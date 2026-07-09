@@ -1292,8 +1292,13 @@ def test_restricted_redecision_filters_before_fairness_window():
 def test_held_position_families_are_monitor_inputs_for_entry_suppression(monkeypatch):
     """Held families are monitor inputs and duplicate-entry suppressors, not entry re-emits."""
 
+    # R4-b2 (2026-07-08 main.py slimming): the held-family provider + reader
+    # moved to src.events.reactor with the day0-hourly-refresh cluster
+    # extraction (their only main.py caller left is a thin re-export).
+    from src.events import reactor
+
     monkeypatch.setattr(
-        main,
+        reactor,
         "_edli_reactor_held_family_provider",
         lambda: lambda: frozenset(
             {

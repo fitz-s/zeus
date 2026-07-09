@@ -869,13 +869,21 @@ class TestMutexNoHttpSplit:
         for forbidden in ("emit_events(", "httpx", "maybe_refresh_day0_hourly_vectors", ".prefetch("):
             assert forbidden not in emit_body, f"write phase must not contain {forbidden!r}"
         assert "emit_prefetched(" in emit_body
-        # and the hourly-vector refresh lives in an independent scheduler job
+        # and the hourly-vector refresh lives in an independent scheduler job.
+        # R4-b2 (2026-07-08 main.py slimming): the job body was extracted to
+        # src.events.reactor.run_edli_day0_hourly_refresh_cycle; main.py's
+        # _edli_day0_hourly_refresh_cycle is now a thin delegating hook, so
+        # this check follows one level of delegation to find the real body.
         pre_start = source.index("def _edli_prefetch_day0_fast_obs(")
-        hourly_start = source.index("def _edli_day0_hourly_refresh_cycle(")
-        pre_end = hourly_start
+        pre_end = source.index("def _edli_emit_day0_extreme_events(")
         assert "maybe_refresh_day0_hourly_vectors" not in source[pre_start:pre_end]
-        hourly_end = source.index("def _edli_emit_day0_extreme_events(")
-        assert "maybe_refresh_day0_hourly_vectors" in source[hourly_start:hourly_end]
+
+        import inspect
+
+        from src.events import reactor as reactor_module
+
+        hourly_src = inspect.getsource(reactor_module.run_edli_day0_hourly_refresh_cycle)
+        assert "maybe_refresh_day0_hourly_vectors" in hourly_src
         assert 'id="edli_day0_hourly_refresh"' in source
 
     def test_publication_clock_missing_denies_live_authority(self):

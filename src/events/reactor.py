@@ -47,13 +47,14 @@ import sqlite3
 import time
 from dataclasses import dataclass, field, replace as dataclass_replace
 from datetime import datetime, timedelta, timezone
-from typing import Any, Callable, Mapping
+from typing import Any, Callable, Iterable, Mapping
+from zoneinfo import ZoneInfo
 
 from src.decision_kernel import claims
 from src.events.day0_authority import normalize_day0_live_authority_status
 from src.events.event_store import EventStore
 from src.events.opportunity_event import OpportunityEvent, assert_available_for_decision
-from src.state.db import world_write_mutex
+from src.state.db import get_trade_connection_read_only, get_world_connection_read_only, world_write_mutex
 from src.strategy.live_inference.live_admission import (
     live_buy_no_conservative_evidence_rejection_reason,
 )
@@ -3548,3 +3549,331 @@ def _regret_bucket_for(reason: str) -> str:
     if "LEAK" in reason_text or "AVAILABLE_AT" in reason_text:
         return "LEAKAGE_BLOCKED"
     return "UNKNOWN_REVIEW_REQUIRED"
+
+
+# ---------------------------------------------------------------------------
+# Day0 hourly-vector refresh cluster (R4-b2 extraction from src/main.py,
+# 2026-07-08 main.py slimming). Refreshes Day0 high-resolution hourly vectors
+# off the trading reactor cadence; opportunistically fetches Open-Meteo and
+# writes zeus-forecasts.db without pinning the live event reactor. Scheduled
+# from src.main's ``edli_day0_hourly_refresh`` job (thin delegating hook there).
+# ---------------------------------------------------------------------------
+
+
+def _edli_reactor_held_family_provider():
+    """ALWAYS-DECIDABLE invariant — ordering (operator correction 2026-06-12). Build the read-only,
+    fail-soft provider of currently-HELD (city, target_date, metric) families so the reactor's
+    refresh fan-out refreshes money-at-risk families FIRST (then liquidity-blind fair rotation —
+    NO liquidity ordering). Reads zeus_trades.position_current via a short-lived mode=ro connection
+    per call (the reactor owns zeus-world only; the trades read is injected so the reactor never
+    opens a trades conn). Absent trades DB / any error => empty set (no held bias). Returns None
+    when the trades DB path is unconfigured."""
+    from src.state.db import _zeus_trade_db_path
+
+    try:
+        trades_path = _zeus_trade_db_path()
+    except Exception:
+        return None
+    if not trades_path:
+        return None
+
+    def _provider():
+        import sqlite3 as _sqlite3
+        from pathlib import Path as _Path
+
+        from src.data.replacement_cycle_advance_trigger import _held_position_families
+
+        p = _Path(str(trades_path))
+        if not p.exists():
+            return frozenset()
+        conn_t = _sqlite3.connect(f"file:{p}?mode=ro", uri=True, timeout=5.0)
+        try:
+            return frozenset(_held_position_families(conn_t))
+        finally:
+            conn_t.close()
+
+    return _provider
+
+
+def _edli_current_held_position_family_keys() -> set[tuple[str, str, str]]:
+    """Current held-position families for monitor and duplicate-entry suppression.
+
+    Any family with real position_current exposure must keep receiving position-monitor
+    attention even when no new-entry edge fires. Future/pre-settlement held exposure
+    also re-enters EDLI_REDECISION_PENDING so the full family selector can exercise
+    the already-owned-token fill-up / close-before-open shift lane. Same-day Day0
+    remains on the observation-aware monitor lane because forecast-only redecision
+    is phase-closed once the target local day starts.
+    Fail-soft matches the reactor held-family provider; a read failure must not crash the daemon.
+    """
+
+    provider = _edli_reactor_held_family_provider()
+    if provider is None:
+        return set()
+    try:
+        raw_families = provider()
+    except Exception as exc:  # noqa: BLE001
+        import logging as _logging
+
+        _logging.getLogger("zeus.events.reactor").warning(
+            "edli_redecision_screen: held-position family read failed; held families not admitted this tick: %r",
+            exc,
+        )
+        return set()
+    out: set[tuple[str, str, str]] = set()
+    for family in raw_families or ():
+        try:
+            city, target_date, metric = family
+        except (TypeError, ValueError):
+            continue
+        key = (str(city or "").strip(), str(target_date or "").strip(), str(metric or "").strip())
+        if all(key):
+            out.add(key)
+    return out
+
+
+def _edli_day0_hourly_priority_families() -> list[tuple[str, str, str]]:
+    """Money-path families that should drive Day0 hourly-vector refresh order."""
+    import logging as _logging
+
+    from src.main import (
+        _open_rest_family_rows_for_refresh,
+        _pending_family_rows_for_refresh,
+        _substrate_refresh_family_key,
+    )
+
+    _log = _logging.getLogger("zeus.events.reactor")
+
+    families: list[tuple[str, str, str]] = []
+    seen: set[tuple[str, str, str]] = set()
+
+    def add(raw: Iterable[tuple[object, object, object]]) -> None:
+        for city, target_date, metric in raw or ():
+            key = _substrate_refresh_family_key(city, target_date, metric)
+            if key and all(key) and key not in seen:
+                seen.add(key)
+                families.append(key)
+
+    # Held money is the first refresh consumer. Pending event queues can grow
+    # large when the reactor is behind; putting them first lets stale candidates
+    # delay fresh held-position Day0 probabilities.
+    add(sorted(_edli_current_held_position_family_keys()))
+
+    try:
+        world_ro = get_world_connection_read_only()
+        try:
+            rows = _pending_family_rows_for_refresh(
+                world_ro,
+                consumer_name="edli_reactor_v1",
+                event_window_limit=int(os.environ.get("ZEUS_DAY0_HOURLY_PRIORITY_EVENT_WINDOW_LIMIT", "2000")),
+            )
+        finally:
+            world_ro.close()
+        add(
+            (
+                row[0],
+                row[1],
+                row[2],
+            )
+            for row in rows
+        )
+    except Exception as exc:  # noqa: BLE001
+        _log.warning("edli_day0_hourly_refresh: pending-family priority read failed: %s", exc)
+
+    try:
+        trade_ro = get_trade_connection_read_only()
+        try:
+            add(_open_rest_family_rows_for_refresh(trade_ro))
+        finally:
+            trade_ro.close()
+    except Exception as exc:  # noqa: BLE001
+        _log.warning("edli_day0_hourly_refresh: open-rest priority read failed: %s", exc)
+
+    return families
+
+
+_DAY0_HOURLY_REFRESH_CURSOR = 0
+
+
+def _day0_hourly_refresh_max_cities(*, priority_city_count: int) -> int:
+    try:
+        configured = int(os.environ.get("ZEUS_DAY0_HOURLY_REFRESH_MAX_CITIES", "1"))
+    except (TypeError, ValueError):
+        configured = 1
+    try:
+        priority_cap = int(os.environ.get("ZEUS_DAY0_HOURLY_REFRESH_PRIORITY_CITY_CAP", "1"))
+    except (TypeError, ValueError):
+        priority_cap = 1
+    if priority_city_count <= 0:
+        return max(0, configured)
+    return max(0, max(configured, min(int(priority_city_count), max(0, priority_cap))))
+
+
+def _day0_hourly_refresh_budget_seconds() -> float:
+    try:
+        return max(0.25, float(os.environ.get("ZEUS_DAY0_HOURLY_REFRESH_BUDGET_SECONDS", "3.0")))
+    except (TypeError, ValueError):
+        return 3.0
+
+
+def _day0_hourly_fetch_timeout_seconds() -> float:
+    try:
+        return max(0.25, float(os.environ.get("ZEUS_DAY0_HOURLY_FETCH_TIMEOUT_SECONDS", "1.5")))
+    except (TypeError, ValueError):
+        return 1.5
+
+
+def _rotate_day0_refresh_segment(items: list[Any], cursor: int) -> list[Any]:
+    if not items:
+        return []
+    offset = int(cursor) % len(items)
+    return items[offset:] + items[:offset]
+
+
+def _edli_rotate_day0_hourly_refresh_order(
+    ordered: list[Any],
+    *,
+    priority_city_count: int,
+    cursor: int,
+) -> list[Any]:
+    priority = ordered[: max(0, int(priority_city_count))]
+    rest = ordered[max(0, int(priority_city_count)) :]
+    return (
+        _rotate_day0_refresh_segment(priority, cursor)
+        + _rotate_day0_refresh_segment(rest, cursor)
+    )
+
+
+def _edli_order_day0_hourly_refresh_cities(
+    cities: list[Any],
+    *,
+    decision_time: datetime,
+    priority_families: Iterable[tuple[str, str, str]],
+) -> tuple[list[Any], int]:
+    """Put same-local-day money-path cities before the static universe sweep."""
+    from src.main import _substrate_refresh_family_text_key
+
+    by_name_key = {
+        _substrate_refresh_family_text_key(getattr(city, "name", "")): city
+        for city in cities
+        if str(getattr(city, "name", "") or "").strip()
+    }
+    priority_city_keys: list[str] = []
+    seen_priority: set[str] = set()
+    for city_name, target_date, metric in priority_families or ():
+        if metric not in {"high", "low"}:
+            continue
+        city = by_name_key.get(_substrate_refresh_family_text_key(city_name))
+        if city is None:
+            continue
+        try:
+            local_date = decision_time.astimezone(ZoneInfo(str(getattr(city, "timezone")))).date().isoformat()
+        except Exception:  # noqa: BLE001
+            continue
+        if str(target_date or "").strip() != local_date:
+            continue
+        key = _substrate_refresh_family_text_key(getattr(city, "name", ""))
+        if key and key not in seen_priority:
+            seen_priority.add(key)
+            priority_city_keys.append(key)
+
+    ordered: list[Any] = []
+    emitted: set[str] = set()
+    for key in priority_city_keys:
+        city = by_name_key.get(key)
+        if city is not None:
+            ordered.append(city)
+            emitted.add(key)
+    for city in cities:
+        key = _substrate_refresh_family_text_key(getattr(city, "name", ""))
+        if key not in emitted:
+            ordered.append(city)
+            emitted.add(key)
+    return ordered, len(priority_city_keys)
+
+
+def run_edli_day0_hourly_refresh_cycle(*, trading_lane_active: bool) -> None:
+    """Scheduler entrypoint (R4-b2 extraction from src/main.py::_edli_day0_hourly_refresh_cycle).
+
+    Refresh Day0 high-resolution hourly vectors off the trading reactor cadence.
+    These vectors improve remaining-day Day0 pricing, but fetching Open-Meteo
+    and writing ``zeus-forecasts.db`` must not pin the live event reactor. The
+    reactor consumes whatever is already fresh; this side job opportunistically
+    refreshes the carrier and yields whenever the trading reactor/redecision
+    lane is active.
+
+    ``trading_lane_active`` is injected from src.main: it folds together two
+    cross-job scheduling-coordination primitives (the reactor-active lock and
+    the redecision-screen lock) that main.py — the dispatcher — retains
+    ownership of, since several other EDLI jobs also read them.
+    """
+    global _DAY0_HOURLY_REFRESH_CURSOR
+
+    import logging as _logging
+
+    from src.config import settings
+
+    _log = _logging.getLogger("zeus.events.reactor")
+    _settings_source = settings._data if hasattr(settings, "_data") else settings
+    edli_cfg = _settings_source.get("edli", {}) if isinstance(_settings_source, dict) else {}
+    if not edli_cfg.get("enabled"):
+        return
+    try:
+        from src.config import runtime_cities as _rc
+        from src.data.day0_hourly_vectors import maybe_refresh_day0_hourly_vectors
+
+        decision_time = datetime.now(timezone.utc)
+        priority_families = _edli_day0_hourly_priority_families()
+        ordered_cities, priority_city_count = _edli_order_day0_hourly_refresh_cities(
+            _rc(),
+            decision_time=decision_time,
+            priority_families=priority_families,
+        )
+        ordered_cities = _edli_rotate_day0_hourly_refresh_order(
+            ordered_cities,
+            priority_city_count=priority_city_count,
+            cursor=_DAY0_HOURLY_REFRESH_CURSOR,
+        )
+        if trading_lane_active and priority_city_count <= 0:
+            _log.info("edli_day0_hourly_refresh deferred: trading reactor/redecision lane active")
+            return
+        if trading_lane_active:
+            _log.info(
+                "edli_day0_hourly_refresh: priority refresh proceeding while trading lane active "
+                "priority_cities=%d",
+                priority_city_count,
+            )
+        max_cities = _day0_hourly_refresh_max_cities(
+            priority_city_count=priority_city_count,
+        )
+        stats = maybe_refresh_day0_hourly_vectors(
+            ordered_cities,
+            decision_time=decision_time,
+            budget_s=_day0_hourly_refresh_budget_seconds(),
+            max_cities=max_cities,
+            timeout_s=_day0_hourly_fetch_timeout_seconds(),
+            persist_lock_blocking=False,
+            return_stats=True,
+        )
+        vectors_written = int(getattr(stats, "vectors_written", stats))
+        cities_attempted = int(getattr(stats, "cities_attempted", 0) or 0)
+        if cities_attempted > 0 and ordered_cities:
+            _DAY0_HOURLY_REFRESH_CURSOR = (
+                _DAY0_HOURLY_REFRESH_CURSOR + cities_attempted
+            ) % max(1, len(ordered_cities))
+        if vectors_written or priority_city_count:
+            _log.info(
+                "edli_day0_hourly_refresh: vectors_written=%d priority_cities=%d "
+                "max_cities=%d cities_attempted=%d skipped_throttle=%d "
+                "incomplete_expected_bundles=%d budget_exhausted=%s cursor=%d",
+                vectors_written,
+                priority_city_count,
+                max_cities,
+                cities_attempted,
+                int(getattr(stats, "cities_skipped_throttle", 0) or 0),
+                int(getattr(stats, "incomplete_expected_bundles", 0) or 0),
+                bool(getattr(stats, "budget_exhausted", False)),
+                _DAY0_HOURLY_REFRESH_CURSOR,
+            )
+    except Exception as _vec_exc:  # noqa: BLE001 — additive lane, fail-soft
+        _log.warning("EDLI day0 hourly-vector refresh failed (non-fatal): %r", _vec_exc)

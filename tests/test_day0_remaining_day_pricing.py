@@ -961,9 +961,11 @@ class TestRequestHashProvenance:
         ]
 
     def test_scheduler_orders_same_local_day_money_path_cities_first(self):
-        import src.main as main
+        # R4-b2 (2026-07-08 main.py slimming): day0-hourly-refresh cluster body
+        # (including this exclusive helper) moved to src.events.reactor.
+        from src.events import reactor
 
-        ordered, priority_count = main._edli_order_day0_hourly_refresh_cities(
+        ordered, priority_count = reactor._edli_order_day0_hourly_refresh_cities(
             [_paris(), _wellington()],
             decision_time=datetime(2026, 6, 25, 12, 47, tzinfo=UTC),
             priority_families=[("Wellington", "2026-06-26", "high")],
@@ -973,11 +975,12 @@ class TestRequestHashProvenance:
         assert [c.name for c in ordered] == ["Wellington", "Paris"]
 
     def test_scheduler_rotates_priority_segment_without_demoting_priority(self):
-        import src.main as main
+        # R4-b2: moved to src.events.reactor with the day0-hourly-refresh cluster.
+        from src.events import reactor
 
         ordered = [_paris(), _wellington(), SimpleNamespace(name="London")]
 
-        rotated = main._edli_rotate_day0_hourly_refresh_order(
+        rotated = reactor._edli_rotate_day0_hourly_refresh_order(
             ordered,
             priority_city_count=2,
             cursor=1,
@@ -986,16 +989,20 @@ class TestRequestHashProvenance:
         assert [c.name for c in rotated] == ["Wellington", "Paris", "London"]
 
     def test_scheduler_day0_hourly_refresh_defaults_to_microbatch(self, monkeypatch):
+        # R4-b2: the microbatch sizing helpers moved to src.events.reactor with the
+        # day0-hourly-refresh cluster; the reactor-cluster interval helper (used
+        # only by the still-in-main.py _edli_reactor_day0_hourly_refresher) stays.
         import src.main as main
+        from src.events import reactor
 
         monkeypatch.delenv("ZEUS_DAY0_HOURLY_REFRESH_MAX_CITIES", raising=False)
         monkeypatch.delenv("ZEUS_DAY0_HOURLY_REFRESH_PRIORITY_CITY_CAP", raising=False)
         monkeypatch.delenv("ZEUS_DAY0_HOURLY_REFRESH_BUDGET_SECONDS", raising=False)
         monkeypatch.delenv("ZEUS_DAY0_HOURLY_FETCH_TIMEOUT_SECONDS", raising=False)
 
-        assert main._day0_hourly_refresh_max_cities(priority_city_count=31) == 1
-        assert main._day0_hourly_refresh_budget_seconds() == 3.0
-        assert main._day0_hourly_fetch_timeout_seconds() == 1.5
+        assert reactor._day0_hourly_refresh_max_cities(priority_city_count=31) == 1
+        assert reactor._day0_hourly_refresh_budget_seconds() == 3.0
+        assert reactor._day0_hourly_fetch_timeout_seconds() == 1.5
         assert main._reactor_day0_hourly_refresh_interval_seconds() == 300.0
 
     def test_reactor_day0_hourly_refresher_preserves_city_date_throttle(
@@ -1030,32 +1037,39 @@ class TestRequestHashProvenance:
     def test_day0_hourly_priority_source_puts_held_families_before_backlog(
         self, monkeypatch
     ):
+        # R4-b2 (2026-07-08 main.py slimming): the priority-families builder
+        # moved to src.events.reactor with the day0-hourly-refresh cluster.
+        # It still lazily reach-back-imports the main.py-owned generic
+        # family-refresh utilities (_pending_family_rows_for_refresh,
+        # _open_rest_family_rows_for_refresh — shared broadly outside this
+        # cluster, so they stayed in main.py), so those two are patched on
+        # `main` as before; the held-family read now lives in reactor.py.
         import src.main as main
-        import src.state.db as state_db
+        from src.events import reactor
 
         class _Conn:
             def close(self):
                 pass
 
         monkeypatch.setattr(
-            main,
+            reactor,
             "_edli_current_held_position_family_keys",
             lambda: frozenset({("Paris", "2026-06-25", "low")}),
         )
-        monkeypatch.setattr(main, "get_world_connection_read_only", lambda: _Conn())
+        monkeypatch.setattr(reactor, "get_world_connection_read_only", lambda: _Conn())
         monkeypatch.setattr(
             main,
             "_pending_family_rows_for_refresh",
             lambda *a, **kw: [("Wellington", "2026-06-26", "high")],
         )
-        monkeypatch.setattr(state_db, "get_trade_connection_read_only", lambda: _Conn())
+        monkeypatch.setattr(reactor, "get_trade_connection_read_only", lambda: _Conn())
         monkeypatch.setattr(
             main,
             "_open_rest_family_rows_for_refresh",
             lambda _conn: [("London", "2026-06-25", "high")],
         )
 
-        assert main._edli_day0_hourly_priority_families() == [
+        assert reactor._edli_day0_hourly_priority_families() == [
             ("paris", "2026-06-25", "low"),
             ("wellington", "2026-06-26", "high"),
             ("london", "2026-06-25", "high"),
