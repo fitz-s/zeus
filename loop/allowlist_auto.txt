@@ -1,0 +1,70 @@
+# AUTO-tier path allowlist for loop/tick.sh (L1) and loop/daily.sh (L2).
+#
+# One glob per line; '#' starts a comment; blank lines ignored. Matched by
+# scripts/ops/loop_guard.py::path_allowed against every path that changed
+# DURING a tick (relative to the pre-tick snapshot, never against files the
+# operator already had dirty). Any changed path that matches none of these
+# is hard-restored to HEAD and logged as VIOLATION in loop/JOURNAL.md.
+#
+# `**` matches any depth (including zero extra segments); a bare `*` or `?`
+# matches within one path segment only (does not cross '/') — this is a
+# glob translator local to loop_guard.py, not stdlib fnmatch.
+#
+# Source of truth for scope:
+#   docs/operations/current/plans/allday_improvement_loop_design_2026-07-06.md §3
+#   (AUTO row) + docs/rebuild/EXECUTION_MASTER_2026-07-07.md §C2.
+#
+# WHO WRITES THIS FILE: only a human/operator commit. A tick can NEVER
+# widen its own scope by editing this file (or loop/tick.sh, loop/daily.sh,
+# loop/prompts/**) even though those paths sit under loop/** — they are
+# GUARD_IMMUTABLE in scripts/ops/loop_guard.py::cmd_enforce, checked
+# unconditionally before the allowlist itself. Any tick-made change to any
+# of them is always a VIOLATION and gets hard-restored, full stop.
+#
+# THE LOAD-BEARING PROTECTION IS ELSEWHERE: enforce NEVER reads this live
+# file, and never reads any file at all for this purpose — two earlier
+# designs tried a frozen file copy (first inside the repo at
+# loop/.pre_tick_allowlist.{l1,l2}, then outside it under a `mktemp -d`
+# $TMPDIR directory) and BOTH were real, live-reproduced escapes: any file
+# a tick's Bash tool can locate — inside the repo via a documented naming
+# convention, or outside it via straightforward $TMPDIR enumeration (same
+# OS user as the wrapper, no process isolation) — is a file it can tamper.
+# tick.sh/daily.sh now capture `BASE_SHA=$(git rev-parse HEAD)` BEFORE
+# claude runs and enforce reads the allowlist via
+# `git show "$BASE_SHA:loop/allowlist_auto.txt"` — an IMMUTABLE, content-
+# addressed git object. A tick can create new commits, but nothing it does
+# can rewrite what BASE_SHA's tree already contains. This closes the
+# tracked-file tamper vector completely (no file to find, tamper, or
+# guess), not just make it harder. The GUARD_IMMUTABLE check above stays as
+# belt-and-suspenders on top of that.
+#
+# WHO READS IT: scripts/ops/loop_guard.py enforce, via `git show` at
+# BASE_SHA, every tick — never this working-tree file. Any git failure
+# (bad ref, path missing at that sha) is caught and treated as zero
+# patterns — allows nothing, so every new-this-tick change becomes a
+# violation (fail closed). Do not let this file go stale regardless; a
+# permanently-empty-patterns enforce quarantines every legitimate AUTO
+# change too, which is safe but makes the loop useless.
+#
+# RESIDUAL NOT CLOSED BY THIS FILE (see scripts/ops/loop_guard.py's module
+# docstring KNOWN LIMITATION and loop/tick.sh's SAFETY section for the full
+# statement): this whole mechanism is repo-scoped — it governs TRACKED
+# files and DB touches under state/, nothing else. A tick runs under the
+# FULL USER UID with no OS sandboxing, so it can write anywhere else on the
+# filesystem (~/.ssh, /etc, an absolute-path DB write) with zero mechanical
+# resistance from anything in loop/. That is an accepted, documented gap,
+# not something this file or cmd_enforce can close.
+
+loop/**
+docs/**
+tests/**
+architecture/*.yaml
+
+# scripts/** is intentionally NOT allowlisted here. The design's AUTO row
+# only admits scripts/** entries with no dangerous_if_run/write_targets in
+# architecture/script_manifest.yaml and no plist/manifest reference — that
+# is a manifest-aware judgment call, not something a path glob can express,
+# and the design's §5 "拒收" list explicitly rejects building a machine
+# classifier for this. Until such a check exists, ANY scripts/** change made
+# by a tick is out of AUTO scope and gets quarantined; script fixes route
+# through PREPARE (queued diff, operator merges).

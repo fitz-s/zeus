@@ -1,0 +1,60 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Created: 2026-07-08 (loop-build packet: 24/7 improvement loop v2 machinery).
+  Authority basis: docs/operations/current/plans/allday_improvement_loop_design_2026-07-06.md
+  §1/§6 (L1 hourly tick, launchd every hour at :17) + §C1 (deploy is
+  operator-only — this is a TEMPLATE, nothing installs it automatically).
+
+  TEMPLATE ONLY — not installed by any script in this repo. No secrets: the
+  loop needs none (it runs `claude -p` headless with a fixed prompt file
+  and touches only docs/tests/registry/loop paths per loop/allowlist_auto.txt,
+  enforced post-run by scripts/ops/loop_guard.py; it never reads API keys).
+
+  WHAT RUNS: loop/tick.sh — see that file's header for the full mechanism
+  (HALT check, pre-tick snapshot, single-flight lock, allowlist enforcement,
+  FALLBACK-on-crash). Runs hourly at minute 17 (StartCalendarInterval, not
+  a fixed-interval timer, so it does not drift and does not double-fire on
+  wake-from-sleep the way StartInterval can).
+
+  DISABLE: `touch <repo>/loop/HALT` (soft — daemon stays loaded, next fire
+  no-ops) or `launchctl bootout gui/$(id -u)/com.zeus.loop-tick` (hard —
+  unloads the daemon). scripts/ops/loop_enable.sh prints the exact
+  bootstrap/bootout commands; it does not run them.
+
+  INSTALL (operator, after scripts/ops/loop_enable.sh preflight passes):
+    1. cp deploy/launchd/com.zeus.loop-tick.plist ~/Library/LaunchAgents/
+    2. launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.zeus.loop-tick.plist
+-->
+<plist version="1.0">
+<dict>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>PATH</key>
+		<string>/Users/leofitz/zeus/.venv/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+		<key>PYTHONPATH</key>
+		<string>/Users/leofitz/zeus</string>
+		<key>ZEUS_PRIMARY_ROOT</key>
+		<string>/Users/leofitz/zeus</string>
+	</dict>
+	<key>Label</key>
+	<string>com.zeus.loop-tick</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/Users/leofitz/zeus/loop/tick.sh</string>
+	</array>
+	<key>StandardErrorPath</key>
+	<string>/Users/leofitz/zeus/loop/logs/launchd-tick.err</string>
+	<key>StandardOutPath</key>
+	<string>/Users/leofitz/zeus/loop/logs/launchd-tick.log</string>
+	<key>StartCalendarInterval</key>
+	<dict>
+		<key>Minute</key>
+		<integer>17</integer>
+	</dict>
+	<key>ThrottleInterval</key>
+	<integer>60</integer>
+	<key>WorkingDirectory</key>
+	<string>/Users/leofitz/zeus</string>
+</dict>
+</plist>

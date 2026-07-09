@@ -1,0 +1,64 @@
+# Loop hypothesis ledger + improvement queue (24/7 improvement loop v2).
+#
+# WHO WRITES: loop/tick.sh (L1) and loop/daily.sh (L2) invocations, via the
+# claude -p run they launch (per loop/prompts/l1.md / l2.md ACTION step —
+# NOT scripts/ops/loop_guard.py, which never touches this file). WHO READS:
+# the next L1/L2 tick's ORIENT step (this file's `next_action` fields ARE
+# the work queue — there is no separate queue file). WHAT BREAKS IF THIS
+# FILE SILENTLY STOPS UPDATING: ticks keep re-reading the same stale open
+# claims and either re-do settled work or starve on an empty queue; a
+# gap here is diagnostic the same way a JOURNAL.md gap is — check the
+# journal tail first, it will say why.
+#
+# Source of truth for the rules below:
+#   docs/operations/current/plans/allday_improvement_loop_design_2026-07-06.md
+#   §2 (state) + §4 (methodology, operator-ruled, not up for re-litigation)
+#   + §5 (consult adoptions: preregistration, exploratory-vs-confirmed).
+
+schema_version: 1
+
+rules:
+  - "Every entry is a falsifiable claim: id + claim + prereg_query +
+     prereg_date + evidence + status. Memory/intuition-sourced claims enter
+     as status: open with evidence: [] until a preregistered query produces
+     real evidence — a hunch is not evidence."
+  - "Statistical conclusions require min_n=30 per cell before a status can
+     move off 'open'; 'insufficient evidence' is a legitimate, required
+     conclusion when n is short, not a failure to report."
+  - "Mechanistic conclusions (pure code-read proof of an invariant
+     violation) are actionable at any n. 'Mechanistic' is reserved for
+     invariant-violation code proof ONLY — anything touching EV,
+     calibration, market selection, sizing, or market behavior is always
+     statistical, never mechanistic, no matter how obvious it looks."
+  - "The query window is preregistered BEFORE looking at data: prereg_query
+     is written and committed to the ledger first; only then is it run and
+     evidence recorded from that exact query, not a post-hoc reformulation."
+  - "An exploratory-slice finding never jumps straight to status: supported.
+     It enters as a NEW open entry with its own freshly preregistered query
+     window, to be resolved on a LATER tick — same-day promotion from
+     exploration to confirmed is p-hacking, full stop."
+  - "status: refuted entries are NEVER deleted. This guards against
+     re-litigating a dead claim; a refuted id staying in the file is the
+     ledger's memory."
+  - "ground truth = decision certificate x real settlement join ONLY
+     (six-category attribution: SKILL_WIN is evidence, LUCKY_WIN is
+     recorded as MISS, not a win). Banned as evidence: runtime-derived
+     numbers, Claude-memory assertions, mixed-regime backtests, a gate's
+     own logic used as its review standard."
+
+statuses: [open, supported, refuted, blocked]
+
+# Entry shape (documented here, not as a live entry — the ledger starts
+# empty; L1/L2 ticks append real entries as claims are opened):
+#
+# - id: <short-slug>-<YYYY-MM-DD>
+#   claim: <one falsifiable sentence>
+#   opened_at: <ISO8601 UTC>
+#   prereg_query: <exact query/probe, written before looking at data>
+#   prereg_date: <YYYY-MM-DD the query is scheduled to run>
+#   evidence: []              # list of {date, n, result, file_or_query_ref}
+#   status: open              # open | supported | refuted | blocked
+#   next_action: <what the NEXT tick that picks this up should do>
+#   fail_count: 0              # consecutive tick failures on this item; 3 -> blocked + ESCALATION
+
+entries: []
