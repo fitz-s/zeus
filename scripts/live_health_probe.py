@@ -70,6 +70,7 @@ REQUIRED_LIVE_HEALTH_SURFACES = (
     "execution_capability",
 )
 DIRECT_HEAD_LIVE_HEALTH_SURFACES = (
+    "forecast_event_bridge",
     "pending_exit_release_loop",
     "monitor_probability_freshness",
 )
@@ -942,18 +943,12 @@ def _direct_head_live_health_surfaces(root, *, status_summary, heartbeat):
 
     state_dir = Path(root) / "state"
     trade_db = state_dir / "zeus_trades.db"
-    if not trade_db.exists():
-        skipped = {
-            "ok": True,
-            "evaluated": False,
-            "issue": "TRADE_DB_MISSING",
-        }
-        return {surface: dict(skipped) for surface in DIRECT_HEAD_LIVE_HEALTH_SURFACES}
     root_path = str(Path(root).resolve())
     if root_path not in sys.path:
         sys.path.insert(0, root_path)
     try:
         from src.control.live_health import (
+            _forecast_to_event_bridge_surface,
             _main_daemon_surface,
             _monitor_probability_freshness_surface,
             _pending_exit_release_loop_surface,
@@ -970,18 +965,40 @@ def _direct_head_live_health_surfaces(root, *, status_summary, heartbeat):
 
     now_dt = datetime.now(timezone.utc)
     main_daemon = _main_daemon_surface(status_summary, heartbeat)
-    return {
-        "pending_exit_release_loop": _pending_exit_release_loop_surface(
+    surfaces = {
+        "forecast_event_bridge": _forecast_to_event_bridge_surface(
             state_dir,
             now_dt,
             main_daemon_surface=main_daemon,
-        ),
-        "monitor_probability_freshness": _monitor_probability_freshness_surface(
-            state_dir,
-            now_dt,
-            main_daemon_surface=main_daemon,
-        ),
+        )
     }
+    if not trade_db.exists():
+        skipped = {
+            "ok": True,
+            "evaluated": False,
+            "issue": "TRADE_DB_MISSING",
+        }
+        surfaces["pending_exit_release_loop"] = dict(skipped)
+        surfaces["monitor_probability_freshness"] = dict(skipped)
+        return surfaces
+    surfaces["pending_exit_release_loop"] = _pending_exit_release_loop_surface(
+        state_dir,
+        now_dt,
+        main_daemon_surface=main_daemon,
+    )
+    surfaces["monitor_probability_freshness"] = _monitor_probability_freshness_surface(
+        state_dir,
+        now_dt,
+        main_daemon_surface=main_daemon,
+    )
+    return surfaces
+
+
+def _direct_head_surface_overrides_composite(report, surface):
+    if surface not in DIRECT_HEAD_LIVE_HEALTH_SURFACES:
+        return False
+    detail = report.get(surface)
+    return isinstance(detail, dict) and detail.get("evaluated") is not False and "ok" in detail
 
 def _classify_alerts(report, ss_age):
     alerts = []
@@ -1048,6 +1065,8 @@ def _classify_alerts(report, ss_age):
         surfaces = composite.get("surfaces") if isinstance(composite.get("surfaces"), dict) else {}
         failing = composite.get("failing_surfaces") or []
         for surface in failing:
+            if _direct_head_surface_overrides_composite(report, surface):
+                continue
             detail = surfaces.get(surface) if isinstance(surfaces, dict) else None
             issue = detail.get("issue") if isinstance(detail, dict) else None
             alerts.append(f"LIVE_HEALTH_{surface.upper()}={issue or 'DEGRADED'}")

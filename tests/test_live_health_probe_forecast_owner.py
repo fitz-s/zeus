@@ -544,6 +544,118 @@ def test_live_probe_alerts_on_degraded_business_plane_composite(
     assert "flags=all_healthy" not in out
 
 
+def test_live_probe_direct_head_forecast_bridge_overrides_stale_composite_ok(
+    tmp_path, monkeypatch, capsys
+):
+    module = _load_module()
+    root = tmp_path / "zeus"
+    _healthy_state(root)
+    surfaces = {
+        surface: {"ok": True, "issue": None}
+        for surface in module.REQUIRED_LIVE_HEALTH_SURFACES
+    }
+    surfaces["forecast_event_bridge"] = {
+        "ok": False,
+        "issue": "FORECAST_TO_EVENT_BRIDGE_STALLED:posterior_newer_by=999s",
+    }
+    _write_json(
+        root / "state" / "live_health_composite.json",
+        {
+            "healthy": False,
+            "status": "DEGRADED",
+            "failing_surfaces": ["forecast_event_bridge"],
+            "surfaces": surfaces,
+        },
+    )
+    monkeypatch.setattr(
+        module,
+        "_direct_head_live_health_surfaces",
+        lambda *args, **kwargs: {
+            "forecast_event_bridge": {"ok": True, "evaluated": True, "issue": None},
+            "pending_exit_release_loop": {"ok": True, "evaluated": True, "issue": None},
+            "monitor_probability_freshness": {"ok": True, "evaluated": True, "issue": None},
+        },
+    )
+    _configure(
+        module,
+        monkeypatch,
+        root,
+        tmp_path / "snapshot.json",
+        {
+            "src.main": [101],
+            "src.ingest.forecast_live_daemon": [202],
+            "src.ingest_main": [404],
+            "src.riskguard": [303],
+        },
+        {404: {"ZEUS_FORECAST_LIVE_OWNER": "forecast_live"}},
+    )
+
+    module.main()
+
+    out = capsys.readouterr().out
+    assert out.startswith("OK")
+    assert "FORECAST_TO_EVENT_BRIDGE_STALLED" not in out
+    assert "LIVE_HEALTH_FORECAST_EVENT_BRIDGE" not in out
+
+
+def test_live_probe_direct_head_forecast_bridge_replaces_composite_issue(
+    tmp_path, monkeypatch, capsys
+):
+    module = _load_module()
+    root = tmp_path / "zeus"
+    _healthy_state(root)
+    surfaces = {
+        surface: {"ok": True, "issue": None}
+        for surface in module.REQUIRED_LIVE_HEALTH_SURFACES
+    }
+    surfaces["forecast_event_bridge"] = {
+        "ok": False,
+        "issue": "FORECAST_TO_EVENT_BRIDGE_STALLED:posterior_newer_by=999s",
+    }
+    _write_json(
+        root / "state" / "live_health_composite.json",
+        {
+            "healthy": False,
+            "status": "DEGRADED",
+            "failing_surfaces": ["forecast_event_bridge"],
+            "surfaces": surfaces,
+        },
+    )
+    monkeypatch.setattr(
+        module,
+        "_direct_head_live_health_surfaces",
+        lambda *args, **kwargs: {
+            "forecast_event_bridge": {
+                "ok": False,
+                "evaluated": True,
+                "issue": "FORECAST_EVENT_POSTERIOR_IDENTITY_SUPERSEDED:latest_newer_by=23700s",
+            },
+            "pending_exit_release_loop": {"ok": True, "evaluated": True, "issue": None},
+            "monitor_probability_freshness": {"ok": True, "evaluated": True, "issue": None},
+        },
+    )
+    _configure(
+        module,
+        monkeypatch,
+        root,
+        tmp_path / "snapshot.json",
+        {
+            "src.main": [101],
+            "src.ingest.forecast_live_daemon": [202],
+            "src.ingest_main": [404],
+            "src.riskguard": [303],
+        },
+        {404: {"ZEUS_FORECAST_LIVE_OWNER": "forecast_live"}},
+    )
+
+    module.main()
+
+    out = capsys.readouterr().out
+    assert out.startswith("ALERT")
+    assert "FORECAST_EVENT_POSTERIOR_IDENTITY_SUPERSEDED:latest_newer_by=23700s" in out
+    assert "FORECAST_TO_EVENT_BRIDGE_STALLED" not in out
+
+
 def test_live_probe_alerts_when_composite_schema_is_missing_required_surfaces(
     tmp_path, monkeypatch, capsys
 ):
