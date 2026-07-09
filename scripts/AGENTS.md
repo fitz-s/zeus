@@ -100,6 +100,7 @@ Only list durable entry points here; use the manifest for the full catalog.
 | `local_post_extract_chain.sh` | Local post-extract chain for TIGGE downloads; pairs with cloud_tigge_autochain.sh (created 2026-05-04) |
 | `maintenance_worker_install.py` | Installer for maintenance_worker daemon and rules; config_writer (created 2026-05-15) |
 | `init_replacement_forecast_live_schema.py` | Repair: initialize replacement forecast live-support schema on forecasts DB; dry-run unless `--commit` (created 2026-06-18) |
+| `repin_stale_forecast_manifests.py` | Repair: re-pin benign raw forecast manifest byte-size/hash drift after dry-run evidence; `--apply` writes manifest files plus forecast DB manifest rows only (created 2026-07-08) |
 | `migrate_ensemble_snapshots_add_ingest_backend.py` | Migration: add ingest_backend column to ensemble_snapshots per TIGGE_DOWNLOAD_SPEC_v3 §3 Phase 0 #5 (dry-run/apply; created 2026-05-07) |
 | `migrate_phase2_cycle_stratification.py` | Migration: Phase 2 cycle stratification per DESIGN_PHASE2_PLATT_CYCLE_STRATIFICATION (dry-run/apply; created 2026-05-14) |
 | `migrate_world_observations_to_forecasts.py` | Migration: move world observation rows to zeus-forecasts.db post K1 split per task_2026-05-14_k1_followups PLAN §2 P0 (dry-run/apply; created 2026-05-14) |
