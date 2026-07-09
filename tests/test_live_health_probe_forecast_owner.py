@@ -287,6 +287,117 @@ def _write_trade_db_with_missing_active_q_version(root: Path) -> None:
         conn.close()
 
 
+def _write_trade_db_with_entry_probability_evidence(
+    root: Path,
+    *,
+    include_certificate: bool,
+    q_lcb: float = 0.72,
+    entry_price: float = 0.60,
+) -> None:
+    db_path = root / "state" / "zeus_trades.db"
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute(
+            """
+            CREATE TABLE venue_commands (
+                command_id TEXT PRIMARY KEY,
+                position_id TEXT NOT NULL,
+                intent_kind TEXT NOT NULL,
+                state TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                q_version TEXT
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE position_current (
+                position_id TEXT PRIMARY KEY,
+                phase TEXT NOT NULL,
+                order_status TEXT,
+                shares REAL,
+                chain_shares REAL,
+                entry_price REAL,
+                p_posterior REAL,
+                direction TEXT,
+                condition_id TEXT,
+                token_id TEXT,
+                no_token_id TEXT,
+                decision_snapshot_id TEXT
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE decision_certificates (
+                certificate_id TEXT PRIMARY KEY,
+                certificate_type TEXT NOT NULL,
+                decision_time TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                payload_json TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO venue_commands (
+                command_id, position_id, intent_kind, state, created_at, q_version
+            ) VALUES (
+                'cmd-entry', 'pos-entry-proof', 'ENTRY', 'FILLED',
+                datetime('now'), 'q:v1'
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO position_current (
+                position_id, phase, order_status, shares, chain_shares,
+                entry_price, p_posterior, direction, condition_id, token_id,
+                no_token_id, decision_snapshot_id
+            ) VALUES (
+                'pos-entry-proof', 'active', 'filled', 12.0, 12.0,
+                ?, 0.81, 'buy_no', 'cond-entry-proof', 'yes-token', 'no-token',
+                'snap-entry-proof'
+            )
+            """,
+            (entry_price,),
+        )
+        if include_certificate:
+            payload = {
+                "condition_id": "cond-entry-proof",
+                "token_id": "no-token",
+                "direction": "buy_no",
+                "decision_snapshot_id": "snap-entry-proof",
+                "q_live": 0.81,
+                "q_lcb_5pct": q_lcb,
+                "q_source": "replacement_0_1",
+                "qkernel_execution_economics": {
+                    "payoff_q_lcb": q_lcb,
+                    "payoff_q_point": 0.81,
+                    "q_lcb_guard_basis": "OOF_WILSON_95",
+                    "source": "qkernel_spine",
+                },
+            }
+            conn.execute(
+                """
+                INSERT INTO decision_certificates (
+                    certificate_id, certificate_type, decision_time, created_at,
+                    payload_json
+                ) VALUES (
+                    'cert-entry-proof', 'PreSubmitRevalidationCertificate',
+                    '2026-07-09T00:00:00+00:00',
+                    '2026-07-09T00:00:01+00:00',
+                    ?
+                )
+                """,
+                (json.dumps(payload),),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+
 def test_data_ingest_support_daemon_required_even_when_forecast_live_owner_alive(
     tmp_path, monkeypatch, capsys
 ):
@@ -342,6 +453,54 @@ def test_live_probe_alerts_on_active_entry_missing_q_version(
     out = capsys.readouterr().out
     assert out.startswith("ALERT")
     assert "ENTRY_Q_VERSION_MISSING_ACTIVE_EXPOSURE:n=1" in out
+
+
+def test_live_probe_entry_probability_evidence_accepts_positive_q_lcb(tmp_path):
+    module = _load_module()
+    root = tmp_path / "zeus"
+    _write_trade_db_with_entry_probability_evidence(
+        root,
+        include_certificate=True,
+        q_lcb=0.72,
+        entry_price=0.60,
+    )
+
+    status = module._entry_probability_evidence_status(str(root))
+
+    assert status["ok"] is True
+    assert status["active_exposure_count"] == 1
+    assert status["covered_count"] == 1
+    assert status["covered_sample"][0]["q_lcb"] == 0.72
+
+
+def test_live_probe_alerts_on_missing_entry_probability_evidence(
+    tmp_path, monkeypatch, capsys
+):
+    module = _load_module()
+    root = tmp_path / "zeus"
+    _healthy_state(root)
+    _write_trade_db_with_entry_probability_evidence(
+        root,
+        include_certificate=False,
+    )
+    _configure(
+        module,
+        monkeypatch,
+        root,
+        tmp_path / "snapshot.json",
+        {
+            "src.main": [101],
+            "src.ingest.forecast_live_daemon": [202],
+            "src.ingest_main": [404],
+            "src.riskguard": [303],
+        },
+    )
+
+    module.main()
+
+    out = capsys.readouterr().out
+    assert out.startswith("ALERT")
+    assert "ENTRY_PROBABILITY_EVIDENCE_MISSING_ACTIVE:n=1" in out
 
 
 def test_live_probe_alerts_on_degraded_business_plane_composite(
