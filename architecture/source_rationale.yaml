@@ -66,6 +66,11 @@ write_routes:
     tables:
     - decision_log
     guardrail: Decision artifacts are evidence/read-model facts, not lifecycle authority.
+  day0_monitoring_fact_write:
+    owner: src/state/day0_metric_fact_store.py
+    tables:
+    - day0_metric_fact
+    guardrail: Day0 monitor facts are durable audit evidence only; they must not bypass forecast_posteriors, hard-fact exit gates, or source-policy validation.
   venue_command_write:
     owner: src/state/venue_command_repo.py
     tables:
@@ -2600,6 +2605,15 @@ files:
     write_routes:
     - calibration_persistence_write
     downstream:
+    - src/state/db.py
+  src/state/day0_metric_fact_store.py:
+    zone: K2_runtime
+    authority_role: day0_monitoring_fact_persistence
+    why: "World-owned Day0 monitor observation fact writer for day0_metric_fact. Writes only the existing monitor observation context as durable audit evidence; does not create a second probability authority or bypass hard-fact/forecast_posteriors gates. Single-DB world write under db_writer_lock(LIVE) when opening its own connection; test/memory connections are explicit."
+    write_routes:
+    - day0_monitoring_fact_write
+    downstream:
+    - src/engine/monitor_refresh.py
     - src/state/db.py
   src/state/book_hash_transitions.py:
     zone: K2_runtime

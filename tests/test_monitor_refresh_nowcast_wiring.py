@@ -1,7 +1,7 @@
 # Created: 2026-05-20
-# Last reused or audited: 2026-05-21
+# Last reused or audited: 2026-07-09
 # Authority basis: PHASE_2_ULTRAPLAN.md §8.2 + §8.3 — monitor_refresh nowcast wiring; live release proof P2-3 nowcast failure telemetry
-# Lifecycle: created=2026-05-20; last_reviewed=2026-05-21; last_reused=never
+# Lifecycle: created=2026-05-20; last_reviewed=2026-05-21; last_reused=2026-07-09
 # Purpose: T5 GREEN antibody — _maybe_write_day0_nowcast gate conditions + write_nowcast_run call.
 # Reuse: Run when _maybe_write_day0_nowcast, write_nowcast_run wiring, or day0 gate logic changes.
 """
@@ -187,3 +187,79 @@ def test_nowcast_write_failure_counter_and_persistent_alert(caplog) -> None:
         labels={"market_slug": "boston-2026-06-15-high"},
     ) == 3
     assert any("MONITOR_NOWCAST_WRITE_PERSISTENT_FAILURE" in record.message for record in caplog.records)
+
+
+def test_day0_metric_fact_write_helper_uses_monitor_observation_contract() -> None:
+    """Valid Day0 monitor observations produce one world-owned metric fact write."""
+    from datetime import date
+
+    from src.types.metric_identity import MetricIdentity
+
+    city = MagicMock()
+    city.name = "Paris"
+    city.timezone = "Europe/Paris"
+    pos = _make_position(market_slug="paris-2026-07-09-low")
+    pos.city = "Paris"
+    obs = {
+        "source": "wu_api",
+        "observation_time": "2026-07-09T04:00:00Z",
+        "local_timestamp": "2026-07-09T06:00:00+02:00",
+    }
+
+    with patch("src.state.day0_metric_fact_store.write_day0_metric_fact") as mock_write:
+        mock_write.return_value = "d0mf_v1_test"
+        monitor_refresh_module._maybe_write_day0_metric_fact(
+            position=pos,
+            city=city,
+            target_d=date(2026, 7, 9),
+            temperature_metric=MetricIdentity.from_raw("low"),
+            obs=obs,
+            current_temp=21.2,
+            observed_extreme_for_metric=20.0,
+        )
+
+    assert mock_write.call_count == 1
+    kwargs = mock_write.call_args.kwargs
+    assert kwargs["city"] == "Paris"
+    assert kwargs["target_date"] == "2026-07-09"
+    assert kwargs["temperature_metric"] == "low"
+    assert kwargs["source"] == "wu_api"
+    assert kwargs["utc_timestamp"] == "2026-07-09T04:00:00Z"
+    assert kwargs["local_timezone"] == "Europe/Paris"
+    assert kwargs["local_timestamp"] == "2026-07-09T06:00:00+02:00"
+    assert kwargs["temp_current"] == 21.2
+    assert kwargs["running_extreme"] == 20.0
+
+
+def test_day0_metric_fact_write_helper_is_fail_soft(caplog) -> None:
+    """A metric-fact persistence failure must not interrupt monitor refresh."""
+    import logging
+    from datetime import date
+
+    from src.types.metric_identity import MetricIdentity
+
+    city = MagicMock()
+    city.name = "Paris"
+    city.timezone = "Europe/Paris"
+    pos = _make_position(market_slug="paris-2026-07-09-low")
+    obs = {
+        "source": "wu_api",
+        "observation_time": "2026-07-09T04:00:00Z",
+        "local_timestamp": "2026-07-09T06:00:00+02:00",
+    }
+
+    with patch(
+        "src.state.day0_metric_fact_store.write_day0_metric_fact",
+        side_effect=RuntimeError("db locked"),
+    ), caplog.at_level(logging.WARNING, logger="src.engine.monitor_refresh"):
+        monitor_refresh_module._maybe_write_day0_metric_fact(
+            position=pos,
+            city=city,
+            target_d=date(2026, 7, 9),
+            temperature_metric=MetricIdentity.from_raw("low"),
+            obs=obs,
+            current_temp=21.2,
+            observed_extreme_for_metric=20.0,
+        )
+
+    assert any("MONITOR_DAY0_METRIC_FACT_WRITE_FAILED" in record.message for record in caplog.records)
