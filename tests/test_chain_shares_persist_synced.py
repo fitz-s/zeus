@@ -1,4 +1,4 @@
-# Lifecycle: created=2026-05-31; last_reviewed=2026-05-31; last_reused=2026-05-31
+# Lifecycle: created=2026-05-31; last_reviewed=2026-07-08; last_reused=2026-07-08
 # Purpose: Relationship test — chain economics (chain_shares, chain_seen_at) persist
 #   to position_current for SYNCED positions and survive a fresh DB read (task #56).
 # Reuse: inspect chain_reconciliation.reconcile() else-branch + _append_canonical_chain_observation_if_available
@@ -758,3 +758,164 @@ def test_chain_seen_at_advances_across_two_cycles_persisted() -> None:
         f"2nd-cycle stale-timestamp refresh must count as chain_observation_persisted; "
         f"stats={stats}"
     )
+
+
+def test_chain_seen_at_refresh_does_not_emit_immediate_duplicate_observation() -> None:
+    """A stale chain_seen_at refresh must not become an event storm.
+
+    The first reconcile after the timestamp goes stale is allowed to append a
+    chain_economics_observed event to advance positive chain evidence. A
+    second reconcile with unchanged chain economics and a fresh chain_seen_at
+    must skip the append.
+    """
+    from datetime import datetime, timedelta, timezone
+
+    from src.state.chain_reconciliation import _CHAIN_SEEN_AT_MAX_AGE_SECONDS
+
+    chain_size = 1.0
+    trade_id = "ts-refresh-no-immediate-duplicate"
+    stale_ts = (
+        datetime.now(timezone.utc)
+        - timedelta(seconds=_CHAIN_SEEN_AT_MAX_AGE_SECONDS + 120)
+    ).isoformat()
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db_path = os.path.join(tmpdir, "world.db")
+        conn = _setup_db_on_disk(db_path)
+
+        pos = _make_position(trade_id=trade_id, token_id="tok-no-dupe", shares=chain_size)
+        _seed_position_current(conn, pos, chain_shares=chain_size)
+        conn.execute(
+            """
+            UPDATE position_current
+               SET chain_seen_at = ?,
+                   chain_state = 'synced',
+                   chain_avg_price = 0.64,
+                   chain_cost_basis_usd = 0.64
+             WHERE position_id = ?
+            """,
+            (stale_ts, trade_id),
+        )
+        conn.commit()
+
+        pos.chain_shares = chain_size
+        pos.chain_avg_price = 0.64
+        pos.chain_cost_basis_usd = 0.64
+        chain = ChainPosition(
+            token_id="tok-no-dupe",
+            size=chain_size,
+            avg_price=0.64,
+            cost=0.64,
+            condition_id="cond-no-dupe",
+        )
+
+        first_stats = reconcile(PortfolioState(positions=[pos]), [chain], conn=conn)
+        first_seen_at = _read_persisted_chain_seen_at(db_path, trade_id)
+        first_count = conn.execute(
+            """
+            SELECT COUNT(*)
+              FROM position_events
+             WHERE position_id = ?
+               AND event_type = 'CHAIN_SIZE_CORRECTED'
+               AND json_extract(payload_json, '$.reason') = 'chain_economics_observed'
+            """,
+            (trade_id,),
+        ).fetchone()[0]
+
+        second_stats = reconcile(PortfolioState(positions=[pos]), [chain], conn=conn)
+        second_seen_at = _read_persisted_chain_seen_at(db_path, trade_id)
+        second_count = conn.execute(
+            """
+            SELECT COUNT(*)
+              FROM position_events
+             WHERE position_id = ?
+               AND event_type = 'CHAIN_SIZE_CORRECTED'
+               AND json_extract(payload_json, '$.reason') = 'chain_economics_observed'
+            """,
+            (trade_id,),
+        ).fetchone()[0]
+        conn.close()
+
+    assert first_stats.get("chain_observation_persisted", 0) == 1
+    assert first_seen_at is not None and first_seen_at > stale_ts
+    assert first_count == 1
+    assert second_stats.get("chain_observation_persisted", 0) == 0
+    assert second_seen_at == first_seen_at
+    assert second_count == 1
+
+
+def test_blank_chain_seen_at_refresh_projects_observation_time_once() -> None:
+    """A synced projection with blank chain_seen_at must converge in one write.
+
+    Live drift shape: position_current can contain chain_state='synced' and
+    positive chain_shares while chain_seen_at is blank. The refresh event must
+    project its observed timestamp, or every reconcile cycle sees the row as
+    stale and emits another chain_economics_observed event.
+    """
+
+    chain_size = 1.0
+    trade_id = "blank-chain-seen-at-no-dupe"
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db_path = os.path.join(tmpdir, "world.db")
+        conn = _setup_db_on_disk(db_path)
+
+        pos = _make_position(trade_id=trade_id, token_id="tok-blank-seen", shares=chain_size)
+        _seed_position_current(conn, pos, chain_shares=chain_size)
+        conn.execute(
+            """
+            UPDATE position_current
+               SET chain_seen_at = '',
+                   chain_state = 'synced',
+                   chain_avg_price = 0.64,
+                   chain_cost_basis_usd = 0.64
+             WHERE position_id = ?
+            """,
+            (trade_id,),
+        )
+        conn.commit()
+
+        pos.chain_shares = chain_size
+        pos.chain_avg_price = 0.64
+        pos.chain_cost_basis_usd = 0.64
+        chain = ChainPosition(
+            token_id="tok-blank-seen",
+            size=chain_size,
+            avg_price=0.64,
+            cost=0.64,
+            condition_id="cond-blank-seen",
+        )
+
+        first_stats = reconcile(PortfolioState(positions=[pos]), [chain], conn=conn)
+        first_seen_at = _read_persisted_chain_seen_at(db_path, trade_id)
+        first_count = conn.execute(
+            """
+            SELECT COUNT(*)
+              FROM position_events
+             WHERE position_id = ?
+               AND event_type = 'CHAIN_SIZE_CORRECTED'
+               AND json_extract(payload_json, '$.reason') = 'chain_economics_observed'
+            """,
+            (trade_id,),
+        ).fetchone()[0]
+
+        second_stats = reconcile(PortfolioState(positions=[pos]), [chain], conn=conn)
+        second_seen_at = _read_persisted_chain_seen_at(db_path, trade_id)
+        second_count = conn.execute(
+            """
+            SELECT COUNT(*)
+              FROM position_events
+             WHERE position_id = ?
+               AND event_type = 'CHAIN_SIZE_CORRECTED'
+               AND json_extract(payload_json, '$.reason') = 'chain_economics_observed'
+            """,
+            (trade_id,),
+        ).fetchone()[0]
+        conn.close()
+
+    assert first_stats.get("chain_observation_persisted", 0) == 1
+    assert first_seen_at
+    assert first_count == 1
+    assert second_stats.get("chain_observation_persisted", 0) == 0
+    assert second_seen_at == first_seen_at
+    assert second_count == 1

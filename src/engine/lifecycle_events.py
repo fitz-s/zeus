@@ -1221,6 +1221,7 @@ def build_chain_economics_observed_canonical_write(
         raise ValueError(
             "chain_observed_at is required for build_chain_economics_observed_canonical_write"
         )
+    projection["chain_seen_at"] = chain_observed_at
     occurred_at = chain_observed_at
     payload = json.dumps(
         {

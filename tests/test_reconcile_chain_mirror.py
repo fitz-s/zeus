@@ -1,4 +1,4 @@
-# Lifecycle: created=2026-07-04; last_reviewed=2026-07-04; last_reused=never
+# Lifecycle: created=2026-07-04; last_reviewed=2026-07-08; last_reused=2026-07-08
 # Purpose: Regression tests for the chain-mirror reconciler (design doc
 #   docs/rebuild/chain_mirror_state_model_2026-07-04.md).
 # Reuse: Run when position_current chain-mirror classification, the
@@ -642,6 +642,114 @@ def test_open_phase_absent_token_second_run_with_open_order_does_not_close(
         "SELECT phase FROM position_current WHERE position_id='pos-manila-4'"
     ).fetchone()
     assert row["phase"] == "day0_window"
+
+
+def test_absent_pending_exit_with_confirmed_exit_fill_skips_review_marker(
+    trades_conn, forecasts_conn
+):
+    """A just-filled exit can remove the held token before the fill projector
+    folds position_current. Chain-mirror must not append a stale REVIEW marker
+    in that window."""
+    _insert_position_current(
+        trades_conn, position_id="pos-milan-exit-fill", phase="pending_exit",
+        city="milan", target_date="2026-07-08", bin_label="36°C",
+        direction="buy_no", no_token_id="tok-milan-no", chain_state="synced",
+        chain_shares=26.79, shares=26.79,
+    )
+    trades_conn.execute(
+        """
+        INSERT INTO venue_commands (
+            command_id, snapshot_id, envelope_id, position_id, decision_id,
+            idempotency_key, intent_kind, market_id, token_id, side, size,
+            price, venue_order_id, state, created_at, updated_at
+        ) VALUES (
+            'cmd-exit-fill', 'snap-exit-fill', 'env-exit-fill',
+            'pos-milan-exit-fill', 'dec-exit-fill', 'idem-exit-fill',
+            'EXIT', 'market-milan', 'tok-milan-no', 'SELL', 26.79, 0.26,
+            'order-exit-fill', 'FILLED', ?, ?
+        )
+        """,
+        ("2026-07-08T14:07:10+00:00", "2026-07-08T14:07:21+00:00"),
+    )
+    trades_conn.execute(
+        """
+        INSERT INTO venue_order_facts (
+            venue_order_id, command_id, state, remaining_size, matched_size,
+            source, observed_at, local_sequence, raw_payload_hash, raw_payload_json
+        ) VALUES (
+            'order-exit-fill', 'cmd-exit-fill', 'MATCHED', '0', '26.79',
+            'REST', '2026-07-08T14:07:21+00:00', 1, 'hash-exit-fill', '{}'
+        )
+        """
+    )
+    trades_conn.commit()
+
+    report = reconcile(trades_conn, forecasts_conn, chain_by_asset={}, apply=True)
+
+    findings = [f for f in report.findings if f.position_id == "pos-milan-exit-fill"]
+    assert len(findings) == 1
+    assert findings[0].classification == CONSISTENT
+    assert findings[0].details["reason"] == "confirmed_exit_fill_fact_pending_projection"
+    assert report.applied == 0
+    events = trades_conn.execute(
+        "SELECT COUNT(*) AS n FROM position_events WHERE position_id='pos-milan-exit-fill'"
+    ).fetchone()
+    assert events["n"] == 0
+
+
+def test_pending_entry_open_order_without_fill_skips_review_marker(
+    trades_conn, forecasts_conn
+):
+    """A live maker entry order is not a held position until venue fill facts exist."""
+    _insert_position_current(
+        trades_conn, position_id="pos-wuhan-entry-live", phase="pending_entry",
+        city="wuhan", target_date="2026-07-10",
+        bin_label="Will the highest temperature in Wuhan be 36°C on July 10?",
+        direction="buy_no", no_token_id="tok-wuhan-no", chain_state="local_only",
+        shares=0.0, chain_shares=None,
+    )
+    trades_conn.execute(
+        """
+        INSERT INTO venue_commands (
+            command_id, snapshot_id, envelope_id, position_id, decision_id,
+            idempotency_key, intent_kind, market_id, token_id, side, size,
+            price, venue_order_id, state, created_at, updated_at
+        ) VALUES (
+            'cmd-entry-live', 'snap-entry-live', 'env-entry-live',
+            'pos-wuhan-entry-live', 'dec-entry-live', 'idem-entry-live',
+            'ENTRY', 'market-wuhan', 'tok-wuhan-no', 'BUY', 18.02, 0.62,
+            'order-entry-live', 'ACKED', ?, ?
+        )
+        """,
+        ("2026-07-08T14:27:44+00:00", "2026-07-08T14:27:47+00:00"),
+    )
+    trades_conn.execute(
+        """
+        INSERT INTO venue_order_facts (
+            venue_order_id, command_id, state, remaining_size, matched_size,
+            source, observed_at, local_sequence, raw_payload_hash, raw_payload_json
+        ) VALUES (
+            'order-entry-live', 'cmd-entry-live', 'LIVE', '18.02', '0',
+            'REST', '2026-07-08T14:27:47+00:00', 1, 'hash-entry-live', '{}'
+        )
+        """
+    )
+    trades_conn.commit()
+
+    report = reconcile(trades_conn, forecasts_conn, chain_by_asset={}, apply=True)
+
+    findings = [f for f in report.findings if f.position_id == "pos-wuhan-entry-live"]
+    assert len(findings) == 1
+    assert findings[0].classification == CONSISTENT
+    assert (
+        findings[0].details["reason"]
+        == "open_entry_order_without_fill_pending_position"
+    )
+    assert report.applied == 0
+    events = trades_conn.execute(
+        "SELECT COUNT(*) AS n FROM position_events WHERE position_id='pos-wuhan-entry-live'"
+    ).fetchone()
+    assert events["n"] == 0
 
 
 def test_foreign_and_missing_local_row_findings_never_create_a_local_row(trades_conn, forecasts_conn):
