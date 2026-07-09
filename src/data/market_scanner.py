@@ -4409,6 +4409,80 @@ def _prefetch_selected_orderbooks(
     return books
 
 
+def _prefetch_selected_clob_market_info(
+    clob: Any,
+    selected_candidates: list[tuple],
+    *,
+    deadline: float | None = None,
+    max_workers: int | None = None,
+) -> dict[str, dict]:
+    """Fetch fresh CLOB market metadata once per condition, concurrently.
+
+    Orderbooks are already batch-fetched before snapshot capture, but market
+    metadata was still fetched serially inside each condition's first capture.
+    The refresh path selects at most a small bounded candidate set, so one
+    bounded concurrent wave removes that network waterfall while preserving the
+    same per-condition CLOB authority and downstream identity validation.
+    """
+
+    condition_ids: list[str] = []
+    seen: set[str] = set()
+    for candidate in selected_candidates:
+        condition_id = str(candidate[5] or "").strip()
+        if condition_id and condition_id not in seen:
+            seen.add(condition_id)
+            condition_ids.append(condition_id)
+    if not condition_ids or (deadline is not None and time.monotonic() >= deadline):
+        return {}
+
+    cache: dict[str, dict] = {}
+    failures: list[tuple[str, Exception]] = []
+
+    def _fetch(condition_id: str) -> tuple[str, dict | None, Exception | None]:
+        try:
+            return condition_id, _fetch_clob_market_info(clob, condition_id), None
+        except Exception as exc:  # noqa: BLE001 - best-effort prefetch; capture retains retry
+            return condition_id, None, exc
+
+    if deadline is None or time.monotonic() < deadline:
+        from concurrent.futures import ThreadPoolExecutor
+
+        workers = max_workers
+        if workers is None:
+            workers = _positive_int_env(
+                "ZEUS_MARKET_DISCOVERY_CLOB_MARKET_INFO_CONCURRENCY",
+                16,
+            )
+        workers = max(1, min(int(workers), 16, len(condition_ids)))
+        if workers == 1:
+            results = map(_fetch, condition_ids)
+        else:
+            executor = ThreadPoolExecutor(
+                max_workers=workers,
+                thread_name_prefix="clob-market-info",
+            )
+            results = executor.map(_fetch, condition_ids)
+        try:
+            for condition_id, info, error in results:
+                if info is not None:
+                    cache[condition_id] = info
+                elif error is not None:
+                    failures.append((condition_id, error))
+        finally:
+            if workers > 1:
+                executor.shutdown(wait=True)
+
+    if failures:
+        logger.info(
+            "CLOB market metadata prefetch deferred %d/%d condition(s); "
+            "capture will retain the existing per-condition retry path: %s",
+            len(failures),
+            len(condition_ids),
+            failures[0][1],
+        )
+    return cache
+
+
 def _candidates_missing_prefetched_orderbooks(
     selected_candidates: list[tuple],
     prefetched_books: dict[str, dict],
@@ -4983,9 +5057,32 @@ def refresh_executable_market_substrate_snapshots(
                 failed_token_sink=failed_prefetch_tokens,
             )
         )
+    market_info_candidates = []
+    for candidate in selected_candidates:
+        _recency, _priority, _ordinal, _market, outcome, condition_id, direction = candidate
+        selected_token = _selected_token_for_direction(outcome, direction)
+        priority_candidate = str(condition_id or "").strip() in priority_conditions
+        priority_candidate_serviced = (
+            str(condition_id or "").strip() in priority_direct_clob_service_conditions
+        )
+        if (
+            not batch_orderbook_supported
+            or not selected_token
+            or selected_token in prefetched_books
+            or (
+                priority_candidate
+                and priority_candidate_serviced
+                and selected_token not in failed_prefetch_tokens
+            )
+        ):
+            market_info_candidates.append(candidate)
+    clob_market_info_cache = _prefetch_selected_clob_market_info(
+        clob,
+        market_info_candidates,
+        deadline=prefetch_deadline,
+    )
     prefetch_missing_skipped = 0
     prefetch_missing_identity_captured = 0
-    clob_market_info_cache: dict[str, dict] = {}
     fee_details_cache: dict[str, dict[str, Any]] = {}
     for index, (_recency, _priority, _ordinal, market, outcome, condition_id, direction) in enumerate(
         selected_candidates
@@ -5153,6 +5250,7 @@ def refresh_executable_market_substrate_snapshots(
         "snapshot_budget_seconds": snapshot_budget_seconds,
         "snapshot_capture_reserve_seconds": capture_reserve_seconds,
         "prefetched_orderbook_count": len(prefetched_books),
+        "prefetched_clob_market_count": len(clob_market_info_cache),
         "prefetch_missing_skipped": prefetch_missing_skipped,
         "prefetch_missing_identity_captured": prefetch_missing_identity_captured,
         "direct_clob_prefetch_skipped": int(direct_clob_prefetch_skipped),

@@ -18,6 +18,7 @@ from src.events.triggers.market_channel_ingestor import (
     MarketTokenMetadata,
     QuoteCache,
     active_weather_token_metadata_from_snapshots,
+    active_weather_token_metadata_for_tokens,
     active_weather_token_ids_from_snapshots,
     assert_market_channel_not_fill_authority,
     assert_user_channel_fill_authority,
@@ -81,6 +82,76 @@ def test_execution_feasibility_schema_indexes_token_created_at():
         ).fetchall()
     ]
     assert columns == ["token_id", "created_at"]
+
+
+def test_bounded_token_metadata_prefers_latest_projection_and_falls_back_per_missing_token():
+    conn = sqlite3.connect(":memory:")
+    conn.executescript(
+        """
+        CREATE TABLE executable_market_snapshots (
+            snapshot_id TEXT PRIMARY KEY,
+            condition_id TEXT NOT NULL,
+            yes_token_id TEXT NOT NULL,
+            no_token_id TEXT NOT NULL,
+            min_tick_size TEXT NOT NULL,
+            min_order_size TEXT NOT NULL,
+            neg_risk INTEGER NOT NULL,
+            active INTEGER,
+            closed INTEGER,
+            event_slug TEXT,
+            market_end_at TEXT,
+            captured_at TEXT NOT NULL
+        );
+        CREATE INDEX idx_snapshots_yes_token_captured
+            ON executable_market_snapshots (yes_token_id, captured_at DESC);
+        CREATE INDEX idx_snapshots_no_token_captured
+            ON executable_market_snapshots (no_token_id, captured_at DESC);
+        CREATE TABLE executable_market_snapshot_latest (
+            snapshot_id TEXT NOT NULL,
+            yes_token_id TEXT NOT NULL,
+            no_token_id TEXT NOT NULL,
+            captured_at TEXT NOT NULL
+        );
+        CREATE INDEX idx_snapshot_latest_yes_token_captured
+            ON executable_market_snapshot_latest (yes_token_id, captured_at DESC);
+        CREATE INDEX idx_snapshot_latest_no_token_captured
+            ON executable_market_snapshot_latest (no_token_id, captured_at DESC);
+
+        INSERT INTO executable_market_snapshots VALUES
+            ('snap-latest', 'cond-latest', 'token-latest', 'no-latest', '0.01', '5', 0,
+             1, 0, 'weather-latest', '2026-07-11T00:00:00+00:00', '2026-07-09T10:00:00+00:00'),
+            ('snap-fallback', 'cond-fallback', 'token-fallback', 'no-fallback', '0.01', '5', 0,
+             1, 0, 'weather-fallback', '2026-07-11T00:00:00+00:00', '2026-07-09T09:00:00+00:00'),
+            ('snap-closed-old', 'cond-closed', 'token-closed', 'no-closed', '0.01', '5', 0,
+             1, 0, 'weather-closed', '2026-07-11T00:00:00+00:00', '2026-07-09T08:00:00+00:00'),
+            ('snap-closed-new', 'cond-closed', 'token-closed', 'no-closed', '0.01', '5', 0,
+             0, 1, 'weather-closed', '2026-07-11T00:00:00+00:00', '2026-07-09T11:00:00+00:00');
+        INSERT INTO executable_market_snapshot_latest VALUES
+            ('snap-latest', 'token-latest', 'no-latest', '2026-07-09T10:00:00+00:00'),
+            ('snap-closed-new', 'token-closed', 'no-closed', '2026-07-09T11:00:00+00:00');
+        """
+    )
+    statements: list[str] = []
+    conn.set_trace_callback(statements.append)
+
+    metadata = active_weather_token_metadata_for_tokens(
+        conn,
+        token_ids=("token-latest", "token-fallback", "token-closed"),
+        now=datetime(2026, 7, 9, 12, tzinfo=timezone.utc),
+    )
+
+    assert set(metadata) == {"token-latest", "token-fallback"}
+    assert metadata["token-latest"].executable_snapshot_id == "snap-latest"
+    assert metadata["token-fallback"].executable_snapshot_id == "snap-fallback"
+    assert any("FROM executable_market_snapshot_latest AS l" in sql for sql in statements)
+    direct_history_seeks = [
+        sql
+        for sql in statements
+        if "FROM executable_market_snapshots" in sql
+        and "JOIN (" not in sql
+        and ("WHERE yes_token_id =" in sql or "WHERE no_token_id =" in sql)
+    ]
+    assert len(direct_history_seeks) == 2
 
 
 def test_book_buy_uses_best_ask():
@@ -303,6 +374,25 @@ def test_quote_cache_seeded_from_rest_on_connect():
     assert results[0].opportunity_event_persisted is False
     assert conn.execute("SELECT COUNT(*) FROM opportunity_events").fetchone()[0] == 0
     assert conn.execute("SELECT COUNT(*) FROM execution_feasibility_evidence").fetchone()[0] == 2
+    rows = conn.execute(
+        """
+        SELECT direction, depth_before_json
+          FROM execution_feasibility_evidence
+         ORDER BY direction
+        """
+    ).fetchall()
+    assert rows[0][0] == "buy_yes"
+    assert rows[0][1]
+    assert rows[1] == ("sell_yes", None)
+    latest_rows = conn.execute(
+        """
+        SELECT direction, best_bid_before, best_ask_before, depth_before_json
+          FROM execution_feasibility_latest
+         ORDER BY direction
+        """
+    ).fetchall()
+    assert latest_rows[0] == ("buy_yes", 0.48, 0.52, rows[0][1])
+    assert latest_rows[1] == ("sell_yes", 0.48, 0.52, None)
 
 
 def test_seed_from_rest_can_seed_priority_subset_before_full_universe():

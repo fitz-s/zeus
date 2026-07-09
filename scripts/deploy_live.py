@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Lifecycle: created=2026-06-12; last_reviewed=2026-06-12; last_reused=2026-06-12
+# Lifecycle: created=2026-06-12; last_reviewed=2026-06-12; last_reused=2026-07-09
 # Purpose: make live daemon restarts SAFE — refuse `launchctl kickstart` while the LIVE
 #   checkout's runtime surface is uncommitted/unpushed, and require live restart preflight
 #   before booting the trading daemon.
@@ -149,6 +149,9 @@ LAUNCHD_UNLOAD_POLL_SECONDS = 0.5
 LIVE_RUNTIME_FRESH_VERIFY_TIMEOUT_SECONDS = float(
     os.environ.get("ZEUS_DEPLOY_LIVE_RUNTIME_FRESH_VERIFY_TIMEOUT_SECONDS", "90")
 )
+LIVE_PREREQUISITE_READY_TIMEOUT_SECONDS = float(
+    os.environ.get("ZEUS_DEPLOY_LIVE_PREREQUISITE_READY_TIMEOUT_SECONDS", "90")
+)
 LIVE_MONITOR_CADENCE_VERIFY_TIMEOUT_SECONDS = float(
     os.environ.get("ZEUS_DEPLOY_LIVE_MONITOR_CADENCE_VERIFY_TIMEOUT_SECONDS", "240")
 )
@@ -159,6 +162,12 @@ LIVE_RUNTIME_FRESH_VERIFY_POLL_SECONDS = 1.0
 LIVE_RUNTIME_FRESH_VERIFY_CLOCK_TOLERANCE_SECONDS = float(
     os.environ.get("ZEUS_DEPLOY_LIVE_RUNTIME_FRESH_CLOCK_TOLERANCE_SECONDS", "5")
 )
+PREREQUISITE_CODE_HEARTBEATS = {
+    DAEMONS["forecast-live"]: ("forecast-live-heartbeat.json", ("written_at", "timestamp")),
+    DAEMONS["substrate-observer"]: ("daemon-heartbeat-substrate-observer.json", ("alive_at",)),
+    DAEMONS["price-channel-ingest"]: ("daemon-heartbeat-price-channel-ingest.json", ("alive_at",)),
+    DAEMONS["post-trade-capital"]: ("daemon-heartbeat-post-trade-capital.json", ("alive_at",)),
+}
 # Runtime surface whose dirtiness must block a restart (per the incident).
 # scripts/ is included because daemon plists and operator flows execute
 # scripts/*.py from the live checkout (external review 2026-06-12). deploy/launchd
@@ -343,6 +352,53 @@ def _load_json(path: Path) -> dict:
     except Exception:
         return {}
     return payload if isinstance(payload, dict) else {}
+
+
+def _wait_for_prerequisite_code_identity(
+    labels: list[str],
+    *,
+    expected_sha: str,
+    launched_after: datetime,
+    timeout_seconds: float = LIVE_PREREQUISITE_READY_TIMEOUT_SECONDS,
+) -> tuple[bool, str]:
+    """Wait for restarted sidecars to prove the code identity preflight checks."""
+
+    targets = [label for label in labels if label in PREREQUISITE_CODE_HEARTBEATS]
+    if not targets:
+        return True, "sidecar code identity wait not required"
+    state_dir = Path(_require_live_repo()) / "state"
+    expected = str(expected_sha or "").strip()
+    floor = launched_after.astimezone(timezone.utc) - timedelta(
+        seconds=max(0.0, LIVE_RUNTIME_FRESH_VERIFY_CLOCK_TOLERANCE_SECONDS)
+    )
+    deadline = time.monotonic() + max(0.0, float(timeout_seconds))
+    last_pending: list[str] = []
+
+    while True:
+        pending: list[str] = []
+        for label in targets:
+            filename, time_keys = PREREQUISITE_CODE_HEARTBEATS[label]
+            payload = _load_json(state_dir / filename)
+            observed = str(payload.get("git_head") or "").strip()
+            observed_at = next(
+                (
+                    parsed
+                    for key in time_keys
+                    if (parsed := _parse_iso_utc(payload.get(key))) is not None
+                ),
+                None,
+            )
+            if observed != expected or observed_at is None or observed_at < floor:
+                pending.append(
+                    f"{label}:sha={observed[:9] if observed else '<missing>'} "
+                    f"at={observed_at.isoformat() if observed_at else '<missing>'}"
+                )
+        if not pending:
+            return True, f"sidecar code identity verified for {len(targets)} prerequisite(s)"
+        last_pending = pending
+        if time.monotonic() >= deadline:
+            return False, "sidecar code identity did not verify after restart: " + "; ".join(last_pending)
+        time.sleep(LIVE_RUNTIME_FRESH_VERIFY_POLL_SECONDS)
 
 
 def _wait_for_live_runtime_fresh(
@@ -708,6 +764,7 @@ def _run_restart_recovery_if_needed(labels: list[str]) -> tuple[bool, str]:
         from scripts.migrations import apply_migrations
         from src.state.db import (
             get_trade_connection,
+            get_trade_connection_with_world_required,
             get_world_connection,
             init_schema_trade_only,
         )
@@ -738,8 +795,23 @@ def _run_restart_recovery_if_needed(labels: list[str]) -> tuple[bool, str]:
             trade_conn.close()
 
         from src.execution.command_recovery import reconcile_unresolved_commands
+        from src.events.edli_trade_fact_bridge import (
+            append_confirmed_trade_facts_to_edli,
+            append_rest_filled_orphan_trade_facts_to_edli,
+        )
 
         summary = reconcile_unresolved_commands(scope='restart_preflight')
+        bridge_conn = get_trade_connection_with_world_required(write_class='live')
+        try:
+            summary['confirmed_fill_bridge_appended'] = append_confirmed_trade_facts_to_edli(
+                bridge_conn
+            )
+            summary['rest_fill_orphan_bridge_appended'] = (
+                append_rest_filled_orphan_trade_facts_to_edli(bridge_conn)
+            )
+            bridge_conn.commit()
+        finally:
+            bridge_conn.close()
         summary['schema_migrations_applied'] = applied
         print(json.dumps(summary, sort_keys=True, default=str))
         raise SystemExit(1 if int(summary.get('errors') or 0) else 0)
@@ -945,6 +1017,7 @@ def cmd_restart(args: argparse.Namespace) -> int:
         return 1
     print(recovery_detail)
 
+    prerequisite_launch_started_at = datetime.now(timezone.utc)
     for label in non_live_labels:
         ok, detail = _launch_or_restart_label(label)
         if ok:
@@ -959,6 +1032,22 @@ def cmd_restart(args: argparse.Namespace) -> int:
                 file=sys.stderr,
             )
         return rc_all
+
+    if includes_live_trading:
+        prerequisite_ok, prerequisite_detail = _wait_for_prerequisite_code_identity(
+            non_live_labels,
+            expected_sha=expected_live_sha,
+            launched_after=prerequisite_launch_started_at,
+        )
+        if not prerequisite_ok:
+            print("REFUSING to restart — live prerequisite code identity is not ready:")
+            print(prerequisite_detail)
+            print(
+                "live-trading left stopped; fix prerequisite daemon startup before starting it.",
+                file=sys.stderr,
+            )
+            return 1
+        print(prerequisite_detail)
 
     preflight_ok, preflight_detail = _run_restart_preflight_if_needed(labels)
     if not preflight_ok:

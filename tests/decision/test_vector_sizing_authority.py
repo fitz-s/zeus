@@ -1,5 +1,5 @@
 # Created: 2026-06-14
-# Last reused or audited: 2026-06-14
+# Last reused or audited: 2026-07-09
 # Authority basis: docs/rebuild/consult_build_spec.md
 #   ("Create src/decision/payoff_vector.py" sizing block lines 776-791: robust_delta_u over
 #   band samples + the EXISTING FamilyPayoffMatrix ΔU; s_star = argmax_s
@@ -34,6 +34,7 @@ Kelly behavior the spec replaces:
 """
 from __future__ import annotations
 
+import math
 from datetime import date, timedelta
 from decimal import Decimal
 from typing import Mapping
@@ -49,6 +50,8 @@ from src.contracts.executable_cost_curve import (
 )
 from src.contracts.native_side_candidate import NativeSideCandidate
 from src.decision.payoff_vector import (
+    _PreparedSizing,
+    _draw_to_pi,
     optimize_vector_stake,
     robust_delta_u,
 )
@@ -61,9 +64,10 @@ from src.probability.outcome_space import (
     compute_topology_hash,
 )
 from src.strategy.utility_ranker import (
-    OUTSIDE_OUTCOME,
     FamilyPayoffMatrix,
     PortfolioExposureVector,
+    _delta_u_at_stake,
+    effective_outcome_pi,
 )
 
 
@@ -207,6 +211,137 @@ def _matrix(space: OutcomeSpace) -> FamilyPayoffMatrix:
     """FamilyPayoffMatrix over the EXECUTABLE bins plus OUTSIDE (Hidden #5)."""
     bins = [b.bin_id for b in space.bins if b.executable]
     return FamilyPayoffMatrix.over_bins(bins)
+
+
+@pytest.mark.parametrize("side", ["YES", "NO"])
+def test_robust_delta_u_walks_cost_curve_once_without_numeric_drift(monkeypatch, side):
+    """One candidate/stake has one cost; outcomes only choose win versus loss."""
+    space = _outcome_space()
+    jq = _joint_q(space, {"b25": 0.55, "b26": 0.20})
+    band = _band_from_point(jq, n_draws=40, jitter=0.008)
+    matrix = _matrix(space)
+    exposure = PortfolioExposureVector.flat(matrix, baseline=Decimal("1000"))
+    curve = ExecutableCostCurve(
+        token_id=f"{side.lower()}-b25",
+        side=side,
+        snapshot_id="snap-1",
+        book_hash=f"hash-b25-{side}",
+        levels=(
+            BookLevel(price=Decimal("0.20"), size=Decimal("50")),
+            BookLevel(price=Decimal("0.30"), size=Decimal("1950")),
+        ),
+        fee_model=FeeModel(fee_rate=Decimal("0.05")),
+        min_tick=Decimal("0.01"),
+        min_order_size=Decimal("1"),
+        quote_ttl=timedelta(seconds=2),
+    )
+    candidate = NativeSideCandidate.tradeable(
+        family_key=space.family_id,
+        bin_id="b25",
+        side=side,
+        token_id=curve.token_id,
+        condition_id="cond-b25",
+        q_point=0.55,
+        q_lcb=0.50,
+        probability_uncertainty=None,
+        executable_cost_curve=curve,
+        forecast_snapshot_id="fc-1",
+        market_snapshot_id="mk-1",
+        hypothesis_id=f"hyp-b25-{side}",
+    )
+    stake = Decimal("37")
+
+    cost = Decimal(str(curve.avg_cost(stake).value))
+    win_profit = stake * (Decimal("1") - cost) / cost
+    loss = -stake
+    per_draw = []
+    for draw in band.samples:
+        pi = effective_outcome_pi(candidate, matrix, _draw_to_pi(draw, space, matrix))
+        total = 0.0
+        for outcome in matrix.outcomes:
+            wins = outcome == candidate.bin_id if side == "YES" else outcome != candidate.bin_id
+            payoff = win_profit if wins else loss
+            wealth = exposure.a(outcome)
+            total += float(pi[outcome]) * (
+                math.log(float(wealth + payoff)) - math.log(float(wealth))
+            )
+        per_draw.append(total)
+    expected = float(np.quantile(per_draw, band.alpha))
+
+    calls = 0
+    original_avg_cost = ExecutableCostCurve.avg_cost
+
+    def counted_avg_cost(self, stake_usd):
+        nonlocal calls
+        calls += 1
+        return original_avg_cost(self, stake_usd)
+
+    monkeypatch.setattr(ExecutableCostCurve, "avg_cost", counted_avg_cost)
+    actual = robust_delta_u(
+        candidate,
+        stake,
+        band=band,
+        omega=space,
+        matrix=matrix,
+        exposure=exposure,
+    )
+
+    assert actual == pytest.approx(expected, abs=1e-15)
+    assert calls == 1
+
+    prepared = _PreparedSizing(
+        candidate,
+        band=band,
+        omega=space,
+        matrix=matrix,
+        exposure=exposure,
+        alpha=band.alpha,
+    )
+    stakes = [Decimal("1"), stake, Decimal("999"), Decimal("1000")]
+    scalar = np.asarray([prepared.robust_at(value) for value in stakes])
+    calls = 0
+    batched = prepared.robust_many(stakes)
+    np.testing.assert_array_equal(batched, scalar)
+    assert calls == len(stakes)
+
+    low_exposure = PortfolioExposureVector.flat(matrix, baseline=Decimal("100"))
+    ruin_prepared = _PreparedSizing(
+        candidate,
+        band=band,
+        omega=space,
+        matrix=matrix,
+        exposure=low_exposure,
+        alpha=band.alpha,
+    )
+    ruin_stakes = [Decimal("1"), Decimal("200")]
+    ruin_scalar = np.asarray(
+        [ruin_prepared.robust_at(value) for value in ruin_stakes]
+    )
+    ruin_batched = ruin_prepared.robust_many(ruin_stakes)
+    np.testing.assert_array_equal(ruin_batched, ruin_scalar)
+
+    mixed_exposure = PortfolioExposureVector.from_outcome_wealth(
+        matrix,
+        baseline=Decimal("1000"),
+        extra_by_outcome={"b25": Decimal("400"), "b26": Decimal("125")},
+    )
+    mixed_prepared = _PreparedSizing(
+        candidate,
+        band=band,
+        omega=space,
+        matrix=matrix,
+        exposure=mixed_exposure,
+        alpha=band.alpha,
+    )
+    reference = []
+    for draw in band.samples:
+        pi = effective_outcome_pi(candidate, matrix, _draw_to_pi(draw, space, matrix))
+        reference.append(
+            _delta_u_at_stake(candidate, matrix, pi, mixed_exposure, stake)
+        )
+    assert mixed_prepared.robust_at(stake) == pytest.approx(
+        float(np.quantile(reference, band.alpha)), abs=1e-15
+    )
 
 
 # ===========================================================================

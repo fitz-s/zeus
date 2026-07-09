@@ -733,7 +733,13 @@ def active_weather_token_metadata_for_tokens(
     thousands of stale/irrelevant weather tokens.
     """
 
-    tokens = [str(token_id) for token_id in token_ids if str(token_id or "").strip()]
+    tokens = list(
+        dict.fromkeys(
+            str(token_id).strip()
+            for token_id in token_ids
+            if str(token_id or "").strip()
+        )
+    )
     if not tokens or not _table_exists(conn, "executable_market_snapshots"):
         return {}
     columns = _table_columns(conn, "executable_market_snapshots")
@@ -769,7 +775,89 @@ def active_weather_token_metadata_for_tokens(
     market_end_expr = "market_end_at" if "market_end_at" in columns else "NULL AS market_end_at"
 
     metadata: dict[str, MarketTokenMetadata] = {}
-    for token_id in dict.fromkeys(tokens):
+    latest_covered: set[str] = set()
+
+    def _record(token_id: str, row: sqlite3.Row | tuple) -> None:
+        (
+            snapshot_id,
+            condition_id,
+            yes_token_id,
+            no_token_id,
+            min_tick_size,
+            min_order_size,
+            neg_risk,
+            market_end_at,
+        ) = row[:8]
+        if str(yes_token_id) == token_id:
+            outcome_label = "YES"
+        elif str(no_token_id) == token_id:
+            outcome_label = "NO"
+        else:
+            return
+        metadata[token_id] = MarketTokenMetadata(
+            condition_id=str(condition_id),
+            token_id=token_id,
+            outcome_label=outcome_label,
+            min_tick_size=str(min_tick_size),
+            min_order_size=str(min_order_size),
+            neg_risk=bool(neg_risk),
+            executable_snapshot_id=str(snapshot_id),
+            market_end_at=str(market_end_at) if market_end_at is not None else None,
+        )
+
+    if _table_exists(conn, "executable_market_snapshot_latest"):
+        latest_columns = _table_columns(conn, "executable_market_snapshot_latest")
+        latest_required = {
+            "snapshot_id",
+            "yes_token_id",
+            "no_token_id",
+            "captured_at",
+        }
+        if latest_required <= latest_columns:
+            eligibility = " AND ".join(predicates) if predicates else "1"
+            # Keep each statement below SQLite's legacy 999-variable ceiling.
+            for offset in range(0, len(tokens), 400):
+                batch = tokens[offset : offset + 400]
+                placeholders = ",".join("?" for _ in batch)
+                rows = conn.execute(
+                    f"""
+                    SELECT s.snapshot_id, s.condition_id, s.yes_token_id, s.no_token_id,
+                           s.min_tick_size, s.min_order_size, s.neg_risk, s.market_end_at,
+                           s._eligible, l.captured_at AS _order_value
+                      FROM executable_market_snapshot_latest AS l
+                      JOIN (
+                            SELECT snapshot_id, condition_id, yes_token_id, no_token_id,
+                                   min_tick_size, min_order_size, neg_risk,
+                                   {market_end_expr},
+                                   CASE WHEN {eligibility} THEN 1 ELSE 0 END AS _eligible
+                              FROM executable_market_snapshots
+                           ) AS s
+                        ON s.snapshot_id = l.snapshot_id
+                     WHERE l.yes_token_id IN ({placeholders})
+                        OR l.no_token_id IN ({placeholders})
+                     ORDER BY l.captured_at DESC
+                    """,
+                    (*extra_params, *batch, *batch),
+                ).fetchall()
+                batch_set = set(batch)
+                for row in rows:
+                    row_tokens = {
+                        str(row[2]),
+                        str(row[3]),
+                    } & batch_set
+                    latest_covered.update(row_tokens)
+                    if not bool(row[8]):
+                        continue
+                    for token_id in row_tokens:
+                        if token_id not in metadata:
+                            _record(token_id, row)
+
+    # Compatibility fallback for databases whose compact latest projection has
+    # not yet seen this token. A latest row that is closed/inactive is coverage,
+    # not permission to resurrect an older tradeable append row.
+    for token_id in tokens:
+        if token_id in latest_covered:
+            continue
         rows = []
         for token_column in ("yes_token_id", "no_token_id"):
             rows.extend(
@@ -788,23 +876,7 @@ def active_weather_token_metadata_for_tokens(
         if not rows:
             continue
         row = max(rows, key=lambda r: str(r[-1] or ""))
-        snapshot_id, condition_id, yes_token_id, no_token_id, min_tick_size, min_order_size, neg_risk, market_end_at, _ = row
-        if str(yes_token_id) == token_id:
-            outcome_label = "YES"
-        elif str(no_token_id) == token_id:
-            outcome_label = "NO"
-        else:
-            continue
-        metadata[token_id] = MarketTokenMetadata(
-            condition_id=str(condition_id),
-            token_id=token_id,
-            outcome_label=outcome_label,
-            min_tick_size=str(min_tick_size),
-            min_order_size=str(min_order_size),
-            neg_risk=bool(neg_risk),
-            executable_snapshot_id=str(snapshot_id),
-            market_end_at=str(market_end_at) if market_end_at is not None else None,
-        )
+        _record(token_id, row)
     return metadata
 
 
@@ -1561,6 +1633,9 @@ def feasibility_evidence_from_quote(
     order_intent_time: str | None = None,
 ) -> dict[str, Any]:
     payload = json.loads(event.payload_json)
+    # The exchange book is token-scoped, so buy/sell directions for the same
+    # token would otherwise duplicate the same depth JSON on every quote tick.
+    depth_before_json = payload.get("depth_json") if str(direction).lower().startswith("buy_") else None
     return {
         "event_id": event.event_id,
         "condition_id": payload["condition_id"],
@@ -1571,7 +1646,7 @@ def feasibility_evidence_from_quote(
         "book_hash_before": payload.get("book_hash"),
         "best_bid_before": payload.get("best_bid"),
         "best_ask_before": payload.get("best_ask"),
-        "depth_before_json": payload.get("depth_json"),
+        "depth_before_json": depth_before_json,
         "order_intent_time": order_intent_time,
         "submit_time": None,
         "accepted_or_rejected": None,

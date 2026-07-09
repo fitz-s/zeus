@@ -1,5 +1,5 @@
 # Created: 2026-06-08
-# Last reused or audited: 2026-06-09
+# Last reused or audited: 2026-07-09
 # Audit note 2026-06-09: RobustCandidateScore now records ΔU at the min-order
 #   notional (delta_u_at_min_order / min_order_notional_usd) so the fractional-Kelly
 #   sizing path can distinguish a true edge reversal (ΔU ≤ 0 at every admissible
@@ -185,22 +185,29 @@ class FamilyPayoffMatrix:
             raise ValueError(
                 f"outcome {outcome!r} not in family outcome set {self.outcomes}"
             )
-        stake = Decimal(stake_usd)
-        if stake <= Decimal("0"):
-            raise ValueError(f"stake_usd must be > 0, got {stake_usd}")
-        if not candidate.is_tradeable or candidate.executable_cost_curve is None:
-            raise ValueError(
-                "FamilyPayoffMatrix.payoff requires a tradeable candidate with an "
-                f"executable cost curve; got no-trade candidate for bin "
-                f"{candidate.bin_id!r} side {candidate.side!r}"
-            )
-
-        c = _all_in_cost(candidate.executable_cost_curve, stake)
-        win_profit = stake * (Decimal("1") - c) / c
-        loss = -stake
-
+        win_profit, loss = self.payoff_terms(candidate, stake_usd)
         wins = _candidate_wins(candidate, outcome)
         return win_profit if wins else loss
+
+    def payoff_terms(
+        self,
+        candidate: NativeSideCandidate,
+        stake_usd: Decimal,
+    ) -> tuple[Decimal, Decimal]:
+        """The shared ``(win_profit, loss)`` terms for one candidate and stake."""
+        return _candidate_payoff_terms(candidate, stake_usd)
+
+    def payoffs(
+        self,
+        candidate: NativeSideCandidate,
+        stake_usd: Decimal,
+    ) -> tuple[Decimal, ...]:
+        """Net payoffs aligned to :attr:`outcomes`, with one executable-cost walk."""
+        win_profit, loss = self.payoff_terms(candidate, stake_usd)
+        return tuple(
+            win_profit if _candidate_wins(candidate, outcome) else loss
+            for outcome in self.outcomes
+        )
 
 
 def _candidate_wins(candidate: NativeSideCandidate, outcome: str) -> bool:
@@ -209,6 +216,25 @@ def _candidate_wins(candidate: NativeSideCandidate, outcome: str) -> bool:
         return outcome == candidate.bin_id
     # NO_i wins on every outcome EXCEPT its own bin (incl. OUTSIDE).
     return outcome != candidate.bin_id
+
+
+def _candidate_payoff_terms(
+    candidate: NativeSideCandidate,
+    stake_usd: Decimal,
+) -> tuple[Decimal, Decimal]:
+    """Return the candidate's shared ``(win_profit, loss)`` at one stake."""
+    stake = Decimal(stake_usd)
+    if stake <= Decimal("0"):
+        raise ValueError(f"stake_usd must be > 0, got {stake_usd}")
+    if not candidate.is_tradeable or candidate.executable_cost_curve is None:
+        raise ValueError(
+            "FamilyPayoffMatrix requires a tradeable candidate with an executable cost "
+            f"curve; got no-trade candidate for bin {candidate.bin_id!r} side "
+            f"{candidate.side!r}"
+        )
+
+    c = _all_in_cost(candidate.executable_cost_curve, stake)
+    return stake * (Decimal("1") - c) / c, -stake
 
 
 def _all_in_cost(curve: ExecutableCostCurve, stake_usd: Decimal) -> Decimal:
@@ -536,16 +562,13 @@ def _delta_u_at_stake(
     are hard no-gos the maximizer must avoid, so they map to negative infinity.
     """
     try:
-        # One avg_cost walk per stake (cost is shared across outcomes for this
-        # candidate); payoff() recomputes c internally but avg_cost is cheap and
-        # this keeps the matrix payoff the single source of the R_y geometry.
+        payoffs = matrix.payoffs(candidate, stake_usd)
         total = 0.0
-        for y in matrix.outcomes:
+        for y, r in zip(matrix.outcomes, payoffs, strict=True):
             p = float(pi.get(y, 0.0))
             if p <= 0.0:
                 continue
             a = exposure.a(y)
-            r = matrix.payoff(candidate, y, stake_usd)
             new_wealth = a + r
             if new_wealth <= Decimal("0"):
                 # A loss that wipes out the outcome's wealth -> log undefined ->

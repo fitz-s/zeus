@@ -1,5 +1,5 @@
 # Created: 2026-05-24
-# Lifecycle: created=2026-05-24; last_reviewed=2026-06-06; last_reused=2026-06-06
+# Lifecycle: created=2026-05-24; last_reviewed=2026-07-09; last_reused=2026-07-09
 # Authority basis: fix(discovery): restore full-city market substrate coverage (50→7 regression);
 #   2026-06-04 EXECUTABLE_SNAPSHOT_BLOCKED antibody — non-tradeable family-identity bins
 #   must reach capture so executable_market_snapshots is family-COMPLETE (FDR full-family proof)
@@ -24,6 +24,7 @@ from __future__ import annotations
 import contextlib
 import re
 import sqlite3
+import threading
 import time
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
@@ -38,6 +39,108 @@ import src.data.substrate_observer as substrate_observer
 
 _NOW = datetime(2026, 5, 24, 12, 0, 0, tzinfo=timezone.utc)
 _CITY_SLUG_RE = re.compile(r"in-([a-z-]+)-on-")
+
+
+def test_clob_market_metadata_prefetch_collapses_serial_latency():
+    """Fresh per-condition CLOB metadata is fetched concurrently and deduplicated."""
+
+    class SlowClob:
+        def __init__(self):
+            self.calls: list[str] = []
+            self.active = 0
+            self.max_active = 0
+            self.lock = threading.Lock()
+
+        def get_clob_market_info(self, condition_id: str) -> dict:
+            with self.lock:
+                self.calls.append(condition_id)
+                self.active += 1
+                self.max_active = max(self.max_active, self.active)
+            try:
+                time.sleep(0.05)
+                return {"condition_id": condition_id, "accepting_orders": True}
+            finally:
+                with self.lock:
+                    self.active -= 1
+
+    condition_ids = [f"condition-{index}" for index in range(16)]
+    candidates = [
+        (0, 0, index * 2 + side, {}, {}, condition_id, direction)
+        for index, condition_id in enumerate(condition_ids)
+        for side, direction in enumerate(("buy_yes", "buy_no"))
+    ]
+
+    serial_clob = SlowClob()
+    serial_started = time.perf_counter()
+    for condition_id in condition_ids:
+        serial_clob.get_clob_market_info(condition_id)
+    serial_elapsed = time.perf_counter() - serial_started
+
+    parallel_clob = SlowClob()
+    parallel_started = time.perf_counter()
+    cache = ms._prefetch_selected_clob_market_info(
+        parallel_clob,
+        candidates,
+        deadline=time.monotonic() + 2.0,
+        max_workers=8,
+    )
+    parallel_elapsed = time.perf_counter() - parallel_started
+
+    assert set(cache) == set(condition_ids)
+    assert sorted(parallel_clob.calls) == sorted(condition_ids)
+    assert parallel_clob.max_active >= 4
+    assert parallel_elapsed < serial_elapsed * 0.30
+
+
+def test_parallel_market_metadata_prefetch_builds_one_public_http_pool(monkeypatch):
+    """Concurrent first use shares one lazily constructed public HTTP client."""
+
+    from src.data import polymarket_client as pm
+
+    class Response:
+        def __init__(self, condition_id: str):
+            self.condition_id = condition_id
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"condition_id": self.condition_id, "accepting_orders": True}
+
+    class PublicClient:
+        def get(self, url, *, params=None):
+            return Response(url.rsplit("/", 1)[-1])
+
+        def close(self):
+            return None
+
+    clients: list[PublicClient] = []
+    factory_lock = threading.Lock()
+
+    def client_factory(*_args, **_kwargs):
+        time.sleep(0.01)
+        client = PublicClient()
+        with factory_lock:
+            clients.append(client)
+        return client
+
+    monkeypatch.setattr(pm.httpx, "Client", client_factory)
+    clob = pm.PolymarketClient()
+    condition_ids = [f"condition-{index}" for index in range(16)]
+    candidates = [
+        (0, 0, index, {}, {}, condition_id, "buy_yes")
+        for index, condition_id in enumerate(condition_ids)
+    ]
+
+    cache = ms._prefetch_selected_clob_market_info(
+        clob,
+        candidates,
+        deadline=time.monotonic() + 2.0,
+        max_workers=16,
+    )
+
+    assert set(cache) == set(condition_ids)
+    assert len(clients) == 1
 
 # ---------------------------------------------------------------------------
 # Helpers

@@ -5187,6 +5187,8 @@ CREATE TABLE IF NOT EXISTS position_current (
     settled_at TEXT,
     exit_reason TEXT
 );
+CREATE INDEX IF NOT EXISTS idx_position_current_phase_quote
+    ON position_current(phase, chain_state, chain_shares, token_id, no_token_id);
 
 -- execution_fact (from architecture/2026_04_02_architecture_kernel.sql)
 CREATE TABLE IF NOT EXISTS execution_fact (

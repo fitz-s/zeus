@@ -1,9 +1,9 @@
 # Created: 2026-03-30
-# Last reused/audited: 2026-05-22
-# Lifecycle: created=2026-03-30; last_reviewed=2026-05-22; last_reused=2026-05-22
+# Last reused/audited: 2026-07-09
+# Lifecycle: created=2026-03-30; last_reviewed=2026-07-09; last_reused=2026-07-09
 # Purpose: Protect DB schema bootstrap contracts, daily revision-history DDL, and fact-smoke authority labels.
 # Reuse: Audit touched schema assertions and high-sensitivity skip metadata before closeout.
-# Authority basis: P2 4.4.A2 daily observation revision-history schema packet; Wave16 object-meaning fact-smoke authority repair; PR90 latest-event env authority review fix; 2026-05-16 live-continuous Phase B event-status boundary.
+# Authority basis: P2 4.4.A2 daily observation revision-history schema packet; Wave16 object-meaning fact-smoke authority repair; PR90 latest-event env authority review fix; 2026-05-16 live-continuous Phase B event-status boundary; 2026-07-09 covering position-current quote-priority index.
 """Tests for database schema initialization."""
 
 import json
@@ -1593,6 +1593,50 @@ def test_init_schema_trade_only_commits_execution_feasibility_indexes(tmp_path):
     assert "idx_execution_feasibility_evidence_token_created" in indexes
     assert "execution_feasibility_latest" in latest_tables
     assert "idx_execution_feasibility_latest_token_created" in latest_indexes
+
+
+def test_init_schema_trade_only_commits_position_current_quote_priority_index(tmp_path):
+    from src.state.db import init_schema_trade_only
+
+    trade_db = tmp_path / "zeus_trades.db"
+    conn = sqlite3.connect(trade_db)
+    conn.row_factory = sqlite3.Row
+    init_schema_trade_only(conn)
+    conn.close()
+
+    reopened = sqlite3.connect(trade_db)
+    try:
+        columns = [
+            row[2]
+            for row in reopened.execute(
+                "PRAGMA index_info('idx_position_current_phase_quote')"
+            ).fetchall()
+        ]
+        plan = " ".join(
+            str(row[3])
+            for row in reopened.execute(
+                """
+                EXPLAIN QUERY PLAN
+                SELECT token_id, no_token_id
+                  FROM position_current
+                 WHERE phase IN ('pending_entry','active','day0_window','pending_exit')
+                    OR (phase IN ('quarantined','voided')
+                        AND COALESCE(chain_state, '') IN ('confirmed','present','synced')
+                        AND COALESCE(chain_shares, 0) > 0.000001)
+                """
+            ).fetchall()
+        )
+    finally:
+        reopened.close()
+
+    assert columns == [
+        "phase",
+        "chain_state",
+        "chain_shares",
+        "token_id",
+        "no_token_id",
+    ]
+    assert "USING COVERING INDEX idx_position_current_phase_quote" in plan
 
 
 def test_load_portfolio_ignores_non_exit_status_payload(tmp_path):

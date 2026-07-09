@@ -667,6 +667,61 @@ def test_deploy_live_trading_restart_runs_recovery(monkeypatch, tmp_path):
     assert calls
     assert "init_schema_trade_only" in calls[0][2]
     assert "get_trade_connection(write_class='live')" in calls[0][2]
+    assert "get_trade_connection_with_world_required(write_class='live')" in calls[0][2]
+    assert "append_rest_filled_orphan_trade_facts_to_edli" in calls[0][2]
+
+
+def test_deploy_live_waits_for_fresh_prerequisite_code_identity(monkeypatch, tmp_path):
+    dl = _load("deploy_live_prerequisite_identity", "deploy_live.py")
+    launched = datetime.now(timezone.utc)
+    state = tmp_path / "state"
+    state.mkdir()
+    expected = "a" * 40
+    (state / "daemon-heartbeat-price-channel-ingest.json").write_text(
+        json.dumps(
+            {
+                "git_head": expected,
+                "alive_at": launched.isoformat(),
+            }
+        )
+    )
+    monkeypatch.setattr(dl, "LIVE_REPO", str(tmp_path))
+
+    ok, detail = dl._wait_for_prerequisite_code_identity(
+        [dl.DAEMONS["price-channel-ingest"]],
+        expected_sha=expected,
+        launched_after=launched,
+        timeout_seconds=0,
+    )
+
+    assert ok is True
+    assert "verified" in detail
+
+
+def test_deploy_live_prerequisite_code_identity_rejects_stale_sha(monkeypatch, tmp_path):
+    dl = _load("deploy_live_prerequisite_identity_stale", "deploy_live.py")
+    launched = datetime.now(timezone.utc)
+    state = tmp_path / "state"
+    state.mkdir()
+    (state / "daemon-heartbeat-price-channel-ingest.json").write_text(
+        json.dumps(
+            {
+                "git_head": "b" * 40,
+                "alive_at": launched.isoformat(),
+            }
+        )
+    )
+    monkeypatch.setattr(dl, "LIVE_REPO", str(tmp_path))
+
+    ok, detail = dl._wait_for_prerequisite_code_identity(
+        [dl.DAEMONS["price-channel-ingest"]],
+        expected_sha="a" * 40,
+        launched_after=launched,
+        timeout_seconds=0,
+    )
+
+    assert ok is False
+    assert "did not verify" in detail
 
 
 def test_deploy_live_non_trading_restart_skips_preflight(monkeypatch):
@@ -1284,6 +1339,10 @@ def test_deploy_live_live_restart_runs_recovery_before_preflight(monkeypatch, ca
         calls.append(("verify", kwargs["expected_sha"][:8]))
         return True, "live runtime freshness verified"
 
+    def _prerequisite(labels, **kwargs):
+        calls.append(("prerequisite", tuple(labels)))
+        return True, "sidecar code identity verified"
+
     def _monitor(**kwargs):
         calls.append(("monitor", "post-start"))
         return True, "post-start monitor cadence verified"
@@ -1297,6 +1356,7 @@ def test_deploy_live_live_restart_runs_recovery_before_preflight(monkeypatch, ca
     monkeypatch.setattr(dl, "_run_restart_recovery_if_needed", _recovery)
     monkeypatch.setattr(dl, "_run_restart_preflight_if_needed", _preflight)
     monkeypatch.setattr(dl, "_launch_or_restart_label", _launch)
+    monkeypatch.setattr(dl, "_wait_for_prerequisite_code_identity", _prerequisite)
     monkeypatch.setattr(dl, "_wait_for_live_runtime_fresh", _verify)
     monkeypatch.setattr(dl, "_wait_for_post_start_edli_queue_progress", _queue)
     monkeypatch.setattr(dl, "_wait_for_post_start_monitor_cadence", _monitor)
@@ -1311,6 +1371,7 @@ def test_deploy_live_live_restart_runs_recovery_before_preflight(monkeypatch, ca
         *[("stop", label) for label in dl.LIVE_TRADING_PREREQUISITE_LABELS],
         ("recovery", tuple(expanded_labels)),
         *[("launch", label) for label in dl.LIVE_TRADING_PREREQUISITE_LABELS],
+        ("prerequisite", tuple(dl.LIVE_TRADING_PREREQUISITE_LABELS)),
         ("preflight", tuple(expanded_labels)),
         ("launch", dl.LIVE_TRADING_LABEL),
         ("verify", "cccccccc"),
@@ -1442,6 +1503,13 @@ def test_deploy_live_all_restarts_sidecars_before_live_preflight(monkeypatch):
     )
     monkeypatch.setattr(
         dl,
+        "_wait_for_prerequisite_code_identity",
+        lambda labels, **kwargs: (
+            calls.append(("prerequisite", tuple(labels))) or (True, "prerequisites verified")
+        ),
+    )
+    monkeypatch.setattr(
+        dl,
         "_wait_for_live_runtime_fresh",
         lambda **kwargs: (calls.append(("verify", kwargs["expected_sha"][:8])) or (True, "verified")),
     )
@@ -1463,8 +1531,14 @@ def test_deploy_live_all_restarts_sidecars_before_live_preflight(monkeypatch):
     stop_index = calls.index(("stop", dl.LIVE_TRADING_LABEL))
     recovery_index = calls.index(("recovery", tuple(dl.DAEMONS.values())))
     preflight_index = calls.index(("preflight", tuple(dl.DAEMONS.values())))
+    prerequisite_index = calls.index(
+        (
+            "prerequisite",
+            tuple(label for label in dl.DAEMONS.values() if label != dl.LIVE_TRADING_LABEL),
+        )
+    )
     assert stop_index < recovery_index
-    assert recovery_index < preflight_index
+    assert recovery_index < prerequisite_index < preflight_index
     live_launch_index = calls.index(("launch", dl.LIVE_TRADING_LABEL))
     assert live_launch_index > preflight_index
     assert calls.index(("verify", "dddddddd")) > live_launch_index
@@ -1510,6 +1584,13 @@ def test_deploy_live_preflight_failure_leaves_live_stopped(monkeypatch, capsys):
         "_launch_or_restart_label",
         lambda label: (calls.append(("launch", label)) or (True, f"bootstrapped {label}")),
     )
+    monkeypatch.setattr(
+        dl,
+        "_wait_for_prerequisite_code_identity",
+        lambda labels, **kwargs: (
+            calls.append(("prerequisite", tuple(labels))) or (True, "prerequisites verified")
+        ),
+    )
 
     rc = dl.main(["restart", "live-trading"])
 
@@ -1521,6 +1602,7 @@ def test_deploy_live_preflight_failure_leaves_live_stopped(monkeypatch, capsys):
         *[("stop", label) for label in dl.LIVE_TRADING_PREREQUISITE_LABELS],
         ("recovery", tuple(expanded_labels)),
         *[("launch", label) for label in dl.LIVE_TRADING_PREREQUISITE_LABELS],
+        ("prerequisite", tuple(dl.LIVE_TRADING_PREREQUISITE_LABELS)),
         ("preflight", tuple(expanded_labels)),
     ]
     err = capsys.readouterr().err

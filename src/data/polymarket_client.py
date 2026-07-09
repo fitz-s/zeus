@@ -1,20 +1,23 @@
 # Created: prior to 2026-04-26
-# Last reused/audited: 2026-06-04
+# Last reused/audited: 2026-07-09
 # Authority basis: docs/operations/task_2026-04-26_ultimate_plan/r3/slice_cards/Z2.yaml
 #                  + 2026-05-13 collateral_ledger singleton conn lifecycle remediation
 #                  + docs/archive/2026-Q2/task_2026-05-15_live_order_e2e_verification/LIVE_ORDER_E2E_VERIFICATION_PLAN.md
 #                  + 2026-05-17 public CLOB HTTP reuse for live opening_hunt backpressure.
 #                  + 2026-05-17 riskguard/read-only bankroll lock remediation.
+#                  + 2026-07-09 concurrent public CLOB metadata prefetch.
 """Polymarket CLOB API client. Spec §6.4.
 
 Limit orders ONLY. Auth via macOS Keychain.
 All numeric fields from API are STRINGS — always float() before use.
 """
 
+import functools as _functools
 import json
 import logging
 import os
 import sys
+import threading
 import warnings
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -192,9 +195,6 @@ def _import_keychain_resolver():
     return read_keychain
 
 
-import functools as _functools
-
-
 @_functools.lru_cache(maxsize=1)
 def _cached_keychain_creds() -> tuple[str, str]:
     """Memoize the two Keychain reads (process-stable per the drift note in _resolve_credentials).
@@ -317,6 +317,7 @@ class PolymarketClient:
         self._v2_adapter = None
         self._pending_submission_envelope = None
         self._public_http_client = None
+        self._public_http_lock = threading.Lock()
         # Optional dedicated connection-pool limits (e.g. the wider keepalive_expiry
         # of PRESUBMIT_JIT_CLOB_HTTP_LIMITS); defaults to PUBLIC_CLOB_HTTP_LIMITS.
         self._public_http_limits = public_http_limits
@@ -335,20 +336,27 @@ class PolymarketClient:
     def _public_http(self) -> httpx.Client:
         client = getattr(self, "_public_http_client", None)
         if client is None:
-            t = self._public_http_timeout
-            if isinstance(t, httpx.Timeout):
-                # Caller supplied an explicit connect/read/write/pool split.
-                timeout = t
-            elif t is not None:
-                # Use explicit connect + read split so TLS handshake is bounded.
-                timeout = httpx.Timeout(connect=t, read=t * 2, write=t, pool=t)
-            else:
-                timeout = PUBLIC_CLOB_HTTP_TIMEOUT_SECONDS
-            client = httpx.Client(
-                timeout=timeout,
-                limits=self._public_http_limits or PUBLIC_CLOB_HTTP_LIMITS,
-            )
-            self._public_http_client = client
+            lock = getattr(self, "_public_http_lock", None)
+            if lock is None:
+                lock = threading.Lock()
+                self._public_http_lock = lock
+            with lock:
+                client = getattr(self, "_public_http_client", None)
+                if client is None:
+                    t = self._public_http_timeout
+                    if isinstance(t, httpx.Timeout):
+                        # Caller supplied an explicit connect/read/write/pool split.
+                        timeout = t
+                    elif t is not None:
+                        # Use explicit connect + read split so TLS handshake is bounded.
+                        timeout = httpx.Timeout(connect=t, read=t * 2, write=t, pool=t)
+                    else:
+                        timeout = PUBLIC_CLOB_HTTP_TIMEOUT_SECONDS
+                    client = httpx.Client(
+                        timeout=timeout,
+                        limits=self._public_http_limits or PUBLIC_CLOB_HTTP_LIMITS,
+                    )
+                    self._public_http_client = client
         return client
 
     def warm_public_connection(self, *, timeout: "httpx.Timeout | float | None" = None) -> bool:

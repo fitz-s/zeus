@@ -1,8 +1,6 @@
 # Created: 2026-06-14
-# Last reused or audited: 2026-06-15 (vectorized robust-ΔU stake sweep: precompute the
-#   stake-independent effective-π matrix once + single matmul reduction over band draws;
-#   numerically identical to the per-draw _delta_u_at_stake sum, ~1400x faster — fixes the
-#   live reactor cycle hang that blew the 45s budget to ~660s and starved snapshot freshness)
+# Last reused or audited: 2026-07-09 (qkernel sizing hot path: one cost walk per stake,
+#   batched grid quantiles, cached all-ruin quantile, and exact wealth/payoff grouping)
 # Authority basis: docs/rebuild/consult_build_spec.md
 #   ("Create src/decision/payoff_vector.py" block lines 734-802: CandidateRoute
 #   738-746 [candidate_id, instrument, route_cost, payoff_vector, side, bin_id];
@@ -150,7 +148,7 @@ from src.strategy.utility_ranker import (
     OUTSIDE_OUTCOME,
     FamilyPayoffMatrix,
     PortfolioExposureVector,
-    _delta_u_at_stake,
+    _candidate_wins,
     effective_outcome_pi,
 )
 
@@ -503,15 +501,24 @@ class _PreparedSizing:
     family expired before it could fill).
 
     This precomputes, ONCE per candidate, the (n_draws × n_outcomes) effective-π matrix
-    ``Pi`` and the per-outcome existing wealth ``A``. Each stake evaluation then costs one
-    per-outcome growth vector ``g(s)`` (``n_outcomes`` ``matrix.payoff`` walks) plus a
-    single ``Pi @ g`` matmul and one quantile — the draw loop is gone. Because ΔU is LINEAR
-    in π, the matmul is numerically identical to the per-draw ``_delta_u_at_stake`` sum: the
-    SAME effective_outcome_pi, the SAME Decimal-wealth ruin rule, the SAME alpha-quantile.
+    ``Pi`` and the per-outcome existing wealth ``A``. Each stake evaluation walks the
+    candidate's executable cost curve once, builds the full growth vector ``g(s)``, then
+    performs one ``Pi @ g`` matmul and one quantile. Because ΔU is LINEAR in π, the matmul
+    is numerically identical to the per-draw ``_delta_u_at_stake`` sum: the SAME
+    effective_outcome_pi, the SAME Decimal-wealth ruin rule, the SAME alpha-quantile.
     It is a pure speedup, NOT a cap/haircut/behavior change.
     """
 
-    __slots__ = ("candidate", "matrix", "alpha", "outcomes", "_A", "_Pi")
+    __slots__ = (
+        "candidate",
+        "matrix",
+        "alpha",
+        "outcomes",
+        "_A",
+        "_Pi",
+        "_all_ruin_q",
+        "_wealth_groups",
+    )
 
     def __init__(
         self,
@@ -533,6 +540,24 @@ class _PreparedSizing:
         # Existing wealth A_y per outcome (Decimal — the ruin check and the log are taken
         # exactly as utility_ranker._delta_u_at_stake does, on Decimal wealth).
         self._A = [exposure.a(y) for y in outcomes]
+        groups: dict[Decimal, list[int]] = {}
+        for j, wealth in enumerate(self._A):
+            groups.setdefault(wealth, []).append(j)
+        self._wealth_groups = tuple(
+            (
+                wealth,
+                math.log(float(wealth)),
+                np.asarray(
+                    [j for j in indexes if _candidate_wins(candidate, outcomes[j])],
+                    dtype=np.intp,
+                ),
+                np.asarray(
+                    [j for j in indexes if not _candidate_wins(candidate, outcomes[j])],
+                    dtype=np.intp,
+                ),
+            )
+            for wealth, indexes in groups.items()
+        )
         # Stake-INDEPENDENT effective-π matrix: Pi[k, j] = effective_outcome_pi(draw_k)[j].
         samples = np.asarray(band.samples, dtype=float)
         n_draws = samples.shape[0]
@@ -550,38 +575,93 @@ class _PreparedSizing:
             for j, y in enumerate(outcomes):
                 Pi[k, j] = float(eff_pi.get(y, 0.0))
         self._Pi = Pi
+        self._all_ruin_q: float | None = None
 
     def robust_at(self, stake_usd: Decimal) -> float:
         """The alpha-quantile of ΔU across all band draws at ``stake_usd`` (vectorized)."""
-        outcomes = self.outcomes
-        A = self._A
-        g = np.zeros(len(outcomes), dtype=float)
-        ruin = np.zeros(len(outcomes), dtype=bool)
-        for j, y in enumerate(outcomes):
-            a = A[j]
-            try:
-                r = self.matrix.payoff(self.candidate, y, stake_usd)
-            except (ValueError, ArithmeticError):
-                # Infeasible stake at this outcome (depth / min order / off-grid): any draw
-                # placing mass here is -inf — exactly _delta_u_at_stake's except branch.
-                ruin[j] = True
-                continue
-            new_wealth = a + r
-            if new_wealth <= Decimal("0"):
-                # Ruin on this outcome -> log undefined -> -inf for any draw with mass here.
-                ruin[j] = True
-                continue
-            g[j] = math.log(float(new_wealth)) - math.log(float(a))
-        # ΔU per draw = Σ_y π_y · g_y  (LINEAR in π -> one matmul over ALL draws at once).
+        growth = self._growth_at(stake_usd)
+        if growth is None:
+            return float("-inf")
+        g, ruin = growth
         du = self._Pi @ g
         if ruin.any():
-            # A draw with POSITIVE mass on ANY ruin outcome is -inf. This matches the
-            # per-draw `if p <= 0: continue` skip: an outcome with zero draw-mass never
-            # triggers the ruin -inf for that draw.
             bad = (self._Pi[:, ruin] > 0.0).any(axis=1)
             if bad.any():
                 du = np.where(bad, -np.inf, du)
         return float(np.quantile(du, self.alpha))
+
+    def robust_many(self, stakes_usd: Sequence[Decimal]) -> np.ndarray:
+        """Robust ΔU for one stake grid using one batched quantile call."""
+        stakes = tuple(stakes_usd)
+        if not stakes:
+            return np.empty(0, dtype=float)
+
+        n_outcomes = len(self.outcomes)
+        ruin = np.zeros((n_outcomes, len(stakes)), dtype=bool)
+        invalid = np.zeros(len(stakes), dtype=bool)
+        du = np.empty((self._Pi.shape[0], len(stakes)), dtype=float)
+        for column, stake in enumerate(stakes):
+            result = self._growth_at(stake)
+            if result is None:
+                invalid[column] = True
+                du[:, column] = -np.inf
+                continue
+            g, ruin[:, column] = result
+            # Keep the original contiguous GEMV reduction order bit-identical to
+            # robust_at; only the quantile reduction is batched across columns.
+            du[:, column] = self._Pi @ g
+
+        ruin_columns = ruin.any(axis=0)
+        affected = np.zeros(len(stakes), dtype=bool)
+        all_ruin = np.zeros(len(stakes), dtype=bool)
+        for column in np.flatnonzero(ruin_columns & ~invalid):
+            bad = (self._Pi[:, ruin[:, column]] > 0.0).any(axis=1)
+            if bad.any():
+                affected[column] = True
+                du[bad, column] = -np.inf
+                all_ruin[column] = bad.all()
+
+        values = np.empty(len(stakes), dtype=float)
+        values[invalid] = -np.inf
+        if all_ruin.any():
+            if self._all_ruin_q is None:
+                self._all_ruin_q = float(
+                    np.quantile(
+                        np.full(self._Pi.shape[0], -np.inf, dtype=float),
+                        self.alpha,
+                    )
+                )
+            values[all_ruin] = self._all_ruin_q
+        scalar_columns = affected & ~all_ruin
+        batch_columns = ~(invalid | affected)
+        if batch_columns.any():
+            values[batch_columns] = np.quantile(
+                du[:, batch_columns], self.alpha, axis=0
+            )
+        for column in np.flatnonzero(scalar_columns):
+            values[column] = np.quantile(du[:, column], self.alpha)
+        return values
+
+    def _growth_at(self, stake_usd: Decimal) -> tuple[np.ndarray, np.ndarray] | None:
+        g = np.zeros(len(self.outcomes), dtype=float)
+        ruin = np.zeros(len(self.outcomes), dtype=bool)
+        try:
+            win_profit, loss = self.matrix.payoff_terms(self.candidate, stake_usd)
+        except (ValueError, ArithmeticError):
+            return None
+        for wealth, log_wealth, win_indexes, loss_indexes in self._wealth_groups:
+            for payoff, indexes in (
+                (win_profit, win_indexes),
+                (loss, loss_indexes),
+            ):
+                if indexes.size == 0:
+                    continue
+                new_wealth = wealth + payoff
+                if new_wealth <= Decimal("0"):
+                    ruin[indexes] = True
+                else:
+                    g[indexes] = math.log(float(new_wealth)) - log_wealth
+        return g, ruin
 
 
 def robust_delta_u(
@@ -726,15 +806,12 @@ def optimize_vector_stake(
         guarded_payoff_q_lcb=guarded_payoff_q_lcb,
     )
 
-    def _ru(stake: Decimal) -> float:
-        return prepared.robust_at(stake)
-
     # import BEFORE first use: the delta_u_at_min NaN guard below references _math, so a
     # later `import math as _math` made _math a function-local that was unbound here ->
     # UnboundLocalError -> SPINE_WIRING_FAULT -> every spine decision crashed (no crosses).
     import math as _math
 
-    delta_u_at_min = _ru(lo)
+    delta_u_at_min = prepared.robust_at(lo)
     if not _math.isfinite(delta_u_at_min):
         delta_u_at_min = 0.0
 
@@ -748,14 +825,18 @@ def optimize_vector_stake(
             break
         step = width / Decimal(steps)
         s = span_lo
+        stakes = []
+        for _ in range(steps + 1):
+            stakes.append(s)
+            s += step
+        values = prepared.robust_many(stakes)
         pass_best_u = float("-inf")
         pass_best_s = span_lo
-        for _ in range(steps + 1):
-            u = _ru(s)
+        for s, value in zip(stakes, values, strict=True):
+            u = float(value)
             if u > pass_best_u:
                 pass_best_u = u
                 pass_best_s = s
-            s += step
         if pass_best_u > best_u:
             best_u = pass_best_u
             best_s = pass_best_s
