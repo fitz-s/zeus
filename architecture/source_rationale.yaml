@@ -3001,16 +3001,23 @@ files:
   src/ingest/price_channel_ingest.py:
     zone: K2_runtime
     authority_role: price_channel_fact_producer_lane
-    why: P3 live price/user channel ingest lane; owns CLOB/user-channel WS lifecycle, durable fill bridge scan, and execution_feasibility_evidence production outside the order daemon. Market-channel snapshot invalidation/refresh now uses the unified trade write coordinator.
+    why: P3 live price/user channel ingest lane; owns CLOB/user-channel WS lifecycle, durable fill bridge scan, and execution_feasibility_evidence production outside the order daemon. Market-channel snapshot invalidation/refresh now uses the unified trade write coordinator. R6 split 2026-07-08 — the re-decision-routing decision (WHICH families a book move re-solves) was extracted to src/events/price_channel_redecision_router.py; this module only wires that router's sink in as an injected market_event_sink dependency, it owns no routing decision itself (EXECUTION_MASTER §E R6 defect #4).
     downstream:
     - src/ingest/price_channel_daemon.py
     - src/main.py
+    - src/events/price_channel_redecision_router.py
   src/ingest/price_channel_daemon.py:
     zone: K2_runtime
     authority_role: price_channel_ingest_daemon
     why: Launchable daemon boundary for P3 price/user channel ingest so venue feed failures cannot poison the order daemon process latch.
     downstream:
     - deploy/launchd/com.zeus.price-channel-ingest.plist
+  src/events/price_channel_redecision_router.py:
+    zone: K2_runtime
+    authority_role: edli_price_channel_redecision_router
+    why: R6 split 2026-07-08 of src/ingest/price_channel_ingest.py's re-decision-routing concern (EXECUTION_MASTER §E R6 defect #4, venue does not decide who re-solves). Resolves quote-changed venue tokens to money-path city/target_date/temperature_metric families and emits EDLI_REDECISION_PENDING for exactly the held/resting/screened-entry buckets that clear the live continuous-entry screen. The venue-fact boundary (price_channel_ingest.py) only wires this module's sink in as an injected market_event_sink dependency, it never inlines the decision itself.
+    downstream:
+    - src/ingest/price_channel_ingest.py
   src/execution/post_trade_capital.py:
     zone: K2_runtime
     authority_role: post_trade_capital_lifecycle_lane
