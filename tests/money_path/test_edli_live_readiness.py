@@ -1924,7 +1924,14 @@ def test_actionable_payload_persists_live_authority_provenance():
     from src.engine import event_reactor_adapter as adapter
 
     event = _forecast_event()
-    receipt = _accepted_receipt(event)
+    receipt = replace(
+        _accepted_receipt(event),
+        q_lcb_calibration_source="FORECAST_BOOTSTRAP",
+        same_bin_yes_posterior=0.1348,
+        settlement_coverage_status="INSUFFICIENT_DATA",
+        posterior_id=25946,
+        probability_authority="replacement_0_1",
+    )
     live_cap = SimpleNamespace(
         payload={
             "usage_id": "usage-1",
@@ -1936,6 +1943,11 @@ def test_actionable_payload_persists_live_authority_provenance():
     payload = adapter._actionable_payload_from_receipt(receipt, live_cap, event=event)
 
     assert payload["q_source"] == "emos"
+    assert payload["q_lcb_calibration_source"] == "FORECAST_BOOTSTRAP"
+    assert payload["same_bin_yes_posterior"] == pytest.approx(0.1348)
+    assert payload["settlement_coverage_status"] == "INSUFFICIENT_DATA"
+    assert payload["posterior_id"] == 25946
+    assert payload["probability_authority"] == "replacement_0_1"
     assert payload["opportunity_book"] == receipt.opportunity_book
     assert payload["strategy_key"] == "center_buy"
 
@@ -4911,6 +4923,11 @@ def test_pre_submit_payload_carries_receipt_economics_from_final_intent():
             "size": 10.0,
             "q_live": 0.62,
             "q_lcb_5pct": 0.58,
+            "q_lcb_calibration_source": "FORECAST_BOOTSTRAP",
+            "same_bin_yes_posterior": 0.1348,
+            "settlement_coverage_status": "INSUFFICIENT_DATA",
+            "posterior_id": 25946,
+            "probability_authority": "replacement_0_1",
             "trade_score": 0.08,
             "action_score": 0.07,
             "min_expected_profit_usd": 0.05,
@@ -4956,6 +4973,11 @@ def test_pre_submit_payload_carries_receipt_economics_from_final_intent():
 
     assert payload["q_live"] == pytest.approx(0.62)
     assert payload["q_lcb_5pct"] == pytest.approx(0.58)
+    assert payload["q_lcb_calibration_source"] == "FORECAST_BOOTSTRAP"
+    assert payload["same_bin_yes_posterior"] == pytest.approx(0.1348)
+    assert payload["settlement_coverage_status"] == "INSUFFICIENT_DATA"
+    assert payload["posterior_id"] == 25946
+    assert payload["probability_authority"] == "replacement_0_1"
     assert payload["expected_edge"] == pytest.approx(0.08)
     assert payload["size"] == pytest.approx(10.0)
     assert payload["min_expected_profit_usd"] == pytest.approx(0.05)
