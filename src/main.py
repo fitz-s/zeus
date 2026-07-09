@@ -7485,6 +7485,8 @@ def _edli_refresh_continuous_money_path_families(
         receipt = _edli_wait_for_substrate_priority_receipt(
             request_id=request_id,
             now_utc=now_utc,
+            families=clean_families,
+            condition_ids=priority_conditions,
         )
         if isinstance(receipt, dict):
             receipt_summary = dict(receipt.get("summary") or {})
@@ -7493,8 +7495,10 @@ def _edli_refresh_continuous_money_path_families(
                 "families_requested": len(clean_families),
                 "priority_condition_count": len(priority_conditions),
                 "priority_request_id": request_id,
+                "priority_receipt_request_id": str(receipt.get("request_id") or ""),
                 "priority_receipt_serviced_at": str(receipt.get("serviced_at") or ""),
                 "priority_receipt_matched": True,
+                "priority_receipt_match_mode": str(receipt.get("_match_mode") or "request_id"),
             }
         return {
             "status": "priority_marked",
@@ -7530,10 +7534,57 @@ def _edli_redecision_confirm_receipt_poll_seconds() -> float:
     return max(0.05, min(value, 2.0))
 
 
+def _edli_priority_receipt_family_set(raw_families: Iterable[object] | None):
+    out: set[tuple[str, str, str]] = set()
+    for raw in raw_families or ():
+        if not isinstance(raw, (list, tuple)) or len(raw) != 3:
+            continue
+        family = tuple(str(part or "").strip() for part in raw)
+        if all(family) and family[2] in {"high", "low"}:
+            out.add(family)  # type: ignore[arg-type]
+    return out
+
+
+def _edli_priority_receipt_condition_set(raw_condition_ids: Iterable[object] | None):
+    return {
+        str(condition_id or "").strip()
+        for condition_id in (raw_condition_ids or ())
+        if str(condition_id or "").strip()
+    }
+
+
+def _edli_priority_receipt_covers_request_scope(
+    receipt: dict,
+    *,
+    families: Iterable[tuple[str, str, str]],
+    condition_ids: Iterable[str],
+    serviced_after: datetime,
+) -> bool:
+    try:
+        serviced_at = datetime.fromisoformat(str(receipt.get("serviced_at") or ""))
+    except (TypeError, ValueError):
+        return False
+    if serviced_at.tzinfo is None:
+        serviced_at = serviced_at.replace(tzinfo=timezone.utc)
+    if serviced_at.astimezone(timezone.utc) < serviced_after.astimezone(timezone.utc):
+        return False
+    requested_families = _edli_priority_receipt_family_set(families)
+    requested_conditions = _edli_priority_receipt_condition_set(condition_ids)
+    receipt_families = _edli_priority_receipt_family_set(receipt.get("families") or [])
+    receipt_conditions = _edli_priority_receipt_condition_set(receipt.get("condition_ids") or [])
+    if requested_families and not requested_families.issubset(receipt_families):
+        return False
+    if requested_conditions and not requested_conditions.issubset(receipt_conditions):
+        return False
+    return bool(requested_families or requested_conditions)
+
+
 def _edli_wait_for_substrate_priority_receipt(
     *,
     request_id: str,
     now_utc: datetime,
+    families: Iterable[tuple[str, str, str]] | None = None,
+    condition_ids: Iterable[str] | None = None,
 ) -> dict | None:
     request_id = str(request_id or "").strip()
     wait_s = _edli_redecision_confirm_receipt_wait_seconds()
@@ -7552,7 +7603,23 @@ def _edli_wait_for_substrate_priority_receipt(
             max_age_seconds=max_age_s,
         )
         if isinstance(receipt, dict):
-            return receipt
+            out = dict(receipt)
+            out["_match_mode"] = "request_id"
+            return out
+        superseding_receipt = money_path_substrate_priority_receipt(
+            request_id=None,
+            now=current,
+            max_age_seconds=max_age_s,
+        )
+        if isinstance(superseding_receipt, dict) and _edli_priority_receipt_covers_request_scope(
+            superseding_receipt,
+            families=families or (),
+            condition_ids=condition_ids or (),
+            serviced_after=now_utc,
+        ):
+            out = dict(superseding_receipt)
+            out["_match_mode"] = "scope_superset"
+            return out
         remaining = deadline - time.monotonic()
         if remaining <= 0.0:
             logger.info(
