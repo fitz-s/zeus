@@ -10409,6 +10409,7 @@ def refresh_strategy_health(
     conn: sqlite3.Connection | None,
     *,
     as_of: str | None = None,
+    position_view: dict | None = None,
 ) -> dict:
     if conn is None:
         return {
@@ -10449,7 +10450,8 @@ def refresh_strategy_health(
             ],
         }
 
-    position_view = query_position_current_status_view(conn)
+    if position_view is None:
+        position_view = query_position_current_status_view(conn)
     position_metrics: dict[str, dict[str, float]] = {}
     omitted_noncanonical_strategy_counts = {
         "position_current": 0,
