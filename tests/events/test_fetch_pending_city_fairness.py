@@ -1,5 +1,5 @@
 # Created: 2026-06-11
-# Last reused or audited: 2026-06-11
+# Last reused or audited: 2026-07-08
 # Authority basis: operator directive 2026-06-11 ~15:40Z — reactor throughput/fairness
 #   incident. 50 cities had fresh posteriors + live markets + pending FORECAST_SNAPSHOT_READY
 #   decision events, but with a bounded per-cycle decision budget (K) and a STRICTLY
@@ -242,6 +242,28 @@ def _insert_recapture_edge_reversed_regret(
             created_at,
         ),
     )
+
+
+def test_recapture_edge_backoff_query_uses_recent_window_index():
+    conn = _world_conn()
+
+    plan = "\n".join(
+        str(row[3])
+        for row in conn.execute(
+            """
+            EXPLAIN QUERY PLAN
+            SELECT city, target_date, metric
+              FROM no_trade_regret_events
+             WHERE created_at >= ?
+               AND rejection_reason LIKE ?
+               AND COALESCE(executable_snapshot_id, '') <> ''
+            """,
+            ("2026-06-11T11:50:00+00:00", "SUBMIT_ABORTED_EDGE_REVERSED%"),
+        ).fetchall()
+    )
+
+    assert "idx_no_trade_regret_created_at" in plan
+    assert "SCAN no_trade_regret_events" not in plan
 
 
 def test_every_city_reached_within_ceil_n_over_k_cycles():
