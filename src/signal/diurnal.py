@@ -7,6 +7,7 @@ Replaces hardcoded `historical_peak_hour = 15.0` with per-city×season values.
 import logging
 import re
 from datetime import date, datetime, time, timezone
+import math
 from typing import Optional
 from zoneinfo import ZoneInfo
 
@@ -61,11 +62,25 @@ def get_solar_day(city_name: str, target_date: date) -> SolarDay | None:
         return None
 
 
-def _apply_solar_bounds(confidence: float, current_local_hour: int, solar_day: SolarDay | None) -> float:
+def _solar_eval_hour(current_local_hour: int | float) -> float:
+    """Return the local hour used for solar phase checks.
+
+    Integer callers historically meant an hourly bucket, so evaluate them at
+    the bucket midpoint for compatibility. Fractional callers already carry
+    minute-level runtime truth and must not be rounded to the next bucket.
+    """
+
+    hour = float(current_local_hour)
+    if isinstance(current_local_hour, int):
+        return hour + 0.5
+    return hour
+
+
+def _apply_solar_bounds(confidence: float, current_local_hour: int | float, solar_day: SolarDay | None) -> float:
     """Constrain confidence with hard daylight facts when solar data exists."""
     if solar_day is None:
         return confidence
-    current = current_local_hour + 0.5
+    current = _solar_eval_hour(current_local_hour)
     if solar_day.is_before_sunrise(current):
         return min(confidence, 0.05)
     if solar_day.is_after_sunset(current):
@@ -74,7 +89,7 @@ def _apply_solar_bounds(confidence: float, current_local_hour: int, solar_day: S
 
 
 def _solar_heuristic_confidence(
-    current_local_hour: int,
+    current_local_hour: int | float,
     peak_hour: int,
     solar_day: SolarDay | None,
 ) -> float | None:
@@ -88,7 +103,7 @@ def _solar_heuristic_confidence(
     if daylight <= 1.0:
         return None
 
-    current = current_local_hour + 0.5
+    current = _solar_eval_hour(current_local_hour)
     if current < sunrise_hour:
         return 0.0
     if current >= sunset_hour:
@@ -104,7 +119,7 @@ def _solar_heuristic_confidence(
 
 
 def _solar_only_post_peak_confidence(
-    current_local_hour: int,
+    current_local_hour: int | float,
     solar_day: SolarDay | None,
 ) -> float | None:
     if solar_day is None:
@@ -112,8 +127,131 @@ def _solar_only_post_peak_confidence(
     return _apply_solar_bounds(0.0, current_local_hour, solar_day)
 
 
+def _row_value(row, key: str):
+    if isinstance(row, dict):
+        return row.get(key)
+    try:
+        return row[key]
+    except (KeyError, TypeError, IndexError):
+        return None
+
+
+def _lookup_hourly_confidence(conn, query: str, params_prefix: tuple, hour: int) -> float | None:
+    row = conn.execute(query, (*params_prefix, hour)).fetchone()
+    if row is None:
+        return None
+    value = _row_value(row, "p_high_set")
+    if value is None:
+        return None
+    try:
+        confidence = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(confidence):
+        return None
+    return min(1.0, max(0.0, confidence))
+
+
+def _interpolate_hourly_confidence(
+    *,
+    lower_hour: int,
+    lower_confidence: float | None,
+    upper_hour: int,
+    upper_confidence: float | None,
+    current_local_hour: int | float,
+) -> float | None:
+    """Linearly interpolate hourly empirical confidence within the hour.
+
+    Runtime Day0 contexts carry fractional local time. Without interpolation,
+    the monitor can jump from one hourly cell to the next without any new
+    observation, which makes post-peak probability changes look like new
+    market evidence rather than wall-clock evidence.
+    """
+
+    if lower_confidence is None and upper_confidence is None:
+        return None
+    if lower_confidence is None:
+        return upper_confidence
+    if upper_confidence is None or upper_hour <= lower_hour:
+        return lower_confidence
+    hour = float(current_local_hour)
+    weight = min(1.0, max(0.0, (hour - lower_hour) / (upper_hour - lower_hour)))
+    return lower_confidence + (upper_confidence - lower_confidence) * weight
+
+
+def _lookup_interpolated_monthly_confidence(
+    conn,
+    *,
+    city_name: str,
+    month: int,
+    current_local_hour: int | float,
+) -> float | None:
+    hour = float(current_local_hour)
+    lower_hour = int(math.floor(hour))
+    upper_hour = int(math.ceil(hour))
+    query = (
+        "SELECT p_high_set FROM diurnal_peak_prob "
+        "WHERE city = ? AND month = ? AND hour = ?"
+    )
+    lower = _lookup_hourly_confidence(conn, query, (city_name, month), lower_hour)
+    upper = lower if upper_hour == lower_hour else _lookup_hourly_confidence(
+        conn, query, (city_name, month), upper_hour
+    )
+    return _interpolate_hourly_confidence(
+        lower_hour=lower_hour,
+        lower_confidence=lower,
+        upper_hour=upper_hour,
+        upper_confidence=upper,
+        current_local_hour=current_local_hour,
+    )
+
+
+def _interpolated_seasonal_confidence(
+    season_rows,
+    current_local_hour: int | float,
+) -> float | None:
+    hour = float(current_local_hour)
+    values: list[tuple[int, float]] = []
+    for row in season_rows:
+        raw_hour = _row_value(row, "hour")
+        raw_confidence = _row_value(row, "p_high_set")
+        if raw_hour is None or raw_confidence is None:
+            continue
+        try:
+            row_hour = int(raw_hour)
+            confidence = float(raw_confidence)
+        except (TypeError, ValueError):
+            continue
+        if not math.isfinite(confidence):
+            continue
+        values.append((row_hour, min(1.0, max(0.0, confidence))))
+    if not values:
+        return None
+    values.sort(key=lambda item: item[0])
+    lower_hour = int(math.floor(hour))
+    upper_hour = int(math.ceil(hour))
+    by_hour = {row_hour: confidence for row_hour, confidence in values}
+    lower = by_hour.get(lower_hour)
+    upper = by_hour.get(upper_hour)
+    if lower is None:
+        lower_candidates = [item for item in values if item[0] <= hour]
+        lower = lower_candidates[-1][1] if lower_candidates else None
+        lower_hour = lower_candidates[-1][0] if lower_candidates else lower_hour
+    if upper is None:
+        upper_candidates = [item for item in values if item[0] >= hour]
+        upper = upper_candidates[0][1] if upper_candidates else None
+        upper_hour = upper_candidates[0][0] if upper_candidates else upper_hour
+    return _interpolate_hourly_confidence(
+        lower_hour=lower_hour,
+        lower_confidence=lower,
+        upper_hour=upper_hour,
+        upper_confidence=upper,
+        current_local_hour=current_local_hour,
+    )
+
+
 def get_peak_hour_context(
-    city_name: str, target_date: date, current_local_hour: int
+    city_name: str, target_date: date, current_local_hour: int | float
 ) -> tuple[Optional[int], float, str]:
     """Single source of truth for peak hour.
     Returns: (peak_hour, confidence, fallback_reason)
@@ -165,20 +303,26 @@ def get_peak_hour_context(
         peak_hour = int(peak_row["hour"])
 
         # 1. Monthly lookup
-        monthly_row = conn.execute(
-            "SELECT p_high_set FROM diurnal_peak_prob WHERE city = ? AND month = ? AND hour = ?",
-            (city_name, month, current_local_hour),
-        ).fetchone()
+        monthly_confidence = _lookup_interpolated_monthly_confidence(
+            conn,
+            city_name=city_name,
+            month=month,
+            current_local_hour=current_local_hour,
+        )
         conn.close()
 
-        if monthly_row and monthly_row["p_high_set"] is not None:
-            conf = _apply_solar_bounds(float(monthly_row["p_high_set"]), current_local_hour, solar_day)
+        if monthly_confidence is not None:
+            conf = _apply_solar_bounds(monthly_confidence, current_local_hour, solar_day)
             return peak_hour, conf, "monthly_empirical"
 
         # 2. Seasonal fallback
-        current_row = next((r for r in season_rows if r["hour"] == current_local_hour), None)
-        if current_row and current_row["p_high_set"] is not None:
-            conf = _apply_solar_bounds(float(current_row["p_high_set"]), current_local_hour, solar_day)
+        seasonal_confidence = _interpolated_seasonal_confidence(
+            season_rows,
+            current_local_hour,
+        )
+        current_row = next((r for r in season_rows if r["hour"] == int(math.floor(float(current_local_hour)))), None)
+        if seasonal_confidence is not None:
+            conf = _apply_solar_bounds(seasonal_confidence, current_local_hour, solar_day)
             return peak_hour, conf, "seasonal_empirical"
 
         # 3. Solar-aware heuristic fallback
@@ -211,7 +355,7 @@ def get_peak_hour_context(
 def post_peak_confidence(
     city_name: str,
     target_date: date,
-    current_local_hour: int,
+    current_local_hour: int | float,
 ) -> float:
     """Empirical P(daily high already set | city, month, hour).
 
@@ -236,13 +380,15 @@ def post_peak_confidence(
         conn = get_world_connection()
 
         # 1. Monthly lookup
-        monthly_row = conn.execute(
-            "SELECT p_high_set FROM diurnal_peak_prob WHERE city = ? AND month = ? AND hour = ?",
-            (city_name, month, current_local_hour),
-        ).fetchone()
-        if monthly_row and monthly_row["p_high_set"] is not None:
+        monthly_confidence = _lookup_interpolated_monthly_confidence(
+            conn,
+            city_name=city_name,
+            month=month,
+            current_local_hour=current_local_hour,
+        )
+        if monthly_confidence is not None:
             conn.close()
-            return _apply_solar_bounds(float(monthly_row["p_high_set"]), current_local_hour, solar_day)
+            return _apply_solar_bounds(monthly_confidence, current_local_hour, solar_day)
 
         # 2. Seasonal fallback
         season_rows = conn.execute(
@@ -256,9 +402,13 @@ def post_peak_confidence(
             solar_conf = _solar_only_post_peak_confidence(current_local_hour, solar_day)
             return solar_conf if solar_conf is not None else 0.0
 
-        current_row = next((r for r in season_rows if r["hour"] == current_local_hour), None)
-        if current_row and current_row["p_high_set"] is not None:
-            return _apply_solar_bounds(float(current_row["p_high_set"]), current_local_hour, solar_day)
+        seasonal_confidence = _interpolated_seasonal_confidence(
+            season_rows,
+            current_local_hour,
+        )
+        current_row = next((r for r in season_rows if r["hour"] == int(math.floor(float(current_local_hour)))), None)
+        if seasonal_confidence is not None:
+            return _apply_solar_bounds(seasonal_confidence, current_local_hour, solar_day)
 
         # 3. Solar-aware heuristic fallback
         peak_row = max(season_rows, key=lambda r: r["avg_temp"])
@@ -480,7 +630,7 @@ def build_day0_temporal_context(
         return None
 
     local_hour = observation_instant.local_hour_fraction
-    peak_hour, confidence, reason = get_peak_hour_context(city_name, target_date, int(local_hour))
+    peak_hour, confidence, reason = get_peak_hour_context(city_name, target_date, local_hour)
     daylight_progress = solar_day.daylight_progress(local_hour)
     return Day0TemporalContext(
         city=city_name,

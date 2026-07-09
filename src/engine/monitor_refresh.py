@@ -2727,6 +2727,15 @@ def _refresh_day0_observation(
         ]
     member_extrema_for_metric = extrema.mins if temperature_metric.is_low() else extrema.maxes
     observed_extreme_for_metric = observed_low_so_far if temperature_metric.is_low() else observed_high_so_far
+    _maybe_write_day0_metric_fact(
+        position=position,
+        city=city,
+        target_d=target_d,
+        temperature_metric=temperature_metric,
+        obs=obs,
+        current_temp=current_temp,
+        observed_extreme_for_metric=observed_extreme_for_metric,
+    )
     maturity_rejection = _day0_extreme_authority_rejection_reason(
         temperature_metric=temperature_metric,
         temporal_context=temporal_context,
@@ -3159,6 +3168,61 @@ def _maybe_write_day0_nowcast(
             market_slug or getattr(position, "market_slug", "?"),
             exc,
             exc_info=True,
+        )
+
+
+def _maybe_write_day0_metric_fact(
+    *,
+    position: "Position",
+    city: object,
+    target_d: "date",
+    temperature_metric: "MetricIdentity",
+    obs: object,
+    current_temp: float | None,
+    observed_extreme_for_metric: float | None,
+) -> None:
+    """Persist the Day0 monitor observation fact to the world-owned audit table.
+
+    This is deliberately fail-soft and authority-neutral: exit decisions still
+    come from the monitor/hard-fact logic above; this write only makes the
+    observed fact chain durable for audit and health checks.
+    """
+    observation_time = _day0_observation_field(obs, "observation_time")
+    source = str(_day0_observation_field(obs, "source", "") or "").strip()
+    if not observation_time or not source:
+        return
+    try:
+        from src.state.day0_metric_fact_store import write_day0_metric_fact
+
+        fact_id = write_day0_metric_fact(
+            city=str(getattr(city, "name", "") or getattr(position, "city", "") or ""),
+            target_date=target_d.isoformat(),
+            temperature_metric=temperature_metric.temperature_metric,
+            source=source,
+            utc_timestamp=observation_time,
+            local_timezone=str(getattr(city, "timezone", "") or ""),
+            local_timestamp=_day0_observation_field(obs, "local_timestamp"),
+            temp_current=current_temp,
+            running_extreme=observed_extreme_for_metric,
+        )
+        logger.debug(
+            "Day0 metric fact write OK: position=%s fact_id=%s source=%s observation_time=%s",
+            getattr(position, "trade_id", "?"),
+            fact_id,
+            source,
+            observation_time,
+        )
+    except Exception as exc:  # noqa: BLE001 - monitor/exit decisions must continue
+        logger.warning(
+            "MONITOR_DAY0_METRIC_FACT_WRITE_FAILED position=%s city=%s target_date=%s "
+            "metric=%s source=%s observation_time=%s exc=%s",
+            getattr(position, "trade_id", "?"),
+            getattr(city, "name", getattr(position, "city", "?")),
+            target_d.isoformat(),
+            getattr(temperature_metric, "temperature_metric", temperature_metric),
+            source or "?",
+            observation_time,
+            exc,
         )
 
 

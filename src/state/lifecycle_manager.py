@@ -62,6 +62,10 @@ LEGAL_LIFECYCLE_FOLDS: dict[LifecyclePhase | None, frozenset[LifecyclePhase]] = 
             LifecyclePhase.DAY0_WINDOW,
             LifecyclePhase.ECONOMICALLY_CLOSED,
             LifecyclePhase.SETTLED,
+            # A quarantined row may temporarily enter pending_exit when real
+            # inventory needs an exit attempt. If no sell order is actually
+            # posted, recovery must be able to restore the review state.
+            LifecyclePhase.QUARANTINED,
             LifecyclePhase.ADMIN_CLOSED,
             LifecyclePhase.VOIDED,
         }

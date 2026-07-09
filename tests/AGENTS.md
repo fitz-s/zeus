@@ -65,6 +65,7 @@ authoritative machine registry is `architecture/test_topology.yaml`.
 | `test_no_synthetic_provenance_marker.py` | Relapse antibody: blocks re-introduction of synthetic provenance markers per critic findings #6A/E (created 2026-04-28) |
 | `test_observations_k1_migration.py` | Antibody for Invariant C: observations schema migrated to K1 dual-atom shape (created 2026-05-01) |
 | `test_opendata_writes_v2_table.py` | Antibody for Invariant A: Open Data ENS rows land in ensemble_snapshots with canonical data_versions (created 2026-05-01) |
+| `test_repair_active_entry_q_versions.py` | Active ENTRY q_version repair antibody: dry-run reconstructs from FinalIntentCertificate evidence, apply writes only missing q_version, ambiguity refuses writes (created 2026-07-09) |
 | `test_riskguard_cold_start.py` | Antibody: riskguard cold-start deadlock fix — empty outcome fact must not block startup (created 2026-05-01) |
 | `test_readiness_state.py` | PR45a relationship contract: readiness invalidation, backfill shadow-only, topology blocking, quote exclusion, and settlement-capture shadow boundary (created 2026-05-02) |
 | `test_scheduler_health_truthfulness.py` | Antibody for Invariant D: structural-failure job must produce status=FAILED in scheduler_jobs_health.json (created 2026-05-01) |

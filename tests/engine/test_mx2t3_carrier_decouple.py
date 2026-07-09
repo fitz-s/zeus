@@ -84,6 +84,9 @@ def test_a_posterior_lane_emits_complete_fsr_with_neutral_snapshot_id():
             captured.append(ev)
             return SimpleNamespace(event=ev, written=True)
 
+        def write_many(self, events):
+            return [self.write(ev) for ev in events]
+
     with mock.patch.object(fsr, "_replacement_live_enabled", return_value=True):
         trig = fsr.ForecastSnapshotReadyTrigger(_W())
         results = trig.scan_committed_snapshots(
@@ -106,6 +109,9 @@ def test_a2_posterior_lane_requires_same_cycle_raw_model_spine_members():
     class _W:
         def write(self, ev):  # noqa: ANN001
             raise AssertionError(f"must not emit without q-kernel raw-model members: {ev!r}")
+
+        def write_many(self, events):
+            return [self.write(ev) for ev in events]
 
     with mock.patch.object(fsr, "_replacement_live_enabled", return_value=True):
         trig = fsr.ForecastSnapshotReadyTrigger(_W())

@@ -12147,6 +12147,7 @@ def test_lifecycle_kernel_releases_pending_exit_to_preserved_or_active_runtime_s
     assert release_pending_exit_runtime_state("entered") == "entered"
     assert release_pending_exit_runtime_state("", day0_entered_at="2026-04-04T00:00:00Z") == "day0_window"
     assert release_pending_exit_runtime_state("", day0_entered_at="") == "holding"
+    assert release_pending_exit_runtime_state("quarantined") == "quarantined"
 
 
 def test_lifecycle_kernel_allows_touched_portfolio_terminal_transitions():
@@ -12332,6 +12333,116 @@ def test_check_pending_exits_restores_day0_window_state_after_bare_exit_intent_r
     assert stats["unchanged"] == 1
     assert pos.exit_state == ""
     assert pos.state == "day0_window"
+
+
+def test_check_pending_exits_restores_quarantine_after_bare_exit_intent_release():
+    pos = _position(
+        state="pending_exit",
+        pre_exit_state="quarantined",
+        exit_state="exit_intent",
+        order_status="exit_intent",
+        chain_state="entry_authority_quarantined",
+    )
+    pos.last_exit_error = ""
+    portfolio = PortfolioState(positions=[pos])
+
+    stats = exit_lifecycle_module.check_pending_exits(portfolio, clob=None, conn=None)
+
+    assert stats["retried"] == 0
+    assert stats["unchanged"] == 1
+    assert pos.exit_state == ""
+    assert pos.state == "quarantined"
+    assert pos.order_status == "filled"
+
+
+def test_check_pending_exits_persists_bare_exit_intent_release(tmp_path):
+    conn = get_connection(tmp_path / "zeus.db")
+    init_schema(conn)
+    pos = _position(
+        trade_id="quarantine-release-preflight-1",
+        state="pending_exit",
+        pre_exit_state="quarantined",
+        exit_state="exit_intent",
+        order_status="exit_intent",
+        chain_state="entry_authority_quarantined",
+    )
+    pos.last_exit_error = ""
+    portfolio = PortfolioState(positions=[pos])
+
+    stats = exit_lifecycle_module.check_pending_exits(portfolio, clob=None, conn=conn)
+
+    assert stats["retried"] == 1
+    assert stats["unchanged"] == 0
+    assert stats["released_no_order"] == 1
+    assert pos.exit_state == ""
+    assert pos.state == "quarantined"
+    assert pos.order_status == "filled"
+    row = conn.execute(
+        "SELECT phase, order_status, exit_retry_count, next_exit_retry_at "
+        "FROM position_current WHERE position_id = ?",
+        (pos.trade_id,),
+    ).fetchone()
+    assert dict(row) == {
+        "phase": "quarantined",
+        "order_status": "filled",
+        "exit_retry_count": 0,
+        "next_exit_retry_at": "",
+    }
+    event = conn.execute(
+        "SELECT event_type, phase_before, phase_after "
+        "FROM position_events WHERE position_id = ?",
+        (pos.trade_id,),
+    ).fetchone()
+    assert dict(event) == {
+        "event_type": "EXIT_RETRY_RELEASED",
+        "phase_before": "pending_exit",
+        "phase_after": "quarantined",
+    }
+    conn.close()
+
+
+def test_pending_exit_without_order_release_persists_quarantine_restore(tmp_path):
+    conn = get_connection(tmp_path / "zeus.db")
+    init_schema(conn)
+    pos = _position(
+        trade_id="quarantine-release-1",
+        state="pending_exit",
+        pre_exit_state="quarantined",
+        exit_state="exit_intent",
+        order_status="exit_intent",
+        chain_state="entry_authority_quarantined",
+    )
+
+    released = exit_lifecycle_module.release_pending_exit_without_order_if_retryable(
+        pos,
+        conn=conn,
+    )
+
+    assert released is True
+    assert pos.state == "quarantined"
+    assert pos.exit_state == ""
+    row = conn.execute(
+        "SELECT phase, order_status, exit_retry_count, next_exit_retry_at "
+        "FROM position_current WHERE position_id = ?",
+        (pos.trade_id,),
+    ).fetchone()
+    assert dict(row) == {
+        "phase": "quarantined",
+        "order_status": "filled",
+        "exit_retry_count": 0,
+        "next_exit_retry_at": "",
+    }
+    event = conn.execute(
+        "SELECT event_type, phase_before, phase_after "
+        "FROM position_events WHERE position_id = ?",
+        (pos.trade_id,),
+    ).fetchone()
+    assert dict(event) == {
+        "event_type": "EXIT_RETRY_RELEASED",
+        "phase_before": "pending_exit",
+        "phase_after": "quarantined",
+    }
+    conn.close()
 
 
 def test_check_pending_exits_emits_void_semantics_for_rejected_sell(monkeypatch, tmp_path):

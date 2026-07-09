@@ -558,6 +558,86 @@ def _write_pending_exit_release_loop_db(sd: Path, *, now: datetime) -> None:
         trade_conn.close()
 
 
+def _write_pending_exit_no_exit_command_db(sd: Path, *, now: datetime) -> None:
+    trade_conn = sqlite3.connect(sd / "zeus_trades.db")
+    try:
+        trade_conn.execute(
+            "CREATE TABLE venue_commands ("
+            "command_id TEXT, position_id TEXT, intent_kind TEXT, state TEXT, "
+            "created_at TEXT, q_version TEXT)"
+        )
+        trade_conn.execute(
+            "INSERT INTO venue_commands VALUES "
+            "('cmd-entry-only', 'pos-no-exit-command', 'ENTRY', 'CANCELLED', ?, 'q-id-1')",
+            ((now - timedelta(hours=2)).isoformat(),),
+        )
+        trade_conn.execute(
+            """
+            CREATE TABLE position_current (
+                position_id TEXT PRIMARY KEY,
+                phase TEXT,
+                order_status TEXT,
+                shares REAL,
+                chain_shares REAL,
+                city TEXT,
+                target_date TEXT,
+                bin_label TEXT,
+                direction TEXT,
+                exit_reason TEXT,
+                updated_at TEXT
+            )
+            """
+        )
+        trade_conn.execute(
+            """
+            INSERT INTO position_current VALUES (
+                'pos-no-exit-command',
+                'pending_exit',
+                'exit_intent',
+                19.98,
+                19.98,
+                'Shenzhen',
+                '2026-07-09',
+                'Will the highest temperature in Shenzhen be 32°C on July 9?',
+                'buy_no',
+                'FAMILY_DIRECT_SELL_DOMINATES_HOLD',
+                ?
+            )
+            """,
+            ((now - timedelta(minutes=5)).isoformat(),),
+        )
+        trade_conn.execute(
+            """
+            CREATE TABLE position_events (
+                position_id TEXT,
+                sequence_no INTEGER,
+                event_type TEXT,
+                occurred_at TEXT,
+                phase_before TEXT,
+                phase_after TEXT,
+                venue_status TEXT,
+                payload_json TEXT
+            )
+            """
+        )
+        trade_conn.execute(
+            "INSERT INTO position_events VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                "pos-no-exit-command",
+                10,
+                "EXIT_INTENT",
+                (now - timedelta(minutes=5)).isoformat(),
+                "quarantined",
+                "pending_exit",
+                "exit_intent",
+                json.dumps({"exit_reason": "FAMILY_DIRECT_SELL_DOMINATES_HOLD"}),
+            ),
+        )
+        trade_conn.commit()
+    finally:
+        trade_conn.close()
+
+
 def _write_pending_exit_reassert_loop_db(sd: Path, *, now: datetime) -> None:
     trade_conn = sqlite3.connect(sd / "zeus_trades.db")
     try:
@@ -1865,6 +1945,50 @@ def test_entry_q_version_missing_column_degrades_when_main_daemon_attested(
     assert surface["ok"] is False
     assert surface["issue"] == "ENTRY_Q_VERSION_COLUMN_MISSING:q_version"
     assert "entry_q_version" in result["failing_surfaces"]
+
+
+def test_pending_exit_without_exit_command_yields_degraded(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A bare exit_intent with no EXIT command is a live health blocker."""
+    sd = tmp_path / "state"
+    sd.mkdir()
+    _setup_healthy_state(sd)
+    monkeypatch.setattr(live_health, "_dirty_runtime_worktree_paths", lambda **_kwargs: ())
+    monkeypatch.setattr(
+        live_health,
+        "_main_daemon_surface",
+        lambda status_summary, heartbeat: {
+            "ok": True,
+            "issue": None,
+            "attested": True,
+            "pid": 123,
+            "command": "python -m src.main",
+        },
+    )
+    monkeypatch.setattr(
+        live_health,
+        "_process_code_surface",
+        lambda main_daemon_surface: {"ok": True, "issue": None, "evaluated": True},
+    )
+    now = datetime.now(timezone.utc)
+    _write_forecast_event_bridge_dbs(
+        sd,
+        posterior_computed_at=(now - timedelta(seconds=30)).isoformat(),
+        fsr_created_at=(now - timedelta(seconds=20)).isoformat(),
+    )
+    _write_pending_exit_no_exit_command_db(sd, now=now)
+
+    result = compute_composite_live_health(state_dir=sd, now=now)
+
+    surface = result["surfaces"]["pending_exit_release_loop"]
+    assert surface["ok"] is False
+    assert surface["issue"] == "PENDING_EXIT_NO_EXIT_COMMAND:n=1"
+    assert surface["pending_exit_no_command_count"] == 1
+    assert surface["pending_exit_no_command_sample"][0]["position_id"] == "pos-no-exit-command"
+    assert surface["pending_exit_no_command_sample"][0]["exit_reason"] == "FAMILY_DIRECT_SELL_DOMINATES_HOLD"
+    assert "pending_exit_release_loop" in result["failing_surfaces"]
 
 
 def test_pending_exit_release_loop_yields_degraded(

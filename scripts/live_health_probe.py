@@ -3,7 +3,7 @@
 # Purpose: One-shot live health signal for daemon, forecast-live owner, riskguard, status summary, and entry capability.
 # Reuse: Run when live process ownership, forecast-live heartbeat semantics, or operator health alerts change.
 # Created: 2026-05-11
-# Last reused/audited: 2026-05-22
+# Last reused/audited: 2026-07-09
 # Authority basis: docs/archive/2026-Q2/task_2026-05-15_live_order_e2e_verification/LIVE_ORDER_E2E_VERIFICATION_PLAN.md; docs/archive/2026-Q2/task_2026-05-16_live_continuous_run_package/LIVE_CONTINUOUS_RUN_PACKAGE_PLAN.md Phase C; 2026-05-17 volatile runtime-artifact code-plane contract.
 """One-shot live health probe.
 
@@ -22,7 +22,7 @@ Reports a single JSON line per invocation summarizing:
 Designed to be called by Monitor with grep filter on "ALERT" lines.
 """
 from __future__ import annotations
-import json, os, sqlite3, sys, time, subprocess
+import json, math, os, sqlite3, sys, time, subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -62,16 +62,24 @@ REQUIRED_LIVE_HEALTH_SURFACES = (
     "forecast_pipeline",
     "forecast_event_bridge",
     "entry_q_version",
+    "entry_probability_evidence",
     "pending_exit_release_loop",
     "monitor_probability_freshness",
     "day0_decision_trace",
     "status_summary",
     "execution_capability",
 )
+DIRECT_HEAD_LIVE_HEALTH_SURFACES = (
+    "forecast_event_bridge",
+    "pending_exit_release_loop",
+    "monitor_probability_freshness",
+)
 SETTLEMENT_TRUTH_STALE_SECONDS = int(os.environ.get("ZEUS_SETTLEMENT_TRUTH_STALE_SECONDS", str(48 * 3600)))
 PROCESS_CODE_STALE_TOLERANCE_SECONDS = 2
 ENTRY_Q_VERSION_LOOKBACK_SECONDS = 2 * 3600
 ENTRY_Q_VERSION_SAMPLE_LIMIT = 8
+ENTRY_PROBABILITY_EVIDENCE_SAMPLE_LIMIT = 8
+ENTRY_PROBABILITY_EVIDENCE_CERT_LOOKBACK_SECONDS = 14 * 24 * 3600
 PROCESS_CODE_SURFACES = {
     "daemon": (
         "src/main.py",
@@ -613,6 +621,385 @@ def _entry_q_version_status(root):
     finally:
         conn.close()
 
+
+def _finite_float(value):
+    try:
+        result = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(result):
+        return None
+    return result
+
+
+def _certificate_entry_probability_evidence(payload):
+    if not isinstance(payload, dict):
+        return {}
+    economics = payload.get("qkernel_execution_economics")
+    if not isinstance(economics, dict):
+        economics = {}
+    q_lcb = _finite_float(payload.get("q_lcb_5pct"))
+    if q_lcb is None:
+        q_lcb = _finite_float(economics.get("payoff_q_lcb"))
+    if q_lcb is None:
+        q_lcb = _finite_float(economics.get("selection_guard_q_safe"))
+    q_live = _finite_float(payload.get("q_live"))
+    if q_live is None:
+        q_live = _finite_float(economics.get("payoff_q_point"))
+    return {
+        "q_lcb": q_lcb,
+        "q_live": q_live,
+        "q_source": payload.get("q_source") or economics.get("source"),
+        "q_lcb_guard_basis": economics.get("q_lcb_guard_basis"),
+        "selection_guard_basis": economics.get("selection_guard_basis"),
+        "receipt_hash": economics.get("receipt_hash"),
+    }
+
+
+def _certificate_payload_matches_position(payload, position):
+    if not isinstance(payload, dict):
+        return False
+    expected_condition = str(position.get("condition_id") or "").strip()
+    direction = str(position.get("direction") or "").strip()
+    if direction == "buy_no":
+        expected_token = str(position.get("no_token_id") or "").strip()
+    elif direction == "buy_yes":
+        expected_token = str(position.get("token_id") or "").strip()
+    else:
+        expected_token = ""
+    payload_condition = str(
+        payload.get("condition_id")
+        or payload.get("actual_condition_id")
+        or ""
+    ).strip()
+    payload_token = str(
+        payload.get("token_id")
+        or payload.get("actual_token_id")
+        or ""
+    ).strip()
+    payload_direction = str(payload.get("direction") or "").strip()
+    if not expected_condition or payload_condition != expected_condition:
+        return False
+    if not expected_token or payload_token != expected_token:
+        return False
+    if payload_direction and payload_direction != direction:
+        return False
+    return True
+
+
+def _entry_probability_expected_key(position):
+    direction = str(position.get("direction") or "").strip()
+    if direction == "buy_no":
+        token = str(position.get("no_token_id") or "").strip()
+    elif direction == "buy_yes":
+        token = str(position.get("token_id") or "").strip()
+    else:
+        token = ""
+    condition = str(position.get("condition_id") or "").strip()
+    if not condition or not token or direction not in {"buy_yes", "buy_no"}:
+        return None
+    return condition, token, direction
+
+
+def _entry_probability_payload_key(payload):
+    if not isinstance(payload, dict):
+        return None
+    condition = str(
+        payload.get("condition_id")
+        or payload.get("actual_condition_id")
+        or ""
+    ).strip()
+    token = str(
+        payload.get("token_id")
+        or payload.get("actual_token_id")
+        or ""
+    ).strip()
+    direction = str(payload.get("direction") or "").strip()
+    if not condition or not token or direction not in {"buy_yes", "buy_no"}:
+        return None
+    return condition, token, direction
+
+
+def _entry_probability_certificate_map(conn, positions):
+    expected = {
+        key: position
+        for position in positions
+        for key in [_entry_probability_expected_key(position)]
+        if key is not None
+    }
+    found = {}
+    if not expected:
+        return found
+    rows = conn.execute(
+        """
+        SELECT certificate_id, certificate_type, decision_time, created_at, payload_json
+          FROM decision_certificates
+         WHERE certificate_type IN (
+               'PreSubmitRevalidationCertificate',
+               'ActionableTradeCertificate'
+         )
+           AND datetime(created_at) >= datetime('now', ?)
+         ORDER BY datetime(decision_time) DESC, datetime(created_at) DESC
+        """,
+        (f"-{ENTRY_PROBABILITY_EVIDENCE_CERT_LOOKBACK_SECONDS} seconds",),
+    )
+    for row in rows:
+        try:
+            payload = json.loads(row["payload_json"] or "{}")
+        except (TypeError, json.JSONDecodeError):
+            continue
+        key = _entry_probability_payload_key(payload)
+        if key not in expected or key in found:
+            continue
+        if not _certificate_payload_matches_position(payload, expected[key]):
+            continue
+        evidence = _certificate_entry_probability_evidence(payload)
+        if evidence.get("q_lcb") is None and evidence.get("q_live") is None:
+            continue
+        found[key] = {
+            "certificate_id": row["certificate_id"],
+            "certificate_type": row["certificate_type"],
+            "decision_time": row["decision_time"],
+            "created_at": row["created_at"],
+            **evidence,
+        }
+        if len(found) == len(expected):
+            break
+    return found
+
+
+def _entry_probability_evidence_status(root):
+    """Read-only proof that active exposure has strict entry q_lcb evidence."""
+
+    trade_db = os.path.join(root, "state/zeus_trades.db")
+    if not os.path.exists(trade_db):
+        return {"ok": True, "evaluated": False, "issue": "TRADE_DB_MISSING"}
+    try:
+        conn = sqlite3.connect(f"file:{trade_db}?mode=ro", uri=True, timeout=5)
+        conn.row_factory = sqlite3.Row
+    except sqlite3.Error as exc:
+        return {
+            "ok": False,
+            "evaluated": True,
+            "issue": f"ENTRY_PROBABILITY_EVIDENCE_READ_UNAVAILABLE:{exc}",
+        }
+    try:
+        position_columns = _table_columns(conn, "position_current")
+        certificate_columns = _table_columns(conn, "decision_certificates")
+        if not position_columns:
+            return {
+                "ok": False,
+                "evaluated": True,
+                "issue": "ENTRY_PROBABILITY_EVIDENCE_TABLE_MISSING:position_current",
+            }
+        if not certificate_columns:
+            return {
+                "ok": False,
+                "evaluated": True,
+                "issue": "ENTRY_PROBABILITY_EVIDENCE_TABLE_MISSING:decision_certificates",
+            }
+        required_position = {
+            "position_id",
+            "phase",
+            "shares",
+            "chain_shares",
+            "entry_price",
+            "p_posterior",
+            "direction",
+            "condition_id",
+            "token_id",
+            "no_token_id",
+            "decision_snapshot_id",
+        }
+        required_certificate = {
+            "certificate_id",
+            "certificate_type",
+            "decision_time",
+            "created_at",
+            "payload_json",
+        }
+        missing_position = sorted(required_position - position_columns)
+        missing_certificate = sorted(required_certificate - certificate_columns)
+        if missing_position:
+            return {
+                "ok": False,
+                "evaluated": True,
+                "issue": "ENTRY_PROBABILITY_EVIDENCE_COLUMN_MISSING:" + ",".join(missing_position),
+            }
+        if missing_certificate:
+            return {
+                "ok": False,
+                "evaluated": True,
+                "issue": "ENTRY_PROBABILITY_EVIDENCE_COLUMN_MISSING:" + ",".join(missing_certificate),
+            }
+
+        positions = [
+            dict(row)
+            for row in conn.execute(
+                """
+                SELECT position_id, phase, order_status, shares, chain_shares,
+                       entry_price, p_posterior, direction, condition_id, token_id,
+                       no_token_id, decision_snapshot_id
+                  FROM position_current
+                 WHERE phase IN ('active', 'day0_window', 'pending_exit')
+                   AND (
+                       COALESCE(CAST(chain_shares AS REAL), 0.0) > 0.0
+                       OR COALESCE(CAST(shares AS REAL), 0.0) > 0.0
+                   )
+                 ORDER BY position_id
+                """
+            ).fetchall()
+        ]
+        missing = []
+        nonpositive = []
+        covered = 0
+        samples = []
+        certificates = _entry_probability_certificate_map(conn, positions)
+        for position in positions:
+            entry_price = _finite_float(position.get("entry_price"))
+            certificate = certificates.get(_entry_probability_expected_key(position))
+            if not certificate:
+                missing.append(position)
+                continue
+            q_lcb = _finite_float(certificate.get("q_lcb"))
+            if q_lcb is None:
+                missing.append({**position, "certificate_id": certificate.get("certificate_id")})
+                continue
+            if entry_price is None or q_lcb <= entry_price:
+                nonpositive.append(
+                    {
+                        **position,
+                        "certificate_id": certificate.get("certificate_id"),
+                        "q_lcb": q_lcb,
+                        "entry_price": entry_price,
+                    }
+                )
+                continue
+            covered += 1
+            if len(samples) < ENTRY_PROBABILITY_EVIDENCE_SAMPLE_LIMIT:
+                samples.append(
+                    {
+                        "position_id": position.get("position_id"),
+                        "phase": position.get("phase"),
+                        "entry_price": entry_price,
+                        "p_posterior": _finite_float(position.get("p_posterior")),
+                        "q_lcb": q_lcb,
+                        "q_live": _finite_float(certificate.get("q_live")),
+                        "certificate_type": certificate.get("certificate_type"),
+                        "decision_time": certificate.get("decision_time"),
+                        "q_source": certificate.get("q_source"),
+                        "q_lcb_guard_basis": certificate.get("q_lcb_guard_basis"),
+                    }
+                )
+
+        detail = {
+            "ok": not missing and not nonpositive,
+            "evaluated": True,
+            "active_exposure_count": len(positions),
+            "covered_count": covered,
+            "missing_count": len(missing),
+            "nonpositive_count": len(nonpositive),
+            "covered_sample": samples,
+            "missing_sample": [
+                {
+                    "position_id": row.get("position_id"),
+                    "phase": row.get("phase"),
+                    "entry_price": row.get("entry_price"),
+                    "p_posterior": row.get("p_posterior"),
+                    "decision_snapshot_id": row.get("decision_snapshot_id"),
+                }
+                for row in missing[:ENTRY_PROBABILITY_EVIDENCE_SAMPLE_LIMIT]
+            ],
+            "nonpositive_sample": [
+                {
+                    "position_id": row.get("position_id"),
+                    "phase": row.get("phase"),
+                    "entry_price": row.get("entry_price"),
+                    "q_lcb": row.get("q_lcb"),
+                    "certificate_id": row.get("certificate_id"),
+                }
+                for row in nonpositive[:ENTRY_PROBABILITY_EVIDENCE_SAMPLE_LIMIT]
+            ],
+        }
+        if missing:
+            detail["issue"] = f"ENTRY_PROBABILITY_EVIDENCE_MISSING_ACTIVE:n={len(missing)}"
+        elif nonpositive:
+            detail["issue"] = f"ENTRY_PROBABILITY_EDGE_NONPOSITIVE:n={len(nonpositive)}"
+        else:
+            detail["issue"] = None
+        return detail
+    except sqlite3.Error as exc:
+        return {
+            "ok": False,
+            "evaluated": True,
+            "issue": f"ENTRY_PROBABILITY_EVIDENCE_READ_UNAVAILABLE:{exc}",
+        }
+    finally:
+        conn.close()
+
+
+def _direct_head_live_health_surfaces(root, *, status_summary, heartbeat):
+    """Compute HEAD read-only surfaces when the daemon-written composite is stale."""
+
+    state_dir = Path(root) / "state"
+    trade_db = state_dir / "zeus_trades.db"
+    root_path = str(Path(root).resolve())
+    if root_path not in sys.path:
+        sys.path.insert(0, root_path)
+    try:
+        from src.control.live_health import (
+            _forecast_to_event_bridge_surface,
+            _main_daemon_surface,
+            _monitor_probability_freshness_surface,
+            _pending_exit_release_loop_surface,
+        )
+    except Exception as exc:  # noqa: BLE001 - health probe must be best-effort.
+        return {
+            surface: {
+                "ok": False,
+                "evaluated": False,
+                "issue": f"HEAD_SURFACE_IMPORT_FAILED:{type(exc).__name__}:{exc}",
+            }
+            for surface in DIRECT_HEAD_LIVE_HEALTH_SURFACES
+        }
+
+    now_dt = datetime.now(timezone.utc)
+    main_daemon = _main_daemon_surface(status_summary, heartbeat)
+    surfaces = {
+        "forecast_event_bridge": _forecast_to_event_bridge_surface(
+            state_dir,
+            now_dt,
+            main_daemon_surface=main_daemon,
+        )
+    }
+    if not trade_db.exists():
+        skipped = {
+            "ok": True,
+            "evaluated": False,
+            "issue": "TRADE_DB_MISSING",
+        }
+        surfaces["pending_exit_release_loop"] = dict(skipped)
+        surfaces["monitor_probability_freshness"] = dict(skipped)
+        return surfaces
+    surfaces["pending_exit_release_loop"] = _pending_exit_release_loop_surface(
+        state_dir,
+        now_dt,
+        main_daemon_surface=main_daemon,
+    )
+    surfaces["monitor_probability_freshness"] = _monitor_probability_freshness_surface(
+        state_dir,
+        now_dt,
+        main_daemon_surface=main_daemon,
+    )
+    return surfaces
+
+
+def _direct_head_surface_overrides_composite(report, surface):
+    if surface not in DIRECT_HEAD_LIVE_HEALTH_SURFACES:
+        return False
+    detail = report.get(surface)
+    return isinstance(detail, dict) and detail.get("evaluated") is not False and "ok" in detail
+
 def _classify_alerts(report, ss_age):
     alerts = []
     code_plane = report.get("code_plane", {})
@@ -646,6 +1033,19 @@ def _classify_alerts(report, ss_age):
     entry_q_version = report.get("entry_q_version", {})
     if entry_q_version.get("ok") is False:
         alerts.append(entry_q_version.get("issue") or "ENTRY_Q_VERSION_UNHEALTHY")
+    entry_probability = report.get("entry_probability_evidence", {})
+    if entry_probability.get("ok") is False:
+        alerts.append(
+            entry_probability.get("issue")
+            or "ENTRY_PROBABILITY_EVIDENCE_UNHEALTHY"
+        )
+    for surface in DIRECT_HEAD_LIVE_HEALTH_SURFACES:
+        direct_surface = report.get(surface, {})
+        if direct_surface.get("ok") is False:
+            alerts.append(
+                f"LIVE_HEALTH_{surface.upper()}="
+                f"{direct_surface.get('issue') or 'DEGRADED'}"
+            )
     status_process = report.get("status_process", {})
     if status_process.get("ok") is False:
         alerts.append(status_process.get("issue") or "STATUS_SUMMARY_PROCESS_CONTRACT")
@@ -658,13 +1058,15 @@ def _classify_alerts(report, ss_age):
         ]
         if missing_surfaces:
             alerts.append(
-                "LIVE_HEALTH_COMPOSITE_SURFACES_MISSING="
+                "LIVE_HEALTH_COMPOSITE_SCHEMA_STALE_MISSING="
                 + "|".join(missing_surfaces[:8])
             )
     if composite.get("status") == "DEGRADED" or composite.get("healthy") is False:
         surfaces = composite.get("surfaces") if isinstance(composite.get("surfaces"), dict) else {}
         failing = composite.get("failing_surfaces") or []
         for surface in failing:
+            if _direct_head_surface_overrides_composite(report, surface):
+                continue
             detail = surfaces.get(surface) if isinstance(surfaces, dict) else None
             issue = detail.get("issue") if isinstance(detail, dict) else None
             alerts.append(f"LIVE_HEALTH_{surface.upper()}={issue or 'DEGRADED'}")
@@ -709,6 +1111,7 @@ def main():
     report["process_code"] = _process_loaded_code_status(report["procs"], ROOT)
     report["settlement_truth"] = _settlement_truth_status(ROOT)
     report["entry_q_version"] = _entry_q_version_status(ROOT)
+    report["entry_probability_evidence"] = _entry_probability_evidence_status(ROOT)
 
     # Status summary
     ss_path = os.path.join(ROOT, "state/status_summary.json")
@@ -716,10 +1119,12 @@ def main():
     report["status_summary_age_s"] = ss_age
     composite_path = os.path.join(ROOT, "state/live_health_composite.json")
     report["live_health_composite"] = _load_json(composite_path)
+    status_payload_for_direct_surfaces = None
     try:
         ss = _load_json(ss_path)
         if ss.get("error"):
             raise RuntimeError(ss["error"])
+        status_payload_for_direct_surfaces = ss
         cycle = ss.get("cycle", {})
         runtime = ss.get("runtime", {})
         risk = ss.get("risk", {})
@@ -760,6 +1165,14 @@ def main():
         }
     except Exception as e:
         report["cycle_error"] = str(e)
+
+    report.update(
+        _direct_head_live_health_surfaces(
+            ROOT,
+            status_summary=status_payload_for_direct_surfaces,
+            heartbeat=d if isinstance(d, dict) and not d.get("error") else None,
+        )
+    )
 
     # Compute delta vs last snapshot
     try:

@@ -1,6 +1,6 @@
 # Created: 2026-04-16
-# Last reused/audited: 2026-04-29
-# Lifecycle: created=2026-04-16; last_reviewed=2026-05-07; last_reused=2026-05-07
+# Last reused/audited: 2026-07-09
+# Lifecycle: created=2026-04-16; last_reviewed=2026-05-07; last_reused=2026-07-09
 # Authority basis: Phase 5C.2 market_price_history schema owner DDL seam
 # Purpose: Lock executable v2 schema relationships and metric coexistence invariants.
 # Reuse: Run before modifying src/state/schema/v2_schema.py or v2 snapshot columns.
@@ -88,23 +88,23 @@ def _insert_calibration_pairs_row(conn: sqlite3.Connection, metric: str) -> None
         INSERT INTO calibration_pairs
             (city, target_date, temperature_metric, observation_field, range_label,
              p_raw, outcome, lead_days, season, cluster, forecast_available_at,
-             bias_corrected, authority, bin_source, dataset_id,
+             decision_group_id, bias_corrected, authority, bin_source, dataset_id,
              training_allowed, causality_status, recorded_at)
         VALUES (?, ?, ?, ?, 'bin_A', 0.6, 1, 1.0, 'summer', 'coastal',
-                '2026-04-15T00:00:00Z', 0, 'UNVERIFIED', 'legacy',
+                '2026-04-15T00:00:00Z', ?, 0, 'UNVERIFIED', 'legacy',
                 'tigge_v2', 1, 'OK', '2026-04-16T00:00:00Z')
         """,
-        (CITY, TARGET_DATE, metric, obs_field),
+        (CITY, TARGET_DATE, metric, obs_field, f"dgid-{metric}-{CITY}-{TARGET_DATE}"),
     )
 
 
 def _insert_platt_models_row(conn: sqlite3.Connection, metric: str) -> None:
-    # Fix C (fixup pass): platt_models_v2 no longer carries city/target_date —
+    # Fix C (fixup pass): platt_models no longer carries city/target_date —
     # Platt models are keyed on bucket family, not city/date.
     # Gate A count for this table uses COUNT(*) on temperature_metric instead.
     conn.execute(
         """
-        INSERT INTO platt_models_v2
+        INSERT INTO platt_models
             (model_key, temperature_metric,
              cluster, season, data_version,
              input_space, param_A, param_B, param_C, bootstrap_params_json,
@@ -141,6 +141,63 @@ def _insert_day0_metric_fact_row(conn: sqlite3.Connection, metric: str) -> None:
         """,
         (f"fact-{metric}-{CITY}-{TARGET_DATE}", CITY, TARGET_DATE, metric),
     )
+
+
+def test_day0_metric_fact_store_upserts_world_owned_natural_key() -> None:
+    from src.state.day0_metric_fact_store import write_day0_metric_fact
+
+    conn = _apply_and_get_conn()
+    conn.row_factory = sqlite3.Row
+    fact_id = write_day0_metric_fact(
+        city="Paris",
+        target_date="2026-07-09",
+        temperature_metric="low",
+        source="wu_api",
+        utc_timestamp="2026-07-09T04:00:00Z",
+        local_timezone="Europe/Paris",
+        temp_current=21.2,
+        running_extreme=20.0,
+        recorded_at="2026-07-09T04:15:00Z",
+        conn=conn,
+    )
+    same_fact_id = write_day0_metric_fact(
+        city="Paris",
+        target_date="2026-07-09",
+        temperature_metric="low",
+        source="wu_api",
+        utc_timestamp="2026-07-09T04:00:00+00:00",
+        local_timezone="Europe/Paris",
+        temp_current=21.0,
+        running_extreme=19.5,
+        recorded_at="2026-07-09T04:20:00Z",
+        conn=conn,
+    )
+
+    rows = conn.execute(
+        """
+        SELECT fact_id, city, target_date, temperature_metric, source,
+               local_timestamp, utc_timestamp, local_hour, temp_current,
+               running_extreme, obs_age_minutes, fact_status,
+               missing_reason_json, recorded_at
+          FROM day0_metric_fact
+        """
+    ).fetchall()
+    assert same_fact_id == fact_id
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["fact_id"] == fact_id
+    assert row["city"] == "Paris"
+    assert row["temperature_metric"] == "low"
+    assert row["source"] == "wu_api"
+    assert row["local_timestamp"].startswith("2026-07-09T06:00:00")
+    assert row["utc_timestamp"] == "2026-07-09T04:00:00+00:00"
+    assert row["local_hour"] == 6.0
+    assert row["temp_current"] == 21.0
+    assert row["running_extreme"] == 19.5
+    assert row["obs_age_minutes"] == 20.0
+    assert row["fact_status"] == "complete"
+    assert row["missing_reason_json"] == "[]"
+    assert row["recorded_at"] == "2026-07-09T04:20:00+00:00"
 
 
 # Map table name → (high inserter, low inserter with same signature)
@@ -477,7 +534,7 @@ class TestGateADualMetricCoexistence(unittest.TestCase):
         """For each metric-aware v2 table, INSERT one high + one low row sharing
         (city, target_date); COUNT(*) returns 2; no IntegrityError.
 
-        platt_models_v2 is keyed on bucket family (not city/date), so its count
+        platt_models is keyed on bucket family (not city/date), so its count
         is verified via COUNT(DISTINCT temperature_metric) instead.
 
         Fails today with ImportError.
@@ -488,7 +545,7 @@ class TestGateADualMetricCoexistence(unittest.TestCase):
                 inserter(conn, "high")
                 inserter(conn, "low")
                 if table == "platt_models":
-                    # Fix C: platt_models_v2 has no city/target_date columns.
+                    # Fix C: platt_models has no city/target_date columns.
                     # Verify 2 distinct temperature_metric values were inserted.
                     (count,) = conn.execute(
                         f"SELECT COUNT(DISTINCT temperature_metric) FROM {table}"

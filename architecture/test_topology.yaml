@@ -77,6 +77,7 @@ test_trust_policy:
     tests/test_replacement_member_vote_smoothing_not_live_wired.py: {created: "2026-06-18", last_used: "2026-06-18", note: "Live/experiment separation antibody: AIFS member-vote smoothing remains experiment-layer math and must not reappear as an edli live settings switch or materializer reader."}
     tests/test_raw_forecast_artifact_manifest.py: {created: "2026-06-18", last_used: "2026-06-18", note: "Manifest compatibility antibody: retired trade_authority_status top-level field is dropped during raw artifact manifest load while unknown authority aliases still fail closed."}
     tests/test_forecast_manifest_repin.py: {created: "2026-07-08", last_used: "2026-07-08", note: "Forecast posterior blackout antibody: a present artifact rewritten by benign trailing-newline serialization drift no longer leaves stale byte_size/sha manifest truth that aborts materialization; repin preserves metadata, missing artifacts still fail closed."}
+    tests/test_repair_active_entry_q_versions.py: {created: "2026-07-09", last_used: "2026-07-09", note: "Active ENTRY q_version repair antibody: dry-run reconstructs missing active exposure q_version from existing FinalIntentCertificate evidence, apply writes only empty venue_commands.q_version cells, and ambiguous certificates refuse writes; no venue action or DB copy."}
     tests/test_repair_dust_exit_projection.py: {created: "2026-06-18", last_used: "2026-06-18", note: "Dust pending-exit projection repair antibody: only existing canonical EXIT_CHAIN_DUST_STILL_HELD backoff evidence may mark position_current.order_status=backoff_exhausted; no venue action or share mutation."}
     tests/test_repair_terminal_order_fact_sequence.py: {created: "2026-07-04", last_used: "2026-07-04", note: "Terminal ENTRY order-fact sequence repair antibody: dry-run candidate detection and append-only OPERATOR fact repair when a stale PARTIALLY_MATCHED row follows existing terminal no-resting proof; no venue action, row update/delete, or DB copy."}
     tests/test_reconcile_chain_mirror.py: {created: "2026-07-04", last_used: "2026-07-04", note: "Chain-mirror reconciliation antibody (docs/rebuild/chain_mirror_state_model_2026-07-04.md): pure classification of the market-rule state model (absent+resolved winner/loser, size mismatch, redeemable-still-held, foreign/missing-local-row/open-but-absent report-only classes), end-to-end DB apply via append_many_and_project (settlement close + size correction), dry-run writes nothing, second run is idempotent (no duplicate position_events), and position_events append-only trigger enforcement."}
@@ -215,7 +216,7 @@ test_trust_policy:
     tests/strategy/live_inference/test_no_trade_regret.py: {created: "2026-05-24", last_used: "2026-05-24"}
     tests/analysis/test_event_opportunity_report.py: {created: "2026-05-24", last_used: "2026-05-24"}
     tests/money_path/test_edli_online_invariants.py: {created: "2026-05-24", last_used: "2026-06-03", note: "Arm direction-gate footgun antibody (2026-06-03): _assert_edli_arm_requires_direction_gate makes arming with only real_order_submit_enabled (direction gate skipped) a boot failure; tests arm/no-submit guard coverage."}
-    tests/money_path/test_edli_live_readiness.py: {created: "2026-05-25", last_used: "2026-05-25"}
+    tests/money_path/test_edli_live_readiness.py: {created: "2026-05-25", last_used: "2026-07-09", note: "Extended live entry provenance antibody: receipt buy-NO gate inputs survive into actionable/final/pre-submit payloads for real-order audit."}
     tests/money_path/test_mainstream_enforce_on_submit.py: {created: "2026-06-03", last_used: "2026-06-03", note: "PR-2 (B) F1 enforce: mainstream_agreement_enforce_on_submit blocks armed submit when selected candidate's verdict != True (fail-closed); reference selector stays reference-only"}
     tests/money_path/test_edli_order_lifecycle.py: {created: "2026-05-25", last_used: "2026-05-25"}
     tests/money_path/test_edli_live_bridge_allocator_refresh.py: {created: "2026-05-31", last_used: "2026-05-31"}
@@ -282,7 +283,7 @@ test_trust_policy:
     tests/test_execution_intent_typed_slippage.py: {created: "2026-04-26", last_used: "2026-04-26"}
     tests/test_lifecycle_terminal_predicate.py: {created: "2026-04-26", last_used: "2026-04-26"}
     tests/test_monitor_refresh_ci_fallback.py: {created: "2026-04-26", last_used: "2026-04-26"}
-    tests/test_monitor_refresh_nowcast_wiring.py: {created: "2026-05-20", last_used: "2026-05-21"}
+    tests/test_monitor_refresh_nowcast_wiring.py: {created: "2026-05-20", last_used: "2026-07-09", note: "Monitor Day0 persistence wiring: _maybe_write_day0_nowcast evidence plus _maybe_write_day0_metric_fact world-owned durable observation fact write contract."}
     tests/test_position_metric_resolver.py: {created: "2026-04-26", last_used: "2026-04-26"}
     # Phase 2 T5: Position.market_slug JSON-only field antibodies (2026-05-20).
     tests/test_position_market_slug_persistence.py: {created: "2026-05-20", last_used: "2026-05-21"}
@@ -342,7 +343,7 @@ test_trust_policy:
     # P5-1 + P5-3 (PR #19 closeout completion, 2026-04-26):
     tests/test_realized_fill_at_receipt.py: {created: "2026-04-26", last_used: "2026-04-26"}
     tests/test_evaluate_candidate_metric_integration.py: {created: "2026-04-26", last_used: "2026-04-26"}
-    tests/test_architecture_contracts.py: {created: "2026-04-02", last_used: "2026-05-09"}
+    tests/test_architecture_contracts.py: {created: "2026-04-02", last_used: "2026-07-09"}
     tests/test_backfill_completeness_guardrails.py: {created: "2026-04-25", last_used: "2026-04-25"}
     tests/test_backfill_scripts_match_live_config.py: {created: "2026-04-21", last_used: "2026-04-25"}
     tests/test_backtest_settlement_value_outcome.py: {created: "2026-04-25", last_used: "2026-04-25"}
@@ -366,7 +367,7 @@ test_trust_policy:
     tests/test_stake_min_order_not_edge_reversed.py: {created: "2026-06-09", last_used: "2026-06-10"}
     tests/test_decision_evidence_entry_emission.py: {created: "2026-04-23", last_used: "2026-04-23"}
     tests/test_decision_evidence_persistence.py: {created: "2026-04-23", last_used: "2026-04-23"}
-    tests/test_diurnal.py: {created: "pre-Phase-0", last_used: "2026-05-08"}
+    tests/test_diurnal.py: {created: "pre-Phase-0", last_used: "2026-07-09", note: "Extended with Day0 post-peak confidence smoothing antibody: runtime fractional local-hour context interpolates hourly empirical p_high_set cells, preventing no-new-observation monitor probability cliffs at hour boundaries."}
     tests/test_diurnal_curves_empty_hk_handled.py: {created: "2026-04-23", last_used: "2026-04-23"}
     tests/test_boot_check_writer_registry.py: {created: "2026-05-18", last_used: "2026-05-19"}
     tests/test_db.py: {created: "2026-03-30", last_used: "2026-04-25"}
@@ -453,9 +454,9 @@ test_trust_policy:
     tests/test_run_replay_cli.py: {created: "2026-04-25", last_used: "2026-05-18"}
     tests/test_riskguard.py: {created: "2026-03-30", last_used: "2026-06-29", note: "RiskGuard strategy policy authority antibody: trade-main legacy control_overrides ghosts are ignored when world is attached; attached world.control_overrides remains the only live manual strategy policy authority."}
     tests/test_riskguard_auxiliary_write_lock_no_degrade.py: {created: "2026-06-13", last_used: "2026-06-13", note: "no-order root Blocker 1 (docs/evidence/no_order_root_2026-06-13/diagnosis.md): RELATIONSHIP test — a concurrent writer holding the zeus_trades WAL write lock must NOT flip RiskGuard's computed level to DATA_DEGRADED when the risk-level READS succeed; the risk_actions/strategy_health writes are AUXILIARY bookkeeping (lock absorbed -> skipped_dependency_lock, level computed from reads). RED-on-revert control proves the unwrapped INSERT raises 'database is locked'; non-lock OperationalError still propagates (fail-loud). The dependency-lock storm / no-conn-across-IO class (9f70e9c581)."}
-    tests/test_runtime_guards.py: {created: "2026-04-28", last_used: "2026-07-08"}
+    tests/test_runtime_guards.py: {created: "2026-04-28", last_used: "2026-07-09"}
     tests/test_runtime_n_mc_floor.py: {created: "2026-04-29", last_used: "2026-05-08"}
-    tests/test_schema_v2_gate_a.py: {created: "2026-04-16", last_used: "2026-04-29"}
+    tests/test_schema_v2_gate_a.py: {created: "2026-04-16", last_used: "2026-07-09", note: "V2 schema coexistence plus day0_metric_fact natural-key writer upsert contract against the world-owned table."}
     tests/test_settlements_authority_trigger.py: {created: "2026-04-23", last_used: "2026-04-23"}
     tests/test_settlements_verified_row_integrity.py: {created: "2026-04-23", last_used: "2026-04-23"}
     tests/test_settlements_unique_migration.py: {created: "2026-04-24", last_used: "2026-04-28"}
@@ -491,7 +492,7 @@ test_trust_policy:
     tests/test_migration_venue_commands_q_version.py: {created: "2026-07-04", last_used: "2026-07-04", note: "SCH-W1.2-ORDER-STATE live trade-DB migration coverage: adds nullable venue_commands.q_version, idempotent when already present, no-op when venue_commands is absent."}
     tests/test_unknown_side_effect.py: {created: "2026-04-27", last_used: "2026-04-30"}
     tests/test_user_channel_ingest.py: {created: "2026-04-27", last_used: "2026-04-27"}
-    tests/test_exit_safety.py: {created: "2026-04-27", last_used: "2026-04-27"}
+    tests/test_exit_safety.py: {created: "2026-04-27", last_used: "2026-07-09", note: "Runtime submit gate block retry semantics and monitor-refresh projection guard for pending_exit dust holds: deployment freshness mismatch remains pending without consuming exit retry budget, and stale monitor projections cannot reopen a pending_exit/backoff hold."}
     tests/test_exchange_reconcile.py: {created: "2026-04-27", last_used: "2026-07-02", note: "SCH-W1.2-ORDER-STATE: extended ghost-sell recovery test + added synthetic external-close test asserting q_version NULL BY RULE at both reconcile backfill INSERT sites, against a non-null entry q_version."}
     tests/test_order_truth_reducer.py: {created: "2026-05-21", last_used: "2026-05-21"}
     tests/test_order_state_predicates.py: {created: "2026-07-02", last_used: "2026-07-03", note: "SCH-W1.2-ORDER-STATE: full truth table for is_stale_pending_cancel (incl. both INDETERMINATE branches, fail-closed), is_delayed, rest_deadline_exceeded (incl. NULL-q leak-closure case). First wired to the cancel path by W4.2 (tests/execution/test_staleness_cancel.py)."}
@@ -557,7 +558,7 @@ test_trust_policy:
     tests/test_ecmwf_opendata_ingest_schedule.py: {created: "2026-05-23", last_used: "2026-05-23"}
     tests/test_check_data_pipeline_live_e2e.py: {created: "2026-05-15", last_used: "2026-05-15"}
     tests/test_check_live_order_e2e.py: {created: "2026-05-15", last_used: "2026-05-15"}
-    tests/test_live_health_probe_forecast_owner.py: {created: "2026-05-15", last_used: "2026-05-18"}
+    tests/test_live_health_probe_forecast_owner.py: {created: "2026-05-15", last_used: "2026-07-09", note: "Extended stale-composite-schema antibody: live_health_probe distinguishes daemon-written composite missing new surfaces from direct HEAD read-only pending-exit/monitor freshness truth."}
     tests/test_admission_severity_schema.py: {created: "2026-05-07", last_used: "2026-05-07"}
     tests/test_attach_narrow_except.py: {created: "2026-05-05", last_used: "2026-05-05"}
     tests/test_backfill_harvester_settlements_isolation.py: {created: "2026-05-11", last_used: "2026-05-11"}
@@ -1329,6 +1330,7 @@ categories:
     - tests/test_promote_calibration_attach_path.py
     - tests/test_promote_entry_forecast_cli.py
     - tests/test_promote_platt.py
+    - tests/test_repair_active_entry_q_versions.py
     - tests/test_rebuild_live_sentinel.py
     - tests/test_redeem_cascade_liveness.py
     - tests/test_rejection_stage_contract.py
@@ -2909,6 +2911,27 @@ test_metadata:
       src/main.py surfaces composite to state/live_health_composite.json each cycle.
     created: 2026-05-19
     last_reused_or_audited: 2026-05-19
+
+  tests/test_repair_active_entry_q_versions.py:
+    modules: [scripts, control, state]
+    category: useful_regression
+    kind: antibody
+    profile: live_entry_q_version_repair
+    blocks_commit: true
+    source_under_test:
+      - scripts/repair_active_entry_q_versions.py
+      - src/control/live_health.py
+    law_dependencies:
+      - AGENTS.md probability/execution proof gates
+      - scripts/AGENTS.md repair contract
+    notes: >
+      Repair-script antibody for active ENTRY q_version provenance gaps. Proves
+      dry-run reconstructs missing active exposure q_version from existing
+      FinalIntentCertificate evidence without writing, apply writes only empty
+      venue_commands.q_version cells, and ambiguous certificates refuse writes.
+      No venue action or DB backup is allowed.
+    created: 2026-07-09
+    last_reused_or_audited: 2026-07-09
 
   tests/test_live_order_ack_durability.py:
     modules: [execution]
