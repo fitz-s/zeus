@@ -125,6 +125,10 @@ class ExitDecision:
 
 
 _CI_SEP_EPS: float = 1e-9
+_NEAR_SETTLEMENT_CONFIRMED_WIN_BID_FLOOR: float = 0.95
+_NEAR_SETTLEMENT_CONFIRMED_WIN_PROB_FLOOR: float = 0.95
+_NEAR_SETTLEMENT_TERMINAL_BID_FLOOR: float = 0.995
+_NEAR_SETTLEMENT_TERMINAL_BID_PROB_FLOOR: float = 0.80
 
 def _ci_intervals_separated(
     a: Optional[tuple], b: Optional[tuple]
@@ -931,17 +935,29 @@ class Position:
             )
         return shares * executable_bid > hold_value.net_value
 
-    def _near_settlement_hold_is_confirmed_win(
+    def _near_settlement_hold_confirmation_reason(
         self,
         *,
         current_p_posterior: float,
         best_bid: Optional[float],
-    ) -> bool:
-        """Return whether near-settle hold is a confirmed-win posture, not generic EV drift."""
+    ) -> Optional[str]:
+        """Return the hold reason for near-settle winner posture, not generic EV drift."""
 
         if not ExitContext._is_finite(best_bid):
-            return False
-        return float(best_bid) >= 0.95 and float(current_p_posterior) >= 0.95
+            return None
+        bid = float(best_bid)
+        prob = float(current_p_posterior)
+        if (
+            bid >= _NEAR_SETTLEMENT_CONFIRMED_WIN_BID_FLOOR
+            and prob >= _NEAR_SETTLEMENT_CONFIRMED_WIN_PROB_FLOOR
+        ):
+            return "near_settlement_confirmed_win_hold"
+        if (
+            bid >= _NEAR_SETTLEMENT_TERMINAL_BID_FLOOR
+            and prob >= _NEAR_SETTLEMENT_TERMINAL_BID_PROB_FLOOR
+        ):
+            return "near_settlement_terminal_bid_hold"
+        return None
 
     def evaluate_exit(self, exit_context: ExitContext) -> ExitDecision:
         """Position knows how to exit ITSELF. Monitor just calls this.
@@ -1180,21 +1196,23 @@ class Position:
         # Settlement imminent (<1h). The blanket force-sell here is a FALSE EXIT for a position
         # whose hold-to-settlement EV still dominates selling now (operator-reported 2026-06-23: a
         # confirmed-win NO at 99.9c was force-sold). Route the decision through the SAME EV(hold)
-        # vs EV(sell) authority the rest of the exit path uses — HoldValue net of exit costs vs
-        # shares×bid — rather than any hardcoded "confirmed" price/belief threshold. HOLD only when
-        # holding genuinely beats selling now; a physics REVERSAL the market has not priced (fresh
-        # belief low) OR a market overpaying our fresh belief both SELL ("sell before the market
-        # notices"); an unprovable EV (no executable bid / no shares -> None) keeps the conservative
-        # force-sell. Freshness of fresh_prob is already gated by the missing-authority check above,
-        # so a stale belief cannot drive this branch.
+        # vs EV(sell) authority the rest of the exit path uses - HoldValue net of exit costs vs
+        # shares*bid. HOLD only for explicitly confirmed winner postures. A physics REVERSAL the
+        # market has not priced (fresh belief low) OR a market overpaying our fresh belief both SELL
+        # ("sell before the market notices"); an unprovable EV (no executable bid / no shares ->
+        # None) keeps the conservative force-sell. Freshness of fresh_prob is already gated by the
+        # missing-authority check above, so a stale belief cannot drive this branch.
         if exit_context.hours_to_settlement is not None and exit_context.hours_to_settlement < 1.0:
-            if self._near_settlement_hold_is_confirmed_win(
+            near_settlement_hold_reason = self._near_settlement_hold_confirmation_reason(
                 current_p_posterior=float(exit_context.fresh_prob),
                 best_bid=exit_context.best_bid,
-            ):
+            )
+            if near_settlement_hold_reason is not None:
                 # Confirmed-win hold: do NOT blanket force-sell at 99c+ and do NOT let
                 # model-divergence telemetry rename the decision into a panic exit.
                 applied.append("near_settlement_confirmed_win_hold")
+                if near_settlement_hold_reason != "near_settlement_confirmed_win_hold":
+                    applied.append(near_settlement_hold_reason)
                 self.applied_validations = _dedupe_validations(applied)
                 return ExitDecision(
                     False,

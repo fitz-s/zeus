@@ -238,6 +238,49 @@ class TestDay0ExitGateStaleProbability:
         assert decision.reason == "INCOMPLETE_EXIT_CONTEXT (missing=best_bid)"
         assert "best_bid_unavailable" in decision.applied_validations
 
+    def test_settlement_imminent_terminal_bid_buy_no_winner_holds(self):
+        pos = _make_position(
+            direction="buy_no",
+            p_posterior=0.52,
+            entry_price=0.52,
+            bin_label="17C",
+        )
+        ctx = _make_day0_exit_context(
+            fresh_prob=0.8333333333333334,
+            fresh_prob_is_fresh=True,
+            current_market_price=0.999,
+            best_bid=0.999,
+            hours_to_settlement=0.5,
+        )
+
+        decision = pos.evaluate_exit(ctx)
+
+        assert not decision.should_exit
+        assert decision.trigger != "SETTLEMENT_IMMINENT"
+        assert "near_settlement_confirmed_win_hold" in decision.applied_validations
+        assert "near_settlement_terminal_bid_hold" in decision.applied_validations
+
+    def test_settlement_imminent_terminal_bid_still_sells_real_low_belief(self):
+        pos = _make_position(
+            direction="buy_no",
+            p_posterior=0.52,
+            entry_price=0.52,
+            bin_label="17C",
+        )
+        ctx = _make_day0_exit_context(
+            fresh_prob=0.20,
+            fresh_prob_is_fresh=True,
+            current_market_price=0.999,
+            best_bid=0.999,
+            hours_to_settlement=0.5,
+        )
+
+        decision = pos.evaluate_exit(ctx)
+
+        assert decision.should_exit
+        assert decision.trigger == "SETTLEMENT_IMMINENT"
+        assert "near_settlement_terminal_bid_hold" not in decision.applied_validations
+
     def test_whale_toxicity_can_exit_without_model_probability_authority(self):
         pos = _make_position(p_posterior=0.02, entry_price=0.02)
         ctx = ExitContext(
