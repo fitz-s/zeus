@@ -5063,47 +5063,12 @@ def _edli_event_reactor_cycle() -> None:
 
 @_scheduler_job("edli_bankroll_warm")
 def _edli_bankroll_warm_cycle() -> None:
-    """Dedicated frequent (~60s) bankroll-of-record cache warmer.
+    """Scheduler hook — body owned by src.runtime.bankroll_provider (R4-b
+    extraction, 2026-07-08). See that module's ``run_warm_cycle`` docstring
+    for the structural fix this job implements (#45 follow-up)."""
+    from src.runtime.bankroll_provider import run_warm_cycle
 
-    STRUCTURAL FIX (2026-05-31, follow-up to #45): the per-event no-submit Kelly
-    proof and the live-bridge allocator refresh both read
-    ``bankroll_provider.cached()`` (300s fail-closed window) and MUST NOT live-fetch
-    per decision. The reactor cycle previously warmed that cache ONCE at cycle
-    start, but the canary cycle runs ~330s (heavy MC re-pricing + live /book fetches
-    + submit path), so by the time those consumers ran near cycle END the cache age
-    had exceeded 300s → ``cached()`` returned None → allocator fail-closed
-    (bankroll_unavailable) AND every candidate rejected with
-    ``KELLY_PROOF_MISSING:bankroll_provider_unavailable``. Bankroll freshness was
-    structurally COUPLED to the slow reactor cycle.
-
-    This job DECOUPLES freshness from the reactor cycle without doing live venue
-    I/O in the trading daemon. It consumes the durable CollateralLedger snapshot
-    maintained by the post-trade-capital sidecar and advances the in-process
-    cache from that local truth. It does NOT widen the ``cached()`` window or
-    weaken fail-closed semantics — stale/degraded/missing collateral snapshots
-    leave consumers fail-closed.
-    """
-
-    edli_cfg = _settings_section("edli", {})
-    if not edli_cfg.get("enabled"):
-        return
-    from src.runtime import bankroll_provider as _bankroll_provider
-
-    try:
-        warm = _bankroll_provider.warm_from_collateral_snapshot()
-    except Exception as exc:  # noqa: BLE001 — fail-soft; consumers fail-closed on None
-        logger.error(
-            "EDLI bankroll warm: collateral snapshot warm raised (non-fatal, freshness "
-            "did not advance this tick): %r",
-            exc,
-        )
-        return
-    if warm is None:
-        logger.error(
-            "EDLI bankroll warm: collateral snapshot warm returned None — cached() will "
-            "fail closed (KELLY_PROOF_MISSING) until post-trade-capital publishes a fresh "
-            "non-degraded collateral snapshot."
-        )
+    run_warm_cycle()
 
 
 def _command_recovery_summary_mutated_allocator_inputs(summary: object) -> bool:
