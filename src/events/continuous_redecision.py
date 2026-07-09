@@ -2116,9 +2116,27 @@ class OpenRest:
     created_at: str = ""
     fact_state: str = ""
     matched_size: float | None = None
+    min_order_size: float | None = None
     city: str = ""
     target_date: str = ""
     metric: str = ""
+
+
+def _rest_has_sub_min_partial_fill(rest: OpenRest) -> bool:
+    try:
+        matched = float(rest.matched_size) if rest.matched_size is not None else 0.0
+        min_order_size = (
+            float(rest.min_order_size) if rest.min_order_size is not None else 0.0
+        )
+    except (TypeError, ValueError):
+        return False
+    return (
+        math.isfinite(matched)
+        and math.isfinite(min_order_size)
+        and matched > _EPS
+        and min_order_size > _EPS
+        and matched < min_order_size - _EPS
+    )
 
 
 def _fresh_quote_or_none(quote: PriceQuote | None, screen_time: datetime) -> PriceQuote | None:
@@ -2379,6 +2397,12 @@ def screen_resting_orders(
             resting_posterior=rest.resting_posterior,
             resting_snapshot_id=rest.resting_snapshot_id,
         )
+        if decision is None and _rest_has_sub_min_partial_fill(rest):
+            # A sub-min partial fill is real exposure but not independently sellable. Microstructure
+            # pulls (BOOK_MOVED/value-refresh/family shift) can cancel the remaining rest and strand
+            # unexitable dust; live KL 2026-07-07 did this at 1 share vs min_order_size 5. New-evidence
+            # belief decay remains allowed above because fair-value protection can dominate dust completion.
+            continue
         if decision is None:
             # 2) Moved-book pull: our limit is at least one full tick behind the live best bid for our side.
             bid = bid_by_cid.get((rest.condition_id, rest.side))

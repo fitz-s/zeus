@@ -5923,13 +5923,23 @@ def _edli_open_maker_rests_for_screen(trade_conn, world_conn, *, beliefs=None) -
     token_ids = {str(r[2] or "") for r in rows if r[2]}
     cond_by_token: dict[str, str] = {}
     side_by_token: dict[str, str] = {}
+    min_order_by_token: dict[str, object] = {}
     if token_ids:
         try:
+            latest_cols = {
+                str(row[1])
+                for row in trade_conn.execute(
+                    "PRAGMA table_info(executable_market_snapshot_latest)"
+                ).fetchall()
+            }
+            latest_min_order_select = (
+                ", min_order_size" if "min_order_size" in latest_cols else ", NULL AS min_order_size"
+            )
             tph = ",".join("?" for _ in token_ids)
             for cr in trade_conn.execute(
                 f"""
                 SELECT selected_outcome_token_id, condition_id, yes_token_id, no_token_id,
-                       captured_at
+                       captured_at{latest_min_order_select}
                 FROM executable_market_snapshot_latest
                 WHERE selected_outcome_token_id IN ({tph})
                    OR yes_token_id IN ({tph})
@@ -5942,6 +5952,7 @@ def _edli_open_maker_rests_for_screen(trade_conn, world_conn, *, beliefs=None) -
                 cond = str(cr[1] or "")
                 yes_token = str(cr[2] or "")
                 no_token = str(cr[3] or "")
+                min_order_size = cr[5]
                 for token, side in (
                     (selected, "buy_no" if selected and selected == no_token else "buy_yes"),
                     (yes_token, "buy_yes"),
@@ -5950,39 +5961,78 @@ def _edli_open_maker_rests_for_screen(trade_conn, world_conn, *, beliefs=None) -
                     if token and token in token_ids and token not in cond_by_token:
                         cond_by_token[token] = cond
                         side_by_token[token] = side
+                        min_order_by_token[token] = min_order_size
         except Exception:  # noqa: BLE001 — token→condition resolution is best-effort
             cond_by_token = {}
             side_by_token = {}
-        if not cond_by_token:
+            min_order_by_token = {}
+        tokens_with_partial_fill: set[str] = set()
+        for row in rows:
+            token = str(row[2] or "")
+            if not token:
+                continue
             try:
-                tph = ",".join("?" for _ in token_ids)
+                matched = float(row[9]) if row[9] is not None else 0.0
+            except (TypeError, ValueError):
+                matched = 0.0
+            if matched > 0.0:
+                tokens_with_partial_fill.add(token)
+        fallback_token_ids = {
+            token
+            for token in token_ids
+            if token not in cond_by_token
+            or (
+                token in tokens_with_partial_fill
+                and min_order_by_token.get(token) in (None, "")
+            )
+        }
+        if fallback_token_ids:
+            try:
+                snapshot_cols = {
+                    str(row[1])
+                    for row in trade_conn.execute(
+                        "PRAGMA table_info(executable_market_snapshots)"
+                    ).fetchall()
+                }
+                snapshot_min_order_select = (
+                    ", min_order_size"
+                    if "min_order_size" in snapshot_cols
+                    else ", NULL AS min_order_size"
+                )
+                tph = ",".join("?" for _ in fallback_token_ids)
                 for cr in trade_conn.execute(
                     f"""
                     SELECT selected_outcome_token_id, condition_id, yes_token_id, no_token_id,
-                           captured_at
+                           captured_at{snapshot_min_order_select}
                     FROM executable_market_snapshots
                     WHERE selected_outcome_token_id IN ({tph})
                        OR yes_token_id IN ({tph})
                        OR no_token_id IN ({tph})
                     ORDER BY captured_at DESC
                     """,
-                    (*tuple(token_ids), *tuple(token_ids), *tuple(token_ids)),
+                    (
+                        *tuple(fallback_token_ids),
+                        *tuple(fallback_token_ids),
+                        *tuple(fallback_token_ids),
+                    ),
                 ).fetchall():
                     selected = str(cr[0] or "")
                     cond = str(cr[1] or "")
                     yes_token = str(cr[2] or "")
                     no_token = str(cr[3] or "")
+                    min_order_size = cr[5]
                     for token, side in (
                         (selected, "buy_no" if selected and selected == no_token else "buy_yes"),
                         (yes_token, "buy_yes"),
                         (no_token, "buy_no"),
                     ):
-                        if token and token in token_ids and token not in cond_by_token:
-                            cond_by_token[token] = cond
-                            side_by_token[token] = side
+                        if token and token in fallback_token_ids:
+                            cond_by_token.setdefault(token, cond)
+                            side_by_token.setdefault(token, side)
+                            if min_order_by_token.get(token) in (None, ""):
+                                min_order_by_token[token] = min_order_size
             except Exception:  # noqa: BLE001 — token→condition resolution is best-effort
-                cond_by_token = {}
-                side_by_token = {}
+                pass
     if beliefs is None:
         beliefs = _all_latest_beliefs(world_conn)
     # Index belief bins by condition_id → (belief, bin_label, posterior).
@@ -6019,6 +6069,10 @@ def _edli_open_maker_rests_for_screen(trade_conn, world_conn, *, beliefs=None) -
         resting_held_side_posterior = (
             1.0 - resting_posterior if screen_side == "buy_no" else resting_posterior
         )
+        try:
+            min_order_size = float(min_order_by_token[token_id])
+        except (KeyError, TypeError, ValueError):
+            min_order_size = None
         out.append(
             OpenRest(
                 command_id=command_id,
@@ -6034,6 +6088,7 @@ def _edli_open_maker_rests_for_screen(trade_conn, world_conn, *, beliefs=None) -
                 created_at=created_at,
                 fact_state=fact_state,
                 matched_size=None if matched_size is None else float(matched_size),
+                min_order_size=min_order_size,
                 city=city,
                 target_date=target_date,
                 metric=metric,

@@ -1,5 +1,5 @@
 # Created: 2026-06-12
-# Last reused or audited: 2026-06-29
+# Last reused or audited: 2026-07-08
 # Authority basis: operator stagnation root-cause 2026-06-12 ("continuous redecision没有作用中") +
 #   /tmp/continuous_redecision_resurrection.md. RELATIONSHIP antibodies for the P1 deadlock-free
 #   belief write, the P2 cheap screen, §4.5 rest management, and the EDLI_REDECISION_PENDING consume
@@ -35,6 +35,7 @@ def _mem_trade() -> sqlite3.Connection:
             selected_outcome_token_id TEXT,
             orderbook_top_bid TEXT,
             orderbook_top_ask TEXT,
+            min_order_size TEXT,
             freshness_deadline TEXT,
             captured_at TEXT
         )
@@ -140,14 +141,15 @@ def _snapshot(
     bid="0.70",
     ask="0.72",
     snapshot_id="s1",
+    min_order_size="5",
     freshness_deadline="2026-06-12T02:00:00+00:00",
     captured_at="2026-06-12T00:30:00+00:00",
 ):
     conn.execute(
         "INSERT INTO executable_market_snapshots "
         "(snapshot_id, condition_id, yes_token_id, no_token_id, selected_outcome_token_id, "
-        "orderbook_top_bid, orderbook_top_ask, freshness_deadline, captured_at) VALUES "
-        "(?,?,?,?,?,?,?,?,?)",
+        "orderbook_top_bid, orderbook_top_ask, min_order_size, freshness_deadline, captured_at) VALUES "
+        "(?,?,?,?,?,?,?,?,?,?)",
         (
             snapshot_id,
             condition_id,
@@ -156,6 +158,7 @@ def _snapshot(
             selected_outcome_token_id,
             bid,
             ask,
+            min_order_size,
             freshness_deadline,
             captured_at,
         ),
@@ -1229,6 +1232,67 @@ def test_rest_pull_fires_when_best_bid_is_one_tick_ahead_of_limit():
     assert pulls[0][1].detail == pytest.approx(cr.TICK_SIZE)
 
 
+def test_book_moved_holds_sub_min_partial_fill_rest():
+    world = _mem_world()
+    trade = _mem_trade()
+    _cache(world, p_yes=0.90, snapshot_id="snap1", cond="0xc30")
+    _snapshot(trade, bid="0.73", ask="0.75", min_order_size="5")
+    rest = cr.OpenRest(
+        command_id="cmd1",
+        venue_order_id="vo1",
+        family_id="hyp|live|Wuhan|2026-06-12|high|disc",
+        bin_label="b30",
+        side="buy_yes",
+        condition_id="0xc30",
+        resting_posterior=0.90,
+        resting_snapshot_id="snap1",
+        limit_price=0.70,
+        quote_age_ms=6 * 60 * 1000.0,
+        matched_size=1.0,
+        min_order_size=5.0,
+    )
+
+    pulls = cr.screen_resting_orders(
+        world,
+        trade,
+        open_rests=[rest],
+        decision_time="2026-06-12T00:45:00+00:00",
+    )
+
+    assert pulls == []
+
+
+def test_belief_decay_still_pulls_sub_min_partial_fill_rest():
+    world = _mem_world()
+    trade = _mem_trade()
+    _cache(world, p_yes=0.90, snapshot_id="snap1", cond="0xc30", recorded_at="2026-06-12T00:00:00+00:00")
+    _cache(world, p_yes=0.60, snapshot_id="snap2", cond="0xc30", recorded_at="2026-06-12T12:00:00+00:00")
+    rest = cr.OpenRest(
+        command_id="cmd1",
+        venue_order_id="vo1",
+        family_id="hyp|live|Wuhan|2026-06-12|high|disc",
+        bin_label="b30",
+        side="buy_yes",
+        condition_id="0xc30",
+        resting_posterior=0.90,
+        resting_snapshot_id="snap1",
+        limit_price=0.70,
+        quote_age_ms=6 * 60 * 1000.0,
+        matched_size=1.0,
+        min_order_size=5.0,
+    )
+
+    pulls = cr.screen_resting_orders(
+        world,
+        trade,
+        open_rests=[rest],
+        decision_time="2026-06-12T12:45:00+00:00",
+    )
+
+    assert len(pulls) == 1
+    assert pulls[0][1].reason == "BELIEF_WORSENING"
+
+
 def test_book_moved_holds_within_maker_window():
     """ANTIBODY (2026-06-23 entry fill-lane diagnosis): sub-floor (quote younger
     than the 300s REST_VALUE_REFRESH_MIN_AGE_SECONDS maker window), even when the
@@ -1358,6 +1422,7 @@ def test_open_maker_rests_preserve_no_token_direction_and_held_side_posterior():
     assert rests[0].created_at == "2026-06-12T00:00:00+00:00"
     assert rests[0].fact_state == "LIVE"
     assert rests[0].matched_size is None
+    assert rests[0].min_order_size == pytest.approx(5.0)
 
 
 def test_open_maker_rests_resolve_token_from_latest_snapshot_mirror_without_append_scan():
