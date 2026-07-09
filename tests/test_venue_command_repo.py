@@ -1,5 +1,5 @@
 # Created: 2026-04-26
-# Lifecycle: created=2026-04-26; last_reviewed=2026-07-08; last_reused=2026-07-08
+# Lifecycle: created=2026-04-26; last_reviewed=2026-07-08; last_reused=2026-07-09
 # Purpose: Lock venue command journal invariants, transitions, recovery, and U1 snapshot gate.
 # Reuse: Run when venue_command_repo, command schema, or executable snapshot gate changes.
 # Authority basis: docs/operations/task_2026-04-26_execution_state_truth_p1_command_bus/implementation_plan.md §P1.S1
@@ -34,6 +34,13 @@ def conn():
     init_schema(c)
     yield c
     c.close()
+
+
+@pytest.fixture(autouse=True)
+def offline_q_version_env(monkeypatch):
+    monkeypatch.delenv("ZEUS_ENTRY_Q_VERSION_STRICT", raising=False)
+    monkeypatch.delenv("ZEUS_MODE", raising=False)
+    monkeypatch.delenv("XPC_SERVICE_NAME", raising=False)
 
 
 def _insert(c, *, command_id="cmd-001", position_id="pos-001",
@@ -533,6 +540,37 @@ class TestInsertCommandQVersionStamp:
 
         row = conn.execute(
             "SELECT command_id FROM venue_commands WHERE command_id = 'cmd-xpc-live-no-qv'"
+        ).fetchone()
+        assert row is None
+
+    def test_zeus_mode_live_entry_missing_q_version_rejected_before_insert(self, conn, monkeypatch):
+        from src.state.venue_command_repo import insert_command
+
+        monkeypatch.delenv("ZEUS_ENTRY_Q_VERSION_STRICT", raising=False)
+        monkeypatch.delenv("XPC_SERVICE_NAME", raising=False)
+        monkeypatch.setenv("ZEUS_MODE", "live")
+        snapshot_id = _ensure_snapshot(conn, token_id="tok-mode-live-qv")
+
+        with pytest.raises(ValueError, match="ENTRY venue command requires non-empty q_version"):
+            insert_command(
+                conn,
+                command_id="cmd-mode-live-no-qv",
+                snapshot_id=snapshot_id,
+                envelope_id=_ensure_envelope(conn, token_id="tok-mode-live-qv"),
+                position_id="pos-mode-live-no-qv",
+                decision_id="dec-mode-live-no-qv",
+                idempotency_key="idem-mode-live-no-qv",
+                intent_kind="ENTRY",
+                market_id="mkt-mode-live-no-qv",
+                token_id="tok-mode-live-qv",
+                side="BUY",
+                size=10.0,
+                price=0.5,
+                created_at="2026-04-26T00:00:00Z",
+            )
+
+        row = conn.execute(
+            "SELECT command_id FROM venue_commands WHERE command_id = 'cmd-mode-live-no-qv'"
         ).fetchone()
         assert row is None
 

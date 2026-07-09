@@ -50,6 +50,7 @@ def _strict_live_entry_q_version_required() -> bool:
     return (
         str(os.environ.get("ZEUS_ENTRY_Q_VERSION_STRICT", "")).lower()
         in {"1", "true", "yes", "on"}
+        or str(os.environ.get("ZEUS_MODE", "")).strip().lower() == "live"
         or str(os.environ.get("XPC_SERVICE_NAME", "")) == "com.zeus.live-trading"
     )
 

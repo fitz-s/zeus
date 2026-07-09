@@ -2428,7 +2428,7 @@ files:
   src/state/venue_command_repo.py:
     zone: K2_runtime
     authority_role: venue_command_journal
-    why: Durable venue command/event journal; R3 Z4 terminal command transitions release collateral reservations atomically; R3 U1 requires fresh executable snapshot citation before insert; R3 U2 owns append-only venue_submission_envelopes, order facts, trade facts, position lots, and provenance envelope events. Per SCH-W1.2-ORDER-STATE, insert_command also stamps venue_commands.q_version (write-once, nullable) beside snapshot_id.
+    why: Durable venue command/event journal; R3 Z4 terminal command transitions release collateral reservations atomically; R3 U1 requires fresh executable snapshot citation before insert; R3 U2 owns append-only venue_submission_envelopes, order facts, trade facts, position lots, and provenance envelope events. Per SCH-W1.2-ORDER-STATE, insert_command also stamps venue_commands.q_version (write-once beside snapshot_id; required for live-mode ENTRY, nullable for non-entry/recovery).
     write_routes:
     - venue_command_write
     downstream:
