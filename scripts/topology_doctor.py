@@ -240,35 +240,6 @@ SCHEMA_ROUTE_CARD_REQUIRED_FIELDS: tuple[str, ...] = (
 )
 
 
-def load_schema() -> dict[str, Any]:
-    """Return schema data as a dict built from inline constants.
-
-    R12 Phase 5.B: topology_schema.yaml deleted. This function builds an equivalent
-    dict from inlined module constants so legacy callers (tests) continue to work
-    without file I/O. New code should use the SCHEMA_* constants directly.
-    """
-    return {
-        "required_top_level_keys": list(SCHEMA_REQUIRED_TOP_LEVEL_KEYS),
-        "issue_json_contract": {
-            "legacy_fields": {f: "string" for f in SCHEMA_ISSUE_JSON_CONTRACT_LEGACY_FIELDS},
-            "typed_fields": {f: "string" for f in SCHEMA_ISSUE_JSON_CONTRACT_TYPED_FIELDS},
-            "enums": {
-                "repair_kind": sorted(ISSUE_REPAIR_KINDS),
-                "maturity": sorted(ISSUE_MATURITY_VALUES),
-                "lifecycle_state": sorted(ISSUE_LIFECYCLE_STATES),
-                "authority_status": sorted(ISSUE_AUTHORITY_STATUSES),
-                "blocking_modes": list(ISSUE_BLOCKING_MODES),
-            },
-        },
-        "agent_runtime_contract": {
-            "route_card_required_fields": list(SCHEMA_ROUTE_CARD_REQUIRED_FIELDS),
-        },
-        "ownership": {
-            "fact_types": {},   # inlined in topology_doctor_ownership_checks.py constants
-        },
-    }
-
-
 RUNTIME_RISK_GATE_BUDGETS = {
     "T0": {
         "label": "read_only_or_orientation",
@@ -420,8 +391,6 @@ def _load_yaml(path: Path) -> dict[str, Any]:
 def load_topology() -> dict[str, Any]:
     return _load_yaml(TOPOLOGY_PATH)
 
-
-# load_schema() is defined above with inline constants (R12 Phase 5.B).
 
 def load_invariants() -> dict[str, Any]:
     return _load_yaml(INVARIANTS_PATH)
@@ -1152,8 +1121,9 @@ def run_strict() -> StrictResult:
 
 
 def run_schema() -> StrictResult:
-    # R12 Phase 5.B: load_schema() now returns inline constants; schema arg to
-    # _check_schema is ignored — keeps call site stable for external callers.
+    # R12 Phase 5.B: topology_schema.yaml deleted; the dead load_schema() shim was
+    # removed R8. _check_schema uses the inlined SCHEMA_REQUIRED_TOP_LEVEL_KEYS
+    # constant directly — schema arg is unused, kept for external call-site stability.
     issues = _check_schema(load_topology())
     return StrictResult(ok=not issues, issues=issues)
 
