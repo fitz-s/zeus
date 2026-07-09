@@ -1789,6 +1789,103 @@ def test_qkernel_receipt_annotation_rejects_not_actionable_rest_then_cross_polic
     assert annotated.selection_authority_applied is None
 
 
+def test_qkernel_selected_rest_policy_is_not_submit_authority():
+    """A selected qkernel proof with a no-action rest policy must no-submit."""
+
+    from dataclasses import replace
+
+    economics = _selected_economics(
+        edge_lcb=0.0842980463451396,
+        cost=0.62,
+        q_dot_payoff=0.8144224142386236,
+        point_ev=0.1944224142386236,
+        side="NO",
+    )
+    proof = _overlay_proof(
+        q_posterior=0.8144224142386236,
+        q_lcb_5pct=0.8031953517267109,
+        economics=economics,
+        direction="buy_no",
+    )
+    assert proof is not None
+    blocked = replace(proof, rest_then_cross_policy="MAKER_TAKER_FORBIDDEN")
+
+    reason = era._live_selection_rejection_reason(
+        blocked,
+        strategy_policy_event_type="FORECAST_SNAPSHOT_READY",
+        enforce_win_rate_floor=False,
+    )
+
+    assert reason == "QKERNEL_REST_THEN_CROSS_NOT_ACTIONABLE:policy=MAKER_TAKER_FORBIDDEN"
+
+
+def test_qkernel_not_actionable_selected_proof_is_not_book_selected():
+    """The opportunity-book audit must not mark a vetoed qkernel proof selected."""
+
+    from dataclasses import replace
+
+    economics = _selected_economics(
+        edge_lcb=0.0842980463451396,
+        cost=0.62,
+        q_dot_payoff=0.8144224142386236,
+        point_ev=0.1944224142386236,
+        side="NO",
+    )
+    proof = _overlay_proof(
+        q_posterior=0.8144224142386236,
+        q_lcb_5pct=0.8031953517267109,
+        economics=economics,
+        direction="buy_no",
+    )
+    assert proof is not None
+    blocked = replace(proof, rest_then_cross_policy="MAKER_TAKER_FORBIDDEN")
+
+    cert = {
+        "source": "qkernel_spine",
+        "decision_id": "decision-qk-rest-policy-book-no",
+        "receipt_hash": "receipt-qk-rest-policy-book-no",
+        "candidate_id": "NO:b1:DIRECT_NO:b1@proof",
+        "route_id": "DIRECT_NO:b1@proof",
+        "side": "NO",
+        "bin_id": era._candidate_bin_id(blocked),
+        "payoff_q_point": 0.8144224142386236,
+        "payoff_q_lcb": 0.7042980463451396,
+        "edge_lcb": 0.0842980463451396,
+        "point_ev": 0.1944224142386236,
+        "delta_u_at_min": 0.00001,
+        "optimal_stake_usd": "20.0",
+        "optimal_delta_u": 0.012,
+        "q_dot_payoff": 0.8144224142386236,
+        "cost": 0.62,
+        "direction_law_ok": True,
+        "coherence_allows": True,
+        "q_lcb_guard_basis": "OOF_WILSON_95",
+        "q_lcb_guard_abstained": False,
+        "q_lcb_guard_cell_key": "high|L2_3|NO|nonmodal|qb16|coarse_global",
+    }
+    book = era._opportunity_book_from_proofs(
+        event_id="event-qk-rest-policy-no",
+        family_id="family-qk-rest-policy-no",
+        proofs=(blocked,),
+        selected_proof=blocked,
+        qkernel_economics_by_bin_side={
+            (era._candidate_bin_id(blocked), "NO"): cert,
+        },
+        enforce_win_rate_floor=False,
+    )
+    payload = book.to_receipt_dict()
+
+    assert payload["selected_candidate_id"] is None
+    assert payload["actual_receipt_selected_candidate_id"] is None
+    assert "selection_authority" not in payload.get("cache_summary", {})
+    candidate = payload["candidates"][0]
+    assert candidate["live_decision_selected"] is False
+    assert candidate["missing_reason"] == (
+        "QKERNEL_REST_THEN_CROSS_NOT_ACTIONABLE:policy=MAKER_TAKER_FORBIDDEN"
+    )
+    assert candidate["trade_score"] == 0.0
+
+
 def test_qkernel_receipt_annotation_keeps_live_positive_profit_roi_frontier_candidate():
     """Receipt annotation must not preserve the removed 5% direct-ROI hard hurdle.
 
