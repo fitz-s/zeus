@@ -70,6 +70,7 @@ REQUIRED_LIVE_HEALTH_SURFACES = (
     "execution_capability",
 )
 DIRECT_HEAD_LIVE_HEALTH_SURFACES = (
+    "runtime_code",
     "forecast_event_bridge",
     "pending_exit_release_loop",
     "monitor_probability_freshness",
@@ -952,6 +953,7 @@ def _direct_head_live_health_surfaces(root, *, status_summary, heartbeat):
             _main_daemon_surface,
             _monitor_probability_freshness_surface,
             _pending_exit_release_loop_surface,
+            _runtime_code_surface,
         )
     except Exception as exc:  # noqa: BLE001 - health probe must be best-effort.
         return {
@@ -966,6 +968,7 @@ def _direct_head_live_health_surfaces(root, *, status_summary, heartbeat):
     now_dt = datetime.now(timezone.utc)
     main_daemon = _main_daemon_surface(status_summary, heartbeat)
     surfaces = {
+        "runtime_code": _runtime_code_surface(state_dir),
         "forecast_event_bridge": _forecast_to_event_bridge_surface(
             state_dir,
             now_dt,

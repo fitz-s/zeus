@@ -233,6 +233,18 @@ def _configure(
             "age_s": 1,
         },
     )
+    direct_head_surfaces = module._direct_head_live_health_surfaces
+
+    def fake_direct_head_surfaces(*args, **kwargs):
+        surfaces = dict(direct_head_surfaces(*args, **kwargs))
+        surfaces["runtime_code"] = {"ok": True, "evaluated": True, "issue": None}
+        return surfaces
+
+    monkeypatch.setattr(
+        module,
+        "_direct_head_live_health_surfaces",
+        fake_direct_head_surfaces,
+    )
 
 
 def _write_trade_db_with_missing_active_q_version(root: Path) -> None:
@@ -596,6 +608,64 @@ def test_live_probe_direct_head_forecast_bridge_overrides_stale_composite_ok(
     assert out.startswith("OK")
     assert "FORECAST_TO_EVENT_BRIDGE_STALLED" not in out
     assert "LIVE_HEALTH_FORECAST_EVENT_BRIDGE" not in out
+
+
+def test_live_probe_direct_head_runtime_code_overrides_stale_composite_mismatch(
+    tmp_path, monkeypatch, capsys
+):
+    module = _load_module()
+    root = tmp_path / "zeus"
+    _healthy_state(root)
+    surfaces = {
+        surface: {"ok": True, "issue": None}
+        for surface in module.REQUIRED_LIVE_HEALTH_SURFACES
+    }
+    surfaces["runtime_code"] = {
+        "ok": False,
+        "issue": (
+            "LOADED_SHA_MISMATCH:loaded=old-runtime:"
+            "current=old-filesystem:code_plane=runtime_diff"
+        ),
+    }
+    _write_json(
+        root / "state" / "live_health_composite.json",
+        {
+            "healthy": False,
+            "status": "DEGRADED",
+            "failing_surfaces": ["runtime_code"],
+            "surfaces": surfaces,
+        },
+    )
+    monkeypatch.setattr(
+        module,
+        "_direct_head_live_health_surfaces",
+        lambda *args, **kwargs: {
+            "runtime_code": {"ok": True, "evaluated": True, "issue": None},
+            "forecast_event_bridge": {"ok": True, "evaluated": True, "issue": None},
+            "pending_exit_release_loop": {"ok": True, "evaluated": True, "issue": None},
+            "monitor_probability_freshness": {"ok": True, "evaluated": True, "issue": None},
+        },
+    )
+    _configure(
+        module,
+        monkeypatch,
+        root,
+        tmp_path / "snapshot.json",
+        {
+            "src.main": [101],
+            "src.ingest.forecast_live_daemon": [202],
+            "src.ingest_main": [404],
+            "src.riskguard": [303],
+        },
+        {404: {"ZEUS_FORECAST_LIVE_OWNER": "forecast_live"}},
+    )
+
+    module.main()
+
+    out = capsys.readouterr().out
+    assert out.startswith("OK")
+    assert "LIVE_HEALTH_RUNTIME_CODE" not in out
+    assert "old-runtime" not in out
 
 
 def test_live_probe_direct_head_forecast_bridge_replaces_composite_issue(
