@@ -12508,6 +12508,119 @@ def test_pending_exit_without_order_release_persists_quarantine_restore(tmp_path
         "phase_before": "pending_exit",
         "phase_after": "quarantined",
     }
+
+
+def test_check_pending_exits_releases_loaded_quarantined_bare_exit_intent_without_order(tmp_path):
+    from src.engine.lifecycle_events import build_position_current_projection
+    from src.execution.exit_lifecycle import check_pending_exits
+    from src.state.db import query_portfolio_loader_view
+    from src.state.portfolio import PortfolioState, _position_from_projection_row
+    from src.state.projection import upsert_position_current
+
+    conn = get_connection(tmp_path / "loaded-quarantine-exit-intent.db")
+    init_schema(conn)
+    pos = _position(
+        trade_id="loaded-quarantine-exit-intent-1",
+        state="pending_exit",
+        pre_exit_state="quarantined",
+        exit_state="exit_intent",
+        order_status="exit_intent",
+        chain_state="entry_authority_quarantined",
+    )
+    upsert_position_current(conn, build_position_current_projection(pos))
+    conn.execute(
+        """
+        INSERT INTO position_events (
+            event_id, position_id, event_version, sequence_no, event_type, occurred_at,
+            phase_before, phase_after, strategy_key, decision_id, snapshot_id, order_id,
+            command_id, caused_by, idempotency_key, venue_status, source_module, payload_json,
+            env
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "evt-loaded-quarantine-exit-intent-1",
+            pos.trade_id,
+            1,
+            1,
+            "EXIT_INTENT",
+            "2026-07-09T05:00:54+00:00",
+            "quarantined",
+            "pending_exit",
+            pos.strategy_key,
+            "exit:loaded-quarantine-exit-intent-1",
+            pos.decision_snapshot_id,
+            None,
+            None,
+            "transition_phase",
+            "loaded-quarantine-exit-intent-1:exit_intent",
+            None,
+            "src.execution.exit_lifecycle",
+            json.dumps({"status": "exit_intent", "error": ""}),
+            "live",
+        ),
+    )
+    conn.commit()
+    assert conn.execute(
+        "SELECT COUNT(*) FROM venue_commands WHERE position_id = ? AND intent_kind = 'EXIT'",
+        (pos.trade_id,),
+    ).fetchone()[0] == 0
+
+    loaded = query_portfolio_loader_view(conn)["positions"][0]
+    loaded_pos = _position_from_projection_row(loaded, current_mode="live")
+
+    assert loaded_pos.state == "pending_exit"
+    assert loaded_pos.pre_exit_state == "quarantined"
+    assert loaded_pos.exit_state == "exit_intent"
+    assert loaded_pos.order_status == "exit_intent"
+
+    stats = check_pending_exits(
+        PortfolioState(positions=[loaded_pos]),
+        clob=None,
+        conn=conn,
+    )
+
+    assert stats["retried"] == 1
+    assert stats["released_no_order"] == 1
+    assert loaded_pos.state == "quarantined"
+    assert loaded_pos.exit_state == ""
+    assert loaded_pos.order_status == "filled"
+    row = conn.execute(
+        """
+        SELECT phase, order_status, exit_retry_count, next_exit_retry_at
+          FROM position_current
+         WHERE position_id = ?
+        """,
+        (pos.trade_id,),
+    ).fetchone()
+    assert dict(row) == {
+        "phase": "quarantined",
+        "order_status": "filled",
+        "exit_retry_count": 0,
+        "next_exit_retry_at": "",
+    }
+    event = conn.execute(
+        """
+        SELECT event_type, phase_before, phase_after, order_id, command_id,
+               json_extract(payload_json, '$.release_reason') AS release_reason
+          FROM position_events
+         WHERE position_id = ?
+         ORDER BY sequence_no DESC
+         LIMIT 1
+        """,
+        (pos.trade_id,),
+    ).fetchone()
+    assert dict(event) == {
+        "event_type": "EXIT_RETRY_RELEASED",
+        "phase_before": "pending_exit",
+        "phase_after": "quarantined",
+        "order_id": None,
+        "command_id": None,
+        "release_reason": "PENDING_EXIT_NO_ORDER_RELEASED",
+    }
+    assert conn.execute(
+        "SELECT COUNT(*) FROM venue_commands WHERE position_id = ? AND intent_kind = 'EXIT'",
+        (pos.trade_id,),
+    ).fetchone()[0] == 0
     conn.close()
 
 
