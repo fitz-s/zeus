@@ -63,7 +63,16 @@ statuses: [open, supported, refuted, blocked]
 #   next_action: <what the NEXT tick that picks this up should do>
 #   fail_count: 0              # consecutive tick failures on this item; 3 -> blocked + ESCALATION
 
-entries: []
+entries:
+  - id: settlement-decision-join-probe-2026-07-09
+    claim: "The current settlement grading blocker is observability: the standing settlement probe must return terminal held positions joined to immutable ActionableTradeCertificate payloads before any settled outcome can update the loop scoreboard."
+    opened_at: "2026-07-09T12:24:24Z"
+    prereg_query: "loop/queries/pending/settlements_recent.sql"
+    prereg_date: "2026-07-09"
+    evidence: []
+    status: open
+    next_action: "After the wrapper runs settlements_recent.sql, grade only returned rows with a VERIFIED decision_certificate_hash and real settlement; rows without a resolvable certificate are INSUFFICIENT, not SKILL_WIN."
+    fail_count: 0
 
 # Scoreboard (v3 §6): the loop's single scoring function — settled realized
 # capital gains, walk-forward. Updated by the tick's settlement-grading step

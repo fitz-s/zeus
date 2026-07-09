@@ -53,3 +53,10 @@ Grep-able marker lines (appear standalone, inside or after a tick block):
   settlement rowid/timestamp), read by the next tick's grading step.
 
 ---
+
+## 2026-07-09T12:25:27Z L1 tick
+queue_item: settlement-decision-join-probe-2026-07-09
+action: Preregistered the settlement standing probe as a terminal-position x VERIFIED-settlement x ActionableTradeCertificate join, and opened the ledger item that makes unresolved certificate rows INSUFFICIENT rather than skill evidence.
+verifier: PASS (GIT_OPTIONAL_LOCKS=0 git -C .. diff --check -- loop/queries/pending/settlements_recent.sql loop/LEDGER.yaml; rg single read-only SELECT in loop/queries/pending/settlements_recent.sql)
+commit: wrapper
+notes: Settlement grading not performed this tick: the available result file contained VERIFIED settlements only, without frozen decision certificate fields, so updating the scoreboard would violate decision-certificate x settlement ground truth. No cursor advanced.
