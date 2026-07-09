@@ -847,7 +847,9 @@ class TestMonitorCadenceWatchdog:
         conn.commit()
 
     def test_watchdog_flags_the_06_19_gap(self):
-        from src.main import _check_monitor_cadence_watchdog
+        # R4-b (2026-07-08): moved from src.main to its owning module (single
+        # caller was src.main._exit_monitor_cycle, also moved there).
+        from src.execution.exit_lifecycle import _check_monitor_cadence_watchdog
 
         conn = _db()
         # The live gap: last refresh at 00:41, no refresh until 09:30 (8.8h).
@@ -867,7 +869,9 @@ class TestMonitorCadenceWatchdog:
     def test_watchdog_silent_within_cadence(self):
         from datetime import datetime, timezone
 
-        from src.main import _check_monitor_cadence_watchdog
+        # R4-b (2026-07-08): moved from src.main to its owning module (single
+        # caller was src.main._exit_monitor_cycle, also moved there).
+        from src.execution.exit_lifecycle import _check_monitor_cadence_watchdog
 
         conn = _db()
         # A refresh 60s ago is well within the 2-min interval → no flag.
