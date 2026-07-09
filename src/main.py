@@ -8861,6 +8861,32 @@ def _edli_prune_pending_working_set(
     )
 
     try:
+        if _budget_exhausted("archive_terminal_last_error_events"):
+            return
+        _step_started = time.monotonic()
+        _terminal_last_error_archived = store.archive_terminal_last_error_events(
+            batch_limit=batch_limit,
+        )
+        _log_prune_step(
+            "archive_terminal_last_error_events",
+            _step_started,
+            _terminal_last_error_archived,
+        )
+        if _terminal_last_error_archived:
+            logger.warning(
+                "EDLI reactor: expired %d pending events with terminal durable "
+                "last_error verdicts; stale retry debt no longer suppresses fresh "
+                "forecast events (batch_limit=%d)",
+                _terminal_last_error_archived,
+                batch_limit,
+            )
+    except Exception as _terminal_last_error_sweep_exc:  # noqa: BLE001 — fail-soft
+        logger.warning(
+            "EDLI reactor: terminal last_error sweep failed (non-fatal): %r",
+            _terminal_last_error_sweep_exc,
+    )
+
+    try:
         if _budget_exhausted("archive_recent_no_value_refuted_events"):
             return
         _step_started = time.monotonic()

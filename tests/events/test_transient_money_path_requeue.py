@@ -1,5 +1,5 @@
 # Created: 2026-06-11
-# Last reused or audited: 2026-06-12
+# Last reused or audited: 2026-07-08
 # Authority basis: operator directive 2026-06-11 ~16:30Z — stale-decision-vs-fresh-book
 #   races were TERMINAL. Live evidence: Miami 16:22:35Z cleared EVERY gate and aborted at
 #   JIT recapture (SUBMIT_ABORTED_PRICE_MOVED: recaptured all-in 0.5136 > max 0.5025 +
@@ -166,6 +166,14 @@ def test_pre_submit_collateral_failure_is_terminal():
         "pre_submit_collateral_reservation_failed: "
         "pusd_allowance_insufficient: required_micro=6856200 "
         "available_allowance_micro=0 allowance_micro=0"
+    )
+
+
+def test_qkernel_actual_submit_quality_floor_is_terminal_for_same_event():
+    assert not _is_transient_money_path_reason(
+        "QKERNEL_ACTUAL_SUBMIT_QUALITY_FLOOR:"
+        "actual_profit_below_strategy_floor:strategy=forecast_qkernel_entry:"
+        "profit_lcb_usd=0.467748:floor=1.000000:stake_usd=11.703848:cost=0.640000"
     )
 
 

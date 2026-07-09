@@ -1,5 +1,5 @@
 # Created: 2026-05-24
-# Last reused/audited: 2026-06-20
+# Last reused/audited: 2026-07-08
 # Authority basis: EDLI v1 implementation prompt §7 EventStore acceptance A01-A04.
 from __future__ import annotations
 
@@ -1157,6 +1157,84 @@ def test_archive_recent_no_value_refuted_events_keeps_day0_separate_from_forecas
         ).fetchone()[0]
         == "pending"
     )
+
+
+def test_archive_terminal_last_error_events_expires_qkernel_quality_retry_debt():
+    conn = _world_conn()
+    store = EventStore(conn)
+    event = _fsr_entity_event(
+        "Chicago|2026-05-24|high|snap-terminal-quality",
+        "snap-terminal-quality",
+        "2026-05-24T04:12:00+00:00",
+        "2026-05-24T04:12:30+00:00",
+    )
+    store.insert_or_ignore(event)
+    conn.execute(
+        """
+        UPDATE opportunity_event_processing
+           SET attempt_count = 7,
+               last_error = ?
+         WHERE event_id = ?
+        """,
+        (
+            "QKERNEL_ACTUAL_SUBMIT_QUALITY_FLOOR:"
+            "actual_profit_below_strategy_floor:strategy=forecast_qkernel_entry:"
+            "profit_lcb_usd=0.467748:floor=1.000000:stake_usd=11.703848:cost=0.640000",
+            event.event_id,
+        ),
+    )
+
+    archived = store.archive_terminal_last_error_events()
+
+    assert archived == 1
+    row = conn.execute(
+        """
+        SELECT processing_status, processed_at, last_error
+          FROM opportunity_event_processing
+         WHERE event_id = ?
+        """,
+        (event.event_id,),
+    ).fetchone()
+    assert row["processing_status"] == "expired"
+    assert row["processed_at"]
+    assert row["last_error"].startswith(
+        "TERMINAL_LAST_ERROR_ARCHIVED:QKERNEL_ACTUAL_SUBMIT_QUALITY_FLOOR:"
+    )
+
+
+def test_archive_terminal_last_error_events_keeps_unknown_retry_debt_active():
+    conn = _world_conn()
+    store = EventStore(conn)
+    event = _fsr_entity_event(
+        "Chicago|2026-05-24|high|snap-transient-quality",
+        "snap-transient-quality",
+        "2026-05-24T04:12:00+00:00",
+        "2026-05-24T04:12:30+00:00",
+    )
+    store.insert_or_ignore(event)
+    conn.execute(
+        """
+        UPDATE opportunity_event_processing
+           SET attempt_count = 7,
+               last_error = 'EXECUTABLE_SNAPSHOT_STALE:selection_deadline=2026-05-24T04:18:00+00:00'
+         WHERE event_id = ?
+        """,
+        (event.event_id,),
+    )
+
+    archived = store.archive_terminal_last_error_events()
+
+    assert archived == 0
+    row = conn.execute(
+        """
+        SELECT processing_status, last_error
+          FROM opportunity_event_processing
+         WHERE event_id = ?
+        """,
+        (event.event_id,),
+    ).fetchone()
+    assert row["processing_status"] == "pending"
+    assert row["last_error"].startswith("EXECUTABLE_SNAPSHOT_STALE:")
 
 
 def test_fetch_pending_interleaves_forecast_before_day0_backlog():
