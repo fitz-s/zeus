@@ -439,6 +439,21 @@ def classify_local_position(
             },
         )
 
+    if prior_review_open_absent:
+        return MirrorFinding(
+            classification=SIZE_CORRECTED,
+            position_id=row.position_id,
+            asset=held_token,
+            writes=True,
+            details={
+                "reason": "chain_reappeared_after_review_absence",
+                "chain_size": chain_fact.size,
+                "local_shares": local_shares,
+                "delta": delta,
+                "shares_unchanged": True,
+            },
+        )
+
     return MirrorFinding(
         classification=CONSISTENT,
         position_id=row.position_id,
@@ -698,10 +713,12 @@ def has_open_entry_order_without_fill(conn: sqlite3.Connection, position_id: str
 
 
 def _has_prior_review_open_absent_marker(conn: sqlite3.Connection, position_id: str) -> bool:
-    """True iff the MOST RECENT position_events row for this position is a
-    chain-mirror REVIEW_OPEN_ABSENT marker (i.e. no intervening write — chain
-    reappearance, settlement, or size correction — has happened since it was
-    first observed absent).
+    """True iff the latest continuity event is a chain-mirror absence marker.
+
+    Plain cycle-runtime ``MONITOR_REFRESHED`` observations are ignored because
+    they contain no Chain/CLOB presence evidence. Semantic monitor subtypes and
+    monitor events from other writers remain reset boundaries, as do every
+    order, fill, settlement, size-correction, and lifecycle event.
 
     This is the append-only-evidence half of the two-consecutive-mirror-runs
     threshold (docs/rebuild/chain_mirror_state_model_2026-07-04.md §5
@@ -709,22 +726,23 @@ def _has_prior_review_open_absent_marker(conn: sqlite3.Connection, position_id: 
     (data-api lag); two independent reads ~10min apart with nothing in
     between are not.
 
-    Known limitation (accepted scope boundary): if the token reappears and
-    the row happens to be an EXACT chain-size match on that intervening run
-    (CONSISTENT, which — by design — never writes an event), the streak is
-    not visibly reset here. Not exercised by any sanctioned test scenario;
-    documented rather than chased, per the smallest-viable-diff mandate.
+    Exact-size token reappearance is materialized as a no-delta
+    ``CHAIN_SIZE_CORRECTED`` observation by ``classify_local_position`` so the
+    positive chain fact also resets this streak durably.
     """
     if not position_id:
         return False
     row = conn.execute(
-        "SELECT event_type, payload_json FROM position_events "
-        "WHERE position_id = ? ORDER BY sequence_no DESC LIMIT 1",
+        "SELECT event_type, payload_json, source_module FROM position_events "
+        "WHERE position_id = ? AND ("
+        "event_type <> 'MONITOR_REFRESHED' "
+        "OR source_module <> 'src.engine.cycle_runtime' "
+        "OR CASE WHEN json_valid(payload_json) = 0 THEN 1 "
+        "ELSE COALESCE(TRIM(json_extract(payload_json, '$.semantic_event')), '') <> '' END"
+        ") ORDER BY sequence_no DESC LIMIT 1",
         (position_id,),
     ).fetchone()
-    if row is None:
-        return False
-    if str(row["event_type"] or "") != "REVIEW_REQUIRED":
+    if row is None or str(row["event_type"] or "") != "REVIEW_REQUIRED":
         return False
     try:
         payload = json.loads(row["payload_json"] or "{}")
@@ -1127,44 +1145,47 @@ def reconcile(
             # checks first; avoids a wasted query on the common matched/closed path.
             prior_review_open_absent = False
             has_open_orders = False
-            if row.phase in _OPEN_LIKE_PHASES and (not held or held not in chain_by_asset):
-                if row.phase == "pending_entry" and has_open_entry_order_without_fill(
-                    conn_trades, row.position_id
-                ):
-                    report.findings.append(
-                        MirrorFinding(
-                            classification=CONSISTENT,
-                            position_id=row.position_id,
-                            asset=held,
-                            writes=False,
-                            details={
-                                "reason": "open_entry_order_without_fill_pending_position",
-                                "phase": row.phase,
-                                "chain_state": row.chain_state,
-                            },
-                        )
-                    )
-                    continue
-                if has_confirmed_exit_fill_for_position(conn_trades, row.position_id):
-                    report.findings.append(
-                        MirrorFinding(
-                            classification=CONSISTENT,
-                            position_id=row.position_id,
-                            asset=held,
-                            writes=False,
-                            details={
-                                "reason": "confirmed_exit_fill_fact_pending_projection",
-                                "phase": row.phase,
-                                "chain_state": row.chain_state,
-                            },
-                        )
-                    )
-                    continue
+            if row.phase in _OPEN_LIKE_PHASES:
                 prior_review_open_absent = _has_prior_review_open_absent_marker(
                     conn_trades, row.position_id
                 )
-                if prior_review_open_absent:
-                    has_open_orders = has_open_orders_for_position(conn_trades, row.position_id)
+                if not held or held not in chain_by_asset:
+                    if row.phase == "pending_entry" and has_open_entry_order_without_fill(
+                        conn_trades, row.position_id
+                    ):
+                        report.findings.append(
+                            MirrorFinding(
+                                classification=CONSISTENT,
+                                position_id=row.position_id,
+                                asset=held,
+                                writes=False,
+                                details={
+                                    "reason": "open_entry_order_without_fill_pending_position",
+                                    "phase": row.phase,
+                                    "chain_state": row.chain_state,
+                                },
+                            )
+                        )
+                        continue
+                    if has_confirmed_exit_fill_for_position(conn_trades, row.position_id):
+                        report.findings.append(
+                            MirrorFinding(
+                                classification=CONSISTENT,
+                                position_id=row.position_id,
+                                asset=held,
+                                writes=False,
+                                details={
+                                    "reason": "confirmed_exit_fill_fact_pending_projection",
+                                    "phase": row.phase,
+                                    "chain_state": row.chain_state,
+                                },
+                            )
+                        )
+                        continue
+                    if prior_review_open_absent:
+                        has_open_orders = has_open_orders_for_position(
+                            conn_trades, row.position_id
+                        )
             finding = classify_local_position(
                 row,
                 chain_by_asset,

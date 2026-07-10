@@ -1,4 +1,4 @@
-# Lifecycle: created=2026-07-04; last_reviewed=2026-07-08; last_reused=2026-07-08
+# Lifecycle: created=2026-07-04; last_reviewed=2026-07-10; last_reused=2026-07-10
 # Purpose: Regression tests for the chain-mirror reconciler (design doc
 #   docs/rebuild/chain_mirror_state_model_2026-07-04.md).
 # Reuse: Run when position_current chain-mirror classification, the
@@ -573,10 +573,187 @@ def test_open_phase_absent_token_second_consecutive_run_force_closes(trades_conn
     assert events[1]["phase_after"] == "voided"
 
 
+def test_monitor_refresh_between_absent_reads_does_not_reset_chain_evidence(
+    trades_conn, forecasts_conn
+):
+    """Monitor observations are not Chain/CLOB evidence.
+
+    A monitor event between two independent absent chain snapshots must not
+    turn the second snapshot back into a first absence forever.
+    """
+    position_id = "pos-manila-monitor-noise"
+    _insert_position_current(
+        trades_conn, position_id=position_id, phase="day0_window",
+        city="manila", target_date="2026-07-04", bin_label="33°C",
+        direction="buy_no", no_token_id="tok-manila-monitor-noise",
+        chain_state="synced", chain_shares=11.1, shares=11.1,
+    )
+
+    first = reconcile(trades_conn, forecasts_conn, chain_by_asset={}, apply=True)
+    assert any(f.classification == REVIEW_OPEN_ABSENT for f in first.findings)
+
+    trades_conn.execute(
+        """
+        INSERT INTO position_events (
+            event_id, position_id, event_version, sequence_no, event_type,
+            occurred_at, phase_before, phase_after, strategy_key, caused_by,
+            source_module, env, payload_json
+        ) VALUES (?, ?, 1, 2, 'MONITOR_REFRESHED', ?, 'day0_window',
+                  'day0_window', 'edli', 'monitor_refresh',
+                  'src.engine.cycle_runtime', 'live', '{}')
+        """,
+        (
+            f"{position_id}:monitor_refreshed:2",
+            position_id,
+            "2026-07-04T00:05:00+00:00",
+        ),
+    )
+    trades_conn.commit()
+
+    second = reconcile(trades_conn, forecasts_conn, chain_by_asset={}, apply=True)
+
+    assert [f.classification for f in second.findings if f.position_id == position_id] == [
+        CLOSED_EXITED
+    ]
+    row = trades_conn.execute(
+        "SELECT phase, chain_state FROM position_current WHERE position_id = ?",
+        (position_id,),
+    ).fetchone()
+    assert (row["phase"], row["chain_state"]) == ("voided", CLOSED_EXITED)
+    events = trades_conn.execute(
+        "SELECT event_type FROM position_events WHERE position_id = ? ORDER BY sequence_no",
+        (position_id,),
+    ).fetchall()
+    assert [event["event_type"] for event in events] == [
+        "REVIEW_REQUIRED",
+        "MONITOR_REFRESHED",
+        "ADMIN_VOIDED",
+    ]
+
+
+def test_semantic_monitor_event_between_absent_reads_resets_chain_evidence(
+    trades_conn, forecasts_conn
+):
+    """A partial-fill monitor subtype is order evidence, not monitor noise."""
+    position_id = "pos-manila-partial-fill-reset"
+    _insert_position_current(
+        trades_conn, position_id=position_id, phase="day0_window",
+        city="manila", target_date="2026-07-04", bin_label="33°C",
+        direction="buy_no", no_token_id="tok-manila-partial-fill-reset",
+        chain_state="synced", chain_shares=11.1, shares=11.1,
+    )
+
+    reconcile(trades_conn, forecasts_conn, chain_by_asset={}, apply=True)
+    trades_conn.execute(
+        """
+        INSERT INTO position_events (
+            event_id, position_id, event_version, sequence_no, event_type,
+            occurred_at, phase_before, phase_after, strategy_key, caused_by,
+            source_module, env, payload_json
+        ) VALUES (?, ?, 1, 2, 'MONITOR_REFRESHED', ?, 'day0_window',
+                  'day0_window', 'edli', 'partial_exit_fill',
+                  'src.execution.exit_lifecycle', 'live', ?)
+        """,
+        (
+            f"{position_id}:partial_exit_fill:2",
+            position_id,
+            "2026-07-04T00:05:00+00:00",
+            '{"semantic_event":"PARTIAL_FILL_OBSERVED",'
+            '"filled_shares":2.0,"remaining_shares":9.1}',
+        ),
+    )
+    trades_conn.commit()
+
+    second = reconcile(trades_conn, forecasts_conn, chain_by_asset={}, apply=True)
+
+    assert not any(f.classification == CLOSED_EXITED for f in second.findings)
+    assert [f.classification for f in second.findings if f.position_id == position_id] == [
+        REVIEW_OPEN_ABSENT
+    ]
+    row = trades_conn.execute(
+        "SELECT phase, chain_state FROM position_current WHERE position_id = ?",
+        (position_id,),
+    ).fetchone()
+    assert (row["phase"], row["chain_state"]) == ("day0_window", "synced")
+    events = trades_conn.execute(
+        "SELECT event_type FROM position_events WHERE position_id = ? ORDER BY sequence_no",
+        (position_id,),
+    ).fetchall()
+    assert [event["event_type"] for event in events] == [
+        "REVIEW_REQUIRED",
+        "MONITOR_REFRESHED",
+        "REVIEW_REQUIRED",
+    ]
+
+
+def test_exact_size_reappearance_resets_chain_evidence_before_next_absence(
+    trades_conn, forecasts_conn
+):
+    """Exact-size token presence must durably break an absence streak."""
+    position_id = "pos-manila-chain-reset"
+    token_id = "tok-manila-chain-reset"
+    _insert_position_current(
+        trades_conn, position_id=position_id, phase="day0_window",
+        city="manila", target_date="2026-07-04", bin_label="33°C",
+        direction="buy_no", no_token_id=token_id,
+        chain_state="synced", chain_shares=11.1, shares=11.1,
+    )
+
+    reconcile(trades_conn, forecasts_conn, chain_by_asset={}, apply=True)
+    present = reconcile(
+        trades_conn,
+        forecasts_conn,
+        chain_by_asset={token_id: ChainPositionFact(
+            token_id=token_id, condition_id="cond-1", size=11.1,
+            redeemable=False, current_value=0.0, side="No",
+        )},
+        apply=True,
+    )
+    assert [f.classification for f in present.findings if f.position_id == position_id] == [
+        SIZE_CORRECTED
+    ]
+
+    present_again = reconcile(
+        trades_conn,
+        forecasts_conn,
+        chain_by_asset={token_id: ChainPositionFact(
+            token_id=token_id, condition_id="cond-1", size=11.1,
+            redeemable=False, current_value=0.0, side="No",
+        )},
+        apply=True,
+    )
+    assert [
+        f.classification for f in present_again.findings if f.position_id == position_id
+    ] == [CONSISTENT]
+
+    absent_again = reconcile(
+        trades_conn, forecasts_conn, chain_by_asset={}, apply=True
+    )
+
+    assert not any(f.classification == CLOSED_EXITED for f in absent_again.findings)
+    assert [
+        f.classification for f in absent_again.findings if f.position_id == position_id
+    ] == [REVIEW_OPEN_ABSENT]
+    row = trades_conn.execute(
+        "SELECT phase, chain_state, chain_seen_at FROM position_current WHERE position_id = ?",
+        (position_id,),
+    ).fetchone()
+    assert (row["phase"], row["chain_state"]) == ("day0_window", "synced")
+    assert row["chain_seen_at"]
+    events = trades_conn.execute(
+        "SELECT event_type FROM position_events WHERE position_id = ? ORDER BY sequence_no",
+        (position_id,),
+    ).fetchall()
+    assert [event["event_type"] for event in events] == [
+        "REVIEW_REQUIRED",
+        "CHAIN_SIZE_CORRECTED",
+        "REVIEW_REQUIRED",
+    ]
+
+
 def test_open_phase_absent_token_reappears_between_runs_no_close(trades_conn, forecasts_conn):
     """Token reappears on the second read (present + matching size) — must
-    return to consistent/synced, never force-close, regardless of the first
-    run's REVIEW_OPEN_ABSENT marker."""
+    record a no-delta chain observation and never force-close."""
     _insert_position_current(
         trades_conn, position_id="pos-manila-3", phase="day0_window",
         city="manila", target_date="2026-07-04", bin_label="33°C",
@@ -594,14 +771,16 @@ def test_open_phase_absent_token_reappears_between_runs_no_close(trades_conn, fo
     second = reconcile(trades_conn, forecasts_conn, chain_by_asset=chain, apply=True)
 
     assert not any(f.classification == CLOSED_EXITED for f in second.findings)
-    consistent = [f for f in second.findings if f.position_id == "pos-manila-3"]
-    assert len(consistent) == 1
-    assert consistent[0].classification == CONSISTENT
+    reappeared = [f for f in second.findings if f.position_id == "pos-manila-3"]
+    assert len(reappeared) == 1
+    assert reappeared[0].classification == SIZE_CORRECTED
     row = trades_conn.execute(
-        "SELECT phase, chain_state FROM position_current WHERE position_id='pos-manila-3'"
+        "SELECT phase, chain_state, chain_seen_at FROM position_current "
+        "WHERE position_id='pos-manila-3'"
     ).fetchone()
     assert row["phase"] == "day0_window"
     assert row["chain_state"] == "synced"
+    assert row["chain_seen_at"]
 
 
 def test_open_phase_absent_token_second_run_with_open_order_does_not_close(
