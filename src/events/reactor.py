@@ -1128,6 +1128,7 @@ class OpportunityEventReactor:
         """Claim/gate all epoch events, then let one opaque adapter auction act once."""
 
         claimed: list[OpportunityEvent] = []
+        claim_generations: dict[str, str] = {}
         attempted = 0
         for event in events:
             if remaining is not None and attempted >= remaining:
@@ -1135,16 +1136,19 @@ class OpportunityEventReactor:
             if budget is not None and (time.monotonic() - cycle_start) >= budget:
                 break
             attempted += 1
-            if self._process_event_unit(
+            claim_generation = self._process_event_unit(
                 event,
                 decision_time=decision_time,
                 result=result,
                 defer_submit=True,
-            ) is True:
+            )
+            if claim_generation is not None:
                 claimed.append(event)
+                claim_generations[event.event_id] = claim_generation
         if not claimed:
             return attempted
 
+        claimed_ids = frozenset(event.event_id for event in claimed)
         process_batch = getattr(self._submit, "process_global_batch")
         try:
             batch_result = process_batch(
@@ -1152,8 +1156,7 @@ class OpportunityEventReactor:
             )
             if not isinstance(batch_result, GlobalBatchSubmitResult):
                 raise TypeError("global batch adapter returned an invalid result")
-            claimed_ids = {event.event_id for event in claimed}
-            if set(batch_result.receipts) != claimed_ids:
+            if set(batch_result.receipts) != set(claimed_ids):
                 raise ValueError("global batch receipts do not cover exactly the claimed epoch")
             if (
                 batch_result.winner_event_id is not None
@@ -1161,7 +1164,10 @@ class OpportunityEventReactor:
             ):
                 raise ValueError("global batch winner is not a claimed event")
             if batch_result.next_claim_event is not None:
-                self._queue_global_winner_for_claim(batch_result.next_claim_event)
+                self._queue_global_winner_for_claim(
+                    batch_result.next_claim_event,
+                    current_batch_claim_generations=claim_generations,
+                )
         except Exception as exc:  # noqa: BLE001 - every claimed event must close its unit
             for event in claimed:
                 self._finalize_deferred_event_unit(
@@ -1187,7 +1193,12 @@ class OpportunityEventReactor:
             )
         return attempted
 
-    def _queue_global_winner_for_claim(self, event: OpportunityEvent) -> None:
+    def _queue_global_winner_for_claim(
+        self,
+        event: OpportunityEvent,
+        *,
+        current_batch_claim_generations: dict[str, str],
+    ) -> None:
         """Persist the auction winner's next legal claim outside submit I/O."""
 
         mutex = world_write_mutex()
@@ -1197,7 +1208,10 @@ class OpportunityEventReactor:
                 raise RuntimeError("GLOBAL_WINNER_QUEUE_WORLD_TXN_OPEN")
             self._store.conn.execute("BEGIN IMMEDIATE")
             try:
-                if not self._store.prioritize_global_winner(event):
+                if not self._store.prioritize_global_winner(
+                    event,
+                    current_batch_claim_generations=current_batch_claim_generations,
+                ):
                     raise RuntimeError("GLOBAL_WINNER_TARGET_NOT_PENDING")
                 self._store.conn.commit()
             except Exception:
@@ -1213,7 +1227,7 @@ class OpportunityEventReactor:
         decision_time: datetime,
         result: ReactorResult,
         defer_submit: bool = False,
-    ) -> bool | None:
+    ) -> str | None:
         """Process ONE event as TWO serialized world-DB write units around the
         network submit boundary (#95 SEV-2.1).
 
@@ -1279,9 +1293,10 @@ class OpportunityEventReactor:
                     # redecision/day0 scheduler interval behind another writer.
                     if not self._store.conn.in_transaction:
                         self._store.conn.execute("BEGIN IMMEDIATE")
+                    claim_generation = decision_time.astimezone(UTC).isoformat()
                     claimed = self._store.claim(
                         event.event_id,
-                        claimed_at=decision_time.astimezone(UTC).isoformat(),
+                        claimed_at=claim_generation,
                     )
                 except Exception as exc:
                     if _is_sqlite_lock_error(exc):
@@ -1355,7 +1370,7 @@ class OpportunityEventReactor:
             mutex.release()
 
         if defer_submit:
-            return True
+            return claim_generation
 
         # ---- Network submit: NO mutex held, NO open world txn (WAL lock free) ----
         # In production self._submit performs the JIT /book HTTP fetch and the

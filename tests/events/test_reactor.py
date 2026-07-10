@@ -399,9 +399,16 @@ def test_global_batch_incomplete_receipt_coverage_fails_closed_for_whole_epoch()
 
 
 def test_global_batch_materializes_unclaimed_winner_as_next_claim():
+    from src.engine.global_batch_runtime import _next_claim_carrier
+
     conn, store = _store()
     claimed = _forecast_event("claimed", target_date="2026-05-25")
-    target = _day0_event("target")
+    target = _next_claim_carrier(
+        claimed,
+        targeted_at=_DT_VENUE_OPEN,
+        economic_identity="current-batch-economic-identity",
+        payload=json.loads(claimed.payload_json),
+    )
     store.insert_or_ignore(claimed)
     observations = {}
     reactor = _global_batch_probe_reactor(
@@ -422,6 +429,45 @@ def test_global_batch_materializes_unclaimed_winner_as_next_claim():
     assert store.fetch_pending(
         decision_time=_DT_VENUE_OPEN.isoformat(), limit=1
     )[0].event_id == target.event_id
+
+
+def test_global_batch_rejects_target_when_claim_is_reclaimed_during_solve():
+    from src.engine.global_batch_runtime import _next_claim_carrier
+
+    conn, store = _store()
+    claimed = _forecast_event("claimed-then-reclaimed", target_date="2026-05-25")
+    target = _next_claim_carrier(
+        claimed,
+        targeted_at=_DT_VENUE_OPEN,
+        economic_identity="reclaimed-economic-identity",
+        payload=json.loads(claimed.payload_json),
+    )
+    store.insert_or_ignore(claimed)
+    observations = {}
+    reactor = _global_batch_probe_reactor(
+        store,
+        observations,
+        next_claim_event=target,
+    )
+    process_batch = reactor._submit.process_global_batch
+
+    def _reclaim_then_solve(events, decision_time):
+        assert store.claim(
+            events[0].event_id,
+            claimed_at="2026-05-25T06:16:00+00:00",
+        )
+        return process_batch(events, decision_time)
+
+    reactor._submit.process_global_batch = _reclaim_then_solve
+
+    result = reactor.process_pending(decision_time=_DT_VENUE_OPEN, limit=1)
+
+    assert result.proof_accepted == 0
+    assert result.retried == 1
+    assert conn.execute(
+        "SELECT 1 FROM opportunity_events WHERE event_id = ?",
+        (target.event_id,),
+    ).fetchone() is None
 
 
 def test_global_target_keeps_claim_priority_after_transient_epoch():
@@ -539,6 +585,166 @@ def test_global_target_processing_lease_blocks_new_target_materialization():
     assert conn.execute(
         "SELECT 1 FROM opportunity_events WHERE event_id = ?",
         (new.event_id,),
+    ).fetchone() is None
+
+
+def test_global_target_allows_only_current_batch_processing_lease():
+    conn, store = _store()
+    inflight = _forecast_event("inflight-current-batch", target_date="2026-05-25")
+    new = _forecast_event("new-current-batch", target_date="2026-05-25")
+    store.insert_or_ignore(inflight)
+    assert store.claim(
+        inflight.event_id,
+        claimed_at="2026-05-24T18:09:00+00:00",
+    )
+    conn.commit()
+    generations = {inflight.event_id: "2026-05-24T18:09:00+00:00"}
+
+    conn.execute("BEGIN IMMEDIATE")
+    assert store.prioritize_global_winner(
+        new,
+        current_batch_claim_generations=generations,
+    )
+    conn.commit()
+    states = {
+        event_id: (status, reason)
+        for event_id, status, reason in conn.execute(
+            "SELECT event_id, processing_status, last_error "
+            "FROM opportunity_event_processing"
+        )
+    }
+    assert states[inflight.event_id][0] == "processing"
+    assert states[new.event_id] == ("pending", "GLOBAL_WINNER_TARGETED_CLAIM")
+
+
+def test_global_target_rejects_unowned_processing_lease_beside_current_batch():
+    conn, store = _store()
+    owned = _forecast_event("owned-current-batch", target_date="2026-05-25")
+    external = _forecast_event("external-worker", target_date="2026-05-25")
+    new = _forecast_event("new-mixed-lease", target_date="2026-05-25")
+    for event in (owned, external):
+        store.insert_or_ignore(event)
+        assert store.claim(
+            event.event_id,
+            claimed_at="2026-05-24T18:09:00+00:00",
+        )
+    conn.commit()
+    owned_generation = {owned.event_id: "2026-05-24T18:09:00+00:00"}
+
+    conn.execute("BEGIN IMMEDIATE")
+    assert store.prioritize_global_winner(
+        new,
+        current_batch_claim_generations=owned_generation,
+    ) is False
+    conn.rollback()
+    assert conn.execute(
+        "SELECT 1 FROM opportunity_events WHERE event_id = ?",
+        (new.event_id,),
+    ).fetchone() is None
+
+
+def test_global_target_rejects_stale_claim_generation_after_aba_reclaim():
+    conn, store = _store()
+    inflight = _forecast_event("inflight-aba", target_date="2026-05-25")
+    new = _forecast_event("new-aba", target_date="2026-05-25")
+    store.insert_or_ignore(inflight)
+    assert store.claim(
+        inflight.event_id,
+        claimed_at="2026-05-24T18:00:00+00:00",
+    )
+    assert store.claim(
+        inflight.event_id,
+        claimed_at="2026-05-24T18:06:00+00:00",
+    )
+    conn.commit()
+
+    conn.execute("BEGIN IMMEDIATE")
+    assert store.prioritize_global_winner(
+        new,
+        current_batch_claim_generations={
+            inflight.event_id: "2026-05-24T18:00:00+00:00"
+        },
+    ) is False
+    conn.rollback()
+    assert conn.execute(
+        "SELECT claimed_at FROM opportunity_event_processing WHERE event_id = ?",
+        (inflight.event_id,),
+    ).fetchone()[0] == "2026-05-24T18:06:00+00:00"
+    assert conn.execute(
+        "SELECT 1 FROM opportunity_events WHERE event_id = ?",
+        (new.event_id,),
+    ).fetchone() is None
+
+
+def test_global_target_commit_before_finalize_is_side_effect_free_and_reclaimable():
+    conn, store = _store()
+    inflight = _forecast_event("inflight-crash", target_date="2026-05-25")
+    target = _forecast_event("target-after-crash", target_date="2026-05-25")
+    store.insert_or_ignore(inflight)
+    assert store.claim(
+        inflight.event_id,
+        claimed_at="2026-05-25T06:09:00+00:00",
+    )
+    conn.commit()
+    generations = {inflight.event_id: "2026-05-25T06:09:00+00:00"}
+    no_submit = GlobalBatchSubmitResult(
+        receipts={
+            inflight.event_id: EventSubmissionReceipt(
+                False,
+                inflight.event_id,
+                inflight.causal_snapshot_id,
+                reason="GLOBAL_TARGET_HANDOFF",
+                proof_accepted=False,
+            )
+        },
+        winner_event_id=None,
+        venue_submit_count=0,
+        next_claim_event=target,
+    )
+
+    conn.execute("BEGIN IMMEDIATE")
+    assert store.prioritize_global_winner(
+        target,
+        current_batch_claim_generations=generations,
+    )
+    conn.commit()
+    fetched = store.fetch_pending(
+        decision_time="2026-05-25T06:10:00+00:00",
+        limit=1,
+    )
+
+    assert no_submit.venue_submit_count == 0
+    assert not any(receipt.submitted for receipt in no_submit.receipts.values())
+    assert _processing_status(conn, inflight.event_id) == "processing"
+    assert [event.event_id for event in fetched] == [target.event_id]
+
+
+def test_global_target_rejects_capability_that_left_processing():
+    conn, store = _store()
+    inflight = _forecast_event("inflight-disappeared", target_date="2026-05-25")
+    target = _forecast_event("target-after-disappearance", target_date="2026-05-25")
+    store.insert_or_ignore(inflight)
+    assert store.claim(
+        inflight.event_id,
+        claimed_at="2026-05-24T18:00:00+00:00",
+    )
+    old_capability = {inflight.event_id: "2026-05-24T18:00:00+00:00"}
+    assert store.claim(
+        inflight.event_id,
+        claimed_at="2026-05-24T18:06:00+00:00",
+    )
+    store.requeue_pending(inflight.event_id, last_error="TRANSIENT_NEW_OWNER")
+    conn.commit()
+
+    conn.execute("BEGIN IMMEDIATE")
+    assert store.prioritize_global_winner(
+        target,
+        current_batch_claim_generations=old_capability,
+    ) is False
+    conn.rollback()
+    assert conn.execute(
+        "SELECT 1 FROM opportunity_events WHERE event_id = ?",
+        (target.event_id,),
     ).fetchone() is None
 
 

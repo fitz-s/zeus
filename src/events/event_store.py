@@ -2038,7 +2038,12 @@ class EventStore:
             (not_before, last_error, _utc_now(), self.consumer_name, event_id),
         )
 
-    def prioritize_global_winner(self, event: OpportunityEvent) -> bool:
+    def prioritize_global_winner(
+        self,
+        event: OpportunityEvent,
+        *,
+        current_batch_claim_generations: dict[str, str] | None = None,
+    ) -> bool:
         """Materialize one current auction winner as the next legal claim.
 
         The global feasible set is independent of queue pagination, but venue
@@ -2059,8 +2064,36 @@ class EventStore:
         if not family[0] or not family[1] or family[2] not in {"high", "low"}:
             return False
 
+        allowed_claims = current_batch_claim_generations or {}
+        if allowed_claims:
+            if not self.conn.in_transaction:
+                return False
+            current_claims: dict[str, str] = {}
+            ordered_ids = sorted(allowed_claims)
+            for start in range(0, len(ordered_ids), 250):
+                chunk = ordered_ids[start : start + 250]
+                placeholders = ",".join("?" for _ in chunk)
+                rows = self.conn.execute(
+                    f"""
+                    SELECT event_id, claimed_at
+                      FROM opportunity_event_processing
+                     WHERE consumer_name = ?
+                       AND processing_status = 'processing'
+                       AND claimed_at IS NOT NULL
+                       AND event_id IN ({placeholders})
+                    """,
+                    (self.consumer_name, *chunk),
+                ).fetchall()
+                current_claims.update(
+                    (str(row[0]), str(row[1]))
+                    for row in rows
+                    if row[0] and row[1]
+                )
+            if current_claims != allowed_claims:
+                return False
+
         old_ids: set[str] = set()
-        processing_ids: set[str] = set()
+        processing_claims: dict[str, str] = {}
         for event_type, index_name in (
             ("FORECAST_SNAPSHOT_READY", "idx_opportunity_events_fsr_target_date"),
             ("EDLI_REDECISION_PENDING", "idx_opportunity_events_fsr_target_date"),
@@ -2073,7 +2106,7 @@ class EventStore:
             }[event_type]
             rows = self.conn.execute(
                 f"""
-                SELECT e.event_id, p.processing_status
+                SELECT e.event_id, p.processing_status, p.claimed_at
                   FROM opportunity_events e INDEXED BY {index_name}
                   JOIN opportunity_event_processing p
                     ON p.consumer_name = ? AND p.event_id = e.event_id
@@ -2100,11 +2133,14 @@ class EventStore:
                 if not event_id:
                     continue
                 if str(row[1] or "") == "processing":
-                    processing_ids.add(event_id)
+                    processing_claims[event_id] = str(row[2] or "")
                 elif event_id != event.event_id:
                     old_ids.add(event_id)
 
-        if processing_ids:
+        if any(
+            allowed_claims.get(event_id) != claimed_at
+            for event_id, claimed_at in processing_claims.items()
+        ):
             return False
 
         self.insert_or_ignore(event)
