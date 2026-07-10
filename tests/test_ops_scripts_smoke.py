@@ -2029,6 +2029,34 @@ def test_deploy_live_waits_for_fresh_prerequisite_code_identity(monkeypatch, tmp
     assert "verified" in detail
 
 
+def test_deploy_live_accepts_sidecar_abbreviated_head(monkeypatch, tmp_path):
+    dl = _load("deploy_live_prerequisite_identity_short", "deploy_live.py")
+    launched = datetime.now(timezone.utc)
+    state = tmp_path / "state"
+    state.mkdir()
+    expected = "8a89dc110e2489a8c9e7ba90688311c6be9b9b7f"
+    (state / "daemon-heartbeat-price-channel-ingest.json").write_text(
+        json.dumps(
+            {
+                "git_head": expected[:9],
+                "alive_at": launched.isoformat(),
+            }
+        )
+    )
+    monkeypatch.setattr(dl, "LIVE_REPO", str(tmp_path))
+
+    ok, detail = dl._wait_for_prerequisite_code_identity(
+        [dl.DAEMONS["price-channel-ingest"]],
+        expected_sha=expected,
+        launched_after=launched,
+        timeout_seconds=0,
+    )
+
+    assert ok is True
+    assert "verified" in detail
+    assert dl._git_head_matches(expected, expected[:6]) is False
+
+
 def test_deploy_live_prerequisite_code_identity_rejects_stale_sha(monkeypatch, tmp_path):
     dl = _load("deploy_live_prerequisite_identity_stale", "deploy_live.py")
     launched = datetime.now(timezone.utc)

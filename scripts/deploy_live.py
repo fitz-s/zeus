@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Lifecycle: created=2026-06-12; last_reviewed=2026-06-12; last_reused=2026-07-09
+# Lifecycle: created=2026-06-12; last_reviewed=2026-07-10; last_reused=2026-07-10
 # Purpose: make live daemon restarts SAFE — refuse `launchctl kickstart` while the LIVE
 #   checkout's runtime surface is uncommitted/unpushed, and require live restart preflight
 #   before booting the trading daemon.
@@ -367,6 +367,21 @@ def _load_json(path: Path) -> dict:
     return payload if isinstance(payload, dict) else {}
 
 
+def _git_head_matches(expected: str, observed: str) -> bool:
+    """Match a full HEAD to the >=7-hex abbreviation emitted by sidecars."""
+
+    expected = str(expected or "").strip()
+    observed = str(observed or "").strip()
+    return bool(
+        expected
+        and observed
+        and (
+            expected == observed
+            or (len(observed) >= 7 and expected.startswith(observed))
+        )
+    )
+
+
 def _wait_for_prerequisite_code_identity(
     labels: list[str],
     *,
@@ -401,7 +416,11 @@ def _wait_for_prerequisite_code_identity(
                 ),
                 None,
             )
-            if observed != expected or observed_at is None or observed_at < floor:
+            if (
+                not _git_head_matches(expected, observed)
+                or observed_at is None
+                or observed_at < floor
+            ):
                 pending.append(
                     f"{label}:sha={observed[:9] if observed else '<missing>'} "
                     f"at={observed_at.isoformat() if observed_at else '<missing>'}"
