@@ -1,5 +1,5 @@
 # Created: 2026-06-08
-# Last reused or audited: 2026-06-08
+# Last reused or audited: 2026-07-10
 # Authority basis: "bin selection.md" §12.D + §3 (ΔU objective) + §5.3 (cost-curve ELG)
 #                  + §4 (native YES/NO belief separation) + §6 (best-candidate
 #                  selection) + §11 (Phase 4) + §14.7
@@ -49,8 +49,11 @@ These exercise pure objects and pure functions. No live decision path is touched
 """
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import timedelta
 from decimal import Decimal
+
+import pytest
 
 from src.contracts.executable_cost_curve import (
     BookLevel,
@@ -162,6 +165,55 @@ BINS = ["B0", "B1", "B2"]
 
 def _matrix(bins=BINS):
     return FamilyPayoffMatrix.over_bins(bins)
+
+
+@pytest.mark.parametrize("bound", ["depth", "bankroll"])
+@pytest.mark.parametrize("utility", [0.01, 0.0, -0.01])
+def test_score_candidate_evaluates_only_feasible_stake(monkeypatch, bound, utility):
+    candidate = _yes_candidate(
+        "B0",
+        q_yes_samples=_samples_centered(0.60),
+        ask="0.10",
+        token_id="t-boundary",
+    )
+    candidate = replace(
+        candidate,
+        executable_cost_curve=_curve(
+            "0.10",
+            token_id="t-boundary",
+            size="1" if bound == "depth" else "100",
+        ),
+    )
+    matrix = _matrix()
+    pi = {"B0": 0.60, "B1": 0.20, "B2": 0.10, OUTSIDE_OUTCOME: 0.10}
+    exposure = PortfolioExposureVector.flat(matrix, baseline=Decimal("1000"))
+    calls = []
+
+    def _utility_at_stake(*args):
+        calls.append(args[-1])
+        return utility
+
+    monkeypatch.setattr(
+        "src.strategy.utility_ranker._delta_u_at_stake",
+        _utility_at_stake,
+    )
+    max_stake = Decimal("0.10") if bound == "bankroll" else None
+
+    score = score_candidate(
+        candidate,
+        matrix,
+        pi,
+        exposure,
+        max_stake_usd=max_stake,
+    )
+
+    assert calls == [Decimal("0.10")]
+    assert score.n_evals == 1
+    assert score.optimal_stake_usd == (
+        Decimal("0.10") if utility > 0.0 else Decimal("0")
+    )
+    assert score.delta_u == pytest.approx(utility)
+    assert score.delta_u_at_min_order == pytest.approx(utility)
 
 
 # ==========================================================================

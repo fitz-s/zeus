@@ -805,7 +805,7 @@ def optimize_vector_stake(
     existing exposure, maximized at the robust tail — NEVER a binary scalar ``f_star``.
     """
     lo, hi = _feasible_stake_bounds(candidate, max_stake_usd)
-    if lo is None or hi is None or hi <= lo:
+    if lo is None or hi is None or hi < lo:
         return Decimal("0"), 0.0, float("-inf")
 
     # Untradeable candidates have no robust ΔU (robust_delta_u returns -inf for them and
@@ -838,6 +838,10 @@ def optimize_vector_stake(
     delta_u_at_min = prepared.robust_at(lo)
     if not _math.isfinite(delta_u_at_min):
         delta_u_at_min = 0.0
+    if hi == lo:
+        if delta_u_at_min > 0.0:
+            return lo, delta_u_at_min, delta_u_at_min
+        return Decimal("0"), delta_u_at_min, delta_u_at_min
 
     coarse_stakes = set(_uniform_stake_grid(lo, hi, _COARSE_STEPS))
     cumulative_notional = Decimal("0")

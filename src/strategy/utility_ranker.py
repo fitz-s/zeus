@@ -614,7 +614,7 @@ def score_candidate(
 
     curve = candidate.executable_cost_curve
     lo, hi = _feasible_stake_bounds(curve, max_stake_usd)
-    if lo is None or hi is None or hi <= lo:
+    if lo is None or hi is None or hi < lo:
         return RobustCandidateScore(
             candidate=candidate,
             delta_u=0.0,
@@ -636,6 +636,26 @@ def score_candidate(
     # uses (one extra avg_cost walk), so the min-order edge is robust-consistent with
     # the optimal-stake edge — never a looser point estimate.
     delta_u_at_min_order = _delta_u_at_stake(candidate, matrix, eff_pi, exposure, lo)
+    if hi == lo:
+        if math.isfinite(delta_u_at_min_order) and delta_u_at_min_order > 0.0:
+            return RobustCandidateScore(
+                candidate=candidate,
+                delta_u=delta_u_at_min_order,
+                optimal_stake_usd=lo,
+                no_trade_reason="",
+                n_evals=1,
+                delta_u_at_min_order=delta_u_at_min_order,
+                min_order_notional_usd=lo,
+            )
+        return RobustCandidateScore(
+            candidate=candidate,
+            delta_u=(delta_u_at_min_order if math.isfinite(delta_u_at_min_order) else 0.0),
+            optimal_stake_usd=Decimal("0"),
+            no_trade_reason="robust marginal expected log utility <= 0 (§13)",
+            n_evals=1,
+            delta_u_at_min_order=delta_u_at_min_order,
+            min_order_notional_usd=lo,
+        )
 
     best_u = float("-inf")
     best_s = Decimal("0")

@@ -1,5 +1,5 @@
 # Created: 2026-06-14
-# Last reused or audited: 2026-07-09
+# Last reused or audited: 2026-07-10
 # Authority basis: docs/rebuild/consult_build_spec.md
 #   ("Create src/decision/payoff_vector.py" block lines 734-802: the edge calculation
 #   759-774 — point_fair_value = q @ payoff, point_edge = point_fair_value -
@@ -627,6 +627,65 @@ def test_optimize_vector_stake_sanitizes_nan_delta_u_at_min(monkeypatch):
     # The NaN at venue-min stake is sanitized to 0.0 (exercises the _math.isfinite guard —
     # RED if `import math as _math` is below this guard's use: UnboundLocalError).
     assert delta_u_at_min == 0.0
+
+
+@pytest.mark.parametrize("bound", ["depth", "bankroll"])
+@pytest.mark.parametrize("utility", [0.01, 0.0, -0.01])
+def test_optimize_vector_stake_evaluates_only_feasible_stake(
+    monkeypatch,
+    bound,
+    utility,
+):
+    class _Level:
+        price = Decimal("0.10")
+        size = Decimal("5") if bound == "depth" else Decimal("100")
+
+    class _FeeModel:
+        @staticmethod
+        def all_in_price(price: Decimal) -> Decimal:
+            return price
+
+    class _Curve:
+        levels = (_Level(),)
+        fee_model = _FeeModel()
+        min_order_size = Decimal("5")
+
+    class _Candidate:
+        is_tradeable = True
+        executable_cost_curve = _Curve()
+
+    class _Band:
+        alpha = 0.05
+
+    calls = []
+
+    class _FakePrepared:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def robust_at(self, stake_usd):
+            calls.append(stake_usd)
+            return utility
+
+        def robust_many(self, stakes_usd):
+            raise AssertionError("single feasible stake must not enter grid search")
+
+    monkeypatch.setattr("src.decision.payoff_vector._PreparedSizing", _FakePrepared)
+    max_stake = Decimal("0.50") if bound == "bankroll" else None
+
+    stake, optimal_delta_u, delta_u_at_min = optimize_vector_stake(
+        _Candidate(),
+        band=_Band(),
+        omega=object(),
+        matrix=object(),
+        exposure=object(),
+        max_stake_usd=max_stake,
+    )
+
+    assert calls == [Decimal("0.50")]
+    assert stake == (Decimal("0.50") if utility > 0.0 else Decimal("0"))
+    assert optimal_delta_u == pytest.approx(utility)
+    assert delta_u_at_min == pytest.approx(utility)
 
 
 
