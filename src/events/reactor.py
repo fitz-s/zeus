@@ -5159,28 +5159,42 @@ def _edli_expire_unready_forecast_snapshot_pending(
     _FORECAST_FAMILY_CHUNK = 250
     for start in range(0, len(family_keys), _FORECAST_FAMILY_CHUNK):
         chunk = family_keys[start : start + _FORECAST_FAMILY_CHUNK]
-        key_predicate = " OR ".join(
-            "(city = ? AND target_date = ? AND temperature_metric = ?)" for _ in chunk
-        )
-        params: list[Any] = [REPLACEMENT_0_1_PRODUCT_ID, decision_time, decision_time]
+        family_values = ",".join("(?, ?, ?)" for _ in chunk)
+        params: list[Any] = []
         for city, target_date, metric in chunk:
             params.extend([city, target_date, metric])
+        params.extend([REPLACEMENT_0_1_PRODUCT_ID, decision_time, decision_time])
         try:
             latest_rows = forecasts_conn.execute(
                 f"""
-                SELECT city, target_date, temperature_metric, source_cycle_time
-                  FROM forecast_posteriors
-                 WHERE product_id = ?
-                   AND runtime_layer = 'live'
-                   AND (source_available_at IS NULL OR source_available_at <= ?)
-                   AND (computed_at IS NULL OR computed_at <= ?)
-                   AND ({key_predicate})
-                 ORDER BY city ASC,
-                          target_date ASC,
-                          temperature_metric ASC,
-                          source_cycle_time DESC,
-                          computed_at DESC,
-                          posterior_id DESC
+                WITH families(city, target_date, metric) AS (
+                    VALUES {family_values}
+                )
+                SELECT family.city,
+                       family.target_date,
+                       family.metric,
+                       (
+                           SELECT posterior.source_cycle_time
+                             FROM forecast_posteriors AS posterior
+                            WHERE posterior.product_id = ?
+                              AND posterior.runtime_layer = 'live'
+                              AND posterior.city = family.city
+                              AND posterior.target_date = family.target_date
+                              AND posterior.temperature_metric = family.metric
+                              AND (
+                                  posterior.source_available_at IS NULL
+                                  OR posterior.source_available_at <= ?
+                              )
+                              AND (
+                                  posterior.computed_at IS NULL
+                                  OR posterior.computed_at <= ?
+                              )
+                            ORDER BY posterior.source_cycle_time DESC,
+                                     posterior.computed_at DESC,
+                                     posterior.posterior_id DESC
+                            LIMIT 1
+                       ) AS source_cycle_time
+                  FROM families AS family
                 """,
                 tuple(params),
             ).fetchall()
@@ -5205,24 +5219,34 @@ def _edli_expire_unready_forecast_snapshot_pending(
             continue
         for start in range(0, len(keys), _FORECAST_FAMILY_CHUNK):
             chunk = keys[start : start + _FORECAST_FAMILY_CHUNK]
-            key_predicate = " OR ".join(
-                "(city = ? AND target_date = ? AND metric = ?)" for _ in chunk
-            )
-            params: list[Any] = [cycle_start, cycle_end, decision_time]
+            family_values = ",".join("(?, ?, ?)" for _ in chunk)
+            params: list[Any] = []
             for city, target_date, metric in chunk:
                 params.extend([city, target_date, metric])
+            params.extend([cycle_start, cycle_end, decision_time])
             try:
                 count_rows = forecasts_conn.execute(
                     f"""
-                    SELECT city, target_date, metric, COUNT(DISTINCT model)
-                      FROM raw_model_forecasts INDEXED BY idx_raw_model_forecasts_endpoint_family_cycle_members
-                     WHERE source_cycle_time >= ?
-                       AND source_cycle_time < ?
-                       AND source_available_at <= ?
-                       AND endpoint = 'single_runs'
-                       AND forecast_value_c IS NOT NULL
-                       AND ({key_predicate})
-                     GROUP BY city, target_date, metric
+                    WITH families(city, target_date, metric) AS (
+                        VALUES {family_values}
+                    )
+                    SELECT family.city,
+                           family.target_date,
+                           family.metric,
+                           (
+                               SELECT COUNT(DISTINCT forecast.model)
+                                 FROM raw_model_forecasts AS forecast
+                                      INDEXED BY idx_raw_model_forecasts_endpoint_family_cycle_members
+                                WHERE forecast.endpoint = 'single_runs'
+                                  AND forecast.city = family.city
+                                  AND forecast.target_date = family.target_date
+                                  AND forecast.metric = family.metric
+                                  AND forecast.source_cycle_time >= ?
+                                  AND forecast.source_cycle_time < ?
+                                  AND forecast.source_available_at <= ?
+                                  AND forecast.forecast_value_c IS NOT NULL
+                           ) AS member_count
+                      FROM families AS family
                     """,
                     tuple(params),
                 ).fetchall()

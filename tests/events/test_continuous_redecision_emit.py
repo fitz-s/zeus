@@ -1,5 +1,5 @@
 # Created: 2026-05-31
-# Last reused or audited: 2026-06-18
+# Last reused or audited: 2026-07-09
 # Authority basis: GOAL #36 continuous trading + PLAN_CONTINUOUS_REDECISION_MAX_ALPHA_2026-05-31.md.
 #   Proves the continuous re-decision emit: scan_committed_snapshots(source=<per-cycle>) re-emits a
 #   fresh FSR-equivalent each cycle (distinct event_id) instead of deduping to the consumed FSR, so
@@ -25,6 +25,7 @@ from src.events.opportunity_event import ForecastSnapshotReadyPayload, make_oppo
 from src.events.triggers.forecast_snapshot_ready import (
     CoverageFairnessRequest,
     ForecastSnapshotReadyTrigger,
+    REPLACEMENT_0_1_PRODUCT_ID,
     _filter_rows_to_restricted_families,
     executable_forecast_live_eligible_reader,
 )
@@ -1509,6 +1510,59 @@ def test_unvalued_pending_redecision_is_kept_for_admitted_held_reemit_family():
     assert tuple(row) == ("pending", None)
 
 
+def _replacement_spine_test_conn() -> sqlite3.Connection:
+    forecasts = sqlite3.connect(":memory:")
+    forecasts.execute(
+        """
+        CREATE TABLE forecast_posteriors (
+            posterior_id INTEGER PRIMARY KEY,
+            product_id TEXT,
+            city TEXT,
+            target_date TEXT,
+            temperature_metric TEXT,
+            source_cycle_time TEXT,
+            source_available_at TEXT,
+            computed_at TEXT,
+            runtime_layer TEXT
+        )
+        """
+    )
+    forecasts.execute(
+        """
+        CREATE INDEX idx_forecast_posteriors_live_family_cycle
+            ON forecast_posteriors (
+                product_id, city, target_date, temperature_metric,
+                source_cycle_time, computed_at, posterior_id
+            )
+            WHERE runtime_layer = 'live'
+        """
+    )
+    forecasts.execute(
+        """
+        CREATE TABLE raw_model_forecasts (
+            endpoint TEXT,
+            model TEXT,
+            city TEXT,
+            target_date TEXT,
+            metric TEXT,
+            source_cycle_time TEXT,
+            source_available_at TEXT,
+            forecast_value_c REAL
+        )
+        """
+    )
+    forecasts.execute(
+        """
+        CREATE INDEX idx_raw_model_forecasts_endpoint_family_cycle_members
+            ON raw_model_forecasts (
+                endpoint, city, target_date, metric, source_cycle_time,
+                source_available_at, model
+            )
+        """
+    )
+    return forecasts
+
+
 def test_unready_replacement_fsr_pending_expires_on_latest_spine_gap():
     world = sqlite3.connect(":memory:")
     init_schema(world)
@@ -1532,40 +1586,12 @@ def test_unready_replacement_fsr_pending_expires_on_latest_spine_gap():
     )
     store.insert_or_ignore(event)
 
-    forecasts = sqlite3.connect(":memory:")
-    forecasts.execute(
-        """
-        CREATE TABLE forecast_posteriors (
-            posterior_id INTEGER PRIMARY KEY,
-            product_id TEXT,
-            city TEXT,
-            target_date TEXT,
-            temperature_metric TEXT,
-            source_cycle_time TEXT,
-            source_available_at TEXT,
-            computed_at TEXT,
-            runtime_layer TEXT
-        )
-        """
-    )
-    forecasts.execute(
-        """
-        CREATE TABLE raw_model_forecasts (
-            model TEXT,
-            city TEXT,
-            target_date TEXT,
-            metric TEXT,
-            source_cycle_time TEXT,
-            source_available_at TEXT,
-            forecast_value_c REAL
-        )
-        """
-    )
+    forecasts = _replacement_spine_test_conn()
     forecasts.execute(
         """
         INSERT INTO forecast_posteriors VALUES (
             1,
-            'openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor_v1',
+            ?,
             'Cape Town',
             '2026-06-19',
             'high',
@@ -1574,12 +1600,13 @@ def test_unready_replacement_fsr_pending_expires_on_latest_spine_gap():
             '2026-06-18T07:58:00+00:00',
             'live'
         )
-        """
+        """,
+        (REPLACEMENT_0_1_PRODUCT_ID,),
     )
     forecasts.executemany(
         """
         INSERT INTO raw_model_forecasts VALUES (
-            ?, 'Cape Town', '2026-06-19', 'high',
+            'single_runs', ?, 'Cape Town', '2026-06-19', 'high',
             '2026-06-17T18:00:00+00:00',
             '2026-06-17T19:00:00+00:00',
             ?
@@ -1610,15 +1637,104 @@ def test_unready_replacement_fsr_pending_expires_on_latest_spine_gap():
     )
 
 
+def test_unready_replacement_sweep_keeps_251_ready_families_pending():
+    world = sqlite3.connect(":memory:")
+    init_schema(world)
+    store = EventStore(world, consumer_name="edli_reactor_v1")
+    forecasts = _replacement_spine_test_conn()
+    target_date = "2026-06-19"
+    cycle_date = "2026-06-18"
+    posterior_rows = []
+    raw_rows = []
+
+    for index in range(251):
+        city = f"Chunk City {index:03d}"
+        snapshot_id = f"rmf-{city}|{target_date}|high|{cycle_date}"
+        store.insert_or_ignore(
+            make_opportunity_event(
+                event_type="FORECAST_SNAPSHOT_READY",
+                entity_key=f"{city}|{target_date}|high|{snapshot_id}",
+                source="cycle-test",
+                observed_at="2026-06-18T07:58:00+00:00",
+                available_at="2026-06-18T07:58:00+00:00",
+                received_at="2026-06-18T07:58:00+00:00",
+                causal_snapshot_id=snapshot_id,
+                payload={
+                    "city": city,
+                    "target_date": target_date,
+                    "metric": "high",
+                    "snapshot_id": snapshot_id,
+                },
+                priority=50,
+            )
+        )
+        posterior_rows.append(
+            (
+                index + 1,
+                REPLACEMENT_0_1_PRODUCT_ID,
+                city,
+                target_date,
+                "high",
+                "2026-06-18T00:00:00+00:00",
+                "2026-06-18T06:39:00+00:00",
+                "2026-06-18T07:58:00+00:00",
+                "live",
+            )
+        )
+        raw_rows.extend(
+            (
+                "single_runs",
+                f"model-{model}",
+                city,
+                target_date,
+                "high",
+                "2026-06-18T00:00:00+00:00",
+                "2026-06-18T07:00:00+00:00",
+                20.0 + model,
+            )
+            for model in range(3)
+        )
+
+    forecasts.executemany(
+        "INSERT INTO forecast_posteriors VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        posterior_rows,
+    )
+    forecasts.executemany(
+        "INSERT INTO raw_model_forecasts VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        raw_rows,
+    )
+
+    expired = reactor._edli_expire_unready_forecast_snapshot_pending(
+        world,
+        forecasts,
+        decision_time="2026-06-18T08:00:00+00:00",
+    )
+
+    pending = world.execute(
+        """
+        SELECT COUNT(*)
+          FROM opportunity_event_processing
+         WHERE consumer_name = 'edli_reactor_v1'
+           AND processing_status = 'pending'
+        """
+    ).fetchone()[0]
+    assert expired == 0
+    assert pending == 251
+
+
 def test_unready_replacement_sweep_batches_forecast_reads():
     src = inspect.getsource(reactor._edli_expire_unready_forecast_snapshot_pending)
     assert "date(source_cycle_time)" not in src
+    assert "WITH families" in src
     assert "runtime_layer = 'live'" in src
+    assert "posterior.city = family.city" in src
+    assert "LIMIT 1" in src
     assert "endpoint = 'single_runs'" in src
+    assert "forecast.city = family.city" in src
     assert "INDEXED BY idx_raw_model_forecasts_endpoint_family_cycle_members" in src
     assert "latest_cycle_by_family" in src
     assert "member_count_by_family_cycle" in src
-    assert "COUNT(DISTINCT model)" in src
+    assert "COUNT(DISTINCT forecast.model)" in src
 
 
 def test_unready_replacement_sweep_is_gated_by_active_rmf_queue():
