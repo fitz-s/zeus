@@ -1140,7 +1140,8 @@ def _global_book_metadata_conn(probability):
             min_order_size TEXT NOT NULL,
             captured_at TEXT NOT NULL,
             freshness_deadline TEXT NOT NULL,
-            tradeability_status_json TEXT NOT NULL
+            tradeability_status_json TEXT NOT NULL,
+            orderbook_depth_json TEXT NOT NULL
         )
         """
     )
@@ -1162,7 +1163,7 @@ def _global_book_metadata_conn(probability):
             snapshot_id = f"metadata-{binding.condition_id}-{side}"
             conn.execute(
                 "INSERT INTO executable_market_snapshots VALUES "
-                "(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     snapshot_id,
                     binding.condition_id,
@@ -1179,6 +1180,7 @@ def _global_book_metadata_conn(probability):
                     "2026-07-10T07:59:00+00:00",
                     "2026-07-10T08:00:30+00:00",
                     '{"executable_allowed":true}',
+                    '{"unused_append_payload":"must_not_be_read"}',
                 ),
             )
             conn.execute(
@@ -1217,6 +1219,18 @@ def test_current_global_book_epoch_reads_yes_and_no_symmetrically():
     assert result.global_family is not None
     probability = result.global_family.probability_witness
     conn = _global_book_metadata_conn(probability)
+    denied_columns = {"orderbook_depth_json"}
+
+    def metadata_authorizer(action, table, column, _db, _trigger):
+        if (
+            action == sqlite3.SQLITE_READ
+            and table == "executable_market_snapshots"
+            and column in denied_columns
+        ):
+            return sqlite3.SQLITE_DENY
+        return sqlite3.SQLITE_OK
+
+    conn.set_authorizer(metadata_authorizer)
     requested = []
     at = _dt.datetime(2026, 7, 10, 8, 0, tzinfo=_dt.timezone.utc)
     times = iter((at, at + _dt.timedelta(seconds=1)))
@@ -1250,6 +1264,21 @@ def test_current_global_book_epoch_reads_yes_and_no_symmetrically():
     assert len(epoch.assets) == expected
     assert {asset.side for asset in epoch.assets} == {"YES", "NO"}
     assert all(asset.curve.token_id == asset.token_id for asset in epoch.assets)
+
+    required_conn = _global_book_metadata_conn(probability)
+    denied_columns.clear()
+    denied_columns.add("fee_details_json")
+    required_conn.set_authorizer(metadata_authorizer)
+    required_times = iter((at, at + _dt.timedelta(seconds=1)))
+    with pytest.raises(sqlite3.DatabaseError, match="not authorized|prohibited"):
+        capture_current_global_book_epoch(
+            required_conn,
+            probability_witnesses={probability.family_key: probability},
+            get_books=books,
+            clock=lambda: next(required_times),
+            max_age=_dt.timedelta(seconds=30),
+            batch_size=500,
+        )
 
 
 def test_current_global_book_epoch_rejects_one_missing_native_side():
@@ -1489,7 +1518,7 @@ def test_current_gamma_identity_fills_missing_no_without_changing_q():
                'conflicting-yes', 'conflicting-no', enable_orderbook, active,
                closed, accepting_orders, fee_details_json, min_tick_size,
                min_order_size, captured_at, freshness_deadline,
-               tradeability_status_json
+               tradeability_status_json, orderbook_depth_json
           FROM executable_market_snapshots
          WHERE condition_id = ?
          LIMIT 1

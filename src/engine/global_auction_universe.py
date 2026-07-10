@@ -206,9 +206,26 @@ def _global_book_snapshot_rows(
     for offset in range(0, len(clean), 400):
         chunk = clean[offset : offset + 400]
         placeholders = ",".join("?" for _ in chunk)
+        # Current CLOB responses own price/depth for this epoch.  Project only
+        # topology/execution metadata here; ``s.*`` also loads the append row's
+        # large historical depth payload and can outlive the quote it supports.
         cur = trade_conn.execute(
             f"""
-            SELECT s.*
+            SELECT s.snapshot_id,
+                   s.condition_id,
+                   s.selected_outcome_token_id,
+                   s.yes_token_id,
+                   s.no_token_id,
+                   s.enable_orderbook,
+                   s.active,
+                   s.closed,
+                   s.accepting_orders,
+                   s.min_tick_size,
+                   s.min_order_size,
+                   s.fee_details_json,
+                   s.tradeability_status_json,
+                   s.captured_at,
+                   s.freshness_deadline
               FROM executable_market_snapshot_latest AS latest
               JOIN executable_market_snapshots AS s
                 ON s.snapshot_id = latest.snapshot_id
