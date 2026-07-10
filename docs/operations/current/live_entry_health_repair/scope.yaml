@@ -10,6 +10,7 @@ in_scope:
 - tests/test_run_mode_failure_surfaces.py
 - tests/events/test_claim_lock_storm.py
 - tests/events/test_continuous_redecision_emit.py
+- tests/events/test_reactor.py
 - tests/test_phase2_exit_emitter_revival.py
 allow_companions:
 - architecture/test_topology.yaml

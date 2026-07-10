@@ -368,6 +368,14 @@ def test_global_batch_claims_epoch_then_calls_one_lock_free_batch_seam():
     assert observations["claimed_statuses_at_batch"] == ("processing", "processing")
     assert result.retried == 2
     assert all(_processing_status(conn, event.event_id) == "pending" for event in events)
+    assert {
+        row[0]
+        for row in conn.execute(
+            "SELECT last_error FROM opportunity_event_processing "
+            "WHERE event_id IN (?, ?)",
+            tuple(event.event_id for event in events),
+        )
+    } == {"SUBMIT_ABORTED_PRICE_MOVED:GLOBAL_TEST_NO_CURRENT_WINNER"}
 
 
 def test_global_batch_incomplete_receipt_coverage_fails_closed_for_whole_epoch():
@@ -411,6 +419,38 @@ def test_global_batch_materializes_unclaimed_winner_as_next_claim():
         (target.event_id,),
     ).fetchone()
     assert row[0] == "GLOBAL_WINNER_TARGETED_CLAIM"
+    assert store.fetch_pending(
+        decision_time=_DT_VENUE_OPEN.isoformat(), limit=1
+    )[0].event_id == target.event_id
+
+
+def test_global_target_keeps_claim_priority_after_transient_epoch():
+    conn, store = _store()
+    from src.engine.global_batch_runtime import _next_claim_carrier
+
+    base = _forecast_event("target-retry", target_date="2026-05-25")
+    target = _next_claim_carrier(
+        base,
+        targeted_at=_DT_VENUE_OPEN,
+        economic_identity="test-economic-identity",
+        payload=json.loads(base.payload_json),
+    )
+    assert store.prioritize_global_winner(target)
+    observations = {}
+    reactor = _global_batch_probe_reactor(store, observations)
+
+    result = reactor.process_pending(decision_time=_DT_VENUE_OPEN, limit=1)
+
+    assert result.retried == 1
+    assert result.rejection_reasons == [
+        "SUBMIT_ABORTED_PRICE_MOVED:GLOBAL_TEST_NO_CURRENT_WINNER"
+    ]
+    row = conn.execute(
+        "SELECT processing_status, last_error "
+        "FROM opportunity_event_processing WHERE event_id = ?",
+        (target.event_id,),
+    ).fetchone()
+    assert tuple(row) == ("pending", "GLOBAL_WINNER_TARGETED_CLAIM")
     assert store.fetch_pending(
         decision_time=_DT_VENUE_OPEN.isoformat(), limit=1
     )[0].event_id == target.event_id

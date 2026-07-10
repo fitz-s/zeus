@@ -55,7 +55,7 @@ from zoneinfo import ZoneInfo
 
 from src.decision_kernel import claims
 from src.events.day0_authority import normalize_day0_live_authority_status
-from src.events.event_store import EventStore
+from src.events.event_store import EventStore, GLOBAL_WINNER_TARGETED_CLAIM
 from src.events.opportunity_event import OpportunityEvent, assert_available_for_decision
 from src.state.db import get_trade_connection_read_only, get_world_connection_read_only, world_write_mutex
 from src.strategy.live_inference.live_admission import (
@@ -2097,10 +2097,17 @@ class OpportunityEventReactor:
                         + timedelta(seconds=_runtime_authority_retry_delay_seconds())
                     ).isoformat()
                 self._note_transient_requeue(event)
+                processing_error = (
+                    GLOBAL_WINNER_TARGETED_CLAIM
+                    if str(event.source or "").startswith(
+                        "global_auction_winner_target:"
+                    )
+                    else last_reason
+                )
                 self._store.requeue_pending(
                     event.event_id,
                     not_before=retry_not_before,
-                    last_error=last_reason,
+                    last_error=processing_error,
                 )
                 result.retried += 1
                 result.rejection_reasons.append(last_reason or "EXECUTABLE_SNAPSHOT_PENDING")
