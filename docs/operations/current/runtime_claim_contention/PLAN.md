@@ -2,7 +2,7 @@
 
 Date: 2026-07-10
 Branch: `agent/runtime-throughput-first-principles`
-Status: active
+Status: landed
 
 ## Background
 

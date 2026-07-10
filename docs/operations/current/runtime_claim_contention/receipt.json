@@ -1,0 +1,47 @@
+{
+  "packet": "current/runtime_claim_contention",
+  "branch": "agent/runtime-throughput-first-principles",
+  "head": "666642225",
+  "closed_at_utc": "2026-07-10T12:11:20.806739+00:00",
+  "scope": {
+    "in_scope": [
+      "docs/operations/current/runtime_claim_contention/**",
+      "src/events/reactor.py",
+      "tests/events/test_claim_lock_storm.py"
+    ],
+    "allow_companions": [
+      "architecture/test_topology.yaml",
+      "docs/operations/current_state.md"
+    ],
+    "out_of_scope": [
+      "state/zeus-world.db",
+      "state/zeus-world.db-*",
+      "state/zeus_trades.db",
+      "state/zeus_trades.db-*",
+      "src/execution/**",
+      "src/venue/**"
+    ]
+  },
+  "commit_log": [
+    "666642225 perf(reactor): collapse repeated claim contention waits"
+  ],
+  "deliverables": "PLAN.md; src/events/reactor.py; tests/events/test_claim_lock_storm.py; architecture/test_topology.yaml",
+  "verification": {
+    "staged_only_tests": [
+      "tests/events/test_claim_lock_storm.py: 9 passed",
+      "tests/events/test_reactor.py -k 'global_batch or sqlite_lock' on HEAD: 3 passed, 52 deselected"
+    ],
+    "working_tree_compatibility": "tests/events/test_reactor.py -k 'global_batch or sqlite_lock' with unstaged co-tenant global-batch seam: 6 passed, 52 deselected",
+    "benchmark": "8 sustained mutex-contention events: 6.035s before, 0.753-0.760s after; 8.0x faster; 8 retries and pending semantics preserved",
+    "guards": [
+      "py_compile passed",
+      "git diff --check passed",
+      "planning-lock passed",
+      "map-maintenance passed",
+      "gitleaks passed"
+    ],
+    "independent_review": "REQUEST_CHANGES on claimed-success coverage; fixed; final APPROVE",
+    "topology": "changed test has zero topology issues; repo-wide pre-existing drift remains 52 errors and 546 warnings"
+  },
+  "runtime_posture": "not deployed or restarted; production daemon remains on its previously loaded SHA"
+}

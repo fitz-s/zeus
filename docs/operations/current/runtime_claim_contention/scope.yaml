@@ -13,4 +13,4 @@ out_of_scope:
 - state/zeus_trades.db-*
 - src/execution/**
 - src/venue/**
-status: in_progress
+status: landed
