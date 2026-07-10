@@ -664,6 +664,7 @@ def _global_book_metadata_conn(probability):
             min_tick_size TEXT NOT NULL,
             min_order_size TEXT NOT NULL,
             captured_at TEXT NOT NULL,
+            freshness_deadline TEXT NOT NULL,
             tradeability_status_json TEXT NOT NULL
         )
         """
@@ -686,7 +687,7 @@ def _global_book_metadata_conn(probability):
             snapshot_id = f"metadata-{binding.condition_id}-{side}"
             conn.execute(
                 "INSERT INTO executable_market_snapshots VALUES "
-                "(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     snapshot_id,
                     binding.condition_id,
@@ -701,6 +702,7 @@ def _global_book_metadata_conn(probability):
                     "0.01",
                     "5",
                     "2026-07-10T07:59:00+00:00",
+                    "2026-07-10T08:00:30+00:00",
                     '{"executable_allowed":true}',
                 ),
             )
@@ -961,6 +963,81 @@ def test_current_gamma_identity_fills_missing_no_without_changing_q():
     assert gamma_metadata[
         (rebound.bindings[0].condition_id, rebound.bindings[0].no_token_id)
     ]["fee_details_json"]
+
+    gamma_calls = []
+    local = bind_current_global_probability_tokens(
+        forecast,
+        probability_witnesses={missing.family_key: missing},
+        get_gamma_event=lambda slug: gamma_calls.append(slug),
+        trade_conn=_global_book_metadata_conn(original),
+        checked_at_utc=_dt.datetime(2026, 7, 10, 8, 0, tzinfo=_dt.timezone.utc),
+    )[missing.family_key]
+    assert gamma_calls == []
+    assert local.bindings == original.bindings
+    assert local.sample_matrix_identity == missing.sample_matrix_identity
+
+    stale_calls = []
+    stale_fallback = bind_current_global_probability_tokens(
+        forecast,
+        probability_witnesses={missing.family_key: missing},
+        get_gamma_event=lambda slug: stale_calls.append(slug) or gamma_event,
+        trade_conn=_global_book_metadata_conn(original),
+        checked_at_utc=_dt.datetime(2026, 7, 10, 8, 1, tzinfo=_dt.timezone.utc),
+    )[missing.family_key]
+    assert stale_calls == ["current-family-slug"]
+    assert stale_fallback.bindings == original.bindings
+
+    partial = _global_book_metadata_conn(original)
+    missing_condition = missing.bindings[0].condition_id
+    partial.execute(
+        "DELETE FROM executable_market_snapshot_latest WHERE condition_id = ?",
+        (missing_condition,),
+    )
+    partial_calls = []
+    fallback = bind_current_global_probability_tokens(
+        forecast,
+        probability_witnesses={missing.family_key: missing},
+        get_gamma_event=lambda slug: (
+            partial_calls.append(slug) or gamma_event
+        ),
+        trade_conn=partial,
+        checked_at_utc=_dt.datetime(2026, 7, 10, 8, 0, tzinfo=_dt.timezone.utc),
+    )[missing.family_key]
+    assert partial_calls == ["current-family-slug"]
+    assert fallback.bindings == original.bindings
+
+    ambiguous = _global_book_metadata_conn(original)
+    ambiguous.execute(
+        """
+        INSERT INTO executable_market_snapshots
+        SELECT 'conflicting-topology', condition_id, 'conflicting-selected',
+               'conflicting-yes', 'conflicting-no', enable_orderbook, active,
+               closed, accepting_orders, fee_details_json, min_tick_size,
+               min_order_size, captured_at, freshness_deadline,
+               tradeability_status_json
+          FROM executable_market_snapshots
+         WHERE condition_id = ?
+         LIMIT 1
+        """,
+        (missing_condition,),
+    )
+    ambiguous.execute(
+        "INSERT INTO executable_market_snapshot_latest VALUES (?,?,?)",
+        (missing_condition, "conflicting-selected", "conflicting-topology"),
+    )
+    with pytest.raises(
+        ValueError,
+        match=f"GLOBAL_LOCAL_TOKEN_IDENTITY_AMBIGUOUS:{missing_condition}",
+    ):
+        bind_current_global_probability_tokens(
+            forecast,
+            probability_witnesses={missing.family_key: missing},
+            get_gamma_event=lambda _slug: gamma_event,
+            trade_conn=ambiguous,
+            checked_at_utc=_dt.datetime(
+                2026, 7, 10, 8, 0, tzinfo=_dt.timezone.utc
+            ),
+        )
 
 
 def test_global_scope_is_independent_of_the_reactor_page_and_current_q_identity():

@@ -540,10 +540,12 @@ def bind_current_global_probability_tokens(
     *,
     probability_witnesses: Mapping[str, JointOutcomeProbabilityWitness],
     get_gamma_event: Callable[[str], Mapping[str, object] | None],
+    trade_conn: sqlite3.Connection | None = None,
+    checked_at_utc: datetime | None = None,
     max_workers: int = 8,
     metadata_sink: dict[tuple[str, str], Mapping[str, object]] | None = None,
 ) -> Mapping[str, JointOutcomeProbabilityWitness]:
-    """Fill missing NO identities from current Gamma events, never from prices."""
+    """Fill missing native token identities from exact topology, never prices."""
 
     missing_by_family = {
         family_key: witness
@@ -556,8 +558,58 @@ def bind_current_global_probability_tokens(
     if not missing_by_family:
         return dict(probability_witnesses)
 
+    local_tokens: dict[str, tuple[str, str]] = {}
+    if trade_conn is not None:
+        if checked_at_utc is None or checked_at_utc.tzinfo is None:
+            raise ValueError("GLOBAL_LOCAL_TOKEN_CHECK_TIME_INVALID")
+        checked_at_utc = checked_at_utc.astimezone(timezone.utc)
+        condition_ids = tuple(
+            binding.condition_id
+            for witness in missing_by_family.values()
+            for binding in witness.bindings
+        )
+        for row in _global_book_snapshot_rows(
+            trade_conn,
+            condition_ids=condition_ids,
+        ):
+            condition_id = str(row.get("condition_id") or "").strip()
+            yes = str(row.get("yes_token_id") or "").strip()
+            no = str(row.get("no_token_id") or "").strip()
+            if not condition_id or not yes or not no:
+                continue
+            try:
+                captured_at = datetime.fromisoformat(
+                    str(row.get("captured_at") or "").replace("Z", "+00:00")
+                )
+                freshness_deadline = datetime.fromisoformat(
+                    str(row.get("freshness_deadline") or "").replace(
+                        "Z", "+00:00"
+                    )
+                )
+            except (TypeError, ValueError):
+                continue
+            if captured_at.tzinfo is None or freshness_deadline.tzinfo is None:
+                continue
+            captured_at = captured_at.astimezone(timezone.utc)
+            freshness_deadline = freshness_deadline.astimezone(timezone.utc)
+            if not captured_at <= checked_at_utc <= freshness_deadline:
+                continue
+            pair = (yes, no)
+            previous = local_tokens.get(condition_id)
+            if previous is not None and previous != pair:
+                raise ValueError(
+                    f"GLOBAL_LOCAL_TOKEN_IDENTITY_AMBIGUOUS:{condition_id}"
+                )
+            local_tokens[condition_id] = pair
+
     slug_by_family: dict[str, str] = {}
     for family_key, witness in missing_by_family.items():
+        if all(
+            (binding.yes_token_id and binding.no_token_id)
+            or binding.condition_id in local_tokens
+            for binding in witness.bindings
+        ):
+            continue
         condition_ids = tuple(binding.condition_id for binding in witness.bindings)
         placeholders = ",".join("?" for _ in condition_ids)
         row = forecasts_conn.execute(
@@ -581,29 +633,44 @@ def bind_current_global_probability_tokens(
     from src.data.market_scanner import _extract_outcomes
 
     events: dict[str, Mapping[str, object] | None] = {}
-    workers = max(1, min(int(max_workers), 16, len(slug_by_family)))
-    with ThreadPoolExecutor(
-        max_workers=workers,
-        thread_name_prefix="global-token-identity",
-    ) as pool:
-        futures = {
-            family_key: pool.submit(get_gamma_event, slug)
-            for family_key, slug in slug_by_family.items()
-        }
-        for family_key, future in futures.items():
-            events[family_key] = future.result()
+    if slug_by_family:
+        workers = max(1, min(int(max_workers), 16, len(slug_by_family)))
+        with ThreadPoolExecutor(
+            max_workers=workers,
+            thread_name_prefix="global-token-identity",
+        ) as pool:
+            futures = {
+                family_key: pool.submit(get_gamma_event, slug)
+                for family_key, slug in slug_by_family.items()
+            }
+            for family_key, future in futures.items():
+                events[family_key] = future.result()
 
     rebound: dict[str, JointOutcomeProbabilityWitness] = {}
     for family_key, witness in probability_witnesses.items():
+        if family_key not in missing_by_family:
+            rebound[family_key] = witness
+            continue
         event = events.get(family_key)
-        token_map: dict[str, tuple[str, str]] = {}
+        condition_ids = {binding.condition_id for binding in witness.bindings}
+        token_map = {
+            condition_id: pair
+            for condition_id, pair in local_tokens.items()
+            if condition_id in condition_ids
+        }
         if event is not None:
             for outcome in _extract_outcomes(dict(event)):
                 condition_id = str(outcome.get("condition_id") or "").strip()
                 yes = str(outcome.get("token_id") or "").strip()
                 no = str(outcome.get("no_token_id") or "").strip()
                 if condition_id and yes and no:
-                    token_map[condition_id] = (yes, no)
+                    pair = (yes, no)
+                    previous = token_map.get(condition_id)
+                    if previous is not None and previous != pair:
+                        raise ValueError(
+                            f"GLOBAL_TOKEN_IDENTITY_CONFLICT:{condition_id}"
+                        )
+                    token_map[condition_id] = pair
                     if metadata_sink is not None:
                         raw = outcome.get("gamma_market_raw")
                         if not isinstance(raw, Mapping):

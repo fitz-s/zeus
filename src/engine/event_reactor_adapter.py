@@ -4639,6 +4639,8 @@ def event_bound_live_adapter_from_trade_conn(
                 forecast_conn,
                 probability_witnesses=probabilities,
                 get_gamma_event=_gamma_event,
+                trade_conn=trade_conn,
+                checked_at_utc=_at,
                 max_workers=8,
                 metadata_sink=gamma_metadata,
             )
