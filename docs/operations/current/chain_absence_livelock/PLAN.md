@@ -1,5 +1,7 @@
 # chain_absence_livelock -- Bugfix packet
 
+Status: landed
+
 ```yaml
 work_packet_id: BUG-CHAIN-ABSENCE-LIVELOCK-2026-07-10
 packet_type: bugfix_packet
@@ -87,3 +89,12 @@ evidence_required:
 - Current order proof before deploy: `venue_commands=982`, latest command creation `2026-07-08T23:22:51Z`; no new submit, ACK, or fill exists yet.
 - Broader gate residue outside this packet: kernel-manifest check reports the existing `shoulder_sell` SQL-constraint drift; module-boundary check reports the existing `src.control.control_plane -> src.strategy.strategy_profile` violation. `ruff` is not installed; `py_compile` and `git diff --check` passed.
 - Schema diff: none. Manual DB mutation: none. Runtime DB backup: none.
+
+## Post-deploy proof
+
+- Commit `16cec04f6` was pushed and loaded by live PID 98439 at 2026-07-10T17:27:48Z.
+- The exact deploy restart guard was expired; current control state reported `entries_paused=false`.
+- At 2026-07-10T17:29:52.818661Z, position `6be10bfa-f2f` appended canonical `ADMIN_VOIDED` with `chain_mirror_classification=closed_exited`; `position_current` folded to `phase=voided, chain_state=closed_exited`.
+- At 2026-07-10T17:31:24Z, reactor no longer reported `CURRENT_WEALTH_POSITION_CHAIN_TIME_INVALID`; it advanced to `GLOBAL_WINNER_AWAITS_CLAIM`, and the following cycle advanced to the next independent live-health gate.
+- No new venue command, submit, ACK, or fill was created by this packet. The next blockers are owned by a separate packet.
+- Topology feedback: planning-evidence correctly admitted the K0 slice and the independent critic caught two continuity counterexamples; navigation misclassified the task as generic/T3 and `zpkt start` emitted a scope schema that `zpkt commit` could not read.

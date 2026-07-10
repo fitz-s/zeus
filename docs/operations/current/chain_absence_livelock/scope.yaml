@@ -1,25 +1,16 @@
-id: chain_absence_livelock
-status: active
-owner: agent
-frontier:
-- src/state/chain_mirror_reconciler.py
-- tests/test_reconcile_chain_mirror.py
-allowed_files:
+packet: current/chain_absence_livelock
+in_scope:
 - docs/operations/current/chain_absence_livelock/**
 - src/state/chain_mirror_reconciler.py
 - tests/test_reconcile_chain_mirror.py
+allow_companions:
 - architecture/test_topology.yaml
-forbidden_files:
+- docs/operations/current_state.md
+out_of_scope:
 - state/**
 - architecture/2026_04_02_architecture_kernel.sql
 - architecture/kernel_manifest.yaml
 - src/state/lifecycle_manager.py
 - src/contracts/settlement_semantics.py
 - docs/authority/**
-live_side_effects_allowed: true
-supersedes: null
-tests:
-- tests/test_reconcile_chain_mirror.py
-- tests/test_architecture_contracts.py::test_lifecycle_phase_kernel_accepts_current_canonical_builder_folds
-- tests/test_architecture_contracts.py::test_lifecycle_phase_kernel_rejects_illegal_fold
-closeout_required: true
+status: landed

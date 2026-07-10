@@ -35,3 +35,4 @@ Closed packet bodies: `docs/archive_registry.md` (bodies untracked under `docs/a
 - `architecture/history_lore.yaml` — durable lessons
 - 2026-07-10 packet `current/runtime_open_exposure_snapshot` landed (head 6aa976985). <!-- zpkt landed: current/runtime_open_exposure_snapshot -->
 - 2026-07-10 packet `current/runtime_claim_contention` landed (head 666642225). <!-- zpkt landed: current/runtime_claim_contention -->
+- 2026-07-10 packet `current/chain_absence_livelock` landed (head 16cec04f6). <!-- zpkt landed: current/chain_absence_livelock -->
