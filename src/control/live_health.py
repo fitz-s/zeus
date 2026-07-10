@@ -1231,6 +1231,7 @@ def _forecast_to_event_bridge_surface(
     identity_match: dict[str, object] | None = None
     identity_payload_lag_seconds: float | None = None
     identity_to_latest_lag_seconds: float | None = None
+    family_latest_posterior_at: datetime | None = None
     if fsr_identity:
         posterior_columns, posterior_column_err = _sqlite_ro_table_columns(
             forecast_db,
@@ -1243,6 +1244,10 @@ def _forecast_to_event_bridge_surface(
                 "evaluated": True,
             }
         if "posterior_identity_hash" in posterior_columns:
+            identity_scope_select = ""
+            for scope_column in ("product_id", "source_id"):
+                if scope_column in posterior_columns:
+                    identity_scope_select += f", {scope_column}"
             predicates = ["runtime_layer = 'live'", "posterior_identity_hash = ?"]
             params: list[str] = [fsr_identity]
             fsr_city = str(fsr_payload.get("city") or "").strip()
@@ -1264,6 +1269,7 @@ def _forecast_to_event_bridge_surface(
                        source_cycle_time,
                        source_available_at,
                        posterior_identity_hash
+                       {identity_scope_select}
                   FROM forecast_posteriors
                  WHERE {" AND ".join(predicates)}
                  ORDER BY datetime(computed_at) DESC
@@ -1286,8 +1292,69 @@ def _forecast_to_event_bridge_surface(
                     identity_match.get("computed_at")
                 )
                 if identity_computed_at is not None:
+                    latest_comparison_at = posterior_at
+                    family_columns = {
+                        "city",
+                        "target_date",
+                        "temperature_metric",
+                    }
+                    if (
+                        fsr_city
+                        and fsr_target
+                        and fsr_metric
+                        and family_columns.issubset(posterior_columns)
+                    ):
+                        family_predicates = [
+                            "runtime_layer = 'live'",
+                            "city = ?",
+                            "target_date = ?",
+                            "temperature_metric = ?",
+                        ]
+                        family_params: list[str] = [
+                            fsr_city,
+                            fsr_target,
+                            fsr_metric,
+                        ]
+                        for scope_column in ("product_id", "source_id"):
+                            scope_value = str(
+                                identity_match.get(scope_column) or ""
+                            ).strip()
+                            if scope_column in posterior_columns and scope_value:
+                                family_predicates.append(f"{scope_column} = ?")
+                                family_params.append(scope_value)
+                        posterior_tiebreak = (
+                            "posterior_id DESC"
+                            if "posterior_id" in posterior_columns
+                            else "rowid DESC"
+                        )
+                        family_rows, family_err = _sqlite_ro_rows(
+                            forecast_db,
+                            f"""
+                            SELECT computed_at
+                              FROM forecast_posteriors
+                             WHERE {" AND ".join(family_predicates)}
+                             ORDER BY COALESCE(source_cycle_time, '') DESC,
+                                      COALESCE(computed_at, '') DESC,
+                                      {posterior_tiebreak}
+                             LIMIT 1
+                            """,
+                            tuple(family_params),
+                        )
+                        if family_err:
+                            return {
+                                "ok": False,
+                                "issue": f"LIVE_POSTERIOR_READ_UNAVAILABLE:{family_err}",
+                                "evaluated": True,
+                            }
+                        if family_rows:
+                            parsed_family_latest = _parse_iso_utc(
+                                family_rows[0].get("computed_at")
+                            )
+                            if parsed_family_latest is not None:
+                                family_latest_posterior_at = parsed_family_latest
+                                latest_comparison_at = parsed_family_latest
                     identity_to_latest_lag_seconds = (
-                        posterior_at - identity_computed_at
+                        latest_comparison_at - identity_computed_at
                     ).total_seconds()
                 if payload_available_at is not None and identity_computed_at is not None:
                     identity_payload_lag_seconds = (
@@ -1310,6 +1377,11 @@ def _forecast_to_event_bridge_surface(
         "latest_fsr_identity_payload_lag_seconds": identity_payload_lag_seconds,
         "latest_fsr_identity_to_latest_posterior_lag_seconds": (
             identity_to_latest_lag_seconds
+        ),
+        "latest_fsr_family_latest_posterior_computed_at": (
+            family_latest_posterior_at.isoformat()
+            if family_latest_posterior_at is not None
+            else None
         ),
         "event_queue": queue_detail,
         "max_lag_seconds": FORECAST_TO_EVENT_BRIDGE_BUDGET_SECONDS,

@@ -51,6 +51,16 @@ Restore truthful live entry admission after the global auction reached a real wi
 - Acceptance: unreleased rejection + held projection still fails; release + held projection clears; current Seoul false positive disappears after deploy.
 - Verification: full `tests/test_run_mode_failure_surfaces.py` passes 86/86. The antibody proves release -> held clears and release -> newer intent/rejection -> held fails again. Independent SQL review found no P0/P1 and judged the slice deploy-safe.
 
+## Slice B3 -- Forecast bridge family identity
+
+- Live proof after B2: the latest FSR names Taipei `2026-07-12/high` identity `0a8e736...`, whose matching and latest same-family posterior both computed at `17:49:44Z`. Health compares it to the global max `18:07:16Z` from unrelated Buenos Aires/Shenzhen families and reports a false `latest_newer_by=1052s`.
+- Defect: posterior supersession is meaningful only inside the same probability authority identity family. A posterior for another city/date/metric cannot supersede the FSR's causal posterior.
+- Minimal repair: preserve the global posterior-to-event timing bridge, but compute identity supersession against the latest live posterior for the same `product_id × city × target_date × metric`, using the same source-cycle/computed ordering as FSR selection.
+- Forbidden: accept a superseded identity inside the same family, remove global bridge timing, weaken posterior/FSR age budgets, or change event production.
+- Acceptance: same-family newer posterior remains blocking; different-family newer posterior does not supersede; current live false positive clears after deploy.
+- Verification: bridge tests pass 7/7 and full live-health file passes 87/87. A read-only HEAD evaluation on current DB resolves the latest event identity to the exact same-family latest posterior with lag `0.0s` while preserving global posterior-to-FSR timing. Independent review found no P0/P1 and judged the slice deploy-safe.
+- Carry-forward P2: the health family query additionally scopes by `source_id`, while producer supersession currently relies on one canonical source per replacement product. This is true in current materialized live rows; if a product later admits multiple live source IDs, producer and health need one shared executable family-key contract.
+
 ## Slice B1 -- Post-trade leaked-thread recovery
 
 - Current evidence: the collateral heartbeat succeeded through 18:33:17 local; from 18:34:35 onward every 30-second attempt exceeded its 25-second deadline and logged `thread leaked, daemon should restart`.
