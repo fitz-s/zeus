@@ -534,43 +534,139 @@ def _latest_authorized_day0_fact(
     metric = str(temperature_metric or "").strip().lower()
     if metric not in {"high", "low"}:
         return None
+    from src.config import runtime_cities_by_name
+    from src.events.triggers.day0_extreme_updated import (
+        _expected_station_for_city,
+        _station_matches,
+    )
+
+    city_obj = runtime_cities_by_name().get(city)
+    expected_station = _expected_station_for_city(city_obj)
+    source_type = str(
+        getattr(city_obj, "settlement_source_type", "") or ""
+    ).strip().lower()
+    expected_unit = str(
+        getattr(city_obj, "settlement_unit", "") or ""
+    ).strip().upper()
     decision_utc = decision_time.astimezone(timezone.utc)
     facts: list[dict[str, object]] = []
     if "observation_instants" in _table_names(conn):
         extreme_col = "running_min" if metric == "low" else "running_max"
-        aggregate = "MIN" if metric == "low" else "MAX"
+        extreme_order = "ASC" if metric == "low" else "DESC"
+        instant_columns = {
+            str(column[1])
+            for column in conn.execute("PRAGMA table_info(observation_instants)").fetchall()
+        }
+
+        def optional_column(name: str) -> str:
+            return name if name in instant_columns else f"NULL AS {name}"
+
+        availability_clause = (
+            "AND imported_at <= ?"
+            if "imported_at" in instant_columns
+            else "AND 0 = 1"
+        )
+        time_geometry_clause = " ".join(
+            clause
+            for column, clause in (
+                (
+                    "is_ambiguous_local_hour",
+                    "AND COALESCE(is_ambiguous_local_hour, 0) = 0",
+                ),
+                (
+                    "is_missing_local_hour",
+                    "AND COALESCE(is_missing_local_hour, 0) = 0",
+                ),
+            )
+            if column in instant_columns
+        )
+        query_params: tuple[object, ...] = (
+            city,
+            target_date,
+            decision_utc.isoformat(),
+        )
+        if "imported_at" in instant_columns:
+            query_params += (decision_utc.isoformat(),)
+        station_identity_clause = ""
+        if expected_station and "station_id" in instant_columns:
+            station_identity_clause = (
+                "AND (UPPER(station_id) = ? OR UPPER(station_id) LIKE ?)"
+            )
+            query_params += (expected_station, f"{expected_station}:%")
+        unit_identity_clause = ""
+        if expected_unit:
+            if "temp_unit" not in instant_columns:
+                unit_identity_clause = "AND 0 = 1"
+            else:
+                unit_identity_clause = "AND UPPER(temp_unit) = ?"
+                query_params += (expected_unit,)
+        source_identity_clause = {
+            "wu_icao": "LOWER(COALESCE(source, '')) = 'wu_icao_history'",
+            "hko": "LOWER(COALESCE(source, '')) = 'hko_hourly_accumulator'",
+        }.get(source_type, "0 = 1")
+        if source_type == "noaa":
+            if not expected_station:
+                source_identity_clause = "0 = 1"
+            else:
+                source_identity_clause = "LOWER(COALESCE(source, '')) = ?"
+                query_params += (f"ogimet_metar_{expected_station.lower()}",)
         row = conn.execute(
             f"""
-            SELECT {aggregate}(CAST({extreme_col} AS REAL)) AS observed_extreme_native,
-                   MAX(utc_timestamp) AS observation_time,
-                   COUNT(*) AS sample_count
-              FROM observation_instants
-             WHERE city = ?
-               AND target_date = ?
-               AND substr(local_timestamp, 1, 10) = target_date
-               AND utc_timestamp <= ?
-               AND COALESCE(causality_status, 'OK') = 'OK'
-               AND (
-                    (
-                        UPPER(COALESCE(authority, '')) = 'VERIFIED'
-                        AND COALESCE(source_role, '') = 'historical_hourly'
-                        AND COALESCE(training_allowed, 0) = 1
-                        AND (
-                            LOWER(COALESCE(source, '')) LIKE 'wu%'
-                            OR LOWER(COALESCE(source, '')) LIKE 'ogimet_metar_%'
+            WITH authorized AS (
+                SELECT CAST({extreme_col} AS REAL) AS observed_extreme_native,
+                       utc_timestamp,
+                       source,
+                       {optional_column('station_id')},
+                       {optional_column('temp_unit')},
+                       {optional_column('imported_at')}
+                  FROM observation_instants
+                 WHERE city = ?
+                   AND target_date = ?
+                   AND substr(local_timestamp, 1, 10) = target_date
+                   AND utc_timestamp <= ?
+                   {availability_clause}
+                   {time_geometry_clause}
+                   {station_identity_clause}
+                   {unit_identity_clause}
+                   AND {source_identity_clause}
+                   AND COALESCE(causality_status, 'OK') = 'OK'
+                   AND (
+                        (
+                            UPPER(COALESCE(authority, '')) = 'VERIFIED'
+                            AND COALESCE(source_role, '') = 'historical_hourly'
+                            AND COALESCE(training_allowed, 0) = 1
+                            AND (
+                                LOWER(COALESCE(source, '')) LIKE 'wu%'
+                                OR LOWER(COALESCE(source, '')) LIKE 'ogimet_metar_%'
+                            )
                         )
-                    )
-                    OR (
-                        city = 'Hong Kong'
-                        AND LOWER(COALESCE(source, '')) = 'hko_hourly_accumulator'
-                        AND UPPER(COALESCE(authority, '')) = 'ICAO_STATION_NATIVE'
-                        AND COALESCE(source_role, '') = 'runtime_monitoring'
-                        AND COALESCE(training_allowed, 0) = 0
-                    )
-               )
-               AND {extreme_col} IS NOT NULL
+                        OR (
+                            city = 'Hong Kong'
+                            AND LOWER(COALESCE(source, '')) = 'hko_hourly_accumulator'
+                            AND UPPER(COALESCE(authority, '')) = 'ICAO_STATION_NATIVE'
+                            AND COALESCE(source_role, '') = 'runtime_monitoring'
+                            AND COALESCE(training_allowed, 0) = 0
+                        )
+                   )
+                   AND {extreme_col} IS NOT NULL
+            )
+            SELECT observed_extreme_native,
+                   (SELECT MAX(utc_timestamp) FROM authorized) AS observation_time,
+                   (SELECT COUNT(*) FROM authorized) AS sample_count,
+                   source AS observation_source,
+                   station_id,
+                   temp_unit,
+                   (
+                       SELECT MAX(COALESCE(imported_at, utc_timestamp))
+                         FROM authorized
+                   ) AS observation_available_at
+              FROM authorized
+             ORDER BY observed_extreme_native {extreme_order},
+                      utc_timestamp DESC,
+                      source DESC
+             LIMIT 1
             """,
-            (city, target_date, decision_utc.isoformat()),
+            query_params,
         ).fetchone()
         if row is not None and row["observation_time"] and row["observed_extreme_native"] is not None:
             facts.append(
@@ -579,13 +675,19 @@ def _latest_authorized_day0_fact(
                     "observation_time": str(row["observation_time"]),
                     "sample_count": int(row["sample_count"] or 0),
                     "source": "durable_observation_instants",
+                    "observation_source": str(row["observation_source"] or ""),
+                    "station_id": str(row["station_id"] or ""),
+                    "unit": str(row["temp_unit"] or "").strip().upper(),
+                    "observation_available_at": str(
+                        row["observation_available_at"] or row["observation_time"]
+                    ),
                 }
             )
 
     if "opportunity_events" in _table_names(conn):
         event_rows = conn.execute(
             """
-            SELECT payload_json
+            SELECT payload_json, available_at, received_at
               FROM opportunity_events
              WHERE event_type = 'DAY0_EXTREME_UPDATED'
                AND available_at <= ?
@@ -593,8 +695,10 @@ def _latest_authorized_day0_fact(
                AND json_extract(payload_json, '$.city') = ?
                AND json_extract(payload_json, '$.target_date') = ?
                AND json_extract(payload_json, '$.metric') = ?
-             ORDER BY available_at DESC, created_at DESC, event_id DESC
-             LIMIT 8
+             ORDER BY datetime(json_extract(payload_json, '$.observation_time')) DESC,
+                      available_at DESC,
+                      created_at DESC,
+                      event_id DESC
             """,
             (
                 decision_utc.isoformat(),
@@ -603,18 +707,53 @@ def _latest_authorized_day0_fact(
                 target_date,
                 metric,
             ),
-        ).fetchall()
-        from src.config import runtime_cities_by_name
+        )
         from src.contracts.settlement_semantics import SettlementSemantics
         from src.events.day0_authority import assert_live_day0_payload_authority
 
-        city_obj = runtime_cities_by_name().get(city)
         for event_row in event_rows:
             try:
+                if source_type not in {"wu_icao", "noaa", "hko"}:
+                    continue
                 payload = json.loads(str(event_row["payload_json"] or "{}"))
                 if not isinstance(payload, Mapping):
                     continue
                 assert_live_day0_payload_authority(payload)
+                if expected_station and not _station_matches(
+                    str(payload.get("station_id") or "").strip().upper(),
+                    expected_station,
+                ):
+                    continue
+                event_source = str(
+                    payload.get("settlement_source") or ""
+                ).strip().lower()
+                event_source_allowed = (
+                    (
+                        source_type in {"wu_icao", "noaa"}
+                        and event_source == "aviationweather_metar"
+                    )
+                    or (
+                        source_type == "wu_icao"
+                        and event_source
+                        in {
+                            "wu_icao_history",
+                            "wu_api",
+                            "same_station_fast_tail",
+                            "wu_api+same_station_fast_tail",
+                        }
+                    )
+                    or (
+                        source_type == "noaa"
+                        and event_source
+                        == f"ogimet_metar_{expected_station.lower()}"
+                    )
+                    or (
+                        source_type == "hko"
+                        and event_source == "hko_hourly_accumulator"
+                    )
+                )
+                if not event_source_allowed:
+                    continue
                 observation_time = datetime.fromisoformat(
                     str(payload.get("observation_time") or "").replace("Z", "+00:00")
                 )
@@ -623,9 +762,42 @@ def _latest_authorized_day0_fact(
                 observation_time = observation_time.astimezone(timezone.utc)
                 if observation_time > decision_utc or city_obj is None:
                     continue
+                observation_available_at = datetime.fromisoformat(
+                    str(
+                        payload.get("observation_available_at")
+                        or event_row["available_at"]
+                        or ""
+                    ).replace("Z", "+00:00")
+                )
+                agent_received_at = datetime.fromisoformat(
+                    str(event_row["received_at"] or "").replace("Z", "+00:00")
+                )
+                if (
+                    observation_available_at.tzinfo is None
+                    or agent_received_at.tzinfo is None
+                ):
+                    continue
+                observation_available_at = observation_available_at.astimezone(
+                    timezone.utc
+                )
+                agent_received_at = agent_received_at.astimezone(timezone.utc)
+                if not (
+                    observation_time
+                    <= observation_available_at
+                    <= agent_received_at
+                    <= decision_utc
+                ):
+                    continue
                 raw_value = float(payload.get("raw_value"))
                 rounded_value = int(payload.get("rounded_value"))
                 semantics = SettlementSemantics.for_city(city_obj)
+                event_unit = str(
+                    payload.get("settlement_unit")
+                    or getattr(city_obj, "settlement_unit", "")
+                    or ""
+                ).strip().upper()
+                if event_unit != expected_unit:
+                    continue
                 if int(semantics.round_single(raw_value)) != rounded_value:
                     continue
                 extreme_raw = payload.get("low_so_far" if metric == "low" else "high_so_far")
@@ -640,6 +812,16 @@ def _latest_authorized_day0_fact(
                     "source": (
                         "durable_day0_event:"
                         f"{str(payload.get('settlement_source') or 'unknown')}"
+                    ),
+                    "observation_source": str(
+                        payload.get("settlement_source") or ""
+                    ),
+                    "station_id": str(payload.get("station_id") or ""),
+                    "unit": str(
+                        event_unit
+                    ),
+                    "observation_available_at": str(
+                        observation_available_at.isoformat()
                     ),
                 }
             )

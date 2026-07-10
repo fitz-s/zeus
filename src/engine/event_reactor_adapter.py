@@ -5711,6 +5711,42 @@ def _global_prepare_failure_reason(spine_result: object) -> str | None:
     ) or None
 
 
+def _current_global_actuation_prepared_family(
+    event: OpportunityEvent,
+    *,
+    global_actuation: object,
+    forecast_conn: sqlite3.Connection,
+    topology_conn: sqlite3.Connection,
+    observation_conn: sqlite3.Connection,
+    decision_time: datetime,
+):
+    from src.contracts.executable_market_snapshot import FRESHNESS_WINDOW_DEFAULT
+
+    selected = getattr(global_actuation, "probability_witness", None)
+    if selected is None:
+        raise ValueError("GLOBAL_ACTUATION_PROBABILITY_WITNESS_MISSING")
+    current_day0_payload: dict[str, object] = {}
+    current = _prepare_current_global_probability_family(
+        event,
+        forecast_conn=forecast_conn,
+        topology_conn=topology_conn,
+        observation_conn=observation_conn,
+        decision_time=decision_time,
+        max_age=FRESHNESS_WINDOW_DEFAULT,
+        day0_payload_out=current_day0_payload,
+    )
+    current_witness = getattr(current, "probability_witness", None)
+    if current_witness is None or any(
+        getattr(current_witness, field, None) != getattr(selected, field, None)
+        for field in _GLOBAL_PROBABILITY_CONTENT_FIELDS
+    ):
+        raise ValueError("GLOBAL_ACTUATION_PROBABILITY_SUPERSEDED")
+    return (
+        dataclass_replace(current, probability_witness=selected),
+        current_day0_payload,
+    )
+
+
 def _build_event_bound_no_submit_receipt_core(
     event: OpportunityEvent,
     *,
@@ -5754,6 +5790,8 @@ def _build_event_bound_no_submit_receipt_core(
         provenance_capture = {}
     decision_time = decision_time.astimezone(UTC)
     payload = _payload(event)
+    current_actuation_family = None
+    current_actuation_day0_payload: dict[str, object] = {}
     if global_actuation is not None:
         if str(getattr(global_actuation, "winner_event_id", "") or "") != event.event_id:
             return EventSubmissionReceipt(
@@ -5785,6 +5823,41 @@ def _build_event_bound_no_submit_receipt_core(
         return EventSubmissionReceipt(False, event.event_id, event.causal_snapshot_id, reason="TOPOLOGY_AUTHORITY_CONNECTION_MISSING")
     if calibration_conn is None:
         return EventSubmissionReceipt(False, event.event_id, event.causal_snapshot_id, reason="CALIBRATION_AUTHORITY_CONNECTION_MISSING")
+    if global_actuation is not None:
+        try:
+            (
+                current_actuation_family,
+                current_actuation_day0_payload,
+            ) = _current_global_actuation_prepared_family(
+                event,
+                global_actuation=global_actuation,
+                forecast_conn=forecast_conn,
+                topology_conn=topology_conn,
+                observation_conn=calibration_conn,
+                decision_time=decision_time,
+            )
+        except Exception as exc:  # noqa: BLE001 - current probability must fail closed
+            return EventSubmissionReceipt(
+                False,
+                event.event_id,
+                event.causal_snapshot_id,
+                reason=(
+                    "GLOBAL_ACTUATION_PROBABILITY_REVALIDATION_FAILED:"
+                    f"{type(exc).__name__}:{exc}"
+                ),
+                proof_accepted=False,
+            )
+        if current_actuation_day0_payload:
+            payload.update(current_actuation_day0_payload)
+            provenance_capture["global_day0_binding"] = dict(
+                current_actuation_day0_payload.get("_edli_global_day0_binding") or {}
+            )
+            provenance_capture["day0_probability_authority"] = {
+                "probability_authority": "replacement_current_global_probability_v1",
+                "global_current_observation_payload": dict(
+                    current_actuation_day0_payload
+                ),
+            }
     source_conn = forecast_conn
     topology_authority_conn = topology_conn
     family_topology_rows = _event_family_market_topology_rows(topology_authority_conn, payload)
@@ -6109,8 +6182,9 @@ def _build_event_bound_no_submit_receipt_core(
         _FORECAST_DECISION_EVENT_TYPES | _DAY0_LANE_EVENT_TYPES
     )
     _spine_candidate_economics_by_key: dict[tuple[str, str], dict[str, Any]] = {}
-    _prepared_global_family = None
+    _prepared_global_family = current_actuation_family
     _global_prepare_reason = None
+    _spine_prepare_global = prepare_global_auction and global_actuation is None
     # Fix #4 generalized: pass REAL current per-bin family exposure into the
     # ΔU SELECTION before the instrument is chosen. A flat/empty baseline can
     # pick a leg the account is already heavy in; re-sizing after selection
@@ -6176,10 +6250,10 @@ def _build_event_bound_no_submit_receipt_core(
                     native_side_candidate_from_proof=_native_side_candidate_from_proof,
                     global_native_side_candidate_from_proof=(
                         _full_depth_native_side_candidate_from_proof
-                        if prepare_global_auction
+                        if _spine_prepare_global
                         else None
                     ),
-                    require_global_probability_witness=prepare_global_auction,
+                    require_global_probability_witness=_spine_prepare_global,
                     global_probability_max_age=global_probability_max_age,
                     candidate_bin_id=_candidate_bin_id,
                     payoff_matrix_over_bins=utility_ranker.FamilyPayoffMatrix.over_bins,
@@ -6194,7 +6268,13 @@ def _build_event_bound_no_submit_receipt_core(
                 _spine_candidate_economics_by_key = qkernel_candidate_economics_by_bin_side(
                     _spine_result.decision
                 )
-                if prepare_global_auction and not _global_prepare_captured:
+                if (
+                    global_actuation is not None
+                    and _spine_result.decision is None
+                    and _spine_result.no_trade_reason is not None
+                ):
+                    _global_prepare_reason = _spine_result.no_trade_reason
+                if _spine_prepare_global and not _global_prepare_captured:
                     # The first pass contains the full eligibility-filtered
                     # native set. Legacy local-winner actionability retries must
                     # not shrink or overwrite the cross-family auction set.
@@ -6334,7 +6414,7 @@ def _build_event_bound_no_submit_receipt_core(
                 metric=family.metric,
                 family_id=family.family_id,
             )
-        if _prepared_global_family is None:
+        if _global_prepare_reason is not None or _prepared_global_family is None:
             return EventSubmissionReceipt(
                 False,
                 event.event_id,
@@ -9695,9 +9775,16 @@ def _build_live_execution_command_certificates(
     base_certs = tuple(compile_result.certificates)
     _assert_event_bound_calibration_live_admitted(_required_cert(base_certs, claims.CALIBRATION))
     executable_snapshot = _required_cert(base_certs, claims.EXECUTABLE_SNAPSHOT)
+    day0_certificate_payload = _payload(event)
+    if isinstance(receipt.day0_probability_authority, Mapping):
+        global_observation_payload = receipt.day0_probability_authority.get(
+            "global_current_observation_payload"
+        )
+        if isinstance(global_observation_payload, Mapping):
+            day0_certificate_payload.update(global_observation_payload)
     day0_source_certs = _day0_live_source_parent_certificates(
         event=event,
-        payload=_payload(event),
+        payload=day0_certificate_payload,
         base_certs=base_certs,
         decision_time=decision_time,
     )
@@ -12416,8 +12503,23 @@ def _day0_live_source_parent_certificates(
         payload.get("observation_available_at") or event.available_at
     )
     source_available_at = _parse_utc(observation_available_at) or _parse_utc(event.available_at) or decision_time
-    agent_received_at = _parse_utc(event.received_at) or source_available_at
-    persisted_at = _parse_utc(event.created_at) or agent_received_at
+    global_current_binding = payload.get("_edli_global_day0_binding")
+    if isinstance(global_current_binding, Mapping):
+        # The old event remains the claim/causal parent. The observation truth was
+        # re-read at this decision boundary, so possession/persistence belong to
+        # this read, not to the carrier's older clocks.
+        agent_received_at = decision_time
+        persisted_at = decision_time
+    else:
+        agent_received_at = _parse_utc(event.received_at) or source_available_at
+        persisted_at = _parse_utc(event.created_at) or agent_received_at
+    if not (
+        source_available_at
+        <= agent_received_at
+        <= persisted_at
+        <= decision_time
+    ):
+        raise ValueError("DAY0_AUTHORITY_CLOCK_ORDER_INVALID")
     rounded_value = payload.get("rounded_value")
 
     day0_authority = build_certificate(
@@ -19256,6 +19358,21 @@ def _live_yes_probabilities(
             raise ValueError(
                 f"DAY0_ORACLE_ANOMALY_PAUSED:{family.city}:{family.target_date}"
             )
+        if payload.get("_edli_global_auction_prepare") is True:
+            replacement = _replacement_authority_probability_and_fdr_proof(
+                event=event,
+                payload=payload,
+                family=family,
+                conn=conn,
+                native_costs=native_costs,
+                decision_time=decision_time,
+                promotion_evidence=promotion_evidence,
+                capital_objective_evidence=capital_objective_evidence,
+                provenance_capture=provenance_capture,
+            )
+            if replacement is None:
+                raise ValueError("GLOBAL_DAY0_REPLACEMENT_AUTHORITY_UNAVAILABLE")
+            return replacement
         generated = _canonical_probability_and_fdr_proof(
             event=event,
             payload=payload,
@@ -19853,6 +19970,139 @@ _GLOBAL_PROBABILITY_CONTENT_FIELDS = (
 )
 
 
+def _global_day0_execution_payload(
+    event: OpportunityEvent,
+    *,
+    family: object,
+    resolution: object,
+    conditioning: Mapping[str, object],
+    observation_conn: sqlite3.Connection,
+    decision_time: datetime,
+    posterior_id: object,
+) -> dict[str, object]:
+    """Bind q's Day0 conditioning to one current canonical observation state."""
+
+    from src.data.replacement_forecast_current_target_plan import (
+        _latest_authorized_day0_fact,
+    )
+    from src.events.day0_authority import assert_live_day0_payload_authority
+
+    carrier = _payload(event)
+    assert_live_day0_payload_authority(carrier)
+    fact = _latest_authorized_day0_fact(
+        observation_conn,
+        city=str(getattr(family, "city", "") or ""),
+        target_date=str(getattr(family, "target_date", "") or ""),
+        temperature_metric=str(getattr(family, "metric", "") or ""),
+        decision_time=decision_time,
+    )
+    if fact is None:
+        raise ValueError("GLOBAL_DAY0_CURRENT_OBSERVATION_MISSING")
+
+    def utc(value: object, *, reason: str) -> datetime:
+        try:
+            parsed = datetime.fromisoformat(str(value or "").replace("Z", "+00:00"))
+        except ValueError as exc:
+            raise ValueError(reason) from exc
+        if parsed.tzinfo is None:
+            raise ValueError(reason)
+        return parsed.astimezone(UTC)
+
+    conditioned_at = utc(
+        conditioning.get("observation_time"),
+        reason="GLOBAL_DAY0_CONDITIONING_TIME_INVALID",
+    )
+    observed_at = utc(
+        fact.get("observation_time"),
+        reason="GLOBAL_DAY0_CURRENT_OBSERVATION_TIME_INVALID",
+    )
+    if conditioned_at != observed_at:
+        raise ValueError("GLOBAL_DAY0_CONDITIONING_OBSERVATION_TIME_MISMATCH")
+
+    try:
+        observed_native = float(fact["observed_extreme_native"])
+        conditioned_c = float(conditioning["observed_extreme_c"])
+        conditioned_samples = int(conditioning["sample_count"])
+        observed_samples = int(fact["sample_count"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError("GLOBAL_DAY0_CONDITIONING_OBSERVATION_INVALID") from exc
+    unit = str(getattr(resolution, "measurement_unit", "") or "").strip().upper()
+    fact_unit = str(fact.get("unit") or "").strip().upper()
+    if unit not in {"C", "F"} or fact_unit != unit:
+        raise ValueError("GLOBAL_DAY0_CONDITIONING_UNIT_MISMATCH")
+    observed_c = (
+        observed_native
+        if unit == "C"
+        else (observed_native - 32.0) * 5.0 / 9.0
+    )
+    if (
+        not math.isclose(observed_c, conditioned_c, rel_tol=0.0, abs_tol=1e-9)
+        or conditioned_samples != observed_samples
+        or str(conditioning.get("unit") or "").strip().upper() != unit
+        or str(conditioning.get("source") or "").strip()
+        != str(fact.get("source") or "").strip()
+    ):
+        raise ValueError("GLOBAL_DAY0_CONDITIONING_OBSERVATION_MISMATCH")
+
+    station_id = str(fact.get("station_id") or "").strip().upper()
+    observation_source = str(fact.get("observation_source") or "").strip()
+    city = runtime_cities_by_name().get(str(getattr(family, "city", "") or ""))
+    if city is None:
+        raise ValueError("GLOBAL_DAY0_CITY_CONFIG_MISSING")
+    from src.events.triggers.day0_extreme_updated import _expected_station_for_city
+
+    expected_station = _expected_station_for_city(city)
+    if (
+        not station_id
+        or not observation_source
+        or not expected_station
+        or not (
+            station_id == expected_station
+            or station_id.startswith(f"{expected_station}:")
+        )
+    ):
+        raise ValueError("GLOBAL_DAY0_CONDITIONING_SOURCE_IDENTITY_MISMATCH")
+
+    rounded = int(SettlementSemantics.for_city(city).round_single(observed_native))
+    metric = str(getattr(family, "metric", "") or "").strip().lower()
+    binding = {
+        "posterior_id": int(posterior_id),
+        "metric": metric,
+        "observation_time": observed_at.isoformat(),
+        "observation_available_at": str(
+            fact.get("observation_available_at") or observed_at.isoformat()
+        ),
+        "observed_extreme_native": observed_native,
+        "sample_count": observed_samples,
+        "station_id": station_id,
+        "settlement_source": observation_source,
+        "settlement_unit": unit,
+    }
+    return {
+        "observation_time": binding["observation_time"],
+        "observation_available_at": binding["observation_available_at"],
+        "raw_value": observed_native,
+        "rounded_value": rounded,
+        "high_so_far": observed_native if metric == "high" else None,
+        "low_so_far": observed_native if metric == "low" else None,
+        "samples_count": observed_samples,
+        "sample_count": observed_samples,
+        "station_id": station_id,
+        "settlement_source": observation_source,
+        "settlement_unit": unit,
+        "source_match_status": "MATCH",
+        "local_date_status": "MATCH",
+        "station_match_status": "MATCH",
+        "dst_status": "UNAMBIGUOUS",
+        "metric_match_status": "MATCH",
+        "rounding_status": "MATCH",
+        "source_authorized_status": "AUTHORIZED",
+        "live_authority_status": "live",
+        "observation_context_id": "global_current_day0:" + stable_hash(binding),
+        "_edli_global_day0_binding": binding,
+    }
+
+
 def _replacement_global_probability_components(
     replacement_bundle: object,
     *,
@@ -19945,6 +20195,7 @@ def _prepare_current_global_probability_family(
     observation_conn: sqlite3.Connection | None = None,
     decision_time: datetime,
     max_age: timedelta,
+    day0_payload_out: dict[str, object] | None = None,
 ):
     """Build a current joint-q witness without any executable-price dependency."""
 
@@ -20018,6 +20269,8 @@ def _prepare_current_global_probability_family(
             f"{result.reason_code}"
         )
     bundle = result.bundle
+    day0_conditioning: Mapping[str, object] | None = None
+    day0_observation_conn = observation_conn or forecast_conn
     if event.event_type == "DAY0_EXTREME_UPDATED":
         conditioning = (
             bundle.provenance_json.get("day0_conditioning")
@@ -20040,7 +20293,7 @@ def _prepare_current_global_probability_family(
             or not math.isfinite(observed_extreme_c)
         ):
             raise ValueError("GLOBAL_DAY0_CONDITIONING_AUTHORITY_MISSING")
-        day0_observation_conn = observation_conn or forecast_conn
+        day0_conditioning = conditioning
         observation_table = day0_observation_conn.execute(
             "SELECT 1 FROM sqlite_master "
             "WHERE type='table' AND name='observation_instants'"
@@ -20091,6 +20344,18 @@ def _prepare_current_global_probability_family(
         source_cycle_time_utc=source_cycle.astimezone(UTC),
     )
     omega = build_outcome_space(family, case)
+    if day0_conditioning is not None:
+        current_day0_payload = _global_day0_execution_payload(
+            event,
+            family=family,
+            resolution=omega.resolution,
+            conditioning=day0_conditioning,
+            observation_conn=day0_observation_conn,
+            decision_time=decision_time,
+            posterior_id=bundle.posterior_id,
+        )
+        if day0_payload_out is not None:
+            day0_payload_out.update(current_day0_payload)
     bindings = tuple(
         OutcomeTokenBinding(
             bin_id=outcome.bin_id,

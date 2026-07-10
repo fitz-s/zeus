@@ -192,6 +192,9 @@ def _write_world_day0_observation(path: Path) -> None:
                 source_role TEXT,
                 training_allowed INTEGER,
                 source TEXT,
+                station_id TEXT,
+                temp_unit TEXT,
+                imported_at TEXT,
                 running_max REAL
             )
             """
@@ -207,7 +210,10 @@ def _write_world_day0_observation(path: Path) -> None:
                 'VERIFIED',
                 'historical_hourly',
                 1,
-                'wu_hourly',
+                'wu_icao_history',
+                'KLGA',
+                'F',
+                '2026-06-08T05:05:00+00:00',
                 77.0
             )
             """

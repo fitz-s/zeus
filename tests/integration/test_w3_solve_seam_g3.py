@@ -33,6 +33,8 @@ import pytest
 import src.engine.qkernel_spine_bridge as bridge
 import src.engine.event_reactor_adapter as era
 import src.engine.global_batch_runtime as global_batch_runtime
+from src.decision_kernel import claims
+from src.decision_kernel.certificate import build_certificate
 from src.engine.global_single_order_auction import (
     global_single_order_actuation_identity,
     global_single_order_economic_identity,
@@ -153,6 +155,423 @@ def test_global_prepare_failure_preserves_early_spine_no_trade_reason():
             no_trade_reason="SPINE_NO_SELECTION",
         )
     ) is None
+
+
+def test_global_actuation_revalidates_content_then_preserves_selected_witness(monkeypatch):
+    content = {
+        field: f"current-{field}"
+        for field in era._GLOBAL_PROBABILITY_CONTENT_FIELDS
+    }
+    selected = SimpleNamespace(**content, authority_certificate_hash="selected-cert")
+    refreshed = SimpleNamespace(**content, authority_certificate_hash="fresh-cert")
+    current_family = bridge.PreparedGlobalFamily(
+        decision_id="fresh-decision",
+        probability_witness=refreshed,
+        candidate_seeds=(),
+    )
+    monkeypatch.setattr(
+        era,
+        "_prepare_current_global_probability_family",
+        lambda *_args, **_kwargs: current_family,
+    )
+    conn = sqlite3.connect(":memory:")
+    rebound, current_day0_payload = era._current_global_actuation_prepared_family(
+        SimpleNamespace(),
+        global_actuation=SimpleNamespace(probability_witness=selected),
+        forecast_conn=conn,
+        topology_conn=conn,
+        observation_conn=conn,
+        decision_time=_dt.datetime(2026, 7, 10, 20, 0, tzinfo=_dt.timezone.utc),
+    )
+    assert rebound.probability_witness is selected
+    assert rebound.decision_id == "fresh-decision"
+    assert current_day0_payload == {}
+
+    monkeypatch.setattr(
+        era,
+        "_prepare_current_global_probability_family",
+        lambda *_args, **_kwargs: replace(
+            current_family,
+            probability_witness=SimpleNamespace(**{**content, "q_version": "moved"}),
+        ),
+    )
+    with pytest.raises(ValueError, match="GLOBAL_ACTUATION_PROBABILITY_SUPERSEDED"):
+        era._current_global_actuation_prepared_family(
+            SimpleNamespace(),
+            global_actuation=SimpleNamespace(probability_witness=selected),
+            forecast_conn=conn,
+            topology_conn=conn,
+            observation_conn=conn,
+            decision_time=_dt.datetime(2026, 7, 10, 20, 0, tzinfo=_dt.timezone.utc),
+        )
+    conn.close()
+
+
+def _stale_day0_carrier_and_current_observations():
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        """
+        CREATE TABLE observation_instants (
+            city TEXT,
+            target_date TEXT,
+            source TEXT,
+            station_id TEXT,
+            local_timestamp TEXT,
+            utc_timestamp TEXT,
+            imported_at TEXT,
+            temp_unit TEXT,
+            running_max REAL,
+            running_min REAL,
+            authority TEXT,
+            training_allowed INTEGER,
+            causality_status TEXT,
+            source_role TEXT
+        )
+        """
+    )
+    conn.executemany(
+        "INSERT INTO observation_instants VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (
+            (
+                "Moscow", "2026-07-10", "ogimet_metar_uuww", "UUWW",
+                "2026-07-10T16:00:00+03:00", "2026-07-10T13:00:00+00:00",
+                "2026-07-10T13:05:00+00:00", "C", 27.0, 27.0,
+                "VERIFIED", 1, "OK", "historical_hourly",
+            ),
+            (
+                "Moscow", "2026-07-10", "ogimet_metar_uuww", "UUWW",
+                "2026-07-10T22:00:00+03:00", "2026-07-10T19:00:00+00:00",
+                "2026-07-10T19:05:00+00:00", "C", 19.0, 19.0,
+                "VERIFIED", 1, "OK", "historical_hourly",
+            ),
+            (
+                "Moscow", "2026-07-10", "ogimet_metar_uuww", "UUWW",
+                "2026-07-10T23:00:00+03:00", "2026-07-10T20:00:00+00:00",
+                "2026-07-10T20:30:00+00:00", "C", 18.0, 18.0,
+                "VERIFIED", 1, "OK", "historical_hourly",
+            ),
+        ),
+    )
+    carrier_payload = {
+        "city": "Moscow",
+        "target_date": "2026-07-10",
+        "metric": "high",
+        "station_id": "UUWW",
+        "settlement_source": "ogimet_metar_uuww",
+        "settlement_unit": "C",
+        "observation_time": "2026-07-10T13:00:00+00:00",
+        "observation_available_at": "2026-07-10T13:05:00+00:00",
+        "raw_value": 27.0,
+        "rounded_value": 27,
+        "high_so_far": 27.0,
+        "source_match_status": "MATCH",
+        "local_date_status": "MATCH",
+        "station_match_status": "MATCH",
+        "dst_status": "UNAMBIGUOUS",
+        "metric_match_status": "MATCH",
+        "rounding_status": "MATCH",
+        "source_authorized_status": "AUTHORIZED",
+        "live_authority_status": "live",
+    }
+    carrier = make_opportunity_event(
+        event_type="DAY0_EXTREME_UPDATED",
+        entity_key="Moscow|2026-07-10|high|UUWW",
+        source="global_auction_winner_target:old-carrier",
+        observed_at="2026-07-10T13:00:00+00:00",
+        available_at="2026-07-10T13:05:00+00:00",
+        received_at="2026-07-10T13:05:00+00:00",
+        payload=carrier_payload,
+        causal_snapshot_id="old-day0-carrier",
+    )
+    return conn, carrier
+
+
+def test_global_day0_actuation_rebinds_stale_carrier_to_current_conditioning():
+    conn, carrier = _stale_day0_carrier_and_current_observations()
+    conditioning = {
+        "active": True,
+        "metric": "high",
+        "observation_time": "2026-07-10T19:00:00+00:00",
+        "observed_extreme_c": 27.0,
+        "sample_count": 2,
+        "source": "durable_observation_instants",
+        "unit": "C",
+    }
+    rebound = era._global_day0_execution_payload(
+        carrier,
+        family=SimpleNamespace(city="Moscow", target_date="2026-07-10", metric="high"),
+        resolution=SimpleNamespace(measurement_unit="C", station_id="UUWW"),
+        conditioning=conditioning,
+        observation_conn=conn,
+        decision_time=_dt.datetime(2026, 7, 10, 20, 0, tzinfo=_dt.timezone.utc),
+        posterior_id=29914,
+    )
+    conn.close()
+
+    assert json.loads(carrier.payload_json)["observation_time"] == "2026-07-10T13:00:00+00:00"
+    assert rebound["observation_time"] == "2026-07-10T19:00:00+00:00"
+    assert rebound["high_so_far"] == 27.0
+    assert rebound["sample_count"] == 2
+    assert rebound["station_id"] == "UUWW"
+    assert rebound["settlement_source"] == "ogimet_metar_uuww"
+    assert rebound["_edli_global_day0_binding"]["posterior_id"] == 29914
+
+
+def test_global_day0_authority_uses_current_possession_clock_not_stale_carrier_clock():
+    conn, carrier = _stale_day0_carrier_and_current_observations()
+    decision_time = _dt.datetime(2026, 7, 10, 20, 0, tzinfo=_dt.timezone.utc)
+    payload = json.loads(carrier.payload_json)
+    payload.update(
+        era._global_day0_execution_payload(
+            carrier,
+            family=SimpleNamespace(city="Moscow", target_date="2026-07-10", metric="high"),
+            resolution=SimpleNamespace(measurement_unit="C", station_id="UUWW"),
+            conditioning={
+                "active": True,
+                "metric": "high",
+                "observation_time": "2026-07-10T19:00:00+00:00",
+                "observed_extreme_c": 27.0,
+                "sample_count": 2,
+                "source": "durable_observation_instants",
+                "unit": "C",
+            },
+            observation_conn=conn,
+            decision_time=decision_time,
+            posterior_id=29914,
+        )
+    )
+    conn.close()
+    old_source_time = _dt.datetime(2026, 7, 10, 13, 0, tzinfo=_dt.timezone.utc)
+    old_received_time = _dt.datetime(2026, 7, 10, 13, 5, tzinfo=_dt.timezone.utc)
+
+    def base_cert(certificate_type, cert_payload=None):
+        return build_certificate(
+            certificate_type=certificate_type,
+            semantic_key=f"fixture:{certificate_type}",
+            claim_type=certificate_type,
+            mode="LIVE",
+            decision_time=decision_time,
+            source_available_at=old_source_time,
+            agent_received_at=old_received_time,
+            persisted_at=old_received_time,
+            payload=dict(cert_payload or {}),
+            authority_id="fixture",
+            authority_version="v1",
+            algorithm_id="fixture",
+            algorithm_version="v1",
+        )
+
+    parents = (
+        base_cert(claims.CLOCK_MODE),
+        base_cert(claims.CAUSAL_EVENT),
+        base_cert(claims.SOURCE_TRUTH),
+        base_cert(claims.FAMILY_CLOSURE, {"family_id": "Moscow|2026-07-10|high"}),
+        base_cert(claims.BELIEF),
+    )
+    certs = era._day0_live_source_parent_certificates(
+        event=carrier,
+        payload=payload,
+        base_certs=parents,
+        decision_time=decision_time,
+    )
+    authority = next(
+        cert for cert in certs if cert.certificate_type == claims.DAY0_AUTHORITY
+    )
+
+    assert authority.payload["observation_time"] == "2026-07-10T19:00:00+00:00"
+    assert authority.header.source_available_at == _dt.datetime(
+        2026, 7, 10, 19, 5, tzinfo=_dt.timezone.utc
+    )
+    assert authority.header.agent_received_at == decision_time
+    assert authority.header.persisted_at == decision_time
+    assert (
+        authority.header.source_available_at
+        <= authority.header.agent_received_at
+        <= authority.header.persisted_at
+        <= authority.header.decision_time
+    )
+
+
+def test_global_day0_actuation_binds_native_fahrenheit_to_conditioned_celsius():
+    conn, old_carrier = _stale_day0_carrier_and_current_observations()
+    conn.execute(
+        """
+        UPDATE observation_instants
+           SET city='NYC', source='wu_icao_history', station_id='KLGA', temp_unit='F',
+               running_max=CASE utc_timestamp
+                   WHEN '2026-07-10T13:00:00+00:00' THEN 80.6
+                   WHEN '2026-07-10T19:00:00+00:00' THEN 66.0
+                   ELSE 64.0
+               END
+        """
+    )
+    conn.execute(
+        "INSERT INTO observation_instants VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (
+            "NYC", "2026-07-10", "wu_icao_history_kjfk", "KJFK",
+            "2026-07-10T15:30:00-04:00", "2026-07-10T19:30:00+00:00",
+            "2026-07-10T19:35:00+00:00", "F", 75.0, 70.0,
+            "VERIFIED", 1, "OK", "historical_hourly",
+        ),
+    )
+    conn.execute(
+        "INSERT INTO observation_instants VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (
+            "NYC", "2026-07-10", "wu_icao_history", "KLGA",
+            "2026-07-10T15:45:00-04:00", "2026-07-10T19:45:00+00:00",
+            "2026-07-10T19:50:00+00:00", "C", 25.0, 20.0,
+            "VERIFIED", 1, "OK", "historical_hourly",
+        ),
+    )
+    carrier_payload = {
+        **json.loads(old_carrier.payload_json),
+        "city": "NYC",
+        "station_id": "KLGA",
+        "settlement_source": "aviationweather_metar",
+        "settlement_unit": "F",
+        "raw_value": 80.6,
+        "rounded_value": 81,
+        "high_so_far": 80.6,
+    }
+    carrier = make_opportunity_event(
+        event_type="DAY0_EXTREME_UPDATED",
+        entity_key="NYC|2026-07-10|high|KLGA",
+        source="global_auction_winner_target:old-nyc-carrier",
+        observed_at="2026-07-10T13:00:00+00:00",
+        available_at="2026-07-10T13:05:00+00:00",
+        received_at="2026-07-10T13:05:00+00:00",
+        payload=carrier_payload,
+        causal_snapshot_id="old-nyc-day0-carrier",
+    )
+    rebound = era._global_day0_execution_payload(
+        carrier,
+        family=SimpleNamespace(city="NYC", target_date="2026-07-10", metric="high"),
+        resolution=SimpleNamespace(measurement_unit="F", station_id="KLGA"),
+        conditioning={
+            "active": True,
+            "metric": "high",
+            "observation_time": "2026-07-10T19:00:00+00:00",
+            "observed_extreme_c": 27.0,
+            "sample_count": 2,
+            "source": "durable_observation_instants",
+            "unit": "F",
+        },
+        observation_conn=conn,
+        decision_time=_dt.datetime(2026, 7, 10, 20, 0, tzinfo=_dt.timezone.utc),
+        posterior_id=29915,
+    )
+    assert rebound["high_so_far"] == pytest.approx(80.6)
+    assert rebound["observation_time"] == "2026-07-10T19:00:00+00:00"
+    assert rebound["sample_count"] == 2
+    assert rebound["settlement_unit"] == "F"
+    assert rebound["rounded_value"] == 81
+    assert rebound["station_id"] == "KLGA"
+    assert rebound["settlement_source"] == "wu_icao_history"
+    with pytest.raises(
+        ValueError,
+        match="GLOBAL_DAY0_CONDITIONING_OBSERVATION_TIME_MISMATCH",
+    ):
+        era._global_day0_execution_payload(
+            carrier,
+            family=SimpleNamespace(city="NYC", target_date="2026-07-10", metric="high"),
+            resolution=SimpleNamespace(measurement_unit="F", station_id="KLGA"),
+            conditioning={
+                "active": True,
+                "metric": "high",
+                "observation_time": "2026-07-10T19:30:00+00:00",
+                "observed_extreme_c": 27.0,
+                "sample_count": 3,
+                "source": "durable_observation_instants",
+                "unit": "F",
+            },
+            observation_conn=conn,
+            decision_time=_dt.datetime(2026, 7, 10, 20, 0, tzinfo=_dt.timezone.utc),
+            posterior_id=29915,
+        )
+    conn.close()
+
+
+def test_global_day0_actuation_rejects_conditioning_not_equal_to_current_state():
+    conn, carrier = _stale_day0_carrier_and_current_observations()
+    with pytest.raises(
+        ValueError,
+        match="GLOBAL_DAY0_CONDITIONING_OBSERVATION_TIME_MISMATCH",
+    ):
+        era._global_day0_execution_payload(
+            carrier,
+            family=SimpleNamespace(city="Moscow", target_date="2026-07-10", metric="high"),
+            resolution=SimpleNamespace(measurement_unit="C", station_id="UUWW"),
+            conditioning={
+                "active": True,
+                "metric": "high",
+                "observation_time": "2026-07-10T13:00:00+00:00",
+                "observed_extreme_c": 27.0,
+                "sample_count": 2,
+                "source": "durable_observation_instants",
+                "unit": "C",
+            },
+            observation_conn=conn,
+            decision_time=_dt.datetime(2026, 7, 10, 20, 0, tzinfo=_dt.timezone.utc),
+            posterior_id=29914,
+        )
+    conn.close()
+
+
+def test_global_day0_observation_unknown_source_type_fails_closed(monkeypatch):
+    from src.data.replacement_forecast_current_target_plan import (
+        _latest_authorized_day0_fact,
+    )
+
+    conn, _carrier = _stale_day0_carrier_and_current_observations()
+    monkeypatch.setattr(
+        "src.config.runtime_cities_by_name",
+        lambda: {
+            "Moscow": SimpleNamespace(
+                settlement_source_type="unknown",
+                settlement_unit="C",
+                wu_station="UUWW",
+            )
+        },
+    )
+    assert _latest_authorized_day0_fact(
+        conn,
+        city="Moscow",
+        target_date="2026-07-10",
+        temperature_metric="high",
+        decision_time=_dt.datetime(2026, 7, 10, 20, 0, tzinfo=_dt.timezone.utc),
+    ) is None
+    conn.close()
+
+
+def test_global_day0_uses_replacement_joint_probability_builder(monkeypatch):
+    expected = ({"condition": 0.5}, {}, {}, {}, {"probability_authority": "replacement_0_1"})
+    monkeypatch.setattr(
+        "src.data.day0_oracle_anomaly.is_day0_family_paused",
+        lambda *_args, **_kwargs: False,
+    )
+    monkeypatch.setattr(
+        era,
+        "_replacement_authority_probability_and_fdr_proof",
+        lambda **_kwargs: expected,
+    )
+    monkeypatch.setattr(
+        era,
+        "_canonical_probability_and_fdr_proof",
+        lambda **_kwargs: pytest.fail("global Day0 must not use canonical probability"),
+    )
+    conn = sqlite3.connect(":memory:")
+    result = era._live_yes_probabilities(
+        event=SimpleNamespace(event_type="DAY0_EXTREME_UPDATED"),
+        payload={"_edli_global_auction_prepare": True},
+        family=SimpleNamespace(city="Moscow", target_date="2026-07-10", metric="high"),
+        conn=conn,
+        calibration_conn=conn,
+        native_costs={},
+        decision_time=_dt.datetime(2026, 7, 10, 20, 0, tzinfo=_dt.timezone.utc),
+    )
+    conn.close()
+    assert result is expected
 
 
 def _global_scope_event(*, city: str, source_run_id: str):

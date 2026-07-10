@@ -30,6 +30,9 @@ def test_day0_observation_hwm_invalidates_older_conditioning() -> None:
             city TEXT,
             target_date TEXT,
             source TEXT,
+            station_id TEXT,
+            temp_unit TEXT,
+            imported_at TEXT,
             local_timestamp TEXT,
             utc_timestamp TEXT,
             running_max REAL,
@@ -42,11 +45,14 @@ def test_day0_observation_hwm_invalidates_older_conditioning() -> None:
         """
     )
     conn.execute(
-        "INSERT INTO observation_instants VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO observation_instants VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (
             "Paris",
             "2026-07-10",
             "wu_icao_history",
+            "LFPB",
+            "C",
+            "2026-07-10T11:05:00+00:00",
             "2026-07-10T13:00:00+02:00",
             "2026-07-10T11:00:00+00:00",
             32.0,
@@ -71,6 +77,38 @@ def test_day0_observation_hwm_invalidates_older_conditioning() -> None:
     assert reason.startswith("basis=day0_observation_hwm_lag")
 
 
+def test_day0_observation_without_import_clock_is_not_live_visible() -> None:
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        """
+        CREATE TABLE observation_instants (
+            city TEXT, target_date TEXT, source TEXT, station_id TEXT,
+            temp_unit TEXT, local_timestamp TEXT, utc_timestamp TEXT,
+            running_max REAL, running_min REAL, authority TEXT,
+            training_allowed INTEGER, causality_status TEXT, source_role TEXT
+        )
+        """
+    )
+    conn.execute(
+        "INSERT INTO observation_instants VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (
+            "Paris", "2026-07-10", "wu_icao_history", "LFPB", "C",
+            "2026-07-10T13:00:00+02:00", "2026-07-10T11:00:00+00:00",
+            32.0, 20.0, "VERIFIED", 1, "OK", "historical_hourly",
+        ),
+    )
+
+    assert _latest_authorized_day0_fact(
+        conn,
+        city="Paris",
+        target_date="2026-07-10",
+        temperature_metric="high",
+        decision_time=datetime(2026, 7, 10, 12, tzinfo=timezone.utc),
+    ) is None
+    conn.close()
+
+
 def test_day0_hwm_accepts_authorized_durable_fast_observation_event() -> None:
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
@@ -91,6 +129,7 @@ def test_day0_hwm_accepts_authorized_durable_fast_observation_event() -> None:
         "target_date": "2026-07-11",
         "metric": "high",
         "settlement_source": "aviationweather_metar",
+        "station_id": "RKPK",
         "observation_time": "2026-07-10T15:00:00+00:00",
         "raw_value": 25.0,
         "rounded_value": 25,
@@ -115,6 +154,30 @@ def test_day0_hwm_accepts_authorized_durable_fast_observation_event() -> None:
             json.dumps(payload),
         ),
     )
+    for minute in range(8):
+        available_second = 30 + minute
+        older_observation_later_arrival = {
+            **payload,
+            "settlement_source": "wu_icao_history",
+            "observation_time": f"2026-07-10T14:{minute:02d}:00+00:00",
+            "observation_available_at": (
+                f"2026-07-10T15:04:{available_second:02d}+00:00"
+            ),
+            "raw_value": 24.0,
+            "rounded_value": 24,
+            "high_so_far": 24.0,
+        }
+        conn.execute(
+            "INSERT INTO opportunity_events VALUES (?, ?, ?, ?, ?, ?)",
+            (
+                f"day0-busan-older-observation-later-arrival-{minute}",
+                "DAY0_EXTREME_UPDATED",
+                f"2026-07-10T15:04:{available_second:02d}+00:00",
+                f"2026-07-10T15:04:{available_second + 1:02d}+00:00",
+                f"2026-07-10T15:04:{available_second + 1:02d}+00:00",
+                json.dumps(older_observation_later_arrival),
+            ),
+        )
 
     fact = _latest_authorized_day0_fact(
         conn,
@@ -135,6 +198,7 @@ def test_day0_hwm_accepts_authorized_durable_fast_observation_event() -> None:
     assert fact is not None
     assert fact["observed_extreme_native"] == 25.0
     assert fact["source"] == "durable_day0_event:aviationweather_metar"
+    assert fact["unit"] == "C"
     assert reason is not None
     assert reason.startswith("basis=day0_observation_hwm_lag")
 
