@@ -1,5 +1,5 @@
 # Created: 2026-05-24
-# Last reused/audited: 2026-06-18
+# Last reused/audited: 2026-07-10
 # Authority basis: EDLI live-only execution scope;
 #                  + 2026-06-08 (system_decomposition_plan §8 Step 3, P3 lift): the
 #                    _run_main_with_fake_scheduler boot harness dropped the obsolete
@@ -234,7 +234,11 @@ def test_edli_reactor_job_wired_behind_live_execution_mode_gate():
     assert "taker_fok_fak_effective" not in reactor_source
     assert "live_submit_effective = live_bridge_mode or submit_disabled_effective_mode" in reactor_source
     assert "real submit disabled this cycle because portfolio_state_unavailable" in reactor_source
-    assert "if real_submit_effective and _portfolio_state_provider is None" in reactor_source
+    assert "_portfolio_snapshot_submit_gate(" in reactor_source
+    assert "snapshot_required=real_submit_effective" in reactor_source
+    assert "snapshot_available=_portfolio_state_provider is not None" in reactor_source
+    assert "if _portfolio_snapshot_block is not None" in reactor_source
+    assert "if (live_submit_effective and operator_arm is not None)" in reactor_source
     assert "submit_existing_cycle_for_event" not in reactor_source
     assert 'edli_cfg.get("real_order_submit_enabled", False)' in reactor_source
     assert "real_order_submit_enabled=real_order_submit_enabled" in reactor_source

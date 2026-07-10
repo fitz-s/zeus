@@ -1768,6 +1768,10 @@ class PortfolioState:
     # "degraded"=DB reachable but projection non-canonical.
     # "unverified"=DB connection failed; callers must not trust this as authority.
     authority: str = "unverified"
+    # Names which canonical subset this read model carries. Runtime exposure
+    # snapshots intentionally omit recovery/operator facts and must not be
+    # mistaken for a complete portfolio view.
+    authority_scope: Literal["full_portfolio", "runtime_exposure"] = "full_portfolio"
 
     @property
     def initial_bankroll(self) -> float:
@@ -2594,6 +2598,72 @@ def _derive_chain_only_review_state(
 # instead of synthetic `Position(direction="unknown")` rows on
 # `PortfolioState.positions`. The cycle entry gate
 # `_has_quarantined_positions` consults both signals (see PR C2).
+
+
+def load_runtime_open_portfolio(conn: sqlite3.Connection) -> PortfolioState:
+    """Load the canonical exposure set needed by one decision cycle.
+
+    Unlike ``load_portfolio``, this read model deliberately excludes terminal
+    history, settlement rows, suppression debt, and chain-only review facts.
+    Its consumers are portfolio sizing and family exposure math, which inspect
+    only runtime-open ``Position`` objects. Recovery, monitoring, and operator
+    views keep using the complete loader.
+    """
+    from src.state.db import query_portfolio_loader_view
+
+    owns_read_transaction = not conn.in_transaction
+    if owns_read_transaction:
+        conn.execute("BEGIN")
+    try:
+        snapshot = query_portfolio_loader_view(conn, runtime_exposure_only=True)
+        policy = choose_portfolio_truth_source(snapshot.get("status"))
+        if policy.source != "canonical_db":
+            raise RuntimeError(
+                "runtime-open portfolio projection is not canonical: "
+                f"status={snapshot.get('status')} reason={policy.reason}"
+            )
+
+        current_mode = get_mode()
+        positions: list[Position] = []
+        poison_rows: list[str] = []
+        for row in snapshot.get("positions", []):
+            try:
+                position = _position_from_projection_row(row, current_mode=current_mode)
+            except Exception as exc:  # noqa: BLE001 - real-submit must fail closed below
+                position_id = str(row.get("position_id") or row.get("trade_id") or "unknown")
+                poison_rows.append(position_id)
+                logger.error(
+                    "load_runtime_open_portfolio: POISON projection row quarantined "
+                    "(position_id=%s city=%s phase=%s chain_state=%s): %s",
+                    position_id,
+                    row.get("city"),
+                    row.get("phase"),
+                    row.get("chain_state"),
+                    exc,
+                )
+                continue
+            if _is_runtime_open_position(position):
+                positions.append(position)
+
+        if poison_rows:
+            raise RuntimeError(
+                "runtime-open portfolio contains unparseable canonical rows: "
+                + ",".join(poison_rows)
+            )
+
+        state = PortfolioState(
+            positions=positions,
+            bankroll=0.0,
+            daily_baseline_total=0.0,
+            weekly_baseline_total=0.0,
+            audit_logging_enabled=True,
+            authority="canonical_db",
+            authority_scope="runtime_exposure",
+        )
+    finally:
+        if owns_read_transaction and conn.in_transaction:
+            conn.rollback()
+    return state
 
 
 def load_portfolio(path: Optional[Path] = None) -> PortfolioState:

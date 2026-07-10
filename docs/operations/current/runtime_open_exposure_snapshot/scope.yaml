@@ -1,0 +1,19 @@
+packet: current/runtime_open_exposure_snapshot
+in_scope:
+  - docs/operations/current/runtime_open_exposure_snapshot/**
+  - src/state/db.py
+  - src/state/portfolio.py
+  - src/events/reactor.py
+  - tests/test_runtime_guards.py
+  - tests/money_path/test_edli_online_invariants.py
+allow_companions:
+  - architecture/source_rationale.yaml
+  - architecture/test_topology.yaml
+  - docs/operations/current_state.md
+out_of_scope:
+  - state/zeus-world.db
+  - state/zeus-world.db-*
+  - state/zeus_trades.db
+  - state/zeus_trades.db-*
+  - src/execution/**
+  - src/venue/**

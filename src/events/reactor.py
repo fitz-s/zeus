@@ -74,6 +74,17 @@ DEFAULT_REACTOR_LANE_FAIRNESS_FETCH_MIN_EXTRA = 50
 DEFAULT_REACTOR_LANE_FAIRNESS_FETCH_MULTIPLIER = 4
 
 
+def _portfolio_snapshot_submit_gate(
+    *,
+    live_submit_effective: bool,
+    snapshot_required: bool,
+    snapshot_available: bool,
+) -> tuple[bool, str | None]:
+    if snapshot_required and not snapshot_available:
+        return False, "live_submit_effective_false:portfolio_state_unavailable"
+    return live_submit_effective, None
+
+
 def _is_sqlite_lock_error(exc: BaseException) -> bool:
     if not isinstance(exc, sqlite3.OperationalError):
         return False
@@ -4476,7 +4487,7 @@ def run_edli_event_reactor_cycle(*, active_lock) -> None:
         _start_venue_background_maintenance_after_reactor_if_required,
     )
     from src.data.replacement_forecast_production import _replacement_forecast_runtime_flags_from_settings
-    from src.state.portfolio import load_portfolio
+    from src.state.portfolio import load_runtime_open_portfolio
 
     _log = _logging.getLogger("zeus.events.reactor")
 
@@ -4799,15 +4810,14 @@ def run_edli_event_reactor_cycle(*, active_lock) -> None:
         # (the live lane was simply not configured for this reactor_mode).
         _live_lane_block_cause: str | None = None
         live_submit_effective = live_bridge_mode or submit_disabled_effective_mode
-        # Task #107 (portfolio/multi Kelly): source the PortfolioState ONCE per
-        # reactor cycle (DB load is seconds on the live DB). The allocator
-        # baseline and per-event Kelly provider must share this same point-in-time
-        # snapshot; loading it twice doubles reactor_construct latency without
-        # adding authority.
+        # Task #107 (portfolio/multi Kelly): source one canonical exposure
+        # snapshot per reactor cycle. Terminal history and operator/recovery
+        # surfaces are irrelevant to sizing, so the decision path reads only
+        # runtime-open rows through this cycle's existing trade connection.
         _portfolio_state_provider = None
         _portfolio_snapshot = None
         try:
-            _portfolio_snapshot = load_portfolio()
+            _portfolio_snapshot = load_runtime_open_portfolio(trade_conn)
             _portfolio_state_provider = lambda: _portfolio_snapshot  # noqa: E731 — cycle-scoped closure
         except Exception as _portfolio_exc:  # noqa: BLE001 — mode-sensitive fail-closed below
             _log.warning(
@@ -4815,9 +4825,13 @@ def run_edli_event_reactor_cycle(*, active_lock) -> None:
                 "with single-asset sizing, but real-submit will fail closed: %r",
                 _portfolio_exc,
             )
-        if real_submit_effective and _portfolio_state_provider is None:
-            live_submit_effective = False
-            _live_lane_block_cause = "live_submit_effective_false:portfolio_state_unavailable"
+        live_submit_effective, _portfolio_snapshot_block = _portfolio_snapshot_submit_gate(
+            live_submit_effective=live_submit_effective,
+            snapshot_required=real_submit_effective,
+            snapshot_available=_portfolio_state_provider is not None,
+        )
+        if _portfolio_snapshot_block is not None:
+            _live_lane_block_cause = _portfolio_snapshot_block
             _log.error(
                 "EDLI reactor: real submit disabled this cycle because portfolio_state_unavailable"
             )

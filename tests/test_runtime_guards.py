@@ -1,7 +1,7 @@
 """Runtime guard and live-cycle wiring tests."""
-# Lifecycle: created=2026-04-28; last_reviewed=2026-06-18; last_reused=2026-07-09
+# Lifecycle: created=2026-04-28; last_reviewed=2026-07-10; last_reused=2026-07-10
 # Created: 2026-04-28
-# Last reused/audited: 2026-07-09
+# Last reused/audited: 2026-07-10
 # Authority basis: docs/archive/2026-Q2/task_2026-05-15_live_order_e2e_verification/LIVE_ORDER_E2E_VERIFICATION_PLAN.md; task_2026-04-28_contamination_remediation Batch G; Phase 1B ENS snapshot persistence; Phase 1D forecast source policy; PR #56 MarketPhaseEvidence sidecar propagation; Wave26 explicit position env authority; task.md B3 exit executable snapshot identity; docs/operations/task_2026-05-21_live_side_effect_risk_boundaries/task.md P1-2 cluster projection; docs/archive/2026-Q2/task_2026-05-22_crosscheck_valid_window/CROSSCHECK_VALID_WINDOW_PLAN.md.
 # Purpose: Lock runtime guard and live-cycle wiring contracts.
 # Reuse: Run for runtime guard, live-only cleanup, and cycle wiring changes.
@@ -7611,6 +7611,783 @@ def test_execution_stub_does_not_reinvent_strategy_without_strategy_key():
 
     assert stub.strategy_key == ""
     assert stub.strategy == ""
+
+
+def test_runtime_open_portfolio_prunes_terminal_rows_before_hydration_and_preserves_exposure(
+    tmp_path,
+    monkeypatch,
+):
+    from src.engine.lifecycle_events import build_position_current_projection
+    from src.state.portfolio import (
+        _position_from_projection_row,
+        correlated_committed_usd,
+        get_open_positions,
+        load_runtime_open_portfolio,
+    )
+    from src.state.projection import upsert_position_current
+
+    conn = get_connection(tmp_path / "runtime-open-portfolio.db")
+    init_schema(conn)
+
+    def persist_position(
+        position_id: str,
+        state: str,
+        *,
+        city: str,
+        size_usd: float,
+        shares: float,
+        entry_price: float,
+        chain_state: str = "unknown",
+        chain_shares: float = 0.0,
+        chain_cost_basis_usd: float = 0.0,
+        fill_authority: str = "none",
+    ) -> Position:
+        position = _position(
+            trade_id=position_id,
+            market_id=f"market-{position_id}",
+            city=city,
+            cluster=city,
+            state=state,
+            size_usd=size_usd,
+            shares=shares,
+            cost_basis_usd=size_usd,
+            entry_price=entry_price,
+            strategy_key="center_buy",
+            token_id=f"yes-{position_id}",
+            no_token_id=f"no-{position_id}",
+            condition_id=f"condition-{position_id}",
+            decision_snapshot_id=f"snapshot-{position_id}",
+            chain_state=chain_state,
+            chain_shares=chain_shares,
+            chain_avg_price=entry_price,
+            chain_cost_basis_usd=chain_cost_basis_usd,
+            fill_authority=fill_authority,
+        )
+        upsert_position_current(conn, build_position_current_projection(position))
+        return position
+
+    persist_position(
+        "active-filled",
+        "entered",
+        city="NYC",
+        size_usd=25.0,
+        shares=50.0,
+        entry_price=0.50,
+    )
+    conn.execute(
+        """
+        INSERT INTO execution_fact (
+            intent_id, position_id, order_role, posted_at, filled_at,
+            fill_price, shares, venue_status, terminal_exec_status
+        ) VALUES (
+            'intent-active-filled', 'active-filled', 'entry',
+            '2026-07-09T09:59:00+00:00', '2026-07-09T10:00:00+00:00',
+            0.40, 50.0, 'MATCHED', 'filled'
+        )
+        """
+    )
+    pending_partial = persist_position(
+        "pending-partial",
+        "pending_tracked",
+        city="NYC",
+        size_usd=4.10,
+        shares=10.0,
+        entry_price=0.41,
+        fill_authority=FILL_AUTHORITY_VENUE_CONFIRMED_PARTIAL,
+    )
+    pending_partial.order_status = "partial"
+    upsert_position_current(conn, build_position_current_projection(pending_partial))
+    persist_position(
+        "pending-entry",
+        "pending_tracked",
+        city="NYC",
+        size_usd=8.0,
+        shares=20.0,
+        entry_price=0.40,
+    )
+    persist_position(
+        "day0-held",
+        "day0_window",
+        city="London",
+        size_usd=6.0,
+        shares=15.0,
+        entry_price=0.40,
+    )
+    persist_position(
+        "quarantine-chain-risk",
+        "quarantined",
+        city="Seoul",
+        size_usd=0.0,
+        shares=0.0,
+        entry_price=0.40,
+        chain_state="synced",
+        chain_shares=5.0,
+        chain_cost_basis_usd=2.0,
+        fill_authority="venue_position_observed",
+    )
+    persist_position(
+        "active-chain-zero",
+        "entered",
+        city="Paris",
+        size_usd=99.0,
+        shares=99.0,
+        entry_price=1.0,
+        chain_state="chain_confirmed_zero",
+    )
+    persist_position(
+        "quarantine-zero",
+        "quarantined",
+        city="Rome",
+        size_usd=99.0,
+        shares=99.0,
+        entry_price=1.0,
+        chain_state="chain_confirmed_zero",
+    )
+    persist_position(
+        "settled-history",
+        "entered",
+        city="Madrid",
+        size_usd=1000.0,
+        shares=1000.0,
+        entry_price=1.0,
+    )
+    conn.execute(
+        "UPDATE position_current SET phase = 'settled' WHERE position_id = 'settled-history'"
+    )
+    conn.commit()
+
+    hydrated_trade_ids: list[tuple[str, ...]] = []
+    real_fill_hints = db_module._query_entry_execution_fill_hints
+    real_event_envs = db_module._latest_position_event_envs
+    real_transitional_hints = db_module._query_transitional_position_hints
+
+    def capture_fill_hints(read_conn, trade_ids, **kwargs):
+        hydrated_trade_ids.append(tuple(trade_ids))
+        return real_fill_hints(read_conn, trade_ids, **kwargs)
+
+    monkeypatch.setattr(db_module, "_query_entry_execution_fill_hints", capture_fill_hints)
+    monkeypatch.setattr(
+        db_module,
+        "_latest_position_event_envs",
+        lambda *_args, **_kwargs: pytest.fail("runtime exposure snapshot hydrated event env"),
+    )
+    monkeypatch.setattr(
+        db_module,
+        "_query_transitional_position_hints",
+        lambda *_args, **_kwargs: pytest.fail("runtime exposure snapshot hydrated transition hints"),
+    )
+    runtime_state = load_runtime_open_portfolio(conn)
+
+    assert len(hydrated_trade_ids) == 1
+    assert set(hydrated_trade_ids[0]) == {
+        "active-filled",
+        "pending-partial",
+        "pending-entry",
+        "day0-held",
+        "quarantine-chain-risk",
+        "active-chain-zero",
+        "quarantine-zero",
+    }
+    assert {pos.trade_id for pos in runtime_state.positions} == {
+        "active-filled",
+        "pending-partial",
+        "pending-entry",
+        "day0-held",
+        "quarantine-chain-risk",
+    }
+    pending_partial_runtime = next(
+        pos for pos in runtime_state.positions if pos.trade_id == "pending-partial"
+    )
+    assert pending_partial_runtime.state.value == "pending_tracked"
+    assert pending_partial_runtime.fill_authority == FILL_AUTHORITY_VENUE_CONFIRMED_PARTIAL
+    assert pending_partial_runtime.effective_shares == pytest.approx(10.0)
+    assert pending_partial_runtime.effective_cost_basis_usd == pytest.approx(4.10)
+    assert total_exposure_usd(runtime_state) == pytest.approx(32.10)
+    assert runtime_state.authority == "canonical_db"
+    assert runtime_state.authority_scope == "runtime_exposure"
+    assert conn.in_transaction is False
+
+    monkeypatch.setattr(db_module, "_latest_position_event_envs", real_event_envs)
+    monkeypatch.setattr(db_module, "_query_transitional_position_hints", real_transitional_hints)
+    full_snapshot = db_module.query_portfolio_loader_view(conn)
+    full_state = PortfolioState(
+        positions=[
+            _position_from_projection_row(row, current_mode="live")
+            for row in full_snapshot["positions"]
+        ],
+        authority="canonical_db",
+    )
+    assert {pos.trade_id for pos in runtime_state.positions} == {
+        pos.trade_id for pos in get_open_positions(full_state)
+    }
+    full_without_pending_partial = PortfolioState(
+        positions=[
+            pos for pos in full_state.positions if pos.trade_id != "pending-partial"
+        ],
+        authority="canonical_db",
+    )
+    runtime_without_pending_partial = PortfolioState(
+        positions=[
+            pos for pos in runtime_state.positions if pos.trade_id != "pending-partial"
+        ],
+        authority="canonical_db",
+    )
+    assert total_exposure_usd(runtime_without_pending_partial) == pytest.approx(
+        total_exposure_usd(full_without_pending_partial)
+    )
+    assert correlated_committed_usd(
+        runtime_without_pending_partial,
+        new_city="NYC",
+    ) == pytest.approx(
+        correlated_committed_usd(full_without_pending_partial, new_city="NYC")
+    )
+    assert correlated_committed_usd(
+        runtime_state,
+        new_city="NYC",
+    ) - correlated_committed_usd(
+        runtime_without_pending_partial,
+        new_city="NYC",
+    ) == pytest.approx(4.10)
+    conn.close()
+
+
+def test_runtime_open_portfolio_fails_closed_without_canonical_projection(tmp_path):
+    from src.state.portfolio import load_runtime_open_portfolio
+
+    conn = get_connection(tmp_path / "missing-position-current.db")
+    with pytest.raises(RuntimeError, match="not canonical"):
+        load_runtime_open_portfolio(conn)
+    conn.close()
+
+
+def test_runtime_open_portfolio_rejects_missing_exposure_authority_columns():
+    from src.state.portfolio import load_runtime_open_portfolio
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        "CREATE TABLE position_current (position_id TEXT PRIMARY KEY, temperature_metric TEXT)"
+    )
+
+    with pytest.raises(RuntimeError, match="runtime exposure authority columns missing.*chain_shares"):
+        load_runtime_open_portfolio(conn)
+    assert conn.in_transaction is False
+    conn.close()
+
+
+def test_runtime_open_portfolio_rejects_malformed_chain_exposure(tmp_path):
+    from src.engine.lifecycle_events import build_position_current_projection
+    from src.state.portfolio import load_runtime_open_portfolio
+    from src.state.projection import upsert_position_current
+
+    conn = get_connection(tmp_path / "malformed-chain-exposure.db")
+    init_schema(conn)
+    position = _position(
+        trade_id="malformed-chain-exposure",
+        state="quarantined",
+        chain_state="synced",
+        chain_shares=2.0,
+        chain_avg_price=0.50,
+        chain_cost_basis_usd=1.0,
+        fill_authority="venue_position_observed",
+    )
+    upsert_position_current(conn, build_position_current_projection(position))
+    conn.execute(
+        "UPDATE position_current SET chain_shares = 'not-a-number' WHERE position_id = ?",
+        (position.trade_id,),
+    )
+    conn.commit()
+
+    with pytest.raises(RuntimeError, match="field=chain_shares.*not-a-number"):
+        load_runtime_open_portfolio(conn)
+    assert conn.in_transaction is False
+    conn.close()
+
+
+def test_runtime_open_portfolio_rejects_missing_identity_value(tmp_path):
+    from src.engine.lifecycle_events import build_position_current_projection
+    from src.state.portfolio import load_runtime_open_portfolio
+    from src.state.projection import upsert_position_current
+
+    conn = get_connection(tmp_path / "missing-runtime-identity.db")
+    init_schema(conn)
+    position = _position(trade_id="missing-runtime-identity")
+    upsert_position_current(conn, build_position_current_projection(position))
+    conn.execute(
+        "UPDATE position_current SET city = NULL WHERE position_id = ?",
+        (position.trade_id,),
+    )
+    conn.commit()
+
+    with pytest.raises(RuntimeError, match="missing identity.*city"):
+        load_runtime_open_portfolio(conn)
+    assert conn.in_transaction is False
+    conn.close()
+
+
+def test_runtime_open_portfolio_rejects_chain_economics_with_nonrisk_state(tmp_path):
+    from src.engine.lifecycle_events import build_position_current_projection
+    from src.state.portfolio import load_runtime_open_portfolio
+    from src.state.projection import upsert_position_current
+
+    conn = get_connection(tmp_path / "contradictory-runtime-authority.db")
+    init_schema(conn)
+    position = _position(
+        trade_id="contradictory-runtime-authority",
+        state="quarantined",
+        chain_state="unknown",
+        chain_shares=5.0,
+        chain_avg_price=0.40,
+        chain_cost_basis_usd=2.0,
+        fill_authority="venue_position_observed",
+    )
+    upsert_position_current(conn, build_position_current_projection(position))
+    conn.commit()
+
+    with pytest.raises(RuntimeError, match="conflicts with chain state"):
+        load_runtime_open_portfolio(conn)
+    assert conn.in_transaction is False
+    conn.close()
+
+
+def test_runtime_open_portfolio_rejects_unconsumable_chain_economics(tmp_path):
+    from src.engine.lifecycle_events import build_position_current_projection
+    from src.state.portfolio import load_runtime_open_portfolio
+    from src.state.projection import upsert_position_current
+
+    conn = get_connection(tmp_path / "unconsumable-runtime-authority.db")
+    init_schema(conn)
+    position = _position(
+        trade_id="unconsumable-runtime-authority",
+        state="entered",
+        size_usd=0.0,
+        shares=0.0,
+        cost_basis_usd=0.0,
+        entry_price=0.0,
+        chain_state="synced",
+        chain_shares=5.0,
+        chain_avg_price=0.40,
+        chain_cost_basis_usd=2.0,
+        fill_authority=FILL_AUTHORITY_NONE,
+    )
+    upsert_position_current(conn, build_position_current_projection(position))
+    conn.commit()
+
+    with pytest.raises(RuntimeError, match="cannot consume chain economics"):
+        load_runtime_open_portfolio(conn)
+    assert conn.in_transaction is False
+    conn.close()
+
+
+def test_runtime_open_portfolio_rejects_partial_fill_without_economics(tmp_path):
+    from src.engine.lifecycle_events import build_position_current_projection
+    from src.state.portfolio import load_runtime_open_portfolio
+    from src.state.projection import upsert_position_current
+
+    conn = get_connection(tmp_path / "incomplete-partial-fill.db")
+    init_schema(conn)
+    position = _position(
+        trade_id="incomplete-partial-fill",
+        state="pending_tracked",
+        size_usd=0.0,
+        shares=0.0,
+        cost_basis_usd=0.0,
+        entry_price=0.0,
+        fill_authority=FILL_AUTHORITY_VENUE_CONFIRMED_PARTIAL,
+    )
+    upsert_position_current(conn, build_position_current_projection(position))
+    conn.commit()
+
+    with pytest.raises(RuntimeError, match="incomplete for fill authority"):
+        load_runtime_open_portfolio(conn)
+    assert conn.in_transaction is False
+    conn.close()
+
+
+def test_runtime_open_portfolio_rejects_partial_fill_with_inconsistent_cost(tmp_path):
+    from src.engine.lifecycle_events import build_position_current_projection
+    from src.state.portfolio import load_runtime_open_portfolio
+    from src.state.projection import upsert_position_current
+
+    conn = get_connection(tmp_path / "inconsistent-partial-fill.db")
+    init_schema(conn)
+    position = _position(
+        trade_id="inconsistent-partial-fill",
+        state="pending_tracked",
+        size_usd=1.0,
+        shares=100.0,
+        cost_basis_usd=1.0,
+        entry_price=0.50,
+        fill_authority=FILL_AUTHORITY_VENUE_CONFIRMED_PARTIAL,
+    )
+    upsert_position_current(conn, build_position_current_projection(position))
+    conn.commit()
+
+    with pytest.raises(RuntimeError, match="pending fill economics disagree"):
+        load_runtime_open_portfolio(conn)
+    assert conn.in_transaction is False
+    conn.close()
+
+
+@pytest.mark.parametrize("fill_authority", ["venue_confirmed_full", "settled"])
+def test_runtime_open_portfolio_rejects_terminal_authority_in_pending_phase(
+    tmp_path,
+    fill_authority,
+):
+    from src.engine.lifecycle_events import build_position_current_projection
+    from src.state.portfolio import load_runtime_open_portfolio
+    from src.state.projection import upsert_position_current
+
+    conn = get_connection(tmp_path / f"pending-{fill_authority}.db")
+    init_schema(conn)
+    position = _position(
+        trade_id=f"pending-{fill_authority}",
+        state="pending_tracked",
+        size_usd=4.10,
+        shares=10.0,
+        cost_basis_usd=4.10,
+        entry_price=0.41,
+        fill_authority=fill_authority,
+    )
+    upsert_position_current(conn, build_position_current_projection(position))
+    conn.commit()
+
+    with pytest.raises(RuntimeError, match="conflicts with .*phase"):
+        load_runtime_open_portfolio(conn)
+    assert conn.in_transaction is False
+    conn.close()
+
+
+@pytest.mark.parametrize("state", ["entered", "day0_window", "pending_exit"])
+@pytest.mark.parametrize("has_fill_hint", [False, True])
+def test_runtime_open_portfolio_rejects_settled_authority_in_open_phase(
+    tmp_path,
+    state,
+    has_fill_hint,
+):
+    from src.engine.lifecycle_events import build_position_current_projection
+    from src.state.portfolio import load_runtime_open_portfolio
+    from src.state.projection import upsert_position_current
+
+    position_id = f"settled-authority-{state}-{has_fill_hint}"
+    conn = get_connection(tmp_path / f"{position_id}.db")
+    init_schema(conn)
+    position = _position(
+        trade_id=position_id,
+        state=state,
+        size_usd=4.10,
+        shares=10.0,
+        cost_basis_usd=4.10,
+        entry_price=0.41,
+        fill_authority="settled",
+    )
+    upsert_position_current(conn, build_position_current_projection(position))
+    if has_fill_hint:
+        conn.execute(
+            """
+            INSERT INTO execution_fact (
+                intent_id, position_id, order_role, filled_at, fill_price, shares,
+                venue_status, terminal_exec_status
+            ) VALUES (?, ?, 'entry', '2026-07-10T00:00:00+00:00', 0.41, 10.0,
+                      'MATCHED', 'filled')
+            """,
+            (f"intent-{position_id}", position.trade_id),
+        )
+    conn.commit()
+
+    with pytest.raises(RuntimeError, match="settled fill authority conflicts with runtime phase"):
+        load_runtime_open_portfolio(conn)
+    assert conn.in_transaction is False
+    conn.close()
+
+
+def test_runtime_open_portfolio_accepts_cancelled_remainder_pending_exposure(tmp_path):
+    from src.engine.lifecycle_events import build_position_current_projection
+    from src.state.portfolio import load_runtime_open_portfolio
+    from src.state.projection import upsert_position_current
+
+    conn = get_connection(tmp_path / "pending-cancelled-remainder.db")
+    init_schema(conn)
+    position = _position(
+        trade_id="pending-cancelled-remainder",
+        state="pending_tracked",
+        size_usd=4.10,
+        shares=10.0,
+        cost_basis_usd=4.10,
+        entry_price=0.41,
+        fill_authority="cancelled_remainder",
+    )
+    upsert_position_current(conn, build_position_current_projection(position))
+    conn.commit()
+
+    state = load_runtime_open_portfolio(conn)
+
+    assert total_exposure_usd(state) == pytest.approx(4.10)
+    assert state.positions[0].fill_authority == "cancelled_remainder"
+    conn.close()
+
+
+def test_runtime_open_portfolio_rejects_hydrated_full_fill_in_pending_phase(tmp_path):
+    from src.engine.lifecycle_events import build_position_current_projection
+    from src.state.portfolio import load_runtime_open_portfolio
+    from src.state.projection import upsert_position_current
+
+    conn = get_connection(tmp_path / "pending-hydrated-full-fill.db")
+    init_schema(conn)
+    position = _position(
+        trade_id="pending-hydrated-full-fill",
+        state="pending_tracked",
+        size_usd=4.10,
+        shares=10.0,
+        cost_basis_usd=4.10,
+        entry_price=0.41,
+        fill_authority=FILL_AUTHORITY_VENUE_CONFIRMED_PARTIAL,
+    )
+    upsert_position_current(conn, build_position_current_projection(position))
+    conn.execute(
+        """
+        INSERT INTO execution_fact (
+            intent_id, position_id, order_role, filled_at, fill_price, shares,
+            venue_status, terminal_exec_status
+        ) VALUES (?, ?, 'entry', '2026-07-10T00:00:00+00:00', 0.41, 10.0,
+                  'MATCHED', 'filled')
+        """,
+        ("intent-pending-hydrated-full-fill", position.trade_id),
+    )
+    conn.commit()
+
+    with pytest.raises(RuntimeError, match="terminal fill conflicts with pending phase"):
+        load_runtime_open_portfolio(conn)
+    assert conn.in_transaction is False
+    conn.close()
+
+
+def test_full_portfolio_loader_does_not_promote_pending_fill_projection(tmp_path):
+    from src.engine.lifecycle_events import build_position_current_projection
+    from src.state.projection import upsert_position_current
+
+    conn = get_connection(tmp_path / "full-loader-pending-fill.db")
+    init_schema(conn)
+    position = _position(
+        trade_id="full-loader-pending-fill",
+        state="pending_tracked",
+        size_usd=4.10,
+        shares=10.0,
+        cost_basis_usd=4.10,
+        entry_price=0.41,
+        fill_authority=FILL_AUTHORITY_VENUE_CONFIRMED_PARTIAL,
+    )
+    upsert_position_current(conn, build_position_current_projection(position))
+    conn.commit()
+
+    full_row = db_module.query_portfolio_loader_view(conn)["positions"][0]
+    runtime_row = db_module.query_portfolio_loader_view(
+        conn,
+        runtime_exposure_only=True,
+    )["positions"][0]
+
+    assert full_row["entry_economics_source"] == "pending_entry_without_fill_authority"
+    assert full_row["effective_cost_basis_usd"] == 0.0
+    assert runtime_row["entry_economics_source"] == "position_current_pending_fill"
+    assert runtime_row["effective_cost_basis_usd"] == pytest.approx(4.10)
+    conn.close()
+
+
+def test_runtime_open_portfolio_rejects_malformed_confirmed_fill(tmp_path):
+    from src.engine.lifecycle_events import build_position_current_projection
+    from src.state.portfolio import load_runtime_open_portfolio
+    from src.state.projection import upsert_position_current
+
+    conn = get_connection(tmp_path / "malformed-execution-fill.db")
+    init_schema(conn)
+    position = _position(trade_id="malformed-execution-fill")
+    upsert_position_current(conn, build_position_current_projection(position))
+    conn.execute(
+        """
+        INSERT INTO execution_fact (
+            intent_id, position_id, order_role, filled_at, fill_price, shares,
+            venue_status, terminal_exec_status
+        ) VALUES (?, ?, 'entry', '2026-07-10T00:00:00+00:00', ?, 2.0, 'MATCHED', 'filled')
+        """,
+        ("intent-malformed-fill", position.trade_id, "not-a-number"),
+    )
+    conn.commit()
+
+    with pytest.raises(RuntimeError, match="execution_fact.fill_price.*not-a-number"):
+        load_runtime_open_portfolio(conn)
+    assert conn.in_transaction is False
+    conn.close()
+
+
+def test_execution_fill_hint_query_uses_position_role_time_index(tmp_path):
+    from src.state.db import init_schema_trade_only
+
+    conn = get_connection(tmp_path / "execution-fill-index.db")
+    init_schema_trade_only(conn)
+    conn.execute("DROP INDEX idx_execution_fact_position_role_effective_fill_time")
+    conn.commit()
+    init_schema_trade_only(conn)
+    plan = conn.execute(
+        """
+        EXPLAIN QUERY PLAN
+        SELECT position_id, intent_id, filled_at, posted_at, fill_price, shares,
+               terminal_exec_status, venue_status
+        FROM execution_fact
+        WHERE position_id IN (?, ?)
+          AND order_role = 'entry'
+          AND lower(COALESCE(terminal_exec_status, '')) = 'filled'
+        ORDER BY position_id,
+                 COALESCE(filled_at, posted_at, '') DESC,
+                 intent_id DESC
+        """,
+        ("position-1", "position-2"),
+    ).fetchall()
+    assert any(
+        "idx_execution_fact_position_role_effective_fill_time" in str(row[3])
+        for row in plan
+    )
+    assert not any("USE TEMP B-TREE" in str(row[3]) for row in plan)
+    conn.close()
+
+
+def test_runtime_open_portfolio_uses_one_sqlite_snapshot_across_hydration(
+    tmp_path,
+    monkeypatch,
+):
+    from src.engine.lifecycle_events import build_position_current_projection
+    from src.state.portfolio import load_runtime_open_portfolio
+    from src.state.projection import upsert_position_current
+
+    db_path = tmp_path / "runtime-open-read-snapshot.db"
+    conn = get_connection(db_path)
+    init_schema(conn)
+    position = _position(
+        trade_id="runtime-open-read-snapshot",
+        state="entered",
+        size_usd=25.0,
+        shares=50.0,
+        cost_basis_usd=25.0,
+        entry_price=0.50,
+    )
+    upsert_position_current(conn, build_position_current_projection(position))
+    conn.execute(
+        """
+        INSERT INTO execution_fact (
+            intent_id, position_id, order_role, filled_at, fill_price, shares,
+            venue_status, terminal_exec_status
+        ) VALUES (?, ?, 'entry', '2026-07-10T00:00:00+00:00', 0.40, 50.0,
+                  'MATCHED', 'filled')
+        """,
+        ("intent-runtime-open-read-snapshot", position.trade_id),
+    )
+    conn.commit()
+
+    writer = get_connection(db_path)
+    real_fill_hints = db_module._query_entry_execution_fill_hints
+
+    def update_after_projection_read(read_conn, trade_ids, **kwargs):
+        assert read_conn.in_transaction is True
+        writer.execute(
+            "UPDATE execution_fact SET fill_price = 0.80 WHERE position_id = ?",
+            (position.trade_id,),
+        )
+        writer.commit()
+        return real_fill_hints(read_conn, trade_ids, **kwargs)
+
+    monkeypatch.setattr(
+        db_module,
+        "_query_entry_execution_fill_hints",
+        update_after_projection_read,
+    )
+    state = load_runtime_open_portfolio(conn)
+
+    assert total_exposure_usd(state) == pytest.approx(20.0)
+    assert conn.in_transaction is False
+    assert writer.execute(
+        "SELECT fill_price FROM execution_fact WHERE position_id = ?",
+        (position.trade_id,),
+    ).fetchone()[0] == pytest.approx(0.80)
+    writer.close()
+    conn.close()
+
+
+def test_runtime_open_portfolio_fails_closed_on_poison_exposure_row(monkeypatch):
+    from src.state import portfolio as portfolio_module
+
+    conn = sqlite3.connect(":memory:")
+    monkeypatch.setattr(
+        db_module,
+        "query_portfolio_loader_view",
+        lambda *_args, **_kwargs: {
+            "status": "ok",
+            "positions": [
+                {
+                    "position_id": "poison-open-position",
+                    "phase": "active",
+                    "city": "NYC",
+                    "chain_state": "unknown",
+                }
+            ],
+        },
+    )
+    def raise_bad_enum(*_args, **_kwargs):
+        raise ValueError("bad enum")
+
+    monkeypatch.setattr(portfolio_module, "_position_from_projection_row", raise_bad_enum)
+
+    with pytest.raises(RuntimeError, match="unparseable canonical rows.*poison-open-position"):
+        portfolio_module.load_runtime_open_portfolio(conn)
+    assert conn.in_transaction is False
+    conn.close()
+
+
+def test_edli_reactor_builds_one_runtime_open_portfolio_snapshot_from_trade_connection():
+    source = Path("src/events/reactor.py").read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    reactor_fn = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name == "run_edli_event_reactor_cycle"
+    )
+    direct_calls = [
+        node.func.id
+        for node in ast.walk(reactor_fn)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+    ]
+
+    assert direct_calls.count("load_runtime_open_portfolio") == 1
+    assert "load_portfolio" not in direct_calls
+
+
+@pytest.mark.parametrize(
+    (
+        "live_submit_effective",
+        "snapshot_required",
+        "snapshot_available",
+        "expected_enabled",
+        "expected_cause",
+    ),
+    [
+        (True, True, True, True, None),
+        (True, True, False, False, "live_submit_effective_false:portfolio_state_unavailable"),
+        (True, False, False, True, None),
+        (False, False, False, False, None),
+    ],
+)
+def test_edli_portfolio_snapshot_submit_gate(
+    live_submit_effective,
+    snapshot_required,
+    snapshot_available,
+    expected_enabled,
+    expected_cause,
+):
+    from src.events.reactor import _portfolio_snapshot_submit_gate
+
+    assert _portfolio_snapshot_submit_gate(
+        live_submit_effective=live_submit_effective,
+        snapshot_required=snapshot_required,
+        snapshot_available=snapshot_available,
+    ) == (expected_enabled, expected_cause)
 
 
 def test_load_portfolio_backfills_strategy_key_from_legacy_strategy(tmp_path, monkeypatch):

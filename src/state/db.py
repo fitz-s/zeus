@@ -24,6 +24,7 @@ import fcntl
 import hashlib
 import json
 import logging
+import math
 import os
 import sqlite3
 import threading
@@ -1250,12 +1251,42 @@ OPEN_EXPOSURE_PHASES = (
     "pending_exit",
     "unknown",
 )
+_RUNTIME_EXPOSURE_REQUIRED_COLUMNS = frozenset(
+    {
+        "position_id",
+        "phase",
+        "trade_id",
+        "market_id",
+        "city",
+        "target_date",
+        "direction",
+        "temperature_metric",
+        "condition_id",
+        "chain_state",
+        "fill_authority",
+        "chain_shares",
+        "chain_avg_price",
+        "chain_cost_basis_usd",
+        "size_usd",
+        "shares",
+        "cost_basis_usd",
+        "entry_price",
+    }
+)
 ENTRY_ECONOMICS_LEGACY_UNKNOWN = "legacy_unknown"
 ENTRY_ECONOMICS_AVG_FILL_PRICE = "avg_fill_price"
 ENTRY_ECONOMICS_CORRECTED_COST_BASIS = "corrected_executable_cost_basis"
 FILL_AUTHORITY_NONE = "none"
 FILL_AUTHORITY_VENUE_POSITION_OBSERVED = "venue_position_observed"
+FILL_AUTHORITY_VENUE_CONFIRMED_PARTIAL = "venue_confirmed_partial"
 FILL_AUTHORITY_VENUE_CONFIRMED_FULL = "venue_confirmed_full"
+FILL_AUTHORITY_CANCELLED_REMAINDER = "cancelled_remainder"
+_RUNTIME_PENDING_FILL_AUTHORITIES = frozenset(
+    {
+        FILL_AUTHORITY_VENUE_CONFIRMED_PARTIAL,
+        FILL_AUTHORITY_CANCELLED_REMAINDER,
+    }
+)
 TERMINAL_TRADE_DECISION_STATUSES = frozenset(
     {
         "exited",
@@ -5215,6 +5246,13 @@ CREATE TABLE IF NOT EXISTS execution_fact (
     -- this never alters mainline/canonical execution facts (observability only).
     posterior_id INTEGER
 );
+CREATE INDEX IF NOT EXISTS idx_execution_fact_position_role_effective_fill_time
+    ON execution_fact(
+        position_id,
+        order_role,
+        COALESCE(filled_at, posted_at, '') DESC,
+        intent_id DESC
+    );
 
 -- trade_decisions (from src/state/db.py:init_schema executescript block)
 CREATE TABLE IF NOT EXISTS trade_decisions (
@@ -10965,13 +11003,207 @@ def _latest_position_event_envs(
     return envs
 
 
-def query_portfolio_loader_view(conn: sqlite3.Connection | None, *, temperature_metric: str | None = None) -> dict:
+def _strict_runtime_exposure_number(
+    value: object,
+    *,
+    position_id: str,
+    field: str,
+    allow_none: bool,
+) -> float | None:
+    if value is None and allow_none:
+        return None
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise RuntimeError(
+            f"runtime exposure authority malformed: position_id={position_id} "
+            f"field={field} value={value!r}"
+        )
+    numeric = float(value)
+    if not math.isfinite(numeric) or numeric < 0.0:
+        raise RuntimeError(
+            f"runtime exposure authority invalid: position_id={position_id} "
+            f"field={field} value={value!r}"
+        )
+    return numeric
+
+
+def _assert_runtime_exposure_rows(rows: list[sqlite3.Row]) -> None:
+    from src.contracts.position_truth import CURRENT_MONEY_RISK_CHAIN_STATES, FillAuthority
+    from src.contracts.semantic_types import Direction, VenueVisibilityStatus
+
+    valid_chain_states = {state.value for state in VenueVisibilityStatus}
+    valid_fill_authorities = {authority.value for authority in FillAuthority}
+    chain_consuming_fill_authorities = valid_fill_authorities - {
+        FillAuthority.NONE.value,
+        FillAuthority.OPTIMISTIC_SUBMITTED.value,
+    }
+    trade_fill_authorities = {
+        FillAuthority.VENUE_CONFIRMED_PARTIAL.value,
+        FillAuthority.VENUE_CONFIRMED_FULL.value,
+        FillAuthority.CANCELLED_REMAINDER.value,
+        FillAuthority.SETTLED.value,
+    }
+    for row in rows:
+        position_id = str(row["position_id"] or row["trade_id"] or "")
+        if not position_id:
+            raise RuntimeError("runtime exposure authority missing position identity")
+        required_identity = {
+            "market_id": str(row["market_id"] or "").strip(),
+            "city": str(row["city"] or "").strip(),
+            "target_date": str(row["target_date"] or "").strip(),
+            "condition_id": str(row["condition_id"] or "").strip(),
+        }
+        missing_identity = sorted(key for key, value in required_identity.items() if not value)
+        if missing_identity:
+            raise RuntimeError(
+                "runtime exposure authority missing identity: "
+                f"position_id={position_id} fields={','.join(missing_identity)}"
+            )
+        target_date = required_identity["target_date"]
+        try:
+            datetime.strptime(target_date, "%Y-%m-%d")
+        except ValueError as exc:
+            raise RuntimeError(
+                "runtime exposure authority malformed: "
+                f"position_id={position_id} field=target_date value={target_date!r}"
+            ) from exc
+        direction = str(row["direction"] or "")
+        if direction not in {member.value for member in Direction}:
+            raise RuntimeError(
+                "runtime exposure authority malformed: "
+                f"position_id={position_id} field=direction value={direction!r}"
+            )
+        temperature_metric = str(row["temperature_metric"] or "")
+        if temperature_metric not in {"high", "low"}:
+            raise RuntimeError(
+                "runtime exposure authority malformed: "
+                f"position_id={position_id} field=temperature_metric "
+                f"value={temperature_metric!r}"
+            )
+        chain_state = str(row["chain_state"] or "")
+        if chain_state not in valid_chain_states:
+            raise RuntimeError(
+                "runtime exposure authority malformed: "
+                f"position_id={position_id} field=chain_state value={chain_state!r}"
+            )
+        fill_authority = str(row["fill_authority"] or "")
+        if fill_authority not in valid_fill_authorities:
+            raise RuntimeError(
+                "runtime exposure authority malformed: "
+                f"position_id={position_id} field=fill_authority value={fill_authority!r}"
+            )
+        phase = str(row["phase"] or "")
+        if fill_authority == FillAuthority.SETTLED.value:
+            raise RuntimeError(
+                "runtime exposure settled fill authority conflicts with runtime phase: "
+                f"position_id={position_id} phase={phase}"
+            )
+        local_economics: dict[str, float] = {}
+        for field in ("size_usd", "shares", "cost_basis_usd", "entry_price"):
+            local_economics[field] = _strict_runtime_exposure_number(
+                row[field],
+                position_id=position_id,
+                field=field,
+                allow_none=False,
+            ) or 0.0
+        chain_shares = _strict_runtime_exposure_number(
+            row["chain_shares"],
+            position_id=position_id,
+            field="chain_shares",
+            allow_none=True,
+        )
+        _strict_runtime_exposure_number(
+            row["chain_avg_price"],
+            position_id=position_id,
+            field="chain_avg_price",
+            allow_none=True,
+        )
+        chain_cost = _strict_runtime_exposure_number(
+            row["chain_cost_basis_usd"],
+            position_id=position_id,
+            field="chain_cost_basis_usd",
+            allow_none=True,
+        )
+        has_chain_shares = chain_shares is not None and chain_shares > 0.000001
+        has_chain_cost = chain_cost is not None and chain_cost > 0.0
+        if has_chain_shares != has_chain_cost:
+            raise RuntimeError(
+                "runtime exposure authority has torn chain economics: "
+                f"position_id={position_id} "
+                f"chain_shares={chain_shares!r} chain_cost_basis_usd={chain_cost!r}"
+            )
+        has_chain_economics = has_chain_shares and has_chain_cost
+        if fill_authority == FillAuthority.VENUE_POSITION_OBSERVED.value and not has_chain_economics:
+            raise RuntimeError(
+                "runtime exposure authority incomplete for venue position observation: "
+                f"position_id={position_id}"
+            )
+        if fill_authority in trade_fill_authorities and not (
+            local_economics["shares"] > 0.000001
+            and max(local_economics["cost_basis_usd"], local_economics["size_usd"]) > 0.0
+            and local_economics["entry_price"] > 0.0
+        ):
+            raise RuntimeError(
+                "runtime exposure authority incomplete for fill authority: "
+                f"position_id={position_id} fill_authority={fill_authority}"
+            )
+        if phase == "pending_entry" and fill_authority in trade_fill_authorities:
+            if fill_authority not in _RUNTIME_PENDING_FILL_AUTHORITIES:
+                raise RuntimeError(
+                    "runtime exposure authority conflicts with pending phase: "
+                    f"position_id={position_id} fill_authority={fill_authority}"
+                )
+            expected_cost = local_economics["shares"] * local_economics["entry_price"]
+            for field in ("size_usd", "cost_basis_usd"):
+                if not math.isclose(
+                    local_economics[field],
+                    expected_cost,
+                    rel_tol=1e-9,
+                    abs_tol=1e-6,
+                ):
+                    raise RuntimeError(
+                        "runtime exposure pending fill economics disagree: "
+                        f"position_id={position_id} field={field} "
+                        f"value={local_economics[field]!r} expected={expected_cost!r}"
+                    )
+        if chain_state in CURRENT_MONEY_RISK_CHAIN_STATES and not has_chain_economics:
+            raise RuntimeError(
+                "runtime exposure authority incomplete for current-money-risk chain state: "
+                f"position_id={position_id} chain_state={chain_state}"
+            )
+        if has_chain_economics and chain_state not in CURRENT_MONEY_RISK_CHAIN_STATES:
+            raise RuntimeError(
+                "runtime exposure authority conflicts with chain state: "
+                f"position_id={position_id} chain_state={chain_state}"
+            )
+        local_covers_chain = (
+            local_economics["shares"] >= (chain_shares or 0.0) - 0.000001
+            and max(local_economics["cost_basis_usd"], local_economics["size_usd"])
+            >= (chain_cost or 0.0) - 0.000001
+        )
+        if (
+            has_chain_economics
+            and fill_authority not in chain_consuming_fill_authorities
+            and not local_covers_chain
+        ):
+            raise RuntimeError(
+                "runtime exposure authority cannot consume chain economics: "
+                f"position_id={position_id} fill_authority={fill_authority}"
+            )
+
+
+def query_portfolio_loader_view(
+    conn: sqlite3.Connection | None,
+    *,
+    temperature_metric: str | None = None,
+    runtime_exposure_only: bool = False,
+) -> dict:
     if conn is None:
         return {
             "status": "skipped_no_connection",
             "table": "position_current",
             "positions": [],
             "temperature_metric": temperature_metric,
+            "runtime_exposure_only": runtime_exposure_only,
         }
     if not _table_exists(conn, "position_current"):
         return {
@@ -10979,6 +11211,7 @@ def query_portfolio_loader_view(conn: sqlite3.Connection | None, *, temperature_
             "table": "position_current",
             "positions": [],
             "temperature_metric": temperature_metric,
+            "runtime_exposure_only": runtime_exposure_only,
         }
 
     actual_cols = {row[1] for row in conn.execute("PRAGMA table_info(position_current)").fetchall()}
@@ -10987,12 +11220,28 @@ def query_portfolio_loader_view(conn: sqlite3.Connection | None, *, temperature_
             "position_current.temperature_metric column missing; "
             "init_schema ALTER must have failed. Re-run init or check DB integrity."
         )
+    if runtime_exposure_only:
+        missing = sorted(_RUNTIME_EXPOSURE_REQUIRED_COLUMNS - actual_cols)
+        if missing:
+            raise RuntimeError(
+                "runtime exposure authority columns missing: " + ",".join(missing)
+            )
 
-    where_clause = ""
-    params: tuple = ()
+    predicates: list[str] = []
+    params: list[object] = []
     if temperature_metric is not None:
-        where_clause = "WHERE temperature_metric = ?"
-        params = (temperature_metric,)
+        predicates.append("temperature_metric = ?")
+        params.append(temperature_metric)
+    if runtime_exposure_only:
+        placeholders = ", ".join("?" for _ in OPEN_EXPOSURE_PHASES)
+        runtime_open_predicate = f"phase IN ({placeholders})"
+        params.extend(OPEN_EXPOSURE_PHASES)
+        # Quarantine is a current risk-review set, not historical closure.
+        # Load every quarantined row so malformed/unknown chain authority
+        # cannot disappear before strict validation and typed risk filtering.
+        runtime_open_predicate = f"({runtime_open_predicate} OR phase = 'quarantined')"
+        predicates.append(runtime_open_predicate)
+    where_clause = f"WHERE {' AND '.join(predicates)}" if predicates else ""
 
     position_current_env_expr = (
         "env"
@@ -11049,7 +11298,7 @@ def query_portfolio_loader_view(conn: sqlite3.Connection | None, *, temperature_
         FROM position_current {where_clause}
         ORDER BY updated_at DESC, position_id
         """,
-        params,
+        tuple(params),
     ).fetchall()
     if not rows:
         return {
@@ -11057,13 +11306,27 @@ def query_portfolio_loader_view(conn: sqlite3.Connection | None, *, temperature_
             "table": "position_current",
             "positions": [],
             "temperature_metric": temperature_metric,
+            "runtime_exposure_only": runtime_exposure_only,
         }
+    if runtime_exposure_only:
+        _assert_runtime_exposure_rows(rows)
 
     trade_ids = [str(row["trade_id"] or row["position_id"] or "") for row in rows]
     position_ids = [str(row["position_id"] or row["trade_id"] or "") for row in rows]
-    event_envs = _latest_position_event_envs(conn, position_ids)
-    transitional_hints = _query_transitional_position_hints(conn, trade_ids)
-    fill_hints = _query_entry_execution_fill_hints(conn, trade_ids)
+    # Sizing consumes current exposure and fill economics only. Entry/Day0/exit
+    # timestamps and event-derived env are recovery/monitoring concerns; avoid
+    # their per-position event seeks on the reactor's runtime-open hot path.
+    if runtime_exposure_only:
+        event_envs: dict[str, str] = {}
+        transitional_hints: dict[str, dict] = {}
+    else:
+        event_envs = _latest_position_event_envs(conn, position_ids)
+        transitional_hints = _query_transitional_position_hints(conn, trade_ids)
+    fill_hints = _query_entry_execution_fill_hints(
+        conn,
+        trade_ids,
+        strict=runtime_exposure_only,
+    )
 
     positions: list[dict] = []
     for row in rows:
@@ -11076,11 +11339,21 @@ def query_portfolio_loader_view(conn: sqlite3.Connection | None, *, temperature_
         fill_economics = _position_current_effective_entry_economics(
             row,
             fill_hints.get(trade_id),
+            allow_pending_fill_projection=runtime_exposure_only,
         )
+        if runtime_exposure_only:
+            _assert_runtime_exposure_hydrated_economics(
+                position_id=trade_id,
+                phase=phase,
+                fill_hint=fill_hints.get(trade_id),
+                fill_economics=fill_economics,
+            )
         runtime_state = _portfolio_loader_runtime_state_from_phase(phase)
         explicit_env = str(row["env"] or event_envs.get(str(row["position_id"] or "")) or "unknown_env")
         positions.append(
             {
+                "position_id": str(row["position_id"] or trade_id),
+                "phase": phase,
                 "trade_id": trade_id,
                 "market_id": row["market_id"],
                 "city": row["city"],
@@ -11163,6 +11436,7 @@ def query_portfolio_loader_view(conn: sqlite3.Connection | None, *, temperature_
         "table": "position_current",
         "positions": positions,
         "temperature_metric": temperature_metric,
+        "runtime_exposure_only": runtime_exposure_only,
     }
 
 
@@ -11900,6 +12174,8 @@ def _finite_float_or_none(value) -> float | None:
 def _query_entry_execution_fill_hints(
     conn: sqlite3.Connection,
     trade_ids: list[str],
+    *,
+    strict: bool = False,
 ) -> dict[str, dict]:
     """Return confirmed entry fill economics from canonical execution facts.
 
@@ -11928,6 +12204,11 @@ def _query_entry_execution_fill_hints(
     if not normalized_trade_ids:
         return {}
     placeholders = ", ".join("?" for _ in normalized_trade_ids)
+    strict_filter = "" if strict else """
+          AND filled_at IS NOT NULL
+          AND COALESCE(fill_price, 0.0) > 0.0
+          AND COALESCE(shares, 0.0) > 0.0
+    """
     rows = conn.execute(
         f"""
         SELECT position_id, intent_id, filled_at, posted_at, fill_price, shares,
@@ -11936,9 +12217,7 @@ def _query_entry_execution_fill_hints(
         WHERE position_id IN ({placeholders})
           AND order_role = 'entry'
           AND lower(COALESCE(terminal_exec_status, '')) = 'filled'
-          AND filled_at IS NOT NULL
-          AND COALESCE(fill_price, 0.0) > 0.0
-          AND COALESCE(shares, 0.0) > 0.0
+          {strict_filter}
         ORDER BY position_id,
                  COALESCE(filled_at, posted_at, '') DESC,
                  intent_id DESC
@@ -11950,10 +12229,36 @@ def _query_entry_execution_fill_hints(
         trade_id = str(row["position_id"] or "")
         if not trade_id or trade_id in hints:
             continue
+        if strict:
+            filled_at = str(row["filled_at"] or "")
+            if _parse_iso_timestamp(filled_at) is None:
+                raise RuntimeError(
+                    "runtime exposure fill authority has invalid filled_at: "
+                    f"position_id={trade_id} intent_id={row['intent_id']} "
+                    f"filled_at={filled_at!r}"
+                )
+            _strict_runtime_exposure_number(
+                row["fill_price"],
+                position_id=trade_id,
+                field="execution_fact.fill_price",
+                allow_none=False,
+            )
+            _strict_runtime_exposure_number(
+                row["shares"],
+                position_id=trade_id,
+                field="execution_fact.shares",
+                allow_none=False,
+            )
         fill_price = _finite_float_or_zero(row["fill_price"])
         shares = _finite_float_or_zero(row["shares"])
         filled_cost_basis_usd = fill_price * shares
         if fill_price <= 0.0 or shares <= 0.0 or filled_cost_basis_usd <= 0.0:
+            if strict:
+                raise RuntimeError(
+                    "runtime exposure fill authority is not positive: "
+                    f"position_id={trade_id} intent_id={row['intent_id']} "
+                    f"fill_price={fill_price!r} shares={shares!r}"
+                )
             continue
         hints[trade_id] = {
             "entry_price_avg_fill": fill_price,
@@ -11970,8 +12275,15 @@ def _query_entry_execution_fill_hints(
     return hints
 
 
-def _position_current_effective_entry_economics(row, fill_hint: dict | None) -> dict:
+def _position_current_effective_entry_economics(
+    row,
+    fill_hint: dict | None,
+    *,
+    allow_pending_fill_projection: bool = False,
+) -> dict:
     from src.state.portfolio import (
+        FILL_AUTHORITY_VENUE_CONFIRMED_PARTIAL,
+        FILL_GRADE_FILL_AUTHORITIES,
         fill_authority_effective_open_cost_basis,
         has_verified_trade_fill,
     )
@@ -12086,6 +12398,34 @@ def _position_current_effective_entry_economics(row, fill_hint: dict | None) -> 
             "execution_fact_venue_status": "",
         }
 
+    if (
+        allow_pending_fill_projection
+        and phase == "pending_entry"
+        and row_fill_authority in FILL_GRADE_FILL_AUTHORITIES
+    ):
+        filled_cost_basis_usd = projection_cost_basis_usd or submitted_size_usd
+        effective_entry_price = projection_entry_price
+        if effective_entry_price <= 0.0 and filled_cost_basis_usd > 0.0 and projection_shares > 0.0:
+            effective_entry_price = filled_cost_basis_usd / projection_shares
+        return {
+            "submitted_size_usd": submitted_size_usd,
+            "projection_cost_basis_usd": projection_cost_basis_usd,
+            "effective_cost_basis_usd": filled_cost_basis_usd,
+            "effective_shares": projection_shares,
+            "pnl_cost_basis_usd": filled_cost_basis_usd,
+            "effective_entry_price": effective_entry_price,
+            "entry_price_avg_fill": effective_entry_price,
+            "shares_filled": projection_shares,
+            "filled_cost_basis_usd": filled_cost_basis_usd,
+            "entry_economics_authority": ENTRY_ECONOMICS_AVG_FILL_PRICE,
+            "fill_authority": row_fill_authority,
+            "entry_economics_source": "position_current_pending_fill",
+            "entry_fill_verified": row_fill_authority != FILL_AUTHORITY_VENUE_CONFIRMED_PARTIAL,
+            "execution_fact_intent_id": "",
+            "execution_fact_filled_at": "",
+            "execution_fact_venue_status": "",
+        }
+
     if phase == "pending_entry":
         return {
             "submitted_size_usd": submitted_size_usd,
@@ -12136,6 +12476,34 @@ def _position_current_effective_entry_economics(row, fill_hint: dict | None) -> 
         "execution_fact_filled_at": "",
         "execution_fact_venue_status": "",
     }
+
+
+def _assert_runtime_exposure_hydrated_economics(
+    *,
+    position_id: str,
+    phase: str,
+    fill_hint: dict | None,
+    fill_economics: dict,
+) -> None:
+    if phase != "pending_entry":
+        return
+    if fill_hint is not None:
+        raise RuntimeError(
+            "runtime exposure terminal fill conflicts with pending phase: "
+            f"position_id={position_id} intent_id={fill_hint.get('execution_fact_intent_id')!r}"
+        )
+    fill_authority = str(fill_economics.get("fill_authority") or "")
+    if fill_authority in _RUNTIME_PENDING_FILL_AUTHORITIES:
+        return
+    has_effective_exposure = (
+        _finite_float_or_zero(fill_economics.get("effective_shares")) > 0.0
+        or _finite_float_or_zero(fill_economics.get("effective_cost_basis_usd")) > 0.0
+    )
+    if fill_authority != FILL_AUTHORITY_NONE or has_effective_exposure:
+        raise RuntimeError(
+            "runtime exposure hydrated authority conflicts with pending phase: "
+            f"position_id={position_id} fill_authority={fill_authority!r}"
+        )
 
 
 

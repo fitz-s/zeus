@@ -216,7 +216,7 @@ test_trust_policy:
     tests/engine/test_event_reactor_no_bypass.py: {created: "2026-05-24", last_used: "2026-05-24"}
     tests/strategy/live_inference/test_no_trade_regret.py: {created: "2026-05-24", last_used: "2026-05-24"}
     tests/analysis/test_event_opportunity_report.py: {created: "2026-05-24", last_used: "2026-05-24"}
-    tests/money_path/test_edli_online_invariants.py: {created: "2026-05-24", last_used: "2026-06-03", note: "Arm direction-gate footgun antibody (2026-06-03): _assert_edli_arm_requires_direction_gate makes arming with only real_order_submit_enabled (direction gate skipped) a boot failure; tests arm/no-submit guard coverage."}
+    tests/money_path/test_edli_online_invariants.py: {created: "2026-05-24", last_used: "2026-07-10", note: "EDLI arm/no-submit relationship antibodies, including portfolio snapshot fail-closed helper-to-adapter selection."}
     tests/money_path/test_edli_live_readiness.py: {created: "2026-05-25", last_used: "2026-07-09", note: "Extended live entry provenance antibody: receipt buy-NO gate inputs survive into actionable/final/pre-submit payloads for real-order audit."}
     tests/money_path/test_mainstream_enforce_on_submit.py: {created: "2026-06-03", last_used: "2026-06-03", note: "PR-2 (B) F1 enforce: mainstream_agreement_enforce_on_submit blocks armed submit when selected candidate's verdict != True (fail-closed); reference selector stays reference-only"}
     tests/money_path/test_edli_order_lifecycle.py: {created: "2026-05-25", last_used: "2026-05-25"}
@@ -455,7 +455,7 @@ test_trust_policy:
     tests/test_run_replay_cli.py: {created: "2026-04-25", last_used: "2026-05-18"}
     tests/test_riskguard.py: {created: "2026-03-30", last_used: "2026-06-29", note: "RiskGuard strategy policy authority antibody: trade-main legacy control_overrides ghosts are ignored when world is attached; attached world.control_overrides remains the only live manual strategy policy authority."}
     tests/test_riskguard_auxiliary_write_lock_no_degrade.py: {created: "2026-06-13", last_used: "2026-06-13", note: "no-order root Blocker 1 (docs/evidence/no_order_root_2026-06-13/diagnosis.md): RELATIONSHIP test — a concurrent writer holding the zeus_trades WAL write lock must NOT flip RiskGuard's computed level to DATA_DEGRADED when the risk-level READS succeed; the risk_actions/strategy_health writes are AUXILIARY bookkeeping (lock absorbed -> skipped_dependency_lock, level computed from reads). RED-on-revert control proves the unwrapped INSERT raises 'database is locked'; non-lock OperationalError still propagates (fail-loud). The dependency-lock storm / no-conn-across-IO class (9f70e9c581)."}
-    tests/test_runtime_guards.py: {created: "2026-04-28", last_used: "2026-07-09"}
+    tests/test_runtime_guards.py: {created: "2026-04-28", last_used: "2026-07-10"}
     tests/test_runtime_n_mc_floor.py: {created: "2026-04-29", last_used: "2026-05-08"}
     tests/test_schema_v2_gate_a.py: {created: "2026-04-16", last_used: "2026-07-09", note: "V2 schema coexistence plus day0_metric_fact natural-key writer upsert contract against the world-owned table."}
     tests/test_settlements_authority_trigger.py: {created: "2026-04-23", last_used: "2026-04-23"}
