@@ -91,6 +91,58 @@ def global_single_order_actuation_identity(
     return digest.hexdigest()
 
 
+def global_single_order_economic_identity(
+    *,
+    decision: GlobalSingleOrderDecision,
+    probability_witness: Any,
+    wealth_economic_identity: str,
+) -> str:
+    """Bind one order's economics without observation or epoch clocks."""
+
+    candidate = decision.candidate
+    if candidate is None or not str(wealth_economic_identity or "").strip():
+        raise ValueError("global economic identity requires a trade and current wealth")
+    if getattr(probability_witness, "family_key", None) != candidate.family_key:
+        raise ValueError("global economic identity probability family mismatch")
+    curve = candidate.executable_cost_curve
+    digest = hashlib.sha256()
+    for value in (
+        candidate.family_key,
+        candidate.bin_id,
+        candidate.condition_id,
+        candidate.side,
+        candidate.token_id,
+        candidate.resolution_identity,
+        probability_witness.family_binding_identity,
+        probability_witness.sample_matrix_identity,
+        probability_witness.q_version,
+        probability_witness.band_alpha,
+        probability_witness.band_basis,
+        wealth_economic_identity,
+        curve.book_hash,
+        curve.fee_model.fee_rate,
+        curve.min_tick,
+        curve.min_order_size,
+        curve.quote_ttl.total_seconds(),
+        decision.shares,
+        decision.cost_usd,
+        decision.limit_price,
+        decision.expected_fill_price_before_fee,
+        decision.max_spend_usd,
+        repr(decision.robust_delta_log_wealth),
+        repr(decision.robust_ev_usd),
+        repr(decision.capital_efficiency),
+    ):
+        digest.update(str(value).encode("utf-8"))
+        digest.update(b"\x1f")
+    for level in curve.levels:
+        digest.update(str(level.price).encode("utf-8"))
+        digest.update(b"\x1e")
+        digest.update(str(level.size).encode("utf-8"))
+        digest.update(b"\x1f")
+    return digest.hexdigest()
+
+
 @dataclass(frozen=True)
 class GlobalSingleOrderActuation:
     """Certificate-bound handoff from the global selector to one live event."""
@@ -102,6 +154,8 @@ class GlobalSingleOrderActuation:
     probability_witness: Any
     decision_at_utc: datetime
     actuation_identity: str
+    wealth_economic_identity: str
+    economic_identity: str
 
     def __post_init__(self) -> None:
         if (
@@ -123,6 +177,13 @@ class GlobalSingleOrderActuation:
         )
         if self.actuation_identity != expected:
             raise ValueError("global actuation identity mismatch")
+        economic = global_single_order_economic_identity(
+            decision=self.decision,
+            probability_witness=self.probability_witness,
+            wealth_economic_identity=self.wealth_economic_identity,
+        )
+        if self.economic_identity != economic:
+            raise ValueError("global actuation economic identity mismatch")
 
 
 def _no_trade(reason: str) -> PreparedGlobalAuctionResult:
@@ -289,6 +350,14 @@ def select_prepared_global_auction(
                 universe_witness_identity=universe_witness.witness_identity,
                 wealth_witness_identity=wealth_witness.witness_identity,
                 decision_at_utc=decision_at_utc,
+            ),
+            wealth_economic_identity=wealth_witness.economic_identity,
+            economic_identity=global_single_order_economic_identity(
+                decision=decision,
+                probability_witness=probability_witnesses[
+                    decision.candidate.family_key
+                ],
+                wealth_economic_identity=wealth_witness.economic_identity,
             ),
         ),
     )

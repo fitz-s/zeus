@@ -229,7 +229,9 @@ def _reactor(store, *, gates=True, config=None):
     return reactor, rejected, submitted
 
 
-def _global_batch_probe_reactor(store, observations, *, incomplete=False):
+def _global_batch_probe_reactor(
+    store, observations, *, incomplete=False, next_claim_event=None
+):
     def _direct_submit(*_args, **_kwargs):
         observations["direct_submit_calls"] += 1
         raise AssertionError("global batch path must not invoke per-event submit")
@@ -258,6 +260,7 @@ def _global_batch_probe_reactor(store, observations, *, incomplete=False):
             receipts=receipts,
             winner_event_id=None,
             venue_submit_count=0,
+            next_claim_event=next_claim_event,
         )
 
     observations.update(direct_submit_calls=0, batch_calls=0)
@@ -385,6 +388,118 @@ def test_global_batch_incomplete_receipt_coverage_fails_closed_for_whole_epoch()
     assert result.proof_accepted == 0
     assert result.retried == 2
     assert all(_processing_status(conn, event.event_id) == "pending" for event in events)
+
+
+def test_global_batch_materializes_unclaimed_winner_as_next_claim():
+    conn, store = _store()
+    claimed = _forecast_event("claimed", target_date="2026-05-25")
+    target = _day0_event("target")
+    store.insert_or_ignore(claimed)
+    observations = {}
+    reactor = _global_batch_probe_reactor(
+        store,
+        observations,
+        next_claim_event=target,
+    )
+
+    first = reactor.process_pending(decision_time=_DT_VENUE_OPEN, limit=1)
+
+    assert first.retried == 1
+    assert _processing_status(conn, target.event_id) == "pending"
+    row = conn.execute(
+        "SELECT last_error FROM opportunity_event_processing WHERE event_id = ?",
+        (target.event_id,),
+    ).fetchone()
+    assert row[0] == "GLOBAL_WINNER_TARGETED_CLAIM"
+    assert store.fetch_pending(
+        decision_time=_DT_VENUE_OPEN.isoformat(), limit=1
+    )[0].event_id == target.event_id
+
+
+def test_global_target_does_not_preempt_stale_processing_recovery():
+    conn, store = _store()
+    stale = _day0_event("stale")
+    target = _forecast_event("target", target_date="2026-05-24")
+    store.insert_or_ignore(target)
+    assert store.prioritize_global_winner(target)
+    store.insert_or_ignore(stale)
+    assert store.claim(
+        stale.event_id,
+        claimed_at="2026-05-24T18:00:00+00:00",
+    )
+
+    first = store.fetch_pending(
+        decision_time=_DT_VENUE_OPEN.isoformat(),
+        limit=1,
+    )
+
+    assert [event.event_id for event in first] == [stale.event_id]
+
+
+def test_global_reactor_keeps_stale_day0_ahead_of_targeted_forecast():
+    conn, store = _store()
+    stale = _day0_event("stale-reactor")
+    target = _forecast_event("target-reactor", target_date="2026-05-24")
+    assert store.prioritize_global_winner(target)
+    store.insert_or_ignore(stale)
+    assert store.claim(
+        stale.event_id,
+        claimed_at="2026-05-24T18:00:00+00:00",
+    )
+    observations = {}
+    reactor = _global_batch_probe_reactor(store, observations)
+
+    reactor.process_pending(decision_time=_DT_VENUE_OPEN, limit=1)
+
+    assert observations["batch_event_ids"] == (stale.event_id,)
+
+
+def test_global_target_atomically_supersedes_only_older_pending_targets():
+    conn, store = _store()
+    old = _day0_event("old-target")
+    new = _forecast_event("new-target", target_date="2026-05-24")
+    unrelated = _forecast_event("unrelated", target_date="2026-05-24")
+    assert store.prioritize_global_winner(old)
+    store.insert_or_ignore(unrelated)
+
+    assert store.prioritize_global_winner(new)
+
+    states = {
+        event_id: (status, reason)
+        for event_id, status, reason in conn.execute(
+            "SELECT event_id, processing_status, last_error "
+            "FROM opportunity_event_processing"
+        )
+    }
+    assert states[old.event_id] == (
+        "expired",
+        "GLOBAL_WINNER_TARGET_SUPERSEDED",
+    )
+    assert states[new.event_id] == ("pending", "GLOBAL_WINNER_TARGETED_CLAIM")
+    assert states[unrelated.event_id] == ("pending", None)
+
+
+def test_global_target_processing_lease_blocks_new_target_materialization():
+    conn, store = _store()
+    inflight = _forecast_event("inflight-target", target_date="2026-05-25")
+    new = _forecast_event("new-target", target_date="2026-05-25")
+    store.insert_or_ignore(inflight)
+    assert store.claim(
+        inflight.event_id,
+        claimed_at="2026-05-24T18:09:00+00:00",
+    )
+
+    assert store.prioritize_global_winner(new) is False
+
+    assert conn.execute(
+        "SELECT processing_status, last_error "
+        "FROM opportunity_event_processing WHERE event_id = ?",
+        (inflight.event_id,),
+    ).fetchone() == ("processing", None)
+    assert conn.execute(
+        "SELECT 1 FROM opportunity_events WHERE event_id = ?",
+        (new.event_id,),
+    ).fetchone() is None
 
 
 def test_global_batch_result_rejects_more_than_one_submit_or_wrong_winner():

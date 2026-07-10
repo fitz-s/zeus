@@ -19,6 +19,8 @@ from typing import Any, Callable
 
 from src.events.opportunity_event import OpportunityEvent
 
+GLOBAL_WINNER_TARGETED_CLAIM = "GLOBAL_WINNER_TARGETED_CLAIM"
+
 # Continuous re-decision resurrection (2026-06-12): the forecast decision lane. EDLI_REDECISION_PENDING
 # carries the same FSR-shaped city/target payload and gets the same timeliness floor. Literal here
 # (mirrors src.events.continuous_redecision.REDECISION_EVENT_TYPE) to avoid an import cycle.
@@ -627,7 +629,16 @@ class EventStore:
                     )
                 )
 
-        ranked = _rank_pending_rows_python(rank_rows, day0_is_tradeable=day0_is_tradeable)
+        targeted_event_ids = frozenset(
+            event_id
+            for event_id, reason in last_error_by_event.items()
+            if reason == GLOBAL_WINNER_TARGETED_CLAIM
+        )
+        ranked = _rank_pending_rows_python(
+            rank_rows,
+            day0_is_tradeable=day0_is_tradeable,
+            targeted_event_ids=targeted_event_ids,
+        )
         events = [event for event, _attempt_count in ranked]
         timely = [event for event in events if self._is_timely(event, parsed_decision_time)]
         return timely[:limit]
@@ -2027,6 +2038,119 @@ class EventStore:
             (not_before, last_error, _utc_now(), self.consumer_name, event_id),
         )
 
+    def prioritize_global_winner(self, event: OpportunityEvent) -> bool:
+        """Materialize one current auction winner as the next legal claim.
+
+        The global feasible set is independent of queue pagination, but venue
+        actuation remains event-claim-bound.  Insert the scope event when needed
+        and mark only an untouched/previously-targeted pending row; never revive a
+        terminal event or erase an unrelated transient retry floor.
+        """
+
+        try:
+            payload = json.loads(event.payload_json)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return False
+        family = (
+            str(payload.get("city") or "").strip(),
+            str(payload.get("target_date") or "").strip(),
+            str(payload.get("metric") or "").strip().lower(),
+        )
+        if not family[0] or not family[1] or family[2] not in {"high", "low"}:
+            return False
+
+        old_ids: set[str] = set()
+        processing_ids: set[str] = set()
+        for event_type, index_name in (
+            ("FORECAST_SNAPSHOT_READY", "idx_opportunity_events_fsr_target_date"),
+            ("EDLI_REDECISION_PENDING", "idx_opportunity_events_fsr_target_date"),
+            ("DAY0_EXTREME_UPDATED", "idx_opportunity_events_day0_family_extreme"),
+        ):
+            event_type_sql = {
+                "FORECAST_SNAPSHOT_READY": "'FORECAST_SNAPSHOT_READY'",
+                "EDLI_REDECISION_PENDING": "'EDLI_REDECISION_PENDING'",
+                "DAY0_EXTREME_UPDATED": "'DAY0_EXTREME_UPDATED'",
+            }[event_type]
+            rows = self.conn.execute(
+                f"""
+                SELECT e.event_id, p.processing_status
+                  FROM opportunity_events e INDEXED BY {index_name}
+                  JOIN opportunity_event_processing p
+                    ON p.consumer_name = ? AND p.event_id = e.event_id
+                 WHERE e.event_type = {event_type_sql}
+                   AND json_extract(e.payload_json, '$.city') = ?
+                   AND json_extract(e.payload_json, '$.target_date') = ?
+                   AND json_extract(e.payload_json, '$.metric') = ?
+                   AND (
+                        p.processing_status = 'processing'
+                     OR (
+                            p.processing_status = 'pending'
+                        AND p.last_error = ?
+                     )
+                   )
+                """,
+                (
+                    self.consumer_name,
+                    *family,
+                    GLOBAL_WINNER_TARGETED_CLAIM,
+                ),
+            ).fetchall()
+            for row in rows:
+                event_id = str(row[0] or "")
+                if not event_id:
+                    continue
+                if str(row[1] or "") == "processing":
+                    processing_ids.add(event_id)
+                elif event_id != event.event_id:
+                    old_ids.add(event_id)
+
+        if processing_ids:
+            return False
+
+        self.insert_or_ignore(event)
+
+        now = _utc_now()
+        if old_ids:
+            ordered_ids = sorted(old_ids)
+            for start in range(0, len(ordered_ids), 250):
+                chunk = ordered_ids[start : start + 250]
+                placeholders = ",".join("?" for _ in chunk)
+                self.conn.execute(
+                    f"""
+                    UPDATE opportunity_event_processing
+                       SET processing_status = 'expired',
+                           processed_at = ?,
+                           last_error = 'GLOBAL_WINNER_TARGET_SUPERSEDED',
+                           updated_at = ?
+                     WHERE consumer_name = ?
+                       AND processing_status = 'pending'
+                       AND last_error = ?
+                       AND event_id IN ({placeholders})
+                    """,
+                    (
+                        now,
+                        now,
+                        self.consumer_name,
+                        GLOBAL_WINNER_TARGETED_CLAIM,
+                        *chunk,
+                    ),
+                )
+        cur = self.conn.execute(
+            "UPDATE opportunity_event_processing "
+            "SET claimed_at = NULL, last_error = ?, updated_at = ? "
+            "WHERE consumer_name = ? AND event_id = ? "
+            "AND processing_status = 'pending' "
+            "AND (last_error IS NULL OR last_error = ?)",
+            (
+                GLOBAL_WINNER_TARGETED_CLAIM,
+                now,
+                self.consumer_name,
+                event.event_id,
+                GLOBAL_WINNER_TARGETED_CLAIM,
+            ),
+        )
+        return cur.rowcount == 1
+
     def requeue_misclassified_local_pre_submit_rejections(self, *, batch_limit: int = 100) -> int:
         """Recover processed events poisoned by old local pre-submit reject receipts.
 
@@ -2617,6 +2741,7 @@ def _rank_pending_rows_python(
     rows: list[sqlite3.Row | tuple] | tuple[sqlite3.Row | tuple, ...],
     *,
     day0_is_tradeable: bool,
+    targeted_event_ids: frozenset[str] = frozenset(),
 ) -> list[tuple[OpportunityEvent, int]]:
     records: list[dict] = []
     for row in rows:
@@ -2643,6 +2768,9 @@ def _rank_pending_rows_python(
                 "retry_key": 0 if attempt_count > 0 else 1,
                 "stale_processing_reclaim_lane": (
                     0 if stale_processing_reclaim else 1
+                ),
+                "global_winner_target_lane": (
+                    0 if event.event_id in targeted_event_ids else 1
                 ),
                 "live_redecision_retry_lane": _live_redecision_retry_lane(
                     event, attempt_count
@@ -2673,6 +2801,7 @@ def _rank_pending_rows_python(
         records,
         key=lambda item: (
             item["stale_processing_reclaim_lane"],
+            item["global_winner_target_lane"],
             item["tier"],
             item["live_redecision_retry_lane"],
             item["recapture_edge_backoff"],
@@ -2709,12 +2838,24 @@ def _fair_decision_lane_interleave(records: list[dict]) -> list[dict]:
     invisible.
     """
 
+    # Stale processing recovery remains the absolute first lane. A globally
+    # selected family targeted for its first legal claim comes immediately after
+    # it; the ordinary forecast/Day0 fairness weave must not page that winner out
+    # again merely because its carrier is Day0.
+    fixed = [
+        item
+        for item in records
+        if item["stale_processing_reclaim_lane"] == 0
+        or item["global_winner_target_lane"] == 0
+    ]
+    fixed_ids = {item["event"].event_id for item in fixed}
+    records = [item for item in records if item["event"].event_id not in fixed_ids]
     forecast = [item for item in records if _is_forecast_decision_lane_item(item)]
     if not forecast:
-        return records
+        return fixed + records
     rest = [item for item in records if not _is_forecast_decision_lane_item(item)]
     if not rest:
-        return records
+        return fixed + records
     out: list[dict] = []
     i = j = 0
     while i < len(forecast) or j < len(rest):
@@ -2724,7 +2865,7 @@ def _fair_decision_lane_interleave(records: list[dict]) -> list[dict]:
         if j < len(rest):
             out.append(rest[j])
             j += 1
-    return out
+    return fixed + out
 
 
 def _event_from_row(row: sqlite3.Row | tuple) -> OpportunityEvent:

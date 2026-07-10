@@ -16,7 +16,7 @@ from src.engine.global_auction_universe import (
 )
 from src.engine.global_single_order_auction import select_prepared_global_auction
 from src.events.candidate_binding import weather_family_id
-from src.events.opportunity_event import OpportunityEvent
+from src.events.opportunity_event import OpportunityEvent, make_opportunity_event
 from src.events.reactor import EventSubmissionReceipt, GlobalBatchSubmitResult
 from src.solve.solver import CurrentFamilyProbabilityAuthority
 from src.state.collateral_ledger import COLLATERAL_SNAPSHOT_MAX_AGE_SECONDS
@@ -40,6 +40,34 @@ def _family_key(event: OpportunityEvent, payload: Mapping[str, object]) -> str:
         city=str(payload.get("city") or ""),
         target_date=str(payload.get("target_date") or ""),
         metric=str(payload.get("metric") or "").lower(),
+    )
+
+
+def _next_claim_carrier(
+    event: OpportunityEvent,
+    *,
+    targeted_at: datetime,
+    economic_identity: str,
+    payload: Mapping[str, object],
+) -> OpportunityEvent:
+    """Create a fresh event identity for one selected current family fact."""
+
+    stamp = targeted_at.astimezone(UTC).isoformat()
+    identity = str(economic_identity or "").strip()
+    if not identity:
+        raise ValueError("GLOBAL_WINNER_ACTUATION_IDENTITY_MISSING")
+    return make_opportunity_event(
+        event_type=event.event_type,
+        entity_key=event.entity_key,
+        source=f"global_auction_winner_target:{event.event_id}:{identity}",
+        observed_at=event.observed_at,
+        available_at=event.available_at,
+        received_at=stamp,
+        causal_snapshot_id=event.causal_snapshot_id,
+        payload=payload,
+        priority=event.priority,
+        expires_at=event.expires_at,
+        created_at=stamp,
     )
 
 
@@ -81,7 +109,11 @@ def process_current_global_batch(
             raise ValueError("GLOBAL_AUCTION_CLOCK_REGRESSION")
         return now
 
-    def reject(reason: str) -> GlobalBatchSubmitResult:
+    def reject(
+        reason: str,
+        *,
+        next_claim_event: OpportunityEvent | None = None,
+    ) -> GlobalBatchSubmitResult:
         return GlobalBatchSubmitResult(
             receipts={
                 event.event_id: stamp_receipt(
@@ -97,6 +129,7 @@ def process_current_global_batch(
             },
             winner_event_id=None,
             venue_submit_count=0,
+            next_claim_event=next_claim_event,
         )
 
     try:
@@ -107,10 +140,14 @@ def process_current_global_batch(
             decision_at_utc=scope_at,
         )
         claimed_by_family = {}
+        duplicate_owner_by_event: dict[str, str] = {}
         for event in event_tuple:
             family_key = _family_key(event, payload_reader(event))
             if family_key in claimed_by_family:
-                return reject("GLOBAL_CLAIMED_FAMILY_AMBIGUOUS")
+                duplicate_owner_by_event[event.event_id] = claimed_by_family[
+                    family_key
+                ].event_id
+                continue
             claimed_by_family[family_key] = event
 
         prepared_by_event = {}
@@ -312,8 +349,28 @@ def process_current_global_batch(
             (event for event in event_tuple if event.event_id == winner_id),
             None,
         )
-        if winner is None or selected.actuation is None:
-            return reject("GLOBAL_WINNER_AWAITS_CLAIM")
+        if selected.actuation is None:
+            return reject("GLOBAL_WINNER_ACTUATION_MISSING")
+        if winner is None:
+            target = next(
+                (
+                    event
+                    for event in full_scope_event_by_family.values()
+                    if event.event_id == winner_id
+                ),
+                None,
+            )
+            if target is None:
+                return reject("GLOBAL_WINNER_IDENTITY_MISSING")
+            return reject(
+                "GLOBAL_WINNER_AWAITS_CLAIM",
+                next_claim_event=_next_claim_carrier(
+                    target,
+                    targeted_at=current_time(),
+                    economic_identity=selected.actuation.economic_identity,
+                    payload=payload_reader(target),
+                ),
+            )
 
         # Selection can take long enough for one q/book/collateral fact to move.
         # Revalidate the complete epoch once more before handing its sole winner to
@@ -337,6 +394,19 @@ def process_current_global_batch(
             event.event_id: (
                 winner_receipt
                 if event.event_id == winner_id
+                else stamp_receipt(
+                    EventSubmissionReceipt(
+                        False,
+                        event.event_id,
+                        event.causal_snapshot_id,
+                        reason=(
+                            "GLOBAL_DUPLICATE_FAMILY_CARRIER:"
+                            f"{duplicate_owner_by_event[event.event_id]}"
+                        ),
+                        proof_accepted=False,
+                    )
+                )
+                if event.event_id in duplicate_owner_by_event
                 else stamp_receipt(
                     EventSubmissionReceipt(
                         False,

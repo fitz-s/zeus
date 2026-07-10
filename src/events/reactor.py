@@ -862,12 +862,19 @@ class GlobalBatchSubmitResult:
     receipts: Mapping[str, EventSubmissionReceipt]
     winner_event_id: str | None
     venue_submit_count: int
+    next_claim_event: OpportunityEvent | None = None
 
     def __post_init__(self) -> None:
         if self.venue_submit_count not in {0, 1}:
             raise ValueError("global batch may start at most one venue submit")
         if self.winner_event_id is None and self.venue_submit_count != 0:
             raise ValueError("venue submit requires one selected winner")
+        if self.next_claim_event is not None and (
+            self.winner_event_id is not None
+            or self.venue_submit_count != 0
+            or self.next_claim_event.event_id in self.receipts
+        ):
+            raise ValueError("next global claim must be unclaimed and side-effect free")
         if self.winner_event_id is not None and self.winner_event_id not in self.receipts:
             raise ValueError("global batch winner must have one event-bound receipt")
         if any(key != receipt.event_id for key, receipt in self.receipts.items()):
@@ -1059,8 +1066,11 @@ class OpportunityEventReactor:
             # (each family is decided on its own fresh inputs; processing order is immaterial
             # to correctness); within-lane fetch order — and thus the per-city fairness — is
             # preserved. Channel events are already excluded by fetch_pending.
-            events = _fair_lane_interleave(events)
             if callable(getattr(self._submit, "process_global_batch", None)):
+                # fetch_pending already owns the complete stale-recovery,
+                # targeted-winner, and cross-lane order. A second forecast-first
+                # weave here would move a targeted forecast ahead of stale Day0
+                # recovery and permit new exposure before unknown in-flight work.
                 attempted = self._process_global_event_batch(
                     events,
                     decision_time=decision_time,
@@ -1074,6 +1084,7 @@ class OpportunityEventReactor:
                 # One global auction epoch may start at most one venue submit. Do not
                 # page into a second auction inside the same reactor cycle.
                 return result
+            events = _fair_lane_interleave(events)
             for event in events:
                 # PRE-EVENT budget check (2026-06-11 cadence guard): if the budget
                 # is ALREADY spent, stop BEFORE claiming another event. The
@@ -1149,6 +1160,8 @@ class OpportunityEventReactor:
                 and batch_result.winner_event_id not in claimed_ids
             ):
                 raise ValueError("global batch winner is not a claimed event")
+            if batch_result.next_claim_event is not None:
+                self._queue_global_winner_for_claim(batch_result.next_claim_event)
         except Exception as exc:  # noqa: BLE001 - every claimed event must close its unit
             for event in claimed:
                 self._finalize_deferred_event_unit(
@@ -1173,6 +1186,25 @@ class OpportunityEventReactor:
                 result=result,
             )
         return attempted
+
+    def _queue_global_winner_for_claim(self, event: OpportunityEvent) -> None:
+        """Persist the auction winner's next legal claim outside submit I/O."""
+
+        mutex = world_write_mutex()
+        mutex.acquire()
+        try:
+            if self._store.conn.in_transaction:
+                raise RuntimeError("GLOBAL_WINNER_QUEUE_WORLD_TXN_OPEN")
+            self._store.conn.execute("BEGIN IMMEDIATE")
+            try:
+                if not self._store.prioritize_global_winner(event):
+                    raise RuntimeError("GLOBAL_WINNER_TARGET_NOT_PENDING")
+                self._store.conn.commit()
+            except Exception:
+                self._store.conn.rollback()
+                raise
+        finally:
+            mutex.release()
 
     def _process_event_unit(
         self,
@@ -3475,6 +3507,10 @@ TRANSIENT_MONEY_PATH_REASONS: frozenset[str] = frozenset({
     "SHIFT_BIN_CONCURRENT_FAMILY_LEASE",
     "FILL_UP_CONCURRENT_FAMILY_LEASE",
     "SHIFT_BIN_EXIT_OLD_LEG_PENDING",
+    # The complete auction selected a current family whose event was outside the
+    # bounded claimed page. The reactor materializes that family as the next legal
+    # claim; the current claimed page must remain pending until that claim runs.
+    "GLOBAL_WINNER_AWAITS_CLAIM",
 })
 
 # A reason whose BASE is in this set is TERMINAL (a genuine, non-race rejection)
@@ -3568,6 +3604,10 @@ _RUNTIME_TERMINAL_MONEY_PATH_REASONS: frozenset[str] = frozenset({
     # redecision event; requeueing this one only clogs the lane.
     "FILL_UP_NO_SUBMIT",
     "SHIFT_BIN_NO_SUBMIT",
+    # Queue carriers do not enlarge the family feasible set. Once an earlier
+    # claimed carrier owns the family in this epoch, a duplicate carrier is
+    # terminal for this event and must not requeue into an ambiguity loop.
+    "GLOBAL_DUPLICATE_FAMILY_CARRIER",
 })
 
 

@@ -33,7 +33,11 @@ import pytest
 import src.engine.qkernel_spine_bridge as bridge
 import src.engine.event_reactor_adapter as era
 import src.engine.global_batch_runtime as global_batch_runtime
-from src.engine.global_single_order_auction import select_prepared_global_auction
+from src.engine.global_single_order_auction import (
+    global_single_order_actuation_identity,
+    global_single_order_economic_identity,
+    select_prepared_global_auction,
+)
 from src.engine.global_auction_universe import (
     _day0_event_is_current_for_entry,
     capture_current_global_book_epoch,
@@ -1106,6 +1110,19 @@ def test_two_prepared_families_choose_one_globally_unique_order():
     assert selected.actuation.winner_event_id == selected.winner_event_id
     assert selected.actuation.universe_witness_identity
     assert selected.actuation.wealth_witness_identity == wealth.witness_identity
+    later_actuation_identity = global_single_order_actuation_identity(
+        decision=selected.decision,
+        winner_event_id=selected.winner_event_id,
+        universe_witness_identity=selected.actuation.universe_witness_identity,
+        wealth_witness_identity=selected.actuation.wealth_witness_identity,
+        decision_at_utc=decision_at + _dt.timedelta(seconds=30),
+    )
+    assert later_actuation_identity != selected.actuation.actuation_identity
+    assert selected.actuation.economic_identity == global_single_order_economic_identity(
+        decision=selected.decision,
+        probability_witness=selected.actuation.probability_witness,
+        wealth_economic_identity=wealth.economic_identity,
+    )
     assert partial.decision.candidate is None
     assert partial.actuation is None
     assert partial.decision.no_trade_reason == "GLOBAL_FEASIBLE_SET_INCOMPLETE"
@@ -1412,7 +1429,10 @@ def test_global_batch_waits_until_global_winner_family_is_claimed(monkeypatch):
     selected = SimpleNamespace(
         decision=SimpleNamespace(candidate=object(), no_trade_reason=None),
         winner_event_id=event_b.event_id,
-        actuation=SimpleNamespace(actuation_identity="actuation-b"),
+        actuation=SimpleNamespace(
+            actuation_identity="actuation-b",
+            economic_identity="economic-b",
+        ),
     )
     monkeypatch.setattr(global_batch_runtime, "scan_current_global_auction_scope", lambda **_: scope)
     monkeypatch.setattr(
@@ -1450,6 +1470,19 @@ def test_global_batch_waits_until_global_winner_family_is_claimed(monkeypatch):
 
     assert result.venue_submit_count == 0
     assert result.winner_event_id is None
+    assert result.next_claim_event is not None
+    assert result.next_claim_event.event_id != event_b.event_id
+    assert result.next_claim_event.event_type == event_b.event_type
+    assert result.next_claim_event.causal_snapshot_id == event_b.causal_snapshot_id
+    assert result.next_claim_event.payload_json == event_b.payload_json
+    assert result.next_claim_event.source.endswith(":economic-b")
+    repeated = global_batch_runtime._next_claim_carrier(
+        event_b,
+        targeted_at=decision_at + _dt.timedelta(seconds=30),
+        economic_identity="economic-b",
+        payload=__import__("json").loads(event_b.payload_json),
+    )
+    assert repeated.event_id == result.next_claim_event.event_id
     assert result.receipts[event_a.event_id].reason == "GLOBAL_WINNER_AWAITS_CLAIM"
 
 
@@ -1603,6 +1636,7 @@ def test_global_batch_rejects_unexpected_probability_prepare_failure(monkeypatch
 def test_global_batch_actuates_exactly_one_claimed_global_winner(monkeypatch):
     decision_at = _dt.datetime(2026, 7, 10, 8, 0, tzinfo=_dt.timezone.utc)
     event = _global_scope_event(city="Alpha", source_run_id="run-a")
+    duplicate = _global_scope_event(city="Alpha", source_run_id="run-duplicate")
     scope = current_global_auction_scope_from_events((event,), captured_at_utc=decision_at)
     prepared = SimpleNamespace(
         probability_witness=SimpleNamespace(family_key=scope.family_keys[0])
@@ -1646,7 +1680,7 @@ def test_global_batch_actuates_exactly_one_claimed_global_winner(monkeypatch):
         )
 
     result = global_batch_runtime.process_current_global_batch(
-        (event,),
+        (event, duplicate),
         decision_time=decision_at,
         world_conn=object(),
         forecast_conn=object(),
@@ -1670,6 +1704,9 @@ def test_global_batch_actuates_exactly_one_claimed_global_winner(monkeypatch):
     assert result.venue_submit_count == 1
     assert result.winner_event_id == event.event_id
     assert result.receipts[event.event_id].submitted is True
+    assert result.receipts[duplicate.event_id].reason == (
+        f"GLOBAL_DUPLICATE_FAMILY_CARRIER:{event.event_id}"
+    )
 
 
 def test_global_batch_aborts_if_any_venue_state_moves_before_actuation(monkeypatch):
