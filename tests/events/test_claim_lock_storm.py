@@ -1,5 +1,5 @@
 # Created: 2026-06-11
-# Last reused or audited: 2026-06-11
+# Last reused/audited: 2026-07-10
 # Authority basis: operator URGENT 2026-06-11 17:51-17:56Z claim-storm incident.
 #   Cycles alternated `processed=0 retried=250 reasons=[]` (whole cycle bounced) and
 #   `processed=22 ... retried=209` (one mid-cycle bounce poisoned the rest). TWO
@@ -34,7 +34,7 @@ from datetime import datetime, timezone
 
 from src.events.event_store import EventStore
 from src.events.opportunity_event import ForecastSnapshotReadyPayload, make_opportunity_event
-from src.events.reactor import OpportunityEventReactor
+from src.events.reactor import OpportunityEventReactor, ReactorResult
 from src.state.db import init_schema
 from src.strategy.live_inference.no_trade_regret import NoTradeRegretLedger
 
@@ -235,6 +235,99 @@ def test_world_mutex_contention_before_claim_is_bounded_and_keeps_event_pending(
     assert result.processed == 0 and result.rejected == 0 and result.dead_lettered == 0
     assert _status(conn, event.event_id) == "pending"
     assert not conn.in_transaction
+
+
+def test_claim_contention_waits_once_then_probes_nonblocking(monkeypatch, caplog):
+    import logging
+
+    class _ContendedMutex:
+        def __init__(self) -> None:
+            self.timeouts: list[float] = []
+
+        def acquire(self, *, timeout: float) -> bool:
+            self.timeouts.append(timeout)
+            return False
+
+        def release(self) -> None:
+            raise AssertionError("an unacquired mutex must not be released")
+
+    mutex = _ContendedMutex()
+    monkeypatch.setenv("ZEUS_REACTOR_CLAIM_BUSY_TIMEOUT_MS", "250")
+    monkeypatch.setattr("src.events.reactor.world_write_mutex", lambda: mutex)
+    reactor = object.__new__(OpportunityEventReactor)
+    result = ReactorResult()
+
+    with caplog.at_level(logging.WARNING, logger="zeus.events.reactor"):
+        for index in range(3):
+            reactor._process_event_unit(
+                _event(f"snap-probe-{index}"),
+                decision_time=_DT,
+                result=result,
+            )
+
+    assert mutex.timeouts == [0.25, 0.0, 0.0]
+    assert result.claim_lock_bounces == 3
+    assert result.retried == 3
+    assert sum("claim mutex-bounce" in record.message for record in caplog.records) == 1
+
+
+def test_successful_claim_probe_restores_normal_wait(monkeypatch):
+    class _RecoveringMutex:
+        def __init__(self) -> None:
+            self.outcomes = iter((False, True, False))
+            self.timeouts: list[float] = []
+            self.releases = 0
+
+        def acquire(self, *, timeout: float) -> bool:
+            self.timeouts.append(timeout)
+            return next(self.outcomes)
+
+        def release(self) -> None:
+            self.releases += 1
+
+    class _Store:
+        def __init__(self) -> None:
+            self.conn = sqlite3.connect(":memory:")
+
+        def claim(self, _event_id: str, *, claimed_at: str) -> bool:
+            return True
+
+    mutex = _RecoveringMutex()
+    monkeypatch.setenv("ZEUS_REACTOR_CLAIM_BUSY_TIMEOUT_MS", "250")
+    monkeypatch.setattr("src.events.reactor.world_write_mutex", lambda: mutex)
+    reactor = object.__new__(OpportunityEventReactor)
+    reactor._store = _Store()
+    reactor._process_one_pre_submit = lambda *_args, **_kwargs: (None, False)
+    reactor._finalize_disposition = lambda *_args, **_kwargs: None
+    result = ReactorResult()
+
+    try:
+        for index in range(3):
+            reactor._process_event_unit(
+                _event(f"snap-recover-{index}"),
+                decision_time=_DT,
+                result=result,
+            )
+    finally:
+        reactor._store.conn.close()
+
+    assert mutex.timeouts == [0.25, 0.0, 0.25]
+    assert mutex.releases == 1
+    assert result.claim_lock_bounces == 2
+    assert result.retried == 2
+
+
+def test_claim_contention_probe_state_resets_each_cycle(tmp_path):
+    _db_path, conn, store = _file_store(tmp_path)
+    reactor = _reactor(conn, store)
+    reactor._claim_contention_seen = True
+
+    try:
+        reactor.process_pending(decision_time=_DT, limit=1)
+    finally:
+        conn.close()
+
+    assert reactor._claim_contention_seen is False
 
 
 def test_dangling_stale_snapshot_txn_cannot_storm_the_cycle(tmp_path):

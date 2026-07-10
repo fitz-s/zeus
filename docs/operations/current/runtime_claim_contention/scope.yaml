@@ -1,0 +1,16 @@
+packet: current/runtime_claim_contention
+in_scope:
+- docs/operations/current/runtime_claim_contention/**
+- src/events/reactor.py
+- tests/events/test_claim_lock_storm.py
+allow_companions:
+- architecture/test_topology.yaml
+- docs/operations/current_state.md
+out_of_scope:
+- state/zeus-world.db
+- state/zeus-world.db-*
+- state/zeus_trades.db
+- state/zeus_trades.db-*
+- src/execution/**
+- src/venue/**
+status: in_progress

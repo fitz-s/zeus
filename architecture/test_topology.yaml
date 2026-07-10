@@ -185,6 +185,7 @@ test_trust_policy:
     tests/strategy/live_inference/test_trade_score.py: {created: "2026-05-24", last_used: "2026-05-24"}
     tests/events/test_market_channel_ingestor.py: {created: "2026-05-24", last_used: "2026-07-09", note: "Market-channel ingestor and feasibility evidence tests, including execution_feasibility_latest schema/upsert coverage, compact executable-snapshot latest reads, and append-history fallback isolation."}
     tests/events/test_reactor.py: {created: "2026-05-24", last_used: "2026-05-24"}
+    tests/events/test_claim_lock_storm.py: {created: "2026-06-11", last_used: "2026-07-10", note: "World-writer claim contention remains bounded, visible, rollback-safe, pending on miss, and waits at most once per contention episode before same-cycle nonblocking probes."}
     tests/events/test_continuous_redecision.py: {created: "2026-05-31", last_used: "2026-06-17"}
     tests/events/test_continuous_redecision_resurrection.py: {created: "2026-06-12", last_used: "2026-06-26", note: "Continuous redecision resurrection/deadlock antibodies; extended 2026-06-26 to prove open-maker token->condition resolution reads executable_market_snapshot_latest without append scans when latest rows exist."}
     tests/events/test_continuous_redecision_emit.py: {created: "2026-05-31", last_used: "2026-05-31"}

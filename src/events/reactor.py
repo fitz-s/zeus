@@ -178,10 +178,6 @@ def _reactor_claim_busy_timeout_ms() -> int:
     return max(1, min(30_000, value))
 
 
-def _reactor_claim_mutex_timeout_seconds() -> float:
-    return _reactor_claim_busy_timeout_ms() / 1000.0
-
-
 def _sqlite_busy_timeout_ms(conn: sqlite3.Connection) -> int:
     row = conn.execute("PRAGMA busy_timeout").fetchone()
     return int(row[0]) if row is not None else 0
@@ -942,6 +938,7 @@ class OpportunityEventReactor:
         self._pending_snapshot_refreshes: list[tuple[str, str, str]] = []
         self._pending_cycle_advances: list[tuple[str, str, str]] = []
         self._pending_day0_hourly_refreshes: list[tuple[str, str, str]] = []
+        self._claim_contention_seen = False
         # Per-event requeue counter — LOG HYGIENE ONLY (operator law 2026-06-12:
         # a retry count is not a market fact and MUST NOT terminalize). Used
         # solely to dedupe the requeue log line (log at attempt 1, then every
@@ -968,6 +965,7 @@ class OpportunityEventReactor:
         self._pending_snapshot_refreshes: list[tuple[str, str, str]] = []
         self._pending_cycle_advances: list[tuple[str, str, str]] = []
         self._pending_day0_hourly_refreshes: list[tuple[str, str, str]] = []
+        self._claim_contention_seen = False
         # E1 (STEP 8): per-cycle wall-clock budget. A cycle must not run unbounded;
         # once the budget is exceeded, stop after the current event and leave the
         # rest PENDING (not consumed, not dropped) for the next cycle. This caps a
@@ -1091,24 +1089,31 @@ class OpportunityEventReactor:
         windows. ``fetch_pending`` (a read) stays OUTSIDE the lock.
         """
         # ---- Window A: pre-submit world write unit (claim + gates) under mutex ----
+        # Every event contends on the same writer. After one full wait expires,
+        # later events probe without waiting until one succeeds; that success ends
+        # the contention episode and restores the normal wait for the next event.
+        contention_seen = bool(getattr(self, "_claim_contention_seen", False))
+        claim_wait_ms = 0 if contention_seen else _reactor_claim_busy_timeout_ms()
         mutex = world_write_mutex()
-        if not mutex.acquire(timeout=_reactor_claim_mutex_timeout_seconds()):
+        if not mutex.acquire(timeout=claim_wait_ms / 1000.0):
+            self._claim_contention_seen = True
             result.claim_lock_bounces += 1
             result.retried += 1
-            import logging as _logging
+            if not contention_seen:
+                import logging as _logging
 
-            _logging.getLogger("zeus.events.reactor").warning(
-                "reactor claim mutex-bounce event_id=%s claim_mutex_timeout_ms=%s "
-                "(event stays pending; no venue side effect attempted)",
-                event.event_id,
-                _reactor_claim_busy_timeout_ms(),
-            )
+                _logging.getLogger("zeus.events.reactor").warning(
+                    "reactor claim mutex-bounce event_id=%s claim_mutex_timeout_ms=%s "
+                    "(event stays pending; no venue side effect attempted)",
+                    event.event_id,
+                    claim_wait_ms,
+                )
             return
         pre_disposition: str | None
         should_submit = False
         try:
             with _scoped_sqlite_busy_timeout(
-                self._store.conn, _reactor_claim_busy_timeout_ms()
+                self._store.conn, claim_wait_ms
             ):
                 try:
                     # CLAIM-STORM FIX (2026-06-11 17:51Z): acquire the WAL write lock
@@ -1137,21 +1142,24 @@ class OpportunityEventReactor:
                         _was_in_txn = bool(getattr(self._store.conn, "in_transaction", False))
                         with contextlib.suppress(Exception):
                             self._store.conn.rollback()
+                        self._claim_contention_seen = True
                         result.claim_lock_bounces += 1
                         result.retried += 1
-                        import logging as _logging
+                        if not contention_seen:
+                            import logging as _logging
 
-                        _logging.getLogger("zeus.events.reactor").warning(
-                            "reactor claim lock-bounce event_id=%s txn_open_at_bounce=%s "
-                            "claim_busy_timeout_ms=%s exc=%s "
-                            "(rolled back; event stays pending; counted in claim_lock_bounces)",
-                            event.event_id,
-                            _was_in_txn,
-                            _reactor_claim_busy_timeout_ms(),
-                            exc,
-                        )
+                            _logging.getLogger("zeus.events.reactor").warning(
+                                "reactor claim lock-bounce event_id=%s txn_open_at_bounce=%s "
+                                "claim_busy_timeout_ms=%s exc=%s "
+                                "(rolled back; event stays pending; counted in claim_lock_bounces)",
+                                event.event_id,
+                                _was_in_txn,
+                                claim_wait_ms,
+                                exc,
+                            )
                         return
                     raise
+            self._claim_contention_seen = False
             if not claimed:
                 # Claim lost (another worker / lease not yet stale): release any
                 # open txn and the mutex; nothing to process this cycle.
