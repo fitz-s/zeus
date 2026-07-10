@@ -99,6 +99,38 @@ def _payload_with_joint_samples(proofs, payload, *, draws=64):
     return out
 
 
+def test_global_prepare_empty_scope_names_admission_classes_without_changing_scope():
+    _family, proofs, _payload = _corpus()[0]
+    ordinary_diagnostic: dict[str, object] = {}
+    ordinary = era._selection_scoped_proofs(
+        proofs=proofs,
+        honor_admission_rejections=False,
+        enforce_win_rate_floor=False,
+        diagnostic_out=ordinary_diagnostic,
+    )
+    assert ordinary == tuple(proofs)
+    assert ordinary_diagnostic == {}
+
+    blocked = tuple(
+        replace(proof, missing_reason="BUY_NO_CONSERVATIVE_EVIDENCE_MISSING")
+        for proof in proofs
+    )
+    blocked_diagnostic: dict[str, object] = {}
+    assert era._selection_scoped_proofs(
+        proofs=blocked,
+        honor_admission_rejections=False,
+        enforce_win_rate_floor=False,
+        diagnostic_out=blocked_diagnostic,
+    ) == ()
+    assert blocked_diagnostic == {
+        "empty_reason": (
+            "SELECTION_SCOPE_EMPTY:admission:"
+            f"input={len(blocked)}:classes=BUY_NO_CONSERVATIVE_EVIDENCE_MISSING="
+            f"{len(blocked)}"
+        )
+    }
+
+
 def _global_scope_event(*, city: str, source_run_id: str):
     captured_at = "2026-07-10T08:00:00+00:00"
     payload = ForecastSnapshotReadyPayload(

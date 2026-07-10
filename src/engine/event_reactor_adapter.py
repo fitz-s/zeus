@@ -6121,6 +6121,7 @@ def _build_event_bound_no_submit_receipt_core(
         proof = None
         _spine_no_trade_reason = "QKERNEL_SPINE_REQUIRED"
     elif _spine_flag_on and _spine_eligible_event:
+        _selection_scope_diagnostic: dict[str, object] = {}
         _spine_entry_proofs = _selection_scoped_proofs(
             proofs=proofs,
             locked_opportunity_conn=locked_opportunity_conn,
@@ -6131,14 +6132,24 @@ def _build_event_bound_no_submit_receipt_core(
             allow_same_family_monitor_owned=_selection_scope_allows_same_family_monitor_owned,
             honor_admission_rejections=False,
             enforce_win_rate_floor=False,
+            diagnostic_out=_selection_scope_diagnostic,
         )
         _pre_day0_low_block_reason = payload.get("_edli_spine_pre_day0_low_block_reason")
         if _pre_day0_low_block_reason is not None:
             proof = None
             _spine_no_trade_reason = str(_pre_day0_low_block_reason)
+            if prepare_global_auction:
+                _global_prepare_reason = _spine_no_trade_reason
         elif not _spine_entry_proofs:
             proof = None
-            _spine_no_trade_reason = None
+            if prepare_global_auction:
+                _spine_no_trade_reason = str(
+                    _selection_scope_diagnostic.get("empty_reason")
+                    or "SELECTION_SCOPE_EMPTY:unknown"
+                )
+                _global_prepare_reason = _spine_no_trade_reason
+            else:
+                _spine_no_trade_reason = None
         else:
             _active_spine_entry_proofs = tuple(_spine_entry_proofs)
             _actionability_exclusions: list[str] = []
@@ -15200,20 +15211,48 @@ def _selection_scoped_proofs(
     allow_same_family_monitor_owned: bool = False,
     honor_admission_rejections: bool = True,
     enforce_win_rate_floor: bool = True,
+    diagnostic_out: dict[str, object] | None = None,
 ) -> tuple[_CandidateProof, ...]:
+    def record_empty(stage: str, reasons: list[object], input_count: int) -> None:
+        if diagnostic_out is None or "empty_reason" in diagnostic_out:
+            return
+        classes: dict[str, int] = {}
+        for reason in reasons:
+            reason_class = str(reason or "UNKNOWN").split(":", 1)[0]
+            classes[reason_class] = classes.get(reason_class, 0) + 1
+        class_counts = ",".join(
+            f"{reason_class}={count}"
+            for reason_class, count in sorted(classes.items())
+        )
+        diagnostic_out["empty_reason"] = (
+            f"SELECTION_SCOPE_EMPTY:{stage}:input={input_count}:classes="
+            f"{class_counts or 'UNKNOWN=0'}"
+        )
+
     executable = [proof for proof in proofs if proof.execution_price is not None]
-    executable = [
-        proof
-        for proof in executable
-        if _live_selection_rejection_reason(
+    if not executable:
+        record_empty(
+            "execution_price",
+            ["EXECUTION_PRICE_MISSING"] * len(proofs),
+            len(proofs),
+        )
+    live_admitted: list[_CandidateProof] = []
+    live_rejections: list[object] = []
+    for proof in executable:
+        rejection = _live_selection_rejection_reason(
             proof,
             strategy_policy_conn=strategy_policy_conn,
             strategy_policy_event_type=strategy_policy_event_type,
             decision_time=decision_time,
             enforce_win_rate_floor=enforce_win_rate_floor,
         )
-        is None
-    ]
+        if rejection is None:
+            live_admitted.append(proof)
+        else:
+            live_rejections.append(rejection)
+    executable = live_admitted
+    if not executable and live_rejections:
+        record_empty("live_selection", live_rejections, len(live_rejections))
     # FIX A/B hardening (2026-06-10 Milan-24C incident): a priced proof that an
     # admission gate REJECTED (missing_reason set: DIRECTION_LAW / COVERAGE_
     # UNLICENSED_TAIL / capital efficiency / buy_no evidence) must not enter the
@@ -15246,25 +15285,31 @@ def _selection_scoped_proofs(
         )
 
     if honor_admission_rejections:
-        executable = [
-            proof
-            for proof in executable
-            if proof.missing_reason is None
-            or (
+        admission_input = executable
+        executable = []
+        admission_rejections: list[object] = []
+        for proof in admission_input:
+            if proof.missing_reason is None or (
                 allow_same_family_monitor_owned
                 and _is_entry_held_redecision_reason(proof.missing_reason)
-            )
-        ]
+            ):
+                executable.append(proof)
+            else:
+                admission_rejections.append(proof.missing_reason)
     else:
-        executable = [
-            proof
-            for proof in executable
-            if _qkernel_may_rescore_rejected_proof(proof.missing_reason)
-            or (
+        admission_input = executable
+        executable = []
+        admission_rejections = []
+        for proof in admission_input:
+            if _qkernel_may_rescore_rejected_proof(proof.missing_reason) or (
                 allow_same_family_monitor_owned
                 and _is_entry_held_redecision_reason(proof.missing_reason)
-            )
-        ]
+            ):
+                executable.append(proof)
+            else:
+                admission_rejections.append(proof.missing_reason)
+    if not executable and admission_rejections:
+        record_empty("admission", admission_rejections, len(admission_input))
     tradeable_limit = [
         proof
         for proof in executable
@@ -15274,21 +15319,25 @@ def _selection_scoped_proofs(
     if tradeable_limit:
         scoped = tradeable_limit
     if locked_opportunity_conn is not None:
-        unlocked = [
-            proof
-            for proof in scoped
-            if _locked_candidate_no_price_improvement_reason(
+        unlocked: list[_CandidateProof] = []
+        locked_rejections: list[object] = []
+        for proof in scoped:
+            locked_reason = _locked_candidate_no_price_improvement_reason(
                 locked_opportunity_conn,
                 proof,
             )
-            is None
-        ]
+            if locked_reason is None:
+                unlocked.append(proof)
+            else:
+                locked_rejections.append(locked_reason)
         if unlocked:
             scoped = unlocked
         elif scoped:
+            record_empty("locked", locked_rejections, len(scoped))
             return ()
     if held_position_conn is not None:
         unheld: list[_CandidateProof] = []
+        held_rejections: list[object] = []
         for proof in scoped:
             reason = _entry_held_position_reason_for_proof(held_position_conn, proof)
             if reason is None:
@@ -15296,9 +15345,12 @@ def _selection_scoped_proofs(
                 continue
             if allow_same_family_monitor_owned and _is_entry_held_redecision_reason(reason):
                 unheld.append(proof)
+                continue
+            held_rejections.append(reason)
         if unheld:
             scoped = unheld
         elif scoped:
+            record_empty("held", held_rejections, len(scoped))
             return ()
     return tuple(scoped)
 
