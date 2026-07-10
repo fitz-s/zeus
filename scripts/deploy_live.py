@@ -1114,6 +1114,17 @@ def cmd_restart(args: argparse.Namespace) -> int:
     expected_live_sha = ""
     launched_after: datetime | None = None
     non_live_labels = [label for label in labels if label != LIVE_TRADING_LABEL]
+    # The venue-heartbeat service owns the heartbeat supervisor, which repairs an
+    # absent live-trading service.  Keep it unloaded through the process-absent
+    # preflight or it will correctly—but prematurely—bootstrap live-trading.
+    post_live_labels = (
+        [DAEMONS["venue-heartbeat"]]
+        if includes_live_trading and DAEMONS["venue-heartbeat"] in non_live_labels
+        else []
+    )
+    preflight_prerequisite_labels = [
+        label for label in non_live_labels if label not in post_live_labels
+    ]
     if includes_live_trading:
         expected_live_sha = head_sha(short=False)
         ok, detail = _stop_label(LIVE_TRADING_LABEL)
@@ -1140,7 +1151,7 @@ def cmd_restart(args: argparse.Namespace) -> int:
     print(recovery_detail)
 
     prerequisite_launch_started_at = datetime.now(timezone.utc)
-    for label in non_live_labels:
+    for label in preflight_prerequisite_labels:
         ok, detail = _launch_or_restart_label(label)
         if ok:
             print(detail)
@@ -1157,7 +1168,7 @@ def cmd_restart(args: argparse.Namespace) -> int:
 
     if includes_live_trading:
         prerequisite_ok, prerequisite_detail = _wait_for_prerequisite_code_identity(
-            non_live_labels,
+            preflight_prerequisite_labels,
             expected_sha=expected_live_sha,
             launched_after=prerequisite_launch_started_at,
         )
@@ -1185,6 +1196,13 @@ def cmd_restart(args: argparse.Namespace) -> int:
         ok, detail = _launch_or_restart_label(LIVE_TRADING_LABEL)
         if ok:
             print(detail)
+            for label in post_live_labels:
+                deferred_ok, deferred_detail = _launch_or_restart_label(label)
+                if deferred_ok:
+                    print(deferred_detail)
+                else:
+                    rc_all = 1
+                    print(deferred_detail, file=sys.stderr)
             runtime_ok, runtime_detail = _wait_for_live_runtime_fresh(
                 expected_sha=expected_live_sha,
                 launched_after=launched_after,

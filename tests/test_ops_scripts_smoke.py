@@ -2724,15 +2724,22 @@ def test_deploy_live_live_restart_runs_recovery_before_preflight(monkeypatch, ca
 
     assert rc == 0
     expanded_labels = [*dl.LIVE_TRADING_PREREQUISITE_LABELS, dl.LIVE_TRADING_LABEL]
+    heartbeat_supervisor = dl.DAEMONS["venue-heartbeat"]
+    preflight_prerequisites = tuple(
+        label
+        for label in dl.LIVE_TRADING_PREREQUISITE_LABELS
+        if label != heartbeat_supervisor
+    )
     assert calls == [
         ("pause_entries", tuple(expanded_labels)),
         ("stop", dl.LIVE_TRADING_LABEL),
         *[("stop", label) for label in dl.LIVE_TRADING_PREREQUISITE_LABELS],
         ("recovery", tuple(expanded_labels)),
-        *[("launch", label) for label in dl.LIVE_TRADING_PREREQUISITE_LABELS],
-        ("prerequisite", tuple(dl.LIVE_TRADING_PREREQUISITE_LABELS)),
+        *[("launch", label) for label in preflight_prerequisites],
+        ("prerequisite", preflight_prerequisites),
         ("preflight", tuple(expanded_labels)),
         ("launch", dl.LIVE_TRADING_LABEL),
+        ("launch", heartbeat_supervisor),
         ("verify", "cccccccc"),
         ("queue", "post-start"),
         ("monitor", "post-start"),
@@ -2893,22 +2900,30 @@ def test_deploy_live_all_restarts_sidecars_before_live_preflight(monkeypatch):
     prerequisite_index = calls.index(
         (
             "prerequisite",
-            tuple(label for label in dl.DAEMONS.values() if label != dl.LIVE_TRADING_LABEL),
+            tuple(
+                label
+                for label in dl.DAEMONS.values()
+                if label not in {dl.LIVE_TRADING_LABEL, dl.DAEMONS["venue-heartbeat"]}
+            ),
         )
     )
     assert stop_index < recovery_index
     assert recovery_index < prerequisite_index < preflight_index
     live_launch_index = calls.index(("launch", dl.LIVE_TRADING_LABEL))
     assert live_launch_index > preflight_index
+    heartbeat_launch_index = calls.index(("launch", dl.DAEMONS["venue-heartbeat"]))
+    assert heartbeat_launch_index > live_launch_index
     assert calls.index(("verify", "dddddddd")) > live_launch_index
     assert calls.index(("queue", "post-start")) > calls.index(("verify", "dddddddd"))
     assert calls.index(("monitor", "post-start")) > calls.index(("verify", "dddddddd"))
-    non_live_launches = [
+    preflight_launches = [
         call for call in calls[recovery_index:preflight_index]
         if call[0] == "launch"
     ]
-    assert {label for _, label in non_live_launches} == {
-        label for label in dl.DAEMONS.values() if label != dl.LIVE_TRADING_LABEL
+    assert {label for _, label in preflight_launches} == {
+        label
+        for label in dl.DAEMONS.values()
+        if label not in {dl.LIVE_TRADING_LABEL, dl.DAEMONS["venue-heartbeat"]}
     }
 
 
@@ -2955,13 +2970,19 @@ def test_deploy_live_preflight_failure_leaves_live_stopped(monkeypatch, capsys):
 
     assert rc == 1
     expanded_labels = [*dl.LIVE_TRADING_PREREQUISITE_LABELS, dl.LIVE_TRADING_LABEL]
+    heartbeat_supervisor = dl.DAEMONS["venue-heartbeat"]
+    preflight_prerequisites = tuple(
+        label
+        for label in dl.LIVE_TRADING_PREREQUISITE_LABELS
+        if label != heartbeat_supervisor
+    )
     assert calls == [
         ("pause_entries", tuple(expanded_labels)),
         ("stop", dl.LIVE_TRADING_LABEL),
         *[("stop", label) for label in dl.LIVE_TRADING_PREREQUISITE_LABELS],
         ("recovery", tuple(expanded_labels)),
-        *[("launch", label) for label in dl.LIVE_TRADING_PREREQUISITE_LABELS],
-        ("prerequisite", tuple(dl.LIVE_TRADING_PREREQUISITE_LABELS)),
+        *[("launch", label) for label in preflight_prerequisites],
+        ("prerequisite", preflight_prerequisites),
         ("preflight", tuple(expanded_labels)),
     ]
     err = capsys.readouterr().err
