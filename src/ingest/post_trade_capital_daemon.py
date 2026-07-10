@@ -1,5 +1,5 @@
 # Created: 2026-06-08
-# Last reused or audited: 2026-06-08
+# Last reused or audited: 2026-07-10
 # Authority basis: docs/architecture/system_decomposition_plan.md
 #   §4.3 (Post-Trade Capital Lifecycle), §6 (P4 row + co-location decision),
 #   §7 (I3 commit-before-HTTP no-back-coupling; I4 ingest->P4),
@@ -80,6 +80,12 @@ _scheduler: Any | None = None
 # SIGTERM-unif (WAVE-4 parity): captured at module load so the forensic elapsed emitted in
 # _graceful_shutdown matches src/main.py / src/ingest_main.py / src/riskguard/riskguard.py.
 _PROCESS_START = time.monotonic()
+
+_COLLATERAL_CHILD_CODE = (
+    "from src.execution.post_trade_capital import collateral_snapshot_refresh_cycle; "
+    "collateral_snapshot_refresh_cycle()"
+)
+_COLLATERAL_CHILD_EXIT_GRACE_SECONDS = 2.0
 
 
 def _git_head_at_boot() -> str:
@@ -164,6 +170,39 @@ def _scheduler_job(job_name: str):
                     pass
         return _wrapper
     return _decorator
+
+
+def _collateral_snapshot_refresh_isolated() -> None:
+    """Refresh collateral in a killable process, isolated from capital pollers.
+
+    ``collateral_snapshot_refresh_cycle`` uses a thread timeout because it normally runs in
+    an APScheduler worker. Python cannot stop the underlying thread after a timeout. Running
+    that cycle in a one-shot interpreter gives this daemon a process boundary it can safely
+    kill without interrupting concurrent wrap/redeem receipt commits.
+    """
+    from src.execution.post_trade_capital import _post_trade_collateral_deadline_seconds
+
+    deadline = _post_trade_collateral_deadline_seconds()
+    timeout = deadline + _COLLATERAL_CHILD_EXIT_GRACE_SECONDS
+    try:
+        result = subprocess.run(
+            [sys.executable, "-c", _COLLATERAL_CHILD_CODE],
+            cwd=Path(__file__).resolve().parents[2],
+            check=False,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired as exc:
+        # subprocess.run kills and reaps the child before raising. The collateral cycle only
+        # reads venue balance/allowance and writes a short SQLite snapshot; it never submits
+        # an external transaction. Killing this child therefore cannot tear a chain action
+        # from its local receipt.
+        raise RuntimeError(
+            f"collateral refresh child exceeded {timeout:.1f}s and was killed"
+        ) from exc
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"collateral refresh child failed with exit_code={result.returncode}"
+        )
 
 
 def _assert_cascade_liveness_contract(scheduler) -> None:
@@ -339,7 +378,9 @@ def main() -> None:
         max_instances=1, coalesce=True,
     )
     _scheduler.add_job(
-        _scheduler_job("collateral_snapshot_refresh")(collateral_snapshot_refresh_cycle),
+        _scheduler_job("collateral_snapshot_refresh")(
+            _collateral_snapshot_refresh_isolated
+        ),
         "interval", seconds=30, id="collateral_snapshot_refresh",
         max_instances=1, coalesce=True,
         next_run_time=datetime.now(timezone.utc),

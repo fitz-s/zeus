@@ -1,10 +1,11 @@
 # Created: 2026-06-08
 # Last reused or audited: 2026-07-10
+# Reuse: Run when post-trade-capital process recovery, poller ownership, or launchd liveness changes.
 # Authority basis: docs/architecture/system_decomposition_plan.md
 #   §4.3 (Post-Trade Capital Lifecycle), §6 (P4 row + co-location decision),
 #   §7 (I3 P4->riskguard/P1 no-back-coupling + commit-before-HTTP; I4 ingest->P4),
 #   §8 Step 2 (split chain-sync READ from exit-SUBMIT), §9 (regression-unconstructable).
-# Lifecycle: created=2026-06-08; last_reviewed=2026-06-08; last_reused=never
+# Lifecycle: created=2026-06-08; last_reviewed=2026-07-10; last_reused=2026-07-10
 # Purpose: RELATIONSHIP TESTS for process-topology refactor STEP P4 — lift the
 #   post-trade capital lifecycle (settlement P&L resolve -> redeem -> wrap +
 #   chain-sync READ phase) OUT of the order daemon into its own process.
@@ -46,7 +47,10 @@
 from __future__ import annotations
 
 import ast
+import subprocess
+import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -571,6 +575,107 @@ def test_collateral_degraded_snapshot_is_scheduler_failure(monkeypatch, tmp_path
         match="balance/allowance unknown",
     ):
         post_trade_capital.collateral_snapshot_refresh_cycle()
+
+
+def test_collateral_refresh_runs_in_killable_child(monkeypatch):
+    """The unkillable timeout thread must live only inside a bounded child process."""
+    from src.ingest import post_trade_capital_daemon as daemon
+
+    calls: list[tuple[list[str], Path, bool, float]] = []
+
+    def _run(cmd, *, cwd, check, timeout):
+        calls.append((cmd, cwd, check, timeout))
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(daemon.subprocess, "run", _run)
+    monkeypatch.setattr(
+        "src.execution.post_trade_capital._post_trade_collateral_deadline_seconds",
+        lambda: 25.0,
+    )
+
+    daemon._collateral_snapshot_refresh_isolated()
+
+    assert calls == [
+        (
+            [daemon.sys.executable, "-c", daemon._COLLATERAL_CHILD_CODE],
+            daemon.Path(daemon.__file__).resolve().parents[2],
+            False,
+            27.0,
+        )
+    ]
+
+
+def test_collateral_child_failure_is_health_failure_without_parent_exit(monkeypatch):
+    """A stuck child is reaped and reported while concurrent capital jobs survive."""
+    from src.ingest import post_trade_capital_daemon as daemon
+
+    trace: list[tuple[str, object]] = []
+
+    def _timeout(*args, **kwargs):
+        raise subprocess.TimeoutExpired(args[0], kwargs["timeout"])
+
+    def _write_health(job_name, *, failed, reason):
+        trace.append(("health", (job_name, failed, reason)))
+
+    monkeypatch.setattr(daemon.subprocess, "run", _timeout)
+    monkeypatch.setattr(
+        "src.execution.post_trade_capital._post_trade_collateral_deadline_seconds",
+        lambda: 25.0,
+    )
+    monkeypatch.setattr(
+        "src.observability.scheduler_health._write_scheduler_health",
+        _write_health,
+    )
+
+    daemon._scheduler_job("collateral_snapshot_refresh")(
+        daemon._collateral_snapshot_refresh_isolated
+    )()
+
+    assert trace == [
+        (
+            "health",
+            (
+                "collateral_snapshot_refresh",
+                True,
+                "collateral refresh child exceeded 27.0s and was killed",
+            ),
+        )
+    ]
+
+
+def test_collateral_child_nonzero_exit_is_scheduler_failure(monkeypatch):
+    """A child-side DEGRADED/error outcome cannot publish false-green health."""
+    from src.ingest import post_trade_capital_daemon as daemon
+
+    monkeypatch.setattr(
+        daemon.subprocess,
+        "run",
+        lambda *args, **kwargs: SimpleNamespace(returncode=7),
+    )
+    monkeypatch.setattr(
+        "src.execution.post_trade_capital._post_trade_collateral_deadline_seconds",
+        lambda: 25.0,
+    )
+
+    with pytest.raises(RuntimeError, match="exit_code=7"):
+        daemon._collateral_snapshot_refresh_isolated()
+
+
+def test_collateral_child_timeout_kills_and_reaps_real_process(monkeypatch):
+    """The outer process deadline must return even when child work never does."""
+    from src.ingest import post_trade_capital_daemon as daemon
+
+    monkeypatch.setattr(daemon, "_COLLATERAL_CHILD_CODE", "import time; time.sleep(60)")
+    monkeypatch.setattr(daemon, "_COLLATERAL_CHILD_EXIT_GRACE_SECONDS", 0.05)
+    monkeypatch.setattr(
+        "src.execution.post_trade_capital._post_trade_collateral_deadline_seconds",
+        lambda: 0.05,
+    )
+
+    started = time.monotonic()
+    with pytest.raises(RuntimeError, match="exceeded 0.1s and was killed"):
+        daemon._collateral_snapshot_refresh_isolated()
+    assert time.monotonic() - started < 1.0
 
 
 def test_collateral_cold_tls_budget_exceeds_observed_handshake(monkeypatch):

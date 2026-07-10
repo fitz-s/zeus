@@ -1,0 +1,26 @@
+packet: current/live_entry_health_repair
+in_scope:
+- docs/operations/current/live_entry_health_repair/**
+- src/ingest/post_trade_capital_daemon.py
+- tests/test_p4_post_trade_capital_lift.py
+allow_companions:
+- architecture/test_topology.yaml
+- docs/operations/current_state.md
+out_of_scope:
+- state/**
+- src/execution/**
+- src/state/**
+- src/control/**
+- scripts/**
+- architecture/2026_04_02_architecture_kernel.sql
+- architecture/kernel_manifest.yaml
+- config/**
+status: in_progress
+live_side_effects_allowed: true
+live_side_effect_allowlist:
+- scripts/repair_active_entry_q_versions.py --apply
+live_side_effect_denied:
+- venue submit or cancel
+- DB backup or copy
+- manual SQL writes
+- schema or lifecycle mutation
