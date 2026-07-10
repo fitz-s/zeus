@@ -1853,6 +1853,68 @@ def test_position_current_status_view_ignores_non_exit_status_payload(tmp_path):
     assert status_view["exit_state_counts"]["none"] == 1
 
 
+def test_position_current_status_view_hydrates_only_open_exposure(tmp_path, monkeypatch):
+    import src.state.db as db_module
+
+    conn = get_connection(tmp_path / "status-view-open-hydration.db")
+    init_schema(conn)
+    open_ids = set()
+    for phase in db_module.OPEN_EXPOSURE_PHASES:
+        if phase == "unknown":
+            # The current schema rejects the recovery-only sentinel; the query
+            # still carries it for legacy/partially migrated DB compatibility.
+            continue
+        position_id = f"open-{phase}"
+        open_ids.add(position_id)
+        _insert_current_position_for_fill_authority_view_test(
+            conn,
+            position_id=position_id,
+            phase=phase,
+        )
+    for phase in (
+        "economically_closed",
+        "settled",
+        "voided",
+        "quarantined",
+        "admin_closed",
+    ):
+        _insert_current_position_for_fill_authority_view_test(
+            conn,
+            position_id=f"terminal-{phase}",
+            phase=phase,
+        )
+    conn.commit()
+
+    hydrated = {}
+
+    def capture_transitional(_conn, trade_ids):
+        hydrated["transitional"] = tuple(trade_ids)
+        return {}
+
+    def capture_fills(_conn, trade_ids, **_kwargs):
+        hydrated["fills"] = tuple(trade_ids)
+        return {}
+
+    monkeypatch.setattr(
+        db_module,
+        "_query_transitional_position_hints",
+        capture_transitional,
+    )
+    monkeypatch.setattr(
+        db_module,
+        "_query_entry_execution_fill_hints",
+        capture_fills,
+    )
+
+    status_view = db_module.query_position_current_status_view(conn)
+    conn.close()
+
+    assert set(hydrated["transitional"]) == open_ids
+    assert set(hydrated["fills"]) == open_ids
+    assert status_view["open_positions"] == len(open_ids)
+    assert {row["trade_id"] for row in status_view["positions"]} == open_ids
+
+
 def test_portfolio_loader_view_ignores_non_exit_status_payload(tmp_path):
     from src.state.db import query_portfolio_loader_view
 

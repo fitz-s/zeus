@@ -10851,8 +10851,9 @@ def query_position_current_status_view(conn: sqlite3.Connection | None) -> dict:
             "day0_positions": 0,
         }
 
+    phase_placeholders = ", ".join("?" for _ in OPEN_EXPOSURE_PHASES)
     rows = conn.execute(
-        """
+        f"""
         SELECT position_id, phase, trade_id, city, bin_label, direction,
                size_usd, shares, cost_basis_usd, entry_price,
                strategy_key, chain_state, order_status,
@@ -10861,8 +10862,10 @@ def query_position_current_status_view(conn: sqlite3.Connection | None) -> dict:
                fill_authority,
                chain_shares, chain_avg_price, chain_cost_basis_usd
         FROM position_current
+        WHERE phase IN ({phase_placeholders})
         ORDER BY updated_at DESC, position_id
-        """
+        """,
+        OPEN_EXPOSURE_PHASES,
     ).fetchall()
     trade_ids = [str(row["trade_id"] or row["position_id"] or "") for row in rows]
     transitional_hints = _query_transitional_position_hints(conn, trade_ids)
