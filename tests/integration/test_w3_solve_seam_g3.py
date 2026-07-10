@@ -131,6 +131,30 @@ def test_global_prepare_empty_scope_names_admission_classes_without_changing_sco
     }
 
 
+def test_global_prepare_failure_preserves_early_spine_no_trade_reason():
+    assert era._global_prepare_failure_reason(
+        SimpleNamespace(
+            global_family=None,
+            global_prepare_reason=None,
+            no_trade_reason="SPINE_INPUTS_UNAVAILABLE:DAY0_OBSERVATION_STALE",
+        )
+    ) == "SPINE_INPUTS_UNAVAILABLE:DAY0_OBSERVATION_STALE"
+    assert era._global_prepare_failure_reason(
+        SimpleNamespace(
+            global_family=None,
+            global_prepare_reason="GLOBAL_FAMILY_PREPARE_FAILED:ValueError:bad",
+            no_trade_reason="SPINE_NO_SELECTION",
+        )
+    ) == "GLOBAL_FAMILY_PREPARE_FAILED:ValueError:bad"
+    assert era._global_prepare_failure_reason(
+        SimpleNamespace(
+            global_family=object(),
+            global_prepare_reason=None,
+            no_trade_reason="SPINE_NO_SELECTION",
+        )
+    ) is None
+
+
 def _global_scope_event(*, city: str, source_run_id: str):
     captured_at = "2026-07-10T08:00:00+00:00"
     payload = ForecastSnapshotReadyPayload(

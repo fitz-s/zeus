@@ -5701,6 +5701,16 @@ def _global_actuation_selected_proof(
     )
 
 
+def _global_prepare_failure_reason(spine_result: object) -> str | None:
+    if getattr(spine_result, "global_family", None) is not None:
+        return None
+    return str(
+        getattr(spine_result, "global_prepare_reason", None)
+        or getattr(spine_result, "no_trade_reason", None)
+        or ""
+    ) or None
+
+
 def _build_event_bound_no_submit_receipt_core(
     event: OpportunityEvent,
     *,
@@ -6189,7 +6199,9 @@ def _build_event_bound_no_submit_receipt_core(
                     # native set. Legacy local-winner actionability retries must
                     # not shrink or overwrite the cross-family auction set.
                     _prepared_global_family = _spine_result.global_family
-                    _global_prepare_reason = _spine_result.global_prepare_reason
+                    _global_prepare_reason = _global_prepare_failure_reason(
+                        _spine_result
+                    )
                     _global_prepare_captured = True
                 _spine_candidate_economics_by_key = (
                     _qkernel_economics_with_near_day0_consistency(
