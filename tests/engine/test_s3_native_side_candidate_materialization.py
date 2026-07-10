@@ -1,5 +1,5 @@
 # Created: 2026-06-08
-# Last reused or audited: 2026-06-08
+# Last reused/audited: 2026-07-10
 # Authority basis: "bin selection.md" §14.2 (NativeSideCandidate per bin per side) +
 #   §6 pseudocode (evaluate_family: a YES and a NO NativeSideCandidate per bin) +
 #   §4 (native YES/NO separation: belief / executable / portfolio spaces;
@@ -49,7 +49,10 @@ correctness).
 from __future__ import annotations
 
 import json
+import sqlite3
+from datetime import datetime, timezone
 from decimal import Decimal
+from types import SimpleNamespace
 
 import pytest
 
@@ -160,6 +163,100 @@ def _priced(row: dict, *, token_id: str, direction: str) -> ExecutionPrice:
         row, selected_token_id=token_id, direction=direction
     )
     return ep
+
+
+def _execution_conn(row: dict) -> sqlite3.Connection:
+    conn = sqlite3.connect(":memory:")
+    conn.execute(
+        "CREATE TABLE executable_market_snapshots ("
+        "snapshot_id TEXT PRIMARY KEY, condition_id TEXT, "
+        "selected_outcome_token_id TEXT, yes_token_id TEXT, no_token_id TEXT, "
+        "captured_at TEXT, freshness_deadline TEXT, enable_orderbook INTEGER, "
+        "active INTEGER, closed INTEGER, accepting_orders INTEGER, "
+        "min_tick_size TEXT, min_order_size TEXT, fee_details_json TEXT, "
+        "neg_risk INTEGER, orderbook_depth_json TEXT, "
+        "tradeability_status_json TEXT, book_hash TEXT)"
+    )
+    conn.execute(
+        "INSERT INTO executable_market_snapshots VALUES "
+        "(:snapshot_id, :condition_id, :selected_outcome_token_id, "
+        ":yes_token_id, :no_token_id, :captured_at, :freshness_deadline, "
+        ":enable_orderbook, :active, :closed, :accepting_orders, "
+        ":min_tick_size, :min_order_size, :fee_details_json, :neg_risk, "
+        ":orderbook_depth_json, :tradeability_status_json, :book_hash)",
+        row,
+    )
+    return conn
+
+
+def test_current_global_execution_authority_uses_latest_full_native_ladder():
+    row = {
+        **_row(
+            yes_asks=(("0.400", "5"), ("0.410", "20")),
+            snapshot_id="snap-current",
+        ),
+        "selected_outcome_token_id": "yes-1",
+        "captured_at": "2026-07-10T09:59:59+00:00",
+        "freshness_deadline": "2026-07-10T10:01:00+00:00",
+        "enable_orderbook": 1,
+        "active": 1,
+        "closed": 0,
+        "accepting_orders": 1,
+    }
+    conn = _execution_conn(row)
+    candidate = SimpleNamespace(
+        condition_id="condition-1",
+        token_id="yes-1",
+        side="YES",
+    )
+    decision_time = datetime(2026, 7, 10, 10, 0, tzinfo=timezone.utc)
+
+    current = era.current_global_execution_authority(
+        conn,
+        candidate,
+        decision_time=decision_time,
+    )
+    expected_curve = era._native_side_cost_curve_from_snapshot_row(
+        row,
+        side="YES",
+        token_id="yes-1",
+    )
+    from src.solve.solver import executable_curve_identity
+
+    assert current is not None
+    assert current.book_snapshot_id == "snap-current"
+    assert current.execution_curve_identity == executable_curve_identity(expected_curve)
+
+    conn.execute(
+        "INSERT INTO executable_market_snapshots VALUES "
+        "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            "snap-closed",
+            "condition-1",
+            "yes-1",
+            "yes-1",
+            "no-1",
+            "2026-07-10T10:00:00+00:00",
+            "2026-07-10T10:01:00+00:00",
+            1,
+            1,
+            1,
+            0,
+            row["min_tick_size"],
+            row["min_order_size"],
+            row["fee_details_json"],
+            row["neg_risk"],
+            row["orderbook_depth_json"],
+            row["tradeability_status_json"],
+            row["book_hash"],
+        ),
+    )
+    assert era.current_global_execution_authority(
+        conn,
+        candidate,
+        decision_time=decision_time,
+    ) is None
+    conn.close()
 
 
 # ===========================================================================
@@ -471,6 +568,32 @@ def test_curve_side_mismatch_is_unconstructable():
             market_snapshot_id="snap-s3",
             hypothesis_id="h",
         )
+
+
+def test_global_candidate_rejects_scalar_curve_fallback_without_full_depth():
+    """The cross-family auction never ranks a million-share scalar fallback."""
+
+    source_row = _row()
+    price = _priced(source_row, token_id="yes-1", direction="buy_yes")
+    scalar_only_row = dict(source_row)
+    scalar_only_row.pop("orderbook_depth_json")
+    proof = _proof(
+        direction="buy_yes",
+        row=scalar_only_row,
+        token_id="yes-1",
+        q_posterior=0.62,
+        q_lcb_5pct=0.50,
+        execution_price=price,
+    )
+
+    legacy = era._native_side_candidate_from_proof(family_key="f", proof=proof)
+    global_candidate = era._full_depth_native_side_candidate_from_proof(
+        family_key="f", proof=proof
+    )
+
+    assert legacy.no_trade_reason is None
+    assert global_candidate.no_trade_reason is CandidateNoTradeReason.NATIVE_QUOTE_MISSING
+    assert global_candidate.executable_cost_curve is None
 
 
 def test_no_runtime_flag_routes_materialization():

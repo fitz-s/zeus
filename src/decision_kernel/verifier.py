@@ -5,10 +5,11 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 import math
-from typing import Iterable
+from typing import Iterable, Mapping
 
 from src.decision_kernel import claims
 from src.decision_kernel.canonicalization import (
+    qkernel_declares_current_state,
     qkernel_current_state_identity_hash,
     stable_hash,
 )
@@ -512,6 +513,10 @@ def _verify_actionable_qkernel_economics(
         raise CertificateVerificationError("actionable qkernel_execution_economics missing")
     if str(economics.get("source") or "").strip() != "qkernel_spine":
         raise CertificateVerificationError("actionable qkernel source must be qkernel_spine")
+    if qkernel_declares_current_state(economics) and not _current_state_solve_payload(
+        payload
+    ):
+        raise CertificateVerificationError("actionable qkernel current-state identity invalid")
     _verify_qkernel_selection_guard(economics, label="actionable qkernel")
     if str(payload.get("event_type") or "").strip() == DAY0_ACTIONABLE_EVENT_TYPE:
         try:
@@ -789,6 +794,13 @@ def _verify_pre_submit_revalidation_for_command(
     final_intent: dict,
     live_cap: dict,
 ) -> None:
+    economics = pre_submit.get("qkernel_execution_economics")
+    if (
+        isinstance(economics, Mapping)
+        and qkernel_declares_current_state(economics)
+        and not _current_state_solve_payload(pre_submit)
+    ):
+        raise CertificateVerificationError("pre-submit qkernel current-state identity invalid")
     for field in (
         "event_id",
         "event_type",
@@ -1030,6 +1042,21 @@ def _verify_final_intent_payload(
         reserved_f = _finite_float(reserved_notional, "actionable live_cap_reserved_notional_usd")
         if notional > reserved_f * (1.0 + 1e-9) + 1e-12:
             raise CertificateVerificationError("final intent notional_usd exceeds live cap reserved notional")
+    if payload.get("global_exact_order") is True:
+        if str(payload.get("order_mode") or "").strip().upper() != "TAKER":
+            raise CertificateVerificationError("global exact order must be TAKER")
+        target_shares = _finite_float(
+            payload.get("global_target_shares"),
+            "final intent global_target_shares",
+        )
+        target_limit = _finite_float(
+            payload.get("global_limit_price"),
+            "final intent global_limit_price",
+        )
+        if not math.isclose(size, target_shares, rel_tol=0.0, abs_tol=1e-12):
+            raise CertificateVerificationError("global exact order share binding mismatch")
+        if not math.isclose(limit_price, target_limit, rel_tol=0.0, abs_tol=1e-12):
+            raise CertificateVerificationError("global exact order limit binding mismatch")
     _assert_order_type_tuple_coherent(payload, surface="final intent")
     if payload.get("source") != "existing_final_intent_builder":
         raise CertificateVerificationError("final intent source must be existing_final_intent_builder")
@@ -1736,6 +1763,10 @@ def _verify_pre_submit_qkernel_economics(
         raise CertificateVerificationError("pre-submit qkernel_execution_economics missing")
     if not isinstance(economics, dict):
         raise CertificateVerificationError("pre-submit qkernel_execution_economics must be object")
+    if qkernel_declares_current_state(economics) and not _current_state_solve_payload(
+        pre_submit
+    ):
+        raise CertificateVerificationError("pre-submit qkernel current-state identity invalid")
     if str(pre_submit.get("selection_authority_applied") or "").strip() != "qkernel_spine":
         raise CertificateVerificationError("pre-submit qkernel selection authority missing")
     route_id = str(economics.get("route_id") or "").upper()

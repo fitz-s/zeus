@@ -179,45 +179,76 @@ def latest_raw_artifact_input_cycle(
     ]
     if "source_id" in columns:
         predicates.append("source_id = 'openmeteo_ecmwf_ifs_9km'")
+    can_verify_payload = "artifact_path" in columns
+    select_payload = ", artifact_path" if can_verify_payload else ""
     try:
-        row = conn.execute(
+        rows = conn.execute(
             f"""
-            SELECT source_cycle_time
+            SELECT source_cycle_time{select_payload}, artifact_metadata_json
               FROM {table_ref}
              WHERE {' AND '.join(predicates)}
                AND datetime(source_cycle_time) <= datetime(?)
              GROUP BY source_cycle_time
              ORDER BY datetime(source_cycle_time) DESC
-             LIMIT 1
             """,
             tuple([*params, decision_iso]),
-        ).fetchone()
+        ).fetchall()
     except Exception:  # noqa: BLE001 - live gate must fail closed at the caller
         return None
-    if row is None:
-        return None
-    try:
-        raw_value = row["source_cycle_time"]
-    except Exception:  # noqa: BLE001
-        raw_value = row[0]
-    return _parse_source_cycle_utc(raw_value)
+    for row in rows:
+        try:
+            raw_value = row["source_cycle_time"]
+        except Exception:  # noqa: BLE001
+            raw_value = row[0]
+        if can_verify_payload:
+            try:
+                artifact_path = str(row["artifact_path"] or "")
+                metadata_raw = row["artifact_metadata_json"]
+            except Exception:  # noqa: BLE001
+                artifact_path = str(row[1] or "")
+                metadata_raw = row[2]
+            try:
+                metadata = json.loads(str(metadata_raw or "{}"))
+            except (TypeError, ValueError):
+                continue
+            if not isinstance(metadata, dict):
+                continue
+            try:
+                from src.config import cities_by_name
+                from src.data.replacement_forecast_current_target_plan import (
+                    _openmeteo_payload_covers_target_local_day,
+                )
+
+                city_cfg = cities_by_name.get(str(city))
+                city_timezone = str(getattr(city_cfg, "timezone", "") or "") or None
+                if not _openmeteo_payload_covers_target_local_day(
+                    metadata,
+                    artifact_path=artifact_path,
+                    city_timezone=city_timezone,
+                    target_date=str(target_date),
+                ):
+                    continue
+            except Exception:  # noqa: BLE001 - unverifiable artifact is not executable HWM
+                continue
+        return _parse_source_cycle_utc(raw_value)
+    return None
 
 
-def _posterior_used_models_for_cycle(
+def _posterior_provenance_for_cycle(
     conn: sqlite3.Connection,
     *,
     city: str,
     target_date: object,
     metric: str,
     posterior_source_cycle_time: object,
-) -> frozenset[str]:
+) -> dict[str, object]:
     table_ref = _authority_table_ref(conn, "forecast_posteriors")
     if table_ref is None:
-        return frozenset()
+        return {}
     columns = _table_ref_columns(conn, table_ref)
     required = {"city", "target_date", "temperature_metric", "source_cycle_time", "provenance_json"}
     if not required.issubset(columns):
-        return frozenset()
+        return {}
     order_terms = []
     if "computed_at" in columns:
         order_terms.append("datetime(computed_at) DESC")
@@ -239,9 +270,9 @@ def _posterior_used_models_for_cycle(
             (city, target_date, metric, str(posterior_source_cycle_time)),
         ).fetchone()
     except Exception:  # noqa: BLE001 - live gate must fail closed at the caller
-        return frozenset()
+        return {}
     if row is None:
-        return frozenset()
+        return {}
     try:
         raw = row["provenance_json"]
     except Exception:  # noqa: BLE001
@@ -249,8 +280,26 @@ def _posterior_used_models_for_cycle(
     try:
         provenance = json.loads(str(raw or "{}"))
     except (TypeError, ValueError):
-        return frozenset()
-    if not isinstance(provenance, dict):
+        return {}
+    return provenance if isinstance(provenance, dict) else {}
+
+
+def _posterior_used_models_for_cycle(
+    conn: sqlite3.Connection,
+    *,
+    city: str,
+    target_date: object,
+    metric: str,
+    posterior_source_cycle_time: object,
+) -> frozenset[str]:
+    provenance = _posterior_provenance_for_cycle(
+        conn,
+        city=city,
+        target_date=target_date,
+        metric=metric,
+        posterior_source_cycle_time=posterior_source_cycle_time,
+    )
+    if not provenance:
         return frozenset()
 
     candidates: list[object] = []
@@ -275,6 +324,28 @@ def _posterior_used_models_for_cycle(
             if text:
                 models.add(text)
     return frozenset(models)
+
+
+def _posterior_has_current_value_serving_for_cycle(
+    conn: sqlite3.Connection,
+    *,
+    city: str,
+    target_date: object,
+    metric: str,
+    posterior_source_cycle_time: object,
+) -> bool:
+    provenance = _posterior_provenance_for_cycle(
+        conn,
+        city=city,
+        target_date=target_date,
+        metric=metric,
+        posterior_source_cycle_time=posterior_source_cycle_time,
+    )
+    fusion = provenance.get("bayes_precision_fusion")
+    if not isinstance(fusion, dict):
+        return False
+    serving = fusion.get("current_value_serving")
+    return isinstance(serving, dict) and bool(serving)
 
 
 def latest_used_raw_model_input_mark(
@@ -426,6 +497,13 @@ def replacement_live_input_lag_reason(
     if posterior_cycle is None:
         return f"posterior_source_cycle_unparseable={posterior_source_cycle_time!s}"
     posterior_computed = _parse_source_cycle_utc(posterior_computed_at)
+    rich_used_input_provenance = _posterior_has_current_value_serving_for_cycle(
+        conn,
+        city=city,
+        target_date=target_date,
+        metric=metric,
+        posterior_source_cycle_time=posterior_source_cycle_time,
+    )
     used_raw_mark = latest_used_raw_model_input_mark(
         conn,
         city=city,
@@ -434,19 +512,53 @@ def replacement_live_input_lag_reason(
         decision_time=decision_time,
         posterior_source_cycle_time=posterior_source_cycle_time,
     )
+    if (
+        rich_used_input_provenance
+        and used_raw_mark is not None
+        and posterior_computed is not None
+        and used_raw_mark[1] is not None
+        and used_raw_mark[1] > posterior_computed
+    ):
+        lag_seconds = (used_raw_mark[1] - posterior_computed).total_seconds()
+        return (
+            "basis=used_raw_model_forecasts_late_input:"
+            f"latest_raw_cycle={used_raw_mark[0].isoformat()}:"
+            f"posterior_cycle={posterior_cycle.isoformat()}:"
+            f"latest_raw_input_at={used_raw_mark[1].isoformat()}:"
+            f"posterior_computed_at={posterior_computed.isoformat()}:"
+            f"lag_s={lag_seconds:.0f}"
+        )
     candidates = [
-        latest_live_input_cycle(
-            conn,
-            city=city,
-            target_date=target_date,
-            metric=metric,
-            decision_time=decision_time,
-        ),
         (
-            used_raw_mark[0] if used_raw_mark is not None else None,
-            "source_cycle_time_used_raw_model_forecasts_lag",
+            latest_raw_artifact_input_cycle(
+                conn,
+                city=city,
+                target_date=target_date,
+                metric=metric,
+                decision_time=decision_time,
+            ),
+            "source_cycle_time_raw_forecast_artifacts_lag",
         ),
     ]
+    if not rich_used_input_provenance:
+        candidates.extend(
+            (
+                (
+                    latest_raw_model_input_cycle(
+                        conn,
+                        city=city,
+                        target_date=target_date,
+                        metric=metric,
+                        decision_time=decision_time,
+                    ),
+                    "source_cycle_time_raw_model_forecasts_lag",
+                ),
+                (
+                    used_raw_mark[0] if used_raw_mark is not None else None,
+                    "source_cycle_time_used_raw_model_forecasts_lag",
+                ),
+            )
+        )
     candidates = [(cycle, basis) for cycle, basis in candidates if cycle is not None]
     if not candidates:
         return None

@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import math
 import os
 from datetime import datetime
 from decimal import Decimal
@@ -67,6 +68,8 @@ def build_final_intent_certificate_from_actionable(
     best_ask: float | None = None,
     available_crossable_shares: float | None = None,
     sweep_expected_fill_price: str | None = None,
+    exact_taker_shares: float | str | Decimal | None = None,
+    exact_taker_limit_price: float | str | Decimal | None = None,
     executable_market_context: Mapping[str, object] | None = None,
     taker_quality_proof: Mapping[str, object] | None = None,
 ) -> DecisionCertificate:
@@ -82,15 +85,34 @@ def build_final_intent_certificate_from_actionable(
         time_in_force=time_in_force,
     )
     reservation = float(action["c_fee_adjusted"])
-    limit_price = _branch_limit_price(
-        side=_side_for_direction(str(action["direction"])),
-        order_mode=order_spec.mode,
-        reservation=reservation,
-        best_bid=best_bid,
-        best_ask=best_ask,
-        tick_size=float(tick_size),
-        passive_maker_context=passive_maker_context,
+    exact_taker = (exact_taker_shares is not None) or (
+        exact_taker_limit_price is not None
     )
+    if exact_taker and (
+        exact_taker_shares is None or exact_taker_limit_price is None
+    ):
+        raise ValueError("EXACT_TAKER_ORDER_REQUIRES_SHARES_AND_LIMIT")
+    if exact_taker:
+        if order_spec.mode != "TAKER":
+            raise ValueError("EXACT_TAKER_ORDER_REQUIRES_TAKER_MODE")
+        limit_price = float(Decimal(str(exact_taker_limit_price)))
+        _validate_exact_taker_limit(
+            side=_side_for_direction(str(action["direction"])),
+            limit_price=limit_price,
+            best_bid=best_bid,
+            best_ask=best_ask,
+            tick_size=float(tick_size),
+        )
+    else:
+        limit_price = _branch_limit_price(
+            side=_side_for_direction(str(action["direction"])),
+            order_mode=order_spec.mode,
+            reservation=reservation,
+            best_bid=best_bid,
+            best_ask=best_ask,
+            tick_size=float(tick_size),
+            passive_maker_context=passive_maker_context,
+        )
     reserved_notional = float(action.get("live_cap_reserved_notional_usd") or action.get("kelly_size_usd") or 0.0)
     if limit_price <= 0.0:
         raise ValueError(
@@ -114,7 +136,13 @@ def build_final_intent_certificate_from_actionable(
                 f" strategy_key={action.get('strategy_key')!r}"
                 f" direction={action.get('direction')!r}"
             )
-    size = desired_shares_for_reserved_notional(min_order_size, reserved_notional, limit_price)
+    size = (
+        float(Decimal(str(exact_taker_shares)))
+        if exact_taker
+        else desired_shares_for_reserved_notional(
+            min_order_size, reserved_notional, limit_price
+        )
+    )
     # SIZE-TO-AVAILABLE-DEPTH (Wall B / 2026-06-01): for TAKER FOK orders cap the
     # requested size to the crossable book depth so the FOK can fully fill on a thin
     # book.  available_crossable_shares is computed by the caller (ERA) via
@@ -122,6 +150,11 @@ def build_final_intent_certificate_from_actionable(
     # size falls below min_order_size the book is too thin → raise so the candidate
     # correctly skips (fail-closed, no -EV order).
     if available_crossable_shares is not None and order_spec.mode == "TAKER":
+        if exact_taker and float(available_crossable_shares) + 1e-12 < size:
+            raise ValueError(
+                "EXACT_TAKER_DEPTH_INSUFFICIENT:"
+                f"target_shares={size}:available_crossable_shares={available_crossable_shares}"
+            )
         size = min(size, float(available_crossable_shares))
         if size < float(min_order_size):
             raise ValueError(
@@ -135,6 +168,12 @@ def build_final_intent_certificate_from_actionable(
         order_type=order_spec.time_in_force,
         tick_size=tick_size,
     )
+    if exact_taker and quantized_size != Decimal(str(exact_taker_shares)):
+        raise ValueError(
+            "EXACT_TAKER_SIZE_NOT_VENUE_EXPRESSIBLE:"
+            f"target_shares={Decimal(str(exact_taker_shares))}:"
+            f"quantized_shares={quantized_size}"
+        )
     if order_spec.mode == "TAKER" and available_crossable_shares is not None:
         available_depth = Decimal(str(available_crossable_shares))
         if quantized_size > available_depth:
@@ -268,6 +307,9 @@ def build_final_intent_certificate_from_actionable(
         # the field falls back to limit_price — identical to the legacy behaviour.
         "expected_fill_price_before_fee": sweep_expected_fill_price if sweep_expected_fill_price is not None else limit_price,
         "size": size,
+        "global_exact_order": bool(exact_taker),
+        "global_target_shares": str(Decimal(str(size))) if exact_taker else None,
+        "global_limit_price": str(Decimal(str(limit_price))) if exact_taker else None,
         "notional_usd": notional,
         "max_slippage_bps": max_slippage_bps,
         "executable_snapshot_id": action["executable_snapshot_id"],
@@ -748,6 +790,33 @@ def _branch_limit_price(
     if bid is not None:
         improved = max(improved, bid + tick_size)
     return _tick_round_up(max(improved, reservation), tick_size)
+
+
+def _validate_exact_taker_limit(
+    *,
+    side: str,
+    limit_price: float,
+    best_bid: float | None,
+    best_ask: float | None,
+    tick_size: float,
+) -> None:
+    """Prove an externally optimized taker boundary is marketable and on-grid."""
+
+    if not (math.isfinite(limit_price) and 0.0 < limit_price < 1.0):
+        raise ValueError("EXACT_TAKER_LIMIT_OUT_OF_RANGE")
+    if not math.isclose(
+        limit_price / tick_size,
+        round(limit_price / tick_size),
+        rel_tol=0.0,
+        abs_tol=1e-9,
+    ):
+        raise ValueError("EXACT_TAKER_LIMIT_OFF_TICK")
+    if side == "BUY":
+        if best_ask is None or float(best_ask) > limit_price + 1e-12:
+            raise ValueError("EXACT_TAKER_LIMIT_NOT_MARKETABLE")
+        return
+    if best_bid is None or float(best_bid) + 1e-12 < limit_price:
+        raise ValueError("EXACT_TAKER_LIMIT_NOT_MARKETABLE")
 
 
 def _spread_at_entry(best_bid, best_ask, passive_maker_context) -> float | None:

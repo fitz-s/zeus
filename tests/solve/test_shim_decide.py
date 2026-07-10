@@ -142,7 +142,12 @@ def _shim(legacy, route_set, *, spendable=100.0):
     )
 
 
-def _decide(shim, bin_ids=("y", "n"), portfolio_wealth=100.0):
+def _decide(
+    shim,
+    bin_ids=("y", "n"),
+    portfolio_wealth=100.0,
+    served_payoff_q_lcb_by_side=None,
+):
     matrix = FamilyPayoffMatrix.over_bins(bin_ids)
     portfolio = PortfolioExposureVector.flat(
         matrix, baseline=Decimal(str(portfolio_wealth))
@@ -176,7 +181,9 @@ def _decide(shim, bin_ids=("y", "n"), portfolio_wealth=100.0):
         SimpleNamespace(family_id="fam"), omega,
         {}, portfolio=portfolio, matrix=matrix, captured_at_utc=None,
         sizing_candidates=sizing_candidates, max_stake_usd=None, shares_for_routing=Decimal("100"),
-        served_joint_q=None, served_band=None, served_payoff_q_lcb_by_side=None,
+        served_joint_q=None,
+        served_band=None,
+        served_payoff_q_lcb_by_side=served_payoff_q_lcb_by_side,
     )
 
 
@@ -285,6 +292,25 @@ def test_shim_yes_no_mirror_uses_one_current_state_rule():
         assert candidate.selection_guard_basis == "CURRENT_POSTERIOR_BAND"
         assert candidate.q_lcb_guard_abstained is False
         assert candidate.selection_guard_abstained is False
+
+
+def test_shim_current_state_rescore_preserves_side_specific_served_lcb():
+    bin_ids = ("y", "n")
+    band = _band(bin_ids, [0.70] * 64)
+    yes = _route("yes_y", "y", "YES", 0.45)
+    no = _route("no_n", "n", "NO", 0.45)
+    legacy = _legacy_decision(bin_ids, (yes, no), band)
+    decision = _decide(
+        _shim(legacy, _route_set({"y": yes}, {"n": no})),
+        bin_ids=bin_ids,
+        served_payoff_q_lcb_by_side={("y", "YES"): 0.40, ("n", "NO"): 0.60},
+    )
+
+    by_side = {candidate.route.side: candidate for candidate in decision.candidate_decisions}
+    assert by_side["YES"].economics.payoff_q_lcb == 0.40
+    assert by_side["YES"].economics.edge_lcb < 0.0
+    assert by_side["NO"].economics.payoff_q_lcb == 0.60
+    assert by_side["NO"].economics.edge_lcb > 0.0
 
 
 def test_shim_no_trade_on_negative_standalone_primary_hedge():

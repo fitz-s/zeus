@@ -92,13 +92,16 @@ from __future__ import annotations
 import hashlib
 import math
 from dataclasses import dataclass, replace
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Any, Mapping, Optional, Sequence
 
 import numpy as np
 
-from src.decision_kernel.canonicalization import qkernel_current_state_identity_hash
+from src.decision_kernel.canonicalization import (
+    qkernel_current_state_identity_hash,
+    stable_hash,
+)
 from src.decision.family_decision_engine import (
     FamilyDecision,
     FamilyDecisionEngine,
@@ -282,7 +285,139 @@ class SpineDecisionResult:
     selected_proof: Optional[Any]
     no_trade_reason: Optional[str]
     decision: Optional[FamilyDecision]
+    global_family: Optional["PreparedGlobalFamily"] = None
+    global_prepare_reason: Optional[str] = None
     decided_by_spine: bool = True
+
+
+@dataclass(frozen=True)
+class PreparedGlobalFamily:
+    """One complete family belief plus every full-depth native order seed."""
+
+    decision_id: str
+    probability_witness: Any
+    candidate_seeds: tuple["PreparedGlobalCandidateSeed", ...]
+
+
+@dataclass(frozen=True)
+class PreparedGlobalCandidateSeed:
+    native_candidate: Any
+    book_captured_at_utc: datetime
+
+
+def _event_resolution_identity(resolution: Any) -> str:
+    """Hash every settlement field without relying on datetime.time JSON support."""
+
+    return stable_hash(
+        {
+            "city": resolution.city,
+            "station_id": resolution.station_id,
+            "settlement_source_type": resolution.settlement_source_type,
+            "resolution_source": resolution.resolution_source,
+            "target_local_date": resolution.target_local_date.isoformat(),
+            "settlement_timezone": resolution.settlement_timezone,
+            "metric": resolution.metric,
+            "measurement_unit": resolution.measurement_unit,
+            "settlement_step_native": resolution.settlement_step_native,
+            "precision": resolution.precision,
+            "rounding_rule": resolution.rounding_rule,
+            "finalization_local_time": resolution.finalization_local_time.isoformat(),
+            "semantics_version": resolution.semantics_version,
+        }
+    )
+
+
+def _prepare_global_family(
+    decision: FamilyDecision,
+    native_candidates: Mapping[tuple[str, str], Any],
+    proofs_by_bin_side: Mapping[tuple[str, str], Any],
+    *,
+    posterior_identity_hash: str,
+    captured_at_utc: datetime,
+    max_age: timedelta,
+) -> PreparedGlobalFamily:
+    """Bind the full row-simplex q to its ordered condition/token topology."""
+
+    from src.solve.solver import (
+        JointOutcomeProbabilityWitness,
+        OutcomeTokenBinding,
+        joint_probability_witness_identity,
+        validate_family_decision_contract,
+    )
+
+    validate_family_decision_contract(decision)
+    if decision.joint_q is None or decision.band is None:
+        raise ValueError("GLOBAL_PROBABILITY_AUTHORITY_MISSING")
+    if not str(posterior_identity_hash or "").strip():
+        raise ValueError("GLOBAL_CURRENT_POSTERIOR_IDENTITY_MISSING")
+    bindings = tuple(
+        OutcomeTokenBinding(
+            bin_id=outcome.bin_id,
+            condition_id=str(outcome.condition_id or ""),
+            yes_token_id=(str(outcome.yes_token_id) if outcome.yes_token_id else None),
+            no_token_id=(str(outcome.no_token_id) if outcome.no_token_id else None),
+        )
+        for outcome in decision.omega.bins
+    )
+    resolution_identity = _event_resolution_identity(decision.omega.resolution)
+    source_truth_identity = str(decision.predictive.identity_hash or "")
+    witness_identity = joint_probability_witness_identity(
+        family_key=decision.case.family_id,
+        bindings=bindings,
+        q_version=decision.joint_q.identity_hash,
+        resolution_identity=resolution_identity,
+        topology_identity=decision.omega.topology_hash,
+        posterior_identity_hash=posterior_identity_hash,
+        source_truth_identity=source_truth_identity,
+        authority_certificate_hash=decision.receipt_hash,
+        band_alpha=decision.band.alpha,
+        band_basis=decision.band.basis,
+        yes_q_samples=decision.band.samples,
+        captured_at_utc=captured_at_utc,
+    )
+    witness = JointOutcomeProbabilityWitness(
+        family_key=decision.case.family_id,
+        bindings=bindings,
+        yes_q_samples=decision.band.samples,
+        q_version=decision.joint_q.identity_hash,
+        resolution_identity=resolution_identity,
+        topology_identity=decision.omega.topology_hash,
+        posterior_identity_hash=posterior_identity_hash,
+        source_truth_identity=source_truth_identity,
+        authority_certificate_hash=decision.receipt_hash,
+        band_alpha=decision.band.alpha,
+        band_basis=decision.band.basis,
+        captured_at_utc=captured_at_utc,
+        max_age=max_age,
+        witness_identity=witness_identity,
+    )
+    seeds: list[PreparedGlobalCandidateSeed] = []
+    for key, candidate in sorted(native_candidates.items()):
+        if (
+            getattr(candidate, "no_trade_reason", None) is not None
+            or getattr(candidate, "executable_cost_curve", None) is None
+        ):
+            continue
+        proof = proofs_by_bin_side.get(key)
+        row = getattr(proof, "row", None) if proof is not None else None
+        captured_raw = row.get("captured_at") if isinstance(row, Mapping) else None
+        try:
+            captured = datetime.fromisoformat(str(captured_raw).replace("Z", "+00:00"))
+        except (TypeError, ValueError):
+            continue
+        if captured.tzinfo is None:
+            captured = captured.replace(tzinfo=timezone.utc)
+        seeds.append(
+            PreparedGlobalCandidateSeed(
+                native_candidate=candidate,
+                book_captured_at_utc=captured.astimezone(timezone.utc),
+            )
+        )
+    return PreparedGlobalFamily(
+        decision_id=decision.decision_id,
+        probability_witness=witness,
+        candidate_seeds=tuple(seeds),
+    )
 
 
 @dataclass(frozen=True)
@@ -461,6 +596,8 @@ def _served_joint_belief_from_proofs(
     proofs: Sequence[Any],
     candidate_bin_id,
     alpha: float,
+    served_joint_samples_by_condition: Any = None,
+    require_joint_samples: bool = False,
 ) -> tuple[JointQ, JointQBand, dict[tuple[str, str], float], None] | tuple[None, None, None, str]:
     """Rehydrate the reactor-served posterior q for the qkernel selector.
 
@@ -474,6 +611,7 @@ def _served_joint_belief_from_proofs(
 
     yes_q_by_bin: dict[str, float] = {}
     payoff_lcb_by_side: dict[tuple[str, str], float] = {}
+    condition_by_bin: dict[str, str] = {}
 
     for proof in proofs:
         side = _proof_side(proof)
@@ -495,6 +633,9 @@ def _served_joint_belief_from_proofs(
         if side == "YES":
             yes_q_by_bin[bin_id] = q_point
             payoff_lcb_by_side[(bin_id, "YES")] = q_lcb
+            condition_by_bin[bin_id] = str(
+                getattr(getattr(proof, "candidate", None), "condition_id", "") or ""
+            )
         else:
             yes_q_by_bin.setdefault(bin_id, float(1.0 - q_point))
             payoff_lcb_by_side[(bin_id, "NO")] = q_lcb
@@ -548,21 +689,59 @@ def _served_joint_belief_from_proofs(
     )
     joint_q.assert_valid()
 
-    # Candidate economics receive the side-specific served q_lcb through
-    # ``guarded_payoff_q_lcb``.  The band still has to be a valid simplex draw
-    # matrix for coherence/receipt/sizing plumbing; a deterministic one-row band
-    # is honest here because this bridge is not inventing a new uncertainty
-    # surface.  Any q_lcb authority comes from ``payoff_lcb_by_side`` above.
-    samples = np.asarray([q_arr], dtype=float)
+    samples = None
+    band_v2 = False
+    if isinstance(served_joint_samples_by_condition, Mapping):
+        try:
+            columns = [
+                served_joint_samples_by_condition[condition_by_bin[b.bin_id]]
+                for b in omega.bins
+            ]
+            samples_candidate = np.asarray(columns, dtype=float).T
+        except (KeyError, TypeError, ValueError):
+            samples_candidate = np.empty((0, 0), dtype=float)
+        if (
+            samples_candidate.ndim == 2
+            and samples_candidate.shape[0] >= 2
+            and samples_candidate.shape[1] == len(omega.bins)
+            and np.isfinite(samples_candidate).all()
+            and (samples_candidate >= 0.0).all()
+            and np.allclose(samples_candidate.sum(axis=1), 1.0, atol=1e-9)
+        ):
+            samples = samples_candidate
+            band_v2 = True
+        elif require_joint_samples:
+            return None, None, None, "SERVED_JOINT_SAMPLES_INVALID"
+
+    absorbing = bool(
+        np.count_nonzero(np.isclose(q_arr, 1.0, atol=1e-12)) == 1
+        and np.all(np.isclose(q_arr, 0.0, atol=1e-12) | np.isclose(q_arr, 1.0, atol=1e-12))
+    )
+    if samples is None:
+        if require_joint_samples and not absorbing:
+            return None, None, None, "SERVED_JOINT_SAMPLES_MISSING"
+        samples = np.asarray([q_arr], dtype=float)
+        band_v2 = require_joint_samples
+
+    # Candidate-local q_lcb remains the side-specific admission authority.  The
+    # band is the probability authority's coherent joint draw matrix used by W3's
+    # CVaR objective; a one-row band is permitted only for OFF-path compatibility
+    # or a mathematically absorbing Day0 posterior.
     bh = hashlib.sha256()
-    bh.update(b"REACTOR_SERVED_POSTERIOR_DETERMINISTIC_BAND_V1")
+    bh.update(
+        b"REACTOR_SERVED_POSTERIOR_JOINT_BAND_V2"
+        if band_v2
+        else b"REACTOR_SERVED_POSTERIOR_DETERMINISTIC_BAND_V1"
+    )
     bh.update(identity_hash.encode("utf-8"))
     bh.update(f"alpha={float(alpha):.12f}".encode("utf-8"))
+    if band_v2:
+        bh.update(np.ascontiguousarray(samples, dtype=np.float64).tobytes())
     band = JointQBand(
         joint_q=joint_q,
         samples=samples,
-        q_lcb=q_arr.copy(),
-        q_ucb=q_arr.copy(),
+        q_lcb=np.quantile(samples, float(alpha), axis=0),
+        q_ucb=np.quantile(samples, 1.0 - float(alpha), axis=0),
         alpha=float(alpha),
         basis="PARAMETER_POSTERIOR_SIMPLEX_V1",
         sample_hash=bh.hexdigest(),
@@ -1233,6 +1412,9 @@ def decide_family_via_spine(
     selection_proofs: Optional[Sequence[Any]] = None,
     decision_time: datetime,
     native_side_candidate_from_proof,
+    global_native_side_candidate_from_proof=None,
+    require_global_probability_witness: bool = False,
+    global_probability_max_age: timedelta | None = None,
     candidate_bin_id,
     payoff_matrix_over_bins,
     exposure_builder,
@@ -1282,6 +1464,7 @@ def decide_family_via_spine(
             decision=None,
         )
 
+    use_w3_solve = w3_solve_enabled()
     try:
         # The ForecastCase issue / source_cycle / lead derive from the FORECAST SOURCE
         # CYCLE that produced the served members (threaded under
@@ -1333,6 +1516,12 @@ def decide_family_via_spine(
             proofs=belief_proofs,
             candidate_bin_id=candidate_bin_id,
             alpha=_band_alpha,
+            served_joint_samples_by_condition=(
+                payload.get("_edli_spine_served_joint_q_samples_by_condition")
+                if (use_w3_solve or require_global_probability_witness)
+                else None
+            ),
+            require_joint_samples=(use_w3_solve or require_global_probability_witness),
         )
         if served_belief_reason:
             return SpineDecisionResult(
@@ -1347,6 +1536,24 @@ def decide_family_via_spine(
             native_side_candidate_from_proof=native_side_candidate_from_proof,
             candidate_bin_id=candidate_bin_id,
         )
+        global_sizing_candidates: Mapping[tuple[str, str], Any] = {}
+        global_proofs_by_bin_side: Mapping[tuple[str, str], Any] = {}
+        if require_global_probability_witness:
+            if global_native_side_candidate_from_proof is None:
+                raise FamilyDecisionError("GLOBAL_FULL_DEPTH_CANDIDATE_BUILDER_MISSING")
+            if global_probability_max_age is None or global_probability_max_age <= timedelta(0):
+                raise FamilyDecisionError("GLOBAL_PROBABILITY_FRESHNESS_CONTRACT_MISSING")
+            global_sizing_candidates = _sizing_candidates_from_proofs(
+                family_key=family_key,
+                proofs=route_proofs,
+                native_side_candidate_from_proof=global_native_side_candidate_from_proof,
+                candidate_bin_id=candidate_bin_id,
+            )
+            global_proofs_by_bin_side = _canonical_proofs_by_bin_side(
+                route_proofs,
+                candidate_bin_id,
+                require_probability_unit_price=True,
+            )
         # The payoff matrix + exposure are the SAME utility_ranker geometry the legacy
         # ranker uses (built over the tradeable family bins).
         bin_ids = list(dict.fromkeys(b.bin_id for b in omega.bins))
@@ -1410,7 +1617,7 @@ def decide_family_via_spine(
         shares_for_routing = _family_min_order_shares(route_proofs)
         # W3 SOLVE promotion seam (time-boxed flag, deleted at promotion): ON → the joint solver
         # selects; OFF/absent → this guard is skipped and the legacy path is byte-identical.
-        if w3_solve_enabled():
+        if use_w3_solve:
             engine = _wrap_engine_with_solve_shim(engine)
         decision = engine.decide(
             case,
@@ -1428,6 +1635,24 @@ def decide_family_via_spine(
             served_band=served_band,
             served_payoff_q_lcb_by_side=served_payoff_q_lcb_by_side,
         )
+        prepared_global_family = None
+        global_prepare_reason = None
+        if require_global_probability_witness:
+            try:
+                prepared_global_family = _prepare_global_family(
+                    decision,
+                    global_sizing_candidates,
+                    global_proofs_by_bin_side,
+                    posterior_identity_hash=str(
+                        payload.get("_edli_spine_posterior_identity_hash") or ""
+                    ),
+                    captured_at_utc=captured_at_utc,
+                    max_age=global_probability_max_age,
+                )
+            except Exception as exc:  # noqa: BLE001 - legacy family decision remains usable
+                global_prepare_reason = (
+                    f"GLOBAL_FAMILY_PREPARE_FAILED:{type(exc).__name__}:{exc}"
+                )
     except (ResolutionError, OutcomeSpaceError) as exc:
         # A settlement/topology resolution fault is a genuine reconstruction gap:
         # return a typed no-trade so the reactor emits a deterministic receipt.
@@ -1474,6 +1699,8 @@ def decide_family_via_spine(
             selected_proof=None,
             no_trade_reason=decision.no_trade_reason or NO_TRADE_SPINE_NO_SELECTION,
             decision=decision,
+            global_family=prepared_global_family,
+            global_prepare_reason=global_prepare_reason,
         )
 
     # ROUTE IDENTITY GUARD (consult_review_pr409.md §5 BLOCKER). The unchanged submit
@@ -1490,6 +1717,8 @@ def decide_family_via_spine(
             selected_proof=None,
             no_trade_reason=NO_TRADE_ROUTE_NOT_DIRECTLY_EXECUTABLE,
             decision=decision,
+            global_family=prepared_global_family,
+            global_prepare_reason=global_prepare_reason,
         )
 
     proof_index = _proof_by_bin_side(route_proofs, candidate_bin_id)
@@ -1505,6 +1734,8 @@ def decide_family_via_spine(
                 f"{decision.selected.candidate_id}"
             ),
             decision=decision,
+            global_family=prepared_global_family,
+            global_prepare_reason=global_prepare_reason,
         )
 
     overlay_result = _overlay_spine_economics_onto_proof_with_reason(selected_proof, decision)
@@ -1517,11 +1748,15 @@ def decide_family_via_spine(
                 f"{decision.selected.candidate_id}"
             ),
             decision=decision,
+            global_family=prepared_global_family,
+            global_prepare_reason=global_prepare_reason,
         )
     return SpineDecisionResult(
         selected_proof=overlay_result.proof,
         no_trade_reason=None,
         decision=decision,
+        global_family=prepared_global_family,
+        global_prepare_reason=global_prepare_reason,
     )
 
 
@@ -1651,10 +1886,12 @@ def _proof_native_direct_route_set_builder(proofs: Sequence[Any], candidate_bin_
     route-intent submit exists. Each route is exactly ONE leg whose token/condition is the
     proof's, so the selected route maps back to that proof unambiguously.
 
-    The returned callable matches the engine's ``RouteSetBuilder`` protocol
-    ``(family_book, *, shares, enable_negrisk_routes) -> NegRiskRouteSet``; the family_book
-    / shares / flag args are accepted for signature parity but the routes come from the
-    proofs (the proof-native cost is the authority, not the book ladder).
+    Every proof execution price was walked at that row's venue minimum order.  The
+    route therefore carries exactly that share count as both its priced size and
+    depth cap; advertising one share (below the venue minimum) or more shares
+    (beyond the proved cost) would make the discrete solver's feasibility claim
+    false.  The returned callable matches the engine's ``RouteSetBuilder`` protocol;
+    its family-level ``shares`` argument cannot override the route-specific proof.
     """
     from src.execution.negrisk_routes import NegRiskRouteSet, RouteCost, RouteLeg
     from src.probability.instruments import Instrument
@@ -1669,8 +1906,19 @@ def _proof_native_direct_route_set_builder(proofs: Sequence[Any], candidate_bin_
         direction = str(getattr(proof, "direction", "") or "")
         execution_price = getattr(proof, "execution_price", None)
         candidate = getattr(proof, "candidate", None)
+        row = getattr(proof, "row", None)
         token_id = str(getattr(proof, "token_id", "") or "")
         condition_id = str(getattr(candidate, "condition_id", "") or "")
+        try:
+            priced_shares = Decimal(
+                str(row.get("min_order_size") or "5")
+                if isinstance(row, Mapping)
+                else "5"
+            )
+        except (TypeError, ValueError):
+            priced_shares = Decimal("5")
+        if priced_shares <= 0:
+            priced_shares = Decimal("5")
         route_type = "DIRECT_YES" if side == "YES" else "DIRECT_NO"
         instrument = Instrument(
             instrument_id=f"{side}:{bin_id}",
@@ -1683,16 +1931,16 @@ def _proof_native_direct_route_set_builder(proofs: Sequence[Any], candidate_bin_
             bin_id=bin_id,
             token_id=token_id,
             direction=direction,  # type: ignore[arg-type]
-            shares=Decimal("1"),
+            shares=priced_shares,
             leg_cost=execution_price,
         )
         route = RouteCost(
             route_id=f"{route_type}:{bin_id}@proof",
             route_type=route_type,  # type: ignore[arg-type]
             instrument=instrument,
-            shares=Decimal("1"),
+            shares=priced_shares,
             avg_cost=execution_price,
-            max_shares=Decimal("1000000"),
+            max_shares=priced_shares,
             legs=(leg,),
             executable=True,
             reason=None,

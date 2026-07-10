@@ -1,5 +1,5 @@
 # Created: 2026-07-03
-# Last reused/audited: 2026-07-03
+# Last reused/audited: 2026-07-10
 """W3 SOLVE math-core acceptance — the property anchors (design packet §4, consult REV-2).
 
 (a) solver ≥ top-1 picker in the SAME feasible set (post-repair) on EVERY fixture;
@@ -16,14 +16,21 @@ All deterministic: solve() never samples; fixture families draw from a seeded ge
 
 from __future__ import annotations
 
-import numpy as np
+from dataclasses import replace
+from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 
+import numpy as np
+import pytest
+
+from src.contracts.executable_cost_curve import BookLevel, ExecutableCostCurve, FeeModel
 from src.solve import solver as S
 from src.solve.kappa import Kappa, KappaPolicy
 from tests.solve import support as F
 
 ALPHA = 0.05
 DOM_TOL = 1e-9
+_DECISION_AT = datetime(2026, 7, 10, 6, 0, tzinfo=UTC)
 
 
 def _solve(menu, q_draws, wealth, *, kappa="1.0", haircut=True, bins=("y", "n"), alpha=ALPHA):
@@ -237,14 +244,14 @@ def test_solver_matches_bruteforce_global_optimum_1d():
     grid = np.linspace(0, hi, 4000)
     brute = max(S._objective(np.array([x]), w0, payoff, q, weights, ALPHA) for x in grid)
     _, u_joint, _, _, _ = S._optimize_continuous(w0, payoff, caps, costs, cash, q, weights, ALPHA)
-    assert u_joint >= brute - 1e-6  # coordinate ascent reached the global optimum
+    assert u_joint >= brute - 1e-6  # certifying optimizer matches the exhaustive oracle
 
 
 def test_solver_matches_bruteforce_global_optimum_3d_coupled():
     # The real stress (verifier finding): three items whose payoffs are COUPLED through the
     # shared joint atoms — item i's marginal value depends on the other stakes — so a 1-D
-    # optimizer is not enough. A coarse 3-D brute-force grid must NOT beat cyclic coordinate
-    # ascent. If it ever does, that is a STOP-and-report (the global-optimality claim is false),
+    # optimizer is not enough. A coarse 3-D brute-force grid must NOT beat the certifying solve.
+    # If it ever does, that is a STOP-and-report (the global-optimality claim is false),
     # NOT a tolerance widen.
     import itertools
 
@@ -272,14 +279,1130 @@ def test_solver_matches_bruteforce_global_optimum_3d_coupled():
             grid_best = u
             grid_arg = combo
 
-    # coordinate ascent (fine) must reach or exceed anything the coarse grid found
+    # the continuous authority must reach or exceed anything the coarse grid found
     assert u_joint >= grid_best - 1e-6, (
-        f"STOP: 3-D brute-force grid ({grid_best:.8f} at {grid_arg}) BEAT coordinate ascent "
-        f"({u_joint:.8f}) — the global-optimality claim under coordinate coupling is FALSE"
+        f"STOP: 3-D brute-force grid ({grid_best:.8f} at {grid_arg}) BEAT the certifying solve "
+        f"({u_joint:.8f}) — the global-optimality claim is FALSE"
     )
     # the optimum is genuinely multi-item (coupling actually exercised, not a 1-D corner)
     assert int((x_joint > 1e-6).sum()) >= 2
     assert sum(1 for v in grid_arg if v > 1e-6) >= 2
+
+
+def _two_side_menu(*, yes_cost: float, no_cost: float, max_units: float):
+    """YES(y) and NO(y) over the same two-outcome family."""
+    from dataclasses import replace
+
+    bins = ("y", "n")
+    yes = F.buy_item(
+        "yes_y", "y", yes_cost, bins, kind="buy_yes", max_units=max_units,
+        min_order_size=0.01,
+    )
+    # NO(y) pays exactly when n occurs. Preserve bin_id=y while reusing the Arrow payoff helper.
+    no = replace(
+        F.buy_item(
+            "no_y", "n", no_cost, bins, kind="buy_no", max_units=max_units,
+            min_order_size=0.01,
+        ),
+        bin_id="y",
+    )
+    return F.menu((yes, no)), bins
+
+
+def _exhaustive_two_leg_oracle(menu, q, wealth, bins):
+    """Exact 0.01-share venue-grid oracle for the bounded two-leg acceptance fixtures."""
+    import itertools
+
+    w0, payoff, caps, costs, _items = _arrays(menu, wealth, bins)
+    weights = np.ones(q.shape[0])
+    axes = [np.arange(0.0, cap + 0.005, 0.01) for cap in caps]
+    best_u = 0.0
+    best_x = np.zeros(len(caps))
+    for combo in itertools.product(*axes):
+        x = np.asarray(combo, dtype=np.float64)
+        if float(costs @ x) > wealth.cash_usd + 1e-12:
+            continue
+        if np.any(w0 + x @ payoff <= 0.0):
+            continue
+        u = S._objective(x, w0, payoff, q, weights, ALPHA)
+        if u > best_u:
+            best_u, best_x = float(u), x
+    return best_x, best_u
+
+
+def test_yes_best_matches_exact_discrete_oracle():
+    menu, bins = _two_side_menu(yes_cost=0.40, no_cost=0.80, max_units=0.05)
+    q = F.two_bin_q_draws([0.70] * 80)
+    wealth = F.flat_wealth_state(bins, 100.0)
+    oracle_x, oracle_u = _exhaustive_two_leg_oracle(menu, q, wealth, bins)
+    plan = _solve(menu, q, wealth)
+
+    assert oracle_x.tolist() == [0.05, 0.0]
+    assert [(order.menu_item_id, order.size) for order in plan.orders] == [
+        ("yes_y", Decimal("0.05"))
+    ]
+    assert abs(plan.expected_delta_log_wealth - oracle_u) < 1e-12
+
+
+def test_no_best_matches_exact_discrete_oracle():
+    menu, bins = _two_side_menu(yes_cost=0.80, no_cost=0.40, max_units=0.05)
+    q = F.two_bin_q_draws([0.30] * 80)
+    wealth = F.flat_wealth_state(bins, 100.0)
+    oracle_x, oracle_u = _exhaustive_two_leg_oracle(menu, q, wealth, bins)
+    plan = _solve(menu, q, wealth)
+
+    assert oracle_x.tolist() == [0.0, 0.05]
+    assert [(order.menu_item_id, order.size) for order in plan.orders] == [
+        ("no_y", Decimal("0.05"))
+    ]
+    assert abs(plan.expected_delta_log_wealth - oracle_u) < 1e-12
+
+
+def test_yes_no_mirror_preserves_stake_cash_and_robust_objective():
+    from dataclasses import replace
+
+    bins = ("y", "n")
+    q = F.two_bin_q_draws([0.70] * 80)
+    wealth = F.flat_wealth_state(bins, 100.0)
+    yes = F.buy_item("yes_y", "y", 0.40, bins, kind="buy_yes", max_units=20)
+    no_mirror = replace(
+        F.buy_item("no_n", "y", 0.40, bins, kind="buy_no", max_units=20),
+        bin_id="n",
+    )
+    yes_plan = _solve(F.menu((yes,), menu_hash="yes"), q, wealth)
+    no_plan = _solve(F.menu((no_mirror,), menu_hash="no"), q, wealth)
+
+    assert yes_plan.orders[0].size == no_plan.orders[0].size
+    assert yes_plan.expected_delta_log_wealth == no_plan.expected_delta_log_wealth
+    assert (
+        yes_plan.repair_certificate.budget_after_repair_usd
+        == no_plan.repair_certificate.budget_after_repair_usd
+    )
+
+
+def test_ru_cvar_closes_known_coordinate_globality_counterexample():
+    """A feasible integer subset used to beat the coordinate-ascent plan by 0.002097 Δlog."""
+    q = np.array(
+        [
+            [0.254633134, 0.422343248, 0.323023618],
+            [0.338665021, 0.486673222, 0.174661757],
+            [0.269158916, 0.591714681, 0.139126403],
+            [0.434229824, 0.358682191, 0.207087985],
+        ]
+    )
+    costs = (0.409151282, 0.239832825, 0.270468968)
+    bins = ("b0", "b1", "b2")
+    menu = F.menu(
+        [
+            F.buy_item(f"i{i}", bins[i], costs[i], bins, max_units=5, min_order_size=1)
+            for i in range(3)
+        ]
+    )
+    wealth = F.flat_wealth_state(bins, 10.0)
+    w0, payoff, caps, cost_array, _items = _arrays(menu, wealth, bins)
+    weights = np.ones(q.shape[0])
+    x, u, _top1, _u_top1, _iterations = S._optimize_continuous(
+        w0, payoff, caps, cost_array, 10.0, q, weights, 0.25
+    )
+    old_counterexample = S._objective(
+        np.array([3.0, 5.0, 2.0]), w0, payoff, q, weights, 0.25
+    )
+
+    assert x[2] > 1.8  # the old heuristic incorrectly left this profitable leg at zero
+    assert u > old_counterexample
+    assert abs(u - 0.046574783343) < 1e-9
+
+
+def _global_curve(*, side, token, levels, fee="0", min_order="0.01"):
+    return ExecutableCostCurve(
+        token_id=token,
+        side=side,
+        snapshot_id=f"book-{token}",
+        book_hash=f"hash-{token}",
+        levels=tuple(
+            BookLevel(price=Decimal(price), size=Decimal(size))
+            for price, size in levels
+        ),
+        fee_model=FeeModel(fee_rate=Decimal(fee)),
+        min_tick=Decimal("0.001"),
+        min_order_size=Decimal(min_order),
+        quote_ttl=timedelta(seconds=1),
+    )
+
+
+_GLOBAL_PROBABILITY_WITNESSES = {}
+
+
+def _global_candidate(
+    *,
+    candidate_id,
+    family,
+    side,
+    q,
+    levels=(("0.40", "100"),),
+    fee="0",
+    reason=None,
+):
+    token = f"token-{candidate_id}"
+    condition = f"condition-{candidate_id}"
+    curve = _global_curve(side=side, token=token, levels=levels, fee=fee)
+    curve_identity = S.executable_curve_identity(curve)
+    resolution_identity = f"resolution-{family}"
+    payoff_q_samples = np.full(400, q, dtype=np.float64)
+    yes_q_samples = (
+        payoff_q_samples if side == "YES" else 1.0 - payoff_q_samples
+    )
+    q_version = f"q-{candidate_id}"
+    captured_at = _DECISION_AT - timedelta(milliseconds=100)
+    candidate_binding = S.OutcomeTokenBinding(
+        bin_id="bin",
+        condition_id=condition,
+        yes_token_id=token if side == "YES" else f"yes-{candidate_id}",
+        no_token_id=token if side == "NO" else f"no-{candidate_id}",
+    )
+    other_binding = S.OutcomeTokenBinding(
+        bin_id="other",
+        condition_id=f"other-condition-{candidate_id}",
+        yes_token_id=f"other-yes-{candidate_id}",
+        no_token_id=f"other-no-{candidate_id}",
+    )
+    bindings = (candidate_binding, other_binding)
+    samples = np.column_stack((yes_q_samples, 1.0 - yes_q_samples))
+    identity = S.joint_probability_witness_identity(
+        family_key=family,
+        bindings=bindings,
+        q_version=q_version,
+        resolution_identity=resolution_identity,
+        topology_identity=f"topology-{candidate_id}",
+        posterior_identity_hash=f"posterior-{candidate_id}",
+        source_truth_identity=f"source-{candidate_id}",
+        authority_certificate_hash=f"decision-certificate-{candidate_id}",
+        band_alpha=ALPHA,
+        band_basis="joint_q_band_samples",
+        yes_q_samples=samples,
+        captured_at_utc=captured_at,
+    )
+    witness = S.JointOutcomeProbabilityWitness(
+        family_key=family,
+        bindings=bindings,
+        yes_q_samples=samples,
+        q_version=q_version,
+        resolution_identity=resolution_identity,
+        topology_identity=f"topology-{candidate_id}",
+        posterior_identity_hash=f"posterior-{candidate_id}",
+        source_truth_identity=f"source-{candidate_id}",
+        authority_certificate_hash=f"decision-certificate-{candidate_id}",
+        band_alpha=ALPHA,
+        band_basis="joint_q_band_samples",
+        captured_at_utc=captured_at,
+        max_age=timedelta(seconds=1),
+        witness_identity=identity,
+    )
+    _GLOBAL_PROBABILITY_WITNESSES[identity] = witness
+    return S.GlobalSingleOrderCandidate(
+        candidate_id=candidate_id,
+        family_key=family,
+        bin_id="bin",
+        condition_id=condition,
+        side=side,
+        token_id=token,
+        probability_witness_identity=identity,
+        book_snapshot_id=f"book-{token}",
+        book_captured_at_utc=captured_at,
+        execution_curve_identity=curve_identity,
+        ledger_snapshot_id="ledger-current",
+        executable_cost_curve=curve,
+        resolution_identity=resolution_identity,
+        eligibility_reason=reason,
+    )
+
+
+def _replace_global_q_samples(candidate, payoff_q_samples):
+    payoff_q = np.ascontiguousarray(np.asarray(payoff_q_samples, dtype=np.float64))
+    yes_q = payoff_q if candidate.side == "YES" else 1.0 - payoff_q
+    prior = _GLOBAL_PROBABILITY_WITNESSES[candidate.probability_witness_identity]
+    samples = np.column_stack((yes_q, 1.0 - yes_q))
+    identity = S.joint_probability_witness_identity(
+        family_key=prior.family_key,
+        bindings=prior.bindings,
+        q_version=prior.q_version,
+        resolution_identity=prior.resolution_identity,
+        topology_identity=prior.topology_identity,
+        posterior_identity_hash=prior.posterior_identity_hash,
+        source_truth_identity=prior.source_truth_identity,
+        authority_certificate_hash=prior.authority_certificate_hash,
+        band_alpha=prior.band_alpha,
+        band_basis=prior.band_basis,
+        yes_q_samples=samples,
+        captured_at_utc=prior.captured_at_utc,
+    )
+    witness = replace(
+        prior,
+        yes_q_samples=samples,
+        witness_identity=identity,
+    )
+    _GLOBAL_PROBABILITY_WITNESSES[identity] = witness
+    return replace(candidate, probability_witness_identity=identity)
+
+
+def _replace_global_band_alpha(candidate, alpha):
+    prior = _GLOBAL_PROBABILITY_WITNESSES[candidate.probability_witness_identity]
+    identity = S.joint_probability_witness_identity(
+        family_key=prior.family_key,
+        bindings=prior.bindings,
+        q_version=prior.q_version,
+        resolution_identity=prior.resolution_identity,
+        topology_identity=prior.topology_identity,
+        posterior_identity_hash=prior.posterior_identity_hash,
+        source_truth_identity=prior.source_truth_identity,
+        authority_certificate_hash=prior.authority_certificate_hash,
+        band_alpha=alpha,
+        band_basis=prior.band_basis,
+        yes_q_samples=prior.yes_q_samples,
+        captured_at_utc=prior.captured_at_utc,
+    )
+    witness = replace(prior, band_alpha=alpha, witness_identity=identity)
+    _GLOBAL_PROBABILITY_WITNESSES[identity] = witness
+    return replace(candidate, probability_witness_identity=identity)
+
+
+def _global_probability_projection(candidate):
+    probability = _GLOBAL_PROBABILITY_WITNESSES[
+        candidate.probability_witness_identity
+    ]
+    column = probability.bin_ids.index(candidate.bin_id)
+    yes_q = probability.yes_q_samples[:, column]
+    return (
+        yes_q if candidate.side == "YES" else 1.0 - yes_q,
+        probability.band_alpha,
+    )
+
+
+def _global_score(candidate, *, floor="100", ceiling="100", cash="100", cap="5"):
+    q_samples, alpha = _global_probability_projection(candidate)
+    return S._score_global_single_order(
+        candidate,
+        q_samples=q_samples,
+        band_alpha=alpha,
+        wealth_floor_usd=Decimal(floor),
+        wealth_ceiling_usd=Decimal(ceiling),
+        spendable_cash_usd=Decimal(cash),
+        capital_limit_usd=Decimal(cap),
+    )
+
+
+def _global_exact_oracle(candidate, *, floor="100", ceiling="100", cap="5"):
+    q_samples, alpha = _global_probability_projection(candidate)
+    max_shares = S._single_order_max_shares(
+        candidate.executable_cost_curve,
+        spend_limit_usd=min(Decimal(floor) * Decimal("0.999999999"), Decimal(cap)),
+    )
+    min_shares = candidate.executable_cost_curve.min_order_size
+    best = None
+    shares = min_shares
+    while shares <= max_shares:
+        metrics = S._single_order_metrics(
+            candidate,
+            q_samples=q_samples,
+            shares=shares,
+            wealth_floor_usd=Decimal(floor),
+            wealth_ceiling_usd=Decimal(ceiling),
+            alpha=alpha,
+        )
+        if best is None or metrics[0] > best[0]:
+            best = (*metrics, shares)
+        shares += Decimal("0.01")
+    return best
+
+
+def _global_witness(
+    *,
+    floor="100",
+    ceiling="100",
+    cash="100",
+    reservations="0",
+    collateral="CHAIN",
+    position_hash="positions-current",
+):
+    captured_at = _DECISION_AT - timedelta(milliseconds=100)
+    identity = S.portfolio_wealth_identity(
+        ledger_snapshot_id="ledger-current",
+        position_set_hash=position_hash,
+        wealth_floor_usd=Decimal(floor),
+        wealth_ceiling_usd=Decimal(ceiling),
+        spendable_cash_usd=Decimal(cash),
+        reservations_usd=Decimal(reservations),
+        collateral_authority=collateral,
+        captured_at_utc=captured_at,
+    )
+    return S.PortfolioWealthWitness(
+        ledger_snapshot_id="ledger-current",
+        position_set_hash=position_hash,
+        wealth_floor_usd=Decimal(floor),
+        wealth_ceiling_usd=Decimal(ceiling),
+        spendable_cash_usd=Decimal(cash),
+        reservations_usd=Decimal(reservations),
+        collateral_authority=collateral,
+        captured_at_utc=captured_at,
+        max_age=timedelta(seconds=1),
+        witness_identity=identity,
+    )
+
+
+def _global_probability_witness(candidate):
+    return _GLOBAL_PROBABILITY_WITNESSES[candidate.probability_witness_identity]
+
+
+def _global_universe(probability_witnesses):
+    captured_at = _DECISION_AT - timedelta(milliseconds=100)
+    family_bindings = tuple(
+        (family_key, witness.family_binding_identity)
+        for family_key, witness in probability_witnesses.items()
+    )
+    identity = S.global_auction_universe_identity(
+        family_bindings=family_bindings,
+        venue_universe_identity="venue-universe-current",
+        captured_at_utc=captured_at,
+    )
+    return S.GlobalAuctionUniverseWitness(
+        family_bindings=family_bindings,
+        venue_universe_identity="venue-universe-current",
+        captured_at_utc=captured_at,
+        max_age=timedelta(seconds=1),
+        witness_identity=identity,
+    )
+
+
+def _global_select(
+    candidates, *, floor="100", ceiling="100", cash="100", cap="5", witness=None,
+    probability_witnesses=None, current_probabilities=None,
+    current_executions=None, current_wealth_identity=None, universe=None,
+    current_universe_identity=None,
+):
+    candidates = tuple(candidates)
+    if probability_witnesses is None:
+        probability_witnesses = {}
+        for candidate in candidates:
+            probability_witnesses.setdefault(
+                candidate.family_key, _global_probability_witness(candidate)
+            )
+    if current_probabilities is None:
+        current_probabilities = {
+            family: S.CurrentFamilyProbabilityAuthority.from_witness(probability)
+            for family, probability in probability_witnesses.items()
+        }
+    if current_executions is None:
+        current_executions = {
+            candidate.candidate_id: S.CurrentExecutionAuthority(
+                token_id=candidate.token_id,
+                side=candidate.side,
+                book_snapshot_id=candidate.book_snapshot_id,
+                execution_curve_identity=candidate.execution_curve_identity,
+            )
+            for candidate in candidates
+        }
+    wealth = witness or _global_witness(floor=floor, ceiling=ceiling, cash=cash)
+    universe = universe or _global_universe(probability_witnesses)
+    return S.select_global_single_order(
+        candidates,
+        probability_witnesses=probability_witnesses,
+        universe_witness=universe,
+        current_universe_identity_resolver=lambda: (
+            universe.witness_identity
+            if current_universe_identity is None
+            else current_universe_identity
+        ),
+        current_probability_resolver=current_probabilities.get,
+        current_execution_resolver=lambda candidate: current_executions.get(
+            candidate.candidate_id
+        ),
+        current_wealth_identity_resolver=lambda: (
+            wealth.economic_identity
+            if current_wealth_identity is None
+            else current_wealth_identity
+        ),
+        wealth_witness=wealth,
+        capital_limit_usd=Decimal(cap),
+        decision_at_utc=_DECISION_AT,
+    )
+
+
+def test_global_single_order_yes_best_matches_full_depth_exact_oracle():
+    yes = _global_candidate(
+        candidate_id="yes-a",
+        family="a",
+        side="YES",
+        q=0.70,
+        levels=(("0.35", "3"), ("0.40", "30")),
+        fee="0.05",
+    )
+    no = _global_candidate(
+        candidate_id="no-b", family="b", side="NO", q=0.55
+    )
+    oracle = _global_exact_oracle(yes)
+    decision = _global_select((no, yes))
+
+    assert decision.candidate.candidate_id == "yes-a"
+    assert decision.shares == oracle[4]
+    assert decision.cost_usd == oracle[3]
+    assert abs(decision.robust_delta_log_wealth - oracle[0]) < 1e-12
+
+
+def test_global_single_order_no_best_matches_full_depth_exact_oracle():
+    yes = _global_candidate(
+        candidate_id="yes-a", family="a", side="YES", q=0.56
+    )
+    no = _global_candidate(
+        candidate_id="no-b",
+        family="b",
+        side="NO",
+        q=0.74,
+        levels=(("0.38", "2"), ("0.43", "30")),
+        fee="0.05",
+    )
+    oracle = _global_exact_oracle(no)
+    decision = _global_select((yes, no))
+
+    assert decision.candidate.candidate_id == "no-b"
+    assert decision.shares == oracle[4]
+    assert decision.cost_usd == oracle[3]
+    assert abs(decision.robust_delta_log_wealth - oracle[0]) < 1e-12
+
+
+def test_global_single_order_binds_exact_shares_to_fundable_deepest_limit():
+    candidate = _global_candidate(
+        candidate_id="deep-book",
+        family="deep",
+        side="YES",
+        q=0.99,
+        levels=(("0.10", "10"), ("0.50", "100")),
+    )
+
+    decision = _global_select((candidate,), cap="6")
+
+    assert decision.candidate is not None
+    assert decision.shares == Decimal("12.00")
+    assert decision.cost_usd == Decimal("2.000")
+    assert decision.limit_price == Decimal("0.50")
+    assert decision.expected_fill_price_before_fee == Decimal("0.1666666666666666666666666667")
+    assert decision.max_spend_usd == Decimal("6.0000")
+
+
+def test_global_single_order_label_mirror_preserves_size_cost_and_objective():
+    yes = _global_candidate(
+        candidate_id="yes", family="a", side="YES", q=0.70,
+        levels=(("0.35", "2"), ("0.41", "20")), fee="0.05",
+    )
+    no = _global_candidate(
+        candidate_id="no", family="b", side="NO", q=0.70,
+        levels=(("0.35", "2"), ("0.41", "20")), fee="0.05",
+    )
+    yes_score = _global_score(yes)
+    no_score = _global_score(no)
+
+    assert yes_score.shares == no_score.shares
+    assert yes_score.cost_usd == no_score.cost_usd
+    assert yes_score.limit_price == no_score.limit_price
+    assert (
+        yes_score.expected_fill_price_before_fee
+        == no_score.expected_fill_price_before_fee
+    )
+    assert yes_score.max_spend_usd == no_score.max_spend_usd
+    assert yes_score.robust_delta_log_wealth == no_score.robust_delta_log_wealth
+
+
+def test_global_single_order_excludes_cheap_day0_without_current_observation():
+    unsupported = _global_candidate(
+        candidate_id="cheap-tail", family="helsinki", side="YES", q=0.13,
+        levels=(("0.008", "1000"),), reason="DAY0_OBSERVATION_UNAVAILABLE",
+    )
+    current = _global_candidate(
+        candidate_id="current-no", family="toronto", side="NO", q=0.65
+    )
+    decision = _global_select((unsupported, current))
+
+    assert decision.candidate.candidate_id == "current-no"
+    assert decision.rejection_reasons["cheap-tail"] == "DAY0_OBSERVATION_UNAVAILABLE"
+
+
+def test_unverified_13pct_tail_is_lottery_not_an_executable_edge():
+    ladder = (("0.008", "19.09"), ("0.009", "14"), ("0.010", "38.14"), ("0.020", "51"))
+    current_13pct_yes = _global_candidate(
+        candidate_id="current-13pct-yes",
+        family="a",
+        side="YES",
+        q=0.13,
+        levels=ladder,
+        fee="0.05",
+    )
+    valid_no = _global_candidate(
+        candidate_id="valid-no",
+        family="b",
+        side="NO",
+        q=0.65,
+        levels=(("0.60", "100"),),
+    )
+
+    probability_witnesses = {"b": _global_probability_witness(valid_no)}
+    decision = _global_select(
+        (current_13pct_yes, valid_no),
+        probability_witnesses=probability_witnesses,
+    )
+
+    assert decision.candidate is None
+    assert decision.no_trade_reason == "GLOBAL_FEASIBLE_SET_INCOMPLETE"
+
+
+def test_global_single_order_self_issued_13pct_without_external_current_is_rejected():
+    tail = _global_candidate(
+        candidate_id="self-issued-13pct",
+        family="tail",
+        side="YES",
+        q=0.13,
+        levels=(("0.008", "1000"),),
+    )
+    valid_no = _global_candidate(
+        candidate_id="valid-no-external",
+        family="current",
+        side="NO",
+        q=0.65,
+    )
+    witnesses = {
+        "tail": _global_probability_witness(tail),
+        "current": _global_probability_witness(valid_no),
+    }
+    current = {
+        "current": S.CurrentFamilyProbabilityAuthority.from_witness(
+            witnesses["current"]
+        )
+    }
+
+    decision = _global_select(
+        (tail, valid_no),
+        probability_witnesses=witnesses,
+        current_probabilities=current,
+    )
+
+    assert decision.candidate is None
+    assert decision.no_trade_reason == "GLOBAL_EPOCH_SUPERSEDED"
+    assert (
+        decision.rejection_reasons["self-issued-13pct"]
+        == "PROBABILITY_AUTHORITY_SUPERSEDED"
+    )
+
+
+def test_global_single_order_refuses_partial_active_family_universe():
+    yes = _global_candidate(candidate_id="yes-partial", family="a", side="YES", q=0.70)
+    no = _global_candidate(candidate_id="no-missing", family="b", side="NO", q=0.70)
+    complete_witnesses = {
+        "a": _global_probability_witness(yes),
+        "b": _global_probability_witness(no),
+    }
+    universe = _global_universe(complete_witnesses)
+
+    decision = _global_select(
+        (yes,),
+        probability_witnesses={"a": complete_witnesses["a"]},
+        universe=universe,
+    )
+
+    assert decision.candidate is None
+    assert decision.no_trade_reason == "GLOBAL_FEASIBLE_SET_INCOMPLETE"
+
+
+def test_global_single_order_refuses_native_token_changed_inside_same_family_key():
+    candidate = _global_candidate(
+        candidate_id="topology-superseded",
+        family="same-family",
+        side="YES",
+        q=0.70,
+    )
+    witness = _global_probability_witness(candidate)
+    captured_at = _DECISION_AT - timedelta(milliseconds=100)
+    changed_outcomes = (
+        replace(witness.bindings[0], yes_token_id="yes-token-current-new"),
+        *witness.bindings[1:],
+    )
+    changed_bindings = (
+        (
+            candidate.family_key,
+            S.outcome_token_binding_identity(
+                family_key=candidate.family_key,
+                bindings=changed_outcomes,
+                resolution_identity=witness.resolution_identity,
+                topology_identity=witness.topology_identity,
+            ),
+        ),
+    )
+    universe = S.GlobalAuctionUniverseWitness(
+        family_bindings=changed_bindings,
+        venue_universe_identity="venue-universe-current",
+        captured_at_utc=captured_at,
+        max_age=timedelta(seconds=1),
+        witness_identity=S.global_auction_universe_identity(
+            family_bindings=changed_bindings,
+            venue_universe_identity="venue-universe-current",
+            captured_at_utc=captured_at,
+        ),
+    )
+
+    decision = _global_select(
+        (candidate,),
+        probability_witnesses={candidate.family_key: witness},
+        universe=universe,
+    )
+
+    assert decision.candidate is None
+    assert decision.no_trade_reason == "GLOBAL_FEASIBLE_SET_INCOMPLETE"
+
+
+def test_global_probability_simplex_keeps_nonexecuted_sibling_without_no_token():
+    candidate = _global_candidate(
+        candidate_id="executable-with-illiquid-sibling",
+        family="complete-simplex",
+        side="YES",
+        q=0.70,
+    )
+    prior = _global_probability_witness(candidate)
+    bindings = (
+        prior.bindings[0],
+        replace(prior.bindings[1], no_token_id=None),
+    )
+    identity = S.joint_probability_witness_identity(
+        family_key=prior.family_key,
+        bindings=bindings,
+        q_version=prior.q_version,
+        resolution_identity=prior.resolution_identity,
+        topology_identity=prior.topology_identity,
+        posterior_identity_hash=prior.posterior_identity_hash,
+        source_truth_identity=prior.source_truth_identity,
+        authority_certificate_hash=prior.authority_certificate_hash,
+        band_alpha=prior.band_alpha,
+        band_basis=prior.band_basis,
+        yes_q_samples=prior.yes_q_samples,
+        captured_at_utc=prior.captured_at_utc,
+    )
+    witness = replace(prior, bindings=bindings, witness_identity=identity)
+    candidate = replace(candidate, probability_witness_identity=identity)
+    _GLOBAL_PROBABILITY_WITNESSES[identity] = witness
+
+    decision = _global_select(
+        (candidate,),
+        probability_witnesses={candidate.family_key: witness},
+    )
+
+    assert decision.candidate is not None
+    assert decision.candidate.candidate_id == candidate.candidate_id
+
+
+def test_global_single_order_binary_metric_has_only_win_one_and_lose_zero_states():
+    candidate = _global_candidate(
+        candidate_id="binary", family="binary", side="YES", q=0.70
+    )
+    shares = Decimal("5")
+    q_samples, alpha = _global_probability_projection(candidate)
+    robust_du, robust_ev, _efficiency, cost = S._single_order_metrics(
+        candidate,
+        q_samples=q_samples,
+        shares=shares,
+        wealth_floor_usd=Decimal("100"),
+        wealth_ceiling_usd=Decimal("100"),
+        alpha=alpha,
+    )
+    expected_du = 0.70 * np.log((100.0 - float(cost) + 5.0) / 100.0) + 0.30 * np.log(
+        (100.0 - float(cost)) / 100.0
+    )
+
+    assert abs(robust_du - expected_du) < 1e-15
+    assert abs(robust_ev - (0.70 * 5.0 - float(cost))) < 1e-15
+
+
+def test_global_single_order_excludes_superseded_q_book_and_capital_identity():
+    q_old = _global_candidate(candidate_id="q-old", family="q", side="YES", q=0.70)
+    book_old = _global_candidate(candidate_id="book-old", family="book", side="YES", q=0.70)
+    curve_old = _global_candidate(candidate_id="curve-old", family="curve", side="YES", q=0.70)
+    ledger_old = replace(
+        _global_candidate(candidate_id="ledger-old", family="ledger", side="YES", q=0.70),
+        ledger_snapshot_id="ledger-old",
+    )
+    candidates = (
+        q_old,
+        book_old,
+        curve_old,
+        ledger_old,
+    )
+    witnesses = {c.family_key: _global_probability_witness(c) for c in candidates}
+    current_probabilities = {
+        family: S.CurrentFamilyProbabilityAuthority.from_witness(witness)
+        for family, witness in witnesses.items()
+    }
+    current_probabilities["q"] = replace(
+        current_probabilities["q"], q_version="q-new"
+    )
+    current_executions = {
+        c.candidate_id: S.CurrentExecutionAuthority(
+            token_id=c.token_id,
+            side=c.side,
+            book_snapshot_id=c.book_snapshot_id,
+            execution_curve_identity=c.execution_curve_identity,
+        )
+        for c in candidates
+    }
+    current_executions["book-old"] = replace(
+        current_executions["book-old"], book_snapshot_id="book-new"
+    )
+    current_executions["curve-old"] = replace(
+        current_executions["curve-old"], execution_curve_identity="curve-new"
+    )
+    decision = _global_select(
+        candidates,
+        probability_witnesses=witnesses,
+        current_probabilities=current_probabilities,
+        current_executions=current_executions,
+    )
+
+    assert decision.candidate is None
+    assert decision.rejection_reasons == {
+        "q-old": "PROBABILITY_AUTHORITY_SUPERSEDED",
+        "book-old": "BOOK_IDENTITY_SUPERSEDED",
+        "curve-old": "EXECUTION_CURVE_SUPERSEDED",
+        "ledger-old": "CAPITAL_IDENTITY_SUPERSEDED",
+    }
+    assert decision.no_trade_reason == "GLOBAL_EPOCH_SUPERSEDED"
+
+
+def test_global_single_order_never_promotes_runner_up_after_book_drift():
+    moved = _global_candidate(
+        candidate_id="old-winner", family="a", side="YES", q=0.90
+    )
+    runner_up = _global_candidate(
+        candidate_id="runner-up", family="b", side="NO", q=0.66
+    )
+    executions = {
+        candidate.candidate_id: S.CurrentExecutionAuthority(
+            token_id=candidate.token_id,
+            side=candidate.side,
+            book_snapshot_id=candidate.book_snapshot_id,
+            execution_curve_identity=candidate.execution_curve_identity,
+        )
+        for candidate in (moved, runner_up)
+    }
+    executions[moved.candidate_id] = replace(
+        executions[moved.candidate_id], book_snapshot_id="new-book"
+    )
+
+    decision = _global_select(
+        (moved, runner_up),
+        current_executions=executions,
+    )
+
+    assert decision.candidate is None
+    assert decision.no_trade_reason == "GLOBAL_EPOCH_SUPERSEDED"
+    assert decision.rejection_reasons[moved.candidate_id] == "BOOK_IDENTITY_SUPERSEDED"
+
+
+def test_global_single_order_rejects_curve_from_another_token_or_snapshot():
+    cheap_yes = _global_candidate(
+        candidate_id="cheap-low-hit-yes",
+        family="a",
+        side="YES",
+        q=0.02,
+        levels=(("0.005", "1000"),),
+    )
+    wrong_curve = _global_curve(
+        side="YES",
+        token="stale-wrong-token",
+        levels=(("0.005", "1000"),),
+    )
+    forged = replace(cheap_yes, executable_cost_curve=wrong_curve)
+    valid_no = _global_candidate(
+        candidate_id="valid-no",
+        family="b",
+        side="NO",
+        q=0.65,
+        levels=(("0.60", "100"),),
+    )
+
+    decision = _global_select((forged, valid_no))
+
+    assert decision.candidate.candidate_id == "valid-no"
+    assert decision.rejection_reasons["cheap-low-hit-yes"] == "BOOK_CERTIFICATE_MISMATCH"
+
+
+def test_global_single_order_rejects_expired_quote_before_economics():
+    expired = replace(
+        _global_candidate(candidate_id="expired", family="a", side="YES", q=0.99),
+        book_captured_at_utc=_DECISION_AT - timedelta(seconds=2),
+    )
+    valid_no = _global_candidate(
+        candidate_id="valid-no", family="b", side="NO", q=0.65
+    )
+
+    decision = _global_select((expired, valid_no))
+
+    assert decision.candidate is None
+    assert decision.no_trade_reason == "GLOBAL_EPOCH_SUPERSEDED"
+    assert decision.rejection_reasons["expired"] == "QUOTE_EXPIRED"
+
+
+def test_global_single_order_unknown_collateral_makes_every_candidate_unrankable():
+    candidate = _global_candidate(
+        candidate_id="yes", family="a", side="YES", q=0.70
+    )
+    decision = _global_select(
+        (candidate,), witness=_global_witness(collateral="DEGRADED")
+    )
+
+    assert decision.candidate is None
+    assert decision.no_trade_reason == "COLLATERAL_UNKNOWN"
+
+
+def test_global_single_order_rejects_stale_wealth_values_not_bound_to_current_ledger():
+    cheap_yes = _global_candidate(
+        candidate_id="cheap-yes", family="a", side="YES", q=0.02,
+        levels=(("0.005", "1000"),),
+    )
+    valid_no = _global_candidate(
+        candidate_id="valid-no", family="b", side="NO", q=0.65,
+        levels=(("0.60", "100"),),
+    )
+    stale = _global_witness(floor="100", ceiling="100", cash="100")
+    current = _global_witness(floor="10", ceiling="190", cash="10")
+    decision = _global_select(
+        (cheap_yes, valid_no),
+        witness=stale,
+        current_wealth_identity=current.economic_identity,
+    )
+
+    assert decision.candidate is None
+    assert decision.no_trade_reason == "CAPITAL_IDENTITY_SUPERSEDED"
+
+
+def test_global_single_order_uses_coupling_robust_endowment_bounds():
+    candidate = _global_candidate(
+        candidate_id="yes", family="a", side="YES", q=0.70
+    )
+    cash_only = _global_select((candidate,))
+    exposed = _global_select((candidate,), floor="50", ceiling="150")
+
+    assert exposed.robust_delta_log_wealth < cash_only.robust_delta_log_wealth
+
+
+def test_global_single_order_uses_current_epoch_growth_not_forged_duration():
+    slow = _global_candidate(
+        candidate_id="higher-growth", family="a", side="YES", q=0.74
+    )
+    fast = _global_candidate(
+        candidate_id="lower-growth", family="b", side="NO", q=0.60
+    )
+    slow_score = _global_score(slow)
+    decision = _global_select((slow, fast))
+
+    assert decision.robust_delta_log_wealth == slow_score.robust_delta_log_wealth
+    assert decision.candidate.candidate_id == "higher-growth"
+
+
+def test_global_single_order_has_no_caller_forgeable_duration_input():
+    assert "capital_release_at_utc" not in S.GlobalSingleOrderCandidate.__dataclass_fields__
+    assert "robust_log_growth_per_hour" not in S.GlobalSingleOrderDecision.__dataclass_fields__
+
+
+def test_global_single_order_rejects_probability_from_one_bin_welded_to_another_token():
+    cheap_yes = _global_candidate(
+        candidate_id="cheap-low-hit-yes",
+        family="a",
+        side="YES",
+        q=0.002,
+        levels=(("0.005", "1000"),),
+    )
+    probability = _global_probability_witness(cheap_yes)
+    wrong_binding = probability.bindings[1]
+    forged_curve = _global_curve(
+        side="YES",
+        token=wrong_binding.yes_token_id,
+        levels=(("0.005", "1000"),),
+    )
+    forged = replace(
+        cheap_yes,
+        token_id=wrong_binding.yes_token_id,
+        executable_cost_curve=forged_curve,
+        book_snapshot_id=forged_curve.snapshot_id,
+        execution_curve_identity=S.executable_curve_identity(forged_curve),
+    )
+    valid_no = _global_candidate(
+        candidate_id="valid-no",
+        family="b",
+        side="NO",
+        q=0.65,
+        levels=(("0.60", "100"),),
+    )
+
+    decision = _global_select((forged, valid_no))
+
+    assert decision.candidate.candidate_id == "valid-no"
+    assert (
+        decision.rejection_reasons["cheap-low-hit-yes"]
+        == "JOINT_Q_MEMBERSHIP_MISMATCH"
+    )
+
+
+def test_global_single_order_rejects_external_current_authority_alpha_drift():
+    tail_yes = _global_candidate(
+        candidate_id="tail-yes",
+        family="a",
+        side="YES",
+        q=0.03,
+        levels=(("0.005", "1000"),),
+    )
+    tail_samples = np.concatenate(
+        (np.full(20, 0.001, dtype=np.float64), np.full(380, 0.03, dtype=np.float64))
+    )
+    tail_yes = _replace_global_q_samples(tail_yes, tail_samples)
+    valid_no = _global_candidate(
+        candidate_id="valid-no", family="b", side="NO", q=0.65,
+        levels=(("0.60", "100"),),
+    )
+
+    authoritative = _global_select((tail_yes, valid_no))
+    witnesses = {
+        "a": _global_probability_witness(tail_yes),
+        "b": _global_probability_witness(valid_no),
+    }
+    current_probabilities = {
+        family: S.CurrentFamilyProbabilityAuthority.from_witness(witness)
+        for family, witness in witnesses.items()
+    }
+    current_probabilities["a"] = replace(
+        current_probabilities["a"], band_alpha=0.25
+    )
+    forged = _global_select(
+        (tail_yes, valid_no),
+        probability_witnesses=witnesses,
+        current_probabilities=current_probabilities,
+    )
+
+    assert authoritative.candidate.candidate_id == "valid-no"
+    assert forged.candidate is None
+    assert forged.no_trade_reason == "GLOBAL_EPOCH_SUPERSEDED"
+    assert forged.rejection_reasons["tail-yes"] == "PROBABILITY_AUTHORITY_SUPERSEDED"
+
+
+def test_global_single_order_ineligible_candidate_cannot_veto_survivor_band():
+    excluded = _global_candidate(
+        candidate_id="excluded-day0",
+        family="a",
+        side="YES",
+        q=0.90,
+        reason="DAY0_OBSERVATION_UNAVAILABLE",
+    )
+    excluded = _replace_global_band_alpha(excluded, 0.10)
+    valid_no = _global_candidate(
+        candidate_id="valid-no", family="b", side="NO", q=0.65,
+        levels=(("0.60", "100"),),
+    )
+
+    decision = _global_select((excluded, valid_no))
+
+    assert decision.candidate.candidate_id == "valid-no"
+    assert decision.rejection_reasons["excluded-day0"] == "DAY0_OBSERVATION_UNAVAILABLE"
+
+
+def test_global_single_order_eligible_candidates_with_different_band_alpha_fail_closed():
+    yes = _replace_global_band_alpha(
+        _global_candidate(candidate_id="yes", family="a", side="YES", q=0.70),
+        0.10,
+    )
+    no = _global_candidate(candidate_id="no", family="b", side="NO", q=0.70)
+
+    decision = _global_select((yes, no))
+
+    assert decision.candidate is None
+    assert decision.no_trade_reason == "BAND_ALPHA_MISMATCH"
+    assert set(decision.rejection_reasons.values()) == {"BAND_ALPHA_MISMATCH"}
+
+
+def test_global_single_order_matches_exhaustive_grid_on_random_full_depth_books():
+    rng = np.random.default_rng(20260710)
+    for index in range(16):
+        p0 = round(float(rng.uniform(0.08, 0.45)), 3)
+        p1 = round(float(rng.uniform(p0 + 0.01, min(0.80, p0 + 0.25))), 3)
+        candidate = _global_candidate(
+            candidate_id=f"c{index}",
+            family=f"f{index}",
+            side="YES" if index % 2 == 0 else "NO",
+            q=0.5,
+            levels=((str(p0), str(rng.uniform(0.5, 4.0))), (str(p1), "30")),
+            fee="0.05",
+        )
+        q_samples = np.clip(rng.normal(rng.uniform(p1 + 0.05, 0.90), 0.025, 400), 0, 1)
+        candidate = _replace_global_q_samples(candidate, q_samples)
+        oracle = _global_exact_oracle(candidate, cap="3")
+        score = _global_score(candidate, cap="3")
+
+        if oracle is None or oracle[0] <= 0.0 or oracle[1] <= 0.0:
+            assert score.candidate is None
+        else:
+            assert score.shares == oracle[4]
+            assert score.cost_usd == oracle[3]
+            assert abs(score.robust_delta_log_wealth - oracle[0]) < 1e-12
+
+
+def test_global_single_order_draw_permutation_is_invariant():
+    q = np.linspace(0.55, 0.80, 400, dtype=np.float64)
+    candidate = _replace_global_q_samples(
+        _global_candidate(candidate_id="c", family="f", side="YES", q=0.5), q
+    )
+    permuted = _replace_global_q_samples(candidate, q[::-1].copy())
+    left = _global_select((candidate,))
+    right = _global_select((permuted,))
+
+    assert left.shares == right.shares
+    assert left.cost_usd == right.cost_usd
+    assert left.robust_delta_log_wealth == right.robust_delta_log_wealth
+
+
+def test_global_single_order_endowment_bound_is_below_every_frechet_coupling():
+    candidate = _global_candidate(
+        candidate_id="c", family="f", side="YES", q=0.70,
+        levels=(("0.40", "100"),),
+    )
+    shares = Decimal("5")
+    bound, _ev, _eff, cost = S._single_order_metrics(
+        candidate,
+        q_samples=_global_probability_projection(candidate)[0],
+        shares=shares,
+        wealth_floor_usd=Decimal("50"),
+        wealth_ceiling_usd=Decimal("150"),
+        alpha=ALPHA,
+    )
+    q = 0.70
+    low_mass = 0.50
+    win_low_min = max(0.0, q + low_mass - 1.0)
+    win_low_max = min(q, low_mass)
+    win_inc = {
+        wealth: np.log((wealth - float(cost) + float(shares)) / wealth)
+        for wealth in (50.0, 150.0)
+    }
+    loss_inc = {
+        wealth: np.log((wealth - float(cost)) / wealth)
+        for wealth in (50.0, 150.0)
+    }
+    for win_low in np.linspace(win_low_min, win_low_max, 101):
+        true_du = (
+            win_low * win_inc[50.0]
+            + (q - win_low) * win_inc[150.0]
+            + (low_mass - win_low) * loss_inc[50.0]
+            + (1.0 - q - low_mass + win_low) * loss_inc[150.0]
+        )
+        assert bound <= true_du + 1e-15
+
+
+def test_global_single_order_rejects_contingent_maker_asset_shape():
+    with pytest.raises(ValueError, match="immediate taker-limit"):
+        replace(
+            _global_candidate(candidate_id="c", family="f", side="YES", q=0.70),
+            execution_mode="MAKER",  # type: ignore[arg-type]
+        )
 
 
 def test_var_nonconcave_where_cvar_stays_concave():

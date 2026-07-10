@@ -64,6 +64,8 @@ def _replacement_bundle() -> SimpleNamespace:
     return SimpleNamespace(
         posterior_id=456,
         product_id="openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor_v1",
+        source_cycle_time="2026-06-09T00:00:00+00:00",
+        computed_at="2026-06-09T00:05:00+00:00",
         q={"bin-22": 0.08, "bin-28": 0.80},
         q_lcb={"bin-22": 0.03, "bin-28": 0.70},
         q_ucb={"bin-22": 0.12, "bin-28": 0.92},
@@ -147,6 +149,7 @@ def _run(native_costs):
         feature_flags["openmeteo_ecmwf_ifs9_aifs_soft_anchor_trade_authority_enabled"] = True
         mp.setitem(settings._data, "feature_flags", feature_flags)
         mp.setattr(hook_factory, "_latest_replacement_readiness", lambda *a, **k: object())
+        mp.setattr(adapter, "_replacement_live_input_lag_reason", lambda *a, **k: None)
         mp.setattr(
             reader,
             "read_replacement_forecast_bundle",

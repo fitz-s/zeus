@@ -1,19 +1,28 @@
 # Created: 2026-06-07
-# Last reused/audited: 2026-06-07
+# Last reused/audited: 2026-07-10
 # Authority basis: Operator 2026-06-07 live cutover directive: replacement 0.1
 #   posterior is the live forecast authority; NO probabilities must not be
 #   inferred from YES complements.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+import json
+import sqlite3
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
+import numpy as np
 import pytest
 
 from src.calibration.qlcb_provenance import _qlcb_float
 from src.contracts.execution_price import ExecutionPrice
 from src.engine import event_reactor_adapter as adapter
+from src.events.candidate_binding import weather_family_id
+from src.solve.solver import (
+    JointOutcomeProbabilityWitness,
+    OutcomeTokenBinding,
+    joint_probability_witness_identity,
+)
 from src.types.market import Bin
 
 
@@ -43,6 +52,8 @@ def _replacement_bundle() -> SimpleNamespace:
     return SimpleNamespace(
         posterior_id=123,
         product_id="openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor_v1",
+        source_cycle_time="2026-06-07T00:00:00+00:00",
+        computed_at="2026-06-07T00:05:00+00:00",
         q={
             "bin-27": 0.20,
             "bin-28": 0.80,
@@ -129,12 +140,24 @@ def test_replacement_0_1_authority_uses_yes_posterior_and_blocks_no_without_nati
     from src.engine import replacement_forecast_hook_factory as hook_factory
 
     feature_flags = dict(settings._data.get("feature_flags", {}))
+    feature_flags["w3_solve_enabled"] = True
     monkeypatch.setitem(settings._data, "feature_flags", feature_flags)
     monkeypatch.setattr(hook_factory, "_latest_replacement_readiness", lambda *a, **k: object())
+    monkeypatch.setattr(adapter, "_replacement_live_input_lag_reason", lambda *a, **k: None)
+    bundle = _replacement_bundle()
     monkeypatch.setattr(
         reader,
         "read_replacement_forecast_bundle",
-        lambda *a, **k: SimpleNamespace(ok=True, bundle=_replacement_bundle(), reason_code="READY"),
+        lambda *a, **k: SimpleNamespace(ok=True, bundle=bundle, reason_code="READY"),
+    )
+    conn = sqlite3.connect(":memory:")
+    conn.execute(
+        "CREATE TABLE forecast_posteriors "
+        "(posterior_id INTEGER PRIMARY KEY, posterior_identity_hash TEXT)"
+    )
+    conn.execute(
+        "INSERT INTO forecast_posteriors VALUES (?, ?)",
+        (bundle.posterior_id, "fixture-posterior-identity"),
     )
 
     # REAUDIT_0_1.md §1.6 (item 3): this success-path test originally called the 0.1
@@ -142,23 +165,30 @@ def test_replacement_0_1_authority_uses_yes_posterior_and_blocks_no_without_nati
     # FIX-1 moved the success path BEHIND the shared evidence gate, so both passing
     # evidence objects are now supplied; absent/failing evidence is covered by
     # tests/engine/test_replacement_0_1_authority_evidence_gate.py (returns None).
+    payload = {}
+    native_costs = {
+        ("cond-27", "buy_yes"): (None, ExecutionPrice(0.30, "ask", fee_deducted=True, currency="probability_units"), 0.30, None, None),
+        ("cond-28", "buy_yes"): (None, ExecutionPrice(0.55, "ask", fee_deducted=True, currency="probability_units"), 0.55, None, None),
+        ("cond-27", "buy_no"): (None, ExecutionPrice(0.70, "ask", fee_deducted=True, currency="probability_units"), 0.70, None, None),
+        ("cond-28", "buy_no"): (None, ExecutionPrice(0.45, "ask", fee_deducted=True, currency="probability_units"), 0.45, None, None),
+    }
     q_by_condition, lcb_by_direction, p_values, prefilter, evidence = (
         adapter._replacement_authority_probability_and_fdr_proof(
             event=SimpleNamespace(event_type="FORECAST_SNAPSHOT_READY"),
-            payload={},
+            payload=payload,
             family=_family(),
-            conn=object(),
-            native_costs={
-                ("cond-27", "buy_yes"): (None, ExecutionPrice(0.30, "ask", fee_deducted=True, currency="probability_units"), 0.30, None, None),
-                ("cond-28", "buy_yes"): (None, ExecutionPrice(0.55, "ask", fee_deducted=True, currency="probability_units"), 0.55, None, None),
-                ("cond-27", "buy_no"): (None, ExecutionPrice(0.70, "ask", fee_deducted=True, currency="probability_units"), 0.70, None, None),
-                ("cond-28", "buy_no"): (None, ExecutionPrice(0.45, "ask", fee_deducted=True, currency="probability_units"), 0.45, None, None),
-            },
+            conn=conn,
+            native_costs=native_costs,
             decision_time=datetime(2026, 6, 7, tzinfo=timezone.utc),
             promotion_evidence=_passing_evidence(),
             capital_objective_evidence=_capital_objective_evidence(),
         )
     )
+    assert payload["_edli_spine_served_joint_q_samples_by_condition"] == {
+        "cond-27": [0.20] * 200,
+        "cond-28": [0.80] * 200,
+    }
+    assert "_edli_spine_joint_q_samples_unavailable_reason" not in payload
 
     assert evidence["probability_authority"] == "replacement_0_1"
     assert q_by_condition == {"cond-27": pytest.approx(0.20), "cond-28": pytest.approx(0.80)}
@@ -167,6 +197,196 @@ def test_replacement_0_1_authority_uses_yes_posterior_and_blocks_no_without_nati
     assert _qlcb_float(lcb_by_direction[("cond-28", "buy_no")]) == 0.0
     assert p_values[("cond-28", "buy_no")] == 1.0
     assert prefilter[("cond-28", "buy_no")] is False
+
+    bundle.provenance_json["city_calibration_layer_applied"] = True
+    bundle.provenance_json["city_calibration_rho"] = 0.25
+    bundle.provenance_json["q_bootstrap_samples_basis"] = "global_simplex_v1"
+    city_payload = {
+        "_edli_spine_served_joint_q_samples_by_condition": {"stale": [1.0, 1.0]}
+    }
+    adapter._replacement_authority_probability_and_fdr_proof(
+        event=SimpleNamespace(event_type="FORECAST_SNAPSHOT_READY"),
+        payload=city_payload,
+        family=_family(),
+        conn=conn,
+        native_costs=native_costs,
+        decision_time=datetime(2026, 6, 7, tzinfo=timezone.utc),
+        promotion_evidence=_passing_evidence(),
+        capital_objective_evidence=_capital_objective_evidence(),
+    )
+    assert "_edli_spine_served_joint_q_samples_by_condition" not in city_payload
+    assert (
+        city_payload["_edli_spine_joint_q_samples_unavailable_reason"]
+        == "CITY_MIX_SAMPLE_AUTHORITY_SUPERSEDED"
+    )
+
+    bundle.provenance_json["q_bootstrap_samples_basis"] = (
+        "served_rho_mixed_simplex_v2"
+    )
+    mixed_payload = {}
+    adapter._replacement_authority_probability_and_fdr_proof(
+        event=SimpleNamespace(event_type="FORECAST_SNAPSHOT_READY"),
+        payload=mixed_payload,
+        family=_family(),
+        conn=conn,
+        native_costs=native_costs,
+        decision_time=datetime(2026, 6, 7, tzinfo=timezone.utc),
+        promotion_evidence=_passing_evidence(),
+        capital_objective_evidence=_capital_objective_evidence(),
+    )
+    assert mixed_payload["_edli_spine_served_joint_q_samples_by_condition"] == {
+        "cond-27": [0.20] * 200,
+        "cond-28": [0.80] * 200,
+    }
+    assert "_edli_spine_joint_q_samples_unavailable_reason" not in mixed_payload
+    conn.close()
+
+
+def test_current_global_probability_authority_rebuilds_canonical_matrix_and_refutes_drift(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.data import replacement_forecast_bundle_reader as reader
+    from src.engine import replacement_forecast_hook_factory as hook_factory
+
+    conn = sqlite3.connect(":memory:")
+    conn.execute(
+        "CREATE TABLE forecast_posteriors "
+        "(posterior_id INTEGER PRIMARY KEY, posterior_identity_hash TEXT)"
+    )
+    conn.execute(
+        "CREATE TABLE market_events ("
+        "city TEXT, target_date TEXT, temperature_metric TEXT, condition_id TEXT, "
+        "market_slug TEXT, range_label TEXT, range_low REAL, range_high REAL, "
+        "outcome TEXT, token_id TEXT)"
+    )
+    conn.executemany(
+        "INSERT INTO market_events VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            (
+                "Testopolis",
+                "2026-06-09",
+                "high",
+                "cond-27",
+                "market-27",
+                "27C",
+                27.0,
+                27.0,
+                "bin-27",
+                "yes-27",
+            ),
+            (
+                "Testopolis",
+                "2026-06-09",
+                "high",
+                "cond-28",
+                "market-28",
+                "28C",
+                28.0,
+                28.0,
+                "bin-28",
+                "yes-28",
+            ),
+        ),
+    )
+    posterior_identity = "canonical-posterior-current"
+    conn.execute(
+        "INSERT INTO forecast_posteriors VALUES (?, ?)",
+        (123, posterior_identity),
+    )
+    bundle = _replacement_bundle()
+    bundle.provenance_json["q_bootstrap_samples_basis"] = "global_simplex_v1"
+    bundle.provenance_json["q_bootstrap_samples_by_bin"] = {
+        "bin-27": [0.20] * 400,
+        "bin-28": [0.80] * 400,
+    }
+    monkeypatch.setattr(
+        hook_factory,
+        "_latest_replacement_readiness",
+        lambda *a, **k: object(),
+    )
+    monkeypatch.setattr(
+        reader,
+        "read_replacement_forecast_bundle",
+        lambda *a, **k: SimpleNamespace(
+            ok=True,
+            bundle=bundle,
+            reason_code="READY",
+        ),
+    )
+    event = SimpleNamespace(
+        payload_json=json.dumps(
+            {
+                "city": "Testopolis",
+                "target_date": "2026-06-09",
+                "metric": "high",
+                "unit": "C",
+            }
+        )
+    )
+    bindings = (
+        OutcomeTokenBinding("internal-27", "cond-27", "yes-27", "no-27"),
+        OutcomeTokenBinding("internal-28", "cond-28", "yes-28", "no-28"),
+    )
+    samples = np.column_stack(
+        (np.full(400, 0.20), np.full(400, 0.80))
+    )
+    decision_time = datetime(2026, 6, 7, tzinfo=timezone.utc)
+    family_key = weather_family_id(
+        city="Testopolis",
+        target_date="2026-06-09",
+        metric="high",
+    )
+    witness_identity = joint_probability_witness_identity(
+        family_key=family_key,
+        bindings=bindings,
+        q_version="q-current",
+        resolution_identity="resolution-current",
+        topology_identity="topology-current",
+        posterior_identity_hash=posterior_identity,
+        source_truth_identity="source-current",
+        authority_certificate_hash="certificate-current",
+        band_alpha=0.05,
+        band_basis="PARAMETER_POSTERIOR_SIMPLEX_V1",
+        yes_q_samples=samples,
+        captured_at_utc=decision_time,
+    )
+    witness = JointOutcomeProbabilityWitness(
+        family_key=family_key,
+        bindings=bindings,
+        yes_q_samples=samples,
+        q_version="q-current",
+        resolution_identity="resolution-current",
+        topology_identity="topology-current",
+        posterior_identity_hash=posterior_identity,
+        source_truth_identity="source-current",
+        authority_certificate_hash="certificate-current",
+        band_alpha=0.05,
+        band_basis="PARAMETER_POSTERIOR_SIMPLEX_V1",
+        captured_at_utc=decision_time,
+        max_age=timedelta(seconds=30),
+        witness_identity=witness_identity,
+    )
+
+    current = adapter.current_global_probability_authority(
+        conn,
+        event,
+        witness,
+        decision_time=decision_time,
+    )
+    assert current is not None
+    assert current.posterior_identity_hash == posterior_identity
+
+    conn.execute(
+        "UPDATE forecast_posteriors SET posterior_identity_hash = ? WHERE posterior_id = ?",
+        ("posterior-superseded", 123),
+    )
+    assert adapter.current_global_probability_authority(
+        conn,
+        event,
+        witness,
+        decision_time=decision_time,
+    ) is None
+    conn.close()
 
 
 def test_replacement_yes_lcb_ignores_aifs_provenance_fallback() -> None:

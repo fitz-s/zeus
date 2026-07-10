@@ -2123,7 +2123,9 @@ def _replacement_bayes_precision_fusion_override(
 #   nudges it). q_ucb ≥ q_point per bin symmetrically.
 # ---------------------------------------------------------------------------
 
-_QLCB_BOOTSTRAP_DRAWS = 200
+# The global lower-CVaR selector requires at least 20 observations in the 5%
+# tail. 400 coherent simplex draws are therefore the minimum certifiable carrier.
+_QLCB_BOOTSTRAP_DRAWS = 400
 # SINGLE AUTHORITY: the certified bootstrap basis string lives in cycle_policy (shared with the
 # tradeable-grade coverage predicate the mask-and-starve antibody sites use). Re-exported as
 # _QLCB_BASIS for the in-module call sites + existing tests that import it by this name.
@@ -2441,6 +2443,58 @@ def _mix_q_by_rho(
         if tot > 0.0 and math.isfinite(tot):
             return {b: v / tot for b, v in mixed.items()}
     return mixed
+
+
+def _mix_q_samples_by_rho(
+    global_samples: "Mapping[str, Sequence[float]]",
+    city_samples: "Mapping[str, Sequence[float]]",
+    rho: float,
+) -> dict[str, list[float]]:
+    """Mix two coherent draw matrices with the same city weight as served q.
+
+    Each mapping is column-oriented (bin -> draws).  Row ``i`` in both carriers
+    represents the same seeded center draw, so the served draw is the pointwise
+    convex combination.  Convex combinations of two simplexes remain a simplex;
+    validating that invariant here prevents a city-mixed point q from being scored
+    against the unrelated global-only bootstrap distribution.
+    """
+
+    keys = tuple(global_samples)
+    if not keys or set(keys) != set(city_samples):
+        raise ValueError("global/city bootstrap sample bins must match exactly")
+    lengths = {
+        len(global_samples[key]) for key in keys
+    } | {
+        len(city_samples[key]) for key in keys
+    }
+    if len(lengths) != 1 or next(iter(lengths), 0) < 2:
+        raise ValueError("global/city bootstrap sample counts must match and be >= 2")
+    r = float(rho)
+    if not math.isfinite(r) or not 0.0 <= r <= 1.0:
+        raise ValueError("city bootstrap mixture rho must lie in [0, 1]")
+
+    n_draws = next(iter(lengths))
+    out = {key: [] for key in keys}
+    for draw_idx in range(n_draws):
+        global_row = [float(global_samples[key][draw_idx]) for key in keys]
+        city_row = [float(city_samples[key][draw_idx]) for key in keys]
+        if (
+            not all(math.isfinite(value) and 0.0 <= value <= 1.0 for value in global_row)
+            or not all(math.isfinite(value) and 0.0 <= value <= 1.0 for value in city_row)
+            or not math.isclose(sum(global_row), 1.0, rel_tol=0.0, abs_tol=1e-9)
+            or not math.isclose(sum(city_row), 1.0, rel_tol=0.0, abs_tol=1e-9)
+        ):
+            raise ValueError("global/city bootstrap draws must each be probability simplexes")
+        mixed_row = [
+            (1.0 - r) * global_value + r * city_value
+            for global_value, city_value in zip(global_row, city_row)
+        ]
+        total = sum(mixed_row)
+        if not math.isclose(total, 1.0, rel_tol=0.0, abs_tol=1e-9):
+            raise ValueError("mixed bootstrap draw left the probability simplex")
+        for key, value in zip(keys, mixed_row):
+            out[key].append(float(value / total))
+    return out
 
 
 def _day0_conditioned_bin_probability(
@@ -2946,8 +3000,9 @@ def _compute_posterior_payload(
             # SERVED q per bin (q_lcb ≤ q_point ≤ q_ucb) and the far-tail honesty is re-applied against
             # the served q, so the persisted bounds are coherent with the served point. rho=0 ⇒ only the
             # global carriers are built and the result is byte-identical to today. The bootstrap SAMPLE
-            # substrate stays the GLOBAL carriers' draws (the empirical edge-confidence basis); the served
-            # bounds are the mixed quantiles.
+            # substrate is mixed row-by-row with that same rho, so point q, bounds, empirical
+            # edge confidence, and downstream CVaR all describe one probability
+            # world.  Serving global-only draws beside a city-mixed q is forbidden.
             try:
                 _lcb_g, _ucb_g, _samples_g = _build_fused_q_bounds(
                     mu_star=float(bayes_precision_fusion_override.anchor_value_c),
@@ -2962,7 +3017,7 @@ def _compute_posterior_payload(
                     return_samples=True,
                 )
                 if _city_sigma_used is not None and _city_rho > 0.0:
-                    _lcb_c, _ucb_c, _ = _build_fused_q_bounds(
+                    _lcb_c, _ucb_c, _samples_c = _build_fused_q_bounds(
                         mu_star=float(bayes_precision_fusion_override.anchor_value_c),
                         center_sigma_c=float(bayes_precision_fusion_override.anchor_sigma_c),
                         predictive_sigma_c=_city_sigma_used,
@@ -2972,7 +3027,7 @@ def _compute_posterior_payload(
                         rounding_rule=_rounding_rule,
                         day0_observed_extreme_c=_day0_obs_extreme_c,
                         day0_metric=metric,
-                        return_samples=False,
+                        return_samples=True,
                     )
                     _lcb_map = _mix_q_by_rho(_lcb_g, _lcb_c, _city_rho, renormalize=False)
                     _ucb_map = _mix_q_by_rho(_ucb_g, _ucb_c, _city_rho, renormalize=False)
@@ -2986,11 +3041,16 @@ def _compute_posterior_payload(
                             _lo = min(_lo, FAR_TAIL_LCB_FLOOR)
                         _lcb_map[_bid] = _lo
                         _ucb_map[_bid] = max(_ucb_map.get(_bid, _qpt), _qpt)
+                    q_bootstrap_samples_by_bin = _mix_q_samples_by_rho(
+                        _samples_g,
+                        _samples_c,
+                        _city_rho,
+                    )
                 else:
                     _lcb_map, _ucb_map = _lcb_g, _ucb_g
+                    q_bootstrap_samples_by_bin = _samples_g
                 q_lcb_map = _lcb_map
                 q_ucb_map = _ucb_map
-                q_bootstrap_samples_by_bin = _samples_g
                 q_lcb_basis = _QLCB_BASIS
                 # FAR-TAIL HONESTY PROVENANCE (2026-06-22): count how many bins had their
                 # q_lcb capped by the far-tail honesty (q_point < FAR_TAIL_Q_POINT_THRESH
@@ -3349,6 +3409,20 @@ def _compute_posterior_payload(
         "q_bootstrap_samples_by_bin": (
             q_bootstrap_samples_by_bin if q_lcb_basis == _QLCB_BASIS else None
         ),
+        "q_bootstrap_samples_basis": (
+            "served_rho_mixed_simplex_v2"
+            if q_lcb_basis == _QLCB_BASIS and city_calibration_layer_applied
+            else (
+                "global_simplex_v1"
+                if q_lcb_basis == _QLCB_BASIS
+                else None
+            )
+        ),
+        "q_bootstrap_samples_hash": (
+            _json_hash(q_bootstrap_samples_by_bin)
+            if q_lcb_basis == _QLCB_BASIS and q_bootstrap_samples_by_bin is not None
+            else None
+        ),
         "bin_topology": bin_topology_payload,
         "bin_topology_hash": bin_topology_hash,
         "dependency_hash": dependency_hash,
@@ -3505,6 +3579,12 @@ def _insert_posterior(
             "q": q,
             "q_lcb": q_lcb_map,
             "q_ucb": q_ucb_map,
+            "q_bootstrap_samples_hash": provenance_payload.get(
+                "q_bootstrap_samples_hash"
+            ),
+            "q_bootstrap_samples_basis": provenance_payload.get(
+                "q_bootstrap_samples_basis"
+            ),
             "dependency_hash": dependency_hash,
             "bin_topology_hash": bin_topology_hash,
             "posterior_config_hash": posterior_config_hash,

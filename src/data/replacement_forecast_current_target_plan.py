@@ -34,10 +34,15 @@ class ReplacementForecastCurrentTargetPlanRow:
     baseline_source_cycle_time: str | None = None
     openmeteo_source_run_id: str | None = None
     day0_observed_extreme_required: bool = False
+    input_lag_reason: str | None = None
 
     @property
     def covered(self) -> bool:
-        return self.posterior_count > 0 and self.readiness_count > 0
+        return (
+            self.posterior_count > 0
+            and self.readiness_count > 0
+            and self.input_lag_reason is None
+        )
 
     @property
     def can_seed(self) -> bool:
@@ -77,6 +82,7 @@ class ReplacementForecastCurrentTargetPlanRow:
             "baseline_source_cycle_time": self.baseline_source_cycle_time,
             "openmeteo_source_run_id": self.openmeteo_source_run_id,
             "day0_observed_extreme_required": self.day0_observed_extreme_required,
+            "input_lag_reason": self.input_lag_reason,
             "covered": self.covered,
             "can_seed": self.can_seed,
             "missing_openmeteo_manifest": self.missing_openmeteo_manifest,
@@ -515,6 +521,368 @@ def _fusion_current_value_count(
         return 0
 
 
+def _latest_authorized_day0_fact(
+    conn: sqlite3.Connection,
+    *,
+    city: str,
+    target_date: str,
+    temperature_metric: str,
+    decision_time: datetime,
+    ) -> dict[str, object] | None:
+    """Latest hard fact accepted by either durable Day0 authority surface."""
+
+    metric = str(temperature_metric or "").strip().lower()
+    if metric not in {"high", "low"}:
+        return None
+    decision_utc = decision_time.astimezone(timezone.utc)
+    facts: list[dict[str, object]] = []
+    if "observation_instants" in _table_names(conn):
+        extreme_col = "running_min" if metric == "low" else "running_max"
+        aggregate = "MIN" if metric == "low" else "MAX"
+        row = conn.execute(
+            f"""
+            SELECT {aggregate}(CAST({extreme_col} AS REAL)) AS observed_extreme_native,
+                   MAX(utc_timestamp) AS observation_time,
+                   COUNT(*) AS sample_count
+              FROM observation_instants
+             WHERE city = ?
+               AND target_date = ?
+               AND substr(local_timestamp, 1, 10) = target_date
+               AND utc_timestamp <= ?
+               AND COALESCE(causality_status, 'OK') = 'OK'
+               AND (
+                    (
+                        UPPER(COALESCE(authority, '')) = 'VERIFIED'
+                        AND COALESCE(source_role, '') = 'historical_hourly'
+                        AND COALESCE(training_allowed, 0) = 1
+                        AND (
+                            LOWER(COALESCE(source, '')) LIKE 'wu%'
+                            OR LOWER(COALESCE(source, '')) LIKE 'ogimet_metar_%'
+                        )
+                    )
+                    OR (
+                        city = 'Hong Kong'
+                        AND LOWER(COALESCE(source, '')) = 'hko_hourly_accumulator'
+                        AND UPPER(COALESCE(authority, '')) = 'ICAO_STATION_NATIVE'
+                        AND COALESCE(source_role, '') = 'runtime_monitoring'
+                        AND COALESCE(training_allowed, 0) = 0
+                    )
+               )
+               AND {extreme_col} IS NOT NULL
+            """,
+            (city, target_date, decision_utc.isoformat()),
+        ).fetchone()
+        if row is not None and row["observation_time"] and row["observed_extreme_native"] is not None:
+            facts.append(
+                {
+                    "observed_extreme_native": float(row["observed_extreme_native"]),
+                    "observation_time": str(row["observation_time"]),
+                    "sample_count": int(row["sample_count"] or 0),
+                    "source": "durable_observation_instants",
+                }
+            )
+
+    if "opportunity_events" in _table_names(conn):
+        event_rows = conn.execute(
+            """
+            SELECT payload_json
+              FROM opportunity_events
+             WHERE event_type = 'DAY0_EXTREME_UPDATED'
+               AND available_at <= ?
+               AND received_at <= ?
+               AND json_extract(payload_json, '$.city') = ?
+               AND json_extract(payload_json, '$.target_date') = ?
+               AND json_extract(payload_json, '$.metric') = ?
+             ORDER BY available_at DESC, created_at DESC, event_id DESC
+             LIMIT 8
+            """,
+            (
+                decision_utc.isoformat(),
+                decision_utc.isoformat(),
+                city,
+                target_date,
+                metric,
+            ),
+        ).fetchall()
+        from src.config import runtime_cities_by_name
+        from src.contracts.settlement_semantics import SettlementSemantics
+        from src.events.day0_authority import assert_live_day0_payload_authority
+
+        city_obj = runtime_cities_by_name().get(city)
+        for event_row in event_rows:
+            try:
+                payload = json.loads(str(event_row["payload_json"] or "{}"))
+                if not isinstance(payload, Mapping):
+                    continue
+                assert_live_day0_payload_authority(payload)
+                observation_time = datetime.fromisoformat(
+                    str(payload.get("observation_time") or "").replace("Z", "+00:00")
+                )
+                if observation_time.tzinfo is None:
+                    continue
+                observation_time = observation_time.astimezone(timezone.utc)
+                if observation_time > decision_utc or city_obj is None:
+                    continue
+                raw_value = float(payload.get("raw_value"))
+                rounded_value = int(payload.get("rounded_value"))
+                semantics = SettlementSemantics.for_city(city_obj)
+                if int(semantics.round_single(raw_value)) != rounded_value:
+                    continue
+                extreme_raw = payload.get("low_so_far" if metric == "low" else "high_so_far")
+                observed_extreme = float(raw_value if extreme_raw is None else extreme_raw)
+            except (TypeError, ValueError):
+                continue
+            facts.append(
+                {
+                    "observed_extreme_native": observed_extreme,
+                    "observation_time": observation_time.isoformat(),
+                    "sample_count": 1,
+                    "source": (
+                        "durable_day0_event:"
+                        f"{str(payload.get('settlement_source') or 'unknown')}"
+                    ),
+                }
+            )
+            break
+
+    def fact_time(fact: Mapping[str, object]) -> datetime:
+        parsed = datetime.fromisoformat(
+            str(fact.get("observation_time") or "").replace("Z", "+00:00")
+        )
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
+
+    return max(facts, key=fact_time) if facts else None
+
+
+def _day0_observation_lag_reason(
+    conn: sqlite3.Connection,
+    *,
+    city: str,
+    target_date: str,
+    temperature_metric: str,
+    decision_time: datetime,
+    posterior_provenance_json: object,
+) -> str | None:
+    try:
+        provenance = json.loads(str(posterior_provenance_json or "{}"))
+    except (TypeError, ValueError):
+        provenance = {}
+    conditioning = (
+        provenance.get("day0_conditioning")
+        if isinstance(provenance, dict)
+        else None
+    )
+    served_raw = (
+        conditioning.get("observation_time")
+        if isinstance(conditioning, Mapping)
+        else None
+    )
+    try:
+        served_at = datetime.fromisoformat(str(served_raw or "").replace("Z", "+00:00"))
+    except ValueError:
+        served_at = None
+    if served_at is not None:
+        if served_at.tzinfo is None:
+            served_at = served_at.replace(tzinfo=timezone.utc)
+        served_at = served_at.astimezone(timezone.utc)
+    fact = _latest_authorized_day0_fact(
+        conn,
+        city=city,
+        target_date=target_date,
+        temperature_metric=temperature_metric,
+        decision_time=decision_time,
+    )
+    if fact is None:
+        return None
+    try:
+        latest_at = datetime.fromisoformat(
+            str(fact["observation_time"]).replace("Z", "+00:00")
+        )
+    except (KeyError, ValueError):
+        return None
+    if latest_at.tzinfo is None:
+        latest_at = latest_at.replace(tzinfo=timezone.utc)
+    latest_at = latest_at.astimezone(timezone.utc)
+    if served_at is not None and latest_at <= served_at:
+        return None
+    return (
+        "basis=day0_observation_hwm_lag:"
+        f"latest_observation_time={latest_at.isoformat()}:"
+        f"posterior_observation_time={served_at.isoformat() if served_at else 'missing'}"
+    )
+
+
+def _latest_readiness_bound_posterior_id(
+    conn: sqlite3.Connection,
+    *,
+    city: str,
+    target_date: str,
+    temperature_metric: str,
+) -> int | None:
+    """Return the posterior bound by the exact readiness the live reader serves.
+
+    ``None`` means the DB predates soft-anchor posterior binding and retains the
+    legacy fixture contract. ``-1`` means the binding contract exists but the
+    current scope cannot prove one, so coverage must fail closed.
+    """
+
+    columns = _columns(conn, "readiness_state")
+    if "dependency_json" not in columns:
+        return None
+    supported = conn.execute(
+        """
+        SELECT 1
+          FROM readiness_state r,
+               json_each(r.dependency_json, '$.dependencies')
+         WHERE json_extract(value, '$.role') = 'soft_anchor_posterior'
+         LIMIT 1
+        """
+    ).fetchone()
+    if supported is None:
+        return None
+    predicates = [
+        "strategy_key = ?",
+        "json_extract(provenance_json, '$.city') = ?",
+        "json_extract(provenance_json, '$.target_date') = ?",
+        "json_extract(provenance_json, '$.temperature_metric') = ?",
+    ]
+    params: list[object] = [SOURCE_ID, city, target_date, temperature_metric]
+    order = "datetime(computed_at) DESC, readiness_id DESC" if "computed_at" in columns else "rowid DESC"
+    selected = "dependency_json" + (", status" if "status" in columns else "")
+    row = conn.execute(
+        f"""
+        SELECT {selected}
+          FROM readiness_state
+         WHERE {' AND '.join(predicates)}
+         ORDER BY {order}
+         LIMIT 1
+        """,
+        tuple(params),
+    ).fetchone()
+    if row is None or ("status" in columns and str(row["status"] or "") != "READY"):
+        return -1
+    try:
+        payload = json.loads(str(row["dependency_json"] or "{}"))
+    except (TypeError, ValueError):
+        return -1
+    dependencies = payload.get("dependencies") if isinstance(payload, Mapping) else None
+    if not isinstance(dependencies, list):
+        return -1
+    matches = [
+        item
+        for item in dependencies
+        if isinstance(item, Mapping)
+        and item.get("role") == "soft_anchor_posterior"
+    ]
+    if len(matches) != 1:
+        return -1
+    try:
+        posterior_id = int(matches[0].get("posterior_id"))
+    except (TypeError, ValueError):
+        return -1
+    return posterior_id if posterior_id > 0 else -1
+
+
+def _covering_posterior_input_lag_reason(
+    conn: sqlite3.Connection,
+    *,
+    city: str,
+    target_date: str,
+    temperature_metric: str,
+    decision_time: datetime,
+    baseline_source_run_id: str | None,
+    openmeteo_source_run_id: str | None,
+    posterior_tradeable_grade_clause: str,
+    check_day0_observation: bool = False,
+    observation_conn: sqlite3.Connection | None = None,
+) -> str | None:
+    """Use the live read gate's HWM rule to invalidate stale plan coverage."""
+
+    columns = _columns(conn, "forecast_posteriors")
+    required = {
+        "city",
+        "target_date",
+        "temperature_metric",
+        "source_id",
+        "source_cycle_time",
+        "computed_at",
+        "provenance_json",
+    }
+    if not required.issubset(columns):
+        return None
+    predicates = [
+        "p.source_id = ?",
+        "p.city = ?",
+        "p.target_date = ?",
+        "p.temperature_metric = ?",
+        "p.training_allowed = 0",
+        "p.runtime_layer = 'live'",
+    ]
+    params: list[object] = [SOURCE_ID, city, target_date, temperature_metric]
+    readiness_posterior_id = _latest_readiness_bound_posterior_id(
+        conn,
+        city=city,
+        target_date=target_date,
+        temperature_metric=temperature_metric,
+    )
+    if readiness_posterior_id == -1:
+        return "basis=readiness_posterior_identity_missing"
+    if readiness_posterior_id is not None:
+        predicates.append("p.posterior_id = ?")
+        params.append(readiness_posterior_id)
+    if "dependency_source_run_ids_json" in columns:
+        if baseline_source_run_id:
+            predicates.append(
+                "json_extract(p.dependency_source_run_ids_json, '$.baseline_b0') = ?"
+            )
+            params.append(baseline_source_run_id)
+        if openmeteo_source_run_id:
+            predicates.append(
+                "json_extract(p.dependency_source_run_ids_json, '$.openmeteo_ifs9_anchor') = ?"
+            )
+            params.append(openmeteo_source_run_id)
+    row = conn.execute(
+        f"""
+        SELECT p.source_cycle_time, p.computed_at, p.provenance_json
+          FROM forecast_posteriors p
+         WHERE {' AND '.join(predicates)}
+           {posterior_tradeable_grade_clause}
+         ORDER BY datetime(p.computed_at) DESC, p.posterior_id DESC
+         LIMIT 1
+        """,
+        tuple(params),
+    ).fetchone()
+    if row is None:
+        return (
+            "basis=readiness_bound_posterior_unavailable"
+            if readiness_posterior_id is not None
+            else None
+        )
+    from src.data.replacement_input_hwm import replacement_live_input_lag_reason
+
+    raw_lag = replacement_live_input_lag_reason(
+        conn,
+        city=city,
+        target_date=target_date,
+        metric=temperature_metric,
+        decision_time=decision_time,
+        posterior_source_cycle_time=row["source_cycle_time"],
+        posterior_computed_at=row["computed_at"],
+    )
+    if raw_lag is not None or not check_day0_observation:
+        return raw_lag
+    return _day0_observation_lag_reason(
+        observation_conn or conn,
+        city=city,
+        target_date=target_date,
+        temperature_metric=temperature_metric,
+        decision_time=decision_time,
+        posterior_provenance_json=row["provenance_json"],
+    )
+
+
 def _blocked_plan(reason_code: str) -> ReplacementForecastCurrentTargetPlan:
     return ReplacementForecastCurrentTargetPlan(
         status="BLOCKED",
@@ -634,6 +1002,7 @@ def build_replacement_forecast_current_target_plan(
     require_raw_artifacts: bool = True,
     now_utc: datetime | None = None,
     required_openmeteo_source_cycle_time: datetime | str | None = None,
+    observation_conn: sqlite3.Connection | None = None,
 ) -> ReplacementForecastCurrentTargetPlan:
     """Return current market targets and the replacement artifacts needed for them."""
 
@@ -668,6 +1037,20 @@ def build_replacement_forecast_current_target_plan(
         )
     conn = _connect(db_path, write_class="live")
     conn.row_factory = sqlite3.Row
+    owned_observation_conn: sqlite3.Connection | None = None
+    if observation_conn is None:
+        try:
+            from src.state.db import (
+                ZEUS_FORECASTS_DB_PATH,
+                get_world_connection_read_only,
+            )
+
+            if db_path.resolve() == Path(ZEUS_FORECASTS_DB_PATH).resolve():
+                owned_observation_conn = get_world_connection_read_only()
+                owned_observation_conn.row_factory = sqlite3.Row
+                observation_conn = owned_observation_conn
+        except Exception:
+            observation_conn = None
     try:
         conn.execute("PRAGMA query_only=ON")
         tables = _table_names(conn)
@@ -979,6 +1362,24 @@ def build_replacement_forecast_current_target_plan(
                     or openmeteo_resolved_cycle
                     or baseline_source_cycle_time,
                 )
+            input_lag_reason = None
+            if posterior_count > 0 and readiness_count > 0:
+                input_lag_reason = _covering_posterior_input_lag_reason(
+                    conn,
+                    city=city,
+                    target_date=target_date,
+                    temperature_metric=metric,
+                    decision_time=evaluation_now_utc,
+                    baseline_source_run_id=(
+                        str(baseline_source_run_id)
+                        if baseline_source_run_id
+                        else None
+                    ),
+                    openmeteo_source_run_id=openmeteo_source_run_id,
+                    posterior_tradeable_grade_clause=posterior_tradeable_grade_clause,
+                    check_day0_observation=day0_observed_extreme_required,
+                    observation_conn=observation_conn,
+                )
             out.append(
                 ReplacementForecastCurrentTargetPlanRow(
                     city=city,
@@ -993,9 +1394,12 @@ def build_replacement_forecast_current_target_plan(
                     baseline_source_cycle_time=baseline_source_cycle_time,
                     openmeteo_source_run_id=openmeteo_source_run_id,
                     day0_observed_extreme_required=day0_observed_extreme_required,
+                    input_lag_reason=input_lag_reason,
                 )
             )
     finally:
+        if owned_observation_conn is not None:
+            owned_observation_conn.close()
         conn.close()
     target_count = len(out)
     covered_count = sum(1 for row in out if row.covered)

@@ -1,5 +1,5 @@
 # Created: 2026-06-08
-# Last reused or audited: 2026-06-08
+# Last reused or audited: 2026-07-10
 # Authority basis: docs/architecture/system_decomposition_plan.md
 #   §4.3 (Post-Trade Capital Lifecycle), §6 (P4 row + co-location decision),
 #   §7 (I3 P4->riskguard/P1 no-back-coupling + commit-before-HTTP; I4 ingest->P4),
@@ -539,3 +539,46 @@ def test_superiority_p4_chain_sync_does_not_hold_lock_across_per_position_http()
         "chain_sync_read_cycle must NOT import the monitoring/exit-submit phase — it lifts "
         "ONLY the chain-sync READ entry points (run_chain_sync + connection/portfolio helpers)."
     )
+
+
+def test_collateral_degraded_snapshot_is_scheduler_failure(monkeypatch, tmp_path):
+    """A mechanically completed DEGRADED refresh must not publish false-green job health."""
+    from src.execution import post_trade_capital
+
+    class _Adapter:
+        def get_pusd_collateral_payload(self, *, refresh_allowance=True):
+            assert refresh_allowance is True
+            return {"authority_tier": "DEGRADED", "error": "simulated TLS failure"}
+
+    class _Client:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def _ensure_v2_adapter(self):
+            return _Adapter()
+
+    monkeypatch.setattr("src.state.db._zeus_trade_db_path", lambda: tmp_path / "trades.db")
+    monkeypatch.setattr("src.data.polymarket_client.PolymarketClient", _Client)
+
+    with pytest.raises(
+        post_trade_capital.CollateralSnapshotDegraded,
+        match="balance/allowance unknown",
+    ):
+        post_trade_capital.collateral_snapshot_refresh_cycle()
+
+
+def test_collateral_cold_tls_budget_exceeds_observed_handshake(monkeypatch):
+    """The default connect budget must not be shorter than normal cold CLOB TLS."""
+    from src.execution import post_trade_capital
+
+    monkeypatch.delenv("ZEUS_POST_TRADE_COLLATERAL_TIMEOUT_SECONDS", raising=False)
+    assert post_trade_capital._post_trade_collateral_timeout_seconds() == 6.0
+
+    monkeypatch.setenv("ZEUS_POST_TRADE_COLLATERAL_TIMEOUT_SECONDS", "invalid")
+    assert post_trade_capital._post_trade_collateral_timeout_seconds() == 6.0

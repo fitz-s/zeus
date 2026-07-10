@@ -1,5 +1,5 @@
 # Created: 2026-06-29
-# Last audited: 2026-06-29
+# Last reused/audited: 2026-07-10
 # Authority basis: capital-gated per-city rho-mix serving (frontier-consult validated). This pins the
 #   EXTRACTED pure q-builder `_build_scaled_normal_uniform_q` and the rho = 1-exp(-C/W) mixture so a
 #   refactor cannot silently change the served calibration q. The byte-identical-global contract for the
@@ -327,6 +327,39 @@ def test_rho_mix_renormalizes_defensively():
     assert sum(m.values()) == pytest.approx(1.0, abs=1e-12)
     m_raw = mat._mix_q_by_rho(qg, qc, 0.5, renormalize=False)
     assert sum(m_raw.values()) == pytest.approx(0.6, abs=1e-12)
+
+
+def test_rho_mix_bootstrap_draws_matches_served_probability_world():
+    global_samples = {
+        "a": [0.70, 0.50, 0.20],
+        "b": [0.20, 0.30, 0.30],
+        "c": [0.10, 0.20, 0.50],
+    }
+    city_samples = {
+        "a": [0.30, 0.20, 0.10],
+        "b": [0.50, 0.60, 0.40],
+        "c": [0.20, 0.20, 0.50],
+    }
+    rho = 0.25
+
+    mixed = mat._mix_q_samples_by_rho(global_samples, city_samples, rho)
+
+    for draw_idx in range(3):
+        assert sum(mixed[key][draw_idx] for key in mixed) == pytest.approx(1.0)
+        for key in mixed:
+            assert mixed[key][draw_idx] == pytest.approx(
+                (1.0 - rho) * global_samples[key][draw_idx]
+                + rho * city_samples[key][draw_idx]
+            )
+
+
+def test_rho_mix_bootstrap_draws_rejects_incoherent_carrier():
+    with pytest.raises(ValueError, match="probability simplexes"):
+        mat._mix_q_samples_by_rho(
+            {"a": [0.8, 0.8], "b": [0.3, 0.3]},
+            {"a": [0.4, 0.4], "b": [0.6, 0.6]},
+            0.5,
+        )
 
 
 # ---------------------------------------------------------------------------

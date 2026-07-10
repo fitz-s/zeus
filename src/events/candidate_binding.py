@@ -155,7 +155,7 @@ def bind_event_to_candidate_family(
         "candidates": [candidate.binding_payload() for candidate in candidates],
     }
     binding_hash = sha256_text(canonical_json(binding_payload))
-    family_id = _stable_weather_family_id(
+    family_id = weather_family_id(
         city=city,
         target_date=target_date,
         metric=metric,
@@ -188,7 +188,7 @@ def _payload_dict(event: OpportunityEvent) -> dict:
     return payload
 
 
-def _stable_weather_family_id(*, city: str, target_date: str, metric: str) -> str:
+def weather_family_id(*, city: str, target_date: str, metric: str) -> str:
     """Stable live identity for one mutually-exclusive weather outcome family.
 
     ``binding_hash`` remains the immutable audit hash for the exact trigger event

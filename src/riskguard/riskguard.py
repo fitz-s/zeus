@@ -856,6 +856,8 @@ def _realized_window_loss_snapshot(
     windowed_pnl = 0.0
     counted = 0
     skipped_unparseable = 0
+    excluded_unowned = 0
+    excluded_unowned_pnl = 0.0
     for exit_row in realized_exits or []:
         ts = str(exit_row.get("exited_at") or "")
         if not ts:
@@ -869,6 +871,15 @@ def _realized_window_loss_snapshot(
         if exit_dt.tzinfo is None:
             exit_dt = exit_dt.replace(tzinfo=timezone.utc)
         if cutoff_dt <= exit_dt <= now_dt:
+            # Balance-only chain recovery proves that inventory existed, not
+            # that Zeus authorized its entry. Its settlement belongs in account
+            # PnL, but cannot convict the current strategy loss breaker.
+            if exit_row.get("loss_eligible") is False:
+                pnl = _coerce_finite_float(exit_row.get("pnl"))
+                if pnl is not None:
+                    excluded_unowned_pnl += float(pnl)
+                excluded_unowned += 1
+                continue
             pnl = _coerce_finite_float(exit_row.get("pnl"))
             if pnl is None:
                 skipped_unparseable += 1
@@ -895,6 +906,8 @@ def _realized_window_loss_snapshot(
             "settlement_count": counted,
             "realized_pnl_window": round(windowed_pnl, 2),
             "skipped_unparseable": skipped_unparseable,
+            "excluded_unowned_settlement_count": excluded_unowned,
+            "excluded_unowned_realized_pnl": round(excluded_unowned_pnl, 2),
         },
     }
 
@@ -961,6 +974,8 @@ def _canonical_recent_exits_from_settlement_rows(rows: list[dict]) -> list[dict]
         pnl = row.get("pnl")
         if pnl is None:
             continue
+        strategy = str(row.get("strategy") or row.get("strategy_key") or "")
+        loss_eligible = strategy != "chain_only_reconciliation"
         exits.append(
             {
                 "city": str(row.get("city") or ""),
@@ -972,6 +987,13 @@ def _canonical_recent_exits_from_settlement_rows(rows: list[dict]) -> list[dict]
                 "exit_reason": str(row.get("exit_reason") or "SETTLEMENT"),
                 "exited_at": str(row.get("exited_at") or row.get("settled_at") or ""),
                 "pnl": float(pnl),
+                "strategy_key": strategy,
+                "loss_eligible": loss_eligible,
+                "loss_exclusion_reason": (
+                    "balance_only_chain_recovery_has_no_entry_authority"
+                    if not loss_eligible
+                    else ""
+                ),
             }
         )
     return exits
@@ -1311,6 +1333,12 @@ def _riskguard_brier_metric_rows(rows: list[dict], *, limit: int = RISKGUARD_SET
     displace a learning-ready row in the Brier sample. Settlement backfills can
     be newest by occurred_at while carrying no decision snapshot; using them as
     the latest Brier rows turns a data repair into a false reduce-only halt.
+
+    A frozen probability value without its ``venue_commands.q_version`` is also
+    not learning lineage. It cannot prove which q authorized the order, so it is
+    diagnostic-only and may not convict the currently executing probability
+    system. ``_bind_brier_probability_identities`` establishes that proof before
+    this filter runs.
     """
 
     metric_rows: list[dict] = []
@@ -1319,12 +1347,99 @@ def _riskguard_brier_metric_rows(rows: list[dict], *, limit: int = RISKGUARD_SET
             continue
         if not row.get("metric_ready", True):
             continue
+        if not row.get("probability_identity_ready", False):
+            continue
         if row.get("p_posterior") is None or row.get("outcome") is None:
             continue
         metric_rows.append(row)
         if len(metric_rows) >= limit:
             break
     return metric_rows
+
+
+def _bind_brier_probability_identities(
+    conn: sqlite3.Connection,
+    rows: list[dict],
+) -> list[dict]:
+    """Bind settled forecasts to one unambiguous entry-time q identity.
+
+    ``p_posterior`` is only a number. A Brier verdict becomes evidence about a
+    probability system only when the actual ENTRY command carries exactly one
+    non-empty, non-conflicting ``q_version``. Missing and ambiguous identities
+    remain visible on the settlement rows but are excluded from the risk verdict.
+    """
+
+    output = [dict(row) for row in rows]
+    unresolved = {
+        str(row.get("trade_id") or "")
+        for row in output
+        if not (
+            row.get("probability_identity_ready") is True
+            and str(row.get("entry_q_version") or "").strip()
+        )
+        and str(row.get("trade_id") or "").strip()
+    }
+    bindings: dict[str, list[str | None]] = {trade_id: [] for trade_id in unresolved}
+    schema_ready = False
+    if unresolved and _table_exists(conn, "venue_commands"):
+        try:
+            columns = {
+                str(row[1])
+                for row in conn.execute("PRAGMA table_info(venue_commands)").fetchall()
+            }
+            schema_ready = {"position_id", "intent_kind", "q_version"}.issubset(columns)
+        except sqlite3.Error:
+            schema_ready = False
+    if schema_ready:
+        trade_ids = sorted(unresolved)
+        for start in range(0, len(trade_ids), 500):
+            chunk = trade_ids[start : start + 500]
+            placeholders = ",".join("?" for _ in chunk)
+            try:
+                command_rows = conn.execute(
+                    "SELECT position_id,q_version FROM venue_commands "
+                    "WHERE intent_kind='ENTRY' AND position_id IN ("
+                    f"{placeholders})",
+                    tuple(chunk),
+                ).fetchall()
+            except sqlite3.Error:
+                schema_ready = False
+                break
+            for command_row in command_rows:
+                position_id = str(command_row[0] or "")
+                q_version = str(command_row[1] or "").strip() or None
+                if position_id in bindings:
+                    bindings[position_id].append(q_version)
+
+    for row in output:
+        if (
+            row.get("probability_identity_ready") is True
+            and str(row.get("entry_q_version") or "").strip()
+        ):
+            continue
+        trade_id = str(row.get("trade_id") or "").strip()
+        versions = bindings.get(trade_id, [])
+        nonempty = {version for version in versions if version is not None}
+        missing_count = sum(version is None for version in versions)
+        if not schema_ready:
+            reason = "venue_q_version_schema_unavailable"
+        elif not versions:
+            reason = "entry_command_missing"
+        elif missing_count:
+            reason = "entry_q_version_missing"
+        elif len(nonempty) != 1:
+            reason = "entry_q_version_conflicting"
+        else:
+            row["probability_identity_ready"] = True
+            row["entry_q_version"] = next(iter(nonempty))
+            row["probability_identity_source"] = "venue_commands.q_version"
+            row["probability_identity_blocked_reason"] = ""
+            continue
+        row["probability_identity_ready"] = False
+        row["entry_q_version"] = next(iter(nonempty)) if len(nonempty) == 1 else ""
+        row["probability_identity_source"] = "venue_commands.q_version"
+        row["probability_identity_blocked_reason"] = reason
+    return output
 
 
 # Below this many settled observations a per-strategy Brier score is noise,
@@ -2031,6 +2146,10 @@ def _tick_once() -> RiskLevel:
             zeus_conn,
             limit=max(RISKGUARD_SETTLEMENT_LIMIT, RISKGUARD_BRIER_SCAN_LIMIT),
         )
+        settlement_scan_rows = _bind_brier_probability_identities(
+            zeus_conn,
+            settlement_scan_rows,
+        )
         settlement_rows = settlement_scan_rows[:RISKGUARD_SETTLEMENT_LIMIT]
         brier_candidate_rows = settlement_scan_rows[:RISKGUARD_BRIER_SCAN_LIMIT]
         settlement_row_storage_sources = sorted({str(r.get("source", "unknown")) for r in settlement_rows})
@@ -2073,6 +2192,20 @@ def _tick_once() -> RiskLevel:
         portfolio = replace(portfolio, recent_exits=realized_exits)
 
         brier_metric_rows = _riskguard_brier_metric_rows(brier_candidate_rows)
+        probability_identity_ready_count = sum(
+            bool(row.get("probability_identity_ready", False))
+            for row in brier_candidate_rows
+        )
+        probability_identity_block_reasons: dict[str, int] = {}
+        for row in brier_candidate_rows:
+            if row.get("probability_identity_ready", False):
+                continue
+            reason = str(
+                row.get("probability_identity_blocked_reason") or "unbound"
+            )
+            probability_identity_block_reasons[reason] = (
+                probability_identity_block_reasons.get(reason, 0) + 1
+            )
         p_forecasts = [float(r["p_posterior"]) for r in brier_metric_rows]
         outcomes = [int(r["outcome"]) for r in brier_metric_rows]
         strategy_settlement_summary = _strategy_settlement_summary(settlement_metric_ready_rows)
@@ -2529,6 +2662,11 @@ def _tick_once() -> RiskLevel:
                 "settlement_canonical_payload_complete_count": canonical_payload_complete_count,
                 "settlement_metric_ready_count": len(settlement_metric_ready_rows),
                 "settlement_brier_learning_ready_count": len(brier_metric_rows),
+                "settlement_probability_identity_ready_count": probability_identity_ready_count,
+                "settlement_probability_identity_unready_count": (
+                    len(brier_candidate_rows) - probability_identity_ready_count
+                ),
+                "settlement_probability_identity_block_reasons": probability_identity_block_reasons,
                 # K2 rename (bug #3): this field is the PROBABILITY-SIDE directional
                 # hit rate computed from brier forecasts (did p>0.5 match the
                 # outcome?). It is NOT the same as trade profitability rate, which
@@ -2674,6 +2812,7 @@ def _tick_once() -> RiskLevel:
             "settlement_quality": (
                 f"metric_ready={len(settlement_metric_ready_rows)}/{len(settlement_rows)} "
                 f"brier_learning_ready={len(brier_metric_rows)}/{len(brier_candidate_rows)} "
+                f"q_identity_ready={probability_identity_ready_count}/{len(brier_candidate_rows)} "
                 f"degraded={degraded_rows} storage={settlement_storage_source}"
             ),
             "execution_quality": (

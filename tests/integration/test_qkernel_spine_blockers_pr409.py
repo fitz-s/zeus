@@ -13,7 +13,7 @@
 #     3. day0 observation lane: _DAY0_LANE_EVENT_TYPES feed live observed-boundary
 #        state into the same qkernel family optimizer.
 #     4. current exposure in SELECTION (per-bin family exposure into argmax ΔU).
-# Last reused/audited: 2026-07-08
+# Last reused/audited: 2026-07-09
 """Integration tests for the four PR #409 live-path blockers (RED-on-revert)."""
 from __future__ import annotations
 
@@ -564,6 +564,26 @@ def test_direct_route_edge_uses_proof_execution_price_not_ask():
         assert float(route.avg_cost.value) == pytest.approx(float(proof.execution_price.value))
 
 
+def test_proof_native_route_uses_venue_min_order_as_priced_depth_cap():
+    family, _bins = _three_bin_family()
+    proofs = _proofs_for(
+        family,
+        yes_asks=[0.05, 0.20, 0.20, 0.05],
+        no_asks=[0.75, 0.75, 0.75, 0.75],
+        q_by_bin=[0.05, 0.45, 0.40, 0.10],
+        q_lcb_by_bin=[0.02, 0.32, 0.28, 0.05],
+    )
+    route_set = bridge._proof_native_direct_route_set_builder(
+        proofs, era._candidate_bin_id
+    )(None, shares=Decimal("1"), enable_negrisk_routes=False)
+
+    for routes in (route_set.direct_yes, route_set.direct_no):
+        for route in routes.values():
+            assert route.shares == Decimal("5")
+            assert route.max_shares == Decimal("5")
+            assert route.legs[0].shares == Decimal("5")
+
+
 def test_center_yes_selected_over_adjacent_no_when_guard_and_book_license(monkeypatch, tmp_path):
     """Shanghai-style direct selection: licensed cheap modal YES beats adjacent NO substitutes.
 
@@ -778,7 +798,15 @@ def test_unarmed_nonmodal_yes_tail_is_abstained_before_selection(monkeypatch):
     monkeypatch.setattr(guard_mod, "_RELIABILITY_LOADED", True)
     monkeypatch.setattr(guard_mod, "_RELIABILITY_ARTIFACT_ACTIVE", True)
 
-    def _fake_selection_guard(*, raw_side_prob, side, lead_days, bin_class, admission_margin=None):
+    def _fake_selection_guard(
+        *,
+        raw_side_prob,
+        side,
+        lead_days,
+        bin_class,
+        admission_margin=None,
+        temperature_metric=None,
+    ):
         return CalibratorVerdict(
             q_safe=float(raw_side_prob),
             trade=True,
@@ -3154,6 +3182,44 @@ def test_qkernel_rehydrates_served_proof_q_instead_of_reintegrating_member_norma
         assert decision.economics.payoff_q_lcb <= float(proof.q_lcb_5pct) + 1e-9
 
 
+def test_qkernel_threads_probability_authority_joint_samples_into_band(monkeypatch):
+    from src.config import settings
+
+    monkeypatch.setitem(settings["feature_flags"], "w3_solve_enabled", True)
+    family, _bins = _three_bin_family()
+    served_yes_q = [0.10, 0.80, 0.10, 0.00]
+    proofs = _proofs_for(
+        family,
+        yes_asks=[0.90, 0.27, 0.90, 0.90],
+        no_asks=[0.79, 0.90, 0.80, 0.95],
+        q_by_bin=served_yes_q,
+        q_lcb_by_bin=[0.02, 0.65, 0.05, 0.00],
+        no_execution_prices=[0.79, 0.90, 0.80, 0.95],
+    )
+    payload = _payload(mu=20.0, sigma=0.05, members=[20.0] * 5)
+    yes_proofs = [proof for proof in proofs if proof.direction == "buy_yes"]
+    rows = np.asarray(
+        [
+            [0.20, 0.70, 0.10, 0.00],
+            [0.00, 0.90, 0.10, 0.00],
+        ],
+        dtype=float,
+    )
+    payload["_edli_spine_served_joint_q_samples_by_condition"] = {
+        str(proof.candidate.condition_id): rows[:, index].tolist()
+        for index, proof in enumerate(yes_proofs)
+    }
+
+    result = _drive(family, proofs, payload)
+
+    assert result.decision is not None
+    assert result.decision.band is not None
+    assert result.decision.band.samples == pytest.approx(rows)
+    assert result.decision.band.q_lcb == pytest.approx(
+        np.quantile(rows, result.decision.band.alpha, axis=0)
+    )
+
+
 def test_day0_monotone_hard_fact_overlays_stale_served_proof_q():
     """Day0 hard facts may dominate the probabilistic proof q at overlay time."""
 
@@ -3270,7 +3336,15 @@ def test_qkernel_modal_guards_follow_served_joint_q_not_predictive_mu(monkeypatc
     monkeypatch.setattr(guard_mod, "_RELIABILITY_LOADED", True)
     monkeypatch.setattr(guard_mod, "_RELIABILITY_ARTIFACT_ACTIVE", True)
 
-    def _selection_guard(*, raw_side_prob, side, lead_days, bin_class, admission_margin=None):
+    def _selection_guard(
+        *,
+        raw_side_prob,
+        side,
+        lead_days,
+        bin_class,
+        admission_margin=None,
+        temperature_metric=None,
+    ):
         cell = f"{str(side).upper()}|L2_3|{bin_class}|test"
         if str(side).upper() == "YES" and bin_class != "modal":
             return CalibratorVerdict(

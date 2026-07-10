@@ -1734,6 +1734,31 @@ files:
     downstream:
     - src/events/reactor.py
     - src/engine/event_bound_final_intent.py
+  src/engine/global_single_order_auction.py:
+    zone: K2_K3_coordination
+    authority_role: global_single_order_auction_coordinator
+    why: Pure cross-family coordinator that refuses partial or malformed family sets, binds every prepared full-simplex family and native full-depth YES/NO order to one current portfolio witness, and returns at most one terminal-wealth-optimal winner; it performs no DB or venue I/O.
+    downstream:
+    - src/engine/event_reactor_adapter.py
+    - src/events/reactor.py
+  src/engine/global_auction_universe.py:
+    zone: K2_K3_coordination
+    authority_role: current_global_auction_scope_reader
+    why: Read-only independent enumeration of every current posterior-ready and phase-admissible weather family; binds the complete scope to full condition/native-token probability witnesses so a reactor queue page can never masquerade as the global feasible set.
+    hazards:
+    - NO_WRITE_PATH
+    downstream:
+    - src/engine/global_single_order_auction.py
+    - src/engine/event_reactor_adapter.py
+  src/engine/global_batch_runtime.py:
+    zone: K2_K3_coordination
+    authority_role: current_global_single_order_runtime
+    why: Owns one complete current auction epoch from independent family scan through exact one-winner actuation; queue pages provide only an eventual claimed event owner and never define the feasible set.
+    downstream:
+    - src/engine/global_auction_universe.py
+    - src/engine/global_single_order_auction.py
+    - src/engine/event_reactor_adapter.py
+    - src/events/reactor.py
   src/engine/replacement_forecast_hook_factory.py:
     zone: K2_runtime
     authority_role: replacement_forecast_live_decision_hook

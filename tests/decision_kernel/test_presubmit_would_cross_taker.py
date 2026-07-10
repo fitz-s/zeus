@@ -421,6 +421,33 @@ class TestLayer2VerifyPreSubmitForCommand:
         with pytest.raises(CertificateVerificationError, match="submit q_lcb-minus-limit"):
             self._call(ps)
 
+    def test_declared_current_state_tamper_cannot_downgrade_to_legacy(self):
+        ps = _maker_pre_submit()
+        economics = _qkernel_economics_for(ps)
+        economics.update(
+            {
+                "decision_id": "decision-current-1",
+                "receipt_hash": "receipt-current-1",
+                "q_version": "q-current-1",
+                "sample_hash": "current-sample-hash",
+                "q_lcb_guard_basis": "CURRENT_POSTERIOR_BAND",
+                "q_lcb_guard_abstained": False,
+                "q_lcb_guard_cell_key": "current-sample-hash",
+                "selection_guard_basis": "CURRENT_POSTERIOR_BAND",
+                "selection_guard_abstained": False,
+                "selection_guard_cell_key": "current-sample-hash",
+                "selection_guard_n": 64,
+            }
+        )
+        economics["current_state_identity_hash"] = qkernel_current_state_identity_hash(
+            economics
+        )
+        economics.update(cost=0.39, edge_lcb=0.21)
+        ps["qkernel_execution_economics"] = economics
+
+        with pytest.raises(CertificateVerificationError, match="current-state identity invalid"):
+            self._call(ps)
+
     def test_qkernel_direct_payoff_probability_mismatch_raises(self):
         ps = _maker_pre_submit(
             direction="buy_no",

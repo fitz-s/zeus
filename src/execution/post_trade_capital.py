@@ -69,6 +69,10 @@ from src.config import get_mode
 logger = logging.getLogger("zeus.post_trade_capital")
 
 
+class CollateralSnapshotDegraded(RuntimeError):
+    """The heartbeat completed mechanically but did not obtain authoritative collateral truth."""
+
+
 class _PusdOnlyCollateralAdapter:
     """Expose only pUSD collateral facts to the sidecar heartbeat.
 
@@ -94,15 +98,17 @@ class _PusdOnlyCollateralAdapter:
 def _post_trade_collateral_timeout_seconds() -> float:
     raw = os.environ.get("ZEUS_POST_TRADE_COLLATERAL_TIMEOUT_SECONDS")
     if raw in (None, ""):
-        return 2.0
+        # This job creates a cold authenticated CLOB client, so its connect budget must cover
+        # DNS/TLS setup. The independent 25s absolute deadline still bounds update+read+fallback.
+        return 6.0
     try:
         value = float(raw)
     except (TypeError, ValueError):
-        logger.warning("Invalid ZEUS_POST_TRADE_COLLATERAL_TIMEOUT_SECONDS=%r; using 2.0", raw)
-        return 2.0
+        logger.warning("Invalid ZEUS_POST_TRADE_COLLATERAL_TIMEOUT_SECONDS=%r; using 6.0", raw)
+        return 6.0
     if value <= 0:
-        logger.warning("Invalid ZEUS_POST_TRADE_COLLATERAL_TIMEOUT_SECONDS=%r; using 2.0", raw)
-        return 2.0
+        logger.warning("Invalid ZEUS_POST_TRADE_COLLATERAL_TIMEOUT_SECONDS=%r; using 6.0", raw)
+        return 6.0
     return value
 
 
@@ -168,6 +174,13 @@ def collateral_snapshot_refresh_cycle() -> None:
         snapshot.available_pusd_micro,
         len(snapshot.ctf_token_balances),
     )
+    if snapshot.authority_tier == "DEGRADED":
+        # CollateralLedger persists DEGRADED so consumers get typed fail-closed context, but a
+        # scheduler cycle that obtained no balance authority is a BUSINESS failure. Raising here
+        # makes the daemon wrapper publish FAILED instead of the previous false-green OK status.
+        raise CollateralSnapshotDegraded(
+            "collateral snapshot refresh returned DEGRADED authority; balance/allowance unknown"
+        )
 
 
 # ---------------------------------------------------------------------------

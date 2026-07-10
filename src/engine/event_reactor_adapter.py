@@ -182,6 +182,7 @@ from src.decision.family_decision_engine import (
 )
 from src.decision_kernel import claims
 from src.decision_kernel.canonicalization import (
+    qkernel_declares_current_state,
     qkernel_current_state_identity_hash,
     stable_hash,
 )
@@ -2581,6 +2582,10 @@ def _valid_qkernel_execution_economics_payload(
         return None
     if str(cert.get("source") or "") != "qkernel_spine":
         return None
+    if qkernel_declares_current_state(cert) and not _qkernel_current_state_solve_economics(
+        cert
+    ):
+        return None
     if not str(cert.get("candidate_id") or "").strip():
         return None
     route_id = str(cert.get("route_id") or "").strip()
@@ -2773,6 +2778,10 @@ def _qkernel_selection_economics_rejection_reason(
         return "QKERNEL_EXECUTION_ECONOMICS_MISSING_FIELDS:fields=" + ",".join(missing)
     if str(cert.get("source") or "") != "qkernel_spine":
         return "QKERNEL_EXECUTION_ECONOMICS_INVALID_SOURCE"
+    if qkernel_declares_current_state(cert) and not _qkernel_current_state_solve_economics(
+        cert
+    ):
+        return "QKERNEL_CURRENT_STATE_IDENTITY_INVALID"
     if not str(cert.get("candidate_id") or "").strip():
         return "QKERNEL_EXECUTION_ECONOMICS_MISSING_CANDIDATE_ID"
     route_id = str(cert.get("route_id") or "").strip()
@@ -3820,7 +3829,54 @@ def event_bound_live_adapter_from_trade_conn(
         trade_conn=trade_conn,
     )
 
-    def _submit_inner(event: OpportunityEvent, decision_time: datetime) -> EventSubmissionReceipt:
+    def _prepare_global_event(
+        event: OpportunityEvent, decision_time: datetime
+    ) -> EventSubmissionReceipt:
+        """Prepare current family q without reading or writing executable prices."""
+
+        from src.contracts.executable_market_snapshot import FRESHNESS_WINDOW_DEFAULT
+
+        try:
+            prepared = _prepare_current_global_probability_family(
+                event,
+                forecast_conn=forecast_conn,
+                topology_conn=topology_conn,
+                observation_conn=calibration_conn,
+                decision_time=decision_time,
+                max_age=FRESHNESS_WINDOW_DEFAULT,
+            )
+        except Exception as exc:  # noqa: BLE001 - typed fail-closed batch receipt
+            return EventSubmissionReceipt(
+                False,
+                event.event_id,
+                event.causal_snapshot_id,
+                reason=(
+                    "GLOBAL_CURRENT_PROBABILITY_PREPARE_FAILED:"
+                    f"{type(exc).__name__}:{exc}"
+                ),
+                proof_accepted=False,
+            )
+        payload = _payload(event)
+        return EventSubmissionReceipt(
+            False,
+            event.event_id,
+            event.causal_snapshot_id,
+            city=str(payload.get("city") or "") or None,
+            target_date=str(payload.get("target_date") or "") or None,
+            metric=str(payload.get("metric") or "") or None,
+            family_id=prepared.probability_witness.family_key,
+            side_effect_status="NO_SUBMIT",
+            reason="GLOBAL_CURRENT_PROBABILITY_PREPARED",
+            proof_accepted=True,
+            prepared_global_family=prepared,
+        )
+
+    def _submit_inner(
+        event: OpportunityEvent,
+        decision_time: datetime,
+        *,
+        global_actuation: "Any | None" = None,
+    ) -> EventSubmissionReceipt:
         # FINAL ADAPTER BOUNDARY SCOPE GATE. Production supports one scope:
         # forecast_plus_day0. Both forecast and Day0 events continue into the
         # same candidate proof/submit path; unknown event types are rejected.
@@ -3918,6 +3974,7 @@ def event_bound_live_adapter_from_trade_conn(
             replacement_forecast_promotion_evidence=replacement_forecast_promotion_evidence,
             replacement_forecast_capital_objective_evidence=replacement_forecast_capital_objective_evidence,
             family_snapshot_refresher=family_snapshot_refresher,
+            global_actuation=global_actuation,
         )
         # D2 SHIFT-BIN CLOSE-BEFORE-OPEN — old-leg exit submission (2026-06-22 consult
         # §"Shift-bin sequencing" step 3). A SHIFT_BIN EXIT_OLD_LEG receipt is a TYPED
@@ -4461,7 +4518,179 @@ def event_bound_live_adapter_from_trade_conn(
             settlement_coverage_status=no_submit_receipt.settlement_coverage_status,
             posterior_id=no_submit_receipt.posterior_id,
             probability_authority=no_submit_receipt.probability_authority,
+            global_actuation=no_submit_receipt.global_actuation,
         )
+
+    def _process_global_batch(events, decision_time):
+        from src.engine.global_batch_runtime import process_current_global_batch
+        from src.solve.solver import CurrentFamilyProbabilityAuthority
+
+        if forecast_conn is None or topology_conn is None or calibration_conn is None:
+            from src.events.reactor import GlobalBatchSubmitResult
+
+            return GlobalBatchSubmitResult(
+                receipts={
+                    event.event_id: _stamp_live_adapter_lane(
+                        EventSubmissionReceipt(
+                            False,
+                            event.event_id,
+                            event.causal_snapshot_id,
+                            reason="GLOBAL_AUCTION_AUTHORITY_CONNECTION_MISSING",
+                            proof_accepted=False,
+                        ),
+                        real_order_submit_enabled=real_order_submit_enabled,
+                    )
+                    for event in events
+                },
+                winner_event_id=None,
+                venue_submit_count=0,
+            )
+
+        def _actuate(event, actuation, at):
+            return _stamp_live_adapter_lane(
+                _submit_inner(event, at, global_actuation=actuation),
+                real_order_submit_enabled=real_order_submit_enabled,
+            )
+
+        def _current_probability(event, witness, at):
+            captured_at = getattr(witness, "captured_at_utc", None)
+            max_age = getattr(witness, "max_age", None)
+            if (
+                not isinstance(captured_at, datetime)
+                or captured_at.tzinfo is None
+                or not isinstance(max_age, timedelta)
+                or max_age <= timedelta(0)
+            ):
+                return None
+            age = at.astimezone(UTC) - captured_at.astimezone(UTC)
+            if age.total_seconds() < 0.0 or age > max_age:
+                return None
+            if event.event_type != "DAY0_EXTREME_UPDATED":
+                return current_global_probability_authority(
+                    forecast_conn,
+                    event,
+                    witness,
+                    decision_time=at,
+                )
+
+            # Day0 q is conditioned on the current observed extreme and current
+            # remaining-day model vectors.  The forecast-only resolver cannot prove
+            # that state. Rebuild the same family read-only at JIT and compare every
+            # probability identity; the decision receipt hash is intentionally not
+            # compared because current books are a separate execution authority.
+            refreshed = _prepare_global_event(event, at).prepared_global_family
+            current = getattr(refreshed, "probability_witness", None)
+            # Gamma completes NO token identities after probability preparation.
+            # That venue binding is revalidated by the current book epoch; requiring
+            # the probability-only rebuild to reproduce it would make every Day0
+            # family look superseded despite byte-identical q/settlement truth.
+            if current is None or any(
+                getattr(current, field, None) != getattr(witness, field, None)
+                for field in _GLOBAL_PROBABILITY_CONTENT_FIELDS
+            ):
+                return None
+            return CurrentFamilyProbabilityAuthority.from_witness(witness)
+
+        def _current_book_epoch(probabilities, _at):
+            from src.contracts.executable_market_snapshot import (
+                FRESHNESS_WINDOW_DEFAULT,
+            )
+            from src.data.polymarket_client import PolymarketClient
+            from src.engine.global_auction_universe import (
+                bind_current_global_probability_tokens,
+                capture_current_global_book_epoch,
+            )
+            from src.data.market_scanner import _gamma_get
+
+            timeout = max(
+                1.0,
+                float(os.environ.get("ZEUS_GLOBAL_AUCTION_BOOK_TIMEOUT_SECONDS", "8.0")),
+            )
+            batch_size = max(
+                1,
+                min(
+                    500,
+                    int(os.environ.get("ZEUS_GLOBAL_AUCTION_BOOK_BATCH_SIZE", "500")),
+                ),
+            )
+            gamma_timeout = max(
+                1.0,
+                float(os.environ.get("ZEUS_GLOBAL_AUCTION_GAMMA_TIMEOUT_SECONDS", "6.0")),
+            )
+
+            def _gamma_event(slug):
+                response = _gamma_get(
+                    "/events",
+                    params={"slug": slug},
+                    timeout=gamma_timeout,
+                )
+                if response.status_code != 200:
+                    return None
+                payload = response.json()
+                if isinstance(payload, list):
+                    return next(
+                        (event for event in payload if isinstance(event, Mapping)),
+                        None,
+                    )
+                return payload if isinstance(payload, Mapping) else None
+
+            gamma_metadata = {}
+            bound_probabilities = bind_current_global_probability_tokens(
+                forecast_conn,
+                probability_witnesses=probabilities,
+                get_gamma_event=_gamma_event,
+                max_workers=8,
+                metadata_sink=gamma_metadata,
+            )
+            with PolymarketClient(public_http_timeout=timeout) as clob:
+                epoch = capture_current_global_book_epoch(
+                    trade_conn,
+                    probability_witnesses=bound_probabilities,
+                    get_books=lambda tokens: clob.get_orderbook_snapshots(
+                        tokens,
+                        timeout=timeout,
+                    ),
+                    clock=lambda: datetime.now(UTC),
+                    max_age=FRESHNESS_WINDOW_DEFAULT,
+                    batch_size=batch_size,
+                    metadata_overrides=gamma_metadata,
+                )
+            return bound_probabilities, epoch
+
+        try:
+            return process_current_global_batch(
+                events,
+                decision_time=decision_time,
+                # The live constructor passes the world DB (with forecasts attached)
+                # as calibration_conn and a forecasts-only connection as topology_conn.
+                # Day0 scope lives in the world DB; using topology_conn silently erased
+                # every current Day0 family from the global auction universe.
+                world_conn=calibration_conn,
+                forecast_conn=forecast_conn,
+                trade_conn=trade_conn,
+                payload_reader=_payload,
+                prepare_event=_prepare_global_event,
+                actuate_winner=_actuate,
+                stamp_receipt=lambda receipt: _stamp_live_adapter_lane(
+                    receipt,
+                    real_order_submit_enabled=real_order_submit_enabled,
+                ),
+                venue_submit_count=lambda: _live_submit_count[0],
+                current_probability=_current_probability,
+                current_execution=lambda candidate, at: (
+                    current_global_execution_authority(
+                        trade_conn,
+                        candidate,
+                        decision_time=at,
+                    )
+                ),
+                current_time_provider=lambda: datetime.now(UTC),
+                portfolio_state_provider=portfolio_state_provider,
+                current_book_epoch_provider=_current_book_epoch,
+            )
+        finally:
+            with contextlib.suppress(Exception):
+                trade_conn.commit()
 
     def _submit(event: OpportunityEvent, decision_time: datetime) -> EventSubmissionReceipt:
         # CATEGORY ANTIBODY (2026-06-08, "database is locked" HOLDER-side kill):
@@ -4514,6 +4743,8 @@ def event_bound_live_adapter_from_trade_conn(
     _submit._live_submit_count = _live_submit_count  # type: ignore[attr-defined]
     # FIX-4 venue_acks: expose the ACK counter alongside submit counter.
     _submit._live_ack_count = _live_ack_count  # type: ignore[attr-defined]
+    _submit.prepare_global_event = _prepare_global_event  # type: ignore[attr-defined]
+    _submit.process_global_batch = _process_global_batch  # type: ignore[attr-defined]
     return _submit
 
 
@@ -5304,6 +5535,170 @@ def _record_qkernel_selection_family_facts(
     }
 
 
+def _global_actuation_selected_proof(
+    *,
+    global_actuation: object,
+    prepared_global_family: object,
+    family: object,
+    event: OpportunityEvent,
+    proofs: tuple["_CandidateProof", ...],
+    economics_by_bin_side: Mapping[tuple[str, str], Mapping[str, Any]],
+    forecast_conn: sqlite3.Connection,
+    trade_conn: sqlite3.Connection,
+    decision_time: datetime,
+) -> "_CandidateProof":
+    """Bind the exact global winner back to one current family proof."""
+
+    from src.solve.solver import executable_curve_identity, global_candidate_from_native
+
+    decision = getattr(global_actuation, "decision", None)
+    candidate = getattr(decision, "candidate", None)
+    prepared_witness = getattr(prepared_global_family, "probability_witness", None)
+    witness = getattr(global_actuation, "probability_witness", None)
+    if candidate is None or witness is None or prepared_witness is None:
+        raise ValueError("GLOBAL_ACTUATION_AUTHORITY_MISSING")
+    probability_fields = (
+        "family_key",
+        "q_version",
+        "resolution_identity",
+        "topology_identity",
+        "posterior_identity_hash",
+        "source_truth_identity",
+        "authority_certificate_hash",
+        "band_alpha",
+        "band_basis",
+        "sample_matrix_identity",
+    )
+    if any(
+        getattr(prepared_witness, field, None) != getattr(witness, field, None)
+        for field in probability_fields
+    ):
+        raise ValueError("GLOBAL_ACTUATION_PROBABILITY_REBIND_MISMATCH")
+    if (
+        str(getattr(family, "family_id", "") or "") != candidate.family_key
+        or str(getattr(witness, "witness_identity", "") or "")
+        != candidate.probability_witness_identity
+    ):
+        raise ValueError("GLOBAL_ACTUATION_FAMILY_PROBABILITY_MISMATCH")
+
+    annotated = _proofs_with_qkernel_candidate_economics(
+        proofs=proofs,
+        qkernel_economics_by_bin_side=economics_by_bin_side,
+        strategy_policy_event_type=event.event_type,
+    )
+    direction = "buy_yes" if candidate.side == "YES" else "buy_no"
+    matches = tuple(
+        proof
+        for proof in annotated
+        if str(getattr(getattr(proof, "candidate", None), "condition_id", "") or "")
+        == candidate.condition_id
+        and str(getattr(proof, "token_id", "") or "") == candidate.token_id
+        and str(getattr(proof, "direction", "") or "") == direction
+    )
+    if len(matches) != 1:
+        raise ValueError("GLOBAL_ACTUATION_PROOF_BINDING_MISSING")
+    proof = matches[0]
+    if not proof.passed_prefilter or proof.missing_reason is not None:
+        raise ValueError(
+            "GLOBAL_ACTUATION_PROOF_NO_LONGER_ELIGIBLE:"
+            f"{proof.missing_reason or 'prefilter_failed'}"
+        )
+    native = _full_depth_native_side_candidate_from_proof(proof)
+    rebound = global_candidate_from_native(
+        native,
+        probability_witness=witness,
+        ledger_snapshot_id=candidate.ledger_snapshot_id,
+        book_captured_at_utc=candidate.book_captured_at_utc,
+    )
+    if any(
+        getattr(rebound, field) != getattr(candidate, field)
+        for field in (
+            "family_key",
+            "bin_id",
+            "condition_id",
+            "side",
+            "token_id",
+            "probability_witness_identity",
+            "resolution_identity",
+        )
+    ):
+        raise ValueError("GLOBAL_ACTUATION_EXECUTION_BINDING_SUPERSEDED")
+    # The global batch epoch is in-memory while the forced JIT winner refresh is
+    # persisted, so snapshot ids and TTL carriers differ by construction. Align
+    # only those carriers and require every economic field — raw book hash, full
+    # depth, fee, tick, min order, token and side — to remain byte-identical.
+    aligned_curve = dataclass_replace(
+        candidate.executable_cost_curve,
+        snapshot_id=rebound.executable_cost_curve.snapshot_id,
+        quote_ttl=rebound.executable_cost_curve.quote_ttl,
+    )
+    if executable_curve_identity(aligned_curve) != rebound.execution_curve_identity:
+        raise ValueError("GLOBAL_ACTUATION_EXECUTION_BINDING_SUPERSEDED")
+    current_probability = current_global_probability_authority(
+        forecast_conn,
+        event,
+        witness,
+        decision_time=decision_time,
+    )
+    current_execution = current_global_execution_authority(
+        trade_conn,
+        rebound,
+        decision_time=decision_time,
+        allow_exact_post_decision_snapshot=True,
+    )
+    if current_probability is None:
+        raise ValueError("GLOBAL_ACTUATION_PROBABILITY_SUPERSEDED")
+    if (
+        current_execution is None
+        or current_execution.book_snapshot_id != rebound.book_snapshot_id
+        or current_execution.execution_curve_identity != rebound.execution_curve_identity
+    ):
+        raise ValueError("GLOBAL_ACTUATION_BOOK_SUPERSEDED")
+
+    cert = dict(proof.qkernel_execution_economics or {})
+    cert.update(
+        {
+            "global_actuation_identity": str(
+                getattr(global_actuation, "actuation_identity", "") or ""
+            ),
+            "global_universe_witness_identity": str(
+                getattr(global_actuation, "universe_witness_identity", "") or ""
+            ),
+            "global_wealth_witness_identity": str(
+                getattr(global_actuation, "wealth_witness_identity", "") or ""
+            ),
+            "global_candidate_id": candidate.candidate_id,
+            "global_book_hash": candidate.executable_cost_curve.book_hash,
+            "global_target_shares": str(decision.shares),
+            "global_expected_cost_usd": str(decision.cost_usd),
+            "global_limit_price": str(decision.limit_price),
+            "global_expected_fill_price_before_fee": str(
+                decision.expected_fill_price_before_fee
+            ),
+            "global_max_spend_usd": str(decision.max_spend_usd),
+            "global_robust_delta_log_wealth": decision.robust_delta_log_wealth,
+            "global_robust_ev_usd": decision.robust_ev_usd,
+            "global_capital_efficiency": decision.capital_efficiency,
+        }
+    )
+    if not all(
+        str(cert.get(field) or "").strip()
+        for field in (
+            "global_actuation_identity",
+            "global_universe_witness_identity",
+            "global_wealth_witness_identity",
+            "global_book_hash",
+        )
+    ):
+        raise ValueError("GLOBAL_ACTUATION_IDENTITY_INCOMPLETE")
+    return dataclass_replace(
+        proof,
+        qkernel_execution_economics=cert,
+        selection_authority_applied="qkernel_spine",
+        execution_mode_intent="TAKER",
+    )
+
+
 def _build_event_bound_no_submit_receipt_core(
     event: OpportunityEvent,
     *,
@@ -5323,6 +5718,10 @@ def _build_event_bound_no_submit_receipt_core(
     replacement_forecast_capital_objective_evidence: ReplacementForecastCapitalObjectiveEvidence | None = None,
     provenance_capture: dict[str, Any] | None = None,
     family_snapshot_refresher: "FamilySnapshotRefresher | None" = None,
+    prepare_global_auction: bool = False,
+    global_probability_max_age: timedelta | None = None,
+    global_actuation: "Any | None" = None,
+    reserve_on_pass: bool = True,
 ) -> EventSubmissionReceipt:
     """Produce a typed no-submit EDLI proof without running the cycle runner.
 
@@ -5343,6 +5742,28 @@ def _build_event_bound_no_submit_receipt_core(
         provenance_capture = {}
     decision_time = decision_time.astimezone(UTC)
     payload = _payload(event)
+    if global_actuation is not None:
+        if str(getattr(global_actuation, "winner_event_id", "") or "") != event.event_id:
+            return EventSubmissionReceipt(
+                False,
+                event.event_id,
+                event.causal_snapshot_id,
+                reason="GLOBAL_ACTUATION_EVENT_IDENTITY_MISMATCH",
+            )
+        global_decision = getattr(global_actuation, "decision", None)
+        global_candidate = getattr(global_decision, "candidate", None)
+        if global_candidate is None:
+            return EventSubmissionReceipt(
+                False,
+                event.event_id,
+                event.causal_snapshot_id,
+                reason="GLOBAL_ACTUATION_CANDIDATE_MISSING",
+            )
+        payload["condition_id"] = str(global_candidate.condition_id)
+        payload["token_id"] = str(global_candidate.token_id)
+        prepare_global_auction = True
+    if prepare_global_auction:
+        payload["_edli_global_auction_prepare"] = True
     allow_same_family_monitor_owned = _event_allows_same_family_monitor_owned(
         event.event_type
     )
@@ -5406,6 +5827,15 @@ def _build_event_bound_no_submit_receipt_core(
     if row is None:
         return EventSubmissionReceipt(False, event.event_id, event.causal_snapshot_id, reason="EVENT_BOUND_SELECTED_SNAPSHOT_MISSING")
     selected_stale_reason = _snapshot_price_stale_reason(row, decision_time=decision_time)
+    if (
+        selected_stale_reason is not None
+        and prepare_global_auction
+        and global_actuation is None
+    ):
+        # Global preparation is probability-only. Its current price authority is
+        # the complete batch-book epoch captured after every family q is built;
+        # an old persisted price must not prevent construction of that q witness.
+        selected_stale_reason = None
     # DECISION-TRIGGERED TARGETED REFRESH (zero-order wall fix 2026-06-11).
     # The warm job's per-family cadence (~5.4min) is far slower than this 30s price-
     # freshness window, so the elected row is price-stale ~91% of wall-clock time and
@@ -5430,7 +5860,18 @@ def _build_event_bound_no_submit_receipt_core(
     # family_condition_ids and is re-read after refresh; sibling catch-up belongs to
     # the warm/confirmation producer lanes so one stale selected row cannot make the
     # live reactor wait on every sibling's CLOB request.
-    if selected_stale_reason is not None and family_snapshot_refresher is not None:
+    if global_actuation is not None and family_snapshot_refresher is None:
+        return EventSubmissionReceipt(
+            False,
+            event.event_id,
+            event.causal_snapshot_id,
+            reason="GLOBAL_JIT_SNAPSHOT_REFRESH_UNAVAILABLE",
+        )
+    global_jit_rebound = False
+    if (
+        (selected_stale_reason is not None or global_actuation is not None)
+        and family_snapshot_refresher is not None
+    ):
         refreshed = False
         try:
             selected_condition_id = str(row.get("condition_id") or "")
@@ -5507,9 +5948,19 @@ def _build_event_bound_no_submit_receipt_core(
                 refreshed_row = _selected_snapshot_row_for_event(family_rows, payload)
                 if refreshed_row is not None:
                     row = refreshed_row
+                    global_jit_rebound = True
                     if provenance_capture is not None:
                         provenance_capture["snapshot_row"] = row
                     selected_stale_reason = _snapshot_price_stale_reason(row, decision_time=decision_time)
+        if global_actuation is not None and (
+            not refreshed or not global_jit_rebound
+        ):
+            return EventSubmissionReceipt(
+                False,
+                event.event_id,
+                event.causal_snapshot_id,
+                reason="GLOBAL_JIT_SNAPSHOT_REFRESH_FAILED",
+            )
     if selected_stale_reason is not None:
         return EventSubmissionReceipt(
             False,
@@ -5646,6 +6097,8 @@ def _build_event_bound_no_submit_receipt_core(
         _FORECAST_DECISION_EVENT_TYPES | _DAY0_LANE_EVENT_TYPES
     )
     _spine_candidate_economics_by_key: dict[tuple[str, str], dict[str, Any]] = {}
+    _prepared_global_family = None
+    _global_prepare_reason = None
     # Fix #4 generalized: pass REAL current per-bin family exposure into the
     # ΔU SELECTION before the instrument is chosen. A flat/empty baseline can
     # pick a leg the account is already heavy in; re-sizing after selection
@@ -5689,6 +6142,7 @@ def _build_event_bound_no_submit_receipt_core(
             _actionability_exclusions: list[str] = []
             _spine_result = None
             _spine_fact_decision = None
+            _global_prepare_captured = False
             while True:
                 _spine_result = decide_family_via_spine(
                     family=family,
@@ -5697,6 +6151,13 @@ def _build_event_bound_no_submit_receipt_core(
                     selection_proofs=_active_spine_entry_proofs,
                     decision_time=decision_time,
                     native_side_candidate_from_proof=_native_side_candidate_from_proof,
+                    global_native_side_candidate_from_proof=(
+                        _full_depth_native_side_candidate_from_proof
+                        if prepare_global_auction
+                        else None
+                    ),
+                    require_global_probability_witness=prepare_global_auction,
+                    global_probability_max_age=global_probability_max_age,
                     candidate_bin_id=_candidate_bin_id,
                     payoff_matrix_over_bins=utility_ranker.FamilyPayoffMatrix.over_bins,
                     exposure_builder=_robust_marginal_utility_exposure,
@@ -5710,6 +6171,13 @@ def _build_event_bound_no_submit_receipt_core(
                 _spine_candidate_economics_by_key = qkernel_candidate_economics_by_bin_side(
                     _spine_result.decision
                 )
+                if prepare_global_auction and not _global_prepare_captured:
+                    # The first pass contains the full eligibility-filtered
+                    # native set. Legacy local-winner actionability retries must
+                    # not shrink or overwrite the cross-family auction set.
+                    _prepared_global_family = _spine_result.global_family
+                    _global_prepare_reason = _spine_result.global_prepare_reason
+                    _global_prepare_captured = True
                 _spine_candidate_economics_by_key = (
                     _qkernel_economics_with_near_day0_consistency(
                         _spine_candidate_economics_by_key,
@@ -5787,15 +6255,27 @@ def _build_event_bound_no_submit_receipt_core(
                     )
                     break
                 _active_spine_entry_proofs = _next_spine_entry_proofs
-            _selection_fact_result = _record_qkernel_selection_family_facts(
-                trade_conn,
-                family=family,
-                decision=_spine_fact_decision,
-                event=event,
-                decision_time=decision_time,
-                decision_snapshot_id=event.causal_snapshot_id,
-            )
-            if proof is not None and _selection_fact_result.get("status") != "written":
+            if prepare_global_auction:
+                provenance_capture["prepared_global_family"] = _prepared_global_family
+                if _global_prepare_reason is not None:
+                    provenance_capture["global_prepare_reason"] = _global_prepare_reason
+            if prepare_global_auction:
+                _selection_fact_result = {"status": "prepared_read_only"}
+            elif global_actuation is not None:
+                _selection_fact_result = {"status": "written"}
+            else:
+                _selection_fact_result = _record_qkernel_selection_family_facts(
+                    trade_conn,
+                    family=family,
+                    decision=_spine_fact_decision,
+                    event=event,
+                    decision_time=decision_time,
+                    decision_snapshot_id=event.causal_snapshot_id,
+                )
+            if proof is not None and _selection_fact_result.get("status") not in {
+                "written",
+                "prepared_read_only",
+            }:
                 proof = None
                 _spine_candidate_economics_by_key = {}
                 _spine_no_trade_reason = (
@@ -5814,6 +6294,58 @@ def _build_event_bound_no_submit_receipt_core(
             allow_same_family_monitor_owned=_selection_scope_allows_same_family_monitor_owned,
             extra_exposure_by_bin_id=(_selection_exposure or None),
         )
+    if global_actuation is not None:
+        if any(
+            abs(float(value or 0.0)) > 1e-12
+            for value in (_selection_exposure or {}).values()
+        ):
+            return EventSubmissionReceipt(
+                False,
+                event.event_id,
+                event.causal_snapshot_id,
+                reason="GLOBAL_EXISTING_FAMILY_EXPOSURE_UNMODELED",
+                city=family.city,
+                target_date=family.target_date,
+                metric=family.metric,
+                family_id=family.family_id,
+            )
+        if _prepared_global_family is None:
+            return EventSubmissionReceipt(
+                False,
+                event.event_id,
+                event.causal_snapshot_id,
+                reason=(
+                    "GLOBAL_ACTUATION_PREPARE_FAILED:"
+                    f"{_global_prepare_reason or 'prepared_family_missing'}"
+                ),
+                city=family.city,
+                target_date=family.target_date,
+                metric=family.metric,
+                family_id=family.family_id,
+            )
+        try:
+            proof = _global_actuation_selected_proof(
+                global_actuation=global_actuation,
+                prepared_global_family=_prepared_global_family,
+                family=family,
+                event=event,
+                proofs=proofs,
+                economics_by_bin_side=_spine_candidate_economics_by_key,
+                forecast_conn=source_conn,
+                trade_conn=trade_conn,
+                decision_time=decision_time,
+            )
+        except ValueError as exc:
+            return EventSubmissionReceipt(
+                False,
+                event.event_id,
+                event.causal_snapshot_id,
+                reason=str(exc),
+                city=family.city,
+                target_date=family.target_date,
+                metric=family.metric,
+                family_id=family.family_id,
+            )
     opportunity_book = _opportunity_book_from_proofs(
         event_id=event.event_id,
         family_id=family.family_id,
@@ -6535,31 +7067,56 @@ def _build_event_bound_no_submit_receipt_core(
         # (full fee + ceiling).  _order_will_rest_at_admitted_price is kept for
         # backward-compat but is no longer called on the money path.
         _order_rests_at_admitted_price = _proof_order_rests_at_admitted_price(proof)
-        _recapture, _robust_stake_usd, _chosen_stake_price = (
-            _evaluate_submit_recapture_for_selected(
-                family_key=str(family.family_id or ""),
-                selected_proof=proof,
-                all_proofs=proofs,
-                extra_exposure_by_bin_id=_recapture_exposure,
-                bankroll_usd=float(bankroll_usd),
-                kelly_multiplier=_fractional_kelly_mult,
-                order_rests_at_admitted_price=_order_rests_at_admitted_price,
-                # On this synchronous path the forecast snapshot was validated by the
-                # decision engine and (if present) the replacement-forecast hook, both
-                # of which already returned a no-submit receipt on any flip/block
-                # above — so the proof carried here is forecast-current at recapture.
-                forecast_still_current=True,
-                # S6 scope-set invariant: the recapture family re-rank must scope the
-                # candidate set EXACTLY as selection did (`_selected_candidate_proof` was
-                # called with this same conn at selection) — else a locked / below-min-tick
-                # leg scoped OUT of selection falsely reverses the chosen leg.
-                locked_opportunity_conn=locked_opportunity_conn,
-                held_position_conn=trade_conn,
-                allow_same_family_monitor_owned=_selection_scope_allows_same_family_monitor_owned,
-                stake_floor_out=_stake_floor_provenance,
-                free_cash_usd=free_cash_usd,
+        if global_actuation is not None:
+            global_decision = global_actuation.decision
+            if (
+                free_cash_usd is None
+                or float(global_decision.max_spend_usd) > float(free_cash_usd) + 1e-9
+            ):
+                raise ValueError("GLOBAL_ACTUATION_FREE_CASH_SUPERSEDED")
+            _recapture = SubmitRecaptureDecision(
+                state=CandidateLifecycleState.READY_TO_SUBMIT,
+                may_submit=True,
+                recaptured_all_in_cost=float(global_decision.cost_usd),
+                recaptured_edge_lcb=float(global_decision.robust_ev_usd),
+                detail="global current-universe winner identity revalidated",
             )
-        )
+            _robust_stake_usd = float(global_decision.max_spend_usd)
+            _chosen_stake_price = ExecutionPrice(
+                value=float(global_decision.cost_usd / global_decision.shares),
+                price_type="fee_adjusted",
+                fee_deducted=True,
+                currency="probability_units",
+            )
+            _stake_floor_provenance["stake_authority"] = (
+                "GLOBAL_SINGLE_ORDER_MAX_SPEND"
+            )
+        else:
+            _recapture, _robust_stake_usd, _chosen_stake_price = (
+                _evaluate_submit_recapture_for_selected(
+                    family_key=str(family.family_id or ""),
+                    selected_proof=proof,
+                    all_proofs=proofs,
+                    extra_exposure_by_bin_id=_recapture_exposure,
+                    bankroll_usd=float(bankroll_usd),
+                    kelly_multiplier=_fractional_kelly_mult,
+                    order_rests_at_admitted_price=_order_rests_at_admitted_price,
+                    # On this synchronous path the forecast snapshot was validated by the
+                    # decision engine and (if present) the replacement-forecast hook, both
+                    # of which already returned a no-submit receipt on any flip/block
+                    # above — so the proof carried here is forecast-current at recapture.
+                    forecast_still_current=True,
+                    # S6 scope-set invariant: the recapture family re-rank must scope the
+                    # candidate set EXACTLY as selection did (`_selected_candidate_proof` was
+                    # called with this same conn at selection) — else a locked / below-min-tick
+                    # leg scoped OUT of selection falsely reverses the chosen leg.
+                    locked_opportunity_conn=locked_opportunity_conn,
+                    held_position_conn=trade_conn,
+                    allow_same_family_monitor_owned=_selection_scope_allows_same_family_monitor_owned,
+                    stake_floor_out=_stake_floor_provenance,
+                    free_cash_usd=free_cash_usd,
+                )
+            )
         # D1/D2 SAME-FAMILY MANAGEMENT (2026-06-30 live fix): this must run for any
         # submit-cleared family selection, not only events already labelled as
         # ``allow_same_family_monitor_owned``. A forecast event that selects a sibling
@@ -7334,7 +7891,7 @@ def _build_event_bound_no_submit_receipt_core(
     # inflates corr_committed_usd / raw_committed_usd for later same-cycle
     # candidates. (Plain lists supplied by legacy/test callers keep the old
     # append-only behavior via the shim below.)
-    if portfolio_reservation is not None:
+    if portfolio_reservation is not None and reserve_on_pass:
         _reserve = getattr(portfolio_reservation, "reserve", None)
         if callable(_reserve):
             _reserve(event.event_id, family.city, float(kelly.size_usd))
@@ -7766,6 +8323,10 @@ def build_event_bound_no_submit_receipt(
     replacement_forecast_promotion_evidence: ReplacementForecastPromotionEvidence | None = None,
     replacement_forecast_capital_objective_evidence: ReplacementForecastCapitalObjectiveEvidence | None = None,
     family_snapshot_refresher: "FamilySnapshotRefresher | None" = None,
+    prepare_global_auction: bool = False,
+    global_probability_max_age: timedelta | None = None,
+    global_actuation: "Any | None" = None,
+    reserve_on_pass: bool = True,
 ) -> EventSubmissionReceipt:
     """DecisionProvenanceEnvelope wrapper (operator law 2026-06-11) around the receipt core.
 
@@ -7800,6 +8361,10 @@ def build_event_bound_no_submit_receipt(
         replacement_forecast_capital_objective_evidence=replacement_forecast_capital_objective_evidence,
         provenance_capture=provenance_capture,
         family_snapshot_refresher=family_snapshot_refresher,
+        prepare_global_auction=prepare_global_auction,
+        global_probability_max_age=global_probability_max_age,
+        global_actuation=global_actuation,
+        reserve_on_pass=reserve_on_pass,
     )
     # P1 BELIEF CACHE (continuous re-decision resurrection 2026-06-12): attach the family belief
     # captured deep in the proof chain (provenance_capture["edli_belief"]) onto the receipt so the
@@ -7809,6 +8374,14 @@ def build_event_bound_no_submit_receipt(
     _belief = provenance_capture.get("edli_belief")
     if _belief is not None and receipt.belief_payload is None:
         receipt = dataclass_replace(receipt, belief_payload=_belief)
+    _prepared_global_family = provenance_capture.get("prepared_global_family")
+    if _prepared_global_family is not None and receipt.prepared_global_family is None:
+        receipt = dataclass_replace(
+            receipt,
+            prepared_global_family=_prepared_global_family,
+        )
+    if global_actuation is not None and receipt.global_actuation is None:
+        receipt = dataclass_replace(receipt, global_actuation=global_actuation)
     _day0_probability = provenance_capture.get("day0_probability_authority")
     if _day0_probability is not None and receipt.day0_probability_authority is None:
         receipt = dataclass_replace(
@@ -8912,11 +9485,16 @@ def _day0_bin_stress_verdict(
     actionable_payload: Mapping[str, object],
     event_payload: Mapping[str, object],
 ) -> tuple[float, bool]:
-    """Return distance-to-death in integer quanta and one-bin-stress survival."""
+    """Return side-specific distance-to-loss and one-bin-stress survival.
+
+    The physical stress is shared: a HIGH may rise one integer quantum and a LOW may
+    fall one.  YES pays on membership in the settlement bin; NO pays on its complement.
+    Applying the stress only to YES made every Day0 NO look unconditionally robust.
+    """
 
     direction = str(actionable_payload.get("direction") or "").strip().lower()
-    if direction != "buy_yes":
-        return float("inf"), True
+    if direction not in {"buy_yes", "buy_no"}:
+        return 0.0, False
     observed_raw = event_payload.get("rounded_value")
     if observed_raw is None:
         observed_raw = actionable_payload.get("rounded_value")
@@ -8932,23 +9510,38 @@ def _day0_bin_stress_verdict(
         low, high = _parse_temp_range(bin_label)
     except Exception:  # noqa: BLE001
         return 0.0, False
+    if low is None and high is None:
+        return 0.0, False
     metric = str(
         actionable_payload.get("metric")
         or actionable_payload.get("temperature_metric")
         or event_payload.get("metric")
         or ""
     ).strip().lower()
-    if metric == "high":
-        if high is None:
+    if metric not in {"high", "low"}:
+        return 0.0, False
+    stressed = float(observed) + (1.0 if metric == "high" else -1.0)
+    yes_survives = bool(
+        (low is None or stressed >= float(low) - 1e-9)
+        and (high is None or stressed <= float(high) + 1e-9)
+    )
+    side_survives = yes_survives if direction == "buy_yes" else not yes_survives
+    if not side_survives:
+        return 0.0, False
+
+    if direction == "buy_yes":
+        boundary = high if metric == "high" else low
+        if boundary is None:
             return float("inf"), True
-        distance = max(0.0, float(high) - float(observed))
-        return distance, bool(float(observed) + 1.0 <= float(high) + 1e-9)
-    if metric == "low":
-        if low is None:
-            return float("inf"), True
-        distance = max(0.0, float(observed) - float(low))
-        return distance, bool(float(observed) - 1.0 >= float(low) - 1e-9)
-    return 0.0, False
+        return abs(float(boundary) - float(observed)), True
+
+    # A winning NO can become a loser only if the monotone extreme has not yet passed
+    # the bin and may enter it later. Once it has passed a finite bin, it cannot re-enter.
+    if metric == "high" and low is not None and stressed < float(low) - 1e-9:
+        return max(0.0, float(low) - float(observed)), True
+    if metric == "low" and high is not None and stressed > float(high) + 1e-9:
+        return max(0.0, float(observed) - float(high)), True
+    return float("inf"), True
 
 
 def _day0_live_submit_admission_rejection_reason(
@@ -9026,6 +9619,23 @@ def _build_live_execution_command_certificates(
     pre_submit_authority_provider: Callable[[DecisionCertificate, DecisionCertificate, datetime], PreSubmitAuthorityWitness] | None = None,
     live_order_schema_initialized: bool = False,
 ) -> tuple[DecisionCertificate, ...]:
+    global_actuation = receipt.global_actuation
+    global_decision = (
+        getattr(global_actuation, "decision", None)
+        if global_actuation is not None
+        else None
+    )
+    global_candidate = (
+        getattr(global_decision, "candidate", None)
+        if global_decision is not None
+        else None
+    )
+    if global_actuation is not None and (
+        global_candidate is None
+        or str(getattr(global_actuation, "winner_event_id", "") or "")
+        != event.event_id
+    ):
+        raise ValueError("GLOBAL_ACTUATION_CERTIFICATE_BINDING_INVALID")
     _assert_event_bound_strategy_live_admitted(
         strategy_key=receipt.strategy_key,
         direction=receipt.direction,
@@ -9107,6 +9717,15 @@ def _build_live_execution_command_certificates(
             executable_snapshot,
             decision_time,
         )
+        if global_candidate is not None and (
+            authority_witness.book_hash
+            != global_candidate.executable_cost_curve.book_hash
+        ):
+            raise ValueError(
+                "GLOBAL_ACTUATION_JIT_BOOK_SUPERSEDED:"
+                f"selected={global_candidate.executable_cost_curve.book_hash}:"
+                f"jit={authority_witness.book_hash}"
+            )
         fresh_best_bid = _optional_float(authority_witness.current_best_bid)
         fresh_best_ask = _optional_float(authority_witness.current_best_ask)
         # K=1 STAGE 1 (k1_final_snapshot_authority_plan_2026-06-11.md §4): persist the
@@ -9155,20 +9774,23 @@ def _build_live_execution_command_certificates(
         # one doctrine, not forced maker: both proof and fresh validation use the
         # same conservative q/q_exec bound, spread/fee law, maker haircut, and
         # mode-consistent EV margin.
-        _fresh_mode = _fresh_rest_then_cross_mode(
-            actionable_payload=actionable.payload,
-            executable_snapshot=executable_snapshot,
-            fresh_best_bid=fresh_best_bid,
-            fresh_best_ask=fresh_best_ask,
-            tick_size=float(provisional_final_intent.payload["tick_size"]),
-            decision_time=decision_time,
-        )
-        order_mode = _validate_final_order_mode_or_abort(
-            proof_mode=str(actionable.payload.get("proof_execution_mode_intent") or "") or None,
-            fresh_mode=_fresh_mode,
-            fresh_best_bid=fresh_best_bid,
-            fresh_best_ask=fresh_best_ask,
-        )
+        if global_candidate is not None:
+            order_mode = "TAKER"
+        else:
+            _fresh_mode = _fresh_rest_then_cross_mode(
+                actionable_payload=actionable.payload,
+                executable_snapshot=executable_snapshot,
+                fresh_best_bid=fresh_best_bid,
+                fresh_best_ask=fresh_best_ask,
+                tick_size=float(provisional_final_intent.payload["tick_size"]),
+                decision_time=decision_time,
+            )
+            order_mode = _validate_final_order_mode_or_abort(
+                proof_mode=str(actionable.payload.get("proof_execution_mode_intent") or "") or None,
+                fresh_mode=_fresh_mode,
+                fresh_best_bid=fresh_best_bid,
+                fresh_best_ask=fresh_best_ask,
+            )
         day0_admission_rejection = _day0_live_submit_admission_rejection_reason(
             event=event,
             actionable_payload=actionable.payload,
@@ -9273,7 +9895,11 @@ def _build_live_execution_command_certificates(
                 _tick_size_d = Decimal(str(
                     executable_snapshot.payload.get("min_tick_size") or "0.01"
                 ))
-                _reservation = Decimal(str(_action_payload.get("c_fee_adjusted") or "0"))
+                _reservation = Decimal(str(
+                    global_decision.limit_price
+                    if global_decision is not None
+                    else (_action_payload.get("c_fee_adjusted") or "0")
+                ))
                 _direction_for_depth = str(_action_payload.get("direction") or "buy_no")
                 if _direction_for_depth.startswith("buy_"):
                     _fresh_touch = Decimal(str(fresh_best_ask))
@@ -9285,7 +9911,11 @@ def _build_live_execution_command_certificates(
                             "TAKER_BUY_TOUCH_EXCEEDS_RESERVATION:"
                             f"best_ask={_fresh_touch}:reservation={_reservation}"
                         )
-                    _limit_price_d = _fresh_touch
+                    _limit_price_d = (
+                        Decimal(str(global_decision.limit_price))
+                        if global_decision is not None
+                        else _fresh_touch
+                    )
                     _rounding_mode = "up"
                 else:
                     _fresh_touch = Decimal(str(fresh_best_bid))
@@ -9294,7 +9924,11 @@ def _build_live_execution_command_certificates(
                             "TAKER_SELL_TOUCH_BELOW_RESERVATION:"
                             f"best_bid={_fresh_touch}:reservation={_reservation}"
                         )
-                    _limit_price_d = _fresh_touch
+                    _limit_price_d = (
+                        Decimal(str(global_decision.limit_price))
+                        if global_decision is not None
+                        else _fresh_touch
+                    )
                     _rounding_mode = "down"
                 # FINDING-A FIX (twin-authority kill, external review 2026-06-12):
                 # the FINAL taker size is swept from this snapshot's DEPTH, but the
@@ -9363,10 +9997,15 @@ def _build_live_execution_command_certificates(
                     desired_shares_for_reserved_notional as _desired_shares_shared,
                 )
 
-                _desired_shares_f = _desired_shares_shared(
-                    float(_min_order_size_d), float(_reserved_notional), float(_limit_price_d)
-                )
-                _desired_shares = Decimal(str(_desired_shares_f))
+                if global_decision is not None:
+                    _desired_shares = Decimal(str(global_decision.shares))
+                else:
+                    _desired_shares_f = _desired_shares_shared(
+                        float(_min_order_size_d),
+                        float(_reserved_notional),
+                        float(_limit_price_d),
+                    )
+                    _desired_shares = Decimal(str(_desired_shares_f))
                 _depth_sweep = simulate_clob_sweep(
                     snapshot=_snap_for_depth,
                     direction=_direction_for_depth,
@@ -9394,6 +10033,16 @@ def _build_live_execution_command_certificates(
                         order_type="FOK",
                         tick_size=_tick_size_d,
                     )
+                    if (
+                        global_decision is not None
+                        and _venue_quantized_shares != _desired_shares
+                    ):
+                        raise ValueError(
+                            "GLOBAL_ACTUATION_EXACT_SIZE_NOT_EXECUTABLE:"
+                            f"target={_desired_shares}:"
+                            f"available={_depth_sweep.filled_shares}:"
+                            f"quantized={_venue_quantized_shares}"
+                        )
                     _venue_quantized_sweep = simulate_clob_sweep(
                         snapshot=_snap_for_depth,
                         direction=_direction_for_depth,
@@ -9416,6 +10065,20 @@ def _build_live_execution_command_certificates(
                         str(_venue_quantized_sweep.average_price)
                         if _venue_quantized_sweep.average_price is not None else None
                     )
+                    if global_decision is not None and (
+                        sweep_expected_fill_price is None
+                        or not math.isclose(
+                            float(sweep_expected_fill_price),
+                            float(global_decision.expected_fill_price_before_fee),
+                            rel_tol=0.0,
+                            abs_tol=1e-12,
+                        )
+                    ):
+                        raise ValueError(
+                            "GLOBAL_ACTUATION_SWEEP_COST_SUPERSEDED:"
+                            f"selected={global_decision.expected_fill_price_before_fee}:"
+                            f"current={sweep_expected_fill_price}"
+                        )
         executable_market_context = _executable_market_context_from_snapshot(_snap_for_context)
         taker_quality_proof = _build_event_bound_taker_quality_proof(
             actionable_payload=actionable.payload,
@@ -9472,6 +10135,16 @@ def _build_live_execution_command_certificates(
             best_ask=fresh_best_ask if str(order_mode).strip().upper() == "TAKER" else best_ask,
             available_crossable_shares=available_crossable_shares,
             sweep_expected_fill_price=sweep_expected_fill_price,
+            exact_taker_shares=(
+                str(global_decision.shares)
+                if global_decision is not None
+                else None
+            ),
+            exact_taker_limit_price=(
+                str(global_decision.limit_price)
+                if global_decision is not None
+                else None
+            ),
             executable_market_context=executable_market_context,
             taker_quality_proof=taker_quality_proof,
         )
@@ -9485,11 +10158,24 @@ def _build_live_execution_command_certificates(
             provisional=authority_witness,
             final=final_authority_witness,
         )
+        if global_candidate is not None and (
+            final_authority_witness.book_hash
+            != global_candidate.executable_cost_curve.book_hash
+        ):
+            raise ValueError("GLOBAL_ACTUATION_FINAL_JIT_BOOK_SUPERSEDED")
         authority_witness = final_authority_witness
         current_utility_reason = _qkernel_current_state_actual_submit_rejection_reason(
             cert=actionable.payload.get("qkernel_execution_economics") or {},
-            actual_stake_usd=_final_intent_worst_case_entry_spend(final_intent),
-            actual_cost=_final_intent_worst_case_entry_cost(final_intent),
+            actual_stake_usd=(
+                float(global_decision.cost_usd)
+                if global_decision is not None
+                else _final_intent_worst_case_entry_spend(final_intent)
+            ),
+            actual_cost=(
+                float(global_decision.cost_usd / global_decision.shares)
+                if global_decision is not None
+                else _final_intent_worst_case_entry_cost(final_intent)
+            ),
         )
         if current_utility_reason is not None:
             raise ValueError(current_utility_reason)
@@ -14122,6 +14808,7 @@ def _native_side_candidate_from_proof(
     *,
     family_key: str,
     proof: _CandidateProof,
+    require_full_depth: bool = False,
 ) -> NativeSideCandidate:
     """Materialize a priced ``_CandidateProof`` as a unified NativeSideCandidate.
 
@@ -14218,6 +14905,18 @@ def _native_side_candidate_from_proof(
             row, side=side, token_id=token_id
         )
     except (ValueError, KeyError, TypeError):
+        if require_full_depth:
+            return NativeSideCandidate.no_trade(
+                family_key=family_key,
+                bin_id=bin_id,
+                side=side,
+                token_id=token_id,
+                condition_id=condition_id,
+                forecast_snapshot_id=forecast_snapshot_id,
+                market_snapshot_id=market_snapshot_id,
+                reason=CandidateNoTradeReason.NATIVE_QUOTE_MISSING,
+                hypothesis_id=hypothesis_id,
+            )
         curve = _native_side_cost_curve_from_execution_price(
             proof=proof,
             side=side,
@@ -14294,6 +14993,18 @@ def _native_side_candidate_from_proof(
         forecast_snapshot_id=forecast_snapshot_id,
         market_snapshot_id=market_snapshot_id,
         hypothesis_id=hypothesis_id,
+    )
+
+
+def _full_depth_native_side_candidate_from_proof(
+    *, family_key: str, proof: _CandidateProof
+) -> NativeSideCandidate:
+    """Global-auction candidate builder: native full depth or typed no-trade."""
+
+    return _native_side_candidate_from_proof(
+        family_key=family_key,
+        proof=proof,
+        require_full_depth=True,
     )
 
 
@@ -15061,6 +15772,39 @@ def _qkernel_current_state_actual_submit_rejection_reason(
 
     if not _qkernel_current_state_solve_economics(cert):
         return None
+    if str(cert.get("global_actuation_identity") or "").strip():
+        try:
+            stake = float(actual_stake_usd)
+            cost = float(actual_cost)
+            global_max_spend = float(cert.get("global_max_spend_usd"))
+            global_expected_cost = float(cert.get("global_expected_cost_usd"))
+            global_shares = float(cert.get("global_target_shares"))
+            global_robust_du = float(cert.get("global_robust_delta_log_wealth"))
+            global_robust_ev = float(cert.get("global_robust_ev_usd"))
+        except (TypeError, ValueError):
+            return "GLOBAL_ACTUATION_SUBMIT_CERTIFICATE_INVALID"
+        expected_unit_cost = global_expected_cost / global_shares
+        if not all(
+            math.isfinite(value)
+            for value in (
+                stake,
+                cost,
+                global_max_spend,
+                global_expected_cost,
+                global_shares,
+                global_robust_du,
+                global_robust_ev,
+                expected_unit_cost,
+            )
+        ):
+            return "GLOBAL_ACTUATION_SUBMIT_CERTIFICATE_NON_FINITE"
+        if global_robust_du <= 0.0 or global_robust_ev <= 0.0:
+            return "GLOBAL_ACTUATION_OBJECTIVE_NON_POSITIVE"
+        if stake > global_max_spend + 1e-9:
+            return "GLOBAL_ACTUATION_MAX_SPEND_EXCEEDED"
+        if cost > expected_unit_cost + 1e-9:
+            return "GLOBAL_ACTUATION_EXPECTED_COST_EXCEEDED"
+        return None
     try:
         stake = float(actual_stake_usd)
         cost = float(actual_cost)
@@ -15212,6 +15956,10 @@ def _proofs_with_qkernel_candidate_economics(
         proof: _CandidateProof,
         cert: Mapping[str, Any],
     ) -> str | None:
+        if qkernel_declares_current_state(cert) and not _qkernel_current_state_solve_economics(
+            cert
+        ):
+            return "QKERNEL_CURRENT_STATE_IDENTITY_INVALID"
         rest_policy = str(
             getattr(proof, "rest_then_cross_policy", None)
             or cert.get("rest_then_cross_policy")
@@ -19026,6 +19774,463 @@ def _replacement_yes_bootstrap_samples_for_bin(
     return tuple(samples)
 
 
+_GLOBAL_PROBABILITY_CONTENT_FIELDS = (
+    "family_key",
+    "q_version",
+    "resolution_identity",
+    "topology_identity",
+    "posterior_identity_hash",
+    "source_truth_identity",
+    "band_alpha",
+    "band_basis",
+    "sample_matrix_identity",
+)
+
+
+def _replacement_global_probability_components(
+    replacement_bundle: object,
+    *,
+    candidates: tuple[MarketTopologyCandidate, ...],
+    bindings: tuple[object, ...],
+) -> tuple[np.ndarray, np.ndarray, str] | None:
+    """Map one current posterior onto the exact ordered settlement topology."""
+
+    provenance = getattr(replacement_bundle, "provenance_json", None) or {}
+    if not isinstance(provenance, Mapping):
+        return None
+    samples_by_bin = provenance.get("q_bootstrap_samples_by_bin")
+    if not isinstance(samples_by_bin, Mapping):
+        return None
+    try:
+        city_rho = float(provenance.get("city_calibration_rho") or 0.0)
+    except (TypeError, ValueError):
+        return None
+    city_mix_applied = bool(
+        provenance.get("city_calibration_layer_applied") or city_rho > 0.0
+    )
+    basis = str(provenance.get("q_bootstrap_samples_basis") or "").strip()
+    if city_mix_applied:
+        if basis != "served_rho_mixed_simplex_v2":
+            return None
+    elif basis not in {"global_simplex_v1", "served_rho_mixed_simplex_v2"}:
+        return None
+
+    bin_key_by_condition = {
+        str(candidate.condition_id or ""): _candidate_replacement_bin_id(
+            candidate, replacement_bundle
+        )
+        for candidate in candidates
+    }
+    if (
+        not bindings
+        or set(bin_key_by_condition)
+        != {str(binding.condition_id) for binding in bindings}
+        or any(not key for key in bin_key_by_condition.values())
+    ):
+        return None
+
+    q_map = getattr(replacement_bundle, "q", None) or {}
+    columns: list[tuple[float, ...]] = []
+    points: list[float] = []
+    for binding in bindings:
+        bin_key = bin_key_by_condition.get(str(binding.condition_id))
+        raw = samples_by_bin.get(bin_key) if bin_key else None
+        if not isinstance(raw, (list, tuple)) or bin_key not in q_map:
+            return None
+        try:
+            column = tuple(float(value) for value in raw)
+            point = float(q_map[bin_key])
+        except (TypeError, ValueError):
+            return None
+        columns.append(column)
+        points.append(point)
+    lengths = {len(column) for column in columns}
+    if len(lengths) != 1:
+        return None
+    matrix = np.asarray(columns, dtype=float).T
+    point_q = np.asarray(points, dtype=float)
+    if (
+        matrix.ndim != 2
+        or matrix.shape[0] < 2
+        or matrix.shape[1] != len(bindings)
+        or not np.isfinite(matrix).all()
+        or (matrix < 0.0).any()
+        or (matrix > 1.0).any()
+        or not np.allclose(matrix.sum(axis=1), 1.0, atol=1e-9)
+        or point_q.shape != (len(bindings),)
+        or not np.isfinite(point_q).all()
+        or (point_q < 0.0).any()
+        or (point_q > 1.0).any()
+        or not math.isclose(float(point_q.sum()), 1.0, rel_tol=0.0, abs_tol=1e-9)
+    ):
+        return None
+    return (
+        np.ascontiguousarray(matrix, dtype=np.float64),
+        np.ascontiguousarray(point_q, dtype=np.float64),
+        basis,
+    )
+
+
+def _prepare_current_global_probability_family(
+    event: OpportunityEvent,
+    *,
+    forecast_conn: sqlite3.Connection,
+    topology_conn: sqlite3.Connection,
+    observation_conn: sqlite3.Connection | None = None,
+    decision_time: datetime,
+    max_age: timedelta,
+):
+    """Build a current joint-q witness without any executable-price dependency."""
+
+    from src.data.replacement_forecast_bundle_reader import (
+        read_replacement_forecast_bundle,
+    )
+    from src.engine.qkernel_spine_bridge import (
+        PreparedGlobalFamily,
+        _event_resolution_identity,
+        _qkernel_spine_band_alpha,
+        build_forecast_case,
+        build_outcome_space,
+    )
+    from src.engine.replacement_forecast_hook_factory import (
+        _latest_replacement_readiness,
+    )
+    from src.solve.solver import (
+        JointOutcomeProbabilityWitness,
+        OutcomeTokenBinding,
+        joint_probability_witness_identity,
+        probability_sample_matrix_identity,
+    )
+
+    if decision_time.tzinfo is None:
+        raise ValueError("GLOBAL_PROBABILITY_DECISION_TIME_NAIVE")
+    if max_age <= timedelta(0):
+        raise ValueError("GLOBAL_PROBABILITY_FRESHNESS_CONTRACT_MISSING")
+    decision_time = decision_time.astimezone(UTC)
+    payload = _payload(event)
+    rows = _event_family_market_topology_rows(topology_conn, payload)
+    if not rows:
+        raise ValueError("EVENT_BOUND_MARKET_TOPOLOGY_MISSING")
+    topology = tuple(
+        _topology_candidate_from_market_event(row, None, payload) for row in rows
+    )
+    bound = EventBoundDecisionEngine().evaluate(
+        EventBoundDecisionRequest(
+            event=event,
+            market_topology=topology,
+            decision_time=decision_time,
+            market_topology_source="market_events_current_probability",
+        )
+    )
+    if bound.status != "CANDIDATE_FAMILY_READY" or bound.candidate_family is None:
+        raise ValueError(
+            bound.rejection_reason or "EVENT_BOUND_CANDIDATE_BINDING_FAILED"
+        )
+    family = bound.candidate_family
+    readiness = _latest_replacement_readiness(
+        forecast_conn,
+        city=family.city,
+        target_date=family.target_date,
+        temperature_metric=family.metric,
+    )
+    if readiness is None:
+        raise ValueError("GLOBAL_CURRENT_REPLACEMENT_READINESS_MISSING")
+    result = read_replacement_forecast_bundle(
+        forecast_conn,
+        baseline_bundle=None,
+        readiness=readiness,
+        city=family.city,
+        target_date=family.target_date,
+        temperature_metric=family.metric,
+        decision_time=decision_time,
+        require_baseline_bundle=False,
+        enforce_raw_input_hwm=True,
+    )
+    if not result.ok or result.bundle is None:
+        raise ValueError(
+            "GLOBAL_CURRENT_REPLACEMENT_BUNDLE_BLOCKED:"
+            f"{result.reason_code}"
+        )
+    bundle = result.bundle
+    if event.event_type == "DAY0_EXTREME_UPDATED":
+        conditioning = (
+            bundle.provenance_json.get("day0_conditioning")
+            if isinstance(bundle.provenance_json, Mapping)
+            else None
+        )
+        try:
+            observed_extreme_c = float(
+                conditioning.get("observed_extreme_c")
+                if isinstance(conditioning, Mapping)
+                else None
+            )
+        except (TypeError, ValueError):
+            observed_extreme_c = math.nan
+        if (
+            not isinstance(conditioning, Mapping)
+            or conditioning.get("active") is not True
+            or str(conditioning.get("metric") or "") != family.metric
+            or not str(conditioning.get("observation_time") or "").strip()
+            or not math.isfinite(observed_extreme_c)
+        ):
+            raise ValueError("GLOBAL_DAY0_CONDITIONING_AUTHORITY_MISSING")
+        day0_observation_conn = observation_conn or forecast_conn
+        observation_table = day0_observation_conn.execute(
+            "SELECT 1 FROM sqlite_master "
+            "WHERE type='table' AND name='observation_instants'"
+        ).fetchone()
+        if observation_table is None:
+            raise ValueError("GLOBAL_DAY0_OBSERVATION_HWM_UNAVAILABLE")
+        from src.data.replacement_forecast_current_target_plan import (
+            _day0_observation_lag_reason,
+        )
+
+        lag_reason = _day0_observation_lag_reason(
+            day0_observation_conn,
+            city=family.city,
+            target_date=family.target_date,
+            temperature_metric=family.metric,
+            decision_time=decision_time,
+            posterior_provenance_json=json.dumps(bundle.provenance_json),
+        )
+        if lag_reason is not None:
+            raise ValueError(f"GLOBAL_DAY0_OBSERVATION_LAG:{lag_reason}")
+
+    identity_row = forecast_conn.execute(
+        """
+        SELECT posterior_identity_hash, dependency_hash, posterior_config_hash
+          FROM forecast_posteriors
+         WHERE posterior_id = ?
+        """,
+        (bundle.posterior_id,),
+    ).fetchone()
+    if identity_row is None:
+        raise ValueError("GLOBAL_CURRENT_POSTERIOR_IDENTITY_MISSING")
+    posterior_identity_hash = str(identity_row[0] or "").strip()
+    dependency_hash = str(identity_row[1] or "").strip()
+    posterior_config_hash = str(identity_row[2] or "").strip()
+    if not all((posterior_identity_hash, dependency_hash, posterior_config_hash)):
+        raise ValueError("GLOBAL_CURRENT_POSTERIOR_IDENTITY_INCOMPLETE")
+
+    try:
+        source_cycle = datetime.fromisoformat(
+            str(bundle.source_cycle_time).replace("Z", "+00:00")
+        )
+    except ValueError as exc:
+        raise ValueError("GLOBAL_CURRENT_SOURCE_CYCLE_INVALID") from exc
+    if source_cycle.tzinfo is None:
+        source_cycle = source_cycle.replace(tzinfo=UTC)
+    case = build_forecast_case(
+        family,
+        source_cycle_time_utc=source_cycle.astimezone(UTC),
+    )
+    omega = build_outcome_space(family, case)
+    bindings = tuple(
+        OutcomeTokenBinding(
+            bin_id=outcome.bin_id,
+            condition_id=str(outcome.condition_id or ""),
+            yes_token_id=(
+                str(outcome.yes_token_id) if outcome.yes_token_id else None
+            ),
+            no_token_id=(
+                str(outcome.no_token_id) if outcome.no_token_id else None
+            ),
+        )
+        for outcome in omega.bins
+    )
+    components = _replacement_global_probability_components(
+        bundle,
+        candidates=family.candidates,
+        bindings=bindings,
+    )
+    if components is None:
+        raise ValueError("GLOBAL_CURRENT_POSTERIOR_SIMPLEX_INVALID")
+    samples, point_q, band_basis = components
+    sample_identity = probability_sample_matrix_identity(samples)
+    resolution_identity = _event_resolution_identity(omega.resolution)
+    source_truth_identity = stable_hash(
+        {
+            "dependency_hash": dependency_hash,
+            "posterior_config_hash": posterior_config_hash,
+            "source_cycle_time": bundle.source_cycle_time,
+            "source_available_at": bundle.source_available_at,
+        }
+    )
+    q_version = stable_hash(
+        {
+            "authority": "replacement_current_global_probability_v1",
+            "posterior_identity_hash": posterior_identity_hash,
+            "topology_identity": omega.topology_hash,
+            "sample_matrix_identity": sample_identity,
+            "point_q": [float(value) for value in point_q],
+        }
+    )
+    authority_certificate_hash = stable_hash(
+        {
+            "event_id": event.event_id,
+            "causal_snapshot_id": event.causal_snapshot_id,
+            "family_binding_hash": family.binding_hash,
+            "q_version": q_version,
+            "source_truth_identity": source_truth_identity,
+            "captured_at_utc": decision_time.isoformat(),
+        }
+    )
+    alpha = _qkernel_spine_band_alpha()
+    witness_identity = joint_probability_witness_identity(
+        family_key=family.family_id,
+        bindings=bindings,
+        q_version=q_version,
+        resolution_identity=resolution_identity,
+        topology_identity=omega.topology_hash,
+        posterior_identity_hash=posterior_identity_hash,
+        source_truth_identity=source_truth_identity,
+        authority_certificate_hash=authority_certificate_hash,
+        band_alpha=alpha,
+        band_basis=band_basis,
+        yes_q_samples=samples,
+        captured_at_utc=decision_time,
+    )
+    witness = JointOutcomeProbabilityWitness(
+        family_key=family.family_id,
+        bindings=bindings,
+        yes_q_samples=samples,
+        q_version=q_version,
+        resolution_identity=resolution_identity,
+        topology_identity=omega.topology_hash,
+        posterior_identity_hash=posterior_identity_hash,
+        source_truth_identity=source_truth_identity,
+        authority_certificate_hash=authority_certificate_hash,
+        band_alpha=alpha,
+        band_basis=band_basis,
+        captured_at_utc=decision_time,
+        max_age=max_age,
+        witness_identity=witness_identity,
+    )
+    return PreparedGlobalFamily(
+        decision_id=stable_hash(
+            {
+                "authority_certificate_hash": authority_certificate_hash,
+                "witness_identity": witness_identity,
+            }
+        ),
+        probability_witness=witness,
+        candidate_seeds=(),
+    )
+
+
+def _current_global_probability_sample_matrix(
+    forecast_conn: sqlite3.Connection,
+    event: OpportunityEvent,
+    replacement_bundle: object,
+    witness: object,
+) -> np.ndarray | None:
+    """Rebuild the witness matrix from the current canonical posterior row."""
+
+    payload = _payload(event)
+    try:
+        rows = _event_family_market_topology_rows(forecast_conn, payload)
+        candidates = tuple(
+            _topology_candidate_from_market_event(row, None, payload) for row in rows
+        )
+    except Exception:  # noqa: BLE001 - incomplete current topology means no authority
+        return None
+    bindings = tuple(getattr(witness, "bindings", ()) or ())
+    components = _replacement_global_probability_components(
+        replacement_bundle,
+        candidates=candidates,
+        bindings=bindings,
+    )
+    return components[0] if components is not None else None
+
+
+def current_global_probability_authority(
+    forecast_conn: sqlite3.Connection,
+    event: OpportunityEvent,
+    witness: object,
+    *,
+    decision_time: datetime,
+):
+    """Resolve current q from canonical DB truth before confirming a witness."""
+
+    from src.data.replacement_forecast_bundle_reader import (
+        read_replacement_forecast_bundle,
+    )
+    from src.engine.replacement_forecast_hook_factory import (
+        _latest_replacement_readiness,
+    )
+    from src.events.candidate_binding import weather_family_id
+    from src.solve.solver import (
+        CurrentFamilyProbabilityAuthority,
+        probability_sample_matrix_identity,
+    )
+
+    if decision_time.tzinfo is None:
+        raise ValueError("decision_time must be timezone-aware")
+    payload = _payload(event)
+    city = str(payload.get("city") or "").strip()
+    target_date = str(payload.get("target_date") or "").strip()
+    metric = str(payload.get("metric") or "").strip().lower()
+    if (
+        not city
+        or not target_date
+        or metric not in {"high", "low"}
+        or str(getattr(witness, "family_key", ""))
+        != weather_family_id(city=city, target_date=target_date, metric=metric)
+    ):
+        return None
+    readiness = _latest_replacement_readiness(
+        forecast_conn,
+        city=city,
+        target_date=target_date,
+        temperature_metric=metric,
+    )
+    if readiness is None:
+        return None
+    result = read_replacement_forecast_bundle(
+        forecast_conn,
+        baseline_bundle=None,
+        readiness=readiness,
+        city=city,
+        target_date=target_date,
+        temperature_metric=metric,
+        decision_time=decision_time,
+        require_baseline_bundle=False,
+        enforce_raw_input_hwm=True,
+    )
+    if not result.ok or result.bundle is None:
+        return None
+    identity_row = forecast_conn.execute(
+        "SELECT posterior_identity_hash FROM forecast_posteriors WHERE posterior_id = ?",
+        (result.bundle.posterior_id,),
+    ).fetchone()
+    current_posterior_identity = str(
+        identity_row[0] if identity_row is not None else ""
+    ).strip()
+    if (
+        not current_posterior_identity
+        or current_posterior_identity
+        != str(getattr(witness, "posterior_identity_hash", ""))
+    ):
+        return None
+    current_samples = _current_global_probability_sample_matrix(
+        forecast_conn,
+        event,
+        result.bundle,
+        witness,
+    )
+    if current_samples is None:
+        return None
+    try:
+        current_sample_identity = probability_sample_matrix_identity(current_samples)
+    except ValueError:
+        return None
+    if current_sample_identity != str(
+        getattr(witness, "sample_matrix_identity", "")
+    ):
+        return None
+    return CurrentFamilyProbabilityAuthority.from_witness(witness)
+
+
 def _finite_sample_false_edge_rate(samples: tuple[float, ...], *, cost: float) -> float | None:
     if not samples:
         return None
@@ -19125,6 +20330,45 @@ def _replacement_authority_probability_and_fdr_proof(
     if not bundle_result.ok or bundle_result.bundle is None:
         raise ValueError(f"REPLACEMENT_0_1_LIVE_BUNDLE_BLOCKED:{bundle_result.reason_code}")
     replacement_bundle = bundle_result.bundle
+    posterior_identity_row = conn.execute(
+        "SELECT posterior_identity_hash FROM forecast_posteriors WHERE posterior_id = ?",
+        (replacement_bundle.posterior_id,),
+    ).fetchone()
+    posterior_identity_hash = str(
+        posterior_identity_row[0] if posterior_identity_row is not None else ""
+    ).strip()
+    if not posterior_identity_hash:
+        raise ValueError("REPLACEMENT_POSTERIOR_IDENTITY_HASH_MISSING")
+    payload["_edli_spine_posterior_identity_hash"] = posterior_identity_hash
+    joint_samples_key = "_edli_spine_served_joint_q_samples_by_condition"
+    joint_samples_reason_key = "_edli_spine_joint_q_samples_unavailable_reason"
+    try:
+        joint_samples_requested = bool(
+            settings["feature_flags"].get("w3_solve_enabled", False)
+        )
+    except Exception:
+        joint_samples_requested = False
+    joint_samples_requested = bool(
+        joint_samples_requested or payload.get("_edli_global_auction_prepare") is True
+    )
+    if joint_samples_requested:
+        payload.pop(joint_samples_key, None)
+        payload.pop(joint_samples_reason_key, None)
+    bundle_provenance = getattr(replacement_bundle, "provenance_json", None) or {}
+    city_mix_applied = False
+    bootstrap_samples_basis = None
+    if isinstance(bundle_provenance, Mapping):
+        try:
+            city_rho = float(bundle_provenance.get("city_calibration_rho") or 0.0)
+        except (TypeError, ValueError):
+            city_rho = 0.0
+        city_mix_applied = bool(
+            bundle_provenance.get("city_calibration_layer_applied") or city_rho > 0.0
+        )
+        bootstrap_samples_basis = str(
+            bundle_provenance.get("q_bootstrap_samples_basis") or ""
+        ).strip()
+    joint_samples_by_condition: dict[str, list[float]] = {}
     # DecisionProvenanceEnvelope (operator law 2026-06-11): record the SERVED bundle the moment it
     # is bound — BEFORE the q-mode / bounds gates below — so every rejection raised after the read
     # (q-mode ineligible, bounds missing, ...) still carries the exact data combination it
@@ -19211,6 +20455,15 @@ def _replacement_authority_probability_and_fdr_proof(
         yes_samples = _replacement_yes_bootstrap_samples_for_bin(
             replacement_bundle, bin_id=bin_id
         )
+        if (
+            joint_samples_requested
+            and yes_samples
+            and (
+                not city_mix_applied
+                or bootstrap_samples_basis == "served_rho_mixed_simplex_v2"
+            )
+        ):
+            joint_samples_by_condition[condition_id] = list(yes_samples)
         q_by_condition[condition_id] = q_yes
         _set_qlcb_provenance(
             lcb_by_direction,
@@ -19279,6 +20532,34 @@ def _replacement_authority_probability_and_fdr_proof(
         key: str(getattr(verdict, "status"))
         for key, verdict in _coverage_verdict_by_direction.items()
     }
+    if joint_samples_requested:
+        if city_mix_applied and bootstrap_samples_basis != "served_rho_mixed_simplex_v2":
+            payload[joint_samples_reason_key] = "CITY_MIX_SAMPLE_AUTHORITY_SUPERSEDED"
+        elif len(joint_samples_by_condition) == len(family.candidates):
+            sample_lengths = {len(values) for values in joint_samples_by_condition.values()}
+            condition_order = [str(candidate.condition_id or "") for candidate in family.candidates]
+            try:
+                sample_matrix = np.asarray(
+                    [joint_samples_by_condition[condition_id] for condition_id in condition_order],
+                    dtype=float,
+                ).T
+            except (KeyError, TypeError, ValueError):
+                sample_matrix = np.empty((0, 0), dtype=float)
+            if (
+                len(sample_lengths) == 1
+                and next(iter(sample_lengths), 0) >= 2
+                and sample_matrix.shape == (next(iter(sample_lengths)), len(condition_order))
+                and np.isfinite(sample_matrix).all()
+                and (sample_matrix >= 0.0).all()
+                and np.allclose(sample_matrix.sum(axis=1), 1.0, atol=1e-9)
+            ):
+                payload[joint_samples_key] = joint_samples_by_condition
+            else:
+                payload[joint_samples_reason_key] = (
+                    "BOOTSTRAP_SAMPLES_INCOMPLETE_OR_INCOHERENT"
+                )
+        else:
+            payload[joint_samples_reason_key] = "BOOTSTRAP_SAMPLES_MISSING"
     payload["_edli_q_source"] = "replacement_0_1"
     return q_by_condition, lcb_by_direction, p_values, prefilter, {
         "probability_authority": "replacement_0_1",
@@ -24224,6 +25505,111 @@ def _native_side_cost_curve_from_snapshot_row(
         min_tick=book.min_tick_size,
         min_order_size=book.min_order_size,
         quote_ttl=_native_quote_ttl_from_row(row),
+    )
+
+
+def current_global_execution_authority(
+    trade_conn: sqlite3.Connection,
+    candidate: object,
+    *,
+    decision_time: datetime,
+    allow_exact_post_decision_snapshot: bool = False,
+):
+    """Resolve a candidate's current full native ladder from canonical trade DB."""
+
+    from src.solve.solver import (
+        CurrentExecutionAuthority,
+        executable_curve_identity,
+    )
+
+    if decision_time.tzinfo is None:
+        raise ValueError("decision_time must be timezone-aware")
+    condition_id = str(getattr(candidate, "condition_id", "") or "").strip()
+    token_id = str(getattr(candidate, "token_id", "") or "").strip()
+    side = str(getattr(candidate, "side", "") or "").strip().upper()
+    if not condition_id or not token_id or side not in {"YES", "NO"}:
+        return None
+    try:
+        cur = trade_conn.execute(
+            "SELECT * FROM executable_market_snapshots "
+            "WHERE condition_id = ? AND selected_outcome_token_id = ? "
+            "ORDER BY captured_at DESC, snapshot_id DESC",
+            (condition_id, token_id),
+        )
+    except sqlite3.Error:
+        return None
+    names = [description[0] for description in cur.description]
+    checked_at = decision_time.astimezone(timezone.utc)
+    expected_snapshot_id = str(
+        getattr(candidate, "book_snapshot_id", "") or ""
+    ).strip()
+    row = None
+    for raw in cur.fetchall():
+        item = (
+            {name: raw[name] for name in names}
+            if isinstance(raw, sqlite3.Row)
+            else dict(zip(names, raw))
+        )
+        captured_at = _parse_iso_optional(item.get("captured_at"))
+        if captured_at is None:
+            continue
+        if captured_at.tzinfo is None:
+            captured_at = captured_at.replace(tzinfo=timezone.utc)
+        exact_jit_snapshot = bool(
+            allow_exact_post_decision_snapshot
+            and expected_snapshot_id
+            and str(item.get("snapshot_id") or "") == expected_snapshot_id
+        )
+        if captured_at.astimezone(timezone.utc) > checked_at and not exact_jit_snapshot:
+            continue
+        row = item
+        break
+    if row is None or snapshot_row_is_invalidated(
+        trade_conn,
+        row,
+        checked_at=checked_at,
+    ):
+        return None
+    deadline = _parse_iso_optional(row.get("freshness_deadline"))
+    if deadline is None:
+        return None
+    if deadline.tzinfo is None:
+        deadline = deadline.replace(tzinfo=timezone.utc)
+    if deadline.astimezone(timezone.utc) < checked_at:
+        return None
+    if (
+        _optional_bool(row.get("enable_orderbook")) is not True
+        or _optional_bool(row.get("active")) is not True
+        or _optional_bool(row.get("closed")) is not False
+        or _optional_bool(row.get("accepting_orders")) is not True
+    ):
+        return None
+    tradeability = _json_object(row.get("tradeability_status_json") or {})
+    if tradeability.get("executable_allowed") is False:
+        return None
+    expected_token = str(
+        (
+            row.get("yes_token_id")
+            if side == "YES"
+            else row.get("no_token_id")
+        )
+        or ""
+    ).strip()
+    if expected_token != token_id:
+        return None
+    try:
+        curve = _native_side_cost_curve_from_snapshot_row(
+            row,
+            side=side,
+            token_id=token_id,
+        )
+    except (KeyError, TypeError, ValueError):
+        return None
+    return CurrentExecutionAuthority(
+        token_id=token_id,
+        side=side,
+        book_snapshot_id=str(row.get("snapshot_id") or ""),
+        execution_curve_identity=executable_curve_identity(curve),
     )
 
 

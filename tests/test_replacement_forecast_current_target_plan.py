@@ -14,9 +14,129 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from src.data.replacement_forecast_current_target_plan import (
+    _day0_observation_lag_reason,
+    _latest_authorized_day0_fact,
     build_replacement_forecast_current_target_plan,
     replacement_forecast_download_plan_from_current_targets,
 )
+
+
+def test_day0_observation_hwm_invalidates_older_conditioning() -> None:
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        """
+        CREATE TABLE observation_instants (
+            city TEXT,
+            target_date TEXT,
+            source TEXT,
+            local_timestamp TEXT,
+            utc_timestamp TEXT,
+            running_max REAL,
+            running_min REAL,
+            authority TEXT,
+            training_allowed INTEGER,
+            causality_status TEXT,
+            source_role TEXT
+        )
+        """
+    )
+    conn.execute(
+        "INSERT INTO observation_instants VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            "Paris",
+            "2026-07-10",
+            "wu_icao_history",
+            "2026-07-10T13:00:00+02:00",
+            "2026-07-10T11:00:00+00:00",
+            32.0,
+            20.0,
+            "VERIFIED",
+            1,
+            "OK",
+            "historical_hourly",
+        ),
+    )
+    reason = _day0_observation_lag_reason(
+        conn,
+        city="Paris",
+        target_date="2026-07-10",
+        temperature_metric="high",
+        decision_time=datetime(2026, 7, 10, 12, tzinfo=timezone.utc),
+        posterior_provenance_json=json.dumps(
+            {"day0_conditioning": {"observation_time": "2026-07-10T10:00:00+00:00"}}
+        ),
+    )
+    assert reason is not None
+    assert reason.startswith("basis=day0_observation_hwm_lag")
+
+
+def test_day0_hwm_accepts_authorized_durable_fast_observation_event() -> None:
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        """
+        CREATE TABLE opportunity_events (
+            event_id TEXT,
+            event_type TEXT,
+            available_at TEXT,
+            received_at TEXT,
+            created_at TEXT,
+            payload_json TEXT
+        )
+        """
+    )
+    payload = {
+        "city": "Busan",
+        "target_date": "2026-07-11",
+        "metric": "high",
+        "settlement_source": "aviationweather_metar",
+        "observation_time": "2026-07-10T15:00:00+00:00",
+        "raw_value": 25.0,
+        "rounded_value": 25,
+        "high_so_far": 25.0,
+        "source_match_status": "MATCH",
+        "local_date_status": "MATCH",
+        "station_match_status": "MATCH",
+        "dst_status": "UNAMBIGUOUS",
+        "metric_match_status": "MATCH",
+        "rounding_status": "MATCH",
+        "source_authorized_status": "AUTHORIZED",
+        "live_authority_status": "live",
+    }
+    conn.execute(
+        "INSERT INTO opportunity_events VALUES (?, ?, ?, ?, ?, ?)",
+        (
+            "day0-busan",
+            "DAY0_EXTREME_UPDATED",
+            "2026-07-10T15:04:00+00:00",
+            "2026-07-10T15:04:01+00:00",
+            "2026-07-10T15:04:01+00:00",
+            json.dumps(payload),
+        ),
+    )
+
+    fact = _latest_authorized_day0_fact(
+        conn,
+        city="Busan",
+        target_date="2026-07-11",
+        temperature_metric="high",
+        decision_time=datetime(2026, 7, 10, 15, 5, tzinfo=timezone.utc),
+    )
+    reason = _day0_observation_lag_reason(
+        conn,
+        city="Busan",
+        target_date="2026-07-11",
+        temperature_metric="high",
+        decision_time=datetime(2026, 7, 10, 15, 5, tzinfo=timezone.utc),
+        posterior_provenance_json=json.dumps({}),
+    )
+
+    assert fact is not None
+    assert fact["observed_extreme_native"] == 25.0
+    assert fact["source"] == "durable_day0_event:aviationweather_metar"
+    assert reason is not None
+    assert reason.startswith("basis=day0_observation_hwm_lag")
 
 
 def _create_db(path) -> None:
@@ -295,6 +415,49 @@ def test_current_target_plan_classifies_covered_seedable_and_missing_manifest_ta
     assert [row["city"] for row in download_plan["seedable_targets"]] == ["London"]
     assert [row["city"] for row in download_plan["openmeteo_download_targets"]] == ["Madrid"]
     assert download_plan["fusion_current_value_missing_targets"] == []
+
+
+def test_current_target_plan_reseeds_same_cycle_late_used_model_input(tmp_path) -> None:
+    db = tmp_path / "forecasts.db"
+    _create_db(db)
+    conn = sqlite3.connect(db)
+    try:
+        conn.execute("ALTER TABLE forecast_posteriors ADD COLUMN source_cycle_time TEXT")
+        conn.execute("ALTER TABLE forecast_posteriors ADD COLUMN computed_at TEXT")
+        conn.execute("ALTER TABLE forecast_posteriors ADD COLUMN provenance_json TEXT")
+        conn.execute(
+            "UPDATE forecast_posteriors SET source_cycle_time=?, computed_at=?, "
+            "provenance_json=? WHERE city='Paris'",
+            (
+                "2026-06-07T06:00:00+00:00",
+                "2026-06-07T08:30:00+00:00",
+                json.dumps(
+                    {
+                        "used_models": ["gfs_global"],
+                        "q_lcb_basis": "fused_center_bootstrap_p05",
+                    }
+                ),
+            ),
+        )
+        conn.execute(
+            "UPDATE raw_model_forecasts SET captured_at=? WHERE city='Paris' "
+            "AND model='gfs_global'",
+            ("2026-06-07T09:00:00+00:00",),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    plan = build_replacement_forecast_current_target_plan(
+        db,
+        now_utc=datetime(2026, 6, 7, 12, 0, tzinfo=timezone.utc),
+    )
+    paris = next(row for row in plan.rows if row.city == "Paris")
+
+    assert paris.input_lag_reason is not None
+    assert "same_cycle_late_input" in paris.input_lag_reason
+    assert paris.covered is False
+    assert paris.can_seed is True
 
 
 def test_current_target_plan_does_not_seed_when_fusion_current_values_are_missing(tmp_path) -> None:

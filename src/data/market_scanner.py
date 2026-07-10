@@ -3730,72 +3730,82 @@ def reconstruct_weather_market_from_static_topology(
         return None
 
     condition_ids = tuple(str(row.get("condition_id") or "").strip() for row in rows)
-    # WARM-LANE FRESHNESS FIX (2026-06-13): the prior query was
-    # ``condition_id IN (...) ORDER BY captured_at DESC`` with NO LIMIT, which pulls
-    # EVERY historical snapshot row for the family's condition_ids out of the
-    # append-only ``executable_market_snapshots`` table (3.18M rows live, ~318 rows
-    # per condition_id and growing — DELETE/UPDATE are trigger-forbidden). Measured on
-    # the live 15GB DB: median 1078 / max 7002 ``SELECT *`` rows materialized per
-    # family at median 205ms / p95 536ms, even though the reconstruction below keeps
-    # ONLY the latest row per (condition_id, side) (≤22 rows). Across the 302 live
-    # pending families a full warm-lane sweep cost ~82s; on the ~5s topology-phase
-    # budget per 20s cycle that swept only ~18 families/cycle, so each family's book
-    # was fresh barely 30s of every ~5min sweep period → the reactor's 30s
-    # price-freshness gate found a stale book ~90% of the time → the
-    # EXECUTABLE_SNAPSHOT_STALE requeue storm (processed=0, retried=18-23/cycle).
-    #
-    # FIX: fetch only what the reconstruction consumes — the latest YES row, the
-    # latest NO row, and the latest-overall row PER condition_id — via the existing
-    # ``idx_snapshots_condition_captured (condition_id, captured_at DESC)`` index as a
-    # bounded tail seek (LIMIT 1 each). The latest-overall seek preserves ``latest_seen``
-    # and is the fail-safe for any future NULL-``outcome_label`` row (the schema CHECK
-    # currently forbids non-YES/NO values; live count of NULL labels = 0). The Python
-    # de-dup loop below is UNCHANGED, so the reconstructed market is byte-identical to
-    # the full-scan path (verified: 0 mismatches over 150 live families — same
-    # ``latest_seen`` and same selected snapshot_id per (condition, side)) at ~272x
-    # lower cost (43.5s → 0.16s for those 150 families). This does NOT relax the 30s
-    # freshness window — it only makes the warm lane fast enough to keep every pending
-    # family's book inside it. The market-identity authority is stable by operator law
-    # ("freshness 针对价格不针对市场; 市场捕捉了不会突然消失").
+    # One family must cost one bounded latest-state query in the normal live path.
+    # The immutable append row remains the full evidence source; its materialized
+    # latest identity turns O(conditions) SQLite seeks into one set operation.
     snapshot_select_columns = (
-        "snapshot_id, gamma_market_id, event_id, event_slug, condition_id, "
-        "question_id, yes_token_id, no_token_id, selected_outcome_token_id, "
-        "outcome_label, enable_orderbook, active, closed, accepting_orders, "
-        "market_start_at, market_end_at, market_close_at, sports_start_at, "
-        "token_map_json, raw_gamma_payload_hash, captured_at, freshness_deadline"
+        "snapshot_id",
+        "gamma_market_id",
+        "event_id",
+        "event_slug",
+        "condition_id",
+        "question_id",
+        "yes_token_id",
+        "no_token_id",
+        "selected_outcome_token_id",
+        "outcome_label",
+        "enable_orderbook",
+        "active",
+        "closed",
+        "accepting_orders",
+        "market_start_at",
+        "market_end_at",
+        "market_close_at",
+        "sports_start_at",
+        "token_map_json",
+        "raw_gamma_payload_hash",
+        "captured_at",
+        "freshness_deadline",
     )
-    seen_snapshot_ids: set[str] = set()
     snapshot_rows: list[Any] = []
     try:
-        for condition_id_seek in condition_ids:
-            for label in ("YES", "NO", None):
-                if label is None:
-                    seek_sql = (
-                        f"SELECT {snapshot_select_columns} FROM executable_market_snapshots "
-                        "WHERE condition_id = ? "
-                        "ORDER BY captured_at DESC, snapshot_id DESC LIMIT 1"
-                    )
-                    seek_params: tuple[str, ...] = (condition_id_seek,)
-                else:
-                    seek_sql = (
-                        f"SELECT {snapshot_select_columns} FROM executable_market_snapshots "
-                        "WHERE condition_id = ? AND outcome_label = ? "
-                        "ORDER BY captured_at DESC, snapshot_id DESC LIMIT 1"
-                    )
-                    seek_params = (condition_id_seek, label)
-                seek_row = snapshot_conn.execute(seek_sql, seek_params).fetchone()
-                if seek_row is None:
+        placeholders = ",".join("?" for _ in condition_ids)
+        selected_columns = ", ".join(f"s.{column}" for column in snapshot_select_columns)
+        snapshot_rows = snapshot_conn.execute(
+            f"""
+            SELECT {selected_columns}
+              FROM executable_market_snapshot_latest AS latest
+              JOIN executable_market_snapshots AS s
+                ON s.snapshot_id = latest.snapshot_id
+             WHERE latest.condition_id IN ({placeholders})
+             ORDER BY s.captured_at DESC, s.snapshot_id DESC
+            """,
+            condition_ids,
+        ).fetchall()
+
+        # Legacy/partially materialized databases may lack one mirror side. Keep
+        # compatibility with bounded indexed seeks only for those missing sides;
+        # the complete live mirror never enters this fallback.
+        present: set[tuple[str, str]] = set()
+        for row in snapshot_rows:
+            data = dict(row)
+            side = _snapshot_outcome_side(data)
+            if side is not None:
+                present.add((str(data.get("condition_id") or "").strip(), side))
+        append_columns = ", ".join(snapshot_select_columns)
+        for condition_id in condition_ids:
+            for side, token_column in (("YES", "yes_token_id"), ("NO", "no_token_id")):
+                if (condition_id, side) in present:
                     continue
-                seek_data = dict(seek_row)
-                snapshot_id = str(seek_data.get("snapshot_id") or "")
-                # De-dup so the latest-overall seek does not double-feed a row already
-                # returned by the YES/NO seek (a row appears at most once, exactly as the
-                # IN-list scan returned each physical row once).
-                if snapshot_id and snapshot_id in seen_snapshot_ids:
-                    continue
-                if snapshot_id:
-                    seen_snapshot_ids.add(snapshot_id)
-                snapshot_rows.append(seek_row)
+                row = snapshot_conn.execute(
+                    f"""
+                    SELECT {append_columns}
+                      FROM executable_market_snapshots
+                     WHERE condition_id = ?
+                       AND (
+                            outcome_label = ?
+                            OR (
+                                outcome_label IS NULL
+                                AND selected_outcome_token_id = {token_column}
+                            )
+                       )
+                     ORDER BY captured_at DESC, snapshot_id DESC
+                     LIMIT 1
+                    """,
+                    (condition_id, side),
+                ).fetchone()
+                if row is not None:
+                    snapshot_rows.append(row)
     except Exception:
         return None
 

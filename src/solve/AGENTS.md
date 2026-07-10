@@ -12,7 +12,9 @@ and the executable venue menu, it plans the multi-order action that maximizes ro
 expected log terminal wealth against the current portfolio as ENDOWMENT. It replaces the
 top-1-candidate picker (`src/decision/family_decision_engine.py`) at exactly one seam —
 `src/engine/qkernel_spine_bridge.py:1332` — behind the time-boxed `w3_solve_enabled`
-promotion flag. Nothing wires it in yet; the math core is inert until sub-slice 3.
+promotion flag. The cross-family global single-order selector is wired through the reactor's
+`prepare all -> choose one -> JIT recapture -> submit once` epoch; live authority still requires
+current scope, book, wealth, probability, RiskGuard, and venue receipt evidence each cycle.
 
 ## Key files
 
@@ -37,13 +39,26 @@ promotion flag. Nothing wires it in yet; the math core is inert until sub-slice 
 - **Objective is joint CVaR, not greedy, not a raw quantile.** `solve()` maximizes the
   lower-tail **CVaR** at the band's α of per-draw expected Δlog-wealth of the WHOLE stake
   vector against `WealthStateByAtom`. CVaR (not the α-quantile) is deliberate: it is
-  concavity-preserving, so coordinate ascent reaches the GLOBAL optimum — the legacy
-  payoff_vector "quantile-of-concave is unimodal" assertion is UNSAFE and not inherited.
+  concavity-preserving. The continuous authority is the Rockafellar–Uryasev lower-CVaR
+  convex program; the legacy payoff_vector "quantile-of-concave is unimodal" assertion is
+  UNSAFE and not inherited.
   Deterministic (no RNG, no wall-clock): coarse-to-fine 1-D grid per coordinate, seeded at
   the best single item so the plan dominates the top-1 picker.
 - **Single-family only.** Multi-family joint scenarios FAIL CLOSED until C4
   (`MultiFamilyJointUnavailableError`) — index-pairing is not a certifiable independent
   product, and caps limit loss, they never license the log-utility objective.
+- **Cross-family comparison is one-order-only and certificate-bound.** It does not fabricate
+  a joint distribution. A candidate carries no self-authored q. One family witness carries the
+  complete MECE row-simplex draw matrix and ordered `(bin, condition, YES token, NO token)`
+  bindings; YES consumes its bound column and NO the pointwise complement. Independent current
+  resolvers must confirm the probability, native ask-depth/fee/tick/book, and reconciled wealth
+  identities before scoring. A current venue-universe witness must prove every active family is
+  represented; a partial reactor page is not global and fails closed. One `PortfolioWealthWitness` binds ledger generation, positions,
+  reservations, spendable cash, and wealth bounds. Stale, mismatched, maker-contingent, or
+  non-positive candidates are unrankable. Rank the current epoch by coupling-robust lower-CVaR
+  Δlog-wealth; numerical ties prefer higher robust Δlog per dollar, then lower cash. A
+  capital-time rate is forbidden without an authoritative release/arrival/reinvestment model.
+  This is not multi-order portfolio optimality.
 - **κ single-owner, typed.** κ=1.0 throughout W3/W4 (the downstream haircut still shades);
   `KappaPolicy.__post_init__` makes a κ<1 with the haircut alive unconstructable. κ is a
   typed `Kappa` Decimal value object. Ownership transfers atomically in the W5 commit that
@@ -58,11 +73,12 @@ promotion flag. Nothing wires it in yet; the math core is inert until sub-slice 
 - **Phase-1 executable menu = DIRECT NATIVE routes only.** synthetic/pair/basket/conversion routes
   are menu-visible but non-executable (`PHASE1_NON_DIRECT_ROUTE`); their single-instrument payoff
   projection is wrong and multi-leg atomicity would be lost (phase-2 `PlannedRoute`/`PlannedLeg`).
-- **The optimizer is coordinate ascent + three coupling moves.** Budget-neutral pairwise exchange
-  (budget face), a diversified multi-start seed (from-origin hedge — CVaR directional derivatives
-  are superadditive), and a radial balanced-growth step (arbs / symmetric hedges). Globality is
-  guarded by 2-D/3-D brute-force fixtures (grid-beats-ascent = STOP). The RU convex program is the
-  recorded future hardening; the `max(joint, top1)` floor guarantees phase-1 safety regardless.
+- **The optimizer is a certifying lower-CVaR program.** A deterministic tail-mixture
+  cutting-plane master solves the Rockafellar–Uryasev convex program. Coordinate ascent,
+  budget-neutral pairwise exchange, diversified multi-start, and radial balanced growth supply
+  only a feasible warm start and the best-single-item dominance floor; they are not a globality
+  certificate. Exact 2-D exhaustive-grid fixtures independently test YES-best, NO-best, mirror
+  invariance, and the former coordinate-ascent counterexample.
 - **Discrete repair must PROVE it did not harm — carry a `RepairCertificate`.** κ scales the
   continuous solution first; quantized/capped stakes (each on their OWN per-item tick/min
   grid) are RE-EVALUATED under the worst-price model; a non-empty plan is submit-worthy only

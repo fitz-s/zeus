@@ -12,7 +12,10 @@ from typing import Callable, Mapping
 from src.config import cities_by_name
 from src.data.raw_forecast_artifact_manifest import RawForecastArtifactManifest, read_manifest
 from src.data.replacement_forecast_cycle_policy import tradeable_grade_coverage_sql
-from src.data.replacement_forecast_current_target_plan import build_replacement_forecast_current_target_plan
+from src.data.replacement_forecast_current_target_plan import (
+    _latest_authorized_day0_fact,
+    build_replacement_forecast_current_target_plan,
+)
 from src.data.replacement_forecast_materialization_seed_builder import (
     build_replacement_forecast_materialization_seed,
     latest_baseline_coverage_for_replacement_seed,
@@ -120,9 +123,6 @@ def _day0_observed_extreme_seed_payload(
     metric_norm = str(metric or "").strip().lower()
     if metric_norm not in {"high", "low"}:
         return None
-    metric_is_low = metric_norm == "low"
-    extreme_col = "running_min" if metric_is_low else "running_max"
-    agg = "MIN" if metric_is_low else "MAX"
     unit = str(getattr(city_obj, "settlement_unit", "") or "").strip().upper()
     if not unit:
         return None
@@ -132,63 +132,33 @@ def _day0_observed_extreme_seed_payload(
         return None
     try:
         world_conn.row_factory = sqlite3.Row
-        now_iso = computed_at.astimezone(UTC).isoformat()
-        for table_ref in ("world.observation_instants", "observation_instants"):
-            try:
-                row = world_conn.execute(
-                    f"""
-                    SELECT {agg}(CAST({extreme_col} AS REAL)) AS extreme,
-                           MAX(utc_timestamp) AS obs_time,
-                           COUNT(*) AS n_rows
-                    FROM {table_ref}
-                    WHERE city = ?
-                      AND target_date = ?
-                      AND substr(local_timestamp, 1, 10) = target_date
-                      AND utc_timestamp <= ?
-                      AND COALESCE(causality_status, 'OK') = 'OK'
-                      AND (
-                            (
-                                UPPER(COALESCE(authority, '')) = 'VERIFIED'
-                                AND COALESCE(source_role, '') = 'historical_hourly'
-                                AND COALESCE(training_allowed, 0) = 1
-                                AND (
-                                    LOWER(COALESCE(source, '')) LIKE 'wu%'
-                                    OR LOWER(COALESCE(source, '')) LIKE 'ogimet_metar_%'
-                                )
-                            )
-                            OR (
-                                city = 'Hong Kong'
-                                AND LOWER(COALESCE(source, '')) = 'hko_hourly_accumulator'
-                                AND UPPER(COALESCE(authority, '')) = 'ICAO_STATION_NATIVE'
-                                AND COALESCE(source_role, '') = 'runtime_monitoring'
-                                AND COALESCE(training_allowed, 0) = 0
-                            )
-                      )
-                      AND {extreme_col} IS NOT NULL
-                    """,
-                    (city, target_date, now_iso),
-                ).fetchone()
-            except Exception:  # noqa: BLE001 - missing attachment/table; try next ref
-                continue
-            if row is None:
-                continue
-            extreme = row["extreme"]
-            obs_time = row["obs_time"]
-            sample_count = int(row["n_rows"] or 0)
-            if extreme is None or not obs_time or sample_count <= 0:
-                continue
-            try:
-                observed_c = _temperature_native_to_c(float(extreme), unit=unit)
-            except Exception:
-                return None
-            return {
-                "day0_observed_extreme_c": float(observed_c),
-                "day0_observed_extreme_source": "durable_observation_instants",
-                "day0_observed_extreme_observation_time": str(obs_time),
-                "day0_observed_extreme_sample_count": sample_count,
-                "day0_observed_extreme_unit": unit,
-            }
-        return None
+        fact = _latest_authorized_day0_fact(
+            world_conn,
+            city=city,
+            target_date=target_date,
+            temperature_metric=metric_norm,
+            decision_time=computed_at,
+        )
+        if fact is None:
+            return None
+        try:
+            observed_c = _temperature_native_to_c(
+                float(fact["observed_extreme_native"]),
+                unit=unit,
+            )
+            sample_count = int(fact.get("sample_count") or 0)
+            observation_time = str(fact["observation_time"])
+        except (KeyError, TypeError, ValueError):
+            return None
+        if sample_count <= 0 or not observation_time:
+            return None
+        return {
+            "day0_observed_extreme_c": float(observed_c),
+            "day0_observed_extreme_source": str(fact.get("source") or "unknown"),
+            "day0_observed_extreme_observation_time": observation_time,
+            "day0_observed_extreme_sample_count": sample_count,
+            "day0_observed_extreme_unit": unit,
+        }
     finally:
         try:
             world_conn.close()

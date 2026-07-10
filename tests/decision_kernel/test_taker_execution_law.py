@@ -61,6 +61,8 @@ def _taker_chain(*, order_mode: str = "TAKER", actionable_overrides: dict | None
                  passive_maker_context=_UNSET,
                  available_crossable_shares: float | None = None,
                  sweep_expected_fill_price: str | None = None,
+                 exact_taker_shares: str | None = None,
+                 exact_taker_limit_price: str | None = None,
                  taker_quality_proof: dict | None = None):
     """Build a final-intent + expressibility chain through the (parameterized) builder.
 
@@ -85,6 +87,7 @@ def _taker_chain(*, order_mode: str = "TAKER", actionable_overrides: dict | None
         "p_fill_lcb": 0.10,  # thin book -> low maker fill prob
         "trade_score": 0.2,
         "action_score": 0.2,
+        "min_entry_price": 0.0,
         "fdr_family_id": "family-1",
         "kelly_decision_id": "kelly-1",
         "kelly_size_usd": 3.0,
@@ -206,6 +209,8 @@ def _taker_chain(*, order_mode: str = "TAKER", actionable_overrides: dict | None
         best_ask=float(quote_payload["best_ask"]),
         available_crossable_shares=available_crossable_shares,
         sweep_expected_fill_price=sweep_expected_fill_price,
+        exact_taker_shares=exact_taker_shares,
+        exact_taker_limit_price=exact_taker_limit_price,
         taker_quality_proof=taker_quality_proof,
     )
     if return_parents:
@@ -255,6 +260,48 @@ def test_governor_taker_accepted_by_all_three_layers_and_submittable():
         executor_native_intent_hash=native_hash,
     )
     verify_executor_expressibility(expressibility, (final_intent, executable, live_cap))
+
+
+def test_global_exact_taker_preserves_deep_limit_and_exact_share_count():
+    _, _, final_intent, parents = _taker_chain(
+        order_mode="TAKER",
+        actionable_overrides={"live_cap_reserved_notional_usd": 6.0},
+        available_crossable_shares=12.0,
+        sweep_expected_fill_price="0.1666666666666666666666666667",
+        exact_taker_shares="12.00",
+        exact_taker_limit_price="0.50",
+        return_parents=True,
+    )
+
+    verify_final_intent(final_intent, parents)
+    assert final_intent.payload["limit_price"] == 0.5
+    assert final_intent.payload["size"] == 12.0
+    assert final_intent.payload["notional_usd"] == 6.0
+    assert final_intent.payload["expected_fill_price_before_fee"] == (
+        "0.1666666666666666666666666667"
+    )
+    assert final_intent.payload["global_exact_order"] is True
+
+
+def test_global_exact_taker_certificate_rejects_share_binding_drift():
+    _, _, final_intent, parents = _taker_chain(
+        order_mode="TAKER",
+        actionable_overrides={"live_cap_reserved_notional_usd": 6.0},
+        available_crossable_shares=12.0,
+        sweep_expected_fill_price="0.1666666666666666666666666667",
+        exact_taker_shares="12.00",
+        exact_taker_limit_price="0.50",
+        return_parents=True,
+    )
+    drifted = dict(final_intent.payload)
+    drifted["global_target_shares"] = "11.99"
+    object.__setattr__(final_intent, "payload", drifted)
+
+    with pytest.raises(
+        CertificateVerificationError,
+        match="global exact order share binding mismatch",
+    ):
+        verify_final_intent(final_intent, parents)
 
 
 def test_taker_price_is_marketable_when_touch_inside_reservation():

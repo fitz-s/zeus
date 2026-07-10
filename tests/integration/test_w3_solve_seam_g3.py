@@ -1,5 +1,5 @@
 # Created: 2026-07-03
-# Last reused/audited: 2026-07-09
+# Last reused/audited: 2026-07-10
 """G3 harness for the W3 SOLVE promotion seam (qkernel_spine_bridge.py w3_solve_enabled flag).
 
 Proves the promotion flag is a SAFE, reversible, single-point cutover before any live enablement:
@@ -18,17 +18,50 @@ from __future__ import annotations
 
 import ast
 import datetime as _dt
+import hashlib
+import json
+import sqlite3
 import subprocess
 import sys
 import textwrap
+from dataclasses import replace
 from decimal import Decimal
+from types import SimpleNamespace
 
 import pytest
 
 import src.engine.qkernel_spine_bridge as bridge
 import src.engine.event_reactor_adapter as era
-from src.solve.solver import validate_family_decision_contract
+import src.engine.global_batch_runtime as global_batch_runtime
+from src.engine.global_single_order_auction import select_prepared_global_auction
+from src.engine.global_auction_universe import (
+    _day0_event_is_current_for_entry,
+    capture_current_global_book_epoch,
+    current_global_scope_events_with_day0,
+    current_portfolio_wealth_witness,
+    current_global_auction_scope_from_events,
+)
+from src.events.opportunity_event import (
+    Day0ExtremeUpdatedPayload,
+    ForecastSnapshotReadyPayload,
+    make_day0_extreme_updated_event,
+    make_opportunity_event,
+)
+from src.events.reactor import EventSubmissionReceipt
+from src.solve.solver import (
+    CurrentExecutionAuthority,
+    CurrentFamilyProbabilityAuthority,
+    JointOutcomeProbabilityWitness,
+    OutcomeTokenBinding,
+    PortfolioWealthWitness,
+    global_candidate_from_native,
+    joint_probability_witness_identity,
+    portfolio_wealth_identity,
+    validate_family_decision_contract,
+)
 from src.strategy import utility_ranker
+from src.state.collateral_ledger import init_collateral_schema
+from src.state.portfolio import PortfolioState
 from tests.integration import test_qkernel_spine_routing as R
 
 _BRIDGE_PATH = bridge.__file__
@@ -50,6 +83,260 @@ def _drive(family, proofs, payload):
     )
 
 
+def _payload_with_joint_samples(proofs, payload, *, draws=64):
+    """Attach a coherent current-posterior draw matrix to a synthetic fixture payload."""
+    out = dict(payload)
+    out["_edli_spine_served_joint_q_samples_by_condition"] = {
+        str(proof.candidate.condition_id): [float(proof.q_posterior)] * draws
+        for proof in proofs
+        if proof.direction == "buy_yes"
+    }
+    out["_edli_spine_posterior_identity_hash"] = "fixture-current-posterior"
+    return out
+
+
+def _global_scope_event(*, city: str, source_run_id: str):
+    captured_at = "2026-07-10T08:00:00+00:00"
+    payload = ForecastSnapshotReadyPayload(
+        city=city,
+        target_date="2026-07-11",
+        metric="high",
+        source_id="replacement_0_1",
+        source_run_id=source_run_id,
+        cycle="2026-07-10T00:00:00+00:00",
+        track="replacement_0_1_openmeteo_bayes_fusion",
+        snapshot_id=f"rmf-{city}|2026-07-11|high|2026-07-10",
+        snapshot_hash=source_run_id,
+        captured_at=captured_at,
+        available_at=captured_at,
+        required_fields_present=True,
+        required_steps_present=True,
+        member_count=3,
+        min_members_floor=3,
+        completeness_status="COMPLETE",
+        required_steps=[],
+        observed_steps=[],
+        expected_members=3,
+        source_run_status="COMPLETE",
+        source_run_completeness_status="COMPLETE",
+        coverage_completeness_status="COMPLETE",
+        coverage_readiness_status="LIVE_ELIGIBLE",
+    )
+    return make_opportunity_event(
+        event_type="FORECAST_SNAPSHOT_READY",
+        entity_key=f"{city}|2026-07-11|high",
+        source="global-auction-current-scope",
+        observed_at=captured_at,
+        available_at=captured_at,
+        received_at=captured_at,
+        payload=payload,
+        causal_snapshot_id=payload.snapshot_id,
+    )
+
+
+def test_current_global_probability_prepare_does_not_require_price_snapshot(monkeypatch):
+    import src.data.replacement_forecast_bundle_reader as bundle_reader
+    import src.engine.replacement_forecast_hook_factory as hook_factory
+
+    forecast = sqlite3.connect(":memory:")
+    forecast.row_factory = sqlite3.Row
+    forecast.execute(
+        """
+        CREATE TABLE forecast_posteriors (
+            posterior_id INTEGER PRIMARY KEY,
+            posterior_identity_hash TEXT NOT NULL,
+            dependency_hash TEXT NOT NULL,
+            posterior_config_hash TEXT NOT NULL
+        )
+        """
+    )
+    forecast.execute(
+        "INSERT INTO forecast_posteriors VALUES (1, 'posterior-1', 'dependency-1', 'config-1')"
+    )
+    forecast.execute(
+        """
+        CREATE TABLE market_events (
+            city TEXT NOT NULL,
+            target_date TEXT NOT NULL,
+            temperature_metric TEXT NOT NULL,
+            condition_id TEXT NOT NULL,
+            token_id TEXT NOT NULL,
+            market_slug TEXT,
+            range_label TEXT,
+            range_low REAL,
+            range_high REAL
+        )
+        """
+    )
+    forecast.executemany(
+        "INSERT INTO market_events VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            ("Dallas", "2026-07-11", "high", "c0", "yes0", "dallas-69-or-below", "69F or below", None, 69.0),
+            ("Dallas", "2026-07-11", "high", "c1", "yes1", "dallas-70-71", "70-71F", 70.0, 71.0),
+            ("Dallas", "2026-07-11", "high", "c2", "yes2", "dallas-72-or-above", "72F or above", 72.0, None),
+        ),
+    )
+    posterior_bins = (
+        ("p0", None, (69.0 - 32.0) * 5.0 / 9.0),
+        ("p1", (70.0 - 32.0) * 5.0 / 9.0, (71.0 - 32.0) * 5.0 / 9.0),
+        ("p2", (72.0 - 32.0) * 5.0 / 9.0, None),
+    )
+    probabilities = (0.2, 0.3, 0.5)
+    bundle = SimpleNamespace(
+        posterior_id=1,
+        q={key: probability for (key, _lo, _hi), probability in zip(posterior_bins, probabilities)},
+        provenance_json={
+            "q_bootstrap_samples_basis": "global_simplex_v1",
+            "q_bootstrap_samples_by_bin": {
+                key: [probability] * 400
+                for (key, _lo, _hi), probability in zip(posterior_bins, probabilities)
+            },
+            "bin_topology": [
+                {"bin_id": key, "lower_c": lower, "upper_c": upper}
+                for key, lower, upper in posterior_bins
+            ],
+        },
+        source_cycle_time="2026-07-10T00:00:00+00:00",
+        source_available_at="2026-07-10T06:00:00+00:00",
+    )
+    monkeypatch.setattr(
+        hook_factory,
+        "_latest_replacement_readiness",
+        lambda *args, **kwargs: object(),
+    )
+    monkeypatch.setattr(
+        bundle_reader,
+        "read_replacement_forecast_bundle",
+        lambda *args, **kwargs: SimpleNamespace(
+            ok=True,
+            bundle=bundle,
+            reason_code="READY",
+        ),
+    )
+
+    prepared = era._prepare_current_global_probability_family(
+        _global_scope_event(city="Dallas", source_run_id="run-dallas"),
+        forecast_conn=forecast,
+        topology_conn=forecast,
+        decision_time=_dt.datetime(2026, 7, 10, 8, 10, tzinfo=_dt.timezone.utc),
+        max_age=_dt.timedelta(seconds=30),
+    )
+
+    witness = prepared.probability_witness
+    assert prepared.candidate_seeds == ()
+    assert witness.yes_q_samples.shape == (400, 3)
+    assert witness.band_basis == "global_simplex_v1"
+    assert [binding.yes_token_id for binding in witness.bindings] == ["yes0", "yes1", "yes2"]
+    assert all(binding.no_token_id is None for binding in witness.bindings)
+    assert witness.yes_q_samples[0].tolist() == pytest.approx(list(probabilities))
+    assert (1.0 - witness.yes_q_samples[:, 1]).tolist() == pytest.approx([0.7] * 400)
+
+
+def test_live_adapter_routes_global_scope_through_world_connection(monkeypatch):
+    trade = sqlite3.connect(":memory:")
+    forecast = sqlite3.connect(":memory:")
+    topology = sqlite3.connect(":memory:")
+    world = sqlite3.connect(":memory:")
+    captured = {}
+
+    def fake_process(events, **kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(events=tuple(events))
+
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "process_current_global_batch",
+        fake_process,
+    )
+    adapter = era.event_bound_live_adapter_from_trade_conn(
+        trade,
+        get_current_level=lambda: era.RiskLevel.GREEN,
+        forecast_conn=forecast,
+        topology_conn=topology,
+        calibration_conn=world,
+    )
+    event = _global_scope_event(city="Dallas", source_run_id="run-dallas")
+
+    result = adapter.process_global_batch(
+        (event,),
+        _dt.datetime(2026, 7, 10, 8, 10, tzinfo=_dt.timezone.utc),
+    )
+
+    assert result.events == (event,)
+    assert captured["world_conn"] is world
+    assert captured["forecast_conn"] is forecast
+    assert captured["world_conn"] is not topology
+
+
+def test_current_global_scope_uses_latest_day0_carrier_per_family():
+    forecast_alpha = _global_scope_event(city="Alpha", source_run_id="run-a")
+    forecast_beta = _global_scope_event(city="Beta", source_run_id="run-b")
+    day0_payload = Day0ExtremeUpdatedPayload(
+        city="Alpha",
+        target_date="2026-07-11",
+        metric="high",
+        settlement_source="WU",
+        station_id="ALPHA-WU",
+        observation_time="2026-07-10T08:09:00+00:00",
+        observation_available_at="2026-07-10T08:10:00+00:00",
+        raw_value=21.2,
+        rounded_value=21,
+        high_so_far=21.2,
+        source_match_status="MATCH",
+        local_date_status="MATCH",
+        station_match_status="MATCH",
+        dst_status="UNAMBIGUOUS",
+        metric_match_status="MATCH",
+        rounding_status="MATCH",
+        source_authorized_status="AUTHORIZED",
+        live_authority_status="live",
+    )
+    day0_alpha = make_day0_extreme_updated_event(
+        entity_key="Alpha|2026-07-11|high|ALPHA-WU",
+        source="day0_observation",
+        observed_at=day0_payload.observation_time,
+        received_at="2026-07-10T08:10:01+00:00",
+        payload=day0_payload,
+        causal_snapshot_id="day0-alpha-0810",
+    )
+
+    forecast_only = current_global_auction_scope_from_events(
+        (forecast_alpha, forecast_beta),
+        captured_at_utc=_dt.datetime(2026, 7, 10, 8, 0, tzinfo=_dt.timezone.utc),
+    )
+    merged_events = current_global_scope_events_with_day0(
+        (forecast_alpha, forecast_beta),
+        (day0_alpha,),
+    )
+    merged = current_global_auction_scope_from_events(
+        merged_events,
+        captured_at_utc=_dt.datetime(2026, 7, 10, 8, 10, tzinfo=_dt.timezone.utc),
+    )
+
+    assert len(merged.events) == 2
+    assert merged.events_by_family[0][1].event_id == day0_alpha.event_id
+    assert merged.events_by_family[0][1].event_type == "DAY0_EXTREME_UPDATED"
+    assert merged.events_by_family[1][1].event_id == forecast_beta.event_id
+    assert merged.scope_identity != forecast_only.scope_identity
+
+
+def test_day0_entry_scope_requires_target_city_current_local_day():
+    current = _dt.datetime(2026, 7, 10, 12, 0, tzinfo=_dt.timezone.utc)
+
+    assert _day0_event_is_current_for_entry(
+        {"city": "London", "target_date": "2026-07-10"},
+        decision_at_utc=current,
+    )
+    assert not _day0_event_is_current_for_entry(
+        {"city": "London", "target_date": "2026-07-09"},
+        decision_at_utc=current,
+    )
+    assert not _day0_event_is_current_for_entry(
+        {"city": "London", "target_date": "2026-07-11"},
+        decision_at_utc=current,
+    )
+
+
 @pytest.fixture(autouse=True)
 def _fast_band_draws(monkeypatch):
     monkeypatch.setattr(bridge, "SPINE_BAND_DRAWS", 400, raising=False)
@@ -58,22 +345,34 @@ def _fast_band_draws(monkeypatch):
 def _corpus():
     """A small (family, proofs, payload) corpus: a +edge trade and an overpriced no-trade."""
     fam_a, _ = R._three_bin_family()
+    trade_proofs = R._proofs_for(
+        fam_a, yes_asks=[0.05, 0.20, 0.20, 0.05], no_asks=[0.92, 0.75, 0.75, 0.92],
+        q_by_bin=[0.05, 0.45, 0.40, 0.10], q_lcb_by_bin=[0.02, 0.32, 0.28, 0.05],
+    )
     trade = (
         fam_a,
-        R._proofs_for(
-            fam_a, yes_asks=[0.05, 0.20, 0.20, 0.05], no_asks=[0.92, 0.75, 0.75, 0.92],
-            q_by_bin=[0.05, 0.45, 0.40, 0.10], q_lcb_by_bin=[0.02, 0.32, 0.28, 0.05],
+        trade_proofs,
+        _payload_with_joint_samples(
+            trade_proofs,
+            R._payload_with_spine_inputs(
+                mu=20.4, sigma=1.2, members=[19.8, 20.1, 20.5, 21.0, 20.7]
+            ),
         ),
-        R._payload_with_spine_inputs(mu=20.4, sigma=1.2, members=[19.8, 20.1, 20.5, 21.0, 20.7]),
     )
     fam_b, _ = R._three_bin_family()
+    no_trade_proofs = R._proofs_for(
+        fam_b, yes_asks=[0.60, 0.60, 0.60, 0.60], no_asks=[0.60, 0.60, 0.60, 0.60],
+        q_by_bin=[0.05, 0.45, 0.40, 0.10], q_lcb_by_bin=[0.02, 0.32, 0.28, 0.05],
+    )
     no_trade = (
         fam_b,
-        R._proofs_for(
-            fam_b, yes_asks=[0.60, 0.60, 0.60, 0.60], no_asks=[0.60, 0.60, 0.60, 0.60],
-            q_by_bin=[0.05, 0.45, 0.40, 0.10], q_lcb_by_bin=[0.02, 0.32, 0.28, 0.05],
+        no_trade_proofs,
+        _payload_with_joint_samples(
+            no_trade_proofs,
+            R._payload_with_spine_inputs(
+                mu=20.4, sigma=1.2, members=[19.8, 20.1, 20.5, 21.0, 20.7]
+            ),
         ),
-        R._payload_with_spine_inputs(mu=20.4, sigma=1.2, members=[19.8, 20.1, 20.5, 21.0, 20.7]),
     )
     return [trade, no_trade]
 
@@ -143,6 +442,24 @@ def test_g3_absent_vs_off_byte_identical():
     assert any("decision_id=" in s for s in off), "corpus did not exercise the engine pipeline"
 
 
+def test_g3_off_ignores_joint_samples_and_keeps_v1_band_identity():
+    restore = _set_flag(None)
+    try:
+        result = _drive(*_corpus()[0])
+    finally:
+        restore()
+
+    assert result.decision is not None
+    band = result.decision.band
+    assert band is not None
+    assert band.samples.shape[0] == 1
+    expected = hashlib.sha256()
+    expected.update(b"REACTOR_SERVED_POSTERIOR_DETERMINISTIC_BAND_V1")
+    expected.update(result.decision.joint_q.identity_hash.encode("utf-8"))
+    expected.update(f"alpha={float(band.alpha):.12f}".encode("utf-8"))
+    assert band.sample_hash == expected.hexdigest()
+
+
 # --- (b) single divergence point --------------------------------------------
 
 def test_g3_flag_consumed_at_exactly_one_site():
@@ -194,8 +511,10 @@ def test_g3_on_mode_shim_runs_and_is_contract_valid():
 
 
 def test_g3_on_mode_selection_diverges_from_off():
-    # The whole point of the seam: ON runs a DIFFERENT selector. Same fixture, same inputs — the
-    # ON no-trade reason is the solver's, the OFF reason is the legacy picker's.
+    # The whole point of the seam: ON runs the current-state solver while OFF retains the
+    # legacy empirical-guard selector.  A route becoming honestly executable may make both
+    # paths trade, so divergence is proven by decision authority rather than by requiring
+    # one path to manufacture a no-trade reason.
     trade = _corpus()[0]
     restore = _set_flag(None)
     try:
@@ -208,10 +527,14 @@ def test_g3_on_mode_selection_diverges_from_off():
     finally:
         restore()
     assert off.decision is not None and on.decision is not None
-    # both no-trade on this realistic (robust-band-wide) fixture, but for DIFFERENT reasons —
-    # legacy NO_POSITIVE_EDGE_CANDIDATE vs solver NO_IMPROVING_DISCRETE_PLAN
-    assert off.no_trade_reason != on.no_trade_reason, (
-        f"selection did not diverge: off={off.no_trade_reason} on={on.no_trade_reason}"
+    assert all(
+        candidate.q_lcb_guard_basis != "CURRENT_POSTERIOR_BAND"
+        for candidate in off.decision.candidate_decisions
+    )
+    assert on.decision.candidate_decisions
+    assert all(
+        candidate.q_lcb_guard_basis == "CURRENT_POSTERIOR_BAND"
+        for candidate in on.decision.candidate_decisions
     )
     assert any(k in (on.no_trade_reason or "") for k in _SOLVER_ORIGIN_REASONS) or on.decision.selected is not None
 
@@ -240,6 +563,1030 @@ def test_g3_on_mode_never_reads_historical_decision_guards(monkeypatch):
 
     assert result.decision is not None
     validate_family_decision_contract(result.decision)
+
+
+def test_g3_on_mode_fails_closed_without_joint_posterior_samples():
+    family, proofs, payload = _corpus()[0]
+    payload = dict(payload)
+    payload.pop("_edli_spine_served_joint_q_samples_by_condition", None)
+    restore = _set_flag(True)
+    try:
+        result = _drive(family, proofs, payload)
+    finally:
+        restore()
+
+    assert result.decision is None
+    assert result.no_trade_reason == "SPINE_INPUTS_UNAVAILABLE:SERVED_JOINT_SAMPLES_MISSING"
+
+
+def test_global_family_prepare_binds_full_simplex_to_condition_token_pairs():
+    family, proofs, payload = _corpus()[0]
+    captured_at = "2026-06-13T11:59:59.900000+00:00"
+    proofs = tuple(
+        replace(proof, row={**proof.row, "captured_at": captured_at})
+        for proof in proofs
+    )
+    payload = _payload_with_joint_samples(proofs, payload, draws=400)
+    restore = _set_flag(False)
+    try:
+        result = bridge.decide_family_via_spine(
+            family=family,
+            payload=payload,
+            proofs=proofs,
+            decision_time=_dt.datetime(2026, 6, 13, 12, 0, tzinfo=_dt.timezone.utc),
+            native_side_candidate_from_proof=era._native_side_candidate_from_proof,
+            global_native_side_candidate_from_proof=(
+                era._full_depth_native_side_candidate_from_proof
+            ),
+            require_global_probability_witness=True,
+            global_probability_max_age=_dt.timedelta(seconds=1),
+            candidate_bin_id=era._candidate_bin_id,
+            payoff_matrix_over_bins=utility_ranker.FamilyPayoffMatrix.over_bins,
+            exposure_builder=era._robust_marginal_utility_exposure,
+            baseline_usd_provider=lambda: Decimal("1000"),
+            per_bin_yes_q_lcb=era._per_bin_yes_q_lcb(proofs),
+            extra_exposure_by_bin_id=None,
+        )
+    finally:
+        restore()
+
+    assert result.global_prepare_reason is None
+    prepared = result.global_family
+    assert prepared is not None
+    probability = prepared.probability_witness
+    assert probability.yes_q_samples.shape[0] == 400
+    assert all(
+        abs(float(row.sum()) - 1.0) < 1e-12
+        for row in probability.yes_q_samples
+    )
+    binding_by_key = {
+        (binding.bin_id, "YES"): binding.yes_token_id
+        for binding in probability.bindings
+    } | {
+        (binding.bin_id, "NO"): binding.no_token_id
+        for binding in probability.bindings
+    }
+    assert prepared.candidate_seeds
+    for seed in prepared.candidate_seeds:
+        candidate = seed.native_candidate
+        assert candidate.token_id == binding_by_key[(candidate.bin_id, candidate.side)]
+        assert candidate.executable_cost_curve.token_id == candidate.token_id
+        materialized = global_candidate_from_native(
+            candidate,
+            probability_witness=probability,
+            ledger_snapshot_id="ledger-current",
+            book_captured_at_utc=seed.book_captured_at_utc,
+        )
+        assert materialized.token_id == candidate.token_id
+        assert materialized.probability_witness_identity == probability.witness_identity
+
+
+def _global_book_metadata_conn(probability):
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        """
+        CREATE TABLE executable_market_snapshots (
+            snapshot_id TEXT PRIMARY KEY,
+            condition_id TEXT NOT NULL,
+            selected_outcome_token_id TEXT NOT NULL,
+            yes_token_id TEXT NOT NULL,
+            no_token_id TEXT NOT NULL,
+            enable_orderbook INTEGER NOT NULL,
+            active INTEGER NOT NULL,
+            closed INTEGER NOT NULL,
+            accepting_orders INTEGER NOT NULL,
+            fee_details_json TEXT NOT NULL,
+            min_tick_size TEXT NOT NULL,
+            min_order_size TEXT NOT NULL,
+            captured_at TEXT NOT NULL,
+            tradeability_status_json TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE executable_market_snapshot_latest (
+            condition_id TEXT NOT NULL,
+            selected_outcome_token_id TEXT NOT NULL,
+            snapshot_id TEXT NOT NULL,
+            PRIMARY KEY (condition_id, selected_outcome_token_id)
+        )
+        """
+    )
+    for binding in probability.bindings:
+        for side, token in (
+            ("YES", binding.yes_token_id),
+            ("NO", binding.no_token_id),
+        ):
+            snapshot_id = f"metadata-{binding.condition_id}-{side}"
+            conn.execute(
+                "INSERT INTO executable_market_snapshots VALUES "
+                "(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    snapshot_id,
+                    binding.condition_id,
+                    token,
+                    binding.yes_token_id,
+                    binding.no_token_id,
+                    1,
+                    1,
+                    0,
+                    1,
+                    '{"fee_rate_fraction":0}',
+                    "0.01",
+                    "5",
+                    "2026-07-10T07:59:00+00:00",
+                    '{"executable_allowed":true}',
+                ),
+            )
+            conn.execute(
+                "INSERT INTO executable_market_snapshot_latest VALUES (?,?,?)",
+                (binding.condition_id, token, snapshot_id),
+            )
+    return conn
+
+
+def test_current_global_book_epoch_reads_yes_and_no_symmetrically():
+    family, proofs, payload = _corpus()[0]
+    proofs = tuple(
+        replace(
+            proof,
+            row={**proof.row, "captured_at": "2026-07-10T07:59:59+00:00"},
+        )
+        for proof in proofs
+    )
+    payload = _payload_with_joint_samples(proofs, payload, draws=400)
+    result = bridge.decide_family_via_spine(
+        family=family,
+        payload=payload,
+        proofs=proofs,
+        decision_time=_dt.datetime(2026, 7, 10, 8, 0, tzinfo=_dt.timezone.utc),
+        native_side_candidate_from_proof=era._native_side_candidate_from_proof,
+        global_native_side_candidate_from_proof=era._full_depth_native_side_candidate_from_proof,
+        require_global_probability_witness=True,
+        global_probability_max_age=_dt.timedelta(seconds=30),
+        candidate_bin_id=era._candidate_bin_id,
+        payoff_matrix_over_bins=utility_ranker.FamilyPayoffMatrix.over_bins,
+        exposure_builder=era._robust_marginal_utility_exposure,
+        baseline_usd_provider=lambda: Decimal("1000"),
+        per_bin_yes_q_lcb=era._per_bin_yes_q_lcb(proofs),
+        extra_exposure_by_bin_id=None,
+    )
+    assert result.global_family is not None
+    probability = result.global_family.probability_witness
+    conn = _global_book_metadata_conn(probability)
+    requested = []
+    at = _dt.datetime(2026, 7, 10, 8, 0, tzinfo=_dt.timezone.utc)
+    times = iter((at, at + _dt.timedelta(seconds=1)))
+
+    def books(tokens):
+        requested.extend(tokens)
+        return {
+            token: {
+                "asset_id": token,
+                "hash": f"book-{token}",
+                "tick_size": "0.01",
+                "min_order_size": "5",
+                "bids": [{"price": "0.20", "size": "100"}],
+                "asks": [{"price": "0.30", "size": "100"}],
+            }
+            for token in tokens
+        }
+
+    epoch = capture_current_global_book_epoch(
+        conn,
+        probability_witnesses={probability.family_key: probability},
+        get_books=books,
+        clock=lambda: next(times),
+        max_age=_dt.timedelta(seconds=30),
+        batch_size=500,
+    )
+
+    expected = 2 * len(probability.bindings)
+    assert len(requested) == expected
+    assert len(epoch.asset_states) == expected
+    assert len(epoch.assets) == expected
+    assert {asset.side for asset in epoch.assets} == {"YES", "NO"}
+    assert all(asset.curve.token_id == asset.token_id for asset in epoch.assets)
+
+
+def test_current_global_book_epoch_rejects_one_missing_native_side():
+    family, proofs, payload = _corpus()[0]
+    proofs = tuple(
+        replace(
+            proof,
+            row={**proof.row, "captured_at": "2026-07-10T07:59:59+00:00"},
+        )
+        for proof in proofs
+    )
+    payload = _payload_with_joint_samples(proofs, payload, draws=400)
+    result = bridge.decide_family_via_spine(
+        family=family,
+        payload=payload,
+        proofs=proofs,
+        decision_time=_dt.datetime(2026, 7, 10, 8, 0, tzinfo=_dt.timezone.utc),
+        native_side_candidate_from_proof=era._native_side_candidate_from_proof,
+        global_native_side_candidate_from_proof=era._full_depth_native_side_candidate_from_proof,
+        require_global_probability_witness=True,
+        global_probability_max_age=_dt.timedelta(seconds=30),
+        candidate_bin_id=era._candidate_bin_id,
+        payoff_matrix_over_bins=utility_ranker.FamilyPayoffMatrix.over_bins,
+        exposure_builder=era._robust_marginal_utility_exposure,
+        baseline_usd_provider=lambda: Decimal("1000"),
+        per_bin_yes_q_lcb=era._per_bin_yes_q_lcb(proofs),
+        extra_exposure_by_bin_id=None,
+    )
+    assert result.global_family is not None
+    probability = result.global_family.probability_witness
+    conn = _global_book_metadata_conn(probability)
+    at = _dt.datetime(2026, 7, 10, 8, 0, tzinfo=_dt.timezone.utc)
+    times = iter((at, at + _dt.timedelta(seconds=1)))
+
+    def incomplete_books(tokens):
+        return {
+            token: {
+                "asset_id": token,
+                "hash": f"book-{token}",
+                "tick_size": "0.01",
+                "min_order_size": "5",
+                "bids": [],
+                "asks": [{"price": "0.30", "size": "100"}],
+            }
+            for token in tokens[:-1]
+        }
+
+    with pytest.raises(ValueError, match="GLOBAL_BOOK_RESPONSE_INCOMPLETE:1"):
+        capture_current_global_book_epoch(
+            conn,
+            probability_witnesses={probability.family_key: probability},
+            get_books=incomplete_books,
+            clock=lambda: next(times),
+            max_age=_dt.timedelta(seconds=30),
+            batch_size=500,
+        )
+
+
+def test_current_gamma_identity_fills_missing_no_without_changing_q():
+    family, proofs, payload = _corpus()[0]
+    proofs = tuple(
+        replace(
+            proof,
+            row={**proof.row, "captured_at": "2026-07-10T07:59:59+00:00"},
+        )
+        for proof in proofs
+    )
+    payload = _payload_with_joint_samples(proofs, payload, draws=400)
+    result = bridge.decide_family_via_spine(
+        family=family,
+        payload=payload,
+        proofs=proofs,
+        decision_time=_dt.datetime(2026, 7, 10, 8, 0, tzinfo=_dt.timezone.utc),
+        native_side_candidate_from_proof=era._native_side_candidate_from_proof,
+        global_native_side_candidate_from_proof=era._full_depth_native_side_candidate_from_proof,
+        require_global_probability_witness=True,
+        global_probability_max_age=_dt.timedelta(seconds=30),
+        candidate_bin_id=era._candidate_bin_id,
+        payoff_matrix_over_bins=utility_ranker.FamilyPayoffMatrix.over_bins,
+        exposure_builder=era._robust_marginal_utility_exposure,
+        baseline_usd_provider=lambda: Decimal("1000"),
+        per_bin_yes_q_lcb=era._per_bin_yes_q_lcb(proofs),
+        extra_exposure_by_bin_id=None,
+    )
+    assert result.global_family is not None
+    original = result.global_family.probability_witness
+    missing_bindings = tuple(
+        OutcomeTokenBinding(
+            bin_id=binding.bin_id,
+            condition_id=binding.condition_id,
+            yes_token_id=binding.yes_token_id,
+            no_token_id=(None if index == 0 else binding.no_token_id),
+        )
+        for index, binding in enumerate(original.bindings)
+    )
+    missing_identity = joint_probability_witness_identity(
+        family_key=original.family_key,
+        bindings=missing_bindings,
+        q_version=original.q_version,
+        resolution_identity=original.resolution_identity,
+        topology_identity=original.topology_identity,
+        posterior_identity_hash=original.posterior_identity_hash,
+        source_truth_identity=original.source_truth_identity,
+        authority_certificate_hash=original.authority_certificate_hash,
+        band_alpha=original.band_alpha,
+        band_basis=original.band_basis,
+        yes_q_samples=original.yes_q_samples,
+        captured_at_utc=original.captured_at_utc,
+    )
+    missing = JointOutcomeProbabilityWitness(
+        family_key=original.family_key,
+        bindings=missing_bindings,
+        yes_q_samples=original.yes_q_samples,
+        q_version=original.q_version,
+        resolution_identity=original.resolution_identity,
+        topology_identity=original.topology_identity,
+        posterior_identity_hash=original.posterior_identity_hash,
+        source_truth_identity=original.source_truth_identity,
+        authority_certificate_hash=original.authority_certificate_hash,
+        band_alpha=original.band_alpha,
+        band_basis=original.band_basis,
+        captured_at_utc=original.captured_at_utc,
+        max_age=original.max_age,
+        witness_identity=missing_identity,
+    )
+    forecast = sqlite3.connect(":memory:")
+    forecast.execute(
+        "CREATE TABLE market_events (condition_id TEXT, market_slug TEXT, created_at TEXT)"
+    )
+    forecast.executemany(
+        "INSERT INTO market_events VALUES (?,?,?)",
+        [
+            (binding.condition_id, "current-family-slug", "2026-07-10T08:00:00+00:00")
+            for binding in missing.bindings
+        ],
+    )
+    gamma_event = {
+        "markets": [
+            {
+                "conditionId": binding.condition_id,
+                "questionID": f"question-{index}",
+                "id": f"market-{index}",
+                "question": f"Will the temperature be {index}C?",
+                "clobTokenIds": [binding.yes_token_id, original.bindings[index].no_token_id],
+                "outcomes": ["Yes", "No"],
+                "outcomePrices": ["0.5", "0.5"],
+                "acceptingOrders": True,
+                "enableOrderBook": True,
+                "active": True,
+                "closed": False,
+                "feeSchedule": {
+                    "exponent": 1,
+                    "rate": 0.05,
+                    "takerOnly": True,
+                    "rebateRate": 0.25,
+                },
+                "feeType": "weather",
+                "orderPriceMinTickSize": "0.01",
+                "orderMinSize": "5",
+            }
+            for index, binding in enumerate(missing.bindings)
+        ]
+    }
+
+    from src.engine.global_auction_universe import bind_current_global_probability_tokens
+
+    gamma_metadata = {}
+    rebound = bind_current_global_probability_tokens(
+        forecast,
+        probability_witnesses={missing.family_key: missing},
+        get_gamma_event=lambda slug: gamma_event if slug == "current-family-slug" else None,
+        metadata_sink=gamma_metadata,
+    )[missing.family_key]
+
+    assert rebound.bindings[0].no_token_id == original.bindings[0].no_token_id
+    assert rebound.sample_matrix_identity == missing.sample_matrix_identity
+    assert rebound.q_version == missing.q_version
+    assert rebound.witness_identity != missing.witness_identity
+    assert rebound.family_binding_identity != missing.family_binding_identity
+    assert all(
+        getattr(rebound, field) == getattr(missing, field)
+        for field in era._GLOBAL_PROBABILITY_CONTENT_FIELDS
+    )
+    assert "family_binding_identity" not in era._GLOBAL_PROBABILITY_CONTENT_FIELDS
+    assert "authority_certificate_hash" not in era._GLOBAL_PROBABILITY_CONTENT_FIELDS
+    assert gamma_metadata[
+        (rebound.bindings[0].condition_id, rebound.bindings[0].no_token_id)
+    ]["fee_details_json"]
+
+
+def test_global_scope_is_independent_of_the_reactor_page_and_current_q_identity():
+    decision_at = _dt.datetime(2026, 7, 10, 8, 0, tzinfo=_dt.timezone.utc)
+    first = _global_scope_event(city="Chicago", source_run_id="posterior-chicago-a")
+    second = _global_scope_event(city="London", source_run_id="posterior-london-a")
+
+    scope = current_global_auction_scope_from_events(
+        (first, second),
+        captured_at_utc=decision_at,
+    )
+    reactor_page = current_global_auction_scope_from_events(
+        (first,),
+        captured_at_utc=decision_at,
+    )
+    updated = current_global_auction_scope_from_events(
+        (
+            _global_scope_event(
+                city="Chicago", source_run_id="posterior-chicago-new"
+            ),
+            second,
+        ),
+        captured_at_utc=decision_at,
+    )
+
+    assert len(scope.family_keys) == 2
+    assert set(reactor_page.family_keys) < set(scope.family_keys)
+    assert reactor_page.scope_identity != scope.scope_identity
+    assert updated.family_keys == scope.family_keys
+    assert updated.scope_identity != scope.scope_identity
+
+
+def test_two_prepared_families_choose_one_globally_unique_order():
+    family, proofs, payload = _corpus()[0]
+    decision_at = _dt.datetime(2026, 6, 13, 12, 0, tzinfo=_dt.timezone.utc)
+    captured_at = "2026-06-13T11:59:59.900000+00:00"
+    proofs = tuple(
+        replace(proof, row={**proof.row, "captured_at": captured_at})
+        for proof in proofs
+    )
+    payload = _payload_with_joint_samples(proofs, payload, draws=400)
+    current_scope = current_global_auction_scope_from_events(
+        (
+            _global_scope_event(
+                city="Chicago", source_run_id="posterior-chicago-current"
+            ),
+            _global_scope_event(
+                city="London", source_run_id="posterior-london-current"
+            ),
+        ),
+        captured_at_utc=decision_at,
+    )
+
+    prepared_by_event = {}
+    restore = _set_flag(False)
+    try:
+        for suffix, family_key in zip(("a", "b"), current_scope.family_keys):
+            scoped_family = replace(
+                family,
+                family_id=family_key,
+                event_id=f"event-{suffix}",
+            )
+            result = bridge.decide_family_via_spine(
+                family=scoped_family,
+                payload=payload,
+                proofs=proofs,
+                decision_time=decision_at,
+                native_side_candidate_from_proof=era._native_side_candidate_from_proof,
+                global_native_side_candidate_from_proof=(
+                    era._full_depth_native_side_candidate_from_proof
+                ),
+                require_global_probability_witness=True,
+                global_probability_max_age=_dt.timedelta(seconds=1),
+                candidate_bin_id=era._candidate_bin_id,
+                payoff_matrix_over_bins=utility_ranker.FamilyPayoffMatrix.over_bins,
+                exposure_builder=era._robust_marginal_utility_exposure,
+                baseline_usd_provider=lambda: Decimal("1000"),
+                per_bin_yes_q_lcb=era._per_bin_yes_q_lcb(proofs),
+                extra_exposure_by_bin_id=None,
+            )
+            assert result.global_family is not None
+            prepared_by_event[f"event-{suffix}"] = result.global_family
+    finally:
+        restore()
+
+    venue_identity = "current-venue-universe"
+    wealth_identity = portfolio_wealth_identity(
+        ledger_snapshot_id="ledger-current",
+        position_set_hash="positions-current",
+        wealth_floor_usd=Decimal("1000"),
+        wealth_ceiling_usd=Decimal("1000"),
+        spendable_cash_usd=Decimal("1000"),
+        reservations_usd=Decimal("0"),
+        collateral_authority="CHAIN",
+        captured_at_utc=decision_at,
+    )
+    wealth = PortfolioWealthWitness(
+        ledger_snapshot_id="ledger-current",
+        position_set_hash="positions-current",
+        wealth_floor_usd=Decimal("1000"),
+        wealth_ceiling_usd=Decimal("1000"),
+        spendable_cash_usd=Decimal("1000"),
+        reservations_usd=Decimal("0"),
+        collateral_authority="CHAIN",
+        captured_at_utc=decision_at,
+        max_age=_dt.timedelta(seconds=1),
+        witness_identity=wealth_identity,
+    )
+    probabilities = {
+        prepared.probability_witness.family_key: prepared.probability_witness
+        for prepared in prepared_by_event.values()
+    }
+
+    auction_kwargs = dict(
+        current_scope=current_scope,
+        current_scope_identity_resolver=lambda: current_scope.scope_identity,
+        venue_universe_identity=venue_identity,
+        current_venue_universe_identity_resolver=lambda: venue_identity,
+        universe_max_age=_dt.timedelta(seconds=1),
+        current_probability_resolver=lambda key: (
+            CurrentFamilyProbabilityAuthority.from_witness(probabilities[key])
+        ),
+        current_execution_resolver=lambda candidate: CurrentExecutionAuthority(
+            token_id=candidate.token_id,
+            side=candidate.side,
+            book_snapshot_id=candidate.book_snapshot_id,
+            execution_curve_identity=candidate.execution_curve_identity,
+        ),
+        current_wealth_identity_resolver=lambda: wealth.economic_identity,
+        wealth_witness=wealth,
+        capital_limit_usd=Decimal("100"),
+        decision_at_utc=decision_at,
+    )
+    selected = select_prepared_global_auction(
+        prepared_by_event,
+        **auction_kwargs,
+    )
+    partial = select_prepared_global_auction(
+        {"event-a": prepared_by_event["event-a"]},
+        **auction_kwargs,
+    )
+
+    assert selected.decision.candidate is not None
+    assert selected.winner_event_id in prepared_by_event
+    assert selected.actuation is not None
+    assert selected.actuation.decision == selected.decision
+    assert selected.actuation.winner_event_id == selected.winner_event_id
+    assert selected.actuation.universe_witness_identity
+    assert selected.actuation.wealth_witness_identity == wealth.witness_identity
+    assert partial.decision.candidate is None
+    assert partial.actuation is None
+    assert partial.decision.no_trade_reason == "GLOBAL_FEASIBLE_SET_INCOMPLETE"
+    all_ids = {
+        global_candidate_from_native(
+            seed.native_candidate,
+            probability_witness=prepared.probability_witness,
+            ledger_snapshot_id=wealth.ledger_snapshot_id,
+            book_captured_at_utc=seed.book_captured_at_utc,
+        ).candidate_id
+        for prepared in prepared_by_event.values()
+        for seed in prepared.candidate_seeds
+    }
+    assert len(all_ids) == sum(
+        len(prepared.candidate_seeds) for prepared in prepared_by_event.values()
+    )
+
+
+def _wealth_test_conn(*, captured_at: _dt.datetime, ctf: dict[str, int] | None = None):
+    conn = sqlite3.connect(":memory:")
+    init_collateral_schema(conn)
+    conn.execute(
+        "INSERT INTO collateral_ledger_snapshots ("
+        "pusd_balance_micro,pusd_allowance_micro,usdc_e_legacy_balance_micro,"
+        "ctf_token_balances_json,ctf_token_allowances_json,"
+        "reserved_pusd_for_buys_micro,reserved_tokens_for_sells_json,"
+        "captured_at,authority_tier,raw_balance_payload_hash"
+        ") VALUES (?,?,?,?,?,?,?,?,?,?)",
+        (
+            25_000_000,
+            20_000_000,
+            2_000_000,
+            json.dumps(ctf or {}),
+            "{}",
+            0,
+            "{}",
+            captured_at.isoformat(),
+            "CHAIN",
+            "wallet-hash",
+        ),
+    )
+    return conn
+
+
+def test_current_portfolio_wealth_witness_uses_one_chain_generation():
+    decision_at = _dt.datetime(2026, 7, 10, 8, 0, tzinfo=_dt.timezone.utc)
+    conn = _wealth_test_conn(captured_at=decision_at)
+    portfolio = PortfolioState(
+        authority="canonical_db",
+        authority_scope="runtime_exposure",
+    )
+
+    witness = current_portfolio_wealth_witness(
+        conn,
+        decision_at_utc=decision_at,
+        max_age=_dt.timedelta(seconds=30),
+        portfolio_state=portfolio,
+    )
+    repeated = current_portfolio_wealth_witness(
+        conn,
+        decision_at_utc=decision_at,
+        max_age=_dt.timedelta(seconds=30),
+        portfolio_state=portfolio,
+    )
+
+    assert witness.spendable_cash_usd == Decimal("20")
+    assert witness.wealth_floor_usd == Decimal("22")
+    assert witness.wealth_ceiling_usd == Decimal("22")
+    assert repeated.witness_identity == witness.witness_identity
+
+
+def test_current_portfolio_wealth_economic_identity_ignores_heartbeat_time_only():
+    first_at = _dt.datetime(2026, 7, 10, 8, 0, tzinfo=_dt.timezone.utc)
+    second_at = first_at + _dt.timedelta(seconds=30)
+    conn = _wealth_test_conn(captured_at=first_at)
+    portfolio = PortfolioState(
+        positions=[
+            SimpleNamespace(
+                trade_id="trade-1",
+                direction="buy_yes",
+                token_id="yes-token",
+                no_token_id="no-token",
+                chain_state="synced",
+                chain_shares=3.25,
+                chain_verified_at=first_at.isoformat(),
+                state="entered",
+            )
+        ],
+        authority="canonical_db",
+        authority_scope="runtime_exposure",
+    )
+    first = current_portfolio_wealth_witness(
+        conn,
+        decision_at_utc=first_at,
+        max_age=_dt.timedelta(seconds=60),
+        portfolio_state=portfolio,
+    )
+    conn.execute(
+        "INSERT INTO collateral_ledger_snapshots ("
+        "pusd_balance_micro,pusd_allowance_micro,usdc_e_legacy_balance_micro,"
+        "ctf_token_balances_json,ctf_token_allowances_json,"
+        "reserved_pusd_for_buys_micro,reserved_tokens_for_sells_json,"
+        "captured_at,authority_tier,raw_balance_payload_hash"
+        ") SELECT pusd_balance_micro,pusd_allowance_micro,usdc_e_legacy_balance_micro,"
+        "ctf_token_balances_json,ctf_token_allowances_json,"
+        "reserved_pusd_for_buys_micro,reserved_tokens_for_sells_json,?,?,"
+        "raw_balance_payload_hash FROM collateral_ledger_snapshots ORDER BY id DESC LIMIT 1",
+        (second_at.isoformat(), "CHAIN"),
+    )
+    portfolio.positions[0].chain_verified_at = second_at.isoformat()
+    second = current_portfolio_wealth_witness(
+        conn,
+        decision_at_utc=second_at,
+        max_age=_dt.timedelta(seconds=60),
+        portfolio_state=portfolio,
+    )
+
+    assert second.witness_identity != first.witness_identity
+    assert second.economic_identity == first.economic_identity
+
+
+def test_current_portfolio_wealth_economic_identity_changes_with_cash():
+    first_at = _dt.datetime(2026, 7, 10, 8, 0, tzinfo=_dt.timezone.utc)
+    second_at = first_at + _dt.timedelta(seconds=1)
+    conn = _wealth_test_conn(captured_at=first_at)
+    portfolio = PortfolioState(
+        authority="canonical_db",
+        authority_scope="runtime_exposure",
+    )
+    first = current_portfolio_wealth_witness(
+        conn,
+        decision_at_utc=first_at,
+        max_age=_dt.timedelta(seconds=60),
+        portfolio_state=portfolio,
+    )
+    conn.execute(
+        "INSERT INTO collateral_ledger_snapshots ("
+        "pusd_balance_micro,pusd_allowance_micro,usdc_e_legacy_balance_micro,"
+        "ctf_token_balances_json,ctf_token_allowances_json,"
+        "reserved_pusd_for_buys_micro,reserved_tokens_for_sells_json,"
+        "captured_at,authority_tier,raw_balance_payload_hash"
+        ") VALUES (?,?,?,?,?,?,?,?,?,?)",
+        (19_000_000, 20_000_000, 2_000_000, "{}", "{}", 0, "{}", second_at.isoformat(), "CHAIN", "changed"),
+    )
+    second = current_portfolio_wealth_witness(
+        conn,
+        decision_at_utc=second_at,
+        max_age=_dt.timedelta(seconds=60),
+        portfolio_state=portfolio,
+    )
+
+    assert second.economic_identity != first.economic_identity
+
+
+def test_current_portfolio_wealth_uses_fresh_synced_positions_when_ctf_mirror_empty():
+    decision_at = _dt.datetime(2026, 7, 10, 8, 0, tzinfo=_dt.timezone.utc)
+    conn = _wealth_test_conn(captured_at=decision_at)
+    portfolio = PortfolioState(
+        positions=[
+            SimpleNamespace(
+                trade_id="trade-1",
+                direction="buy_yes",
+                token_id="yes-token",
+                no_token_id="no-token",
+                chain_state="synced",
+                chain_shares=3.25,
+                chain_verified_at=decision_at.isoformat(),
+                state="entered",
+            )
+        ],
+        authority="canonical_db",
+        authority_scope="runtime_exposure",
+    )
+
+    witness = current_portfolio_wealth_witness(
+        conn,
+        decision_at_utc=decision_at,
+        max_age=_dt.timedelta(seconds=30),
+        portfolio_state=portfolio,
+    )
+
+    assert witness.wealth_floor_usd == Decimal("22")
+    assert witness.wealth_ceiling_usd == Decimal("25.25")
+
+
+def test_current_portfolio_wealth_uses_fresh_ctf_mirror_over_stale_projection_time():
+    decision_at = _dt.datetime(2026, 7, 10, 8, 0, tzinfo=_dt.timezone.utc)
+    conn = _wealth_test_conn(
+        captured_at=decision_at,
+        ctf={"yes-token": 3_250_000},
+    )
+    portfolio = PortfolioState(
+        positions=[
+            SimpleNamespace(
+                trade_id="trade-1",
+                direction="buy_yes",
+                token_id="yes-token",
+                no_token_id="no-token",
+                chain_state="synced",
+                chain_shares=3.25,
+                chain_verified_at="2026-07-10T07:00:00+00:00",
+                state="entered",
+            )
+        ],
+        authority="canonical_db",
+        authority_scope="runtime_exposure",
+    )
+
+    witness = current_portfolio_wealth_witness(
+        conn,
+        decision_at_utc=decision_at,
+        max_age=_dt.timedelta(seconds=30),
+        portfolio_state=portfolio,
+    )
+
+    assert witness.wealth_ceiling_usd == Decimal("25.25")
+
+
+@pytest.mark.parametrize(
+    ("chain_state", "chain_verified_at", "reason"),
+    [
+        ("unknown", "2026-07-10T08:00:00+00:00", "CHAIN_STATE_UNVERIFIED"),
+        ("synced", "2026-07-10T07:29:00+00:00", "CHAIN_EXPIRED"),
+    ],
+)
+def test_current_portfolio_wealth_refuses_unverified_position_inventory(
+    chain_state, chain_verified_at, reason
+):
+    decision_at = _dt.datetime(2026, 7, 10, 8, 0, tzinfo=_dt.timezone.utc)
+    conn = _wealth_test_conn(captured_at=decision_at)
+    portfolio = PortfolioState(
+        positions=[
+            SimpleNamespace(
+                trade_id="trade-1",
+                direction="buy_yes",
+                token_id="yes-token",
+                no_token_id="no-token",
+                chain_state=chain_state,
+                chain_shares=1.0,
+                chain_verified_at=chain_verified_at,
+                state="entered",
+            )
+        ],
+        authority="canonical_db",
+        authority_scope="runtime_exposure",
+    )
+
+    with pytest.raises(ValueError, match=reason):
+        current_portfolio_wealth_witness(
+            conn,
+            decision_at_utc=decision_at,
+            max_age=_dt.timedelta(seconds=30),
+            portfolio_state=portfolio,
+        )
+
+
+def test_current_portfolio_wealth_witness_refuses_inflight_or_unknown_inventory():
+    decision_at = _dt.datetime(2026, 7, 10, 8, 0, tzinfo=_dt.timezone.utc)
+    portfolio = PortfolioState(
+        authority="canonical_db",
+        authority_scope="runtime_exposure",
+    )
+    reserved = _wealth_test_conn(captured_at=decision_at)
+    reserved.execute(
+        "INSERT INTO collateral_reservations ("
+        "command_id,reservation_type,token_id,amount,created_at"
+        ") VALUES (?,?,?,?,?)",
+        ("cmd", "PUSD_BUY", None, 1_000_000, decision_at.isoformat()),
+    )
+    with pytest.raises(ValueError, match="CURRENT_WEALTH_INFLIGHT_BUY_AMBIGUOUS"):
+        current_portfolio_wealth_witness(
+            reserved,
+            decision_at_utc=decision_at,
+            max_age=_dt.timedelta(seconds=30),
+            portfolio_state=portfolio,
+        )
+
+    unknown = _wealth_test_conn(captured_at=decision_at, ctf={"unknown-token": 1_000_000})
+    with pytest.raises(ValueError, match="CURRENT_WEALTH_CHAIN_POSITION_SET_MISMATCH"):
+        current_portfolio_wealth_witness(
+            unknown,
+            decision_at_utc=decision_at,
+            max_age=_dt.timedelta(seconds=30),
+            portfolio_state=portfolio,
+        )
+
+
+def test_global_batch_waits_until_global_winner_family_is_claimed(monkeypatch):
+    decision_at = _dt.datetime(2026, 7, 10, 8, 0, tzinfo=_dt.timezone.utc)
+    event_a = _global_scope_event(city="Alpha", source_run_id="run-a")
+    event_b = _global_scope_event(city="Beta", source_run_id="run-b")
+    scope = current_global_auction_scope_from_events(
+        (event_a, event_b),
+        captured_at_utc=decision_at,
+    )
+    prepared = {
+        event_a.event_id: SimpleNamespace(
+            probability_witness=SimpleNamespace(family_key=scope.family_keys[0])
+        ),
+        event_b.event_id: SimpleNamespace(
+            probability_witness=SimpleNamespace(family_key=scope.family_keys[1])
+        ),
+    }
+    selected = SimpleNamespace(
+        decision=SimpleNamespace(candidate=object(), no_trade_reason=None),
+        winner_event_id=event_b.event_id,
+        actuation=SimpleNamespace(actuation_identity="actuation-b"),
+    )
+    monkeypatch.setattr(global_batch_runtime, "scan_current_global_auction_scope", lambda **_: scope)
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "current_portfolio_wealth_witness",
+        lambda *_, **__: SimpleNamespace(
+            spendable_cash_usd=Decimal("10"),
+            witness_identity="wealth-certificate",
+            economic_identity="wealth-economics",
+        ),
+    )
+    monkeypatch.setattr(global_batch_runtime, "current_venue_auction_identity", lambda *_, **__: "venue")
+    monkeypatch.setattr(global_batch_runtime, "select_prepared_global_auction", lambda *_, **__: selected)
+
+    result = global_batch_runtime.process_current_global_batch(
+        (event_a,),
+        decision_time=decision_at,
+        world_conn=object(),
+        forecast_conn=object(),
+        trade_conn=object(),
+        payload_reader=lambda event: __import__("json").loads(event.payload_json),
+        prepare_event=lambda event, _at: EventSubmissionReceipt(
+            False,
+            event.event_id,
+            event.causal_snapshot_id,
+            prepared_global_family=prepared[event.event_id],
+        ),
+        actuate_winner=lambda *_: pytest.fail("unclaimed winner must not actuate"),
+        stamp_receipt=lambda receipt: receipt,
+        venue_submit_count=lambda: 0,
+        current_probability=lambda *_: object(),
+        current_execution=lambda *_: object(),
+        current_time_provider=lambda: decision_at,
+    )
+
+    assert result.venue_submit_count == 0
+    assert result.winner_event_id is None
+    assert result.receipts[event_a.event_id].reason == "GLOBAL_WINNER_AWAITS_CLAIM"
+
+
+def test_global_batch_actuates_exactly_one_claimed_global_winner(monkeypatch):
+    decision_at = _dt.datetime(2026, 7, 10, 8, 0, tzinfo=_dt.timezone.utc)
+    event = _global_scope_event(city="Alpha", source_run_id="run-a")
+    scope = current_global_auction_scope_from_events((event,), captured_at_utc=decision_at)
+    prepared = SimpleNamespace(
+        probability_witness=SimpleNamespace(family_key=scope.family_keys[0])
+    )
+    actuation = SimpleNamespace(actuation_identity="actuation-a")
+    selected = SimpleNamespace(
+        decision=SimpleNamespace(candidate=object(), no_trade_reason=None),
+        winner_event_id=event.event_id,
+        actuation=actuation,
+    )
+    current_probability = object()
+    calls = {"venue": 0}
+    monkeypatch.setattr(global_batch_runtime, "scan_current_global_auction_scope", lambda **_: scope)
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "current_portfolio_wealth_witness",
+        lambda *_, **__: SimpleNamespace(
+            spendable_cash_usd=Decimal("10"),
+            witness_identity="wealth-certificate",
+            economic_identity="wealth-economics",
+        ),
+    )
+    monkeypatch.setattr(global_batch_runtime, "current_venue_auction_identity", lambda *_, **__: "venue")
+    monkeypatch.setattr(global_batch_runtime, "select_prepared_global_auction", lambda *_, **__: selected)
+    monkeypatch.setattr(
+        global_batch_runtime.CurrentFamilyProbabilityAuthority,
+        "from_witness",
+        classmethod(lambda cls, witness: current_probability),
+    )
+
+    def actuate(winner, chosen, _at):
+        assert winner.event_id == event.event_id
+        assert chosen is actuation
+        calls["venue"] += 1
+        return EventSubmissionReceipt(
+            True,
+            winner.event_id,
+            winner.causal_snapshot_id,
+            proof_accepted=True,
+            side_effect_status="SUBMITTED",
+        )
+
+    result = global_batch_runtime.process_current_global_batch(
+        (event,),
+        decision_time=decision_at,
+        world_conn=object(),
+        forecast_conn=object(),
+        trade_conn=object(),
+        payload_reader=lambda current: __import__("json").loads(current.payload_json),
+        prepare_event=lambda current, _at: EventSubmissionReceipt(
+            False,
+            current.event_id,
+            current.causal_snapshot_id,
+            prepared_global_family=prepared,
+        ),
+        actuate_winner=actuate,
+        stamp_receipt=lambda receipt: receipt,
+        venue_submit_count=lambda: calls["venue"],
+        current_probability=lambda *_: current_probability,
+        current_execution=lambda *_: object(),
+        current_time_provider=lambda: decision_at,
+    )
+
+    assert calls["venue"] == 1
+    assert result.venue_submit_count == 1
+    assert result.winner_event_id == event.event_id
+    assert result.receipts[event.event_id].submitted is True
+
+
+def test_global_batch_aborts_if_any_venue_state_moves_before_actuation(monkeypatch):
+    decision_at = _dt.datetime(2026, 7, 10, 8, 0, tzinfo=_dt.timezone.utc)
+    event = _global_scope_event(city="Alpha", source_run_id="run-a")
+    scope = current_global_auction_scope_from_events((event,), captured_at_utc=decision_at)
+    prepared = SimpleNamespace(
+        probability_witness=SimpleNamespace(family_key=scope.family_keys[0])
+    )
+    selected = SimpleNamespace(
+        decision=SimpleNamespace(candidate=object(), no_trade_reason=None),
+        winner_event_id=event.event_id,
+        actuation=SimpleNamespace(actuation_identity="actuation-a"),
+    )
+    current_probability = object()
+    venue_reads = iter(("venue-before", "venue-after"))
+    monkeypatch.setattr(global_batch_runtime, "scan_current_global_auction_scope", lambda **_: scope)
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "current_portfolio_wealth_witness",
+        lambda *_, **__: SimpleNamespace(
+            spendable_cash_usd=Decimal("10"),
+            witness_identity="wealth-certificate",
+            economic_identity="wealth-economics",
+        ),
+    )
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "current_venue_auction_identity",
+        lambda *_, **__: next(venue_reads),
+    )
+    monkeypatch.setattr(global_batch_runtime, "select_prepared_global_auction", lambda *_, **__: selected)
+    monkeypatch.setattr(
+        global_batch_runtime.CurrentFamilyProbabilityAuthority,
+        "from_witness",
+        classmethod(lambda cls, witness: current_probability),
+    )
+
+    result = global_batch_runtime.process_current_global_batch(
+        (event,),
+        decision_time=decision_at,
+        world_conn=object(),
+        forecast_conn=object(),
+        trade_conn=object(),
+        payload_reader=lambda current: json.loads(current.payload_json),
+        prepare_event=lambda current, _at: EventSubmissionReceipt(
+            False,
+            current.event_id,
+            current.causal_snapshot_id,
+            prepared_global_family=prepared,
+        ),
+        actuate_winner=lambda *_: pytest.fail("a superseded epoch must not actuate"),
+        stamp_receipt=lambda receipt: receipt,
+        venue_submit_count=lambda: 0,
+        current_probability=lambda *_: current_probability,
+        current_execution=lambda *_: object(),
+        current_time_provider=lambda: decision_at,
+    )
+
+    assert result.venue_submit_count == 0
+    assert result.winner_event_id is None
+    assert result.receipts[event.event_id].reason == (
+        "GLOBAL_VENUE_SUPERSEDED_BEFORE_ACTUATION"
+    )
 
 
 # --- (d) OFF-path import-isolation (subprocess) -----------------------------

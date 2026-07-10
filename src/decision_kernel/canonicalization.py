@@ -93,3 +93,14 @@ def qkernel_current_state_identity_hash(economics: Mapping[str, Any]) -> str:
     return stable_hash(
         {field: economics.get(field) for field in _QKERNEL_CURRENT_STATE_IDENTITY_FIELDS}
     )
+
+
+def qkernel_declares_current_state(economics: Mapping[str, Any]) -> bool:
+    """Whether a payload has entered the non-downgradable current-state grammar."""
+
+    basis = "CURRENT_POSTERIOR_BAND"
+    return (
+        str(economics.get("q_lcb_guard_basis") or "").strip() == basis
+        or str(economics.get("selection_guard_basis") or "").strip() == basis
+        or bool(str(economics.get("current_state_identity_hash") or "").strip())
+    )

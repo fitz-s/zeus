@@ -25,15 +25,13 @@ MATH CORE (W3 sub-slice 2) fills ``solve()``:
 
   CVaR (not the raw α-quantile) is used deliberately (consult REV-2): each ``du_k`` is concave
   in ``x`` (log of an affine wealth), and the lower-tail CVaR of concave functions is CONCAVE,
-  so the objective is concave and coordinate ascent reaches the GLOBAL optimum — the legacy
-  payoff_vector "quantile-of-concave is unimodal" assertion is unsafe and is NOT inherited.
+  so a convex-program solve can recover the global optimum — the legacy payoff_vector
+  "quantile-of-concave is unimodal" assertion is unsafe and is NOT inherited.
   CVaR_α ≤ VaR_α, so this is also strictly more conservative than the served-band quantile.
 
-* OPTIMIZER — deterministic cyclic coordinate ascent, each coordinate maximized by a
-  coarse-to-fine 1-D grid holding the others fixed, sweeping until a full sweep improves ``U``
-  by less than ``_CONVERGENCE_TOL`` or ``_MAX_SWEEPS`` is hit. No RNG, no wall clock; the only
-  sampling is the served band draws. Seeded at the best single item so the plan dominates the
-  top-1 picker by construction.
+* OPTIMIZER — the lower-CVaR Rockafellar–Uryasev convex program is the continuous authority.
+  Deterministic cyclic coordinate ascent supplies a feasible warm start and the best-single-item
+  dominance floor; it is not treated as a globality certificate. No RNG or wall clock enters.
 
 * DOMINANCE BASELINE — the top-1 pick is the best SINGLE menu item taken through the SAME
   feasible set (same depth/budget, same κ, same discrete repair, same worst-price model), not
@@ -54,11 +52,22 @@ MATH CORE (W3 sub-slice 2) fills ``solve()``:
 from __future__ import annotations
 
 import hashlib
-from decimal import ROUND_FLOOR, ROUND_HALF_EVEN, Decimal
-from typing import TYPE_CHECKING, Any, Optional
+import math
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta
+from decimal import ROUND_CEILING, ROUND_FLOOR, ROUND_HALF_EVEN, Decimal
+from typing import TYPE_CHECKING, Any, Callable, Literal, Mapping, Optional, Sequence
 
 import numpy as np
+from scipy.optimize import (
+    Bounds,
+    LinearConstraint,
+    NonlinearConstraint,
+    minimize,
+    minimize_scalar,
+)
 
+from src.contracts.executable_cost_curve import ExecutableCostCurve
 from src.solve.exits import ZeroWealthOutcomeError
 from src.solve.kappa import KappaPolicy
 from src.solve.scenario_service import ScenarioService
@@ -146,6 +155,667 @@ class FamilyDecisionContractError(AssertionError):
     """A FamilyDecision violates the frozen seam contract (missing/nulled consumer field)."""
 
 
+class OptimizerConvergenceError(RuntimeError):
+    """The certifying convex CVaR solve failed to dominate its feasible warm start."""
+
+
+GlobalEligibilityReason = Literal[
+    "DAY0_OBSERVATION_UNAVAILABLE",
+    "PROBABILITY_AUTHORITY_MISSING",
+    "PROBABILITY_AUTHORITY_SUPERSEDED",
+    "PROBABILITY_AUTHORITY_EXPIRED",
+    "JOINT_Q_MEMBERSHIP_MISMATCH",
+    "Q_IDENTITY_SUPERSEDED",
+    "Q_SAMPLE_CERTIFICATE_MISMATCH",
+    "Q_SAMPLE_IDENTITY_SUPERSEDED",
+    "BAND_ALPHA_MISMATCH",
+    "BAND_TAIL_UNDERSAMPLED",
+    "BOOK_IDENTITY_SUPERSEDED",
+    "BOOK_CERTIFICATE_MISMATCH",
+    "EXECUTION_AUTHORITY_MISSING",
+    "EXECUTION_CURVE_SUPERSEDED",
+    "QUOTE_EXPIRED",
+    "SETTLEMENT_IDENTITY_SUPERSEDED",
+    "CAPITAL_IDENTITY_SUPERSEDED",
+    "COLLATERAL_UNKNOWN",
+    "DEPTH_INFEASIBLE",
+    "NON_POSITIVE_ROBUST_OBJECTIVE",
+]
+
+
+def executable_curve_identity(curve: ExecutableCostCurve) -> str:
+    """Bind depth, fee, tick, token, and snapshot into one execution certificate."""
+
+    digest = hashlib.sha256()
+    for value in (
+        curve.token_id,
+        curve.side,
+        curve.snapshot_id,
+        curve.book_hash,
+        curve.fee_model.fee_rate,
+        curve.min_tick,
+        curve.min_order_size,
+        curve.quote_ttl.total_seconds(),
+    ):
+        digest.update(str(value).encode("utf-8"))
+        digest.update(b"\x1f")
+    for level in curve.levels:
+        digest.update(str(level.price).encode("utf-8"))
+        digest.update(b"\x1e")
+        digest.update(str(level.size).encode("utf-8"))
+        digest.update(b"\x1f")
+    return digest.hexdigest()
+
+
+def q_sample_identity(
+    family_key: str,
+    bin_id: str,
+    q_version: str,
+    resolution_identity: str,
+    band_alpha: float,
+    band_basis: str,
+    yes_q_samples: np.ndarray,
+) -> str:
+    """Bind the canonical YES sample axis; NO is its pointwise complement."""
+
+    q = np.ascontiguousarray(np.asarray(yes_q_samples, dtype=np.float64))
+    digest = hashlib.sha256()
+    for value in (
+        family_key,
+        bin_id,
+        q_version,
+        resolution_identity,
+        repr(float(band_alpha)),
+        band_basis,
+        q.shape,
+    ):
+        digest.update(str(value).encode("utf-8"))
+        digest.update(b"\x1f")
+    digest.update(q.astype("<f8", copy=False).tobytes(order="C"))
+    return digest.hexdigest()
+
+
+@dataclass(frozen=True)
+class OutcomeTokenBinding:
+    """One MECE probability column bound to its actual binary token pair."""
+
+    bin_id: str
+    condition_id: str
+    yes_token_id: str | None
+    no_token_id: str | None
+
+    def __post_init__(self) -> None:
+        if not self.bin_id.strip() or not self.condition_id.strip():
+            raise ValueError("outcome binding requires bin and condition identities")
+        if self.yes_token_id is not None and not str(self.yes_token_id).strip():
+            raise ValueError("YES token identity must be non-empty when present")
+        if self.no_token_id is not None and not str(self.no_token_id).strip():
+            raise ValueError("NO token identity must be non-empty when present")
+        if (
+            self.yes_token_id is not None
+            and self.no_token_id is not None
+            and self.yes_token_id == self.no_token_id
+        ):
+            raise ValueError("YES and NO token identities must differ")
+
+
+def outcome_token_binding_identity(
+    *,
+    family_key: str,
+    bindings: Sequence[OutcomeTokenBinding],
+    resolution_identity: str,
+    topology_identity: str,
+) -> str:
+    """Bind the complete settlement-bin to condition/native-token topology."""
+
+    if not family_key or not resolution_identity or not topology_identity or not bindings:
+        raise ValueError("family binding identity requires complete authority inputs")
+    return _hash(
+        family_key,
+        resolution_identity,
+        topology_identity,
+        *(
+            f"{binding.bin_id}:{binding.condition_id}:"
+            f"{binding.yes_token_id or ''}:{binding.no_token_id or ''}"
+            for binding in bindings
+        ),
+    )
+
+
+def probability_sample_matrix_identity(samples: np.ndarray) -> str:
+    """Canonical identity of one ordered row-simplex probability draw matrix."""
+
+    matrix = np.ascontiguousarray(np.asarray(samples, dtype=np.float64))
+    if matrix.ndim != 2 or not np.isfinite(matrix).all():
+        raise ValueError("probability sample matrix must be finite and two-dimensional")
+    digest = hashlib.sha256()
+    digest.update(repr(matrix.shape).encode("utf-8"))
+    digest.update(matrix.astype("<f8", copy=False).tobytes(order="C"))
+    return digest.hexdigest()
+
+
+def joint_probability_witness_identity(
+    *,
+    family_key: str,
+    bindings: Sequence[OutcomeTokenBinding],
+    q_version: str,
+    resolution_identity: str,
+    topology_identity: str,
+    posterior_identity_hash: str,
+    source_truth_identity: str,
+    authority_certificate_hash: str,
+    band_alpha: float,
+    band_basis: str,
+    yes_q_samples: np.ndarray,
+    captured_at_utc: datetime,
+) -> str:
+    """Bind one complete family-simplex probability authority.
+
+    A candidate-local probability is only a projection.  The authority is the full
+    mutually-exclusive/exhaustive family draw matrix plus the current source,
+    settlement, topology, and decision-certificate identities that produced it.
+    """
+
+    if captured_at_utc.tzinfo is None:
+        raise ValueError("captured_at_utc must be timezone-aware")
+    samples = np.ascontiguousarray(np.asarray(yes_q_samples, dtype=np.float64))
+    digest = hashlib.sha256()
+    for value in (
+        family_key,
+        tuple(
+            (b.bin_id, b.condition_id, b.yes_token_id, b.no_token_id)
+            for b in bindings
+        ),
+        q_version,
+        resolution_identity,
+        topology_identity,
+        posterior_identity_hash,
+        source_truth_identity,
+        authority_certificate_hash,
+        repr(float(band_alpha)),
+        band_basis,
+        samples.shape,
+        captured_at_utc.isoformat(),
+    ):
+        digest.update(str(value).encode("utf-8"))
+        digest.update(b"\x1f")
+    digest.update(samples.astype("<f8", copy=False).tobytes(order="C"))
+    return digest.hexdigest()
+
+
+@dataclass(frozen=True)
+class JointOutcomeProbabilityWitness:
+    """Current zero-sum outcome authority for one complete market family.
+
+    Every row is one coherent draw over the MECE settlement bins and therefore sums
+    to one.  A YES candidate consumes one column; NO consumes its pointwise
+    complement.  The full matrix, not a caller-supplied scalar q, is the authority.
+    """
+
+    family_key: str
+    bindings: tuple[OutcomeTokenBinding, ...]
+    yes_q_samples: np.ndarray
+    q_version: str
+    resolution_identity: str
+    topology_identity: str
+    posterior_identity_hash: str
+    source_truth_identity: str
+    authority_certificate_hash: str
+    band_alpha: float
+    band_basis: str
+    captured_at_utc: datetime
+    max_age: timedelta
+    witness_identity: str
+
+    @property
+    def bin_ids(self) -> tuple[str, ...]:
+        return tuple(binding.bin_id for binding in self.bindings)
+
+    @property
+    def family_binding_identity(self) -> str:
+        return outcome_token_binding_identity(
+            family_key=self.family_key,
+            bindings=self.bindings,
+            resolution_identity=self.resolution_identity,
+            topology_identity=self.topology_identity,
+        )
+
+    @property
+    def sample_matrix_identity(self) -> str:
+        return probability_sample_matrix_identity(self.yes_q_samples)
+
+    def __post_init__(self) -> None:
+        samples = np.asarray(self.yes_q_samples, dtype=np.float64)
+        if (
+            samples.ndim != 2
+            or samples.shape[0] < 2
+            or samples.shape[1] != len(self.bindings)
+            or len(set(self.bin_ids)) != len(self.bindings)
+            or not self.bindings
+            or not np.isfinite(samples).all()
+            or np.any(samples < 0.0)
+            or np.any(samples > 1.0)
+            or not np.allclose(samples.sum(axis=1), 1.0, atol=1e-9)
+        ):
+            raise ValueError("probability witness must be a finite MECE row-simplex matrix")
+        if not (0.0 < self.band_alpha < 0.5):
+            raise ValueError("probability witness alpha must lie in (0, 0.5)")
+        if self.band_alpha * samples.shape[0] < _MIN_TAIL_DRAWS:
+            raise ValueError("probability witness has too few tail draws")
+        if self.captured_at_utc.tzinfo is None or self.max_age <= timedelta(0):
+            raise ValueError("probability witness freshness contract is invalid")
+        if not all(
+            str(value).strip()
+            for value in (
+                self.family_key,
+                self.q_version,
+                self.resolution_identity,
+                self.topology_identity,
+                self.posterior_identity_hash,
+                self.source_truth_identity,
+                self.authority_certificate_hash,
+                self.band_basis,
+            )
+        ):
+            raise ValueError("probability witness authority identities must be non-empty")
+        expected = joint_probability_witness_identity(
+            family_key=self.family_key,
+            bindings=self.bindings,
+            q_version=self.q_version,
+            resolution_identity=self.resolution_identity,
+            topology_identity=self.topology_identity,
+            posterior_identity_hash=self.posterior_identity_hash,
+            source_truth_identity=self.source_truth_identity,
+            authority_certificate_hash=self.authority_certificate_hash,
+            band_alpha=self.band_alpha,
+            band_basis=self.band_basis,
+            yes_q_samples=samples,
+            captured_at_utc=self.captured_at_utc,
+        )
+        if self.witness_identity != expected:
+            raise ValueError("probability witness identity does not bind its family simplex")
+        object.__setattr__(self, "yes_q_samples", np.ascontiguousarray(samples))
+
+
+@dataclass(frozen=True)
+class CurrentFamilyProbabilityAuthority:
+    """Independent resolver output for the family authority current at selection."""
+
+    family_key: str
+    witness_identity: str
+    q_version: str
+    resolution_identity: str
+    topology_identity: str
+    posterior_identity_hash: str
+    source_truth_identity: str
+    authority_certificate_hash: str
+    band_alpha: float
+    band_basis: str
+
+    @classmethod
+    def from_witness(
+        cls, witness: JointOutcomeProbabilityWitness
+    ) -> "CurrentFamilyProbabilityAuthority":
+        return cls(
+            family_key=witness.family_key,
+            witness_identity=witness.witness_identity,
+            q_version=witness.q_version,
+            resolution_identity=witness.resolution_identity,
+            topology_identity=witness.topology_identity,
+            posterior_identity_hash=witness.posterior_identity_hash,
+            source_truth_identity=witness.source_truth_identity,
+            authority_certificate_hash=witness.authority_certificate_hash,
+            band_alpha=witness.band_alpha,
+            band_basis=witness.band_basis,
+        )
+
+
+@dataclass(frozen=True)
+class CurrentExecutionAuthority:
+    """Independent JIT book resolver output used to refute stale prepared curves."""
+
+    token_id: str
+    side: Literal["YES", "NO"]
+    book_snapshot_id: str
+    execution_curve_identity: str
+
+
+def global_auction_universe_identity(
+    *,
+    family_bindings: Sequence[tuple[str, str]],
+    venue_universe_identity: str,
+    captured_at_utc: datetime,
+) -> str:
+    if captured_at_utc.tzinfo is None:
+        raise ValueError("captured_at_utc must be timezone-aware")
+    normalized = tuple(
+        sorted(
+            (str(family_key), str(binding_identity))
+            for family_key, binding_identity in family_bindings
+        )
+    )
+    return _hash(
+        *(f"{family_key}:{binding_identity}" for family_key, binding_identity in normalized),
+        venue_universe_identity,
+        captured_at_utc.isoformat(),
+    )
+
+
+@dataclass(frozen=True)
+class GlobalAuctionUniverseWitness:
+    """Current active-family/token binding that makes the word global auditable."""
+
+    family_bindings: tuple[tuple[str, str], ...]
+    venue_universe_identity: str
+    captured_at_utc: datetime
+    max_age: timedelta
+    witness_identity: str
+
+    def __post_init__(self) -> None:
+        family_bindings = tuple(
+            sorted(
+                (str(family_key), str(binding_identity))
+                for family_key, binding_identity in self.family_bindings
+            )
+        )
+        keys = tuple(family_key for family_key, _ in family_bindings)
+        if (
+            not family_bindings
+            or len(set(keys)) != len(keys)
+            or not all(
+                family_key and binding_identity
+                for family_key, binding_identity in family_bindings
+            )
+        ):
+            raise ValueError(
+                "global auction universe must contain unique family/token bindings"
+            )
+        if not self.venue_universe_identity:
+            raise ValueError("global auction universe requires venue identity")
+        if self.captured_at_utc.tzinfo is None or self.max_age <= timedelta(0):
+            raise ValueError("global auction universe freshness contract is invalid")
+        expected = global_auction_universe_identity(
+            family_bindings=family_bindings,
+            venue_universe_identity=self.venue_universe_identity,
+            captured_at_utc=self.captured_at_utc,
+        )
+        if self.witness_identity != expected:
+            raise ValueError(
+                "global auction universe identity does not bind its family/token topology"
+            )
+        object.__setattr__(self, "family_bindings", family_bindings)
+
+    @property
+    def family_keys(self) -> tuple[str, ...]:
+        return tuple(family_key for family_key, _ in self.family_bindings)
+
+    @property
+    def binding_by_family(self) -> Mapping[str, str]:
+        return dict(self.family_bindings)
+
+
+def portfolio_wealth_identity(
+    *,
+    ledger_snapshot_id: str,
+    position_set_hash: str,
+    wealth_floor_usd: Decimal,
+    wealth_ceiling_usd: Decimal,
+    spendable_cash_usd: Decimal,
+    reservations_usd: Decimal,
+    collateral_authority: str,
+    captured_at_utc: datetime,
+) -> str:
+    """Bind every capital number to one reconciled ledger/position generation."""
+
+    if captured_at_utc.tzinfo is None:
+        raise ValueError("captured_at_utc must be timezone-aware")
+    return _hash(
+        ledger_snapshot_id,
+        position_set_hash,
+        str(wealth_floor_usd),
+        str(wealth_ceiling_usd),
+        str(spendable_cash_usd),
+        str(reservations_usd),
+        collateral_authority,
+        captured_at_utc.isoformat(),
+    )
+
+
+def portfolio_wealth_economic_identity(
+    *,
+    position_set_hash: str,
+    wealth_floor_usd: Decimal,
+    wealth_ceiling_usd: Decimal,
+    spendable_cash_usd: Decimal,
+    reservations_usd: Decimal,
+    collateral_authority: str,
+) -> str:
+    """Bind the economic endowment independently of evidence refresh time.
+
+    ``witness_identity`` remains the immutable certificate for one exact ledger
+    observation.  This identity answers the narrower actuation question: did the
+    cash, inventory, reservations, or authority used by the optimizer change?
+    A heartbeat that proves the same balances more recently must not make a
+    long-running full-universe auction impossible to actuate.
+    """
+
+    return _hash(
+        position_set_hash,
+        str(wealth_floor_usd),
+        str(wealth_ceiling_usd),
+        str(spendable_cash_usd),
+        str(reservations_usd),
+        collateral_authority,
+    )
+
+
+@dataclass(frozen=True)
+class PortfolioWealthWitness:
+    """Current capital truth used by every candidate in one auction epoch."""
+
+    ledger_snapshot_id: str
+    position_set_hash: str
+    wealth_floor_usd: Decimal
+    wealth_ceiling_usd: Decimal
+    spendable_cash_usd: Decimal
+    reservations_usd: Decimal
+    collateral_authority: str
+    captured_at_utc: datetime
+    max_age: timedelta
+    witness_identity: str
+
+    @property
+    def economic_identity(self) -> str:
+        return portfolio_wealth_economic_identity(
+            position_set_hash=self.position_set_hash,
+            wealth_floor_usd=self.wealth_floor_usd,
+            wealth_ceiling_usd=self.wealth_ceiling_usd,
+            spendable_cash_usd=self.spendable_cash_usd,
+            reservations_usd=self.reservations_usd,
+            collateral_authority=self.collateral_authority,
+        )
+
+    def __post_init__(self) -> None:
+        if self.captured_at_utc.tzinfo is None:
+            raise ValueError("PortfolioWealthWitness.captured_at_utc must be timezone-aware")
+        if self.max_age <= timedelta(0):
+            raise ValueError("PortfolioWealthWitness.max_age must be positive")
+        if (
+            self.wealth_floor_usd <= 0
+            or self.wealth_ceiling_usd < self.wealth_floor_usd
+            or self.spendable_cash_usd <= 0
+            or self.reservations_usd < 0
+        ):
+            raise ValueError("portfolio wealth, cash, and reservations must be valid")
+        expected = portfolio_wealth_identity(
+            ledger_snapshot_id=self.ledger_snapshot_id,
+            position_set_hash=self.position_set_hash,
+            wealth_floor_usd=self.wealth_floor_usd,
+            wealth_ceiling_usd=self.wealth_ceiling_usd,
+            spendable_cash_usd=self.spendable_cash_usd,
+            reservations_usd=self.reservations_usd,
+            collateral_authority=self.collateral_authority,
+            captured_at_utc=self.captured_at_utc,
+        )
+        if self.witness_identity != expected:
+            raise ValueError("PortfolioWealthWitness identity does not bind its values")
+
+
+@dataclass(frozen=True)
+class GlobalSingleOrderCandidate:
+    """One current, native-side order hypothesis in the cross-family auction.
+
+    It carries no probability scalar.  The selector derives q from the verified full
+    family simplex after proving this exact condition/token membership.  The executable
+    curve is the candidate's own side-native ask ladder, including fees.
+    """
+
+    candidate_id: str
+    family_key: str
+    bin_id: str
+    condition_id: str
+    side: Literal["YES", "NO"]
+    token_id: str
+    probability_witness_identity: str
+    book_snapshot_id: str
+    book_captured_at_utc: datetime
+    execution_curve_identity: str
+    ledger_snapshot_id: str
+    executable_cost_curve: ExecutableCostCurve
+    resolution_identity: str
+    execution_mode: Literal["TAKER_LIMIT"] = "TAKER_LIMIT"
+    eligibility_reason: GlobalEligibilityReason | None = None
+
+    def __post_init__(self) -> None:
+        if self.side not in {"YES", "NO"}:
+            raise ValueError(f"unsupported native side: {self.side!r}")
+        if not all(
+            str(value).strip()
+            for value in (
+                self.candidate_id,
+                self.family_key,
+                self.bin_id,
+                self.condition_id,
+                self.token_id,
+                self.probability_witness_identity,
+                self.resolution_identity,
+            )
+        ):
+            raise ValueError("global order candidate identities must be non-empty")
+        if self.executable_cost_curve.side != self.side:
+            raise ValueError("candidate side must match its own native executable cost curve")
+        if self.book_captured_at_utc.tzinfo is None:
+            raise ValueError("book_captured_at_utc must be timezone-aware")
+        curve_identity = executable_curve_identity(self.executable_cost_curve)
+        if (
+            self.token_id != self.executable_cost_curve.token_id
+            or self.book_snapshot_id != self.executable_cost_curve.snapshot_id
+            or self.execution_curve_identity != curve_identity
+        ):
+            object.__setattr__(self, "eligibility_reason", "BOOK_CERTIFICATE_MISMATCH")
+        if self.execution_mode != "TAKER_LIMIT":
+            raise ValueError("global single-order candidates must be immediate taker-limit assets")
+
+
+def global_candidate_from_native(
+    native: Any,
+    *,
+    probability_witness: JointOutcomeProbabilityWitness,
+    ledger_snapshot_id: str,
+    book_captured_at_utc: datetime,
+    eligibility_reason: GlobalEligibilityReason | None = None,
+) -> GlobalSingleOrderCandidate:
+    """Materialize one order only after proving q-column/token membership."""
+
+    if getattr(native, "no_trade_reason", None) is not None:
+        raise ValueError("native no-trade candidate is not globally executable")
+    curve = getattr(native, "executable_cost_curve", None)
+    if curve is None:
+        raise ValueError("global candidate requires a full native executable curve")
+    try:
+        column = probability_witness.bin_ids.index(str(native.bin_id))
+    except ValueError as exc:
+        raise ValueError("native bin is absent from the family probability witness") from exc
+    binding = probability_witness.bindings[column]
+    expected_token = (
+        binding.yes_token_id if native.side == "YES" else binding.no_token_id
+    )
+    if (
+        not expected_token
+        or str(native.family_key) != probability_witness.family_key
+        or str(native.condition_id) != binding.condition_id
+        or str(native.token_id) != expected_token
+        or curve.token_id != expected_token
+        or curve.side != native.side
+    ):
+        raise ValueError("native condition/token does not own the selected q column")
+    return GlobalSingleOrderCandidate(
+        candidate_id=_hash(
+            probability_witness.family_key,
+            str(native.hypothesis_id),
+            binding.bin_id,
+            binding.condition_id,
+            str(native.side),
+            str(expected_token),
+        ),
+        family_key=probability_witness.family_key,
+        bin_id=binding.bin_id,
+        condition_id=binding.condition_id,
+        side=native.side,
+        token_id=expected_token,
+        probability_witness_identity=probability_witness.witness_identity,
+        book_snapshot_id=curve.snapshot_id,
+        book_captured_at_utc=book_captured_at_utc,
+        execution_curve_identity=executable_curve_identity(curve),
+        ledger_snapshot_id=str(ledger_snapshot_id),
+        executable_cost_curve=curve,
+        resolution_identity=probability_witness.resolution_identity,
+        eligibility_reason=eligibility_reason,
+    )
+
+
+@dataclass(frozen=True)
+class GlobalSingleOrderDecision:
+    """The one order that wins the current cross-family feasible-set auction."""
+
+    candidate: GlobalSingleOrderCandidate | None
+    shares: Decimal
+    cost_usd: Decimal
+    robust_delta_log_wealth: float
+    robust_ev_usd: float
+    capital_efficiency: float
+    no_trade_reason: str | None
+    limit_price: Decimal = Decimal("0")
+    expected_fill_price_before_fee: Decimal = Decimal("0")
+    max_spend_usd: Decimal = Decimal("0")
+    rejection_reasons: Mapping[str, str] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if self.candidate is None:
+            if self.no_trade_reason is None:
+                raise ValueError("global no-trade decision requires a reason")
+            if self.shares != 0 or self.cost_usd != 0:
+                raise ValueError("global no-trade decision cannot allocate capital")
+            if (
+                self.limit_price != 0
+                or self.expected_fill_price_before_fee != 0
+                or self.max_spend_usd != 0
+            ):
+                raise ValueError("global no-trade decision cannot carry an execution boundary")
+        elif (
+            self.no_trade_reason is not None
+            or self.shares <= 0
+            or self.cost_usd <= 0
+            or self.limit_price <= 0
+            or self.expected_fill_price_before_fee <= 0
+            or self.expected_fill_price_before_fee > self.limit_price
+            or self.max_spend_usd < self.cost_usd
+        ):
+            raise ValueError(
+                "global trade decision requires positive shares/cost/limit and sufficient max spend"
+            )
+
+
 def validate_family_decision_contract(decision: "FamilyDecision") -> "FamilyDecision":
     """Loud guard against the getattr-soft-fail class (consult REV-2: presence is not enough).
 
@@ -185,10 +855,10 @@ def _lower_cvar(du: np.ndarray, weights: np.ndarray, alpha: float) -> float:
     """Lower-tail CVaR at ``alpha`` — the (weighted) mean of the worst ``alpha`` fraction.
 
     CONCAVE-PRESERVING (consult REV-2): each per-draw ``du_k`` is concave in the stake vector,
-    and the lower-tail CVaR of concave functions is concave — so the objective is concave and
-    coordinate ascent reaches the global optimum. This replaces the raw α-quantile (VaR), whose
-    order statistic of concave functions is not concave. ``-inf`` draws (a ruined atom carries
-    positive mass) propagate to ``-inf`` correctly.
+    and the lower-tail CVaR of concave functions is concave, which licenses the certifying convex
+    solve. This replaces the raw α-quantile (VaR), whose order statistic of concave functions is
+    not concave. ``-inf`` draws (a ruined atom carries positive mass) propagate to ``-inf``
+    correctly.
 
     Zero/negative weights are FILTERED before the sort (consult REV-2 follow-up): a zero-weight
     row would be ``0 * -inf = NaN`` in the tail sum if it were a ruin draw; a weight of exactly
@@ -287,6 +957,709 @@ def _objective(
     return _lower_cvar(du, weights, alpha)
 
 
+def _single_order_cost(curve: ExecutableCostCurve, shares: Decimal) -> Decimal:
+    """Exact all-in spend for ``shares`` on the side-native ask ladder."""
+
+    remaining = Decimal(shares)
+    if remaining <= 0 or remaining < curve.min_order_size:
+        raise ValueError("share size is below the executable minimum")
+    cost = Decimal("0")
+    for level in curve.levels:
+        take = min(remaining, level.size)
+        if take > 0:
+            cost += take * curve.fee_model.all_in_price(level.price)
+            remaining -= take
+        if remaining <= Decimal("1e-18"):
+            return cost
+    raise ValueError("share size exceeds executable depth")
+
+
+def _single_order_max_shares(
+    curve: ExecutableCostCurve,
+    *,
+    spend_limit_usd: Decimal,
+) -> Decimal:
+    """Largest venue-grid size whose worst admitted limit fill fits cash.
+
+    The current-book VWAP is the expected spend, but the executable request is a
+    limit order. Collateral must therefore cover every requested share at the
+    deepest admitted level. This makes the mathematical optimum fundable by the
+    exact command that will represent it.
+    """
+
+    spend_limit = Decimal(spend_limit_usd)
+    cumulative = Decimal("0")
+    shares = Decimal("0")
+    for level in curve.levels:
+        price = curve.fee_model.all_in_price(level.price)
+        cumulative += level.size
+        shares = min(cumulative, spend_limit / price)
+        if shares < cumulative:
+            break
+    return (shares / _SIZE_QUANTUM).to_integral_value(rounding=ROUND_FLOOR) * _SIZE_QUANTUM
+
+
+def _single_order_execution_boundary(
+    candidate: GlobalSingleOrderCandidate,
+    shares: Decimal,
+) -> tuple[Decimal, Decimal, Decimal]:
+    """Return raw limit, raw VWAP, and fee-aware max spend for exact shares."""
+
+    remaining = Decimal(shares)
+    if remaining <= 0:
+        raise ValueError("single-order execution boundary requires positive shares")
+    limit_price: Decimal | None = None
+    raw_cost = Decimal("0")
+    for level in candidate.executable_cost_curve.levels:
+        take = min(level.size, remaining)
+        if take > 0:
+            limit_price = level.price
+            raw_cost += take * level.price
+            remaining -= take
+        if remaining <= Decimal("1e-18"):
+            break
+    if remaining > Decimal("1e-18") or limit_price is None:
+        raise ValueError("single-order execution boundary exceeds executable depth")
+    all_in_limit = candidate.executable_cost_curve.fee_model.all_in_price(limit_price)
+    return limit_price, raw_cost / Decimal(shares), Decimal(shares) * all_in_limit
+
+
+def _single_order_metrics(
+    candidate: GlobalSingleOrderCandidate,
+    *,
+    q_samples: np.ndarray,
+    shares: Decimal,
+    wealth_floor_usd: Decimal,
+    wealth_ceiling_usd: Decimal,
+    alpha: float,
+) -> tuple[float, float, float, Decimal]:
+    """Return robust Δlog, robust EV, Δlog/cost, and exact cost.
+
+    The contract has only two settlement payoffs.  Expected ROI is not the
+    objective; capital efficiency is the conservative terminal-wealth growth
+    purchased per dollar of current capital.
+    """
+
+    cost = _single_order_cost(candidate.executable_cost_curve, shares)
+    floor = float(wealth_floor_usd)
+    ceiling = float(wealth_ceiling_usd)
+    lose_wealth = floor - float(cost)
+    win_wealth = ceiling - float(cost) + float(shares)
+    if lose_wealth <= 0.0 or win_wealth <= 0.0:
+        return float("-inf"), float("-inf"), float("-inf"), cost
+    q = np.asarray(q_samples, dtype=np.float64)
+    # Coupling-robust endowment bound. A positive payoff's Δlog decreases with baseline
+    # wealth, so use the portfolio ceiling on wins. A loss's Δlog increases with baseline
+    # wealth, so use the floor on losses. This lower-bounds every unknown cross-family
+    # coupling without pairing marginal q draws or pretending the account is pure cash.
+    draw_du = q * math.log(win_wealth / ceiling) + (1.0 - q) * math.log(
+        lose_wealth / floor
+    )
+    weights = np.ones(q.size, dtype=np.float64)
+    robust_du = _lower_cvar(draw_du, weights, alpha)
+    draw_ev = q * float(shares) - float(cost)
+    robust_ev = _lower_cvar(draw_ev, weights, alpha)
+    efficiency = robust_du / float(cost) if cost > 0 else float("-inf")
+    return float(robust_du), float(robust_ev), float(efficiency), cost
+
+
+def _score_global_single_order(
+    candidate: GlobalSingleOrderCandidate,
+    *,
+    q_samples: np.ndarray,
+    band_alpha: float,
+    wealth_floor_usd: Decimal,
+    wealth_ceiling_usd: Decimal,
+    spendable_cash_usd: Decimal,
+    capital_limit_usd: Decimal,
+) -> GlobalSingleOrderDecision:
+    """Find the exact venue-grid optimum for one full-depth candidate."""
+
+    spend_limit = min(
+        Decimal(capital_limit_usd),
+        Decimal(spendable_cash_usd),
+        Decimal(wealth_floor_usd) * (Decimal("1") - Decimal(str(_WEALTH_MARGIN))),
+    )
+    max_shares = _single_order_max_shares(
+        candidate.executable_cost_curve,
+        spend_limit_usd=spend_limit,
+    )
+    min_shares = (
+        candidate.executable_cost_curve.min_order_size / _SIZE_QUANTUM
+    ).to_integral_value(rounding=ROUND_CEILING) * _SIZE_QUANTUM
+    if max_shares < min_shares:
+        return GlobalSingleOrderDecision(
+            candidate=None,
+            shares=Decimal("0"),
+            cost_usd=Decimal("0"),
+            robust_delta_log_wealth=0.0,
+            robust_ev_usd=0.0,
+            capital_efficiency=0.0,
+            no_trade_reason="DEPTH_INFEASIBLE",
+            rejection_reasons={candidate.candidate_id: "DEPTH_INFEASIBLE"},
+        )
+
+    def _continuous_objective(raw_shares: float) -> float:
+        shares = Decimal(str(raw_shares))
+        try:
+            return -_single_order_metrics(
+                candidate,
+                q_samples=q_samples,
+                shares=shares,
+                wealth_floor_usd=wealth_floor_usd,
+                wealth_ceiling_usd=wealth_ceiling_usd,
+                alpha=band_alpha,
+            )[0]
+        except ValueError:
+            return float("inf")
+
+    probes = {min_shares, max_shares}
+    if max_shares > min_shares:
+        result = minimize_scalar(
+            _continuous_objective,
+            method="bounded",
+            bounds=(float(min_shares), float(max_shares)),
+            options={"xatol": 1e-10, "maxiter": 300},
+        )
+        if result.success and math.isfinite(float(result.x)):
+            raw = Decimal(str(result.x)) / _SIZE_QUANTUM
+            for units in (
+                raw.to_integral_value(rounding=ROUND_FLOOR),
+                raw.to_integral_value(rounding=ROUND_CEILING),
+            ):
+                probes.add(units * _SIZE_QUANTUM)
+    cumulative = Decimal("0")
+    for level in candidate.executable_cost_curve.levels:
+        cumulative += level.size
+        raw = cumulative / _SIZE_QUANTUM
+        for units in (
+            raw.to_integral_value(rounding=ROUND_FLOOR),
+            raw.to_integral_value(rounding=ROUND_CEILING),
+        ):
+            probes.add(units * _SIZE_QUANTUM)
+
+    best: tuple[
+        float,
+        float,
+        float,
+        Decimal,
+        Decimal,
+        Decimal,
+        Decimal,
+        Decimal,
+    ] | None = None
+    for shares in sorted(probes):
+        if shares < min_shares or shares > max_shares:
+            continue
+        try:
+            robust_du, robust_ev, efficiency, cost = _single_order_metrics(
+                candidate,
+                q_samples=q_samples,
+                shares=shares,
+                wealth_floor_usd=wealth_floor_usd,
+                wealth_ceiling_usd=wealth_ceiling_usd,
+                alpha=band_alpha,
+            )
+            limit_price, expected_fill_price, max_spend = _single_order_execution_boundary(
+                candidate, shares
+            )
+        except ValueError:
+            continue
+        if max_spend > spend_limit:
+            continue
+        if best is None or robust_du > best[0] + 1e-15 or (
+            math.isclose(robust_du, best[0], rel_tol=0.0, abs_tol=1e-15)
+            and (cost, -efficiency, candidate.candidate_id)
+            < (best[3], -best[2], candidate.candidate_id)
+        ):
+            best = (
+                robust_du,
+                robust_ev,
+                efficiency,
+                cost,
+                shares,
+                limit_price,
+                expected_fill_price,
+                max_spend,
+            )
+
+    if best is None or not (best[0] > 0.0 and best[1] > 0.0):
+        return GlobalSingleOrderDecision(
+            candidate=None,
+            shares=Decimal("0"),
+            cost_usd=Decimal("0"),
+            robust_delta_log_wealth=0.0,
+            robust_ev_usd=0.0,
+            capital_efficiency=0.0,
+            no_trade_reason="NON_POSITIVE_ROBUST_OBJECTIVE",
+            rejection_reasons={candidate.candidate_id: "NON_POSITIVE_ROBUST_OBJECTIVE"},
+        )
+    (
+        robust_du,
+        robust_ev,
+        efficiency,
+        cost,
+        shares,
+        limit_price,
+        expected_fill_price,
+        max_spend,
+    ) = best
+    return GlobalSingleOrderDecision(
+        candidate=candidate,
+        shares=shares,
+        cost_usd=cost,
+        robust_delta_log_wealth=robust_du,
+        robust_ev_usd=robust_ev,
+        capital_efficiency=efficiency,
+        no_trade_reason=None,
+        limit_price=limit_price,
+        expected_fill_price_before_fee=expected_fill_price,
+        max_spend_usd=max_spend,
+    )
+
+
+def _probability_witness_rejection_reason(
+    candidate: GlobalSingleOrderCandidate,
+    witness: JointOutcomeProbabilityWitness | None,
+    current: CurrentFamilyProbabilityAuthority | None,
+    *,
+    decision_at_utc: datetime,
+) -> tuple[GlobalEligibilityReason | None, np.ndarray | None]:
+    """Verify that candidate q is one projection of a current complete simplex."""
+
+    if witness is None or witness.family_key != candidate.family_key:
+        return "PROBABILITY_AUTHORITY_MISSING", None
+    age = decision_at_utc - witness.captured_at_utc
+    if age.total_seconds() < 0.0 or age > witness.max_age:
+        return "PROBABILITY_AUTHORITY_EXPIRED", None
+    if (
+        current is None
+        or current.family_key != witness.family_key
+        or current.witness_identity != witness.witness_identity
+        or current.q_version != witness.q_version
+        or current.resolution_identity != witness.resolution_identity
+        or current.topology_identity != witness.topology_identity
+        or current.posterior_identity_hash != witness.posterior_identity_hash
+        or current.source_truth_identity != witness.source_truth_identity
+        or current.authority_certificate_hash != witness.authority_certificate_hash
+        or current.band_alpha != witness.band_alpha
+        or current.band_basis != witness.band_basis
+    ):
+        return "PROBABILITY_AUTHORITY_SUPERSEDED", None
+    try:
+        column = witness.bin_ids.index(candidate.bin_id)
+    except ValueError:
+        return "JOINT_Q_MEMBERSHIP_MISMATCH", None
+    binding = witness.bindings[column]
+    expected_token = (
+        binding.yes_token_id if candidate.side == "YES" else binding.no_token_id
+    )
+    if (
+        not expected_token
+        or candidate.condition_id != binding.condition_id
+        or candidate.token_id != expected_token
+        or candidate.probability_witness_identity != witness.witness_identity
+        or candidate.resolution_identity != witness.resolution_identity
+    ):
+        return "JOINT_Q_MEMBERSHIP_MISMATCH", None
+    yes_q = witness.yes_q_samples[:, column]
+    payoff_q = yes_q if candidate.side == "YES" else 1.0 - yes_q
+    return None, np.ascontiguousarray(payoff_q)
+
+
+def select_global_single_order(
+    candidates: Sequence[GlobalSingleOrderCandidate],
+    *,
+    probability_witnesses: Mapping[str, JointOutcomeProbabilityWitness],
+    universe_witness: GlobalAuctionUniverseWitness,
+    current_universe_identity_resolver: Callable[[], str | None],
+    current_probability_resolver: Callable[
+        [str], CurrentFamilyProbabilityAuthority | None
+    ],
+    current_execution_resolver: Callable[
+        [GlobalSingleOrderCandidate], CurrentExecutionAuthority | None
+    ],
+    current_wealth_identity_resolver: Callable[[], str | None],
+    wealth_witness: PortfolioWealthWitness,
+    capital_limit_usd: Decimal,
+    decision_at_utc: datetime,
+) -> GlobalSingleOrderDecision:
+    """Select one current executable order across every family and native side.
+
+    Eligibility is lexically prior to economics.  A cheap stale/unsupported tail never
+    receives a score.  Candidate q is not self-authenticating: it must be the exact YES
+    column (or pointwise NO complement) of a current complete family-simplex witness.
+    Because exactly one new order may win, cross-family coupling is not fabricated.
+    """
+
+    if decision_at_utc.tzinfo is None:
+        raise ValueError("decision_at_utc must be timezone-aware")
+    universe_age = decision_at_utc - universe_witness.captured_at_utc
+    try:
+        current_universe_identity = current_universe_identity_resolver()
+    except Exception:  # noqa: BLE001 - authority loss is a typed no-trade
+        current_universe_identity = None
+    expected_families = set(universe_witness.family_keys)
+    supplied_families = set(probability_witnesses)
+    candidate_families = {candidate.family_key for candidate in candidates}
+    supplied_bindings = {
+        family_key: witness.family_binding_identity
+        for family_key, witness in probability_witnesses.items()
+    }
+    if (
+        universe_witness.witness_identity != current_universe_identity
+        or universe_age.total_seconds() < 0.0
+        or universe_age > universe_witness.max_age
+        or supplied_families != expected_families
+        or supplied_bindings != universe_witness.binding_by_family
+        or not candidate_families.issubset(expected_families)
+    ):
+        return GlobalSingleOrderDecision(
+            candidate=None,
+            shares=Decimal("0"),
+            cost_usd=Decimal("0"),
+            robust_delta_log_wealth=0.0,
+            robust_ev_usd=0.0,
+            capital_efficiency=0.0,
+            no_trade_reason="GLOBAL_FEASIBLE_SET_INCOMPLETE",
+            rejection_reasons={
+                candidate.candidate_id: "GLOBAL_FEASIBLE_SET_INCOMPLETE"
+                for candidate in candidates
+            },
+        )
+    if wealth_witness.collateral_authority not in {"CHAIN", "VENUE"}:
+        return GlobalSingleOrderDecision(
+            candidate=None,
+            shares=Decimal("0"),
+            cost_usd=Decimal("0"),
+            robust_delta_log_wealth=0.0,
+            robust_ev_usd=0.0,
+            capital_efficiency=0.0,
+            no_trade_reason="COLLATERAL_UNKNOWN",
+            rejection_reasons={c.candidate_id: "COLLATERAL_UNKNOWN" for c in candidates},
+        )
+    witness_age = decision_at_utc - wealth_witness.captured_at_utc
+    try:
+        current_wealth_identity = current_wealth_identity_resolver()
+    except Exception:  # noqa: BLE001 - authority loss is a typed no-trade
+        current_wealth_identity = None
+    witness_current = (
+        wealth_witness.economic_identity == current_wealth_identity
+        and 0.0 <= witness_age.total_seconds()
+        and witness_age <= wealth_witness.max_age
+    )
+    if not witness_current:
+        return GlobalSingleOrderDecision(
+            candidate=None,
+            shares=Decimal("0"),
+            cost_usd=Decimal("0"),
+            robust_delta_log_wealth=0.0,
+            robust_ev_usd=0.0,
+            capital_efficiency=0.0,
+            no_trade_reason="CAPITAL_IDENTITY_SUPERSEDED",
+            rejection_reasons={
+                c.candidate_id: "CAPITAL_IDENTITY_SUPERSEDED" for c in candidates
+            },
+        )
+    if capital_limit_usd <= 0:
+        raise ValueError("capital limit must be positive")
+
+    rejections: dict[str, str] = {}
+    eligible: list[tuple[GlobalSingleOrderCandidate, np.ndarray, float, str]] = []
+    for candidate in candidates:
+        reason: str | None = candidate.eligibility_reason
+        q_samples: np.ndarray | None = None
+        probability_witness = probability_witnesses.get(candidate.family_key)
+        if reason is None:
+            try:
+                current_probability = current_probability_resolver(candidate.family_key)
+            except Exception:  # noqa: BLE001 - authority loss is a typed no-trade
+                current_probability = None
+            reason, q_samples = _probability_witness_rejection_reason(
+                candidate,
+                probability_witness,
+                current_probability,
+                decision_at_utc=decision_at_utc,
+            )
+        if reason is None:
+            try:
+                current_execution = current_execution_resolver(candidate)
+            except Exception:  # noqa: BLE001 - authority loss is a typed no-trade
+                current_execution = None
+            if current_execution is None:
+                reason = "EXECUTION_AUTHORITY_MISSING"
+            elif (
+                current_execution.token_id != candidate.token_id
+                or current_execution.side != candidate.side
+                or current_execution.book_snapshot_id != candidate.book_snapshot_id
+            ):
+                reason = "BOOK_IDENTITY_SUPERSEDED"
+            elif (
+                current_execution.execution_curve_identity
+                != candidate.execution_curve_identity
+            ):
+                reason = "EXECUTION_CURVE_SUPERSEDED"
+        quote_age = decision_at_utc - candidate.book_captured_at_utc
+        if (
+            reason is None
+            and (
+                quote_age.total_seconds() < 0.0
+                or quote_age > candidate.executable_cost_curve.quote_ttl
+            )
+        ):
+            reason = "QUOTE_EXPIRED"
+        if (
+            reason is None
+            and candidate.ledger_snapshot_id != wealth_witness.ledger_snapshot_id
+        ):
+            reason = "CAPITAL_IDENTITY_SUPERSEDED"
+        if reason is not None:
+            rejections[candidate.candidate_id] = reason
+            continue
+        assert probability_witness is not None and q_samples is not None
+        eligible.append(
+            (
+                candidate,
+                q_samples,
+                probability_witness.band_alpha,
+                probability_witness.band_basis,
+            )
+        )
+
+    # A dynamic authority change invalidates the epoch; it does not merely remove
+    # one asset from the ranking. Choosing an unchanged runner-up after another
+    # candidate's q/book/capital identity moved would prove a global optimum in
+    # neither the old nor the new feasible set. Rebuild the complete set next cycle.
+    epoch_invalidating_reasons = {
+        "PROBABILITY_AUTHORITY_MISSING",
+        "PROBABILITY_AUTHORITY_EXPIRED",
+        "PROBABILITY_AUTHORITY_SUPERSEDED",
+        "EXECUTION_AUTHORITY_MISSING",
+        "BOOK_IDENTITY_SUPERSEDED",
+        "EXECUTION_CURVE_SUPERSEDED",
+        "QUOTE_EXPIRED",
+        "CAPITAL_IDENTITY_SUPERSEDED",
+    }
+    if any(reason in epoch_invalidating_reasons for reason in rejections.values()):
+        return GlobalSingleOrderDecision(
+            candidate=None,
+            shares=Decimal("0"),
+            cost_usd=Decimal("0"),
+            robust_delta_log_wealth=0.0,
+            robust_ev_usd=0.0,
+            capital_efficiency=0.0,
+            no_trade_reason="GLOBAL_EPOCH_SUPERSEDED",
+            rejection_reasons=rejections,
+        )
+
+    band_contracts = {(alpha, basis) for _, _, alpha, basis in eligible}
+    if len(band_contracts) > 1:
+        rejections.update(
+            {c.candidate_id: "BAND_ALPHA_MISMATCH" for c, _, _, _ in eligible}
+        )
+        return GlobalSingleOrderDecision(
+            candidate=None,
+            shares=Decimal("0"),
+            cost_usd=Decimal("0"),
+            robust_delta_log_wealth=0.0,
+            robust_ev_usd=0.0,
+            capital_efficiency=0.0,
+            no_trade_reason="BAND_ALPHA_MISMATCH",
+            rejection_reasons=rejections,
+        )
+
+    scored: list[GlobalSingleOrderDecision] = []
+    for candidate, q_samples, band_alpha, _band_basis in eligible:
+        score = _score_global_single_order(
+            candidate,
+            q_samples=q_samples,
+            band_alpha=band_alpha,
+            wealth_floor_usd=wealth_witness.wealth_floor_usd,
+            wealth_ceiling_usd=wealth_witness.wealth_ceiling_usd,
+            spendable_cash_usd=wealth_witness.spendable_cash_usd,
+            capital_limit_usd=capital_limit_usd,
+        )
+        if score.candidate is None:
+            rejections.update(score.rejection_reasons)
+        else:
+            scored.append(score)
+
+    if not scored:
+        return GlobalSingleOrderDecision(
+            candidate=None,
+            shares=Decimal("0"),
+            cost_usd=Decimal("0"),
+            robust_delta_log_wealth=0.0,
+            robust_ev_usd=0.0,
+            capital_efficiency=0.0,
+            no_trade_reason="NO_CURRENT_EXECUTABLE_POSITIVE_ORDER",
+            rejection_reasons=rejections,
+        )
+
+    # Current-epoch capital growth is the only objective identified by current truth.
+    # A cross-epoch rate would require an authoritative capital-release distribution,
+    # future opportunity-arrival process, and reinvestment policy.  None may be guessed
+    # from a target date.  Maximize robust Δlog now; at a numerical tie, prefer higher
+    # robust terminal-wealth growth per dollar and then less cash.
+    winner = min(
+        scored,
+        key=lambda score: (
+            -round(score.robust_delta_log_wealth, 15),
+            -round(score.capital_efficiency, 15),
+            score.cost_usd,
+            score.candidate.candidate_id if score.candidate is not None else "",
+        ),
+    )
+    return GlobalSingleOrderDecision(
+        candidate=winner.candidate,
+        shares=winner.shares,
+        cost_usd=winner.cost_usd,
+        robust_delta_log_wealth=winner.robust_delta_log_wealth,
+        robust_ev_usd=winner.robust_ev_usd,
+        capital_efficiency=winner.capital_efficiency,
+        no_trade_reason=None,
+        limit_price=winner.limit_price,
+        expected_fill_price_before_fee=winner.expected_fill_price_before_fee,
+        max_spend_usd=winner.max_spend_usd,
+        rejection_reasons=rejections,
+    )
+
+
+def _ru_cvar_optimum(
+    *,
+    seed: np.ndarray,
+    w0: np.ndarray,
+    payoff: np.ndarray,
+    caps: np.ndarray,
+    costs: np.ndarray,
+    cash: float,
+    q_draws: np.ndarray,
+    weights: np.ndarray,
+    alpha: float,
+) -> tuple[np.ndarray, float, int]:
+    """Certify the continuous global optimum through a lower-CVaR cutting-plane program.
+
+    Lower CVaR is the minimum weighted expectation over the bounded tail-mixture polytope.
+    The master maximizes ``eta`` subject to ``eta <= r·du(x)`` for each discovered tail mixture
+    ``r``; at every candidate the current worst-tail mixture is added.  Each ``du_k`` is concave,
+    so every cut is a convex-feasible superlevel constraint.  When the master upper bound ``eta``
+    meets the actual lower CVaR, the global gap is certified without one slack variable per draw.
+    """
+    keep = np.asarray(weights, dtype=np.float64) > 0.0
+    q = np.asarray(q_draws, dtype=np.float64)[keep]
+    w = np.asarray(weights, dtype=np.float64)[keep]
+    if q.shape[0] == 0:
+        raise OptimizerConvergenceError("RU CVaR solve has no positive-weight belief draws")
+
+    n_items = payoff.shape[0]
+    n_draws = q.shape[0]
+
+    def _draw_utility(x: np.ndarray) -> np.ndarray:
+        w_end = w0 + x @ payoff
+        if not np.all(w_end > 0.0):
+            return np.full(n_draws, -np.inf, dtype=np.float64)
+        return q @ np.log(w_end / w0)
+
+    def _tail_mixture(du: np.ndarray) -> np.ndarray:
+        """The exact weighted worst-alpha mixture whose dot product equals lower CVaR."""
+        order = np.argsort(du, kind="stable")
+        target = float(alpha) * float(w.sum())
+        remaining = target
+        mixture = np.zeros(n_draws, dtype=np.float64)
+        for idx in order:
+            take = min(float(w[idx]), remaining)
+            if take > 0.0:
+                mixture[idx] = take / target
+                remaining -= take
+            if remaining <= 1e-15:
+                break
+        return mixture
+
+    seed = np.clip(np.asarray(seed, dtype=np.float64), 0.0, caps)
+    seed_du = _draw_utility(seed)
+    if not np.all(np.isfinite(seed_du)):
+        raise OptimizerConvergenceError("RU CVaR warm start has non-positive terminal wealth")
+    warm_seed = seed.copy()
+    warm_du = seed_du.copy()
+    cuts = [_tail_mixture(seed_du)]
+    n_vars = n_items + 1
+    budget_row = np.concatenate((costs, np.zeros(1))).reshape(1, n_vars)
+    wealth_rows = np.hstack(
+        (payoff.T, np.zeros((w0.size, 1), dtype=np.float64))
+    )
+    wealth_floor = np.maximum(w0 * _WEALTH_MARGIN, 1e-12)
+    bounds = Bounds(
+        np.concatenate((np.zeros(n_items), np.array([-np.inf]))),
+        np.concatenate((caps, np.array([np.inf]))),
+    )
+    objective_jac = np.concatenate((np.zeros(n_items), np.array([-1.0])))
+    total_iterations = 0
+    for _cut_round in range(64):
+        mixture_matrix = np.stack(cuts)
+
+        def _cut_values(v: np.ndarray) -> np.ndarray:
+            return mixture_matrix @ _draw_utility(v[:n_items]) - v[n_items]
+
+        def _cut_jac(v: np.ndarray) -> np.ndarray:
+            x = v[:n_items]
+            w_end = w0 + x @ payoff
+            draw_grad = q @ (payoff.T / w_end[:, None])
+            jac = np.empty((len(cuts), n_items + 1), dtype=np.float64)
+            jac[:, :n_items] = mixture_matrix @ draw_grad
+            jac[:, n_items] = -1.0
+            return jac
+
+        seed_eta = float(np.min(mixture_matrix @ seed_du))
+        warm_eta = float(np.min(mixture_matrix @ warm_du))
+        if warm_eta > seed_eta:
+            start_x, eta0 = warm_seed, warm_eta
+        else:
+            start_x, eta0 = seed, seed_eta
+        v0 = np.concatenate((start_x, np.array([eta0])))
+        constraints = (
+            LinearConstraint(budget_row, -np.inf, cash),
+            LinearConstraint(wealth_rows, wealth_floor - w0, np.inf),
+            NonlinearConstraint(_cut_values, 0.0, np.inf, jac=_cut_jac),
+        )
+        result = minimize(
+            lambda v: -float(v[n_items]),
+            v0,
+            jac=lambda _v: objective_jac,
+            method="SLSQP",
+            bounds=bounds,
+            constraints=constraints,
+            options={"ftol": 1e-12, "maxiter": 300, "disp": False},
+        )
+        total_iterations += int(result.nit)
+        x = np.asarray(result.x[:n_items], dtype=np.float64)
+        du = _draw_utility(x)
+        u = _lower_cvar(du, w, alpha)
+        gap = float(result.x[n_items]) - float(u)
+        violations = (
+            float(costs @ x) > cash + 1e-7
+            or np.any(w0 + x @ payoff < wealth_floor - 1e-7)
+            or np.any(x < -1e-8)
+            or np.any(x > caps + 1e-8)
+            or np.min(_cut_values(result.x)) < -1e-7
+        )
+        if result.success and not violations and np.isfinite(u) and gap <= 2e-9:
+            return x, float(u), total_iterations
+        if violations or not np.isfinite(u):
+            raise OptimizerConvergenceError(
+                f"RU CVaR master became infeasible: success={result.success}, "
+                f"message={result.message!s}, violations={violations}"
+            )
+        next_cut = _tail_mixture(du)
+        if any(np.array_equal(next_cut, prior) for prior in cuts):
+            raise OptimizerConvergenceError(
+                f"RU CVaR master stalled: success={result.success}, gap={gap:.12g}, "
+                f"message={result.message!s}"
+            )
+        cuts.append(next_cut)
+        seed, seed_du = x, du
+    raise OptimizerConvergenceError("RU CVaR master exceeded 64 tail-cut rounds")
+
+
 def _feasible_hi(
     i: int, x: np.ndarray, w0: np.ndarray, payoff: np.ndarray, caps: np.ndarray, costs: np.ndarray, cash: float
 ) -> float:
@@ -371,6 +1744,7 @@ def _pair_exchange(
     x: np.ndarray,
     w0: np.ndarray,
     payoff: np.ndarray,
+    caps: np.ndarray,
     costs: np.ndarray,
     q_draws: np.ndarray,
     weights: np.ndarray,
@@ -390,8 +1764,20 @@ def _pair_exchange(
     if ci <= 0.0 or cj <= 0.0:
         return 0.0  # only positive-cost (buy) pairs are coupled through the budget
     xi0, xj0 = float(x[i]), float(x[j])
-    lo = -xi0 * ci   # t at which new_x_i hits 0
-    hi = xj0 * cj    # t at which new_x_j hits 0
+    # Preserve both coordinates' venue-depth caps as well as non-negativity. The old exchange
+    # bounded only the lower side and could manufacture stake beyond priced depth while keeping
+    # the cash budget constant — an infeasible warm start that falsely outscored the convex solve.
+    lo = max(-xi0 * ci, (xj0 - float(caps[j])) * cj)
+    hi = min((float(caps[i]) - xi0) * ci, xj0 * cj)
+    # Preserve strictly positive terminal wealth along the exchange ray.
+    w_cur = w0 + x @ payoff
+    direction = payoff[i] / ci - payoff[j] / cj
+    wealth_floor = np.maximum(w0 * _WEALTH_MARGIN, 1e-12)
+    for atom in range(w0.size):
+        if direction[atom] < 0.0:
+            hi = min(hi, (w_cur[atom] - wealth_floor[atom]) / -direction[atom])
+        elif direction[atom] > 0.0:
+            lo = max(lo, (wealth_floor[atom] - w_cur[atom]) / direction[atom])
     if hi - lo <= 0.0:
         return 0.0
     trial = x.copy()
@@ -428,9 +1814,9 @@ def _optimize_continuous(
 
     Returns ``(x_joint, U_joint, x_top1, U_top1, sweeps)``; ``x_joint`` is the coordinate-ascent
     optimum seeded at the best single item, so ``U_joint ≥ U_top1`` always (dominance guarantee).
-    Because the CVaR objective is concave, the ascent reaches the global optimum; every coordinate
-    respects the depth/wealth/budget feasibility bound. ``sweeps`` is stamped as an optimizer-gap
-    diagnostic (converged before ``_MAX_SWEEPS`` ⇒ a stationary point of the concave objective).
+    The coordinate/pair/radial ascent constructs a deterministic feasible warm start. The final
+    joint vector comes from the certifying Rockafellar–Uryasev convex program; failure to dominate
+    the warm start is loud rather than silently relabeling a heuristic as globally optimal.
     """
     n_items = payoff.shape[0]
     zeros = np.zeros(n_items, dtype=np.float64)
@@ -486,7 +1872,9 @@ def _optimize_continuous(
             if float(costs @ x) >= cash - (_BUDGET_BIND_REL * cash + 1e-9):
                 for i in range(n_items):
                     for j in range(i + 1, n_items):
-                        sweep_gain += _pair_exchange(i, j, x, w0, payoff, costs, q_draws, weights, alpha)
+                        sweep_gain += _pair_exchange(
+                            i, j, x, w0, payoff, caps, costs, q_draws, weights, alpha
+                        )
             # radial balanced-growth step (handles the direction both arbs and symmetric hedges need)
             sweep_gain += _radial(x, _objective(x, w0, payoff, q_draws, weights, alpha))
             u_cur = _objective(x, w0, payoff, q_draws, weights, alpha)
@@ -528,7 +1916,22 @@ def _optimize_continuous(
             if u_b > u_a:
                 x_a, u_a = x_b, u_b
 
-    return x_a, float(u_a), x_top1, float(best_single_u), total_sweeps[0]
+    x_ru, u_ru, ru_iterations = _ru_cvar_optimum(
+        seed=x_a,
+        w0=w0,
+        payoff=payoff,
+        caps=caps,
+        costs=costs,
+        cash=cash,
+        q_draws=q_draws,
+        weights=weights,
+        alpha=alpha,
+    )
+    if u_ru < u_a - 1e-8:
+        raise OptimizerConvergenceError(
+            f"RU CVaR objective {u_ru:.12g} failed to dominate feasible warm start {u_a:.12g}"
+        )
+    return x_ru, float(u_ru), x_top1, float(best_single_u), total_sweeps[0] + ru_iterations
 
 
 def _quantize_size(units: float, item: MenuItem) -> Optional[Decimal]:
@@ -1006,6 +2409,7 @@ class SolveEngineShim:
             portfolio=portfolio,
             sizing_candidates=sizing_candidates,
             max_stake_usd=max_stake_usd,
+            served_payoff_q_lcb_by_side=served_payoff_q_lcb_by_side,
             replace=replace,
         )
         econ_by_route = {d.economics.route_id: d.economics for d in candidate_decisions}
@@ -1047,6 +2451,7 @@ class SolveEngineShim:
         portfolio,
         sizing_candidates,
         max_stake_usd,
+        served_payoff_q_lcb_by_side,
         replace,
     ):
         """Return symmetric YES/NO economics from the served band and live cost curves.
@@ -1066,6 +2471,11 @@ class SolveEngineShim:
             if sizing is None or not sizing.is_tradeable:
                 continue
             try:
+                guarded_payoff_q_lcb = None
+                if served_payoff_q_lcb_by_side is not None:
+                    guarded_payoff_q_lcb = served_payoff_q_lcb_by_side.get(
+                        (route.bin_id, route.side)
+                    )
                 economics = compute_candidate_economics(
                     route,
                     joint_q=legacy.joint_q,
@@ -1075,6 +2485,7 @@ class SolveEngineShim:
                     exposure=portfolio,
                     max_stake_usd=max_stake_usd,
                     alpha=alpha,
+                    guarded_payoff_q_lcb=guarded_payoff_q_lcb,
                 )
             except Exception:  # noqa: BLE001 - missing current economics is a fail-closed leg.
                 continue

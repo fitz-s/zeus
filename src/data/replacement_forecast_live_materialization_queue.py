@@ -20,6 +20,7 @@ from src.contracts.replacement_pipeline_files import (
     validate_materialization_seed,
 )
 from src.data.replacement_forecast_cycle_policy import tradeable_grade_coverage_sql
+from src.data.replacement_input_hwm import replacement_live_input_lag_reason
 from src.data.replacement_forecast_materialization_request_builder import (
     build_replacement_forecast_materialization_request,
 )
@@ -291,7 +292,7 @@ def _seed_already_covered(*, forecast_db: Path | str | None, seed: dict[str, obj
         runtime_layer_clause = "AND runtime_layer = 'live'" if "runtime_layer" in posterior_columns else ""
         posterior = conn.execute(
             f"""
-            SELECT 1
+            SELECT posterior_id, source_cycle_time, computed_at, provenance_json
             FROM forecast_posteriors
             WHERE source_id = ?
               {runtime_layer_clause}
@@ -301,12 +302,49 @@ def _seed_already_covered(*, forecast_db: Path | str | None, seed: dict[str, obj
               {tradeable_grade_clause}
               AND json_extract(dependency_source_run_ids_json, '$.baseline_b0') = ?
               AND json_extract(dependency_source_run_ids_json, '$.openmeteo_ifs9_anchor') = ?
+            ORDER BY datetime(computed_at) DESC, posterior_id DESC
             LIMIT 1
             """,
             (SOURCE_ID, city, target_date, metric, baseline_source_run_id, openmeteo_source_run_id),
         ).fetchone()
         if posterior is None:
             return False
+        decision_time = _parse_utc_iso(seed.get("computed_at")) or datetime.now(timezone.utc)
+        if replacement_live_input_lag_reason(
+            conn,
+            city=city,
+            target_date=target_date,
+            metric=metric,
+            decision_time=decision_time,
+            posterior_source_cycle_time=posterior["source_cycle_time"],
+            posterior_computed_at=posterior["computed_at"],
+        ) is not None:
+            return False
+        seed_observation_time = _parse_utc_iso(
+            seed.get("day0_observed_extreme_observation_time")
+        )
+        if seed_observation_time is not None:
+            try:
+                posterior_provenance = json.loads(
+                    str(posterior["provenance_json"] or "{}")
+                )
+            except (TypeError, ValueError):
+                posterior_provenance = {}
+            conditioning = (
+                posterior_provenance.get("day0_conditioning")
+                if isinstance(posterior_provenance, dict)
+                else None
+            )
+            posterior_observation_time = _parse_utc_iso(
+                conditioning.get("observation_time")
+                if isinstance(conditioning, dict)
+                else None
+            )
+            if (
+                posterior_observation_time is None
+                or posterior_observation_time < seed_observation_time
+            ):
+                return False
         readiness_columns = {
             str(row["name"] if isinstance(row, dict) else row[1])
             for row in conn.execute("PRAGMA table_info(readiness_state)").fetchall()
@@ -325,7 +363,7 @@ def _seed_already_covered(*, forecast_db: Path | str | None, seed: dict[str, obj
             )
         readiness = conn.execute(
             f"""
-            SELECT 1
+            SELECT dependency_json
             FROM readiness_state
             WHERE strategy_key = ?
               {readiness_status_clause}
@@ -349,7 +387,42 @@ def _seed_already_covered(*, forecast_db: Path | str | None, seed: dict[str, obj
             """,
             (STRATEGY_KEY, city, target_date, metric, baseline_source_run_id, openmeteo_source_run_id),
         ).fetchone()
-        return readiness is not None
+        if readiness is None:
+            return False
+        soft_binding_supported = conn.execute(
+            """
+            SELECT 1
+              FROM readiness_state r,
+                   json_each(r.dependency_json, '$.dependencies')
+             WHERE json_extract(value, '$.role') = 'soft_anchor_posterior'
+             LIMIT 1
+            """
+        ).fetchone()
+        if soft_binding_supported is not None:
+            try:
+                readiness_payload = json.loads(str(readiness["dependency_json"] or "{}"))
+            except (TypeError, ValueError):
+                return False
+            dependencies = (
+                readiness_payload.get("dependencies")
+                if isinstance(readiness_payload, dict)
+                else None
+            )
+            matches = [
+                item
+                for item in (dependencies or [])
+                if isinstance(item, dict)
+                and item.get("role") == "soft_anchor_posterior"
+            ]
+            if len(matches) != 1:
+                return False
+            try:
+                bound_posterior_id = int(matches[0].get("posterior_id"))
+            except (TypeError, ValueError):
+                return False
+            if bound_posterior_id != int(posterior["posterior_id"]):
+                return False
+        return True
     finally:
         conn.close()
 

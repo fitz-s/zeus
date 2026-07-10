@@ -233,21 +233,34 @@ guard) and `JointOutcomeScenarioSet` rejects non-positive weights.
 `MIN_TAIL_DRAWS=20` + point-belief STAMPED in diagnostics (`tail_floor_ok`, `effective_tail_draws`,
 `point_belief`); AST sentinel tied to the real `_record_qkernel_selection_family_facts` consumer.
 
-**Optimizer ruling — coordinate ascent RETAINED over the Rockafellar–Uryasev convex program.**
-The continuous solve is deterministic, zero-dependency coordinate ascent, now hardened with three
-moves that close the coupling gaps a pure axis method has on this concave-but-coupled objective:
-(a) **budget-neutral pairwise exchange** for the budget FACE (single-coordinate moves are infeasible
-there); (b) a **diversified multi-start seed** when no single item improves alone, for the from-origin
-diversification hedge (CVaR's directional derivative is superadditive, so `∂U/∂(e_i+e_j)` can be > 0
-while each axis derivative ≤ 0); (c) a **radial balanced-growth step** for the direction both full-set
-arbs and symmetric hedges need. Globality is guarded empirically by 2-D/3-D brute-force fixtures
-(grid-beats-ascent = STOP) and by optimizer-gap diagnostics (`optimizer_sweeps`). Rationale for
-retaining over RU: zero-dependency determinism, the `max(joint, top1)` floor guarantees phase-1
-migration safety (never below the picker), and phase-1 executes only the primary leg so joint
-diversification/arb optimality is not on the live path. RESIDUAL: pathological asymmetric
-multi-item coupling beyond these three moves is a known theoretical gap — SAFE for phase-1, with the
-**RU auxiliary-variable convex program recorded as future hardening** if the gap diagnostics ever show
-a material stall on the live corpus.
+**Optimizer ruling — Rockafellar–Uryasev lower-CVaR convex program is authoritative.**
+The continuous solve uses a deterministic tail-mixture cutting-plane master. Each discovered
+worst-tail mixture adds a concave-superlevel constraint; convergence requires the master's `eta`
+upper bound to meet the directly evaluated lower CVaR. Coordinate ascent, budget-neutral pairwise
+exchange, diversified multi-start, and radial balanced growth remain only as a feasible warm start
+and best-single-item dominance floor. They are not a globality certificate. Globality is attacked
+independently by exact 0.01-grid YES-best/NO-best fixtures, label-mirror invariance, 2-D/3-D
+exhaustive grids, and the known asymmetric multi-item counterexample that defeats the former warm
+start. Any grid-oracle win over the continuous authority is a STOP, not a tolerance widening.
+
+**Cross-family one-order ruling — compare certificates, never fabricate a joint law.**
+When an epoch may add exactly one order, native YES and NO candidates from different
+families may compete without a cross-family joint distribution only through the dedicated
+single-order selector. It integrates the complete fee-adjusted ask curve at 0.01-share
+granularity. A candidate carries no caller-authored q: a family witness supplies one complete
+MECE row-simplex matrix with ordered `(bin_id, condition_id, YES token, NO token)` membership;
+YES takes the bound column and NO its pointwise complement. Independent current resolvers confirm
+the probability certificate and exact native book/curve. A current venue-universe witness proves
+that every active family is present; a bounded reactor page is never renamed "global". The wealth witness binds ledger
+generation, reconciled positions, reservations, spendable cash, and wealth bounds. Unknown
+coupling is lower-bounded by evaluating wins against the portfolio ceiling and losses against
+the floor. The current-epoch primary score is lower-CVaR Δlog-wealth; numerical ties use robust
+Δlog per dollar, then lower cash. A `/capital-hour` score is forbidden until capital release,
+future opportunity arrivals, and reinvestment policy have current authority. Maker-contingent
+assets and any stale/mismatched certificate fail closed. The event reactor now owns
+`prepare all -> choose one -> JIT recapture -> submit once`; implementation alone is not a
+live-optimality claim, which additionally requires a current complete-scope receipt, exact
+one-submit evidence, and fresh post-submit capital/venue reconciliation.
 
 **α-sensitivity replay (promotion-evidence-gate item, NOT a solver change).** Before promotion, replay
 the W3 fixture corpus at α ∈ {0.01, 0.05, 0.10} and require decision-stability bands (diff the

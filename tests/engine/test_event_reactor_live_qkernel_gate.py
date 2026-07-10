@@ -341,14 +341,14 @@ def _day0_submit_witness() -> PreSubmitAuthorityWitness:
     )
 
 
-def _day0_action_payload(*, bin_label: str) -> dict[str, object]:
+def _day0_action_payload(*, bin_label: str, direction: str = "buy_yes") -> dict[str, object]:
     return {
         "event_type": "DAY0_EXTREME_UPDATED",
         "city": "Manila",
         "target_date": "2026-07-02",
         "metric": "high",
         "temperature_metric": "high",
-        "direction": "buy_yes",
+        "direction": direction,
         "bin_label": bin_label,
         "source_match_status": "MATCH",
         "local_date_status": "MATCH",
@@ -417,6 +417,79 @@ def test_day0_submit_gate_allows_maker_range_with_fresh_observation() -> None:
         decision_time=datetime(2026, 7, 2, 2, 17, tzinfo=timezone.utc),
     )
     assert reason is None
+
+
+@pytest.mark.parametrize(
+    ("metric", "bin_label", "observed", "yes_survives"),
+    (
+        ("high", "32°C", 31, True),
+        ("high", "32-33°C", 33, False),
+        ("high", "32°C or below", 32, False),
+        ("high", "32°C or higher", 31, True),
+        ("low", "32°C", 33, True),
+        ("low", "32-33°C", 32, False),
+        ("low", "32°C or below", 33, True),
+        ("low", "32°C or higher", 32, False),
+    ),
+)
+def test_day0_one_bin_stress_is_payoff_complement_symmetric(
+    metric: str,
+    bin_label: str,
+    observed: float,
+    yes_survives: bool,
+) -> None:
+    common = {
+        "metric": metric,
+        "temperature_metric": metric,
+        "bin_label": bin_label,
+        "rounded_value": observed,
+    }
+    _, yes_result = era._day0_bin_stress_verdict(
+        actionable_payload={**common, "direction": "buy_yes"},
+        event_payload={},
+    )
+    _, no_result = era._day0_bin_stress_verdict(
+        actionable_payload={**common, "direction": "buy_no"},
+        event_payload={},
+    )
+
+    assert yes_result is yes_survives
+    assert no_result is (not yes_survives)
+
+
+def test_day0_submit_gate_blocks_no_when_one_bin_stress_enters_point_bin() -> None:
+    event = _day0_event_payload()
+    event.payload["rounded_value"] = 31
+    event.payload_json = json.dumps(event.payload)
+
+    reason = _day0_live_submit_admission_rejection_reason(
+        event=event,
+        actionable_payload=_day0_action_payload(
+            bin_label="Will the highest temperature in Manila be 32°C on July 2?",
+            direction="buy_no",
+        ),
+        authority_witness=_day0_submit_witness(),
+        order_mode="MAKER",
+        decision_time=datetime(2026, 7, 2, 2, 17, tzinfo=timezone.utc),
+    )
+
+    assert reason == "DAY0_ONE_BIN_EDGE_FRAGILE"
+
+
+@pytest.mark.parametrize("direction", ("buy_yes", "buy_no"))
+def test_day0_one_bin_stress_fails_closed_when_bin_is_unparseable(direction: str) -> None:
+    distance, survives = era._day0_bin_stress_verdict(
+        actionable_payload={
+            "direction": direction,
+            "metric": "high",
+            "bin_label": "not a settlement bin",
+            "rounded_value": 31,
+        },
+        event_payload={},
+    )
+
+    assert distance == 0.0
+    assert survives is False
 
 
 def test_qkernel_selection_facts_write_to_attached_world_not_trade_local(tmp_path):
@@ -693,8 +766,10 @@ def test_current_state_marker_rejects_unsealed_economics_mutation():
     cert = _current_qkernel_cert()
 
     cert["cost"] = 0.39
+    cert["edge_lcb"] = 0.21
 
     assert era._qkernel_current_state_solve_economics(cert) is False
+    assert era._valid_qkernel_execution_economics_payload(cert, direction="buy_yes") is None
 
 
 @pytest.mark.parametrize("side", ("YES", "NO"))

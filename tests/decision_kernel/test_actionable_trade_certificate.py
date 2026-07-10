@@ -405,6 +405,49 @@ def test_actionable_current_state_identity_must_match_belief_parent():
         verify_actionable_trade(action, parents)
 
 
+def test_actionable_declared_current_state_cannot_downgrade_to_legacy_after_tamper():
+    economics = {
+        **_action_payload()["qkernel_execution_economics"],
+        "decision_id": "decision-current-1",
+        "receipt_hash": "receipt-current-1",
+        "q_version": "q-current-1",
+        "sample_hash": "current-sample-hash",
+        "q_lcb_guard_basis": "CURRENT_POSTERIOR_BAND",
+        "q_lcb_guard_abstained": False,
+        "q_lcb_guard_cell_key": "current-sample-hash",
+        "selection_guard_basis": "CURRENT_POSTERIOR_BAND",
+        "selection_guard_abstained": False,
+        "selection_guard_cell_key": "current-sample-hash",
+        "selection_guard_n": 64,
+    }
+    economics["current_state_identity_hash"] = qkernel_current_state_identity_hash(economics)
+    original_identity = economics["current_state_identity_hash"]
+    economics.update(cost=0.39, edge_lcb=0.21)
+    parents, action = actionable_graph(
+        parent_overrides={
+            claims.BELIEF: {
+                "qkernel_decision_id": economics["decision_id"],
+                "qkernel_receipt_hash": economics["receipt_hash"],
+                "qkernel_q_version": economics["q_version"],
+                "qkernel_sample_hash": economics["sample_hash"],
+                "qkernel_current_state_identity_hash": original_identity,
+            }
+        },
+        action_payload={
+            "c_fee_adjusted": 0.39,
+            "trade_score": 0.21,
+            "action_score": 0.21,
+            "qkernel_execution_economics": economics,
+        },
+    )
+
+    with pytest.raises(
+        CertificateVerificationError,
+        match="current-state identity invalid",
+    ):
+        verify_actionable_trade(action, parents)
+
+
 def test_actionable_accepts_center_yes_below_binary_floor_when_quality_clear():
     parents, action = actionable_graph(
         action_payload={

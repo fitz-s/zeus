@@ -1,5 +1,5 @@
 # Created: 2026-07-03
-# Last reused/audited: 2026-07-03
+# Last reused/audited: 2026-07-09
 """build_solve_menu — pure reshaping of a priced NegRiskRouteSet into a SolveMenu (atom axis).
 
 Duck-typed venue fakes (the adapter reads only documented attributes). Verifies the typed
@@ -37,13 +37,24 @@ class FakeInstrument:
         return e
 
 
-def _route(route_id, bin_id, side, cost, max_shares, *, shares=100, executable=True, reason=None):
+def _route(
+    route_id,
+    bin_id,
+    side,
+    cost,
+    max_shares,
+    *,
+    shares=100,
+    executable=True,
+    reason=None,
+    price_type="fee_adjusted",
+):
     return SimpleNamespace(
         route_id=route_id,
         route_type="DIRECT_YES" if side == "YES" else "DIRECT_NO",
         instrument=FakeInstrument(bin_id, side),
         shares=Decimal(str(shares)),
-        avg_cost=SimpleNamespace(value=float(cost)),
+        avg_cost=SimpleNamespace(value=float(cost), price_type=price_type),
         max_shares=Decimal(str(max_shares)),
         legs=(SimpleNamespace(bin_id=bin_id, token_id=f"tok_{side}_{bin_id}"),),
         executable=executable,
@@ -170,6 +181,23 @@ def test_maker_lane_disabled_even_when_requested():
     rs = _route_set(direct_yes={"y": _route("r_y", "y", "YES", 0.4, 500)})
     menu = build_solve_menu(rs, family_key="fam", family_book=fb, holdings_by_bin_id={}, include_maker_lane=True)
     assert all(it.kind != "maker_quote" for it in menu.items)
+
+
+def test_proof_native_maker_direct_route_is_non_executable_in_phase1():
+    fb = _family_book(("y", "n"), {"y": _market("y"), "n": _market("n")})
+    rs = _route_set(
+        direct_yes={
+            "y": _route("maker_y", "y", "YES", 0.4, 5, shares=5, price_type="bid")
+        },
+        direct_no={
+            "n": _route("maker_n", "n", "NO", 0.3, 5, shares=5, price_type="bid")
+        },
+    )
+    menu = build_solve_menu(rs, family_key="fam", family_book=fb, holdings_by_bin_id={})
+    for item_id in ("maker_y", "maker_n"):
+        item = next(it for it in menu.items if it.item_id == item_id)
+        assert item.executable is False
+        assert item.non_executable_reason == "PHASE1_MAKER_CONTINGENT_UNMODELED"
 
 
 def test_depth_cap_at_priced_shares():

@@ -1,5 +1,5 @@
 # Created: 2026-05-24
-# Last reused/audited: 2026-07-02
+# Last reused/audited: 2026-07-10
 # Authority basis: EDLI v1 implementation prompt §13 event reactor no-bypass contract.
 from __future__ import annotations
 
@@ -11,6 +11,8 @@ from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
+import pytest
+
 from src.decision_kernel import claims
 from tests.decision_kernel.no_submit_fixtures import build_test_no_submit_proof_bundle
 from src.events.event_store import EventStore
@@ -21,8 +23,14 @@ from src.events.opportunity_event import (
     make_day0_extreme_updated_event,
     make_opportunity_event,
 )
-from src.events.reactor import EventSubmissionReceipt, OpportunityEventReactor, ReactorConfig, ReactorResult
-from src.state.db import init_schema
+from src.events.reactor import (
+    EventSubmissionReceipt,
+    GlobalBatchSubmitResult,
+    OpportunityEventReactor,
+    ReactorConfig,
+    ReactorResult,
+)
+from src.state.db import init_schema, world_write_mutex
 from src.strategy.live_inference.no_trade_regret import NoTradeRegretLedger
 
 
@@ -221,6 +229,51 @@ def _reactor(store, *, gates=True, config=None):
     return reactor, rejected, submitted
 
 
+def _global_batch_probe_reactor(store, observations, *, incomplete=False):
+    def _direct_submit(*_args, **_kwargs):
+        observations["direct_submit_calls"] += 1
+        raise AssertionError("global batch path must not invoke per-event submit")
+
+    def _process_global_batch(events, _decision_time):
+        observations["batch_calls"] += 1
+        observations["batch_event_ids"] = tuple(event.event_id for event in events)
+        observations["mutex_locked_at_batch"] = world_write_mutex().locked()
+        observations["world_conn_in_txn_at_batch"] = bool(store.conn.in_transaction)
+        observations["claimed_statuses_at_batch"] = tuple(
+            _processing_status(store.conn, event.event_id) for event in events
+        )
+        receipts = {
+            event.event_id: EventSubmissionReceipt(
+                submitted=False,
+                event_id=event.event_id,
+                causal_snapshot_id=event.causal_snapshot_id,
+                reason="SUBMIT_ABORTED_PRICE_MOVED:GLOBAL_TEST_NO_CURRENT_WINNER",
+                proof_accepted=False,
+            )
+            for event in events
+        }
+        if incomplete:
+            receipts.pop(events[-1].event_id)
+        return GlobalBatchSubmitResult(
+            receipts=receipts,
+            winner_event_id=None,
+            venue_submit_count=0,
+        )
+
+    observations.update(direct_submit_calls=0, batch_calls=0)
+    _direct_submit.process_global_batch = _process_global_batch  # type: ignore[attr-defined]
+    return OpportunityEventReactor(
+        store,
+        source_truth_gate=lambda _event: True,
+        executable_snapshot_gate=lambda _event, _decision_time: True,
+        riskguard_gate=lambda _event: True,
+        final_intent_submit=_direct_submit,
+        reject=lambda *_args: None,
+        config=ReactorConfig(reactor_mode="live_no_submit"),
+        regret_ledger=NoTradeRegretLedger(store.conn),
+    )
+
+
 def _terminal_surfaces(conn: sqlite3.Connection, event_id: str) -> dict[str, int]:
     verified_no_submit = conn.execute(
         """
@@ -289,6 +342,66 @@ def test_market_channel_event_not_direct_reactor_input():
     assert rejected == []
     assert submitted == []
     assert _processing_status(_conn, event.event_id) == "ignored"
+
+
+def test_global_batch_claims_epoch_then_calls_one_lock_free_batch_seam():
+    conn, store = _store()
+    events = (
+        _forecast_event("global-a", target_date="2026-05-25"),
+        _forecast_event("global-b", target_date="2026-05-25"),
+    )
+    for event in events:
+        store.insert_or_ignore(event)
+    observations = {}
+    reactor = _global_batch_probe_reactor(store, observations)
+
+    result = reactor.process_pending(decision_time=_DT_VENUE_OPEN, limit=2)
+
+    assert observations["batch_calls"] == 1
+    assert observations["direct_submit_calls"] == 0
+    assert set(observations["batch_event_ids"]) == {event.event_id for event in events}
+    assert observations["mutex_locked_at_batch"] is False
+    assert observations["world_conn_in_txn_at_batch"] is False
+    assert observations["claimed_statuses_at_batch"] == ("processing", "processing")
+    assert result.retried == 2
+    assert all(_processing_status(conn, event.event_id) == "pending" for event in events)
+
+
+def test_global_batch_incomplete_receipt_coverage_fails_closed_for_whole_epoch():
+    conn, store = _store()
+    events = (
+        _forecast_event("incomplete-a", target_date="2026-05-25"),
+        _forecast_event("incomplete-b", target_date="2026-05-25"),
+    )
+    for event in events:
+        store.insert_or_ignore(event)
+    observations = {}
+    reactor = _global_batch_probe_reactor(store, observations, incomplete=True)
+
+    result = reactor.process_pending(decision_time=_DT_VENUE_OPEN, limit=2)
+
+    assert observations["batch_calls"] == 1
+    assert observations["direct_submit_calls"] == 0
+    assert result.proof_accepted == 0
+    assert result.retried == 2
+    assert all(_processing_status(conn, event.event_id) == "pending" for event in events)
+
+
+def test_global_batch_result_rejects_more_than_one_submit_or_wrong_winner():
+    first = EventSubmissionReceipt(True, "first", side_effect_status="ACKED")
+    second = EventSubmissionReceipt(True, "second", side_effect_status="ACKED")
+    with pytest.raises(ValueError, match="at most one venue submit"):
+        GlobalBatchSubmitResult(
+            receipts={"first": first, "second": second},
+            winner_event_id="first",
+            venue_submit_count=2,
+        )
+    with pytest.raises(ValueError, match="submitted receipt must be the one global winner"):
+        GlobalBatchSubmitResult(
+            receipts={"first": first},
+            winner_event_id=None,
+            venue_submit_count=0,
+        )
 
 
 def _retry_reactor(store, snapshot_present: dict):

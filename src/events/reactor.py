@@ -50,7 +50,7 @@ from dataclasses import dataclass, field, replace as dataclass_replace
 from collections import Counter
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Callable, Iterable, Mapping
+from typing import Any, Callable, Iterable, Mapping, Sequence
 from zoneinfo import ZoneInfo
 
 from src.decision_kernel import claims
@@ -594,6 +594,14 @@ class EventSubmissionReceipt:
     # the receipt hash (it is internal plumbing, never serialized into receipt_json). None on every
     # legacy / gate-reject receipt that never reached candidate-proof generation.
     belief_payload: "dict[str, Any] | None" = field(default=None, repr=False, compare=False)
+    # Cross-family auction transport. The adapter prepares the complete family
+    # probability/token/book set without reserving or submitting; the reactor compares
+    # every prepared family before one winner may reserve. Internal only: never serialized.
+    prepared_global_family: "Any | None" = field(default=None, repr=False, compare=False)
+    # Exact cross-family winner certificate. Present only on the one event selected
+    # from a complete current universe; the live certificate builder consumes its
+    # immutable shares/limit/book/wealth identities and may not re-size it locally.
+    global_actuation: "Any | None" = field(default=None, repr=False, compare=False)
     # D1 FILL-UP LEASE CONTEXT (2026-06-22 lifecycle consult REQ-20260622-060011).
     # When this receipt is an APPROVED same-token fill-up (stake overridden to the
     # residual delta), the family-rebalance lease intent_id + the owned-exposure
@@ -847,6 +855,34 @@ class ReactorResult:
         return self.proof_accepted
 
 
+@dataclass(frozen=True)
+class GlobalBatchSubmitResult:
+    """Opaque batch-actuation result: all events finalized, at most one venue call."""
+
+    receipts: Mapping[str, EventSubmissionReceipt]
+    winner_event_id: str | None
+    venue_submit_count: int
+
+    def __post_init__(self) -> None:
+        if self.venue_submit_count not in {0, 1}:
+            raise ValueError("global batch may start at most one venue submit")
+        if self.winner_event_id is None and self.venue_submit_count != 0:
+            raise ValueError("venue submit requires one selected winner")
+        if self.winner_event_id is not None and self.winner_event_id not in self.receipts:
+            raise ValueError("global batch winner must have one event-bound receipt")
+        if any(key != receipt.event_id for key, receipt in self.receipts.items()):
+            raise ValueError("global batch receipt keys must match receipt event identities")
+        submitted_ids = {
+            receipt.event_id for receipt in self.receipts.values() if receipt.submitted
+        }
+        if len(submitted_ids) > 1:
+            raise ValueError("global batch may contain at most one submitted receipt")
+        if submitted_ids and (
+            self.venue_submit_count != 1 or submitted_ids != {self.winner_event_id}
+        ):
+            raise ValueError("submitted receipt must be the one global winner")
+
+
 class OpportunityEventReactor:
     def __init__(
         self,
@@ -1024,6 +1060,20 @@ class OpportunityEventReactor:
             # to correctness); within-lane fetch order — and thus the per-city fairness — is
             # preserved. Channel events are already excluded by fetch_pending.
             events = _fair_lane_interleave(events)
+            if callable(getattr(self._submit, "process_global_batch", None)):
+                attempted = self._process_global_event_batch(
+                    events,
+                    decision_time=decision_time,
+                    result=result,
+                    budget=budget,
+                    cycle_start=cycle_start,
+                    remaining=remaining,
+                )
+                if remaining is not None:
+                    remaining -= attempted
+                # One global auction epoch may start at most one venue submit. Do not
+                # page into a second auction inside the same reactor cycle.
+                return result
             for event in events:
                 # PRE-EVENT budget check (2026-06-11 cadence guard): if the budget
                 # is ALREADY spent, stop BEFORE claiming another event. The
@@ -1054,13 +1104,84 @@ class OpportunityEventReactor:
                 self._drain_substrate_refreshes(result=result)
         return result
 
+    def _process_global_event_batch(
+        self,
+        events: Sequence[OpportunityEvent],
+        *,
+        decision_time: datetime,
+        result: ReactorResult,
+        budget: float | None,
+        cycle_start: float,
+        remaining: int | None,
+    ) -> int:
+        """Claim/gate all epoch events, then let one opaque adapter auction act once."""
+
+        claimed: list[OpportunityEvent] = []
+        attempted = 0
+        for event in events:
+            if remaining is not None and attempted >= remaining:
+                break
+            if budget is not None and (time.monotonic() - cycle_start) >= budget:
+                break
+            attempted += 1
+            if self._process_event_unit(
+                event,
+                decision_time=decision_time,
+                result=result,
+                defer_submit=True,
+            ) is True:
+                claimed.append(event)
+        if not claimed:
+            return attempted
+
+        process_batch = getattr(self._submit, "process_global_batch")
+        try:
+            batch_result = process_batch(
+                tuple(claimed), decision_time.astimezone(UTC)
+            )
+            if not isinstance(batch_result, GlobalBatchSubmitResult):
+                raise TypeError("global batch adapter returned an invalid result")
+            claimed_ids = {event.event_id for event in claimed}
+            if set(batch_result.receipts) != claimed_ids:
+                raise ValueError("global batch receipts do not cover exactly the claimed epoch")
+            if (
+                batch_result.winner_event_id is not None
+                and batch_result.winner_event_id not in claimed_ids
+            ):
+                raise ValueError("global batch winner is not a claimed event")
+        except Exception as exc:  # noqa: BLE001 - every claimed event must close its unit
+            for event in claimed:
+                self._finalize_deferred_event_unit(
+                    event,
+                    EventSubmissionReceipt(
+                        False,
+                        event.event_id,
+                        event.causal_snapshot_id,
+                        reason=f"GLOBAL_BATCH_FAILED:{type(exc).__name__}:{exc}",
+                        proof_accepted=False,
+                    ),
+                    decision_time=decision_time,
+                    result=result,
+                )
+            return attempted
+
+        for event in claimed:
+            self._finalize_deferred_event_unit(
+                event,
+                batch_result.receipts[event.event_id],
+                decision_time=decision_time,
+                result=result,
+            )
+        return attempted
+
     def _process_event_unit(
         self,
         event: OpportunityEvent,
         *,
         decision_time: datetime,
         result: ReactorResult,
-    ) -> None:
+        defer_submit: bool = False,
+    ) -> bool | None:
         """Process ONE event as TWO serialized world-DB write units around the
         network submit boundary (#95 SEV-2.1).
 
@@ -1168,7 +1289,10 @@ class OpportunityEventReactor:
             try:
                 self._store.conn.execute("SAVEPOINT edli_reactor_event")
                 pre_disposition, should_submit = self._process_one_pre_submit(
-                    event, decision_time=decision_time, result=result
+                    event,
+                    decision_time=decision_time,
+                    result=result,
+                    global_batch=defer_submit,
                 )
                 if not should_submit:
                     self._finalize_disposition(
@@ -1197,6 +1321,9 @@ class OpportunityEventReactor:
                 return
         finally:
             mutex.release()
+
+        if defer_submit:
+            return True
 
         # ---- Network submit: NO mutex held, NO open world txn (WAL lock free) ----
         # In production self._submit performs the JIT /book HTTP fetch and the
@@ -1315,6 +1442,85 @@ class OpportunityEventReactor:
                 with contextlib.suppress(Exception):
                     self._finalize_reservation(event, emitted=False)
                 self._dead_letter_unknown(event, exc, decision_time=decision_time, result=result)
+        finally:
+            mutex.release()
+
+    def _finalize_deferred_event_unit(
+        self,
+        event: OpportunityEvent,
+        submit_result: EventSubmissionReceipt,
+        *,
+        decision_time: datetime,
+        result: ReactorResult,
+    ) -> None:
+        """Window B for an event whose Window A joined a global auction epoch."""
+
+        mutex = world_write_mutex()
+        mutex.acquire()
+        try:
+            try:
+                with _scoped_sqlite_busy_timeout(
+                    self._store.conn, _reactor_claim_busy_timeout_ms()
+                ):
+                    if not self._store.conn.in_transaction:
+                        self._store.conn.execute("BEGIN IMMEDIATE")
+                    self._store.conn.execute("SAVEPOINT edli_reactor_event")
+                    accepted_before = result.proof_accepted
+                    disposition = self._process_one_post_submit(
+                        event,
+                        submit_result,
+                        decision_time=decision_time,
+                        result=result,
+                    )
+                    emitted = result.proof_accepted > accepted_before
+                    self._finalize_reservation(event, emitted=emitted)
+                    self._finalize_disposition(
+                        event,
+                        disposition,
+                        decision_time=decision_time,
+                        result=result,
+                        proof_emitted=emitted,
+                    )
+                    self._store.conn.execute("RELEASE SAVEPOINT edli_reactor_event")
+                    self._commit_event_unit()
+            except Exception as exc:
+                if _is_sqlite_lock_error(exc):
+                    with contextlib.suppress(Exception):
+                        self._store.conn.execute("ROLLBACK TO SAVEPOINT edli_reactor_event")
+                        self._store.conn.execute("RELEASE SAVEPOINT edli_reactor_event")
+                    with contextlib.suppress(Exception):
+                        self._finalize_reservation(event, emitted=False)
+                    with contextlib.suppress(Exception):
+                        if getattr(self._store.conn, "in_transaction", False):
+                            self._store.conn.rollback()
+                    try:
+                        with _scoped_sqlite_busy_timeout(
+                            self._store.conn, _reactor_claim_busy_timeout_ms()
+                        ):
+                            self._store.requeue_pending(
+                                event.event_id,
+                                last_error=_POST_SUBMIT_WORLD_WRITE_LOCK_RETRY,
+                            )
+                            self._commit_event_unit()
+                    except Exception as requeue_exc:
+                        if not _is_sqlite_lock_error(requeue_exc):
+                            raise
+                        with contextlib.suppress(Exception):
+                            self._store.conn.rollback()
+                    result.rejection_reasons.append(_POST_SUBMIT_WORLD_WRITE_LOCK_RETRY)
+                    result.retried += 1
+                    return
+                with contextlib.suppress(Exception):
+                    self._store.conn.execute("ROLLBACK TO SAVEPOINT edli_reactor_event")
+                    self._store.conn.execute("RELEASE SAVEPOINT edli_reactor_event")
+                with contextlib.suppress(Exception):
+                    self._finalize_reservation(event, emitted=False)
+                self._dead_letter_unknown(
+                    event,
+                    exc,
+                    decision_time=decision_time,
+                    result=result,
+                )
         finally:
             mutex.release()
 
@@ -2012,7 +2218,12 @@ class OpportunityEventReactor:
             )
 
     def _process_one_pre_submit(
-        self, event: OpportunityEvent, *, decision_time: datetime, result: ReactorResult
+        self,
+        event: OpportunityEvent,
+        *,
+        decision_time: datetime,
+        result: ReactorResult,
+        global_batch: bool = False,
     ) -> tuple[str | None, bool]:
         """Pre-submit gate phase (#95 SEV-2.1).
 
@@ -2094,7 +2305,10 @@ class OpportunityEventReactor:
         if not self._source_truth_gate(event):
             self._reject_event(event, "SOURCE_TRUTH", "SOURCE_TRUTH_BLOCKED", result, decision_time=decision_time)
             return None, False
-        if not self._executable_snapshot_gate(event, decision_time.astimezone(UTC)):
+        if (
+            not global_batch
+            and not self._executable_snapshot_gate(event, decision_time.astimezone(UTC))
+        ):
             # Transient: the family's executable snapshots may not be captured yet this cycle.
             # Signal a retry instead of consuming the event (see process_pending).
             #
@@ -4933,7 +5147,7 @@ def run_edli_event_reactor_cycle(*, active_lock) -> None:
         submit_adapter = (
             event_bound_live_adapter_from_trade_conn(
                 trade_conn,
-                live_cap_conn=conn,
+                live_cap_conn=trade_conn,
                 live_order_schema_initialized=True,
                 forecast_conn=forecasts_conn,
                 topology_conn=forecasts_conn,

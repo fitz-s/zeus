@@ -314,8 +314,62 @@ def test_riskguard_recent_exits_skip_settlement_rows_without_metric_authority():
             "exit_reason": "SETTLEMENT",
             "exited_at": "2026-04-02T00:00:00Z",
             "pnl": 4.2,
+            "strategy_key": "",
+            "loss_eligible": True,
+            "loss_exclusion_reason": "",
         }
     ]
+
+
+def test_loss_breaker_excludes_balance_only_chain_recovery_but_keeps_system_loss():
+    now = "2026-07-10T15:00:00+00:00"
+    snapshot = riskguard_module._realized_window_loss_snapshot(
+        [
+            {
+                "exited_at": "2026-07-10T14:00:00+00:00",
+                "pnl": -186.72,
+                "loss_eligible": False,
+            },
+            {
+                "exited_at": "2026-07-10T14:30:00+00:00",
+                "pnl": -8.56,
+                "loss_eligible": True,
+            },
+        ],
+        now=now,
+        lookback=timedelta(hours=24),
+        initial_bankroll=1230.43,
+        threshold_pct=0.08,
+        degraded=False,
+        source="test",
+    )
+
+    assert snapshot["level"] == RiskLevel.GREEN
+    assert snapshot["loss"] == pytest.approx(8.56)
+    assert snapshot["reference"]["settlement_count"] == 1
+    assert snapshot["reference"]["excluded_unowned_settlement_count"] == 1
+    assert snapshot["reference"]["excluded_unowned_realized_pnl"] == pytest.approx(-186.72)
+
+
+def test_loss_breaker_still_red_for_system_authorized_loss():
+    snapshot = riskguard_module._realized_window_loss_snapshot(
+        [
+            {
+                "exited_at": "2026-07-10T14:30:00+00:00",
+                "pnl": -100.0,
+                "loss_eligible": True,
+            }
+        ],
+        now="2026-07-10T15:00:00+00:00",
+        lookback=timedelta(hours=24),
+        initial_bankroll=1000.0,
+        threshold_pct=0.08,
+        degraded=False,
+        source="test",
+    )
+
+    assert snapshot["level"] == RiskLevel.RED
+    assert snapshot["loss"] == pytest.approx(100.0)
 
 
 def test_current_mode_realized_exits_prefers_verified_settlements_over_outcome_fact():
@@ -609,6 +663,7 @@ class TestMetrics:
                 "id": "learning-ready-1",
                 "learning_snapshot_ready": True,
                 "metric_ready": True,
+                "probability_identity_ready": True,
                 "p_posterior": 0.78,
                 "outcome": 1,
             },
@@ -616,6 +671,7 @@ class TestMetrics:
                 "id": "missing-prob",
                 "learning_snapshot_ready": True,
                 "metric_ready": True,
+                "probability_identity_ready": True,
                 "p_posterior": None,
                 "outcome": 1,
             },
@@ -623,6 +679,7 @@ class TestMetrics:
                 "id": "metric-not-ready",
                 "learning_snapshot_ready": True,
                 "metric_ready": False,
+                "probability_identity_ready": True,
                 "p_posterior": 0.65,
                 "outcome": 1,
             },
@@ -630,6 +687,7 @@ class TestMetrics:
                 "id": "learning-ready-2",
                 "learning_snapshot_ready": True,
                 "metric_ready": True,
+                "probability_identity_ready": True,
                 "p_posterior": 0.31,
                 "outcome": 0,
             },
@@ -637,6 +695,7 @@ class TestMetrics:
                 "id": "learning-ready-3",
                 "learning_snapshot_ready": True,
                 "metric_ready": True,
+                "probability_identity_ready": True,
                 "p_posterior": 0.52,
                 "outcome": 1,
             },
@@ -645,6 +704,53 @@ class TestMetrics:
         selected = riskguard_module._riskguard_brier_metric_rows(rows, limit=2)
 
         assert [row["id"] for row in selected] == ["learning-ready-1", "learning-ready-2"]
+
+    def test_brier_sample_rejects_probability_without_q_identity(self):
+        rows = [
+            {
+                "id": "unbound",
+                "learning_snapshot_ready": True,
+                "metric_ready": True,
+                "probability_identity_ready": False,
+                "p_posterior": 0.90,
+                "outcome": 0,
+            }
+        ]
+
+        assert riskguard_module._riskguard_brier_metric_rows(rows) == []
+
+    def test_probability_identity_binding_requires_one_complete_entry_q_version(self):
+        conn = sqlite3.connect(":memory:")
+        conn.execute(
+            "CREATE TABLE venue_commands ("
+            "position_id TEXT,intent_kind TEXT,q_version TEXT)"
+        )
+        conn.executemany(
+            "INSERT INTO venue_commands VALUES (?,?,?)",
+            [
+                ("bound", "ENTRY", "q-v1"),
+                ("missing", "ENTRY", None),
+                ("conflict", "ENTRY", "q-v1"),
+                ("conflict", "ENTRY", "q-v2"),
+            ],
+        )
+
+        bound = riskguard_module._bind_brier_probability_identities(
+            conn,
+            [
+                {"trade_id": "bound"},
+                {"trade_id": "missing"},
+                {"trade_id": "conflict"},
+                {"trade_id": "absent"},
+            ],
+        )
+
+        assert bound[0]["probability_identity_ready"] is True
+        assert bound[0]["entry_q_version"] == "q-v1"
+        assert bound[1]["probability_identity_blocked_reason"] == "entry_q_version_missing"
+        assert bound[2]["probability_identity_blocked_reason"] == "entry_q_version_conflicting"
+        assert bound[3]["probability_identity_blocked_reason"] == "entry_command_missing"
+        conn.close()
 
 
 def _settlement_row(
@@ -664,6 +770,8 @@ def _settlement_row(
         "authority_level": "VERIFIED",
         "metric_ready": True,
         "learning_snapshot_ready": True,
+        "probability_identity_ready": True,
+        "entry_q_version": "test-q-version",
         "canonical_payload_complete": True,
         "is_degraded": False,
         "pnl": pnl,
@@ -1491,6 +1599,8 @@ class TestRiskGuardSettlementSource:
                     "source": "position_events",
                     "metric_ready": True,
                     "learning_snapshot_ready": True,
+                    "probability_identity_ready": True,
+                    "entry_q_version": "test-q-version",
                 }
             ],
         )
@@ -1528,6 +1638,8 @@ class TestRiskGuardSettlementSource:
                     "source": "decision_log",
                     "metric_ready": True,
                     "learning_snapshot_ready": True,
+                    "probability_identity_ready": True,
+                    "entry_q_version": "test-q-version",
                 }
             ],
         )
@@ -3436,6 +3548,8 @@ class TestStrategyPolicyResolver:
                     "learning_snapshot_ready": True,
                     "canonical_payload_complete": True,
                     "metric_ready": True,
+                    "probability_identity_ready": True,
+                    "entry_q_version": "test-q-version",
                 },
                 {
                     "p_posterior": None,

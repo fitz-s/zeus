@@ -1,5 +1,5 @@
 # Created: 2026-07-03
-# Last reused or audited: 2026-07-03
+# Last reused or audited: 2026-07-09
 # Authority basis: architecture doc §1 SOLVE row (menu from negrisk_routes, REUSE-grade);
 #   W3.MATH brief (RouteCost/NegRiskRouteSet field inventory, conversion_routes stays ());
 #   CONSULT REV-2 rulings 2026-07-03 (typed atom payoff projector; per-leg tick/min-size;
@@ -85,8 +85,17 @@ def _route_menu_item(
     # side-correct ladder: YES buys walk yes_asks, NO buys walk no_asks (consult REV-2 follow-up)
     ladder_attr = "yes_asks" if instrument.side == "YES" else "no_asks"
     tick, min_order = _ladder_tick_min(getattr(market, ladder_attr, None) or getattr(market, "yes_asks", None))
-    executable = bool(route.executable) and phase1_executable
-    reason = route.reason if route.reason is not None else (None if executable else "PHASE1_NON_DIRECT_ROUTE")
+    # A proof-native maker quote is still a direct instrument, but its acquisition
+    # is contingent on fill/latency/cancel state.  Phase 1 has no such state model,
+    # so treating the claim as already acquired would overstate expected utility.
+    maker_contingent = str(getattr(route.avg_cost, "price_type", "") or "").lower() == "bid"
+    executable = bool(route.executable) and phase1_executable and not maker_contingent
+    if route.reason is not None:
+        reason = route.reason
+    elif maker_contingent:
+        reason = "PHASE1_MAKER_CONTINGENT_UNMODELED"
+    else:
+        reason = None if executable else "PHASE1_NON_DIRECT_ROUTE"
     # Depth cap: avg_cost was walked at route.shares, so never size past the priced depth in
     # phase 1 (consult REV-2 follow-up blocker) — a per-level cost curve is phase-2.
     max_units = min(Decimal(route.max_shares), Decimal(route.shares))

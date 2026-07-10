@@ -244,6 +244,54 @@ def test_reconstruct_rows_materialized_independent_of_history_depth():
         f"reconstruct rows grew with history depth: shallow="
         f"{count_shallow.snapshot_rows_materialized} deep={count_deep.snapshot_rows_materialized}"
     )
+    assert count_shallow.snapshot_query_count == 1
+    assert count_deep.snapshot_query_count == 1
+
+
+def test_reconstruct_uses_exact_latest_snapshot_identity_for_both_sides():
+    conn = _snapshot_conn()
+    topo = _build_family_history(
+        conn,
+        condition_ids=["0xlatest-a", "0xlatest-b"],
+        captures_per_condition=3,
+    )
+
+    market, counting = _reconstruct_with_counting(conn, topo)
+
+    assert market is not None
+    assert counting.snapshot_query_count == 1
+    assert counting.snapshot_rows_materialized == 4
+    assert {outcome["condition_id"] for outcome in market["outcomes"]} == {
+        "0xlatest-a",
+        "0xlatest-b",
+    }
+
+
+def test_reconstruct_fails_closed_when_condition_lacks_executable_identity():
+    conn = _snapshot_conn()
+    topo = _build_family_history(
+        conn,
+        condition_ids=["0xcomplete", "0xmissing"],
+        captures_per_condition=1,
+    )
+    conn.execute(
+        "DELETE FROM executable_market_snapshot_latest "
+        "WHERE condition_id = '0xmissing'"
+    )
+    # Simulate a legacy append store that also never observed the condition.
+    conn.execute("DROP TRIGGER no_delete_executable_market_snapshots")
+    conn.execute(
+        "DELETE FROM executable_market_snapshots "
+        "WHERE condition_id = '0xmissing'"
+    )
+
+    market = reconstruct_weather_market_from_static_topology(
+        conn,
+        topology_rows=topo,
+        now_utc=_BASE,
+    )
+
+    assert market is None
 
 
 # ---------------------------------------------------------------------------
