@@ -890,16 +890,21 @@ def _run_restart_recovery_if_needed(labels: list[str]) -> tuple[bool, str]:
             get_world_connection,
             init_schema_trade_only,
         )
+        from src.state.schema.edli_live_order_events_schema import (
+            ensure_tables as ensure_live_order_tables,
+        )
 
         applied = {}
 
         world_conn = get_world_connection(write_class='live')
         try:
+            ensure_live_order_tables(world_conn)
             applied['world'] = apply_migrations(
                 world_conn,
                 target='202607_drop_world_collateral_unsettled_ghost',
                 db_identity='world',
             )
+            world_conn.commit()
         finally:
             world_conn.close()
 

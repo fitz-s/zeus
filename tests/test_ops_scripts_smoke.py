@@ -1996,6 +1996,7 @@ def test_deploy_live_trading_restart_runs_recovery(monkeypatch, tmp_path):
     assert ok is True
     assert "restart recovery passed" in detail
     assert calls
+    assert "ensure_live_order_tables(world_conn)" in calls[0][2]
     assert "init_schema_trade_only" in calls[0][2]
     assert "get_trade_connection(write_class='live')" in calls[0][2]
     assert "get_trade_connection_with_world_required(write_class='live')" in calls[0][2]
