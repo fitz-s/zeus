@@ -1,8 +1,8 @@
 # Created: 2026-05-19
-# Last reused or audited: 2026-07-09
+# Last reused or audited: 2026-07-10
 # Authority basis: codereview-may19-2.md relationship F
 #                  + docs/operations/task_2026-05-21_live_side_effect_risk_boundaries/task.md P1-1
-# Lifecycle: created=2026-05-19; last_reviewed=2026-07-09; last_reused=2026-07-09
+# Lifecycle: created=2026-05-19; last_reviewed=2026-07-10; last_reused=2026-07-10
 # Purpose: Relationship-F antibody — assert that compute_composite_live_health()
 #   surfaces DEGRADED when run_mode has failed or status_summary is stale, even
 #   when the heartbeat is OK (closing the "scheduler alive but not trading" gap).
@@ -993,7 +993,12 @@ def _write_pending_exit_reassert_loop_db(sd: Path, *, now: datetime) -> None:
         trade_conn.close()
 
 
-def _write_pending_exit_projection_regression_db(sd: Path, *, now: datetime) -> None:
+def _write_pending_exit_projection_regression_db(
+    sd: Path,
+    *,
+    now: datetime,
+    released: bool = False,
+) -> None:
     trade_conn = sqlite3.connect(sd / "zeus_trades.db")
     try:
         trade_conn.execute(
@@ -1086,8 +1091,26 @@ def _write_pending_exit_projection_regression_db(sd: Path, *, now: datetime) -> 
                     "status": "backoff_exhausted",
                 },
             ),
+        ]
+        if released:
+            events.append(
+                (
+                    12,
+                    "EXIT_RETRY_RELEASED",
+                    now - timedelta(minutes=5, seconds=52),
+                    "pending_exit",
+                    "day0_window",
+                    "ready",
+                    {
+                        "error": "executable_snapshot_gate: size below min_order_size",
+                        "status": "ready",
+                    },
+                )
+            )
+        next_sequence = 13 if released else 12
+        events.extend([
             (
-                12,
+                next_sequence,
                 "MONITOR_REFRESHED",
                 now - timedelta(minutes=5, seconds=50),
                 "day0_window",
@@ -1096,7 +1119,7 @@ def _write_pending_exit_projection_regression_db(sd: Path, *, now: datetime) -> 
                 {"fresh_prob": 0.77},
             ),
             (
-                13,
+                next_sequence + 1,
                 "CHAIN_SIZE_CORRECTED",
                 now - timedelta(minutes=5, seconds=40),
                 "day0_window",
@@ -1104,7 +1127,7 @@ def _write_pending_exit_projection_regression_db(sd: Path, *, now: datetime) -> 
                 "partial",
                 {"chain_shares": 3.8},
             ),
-        ]
+        ])
         for seq, event_type, occurred_at, before, after, status, payload in events:
             trade_conn.execute(
                 """
@@ -2781,6 +2804,81 @@ def test_pending_exit_projection_regression_evaluates_without_attested_daemon(
     assert surface["main_daemon_issue"] == "MAIN_DAEMON_PROCESS_MISSING"
     assert "main_daemon" in result["failing_surfaces"]
     assert "pending_exit_release_loop" in result["failing_surfaces"]
+
+
+def test_pending_exit_projection_release_then_held_is_not_regression(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A canonical retry release authorizes the subsequent held projection."""
+    sd = tmp_path / "state"
+    sd.mkdir()
+    _setup_healthy_state(sd)
+    monkeypatch.setattr(live_health, "_dirty_runtime_worktree_paths", lambda **_kwargs: ())
+    monkeypatch.setattr(
+        live_health,
+        "_main_daemon_surface",
+        lambda status_summary, heartbeat: {
+            "ok": True,
+            "issue": None,
+            "attested": True,
+            "pid": 123,
+            "command": "python -m src.main",
+        },
+    )
+    monkeypatch.setattr(
+        live_health,
+        "_process_code_surface",
+        lambda main_daemon_surface: {"ok": True, "issue": None, "evaluated": True},
+    )
+    now = datetime.now(timezone.utc)
+    _write_forecast_event_bridge_dbs(
+        sd,
+        posterior_computed_at=(now - timedelta(seconds=30)).isoformat(),
+        fsr_created_at=(now - timedelta(seconds=20)).isoformat(),
+    )
+    _write_pending_exit_projection_regression_db(sd, now=now, released=True)
+
+    result = compute_composite_live_health(state_dir=sd, now=now)
+
+    surface = result["surfaces"]["pending_exit_release_loop"]
+    assert surface["pending_exit_projection_regression_count"] == 0
+    assert surface["pending_exit_projection_regression_sample"] == []
+    assert surface["ok"] is True
+    assert "pending_exit_release_loop" not in result["failing_surfaces"]
+
+    # A release is not a permanent exemption. A newer exit transition becomes latest and
+    # a subsequent held projection without another release must fail again.
+    trade_conn = sqlite3.connect(sd / "zeus_trades.db")
+    try:
+        for seq, event_type, before, after, status in (
+            (15, "EXIT_INTENT", "day0_window", "pending_exit", "exit_intent"),
+            (16, "EXIT_ORDER_REJECTED", "day0_window", "pending_exit", "retry_pending"),
+            (17, "MONITOR_REFRESHED", "day0_window", "day0_window", "partial"),
+        ):
+            trade_conn.execute(
+                "INSERT INTO position_events VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    "pos-regression",
+                    seq,
+                    event_type,
+                    (now - timedelta(minutes=1, seconds=17 - seq)).isoformat(),
+                    before,
+                    after,
+                    status,
+                    json.dumps({"status": status}),
+                ),
+            )
+        trade_conn.commit()
+    finally:
+        trade_conn.close()
+
+    result = compute_composite_live_health(state_dir=sd, now=now)
+    surface = result["surfaces"]["pending_exit_release_loop"]
+    assert surface["pending_exit_projection_regression_count"] == 1
+    assert surface["pending_exit_projection_regression_sample"][0][
+        "latest_exit_event_type"
+    ] == "EXIT_ORDER_REJECTED"
 
 
 def test_pending_exit_runtime_gate_block_yields_degraded(

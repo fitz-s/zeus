@@ -2908,14 +2908,16 @@ test_metadata:
     law_dependencies:
       - codereview-may19-2.md relationship F
     notes: >
-      Closes the "scheduler alive but not trading" observability gap (relationship F).
+      Closes the "scheduler alive but not trading" observability gap (relationship F),
+      including exit-projection ordering that treats EXIT_RETRY_RELEASED as the
+      canonical authorization for a subsequent held monitor projection.
       Asserts compute_composite_live_health() returns DEGRADED when run_mode has
       failed (scheduler_jobs_health.json status=FAILED) or status_summary.json is
       stale (>5 min), even when daemon heartbeat is fresh. T4 asserts WARNING log
       is emitted with the failing surface name. Call site in _write_heartbeat() in
       src/main.py surfaces composite to state/live_health_composite.json each cycle.
     created: 2026-05-19
-    last_reused_or_audited: 2026-05-19
+    last_reused_or_audited: 2026-07-10
 
   tests/test_repair_active_entry_q_versions.py:
     modules: [scripts, control, state]

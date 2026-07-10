@@ -42,6 +42,15 @@ Restore truthful live entry admission after the global auction reached a real wi
 3. Locate the stuck reactor call from current process/log/DB evidence; distinguish bounded slow solve from deadlock or unbounded queue work.
 4. Any repair must be one minimal independently reviewed slice; otherwise remain fail-closed with an exact blocker.
 
+## Slice B2 -- Released exit projection health
+
+- Canonical sequence for Seoul `656594aa-af2`: `EXIT_ORDER_REJECTED` seq 663 left `pending_exit`; `EXIT_RETRY_RELEASED` seq 666 legally transitioned `pending_exit -> day0_window`; held `MONITOR_REFRESHED` starts at seq 667.
+- Defect: the projection-regression query selects the latest event only from `EXIT_INTENT`, `EXIT_ORDER_REJECTED`, and `EXIT_ORDER_POSTED`. It excludes `EXIT_RETRY_RELEASED`, so every legal held monitor after release is compared against the older rejection and mislabeled as a regression.
+- Minimal repair: make release part of the latest exit-transition ordering and exclude a position when that latest transition is `EXIT_RETRY_RELEASED`. A new exit intent/rejection after release remains blocking because it becomes latest again.
+- Forbidden: change position phase, suppress a genuine held projection after an unreleased exit, weaken any exit submit/runtime gate, or mutate live DB state.
+- Acceptance: unreleased rejection + held projection still fails; release + held projection clears; current Seoul false positive disappears after deploy.
+- Verification: full `tests/test_run_mode_failure_surfaces.py` passes 86/86. The antibody proves release -> held clears and release -> newer intent/rejection -> held fails again. Independent SQL review found no P0/P1 and judged the slice deploy-safe.
+
 ## Slice B1 -- Post-trade leaked-thread recovery
 
 - Current evidence: the collateral heartbeat succeeded through 18:33:17 local; from 18:34:35 onward every 30-second attempt exceeded its 25-second deadline and logged `thread leaked, daemon should restart`.

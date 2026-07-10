@@ -2350,7 +2350,8 @@ def _pending_exit_release_loop_surface(
                      WHERE event_type IN (
                            'EXIT_INTENT',
                            'EXIT_ORDER_REJECTED',
-                           'EXIT_ORDER_POSTED'
+                           'EXIT_ORDER_POSTED',
+                           'EXIT_RETRY_RELEASED'
                        )
                        AND datetime(occurred_at) >= datetime(?)
                      GROUP BY position_id
@@ -2421,6 +2422,7 @@ def _pending_exit_release_loop_surface(
             ON rp.position_id = le.position_id
          WHERE pc.phase IN ('active', 'day0_window')
            AND pc.order_status IN ('filled', 'partial')
+           AND le.latest_exit_event_type <> 'EXIT_RETRY_RELEASED'
            AND rp.position_id IS NULL
            AND (
                COALESCE(CAST(pc.chain_shares AS REAL), 0.0) > 0.0
