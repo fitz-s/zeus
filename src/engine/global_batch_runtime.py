@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
+import hashlib
+import sqlite3
 from typing import Callable, Mapping, Sequence
 
 from src.contracts.executable_market_snapshot import FRESHNESS_WINDOW_DEFAULT
@@ -24,6 +26,46 @@ from src.state.collateral_ledger import COLLATERAL_SNAPSHOT_MAX_AGE_SECONDS
 UTC = timezone.utc
 
 
+def _begin_selection_read_snapshot(
+    connections: Sequence[sqlite3.Connection],
+) -> Callable[[], None]:
+    """Own one frozen read view for selection; reject caller-owned transactions."""
+
+    owned: list[sqlite3.Connection] = []
+    seen: set[int] = set()
+    try:
+        for conn in connections:
+            identity = id(conn)
+            if identity in seen:
+                continue
+            seen.add(identity)
+            if not isinstance(conn, sqlite3.Connection):
+                raise TypeError("GLOBAL_SELECTION_SNAPSHOT_CONNECTION_INVALID")
+            if conn.in_transaction:
+                raise RuntimeError("GLOBAL_SELECTION_SNAPSHOT_CALLER_TXN_OPEN")
+            conn.execute("BEGIN")
+            owned.append(conn)
+            # A deferred transaction does not acquire its read view until the first
+            # statement. Establish every authority view before the cut is named.
+            conn.execute("SELECT 1 FROM sqlite_master LIMIT 1").fetchone()
+    except Exception:
+        for conn in reversed(owned):
+            conn.rollback()
+        raise
+
+    released = False
+
+    def release() -> None:
+        nonlocal released
+        if released:
+            return
+        released = True
+        for conn in reversed(owned):
+            conn.rollback()
+
+    return release
+
+
 def _current_probability_ineligible(receipt: EventSubmissionReceipt) -> bool:
     """A typed ValueError means this family has no current q certificate."""
 
@@ -41,6 +83,57 @@ def _family_key(event: OpportunityEvent, payload: Mapping[str, object]) -> str:
         target_date=str(payload.get("target_date") or ""),
         metric=str(payload.get("metric") or "").lower(),
     )
+
+
+def _forecast_carrier_matches(
+    event: OpportunityEvent,
+    payload: Mapping[str, object],
+    witness: object,
+) -> bool:
+    """Bind forecast-scope identity to the exact prepared posterior carrier."""
+
+    if event.event_type != "FORECAST_SNAPSHOT_READY":
+        return True
+    carrier = str(
+        payload.get("source_run_id") or payload.get("snapshot_hash") or ""
+    ).strip()
+    return bool(carrier) and carrier == str(
+        getattr(witness, "posterior_identity_hash", "") or ""
+    ).strip()
+
+
+def _selection_epoch_identity(
+    *,
+    full_scope: CurrentGlobalAuctionScope,
+    eligible_scope: CurrentGlobalAuctionScope,
+    probability_witnesses: Mapping[str, object],
+    ineligible_by_family: Mapping[str, str],
+) -> str:
+    """Bind the full cut, its executable q manifest, and every typed exclusion."""
+
+    digest = hashlib.sha256()
+    rows = (
+        ("cut_at", full_scope.captured_at_utc.isoformat()),
+        ("full_scope", full_scope.scope_identity),
+        ("eligible_scope", eligible_scope.scope_identity),
+    )
+    for row in rows:
+        digest.update(repr(row).encode("utf-8"))
+        digest.update(b"\x1f")
+    for family_key in full_scope.family_keys:
+        witness = probability_witnesses.get(family_key)
+        row = (
+            family_key,
+            str(getattr(witness, "witness_identity", "") or ""),
+            str(getattr(witness, "q_version", "") or ""),
+            str(getattr(witness, "posterior_identity_hash", "") or ""),
+            str(ineligible_by_family.get(family_key) or ""),
+        )
+        if witness is None and not row[-1]:
+            raise ValueError("GLOBAL_SELECTION_EPOCH_FAMILY_UNACCOUNTED")
+        digest.update(repr(row).encode("utf-8"))
+        digest.update(b"\x1f")
+    return digest.hexdigest()
 
 
 def _next_claim_carrier(
@@ -83,7 +176,6 @@ def process_current_global_batch(
     actuate_winner: Callable[[OpportunityEvent, object, datetime], EventSubmissionReceipt],
     stamp_receipt: Callable[[EventSubmissionReceipt], EventSubmissionReceipt],
     venue_submit_count: Callable[[], int],
-    current_probability: Callable[[OpportunityEvent, object, datetime], object | None],
     current_execution: Callable[[object, datetime], object | None],
     current_time_provider: Callable[[], datetime],
     portfolio_state_provider: Callable[[], object] | None = None,
@@ -92,6 +184,7 @@ def process_current_global_batch(
         tuple[Mapping[str, object], CurrentGlobalBookEpoch],
     ]
     | None = None,
+    selection_snapshot_connections: Sequence[sqlite3.Connection] = (),
 ) -> GlobalBatchSubmitResult:
     """Select once from every family holding a current q certificate."""
 
@@ -99,6 +192,7 @@ def process_current_global_batch(
         raise ValueError("GLOBAL_AUCTION_DECISION_TIME_NAIVE")
     decision_time = decision_time.astimezone(UTC)
     event_tuple = tuple(events)
+    release_selection_snapshot: Callable[[], None] = lambda: None
 
     def current_time() -> datetime:
         now = current_time_provider()
@@ -114,6 +208,7 @@ def process_current_global_batch(
         *,
         next_claim_event: OpportunityEvent | None = None,
     ) -> GlobalBatchSubmitResult:
+        release_selection_snapshot()
         return GlobalBatchSubmitResult(
             receipts={
                 event.event_id: stamp_receipt(
@@ -133,6 +228,9 @@ def process_current_global_batch(
         )
 
     try:
+        release_selection_snapshot = _begin_selection_read_snapshot(
+            selection_snapshot_connections
+        )
         scope_at = current_time()
         full_scope = scan_current_global_auction_scope(
             world_conn=world_conn,
@@ -151,7 +249,6 @@ def process_current_global_batch(
             claimed_by_family[family_key] = event
 
         prepared_by_event = {}
-        full_scope_identity = full_scope.scope_identity
         full_scope_event_by_family = dict(full_scope.events_by_family)
         ineligible_by_family: dict[str, str] = {}
         ineligible_by_event: dict[str, str] = {}
@@ -170,6 +267,14 @@ def process_current_global_batch(
                     "GLOBAL_PREPARED_FAMILY_INCOMPLETE:"
                     f"{family_key}:{prepared_receipt.reason or 'missing'}"
                 )
+            if not _forecast_carrier_matches(
+                scope_event,
+                payload_reader(scope_event),
+                prepared.probability_witness,
+            ):
+                return reject(
+                    f"GLOBAL_PROBABILITY_EPOCH_CARRIER_MISMATCH:{family_key}"
+                )
             prepared_by_event[owner.event_id] = prepared
         if not prepared_by_event:
             return reject("GLOBAL_AUCTION_NO_CURRENT_PROBABILITY_FAMILY")
@@ -185,43 +290,21 @@ def process_current_global_batch(
             ),
             captured_at_utc=scope_at,
         )
-        scope_event_by_family = {
-            family_key: full_scope_event_by_family[family_key]
-            for family_key in eligible_family_keys
-        }
-
-        def current_eligible_scope(checked_at: datetime):
-            refreshed_full = scan_current_global_auction_scope(
-                world_conn=world_conn,
-                forecasts_conn=forecast_conn,
-                decision_at_utc=checked_at,
-            )
-            if refreshed_full.scope_identity != full_scope_identity:
-                return None
-            refreshed_by_family = dict(refreshed_full.events_by_family)
-            for family_key in ineligible_by_family:
-                event = refreshed_by_family.get(family_key)
-                if event is None:
-                    return None
-                receipt = prepare_event(event, checked_at)
-                if not _current_probability_ineligible(receipt):
-                    return None
-            try:
-                refreshed = current_global_auction_scope_from_events(
-                    tuple(
-                        refreshed_by_family[family_key]
-                        for family_key in sorted(eligible_family_keys)
-                    ),
-                    captured_at_utc=checked_at,
-                )
-            except (KeyError, ValueError):
-                return None
-            return refreshed if refreshed.scope_identity == scope.scope_identity else None
-
         probabilities = {
             prepared.probability_witness.family_key: prepared.probability_witness
             for prepared in prepared_by_event.values()
         }
+        if any(
+            getattr(witness, "captured_at_utc", None) != scope_at
+            for witness in probabilities.values()
+        ):
+            return reject("GLOBAL_PROBABILITY_EPOCH_MIXED_CUT")
+        selection_epoch_identity = _selection_epoch_identity(
+            full_scope=full_scope,
+            eligible_scope=scope,
+            probability_witnesses=probabilities,
+            ineligible_by_family=ineligible_by_family,
+        )
         book_epoch = None
         if current_book_epoch_provider is not None:
             probabilities, book_epoch = current_book_epoch_provider(
@@ -237,16 +320,12 @@ def process_current_global_batch(
                 )
                 for event_id, prepared in prepared_by_event.items()
             }
-        # Probability preparation + the complete public-CLOB sweep can legitimately
-        # take longer than one quote TTL.  The family set is not a price quote: renew
-        # its observation time by re-enumerating the exact discovered scope and
-        # re-proving that every excluded family still lacks a current q certificate.
-        # A changed carrier or eligibility set invalidates the whole epoch.
+        # Selection is a comparison over one immutable information vector.  Scope and
+        # q are frozen at ``scope_at``; the complete native YES/NO book and wealth
+        # witnesses join that vector below.  A later family update belongs to the next
+        # epoch.  Only the selected winner is allowed to cross into the side-effect
+        # path, where probability, exact book/curve, and free cash are rebuilt JIT.
         selection_at = current_time()
-        refreshed_scope = current_eligible_scope(selection_at)
-        if refreshed_scope is None:
-            return reject("GLOBAL_FEASIBLE_SET_SUPERSEDED_BEFORE_SELECTION")
-        scope = refreshed_scope
         state = portfolio_state_provider() if portfolio_state_provider else None
         wealth_age = timedelta(seconds=float(COLLATERAL_SNAPSHOT_MAX_AGE_SECONDS))
         wealth = current_portfolio_wealth_witness(
@@ -264,68 +343,30 @@ def process_current_global_batch(
             )
         )
 
-        def current_scope_identity():
-            try:
-                checked_at = current_time()
-                refreshed = current_eligible_scope(checked_at)
-                return refreshed.scope_identity if refreshed is not None else None
-            except Exception:
-                return None
-
-        def current_venue_identity():
-            try:
-                if book_epoch is not None:
-                    return book_epoch.current_identity(current_time())
-                return current_venue_auction_identity(
-                    trade_conn,
-                    probability_witnesses=probabilities,
-                )
-            except Exception:
-                return None
-
-        probability_cache: dict[str, object | None] = {}
-
         def probability_resolver(family_key):
-            if family_key in probability_cache:
-                return probability_cache[family_key]
-            event = scope_event_by_family.get(family_key)
             witness = probabilities.get(family_key)
-            resolved = (
-                None
-                if event is None or witness is None
-                else current_probability(event, witness, current_time())
+            return (
+                CurrentFamilyProbabilityAuthority.from_witness(witness)
+                if witness is not None
+                else None
             )
-            probability_cache[family_key] = resolved
-            return resolved
 
         def execution_resolver(candidate):
             if book_epoch is not None:
                 return book_epoch.execution_authority(
                     candidate,
-                    checked_at_utc=current_time(),
+                    checked_at_utc=selection_at,
                 )
-            return current_execution(candidate, current_time())
-
-        def wealth_identity():
-            try:
-                state_now = (
-                    portfolio_state_provider() if portfolio_state_provider else None
-                )
-                return current_portfolio_wealth_witness(
-                    trade_conn,
-                    decision_at_utc=current_time(),
-                    max_age=wealth_age,
-                    portfolio_state=state_now,
-                ).economic_identity
-            except Exception:
-                return None
+            return current_execution(candidate, selection_at)
 
         selected = select_prepared_global_auction(
             prepared_by_event,
+            selection_epoch_identity=selection_epoch_identity,
+            selection_cut_at_utc=scope_at,
             current_scope=scope,
-            current_scope_identity_resolver=current_scope_identity,
+            current_scope_identity_resolver=lambda: scope.scope_identity,
             venue_universe_identity=venue_identity,
-            current_venue_universe_identity_resolver=current_venue_identity,
+            current_venue_universe_identity_resolver=lambda: venue_identity,
             universe_max_age=(
                 book_epoch.max_age
                 if book_epoch is not None
@@ -333,7 +374,7 @@ def process_current_global_batch(
             ),
             current_probability_resolver=probability_resolver,
             current_execution_resolver=execution_resolver,
-            current_wealth_identity_resolver=wealth_identity,
+            current_wealth_identity_resolver=lambda: wealth.economic_identity,
             wealth_witness=wealth,
             capital_limit_usd=wealth.spendable_cash_usd,
             decision_at_utc=selection_at,
@@ -372,23 +413,8 @@ def process_current_global_batch(
                 ),
             )
 
-        # Selection can take long enough for one q/book/collateral fact to move.
-        # Revalidate the complete epoch once more before handing its sole winner to
-        # the side-effect path.  A moved loser can never be silently discarded in
-        # favour of the old runner-up.
-        probability_cache.clear()
-        if current_scope_identity() != scope.scope_identity:
-            return reject("GLOBAL_SCOPE_SUPERSEDED_BEFORE_ACTUATION")
-        if current_venue_identity() != venue_identity:
-            return reject("GLOBAL_VENUE_SUPERSEDED_BEFORE_ACTUATION")
-        if wealth_identity() != wealth.economic_identity:
-            return reject("GLOBAL_WEALTH_SUPERSEDED_BEFORE_ACTUATION")
-        for family_key, witness in probabilities.items():
-            expected = CurrentFamilyProbabilityAuthority.from_witness(witness)
-            if probability_resolver(family_key) != expected:
-                return reject("GLOBAL_PROBABILITY_SUPERSEDED_BEFORE_ACTUATION")
-
         before_calls = venue_submit_count()
+        release_selection_snapshot()
         winner_receipt = actuate_winner(winner, selected.actuation, current_time())
         receipts = {
             event.event_id: (

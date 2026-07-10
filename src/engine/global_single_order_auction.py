@@ -57,6 +57,8 @@ def global_single_order_actuation_identity(
     winner_event_id: str,
     universe_witness_identity: str,
     wealth_witness_identity: str,
+    selection_epoch_identity: str,
+    selection_cut_at_utc: datetime,
     decision_at_utc: datetime,
 ) -> str:
     candidate = decision.candidate
@@ -67,6 +69,8 @@ def global_single_order_actuation_identity(
         winner_event_id,
         universe_witness_identity,
         wealth_witness_identity,
+        selection_epoch_identity,
+        selection_cut_at_utc.isoformat(),
         decision_at_utc.isoformat(),
         candidate.candidate_id,
         candidate.family_key,
@@ -151,7 +155,9 @@ class GlobalSingleOrderActuation:
     winner_event_id: str
     universe_witness_identity: str
     wealth_witness_identity: str
+    selection_epoch_identity: str
     probability_witness: Any
+    selection_cut_at_utc: datetime
     decision_at_utc: datetime
     actuation_identity: str
     wealth_economic_identity: str
@@ -163,7 +169,10 @@ class GlobalSingleOrderActuation:
             or not self.winner_event_id
             or not self.universe_witness_identity
             or not self.wealth_witness_identity
+            or not self.selection_epoch_identity
+            or self.selection_cut_at_utc.tzinfo is None
             or self.decision_at_utc.tzinfo is None
+            or self.selection_cut_at_utc > self.decision_at_utc
             or getattr(self.probability_witness, "witness_identity", None)
             != self.decision.candidate.probability_witness_identity
         ):
@@ -173,6 +182,8 @@ class GlobalSingleOrderActuation:
             winner_event_id=self.winner_event_id,
             universe_witness_identity=self.universe_witness_identity,
             wealth_witness_identity=self.wealth_witness_identity,
+            selection_epoch_identity=self.selection_epoch_identity,
+            selection_cut_at_utc=self.selection_cut_at_utc,
             decision_at_utc=self.decision_at_utc,
         )
         if self.actuation_identity != expected:
@@ -205,6 +216,8 @@ def _no_trade(reason: str) -> PreparedGlobalAuctionResult:
 def select_prepared_global_auction(
     prepared_by_event: Mapping[str, Any],
     *,
+    selection_epoch_identity: str,
+    selection_cut_at_utc: datetime,
     current_scope: CurrentGlobalAuctionScope,
     current_scope_identity_resolver: Callable[[], str | None],
     venue_universe_identity: str,
@@ -230,6 +243,12 @@ def select_prepared_global_auction(
     dropping it would shrink the feasible set and make ``global`` false.
     """
 
+    if (
+        not str(selection_epoch_identity or "").strip()
+        or selection_cut_at_utc.tzinfo is None
+        or selection_cut_at_utc > decision_at_utc
+    ):
+        return _no_trade("GLOBAL_SELECTION_EPOCH_IDENTITY_MISSING")
     probability_witnesses = {}
     event_by_family: dict[str, str] = {}
     candidates: list[GlobalSingleOrderCandidate] = []
@@ -340,15 +359,19 @@ def select_prepared_global_auction(
             winner_event_id=winner_event_id,
             universe_witness_identity=universe_witness.witness_identity,
             wealth_witness_identity=wealth_witness.witness_identity,
+            selection_epoch_identity=selection_epoch_identity,
             probability_witness=probability_witnesses[
                 decision.candidate.family_key
             ],
+            selection_cut_at_utc=selection_cut_at_utc,
             decision_at_utc=decision_at_utc,
             actuation_identity=global_single_order_actuation_identity(
                 decision=decision,
                 winner_event_id=winner_event_id,
                 universe_witness_identity=universe_witness.witness_identity,
                 wealth_witness_identity=wealth_witness.witness_identity,
+                selection_epoch_identity=selection_epoch_identity,
+                selection_cut_at_utc=selection_cut_at_utc,
                 decision_at_utc=decision_at_utc,
             ),
             wealth_economic_identity=wealth_witness.economic_identity,

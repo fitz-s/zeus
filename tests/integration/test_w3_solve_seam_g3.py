@@ -1656,6 +1656,8 @@ def test_two_prepared_families_choose_one_globally_unique_order():
     }
 
     auction_kwargs = dict(
+        selection_epoch_identity="selection-epoch-current",
+        selection_cut_at_utc=decision_at,
         current_scope=current_scope,
         current_scope_identity_resolver=lambda: current_scope.scope_identity,
         venue_universe_identity=venue_identity,
@@ -1691,11 +1693,15 @@ def test_two_prepared_families_choose_one_globally_unique_order():
     assert selected.actuation.winner_event_id == selected.winner_event_id
     assert selected.actuation.universe_witness_identity
     assert selected.actuation.wealth_witness_identity == wealth.witness_identity
+    assert selected.actuation.selection_epoch_identity == "selection-epoch-current"
+    assert selected.actuation.selection_cut_at_utc == decision_at
     later_actuation_identity = global_single_order_actuation_identity(
         decision=selected.decision,
         winner_event_id=selected.winner_event_id,
         universe_witness_identity=selected.actuation.universe_witness_identity,
         wealth_witness_identity=selected.actuation.wealth_witness_identity,
+        selection_epoch_identity=selected.actuation.selection_epoch_identity,
+        selection_cut_at_utc=selected.actuation.selection_cut_at_utc,
         decision_at_utc=decision_at + _dt.timedelta(seconds=30),
     )
     assert later_actuation_identity != selected.actuation.actuation_identity
@@ -2001,10 +2007,18 @@ def test_global_batch_waits_until_global_winner_family_is_claimed(monkeypatch):
     )
     prepared = {
         event_a.event_id: SimpleNamespace(
-            probability_witness=SimpleNamespace(family_key=scope.family_keys[0])
+            probability_witness=SimpleNamespace(
+                family_key=scope.family_keys[0],
+                captured_at_utc=decision_at,
+                posterior_identity_hash="run-a",
+            )
         ),
         event_b.event_id: SimpleNamespace(
-            probability_witness=SimpleNamespace(family_key=scope.family_keys[1])
+            probability_witness=SimpleNamespace(
+                family_key=scope.family_keys[1],
+                captured_at_utc=decision_at,
+                posterior_identity_hash="run-b",
+            )
         ),
     }
     selected = SimpleNamespace(
@@ -2044,7 +2058,6 @@ def test_global_batch_waits_until_global_winner_family_is_claimed(monkeypatch):
         actuate_winner=lambda *_: pytest.fail("unclaimed winner must not actuate"),
         stamp_receipt=lambda receipt: receipt,
         venue_submit_count=lambda: 0,
-        current_probability=lambda *_: object(),
         current_execution=lambda *_: object(),
         current_time_provider=lambda: decision_at,
     )
@@ -2076,7 +2089,11 @@ def test_global_batch_excludes_typed_current_q_ineligible_family(monkeypatch):
     )
     family_a, family_b = scope.family_keys
     prepared_b = SimpleNamespace(
-        probability_witness=SimpleNamespace(family_key=family_b)
+        probability_witness=SimpleNamespace(
+            family_key=family_b,
+            captured_at_utc=decision_at,
+            posterior_identity_hash="run-b",
+        )
     )
     current_probability = object()
     actuation = SimpleNamespace(actuation_identity="actuation-b")
@@ -2160,14 +2177,11 @@ def test_global_batch_excludes_typed_current_q_ineligible_family(monkeypatch):
         actuate_winner=actuate,
         stamp_receipt=lambda receipt: receipt,
         venue_submit_count=lambda: calls["venue"],
-        current_probability=lambda event, _witness, _at: (
-            current_probability if event.event_id == event_b.event_id else None
-        ),
         current_execution=lambda *_: object(),
         current_time_provider=lambda: decision_at,
     )
 
-    assert calls["ineligible_prepare"] >= 3
+    assert calls["ineligible_prepare"] == 1
     assert result.venue_submit_count == 1
     assert result.winner_event_id == event_b.event_id
     assert result.receipts[event_b.event_id].submitted is True
@@ -2203,7 +2217,6 @@ def test_global_batch_rejects_unexpected_probability_prepare_failure(monkeypatch
         actuate_winner=lambda *_: pytest.fail("unexpected failure must not actuate"),
         stamp_receipt=lambda receipt: receipt,
         venue_submit_count=lambda: 0,
-        current_probability=lambda *_: object(),
         current_execution=lambda *_: object(),
         current_time_provider=lambda: decision_at,
     )
@@ -2220,7 +2233,11 @@ def test_global_batch_actuates_exactly_one_claimed_global_winner(monkeypatch):
     duplicate = _global_scope_event(city="Alpha", source_run_id="run-duplicate")
     scope = current_global_auction_scope_from_events((event,), captured_at_utc=decision_at)
     prepared = SimpleNamespace(
-        probability_witness=SimpleNamespace(family_key=scope.family_keys[0])
+        probability_witness=SimpleNamespace(
+            family_key=scope.family_keys[0],
+            captured_at_utc=decision_at,
+            posterior_identity_hash="run-a",
+        )
     )
     actuation = SimpleNamespace(actuation_identity="actuation-a")
     selected = SimpleNamespace(
@@ -2276,7 +2293,6 @@ def test_global_batch_actuates_exactly_one_claimed_global_winner(monkeypatch):
         actuate_winner=actuate,
         stamp_receipt=lambda receipt: receipt,
         venue_submit_count=lambda: calls["venue"],
-        current_probability=lambda *_: current_probability,
         current_execution=lambda *_: object(),
         current_time_provider=lambda: decision_at,
     )
@@ -2290,12 +2306,18 @@ def test_global_batch_actuates_exactly_one_claimed_global_winner(monkeypatch):
     )
 
 
-def test_global_batch_aborts_if_any_venue_state_moves_before_actuation(monkeypatch):
+def test_global_batch_freezes_cut_then_releases_before_winner_jit(
+    monkeypatch, tmp_path
+):
     decision_at = _dt.datetime(2026, 7, 10, 8, 0, tzinfo=_dt.timezone.utc)
     event = _global_scope_event(city="Alpha", source_run_id="run-a")
     scope = current_global_auction_scope_from_events((event,), captured_at_utc=decision_at)
     prepared = SimpleNamespace(
-        probability_witness=SimpleNamespace(family_key=scope.family_keys[0])
+        probability_witness=SimpleNamespace(
+            family_key=scope.family_keys[0],
+            captured_at_utc=decision_at,
+            posterior_identity_hash="run-a",
+        )
     )
     selected = SimpleNamespace(
         decision=SimpleNamespace(candidate=object(), no_trade_reason=None),
@@ -2303,8 +2325,44 @@ def test_global_batch_aborts_if_any_venue_state_moves_before_actuation(monkeypat
         actuation=SimpleNamespace(actuation_identity="actuation-a"),
     )
     current_probability = object()
-    venue_reads = iter(("venue-before", "venue-after"))
-    monkeypatch.setattr(global_batch_runtime, "scan_current_global_auction_scope", lambda **_: scope)
+    path = tmp_path / "batch-cut.db"
+    seed = sqlite3.connect(path)
+    assert seed.execute("PRAGMA journal_mode=WAL").fetchone()[0] == "wal"
+    seed.execute("CREATE TABLE readiness_state (value TEXT NOT NULL)")
+    seed.execute("INSERT INTO readiness_state VALUES ('cut')")
+    seed.commit()
+    seed.close()
+    selection = sqlite3.connect(path)
+    writer = sqlite3.connect(path)
+    scope_reads = []
+
+    def scan(**_kwargs):
+        scope_reads.append(1)
+        assert selection.execute("SELECT value FROM readiness_state").fetchone()[0] == "cut"
+        writer.execute("UPDATE readiness_state SET value='after-cut'")
+        writer.commit()
+        return scope
+
+    def prepare(current, _at):
+        assert selection.execute("SELECT value FROM readiness_state").fetchone()[0] == "cut"
+        return EventSubmissionReceipt(
+            False,
+            current.event_id,
+            current.causal_snapshot_id,
+            prepared_global_family=prepared,
+        )
+
+    def actuate(winner, _chosen, _at):
+        assert selection.execute("SELECT value FROM readiness_state").fetchone()[0] == "after-cut"
+        return EventSubmissionReceipt(
+            True,
+            winner.event_id,
+            winner.causal_snapshot_id,
+            proof_accepted=True,
+            side_effect_status="SUBMITTED",
+        )
+
+    monkeypatch.setattr(global_batch_runtime, "scan_current_global_auction_scope", scan)
     monkeypatch.setattr(
         global_batch_runtime,
         "current_portfolio_wealth_witness",
@@ -2317,7 +2375,7 @@ def test_global_batch_aborts_if_any_venue_state_moves_before_actuation(monkeypat
     monkeypatch.setattr(
         global_batch_runtime,
         "current_venue_auction_identity",
-        lambda *_, **__: next(venue_reads),
+        lambda *_, **__: "venue-before",
     )
     monkeypatch.setattr(global_batch_runtime, "select_prepared_global_auction", lambda *_, **__: selected)
     monkeypatch.setattr(
@@ -2333,25 +2391,106 @@ def test_global_batch_aborts_if_any_venue_state_moves_before_actuation(monkeypat
         forecast_conn=object(),
         trade_conn=object(),
         payload_reader=lambda current: json.loads(current.payload_json),
-        prepare_event=lambda current, _at: EventSubmissionReceipt(
-            False,
-            current.event_id,
-            current.causal_snapshot_id,
-            prepared_global_family=prepared,
-        ),
-        actuate_winner=lambda *_: pytest.fail("a superseded epoch must not actuate"),
+        prepare_event=prepare,
+        actuate_winner=actuate,
         stamp_receipt=lambda receipt: receipt,
-        venue_submit_count=lambda: 0,
-        current_probability=lambda *_: current_probability,
+        venue_submit_count=iter((0, 1)).__next__,
         current_execution=lambda *_: object(),
         current_time_provider=lambda: decision_at,
+        selection_snapshot_connections=(selection,),
     )
 
-    assert result.venue_submit_count == 0
-    assert result.winner_event_id is None
-    assert result.receipts[event.event_id].reason == (
-        "GLOBAL_VENUE_SUPERSEDED_BEFORE_ACTUATION"
+    assert scope_reads == [1]
+    assert result.venue_submit_count == 1
+    assert result.winner_event_id == event.event_id
+    assert result.receipts[event.event_id].submitted is True
+    selection.close()
+    writer.close()
+
+
+def test_global_batch_rejects_mixed_probability_manifest(monkeypatch):
+    decision_at = _dt.datetime(2026, 7, 10, 8, 0, tzinfo=_dt.timezone.utc)
+    event = _global_scope_event(city="Alpha", source_run_id="run-a")
+    scope = current_global_auction_scope_from_events((event,), captured_at_utc=decision_at)
+    monkeypatch.setattr(
+        global_batch_runtime, "scan_current_global_auction_scope", lambda **_: scope
     )
+    cases = (
+        (
+            SimpleNamespace(
+                family_key=scope.family_keys[0],
+                captured_at_utc=decision_at + _dt.timedelta(microseconds=1),
+                posterior_identity_hash="run-a",
+            ),
+            "GLOBAL_PROBABILITY_EPOCH_MIXED_CUT",
+        ),
+        (
+            SimpleNamespace(
+                family_key=scope.family_keys[0],
+                captured_at_utc=decision_at,
+                posterior_identity_hash="run-after-cut",
+            ),
+            f"GLOBAL_PROBABILITY_EPOCH_CARRIER_MISMATCH:{scope.family_keys[0]}",
+        ),
+    )
+    for witness, expected_reason in cases:
+        prepared = SimpleNamespace(probability_witness=witness)
+        result = global_batch_runtime.process_current_global_batch(
+            (event,),
+            decision_time=decision_at,
+            world_conn=object(),
+            forecast_conn=object(),
+            trade_conn=object(),
+            payload_reader=lambda current: json.loads(current.payload_json),
+            prepare_event=lambda current, _at: EventSubmissionReceipt(
+                False,
+                current.event_id,
+                current.causal_snapshot_id,
+                prepared_global_family=prepared,
+            ),
+            actuate_winner=lambda *_: pytest.fail(
+                "a mixed probability manifest must never actuate"
+            ),
+            stamp_receipt=lambda receipt: receipt,
+            venue_submit_count=lambda: 0,
+            current_execution=lambda *_: object(),
+            current_time_provider=lambda: decision_at,
+        )
+
+        assert result.venue_submit_count == 0
+        assert result.receipts[event.event_id].reason == expected_reason
+
+
+def test_global_selection_read_snapshot_holds_one_readiness_cut(tmp_path):
+    path = tmp_path / "selection-cut.db"
+    seed = sqlite3.connect(path)
+    assert seed.execute("PRAGMA journal_mode=WAL").fetchone()[0] == "wal"
+    seed.execute("CREATE TABLE readiness_state (value TEXT NOT NULL)")
+    seed.execute("INSERT INTO readiness_state VALUES ('cut')")
+    seed.commit()
+    seed.close()
+
+    selection = sqlite3.connect(path)
+    writer = sqlite3.connect(path)
+    release = global_batch_runtime._begin_selection_read_snapshot(
+        (selection, selection)
+    )
+    try:
+        assert selection.execute("SELECT value FROM readiness_state").fetchone()[0] == "cut"
+        writer.execute("UPDATE readiness_state SET value='after-cut'")
+        writer.commit()
+        assert selection.execute("SELECT value FROM readiness_state").fetchone()[0] == "cut"
+    finally:
+        release()
+    assert selection.execute("SELECT value FROM readiness_state").fetchone()[0] == "after-cut"
+    selection.execute("BEGIN")
+    with pytest.raises(
+        RuntimeError, match="GLOBAL_SELECTION_SNAPSHOT_CALLER_TXN_OPEN"
+    ):
+        global_batch_runtime._begin_selection_read_snapshot((selection,))
+    selection.rollback()
+    selection.close()
+    writer.close()
 
 
 # --- (d) OFF-path import-isolation (subprocess) -----------------------------

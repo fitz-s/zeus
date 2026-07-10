@@ -3830,18 +3830,24 @@ def event_bound_live_adapter_from_trade_conn(
     )
 
     def _prepare_global_event(
-        event: OpportunityEvent, decision_time: datetime
+        event: OpportunityEvent,
+        decision_time: datetime,
+        *,
+        selection_conn: sqlite3.Connection | None = None,
     ) -> EventSubmissionReceipt:
         """Prepare current family q without reading or writing executable prices."""
 
         from src.contracts.executable_market_snapshot import FRESHNESS_WINDOW_DEFAULT
 
         try:
+            probability_conn = selection_conn or forecast_conn
+            probability_topology_conn = selection_conn or topology_conn
+            probability_observation_conn = selection_conn or calibration_conn
             prepared = _prepare_current_global_probability_family(
                 event,
-                forecast_conn=forecast_conn,
-                topology_conn=topology_conn,
-                observation_conn=calibration_conn,
+                forecast_conn=probability_conn,
+                topology_conn=probability_topology_conn,
+                observation_conn=probability_observation_conn,
                 decision_time=decision_time,
                 max_age=FRESHNESS_WINDOW_DEFAULT,
             )
@@ -4523,7 +4529,6 @@ def event_bound_live_adapter_from_trade_conn(
 
     def _process_global_batch(events, decision_time):
         from src.engine.global_batch_runtime import process_current_global_batch
-        from src.solve.solver import CurrentFamilyProbabilityAuthority
 
         if forecast_conn is None or topology_conn is None or calibration_conn is None:
             from src.events.reactor import GlobalBatchSubmitResult
@@ -4551,45 +4556,6 @@ def event_bound_live_adapter_from_trade_conn(
                 _submit_inner(event, at, global_actuation=actuation),
                 real_order_submit_enabled=real_order_submit_enabled,
             )
-
-        def _current_probability(event, witness, at):
-            captured_at = getattr(witness, "captured_at_utc", None)
-            max_age = getattr(witness, "max_age", None)
-            if (
-                not isinstance(captured_at, datetime)
-                or captured_at.tzinfo is None
-                or not isinstance(max_age, timedelta)
-                or max_age <= timedelta(0)
-            ):
-                return None
-            age = at.astimezone(UTC) - captured_at.astimezone(UTC)
-            if age.total_seconds() < 0.0 or age > max_age:
-                return None
-            if event.event_type != "DAY0_EXTREME_UPDATED":
-                return current_global_probability_authority(
-                    forecast_conn,
-                    event,
-                    witness,
-                    decision_time=at,
-                )
-
-            # Day0 q is conditioned on the current observed extreme and current
-            # remaining-day model vectors.  The forecast-only resolver cannot prove
-            # that state. Rebuild the same family read-only at JIT and compare every
-            # probability identity; the decision receipt hash is intentionally not
-            # compared because current books are a separate execution authority.
-            refreshed = _prepare_global_event(event, at).prepared_global_family
-            current = getattr(refreshed, "probability_witness", None)
-            # Gamma completes NO token identities after probability preparation.
-            # That venue binding is revalidated by the current book epoch; requiring
-            # the probability-only rebuild to reproduce it would make every Day0
-            # family look superseded despite byte-identical q/settlement truth.
-            if current is None or any(
-                getattr(current, field, None) != getattr(witness, field, None)
-                for field in _GLOBAL_PROBABILITY_CONTENT_FIELDS
-            ):
-                return None
-            return CurrentFamilyProbabilityAuthority.from_witness(witness)
 
         def _current_book_epoch(probabilities, _at):
             from src.contracts.executable_market_snapshot import (
@@ -4671,14 +4637,17 @@ def event_bound_live_adapter_from_trade_conn(
                 forecast_conn=forecast_conn,
                 trade_conn=trade_conn,
                 payload_reader=_payload,
-                prepare_event=_prepare_global_event,
+                prepare_event=lambda event, at: _prepare_global_event(
+                    event,
+                    at,
+                    selection_conn=forecast_conn,
+                ),
                 actuate_winner=_actuate,
                 stamp_receipt=lambda receipt: _stamp_live_adapter_lane(
                     receipt,
                     real_order_submit_enabled=real_order_submit_enabled,
                 ),
                 venue_submit_count=lambda: _live_submit_count[0],
-                current_probability=_current_probability,
                 current_execution=lambda candidate, at: (
                     current_global_execution_authority(
                         trade_conn,
@@ -4689,6 +4658,9 @@ def event_bound_live_adapter_from_trade_conn(
                 current_time_provider=lambda: datetime.now(UTC),
                 portfolio_state_provider=portfolio_state_provider,
                 current_book_epoch_provider=_current_book_epoch,
+                selection_snapshot_connections=(
+                    forecast_conn,
+                ),
             )
         finally:
             with contextlib.suppress(Exception):
@@ -5669,6 +5641,15 @@ def _global_actuation_selected_proof(
             "global_wealth_witness_identity": str(
                 getattr(global_actuation, "wealth_witness_identity", "") or ""
             ),
+            "global_selection_epoch_identity": str(
+                getattr(global_actuation, "selection_epoch_identity", "") or ""
+            ),
+            "global_selection_cut_at": str(
+                getattr(global_actuation, "selection_cut_at_utc", "") or ""
+            ),
+            "global_selection_decision_at": str(
+                getattr(global_actuation, "decision_at_utc", "") or ""
+            ),
             "global_candidate_id": candidate.candidate_id,
             "global_book_hash": candidate.executable_cost_curve.book_hash,
             "global_target_shares": str(decision.shares),
@@ -5681,6 +5662,7 @@ def _global_actuation_selected_proof(
             "global_robust_delta_log_wealth": decision.robust_delta_log_wealth,
             "global_robust_ev_usd": decision.robust_ev_usd,
             "global_capital_efficiency": decision.capital_efficiency,
+            "global_optimum_semantics": "CUT_TIME_GLOBAL_OPTIMUM",
         }
     )
     if not all(
@@ -5689,6 +5671,9 @@ def _global_actuation_selected_proof(
             "global_actuation_identity",
             "global_universe_witness_identity",
             "global_wealth_witness_identity",
+            "global_selection_epoch_identity",
+            "global_selection_cut_at",
+            "global_selection_decision_at",
             "global_book_hash",
         )
     ):
@@ -7184,7 +7169,10 @@ def _build_event_bound_no_submit_receipt_core(
                 may_submit=True,
                 recaptured_all_in_cost=float(global_decision.cost_usd),
                 recaptured_edge_lcb=float(global_decision.robust_ev_usd),
-                detail="global current-universe winner identity revalidated",
+                detail=(
+                    "CUT_TIME_GLOBAL_OPTIMUM; winner probability, exact book, "
+                    "and free cash revalidated JIT"
+                ),
             )
             _robust_stake_usd = float(global_decision.max_spend_usd)
             _chosen_stake_price = ExecutionPrice(
