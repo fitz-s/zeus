@@ -52,6 +52,7 @@ from src.contracts.native_side_candidate import NativeSideCandidate
 from src.decision.payoff_vector import (
     _PreparedSizing,
     _draw_to_pi,
+    _local_maximum_indexes,
     optimize_vector_stake,
     robust_delta_u,
 )
@@ -64,6 +65,7 @@ from src.probability.outcome_space import (
     compute_topology_hash,
 )
 from src.strategy.utility_ranker import (
+    OUTSIDE_OUTCOME,
     FamilyPayoffMatrix,
     PortfolioExposureVector,
     _delta_u_at_stake,
@@ -477,3 +479,111 @@ def test_no_trade_when_robust_delta_u_nonpositive():
     )
     assert s_star == Decimal("0")
     assert optimal_du <= 0.0
+
+
+def test_quantile_optimizer_matches_global_oracle_with_multiple_local_maxima():
+    """VaR sizing refines every coarse peak because its quantile need not be concave."""
+
+    space = _outcome_space()
+    bin_ids = [outcome.bin_id for outcome in space.bins]
+    indexes = {bin_id: index for index, bin_id in enumerate(bin_ids)}
+    samples = np.zeros((12, len(bin_ids)), dtype=float)
+    low_draws = np.asarray(
+        [
+            [0.8563, 0.1031, 0.0406],
+            [0.4775, 0.3657, 0.1568],
+            [0.2680, 0.0002, 0.7318],
+        ]
+    )
+    for row, masses in enumerate(low_draws):
+        samples[row, indexes["b25"]] = masses[0]
+        samples[row, indexes["b26"]] = masses[1]
+        samples[row, indexes["b_low"]] = masses[2]
+    samples[3:, indexes["b25"]] = 1.0
+
+    mean_q = samples.mean(axis=0)
+    joint_q = _joint_q(
+        space,
+        {bin_id: float(mean_q[index]) for index, bin_id in enumerate(bin_ids)},
+    )
+    alpha = 0.05
+    band = JointQBand(
+        joint_q=joint_q,
+        samples=samples,
+        q_lcb=np.quantile(samples, alpha, axis=0),
+        q_ucb=np.quantile(samples, 1.0 - alpha, axis=0),
+        alpha=alpha,
+        basis="PARAMETER_POSTERIOR_SIMPLEX_V1",
+        sample_hash="nonconcave-quantile-band",
+    )
+    band.assert_valid()
+
+    curve = ExecutableCostCurve(
+        token_id="yes-b25",
+        side="YES",
+        snapshot_id="snap-nonconcave",
+        book_hash="book-nonconcave",
+        levels=(BookLevel(price=Decimal("0.128"), size=Decimal("100")),),
+        fee_model=FeeModel(fee_rate=Decimal("0")),
+        min_tick=Decimal("0.001"),
+        min_order_size=Decimal("1"),
+        quote_ttl=timedelta(seconds=2),
+    )
+    candidate = NativeSideCandidate.tradeable(
+        family_key=space.family_id,
+        bin_id="b25",
+        side="YES",
+        token_id="yes-b25",
+        condition_id="cond-b25",
+        q_point=float(mean_q[indexes["b25"]]),
+        q_lcb=float(np.quantile(samples[:, indexes["b25"]], alpha)),
+        probability_uncertainty=None,
+        executable_cost_curve=curve,
+        forecast_snapshot_id="fc-nonconcave",
+        market_snapshot_id="mk-nonconcave",
+        hypothesis_id="hyp-nonconcave",
+    )
+    matrix = _matrix(space)
+    wealth = {outcome: Decimal("3.76") for outcome in matrix.outcomes}
+    wealth["b26"] = Decimal("3.93")
+    wealth[OUTSIDE_OUTCOME] = Decimal("617.5")
+    exposure = PortfolioExposureVector(wealth=wealth)
+    max_stake = Decimal("3.7183")
+
+    stake, utility, _ = optimize_vector_stake(
+        candidate,
+        band=band,
+        omega=space,
+        matrix=matrix,
+        exposure=exposure,
+        max_stake_usd=max_stake,
+    )
+    prepared = _PreparedSizing(
+        candidate,
+        band=band,
+        omega=space,
+        matrix=matrix,
+        exposure=exposure,
+        alpha=alpha,
+    )
+    lo = Decimal("0.128")
+    oracle_stakes = [
+        lo + (max_stake - lo) * Decimal(index) / Decimal(20_000)
+        for index in range(20_001)
+    ]
+    oracle_values = prepared.robust_many(oracle_stakes)
+    oracle_index = int(np.argmax(oracle_values))
+    oracle_stake = oracle_stakes[oracle_index]
+    oracle_utility = float(oracle_values[oracle_index])
+
+    local_maxima = np.flatnonzero(
+        (oracle_values[1:-1] > oracle_values[:-2])
+        & (oracle_values[1:-1] >= oracle_values[2:])
+    )
+    assert len(local_maxima) >= 2
+    assert utility == pytest.approx(oracle_utility, abs=1e-8)
+    assert abs(float(stake - oracle_stake)) < 0.01
+
+
+def test_quantile_optimizer_refines_finite_peak_between_ruin_nans():
+    assert _local_maximum_indexes([float("nan"), 0.1, float("nan")]) == [1]

@@ -158,11 +158,10 @@ from src.strategy.utility_ranker import (
 # ``np.quantile(sample_edges, alpha)`` with the band's alpha.
 _DEFAULT_ALPHA: float | None = None
 
-# Numerical-optimizer resolution for the s* = argmax_s robust_delta_u(s) sweep. ΔU is
-# concave in stake (a sum of concave logs of an affine-in-s wealth) and the alpha-quantile
-# of a family of concave functions is itself concave, so robust_delta_u is unimodal and a
-# coarse-to-fine grid converges. These mirror utility_ranker's optimizer resolution so the
-# vector sizing has the same stake granularity the family ranker uses.
+# Numerical resolution for the s* = argmax_s robust_delta_u(s) sweep. Each draw's ΔU is
+# concave, but a general interpolated quantile of those draws need not be concave or
+# unimodal. The first pass therefore finds every visible local maximum; later passes refine
+# every surviving peak instead of assuming the first coarse winner is the only one.
 _COARSE_STEPS = 200
 _REFINE_STEPS = 64
 _REFINE_PASSES = 3
@@ -749,6 +748,31 @@ def _feasible_stake_bounds(
     return lo, hi
 
 
+def _uniform_stake_grid(lo: Decimal, hi: Decimal, steps: int) -> list[Decimal]:
+    width = hi - lo
+    return [lo + width * Decimal(index) / Decimal(steps) for index in range(steps + 1)]
+
+
+def _local_maximum_indexes(values: Sequence[float]) -> list[int]:
+    """Return one index per finite local-maximum plateau, including endpoints."""
+
+    peaks: list[int] = []
+    index = 0
+    while index < len(values):
+        end = index
+        while end + 1 < len(values) and values[end + 1] == values[index]:
+            end += 1
+        value = float(values[index])
+        left = float(values[index - 1]) if index else float("-inf")
+        right = float(values[end + 1]) if end + 1 < len(values) else float("-inf")
+        left = left if math.isfinite(left) else float("-inf")
+        right = right if math.isfinite(right) else float("-inf")
+        if math.isfinite(value) and value >= left and value >= right:
+            peaks.append((index + end) // 2)
+        index = end + 1
+    return peaks
+
+
 def optimize_vector_stake(
     candidate: NativeSideCandidate,
     *,
@@ -773,9 +797,9 @@ def optimize_vector_stake(
       bound ``lo``), so the live pass can distinguish a true edge reversal from a stake
       the optimizer shrank below the venue floor (spec line 798 ``delta_u_at_min > 0``).
 
-    The argmax is a coarse-to-fine 1-D grid search over ``[lo, hi]`` — the SAME stake
-    bounds and resolution the family ranker uses. ``robust_delta_u`` is unimodal in stake
-    (a quantile of concave-in-s log-growth functions), so the refined grid converges.
+    The argmax is a global coarse grid over ``[lo, hi]`` followed by refinement of every
+    visible local maximum. Executable-book depth breakpoints are included in the global
+    grid. This preserves the VaR/quantile objective without assuming it is concave.
 
     This is the VECTOR sizing: the stake comes from the FamilyPayoffMatrix ΔU against the
     existing exposure, maximized at the robust tail — NEVER a binary scalar ``f_star``.
@@ -815,34 +839,54 @@ def optimize_vector_stake(
     if not _math.isfinite(delta_u_at_min):
         delta_u_at_min = 0.0
 
+    coarse_stakes = set(_uniform_stake_grid(lo, hi, _COARSE_STEPS))
+    cumulative_notional = Decimal("0")
+    for level in candidate.executable_cost_curve.levels:
+        cumulative_notional += (
+            candidate.executable_cost_curve.fee_model.all_in_price(level.price) * level.size
+        )
+        if lo < cumulative_notional < hi:
+            coarse_stakes.add(cumulative_notional)
+    stakes = sorted(coarse_stakes)
+    values = prepared.robust_many(stakes)
+
     best_u = float("-inf")
     best_s = Decimal("0")
-    span_lo, span_hi = lo, hi
-    steps = _COARSE_STEPS
-    for _pass in range(_REFINE_PASSES + 1):
-        width = span_hi - span_lo
-        if width <= Decimal("0"):
+
+    def _record_best(grid: Sequence[Decimal], grid_values: Sequence[float]) -> None:
+        nonlocal best_s, best_u
+        for stake, value in zip(grid, grid_values, strict=True):
+            utility = float(value)
+            if utility > best_u:
+                best_u = utility
+                best_s = stake
+
+    _record_best(stakes, values)
+    spans = {
+        (
+            stakes[max(0, index - 1)],
+            stakes[min(len(stakes) - 1, index + 1)],
+        )
+        for index in _local_maximum_indexes(values)
+    }
+    for _pass in range(_REFINE_PASSES):
+        refined_spans: set[tuple[Decimal, Decimal]] = set()
+        for span_lo, span_hi in sorted(spans):
+            if span_hi <= span_lo:
+                continue
+            refined_stakes = _uniform_stake_grid(span_lo, span_hi, _REFINE_STEPS)
+            refined_values = prepared.robust_many(refined_stakes)
+            _record_best(refined_stakes, refined_values)
+            for index in _local_maximum_indexes(refined_values):
+                refined_spans.add(
+                    (
+                        refined_stakes[max(0, index - 1)],
+                        refined_stakes[min(len(refined_stakes) - 1, index + 1)],
+                    )
+                )
+        spans = refined_spans
+        if not spans:
             break
-        step = width / Decimal(steps)
-        s = span_lo
-        stakes = []
-        for _ in range(steps + 1):
-            stakes.append(s)
-            s += step
-        values = prepared.robust_many(stakes)
-        pass_best_u = float("-inf")
-        pass_best_s = span_lo
-        for s, value in zip(stakes, values, strict=True):
-            u = float(value)
-            if u > pass_best_u:
-                pass_best_u = u
-                pass_best_s = s
-        if pass_best_u > best_u:
-            best_u = pass_best_u
-            best_s = pass_best_s
-        span_lo = max(lo, pass_best_s - step)
-        span_hi = min(hi, pass_best_s + step)
-        steps = _REFINE_STEPS
 
     if not _math.isfinite(best_u) or best_u <= 0.0 or best_s <= Decimal("0"):
         return Decimal("0"), (best_u if _math.isfinite(best_u) else 0.0), delta_u_at_min

@@ -1,5 +1,5 @@
 # Created: 2026-06-14
-# Last reused or audited: 2026-06-14
+# Last reused or audited: 2026-07-09
 # Authority basis: docs/rebuild/consult_build_spec.md
 #   ("Create src/decision/payoff_vector.py" block lines 734-802: the edge calculation
 #   759-774 — point_fair_value = q @ payoff, point_edge = point_fair_value -
@@ -593,9 +593,9 @@ def test_optimize_vector_stake_sanitizes_nan_delta_u_at_min(monkeypatch):
     class _Band:
         alpha = 0.05
 
-    # optimize_vector_stake sizes via _PreparedSizing.robust_at (NOT the old per-call
-    # robust_delta_u). Monkeypatch the prepared sizer so its construction is inert and
-    # robust_at returns a ruin-straddle NaN exactly at the venue-min stake
+    # optimize_vector_stake sizes via one prepared sizer (NOT the old per-call
+    # robust_delta_u). Monkeypatch it so construction is inert and robust_at returns a
+    # ruin-straddle NaN exactly at the venue-min stake
     # (lo = all_in_price(0.10) * min_order_size(5) = 0.50) and a finite positive ΔU above.
     calls = {"n": 0}
 
@@ -606,6 +606,9 @@ def test_optimize_vector_stake_sanitizes_nan_delta_u_at_min(monkeypatch):
         def robust_at(self, stake_usd):
             calls["n"] += 1
             return float("nan") if stake_usd == Decimal("0.50") else 0.01
+
+        def robust_many(self, stakes_usd):
+            return np.asarray([self.robust_at(stake) for stake in stakes_usd])
 
     monkeypatch.setattr("src.decision.payoff_vector._PreparedSizing", _FakePrepared)
 
