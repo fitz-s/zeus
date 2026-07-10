@@ -5327,6 +5327,10 @@ def run_edli_event_reactor_cycle(*, active_lock) -> None:
         _log_stage("reactor_construct")
         _rr = reactor.process_pending(decision_time=process_pending_decision_time, limit=proof_limit)
         _log_stage("process_pending")
+        # Canonical event/finalization truth must commit before the derived status
+        # pulse opens independent readers. A slow pulse cannot retain the world
+        # writer or leave a targeted winner invisibly stuck in processing.
+        conn.commit()
         _rejection_counts = dict(Counter(_rr.rejection_reasons))
         _edli_candidates = int(_rr.proof_accepted + _rr.rejected + _rr.retried + _rr.dead_lettered)
         # FIX-4 (P2): read the per-cycle live-submit and venue-ack counters from
@@ -5377,7 +5381,6 @@ def run_edli_event_reactor_cycle(*, active_lock) -> None:
             _rr.processed, _rr.proof_accepted, _rr.rejected, _rr.retried, _rr.dead_lettered,
             getattr(_rr, "claim_lock_bounces", 0), _rr.rejection_reasons[:8],
         )
-        conn.commit()
     finally:
         try:
             trade_conn.close()

@@ -1,7 +1,7 @@
 # Created: 2026-04-19
-# Last reused/audited: 2026-07-08
+# Last reused/audited: 2026-07-10
 # Authority basis: Phase 10B DT-Seam Cleanup, 2026-04-29 design simplification audit F4, 2026-05-01 stale live-state artifact tracking, and 2026-05-15 K1 forecast DB split status-summary false-flag repair.
-# Lifecycle: created=2026-04-19; last_reviewed=2026-05-21; last_reused=2026-07-08
+# Lifecycle: created=2026-04-19; last_reviewed=2026-05-21; last_reused=2026-07-10
 # Purpose: Phase 10B "DT-Seam Cleanup" antibodies (R-CL..R-CP).
 #          Dedicated test file per critic-carol cycle-3 L2 convention.
 #          Do NOT co-locate with test_phase10a_hygiene.py.
@@ -1201,6 +1201,38 @@ class TestRCPV2RowCountSensor:
         assert open_orders["status"] == "ok"
         assert open_orders["count"] == 0
         assert open_orders["orders"] == []
+
+    def test_cycle_pulse_latest_fact_queries_are_command_driven(self):
+        """Current-order visibility must not window-scan all historical facts."""
+        import inspect
+
+        from src.observability import status_summary as status_summary_module
+
+        sources = (
+            inspect.getsource(status_summary_module._query_current_open_entry_orders),
+            inspect.getsource(
+                status_summary_module._query_terminal_entry_command_venue_fact_conflicts
+            ),
+        )
+
+        assert all("ROW_NUMBER" not in source for source in sources)
+        assert all(
+            "latest.venue_order_id = vc.venue_order_id" in source
+            for source in sources
+        )
+
+    def test_reactor_commits_canonical_truth_before_derived_status_pulse(self):
+        """A slow derived pulse cannot retain uncommitted target dispositions."""
+        import inspect
+
+        from src.events.reactor import run_edli_event_reactor_cycle
+
+        source = inspect.getsource(run_edli_event_reactor_cycle)
+        after_process = source.split("_rr = reactor.process_pending", 1)[1]
+
+        assert after_process.index("conn.commit()") < after_process.index(
+            "write_cycle_pulse("
+        )
 
     def test_terminal_entry_command_with_nonterminal_venue_fact_is_conflict(self):
         """Terminal local commands still need explicit venue-fact visibility."""

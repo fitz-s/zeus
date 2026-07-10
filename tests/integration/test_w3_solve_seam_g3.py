@@ -41,6 +41,7 @@ from src.engine.global_single_order_auction import (
     select_prepared_global_auction,
 )
 from src.engine.global_auction_universe import (
+    _current_day0_events,
     _day0_event_is_current_for_entry,
     capture_current_global_book_epoch,
     current_global_scope_events_with_day0,
@@ -68,6 +69,9 @@ from src.solve.solver import (
 from src.strategy import utility_ranker
 from src.state.collateral_ledger import init_collateral_schema
 from src.state.portfolio import PortfolioState
+from src.state.schema.opportunity_events_schema import (
+    ensure_table as ensure_opportunity_events_table,
+)
 from tests.integration import test_qkernel_spine_routing as R
 
 _BRIDGE_PATH = bridge.__file__
@@ -814,6 +818,109 @@ def test_day0_entry_scope_requires_target_city_current_local_day():
         {"city": "London", "target_date": "2026-07-11"},
         decision_at_utc=current,
     )
+
+
+def _insert_event(conn, event):
+    fields = tuple(event.__dataclass_fields__)
+    conn.execute(
+        f"INSERT INTO opportunity_events ({','.join(fields)}) "
+        f"VALUES ({','.join('?' for _ in fields)})",
+        tuple(getattr(event, field) for field in fields),
+    )
+
+
+def _current_day0_scope_event(*, city, target_date, available_at):
+    payload = {
+        "city": city,
+        "target_date": target_date,
+        "metric": "high",
+        "source_match_status": "MATCH",
+        "local_date_status": "MATCH",
+        "station_match_status": "MATCH",
+        "dst_status": "UNAMBIGUOUS",
+        "metric_match_status": "MATCH",
+        "rounding_status": "MATCH",
+        "source_authorized_status": "AUTHORIZED",
+        "live_authority_status": "live",
+    }
+    return make_opportunity_event(
+        event_type="DAY0_EXTREME_UPDATED",
+        entity_key=f"{city}|{target_date}|high|{available_at}",
+        source="day0_observation",
+        observed_at=available_at,
+        available_at=available_at,
+        received_at=available_at,
+        payload=payload,
+        causal_snapshot_id=f"day0-{city}-{target_date}",
+    )
+
+
+def test_current_day0_query_uses_utc_window_and_target_date_index(monkeypatch):
+    import src.config as config
+
+    decision_at = _dt.datetime(2026, 7, 10, 11, 30, tzinfo=_dt.timezone.utc)
+    monkeypatch.setattr(
+        config,
+        "runtime_cities_by_name",
+        lambda: {
+            "West": SimpleNamespace(timezone="Etc/GMT+12"),
+            "Center": SimpleNamespace(timezone="UTC"),
+            "East": SimpleNamespace(timezone="Pacific/Kiritimati"),
+            "Old": SimpleNamespace(timezone="UTC"),
+            "Future": SimpleNamespace(timezone="UTC"),
+        },
+    )
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    ensure_opportunity_events_table(conn)
+    for city, target_date in (
+        ("West", "2026-07-09"),
+        ("Center", "2026-07-10"),
+        ("East", "2026-07-11"),
+        ("Old", "2026-07-08"),
+        ("Future", "2026-07-12"),
+    ):
+        _insert_event(
+            conn,
+            _current_day0_scope_event(
+                city=city,
+                target_date=target_date,
+                available_at="2026-07-10T11:00:00+00:00",
+            ),
+        )
+    _insert_event(
+        conn,
+        _current_day0_scope_event(
+            city="Center",
+            target_date="2026-07-10",
+            available_at="2026-07-10T10:00:00+00:00",
+        ),
+    )
+
+    executed_sql = []
+    conn.set_trace_callback(executed_sql.append)
+    events = _current_day0_events(conn, decision_at_utc=decision_at)
+
+    events_by_city = {
+        json.loads(event.payload_json)["city"]: event for event in events
+    }
+    assert set(events_by_city) == {"West", "Center", "East"}
+    assert events_by_city["Center"].available_at == "2026-07-10T11:00:00+00:00"
+    sql = next(
+        sql
+        for sql in executed_sql
+        if "INDEXED BY idx_opportunity_events_fsr_target_date" in sql
+    )
+    assert "BETWEEN '2026-07-09' AND '2026-07-11'" in sql
+    plan = " ".join(
+        row[3] for row in conn.execute(f"EXPLAIN QUERY PLAN {sql}").fetchall()
+    ).upper()
+    assert (
+        "SEARCH OPPORTUNITY_EVENTS USING INDEX IDX_OPPORTUNITY_EVENTS_FSR_TARGET_DATE"
+        in plan
+    )
+    assert "SCAN OPPORTUNITY_EVENTS" not in plan
+    assert "USE TEMP B-TREE" not in plan
 
 
 @pytest.fixture(autouse=True)

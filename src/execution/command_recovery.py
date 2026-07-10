@@ -8743,9 +8743,11 @@ def _partial_remainder_candidates(
     conn: sqlite3.Connection,
     *,
     updated_before: str | None = None,
+    live_tick_scope: bool = False,
 ) -> list[dict]:
     state_placeholders = ",".join("?" for _ in _PARTIAL_REMAINDER_STATES)
-    sql = f"""
+    if not live_tick_scope:
+        sql = f"""
         SELECT *
           FROM venue_commands
          WHERE intent_kind = 'ENTRY'
@@ -8754,9 +8756,40 @@ def _partial_remainder_candidates(
            AND (? IS NULL OR updated_at < ?)
          ORDER BY updated_at, command_id
         """
+        rows = conn.execute(
+            sql,
+            (*tuple(_PARTIAL_REMAINDER_STATES), updated_before, updated_before),
+        ).fetchall()
+        return [_dict_row(row) for row in rows]
+
+    open_phase_placeholders = ",".join("?" for _ in _RUNTIME_OPEN_REPAIR_PHASES)
+    sql = "WITH " + _canonical_order_truth_cte() + f"""
+        SELECT cmd.*
+          FROM venue_commands cmd
+          LEFT JOIN canonical_order_truth fact
+            ON fact.command_id = cmd.command_id
+           AND fact.venue_order_id = cmd.venue_order_id
+          LEFT JOIN position_current pc
+            ON pc.position_id = cmd.position_id
+         WHERE cmd.intent_kind = 'ENTRY'
+           AND cmd.state IN ({state_placeholders})
+           AND COALESCE(cmd.venue_order_id, '') != ''
+           AND (? IS NULL OR cmd.updated_at < ?)
+           AND (
+                cmd.state != 'FILLED'
+                OR CAST(COALESCE(fact.remaining_size, '0') AS REAL) > 0
+                OR COALESCE(pc.phase, '') IN ({open_phase_placeholders})
+           )
+         ORDER BY cmd.updated_at, cmd.command_id
+        """
     rows = conn.execute(
         sql,
-        (*tuple(_PARTIAL_REMAINDER_STATES), updated_before, updated_before),
+        (
+            *tuple(_PARTIAL_REMAINDER_STATES),
+            updated_before,
+            updated_before,
+            *tuple(_RUNTIME_OPEN_REPAIR_PHASES),
+        ),
     ).fetchall()
     return [_dict_row(row) for row in rows]
 
@@ -9624,6 +9657,7 @@ def reconcile_partial_remainders(
     client,
     *,
     updated_before: str | None = None,
+    live_tick_scope: bool = False,
 ) -> dict:
     """Terminalize filled command remainders when the venue open-order surface is empty.
 
@@ -9635,7 +9669,11 @@ def reconcile_partial_remainders(
     """
 
     summary = {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
-    candidates = _partial_remainder_candidates(conn, updated_before=updated_before)
+    candidates = _partial_remainder_candidates(
+        conn,
+        updated_before=updated_before,
+        live_tick_scope=live_tick_scope,
+    )
     if not candidates:
         return summary
     try:
@@ -15340,21 +15378,54 @@ def _accumulate(
     summary["errors"] += pass_summary["errors"]
 
 
-def _active_venue_command_priming_rows(conn: sqlite3.Connection) -> list[dict]:
+def _active_venue_command_priming_rows(
+    conn: sqlite3.Connection,
+    *,
+    live_tick_scope: bool = False,
+) -> list[dict]:
     if not _table_exists(conn, "venue_commands"):
         return []
     active_states = tuple(sorted(_ACKED_ORDER_STATES | _PARTIAL_REMAINDER_STATES))
     placeholders = ",".join("?" for _ in active_states)
+    if not live_tick_scope:
+        rows = conn.execute(
+            f"""
+            SELECT command_id, venue_order_id, idempotency_key, intent_kind, state
+              FROM venue_commands
+             WHERE state IN ({placeholders})
+               AND COALESCE(venue_order_id, '') != ''
+               AND intent_kind IN ('ENTRY', 'EXIT')
+             ORDER BY updated_at, command_id
+            """,
+            active_states,
+        ).fetchall()
+        return [_dict_row(row) for row in rows]
+
+    open_phase_placeholders = ",".join("?" for _ in _RUNTIME_OPEN_REPAIR_PHASES)
     rows = conn.execute(
-        f"""
-        SELECT command_id, venue_order_id, idempotency_key, intent_kind, state
-          FROM venue_commands
-         WHERE state IN ({placeholders})
-           AND COALESCE(venue_order_id, '') != ''
-           AND intent_kind IN ('ENTRY', 'EXIT')
-         ORDER BY updated_at, command_id
+        "WITH " + _canonical_order_truth_cte() + f"""
+        SELECT cmd.command_id,
+               cmd.venue_order_id,
+               cmd.idempotency_key,
+               cmd.intent_kind,
+               cmd.state
+          FROM venue_commands cmd
+          LEFT JOIN canonical_order_truth fact
+            ON fact.command_id = cmd.command_id
+           AND fact.venue_order_id = cmd.venue_order_id
+          LEFT JOIN position_current pc
+            ON pc.position_id = cmd.position_id
+         WHERE cmd.state IN ({placeholders})
+           AND COALESCE(cmd.venue_order_id, '') != ''
+           AND cmd.intent_kind IN ('ENTRY', 'EXIT')
+           AND (
+                cmd.state != 'FILLED'
+                OR CAST(COALESCE(fact.remaining_size, '0') AS REAL) > 0
+                OR COALESCE(pc.phase, '') IN ({open_phase_placeholders})
+           )
+         ORDER BY cmd.updated_at, cmd.command_id
         """,
-        active_states,
+        (*active_states, *_RUNTIME_OPEN_REPAIR_PHASES),
     ).fetchall()
     return [_dict_row(row) for row in rows]
 
@@ -15415,7 +15486,12 @@ def _collect_recovery_priming_keys(conn: sqlite3.Connection, *, scope: str = "fu
             "condition_ids": condition_ids,
         }
     try:
-        _harvest(_active_venue_command_priming_rows(conn))
+        _harvest(
+            _active_venue_command_priming_rows(
+                conn,
+                live_tick_scope=scope == "live_tick",
+            )
+        )
     except Exception:  # noqa: BLE001 — a missing table just means no candidates
         logger.debug("recovery: priming candidate _active_venue_command_priming_rows failed", exc_info=True)
     if scope in {"live_tick", "boot_fast"}:
@@ -15442,7 +15518,13 @@ def _collect_recovery_priming_keys(conn: sqlite3.Connection, *, scope: str = "fu
             )
         if scope == "live_tick":
             try:
-                _harvest(_partial_remainder_candidates(conn, updated_before=None))
+                _harvest(
+                    _partial_remainder_candidates(
+                        conn,
+                        updated_before=None,
+                        live_tick_scope=True,
+                    )
+                )
             except Exception:  # noqa: BLE001
                 logger.debug("recovery: priming candidate _partial_remainder_candidates failed", exc_info=True)
         return {
@@ -16227,6 +16309,7 @@ def _reconcile_passes_short_conn(client, summary: dict, started_at: str, *, scop
                 advanced_key="corrected",
                 fold_stayed=False,
                 observed_at=started_at,
+                live_tick_scope=True,
             )
         _client_pass("local_orphan_no_fill_findings",
                      reconcile_local_orphan_no_fill_findings,
@@ -16318,6 +16401,7 @@ def _reconcile_passes_short_conn(client, summary: dict, started_at: str, *, scop
                 reconcile_partial_remainders,
                 "partial_remainders",
                 updated_before=started_at,
+                live_tick_scope=True,
             )
         summary["scope"] = scope
         summary["deferred_full_sweep"] = True
@@ -16400,7 +16484,8 @@ def _reconcile_passes_short_conn(client, summary: dict, started_at: str, *, scop
 
     _db_pass("recorded_maker_fill_economics",
              reconcile_recorded_maker_fill_economics, "recorded_maker_fill_economics",
-             advanced_key="corrected", fold_stayed=False, observed_at=started_at)
+             advanced_key="corrected", fold_stayed=False, observed_at=started_at,
+             live_tick_scope=False)
     _db_pass("closed_shift_bin_exit_leases",
              release_closed_shift_bin_exit_leases, "closed_shift_bin_exit_leases",
              observed_at=started_at)

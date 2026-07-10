@@ -821,29 +821,24 @@ def _query_current_open_entry_orders(conn) -> dict:
     )
     pc_join = "LEFT JOIN position_current pc ON pc.position_id = vc.position_id" if has_position_current else ""
     if has_order_facts:
-        fact_cte = """
-            WITH latest_order_facts AS (
-                SELECT venue_order_id, command_id, state, remaining_size, matched_size, observed_at,
-                       ROW_NUMBER() OVER (
-                           PARTITION BY venue_order_id
-                           ORDER BY COALESCE(local_sequence, 0) DESC,
-                                    COALESCE(observed_at, '') DESC,
-                                    COALESCE(ingested_at, '') DESC,
-                                    fact_id DESC
-                       ) AS rn
-                  FROM venue_order_facts
-            )
-        """
         fact_select = (
             "lof.state AS venue_state, lof.remaining_size, lof.matched_size, "
             "lof.observed_at AS venue_observed_at"
         )
-        fact_join = (
-            "LEFT JOIN latest_order_facts lof "
-            "ON lof.venue_order_id = vc.venue_order_id AND lof.rn = 1"
-        )
+        fact_join = """
+            LEFT JOIN venue_order_facts lof
+              ON lof.fact_id = (
+                    SELECT latest.fact_id
+                      FROM venue_order_facts latest
+                     WHERE latest.venue_order_id = vc.venue_order_id
+                     ORDER BY latest.local_sequence DESC,
+                              latest.observed_at DESC,
+                              latest.ingested_at DESC,
+                              latest.fact_id DESC
+                     LIMIT 1
+                 )
+        """
     else:
-        fact_cte = ""
         fact_select = (
             "NULL AS venue_state, NULL AS remaining_size, NULL AS matched_size, "
             "NULL AS venue_observed_at"
@@ -852,7 +847,6 @@ def _query_current_open_entry_orders(conn) -> dict:
 
     rows = conn.execute(
         f"""
-        {fact_cte}
         SELECT vc.command_id, vc.venue_order_id, vc.state AS command_state,
                vc.side, vc.size AS submitted_size, vc.price AS submitted_price,
                vc.updated_at, {pc_select}, {fact_select}
@@ -958,7 +952,6 @@ def _query_terminal_entry_command_venue_fact_conflicts(conn) -> dict:
         )
     )
     pc_join = "LEFT JOIN position_current pc ON pc.position_id = vc.position_id" if has_position_current else ""
-    event_cte = ""
     event_select = (
         "NULL AS terminal_event_type, NULL AS terminal_event_at, "
         "NULL AS terminal_event_state_after, NULL AS terminal_event_payload_json"
@@ -966,46 +959,31 @@ def _query_terminal_entry_command_venue_fact_conflicts(conn) -> dict:
     event_join = ""
     event_params: tuple[str, ...] = ()
     if has_command_events:
-        event_cte = """,
-            latest_terminal_events AS (
-                SELECT command_id, event_type, occurred_at, state_after, payload_json,
-                       ROW_NUMBER() OVER (
-                           PARTITION BY command_id
-                           ORDER BY COALESCE(sequence_no, 0) DESC,
-                                    COALESCE(occurred_at, '') DESC
-                       ) AS rn
-                  FROM venue_command_events
-                 WHERE event_type IN ({terminal_event_placeholders})
-            )
-        """.format(
-            terminal_event_placeholders=",".join("?" for _ in _TERMINAL_COMMAND_EVENT_TYPES)
-        )
         event_select = (
             "lte.event_type AS terminal_event_type, "
             "lte.occurred_at AS terminal_event_at, "
             "lte.state_after AS terminal_event_state_after, "
             "lte.payload_json AS terminal_event_payload_json"
         )
-        event_join = (
-            "LEFT JOIN latest_terminal_events lte "
-            "ON lte.command_id = vc.command_id AND lte.rn = 1"
+        event_join = """
+            LEFT JOIN venue_command_events lte
+              ON lte.event_id = (
+                    SELECT latest.event_id
+                      FROM venue_command_events latest
+                     WHERE latest.command_id = vc.command_id
+                       AND latest.event_type IN ({terminal_event_placeholders})
+                     ORDER BY latest.sequence_no DESC,
+                              latest.occurred_at DESC,
+                              latest.event_id DESC
+                     LIMIT 1
+                 )
+        """.format(
+            terminal_event_placeholders=",".join("?" for _ in _TERMINAL_COMMAND_EVENT_TYPES)
         )
         event_params = tuple(sorted(_TERMINAL_COMMAND_EVENT_TYPES))
 
     rows = conn.execute(
         f"""
-        WITH latest_order_facts AS (
-            SELECT venue_order_id, command_id, state, remaining_size, matched_size, observed_at,
-                   ROW_NUMBER() OVER (
-                       PARTITION BY venue_order_id
-                       ORDER BY COALESCE(local_sequence, 0) DESC,
-                                COALESCE(observed_at, '') DESC,
-                                COALESCE(ingested_at, '') DESC,
-                                fact_id DESC
-                       ) AS rn
-              FROM venue_order_facts
-        )
-        {event_cte}
         SELECT vc.command_id, vc.venue_order_id, vc.state AS command_state,
                vc.side, vc.size AS submitted_size, vc.price AS submitted_price,
                vc.updated_at, {pc_select},
@@ -1013,9 +991,17 @@ def _query_terminal_entry_command_venue_fact_conflicts(conn) -> dict:
                lof.observed_at AS venue_observed_at,
                {event_select}
           FROM venue_commands vc
-          JOIN latest_order_facts lof
-            ON lof.venue_order_id = vc.venue_order_id
-           AND lof.rn = 1
+          JOIN venue_order_facts lof
+            ON lof.fact_id = (
+                  SELECT latest.fact_id
+                    FROM venue_order_facts latest
+                   WHERE latest.venue_order_id = vc.venue_order_id
+                   ORDER BY latest.local_sequence DESC,
+                            latest.observed_at DESC,
+                            latest.ingested_at DESC,
+                            latest.fact_id DESC
+                   LIMIT 1
+               )
           {event_join}
           {pc_join}
          WHERE upper(COALESCE(vc.intent_kind, '')) = 'ENTRY'

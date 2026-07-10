@@ -874,11 +874,21 @@ def _current_day0_events(
         return ()
     from src.events.day0_authority import normalize_day0_live_authority_status
 
+    utc_date = decision_at_utc.astimezone(timezone.utc).date()
+    target_floor = (utc_date - timedelta(days=1)).isoformat()
+    target_ceiling = (utc_date + timedelta(days=1)).isoformat()
     cur = world_conn.execute(
-        "SELECT * FROM opportunity_events WHERE event_type='DAY0_EXTREME_UPDATED' "
-        "AND available_at<=? AND received_at<=? "
-        "ORDER BY available_at DESC,created_at DESC,event_id DESC",
-        (decision_at_utc.isoformat(), decision_at_utc.isoformat()),
+        "SELECT * FROM opportunity_events "
+        "INDEXED BY idx_opportunity_events_fsr_target_date "
+        "WHERE event_type='DAY0_EXTREME_UPDATED' "
+        "AND json_extract(payload_json, '$.target_date') BETWEEN ? AND ? "
+        "AND available_at<=? AND received_at<=?",
+        (
+            target_floor,
+            target_ceiling,
+            decision_at_utc.isoformat(),
+            decision_at_utc.isoformat(),
+        ),
     )
     out = {}
     for raw in cur.fetchall():
@@ -923,7 +933,16 @@ def _current_day0_events(
             if expires.tzinfo is None or expires.astimezone(timezone.utc) < decision_at_utc:
                 continue
         family_key = _event_family_key(event)
-        if family_key not in out:
+        previous = out.get(family_key)
+        if previous is None or (
+            event.available_at,
+            event.created_at,
+            event.event_id,
+        ) > (
+            previous.available_at,
+            previous.created_at,
+            previous.event_id,
+        ):
             out[family_key] = event
     return tuple(out[key] for key in sorted(out))
 

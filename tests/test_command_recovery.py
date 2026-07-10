@@ -1,8 +1,8 @@
 # Created: 2026-04-26
-# Lifecycle: created=2026-04-26; last_reviewed=2026-05-21; last_reused=2026-07-02
+# Lifecycle: created=2026-04-26; last_reviewed=2026-05-21; last_reused=2026-07-11
 # Purpose: Lock INV-31 command recovery behavior plus snapshot-gated command inserts.
 # Reuse: Run when command recovery, command journal schema, or executable snapshot gating changes.
-# Last reused/audited: 2026-07-02
+# Last reused/audited: 2026-07-11
 # Authority basis: docs/operations/task_2026-04-26_execution_state_truth_p1_command_bus/implementation_plan.md u00a7P1.S4
 """INV-31 anchor tests: command recovery loop.
 
@@ -4020,6 +4020,66 @@ class TestRecoveryResolutionTable:
 
         assert "ord-late-candidate" in priming["order_ids"]
 
+    @pytest.mark.parametrize(
+        ("remaining_size", "position_phase", "live_tick_expected"),
+        [
+            ("0", "economically_closed", False),
+            ("2", "economically_closed", True),
+            ("0", "active", True),
+        ],
+    )
+    def test_live_tick_primes_filled_order_only_for_remainder_or_runtime_open_position(
+        self,
+        conn,
+        remaining_size,
+        position_phase,
+        live_tick_expected,
+    ):
+        from src.execution.command_recovery import _collect_recovery_priming_keys
+        from src.state.venue_command_repo import append_event
+
+        _insert(conn, size=10.0)
+        _advance_to_acked(conn, venue_order_id="ord-filled-scope")
+        append_event(
+            conn,
+            command_id="cmd-001",
+            event_type="FILL_CONFIRMED",
+            occurred_at="2026-04-26T00:06:00Z",
+            payload={
+                "venue_order_id": "ord-filled-scope",
+                "trade_id": "trade-filled-scope",
+                "filled_size": "10",
+                "fill_price": "0.5",
+            },
+        )
+        _seed_pending_entry_projection(conn, order_id="ord-filled-scope")
+        conn.execute(
+            """
+            UPDATE position_current
+               SET phase = ?,
+                   shares = 0,
+                   cost_basis_usd = 0,
+                   order_status = 'filled'
+             WHERE position_id = 'pos-001'
+            """,
+            (position_phase,),
+        )
+        _append_order_fact(
+            conn,
+            order_id="ord-filled-scope",
+            state="PARTIALLY_MATCHED" if remaining_size != "0" else "MATCHED",
+            matched_size="8" if remaining_size != "0" else "10",
+            remaining_size=remaining_size,
+        )
+
+        live_tick = _collect_recovery_priming_keys(conn, scope="live_tick")
+        boot_fast = _collect_recovery_priming_keys(conn, scope="boot_fast")
+        full = _collect_recovery_priming_keys(conn, scope="full")
+
+        assert ("ord-filled-scope" in live_tick["order_ids"]) is live_tick_expected
+        assert "ord-filled-scope" in boot_fast["order_ids"]
+        assert "ord-filled-scope" in full["order_ids"]
+
     def test_live_tick_does_not_prime_terminal_zero_fill_matched_recovery_debt(
         self,
         conn,
@@ -4065,6 +4125,49 @@ class TestRecoveryResolutionTable:
             row["command_id"] != "cmd-terminal-zero"
             for row in live_tick_candidates
         )
+
+    def test_live_tick_scopes_recorded_maker_fill_economics(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        from src.execution import command_recovery, exchange_reconcile, venue_sync_contract
+        from src.state.db import init_schema
+        from src.state.collateral_ledger import init_collateral_schema
+
+        db_path = tmp_path / "live-tick-maker-scope.db"
+        seed = sqlite3.connect(db_path)
+        seed.row_factory = sqlite3.Row
+        init_schema(seed)
+        init_collateral_schema(seed)
+        seed.close()
+
+        def _conn_factory():
+            scoped_conn = sqlite3.connect(db_path)
+            scoped_conn.row_factory = sqlite3.Row
+            return scoped_conn
+
+        observed_scopes = []
+
+        def _maker_fill_scope_spy(conn, *, observed_at=None, live_tick_scope=False):
+            observed_scopes.append(live_tick_scope)
+            return {"scanned": 0, "corrected": 0, "stayed": 0, "errors": 0}
+
+        monkeypatch.setattr(venue_sync_contract, "default_trade_conn_factory", _conn_factory)
+        monkeypatch.setattr(
+            exchange_reconcile,
+            "reconcile_recorded_maker_fill_economics",
+            _maker_fill_scope_spy,
+        )
+        client = MagicMock(
+            spec_set=["get_order", "get_open_orders", "get_trades", "get_clob_market_info"]
+        )
+        client.get_open_orders.return_value = []
+        client.get_trades.return_value = []
+
+        command_recovery.reconcile_unresolved_commands(client=client, scope="live_tick")
+
+        assert observed_scopes == [True]
 
     def test_live_tick_clears_terminal_cancel_fact_before_venue_snapshot(
         self,
