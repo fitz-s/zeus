@@ -4919,9 +4919,18 @@ def run_edli_event_reactor_cycle(*, active_lock) -> None:
         if edli_cfg.get("forecast_snapshot_trigger_enabled"):
             try:
                 _fair_source = _edli_next_redecision_source()
+                _pending_key_budget_s = _edli_forecast_snapshot_build_budget_seconds(
+                    edli_cfg
+                )
                 _fsr_pending = _edli_pending_entity_keys(
                     conn,
                     event_types=("FORECAST_SNAPSHOT_READY",),
+                    max_rows_per_status=_edli_prune_batch_limit(edli_cfg),
+                    deadline_monotonic=(
+                        time.monotonic() + _pending_key_budget_s
+                        if _pending_key_budget_s > 0
+                        else None
+                    ),
                 )
                 _fsr_events = _edli_build_forecast_snapshot_events(
                     conn,

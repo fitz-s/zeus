@@ -420,3 +420,61 @@ def test_pending_entity_keys_restores_busy_timeout():
         f"busy_timeout leaked at {restored} ms after _edli_pending_entity_keys — "
         "the claim path inherits this connection-wide value (claim-storm root cause)"
     )
+
+
+def test_pending_entity_keys_reads_only_newest_bounded_working_set():
+    """The skip-set read must not scan the historical processing universe."""
+    from src.main import _edli_pending_entity_keys
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    init_schema(conn)
+    store = EventStore(conn)
+    old = _event("old")
+    newest = _event("newest")
+    store.insert_or_ignore(old)
+    store.insert_or_ignore(newest)
+    conn.execute(
+        "UPDATE opportunity_event_processing SET updated_at = ? WHERE event_id = ?",
+        ("2026-06-04T00:00:00+00:00", old.event_id),
+    )
+    conn.execute(
+        "UPDATE opportunity_event_processing SET updated_at = ? WHERE event_id = ?",
+        ("2026-06-04T01:00:00+00:00", newest.event_id),
+    )
+    conn.commit()
+    traced: list[str] = []
+    conn.set_trace_callback(traced.append)
+
+    assert _edli_pending_entity_keys(conn, max_rows_per_status=1) == {
+        newest.entity_key
+    }
+    conn.set_trace_callback(None)
+    query = next(sql for sql in traced if "WITH active(event_id)" in sql)
+    plan = "\n".join(
+        str(row[3]) for row in conn.execute(f"EXPLAIN QUERY PLAN {query}").fetchall()
+    )
+    assert "MATERIALIZE active" in plan
+    assert "sqlite_autoindex_opportunity_events_1 (event_id=?)" in plan
+
+
+def test_pending_entity_keys_deadline_interrupts_and_clears_handler():
+    """A slow skip-set read must yield; its progress handler must not leak."""
+    from src.main import _edli_pending_entity_keys
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    init_schema(conn)
+    store = EventStore(conn)
+    for index in range(500):
+        store.insert_or_ignore(_event(f"deadline-{index}"))
+    conn.commit()
+
+    keys = _edli_pending_entity_keys(
+        conn,
+        max_rows_per_status=500,
+        deadline_monotonic=time.monotonic() - 1.0,
+    )
+
+    assert keys == set()
+    assert conn.execute("SELECT 1").fetchone()[0] == 1

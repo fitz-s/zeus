@@ -6036,9 +6036,18 @@ def _check_monitor_cadence_watchdog(conn, summary: dict) -> dict | None:
     try:
         row = conn.execute(
             """
-            SELECT MAX(occurred_at)
-              FROM position_events
-             WHERE event_type = 'MONITOR_REFRESHED'
+            SELECT MAX(
+                       (
+                           SELECT pe.occurred_at
+                             FROM position_events pe
+                            WHERE pe.position_id = pc.position_id
+                              AND pe.event_type = 'MONITOR_REFRESHED'
+                            ORDER BY pe.sequence_no DESC
+                            LIMIT 1
+                       )
+                   )
+              FROM position_current pc
+             WHERE pc.phase IN ('active', 'day0_window', 'pending_exit', 'quarantined')
             """
         ).fetchone()
     except Exception:

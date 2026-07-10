@@ -4912,6 +4912,8 @@ def _edli_pending_entity_keys(
     world_conn,
     *,
     event_types: tuple[str, ...] = ("FORECAST_SNAPSHOT_READY",),
+    max_rows_per_status: int = 5_000,
+    deadline_monotonic: float | None = None,
 ) -> set[str]:
     """entity_keys of opportunity_events still unprocessed for the EDLI reactor consumer.
 
@@ -4933,7 +4935,13 @@ def _edli_pending_entity_keys(
     defensive timeout must never leak into the shared connection's WRITE path.
     """
     saved_busy_timeout_ms: int | None = None
+    deadline_installed = deadline_monotonic is not None
     try:
+        if deadline_installed:
+            _edli_install_sqlite_deadline(
+                world_conn,
+                deadline_monotonic=deadline_monotonic,
+            )
         try:
             row = world_conn.execute("PRAGMA busy_timeout").fetchone()
             saved_busy_timeout_ms = int(row[0]) if row is not None else None
@@ -4943,23 +4951,56 @@ def _edli_pending_entity_keys(
         event_type_values = tuple(str(t).strip() for t in event_types if str(t).strip())
         if not event_type_values:
             return set()
+        bounded_rows = max(1, min(int(max_rows_per_status or 1), 50_000))
         placeholders = ",".join("?" for _ in event_type_values)
         try:
             rows = world_conn.execute(
                 f"""
+                WITH active(event_id) AS MATERIALIZED (
+                    SELECT event_id
+                      FROM (
+                            SELECT event_id
+                              FROM opportunity_event_processing
+                                   INDEXED BY idx_opportunity_event_processing_status
+                             WHERE consumer_name = 'edli_reactor_v1'
+                               AND processing_status = 'pending'
+                             ORDER BY updated_at DESC
+                             LIMIT ?
+                           )
+                    UNION ALL
+                    SELECT event_id
+                      FROM (
+                            SELECT event_id
+                              FROM opportunity_event_processing
+                                   INDEXED BY idx_opportunity_event_processing_status
+                             WHERE consumer_name = 'edli_reactor_v1'
+                               AND processing_status = 'processing'
+                             ORDER BY updated_at DESC
+                             LIMIT ?
+                           )
+                )
                 SELECT DISTINCT e.entity_key
-                FROM opportunity_event_processing p INDEXED BY idx_opportunity_event_processing_status
-                JOIN opportunity_events e ON e.event_id = p.event_id
-                WHERE p.consumer_name = 'edli_reactor_v1'
-                  AND p.processing_status IN ('pending', 'processing', 'claimed')
-                  AND e.event_type IN ({placeholders})
+                  FROM active p
+                  CROSS JOIN opportunity_events e
+                 WHERE e.event_id = p.event_id
+                   AND e.event_type IN ({placeholders})
             """,
-                event_type_values,
+                (bounded_rows, bounded_rows, *event_type_values),
             ).fetchall()
+        except sqlite3.OperationalError as exc:
+            if "interrupted" in str(exc).lower():
+                logger.warning(
+                    "EDLI pending-entity scan deadline exhausted; using an empty "
+                    "skip set so the bounded event builder can continue"
+                )
+                return set()
+            return set()
         except Exception:  # noqa: BLE001 — fail-open: no skip set (cap still bounds)
             return set()
         return {str(r[0]) for r in rows}
     finally:
+        if deadline_installed:
+            _edli_clear_sqlite_progress_handler(world_conn)
         if saved_busy_timeout_ms is not None:
             try:
                 world_conn.execute("PRAGMA busy_timeout = %d" % saved_busy_timeout_ms)

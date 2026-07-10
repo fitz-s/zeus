@@ -833,7 +833,22 @@ class TestMonitorCadenceWatchdog:
     """The watchdog must flag a MONITOR_REFRESHED gap beyond ~2x the 2-min
     interval (the live 8.8h 06-19 00:41→09:30 whole-book silence)."""
 
-    def _insert_monitor_refreshed(self, conn: sqlite3.Connection, occurred_at: str) -> None:
+    def _insert_monitor_refreshed(
+        self,
+        conn: sqlite3.Connection,
+        occurred_at: str,
+        *,
+        position_id: str = "p1",
+        phase: str = "active",
+    ) -> None:
+        conn.execute(
+            """
+            INSERT INTO position_current (
+                position_id, phase, strategy_key, updated_at, temperature_metric
+            ) VALUES (?, ?, 'opening_inertia', ?, 'high')
+            """,
+            (position_id, phase, occurred_at),
+        )
         conn.execute(
             """
             INSERT INTO position_events (
@@ -842,7 +857,12 @@ class TestMonitorCadenceWatchdog:
                 payload_json
             ) VALUES (?, ?, 1, 1, 'MONITOR_REFRESHED', ?, 'opening_inertia', ?, 'test', 'live', '{}')
             """,
-            (f"e:{occurred_at}", "p1", occurred_at, f"i:{occurred_at}"),
+            (
+                f"e:{position_id}:{occurred_at}",
+                position_id,
+                occurred_at,
+                f"i:{position_id}:{occurred_at}",
+            ),
         )
         conn.commit()
 
@@ -882,3 +902,29 @@ class TestMonitorCadenceWatchdog:
         record = _check_monitor_cadence_watchdog(conn, summary)
         assert record is None, "watchdog must NOT flag a healthy cadence"
         assert "monitor_cadence_gap_flagged" not in summary
+
+    def test_watchdog_ignores_recent_monitor_history_for_closed_positions(self):
+        from datetime import datetime, timezone
+
+        from src.execution.exit_lifecycle import _check_monitor_cadence_watchdog
+
+        conn = _db()
+        active_old = "2026-06-19T00:41:00+00:00"
+        self._insert_monitor_refreshed(
+            conn,
+            active_old,
+            position_id="active-old",
+            phase="active",
+        )
+        self._insert_monitor_refreshed(
+            conn,
+            datetime.now(timezone.utc).isoformat(),
+            position_id="closed-recent",
+            phase="economically_closed",
+        )
+        summary: dict = {}
+
+        record = _check_monitor_cadence_watchdog(conn, summary)
+
+        assert record is not None
+        assert record["last_monitor_refreshed_at"] == active_old
