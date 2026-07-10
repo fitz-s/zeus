@@ -1,5 +1,5 @@
 # Created: 2026-05-31
-# Last reused/audited: 2026-05-31
+# Last reused/audited: 2026-07-09
 # Authority basis: EDLI live canary QUOTE_FEASIBILITY_BID_ASK_REQUIRED root-cause
 #                   (event_reactor_adapter quote_feasibility producer L1893-1918 ;
 #                   passive-maker consumer _passive_maker_context_from_authorities L1616-1643).
@@ -207,7 +207,7 @@ def _executable_snapshot_cert():
     )
 
 
-def _actionable_cert():
+def _actionable_cert(*, payload: dict | None = None):
     return build_certificate(
         certificate_type=claims.ACTIONABLE_TRADE,
         semantic_key="actionable:evt-qf:identity",
@@ -217,7 +217,7 @@ def _actionable_cert():
         source_available_at=NOW,
         agent_received_at=NOW,
         persisted_at=NOW,
-        payload={"p_fill_lcb": 0.1},
+        payload=payload or {"p_fill_lcb": 0.1},
         authority_id="test",
         authority_version="v1",
         algorithm_id="test",
@@ -262,6 +262,74 @@ def test_selected_snapshot_top_of_book_flows_into_passive_maker_context(conn):
     # Consumer accepted: spread is derived from the snapshot top-of-book.
     assert context["spread_usd"] == pytest.approx(float(TOP_ASK) - float(TOP_BID))
     assert context["quote_age_ms"] >= 0
+
+
+def test_qkernel_maker_context_uses_selected_resting_fill_probability(conn):
+    """Maker economics must not reuse near-certain taker depth coverage."""
+
+    row = _selected_row(conn)
+    payload = _production_quote_feasibility_payload(row)
+    actionable = _actionable_cert(
+        payload={
+            "p_fill_lcb": 0.9998,
+            "opportunity_book": {
+                "selection_authority": "qkernel_spine",
+                "actual_receipt_selected_candidate_id": "selected-maker",
+                "candidates": [
+                    {
+                        "candidate_id": "selected-maker",
+                        "execution_mode_intent": "MAKER",
+                        "maker_fill_probability": 0.19,
+                    }
+                ],
+            },
+        }
+    )
+
+    context = _passive_maker_context_from_authorities(
+        actionable=actionable,
+        quote_feasibility_cert=_quote_feasibility_cert(payload=payload),
+        executable_snapshot_cert=_executable_snapshot_cert(),
+        decision_time=NOW,
+    )
+
+    assert float(context["expected_fill_probability"]) == pytest.approx(0.19)
+
+
+@pytest.mark.parametrize("maker_fill_probability", [None, 0.0, 1.01])
+def test_qkernel_maker_context_rejects_invalid_selected_fill_probability(
+    conn,
+    maker_fill_probability,
+):
+    row = _selected_row(conn)
+    payload = _production_quote_feasibility_payload(row)
+    actionable = _actionable_cert(
+        payload={
+            "p_fill_lcb": 0.9998,
+            "opportunity_book": {
+                "selection_authority": "qkernel_spine",
+                "actual_receipt_selected_candidate_id": "selected-maker",
+                "candidates": [
+                    {
+                        "candidate_id": "selected-maker",
+                        "execution_mode_intent": "MAKER",
+                        "maker_fill_probability": maker_fill_probability,
+                    }
+                ],
+            },
+        }
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="ACTIONABLE_SELECTED_MAKER_FILL_PROBABILITY_REQUIRED",
+    ):
+        _passive_maker_context_from_authorities(
+            actionable=actionable,
+            quote_feasibility_cert=_quote_feasibility_cert(payload=payload),
+            executable_snapshot_cert=_executable_snapshot_cert(),
+            decision_time=NOW,
+        )
 
 
 def test_one_sided_ask_book_flows_into_passive_maker_context(conn):

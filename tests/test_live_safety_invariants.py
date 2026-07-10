@@ -6600,6 +6600,60 @@ def test_monitor_refreshed_persists_day0_probability_receipt():
     assert receipt["p_cal_vector"] == pytest.approx([0.01, 0.8419, 0.1481])
 
 
+def test_monitor_refreshed_persists_conditioned_daily_extrema_receipt():
+    from src.engine.lifecycle_events import build_monitor_refreshed_canonical_write
+    from src.state.lifecycle_manager import LifecyclePhase
+
+    pos = _make_position(
+        trade_id="taipei-conditioned-daily-receipt",
+        city="Taipei",
+        target_date="2026-07-09",
+        temperature_metric="high",
+        bin_label="Will the highest temperature in Taipei be 35°C on July 9?",
+        direction="buy_no",
+        shares=3.8,
+        entry_price=0.64,
+        p_posterior=0.8006076372881108,
+        strategy_key="center_bin_buy",
+        env="live",
+    )
+    pos.last_monitor_at = "2026-07-09T11:20:00+00:00"
+    pos.last_monitor_prob = 0.0066
+    pos.last_monitor_prob_is_fresh = True
+    pos.selected_method = "day0_observation_conditioned_daily_extrema"
+    pos.applied_validations = [
+        "day0_observation_conditioned_daily_extrema",
+        "day0_daily_extrema_not_remaining_window:day0_daily_extrema_live",
+    ]
+    pos._day0_monitor_probability_receipt = {
+        "schema_version": 1,
+        "selected_method": "day0_observation_conditioned_daily_extrema",
+        "metric": "high",
+        "held_side_probability": 0.0066,
+        "remaining_window": {
+            "source": "day0_observed_bound_conditioned_daily_extrema",
+            "member_extrema_summary": {"count": 1, "max": 35.0},
+            "raw_member_extrema_summary": {"count": 1, "max": 36.0},
+        },
+    }
+
+    events, _projection = build_monitor_refreshed_canonical_write(
+        pos,
+        sequence_no=28,
+        phase_after=LifecyclePhase.DAY0_WINDOW.value,
+        source_module="tests/test_day0_conditioned_daily_receipt",
+    )
+
+    payload = json.loads(events[0]["payload_json"])
+    receipt = payload["day0_monitor_probability_receipt"]
+    assert receipt["selected_method"] == "day0_observation_conditioned_daily_extrema"
+    assert receipt["remaining_window"]["source"] == (
+        "day0_observed_bound_conditioned_daily_extrema"
+    )
+    assert receipt["remaining_window"]["raw_member_extrema_summary"]["max"] == pytest.approx(36.0)
+    assert receipt["remaining_window"]["member_extrema_summary"]["max"] == pytest.approx(35.0)
+
+
 def test_monitor_refreshed_omits_stale_day0_probability_receipt_on_non_day0_method():
     """A stale Day0 receipt must not contaminate later non-Day0 monitor events."""
     from src.engine.lifecycle_events import build_monitor_refreshed_canonical_write

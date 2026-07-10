@@ -98,6 +98,7 @@ from typing import Any, Mapping, Optional, Sequence
 
 import numpy as np
 
+from src.decision_kernel.canonicalization import qkernel_current_state_identity_hash
 from src.decision.family_decision_engine import (
     FamilyDecision,
     FamilyDecisionEngine,
@@ -2060,6 +2061,8 @@ def _candidate_qkernel_execution_economics_payload(
             "source": "qkernel_spine",
             "decision_id": getattr(decision, "decision_id", None),
             "receipt_hash": getattr(decision, "receipt_hash", None),
+            "q_version": getattr(getattr(decision, "joint_q", None), "identity_hash", None),
+            "sample_hash": getattr(getattr(decision, "band", None), "sample_hash", None),
             "candidate_id": selected.candidate_id,
             "route_id": selected.route_id,
             "payoff_q_point": q_dot_payoff,
@@ -2115,6 +2118,13 @@ def _candidate_qkernel_execution_economics_payload(
         false_edge_rate = _qkernel_false_edge_rate(decision, candidate_decision)
         if false_edge_rate is not None:
             payload["false_edge_rate"] = false_edge_rate
+        if (
+            payload.get("q_lcb_guard_basis") == "CURRENT_POSTERIOR_BAND"
+            and payload.get("selection_guard_basis") == "CURRENT_POSTERIOR_BAND"
+        ):
+            payload["current_state_identity_hash"] = qkernel_current_state_identity_hash(
+                payload
+            )
     except (TypeError, ValueError, AttributeError):
         return None
     return payload

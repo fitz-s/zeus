@@ -228,6 +228,7 @@ def test_fetch_events_by_tags_does_not_pass_closed_false_param():
 from src.data.market_scanner import (
     _market_child_is_tradable,
     _orderbook_from_feasibility_row,
+    _prefetch_selected_orderbooks_from_feasibility,
     capture_executable_market_snapshot,
 )
 from src.state.snapshot_repo import init_snapshot_schema
@@ -356,6 +357,138 @@ def test_feasibility_row_preserves_exchange_metadata_when_reused() -> None:
     assert book["tick_size"] == "0.01"
     assert book["min_order_size"] == "5"
     assert book["neg_risk"] is True
+
+
+def test_feasibility_prefetch_falls_back_to_depth_bearing_direction() -> None:
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        """
+        CREATE TABLE execution_feasibility_evidence (
+            token_id TEXT,
+            direction TEXT,
+            quote_seen_at TEXT,
+            book_hash_before TEXT,
+            best_bid_before REAL,
+            best_ask_before REAL,
+            depth_before_json TEXT,
+            created_at TEXT
+        )
+        """
+    )
+    conn.executemany(
+        """
+        INSERT INTO execution_feasibility_evidence (
+            token_id, direction, quote_seen_at, book_hash_before,
+            best_bid_before, best_ask_before, depth_before_json, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        [
+            (
+                "yes-token",
+                "sell_yes",
+                "2026-05-24T10:01:00+00:00",
+                "hash-sell",
+                0.48,
+                0.52,
+                None,
+                "2026-05-24T10:01:00+00:00",
+            ),
+            (
+                "yes-token",
+                "buy_yes",
+                "2026-05-24T10:00:59+00:00",
+                "hash-buy",
+                0.48,
+                0.52,
+                json.dumps({"bids": [], "asks": [{"price": "0.52", "size": "10"}]}),
+                "2026-05-24T10:00:59+00:00",
+            ),
+        ],
+    )
+    outcome = {
+        "token_id": "yes-token",
+        "no_token_id": "no-token",
+        "condition_id": "cond-real",
+        "gamma_market_raw": {
+            "tick_size": "0.01",
+            "min_order_size": "5",
+            "negRisk": True,
+        },
+    }
+    selected_candidates = [(0, 0, 0, {}, outcome, "cond-real", "sell_yes")]
+
+    books = _prefetch_selected_orderbooks_from_feasibility(
+        conn,
+        selected_candidates,
+        captured=datetime.fromisoformat("2026-05-24T10:01:01+00:00"),
+    )
+
+    assert books["yes-token"]["hash"] == "hash-buy"
+    assert books["yes-token"]["asks"] == [{"price": "0.52", "size": "10"}]
+
+
+def test_feasibility_prefetch_uses_latest_without_history_scan() -> None:
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        """
+        CREATE TABLE execution_feasibility_latest (
+            token_id TEXT,
+            direction TEXT,
+            quote_seen_at TEXT,
+            book_hash_before TEXT,
+            best_bid_before REAL,
+            best_ask_before REAL,
+            depth_before_json TEXT,
+            created_at TEXT
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO execution_feasibility_latest (
+            token_id, direction, quote_seen_at, book_hash_before,
+            best_bid_before, best_ask_before, depth_before_json, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "yes-token",
+            "buy_yes",
+            "2026-05-24T10:01:00+00:00",
+            "hash-latest",
+            0.48,
+            0.52,
+            json.dumps({"bids": [], "asks": [{"price": "0.52", "size": "10"}]}),
+            "2026-05-24T10:01:00+00:00",
+        ),
+    )
+    outcome = {
+        "token_id": "yes-token",
+        "no_token_id": "no-token",
+        "condition_id": "cond-real",
+        "gamma_market_raw": {
+            "tick_size": "0.01",
+            "min_order_size": "5",
+            "negRisk": True,
+        },
+    }
+    traces: list[str] = []
+    conn.set_trace_callback(traces.append)
+
+    books = _prefetch_selected_orderbooks_from_feasibility(
+        conn,
+        [(0, 0, 0, {}, outcome, "cond-real", "buy_yes")],
+        captured=datetime.fromisoformat("2026-05-24T10:01:01+00:00"),
+    )
+
+    history_reads = [
+        sql
+        for sql in traces
+        if "FROM execution_feasibility_evidence" in sql and sql.lstrip().upper().startswith("SELECT")
+    ]
+    assert books["yes-token"]["hash"] == "hash-latest"
+    assert history_reads == []
 
 
 def test_negrisk_child_active_false_accepting_true_capture_snapshot_admits() -> None:

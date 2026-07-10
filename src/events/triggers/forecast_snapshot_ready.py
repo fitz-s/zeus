@@ -752,14 +752,21 @@ class ForecastSnapshotReadyTrigger:
         # any market exists, require the family to have one. Non-permanent — re-scanned every
         # cycle, so a family emits as soon as its market is discovered.
         market_filter = ""
+        posterior_market_filter = ""
         if _table_exists(forecasts_conn, "market_events"):
-            market_filter = (
-                " AND (NOT EXISTS (SELECT 1 FROM market_events)"
-                " OR EXISTS (SELECT 1 FROM market_events m"
-                " WHERE m.city = c.city"
-                " AND m.target_date = c.target_local_date"
-                " AND m.temperature_metric = c.temperature_metric))"
-            )
+            if _table_has_rows(forecasts_conn, "market_events"):
+                market_filter = (
+                    " AND EXISTS (SELECT 1 FROM market_events m"
+                    " WHERE m.city = c.city"
+                    " AND m.target_date = c.target_local_date"
+                    " AND m.temperature_metric = c.temperature_metric)"
+                )
+                posterior_market_filter = (
+                    " AND EXISTS (SELECT 1 FROM market_events m"
+                    " WHERE m.city = fp.city"
+                    " AND m.target_date = fp.target_date"
+                    " AND m.temperature_metric = fp.temperature_metric)"
+                )
         # Coverage-fairness contract (Wave-1 2026-06-12: now UNCONDITIONAL).
         # Fetch ALL candidates (no SQL LIMIT) then apply CoverageFairnessRequest
         # .select_rows() which deduplicates to ≤1 row per (city, target_date, metric)
@@ -776,6 +783,12 @@ class ForecastSnapshotReadyTrigger:
                 _cycle_index = 0
 
         _decision_iso = decision_time.astimezone(UTC).isoformat()
+        # A target date older than UTC-yesterday is strictly past in every
+        # inhabited settlement timezone. Keep yesterday as the conservative
+        # boundary; the precise per-city phase filter below still owns admission.
+        _target_date_floor = (
+            decision_time.astimezone(UTC).date() - timedelta(days=1)
+        ).isoformat()
         _family_filter_sql, _family_filter_params = _family_restriction_sql(
             table_alias="fp",
             city_col="city",
@@ -809,52 +822,30 @@ class ForecastSnapshotReadyTrigger:
             # raw table could spend minutes before emitting any candidate. This
             # preserves the one latest posterior per family law while bounding
             # the carrier count to the currently-emittable family/cycle set.
-            # The market_filter references c.* columns; re-alias onto the posterior row p.*.
-            _posterior_market_filter = (
-                market_filter.replace("c.city", "p.city")
-                .replace("c.target_local_date", "p.target_date")
-                .replace("c.temperature_metric", "p.temperature_metric")
-            )
             _posterior_columns = _table_columns(forecasts_conn, "forecast_posteriors")
             _posterior_runtime_filter = (
                 " AND fp.runtime_layer = 'live'"
                 if "runtime_layer" in _posterior_columns
                 else ""
             )
+            _posterior_newer_runtime_filter = (
+                " AND newer.runtime_layer = fp.runtime_layer"
+                if "runtime_layer" in _posterior_columns
+                else ""
+            )
             _select_sql_base = f"""
-                WITH ranked_posterior AS (
-                    SELECT
-                        fp.*,
-                        ROW_NUMBER() OVER (
-                            PARTITION BY fp.city, fp.target_date, fp.temperature_metric
-                            ORDER BY fp.source_cycle_time DESC, fp.computed_at DESC, fp.posterior_id DESC
-                        ) AS _family_rank
-                      FROM forecast_posteriors fp
-                     WHERE fp.product_id = '{REPLACEMENT_0_1_PRODUCT_ID}'
-                       {_posterior_runtime_filter}
-                       {_family_filter_sql}
-                       AND (fp.source_available_at IS NULL OR fp.source_available_at <= ?)
-                       AND (fp.computed_at IS NULL OR fp.computed_at <= ?)
-                ),
-                latest_posterior AS (
-                    SELECT *
-                      FROM ranked_posterior p
-                     WHERE p._family_rank = 1
-                       AND (p.source_available_at IS NULL OR p.source_available_at <= ?)
-                       AND (p.computed_at IS NULL OR p.computed_at <= ?){_posterior_market_filter}
-                )
                 SELECT
-                    p.posterior_id AS coverage_id,
-                    p.posterior_identity_hash AS source_run_id,
-                    p.source_id AS source_id,
+                    fp.posterior_id AS coverage_id,
+                    fp.posterior_identity_hash AS source_run_id,
+                    fp.source_id AS source_id,
                     NULL AS source_transport,
                     NULL AS release_calendar_key,
                     '{REPLACEMENT_0_1_TRACK_LABEL}' AS track,
                     NULL AS city_id,
-                    p.city AS city,
+                    fp.city AS city,
                     NULL AS city_timezone,
-                    p.target_date AS target_local_date,
-                    p.temperature_metric AS temperature_metric,
+                    fp.target_date AS target_local_date,
+                    fp.temperature_metric AS temperature_metric,
                     '{POSTERIOR_BACKED_DATA_VERSION}' AS data_version,
                     NULL AS expected_members,
                     NULL AS observed_members,
@@ -865,37 +856,68 @@ class ForecastSnapshotReadyTrigger:
                     NULL AS target_window_end_utc,
                     'COMPLETE' AS completeness_status,
                     'LIVE_ELIGIBLE' AS readiness_status,
-                    p.computed_at AS computed_at,
-                    p.source_cycle_time AS sr_source_cycle_time,
-                    p.source_available_at AS sr_source_issue_time,
+                    fp.computed_at AS computed_at,
+                    fp.source_cycle_time AS sr_source_cycle_time,
+                    fp.source_available_at AS sr_source_issue_time,
                     NULL AS sr_source_release_time,
-                    p.source_available_at AS sr_source_available_at,
+                    fp.source_available_at AS sr_source_available_at,
                     NULL AS sr_fetch_started_at,
                     NULL AS sr_fetch_finished_at,
-                    p.computed_at AS sr_captured_at,
+                    fp.computed_at AS sr_captured_at,
                     'COMPLETE' AS sr_status,
                     'COMPLETE' AS sr_completeness_status,
                     NULL AS sr_expected_steps_json,
                     NULL AS sr_observed_steps_json,
                     NULL AS sr_expected_members,
                     NULL AS sr_observed_members,
-                    ('{_POSTERIOR_SNAPSHOT_ID_PREFIX}' || p.city || '|' || p.target_date || '|'
-                        || p.temperature_metric || '|' || substr(p.source_cycle_time, 1, 10)) AS snapshot_id,
-                    p.city AS snapshot_city,
-                    p.target_date AS snapshot_target_date,
-                    p.temperature_metric AS snapshot_temperature_metric,
-                    p.source_available_at AS snapshot_available_at,
-                    p.computed_at AS snapshot_fetch_time,
-                    p.posterior_identity_hash AS snapshot_manifest_hash,
+                    ('{_POSTERIOR_SNAPSHOT_ID_PREFIX}' || fp.city || '|' || fp.target_date || '|'
+                        || fp.temperature_metric || '|' || substr(fp.source_cycle_time, 1, 10)) AS snapshot_id,
+                    fp.city AS snapshot_city,
+                    fp.target_date AS snapshot_target_date,
+                    fp.temperature_metric AS snapshot_temperature_metric,
+                    fp.source_available_at AS snapshot_available_at,
+                    fp.computed_at AS snapshot_fetch_time,
+                    fp.posterior_identity_hash AS snapshot_manifest_hash,
+                    NULL AS provenance_json,
                     NULL AS snapshot_members_json
-                FROM latest_posterior p
-                ORDER BY p.source_cycle_time DESC, p.computed_at DESC
+                  FROM forecast_posteriors fp
+                 WHERE fp.product_id = '{REPLACEMENT_0_1_PRODUCT_ID}'
+                   {_posterior_runtime_filter}
+                   {_family_filter_sql}
+                   AND fp.target_date >= ?
+                   AND (fp.source_available_at IS NULL OR fp.source_available_at <= ?)
+                   AND (fp.computed_at IS NULL OR fp.computed_at <= ?)
+                   AND NOT EXISTS (
+                        SELECT 1
+                          FROM forecast_posteriors newer
+                         WHERE newer.product_id = fp.product_id
+                           {_posterior_newer_runtime_filter}
+                           AND newer.city = fp.city
+                           AND newer.target_date = fp.target_date
+                           AND newer.temperature_metric = fp.temperature_metric
+                           AND (newer.source_available_at IS NULL OR newer.source_available_at <= ?)
+                           AND (newer.computed_at IS NULL OR newer.computed_at <= ?)
+                           AND (
+                                COALESCE(newer.source_cycle_time, '') > COALESCE(fp.source_cycle_time, '')
+                             OR (
+                                    COALESCE(newer.source_cycle_time, '') = COALESCE(fp.source_cycle_time, '')
+                                AND COALESCE(newer.computed_at, '') > COALESCE(fp.computed_at, '')
+                             )
+                             OR (
+                                    COALESCE(newer.source_cycle_time, '') = COALESCE(fp.source_cycle_time, '')
+                                AND COALESCE(newer.computed_at, '') = COALESCE(fp.computed_at, '')
+                                AND newer.posterior_id > fp.posterior_id
+                             )
+                           )
+                   ){posterior_market_filter}
+                ORDER BY fp.source_cycle_time DESC, fp.computed_at DESC
                 """
             rows = _dict_rows(
                 forecasts_conn,
                 _select_sql_base,
                 (
                     *_family_filter_params,
+                    _target_date_floor,
                     _decision_iso,
                     _decision_iso,
                     _decision_iso,
@@ -1303,6 +1325,13 @@ def _table_exists(conn: sqlite3.Connection, table_name: str) -> bool:
     )
 
 
+def _table_has_rows(conn: sqlite3.Connection, table_name: str) -> bool:
+    try:
+        return conn.execute(f"SELECT 1 FROM {table_name} LIMIT 1").fetchone() is not None
+    except sqlite3.Error:
+        return False
+
+
 def _table_columns(conn: sqlite3.Connection, table_name: str) -> set[str]:
     try:
         return {str(row[1]) for row in conn.execute(f"PRAGMA table_info({table_name})").fetchall()}
@@ -1343,7 +1372,79 @@ def _raw_model_member_count_for_posterior_row(
         """,
         (city, target_date, metric, cycle_date, decision_iso),
     ).fetchone()
-    return int(record[0] or 0) if record is not None else 0
+    try:
+        count = int(record[0] or 0) if record is not None else 0
+    except (TypeError, ValueError):
+        count = 0
+    if count > 0:
+        return count
+    fallback = _posterior_provenance_raw_member_count(row)
+    if fallback > 0:
+        return fallback
+    posterior_id = row.get("posterior_id") or row.get("coverage_id")
+    if posterior_id in (None, ""):
+        return 0
+    try:
+        record = conn.execute(
+            "SELECT provenance_json FROM forecast_posteriors WHERE posterior_id = ?",
+            (posterior_id,),
+        ).fetchone()
+    except sqlite3.Error:
+        return 0
+    if record is None:
+        return 0
+    return _posterior_provenance_raw_member_count({"provenance_json": record[0]})
+
+
+def _posterior_provenance_raw_member_count(row: dict[str, Any]) -> int:
+    """Count materialized carrier members from posterior provenance when raw rows lag.
+
+    The replacement posterior row is the certified probability authority, but the
+    live event still needs a concrete carrier-member count.  Some current-target
+    materializations stamp the posterior with the anchor/source cycle while the
+    persisted raw member rows came from the served previous cycle; in that shape
+    the strict same-cycle raw table count is zero even though the posterior carries
+    the raw_model_forecast_ids it was fused from.  Only accept that fallback when
+    the fusion provenance says the decorrelated provider set was complete.
+    """
+
+    raw = row.get("provenance_json")
+    if not raw:
+        return 0
+    try:
+        provenance = json.loads(raw) if isinstance(raw, str) else raw
+    except (TypeError, json.JSONDecodeError):
+        return 0
+    if not isinstance(provenance, dict):
+        return 0
+    fusion = provenance.get("bayes_precision_fusion")
+    if not isinstance(fusion, dict):
+        return 0
+    complete = fusion.get("decorrelated_providers_complete") is True
+    if not complete:
+        try:
+            served = int(fusion.get("decorrelated_providers_served") or 0)
+            expected = int(fusion.get("decorrelated_providers_expected") or 0)
+        except (TypeError, ValueError):
+            served = expected = 0
+        complete = expected > 0 and served >= expected
+    if not complete:
+        return 0
+    raw_ids = fusion.get("raw_model_forecast_ids")
+    if isinstance(raw_ids, list):
+        unique_ids = {str(value) for value in raw_ids if value not in (None, "")}
+        if unique_ids:
+            return len(unique_ids)
+    serving = fusion.get("current_value_serving")
+    if isinstance(serving, dict):
+        unique_ids = {
+            str(details.get("raw_model_forecast_id"))
+            for details in serving.values()
+            if isinstance(details, dict) and details.get("raw_model_forecast_id") not in (None, "")
+        }
+        if unique_ids:
+            return len(unique_ids)
+    return 0
 
 
 def _with_posterior_raw_member_counts(

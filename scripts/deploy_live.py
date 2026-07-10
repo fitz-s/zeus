@@ -69,6 +69,7 @@ from src.ops.edli_queue import (
     collect_edli_queue_evidence,
 )
 from src.ops.monitor_cadence import collect_monitor_cadence_evidence
+from src.control.runtime_code_plane import is_runtime_code_path
 
 LIVE_TRADING_PLIST = (
     Path.home() / "Library" / "LaunchAgents" / "com.zeus.live-trading.plist"
@@ -205,7 +206,19 @@ def dirty_runtime_files() -> list[str]:
         detail = (res.stderr or res.stdout).strip().splitlines()
         msg = detail[-1] if detail else "unknown git status failure"
         return [f"GIT_STATUS_FAILED: {msg}"]
-    return [ln for ln in res.stdout.splitlines() if ln.strip()]
+    lines: list[str] = []
+    for line in res.stdout.splitlines():
+        if not line.strip():
+            continue
+        raw_path = line[3:].strip().replace("\\", "/")
+        candidates = (
+            [part.strip() for part in raw_path.split(" -> ", 1)]
+            if " -> " in raw_path
+            else [raw_path]
+        )
+        if any(is_runtime_code_path(candidate) for candidate in candidates):
+            lines.append(line)
+    return lines
 
 
 def unpushed_state(branch: str) -> tuple[bool, str]:
@@ -657,29 +670,119 @@ def _stop_label(label: str) -> tuple[bool, str]:
     return False, f"FAILED stop {label}: rc={stop.returncode} {stop.stderr.strip()}"
 
 
-def cmd_status(_args: argparse.Namespace) -> int:
+def _runtime_status_summary() -> dict:
+    """Read the live status projection without mutating runtime state."""
+
+    live_repo = Path(_require_live_repo())
+    payload = _load_json(live_repo / "state" / "status_summary.json")
+    if not payload:
+        return {"present": False}
+    return {
+        "present": True,
+        "generated_at": payload.get("generated_at") or payload.get("timestamp"),
+        "status": payload.get("status"),
+        "mode": payload.get("mode"),
+        "live_action_authorized": payload.get("live_action_authorized"),
+        "failure_reason": payload.get("failure_reason"),
+        "live_boot": payload.get("live_boot"),
+        "execution_capability": payload.get("execution_capability"),
+    }
+
+
+def _status_payload() -> tuple[int, dict]:
     try:
         _require_live_repo()
     except RuntimeError as exc:
-        print(f"REFUSING status — {exc}", file=sys.stderr)
-        return 2
+        return 2, {
+            "ok": False,
+            "issue": "LIVE_REPO_UNRESOLVED",
+            "detail": str(exc),
+        }
     branch = current_branch()
     unpushed, push_detail = unpushed_state(branch)
     dirty = dirty_runtime_files()
+    daemons = {}
+    for short, label in DAEMONS.items():
+        pid, status = daemon_pid_uptime(label)
+        daemons[short] = {
+            "label": label,
+            "pid": None if pid == "-" else pid,
+            "last_status": None if status == "-" else status,
+            "loaded": pid != "-" or status != "-",
+        }
+    gate_ok, gate_blockers = _gate(allow_dirty=False, allow_unpushed=False)
+    return 0, {
+        "ok": True,
+        "live_repo": LIVE_REPO,
+        "branch": branch,
+        "head": head_sha(),
+        "push_state": {
+            "unpushed": unpushed,
+            "detail": push_detail,
+        },
+        "dirty_runtime_files": dirty,
+        "restart_gate": {
+            "ok": gate_ok,
+            "blockers": gate_blockers,
+        },
+        "runtime_status": _runtime_status_summary(),
+        "daemons": daemons,
+    }
+
+
+def cmd_status(args: argparse.Namespace) -> int:
+    rc, payload = _status_payload()
+    if getattr(args, "json", False):
+        print(json.dumps(payload, sort_keys=True, default=str))
+        return rc
+    if rc != 0:
+        print(f"REFUSING status — {payload.get('detail')}", file=sys.stderr)
+        return rc
+    branch = str(payload["branch"])
+    push_state = payload["push_state"]
+    dirty = list(payload["dirty_runtime_files"])
     print(f"deploy_live status  (live checkout: {LIVE_REPO})")
     print("=" * 64)
     print(f"branch     : {branch}")
-    print(f"HEAD       : {head_sha()}")
-    print(f"push state : {'UNPUSHED — ' if unpushed else 'clean — '}{push_detail}")
+    print(f"HEAD       : {payload['head']}")
+    print(
+        "push state : "
+        f"{'UNPUSHED — ' if push_state['unpushed'] else 'clean — '}"
+        f"{push_state['detail']}"
+    )
     if dirty:
-        print(f"dirty src/config ({len(dirty)} entries):")
+        print(f"dirty runtime surface ({len(dirty)} entries):")
         for ln in dirty:
             print(f"   {ln}")
     else:
-        print("dirty src/config : (clean)")
+        print("dirty runtime surface : (clean)")
+    restart_gate = payload["restart_gate"]
+    if not restart_gate["ok"]:
+        print(f"restart gate: BLOCKED ({len(restart_gate['blockers'])} blockers)")
+    else:
+        print("restart gate: ok")
+    runtime_status = payload.get("runtime_status") or {}
+    if runtime_status.get("present"):
+        status = runtime_status.get("status") or "?"
+        mode = runtime_status.get("mode") or "?"
+        live_authorized = runtime_status.get("live_action_authorized")
+        print(
+            "runtime status: "
+            f"{status} mode={mode} live_action_authorized={live_authorized}"
+        )
+        live_boot = runtime_status.get("live_boot") or {}
+        live_boot_issue = live_boot.get("issue") if isinstance(live_boot, dict) else None
+        if live_boot_issue:
+            print(f"runtime boot : {live_boot_issue}")
+        failure_reason = runtime_status.get("failure_reason")
+        if failure_reason:
+            print(f"runtime failure: {failure_reason}")
+    else:
+        print("runtime status: (no status_summary.json)")
     print("daemons:")
-    for short, label in DAEMONS.items():
-        pid, status = daemon_pid_uptime(label)
+    for short, row in payload["daemons"].items():
+        pid = row["pid"] if row["pid"] is not None else "-"
+        status = row["last_status"] if row["last_status"] is not None else "-"
         print(f"   {short:<16} pid={pid:<8} last-status={status}")
     return 0
 
@@ -1094,6 +1197,7 @@ def main(argv: list[str] | None = None) -> int:
     sub = ap.add_subparsers(dest="cmd", required=True)
 
     p_status = sub.add_parser("status", help="show HEAD/dirty/push state + daemon pids")
+    p_status.add_argument("--json", action="store_true", help="emit machine-readable status JSON")
     p_status.set_defaults(func=cmd_status)
 
     p_restart = sub.add_parser("restart", help="bootstrap or kickstart a daemon (gated on clean live tree)")

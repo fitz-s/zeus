@@ -508,6 +508,87 @@ def test_user_channel_reconcile_cycle_processes_authenticated_queue(monkeypatch,
     assert payload["fill_authority_state"] == "FILL_CONFIRMED"
 
 
+def test_user_channel_reconcile_cycle_recovers_rest_filled_orphan(monkeypatch, tmp_path):
+    from src.ingest import price_channel_ingest as main
+    import src.observability.scheduler_health as _sched_health
+    import src.state.db as _state_db
+    from src.state.db import init_schema
+    from src.state.venue_command_repo import append_trade_fact
+
+    db_path = tmp_path / "world.db"
+    conn = _conn(db_path)
+    init_schema(conn)
+    ledger = LiveOrderAggregateLedger(conn)
+    _seed(ledger)
+    conn.execute(
+        """
+        INSERT INTO venue_commands (
+            command_id, snapshot_id, envelope_id, position_id, decision_id,
+            idempotency_key, intent_kind, market_id, token_id, side, size,
+            price, venue_order_id, state, created_at, updated_at
+        ) VALUES (
+            'cmd-1', 'snap-1', 'env-1', 'pos-1', 'command-1',
+            'idem-1', 'ENTRY', 'market-1', 'token-1', 'BUY', 5,
+            0.72, 'venue-1', 'FILLED',
+            '2026-05-26T12:00:00+00:00',
+            '2026-05-26T12:01:00+00:00'
+        )
+        """
+    )
+    append_trade_fact(
+        conn,
+        trade_id="trade-rest-orphan",
+        venue_order_id="venue-1",
+        command_id="cmd-1",
+        state="MATCHED",
+        filled_size="5",
+        fill_price="0.72",
+        source="REST",
+        observed_at=NOW,
+        venue_timestamp=NOW,
+        raw_payload_hash="e" * 64,
+        raw_payload_json="{}",
+    )
+    conn.commit()
+    conn.close()
+
+    monkeypatch.setattr(
+        main,
+        "settings",
+        {
+            "edli": {
+                "enabled": True,
+                "edli_user_channel_reconcile_enabled": True,
+                "edli_user_channel_message_queue_path": "",
+                "edli_venue_reconcile_facts_path": "",
+            }
+        },
+    )
+    monkeypatch.setattr(
+        _state_db,
+        "get_trade_connection_with_world_required",
+        lambda *args, **kwargs: _conn(db_path),
+    )
+    monkeypatch.setattr(_sched_health, "_write_scheduler_health", lambda *args, **kwargs: None)
+
+    main._edli_user_channel_reconcile_cycle()
+
+    check_ledger = LiveOrderAggregateLedger(_conn(db_path))
+    projection = check_ledger.get_projection("event-1:intent-1")
+    assert projection.current_state == "USER_TRADE_OBSERVED"
+    row = check_ledger.conn.execute(
+        """
+        SELECT payload_json
+        FROM edli_live_order_events
+        WHERE event_type = 'UserTradeObserved'
+        """
+    ).fetchone()
+    payload = json.loads(row["payload_json"])
+    assert payload["fill_authority_state"] == "FILL_CONFIRMED"
+    assert payload["source_authority"] == "venue_reconcile"
+    assert payload["source_trade_fact_authority"] == "venue_trade_facts:REST:MATCHED"
+
+
 def test_user_channel_reconcile_cycle_is_idempotent_for_duplicate_queue_messages(monkeypatch, tmp_path):
     # P3 lift (system_decomposition_plan §8 Step 3): the user-channel/reconcile cycle
     # moved from src.main to src.ingest.price_channel_ingest. The cycle is a BARE function

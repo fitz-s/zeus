@@ -122,7 +122,70 @@ def _day0_lcb_transform(payload: Mapping[str, object], block: Mapping[str, objec
     return transform
 
 
-def _assert_remaining_day_lcb_is_supported_by_transform(*, q_live: float, q_lcb: float) -> None:
+def _truthy_false(value: object) -> bool:
+    if isinstance(value, bool):
+        return value is False
+    if value in (None, ""):
+        return False
+    return str(value).strip().lower() in {"0", "false", "no"}
+
+
+def _remaining_day_lcb_has_guarded_qkernel_lcb(
+    payload: Mapping[str, object],
+    *,
+    q_live: float,
+    q_lcb: float,
+) -> bool:
+    """Return whether qkernel guard evidence licenses q_lcb == q_live.
+
+    A remaining-day transform can be numerically degenerate when the selected
+    route's explicit 95% guard supplies the conservative bound. Only the Day0
+    remaining-window guard and explicit OOF 95% bases qualify; observed-boundary
+    and inert pass-through evidence must keep the ordinary non-degenerate
+    lower-bound requirement.
+    """
+
+    economics = payload.get("qkernel_execution_economics")
+    if not isinstance(economics, Mapping):
+        return False
+    guarded_bases = {
+        DAY0_REMAINING_DAY_Q_LCB_GUARD_BASIS,
+        "OOF_WILSON_95",
+        "OOF_WILSON_95_POOLED_TAIL",
+    }
+    q_lcb_basis = str(economics.get("q_lcb_guard_basis") or "").strip()
+    selection_basis = str(economics.get("selection_guard_basis") or "").strip()
+    if q_lcb_basis not in guarded_bases or selection_basis not in guarded_bases:
+        return False
+    if not (
+        _truthy_false(economics.get("q_lcb_guard_abstained"))
+        and _truthy_false(economics.get("selection_guard_abstained"))
+    ):
+        return False
+    try:
+        payoff_q_point = float(economics.get("payoff_q_point"))
+        payoff_q_lcb = float(economics.get("payoff_q_lcb"))
+        selection_guard_q_safe = float(economics.get("selection_guard_q_safe"))
+    except (TypeError, ValueError):
+        return False
+    if not all(
+        math.isfinite(v)
+        for v in (payoff_q_point, payoff_q_lcb, selection_guard_q_safe)
+    ):
+        return False
+    return (
+        selection_guard_q_safe > 0.0
+        and math.isclose(payoff_q_point, q_live, rel_tol=1e-9, abs_tol=1e-6)
+        and math.isclose(payoff_q_lcb, q_lcb, rel_tol=1e-9, abs_tol=1e-6)
+    )
+
+
+def _assert_remaining_day_lcb_is_supported_by_transform(
+    *,
+    payload: Mapping[str, object],
+    q_live: float,
+    q_lcb: float,
+) -> None:
     """Validate the selected-side Day0 qLCB shape.
 
     ``remaining_models`` is evidence that the remaining-window probability was
@@ -133,7 +196,14 @@ def _assert_remaining_day_lcb_is_supported_by_transform(*, q_live: float, q_lcb:
     degenerate to the point q.
     """
 
-    if q_lcb >= q_live - DAY0_REMAINING_DAY_LCB_TOLERANCE:
+    if (
+        q_lcb >= q_live - DAY0_REMAINING_DAY_LCB_TOLERANCE
+        and not _remaining_day_lcb_has_guarded_qkernel_lcb(
+            payload,
+            q_live=q_live,
+            q_lcb=q_lcb,
+        )
+    ):
         raise Day0AuthorityError("remaining_day q_lcb is degenerate with q_live")
 
 
@@ -197,6 +267,7 @@ def assert_live_day0_probability_authority(
         if q_live_value < 0.0 or q_live_value > 1.0 or q_lcb_value < 0.0 or q_lcb_value > 1.0:
             raise Day0AuthorityError("remaining_day q_live/q_lcb out of range")
         _assert_remaining_day_lcb_is_supported_by_transform(
+            payload=payload,
             q_live=q_live_value,
             q_lcb=q_lcb_value,
         )

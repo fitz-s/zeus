@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import inspect
 import json
 import logging
@@ -353,11 +354,11 @@ def _launchd_gui_domain() -> str:
     return os.environ.get("ZEUS_GUI_DOMAIN") or f"gui/{os.getuid()}"
 
 
-def _launchd_service_loaded(
+def _launchd_service_status(
     label: str,
     *,
     run_cmd: Any = subprocess.run,
-) -> bool:
+) -> dict[str, Any]:
     try:
         res = run_cmd(
             ["launchctl", "print", f"{_launchd_gui_domain()}/{label}"],
@@ -365,9 +366,46 @@ def _launchd_service_loaded(
             text=True,
             timeout=8.0,
         )
-    except (FileNotFoundError, OSError, subprocess.SubprocessError):
-        return False
-    return getattr(res, "returncode", 1) == 0
+    except (FileNotFoundError, OSError, subprocess.SubprocessError) as exc:
+        return {
+            "loaded": False,
+            "running": False,
+            "detail": f"launchctl print unavailable: {exc}",
+        }
+    output = f"{getattr(res, 'stdout', '')}\n{getattr(res, 'stderr', '')}"
+    status: dict[str, Any] = {
+        "loaded": getattr(res, "returncode", 1) == 0,
+        "running": False,
+        "returncode": getattr(res, "returncode", None),
+    }
+    for line in output.splitlines():
+        text = line.strip()
+        if "=" not in text:
+            continue
+        key, value = (piece.strip() for piece in text.split("=", 1))
+        if key == "state":
+            status["state"] = value
+        elif key == "pid":
+            with contextlib.suppress(ValueError):
+                status["pid"] = int(value)
+        elif key == "active count":
+            with contextlib.suppress(ValueError):
+                status["active_count"] = int(value)
+        elif key == "last exit code":
+            with contextlib.suppress(ValueError):
+                status["last_exit_status"] = int(value)
+    state = str(status.get("state") or "").strip().lower()
+    pid = status.get("pid")
+    status["running"] = bool(status["loaded"] and (state == "running" or (isinstance(pid, int) and pid > 0)))
+    return status
+
+
+def _launchd_service_loaded(
+    label: str,
+    *,
+    run_cmd: Any = subprocess.run,
+) -> bool:
+    return bool(_launchd_service_status(label, run_cmd=run_cmd).get("loaded"))
 
 
 def _launchd_service_disabled(
@@ -505,9 +543,30 @@ def recover_missing_live_trading_launchd_if_needed(
             {"ok": True, "action": "none", "reason": "watchdog_disabled"},
             status_path=status_path,
         )
-    if _launchd_service_loaded(LIVE_TRADING_LABEL, run_cmd=run_cmd):
+    launchd_status = _launchd_service_status(LIVE_TRADING_LABEL, run_cmd=run_cmd)
+    if launchd_status.get("loaded"):
+        if launchd_status.get("running"):
+            return _live_trading_watchdog_write_status(
+                {
+                    "ok": True,
+                    "action": "none",
+                    "reason": "service_running",
+                    "launchd_state": launchd_status.get("state"),
+                    "pid": launchd_status.get("pid"),
+                    "active_count": launchd_status.get("active_count"),
+                },
+                status_path=status_path,
+            )
         return _live_trading_watchdog_write_status(
-            {"ok": True, "action": "none", "reason": "service_loaded"},
+            {
+                "ok": False,
+                "action": "blocked",
+                "reason": "service_loaded_not_running",
+                "launchd_state": launchd_status.get("state"),
+                "pid": launchd_status.get("pid"),
+                "active_count": launchd_status.get("active_count"),
+                "last_exit_status": launchd_status.get("last_exit_status"),
+            },
             status_path=status_path,
         )
 

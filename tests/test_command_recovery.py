@@ -701,6 +701,7 @@ def _insert(conn, *, command_id="cmd-001", position_id="pos-001",
         size=size,
         price=price,
         created_at=created_at,
+        q_version="test-q-version",
     )
     return command_id
 
@@ -4018,6 +4019,52 @@ class TestRecoveryResolutionTable:
         priming = _collect_recovery_priming_keys(conn, scope="live_tick")
 
         assert "ord-late-candidate" in priming["order_ids"]
+
+    def test_live_tick_does_not_prime_terminal_zero_fill_matched_recovery_debt(
+        self,
+        conn,
+    ):
+        from src.execution.command_recovery import (
+            _collect_recovery_priming_keys,
+            _latest_matched_order_fact_candidates,
+        )
+        from src.state.venue_command_repo import append_event
+
+        _insert(conn, command_id="cmd-terminal-zero")
+        _advance_to_cancel_pending(
+            conn,
+            command_id="cmd-terminal-zero",
+            venue_order_id="ord-terminal-zero",
+        )
+        append_event(
+            conn,
+            command_id="cmd-terminal-zero",
+            event_type="CANCEL_ACKED",
+            occurred_at="2026-04-26T00:04:00Z",
+            payload={"venue_order_id": "ord-terminal-zero", "venue_status": "CANCELED"},
+        )
+        _append_order_fact(
+            conn,
+            command_id="cmd-terminal-zero",
+            order_id="ord-terminal-zero",
+            state="CANCEL_CONFIRMED",
+            matched_size="0",
+            remaining_size="0",
+        )
+
+        priming = _collect_recovery_priming_keys(conn, scope="live_tick")
+        full_candidates = _latest_matched_order_fact_candidates(conn)
+        live_tick_candidates = _latest_matched_order_fact_candidates(
+            conn,
+            skip_stale_terminal_zero=True,
+        )
+
+        assert "ord-terminal-zero" not in priming["order_ids"]
+        assert any(row["command_id"] == "cmd-terminal-zero" for row in full_candidates)
+        assert all(
+            row["command_id"] != "cmd-terminal-zero"
+            for row in live_tick_candidates
+        )
 
     def test_live_tick_clears_terminal_cancel_fact_before_venue_snapshot(
         self,
@@ -8718,12 +8765,12 @@ class TestRecoveryResolutionTable:
             "strategy_key": "forecast_qkernel_entry",
         }
 
-    def test_filled_day0_edli_entry_projects_from_nested_receipt_qkernel(
+    def test_filled_day0_edli_entry_with_retired_boundary_guard_projects_as_venue_fact(
         self,
         conn,
         mock_client,
     ):
-        """Live Day0 FOK fills must become active positions from real receipt shape."""
+        """Retired Day0 boundary qkernel evidence must not resurrect posterior authority."""
 
         event_id = "edli_evt_day0_nested_qkernel"
         yes_token_id = "tok-yes-day0"
@@ -8815,6 +8862,11 @@ class TestRecoveryResolutionTable:
                                 "false_edge_rate": 0.01,
                                 "direction_law_ok": True,
                                 "coherence_allows": True,
+                                "q_lcb_guard_basis": "DAY0_OBSERVED_BOUNDARY",
+                                "selection_guard_basis": "DAY0_OBSERVED_BOUNDARY",
+                                "q_lcb_guard_abstained": False,
+                                "selection_guard_abstained": False,
+                                "selection_guard_q_safe": 0.96,
                             }
                         }
                     },
@@ -8871,10 +8923,10 @@ class TestRecoveryResolutionTable:
             "shares": pytest.approx(40.25),
             "entry_price": pytest.approx(0.44),
             "order_status": "filled",
-            "entry_method": "qkernel_spine",
+            "entry_method": "venue_fact_recovery",
             "strategy_key": "day0_nowcast_entry",
-            "p_posterior": pytest.approx(0.9614944294185659),
-            "entry_ci_width": pytest.approx(0.0029888588371318),
+            "p_posterior": pytest.approx(0.0),
+            "entry_ci_width": pytest.approx(0.0),
         }
         event_types = [
             row["event_type"]

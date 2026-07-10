@@ -898,7 +898,40 @@ def test_pre_submit_accepts_day0_observation_authority_with_qkernel():
     assert pre_submit.payload["_edli_q_source"] == "day0_remaining_day"
 
 
-def test_pre_submit_rejects_degenerate_day0_remaining_window_probability():
+def test_pre_submit_accepts_degenerate_day0_remaining_window_guarded_probability():
+    ledger = LiveOrderAggregateLedger(_conn())
+    ledger.append_event(
+        aggregate_id="event-1:intent-1",
+        event_type="DecisionProofAccepted",
+        payload={"event_id": "event-1", "final_intent_id": "intent-1"},
+        occurred_at=NOW,
+        source_authority="decision_kernel",
+    )
+
+    ledger.append_event(
+        aggregate_id="event-1:intent-1",
+        event_type="PreSubmitRevalidated",
+        payload=_day0_pre_submit_payload(
+            q_live=0.60,
+            q_lcb_5pct=0.60,
+            qkernel_execution_economics={
+                **_day0_qkernel_economics(),
+                "payoff_q_point": 0.60,
+                "payoff_q_lcb": 0.60,
+                "cost": 0.40,
+                "edge_lcb": 0.20,
+                "selection_guard_q_safe": 0.60,
+            },
+        ),
+        occurred_at=NOW,
+        source_authority="engine_adapter",
+    )
+
+    pre_submit = ledger.latest_event_of_type("event-1:intent-1", "PreSubmitRevalidated")
+    assert pre_submit is not None
+
+
+def test_pre_submit_rejects_degenerate_day0_inert_pass_through_probability():
     ledger = LiveOrderAggregateLedger(_conn())
     ledger.append_event(
         aggregate_id="event-1:intent-1",
@@ -922,6 +955,10 @@ def test_pre_submit_rejects_degenerate_day0_remaining_window_probability():
                     "cost": 0.40,
                     "edge_lcb": 0.20,
                     "selection_guard_q_safe": 0.60,
+                    "q_lcb_guard_basis": "INERT",
+                    "q_lcb_guard_cell_key": "high|L1|YES|modal|qb12|coarse_global",
+                    "selection_guard_basis": "INERT",
+                    "selection_guard_cell_key": "high|L1|YES|modal|qb12|coarse_global",
                 },
             ),
             occurred_at=NOW,

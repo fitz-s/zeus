@@ -4374,6 +4374,8 @@ def execute_intent(
     with a WARNING log.
     """
 
+    from src.architecture.gate_runtime import check as _gate_runtime_check
+    _gate_runtime_check("live_venue_submit")
     from src.config import get_mode
 
     if get_mode() == "live":
@@ -4447,6 +4449,7 @@ def place_sell_order(
     return payload
 
 
+@capability("reduce_only_exit_submit", lease=True)
 def execute_exit_order(
     intent: ExitOrderIntent,
     conn: Optional[sqlite3.Connection] = None,
@@ -4462,7 +4465,7 @@ def execute_exit_order(
       5. ack: append_event SUBMIT_ACKED / SUBMIT_REJECTED / SUBMIT_UNKNOWN
     """
     from src.architecture.gate_runtime import check as _gate_runtime_check
-    _gate_runtime_check("live_venue_submit")
+    _gate_runtime_check("reduce_only_exit_submit")
     _gate_runtime_check("settlement_write")
     from src.data.polymarket_client import PolymarketClient
     from src.execution.command_bus import IdempotencyKey, IntentKind, VenueCommand

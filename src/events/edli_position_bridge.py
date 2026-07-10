@@ -1,5 +1,5 @@
 # Created: 2026-06-01
-# Last reused or audited: 2026-06-03
+# Last reused or audited: 2026-07-09
 # Authority basis: DEFECT-1 capital-recoverability bridge — EDLI fill → canonical
 #   position_current. Audit: an EDLI FILL_CONFIRMED writes only
 #   edli_live_order_events + edli_live_profit_audit and NEVER a position_current
@@ -285,16 +285,24 @@ def _entry_authority_from_certificates(
     q_lcb = _float_or_none(actionable_payload.get("q_lcb_5pct"))
     qkernel_payload = actionable_payload.get("qkernel_execution_economics")
     if isinstance(qkernel_payload, dict):
-        qkernel_point = _float_or_none(qkernel_payload.get("payoff_q_point"))
-        qkernel_lcb = _float_or_none(qkernel_payload.get("payoff_q_lcb"))
-        if (
-            qkernel_point is not None
-            and qkernel_lcb is not None
-            and 0.0 <= qkernel_lcb <= qkernel_point <= 1.0
+        if _qkernel_payload_has_live_entry_authority(
+            qkernel_payload,
+            event_type=actionable_payload.get("event_type"),
+            source="certificate",
         ):
-            q_live = qkernel_point
-            q_lcb = qkernel_lcb
-            entry_method = EntryMethod.QKERNEL_SPINE.value
+            qkernel_point = _float_or_none(qkernel_payload.get("payoff_q_point"))
+            qkernel_lcb = _float_or_none(qkernel_payload.get("payoff_q_lcb"))
+            if (
+                qkernel_point is not None
+                and qkernel_lcb is not None
+                and 0.0 <= qkernel_lcb <= qkernel_point <= 1.0
+            ):
+                q_live = qkernel_point
+                q_lcb = qkernel_lcb
+                entry_method = EntryMethod.QKERNEL_SPINE.value
+        elif _is_day0_or_retired_day0_qkernel(actionable_payload, qkernel_payload):
+            q_live = None
+            q_lcb = None
     ci_width = 0.0
     if q_live is not None and q_lcb is not None and q_live > q_lcb:
         ci_width = min(1.0, max(0.0, 2.0 * (q_live - q_lcb)))
@@ -354,16 +362,24 @@ def _entry_authority_from_decision_audit(
     entry_method: str | None = None
     qkernel_payload = _selected_qkernel_execution_economics(audit)
     if qkernel_payload:
-        qkernel_point = _float_or_none(qkernel_payload.get("payoff_q_point"))
-        qkernel_lcb = _float_or_none(qkernel_payload.get("payoff_q_lcb"))
-        if (
-            qkernel_point is not None
-            and qkernel_lcb is not None
-            and 0.0 <= qkernel_lcb <= qkernel_point <= 1.0
+        if _qkernel_payload_has_live_entry_authority(
+            qkernel_payload,
+            event_type=audit.get("event_type"),
+            source="decision_audit",
         ):
-            q_live = qkernel_point
-            q_lcb = qkernel_lcb
-            entry_method = EntryMethod.QKERNEL_SPINE.value
+            qkernel_point = _float_or_none(qkernel_payload.get("payoff_q_point"))
+            qkernel_lcb = _float_or_none(qkernel_payload.get("payoff_q_lcb"))
+            if (
+                qkernel_point is not None
+                and qkernel_lcb is not None
+                and 0.0 <= qkernel_lcb <= qkernel_point <= 1.0
+            ):
+                q_live = qkernel_point
+                q_lcb = qkernel_lcb
+                entry_method = EntryMethod.QKERNEL_SPINE.value
+        elif _is_day0_or_retired_day0_qkernel(audit, qkernel_payload):
+            q_live = None
+            q_lcb = None
     ci_width = 0.0
     if q_live is not None and q_lcb is not None and q_live > q_lcb:
         ci_width = min(1.0, max(0.0, 2.0 * (q_live - q_lcb)))
@@ -387,6 +403,68 @@ def _selected_qkernel_execution_economics(payload: dict[str, Any]) -> dict[str, 
             if isinstance(selected, dict) and selected:
                 return selected
     return {}
+
+
+def _is_day0_or_retired_day0_qkernel(payload: dict[str, Any], economics: dict[str, Any]) -> bool:
+    if str(payload.get("event_type") or "").strip() == "DAY0_EXTREME_UPDATED":
+        return True
+    return any(
+        str(economics.get(field_name) or "").strip() == "DAY0_OBSERVED_BOUNDARY"
+        for field_name in ("q_lcb_guard_basis", "selection_guard_basis")
+    )
+
+
+def _qkernel_payload_has_live_entry_authority(
+    economics: dict[str, Any],
+    *,
+    event_type: Any,
+    source: str,
+) -> bool:
+    if any(
+        str(economics.get(field_name) or "").strip() == "DAY0_OBSERVED_BOUNDARY"
+        for field_name in ("q_lcb_guard_basis", "selection_guard_basis")
+    ):
+        logger.warning(
+            "edli position bridge: %s qkernel payload uses retired Day0 observed-boundary guard",
+            source,
+        )
+        return False
+    if str(event_type or "").strip() != "DAY0_EXTREME_UPDATED":
+        return True
+    try:
+        from src.events.day0_authority import (
+            Day0AuthorityError,
+            assert_live_day0_qkernel_guard_authority,
+        )
+
+        assert_live_day0_qkernel_guard_authority(economics)
+    except Day0AuthorityError as exc:
+        logger.warning(
+            "edli position bridge: %s Day0 qkernel payload is not live entry authority: %s",
+            source,
+            exc,
+        )
+        return False
+    return True
+
+
+def _pre_submit_posterior(pre_submit: dict[str, Any]) -> float:
+    if str(pre_submit.get("event_type") or "").strip() != "DAY0_EXTREME_UPDATED":
+        return _float_or_none(pre_submit.get("q_live")) or 0.0
+    economics = _selected_qkernel_execution_economics(pre_submit)
+    if not economics:
+        return 0.0
+    if not _qkernel_payload_has_live_entry_authority(
+        economics,
+        event_type=pre_submit.get("event_type"),
+        source="pre_submit",
+    ):
+        return 0.0
+    return (
+        _float_or_none(economics.get("payoff_q_point"))
+        or _float_or_none(pre_submit.get("q_live"))
+        or 0.0
+    )
 
 
 def _latest_payload(events: list[tuple[str, dict[str, Any]]], event_type: str) -> dict[str, Any] | None:
@@ -627,7 +705,7 @@ def _resolve_identity(events: list[tuple[str, dict[str, Any]]]) -> dict[str, Any
         "strategy_key": strategy_key,
         "market_id": str(pre_submit.get("market_id") or condition_id),
         "cluster": str(pre_submit.get("cluster") or city),
-        "p_posterior": _float_or_none(pre_submit.get("q_live")) or 0.0,
+        "p_posterior": _pre_submit_posterior(pre_submit),
         "entry_ci_width": 0.0,
         "actionable_certificate_hash": str(
             pre_submit.get("expected_edge_source_certificate_hash")

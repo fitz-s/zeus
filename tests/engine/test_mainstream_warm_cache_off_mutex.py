@@ -115,8 +115,13 @@ def test_warm_function_is_the_only_fetcher(monkeypatch):
     snap = mfs.warm_mainstream_point("Chicago", "2026-06-06", metric="high")
     assert snap is not None and fetched, "warm must perform the fetch"
 
-    # After warming, the cache-only read serves it without any further fetch.
+    # After warming, a repeated warm and the cache-only read both serve it
+    # without any further fetch.
     fetched.clear()
+    rewarmed = mfs.warm_mainstream_point("Chicago", "2026-06-06", metric="high")
+    assert rewarmed is not None and rewarmed["point"] == pytest.approx(71.5)
+    assert fetched == [], "warm must not re-fetch a fresh cached point"
+
     cached = mfs.read_mainstream_point_cached("Chicago", "2026-06-06", metric="high")
     assert cached is not None and cached["point"] == pytest.approx(71.5)
     assert fetched == [], "read must be cache-only — no fetch"

@@ -8,7 +8,7 @@ import json
 from datetime import datetime, timezone
 from decimal import Decimal
 from enum import Enum
-from typing import Any
+from typing import Any, Mapping
 
 CANONICALIZATION_VERSION = "decision-kernel-json-v1"
 
@@ -46,3 +46,50 @@ def canonical_json(value: Any) -> str:
 
 def stable_hash(value: Any) -> str:
     return hashlib.sha256(canonical_json(value).encode("utf-8")).hexdigest()
+
+
+_QKERNEL_CURRENT_STATE_IDENTITY_FIELDS: tuple[str, ...] = (
+    "source",
+    "decision_id",
+    "receipt_hash",
+    "q_version",
+    "sample_hash",
+    "candidate_id",
+    "route_id",
+    "side",
+    "bin_id",
+    "payoff_q_point",
+    "payoff_q_lcb",
+    "edge_lcb",
+    "point_ev",
+    "delta_u_at_min",
+    "optimal_stake_usd",
+    "optimal_delta_u",
+    "q_dot_payoff",
+    "cost",
+    "cost_basis",
+    "route_cost",
+    "route_edge_lcb",
+    "route_point_ev",
+    "chosen_stake_cost",
+    "q_lcb_guard_basis",
+    "q_lcb_guard_abstained",
+    "q_lcb_guard_cell_key",
+    "selection_guard_basis",
+    "selection_guard_abstained",
+    "selection_guard_cell_key",
+    "selection_guard_n",
+    "selection_guard_q_safe",
+    "direction_law_ok",
+    "coherence_allows",
+    "robust_trade_score",
+    "false_edge_rate",
+)
+
+
+def qkernel_current_state_identity_hash(economics: Mapping[str, Any]) -> str:
+    """Recomputable identity for the current-posterior execution certificate."""
+
+    return stable_hash(
+        {field: economics.get(field) for field in _QKERNEL_CURRENT_STATE_IDENTITY_FIELDS}
+    )

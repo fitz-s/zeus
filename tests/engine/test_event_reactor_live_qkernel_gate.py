@@ -1,5 +1,5 @@
 # Created: 2026-06-30
-# Last reused/audited: 2026-07-08
+# Last reused/audited: 2026-07-09
 # Authority basis: live-money qkernel submit authority and canonical selection-fact persistence.
 
 from __future__ import annotations
@@ -55,6 +55,32 @@ def _qkernel_cert() -> dict:
         "selection_guard_abstained": False,
         "selection_guard_q_safe": 0.60,
     }
+
+
+def _current_qkernel_cert(*, side: str = "YES") -> dict:
+    cert = _qkernel_cert()
+    cert.update(
+        decision_id="decision-current-1",
+        receipt_hash="receipt-current-1",
+        q_version="q-current-1",
+        sample_hash="current-sample-hash",
+        side=side,
+        route_id=f"DIRECT_{side}:bin-1@proof",
+        candidate_id=f"{side}:bin-1:DIRECT_{side}:bin-1@proof",
+        q_lcb_guard_basis="CURRENT_POSTERIOR_BAND",
+        q_lcb_guard_abstained=False,
+        q_lcb_guard_cell_key="current-sample-hash",
+        selection_guard_basis="CURRENT_POSTERIOR_BAND",
+        selection_guard_abstained=False,
+        selection_guard_cell_key="current-sample-hash",
+        selection_guard_n=64,
+    )
+    _seal_current_qkernel_cert(cert)
+    return cert
+
+
+def _seal_current_qkernel_cert(cert: dict) -> None:
+    cert["current_state_identity_hash"] = era.qkernel_current_state_identity_hash(cert)
 
 
 def _day0_probability_fields(
@@ -628,6 +654,159 @@ def test_live_entry_qkernel_gate_rejects_buenos_aires_low_quality_yes():
         )
 
 
+@pytest.mark.parametrize(("side", "direction"), (("YES", "buy_yes"), ("NO", "buy_no")))
+def test_current_state_live_entry_uses_same_after_cost_rule_for_yes_and_no(side, direction):
+    cert = _current_qkernel_cert(side=side)
+    cert.update(
+        cost=0.04,
+        payoff_q_lcb=0.10,
+        payoff_q_point=0.12,
+        edge_lcb=0.06,
+        selection_guard_q_safe=0.10,
+    )
+    _seal_current_qkernel_cert(cert)
+
+    _assert_live_entry_submit_authority(
+        {
+            "event_type": "FORECAST_SNAPSHOT_READY",
+            "selection_authority_applied": "qkernel_spine",
+            "direction": direction,
+            "strategy_key": "forecast_qkernel_entry",
+            "candidate_bin_id": "bin-1",
+            "q_live": 0.12,
+            "q_lcb_5pct": 0.10,
+            "min_entry_price": 0.95,
+            "qkernel_execution_economics": cert,
+        }
+    )
+
+
+@pytest.mark.parametrize("missing_field", ("decision_id", "receipt_hash", "q_version", "sample_hash"))
+def test_current_state_marker_requires_decision_and_posterior_identity(missing_field):
+    cert = _current_qkernel_cert()
+    cert.pop(missing_field)
+
+    assert era._qkernel_current_state_solve_economics(cert) is False
+
+
+def test_current_state_marker_rejects_unsealed_economics_mutation():
+    cert = _current_qkernel_cert()
+
+    cert["cost"] = 0.39
+
+    assert era._qkernel_current_state_solve_economics(cert) is False
+
+
+@pytest.mark.parametrize("side", ("YES", "NO"))
+def test_current_state_path_has_no_yes_only_near_day0_veto(side):
+    cert = _current_qkernel_cert(side=side)
+    cert["near_day0_raw_extrema_consistency"] = {
+        "passed": False,
+        "reason": "LEGACY_YES_ONLY_VETO",
+    }
+
+    assert era._qkernel_near_day0_cert_rejection_reason(cert) is None
+
+
+@pytest.mark.parametrize(("side", "direction"), (("YES", "buy_yes"), ("NO", "buy_no")))
+def test_current_state_actual_submit_has_no_side_or_fixed_profit_floor(side, direction):
+    cert = _current_qkernel_cert(side=side)
+    cert.update(
+        cost=0.04,
+        payoff_q_lcb=0.10,
+        payoff_q_point=0.12,
+        edge_lcb=0.06,
+        optimal_stake_usd=0.01,
+        selection_guard_q_safe=0.10,
+    )
+    _seal_current_qkernel_cert(cert)
+    proof = SimpleNamespace(
+        direction=direction,
+        candidate=SimpleNamespace(metric="high"),
+        qkernel_execution_economics=cert,
+    )
+
+    assert era._qkernel_actual_submit_quality_rejection_reason(
+        proof=proof,
+        strategy_policy_event_type="FORECAST_SNAPSHOT_READY",
+        actual_stake_usd=0.01,
+        actual_cost=0.04,
+    ) is None
+
+
+@pytest.mark.parametrize(("side", "direction"), (("YES", "buy_yes"), ("NO", "buy_no")))
+def test_current_state_actual_submit_must_remain_inside_certified_utility_envelope(
+    side, direction
+):
+    cert = _current_qkernel_cert(side=side)
+    cert.update(
+        cost=0.40,
+        payoff_q_lcb=0.60,
+        payoff_q_point=0.70,
+        edge_lcb=0.20,
+        optimal_stake_usd=5.0,
+        selection_guard_q_safe=0.60,
+    )
+    _seal_current_qkernel_cert(cert)
+    proof = SimpleNamespace(
+        direction=direction,
+        candidate=SimpleNamespace(metric="high"),
+        qkernel_execution_economics=cert,
+    )
+
+    assert era._qkernel_actual_submit_quality_rejection_reason(
+        proof=proof,
+        strategy_policy_event_type="FORECAST_SNAPSHOT_READY",
+        actual_stake_usd=2.5,
+        actual_cost=0.39,
+    ) is None
+    assert "actual_cost_exceeds_certified_cost" in era._qkernel_actual_submit_quality_rejection_reason(
+        proof=proof,
+        strategy_policy_event_type="FORECAST_SNAPSHOT_READY",
+        actual_stake_usd=2.5,
+        actual_cost=0.41,
+    )
+    assert "actual_stake_exceeds_certified_optimum" in era._qkernel_actual_submit_quality_rejection_reason(
+        proof=proof,
+        strategy_policy_event_type="FORECAST_SNAPSHOT_READY",
+        actual_stake_usd=5.01,
+        actual_cost=0.39,
+    )
+
+
+def test_current_state_final_taker_spend_includes_fee_before_safe_prefix_check():
+    cert = _current_qkernel_cert()
+    cert.update(
+        cost=0.50,
+        payoff_q_lcb=0.60,
+        payoff_q_point=0.70,
+        edge_lcb=0.10,
+        optimal_stake_usd=100.0,
+        selection_guard_q_safe=0.60,
+    )
+    _seal_current_qkernel_cert(cert)
+    intent = SimpleNamespace(
+        payload={
+            "limit_price": 0.48,
+            "size": 100.0 / 0.48,
+            "post_only": False,
+        }
+    )
+    actual_cost = era._final_intent_worst_case_entry_cost(intent)
+    actual_spend = era._final_intent_worst_case_entry_spend(intent)
+
+    assert actual_cost < 0.50
+    assert actual_spend > 100.0
+    assert "actual_stake_exceeds_certified_optimum" in (
+        era._qkernel_current_state_actual_submit_rejection_reason(
+            cert=cert,
+            actual_stake_usd=actual_spend,
+            actual_cost=actual_cost,
+        )
+        or ""
+    )
+
+
 def test_qkernel_actual_submit_floor_uses_actual_stake_not_cert_optimal_size():
     cert = _qkernel_cert()
     cert.update(
@@ -1024,6 +1203,57 @@ def test_live_entry_day0_gate_accepts_live_observation_authority_with_qkernel():
             candidate_bin_id="bin-1",
             min_entry_price=0.10,
             qkernel_execution_economics=_day0_qkernel_cert(),
+        )
+    )
+
+
+def test_live_entry_day0_gate_accepts_degenerate_lcb_with_remaining_window_guard():
+    q_live = 0.9541351747957598
+    q_lcb = 0.9541351747957598
+    cert = _day0_qkernel_cert(q_live=q_live, q_lcb=q_lcb)
+    cert.update(selection_guard_q_safe=q_lcb)
+
+    _assert_live_entry_submit_authority(
+        _day0_payload(
+            **_day0_probability_fields(q_live=q_live, q_lcb=q_lcb),
+            selection_authority_applied="qkernel_spine",
+            direction="buy_yes",
+            strategy_key="day0_nowcast_entry",
+            candidate_bin_id="bin-1",
+            min_entry_price=0.10,
+            qkernel_execution_economics=cert,
+        )
+    )
+
+
+def test_live_entry_day0_gate_accepts_degenerate_lcb_with_oof_qkernel_guard():
+    q_live = 0.9542497357620147
+    q_lcb = 0.9542497290822666
+    price = 0.8075023920658596
+    cert = _day0_qkernel_cert(q_live=q_live, q_lcb=q_lcb)
+    cert.update(
+        cost=price,
+        edge_lcb=q_lcb - price,
+        false_edge_rate=0.05,
+        optimal_stake_usd=383.9270934399719,
+        optimal_delta_u=0.0536018706110991,
+        delta_u_at_min=0.002361709922736971,
+        q_lcb_guard_basis="OOF_WILSON_95_POOLED_TAIL",
+        q_lcb_guard_cell_key="high|L1|YES|modal|qb19|coarse_global->tail_qb7+",
+        selection_guard_basis="OOF_WILSON_95_POOLED_TAIL",
+        selection_guard_cell_key="high|L1|YES|modal|qb19|coarse_global->tail_qb7+",
+        selection_guard_q_safe=q_lcb,
+    )
+
+    _assert_live_entry_submit_authority(
+        _day0_payload(
+            **_day0_probability_fields(q_live=q_live, q_lcb=q_lcb),
+            selection_authority_applied="qkernel_spine",
+            direction="buy_yes",
+            strategy_key="day0_nowcast_entry",
+            candidate_bin_id="bin-1",
+            min_entry_price=0.10,
+            qkernel_execution_economics=cert,
         )
     )
 

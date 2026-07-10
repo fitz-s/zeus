@@ -725,6 +725,17 @@ files:
     zone: docs
     authority_role: registry
     why: Control package rules and file registry.
+  src/architecture/gate_runtime.py:
+    zone: K1_governance
+    authority_role: live_side_effect_runtime_gate
+    why: Gate 5 runtime capability checker for live venue submit, reduce-only exit submit, settlement write, and related live side-effect capabilities; emits blocking ritual_signal evidence and fails closed on active kill/freeze/risk/runtime-freshness conditions.
+    hazards:
+    - VENUS_CONTROL_ONLY
+    downstream:
+    - src/execution/executor.py
+    - src/execution/exit_lifecycle.py
+    - src/execution/live_executor.py
+    - src/control/live_health.py
   src/control/__init__.py:
     zone: K1_governance
     authority_role: package_marker
@@ -1748,8 +1759,8 @@ files:
     - src/engine/monitor_refresh.py
   src/events/edli_position_bridge.py:
     zone: K2_runtime
-    authority_role: edli_position_id_generation
-    why: Deterministic canonical position_id from SHA-256 of aggregate_id (68 chars). Widened from 11-char truncation (28 bits) to full digest (256 bits) in FIX #96 to eliminate birthday collision at ~10k fills.
+    authority_role: edli_fill_position_projection
+    why: Materializes confirmed EDLI fills into canonical position_current rows, including deterministic 68-char position ids and guarded recovery of qkernel posterior authority from certificates or EDLI event payloads.
     downstream:
     - src/state/projection.py
   src/events/candidate_evaluation.py:

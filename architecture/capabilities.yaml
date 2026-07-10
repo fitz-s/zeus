@@ -5,7 +5,7 @@
 schema_version: 1
 metadata:
   charter_version: 1.0.0
-  catalog_size: 21
+  catalog_size: 22
   created: 2026-05-06
   authority_basis: ULTIMATE_DESIGN §2.2 sunset 2027-05-06
 capabilities:
@@ -296,6 +296,44 @@ capabilities:
       does_not_fit: refuse_with_advice
       scope_keywords: [live, submit, order, venue]
       out_of_scope_keywords: [shadow, paper, replay, simulate, mock, dry-run]
+    sunset_date: 2027-05-06
+    lease_required: true
+    telemetry:
+      ritual_signal_emitted: true
+      latency_budget_ms: 50
+    reversibility_class: ON_CHAIN
+
+  # ─── new: reduce_only_exit_submit ─
+  - id: reduce_only_exit_submit
+    owner_module: src/execution/executor.py
+    intent: >
+      Submit a real reduce-only exit order for an already-held position. This
+      is deliberately separate from live_venue_submit: new entries remain
+      blocked on any runtime-code freshness mismatch, while reduce-only exits
+      may proceed only when the stale/dirty diff is proven not to touch the
+      exit/venue/state/risk/control submit plane. It is not a general venue
+      submit lane and must never open or increase exposure.
+    relationships:
+      protects_invariants: [INV-21, INV-04, INV-01]
+      blocked_when:
+        - kill_switch_active
+        - settlement_window_freeze_active
+        - risk_level_RED
+        - reduce_only_exit_deployment_freshness_mismatch
+    hard_kernel_paths:
+      - src/execution/executor.py
+      - src/execution/exit_lifecycle.py
+      - src/venue/
+      - src/state/
+      - src/risk_allocator/
+      - src/control/
+      - src/architecture/gate_runtime.py
+      - src/control/runtime_code_plane.py
+    original_intent:
+      intent_test: "diff touches reduce-only exit submit path"
+      does_not_fit: refuse_with_advice
+      scope_keywords: [exit, reduce_only, sell, held_position, venue]
+      out_of_scope_keywords: [entry, buy, open, increase, shadow, paper, replay, simulate, mock, dry-run]
     sunset_date: 2027-05-06
     lease_required: true
     telemetry:

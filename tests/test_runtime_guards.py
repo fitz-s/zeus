@@ -5373,7 +5373,7 @@ def test_day0_monitor_refresh_blocks_mature_remaining_window_zero_without_hard_f
     )
 
 
-def test_day0_monitor_refresh_rejects_daily_extrema_as_remaining_window_authority(monkeypatch):
+def test_day0_monitor_refresh_conditions_daily_extrema_without_remaining_window_authority(monkeypatch):
     from src.engine import monitor_refresh
 
     position = types.SimpleNamespace(
@@ -5442,12 +5442,40 @@ def test_day0_monitor_refresh_rejects_daily_extrema_as_remaining_window_authorit
         },
     )
     monkeypatch.setattr(
-        monitor_refresh.Day0Router,
-        "route",
-        lambda inputs: (_ for _ in ()).throw(
-            AssertionError("daily extrema must not reach remaining-window routing")
+        monitor_refresh,
+        "_day0_observed_extreme_from_canonical_surface",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(
+        monitor_refresh,
+        "_day0_extreme_authority_rejection_reason",
+        lambda **kwargs: None,
+    )
+    monkeypatch.setattr(
+        monitor_refresh,
+        "_build_all_bins",
+        lambda *args, **kwargs: (
+            [
+                Bin(low=17, high=17, label="17°C", unit="C"),
+                Bin(low=18, high=18, label="18°C", unit="C"),
+            ],
+            0,
         ),
     )
+    captured = {}
+
+    def _route(inputs):
+        captured["member_mins_remaining"] = np.asarray(inputs.member_mins_remaining)
+        return types.SimpleNamespace(
+            p_vector=lambda bins, n_mc=None: np.array([0.02, 0.98])
+        )
+
+    monkeypatch.setattr(
+        monitor_refresh.Day0Router,
+        "route",
+        staticmethod(_route),
+    )
+    monkeypatch.setattr(monitor_refresh, "_maybe_write_day0_nowcast", lambda **kwargs: None)
 
     posterior, applied = monitor_refresh._refresh_day0_observation(
         position=position,
@@ -5457,12 +5485,155 @@ def test_day0_monitor_refresh_rejects_daily_extrema_as_remaining_window_authorit
         target_d=date(2026, 7, 8),
     )
 
-    assert posterior == pytest.approx(position.p_posterior)
-    assert getattr(position, monitor_refresh._MONITOR_PROBABILITY_FRESH_ATTR) is False
+    assert posterior == pytest.approx(0.98)
+    assert getattr(position, monitor_refresh._MONITOR_PROBABILITY_FRESH_ATTR) is True
     assert getattr(position, monitor_refresh._DAY0_ZERO_PROBABILITY_EXIT_AUTHORITY_ATTR) is False
+    assert np.all(captured["member_mins_remaining"] >= 17.0)
     assert "day0_remaining_window_hourly_bundle_unavailable" in applied
     assert "day0_daily_extrema_not_remaining_window:day0_daily_extrema_live" in applied
-    assert not hasattr(position, "_day0_monitor_probability_receipt")
+    assert "day0_observation_remaining_window" not in applied
+    assert "day0_observation_conditioned_daily_extrema" in applied
+    assert any(
+        item.startswith(
+            "belief_source=day0_observation_conditioned_daily_extrema"
+        )
+        for item in applied
+    )
+    receipt = position._day0_monitor_probability_receipt
+    assert receipt["selected_method"] == "day0_observation_conditioned_daily_extrema"
+    assert receipt["remaining_window"]["source"] == (
+        "day0_observed_bound_conditioned_daily_extrema"
+    )
+    assert receipt["zero_probability_exit_authority"] is False
+    assert receipt["zero_probability_exit_authority_reason"] == (
+        "daily_extrema_conditioned_not_hard_fact"
+    )
+
+
+def test_day0_monitor_refresh_conditions_post_peak_high_daily_extrema_to_observed_bound(monkeypatch):
+    from src.engine import monitor_refresh
+
+    position = types.SimpleNamespace(
+        temperature_metric="high",
+        bin_label="Will the highest temperature in Taipei be 35°C on July 9?",
+        unit="C",
+        market_id="m-taipei-high-35c",
+        direction="buy_no",
+        p_posterior=0.8006076372881108,
+        selected_method="day0_observation",
+        entry_method="day0_observation",
+    )
+    city = types.SimpleNamespace(
+        name="Taipei",
+        lat=25.033,
+        timezone="Asia/Taipei",
+        cluster="Asia",
+        settlement_unit="C",
+        settlement_source_type="wu_icao",
+        wu_station="RCSS",
+    )
+    monkeypatch.setattr(
+        monitor_refresh,
+        "_fetch_day0_observation",
+        lambda *args, **kwargs: types.SimpleNamespace(
+            high_so_far=35.0,
+            low_so_far=26.0,
+            current_temp=31.0,
+            source="wu_icao_history",
+            observation_time="2026-07-09T11:00:00+00:00",
+            observation_available_at="2026-07-09T11:10:00+00:00",
+            provider_reported_time="canonical_observation_instants",
+            coverage_status="OK",
+        ),
+    )
+    monkeypatch.setattr(
+        monitor_refresh,
+        "_day0_observation_source_rejection_reason",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(
+        monitor_refresh,
+        "_day0_observation_quality_rejection_reason",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(
+        "src.signal.diurnal.build_day0_temporal_context",
+        lambda *args, **kwargs: types.SimpleNamespace(
+            daypart="post_peak",
+            post_peak_confidence=1.0,
+            current_utc_timestamp=datetime(2026, 7, 9, 11, 20, tzinfo=timezone.utc),
+            solar_day=None,
+            current_local_hour=19.33,
+            daylight_progress=1.0,
+        ),
+    )
+    monkeypatch.setattr(monitor_refresh, "_read_day0_hourly_vectors", lambda **kwargs: None)
+    monkeypatch.setattr(
+        monitor_refresh,
+        "_read_day0_raw_model_extrema",
+        lambda **kwargs: {
+            "member_extrema": np.array([36.0]),
+            "source_id": "raw_model_forecasts.single_runs",
+            "forecast_source_role": "day0_daily_extrema_live",
+            "source_cycle_time": "2026-07-09T02:14:47.342175+00:00",
+        },
+    )
+    monkeypatch.setattr(
+        monitor_refresh,
+        "_day0_observed_extreme_from_canonical_surface",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(
+        monitor_refresh,
+        "_day0_extreme_authority_rejection_reason",
+        lambda **kwargs: None,
+    )
+    monkeypatch.setattr(
+        monitor_refresh,
+        "_build_all_bins",
+        lambda *args, **kwargs: (
+            [
+                Bin(low=34, high=34, label="34°C", unit="C"),
+                Bin(low=35, high=35, label="35°C", unit="C"),
+                Bin(low=36, high=36, label="36°C", unit="C"),
+            ],
+            1,
+        ),
+    )
+    captured = {}
+
+    def _route(inputs):
+        captured["member_maxes_remaining"] = np.asarray(inputs.member_maxes_remaining)
+        return types.SimpleNamespace(
+            p_vector=lambda bins, n_mc=None: np.array([0.01, 0.98, 0.01])
+        )
+
+    monkeypatch.setattr(
+        monitor_refresh.Day0Router,
+        "route",
+        staticmethod(_route),
+    )
+    monkeypatch.setattr(monitor_refresh, "_maybe_write_day0_nowcast", lambda **kwargs: None)
+
+    posterior, applied = monitor_refresh._refresh_day0_observation(
+        position=position,
+        current_p_market=0.001,
+        conn=None,
+        city=city,
+        target_d=date(2026, 7, 9),
+    )
+
+    assert posterior == pytest.approx(0.02)
+    assert getattr(position, monitor_refresh._MONITOR_PROBABILITY_FRESH_ATTR) is True
+    assert captured["member_maxes_remaining"].tolist() == pytest.approx([35.0])
+    assert "day0_daily_extrema_conditioned_on_observed_bound" in applied
+    assert "day0_observation_conditioned_daily_extrema" in applied
+    assert "day0_observation_remaining_window" not in applied
+    receipt = position._day0_monitor_probability_receipt
+    assert receipt["held_yes_probability"] == pytest.approx(0.98)
+    assert receipt["held_side_probability"] == pytest.approx(0.02)
+    assert receipt["remaining_window"]["raw_member_extrema_summary"]["max"] == pytest.approx(36.0)
+    assert receipt["remaining_window"]["member_extrema_summary"]["max"] == pytest.approx(35.0)
 
 
 def test_stale_day0_bound_can_remain_monitor_authority_for_held_redecision():
@@ -10198,6 +10369,29 @@ def test_live_boot_sidecar_head_check_blocks_stale_code_sidecar(monkeypatch, tmp
             state_dir=tmp_path,
             now=now + timedelta(seconds=30),
         )
+    heartbeat = json.loads((tmp_path / "daemon-heartbeat.json").read_text())
+    status = json.loads((tmp_path / "status_summary.json").read_text())
+    assert heartbeat["alive"] is False
+    assert heartbeat["daemon_health"] == "BOOT_BLOCKED"
+    assert heartbeat["loaded_sha"] == boot_sha
+    assert "price-channel-ingest:git_head_mismatch" in heartbeat["failure_reason"]
+    assert status["status"] == "BOOT_BLOCKED"
+    assert status["live_action_authorized"] is False
+    assert status["risk"]["infrastructure_level"] == "RED"
+    assert status["live_boot"]["issue"] == "LIVE_SIDECAR_BOOT_BLOCKED"
+    assert "price-channel-ingest:git_head_mismatch" in status["live_boot"]["detail"]
+    assert status["cycle"]["entries_blocked_reason"].startswith("LIVE_SIDECAR_BOOT_BLOCKED:")
+    capability = status["execution_capability"]
+    assert capability["entry"]["capability"] == "live_venue_submit"
+    assert capability["exit"]["capability"] == "reduce_only_exit_submit"
+    assert capability["entry"]["global_allow_submit"] is False
+    assert capability["exit"]["global_allow_submit"] is False
+    assert capability["entry"]["unavailable_components"] == [
+        "live_venue_submit:live_boot_prerequisite"
+    ]
+    assert capability["exit"]["unavailable_components"] == [
+        "reduce_only_exit_submit:live_boot_prerequisite"
+    ]
 
 
 def test_openmeteo_quota_warns_blocks_and_resets(caplog):

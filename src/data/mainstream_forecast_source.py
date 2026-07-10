@@ -258,6 +258,10 @@ def warm_mainstream_point(
     snapshot (or None on fail-closed); the side effect is the cache write that
     ``read_mainstream_point_cached`` later serves to the reactor.
     """
+    cached = read_mainstream_point_cached(city, target_date, metric=metric)
+    if cached is not None:
+        return cached
+
     result = fetch_mainstream_point(city, target_date, metric=metric)
     if result is not None:
         cache_key = (city.lower(), target_date, str(metric).lower())

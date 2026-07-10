@@ -68,6 +68,7 @@ DEFAULT_REACTOR_CYCLE_BUDGET_SECONDS = 22.0
 DEFAULT_REACTOR_FETCH_BATCH_LIMIT = 50
 DEFAULT_SNAPSHOT_BLOCK_RETRY_DELAY_SECONDS = 60.0
 DEFAULT_SNAPSHOT_BLOCK_RETRY_MAX_DELAY_SECONDS = 600.0
+DEFAULT_RUNTIME_AUTHORITY_RETRY_DELAY_SECONDS = 300.0
 DEFAULT_REACTOR_CLAIM_BUSY_TIMEOUT_MS = 750
 DEFAULT_REACTOR_LANE_FAIRNESS_FETCH_MIN_EXTRA = 50
 DEFAULT_REACTOR_LANE_FAIRNESS_FETCH_MULTIPLIER = 4
@@ -220,6 +221,27 @@ def _snapshot_block_retry_delay_seconds(*, attempt_count: int = 1) -> float:
         attempt = 1
     multiplier = max(1, min(attempt, 10))
     return min(max_delay, base_delay * multiplier)
+
+
+def _runtime_authority_retry_delay_seconds() -> float:
+    """Retry floor for runtime authority blocks that cannot clear intra-cycle.
+
+    Entry pauses and live-health entry-authority gaps are control/runtime state,
+    not fresh market facts. Immediate reclaims only replay the same fail-closed
+    block while the authority surface is still dark or intentionally paused.
+    Keep the floor bounded so recovery still re-decides surviving events soon
+    after the operator/runtime state clears.
+    """
+
+    raw = os.environ.get("ZEUS_RUNTIME_AUTHORITY_RETRY_DELAY_SECONDS")
+    if raw is None:
+        delay = DEFAULT_RUNTIME_AUTHORITY_RETRY_DELAY_SECONDS
+    else:
+        try:
+            delay = float(raw)
+        except (TypeError, ValueError):
+            delay = DEFAULT_RUNTIME_AUTHORITY_RETRY_DELAY_SECONDS
+    return max(30.0, min(900.0, delay))
 
 
 DEFAULT_REACTOR_DRAIN_BUDGET_SECONDS = 10.0
@@ -1812,6 +1834,11 @@ class OpportunityEventReactor:
                             )
                         )
                     ).isoformat()
+                elif _is_runtime_authority_retry_reason(last_reason):
+                    retry_not_before = (
+                        decision_time.astimezone(UTC)
+                        + timedelta(seconds=_runtime_authority_retry_delay_seconds())
+                    ).isoformat()
                 self._note_transient_requeue(event)
                 self._store.requeue_pending(
                     event.event_id,
@@ -3205,6 +3232,10 @@ TRANSIENT_MONEY_PATH_REASONS: frozenset[str] = frozenset({
     # belief/price evidence rather than burned as terminal or logged as an
     # unknown fail-open reason.
     "entries_paused",
+    # Live-entry authority is a fail-closed runtime health surface. A missing or
+    # stale authority surface blocks new entries but can clear when the sidecar /
+    # daemon / deployment head realigns; retry later, never burn the event.
+    "live_health_entry_authority",
     # Continuous redecision coordination: another live action already owns this
     # family, or the old leg is still exiting. The cure is state advancement from
     # that existing action, not burning the family forever.
@@ -3394,6 +3425,16 @@ def _is_day0_hourly_refresh_reason(reason: str | None) -> bool:
         return False
     segments = [seg.strip() for seg in str(reason).split(":")]
     return "DAY0_REMAINING_DAY_MEMBERS_UNAVAILABLE" in segments
+
+
+def _is_runtime_authority_retry_reason(reason: str | None) -> bool:
+    if not reason:
+        return False
+    segments = [seg.strip() for seg in str(reason).split(":")]
+    return any(
+        seg in {"entries_paused", "live_health_entry_authority"}
+        for seg in segments
+    )
 
 
 def _is_executable_snapshot_refresh_reason(reason: str | None) -> bool:
@@ -4758,28 +4799,13 @@ def run_edli_event_reactor_cycle(*, active_lock) -> None:
         # (the live lane was simply not configured for this reactor_mode).
         _live_lane_block_cause: str | None = None
         live_submit_effective = live_bridge_mode or submit_disabled_effective_mode
-        if live_submit_effective:
-            _alloc_refresh = _edli_refresh_global_allocator_for_live_bridge(trade_conn)
-            if live_bridge_mode and not _alloc_refresh.get("configured"):
-                live_submit_effective = False
-                _alloc_reason = _alloc_refresh.get("entry", {}).get("reason") or "allocator_not_configured"
-                _live_lane_block_cause = f"live_submit_effective_false:allocator_refresh:{_alloc_reason}"
-                _log.error(
-                    "EDLI reactor: live-bridge allocator refresh did not configure "
-                    "(fail_closed=%r reason=%r) — selecting NO-SUBMIT this cycle.",
-                    _alloc_refresh.get("fail_closed"),
-                    _alloc_refresh.get("entry", {}).get("reason"),
-                )
         # Task #107 (portfolio/multi Kelly): source the PortfolioState ONCE per
-        # reactor cycle (DB-only, microseconds) so per-event Kelly sizes against
-        # the bankroll NET of correlation-weighted committed capital. The
-        # provider closure hands the SAME cached snapshot to every event this
-        # cycle (cycle-level read, not per-decision — mirrors the bankroll warm).
-        # The no-submit adapter may still build read-only receipts when the portfolio
-        # snapshot is unavailable. Real-submit is different: never let the live path
-        # fall back to pre-#107 single-asset Kelly sizing, because that ignores
-        # open/pending/correlated exposure.
+        # reactor cycle (DB load is seconds on the live DB). The allocator
+        # baseline and per-event Kelly provider must share this same point-in-time
+        # snapshot; loading it twice doubles reactor_construct latency without
+        # adding authority.
         _portfolio_state_provider = None
+        _portfolio_snapshot = None
         try:
             _portfolio_snapshot = load_portfolio()
             _portfolio_state_provider = lambda: _portfolio_snapshot  # noqa: E731 — cycle-scoped closure
@@ -4795,6 +4821,21 @@ def run_edli_event_reactor_cycle(*, active_lock) -> None:
             _log.error(
                 "EDLI reactor: real submit disabled this cycle because portfolio_state_unavailable"
             )
+        if live_submit_effective:
+            _alloc_refresh = _edli_refresh_global_allocator_for_live_bridge(
+                trade_conn,
+                portfolio_snapshot=_portfolio_snapshot,
+            )
+            if live_bridge_mode and not _alloc_refresh.get("configured"):
+                live_submit_effective = False
+                _alloc_reason = _alloc_refresh.get("entry", {}).get("reason") or "allocator_not_configured"
+                _live_lane_block_cause = f"live_submit_effective_false:allocator_refresh:{_alloc_reason}"
+                _log.error(
+                    "EDLI reactor: live-bridge allocator refresh did not configure "
+                    "(fail_closed=%r reason=%r) — selecting NO-SUBMIT this cycle.",
+                    _alloc_refresh.get("fail_closed"),
+                    _alloc_refresh.get("entry", {}).get("reason"),
+                )
         # The FSR/redecision emit phase intentionally uses the cycle-start timestamp for
         # event identity. Decision certificates are built later, after DB-backed substrate
         # and portfolio reads; use the actual processing timestamp so fresh executable/book
@@ -5344,7 +5385,7 @@ def _edli_active_rmf_forecast_snapshot_pending_count(world_conn, *, limit: int) 
             SELECT COUNT(*)
               FROM (
                     SELECT 1
-                      FROM opportunity_event_processing p INDEXED BY idx_opportunity_event_processing_status
+                      FROM opportunity_event_processing p
                       JOIN opportunity_events e ON e.event_id = p.event_id
                      WHERE p.consumer_name = 'edli_reactor_v1'
                        AND p.processing_status = 'pending'
@@ -6456,7 +6497,15 @@ def _edli_reactor_cycle_advance_enqueuer():
 
     return _enqueue
 
-def _edli_pre_submit_book_from_jit_fetch(book_quote_provider, *, token_id: str, side: str | None = None):
+def _edli_pre_submit_book_from_jit_fetch(
+    book_quote_provider,
+    *,
+    token_id: str,
+    side: str | None = None,
+    limit_price: float | None = None,
+    size: float | None = None,
+    post_only: bool = False,
+):
     """JIT single-token book fetch for the SELECTED candidate at submit time.
 
     GATE #84 root cause: the shared market-channel feasibility feed stamps
@@ -6468,12 +6517,10 @@ def _edli_pre_submit_book_from_jit_fetch(book_quote_provider, *, token_id: str, 
     observation time — the FOK crosses against exactly this book.
 
     Returns ``(best_bid, best_ask, book_hash, observed_at)`` on a usable executable
-    book, or ``None`` only when the fetch itself fails (fail-closed fallback to a
-    genuinely-fresh DB row). If the fetch succeeds but proves the selected side is
-    no longer executable, raise a typed PRE_SUBMIT_BOOK_AUTHORITY_JIT_* reason. That
-    distinction matters in live: a successful JIT read is fresher authority than
-    the old DB row and must force a fresh family redecision, not be masked as
-    PRE_SUBMIT_BOOK_AUTHORITY_STALE.
+    book, or ``None`` only when the fetch itself fails. The caller treats that as a
+    hard no-submit: cached feasibility rows cannot prove submit-time truth. For a
+    taker intent, the same JIT response must also cover the full intended size at
+    prices within the limit.
     """
     import logging as _logging
     _log = _logging.getLogger("zeus.events.reactor")
@@ -6485,6 +6532,12 @@ def _edli_pre_submit_book_from_jit_fetch(book_quote_provider, *, token_id: str, 
     except Exception as exc:  # noqa: BLE001 - JIT fetch failure must not fabricate freshness
         _log.warning("EDLI pre-submit JIT book fetch failed for %s: %s", token_id, exc)
         return None
+    response_token_id = str(message.get("asset_id") or message.get("token_id") or "").strip()
+    if not response_token_id or response_token_id != str(token_id):
+        raise ValueError(
+            "PRE_SUBMIT_BOOK_AUTHORITY_JIT_TOKEN_MISMATCH:"
+            f"requested_token_id={token_id}:response_token_id={response_token_id or 'missing'}"
+        )
     best_bid = _edli_book_best_price(message.get("bids"), best="bid")
     best_ask = _edli_book_best_price(message.get("asks"), best="ask")
     book_hash = str(message.get("hash") or "")
@@ -6516,6 +6569,20 @@ def _edli_pre_submit_book_from_jit_fetch(book_quote_provider, *, token_id: str, 
             "PRE_SUBMIT_BOOK_AUTHORITY_JIT_CROSSED_BOOK:"
             f"token_id={token_id}:best_bid={best_bid}:best_ask={best_ask}"
         )
+    if not post_only and limit_price is not None and size is not None:
+        levels = message.get("asks") if normalized_side == "BUY" else message.get("bids")
+        executable_size = _edli_book_executable_size(
+            levels,
+            side=normalized_side,
+            limit_price=float(limit_price),
+        )
+        if executable_size + 1e-9 < float(size):
+            raise ValueError(
+                "PRE_SUBMIT_BOOK_AUTHORITY_JIT_DEPTH_INSUFFICIENT:"
+                f"token_id={token_id}:side={normalized_side}:limit_price={float(limit_price):.6f}:"
+                f"required_size={float(size):.6f}:executable_size={executable_size:.6f}:"
+                f"book_hash={book_hash}"
+            )
     return best_bid, best_ask, book_hash, datetime.now(timezone.utc)
 
 def _edli_book_best_price(levels, *, best: str):
@@ -6534,6 +6601,31 @@ def _edli_book_best_price(levels, *, best: str):
         return None
     return max(parsed) if best == "bid" else min(parsed)
 
+
+def _edli_book_executable_size(levels, *, side: str, limit_price: float) -> float:
+    """Shares executable now within a BUY/SELL limit in one JIT book response."""
+
+    total = 0.0
+    for level in levels or ():
+        if isinstance(level, dict):
+            raw_price = level.get("price")
+            raw_size = level.get("size")
+        else:
+            raw_price = level[0] if level else None
+            raw_size = level[1] if level and len(level) > 1 else None
+        try:
+            price = float(raw_price)
+            level_size = float(raw_size)
+        except (TypeError, ValueError):
+            continue
+        if not (math.isfinite(price) and math.isfinite(level_size) and level_size > 0.0):
+            continue
+        if side == "BUY" and price <= limit_price + 1e-12:
+            total += level_size
+        elif side == "SELL" and price + 1e-12 >= limit_price:
+            total += level_size
+    return total
+
 def _edli_pre_submit_authority_provider_from_book_evidence_conn(
     book_evidence_conn, edli_cfg, *, book_quote_provider=None
 ):
@@ -6543,14 +6635,13 @@ def _edli_pre_submit_authority_provider_from_book_evidence_conn(
     wallet allowance truth; missing authority remains fail-closed before command
     creation.
 
-    ``book_quote_provider`` (GATE #84) is an optional just-in-time single-token
+    ``book_quote_provider`` (GATE #84) is a just-in-time single-token
     ``/book`` fetch (``token_id -> dict``). When wired in live/canary mode it is
     the PRIMARY book authority: for the selected candidate at submit time we pull
     its live book and anchor ``quote_seen_at`` to our observation instant
     (``checked_at``), so the 1000ms freshness bound reflects observation-to-submit
-    latency rather than the venue's coarse book-change stamp. The DB feasibility
-    row is the fail-closed fallback and is only accepted when it is itself within
-    ``max_quote_age_ms`` — a stale row never leaks through as a fresh quote.
+    latency rather than the venue's coarse book-change stamp. Cached DB feasibility
+    evidence remains useful for screening but never licenses venue submission.
     """
     from src.main import _row_get
 
@@ -6609,46 +6700,27 @@ def _edli_pre_submit_authority_provider_from_book_evidence_conn(
         # anchored to OUR observation time (checked_at) — the FOK crosses against
         # exactly this book — so quote_age_ms is the observation-to-submit latency.
         side = str(intent.get("side") or "").upper()
-        jit = _edli_pre_submit_book_from_jit_fetch(book_quote_provider, token_id=token_id, side=side)
-        if jit is not None:
-            best_bid, best_ask, book_hash, book_observed_at = jit
-            checked_at = book_observed_at.astimezone(timezone.utc)
-            quote_seen_at = checked_at.isoformat()
-            book_authority_id = "clob_jit_book"
-        else:
-            # FAIL-CLOSED FALLBACK: the shared feasibility feed. Accept the latest
-            # row ONLY if it is itself within the freshness bound; a venue-stale row
-            # (the GATE #84 pathology) must NOT be emitted as a fresh quote.
-            row = _edli_latest_pre_submit_book_row(
-                book_evidence_conn,
-                token_id=token_id,
-                side=side,
-                decision_time=checked_at,
+        has_limit_price = intent.get("limit_price") not in (None, "")
+        has_size = intent.get("size") not in (None, "")
+        if has_limit_price != has_size:
+            raise ValueError(
+                "PRE_SUBMIT_BOOK_AUTHORITY_JIT_INTENT_INCOMPLETE:"
+                f"token_id={token_id}:has_limit_price={has_limit_price}:has_size={has_size}"
             )
-            if row is None:
-                raise ValueError("PRE_SUBMIT_BOOK_AUTHORITY_MISSING")
-            quote_seen_at = str(_row_get(row, "quote_seen_at") or "")
-            book_hash = str(_row_get(row, "book_hash_before") or "")
-            best_bid = _row_float(row, "best_bid_before")
-            best_ask = _row_float(row, "best_ask_before")
-            if not quote_seen_at or not book_hash:
-                raise ValueError("PRE_SUBMIT_BOOK_AUTHORITY_INCOMPLETE")
-            if side == "BUY" and best_ask is None:
-                raise ValueError("PRE_SUBMIT_BOOK_AUTHORITY_INCOMPLETE")
-            if side == "SELL" and best_bid is None:
-                raise ValueError("PRE_SUBMIT_BOOK_AUTHORITY_INCOMPLETE")
-            try:
-                row_quote_dt = datetime.fromisoformat(quote_seen_at.replace("Z", "+00:00"))
-            except (TypeError, ValueError):
-                raise ValueError("PRE_SUBMIT_BOOK_AUTHORITY_INCOMPLETE")
-            if row_quote_dt.tzinfo is None:
-                row_quote_dt = row_quote_dt.replace(tzinfo=timezone.utc)
-            row_age_ms = (checked_at - row_quote_dt.astimezone(timezone.utc)).total_seconds() * 1000.0
-            if row_age_ms > max_quote_age_ms:
-                # No fresh JIT book and the only stored quote is stale: do not
-                # leak a stale quote that the downstream gate would have to catch.
-                raise ValueError("PRE_SUBMIT_BOOK_AUTHORITY_STALE")
-            book_authority_id = "execution_feasibility_evidence"
+        jit = _edli_pre_submit_book_from_jit_fetch(
+            book_quote_provider,
+            token_id=token_id,
+            side=side,
+            limit_price=float(intent["limit_price"]) if has_limit_price else None,
+            size=float(intent["size"]) if has_size else None,
+            post_only=intent.get("post_only") is True,
+        )
+        if jit is None:
+            raise ValueError("PRE_SUBMIT_BOOK_AUTHORITY_JIT_REQUIRED")
+        best_bid, best_ask, book_hash, book_observed_at = jit
+        checked_at = book_observed_at.astimezone(timezone.utc)
+        quote_seen_at = checked_at.isoformat()
+        book_authority_id = "clob_jit_book"
 
         heartbeat_summary = _edli_heartbeat_authority_summary()
         user_ws_summary = _edli_user_ws_authority_summary(checked_at)

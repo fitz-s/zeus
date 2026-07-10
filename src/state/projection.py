@@ -314,6 +314,9 @@ _MONITOR_SNAPSHOT_COLUMNS = frozenset(
     }
 )
 _CHAIN_PROJECTION_EVENT_TYPES = frozenset({"CHAIN_SIZE_CORRECTED", "CHAIN_SYNCED"})
+_PENDING_EXIT_AUTHORITY_PRESERVING_EVENT_TYPES = frozenset(
+    {"MONITOR_REFRESHED", *_CHAIN_PROJECTION_EVENT_TYPES}
+)
 _MONITOR_REFRESH_PROTECTED_PENDING_EXIT_STATUSES = frozenset(
     {
         "exit_intent",
@@ -333,6 +336,46 @@ _MONITOR_REFRESH_PROTECTED_PENDING_EXIT_COLUMNS = frozenset(
         "next_exit_retry_at",
     }
 )
+
+
+def _preserve_existing_pending_exit_authority(
+    conn: sqlite3.Connection, projection: dict
+) -> dict:
+    if (
+        projection.get("_canonical_event_type")
+        not in _PENDING_EXIT_AUTHORITY_PRESERVING_EVENT_TYPES
+    ):
+        return projection
+    position_id = str(projection.get("position_id") or "")
+    if not position_id:
+        return projection
+    current_columns = table_columns(conn, "position_current")
+    selected = tuple(
+        column
+        for column in CANONICAL_POSITION_CURRENT_COLUMNS
+        if column in _MONITOR_REFRESH_PROTECTED_PENDING_EXIT_COLUMNS
+        and column in current_columns
+    )
+    if not selected:
+        return projection
+    row = conn.execute(
+        f"SELECT {', '.join(selected)} FROM position_current WHERE position_id = ?",
+        (position_id,),
+    ).fetchone()
+    if row is None:
+        return projection
+    current = {column: row[index] for index, column in enumerate(selected)}
+    if (
+        str(current.get("phase") or "") == LifecyclePhase.PENDING_EXIT.value
+        and str(projection.get("phase") or "") != LifecyclePhase.PENDING_EXIT.value
+        and str(current.get("order_status") or "")
+        in _MONITOR_REFRESH_PROTECTED_PENDING_EXIT_STATUSES
+    ):
+        merged = dict(projection)
+        for column in selected:
+            merged[column] = current[column]
+        return merged
+    return projection
 
 
 def _preserve_existing_monitor_refresh_authority(
@@ -472,6 +515,7 @@ def _projection_allows_redecision_quarantine_pending_exit(projection: dict) -> b
 @capability("canonical_position_write", lease=True)
 def upsert_position_current(conn: sqlite3.Connection, projection: dict) -> None:
     projection = _preserve_existing_monitor_refresh_authority(conn, projection)
+    projection = _preserve_existing_pending_exit_authority(conn, projection)
     projection = _preserve_existing_monitor_snapshot_for_chain_projection(conn, projection)
     # F109 writer-side idempotency check (2026-05-17).
     # Runs before INSERT so the race window with the partial UNIQUE INDEX is

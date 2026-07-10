@@ -1262,7 +1262,38 @@ def test_book_moved_holds_sub_min_partial_fill_rest():
     assert pulls == []
 
 
-def test_belief_decay_still_pulls_sub_min_partial_fill_rest():
+def test_confirmed_value_refresh_holds_sub_min_partial_fill_rest():
+    world = _mem_world()
+    trade = _mem_trade()
+    _cache(world, p_yes=0.90, snapshot_id="snap1", cond="0xc30")
+    _snapshot(trade, bid="0.69", ask="0.72", min_order_size="5")
+    rest = cr.OpenRest(
+        command_id="cmd1",
+        venue_order_id="vo1",
+        family_id="hyp|live|Wuhan|2026-06-12|high|disc",
+        bin_label="b30",
+        side="buy_yes",
+        condition_id="0xc30",
+        resting_posterior=0.90,
+        resting_snapshot_id="snap1",
+        limit_price=0.70,
+        quote_age_ms=6 * 60 * 1000.0,
+        matched_size=3.8,
+        min_order_size=5.0,
+    )
+
+    pulls = cr.screen_resting_orders(
+        world,
+        trade,
+        open_rests=[rest],
+        decision_time="2026-06-12T00:45:00+00:00",
+        value_refresh_min_age_seconds=5 * 60,
+    )
+
+    assert pulls == []
+
+
+def test_belief_decay_holds_sub_min_partial_fill_rest():
     world = _mem_world()
     trade = _mem_trade()
     _cache(world, p_yes=0.90, snapshot_id="snap1", cond="0xc30", recorded_at="2026-06-12T00:00:00+00:00")
@@ -1279,6 +1310,71 @@ def test_belief_decay_still_pulls_sub_min_partial_fill_rest():
         limit_price=0.70,
         quote_age_ms=6 * 60 * 1000.0,
         matched_size=1.0,
+        min_order_size=5.0,
+    )
+
+    pulls = cr.screen_resting_orders(
+        world,
+        trade,
+        open_rests=[rest],
+        decision_time="2026-06-12T12:45:00+00:00",
+    )
+
+    assert pulls == []
+
+
+def test_sub_min_partial_fill_short_circuits_before_belief_decay(monkeypatch):
+    world = _mem_world()
+    trade = _mem_trade()
+    _cache(world, p_yes=0.90, snapshot_id="snap1", cond="0xc30", recorded_at="2026-06-12T00:00:00+00:00")
+    _cache(world, p_yes=0.60, snapshot_id="snap2", cond="0xc30", recorded_at="2026-06-12T12:00:00+00:00")
+
+    def fail_screen_reprice(*_args, **_kwargs):
+        raise AssertionError("sub-min partial rests must not enter belief-decay pull")
+
+    monkeypatch.setattr(cr, "screen_reprice", fail_screen_reprice)
+    rest = cr.OpenRest(
+        command_id="cmd1",
+        venue_order_id="vo1",
+        family_id="hyp|live|Wuhan|2026-06-12|high|disc",
+        bin_label="b30",
+        side="buy_yes",
+        condition_id="0xc30",
+        resting_posterior=0.90,
+        resting_snapshot_id="snap1",
+        limit_price=0.70,
+        quote_age_ms=6 * 60 * 1000.0,
+        matched_size=1.0,
+        min_order_size=5.0,
+    )
+
+    pulls = cr.screen_resting_orders(
+        world,
+        trade,
+        open_rests=[rest],
+        decision_time="2026-06-12T12:45:00+00:00",
+    )
+
+    assert pulls == []
+
+
+def test_belief_decay_still_pulls_partial_fill_at_min_order_size():
+    world = _mem_world()
+    trade = _mem_trade()
+    _cache(world, p_yes=0.90, snapshot_id="snap1", cond="0xc30", recorded_at="2026-06-12T00:00:00+00:00")
+    _cache(world, p_yes=0.60, snapshot_id="snap2", cond="0xc30", recorded_at="2026-06-12T12:00:00+00:00")
+    rest = cr.OpenRest(
+        command_id="cmd1",
+        venue_order_id="vo1",
+        family_id="hyp|live|Wuhan|2026-06-12|high|disc",
+        bin_label="b30",
+        side="buy_yes",
+        condition_id="0xc30",
+        resting_posterior=0.90,
+        resting_snapshot_id="snap1",
+        limit_price=0.70,
+        quote_age_ms=6 * 60 * 1000.0,
+        matched_size=5.0,
         min_order_size=5.0,
     )
 

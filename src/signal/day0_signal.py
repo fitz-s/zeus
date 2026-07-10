@@ -5,6 +5,7 @@ The final settlement value = max(observed_high_so_far, max_remaining_ENS).
 This constraint dramatically narrows probability distribution near settlement.
 """
 
+import hashlib
 import math
 import numpy as np
 
@@ -26,6 +27,39 @@ from src.types.metric_identity import MetricIdentity
 
 
 _UNSEEN_PEAK_SIGMA_MULTIPLIER = 3.0
+
+
+def _stable_day0_rng_seed(*, bins: list[Bin], member_values, unit: str, precision: float) -> int:
+    """Common-random seed for live Day0 monitor integration.
+
+    The seed intentionally depends on the support and forecast member surface,
+    not on wall-clock or diurnal parameters. Reusing the same random stream lets
+    probability changes reflect changed physics inputs instead of per-cycle MC
+    seed noise.
+    """
+
+    arr = np.asarray(member_values, dtype=float)
+    finite_members = sorted(
+        round(float(v), 6)
+        for v in arr.reshape(-1).tolist()
+        if math.isfinite(float(v))
+    )
+    bin_payload = [
+        {
+            "low": None if getattr(bin_, "low", None) is None else round(float(bin_.low), 6),
+            "high": None if getattr(bin_, "high", None) is None else round(float(bin_.high), 6),
+        }
+        for bin_ in bins
+    ]
+    payload = repr(
+        {
+            "bins": bin_payload,
+            "members": finite_members,
+            "unit": str(unit),
+            "precision": round(float(precision), 6),
+        }
+    ).encode("utf-8")
+    return int(hashlib.sha256(payload).hexdigest()[:16], 16)
 
 
 class Day0Signal:
@@ -191,15 +225,23 @@ class Day0Signal:
             raise ValueError("ens_remaining cannot be empty; requires explicit degraded path")
 
         n_bins = len(bins)
-        n_members = len(self.ens_remaining)
+        remaining_pool = np.sort(np.asarray(self.ens_remaining, dtype=float))
+        n_members = len(remaining_pool)
         p = np.zeros(n_bins)
 
-        rng = rng if rng is not None else np.random.default_rng()
+        rng = rng if rng is not None else np.random.default_rng(
+            _stable_day0_rng_seed(
+                bins=bins,
+                member_values=self.ens_remaining,
+                unit=self.unit,
+                precision=self._precision,
+            )
+        )
         obs_weight = self.observation_weight()
 
         for _ in range(n_mc):
             # Sample residual ENS member
-            remaining = rng.choice(self.ens_remaining, size=n_members, replace=True)
+            remaining = rng.choice(remaining_pool, size=n_members, replace=True)
             effective_sigma = float(np.hypot(self._sigma, self._unseen_peak_sigma))
             noised = remaining + rng.normal(0, effective_sigma, n_members)
             backbone_high = day0_backbone_high(

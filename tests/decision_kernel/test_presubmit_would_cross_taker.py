@@ -1,5 +1,5 @@
 # Created: 2026-06-01
-# Last reused or audited: 2026-06-01
+# Last reused or audited: 2026-07-09
 # Authority basis: GATE #84 would_cross taker conditioning
 """
 Safety matrix: pre-submit would_cross_book gate conditioned on post_only.
@@ -31,6 +31,7 @@ from datetime import datetime, timezone
 
 import pytest
 
+from src.decision_kernel.canonicalization import qkernel_current_state_identity_hash
 from src.decision_kernel.errors import CertificateVerificationError
 from src.decision_kernel.verifier import _verify_pre_submit_revalidation_for_command
 from src.events.live_order_aggregate import (
@@ -344,6 +345,80 @@ class TestLayer2VerifyPreSubmitForCommand:
             min_submit_edge_density=0.02,
         )
         with pytest.raises(CertificateVerificationError, match="submit edge density"):
+            self._call(ps)
+
+    @pytest.mark.parametrize(
+        ("direction", "token_id", "side"),
+        (("buy_yes", "yes-1", "YES"), ("buy_no", "no-1", "NO")),
+    )
+    def test_current_state_solver_applies_same_after_cost_rule_to_yes_and_no(
+        self, direction, token_id, side
+    ):
+        ps = _maker_pre_submit(
+            direction=direction,
+            token_id=token_id,
+            q_live=0.12,
+            q_lcb_5pct=0.10,
+            limit_price=0.04,
+            size=1.0,
+            expected_edge=0.06,
+            min_entry_price=0.95,
+            min_expected_profit_usd=1000.0,
+            min_submit_edge_density=1000.0,
+        )
+        economics = _qkernel_economics_for(ps)
+        economics.update(
+            {
+                "side": side,
+                "decision_id": "decision-current-1",
+                "receipt_hash": "receipt-current-1",
+                "q_version": "q-current-1",
+                "sample_hash": "current-sample-hash",
+                "q_lcb_guard_basis": "CURRENT_POSTERIOR_BAND",
+                "q_lcb_guard_abstained": False,
+                "q_lcb_guard_cell_key": "current-sample-hash",
+                "selection_guard_basis": "CURRENT_POSTERIOR_BAND",
+                "selection_guard_abstained": False,
+                "selection_guard_cell_key": "current-sample-hash",
+                "selection_guard_n": 64,
+            }
+        )
+        economics["current_state_identity_hash"] = qkernel_current_state_identity_hash(
+            economics
+        )
+        ps["qkernel_execution_economics"] = economics
+
+        self._call(ps)
+
+    def test_current_state_solver_still_rejects_non_positive_after_cost_edge(self):
+        ps = _maker_pre_submit(
+            q_live=0.12,
+            q_lcb_5pct=0.10,
+            limit_price=0.10,
+            expected_edge=0.001,
+        )
+        economics = _qkernel_economics_for(ps)
+        economics.update(
+            {
+                "decision_id": "decision-current-1",
+                "receipt_hash": "receipt-current-1",
+                "q_version": "q-current-1",
+                "sample_hash": "current-sample-hash",
+                "q_lcb_guard_basis": "CURRENT_POSTERIOR_BAND",
+                "q_lcb_guard_abstained": False,
+                "q_lcb_guard_cell_key": "current-sample-hash",
+                "selection_guard_basis": "CURRENT_POSTERIOR_BAND",
+                "selection_guard_abstained": False,
+                "selection_guard_cell_key": "current-sample-hash",
+                "selection_guard_n": 64,
+            }
+        )
+        economics["current_state_identity_hash"] = qkernel_current_state_identity_hash(
+            economics
+        )
+        ps["qkernel_execution_economics"] = economics
+
+        with pytest.raises(CertificateVerificationError, match="submit q_lcb-minus-limit"):
             self._call(ps)
 
     def test_qkernel_direct_payoff_probability_mismatch_raises(self):

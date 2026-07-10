@@ -375,6 +375,73 @@ def test_executable_price_reader_uses_fresh_feasibility_quote_when_snapshot_stal
     assert bids[("cid-1", "buy_no")].freshness_deadline == "2026-06-01T13:01:30+00:00"
 
 
+def test_executable_price_reader_prefers_feasibility_latest_without_history_scan():
+    from src.state.schema.execution_feasibility_evidence_schema import ensure_table
+
+    trade = sqlite3.connect(":memory:")
+    trade.row_factory = sqlite3.Row
+    trade.execute(
+        """
+        CREATE TABLE executable_market_snapshots (
+            snapshot_id TEXT,
+            condition_id TEXT,
+            orderbook_top_bid REAL,
+            orderbook_top_ask REAL,
+            freshness_deadline TEXT,
+            captured_at TEXT,
+            selected_outcome_token_id TEXT,
+            yes_token_id TEXT,
+            no_token_id TEXT,
+            outcome_label TEXT,
+            min_tick_size TEXT,
+            enable_orderbook INTEGER,
+            active INTEGER,
+            closed INTEGER,
+            accepting_orders INTEGER
+        )
+        """
+    )
+    trade.execute(
+        """
+        INSERT INTO executable_market_snapshots (
+            snapshot_id, condition_id, orderbook_top_bid, orderbook_top_ask,
+            freshness_deadline, captured_at, selected_outcome_token_id,
+            yes_token_id, no_token_id, outcome_label, min_tick_size,
+            enable_orderbook, active, closed, accepting_orders
+        ) VALUES ('stale-no', 'cid-1', 0.70, 0.71,
+                  '2026-06-01T12:00:00+00:00',
+                  '2026-06-01T11:59:00+00:00', 'no-1',
+                  'yes-1', 'no-1', 'NO', '0.001', 1, 1, 0, 1)
+        """
+    )
+    ensure_table(trade)
+    trade.execute(
+        """
+        INSERT INTO execution_feasibility_latest (
+            token_id, direction, evidence_id, event_id, condition_id,
+            outcome_label, quote_seen_at, book_hash_before, best_bid_before,
+            best_ask_before, created_at, schema_version
+        ) VALUES (
+            'no-1', 'buy_no', 'latest-1', 'event-1', 'cid-1',
+            'NO', '2026-06-01T13:00:00+00:00', 'hash-1', 0.74,
+            0.75, '2026-06-01T13:00:02+00:00', 1
+        )
+        """
+    )
+    traces: list[str] = []
+    trade.set_trace_callback(traces.append)
+
+    asks = cr.read_freshest_executable_prices(trade, condition_ids={"cid-1"})
+
+    history_reads = [
+        sql
+        for sql in traces
+        if "FROM execution_feasibility_evidence" in sql and sql.lstrip().upper().startswith("SELECT")
+    ]
+    assert asks[("cid-1", "buy_no")].price == pytest.approx(0.75)
+    assert history_reads == []
+
+
 def test_feasibility_quote_overlay_rejects_crossed_books():
     trade = sqlite3.connect(":memory:")
     trade.row_factory = sqlite3.Row

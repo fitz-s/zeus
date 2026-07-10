@@ -520,6 +520,10 @@ def test_adapter_envelope_snapshot_row_is_rebound_to_final_selected_proof():
     assert bind in source
     assert source.index(bind) < source.index(trade_score_bind)
 
+    wrapper_source = inspect.getsource(era.build_event_bound_no_submit_receipt)
+    day0_authority_bind = 'envelope["day0_probability_authority"]'
+    assert day0_authority_bind in wrapper_source
+
 
 def test_reactor_merges_rejection_into_adapter_envelope_materials():
     """RELATIONSHIP: reactor._write_regret MERGES the final {stage, reason FULL TEXT} into the

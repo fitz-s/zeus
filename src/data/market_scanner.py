@@ -4547,7 +4547,9 @@ def _prefetch_selected_orderbooks_from_feasibility(
     top-of-book validation before any candidate can become executable.
     """
 
-    if not _table_exists(conn, "execution_feasibility_evidence"):
+    latest_available = _table_exists(conn, "execution_feasibility_latest")
+    history_available = _table_exists(conn, "execution_feasibility_evidence")
+    if not latest_available and not history_available:
         return {}
     already = set(already_prefetched or set())
     max_age_seconds = _positive_float_env(
@@ -4557,6 +4559,16 @@ def _prefetch_selected_orderbooks_from_feasibility(
     cutoff = captured.astimezone(timezone.utc) - timedelta(seconds=max_age_seconds)
     books: dict[str, dict] = {}
     prior_busy_timeout_ms = _pragma_busy_timeout_ms(conn)
+
+    def _fresh_book_from_row(row: sqlite3.Row | tuple | None, *, outcome: dict[str, Any]) -> dict | None:
+        if row is None:
+            return None
+        data = dict(row)
+        quote_seen_at = _parse_snapshot_time(data.get("quote_seen_at"))
+        if quote_seen_at is None or quote_seen_at < cutoff:
+            return None
+        return _orderbook_from_feasibility_row(data, outcome=outcome)
+
     try:
         _set_busy_timeout_ms(conn, _feasibility_prefetch_busy_timeout_ms())
         for _recency, _priority, _ordinal, _market, outcome, _condition_id, direction in selected_candidates:
@@ -4565,19 +4577,44 @@ def _prefetch_selected_orderbooks_from_feasibility(
             token_id = _selected_token_for_direction(outcome, direction)
             if not token_id or token_id in already or token_id in books:
                 continue
+            book = None
             try:
-                row = conn.execute(
-                    """
-                    SELECT token_id, direction, quote_seen_at, book_hash_before,
-                           best_bid_before, best_ask_before, depth_before_json
-                      FROM execution_feasibility_evidence
-                     WHERE token_id = ?
-                     ORDER BY CASE WHEN direction = ? THEN 0 ELSE 1 END,
-                              quote_seen_at DESC, created_at DESC
-                     LIMIT 1
-                    """,
-                    (token_id, str(direction)),
-                ).fetchone()
+                if latest_available:
+                    row = conn.execute(
+                        """
+                        SELECT token_id, direction, quote_seen_at, book_hash_before,
+                               best_bid_before, best_ask_before, depth_before_json
+                          FROM execution_feasibility_latest
+                         WHERE token_id = ?
+                         ORDER BY CASE
+                                      WHEN direction = ? AND COALESCE(depth_before_json, '') != '' THEN 0
+                                      WHEN COALESCE(depth_before_json, '') != '' THEN 1
+                                      ELSE 2
+                                  END,
+                                  quote_seen_at DESC, created_at DESC
+                         LIMIT 1
+                        """,
+                        (token_id, str(direction)),
+                    ).fetchone()
+                    book = _fresh_book_from_row(row, outcome=outcome)
+                if book is None and history_available:
+                    row = conn.execute(
+                        """
+                        SELECT token_id, direction, quote_seen_at, book_hash_before,
+                               best_bid_before, best_ask_before, depth_before_json
+                          FROM execution_feasibility_evidence
+                         WHERE token_id = ?
+                         ORDER BY CASE
+                                      WHEN direction = ? AND COALESCE(depth_before_json, '') != '' THEN 0
+                                      WHEN COALESCE(depth_before_json, '') != '' THEN 1
+                                      ELSE 2
+                                  END,
+                                  quote_seen_at DESC, created_at DESC
+                         LIMIT 1
+                        """,
+                        (token_id, str(direction)),
+                    ).fetchone()
+                    book = _fresh_book_from_row(row, outcome=outcome)
             except Exception as exc:
                 if _is_sqlite_locked_error(exc):
                     logger.info(
@@ -4586,13 +4623,6 @@ def _prefetch_selected_orderbooks_from_feasibility(
                     )
                     break
                 raise
-            if row is None:
-                continue
-            data = dict(row)
-            quote_seen_at = _parse_snapshot_time(data.get("quote_seen_at"))
-            if quote_seen_at is None or quote_seen_at < cutoff:
-                continue
-            book = _orderbook_from_feasibility_row(data, outcome=outcome)
             if book is not None:
                 books[token_id] = book
     finally:

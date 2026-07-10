@@ -813,6 +813,7 @@ class FamilyDecisionEngine:
         served_joint_q: JointQ | None = None,
         served_band: JointQBand | None = None,
         served_payoff_q_lcb_by_side: Mapping[tuple[str, str], float] | None = None,
+        current_state_solve: bool = False,
     ) -> FamilyDecision:
         """Run the full decision pipeline once and emit a ``FamilyDecision`` (spec 876-901).
 
@@ -901,8 +902,12 @@ class FamilyDecisionEngine:
             snapshots_by_bin_id=dict(snapshots),
             captured_at_utc=captured_at_utc,
         )
-        market_implied = build_market_implied_q(
-            family_book, depth_reference_size=self._depth_reference_size
+        market_implied = (
+            None
+            if current_state_solve
+            else build_market_implied_q(
+                family_book, depth_reference_size=self._depth_reference_size
+            )
         )
 
         # --- (5) the family route set (the executable surface per bin/side) ------
@@ -977,6 +982,13 @@ class FamilyDecisionEngine:
                 sizing_candidates=sizing_candidates,
                 max_stake_usd=max_stake_usd,
             )
+        elif current_state_solve:
+            # W3 authority is memoryless. The current served q band and current
+            # executable cost curves are sufficient statistics for this decision;
+            # settlement-fitted reliability and selection calibrators are not read.
+            # Day0 stays above this branch because an observed running extreme is
+            # current source truth, not historical performance evidence.
+            guarded = pre_coherence_scored
         else:
             # --- (6b) q_lcb EMPIRICAL RELIABILITY GUARD (single-serving-rule flow §6) -----
             # The RAW-honest serving rule: deflate each candidate's served q_lcb to
@@ -1037,21 +1049,32 @@ class FamilyDecisionEngine:
             return bin_id in empirical_reliability_bins
 
         candidate_bin_ids = sorted({d.route.bin_id for d in guarded})
-        coherence = assess_market_coherence(
-            joint_q=joint_q,
-            family_book=family_book,
-            candidate_bin_ids=candidate_bin_ids,
-            case_key=case.family_id,
-            licensed_model_superiority=_empirical_or_injected_reliability,
-            min_depth=self._min_depth,
-            max_spread=self._max_spread,
-            depth_reference_size=self._depth_reference_size,
+        coherence = (
+            None
+            if current_state_solve
+            else assess_market_coherence(
+                joint_q=joint_q,
+                family_book=family_book,
+                candidate_bin_ids=candidate_bin_ids,
+                case_key=case.family_id,
+                licensed_model_superiority=_empirical_or_injected_reliability,
+                min_depth=self._min_depth,
+                max_spread=self._max_spread,
+                depth_reference_size=self._depth_reference_size,
+            )
         )
 
         # Re-stamp each candidate's coherence flag from the report. Direction and q_lcb
         # guard fields are already authoritative on ``guarded``.
         scored = tuple(
-            replace(d, coherence_allows=coherence_allows(d.route, coherence))
+            replace(
+                d,
+                coherence_allows=(
+                    True
+                    if current_state_solve
+                    else coherence_allows(d.route, coherence)
+                ),
+            )
             for d in guarded
         )
 
@@ -2135,6 +2158,7 @@ class FamilyDecisionEngine:
                     lead_days=lead_days,
                     bin_class=bin_class,
                     admission_margin=cost,
+                    temperature_metric=str(case.metric),
                 )
                 unarmed_side = str(verdict.basis) == "SIDE_NOT_ARMED"
                 modal_yes_without_selection_bias_evidence = (

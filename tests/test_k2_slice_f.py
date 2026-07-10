@@ -298,3 +298,43 @@ class TestQueryTransitionalPositionHints:
         assert result["trade1"]["entered_at"] == "2026-06-25T10:05:00+00:00"
         assert result["trade1"]["entry_fill_verified"] is True
         assert result["trade1"]["exit_state"] == "retry_pending"
+
+    def test_ignores_payload_key_noise_outside_typed_hint_events(self):
+        from src.state.db import _query_transitional_position_hints
+
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        conn.execute(
+            """
+            CREATE TABLE position_events (
+                position_id TEXT NOT NULL,
+                event_type TEXT NOT NULL,
+                payload_json TEXT,
+                occurred_at TEXT NOT NULL,
+                sequence_no INTEGER NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO position_events
+                (position_id, event_type, payload_json, occurred_at, sequence_no)
+            VALUES
+                ('trade1', 'MONITOR_REFRESHED', '{"entry_fill_verified": true}', '2026-06-25T10:00:00+00:00', 1)
+            """
+        )
+
+        result = _query_transitional_position_hints(conn, ["trade1"])
+        assert "entry_fill_verified" not in result.get("trade1", {})
+
+        conn.execute(
+            """
+            INSERT INTO position_events
+                (position_id, event_type, payload_json, occurred_at, sequence_no)
+            VALUES
+                ('trade1', 'CHAIN_SYNCED', '{"entry_fill_verified": true}', '2026-06-25T10:05:00+00:00', 2)
+            """
+        )
+
+        result = _query_transitional_position_hints(conn, ["trade1"])
+        assert result["trade1"]["entry_fill_verified"] is True

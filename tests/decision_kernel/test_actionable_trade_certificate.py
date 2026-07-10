@@ -1,5 +1,5 @@
 # Created: 2026-05-25
-# Last reused or audited: 2026-05-25
+# Last reused or audited: 2026-07-09
 # Authority basis: docs/operations/edli_v1/EDLI_REDEMPTION_FINAL_PACKAGE_SPEC.md §14 full-live increment.
 from __future__ import annotations
 
@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 import pytest
 
 from src.decision_kernel import claims
+from src.decision_kernel.canonicalization import qkernel_current_state_identity_hash
 from src.decision_kernel.certificate import ParentEdge, build_certificate
 from src.decision_kernel.errors import CertificateVerificationError
 from src.decision_kernel.ledger import DecisionCertificateLedger
@@ -71,7 +72,7 @@ def test_actionable_accepts_day0_observation_authority_with_qkernel():
     verify_actionable_trade(action, parents)
 
 
-def test_actionable_rejects_degenerate_day0_remaining_window_q():
+def test_actionable_accepts_degenerate_day0_remaining_window_guarded_q():
     parents, action = actionable_graph(
         action_payload={
             "event_type": "DAY0_EXTREME_UPDATED",
@@ -98,6 +99,56 @@ def test_actionable_rejects_degenerate_day0_remaining_window_q():
                 **_day0_qkernel_economics(),
                 "payoff_q_point": 0.6,
                 "payoff_q_lcb": 0.6,
+                "selection_guard_q_safe": 0.6,
+            },
+        },
+        extra_parent_payloads={
+            claims.DAY0_AUTHORITY: {
+                "event_id": "event-1",
+                "authority": "DAY0_LIVE_OBSERVATION_HARD_FACT",
+            },
+            claims.ABSORBING_BOUNDARY: {
+                "event_id": "event-1",
+                "boundary": "day0_absorbing_hard_fact",
+            },
+        },
+    )
+
+    verify_actionable_trade(action, parents)
+
+
+def test_actionable_rejects_degenerate_day0_inert_pass_through_q():
+    parents, action = actionable_graph(
+        action_payload={
+            "event_type": "DAY0_EXTREME_UPDATED",
+            "source_match_status": "MATCH",
+            "local_date_status": "MATCH",
+            "station_match_status": "MATCH",
+            "dst_status": "UNAMBIGUOUS",
+            "metric_match_status": "MATCH",
+            "rounding_status": "MATCH",
+            "source_authorized_status": "AUTHORIZED",
+            "live_authority_status": "live",
+            "raw_value": 20.0,
+            "rounded_value": 20,
+            "observation_time": "2026-05-25T11:30:00+00:00",
+            "observation_available_at": "2026-05-25T11:35:00+00:00",
+            "day0_probability_authority": _day0_probability_authority(),
+            "_edli_q_source": "day0_remaining_day",
+            "_edli_day0_q_mode": "remaining_day",
+            "_edli_day0_remaining_models": 3,
+            "_edli_day0_lcb_transform": _day0_lcb_transform(),
+            "q_live": 0.6,
+            "q_lcb_5pct": 0.6,
+            "qkernel_execution_economics": {
+                **_day0_qkernel_economics(),
+                "payoff_q_point": 0.6,
+                "payoff_q_lcb": 0.6,
+                "selection_guard_q_safe": 0.6,
+                "q_lcb_guard_basis": "INERT",
+                "selection_guard_basis": "INERT",
+                "q_lcb_guard_cell_key": "high|L1|YES|modal|qb12|coarse_global",
+                "selection_guard_cell_key": "high|L1|YES|modal|qb12|coarse_global",
             },
         },
         extra_parent_payloads={
@@ -265,6 +316,92 @@ def test_actionable_rejects_center_yes_below_quality_floor():
         CertificateVerificationError,
         match="ADMISSION_QKERNEL_CENTER_YES_QUALITY_FLOOR",
     ):
+        verify_actionable_trade(action, parents)
+
+
+def test_actionable_current_state_solver_skips_legacy_quality_and_roi_floors():
+    q_live = 0.12
+    q_lcb = 0.10
+    cost = 0.04
+    economics = {
+        **_action_payload()["qkernel_execution_economics"],
+        "payoff_q_point": q_live,
+        "payoff_q_lcb": q_lcb,
+        "cost": cost,
+        "edge_lcb": q_lcb - cost,
+        "optimal_stake_usd": 0.01,
+        "decision_id": "decision-current-1",
+        "receipt_hash": "receipt-current-1",
+        "q_version": "q-current-1",
+        "sample_hash": "current-sample-hash",
+        "q_lcb_guard_basis": "CURRENT_POSTERIOR_BAND",
+        "q_lcb_guard_abstained": False,
+        "q_lcb_guard_cell_key": "current-sample-hash",
+        "selection_guard_basis": "CURRENT_POSTERIOR_BAND",
+        "selection_guard_abstained": False,
+        "selection_guard_cell_key": "current-sample-hash",
+        "selection_guard_n": 64,
+        "selection_guard_q_safe": q_lcb,
+    }
+    economics["current_state_identity_hash"] = qkernel_current_state_identity_hash(economics)
+    parents, action = actionable_graph(
+        parent_overrides={
+            claims.BELIEF: {
+                "qkernel_decision_id": economics["decision_id"],
+                "qkernel_receipt_hash": economics["receipt_hash"],
+                "qkernel_q_version": economics["q_version"],
+                "qkernel_sample_hash": economics["sample_hash"],
+                "qkernel_current_state_identity_hash": economics[
+                    "current_state_identity_hash"
+                ],
+            }
+        },
+        action_payload={
+            "q_live": q_live,
+            "q_lcb_5pct": q_lcb,
+            "c_fee_adjusted": cost,
+            "c_cost_95pct": cost,
+            "trade_score": q_lcb - cost,
+            "action_score": q_lcb - cost,
+            "qkernel_execution_economics": economics,
+        }
+    )
+
+    verify_actionable_trade(action, parents)
+
+
+def test_actionable_current_state_identity_must_match_belief_parent():
+    economics = {
+        **_action_payload()["qkernel_execution_economics"],
+        "decision_id": "decision-current-1",
+        "receipt_hash": "receipt-current-1",
+        "q_version": "q-current-1",
+        "sample_hash": "current-sample-hash",
+        "q_lcb_guard_basis": "CURRENT_POSTERIOR_BAND",
+        "q_lcb_guard_abstained": False,
+        "q_lcb_guard_cell_key": "current-sample-hash",
+        "selection_guard_basis": "CURRENT_POSTERIOR_BAND",
+        "selection_guard_abstained": False,
+        "selection_guard_cell_key": "current-sample-hash",
+        "selection_guard_n": 64,
+    }
+    economics["current_state_identity_hash"] = qkernel_current_state_identity_hash(economics)
+    parents, action = actionable_graph(
+        parent_overrides={
+            claims.BELIEF: {
+                "qkernel_decision_id": economics["decision_id"],
+                "qkernel_receipt_hash": economics["receipt_hash"],
+                "qkernel_q_version": "different-q-version",
+                "qkernel_sample_hash": economics["sample_hash"],
+                "qkernel_current_state_identity_hash": economics[
+                    "current_state_identity_hash"
+                ],
+            }
+        },
+        action_payload={"qkernel_execution_economics": economics},
+    )
+
+    with pytest.raises(CertificateVerificationError, match="belief.qkernel_q_version"):
         verify_actionable_trade(action, parents)
 
 

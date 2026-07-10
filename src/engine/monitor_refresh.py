@@ -94,6 +94,9 @@ _NOWCAST_PERSISTENT_FAILURE_THRESHOLD = 3
 _DAY0_LOW_EXTREME_AUTHORITY_HOURS = 6.0
 SELECTED_METHOD_DAY0_ABSORBING_HARD_FACT = "day0_absorbing_hard_fact"
 SELECTED_METHOD_DAY0_OBSERVATION_REMAINING_WINDOW = "day0_observation_remaining_window"
+SELECTED_METHOD_DAY0_OBS_CONDITIONED_DAILY_EXTREMA = (
+    "day0_observation_conditioned_daily_extrema"
+)
 _DAY0_STALE_OBSERVATION_REJECTION_PREFIX = (
     "Day0 observation is stale for executable probability generation:"
 )
@@ -191,17 +194,50 @@ def _held_side_probability_from_yes_bin_probability(p_yes_bin: float, direction:
 
 
 def _day0_remaining_window_belief_validations(metric: str | None = None) -> list[str]:
+    return _day0_monitor_belief_validations(
+        SELECTED_METHOD_DAY0_OBSERVATION_REMAINING_WINDOW,
+        kind="probabilistic_remaining_window",
+        metric=metric,
+    )
+
+
+def _day0_conditioned_daily_extrema_belief_validations(
+    metric: str | None = None,
+) -> list[str]:
+    return _day0_monitor_belief_validations(
+        SELECTED_METHOD_DAY0_OBS_CONDITIONED_DAILY_EXTREMA,
+        kind="probabilistic_observed_bound_conditioned_daily_extrema",
+        metric=metric,
+    )
+
+
+def _day0_monitor_belief_validations(
+    selected_method: str,
+    *,
+    kind: str,
+    metric: str | None = None,
+) -> list[str]:
     metric_part = f";metric={metric}" if metric else ""
     return [
-        "day0_observation_remaining_window",
+        selected_method,
         (
-            "belief_source=day0_observation_remaining_window"
-            f";kind=probabilistic_remaining_window{metric_part}"
+            f"belief_source={selected_method}"
+            f";kind={kind}{metric_part}"
             ";posterior_mode=model_only_v1"
         ),
-        "market_quote_prior_excluded:day0_observation_remaining_window",
-        "alpha_blend_inapplicable:day0_observation_remaining_window",
+        f"market_quote_prior_excluded:{selected_method}",
+        f"alpha_blend_inapplicable:{selected_method}",
     ]
+
+
+def _day0_selected_belief_validations(
+    selected_method: str,
+    *,
+    metric: str | None = None,
+) -> list[str]:
+    if selected_method == SELECTED_METHOD_DAY0_OBS_CONDITIONED_DAILY_EXTREMA:
+        return _day0_conditioned_daily_extrema_belief_validations(metric)
+    return _day0_remaining_window_belief_validations(metric)
 
 
 def _stamp_day0_remaining_window_belief(
@@ -209,8 +245,40 @@ def _stamp_day0_remaining_window_belief(
     *,
     metric: str | None = None,
 ) -> None:
-    setattr(position, "selected_method", SELECTED_METHOD_DAY0_OBSERVATION_REMAINING_WINDOW)
-    for validation in _day0_remaining_window_belief_validations(metric):
+    _stamp_day0_monitor_belief(
+        position,
+        selected_method=SELECTED_METHOD_DAY0_OBSERVATION_REMAINING_WINDOW,
+        kind="probabilistic_remaining_window",
+        metric=metric,
+    )
+
+
+def _stamp_day0_conditioned_daily_extrema_belief(
+    position: Position,
+    *,
+    metric: str | None = None,
+) -> None:
+    _stamp_day0_monitor_belief(
+        position,
+        selected_method=SELECTED_METHOD_DAY0_OBS_CONDITIONED_DAILY_EXTREMA,
+        kind="probabilistic_observed_bound_conditioned_daily_extrema",
+        metric=metric,
+    )
+
+
+def _stamp_day0_monitor_belief(
+    position: Position,
+    *,
+    selected_method: str,
+    kind: str,
+    metric: str | None = None,
+) -> None:
+    setattr(position, "selected_method", selected_method)
+    for validation in _day0_monitor_belief_validations(
+        selected_method,
+        kind=kind,
+        metric=metric,
+    ):
         _append_monitor_validation(position, validation)
 
 
@@ -1197,6 +1265,66 @@ def _read_day0_raw_model_extrema(
         "forecast_source_role": "day0_daily_extrema_live",
         "source_cycle_time": cycle,
     }
+
+
+def _condition_daily_extrema_to_observed_bound(
+    daily_extrema,
+    *,
+    temperature_metric: MetricIdentity,
+    observed_extreme: float | None,
+    temporal_context,
+    hours_remaining: float,
+) -> np.ndarray | None:
+    """Convert daily-final extrema into a Day0 residual proxy.
+
+    ``raw_model_forecasts.single_runs`` stores final daily extrema, not future
+    remaining-window extrema. A same-day monitor may still use it as weak
+    forecast evidence when hourly vectors are unavailable, but only after
+    conditioning it on the already-observed settlement bound and the remaining
+    temporal opportunity. This keeps the source distinct from
+    ``day0_remaining_window_live`` and prevents stale daily highs from
+    overriding a post-peak observed max.
+    """
+
+    try:
+        observed = float(observed_extreme)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+    if not np.isfinite(observed):
+        return None
+    try:
+        values = np.asarray(daily_extrema, dtype=float)
+    except (TypeError, ValueError):
+        return None
+    values = values[np.isfinite(values)]
+    if values.size == 0:
+        return None
+
+    if temperature_metric.is_low():
+        try:
+            hours = max(0.0, float(hours_remaining))
+        except (TypeError, ValueError):
+            hours = _DAY0_LOW_EXTREME_AUTHORITY_HOURS
+        residual_factor = min(1.0, hours / _DAY0_LOW_EXTREME_AUTHORITY_HOURS)
+        lower_residual = np.maximum(observed - values, 0.0)
+        return observed - residual_factor * lower_residual
+
+    try:
+        post_peak_confidence = float(
+            getattr(temporal_context, "post_peak_confidence", 0.0) or 0.0
+        )
+    except (TypeError, ValueError):
+        post_peak_confidence = 0.0
+    peak_factor = 1.0 - min(1.0, max(0.0, post_peak_confidence))
+    try:
+        daylight_progress = getattr(temporal_context, "daylight_progress", None)
+        if daylight_progress is not None:
+            daylight_factor = 1.0 - min(1.0, max(0.0, float(daylight_progress)))
+            peak_factor = min(peak_factor, daylight_factor)
+    except (TypeError, ValueError):
+        pass
+    higher_residual = np.maximum(values - observed, 0.0)
+    return observed + peak_factor * higher_residual
 
 
 def _monitor_city_id(city) -> str:
@@ -2622,6 +2750,10 @@ def _refresh_day0_observation(
 
     ens_result = _read_day0_hourly_vectors(city=city, target_d=target_d)
     live_forecast_source = "day0_hourly_vectors"
+    day0_selected_method = SELECTED_METHOD_DAY0_OBSERVATION_REMAINING_WINDOW
+    daily_extrema_conditioned = False
+    raw_daily_member_extrema_for_receipt = None
+    forecast_source_validations: list[str] = []
     if ens_result is not None:
         forecast_source_validations = _monitor_forecast_source_validations(ens_result)
         hourly_bundle_rejection = _day0_hourly_bundle_authority_rejection_reason(ens_result)
@@ -2659,7 +2791,10 @@ def _refresh_day0_observation(
                 "day0_live_forecast_unavailable",
             ]
         raw_forecast_role = str(raw_extrema.get("forecast_source_role") or "")
-        if raw_forecast_role != "day0_remaining_window_live":
+        if (
+            raw_forecast_role != "day0_remaining_window_live"
+            and raw_forecast_role != "day0_daily_extrema_live"
+        ):
             _set_monitor_probability_fresh(position, False)
             _set_day0_zero_probability_exit_authority(position, False)
             return position.p_posterior, [
@@ -2682,12 +2817,29 @@ def _refresh_day0_observation(
             target_d,
             now=temporal_context.current_utc_timestamp,
         )
-        live_forecast_source = "day0_raw_model_extrema"
+        if raw_forecast_role == "day0_daily_extrema_live":
+            day0_selected_method = SELECTED_METHOD_DAY0_OBS_CONDITIONED_DAILY_EXTREMA
+            daily_extrema_conditioned = True
+            raw_daily_member_extrema_for_receipt = raw_extrema["member_extrema"]
+            live_forecast_source = "day0_observed_bound_conditioned_daily_extrema"
+        else:
+            live_forecast_source = "day0_raw_model_extrema"
         forecast_source_validations = [
             f"forecast_source_id:{raw_extrema['source_id']}",
             f"forecast_source_role:{raw_forecast_role}",
             f"forecast_source_cycle_time:{raw_extrema['source_cycle_time']}",
         ]
+        if daily_extrema_conditioned:
+            forecast_source_validations.extend(
+                [
+                    "day0_remaining_window_hourly_bundle_unavailable",
+                    (
+                        "day0_daily_extrema_not_remaining_window:"
+                        f"{raw_forecast_role}"
+                    ),
+                    "day0_daily_extrema_conditioned_on_observed_bound",
+                ]
+            )
 
     semantics = SettlementSemantics.for_city(city)
     observed_high_so_far = _finite_day0_observation_float(obs, "high_so_far")
@@ -2725,6 +2877,31 @@ def _refresh_day0_observation(
             live_forecast_source,
             "observation_quality_gate",
         ]
+    if daily_extrema_conditioned:
+        from src.signal.day0_extrema import RemainingMemberExtrema
+
+        conditioned_extrema = _condition_daily_extrema_to_observed_bound(
+            raw_daily_member_extrema_for_receipt,
+            temperature_metric=temperature_metric,
+            observed_extreme=(
+                observed_low_so_far if temperature_metric.is_low() else observed_high_so_far
+            ),
+            temporal_context=temporal_context,
+            hours_remaining=hours_remaining,
+        )
+        if conditioned_extrema is None:
+            _set_monitor_probability_fresh(position, False)
+            return position.p_posterior, [
+                "day0_observation",
+                *coverage_validations,
+                live_forecast_source,
+                *forecast_source_validations,
+                "day0_daily_extrema_conditioning_unavailable",
+            ]
+        extrema = RemainingMemberExtrema.for_metric(
+            conditioned_extrema,
+            temperature_metric,
+        )
     member_extrema_for_metric = extrema.mins if temperature_metric.is_low() else extrema.maxes
     observed_extreme_for_metric = observed_low_so_far if temperature_metric.is_low() else observed_high_so_far
     _maybe_write_day0_metric_fact(
@@ -2799,6 +2976,11 @@ def _refresh_day0_observation(
         ]
     p_cal_full = p_cal_full / p_cal_sum
     p_cal_yes = float(p_cal_full[held_idx])
+    raw_vector_normalization_validation = (
+        "day0_conditioned_daily_extrema_raw_vector_normalization"
+        if daily_extrema_conditioned
+        else "day0_remaining_window_raw_vector_normalization"
+    )
     applied = [
         "day0_observation",
         *coverage_validations,
@@ -2806,7 +2988,7 @@ def _refresh_day0_observation(
         *forecast_source_validations,
         *maturity_validations,
         "mc_instrument_noise",
-        "day0_remaining_window_raw_vector_normalization",
+        raw_vector_normalization_validation,
     ]
 
     member_extrema = extrema.mins if temperature_metric.is_low() else extrema.maxes
@@ -2831,6 +3013,7 @@ def _refresh_day0_observation(
     zero_probability_exit_authority_candidate = (
         maturity_rejection is None
         and "day0_observation_stale_monitor_bound" not in coverage_validations
+        and not daily_extrema_conditioned
     )
     held_probability_collapsed = current_p_posterior <= 1e-9
     if held_probability_collapsed and zero_probability_exit_authority_candidate:
@@ -2843,7 +3026,11 @@ def _refresh_day0_observation(
         zero_probability_exit_authority_reason = (
             "mature_day0_extreme"
             if zero_probability_exit_authority
-            else "stale_or_immature_day0_remaining_window"
+            else (
+                "daily_extrema_conditioned_not_hard_fact"
+                if daily_extrema_conditioned
+                else "stale_or_immature_day0_remaining_window"
+            )
         )
     if held_probability_collapsed and not zero_probability_exit_authority:
         applied.append("day0_zero_probability_exit_authority_blocked")
@@ -2852,7 +3039,7 @@ def _refresh_day0_observation(
         "_day0_monitor_probability_receipt",
         {
             "schema_version": 1,
-            "selected_method": SELECTED_METHOD_DAY0_OBSERVATION_REMAINING_WINDOW,
+            "selected_method": day0_selected_method,
             "metric": temperature_metric.temperature_metric,
             "unit": str(getattr(city, "settlement_unit", "") or ""),
             "target_date": str(target_d),
@@ -2905,6 +3092,11 @@ def _refresh_day0_observation(
                 "forecast_source_validations": list(forecast_source_validations),
                 "hours_remaining": _monitor_receipt_float(hours_remaining),
                 "member_extrema_summary": _monitor_receipt_quantiles(member_extrema),
+                "raw_member_extrema_summary": (
+                    _monitor_receipt_quantiles(raw_daily_member_extrema_for_receipt)
+                    if raw_daily_member_extrema_for_receipt is not None
+                    else None
+                ),
             },
             "temporal_context": {
                 "daypart": str(getattr(temporal_context, "daypart", "") or ""),
@@ -2930,20 +3122,27 @@ def _refresh_day0_observation(
         "calibrator": None,
         "lead_days": 0.0,
         "unit": city.settlement_unit,
-        "bootstrap_signal_type": SELECTED_METHOD_DAY0_OBSERVATION_REMAINING_WINDOW,
+        "bootstrap_signal_type": day0_selected_method,
     })
 
-    _stamp_day0_remaining_window_belief(
-        position,
-        metric=temperature_metric.temperature_metric,
-    )
+    if day0_selected_method == SELECTED_METHOD_DAY0_OBS_CONDITIONED_DAILY_EXTREMA:
+        _stamp_day0_conditioned_daily_extrema_belief(
+            position,
+            metric=temperature_metric.temperature_metric,
+        )
+    else:
+        _stamp_day0_remaining_window_belief(
+            position,
+            metric=temperature_metric.temperature_metric,
+        )
     _set_day0_zero_probability_exit_authority(position, zero_probability_exit_authority)
     if held_probability_collapsed and not zero_probability_exit_authority:
         _set_monitor_probability_fresh(position, False)
         return position.p_posterior, [
             *applied,
-            *_day0_remaining_window_belief_validations(
-                temperature_metric.temperature_metric,
+            *_day0_selected_belief_validations(
+                day0_selected_method,
+                metric=temperature_metric.temperature_metric,
             ),
         ]
     _set_monitor_probability_fresh(position, True)
@@ -2967,8 +3166,9 @@ def _refresh_day0_observation(
 
     return current_p_posterior, [
         *applied,
-        *_day0_remaining_window_belief_validations(
-            temperature_metric.temperature_metric,
+        *_day0_selected_belief_validations(
+            day0_selected_method,
+            metric=temperature_metric.temperature_metric,
         ),
     ]
 
@@ -3706,7 +3906,16 @@ def _refresh_day0_monitor_probability(
             ).temperature_metric
         except Exception:
             _day0_metric = None
-        _stamp_day0_remaining_window_belief(refresh_pos, metric=_day0_metric)
+        if (
+            str(getattr(refresh_pos, "selected_method", "") or "")
+            == SELECTED_METHOD_DAY0_OBS_CONDITIONED_DAILY_EXTREMA
+        ):
+            _stamp_day0_conditioned_daily_extrema_belief(
+                refresh_pos,
+                metric=_day0_metric,
+            )
+        else:
+            _stamp_day0_remaining_window_belief(refresh_pos, metric=_day0_metric)
     else:
         _append_monitor_validation(
             refresh_pos,

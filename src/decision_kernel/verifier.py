@@ -8,7 +8,10 @@ import math
 from typing import Iterable
 
 from src.decision_kernel import claims
-from src.decision_kernel.canonicalization import stable_hash
+from src.decision_kernel.canonicalization import (
+    qkernel_current_state_identity_hash,
+    stable_hash,
+)
 from src.decision_kernel.certificate import DecisionCertificate, certificate_hash_for
 from src.decision_kernel.errors import CertificateVerificationError
 from src.decision_kernel.modes import ALLOWED_MODES, is_live_like
@@ -574,26 +577,27 @@ def _verify_actionable_qkernel_economics(
         raise CertificateVerificationError("actionable qkernel false_edge_rate blocks")
     if abs((payoff_q_lcb - cost) - edge_lcb) > 1e-6:
         raise CertificateVerificationError("actionable qkernel payoff edge inconsistent")
-    quality_reason = live_entry_probability_quality_rejection_reason(
-        q_lcb=payoff_q_lcb,
-        direction=payload.get("direction"),
-        strategy_key=payload.get("strategy_key"),
-        selection_authority_applied=payload.get("selection_authority_applied"),
-        qkernel_execution_economics=economics,
-    )
-    if quality_reason is not None:
-        raise CertificateVerificationError(f"actionable {quality_reason}")
-    if not roi_frontier_useful_values(
-        side=qkernel_side,
-        cost=cost,
-        payoff_q_lcb=payoff_q_lcb,
-        edge_lcb=edge_lcb,
-        stake=optimal_stake_usd,
-        delta_u_at_min=delta_u_at_min,
-    ):
-        raise CertificateVerificationError(
-            "actionable qkernel roi frontier not useful"
+    if not _current_state_solve_payload(payload):
+        quality_reason = live_entry_probability_quality_rejection_reason(
+            q_lcb=payoff_q_lcb,
+            direction=payload.get("direction"),
+            strategy_key=payload.get("strategy_key"),
+            selection_authority_applied=payload.get("selection_authority_applied"),
+            qkernel_execution_economics=economics,
         )
+        if quality_reason is not None:
+            raise CertificateVerificationError(f"actionable {quality_reason}")
+        if not roi_frontier_useful_values(
+            side=qkernel_side,
+            cost=cost,
+            payoff_q_lcb=payoff_q_lcb,
+            edge_lcb=edge_lcb,
+            stake=optimal_stake_usd,
+            delta_u_at_min=delta_u_at_min,
+        ):
+            raise CertificateVerificationError(
+                "actionable qkernel roi frontier not useful"
+            )
     if not _qkernel_direction_admitted(economics, direction=payload.get("direction")):
         raise CertificateVerificationError("actionable qkernel direction admission missing")
     if economics.get("coherence_allows") is not True:
@@ -609,6 +613,7 @@ def _verify_actionable_parent_consistency(
     causal = _required_parent_payload(parent, claims.CAUSAL_EVENT)
     topology = _required_parent_payload(parent, claims.MARKET_TOPOLOGY)
     family = _required_parent_payload(parent, claims.FAMILY_CLOSURE)
+    belief = _required_parent_payload(parent, claims.BELIEF)
     executable = _required_parent_payload(parent, claims.EXECUTABLE_SNAPSHOT)
     quote = _required_parent_payload(parent, claims.QUOTE_FEASIBILITY)
     cost = _required_parent_payload(parent, claims.COST_MODEL)
@@ -617,6 +622,22 @@ def _verify_actionable_parent_consistency(
     kelly = _required_parent_payload(parent, claims.KELLY_DRY_RUN)
     risk = _required_parent_payload(parent, claims.RISK_LEVEL)
     live_cap = _required_parent_payload(parent, claims.LIVE_CAP)
+
+    if _current_state_solve_payload(payload):
+        economics = payload["qkernel_execution_economics"]
+        for economics_field, belief_field in (
+            ("decision_id", "qkernel_decision_id"),
+            ("receipt_hash", "qkernel_receipt_hash"),
+            ("q_version", "qkernel_q_version"),
+            ("sample_hash", "qkernel_sample_hash"),
+            ("current_state_identity_hash", "qkernel_current_state_identity_hash"),
+        ):
+            _require_equal(
+                f"actionable.qkernel_execution_economics.{economics_field}",
+                economics.get(economics_field),
+                f"belief.{belief_field}",
+                belief.get(belief_field),
+            )
 
     _require_equal("actionable.event_id", payload.get("event_id"), "causal.event_id", causal.get("event_id"))
     _require_equal(
@@ -898,10 +919,11 @@ def _verify_pre_submit_revalidation_for_command(
         raise CertificateVerificationError("pre-submit revalidation limit_price below strategy entry floor")
     if size <= 0.0:
         raise CertificateVerificationError("pre-submit revalidation size must be positive")
-    if submit_edge * size + 1e-9 < effective_min_expected_profit_usd:
-        raise CertificateVerificationError("pre-submit revalidation expected profit below strategy floor")
-    if submit_edge / limit_price + 1e-9 < effective_min_submit_edge_density:
-        raise CertificateVerificationError("pre-submit revalidation submit edge density below strategy floor")
+    if not _current_state_solve_payload(pre_submit):
+        if submit_edge * size + 1e-9 < effective_min_expected_profit_usd:
+            raise CertificateVerificationError("pre-submit revalidation expected profit below strategy floor")
+        if submit_edge / limit_price + 1e-9 < effective_min_submit_edge_density:
+            raise CertificateVerificationError("pre-submit revalidation submit edge density below strategy floor")
     _verify_pre_submit_probability_authority(pre_submit, q_live=q_live, q_lcb=q_lcb)
 
 
@@ -1540,7 +1562,45 @@ def _finite_float(value: object, field_name: str) -> float:
 
 def _entry_floor_applies(payload: dict) -> bool:
     direction = str(payload.get("direction") or "").strip().lower()
-    return direction in {"buy_yes", "buy_no"}
+    return direction in {"buy_yes", "buy_no"} and not _current_state_solve_payload(payload)
+
+
+def _current_state_solve_payload(payload: dict) -> bool:
+    """Whether this certificate uses only the current served posterior band.
+
+    The marker removes legacy side/win-rate/price/profit-density floors.  It does
+    not relax certificate identity, current-q, executable-price, freshness, risk,
+    size, or positive-after-cost edge checks.
+    """
+
+    economics = payload.get("qkernel_execution_economics")
+    if not isinstance(economics, dict):
+        return False
+    basis = "CURRENT_POSTERIOR_BAND"
+    sample_hash = str(economics.get("sample_hash") or "").strip()
+    q_lcb_sample_hash = str(economics.get("q_lcb_guard_cell_key") or "").strip()
+    selection_hash = str(economics.get("selection_guard_cell_key") or "").strip()
+    try:
+        n_draws = int(economics.get("selection_guard_n") or 0)
+    except (TypeError, ValueError):
+        return False
+    return (
+        str(payload.get("selection_authority_applied") or "").strip() == "qkernel_spine"
+        and str(economics.get("source") or "").strip() == "qkernel_spine"
+        and bool(str(economics.get("decision_id") or "").strip())
+        and bool(str(economics.get("receipt_hash") or "").strip())
+        and bool(str(economics.get("q_version") or "").strip())
+        and str(economics.get("current_state_identity_hash") or "").strip()
+        == qkernel_current_state_identity_hash(economics)
+        and str(economics.get("q_lcb_guard_basis") or "").strip() == basis
+        and str(economics.get("selection_guard_basis") or "").strip() == basis
+        and economics.get("q_lcb_guard_abstained") is False
+        and economics.get("selection_guard_abstained") is False
+        and bool(sample_hash)
+        and q_lcb_sample_hash == sample_hash
+        and selection_hash == sample_hash
+        and n_draws >= 2
+    )
 
 
 def _verify_live_entry_win_rate_floor(

@@ -333,6 +333,41 @@ def test_repair_missing_processing_rows_backfills_decision_events_only():
     assert rows == {decision.event_id: "pending"}
 
 
+def test_repair_missing_processing_rows_skips_historical_rows():
+    conn = _world_conn()
+    store = EventStore(conn)
+    recent = _event(
+        "snap-recent",
+        0,
+        "2026-05-26T04:15:00+00:00",
+        "2026-05-26T04:16:00+00:00",
+    )
+    historical = _event(
+        "snap-historical",
+        0,
+        "2026-05-24T04:15:00+00:00",
+        "2026-05-24T04:16:00+00:00",
+    )
+    assert store.insert_or_ignore(recent) is True
+    assert store.insert_or_ignore(historical) is True
+    conn.execute("DELETE FROM opportunity_event_processing")
+    conn.commit()
+
+    repaired = store.repair_missing_processing_rows(
+        decision_time="2026-05-27T05:00:00+00:00",
+        batch_limit=10,
+    )
+
+    assert repaired == 1
+    rows = {
+        row["event_id"]: row["processing_status"]
+        for row in conn.execute(
+            "SELECT event_id, processing_status FROM opportunity_event_processing"
+        )
+    }
+    assert rows == {recent.event_id: "pending"}
+
+
 def test_requeue_processed_day0_entries_paused_when_pause_cleared():
     conn = _world_conn()
     store = EventStore(conn)

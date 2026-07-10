@@ -150,6 +150,45 @@ def test_live_trading_launchd_watchdog_bootstraps_only_when_sidecars_match(
     assert json.loads(status_path.read_text())["action"] == "bootstrapped"
 
 
+def test_live_trading_launchd_watchdog_reports_loaded_but_failed_service(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("ZEUS_MODE", "live")
+    monkeypatch.setenv("ZEUS_GUI_DOMAIN", "gui/501")
+    status_path = tmp_path / "watchdog.json"
+    calls: list[list[str]] = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append(list(cmd))
+        if cmd[:2] == ["launchctl", "print"]:
+            return SimpleNamespace(
+                returncode=0,
+                stdout=(
+                    "state = spawn scheduled\n"
+                    "active count = 0\n"
+                    "last exit code = 1\n"
+                ),
+                stderr="",
+            )
+        raise AssertionError(f"unexpected command: {cmd}")
+
+    result = recover_missing_live_trading_launchd_if_needed(
+        now=datetime(2026, 7, 9, 14, 0, tzinfo=timezone.utc),
+        run_cmd=fake_run,
+        status_path=status_path,
+    )
+
+    written = json.loads(status_path.read_text())
+    assert result["ok"] is False
+    assert result["action"] == "blocked"
+    assert result["reason"] == "service_loaded_not_running"
+    assert result["launchd_state"] == "spawn scheduled"
+    assert result["last_exit_status"] == 1
+    assert written["reason"] == "service_loaded_not_running"
+    assert calls == [["launchctl", "print", "gui/501/com.zeus.live-trading"]]
+
+
 def test_live_trading_launchd_watchdog_blocks_when_sidecars_are_stale(
     tmp_path,
     monkeypatch,

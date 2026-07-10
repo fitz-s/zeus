@@ -1,5 +1,5 @@
 # Created: 2026-06-11
-# Last reused or audited: 2026-07-08
+# Last reused or audited: 2026-07-09
 # Authority basis: operator directive 2026-06-11 ~16:30Z — stale-decision-vs-fresh-book
 #   races were TERMINAL. Live evidence: Miami 16:22:35Z cleared EVERY gate and aborted at
 #   JIT recapture (SUBMIT_ABORTED_PRICE_MOVED: recaptured all-in 0.5136 > max 0.5025 +
@@ -28,7 +28,7 @@ at the fresh price. Every OTHER certificate-build failure stays terminal.
 from __future__ import annotations
 
 import sqlite3
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from src.events.event_store import EventStore
 from src.events.opportunity_event import ForecastSnapshotReadyPayload, make_opportunity_event
@@ -37,6 +37,7 @@ from src.events.reactor import (
     OpportunityEventReactor,
     _is_executable_snapshot_refresh_reason,
     _is_transient_money_path_reason,
+    _runtime_authority_retry_delay_seconds,
     _snapshot_block_retry_delay_seconds,
 )
 from src.state.db import init_schema
@@ -62,6 +63,12 @@ _OTHER_CERT_REASON = "EDLI_LIVE_CERTIFICATE_BUILD_FAILED:SOME_OTHER_ASSERTION_FA
 
 def test_price_moved_is_transient():
     assert _is_transient_money_path_reason(_PRICE_MOVED_REASON)
+
+
+def test_live_health_entry_authority_is_transient():
+    assert _is_transient_money_path_reason(
+        "live_health_entry_authority:LIVE_SIDECAR_BOOT_BLOCKED"
+    )
 
 
 def test_venue_rejected_400_is_submit_race_transient():
@@ -154,6 +161,17 @@ def test_snapshot_block_retry_floor_backs_off_without_attempt_cap(monkeypatch):
     assert _snapshot_block_retry_delay_seconds(attempt_count=1) == 60.0
     assert _snapshot_block_retry_delay_seconds(attempt_count=3) == 180.0
     assert _snapshot_block_retry_delay_seconds(attempt_count=33) == 600.0
+
+
+def test_runtime_authority_retry_floor_is_bounded(monkeypatch):
+    monkeypatch.setenv("ZEUS_RUNTIME_AUTHORITY_RETRY_DELAY_SECONDS", "120")
+    assert _runtime_authority_retry_delay_seconds() == 120.0
+
+    monkeypatch.setenv("ZEUS_RUNTIME_AUTHORITY_RETRY_DELAY_SECONDS", "5")
+    assert _runtime_authority_retry_delay_seconds() == 30.0
+
+    monkeypatch.setenv("ZEUS_RUNTIME_AUTHORITY_RETRY_DELAY_SECONDS", "1200")
+    assert _runtime_authority_retry_delay_seconds() == 900.0
 
 
 def test_empty_reason_not_transient():
@@ -267,6 +285,13 @@ def _status(conn, event_id: str) -> str:
     ).fetchone()[0]
 
 
+def _claimed_at(conn, event_id: str) -> str | None:
+    return conn.execute(
+        "SELECT claimed_at FROM opportunity_event_processing WHERE event_id = ?",
+        (event_id,),
+    ).fetchone()[0]
+
+
 _DT = datetime(2026, 6, 4, 18, 10, tzinfo=timezone.utc)
 # Chicago 2026-06-05 strictly-past-in-tz boundary is 2026-06-06T05:00Z; this is
 # after it, so the timeliness horizon has expired for the test event.
@@ -288,6 +313,40 @@ def test_price_moved_requeues_not_terminal():
     assert _status(conn, event.event_id) == "pending", (
         "PRICE_MOVED must requeue (transient), not terminally consume the opportunity"
     )
+
+
+def test_price_moved_requeue_has_no_runtime_pause_floor(monkeypatch):
+    monkeypatch.setenv("ZEUS_RUNTIME_AUTHORITY_RETRY_DELAY_SECONDS", "120")
+    conn, store = _store()
+    event = _event("snap-pm-no-floor")
+    store.insert_or_ignore(event)
+    reactor = _reactor_with_reason(conn, store, _PRICE_MOVED_REASON)
+
+    result = reactor.process_pending(decision_time=_DT, limit=10)
+
+    assert result.retried == 1
+    assert _status(conn, event.event_id) == "pending"
+    assert _claimed_at(conn, event.event_id) is None
+
+
+def test_entries_paused_requeue_sets_runtime_authority_retry_floor(monkeypatch):
+    monkeypatch.setenv("ZEUS_RUNTIME_AUTHORITY_RETRY_DELAY_SECONDS", "120")
+    conn, store = _store()
+    event = _event("snap-paused-floor")
+    store.insert_or_ignore(event)
+    reactor = _reactor_with_reason(
+        conn,
+        store,
+        "entries_paused:deployment_freshness_mismatch",
+    )
+
+    result = reactor.process_pending(decision_time=_DT, limit=10)
+
+    assert result.retried == 1
+    assert _status(conn, event.event_id) == "pending"
+    assert _claimed_at(conn, event.event_id) == (
+        _DT + timedelta(seconds=120)
+    ).isoformat()
 
 
 def test_would_cross_book_requeues_not_terminal():

@@ -78,6 +78,7 @@ AUTHORITY = "selection_calibrator_v1_walkforward"
 # The served fused posterior method (forecast_posteriors.posterior_method) the calibrator is bound
 # to. A served artifact whose posterior_version differs is STALE in the runtime serving rule.
 POSTERIOR_VERSION = "openmeteo_ecmwf_ifs9_bayes_fusion"
+FIT_TEMPERATURE_METRIC = "high"
 
 # Same canonical join as the σ-scale fit, plus settled_at + posterior_method for walk-forward
 # ordering and the version stamp. Freshest posterior per (city, target_date, lead-bucket) below.
@@ -235,6 +236,7 @@ def fit_cells(
             "authority": AUTHORITY,
             "version": "sel_v1",
             "posterior_version": posterior_version,
+            "temperature_metrics": [FIT_TEMPERATURE_METRIC],
             "armed_sides": _armed_sides_from_cells(cells, min_n=min_n),
             "min_n": int(min_n),
             "max_settled_at": max_settled or None,
@@ -447,6 +449,7 @@ def fit_eb_cells(
             "version": "sel_eb_v2",
             "schema": "eb_v2",
             "posterior_version": posterior_version,
+            "temperature_metrics": [FIT_TEMPERATURE_METRIC],
             "armed_sides": _armed_sides_from_cells(cells, min_n=min_n),
             "min_n": int(min_n),
             "tau": float(tau),

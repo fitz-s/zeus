@@ -1,5 +1,5 @@
 # Created: 2026-07-03
-# Last reused/audited: 2026-07-03
+# Last reused/audited: 2026-07-09
 """G3 harness for the W3 SOLVE promotion seam (qkernel_spine_bridge.py w3_solve_enabled flag).
 
 Proves the promotion flag is a SAFE, reversible, single-point cutover before any live enablement:
@@ -214,6 +214,32 @@ def test_g3_on_mode_selection_diverges_from_off():
         f"selection did not diverge: off={off.no_trade_reason} on={on.no_trade_reason}"
     )
     assert any(k in (on.no_trade_reason or "") for k in _SOLVER_ORIGIN_REASONS) or on.decision.selected is not None
+
+
+def test_g3_on_mode_never_reads_historical_decision_guards(monkeypatch):
+    from src.decision.family_decision_engine import FamilyDecisionEngine
+
+    def _history_read_forbidden(*args, **kwargs):
+        raise AssertionError("W3_CURRENT_STATE_SOLVE_MUST_NOT_READ_HISTORICAL_GUARDS")
+
+    monkeypatch.setattr(
+        FamilyDecisionEngine,
+        "_apply_qlcb_reliability_guard",
+        _history_read_forbidden,
+    )
+    monkeypatch.setattr(
+        FamilyDecisionEngine,
+        "_apply_selection_calibrator_guard",
+        _history_read_forbidden,
+    )
+    restore = _set_flag(True)
+    try:
+        result = _drive(*_corpus()[0])
+    finally:
+        restore()
+
+    assert result.decision is not None
+    validate_family_decision_contract(result.decision)
 
 
 # --- (d) OFF-path import-isolation (subprocess) -----------------------------

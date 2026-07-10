@@ -1,5 +1,5 @@
 # Created: 2026-06-22
-# Last audited: 2026-06-22
+# Last reused/audited: 2026-07-09
 # Authority basis: live-path wiring of the selection-calibrator + city-skill gate into
 #   CandidateEvaluation.admitted (team-lead 2026-06-22; live_order_pathology 2026-06-22).
 """CandidateEvaluation.admitted reflects the live selection calibrator and explicit city-skill gate."""
@@ -36,6 +36,7 @@ def _base(**over):
 def test_new_fields_are_optional_default_none():
     ev = _base()
     assert ev.city is None
+    assert ev.temperature_metric == "high"
     assert ev.admitted is True
 
 
@@ -115,3 +116,12 @@ def test_buy_yes_genuine_edge_survives_live_calibrator(monkeypatch):
     )
     assert ev.calibrated_admission_q_lcb > 0.30
     assert ev.admitted is True
+
+
+def test_low_receipt_projection_cannot_borrow_high_calibrator_artifact():
+    ev = _base(temperature_metric="low")
+
+    assert ev.calibrated_admission_q_lcb == 0.0
+    assert ev.selection_calibrator_admissible is False
+    assert ev.admitted is False
+    assert ev.to_receipt_dict()["temperature_metric"] == "low"

@@ -1476,8 +1476,10 @@ def _freshest_feasibility_quotes_by_condition(
     if quote_column not in {"bid", "ask"} or not token_sides:
         return {}
     try:
-        cols = {row[1] for row in trade_conn.execute(
+        history_cols = {row[1] for row in trade_conn.execute(
             "PRAGMA table_info(execution_feasibility_evidence)").fetchall()}
+        latest_cols = {row[1] for row in trade_conn.execute(
+            "PRAGMA table_info(execution_feasibility_latest)").fetchall()}
     except sqlite3.Error:
         return {}
     required = {
@@ -1489,32 +1491,14 @@ def _freshest_feasibility_quotes_by_condition(
         "best_bid_before",
         "best_ask_before",
     }
-    if not required.issubset(cols):
+    history_available = required.issubset(history_cols)
+    latest_available = required.issubset(latest_cols)
+    if not history_available and not latest_available:
         return {}
     out: dict[tuple[str, str], PriceQuote] = {}
-    seen_tokens: set[str] = set()
-    for key, raw_token_id in sorted(token_sides.items()):
-        condition_id, expected_side = key
-        token_id = str(raw_token_id or "").strip()
-        if not condition_id or not token_id or token_id in seen_tokens:
-            continue
-        seen_tokens.add(token_id)
-        rows = trade_conn.execute(
-            """
-            SELECT condition_id,
-                   outcome_label,
-                   direction,
-                   quote_seen_at,
-                   created_at,
-                   best_bid_before,
-                   best_ask_before
-              FROM execution_feasibility_evidence
-             WHERE token_id = ?
-             ORDER BY created_at DESC
-             LIMIT 12
-            """,
-            (token_id,),
-        ).fetchall()
+
+    def _merge_rows(rows: list[sqlite3.Row | tuple], *, condition_id: str, expected_side: str) -> bool:
+        merged = False
         for row in rows:
             row_condition_id = str(_row_cell(row, 0, "condition_id") or "").strip()
             if row_condition_id != condition_id:
@@ -1543,6 +1527,53 @@ def _freshest_feasibility_quotes_by_condition(
                     tick_size=TICK_SIZE,
                 ),
             )
+            merged = True
+        return merged
+
+    seen_tokens: set[str] = set()
+    for key, raw_token_id in sorted(token_sides.items()):
+        condition_id, expected_side = key
+        token_id = str(raw_token_id or "").strip()
+        if not condition_id or not token_id or token_id in seen_tokens:
+            continue
+        seen_tokens.add(token_id)
+        if latest_available:
+            rows = trade_conn.execute(
+                """
+                SELECT condition_id,
+                       outcome_label,
+                       direction,
+                       quote_seen_at,
+                       created_at,
+                       best_bid_before,
+                       best_ask_before
+                  FROM execution_feasibility_latest
+                 WHERE token_id = ?
+                 ORDER BY created_at DESC
+                 LIMIT 4
+                """,
+                (token_id,),
+            ).fetchall()
+            if _merge_rows(rows, condition_id=condition_id, expected_side=expected_side):
+                continue
+        if history_available:
+            rows = trade_conn.execute(
+                """
+                SELECT condition_id,
+                       outcome_label,
+                       direction,
+                       quote_seen_at,
+                       created_at,
+                       best_bid_before,
+                       best_ask_before
+                  FROM execution_feasibility_evidence
+                 WHERE token_id = ?
+                 ORDER BY created_at DESC
+                 LIMIT 12
+                """,
+                (token_id,),
+            ).fetchall()
+            _merge_rows(rows, condition_id=condition_id, expected_side=expected_side)
     return out
 
 
@@ -2387,6 +2418,11 @@ def screen_resting_orders(
     ask_by_cid = read_freshest_executable_prices(trade_conn, condition_ids=condition_ids)
     out: list[tuple[OpenRest, RepriceDecision]] = []
     for rest in open_rests:
+        if _rest_has_sub_min_partial_fill(rest):
+            # A sub-min partial fill is real exposure but not independently sellable.
+            # Pulling the rest can strand dust that the exit path cannot sell because
+            # the remaining held shares are below the venue min_order_size.
+            continue
         belief = beliefs_by_family.get(str(rest.family_id or ""))
         # 1) Belief-decay pull (evidence-gated, anti-twitch by snapshot identity).
         decision = screen_reprice(
@@ -2397,12 +2433,6 @@ def screen_resting_orders(
             resting_posterior=rest.resting_posterior,
             resting_snapshot_id=rest.resting_snapshot_id,
         )
-        if decision is None and _rest_has_sub_min_partial_fill(rest):
-            # A sub-min partial fill is real exposure but not independently sellable. Microstructure
-            # pulls (BOOK_MOVED/value-refresh/family shift) can cancel the remaining rest and strand
-            # unexitable dust; live KL 2026-07-07 did this at 1 share vs min_order_size 5. New-evidence
-            # belief decay remains allowed above because fair-value protection can dominate dust completion.
-            continue
         if decision is None:
             # 2) Moved-book pull: our limit is at least one full tick behind the live best bid for our side.
             bid = bid_by_cid.get((rest.condition_id, rest.side))

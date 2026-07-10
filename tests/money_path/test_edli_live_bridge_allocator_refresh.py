@@ -1,5 +1,5 @@
 # Created: 2026-05-31
-# Last reused/audited: 2026-05-31
+# Last reused/audited: 2026-07-09
 # Authority basis: /tmp/edli_submit_gate_trace.md (EDLI submit gate: allocator_not_configured
 #   root) + src/engine/cycle_runner.py:705-728 legacy refresh_global_allocator contract.
 """Relationship test for the EDLI live-bridge risk-allocator refresh seam.
@@ -167,6 +167,37 @@ def test_live_bridge_refresh_publishes_true_drawdown_when_baseline_positive(monk
     assert governor._GLOBAL_GOVERNOR_STATE.current_drawdown_pct == pytest.approx(15.0)
 
 
+def test_live_bridge_refresh_reuses_supplied_portfolio_snapshot(monkeypatch):
+    """The EDLI reactor already loads PortfolioState for sizing; allocator refresh
+    must reuse that cycle snapshot instead of loading the live DB a second time."""
+    import src.control.heartbeat_supervisor as heartbeat_supervisor
+    import src.control.ws_gap_guard as ws_gap_guard
+    import src.main as main
+    import src.runtime.bankroll_provider as bankroll_provider
+    from src.runtime.bankroll_provider import BankrollOfRecord
+
+    conn = _world_conn()
+
+    def _unexpected_load_portfolio(*_args, **_kwargs):
+        raise AssertionError("portfolio_snapshot should avoid a second load_portfolio()")
+
+    monkeypatch.setattr(main, "load_portfolio", _unexpected_load_portfolio)
+    monkeypatch.setattr(
+        bankroll_provider,
+        "cached",
+        lambda *a, **k: BankrollOfRecord(value_usd=995.0, fetched_at="2026-05-31T00:00:00+00:00"),
+    )
+    monkeypatch.setattr(heartbeat_supervisor, "summary", lambda: {"health": "HEALTHY"})
+    monkeypatch.setattr(ws_gap_guard, "summary", lambda *, now=None: {})
+
+    summary = main._edli_refresh_global_allocator_for_live_bridge(
+        conn,
+        portfolio_snapshot=SimpleNamespace(daily_baseline_total=1000.0, bankroll=995.0),
+    )
+
+    assert summary.get("configured") is True
+
+
 def test_live_bridge_refresh_fails_closed_when_bankroll_unavailable(monkeypatch):
     """FAIL-CLOSED: if the on-chain bankroll cache is None (wallet unreachable),
     drawdown is untrustworthy. The refresh must NOT configure an
@@ -313,7 +344,9 @@ def test_main_edli_cycle_refreshes_allocator_for_shadow_no_submit_visibility():
     assert 'submit_disabled_effective_mode = reactor_mode == "live_no_submit"' in source
     assert "live_submit_effective = live_bridge_mode or submit_disabled_effective_mode" in source
     assert "trade_conn = get_trade_connection_with_world_required(write_class=None)" in source
-    assert "if live_submit_effective:\n            _alloc_refresh = _edli_refresh_global_allocator_for_live_bridge(trade_conn)" in source
+    assert "if live_submit_effective:" in source
+    assert "_edli_refresh_global_allocator_for_live_bridge(" in source
+    assert "portfolio_snapshot=_portfolio_snapshot" in source
     assert "if live_bridge_mode and not _alloc_refresh.get(\"configured\")" in source
 
 

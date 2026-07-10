@@ -1,5 +1,5 @@
 # Created: 2026-07-03
-# Last reused or audited: 2026-07-03
+# Last reused or audited: 2026-07-09
 # Authority basis: design doc §3.3 (objective: expected log terminal wealth over joint
 #   scenarios, full menu, scale by κ, discrete repair, safe prefixes); seam contract verbatim
 #   from qkernel_spine_bridge.py:1332-1400 + family_decision_engine.py:583-635 (FamilyDecision);
@@ -103,6 +103,13 @@ _WORST_PRICE_MODEL = "avg_cost_size_aware_depth_capped_v1"
 # the alpha-tail to be meaningful. Below this the plan is STAMPED (diagnostics) so the promotion
 # evidence gate can down-weight it; a one-draw band is stamped point_belief. Not a hard reject.
 _MIN_TAIL_DRAWS = 20
+
+# W3 live authority is memoryless: every native YES/NO leg is re-scored from the
+# currently served joint-q band and the current executable cost curve.  This basis
+# is carried through the existing receipt fields so downstream gates can distinguish
+# it from settlement-fitted reliability/selection guards without inventing a second
+# probability authority.
+CURRENT_POSTERIOR_BAND_BASIS = "CURRENT_POSTERIOR_BAND"
 
 
 class PayoffCoverageError(ValueError):
@@ -944,6 +951,7 @@ class SolveEngineShim:
             sizing_candidates=sizing_candidates, max_stake_usd=max_stake_usd,
             shares_for_routing=shares_for_routing, served_joint_q=served_joint_q,
             served_band=served_band, served_payoff_q_lcb_by_side=served_payoff_q_lcb_by_side,
+            current_state_solve=True,
         )
 
         # Ineligible / no-q path: no belief was integrated — pass the legacy no-trade through.
@@ -989,9 +997,18 @@ class SolveEngineShim:
         )
         self.last_plan = plan
 
-        # candidate_decisions: coherence lockstep — the shim emits coherence_allows=True (§4 dec 1).
-        candidate_decisions = tuple(replace(d, coherence_allows=True) for d in legacy.candidate_decisions)
-        econ_by_route = {c.route_id: c for c in legacy.candidates}
+        # Re-score every native leg from CURRENT state only.  The composed legacy engine is
+        # scaffolding (predictive/q/book/route construction); its settlement-fitted reliability,
+        # selection-calibrator, direction and market-coherence verdicts have no authority in W3.
+        candidate_decisions = self._current_candidate_decisions(
+            legacy=legacy,
+            matrix=matrix,
+            portfolio=portfolio,
+            sizing_candidates=sizing_candidates,
+            max_stake_usd=max_stake_usd,
+            replace=replace,
+        )
+        econ_by_route = {d.economics.route_id: d.economics for d in candidate_decisions}
 
         selected, no_trade_reason, projection = self._project_primary_leg(
             plan=plan, menu=menu, wealth=wealth, scenarios=scenarios, bands_by_family=bands_by_family,
@@ -999,6 +1016,14 @@ class SolveEngineShim:
             LegacyDecisionProjection=LegacyDecisionProjection,
         )
         self.last_projection = projection
+
+        if selected is not None:
+            candidate_decisions = tuple(
+                replace(d, economics=selected)
+                if d.economics.route_id == selected.route_id
+                else d
+                for d in candidate_decisions
+            )
 
         receipt_hash = _hash(
             legacy.decision_id, plan.plan_id, q_version,
@@ -1008,10 +1033,68 @@ class SolveEngineShim:
             legacy,
             selected=selected,
             no_trade_reason=no_trade_reason,
+            candidates=tuple(d.economics for d in candidate_decisions),
             candidate_decisions=candidate_decisions,
             receipt_hash=receipt_hash,
         )
         return validate_family_decision_contract(decision)
+
+    @staticmethod
+    def _current_candidate_decisions(
+        *,
+        legacy,
+        matrix,
+        portfolio,
+        sizing_candidates,
+        max_stake_usd,
+        replace,
+    ):
+        """Return symmetric YES/NO economics from the served band and live cost curves.
+
+        Missing or malformed current sizing evidence removes the leg from the executable menu;
+        it never falls back to the legacy settlement-derived guard output.
+        """
+        from src.decision.payoff_vector import compute_candidate_economics
+
+        sample_hash = str(getattr(legacy.band, "sample_hash", "") or "")
+        n_draws = int(getattr(getattr(legacy.band, "samples", None), "shape", (0,))[0] or 0)
+        alpha = float(getattr(legacy.band, "alpha", 0.05) or 0.05)
+        current = []
+        for decision in legacy.candidate_decisions:
+            route = decision.route
+            sizing = sizing_candidates.get((route.bin_id, route.side))
+            if sizing is None or not sizing.is_tradeable:
+                continue
+            try:
+                economics = compute_candidate_economics(
+                    route,
+                    joint_q=legacy.joint_q,
+                    band=legacy.band,
+                    sizing_candidate=sizing,
+                    matrix=matrix,
+                    exposure=portfolio,
+                    max_stake_usd=max_stake_usd,
+                    alpha=alpha,
+                )
+            except Exception:  # noqa: BLE001 - missing current economics is a fail-closed leg.
+                continue
+            current.append(
+                replace(
+                    decision,
+                    economics=economics,
+                    direction_law_ok=True,
+                    coherence_allows=True,
+                    q_lcb_guard_basis=CURRENT_POSTERIOR_BAND_BASIS,
+                    q_lcb_guard_abstained=False,
+                    q_lcb_guard_cell_key=sample_hash,
+                    selection_guard_basis=CURRENT_POSTERIOR_BAND_BASIS,
+                    selection_guard_abstained=False,
+                    selection_guard_cell_key=sample_hash,
+                    selection_guard_n=n_draws,
+                    selection_guard_q_safe=economics.payoff_q_lcb,
+                )
+            )
+        return tuple(current)
 
     def _project_primary_leg(
         self, *, plan, menu, wealth, scenarios, bands_by_family, atom_ids, econ_by_route, replace,

@@ -18,6 +18,7 @@ import logging
 import json
 import math
 import os
+import re
 import sqlite3
 import threading
 import time as _time_module
@@ -300,9 +301,10 @@ def _is_runtime_submit_gate_block_error(error: str) -> bool:
     e = error.lower()
     return (
         "[gate_runtime] blocked" in e
-        and "live_venue_submit" in e
+        and ("live_venue_submit" in e or "reduce_only_exit_submit" in e)
         and (
             "deployment_freshness_mismatch" in e
+            or "reduce_only_exit_deployment_freshness_mismatch" in e
             or "loaded_sha_mismatch" in e
             or "process_loaded_code_stale" in e
         )
@@ -315,7 +317,7 @@ def _runtime_submit_gate_currently_allows_submit() -> bool:
     try:
         from src.architecture import gate_runtime
 
-        gate_runtime.check("live_venue_submit")
+        gate_runtime.check("reduce_only_exit_submit")
         return True
     except Exception:  # noqa: BLE001 - monitor must fail closed on gate uncertainty.
         return False
@@ -2522,6 +2524,42 @@ def _latest_exit_reject_is_identical(
     return str(payload.get("exit_reason") or "") == str(reason or "")
 
 
+def _latest_exit_reject_error(
+    conn: sqlite3.Connection | None,
+    position: Position,
+) -> str:
+    """Return the newest canonical EXIT_ORDER_REJECTED error for retry recovery."""
+
+    if conn is None:
+        return ""
+    trade_id = str(getattr(position, "trade_id", "") or "").strip()
+    if not trade_id:
+        return ""
+    try:
+        row = conn.execute(
+            """
+            SELECT payload_json
+              FROM position_events
+             WHERE position_id = ?
+               AND event_type = 'EXIT_ORDER_REJECTED'
+             ORDER BY sequence_no DESC
+             LIMIT 1
+            """,
+            (trade_id,),
+        ).fetchone()
+    except sqlite3.Error:
+        return ""
+    if row is None:
+        return ""
+    try:
+        payload = json.loads(str(row["payload_json"] or "{}"))
+    except (TypeError, ValueError, IndexError, KeyError):
+        return ""
+    if not isinstance(payload, dict):
+        return ""
+    return str(payload.get("error") or "")
+
+
 def _dust_hold_event_already_recorded(
     conn: sqlite3.Connection | None,
     position: Position,
@@ -2629,6 +2667,12 @@ def _mark_exit_dust_hold(
         reason=reason,
         error=normalized_error,
         event_type="EXIT_ORDER_REJECTED",
+        extra_payload=_snapshot_min_order_dust_audit_payload(
+            position,
+            reason=reason,
+            error=normalized_error,
+            chain_balance_shares=chain_balance_shares,
+        ),
     )
     logger.warning(
         "EXIT DUST HOLD %s: %s. Holding to settlement; no sell retry is executable.",
@@ -2647,6 +2691,51 @@ def _positive_decimal(value: object) -> Decimal | None:
     if numeric <= 0:
         return None
     return numeric
+
+
+def _snapshot_min_order_from_error(error: str) -> str:
+    match = re.search(r"min_order_size\s+([0-9]+(?:\.[0-9]+)?)", error or "")
+    return match.group(1) if match else ""
+
+
+def _blocked_exit_shares(
+    position: Position,
+    *,
+    chain_balance_shares: Decimal | None = None,
+) -> str:
+    for value in (
+        chain_balance_shares,
+        getattr(position, "effective_shares", None),
+        getattr(position, "chain_shares", None),
+        getattr(position, "shares", None),
+    ):
+        shares = _positive_decimal(value)
+        if shares is not None:
+            return str(shares)
+    return ""
+
+
+def _snapshot_min_order_dust_audit_payload(
+    position: Position,
+    *,
+    reason: str,
+    error: str,
+    chain_balance_shares: Decimal | None = None,
+) -> dict[str, object]:
+    """Machine-readable evidence that a held exit is not currently executable."""
+
+    return {
+        "exit_block_class": "snapshot_min_order_dust",
+        "exit_order_submitted": False,
+        "operator_action_required": True,
+        "held_to_settlement_unless_aggregate_exit_available": True,
+        "blocked_shares": _blocked_exit_shares(
+            position,
+            chain_balance_shares=chain_balance_shares,
+        ),
+        "snapshot_min_order_size": _snapshot_min_order_from_error(error),
+        "dust_hold_reason": reason,
+    }
 
 
 def _below_snapshot_min_order_error(position: Position, snapshot_context: dict[str, object]) -> str:
@@ -4964,6 +5053,8 @@ def check_pending_retries(position: Position, conn: sqlite3.Connection | None = 
     previous_next_retry_at = str(getattr(position, "next_exit_retry_at", "") or "")
     previous_retry_count = int(getattr(position, "exit_retry_count", 0) or 0)
     previous_error = str(getattr(position, "last_exit_error", "") or "")
+    if not previous_error:
+        previous_error = _latest_exit_reject_error(conn, position)
 
     dust_error = _latest_snapshot_min_order_dust_error(position, conn=conn)
     if dust_error:

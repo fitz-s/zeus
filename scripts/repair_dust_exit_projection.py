@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-# Lifecycle: created=2026-06-18; last_reviewed=2026-06-18; last_reused=2026-06-18
+# Lifecycle: created=2026-06-18; last_reviewed=2026-07-09; last_reused=2026-07-09
 # Purpose: Repair restart-visible dust exit projections after canonical backoff evidence exists.
 # Reuse: Run with --dry-run before --apply when live restart preflight reports dust projection reload risk.
 # Created: 2026-06-18
-# Last reused or audited: 2026-06-18
+# Last reused or audited: 2026-07-09
 # Authority basis: AGENTS.md position/execution truth gate; scripts/AGENTS.md repair contract.
 """Repair dust pending-exit projections without placing or canceling orders."""
 
@@ -30,6 +30,7 @@ from src.state.projection import CANONICAL_POSITION_CURRENT_COLUMNS, upsert_posi
 DUST_SHARE_LIMIT = 0.01
 SOURCE_MODULE = "scripts.repair_dust_exit_projection"
 REPAIR_REASON = "dust_backoff_projection_reload_repair"
+SNAPSHOT_MIN_ORDER_DUST = "snapshot_min_order_dust"
 
 
 @dataclass
@@ -39,10 +40,13 @@ class RepairCandidate:
     target_date: str
     bin_label: str
     shares: float
+    current_phase: str
     order_status: str
-    exit_reason: str
+    current_exit_reason: str
+    target_exit_reason: str
     backoff_events: int
     latest_backoff_at: str | None
+    latest_backoff_error: str
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -51,10 +55,13 @@ class RepairCandidate:
             "target_date": self.target_date,
             "bin_label": self.bin_label,
             "shares": self.shares,
+            "current_phase": self.current_phase,
             "order_status": self.order_status,
-            "exit_reason": self.exit_reason,
+            "current_exit_reason": self.current_exit_reason,
+            "target_exit_reason": self.target_exit_reason,
             "backoff_events": self.backoff_events,
             "latest_backoff_at": self.latest_backoff_at,
+            "latest_backoff_error": self.latest_backoff_error,
         }
 
 
@@ -89,30 +96,84 @@ def repair_candidates(conn: sqlite3.Connection) -> list[RepairCandidate]:
     """Return projection rows safe to repair from existing backoff evidence."""
     rows = conn.execute(
         """
+        WITH backoff_events AS (
+            SELECT pe.position_id,
+                   pe.sequence_no,
+                   pe.occurred_at,
+                   json_extract(pe.payload_json, '$.exit_reason') AS event_exit_reason,
+                   json_extract(pe.payload_json, '$.error') AS event_error,
+                   json_extract(pe.payload_json, '$.exit_block_class') AS event_block_class
+              FROM position_events pe
+             WHERE pe.event_type = 'EXIT_ORDER_REJECTED'
+               AND json_extract(pe.payload_json, '$.status') = 'backoff_exhausted'
+        ),
+        backoff_counts AS (
+            SELECT position_id,
+                   COUNT(*) AS backoff_events,
+                   MAX(occurred_at) AS latest_backoff_at
+              FROM backoff_events
+             GROUP BY position_id
+        ),
+        latest_backoff AS (
+            SELECT be.*
+              FROM backoff_events be
+              JOIN (
+                    SELECT position_id, MAX(sequence_no) AS sequence_no
+                      FROM backoff_events
+                     GROUP BY position_id
+                   ) latest
+                ON latest.position_id = be.position_id
+               AND latest.sequence_no = be.sequence_no
+        )
         SELECT pc.position_id,
                pc.city,
                pc.target_date,
                pc.bin_label,
                COALESCE(pc.chain_shares, pc.shares, 0) AS shares,
+               COALESCE(pc.phase, '') AS current_phase,
                COALESCE(pc.order_status, '') AS order_status,
-               COALESCE(pc.exit_reason, '') AS exit_reason,
-               COUNT(pe.event_id) AS backoff_events,
-               MAX(pe.occurred_at) AS latest_backoff_at
+               COALESCE(pc.exit_reason, '') AS current_exit_reason,
+               COALESCE(lb.event_exit_reason, '') AS target_exit_reason,
+               COALESCE(bc.backoff_events, 0) AS backoff_events,
+               bc.latest_backoff_at AS latest_backoff_at,
+               COALESCE(lb.event_error, '') AS latest_backoff_error
           FROM position_current pc
-          JOIN position_events pe
-            ON pe.position_id = pc.position_id
-           AND pe.event_type = 'EXIT_ORDER_REJECTED'
-           AND json_extract(pe.payload_json, '$.status') = 'backoff_exhausted'
-           AND json_extract(pe.payload_json, '$.exit_reason') = pc.exit_reason
-         WHERE pc.phase = 'pending_exit'
-           AND pc.exit_reason = 'EXIT_CHAIN_DUST_STILL_HELD'
-           AND COALESCE(pc.chain_shares, pc.shares, 0) > 0
-           AND COALESCE(pc.chain_shares, pc.shares, 0) <= ?
-           AND COALESCE(pc.order_status, '') != 'backoff_exhausted'
+          JOIN latest_backoff lb
+            ON lb.position_id = pc.position_id
+          JOIN backoff_counts bc
+            ON bc.position_id = pc.position_id
+         WHERE (
+             pc.phase = 'pending_exit'
+             AND pc.exit_reason = 'EXIT_CHAIN_DUST_STILL_HELD'
+             AND lb.event_exit_reason = pc.exit_reason
+             AND COALESCE(pc.chain_shares, pc.shares, 0) > 0
+             AND COALESCE(pc.chain_shares, pc.shares, 0) <= ?
+             AND COALESCE(pc.order_status, '') != 'backoff_exhausted'
+           )
+            OR (
+            COALESCE(pc.chain_shares, pc.shares, 0) > 0
+             AND COALESCE(pc.phase, '') NOT IN (
+                    'settled',
+                    'voided',
+                    'admin_closed',
+                    'quarantined',
+                    'economically_closed'
+                 )
+             AND (
+                    lb.event_block_class = ?
+                    OR lb.event_error LIKE '%min_order_size%'
+                    OR lb.event_exit_reason LIKE '%[DUST:%min_order_size%'
+                 )
+             AND NOT (
+                    pc.phase = 'pending_exit'
+                    AND COALESCE(pc.order_status, '') = 'backoff_exhausted'
+                    AND COALESCE(pc.exit_reason, '') = COALESCE(lb.event_exit_reason, '')
+                 )
+           )
          GROUP BY pc.position_id
          ORDER BY pc.city, pc.target_date, pc.position_id
         """,
-        (DUST_SHARE_LIMIT,),
+        (DUST_SHARE_LIMIT, SNAPSHOT_MIN_ORDER_DUST),
     ).fetchall()
     return [
         RepairCandidate(
@@ -121,10 +182,13 @@ def repair_candidates(conn: sqlite3.Connection) -> list[RepairCandidate]:
             target_date=str(row["target_date"] or ""),
             bin_label=str(row["bin_label"] or ""),
             shares=float(row["shares"] or 0.0),
+            current_phase=str(row["current_phase"] or ""),
             order_status=str(row["order_status"] or ""),
-            exit_reason=str(row["exit_reason"] or ""),
+            current_exit_reason=str(row["current_exit_reason"] or ""),
+            target_exit_reason=str(row["target_exit_reason"] or ""),
             backoff_events=int(row["backoff_events"] or 0),
             latest_backoff_at=row["latest_backoff_at"],
+            latest_backoff_error=str(row["latest_backoff_error"] or ""),
         )
         for row in rows
     ]
@@ -132,20 +196,24 @@ def repair_candidates(conn: sqlite3.Connection) -> list[RepairCandidate]:
 
 def _projection_for_repair(
     conn: sqlite3.Connection,
-    position_id: str,
+    candidate: RepairCandidate,
     occurred_at: str,
 ) -> dict[str, Any]:
     row = conn.execute(
         "SELECT * FROM position_current WHERE position_id = ?",
-        (position_id,),
+        (candidate.position_id,),
     ).fetchone()
     if row is None:
-        raise ValueError(f"position_current row missing for {position_id}")
+        raise ValueError(f"position_current row missing for {candidate.position_id}")
     projection = _row_dict(row)
     missing = [col for col in CANONICAL_POSITION_CURRENT_COLUMNS if col not in projection]
     if missing:
         raise ValueError(f"position_current missing canonical columns: {missing}")
+    projection["phase"] = "pending_exit"
     projection["order_status"] = "backoff_exhausted"
+    projection["exit_reason"] = candidate.target_exit_reason or candidate.current_exit_reason
+    projection["next_exit_retry_at"] = ""
+    projection["exit_retry_count"] = 0
     projection["updated_at"] = occurred_at
     return {col: projection.get(col) for col in CANONICAL_POSITION_CURRENT_COLUMNS}
 
@@ -156,7 +224,7 @@ def apply_repair(
     *,
     occurred_at: str,
 ) -> str:
-    projection = _projection_for_repair(conn, candidate.position_id, occurred_at)
+    projection = _projection_for_repair(conn, candidate, occurred_at)
     if _existing_repair_event(conn, candidate.position_id):
         upsert_position_current(conn, projection)
         return "projection_refreshed"
@@ -168,7 +236,7 @@ def apply_repair(
         "sequence_no": _latest_sequence_no(conn, candidate.position_id) + 1,
         "event_type": "EXIT_ORDER_REJECTED",
         "occurred_at": occurred_at,
-        "phase_before": "pending_exit",
+        "phase_before": candidate.current_phase or projection.get("phase"),
         "phase_after": "pending_exit",
         "strategy_key": projection.get("strategy_key"),
         "decision_id": None,
@@ -184,11 +252,16 @@ def apply_repair(
             {
                 "reason": REPAIR_REASON,
                 "status": "backoff_exhausted",
-                "exit_reason": candidate.exit_reason,
+                "exit_reason": projection.get("exit_reason"),
+                "old_phase": candidate.current_phase,
+                "new_phase": "pending_exit",
                 "old_order_status": candidate.order_status,
                 "new_order_status": "backoff_exhausted",
+                "old_exit_reason": candidate.current_exit_reason,
                 "chain_shares": candidate.shares,
                 "dust_share_limit": DUST_SHARE_LIMIT,
+                "exit_block_class": SNAPSHOT_MIN_ORDER_DUST,
+                "latest_backoff_error": candidate.latest_backoff_error,
                 "backoff_events": candidate.backoff_events,
                 "latest_backoff_at": candidate.latest_backoff_at,
                 "semantic_guard": "repair_projection_only_no_venue_action",

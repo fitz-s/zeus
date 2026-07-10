@@ -18,6 +18,9 @@ RUNTIME_CODE_PREFIXES = (
     ".github/workflows/",
     "launchd/",
 )
+NON_RUNTIME_SCRIPT_PREFIXES = (
+    "scripts/audit_",
+)
 RUNTIME_CODE_FILES = frozenset(
     {
         "pyproject.toml",
@@ -30,6 +33,18 @@ RUNTIME_CODE_FILES = frozenset(
         "Makefile",
         "Dockerfile",
     }
+)
+REDUCE_ONLY_EXIT_RUNTIME_PREFIXES = (
+    "src/execution/",
+    "src/venue/",
+    "src/state/",
+    "src/risk_allocator/",
+    "src/control/",
+    "src/architecture/",
+    "config/",
+    "architecture/capabilities.yaml",
+    "architecture/source_rationale.yaml",
+    "architecture/test_topology.yaml",
 )
 
 
@@ -174,7 +189,7 @@ def runtime_code_plane_diff(
         for path in raw.decode().splitlines()
         if path.strip()
     )
-    runtime_changed = any(_is_runtime_code_path(path) for path in changed_paths)
+    runtime_changed = any(is_runtime_code_path(path) for path in changed_paths)
     return RuntimeCodePlaneDiff(
         boot_sha=boot,
         current_sha=current,
@@ -184,10 +199,35 @@ def runtime_code_plane_diff(
     )
 
 
-def _is_runtime_code_path(path: str) -> bool:
+def is_runtime_code_path(path: str) -> bool:
     text = str(path or "").strip().replace("\\", "/")
     if not text:
+        return False
+    if any(text.startswith(prefix) for prefix in NON_RUNTIME_SCRIPT_PREFIXES):
         return False
     if text in RUNTIME_CODE_FILES:
         return True
     return any(text.startswith(prefix) for prefix in RUNTIME_CODE_PREFIXES)
+
+
+def _is_runtime_code_path(path: str) -> bool:
+    return is_runtime_code_path(path)
+
+
+def is_reduce_only_exit_runtime_path(path: str) -> bool:
+    """Return whether a path can affect reduce-only exit venue submission.
+
+    This narrower classifier is deliberately conservative. It is used only to
+    decide whether a stale managed runtime may continue reducing already-held
+    exposure while new entry submission remains blocked by the broader
+    ``live_venue_submit`` freshness gate.
+    """
+
+    text = str(path or "").strip().replace("\\", "/")
+    if not text:
+        return False
+    if any(text.startswith(prefix) for prefix in NON_RUNTIME_SCRIPT_PREFIXES):
+        return False
+    if text in RUNTIME_CODE_FILES:
+        return True
+    return any(text.startswith(prefix) for prefix in REDUCE_ONLY_EXIT_RUNTIME_PREFIXES)

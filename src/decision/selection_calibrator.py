@@ -93,6 +93,7 @@ _SELECTION_CALIBRATOR_PATH: str = "state/selection_calibrator.json"
 # posterior version into apply_selection_calibrator(expected_posterior_version=...) from the
 # replacement readiness/bundle path; when it does, that wins over this default.
 DEFAULT_POSTERIOR_VERSION: str = "openmeteo_ecmwf_ifs9_bayes_fusion"
+DEFAULT_TEMPERATURE_METRIC: str = "high"
 
 # Module-level one-shot cache of the parsed artifact.
 _ARTIFACT_CACHE: Optional[dict] = None
@@ -447,6 +448,7 @@ def artifact_status(*, expected_posterior_version: str = DEFAULT_POSTERIOR_VERSI
         "active": bool(cells),
         "cell_count": len(cells),
         "posterior_version": version,
+        "temperature_metrics": sorted(_artifact_armed_metrics(meta)),
         "max_settled_at": meta.get("max_settled_at"),
     }
 
@@ -528,6 +530,34 @@ def _artifact_armed_sides(meta: Mapping, cells: Mapping, *, min_n: int) -> froze
     return frozenset(out)
 
 
+def _artifact_armed_metrics(meta: Mapping) -> frozenset[str]:
+    """Physical quantities this artifact may grade.
+
+    The v1 fitter has always queried ``temperature_metric='high'`` and its cell
+    key does not contain metric.  Artifacts created before the explicit scope
+    field are therefore HIGH-only, never pooled authority for LOW.  A future
+    multi-metric artifact must use metric-keyed cells; accepting multiple values
+    here would silently recreate the cross-track contamination this guard stops.
+    """
+
+    raw = meta.get("temperature_metrics", meta.get("temperature_metric"))
+    if raw is None:
+        return frozenset({DEFAULT_TEMPERATURE_METRIC})
+    if isinstance(raw, str):
+        values = (raw,)
+    else:
+        try:
+            values = tuple(raw)
+        except TypeError:
+            return frozenset()
+    metrics = {
+        str(value or "").strip().lower()
+        for value in values
+        if str(value or "").strip().lower() in {"high", "low"}
+    }
+    return frozenset(metrics) if len(metrics) == 1 else frozenset()
+
+
 def apply_selection_calibrator(
     *,
     raw_side_prob: float,
@@ -537,6 +567,7 @@ def apply_selection_calibrator(
     admission_margin: float | None = None,  # price/cost CONTEXT only — never a probability target.
     artifact: Optional[Mapping] = None,
     expected_posterior_version: str = DEFAULT_POSTERIOR_VERSION,
+    temperature_metric: str = DEFAULT_TEMPERATURE_METRIC,
 ) -> CalibratorVerdict:
     """Apply the selection-aware settlement q_lcb calibrator to ONE candidate's side.
 
@@ -565,6 +596,12 @@ def apply_selection_calibrator(
     art_version = str(meta.get("posterior_version", "")) if isinstance(meta, Mapping) else ""
     if art_version and expected_posterior_version and art_version != expected_posterior_version:
         return _fail_closed(key, "FAIL_CLOSED_STALE_VERSION")
+
+    clean_metric = str(temperature_metric or "").strip().lower()
+    if clean_metric not in {"high", "low"}:
+        return _fail_closed(key, "METRIC_MISSING_OR_INVALID")
+    if clean_metric not in _artifact_armed_metrics(meta):
+        return _fail_closed(key, "METRIC_NOT_ARMED")
 
     min_n = int(meta.get("min_n", MIN_N)) if isinstance(meta, Mapping) else MIN_N
     clean_side = "NO" if str(side).upper() == "NO" else "YES"
@@ -675,6 +712,7 @@ def selection_calibrated_side_lcb(
     admission_margin: float | None = None,
     artifact: Optional[Mapping] = None,
     expected_posterior_version: str = DEFAULT_POSTERIOR_VERSION,
+    temperature_metric: str = DEFAULT_TEMPERATURE_METRIC,
 ) -> float:
     """The seam value: the calibrated admission lower bound for ONE side, or fail-closed 0.0.
 
@@ -688,6 +726,7 @@ def selection_calibrated_side_lcb(
         raw_side_prob=raw_side_prob, side=side, lead_days=lead_days, bin_class=bin_class,
         admission_margin=admission_margin, artifact=artifact,
         expected_posterior_version=expected_posterior_version,
+        temperature_metric=temperature_metric,
     )
     if not verdict.trade:
         return 0.0  # fail-closed -> non-positive edge downstream -> not admitted.

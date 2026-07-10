@@ -1,5 +1,5 @@
 # Created: 2026-05-25
-# Last reused/audited: 2026-07-02
+# Last reused/audited: 2026-07-09
 # Authority basis: docs/operations/edli_v1/EDLI_REDEMPTION_FINAL_PACKAGE_SPEC.md §14 full-live increment.
 from __future__ import annotations
 
@@ -13,6 +13,31 @@ from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import pytest
+
+
+def _strict_jit_book(token_id: str) -> dict:
+    return {
+        "asset_id": token_id,
+        "hash": "strict-jit-book-hash",
+        "bids": [{"price": "0.39", "size": "100"}],
+        "asks": [{"price": "0.41", "size": "100"}],
+    }
+
+
+def _strict_jit_final_intent() -> SimpleNamespace:
+    return SimpleNamespace(
+        payload={
+            "token_id": "yes-1",
+            "side": "BUY",
+            "limit_price": 0.41,
+            "size": 10.0,
+            "post_only": False,
+            "tick_size": 0.01,
+            "min_order_size": 1.0,
+            "neg_risk": False,
+            "notional_usd": 5.0,
+        }
+    )
 
 
 def _edli_settings() -> dict:
@@ -2695,7 +2720,7 @@ def test_live_command_reuses_single_pre_submit_authority_witness():
     )
 
     pre_submit = next(c for c in certs if getattr(c, "certificate_type", None) == claims.PRE_SUBMIT_REVALIDATION)
-    assert calls == ["yes-1"]
+    assert calls == ["yes-1", "yes-1"]
     assert pre_submit.payload["book_hash"] == "book-hash-1"
 
 
@@ -3555,24 +3580,16 @@ def test_main_pre_submit_authority_provider_hydrates_typed_provenance(monkeypatc
             "pre_submit_max_quote_age_ms": 1000,
             "pre_submit_balance_allowance_check_enabled": True,
         },
+        book_quote_provider=_strict_jit_book,
     )
-    final_intent = SimpleNamespace(
-        payload={
-            "token_id": "yes-1",
-            "side": "BUY",
-            "tick_size": 0.01,
-            "min_order_size": 1.0,
-            "neg_risk": False,
-            "notional_usd": 5.0,
-        }
-    )
+    final_intent = _strict_jit_final_intent()
 
     witness = provider(final_intent, object(), datetime(2026, 5, 25, 12, tzinfo=timezone.utc))
     witness_again = provider(final_intent, object(), datetime(2026, 5, 25, 12, tzinfo=timezone.utc))
 
-    assert witness.book_hash == "book-hash-1"
-    assert witness_again.book_hash == "book-hash-1"
-    assert witness.book_authority_id == "execution_feasibility_evidence"
+    assert witness.book_hash == "strict-jit-book-hash"
+    assert witness_again.book_hash == "strict-jit-book-hash"
+    assert witness.book_authority_id == "clob_jit_book"
     assert witness.heartbeat_authority_id == "heartbeat_supervisor"
     assert witness.user_ws_authority_id == "ws_gap_guard"
     assert witness.balance_allowance_authority_id == "polymarket_wallet_readonly"
@@ -3650,17 +3667,9 @@ def test_main_pre_submit_buy_uses_pusd_payload_without_ctf_enumeration(monkeypat
             "pre_submit_max_quote_age_ms": 1000,
             "pre_submit_balance_allowance_check_enabled": True,
         },
+        book_quote_provider=_strict_jit_book,
     )
-    final_intent = SimpleNamespace(
-        payload={
-            "token_id": "yes-1",
-            "side": "BUY",
-            "tick_size": 0.01,
-            "min_order_size": 1.0,
-            "neg_risk": False,
-            "notional_usd": 5.0,
-        }
-    )
+    final_intent = _strict_jit_final_intent()
 
     witness = provider(final_intent, object(), datetime(2026, 5, 25, 12, tzinfo=timezone.utc))
 
@@ -3731,17 +3740,9 @@ def test_main_pre_submit_collateral_payload_timeout_fails_closed(monkeypatch):
             "pre_submit_max_quote_age_ms": 1000,
             "pre_submit_balance_allowance_check_enabled": True,
         },
+        book_quote_provider=_strict_jit_book,
     )
-    final_intent = SimpleNamespace(
-        payload={
-            "token_id": "yes-1",
-            "side": "BUY",
-            "tick_size": 0.01,
-            "min_order_size": 1.0,
-            "neg_risk": False,
-            "notional_usd": 5.0,
-        }
-    )
+    final_intent = _strict_jit_final_intent()
 
     started = time.monotonic()
     try:
@@ -3876,17 +3877,9 @@ def test_main_pre_submit_authority_provider_blocks_insufficient_buy_allowance(mo
             "pre_submit_max_quote_age_ms": 1000,
             "pre_submit_balance_allowance_check_enabled": True,
         },
+        book_quote_provider=_strict_jit_book,
     )
-    final_intent = SimpleNamespace(
-        payload={
-            "token_id": "yes-1",
-            "side": "BUY",
-            "tick_size": 0.01,
-            "min_order_size": 1.0,
-            "neg_risk": False,
-            "notional_usd": 5.0,
-        }
-    )
+    final_intent = _strict_jit_final_intent()
 
     with pytest.raises(ValueError, match="PRE_SUBMIT_PUSD_ALLOWANCE_INSUFFICIENT"):
         provider(final_intent, object(), datetime(2026, 5, 25, 12, tzinfo=timezone.utc))
@@ -3954,17 +3947,9 @@ def test_main_pre_submit_authority_provider_blocks_venue_connectivity_failure(mo
             "pre_submit_max_quote_age_ms": 1000,
             "pre_submit_balance_allowance_check_enabled": True,
         },
+        book_quote_provider=_strict_jit_book,
     )
-    final_intent = SimpleNamespace(
-        payload={
-            "token_id": "yes-1",
-            "side": "BUY",
-            "tick_size": 0.01,
-            "min_order_size": 1.0,
-            "neg_risk": False,
-            "notional_usd": 5.0,
-        }
-    )
+    final_intent = _strict_jit_final_intent()
 
     with pytest.raises(ValueError, match="POLYMARKET_PREFLIGHT_DOWN"):
         provider(final_intent, object(), datetime(2026, 5, 25, 12, tzinfo=timezone.utc))
@@ -4551,7 +4536,7 @@ def _pre_submit_authority_witness(
         user_ws_status=user_ws_status,
         venue_connectivity_status=venue_connectivity_status,
         balance_allowance_status=balance_allowance_status,
-        book_authority_id="execution_feasibility_evidence",
+        book_authority_id="clob_jit_book",
         book_captured_at=quote_seen_at.isoformat(),
         heartbeat_authority_id="heartbeat_supervisor",
         heartbeat_checked_at=checked_at.isoformat(),
@@ -4620,6 +4605,9 @@ def _gate84_final_intent(*, side: str = "BUY"):
         payload={
             "token_id": "yes-1",
             "side": side,
+            "limit_price": 0.50 if side == "BUY" else 0.30,
+            "size": 10.0,
+            "post_only": False,
             "tick_size": 0.01,
             "min_order_size": 1.0,
             "neg_risk": False,
@@ -4784,7 +4772,7 @@ def test_gate84_jit_buy_rejects_book_without_ask(monkeypatch):
         provider(_gate84_final_intent(side="BUY"), object(), decision_time)
 
 
-def test_gate84_db_fallback_buy_accepts_fresh_ask_only_row(monkeypatch):
+def test_gate84_fresh_db_row_cannot_replace_submit_time_jit_book(monkeypatch):
     import src.main as main
     from src.events import reactor
 
@@ -4824,12 +4812,119 @@ def test_gate84_db_fallback_buy_accepts_fresh_ask_only_row(monkeypatch):
         book_quote_provider=lambda token_id: (_ for _ in ()).throw(RuntimeError("transient /book failure")),
     )
 
-    witness = provider(_gate84_final_intent(side="BUY"), object(), decision_time)
+    with pytest.raises(ValueError, match="PRE_SUBMIT_BOOK_AUTHORITY_JIT_REQUIRED"):
+        provider(_gate84_final_intent(side="BUY"), object(), decision_time)
 
-    assert witness.book_authority_id == "execution_feasibility_evidence"
-    assert witness.current_best_bid is None
-    assert witness.current_best_ask == 0.006
-    assert witness.book_hash == "fresh-db-ask-only-book"
+
+def test_gate84_jit_book_requires_full_intended_size_within_limit(monkeypatch):
+    from src.events import reactor
+
+    decision_time = datetime(2026, 6, 1, 6, 21, 0, tzinfo=timezone.utc)
+    conn = _gate84_world_conn_with_stale_row(
+        quote_seen_at=(decision_time - timedelta(milliseconds=200)).isoformat()
+    )
+    _gate84_patch_authority_guards(monkeypatch)
+    provider = reactor._edli_pre_submit_authority_provider_from_book_evidence_conn(
+        conn,
+        {"pre_submit_max_quote_age_ms": 1000, "pre_submit_balance_allowance_check_enabled": True},
+        book_quote_provider=lambda token_id: {
+            "asset_id": token_id,
+            "hash": "thin-jit-book",
+            "bids": [{"price": "0.40", "size": "20"}],
+            "asks": [
+                {"price": "0.42", "size": "3"},
+                {"price": "0.45", "size": "4"},
+                {"price": "0.51", "size": "100"},
+            ],
+        },
+    )
+
+    with pytest.raises(ValueError, match="PRE_SUBMIT_BOOK_AUTHORITY_JIT_DEPTH_INSUFFICIENT"):
+        provider(_gate84_final_intent(side="BUY"), object(), decision_time)
+
+
+def test_gate84_provisional_intent_fetches_top_without_final_limit_or_size(monkeypatch):
+    from src.events import reactor
+
+    decision_time = datetime(2026, 6, 1, 6, 21, 0, tzinfo=timezone.utc)
+    conn = _gate84_world_conn_with_stale_row(quote_seen_at=decision_time.isoformat())
+    _gate84_patch_authority_guards(monkeypatch)
+    provider = reactor._edli_pre_submit_authority_provider_from_book_evidence_conn(
+        conn,
+        {"pre_submit_max_quote_age_ms": 1000, "pre_submit_balance_allowance_check_enabled": True},
+        book_quote_provider=_strict_jit_book,
+    )
+    provisional = SimpleNamespace(
+        payload={
+            "token_id": "yes-1",
+            "side": "BUY",
+            "tick_size": 0.01,
+            "min_order_size": 1.0,
+            "neg_risk": False,
+        }
+    )
+
+    witness = provider(provisional, object(), decision_time)
+
+    assert witness.book_hash == "strict-jit-book-hash"
+    assert witness.current_best_bid == 0.39
+    assert witness.current_best_ask == 0.41
+
+
+def test_gate84_jit_response_must_bind_requested_token(monkeypatch):
+    from src.events import reactor
+
+    decision_time = datetime(2026, 6, 1, 6, 21, 0, tzinfo=timezone.utc)
+    conn = _gate84_world_conn_with_stale_row(quote_seen_at=decision_time.isoformat())
+    _gate84_patch_authority_guards(monkeypatch)
+    provider = reactor._edli_pre_submit_authority_provider_from_book_evidence_conn(
+        conn,
+        {"pre_submit_max_quote_age_ms": 1000, "pre_submit_balance_allowance_check_enabled": True},
+        book_quote_provider=lambda _token_id: {
+            **_strict_jit_book("different-token"),
+        },
+    )
+
+    with pytest.raises(ValueError, match="PRE_SUBMIT_BOOK_AUTHORITY_JIT_TOKEN_MISMATCH"):
+        provider(_gate84_final_intent(side="BUY"), object(), decision_time)
+
+
+def test_gate84_final_jit_witness_must_match_provisional_book(monkeypatch):
+    from src.engine import event_reactor_adapter as adapter
+    from src.events import reactor
+
+    decision_time = datetime(2026, 6, 1, 6, 21, 0, tzinfo=timezone.utc)
+    conn = _gate84_world_conn_with_stale_row(quote_seen_at=decision_time.isoformat())
+    _gate84_patch_authority_guards(monkeypatch)
+    provider = reactor._edli_pre_submit_authority_provider_from_book_evidence_conn(
+        conn,
+        {"pre_submit_max_quote_age_ms": 1000, "pre_submit_balance_allowance_check_enabled": True},
+        book_quote_provider=_strict_jit_book,
+    )
+    provisional_intent = SimpleNamespace(
+        payload={
+            "token_id": "yes-1",
+            "side": "BUY",
+            "tick_size": 0.01,
+            "min_order_size": 1.0,
+            "neg_risk": False,
+        }
+    )
+    provisional = provider(provisional_intent, object(), decision_time)
+    final = provider(_strict_jit_final_intent(), object(), decision_time)
+
+    adapter._assert_final_jit_witness_matches_provisional(
+        provisional=provisional,
+        final=final,
+    )
+    with pytest.raises(
+        ValueError,
+        match="PRE_SUBMIT_BOOK_AUTHORITY_JIT_CHANGED_DURING_BUILD",
+    ):
+        adapter._assert_final_jit_witness_matches_provisional(
+            provisional=provisional,
+            final=replace(final, book_hash="different-book-hash"),
+        )
 
 
 def test_gate84_jit_book_uses_fetch_time_when_reactor_decision_time_is_old(monkeypatch):
@@ -5029,10 +5124,8 @@ def test_gate84_jit_unavailable_and_db_row_stale_fails_closed(monkeypatch):
         provider(_gate84_final_intent(), object(), decision_time)
 
 
-def test_gate84_jit_unavailable_but_db_row_fresh_uses_db_row(monkeypatch):
-    """GREEN-guard: when no JIT provider is wired but the DB row is genuinely fresh
-    (within bound), the existing DB-row path still works (backward compatible).
-    """
+def test_gate84_jit_unavailable_but_db_row_fresh_still_fails_closed(monkeypatch):
+    """A cached row is screening evidence, never submit-time executable truth."""
     import src.main as main
     from src.events import reactor
 
@@ -5047,8 +5140,5 @@ def test_gate84_jit_unavailable_but_db_row_fresh_uses_db_row(monkeypatch):
         {"pre_submit_max_quote_age_ms": 1000, "pre_submit_balance_allowance_check_enabled": True},
     )
 
-    witness = provider(_gate84_final_intent(), object(), decision_time)
-    quote_seen = datetime.fromisoformat(witness.quote_seen_at)
-    age_ms = (decision_time - quote_seen).total_seconds() * 1000.0
-    assert 0.0 <= age_ms <= witness.max_quote_age_ms
-    assert witness.book_hash == "venue-book-hash-STALE"  # DB-row path preserved
+    with pytest.raises(ValueError, match="PRE_SUBMIT_BOOK_AUTHORITY_JIT_REQUIRED"):
+        provider(_gate84_final_intent(), object(), decision_time)

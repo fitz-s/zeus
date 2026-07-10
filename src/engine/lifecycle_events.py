@@ -651,7 +651,10 @@ def build_monitor_refreshed_canonical_write(
     if (
         day0_probability_receipt
         and str(getattr(position, "selected_method", "") or "")
-        == "day0_observation_remaining_window"
+        in {
+            "day0_observation_remaining_window",
+            "day0_observation_conditioned_daily_extrema",
+        }
     ):
         payload_dict["day0_monitor_probability_receipt"] = day0_probability_receipt
     if exit_decision is not None:

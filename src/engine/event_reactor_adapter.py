@@ -181,7 +181,10 @@ from src.decision.family_decision_engine import (
     roi_frontier_useful_values,
 )
 from src.decision_kernel import claims
-from src.decision_kernel.canonicalization import stable_hash
+from src.decision_kernel.canonicalization import (
+    qkernel_current_state_identity_hash,
+    stable_hash,
+)
 from src.decision_kernel.certificate import DecisionCertificate, ParentEdge, build_certificate
 from src.decision_kernel.certificates.action import build_actionable_trade_certificate
 from src.decision_kernel.certificates.execution import (
@@ -2689,7 +2692,7 @@ def _valid_qkernel_execution_economics_payload(
         return None
     if not (math.isfinite(selection_guard_q_safe) and selection_guard_q_safe > 0.0):
         return None
-    if not _qkernel_roi_frontier_useful_cert(
+    if not _qkernel_current_state_solve_economics(cert) and not _qkernel_roi_frontier_useful_cert(
         side=side,
         cost=cost,
         payoff_q_lcb=payoff_q_lcb,
@@ -2699,6 +2702,55 @@ def _valid_qkernel_execution_economics_payload(
     ):
         return None
     return cert
+
+
+def _qkernel_current_state_solve_economics(cert: Any) -> bool:
+    """Whether the economics were derived solely from this decision's served q band.
+
+    This is the W3 first-principles authority marker.  It licenses removal of legacy
+    side/ROI/settlement-fit gates; it does not relax any current-q, cost, utility,
+    identity, freshness, risk, or executable-book check.
+    """
+    if not isinstance(cert, Mapping):
+        return False
+    basis = "CURRENT_POSTERIOR_BAND"
+    sample_hash = str(cert.get("sample_hash") or "").strip()
+    q_lcb_sample_hash = str(cert.get("q_lcb_guard_cell_key") or "").strip()
+    selection_hash = str(cert.get("selection_guard_cell_key") or "").strip()
+    try:
+        n_draws = int(cert.get("selection_guard_n") or 0)
+    except (TypeError, ValueError):
+        return False
+    return (
+        str(cert.get("source") or "").strip() == "qkernel_spine"
+        and bool(str(cert.get("decision_id") or "").strip())
+        and bool(str(cert.get("receipt_hash") or "").strip())
+        and bool(str(cert.get("q_version") or "").strip())
+        and str(cert.get("current_state_identity_hash") or "").strip()
+        == qkernel_current_state_identity_hash(cert)
+        and str(cert.get("q_lcb_guard_basis") or "").strip() == basis
+        and str(cert.get("selection_guard_basis") or "").strip() == basis
+        and cert.get("q_lcb_guard_abstained") is False
+        and cert.get("selection_guard_abstained") is False
+        and bool(sample_hash)
+        and q_lcb_sample_hash == sample_hash
+        and selection_hash == sample_hash
+        and n_draws >= 2
+    )
+
+
+def _qkernel_current_state_belief_identity_fields(cert: Any) -> dict[str, object]:
+    """Fields copied onto the BELIEF parent to anchor the current-state certificate."""
+
+    if not _qkernel_current_state_solve_economics(cert):
+        return {}
+    return {
+        "qkernel_decision_id": cert.get("decision_id"),
+        "qkernel_receipt_hash": cert.get("receipt_hash"),
+        "qkernel_q_version": cert.get("q_version"),
+        "qkernel_sample_hash": cert.get("sample_hash"),
+        "qkernel_current_state_identity_hash": cert.get("current_state_identity_hash"),
+    }
 
 
 def _qkernel_selection_economics_rejection_reason(
@@ -2869,7 +2921,7 @@ def _qkernel_selection_economics_rejection_reason(
             "QKERNEL_SELECTION_GUARD_Q_SAFE_INVALID:"
             f"selection_guard_q_safe={selection_guard_q_safe:.6f}"
         )
-    if not _qkernel_roi_frontier_useful_cert(
+    if not _qkernel_current_state_solve_economics(cert) and not _qkernel_roi_frontier_useful_cert(
         side=side,
         cost=cost,
         payoff_q_lcb=payoff_q_lcb,
@@ -2887,6 +2939,8 @@ def _qkernel_selection_economics_rejection_reason(
 
 def _qkernel_near_day0_cert_rejection_reason(cert: Mapping[str, Any] | None) -> str | None:
     if not isinstance(cert, Mapping):
+        return None
+    if _qkernel_current_state_solve_economics(cert):
         return None
     verdict = cert.get("near_day0_raw_extrema_consistency")
     if not isinstance(verdict, Mapping):
@@ -7845,6 +7899,10 @@ def build_event_bound_no_submit_receipt(
             envelope["qkernel_execution_economics"] = _json_finite(
                 receipt.qkernel_execution_economics
             )
+        if receipt.day0_probability_authority is not None:
+            envelope["day0_probability_authority"] = _json_finite(
+                receipt.day0_probability_authority
+            )
         return dataclass_replace(receipt, envelope_json=envelope_to_json(envelope))
     except Exception:  # noqa: BLE001 — observability must never alter or fail a decision
         return receipt
@@ -8658,13 +8716,18 @@ def _build_event_bound_taker_quality_proof(
         live_entry_probability_quality_rejection_reason,
     )
 
-    live_win_rate_floor_reason = live_entry_probability_quality_rejection_reason(
-        q_lcb=q_lcb,
-        direction=direction,
-        strategy_key=actionable_payload.get("strategy_key"),
-        selection_authority_applied=actionable_payload.get("selection_authority_applied"),
-        qkernel_execution_economics=actionable_payload.get("qkernel_execution_economics"),
+    current_state_solve = _qkernel_current_state_solve_economics(
+        actionable_payload.get("qkernel_execution_economics")
     )
+    live_win_rate_floor_reason = None
+    if not current_state_solve:
+        live_win_rate_floor_reason = live_entry_probability_quality_rejection_reason(
+            q_lcb=q_lcb,
+            direction=direction,
+            strategy_key=actionable_payload.get("strategy_key"),
+            selection_authority_applied=actionable_payload.get("selection_authority_applied"),
+            qkernel_execution_economics=actionable_payload.get("qkernel_execution_economics"),
+        )
     if live_win_rate_floor_reason is not None:
         return {
             "schema_version": 1,
@@ -8682,9 +8745,13 @@ def _build_event_bound_taker_quality_proof(
     # bound q_exec_lcb = min(q_lcb, settlement-evidenced cell LCB), never the plain q_lcb. Absent/
     # thin cell -> q_exec_lcb == q_lcb (identity). q_lcb_dec is still used for model_confidence (a
     # belief-gap telemetry, not a gate). This only TIGHTENS the cross, consistent with FIX B.
-    q_exec_lcb_value, q_exec_lcb_basis = _event_bound_q_exec_lcb(
-        direction=direction, price=float(touch), q_decision_lcb=float(q_lcb)
-    )
+    if current_state_solve:
+        q_exec_lcb_value = float(q_lcb)
+        q_exec_lcb_basis = "CURRENT_POSTERIOR_BAND"
+    else:
+        q_exec_lcb_value, q_exec_lcb_basis = _event_bound_q_exec_lcb(
+            direction=direction, price=float(touch), q_decision_lcb=float(q_lcb)
+        )
     q_gate_dec = Decimal(str(q_exec_lcb_value))
     taker_edge_dec = q_gate_dec - touch_dec - fee_dec
     taker_expected_profit_usd = (
@@ -8738,16 +8805,22 @@ def _build_event_bound_taker_quality_proof(
     taker_edge_density = taker_edge_dec / max(touch_dec, Decimal("0.000001"))
     conservative_surplus_ok = taker_edge_dec >= Decimal("0")
     taker_quality_threshold_pass = bool(
-        taker_edge_dec >= min_taker_edge
-        and incremental_expected_profit_usd >= min_incremental_profit
-        and taker_expected_profit_usd >= required_profit
-        and model_confidence >= min_model_confidence
+        current_state_solve
+        or (
+            taker_edge_dec >= min_taker_edge
+            and incremental_expected_profit_usd >= min_incremental_profit
+            and taker_expected_profit_usd >= required_profit
+            and model_confidence >= min_model_confidence
+        )
     )
     entry_price_floor_pass = bool(touch_dec + Decimal("1e-12") >= effective_min_entry_price)
     strategy_quality_floor_pass = bool(
-        entry_price_floor_pass
-        and taker_expected_profit_usd >= min_expected_profit
-        and taker_edge_density >= min_submit_edge_density
+        current_state_solve
+        or (
+            entry_price_floor_pass
+            and taker_expected_profit_usd >= min_expected_profit
+            and taker_edge_density >= min_submit_edge_density
+        )
     )
     passed = bool(
         conservative_surplus_ok
@@ -8765,7 +8838,11 @@ def _build_event_bound_taker_quality_proof(
         "schema_version": 1,
         "passed": bool(passed),
         "reason": reason,
-        "passed_basis": "conservative_after_cost_plus_taker_and_strategy_quality_floors",
+        "passed_basis": (
+            "current_posterior_band_after_cost"
+            if current_state_solve
+            else "conservative_after_cost_plus_taker_and_strategy_quality_floors"
+        ),
         "taker_quality_threshold_pass": taker_quality_threshold_pass,
         "strategy_quality_floor_pass": strategy_quality_floor_pass,
         "legacy_threshold_pass": taker_quality_threshold_pass,
@@ -9393,6 +9470,24 @@ def _build_live_execution_command_certificates(
             executable_market_context=executable_market_context,
             taker_quality_proof=taker_quality_proof,
         )
+        final_authority_witness = _require_pre_submit_authority_witness(
+            pre_submit_authority_provider,
+            final_intent,
+            executable_snapshot,
+            decision_time,
+        )
+        _assert_final_jit_witness_matches_provisional(
+            provisional=authority_witness,
+            final=final_authority_witness,
+        )
+        authority_witness = final_authority_witness
+        current_utility_reason = _qkernel_current_state_actual_submit_rejection_reason(
+            cert=actionable.payload.get("qkernel_execution_economics") or {},
+            actual_stake_usd=_final_intent_worst_case_entry_spend(final_intent),
+            actual_cost=_final_intent_worst_case_entry_cost(final_intent),
+        )
+        if current_utility_reason is not None:
+            raise ValueError(current_utility_reason)
         # Legacy guard for old proofs without rest_then_cross policy. Modern proofs already
         # use the same policy in _validate_final_order_mode_or_abort; if a MAKER proof
         # upgrades to TAKER, that happened before the final intent was built and all taker
@@ -9696,7 +9791,7 @@ def _assert_forecast_entry_uses_qkernel_authority(actionable_payload: Mapping[st
         raw_cert = actionable_payload.get("qkernel_execution_economics")
         if raw_cert in (None, ""):
             raise ValueError("LIVE_ENTRY_QKERNEL_EXECUTION_ECONOMICS_REQUIRED")
-        if isinstance(raw_cert, Mapping):
+        if isinstance(raw_cert, Mapping) and not _qkernel_current_state_solve_economics(raw_cert):
             from src.strategy.live_inference.live_admission import (
                 live_entry_probability_quality_rejection_reason,
             )
@@ -9748,19 +9843,20 @@ def _assert_forecast_entry_uses_qkernel_authority(actionable_payload: Mapping[st
             f"cert_q={cert_q_live:.9f}:payload_q={payload_q_live:.9f}:"
             f"cert_q_lcb={cert_q_lcb:.9f}:payload_q_lcb={payload_q_lcb:.9f}"
         )
-    from src.strategy.live_inference.live_admission import (
-        live_entry_probability_quality_rejection_reason,
-    )
+    if not _qkernel_current_state_solve_economics(cert):
+        from src.strategy.live_inference.live_admission import (
+            live_entry_probability_quality_rejection_reason,
+        )
 
-    win_rate_reason = live_entry_probability_quality_rejection_reason(
-        q_lcb=cert_q_lcb,
-        direction=direction,
-        strategy_key=actionable_payload.get("strategy_key"),
-        selection_authority_applied=actionable_payload.get("selection_authority_applied"),
-        qkernel_execution_economics=cert,
-    )
-    if win_rate_reason is not None:
-        raise ValueError(win_rate_reason)
+        win_rate_reason = live_entry_probability_quality_rejection_reason(
+            q_lcb=cert_q_lcb,
+            direction=direction,
+            strategy_key=actionable_payload.get("strategy_key"),
+            selection_authority_applied=actionable_payload.get("selection_authority_applied"),
+            qkernel_execution_economics=cert,
+        )
+        if win_rate_reason is not None:
+            raise ValueError(win_rate_reason)
 
 
 def _assert_day0_entry_uses_live_observation_authority(actionable_payload: Mapping[str, object]) -> None:
@@ -10694,6 +10790,59 @@ def _require_pre_submit_authority_witness(
     return witness
 
 
+def _assert_final_jit_witness_matches_provisional(
+    *,
+    provisional: PreSubmitAuthorityWitness,
+    final: PreSubmitAuthorityWitness,
+) -> None:
+    """Bind final limit/size validation to the same JIT book used for re-decision."""
+
+    if (
+        provisional.book_authority_id != "clob_jit_book"
+        or final.book_authority_id != "clob_jit_book"
+    ):
+        raise ValueError("PRE_SUBMIT_BOOK_AUTHORITY_JIT_REQUIRED")
+    if not provisional.book_hash or provisional.book_hash != final.book_hash:
+        raise ValueError(
+            "PRE_SUBMIT_BOOK_AUTHORITY_JIT_CHANGED_DURING_BUILD:"
+            f"provisional_hash={provisional.book_hash or 'missing'}:"
+            f"final_hash={final.book_hash or 'missing'}"
+        )
+    for field_name in ("current_best_bid", "current_best_ask"):
+        before = getattr(provisional, field_name)
+        after = getattr(final, field_name)
+        if before is None or after is None:
+            matches = before is None and after is None
+        else:
+            matches = math.isclose(float(before), float(after), rel_tol=0.0, abs_tol=1e-12)
+        if not matches:
+            raise ValueError(
+                "PRE_SUBMIT_BOOK_AUTHORITY_JIT_CHANGED_DURING_BUILD:"
+                f"field={field_name}:provisional={before}:final={after}:"
+                f"book_hash={final.book_hash}"
+            )
+
+
+def _final_intent_worst_case_entry_cost(final_intent: DecisionCertificate) -> float:
+    """Worst per-share capital cost allowed by the final entry tuple."""
+
+    payload = final_intent.payload
+    limit = float(payload.get("limit_price") or 0.0)
+    if payload.get("post_only") is True:
+        return limit
+    # Same current fee law used by the taker-quality certificate.  Use the limit,
+    # not the expected VWAP, so every fill admitted by this FOK/FAK tuple is covered.
+    return limit + 0.05 * limit * (1.0 - limit)
+
+
+def _final_intent_worst_case_entry_spend(final_intent: DecisionCertificate) -> float:
+    """Maximum all-in capital consumed if the full final share size fills."""
+
+    return float(final_intent.payload.get("size") or 0.0) * _final_intent_worst_case_entry_cost(
+        final_intent
+    )
+
+
 _MAKER_BOOK_FRESH_MID_TOLERANCE_TICKS = 10.0
 
 
@@ -11159,7 +11308,7 @@ def _passive_maker_context_from_authorities(
         if best_bid is not None and best_ask is not None
         else 0.0
     )
-    p_fill_lcb = float(actionable.payload.get("p_fill_lcb") or 0.0)
+    p_fill_lcb = _maker_fill_probability_from_actionable(actionable.payload)
     # Adverse-selection proxy (§4 Dim 4.2): A ~= recent belief volatility x spread.
     # Belief volatility is sourced from the actionable's prior-cycle posterior when
     # available (|q_posterior - q_posterior_prev|); absent a trustworthy prior we
@@ -11182,6 +11331,56 @@ def _passive_maker_context_from_authorities(
         "best_ask": best_ask,
         "spread_observed": best_bid is not None and best_ask is not None,
     }
+
+
+def _maker_fill_probability_from_actionable(
+    actionable_payload: Mapping[str, object],
+) -> float:
+    """Return the selected maker leg's fill probability.
+
+    ``p_fill_lcb`` is taker visible-depth coverage.  Q-kernel opportunity books
+    separately carry the measured resting-order fill probability used by the
+    mode-consistent EV calculation.  Reusing the taker value for a maker intent
+    makes a roughly 20% resting fill look almost certain.  That corrupts the
+    final-intent economic witness and would overstate maker value for any
+    downstream profit or admission consumer.
+
+    Legacy certificates without a q-kernel opportunity book retain their
+    existing ``p_fill_lcb`` contract.  A q-kernel book, however, must bind the
+    selected candidate to an explicit, valid maker probability or fail closed.
+    """
+
+    book = actionable_payload.get("opportunity_book")
+    if not isinstance(book, Mapping) or str(book.get("selection_authority") or "") != (
+        "qkernel_spine"
+    ):
+        return float(actionable_payload.get("p_fill_lcb") or 0.0)
+
+    selected_id = str(
+        book.get("actual_receipt_selected_candidate_id")
+        or book.get("selected_candidate_id")
+        or ""
+    )
+    candidates = book.get("candidates")
+    if not selected_id or not isinstance(candidates, list):
+        raise ValueError("ACTIONABLE_SELECTED_MAKER_FILL_PROBABILITY_REQUIRED")
+
+    selected = next(
+        (
+            candidate
+            for candidate in candidates
+            if isinstance(candidate, Mapping)
+            and str(candidate.get("candidate_id") or "") == selected_id
+        ),
+        None,
+    )
+    if selected is None:
+        raise ValueError("ACTIONABLE_SELECTED_MAKER_FILL_PROBABILITY_REQUIRED")
+
+    probability = _optional_float(selected.get("maker_fill_probability"))
+    if probability is None or not 0.0 < probability <= 1.0:
+        raise ValueError("ACTIONABLE_SELECTED_MAKER_FILL_PROBABILITY_REQUIRED")
+    return probability
 
 
 def _adverse_selection_proxy(*, actionable_payload: Mapping[str, object], spread_usd: float) -> str | None:
@@ -12057,6 +12256,9 @@ def _build_no_submit_proof_bundle_from_adapter_evidence(
                 "bootstrap_n": edge_n_bootstrap(),
                 "unit": forecast_payload.get("unit"),
                 "unit_authority_source": forecast_payload.get("unit_authority_source"),
+                **_qkernel_current_state_belief_identity_fields(
+                    proof.qkernel_execution_economics
+                ),
             },
             forecast_clock,
             "zeus.strategy.market_analysis_family_scan",
@@ -13645,6 +13847,24 @@ def _qkernel_recapture_rank_key(
         for value in (cost, edge_lcb, payoff_q_lcb, stake, delta_u_at_min, optimal_delta_u)
     ):
         return None
+    utility_density = optimal_delta_u / stake if stake > 0.0 else float("-inf")
+    if _qkernel_current_state_solve_economics(cert):
+        if (
+            cost <= 0.0
+            or edge_lcb <= 0.0
+            or stake <= 0.0
+            or delta_u_at_min <= 0.0
+            or optimal_delta_u <= 0.0
+        ):
+            return None
+        return (
+            float(optimal_delta_u),
+            float(delta_u_at_min),
+            float(edge_lcb),
+            float(utility_density),
+            float(payoff_q_lcb),
+            -float(cost),
+        )
     profit_lcb = roi_frontier_profit_lcb_usd(stake=stake, cost=cost, edge_lcb=edge_lcb)
     growth_density = roi_frontier_growth_density(
         cost=cost,
@@ -13652,7 +13872,6 @@ def _qkernel_recapture_rank_key(
         payoff_q_lcb=payoff_q_lcb,
     )
     roi_lcb = edge_lcb / cost if cost > 0.0 else float("-inf")
-    utility_density = optimal_delta_u / stake if stake > 0.0 else float("-inf")
     if not roi_frontier_useful_values(
         side=side,
         cost=cost,
@@ -14126,6 +14345,12 @@ def _candidate_evaluation_from_proof(
         q_lcb_5pct=float(proof.q_lcb_5pct),
         q_lcb_calibration_source=proof.q_lcb_calibration_source,
         same_bin_yes_posterior=proof.same_bin_yes_posterior,
+        temperature_metric=str(
+            getattr(candidate, "temperature_metric", "")
+            or row.get("temperature_metric")
+            or row.get("metric")
+            or ""
+        ),
         settlement_coverage_status=proof.settlement_coverage_status,
         c_cost_95pct=_optional_float(proof.c_cost_95pct),
         p_fill_lcb=float(proof.p_fill_lcb),
@@ -14464,7 +14689,8 @@ def _live_selection_rejection_reason(
     the final venue submit gate.  This keeps cheap positive-EV lottery legs and
     qkernel SIDE_NOT_ARMED telemetry from becoming selected live intents.
     """
-    if enforce_win_rate_floor:
+    proof_cert = getattr(proof, "qkernel_execution_economics", None)
+    if enforce_win_rate_floor and not _qkernel_current_state_solve_economics(proof_cert):
         from src.strategy.live_inference.live_admission import (
             live_entry_probability_quality_rejection_reason,
         )
@@ -14560,33 +14786,37 @@ def _qkernel_final_submit_floor_rejection_reason(
     ):
         return "QKERNEL_FINAL_SUBMIT_FLOOR:non_finite_economics"
 
-    from src.strategy.live_inference.live_admission import (
-        live_entry_probability_quality_rejection_reason,
-    )
+    current_state_solve = _qkernel_current_state_solve_economics(cert)
+    if not current_state_solve:
+        from src.strategy.live_inference.live_admission import (
+            live_entry_probability_quality_rejection_reason,
+        )
 
-    strategy_key_for_quality = _proof_strategy_key_for_quality(
-        proof,
-        strategy_policy_event_type=strategy_policy_event_type,
-    )
-    if (
-        strategy_key_for_quality is None
-        and str(getattr(proof, "direction", "") or "").strip() == "buy_yes"
-        and str(cert.get("source") or "").strip() == "qkernel_spine"
-    ):
-        strategy_key_for_quality = "forecast_qkernel_entry"
+        strategy_key_for_quality = _proof_strategy_key_for_quality(
+            proof,
+            strategy_policy_event_type=strategy_policy_event_type,
+        )
+        if (
+            strategy_key_for_quality is None
+            and str(getattr(proof, "direction", "") or "").strip() == "buy_yes"
+            and str(cert.get("source") or "").strip() == "qkernel_spine"
+        ):
+            strategy_key_for_quality = "forecast_qkernel_entry"
 
-    win_rate_reason = live_entry_probability_quality_rejection_reason(
-        q_lcb=payoff_q_lcb,
-        direction=str(getattr(proof, "direction", "") or ""),
-        strategy_key=strategy_key_for_quality,
-        selection_authority_applied="qkernel_spine",
-        qkernel_execution_economics=cert,
-    )
-    if win_rate_reason is not None:
-        return win_rate_reason
+        win_rate_reason = live_entry_probability_quality_rejection_reason(
+            q_lcb=payoff_q_lcb,
+            direction=str(getattr(proof, "direction", "") or ""),
+            strategy_key=strategy_key_for_quality,
+            selection_authority_applied="qkernel_spine",
+            qkernel_execution_economics=cert,
+        )
+        if win_rate_reason is not None:
+            return win_rate_reason
     near_day0_reason = _qkernel_near_day0_cert_rejection_reason(cert)
     if near_day0_reason is not None:
         return near_day0_reason
+    if current_state_solve:
+        return None
 
     if not str(strategy_policy_event_type or "").strip():
         return None
@@ -14686,6 +14916,12 @@ def _qkernel_actual_submit_quality_rejection_reason(
         return (
             "QKERNEL_ACTUAL_SUBMIT_QUALITY_FLOOR:actual_edge_non_positive:"
             f"payoff_q_lcb={payoff_q_lcb:.6f}:cost={cost:.6f}"
+        )
+    if _qkernel_current_state_solve_economics(cert):
+        return _qkernel_current_state_actual_submit_rejection_reason(
+            cert=cert,
+            actual_stake_usd=stake,
+            actual_cost=cost,
         )
 
     from src.strategy.live_inference.live_admission import (
@@ -14795,6 +15031,73 @@ def _qkernel_actual_submit_quality_rejection_reason(
             "QKERNEL_ACTUAL_SUBMIT_QUALITY_FLOOR:actual_roi_frontier_not_useful:"
             f"strategy={strategy_key}:stake_usd={stake:.6f}:cost={cost:.6f}:"
             f"edge_lcb={edge_lcb:.6f}:payoff_q_lcb={payoff_q_lcb:.6f}"
+        )
+    return None
+
+
+def _qkernel_current_state_actual_submit_rejection_reason(
+    *,
+    cert: Mapping[str, Any],
+    actual_stake_usd: float,
+    actual_cost: float,
+) -> str | None:
+    """Prove the executable tuple remains inside the certified utility envelope.
+
+    The current-state solver maximizes a concave utility curve with U(0)=0.  A
+    positive certified optimum therefore implies positive utility for every
+    positive prefix of that stake; a no-worse cost can only improve the result.
+    This is a sufficient proof over the actual tuple, without replaying history or
+    reconstructing posterior samples at submit time.
+    """
+
+    if not _qkernel_current_state_solve_economics(cert):
+        return None
+    try:
+        stake = float(actual_stake_usd)
+        cost = float(actual_cost)
+        certified_cost = float(cert.get("cost"))
+        certified_stake = float(cert.get("optimal_stake_usd"))
+        payoff_q_lcb = float(cert.get("payoff_q_lcb"))
+        delta_u_at_min = float(cert.get("delta_u_at_min"))
+        optimal_delta_u = float(cert.get("optimal_delta_u"))
+    except (TypeError, ValueError):
+        return "QKERNEL_ACTUAL_SUBMIT_QUALITY_FLOOR:current_utility_certificate_invalid"
+    values = (
+        stake,
+        cost,
+        certified_cost,
+        certified_stake,
+        payoff_q_lcb,
+        delta_u_at_min,
+        optimal_delta_u,
+    )
+    if not all(math.isfinite(value) for value in values):
+        return "QKERNEL_ACTUAL_SUBMIT_QUALITY_FLOOR:current_utility_certificate_non_finite"
+    if (
+        stake <= 0.0
+        or certified_stake <= 0.0
+        or delta_u_at_min <= 0.0
+        or optimal_delta_u <= 0.0
+    ):
+        return (
+            "QKERNEL_ACTUAL_SUBMIT_QUALITY_FLOOR:current_utility_not_positive:"
+            f"actual_stake={stake:.9f}:certified_stake={certified_stake:.9f}:"
+            f"delta_u_at_min={delta_u_at_min:.12f}:optimal_delta_u={optimal_delta_u:.12f}"
+        )
+    if stake > certified_stake + 1e-9:
+        return (
+            "QKERNEL_ACTUAL_SUBMIT_QUALITY_FLOOR:actual_stake_exceeds_certified_optimum:"
+            f"actual_stake={stake:.9f}:certified_stake={certified_stake:.9f}"
+        )
+    if cost > certified_cost + 1e-9:
+        return (
+            "QKERNEL_ACTUAL_SUBMIT_QUALITY_FLOOR:actual_cost_exceeds_certified_cost:"
+            f"actual_cost={cost:.9f}:certified_cost={certified_cost:.9f}"
+        )
+    if payoff_q_lcb - cost <= 0.0:
+        return (
+            "QKERNEL_ACTUAL_SUBMIT_QUALITY_FLOOR:actual_edge_non_positive:"
+            f"payoff_q_lcb={payoff_q_lcb:.9f}:actual_cost={cost:.9f}"
         )
     return None
 
@@ -14950,6 +15253,8 @@ def _proofs_with_qkernel_candidate_economics(
         )
         if final_floor_reason is not None:
             return final_floor_reason
+        if _qkernel_current_state_solve_economics(cert):
+            return None
         growth_density = roi_frontier_growth_density(
             cost=cost,
             edge_lcb=edge_lcb,
@@ -20867,12 +21172,8 @@ def _market_analysis_from_event_snapshot(
         if _day0_sampler is not None:
             sampler = _day0_sampler
         else:
-            static_p_cal = np.asarray(p_cal, dtype=float)
-
-            def _static_sampler(_analysis, _n_members):
-                return static_p_cal
-
-            sampler = _static_sampler
+            payload["_edli_day0_q_block_reason"] = "DAY0_BOOTSTRAP_LCB_UNAVAILABLE"
+            raise ValueError("DAY0_BOOTSTRAP_LCB_UNAVAILABLE")
     # Wave-1 2026-06-12: the forecast-sharpness EDGE-SUPPRESSION GATE is DELETED (it was
     # a 50/54-city zero-trade veto). The ForecastSharpnessEvidence is now a purely inert,
     # unit-checked provenance carrier — it suppresses nothing. We still build it (the

@@ -1,5 +1,5 @@
 # Created: 2026-06-22
-# Last audited: 2026-06-22
+# Last reused/audited: 2026-07-09
 # Authority basis: selection-aware settlement q_lcb calibrator
 #   (frontier consult REQ-20260622-151741; live_order_pathology 2026-06-22)
 """RED-first tests for the selection-aware settlement q_lcb calibrator (runtime serving rule).
@@ -96,6 +96,7 @@ def _artifact(cells: dict, *, version: str = "sel_v1", min_n: int = 30, fitted_b
             # Source-of-truth constant so runtime/fitter version strings can never drift apart
             # again (the BLOCKER the consult flagged).
             "posterior_version": sc.DEFAULT_POSTERIOR_VERSION,
+            "temperature_metrics": ["high"],
             "min_n": min_n,
             "max_settled_at": fitted_before,
             "cell_key_schema": "side|lead_bucket|bin_class|raw_prob_bucket",
@@ -155,6 +156,30 @@ def test_selection_calibrator_preserves_genuine_edge_buy_yes():
     # The lower bound clears the 0.30 cost -> genuine edge survives.
     assert v.q_safe - 0.30 > 0.0
     assert v.q_safe <= raw_yes_prob + 1e-9  # still a lower bound
+
+
+def test_low_metric_cannot_borrow_high_metric_calibration_authority():
+    """HIGH settlement evidence cannot license a LOW candidate."""
+
+    raw_yes_prob = 0.45
+    bucket_idx, _ = sc.raw_prob_bucket(raw_yes_prob)
+    key = f"YES|L1|modal|pb{bucket_idx}"
+    art = _artifact({key: {"n": 200, "hit_rate": 0.46}})
+    art["_meta"]["armed_sides"] = ["YES", "NO"]
+
+    verdict = sc.apply_selection_calibrator(
+        raw_side_prob=raw_yes_prob,
+        side="YES",
+        lead_days=1.0,
+        bin_class="modal",
+        artifact=art,
+        temperature_metric="low",
+    )
+
+    assert verdict.trade is False
+    assert verdict.abstained is True
+    assert verdict.q_safe == 0.0
+    assert verdict.basis == "METRIC_NOT_ARMED"
 
 
 def test_legacy_sel_v1_sparse_yes_cell_does_not_arm_buy_yes():

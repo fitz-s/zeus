@@ -46,6 +46,20 @@ class TestGateRuntimeKillSwitch:
         with pytest.raises(RuntimeError, match="kill_switch_active"):
             gate_runtime.check("live_venue_submit")
 
+    def test_refuse_reduce_only_exit_submit_on_kill_switch(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
+    ) -> None:
+        """kill_switch_active blocks reduce-only exit submit too."""
+        monkeypatch.setenv("ZEUS_KILL_SWITCH", "1")
+        monkeypatch.delenv("ZEUS_RISK_HALT", raising=False)
+        monkeypatch.delenv("ZEUS_SETTLEMENT_FREEZE", raising=False)
+
+        from src.architecture import gate_runtime
+        monkeypatch.setattr(gate_runtime, "_RITUAL_SIGNAL_DIR", tmp_path / "ritual_signal")
+
+        with pytest.raises(RuntimeError, match="kill_switch_active"):
+            gate_runtime.check("reduce_only_exit_submit")
+
     def test_refuse_live_venue_submit_on_risk_halt(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
     ) -> None:
@@ -79,6 +93,19 @@ class TestGateRuntimeSettlementFreeze:
 
         with pytest.raises(RuntimeError, match="settlement_window_freeze_active"):
             gate_runtime.check("settlement_write")
+
+    def test_refuse_reduce_only_exit_submit_on_freeze(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
+    ) -> None:
+        monkeypatch.setenv("ZEUS_SETTLEMENT_FREEZE", "on")
+        monkeypatch.delenv("ZEUS_KILL_SWITCH", raising=False)
+        monkeypatch.delenv("ZEUS_RISK_HALT", raising=False)
+
+        from src.architecture import gate_runtime
+        monkeypatch.setattr(gate_runtime, "_RITUAL_SIGNAL_DIR", tmp_path / "ritual_signal")
+
+        with pytest.raises(RuntimeError, match="settlement_window_freeze_active"):
+            gate_runtime.check("reduce_only_exit_submit")
 
 
 class TestGateRuntimeAllClear:
@@ -136,6 +163,99 @@ class TestGateRuntimeAllClear:
         with pytest.raises(RuntimeError, match="deployment_freshness_mismatch"):
             gate_runtime.check("live_venue_submit")
 
+    def test_reduce_only_exit_allows_non_exit_runtime_diff_while_entry_blocks(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
+    ) -> None:
+        monkeypatch.delenv("ZEUS_KILL_SWITCH", raising=False)
+        monkeypatch.delenv("ZEUS_RISK_HALT", raising=False)
+        monkeypatch.delenv("ZEUS_SETTLEMENT_FREEZE", raising=False)
+        monkeypatch.setenv("ZEUS_PROCESS_BOOT_SHA", "a" * 40)
+
+        from src.architecture import gate_runtime
+        from src.control import runtime_code_plane
+
+        monkeypatch.setattr(gate_runtime, "_RITUAL_SIGNAL_DIR", tmp_path / "ritual_signal")
+        monkeypatch.setattr(gate_runtime, "REPO_ROOT", tmp_path)
+
+        def _fake_git(cmd, **_kwargs):
+            if list(cmd[:3]) == ["git", "diff", "--name-only"]:
+                return b"src/data/mainstream_forecast_source.py\n"
+            return ("b" * 40).encode()
+
+        monkeypatch.setattr(runtime_code_plane.subprocess, "check_output", _fake_git)
+        monkeypatch.setattr(
+            runtime_code_plane,
+            "dirty_runtime_worktree_paths",
+            lambda *_args, **_kwargs: (),
+        )
+
+        with pytest.raises(RuntimeError, match="deployment_freshness_mismatch"):
+            gate_runtime.check("live_venue_submit")
+        gate_runtime.check("reduce_only_exit_submit")
+
+    def test_reduce_only_exit_blocks_exit_runtime_diff(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
+    ) -> None:
+        monkeypatch.delenv("ZEUS_KILL_SWITCH", raising=False)
+        monkeypatch.delenv("ZEUS_RISK_HALT", raising=False)
+        monkeypatch.delenv("ZEUS_SETTLEMENT_FREEZE", raising=False)
+        monkeypatch.setenv("ZEUS_PROCESS_BOOT_SHA", "a" * 40)
+
+        from src.architecture import gate_runtime
+        from src.control import runtime_code_plane
+
+        monkeypatch.setattr(gate_runtime, "_RITUAL_SIGNAL_DIR", tmp_path / "ritual_signal")
+        monkeypatch.setattr(gate_runtime, "REPO_ROOT", tmp_path)
+
+        def _fake_git(cmd, **_kwargs):
+            if list(cmd[:3]) == ["git", "diff", "--name-only"]:
+                return b"src/execution/executor.py\n"
+            return ("b" * 40).encode()
+
+        monkeypatch.setattr(runtime_code_plane.subprocess, "check_output", _fake_git)
+        monkeypatch.setattr(
+            runtime_code_plane,
+            "dirty_runtime_worktree_paths",
+            lambda *_args, **_kwargs: (),
+        )
+
+        with pytest.raises(
+            RuntimeError,
+            match="reduce_only_exit_deployment_freshness_mismatch",
+        ):
+            gate_runtime.check("reduce_only_exit_submit")
+
+    def test_reduce_only_exit_blocks_dirty_exit_runtime_path(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
+    ) -> None:
+        monkeypatch.delenv("ZEUS_KILL_SWITCH", raising=False)
+        monkeypatch.delenv("ZEUS_RISK_HALT", raising=False)
+        monkeypatch.delenv("ZEUS_SETTLEMENT_FREEZE", raising=False)
+        sha = "c" * 40
+        monkeypatch.setenv("ZEUS_PROCESS_BOOT_SHA", sha)
+
+        from src.architecture import gate_runtime
+        from src.control import runtime_code_plane
+
+        monkeypatch.setattr(gate_runtime, "_RITUAL_SIGNAL_DIR", tmp_path / "ritual_signal")
+        monkeypatch.setattr(gate_runtime, "REPO_ROOT", tmp_path)
+        monkeypatch.setattr(
+            runtime_code_plane.subprocess,
+            "check_output",
+            lambda *_, **__: sha.encode(),
+        )
+        monkeypatch.setattr(
+            runtime_code_plane,
+            "dirty_runtime_worktree_paths",
+            lambda *_args, **_kwargs: ("src/execution/exit_lifecycle.py",),
+        )
+
+        with pytest.raises(
+            RuntimeError,
+            match="reduce_only_exit_deployment_freshness_mismatch",
+        ):
+            gate_runtime.check("reduce_only_exit_submit")
+
     def test_deployment_freshness_match_allows_live_submit(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
     ) -> None:
@@ -186,6 +306,43 @@ class TestGateRuntimeAllClear:
         with pytest.raises(RuntimeError, match="deployment_freshness_mismatch"):
             gate_runtime.check("live_venue_submit")
 
+    def test_deployment_freshness_dirty_readonly_audit_scripts_allow_live_submit(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
+    ) -> None:
+        monkeypatch.delenv("ZEUS_KILL_SWITCH", raising=False)
+        monkeypatch.delenv("ZEUS_RISK_HALT", raising=False)
+        monkeypatch.delenv("ZEUS_SETTLEMENT_FREEZE", raising=False)
+        sha = "c" * 40
+        monkeypatch.setenv("ZEUS_PROCESS_BOOT_SHA", sha)
+
+        from src.architecture import gate_runtime
+        from src.control import runtime_code_plane
+
+        monkeypatch.setattr(gate_runtime, "_RITUAL_SIGNAL_DIR", tmp_path / "ritual_signal")
+        monkeypatch.setattr(gate_runtime, "REPO_ROOT", tmp_path)
+
+        def _fake_git_status(cmd, **_kwargs):
+            if list(cmd[:2]) == ["git", "status"]:
+                return type(
+                    "Proc",
+                    (),
+                    {
+                        "returncode": 0,
+                        "stdout": "?? scripts/audit_live_probability_reality.py\n"
+                        "?? scripts/audit_yes_no_selection_skew.py\n",
+                    },
+                )()
+            raise AssertionError(f"unexpected command: {cmd!r}")
+
+        monkeypatch.setattr(
+            runtime_code_plane.subprocess,
+            "check_output",
+            lambda *_, **__: sha.encode(),
+        )
+        monkeypatch.setattr(runtime_code_plane.subprocess, "run", _fake_git_status)
+
+        gate_runtime.check("live_venue_submit")
+
     def test_deployment_freshness_non_runtime_diff_allows_live_submit(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
     ) -> None:
@@ -203,6 +360,32 @@ class TestGateRuntimeAllClear:
         def _fake_git(cmd, **_kwargs):
             if list(cmd[:3]) == ["git", "diff", "--name-only"]:
                 return b"tests/test_only.py\n"
+            return ("b" * 40).encode()
+
+        monkeypatch.setattr(runtime_code_plane.subprocess, "check_output", _fake_git)
+
+        gate_runtime.check("live_venue_submit")
+
+    def test_deployment_freshness_agent_instruction_diff_allows_live_submit(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
+    ) -> None:
+        monkeypatch.delenv("ZEUS_KILL_SWITCH", raising=False)
+        monkeypatch.delenv("ZEUS_RISK_HALT", raising=False)
+        monkeypatch.delenv("ZEUS_SETTLEMENT_FREEZE", raising=False)
+        monkeypatch.setenv("ZEUS_PROCESS_BOOT_SHA", "a" * 40)
+
+        from src.architecture import gate_runtime
+        from src.control import runtime_code_plane
+
+        monkeypatch.setattr(gate_runtime, "_RITUAL_SIGNAL_DIR", tmp_path / "ritual_signal")
+        monkeypatch.setattr(gate_runtime, "REPO_ROOT", tmp_path)
+
+        def _fake_git(cmd, **_kwargs):
+            if list(cmd[:3]) == ["git", "diff", "--name-only"]:
+                return (
+                    b".agents/skills/zeus-methodology-bootstrap/SKILL.md\n"
+                    b".claude/agents/verifier.md\n"
+                )
             return ("b" * 40).encode()
 
         monkeypatch.setattr(runtime_code_plane.subprocess, "check_output", _fake_git)

@@ -67,6 +67,7 @@ class CandidateEvaluation:
     # The city-skill fields are retained for explicit artifact-backed stable-bad blocking only; no
     # artifact means the city-skill selector is not in the execution path.
     city: str | None = None
+    temperature_metric: str = "high"
     target_date: str | None = None
     decision_time: str | None = None
     lead_days: float = 1.0
@@ -190,6 +191,7 @@ class CandidateEvaluation:
             own_side_cost=self.execution_price,
             artifact=self.selection_calibrator_artifact,
             expected_posterior_version=self.posterior_version,
+            temperature_metric=self.temperature_metric,
         )
 
     @property
@@ -269,6 +271,7 @@ class CandidateEvaluation:
             "low_volume_usd": self.low_volume_usd,
             "q_lcb_calibration_source": self.q_lcb_calibration_source,
             "same_bin_yes_posterior": self.same_bin_yes_posterior,
+            "temperature_metric": self.temperature_metric,
             "settlement_coverage_status": self.settlement_coverage_status,
             "admitted": self.admitted,
             "live_win_rate_floor": LIVE_DIRECTION_WIN_RATE_FLOOR,

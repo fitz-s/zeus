@@ -1,5 +1,5 @@
 # Created: 2026-06-01
-# Last reused or audited: 2026-06-17
+# Last reused or audited: 2026-07-09
 # Authority basis: DEFECT-1 capital-recoverability bridge. An EDLI FILL_CONFIRMED
 #   must materialise a canonical position_current row (the seam audited as
 #   missing), idempotently, chain-reconcilable by token, summing partial fills.
@@ -256,10 +256,30 @@ def _position_current_rows(conn: sqlite3.Connection) -> list[sqlite3.Row]:
     return conn.execute("SELECT * FROM position_current").fetchall()
 
 
-def test_bridge_uses_nested_decision_audit_qkernel_when_certificates_unavailable(conn):
-    aggregate_id = "agg-edli-day0-nested-qkernel"
-    event_id = "evt-edli-day0-nested-qkernel"
+def test_bridge_downgrades_retired_day0_observed_boundary_qkernel_when_certificates_unavailable(conn):
+    aggregate_id = "agg-edli-day0-retired-boundary-qkernel"
+    event_id = "evt-edli-day0-retired-boundary-qkernel"
     final_intent_id = f"intent:{event_id}:{ELECTED_YES_TOKEN}"
+    retired_qkernel = {
+        "source": "qkernel_spine",
+        "side": "YES",
+        "candidate_id": "YES:bin-32:DIRECT_YES:bin-32@proof",
+        "route_id": "DIRECT_YES:bin-32@proof",
+        "bin_id": "bin-32",
+        "payoff_q_point": 0.9614944294185659,
+        "payoff_q_lcb": 0.96,
+        "cost": 0.44,
+        "edge_lcb": 0.52,
+        "optimal_delta_u": 0.52,
+        "false_edge_rate": 0.01,
+        "direction_law_ok": True,
+        "coherence_allows": True,
+        "q_lcb_guard_basis": "DAY0_OBSERVED_BOUNDARY",
+        "selection_guard_basis": "DAY0_OBSERVED_BOUNDARY",
+        "q_lcb_guard_abstained": False,
+        "selection_guard_abstained": False,
+        "selection_guard_q_safe": 0.96,
+    }
     _insert_edli_event(
         conn,
         aggregate_id=aggregate_id,
@@ -282,21 +302,7 @@ def test_bridge_uses_nested_decision_audit_qkernel_when_certificates_unavailable
                 "strategy_key": "day0_nowcast_entry",
                 "opportunity_book": {
                     "cache_summary": {
-                        "selected_qkernel_execution_economics": {
-                            "source": "qkernel_spine",
-                            "side": "YES",
-                            "candidate_id": "YES:bin-32:DIRECT_YES:bin-32@proof",
-                            "route_id": "DIRECT_YES:bin-32@proof",
-                            "bin_id": "bin-32",
-                            "payoff_q_point": 0.9614944294185659,
-                            "payoff_q_lcb": 0.96,
-                            "cost": 0.44,
-                            "edge_lcb": 0.52,
-                            "optimal_delta_u": 0.52,
-                            "false_edge_rate": 0.01,
-                            "direction_law_ok": True,
-                            "coherence_allows": True,
-                        },
+                        "selected_qkernel_execution_economics": retired_qkernel,
                     },
                 },
             },
@@ -324,6 +330,9 @@ def test_bridge_uses_nested_decision_audit_qkernel_when_certificates_unavailable
             "metric": "high",
             "unit": "C",
             "market_id": CONDITION_ID,
+            "q_live": 0.9614944294185659,
+            "q_lcb_5pct": 0.96,
+            "qkernel_execution_economics": retired_qkernel,
         },
     )
     _insert_edli_event(
@@ -369,8 +378,133 @@ def test_bridge_uses_nested_decision_audit_qkernel_when_certificates_unavailable
     assert dict(current) == {
         "phase": "active",
         "direction": "buy_yes",
-        "p_posterior": pytest.approx(0.9614944294185659),
-        "entry_ci_width": pytest.approx(0.002988858837131723),
+        "p_posterior": pytest.approx(0.0),
+        "entry_ci_width": pytest.approx(0.0),
+        "entry_method": "ens_member_counting",
+        "strategy_key": "day0_nowcast_entry",
+    }
+
+
+def test_bridge_keeps_legitimate_day0_remaining_window_qkernel_when_certificates_unavailable(conn):
+    aggregate_id = "agg-edli-day0-legit-remaining-qkernel"
+    event_id = "evt-edli-day0-legit-remaining-qkernel"
+    final_intent_id = f"intent:{event_id}:{ELECTED_YES_TOKEN}"
+    qkernel = {
+        "source": "qkernel_spine",
+        "side": "YES",
+        "candidate_id": "YES:bin-32:DIRECT_YES:bin-32@proof",
+        "route_id": "DIRECT_YES:bin-32@proof",
+        "bin_id": "bin-32",
+        "payoff_q_point": 0.61,
+        "payoff_q_lcb": 0.57,
+        "cost": 0.44,
+        "edge_lcb": 0.13,
+        "optimal_delta_u": 0.13,
+        "false_edge_rate": 0.01,
+        "direction_law_ok": True,
+        "coherence_allows": True,
+        "q_lcb_guard_basis": "DAY0_REMAINING_DAY_Q_LCB",
+        "selection_guard_basis": "DAY0_REMAINING_DAY_Q_LCB",
+        "q_lcb_guard_abstained": False,
+        "selection_guard_abstained": False,
+        "selection_guard_q_safe": 0.57,
+    }
+    _insert_edli_event(
+        conn,
+        aggregate_id=aggregate_id,
+        sequence=1,
+        event_type="DecisionProofAccepted",
+        payload={
+            "event_id": event_id,
+            "final_intent_id": final_intent_id,
+            "decision_audit": {
+                "event_id": event_id,
+                "event_type": "DAY0_EXTREME_UPDATED",
+                "final_intent_id": final_intent_id,
+                "actual_bin_label": "Will the highest temperature in Manila be 32°C on July 2?",
+                "actual_condition_id": CONDITION_ID,
+                "actual_direction": "buy_yes",
+                "actual_token_id": ELECTED_YES_TOKEN,
+                "city": "Manila",
+                "target_date": "2026-07-02",
+                "metric": "high",
+                "strategy_key": "day0_nowcast_entry",
+                "qkernel_execution_economics": qkernel,
+            },
+        },
+    )
+    _insert_edli_event(
+        conn,
+        aggregate_id=aggregate_id,
+        sequence=2,
+        event_type="PreSubmitRevalidated",
+        payload={
+            "event_id": event_id,
+            "event_type": "DAY0_EXTREME_UPDATED",
+            "final_intent_id": final_intent_id,
+            "strategy_key": "day0_nowcast_entry",
+            "condition_id": CONDITION_ID,
+            "token_id": ELECTED_YES_TOKEN,
+            "side": "BUY",
+            "direction": "buy_yes",
+            "native_token_side": "YES",
+            "outcome_label": "YES",
+            "city": "Manila",
+            "target_date": "2026-07-02",
+            "bin_label": "Will the highest temperature in Manila be 32°C on July 2?",
+            "metric": "high",
+            "unit": "C",
+            "market_id": CONDITION_ID,
+            "q_live": 0.61,
+            "q_lcb_5pct": 0.57,
+            "qkernel_execution_economics": qkernel,
+        },
+    )
+    _insert_edli_event(
+        conn,
+        aggregate_id=aggregate_id,
+        sequence=3,
+        event_type="ExecutionCommandCreated",
+        payload={
+            "event_id": event_id,
+            "final_intent_id": final_intent_id,
+            "execution_command_id": EXECUTION_COMMAND_ID,
+        },
+    )
+    _insert_edli_event(
+        conn,
+        aggregate_id=aggregate_id,
+        sequence=4,
+        event_type="UserTradeObserved",
+        payload={
+            "event_id": event_id,
+            "final_intent_id": final_intent_id,
+            "trade_status": "CONFIRMED",
+            "fill_authority_state": "FILL_CONFIRMED",
+            "venue_order_id": VENUE_ORDER_ID,
+            "filled_size": 40.25,
+            "avg_fill_price": 0.44,
+            "fees": 0.0,
+        },
+        source_authority="user_channel",
+    )
+
+    result = materialize_position_current_from_edli_fill(conn, aggregate_id)
+
+    assert result is not None
+    current = conn.execute(
+        """
+        SELECT phase, direction, p_posterior, entry_ci_width, entry_method, strategy_key
+          FROM position_current
+         WHERE position_id = ?
+        """,
+        (edli_bridge_position_id(aggregate_id),),
+    ).fetchone()
+    assert dict(current) == {
+        "phase": "active",
+        "direction": "buy_yes",
+        "p_posterior": pytest.approx(0.61),
+        "entry_ci_width": pytest.approx(0.08),
         "entry_method": EntryMethod.QKERNEL_SPINE.value,
         "strategy_key": "day0_nowcast_entry",
     }
@@ -1121,7 +1255,7 @@ def test_bridge_resolves_day0_buy_yes_to_day0_nowcast_entry(conn):
     assert row["direction"] == "buy_yes"
     assert row["token_id"] == ELECTED_YES_TOKEN
     assert row["no_token_id"] in (None, "")
-    assert row["p_posterior"] == pytest.approx(0.9592408185)
+    assert row["p_posterior"] == pytest.approx(0.0)
 
 
 # --------------------------------------------------------------------------- #

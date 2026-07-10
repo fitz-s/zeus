@@ -214,6 +214,7 @@ REPLACEMENT_HEARTBEAT_JOBS = (
 )
 REPLACEMENT_POSTERIOR_SOURCE_ID = "openmeteo_ecmwf_ifs9_bayes_fusion"
 RAW_POSTERIOR_ALIGNMENT_SAMPLE_LIMIT = 25
+MONITOR_DAY0_SEMANTIC_SAMPLE_LIMIT = 25
 
 
 @dataclass
@@ -2220,6 +2221,7 @@ def _edli_confirmed_fill_bridge_coverage_check() -> CheckResult:
                 "command_id",
                 "decision_id",
                 "position_id",
+                "state",
             },
             "venue_trade_facts": {
                 "command_id",
@@ -2301,6 +2303,7 @@ def _edli_confirmed_fill_bridge_coverage_check() -> CheckResult:
                        exec.execution_command_id,
                        cmd.command_id,
                        cmd.position_id,
+                       cmd.state AS command_state,
                        ack.venue_order_id AS acknowledged_venue_order_id,
                        trade.trade_id,
                        trade.venue_order_id,
@@ -2309,6 +2312,12 @@ def _edli_confirmed_fill_bridge_coverage_check() -> CheckResult:
                        trade.filled_size,
                        trade.fill_price,
                        trade.observed_at,
+                       CASE
+                         WHEN UPPER(COALESCE(trade.state, '')) = 'CONFIRMED'
+                          AND trade.source = 'WS_USER'
+                         THEN 'ws_user_confirmed_missing_bridge'
+                         ELSE 'rest_filled_orphan_missing_bridge'
+                       END AS bridge_gap_type,
                        {position_select}
                   FROM execution_commands exec
                   JOIN submit_acks ack
@@ -2319,22 +2328,56 @@ def _edli_confirmed_fill_bridge_coverage_check() -> CheckResult:
                   JOIN venue_trade_facts trade
                     ON trade.command_id = cmd.command_id
                    AND trade.venue_order_id = ack.venue_order_id
-                 WHERE UPPER(COALESCE(trade.state, '')) = 'CONFIRMED'
-                   AND trade.source = 'WS_USER'
-                   AND CAST(COALESCE(trade.filled_size, '0') AS REAL) > 0
+                 WHERE CAST(COALESCE(trade.filled_size, '0') AS REAL) > 0
                    AND CAST(COALESCE(trade.fill_price, '0') AS REAL) > 0
-                   AND NOT EXISTS (
-                         SELECT 1
-                           FROM {events_table} existing
-                          WHERE existing.aggregate_id = exec.aggregate_id
-                            AND existing.event_type = 'UserTradeObserved'
-                            AND json_extract(existing.payload_json, '$.trade_id') = trade.trade_id
-                            AND json_extract(existing.payload_json, '$.fill_authority_state') = 'FILL_CONFIRMED'
+                   AND (
+                         (
+                           UPPER(COALESCE(trade.state, '')) = 'CONFIRMED'
+                           AND trade.source = 'WS_USER'
+                           AND NOT EXISTS (
+                                 SELECT 1
+                                   FROM {events_table} existing
+                                  WHERE existing.aggregate_id = exec.aggregate_id
+                                    AND existing.event_type = 'UserTradeObserved'
+                                    AND json_extract(existing.payload_json, '$.trade_id') = trade.trade_id
+                                    AND json_extract(existing.payload_json, '$.fill_authority_state') = 'FILL_CONFIRMED'
+                               )
+                         )
+                         OR (
+                           UPPER(COALESCE(cmd.state, '')) IN ('FILLED', 'PARTIAL')
+                           AND datetime(trade.observed_at) <= datetime('now', '-15 minutes')
+                           AND NOT EXISTS (
+                                 SELECT 1
+                                   FROM venue_trade_facts ws
+                                  WHERE ws.trade_id = trade.trade_id
+                                    AND ws.source = 'WS_USER'
+                                    AND UPPER(COALESCE(ws.state, '')) = 'CONFIRMED'
+                               )
+                           AND NOT EXISTS (
+                                 SELECT 1
+                                   FROM {events_table} existing
+                                  WHERE existing.aggregate_id = exec.aggregate_id
+                                    AND existing.event_type = 'UserTradeObserved'
+                                    AND json_extract(existing.payload_json, '$.trade_id') = trade.trade_id
+                               )
+                         )
                        )
             )
         """
         count_row = conn.execute(f"{missing_cte} SELECT COUNT(*) AS count FROM missing").fetchone()
         missing_count = int(count_row["count"] if count_row is not None else 0)
+        ws_count_row = conn.execute(
+            f"{missing_cte} SELECT COUNT(*) AS count FROM missing WHERE bridge_gap_type = ?",
+            ("ws_user_confirmed_missing_bridge",),
+        ).fetchone()
+        rest_orphan_count_row = conn.execute(
+            f"{missing_cte} SELECT COUNT(*) AS count FROM missing WHERE bridge_gap_type = ?",
+            ("rest_filled_orphan_missing_bridge",),
+        ).fetchone()
+        ws_count = int(ws_count_row["count"] if ws_count_row is not None else 0)
+        rest_orphan_count = int(
+            rest_orphan_count_row["count"] if rest_orphan_count_row is not None else 0
+        )
         samples = [
             dict(row)
             for row in conn.execute(
@@ -2351,10 +2394,13 @@ def _edli_confirmed_fill_bridge_coverage_check() -> CheckResult:
         evidence.update(
             {
                 "missing_confirmed_fill_count": missing_count,
+                "missing_ws_user_confirmed_fill_count": ws_count,
+                "missing_rest_filled_orphan_count": rest_orphan_count,
                 "samples": samples,
                 "repair_owner": (
                     "src.ingest.price_channel_ingest._edli_user_channel_reconcile_cycle/"
-                    "src.events.edli_trade_fact_bridge.append_confirmed_trade_facts_to_edli"
+                    "src.events.edli_trade_fact_bridge.append_confirmed_trade_facts_to_edli+"
+                    "append_rest_filled_orphan_trade_facts_to_edli"
                 ),
                 "restart_requirement": (
                     "run the current price-channel ingest fill bridge and materialize "
@@ -5566,6 +5612,172 @@ def _monitor_cadence_restart_evidence_check(rows: list[sqlite3.Row]) -> CheckRes
     )
 
 
+def _monitor_day0_semantic_restart_gate_check() -> CheckResult:
+    evidence: dict[str, Any] = {
+        "trade_db": str(TRADE_DB),
+        "sample_limit": MONITOR_DAY0_SEMANTIC_SAMPLE_LIMIT,
+        "bad_shape": (
+            "selected_method=day0_observation_remaining_window with "
+            "remaining_window.source=day0_raw_model_extrema and "
+            "forecast_source_role:day0_daily_extrema_live"
+        ),
+        "restart_requirement": (
+            "recompute held-position monitor probabilities with conditioned daily-extrema "
+            "semantics, or clear/repair stale semantic projections before live restart"
+        ),
+    }
+    if not TRADE_DB.exists():
+        return CheckResult(
+            "monitor_day0_semantic_restart_gate",
+            True,
+            "trade DB is absent; no Day0 monitor receipt semantics to inspect",
+            evidence,
+        )
+    try:
+        conn = _connect_live_ro()
+    except Exception as exc:  # noqa: BLE001
+        evidence["error"] = repr(exc)
+        return CheckResult(
+            "monitor_day0_semantic_restart_gate",
+            False,
+            "live DBs are unreadable for Day0 monitor semantic restart gate",
+            evidence,
+        )
+    try:
+        required_tables = {
+            "position_current": _table_exists(conn, "main", "position_current"),
+            "position_events": _table_exists(conn, "main", "position_events"),
+        }
+        evidence["required_tables"] = required_tables
+        if not all(required_tables.values()):
+            return CheckResult(
+                "monitor_day0_semantic_restart_gate",
+                True,
+                "position monitor tables are not all present; no Day0 semantic gap detected",
+                evidence,
+            )
+        rows = [
+            dict(row)
+            for row in conn.execute(
+                """
+                SELECT pc.position_id,
+                       pc.phase,
+                       pc.order_status,
+                       pc.shares,
+                       pc.chain_shares,
+                       pc.last_monitor_prob,
+                       pc.last_monitor_prob_is_fresh,
+                       latest.occurred_at AS latest_monitor_at,
+                       pc.city,
+                       pc.target_date,
+                       pc.temperature_metric,
+                       pc.bin_label,
+                       pc.direction,
+                       json_extract(
+                           latest.payload_json,
+                           '$.day0_monitor_probability_receipt.selected_method'
+                       ) AS selected_method,
+                       json_extract(
+                           latest.payload_json,
+                           '$.day0_monitor_probability_receipt.remaining_window.source'
+                       ) AS remaining_window_source,
+                       json_extract(
+                           latest.payload_json,
+                           '$.day0_monitor_probability_receipt.remaining_window.forecast_source_validations'
+                       ) AS forecast_source_validations
+                  FROM position_current pc
+                  JOIN position_events latest
+                    ON latest.rowid = (
+                        SELECT e.rowid
+                          FROM position_events e
+                         WHERE e.position_id = pc.position_id
+                           AND e.event_type = 'MONITOR_REFRESHED'
+                         ORDER BY e.sequence_no DESC, datetime(e.occurred_at) DESC
+                         LIMIT 1
+                    )
+                 WHERE pc.phase IN ('active', 'day0_window', 'pending_exit')
+                   AND (
+                       COALESCE(CAST(pc.chain_shares AS REAL), 0.0) > 0.0
+                       OR COALESCE(CAST(pc.shares AS REAL), 0.0) > 0.0
+                   )
+                   AND EXISTS (
+                       SELECT 1
+                         FROM json_each(
+                             json_extract(
+                                 latest.payload_json,
+                                 '$.day0_monitor_probability_receipt.remaining_window.forecast_source_validations'
+                             )
+                         )
+                        WHERE json_each.value = 'forecast_source_role:day0_daily_extrema_live'
+                   )
+                   AND (
+                       COALESCE(
+                           json_extract(
+                               latest.payload_json,
+                               '$.day0_monitor_probability_receipt.selected_method'
+                           ),
+                           ''
+                       ) != 'day0_observation_conditioned_daily_extrema'
+                       OR COALESCE(
+                           json_extract(
+                               latest.payload_json,
+                               '$.day0_monitor_probability_receipt.remaining_window.source'
+                           ),
+                           ''
+                       ) != 'day0_observed_bound_conditioned_daily_extrema'
+                   )
+                 ORDER BY datetime(latest.occurred_at) DESC, pc.position_id
+                 LIMIT ?
+                """,
+                (MONITOR_DAY0_SEMANTIC_SAMPLE_LIMIT,),
+            ).fetchall()
+        ]
+        evidence["unconditioned_daily_extrema_count"] = len(rows)
+        evidence["samples"] = rows
+        main_processes = _live_main_processes()
+        restart_in_progress = _live_restart_in_progress()
+        evidence["live_main_processes"] = main_processes
+        evidence["restart_in_progress"] = restart_in_progress
+        if not rows:
+            return CheckResult(
+                "monitor_day0_semantic_restart_gate",
+                True,
+                "Day0 monitor receipts use conditioned daily-extrema semantics or true remaining-window sources",
+                evidence,
+            )
+        if not main_processes:
+            evidence["restart_recovery_obligation"] = (
+                "post-start health must observe fresh per-position MONITOR_REFRESHED "
+                "events with day0_observation_conditioned_daily_extrema before live is considered recovered"
+            )
+            evidence["restart_safe_ordering"] = (
+                "src.main schedules exit_monitor before EDLI entry/redecision jobs, so the "
+                "held-position monitor can recompute stale Day0 receipts before new-entry lanes run"
+            )
+            return CheckResult(
+                "monitor_day0_semantic_restart_gate",
+                True,
+                "Day0 monitor receipts still use old unconditioned daily-extrema semantics; restart is expected to recover them and post-start health must verify",
+                evidence,
+            )
+        return CheckResult(
+            "monitor_day0_semantic_restart_gate",
+            False,
+            "src.main is running but Day0 monitor receipts still use unconditioned daily extrema",
+            evidence,
+        )
+    except sqlite3.Error as exc:
+        evidence["error"] = str(exc)
+        return CheckResult(
+            "monitor_day0_semantic_restart_gate",
+            False,
+            "Day0 monitor semantic restart gate query failed",
+            evidence,
+        )
+    finally:
+        conn.close()
+
+
 def evaluate() -> dict[str, Any]:
     cfg = _settings()
     real_submit = bool((cfg.get("edli") or {}).get("real_order_submit_enabled", False))
@@ -5623,6 +5835,7 @@ def evaluate() -> dict[str, Any]:
         _execution_feasibility_evidence_check(quote_rows),
         _pending_exit_check(rows),
         _belief_check(rows),
+        _monitor_day0_semantic_restart_gate_check(),
         _monitor_cadence_restart_evidence_check(rows),
     ]
     blockers = [asdict(check) for check in checks if not check.ok]

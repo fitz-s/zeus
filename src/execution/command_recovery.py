@@ -1,4 +1,4 @@
-# Lifecycle: created=2026-04-26; last_reviewed=2026-05-21; last_reused=2026-06-29
+# Lifecycle: created=2026-04-26; last_reviewed=2026-05-21; last_reused=2026-07-09
 # Purpose: Command recovery loop for unresolved venue command side effects.
 # Reuse: Run when command recovery, venue order payload normalization, or unknown side-effect resolution changes.
 # Authority basis: docs/operations/task_2026-04-26_execution_state_truth_p1_command_bus/implementation_plan.md §P1.S4
@@ -214,6 +214,7 @@ _REBALANCE_LIVE_EXPOSURE_PHASES = frozenset({
     "review_required",
 })
 _SAFE_REPLAY_MIN_AGE_SECONDS = 15 * 60
+_MATCHED_RECOVERY_TERMINAL_ZERO_LOOKBACK_SECONDS = 48 * 60 * 60
 _POST_ACK_PERSISTENCE_REVIEW_REASONS = frozenset({
     "entry_ack_persistence_failed_after_side_effect",
     "exit_ack_persistence_failed_after_side_effect",
@@ -1693,7 +1694,12 @@ def _trade_fact_count(conn: sqlite3.Connection, command_id: str) -> int:
     return int((_dict_row(row).get("count") if row else 0) or 0)
 
 
-def _latest_matched_order_fact_candidates(conn: sqlite3.Connection) -> list[dict]:
+def _latest_matched_order_fact_candidates(
+    conn: sqlite3.Connection,
+    *,
+    skip_stale_terminal_zero: bool = False,
+    now: datetime | None = None,
+) -> list[dict]:
     if not _table_exists(conn, "venue_order_facts"):
         return []
     command_states = tuple(
@@ -1739,16 +1745,54 @@ def _latest_matched_order_fact_candidates(conn: sqlite3.Connection) -> list[dict
     ).fetchall()
     candidates: list[dict] = []
     terminal_no_fill_fact_states = {"CANCEL_CONFIRMED", "EXPIRED", "VENUE_WIPED"}
+    checked_at_epoch = (now or datetime.now(timezone.utc)).timestamp()
     for row in rows:
         candidate = _dict_row(row)
+        command_state = str(candidate.get("state") or "").upper()
+        matched_positive = (
+            _positive_decimal_or_none(candidate.get("order_fact_matched_size")) is not None
+        )
+        terminal_positive_fact = _is_terminal_positive_match_candidate(candidate)
+        review_required = command_state == CommandState.REVIEW_REQUIRED.value
         if (
-            str(candidate.get("state") or "").upper() == CommandState.REVIEW_REQUIRED.value
+            review_required
             and str(candidate.get("order_fact_state") or "").upper() in terminal_no_fill_fact_states
-            and _positive_decimal_or_none(candidate.get("order_fact_matched_size")) is None
+            and not matched_positive
+        ):
+            continue
+        if (
+            skip_stale_terminal_zero
+            and command_state in _TERMINAL_POSITIVE_MATCH_COMMAND_STATES
+            and not matched_positive
+            and _matched_recovery_terminal_zero_is_stale(
+                candidate,
+                checked_at_epoch=checked_at_epoch,
+            )
+        ):
+            continue
+        if (
+            _fill_trade_fact_count(conn, str(candidate.get("command_id") or "")) > 0
+            and not (terminal_positive_fact or review_required)
         ):
             continue
         candidates.append(candidate)
     return candidates
+
+
+def _matched_recovery_terminal_zero_is_stale(
+    candidate: Mapping[str, object],
+    *,
+    checked_at_epoch: float,
+) -> bool:
+    latest_epoch = max(
+        _epoch_seconds(candidate.get("updated_at")) or 0.0,
+        _epoch_seconds(candidate.get("order_fact_observed_at")) or 0.0,
+    )
+    if latest_epoch <= 0.0:
+        return False
+    return (
+        checked_at_epoch - latest_epoch
+    ) > _MATCHED_RECOVERY_TERMINAL_ZERO_LOOKBACK_SECONDS
 
 
 def _latest_completed_partial_order_fact_candidates(conn: sqlite3.Connection) -> list[dict]:
@@ -3150,6 +3194,44 @@ def _selected_qkernel_execution_economics(payload: dict) -> dict:
     return {}
 
 
+def _event_context_qkernel_authority(
+    payload: dict,
+    *,
+    event_type: object,
+    q_live: object,
+    q_lcb: object,
+) -> tuple[dict, object, object, str]:
+    """Return current recovery authority for event-only qkernel evidence.
+
+    EDLI event context is a fallback for ACK/fill projection when certificates are
+    not visible to the recovery transaction yet. It must not resurrect retired
+    Day0 observed-boundary qkernel evidence as a fresh probability authority.
+    Invalid Day0 qkernel payloads still allow venue-fact projection, but with no
+    qkernel_spine method and no inherited posterior.
+    """
+
+    if not payload:
+        return {}, None, None, "missing"
+    event_type_text = str(event_type or "").strip()
+    if event_type_text != "DAY0_EXTREME_UPDATED":
+        return payload, q_live, q_lcb, "qkernel_spine"
+    try:
+        from src.events.day0_authority import (
+            Day0AuthorityError,
+            assert_live_day0_qkernel_guard_authority,
+        )
+
+        assert_live_day0_qkernel_guard_authority(payload)
+    except Day0AuthorityError as exc:
+        logger.warning(
+            "recovery: EDLI event-only Day0 qkernel evidence is not current "
+            "entry authority; projecting venue fact without posterior error=%s",
+            exc,
+        )
+        return {}, None, None, "venue_fact_recovery"
+    return payload, q_live, q_lcb, "qkernel_spine"
+
+
 def _unit_from_bin_label(bin_label: str) -> str:
     label = str(bin_label or "").strip().upper()
     if "°C" in label or label.endswith(" C") or label.endswith("C"):
@@ -3252,13 +3334,18 @@ def _edli_live_order_event_context(
             qkernel_payload.get("payoff_q_lcb")
             or qkernel_payload.get("pre_qkernel_q_lcb_5pct")
         )
+    qkernel_payload, q_live, q_lcb, selection_authority = _event_context_qkernel_authority(
+        qkernel_payload,
+        event_type=event_type,
+        q_live=q_live,
+        q_lcb=q_lcb,
+    )
     if not (
         condition_id
         and direction in {"buy_yes", "buy_no"}
         and bin_label
         and metric in {"high", "low"}
-        and qkernel_payload
-        and q_live not in (None, "")
+        and (qkernel_payload or selection_authority == "venue_fact_recovery")
     ):
         return {}
     context = {
@@ -3277,7 +3364,7 @@ def _edli_live_order_event_context(
         "q_live": q_live,
         "q_lcb_5pct": q_lcb,
         "qkernel_execution_economics": qkernel_payload,
-        "selection_authority_applied": "qkernel_spine",
+        "selection_authority_applied": selection_authority,
         "causal_snapshot_id": str(first("causal_snapshot_id", "snapshot_id") or "").strip(),
         "final_intent_id": str(first("final_intent_id") or "").strip(),
         "source_authority": "edli_live_order_events",
@@ -7139,6 +7226,7 @@ def reconcile_matched_order_facts(
     client,
     *,
     command_id: str | None = None,
+    skip_stale_terminal_zero: bool = False,
 ) -> dict:
     """Recover ACKED command fill facts when point-order truth says the order matched."""
 
@@ -7146,7 +7234,10 @@ def reconcile_matched_order_facts(
     get_order = getattr(client, "get_order", None)
     trade_payloads_cache: list[dict] | None = None
     target_command_id = str(command_id or "").strip()
-    for row in _latest_matched_order_fact_candidates(conn):
+    for row in _latest_matched_order_fact_candidates(
+        conn,
+        skip_stale_terminal_zero=skip_stale_terminal_zero,
+    ):
         if target_command_id and str(row.get("command_id") or "") != target_command_id:
             continue
         summary["scanned"] += 1
@@ -15331,13 +15422,24 @@ def _collect_recovery_priming_keys(conn: sqlite3.Connection, *, scope: str = "fu
         for candidate_fn in (
             _local_orphan_no_fill_candidates,
             _terminal_point_order_candidates,
-            _latest_matched_order_fact_candidates,
             _latest_unprojected_filled_entry_candidates,
         ):
             try:
                 _harvest(candidate_fn(conn))
             except Exception:  # noqa: BLE001
                 logger.debug("recovery: priming candidate %s failed", candidate_fn.__name__, exc_info=True)
+        try:
+            _harvest(
+                _latest_matched_order_fact_candidates(
+                    conn,
+                    skip_stale_terminal_zero=True,
+                )
+            )
+        except Exception:  # noqa: BLE001
+            logger.debug(
+                "recovery: priming candidate _latest_matched_order_fact_candidates failed",
+                exc_info=True,
+            )
         if scope == "live_tick":
             try:
                 _harvest(_partial_remainder_candidates(conn, updated_before=None))
@@ -16140,7 +16242,8 @@ def _reconcile_passes_short_conn(client, summary: dict, started_at: str, *, scop
         )
         _client_pass("matched_order_facts",
                      reconcile_matched_order_facts,
-                     "matched_order_facts")
+                     "matched_order_facts",
+                     skip_stale_terminal_zero=True)
         _db_pass(
             "filled_exit_trade_fact_tx_repair",
             reconcile_filled_exit_trade_fact_tx_repairs,

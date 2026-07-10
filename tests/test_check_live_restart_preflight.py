@@ -129,6 +129,46 @@ def _insert_open_position_with_monitor_events(
     _insert_monitor_events(conn, monitor_at=monitor_at, chain_at=chain_at)
 
 
+def _insert_open_position_with_day0_receipt(
+    conn: sqlite3.Connection,
+    *,
+    receipt: dict[str, object],
+    position_id: str = "pos-day0",
+) -> None:
+    now = datetime.now(timezone.utc)
+    conn.execute(
+        """
+        INSERT INTO position_current (
+            position_id, phase, city, target_date, temperature_metric,
+            bin_label, direction, shares, chain_shares, order_status,
+            exit_reason, exit_retry_count, next_exit_retry_at,
+            last_monitor_prob, last_monitor_prob_is_fresh,
+            last_monitor_market_price, last_monitor_market_price_is_fresh,
+            updated_at
+        ) VALUES (
+            ?, 'day0_window', 'Taipei', '2026-07-09', 'high',
+            'Will the highest temperature in Taipei be 35°C on July 9?',
+            'buy_no', 3.8, 3.8, 'partial', NULL, 0, NULL,
+            0.9461, 1, 0.36, 1, ?
+        )
+        """,
+        (position_id, now.isoformat()),
+    )
+    _insert_monitor_events(
+        conn,
+        position_id=position_id,
+        monitor_at=now,
+        payload={
+            "last_monitor_prob": 0.9461,
+            "last_monitor_prob_is_fresh": True,
+            "last_monitor_market_price": 0.36,
+            "last_monitor_market_price_is_fresh": True,
+            "selected_method": receipt.get("selected_method"),
+            "day0_monitor_probability_receipt": receipt,
+        },
+    )
+
+
 def _init_forecast_db(path):
     conn = sqlite3.connect(path)
     conn.execute(
@@ -4461,7 +4501,8 @@ def _init_confirmed_fill_bridge_gap_db(path):
         CREATE TABLE venue_commands (
             command_id TEXT PRIMARY KEY,
             decision_id TEXT NOT NULL,
-            position_id TEXT NOT NULL
+            position_id TEXT NOT NULL,
+            state TEXT NOT NULL
         )
         """
     )
@@ -4503,7 +4544,7 @@ def _init_confirmed_fill_bridge_gap_db(path):
         """,
         (json.dumps({"venue_order_id": "ord-1"}),),
     )
-    conn.execute("INSERT INTO venue_commands VALUES ('cmd-1', 'exec-1', 'pos-1')")
+    conn.execute("INSERT INTO venue_commands VALUES ('cmd-1', 'exec-1', 'pos-1', 'FILLED')")
     conn.execute(
         """
         INSERT INTO venue_trade_facts VALUES (
@@ -4530,8 +4571,42 @@ def test_confirmed_fill_bridge_coverage_blocks_unbridged_ws_confirmed_fill(
     assert check.ok is False
     assert check.name == "edli_confirmed_fill_bridge_coverage"
     assert check.evidence["missing_confirmed_fill_count"] == 1
+    assert check.evidence["missing_ws_user_confirmed_fill_count"] == 1
+    assert check.evidence["missing_rest_filled_orphan_count"] == 0
+    assert check.evidence["samples"][0]["bridge_gap_type"] == "ws_user_confirmed_missing_bridge"
     assert check.evidence["samples"][0]["trade_id"] == "trade-1"
     assert check.evidence["samples"][0]["command_id"] == "cmd-1"
+
+
+def test_confirmed_fill_bridge_coverage_blocks_unbridged_rest_filled_orphan(
+    monkeypatch,
+    tmp_path,
+):
+    trade_db, forecast_db, _state_dir = _patch_paths(monkeypatch, tmp_path)
+    _init_forecast_db(forecast_db).close()
+    conn = _init_confirmed_fill_bridge_gap_db(trade_db)
+    conn.execute("DELETE FROM venue_trade_facts")
+    conn.execute(
+        """
+        INSERT INTO venue_trade_facts VALUES (
+            'cmd-1', 'ord-1', 'trade-rest-orphan', 'REST', 'MATCHED',
+            '10.5', '0.54', '2026-06-29T20:00:10+00:00'
+        )
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    check = preflight._edli_confirmed_fill_bridge_coverage_check()
+
+    assert check.ok is False
+    assert check.name == "edli_confirmed_fill_bridge_coverage"
+    assert check.evidence["missing_confirmed_fill_count"] == 1
+    assert check.evidence["missing_ws_user_confirmed_fill_count"] == 0
+    assert check.evidence["missing_rest_filled_orphan_count"] == 1
+    assert check.evidence["samples"][0]["bridge_gap_type"] == "rest_filled_orphan_missing_bridge"
+    assert check.evidence["samples"][0]["trade_id"] == "trade-rest-orphan"
+    assert check.evidence["samples"][0]["command_state"] == "FILLED"
 
 
 def test_confirmed_fill_bridge_coverage_accepts_already_bridged_trade(
@@ -4563,6 +4638,8 @@ def test_confirmed_fill_bridge_coverage_accepts_already_bridged_trade(
 
     assert check.ok is True
     assert check.evidence["missing_confirmed_fill_count"] == 0
+    assert check.evidence["missing_ws_user_confirmed_fill_count"] == 0
+    assert check.evidence["missing_rest_filled_orphan_count"] == 0
 
 
 def test_preflight_tolerates_retry_pending_without_resting_exit_order(monkeypatch, tmp_path):
@@ -6271,6 +6348,128 @@ def test_monitor_cadence_restart_evidence_blocks_running_stale_main(
     assert result.evidence["restart_in_progress"] is False
 
 
+def test_monitor_day0_semantic_restart_gate_allows_restart_recovery_when_main_absent(
+    monkeypatch, tmp_path
+):
+    trade_db = tmp_path / "zeus_trades.db"
+    world_db = tmp_path / "zeus-world.db"
+    forecast_db = tmp_path / "zeus-forecasts.db"
+    sqlite3.connect(world_db).close()
+    sqlite3.connect(forecast_db).close()
+    conn = _init_trade_db(trade_db)
+    _insert_open_position_with_day0_receipt(
+        conn,
+        receipt={
+            "selected_method": "day0_observation_remaining_window",
+            "remaining_window": {
+                "source": "day0_raw_model_extrema",
+                "forecast_source_validations": [
+                    "forecast_source_id:raw_model_forecasts.single_runs",
+                    "forecast_source_role:day0_daily_extrema_live",
+                    "forecast_source_cycle_time:2026-07-09T02:14:47+00:00",
+                ],
+            },
+        },
+    )
+    conn.close()
+    monkeypatch.setattr(preflight, "TRADE_DB", trade_db)
+    monkeypatch.setattr(preflight, "WORLD_DB", world_db)
+    monkeypatch.setattr(preflight, "FORECAST_DB", forecast_db)
+    monkeypatch.setattr(preflight, "_live_main_processes", lambda: [])
+
+    result = preflight._monitor_day0_semantic_restart_gate_check()
+
+    assert result.ok is True
+    assert result.name == "monitor_day0_semantic_restart_gate"
+    assert result.evidence["unconditioned_daily_extrema_count"] == 1
+    assert result.evidence["live_main_processes"] == []
+    assert result.evidence["restart_recovery_obligation"].startswith("post-start health")
+    assert "exit_monitor before EDLI entry" in result.evidence["restart_safe_ordering"]
+    assert "restart is expected to recover" in result.detail
+    sample = result.evidence["samples"][0]
+    assert sample["position_id"] == "pos-day0"
+    assert sample["selected_method"] == "day0_observation_remaining_window"
+    assert sample["remaining_window_source"] == "day0_raw_model_extrema"
+
+
+def test_monitor_day0_semantic_restart_gate_blocks_running_main_with_unconditioned_daily_extrema(
+    monkeypatch, tmp_path
+):
+    trade_db = tmp_path / "zeus_trades.db"
+    world_db = tmp_path / "zeus-world.db"
+    forecast_db = tmp_path / "zeus-forecasts.db"
+    sqlite3.connect(world_db).close()
+    sqlite3.connect(forecast_db).close()
+    conn = _init_trade_db(trade_db)
+    _insert_open_position_with_day0_receipt(
+        conn,
+        receipt={
+            "selected_method": "day0_observation_remaining_window",
+            "remaining_window": {
+                "source": "day0_raw_model_extrema",
+                "forecast_source_validations": [
+                    "forecast_source_id:raw_model_forecasts.single_runs",
+                    "forecast_source_role:day0_daily_extrema_live",
+                    "forecast_source_cycle_time:2026-07-09T02:14:47+00:00",
+                ],
+            },
+        },
+    )
+    conn.close()
+    monkeypatch.setattr(preflight, "TRADE_DB", trade_db)
+    monkeypatch.setattr(preflight, "WORLD_DB", world_db)
+    monkeypatch.setattr(preflight, "FORECAST_DB", forecast_db)
+    monkeypatch.setattr(preflight, "_live_main_processes", lambda: ["123 python -m src.main"])
+
+    result = preflight._monitor_day0_semantic_restart_gate_check()
+
+    assert result.ok is False
+    assert result.name == "monitor_day0_semantic_restart_gate"
+    assert result.detail == (
+        "src.main is running but Day0 monitor receipts still use unconditioned daily extrema"
+    )
+    assert result.evidence["unconditioned_daily_extrema_count"] == 1
+    assert result.evidence["live_main_processes"] == ["123 python -m src.main"]
+    assert "restart_recovery_obligation" not in result.evidence
+
+
+def test_monitor_day0_semantic_restart_gate_accepts_conditioned_daily_extrema(
+    monkeypatch, tmp_path
+):
+    trade_db = tmp_path / "zeus_trades.db"
+    world_db = tmp_path / "zeus-world.db"
+    forecast_db = tmp_path / "zeus-forecasts.db"
+    sqlite3.connect(world_db).close()
+    sqlite3.connect(forecast_db).close()
+    conn = _init_trade_db(trade_db)
+    _insert_open_position_with_day0_receipt(
+        conn,
+        receipt={
+            "selected_method": "day0_observation_conditioned_daily_extrema",
+            "remaining_window": {
+                "source": "day0_observed_bound_conditioned_daily_extrema",
+                "forecast_source_validations": [
+                    "forecast_source_id:raw_model_forecasts.single_runs",
+                    "forecast_source_role:day0_daily_extrema_live",
+                    "day0_daily_extrema_conditioned_on_observed_bound",
+                    "forecast_source_cycle_time:2026-07-09T02:14:47+00:00",
+                ],
+            },
+        },
+    )
+    conn.close()
+    monkeypatch.setattr(preflight, "TRADE_DB", trade_db)
+    monkeypatch.setattr(preflight, "WORLD_DB", world_db)
+    monkeypatch.setattr(preflight, "FORECAST_DB", forecast_db)
+    monkeypatch.setattr(preflight, "_live_main_processes", lambda: ["123 python -m src.main"])
+
+    result = preflight._monitor_day0_semantic_restart_gate_check()
+
+    assert result.ok is True
+    assert result.evidence["unconditioned_daily_extrema_count"] == 0
+    assert result.evidence["live_main_processes"] == ["123 python -m src.main"]
+
+
 def test_live_trading_process_absent_blocks_running_main_without_deploy_restart(
     monkeypatch,
 ):
@@ -6359,6 +6558,7 @@ def test_final_preflight_fails_when_restart_env_set_but_old_main_running(monkeyp
     monkeypatch.setattr(preflight, "_execution_feasibility_evidence_check", lambda rows: pass_check)
     monkeypatch.setattr(preflight, "_pending_exit_check", lambda rows: pass_check)
     monkeypatch.setattr(preflight, "_belief_check", lambda rows: pass_check)
+    monkeypatch.setattr(preflight, "_monitor_day0_semantic_restart_gate_check", lambda: pass_check)
     monkeypatch.setattr(preflight, "_monitor_cadence_restart_evidence_check", lambda rows: pass_check)
 
     result = preflight.evaluate()

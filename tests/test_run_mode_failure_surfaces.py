@@ -1,8 +1,8 @@
 # Created: 2026-05-19
-# Last reused or audited: 2026-07-08
+# Last reused or audited: 2026-07-09
 # Authority basis: codereview-may19-2.md relationship F
 #                  + docs/operations/task_2026-05-21_live_side_effect_risk_boundaries/task.md P1-1
-# Lifecycle: created=2026-05-19; last_reviewed=2026-07-08; last_reused=2026-07-08
+# Lifecycle: created=2026-05-19; last_reviewed=2026-07-09; last_reused=2026-07-09
 # Purpose: Relationship-F antibody — assert that compute_composite_live_health()
 #   surfaces DEGRADED when run_mode has failed or status_summary is stale, even
 #   when the heartbeat is OK (closing the "scheduler alive but not trading" gap).
@@ -187,6 +187,272 @@ def _write_day0_trace_dbs(sd: Path, *, with_regret: bool) -> None:
         trade_conn.commit()
     finally:
         trade_conn.close()
+
+
+def _write_forecast_trace_dbs(sd: Path, *, with_no_submit: bool = False) -> None:
+    world_conn = sqlite3.connect(sd / "zeus-world.db")
+    try:
+        world_conn.execute(
+            "CREATE TABLE opportunity_events ("
+            "event_id TEXT, event_type TEXT, entity_key TEXT, created_at TEXT)"
+        )
+        world_conn.execute(
+            "CREATE TABLE opportunity_event_processing ("
+            "consumer_name TEXT, event_id TEXT, processing_status TEXT, "
+            "processed_at TEXT, last_error TEXT)"
+        )
+        world_conn.execute(
+            "CREATE TABLE decision_compile_failures (event_id TEXT, stage TEXT, reason_code TEXT)"
+        )
+        world_conn.execute(
+            "CREATE TABLE no_trade_regret_events (event_id TEXT, rejection_stage TEXT, rejection_reason TEXT)"
+        )
+        world_conn.execute("CREATE TABLE edli_no_submit_receipts (event_id TEXT)")
+        world_conn.execute(
+            "CREATE TABLE decision_certificates (certificate_type TEXT, semantic_key TEXT)"
+        )
+        world_conn.execute(
+            "CREATE INDEX idx_decision_certificates_semantic "
+            "ON decision_certificates(certificate_type, semantic_key)"
+        )
+        world_conn.execute(
+            "INSERT INTO opportunity_events VALUES "
+            "('fsr-trace-1', 'FORECAST_SNAPSHOT_READY', 'Paris|2026-07-09|low', ?)",
+            (_now_iso(-60),),
+        )
+        world_conn.execute(
+            "INSERT INTO opportunity_event_processing VALUES "
+            "('edli_reactor_v1', 'fsr-trace-1', 'processed', ?, NULL)",
+            (_now_iso(-30),),
+        )
+        if with_no_submit:
+            world_conn.execute(
+                "INSERT INTO edli_no_submit_receipts VALUES ('fsr-trace-1')"
+            )
+        world_conn.commit()
+    finally:
+        world_conn.close()
+
+    trade_conn = sqlite3.connect(sd / "zeus_trades.db")
+    try:
+        trade_conn.execute("CREATE TABLE venue_commands (decision_id TEXT)")
+        trade_conn.execute(
+            "CREATE TABLE decision_certificates (certificate_type TEXT, semantic_key TEXT)"
+        )
+        trade_conn.execute(
+            "CREATE INDEX idx_decision_certificates_semantic "
+            "ON decision_certificates(certificate_type, semantic_key)"
+        )
+        trade_conn.commit()
+    finally:
+        trade_conn.close()
+
+
+def _write_high_yes_edge_dbs(
+    sd: Path,
+    *,
+    with_yes_no_submit: bool = False,
+    with_yes_no_trade: bool = False,
+    with_yes_entry_command: bool = False,
+    with_stale_yes_no_trade: bool = False,
+    with_degenerate_day0_lcb_no_trade: bool = False,
+    stale_quote: bool = False,
+) -> None:
+    now = datetime.now(timezone.utc)
+    condition_id = "cond-high-yes-1"
+    bin_label = "Will the lowest temperature in Paris be 17C on July 9?"
+    computed_at = (now - timedelta(minutes=5)).isoformat()
+    forecast_conn = sqlite3.connect(sd / "zeus-forecasts.db")
+    try:
+        forecast_conn.execute(
+            "CREATE TABLE forecast_posteriors ("
+            "posterior_id INTEGER, city TEXT, target_date TEXT, "
+            "temperature_metric TEXT, computed_at TEXT, runtime_layer TEXT, "
+            "q_json TEXT, q_lcb_json TEXT)"
+        )
+        forecast_conn.execute(
+            "CREATE TABLE market_events ("
+            "city TEXT, target_date TEXT, temperature_metric TEXT, "
+            "range_label TEXT, condition_id TEXT)"
+        )
+        forecast_conn.execute(
+            "INSERT INTO forecast_posteriors VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                1,
+                "Paris",
+                "2026-07-09",
+                "low",
+                computed_at,
+                "live",
+                json.dumps({bin_label: 0.93}),
+                json.dumps({bin_label: 0.91}),
+            ),
+        )
+        forecast_conn.execute(
+            "INSERT INTO market_events VALUES (?, ?, ?, ?, ?)",
+            ("Paris", "2026-07-09", "low", bin_label, condition_id),
+        )
+        forecast_conn.commit()
+    finally:
+        forecast_conn.close()
+
+    trade_conn = sqlite3.connect(sd / "zeus_trades.db")
+    try:
+        trade_conn.execute(
+            "CREATE TABLE executable_market_snapshot_latest ("
+            "condition_id TEXT, outcome_label TEXT, orderbook_top_ask TEXT, "
+            "captured_at TEXT, freshness_deadline TEXT, "
+            "active INTEGER, closed INTEGER, accepting_orders INTEGER)"
+        )
+        trade_conn.execute(
+            "CREATE TABLE venue_commands ("
+            "intent_kind TEXT, created_at TEXT, side TEXT, market_id TEXT, "
+            "envelope_id TEXT, decision_id TEXT)"
+        )
+        trade_conn.execute(
+            "CREATE TABLE venue_submission_envelopes ("
+            "envelope_id TEXT, condition_id TEXT, outcome_label TEXT)"
+        )
+        if with_yes_entry_command:
+            trade_conn.execute(
+                "INSERT INTO venue_submission_envelopes VALUES (?, ?, 'YES')",
+                ("env-high-yes-1", condition_id),
+            )
+            trade_conn.execute(
+                "INSERT INTO venue_commands VALUES "
+                "('ENTRY', ?, 'BUY', 'market-high-yes-1', 'env-high-yes-1', ?)",
+                (
+                    (now - timedelta(minutes=1)).isoformat(),
+                    "edli_intent:fsr-high-yes-1:buy_yes",
+                ),
+            )
+        trade_conn.execute(
+            "INSERT INTO executable_market_snapshot_latest VALUES "
+            "(?, 'YES', '0.20', ?, ?, 1, 0, 1)",
+            (
+                condition_id,
+                (now - timedelta(minutes=2)).isoformat(),
+                (
+                    now - timedelta(minutes=1)
+                    if stale_quote
+                    else now + timedelta(minutes=1)
+                ).isoformat(),
+            ),
+        )
+        trade_conn.commit()
+    finally:
+        trade_conn.close()
+
+    world_conn = sqlite3.connect(sd / "zeus-world.db")
+    try:
+        world_conn.execute(
+            "CREATE TABLE opportunity_events ("
+            "event_id TEXT, event_type TEXT, payload_json TEXT, created_at TEXT)"
+        )
+        world_conn.execute(
+            "CREATE TABLE opportunity_event_processing ("
+            "event_id TEXT, consumer_name TEXT, processing_status TEXT)"
+        )
+        world_conn.execute(
+            "CREATE TABLE decision_certificates ("
+            "certificate_type TEXT, created_at TEXT, payload_json TEXT)"
+        )
+        world_conn.execute(
+            "CREATE TABLE edli_no_submit_receipts ("
+            "created_at TEXT, condition_id TEXT, direction TEXT)"
+        )
+        world_conn.execute(
+            "CREATE TABLE no_trade_regret_events ("
+            "created_at TEXT, condition_id TEXT, direction TEXT, "
+            "rejection_stage TEXT, rejection_reason TEXT, "
+            "city TEXT, target_date TEXT, metric TEXT, bin_label TEXT, "
+            "q_lcb_5pct REAL, c_fee_adjusted REAL, trade_score REAL)"
+        )
+        world_conn.execute(
+            "INSERT INTO opportunity_events VALUES (?, 'FORECAST_SNAPSHOT_READY', ?, ?)",
+            (
+                "fsr-high-yes-1",
+                json.dumps(
+                    {
+                        "city": "Paris",
+                        "target_date": "2026-07-09",
+                        "metric": "low",
+                        "available_at": computed_at,
+                    }
+                ),
+                (now - timedelta(minutes=4)).isoformat(),
+            ),
+        )
+        world_conn.execute(
+            "INSERT INTO opportunity_event_processing VALUES "
+            "('fsr-high-yes-1', 'edli_reactor_v1', 'processed')"
+        )
+        if with_yes_no_submit:
+            world_conn.execute(
+                "INSERT INTO edli_no_submit_receipts VALUES (?, ?, ?)",
+                (
+                    (now - timedelta(minutes=1)).isoformat(),
+                    condition_id,
+                    "buy_yes",
+                ),
+            )
+        if with_yes_no_trade:
+            world_conn.execute(
+                "INSERT INTO no_trade_regret_events "
+                "(created_at, condition_id, direction, rejection_stage, rejection_reason, "
+                "city, target_date, metric, bin_label, q_lcb_5pct, c_fee_adjusted, "
+                "trade_score) "
+                "VALUES (?, ?, ?, 'TRADE_SCORE', ?, 'Paris', '2026-07-09', "
+                "'low', ?, 0.91, 0.20, 0.71)",
+                (
+                    (now - timedelta(minutes=1)).isoformat(),
+                    condition_id,
+                    "buy_yes",
+                    "EVENT_BOUND_CANDIDATE_REJECTED:"
+                    "QKERNEL_EXECUTION_ECONOMICS_FALSE_EDGE_RATE_BLOCKS:"
+                    "value=0.500000:alpha=0.100000:candidate_id=abc",
+                    bin_label,
+                ),
+            )
+        if with_stale_yes_no_trade:
+            world_conn.execute(
+                "INSERT INTO no_trade_regret_events "
+                "(created_at, condition_id, direction, rejection_stage, rejection_reason, "
+                "city, target_date, metric, bin_label, q_lcb_5pct, c_fee_adjusted, "
+                "trade_score) "
+                "VALUES (?, ?, ?, 'TRADE_SCORE', ?, 'Paris', '2026-07-09', "
+                "'low', ?, 0.91, 0.20, 0.71)",
+                (
+                    (now - timedelta(minutes=10)).isoformat(),
+                    condition_id,
+                    "buy_yes",
+                    "EVENT_BOUND_CANDIDATE_REJECTED:"
+                    "QKERNEL_EXECUTION_ECONOMICS_FALSE_EDGE_RATE_BLOCKS:"
+                    "value=0.500000:alpha=0.100000:candidate_id=stale",
+                    bin_label,
+                ),
+            )
+        if with_degenerate_day0_lcb_no_trade:
+            world_conn.execute(
+                "INSERT INTO no_trade_regret_events "
+                "(created_at, condition_id, direction, rejection_stage, rejection_reason, "
+                "city, target_date, metric, bin_label, q_lcb_5pct, c_fee_adjusted, "
+                "trade_score) "
+                "VALUES (?, ?, ?, 'EXECUTOR_EXPRESSIBILITY', ?, 'Paris', '2026-07-09', "
+                "'low', ?, 0.91, 0.20, 0.71)",
+                (
+                    (now - timedelta(minutes=1)).isoformat(),
+                    condition_id,
+                    "buy_yes",
+                    "EDLI_LIVE_CERTIFICATE_BUILD_FAILED:"
+                    "LIVE_ENTRY_DAY0_PROBABILITY_AUTHORITY_REQUIRED:"
+                    "remaining_day q_lcb is degenerate with q_live",
+                    bin_label,
+                ),
+            )
+        world_conn.commit()
+    finally:
+        world_conn.close()
 
 
 def _write_entry_q_version_db(
@@ -450,7 +716,7 @@ def _write_pending_exit_release_loop_db(sd: Path, *, now: datetime) -> None:
     trade_conn = sqlite3.connect(sd / "zeus_trades.db")
     try:
         trade_conn.execute(
-            "CREATE TABLE venue_commands ("
+            "CREATE TABLE IF NOT EXISTS venue_commands ("
             "command_id TEXT, position_id TEXT, intent_kind TEXT, state TEXT, "
             "created_at TEXT, q_version TEXT)"
         )
@@ -461,7 +727,7 @@ def _write_pending_exit_release_loop_db(sd: Path, *, now: datetime) -> None:
         )
         trade_conn.execute(
             """
-            CREATE TABLE position_current (
+            CREATE TABLE IF NOT EXISTS position_current (
                 position_id TEXT PRIMARY KEY,
                 phase TEXT,
                 order_status TEXT,
@@ -562,7 +828,7 @@ def _write_pending_exit_no_exit_command_db(sd: Path, *, now: datetime) -> None:
     trade_conn = sqlite3.connect(sd / "zeus_trades.db")
     try:
         trade_conn.execute(
-            "CREATE TABLE venue_commands ("
+            "CREATE TABLE IF NOT EXISTS venue_commands ("
             "command_id TEXT, position_id TEXT, intent_kind TEXT, state TEXT, "
             "created_at TEXT, q_version TEXT)"
         )
@@ -573,7 +839,7 @@ def _write_pending_exit_no_exit_command_db(sd: Path, *, now: datetime) -> None:
         )
         trade_conn.execute(
             """
-            CREATE TABLE position_current (
+            CREATE TABLE IF NOT EXISTS position_current (
                 position_id TEXT PRIMARY KEY,
                 phase TEXT,
                 order_status TEXT,
@@ -727,6 +993,234 @@ def _write_pending_exit_reassert_loop_db(sd: Path, *, now: datetime) -> None:
         trade_conn.close()
 
 
+def _write_pending_exit_projection_regression_db(sd: Path, *, now: datetime) -> None:
+    trade_conn = sqlite3.connect(sd / "zeus_trades.db")
+    try:
+        trade_conn.execute(
+            "CREATE TABLE IF NOT EXISTS venue_commands ("
+            "command_id TEXT, position_id TEXT, intent_kind TEXT, state TEXT, "
+            "created_at TEXT, q_version TEXT)"
+        )
+        trade_conn.execute(
+            "INSERT INTO venue_commands VALUES "
+            "('cmd-entry-only', 'pos-regression', 'ENTRY', 'FILLED', ?, 'q-id-1')",
+            ((now - timedelta(minutes=10)).isoformat(),),
+        )
+        trade_conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS position_current (
+                position_id TEXT PRIMARY KEY,
+                phase TEXT,
+                order_status TEXT,
+                shares REAL,
+                chain_shares REAL,
+                city TEXT,
+                target_date TEXT,
+                bin_label TEXT,
+                direction TEXT,
+                exit_reason TEXT
+            )
+            """
+        )
+        trade_conn.execute(
+            """
+            INSERT INTO position_current (
+                position_id,
+                phase,
+                order_status,
+                shares,
+                chain_shares,
+                city,
+                target_date,
+                bin_label,
+                direction,
+                exit_reason
+            ) VALUES (
+                'pos-regression',
+                'day0_window',
+                'partial',
+                3.8,
+                3.8,
+                'Taipei',
+                '2026-07-09',
+                'Will the highest temperature in Taipei be 35°C on July 9?',
+                'buy_no',
+                'FAMILY_DIRECT_SELL_DOMINATES_HOLD [DUST: min_order_size=5]'
+            )
+            """
+        )
+        trade_conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS position_events (
+                position_id TEXT,
+                sequence_no INTEGER,
+                event_type TEXT,
+                occurred_at TEXT,
+                phase_before TEXT,
+                phase_after TEXT,
+                venue_status TEXT,
+                payload_json TEXT
+            )
+            """
+        )
+        events = [
+            (
+                10,
+                "EXIT_INTENT",
+                now - timedelta(minutes=6),
+                "day0_window",
+                "pending_exit",
+                "exit_intent",
+                {"exit_reason": "FAMILY_DIRECT_SELL_DOMINATES_HOLD"},
+            ),
+            (
+                11,
+                "EXIT_ORDER_REJECTED",
+                now - timedelta(minutes=5, seconds=55),
+                "day0_window",
+                "pending_exit",
+                "backoff_exhausted",
+                {
+                    "error": "executable_snapshot_gate: size below min_order_size",
+                    "exit_reason": "FAMILY_DIRECT_SELL_DOMINATES_HOLD [DUST]",
+                    "status": "backoff_exhausted",
+                },
+            ),
+            (
+                12,
+                "MONITOR_REFRESHED",
+                now - timedelta(minutes=5, seconds=50),
+                "day0_window",
+                "day0_window",
+                "partial",
+                {"fresh_prob": 0.77},
+            ),
+            (
+                13,
+                "CHAIN_SIZE_CORRECTED",
+                now - timedelta(minutes=5, seconds=40),
+                "day0_window",
+                "day0_window",
+                "partial",
+                {"chain_shares": 3.8},
+            ),
+        ]
+        for seq, event_type, occurred_at, before, after, status, payload in events:
+            trade_conn.execute(
+                """
+                INSERT INTO position_events (
+                    position_id,
+                    sequence_no,
+                    event_type,
+                    occurred_at,
+                    phase_before,
+                    phase_after,
+                    venue_status,
+                    payload_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "pos-regression",
+                    seq,
+                    event_type,
+                    occurred_at.isoformat(),
+                    before,
+                    after,
+                    status,
+                    json.dumps(payload),
+                ),
+            )
+        trade_conn.commit()
+    finally:
+        trade_conn.close()
+
+
+def _write_pending_exit_runtime_gate_block_db(sd: Path, *, now: datetime) -> None:
+    trade_conn = sqlite3.connect(sd / "zeus_trades.db")
+    try:
+        trade_conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS position_current (
+                position_id TEXT PRIMARY KEY,
+                phase TEXT,
+                order_status TEXT,
+                shares REAL,
+                chain_shares REAL,
+                city TEXT,
+                target_date TEXT,
+                bin_label TEXT,
+                direction TEXT,
+                exit_reason TEXT
+            )
+            """
+        )
+        trade_conn.execute(
+            """
+            INSERT INTO position_current (
+                position_id,
+                phase,
+                order_status,
+                shares,
+                chain_shares,
+                city,
+                target_date,
+                bin_label,
+                direction,
+                exit_reason
+            ) VALUES (
+                'pos-runtime-gate',
+                'day0_window',
+                'partial',
+                11.6,
+                11.6,
+                'Taipei',
+                '2026-07-09',
+                'Will the highest temperature in Taipei be 36°C on July 9?',
+                'buy_no',
+                'FAMILY_DIRECT_SELL_DOMINATES_HOLD'
+            )
+            """
+        )
+        trade_conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS position_events (
+                position_id TEXT,
+                sequence_no INTEGER,
+                event_type TEXT,
+                occurred_at TEXT,
+                phase_before TEXT,
+                phase_after TEXT,
+                venue_status TEXT,
+                payload_json TEXT
+            )
+            """
+        )
+        for seq in (10, 20):
+            trade_conn.execute(
+                "INSERT INTO position_events VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    "pos-runtime-gate",
+                    seq,
+                    "EXIT_ORDER_REJECTED",
+                    (now - timedelta(minutes=3 - (seq // 10))).isoformat(),
+                    "pending_exit",
+                    "pending_exit",
+                    "retry_pending",
+                    json.dumps(
+                        {
+                            "status": "retry_pending",
+                            "runtime_submit_gate_block": True,
+                            "exit_reason": "FAMILY_DIRECT_SELL_DOMINATES_HOLD",
+                            "error": "structured_runtime_gate_block_without_legacy_text",
+                        }
+                    ),
+                ),
+            )
+        trade_conn.commit()
+    finally:
+        trade_conn.close()
+
+
 def _write_pending_exit_historical_churn_db(sd: Path, *, now: datetime) -> None:
     trade_conn = sqlite3.connect(sd / "zeus_trades.db")
     try:
@@ -869,6 +1363,9 @@ def _write_monitor_probability_freshness_db(
     now: datetime,
     latest_event_fresh: bool,
     projection_fresh: bool = True,
+    stale_event_age: timedelta = timedelta(minutes=3),
+    latest_event_age: timedelta = timedelta(minutes=1),
+    day0_daily_extrema_receipt: str | None = None,
 ) -> None:
     trade_conn = sqlite3.connect(sd / "zeus_trades.db")
     try:
@@ -936,19 +1433,43 @@ def _write_monitor_probability_freshness_db(
                 "last_monitor_prob_is_fresh": False,
             }
         )
-        latest_payload = json.dumps(
-            {
-                "last_monitor_prob": 0.42,
-                "last_monitor_prob_is_fresh": latest_event_fresh,
+        latest_payload_obj = {
+            "last_monitor_prob": 0.42,
+            "last_monitor_prob_is_fresh": latest_event_fresh,
+        }
+        if day0_daily_extrema_receipt == "unconditioned":
+            latest_payload_obj["day0_monitor_probability_receipt"] = {
+                "selected_method": "day0_observation_remaining_window",
+                "remaining_window": {
+                    "source": "day0_raw_model_extrema",
+                    "forecast_source_validations": [
+                        "forecast_source_id:raw_model_forecasts.single_runs",
+                        "forecast_source_role:day0_daily_extrema_live",
+                        "forecast_source_cycle_time:2026-07-09T02:14:47+00:00",
+                    ],
+                },
             }
-        )
+        elif day0_daily_extrema_receipt == "conditioned":
+            latest_payload_obj["day0_monitor_probability_receipt"] = {
+                "selected_method": "day0_observation_conditioned_daily_extrema",
+                "remaining_window": {
+                    "source": "day0_observed_bound_conditioned_daily_extrema",
+                    "forecast_source_validations": [
+                        "forecast_source_id:raw_model_forecasts.single_runs",
+                        "forecast_source_role:day0_daily_extrema_live",
+                        "forecast_source_cycle_time:2026-07-09T02:14:47+00:00",
+                        "day0_daily_extrema_conditioned_on_observed_bound",
+                    ],
+                },
+            }
+        latest_payload = json.dumps(latest_payload_obj)
         trade_conn.execute(
             "INSERT INTO position_events VALUES (?, ?, ?, ?, ?)",
             (
                 "pos-monitor",
                 10,
                 "MONITOR_REFRESHED",
-                (now - timedelta(minutes=3)).isoformat(),
+                (now - stale_event_age).isoformat(),
                 stale_payload,
             ),
         )
@@ -958,8 +1479,94 @@ def _write_monitor_probability_freshness_db(
                 "pos-monitor",
                 11,
                 "MONITOR_REFRESHED",
-                (now - timedelta(minutes=1)).isoformat(),
+                (now - latest_event_age).isoformat(),
                 latest_payload,
+            ),
+        )
+        trade_conn.commit()
+    finally:
+        trade_conn.close()
+
+
+def _write_sub_min_partial_position_db(
+    sd: Path,
+    *,
+    now: datetime,
+    chain_shares: float,
+    min_order_size: str = "5",
+) -> None:
+    trade_conn = sqlite3.connect(sd / "zeus_trades.db")
+    try:
+        trade_conn.execute(
+            """
+            CREATE TABLE position_current (
+                position_id TEXT PRIMARY KEY,
+                phase TEXT,
+                order_status TEXT,
+                shares REAL,
+                chain_shares REAL,
+                token_id TEXT,
+                condition_id TEXT,
+                city TEXT,
+                target_date TEXT,
+                bin_label TEXT,
+                direction TEXT,
+                exit_reason TEXT,
+                updated_at TEXT
+            )
+            """
+        )
+        trade_conn.execute(
+            """
+            INSERT INTO position_current VALUES (
+                'pos-sub-min',
+                'day0_window',
+                'partial',
+                ?,
+                ?,
+                'token-no-sub-min',
+                'cond-sub-min',
+                'Taipei',
+                '2026-07-09',
+                'Will the highest temperature in Taipei be 35°C on July 9?',
+                'buy_no',
+                NULL,
+                ?
+            )
+            """,
+            (chain_shares, chain_shares, (now - timedelta(seconds=30)).isoformat()),
+        )
+        trade_conn.execute(
+            """
+            CREATE TABLE executable_market_snapshots (
+                snapshot_id TEXT PRIMARY KEY,
+                condition_id TEXT,
+                selected_outcome_token_id TEXT,
+                min_order_size TEXT,
+                orderbook_top_bid TEXT,
+                orderbook_top_ask TEXT,
+                captured_at TEXT,
+                freshness_deadline TEXT
+            )
+            """
+        )
+        trade_conn.execute(
+            """
+            INSERT INTO executable_market_snapshots VALUES (
+                'snap-sub-min',
+                'cond-sub-min',
+                'token-no-sub-min',
+                ?,
+                '0.999',
+                'ABSENT',
+                ?,
+                ?
+            )
+            """,
+            (
+                min_order_size,
+                (now - timedelta(seconds=10)).isoformat(),
+                (now + timedelta(minutes=1)).isoformat(),
             ),
         )
         trade_conn.commit()
@@ -1009,6 +1616,14 @@ def _setup_healthy_state(sd: Path, offset_seconds: int = -30) -> None:
             "cadence_seconds": 5,
         },
     )
+    for _, filename, _max_age_seconds in live_health.LIVE_BOOT_SIDECAR_HEARTBEATS:
+        _write(
+            sd / filename,
+            {
+                "git_head": current_head[:8],
+                "written_at": cycle_time,
+            },
+        )
     _write(
         sd / "scheduler_jobs_health.json",
         {"_run_mode": {"status": "OK", "last_run_at": cycle_time, "last_success_at": cycle_time}},
@@ -2082,6 +2697,185 @@ def test_pending_exit_reassert_loop_yields_degraded(
     assert "pending_exit_release_loop" in result["failing_surfaces"]
 
 
+def test_pending_exit_projection_regression_yields_degraded(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A rejected exit must not be silently overwritten back to held projection."""
+    sd = tmp_path / "state"
+    sd.mkdir()
+    _setup_healthy_state(sd)
+    monkeypatch.setattr(live_health, "_dirty_runtime_worktree_paths", lambda **_kwargs: ())
+    monkeypatch.setattr(
+        live_health,
+        "_main_daemon_surface",
+        lambda status_summary, heartbeat: {
+            "ok": True,
+            "issue": None,
+            "attested": True,
+            "pid": 123,
+            "command": "python -m src.main",
+        },
+    )
+    monkeypatch.setattr(
+        live_health,
+        "_process_code_surface",
+        lambda main_daemon_surface: {"ok": True, "issue": None, "evaluated": True},
+    )
+    now = datetime.now(timezone.utc)
+    _write_forecast_event_bridge_dbs(
+        sd,
+        posterior_computed_at=(now - timedelta(seconds=30)).isoformat(),
+        fsr_created_at=(now - timedelta(seconds=20)).isoformat(),
+    )
+    _write_pending_exit_projection_regression_db(sd, now=now)
+
+    result = compute_composite_live_health(state_dir=sd, now=now)
+
+    surface = result["surfaces"]["pending_exit_release_loop"]
+    assert surface["ok"] is False
+    assert surface["issue"] == "PENDING_EXIT_PROJECTION_REGRESSION:n=1"
+    assert surface["pending_exit_projection_regression_count"] == 1
+    sample = surface["pending_exit_projection_regression_sample"][0]
+    assert sample["position_id"] == "pos-regression"
+    assert sample["latest_exit_event_type"] == "EXIT_ORDER_REJECTED"
+    assert sample["latest_exit_status"] == "backoff_exhausted"
+    assert sample["post_exit_held_event_count"] == 2
+    assert "below min_order_size" in sample["latest_exit_error"]
+    assert "pending_exit_release_loop" in result["failing_surfaces"]
+
+
+def test_pending_exit_projection_regression_evaluates_without_attested_daemon(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """DB-backed exit projection regressions stay visible after the daemon dies."""
+    sd = tmp_path / "state"
+    sd.mkdir()
+    _setup_healthy_state(sd)
+    monkeypatch.setattr(live_health, "_dirty_runtime_worktree_paths", lambda **_kwargs: ())
+    monkeypatch.setattr(
+        live_health,
+        "_main_daemon_surface",
+        lambda status_summary, heartbeat: {
+            "ok": False,
+            "issue": "MAIN_DAEMON_PROCESS_MISSING",
+            "attested": False,
+            "pid": 123,
+        },
+    )
+    now = datetime.now(timezone.utc)
+    _write_forecast_event_bridge_dbs(
+        sd,
+        posterior_computed_at=(now - timedelta(seconds=30)).isoformat(),
+        fsr_created_at=(now - timedelta(seconds=20)).isoformat(),
+    )
+    _write_pending_exit_projection_regression_db(sd, now=now)
+
+    result = compute_composite_live_health(state_dir=sd, now=now)
+
+    surface = result["surfaces"]["pending_exit_release_loop"]
+    assert surface["ok"] is False
+    assert surface["issue"] == "PENDING_EXIT_PROJECTION_REGRESSION:n=1"
+    assert surface["main_daemon_attested"] is False
+    assert surface["main_daemon_issue"] == "MAIN_DAEMON_PROCESS_MISSING"
+    assert "main_daemon" in result["failing_surfaces"]
+    assert "pending_exit_release_loop" in result["failing_surfaces"]
+
+
+def test_pending_exit_runtime_gate_block_yields_degraded(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A real exit decision blocked by runtime submit gate must stay visible."""
+    sd = tmp_path / "state"
+    sd.mkdir()
+    _setup_healthy_state(sd)
+    monkeypatch.setattr(live_health, "_dirty_runtime_worktree_paths", lambda **_kwargs: ())
+    monkeypatch.setattr(
+        live_health,
+        "_main_daemon_surface",
+        lambda status_summary, heartbeat: {
+            "ok": True,
+            "issue": None,
+            "attested": True,
+            "pid": 123,
+            "command": "python -m src.main",
+        },
+    )
+    monkeypatch.setattr(
+        live_health,
+        "_process_code_surface",
+        lambda main_daemon_surface: {"ok": True, "issue": None, "evaluated": True},
+    )
+    now = datetime.now(timezone.utc)
+    _write_forecast_event_bridge_dbs(
+        sd,
+        posterior_computed_at=(now - timedelta(seconds=30)).isoformat(),
+        fsr_created_at=(now - timedelta(seconds=20)).isoformat(),
+    )
+    _write_pending_exit_runtime_gate_block_db(sd, now=now)
+
+    result = compute_composite_live_health(state_dir=sd, now=now)
+
+    surface = result["surfaces"]["pending_exit_release_loop"]
+    assert surface["ok"] is False
+    assert surface["issue"] == "PENDING_EXIT_RUNTIME_GATE_BLOCK:n=1"
+    assert surface["pending_exit_runtime_gate_block_count"] == 1
+    sample = surface["pending_exit_runtime_gate_block_sample"][0]
+    assert sample["position_id"] == "pos-runtime-gate"
+    assert sample["runtime_gate_reject_count"] == 2
+    assert sample["latest_runtime_gate_status"] == "retry_pending"
+    assert sample["latest_runtime_gate_error"] == "structured_runtime_gate_block_without_legacy_text"
+    assert "pending_exit_release_loop" in result["failing_surfaces"]
+
+
+def test_pending_exit_multiple_failure_issue_keeps_all_active_counts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sd = tmp_path / "state"
+    sd.mkdir()
+    _setup_healthy_state(sd)
+    monkeypatch.setattr(live_health, "_dirty_runtime_worktree_paths", lambda **_kwargs: ())
+    monkeypatch.setattr(
+        live_health,
+        "_main_daemon_surface",
+        lambda status_summary, heartbeat: {
+            "ok": True,
+            "issue": None,
+            "attested": True,
+            "pid": 123,
+            "command": "python -m src.main",
+        },
+    )
+    monkeypatch.setattr(
+        live_health,
+        "_process_code_surface",
+        lambda main_daemon_surface: {"ok": True, "issue": None, "evaluated": True},
+    )
+    now = datetime.now(timezone.utc)
+    _write_forecast_event_bridge_dbs(
+        sd,
+        posterior_computed_at=(now - timedelta(seconds=30)).isoformat(),
+        fsr_created_at=(now - timedelta(seconds=20)).isoformat(),
+    )
+    _write_pending_exit_no_exit_command_db(sd, now=now)
+    _write_pending_exit_projection_regression_db(sd, now=now)
+
+    result = compute_composite_live_health(state_dir=sd, now=now)
+
+    surface = result["surfaces"]["pending_exit_release_loop"]
+    assert surface["ok"] is False
+    assert surface["issue"] == (
+        "PENDING_EXIT_MULTIPLE_FAILURES:"
+        "no_exit_command=1:projection_regression=1"
+    )
+    assert surface["pending_exit_no_command_count"] == 1
+    assert surface["pending_exit_projection_regression_count"] == 1
+    assert "pending_exit_release_loop" in result["failing_surfaces"]
+
+
 def test_pending_exit_historical_churn_reports_stabilized_non_blocking(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -2259,6 +3053,232 @@ def test_monitor_probability_freshness_allows_resolved_recent_stale(
     assert "monitor_probability_freshness" not in result["failing_surfaces"]
 
 
+def test_monitor_probability_freshness_degrades_on_unconditioned_daily_extrema_receipt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sd = tmp_path / "state"
+    sd.mkdir()
+    _setup_healthy_state(sd)
+    monkeypatch.setattr(live_health, "_dirty_runtime_worktree_paths", lambda **_kwargs: ())
+    monkeypatch.setattr(
+        live_health,
+        "_main_daemon_surface",
+        lambda status_summary, heartbeat: {
+            "ok": True,
+            "issue": None,
+            "attested": True,
+            "pid": 123,
+            "command": "python -m src.main",
+        },
+    )
+    monkeypatch.setattr(
+        live_health,
+        "_process_code_surface",
+        lambda main_daemon_surface: {"ok": True, "issue": None, "evaluated": True},
+    )
+    now = datetime.now(timezone.utc)
+    _write_forecast_event_bridge_dbs(
+        sd,
+        posterior_computed_at=(now - timedelta(seconds=30)).isoformat(),
+        fsr_created_at=(now - timedelta(seconds=20)).isoformat(),
+    )
+    _write_monitor_probability_freshness_db(
+        sd,
+        now=now,
+        latest_event_fresh=True,
+        day0_daily_extrema_receipt="unconditioned",
+    )
+
+    result = compute_composite_live_health(state_dir=sd, now=now)
+
+    surface = result["surfaces"]["monitor_probability_freshness"]
+    assert surface["ok"] is False
+    assert surface["issue"] == (
+        "MONITOR_DAY0_DAILY_EXTREMA_USED_AS_REMAINING_WINDOW:n=1"
+    )
+    assert surface["day0_daily_extrema_unconditioned_count"] == 1
+    sample = surface["day0_daily_extrema_unconditioned_sample"][0]
+    assert sample["position_id"] == "pos-monitor"
+    assert sample["selected_method"] == "day0_observation_remaining_window"
+    assert sample["remaining_window_source"] == "day0_raw_model_extrema"
+    assert "monitor_probability_freshness" in result["failing_surfaces"]
+
+
+def test_monitor_probability_freshness_allows_conditioned_daily_extrema_receipt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sd = tmp_path / "state"
+    sd.mkdir()
+    _setup_healthy_state(sd)
+    monkeypatch.setattr(live_health, "_dirty_runtime_worktree_paths", lambda **_kwargs: ())
+    monkeypatch.setattr(
+        live_health,
+        "_main_daemon_surface",
+        lambda status_summary, heartbeat: {
+            "ok": True,
+            "issue": None,
+            "attested": True,
+            "pid": 123,
+            "command": "python -m src.main",
+        },
+    )
+    monkeypatch.setattr(
+        live_health,
+        "_process_code_surface",
+        lambda main_daemon_surface: {"ok": True, "issue": None, "evaluated": True},
+    )
+    now = datetime.now(timezone.utc)
+    _write_forecast_event_bridge_dbs(
+        sd,
+        posterior_computed_at=(now - timedelta(seconds=30)).isoformat(),
+        fsr_created_at=(now - timedelta(seconds=20)).isoformat(),
+    )
+    _write_monitor_probability_freshness_db(
+        sd,
+        now=now,
+        latest_event_fresh=True,
+        day0_daily_extrema_receipt="conditioned",
+    )
+
+    result = compute_composite_live_health(state_dir=sd, now=now)
+
+    surface = result["surfaces"]["monitor_probability_freshness"]
+    assert surface["ok"] is True
+    assert surface["day0_daily_extrema_unconditioned_count"] == 0
+    assert "monitor_probability_freshness" not in result["failing_surfaces"]
+
+
+def test_monitor_probability_freshness_degrades_when_latest_monitor_too_old(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sd = tmp_path / "state"
+    sd.mkdir()
+    _setup_healthy_state(sd)
+    monkeypatch.setattr(live_health, "_dirty_runtime_worktree_paths", lambda **_kwargs: ())
+    monkeypatch.setattr(
+        live_health,
+        "_main_daemon_surface",
+        lambda status_summary, heartbeat: {
+            "ok": True,
+            "issue": None,
+            "attested": True,
+            "pid": 123,
+            "command": "python -m src.main",
+        },
+    )
+    monkeypatch.setattr(
+        live_health,
+        "_process_code_surface",
+        lambda main_daemon_surface: {"ok": True, "issue": None, "evaluated": True},
+    )
+    now = datetime.now(timezone.utc)
+    _write_monitor_probability_freshness_db(
+        sd,
+        now=now,
+        latest_event_fresh=True,
+        stale_event_age=timedelta(minutes=21),
+        latest_event_age=timedelta(minutes=20),
+    )
+
+    result = compute_composite_live_health(state_dir=sd, now=now)
+
+    surface = result["surfaces"]["monitor_probability_freshness"]
+    assert surface["ok"] is False
+    assert surface["issue"] == "MONITOR_PROBABILITY_STALE_AGE:n=1"
+    assert surface["latest_monitor_age_stale_count"] == 1
+    sample = surface["latest_monitor_age_stale_sample"][0]
+    assert sample["position_id"] == "pos-monitor"
+    assert sample["last_monitor_prob_is_fresh"] == 1
+    assert sample["latest_monitor_age_seconds"] == pytest.approx(20 * 60)
+    assert sample["latest_monitor_stale_overage_seconds"] == pytest.approx(10 * 60)
+    assert "monitor_probability_freshness" in result["failing_surfaces"]
+
+
+def test_monitor_probability_freshness_evaluates_stale_age_without_attested_daemon(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sd = tmp_path / "state"
+    sd.mkdir()
+    _setup_healthy_state(sd)
+    monkeypatch.setattr(live_health, "_dirty_runtime_worktree_paths", lambda **_kwargs: ())
+    monkeypatch.setattr(
+        live_health,
+        "_main_daemon_surface",
+        lambda status_summary, heartbeat: {
+            "ok": False,
+            "issue": "MAIN_DAEMON_PROCESS_NOT_FOUND",
+            "attested": False,
+            "pid": 999999,
+        },
+    )
+    now = datetime.now(timezone.utc)
+    _write_monitor_probability_freshness_db(
+        sd,
+        now=now,
+        latest_event_fresh=True,
+        stale_event_age=timedelta(minutes=21),
+        latest_event_age=timedelta(minutes=20),
+    )
+
+    result = compute_composite_live_health(state_dir=sd, now=now)
+
+    surface = result["surfaces"]["monitor_probability_freshness"]
+    assert surface["ok"] is False
+    assert surface["issue"] == "MONITOR_PROBABILITY_STALE_AGE:n=1"
+    assert surface["main_daemon_attested"] is False
+    assert surface["main_daemon_issue"] == "MAIN_DAEMON_PROCESS_NOT_FOUND"
+    assert "main_daemon" in result["failing_surfaces"]
+    assert "monitor_probability_freshness" in result["failing_surfaces"]
+
+
+def test_sub_min_partial_position_degrades_when_held_shares_below_snapshot_minimum(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sd = tmp_path / "state"
+    sd.mkdir()
+    _setup_healthy_state(sd)
+    monkeypatch.setattr(live_health, "_dirty_runtime_worktree_paths", lambda **_kwargs: ())
+    now = datetime.now(timezone.utc)
+    _write_sub_min_partial_position_db(sd, now=now, chain_shares=3.8)
+
+    result = compute_composite_live_health(state_dir=sd, now=now)
+
+    surface = result["surfaces"]["sub_min_partial_position"]
+    assert surface["ok"] is False
+    assert surface["issue"] == "SUB_MIN_PARTIAL_POSITION_UNEXITABLE:n=1"
+    assert surface["sub_min_partial_position_count"] == 1
+    sample = surface["sub_min_partial_position_sample"][0]
+    assert sample["position_id"] == "pos-sub-min"
+    assert sample["held_shares"] == pytest.approx(3.8)
+    assert sample["min_order_size"] == "5"
+    assert sample["orderbook_top_ask"] == "ABSENT"
+    assert "sub_min_partial_position" in result["failing_surfaces"]
+
+
+def test_sub_min_partial_position_allows_size_at_snapshot_minimum(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sd = tmp_path / "state"
+    sd.mkdir()
+    _setup_healthy_state(sd)
+    monkeypatch.setattr(live_health, "_dirty_runtime_worktree_paths", lambda **_kwargs: ())
+    now = datetime.now(timezone.utc)
+    _write_sub_min_partial_position_db(sd, now=now, chain_shares=5.0)
+
+    result = compute_composite_live_health(state_dir=sd, now=now)
+
+    surface = result["surfaces"]["sub_min_partial_position"]
+    assert surface["ok"] is True
+    assert surface["sub_min_partial_position_count"] == 0
+    assert "sub_min_partial_position" not in result["failing_surfaces"]
+
+
 def test_day0_decision_trace_degrades_when_processed_day0_has_no_artifact(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -2315,6 +3335,210 @@ def test_day0_decision_trace_accepts_processed_day0_with_regret_artifact(
     assert trace["processed_event_count"] == 1
     assert trace["traced_processed_event_count"] == 1
     assert "day0_decision_trace" not in result["failing_surfaces"]
+
+
+def test_forecast_decision_trace_degrades_when_processed_fsr_has_no_artifact(
+    tmp_path: Path,
+) -> None:
+    sd = tmp_path / "state"
+    sd.mkdir()
+    _write_forecast_trace_dbs(sd, with_no_submit=False)
+
+    trace = live_health._forecast_decision_trace_surface(
+        sd,
+        datetime.now(timezone.utc),
+        main_daemon_surface={"attested": True},
+    )
+
+    assert trace["ok"] is False
+    assert "FORECAST_PROCESSED_WITHOUT_DECISION_TRACE" in trace["issue"]
+    assert trace["missing_trace_count"] == 1
+    assert trace["missing_trace_sample"][0]["event_id"] == "fsr-trace-1"
+
+
+def test_forecast_decision_trace_accepts_processed_fsr_with_no_submit_artifact(
+    tmp_path: Path,
+) -> None:
+    sd = tmp_path / "state"
+    sd.mkdir()
+    _write_forecast_trace_dbs(sd, with_no_submit=True)
+
+    trace = live_health._forecast_decision_trace_surface(
+        sd,
+        datetime.now(timezone.utc),
+        main_daemon_surface={"attested": True},
+    )
+
+    assert trace["ok"] is True
+    assert trace["processed_event_count"] == 1
+    assert trace["traced_processed_event_count"] == 1
+
+
+def test_high_yes_edge_degrades_without_yes_action_or_rejection_trace(
+    tmp_path: Path,
+) -> None:
+    sd = tmp_path / "state"
+    sd.mkdir()
+    _write_high_yes_edge_dbs(sd, with_yes_no_submit=False)
+
+    surface = live_health._high_yes_edge_missed_surface(
+        sd,
+        datetime.now(timezone.utc),
+        main_daemon_surface={
+            "attested": False,
+            "issue": "MAIN_DAEMON_PROCESS_NOT_FOUND",
+        },
+    )
+
+    assert surface["ok"] is False
+    assert surface["issue"] == "HIGH_YES_EDGE_WITHOUT_FSR:n=1"
+    assert surface["main_daemon_attested"] is False
+    assert surface["main_daemon_issue"] == "MAIN_DAEMON_PROCESS_NOT_FOUND"
+    assert surface["high_yes_edge_count"] == 1
+    assert surface["very_high_yes_edge_count"] == 1
+    assert surface["missing_fsr_high_yes_edge_count"] == 1
+    assert surface["recent_buy_yes_no_submit_count"] == 0
+    assert surface["recent_buy_yes_no_trade_count"] == 0
+    assert surface["missed_high_yes_edge_sample"][0]["condition_id"] == "cond-high-yes-1"
+
+
+def test_high_yes_edge_ignores_stale_executable_quote(
+    tmp_path: Path,
+) -> None:
+    sd = tmp_path / "state"
+    sd.mkdir()
+    _write_high_yes_edge_dbs(sd, stale_quote=True)
+
+    surface = live_health._high_yes_edge_missed_surface(
+        sd,
+        datetime.now(timezone.utc),
+        main_daemon_surface={"attested": False},
+    )
+
+    assert surface["ok"] is True
+    assert surface["high_yes_edge_count"] == 0
+    assert surface["missed_high_yes_edge_count"] == 0
+
+
+def test_high_yes_edge_accepts_buy_yes_no_submit_evidence(
+    tmp_path: Path,
+) -> None:
+    sd = tmp_path / "state"
+    sd.mkdir()
+    _write_high_yes_edge_dbs(sd, with_yes_no_submit=True)
+
+    surface = live_health._high_yes_edge_missed_surface(
+        sd,
+        datetime.now(timezone.utc),
+        main_daemon_surface={"attested": False},
+    )
+
+    assert surface["ok"] is True
+    assert surface["high_yes_edge_count"] == 1
+    assert surface["missed_high_yes_edge_count"] == 0
+    assert surface["recent_buy_yes_no_submit_count"] == 1
+    assert surface["recent_buy_yes_no_trade_count"] == 0
+
+
+def test_high_yes_edge_degrades_when_quality_yes_no_trade_has_no_order_chain(
+    tmp_path: Path,
+) -> None:
+    sd = tmp_path / "state"
+    sd.mkdir()
+    _write_high_yes_edge_dbs(sd, with_yes_no_trade=True)
+
+    surface = live_health._high_yes_edge_missed_surface(
+        sd,
+        datetime.now(timezone.utc),
+        main_daemon_surface={"attested": False},
+    )
+
+    assert surface["ok"] is False
+    assert surface["issue"] == "HIGH_YES_QUALITY_SUPPRESSED_WITHOUT_ORDER_CHAIN:n=1"
+    assert surface["high_yes_edge_count"] == 1
+    assert surface["missed_high_yes_edge_count"] == 0
+    assert surface["recent_buy_yes_entry_command_count"] == 0
+    assert surface["recent_buy_yes_no_submit_count"] == 0
+    assert surface["recent_buy_yes_no_trade_count"] == 1
+    assert surface["recent_buy_yes_high_quality_no_trade_count"] == 1
+    high_quality = surface["recent_buy_yes_high_quality_no_trade_sample"][0]
+    assert high_quality["q_lcb_5pct"] == 0.91
+    assert high_quality["trade_score"] == 0.71
+    assert high_quality["city"] == "Paris"
+    reason_class = surface["recent_buy_yes_no_trade_top_reason_classes"][0]
+    assert reason_class["rejection_stage"] == "TRADE_SCORE"
+    assert reason_class["rejection_reason_class"] == (
+        "EVENT_BOUND_CANDIDATE_REJECTED:"
+        "QKERNEL_EXECUTION_ECONOMICS_FALSE_EDGE_RATE_BLOCKS:"
+        "value=0.500000:alpha=0.100000"
+    )
+    assert reason_class["count"] == 1
+
+
+def test_high_yes_edge_separates_degenerate_day0_lcb_from_quality_yes(
+    tmp_path: Path,
+) -> None:
+    sd = tmp_path / "state"
+    sd.mkdir()
+    _write_high_yes_edge_dbs(sd, with_degenerate_day0_lcb_no_trade=True)
+
+    surface = live_health._high_yes_edge_missed_surface(
+        sd,
+        datetime.now(timezone.utc),
+        main_daemon_surface={"attested": False},
+    )
+
+    assert surface["ok"] is True
+    assert surface["recent_buy_yes_no_trade_count"] == 1
+    assert surface["recent_buy_yes_high_quality_no_trade_count"] == 0
+    assert surface["recent_buy_yes_high_quality_no_trade_sample"] == []
+    assert surface["recent_buy_yes_degenerate_day0_lcb_no_trade_count"] == 1
+    degenerate = surface["recent_buy_yes_degenerate_day0_lcb_no_trade_sample"][0]
+    assert "degenerate with q_live" in degenerate["rejection_reason"]
+    assert degenerate["q_lcb_5pct"] == 0.91
+
+
+def test_high_yes_edge_accepts_quality_yes_with_order_chain_evidence(
+    tmp_path: Path,
+) -> None:
+    sd = tmp_path / "state"
+    sd.mkdir()
+    _write_high_yes_edge_dbs(
+        sd,
+        with_yes_no_trade=True,
+        with_yes_entry_command=True,
+    )
+
+    surface = live_health._high_yes_edge_missed_surface(
+        sd,
+        datetime.now(timezone.utc),
+        main_daemon_surface={"attested": False},
+    )
+
+    assert surface["ok"] is True
+    assert surface["high_yes_edge_count"] == 1
+    assert surface["missed_high_yes_edge_count"] == 0
+    assert surface["recent_buy_yes_entry_command_count"] == 1
+    assert surface["recent_buy_yes_no_trade_count"] == 1
+    assert surface["recent_buy_yes_high_quality_no_trade_count"] == 1
+
+
+def test_high_yes_edge_ignores_no_trade_before_current_posterior(
+    tmp_path: Path,
+) -> None:
+    sd = tmp_path / "state"
+    sd.mkdir()
+    _write_high_yes_edge_dbs(sd, with_stale_yes_no_trade=True)
+
+    surface = live_health._high_yes_edge_missed_surface(
+        sd,
+        datetime.now(timezone.utc),
+        main_daemon_surface={"attested": False},
+    )
+
+    assert surface["ok"] is False
+    assert surface["issue"] == "HIGH_YES_EDGE_WITHOUT_FSR:n=1"
+    assert surface["missed_high_yes_edge_count"] == 1
 
 
 def test_bpf_capture_failed_yields_forecast_pipeline_degraded(tmp_path: Path) -> None:
@@ -2606,6 +3830,54 @@ def test_business_plane_zero_candidates_without_proof_yields_degraded(tmp_path: 
     assert result["status"] == "DEGRADED"
     assert result["surfaces"]["business_plane"]["issue"] == (
         "ZERO_CANDIDATES_WITHOUT_SOURCE_OR_NO_MARKET_PROOF"
+    )
+
+
+def test_business_plane_zero_candidates_with_entry_gate_block_has_proof(tmp_path: Path) -> None:
+    """A boot/entry gate block explains zero candidates; execution_capability carries the failure."""
+
+    sd = tmp_path / "state"
+    sd.mkdir()
+    _setup_healthy_state(sd)
+    cycle_time = _now_iso(-30)
+    capability = _healthy_execution_capability()
+    capability["entry"] = {
+        "status": "unavailable",
+        "global_allow_submit": False,
+        "components": [
+            {
+                "component": "live_boot_prerequisite",
+                "allowed": False,
+                "reason": "LIVE_SIDECAR_BOOT_BLOCKED: sidecar stale",
+            }
+        ],
+        "unavailable_components": ["live_boot_prerequisite"],
+    }
+    _write(
+        sd / "status_summary.json",
+        {
+            "timestamp": cycle_time,
+            "cycle": {
+                "mode": "boot_blocked",
+                "completed_at": cycle_time,
+                "candidates": 0,
+                "entries_blocked_reason": "LIVE_SIDECAR_BOOT_BLOCKED: sidecar stale",
+            },
+            "execution_capability": capability,
+        },
+    )
+
+    result = compute_composite_live_health(state_dir=sd)
+
+    business = result["surfaces"]["business_plane"]
+    assert business["ok"] is True
+    assert business["progress"]["entry_unavailable_proof"] is True
+    assert business["progress"]["entry_unavailable_reason"] == (
+        "live_boot_prerequisite:LIVE_SIDECAR_BOOT_BLOCKED: sidecar stale"
+    )
+    assert result["surfaces"]["execution_capability"]["ok"] is False
+    assert "entry:live_boot_prerequisite" in (
+        result["surfaces"]["execution_capability"]["issue"] or ""
     )
 
 
@@ -2914,6 +4186,76 @@ def test_execution_capability_unavailable_yields_degraded(tmp_path: Path) -> Non
     )
 
 
+def test_execution_capability_reports_entry_and_reduce_only_exit_gates(
+    tmp_path: Path,
+) -> None:
+    """Boot-blocked status must not collapse new-entry and reduce-only exit gates."""
+    sd = tmp_path / "state"
+    sd.mkdir()
+    _setup_healthy_state(sd)
+    cycle_time = _now_iso(-30)
+    reason = "LIVE_SIDECAR_BOOT_BLOCKED: sidecar stale"
+    _write(
+        sd / "status_summary.json",
+        {
+            "timestamp": cycle_time,
+            "cycle": {
+                "mode": "boot_blocked",
+                "completed_at": cycle_time,
+                "candidates": 0,
+                "entries_blocked_reason": reason,
+            },
+            "execution_capability": {
+                "entry": {
+                    "action": "entry",
+                    "capability": "live_venue_submit",
+                    "status": "unavailable",
+                    "global_allow_submit": False,
+                    "components": [
+                        {
+                            "component": "live_venue_submit:live_boot_prerequisite",
+                            "capability": "live_venue_submit",
+                            "allowed": False,
+                            "reason": reason,
+                        }
+                    ],
+                    "unavailable_components": [
+                        "live_venue_submit:live_boot_prerequisite"
+                    ],
+                },
+                "exit": {
+                    "action": "exit",
+                    "capability": "reduce_only_exit_submit",
+                    "status": "unavailable",
+                    "global_allow_submit": False,
+                    "components": [
+                        {
+                            "component": "reduce_only_exit_submit:live_boot_prerequisite",
+                            "capability": "reduce_only_exit_submit",
+                            "allowed": False,
+                            "reason": reason,
+                        }
+                    ],
+                    "unavailable_components": [
+                        "reduce_only_exit_submit:live_boot_prerequisite"
+                    ],
+                },
+            },
+        },
+    )
+
+    result = compute_composite_live_health(state_dir=sd)
+
+    surface = result["surfaces"]["execution_capability"]
+    assert surface["ok"] is False
+    assert surface["actions"]["entry"]["capability"] == "live_venue_submit"
+    assert surface["actions"]["exit"]["capability"] == "reduce_only_exit_submit"
+    assert "entry:live_venue_submit:live_boot_prerequisite" in (surface["issue"] or "")
+    assert "exit:reduce_only_exit_submit:live_boot_prerequisite" in (
+        surface["issue"] or ""
+    )
+
+
 def test_venue_heartbeat_lost_yields_degraded_even_when_daemon_heartbeat_is_fresh(
     tmp_path: Path,
 ) -> None:
@@ -3069,6 +4411,94 @@ def test_status_summary_dead_main_pid_yields_degraded(
     assert result["status"] == "DEGRADED"
     assert "main_daemon" in result["failing_surfaces"]
     assert result["surfaces"]["main_daemon"]["issue"] == "MAIN_DAEMON_PROCESS_NOT_FOUND"
+
+
+def test_fresh_not_alive_heartbeat_yields_degraded(tmp_path: Path) -> None:
+    """A fresh heartbeat with alive=false is a current failure, not healthy liveness."""
+
+    sd = tmp_path / "state"
+    sd.mkdir()
+    _setup_healthy_state(sd)
+    _write(
+        sd / "daemon-heartbeat.json",
+        {
+            "alive": False,
+            "timestamp": _now_iso(-5),
+            "mode": "live",
+            "daemon_health": "BOOT_BLOCKED",
+            "failure_reason": "LIVE_SIDECAR_BOOT_BLOCKED: sidecar stale",
+        },
+    )
+
+    result = compute_composite_live_health(state_dir=sd)
+
+    surface = result["surfaces"]["heartbeat"]
+    assert surface["ok"] is False
+    assert surface["issue"] == "NOT_ALIVE:LIVE_SIDECAR_BOOT_BLOCKED: sidecar stale"
+    assert "heartbeat" in result["failing_surfaces"]
+
+
+def test_live_trading_watchdog_loaded_false_ok_yields_degraded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A loaded launchd label is not health when src.main is not running."""
+
+    sd = tmp_path / "state"
+    sd.mkdir()
+    _setup_healthy_state(sd)
+    status_path = sd / "status_summary.json"
+    status = json.loads(status_path.read_text())
+    status["process"] = {
+        "pid": 999999,
+        "mode": "live",
+        "version": "zeus_v2",
+        "pulse_only": False,
+    }
+    _write(status_path, status)
+    _write(
+        sd / "live-trading-launchd-watchdog.json",
+        {
+            "ok": True,
+            "action": "none",
+            "reason": "service_loaded",
+            "written_at": _now_iso(-5),
+        },
+    )
+    monkeypatch.setattr(live_health, "_process_command_line", lambda pid: None)
+
+    result = compute_composite_live_health(state_dir=sd)
+
+    surface = result["surfaces"]["live_trading_watchdog"]
+    assert surface["ok"] is False
+    assert surface["issue"] == "LIVE_TRADING_WATCHDOG_FALSE_OK:service_loaded_not_running"
+    assert surface["watchdog_reason"] == "service_loaded"
+    assert surface["main_daemon_issue"] == "MAIN_DAEMON_PROCESS_NOT_FOUND"
+    assert "live_trading_watchdog" in result["failing_surfaces"]
+
+
+def test_live_boot_prerequisites_degrade_on_sidecar_sha_mismatch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A loaded launchd label is not enough when required sidecars run old code."""
+
+    sd = tmp_path / "state"
+    sd.mkdir()
+    _setup_healthy_state(sd)
+    monkeypatch.setattr(live_health, "_dirty_runtime_worktree_paths", lambda **_kwargs: ())
+    heartbeat = json.loads((sd / "forecast-live-heartbeat.json").read_text())
+    heartbeat["git_head"] = "2b436160d"
+    _write(sd / "forecast-live-heartbeat.json", heartbeat)
+
+    result = compute_composite_live_health(state_dir=sd)
+
+    surface = result["surfaces"]["live_boot_prerequisites"]
+    assert surface["ok"] is False
+    assert surface["issue"] == "LIVE_BOOT_SIDECARS_NOT_READY:n=1"
+    assert surface["failures"] == [
+        f"forecast-live:git_head_mismatch heartbeat=2b436160d "
+        f"expected={live_health._current_git_head()[:8]}"
+    ]
+    assert "live_boot_prerequisites" in result["failing_surfaces"]
 
 
 def test_command_recovery_mutation_summary_requires_allocator_refresh() -> None:

@@ -1,5 +1,5 @@
 # Created: 2026-07-03
-# Last reused/audited: 2026-07-03
+# Last reused/audited: 2026-07-09
 """SolveEngineShim.decide() — phase-1 shim + LegacyDecisionProjection (W3.3 sub-slice 3).
 
 The shim composes an inner engine for the FamilyDecision scaffolding and REPLACES the selection
@@ -10,14 +10,19 @@ route surface, and injected spendable cash — no live readers/ledger required.
 
 from __future__ import annotations
 
+from datetime import timedelta
 from decimal import Decimal
 from types import SimpleNamespace
 
 import numpy as np
 
+from src.contracts.executable_cost_curve import BookLevel, ExecutableCostCurve, FeeModel
+from src.contracts.execution_price import ExecutionPrice
+from src.contracts.native_side_candidate import NativeSideCandidate
 from src.decision.family_decision_engine import CandidateDecision, FamilyDecision
 from src.decision.payoff_vector import CandidateEconomics
 from src.solve.solver import SolveEngineShim, validate_family_decision_contract
+from src.strategy.utility_ranker import FamilyPayoffMatrix, PortfolioExposureVector
 from tests.solve import support as F
 
 
@@ -39,8 +44,12 @@ class _FakeInstrument:
 
 def _route(route_id, bin_id, side, cost, max_shares=5000, shares=5000):
     return SimpleNamespace(
-        route_id=route_id, route_type="DIRECT_YES", instrument=_FakeInstrument(bin_id, side),
-        shares=Decimal(str(shares)), avg_cost=SimpleNamespace(value=float(cost)),
+        route_id=route_id, route_type=f"DIRECT_{side}", instrument=_FakeInstrument(bin_id, side),
+        shares=Decimal(str(shares)),
+        avg_cost=ExecutionPrice(
+            value=float(cost), price_type="fee_adjusted", fee_deducted=True,
+            currency="probability_units",
+        ),
         max_shares=Decimal(str(max_shares)),
         legs=(SimpleNamespace(bin_id=bin_id, token_id=f"tok_{side}_{bin_id}"),),
         executable=True, reason=None,
@@ -57,9 +66,9 @@ def _family_book(bin_ids):
     return SimpleNamespace(omega=omega, markets={b: _market(b) for b in bin_ids})
 
 
-def _route_set(direct_yes):
+def _route_set(direct_yes, direct_no=None):
     return SimpleNamespace(
-        direct_yes=direct_yes, direct_no={}, synthetic_not_i={},
+        direct_yes=direct_yes, direct_no=direct_no or {}, synthetic_not_i={},
         pair_arbs=(), full_basket_arbs=(), conversion_routes=(),
     )
 
@@ -74,23 +83,39 @@ def _econ(route_id):
 
 def _band(bin_ids, win_probs, sample_hash="h", alpha=0.05):
     samples = F.two_bin_q_draws(win_probs) if len(bin_ids) == 2 else np.asarray(win_probs, dtype=np.float64)
-    joint_q = SimpleNamespace(omega=SimpleNamespace(bins=[SimpleNamespace(bin_id=b) for b in bin_ids]))
+    joint_q = SimpleNamespace(
+        omega=SimpleNamespace(bins=[SimpleNamespace(bin_id=b) for b in bin_ids]),
+        q=np.mean(samples, axis=0), identity_hash="qv_abc",
+    )
     return SimpleNamespace(samples=samples, joint_q=joint_q, sample_hash=sample_hash, alpha=alpha)
 
 
-def _legacy_decision(bin_ids, route_ids, band, *, joint_q_none=False):
-    candidates = tuple(_econ(r) for r in route_ids)
+def _legacy_decision(bin_ids, routes, band, *, joint_q_none=False):
+    route_costs = tuple(routes)
+    omega = SimpleNamespace(bins=[SimpleNamespace(bin_id=b) for b in bin_ids])
+    candidate_routes = tuple(
+        SimpleNamespace(
+            candidate_id=route.route_id,
+            instrument=route.instrument,
+            route_cost=route,
+            payoff_vector=route.instrument.payoff_vector(omega),
+            side=route.instrument.side,
+            bin_id=route.instrument.bin_id,
+        )
+        for route in route_costs
+    )
+    candidates = tuple(_econ(route.route_id) for route in route_costs)
     cds = tuple(
         CandidateDecision(
-            route=SimpleNamespace(route_id=r), economics=e, direction_law_ok=True,
+            route=route, economics=e, direction_law_ok=True,
             coherence_allows=False, robust_trade_score=0.1,
         )
-        for r, e in zip(route_ids, candidates)
+        for route, e in zip(candidate_routes, candidates)
     )
     return FamilyDecision(
         decision_id="tokyo@t", case=SimpleNamespace(family_id="fam"), predictive=SimpleNamespace(),
         omega=SimpleNamespace(bins=[SimpleNamespace(bin_id=b) for b in bin_ids]),
-        joint_q=None if joint_q_none else SimpleNamespace(identity_hash="qv_abc"),
+        joint_q=None if joint_q_none else band.joint_q,
         band=None if joint_q_none else band,
         family_book=None if joint_q_none else _family_book(bin_ids),
         market_coherence=SimpleNamespace(), candidates=candidates, selected=None,
@@ -118,12 +143,39 @@ def _shim(legacy, route_set, *, spendable=100.0):
 
 
 def _decide(shim, bin_ids=("y", "n"), portfolio_wealth=100.0):
-    portfolio = SimpleNamespace(a=lambda b: Decimal(str(portfolio_wealth)))
+    matrix = FamilyPayoffMatrix.over_bins(bin_ids)
+    portfolio = PortfolioExposureVector.flat(
+        matrix, baseline=Decimal(str(portfolio_wealth))
+    )
+    legacy = shim._engine._decision
+    sizing_candidates = {}
+    if legacy.band is not None:
+        for decision in legacy.candidate_decisions:
+            route = decision.route
+            cost = Decimal(str(route.route_cost.avg_cost.value))
+            curve = ExecutableCostCurve(
+                token_id=f"tok_{route.side}_{route.bin_id}", side=route.side,
+                snapshot_id="snap", book_hash=f"book_{route.side}_{route.bin_id}",
+                levels=(BookLevel(price=cost, size=Decimal("100000")),),
+                fee_model=FeeModel(fee_rate=Decimal("0")), min_tick=Decimal("0.01"),
+                min_order_size=Decimal("0.01"), quote_ttl=timedelta(seconds=10),
+            )
+            payoff_samples = legacy.band.samples @ route.payoff_vector
+            q_point = float(legacy.joint_q.q @ route.payoff_vector)
+            sizing_candidates[(route.bin_id, route.side)] = NativeSideCandidate.tradeable(
+                family_key="fam", bin_id=route.bin_id, side=route.side,
+                token_id=curve.token_id, condition_id=f"cond_{route.bin_id}",
+                q_point=q_point,
+                q_lcb=min(q_point, float(np.quantile(payoff_samples, legacy.band.alpha))),
+                probability_uncertainty=None, executable_cost_curve=curve,
+                forecast_snapshot_id="forecast", market_snapshot_id="market",
+                hypothesis_id=f"hyp_{route.side}_{route.bin_id}",
+            )
     omega = SimpleNamespace(bins=[SimpleNamespace(bin_id=b) for b in bin_ids])
     return shim.decide(
         SimpleNamespace(family_id="fam"), omega,
-        {}, portfolio=portfolio, matrix=SimpleNamespace(), captured_at_utc=None,
-        sizing_candidates={}, max_stake_usd=None, shares_for_routing=Decimal("100"),
+        {}, portfolio=portfolio, matrix=matrix, captured_at_utc=None,
+        sizing_candidates=sizing_candidates, max_stake_usd=None, shares_for_routing=Decimal("100"),
         served_joint_q=None, served_band=None, served_payoff_q_lcb_by_side=None,
     )
 
@@ -139,8 +191,9 @@ def test_shim_trades_and_stamps_projection(monkeypatch):
 
     bin_ids = ("y", "n")
     band = _band(bin_ids, [0.75] * 64)  # clear edge on y vs cost 0.45
-    legacy = _legacy_decision(bin_ids, ("r_y",), band)
-    rs = _route_set({"y": _route("r_y", "y", "YES", 0.45)})
+    route = _route("r_y", "y", "YES", 0.45)
+    legacy = _legacy_decision(bin_ids, (route,), band)
+    rs = _route_set({"y": route})
     shim = _shim(legacy, rs)
     d = _decide(shim)
     assert d.selected is not None
@@ -160,18 +213,78 @@ def test_shim_trades_and_stamps_projection(monkeypatch):
     # coherence lockstep: every candidate_decision emits coherence_allows=True
     assert all(cd.coherence_allows is True for cd in d.candidate_decisions)
     assert d.receipt_hash and d.receipt_hash != "legacy_hash"
+    from src.engine import event_reactor_adapter as era
+    from src.engine import qkernel_spine_bridge as bridge
+
+    selected_decision = next(
+        cd for cd in d.candidate_decisions if cd.economics.route_id == d.selected.route_id
+    )
+    serialized = bridge._candidate_qkernel_execution_economics_payload(
+        d,
+        selected_decision,
+        selected=d.selected,
+    )
+    assert serialized is not None
+    assert era._qkernel_current_state_solve_economics(serialized) is True
     validate_family_decision_contract(d)  # loud if any consumer field broke
 
 
 def test_shim_no_trade_on_zero_edge():
     bin_ids = ("y", "n")
     band = _band(bin_ids, [0.45] * 64)  # 0.45 win vs 0.45 cost -> no edge
-    legacy = _legacy_decision(bin_ids, ("r_y",), band)
-    rs = _route_set({"y": _route("r_y", "y", "YES", 0.45)})
+    route = _route("r_y", "y", "YES", 0.45)
+    legacy = _legacy_decision(bin_ids, (route,), band)
+    rs = _route_set({"y": route})
     d = _decide(_shim(legacy, rs))
     assert d.selected is None
     assert d.no_trade_reason is not None
     validate_family_decision_contract(d)
+
+
+def test_shim_yes_no_mirror_uses_one_current_state_rule():
+    """YES_y and NO_n are the same payoff, so equal costs must score identically."""
+
+    from dataclasses import replace
+
+    bin_ids = ("y", "n")
+    band = _band(bin_ids, [0.70] * 64)
+    yes = _route("yes_y", "y", "YES", 0.45)
+    no = _route("no_n", "n", "NO", 0.45)
+    legacy = _legacy_decision(bin_ids, (yes, no), band)
+    legacy = replace(
+        legacy,
+        candidate_decisions=tuple(
+            replace(
+                decision,
+                direction_law_ok=False,
+                coherence_allows=False,
+                q_lcb_guard_basis="HISTORICAL_RELIABILITY",
+                q_lcb_guard_abstained=True,
+                selection_guard_basis="HISTORICAL_SELECTION",
+                selection_guard_abstained=True,
+            )
+            for decision in legacy.candidate_decisions
+        ),
+    )
+    decision = _decide(
+        _shim(legacy, _route_set({"y": yes}, {"n": no})),
+        bin_ids=bin_ids,
+    )
+
+    by_side = {candidate.route.side: candidate for candidate in decision.candidate_decisions}
+    assert set(by_side) == {"YES", "NO"}
+    assert by_side["YES"].economics.point_ev == by_side["NO"].economics.point_ev
+    assert by_side["YES"].economics.edge_lcb == by_side["NO"].economics.edge_lcb
+    # The selected leg is later re-stamped at the post-haircut execution size, so compare the
+    # pre-size local utility boundary rather than the selected projection's final objective.
+    assert by_side["YES"].economics.delta_u_at_min == by_side["NO"].economics.delta_u_at_min
+    for candidate in by_side.values():
+        assert candidate.direction_law_ok is True
+        assert candidate.coherence_allows is True
+        assert candidate.q_lcb_guard_basis == "CURRENT_POSTERIOR_BAND"
+        assert candidate.selection_guard_basis == "CURRENT_POSTERIOR_BAND"
+        assert candidate.q_lcb_guard_abstained is False
+        assert candidate.selection_guard_abstained is False
 
 
 def test_shim_no_trade_on_negative_standalone_primary_hedge():
@@ -183,10 +296,15 @@ def test_shim_no_trade_on_negative_standalone_primary_hedge():
     c0 = np.tile([0.66, 0.29, 0.05], (n // 2, 1))
     c1 = np.tile([0.29, 0.66, 0.05], (n // 2, 1))
     samples = np.vstack([c0, c1])
-    joint_q = SimpleNamespace(omega=SimpleNamespace(bins=[SimpleNamespace(bin_id=b) for b in bin_ids]))
+    joint_q = SimpleNamespace(
+        omega=SimpleNamespace(bins=[SimpleNamespace(bin_id=b) for b in bin_ids]),
+        q=np.mean(samples, axis=0), identity_hash="qv_abc",
+    )
     band = SimpleNamespace(samples=samples, joint_q=joint_q, sample_hash="h", alpha=0.1)
-    legacy = _legacy_decision(bin_ids, ("L0", "L1"), band)
-    rs = _route_set({"b0": _route("L0", "b0", "YES", 0.40), "b1": _route("L1", "b1", "YES", 0.40)})
+    route0 = _route("L0", "b0", "YES", 0.40)
+    route1 = _route("L1", "b1", "YES", 0.40)
+    legacy = _legacy_decision(bin_ids, (route0, route1), band)
+    rs = _route_set({"b0": route0, "b1": route1})
     d = _decide(_shim(legacy, rs), bin_ids=bin_ids, portfolio_wealth=200.0)
     assert d.selected is None
     assert d.no_trade_reason == "UNSAFE_PREFIX_DECOMPOSITION"
@@ -194,8 +312,9 @@ def test_shim_no_trade_on_negative_standalone_primary_hedge():
 
 
 def test_shim_ineligible_passthrough():
-    legacy = _legacy_decision(("y", "n"), ("r_y",), None, joint_q_none=True)
-    rs = _route_set({"y": _route("r_y", "y", "YES", 0.45)})
+    route = _route("r_y", "y", "YES", 0.45)
+    legacy = _legacy_decision(("y", "n"), (route,), None, joint_q_none=True)
+    rs = _route_set({"y": route})
     d = _decide(_shim(legacy, rs))
     # ineligible legacy no-trade passes straight through, still contract-valid
     assert d.no_trade_reason == "INELIGIBLE"

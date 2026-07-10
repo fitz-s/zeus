@@ -1,5 +1,5 @@
 # Created: 2026-06-14
-# Last reused or audited: 2026-07-02
+# Last reused/audited: 2026-07-09
 # Authority basis: docs/rebuild/consult_build_spec.md
 #   ("Create src/decision/family_decision_engine.py" block lines 854-904: the
 #   FamilyDecision dataclass 858-871; the decide() algorithm 876-901 — the candidate
@@ -2716,6 +2716,70 @@ def test_selection_calibrator_blocks_toxic_no_before_roi_selection(monkeypatch):
     selected, reason = engine._select(guarded)
     assert reason is None
     assert selected is passed_yes
+
+
+def test_selection_calibrator_metric_scope_blocks_low_modal_yes(monkeypatch):
+    """A HIGH-only selection artifact must fail closed on the LOW money path."""
+
+    case = _case("low")
+    space = _outcome_space(case)
+    modal_yes = _hand_decision(
+        _hand_route(space, side="YES", bin_id="b25", cost=0.27),
+        edge_lcb=0.08,
+        optimal_delta_u=0.08,
+        delta_u_at_min=0.01,
+        robust_trade_score=0.10,
+        optimal_stake_usd=Decimal("5"),
+    )
+
+    def _selection_verdict(**kwargs):
+        assert kwargs["temperature_metric"] == "low"
+        return SimpleNamespace(
+            q_safe=0.0,
+            trade=False,
+            abstained=True,
+            cell_key="YES|L1|modal|pb10",
+            L_g=0.0,
+            n_g=0,
+            basis="METRIC_NOT_ARMED",
+        )
+
+    monkeypatch.setattr(fde_mod, "apply_selection_calibrator", _selection_verdict)
+    engine = FamilyDecisionEngine(
+        fresh_model_reader=_FreshModelReader(_model_set([25.0], case)),
+        day0_reader=_Day0Reader(_no_obs()),
+        predictive_builder=_PredictiveBuilder(DebiasAuthority(())),
+    )
+    predictive = PredictiveDistributionBuilder(DebiasAuthority(())).build(
+        case, _model_set([25.0], case), _no_obs(), has_fusion_capture=True
+    )
+    joint_q = build_joint_q(predictive, space)
+    matrix = _matrix(space)
+
+    guarded = engine._apply_selection_calibrator_guard(
+        scored=(modal_yes,),
+        case=case,
+        joint_q=joint_q,
+        band=build_joint_q_band(
+            predictive, space, n_draws=_TEST_BAND_DRAWS, alpha=0.05
+        ),
+        forecast_bin="b25",
+        matrix=matrix,
+        exposure=PortfolioExposureVector.flat(matrix, baseline=Decimal("1000")),
+        sizing_candidates={
+            ("b25", "YES"): _yes_sizing(
+                space, "b25", q_point=0.50, q_lcb=0.35, price="0.27"
+            )
+        },
+        max_stake_usd=Decimal("100"),
+    )
+
+    blocked = guarded[0]
+    assert blocked.selection_guard_basis == "METRIC_NOT_ARMED"
+    assert blocked.selection_guard_abstained is True
+    assert blocked.selection_guard_q_safe == 0.0
+    assert blocked.economics.edge_lcb < 0.0
+    assert blocked.economics.optimal_delta_u <= 0.0
 
 
 @pytest.mark.parametrize("selection_basis", ["SIDE_NOT_ARMED", "ACTIVE_MISSING_CELL", "ACTIVE_THIN_CELL", "EB_THIN_SELECTED"])

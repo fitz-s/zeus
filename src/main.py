@@ -2657,6 +2657,136 @@ def _git_head_matches_boot(boot_sha: str, heartbeat_sha: str) -> bool:
     return len(heartbeat) >= 7 and boot.startswith(heartbeat)
 
 
+def _boot_blocked_action_capability(
+    *,
+    action: str,
+    capability: str,
+    reason: str,
+    timestamp: str,
+) -> dict[str, Any]:
+    component_name = f"{capability}:live_boot_prerequisite"
+    return {
+        "action": action,
+        "capability": capability,
+        "status": "unavailable",
+        "global_allow_submit": False,
+        "components": [
+            {
+                "component": component_name,
+                "capability": capability,
+                "allowed": False,
+                "reason": reason,
+                "observed_at": timestamp,
+            }
+        ],
+        "unavailable_components": [component_name],
+    }
+
+
+def _boot_blocked_execution_capability(*, reason: str, timestamp: str) -> dict[str, Any]:
+    """Derived operator proof that startup never reached executable submit gates."""
+
+    return {
+        "schema_version": 1,
+        "authority": "startup_boot_blocked_operator_visibility",
+        "derived_only": True,
+        "live_action_authorized": False,
+        "entry": _boot_blocked_action_capability(
+            action="entry",
+            capability="live_venue_submit",
+            reason=reason,
+            timestamp=timestamp,
+        ),
+        "exit": _boot_blocked_action_capability(
+            action="exit",
+            capability="reduce_only_exit_submit",
+            reason=reason,
+            timestamp=timestamp,
+        ),
+    }
+
+
+def _write_startup_boot_blocked_operator_status(
+    *,
+    state_root: Path,
+    boot_sha: str,
+    detail: str,
+    checked_at: datetime,
+) -> None:
+    """Write fresh operator projections when live boot fails before schedulers start."""
+
+    timestamp = checked_at.astimezone(timezone.utc).isoformat()
+    reason = f"LIVE_SIDECAR_BOOT_BLOCKED: {detail}"
+    heartbeat_payload = {
+        "alive": False,
+        "timestamp": timestamp,
+        "mode": get_mode(),
+        "pid": os.getpid(),
+        "process": "src.main",
+        "daemon_health": "BOOT_BLOCKED",
+        "boot_blocked": True,
+        "failure_reason": reason,
+        "loaded_sha": boot_sha,
+    }
+    status_payload = {
+        "timestamp": timestamp,
+        "generated_at": timestamp,
+        "mode": get_mode(),
+        "status": "BOOT_BLOCKED",
+        "live_action_authorized": False,
+        "process": {
+            "pid": os.getpid(),
+            "mode": get_mode(),
+            "process": "src.main",
+            "boot_sha": boot_sha,
+            "boot_blocked": True,
+        },
+        "cycle": {
+            "mode": "boot_blocked",
+            "started_at": timestamp,
+            "completed_at": timestamp,
+            "candidates": 0,
+            "trades": 0,
+            "no_trades": 0,
+            "entry_orders_submitted": 0,
+            "exits": 0,
+            "rejection_reason_counts": {"live_boot_blocked": 1},
+            "entries_blocked_reason": reason,
+        },
+        "risk": {
+            "infrastructure_level": "RED",
+            "infrastructure_scope": "startup",
+            "infrastructure_issues": ["live_sidecar_boot_blocked"],
+        },
+        "failure_reason": reason,
+        "live_boot": {
+            "ok": False,
+            "issue": "LIVE_SIDECAR_BOOT_BLOCKED",
+            "detail": detail,
+            "boot_sha": boot_sha,
+        },
+        "execution_capability": _boot_blocked_execution_capability(
+            reason=reason,
+            timestamp=timestamp,
+        ),
+    }
+    state_root.mkdir(parents=True, exist_ok=True)
+    for filename, payload in (
+        ("daemon-heartbeat.json", heartbeat_payload),
+        ("status_summary.json", status_payload),
+    ):
+        path = state_root / filename
+        tmp_path = path.with_suffix(path.suffix + ".tmp")
+        try:
+            tmp_path.write_text(json.dumps(payload, sort_keys=True) + "\n")
+            tmp_path.replace(path)
+        except OSError:
+            logger.exception(
+                "failed to write boot-blocked operator status file: %s",
+                path,
+            )
+
+
 def _startup_required_sidecar_head_check(
     *,
     boot_sha: str | None = None,
@@ -2726,6 +2856,12 @@ def _startup_required_sidecar_head_check(
 
     if failures:
         detail = "; ".join(failures)
+        _write_startup_boot_blocked_operator_status(
+            state_root=state_root,
+            boot_sha=expected_sha,
+            detail=detail,
+            checked_at=checked_at,
+        )
         logger.critical("LIVE_SIDECAR_BOOT_BLOCKED: %s", detail)
         raise SystemExit(f"LIVE_SIDECAR_BOOT_BLOCKED: {detail}")
 
@@ -3458,7 +3594,7 @@ def _assert_live_safe_strategies_or_exit(*, refresh_state: bool = True) -> None:
     assert_live_safe_strategies_under_live_mode(enabled_strategies)
 
 
-def _edli_refresh_global_allocator_for_live_bridge(conn) -> dict:
+def _edli_refresh_global_allocator_for_live_bridge(conn, *, portfolio_snapshot=None) -> dict:
     """Configure the process-wide risk allocator/governor for the EDLI live path.
 
     ROOT (see /tmp/edli_submit_gate_trace.md): the live ``_live_order`` submit path
@@ -3522,7 +3658,7 @@ def _edli_refresh_global_allocator_for_live_bridge(conn) -> dict:
             }
         _current_bankroll = float(getattr(_bk, "value_usd", 0.0) or 0.0)
 
-        _portfolio = load_portfolio()
+        _portfolio = portfolio_snapshot if portfolio_snapshot is not None else load_portfolio()
         _baseline = float(getattr(_portfolio, "daily_baseline_total", 0.0) or 0.0)
 
         # Legacy formula EXACTLY (cycle_runner.py:711): drawdown=0.0 when baseline<=0.

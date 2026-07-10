@@ -1,5 +1,5 @@
 # Created: 2026-05-24
-# Last reused/audited: 2026-06-19
+# Last reused/audited: 2026-07-09
 # Authority basis: EDLI v1 implementation prompt §8 ForecastSnapshotReadyTrigger contract.
 from __future__ import annotations
 
@@ -728,7 +728,7 @@ def test_replacement_authority_scan_requires_matching_0_1_posterior(monkeypatch)
             source_id, product_id, data_version, city, target_date, temperature_metric,
             source_cycle_time, source_available_at, computed_at, q_json, q_lcb_json,
             q_ucb_json, posterior_method, dependency_source_run_ids_json,
-            provenance_json, runtime_layer, training_allowed
+            provenance_json, runtime_layer, training_allowed, posterior_identity_hash
         ) VALUES (
             'openmeteo_ecmwf_ifs9_bayes_fusion',
             'openmeteo_ecmwf_ifs9_bayes_fusion_v1',
@@ -739,7 +739,7 @@ def test_replacement_authority_scan_requires_matching_0_1_posterior(monkeypatch)
             '2026-05-24T04:16:00+00:00',
             '{"bin:28":0.42}', NULL, NULL,
             'openmeteo_ecmwf_ifs9_bayes_fusion',
-            '[]', '{}', 'live', 0
+            '[]', '{}', 'live', 0, 'posterior-hash-chicago-high-20260524'
         )
         """
     )
@@ -759,6 +759,12 @@ def test_replacement_authority_scan_requires_matching_0_1_posterior(monkeypatch)
     forecasts_conn.execute(
         "DELETE FROM raw_model_forecasts WHERE city='Chicago' AND target_date='2026-05-24' AND metric='high'"
     )
+    posterior_without_carrier = trigger.build_committed_snapshot_events(
+        forecasts_conn=forecasts_conn,
+        decision_time=_decision_time(),
+        received_at="2026-05-24T04:17:30+00:00",
+    )
+    assert posterior_without_carrier == []
     forecasts_conn.executemany(
         """
         INSERT INTO raw_model_forecasts (
@@ -784,6 +790,83 @@ def test_replacement_authority_scan_requires_matching_0_1_posterior(monkeypatch)
     assert payload["track"] == "replacement_0_1_openmeteo_bayes_fusion"
     assert payload["member_count"] == 3
     assert payload["expected_members"] == 3
+
+
+def test_replacement_authority_scan_accepts_posterior_provenance_carrier_count(monkeypatch):
+    """A certified posterior may carry raw-member proof when same-cycle raw rows lag."""
+
+    monkeypatch.setattr(
+        "src.events.triggers.forecast_snapshot_ready._replacement_live_enabled",
+        lambda: True,
+    )
+    forecasts_conn = sqlite3.connect(":memory:")
+    forecasts_conn.row_factory = sqlite3.Row
+    from src.state.db import init_schema_forecasts
+
+    init_schema_forecasts(forecasts_conn)
+    forecasts_conn.execute(
+        """
+        INSERT INTO forecast_posteriors (
+            source_id, product_id, data_version, city, target_date, temperature_metric,
+            source_cycle_time, source_available_at, computed_at, q_json, q_lcb_json,
+            q_ucb_json, posterior_method, dependency_source_run_ids_json,
+            provenance_json, runtime_layer, training_allowed, posterior_identity_hash
+        ) VALUES (
+            'openmeteo_ecmwf_ifs9_bayes_fusion',
+            'openmeteo_ecmwf_ifs9_bayes_fusion_v1',
+            'openmeteo_ecmwf_ifs9_bayes_fusion_high_v1',
+            'Shanghai', '2026-07-09', 'low',
+            '2026-07-09T00:00:00+00:00',
+            '2026-07-09T08:17:02+00:00',
+            '2026-07-09T08:21:20+00:00',
+            '{"24C":0.92}',
+            '{"24C":0.91}',
+            NULL,
+            'openmeteo_ecmwf_ifs9_bayes_fusion',
+            '[]',
+            ?,
+            'live',
+            0,
+            'posterior-hash-shanghai-low-20260709'
+        )
+        """,
+        (
+            json.dumps(
+                {
+                    "capture_status": "FULL_CURRENT",
+                    "runtime_policy_status": "live",
+                    "bayes_precision_fusion": {
+                        "decorrelated_providers_complete": True,
+                        "decorrelated_providers_expected": 2,
+                        "decorrelated_providers_served": 2,
+                        "raw_model_forecast_ids": [652620, 652622, 652624],
+                    },
+                },
+                sort_keys=True,
+            ),
+        ),
+    )
+
+    world_conn = sqlite3.connect(":memory:")
+    init_schema(world_conn)
+    trigger = ForecastSnapshotReadyTrigger(
+        EventWriter(world_conn),
+        live_eligibility_reader=lambda _sr, _cov, _snap, _now: True,
+    )
+
+    events = trigger.build_committed_snapshot_events(
+        forecasts_conn=forecasts_conn,
+        decision_time=datetime(2026, 7, 9, 10, 28, tzinfo=UTC),
+        received_at="2026-07-09T10:28:30+00:00",
+    )
+
+    assert len(events) == 1
+    payload = json.loads(events[0].payload_json)
+    assert payload["city"] == "Shanghai"
+    assert payload["metric"] == "low"
+    assert payload["member_count"] == 3
+    assert payload["expected_members"] == 3
+    assert payload["completeness_status"] == "COMPLETE"
 
 
 def test_restricted_redecision_counts_raw_members_only_for_screened_family(monkeypatch):

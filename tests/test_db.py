@@ -3,7 +3,7 @@
 # Lifecycle: created=2026-03-30; last_reviewed=2026-07-09; last_reused=2026-07-09
 # Purpose: Protect DB schema bootstrap contracts, daily revision-history DDL, and fact-smoke authority labels.
 # Reuse: Audit touched schema assertions and high-sensitivity skip metadata before closeout.
-# Authority basis: P2 4.4.A2 daily observation revision-history schema packet; Wave16 object-meaning fact-smoke authority repair; PR90 latest-event env authority review fix; 2026-05-16 live-continuous Phase B event-status boundary; 2026-07-09 covering position-current quote-priority index.
+# Authority basis: P2 4.4.A2 daily observation revision-history schema packet; Wave16 object-meaning fact-smoke authority repair; PR90 latest-event env authority review fix; 2026-05-16 live-continuous Phase B event-status boundary; 2026-07-09 portfolio-loader event-spine read indexes.
 """Tests for database schema initialization."""
 
 import json
@@ -1593,6 +1593,32 @@ def test_init_schema_trade_only_commits_execution_feasibility_indexes(tmp_path):
     assert "idx_execution_feasibility_evidence_token_created" in indexes
     assert "execution_feasibility_latest" in latest_tables
     assert "idx_execution_feasibility_latest_token_created" in latest_indexes
+
+
+def test_init_schema_trade_only_commits_position_events_read_indexes(tmp_path):
+    import sqlite3
+
+    from src.state.db import init_schema_trade_only
+
+    trade_db = tmp_path / "zeus_trades.db"
+    conn = sqlite3.connect(trade_db)
+    conn.row_factory = sqlite3.Row
+    init_schema_trade_only(conn)
+    conn.close()
+
+    reopened = sqlite3.connect(trade_db)
+    try:
+        indexes = {
+            row[1]
+            for row in reopened.execute(
+                "PRAGMA index_list('position_events')"
+            ).fetchall()
+        }
+    finally:
+        reopened.close()
+
+    assert "idx_position_events_position_type_sequence" in indexes
+    assert "idx_position_events_position_phase_after_sequence" in indexes
 
 
 def test_init_schema_trade_only_commits_position_current_quote_priority_index(tmp_path):
@@ -3546,6 +3572,66 @@ def test_log_settlement_event_preserves_prior_exit_time_in_outcome_fact(tmp_path
     assert row["exited_at"] == "2026-04-01T18:00:00Z"
     assert row["settled_at"] == "2026-04-01T18:00:00Z"
     assert row["hold_duration_hours"] == pytest.approx(18.0)
+
+
+def test_log_settlement_event_counts_canonical_monitor_events_in_outcome_fact(tmp_path):
+    from src.state.db import log_settlement_event
+    from src.state.portfolio import Position
+
+    db_path = tmp_path / "test.db"
+    conn = get_connection(db_path)
+    init_schema(conn)
+    _create_outcome_fact_table(conn)
+    for seq in (1, 2):
+        conn.execute(
+            """
+            INSERT INTO position_events (
+                event_id, position_id, event_version, sequence_no, event_type,
+                occurred_at, phase_before, phase_after, strategy_key,
+                source_module, env, payload_json
+            ) VALUES (?, 'rt-settle-monitored', 1, ?, 'MONITOR_REFRESHED',
+                ?, 'active', 'active', 'center_buy', 'test.monitor', 'test', '{}')
+            """,
+            (f"evt-monitor-{seq}", seq, f"2026-04-01T1{seq}:00:00Z"),
+        )
+
+    pos = Position(
+        trade_id="rt-settle-monitored",
+        market_id="m6",
+        city="NYC",
+        cluster="US-Northeast",
+        target_date="2026-04-01",
+        bin_label="39-40°F",
+        direction="buy_yes",
+        unit="F",
+        size_usd=10.0,
+        entry_price=0.40,
+        p_posterior=0.60,
+        edge=0.20,
+        strategy="center_buy",
+        edge_source="center_buy",
+        decision_snapshot_id="snap-monitor",
+        exit_price=1.0,
+        pnl=15.0,
+        exit_reason="SETTLEMENT",
+        last_exit_at="2026-04-01T23:00:00Z",
+        state="settled",
+    )
+
+    log_settlement_event(conn, pos, winning_bin="39-40°F", won=True, outcome=1)
+    conn.commit()
+
+    row = conn.execute(
+        """
+        SELECT monitor_count
+          FROM outcome_fact
+         WHERE position_id = 'rt-settle-monitored'
+        """
+    ).fetchone()
+    conn.close()
+
+    assert row is not None
+    assert row["monitor_count"] == 2
 
 
 def test_query_authoritative_settlement_rows_prefers_position_events(tmp_path):

@@ -478,6 +478,7 @@ def selection_calibrated_admission_q_lcb(
     own_side_cost: float | int | None = None,
     artifact=None,
     expected_posterior_version: str | None = None,
+    temperature_metric: str = "high",
 ) -> float:
     """The admission q_lcb after the live selection-aware calibrator deflation.
 
@@ -510,6 +511,7 @@ def selection_calibrated_admission_q_lcb(
                 admission_margin=margin,
                 artifact=artifact,
                 expected_posterior_version=expected_posterior_version or _SC_DEFAULT_VER,
+                temperature_metric=temperature_metric,
             )
         )
         # 2026-06-23: compose the PRICE-CONDITIONED selection-curse deflation at ENTRY (the primary

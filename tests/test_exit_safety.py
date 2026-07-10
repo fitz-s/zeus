@@ -1009,11 +1009,59 @@ def test_runtime_submit_gate_block_holds_retry_until_gate_recovers(conn, monkeyp
     assert payload["status"] == "runtime_submit_gate_blocked"
     assert payload["runtime_submit_gate_block"] is True
 
+    reloaded = Position(
+        trade_id=position.trade_id,
+        market_id=position.market_id,
+        city=position.city,
+        cluster=position.cluster,
+        target_date=position.target_date,
+        bin_label=position.bin_label,
+        direction=position.direction,
+        strategy_key=position.strategy_key,
+        size_usd=position.size_usd,
+        entry_price=position.entry_price,
+        shares=position.shares,
+        cost_basis_usd=position.cost_basis_usd,
+        state="pending_exit",
+        pre_exit_state="day0_window",
+        day0_entered_at=position.day0_entered_at,
+        entered_at=position.entered_at,
+        exit_state="retry_pending",
+        order_status="retry_pending",
+        token_id=position.token_id,
+        no_token_id=position.no_token_id,
+        condition_id=position.condition_id,
+        exit_retry_count=0,
+        next_exit_retry_at="2000-01-01T00:00:00+00:00",
+        exit_reason=position.exit_reason,
+    )
     monkeypatch.setattr(
         exit_lifecycle,
         "_runtime_submit_gate_currently_allows_submit",
         lambda: False,
     )
+    assert exit_lifecycle.check_pending_retries(reloaded, conn=conn) is False
+    assert reloaded.state == "pending_exit"
+    assert reloaded.exit_state == "retry_pending"
+    assert reloaded.order_status == "retry_pending"
+    assert reloaded.next_exit_retry_at != "2000-01-01T00:00:00+00:00"
+    latest = conn.execute(
+        """
+        SELECT event_type, phase_after, payload_json
+          FROM position_events
+         WHERE position_id = ?
+         ORDER BY sequence_no DESC
+         LIMIT 1
+        """,
+        (position.trade_id,),
+    ).fetchone()
+    latest_payload = json.loads(latest["payload_json"])
+    assert latest["event_type"] == "EXIT_ORDER_REJECTED"
+    assert latest["phase_after"] == "pending_exit"
+    assert latest_payload["status"] == "runtime_submit_gate_blocked"
+    assert latest_payload["runtime_submit_gate_block"] is True
+    assert "deployment_freshness_mismatch" in latest_payload["error"]
+
     assert exit_lifecycle.check_pending_retries(position, conn=conn) is False
     assert position.exit_state == "retry_pending"
     assert position.exit_retry_count == 0
@@ -1025,12 +1073,24 @@ def test_runtime_submit_gate_block_holds_retry_until_gate_recovers(conn, monkeyp
         "_runtime_submit_gate_currently_allows_submit",
         lambda: True,
     )
-    assert exit_lifecycle.is_exit_cooldown_active(position) is False
-    assert exit_lifecycle.check_pending_retries(position, conn=conn) is True
-    assert position.state == "day0_window"
-    assert position.exit_state == ""
-    assert position.order_status == "filled"
-    assert position.next_exit_retry_at == ""
+    assert exit_lifecycle.check_pending_retries(reloaded, conn=conn) is True
+    assert reloaded.state == "day0_window"
+    assert reloaded.exit_state == ""
+    assert reloaded.order_status == "filled"
+    assert reloaded.next_exit_retry_at == ""
+    released = conn.execute(
+        """
+        SELECT event_type, payload_json
+          FROM position_events
+         WHERE position_id = ?
+         ORDER BY sequence_no DESC
+         LIMIT 1
+        """,
+        (position.trade_id,),
+    ).fetchone()
+    released_payload = json.loads(released["payload_json"])
+    assert released["event_type"] == "EXIT_RETRY_RELEASED"
+    assert "deployment_freshness_mismatch" in released_payload["error"]
 
 
 def test_monitor_refresh_cannot_overwrite_pending_exit_dust_hold_projection(conn):
@@ -1133,6 +1193,458 @@ def test_monitor_refresh_cannot_overwrite_pending_exit_dust_hold_projection(conn
     assert current["next_exit_retry_at"] in ("", None)
     assert current["last_monitor_prob"] == pytest.approx(0.0)
     assert current["last_monitor_prob_is_fresh"] == 1
+
+
+def test_chain_size_correction_cannot_overwrite_pending_exit_dust_hold_projection(conn):
+    from src.engine.lifecycle_events import build_chain_size_corrected_canonical_write
+    from src.execution import exit_lifecycle
+    from src.state.db import append_many_and_project
+    from src.state.portfolio import Position
+
+    position = Position(
+        trade_id="pos-dust-hold-chain-overwrite",
+        market_id="mkt-dust-hold-chain-overwrite",
+        city="Taipei",
+        cluster="Asia",
+        target_date="2026-07-09",
+        bin_label="35C",
+        direction="buy_no",
+        strategy_key="forecast_qkernel_entry",
+        size_usd=2.432,
+        entry_price=0.64,
+        shares=3.8,
+        chain_shares=3.8,
+        chain_avg_price=0.64,
+        chain_cost_basis_usd=2.432,
+        cost_basis_usd=2.432,
+        state="day0_window",
+        pre_exit_state="day0_window",
+        env="live",
+        day0_entered_at="2026-07-09T00:00:00+00:00",
+        entered_at="2026-07-08T12:04:04+00:00",
+        exit_state="",
+        order_status="filled",
+        token_id=YES_TOKEN,
+        no_token_id=NO_TOKEN,
+        condition_id="condition-dust-hold-chain-overwrite",
+        last_monitor_prob=0.7672,
+        last_monitor_prob_is_fresh=True,
+        last_monitor_market_price=0.41,
+        last_monitor_market_price_is_fresh=True,
+        exit_reason="FAMILY_DIRECT_SELL_DOMINATES_HOLD",
+    )
+    dust_error = "executable_snapshot_gate: size 3.8 is below snapshot min_order_size 5"
+    exit_lifecycle._mark_exit_dust_hold(
+        position,
+        reason=f"FAMILY_DIRECT_SELL_DOMINATES_HOLD [DUST: {dust_error}]",
+        error=dust_error,
+        conn=conn,
+    )
+
+    stale_chain_position = Position(
+        trade_id=position.trade_id,
+        market_id=position.market_id,
+        city=position.city,
+        cluster=position.cluster,
+        target_date=position.target_date,
+        bin_label=position.bin_label,
+        direction=position.direction,
+        strategy_key=position.strategy_key,
+        size_usd=position.size_usd,
+        entry_price=position.entry_price,
+        shares=position.shares,
+        chain_shares=3.8,
+        chain_avg_price=0.64,
+        chain_cost_basis_usd=2.432,
+        cost_basis_usd=position.cost_basis_usd,
+        state="day0_window",
+        env="live",
+        day0_entered_at=position.day0_entered_at,
+        entered_at=position.entered_at,
+        exit_state="",
+        order_status="partial",
+        token_id=position.token_id,
+        no_token_id=position.no_token_id,
+        condition_id=position.condition_id,
+        chain_state="synced",
+        chain_verified_at="2026-07-09T04:10:32+00:00",
+    )
+    sequence_no = conn.execute(
+        "SELECT COALESCE(MAX(sequence_no), 0) + 1 FROM position_events WHERE position_id = ?",
+        (position.trade_id,),
+    ).fetchone()[0]
+    events, projection = build_chain_size_corrected_canonical_write(
+        stale_chain_position,
+        local_shares_before=3.8,
+        sequence_no=sequence_no,
+        phase_after="day0_window",
+    )
+    append_many_and_project(conn, events, projection)
+
+    current = conn.execute(
+        """
+        SELECT phase, order_status, exit_reason, exit_retry_count,
+               next_exit_retry_at, chain_state, chain_shares
+          FROM position_current
+         WHERE position_id = ?
+        """,
+        (position.trade_id,),
+    ).fetchone()
+    assert current["phase"] == "pending_exit"
+    assert current["order_status"] == "backoff_exhausted"
+    assert "[DUST:" in current["exit_reason"]
+    assert current["exit_retry_count"] == 0
+    assert current["next_exit_retry_at"] in ("", None)
+    assert current["chain_state"] == "synced"
+    assert current["chain_shares"] == pytest.approx(3.8)
+
+
+def test_live_dust_rejection_sequence_stays_pending_exit_through_monitor_and_chain(conn):
+    from src.engine.lifecycle_events import (
+        build_chain_size_corrected_canonical_write,
+        build_monitor_refreshed_canonical_write,
+    )
+    from src.execution import exit_lifecycle
+    from src.state.db import append_many_and_project
+    from src.state.portfolio import Position
+
+    position = Position(
+        trade_id="pos-live-dust-sequence",
+        market_id="mkt-live-dust-sequence",
+        city="Taipei",
+        cluster="Asia",
+        target_date="2026-07-09",
+        bin_label="35C",
+        direction="buy_no",
+        strategy_key="forecast_qkernel_entry",
+        size_usd=2.432,
+        entry_price=0.64,
+        shares=3.8,
+        chain_shares=3.8,
+        chain_avg_price=0.64,
+        chain_cost_basis_usd=2.432,
+        cost_basis_usd=2.432,
+        state="day0_window",
+        pre_exit_state="day0_window",
+        env="live",
+        day0_entered_at="2026-07-09T00:00:00+00:00",
+        entered_at="2026-07-08T12:04:04+00:00",
+        exit_state="",
+        order_status="partial",
+        token_id=YES_TOKEN,
+        no_token_id=NO_TOKEN,
+        condition_id="condition-live-dust-sequence",
+        last_monitor_prob=0.9461,
+        last_monitor_prob_is_fresh=True,
+        last_monitor_market_price=0.36,
+        last_monitor_market_price_is_fresh=True,
+        exit_reason="FAMILY_DIRECT_SELL_DOMINATES_HOLD",
+    )
+    dust_error = "executable_snapshot_gate: size 3.8 is below snapshot min_order_size 5"
+    exit_lifecycle._mark_exit_dust_hold(
+        position,
+        reason=f"FAMILY_DIRECT_SELL_DOMINATES_HOLD [DUST: {dust_error}]",
+        error=dust_error,
+        conn=conn,
+    )
+
+    stale_monitor_position = Position(
+        trade_id=position.trade_id,
+        market_id=position.market_id,
+        city=position.city,
+        cluster=position.cluster,
+        target_date=position.target_date,
+        bin_label=position.bin_label,
+        direction=position.direction,
+        strategy_key=position.strategy_key,
+        size_usd=position.size_usd,
+        entry_price=position.entry_price,
+        shares=position.shares,
+        chain_shares=position.chain_shares,
+        chain_avg_price=position.chain_avg_price,
+        chain_cost_basis_usd=position.chain_cost_basis_usd,
+        cost_basis_usd=position.cost_basis_usd,
+        state="day0_window",
+        env="live",
+        day0_entered_at=position.day0_entered_at,
+        entered_at=position.entered_at,
+        exit_state="",
+        order_status="partial",
+        token_id=position.token_id,
+        no_token_id=position.no_token_id,
+        condition_id=position.condition_id,
+        last_monitor_prob=0.9461,
+        last_monitor_prob_is_fresh=True,
+        last_monitor_edge=-0.4,
+        last_monitor_market_price=0.001,
+        last_monitor_market_price_is_fresh=True,
+        exit_reason="",
+    )
+    sequence_no = conn.execute(
+        "SELECT COALESCE(MAX(sequence_no), 0) + 1 FROM position_events WHERE position_id = ?",
+        (position.trade_id,),
+    ).fetchone()[0]
+    events, projection = build_monitor_refreshed_canonical_write(
+        stale_monitor_position,
+        sequence_no=sequence_no,
+        phase_after="day0_window",
+        occurred_at="2026-07-09T04:02:44+00:00",
+    )
+    append_many_and_project(conn, events, projection)
+
+    stale_chain_position = Position(
+        trade_id=position.trade_id,
+        market_id=position.market_id,
+        city=position.city,
+        cluster=position.cluster,
+        target_date=position.target_date,
+        bin_label=position.bin_label,
+        direction=position.direction,
+        strategy_key=position.strategy_key,
+        size_usd=position.size_usd,
+        entry_price=position.entry_price,
+        shares=position.shares,
+        chain_shares=3.8,
+        chain_avg_price=0.64,
+        chain_cost_basis_usd=2.432,
+        cost_basis_usd=position.cost_basis_usd,
+        state="day0_window",
+        env="live",
+        day0_entered_at=position.day0_entered_at,
+        entered_at=position.entered_at,
+        exit_state="",
+        order_status="partial",
+        token_id=position.token_id,
+        no_token_id=position.no_token_id,
+        condition_id=position.condition_id,
+        chain_state="synced",
+        chain_verified_at="2026-07-09T04:04:43+00:00",
+    )
+    sequence_no = conn.execute(
+        "SELECT COALESCE(MAX(sequence_no), 0) + 1 FROM position_events WHERE position_id = ?",
+        (position.trade_id,),
+    ).fetchone()[0]
+    events, projection = build_chain_size_corrected_canonical_write(
+        stale_chain_position,
+        local_shares_before=3.8,
+        sequence_no=sequence_no,
+        phase_after="day0_window",
+    )
+    append_many_and_project(conn, events, projection)
+
+    current = conn.execute(
+        """
+        SELECT phase, order_status, exit_reason, exit_retry_count,
+               next_exit_retry_at, chain_state, chain_shares, last_monitor_prob
+          FROM position_current
+         WHERE position_id = ?
+        """,
+        (position.trade_id,),
+    ).fetchone()
+    assert current["phase"] == "pending_exit"
+    assert current["order_status"] == "backoff_exhausted"
+    assert "[DUST:" in current["exit_reason"]
+    assert current["exit_retry_count"] == 0
+    assert current["next_exit_retry_at"] in ("", None)
+    assert current["chain_state"] == "synced"
+    assert current["chain_shares"] == pytest.approx(3.8)
+    assert current["last_monitor_prob"] == pytest.approx(0.9461)
+
+
+def test_monitor_refresh_cannot_overwrite_retry_pending_exit_projection(conn):
+    from src.engine.lifecycle_events import (
+        build_monitor_refreshed_canonical_write,
+        build_position_current_projection,
+    )
+    from src.state.db import append_many_and_project
+    from src.state.portfolio import Position
+    from src.state.projection import upsert_position_current
+
+    pending_exit = Position(
+        trade_id="pos-retry-pending-monitor-overwrite",
+        market_id="mkt-retry-pending-monitor-overwrite",
+        city="Taipei",
+        cluster="Asia",
+        target_date="2026-07-09",
+        bin_label="36C",
+        direction="buy_no",
+        strategy_key="forecast_qkernel_entry",
+        size_usd=7.44,
+        entry_price=0.64,
+        shares=11.627905,
+        chain_shares=11.6279,
+        chain_avg_price=0.64,
+        chain_cost_basis_usd=7.44,
+        cost_basis_usd=7.44,
+        state="pending_exit",
+        pre_exit_state="day0_window",
+        env="live",
+        day0_entered_at="2026-07-09T00:00:00+00:00",
+        entered_at="2026-07-08T12:04:04+00:00",
+        exit_state="retry_pending",
+        order_status="retry_pending",
+        exit_retry_count=2,
+        next_exit_retry_at="2026-07-09T14:55:24+00:00",
+        exit_reason="FAMILY_DIRECT_SELL_DOMINATES_HOLD",
+        token_id=YES_TOKEN,
+        no_token_id=NO_TOKEN,
+        condition_id="condition-retry-pending-monitor-overwrite",
+        last_monitor_prob=0.72,
+        last_monitor_prob_is_fresh=True,
+        last_monitor_market_price=0.41,
+        last_monitor_market_price_is_fresh=True,
+    )
+    upsert_position_current(conn, build_position_current_projection(pending_exit))
+
+    stale_monitor_position = Position(
+        trade_id=pending_exit.trade_id,
+        market_id=pending_exit.market_id,
+        city=pending_exit.city,
+        cluster=pending_exit.cluster,
+        target_date=pending_exit.target_date,
+        bin_label=pending_exit.bin_label,
+        direction=pending_exit.direction,
+        strategy_key=pending_exit.strategy_key,
+        size_usd=pending_exit.size_usd,
+        entry_price=pending_exit.entry_price,
+        shares=pending_exit.shares,
+        chain_shares=pending_exit.chain_shares,
+        chain_avg_price=pending_exit.chain_avg_price,
+        chain_cost_basis_usd=pending_exit.chain_cost_basis_usd,
+        cost_basis_usd=pending_exit.cost_basis_usd,
+        state="day0_window",
+        env="live",
+        day0_entered_at=pending_exit.day0_entered_at,
+        entered_at=pending_exit.entered_at,
+        exit_state="",
+        order_status="partial",
+        token_id=pending_exit.token_id,
+        no_token_id=pending_exit.no_token_id,
+        condition_id=pending_exit.condition_id,
+        last_monitor_prob=0.18,
+        last_monitor_prob_is_fresh=True,
+        last_monitor_edge=-0.9,
+        last_monitor_market_price=0.01,
+        last_monitor_market_price_is_fresh=True,
+        exit_reason="",
+    )
+    events, projection = build_monitor_refreshed_canonical_write(
+        stale_monitor_position,
+        sequence_no=1,
+        phase_after="day0_window",
+        occurred_at="2026-07-09T14:58:00+00:00",
+    )
+    append_many_and_project(conn, events, projection)
+
+    current = conn.execute(
+        """
+        SELECT phase, order_status, exit_reason, exit_retry_count,
+               next_exit_retry_at, last_monitor_prob, last_monitor_prob_is_fresh
+          FROM position_current
+         WHERE position_id = ?
+        """,
+        (pending_exit.trade_id,),
+    ).fetchone()
+    assert current["phase"] == "pending_exit"
+    assert current["order_status"] == "retry_pending"
+    assert current["exit_reason"] == "FAMILY_DIRECT_SELL_DOMINATES_HOLD"
+    assert current["exit_retry_count"] == 2
+    assert current["next_exit_retry_at"] == "2026-07-09T14:55:24+00:00"
+    assert current["last_monitor_prob"] == pytest.approx(0.18)
+    assert current["last_monitor_prob_is_fresh"] == 1
+
+
+def test_chain_size_correction_cannot_overwrite_exit_intent_projection(conn):
+    from src.engine.lifecycle_events import (
+        build_chain_size_corrected_canonical_write,
+        build_position_current_projection,
+    )
+    from src.state.db import append_many_and_project
+    from src.state.portfolio import Position
+    from src.state.projection import upsert_position_current
+
+    pending_exit = Position(
+        trade_id="pos-exit-intent-chain-overwrite",
+        market_id="mkt-exit-intent-chain-overwrite",
+        city="Shenzhen",
+        cluster="Asia",
+        target_date="2026-07-09",
+        bin_label="32C",
+        direction="buy_no",
+        strategy_key="forecast_qkernel_entry",
+        size_usd=12.39,
+        entry_price=0.62,
+        shares=19.98,
+        chain_shares=19.98,
+        chain_avg_price=0.62,
+        chain_cost_basis_usd=12.39,
+        cost_basis_usd=12.39,
+        state="pending_exit",
+        pre_exit_state="day0_window",
+        env="live",
+        day0_entered_at="2026-07-09T00:00:00+00:00",
+        entered_at="2026-07-08T12:04:04+00:00",
+        exit_state="exit_intent",
+        order_status="exit_intent",
+        exit_reason="FAMILY_DIRECT_SELL_DOMINATES_HOLD",
+        token_id=YES_TOKEN,
+        no_token_id=NO_TOKEN,
+        condition_id="condition-exit-intent-chain-overwrite",
+    )
+    upsert_position_current(conn, build_position_current_projection(pending_exit))
+
+    stale_chain_position = Position(
+        trade_id=pending_exit.trade_id,
+        market_id=pending_exit.market_id,
+        city=pending_exit.city,
+        cluster=pending_exit.cluster,
+        target_date=pending_exit.target_date,
+        bin_label=pending_exit.bin_label,
+        direction=pending_exit.direction,
+        strategy_key=pending_exit.strategy_key,
+        size_usd=pending_exit.size_usd,
+        entry_price=pending_exit.entry_price,
+        shares=pending_exit.shares,
+        chain_shares=19.98,
+        chain_avg_price=0.62,
+        chain_cost_basis_usd=12.39,
+        cost_basis_usd=pending_exit.cost_basis_usd,
+        state="day0_window",
+        env="live",
+        day0_entered_at=pending_exit.day0_entered_at,
+        entered_at=pending_exit.entered_at,
+        exit_state="",
+        order_status="partial",
+        token_id=pending_exit.token_id,
+        no_token_id=pending_exit.no_token_id,
+        condition_id=pending_exit.condition_id,
+        chain_state="synced",
+        chain_verified_at="2026-07-09T14:59:00+00:00",
+    )
+    events, projection = build_chain_size_corrected_canonical_write(
+        stale_chain_position,
+        local_shares_before=19.98,
+        sequence_no=1,
+        phase_after="day0_window",
+    )
+    append_many_and_project(conn, events, projection)
+
+    current = conn.execute(
+        """
+        SELECT phase, order_status, exit_reason, exit_retry_count,
+               next_exit_retry_at, chain_state, chain_shares
+          FROM position_current
+         WHERE position_id = ?
+        """,
+        (pending_exit.trade_id,),
+    ).fetchone()
+    assert current["phase"] == "pending_exit"
+    assert current["order_status"] == "exit_intent"
+    assert current["exit_reason"] == "FAMILY_DIRECT_SELL_DOMINATES_HOLD"
+    assert current["exit_retry_count"] == 0
+    assert current["next_exit_retry_at"] in ("", None)
+    assert current["chain_state"] == "synced"
+    assert current["chain_shares"] == pytest.approx(19.98)
 
 
 def test_pending_exit_without_order_releases_for_redecision(conn):
@@ -1251,6 +1763,97 @@ def test_pending_exit_phantom_sell_projection_releases_before_no_order_retry(con
         """,
         (position.trade_id,),
     ).fetchone()[0] == 0
+
+
+def test_pending_exit_intent_without_exit_command_releases_for_redecision(conn):
+    from src.execution import exit_lifecycle
+    from src.engine.lifecycle_events import build_position_current_projection
+    from src.state.portfolio import PortfolioState, Position, _position_from_projection_row
+    from src.state.projection import upsert_position_current
+
+    position = Position(
+        trade_id="pos-exit-intent-no-command",
+        market_id="mkt-exit-intent-no-command",
+        city="Shenzhen",
+        cluster="Asia",
+        target_date="2026-07-09",
+        bin_label="32C",
+        direction="buy_no",
+        strategy_key="center_buy",
+        size_usd=12.39,
+        entry_price=0.62,
+        shares=19.98,
+        cost_basis_usd=12.39,
+        state="pending_exit",
+        pre_exit_state="day0_window",
+        day0_entered_at="2026-07-09T00:30:00+00:00",
+        chain_state="synced",
+        chain_shares=19.98,
+        order_status="exit_intent",
+        exit_state="",
+        last_exit_order_id="",
+        exit_reason="FAMILY_DIRECT_SELL_DOMINATES_HOLD",
+        token_id=YES_TOKEN,
+        no_token_id=NO_TOKEN,
+        condition_id="condition-exit-intent-no-command",
+        env="live",
+    )
+    upsert_position_current(conn, build_position_current_projection(position))
+    row = conn.execute(
+        "SELECT * FROM position_current WHERE position_id = ?",
+        (position.trade_id,),
+    ).fetchone()
+    runtime_position = _position_from_projection_row(dict(row), current_mode="live")
+    runtime_position.pre_exit_state = "day0_window"
+    assert runtime_position.state == "pending_exit"
+    assert runtime_position.exit_state == "exit_intent"
+    assert runtime_position.order_status == "exit_intent"
+
+    class FakeClob:
+        def get_order_status(self, order_id):
+            raise AssertionError(f"stranded exit intent must release, not poll: {order_id}")
+
+    stats = exit_lifecycle.check_pending_exits(
+        PortfolioState(positions=[runtime_position]),
+        FakeClob(),
+        conn=conn,
+    )
+
+    assert stats["retried"] == 1
+    assert stats["released_no_order"] == 1
+    assert runtime_position.state == "day0_window"
+    assert runtime_position.exit_state == ""
+    assert runtime_position.order_status == "filled"
+    current = conn.execute(
+        """
+        SELECT phase, order_status, exit_retry_count, next_exit_retry_at
+          FROM position_current
+         WHERE position_id = ?
+        """,
+        (position.trade_id,),
+    ).fetchone()
+    assert dict(current) == {
+        "phase": "day0_window",
+        "order_status": "filled",
+        "exit_retry_count": 0,
+        "next_exit_retry_at": "",
+    }
+    event = conn.execute(
+        """
+        SELECT event_type, phase_before, phase_after, venue_status, payload_json
+          FROM position_events
+         WHERE position_id = ?
+         ORDER BY sequence_no DESC
+         LIMIT 1
+        """,
+        (position.trade_id,),
+    ).fetchone()
+    payload = json.loads(event["payload_json"])
+    assert event["event_type"] == "EXIT_RETRY_RELEASED"
+    assert event["phase_before"] == "pending_exit"
+    assert event["phase_after"] == "day0_window"
+    assert event["venue_status"] == "ready"
+    assert payload["release_reason"] == "PENDING_EXIT_NO_ORDER_RELEASED"
 
 
 def test_retrying_pending_exit_posted_without_command_releases_before_poll(conn):
@@ -3858,9 +4461,16 @@ def test_live_exit_below_min_order_rejection_enters_dust_hold_not_retry(conn, mo
         """,
         (position.trade_id,),
     ).fetchone()
+    payload = json.loads(event["payload_json"])
     assert event["event_type"] == "EXIT_ORDER_REJECTED"
     assert event["phase_after"] == "pending_exit"
-    assert json.loads(event["payload_json"])["status"] == "backoff_exhausted"
+    assert payload["status"] == "backoff_exhausted"
+    assert payload["exit_block_class"] == "snapshot_min_order_dust"
+    assert payload["exit_order_submitted"] is False
+    assert payload["operator_action_required"] is True
+    assert payload["held_to_settlement_unless_aggregate_exit_available"] is True
+    assert payload["blocked_shares"] == "1.5873"
+    assert payload["snapshot_min_order_size"] == "5"
     from src.state.db import query_position_current_status_view
 
     status_view = query_position_current_status_view(conn)

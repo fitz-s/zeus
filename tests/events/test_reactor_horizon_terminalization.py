@@ -1,5 +1,5 @@
 # Created: 2026-06-12
-# Last reused or audited: 2026-07-08
+# Last reused or audited: 2026-07-09
 # Authority basis: operator law 2026-06-12 ("no caps of any kind"; "重试次数不是市场
 #   事实" — a retry count is not a market fact) + Wave 1 items 1 and 13 of
 #   docs/archive/2026-Q2/operations_historical/overengineering_simplification_plan_2026-06-12.md + external
@@ -838,6 +838,89 @@ def test_day0_false_stale_snapshot_selection_deadline_dead_letter_is_requeued():
     assert store.processing_last_error(event.event_id) == (
         "RECOVERED_FALSE_EXECUTABLE_SNAPSHOT_SELECTION_DEADLINE_DAY0"
     )
+
+
+def test_day0_false_static_venue_close_dead_letter_is_requeued():
+    """Old static F1 venue-close dead letters recover while the local target day is live."""
+    conn, store = _store()
+    event = _day0_event(city="Manila", target_date="2026-06-13", suffix="recover-static")
+    store.insert_or_ignore(event)
+    store.mark_dead_letter(
+        event,
+        failure_stage="MONEY_PATH_HORIZON_EXPIRED",
+        error_message=(
+            "money-path transient terminalized at event horizon "
+            "(MARKET_VENUE_CLOSED: F1 12:00-UTC close); "
+            "last reason: EXECUTABLE_SNAPSHOT_BLOCKED"
+        ),
+        created_at="2026-06-13T14:00:00+00:00",
+    )
+
+    recovered = store.requeue_false_static_venue_close_day0_dead_letters(
+        decision_time=_DT_VENUE_CLOSED_NOT_LOCAL_PAST.isoformat(),
+    )
+
+    assert recovered == 1
+    assert _status(conn, event.event_id) == "pending"
+    assert store.processing_last_error(event.event_id) == (
+        "RECOVERED_FALSE_STATIC_VENUE_CLOSE_DAY0"
+    )
+
+
+def test_day0_false_dead_letter_recovery_sql_skips_historical_targets(monkeypatch):
+    """Historical dead-letter recovery must not re-read unrecoverable old Day0 rows."""
+    conn, store = _store()
+    static_event = _day0_event(
+        city="Manila",
+        target_date="2026-06-10",
+        suffix="old-static",
+    )
+    stale_event = _day0_event(
+        city="Manila",
+        target_date="2026-06-10",
+        suffix="old-stale",
+    )
+    store.insert_or_ignore(static_event)
+    store.insert_or_ignore(stale_event)
+    store.mark_dead_letter(
+        static_event,
+        failure_stage="MONEY_PATH_HORIZON_EXPIRED",
+        error_message=(
+            "money-path transient terminalized at event horizon "
+            "(MARKET_VENUE_CLOSED: F1 12:00-UTC close); "
+            "last reason: EXECUTABLE_SNAPSHOT_BLOCKED"
+        ),
+        created_at="2026-06-10T14:00:00+00:00",
+    )
+    store.mark_dead_letter(
+        stale_event,
+        failure_stage="MONEY_PATH_HORIZON_EXPIRED",
+        error_message=(
+            "money-path transient terminalized at event horizon "
+            "(SELECTION_DEADLINE_PAST: selection_deadline=2026-06-10T11:55:00+00:00); "
+            "last reason: EXECUTABLE_SNAPSHOT_STALE:"
+            "selection_deadline=2026-06-10T11:55:00+00:00"
+        ),
+        created_at="2026-06-10T14:00:00+00:00",
+    )
+
+    def _unexpected_timeliness_check(*_args, **_kwargs):
+        raise AssertionError("historical dead-letter rows should be filtered by SQL target floor")
+
+    monkeypatch.setattr(
+        EventStore,
+        "_strictly_past_in_tz",
+        staticmethod(_unexpected_timeliness_check),
+    )
+
+    assert store.requeue_false_static_venue_close_day0_dead_letters(
+        decision_time=_DT_VENUE_CLOSED_NOT_LOCAL_PAST.isoformat(),
+    ) == 0
+    assert store.requeue_false_executable_snapshot_deadline_day0_dead_letters(
+        decision_time=_DT_VENUE_CLOSED_NOT_LOCAL_PAST.isoformat(),
+    ) == 0
+    assert _status(conn, static_event.event_id) == "dead_letter"
+    assert _status(conn, stale_event.event_id) == "dead_letter"
 
 
 def test_day0_live_future_close_family_does_not_terminalize():

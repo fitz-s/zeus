@@ -117,15 +117,12 @@ _TRANSITIONAL_HINT_EVENT_TYPES = frozenset(
         "ENTRY_ORDER_POSTED",
         "ENTRY_ORDER_FILLED",
         "DAY0_WINDOW_ENTERED",
+        "CHAIN_SYNCED",
+        "VENUE_POSITION_OBSERVED",
         "ADMIN_VOIDED",
         "EXIT_RETRY_RELEASED",
         *_EXIT_LIFECYCLE_EVENT_TYPES,
     }
-)
-_TRANSITIONAL_HINT_PAYLOAD_KEYS = (
-    "entry_fill_verified",
-    "admin_exit_reason",
-    "day0_entered_at",
 )
 _TRANSITIONAL_HINT_ROWS_PER_POSITION = 40
 
@@ -5109,6 +5106,10 @@ BEFORE DELETE ON position_events
 BEGIN
     SELECT RAISE(FAIL, 'position_events is append-only');
 END;
+CREATE INDEX IF NOT EXISTS idx_position_events_position_type_sequence
+    ON position_events(position_id, event_type, sequence_no DESC);
+CREATE INDEX IF NOT EXISTS idx_position_events_position_phase_after_sequence
+    ON position_events(position_id, phase_after, sequence_no DESC);
 
 -- position_current (from architecture/2026_04_02_architecture_kernel.sql)
 CREATE TABLE IF NOT EXISTS position_current (
@@ -9735,6 +9736,32 @@ def log_outcome_fact(
     )
     return {"status": "written", "table": "outcome_fact"}
 
+
+def _count_position_monitor_refreshes(
+    conn: sqlite3.Connection,
+    position_id: str,
+) -> int | None:
+    if not position_id or not _table_exists(conn, "position_events"):
+        return None
+    columns = _table_columns(conn, "position_events")
+    if not {"position_id", "event_type"}.issubset(columns):
+        return None
+    row = conn.execute(
+        """
+        SELECT COUNT(*) AS n
+          FROM position_events
+         WHERE position_id = ?
+           AND event_type = 'MONITOR_REFRESHED'
+        """,
+        (position_id,),
+    ).fetchone()
+    if row is None:
+        return 0
+    try:
+        return int(row["n"])
+    except (TypeError, KeyError, IndexError):
+        return int(row[0] or 0)
+
 _LEGACY_POSITION_EVENTS_COLUMNS = frozenset(
     {
         "runtime_trade_id",
@@ -9895,11 +9922,18 @@ def log_settlement_event(
 ) -> None:
     """Append a durable settlement event for learning/risk consumers."""
     _guard_legacy_position_events_schema(conn)
+    position_id = getattr(pos, "trade_id", "")
     settled_at = getattr(pos, "last_exit_at", None)
     entered_at = getattr(pos, "entered_at", None) or getattr(pos, "day0_entered_at", None)
+    explicit_monitor_count = getattr(pos, "monitor_count", None)
+    monitor_count = (
+        int(explicit_monitor_count or 0)
+        if explicit_monitor_count is not None
+        else _count_position_monitor_refreshes(conn, str(position_id or ""))
+    )
     log_outcome_fact(
         conn,
-        position_id=getattr(pos, "trade_id", ""),
+        position_id=position_id,
         strategy_key=str(getattr(pos, "strategy_key", "") or getattr(pos, "strategy", "") or "") or None,
         entered_at=entered_at,
         exited_at=exited_at_override,
@@ -9909,7 +9943,7 @@ def log_settlement_event(
         decision_snapshot_id=getattr(pos, "decision_snapshot_id", None),
         pnl=getattr(pos, "pnl", None),
         outcome=outcome,
-        monitor_count=int(getattr(pos, "monitor_count", 0) or 0),
+        monitor_count=monitor_count,
         chain_corrections_count=int(getattr(pos, "chain_corrections_count", 0) or 0),
     )
 
@@ -10909,26 +10943,22 @@ def _latest_position_event_envs(
         return {}
     if "env" not in _table_columns(conn, "position_events"):
         return {}
-    placeholders = ", ".join(["?"] * len(position_ids))
-    rows = conn.execute(
-        f"""
-        SELECT position_id, env
-        FROM (
-            SELECT position_id,
-                   env,
-                   ROW_NUMBER() OVER (
-                       PARTITION BY position_id
-                       ORDER BY sequence_no DESC
-                   ) AS rn
-            FROM position_events
-            WHERE position_id IN ({placeholders})
-        )
-        WHERE rn = 1
-        """,
-        tuple(position_ids),
-    ).fetchall()
     envs: dict[str, str] = {}
-    for row in rows:
+    for position_id in dict.fromkeys(str(position_id or "") for position_id in position_ids):
+        if not position_id:
+            continue
+        row = conn.execute(
+            """
+            SELECT position_id, env
+              FROM position_events
+             WHERE position_id = ?
+             ORDER BY sequence_no DESC
+             LIMIT 1
+            """,
+            (position_id,),
+        ).fetchone()
+        if row is None:
+            continue
         env = str(row["env"] or "").strip().lower()
         if env in POSITION_EVENT_ENVS:
             envs[str(row["position_id"])] = env
@@ -12062,42 +12092,32 @@ def _query_transitional_position_hints(
     if not trade_ids:
         return {}
     columns = _table_columns(conn, "position_events")
-    placeholders = ", ".join("?" for _ in trade_ids)
     if {"position_id", "payload_json", "occurred_at"}.issubset(columns):
         event_placeholders = ", ".join("?" for _ in _TRANSITIONAL_HINT_EVENT_TYPES)
-        payload_predicate = " OR ".join("payload_json LIKE ?" for _ in _TRANSITIONAL_HINT_PAYLOAD_KEYS)
-        params = (
-            *trade_ids,
+        shared_params = (
             *_TRANSITIONAL_HINT_EVENT_TYPES,
-            *(f"%{key}%" for key in _TRANSITIONAL_HINT_PAYLOAD_KEYS),
             _TRANSITIONAL_HINT_ROWS_PER_POSITION,
         )
-        rows = conn.execute(
-            f"""
-            WITH ranked AS (
-                SELECT position_id AS trade_key,
-                       event_type,
-                       payload_json AS payload,
-                       occurred_at,
-                       sequence_no,
-                       ROW_NUMBER() OVER (
-                           PARTITION BY position_id
-                           ORDER BY occurred_at DESC, sequence_no DESC
-                       ) AS rn
-                FROM position_events
-                WHERE position_id IN ({placeholders})
-                  AND (
-                      event_type IN ({event_placeholders})
-                      OR {payload_predicate}
-                  )
+        rows = []
+        for trade_id in dict.fromkeys(str(trade_id or "") for trade_id in trade_ids):
+            if not trade_id:
+                continue
+            rows.extend(
+                conn.execute(
+                    f"""
+                    SELECT position_id AS trade_key,
+                           event_type,
+                           payload_json AS payload,
+                           occurred_at
+                      FROM position_events
+                     WHERE position_id = ?
+                       AND event_type IN ({event_placeholders})
+                     ORDER BY sequence_no DESC
+                     LIMIT ?
+                    """,
+                    (trade_id, *shared_params),
+                ).fetchall()
             )
-            SELECT trade_key, event_type, payload, occurred_at
-            FROM ranked
-            WHERE rn <= ?
-            ORDER BY occurred_at DESC, sequence_no DESC
-            """,
-            params,
-        ).fetchall()
     else:
         logger.warning("position_events table missing expected columns"); return {}
     hints: dict[str, dict] = {}
@@ -12164,29 +12184,26 @@ def _hydrate_unbounded_day0_hints(
     missing = [trade_id for trade_id in trade_ids if not hints.get(trade_id, {}).get("day0_entered_at")]
     if not missing:
         return
-    placeholders = ", ".join("?" for _ in missing)
+    rows = []
     try:
-        rows = conn.execute(
-            f"""
-            WITH ranked AS (
+        for trade_id in dict.fromkeys(str(trade_id or "") for trade_id in missing):
+            if not trade_id:
+                continue
+            row = conn.execute(
+                """
                 SELECT position_id,
                        payload_json,
-                       occurred_at,
-                       sequence_no,
-                       ROW_NUMBER() OVER (
-                           PARTITION BY position_id
-                           ORDER BY occurred_at DESC, sequence_no DESC
-                       ) AS rn
+                       occurred_at
                   FROM position_events
-                 WHERE position_id IN ({placeholders})
+                 WHERE position_id = ?
                    AND event_type = 'DAY0_WINDOW_ENTERED'
-            )
-            SELECT position_id, payload_json, occurred_at
-              FROM ranked
-             WHERE rn = 1
-            """,
-            tuple(missing),
-        ).fetchall()
+                 ORDER BY sequence_no DESC
+                 LIMIT 1
+                """,
+                (trade_id,),
+            ).fetchone()
+            if row is not None:
+                rows.append(row)
     except sqlite3.Error:
         return
     for row in rows:
@@ -12218,32 +12235,27 @@ def _hydrate_pending_exit_pre_state_hints(
     missing = [trade_id for trade_id in trade_ids if not hints.get(trade_id, {}).get("pre_exit_state")]
     if not missing:
         return
-    placeholders = ", ".join("?" for _ in missing)
+    rows = []
     try:
-        rows = conn.execute(
-            f"""
-            WITH ranked AS (
+        for trade_id in dict.fromkeys(str(trade_id or "") for trade_id in missing):
+            if not trade_id:
+                continue
+            row = conn.execute(
+                """
                 SELECT position_id,
-                       phase_before,
-                       phase_after,
-                       occurred_at,
-                       sequence_no,
-                       ROW_NUMBER() OVER (
-                           PARTITION BY position_id
-                           ORDER BY occurred_at DESC, sequence_no DESC
-                       ) AS rn
-                 FROM position_events
-                 WHERE position_id IN ({placeholders})
+                       phase_before
+                  FROM position_events
+                 WHERE position_id = ?
                    AND phase_after = 'pending_exit'
                    AND COALESCE(phase_before, '') != ''
                    AND phase_before != phase_after
-            )
-            SELECT position_id, phase_before
-              FROM ranked
-             WHERE rn = 1
-            """,
-            tuple(missing),
-        ).fetchall()
+                 ORDER BY sequence_no DESC
+                 LIMIT 1
+                """,
+                (trade_id,),
+            ).fetchone()
+            if row is not None:
+                rows.append(row)
     except sqlite3.Error:
         return
     for row in rows:

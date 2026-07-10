@@ -60,6 +60,8 @@ _TERMINAL_PENDING_LAST_ERROR_PREFIXES = (
     "QKERNEL_ACTUAL_SUBMIT_QUALITY_FLOOR:",
 )
 _RECENT_RECAPTURE_EDGE_REVERSED_REASON = "SUBMIT_ABORTED_EDGE_REVERSED"
+_MISSING_PROCESSING_REPAIR_LOOKBACK_HOURS = 48
+_DAY0_PAUSE_REQUEUE_LOOKBACK_HOURS = 48
 _FamilyNormalizer = Callable[[object, object, object], tuple[str, str, str]]
 
 
@@ -211,13 +213,19 @@ class EventStore:
         Older writer bugs could leave an ``opportunity_events`` row without the
         matching ``opportunity_event_processing`` row. Such events are invisible
         to ``fetch_pending`` forever because processing rows are the mutable
-        claim/retry surface. Repair only decision-trigger event types; market
+        claim/retry surface. Runtime repair is scoped to recent decision events:
+        a full historical scan belongs to explicit maintenance, not every
+        reactor prune cycle. Repair only decision-trigger event types; market
         channel cache events are intentionally ignored work and must not be
         resurrected as reactor candidates.
         """
 
         self._require_world_event_tables()
-        parsed_decision_time = _parse_utc(decision_time).isoformat()
+        parsed_decision_time = _parse_utc(decision_time)
+        parsed_decision_time_iso = parsed_decision_time.isoformat()
+        repair_floor = (
+            parsed_decision_time - timedelta(hours=_MISSING_PROCESSING_REPAIR_LOOKBACK_HOURS)
+        ).isoformat()
         limit = max(1, int(batch_limit))
         placeholders = ",".join("?" for _ in _DECISION_TRIGGER_EVENT_TYPES)
         rows = self.conn.execute(
@@ -232,15 +240,17 @@ class EventStore:
                AND e.available_at <= ?
                AND e.received_at <= ?
                AND (e.expires_at IS NULL OR e.expires_at > ?)
+               AND e.available_at >= ?
              ORDER BY e.available_at DESC
              LIMIT ?
             """,
             (
                 self.consumer_name,
                 *sorted(_DECISION_TRIGGER_EVENT_TYPES),
-                parsed_decision_time,
-                parsed_decision_time,
-                parsed_decision_time,
+                parsed_decision_time_iso,
+                parsed_decision_time_iso,
+                parsed_decision_time_iso,
+                repair_floor,
                 limit,
             ),
         ).fetchall()
@@ -1609,7 +1619,6 @@ class EventStore:
                AND n.created_at <= ?
                AND ({_TERMINAL_NO_VALUE_REFUTATION_SQL})
                AND ({_FORECAST_ONLY_NO_VALUE_REFUTATION_GUARD_SQL})
-             ORDER BY n.created_at DESC
             """,
             (evidence_floor, parsed_decision_time.isoformat()),
         ).fetchall()
@@ -2084,32 +2093,30 @@ class EventStore:
         if not _table_exists(self.conn, "no_trade_regret_events"):
             return 0
         decision_time_utc = _parse_utc(decision_time)
+        recent_floor = (
+            decision_time_utc - timedelta(hours=_DAY0_PAUSE_REQUEUE_LOOKBACK_HOURS)
+        ).isoformat()
         limit = max(1, min(int(batch_limit or 500), 5000))
         rows = self.conn.execute(
             """
-            WITH latest AS (
-                SELECT n.event_id, MAX(n.created_at) AS latest_created_at
-                  FROM no_trade_regret_events n
-                  JOIN opportunity_events e
-                    ON e.event_id = n.event_id
-                 WHERE e.event_type = 'DAY0_EXTREME_UPDATED'
-                 GROUP BY n.event_id
-            )
             SELECT e.event_id,
                    json_extract(e.payload_json, '$.city') AS city,
                    json_extract(e.payload_json, '$.target_date') AS target_date,
                    n.rejection_reason
-              FROM latest l
-              JOIN no_trade_regret_events n
-                ON n.event_id = l.event_id
-               AND n.created_at = l.latest_created_at
+              FROM opportunity_events e
               JOIN opportunity_event_processing p
-                ON p.event_id = l.event_id
-              JOIN opportunity_events e
-                ON e.event_id = l.event_id
-             WHERE p.consumer_name = ?
-               AND p.processing_status = 'processed'
+                ON p.consumer_name = ?
+               AND p.event_id = e.event_id
+              JOIN no_trade_regret_events n
+                ON n.event_id = e.event_id
+             WHERE p.processing_status = 'processed'
                AND e.event_type = 'DAY0_EXTREME_UPDATED'
+               AND e.available_at >= ?
+               AND n.created_at = (
+                   SELECT MAX(n2.created_at)
+                     FROM no_trade_regret_events n2
+                    WHERE n2.event_id = e.event_id
+               )
                AND (
                     n.rejection_reason LIKE '%entries_paused%'
                  OR n.rejection_reason LIKE '%pause_entries%'
@@ -2117,7 +2124,7 @@ class EventStore:
              ORDER BY n.created_at DESC
              LIMIT ?
             """,
-            (self.consumer_name, limit),
+            (self.consumer_name, recent_floor, limit),
         ).fetchall()
 
         recover: list[str] = []
@@ -2171,6 +2178,11 @@ class EventStore:
 
         self._require_world_event_tables()
         decision_time_utc = _parse_utc(decision_time)
+        # A Day0 target older than UTC yesterday cannot still be inside its
+        # local target day in any Zeus market timezone. Keep the final
+        # _strictly_past_in_tz authority below, but avoid re-scanning historical
+        # dead-letter rows every prune cycle.
+        active_target_floor = (decision_time_utc.date() - timedelta(days=1)).isoformat()
         limit = max(1, min(int(batch_limit or 500), 5000))
         rows = self.conn.execute(
             """
@@ -2186,13 +2198,13 @@ class EventStore:
              WHERE p.consumer_name = ?
                AND p.processing_status = 'dead_letter'
                AND e.event_type = 'DAY0_EXTREME_UPDATED'
+               AND json_extract(e.payload_json, '$.target_date') >= ?
                AND d.failure_stage = 'MONEY_PATH_HORIZON_EXPIRED'
                AND d.error_message LIKE '%MARKET_VENUE_CLOSED%'
                AND d.error_message LIKE '%F1 12:00-UTC close%'
-             ORDER BY d.created_at DESC
              LIMIT ?
             """,
-            (self.consumer_name, limit),
+            (self.consumer_name, active_target_floor, limit),
         ).fetchall()
 
         recover: list[str] = []
@@ -2245,6 +2257,10 @@ class EventStore:
 
         self._require_world_event_tables()
         decision_time_utc = _parse_utc(decision_time)
+        # Same conservative Day0 floor as static-close recovery: old historical
+        # dead letters are unrecoverable by local-day law and should not be read
+        # every live prune cycle.
+        active_target_floor = (decision_time_utc.date() - timedelta(days=1)).isoformat()
         limit = max(1, min(int(batch_limit or 500), 5000))
         rows = self.conn.execute(
             """
@@ -2260,13 +2276,13 @@ class EventStore:
              WHERE p.consumer_name = ?
                AND p.processing_status = 'dead_letter'
                AND e.event_type = 'DAY0_EXTREME_UPDATED'
+               AND json_extract(e.payload_json, '$.target_date') >= ?
                AND d.failure_stage = 'MONEY_PATH_HORIZON_EXPIRED'
                AND d.error_message LIKE '%SELECTION_DEADLINE_PAST%'
                AND d.error_message LIKE '%EXECUTABLE_SNAPSHOT_STALE%'
-             ORDER BY d.created_at DESC
              LIMIT ?
             """,
-            (self.consumer_name, limit),
+            (self.consumer_name, active_target_floor, limit),
         ).fetchall()
 
         recover: list[str] = []

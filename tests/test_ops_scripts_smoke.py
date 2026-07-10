@@ -493,6 +493,1337 @@ def test_deploy_live_status_runs(capsys):
     assert "post-trade-capital" in out
 
 
+def test_deploy_live_status_json_reports_restart_gate(capsys):
+    dl = _load("deploy_live_status_json", "deploy_live.py")
+    dl.LIVE_REPO = str(_REPO)
+
+    rc = dl.main(["status", "--json"])
+
+    assert rc == 0
+    data = json.loads(capsys.readouterr().out)
+    assert data["live_repo"] == str(_REPO)
+    assert "branch" in data
+    assert "head" in data
+    assert "push_state" in data
+    assert "dirty_runtime_files" in data
+    assert "restart_gate" in data
+    assert "ok" in data["restart_gate"]
+    assert "blockers" in data["restart_gate"]
+    assert "runtime_status" in data
+    assert data["daemons"]["live-trading"]["label"] == "com.zeus.live-trading"
+    assert data["daemons"]["forecast-live"]["label"] == "com.zeus.forecast-live"
+
+
+def test_deploy_live_status_json_reports_runtime_boot_blocker(monkeypatch, tmp_path, capsys):
+    dl = _load("deploy_live_status_runtime", "deploy_live.py")
+    state = tmp_path / "state"
+    state.mkdir()
+    (state / "status_summary.json").write_text(
+        json.dumps(
+            {
+                "generated_at": "2026-07-09T16:50:18+00:00",
+                "status": "BOOT_BLOCKED",
+                "mode": "live",
+                "live_action_authorized": False,
+                "failure_reason": "LIVE_SIDECAR_BOOT_BLOCKED: forecast-live:git_head_mismatch",
+                "live_boot": {
+                    "ok": False,
+                    "issue": "LIVE_SIDECAR_BOOT_BLOCKED",
+                },
+                "execution_capability": {
+                    "live_action_authorized": False,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(dl, "LIVE_REPO", str(tmp_path))
+    monkeypatch.setattr(dl, "current_branch", lambda: "main")
+    monkeypatch.setattr(dl, "unpushed_state", lambda _branch: (False, "clean"))
+    monkeypatch.setattr(dl, "dirty_runtime_files", lambda: [])
+    monkeypatch.setattr(dl, "head_sha", lambda short=True: "abc1234")
+    monkeypatch.setattr(dl, "daemon_pid_uptime", lambda _label: ("-", "-"))
+
+    rc = dl.main(["status", "--json"])
+
+    assert rc == 0
+    data = json.loads(capsys.readouterr().out)
+    runtime = data["runtime_status"]
+    assert runtime["present"] is True
+    assert runtime["status"] == "BOOT_BLOCKED"
+    assert runtime["live_action_authorized"] is False
+    assert runtime["live_boot"]["issue"] == "LIVE_SIDECAR_BOOT_BLOCKED"
+
+
+def test_deploy_live_status_text_reports_runtime_boot_blocker(monkeypatch, tmp_path, capsys):
+    dl = _load("deploy_live_status_text_runtime", "deploy_live.py")
+    state = tmp_path / "state"
+    state.mkdir()
+    (state / "status_summary.json").write_text(
+        json.dumps(
+            {
+                "generated_at": "2026-07-09T16:50:18+00:00",
+                "status": "BOOT_BLOCKED",
+                "mode": "live",
+                "live_action_authorized": False,
+                "failure_reason": "LIVE_SIDECAR_BOOT_BLOCKED: forecast-live:git_head_mismatch",
+                "live_boot": {
+                    "ok": False,
+                    "issue": "LIVE_SIDECAR_BOOT_BLOCKED",
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(dl, "LIVE_REPO", str(tmp_path))
+    monkeypatch.setattr(dl, "current_branch", lambda: "main")
+    monkeypatch.setattr(dl, "unpushed_state", lambda _branch: (False, "clean"))
+    monkeypatch.setattr(dl, "dirty_runtime_files", lambda: [])
+    monkeypatch.setattr(dl, "head_sha", lambda short=True: "abc1234")
+    monkeypatch.setattr(dl, "daemon_pid_uptime", lambda _label: ("-", "-"))
+
+    rc = dl.main(["status"])
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "dirty runtime surface : (clean)" in out
+    assert "runtime status: BOOT_BLOCKED mode=live live_action_authorized=False" in out
+    assert "runtime boot : LIVE_SIDECAR_BOOT_BLOCKED" in out
+    assert "runtime failure: LIVE_SIDECAR_BOOT_BLOCKED: forecast-live:git_head_mismatch" in out
+
+
+def test_deploy_live_dirty_runtime_files_ignores_readonly_audit_scripts(monkeypatch):
+    dl = _load("deploy_live_dirty_runtime_filter", "deploy_live.py")
+
+    def _fake_git(*args, repo=None):
+        assert args[:3] == ("status", "--porcelain", "--")
+        return dl.subprocess.CompletedProcess(
+            ["git", *args],
+            0,
+            stdout=(
+                "?? scripts/audit_live_probability_reality.py\n"
+                "?? scripts/audit_yes_no_selection_skew.py\n"
+                " M src/main.py\n"
+            ),
+            stderr="",
+        )
+
+    monkeypatch.setattr(dl, "_git", _fake_git)
+
+    assert dl.dirty_runtime_files() == [" M src/main.py"]
+
+
+def _write_yes_no_selection_event(
+    conn: sqlite3.Connection,
+    *,
+    direction: str,
+    yes_optimal_delta_u: float,
+    yes_score: float,
+    no_optimal_delta_u: float,
+    no_score: float,
+    yes_condition_id: str | None = None,
+    yes_q_lcb: float = 0.62,
+    yes_q_point: float | None = None,
+    yes_cost: float = 0.44,
+) -> None:
+    yes_qkernel = {
+        "optimal_delta_u": yes_optimal_delta_u,
+        "delta_u_at_min": yes_optimal_delta_u / 10.0,
+        "robust_trade_score": yes_score,
+        "edge_lcb": yes_optimal_delta_u,
+        "payoff_q_lcb": yes_q_lcb,
+        "cost": yes_cost,
+    }
+    if yes_q_point is not None:
+        yes_qkernel["payoff_q_point"] = yes_q_point
+    yes_candidate = {
+        "direction": "buy_yes",
+        "bin_label": "Will the highest temperature in Paris be 26C?",
+        "qkernel_execution_economics": yes_qkernel,
+    }
+    if yes_condition_id is not None:
+        yes_candidate["condition_id"] = yes_condition_id
+    payload = {
+        "decision_audit": {
+            "city": "Paris",
+            "target_date": "2026-07-09",
+            "direction": direction,
+            "opportunity_book": {
+                "candidates": [
+                    yes_candidate,
+                    {
+                        "direction": "buy_no",
+                        "bin_label": "Will the highest temperature in Paris be 34C?",
+                        "qkernel_execution_economics": {
+                            "optimal_delta_u": no_optimal_delta_u,
+                            "delta_u_at_min": no_optimal_delta_u / 10.0,
+                            "robust_trade_score": no_score,
+                            "edge_lcb": no_optimal_delta_u,
+                            "q_lcb_5pct": 0.71,
+                            "cost": 0.51,
+                        },
+                    },
+                ],
+            },
+        },
+    }
+    conn.execute(
+        """
+        INSERT INTO edli_live_order_events (
+            event_type, created_at, payload_json
+        ) VALUES ('DecisionProofAccepted', ?, ?)
+        """,
+        (datetime.now(timezone.utc).isoformat(), json.dumps(payload)),
+    )
+
+
+def _write_yes_no_execution_chain(
+    conn: sqlite3.Connection,
+    *,
+    final_intent_id: str,
+    direction: str,
+) -> None:
+    now = datetime.now(timezone.utc).isoformat()
+    conn.execute(
+        """
+        INSERT INTO edli_live_order_events (
+            event_type, created_at, payload_json
+        ) VALUES ('SubmitPlanBuilt', ?, ?)
+        """,
+        (
+            now,
+            json.dumps(
+                {
+                    "final_intent_id": final_intent_id,
+                    "direction": direction,
+                    "size": 1.0,
+                }
+            ),
+        ),
+    )
+    conn.execute(
+        """
+        INSERT INTO edli_live_order_events (
+            event_type, created_at, payload_json
+        ) VALUES ('UserTradeObserved', ?, ?)
+        """,
+        (
+            now,
+            json.dumps(
+                {
+                    "final_intent_id": final_intent_id,
+                    "filled_size": 1.0,
+                    "avg_fill_price": 0.64,
+                }
+            ),
+        ),
+    )
+
+
+def _init_yes_no_selection_db(path: Path) -> sqlite3.Connection:
+    conn = sqlite3.connect(path)
+    conn.execute(
+        """
+        CREATE TABLE edli_live_order_events (
+            event_type TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            payload_json TEXT NOT NULL
+        )
+        """
+    )
+    return conn
+
+
+def _init_yes_no_selection_db_with_aggregate_id(path: Path) -> sqlite3.Connection:
+    conn = sqlite3.connect(path)
+    conn.execute(
+        """
+        CREATE TABLE edli_live_order_events (
+            aggregate_id TEXT,
+            event_type TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            payload_json TEXT NOT NULL
+        )
+        """
+    )
+    return conn
+
+
+def _init_yes_no_forecast_db(path: Path) -> sqlite3.Connection:
+    conn = sqlite3.connect(path)
+    conn.execute(
+        """
+        CREATE TABLE market_events (
+            event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            city TEXT,
+            target_date TEXT,
+            temperature_metric TEXT,
+            condition_id TEXT,
+            token_id TEXT,
+            range_label TEXT,
+            range_low REAL,
+            range_high REAL
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE settlement_outcomes (
+            settlement_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            city TEXT,
+            target_date TEXT,
+            temperature_metric TEXT,
+            winning_bin TEXT,
+            settlement_value REAL,
+            settlement_unit TEXT,
+            settled_at TEXT,
+            authority TEXT
+        )
+        """
+    )
+    return conn
+
+
+def test_audit_yes_no_selection_skew_does_not_flag_score_only_yes(tmp_path):
+    audit = _load("audit_yes_no_selection_score_only", "audit_yes_no_selection_skew.py")
+    trade_db = tmp_path / "zeus_trades.db"
+    conn = _init_yes_no_selection_db(trade_db)
+    _write_yes_no_selection_event(
+        conn,
+        direction="buy_no",
+        yes_optimal_delta_u=0.001,
+        yes_score=0.50,
+        no_optimal_delta_u=0.02,
+        no_score=0.10,
+    )
+    conn.commit()
+    conn.close()
+
+    report = audit.audit_selection_skew(trade_db=trade_db, days=1.0)
+
+    assert report["verdict"] == "NO_SELECTED_YES_BUT_NO_OBJECTIVE_SELECTOR_ANOMALY"
+    summary = report["summary"]
+    assert summary["selected_buy_no"] == 1
+    assert summary["selected_buy_yes"] == 0
+    assert summary["selected_no_top_yes_objective_better"] == 0
+    assert summary["selected_no_top_yes_score_better_only"] == 1
+
+
+def test_audit_yes_no_selection_skew_flags_objective_metric_false_positive_when_roi_not_useful(tmp_path):
+    audit = _load("audit_yes_no_selection_objective", "audit_yes_no_selection_skew.py")
+    trade_db = tmp_path / "zeus_trades.db"
+    conn = _init_yes_no_selection_db(trade_db)
+    _write_yes_no_selection_event(
+        conn,
+        direction="buy_no",
+        yes_optimal_delta_u=0.04,
+        yes_score=0.20,
+        no_optimal_delta_u=0.01,
+        no_score=0.10,
+    )
+    conn.commit()
+    conn.close()
+
+    report = audit.audit_selection_skew(trade_db=trade_db, days=1.0)
+
+    assert report["verdict"] == "OBJECTIVE_METRIC_FALSE_POSITIVE_NO_ROI_SELECTOR_ANOMALY"
+    summary = report["summary"]
+    assert summary["selected_buy_no"] == 1
+    assert summary["selected_no_top_yes_objective_better"] == 1
+    assert report["objective_better_samples"][0]["top_yes"]["optimal_delta_u"] == 0.04
+    assert report["objective_better_samples"][0]["top_yes"]["roi_frontier"]["roi_frontier_useful"] is False
+
+
+def test_audit_yes_no_selection_skew_attributes_user_trade_direction(tmp_path):
+    audit = _load("audit_yes_no_selection_execution_chain", "audit_yes_no_selection_skew.py")
+    trade_db = tmp_path / "zeus_trades.db"
+    conn = _init_yes_no_selection_db(trade_db)
+    _write_yes_no_selection_event(
+        conn,
+        direction="buy_no",
+        yes_optimal_delta_u=0.001,
+        yes_score=0.10,
+        no_optimal_delta_u=0.02,
+        no_score=0.20,
+    )
+    _write_yes_no_execution_chain(
+        conn,
+        final_intent_id="intent-no-1",
+        direction="buy_no",
+    )
+    conn.commit()
+    conn.close()
+
+    report = audit.audit_selection_skew(trade_db=trade_db, days=1.0)
+
+    assert report["execution_chain"]["SubmitPlanBuilt"]["buy_no"] == 1
+    assert report["execution_chain"]["UserTradeObserved"]["buy_no"] == 1
+    assert report["execution_chain"]["UserTradeObserved"]["buy_yes"] == 0
+    assert report["execution_chain"]["UserTradeObserved"]["unknown"] == 0
+    day_counts = next(iter(report["by_day"].values()))
+    assert day_counts["selected_buy_no"] == 1
+    assert day_counts["yes_candidates"] == 1
+
+
+def test_audit_yes_no_selection_skew_reports_confirmed_yes_trade_quality(tmp_path):
+    audit = _load("audit_yes_no_selection_confirmed_yes", "audit_yes_no_selection_skew.py")
+    trade_db = tmp_path / "zeus_trades.db"
+    conn = _init_yes_no_selection_db_with_aggregate_id(trade_db)
+    now = datetime.now(timezone.utc).isoformat()
+    aggregate_id = "agg-yes-1"
+    final_intent_id = "intent-yes-1"
+    conn.execute(
+        """
+        INSERT INTO edli_live_order_events (
+            aggregate_id, event_type, created_at, payload_json
+        ) VALUES (?, 'SubmitPlanBuilt', ?, ?)
+        """,
+        (
+            aggregate_id,
+            now,
+            json.dumps(
+                {
+                    "final_intent_id": final_intent_id,
+                    "direction": "buy_yes",
+                    "size": 2.0,
+                }
+            ),
+        ),
+    )
+    conn.execute(
+        """
+        INSERT INTO edli_live_order_events (
+            aggregate_id, event_type, created_at, payload_json
+        ) VALUES (?, 'PreSubmitRevalidated', ?, ?)
+        """,
+        (
+            aggregate_id,
+            now,
+            json.dumps(
+                {
+                    "final_intent_id": final_intent_id,
+                    "direction": "buy_yes",
+                    "condition_id": "0xyes",
+                    "strategy_key": "center_buy",
+                    "q_live": 0.42,
+                    "q_lcb_5pct": 0.31,
+                    "limit_price": 0.22,
+                    "qkernel_execution_economics": {
+                        "selection_guard_basis": "SELECTION_BETA_95",
+                        "q_lcb_guard_basis": "OOF_WILSON_95",
+                    },
+                }
+            ),
+        ),
+    )
+    conn.execute(
+        """
+        INSERT INTO edli_live_order_events (
+            aggregate_id, event_type, created_at, payload_json
+        ) VALUES (?, 'UserTradeObserved', ?, ?)
+        """,
+        (
+            aggregate_id,
+            now,
+            json.dumps(
+                {
+                    "final_intent_id": final_intent_id,
+                    "trade_status": "CONFIRMED",
+                    "fill_authority_state": "FILL_CONFIRMED",
+                    "trade_id": "trade-1",
+                    "fill_price": 0.21,
+                    "filled_size": 2.0,
+                }
+            ),
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+    report = audit.audit_selection_skew(trade_db=trade_db, days=1.0)
+
+    assert report["execution_chain"]["UserTradeObserved"]["buy_yes"] == 1
+    assert report["confirmed_user_trade_chain"]["buy_yes"] == 1
+    assert report["confirmed_yes_trade_quality"]["count"] == 1
+    assert report["confirmed_yes_trade_quality"]["q_lcb_ge_025"] == 1
+    assert report["confirmed_yes_trade_quality"]["samples"][0]["q_lcb"] == 0.31
+    assert report["confirmed_yes_trade_quality"]["samples"][0]["fill_price"] == 0.21
+
+
+def test_audit_yes_no_selection_skew_flags_day0_boundary_high_q_yes_fill_loss(tmp_path):
+    audit = _load("audit_yes_no_selection_day0_boundary_fill_loss", "audit_yes_no_selection_skew.py")
+    trade_db = tmp_path / "zeus_trades.db"
+    conn = _init_yes_no_selection_db_with_aggregate_id(trade_db)
+    conn.executescript(
+        """
+        CREATE TABLE venue_order_facts (
+            venue_order_id TEXT,
+            state TEXT,
+            matched_size TEXT,
+            remaining_size TEXT,
+            observed_at TEXT,
+            ingested_at TEXT
+        );
+        CREATE TABLE venue_commands (
+            venue_order_id TEXT,
+            state TEXT,
+            updated_at TEXT,
+            created_at TEXT
+        );
+        CREATE TABLE position_events (
+            position_id TEXT,
+            event_type TEXT,
+            payload_json TEXT,
+            sequence_no INTEGER,
+            order_id TEXT
+        );
+        CREATE TABLE position_current (
+            position_id TEXT,
+            phase TEXT,
+            realized_pnl_usd REAL
+        );
+        """
+    )
+    now = datetime.now(timezone.utc).isoformat()
+    aggregate_id = "agg-day0-boundary-yes"
+    final_intent_id = "intent-day0-boundary-yes"
+    venue_order_id = "0xday0boundary"
+    conn.execute(
+        """
+        INSERT INTO edli_live_order_events (
+            aggregate_id, event_type, created_at, payload_json
+        ) VALUES (?, 'DecisionProofAccepted', ?, ?)
+        """,
+        (
+            aggregate_id,
+            now,
+            json.dumps(
+                {
+                    "decision_audit": {
+                        "city": "Wellington",
+                        "target_date": "2026-07-02",
+                        "direction": "buy_yes",
+                        "opportunity_book": {"candidates": []},
+                    }
+                }
+            ),
+        ),
+    )
+    conn.execute(
+        """
+        INSERT INTO edli_live_order_events (
+            aggregate_id, event_type, created_at, payload_json
+        ) VALUES (?, 'SubmitPlanBuilt', ?, ?)
+        """,
+        (
+            aggregate_id,
+            now,
+            json.dumps(
+                {
+                    "final_intent_id": final_intent_id,
+                    "direction": "buy_yes",
+                }
+            ),
+        ),
+    )
+    conn.execute(
+        """
+        INSERT INTO edli_live_order_events (
+            aggregate_id, event_type, created_at, payload_json
+        ) VALUES (?, 'PreSubmitRevalidated', ?, ?)
+        """,
+        (
+            aggregate_id,
+            now,
+            json.dumps(
+                {
+                    "final_intent_id": final_intent_id,
+                    "direction": "buy_yes",
+                    "city": "Wellington",
+                    "target_date": "2026-07-02",
+                    "bin_label": "Will the highest temperature in Wellington be 12C on July 2?",
+                    "strategy_key": "day0_nowcast_entry",
+                    "q_live": 0.9602,
+                    "q_lcb_5pct": 0.9602,
+                    "q_lcb_calibration_source": "FORECAST_BOOTSTRAP",
+                    "limit_price": 0.50,
+                    "size": 15.0,
+                    "qkernel_execution_economics": {
+                        "q_lcb_guard_basis": "DAY0_OBSERVED_BOUNDARY",
+                        "selection_guard_basis": "DAY0_OBSERVED_BOUNDARY",
+                        "selection_guard_n": 1,
+                    },
+                }
+            ),
+        ),
+    )
+    conn.execute(
+        """
+        INSERT INTO edli_live_order_events (
+            aggregate_id, event_type, created_at, payload_json
+        ) VALUES (?, 'VenueSubmitAcknowledged', ?, ?)
+        """,
+        (
+            aggregate_id,
+            now,
+            json.dumps({"venue_order_id": venue_order_id}),
+        ),
+    )
+    conn.execute(
+        "INSERT INTO venue_order_facts VALUES (?, 'MATCHED', '15', '0', ?, ?)",
+        (venue_order_id, now, now),
+    )
+    conn.execute(
+        "INSERT INTO venue_commands VALUES (?, 'FILLED', ?, ?)",
+        (venue_order_id, now, now),
+    )
+    conn.execute(
+        "INSERT INTO position_current VALUES ('pos-yes-loss', 'settled', -7.50)"
+    )
+    conn.execute(
+        """
+        INSERT INTO position_events VALUES (
+            'pos-yes-loss', 'ENTRY_ORDER_FILLED', '{}', 1, ?
+        )
+        """,
+        (venue_order_id,),
+    )
+    conn.execute(
+        """
+        INSERT INTO position_events VALUES (
+            'pos-yes-loss', 'SETTLED', ?, 2, ?
+        )
+        """,
+        (json.dumps({"won": False, "pnl": -7.50}), venue_order_id),
+    )
+    conn.commit()
+    conn.close()
+
+    report = audit.audit_selection_skew(trade_db=trade_db, days=1.0)
+
+    assert report["verdict"] == "HIGH_Q_YES_DAY0_OBSERVED_BOUNDARY_FILLED_SETTLED_LOSS"
+    chain = report["high_quality_yes_chain"]
+    assert chain["pre_submit_q_lcb_ge_025"] == 1
+    assert chain["venue_matched_or_filled"] == 1
+    assert chain["settled_losses"] == 1
+    assert chain["user_trade_observed_confirmed"] == 0
+    assert chain["day0_observed_boundary_pre_submit"] == 1
+    assert chain["day0_observed_boundary_venue_filled"] == 1
+    assert chain["day0_observed_boundary_settled_losses"] == 1
+    assert chain["q_lcb_guard_basis_counts"] == {"DAY0_OBSERVED_BOUNDARY": 1}
+    assert chain["selection_guard_n_buckets"] == {"<=1": 1}
+    sample = chain["samples"][0]
+    assert sample["day0_observed_boundary_guard"] is True
+    assert sample["position_entry_filled"] is True
+    assert sample["settled_won"] is False
+
+
+def test_audit_yes_no_selection_skew_prefers_qkernel_payoff_lcb():
+    audit = _load("audit_yes_no_selection_qkernel_lcb", "audit_yes_no_selection_skew.py")
+
+    value = audit._metric(
+        {
+            "q_lcb_5pct": 0.40,
+            "qkernel_execution_economics": {
+                "payoff_q_lcb": 0.17,
+            },
+        },
+        "q_lcb",
+    )
+
+    assert value == 0.17
+
+
+def test_audit_yes_no_selection_skew_joins_yes_candidate_to_settlement(tmp_path):
+    audit = _load("audit_yes_no_selection_settlement", "audit_yes_no_selection_skew.py")
+    trade_db = tmp_path / "zeus_trades.db"
+    forecast_db = tmp_path / "zeus-forecasts.db"
+    condition_id = "0xparis26"
+    trade = _init_yes_no_selection_db(trade_db)
+    _write_yes_no_selection_event(
+        trade,
+        direction="buy_no",
+        yes_optimal_delta_u=0.02,
+        yes_score=0.20,
+        no_optimal_delta_u=0.03,
+        no_score=0.30,
+        yes_condition_id=condition_id,
+        yes_q_lcb=0.22,
+        yes_q_point=0.80,
+        yes_cost=0.21,
+    )
+    trade.commit()
+    trade.close()
+    forecasts = _init_yes_no_forecast_db(forecast_db)
+    forecasts.execute(
+        """
+        INSERT INTO market_events (
+            city, target_date, temperature_metric, condition_id, token_id,
+            range_label, range_low, range_high
+        ) VALUES (
+            'Paris', '2026-07-09', 'high', ?, 'yes-token-26',
+            'Will the highest temperature in Paris be 26C?', 26, 26
+        )
+        """,
+        (condition_id,),
+    )
+    forecasts.execute(
+        """
+        INSERT INTO settlement_outcomes (
+            city, target_date, temperature_metric, winning_bin,
+            settlement_value, settlement_unit, settled_at, authority
+        ) VALUES (
+            'Paris', '2026-07-09', 'high', '26C',
+            26, 'C', '2026-07-10T10:00:00+00:00', 'VERIFIED'
+        )
+        """
+    )
+    forecasts.commit()
+    forecasts.close()
+
+    report = audit.audit_selection_skew(
+        trade_db=trade_db,
+        forecast_db=forecast_db,
+        days=1.0,
+    )
+
+    outcome = report["yes_settlement_outcome"]
+    assert outcome["with_bin_outcome"] == 1
+    assert outcome["actual_yes_wins"] == 1
+    assert outcome["actual_yes_win_rate"] == 1.0
+    assert outcome["by_q_lcb_bucket"]["[0.20,0.25)"] == {
+        "n": 1,
+        "wins": 1,
+        "win_rate": 1.0,
+    }
+    assert outcome["unique_conditions"]["by_q_lcb_bucket"]["[0.20,0.25)"] == {
+        "n": 1,
+        "wins": 1,
+        "win_rate": 1.0,
+    }
+    sample = outcome["actual_win_point_ev_positive_samples"][0]
+    assert sample["label"] == "Will the highest temperature in Paris be 26C?"
+    assert sample["settlement_value"] == 26
+
+
+def _init_live_probability_reality_trade_db(path: Path) -> sqlite3.Connection:
+    conn = sqlite3.connect(path)
+    conn.execute(
+        """
+        CREATE TABLE position_current (
+            position_id TEXT PRIMARY KEY,
+            phase TEXT,
+            strategy_key TEXT,
+            direction TEXT,
+            city TEXT,
+            target_date TEXT,
+            temperature_metric TEXT,
+            bin_label TEXT,
+            p_posterior REAL,
+            entry_price REAL,
+            cost_basis_usd REAL,
+            shares REAL,
+            chain_shares REAL,
+            chain_state TEXT,
+            order_status TEXT,
+            realized_pnl_usd REAL,
+            settled_at TEXT,
+            last_monitor_prob REAL,
+            last_monitor_market_price REAL,
+            last_monitor_prob_is_fresh INTEGER,
+            last_monitor_market_price_is_fresh INTEGER,
+            updated_at TEXT,
+            exit_reason TEXT
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE outcome_fact (
+            position_id TEXT PRIMARY KEY,
+            strategy_key TEXT,
+            entered_at TEXT,
+            exited_at TEXT,
+            settled_at TEXT,
+            exit_reason TEXT,
+            admin_exit_reason TEXT,
+            decision_snapshot_id TEXT,
+            pnl REAL,
+            outcome INTEGER,
+            hold_duration_hours REAL,
+            monitor_count INTEGER,
+            chain_corrections_count INTEGER
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE position_events (
+            event_id TEXT PRIMARY KEY,
+            position_id TEXT NOT NULL,
+            event_version INTEGER NOT NULL DEFAULT 1,
+            sequence_no INTEGER NOT NULL,
+            event_type TEXT NOT NULL,
+            occurred_at TEXT NOT NULL,
+            phase_before TEXT,
+            phase_after TEXT,
+            strategy_key TEXT NOT NULL,
+            decision_id TEXT,
+            snapshot_id TEXT,
+            order_id TEXT,
+            command_id TEXT,
+            caused_by TEXT,
+            idempotency_key TEXT,
+            venue_status TEXT,
+            source_module TEXT NOT NULL,
+            env TEXT NOT NULL,
+            payload_json TEXT NOT NULL
+        )
+        """
+    )
+    return conn
+
+
+def _init_live_probability_reality_world_db(path: Path) -> sqlite3.Connection:
+    conn = sqlite3.connect(path)
+    conn.execute(
+        """
+        CREATE TABLE settlement_attribution (
+            direction TEXT,
+            category TEXT,
+            won INTEGER,
+            q_live REAL,
+            q_lcb_5pct REAL,
+            fresh_q_supports_position INTEGER
+        )
+        """
+    )
+    return conn
+
+
+def test_audit_live_probability_reality_flags_miss_and_zero_monitor(tmp_path):
+    audit = _load("audit_live_probability_reality_smoke", "audit_live_probability_reality.py")
+    trade_db = tmp_path / "zeus_trades.db"
+    world_db = tmp_path / "zeus-world.db"
+    trade = _init_live_probability_reality_trade_db(trade_db)
+    now = datetime.now(timezone.utc).isoformat()
+    trade.execute(
+        """
+        INSERT INTO position_current (
+            position_id, phase, strategy_key, direction, city, target_date,
+            temperature_metric, bin_label, p_posterior, entry_price,
+            cost_basis_usd, shares, chain_shares, chain_state, order_status,
+            realized_pnl_usd, settled_at, last_monitor_prob,
+            last_monitor_market_price, last_monitor_prob_is_fresh,
+            last_monitor_market_price_is_fresh, updated_at, exit_reason
+        ) VALUES (
+            'pos-miss', 'settled', 'forecast_qkernel_entry', 'buy_no',
+            'Wuhan', '2026-07-09', 'high', '35C', 0.86, 0.64,
+            6.4, 10.0, 10.0, 'synced', 'filled', -6.4, ?,
+            NULL, NULL, NULL, NULL, ?, NULL
+        )
+        """,
+        (now, now),
+    )
+    trade.execute(
+        """
+        INSERT INTO outcome_fact (
+            position_id, strategy_key, entered_at, exited_at, settled_at,
+            exit_reason, admin_exit_reason, decision_snapshot_id, pnl, outcome,
+            hold_duration_hours, monitor_count, chain_corrections_count
+        ) VALUES (
+            'pos-miss', 'forecast_qkernel_entry', ?, NULL, ?, 'SETTLEMENT',
+            NULL, 'snap-1', -6.4, 0, 10.0, 0, 0
+        )
+        """,
+        (now, now),
+    )
+    trade.commit()
+    trade.close()
+    world = _init_live_probability_reality_world_db(world_db)
+    world.execute(
+        """
+        INSERT INTO settlement_attribution (
+            direction, category, won, q_live, q_lcb_5pct, fresh_q_supports_position
+        ) VALUES ('buy_no', 'MISCALIBRATED', 0, 0.86, 0.81, 0)
+        """
+    )
+    world.commit()
+    world.close()
+
+    report = audit.audit_live_probability_reality(
+        trade_db=trade_db,
+        world_db=world_db,
+        days=1.0,
+    )
+
+    assert report["verdict"] == "PROBABILITY_REALITY_AND_ACTUAL_MONITOR_ABSENCE_EVIDENCE"
+    assert report["settled_summary"]["with_outcome_fact"] == 1
+    assert report["settled_summary"]["wins"] == 0
+    assert report["settled_summary"]["actual_monitor_zero"] == 1
+    assert report["settled_summary"]["outcome_monitor_zero"] == 1
+    assert report["by_declared_probability_bin"]["[0.85,0.90)"]["win_rate"] == 0.0
+    assert report["settlement_attribution"]["rows"] == 1
+
+
+def test_audit_live_probability_reality_distinguishes_monitor_projection_gap(tmp_path):
+    audit = _load("audit_live_probability_reality_projection_gap", "audit_live_probability_reality.py")
+    trade_db = tmp_path / "zeus_trades.db"
+    world_db = tmp_path / "zeus-world.db"
+    trade = _init_live_probability_reality_trade_db(trade_db)
+    now = datetime.now(timezone.utc).isoformat()
+    trade.execute(
+        """
+        INSERT INTO position_current (
+            position_id, phase, strategy_key, direction, city, target_date,
+            temperature_metric, bin_label, p_posterior, entry_price,
+            cost_basis_usd, shares, chain_shares, chain_state, order_status,
+            realized_pnl_usd, settled_at, last_monitor_prob,
+            last_monitor_market_price, last_monitor_prob_is_fresh,
+            last_monitor_market_price_is_fresh, updated_at, exit_reason
+        ) VALUES (
+            'pos-gap', 'settled', 'forecast_qkernel_entry', 'buy_no',
+            'Wuhan', '2026-07-09', 'high', '35C', 0.86, 0.64,
+            6.4, 10.0, 10.0, 'synced', 'filled', -6.4, ?,
+            NULL, NULL, NULL, NULL, ?, NULL
+        )
+        """,
+        (now, now),
+    )
+    trade.execute(
+        """
+        INSERT INTO outcome_fact (
+            position_id, strategy_key, entered_at, exited_at, settled_at,
+            exit_reason, admin_exit_reason, decision_snapshot_id, pnl, outcome,
+            hold_duration_hours, monitor_count, chain_corrections_count
+        ) VALUES (
+            'pos-gap', 'forecast_qkernel_entry', ?, NULL, ?, 'SETTLEMENT',
+            NULL, 'snap-1', -6.4, 0, 10.0, 0, 0
+        )
+        """,
+        (now, now),
+    )
+    trade.execute(
+        """
+        INSERT INTO position_events (
+            event_id, position_id, event_version, sequence_no, event_type,
+            occurred_at, phase_before, phase_after, strategy_key, source_module,
+            env, payload_json
+        ) VALUES (
+            'evt-monitor-gap', 'pos-gap', 1, 1, 'MONITOR_REFRESHED',
+            ?, 'active', 'active', 'forecast_qkernel_entry',
+            'test.monitor', 'test', '{}'
+        )
+        """,
+        (now,),
+    )
+    trade.commit()
+    trade.close()
+    world = _init_live_probability_reality_world_db(world_db)
+    world.commit()
+    world.close()
+
+    report = audit.audit_live_probability_reality(
+        trade_db=trade_db,
+        world_db=world_db,
+        days=1.0,
+    )
+
+    assert report["verdict"] == "PROBABILITY_REALITY_AND_MONITOR_PROJECTION_GAP_EVIDENCE"
+    assert report["settled_summary"]["actual_monitor_zero"] == 0
+    assert report["settled_summary"]["outcome_monitor_zero"] == 1
+    assert report["settled_summary"]["monitor_projection_gap"] == 1
+    assert report["settled_summary"]["avg_actual_monitor_events"] == 1.0
+
+
+def test_audit_live_probability_reality_reports_open_monitor_probability_jumps(tmp_path):
+    audit = _load("audit_live_probability_reality_jumps", "audit_live_probability_reality.py")
+    trade_db = tmp_path / "zeus_trades.db"
+    world_db = tmp_path / "zeus-world.db"
+    trade = _init_live_probability_reality_trade_db(trade_db)
+    now = datetime.now(timezone.utc)
+    trade.execute(
+        """
+        INSERT INTO position_current (
+            position_id, phase, strategy_key, direction, city, target_date,
+            temperature_metric, bin_label, p_posterior, entry_price,
+            cost_basis_usd, shares, chain_shares, chain_state, order_status,
+            realized_pnl_usd, settled_at, last_monitor_prob,
+            last_monitor_market_price, last_monitor_prob_is_fresh,
+            last_monitor_market_price_is_fresh, updated_at, exit_reason
+        ) VALUES (
+            'pos-jump', 'day0_window', 'forecast_qkernel_entry', 'buy_no',
+            'Taipei', '2026-07-09', 'high', '35C', 0.80, 0.64,
+            2.432, 3.8, 3.8, 'synced', 'partial', NULL, NULL,
+            0.9461, 0.36, 1, 1, ?, NULL
+        )
+        """,
+        (now.isoformat(),),
+    )
+    monitor_rows = [
+        (
+            "evt-jump-1",
+            "pos-jump",
+            1,
+            "MONITOR_REFRESHED",
+            (now - timedelta(minutes=2)).isoformat(),
+            json.dumps(
+                {
+                    "last_monitor_prob": 0.7625,
+                    "last_monitor_prob_is_fresh": True,
+                    "last_monitor_market_price": 0.35,
+                    "last_monitor_market_price_is_fresh": True,
+                    "selected_method": "day0_high_hard_fact_overlay",
+                    "day0_monitor_probability_receipt": {
+                        "temporal_context": {
+                            "current_utc_timestamp": "2026-07-09 04:58:00+00:00",
+                            "post_peak_confidence": 0.7778,
+                        },
+                        "observation": {
+                            "observation_time": "2026-07-09T04:00:00+00:00",
+                        },
+                        "remaining_window": {
+                            "forecast_source_validations": [
+                                "forecast_source_cycle_time:2026-07-08T18:00:00+00:00",
+                            ],
+                        },
+                    },
+                }
+            ),
+        ),
+        (
+            "evt-jump-2",
+            "pos-jump",
+            2,
+            "MONITOR_REFRESHED",
+            now.isoformat(),
+            json.dumps(
+                {
+                    "last_monitor_prob": 0.9461,
+                    "last_monitor_prob_is_fresh": True,
+                    "last_monitor_market_price": 0.36,
+                    "last_monitor_market_price_is_fresh": True,
+                    "selected_method": "day0_high_hard_fact_overlay",
+                    "day0_monitor_probability_receipt": {
+                        "temporal_context": {
+                            "current_utc_timestamp": "2026-07-09 05:00:00+00:00",
+                            "post_peak_confidence": 0.9206,
+                        },
+                        "observation": {
+                            "observation_time": "2026-07-09T04:00:00+00:00",
+                        },
+                        "remaining_window": {
+                            "forecast_source_validations": [
+                                "forecast_source_cycle_time:2026-07-08T18:00:00+00:00",
+                            ],
+                        },
+                    },
+                    "exit_decision_reason": "",
+                }
+            ),
+        ),
+    ]
+    trade.executemany(
+        """
+        INSERT INTO position_events (
+            event_id, position_id, event_version, sequence_no, event_type,
+            occurred_at, phase_before, phase_after, strategy_key, source_module,
+            env, payload_json
+        ) VALUES (?, ?, 1, ?, ?, ?, 'day0_window', 'day0_window',
+                  'forecast_qkernel_entry', 'test.monitor', 'test', ?)
+        """,
+        monitor_rows,
+    )
+    trade.commit()
+    trade.close()
+    world = _init_live_probability_reality_world_db(world_db)
+    world.execute(
+        """
+        CREATE TABLE diurnal_peak_prob (
+            city TEXT,
+            month INTEGER,
+            hour INTEGER,
+            p_high_set REAL
+        )
+        """
+    )
+    world.executemany(
+        """
+        INSERT INTO diurnal_peak_prob (city, month, hour, p_high_set)
+        VALUES ('Taipei', 7, ?, ?)
+        """,
+        [(12, 0.7778), (13, 0.9206)],
+    )
+    world.commit()
+    world.close()
+
+    report = audit.audit_live_probability_reality(
+        trade_db=trade_db,
+        world_db=world_db,
+        days=1.0,
+    )
+
+    assert report["open_summary"]["monitor_probability_jump_count"] == 1
+    sample = report["open_summary"]["monitor_probability_jump_samples"][0]
+    assert sample["position_id"] == "pos-jump"
+    assert sample["city"] == "Taipei"
+    assert sample["previous_prob"] == pytest.approx(0.7625)
+    assert sample["prob"] == pytest.approx(0.9461)
+    assert sample["delta_prob"] == pytest.approx(0.1836)
+    assert sample["delta_market_price"] == pytest.approx(0.01)
+    assert sample["previous_current_source_local_hour"] == pytest.approx(12.9667, abs=0.0001)
+    assert sample["previous_current_source_post_peak_confidence"] == pytest.approx(0.9158, abs=0.0001)
+    assert sample["previous_receipt_current_source_post_peak_delta"] == pytest.approx(-0.1380, abs=0.0001)
+    assert sample["jump_driver"] == "current_source_semantic_mismatch"
+    assert report["open_summary"]["monitor_probability_jump_driver_counts"] == {
+        "current_source_semantic_mismatch": 1,
+    }
+
+
+def test_audit_live_probability_reality_flags_unconditioned_daily_extrema_jump(tmp_path):
+    audit = _load("audit_live_probability_reality_daily_extrema_jump", "audit_live_probability_reality.py")
+    trade_db = tmp_path / "zeus_trades.db"
+    world_db = tmp_path / "zeus-world.db"
+    trade = _init_live_probability_reality_trade_db(trade_db)
+    now = datetime.now(timezone.utc)
+    trade.execute(
+        """
+        INSERT INTO position_current (
+            position_id, phase, strategy_key, direction, city, target_date,
+            temperature_metric, bin_label, p_posterior, entry_price,
+            cost_basis_usd, shares, chain_shares, chain_state, order_status,
+            realized_pnl_usd, settled_at, last_monitor_prob,
+            last_monitor_market_price, last_monitor_prob_is_fresh,
+            last_monitor_market_price_is_fresh, updated_at, exit_reason
+        ) VALUES (
+            'pos-daily-extrema', 'day0_window', 'forecast_qkernel_entry', 'buy_no',
+            'Taipei', '2026-07-09', 'high', '35C', 0.80, 0.64,
+            2.432, 3.8, 3.8, 'synced', 'partial', NULL, NULL,
+            0.9461, 0.36, 1, 1, ?, NULL
+        )
+        """,
+        (now.isoformat(),),
+    )
+    monitor_rows = []
+    for seq, prob in ((1, 0.7625), (2, 0.9461)):
+        monitor_rows.append(
+            (
+                f"evt-daily-extrema-{seq}",
+                "pos-daily-extrema",
+                seq,
+                "MONITOR_REFRESHED",
+                (now - timedelta(minutes=2 - seq)).isoformat(),
+                json.dumps(
+                    {
+                        "last_monitor_prob": prob,
+                        "last_monitor_prob_is_fresh": True,
+                        "last_monitor_market_price": 0.35 + (0.01 if seq == 2 else 0.0),
+                        "last_monitor_market_price_is_fresh": True,
+                        "exit_decision_should_exit": False,
+                        "exit_decision_reason": "",
+                        "selected_method": "day0_observation_remaining_window",
+                        "day0_monitor_probability_receipt": {
+                            "selected_method": "day0_observation_remaining_window",
+                            "temporal_context": {
+                                "current_utc_timestamp": f"2026-07-09 0{3 + seq}:00:00+00:00",
+                                "post_peak_confidence": 0.75 + (0.1 if seq == 2 else 0.0),
+                            },
+                            "observation": {
+                                "observation_time": "2026-07-09T04:00:00+00:00",
+                            },
+                            "remaining_window": {
+                                "source": "day0_raw_model_extrema",
+                                "forecast_source_validations": [
+                                    "forecast_source_id:raw_model_forecasts.single_runs",
+                                    "forecast_source_role:day0_daily_extrema_live",
+                                    "forecast_source_cycle_time:2026-07-09T02:14:47+00:00",
+                                ],
+                            },
+                        },
+                    }
+                ),
+            )
+        )
+    trade.executemany(
+        """
+        INSERT INTO position_events (
+            event_id, position_id, event_version, sequence_no, event_type,
+            occurred_at, phase_before, phase_after, strategy_key, source_module,
+            env, payload_json
+        ) VALUES (?, ?, 1, ?, ?, ?, 'day0_window', 'day0_window',
+                  'forecast_qkernel_entry', 'test.monitor', 'test', ?)
+        """,
+        monitor_rows,
+    )
+    trade.commit()
+    trade.close()
+    world = _init_live_probability_reality_world_db(world_db)
+    world.commit()
+    world.close()
+
+    report = audit.audit_live_probability_reality(
+        trade_db=trade_db,
+        world_db=world_db,
+        days=1.0,
+    )
+
+    assert report["open_summary"]["monitor_probability_jump_count"] == 1
+    assert report["verdict"] == "OPEN_DAY0_UNCONDITIONED_DAILY_EXTREMA_HOLD_EVIDENCE"
+    assert report["open_summary"]["monitor_probability_jump_driver_counts"] == {
+        "unconditioned_daily_extrema_used_as_remaining_window": 1,
+    }
+    sample = report["open_summary"]["monitor_probability_jump_samples"][0]
+    assert sample["remaining_window_source"] == "day0_raw_model_extrema"
+    assert sample["forecast_source_role"] == "day0_daily_extrema_live"
+    assert sample["jump_driver"] == "unconditioned_daily_extrema_used_as_remaining_window"
+    assert report["open_summary"]["unconditioned_daily_extrema_hold_count"] == 1
+    hold_sample = report["open_summary"]["unconditioned_daily_extrema_hold_samples"][0]
+    assert hold_sample["position_id"] == "pos-daily-extrema"
+    assert hold_sample["exit_decision_should_exit"] == 0
+    assert hold_sample["remaining_window_source"] == "day0_raw_model_extrema"
+
+
+def test_audit_live_probability_reality_reports_lost_dust_exit_projection(tmp_path):
+    audit = _load("audit_live_probability_reality_dust_projection", "audit_live_probability_reality.py")
+    trade_db = tmp_path / "zeus_trades.db"
+    world_db = tmp_path / "zeus-world.db"
+    trade = _init_live_probability_reality_trade_db(trade_db)
+    now = datetime.now(timezone.utc).isoformat()
+    trade.execute(
+        """
+        INSERT INTO position_current (
+            position_id, phase, strategy_key, direction, city, target_date,
+            temperature_metric, bin_label, p_posterior, entry_price,
+            cost_basis_usd, shares, chain_shares, chain_state, order_status,
+            realized_pnl_usd, settled_at, last_monitor_prob,
+            last_monitor_market_price, last_monitor_prob_is_fresh,
+            last_monitor_market_price_is_fresh, updated_at, exit_reason
+        ) VALUES (
+            'pos-dust-lost', 'day0_window', 'forecast_qkernel_entry', 'buy_no',
+            'Taipei', '2026-07-09', 'high', '35C', 0.80, 0.64,
+            2.432, 3.8, 3.8, 'synced', 'partial', NULL, NULL,
+            0.9461, 0.36, 1, 1, ?, NULL
+        )
+        """,
+        (now,),
+    )
+    trade.execute(
+        """
+        INSERT INTO position_events (
+            event_id, position_id, event_version, sequence_no, event_type,
+            occurred_at, phase_before, phase_after, strategy_key, source_module,
+            env, payload_json
+        ) VALUES (
+            'evt-dust-lost', 'pos-dust-lost', 1, 1, 'EXIT_ORDER_REJECTED',
+            ?, 'pending_exit', 'pending_exit', 'forecast_qkernel_entry',
+            'test.exit', 'test', ?
+        )
+        """,
+        (
+            now,
+            json.dumps(
+                {
+                    "status": "backoff_exhausted",
+                    "exit_reason": (
+                        "FAMILY_DIRECT_SELL_DOMINATES_HOLD "
+                        "[DUST: executable_snapshot_gate: size 3.8 is below snapshot min_order_size 5]"
+                    ),
+                    "error": "executable_snapshot_gate: size 3.8 is below snapshot min_order_size 5",
+                }
+            ),
+        ),
+    )
+    trade.commit()
+    trade.close()
+    world = _init_live_probability_reality_world_db(world_db)
+    world.commit()
+    world.close()
+
+    report = audit.audit_live_probability_reality(
+        trade_db=trade_db,
+        world_db=world_db,
+        days=1.0,
+    )
+
+    assert report["open_summary"]["dust_exit_blocked_count"] == 1
+    assert report["open_summary"]["dust_exit_projection_lost_count"] == 1
+    sample = report["open_summary"]["dust_exit_projection_lost_samples"][0]
+    assert sample["position_id"] == "pos-dust-lost"
+    assert sample["phase"] == "day0_window"
+    assert sample["order_status"] == "partial"
+    assert "min_order_size" in sample["dust_reject_error"]
+
+
+def test_audit_live_probability_reality_reports_runtime_gate_exit_block(tmp_path):
+    audit = _load("audit_live_probability_reality_runtime_gate", "audit_live_probability_reality.py")
+    trade_db = tmp_path / "zeus_trades.db"
+    world_db = tmp_path / "zeus-world.db"
+    trade = _init_live_probability_reality_trade_db(trade_db)
+    now = datetime.now(timezone.utc).isoformat()
+    trade.execute(
+        """
+        INSERT INTO position_current (
+            position_id, phase, strategy_key, direction, city, target_date,
+            temperature_metric, bin_label, p_posterior, entry_price,
+            cost_basis_usd, shares, chain_shares, chain_state, order_status,
+            realized_pnl_usd, settled_at, last_monitor_prob,
+            last_monitor_market_price, last_monitor_prob_is_fresh,
+            last_monitor_market_price_is_fresh, updated_at, exit_reason
+        ) VALUES (
+            'pos-runtime-gate', 'day0_window', 'forecast_qkernel_entry', 'buy_no',
+            'Taipei', '2026-07-09', 'high', '36C', 0.81, 0.57,
+            6.6, 11.6, 11.6, 'synced', 'partial', NULL, NULL,
+            0.4785, 0.63, 1, 1, ?, 'FAMILY_DIRECT_SELL_DOMINATES_HOLD'
+        )
+        """,
+        (now,),
+    )
+    for seq in (1, 2):
+        trade.execute(
+            """
+            INSERT INTO position_events (
+                event_id, position_id, event_version, sequence_no, event_type,
+                occurred_at, phase_before, phase_after, strategy_key, source_module,
+                env, payload_json
+            ) VALUES (?, 'pos-runtime-gate', 1, ?, 'EXIT_ORDER_REJECTED',
+                      ?, 'pending_exit', 'pending_exit', 'forecast_qkernel_entry',
+                      'test.exit', 'test', ?)
+            """,
+            (
+                f"evt-runtime-gate-{seq}",
+                seq,
+                now,
+                json.dumps(
+                        {
+                            "status": "retry_pending",
+                            "runtime_submit_gate_block": True,
+                            "exit_reason": "FAMILY_DIRECT_SELL_DOMINATES_HOLD",
+                            "error": "structured_runtime_gate_block_without_legacy_text",
+                        }
+                    ),
+                ),
+        )
+    trade.commit()
+    trade.close()
+    world = _init_live_probability_reality_world_db(world_db)
+    world.commit()
+    world.close()
+
+    report = audit.audit_live_probability_reality(
+        trade_db=trade_db,
+        world_db=world_db,
+        days=1.0,
+    )
+
+    assert report["open_summary"]["runtime_gate_exit_block_count"] == 1
+    assert report["verdict"] == "OPEN_RUNTIME_GATE_EXIT_BLOCK_EVIDENCE"
+    sample = report["open_summary"]["runtime_gate_exit_block_samples"][0]
+    assert sample["position_id"] == "pos-runtime-gate"
+    assert sample["runtime_gate_reject_count"] == 2
+    assert sample["latest_runtime_gate_reject_status"] == "retry_pending"
+    assert sample["latest_runtime_gate_error"] == "structured_runtime_gate_block_without_legacy_text"
+
+
 def test_deploy_live_knows_sidecar_labels():
     dl = _load("deploy_live_sidecars", "deploy_live.py")
     assert dl.DAEMONS["substrate-observer"] == "com.zeus.substrate-observer"

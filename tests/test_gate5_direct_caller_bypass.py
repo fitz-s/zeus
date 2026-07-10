@@ -90,8 +90,9 @@ def test_execute_exit_order_calls_gate_runtime(monkeypatch):
     with pytest.raises(Exception):  # will fail somewhere after gate; that's fine
         execute_exit_order(mock_intent)
 
-    assert "settlement_write" in gate_calls, (
-        f"gate_runtime.check('settlement_write') must be called; got calls={gate_calls}"
+    assert gate_calls[:2] == ["reduce_only_exit_submit", "settlement_write"], (
+        "execute_exit_order must gate reduce-only exit submit before settlement_write "
+        f"and before other I/O; got calls={gate_calls}"
     )
 
 
