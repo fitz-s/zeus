@@ -11408,14 +11408,14 @@ def query_token_suppression_tokens(conn: sqlite3.Connection | None) -> list[str]
             ORDER BY created_at ASC, token_id ASC
             """
         ).fetchall()
+        scopes = _chain_only_entry_block_scopes(
+            conn,
+            [str(row["condition_id"] or "") for row in chain_rows],
+        )
         chain_non_global = [
             row
             for row in chain_rows
-            if chain_only_entry_block_scope(
-                conn,
-                condition_id=str(row["condition_id"] or ""),
-            )
-            != "global"
+            if scopes.get(str(row["condition_id"] or ""), "position_only") != "global"
         ]
     out: list[str] = []
     seen: set[str] = set()
@@ -11442,29 +11442,80 @@ def chain_only_entry_block_scope(
     trading.
     """
 
-    if conn is None or not condition_id:
+    condition = str(condition_id or "")
+    if not condition:
         return "position_only"
+    return _chain_only_entry_block_scopes(
+        conn,
+        [condition],
+        decision_time=decision_time,
+    )[condition]
+
+
+def _chain_only_entry_block_scopes(
+    conn: sqlite3.Connection | None,
+    condition_ids: list[str],
+    *,
+    decision_time: datetime | None = None,
+) -> dict[str, str]:
+    conditions = tuple(dict.fromkeys(str(value or "") for value in condition_ids if value))
+    if not conditions:
+        return {}
+    if conn is None:
+        return {condition: "position_only" for condition in conditions}
     if not _table_or_view_exists(conn, "market_topology_state"):
-        return "global"
+        return {condition: "global" for condition in conditions}
+    scopes = {condition: "position_only" for condition in conditions}
+    now_dt = decision_time or datetime.now(timezone.utc)
     try:
-        row = conn.execute(
-            """
-            SELECT market_family, target_local_date, status, authority_status
-            FROM market_topology_state
-            WHERE condition_id = ?
-            ORDER BY recorded_at DESC
-            LIMIT 1
-            """,
-            (str(condition_id),),
-        ).fetchone()
+        batch_size = max(1, conn.getlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER))
+        for offset in range(0, len(conditions), batch_size):
+            batch = conditions[offset:offset + batch_size]
+            placeholders = ", ".join("?" for _ in batch)
+            rows = conn.execute(
+                f"""
+                WITH ranked AS (
+                    SELECT condition_id,
+                           market_family,
+                           target_local_date,
+                           status,
+                           authority_status,
+                           ROW_NUMBER() OVER (
+                               PARTITION BY condition_id
+                               ORDER BY recorded_at DESC
+                           ) AS rn
+                    FROM market_topology_state
+                    WHERE condition_id IN ({placeholders})
+                )
+                SELECT condition_id,
+                       market_family,
+                       target_local_date,
+                       status,
+                       authority_status
+                FROM ranked
+                WHERE rn = 1
+                """,
+                batch,
+            ).fetchall()
+            for row in rows:
+                scopes[str(row["condition_id"])] = _chain_only_scope_from_topology(
+                    row,
+                    decision_time=now_dt,
+                )
     except sqlite3.Error:
         logger.warning(
             "chain-only scope lookup failed; preserving global entry block",
             exc_info=True,
         )
-        return "global"
-    if row is None:
-        return "position_only"
+        return {condition: "global" for condition in conditions}
+    return scopes
+
+
+def _chain_only_scope_from_topology(
+    row: sqlite3.Row,
+    *,
+    decision_time: datetime,
+) -> str:
     if str(row["market_family"] or "") != "weather_temperature":
         return "position_only"
     if str(row["status"] or "") != "CURRENT":
@@ -11476,23 +11527,29 @@ def chain_only_entry_block_scope(
         target_date = datetime.strptime(target_date_raw, "%Y-%m-%d").date()
     except ValueError:
         return "position_only"
-    now_dt = decision_time or datetime.now(timezone.utc)
     # Allow one UTC-day slack for west-of-UTC local trading days. Older weather
     # markets are settlement/redeem review debt, not current entry risk.
-    if target_date < (now_dt.date() - timedelta(days=1)):
+    if target_date < (decision_time.date() - timedelta(days=1)):
         return "position_only"
     return "global"
 
 
-def _with_chain_only_entry_block_scope(
+def _with_chain_only_entry_block_scopes(
     conn: sqlite3.Connection,
-    row: sqlite3.Row,
-) -> dict:
-    out = dict(row)
-    out["entry_block_scope"] = chain_only_entry_block_scope(
+    rows: list[sqlite3.Row],
+) -> list[dict]:
+    scopes = _chain_only_entry_block_scopes(
         conn,
-        condition_id=str(out.get("condition_id") or ""),
+        [str(row["condition_id"] or "") for row in rows],
     )
+    out: list[dict] = []
+    for row in rows:
+        item = dict(row)
+        item["entry_block_scope"] = scopes.get(
+            str(item.get("condition_id") or ""),
+            "position_only",
+        )
+        out.append(item)
     return out
 
 
@@ -11533,7 +11590,7 @@ def query_chain_only_quarantine_rows(conn: sqlite3.Connection | None) -> list[di
             ORDER BY created_at ASC, token_id ASC
             """
         ).fetchall()
-        return [_with_chain_only_entry_block_scope(conn, row) for row in rows]
+        return _with_chain_only_entry_block_scopes(conn, rows)
     rows = conn.execute(
         """
         SELECT ts.token_id, ts.condition_id, ts.created_at, ts.updated_at, ts.evidence_json
@@ -11547,7 +11604,7 @@ def query_chain_only_quarantine_rows(conn: sqlite3.Connection | None) -> list[di
         ORDER BY ts.created_at ASC, ts.token_id ASC
         """
     ).fetchall()
-    return [_with_chain_only_entry_block_scope(conn, row) for row in rows]
+    return _with_chain_only_entry_block_scopes(conn, rows)
 
 
 def expire_control_override(

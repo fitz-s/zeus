@@ -490,6 +490,59 @@ class TestRCJTokenSuppressionHistoryView:
         assert chain_only_entry_block_scope(conn, condition_id=condition_id) == "global"
         assert "current-weather-token" not in query_token_suppression_tokens(conn)
 
+    def test_chain_only_scope_queries_topology_once_per_helper(self):
+        conn = _make_ts_conn()
+        current_condition = "batched-current-weather-condition"
+        _insert_weather_topology(
+            conn,
+            condition_id=current_condition,
+            target_date=(datetime.now(timezone.utc).date() + timedelta(days=1)).isoformat(),
+        )
+        record_token_suppression(
+            conn,
+            token_id="batched-current-weather-token",
+            suppression_reason="chain_only_quarantined",
+            source_module="test_mod",
+            condition_id=current_condition,
+        )
+        missing_conditions = [f"batched-missing-condition-{index}" for index in range(24)]
+        for index, condition_id in enumerate(missing_conditions):
+            record_token_suppression(
+                conn,
+                token_id=f"batched-missing-token-{index}",
+                suppression_reason="chain_only_quarantined",
+                source_module="test_mod",
+                condition_id=condition_id,
+            )
+
+        statements: list[str] = []
+        conn.set_trace_callback(statements.append)
+        quarantine_rows = query_chain_only_quarantine_rows(conn)
+        conn.set_trace_callback(None)
+        topology_reads = [
+            statement
+            for statement in statements
+            if "FROM market_topology_state" in statement
+        ]
+        assert len(topology_reads) == 1
+
+        scopes = {row["token_id"]: row["entry_block_scope"] for row in quarantine_rows}
+        assert scopes["batched-current-weather-token"] == "global"
+        assert scopes["batched-missing-token-0"] == "position_only"
+
+        statements.clear()
+        conn.set_trace_callback(statements.append)
+        ignored_tokens = query_token_suppression_tokens(conn)
+        conn.set_trace_callback(None)
+        topology_reads = [
+            statement
+            for statement in statements
+            if "FROM market_topology_state" in statement
+        ]
+        assert len(topology_reads) == 1
+        assert "batched-current-weather-token" not in ignored_tokens
+        assert "batched-missing-token-0" in ignored_tokens
+
 
 # ---------------------------------------------------------------------------
 # R-CK — S4 B091 lower half: decision_time_status in evaluator
