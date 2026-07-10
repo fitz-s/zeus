@@ -12,8 +12,9 @@ Contracts:
        on (model, city, date, captured_at), retention prunes old rows, stale
        vectors (> max_age) are NOT served to the q path. When remaining-day
        mode is required by live Day0, unavailable vectors block the q seam.
-  R10. REMAINING-DAY SELECTION: only hours of the local target day AT/AFTER
-       now contribute; a model whose remaining window is empty contributes
+  R10. REMAINING-DAY SELECTION: hours of the open local target-day window
+       contribute; the just-elapsed hourly point may anchor its terminal
+       sub-hour for at most one hour. Wider gaps and ended days contribute
        nothing.
   R11. POST-PEAK REPRICING: with all remaining-hours temps at/below the
        running max, the pooled members clamp to the floor — the floor bin
@@ -422,6 +423,55 @@ class TestRemainingDaySelection:
         v = _vector()
         now = datetime(2026, 6, 11, 1, 0, tzinfo=UTC)  # past the local day
         assert remaining_day_extremes_c([v], target_date="2026-06-10", now=now, metric="high") == []
+
+    @pytest.mark.parametrize("metric", ["high", "low"])
+    def test_terminal_subhour_uses_same_hour_grid_anchor(self, metric):
+        v = Day0HourlyVector(
+            model="ecmwf_ifs",
+            city="Paris",
+            target_date="2026-06-10",
+            timezone_name="Europe/Paris",
+            captured_at="2026-06-10T21:17:00+00:00",
+            times=("2026-06-10T22:00", "2026-06-10T23:00"),
+            temps_c=(22.4, 22.1),
+        )
+        now = datetime(2026, 6, 10, 21, 17, tzinfo=UTC)  # 23:17 local
+
+        assert remaining_day_extremes_c(
+            [v], target_date="2026-06-10", now=now, metric=metric
+        ) == [22.1]
+
+    def test_terminal_anchor_older_than_one_hour_is_unavailable(self):
+        v = Day0HourlyVector(
+            model="ecmwf_ifs",
+            city="Paris",
+            target_date="2026-06-10",
+            timezone_name="Europe/Paris",
+            captured_at="2026-06-10T21:17:00+00:00",
+            times=("2026-06-10T21:00",),
+            temps_c=(22.4,),
+        )
+        now = datetime(2026, 6, 10, 21, 17, tzinfo=UTC)  # 23:17 local
+
+        assert remaining_day_extremes_c(
+            [v], target_date="2026-06-10", now=now, metric="high"
+        ) == []
+
+    def test_midday_truncated_vector_cannot_masquerade_as_terminal_hour(self):
+        v = Day0HourlyVector(
+            model="ecmwf_ifs",
+            city="Paris",
+            target_date="2026-06-10",
+            timezone_name="Europe/Paris",
+            captured_at="2026-06-10T10:30:00+00:00",
+            times=("2026-06-10T12:00",),
+            temps_c=(22.4,),
+        )
+        now = datetime(2026, 6, 10, 10, 30, tzinfo=UTC)  # 12:30 local
+
+        assert remaining_day_extremes_c(
+            [v], target_date="2026-06-10", now=now, metric="high"
+        ) == []
 
     def test_low_metric_takes_min(self):
         temps = [18.0, 12.0, 11.0] + [15.0] * 21

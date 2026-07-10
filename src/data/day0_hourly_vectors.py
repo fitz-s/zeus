@@ -525,9 +525,13 @@ def remaining_day_extremes_c(
     now: datetime,
     metric: str,
 ) -> list[float]:
-    """Per-model remaining-day extreme (degC): hours of the local target day
-    at/after ``now`` only. A vector with no remaining hours contributes nothing
-    (the day is over for that model's grid — the obs floor owns the answer)."""
+    """Per-model remaining-day extreme in degC over the open local-day window.
+
+    Grid points at/after ``now`` are the ordinary support. During the terminal
+    sub-hour, when the local day is still open but the final hourly grid point
+    has just elapsed, that point remains the current interval anchor for at most
+    one hour. Wider gaps and an already-ended local day contribute nothing.
+    """
     if metric not in {"high", "low"}:
         raise ValueError(f"unsupported metric: {metric}")
     target = date.fromisoformat(str(target_date)[:10])
@@ -539,18 +543,43 @@ def remaining_day_extremes_c(
             continue
         now_local = now.astimezone(tz)
         values: list[float] = []
+        elapsed_target_points: list[tuple[datetime, float]] = []
         for raw_time, temp in zip(vector.times, vector.temps_c):
             try:
                 local = datetime.fromisoformat(str(raw_time))
                 if local.tzinfo is None:
                     local = local.replace(tzinfo=tz)
+                else:
+                    local = local.astimezone(tz)
             except ValueError:
                 continue
             if local.date() != target:
                 continue
             if local < now_local:
+                elapsed_target_points.append((local, float(temp)))
                 continue
             values.append(float(temp))
+        if (
+            not values
+            and now_local.date() == target
+            and elapsed_target_points
+        ):
+            local_day_end = datetime.combine(
+                target + timedelta(days=1),
+                datetime.min.time(),
+                tzinfo=tz,
+            )
+            anchor_time, anchor_temp = max(
+                elapsed_target_points,
+                key=lambda item: item[0],
+            )
+            anchor_age = now_local - anchor_time
+            time_to_day_end = local_day_end - now_local
+            if (
+                timedelta(0) < time_to_day_end <= timedelta(hours=1)
+                and timedelta(0) <= anchor_age <= timedelta(hours=1)
+            ):
+                values.append(anchor_temp)
         if not values:
             continue
         out.append(max(values) if metric == "high" else min(values))
