@@ -1453,6 +1453,153 @@ def test_global_batch_waits_until_global_winner_family_is_claimed(monkeypatch):
     assert result.receipts[event_a.event_id].reason == "GLOBAL_WINNER_AWAITS_CLAIM"
 
 
+def test_global_batch_excludes_typed_current_q_ineligible_family(monkeypatch):
+    decision_at = _dt.datetime(2026, 7, 10, 8, 0, tzinfo=_dt.timezone.utc)
+    event_a = _global_scope_event(city="Alpha", source_run_id="run-a")
+    event_b = _global_scope_event(city="Beta", source_run_id="run-b")
+    scope = current_global_auction_scope_from_events(
+        (event_a, event_b), captured_at_utc=decision_at
+    )
+    family_a, family_b = scope.family_keys
+    prepared_b = SimpleNamespace(
+        probability_witness=SimpleNamespace(family_key=family_b)
+    )
+    current_probability = object()
+    actuation = SimpleNamespace(actuation_identity="actuation-b")
+    selected = SimpleNamespace(
+        decision=SimpleNamespace(candidate=object(), no_trade_reason=None),
+        winner_event_id=event_b.event_id,
+        actuation=actuation,
+    )
+    calls = {"venue": 0, "ineligible_prepare": 0}
+    ineligible_reason = (
+        "GLOBAL_CURRENT_PROBABILITY_PREPARE_FAILED:ValueError:"
+        "GLOBAL_CURRENT_REPLACEMENT_BUNDLE_BLOCKED:REPLACEMENT_RAW_INPUT_HWM"
+    )
+
+    monkeypatch.setattr(
+        global_batch_runtime, "scan_current_global_auction_scope", lambda **_: scope
+    )
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "current_portfolio_wealth_witness",
+        lambda *_, **__: SimpleNamespace(
+            spendable_cash_usd=Decimal("10"),
+            witness_identity="wealth-certificate",
+            economic_identity="wealth-economics",
+        ),
+    )
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "current_venue_auction_identity",
+        lambda *_, **__: "venue",
+    )
+
+    def select(prepared_by_event, *, current_scope, **_kwargs):
+        assert current_scope.family_keys == (family_b,)
+        assert tuple(prepared_by_event) == (event_b.event_id,)
+        return selected
+
+    monkeypatch.setattr(global_batch_runtime, "select_prepared_global_auction", select)
+    monkeypatch.setattr(
+        global_batch_runtime.CurrentFamilyProbabilityAuthority,
+        "from_witness",
+        classmethod(lambda cls, witness: current_probability),
+    )
+
+    def prepare(event, _at):
+        if event.event_id == event_a.event_id:
+            calls["ineligible_prepare"] += 1
+            return EventSubmissionReceipt(
+                False,
+                event.event_id,
+                event.causal_snapshot_id,
+                reason=ineligible_reason,
+            )
+        return EventSubmissionReceipt(
+            False,
+            event.event_id,
+            event.causal_snapshot_id,
+            prepared_global_family=prepared_b,
+        )
+
+    def actuate(winner, chosen, _at):
+        assert winner.event_id == event_b.event_id
+        assert chosen is actuation
+        calls["venue"] += 1
+        return EventSubmissionReceipt(
+            True,
+            winner.event_id,
+            winner.causal_snapshot_id,
+            proof_accepted=True,
+            side_effect_status="SUBMITTED",
+        )
+
+    result = global_batch_runtime.process_current_global_batch(
+        (event_a, event_b),
+        decision_time=decision_at,
+        world_conn=object(),
+        forecast_conn=object(),
+        trade_conn=object(),
+        payload_reader=lambda current: json.loads(current.payload_json),
+        prepare_event=prepare,
+        actuate_winner=actuate,
+        stamp_receipt=lambda receipt: receipt,
+        venue_submit_count=lambda: calls["venue"],
+        current_probability=lambda event, _witness, _at: (
+            current_probability if event.event_id == event_b.event_id else None
+        ),
+        current_execution=lambda *_: object(),
+        current_time_provider=lambda: decision_at,
+    )
+
+    assert calls["ineligible_prepare"] >= 3
+    assert result.venue_submit_count == 1
+    assert result.winner_event_id == event_b.event_id
+    assert result.receipts[event_b.event_id].submitted is True
+    assert result.receipts[event_a.event_id].reason == (
+        f"GLOBAL_FAMILY_INELIGIBLE:{ineligible_reason}"
+    )
+
+
+def test_global_batch_rejects_unexpected_probability_prepare_failure(monkeypatch):
+    decision_at = _dt.datetime(2026, 7, 10, 8, 0, tzinfo=_dt.timezone.utc)
+    event = _global_scope_event(city="Alpha", source_run_id="run-a")
+    scope = current_global_auction_scope_from_events(
+        (event,), captured_at_utc=decision_at
+    )
+    reason = "GLOBAL_CURRENT_PROBABILITY_PREPARE_FAILED:RuntimeError:boom"
+    monkeypatch.setattr(
+        global_batch_runtime, "scan_current_global_auction_scope", lambda **_: scope
+    )
+
+    result = global_batch_runtime.process_current_global_batch(
+        (event,),
+        decision_time=decision_at,
+        world_conn=object(),
+        forecast_conn=object(),
+        trade_conn=object(),
+        payload_reader=lambda current: json.loads(current.payload_json),
+        prepare_event=lambda current, _at: EventSubmissionReceipt(
+            False,
+            current.event_id,
+            current.causal_snapshot_id,
+            reason=reason,
+        ),
+        actuate_winner=lambda *_: pytest.fail("unexpected failure must not actuate"),
+        stamp_receipt=lambda receipt: receipt,
+        venue_submit_count=lambda: 0,
+        current_probability=lambda *_: object(),
+        current_execution=lambda *_: object(),
+        current_time_provider=lambda: decision_at,
+    )
+
+    assert result.venue_submit_count == 0
+    assert result.receipts[event.event_id].reason == (
+        f"GLOBAL_PREPARED_FAMILY_INCOMPLETE:{scope.family_keys[0]}:{reason}"
+    )
+
+
 def test_global_batch_actuates_exactly_one_claimed_global_winner(monkeypatch):
     decision_at = _dt.datetime(2026, 7, 10, 8, 0, tzinfo=_dt.timezone.utc)
     event = _global_scope_event(city="Alpha", source_run_id="run-a")

@@ -9,6 +9,7 @@ from typing import Callable, Mapping, Sequence
 from src.contracts.executable_market_snapshot import FRESHNESS_WINDOW_DEFAULT
 from src.engine.global_auction_universe import (
     CurrentGlobalBookEpoch,
+    current_global_auction_scope_from_events,
     current_portfolio_wealth_witness,
     current_venue_auction_identity,
     scan_current_global_auction_scope,
@@ -21,6 +22,17 @@ from src.solve.solver import CurrentFamilyProbabilityAuthority
 from src.state.collateral_ledger import COLLATERAL_SNAPSHOT_MAX_AGE_SECONDS
 
 UTC = timezone.utc
+
+
+def _current_probability_ineligible(receipt: EventSubmissionReceipt) -> bool:
+    """A typed ValueError means this family has no current q certificate."""
+
+    return (
+        receipt.prepared_global_family is None
+        and str(receipt.reason or "").startswith(
+            "GLOBAL_CURRENT_PROBABILITY_PREPARE_FAILED:ValueError:"
+        )
+    )
 
 
 def _family_key(event: OpportunityEvent, payload: Mapping[str, object]) -> str:
@@ -53,7 +65,7 @@ def process_current_global_batch(
     ]
     | None = None,
 ) -> GlobalBatchSubmitResult:
-    """Prepare all current families, select once, then actuate one claimed owner."""
+    """Select once from every family holding a current q certificate."""
 
     if decision_time.tzinfo is None:
         raise ValueError("GLOBAL_AUCTION_DECISION_TIME_NAIVE")
@@ -89,7 +101,7 @@ def process_current_global_batch(
 
     try:
         scope_at = current_time()
-        scope = scan_current_global_auction_scope(
+        full_scope = scan_current_global_auction_scope(
             world_conn=world_conn,
             forecasts_conn=forecast_conn,
             decision_at_utc=scope_at,
@@ -102,17 +114,72 @@ def process_current_global_batch(
             claimed_by_family[family_key] = event
 
         prepared_by_event = {}
-        scope_event_by_family = dict(scope.events_by_family)
-        for family_key, scope_event in scope.events_by_family:
+        full_scope_identity = full_scope.scope_identity
+        full_scope_event_by_family = dict(full_scope.events_by_family)
+        ineligible_by_family: dict[str, str] = {}
+        ineligible_by_event: dict[str, str] = {}
+        for family_key, scope_event in full_scope.events_by_family:
             owner = claimed_by_family.get(family_key, scope_event)
             prepared_receipt = prepare_event(scope_event, scope_at)
             prepared = prepared_receipt.prepared_global_family
             if prepared is None:
+                if _current_probability_ineligible(prepared_receipt):
+                    reason = str(prepared_receipt.reason)
+                    ineligible_by_family[family_key] = reason
+                    if family_key in claimed_by_family:
+                        ineligible_by_event[owner.event_id] = reason
+                    continue
                 return reject(
                     "GLOBAL_PREPARED_FAMILY_INCOMPLETE:"
                     f"{family_key}:{prepared_receipt.reason or 'missing'}"
                 )
             prepared_by_event[owner.event_id] = prepared
+        if not prepared_by_event:
+            return reject("GLOBAL_AUCTION_NO_CURRENT_PROBABILITY_FAMILY")
+
+        eligible_family_keys = frozenset(
+            prepared.probability_witness.family_key
+            for prepared in prepared_by_event.values()
+        )
+        scope = current_global_auction_scope_from_events(
+            tuple(
+                full_scope_event_by_family[family_key]
+                for family_key in sorted(eligible_family_keys)
+            ),
+            captured_at_utc=scope_at,
+        )
+        scope_event_by_family = {
+            family_key: full_scope_event_by_family[family_key]
+            for family_key in eligible_family_keys
+        }
+
+        def current_eligible_scope(checked_at: datetime):
+            refreshed_full = scan_current_global_auction_scope(
+                world_conn=world_conn,
+                forecasts_conn=forecast_conn,
+                decision_at_utc=checked_at,
+            )
+            if refreshed_full.scope_identity != full_scope_identity:
+                return None
+            refreshed_by_family = dict(refreshed_full.events_by_family)
+            for family_key in ineligible_by_family:
+                event = refreshed_by_family.get(family_key)
+                if event is None:
+                    return None
+                receipt = prepare_event(event, checked_at)
+                if not _current_probability_ineligible(receipt):
+                    return None
+            try:
+                refreshed = current_global_auction_scope_from_events(
+                    tuple(
+                        refreshed_by_family[family_key]
+                        for family_key in sorted(eligible_family_keys)
+                    ),
+                    captured_at_utc=checked_at,
+                )
+            except (KeyError, ValueError):
+                return None
+            return refreshed if refreshed.scope_identity == scope.scope_identity else None
 
         probabilities = {
             prepared.probability_witness.family_key: prepared.probability_witness
@@ -135,17 +202,13 @@ def process_current_global_batch(
             }
         # Probability preparation + the complete public-CLOB sweep can legitimately
         # take longer than one quote TTL.  The family set is not a price quote: renew
-        # its observation time by re-enumerating the exact current scope immediately
-        # before selection.  Identity must stay byte-identical; a changed family or
-        # probability carrier still invalidates the whole epoch.
+        # its observation time by re-enumerating the exact discovered scope and
+        # re-proving that every excluded family still lacks a current q certificate.
+        # A changed carrier or eligibility set invalidates the whole epoch.
         selection_at = current_time()
-        refreshed_scope = scan_current_global_auction_scope(
-            world_conn=world_conn,
-            forecasts_conn=forecast_conn,
-            decision_at_utc=selection_at,
-        )
-        if refreshed_scope.scope_identity != scope.scope_identity:
-            return reject("GLOBAL_SCOPE_SUPERSEDED_BEFORE_SELECTION")
+        refreshed_scope = current_eligible_scope(selection_at)
+        if refreshed_scope is None:
+            return reject("GLOBAL_FEASIBLE_SET_SUPERSEDED_BEFORE_SELECTION")
         scope = refreshed_scope
         state = portfolio_state_provider() if portfolio_state_provider else None
         wealth_age = timedelta(seconds=float(COLLATERAL_SNAPSHOT_MAX_AGE_SECONDS))
@@ -167,11 +230,8 @@ def process_current_global_batch(
         def current_scope_identity():
             try:
                 checked_at = current_time()
-                return scan_current_global_auction_scope(
-                    world_conn=world_conn,
-                    forecasts_conn=forecast_conn,
-                    decision_at_utc=checked_at,
-                ).scope_identity
+                refreshed = current_eligible_scope(checked_at)
+                return refreshed.scope_identity if refreshed is not None else None
             except Exception:
                 return None
 
@@ -277,6 +337,19 @@ def process_current_global_batch(
             event.event_id: (
                 winner_receipt
                 if event.event_id == winner_id
+                else stamp_receipt(
+                    EventSubmissionReceipt(
+                        False,
+                        event.event_id,
+                        event.causal_snapshot_id,
+                        reason=(
+                            "GLOBAL_FAMILY_INELIGIBLE:"
+                            f"{ineligible_by_event[event.event_id]}"
+                        ),
+                        proof_accepted=False,
+                    )
+                )
+                if event.event_id in ineligible_by_event
                 else stamp_receipt(
                     EventSubmissionReceipt(
                         False,
