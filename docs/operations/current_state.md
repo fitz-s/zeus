@@ -33,3 +33,4 @@ Closed packet bodies: `docs/archive_registry.md` (bodies untracked under `docs/a
 
 - `docs/operations/AGENTS.md` — packet/package routing and closeout rules
 - `architecture/history_lore.yaml` — durable lessons
+- 2026-07-10 packet `current/runtime_open_exposure_snapshot` landed (head 6aa976985). <!-- zpkt landed: current/runtime_open_exposure_snapshot -->
