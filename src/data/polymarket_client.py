@@ -414,6 +414,49 @@ class PolymarketClient:
             return self._public_http().get(url, params=params, timeout=timeout)
         return self._public_http().get(url, params=params)
 
+    def _bounded_public_http_timeout(
+        self,
+        ceiling: "float | httpx.Timeout",
+    ) -> httpx.Timeout:
+        """Clamp every configured HTTP phase to an outer absolute-deadline budget."""
+
+        configured = self._public_http_timeout
+        if isinstance(configured, httpx.Timeout):
+            base = configured
+        elif configured is not None:
+            value = float(configured)
+            base = httpx.Timeout(
+                connect=value,
+                read=value * 2,
+                write=value,
+                pool=value,
+            )
+        else:
+            base = httpx.Timeout(PUBLIC_CLOB_HTTP_TIMEOUT_SECONDS)
+
+        request = (
+            ceiling
+            if isinstance(ceiling, httpx.Timeout)
+            else httpx.Timeout(max(0.001, float(ceiling)))
+        )
+
+        def _phase(name: str) -> float:
+            configured_value = getattr(base, name, None)
+            request_value = getattr(request, name, None)
+            limits = [
+                max(0.001, float(value))
+                for value in (configured_value, request_value)
+                if value is not None
+            ]
+            return min(limits) if limits else 0.001
+
+        return httpx.Timeout(
+            connect=_phase("connect"),
+            read=_phase("read"),
+            write=_phase("write"),
+            pool=_phase("pool"),
+        )
+
     def _public_post(
         self,
         path: str,
@@ -642,10 +685,16 @@ class PolymarketClient:
             books[str(asset_id)] = entry
         return books
 
-    def get_clob_market_info(self, condition_id: str) -> dict:
+    def get_clob_market_info(
+        self,
+        condition_id: str,
+        *,
+        timeout: "float | httpx.Timeout | None" = None,
+    ) -> dict:
         """Fetch raw CLOB market facts for executable snapshot capture."""
 
-        resp = self._public_get(f"/markets/{condition_id}")
+        request_timeout = self._bounded_public_http_timeout(timeout) if timeout is not None else None
+        resp = self._public_get(f"/markets/{condition_id}", timeout=request_timeout)
         resp.raise_for_status()
         data = resp.json()
         if isinstance(data, dict):

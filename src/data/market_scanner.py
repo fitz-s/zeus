@@ -12,6 +12,7 @@ Parses bin structure, token IDs, and prices from market data.
 """
 
 import contextlib
+import inspect
 import json
 import logging
 import os
@@ -4415,14 +4416,17 @@ def _prefetch_selected_clob_market_info(
     *,
     deadline: float | None = None,
     max_workers: int | None = None,
-) -> dict[str, dict]:
+) -> tuple[dict[str, dict], frozenset[str]]:
     """Fetch fresh CLOB market metadata once per condition, concurrently.
 
     Orderbooks are already batch-fetched before snapshot capture, but market
     metadata was still fetched serially inside each condition's first capture.
     The refresh path selects at most a small bounded candidate set, so one
     bounded concurrent wave removes that network waterfall while preserving the
-    same per-condition CLOB authority and downstream identity validation.
+    same per-condition CLOB authority and downstream identity validation. The
+    second return value names conditions not completed before ``deadline``;
+    callers defer those conditions instead of issuing a duplicate request while
+    the timed-out worker may still be running.
     """
 
     condition_ids: list[str] = []
@@ -4432,20 +4436,46 @@ def _prefetch_selected_clob_market_info(
         if condition_id and condition_id not in seen:
             seen.add(condition_id)
             condition_ids.append(condition_id)
-    if not condition_ids or (deadline is not None and time.monotonic() >= deadline):
-        return {}
+    if not condition_ids:
+        return {}, frozenset()
+    if deadline is not None and time.monotonic() >= deadline:
+        return {}, frozenset()
 
     cache: dict[str, dict] = {}
     failures: list[tuple[str, Exception]] = []
+    deferred: set[str] = set()
+
+    getter = getattr(clob, "get_clob_market_info", None)
+    supports_timeout = False
+    if callable(getter):
+        try:
+            parameters = inspect.signature(getter).parameters.values()
+            supports_timeout = any(
+                parameter.name == "timeout" or parameter.kind is inspect.Parameter.VAR_KEYWORD
+                for parameter in parameters
+            )
+        except (TypeError, ValueError):
+            pass
 
     def _fetch(condition_id: str) -> tuple[str, dict | None, Exception | None]:
         try:
-            return condition_id, _fetch_clob_market_info(clob, condition_id), None
+            remaining = None if deadline is None else deadline - time.monotonic()
+            if remaining is not None and remaining <= 0:
+                raise TimeoutError("CLOB market metadata prefetch deadline expired")
+            return (
+                condition_id,
+                _fetch_clob_market_info(
+                    clob,
+                    condition_id,
+                    timeout=remaining if supports_timeout else None,
+                ),
+                None,
+            )
         except Exception as exc:  # noqa: BLE001 - best-effort prefetch; capture retains retry
             return condition_id, None, exc
 
     if deadline is None or time.monotonic() < deadline:
-        from concurrent.futures import ThreadPoolExecutor
+        from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError, as_completed
 
         workers = max_workers
         if workers is None:
@@ -4454,23 +4484,56 @@ def _prefetch_selected_clob_market_info(
                 16,
             )
         workers = max(1, min(int(workers), 16, len(condition_ids)))
-        if workers == 1:
-            results = map(_fetch, condition_ids)
-        else:
-            executor = ThreadPoolExecutor(
-                max_workers=workers,
-                thread_name_prefix="clob-market-info",
-            )
-            results = executor.map(_fetch, condition_ids)
+        executor = ThreadPoolExecutor(
+            max_workers=workers,
+            thread_name_prefix="clob-market-info",
+        )
+        pending = {
+            executor.submit(_fetch, condition_id): condition_id
+            for condition_id in condition_ids
+        }
+
+        def _consume(future: Any) -> None:
+            condition_id, info, error = future.result()
+            if info is not None:
+                cache[condition_id] = info
+            elif error is not None:
+                failures.append((condition_id, error))
+
         try:
-            for condition_id, info, error in results:
-                if info is not None:
-                    cache[condition_id] = info
-                elif error is not None:
-                    failures.append((condition_id, error))
+            while pending:
+                if deadline is None:
+                    future = next(as_completed(tuple(pending)))
+                else:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        break
+                    try:
+                        future = next(as_completed(tuple(pending), timeout=remaining))
+                    except FuturesTimeoutError:
+                        break
+                pending.pop(future)
+                _consume(future)
         finally:
-            if workers > 1:
-                executor.shutdown(wait=True)
+            for future in tuple(pending):
+                if future.done():
+                    pending.pop(future)
+                    _consume(future)
+            for future in tuple(pending):
+                if future.cancel():
+                    pending.pop(future)
+                elif future.done():
+                    pending.pop(future)
+                    _consume(future)
+            deferred.update(pending.values())
+            executor.shutdown(wait=not pending, cancel_futures=bool(pending))
+
+        if deferred:
+            logger.info(
+                "CLOB market metadata prefetch deadline deferred %d/%d condition(s)",
+                len(deferred),
+                len(condition_ids),
+            )
 
     if failures:
         logger.info(
@@ -4480,7 +4543,7 @@ def _prefetch_selected_clob_market_info(
             len(condition_ids),
             failures[0][1],
         )
-    return cache
+    return cache, frozenset(deferred)
 
 
 def _candidates_missing_prefetched_orderbooks(
@@ -5106,7 +5169,7 @@ def refresh_executable_market_substrate_snapshots(
             )
         ):
             market_info_candidates.append(candidate)
-    clob_market_info_cache = _prefetch_selected_clob_market_info(
+    clob_market_info_cache, deferred_clob_market_conditions = _prefetch_selected_clob_market_info(
         clob,
         market_info_candidates,
         deadline=prefetch_deadline,
@@ -5158,6 +5221,9 @@ def refresh_executable_market_substrate_snapshots(
                 skipped += 1
                 prefetch_missing_skipped += 1
                 continue
+        if str(condition_id or "").strip() in deferred_clob_market_conditions:
+            skipped += 1
+            continue
         attempted += 1
         prior_busy_timeout_ms = _pragma_busy_timeout_ms(conn)
         lock_retry_count = _snapshot_capture_sqlite_lock_retries()
@@ -5281,6 +5347,7 @@ def refresh_executable_market_substrate_snapshots(
         "snapshot_capture_reserve_seconds": capture_reserve_seconds,
         "prefetched_orderbook_count": len(prefetched_books),
         "prefetched_clob_market_count": len(clob_market_info_cache),
+        "prefetch_clob_market_deferred_count": len(deferred_clob_market_conditions),
         "prefetch_missing_skipped": prefetch_missing_skipped,
         "prefetch_missing_identity_captured": prefetch_missing_identity_captured,
         "direct_clob_prefetch_skipped": int(direct_clob_prefetch_skipped),
@@ -5334,11 +5401,16 @@ def _find_decision_outcome(market: dict, tokens: dict) -> dict | None:
     return None
 
 
-def _fetch_clob_market_info(clob: Any, condition_id: str) -> dict:
+def _fetch_clob_market_info(
+    clob: Any,
+    condition_id: str,
+    *,
+    timeout: float | None = None,
+) -> dict:
     getter = getattr(clob, "get_clob_market_info", None)
     if not callable(getter):
         raise ExecutableSnapshotCaptureError("CLOB client lacks get_clob_market_info")
-    raw = getter(condition_id)
+    raw = getter(condition_id, timeout=timeout) if timeout is not None else getter(condition_id)
     raw = getattr(raw, "raw", raw)
     if not isinstance(raw, dict) or not raw:
         raise ExecutableSnapshotCaptureError("CLOB market info response is empty or non-object")

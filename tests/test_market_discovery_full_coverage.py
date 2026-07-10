@@ -78,7 +78,7 @@ def test_clob_market_metadata_prefetch_collapses_serial_latency():
 
     parallel_clob = SlowClob()
     parallel_started = time.perf_counter()
-    cache = ms._prefetch_selected_clob_market_info(
+    cache, deferred = ms._prefetch_selected_clob_market_info(
         parallel_clob,
         candidates,
         deadline=time.monotonic() + 2.0,
@@ -87,6 +87,7 @@ def test_clob_market_metadata_prefetch_collapses_serial_latency():
     parallel_elapsed = time.perf_counter() - parallel_started
 
     assert set(cache) == set(condition_ids)
+    assert deferred == frozenset()
     assert sorted(parallel_clob.calls) == sorted(condition_ids)
     assert parallel_clob.max_active >= 4
     assert parallel_elapsed < serial_elapsed * 0.30
@@ -108,7 +109,11 @@ def test_parallel_market_metadata_prefetch_builds_one_public_http_pool(monkeypat
             return {"condition_id": self.condition_id, "accepting_orders": True}
 
     class PublicClient:
-        def get(self, url, *, params=None):
+        def __init__(self):
+            self.timeouts: list[float] = []
+
+        def get(self, url, *, params=None, timeout=None):
+            self.timeouts.append(timeout)
             return Response(url.rsplit("/", 1)[-1])
 
         def close(self):
@@ -125,14 +130,17 @@ def test_parallel_market_metadata_prefetch_builds_one_public_http_pool(monkeypat
         return client
 
     monkeypatch.setattr(pm.httpx, "Client", client_factory)
-    clob = pm.PolymarketClient()
+    clob = pm.PolymarketClient(public_http_timeout=0.25)
+    object_timeout = clob._bounded_public_http_timeout(pm.httpx.Timeout(9.0))
+    assert object_timeout.connect <= 0.25
+    assert object_timeout.read <= 0.5
     condition_ids = [f"condition-{index}" for index in range(16)]
     candidates = [
         (0, 0, index, {}, {}, condition_id, "buy_yes")
         for index, condition_id in enumerate(condition_ids)
     ]
 
-    cache = ms._prefetch_selected_clob_market_info(
+    cache, deferred = ms._prefetch_selected_clob_market_info(
         clob,
         candidates,
         deadline=time.monotonic() + 2.0,
@@ -140,7 +148,126 @@ def test_parallel_market_metadata_prefetch_builds_one_public_http_pool(monkeypat
     )
 
     assert set(cache) == set(condition_ids)
+    assert deferred == frozenset()
     assert len(clients) == 1
+    assert len(clients[0].timeouts) == len(condition_ids)
+    assert all(isinstance(timeout, pm.httpx.Timeout) for timeout in clients[0].timeouts)
+    assert all(timeout.connect <= 0.25 for timeout in clients[0].timeouts)
+    assert all(timeout.read <= 0.5 for timeout in clients[0].timeouts)
+
+
+def test_market_metadata_prefetch_consumes_fast_results_before_deadline():
+    """A slow first condition cannot hide completed metadata or overrun the wave budget."""
+
+    class SlowFirstClob:
+        def get_clob_market_info(self, condition_id: str) -> dict:
+            time.sleep(0.25 if condition_id == "slow" else 0.005)
+            return {"condition_id": condition_id, "accepting_orders": True}
+
+    condition_ids = ["slow", *(f"fast-{index}" for index in range(8))]
+    candidates = [
+        (0, 0, index, {}, {}, condition_id, "buy_yes")
+        for index, condition_id in enumerate(condition_ids)
+    ]
+
+    started = time.monotonic()
+    cache, deferred = ms._prefetch_selected_clob_market_info(
+        SlowFirstClob(),
+        candidates,
+        deadline=time.monotonic() + 0.08,
+        max_workers=2,
+    )
+    elapsed = time.monotonic() - started
+
+    assert "slow" not in cache
+    assert set(cache) == {f"fast-{index}" for index in range(8)}
+    assert deferred == frozenset({"slow"})
+    assert elapsed < 0.18
+
+
+def test_market_metadata_deadline_defers_without_same_cycle_retry():
+    """An in-flight metadata request is retried next tick, not beside itself."""
+
+    market = _make_market("Tokyo", 1, metric="highest", target_date="2026-05-25")
+
+    class SlowClob:
+        def __init__(self):
+            self.calls = 0
+
+        def get_clob_market_info(self, condition_id: str) -> dict:
+            self.calls += 1
+            time.sleep(0.25)
+            return {"condition_id": condition_id, "accepting_orders": True}
+
+    clob = SlowClob()
+    conn = _make_in_memory_trade_db()
+    started = time.monotonic()
+    with patch("src.data.market_scanner.capture_executable_market_snapshot") as capture:
+        summary = refresh_executable_market_substrate_snapshots(
+            conn,
+            markets=[market],
+            clob=clob,
+            captured_at=_NOW,
+            scan_authority="VERIFIED",
+            max_outcomes=2,
+            budget_seconds=0.10,
+            capture_reserve_seconds=0.02,
+        )
+    elapsed = time.monotonic() - started
+
+    assert clob.calls == 1
+    capture.assert_not_called()
+    assert summary["attempted"] == 0
+    assert summary["prefetch_clob_market_deferred_count"] == 1
+    assert elapsed < 0.18
+
+
+def test_market_metadata_completion_during_cancel_is_consumed(monkeypatch):
+    """A future finishing in the cancel race is cached, not mislabeled deferred."""
+
+    import concurrent.futures
+
+    class RaceFuture:
+        def __init__(self, result):
+            self._result = result
+            self._done = False
+
+        def done(self):
+            return self._done
+
+        def cancel(self):
+            self._done = True
+            return False
+
+        def result(self):
+            return self._result
+
+    class FakeExecutor:
+        def __init__(self, **_kwargs):
+            pass
+
+        def submit(self, _fn, condition_id):
+            return RaceFuture(
+                (condition_id, {"condition_id": condition_id, "accepting_orders": True}, None)
+            )
+
+        def shutdown(self, **_kwargs):
+            pass
+
+    ticks = iter((0.0, 0.0, 1.0))
+    monkeypatch.setattr(ms.time, "monotonic", lambda: next(ticks, 1.0))
+    monkeypatch.setattr(concurrent.futures, "ThreadPoolExecutor", FakeExecutor)
+
+    cache, deferred = ms._prefetch_selected_clob_market_info(
+        object(),
+        [(0, 0, 0, {}, {}, "condition-race", "buy_yes")],
+        deadline=0.5,
+        max_workers=1,
+    )
+
+    assert set(cache) == {"condition-race"}
+    assert deferred == frozenset()
+
 
 # ---------------------------------------------------------------------------
 # Helpers
