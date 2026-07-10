@@ -258,7 +258,11 @@ def test_edli_reactor_job_wired_behind_live_execution_mode_gate():
             reactor_source.index("event_bound_live_adapter_from_trade_conn("),
         )
     ]
-    assert "live_cap_conn=conn" not in live_adapter_call
+    # Canonical ownership is WORLD_CLASS for edli_live_cap_usage and the
+    # edli_live_order event/projection ledgers.  The same-named trade tables are
+    # legacy_archived ghosts, so the live adapter must receive the world conn.
+    assert "live_cap_conn=conn" in live_adapter_call
+    assert "live_cap_conn=trade_conn" not in live_adapter_call
     # P3 lift (system_decomposition_plan §8 Step 3): the user-channel/reconcile cycle —
     # and its scheduler-health fill-authority string "user_channel_or_reconcile_only" —
     # was lifted out of src.main into src.ingest.price_channel_ingest. The reactor (which

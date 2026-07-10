@@ -132,6 +132,17 @@ class LiveOrderProjection:
     venue_order_id: str | None
 
 
+@dataclass(frozen=True)
+class _ProjectionState:
+    event_id: str
+    final_intent_id: str | None = None
+    current_state: str = "UNKNOWN"
+    pending_reconcile: bool = False
+    venue_order_id: str | None = None
+    posterior_id: int | None = None
+    probability_authority: str | None = None
+
+
 class LiveOrderAggregateLedger:
     def __init__(
         self,
@@ -162,6 +173,7 @@ class LiveOrderAggregateLedger:
         latest = self._latest_row(aggregate_id)
         if latest is not None and payload.get("event_id") != _payload(latest).get("event_id"):
             raise LiveOrderAggregateError("live-order aggregate event_id drift")
+        projection = self._projection_row_for_append(aggregate_id, latest)
         self._validate_event_append(
             aggregate_id=aggregate_id,
             event_type=event_type,
@@ -200,8 +212,10 @@ class LiveOrderAggregateLedger:
                 raise LiveOrderAggregateError("live-order aggregate sequence collision")
             return _event_from_row(existing)
         needs_user_dedup = event_type in {"UserOrderObserved", "UserTradeObserved"}
-        if needs_user_dedup:
-            self.conn.execute("SAVEPOINT edli_live_order_user_dedup_append")
+        started_transaction = not self.conn.in_transaction
+        if started_transaction:
+            self.conn.execute("BEGIN")
+        self.conn.execute("SAVEPOINT edli_live_order_append")
         try:
             if needs_user_dedup:
                 self._reserve_user_channel_message_hash(
@@ -229,22 +243,142 @@ class LiveOrderAggregateLedger:
                     payload_hash,
                     source_authority,
                     _dt(occurred_at),
-                    _dt(datetime.now(timezone.utc)),
-                ),
+                        _dt(datetime.now(timezone.utc)),
+                    ),
+                )
+            self._project_appended_event(
+                aggregate_id=aggregate_id,
+                projection=projection,
+                event_type=event_type,
+                payload=payload,
+                event_sequence=next_sequence,
+                event_hash=event_hash,
             )
-        except Exception:
-            if needs_user_dedup:
-                self.conn.execute("ROLLBACK TO SAVEPOINT edli_live_order_user_dedup_append")
-                self.conn.execute("RELEASE SAVEPOINT edli_live_order_user_dedup_append")
-            raise
-        if needs_user_dedup:
-            self.conn.execute("RELEASE SAVEPOINT edli_live_order_user_dedup_append")
-        self.rebuild_projection(aggregate_id)
-        if event_type in PROFIT_AUDIT_TRIGGER_EVENTS:
-            from src.events.live_profit_audit import record_edli_live_profit_audit_from_aggregate
+            if event_type in PROFIT_AUDIT_TRIGGER_EVENTS:
+                from src.events.live_profit_audit import record_edli_live_profit_audit_from_aggregate
 
-            record_edli_live_profit_audit_from_aggregate(self.conn, aggregate_id)
-        return self.get_event(aggregate_event_id)
+                record_edli_live_profit_audit_from_aggregate(self.conn, aggregate_id)
+            event = self.get_event(aggregate_event_id)
+        except Exception:
+            self.conn.execute("ROLLBACK TO SAVEPOINT edli_live_order_append")
+            self.conn.execute("RELEASE SAVEPOINT edli_live_order_append")
+            if started_transaction:
+                self.conn.rollback()
+            raise
+        self.conn.execute("RELEASE SAVEPOINT edli_live_order_append")
+        return event
+
+    def _projection_row_for_append(
+        self,
+        aggregate_id: str,
+        latest: sqlite3.Row | None,
+    ) -> sqlite3.Row | None:
+        projection = self.conn.execute(
+            "SELECT * FROM edli_live_order_projection WHERE aggregate_id = ?",
+            (aggregate_id,),
+        ).fetchone()
+        if latest is None:
+            if projection is not None:
+                raise LiveOrderAggregateError("live-order projection exists without events")
+            return None
+
+        event_id = str(_payload(latest)["event_id"])
+        projection_current = (
+            projection is not None
+            and int(projection["last_sequence"]) == int(latest["event_sequence"])
+            and str(projection["last_event_hash"] or "") == str(latest["event_hash"])
+            and str(projection["event_id"]) == event_id
+        )
+        if not projection_current:
+            self.rebuild_projection(aggregate_id)
+            projection = self.conn.execute(
+                "SELECT * FROM edli_live_order_projection WHERE aggregate_id = ?",
+                (aggregate_id,),
+            ).fetchone()
+        if (
+            projection is None
+            or int(projection["last_sequence"]) != int(latest["event_sequence"])
+            or str(projection["last_event_hash"] or "") != str(latest["event_hash"])
+            or str(projection["event_id"]) != event_id
+        ):
+            raise LiveOrderAggregateError("live-order projection recovery failed")
+        return projection
+
+    def _project_appended_event(
+        self,
+        *,
+        aggregate_id: str,
+        projection: sqlite3.Row | None,
+        event_type: str,
+        payload: Mapping[str, Any],
+        event_sequence: int,
+        event_hash: str,
+    ) -> None:
+        state = _advance_projection_state(
+            _projection_state_from_row(projection) if projection is not None else None,
+            event_type=event_type,
+            payload=payload,
+        )
+        values = (
+            state.event_id,
+            state.final_intent_id,
+            state.current_state,
+            event_sequence,
+            event_type,
+            event_hash,
+            1 if state.pending_reconcile else 0,
+            state.venue_order_id,
+            _dt(datetime.now(timezone.utc)),
+            state.posterior_id,
+            state.probability_authority,
+        )
+        if projection is None:
+            try:
+                self.conn.execute(
+                    """
+                    INSERT INTO edli_live_order_projection (
+                        aggregate_id, event_id, final_intent_id, current_state,
+                        last_sequence, last_event_type, last_event_hash,
+                        pending_reconcile, venue_order_id, updated_at, schema_version,
+                        posterior_id, probability_authority
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
+                    """,
+                    (aggregate_id, *values),
+                )
+            except sqlite3.IntegrityError as exc:
+                raise LiveOrderAggregateError(
+                    "live-order projection concurrent insert"
+                ) from exc
+            return
+
+        cursor = self.conn.execute(
+            """
+            UPDATE edli_live_order_projection
+               SET event_id = ?,
+                   final_intent_id = ?,
+                   current_state = ?,
+                   last_sequence = ?,
+                   last_event_type = ?,
+                   last_event_hash = ?,
+                   pending_reconcile = ?,
+                   venue_order_id = ?,
+                   updated_at = ?,
+                   schema_version = 1,
+                   posterior_id = ?,
+                   probability_authority = ?
+             WHERE aggregate_id = ?
+               AND last_sequence = ?
+               AND last_event_hash = ?
+            """,
+            (
+                *values,
+                aggregate_id,
+                int(projection["last_sequence"]),
+                str(projection["last_event_hash"]),
+            ),
+        )
+        if cursor.rowcount != 1:
+            raise LiveOrderAggregateError("live-order projection CAS mismatch")
 
     def rebuild_projection(self, aggregate_id: str) -> LiveOrderProjection:
         rows = self.conn.execute(
@@ -258,62 +392,14 @@ class LiveOrderAggregateLedger:
         ).fetchall()
         if not rows:
             raise LiveOrderAggregateError("cannot rebuild projection for empty aggregate")
-        event_id = str(_payload(rows[0])["event_id"])
-        final_intent_id: str | None = None
-        venue_order_id: str | None = None
-        # H2_E2E (REAUDIT_0_1.md §2/§4): the live-order projection's posterior
-        # trace is reconstructed from the DecisionProofAccepted event payload's
-        # decision_audit block (event_reactor_adapter.py:2818-2819 writes the
-        # receipt's posterior_id there), so the projection is SQL-reconstructable
-        # to the driving posterior WITHOUT JSON_EXTRACT and WITHOUT a cross-table
-        # join. Observability only and fail-soft: None on canonical orders /
-        # absent block — never changes order state. Sticky once set so a later
-        # reconcile event (no decision_audit) does not clear it.
-        posterior_id: int | None = None
-        probability_authority: str | None = None
-        pending_reconcile = False
-        current_state = "UNKNOWN"
+        state: _ProjectionState | None = None
         for row in rows:
-            payload = _payload(row)
-            if payload.get("event_id") != event_id:
-                raise LiveOrderAggregateError("aggregate event_id drift")
-            if payload.get("final_intent_id") is not None:
-                final_intent_id = str(payload["final_intent_id"])
-            if payload.get("venue_order_id") is not None:
-                venue_order_id = str(payload["venue_order_id"])
-            _audit = payload.get("decision_audit")
-            if isinstance(_audit, dict):
-                _pid = _optional_posterior_id(_audit.get("posterior_id"))
-                if _pid is not None:
-                    posterior_id = _pid
-                _auth = _audit.get("probability_authority")
-                if _auth is not None:
-                    probability_authority = str(_auth)
-            event_type = str(row["event_type"])
-            if event_type == "SubmitUnknown":
-                current_state = EVENT_STATE[event_type]
-                pending_reconcile = True
-            elif event_type == "CapTransitioned":
-                to_status = str(payload.get("to_status") or "")
-                if to_status == "PENDING_RECONCILE":
-                    current_state = "PENDING_RECONCILE"
-                    pending_reconcile = True
-                elif to_status == "CONSUMED":
-                    # CONSUMED is capital-ledger state, not order lifecycle state.
-                    # A successful submit remains a live/acked order until venue
-                    # facts or user-channel events prove a lifecycle transition.
-                    if current_state == "UNKNOWN":
-                        current_state = "VENUE_SUBMIT_ACKED"
-                else:
-                    current_state = EVENT_STATE[event_type]
-            elif event_type == "Reconciled":
-                current_state = EVENT_STATE[event_type]
-                pending_reconcile = bool(payload.get("pending_reconcile", False))
-            elif event_type == "OrderLifecycleProjected":
-                current_state = str(payload.get("order_lifecycle_state") or EVENT_STATE[event_type])
-                pending_reconcile = bool(payload.get("pending_reconcile", False))
-            else:
-                current_state = EVENT_STATE[event_type]
+            state = _advance_projection_state(
+                state,
+                event_type=str(row["event_type"]),
+                payload=_payload(row),
+            )
+        assert state is not None
         last = rows[-1]
         self.conn.execute(
             """
@@ -343,17 +429,17 @@ class LiveOrderAggregateLedger:
             """,
             (
                 aggregate_id,
-                event_id,
-                final_intent_id,
-                current_state,
+                state.event_id,
+                state.final_intent_id,
+                state.current_state,
                 int(last["event_sequence"]),
                 str(last["event_type"]),
                 str(last["event_hash"]),
-                1 if pending_reconcile else 0,
-                venue_order_id,
+                1 if state.pending_reconcile else 0,
+                state.venue_order_id,
                 _dt(datetime.now(timezone.utc)),
-                posterior_id,
-                probability_authority,
+                state.posterior_id,
+                state.probability_authority,
             ),
         )
         return self.get_projection(aggregate_id)
@@ -707,6 +793,82 @@ class LiveOrderAggregateLedger:
         )
 
 
+def _projection_state_from_row(row: sqlite3.Row) -> _ProjectionState:
+    return _ProjectionState(
+        event_id=str(row["event_id"]),
+        final_intent_id=row["final_intent_id"],
+        current_state=str(row["current_state"]),
+        pending_reconcile=bool(row["pending_reconcile"]),
+        venue_order_id=row["venue_order_id"],
+        posterior_id=_optional_posterior_id(row["posterior_id"]),
+        probability_authority=row["probability_authority"],
+    )
+
+
+def _advance_projection_state(
+    state: _ProjectionState | None,
+    *,
+    event_type: str,
+    payload: Mapping[str, Any],
+) -> _ProjectionState:
+    event_id = str(payload.get("event_id") or "")
+    if not event_id:
+        raise LiveOrderAggregateError("live-order projection event_id missing")
+    if state is not None and state.event_id != event_id:
+        raise LiveOrderAggregateError("aggregate event_id drift")
+
+    final_intent_id = state.final_intent_id if state is not None else None
+    venue_order_id = state.venue_order_id if state is not None else None
+    posterior_id = state.posterior_id if state is not None else None
+    probability_authority = state.probability_authority if state is not None else None
+    current_state = state.current_state if state is not None else "UNKNOWN"
+    pending_reconcile = state.pending_reconcile if state is not None else False
+
+    if payload.get("final_intent_id") is not None:
+        final_intent_id = str(payload["final_intent_id"])
+    if payload.get("venue_order_id") is not None:
+        venue_order_id = str(payload["venue_order_id"])
+    audit = payload.get("decision_audit")
+    if isinstance(audit, dict):
+        parsed_posterior_id = _optional_posterior_id(audit.get("posterior_id"))
+        if parsed_posterior_id is not None:
+            posterior_id = parsed_posterior_id
+        if audit.get("probability_authority") is not None:
+            probability_authority = str(audit["probability_authority"])
+
+    if event_type == "SubmitUnknown":
+        current_state = EVENT_STATE[event_type]
+        pending_reconcile = True
+    elif event_type == "CapTransitioned":
+        to_status = str(payload.get("to_status") or "")
+        if to_status == "PENDING_RECONCILE":
+            current_state = "PENDING_RECONCILE"
+            pending_reconcile = True
+        elif to_status == "CONSUMED":
+            if current_state == "UNKNOWN":
+                current_state = "VENUE_SUBMIT_ACKED"
+        else:
+            current_state = EVENT_STATE[event_type]
+    elif event_type == "Reconciled":
+        current_state = EVENT_STATE[event_type]
+        pending_reconcile = bool(payload.get("pending_reconcile", False))
+    elif event_type == "OrderLifecycleProjected":
+        current_state = str(payload.get("order_lifecycle_state") or EVENT_STATE[event_type])
+        pending_reconcile = bool(payload.get("pending_reconcile", False))
+    else:
+        current_state = EVENT_STATE[event_type]
+
+    return _ProjectionState(
+        event_id=event_id,
+        final_intent_id=final_intent_id,
+        current_state=current_state,
+        pending_reconcile=pending_reconcile,
+        venue_order_id=venue_order_id,
+        posterior_id=posterior_id,
+        probability_authority=probability_authority,
+    )
+
+
 def _event_from_row(row: sqlite3.Row) -> LiveOrderAggregateEvent:
     return LiveOrderAggregateEvent(
         aggregate_event_id=str(row["aggregate_event_id"]),
@@ -745,8 +907,8 @@ def _optional_posterior_id(value: Any) -> int | None:
     H2_E2E: the authority builder emits posterior_id as a string in some paths
     (event_reactor_adapter.py:5778) and as an int via the receipt in others, so
     coerce defensively. Returns None for None / empty / non-numeric — the
-    posterior trace is observability only and must never raise in the projection
-    rebuild (which runs on every live-order event append).
+    posterior trace is observability only and must never raise during incremental
+    projection or a recovery rebuild.
     """
     if value is None:
         return None

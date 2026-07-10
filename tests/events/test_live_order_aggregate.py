@@ -103,11 +103,120 @@ def test_live_order_projection_rebuilds_from_append_only_events():
         source_authority="engine_adapter",
     )
 
+    incremental = dict(
+        conn.execute(
+            "SELECT * FROM edli_live_order_projection WHERE aggregate_id = ?",
+            ("event-1:intent-1",),
+        ).fetchone()
+    )
     conn.execute("DELETE FROM edli_live_order_projection WHERE aggregate_id = ?", ("event-1:intent-1",))
     rebuilt = ledger.rebuild_projection("event-1:intent-1")
+    replayed = dict(
+        conn.execute(
+            "SELECT * FROM edli_live_order_projection WHERE aggregate_id = ?",
+            ("event-1:intent-1",),
+        ).fetchone()
+    )
 
     assert rebuilt.current_state == "EXECUTION_COMMAND_CREATED"
     assert rebuilt.last_sequence == 4
+    incremental.pop("updated_at")
+    replayed.pop("updated_at")
+    assert replayed == incremental
+
+
+def test_live_order_append_projects_incrementally_without_history_replay():
+    conn = _conn()
+    ledger = LiveOrderAggregateLedger(conn)
+    ledger.append_event(
+        aggregate_id="event-1:intent-1",
+        event_type="DecisionProofAccepted",
+        payload={"event_id": "event-1", "final_intent_id": "intent-1"},
+        occurred_at=NOW,
+        source_authority="decision_kernel",
+    )
+    statements: list[str] = []
+    conn.set_trace_callback(statements.append)
+    try:
+        ledger.append_event(
+            aggregate_id="event-1:intent-1",
+            event_type="SubmitPlanBuilt",
+            payload={"event_id": "event-1", "final_intent_id": "intent-1"},
+            occurred_at=NOW,
+            source_authority="engine_adapter",
+        )
+    finally:
+        conn.set_trace_callback(None)
+
+    normalized = [" ".join(sql.split()) for sql in statements]
+    assert not any("ORDER BY event_sequence ASC" in sql for sql in normalized)
+    assert any(sql.startswith("UPDATE edli_live_order_projection") for sql in normalized)
+    projection = ledger.get_projection("event-1:intent-1")
+    assert projection.last_sequence == 2
+    assert projection.current_state == "SUBMIT_PLAN_BUILT"
+
+
+def test_live_order_append_rolls_back_event_when_projection_fails(monkeypatch):
+    conn = _conn()
+    ledger = LiveOrderAggregateLedger(conn)
+
+    def _fail_projection(**_kwargs):
+        raise LiveOrderAggregateError("injected projection failure")
+
+    monkeypatch.setattr(ledger, "_project_appended_event", _fail_projection)
+    with pytest.raises(LiveOrderAggregateError, match="injected projection failure"):
+        ledger.append_event(
+            aggregate_id="event-1:intent-1",
+            event_type="DecisionProofAccepted",
+            payload={"event_id": "event-1", "final_intent_id": "intent-1"},
+            occurred_at=NOW,
+            source_authority="decision_kernel",
+        )
+
+    assert conn.execute("SELECT COUNT(*) FROM edli_live_order_events").fetchone()[0] == 0
+    assert conn.execute("SELECT COUNT(*) FROM edli_live_order_projection").fetchone()[0] == 0
+    assert conn.in_transaction is False
+
+
+def test_live_order_append_repairs_stale_projection_before_incremental_update():
+    conn = _conn()
+    ledger = LiveOrderAggregateLedger(conn)
+    first = ledger.append_event(
+        aggregate_id="event-1:intent-1",
+        event_type="DecisionProofAccepted",
+        payload={"event_id": "event-1", "final_intent_id": "intent-1"},
+        occurred_at=NOW,
+        source_authority="decision_kernel",
+    )
+    conn.execute(
+        """
+        UPDATE edli_live_order_projection
+           SET last_sequence = 0,
+               last_event_hash = 'stale'
+         WHERE aggregate_id = 'event-1:intent-1'
+        """
+    )
+    statements: list[str] = []
+    conn.set_trace_callback(statements.append)
+    try:
+        second = ledger.append_event(
+            aggregate_id="event-1:intent-1",
+            event_type="SubmitPlanBuilt",
+            payload={"event_id": "event-1", "final_intent_id": "intent-1"},
+            occurred_at=NOW,
+            source_authority="engine_adapter",
+            expected_parent_event_hash=first.event_hash,
+        )
+    finally:
+        conn.set_trace_callback(None)
+
+    normalized = [" ".join(sql.split()) for sql in statements]
+    assert any("ORDER BY event_sequence ASC" in sql for sql in normalized)
+    projection = ledger.get_projection("event-1:intent-1")
+    assert second.event_sequence == 2
+    assert projection.last_sequence == 2
+    assert projection.last_event_hash == second.event_hash
+    assert projection.current_state == "SUBMIT_PLAN_BUILT"
 
 
 def test_live_order_aggregate_rejects_parent_hash_mismatch():
