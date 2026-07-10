@@ -2128,6 +2128,69 @@ def test_forecast_event_bridge_does_not_cross_supersede_unrelated_family(
     assert "forecast_event_bridge" not in result["failing_surfaces"]
 
 
+def test_forecast_event_bridge_identity_match_does_not_mask_global_stall(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A valid old-family identity cannot green a globally stopped event bridge."""
+    sd = tmp_path / "state"
+    sd.mkdir()
+    _setup_healthy_state(sd)
+    monkeypatch.setattr(
+        live_health,
+        "_main_daemon_surface",
+        lambda status_summary, heartbeat: {
+            "ok": True,
+            "issue": None,
+            "attested": True,
+            "pid": 123,
+            "command": "python -m src.main",
+        },
+    )
+    now = datetime.now(timezone.utc)
+    identity_hash = "madrid-old-but-family-latest"
+    madrid_at = (now - timedelta(minutes=40)).isoformat()
+    _write_forecast_event_bridge_dbs(
+        sd,
+        posterior_computed_at=madrid_at,
+        fsr_created_at=(now - timedelta(minutes=40)).isoformat(),
+        posterior_identity_hash=identity_hash,
+        fsr_payload={
+            "city": "Madrid",
+            "target_date": "2026-07-09",
+            "metric": "high",
+            "source_run_id": identity_hash,
+            "cycle": "2026-07-08T06:00:00+00:00",
+            "available_at": madrid_at,
+        },
+    )
+    forecast_conn = sqlite3.connect(sd / "zeus-forecasts.db")
+    try:
+        forecast_conn.execute(
+            "INSERT INTO forecast_posteriors ("
+            "computed_at, runtime_layer, posterior_identity_hash, city, target_date, "
+            "temperature_metric, source_cycle_time, source_available_at"
+            ") VALUES (?, 'live', 'taipei-unbridged', 'Taipei', '2026-07-12', "
+            "'high', '2026-07-08T12:00:00+00:00', ?)",
+            (
+                (now - timedelta(minutes=20)).isoformat(),
+                (now - timedelta(minutes=21)).isoformat(),
+            ),
+        )
+        forecast_conn.commit()
+    finally:
+        forecast_conn.close()
+
+    result = compute_composite_live_health(state_dir=sd, now=now)
+
+    bridge = result["surfaces"]["forecast_event_bridge"]
+    assert bridge["ok"] is False
+    assert bridge["issue"].startswith("FORECAST_TO_EVENT_BRIDGE_STALLED")
+    assert bridge["latest_fsr_identity_to_latest_posterior_lag_seconds"] == 0
+    assert bridge["posterior_to_fsr_lag_seconds"] == 20 * 60
+    assert "forecast_event_bridge" in result["failing_surfaces"]
+
+
 def test_entry_q_version_not_evaluated_without_attested_main_daemon(
     tmp_path: Path,
 ) -> None:

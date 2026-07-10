@@ -1386,6 +1386,10 @@ def _forecast_to_event_bridge_surface(
         "event_queue": queue_detail,
         "max_lag_seconds": FORECAST_TO_EVENT_BRIDGE_BUDGET_SECONDS,
     }
+    global_bridge_stalled = (
+        lag_seconds > FORECAST_TO_EVENT_BRIDGE_BUDGET_SECONDS
+        and posterior_age > FORECAST_TO_EVENT_BRIDGE_BUDGET_SECONDS
+    )
     if identity_match is not None:
         if (
             identity_to_latest_lag_seconds is not None
@@ -1411,16 +1415,22 @@ def _forecast_to_event_bridge_surface(
                 ),
                 **detail,
             }
+        if global_bridge_stalled:
+            return {
+                "ok": False,
+                "issue": (
+                    "FORECAST_TO_EVENT_BRIDGE_STALLED:"
+                    f"posterior_newer_by={lag_seconds:.0f}s"
+                ),
+                **detail,
+            }
         return {
             "ok": True,
             "issue": None,
             "bridge_mode": "fsr_identity_match",
             **detail,
         }
-    if (
-        lag_seconds > FORECAST_TO_EVENT_BRIDGE_BUDGET_SECONDS
-        and posterior_age > FORECAST_TO_EVENT_BRIDGE_BUDGET_SECONDS
-    ):
+    if global_bridge_stalled:
         return {
             "ok": False,
             "issue": (

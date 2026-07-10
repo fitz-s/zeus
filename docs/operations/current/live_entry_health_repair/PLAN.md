@@ -60,6 +60,14 @@ Restore truthful live entry admission after the global auction reached a real wi
 - Acceptance: same-family newer posterior remains blocking; different-family newer posterior does not supersede; current live false positive clears after deploy.
 - Verification: bridge tests pass 7/7 and full live-health file passes 87/87. A read-only HEAD evaluation on current DB resolves the latest event identity to the exact same-family latest posterior with lag `0.0s` while preserving global posterior-to-FSR timing. Independent review found no P0/P1 and judged the slice deploy-safe.
 - Carry-forward P2: the health family query additionally scopes by `source_id`, while producer supersession currently relies on one canonical source per replacement product. This is true in current materialized live rows; if a product later admits multiple live source IDs, producer and health need one shared executable family-key contract.
+- Post-deploy review erratum: an adversarial counterexample proved the identity-match success return skipped the pre-existing global producer-stall condition. Current runtime was not stalled (`latest FSR created after global latest posterior`), but the shape could false-green if an unrelated-family posterior became globally newest and no later FSR existed. Corrective slice B3.1 is mandatory immediately.
+
+## Slice B3.1 -- Preserve global producer stall under identity match
+
+- Required conjunction: identity health has two independent axes. Same-family latest ordering proves the FSR's causal identity is not superseded; global posterior/event ordering proves the producer bridge has not stopped altogether.
+- Minimal repair: evaluate `posterior newer than latest FSR by > budget AND posterior age > budget` before an identity match can return healthy. Keep same-family supersession and payload-age checks unchanged.
+- Acceptance: unrelated-family newer posterior plus a newer FSR remains healthy; unrelated-family posterior with no later FSR becomes `FORECAST_TO_EVENT_BRIDGE_STALLED`; same-family newer posterior remains `IDENTITY_SUPERSEDED`.
+- Verification: bridge tests pass 8/8 and full live-health file passes 88/88. Independent re-review confirms the original P1 is closed: identity and non-identity branches now share the global stall predicate, and no healthy return precedes it.
 
 ## Slice B1 -- Post-trade leaked-thread recovery
 
