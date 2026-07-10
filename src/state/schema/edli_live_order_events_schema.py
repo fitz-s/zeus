@@ -69,7 +69,8 @@ CREATE TABLE IF NOT EXISTS edli_live_order_projection (
     -- driving posterior WITHOUT JSON_EXTRACT. Nullable; NULL on non-replacement
     -- orders (observability only — never changes order state).
     posterior_id INTEGER,
-    probability_authority TEXT
+    probability_authority TEXT,
+    projection_state_hash TEXT
 )
 """
 
@@ -177,6 +178,7 @@ def ensure_tables(conn: sqlite3.Connection) -> None:
     conn.execute(CREATE_PROJECTION_SQL)
     _ensure_projection_column(conn, "posterior_id", "INTEGER")
     _ensure_projection_column(conn, "probability_authority", "TEXT")
+    _ensure_projection_column(conn, "projection_state_hash", "TEXT")
     conn.execute(CREATE_USER_MESSAGE_DEDUP_SQL)
     conn.execute(CREATE_USER_CHANNEL_INBOX_SQL)
     conn.execute(CREATE_INDEX_SQL)

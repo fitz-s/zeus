@@ -170,6 +170,51 @@ class LiveOrderAggregateLedger:
             raise LiveOrderAggregateError(f"unsupported live-order event_type: {event_type!r}")
         if not payload.get("event_id"):
             raise LiveOrderAggregateError("live-order event payload requires event_id")
+
+        started_transaction = not self.conn.in_transaction
+        if started_transaction:
+            self.conn.execute("BEGIN IMMEDIATE")
+        self.conn.execute("SAVEPOINT edli_live_order_append")
+        try:
+            if not started_transaction:
+                # Upgrade a caller-owned DEFERRED transaction before any aggregate read.
+                self.conn.execute(
+                    """
+                    UPDATE edli_live_order_projection
+                       SET last_sequence = last_sequence
+                     WHERE aggregate_id = ?
+                    """,
+                    (aggregate_id,),
+                )
+            event, changed = self._append_event_locked(
+                aggregate_id=aggregate_id,
+                event_type=event_type,
+                payload=payload,
+                occurred_at=occurred_at,
+                source_authority=source_authority,
+                expected_parent_event_hash=expected_parent_event_hash,
+            )
+        except Exception:
+            self.conn.execute("ROLLBACK TO SAVEPOINT edli_live_order_append")
+            self.conn.execute("RELEASE SAVEPOINT edli_live_order_append")
+            if started_transaction:
+                self.conn.rollback()
+            raise
+        self.conn.execute("RELEASE SAVEPOINT edli_live_order_append")
+        if started_transaction and not changed:
+            self.conn.rollback()
+        return event
+
+    def _append_event_locked(
+        self,
+        *,
+        aggregate_id: str,
+        event_type: str,
+        payload: dict[str, Any],
+        occurred_at: datetime,
+        source_authority: str,
+        expected_parent_event_hash: str | None,
+    ) -> tuple[LiveOrderAggregateEvent, bool]:
         latest = self._latest_row(aggregate_id)
         if latest is not None and payload.get("event_id") != _payload(latest).get("event_id"):
             raise LiveOrderAggregateError("live-order aggregate event_id drift")
@@ -210,63 +255,50 @@ class LiveOrderAggregateLedger:
         if existing is not None:
             if existing["event_hash"] != event_hash:
                 raise LiveOrderAggregateError("live-order aggregate sequence collision")
-            return _event_from_row(existing)
+            return _event_from_row(existing), False
         needs_user_dedup = event_type in {"UserOrderObserved", "UserTradeObserved"}
-        started_transaction = not self.conn.in_transaction
-        if started_transaction:
-            self.conn.execute("BEGIN")
-        self.conn.execute("SAVEPOINT edli_live_order_append")
-        try:
-            if needs_user_dedup:
-                self._reserve_user_channel_message_hash(
-                    aggregate_id=aggregate_id,
-                    event_type=event_type,
-                    payload=payload,
-                    occurred_at=occurred_at,
-                )
-            self.conn.execute(
-                """
-                INSERT INTO edli_live_order_events (
-                    aggregate_event_id, aggregate_id, event_sequence, event_type,
-                    parent_event_hash, event_hash, payload_json, payload_hash,
-                    source_authority, occurred_at, created_at, schema_version
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
-                """,
-                (
-                    aggregate_event_id,
-                    aggregate_id,
-                    next_sequence,
-                    event_type,
-                    parent_hash,
-                    event_hash,
-                    payload_json,
-                    payload_hash,
-                    source_authority,
-                    _dt(occurred_at),
-                        _dt(datetime.now(timezone.utc)),
-                    ),
-                )
-            self._project_appended_event(
+        if needs_user_dedup:
+            self._reserve_user_channel_message_hash(
                 aggregate_id=aggregate_id,
-                projection=projection,
                 event_type=event_type,
                 payload=payload,
-                event_sequence=next_sequence,
-                event_hash=event_hash,
+                occurred_at=occurred_at,
             )
-            if event_type in PROFIT_AUDIT_TRIGGER_EVENTS:
-                from src.events.live_profit_audit import record_edli_live_profit_audit_from_aggregate
+        self.conn.execute(
+            """
+            INSERT INTO edli_live_order_events (
+                aggregate_event_id, aggregate_id, event_sequence, event_type,
+                parent_event_hash, event_hash, payload_json, payload_hash,
+                source_authority, occurred_at, created_at, schema_version
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+            """,
+            (
+                aggregate_event_id,
+                aggregate_id,
+                next_sequence,
+                event_type,
+                parent_hash,
+                event_hash,
+                payload_json,
+                payload_hash,
+                source_authority,
+                _dt(occurred_at),
+                _dt(datetime.now(timezone.utc)),
+            ),
+        )
+        self._project_appended_event(
+            aggregate_id=aggregate_id,
+            projection=projection,
+            event_type=event_type,
+            payload=payload,
+            event_sequence=next_sequence,
+            event_hash=event_hash,
+        )
+        if event_type in PROFIT_AUDIT_TRIGGER_EVENTS:
+            from src.events.live_profit_audit import record_edli_live_profit_audit_from_aggregate
 
-                record_edli_live_profit_audit_from_aggregate(self.conn, aggregate_id)
-            event = self.get_event(aggregate_event_id)
-        except Exception:
-            self.conn.execute("ROLLBACK TO SAVEPOINT edli_live_order_append")
-            self.conn.execute("RELEASE SAVEPOINT edli_live_order_append")
-            if started_transaction:
-                self.conn.rollback()
-            raise
-        self.conn.execute("RELEASE SAVEPOINT edli_live_order_append")
-        return event
+            record_edli_live_profit_audit_from_aggregate(self.conn, aggregate_id)
+        return self.get_event(aggregate_event_id), True
 
     def _projection_row_for_append(
         self,
@@ -283,9 +315,16 @@ class LiveOrderAggregateLedger:
             return None
 
         event_id = str(_payload(latest)["event_id"])
+        projection_hash_current = (
+            projection is not None
+            and str(projection["projection_state_hash"] or "")
+            == _projection_state_hash(_projection_state_from_row(projection))
+        )
         projection_current = (
             projection is not None
+            and projection_hash_current
             and int(projection["last_sequence"]) == int(latest["event_sequence"])
+            and str(projection["last_event_type"] or "") == str(latest["event_type"])
             and str(projection["last_event_hash"] or "") == str(latest["event_hash"])
             and str(projection["event_id"]) == event_id
         )
@@ -297,7 +336,10 @@ class LiveOrderAggregateLedger:
             ).fetchone()
         if (
             projection is None
+            or str(projection["projection_state_hash"] or "")
+            != _projection_state_hash(_projection_state_from_row(projection))
             or int(projection["last_sequence"]) != int(latest["event_sequence"])
+            or str(projection["last_event_type"] or "") != str(latest["event_type"])
             or str(projection["last_event_hash"] or "") != str(latest["event_hash"])
             or str(projection["event_id"]) != event_id
         ):
@@ -331,6 +373,7 @@ class LiveOrderAggregateLedger:
             _dt(datetime.now(timezone.utc)),
             state.posterior_id,
             state.probability_authority,
+            _projection_state_hash(state),
         )
         if projection is None:
             try:
@@ -340,8 +383,8 @@ class LiveOrderAggregateLedger:
                         aggregate_id, event_id, final_intent_id, current_state,
                         last_sequence, last_event_type, last_event_hash,
                         pending_reconcile, venue_order_id, updated_at, schema_version,
-                        posterior_id, probability_authority
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
+                        posterior_id, probability_authority, projection_state_hash
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)
                     """,
                     (aggregate_id, *values),
                 )
@@ -365,16 +408,21 @@ class LiveOrderAggregateLedger:
                    updated_at = ?,
                    schema_version = 1,
                    posterior_id = ?,
-                   probability_authority = ?
+                   probability_authority = ?,
+                   projection_state_hash = ?
              WHERE aggregate_id = ?
                AND last_sequence = ?
+               AND last_event_type = ?
                AND last_event_hash = ?
+               AND projection_state_hash = ?
             """,
             (
                 *values,
                 aggregate_id,
                 int(projection["last_sequence"]),
+                str(projection["last_event_type"]),
                 str(projection["last_event_hash"]),
+                str(projection["projection_state_hash"]),
             ),
         )
         if cursor.rowcount != 1:
@@ -407,8 +455,8 @@ class LiveOrderAggregateLedger:
                 aggregate_id, event_id, final_intent_id, current_state,
                 last_sequence, last_event_type, last_event_hash,
                 pending_reconcile, venue_order_id, updated_at, schema_version,
-                posterior_id, probability_authority
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
+                posterior_id, probability_authority, projection_state_hash
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)
             ON CONFLICT(aggregate_id) DO UPDATE SET
                 event_id = excluded.event_id,
                 final_intent_id = excluded.final_intent_id,
@@ -420,12 +468,9 @@ class LiveOrderAggregateLedger:
                 venue_order_id = excluded.venue_order_id,
                 updated_at = excluded.updated_at,
                 schema_version = excluded.schema_version,
-                -- H2_E2E: COALESCE so a later rebuild from events that lack a
-                -- decision_audit block (e.g. a reconcile-only re-projection)
-                -- never clears an already-recorded posterior link. NULL on
-                -- canonical orders. Observability only.
-                posterior_id = COALESCE(excluded.posterior_id, edli_live_order_projection.posterior_id),
-                probability_authority = COALESCE(excluded.probability_authority, edli_live_order_projection.probability_authority)
+                posterior_id = excluded.posterior_id,
+                probability_authority = excluded.probability_authority,
+                projection_state_hash = excluded.projection_state_hash
             """,
             (
                 aggregate_id,
@@ -440,6 +485,7 @@ class LiveOrderAggregateLedger:
                 _dt(datetime.now(timezone.utc)),
                 state.posterior_id,
                 state.probability_authority,
+                _projection_state_hash(state),
             ),
         )
         return self.get_projection(aggregate_id)
@@ -802,6 +848,20 @@ def _projection_state_from_row(row: sqlite3.Row) -> _ProjectionState:
         venue_order_id=row["venue_order_id"],
         posterior_id=_optional_posterior_id(row["posterior_id"]),
         probability_authority=row["probability_authority"],
+    )
+
+
+def _projection_state_hash(state: _ProjectionState) -> str:
+    return stable_hash(
+        {
+            "event_id": state.event_id,
+            "final_intent_id": state.final_intent_id,
+            "current_state": state.current_state,
+            "pending_reconcile": state.pending_reconcile,
+            "venue_order_id": state.venue_order_id,
+            "posterior_id": state.posterior_id,
+            "probability_authority": state.probability_authority,
+        }
     )
 
 

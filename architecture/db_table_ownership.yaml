@@ -1301,6 +1301,7 @@ tables:
       - {name: venue_order_id, type: TEXT, nullable: true}
       - {name: updated_at, type: TEXT, nullable: false}
       - {name: schema_version, type: INTEGER, nullable: false}
+      - {name: projection_state_hash, type: TEXT, nullable: true}
     notes: >
       Deterministic projection of edli_live_order_events. The append-only event
       log remains source of truth; this table is rebuildable current state.

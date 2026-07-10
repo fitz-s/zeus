@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import sqlite3
+import threading
+import time
 from datetime import datetime, timezone
 
 import pytest
@@ -217,6 +219,210 @@ def test_live_order_append_repairs_stale_projection_before_incremental_update():
     assert projection.last_sequence == 2
     assert projection.last_event_hash == second.event_hash
     assert projection.current_state == "SUBMIT_PLAN_BUILT"
+
+
+@pytest.mark.parametrize(
+    ("column", "corrupt_value"),
+    [
+        ("current_state", "CORRUPT"),
+        ("last_event_type", "SubmitRejected"),
+        ("pending_reconcile", 0),
+        ("venue_order_id", "wrong-order"),
+        ("final_intent_id", "wrong-intent"),
+        ("posterior_id", 999),
+        ("probability_authority", "wrong-authority"),
+    ],
+)
+def test_live_order_append_repairs_projection_state_hash_mismatch(
+    column,
+    corrupt_value,
+):
+    conn = _conn()
+    ledger = LiveOrderAggregateLedger(conn)
+    _seed_command_with_submit_attempt(ledger)
+    ledger.append_event(
+        aggregate_id="event-1:intent-1",
+        event_type="SubmitUnknown",
+        payload={
+            "event_id": "event-1",
+            "final_intent_id": "intent-1",
+            "execution_command_id": "cmd-1",
+            "venue_order_id": "venue-unknown",
+        },
+        occurred_at=NOW,
+        source_authority="existing_executor",
+    )
+    ledger.append_event(
+        aggregate_id="event-1:intent-1",
+        event_type="DecisionProofAccepted",
+        payload={
+            "event_id": "event-1",
+            "final_intent_id": "intent-1",
+            "decision_audit": {
+                "posterior_id": 42,
+                "probability_authority": "replacement",
+            },
+        },
+        occurred_at=NOW,
+        source_authority="decision_kernel",
+    )
+    conn.execute(
+        f"UPDATE edli_live_order_projection SET {column} = ? WHERE aggregate_id = ?",
+        (corrupt_value, "event-1:intent-1"),
+    )
+    statements: list[str] = []
+    conn.set_trace_callback(statements.append)
+    try:
+        ledger.append_event(
+            aggregate_id="event-1:intent-1",
+            event_type="SubmitPlanBuilt",
+            payload={"event_id": "event-1", "final_intent_id": "intent-1"},
+            occurred_at=NOW,
+            source_authority="engine_adapter",
+        )
+    finally:
+        conn.set_trace_callback(None)
+
+    normalized = [" ".join(sql.split()) for sql in statements]
+    assert any("ORDER BY event_sequence ASC" in sql for sql in normalized)
+    row = conn.execute(
+        "SELECT * FROM edli_live_order_projection WHERE aggregate_id = ?",
+        ("event-1:intent-1",),
+    ).fetchone()
+    assert row["current_state"] == "SUBMIT_PLAN_BUILT"
+    assert row["pending_reconcile"] == 1
+    assert row["venue_order_id"] == "venue-unknown"
+    assert row["final_intent_id"] == "intent-1"
+    assert row["posterior_id"] == 42
+    assert row["probability_authority"] == "replacement"
+    assert row["projection_state_hash"]
+
+
+def test_live_order_append_serializes_before_reading_aggregate_tail(tmp_path):
+    path = tmp_path / "live-order-race.db"
+    conn1 = sqlite3.connect(path, timeout=2.0)
+    conn1.row_factory = sqlite3.Row
+    conn1.execute("PRAGMA journal_mode = WAL")
+    ledger1 = LiveOrderAggregateLedger(conn1)
+    conn1.commit()
+
+    conn2 = sqlite3.connect(path, timeout=2.0, check_same_thread=False)
+    conn2.row_factory = sqlite3.Row
+    ledger2 = LiveOrderAggregateLedger(conn2)
+    conn2.commit()
+
+    first = ledger1.append_event(
+        aggregate_id="event-1:intent-1",
+        event_type="DecisionProofAccepted",
+        payload={"event_id": "event-1", "final_intent_id": "intent-1"},
+        occurred_at=NOW,
+        source_authority="decision_kernel",
+    )
+    started = threading.Event()
+    results = []
+    errors = []
+
+    def _append_second():
+        started.set()
+        try:
+            results.append(
+                ledger2.append_event(
+                    aggregate_id="event-1:intent-1",
+                    event_type="SubmitPlanBuilt",
+                    payload={"event_id": "event-1", "final_intent_id": "intent-1"},
+                    occurred_at=NOW,
+                    source_authority="engine_adapter",
+                    expected_parent_event_hash=first.event_hash,
+                )
+            )
+            conn2.commit()
+        except Exception as exc:  # noqa: BLE001 - asserted below
+            errors.append(exc)
+
+    thread = threading.Thread(target=_append_second)
+    thread.start()
+    assert started.wait(timeout=1.0)
+    time.sleep(0.05)
+    assert thread.is_alive()
+    conn1.commit()
+    thread.join(timeout=2.0)
+    conn2.close()
+
+    assert not thread.is_alive()
+    assert errors == []
+    assert [event.event_sequence for event in results] == [2]
+    projection = ledger1.get_projection("event-1:intent-1")
+    assert projection.last_sequence == 2
+    assert projection.current_state == "SUBMIT_PLAN_BUILT"
+
+
+def test_live_order_projection_hash_migrates_legacy_row_and_repairs_on_append():
+    from src.state.schema.edli_live_order_events_schema import ensure_tables
+
+    conn = _conn()
+    ledger = LiveOrderAggregateLedger(conn)
+    ledger.append_event(
+        aggregate_id="event-legacy:intent-legacy",
+        event_type="DecisionProofAccepted",
+        payload={"event_id": "event-legacy", "final_intent_id": "intent-legacy"},
+        occurred_at=NOW,
+        source_authority="decision_kernel",
+    )
+    conn.commit()
+    conn.execute(
+        "ALTER TABLE edli_live_order_projection DROP COLUMN projection_state_hash"
+    )
+    conn.commit()
+
+    ensure_tables(conn)
+    columns = {
+        row[1] for row in conn.execute("PRAGMA table_info(edli_live_order_projection)")
+    }
+    assert "projection_state_hash" in columns
+    assert conn.execute(
+        "SELECT projection_state_hash FROM edli_live_order_projection "
+        "WHERE aggregate_id = 'event-legacy:intent-legacy'"
+    ).fetchone()[0] is None
+
+    migrated = LiveOrderAggregateLedger(conn, initialize_schema=False)
+    migrated.append_event(
+        aggregate_id="event-legacy:intent-legacy",
+        event_type="SubmitPlanBuilt",
+        payload={"event_id": "event-legacy", "final_intent_id": "intent-legacy"},
+        occurred_at=NOW,
+        source_authority="engine_adapter",
+    )
+    row = conn.execute(
+        "SELECT last_sequence, current_state, projection_state_hash "
+        "FROM edli_live_order_projection "
+        "WHERE aggregate_id = 'event-legacy:intent-legacy'"
+    ).fetchone()
+    assert tuple(row[:2]) == (2, "SUBMIT_PLAN_BUILT")
+    assert row[2]
+
+
+def test_live_order_append_respects_caller_owned_transaction_rollback():
+    conn = _conn()
+    ledger = LiveOrderAggregateLedger(conn)
+    conn.commit()
+    conn.execute("BEGIN IMMEDIATE")
+
+    ledger.append_event(
+        aggregate_id="event-rollback:intent-rollback",
+        event_type="DecisionProofAccepted",
+        payload={
+            "event_id": "event-rollback",
+            "final_intent_id": "intent-rollback",
+        },
+        occurred_at=NOW,
+        source_authority="decision_kernel",
+    )
+    assert conn.execute("SELECT COUNT(*) FROM edli_live_order_events").fetchone()[0] == 1
+    assert conn.execute("SELECT COUNT(*) FROM edli_live_order_projection").fetchone()[0] == 1
+
+    conn.rollback()
+    assert conn.execute("SELECT COUNT(*) FROM edli_live_order_events").fetchone()[0] == 0
+    assert conn.execute("SELECT COUNT(*) FROM edli_live_order_projection").fetchone()[0] == 0
 
 
 def test_live_order_aggregate_rejects_parent_hash_mismatch():
