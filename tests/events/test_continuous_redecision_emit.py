@@ -1,5 +1,5 @@
 # Created: 2026-05-31
-# Last reused or audited: 2026-07-09
+# Last reused/audited: 2026-07-10
 # Authority basis: GOAL #36 continuous trading + PLAN_CONTINUOUS_REDECISION_MAX_ALPHA_2026-05-31.md.
 #   Proves the continuous re-decision emit: scan_committed_snapshots(source=<per-cycle>) re-emits a
 #   fresh FSR-equivalent each cycle (distinct event_id) instead of deduping to the consumed FSR, so

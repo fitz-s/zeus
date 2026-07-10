@@ -1,5 +1,5 @@
 # Created: 2026-05-31
-# Last reused or audited: 2026-06-25
+# Last reused/audited: 2026-07-10
 # Authority basis: PLAN_CONTINUOUS_REDECISION_MAX_ALPHA_2026-05-31.md (v2, critic-resolved) +
 #   GOAL #36 expanded (continuous entry+exit, evidence-gated). RED-first relationship tests for the
 #   continuous re-decision contract. These pin the cache (P1) + cheap-screen/enqueue (P2) API BEFORE
@@ -44,19 +44,26 @@ def _mem_world() -> sqlite3.Connection:
     return conn
 
 
-def _event_for_refutation(*, causal_snapshot_id: str = "snap-1", price_marker: str = "same"):
+def _event_for_refutation(
+    *,
+    causal_snapshot_id: str = "snap-1",
+    price_marker: str = "same",
+    city: str = "Shanghai",
+    target_date: str = "2026-06-19",
+    metric: str = "low",
+):
     return make_opportunity_event(
         event_type="FORECAST_SNAPSHOT_READY",
-        entity_key="Shanghai|2026-06-19|low|run-1",
+        entity_key=f"{city}|{target_date}|{metric}|run-1",
         source="cycle-test",
         observed_at="2026-06-18T00:00:00+00:00",
         available_at="2026-06-18T00:00:00+00:00",
         received_at="2026-06-18T00:00:01+00:00",
         causal_snapshot_id=causal_snapshot_id,
         payload={
-            "city": "Shanghai",
-            "target_date": "2026-06-19",
-            "metric": "low",
+            "city": city,
+            "target_date": target_date,
+            "metric": metric,
             "source_run_id": "run-1",
             "price_marker": price_marker,
         },
@@ -69,6 +76,11 @@ def _insert_terminal_no_value_regret(
     *,
     event_id: str,
     causal_snapshot_id: str = "snap-1",
+    city: str = "Shanghai",
+    target_date: str = "2026-06-19",
+    metric: str = "low",
+    rejection_reason: str = "TRADE_SCORE_NON_POSITIVE",
+    created_at: str = "2026-06-18T00:00:10+00:00",
 ) -> None:
     conn.execute(
         """
@@ -76,11 +88,21 @@ def _insert_terminal_no_value_regret(
             regret_event_id, event_id, rejection_stage, rejection_reason, regret_bucket,
             decision_time, city, target_date, metric, family_id, causal_snapshot_id,
             created_at, schema_version
-        ) VALUES (?, ?, 'TRADE_SCORE', 'TRADE_SCORE_NON_POSITIVE', 'NO_EDGE',
-                  '2026-06-18T00:00:10+00:00', 'Shanghai', '2026-06-19', 'low',
-                  'family-shanghai-low', ?, '2026-06-18T00:00:10+00:00', 1)
+        ) VALUES (?, ?, 'TRADE_SCORE', ?, 'NO_EDGE',
+                  '2026-06-18T00:00:10+00:00', ?, ?, ?,
+                  ?, ?, ?, 1)
         """,
-        ("regret-" + event_id, event_id, causal_snapshot_id),
+        (
+            "regret-" + event_id,
+            event_id,
+            rejection_reason,
+            city,
+            target_date,
+            metric,
+            f"family-{city}-{metric}",
+            causal_snapshot_id,
+            created_at,
+        ),
     )
 
 
@@ -106,6 +128,124 @@ def test_recent_no_value_refutation_suppresses_same_evidence_only():
         fresh_payload,
         decision_time=datetime.fromisoformat("2026-06-18T00:05:00+00:00"),
     ) is None
+
+
+def test_recent_no_value_refutations_batch_one_query_for_same_family():
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    init_schema(conn)
+    store = EventStore(conn)
+    prior = _event_for_refutation()
+    store.insert_or_ignore(prior)
+    _insert_terminal_no_value_regret(conn, event_id=prior.event_id)
+
+    same = _event_for_refutation()
+    fresh = _event_for_refutation(causal_snapshot_id="snap-2", price_marker="changed")
+    statements: list[str] = []
+    conn.set_trace_callback(statements.append)
+    try:
+        refutations = cr.recent_no_value_event_refutations(
+            conn,
+            (same, fresh),
+            decision_time=datetime.fromisoformat("2026-06-18T00:05:00+00:00"),
+        )
+    finally:
+        conn.set_trace_callback(None)
+
+    assert set(refutations) == {same.event_id}
+    no_value_reads = [
+        sql
+        for sql in statements
+        if "no_trade_regret_events n" in sql
+    ]
+    assert len(no_value_reads) == 1
+    assert not any("sqlite_master" in sql for sql in statements)
+
+
+def test_recent_no_value_refutations_batch_isolates_families_and_matches_wrapper():
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    init_schema(conn)
+    store = EventStore(conn)
+    shanghai = _event_for_refutation()
+    wuhan = _event_for_refutation(city="Wuhan", metric="high")
+    for prior in (shanghai, wuhan):
+        store.insert_or_ignore(prior)
+    _insert_terminal_no_value_regret(conn, event_id=shanghai.event_id)
+    _insert_terminal_no_value_regret(
+        conn,
+        event_id=wuhan.event_id,
+        city="Wuhan",
+        metric="high",
+    )
+
+    decision_time = datetime.fromisoformat("2026-06-18T00:05:00+00:00")
+    statements: list[str] = []
+    conn.set_trace_callback(statements.append)
+    try:
+        batched = cr.recent_no_value_event_refutations(
+            conn,
+            (shanghai, wuhan),
+            decision_time=decision_time,
+        )
+    finally:
+        conn.set_trace_callback(None)
+
+    assert set(batched) == {shanghai.event_id, wuhan.event_id}
+    assert batched[shanghai.event_id] == cr.recent_no_value_event_refutation(
+        conn,
+        shanghai,
+        decision_time=decision_time,
+    )
+    assert batched[wuhan.event_id] == cr.recent_no_value_event_refutation(
+        conn,
+        wuhan,
+        decision_time=decision_time,
+    )
+    reads = [sql for sql in statements if "no_trade_regret_events n" in sql]
+    assert len(reads) == 1
+    assert "('Shanghai', '2026-06-19', 'low')" in reads[0]
+    assert "('Wuhan', '2026-06-19', 'high')" in reads[0]
+
+
+def test_recent_no_value_refutations_preserves_per_family_limit_25():
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    init_schema(conn)
+    store = EventStore(conn)
+    prior = _event_for_refutation()
+    store.insert_or_ignore(prior)
+    _insert_terminal_no_value_regret(
+        conn,
+        event_id=prior.event_id,
+        created_at="2026-06-18T00:00:00+00:00",
+    )
+    for index in range(1, 26):
+        _insert_terminal_no_value_regret(
+            conn,
+            event_id=f"operational-{index}",
+            causal_snapshot_id=f"other-{index}",
+            rejection_reason=(
+                "EVENT_BOUND_ALL_CANDIDATES_REJECTED:n=1 other=1; "
+                f"best_rejected={index}C missing_reason="
+                "EDLI_LIVE_ORDER_ACTIVE_DUPLICATE_SUPPRESSED:condition_id=0xabc"
+            ),
+            created_at=f"2026-06-18T00:00:{index:02d}+00:00",
+        )
+
+    decision_time = datetime.fromisoformat("2026-06-18T00:05:00+00:00")
+    assert cr.recent_no_value_event_refutation(
+        conn,
+        prior,
+        decision_time=decision_time,
+    ) is None
+
+    conn.execute("DELETE FROM no_trade_regret_events WHERE event_id = 'operational-1'")
+    assert cr.recent_no_value_event_refutation(
+        conn,
+        prior,
+        decision_time=decision_time,
+    ) is not None
 
 
 def test_recent_no_value_refutation_ignores_operational_duplicate_summary():

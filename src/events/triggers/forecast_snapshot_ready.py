@@ -1144,16 +1144,17 @@ class ForecastSnapshotReadyTrigger:
                 source=source,
                 event_type=event_type,
             )
-            if suppress_recent_no_value_refutations:
-                from src.events.continuous_redecision import recent_no_value_event_refutation
-
-                if recent_no_value_event_refutation(
-                    self._writer.conn,
-                    event,
-                    decision_time=decision_time,
-                ) is not None:
-                    continue
             results.append(event)
+        if suppress_recent_no_value_refutations and results:
+            from src.events.continuous_redecision import recent_no_value_event_refutations
+
+            refutations = recent_no_value_event_refutations(
+                self._writer.conn,
+                results,
+                decision_time=decision_time,
+            )
+            if refutations:
+                results = [event for event in results if event.event_id not in refutations]
         return results
 
     def scan_committed_snapshots(

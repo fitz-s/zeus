@@ -133,9 +133,15 @@ class LiveOrderProjection:
 
 
 class LiveOrderAggregateLedger:
-    def __init__(self, conn: sqlite3.Connection) -> None:
+    def __init__(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        initialize_schema: bool = True,
+    ) -> None:
         self.conn = conn
-        ensure_tables(conn)
+        if initialize_schema:
+            ensure_tables(conn)
 
     def append_event(
         self,

@@ -30,6 +30,7 @@ import json
 import math
 import os
 import sqlite3
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
@@ -1149,14 +1150,14 @@ def read_recent_full_economics_rejections(
     return out
 
 
-def recent_no_value_event_refutation(
+def recent_no_value_event_refutations(
     conn: sqlite3.Connection,
-    event: OpportunityEvent,
+    events: Sequence[OpportunityEvent],
     *,
     decision_time: datetime | None = None,
     cooldown_seconds: float = FULL_DECISION_FAMILY_REFUTATION_COOLDOWN_SECONDS,
-) -> RecentNoValueEventRefutation | None:
-    """Return a same-evidence terminal no-value refutation for ordinary intake events.
+) -> dict[str, RecentNoValueEventRefutation]:
+    """Batch same-evidence terminal no-value refutations for intake events.
 
     This is an admission de-duplication guard, not an edge/no-edge cap. It only
     suppresses a newly minted ordinary FSR/DAY0 event when the same
@@ -1167,74 +1168,139 @@ def recent_no_value_event_refutation(
     Day0 is a separate observation lane and only Day0 no-value can refute Day0.
     """
 
-    if event.event_type not in {"FORECAST_SNAPSHOT_READY", "DAY0_EXTREME_UPDATED"}:
-        return None
-    if not _table_exists(conn, "no_trade_regret_events") or not _table_exists(conn, "opportunity_events"):
-        return None
-    try:
-        payload = json.loads(event.payload_json)
-    except (TypeError, ValueError):
-        return None
-    city = str(payload.get("city") or "").strip()
-    target_date = str(payload.get("target_date") or "").strip()
-    metric = str(payload.get("metric") or "").strip()
-    if not (city and target_date and metric):
-        return None
-
     now = decision_time.astimezone(timezone.utc) if decision_time is not None else datetime.now(timezone.utc)
     cutoff = (now - timedelta(seconds=max(0.0, float(cooldown_seconds)))).isoformat()
-    causal_snapshot_id = str(event.causal_snapshot_id or "").strip()
-    payload_digest = str(event.payload_hash or "").strip()
+    event_inputs: dict[
+        tuple[str, str, str],
+        list[tuple[OpportunityEvent, str, str]],
+    ] = {}
+    for event in events:
+        if event.event_type not in {"FORECAST_SNAPSHOT_READY", "DAY0_EXTREME_UPDATED"}:
+            continue
+        try:
+            payload = json.loads(event.payload_json)
+        except (TypeError, ValueError):
+            continue
+        city = str(payload.get("city") or "").strip()
+        target_date = str(payload.get("target_date") or "").strip()
+        metric = str(payload.get("metric") or "").strip()
+        if not (city and target_date and metric):
+            continue
+        event_inputs.setdefault((city, target_date, metric), []).append(
+            (
+                event,
+                str(event.causal_snapshot_id or "").strip(),
+                str(event.payload_hash or "").strip(),
+            )
+        )
+    if not event_inputs:
+        return {}
+
+    family_values_sql = ", ".join("(?, ?, ?)" for _ in event_inputs)
+    family_params = tuple(value for family in event_inputs for value in family)
+    rows_by_family: dict[tuple[str, str, str], list[sqlite3.Row | tuple]] = {}
     try:
         rows = conn.execute(
             f"""
-            SELECT n.event_id,
-                   n.rejection_reason,
-                   n.created_at,
-                   n.causal_snapshot_id AS regret_causal_snapshot_id,
-                   e.causal_snapshot_id AS event_causal_snapshot_id,
-                   e.payload_hash,
-                   e.event_type
-              FROM no_trade_regret_events n
-              LEFT JOIN opportunity_events e ON e.event_id = n.event_id
-             WHERE n.city = ?
-               AND n.target_date = ?
-               AND n.metric = ?
-               AND n.created_at >= ?
-               AND ({_TERMINAL_NO_VALUE_SQL})
-               AND ({_FORECAST_ONLY_NO_VALUE_REFUTATION_GUARD_SQL})
-             ORDER BY n.created_at DESC
-             LIMIT 25
+            WITH requested_families(city, target_date, metric) AS (
+                VALUES {family_values_sql}
+            ), ranked AS (
+                SELECT n.city,
+                       n.target_date,
+                       n.metric,
+                       n.event_id,
+                       n.rejection_reason,
+                       n.created_at,
+                       n.causal_snapshot_id AS regret_causal_snapshot_id,
+                       e.causal_snapshot_id AS event_causal_snapshot_id,
+                       e.payload_hash,
+                       e.event_type,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY n.city, n.target_date, n.metric
+                           ORDER BY n.created_at DESC
+                       ) AS family_rank
+                  FROM requested_families f
+                  JOIN no_trade_regret_events n
+                    ON n.city = f.city
+                   AND n.target_date = f.target_date
+                   AND n.metric = f.metric
+                  LEFT JOIN opportunity_events e ON e.event_id = n.event_id
+                 WHERE n.created_at >= ?
+                   AND ({_TERMINAL_NO_VALUE_SQL})
+                   AND ({_FORECAST_ONLY_NO_VALUE_REFUTATION_GUARD_SQL})
+            )
+            SELECT city,
+                   target_date,
+                   metric,
+                   event_id,
+                   rejection_reason,
+                   created_at,
+                   regret_causal_snapshot_id,
+                   event_causal_snapshot_id,
+                   payload_hash,
+                   event_type
+              FROM ranked
+             WHERE family_rank <= 25
+             ORDER BY created_at DESC
             """,
-            (city, target_date, metric, cutoff),
+            (*family_params, cutoff),
         ).fetchall()
     except sqlite3.Error:
-        return None
-
+        rows = ()
     for row in rows:
-        reason = str(row[1] or "")
-        if _is_operational_non_value_summary(reason):
+        family = (str(row[0] or ""), str(row[1] or ""), str(row[2] or ""))
+        if family not in event_inputs:
             continue
-        row_event_type = str(row[6] or "").strip()
-        if not _no_value_refutation_event_types_compatible(event.event_type, row_event_type):
-            continue
-        prior_payload_hash = str(row[5] or "").strip()
-        if payload_digest and prior_payload_hash and payload_digest == prior_payload_hash:
-            return RecentNoValueEventRefutation(
-                event_id=str(row[0] or ""),
-                rejection_reason=reason,
-                created_at=str(row[2] or ""),
-                evidence_match="payload_hash",
-            )
-        prior_causal = str(row[4] or row[3] or "").strip()
-        if causal_snapshot_id and prior_causal and causal_snapshot_id == prior_causal:
-            return RecentNoValueEventRefutation(
-                event_id=str(row[0] or ""),
-                rejection_reason=reason,
-                created_at=str(row[2] or ""),
-                evidence_match="causal_snapshot_id",
-            )
-    return None
+        family_rows = rows_by_family.setdefault(family, [])
+        if len(family_rows) < 25:
+            family_rows.append(row)
+
+    refutations: dict[str, RecentNoValueEventRefutation] = {}
+    for family, family_events in event_inputs.items():
+        rows = rows_by_family.get(family, ())
+        for event, causal_snapshot_id, payload_digest in family_events:
+            for row in rows:
+                reason = str(row[4] or "")
+                if _is_operational_non_value_summary(reason):
+                    continue
+                row_event_type = str(row[9] or "").strip()
+                if not _no_value_refutation_event_types_compatible(event.event_type, row_event_type):
+                    continue
+                prior_payload_hash = str(row[8] or "").strip()
+                if payload_digest and prior_payload_hash and payload_digest == prior_payload_hash:
+                    evidence_match = "payload_hash"
+                else:
+                    prior_causal = str(row[7] or row[6] or "").strip()
+                    if not (
+                        causal_snapshot_id
+                        and prior_causal
+                        and causal_snapshot_id == prior_causal
+                    ):
+                        continue
+                    evidence_match = "causal_snapshot_id"
+                refutations[event.event_id] = RecentNoValueEventRefutation(
+                    event_id=str(row[3] or ""),
+                    rejection_reason=reason,
+                    created_at=str(row[5] or ""),
+                    evidence_match=evidence_match,
+                )
+                break
+    return refutations
+
+
+def recent_no_value_event_refutation(
+    conn: sqlite3.Connection,
+    event: OpportunityEvent,
+    *,
+    decision_time: datetime | None = None,
+    cooldown_seconds: float = FULL_DECISION_FAMILY_REFUTATION_COOLDOWN_SECONDS,
+) -> RecentNoValueEventRefutation | None:
+    return recent_no_value_event_refutations(
+        conn,
+        (event,),
+        decision_time=decision_time,
+        cooldown_seconds=cooldown_seconds,
+    ).get(event.event_id)
 
 
 def screen_reprice(

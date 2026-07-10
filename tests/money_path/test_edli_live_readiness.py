@@ -1,8 +1,10 @@
 # Created: 2026-05-25
-# Last reused/audited: 2026-07-09
+# Last reused/audited: 2026-07-10
 # Authority basis: docs/operations/edli_v1/EDLI_REDEMPTION_FINAL_PACKAGE_SPEC.md §14 full-live increment.
 from __future__ import annotations
 
+import ast
+import inspect
 import json
 import sqlite3
 import threading
@@ -574,6 +576,95 @@ def test_submit_disabled_live_bridge_writes_live_order_aggregate_without_command
     assert projection["current_state"] == "CAP_TRANSITIONED"
 
 
+def test_live_adapter_persists_live_order_aggregate_only_in_live_cap_db(monkeypatch):
+    from src.engine import event_reactor_adapter as adapter
+    from src.riskguard.risk_level import RiskLevel
+    from tests.decision_kernel.no_submit_fixtures import build_test_no_submit_proof_bundle
+
+    trade_conn = sqlite3.connect(":memory:")
+    trade_conn.row_factory = sqlite3.Row
+    world_conn = sqlite3.connect(":memory:")
+    world_conn.row_factory = sqlite3.Row
+    event = _forecast_event()
+    decision_time = datetime(2026, 5, 24, 18, 10, tzinfo=timezone.utc)
+    accepted = _accepted_receipt(event)
+    accepted = replace(
+        accepted,
+        decision_proof_bundle=build_test_no_submit_proof_bundle(
+            event,
+            accepted,
+            decision_time=decision_time,
+        ),
+    )
+    monkeypatch.setattr(
+        adapter,
+        "build_event_bound_no_submit_receipt",
+        lambda *_args, **_kwargs: accepted,
+    )
+
+    submit = adapter.event_bound_live_adapter_from_trade_conn(
+        trade_conn,
+        live_cap_conn=world_conn,
+        get_current_level=lambda: RiskLevel.GREEN,
+        real_order_submit_enabled=False,
+        pre_submit_authority_provider=_pre_submit_authority_provider,
+    )
+    assert not world_conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE name LIKE 'edli_live_order_%' LIMIT 1"
+    ).fetchone()
+    receipt = submit(event, decision_time)
+
+    trade_tables = {
+        row[0]
+        for row in trade_conn.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table'"
+        )
+    }
+    world_event_types = [
+        row[0]
+        for row in world_conn.execute(
+            "SELECT event_type FROM edli_live_order_events ORDER BY event_sequence"
+        )
+    ]
+    assert receipt.side_effect_status == "SUBMIT_DISABLED"
+    assert not {"edli_live_order_events", "edli_live_order_projection"} & trade_tables
+    assert world_event_types == [
+        "DecisionProofAccepted",
+        "SubmitPlanBuilt",
+        "PreSubmitRevalidated",
+        "LiveCapReserved",
+        "ExecutionCommandCreated",
+        "CapTransitioned",
+    ]
+
+
+def test_event_reactor_routes_live_order_aggregate_to_world_connection():
+    from src.events import reactor
+
+    tree = ast.parse(inspect.getsource(reactor.run_edli_event_reactor_cycle))
+    calls = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "event_bound_live_adapter_from_trade_conn"
+    ]
+
+    assert len(calls) == 1
+    live_cap = next(
+        keyword.value for keyword in calls[0].keywords if keyword.arg == "live_cap_conn"
+    )
+    assert isinstance(live_cap, ast.Name)
+    assert live_cap.id == "conn"
+    schema_ready = next(
+        keyword.value
+        for keyword in calls[0].keywords
+        if keyword.arg == "live_order_schema_initialized"
+    )
+    assert isinstance(schema_ready, ast.Constant)
+    assert schema_ready.value is True
+
+
 def test_submit_disabled_bridge_uses_latest_parent_evidence_time_for_redecision():
     from src.decision_kernel import claims
     from src.decision_kernel.compiler import DecisionCompiler, EvidenceClock
@@ -903,6 +994,21 @@ def test_fixA_active_live_order_suppresses_new_submit():
     assert same_price is not None
     assert same_price.startswith("EDLI_LIVE_ORDER_ACTIVE_DUPLICATE_SUPPRESSED")
     assert much_better is not None  # no price-improvement escape while order is live
+
+
+def test_active_live_order_read_does_not_reensure_schema():
+    conn = sqlite3.connect(":memory:")
+    _seed_active_family_order(conn)
+    statements: list[str] = []
+    conn.set_trace_callback(statements.append)
+    try:
+        reason = _lock_reason(conn, limit_price=0.70)
+    finally:
+        conn.set_trace_callback(None)
+
+    assert reason is not None
+    assert not any(sql.lstrip().upper().startswith("CREATE ") for sql in statements)
+    assert not any("PRAGMA table_info" in sql for sql in statements)
 
 
 def test_fixA_family_sibling_active_order_suppresses_new_submit():

@@ -1,5 +1,5 @@
 # Created: 2026-05-25
-# Last reused/audited: 2026-05-25
+# Last reused/audited: 2026-07-10
 # Authority basis: PR332 full-live split verdict; live-order aggregate substrate PR A.
 from __future__ import annotations
 
@@ -13,6 +13,27 @@ from src.state.db import init_schema
 
 
 NOW = datetime(2026, 5, 25, 18, tzinfo=timezone.utc)
+
+
+def test_initialized_schema_mode_does_not_repeat_schema_work():
+    conn = _conn()
+    init_schema(conn)
+    statements: list[str] = []
+    conn.set_trace_callback(statements.append)
+    try:
+        ledger = LiveOrderAggregateLedger(conn, initialize_schema=False)
+        ledger.append_event(
+            aggregate_id="event-fast:intent-fast",
+            event_type="DecisionProofAccepted",
+            payload={"event_id": "event-fast", "final_intent_id": "intent-fast"},
+            occurred_at=NOW,
+            source_authority="decision_kernel",
+        )
+    finally:
+        conn.set_trace_callback(None)
+
+    assert not any(sql.lstrip().upper().startswith("CREATE ") for sql in statements)
+    assert not any("PRAGMA table_info" in sql for sql in statements)
 
 
 def test_live_order_aggregate_appends_and_projects_sequence():

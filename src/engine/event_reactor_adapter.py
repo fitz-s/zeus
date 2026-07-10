@@ -3748,6 +3748,7 @@ def event_bound_live_adapter_from_trade_conn(
     topology_conn: sqlite3.Connection | None = None,
     calibration_conn: sqlite3.Connection | None = None,
     live_cap_conn: sqlite3.Connection | None = None,
+    live_order_schema_initialized: bool = False,
     bankroll_usd_provider: Callable[[], float | None] | None = None,
     free_cash_usd_provider: Callable[[], float | None] | None = None,
     portfolio_state_provider: "Callable[[], Any] | None" = None,
@@ -3784,7 +3785,6 @@ def event_bound_live_adapter_from_trade_conn(
     # Live production scope is forecast_plus_day0 only. Forecast and Day0 events
     # both use this same execution adapter; unknown events fail closed before the
     # candidate pipeline. There is no non-live/no-submit scope inside production.
-
     # FIX-4 (P2): per-cycle live submit call counter. Incremented ONLY when
     # executor_submit() is actually called (i.e., real_order_submit_enabled and
     # all gates pass). Exposed on the adapter callable so main.py can read it
@@ -4143,6 +4143,7 @@ def event_bound_live_adapter_from_trade_conn(
                     live_cap_conn=build_conn,
                     trade_conn=trade_conn,
                     pre_submit_authority_provider=pre_submit_authority_provider,
+                    live_order_schema_initialized=live_order_schema_initialized,
                 )
                 _live_order_build_phase = "live_order_certificates_built"
                 final_intent = _required_cert(command_certificates, claims.FINAL_INTENT)
@@ -4226,6 +4227,7 @@ def event_bound_live_adapter_from_trade_conn(
                         live_cap_conn=build_conn,
                         trade_conn=trade_conn,
                         pre_submit_authority_provider=pre_submit_authority_provider,
+                        live_order_schema_initialized=live_order_schema_initialized,
                     ),
                     savepoint_name="edli_submit_disabled_live_order_build",
                 )
@@ -8026,6 +8028,7 @@ def _build_submit_disabled_live_certificates(
     live_cap_conn: sqlite3.Connection | None = None,
     trade_conn: sqlite3.Connection | None = None,
     pre_submit_authority_provider: Callable[[DecisionCertificate, DecisionCertificate, datetime], PreSubmitAuthorityWitness] | None = None,
+    live_order_schema_initialized: bool = False,
 ) -> tuple[DecisionCertificate, ...]:
     command_certificates = _build_live_execution_command_certificates(
         event=event,
@@ -8034,6 +8037,7 @@ def _build_submit_disabled_live_certificates(
         live_cap_conn=live_cap_conn,
         trade_conn=trade_conn,
         pre_submit_authority_provider=pre_submit_authority_provider,
+        live_order_schema_initialized=live_order_schema_initialized,
     )
     command = _required_cert(command_certificates, claims.EXECUTION_COMMAND)
     certificate_decision_time = command.header.decision_time
@@ -9020,6 +9024,7 @@ def _build_live_execution_command_certificates(
     live_cap_conn: sqlite3.Connection | None = None,
     trade_conn: sqlite3.Connection | None = None,
     pre_submit_authority_provider: Callable[[DecisionCertificate, DecisionCertificate, datetime], PreSubmitAuthorityWitness] | None = None,
+    live_order_schema_initialized: bool = False,
 ) -> tuple[DecisionCertificate, ...]:
     _assert_event_bound_strategy_live_admitted(
         strategy_key=receipt.strategy_key,
@@ -9534,6 +9539,8 @@ def _build_live_execution_command_certificates(
             live_cap_conn,
             phase="active_duplicate_read",
         )
+        if not live_order_schema_initialized:
+            LiveOrderAggregateLedger(live_cap_conn)
         entry_global_submit_suppression_reason = _entry_global_submit_suppression_reason()
         if entry_global_submit_suppression_reason is not None:
             raise _LiveOpportunityAlreadyLocked(entry_global_submit_suppression_reason)
@@ -9573,7 +9580,10 @@ def _build_live_execution_command_certificates(
         executor_native_intent_hash = validate_final_intent_cert_for_existing_executor(final_intent)
 
         def _append_live_order_state() -> tuple[DecisionCertificate, DecisionCertificate, DecisionCertificate]:
-            aggregate_ledger = LiveOrderAggregateLedger(live_cap_conn)
+            aggregate_ledger = LiveOrderAggregateLedger(
+                live_cap_conn,
+                initialize_schema=False,
+            )
             aggregate_id = _live_order_aggregate_id(event.event_id, str(final_intent.payload["final_intent_id"]))
             decision_event = aggregate_ledger.append_event(
                 aggregate_id=aggregate_id,
@@ -10494,7 +10504,6 @@ def _locked_live_opportunity_active_order_reason(
     metric = str(metric or "").strip()
     family_key_available = bool(family_id or (city and target_date and metric))
     try:
-        LiveOrderAggregateLedger(live_cap_conn)
         if family_key_available:
             plan_rows = live_cap_conn.execute(
                 """
@@ -11103,7 +11112,7 @@ def _append_venue_submit_attempted_aggregate_event(
     aggregate_id = str(command.payload.get("aggregate_id") or "")
     if not aggregate_id:
         return None
-    event = LiveOrderAggregateLedger(conn).append_event(
+    event = LiveOrderAggregateLedger(conn, initialize_schema=False).append_event(
         aggregate_id=aggregate_id,
         event_type="VenueSubmitAttempted",
         payload={
@@ -11132,7 +11141,7 @@ def _append_submit_terminal_aggregate_event(
     if not aggregate_id:
         return None
     if submit_result.status == "SUBMITTED":
-        event = LiveOrderAggregateLedger(conn).append_event(
+        event = LiveOrderAggregateLedger(conn, initialize_schema=False).append_event(
             aggregate_id=aggregate_id,
             event_type="VenueSubmitAcknowledged",
             payload={
@@ -11150,7 +11159,7 @@ def _append_submit_terminal_aggregate_event(
         return event.event_hash
     if submit_result.status in {"REJECTED", "PRE_SUBMIT_ERROR"}:
         is_pre_submit_rejection = submit_result.status == "PRE_SUBMIT_ERROR"
-        event = LiveOrderAggregateLedger(conn).append_event(
+        event = LiveOrderAggregateLedger(conn, initialize_schema=False).append_event(
             aggregate_id=aggregate_id,
             event_type="SubmitRejected",
             payload={
@@ -11188,7 +11197,7 @@ def _append_cap_transition_aggregate_event(
     aggregate_id = str(command.payload.get("aggregate_id") or "")
     if not aggregate_id:
         return None
-    event = LiveOrderAggregateLedger(conn).append_event(
+    event = LiveOrderAggregateLedger(conn, initialize_schema=False).append_event(
         aggregate_id=aggregate_id,
         event_type="CapTransitioned",
         payload={
@@ -11219,7 +11228,7 @@ def _append_submit_unknown_aggregate_event(
     aggregate_id = str(command.payload.get("aggregate_id") or "")
     if not aggregate_id:
         return None
-    event = LiveOrderAggregateLedger(conn).append_event(
+    event = LiveOrderAggregateLedger(conn, initialize_schema=False).append_event(
         aggregate_id=aggregate_id,
         event_type="SubmitUnknown",
         payload={

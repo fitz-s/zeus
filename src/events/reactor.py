@@ -4933,6 +4933,8 @@ def run_edli_event_reactor_cycle(*, active_lock) -> None:
         submit_adapter = (
             event_bound_live_adapter_from_trade_conn(
                 trade_conn,
+                live_cap_conn=conn,
+                live_order_schema_initialized=True,
                 forecast_conn=forecasts_conn,
                 topology_conn=forecasts_conn,
                 calibration_conn=conn,
