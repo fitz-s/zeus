@@ -7744,6 +7744,18 @@ def test_runtime_open_portfolio_prunes_terminal_rows_before_hydration_and_preser
         chain_state="chain_confirmed_zero",
     )
     persist_position(
+        "quarantine-closed-worthless",
+        "quarantined",
+        city="Seoul",
+        size_usd=2.0,
+        shares=5.0,
+        entry_price=0.40,
+        chain_state="closed_worthless",
+        chain_shares=5.0,
+        chain_cost_basis_usd=2.0,
+        fill_authority="venue_position_observed",
+    )
+    persist_position(
         "settled-history",
         "entered",
         city="Madrid",

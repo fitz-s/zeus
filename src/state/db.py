@@ -11236,13 +11236,25 @@ def query_portfolio_loader_view(
         predicates.append("temperature_metric = ?")
         params.append(temperature_metric)
     if runtime_exposure_only:
+        from src.contracts.position_truth import (
+            TERMINAL_NO_CURRENT_MONEY_RISK_CHAIN_STATES,
+        )
+
         placeholders = ", ".join("?" for _ in OPEN_EXPOSURE_PHASES)
         runtime_open_predicate = f"phase IN ({placeholders})"
         params.extend(OPEN_EXPOSURE_PHASES)
         # Quarantine is a current risk-review set, not historical closure.
-        # Load every quarantined row so malformed/unknown chain authority
-        # cannot disappear before strict validation and typed risk filtering.
-        runtime_open_predicate = f"({runtime_open_predicate} OR phase = 'quarantined')"
+        # Load every quarantined row unless chain truth has already proved the
+        # asset exited, redeemed, or worthless. Those rows retain historical
+        # shares/cost and lifecycle debt but own no current wealth; malformed or
+        # unknown chain authority still enters strict validation below.
+        terminal_no_risk = tuple(sorted(TERMINAL_NO_CURRENT_MONEY_RISK_CHAIN_STATES))
+        terminal_placeholders = ", ".join("?" for _ in terminal_no_risk)
+        runtime_open_predicate = (
+            f"({runtime_open_predicate} OR (phase = 'quarantined' "
+            f"AND COALESCE(chain_state, '') NOT IN ({terminal_placeholders})))"
+        )
+        params.extend(terminal_no_risk)
         predicates.append(runtime_open_predicate)
     where_clause = f"WHERE {' AND '.join(predicates)}" if predicates else ""
 

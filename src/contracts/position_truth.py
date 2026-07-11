@@ -58,6 +58,14 @@ REDECISION_ELIGIBLE_QUARANTINE_CHAIN_STATES = frozenset(
     }
 )
 
+TERMINAL_NO_CURRENT_MONEY_RISK_CHAIN_STATES = frozenset(
+    {
+        "closed_exited",
+        "closed_redeemed",
+        "closed_worthless",
+    }
+)
+
 NO_CURRENT_MONEY_RISK_CHAIN_STATES = frozenset(
     {
         "chain_absent_confirmed_position_unattributed",
@@ -67,7 +75,7 @@ NO_CURRENT_MONEY_RISK_CHAIN_STATES = frozenset(
         "quarantined",
         "quarantine_expired",
     }
-)
+) | TERMINAL_NO_CURRENT_MONEY_RISK_CHAIN_STATES
 
 
 def has_current_money_risk_chain_state(value: object) -> bool:
