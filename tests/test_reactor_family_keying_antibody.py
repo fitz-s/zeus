@@ -1,4 +1,4 @@
-# Lifecycle: created=2026-06-04; last_reviewed=2026-06-05; last_reused=2026-06-05
+# Lifecycle: created=2026-06-04; last_reviewed=2026-07-11; last_reused=2026-07-11
 # Purpose: Antibody — a NULL/empty condition_id sibling at the reactor family seam
 #   must fail LOUD (FamilyKeyingError), never silently shrink the MECE family.
 # Reuse: Re-run whenever the market_events->reactor family-binding seam or its
@@ -85,8 +85,12 @@ def test_clean_family_returns_all_siblings() -> None:
             ("TestCity", "2026-06-05", "high", "cid_3", "tok3", ">=11"),
         ],
     )
+    traced: list[str] = []
+    conn.set_trace_callback(traced.append)
     rows = _event_family_market_topology_rows(conn, _PAYLOAD)
+    conn.set_trace_callback(None)
     assert [r["condition_id"] for r in rows] == ["cid_1", "cid_2", "cid_3"]
+    assert sum("FROM MARKET_EVENTS" in statement.upper() for statement in traced) == 1
 
 
 def test_null_condition_id_sibling_fails_loud_not_silent_drop() -> None:
@@ -126,6 +130,19 @@ def test_empty_string_condition_id_also_fails_loud() -> None:
         ],
     )
     with pytest.raises(FamilyKeyingError):
+        _event_family_market_topology_rows(conn, _PAYLOAD)
+
+
+def test_duplicate_condition_id_also_fails_loud() -> None:
+    conn = _market_events_conn()
+    _insert(
+        conn,
+        [
+            ("TestCity", "2026-06-05", "high", "cid_1", "tok1", "<=10"),
+            ("TestCity", "2026-06-05", "high", "cid_1", "tok2", "10-11"),
+        ],
+    )
+    with pytest.raises(FamilyKeyingError, match="duplicate condition_id"):
         _event_family_market_topology_rows(conn, _PAYLOAD)
 
 

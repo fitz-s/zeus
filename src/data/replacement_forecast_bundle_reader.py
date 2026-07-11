@@ -6,6 +6,7 @@ import json
 import hashlib
 import math
 import sqlite3
+from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from typing import Any, Mapping
@@ -301,37 +302,28 @@ def _display_unit_for_label(label: str, *, fallback: str) -> str:
     raise ValueError("temperature unit must be C or F")
 
 
-def _current_market_bin_topology_hash(
-    conn: sqlite3.Connection,
+def _market_bin_topology_payload_from_rows(
+    rows: Iterable[Mapping[str, object]],
     *,
     city: str,
-    target_date: str,
-    temperature_metric: str,
-) -> str | None:
-    columns = _table_columns(conn, "market_events")
-    required = {"city", "target_date", "temperature_metric", "condition_id", "range_label", "range_low", "range_high"}
-    if not required.issubset(columns):
-        return None
-    rows = conn.execute(
-        """
-        SELECT range_label, outcome, range_low, range_high, condition_id
-        FROM market_events
-        WHERE city = ?
-          AND target_date = ?
-          AND temperature_metric = ?
-          AND COALESCE(condition_id, '') != ''
-        ORDER BY
-          CASE WHEN range_low IS NULL THEN -999999 ELSE range_low END,
-          CASE WHEN range_high IS NULL THEN 999999 ELSE range_high END,
-          condition_id
-        """,
-        (city, target_date, temperature_metric),
-    ).fetchall()
-    if not rows:
+) -> list[dict[str, object]] | None:
+    ordered = sorted(
+        rows,
+        key=lambda row: (
+            -999999.0
+            if row.get("range_low") is None
+            else float(row["range_low"]),
+            999999.0
+            if row.get("range_high") is None
+            else float(row["range_high"]),
+            str(row.get("condition_id") or ""),
+        ),
+    )
+    if not ordered:
         return None
     topology: list[dict[str, object]] = []
-    for row in rows:
-        label = str(row["range_label"] or row["outcome"] or "").strip()
+    for row in ordered:
+        label = str(row.get("range_label") or row.get("outcome") or "").strip()
         if not label:
             return None
         city_cfg = cities_by_name.get(city)
@@ -341,8 +333,8 @@ def _current_market_bin_topology_hash(
         display_unit = _display_unit_for_label(label, fallback=settlement_unit)
         rounding_rule = "oracle_truncate" if str(getattr(city_cfg, "settlement_source_type", "") or "") == "hko" else "wmo_half_up"
         settlement_step_c = 5.0 / 9.0 if settlement_unit == "F" else 1.0
-        lower_c = _temperature_bound_to_c(row["range_low"], unit=display_unit)
-        upper_c = _temperature_bound_to_c(row["range_high"], unit=display_unit)
+        lower_c = _temperature_bound_to_c(row.get("range_low"), unit=display_unit)
+        upper_c = _temperature_bound_to_c(row.get("range_high"), unit=display_unit)
         if lower_c is None and upper_c is not None:
             center_c = upper_c - settlement_step_c
         elif upper_c is None and lower_c is not None:
@@ -363,7 +355,32 @@ def _current_market_bin_topology_hash(
                 "settlement_step_c": float(settlement_step_c),
             }
         )
-    return _json_hash(topology)
+    return topology
+
+
+def market_bin_topology_hash_from_rows(
+    rows: Iterable[Mapping[str, object]],
+    *,
+    city: str,
+) -> str | None:
+    topology = _market_bin_topology_payload_from_rows(rows, city=city)
+    return _json_hash(topology) if topology is not None else None
+
+
+def _current_market_bin_topology_hash(
+    conn: sqlite3.Connection,
+    *,
+    city: str,
+    target_date: str,
+    temperature_metric: str,
+) -> str | None:
+    topology = _current_market_bin_topology_payload(
+        conn,
+        city=city,
+        target_date=target_date,
+        temperature_metric=temperature_metric,
+    )
+    return _json_hash(topology) if topology is not None else None
 
 
 def _current_market_bin_topology_payload(
@@ -392,43 +409,10 @@ def _current_market_bin_topology_payload(
         """,
         (city, target_date, temperature_metric),
     ).fetchall()
-    if not rows:
-        return None
-    topology: list[dict[str, object]] = []
-    for row in rows:
-        label = str(row["range_label"] or row["outcome"] or "").strip()
-        if not label:
-            return None
-        city_cfg = cities_by_name.get(city)
-        settlement_unit = str(getattr(city_cfg, "settlement_unit", "") or getattr(city_cfg, "unit", "") or "").strip().upper()
-        if settlement_unit not in {"C", "F"}:
-            settlement_unit = _display_unit_for_label(label, fallback="C")
-        display_unit = _display_unit_for_label(label, fallback=settlement_unit)
-        rounding_rule = "oracle_truncate" if str(getattr(city_cfg, "settlement_source_type", "") or "") == "hko" else "wmo_half_up"
-        settlement_step_c = 5.0 / 9.0 if settlement_unit == "F" else 1.0
-        lower_c = _temperature_bound_to_c(row["range_low"], unit=display_unit)
-        upper_c = _temperature_bound_to_c(row["range_high"], unit=display_unit)
-        if lower_c is None and upper_c is not None:
-            center_c = upper_c - settlement_step_c
-        elif upper_c is None and lower_c is not None:
-            center_c = lower_c + settlement_step_c
-        elif lower_c is not None and upper_c is not None:
-            center_c = (lower_c + upper_c) / 2.0
-        else:
-            return None
-        topology.append(
-            {
-                "bin_id": label,
-                "lower_c": lower_c,
-                "upper_c": upper_c,
-                "center_c": center_c,
-                "display_unit": display_unit,
-                "settlement_unit": settlement_unit,
-                "rounding_rule": rounding_rule,
-                "settlement_step_c": float(settlement_step_c),
-            }
-        )
-    return topology
+    return _market_bin_topology_payload_from_rows(
+        (dict(row) for row in rows),
+        city=city,
+    )
 
 
 def _topology_core(value: object) -> list[dict[str, object]] | None:

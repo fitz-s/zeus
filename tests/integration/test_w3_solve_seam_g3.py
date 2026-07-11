@@ -710,15 +710,17 @@ def test_current_global_probability_prepare_does_not_require_price_snapshot(monk
         "_latest_replacement_readiness",
         lambda *args, **kwargs: object(),
     )
-    monkeypatch.setattr(
-        bundle_reader,
-        "read_replacement_forecast_bundle",
-        lambda *args, **kwargs: SimpleNamespace(
+    bundle_read: dict[str, object] = {}
+
+    def read_bundle(*args, **kwargs):
+        bundle_read.update(kwargs)
+        return SimpleNamespace(
             ok=True,
             bundle=bundle,
             reason_code="READY",
-        ),
-    )
+        )
+
+    monkeypatch.setattr(bundle_reader, "read_replacement_forecast_bundle", read_bundle)
 
     traced: list[str] = []
     forecast.set_trace_callback(traced.append)
@@ -740,6 +742,8 @@ def test_current_global_probability_prepare_does_not_require_price_snapshot(monk
     assert witness.yes_q_samples[0].tolist() == pytest.approx(list(probabilities))
     assert (1.0 - witness.yes_q_samples[:, 1]).tolist() == pytest.approx([0.7] * 400)
     assert witness.posterior_identity_hash == "posterior-1"
+    assert len(str(bundle_read["current_bin_topology_hash"])) == 64
+    assert sum("FROM MARKET_EVENTS" in statement.upper() for statement in traced) == 1
     assert not any(
         "SELECT POSTERIOR_IDENTITY_HASH, DEPENDENCY_HASH, POSTERIOR_CONFIG_HASH"
         in statement.upper()

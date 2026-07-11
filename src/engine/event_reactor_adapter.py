@@ -21314,6 +21314,7 @@ def _prepare_current_global_probability_family(
     """Build a current joint-q witness without any executable-price dependency."""
 
     from src.data.replacement_forecast_bundle_reader import (
+        market_bin_topology_hash_from_rows,
         read_replacement_forecast_bundle,
     )
     from src.engine.qkernel_spine_bridge import (
@@ -21342,6 +21343,10 @@ def _prepare_current_global_probability_family(
     rows = _event_family_market_topology_rows(topology_conn, payload)
     if not rows:
         raise ValueError("EVENT_BOUND_MARKET_TOPOLOGY_MISSING")
+    current_topology_hash = market_bin_topology_hash_from_rows(
+        rows,
+        city=str(payload.get("city") or ""),
+    )
     topology = tuple(
         _topology_candidate_from_market_event(row, None, payload) for row in rows
     )
@@ -21376,6 +21381,7 @@ def _prepare_current_global_probability_family(
         temperature_metric=family.metric,
         decision_time=decision_time,
         require_baseline_bundle=False,
+        current_bin_topology_hash=current_topology_hash,
         enforce_raw_input_hwm=True,
     )
     if not result.ok or result.bundle is None:

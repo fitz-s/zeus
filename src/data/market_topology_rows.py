@@ -203,34 +203,6 @@ def _event_family_market_topology_rows(
     required = {"city", "target_date", "temperature_metric", "condition_id"}
     if not required.issubset(columns):
         return []
-    # ANTIBODY (Fitz #4): detect a keying-broken sibling BEFORE building the
-    # family. A separate count of NULL/empty-condition_id rows scoped to THIS
-    # family (never the whole table) — additive, so when condition_id is clean
-    # the count is 0 and the family construction below is byte-identical to
-    # legacy. A non-zero count means a sibling lost its executable identity at
-    # the producer (market ingest) → fail loud, naming the family, instead of
-    # silently shrinking the MECE partition q/FDR are computed over.
-    broken_siblings = conn.execute(
-        f"""
-        SELECT COUNT(*)
-        FROM {table_ref}
-        WHERE city = ?
-          AND target_date = ?
-          AND temperature_metric = ?
-          AND COALESCE(condition_id, '') = ''
-        """,
-        (city, target_date, metric),
-    ).fetchone()
-    n_broken = int(broken_siblings[0]) if broken_siblings else 0
-    if n_broken:
-        raise FamilyKeyingError(
-            f"market_events family city={city!r} target_date={target_date!r} "
-            f"metric={metric!r} has {n_broken} sibling row(s) with a NULL/empty "
-            f"condition_id — the bin lost its executable identity at the ingest "
-            f"producer. Refusing to bind a silently-shrunk MECE family (Fitz #4 "
-            f"keying antibody). Fix the market_events writer keying, do NOT drop "
-            f"the sibling."
-        )
     select_fields = [
         "condition_id",
         _optional_column_expr(columns, "market_slug"),
@@ -260,16 +232,36 @@ def _event_family_market_topology_rows(
         WHERE city = ?
           AND target_date = ?
           AND temperature_metric = ?
-          AND COALESCE(condition_id, '') != ''
         ORDER BY condition_id, {label_order}, {token_order}
         """,
         (city, target_date, metric),
     )
     names = [description[0] for description in cur.description]
+    items = [
+        {name: row[name] for name in names}
+        if isinstance(row, sqlite3.Row)
+        else dict(zip(names, row))
+        for row in cur.fetchall()
+    ]
+    n_broken = sum(not str(item.get("condition_id") or "") for item in items)
+    if n_broken:
+        raise FamilyKeyingError(
+            f"market_events family city={city!r} target_date={target_date!r} "
+            f"metric={metric!r} has {n_broken} sibling row(s) with a NULL/empty "
+            f"condition_id — the bin lost its executable identity at the ingest "
+            f"producer. Refusing to bind a silently-shrunk MECE family (Fitz #4 "
+            f"keying antibody). Fix the market_events writer keying, do NOT drop "
+            f"the sibling."
+        )
+    condition_ids = [str(item["condition_id"]) for item in items]
+    if len(condition_ids) != len(set(condition_ids)):
+        raise FamilyKeyingError(
+            f"market_events family city={city!r} target_date={target_date!r} "
+            f"metric={metric!r} has duplicate condition_id rows"
+        )
     rows: list[dict[str, Any]] = []
     seen_conditions: set[str] = set()
-    for row in cur.fetchall():
-        item = {name: row[name] for name in names} if isinstance(row, sqlite3.Row) else dict(zip(names, row))
+    for item in items:
         condition_id = str(item.get("condition_id") or "")
         if not condition_id or condition_id in seen_conditions:
             continue

@@ -15,6 +15,7 @@ from datetime import date, datetime, timezone
 
 import pytest
 
+import src.data.replacement_forecast_bundle_reader as reader
 from src.data.replacement_forecast_bundle_reader import (
     HIGH_DATA_VERSION,
     PRODUCT_ID,
@@ -36,6 +37,70 @@ class _Evidence:
 @dataclass(frozen=True)
 class _BaselineBundle:
     evidence: _Evidence
+
+
+def test_preloaded_market_topology_hash_matches_database_read() -> None:
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        """
+        CREATE TABLE market_events (
+            city TEXT NOT NULL,
+            target_date TEXT NOT NULL,
+            temperature_metric TEXT NOT NULL,
+            condition_id TEXT NOT NULL,
+            range_label TEXT,
+            outcome TEXT,
+            range_low REAL,
+            range_high REAL
+        )
+        """
+    )
+    rows = [
+        {
+            "condition_id": "c2",
+            "range_label": "72F or above",
+            "outcome": None,
+            "range_low": 72.0,
+            "range_high": None,
+        },
+        {
+            "condition_id": "c0",
+            "range_label": "69F or below",
+            "outcome": None,
+            "range_low": None,
+            "range_high": 69.0,
+        },
+        {
+            "condition_id": "c1",
+            "range_label": "70-71F",
+            "outcome": None,
+            "range_low": 70.0,
+            "range_high": 71.0,
+        },
+    ]
+    conn.executemany(
+        "INSERT INTO market_events VALUES ('Dallas', '2026-07-11', 'high', ?, ?, ?, ?, ?)",
+        [
+            (
+                row["condition_id"],
+                row["range_label"],
+                row["outcome"],
+                row["range_low"],
+                row["range_high"],
+            )
+            for row in rows
+        ],
+    )
+
+    assert reader.market_bin_topology_hash_from_rows(rows, city="Dallas") == (
+        reader._current_market_bin_topology_hash(
+            conn,
+            city="Dallas",
+            target_date="2026-07-11",
+            temperature_metric="high",
+        )
+    )
 
 
 def _conn() -> sqlite3.Connection:
