@@ -17,7 +17,7 @@
 #   (d) failed aggregates do not starve new real fills.
 """Relationship antibodies for fill-bridge settled routing and bounded retry.
 
-Four cross-module invariants tested here:
+Five cross-module invariants tested here:
 
 1. Settled-market fill (target_date days past) → SETTLED_MARKET_FILL_BOOKED
    disposition, NO position_current row, never re-selected by scan.
@@ -29,6 +29,12 @@ Four cross-module invariants tested here:
    (regression pin for the normal path).
 4. Failed aggregate does NOT starve a later valid aggregate in the same scan
    (budget gate applies only to non-disposed, retry-eligible aggregates).
+5. UNRECOVERABLE_MANUAL_REVIEW is written ONLY by an explicit operator/script
+   call (mark_unrecoverable_manual_review), NEVER by the automatic scan/retry
+   loop — the automatic path stays retry-forever no matter how many failures
+   accumulate. Once a human has flagged a row, the scan stops attempting to
+   bridge it but WARNING-logs it with its age on every pass instead of
+   excluding it silently.
 """
 from __future__ import annotations
 
@@ -42,10 +48,12 @@ import pytest
 
 from src.events.edli_position_bridge import (
     DISPOSITION_SETTLED_MARKET,
+    DISPOSITION_UNRECOVERABLE_MANUAL_REVIEW,
     _retry_backoff_seconds,
     edli_bridge_position_id,
     get_fill_bridge_disposition,
     is_retry_eligible,
+    mark_unrecoverable_manual_review,
 )
 
 
@@ -397,6 +405,74 @@ def test_previously_quarantined_row_is_retried_after_migration():
     )
 
 
+def test_drained_row_with_existing_position_current_does_not_duplicate():
+    """Idempotent-drain proof (deep-review adjudication item 1, 2026-07-11):
+    a drained (formerly QUARANTINED_BRIDGE_FAILURE) row whose aggregate has
+    ALREADY produced a canonical position_current row (e.g. the underlying
+    failure was transient and a prior scan already healed it, or the row was
+    manually repaired) must NEVER be re-materialised into a duplicate
+    position_current row when the scan re-drives it under backoff.
+
+    This is proven at TWO layers:
+    1. Function-level idempotency: materialize_position_current_from_edli_fill
+       UPDATEs the same deterministic position_id (ON CONFLICT DO UPDATE) and
+       never re-inserts entry events (UNIQUE(position_id, sequence_no)) — see
+       tests/events/test_edli_position_bridge.py::test_idempotent_replay_keeps_one_row.
+    2. Scan-level short-circuit (exercised here): the scan's unconditional
+       "already bridged" existing-position_current probe runs for EVERY
+       candidate BEFORE the disposition/backoff gate, so a drained row never
+       even reaches materialize_position_current_from_edli_fill once its
+       position already exists — belt AND suspenders.
+    """
+    conn = _mem_conn()
+    agg_id = "agg-drained-already-materialized"
+    _seed_valid_aggregate(conn, agg_id, target_date=LIVE_DATE)
+
+    # First scan: bridges normally, creates the canonical position_current row.
+    first_bridged = _run_scan(conn, now=_now(TODAY_UTC))
+    assert first_bridged == 1
+    position_id = edli_bridge_position_id(agg_id)
+    rows_after_first = conn.execute(
+        "SELECT position_id FROM position_current WHERE position_id = ?", (position_id,)
+    ).fetchall()
+    assert len(rows_after_first) == 1
+
+    # Simulate a drained disposition row for this SAME aggregate — as if it
+    # had earlier been marked QUARANTINED_BRIDGE_FAILURE (stale relative to
+    # the fact that its fill was, in truth, already materialised) and the T1
+    # migration drained it back to accumulating/NULL with a historical
+    # updated_at, well past the backoff cap.
+    conn.execute(
+        "INSERT INTO edli_fill_bridge_dispositions "
+        "(aggregate_id, disposition, reason, attempt_count, last_error, created_at, updated_at) "
+        "VALUES (?, NULL, 'bridge_failure_accumulating', 10, 'boom', ?, ?)",
+        (agg_id, "2026-06-12T00:00:00+00:00", "2026-06-12T00:00:00+00:00"),
+    )
+    assert is_retry_eligible(conn, agg_id, _now(TODAY_UTC)) is True, (
+        "sanity: the drained row IS backoff-eligible for this scan (proves the "
+        "no-duplicate result below is from the already-bridged guard, not from backoff)"
+    )
+
+    second_bridged = _run_scan(conn, now=_now(TODAY_UTC))
+
+    assert second_bridged == 0, (
+        "an aggregate whose position_current row already exists must NOT count "
+        "as a newly-bridged fill, even when its disposition row is drained/eligible"
+    )
+    rows_after_second = conn.execute(
+        "SELECT position_id FROM position_current WHERE position_id = ?", (position_id,)
+    ).fetchall()
+    assert len(rows_after_second) == 1, (
+        f"re-driving a drained row must never duplicate position_current; got {len(rows_after_second)} rows"
+    )
+    # No duplicate entry events either.
+    event_count = conn.execute(
+        "SELECT COUNT(*) FROM position_events WHERE position_id = ? AND event_type = 'POSITION_OPEN_INTENT'",
+        (position_id,),
+    ).fetchone()[0]
+    assert event_count == 1, "re-driving a drained row must not duplicate entry events"
+
+
 # ---------------------------------------------------------------------------
 # Invariant 3: Fresh valid fill on live market → bridges to position_current
 # ---------------------------------------------------------------------------
@@ -545,3 +621,127 @@ def test_disposition_table_exists_after_init_schema():
         "SELECT name FROM sqlite_master WHERE type='table' AND name='edli_fill_bridge_dispositions'"
     ).fetchone()
     assert row is not None, "edli_fill_bridge_dispositions must be created by init_schema"
+
+
+# ---------------------------------------------------------------------------
+# Invariant 5: UNRECOVERABLE_MANUAL_REVIEW is operator/script-only — the
+# automatic scan/retry loop NEVER writes it (critic amendment M-3, 2026-07-11)
+# ---------------------------------------------------------------------------
+
+def test_automatic_scan_never_writes_unrecoverable_manual_review():
+    """The automatic retry loop must NEVER transition a row to
+    UNRECOVERABLE_MANUAL_REVIEW no matter how many consecutive failures
+    accumulate — that disposition is reachable ONLY through an explicit
+    mark_unrecoverable_manual_review call, never through scan/retry alone.
+    """
+    conn = _mem_conn()
+    agg_id = "agg-never-auto-manual-review"
+    _seed_pre_era_aggregate(conn, agg_id, target_date=LIVE_DATE)
+
+    scan_now = _now(TODAY_UTC)
+    for _ in range(20):  # far past the old _QUARANTINE_THRESHOLD (10)
+        _run_scan(conn, now=scan_now)
+        disp = get_fill_bridge_disposition(conn, agg_id)
+        assert disp != DISPOSITION_UNRECOVERABLE_MANUAL_REVIEW, (
+            "automatic scan/retry loop must never write UNRECOVERABLE_MANUAL_REVIEW"
+        )
+        row = conn.execute(
+            "SELECT attempt_count FROM edli_fill_bridge_dispositions WHERE aggregate_id = ?",
+            (agg_id,),
+        ).fetchone()
+        attempt_count = row["attempt_count"] if row else 0
+        scan_now = scan_now + timedelta(seconds=_retry_backoff_seconds(attempt_count) + 1)
+
+    # Never terminal at all — still None (accumulating), consistent with
+    # invariant 2 (retries forever, no automatic terminal exclusion of any kind).
+    assert get_fill_bridge_disposition(conn, agg_id) is None
+
+
+def test_mark_unrecoverable_manual_review_is_explicit_and_idempotent():
+    """The sanctioned writer transitions a row to UNRECOVERABLE_MANUAL_REVIEW
+    and is idempotent; it must NOT overwrite an existing SETTLED_MARKET_FILL_BOOKED
+    row (accounting truth is never clobbered by a manual-review flag).
+    """
+    conn = _mem_conn()
+    agg_id = "agg-manual-flag"
+    _seed_pre_era_aggregate(conn, agg_id, target_date=LIVE_DATE)
+    _run_scan(conn, now=_now(TODAY_UTC))  # accumulate one failure first
+
+    mark_unrecoverable_manual_review(
+        conn, agg_id, "diagnosed: payload predates strategy_key field", "2026-07-11T00:00:00+00:00"
+    )
+    assert get_fill_bridge_disposition(conn, agg_id) == DISPOSITION_UNRECOVERABLE_MANUAL_REVIEW
+
+    # Idempotent re-mark.
+    mark_unrecoverable_manual_review(
+        conn, agg_id, "diagnosed: payload predates strategy_key field", "2026-07-11T01:00:00+00:00"
+    )
+    assert get_fill_bridge_disposition(conn, agg_id) == DISPOSITION_UNRECOVERABLE_MANUAL_REVIEW
+
+    # Must not clobber a settled (accounting-truth) row.
+    settled_id = "agg-settled-not-clobbered"
+    _seed_pre_era_aggregate(conn, settled_id, target_date=SETTLED_DATE)
+    _run_scan(conn, now=_now(TODAY_UTC))
+    assert get_fill_bridge_disposition(conn, settled_id) == DISPOSITION_SETTLED_MARKET
+    mark_unrecoverable_manual_review(conn, settled_id, "should not apply", "2026-07-11T00:00:00+00:00")
+    assert get_fill_bridge_disposition(conn, settled_id) == DISPOSITION_SETTLED_MARKET, (
+        "mark_unrecoverable_manual_review must never overwrite accounting-truth SETTLED disposition"
+    )
+
+
+def test_manual_review_row_skips_bridge_attempt_and_warns_every_pass(caplog):
+    """Once flagged, the scan must NOT attempt to bridge the row (no wasted
+    retry on a diagnosed-dead payload) but must WARNING-log it with its age
+    on EVERY pass — the row stays visible, unlike the retired silent
+    permanent quarantine.
+    """
+    conn = _mem_conn()
+    agg_id = "agg-manual-review-warns"
+    _seed_pre_era_aggregate(conn, agg_id, target_date=LIVE_DATE)
+    mark_unrecoverable_manual_review(conn, agg_id, "structurally unparseable payload", "2026-06-12T00:00:00+00:00")
+
+    with caplog.at_level(logging.WARNING, logger="zeus"):
+        _run_scan(conn, now=_now(TODAY_UTC))
+        first_pass_warnings = [
+            r for r in caplog.records
+            if r.levelname == "WARNING" and "UNRECOVERABLE_MANUAL_REVIEW" in r.message and agg_id in r.message
+        ]
+        caplog.clear()
+        _run_scan(conn, now=_now(TODAY_UTC))
+        second_pass_warnings = [
+            r for r in caplog.records
+            if r.levelname == "WARNING" and "UNRECOVERABLE_MANUAL_REVIEW" in r.message and agg_id in r.message
+        ]
+
+    assert len(first_pass_warnings) == 1, f"expected 1 WARNING on pass 1; got {first_pass_warnings}"
+    assert len(second_pass_warnings) == 1, (
+        f"expected 1 WARNING on pass 2 too — every pass must warn, not just the first; "
+        f"got {second_pass_warnings}"
+    )
+
+    # Attempt_count must be untouched — no bridge attempt was made.
+    row = conn.execute(
+        "SELECT attempt_count FROM edli_fill_bridge_dispositions WHERE aggregate_id = ?",
+        (agg_id,),
+    ).fetchone()
+    assert row["attempt_count"] == 0, "manual-review row must not accumulate retry attempts"
+    assert conn.execute("SELECT 1 FROM position_current").fetchall() == []
+
+
+def test_manual_review_row_does_not_consume_scan_budget():
+    """A manual-review row must not count against the new-fill budget, same
+    as settled and backoff-gated rows."""
+    conn = _mem_conn()
+
+    manual_id = "agg-A-manual-budget"
+    valid_id = "agg-B-valid-budget-manual"
+    _seed_pre_era_aggregate(conn, manual_id, target_date=LIVE_DATE)
+    mark_unrecoverable_manual_review(conn, manual_id, "diagnosed dead", "2026-06-12T00:00:00+00:00")
+    _seed_valid_aggregate(conn, valid_id, target_date=LIVE_DATE)
+
+    bridged = _run_scan(conn, now=_now(TODAY_UTC), limit=1)
+
+    assert bridged == 1, (
+        f"valid aggregate must bridge even with limit=1 when a manual-review aggregate precedes it; "
+        f"bridged={bridged}"
+    )

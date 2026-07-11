@@ -1013,6 +1013,7 @@ def _edli_durable_fill_bridge_scan(
     """
     from src.events.edli_position_bridge import (
         DISPOSITION_SETTLED_MARKET,
+        DISPOSITION_UNRECOVERABLE_MANUAL_REVIEW,
         _aggregate_event_rows,
         _edli_events_table,
         _has_confirmed_fill,
@@ -1021,6 +1022,7 @@ def _edli_durable_fill_bridge_scan(
         _market_is_settled,
         _record_settled_disposition,
         _venue_command_row_for_execution_command_id,
+        disposition_reason_and_age,
         edli_bridge_position_id,
         edli_bridge_position_id_legacy,
         get_fill_bridge_disposition,
@@ -1255,6 +1257,24 @@ def _edli_durable_fill_bridge_scan(
         # accounting truth, over for good). Does NOT count against the new-fill budget.
         prior_disposition = get_fill_bridge_disposition(conn, aggregate_id)
         if prior_disposition == DISPOSITION_SETTLED_MARKET:
+            continue
+
+        # An operator/script has diagnosed this aggregate as structurally
+        # unrecoverable (never set by this scan itself — see
+        # mark_unrecoverable_manual_review). Automatic retry stops wasting
+        # attempts on a known-dead payload, but the row stays LOUDLY visible:
+        # every pass logs a WARNING with its age so it cannot silently
+        # disappear the way the retired permanent quarantine did.
+        if prior_disposition == DISPOSITION_UNRECOVERABLE_MANUAL_REVIEW:
+            detail = disposition_reason_and_age(conn, aggregate_id, now)
+            reason, age_str = detail if detail else ("", "unknown")
+            logger.warning(
+                "EDLI fill-bridge: aggregate=%s flagged UNRECOVERABLE_MANUAL_REVIEW "
+                "age=%s reason=%s -- awaiting operator action, not auto-retried",
+                aggregate_id,
+                age_str,
+                reason,
+            )
             continue
 
         # Retry-cadence gate: an accumulating bridge-failure aggregate is retried

@@ -11,7 +11,7 @@
 """Schema owner for edli_fill_bridge_dispositions.
 
 One row per EDLI aggregate the _edli_durable_fill_bridge_scan has seen.
-One terminal disposition class:
+Two terminal disposition classes:
 
   SETTLED_MARKET_FILL_BOOKED
       The aggregate's market was already settled when the bridge attempted
@@ -20,18 +20,29 @@ One terminal disposition class:
       all future candidate scans (permanent terminal routing — legitimate
       accounting truth, not a failure state).
 
+  UNRECOVERABLE_MANUAL_REVIEW
+      An operator or script has explicitly diagnosed the aggregate as
+      structurally unrecoverable (e.g. a payload shape current code can
+      never parse) and called mark_unrecoverable_manual_review. NEVER
+      written by the automatic scan/retry loop. Stops wasted automatic
+      retry attempts WITHOUT excluding the row from operator visibility:
+      every scan pass that encounters it logs a WARNING with the row's age,
+      so it keeps surfacing instead of silently vanishing.
+
 A row with disposition NULL is accumulating: the bridge has failed on it
 before but retry eligibility never terminates. attempt_count is retry-cadence
 evidence, not a path to exclusion (see ``is_retry_eligible`` /
 ``_retry_backoff_seconds`` in src.events.edli_position_bridge) — a poison
 aggregate is retried less and less often (bounded per-cycle cost), never
-excluded, because a confirmed on-chain fill is truth that must materialise.
+excluded, because a confirmed on-chain fill is truth that must materialise
+unless a human has separately confirmed it never can.
 
 Additional columns:
   attempt_count   — running total of failed attempts; drives retry backoff.
   last_error      — last exception message; updated on every failed attempt.
   updated_at      — wall-clock timestamp of the last state change; the retry
-                    backoff clock reads from here.
+                    backoff clock (and the manual-review age report) reads
+                    from here.
 """
 from __future__ import annotations
 
@@ -40,11 +51,18 @@ import sqlite3
 
 # The complete set of terminal disposition values the CHECK constraint
 # admits today. A row's disposition is either NULL (accumulating, retried on
-# a decaying backoff cadence forever) or one of these accounting-truth
-# terminals. Retired terminal values are never re-added here — they are
-# dropped from the CHECK and any row still carrying one is drained back to
-# NULL by ``_ensure_disposition_check_current`` below.
-_ALLOWED_TERMINAL_DISPOSITIONS = ("SETTLED_MARKET_FILL_BOOKED",)
+# a decaying backoff cadence forever, always automatic) or one of these:
+#   SETTLED_MARKET_FILL_BOOKED    accounting truth (see the module docstring).
+#   UNRECOVERABLE_MANUAL_REVIEW   an operator/script's explicit diagnosis
+#                                 that automatic retry can never succeed;
+#                                 written by exactly one function
+#                                 (mark_unrecoverable_manual_review in
+#                                 src.events.edli_position_bridge), never by
+#                                 the automatic scan/retry loop.
+# Retired terminal values are never re-added here — they are dropped from
+# the CHECK and any row still carrying one is drained back to NULL by
+# ``_ensure_disposition_check_current`` below.
+_ALLOWED_TERMINAL_DISPOSITIONS = ("SETTLED_MARKET_FILL_BOOKED", "UNRECOVERABLE_MANUAL_REVIEW")
 
 _ALLOWED_DISPOSITIONS_SQL = ", ".join(f"'{v}'" for v in _ALLOWED_TERMINAL_DISPOSITIONS)
 

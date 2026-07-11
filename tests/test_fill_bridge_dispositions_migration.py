@@ -209,6 +209,27 @@ def test_drained_row_retried_once_backoff_window_elapses(legacy_quarantine_conn)
     assert is_retry_eligible(legacy_quarantine_conn, "agg_quarantined", far_future) is True
 
 
+def test_ensure_table_admits_unrecoverable_manual_review_literal(legacy_quarantine_conn):
+    """CHECK amendment (critic M-3, 2026-07-11): a second, deliberately
+    NON-AUTOMATIC terminal (UNRECOVERABLE_MANUAL_REVIEW) is admitted by the
+    current CHECK on a fully-migrated table, alongside SETTLED_MARKET_FILL_BOOKED."""
+    from src.events.edli_position_bridge import mark_unrecoverable_manual_review
+
+    ensure_table(legacy_quarantine_conn)
+    mark_unrecoverable_manual_review(
+        legacy_quarantine_conn, "agg_quarantined", "diagnosed dead", "2026-07-11T00:00:00+00:00"
+    )
+    assert get_fill_bridge_disposition(legacy_quarantine_conn, "agg_quarantined") == "UNRECOVERABLE_MANUAL_REVIEW"
+
+    # The retired QUARANTINED_BRIDGE_FAILURE literal is still rejected.
+    with pytest.raises(sqlite3.IntegrityError):
+        legacy_quarantine_conn.execute(
+            "INSERT INTO edli_fill_bridge_dispositions "
+            "(aggregate_id, disposition, reason, attempt_count, created_at, updated_at) "
+            "VALUES ('agg_new_bad2', 'QUARANTINED_BRIDGE_FAILURE', 'x', 0, 't', 't')"
+        )
+
+
 def test_orphan_bridge_excludes_terminal_reconciled_aggregates():
     """The candidate query must mirror the ledger guard: terminal RECONCILED
     projections are unselectable (not selected-then-rejected every scan)."""

@@ -1198,14 +1198,39 @@ def sync_venue_command_position_link_for_edli_fill(
 # Settled-market routing + bridge-failure retry helpers
 # ---------------------------------------------------------------------------
 
-# Disposition constant — must match the CHECK in edli_fill_bridge_dispositions_schema.py
+# Disposition constants — must match the CHECK in edli_fill_bridge_dispositions_schema.py
 DISPOSITION_SETTLED_MARKET = "SETTLED_MARKET_FILL_BOOKED"
+
+# A second, DELIBERATELY NON-AUTOMATIC terminal for aggregates a human has
+# diagnosed as structurally unrecoverable (e.g. a payload shape that will
+# never parse under current code). This constant is written by exactly one
+# path: ``mark_unrecoverable_manual_review`` — an explicit operator/script
+# call, never by the scan/retry loop itself. The automatic path always stays
+# retry-forever with decaying cadence (see ``is_retry_eligible``); marking a
+# row here only stops WASTED automatic retry attempts once a human has
+# confirmed retry can never succeed — it does not stop the row from being
+# seen. Every scan pass that encounters this disposition logs a WARNING with
+# the row's age (see the scan in src.ingest.price_channel_ingest), so an
+# unresolved manual-review row keeps surfacing in the logs instead of
+# silently vanishing — the honest alternative to claiming an unparseable
+# aggregate is still "making progress" via infinite retry.
+DISPOSITION_UNRECOVERABLE_MANUAL_REVIEW = "UNRECOVERABLE_MANUAL_REVIEW"
 
 # Cap on the decaying retry cadence, in scan cycles (~60s/cycle live cadence).
 # A confirmed on-chain fill is truth that MUST eventually materialise; failure
 # to do so is a code/venue problem, never a reason to stop trying. This bounds
 # the WORST-CASE wait between attempts (~4.3h) without ever excluding the
 # aggregate — eligibility never terminates.
+#
+# Scheduler-threshold note (deep-review adjudication, 2026-07-11): eligibility
+# is computed by scanning every row's (attempt_count, updated_at) each cycle
+# (O(rows), no index) — adjudicated OPTIONAL at the current live row count
+# (~21 rows across settled + accumulating + manual-review). An indexed
+# ``next_attempt_at`` column (materialise the backoff deadline at write time,
+# index it, query only due rows) becomes MANDATORY if this table's row count
+# grows large enough that a full per-cycle scan is no longer cheap — watch
+# for it if the aggregate volume driving this table changes by an order of
+# magnitude.
 _RETRY_BACKOFF_CAP_CYCLES = 256
 _RETRY_CYCLE_SECONDS = 60
 
@@ -1237,7 +1262,10 @@ def get_fill_bridge_disposition(conn: sqlite3.Connection, aggregate_id: str) -> 
     - the row exists but disposition is NULL (accumulating failure count under
       decaying retry — not terminal; the aggregate is retried on a backoff
       cadence, never permanently excluded).
-    Returns DISPOSITION_SETTLED_MARKET for terminal (accounting-truth) rows.
+    Returns DISPOSITION_SETTLED_MARKET for terminal (accounting-truth) rows,
+    or DISPOSITION_UNRECOVERABLE_MANUAL_REVIEW for rows an operator has
+    explicitly flagged as diagnosed-unrecoverable (never set automatically —
+    see ``mark_unrecoverable_manual_review``).
     """
     table = _dispositions_table(conn)
     try:
@@ -1275,6 +1303,85 @@ def _record_settled_disposition(
         )
     except sqlite3.Error as exc:
         logger.warning("fill-bridge: could not persist settled disposition for %s: %s", aggregate_id, exc)
+
+
+def mark_unrecoverable_manual_review(
+    conn: sqlite3.Connection,
+    aggregate_id: str,
+    reason: str,
+    now_str: str,
+) -> None:
+    """Explicit operator/script transition to DISPOSITION_UNRECOVERABLE_MANUAL_REVIEW.
+
+    THE SOLE SANCTIONED WRITER of this disposition. The automatic scan/retry
+    loop (``_edli_durable_fill_bridge_scan`` in
+    ``src.ingest.price_channel_ingest``) never calls this function and never
+    writes this value — a human (or an explicit operator script acting on a
+    human's diagnosis) must call it directly, after confirming an aggregate's
+    failure is structurally unrecoverable (e.g. a payload shape current code
+    can never parse), not merely persistent. Idempotent no-op against a row
+    already carrying DISPOSITION_SETTLED_MARKET (accounting truth is never
+    overwritten by a manual-review flag).
+    """
+    table = _dispositions_table(conn)
+    try:
+        conn.execute(
+            f"""
+            INSERT INTO {table}
+                (aggregate_id, disposition, reason, attempt_count, created_at, updated_at)
+            VALUES (?, ?, ?, 0, ?, ?)
+            ON CONFLICT(aggregate_id) DO UPDATE SET
+                disposition = excluded.disposition,
+                reason = excluded.reason,
+                updated_at = excluded.updated_at
+            WHERE disposition IS NULL OR disposition = ?
+            """,
+            (
+                aggregate_id,
+                DISPOSITION_UNRECOVERABLE_MANUAL_REVIEW,
+                reason,
+                now_str,
+                now_str,
+                DISPOSITION_UNRECOVERABLE_MANUAL_REVIEW,
+            ),
+        )
+    except sqlite3.Error as exc:
+        logger.warning(
+            "fill-bridge: could not mark %s UNRECOVERABLE_MANUAL_REVIEW: %s", aggregate_id, exc
+        )
+
+
+def disposition_reason_and_age(
+    conn: sqlite3.Connection, aggregate_id: str, now: datetime
+) -> tuple[str, str] | None:
+    """Return (reason, age_str) for an aggregate's disposition row, or None.
+
+    Used by the scan to WARNING-log an UNRECOVERABLE_MANUAL_REVIEW row on
+    every pass with its age — the row stays operator-visible instead of
+    silently vanishing once flagged.
+    """
+    table = _dispositions_table(conn)
+    try:
+        row = conn.execute(
+            f"SELECT reason, updated_at FROM {table} WHERE aggregate_id = ? LIMIT 1",
+            (aggregate_id,),
+        ).fetchone()
+    except sqlite3.Error:
+        return None
+    if row is None:
+        return None
+    reason = str((row[0] if not isinstance(row, sqlite3.Row) else row["reason"]) or "")
+    updated_at = row[1] if not isinstance(row, sqlite3.Row) else row["updated_at"]
+    age_str = "unknown"
+    try:
+        marked_at = datetime.fromisoformat(str(updated_at))
+        if marked_at.tzinfo is None:
+            marked_at = marked_at.replace(tzinfo=timezone.utc)
+        now_aware = now if now.tzinfo is not None else now.replace(tzinfo=timezone.utc)
+        age_str = f"{(now_aware - marked_at).days}d"
+    except (TypeError, ValueError):
+        pass
+    return reason, age_str
 
 
 def _increment_failure_count(
