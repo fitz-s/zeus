@@ -898,7 +898,7 @@ class ForecastSnapshotReadyTrigger:
                     fp.source_available_at AS snapshot_available_at,
                     fp.computed_at AS snapshot_fetch_time,
                     fp.posterior_identity_hash AS snapshot_manifest_hash,
-                    NULL AS provenance_json,
+                    fp.provenance_json AS provenance_json,
                     NULL AS snapshot_members_json
                   FROM forecast_posteriors fp
                  WHERE fp.product_id = '{REPLACEMENT_0_1_PRODUCT_ID}'
@@ -1409,55 +1409,85 @@ def _dict_rows(conn: sqlite3.Connection, sql: str, params: tuple[Any, ...]) -> l
     return [dict(zip(names, row)) for row in cur.fetchall()]
 
 
-def _raw_model_member_count_for_posterior_row(
+def _raw_model_member_counts_for_posterior_rows(
     conn: sqlite3.Connection,
-    row: dict[str, Any],
+    rows: list[dict[str, Any]],
     *,
     decision_iso: str,
-) -> int:
-    cycle_date = str(row.get("sr_source_cycle_time") or row.get("source_cycle_time") or "")[:10]
-    if len(cycle_date) != 10:
-        return 0
-    city = str(row.get("city") or row.get("snapshot_city") or "")
-    target_date = str(row.get("target_local_date") or row.get("snapshot_target_date") or "")
-    metric = str(row.get("temperature_metric") or row.get("snapshot_temperature_metric") or "")
-    if not (city and target_date and metric):
-        return 0
-    record = conn.execute(
-        """
-        SELECT COUNT(DISTINCT model)
-          FROM raw_model_forecasts
-         WHERE city = ?
-           AND target_date = ?
-           AND metric = ?
-           AND substr(source_cycle_time, 1, 10) = ?
-           AND source_available_at <= ?
-           AND forecast_value_c IS NOT NULL
-        """,
-        (city, target_date, metric, cycle_date, decision_iso),
-    ).fetchone()
-    try:
-        count = int(record[0] or 0) if record is not None else 0
-    except (TypeError, ValueError):
-        count = 0
-    if count > 0:
-        return count
-    fallback = _posterior_provenance_raw_member_count(row)
-    if fallback > 0:
-        return fallback
-    posterior_id = row.get("posterior_id") or row.get("coverage_id")
-    if posterior_id in (None, ""):
-        return 0
-    try:
-        record = conn.execute(
-            "SELECT provenance_json FROM forecast_posteriors WHERE posterior_id = ?",
-            (posterior_id,),
-        ).fetchone()
-    except sqlite3.Error:
-        return 0
-    if record is None:
-        return 0
-    return _posterior_provenance_raw_member_count({"provenance_json": record[0]})
+) -> list[int]:
+    provenance_counts = [
+        _posterior_provenance_raw_member_count(row) for row in rows
+    ]
+    keys = [
+        (
+            str(row.get("city") or row.get("snapshot_city") or ""),
+            str(row.get("target_local_date") or row.get("snapshot_target_date") or ""),
+            str(row.get("temperature_metric") or row.get("snapshot_temperature_metric") or ""),
+            str(row.get("sr_source_cycle_time") or row.get("source_cycle_time") or "")[:10],
+        )
+        for row in rows
+    ]
+    requested = sorted(
+        {
+            key
+            for key, provenance_count in zip(keys, provenance_counts)
+            if provenance_count <= 0 and all(key[:3]) and len(key[3]) == 10
+        }
+    )
+    counts: dict[tuple[str, str, str, str], int] = {}
+    if requested:
+        limit = conn.getlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER)
+        chunk_size = max(1, (limit - 1) // 4)
+        for offset in range(0, len(requested), chunk_size):
+            chunk = requested[offset : offset + chunk_size]
+            values_sql = ",".join("(?,?,?,?)" for _ in chunk)
+            records = conn.execute(
+                f"""
+                WITH requested(city, target_date, metric, cycle_date) AS (
+                    VALUES {values_sql}
+                )
+                SELECT requested.city,
+                       requested.target_date,
+                       requested.metric,
+                       requested.cycle_date,
+                       COUNT(DISTINCT raw.model) AS member_count
+                  FROM requested
+                  LEFT JOIN raw_model_forecasts AS raw
+                    ON raw.city = requested.city
+                   AND raw.target_date = requested.target_date
+                   AND raw.metric = requested.metric
+                   AND substr(raw.source_cycle_time, 1, 10) = requested.cycle_date
+                   AND raw.source_available_at <= ?
+                   AND raw.forecast_value_c IS NOT NULL
+                 GROUP BY requested.city, requested.target_date,
+                          requested.metric, requested.cycle_date
+                """,
+                (*[value for key in chunk for value in key], decision_iso),
+            ).fetchall()
+            for record in records:
+                counts[tuple(str(record[index]) for index in range(4))] = int(
+                    record[4] or 0
+                )
+
+    out: list[int] = []
+    for row, key, provenance_count in zip(rows, keys, provenance_counts):
+        count = provenance_count if provenance_count > 0 else counts.get(key, 0)
+        if count <= 0:
+            posterior_id = row.get("posterior_id") or row.get("coverage_id")
+            if posterior_id not in (None, ""):
+                try:
+                    record = conn.execute(
+                        "SELECT provenance_json FROM forecast_posteriors WHERE posterior_id = ?",
+                        (posterior_id,),
+                    ).fetchone()
+                except sqlite3.Error:
+                    record = None
+                if record is not None:
+                    count = _posterior_provenance_raw_member_count(
+                        {"provenance_json": record[0]}
+                    )
+        out.append(count)
+    return out
 
 
 def _posterior_provenance_raw_member_count(row: dict[str, Any]) -> int:
@@ -1520,13 +1550,13 @@ def _with_posterior_raw_member_counts(
 ) -> list[dict[str, Any]]:
     """Attach raw-model carrier counts after fairness/restriction has bounded rows."""
 
+    counts = _raw_model_member_counts_for_posterior_rows(
+        conn,
+        rows,
+        decision_iso=decision_iso,
+    )
     out: list[dict[str, Any]] = []
-    for row in rows:
-        count = _raw_model_member_count_for_posterior_row(
-            conn,
-            row,
-            decision_iso=decision_iso,
-        )
+    for row, count in zip(rows, counts):
         if count < min_members:
             continue
         enriched = dict(row)

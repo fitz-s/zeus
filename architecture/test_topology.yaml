@@ -181,7 +181,7 @@ test_trust_policy:
     tests/events/test_edli_position_bridge.py: {created: "2026-06-01", last_used: "2026-07-09"}
     tests/events/test_event_writer_single_writer.py: {created: "2026-05-24", last_used: "2026-05-24"}
     tests/events/test_market_event_coalescer.py: {created: "2026-05-24", last_used: "2026-05-24"}
-    tests/events/test_forecast_snapshot_ready.py: {created: "2026-05-24", last_used: "2026-05-24"}
+    tests/events/test_forecast_snapshot_ready.py: {created: "2026-05-24", last_used: "2026-07-11", note: "ForecastSnapshotReady replacement-carrier contracts, including bounded family restriction and batched posterior raw-member coverage without per-family history scans."}
     tests/events/test_day0_extreme_updated_trigger.py: {created: "2026-05-24", last_used: "2026-05-24"}
     tests/strategy/live_inference/test_live_bin_inference.py: {created: "2026-05-24", last_used: "2026-05-24"}
     tests/strategy/live_inference/test_executable_cost.py: {created: "2026-05-24", last_used: "2026-05-24"}

@@ -1,4 +1,4 @@
-# Lifecycle: created=2026-05-24; last_reviewed=2026-07-10; last_reused=2026-07-10
+# Lifecycle: created=2026-05-24; last_reviewed=2026-07-11; last_reused=2026-07-11
 # Purpose: Prove FSR emits only complete, current, authority-bound forecast carriers.
 # Reuse: Re-audit replacement readiness binding and event clocks before trigger changes.
 # Authority basis: EDLI v1 implementation prompt §8 ForecastSnapshotReadyTrigger contract.
@@ -13,6 +13,7 @@ import pytest
 from src.events.event_writer import EventWriter
 from src.events.triggers.forecast_snapshot_ready import (
     ForecastSnapshotReadyTrigger,
+    _with_posterior_raw_member_counts,
     build_forecast_snapshot_ready_event,
     classify_forecast_snapshot,
     ecmwf_open_data_expected_steps,
@@ -1111,13 +1112,16 @@ def test_restricted_redecision_counts_raw_members_only_for_screened_family(monke
     )
     counted: list[tuple[str, str, str]] = []
 
-    def _fake_count(_conn, row, *, decision_iso):
-        counted.append((row["city"], row["target_local_date"], row["temperature_metric"]))
-        return 3
+    def _fake_counts(_conn, rows, *, decision_iso):
+        counted.extend(
+            (row["city"], row["target_local_date"], row["temperature_metric"])
+            for row in rows
+        )
+        return [3] * len(rows)
 
     monkeypatch.setattr(
-        "src.events.triggers.forecast_snapshot_ready._raw_model_member_count_for_posterior_row",
-        _fake_count,
+        "src.events.triggers.forecast_snapshot_ready._raw_model_member_counts_for_posterior_rows",
+        _fake_counts,
     )
     forecasts_conn = sqlite3.connect(":memory:")
     forecasts_conn.row_factory = sqlite3.Row
@@ -1189,6 +1193,101 @@ def test_restricted_redecision_counts_raw_members_only_for_screened_family(monke
 
     payload = json.loads(world_conn.execute("SELECT payload_json FROM opportunity_events").fetchone()[0])
     assert payload["city"] == "Chicago"
+
+
+def test_posterior_raw_member_counts_are_batched_for_global_scope():
+    conn = sqlite3.connect(":memory:")
+    conn.execute(
+        """
+        CREATE TABLE raw_model_forecasts (
+            model TEXT,
+            city TEXT,
+            target_date TEXT,
+            metric TEXT,
+            source_cycle_time TEXT,
+            source_available_at TEXT,
+            forecast_value_c REAL
+        )
+        """
+    )
+    family_count = 96
+    rows = [
+        {
+            "city": f"City-{index:03d}",
+            "target_local_date": "2026-07-12",
+            "temperature_metric": "high",
+            "sr_source_cycle_time": "2026-07-11T00:00:00+00:00",
+        }
+        for index in range(family_count)
+    ]
+    conn.executemany(
+        """
+        INSERT INTO raw_model_forecasts (
+            model, city, target_date, metric, source_cycle_time,
+            source_available_at, forecast_value_c
+        ) VALUES (?, ?, '2026-07-12', 'high',
+                  '2026-07-11T00:00:00+00:00',
+                  '2026-07-11T01:00:00+00:00', 20.0)
+        """,
+        (
+            (model, f"City-{index:03d}")
+            for index in range(family_count)
+            for model in ("ecmwf", "gfs", "icon")
+        ),
+    )
+    traced: list[str] = []
+    conn.set_trace_callback(traced.append)
+
+    enriched = _with_posterior_raw_member_counts(
+        conn,
+        rows,
+        decision_iso="2026-07-11T02:00:00+00:00",
+    )
+    conn.set_trace_callback(None)
+
+    assert len(enriched) == family_count
+    assert {row["observed_members"] for row in enriched} == {3}
+    assert sum(
+        "COUNT(DISTINCT RAW.MODEL)" in statement.upper() for statement in traced
+    ) == 1
+
+
+def test_posterior_bound_complete_provenance_skips_raw_history_scan():
+    conn = sqlite3.connect(":memory:")
+    conn.execute(
+        """
+        CREATE TABLE raw_model_forecasts (
+            model TEXT, city TEXT, target_date TEXT, metric TEXT,
+            source_cycle_time TEXT, source_available_at TEXT, forecast_value_c REAL
+        )
+        """
+    )
+    row = {
+        "city": "Chicago",
+        "target_local_date": "2026-07-12",
+        "temperature_metric": "high",
+        "sr_source_cycle_time": "2026-07-11T00:00:00+00:00",
+        "provenance_json": json.dumps(
+            {
+                "bayes_precision_fusion": {
+                    "decorrelated_providers_complete": True,
+                    "raw_model_forecast_ids": [101, 102, 103],
+                }
+            }
+        ),
+    }
+    traced: list[str] = []
+    conn.set_trace_callback(traced.append)
+
+    enriched = _with_posterior_raw_member_counts(
+        conn,
+        [row],
+        decision_iso="2026-07-11T02:00:00+00:00",
+    )
+    conn.set_trace_callback(None)
+
+    assert enriched[0]["observed_members"] == 3
+    assert not any("RAW_MODEL_FORECASTS" in statement.upper() for statement in traced)
 
 
 def test_scan_emits_only_for_families_with_a_market_when_markets_exist():
