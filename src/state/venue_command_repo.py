@@ -2037,6 +2037,7 @@ def _validate_review_confirmed_fill_payload(
         "prior_fill_confirmed_event_with_positive_trade_fact",
         "cancel_unknown_confirmed_trade_with_positive_trade_fact",
         "recovery_no_venue_order_id_confirmed_trade",
+        "matched_submit_missing_trade_id_confirmed_trade",
         "matched_cancel_with_confirmed_held_projection",
         "review_required_matched_order_fact_with_positive_trade_fact",
         "review_required_terminal_order_fact_with_held_projection",
@@ -2058,6 +2059,16 @@ def _validate_review_confirmed_fill_payload(
             "review_reason_recovery_no_venue_order_id",
             "positive_trade_fact",
             "maker_order_token_matches_command",
+            "maker_order_not_open",
+            "venue_size_quantization_residual_lt_0_01",
+        )
+    elif proof_class == "matched_submit_missing_trade_id_confirmed_trade":
+        required_true = (
+            "latest_event_is_review_required",
+            "review_reason_matched_submit_missing_trade_id",
+            "positive_trade_fact",
+            "maker_order_token_matches_command",
+            "bound_venue_order_id_matches_trade",
             "maker_order_not_open",
             "venue_size_quantization_residual_lt_0_01",
         )
@@ -2446,7 +2457,7 @@ def _actual_review_confirmed_fill_predicates(
             (command_id, venue_order_id),
         ).fetchone()
         command = conn.execute(
-            "SELECT position_id, state FROM venue_commands WHERE command_id = ?",
+            "SELECT position_id, state, venue_order_id FROM venue_commands WHERE command_id = ?",
             (command_id,),
         ).fetchone()
         position_rows = conn.execute(
@@ -2560,6 +2571,9 @@ def _actual_review_confirmed_fill_predicates(
         "requires_m5_reconcile": _latest_payload_is_cancel_unknown(latest_payload),
         "review_reason_supported": review_reason == "ws_trade_lifecycle_regression_or_economic_drift",
         "review_reason_recovery_no_venue_order_id": review_reason == "recovery_no_venue_order_id",
+        "review_reason_matched_submit_missing_trade_id": (
+            review_reason == "matched_submit_missing_trade_id"
+        ),
         "prior_fill_confirmed_event": prior_fill_confirmed,
         "positive_trade_fact": positive_trade_fact,
         "matched_order_fact_positive": matched_order_fact_positive,
@@ -2570,6 +2584,10 @@ def _actual_review_confirmed_fill_predicates(
         "residual_size_is_dust": residual_is_dust,
         "active_projection_matches_confirmed_fill": active_projection_matches,
         "maker_order_token_matches_command": required_predicates.get("maker_order_token_matches_command") is True,
+        "bound_venue_order_id_matches_trade": (
+            command is not None
+            and str(command["venue_order_id"] or "") == venue_order_id
+        ),
         "maker_order_not_open": required_predicates.get("maker_order_not_open") is True,
         "venue_size_quantization_residual_lt_0_01": (
             required_predicates.get("venue_size_quantization_residual_lt_0_01") is True

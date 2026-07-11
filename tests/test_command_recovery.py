@@ -2256,6 +2256,67 @@ class TestRecoveryResolutionTable:
         assert unknown_count == 0
         assert unknown_markets == ()
 
+    def test_matched_submit_missing_trade_id_confirmed_trade_fills(
+        self, conn, mock_client
+    ):
+        from src.state.venue_command_repo import append_event
+
+        _insert(
+            conn,
+            command_id="cmd-matched-missing-trade-id",
+            position_id="pos-matched-missing-trade-id",
+            decision_id="dec-matched-missing-trade-id",
+            token_id="tok-matched-missing-trade-id",
+            size=31.5,
+            price=0.74,
+        )
+        _advance_to_submitting(
+            conn,
+            command_id="cmd-matched-missing-trade-id",
+            venue_order_id="ord-matched-missing-trade-id",
+        )
+        append_event(
+            conn,
+            command_id="cmd-matched-missing-trade-id",
+            event_type="REVIEW_REQUIRED",
+            occurred_at="2026-04-26T00:01:00Z",
+            payload={"reason": "matched_submit_missing_trade_id"},
+        )
+        mock_client.get_open_orders.return_value = []
+        mock_client.get_trades.return_value = [
+            {
+                "id": "trade-matched-missing-trade-id",
+                "status": "CONFIRMED",
+                "match_time": "2026-04-26T00:02:00Z",
+                "transaction_hash": "0xtx-matched-missing-trade-id",
+                "maker_orders": [
+                    {
+                        "asset_id": "tok-matched-missing-trade-id",
+                        "order_id": "ord-matched-missing-trade-id",
+                        "side": "BUY",
+                        "price": "0.74",
+                        "matched_amount": "31.5",
+                    }
+                ],
+            }
+        ]
+
+        from src.execution.command_recovery import reconcile_unresolved_commands
+
+        summary = reconcile_unresolved_commands(conn, mock_client)
+
+        assert _get_state(conn, "cmd-matched-missing-trade-id") == "FILLED"
+        assert summary["advanced"] >= 1
+        event = _get_events(conn, "cmd-matched-missing-trade-id")[-1]
+        assert event["event_type"] == "FILL_CONFIRMED"
+        payload = json.loads(event["payload_json"])
+        assert payload["proof_class"] == (
+            "matched_submit_missing_trade_id_confirmed_trade"
+        )
+        assert payload["required_predicates"][
+            "bound_venue_order_id_matches_trade"
+        ] is True
+
     def test_review_required_recovery_no_venue_order_id_confirmed_trade_stays_when_order_open(
         self, conn, mock_client
     ):

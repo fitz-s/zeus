@@ -222,6 +222,10 @@ _POST_ACK_PERSISTENCE_REVIEW_REASONS = frozenset({
     "entry_ack_persistence_failed_after_side_effect",
     "exit_ack_persistence_failed_after_side_effect",
 })
+_CONFIRMED_TRADE_REVIEW_REASONS = frozenset({
+    "recovery_no_venue_order_id",
+    "matched_submit_missing_trade_id",
+})
 
 
 def _canonical_order_truth_cte(
@@ -14119,7 +14123,7 @@ def _review_required_confirmed_trade_recovery(
 ) -> str:
     events = _command_events(conn, cmd.command_id)
     latest_reason = _latest_review_required_payload(events).get("reason")
-    if latest_reason != "recovery_no_venue_order_id":
+    if latest_reason not in _CONFIRMED_TRADE_REVIEW_REASONS:
         return "stayed"
     command = _dict_row(
         conn.execute(
@@ -14141,6 +14145,9 @@ def _review_required_confirmed_trade_recovery(
     trade, maker_match, open_orders = match
     now = _now_iso()
     venue_order_id = str(maker_match["order_id"])
+    bound_venue_order_id = str(command.get("venue_order_id") or "").strip()
+    if bound_venue_order_id and venue_order_id != bound_venue_order_id:
+        return "stayed"
     trade_id = str(trade.get("id") or trade.get("trade_id") or "")
     filled_size = str(maker_match["matched_size"])
     fill_price = str(maker_match["fill_price"])
@@ -14156,14 +14163,26 @@ def _review_required_confirmed_trade_recovery(
         "trade_id": trade_id,
         "filled_size": filled_size,
         "fill_price": fill_price,
-        "proof_class": "recovery_no_venue_order_id_confirmed_trade",
+        "proof_class": f"{latest_reason}_confirmed_trade",
         "side_effect_boundary_crossed": True,
-        "sdk_submit_attempted": "unknown",
+        "sdk_submit_attempted": (
+            True if latest_reason == "matched_submit_missing_trade_id" else "unknown"
+        ),
         "required_predicates": {
             "latest_event_is_review_required": True,
-            "review_reason_recovery_no_venue_order_id": True,
+            "review_reason_confirmed_trade_recoverable": True,
+            "review_reason": latest_reason,
+            "review_reason_recovery_no_venue_order_id": (
+                latest_reason == "recovery_no_venue_order_id"
+            ),
+            "review_reason_matched_submit_missing_trade_id": (
+                latest_reason == "matched_submit_missing_trade_id"
+            ),
             "positive_trade_fact": True,
             "maker_order_token_matches_command": True,
+            "bound_venue_order_id_matches_trade": (
+                not bound_venue_order_id or venue_order_id == bound_venue_order_id
+            ),
             "maker_order_not_open": True,
             "venue_size_quantization_residual_lt_0_01": True,
         },
@@ -14184,7 +14203,7 @@ def _review_required_confirmed_trade_recovery(
         "source_proof": {
             "source_commit": "runtime",
             "source_function": "command_recovery._reconcile_row",
-            "source_reason": "recovery_no_venue_order_id_confirmed_trade",
+            "source_reason": f"{latest_reason}_confirmed_trade",
         },
         "reviewed_by": "command_recovery",
         "cleared_at": now,
@@ -14233,9 +14252,10 @@ def _review_required_confirmed_trade_recovery(
         observed_at=now,
     )
     logger.info(
-        "recovery: command %s REVIEW_REQUIRED recovery_no_venue_order_id -> FILLED "
+        "recovery: command %s REVIEW_REQUIRED %s -> FILLED "
         "(venue_order_id=%s trade_id=%s)",
         cmd.command_id,
+        latest_reason,
         venue_order_id,
         trade_id,
     )
