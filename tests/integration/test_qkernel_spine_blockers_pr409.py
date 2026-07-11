@@ -1312,6 +1312,75 @@ def test_opportunity_book_receipt_records_checked_empty_selection_exposure():
     assert summary["by_outcome_usd"] == {}
 
 
+def test_opportunity_book_records_valid_qkernel_selection_before_legacy_projection():
+    """A valid qkernel selection cannot be erased by the legacy win-rate view."""
+
+    from dataclasses import replace
+
+    row = _row(
+        condition_id="cond-global-qk",
+        yes_token="yes-global-qk",
+        no_token="no-global-qk",
+        yes_ask=0.10,
+        no_ask=0.90,
+        snapshot_id="snap-global-qk",
+    )
+    proof = _proof(
+        direction="buy_yes",
+        row=row,
+        token_id="yes-global-qk",
+        q_posterior=0.35,
+        q_lcb_5pct=0.30,
+        bin_obj=Bin(low=22.0, high=22.0, unit="C", label="22C"),
+    )
+    bin_id = era._candidate_bin_id(proof)
+    cert = {
+        "source": "qkernel_spine",
+        "candidate_id": f"YES:{bin_id}",
+        "route_id": f"DIRECT_YES:{bin_id}",
+        "side": "YES",
+        "bin_id": bin_id,
+        "payoff_q_point": 0.35,
+        "payoff_q_lcb": 0.30,
+        "edge_lcb": 0.20,
+        "delta_u_at_min": 0.0001,
+        "optimal_stake_usd": "10.0",
+        "optimal_delta_u": 0.01,
+        "cost": 0.10,
+        "false_edge_rate": 0.01,
+        "direction_law_ok": True,
+        "coherence_allows": True,
+        "selection_guard_basis": "SELECTION_BETA_95",
+        "selection_guard_abstained": False,
+        "selection_guard_q_safe": 0.30,
+        "global_actuation_identity": "global-actuation-1",
+    }
+    selected = replace(
+        proof,
+        trade_score=0.20,
+        passed_prefilter=True,
+        missing_reason=None,
+        q_source="qkernel_spine",
+        selection_authority_applied="qkernel_spine",
+        qkernel_execution_economics=cert,
+    )
+
+    book = era._opportunity_book_from_proofs(
+        event_id="event-global-qk",
+        family_id="family-global-qk",
+        proofs=(proof,),
+        selected_proof=selected,
+        enforce_win_rate_floor=False,
+    )
+    payload = book.to_receipt_dict()
+
+    assert payload["selected_candidate_id"] == era._candidate_evaluation_id(selected)
+    assert payload["actual_receipt_selected_candidate_id"] == payload["selected_candidate_id"]
+    assert payload["selection_authority"] == "qkernel_spine"
+    assert payload["candidates"][0]["admitted"] is True
+    assert payload["candidates"][0]["live_admission_authority"] == "qkernel_spine"
+
+
 def test_selection_exposure_fails_closed_for_same_family_position_outside_bound_topology():
     """Same city/date/metric exposure cannot flatten to zero when topology split hides it.
 

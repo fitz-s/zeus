@@ -17106,9 +17106,15 @@ def _opportunity_book_from_proofs(
             if evaluation.candidate_id == selected_candidate_id_raw:
                 selected_evaluation = evaluation
                 break
+    selected_qkernel_authority = bool(
+        selected_proof is not None
+        and _proof_uses_qkernel_spine(selected_proof)
+        and _qkernel_execution_economics(selected_proof) is not None
+    )
     decided_candidate_id = (
         selected_candidate_id_raw
-        if selected_evaluation is not None and selected_evaluation.admitted
+        if selected_evaluation is not None
+        and (selected_evaluation.admitted or selected_qkernel_authority)
         else None
     )
     selection_authority = None
