@@ -2331,7 +2331,22 @@ def _append_matched_order_fill_projection(
     order_fact_source: str = "REST",
 ) -> None:
     command_id = str(command.get("command_id") or "")
-    if _edli_event_id_from_decision_id(str(command.get("decision_id") or "")):
+    existing_projection = conn.execute(
+        """
+        SELECT 1
+          FROM position_current
+         WHERE position_id = ? OR lower(COALESCE(order_id, '')) = lower(?)
+         LIMIT 1
+        """,
+        (
+            str(command.get("position_id") or ""),
+            str(venue_order_id or ""),
+        ),
+    ).fetchone()
+    if (
+        existing_projection is None
+        and _edli_event_id_from_decision_id(str(command.get("decision_id") or ""))
+    ):
         candidates = [
             candidate
             for candidate in _latest_unprojected_filled_entry_candidates(conn)
