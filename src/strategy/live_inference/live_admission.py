@@ -19,14 +19,14 @@ from src.calibration.settlement_backward_coverage import (
 from src.decision_kernel.canonicalization import stable_hash
 
 
-# Operator objective for ordinary binary replacement/NO-side candidates: real
-# participating trades must settle with stable win-rate greater than 51% after
-# costs. Q-kernel center-buy YES is a different Arrow-Debreu point-bin contract:
-# a single exact-bin YES can be profitable with side probability below 51% when
-# it is the family-efficient claim. It uses the q-kernel quality floor below
-# instead of this binary replacement floor.
+# Operator objective for every executable selected side: its conservative hit
+# probability must be greater than 51%. Price and payoff still decide edge and
+# sizing, but a cheap exact-bin YES does not earn a weaker final-admission
+# standard merely because its ROI denominator is small.
 LIVE_DIRECTION_WIN_RATE_FLOOR = 0.51
 LIVE_NEAR_SETTLED_ENTRY_PRICE_CEILING = 0.99
+# Candidate-generation floor retained for the legacy family selector. Final
+# executable admission below uses LIVE_DIRECTION_WIN_RATE_FLOOR for both sides.
 LIVE_QKERNEL_CENTER_YES_MIN_Q_LCB = 0.25
 LIVE_QKERNEL_EXACT_YES_STRATEGY_KEYS = frozenset({
     "center_buy",
@@ -86,7 +86,7 @@ def live_win_rate_floor_rejection_reason(
 
 
 def qkernel_center_yes_quality_floor() -> float:
-    """Minimum conservative exact-bin YES probability for live q-kernel center buys."""
+    """Legacy candidate-generation floor for exact-bin q-kernel YES routes."""
 
     return float(LIVE_QKERNEL_CENTER_YES_MIN_Q_LCB)
 
@@ -106,12 +106,11 @@ def live_entry_probability_quality_rejection_reason(
 ) -> str | None:
     """Return the probability-quality blocker for a live entry candidate.
 
-    Ordinary buy-side entries keep the binary selected-side win-rate floor. The
-    q-kernel center-buy YES lane is exempt from the 51% binary floor because it
-    buys one exact outcome in a multi-bin family; using the binary floor there
-    mechanically starves legitimate center YES trades and pushes the optimizer
-    toward NO. It still needs a real conservative probability floor so cheap
-    longshot tails cannot pass on ROI optics alone.
+    Every selected side uses one conservative hit-probability floor. Q-kernel
+    center-buy YES keeps a distinct rejection label for attribution, not a
+    weaker numerical standard. This prevents cheap longshot tails from passing
+    on ROI optics while preserving YES eligibility whenever its own bound clears
+    the same bar as NO.
     """
 
     direction_value = getattr(direction, "value", direction)
@@ -129,7 +128,7 @@ def live_entry_probability_quality_rejection_reason(
     if is_qkernel_center_yes:
         reason = live_win_rate_floor_rejection_reason(
             q_lcb=q_lcb,
-            floor=qkernel_center_yes_quality_floor(),
+            floor=floor,
         )
         if reason is None:
             return None

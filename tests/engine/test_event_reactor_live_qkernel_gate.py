@@ -1,5 +1,5 @@
 # Created: 2026-06-30
-# Last reused/audited: 2026-07-09
+# Last reused/audited: 2026-07-11
 # Authority basis: live-money qkernel submit authority and canonical selection-fact persistence.
 
 from __future__ import annotations
@@ -655,17 +655,17 @@ def test_live_entry_qkernel_gate_accepts_low_cost_when_qkernel_cert_is_high_conf
     )
 
 
-def test_live_entry_qkernel_gate_accepts_center_yes_below_binary_floor_when_quality_clear():
+def test_live_entry_qkernel_gate_accepts_center_yes_when_symmetric_quality_floor_clear():
     cert = _qkernel_cert()
     cert.update(
         cost=0.12,
-        payoff_q_lcb=0.30,
-        payoff_q_point=0.36,
-        edge_lcb=0.18,
+        payoff_q_lcb=0.52,
+        payoff_q_point=0.60,
+        edge_lcb=0.40,
         delta_u_at_min=0.01,
         optimal_stake_usd=10.0,
         optimal_delta_u=0.02,
-        selection_guard_q_safe=0.30,
+        selection_guard_q_safe=0.52,
     )
 
     _assert_live_entry_submit_authority(
@@ -675,8 +675,8 @@ def test_live_entry_qkernel_gate_accepts_center_yes_below_binary_floor_when_qual
             "direction": "buy_yes",
             "strategy_key": "center_buy",
             "candidate_bin_id": "bin-1",
-            "q_live": 0.36,
-            "q_lcb_5pct": 0.30,
+            "q_live": 0.60,
+            "q_lcb_5pct": 0.52,
             "min_entry_price": 0.02,
             "qkernel_execution_economics": cert,
         }

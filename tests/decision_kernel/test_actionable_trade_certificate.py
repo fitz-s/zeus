@@ -1,4 +1,4 @@
-# Lifecycle: created=2026-05-25; last_reviewed=2026-07-10; last_reused=2026-07-10
+# Lifecycle: created=2026-05-25; last_reviewed=2026-07-11; last_reused=2026-07-11
 # Purpose: Prove actionable trade certificates bind every live probability and execution parent.
 # Reuse: Re-audit canonical parent identity and selected-leg probability closure before live use.
 # Authority basis: docs/operations/edli_v1/EDLI_REDEMPTION_FINAL_PACKAGE_SPEC.md §14 full-live increment.
@@ -594,22 +594,22 @@ def test_actionable_declared_current_state_cannot_downgrade_to_legacy_after_tamp
         verify_actionable_trade(action, parents)
 
 
-def test_actionable_accepts_center_yes_below_binary_floor_when_quality_clear():
+def test_actionable_accepts_center_yes_when_symmetric_quality_floor_clear():
     parents, action = actionable_graph(
         action_payload={
-            "q_live": 0.36,
-            "q_lcb_5pct": 0.30,
+            "q_live": 0.60,
+            "q_lcb_5pct": 0.52,
             "c_fee_adjusted": 0.12,
             "c_cost_95pct": 0.12,
-            "trade_score": 0.18,
-            "action_score": 0.18,
+            "trade_score": 0.40,
+            "action_score": 0.40,
             "qkernel_execution_economics": {
                 **_action_payload()["qkernel_execution_economics"],
-                "payoff_q_point": 0.36,
-                "payoff_q_lcb": 0.30,
+                "payoff_q_point": 0.60,
+                "payoff_q_lcb": 0.52,
                 "cost": 0.12,
-                "edge_lcb": 0.18,
-                "selection_guard_q_safe": 0.30,
+                "edge_lcb": 0.40,
+                "selection_guard_q_safe": 0.52,
             },
         }
     )

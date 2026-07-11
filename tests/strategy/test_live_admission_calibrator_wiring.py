@@ -1,5 +1,5 @@
 # Created: 2026-06-22
-# Last audited: 2026-06-22
+# Last reused/audited: 2026-07-11
 # Authority basis: live-path wiring of the selection-calibrator + city-skill gate + shadow logger
 #   (team-lead 2026-06-22; live_order_pathology 2026-06-22).
 """Tests for the live_admission.py wiring of the calibrator and explicit city-skill blocker."""
@@ -10,6 +10,38 @@ import pytest
 from src.strategy.live_inference import live_admission as la
 from src.decision import selection_calibrator as sc
 from src.decision import city_skill_gate as csg
+
+
+@pytest.mark.parametrize(
+    ("direction", "strategy_key", "authority", "economics"),
+    (
+        ("buy_yes", "center_buy", "qkernel_spine", {"source": "qkernel_spine"}),
+        ("buy_no", "center_buy", "qkernel_spine", {"source": "qkernel_spine"}),
+    ),
+)
+def test_selected_side_probability_quality_floor_is_yes_no_symmetric(
+    direction,
+    strategy_key,
+    authority,
+    economics,
+):
+    below = la.live_entry_probability_quality_rejection_reason(
+        q_lcb=0.50,
+        direction=direction,
+        strategy_key=strategy_key,
+        selection_authority_applied=authority,
+        qkernel_execution_economics=economics,
+    )
+    above = la.live_entry_probability_quality_rejection_reason(
+        q_lcb=0.52,
+        direction=direction,
+        strategy_key=strategy_key,
+        selection_authority_applied=authority,
+        qkernel_execution_economics=economics,
+    )
+
+    assert below is not None
+    assert above is None
 
 
 # --------------------------------------------------------------------------------------------------
