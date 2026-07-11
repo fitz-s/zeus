@@ -4609,6 +4609,76 @@ def test_confirmed_fill_bridge_coverage_blocks_unbridged_rest_filled_orphan(
     assert check.evidence["samples"][0]["command_state"] == "FILLED"
 
 
+def test_confirmed_fill_bridge_coverage_ignores_terminal_reconciled_rest_fill(
+    monkeypatch,
+    tmp_path,
+):
+    trade_db, forecast_db, _state_dir = _patch_paths(monkeypatch, tmp_path)
+    _init_forecast_db(forecast_db).close()
+    conn = _init_confirmed_fill_bridge_gap_db(trade_db)
+    conn.execute("DELETE FROM venue_trade_facts")
+    conn.execute(
+        """
+        INSERT INTO venue_trade_facts VALUES (
+            'cmd-1', 'ord-1', 'trade-rest-reconciled', 'REST', 'MATCHED',
+            '10.5', '0.54', '2026-06-29T20:00:10+00:00'
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE edli_live_order_projection (
+            aggregate_id TEXT PRIMARY KEY,
+            current_state TEXT NOT NULL,
+            pending_reconcile INTEGER NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        "INSERT INTO edli_live_order_projection VALUES ('agg-1', 'RECONCILED', 0)"
+    )
+    conn.commit()
+    conn.close()
+
+    check = preflight._edli_confirmed_fill_bridge_coverage_check()
+
+    assert check.ok is True
+    assert check.evidence["terminal_reconciled_projection_excluded"] is True
+    assert check.evidence["missing_confirmed_fill_count"] == 0
+    assert check.evidence["missing_rest_filled_orphan_count"] == 0
+
+
+def test_confirmed_fill_bridge_coverage_ignores_terminal_position_rest_fill(
+    monkeypatch,
+    tmp_path,
+):
+    trade_db, forecast_db, _state_dir = _patch_paths(monkeypatch, tmp_path)
+    _init_forecast_db(forecast_db).close()
+    conn = _init_confirmed_fill_bridge_gap_db(trade_db)
+    conn.execute("DELETE FROM venue_trade_facts")
+    conn.execute(
+        """
+        INSERT INTO venue_trade_facts VALUES (
+            'cmd-1', 'ord-1', 'trade-rest-settled', 'REST', 'MATCHED',
+            '10.5', '0.54', '2026-06-29T20:00:10+00:00'
+        )
+        """
+    )
+    conn.execute(
+        "CREATE TABLE position_current (position_id TEXT PRIMARY KEY, phase TEXT NOT NULL)"
+    )
+    conn.execute("INSERT INTO position_current VALUES ('pos-1', 'settled')")
+    conn.commit()
+    conn.close()
+
+    check = preflight._edli_confirmed_fill_bridge_coverage_check()
+
+    assert check.ok is True
+    assert check.evidence["terminal_position_excluded"] is True
+    assert check.evidence["missing_confirmed_fill_count"] == 0
+    assert check.evidence["missing_rest_filled_orphan_count"] == 0
+
+
 def test_confirmed_fill_bridge_coverage_accepts_already_bridged_trade(
     monkeypatch,
     tmp_path,

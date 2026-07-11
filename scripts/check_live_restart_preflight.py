@@ -2256,7 +2256,31 @@ def _edli_confirmed_fill_bridge_coverage_check() -> CheckResult:
                 evidence,
             )
 
+        reconciled_projection_exclusion = ""
+        if _table_exists(conn, "main", "edli_live_order_projection"):
+            projection_columns = _table_columns(
+                conn, "main", "edli_live_order_projection"
+            )
+            if {
+                "aggregate_id",
+                "current_state",
+                "pending_reconcile",
+            }.issubset(projection_columns):
+                reconciled_projection_exclusion = """
+                           AND NOT EXISTS (
+                                 SELECT 1
+                                   FROM edli_live_order_projection projection
+                                  WHERE projection.aggregate_id = exec.aggregate_id
+                                    AND projection.current_state = 'RECONCILED'
+                                    AND COALESCE(projection.pending_reconcile, 0) = 0
+                               )
+                """
+        evidence["terminal_reconciled_projection_excluded"] = bool(
+            reconciled_projection_exclusion
+        )
+
         position_join = ""
+        terminal_position_exclusion = ""
         position_select = (
             "NULL AS city, NULL AS target_date, NULL AS temperature_metric, "
             "NULL AS bin_label, NULL AS direction, NULL AS phase"
@@ -2280,6 +2304,16 @@ def _edli_confirmed_fill_bridge_coverage_check() -> CheckResult:
               LEFT JOIN position_current pc
                 ON pc.position_id = cmd.position_id
             """
+            if "phase" in position_columns:
+                terminal_position_exclusion = """
+                           AND (
+                                 pc.position_id IS NULL
+                                 OR LOWER(COALESCE(pc.phase, '')) NOT IN (
+                                      'settled', 'voided', 'quarantined', 'admin_closed'
+                                 )
+                               )
+                """
+        evidence["terminal_position_excluded"] = bool(terminal_position_exclusion)
 
         missing_cte = f"""
             WITH execution_commands AS (
@@ -2360,6 +2394,8 @@ def _edli_confirmed_fill_bridge_coverage_check() -> CheckResult:
                                     AND existing.event_type = 'UserTradeObserved'
                                     AND json_extract(existing.payload_json, '$.trade_id') = trade.trade_id
                                )
+                           {reconciled_projection_exclusion}
+                           {terminal_position_exclusion}
                          )
                        )
             )
