@@ -4521,6 +4521,86 @@ def test_107_durable_live_cap_seed_excludes_trade_truth_materialized_exposure():
     )
 
 
+def test_107_durable_live_cap_seed_batches_trade_truth_for_runtime_scale():
+    """Trade-truth reconstruction must not issue one query per live-cap row."""
+    conn = _live_cap_seed_conn()
+    trade_conn = sqlite3.connect(":memory:")
+    trade_conn.row_factory = sqlite3.Row
+    trade_conn.executescript(
+        """
+        CREATE TABLE venue_commands (
+            command_id TEXT NOT NULL,
+            decision_id TEXT NOT NULL,
+            intent_kind TEXT NOT NULL,
+            state TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        );
+        CREATE TABLE position_current (
+            phase TEXT NOT NULL,
+            token_id TEXT,
+            no_token_id TEXT,
+            cost_basis_usd REAL,
+            chain_cost_basis_usd REAL,
+            shares REAL
+        );
+        """
+    )
+    count = 450
+    for index in range(count):
+        _insert_live_cap_usage(
+            conn,
+            usage_id=f"usage-{index:03d}",
+            event_id=f"event-{index:03d}",
+            final_intent_id=f"intent:token-{index:03d}",
+            usd=1.0,
+            execution_command_id=f"cmd-{index:03d}",
+        )
+    trade_conn.executemany(
+        """
+        INSERT INTO venue_commands (
+            command_id, decision_id, intent_kind, state, updated_at, created_at
+        ) VALUES (?, ?, 'ENTRY', ?, '2026-06-07T00:05:00+00:00',
+                  '2026-06-07T00:00:00+00:00')
+        """,
+        (
+            (
+                f"cmd-{index:03d}",
+                f"decision-{index:03d}",
+                "REJECTED" if index % 3 == 0 else "ACKED",
+            )
+            for index in range(count)
+        ),
+    )
+    trade_conn.executemany(
+        """
+        INSERT INTO position_current (
+            phase, token_id, no_token_id, cost_basis_usd, chain_cost_basis_usd, shares
+        ) VALUES ('active', ?, '', 1.0, 0.0, 1.0)
+        """,
+        ((f"token-{index:03d}",) for index in range(count) if index % 3 == 1),
+    )
+
+    traced: list[str] = []
+    trade_conn.set_trace_callback(traced.append)
+    rows = _durable_unmaterialized_live_cap_reservations(conn, trade_conn=trade_conn)
+    trade_conn.set_trace_callback(None)
+
+    assert tuple(row[0] for row in rows) == tuple(
+        f"durable_live_cap:usage-{index:03d}"
+        for index in range(count)
+        if index % 3 == 2
+    )
+    trade_reads = [
+        statement
+        for statement in traced
+        if statement.lstrip().upper().startswith(("SELECT", "PRAGMA"))
+    ]
+    assert sum("FROM VENUE_COMMANDS" in statement.upper() for statement in trade_reads) == 1
+    assert sum("FROM POSITION_CURRENT" in statement.upper() for statement in trade_reads) == 1
+    assert len(trade_reads) <= 6
+
+
 def test_107_durable_live_cap_seed_is_committed_and_rollback_immune():
     """Already-emitted cross-cycle live-cap exposure cannot be removed by the
     per-event rollback path, because it is real in-flight capital."""

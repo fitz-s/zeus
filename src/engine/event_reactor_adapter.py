@@ -1113,6 +1113,126 @@ def _durable_live_cap_token_has_materialized_position(
     return row is not None
 
 
+def _durable_live_cap_represented_pairs(
+    trade_conn: sqlite3.Connection | None,
+    pairs: Iterable[tuple[str, str]],
+) -> frozenset[tuple[str, str]]:
+    """Batch the trade-truth side of durable live-cap reconstruction."""
+    requested = tuple(dict.fromkeys(pairs))
+    if trade_conn is None or not requested:
+        return frozenset()
+    try:
+        command_ids = sorted({command_id for command_id, _ in requested if command_id})
+        command_states: dict[str, str] = {}
+        if command_ids and _adapter_table_exists(trade_conn, "venue_commands"):
+            command_columns = {
+                str(row[1] if not isinstance(row, sqlite3.Row) else row["name"])
+                for row in trade_conn.execute("PRAGMA table_info(venue_commands)").fetchall()
+            }
+            match_columns = ["decision_id"]
+            if "command_id" in command_columns:
+                match_columns.insert(0, "command_id")
+            limit = trade_conn.getlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER)
+            chunk_size = max(1, (limit - 1) // len(match_columns))
+            select_command_id = "command_id" if "command_id" in command_columns else "NULL"
+            for offset in range(0, len(command_ids), chunk_size):
+                chunk = command_ids[offset : offset + chunk_size]
+                placeholders = ",".join("?" for _ in chunk)
+                match_sql = " OR ".join(
+                    f"{column} IN ({placeholders})" for column in match_columns
+                )
+                rows = trade_conn.execute(
+                    f"""
+                    SELECT {select_command_id} AS command_id,
+                           decision_id,
+                           state
+                      FROM venue_commands
+                     WHERE intent_kind = 'ENTRY'
+                       AND ({match_sql})
+                     ORDER BY updated_at DESC, created_at DESC
+                    """,
+                    tuple(chunk) * len(match_columns),
+                ).fetchall()
+                chunk_ids = set(chunk)
+                for row in rows:
+                    command_id = str(
+                        row[0] if not isinstance(row, sqlite3.Row) else row["command_id"] or ""
+                    )
+                    decision_id = str(
+                        row[1] if not isinstance(row, sqlite3.Row) else row["decision_id"] or ""
+                    )
+                    state = str(
+                        row[2] if not isinstance(row, sqlite3.Row) else row["state"] or ""
+                    ).strip().upper()
+                    for matched_id in (command_id, decision_id):
+                        if matched_id in chunk_ids and matched_id not in command_states:
+                            command_states[matched_id] = state
+
+        token_by_pair = {
+            pair: _durable_live_cap_final_intent_token(pair[1]) for pair in requested
+        }
+        tokens = sorted({token for token in token_by_pair.values() if token})
+        materialized_tokens: set[str] = set()
+        if tokens and _adapter_table_exists(trade_conn, "position_current"):
+            columns = _position_current_columns(trade_conn)
+            phase_sql, phase_params = _position_phase_or_positive_chain_clause(
+                columns,
+                _DURABLE_LIVE_CAP_MATERIALIZED_POSITION_PHASES,
+            )
+            positive_terms = [
+                f"COALESCE({name}, 0) > 0"
+                for name in ("chain_shares", "shares", "chain_cost_basis_usd", "cost_basis_usd")
+                if name in columns
+            ]
+            token_columns = [name for name in ("token_id", "no_token_id") if name in columns]
+            if positive_terms and token_columns:
+                limit = trade_conn.getlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER)
+                chunk_size = max(
+                    1,
+                    (limit - len(phase_params)) // len(token_columns),
+                )
+                select_tokens = ", ".join(token_columns)
+                for offset in range(0, len(tokens), chunk_size):
+                    chunk = tokens[offset : offset + chunk_size]
+                    placeholders = ",".join("?" for _ in chunk)
+                    token_sql = " OR ".join(
+                        f"NULLIF({column}, '') IN ({placeholders})"
+                        for column in token_columns
+                    )
+                    rows = trade_conn.execute(
+                        f"""
+                        SELECT {select_tokens}
+                          FROM position_current
+                         WHERE {phase_sql}
+                           AND ({token_sql})
+                           AND ({" OR ".join(positive_terms)})
+                        """,
+                        (*phase_params, *(tuple(chunk) * len(token_columns))),
+                    ).fetchall()
+                    chunk_tokens = set(chunk)
+                    for row in rows:
+                        for index, column in enumerate(token_columns):
+                            token = str(
+                                row[index]
+                                if not isinstance(row, sqlite3.Row)
+                                else row[column] or ""
+                            )
+                            if token in chunk_tokens:
+                                materialized_tokens.add(token)
+
+        return frozenset(
+            pair
+            for pair in requested
+            if command_states.get(pair[0])
+            in _DURABLE_LIVE_CAP_NO_EXPOSURE_TERMINAL_COMMAND_STATES
+            or token_by_pair[pair] in materialized_tokens
+        )
+    except Exception as exc:  # noqa: BLE001 - sizing must fail closed on exposure ambiguity.
+        raise RuntimeError(
+            f"DURABLE_LIVE_CAP_TRADE_TRUTH_UNAVAILABLE:{type(exc).__name__}:{exc}"
+        ) from exc
+
+
 def _position_current_columns(conn: sqlite3.Connection) -> set[str]:
     try:
         columns = {
@@ -1491,6 +1611,24 @@ def _durable_unmaterialized_live_cap_reservations(
         raise RuntimeError(
             f"DURABLE_LIVE_CAP_EXPOSURE_SEED_UNAVAILABLE:{type(exc).__name__}:{exc}"
         ) from exc
+    trade_truth_pairs = _durable_live_cap_represented_pairs(
+        trade_conn,
+        (
+            (
+                str(
+                    row[2]
+                    if not isinstance(row, sqlite3.Row)
+                    else row["execution_command_id"] or ""
+                ),
+                str(
+                    row[1]
+                    if not isinstance(row, sqlite3.Row)
+                    else row["final_intent_id"] or ""
+                ),
+            )
+            for row in rows
+        ),
+    )
     out: list[tuple[str, str, float]] = []
     for row in rows:
         usage_id = str(row[0] if not isinstance(row, sqlite3.Row) else row["usage_id"])
@@ -1498,11 +1636,7 @@ def _durable_unmaterialized_live_cap_reservations(
         execution_command_id = str(row[2] if not isinstance(row, sqlite3.Row) else row["execution_command_id"] or "")
         city = str(row[3] if not isinstance(row, sqlite3.Row) else row["city"])
         reserved = float(row[4] if not isinstance(row, sqlite3.Row) else row["reserved_notional_usd"])
-        if _durable_live_cap_usage_is_represented_in_trade_truth(
-            trade_conn,
-            execution_command_id=execution_command_id,
-            final_intent_id=final_intent_id,
-        ):
+        if (execution_command_id, final_intent_id) in trade_truth_pairs:
             continue
         if usage_id and reserved > 0.0:
             out.append((f"durable_live_cap:{usage_id}", city, reserved))
