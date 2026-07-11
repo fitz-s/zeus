@@ -1368,7 +1368,7 @@ def _edli_user_channel_reconcile_cycle() -> None:
     market-channel data remains quote evidence only.
     """
     from src.observability.scheduler_health import _write_scheduler_health
-    from src.state.db import get_trade_connection_with_world_required
+    from src.state.db import get_world_connection_with_trades_required
 
     edli_cfg = _settings_section("edli_v1", {})
     if not _edli_user_channel_reconcile_runtime_enabled(edli_cfg):
@@ -1396,7 +1396,7 @@ def _edli_user_channel_reconcile_cycle() -> None:
         pending_user_channel_inbox_messages,
     )
 
-    conn = get_trade_connection_with_world_required(write_class="live")
+    conn = get_world_connection_with_trades_required(write_class="live")
     try:
         ledger = LiveOrderAggregateLedger(conn)
         user_channel_reader = _edli_user_channel_reader(edli_cfg)

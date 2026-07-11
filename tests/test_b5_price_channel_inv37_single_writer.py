@@ -1,5 +1,6 @@
 # Created: 2026-06-20
-# Last audited: 2026-06-20
+# Last audited: 2026-07-11
+# Last reused/audited: 2026-07-11
 # Authority basis: PR415 ChatGPT deep-review blocker B5 (INV-37). The held- and
 #   candidate-priority quote-evidence ingest (and the forever market-channel loop)
 #   must write the world event (opportunity_events) AND the trade-owned book witness
@@ -171,6 +172,23 @@ def test_forever_ingestor_uses_single_attached_connection():
         "_edli_market_channel_ingestor_cycle must use the single-connection ATTACH "
         "helper get_world_connection_with_trades_required (INV-37)."
     )
+
+
+def test_user_channel_reconcile_uses_world_main_with_trades_attached():
+    """EDLI ledger writes must resolve to canonical world MAIN while authenticated
+    command/trade facts resolve through the attached ``trades`` schema."""
+    node = _func_node("_edli_user_channel_reconcile_cycle")
+    assigned_openers = {
+        target.id: sub.value.func.id
+        for sub in ast.walk(node)
+        if isinstance(sub, ast.Assign)
+        and isinstance(sub.value, ast.Call)
+        and isinstance(sub.value.func, ast.Name)
+        for target in sub.targets
+        if isinstance(target, ast.Name)
+    }
+    assert assigned_openers["conn"] == "get_world_connection_with_trades_required"
+    assert assigned_openers["bridge_conn"] == "get_trade_connection_with_world_required"
 
 
 def test_forever_ingestor_passes_unified_world_trade_gate():

@@ -1,10 +1,10 @@
-# Lifecycle: created=2026-06-12; last_reviewed=2026-06-12; last_reused=2026-06-29
+# Lifecycle: created=2026-06-12; last_reviewed=2026-07-11; last_reused=2026-07-11
 # Purpose: light smoke coverage for the three new ops scripts (zeus_status,
 #   deploy_live, generate_schema_cheatsheet).
 # Reuse: asserts the FAIL-SOFT contract (a locked/empty/missing DB degrades one
 #   section to ERR, the rest still render) and that each script runs read-only
 #   against temp DBs. No live DB is touched.
-# Last reused/audited: 2026-06-29
+# Last reused/audited: 2026-07-11
 # Authority basis: operator big-direction 2026-06-12 ("大方向现在也只是添加几个文件现在做")
 """Smoke tests for scripts/zeus_status.py, deploy_live.py, generate_schema_cheatsheet.py."""
 from __future__ import annotations
@@ -1999,7 +1999,8 @@ def test_deploy_live_trading_restart_runs_recovery(monkeypatch, tmp_path):
     assert "ensure_live_order_tables(world_conn)" in calls[0][2]
     assert "init_schema_trade_only" in calls[0][2]
     assert "get_trade_connection(write_class='live')" in calls[0][2]
-    assert "get_trade_connection_with_world_required(write_class='live')" in calls[0][2]
+    assert "get_world_connection_with_trades_required(write_class='live')" in calls[0][2]
+    assert "get_trade_connection_with_world_required(write_class='live')" not in calls[0][2]
     assert "append_rest_filled_orphan_trade_facts_to_edli" in calls[0][2]
 
 

@@ -886,8 +886,8 @@ def _run_restart_recovery_if_needed(labels: list[str]) -> tuple[bool, str]:
         from scripts.migrations import apply_migrations
         from src.state.db import (
             get_trade_connection,
-            get_trade_connection_with_world_required,
             get_world_connection,
+            get_world_connection_with_trades_required,
             init_schema_trade_only,
         )
         from src.state.schema.edli_live_order_events_schema import (
@@ -928,7 +928,7 @@ def _run_restart_recovery_if_needed(labels: list[str]) -> tuple[bool, str]:
         )
 
         summary = reconcile_unresolved_commands(scope='restart_preflight')
-        bridge_conn = get_trade_connection_with_world_required(write_class='live')
+        bridge_conn = get_world_connection_with_trades_required(write_class='live')
         try:
             summary['confirmed_fill_bridge_appended'] = append_confirmed_trade_facts_to_edli(
                 bridge_conn
