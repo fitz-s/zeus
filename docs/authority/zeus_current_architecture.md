@@ -235,8 +235,17 @@ Legal lifecycle phases are bounded and enum-backed:
 Terminal phases:
 
 - `voided`
-- `quarantined`
+- `settled`
 - `admin_closed`
+
+`quarantined` is NOT terminal today: `LEGAL_LIFECYCLE_FOLDS` (P0c,
+2026-07-04) widened its fold to `{quarantined, settled, voided}` so the
+chain-mirror reconciler can legally close a quarantined row once chain truth
+grades it — see `docs/reference/zeus_execution_lifecycle_reference.md`
+§1.1-1.2 and `docs/rebuild/chain_mirror_state_model_2026-07-04.md` §5.
+`quarantined` is a review/investigation phase, not a market terminal.
+Retirement of the phase itself (and this note) is tracked by
+`docs/rebuild/quarantine_excision_2026-07-11.md` (T5).
 
 Exit intent is not closure. Settlement is not exit. Quarantine is not a normal
 holding state. No helper, report, strategy, or LLM-generated patch may invent

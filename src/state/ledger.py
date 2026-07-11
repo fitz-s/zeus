@@ -306,7 +306,7 @@ def _ensure_venue_position_observed_event_type(conn: sqlite3.Connection) -> None
                     INSERT INTO position_events ({", ".join(shared_columns)})
                     SELECT {", ".join(shared_columns)}
                     FROM position_events_pre_d0_v1
-                    WHERE occurred_at LIKE '____-__-__T%' OR occurred_at = 'QUARANTINE'
+                    WHERE occurred_at LIKE '____-__-__T%'
                     """
                 )
             conn.execute("DROP TABLE position_events_pre_d0_v1")

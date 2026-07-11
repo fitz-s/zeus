@@ -30,8 +30,16 @@ CREATE TABLE IF NOT EXISTS position_events (
         'VENUE_POSITION_OBSERVED',
         'REVIEW_REQUIRED'
     )),
+    -- 2026-07-11: 'QUARANTINE' sentinel literal removed from this CHECK — a
+    -- state word inside a timestamp type (docs/rebuild/quarantine_excision_2026-07-11.md
+    -- §T7). Evidence: zero live position_events rows carry occurred_at='QUARANTINE'
+    -- (state/zeus_trades.db, 2026-07-11) and no src/ writer ever sets it; the
+    -- literal only ever appeared as a last-resort fallback inside the historical,
+    -- already-applied scripts/migrations/202605_position_events_occurred_at_iso_check.py
+    -- (kept verbatim as history — it built its own self-contained DDL, independent
+    -- of this kernel file, and never hit that fallback branch on live data).
     occurred_at TEXT NOT NULL
-        CHECK (occurred_at LIKE '____-__-__T%' OR occurred_at = 'QUARANTINE'),
+        CHECK (occurred_at LIKE '____-__-__T%'),
     phase_before TEXT CHECK (phase_before IS NULL OR phase_before IN (
         'pending_entry',
         'active',
