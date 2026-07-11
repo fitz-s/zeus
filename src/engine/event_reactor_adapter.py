@@ -5959,25 +5959,29 @@ def _global_current_state_execution_economics(
     decision: object,
     witness: object,
 ) -> dict[str, Any]:
-    """Bind the actuation certificate to the exact band the global solver used."""
+    """Bind actuation to the current global band without loosening served belief."""
 
     shares = Decimal(str(getattr(decision, "shares", "0") or "0"))
     cost = Decimal(str(getattr(decision, "cost_usd", "0") or "0"))
     robust_ev = Decimal(str(getattr(decision, "robust_ev_usd", "nan")))
     point_q = Decimal(str(cert.get("payoff_q_point")))
+    served_lcb = Decimal(str(cert.get("pre_qkernel_q_lcb_5pct")))
     unit_cost = Decimal(str(cert.get("cost")))
     if (
         shares <= 0
         or cost <= 0
         or not robust_ev.is_finite()
         or not point_q.is_finite()
+        or not served_lcb.is_finite()
         or not unit_cost.is_finite()
     ):
         raise ValueError("GLOBAL_CURRENT_STATE_ECONOMICS_INVALID")
-    payoff_q_lcb = (robust_ev + cost) / shares
+    current_band_payoff_q_lcb = (robust_ev + cost) / shares
+    payoff_q_lcb = min(current_band_payoff_q_lcb, served_lcb)
     edge_lcb = payoff_q_lcb - unit_cost
     if not (
-        Decimal("0") <= payoff_q_lcb <= point_q <= Decimal("1")
+        Decimal("0") <= served_lcb <= point_q <= Decimal("1")
+        and Decimal("0") <= current_band_payoff_q_lcb <= point_q
         and edge_lcb > 0
     ):
         raise ValueError("GLOBAL_CURRENT_STATE_ECONOMICS_NON_POSITIVE")
@@ -6009,7 +6013,9 @@ def _global_current_state_execution_economics(
             "selection_guard_cell_key": sample_hash,
             "selection_guard_n": n_draws,
             "selection_guard_q_safe": float(payoff_q_lcb),
-            "global_current_band_payoff_q_lcb": float(payoff_q_lcb),
+            "global_current_band_payoff_q_lcb": float(current_band_payoff_q_lcb),
+            "global_current_served_payoff_q_lcb": float(served_lcb),
+            "global_current_effective_payoff_q_lcb": float(payoff_q_lcb),
             "global_current_band_sample_identity": sample_hash,
             "global_current_band_n": n_draws,
             "global_current_band_alpha": alpha,
