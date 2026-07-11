@@ -597,10 +597,74 @@ def process_current_global_batch(
             if venue_submit_count() != before_preflight:
                 return reject("GLOBAL_PREFLIGHT_VENUE_SIDE_EFFECT")
             if preflight.status == "CURVE_SUPERSEDED":
-                return reject(
-                    "GLOBAL_REAUCTION_EXHAUSTED:"
-                    f"{preflight.reason or preflight.status}"
+                probabilities_1, book_epoch_1 = current_book_epoch_provider(
+                    probabilities_fence,
+                    current_time(),
                 )
+                if _probability_manifest(probabilities_1) != probability_manifest:
+                    return reject("GLOBAL_REAUCTION_PROBABILITY_CUT_DRIFT")
+                prepared_1 = {
+                    event_id: replace(
+                        prepared,
+                        probability_witness=probabilities_1[
+                            prepared.probability_witness.family_key
+                        ],
+                    )
+                    for event_id, prepared in prepared_by_event.items()
+                }
+                selected = select_once(probabilities_1, book_epoch_1, prepared_1)
+                if selected.decision.candidate is None:
+                    return reject(
+                        "GLOBAL_REAUCTION_NO_TRADE:"
+                        f"{selected.decision.no_trade_reason or 'unknown'}"
+                    )
+                winner_id = selected.winner_event_id
+                winner = next(
+                    (event for event in event_tuple if event.event_id == winner_id),
+                    None,
+                )
+                if selected.actuation is None:
+                    return reject("GLOBAL_REAUCTION_ACTUATION_MISSING")
+                if winner is None:
+                    target = next(
+                        (
+                            event
+                            for event in full_scope_event_by_family.values()
+                            if event.event_id == winner_id
+                        ),
+                        None,
+                    )
+                    if target is None:
+                        return reject("GLOBAL_REAUCTION_WINNER_IDENTITY_MISSING")
+                    return reject(
+                        "GLOBAL_REAUCTION_WINNER_AWAITS_CLAIM",
+                        next_claim_event=_next_claim_carrier(
+                            target,
+                            targeted_at=current_time(),
+                            economic_identity=selected.actuation.economic_identity,
+                            payload=payload_reader(target),
+                        ),
+                    )
+                preflight_authority = GlobalPreflightAuthority(
+                    probability_manifest=probability_manifest,
+                    book_epoch_identity=book_epoch_1.witness_identity,
+                    book_economics_manifest=_book_economics_manifest(book_epoch_1),
+                    wealth_witness_identity=selected.actuation.wealth_witness_identity,
+                )
+                before_second_preflight = venue_submit_count()
+                preflight = preflight_winner(
+                    winner,
+                    selected.actuation,
+                    current_time(),
+                    preflight_authority,
+                )
+                if venue_submit_count() != before_second_preflight:
+                    return reject("GLOBAL_PREFLIGHT_VENUE_SIDE_EFFECT")
+                if preflight.status != "STABLE":
+                    return reject(
+                        "GLOBAL_REAUCTION_EXHAUSTED:"
+                        f"{preflight.reason or preflight.status}"
+                    )
             elif preflight.status != "STABLE":
                 return reject(
                     f"GLOBAL_WINNER_PREFLIGHT_BLOCKED:{preflight.reason}"

@@ -2523,26 +2523,32 @@ def test_global_batch_reauctions_once_on_full_universe_curve_drift(monkeypatch):
         )
         for event, family_key in zip((event_a, event_b), scope.family_keys)
     }
-    actuations = {
-        event_a.event_id: SimpleNamespace(
-            actuation_identity="actuation-a", wealth_witness_identity="wealth-1"
-        ),
-        event_b.event_id: SimpleNamespace(
-            actuation_identity="actuation-b", wealth_witness_identity="wealth-2"
-        ),
-    }
+    actuation_a = SimpleNamespace(
+        actuation_identity="actuation-a", wealth_witness_identity="wealth-1"
+    )
+    actuation_b_fence = SimpleNamespace(
+        actuation_identity="actuation-b-fence", wealth_witness_identity="wealth-2"
+    )
+    actuation_b_final = SimpleNamespace(
+        actuation_identity="actuation-b-final", wealth_witness_identity="wealth-3"
+    )
     selections = iter(
         SimpleNamespace(
             decision=SimpleNamespace(candidate=object(), no_trade_reason=None),
             winner_event_id=event.event_id,
-            actuation=actuations[event.event_id],
+            actuation=actuation,
         )
-        for event in (event_a, event_b)
+        for event, actuation in (
+            (event_a, actuation_a),
+            (event_b, actuation_b_fence),
+            (event_b, actuation_b_final),
+        )
     )
     books = iter(
         (
             _global_test_book("book-0", price="0.40"),
             _global_test_book("book-1", price="0.41"),
+            _global_test_book("book-2", price="0.42"),
         )
     )
     calls = {"prepare": 0, "books": 0, "wealth": 0, "preflight": [], "venue": 0}
@@ -2590,15 +2596,19 @@ def test_global_batch_reauctions_once_on_full_universe_curve_drift(monkeypatch):
 
     def preflight(event, _actuation, _at, _authority):
         calls["preflight"].append(event.event_id)
+        if len(calls["preflight"]) == 1:
+            return global_batch_runtime.GlobalWinnerPreflight(
+                status="CURVE_SUPERSEDED", reason="curve moved"
+            )
         return global_batch_runtime.GlobalWinnerPreflight(
             status="STABLE", binding_token="binding-b"
         )
 
     def actuate_preflighted(event, actuation, _at, token, authority):
         assert event.event_id == event_b.event_id
-        assert actuation is actuations[event_b.event_id]
+        assert actuation is actuation_b_final
         assert token == "binding-b"
-        assert authority.book_epoch_identity == "book-1"
+        assert authority.book_epoch_identity == "book-2"
         calls["venue"] += 1
         return EventSubmissionReceipt(
             True,
@@ -2630,9 +2640,9 @@ def test_global_batch_reauctions_once_on_full_universe_curve_drift(monkeypatch):
 
     assert calls == {
         "prepare": 2,
-        "books": 2,
-        "wealth": 2,
-        "preflight": [event_b.event_id],
+        "books": 3,
+        "wealth": 3,
+        "preflight": [event_b.event_id, event_b.event_id],
         "venue": 1,
     }
     assert result.winner_event_id == event_b.event_id
@@ -2640,7 +2650,7 @@ def test_global_batch_reauctions_once_on_full_universe_curve_drift(monkeypatch):
     assert result.receipts[event_b.event_id].submitted is True
 
 
-def test_global_batch_fence_curve_supersession_exhausts_without_venue(monkeypatch):
+def test_global_batch_second_curve_supersession_exhausts_without_venue(monkeypatch):
     decision_at = _dt.datetime(2026, 7, 10, 8, 0, tzinfo=_dt.timezone.utc)
     event = _global_scope_event(city="Alpha", source_run_id="run-a")
     scope = current_global_auction_scope_from_events(
@@ -2717,11 +2727,11 @@ def test_global_batch_fence_curve_supersession_exhausts_without_venue(monkeypatc
         ),
     )
 
-    assert calls == {"preflight": 1, "venue": 0}
+    assert calls == {"preflight": 2, "venue": 0}
     assert result.venue_submit_count == 0
     assert result.winner_event_id is None
     assert result.receipts[event.event_id].reason == (
-        "GLOBAL_REAUCTION_EXHAUSTED:curve moved 1"
+        "GLOBAL_REAUCTION_EXHAUSTED:curve moved 2"
     )
 
 
