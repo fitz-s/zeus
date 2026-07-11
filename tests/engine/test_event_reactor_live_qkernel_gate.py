@@ -956,6 +956,28 @@ def test_global_actuation_current_band_refuses_non_positive_bound():
         )
 
 
+def test_global_actuation_current_band_reports_missing_prior_lcb():
+    cert = _current_qkernel_cert(side="YES")
+    cert.pop("payoff_q_lcb")
+    decision = SimpleNamespace(
+        shares=Decimal("100"),
+        cost_usd=Decimal("1"),
+        robust_ev_usd=Decimal("9"),
+    )
+    witness = SimpleNamespace(
+        sample_matrix_identity="global-current-sample",
+        yes_q_samples=SimpleNamespace(shape=(400, 2)),
+        band_alpha=0.05,
+    )
+
+    with pytest.raises(ValueError, match="GLOBAL_CURRENT_STATE_PRIOR_LCB_INVALID"):
+        era._global_current_state_execution_economics(
+            cert,
+            decision=decision,
+            witness=witness,
+        )
+
+
 def test_global_actuation_recovers_missing_point_from_current_bound_witness():
     cert = _current_qkernel_cert(side="NO")
     cert.pop("payoff_q_point")
