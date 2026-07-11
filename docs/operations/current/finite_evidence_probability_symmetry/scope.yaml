@@ -12,7 +12,9 @@ allowed_files:
 - src/data/replacement_forecast_materializer.py
 - src/execution/venue_sync_contract.py
 - src/engine/cycle_runtime.py
+- src/engine/event_reactor_adapter.py
 - src/engine/monitor_refresh.py
+- tests/engine/test_event_reactor_live_qkernel_gate.py
 - tests/test_finite_evidence_probability_symmetry.py
 - tests/execution/test_venue_sync_contract.py
 - tests/test_monitor_refresh_nowcast_wiring.py

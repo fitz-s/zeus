@@ -1012,6 +1012,60 @@ def test_global_actuation_current_band_refuses_non_positive_bound():
         )
 
 
+@pytest.mark.parametrize("side", ("YES", "NO"))
+def test_global_actuation_current_band_binds_candidate_side_when_cert_omits_it(side):
+    cert = _current_qkernel_cert(side=side)
+    cert.pop("side")
+    cert.update(
+        payoff_q_point=0.70,
+        pre_qkernel_q_lcb_5pct=0.65,
+        payoff_q_lcb=0.60,
+        cost=0.40,
+        edge_lcb=0.20,
+    )
+    decision = SimpleNamespace(
+        candidate=SimpleNamespace(side=side),
+        shares=Decimal("10"),
+        cost_usd=Decimal("4"),
+        robust_ev_usd=Decimal("2"),
+    )
+    witness = SimpleNamespace(
+        sample_matrix_identity="global-current-sample",
+        yes_q_samples=SimpleNamespace(shape=(400, 2)),
+        band_alpha=0.05,
+    )
+
+    current = era._global_current_state_execution_economics(
+        cert,
+        decision=decision,
+        witness=witness,
+    )
+
+    assert current["side"] == side
+
+
+def test_global_actuation_current_band_refuses_candidate_cert_side_mismatch():
+    cert = _current_qkernel_cert(side="NO")
+    decision = SimpleNamespace(
+        candidate=SimpleNamespace(side="YES"),
+        shares=Decimal("10"),
+        cost_usd=Decimal("4"),
+        robust_ev_usd=Decimal("2"),
+    )
+    witness = SimpleNamespace(
+        sample_matrix_identity="global-current-sample",
+        yes_q_samples=SimpleNamespace(shape=(400, 2)),
+        band_alpha=0.05,
+    )
+
+    with pytest.raises(ValueError, match="GLOBAL_CURRENT_STATE_SIDE_INVALID"):
+        era._global_current_state_execution_economics(
+            cert,
+            decision=decision,
+            witness=witness,
+        )
+
+
 def test_global_actuation_current_band_uses_current_bound_when_prior_is_absent():
     cert = _current_qkernel_cert(side="YES")
     for field in (

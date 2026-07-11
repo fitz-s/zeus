@@ -61,6 +61,9 @@ replacement posterior is stale, the Day0 lane remains fail-closed.
   inside the existing coverage grace, a fresh replacement posterior remains
   monitor authority; this is not permission to use stale forecast belief or to
   ignore any available Day0 observation.
+- Bind the global candidate's canonical YES/NO side into the current-state
+  submit certificate. A missing legacy route `side` must not become `UNKNOWN`,
+  while any real certificate/candidate side mismatch remains fail-closed.
 
 ## Verification
 - Focused first-principles antibody and settlement-preimage regressions pass.
@@ -99,3 +102,8 @@ replacement posterior is stale, the Day0 lane remains fail-closed.
   was 22:50 UTC / 23:50 local. The monitor therefore recorded three consecutive
   stale probabilities despite a fresh replacement posterior, and live health
   globally excluded multiple independent positive-EV YES candidates.
+- 2026-07-11: after monitor freshness recovered, Madrid YES reached actual
+  submit quality but was rejected as `side=UNKNOWN:direction=buy_yes`. The
+  sealed global certificate carried the global candidate and direction but did
+  not copy the candidate's typed YES/NO side; the final check was therefore
+  testing an unproduced legacy field rather than the selected order identity.
