@@ -1,4 +1,4 @@
-# Lifecycle: created=2026-06-08; last_reviewed=2026-06-17; last_reused=2026-06-17
+# Lifecycle: created=2026-06-08; last_reviewed=2026-07-11; last_reused=2026-07-11
 # Reuse: Run with pytest; update if bayes_precision_fusion fusion, materializer wiring, or flag-gate semantics change.
 # Created: 2026-06-08
 # Last reused or audited: 2026-06-17
@@ -187,6 +187,38 @@ def _seed_current_single_runs(conn, *, live_values: dict[str, float], request=No
         )
 
 
+def _seed_current_ens(conn, *, request=None) -> None:
+    """Seed the current target-specific shape carrier required by source-clock q."""
+
+    req = request if request is not None else _request()
+    members = [24.0 + (index - 25) * 0.02 for index in range(51)]
+    conn.execute(
+        """
+        INSERT INTO ensemble_snapshots (
+            city, target_date, temperature_metric, physical_quantity,
+            observation_field, issue_time, valid_time, available_at,
+            fetch_time, lead_hours, members_json, model_version, dataset_id,
+            source_id, source_cycle_time, source_available_at,
+            forecast_window_attribution_status, contributes_to_target_extrema,
+            causality_status, boundary_ambiguous, authority, members_unit
+        ) VALUES (?, ?, 'high', 'temperature', 'high_temp', ?, ?, ?, ?, 24.0,
+                  ?, 'ecmwf_ens', 'test-current-ens', 'ecmwf_open_data', ?, ?,
+                  'FULLY_INSIDE_TARGET_LOCAL_DAY', 1, 'OK', 0, 'VERIFIED', 'degC')
+        """,
+        (
+            req.city,
+            mod._date_text(req.target_date),
+            mod._to_utc(req.source_cycle_time, field_name="source_cycle_time").isoformat(),
+            datetime(2026, 6, 7, 12, tzinfo=UTC).isoformat(),
+            _dt(3).isoformat(),
+            _dt(3, 30).isoformat(),
+            json.dumps(members),
+            mod._to_utc(req.source_cycle_time, field_name="source_cycle_time").isoformat(),
+            _dt(3).isoformat(),
+        ),
+    )
+
+
 def _enable_flag(monkeypatch):
     import src.config as cfg
     monkeypatch.setitem(cfg.settings["edli"], "replacement_0_1_bayes_precision_fusion_enabled", True)
@@ -299,6 +331,7 @@ def test_source_clock_accepts_registered_station_entry_sources(monkeypatch, tmp_
                 "hko_fnd": 31.0,
             },
         )
+        _seed_current_ens(conn)
 
         pid = mod._insert_posterior(conn, _request(), metric="high", anchor_id=1)
         fusion = json.loads(_row(conn, pid)["provenance_json"])["bayes_precision_fusion"]
@@ -306,6 +339,80 @@ def test_source_clock_accepts_registered_station_entry_sources(monkeypatch, tmp_
         assert fusion["method"] == "SOURCE_CLOCK_FIXED_WEIGHT"
         assert fusion["source_clock_one_scheme"] is not None
         assert "hko_fnd" in fusion["used_models"]
+    finally:
+        source_clock.load_city_one_schemes.cache_clear()
+
+
+def test_source_clock_missing_current_ens_shape_fails_closed(monkeypatch, tmp_path) -> None:
+    from src.strategy.live_inference import source_clock_city_weights as source_clock
+
+    _disable_other_layers(monkeypatch)
+    _enable_flag(monkeypatch)
+    scheme_path = tmp_path / "city_one_scheme_grid_aware.csv"
+    scheme_path.write_text(
+        "city,selection_status,grid_aware_sources,grid_aware_weighted_sources,"
+        "candidate_count,eligible_live_grid_cap10_count,eligible_grid_cap10_count,reason\n"
+        "Paris,GRID_CAP10_LIVE_READY,ecmwf_ifs+ukmo_global_deterministic_10km,"
+        "ecmwf_ifs:0.5+ukmo_global_deterministic_10km:0.5,10,2,2,\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv(source_clock.ENV_CITY_ONE_SCHEME_PATH, str(scheme_path))
+    source_clock.load_city_one_schemes.cache_clear()
+    try:
+        _install_seams(
+            monkeypatch,
+            live_values={"ukmo_global_deterministic_10km": 23.0},
+            history_models=["ecmwf_ifs", "ukmo_global_deterministic_10km"],
+        )
+        conn = _conn()
+        _seed_current_single_runs(
+            conn, live_values={"ukmo_global_deterministic_10km": 23.0}
+        )
+
+        assert mod._insert_posterior(
+            conn, _request(), metric="high", anchor_id=1
+        ) is None
+    finally:
+        source_clock.load_city_one_schemes.cache_clear()
+
+
+def test_source_clock_exception_cannot_fall_back_to_historical_q(
+    monkeypatch, tmp_path
+) -> None:
+    from src.strategy.live_inference import source_clock_city_weights as source_clock
+
+    _disable_other_layers(monkeypatch)
+    _enable_flag(monkeypatch)
+    scheme_path = tmp_path / "city_one_scheme_grid_aware.csv"
+    scheme_path.write_text(
+        "city,selection_status,grid_aware_sources,grid_aware_weighted_sources,"
+        "candidate_count,eligible_live_grid_cap10_count,eligible_grid_cap10_count,reason\n"
+        "Paris,GRID_CAP10_LIVE_READY,ecmwf_ifs+ukmo_global_deterministic_10km,"
+        "ecmwf_ifs:0.5+ukmo_global_deterministic_10km:0.5,10,2,2,\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv(source_clock.ENV_CITY_ONE_SCHEME_PATH, str(scheme_path))
+    source_clock.load_city_one_schemes.cache_clear()
+    try:
+        _install_seams(
+            monkeypatch,
+            live_values={"ukmo_global_deterministic_10km": 23.0},
+            history_models=["ecmwf_ifs", "ukmo_global_deterministic_10km"],
+        )
+        conn = _conn()
+        _seed_current_single_runs(
+            conn, live_values={"ukmo_global_deterministic_10km": 23.0}
+        )
+        _seed_current_ens(conn)
+        monkeypatch.setattr(
+            source_clock,
+            "fixed_weight_center_from_values",
+            lambda **_kwargs: (_ for _ in ()).throw(RuntimeError("source-clock boom")),
+        )
+
+        assert mod._insert_posterior(
+            conn, _request(), metric="high", anchor_id=1
+        ) is None
     finally:
         source_clock.load_city_one_schemes.cache_clear()
 

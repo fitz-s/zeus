@@ -10,7 +10,7 @@ SessionStart injects only a prefix of this file; this digest keeps the whole law
 
 **Time law [§0].** Freshness gates fail closed (DATA_DEGRADED), never stale-as-fresh; re-fetch executable truth at submit (FC-03). Learning strictly walk-forward; decision probability frozen as immutable certificate; no look-ahead.
 
-**Probability authority [§0 + docs/authority/replacement_final_form_2026_06_09.md].** Replacement chain is strategy of record: walk-forward de-bias -> T2 Bayesian precision fusion -> mu*, sigma_pred (floor 1.0C) -> sigma-shape floor -> bin integration -> q_lcb -> Edge -> Fractional Kelly. Never reintroduce market-anchor caps, shadow gates, or bankroll snapshots into root law. Legacy ENS/Platt is diagnostics-only.
+**Probability authority [§0 + docs/authority/replacement_final_form_2026_06_09.md].** Replacement chain is strategy of record. On the source-clock live route, current provider center + latest causal target-specific ENS within-spread + simultaneous provider between-spread produce one settlement-preimage q and current-evidence q bounds; missing current shape fails closed. Historical residual/floor/mixture transforms and legacy ENS/Platt are diagnostics-only on that route.
 
 **Proof discipline [§1 — both tables mandatory before any live/armed/safe claim].** Narrowest authoritative surface wins: direct instructions > AGENTS > executable law > authority docs > current facts > references > derived context (CodeGraph/CRG answer WHERE, never what is true) > archives. Stale surface = say stale, stop using it. Do not collapse §1's per-claim proof lines.
 
@@ -64,7 +64,14 @@ The replacement chain is the strategy of record. Authority basis: `docs/authorit
 
 Durable chain:
 
-`per-model walk-forward de-bias (z = x - b_hat, settlement residuals) -> T2 Bayesian precision fusion over decorrelated providers + in-domain regional experts -> mu* -> sigma_pred = sqrt(V* + walk-forward fused-center residual variance, floor 1.0C) -> settlement sigma-shape floor -> settlement-preimage bin integration of N(mu*, sigma_pred*k) mixed with uniform -> q_lcb conservative floor -> Edge -> Fractional Kelly -> Position Size`
+`current provider center mu* -> current target-specific ENS within-spread + simultaneous provider between-spread -> sigma_pred = sqrt(within^2 + between^2) -> settlement-preimage integration of N(mu*, sigma_pred) -> current-evidence q_lcb/q_ucb -> symmetric YES/NO executable edge -> Fractional Kelly -> Position Size`
+
+This decision-time current-evidence form is mandatory for source-clock live
+posteriors. A missing/invalid current ENS shape blocks the posterior; it must not
+fall back to historical residual sigma, constant/fitted floors, fitted uniform or
+city mixtures, or a fitted affine center shift. Older fusion/calibration machinery
+may remain as diagnostics or for explicitly non-source-clock carriers, never as a
+silent alternate live probability regime.
 
 Do not reintroduce market-anchor caps, submit-disabled state, shadow-only gates, version snapshots, bankrolls, or current Kelly multipliers into root law. Present behavior must be proven from executable source, active config, process state, canonical DB rows, and decision receipts at task time. If that proof changes durable strategy law, update the owning authority doc or manifest instead of encoding a runtime snapshot here.
 

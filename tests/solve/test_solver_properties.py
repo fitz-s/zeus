@@ -1,5 +1,6 @@
 # Created: 2026-07-03
-# Last reused/audited: 2026-07-10
+# Last reused/audited: 2026-07-11
+# Authority basis: W3 SOLVE design packet and 2026-07-11 global fractional-Kelly repair
 """W3 SOLVE math-core acceptance — the property anchors (design packet §4, consult REV-2).
 
 (a) solver ≥ top-1 picker in the SAME feasible set (post-repair) on EVERY fixture;
@@ -583,7 +584,9 @@ def _global_probability_projection(candidate):
     )
 
 
-def _global_score(candidate, *, floor="100", ceiling="100", cash="100", cap="5"):
+def _global_score(
+    candidate, *, floor="100", ceiling="100", cash="100", cap="5", multiplier="1"
+):
     q_samples, alpha = _global_probability_projection(candidate)
     return S._score_global_single_order(
         candidate,
@@ -593,6 +596,7 @@ def _global_score(candidate, *, floor="100", ceiling="100", cash="100", cap="5")
         wealth_ceiling_usd=Decimal(ceiling),
         spendable_cash_usd=Decimal(cash),
         capital_limit_usd=Decimal(cap),
+        fractional_kelly_multiplier=Decimal(multiplier),
     )
 
 
@@ -695,6 +699,7 @@ def _global_select(
     current_executions=None, current_wealth_identity=None, universe=None,
     current_universe_identity=None,
     candidate_capital_limit_resolver=None,
+    fractional_kelly_multiplier="1",
 ):
     candidates = tuple(candidates)
     if probability_witnesses is None:
@@ -740,6 +745,7 @@ def _global_select(
         ),
         wealth_witness=wealth,
         capital_limit_usd=Decimal(cap),
+        fractional_kelly_multiplier=Decimal(fractional_kelly_multiplier),
         decision_at_utc=_DECISION_AT,
         candidate_capital_limit_resolver=candidate_capital_limit_resolver,
     )
@@ -964,6 +970,82 @@ def test_global_single_order_label_mirror_preserves_size_cost_and_objective():
     )
     assert yes_score.max_spend_usd == no_score.max_spend_usd
     assert yes_score.robust_delta_log_wealth == no_score.robust_delta_log_wealth
+
+
+def test_global_single_order_fractional_kelly_scales_full_optimum_once_for_both_sides():
+    yes = _global_candidate(
+        candidate_id="fractional-yes",
+        family="fractional-yes",
+        side="YES",
+        q=0.78,
+        levels=(("0.27", "10"), ("0.33", "490")),
+    )
+    no = _global_candidate(
+        candidate_id="fractional-no",
+        family="fractional-no",
+        side="NO",
+        q=0.78,
+        levels=(("0.27", "10"), ("0.33", "490")),
+    )
+    full_yes = _global_score(
+        yes, floor="1253.44", ceiling="1253.44", cash="1141.98", cap="1141.98"
+    )
+    fractional_yes = _global_score(
+        yes,
+        floor="1253.44",
+        ceiling="1253.44",
+        cash="1141.98",
+        cap="107.58",
+        multiplier="0.03125",
+    )
+    fractional_no = _global_score(
+        no,
+        floor="1253.44",
+        ceiling="1253.44",
+        cash="1141.98",
+        cap="107.58",
+        multiplier="0.03125",
+    )
+    capacity_bounded = _global_score(
+        yes,
+        floor="1253.44",
+        ceiling="1253.44",
+        cash="1141.98",
+        cap="3",
+        multiplier="0.03125",
+    )
+
+    expected = S._single_order_venue_legal_neighbor(
+        yes,
+        full_yes.shares * Decimal("0.03125"),
+        at_most=False,
+    )
+    assert expected is not None
+    assert fractional_yes.shares == expected
+    assert fractional_yes.shares == fractional_no.shares
+    assert fractional_yes.cost_usd == fractional_no.cost_usd
+    assert fractional_yes.max_spend_usd == fractional_no.max_spend_usd
+    assert (
+        fractional_yes.robust_delta_log_wealth
+        == fractional_no.robust_delta_log_wealth
+    )
+    assert fractional_yes.max_spend_usd < Decimal("10")
+    assert fractional_yes.max_spend_usd < full_yes.max_spend_usd
+    assert capacity_bounded.max_spend_usd <= Decimal("3")
+    assert capacity_bounded.shares < fractional_yes.shares
+
+
+@pytest.mark.parametrize("multiplier", ("0", "-0.1", "NaN", "1.01"))
+def test_global_single_order_fractional_kelly_multiplier_fails_closed(multiplier):
+    candidate = _global_candidate(
+        candidate_id=f"invalid-kelly-{multiplier}",
+        family=f"invalid-kelly-{multiplier}",
+        side="YES",
+        q=0.78,
+    )
+
+    with pytest.raises(ValueError, match="fractional Kelly multiplier"):
+        _global_score(candidate, multiplier=multiplier)
 
 
 def test_global_single_order_excludes_cheap_day0_without_current_observation():

@@ -28,10 +28,11 @@ test_trust_policy:
   # Machine-readable registry: tests with valid lifecycle headers.
   # Tests not in this list require audit before running.
   trusted_tests:
-    tests/solve/test_solver_properties.py: {created: "2026-07-03", last_used: "2026-07-10", note: "Order-engine rebuild SOLVE and global one-order properties: symmetric YES/NO terminal wealth, current full-simplex q/token binding, full native depth, current universe/book/wealth authorities, exact depth oracles, and non-executable siblings retained in the MECE simplex without fabricating missing token authority."}
+    tests/test_replacement_fused_q_shape.py: {created: "2026-06-09", last_used: "2026-07-11", note: "Probability authority antibody: current target-specific ensemble within-spread plus simultaneous provider between-spread reproduces Wellington no-edge at the order-time book; YES/NO remain exact complements; source-clock current q cannot consult historical k/w/floor/city transforms."}
+    tests/solve/test_solver_properties.py: {created: "2026-07-03", last_used: "2026-07-11", note: "Order-engine rebuild SOLVE and global one-order properties: symmetric YES/NO terminal wealth, current full-simplex q/token binding, full native depth, current universe/book/wealth authorities, exact depth oracles, one operator-owned fractional-Kelly projection on both sides, and non-executable siblings retained in the MECE simplex without fabricating missing token authority."}
     tests/solve/test_solver_numerical.py: {created: "2026-07-03", last_used: "2026-07-03", note: "Order-engine rebuild W3.2 SOLVE numerical-safety guards (inert, pure): zero/negative endowment atom and missing-atom → typed ZeroWealthOutcomeError; full-cash corner (extreme edge) stays feasible with W_end > 0 in every atom; non-executable / zero-depth menu items excluded not crashed; all-non-executable → clean NO_EXECUTABLE_MENU_ITEMS; ≤15-order batch cap enforced (batch_partition chunks ≤15). REV-2 follow-up: the executable-cash budget binds when a holding keeps W_end>0 beyond what cash funds (budget_after_repair >= 0, never negative); tail-draw floor + point-belief stamped in diagnostics; projector missing an atom raises PayoffCoverageError; a zero-weight -inf row yields finite CVaR (0*-inf guard)."}
     tests/solve/test_joint_axis.py: {created: "2026-07-03", last_used: "2026-07-03", note: "Order-engine rebuild W3.2 joint-atom-axis antibody (inert, pure) per consult REV-2: the objective SEES correlation — two joint beliefs with identical per-family marginals but different joint atom masses (independent product vs comonotone) give different robust ΔU for a diversified stake, with comonotone strictly worse; multi-family solve() FAILS CLOSED (MultiFamilyJointUnavailableError) until C4; and an adapter → solve() end-to-end wiring check (route token, q_version, ledger_snapshot_id, RepairCertificate on the emitted plan)."}
-    tests/integration/test_w3_solve_seam_g3.py: {created: "2026-07-03", last_used: "2026-07-11", note: "W3 promotion seam plus current global auction binding. Extended 2026-07-11 to prove one venue-side-effect-free winner preflight is fenced by full probability/book/wealth authority, may trigger only one fresh-book re-auction, uses one-shot capabilities, rejects probability drift, and preserves Gamma metadata across same-batch book fences."}
+    tests/integration/test_w3_solve_seam_g3.py: {created: "2026-07-03", last_used: "2026-07-11", note: "W3 promotion seam plus current global auction binding. Extended 2026-07-11 to prove one venue-side-effect-free winner preflight is fenced by full probability/book/wealth authority, threads the one fractional-Kelly multiplier into global selection, may trigger only one fresh-book re-auction, uses one-shot capabilities, rejects probability drift, and preserves Gamma metadata across same-batch book fences."}
     tests/engine/test_s3_native_side_candidate_materialization.py: {created: "2026-06-08", last_used: "2026-07-10", note: "Native YES/NO candidate materialization, including global-auction refusal of scalar execution-price fallback when full depth is absent."}
     tests/solve/test_wealth_builder.py: {created: "2026-07-03", last_used: "2026-07-03", note: "Order-engine rebuild W3.3 build_wealth_by_atom antibody (inert, pure): entry-side wealth-by-atom from INJECTED spendable cash (net of reservations) + per-atom holdings payout — cash-only endowment, holdings add per-atom payout, reservations recorded while cash stays net, ledger_snapshot_id/source_positions round-trip, zero/negative-wealth atom -> ZeroWealthOutcomeError."}
     tests/solve/test_shim_decide.py: {created: "2026-07-03", last_used: "2026-07-03", note: "Order-engine rebuild W3.3 SolveEngineShim.decide() antibody (inert, pure): composes an inner engine (injected fake) for the FamilyDecision scaffolding and REPLACES selection with the joint solver — trades a clear edge and stamps the LegacyDecisionProjection standalone post-haircut ΔU into selected (coherence_allows=True lockstep, receipt_hash re-stamped, validator green); solver no-trade (zero edge) surfaces as a shim no-trade; a two-leg hedge (each leg alone negative) -> UNSAFE_PREFIX_DECOMPOSITION no-trade (never submits a primary leg good only because of an unexecuted hedge); ineligible legacy no-q passthrough; and the phase-1 gate refuses when the primary order's item is absent from the executable menu (PHASE1_PRIMARY_LEG_NOT_TRADEABLE)."}
@@ -186,7 +187,7 @@ test_trust_policy:
     tests/strategy/live_inference/test_executable_cost.py: {created: "2026-05-24", last_used: "2026-05-24"}
     tests/strategy/live_inference/test_trade_score.py: {created: "2026-05-24", last_used: "2026-05-24"}
     tests/events/test_market_channel_ingestor.py: {created: "2026-05-24", last_used: "2026-07-09", note: "Market-channel ingestor and feasibility evidence tests, including execution_feasibility_latest schema/upsert coverage, compact executable-snapshot latest reads, and append-history fallback isolation."}
-    tests/events/test_reactor.py: {created: "2026-05-24", last_used: "2026-07-10", note: "EDLI event reactor contracts, including one lock-free global batch seam per epoch, exact receipt coverage, and fail-closed multi-submit/result identity guards."}
+    tests/events/test_reactor.py: {created: "2026-05-24", last_used: "2026-07-11", note: "EDLI event reactor contracts, including one lock-free global batch seam per epoch, exact receipt coverage, fail-closed multi-submit/result identity guards, and targeted global-winner visibility beyond the 20k old-pending active scan window."}
     tests/events/test_claim_lock_storm.py: {created: "2026-06-11", last_used: "2026-07-10", note: "World-writer claim contention remains bounded, visible, rollback-safe, pending on miss, and waits at most once per contention episode before same-cycle nonblocking probes."}
     tests/calibration/test_scaled_normal_uniform_q_builder.py: {created: "2026-06-29", last_used: "2026-07-10", note: "Capital-gated city rho mixture math, including row-wise simplex bootstrap-draw mixing so served q, bounds, empirical edge confidence, and CVaR share one probability world."}
     tests/engine/test_replacement_0_1_live_authority_probability.py: {created: "2026-06-07", last_used: "2026-07-10", note: "Replacement live probability authority and city-mixed bootstrap sample-basis gate."}
@@ -845,7 +846,7 @@ test_trust_policy:
     tests/test_bayes_precision_fusion_posterior_records_raw_model_forecast_dependency_ids.py: {created: "2026-06-08", last_used: "2026-06-08", note: "PR#400 BLOCKER 5 RT: fused posterior records raw_model_forecast_ids for full q reconstructability"}
     tests/test_bayes_precision_fusion_lead_days_uses_city_local_date_not_utc.py: {created: "2026-06-08", last_used: "2026-06-08", note: "PR#400 BLOCKER 6 RT: lead_days computed against city-local date, not UTC (off-by-one in cross-timezone cases)"}
     tests/test_bayes_precision_fusion_history_provider_materializer_wiring.py: {created: "2026-06-08", last_used: "2026-06-08", note: "PR#400 end-to-end RT: real BayesPrecisionFusionHistoryProvider at materializer seam; persisted previous_runs + VERIFIED settlement yields T2_BAYES"}
-    tests/test_replacement_0_1_bayes_precision_fusion_materializer_wiring.py: {created: "2026-06-08", last_used: "2026-06-08", note: "PR#400 RT: flag-OFF byte-identical; flag-ON fused mu*/sigma replaces anchor center/spread + own EMOS cell identity (F6)"}
+    tests/test_replacement_0_1_bayes_precision_fusion_materializer_wiring.py: {created: "2026-06-08", last_used: "2026-07-11", note: "Source-clock current-shape wiring: current causal ENS carrier is required and any source-clock exception fails closed instead of falling back to historical q; legacy flag/wiring coverage retained."}
     tests/test_replacement_sigma_floor_steps_wiring.py: {created: "2026-06-13", last_used: "2026-06-13", note: "σ-refit task #69 RT: q-construction consumer honors absolute σ-floor (σ_core=max(σ_impl·k, floor_steps·step)) when the FITTED artifact carries floor_steps; artifact WITHOUT floor_steps (current live) is byte-identical (q + identity hash); floor binds an over-sharp σ (flattens mode) and is inert when σ already wide. RED-on-revert: removing max() ⇒ floor never binds ⇒ widens-test flips"}
     tests/test_bayes_precision_fusion_model_selection_gate.py: {created: "2026-06-08", last_used: "2026-06-08", note: "PR#400 F4 RT: regional polygon gate + alias dedup; icon_d2 in-polygon enters; out-of-polygon absent; icon_seamless deduped"}
     tests/test_switch_decision_live_policy_requires_capital_evidence_object.py: {created: "2026-06-08", last_used: "2026-06-08", note: "PR#400 BLOCKER 8 RT: evaluate_replacement_forecast_switch_decision must not trust upstream LIVE_AUTHORITY without capital evidence object"}
@@ -3744,11 +3745,26 @@ test_metadata:
     notes: >
       RT: (a) flag-OFF materialized posterior byte-identical to today; (b) flag-ON
       fused mu*/sigma replace single-anchor center/spread and get own EMOS cell
-      identity (F6); (c) dropped global -> remaining used; all extras absent ->
-      anchor byte-identical; (d) regional gate: icon_d2 in-polygon, Moscow absent,
-      icon_seamless deduped.
+      identity (F6); (c) source-clock current q requires a causal target-specific
+      ENS shape and source-clock exceptions cannot fall back to historical q;
+      (d) dropped global/regional routing coverage remains.
     created: 2026-06-08
-    last_reused_or_audited: 2026-06-08
+    last_reused_or_audited: 2026-07-11
+
+  tests/test_replacement_fused_q_shape.py:
+    cohort: law_antibody
+    trust: trusted
+    authority_docs:
+      - docs/authority/replacement_final_form_2026_06_09.md
+      - docs/authority/regime_unification_2026-06-12.md
+    notes: >
+      Source-clock live probability uses only the latest causal target-specific
+      current ENS within-spread and simultaneous provider between-spread. The
+      Wellington counterfactual proves market agreement means no order on either
+      side, complement symmetry permits either YES or NO when executable edge
+      exists, and historical shape transforms are unreachable on this route.
+    created: 2026-06-09
+    last_reused_or_audited: 2026-07-11
 
   tests/test_bayes_precision_fusion_model_selection_gate.py:
     cohort: law_antibody

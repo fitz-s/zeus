@@ -484,6 +484,32 @@ class EventStore:
         # only, then point-read events by event_id and do tier/city ranking in Python.
         active_limit = max(limit * 512, limit + 20_000)
         active_rows: list[tuple[str, int, str, int]] = []
+        # A global-auction winner that was outside the current claim page is
+        # materialized as a fresh pending row with
+        # last_error=GLOBAL_WINNER_TARGETED_CLAIM.  The debt/fairness probe below
+        # intentionally reads the OLDEST updated rows first, but on a backlog
+        # larger than active_limit that makes the freshly targeted winner
+        # invisible forever: every epoch selects it globally, cannot find it in
+        # the claimed page, and targets it again at the tail.  Probe one page from
+        # the indexed NEWEST end before the old-debt scan.  Python ranking still
+        # gives only explicitly targeted rows the priority tier, so ordinary new
+        # rows do not bypass fairness; this merely makes a targeted row visible.
+        active_rows.extend(
+            (str(row[0] or ""), _safe_int(row[1]), str(row[2] or ""), 0)
+            for row in self.conn.execute(
+                """
+                SELECT p.event_id, p.attempt_count, p.last_error
+                  FROM opportunity_event_processing p
+                       INDEXED BY idx_opportunity_event_processing_pending_retry_floor
+                 WHERE p.consumer_name = ?
+                   AND p.processing_status = 'pending'
+                   AND p.claimed_at IS NULL
+                 ORDER BY p.updated_at DESC
+                 LIMIT ?
+                """,
+                (self.consumer_name, max(1, limit)),
+            ).fetchall()
+        )
         # Keep the immediate-ready and retry-floor-ready pending lanes as two
         # indexed probes. A single OR predicate over claimed_at makes SQLite
         # materialize a temp ORDER BY tree on large live processing tables.

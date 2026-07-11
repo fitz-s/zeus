@@ -1,5 +1,5 @@
 # Created: 2026-05-24
-# Last reused/audited: 2026-07-10
+# Last reused/audited: 2026-07-11
 # Authority basis: EDLI v1 implementation prompt §13 event reactor no-bypass contract.
 from __future__ import annotations
 
@@ -500,6 +500,66 @@ def test_global_target_keeps_claim_priority_after_transient_epoch():
     assert store.fetch_pending(
         decision_time=_DT_VENUE_OPEN.isoformat(), limit=1
     )[0].event_id == target.event_id
+
+
+def test_global_target_is_visible_beyond_old_pending_active_scan_window():
+    """A fresh targeted winner cannot starve behind more than 20k old rows."""
+
+    conn, store = _store()
+    from src.engine.global_batch_runtime import _next_claim_carrier
+
+    base = _forecast_event("target-large-backlog", target_date="2026-05-25")
+    target = _next_claim_carrier(
+        base,
+        targeted_at=_DT_VENUE_OPEN,
+        economic_identity="large-backlog-economic-identity",
+        payload=json.loads(base.payload_json),
+    )
+    assert store.prioritize_global_winner(target)
+
+    target_row = tuple(
+        conn.execute(
+            "SELECT * FROM opportunity_events WHERE event_id = ?", (target.event_id,)
+        ).fetchone()
+    )
+    event_rows = []
+    processing_rows = []
+    for index in range(20_002):
+        event_id = f"old-backlog-{index:05d}"
+        row = list(target_row)
+        row[0] = event_id
+        row[2] = f"Chicago|2026-05-25|high|old-{index:05d}"
+        row[3] = f"old-backlog-source-{index:05d}"
+        row[8] = f"old-payload-{index:05d}"
+        row[9] = f"old-idempotency-{index:05d}"
+        event_rows.append(tuple(row))
+        processing_rows.append(
+            (
+                store.consumer_name,
+                event_id,
+                "pending",
+                0,
+                None,
+                None,
+                None,
+                "2026-01-01T00:00:00+00:00",
+            )
+        )
+    conn.executemany(
+        "INSERT INTO opportunity_events VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        event_rows,
+    )
+    conn.executemany(
+        "INSERT INTO opportunity_event_processing VALUES (?,?,?,?,?,?,?,?)",
+        processing_rows,
+    )
+    conn.commit()
+
+    fetched = store.fetch_pending(
+        decision_time=_DT_VENUE_OPEN.isoformat(), limit=1
+    )
+
+    assert [event.event_id for event in fetched] == [target.event_id]
 
 
 def test_global_target_does_not_preempt_stale_processing_recovery():

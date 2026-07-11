@@ -1175,6 +1175,187 @@ class _BayesPrecisionFusionFusionOverride:
     emos_center_a: float = 0.0
     emos_center_b: float = 1.0
     emos_center_delta_c: float = 0.0
+    # Decision-time-only probability shape used by the live source-clock route.
+    # This is intentionally distinct from historical residual calibration: the
+    # within component comes from the latest causal ECMWF ENS members for this
+    # target, while the between component comes from the same current provider
+    # values that produced the center.
+    current_evidence_shape: Mapping[str, object] | None = None
+
+
+@dataclass(frozen=True)
+class _CurrentEvidenceShape:
+    """Current target-specific predictive shape with no historical residual input."""
+
+    snapshot_id: int
+    source_cycle_time: str
+    source_available_at: str
+    member_count: int
+    provider_count: int
+    effective_provider_count: float
+    ensemble_within_sigma_c: float
+    provider_between_sigma_c: float
+    predictive_sigma_c: float
+    center_sigma_c: float
+    shape_hash: str
+
+    def as_payload(self) -> dict[str, object]:
+        return asdict(self)
+
+
+def _current_evidence_shape_from_values(
+    *,
+    snapshot_id: int,
+    source_cycle_time: str,
+    source_available_at: str,
+    members_c: Sequence[float],
+    provider_values_c: Mapping[str, float],
+    provider_weights: Mapping[str, float],
+    center_c: float,
+) -> _CurrentEvidenceShape:
+    """Compose current ensemble and provider disagreement without a fitted floor.
+
+    The only distributional assumption is maximum-entropy Normal integration
+    downstream from the two observable second moments.  The ensemble members
+    measure within-model state uncertainty; simultaneous provider centers
+    measure between-model uncertainty.  Independent components add in variance.
+    """
+
+    members = tuple(float(value) for value in members_c)
+    if len(members) < 20 or any(not math.isfinite(value) for value in members):
+        raise ValueError("current ensemble requires at least 20 finite members")
+    center = float(center_c)
+    if not math.isfinite(center):
+        raise ValueError("current provider center must be finite")
+
+    weighted: list[tuple[str, float, float]] = []
+    for model, raw_weight in provider_weights.items():
+        if model not in provider_values_c:
+            continue
+        value = float(provider_values_c[model])
+        weight = float(raw_weight)
+        if math.isfinite(value) and math.isfinite(weight) and weight > 0.0:
+            weighted.append((str(model), value, weight))
+    if len(weighted) < 2:
+        raise ValueError("current shape requires at least two weighted providers")
+    weight_total = sum(weight for _, _, weight in weighted)
+    normalized = tuple(
+        (model, value, weight / weight_total) for model, value, weight in weighted
+    )
+
+    member_mean = sum(members) / len(members)
+    within = math.sqrt(
+        sum((value - member_mean) ** 2 for value in members) / len(members)
+    )
+    between = math.sqrt(
+        sum(weight * (value - center) ** 2 for _, value, weight in normalized)
+    )
+    sigma = math.hypot(within, between)
+    effective_providers = 1.0 / sum(weight * weight for _, _, weight in normalized)
+    center_sigma = math.hypot(
+        within / math.sqrt(len(members)),
+        between / math.sqrt(effective_providers),
+    )
+    if not math.isfinite(sigma) or sigma <= 0.0:
+        raise ValueError("current evidence predictive sigma must be positive")
+    if not math.isfinite(center_sigma) or center_sigma <= 0.0:
+        raise ValueError("current evidence center sigma must be positive")
+
+    identity = {
+        "snapshot_id": int(snapshot_id),
+        "source_cycle_time": str(source_cycle_time),
+        "source_available_at": str(source_available_at),
+        "member_count": len(members),
+        "member_values_hash": _json_hash(list(members)),
+        "providers": [
+            {"model": model, "value_c": value, "weight": weight}
+            for model, value, weight in normalized
+        ],
+        "center_c": center,
+        "ensemble_within_sigma_c": within,
+        "provider_between_sigma_c": between,
+        "predictive_sigma_c": sigma,
+        "center_sigma_c": center_sigma,
+    }
+    return _CurrentEvidenceShape(
+        snapshot_id=int(snapshot_id),
+        source_cycle_time=str(source_cycle_time),
+        source_available_at=str(source_available_at),
+        member_count=len(members),
+        provider_count=len(normalized),
+        effective_provider_count=effective_providers,
+        ensemble_within_sigma_c=within,
+        provider_between_sigma_c=between,
+        predictive_sigma_c=sigma,
+        center_sigma_c=center_sigma,
+        shape_hash=_json_hash(identity),
+    )
+
+
+def _read_current_evidence_shape(
+    conn: sqlite3.Connection,
+    request: ReplacementForecastMaterializeRequest,
+    *,
+    metric: str,
+    provider_values_c: Mapping[str, float],
+    provider_weights: Mapping[str, float],
+    center_c: float,
+) -> _CurrentEvidenceShape | None:
+    """Read the latest causal target-specific ECMWF ENS available at decision time."""
+
+    try:
+        decision_at = _to_utc(request.computed_at, field_name="computed_at").isoformat()
+        carrier_cycle = _to_utc(
+            request.source_cycle_time, field_name="source_cycle_time"
+        ).isoformat()
+        row = conn.execute(
+            """
+            SELECT snapshot_id, members_json,
+                   COALESCE(source_cycle_time, issue_time) AS evidence_cycle,
+                   COALESCE(source_available_at, available_at) AS evidence_available_at,
+                   members_unit
+            FROM ensemble_snapshots
+            WHERE lower(city) = lower(?)
+              AND target_date = ?
+              AND temperature_metric = ?
+              AND source_id = 'ecmwf_open_data'
+              AND model_version = 'ecmwf_ens'
+              AND authority = 'VERIFIED'
+              AND causality_status = 'OK'
+              AND boundary_ambiguous = 0
+              AND forecast_window_attribution_status = 'FULLY_INSIDE_TARGET_LOCAL_DAY'
+              AND contributes_to_target_extrema = 1
+              AND COALESCE(source_cycle_time, issue_time) <= ?
+              AND COALESCE(source_available_at, available_at) <= ?
+            ORDER BY COALESCE(source_cycle_time, issue_time) DESC,
+                     COALESCE(source_available_at, available_at) DESC,
+                     snapshot_id DESC
+            LIMIT 1
+            """,
+            (
+                request.city,
+                _date_text(request.target_date),
+                metric,
+                carrier_cycle,
+                decision_at,
+            ),
+        ).fetchone()
+        if row is None:
+            return None
+        values = tuple(json.loads(row[1]))
+        if str(row[4] or "").strip().lower() not in {"degc", "c", "°c"}:
+            return None
+        return _current_evidence_shape_from_values(
+            snapshot_id=int(row[0]),
+            source_cycle_time=str(row[2]),
+            source_available_at=str(row[3]),
+            members_c=values,
+            provider_values_c=provider_values_c,
+            provider_weights=provider_weights,
+            center_c=center_c,
+        )
+    except (json.JSONDecodeError, sqlite3.Error, TypeError, ValueError):
+        return None
 
 
 def served_predictive_sigma_c(sigma_realized_c: float, *, floor_c: float = 1.0) -> float:
@@ -1672,6 +1853,7 @@ def _replacement_bayes_precision_fusion_override(
         _source_clock_used_models: tuple[str, ...] | None = None
         _source_clock_center_sigma_c: float | None = None
         _source_clock_predictive_sigma_c: float | None = None
+        _source_clock_current_shape: _CurrentEvidenceShape | None = None
         _source_clock_current_value_serving: dict[str, Mapping[str, object]] = {}
         _source_clock_dep_ids: set[int] = set()
         try:
@@ -1866,12 +2048,56 @@ def _replacement_bayes_precision_fusion_override(
                         "center_sigma_c": _source_clock_center_sigma_c,
                         "predictive_sigma_c": _source_clock_predictive_sigma_c,
                     }
-        except Exception as _source_clock_exc:  # fail-soft: legacy fusion remains available
+                    _source_clock_current_shape = _read_current_evidence_shape(
+                        conn,
+                        request,
+                        metric=metric,
+                        provider_values_c={
+                            model: float(_source_values[model])
+                            for model in _source_clock_used_models
+                            if model in _source_values
+                        },
+                        provider_weights={
+                            str(model): float(weight)
+                            for model, weight in _weights.items()
+                            if model in _source_clock_used_models
+                        },
+                        center_c=float(_mu_diagonal),
+                    )
+                    # The live source-clock route has one shape authority: current
+                    # target-specific evidence.  A missing/invalid ENS carrier is
+                    # represented by predictive_sigma=None and therefore cannot
+                    # materialize a live posterior; historical residual/floor
+                    # values above remain diagnostics only.
+                    if _source_clock_current_shape is None:
+                        _source_clock_predictive_sigma_c = None
+                    else:
+                        _source_clock_center_sigma_c = (
+                            _source_clock_current_shape.center_sigma_c
+                        )
+                        _source_clock_predictive_sigma_c = (
+                            _source_clock_current_shape.predictive_sigma_c
+                        )
+                    _source_clock_payload.update(
+                        {
+                            "center_sigma_c": _source_clock_center_sigma_c,
+                            "predictive_sigma_c": _source_clock_predictive_sigma_c,
+                            "probability_shape_basis": (
+                                "decision_time_current_ensemble_within_plus_provider_between"
+                            ),
+                            "current_evidence_shape": (
+                                None
+                                if _source_clock_current_shape is None
+                                else _source_clock_current_shape.as_payload()
+                            ),
+                        }
+                    )
+        except Exception as _source_clock_exc:
             try:
                 import logging  # noqa: PLC0415
 
                 logging.getLogger("zeus.replacement_bayes_precision_fusion").warning(
-                    "source-clock one-scheme center skipped for %s %s %s: %s",
+                    "source-clock one-scheme center failed closed for %s %s %s: %s",
                     request.city,
                     metric,
                     target_date,
@@ -1879,6 +2105,12 @@ def _replacement_bayes_precision_fusion_override(
                 )
             except Exception:
                 pass
+            # A source-clock evaluation error is evidence loss, not permission
+            # to resurrect the historical residual/floor probability regime.
+            # Returning no override leaves the materialized row explicitly
+            # non-live (CAPTURE_MISSING) and preserves blocked-candidate
+            # observability without creating an alternate tradeable q.
+            return None
 
         used_models = _source_clock_used_models or tuple(
             dict.fromkeys((*tuple(fused.used_models), *_station_entry_models_added))
@@ -2006,9 +2238,15 @@ def _replacement_bayes_precision_fusion_override(
         # which adds the center posterior sd on top of an already-complete realized error (served ~3.0
         # vs realized ~1.35). fused.sd is carried separately as anchor_sigma_c (below) into the
         # q_lcb/q_ucb center-uncertainty bootstrap, where center uncertainty belongs.
-        predictive_sigma_c = served_predictive_sigma_c(_sigma_resid, floor_c=1.0)
-        if _source_clock_predictive_sigma_c is not None:
-            predictive_sigma_c = float(_source_clock_predictive_sigma_c)
+        predictive_sigma_c: float | None = served_predictive_sigma_c(
+            _sigma_resid, floor_c=1.0
+        )
+        if _source_clock_payload is not None:
+            predictive_sigma_c = (
+                None
+                if _source_clock_predictive_sigma_c is None
+                else float(_source_clock_predictive_sigma_c)
+            )
 
         # Task #32 follow-up (brand law): per-instrument serving provenance for the FUSED set.
         # served_current is the single-authority serving map (read_current_instrument_values);
@@ -2048,7 +2286,12 @@ def _replacement_bayes_precision_fusion_override(
             ).days
         except Exception:
             _emos_lead = None
-        if _emos_lead is None:
+        if _source_clock_current_shape is not None:
+            # A historical affine would contaminate the decision-time-only
+            # current-evidence authority.  The current provider center is served
+            # directly; calibration remains diagnostic provenance elsewhere.
+            _emos_a, _emos_b, _emos_xlo, _emos_xhi = 0.0, 1.0, None, None
+        elif _emos_lead is None:
             _emos_a, _emos_b, _emos_xlo, _emos_xhi = 0.0, 1.0, None, None
         else:
             _emos_a, _emos_b, _emos_xlo, _emos_xhi = lookup_affine(request.city, metric, _emos_lead)
@@ -2080,6 +2323,11 @@ def _replacement_bayes_precision_fusion_override(
             precision_basis_hash=_precision_basis_hash,
             low_n_prior_weighted_models=_low_n_prior_weighted,
             source_clock_one_scheme=_source_clock_payload,
+            current_evidence_shape=(
+                None
+                if _source_clock_current_shape is None
+                else _source_clock_current_shape.as_payload()
+            ),
         )
     except Exception as exc:  # fail-soft: never break blocked-candidate materialization
         try:
@@ -2763,6 +3011,22 @@ def _compute_posterior_payload(
     # (~8.4h early for the baseline) as each input; this recovers the honest possession time.
     available_at = _posterior_source_available_at(conn, request).isoformat()
     computed_at = _to_utc(request.computed_at, field_name="computed_at").isoformat()
+    if (
+        bayes_precision_fusion_override is not None
+        and bayes_precision_fusion_override.current_evidence_shape is not None
+    ):
+        evidence_available_at = _to_utc(
+            str(
+                bayes_precision_fusion_override.current_evidence_shape[
+                    "source_available_at"
+                ]
+            ),
+            field_name="current_evidence_shape.source_available_at",
+        )
+        available_at = max(
+            _to_utc(available_at, field_name="posterior_source_available_at"),
+            evidence_available_at,
+        ).isoformat()
     data_version = _data_version(metric)
     _n_bins_seed = len(request.bins) or 1
     q = {b.bin_id: 1.0 / _n_bins_seed for b in request.bins}
@@ -2849,7 +3113,12 @@ def _compute_posterior_payload(
             # None and the floor is simply not applied (recorded, NEVER blocks blocked). One
             # construction rule, no knob.
             _sigma_pred_raw = float(bayes_precision_fusion_override.predictive_sigma_c)
-            replacement_sigma_basis = "fused_center_residual_std"
+            _current_shape = bayes_precision_fusion_override.current_evidence_shape
+            replacement_sigma_basis = (
+                "decision_time_current_ensemble_within_plus_provider_between"
+                if _current_shape is not None
+                else "fused_center_residual_std"
+            )
             # C3 CALIBRATION SURFACE (2026-06-12) — FITTED σ_pred scale (k) + uniform-mixture (w).
             # OPERATOR LAW 2026-06-12: the correction factor must be FITTED by math, never hand-set.
             # k and w are read from state/sigma_scale_fit.json (MLE over settled cells; only
@@ -2858,12 +3127,24 @@ def _compute_posterior_payload(
             # INERT for it automatically. Per-family licensing is the artifact's job (a REFUSED family →
             # (1.0,0.0,0.0) inert from the lookup), so NO hardcoded settlement-unit allow-list here.
             _city_unit = _city_settlement_unit_from_bins(request)
-            _k, _uniform_w, _floor_steps = _effective_unit_sigma_scale(_city_unit)
+            if _current_shape is not None:
+                # Historical k/w/floors would change a decision-time-only shape
+                # into a second probability regime. They are exactly neutral here.
+                _k, _uniform_w, _floor_steps = 1.0, 0.0, 0.0
+            else:
+                _k, _uniform_w, _floor_steps = _effective_unit_sigma_scale(
+                    _city_unit
+                )
             _mu_anchor = float(bayes_precision_fusion_override.anchor_value_c)
             # The settlement σ-floor (city|season|metric) lookup is IMPURE (config + season) and is read
             # ONCE here, then threaded into the pure q builder for BOTH the global and the city carriers
             # (same physical dispersion). It sets the floor provenance fields exactly as before.
-            _floor_c, _floor_reason = _replacement_settlement_sigma_floor_lookup(request, metric=metric)
+            if _current_shape is not None:
+                _floor_c, _floor_reason = None, None
+            else:
+                _floor_c, _floor_reason = _replacement_settlement_sigma_floor_lookup(
+                    request, metric=metric
+                )
             if _floor_c is not None:
                 settlement_sigma_floor_c = float(_floor_c)
                 settlement_sigma_floor_applied = True
@@ -2935,7 +3216,13 @@ def _compute_posterior_payload(
             # from capital — never a manual flag / cap / allowlist. C<=0 or no candidate ⇒ rho=0 ⇒ q is
             # exactly q_global (byte-identical to today). The city carrier's σ ladder is computed at the
             # city (k_eb, floor) so its bounds integrate at the matching predictive width.
-            _city_cand = _replacement_city_candidate_lookup(_city_unit, getattr(request, "city", None))
+            _city_cand = (
+                None
+                if _current_shape is not None
+                else _replacement_city_candidate_lookup(
+                    _city_unit, getattr(request, "city", None)
+                )
+            )
             _city_sigma_used: float | None = None
             _city_rho: float = 0.0
             q = q_global
@@ -3195,6 +3482,16 @@ def _compute_posterior_payload(
         "baseline_b0": request.baseline_source_run_id,
         "openmeteo_ifs9_anchor": request.openmeteo_source_run_id,
     }
+    if (
+        bayes_precision_fusion_override is not None
+        and bayes_precision_fusion_override.current_evidence_shape is not None
+    ):
+        dependency_payload["current_ensemble_snapshot"] = int(
+            bayes_precision_fusion_override.current_evidence_shape["snapshot_id"]
+        )
+        dependency_payload["current_evidence_shape_hash"] = str(
+            bayes_precision_fusion_override.current_evidence_shape["shape_hash"]
+        )
     dependency_hash = _json_hash(dependency_payload)
     posterior_config = {
         "posterior_method": "openmeteo_ecmwf_ifs9_bayes_fusion",
@@ -3239,6 +3536,15 @@ def _compute_posterior_payload(
                 # None when no override basis was computed.
                 "bayes_precision_fusion_precision_basis_hash": (
                     bayes_precision_fusion_override.precision_basis_hash
+                ),
+                "current_evidence_shape_hash": (
+                    None
+                    if bayes_precision_fusion_override.current_evidence_shape is None
+                    else str(
+                        bayes_precision_fusion_override.current_evidence_shape[
+                            "shape_hash"
+                        ]
+                    )
                 ),
             }
         )
@@ -3500,6 +3806,11 @@ def _compute_posterior_payload(
             "source_clock_one_scheme": (
                 dict(bayes_precision_fusion_override.source_clock_one_scheme)
                 if bayes_precision_fusion_override.source_clock_one_scheme
+                else None
+            ),
+            "current_evidence_shape": (
+                dict(bayes_precision_fusion_override.current_evidence_shape)
+                if bayes_precision_fusion_override.current_evidence_shape
                 else None
             ),
             # Low-n prior weighting provenance: these models still entered the center,

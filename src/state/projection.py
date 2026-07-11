@@ -314,6 +314,14 @@ _MONITOR_SNAPSHOT_COLUMNS = frozenset(
     }
 )
 _CHAIN_PROJECTION_EVENT_TYPES = frozenset({"CHAIN_SIZE_CORRECTED", "CHAIN_SYNCED"})
+_CHAIN_OBSERVATION_COLUMNS = (
+    "chain_state",
+    "chain_shares",
+    "chain_avg_price",
+    "chain_cost_basis_usd",
+    "chain_seen_at",
+    "chain_absence_at",
+)
 _PENDING_EXIT_AUTHORITY_PRESERVING_EVENT_TYPES = frozenset(
     {"MONITOR_REFRESHED", *_CHAIN_PROJECTION_EVENT_TYPES}
 )
@@ -426,6 +434,50 @@ def _preserve_existing_monitor_refresh_authority(
     return merged
 
 
+def _preserve_existing_chain_authority_without_new_observation(
+    conn: sqlite3.Connection, projection: dict
+) -> dict:
+    """Keep newer positive chain truth across stale open-position replays.
+
+    Recovery and fill bridges may replay an older position projection after a
+    chain reconciliation has already observed the held token.  A replay with
+    neither ``chain_seen_at`` nor ``chain_absence_at`` carries no new chain
+    observation, so it cannot erase the existing positive observation.  A real
+    positive or negative observation carries its own timestamp and remains
+    authoritative.  Terminal projections are excluded because close/settlement
+    writers own their chain-field semantics.
+    """
+
+    if str(projection.get("phase") or "") not in _F109_OPEN_PHASES:
+        return projection
+    if str(projection.get("chain_seen_at") or "") or str(
+        projection.get("chain_absence_at") or ""
+    ):
+        return projection
+    position_id = str(projection.get("position_id") or "")
+    if not position_id:
+        return projection
+    current_columns = table_columns(conn, "position_current")
+    selected = tuple(
+        column for column in _CHAIN_OBSERVATION_COLUMNS if column in current_columns
+    )
+    if "chain_seen_at" not in selected or "chain_shares" not in selected:
+        return projection
+    row = conn.execute(
+        f"SELECT {', '.join(selected)} FROM position_current WHERE position_id = ?",
+        (position_id,),
+    ).fetchone()
+    if row is None:
+        return projection
+    current = {column: row[index] for index, column in enumerate(selected)}
+    if not _has_positive_chain_observation(current):
+        return projection
+    merged = dict(projection)
+    for column in selected:
+        merged[column] = current[column]
+    return merged
+
+
 def _preserve_existing_monitor_snapshot_for_chain_projection(
     conn: sqlite3.Connection, projection: dict
 ) -> dict:
@@ -515,6 +567,9 @@ def _projection_allows_redecision_quarantine_pending_exit(projection: dict) -> b
 @capability("canonical_position_write", lease=True)
 def upsert_position_current(conn: sqlite3.Connection, projection: dict) -> None:
     projection = _preserve_existing_monitor_refresh_authority(conn, projection)
+    projection = _preserve_existing_chain_authority_without_new_observation(
+        conn, projection
+    )
     projection = _preserve_existing_pending_exit_authority(conn, projection)
     projection = _preserve_existing_monitor_snapshot_for_chain_projection(conn, projection)
     # F109 writer-side idempotency check (2026-05-17).

@@ -1,5 +1,6 @@
 # Created: 2026-07-03
 # Last reused/audited: 2026-07-11
+# Authority basis: W3 SOLVE design packet and 2026-07-11 global fractional-Kelly repair
 """G3 harness for the W3 SOLVE promotion seam (qkernel_spine_bridge.py w3_solve_enabled flag).
 
 Proves the promotion flag is a SAFE, reversible, single-point cutover before any live enablement:
@@ -19,6 +20,7 @@ from __future__ import annotations
 import ast
 import datetime as _dt
 import hashlib
+import inspect
 import json
 import sqlite3
 import subprocess
@@ -76,6 +78,22 @@ from src.state.schema.opportunity_events_schema import (
 from tests.integration import test_qkernel_spine_routing as R
 
 _BRIDGE_PATH = bridge.__file__
+
+
+def test_global_actuation_does_not_blanket_block_existing_family_exposure():
+    """A first fill must not structurally disable every later global order."""
+
+    actuation_source = inspect.getsource(
+        era._build_event_bound_no_submit_receipt_core
+    )
+    metrics_source = inspect.getsource(
+        __import__("src.solve.solver", fromlist=["_single_order_metrics"])
+        ._single_order_metrics
+    )
+
+    assert "GLOBAL_EXISTING_FAMILY_EXPOSURE_UNMODELED" not in actuation_source
+    assert "_family_existing_exposure_for_selection_by_bin_id" in actuation_source
+    assert "Coupling-robust endowment bound" in metrics_source
 
 
 def _drive(family, proofs, payload):
@@ -2465,7 +2483,7 @@ def test_global_batch_actuates_exactly_one_claimed_global_winner(monkeypatch):
         actuation=actuation,
     )
     current_probability = object()
-    calls = {"venue": 0}
+    calls = {"venue": 0, "fractional_kelly_multiplier": None}
     monkeypatch.setattr(global_batch_runtime, "scan_current_global_auction_scope", lambda **_: scope)
     monkeypatch.setattr(
         global_batch_runtime,
@@ -2477,7 +2495,13 @@ def test_global_batch_actuates_exactly_one_claimed_global_winner(monkeypatch):
         ),
     )
     monkeypatch.setattr(global_batch_runtime, "current_venue_auction_identity", lambda *_, **__: "venue")
-    monkeypatch.setattr(global_batch_runtime, "select_prepared_global_auction", lambda *_, **__: selected)
+    def select(*_, **kwargs):
+        calls["fractional_kelly_multiplier"] = kwargs[
+            "fractional_kelly_multiplier"
+        ]
+        return selected
+
+    monkeypatch.setattr(global_batch_runtime, "select_prepared_global_auction", select)
     monkeypatch.setattr(
         global_batch_runtime.CurrentFamilyProbabilityAuthority,
         "from_witness",
@@ -2514,9 +2538,11 @@ def test_global_batch_actuates_exactly_one_claimed_global_winner(monkeypatch):
         venue_submit_count=lambda: calls["venue"],
         current_execution=lambda *_: object(),
         current_time_provider=lambda: decision_at,
+        fractional_kelly_multiplier=Decimal("0.03125"),
     )
 
     assert calls["venue"] == 1
+    assert calls["fractional_kelly_multiplier"] == Decimal("0.03125")
     assert result.venue_submit_count == 1
     assert result.winner_event_id == event.event_id
     assert result.receipts[event.event_id].submitted is True

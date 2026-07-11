@@ -3,7 +3,7 @@
 **Status:** Live replacement probability law. Runtime rows use `forecast_posteriors.runtime_layer='live'`; `LIVE_AUTHORITY`, `trade_authority_status`, and shadow/diagnostic labels are not live execution authority.
 **Supersedes:** `BAYES_PRECISION_FUSION_SPEC.md` (deleted).  
 **Created:** 2026-06-09  
-**Last audited:** 2026-06-18 (live/experiment split: OpenMeteo anchor + Bayes fusion live path; AIFS and shadow/diagnostic labels removed from live runtime semantics)
+**Last audited:** 2026-07-11 (source-clock live q shape moved to decision-time current evidence; historical residual/floor/mixture shape is diagnostic-only on that route)
 **Authority basis:** Commits 140d75ff6d · 6860f00a21 · edc598b440 · 94b584cc3f · 49492f1528 · 2b6936d3b5 · 9c594c9fc3 · df8199ef8e · e80c101c4c · 8541bc93cd · 8f20d39863 · a70436d478 · a1c2163e46 plus June 18 live-runtime cleanup. Historical experiment reports remain evidence only; they do not define the live execution layer.
 
 ---
@@ -56,18 +56,32 @@ Under diagonal Σ the "prior" label is algebraically irrelevant: μ* is the prec
 
 When anchor history `n < MIN_TRAIN`, the anchor has no trusted τ₀. Prior to this fix the anchor center was silently dropped. **Fix (both sides of the boundary):** a finite `anchor_z` without trusted τ₀ joins the fusion as ONE equal-weight member at variance `(TAU0_FLOOR · LOWN_INFLATE)² = (0.8·1.5)² = 1.44 °C²` — demoted from T2 prior, never deleted. Zero-history anchor is the only valid reason for a null anchor center. `src/forecast/bayes_precision_fusion.py` + `src/data/bayes_precision_fusion_capture.py`.
 
-### 1d. Predictive spread
+### 1d. Predictive spread — decision-time current evidence
 
 ```
-σ_resid  = stdev({mean_z(d) − Y(d) | d = common-date fused-center residuals, ≥5 dates})
-           else 1.5 °C (conservative default)                # materializer:937,948–950
-σ_pred   = max(1.0,  σ_resid)                              # materializer:served_predictive_sigma_c
+σ_within  = population_std(latest causal target-specific ECMWF ENS members)
+σ_between = sqrt(Σ_s w_s · (x_s(current) − μ*)²)
+σ_pred    = sqrt(σ_within² + σ_between²)
 ```
 
-`σ_resid` is the realized walk-forward fused-center settlement error, so it is the
-served point predictive width after the 1.0 °C floor. `fused.sd` is center
-uncertainty and belongs in the q_lcb/q_ucb center bootstrap (`anchor_sigma_c`);
-adding it into `σ_pred` double-counts uncertainty.
+For the live source-clock route, both components are facts available at the same
+decision instant and target. The ENS row must be `VERIFIED`, causal, unambiguous,
+fully inside the target local day, contribute to the target extrema, have at least
+20 finite °C members, and have `source_available_at <= computed_at` and
+`source_cycle_time <= carrier source_cycle_time`. Two positively weighted current
+providers are the minimum. Missing or invalid current shape blocks the live
+posterior; it never falls back to a historical residual, constant width, fitted
+floor, or uniform mixture.
+
+The center bootstrap uses only the current sampling terms:
+
+```
+n_eff_provider = 1 / Σ_s w_s²
+σ_center = sqrt(σ_within²/n_members + σ_between²/n_eff_provider)
+```
+
+The older walk-forward residual width remains diagnostic for non-source-clock
+carriers; it is not a fallback into the live source-clock probability regime.
 
 ### 1e. q construction — fused-N-direct (commit 8541bc93cd)
 
@@ -81,11 +95,17 @@ q_shape provenance = "fused_normal_direct"
 
 `src/calibration/emos.bin_probability_settlement` (lines 427–485) is the single settlement integrator — preimage math, Celsius bounds, half_step=0.5 for precision=1. `src/data/replacement_forecast_materializer.py:1040–1062`.
 
+The Normal is the maximum-entropy distribution determined by the observable
+current center and variance; it does not add a fitted tail or a market anchor.
+YES and NO are exact complements of this one probability world. Side selection
+therefore depends only on executable cost and the same robust objective, never on
+a side-specific probability recipe.
+
 ### 1e-bis. Post-2026-06-12 q corrections (ADDENDUM — fitted artifacts + single authority)
 
-The q chain gained three operator-ratified corrections on 2026-06-12; all are
-fitted-artifact-driven or per-cell-data-driven, never settings numbers
-(no-unsupported-hardcoded-values law):
+The q chain gained three fitted corrections on 2026-06-12. As of 2026-07-11 they
+remain diagnostic for the source-clock route and may still apply to explicitly
+non-source-clock carriers; they must not transform a current-evidence live q:
 
 1. **Fitted σ-scale + uniform mixture** (`state/sigma_scale_fit.json`, sole writer
    `scripts/fit_sigma_scale.py`, weekly refit): `q_adj = (1−w)·N(σ_impl·k) + w·(1/n_bins)`,
@@ -187,7 +207,7 @@ These make error categories **unconstructable**, not merely less likely.
 
 **Live runtime semantics:** All required replacement policy flags true -> rows may be materialized/read as `runtime_layer='live'`. Execution and monitoring must consume the live row set only. Historical row labels such as `LIVE_AUTHORITY`, `trade_authority_status`, `SHADOW_ONLY`, `SHADOW_VETO_ONLY`, and `DIAGNOSTIC_ONLY` are not live authority and must not be joined into the execution or monitor decision path.
 
-**q_lcb requirement:** The live replacement path requires fused-q certified bootstrap `q_lcb_json` / `q_ucb_json`. A missing bound blocks live materialization/readiness; it must not fall back through baseline or retired experiment provenance.
+**q_lcb requirement:** The live replacement path requires fused-q certified bootstrap `q_lcb_json` / `q_ucb_json`. On the source-clock route the bootstrap consumes `σ_center` and `σ_pred` from the same current-evidence shape. A missing current ENS carrier or bound blocks live materialization/readiness; it must not fall back through historical residual calibration, baseline, or retired experiment provenance.
 
 **FSR dependency (commit 8c6e028066):** The replacement forecast is an OVERLAY authority — it writes posteriors and readiness that depend on `baseline_b0 (ecmwf_open_data)` source_run. It emits no source_run or ensemble_snapshots of its own. The opendata baseline producer (mx2t6_high / mn2t6_low) MUST remain enabled; disabling it starves FSR.
 
@@ -211,7 +231,7 @@ These make error categories **unconstructable**, not merely less likely.
 | `tests/test_stale_cycle_download_includes_covered_targets.py` | Covered-target filter starves new-cycle raw inputs (9c594c9fc3) |
 | `tests/test_download_row_level_skip_only_missing_fetches.py` | Coverage filter on extras download; instance 5 coverage!=currency (df8199ef8e) |
 | `tests/test_queue_surfaces_subprocess_warnings.py` | Subprocess WARNINGs silently discarded in sidecar void (2b6936d3b5) |
-| `tests/test_replacement_fused_q_shape.py` | AIFS-vote shape zero-coverage bins; flag-OFF byte-path; fail-closed (8541bc93cd) |
+| `tests/test_replacement_fused_q_shape.py` | Current-evidence Wellington no-edge counterfactual; YES/NO complement symmetry; historical shape transforms cannot enter source-clock live q |
 | `tests/test_icon_eu_is_the_dwd_rep_inside_its_own_icon_eu_domain.py` | icon_eu borrowing icon_d2 box drops 7 EU-edge cities (6860f00a21) |
 | `tests/test_replacement_0_1_anchor_eb_bias_source_match.py` | ENS bias applied to IFS anchor (wrong-set over-correction) (ff7f33dd5b) |
 | `tests/test_forecast_live_opendata_producer_required_for_fsr.py` | FSR starvation when opendata baseline producer disabled (8c6e028066) |

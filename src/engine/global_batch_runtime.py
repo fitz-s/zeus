@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal
 import hashlib
 import sqlite3
 from typing import Callable, Mapping, Sequence
@@ -399,6 +400,7 @@ def process_current_global_batch(
     selection_snapshot_connections: Sequence[sqlite3.Connection] = (),
     current_capital_limit_resolver: Callable[[object, str, str], object]
     | None = None,
+    fractional_kelly_multiplier: Decimal = Decimal("1"),
 ) -> GlobalBatchSubmitResult:
     """Select once from every family holding a current q certificate."""
 
@@ -598,6 +600,7 @@ def process_current_global_batch(
                 current_wealth_identity_resolver=lambda: wealth.economic_identity,
                 wealth_witness=wealth,
                 capital_limit_usd=wealth.spendable_cash_usd,
+                fractional_kelly_multiplier=fractional_kelly_multiplier,
                 decision_at_utc=selection_at,
                 book_epoch=attempt_book_epoch,
                 current_capital_limit_resolver=current_capital_limit_resolver,

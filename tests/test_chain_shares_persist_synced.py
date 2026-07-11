@@ -1,4 +1,4 @@
-# Lifecycle: created=2026-05-31; last_reviewed=2026-07-08; last_reused=2026-07-08
+# Lifecycle: created=2026-05-31; last_reviewed=2026-07-11; last_reused=2026-07-11
 # Purpose: Relationship test — chain economics (chain_shares, chain_seen_at) persist
 #   to position_current for SYNCED positions and survive a fresh DB read (task #56).
 # Reuse: inspect chain_reconciliation.reconcile() else-branch + _append_canonical_chain_observation_if_available
@@ -919,3 +919,122 @@ def test_blank_chain_seen_at_refresh_projects_observation_time_once() -> None:
     assert second_stats.get("chain_observation_persisted", 0) == 0
     assert second_seen_at == first_seen_at
     assert second_count == 1
+
+
+def test_stale_open_projection_cannot_erase_newer_positive_chain_observation() -> None:
+    """A fill/recovery replay without chain evidence must be monotone.
+
+    Live failure shape: chain reconciliation persisted a positive observation,
+    then the periodic command-recovery lane replayed the original fill
+    projection (which has no chain timestamp) and cleared ``chain_seen_at``.
+    That made the global wealth witness fail closed until the next reconcile.
+    """
+
+    from src.engine.lifecycle_events import build_position_current_projection
+    from src.state.projection import upsert_position_current
+
+    trade_id = "stale-replay-preserves-chain-observation"
+    observed_at = "2026-07-11T09:36:52.738010+00:00"
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db_path = os.path.join(tmpdir, "world.db")
+        conn = _setup_db_on_disk(db_path)
+        pos = _make_position(trade_id=trade_id, token_id="tok-stale-replay", shares=3.0)
+        _seed_position_current(conn, pos, chain_shares=3.0)
+        conn.execute(
+            """
+            UPDATE position_current
+               SET chain_state = 'synced',
+                   chain_shares = 3.0,
+                   chain_avg_price = 0.28,
+                   chain_cost_basis_usd = 0.84,
+                   chain_seen_at = ?,
+                   chain_absence_at = NULL
+             WHERE position_id = ?
+            """,
+            (observed_at, trade_id),
+        )
+        conn.commit()
+
+        stale = build_position_current_projection(pos)
+        stale["phase"] = "active"
+        stale["chain_state"] = "local_only"
+        stale["chain_shares"] = None
+        stale["chain_avg_price"] = None
+        stale["chain_cost_basis_usd"] = None
+        stale["chain_seen_at"] = None
+        stale["chain_absence_at"] = None
+        upsert_position_current(conn, stale)
+        conn.commit()
+
+        row = conn.execute(
+            """
+            SELECT chain_state, chain_shares, chain_avg_price,
+                   chain_cost_basis_usd, chain_seen_at, chain_absence_at
+              FROM position_current
+             WHERE position_id = ?
+            """,
+            (trade_id,),
+        ).fetchone()
+        conn.close()
+
+    assert dict(row) == {
+        "chain_state": "synced",
+        "chain_shares": 3.0,
+        "chain_avg_price": 0.28,
+        "chain_cost_basis_usd": 0.84,
+        "chain_seen_at": observed_at,
+        "chain_absence_at": None,
+    }
+
+
+def test_new_chain_absence_can_supersede_positive_chain_observation() -> None:
+    """Monotonicity protects missing evidence, not stale positive state."""
+
+    from src.engine.lifecycle_events import build_position_current_projection
+    from src.state.projection import upsert_position_current
+
+    trade_id = "new-absence-supersedes-positive"
+    absence_at = "2026-07-11T09:40:00+00:00"
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db_path = os.path.join(tmpdir, "world.db")
+        conn = _setup_db_on_disk(db_path)
+        pos = _make_position(trade_id=trade_id, token_id="tok-new-absence", shares=3.0)
+        _seed_position_current(conn, pos, chain_shares=3.0)
+        conn.execute(
+            """
+            UPDATE position_current
+               SET chain_state = 'synced', chain_shares = 3.0,
+                   chain_seen_at = '2026-07-11T09:36:52+00:00',
+                   chain_absence_at = NULL
+             WHERE position_id = ?
+            """,
+            (trade_id,),
+        )
+        conn.commit()
+
+        observed_absence = build_position_current_projection(pos)
+        observed_absence["phase"] = "active"
+        observed_absence["chain_state"] = "local_only"
+        observed_absence["chain_shares"] = 0.0
+        observed_absence["chain_seen_at"] = None
+        observed_absence["chain_absence_at"] = absence_at
+        upsert_position_current(conn, observed_absence)
+        conn.commit()
+
+        row = conn.execute(
+            """
+            SELECT chain_state, chain_shares, chain_seen_at, chain_absence_at
+              FROM position_current WHERE position_id = ?
+            """,
+            (trade_id,),
+        ).fetchone()
+        conn.close()
+
+    assert dict(row) == {
+        "chain_state": "local_only",
+        "chain_shares": 0.0,
+        "chain_seen_at": None,
+        "chain_absence_at": absence_at,
+    }

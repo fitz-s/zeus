@@ -4843,6 +4843,9 @@ def event_bound_live_adapter_from_trade_conn(
                 portfolio_state_provider=None,
                 current_book_epoch_provider=_current_book_epoch,
                 current_capital_limit_resolver=_current_entry_capital_limit,
+                fractional_kelly_multiplier=Decimal(
+                    str(_runtime_kelly_multiplier())
+                ),
                 selection_snapshot_connections=(
                     forecast_conn,
                 ),
@@ -6966,20 +6969,13 @@ def _build_event_bound_no_submit_receipt_core(
             extra_exposure_by_bin_id=(_selection_exposure or None),
         )
     if global_actuation is not None:
-        if any(
-            abs(float(value or 0.0)) > 1e-12
-            for value in (_selection_exposure or {}).values()
-        ):
-            return EventSubmissionReceipt(
-                False,
-                event.event_id,
-                event.causal_snapshot_id,
-                reason="GLOBAL_EXISTING_FAMILY_EXPOSURE_UNMODELED",
-                city=family.city,
-                target_date=family.target_date,
-                metric=family.metric,
-                family_id=family.family_id,
-            )
+        # Existing family exposure is already represented twice at the right
+        # levels: the global solver lower-bounds every unknown payoff coupling
+        # with its wealth floor/ceiling, while this family pass supplies the exact
+        # per-outcome exposure to the qkernel marginal-utility calculation.  A
+        # blanket block here discarded both proofs and made any first fill shut
+        # the entire entry engine down.  Continue to the exact prepared-family
+        # and selected-proof checks below; either may still no-trade honestly.
         if _global_prepare_reason is not None or _prepared_global_family is None:
             return EventSubmissionReceipt(
                 False,

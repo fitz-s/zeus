@@ -1168,22 +1168,39 @@ def _score_global_single_order(
     wealth_ceiling_usd: Decimal,
     spendable_cash_usd: Decimal,
     capital_limit_usd: Decimal,
+    fractional_kelly_multiplier: Decimal = Decimal("1"),
 ) -> GlobalSingleOrderDecision:
-    """Find the exact executable-grid optimum for one full-depth candidate."""
+    """Find the executable fractional-Kelly projection of one candidate.
 
-    spend_limit = min(
-        Decimal(capital_limit_usd),
+    The current book and terminal-wealth objective first identify the full-Kelly
+    optimum. The operator-owned fractional multiplier then scales that exact
+    share quantity once; the projected order is re-priced and re-scored on the
+    venue-legal grid. Cash and allocator capacity remain hard outer bounds.
+    """
+
+    multiplier = Decimal(fractional_kelly_multiplier)
+    if not multiplier.is_finite() or not Decimal("0") < multiplier <= Decimal("1"):
+        raise ValueError("fractional Kelly multiplier must be finite and in (0, 1]")
+    affordability_limit = min(
         Decimal(spendable_cash_usd),
         Decimal(wealth_floor_usd) * (Decimal("1") - Decimal(str(_WEALTH_MARGIN))),
     )
-    raw_max_shares = _single_order_max_shares(
+    spend_limit = min(Decimal(capital_limit_usd), affordability_limit)
+    capacity_max_shares = _single_order_max_shares(
         candidate.executable_cost_curve,
         spend_limit_usd=spend_limit,
+    )
+    optimization_limit = (
+        spend_limit if multiplier == Decimal("1") else affordability_limit
+    )
+    raw_max_shares = _single_order_max_shares(
+        candidate.executable_cost_curve,
+        spend_limit_usd=optimization_limit,
     )
     raw_min_shares = (
         candidate.executable_cost_curve.min_order_size / _SIZE_QUANTUM
     ).to_integral_value(rounding=ROUND_CEILING) * _SIZE_QUANTUM
-    if raw_max_shares < raw_min_shares:
+    if raw_max_shares < raw_min_shares or capacity_max_shares < raw_min_shares:
         return GlobalSingleOrderDecision(
             candidate=None,
             shares=Decimal("0"),
@@ -1243,7 +1260,7 @@ def _score_global_single_order(
             if legal is not None:
                 probes.add(legal)
 
-    best: tuple[
+    full_best: tuple[
         float,
         float,
         float,
@@ -1255,6 +1272,68 @@ def _score_global_single_order(
     ] | None = None
     for shares in sorted(probes):
         if shares < raw_min_shares or shares > raw_max_shares:
+            continue
+        try:
+            robust_du, robust_ev, efficiency, cost = _single_order_metrics(
+                candidate,
+                q_samples=q_samples,
+                shares=shares,
+                wealth_floor_usd=wealth_floor_usd,
+                wealth_ceiling_usd=wealth_ceiling_usd,
+                alpha=band_alpha,
+            )
+            limit_price, expected_fill_price, max_spend = _single_order_execution_boundary(
+                candidate, shares
+            )
+        except ValueError:
+            continue
+        if max_spend > optimization_limit:
+            continue
+        if full_best is None or robust_du > full_best[0] + 1e-15 or (
+            math.isclose(robust_du, full_best[0], rel_tol=0.0, abs_tol=1e-15)
+            and (cost, -efficiency, candidate.candidate_id)
+            < (full_best[3], -full_best[2], candidate.candidate_id)
+        ):
+            full_best = (
+                robust_du,
+                robust_ev,
+                efficiency,
+                cost,
+                shares,
+                limit_price,
+                expected_fill_price,
+                max_spend,
+            )
+
+    if full_best is None:
+        return GlobalSingleOrderDecision(
+            candidate=None,
+            shares=Decimal("0"),
+            cost_usd=Decimal("0"),
+            robust_delta_log_wealth=0.0,
+            robust_ev_usd=0.0,
+            capital_efficiency=0.0,
+            no_trade_reason="NON_POSITIVE_ROBUST_OBJECTIVE",
+            rejection_reasons={candidate.candidate_id: "NON_POSITIVE_ROBUST_OBJECTIVE"},
+        )
+
+    projected_shares = min(full_best[4] * multiplier, capacity_max_shares)
+    projected_probes = {
+        legal
+        for at_most in (True, False)
+        if (
+            legal := _single_order_venue_legal_neighbor(
+                candidate,
+                max(projected_shares, raw_min_shares),
+                at_most=at_most,
+            )
+        )
+        is not None
+    }
+
+    best = None
+    for shares in sorted(projected_probes):
+        if shares < raw_min_shares or shares > capacity_max_shares:
             continue
         try:
             robust_du, robust_ev, efficiency, cost = _single_order_metrics(
@@ -1387,6 +1466,7 @@ def select_global_single_order(
     current_wealth_identity_resolver: Callable[[], str | None],
     wealth_witness: PortfolioWealthWitness,
     capital_limit_usd: Decimal,
+    fractional_kelly_multiplier: Decimal = Decimal("1"),
     decision_at_utc: datetime,
     candidate_capital_limit_resolver: Callable[
         [GlobalSingleOrderCandidate], Decimal
@@ -1472,6 +1552,9 @@ def select_global_single_order(
         )
     if capital_limit_usd <= 0:
         raise ValueError("capital limit must be positive")
+    multiplier = Decimal(fractional_kelly_multiplier)
+    if not multiplier.is_finite() or not Decimal("0") < multiplier <= Decimal("1"):
+        raise ValueError("fractional Kelly multiplier must be finite and in (0, 1]")
 
     rejections: dict[str, str] = {}
     eligible: list[tuple[GlobalSingleOrderCandidate, np.ndarray, float, str]] = []
@@ -1610,6 +1693,7 @@ def select_global_single_order(
             wealth_ceiling_usd=wealth_witness.wealth_ceiling_usd,
             spendable_cash_usd=wealth_witness.spendable_cash_usd,
             capital_limit_usd=candidate_capital_limit,
+            fractional_kelly_multiplier=multiplier,
         )
         if score.candidate is None:
             rejections.update(score.rejection_reasons)

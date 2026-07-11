@@ -16,12 +16,17 @@ of its refreshes on a different era's probability than entry used.
 
 | Domain | THE authority | Everything else |
 |---|---|---|
-| Forecast markets (entry + exit + redecision + FDR + Kelly + evidence fields) | replacement chain posterior (`forecast_posteriors` q_json: walk-forward de-bias + σ-floor + fitted k,w) + decision-time q_lcb machinery (bootstrap floor, market-anchor cap) | RETIRED: edli_per_city_v1 shift, full_transport_v1 path, legacy ENS p_raw+Platt monitor chain, baseline LCB cap on the live path |
+| Forecast markets (entry + exit + redecision + FDR + Kelly + evidence fields) | replacement chain posterior (`forecast_posteriors` q_json). On the source-clock live route: current provider center + latest causal target-specific ECMWF ENS within-spread + simultaneous provider between-spread, then decision-time q_lcb machinery. | RETIRED on that route: historical residual σ, constant/fitted σ floors, fitted uniform mixture, city shape mixture, fitted affine center shift, edli_per_city_v1 shift, full_transport_v1 path, legacy ENS p_raw+Platt monitor chain, baseline LCB cap |
 | Same-day (day0) extremes | observation authority (METAR/WU running extremes → EMOS/honest-raw on the snapshot) — honestly a DIFFERENT domain (nowcast, not forecast); documented, not a fallback | RETIRED: per-city bias shift on day0 lane (already unreachable under EMOS-sole-calibrator) |
 
 A consumer that cannot use THE authority is either (a) in the other domain (day0), or
 (b) evidence the authority's coverage must be COMPLETED (positive direction), never a
 license to resurrect a retired era.
+
+2026-07-11 clarification: a missing current target-specific ENS shape is degraded
+evidence, not permission to substitute the older residual/floor regime. The source-clock
+posterior is non-live until that current carrier exists and passes causality/provenance
+checks.
 
 ## U2 — Degraded-mode law (the only legal "fallback")
 

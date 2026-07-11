@@ -232,6 +232,7 @@ def select_prepared_global_auction(
     current_wealth_identity_resolver: Callable[[], str | None],
     wealth_witness: PortfolioWealthWitness,
     capital_limit_usd: Decimal,
+    fractional_kelly_multiplier: Decimal = Decimal("1"),
     decision_at_utc: datetime,
     book_epoch: CurrentGlobalBookEpoch | None = None,
     current_capital_limit_resolver: Callable[
@@ -370,6 +371,7 @@ def select_prepared_global_auction(
         current_wealth_identity_resolver=current_wealth_identity_resolver,
         wealth_witness=wealth_witness,
         capital_limit_usd=capital_limit_usd,
+        fractional_kelly_multiplier=fractional_kelly_multiplier,
         decision_at_utc=decision_at_utc,
         candidate_capital_limit_resolver=_candidate_capital_limit,
     )

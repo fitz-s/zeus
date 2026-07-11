@@ -349,7 +349,7 @@ files:
   src/data/replacement_forecast_materializer.py:
     zone: K2_runtime
     authority_role: replacement_forecast_posterior_writer
-    why: Writes forecast_posteriors rows with content-addressed identity (posterior_identity_hash/dependency_hash/posterior_config_hash over dependency_hash, q, q_lcb, q_ucb, source_cycle_time) so a later read can prove which raw inputs a served posterior was built from. On a UNIQUE(posterior_identity_hash) conflict, re-selects the existing row instead of duplicating it.
+    why: Writes forecast_posteriors rows with content-addressed identity (posterior_identity_hash/dependency_hash/posterior_config_hash over dependency_hash, q, q_lcb, q_ucb, source_cycle_time) so a later read can prove which raw inputs a served posterior was built from. The source-clock live route binds the latest causal target-specific VERIFIED ECMWF ENS snapshot plus simultaneous provider values into a decision-time current-evidence shape; its snapshot id and shape hash enter dependency/config identity, and missing current shape fails closed instead of falling back to historical residual/floor/mixture probability. On a UNIQUE(posterior_identity_hash) conflict, re-selects the existing row instead of duplicating it.
     hazards:
     - SOURCE_TRUTH_PLANE_COLLAPSE
     downstream:
@@ -2792,7 +2792,7 @@ files:
   src/state/projection.py:
     zone: K0_frozen_kernel
     authority_role: canonical_projection_law
-    why: Projects event ledger into position_current and defines projection columns.
+    why: Projects event ledger into position_current, defines projection columns, and enforces open-position chain-observation monotonicity so evidence-free recovery/fill replays cannot erase newer positive chain truth.
     write_routes:
     - canonical_position_write
     downstream:
