@@ -14,6 +14,7 @@ import numpy as np
 import pytest
 
 import src.engine.event_reactor_adapter as era
+from src.execution.executor import _entry_taker_quality_component
 from src.engine.event_reactor_adapter import (
     PreSubmitAuthorityWitness,
     _assert_live_entry_submit_authority,
@@ -843,6 +844,89 @@ def test_global_actuation_rebinds_submit_gate_to_exact_current_band(
     )
     assert proof is not None and proof["passed"] is True
     assert proof["q_exec_lcb_basis"] == "CURRENT_POSTERIOR_BAND"
+
+
+@pytest.mark.parametrize(("side", "direction"), (("YES", "buy_yes"), ("NO", "buy_no")))
+def test_low_probability_current_band_taker_is_symmetric_and_price_relative(
+    side,
+    direction,
+):
+    cert = _current_qkernel_cert(side=side)
+    cert.update(
+        payoff_q_point=0.999,
+        payoff_q_lcb=0.13,
+        pre_qkernel_q_lcb_5pct=0.13,
+        cost=0.03,
+        edge_lcb=0.10,
+        route_cost=0.03,
+        route_edge_lcb=0.10,
+        selection_guard_q_safe=0.13,
+    )
+    _seal_current_qkernel_cert(cert)
+    decision = SimpleNamespace(
+        shares=Decimal("100"),
+        cost_usd=Decimal("3"),
+        robust_ev_usd=Decimal("10"),
+    )
+    witness = SimpleNamespace(
+        sample_matrix_identity=f"current-sample-{side.lower()}",
+        yes_q_samples=SimpleNamespace(shape=(400, 11)),
+        band_alpha=0.05,
+    )
+    current = era._global_current_state_execution_economics(
+        cert,
+        decision=decision,
+        witness=witness,
+    )
+    proof = era._build_event_bound_taker_quality_proof(
+        actionable_payload={
+            "direction": direction,
+            "selection_authority_applied": "qkernel_spine",
+            "candidate_bin_id": "bin-1",
+            "q_live": current["payoff_q_point"],
+            "q_lcb_5pct": current["payoff_q_lcb"],
+            "live_cap_reserved_notional_usd": "3",
+            "qkernel_execution_economics": current,
+        },
+        order_mode="TAKER",
+        fresh_best_bid=0.02,
+        fresh_best_ask=0.03,
+    )
+
+    assert proof is not None and proof["passed"] is True
+    assert Decimal(str(proof["model_confidence"])) < Decimal("0.60")
+    assert Decimal(str(proof["taker_fee_adjusted_edge"])) > Decimal("0")
+    admission = _entry_taker_quality_component(
+        effective_order_type="FOK",
+        post_only=False,
+        intent_order_type="FOK",
+        taker_quality_proof=proof,
+        selection_authority_applied="qkernel_spine",
+        qkernel_execution_economics=current,
+    )
+    assert admission["allowed"] is True
+    assert admission["reason"] == "taker_quality_passed"
+
+    tampered = dict(current, payoff_q_lcb=0.14)
+    invalid_identity = _entry_taker_quality_component(
+        effective_order_type="FOK",
+        post_only=False,
+        taker_quality_proof=proof,
+        selection_authority_applied="qkernel_spine",
+        qkernel_execution_economics=tampered,
+    )
+    assert invalid_identity["allowed"] is False
+    assert invalid_identity["reason"] == "current_band_taker_quality_proof_invalid"
+
+    negative = _entry_taker_quality_component(
+        effective_order_type="FOK",
+        post_only=False,
+        taker_quality_proof=dict(proof, taker_fee_adjusted_edge="-0.001"),
+        selection_authority_applied="qkernel_spine",
+        qkernel_execution_economics=current,
+    )
+    assert negative["allowed"] is False
+    assert negative["reason"] == "negative_current_band_after_cost_surplus"
 
 
 def test_global_actuation_current_band_refuses_non_positive_bound():

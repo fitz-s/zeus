@@ -562,6 +562,8 @@ def _entry_taker_quality_component(
     post_only: bool,
     intent_order_type: str | None = None,
     taker_quality_proof: Any = None,
+    selection_authority_applied: Any = None,
+    qkernel_execution_economics: Any = None,
 ) -> dict:
     """Final live-entry policy: takers need explicit edge-vs-maker proof."""
 
@@ -637,11 +639,31 @@ def _entry_taker_quality_component(
             "order_type": order_type,
             "post_only": False,
         }
+    current_band_proof = _current_band_taker_quality_proof_valid(
+        taker_quality_proof=taker_quality_proof,
+        selection_authority_applied=selection_authority_applied,
+        qkernel_execution_economics=qkernel_execution_economics,
+    )
+    if _current_band_taker_quality_declared(
+        taker_quality_proof=taker_quality_proof,
+        qkernel_execution_economics=qkernel_execution_economics,
+    ) and not current_band_proof:
+        return {
+            "component": "entry_taker_quality",
+            "allowed": False,
+            "reason": "current_band_taker_quality_proof_invalid",
+            "order_type": order_type,
+            "post_only": False,
+        }
     required_profit = max(
         maker_profit * _ENTRY_TAKER_MIN_PROFIT_RATIO,
         maker_profit + _ENTRY_TAKER_MIN_INCREMENTAL_PROFIT_USD,
     )
-    if taker_edge < _ENTRY_TAKER_MIN_FEE_ADJUSTED_EDGE:
+    if current_band_proof and taker_edge < Decimal("0"):
+        reason = "negative_current_band_after_cost_surplus"
+    elif current_band_proof:
+        reason = ""
+    elif taker_edge < _ENTRY_TAKER_MIN_FEE_ADJUSTED_EDGE:
         reason = "taker_fee_adjusted_edge_below_floor"
     elif incremental_profit < _ENTRY_TAKER_MIN_INCREMENTAL_PROFIT_USD:
         reason = "taker_incremental_profit_below_floor"
@@ -676,7 +698,75 @@ def _entry_taker_quality_component(
         "maker_expected_profit_usd": str(maker_profit),
         "incremental_expected_profit_usd": str(incremental_profit),
         "model_confidence": str(confidence),
+        "passed_basis": str(taker_quality_proof.get("passed_basis") or ""),
     }
+
+
+def _current_band_taker_quality_declared(
+    *,
+    taker_quality_proof: Mapping[str, Any],
+    qkernel_execution_economics: Any,
+) -> bool:
+    from src.decision_kernel.canonicalization import qkernel_declares_current_state
+
+    return (
+        str(taker_quality_proof.get("passed_basis") or "").strip()
+        == "current_posterior_band_after_cost"
+        or str(taker_quality_proof.get("q_exec_lcb_basis") or "").strip()
+        == "CURRENT_POSTERIOR_BAND"
+        or (
+            isinstance(qkernel_execution_economics, Mapping)
+            and qkernel_declares_current_state(qkernel_execution_economics)
+        )
+    )
+
+
+def _current_band_taker_quality_proof_valid(
+    *,
+    taker_quality_proof: Mapping[str, Any],
+    selection_authority_applied: Any,
+    qkernel_execution_economics: Any,
+) -> bool:
+    """Bind the fixed-threshold exception to the sealed current-band economics."""
+
+    from src.decision_kernel.canonicalization import qkernel_current_state_identity_hash
+
+    if not isinstance(qkernel_execution_economics, Mapping):
+        return False
+    economics = qkernel_execution_economics
+    basis = "CURRENT_POSTERIOR_BAND"
+    sample_hash = str(economics.get("sample_hash") or "").strip()
+    try:
+        n_draws = int(economics.get("selection_guard_n") or 0)
+        proof_q_lcb = Decimal(str(taker_quality_proof.get("q_exec_lcb")))
+        economics_q_lcb = Decimal(str(economics.get("payoff_q_lcb")))
+    except (ArithmeticError, TypeError, ValueError):
+        return False
+    return (
+        str(selection_authority_applied or "").strip() == "qkernel_spine"
+        and str(economics.get("source") or "").strip() == "qkernel_spine"
+        and bool(str(economics.get("decision_id") or "").strip())
+        and bool(str(economics.get("receipt_hash") or "").strip())
+        and bool(str(economics.get("q_version") or "").strip())
+        and str(economics.get("current_state_identity_hash") or "").strip()
+        == qkernel_current_state_identity_hash(economics)
+        and str(economics.get("q_lcb_guard_basis") or "").strip() == basis
+        and str(economics.get("selection_guard_basis") or "").strip() == basis
+        and economics.get("q_lcb_guard_abstained") is False
+        and economics.get("selection_guard_abstained") is False
+        and bool(sample_hash)
+        and str(economics.get("q_lcb_guard_cell_key") or "").strip() == sample_hash
+        and str(economics.get("selection_guard_cell_key") or "").strip() == sample_hash
+        and n_draws >= 2
+        and str(taker_quality_proof.get("passed_basis") or "").strip()
+        == "current_posterior_band_after_cost"
+        and str(taker_quality_proof.get("q_exec_lcb_basis") or "").strip() == basis
+        and str(taker_quality_proof.get("q_lcb_source") or "").strip()
+        == "qkernel_execution_economics.payoff_q_lcb"
+        and proof_q_lcb.is_finite()
+        and economics_q_lcb.is_finite()
+        and proof_q_lcb == economics_q_lcb
+    )
 
 
 def _float_field(value: Any) -> float | None:
@@ -5861,6 +5951,12 @@ def _live_order(
             post_only=submit_post_only,
             intent_order_type=submit_order_type,
             taker_quality_proof=getattr(intent, "taker_quality_proof", None),
+            selection_authority_applied=getattr(
+                intent, "selection_authority_applied", None
+            ),
+            qkernel_execution_economics=getattr(
+                intent, "qkernel_execution_economics", None
+            ),
         )
         if not taker_quality_component.get("allowed"):
             reason = str(taker_quality_component.get("reason") or "entry_taker_quality")
