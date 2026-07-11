@@ -1195,15 +1195,19 @@ def sync_venue_command_position_link_for_edli_fill(
 
 
 # ---------------------------------------------------------------------------
-# Settled-market routing + quarantine disposition helpers
+# Settled-market routing + bridge-failure retry helpers
 # ---------------------------------------------------------------------------
 
-# Number of consecutive bridge failures before an aggregate is quarantined.
-_QUARANTINE_THRESHOLD = 10
-
-# Disposition constants — must match the CHECK in edli_fill_bridge_dispositions_schema.py
+# Disposition constant — must match the CHECK in edli_fill_bridge_dispositions_schema.py
 DISPOSITION_SETTLED_MARKET = "SETTLED_MARKET_FILL_BOOKED"
-DISPOSITION_QUARANTINED = "QUARANTINED_BRIDGE_FAILURE"
+
+# Cap on the decaying retry cadence, in scan cycles (~60s/cycle live cadence).
+# A confirmed on-chain fill is truth that MUST eventually materialise; failure
+# to do so is a code/venue problem, never a reason to stop trying. This bounds
+# the WORST-CASE wait between attempts (~4.3h) without ever excluding the
+# aggregate — eligibility never terminates.
+_RETRY_BACKOFF_CAP_CYCLES = 256
+_RETRY_CYCLE_SECONDS = 60
 
 
 def _dispositions_table(conn: sqlite3.Connection) -> str:
@@ -1230,8 +1234,10 @@ def get_fill_bridge_disposition(conn: sqlite3.Connection, aggregate_id: str) -> 
 
     Returns None when:
     - no row exists for the aggregate,
-    - the row exists but disposition is NULL (accumulating failure count, not yet terminal).
-    Returns DISPOSITION_SETTLED_MARKET or DISPOSITION_QUARANTINED for terminal rows.
+    - the row exists but disposition is NULL (accumulating failure count under
+      decaying retry — not terminal; the aggregate is retried on a backoff
+      cadence, never permanently excluded).
+    Returns DISPOSITION_SETTLED_MARKET for terminal (accounting-truth) rows.
     """
     table = _dispositions_table(conn)
     try:
@@ -1279,16 +1285,19 @@ def _increment_failure_count(
 ) -> int:
     """Increment attempt_count for an aggregate, inserting the row if absent.
 
-    Returns the NEW attempt_count after the increment.
-    Quarantine transition (disposition=QUARANTINED_BRIDGE_FAILURE) is handled by
-    the caller after inspecting the returned count.
+    Returns the NEW attempt_count after the increment. attempt_count is pure
+    evidence + retry-cadence input (see ``_retry_backoff_seconds`` /
+    ``is_retry_eligible``) — it never drives a terminal exclusion. The caller
+    logs loudly on every failure and keeps the aggregate in the scan set
+    forever, retried on a decaying cadence so a poison aggregate cannot
+    dominate every cycle.
     """
     table = _dispositions_table(conn)
     try:
-        # Upsert: insert with NULL disposition (accumulating, not yet terminal) on first
+        # Upsert: insert with NULL disposition (accumulating, not terminal) on first
         # failure; increment attempt_count on subsequent failures. The WHERE guard prevents
-        # incrementing a row that already has a terminal disposition (QUARANTINED written by
-        # _quarantine_aggregate or SETTLED written by _record_settled_disposition).
+        # incrementing a row that already has a terminal disposition (SETTLED written by
+        # _record_settled_disposition — the only terminal disposition left).
         conn.execute(
             f"""
             INSERT INTO {table}
@@ -1319,37 +1328,50 @@ def _increment_failure_count(
         return 1
 
 
-def _quarantine_aggregate(
-    conn: sqlite3.Connection,
-    aggregate_id: str,
-    error_str: str,
-    attempt_count: int,
-    now_str: str,
-) -> None:
-    """Transition an aggregate to QUARANTINED_BRIDGE_FAILURE (idempotent UPDATE OR IGNORE)."""
+def _retry_backoff_seconds(attempt_count: int) -> int:
+    """Decaying retry cadence for an accumulating bridge-failure aggregate.
+
+    Doubles the minimum wait between attempts per failure, in ~cycle units
+    (``_RETRY_CYCLE_SECONDS`` each), capped at ``_RETRY_BACKOFF_CAP_CYCLES``.
+    Bounds per-cycle cost (a poison aggregate is attempted less and less
+    often) without ever making retry ineligible — the cap is a ceiling on
+    wait time, not a terminal exclusion.
+    """
+    cycles = min(2 ** min(max(int(attempt_count), 0), 8), _RETRY_BACKOFF_CAP_CYCLES)
+    return cycles * _RETRY_CYCLE_SECONDS
+
+
+def is_retry_eligible(conn: sqlite3.Connection, aggregate_id: str, now: datetime) -> bool:
+    """Whether an accumulating bridge-failure aggregate may be retried this cycle.
+
+    True when: no disposition row exists yet (fresh aggregate — always try),
+    or the row's terminal disposition is not SETTLED (i.e. it is an
+    accumulating failure row) AND enough wall-clock time has elapsed since
+    ``updated_at`` per ``_retry_backoff_seconds(attempt_count)``. Malformed
+    timestamps fail open (eligible) rather than silently starving retry.
+    """
     table = _dispositions_table(conn)
     try:
-        conn.execute(
-            f"""
-            UPDATE {table}
-            SET disposition = ?,
-                reason = ?,
-                last_error = ?,
-                attempt_count = ?,
-                updated_at = ?
-            WHERE aggregate_id = ?
-            """,
-            (
-                DISPOSITION_QUARANTINED,
-                f"quarantined after {attempt_count} consecutive failures",
-                error_str[:2000],
-                attempt_count,
-                now_str,
-                aggregate_id,
-            ),
-        )
-    except sqlite3.Error as exc:
-        logger.warning("fill-bridge: could not quarantine aggregate %s: %s", aggregate_id, exc)
+        row = conn.execute(
+            f"SELECT attempt_count, updated_at FROM {table} "
+            "WHERE aggregate_id = ? AND disposition IS NULL LIMIT 1",
+            (aggregate_id,),
+        ).fetchone()
+    except sqlite3.Error:
+        return True
+    if row is None:
+        return True
+    attempt_count = int(row[0] if not isinstance(row, sqlite3.Row) else row["attempt_count"])
+    updated_at = row[1] if not isinstance(row, sqlite3.Row) else row["updated_at"]
+    try:
+        last = datetime.fromisoformat(str(updated_at))
+    except (TypeError, ValueError):
+        return True
+    if last.tzinfo is None:
+        last = last.replace(tzinfo=timezone.utc)
+    now_aware = now if now.tzinfo is not None else now.replace(tzinfo=timezone.utc)
+    elapsed = (now_aware - last).total_seconds()
+    return elapsed >= _retry_backoff_seconds(attempt_count)
 
 
 def _market_is_settled(

@@ -1,12 +1,19 @@
 # Created: 2026-06-13
-# Last reused or audited: 2026-06-13
+# Last reused or audited: 2026-07-11
 # Authority basis: docs/evidence/plans/2026-06-13_fill_bridge_retry_storm.md —
 #   live incident 2026-06-12: legacy NOT NULL disposition column made the
-#   accumulating-row insert fail forever, freezing attempt_count at 1 so the
-#   quarantine threshold was unreachable (infinite retry storm); the rest-filled
+#   accumulating-row insert fail forever, freezing attempt_count at 1 and
+#   defeating retry-cadence evidence (infinite retry storm); the rest-filled
 #   orphan bridge re-selected terminal-RECONCILED aggregates its own ledger guard
 #   rejects, looping every scan, and one raising row aborted the whole batch.
-"""Antibodies for the fill-bridge retry-storm pair (schema drift + orphan re-selection)."""
+#   Quarantine excision (docs/rebuild/quarantine_excision_2026-07-11.md T1,
+#   2026-07-11): the permanent QUARANTINED_BRIDGE_FAILURE terminal disposition
+#   is retired (CHECK literal dropped via table rebuild); a live DB carrying
+#   the retired value must be drained back to an accumulating row (disposition
+#   NULL) so the fixed scanner re-drives it under decaying retry, never
+#   excluding it.
+"""Antibodies for the fill-bridge retry-storm pair (schema drift + orphan re-selection)
+and the quarantine-literal drop migration."""
 from __future__ import annotations
 
 import sqlite3
@@ -15,8 +22,8 @@ import pytest
 
 from src.events.edli_position_bridge import (
     _increment_failure_count,
-    _quarantine_aggregate,
     get_fill_bridge_disposition,
+    is_retry_eligible,
 )
 from src.state.schema.edli_fill_bridge_dispositions_schema import ensure_table
 
@@ -26,6 +33,22 @@ CREATE TABLE edli_fill_bridge_dispositions (
     disposition   TEXT NOT NULL
         CHECK (disposition IN ('SETTLED_MARKET_FILL_BOOKED', 'QUARANTINED_BRIDGE_FAILURE')),
     reason        TEXT NOT NULL,
+    attempt_count INTEGER NOT NULL DEFAULT 0,
+    last_error    TEXT,
+    created_at    TEXT NOT NULL,
+    updated_at    TEXT NOT NULL
+)
+"""
+
+# Nullable-disposition legacy DDL: the shape live DBs carried between the
+# 2026-06-12 nullability fix and the 2026-07-11 quarantine excision — CHECK
+# still allows the retired QUARANTINED_BRIDGE_FAILURE literal.
+LEGACY_QUARANTINE_CHECK_DDL = """
+CREATE TABLE edli_fill_bridge_dispositions (
+    aggregate_id  TEXT PRIMARY KEY,
+    disposition   TEXT
+        CHECK (disposition IS NULL OR disposition IN ('SETTLED_MARKET_FILL_BOOKED', 'QUARANTINED_BRIDGE_FAILURE')),
+    reason        TEXT,
     attempt_count INTEGER NOT NULL DEFAULT 0,
     last_error    TEXT,
     created_at    TEXT NOT NULL,
@@ -74,17 +97,116 @@ def test_ensure_table_idempotent_on_migrated_table(legacy_conn):
     assert get_fill_bridge_disposition(legacy_conn, "agg_settled") == "SETTLED_MARKET_FILL_BOOKED"
 
 
-def test_quarantine_reachable_after_migration(legacy_conn):
-    """Relationship test: failure-count increments must actually accumulate so the
-    caller's quarantine threshold fires — on the MIGRATED legacy table."""
+def test_failure_count_accumulates_on_migrated_table(legacy_conn):
+    """Relationship test: failure-count increments must actually accumulate (not
+    freeze) on the MIGRATED legacy table — retry-cadence evidence, never a path
+    to exclusion (no terminal quarantine disposition exists any more)."""
     ensure_table(legacy_conn)
     counts = [
         _increment_failure_count(legacy_conn, "agg_fail", "boom", f"t{i}")
         for i in range(1, 4)
     ]
-    assert counts == [1, 2, 3], "attempt_count frozen — quarantine unreachable (live bug)"
-    _quarantine_aggregate(legacy_conn, "agg_fail", "boom", 3, "t4")
-    assert get_fill_bridge_disposition(legacy_conn, "agg_fail") == "QUARANTINED_BRIDGE_FAILURE"
+    assert counts == [1, 2, 3], "attempt_count frozen — retry-cadence evidence unreachable (live bug)"
+    # No terminal disposition — the aggregate is still accumulating and
+    # eligible for retry forever (subject only to backoff cadence).
+    assert get_fill_bridge_disposition(legacy_conn, "agg_fail") is None
+
+
+# ---------------------------------------------------------------------------
+# Quarantine-literal drop migration (T1 excision, 2026-07-11)
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture()
+def legacy_quarantine_conn():
+    """A live-shaped DB carrying a QUARANTINED_BRIDGE_FAILURE row under the
+    retired CHECK — the exact shape of the 8 live rows found 2026-07-11."""
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute(LEGACY_QUARANTINE_CHECK_DDL)
+    conn.execute(
+        "INSERT INTO edli_fill_bridge_dispositions "
+        "(aggregate_id, disposition, reason, attempt_count, last_error, created_at, updated_at) "
+        "VALUES ('agg_quarantined', 'QUARANTINED_BRIDGE_FAILURE', "
+        "'quarantined after 10 consecutive failures', 10, 'boom', 't0', "
+        "'2026-06-12T00:00:00+00:00')"
+    )
+    conn.execute(
+        "INSERT INTO edli_fill_bridge_dispositions "
+        "(aggregate_id, disposition, reason, attempt_count, created_at, updated_at) "
+        "VALUES ('agg_settled', 'SETTLED_MARKET_FILL_BOOKED', 'settled', 0, 't0', 't0')"
+    )
+    yield conn
+    conn.close()
+
+
+def _check_sql(conn: sqlite3.Connection) -> str:
+    row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='edli_fill_bridge_dispositions'"
+    ).fetchone()
+    return str(row["sql"])
+
+
+def test_ensure_table_drops_quarantine_check_literal(legacy_quarantine_conn):
+    assert "QUARANTINED_BRIDGE_FAILURE" in _check_sql(legacy_quarantine_conn)
+    ensure_table(legacy_quarantine_conn)
+    assert "QUARANTINED_BRIDGE_FAILURE" not in _check_sql(legacy_quarantine_conn)
+    # A fresh write attempting the retired literal is now structurally impossible.
+    with pytest.raises(sqlite3.IntegrityError):
+        legacy_quarantine_conn.execute(
+            "INSERT INTO edli_fill_bridge_dispositions "
+            "(aggregate_id, disposition, reason, attempt_count, created_at, updated_at) "
+            "VALUES ('agg_new_bad', 'QUARANTINED_BRIDGE_FAILURE', 'x', 0, 't', 't')"
+        )
+
+
+def test_ensure_table_drains_quarantined_rows_to_accumulating(legacy_quarantine_conn):
+    """The drain: existing QUARANTINED_BRIDGE_FAILURE rows lose their terminal
+    disposition (NULL) but keep attempt_count/last_error as retry-cadence
+    evidence, so the fixed scanner re-drives them under backoff instead of
+    skipping them forever."""
+    ensure_table(legacy_quarantine_conn)
+
+    disp = get_fill_bridge_disposition(legacy_quarantine_conn, "agg_quarantined")
+    assert disp is None, f"drained row must be non-terminal (accumulating); got {disp!r}"
+
+    row = legacy_quarantine_conn.execute(
+        "SELECT attempt_count, last_error FROM edli_fill_bridge_dispositions WHERE aggregate_id = ?",
+        ("agg_quarantined",),
+    ).fetchone()
+    assert row["attempt_count"] == 10, "attempt_count (retry evidence) must survive the drain"
+    assert row["last_error"] == "boom"
+
+    # Unrelated SETTLED row is untouched by the drain.
+    assert get_fill_bridge_disposition(legacy_quarantine_conn, "agg_settled") == "SETTLED_MARKET_FILL_BOOKED"
+
+
+def test_drained_row_retried_once_backoff_window_elapses(legacy_quarantine_conn):
+    """A drained (formerly QUARANTINED_BRIDGE_FAILURE) row must become retry
+    eligible once wall-clock time has elapsed past its backoff window — it is
+    not readmitted instantly on every scan tick, but it is NEVER permanently
+    excluded either."""
+    from datetime import datetime, timedelta, timezone
+
+    ensure_table(legacy_quarantine_conn)
+
+    updated_at = datetime.fromisoformat("2026-06-12T00:00:00+00:00")
+    # Immediately after migration (no wall-clock time elapsed): still backed off.
+    assert is_retry_eligible(legacy_quarantine_conn, "agg_quarantined", updated_at) is False
+
+    # attempt_count=10 -> capped backoff (256 cycles * 60s = 15360s ~= 4.27h).
+    just_short = updated_at + timedelta(seconds=15359)
+    assert is_retry_eligible(legacy_quarantine_conn, "agg_quarantined", just_short) is False
+
+    past_window = updated_at + timedelta(seconds=15360)
+    assert is_retry_eligible(legacy_quarantine_conn, "agg_quarantined", past_window) is True
+
+    # In production this row was quarantined 2026-06-12; a scan running any
+    # time after that window is well past the backoff cap, so the drained
+    # aggregate is re-driven on the very next live scan (the packet's
+    # "each either materializes a position or fails loudly" verification bar).
+    far_future = datetime(2026, 7, 11, tzinfo=timezone.utc)
+    assert is_retry_eligible(legacy_quarantine_conn, "agg_quarantined", far_future) is True
 
 
 def test_orphan_bridge_excludes_terminal_reconciled_aggregates():

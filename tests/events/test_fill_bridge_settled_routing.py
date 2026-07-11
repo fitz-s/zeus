@@ -1,42 +1,51 @@
 # Created: 2026-06-12
-# Last reused or audited: 2026-06-12
+# Last reused or audited: 2026-07-11
 # Authority basis: fill-bridge retry-spiral incident 2026-06-12 — relationship
 #   antibodies for settled-market routing (SETTLED_MARKET_FILL_BOOKED) and
-#   bounded-retry quarantine (QUARANTINED_BRIDGE_FAILURE) in the EDLI fill-bridge
-#   scan. These are CROSS-MODULE invariants: the scan in src/main.py + the
+#   bounded decaying retry for persistent bridge failures in the EDLI
+#   fill-bridge scan. Quarantine excision (docs/rebuild/
+#   quarantine_excision_2026-07-11.md T1, 2026-07-11): the permanent
+#   QUARANTINED_BRIDGE_FAILURE terminal disposition excluded confirmed
+#   on-chain fills from all future scans forever with no release path (8 live
+#   rows = potentially unmaterialised real money). Replaced with bounded
+#   decaying retry — eligibility never terminates. These are CROSS-MODULE
+#   invariants: the scan in src/ingest/price_channel_ingest.py + the
 #   disposition helpers in src/events/edli_position_bridge.py must together
 #   guarantee that (a) settled markets never re-enter position_current, (b)
-#   persistent failures quarantine after N attempts, (c) fresh valid fills still
-#   bridge as before, and (d) failed aggregates do not starve new real fills.
-"""Relationship antibodies for fill-bridge settled routing and quarantine.
+#   persistent failures retry forever on a decaying backoff cadence — never
+#   permanently excluded, (c) fresh valid fills still bridge as before, and
+#   (d) failed aggregates do not starve new real fills.
+"""Relationship antibodies for fill-bridge settled routing and bounded retry.
 
 Four cross-module invariants tested here:
 
 1. Settled-market fill (target_date days past) → SETTLED_MARKET_FILL_BOOKED
    disposition, NO position_current row, never re-selected by scan.
-2. Pre-era payload (strategy missing) on NON-settled market → retries N times
-   then QUARANTINED_BRIDGE_FAILURE, exactly one quarantine ERROR, excluded thereafter.
+2. Pre-era payload (strategy missing) on NON-settled market → retries forever
+   on a decaying backoff cadence (bounded per-cycle cost), loud ERROR on
+   every attempt, NEVER excluded — a confirmed on-chain fill is truth that
+   must eventually materialise.
 3. Fresh valid fill on live market → still bridges to position_current as before
    (regression pin for the normal path).
 4. Failed aggregate does NOT starve a later valid aggregate in the same scan
-   (budget gate applies only to non-disposed aggregates).
+   (budget gate applies only to non-disposed, retry-eligible aggregates).
 """
 from __future__ import annotations
 
 import json
 import logging
 import sqlite3
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 
 import pytest
 
 from src.events.edli_position_bridge import (
-    DISPOSITION_QUARANTINED,
     DISPOSITION_SETTLED_MARKET,
-    _QUARANTINE_THRESHOLD,
+    _retry_backoff_seconds,
     edli_bridge_position_id,
     get_fill_bridge_disposition,
+    is_retry_eligible,
 )
 
 
@@ -261,76 +270,130 @@ def test_settled_market_via_settlements_table():
 
 
 # ---------------------------------------------------------------------------
-# Invariant 2: Pre-era payload on non-settled market → quarantine after N failures
+# Invariant 2: Pre-era payload on non-settled market → decaying retry, never
+# permanently excluded (quarantine excision, T1 2026-07-11)
 # ---------------------------------------------------------------------------
 
-def test_pre_era_non_settled_quarantines_after_threshold(caplog):
+def test_pre_era_non_settled_retries_indefinitely_never_terminates(caplog):
     """A pre-era payload on a non-settled market must:
-    - retry up to _QUARANTINE_THRESHOLD times,
-    - then produce exactly ONE quarantine ERROR log,
-    - then be excluded from further scans with disposition QUARANTINED_BRIDGE_FAILURE.
+    - retry well past the old quarantine threshold (10) across many scans,
+    - log a loud ERROR on every attempt that is actually made,
+    - NEVER acquire a terminal disposition — get_fill_bridge_disposition stays
+      None forever (only SETTLED_MARKET_FILL_BOOKED is terminal now).
     """
     conn = _mem_conn()
-    agg_id = "agg-quarantine-1"
+    agg_id = "agg-retry-forever"
     # Non-settled: target_date in the far future so date fallback doesn't trigger.
     _seed_pre_era_aggregate(conn, agg_id, target_date=LIVE_DATE)
 
-    quarantine_errors = []
+    attempts_made = 0
+    scan_now = _now(TODAY_UTC)
 
-    # main.py uses logging.getLogger("zeus") — match that name for caplog capture.
+    # main.py's scan uses logging.getLogger("zeus") — match that name for caplog capture.
     with caplog.at_level(logging.ERROR, logger="zeus"):
-        for attempt in range(_QUARANTINE_THRESHOLD + 2):
-            _run_scan(conn, now=_now(TODAY_UTC))
+        for _ in range(15):  # well past the old _QUARANTINE_THRESHOLD (10)
+            _run_scan(conn, now=scan_now)
             disp = get_fill_bridge_disposition(conn, agg_id)
-            if disp == DISPOSITION_QUARANTINED:
-                break
+            assert disp is None, f"aggregate must never acquire a terminal disposition; got {disp!r}"
+            row = conn.execute(
+                "SELECT attempt_count, updated_at FROM edli_fill_bridge_dispositions WHERE aggregate_id = ?",
+                (agg_id,),
+            ).fetchone()
+            attempt_count = row["attempt_count"]
+            # Advance past this attempt_count's backoff window so the next
+            # scan is eligible to retry (real-cadence simulation).
+            scan_now = scan_now + timedelta(seconds=_retry_backoff_seconds(attempt_count) + 1)
+        attempts_made = attempt_count
 
-    # Exactly quarantined
-    assert disp == DISPOSITION_QUARANTINED, (
-        f"aggregate must be QUARANTINED after {_QUARANTINE_THRESHOLD} failures; got {disp!r}"
-    )
+    assert attempts_made >= 15, f"expected >= 15 accumulated attempts; got {attempts_made}"
 
-    # Exactly one "QUARANTINED" ERROR in caplog
-    quarantine_msgs = [r for r in caplog.records if "QUARANTINED" in r.message and r.levelname == "ERROR"]
-    assert len(quarantine_msgs) == 1, (
-        f"expected exactly 1 quarantine ERROR; got {len(quarantine_msgs)}: {[r.message for r in quarantine_msgs]}"
-    )
-
-    # No position_current row
+    # No position_current row (the pre-era payload never resolves)
     assert conn.execute("SELECT 1 FROM position_current").fetchall() == []
 
+    # No "QUARANTINED" language survives anywhere in the emitted logs.
+    assert not any("QUARANTIN" in r.message.upper() for r in caplog.records)
+    # A loud ERROR was emitted for the attempts made.
+    error_msgs = [r for r in caplog.records if r.levelname == "ERROR"]
+    assert len(error_msgs) >= 15
 
-def test_quarantined_aggregate_excluded_from_subsequent_scans():
-    """Once QUARANTINED_BRIDGE_FAILURE, the aggregate must be skipped on every
-    subsequent scan without incrementing attempt_count further.
+
+def test_backoff_gate_skips_retry_before_window_elapses():
+    """Between two scans within the same backoff window, the aggregate must be
+    skipped (attempt_count unchanged) — bounded per-cycle cost. Once the
+    backoff window elapses, the retry fires again — eligibility never
+    terminates, it is only spaced out.
     """
     conn = _mem_conn()
-    agg_id = "agg-quarantine-rescan"
+    agg_id = "agg-backoff-gate"
     _seed_pre_era_aggregate(conn, agg_id, target_date=LIVE_DATE)
 
-    # Drive to quarantine
-    for _ in range(_QUARANTINE_THRESHOLD + 2):
-        _run_scan(conn, now=_now(TODAY_UTC))
-        if get_fill_bridge_disposition(conn, agg_id) == DISPOSITION_QUARANTINED:
-            break
-
-    count_at_quarantine = conn.execute(
+    t0 = _now(TODAY_UTC)
+    _run_scan(conn, now=t0)
+    count_after_first = conn.execute(
         "SELECT attempt_count FROM edli_fill_bridge_dispositions WHERE aggregate_id = ?",
         (agg_id,),
     ).fetchone()[0]
+    assert count_after_first == 1
 
-    # Run two more scans — attempt_count must NOT increase (excluded)
-    _run_scan(conn, now=_now(TODAY_UTC))
-    _run_scan(conn, now=_now(TODAY_UTC))
-
-    count_after = conn.execute(
+    # Immediately re-scan (no wall-clock time elapsed) — must be gated, not retried.
+    _run_scan(conn, now=t0)
+    count_immediate = conn.execute(
         "SELECT attempt_count FROM edli_fill_bridge_dispositions WHERE aggregate_id = ?",
         (agg_id,),
     ).fetchone()[0]
+    assert count_immediate == count_after_first, (
+        "scan within the backoff window must not re-attempt (per-cycle cost bound)"
+    )
 
-    assert count_after == count_at_quarantine, (
-        f"quarantined aggregate must not increment attempt_count; "
-        f"was {count_at_quarantine}, now {count_after}"
+    # Advance past the backoff window for attempt_count=1 — retry must fire.
+    t1 = t0 + timedelta(seconds=_retry_backoff_seconds(count_after_first) + 1)
+    _run_scan(conn, now=t1)
+    count_after_backoff = conn.execute(
+        "SELECT attempt_count FROM edli_fill_bridge_dispositions WHERE aggregate_id = ?",
+        (agg_id,),
+    ).fetchone()[0]
+    assert count_after_backoff == count_after_first + 1, (
+        "scan past the backoff window must retry (eligibility never terminates)"
+    )
+
+
+def test_previously_quarantined_row_is_retried_after_migration():
+    """A row that WAS QUARANTINED_BRIDGE_FAILURE before the excision migration
+    drained it to an accumulating (disposition NULL) row must be picked back
+    up by the scan and healed once its backoff window has elapsed — the
+    packet's drain guarantee: 'the fixed scanner re-drives them under backoff'.
+    """
+    conn = _mem_conn()
+    agg_id = "agg-drained-heals"
+    # A fully valid aggregate: represents a confirmed fill that only failed
+    # historically because of a now-fixed bridge bug (e.g. a decoder defect),
+    # not because the fill itself is bad.
+    _seed_valid_aggregate(conn, agg_id, target_date=LIVE_DATE)
+
+    # Simulate the migration drain: pre-seed a disposition row shaped exactly
+    # like a formerly-QUARANTINED_BRIDGE_FAILURE aggregate post-drain —
+    # disposition NULL, attempt_count preserved at the old threshold, stale
+    # updated_at (the historical incident timestamp).
+    conn.execute(
+        "INSERT INTO edli_fill_bridge_dispositions "
+        "(aggregate_id, disposition, reason, attempt_count, last_error, created_at, updated_at) "
+        "VALUES (?, NULL, 'bridge_failure_accumulating', 10, 'boom', ?, ?)",
+        (agg_id, "2026-06-12T00:00:00+00:00", "2026-06-12T00:00:00+00:00"),
+    )
+
+    # A scan run well after the backoff cap has elapsed (matches production:
+    # any deploy meaningfully later than the incident date clears the window).
+    healing_now = _now(TODAY_UTC)
+    assert is_retry_eligible(conn, agg_id, healing_now) is True
+
+    bridged = _run_scan(conn, now=healing_now)
+
+    assert bridged == 1, "drained aggregate must be re-driven and heal once eligible"
+    rows = conn.execute("SELECT position_id FROM position_current WHERE position_id = ?",
+                         (edli_bridge_position_id(agg_id),)).fetchall()
+    assert len(rows) == 1, "healed aggregate must materialise position_current"
+    assert get_fill_bridge_disposition(conn, agg_id) is None, (
+        "successfully bridged aggregate must have no residual disposition row state"
     )
 
 

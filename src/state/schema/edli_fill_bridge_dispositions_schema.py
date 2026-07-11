@@ -1,41 +1,58 @@
 # Created: 2026-06-12
-# Last reused or audited: 2026-06-12
+# Last reused or audited: 2026-07-11
 # Authority basis: fill-bridge retry-spiral incident 2026-06-12 — durable
-#   per-aggregate disposition table that prevents settled-market infinite retry
-#   and quarantines persistently-failing aggregates after N attempts.
+#   per-aggregate disposition table that prevents settled-market infinite
+#   retry. T1 excision (2026-07-11): a formerly permanent bridge-failure
+#   terminal disposition excluded confirmed on-chain fills from all future
+#   scans forever with no release path (8 live rows = potentially
+#   unmaterialised real money). Replaced with bounded decaying retry that
+#   never terminates eligibility; the retired CHECK literal and disposition
+#   value are dropped from both the constraint and any live row carrying it.
 """Schema owner for edli_fill_bridge_dispositions.
 
-One row per EDLI aggregate that the _edli_durable_fill_bridge_scan has
-terminally routed.  Two disposition classes:
+One row per EDLI aggregate the _edli_durable_fill_bridge_scan has seen.
+One terminal disposition class:
 
   SETTLED_MARKET_FILL_BOOKED
       The aggregate's market was already settled when the bridge attempted
       to materialise position_current.  The fill is booked for accounting
       purposes; no position lifecycle exists (it is over).  Excluded from
-      all future candidate scans (permanent terminal routing).
+      all future candidate scans (permanent terminal routing — legitimate
+      accounting truth, not a failure state).
 
-  QUARANTINED_BRIDGE_FAILURE
-      The bridge raised a non-transient exception on N consecutive attempts.
-      The aggregate is parked here so it does not starve new real fills.
-      One ERROR log is emitted at quarantine time; the row carries the last
-      error string for operator inspection.
+A row with disposition NULL is accumulating: the bridge has failed on it
+before but retry eligibility never terminates. attempt_count is retry-cadence
+evidence, not a path to exclusion (see ``is_retry_eligible`` /
+``_retry_backoff_seconds`` in src.events.edli_position_bridge) — a poison
+aggregate is retried less and less often (bounded per-cycle cost), never
+excluded, because a confirmed on-chain fill is truth that must materialise.
 
 Additional columns:
-  attempt_count   — running total of failed attempts before terminal disposition.
-  last_error      — last exception message; updated on every failed attempt while
-                    still below the quarantine threshold.
-  updated_at      — wall-clock timestamp of the last state change.
+  attempt_count   — running total of failed attempts; drives retry backoff.
+  last_error      — last exception message; updated on every failed attempt.
+  updated_at      — wall-clock timestamp of the last state change; the retry
+                    backoff clock reads from here.
 """
 from __future__ import annotations
 
 import sqlite3
 
 
-CREATE_TABLE_SQL = """
+# The complete set of terminal disposition values the CHECK constraint
+# admits today. A row's disposition is either NULL (accumulating, retried on
+# a decaying backoff cadence forever) or one of these accounting-truth
+# terminals. Retired terminal values are never re-added here — they are
+# dropped from the CHECK and any row still carrying one is drained back to
+# NULL by ``_ensure_disposition_check_current`` below.
+_ALLOWED_TERMINAL_DISPOSITIONS = ("SETTLED_MARKET_FILL_BOOKED",)
+
+_ALLOWED_DISPOSITIONS_SQL = ", ".join(f"'{v}'" for v in _ALLOWED_TERMINAL_DISPOSITIONS)
+
+CREATE_TABLE_SQL = f"""
 CREATE TABLE IF NOT EXISTS edli_fill_bridge_dispositions (
     aggregate_id  TEXT PRIMARY KEY,
     disposition   TEXT
-        CHECK (disposition IS NULL OR disposition IN ('SETTLED_MARKET_FILL_BOOKED', 'QUARANTINED_BRIDGE_FAILURE')),
+        CHECK (disposition IS NULL OR disposition IN ({_ALLOWED_DISPOSITIONS_SQL})),
     reason        TEXT,
     attempt_count INTEGER NOT NULL DEFAULT 0,
     last_error    TEXT,
@@ -43,6 +60,10 @@ CREATE TABLE IF NOT EXISTS edli_fill_bridge_dispositions (
     updated_at    TEXT NOT NULL
 )
 """
+
+_ALLOWED_DISPOSITIONS_CASE_SQL = (
+    "CASE WHEN disposition IN (" + _ALLOWED_DISPOSITIONS_SQL + ") THEN disposition ELSE NULL END"
+)
 
 
 def ensure_table(conn: sqlite3.Connection) -> None:
@@ -53,6 +74,7 @@ def ensure_table(conn: sqlite3.Connection) -> None:
     _ensure_column(conn, "last_error", "TEXT")
     _ensure_column(conn, "attempt_count", "INTEGER NOT NULL DEFAULT 0")
     _ensure_disposition_nullable(conn)
+    _ensure_disposition_check_current(conn)
 
 
 def _ensure_disposition_nullable(conn: sqlite3.Connection) -> None:
@@ -61,10 +83,10 @@ def _ensure_disposition_nullable(conn: sqlite3.Connection) -> None:
     Idempotent DDL (the IF-NOT-EXISTS form above) is unable to relax constraints
     on a pre-existing table, so a live DB created under the original
     two-terminal-states DDL silently keeps NOT NULL while the code writes
-    NULL-disposition accumulating rows. That made
-    every `_increment_failure_count` insert fail, froze attempt_count at 1, and
-    made the quarantine threshold unreachable (infinite retry storm, 2026-06-12).
-    SQLite cannot ALTER a column constraint; the sanctioned path is a rebuild.
+    NULL-disposition accumulating rows. That made every `_increment_failure_count`
+    insert fail, freezing attempt_count at 1 and defeating retry-cadence
+    evidence entirely (infinite retry storm, 2026-06-12). SQLite cannot ALTER
+    a column constraint; the sanctioned path is a rebuild.
     """
     notnull = {
         str(row[1]): bool(row[3])
@@ -80,10 +102,65 @@ def _ensure_disposition_nullable(conn: sqlite3.Connection) -> None:
         )
     )
     conn.execute(
-        """
+        f"""
         INSERT INTO edli_fill_bridge_dispositions_rebuild
             (aggregate_id, disposition, reason, attempt_count, last_error, created_at, updated_at)
-        SELECT aggregate_id, disposition, reason, attempt_count, last_error, created_at, updated_at
+        SELECT
+            aggregate_id,
+            {_ALLOWED_DISPOSITIONS_CASE_SQL},
+            reason, attempt_count, last_error, created_at, updated_at
+        FROM edli_fill_bridge_dispositions
+        """
+    )
+    conn.execute("DROP TABLE edli_fill_bridge_dispositions")
+    conn.execute(
+        "ALTER TABLE edli_fill_bridge_dispositions_rebuild RENAME TO edli_fill_bridge_dispositions"
+    )
+
+
+def _ensure_disposition_check_current(conn: sqlite3.Connection) -> None:
+    """Rebuild the table when its CHECK constraint has drifted from
+    ``_ALLOWED_TERMINAL_DISPOSITIONS`` (SQLite cannot ALTER a CHECK).
+
+    A DDL retired a terminal disposition value (T1, 2026-07-11): a formerly
+    permanent bridge-failure state made a confirmed on-chain fill invisible
+    forever after N failed attempts, with no release path. Any row still
+    carrying a disposition value outside the current allowed set is drained
+    back to an accumulating row (disposition NULL) so the fixed scanner
+    re-drives it under the decaying retry cadence instead of leaving it
+    stranded on a retired terminal state.
+    """
+    try:
+        sql_row = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='edli_fill_bridge_dispositions'"
+        ).fetchone()
+    except sqlite3.Error:
+        return
+    if sql_row is None:
+        return
+    table_sql = str(sql_row[0] if not isinstance(sql_row, sqlite3.Row) else sql_row["sql"])
+    # Exact-fragment match (not mere substring containment of the allowed-set
+    # literal): a legacy CHECK carrying an additional retired value still
+    # contains "'SETTLED_MARKET_FILL_BOOKED'" as a substring but NOT this
+    # closed "IN (...)" fragment, since a retired literal sits before the
+    # closing paren.
+    if f"IN ({_ALLOWED_DISPOSITIONS_SQL})" in table_sql:
+        return  # CHECK already matches the current allowed set — no-op.
+    conn.execute("DROP TABLE IF EXISTS edli_fill_bridge_dispositions_rebuild")
+    conn.execute(
+        CREATE_TABLE_SQL.replace(
+            "IF NOT EXISTS edli_fill_bridge_dispositions",
+            "edli_fill_bridge_dispositions_rebuild",
+        )
+    )
+    conn.execute(
+        f"""
+        INSERT INTO edli_fill_bridge_dispositions_rebuild
+            (aggregate_id, disposition, reason, attempt_count, last_error, created_at, updated_at)
+        SELECT
+            aggregate_id,
+            {_ALLOWED_DISPOSITIONS_CASE_SQL},
+            reason, attempt_count, last_error, created_at, updated_at
         FROM edli_fill_bridge_dispositions
         """
     )

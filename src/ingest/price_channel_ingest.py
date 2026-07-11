@@ -1012,21 +1012,19 @@ def _edli_durable_fill_bridge_scan(
     Returns the number of orphaned fills bridged this pass.
     """
     from src.events.edli_position_bridge import (
-        DISPOSITION_QUARANTINED,
         DISPOSITION_SETTLED_MARKET,
-        _QUARANTINE_THRESHOLD,
         _aggregate_event_rows,
         _edli_events_table,
         _has_confirmed_fill,
         _increment_failure_count,
         _latest_payload,
         _market_is_settled,
-        _quarantine_aggregate,
         _record_settled_disposition,
         _venue_command_row_for_execution_command_id,
         edli_bridge_position_id,
         edli_bridge_position_id_legacy,
         get_fill_bridge_disposition,
+        is_retry_eligible,
         materialize_position_current_from_edli_fill,
         sync_venue_command_position_link_for_edli_fill,
     )
@@ -1253,10 +1251,18 @@ def _edli_durable_fill_bridge_scan(
             # Already bridged (wide or legacy id) — idempotent skip.
             continue
 
-        # Disposition check: skip terminally routed aggregates (settled or quarantined).
-        # These do NOT count against the new-fill budget.
+        # Disposition check: skip terminally routed aggregates (settled market —
+        # accounting truth, over for good). Does NOT count against the new-fill budget.
         prior_disposition = get_fill_bridge_disposition(conn, aggregate_id)
-        if prior_disposition in (DISPOSITION_SETTLED_MARKET, DISPOSITION_QUARANTINED):
+        if prior_disposition == DISPOSITION_SETTLED_MARKET:
+            continue
+
+        # Retry-cadence gate: an accumulating bridge-failure aggregate is retried
+        # only when its decaying backoff window has elapsed (bounded per-cycle
+        # cost). It is NEVER excluded — a fresh aggregate or one due for retry
+        # falls through; a confirmed fill is truth that must eventually
+        # materialise. Does NOT count against the new-fill budget.
+        if not is_retry_eligible(conn, aggregate_id, now):
             continue
 
         # Before attempting to bridge, route fills for already-settled markets into
@@ -1320,28 +1326,15 @@ def _edli_durable_fill_bridge_scan(
                 attempt_count = _increment_failure_count(conn, aggregate_id, error_str, now_str)
             except Exception:  # noqa: BLE001
                 attempt_count = 1
-            if attempt_count >= _QUARANTINE_THRESHOLD:
-                logger.error(
-                    "EDLI fill-bridge: QUARANTINED aggregate=%s after %d consecutive "
-                    "failures (excluded from future scans); last_error=%s",
-                    aggregate_id,
-                    attempt_count,
-                    error_str[:500],
-                )
-                try:
-                    _quarantine_aggregate(conn, aggregate_id, error_str, attempt_count, now_str)
-                except Exception:  # noqa: BLE001
-                    pass
-            else:
-                logger.error(
-                    "EDLI durable fill-bridge: failed to bridge aggregate %s "
-                    "(attempt %d/%d; EDLI events persist, next scan retries): %s",
-                    aggregate_id,
-                    attempt_count,
-                    _QUARANTINE_THRESHOLD,
-                    exc,
-                    exc_info=True,
-                )
+            logger.error(
+                "EDLI durable fill-bridge: failed to bridge aggregate %s "
+                "(attempt %d; EDLI events persist, retried on decaying backoff "
+                "cadence, never excluded): %s",
+                aggregate_id,
+                attempt_count,
+                exc,
+                exc_info=True,
+            )
     return bridged
 
 
