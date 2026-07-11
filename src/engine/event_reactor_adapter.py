@@ -298,6 +298,20 @@ from src.calibration.emos import (
 
 UTC = timezone.utc
 
+
+@dataclass(frozen=True)
+class _GlobalWinnerBindingToken:
+    token_id: str
+    event_id: str
+    actuation_identity: str
+    probability_manifest: tuple[tuple[str, str], ...]
+    book_epoch_identity: str
+    book_economics_manifest: tuple[tuple[object, ...], ...]
+    wealth_witness_identity: str
+    issued_at: datetime
+    expires_at: datetime
+    receipt: EventSubmissionReceipt
+
 # Continuous re-decision resurrection (2026-06-12): EDLI_REDECISION_PENDING is a PRICE-DRIVEN
 # re-decision of a FORECAST family — it routes through the SAME forecast decision path (same
 # snapshot binding, same q/FDR/Kelly cert), differing only in trigger (a P2 cheap-screen edge,
@@ -3810,6 +3824,7 @@ def event_bound_live_adapter_from_trade_conn(
     # place_limit_order responses).  Incremented when venue_ack_received is
     # True on the submit result.  Exposed on the adapter callable for main.py.
     _live_ack_count: list[int] = [0]
+    _consumed_global_preflight_tokens: dict[str, datetime] = {}
 
     # INV-K7 reservation ledger: closure-held, fresh per reactor cycle. FIX B
     # (2026-06-05): rollback-aware so a candidate rejected downstream of Kelly is
@@ -4588,7 +4603,7 @@ def event_bound_live_adapter_from_trade_conn(
                 real_order_submit_enabled=real_order_submit_enabled,
             )
 
-        def _preflight(event, actuation, at):
+        def _preflight(event, actuation, at, authority):
             receipt = _submit_inner(
                 event,
                 at,
@@ -4600,12 +4615,33 @@ def event_bound_live_adapter_from_trade_conn(
                 receipt.proof_accepted is True
                 and receipt.decision_proof_bundle is not None
             ):
-                return GlobalWinnerPreflight(
-                    status="STABLE",
-                    binding_token=(
+                issued_at = at.astimezone(UTC)
+                token_id = stable_hash(
+                    (
                         event.event_id,
                         str(getattr(actuation, "actuation_identity", "") or ""),
-                        receipt,
+                        authority.probability_manifest,
+                        authority.book_epoch_identity,
+                        authority.book_economics_manifest,
+                        authority.wealth_witness_identity,
+                        issued_at.isoformat(),
+                    )
+                )
+                return GlobalWinnerPreflight(
+                    status="STABLE",
+                    binding_token=_GlobalWinnerBindingToken(
+                        token_id=token_id,
+                        event_id=event.event_id,
+                        actuation_identity=str(
+                            getattr(actuation, "actuation_identity", "") or ""
+                        ),
+                        probability_manifest=authority.probability_manifest,
+                        book_epoch_identity=authority.book_epoch_identity,
+                        book_economics_manifest=authority.book_economics_manifest,
+                        wealth_witness_identity=authority.wealth_witness_identity,
+                        issued_at=issued_at,
+                        expires_at=issued_at + timedelta(seconds=10),
+                        receipt=receipt,
                     ),
                 )
             if reason.startswith(
@@ -4620,14 +4656,29 @@ def event_bound_live_adapter_from_trade_conn(
                 reason=reason or "GLOBAL_WINNER_PREFLIGHT_REJECTED",
             )
 
-        def _actuate_preflighted(event, actuation, at, token):
+        def _actuate_preflighted(event, actuation, at, token, authority):
+            now = at.astimezone(UTC)
+            for token_id, expires_at in tuple(
+                _consumed_global_preflight_tokens.items()
+            ):
+                if expires_at < now:
+                    _consumed_global_preflight_tokens.pop(token_id, None)
             if (
-                not isinstance(token, tuple)
-                or len(token) != 3
-                or token[0] != event.event_id
-                or token[1]
+                not isinstance(token, _GlobalWinnerBindingToken)
+                or token.event_id != event.event_id
+                or token.actuation_identity
                 != str(getattr(actuation, "actuation_identity", "") or "")
-                or not isinstance(token[2], EventSubmissionReceipt)
+                or token.probability_manifest != authority.probability_manifest
+                or token.book_epoch_identity != authority.book_epoch_identity
+                or token.book_economics_manifest
+                != authority.book_economics_manifest
+                or token.wealth_witness_identity
+                != authority.wealth_witness_identity
+                or token.wealth_witness_identity
+                != str(getattr(actuation, "wealth_witness_identity", "") or "")
+                or now < token.issued_at
+                or now > token.expires_at
+                or token.token_id in _consumed_global_preflight_tokens
             ):
                 return _stamp_live_adapter_lane(
                     EventSubmissionReceipt(
@@ -4639,12 +4690,13 @@ def event_bound_live_adapter_from_trade_conn(
                     ),
                     real_order_submit_enabled=real_order_submit_enabled,
                 )
+            _consumed_global_preflight_tokens[token.token_id] = token.expires_at
             return _stamp_live_adapter_lane(
                 _submit_inner(
                     event,
                     at,
                     global_actuation=actuation,
-                    preflight_receipt=token[2],
+                    preflight_receipt=token.receipt,
                 ),
                 real_order_submit_enabled=real_order_submit_enabled,
             )

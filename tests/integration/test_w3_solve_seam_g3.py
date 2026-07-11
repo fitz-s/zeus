@@ -2417,7 +2417,111 @@ def test_global_batch_actuates_exactly_one_claimed_global_winner(monkeypatch):
     )
 
 
-def test_global_batch_reauctions_once_on_curve_supersession(monkeypatch):
+def test_global_batch_rejects_multi_venue_actuator(monkeypatch):
+    decision_at = _dt.datetime(2026, 7, 10, 8, 0, tzinfo=_dt.timezone.utc)
+    event = _global_scope_event(city="Alpha", source_run_id="run-a")
+    scope = current_global_auction_scope_from_events(
+        (event,), captured_at_utc=decision_at
+    )
+    prepared = SimpleNamespace(
+        probability_witness=SimpleNamespace(
+            family_key=scope.family_keys[0],
+            captured_at_utc=decision_at,
+            posterior_identity_hash="run-a",
+        )
+    )
+    selected = SimpleNamespace(
+        decision=SimpleNamespace(candidate=object(), no_trade_reason=None),
+        winner_event_id=event.event_id,
+        actuation=SimpleNamespace(actuation_identity="actuation-a"),
+    )
+    calls = {"venue": 0}
+    monkeypatch.setattr(
+        global_batch_runtime, "scan_current_global_auction_scope", lambda **_: scope
+    )
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "current_portfolio_wealth_witness",
+        lambda *_, **__: SimpleNamespace(
+            spendable_cash_usd=Decimal("10"),
+            witness_identity="wealth",
+            economic_identity="wealth-economics",
+        ),
+    )
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "current_venue_auction_identity",
+        lambda *_, **__: "venue",
+    )
+    monkeypatch.setattr(
+        global_batch_runtime, "select_prepared_global_auction", lambda *_, **__: selected
+    )
+
+    def invalid_actuator(winner, _actuation, _at):
+        calls["venue"] += 2
+        return EventSubmissionReceipt(
+            True,
+            winner.event_id,
+            winner.causal_snapshot_id,
+            proof_accepted=True,
+            side_effect_status="SUBMITTED",
+        )
+
+    result = global_batch_runtime.process_current_global_batch(
+        (event,),
+        decision_time=decision_at,
+        world_conn=object(),
+        forecast_conn=object(),
+        trade_conn=object(),
+        payload_reader=lambda current: json.loads(current.payload_json),
+        prepare_event=lambda current, _at: EventSubmissionReceipt(
+            False,
+            current.event_id,
+            current.causal_snapshot_id,
+            prepared_global_family=prepared,
+        ),
+        actuate_winner=invalid_actuator,
+        stamp_receipt=lambda receipt: receipt,
+        venue_submit_count=lambda: calls["venue"],
+        current_execution=lambda *_: object(),
+        current_time_provider=lambda: decision_at,
+    )
+
+    assert calls["venue"] == 2
+    assert result.venue_submit_count == 0
+    assert result.receipts[event.event_id].reason == (
+        "GLOBAL_AUCTION_FAILED:RuntimeError:GLOBAL_ACTUATION_VENUE_COUNT_INVALID"
+    )
+
+
+def _global_test_book(identity: str, *, price: str):
+    return SimpleNamespace(
+        witness_identity=identity,
+        max_age=_dt.timedelta(seconds=30),
+        assets=(
+            SimpleNamespace(
+                family_key="family",
+                bin_id="bin",
+                condition_id="condition",
+                side="YES",
+                token_id="token",
+                curve=SimpleNamespace(
+                    fee_model=SimpleNamespace(fee_rate=Decimal("0")),
+                    min_tick=Decimal("0.001"),
+                    min_order_size=Decimal("1"),
+                    levels=(
+                        SimpleNamespace(
+                            price=Decimal(price),
+                            size=Decimal("100"),
+                        ),
+                    ),
+                ),
+            ),
+        ),
+    )
+
+
+def test_global_batch_reauctions_once_on_full_universe_curve_drift(monkeypatch):
     decision_at = _dt.datetime(2026, 7, 10, 8, 0, tzinfo=_dt.timezone.utc)
     event_a = _global_scope_event(city="Alpha", source_run_id="run-a")
     event_b = _global_scope_event(city="Beta", source_run_id="run-b")
@@ -2440,8 +2544,12 @@ def test_global_batch_reauctions_once_on_curve_supersession(monkeypatch):
         for event, family_key in zip((event_a, event_b), scope.family_keys)
     }
     actuations = {
-        event_a.event_id: SimpleNamespace(actuation_identity="actuation-a"),
-        event_b.event_id: SimpleNamespace(actuation_identity="actuation-b"),
+        event_a.event_id: SimpleNamespace(
+            actuation_identity="actuation-a", wealth_witness_identity="wealth-1"
+        ),
+        event_b.event_id: SimpleNamespace(
+            actuation_identity="actuation-b", wealth_witness_identity="wealth-2"
+        ),
     }
     selections = iter(
         SimpleNamespace(
@@ -2452,11 +2560,10 @@ def test_global_batch_reauctions_once_on_curve_supersession(monkeypatch):
         for event in (event_a, event_b)
     )
     books = iter(
-        SimpleNamespace(
-            witness_identity=f"book-{index}",
-            max_age=_dt.timedelta(seconds=30),
+        (
+            _global_test_book("book-0", price="0.40"),
+            _global_test_book("book-1", price="0.41"),
         )
-        for index in range(2)
     )
     calls = {"prepare": 0, "books": 0, "wealth": 0, "preflight": [], "venue": 0}
 
@@ -2501,20 +2608,17 @@ def test_global_batch_reauctions_once_on_curve_supersession(monkeypatch):
         calls["books"] += 1
         return probabilities, next(books)
 
-    def preflight(event, _actuation, _at):
+    def preflight(event, _actuation, _at, _authority):
         calls["preflight"].append(event.event_id)
-        if len(calls["preflight"]) == 1:
-            return global_batch_runtime.GlobalWinnerPreflight(
-                status="CURVE_SUPERSEDED", reason="curve moved"
-            )
         return global_batch_runtime.GlobalWinnerPreflight(
             status="STABLE", binding_token="binding-b"
         )
 
-    def actuate_preflighted(event, actuation, _at, token):
+    def actuate_preflighted(event, actuation, _at, token, authority):
         assert event.event_id == event_b.event_id
         assert actuation is actuations[event_b.event_id]
         assert token == "binding-b"
+        assert authority.book_epoch_identity == "book-1"
         calls["venue"] += 1
         return EventSubmissionReceipt(
             True,
@@ -2546,7 +2650,7 @@ def test_global_batch_reauctions_once_on_curve_supersession(monkeypatch):
         "prepare": 2,
         "books": 2,
         "wealth": 2,
-        "preflight": [event_a.event_id, event_b.event_id],
+        "preflight": [event_b.event_id],
         "venue": 1,
     }
     assert result.winner_event_id == event_b.event_id
@@ -2570,7 +2674,10 @@ def test_global_batch_second_curve_supersession_exhausts_without_venue(monkeypat
     selected = SimpleNamespace(
         decision=SimpleNamespace(candidate=object(), no_trade_reason=None),
         winner_event_id=event.event_id,
-        actuation=SimpleNamespace(actuation_identity="actuation-a"),
+        actuation=SimpleNamespace(
+            actuation_identity="actuation-a",
+            wealth_witness_identity="wealth",
+        ),
     )
     calls = {"preflight": 0, "venue": 0}
     monkeypatch.setattr(
@@ -2622,10 +2729,7 @@ def test_global_batch_second_curve_supersession_exhausts_without_venue(monkeypat
         current_time_provider=lambda: decision_at,
         current_book_epoch_provider=lambda probabilities, _at: (
             probabilities,
-            SimpleNamespace(
-                witness_identity="book",
-                max_age=_dt.timedelta(seconds=30),
-            ),
+            _global_test_book("book", price="0.40"),
         ),
     )
 
@@ -2659,7 +2763,10 @@ def test_global_batch_reauction_rejects_probability_cut_drift(monkeypatch):
     selected = SimpleNamespace(
         decision=SimpleNamespace(candidate=object(), no_trade_reason=None),
         winner_event_id=event.event_id,
-        actuation=SimpleNamespace(actuation_identity="actuation-a"),
+        actuation=SimpleNamespace(
+            actuation_identity="actuation-a",
+            wealth_witness_identity="wealth",
+        ),
     )
     calls = {"books": 0, "preflight": 0, "venue": 0}
     monkeypatch.setattr(
@@ -2690,9 +2797,8 @@ def test_global_batch_reauction_rejects_probability_cut_drift(monkeypatch):
             if calls["books"] == 1
             else {scope.family_keys[0]: drifted_witness}
         )
-        return rebound, SimpleNamespace(
-            witness_identity=f"book-{calls['books']}",
-            max_age=_dt.timedelta(seconds=30),
+        return rebound, _global_test_book(
+            f"book-{calls['books']}", price="0.40"
         )
 
     def preflight(*_):
@@ -2724,11 +2830,11 @@ def test_global_batch_reauction_rejects_probability_cut_drift(monkeypatch):
         current_book_epoch_provider=book_provider,
     )
 
-    assert calls == {"books": 2, "preflight": 1, "venue": 0}
+    assert calls == {"books": 2, "preflight": 0, "venue": 0}
     assert result.venue_submit_count == 0
     assert result.winner_event_id is None
     assert result.receipts[event.event_id].reason == (
-        "GLOBAL_REAUCTION_PROBABILITY_CUT_DRIFT"
+        "GLOBAL_PREFLIGHT_PROBABILITY_CUT_DRIFT"
     )
 
 

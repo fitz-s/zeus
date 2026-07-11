@@ -43,6 +43,25 @@ class GlobalWinnerPreflight:
             raise ValueError("GLOBAL_WINNER_PREFLIGHT_REASON_MISSING")
 
 
+@dataclass(frozen=True)
+class GlobalPreflightAuthority:
+    """Frozen whole-universe authority carried by one one-shot preflight."""
+
+    probability_manifest: tuple[tuple[str, str], ...]
+    book_epoch_identity: str
+    book_economics_manifest: tuple[tuple[object, ...], ...]
+    wealth_witness_identity: str
+
+    def __post_init__(self) -> None:
+        if (
+            not self.probability_manifest
+            or not self.book_epoch_identity
+            or not self.book_economics_manifest
+            or not self.wealth_witness_identity
+        ):
+            raise ValueError("GLOBAL_PREFLIGHT_AUTHORITY_INCOMPLETE")
+
+
 def _probability_manifest(probabilities: Mapping[str, object]) -> tuple[tuple[str, str], ...]:
     """Freeze q plus token bindings while allowing only book and wealth to move."""
 
@@ -55,6 +74,33 @@ def _probability_manifest(probabilities: Mapping[str, object]) -> tuple[tuple[st
             for family_key, witness in probabilities.items()
         )
     )
+
+
+def _book_economics_manifest(
+    book_epoch: CurrentGlobalBookEpoch,
+) -> tuple[tuple[object, ...], ...]:
+    """Compare the complete native YES/NO economy without evidence carriers."""
+
+    rows = []
+    for asset in book_epoch.assets:
+        curve = asset.curve
+        rows.append(
+            (
+                asset.family_key,
+                asset.bin_id,
+                asset.condition_id,
+                asset.side,
+                asset.token_id,
+                str(curve.fee_model.fee_rate),
+                str(curve.min_tick),
+                str(curve.min_order_size),
+                tuple((str(level.price), str(level.size)) for level in curve.levels),
+            )
+        )
+    manifest = tuple(sorted(rows, key=repr))
+    if not manifest:
+        raise ValueError("GLOBAL_BOOK_ECONOMICS_MISSING")
+    return manifest
 
 
 def _begin_selection_read_snapshot(
@@ -210,11 +256,13 @@ def process_current_global_batch(
     current_execution: Callable[[object, datetime], object | None],
     current_time_provider: Callable[[], datetime],
     preflight_winner: Callable[
-        [OpportunityEvent, object, datetime], GlobalWinnerPreflight
+        [OpportunityEvent, object, datetime, GlobalPreflightAuthority],
+        GlobalWinnerPreflight,
     ]
     | None = None,
     actuate_preflighted_winner: Callable[
-        [OpportunityEvent, object, datetime, object], EventSubmissionReceipt
+        [OpportunityEvent, object, datetime, object, GlobalPreflightAuthority],
+        EventSubmissionReceipt,
     ]
     | None = None,
     portfolio_state_provider: Callable[[], object] | None = None,
@@ -465,78 +513,84 @@ def process_current_global_batch(
         if preflight_winner is not None:
             if actuate_preflighted_winner is None:
                 return reject("GLOBAL_PREFLIGHT_ACTUATOR_MISSING")
+            if current_book_epoch_provider is None or book_epoch is None:
+                return reject("GLOBAL_PREFLIGHT_BOOK_PROVIDER_MISSING")
+            probabilities_fence, book_epoch_fence = current_book_epoch_provider(
+                probabilities,
+                current_time(),
+            )
+            if _probability_manifest(probabilities_fence) != probability_manifest:
+                return reject("GLOBAL_PREFLIGHT_PROBABILITY_CUT_DRIFT")
+            fence_economics = _book_economics_manifest(book_epoch_fence)
+            prepared_fence = {
+                event_id: replace(
+                    prepared,
+                    probability_witness=probabilities_fence[
+                        prepared.probability_witness.family_key
+                    ],
+                )
+                for event_id, prepared in prepared_by_event.items()
+            }
+            # The fence is also the single permitted re-auction even when books are
+            # economically unchanged: selection-time wealth must be reacquired at the
+            # same late boundary as the whole-universe book.
+            selected = select_once(
+                probabilities_fence,
+                book_epoch_fence,
+                prepared_fence,
+            )
+            if selected.decision.candidate is None:
+                return reject(
+                    "GLOBAL_REAUCTION_NO_TRADE:"
+                    f"{selected.decision.no_trade_reason or 'unknown'}"
+                )
+            winner_id = selected.winner_event_id
+            winner = next(
+                (event for event in event_tuple if event.event_id == winner_id),
+                None,
+            )
+            if selected.actuation is None:
+                return reject("GLOBAL_REAUCTION_ACTUATION_MISSING")
+            if winner is None:
+                target = next(
+                    (
+                        event
+                        for event in full_scope_event_by_family.values()
+                        if event.event_id == winner_id
+                    ),
+                    None,
+                )
+                if target is None:
+                    return reject("GLOBAL_REAUCTION_WINNER_IDENTITY_MISSING")
+                return reject(
+                    "GLOBAL_REAUCTION_WINNER_AWAITS_CLAIM",
+                    next_claim_event=_next_claim_carrier(
+                        target,
+                        targeted_at=current_time(),
+                        economic_identity=selected.actuation.economic_identity,
+                        payload=payload_reader(target),
+                    ),
+                )
+            preflight_authority = GlobalPreflightAuthority(
+                probability_manifest=probability_manifest,
+                book_epoch_identity=book_epoch_fence.witness_identity,
+                book_economics_manifest=fence_economics,
+                wealth_witness_identity=selected.actuation.wealth_witness_identity,
+            )
             before_preflight = venue_submit_count()
             preflight = preflight_winner(
                 winner,
                 selected.actuation,
                 current_time(),
+                preflight_authority,
             )
             if venue_submit_count() != before_preflight:
                 return reject("GLOBAL_PREFLIGHT_VENUE_SIDE_EFFECT")
             if preflight.status == "CURVE_SUPERSEDED":
-                if current_book_epoch_provider is None:
-                    return reject("GLOBAL_REAUCTION_BOOK_PROVIDER_MISSING")
-                probabilities_1, book_epoch_1 = current_book_epoch_provider(
-                    probabilities,
-                    current_time(),
+                return reject(
+                    "GLOBAL_REAUCTION_EXHAUSTED:"
+                    f"{preflight.reason or preflight.status}"
                 )
-                if _probability_manifest(probabilities_1) != probability_manifest:
-                    return reject("GLOBAL_REAUCTION_PROBABILITY_CUT_DRIFT")
-                prepared_1 = {
-                    event_id: replace(
-                        prepared,
-                        probability_witness=probabilities_1[
-                            prepared.probability_witness.family_key
-                        ],
-                    )
-                    for event_id, prepared in prepared_by_event.items()
-                }
-                selected = select_once(probabilities_1, book_epoch_1, prepared_1)
-                if selected.decision.candidate is None:
-                    return reject(
-                        "GLOBAL_REAUCTION_NO_TRADE:"
-                        f"{selected.decision.no_trade_reason or 'unknown'}"
-                    )
-                winner_id = selected.winner_event_id
-                winner = next(
-                    (event for event in event_tuple if event.event_id == winner_id),
-                    None,
-                )
-                if selected.actuation is None:
-                    return reject("GLOBAL_REAUCTION_ACTUATION_MISSING")
-                if winner is None:
-                    target = next(
-                        (
-                            event
-                            for event in full_scope_event_by_family.values()
-                            if event.event_id == winner_id
-                        ),
-                        None,
-                    )
-                    if target is None:
-                        return reject("GLOBAL_REAUCTION_WINNER_IDENTITY_MISSING")
-                    return reject(
-                        "GLOBAL_REAUCTION_WINNER_AWAITS_CLAIM",
-                        next_claim_event=_next_claim_carrier(
-                            target,
-                            targeted_at=current_time(),
-                            economic_identity=selected.actuation.economic_identity,
-                            payload=payload_reader(target),
-                        ),
-                    )
-                before_second_preflight = venue_submit_count()
-                preflight = preflight_winner(
-                    winner,
-                    selected.actuation,
-                    current_time(),
-                )
-                if venue_submit_count() != before_second_preflight:
-                    return reject("GLOBAL_PREFLIGHT_VENUE_SIDE_EFFECT")
-                if preflight.status != "STABLE":
-                    return reject(
-                        "GLOBAL_REAUCTION_EXHAUSTED:"
-                        f"{preflight.reason or preflight.status}"
-                    )
             elif preflight.status != "STABLE":
                 return reject(
                     f"GLOBAL_WINNER_PREFLIGHT_BLOCKED:{preflight.reason}"
@@ -551,10 +605,14 @@ def process_current_global_batch(
                 selected.actuation,
                 current_time(),
                 binding_token,
+                preflight_authority,
             )
             if preflight_winner is not None
             else actuate_winner(winner, selected.actuation, current_time())
         )
+        venue_delta = venue_submit_count() - before_calls
+        if venue_delta not in {0, 1}:
+            raise RuntimeError("GLOBAL_ACTUATION_VENUE_COUNT_INVALID")
         receipts = {
             event.event_id: (
                 winner_receipt
@@ -603,7 +661,7 @@ def process_current_global_batch(
         return GlobalBatchSubmitResult(
             receipts=receipts,
             winner_event_id=winner_id,
-            venue_submit_count=venue_submit_count() - before_calls,
+            venue_submit_count=venue_delta,
         )
     except Exception as exc:  # noqa: BLE001 - one authority fault invalidates epoch
         return reject(f"GLOBAL_AUCTION_FAILED:{type(exc).__name__}:{exc}")
