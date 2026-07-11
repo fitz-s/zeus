@@ -696,6 +696,56 @@ def _bool_field(value: Any) -> bool | None:
     return None
 
 
+def _global_limit_edge_bound_authorized(
+    economics: Mapping[str, Any],
+    *,
+    limit_price: float,
+    submitted_shares: float,
+    q_lcb: float,
+    expected_edge: float,
+) -> bool:
+    """Prove a multi-level global FOK limit is bounded by its exact max spend."""
+
+    if not str(economics.get("global_actuation_identity") or "").strip():
+        return False
+    try:
+        global_limit = float(economics["global_limit_price"])
+        global_shares = float(economics["global_target_shares"])
+        max_spend = float(economics["global_max_spend_usd"])
+    except (KeyError, TypeError, ValueError):
+        return False
+    values = (
+        global_limit,
+        global_shares,
+        max_spend,
+        limit_price,
+        submitted_shares,
+        q_lcb,
+        expected_edge,
+    )
+    if not all(math.isfinite(value) for value in values):
+        return False
+    if (
+        global_shares <= 0.0
+        or max_spend <= 0.0
+        or not math.isclose(global_limit, limit_price, rel_tol=0.0, abs_tol=1e-6)
+        or not math.isclose(
+            global_shares,
+            submitted_shares,
+            rel_tol=0.0,
+            abs_tol=1e-6,
+        )
+    ):
+        return False
+    worst_unit_cost = max_spend / global_shares
+    worst_edge = q_lcb - worst_unit_cost
+    return (
+        worst_unit_cost + 1e-6 >= limit_price
+        and worst_edge > 0.0
+        and expected_edge <= worst_edge + 1e-6
+    )
+
+
 def _entry_economics_component(
     intent: ExecutionIntent,
     *,
@@ -944,6 +994,13 @@ def _entry_economics_component(
         max_false_edge_rate = float(DEFAULT_FDR_ALPHA)
     except Exception:  # noqa: BLE001
         max_false_edge_rate = 0.05
+    global_limit_bound_authorized = _global_limit_edge_bound_authorized(
+        economics,
+        limit_price=limit_price,
+        submitted_shares=submitted_shares,
+        q_lcb=q_lcb,
+        expected_edge=expected_edge,
+    )
     if econ_source != "qkernel_spine":
         reason = "qkernel_source_missing"
     elif selection_authority != "qkernel_spine":
@@ -962,11 +1019,11 @@ def _entry_economics_component(
         reason = "qkernel_side_mismatch"
     elif econ_cost is None:
         reason = "qkernel_cost_missing"
-    elif limit_price > econ_cost + 1e-6:
+    elif limit_price > econ_cost + 1e-6 and not global_limit_bound_authorized:
         reason = "submit_price_worse_than_qkernel_cost"
     elif econ_edge_lcb is None or econ_edge_lcb <= 0.0:
         reason = "qkernel_edge_lcb_non_positive"
-    elif econ_edge_lcb > submit_edge + 1e-6:
+    elif econ_edge_lcb > submit_edge + 1e-6 and not global_limit_bound_authorized:
         reason = "qkernel_edge_lcb_exceeds_submit_edge"
     elif expected_edge > econ_edge_lcb + 1e-6:
         reason = "expected_edge_exceeds_qkernel_edge_lcb"
@@ -1040,6 +1097,7 @@ def _entry_economics_component(
             qkernel_selection_guard_q_safe=(
                 selection_guard_q_safe if selection_guard_q_safe is not None else ""
             ),
+            global_limit_bound_authorized=global_limit_bound_authorized,
             day0_qkernel_guard_error=day0_qkernel_guard_error,
         )
     live_win_rate_floor_reason = live_probability_quality_reason
@@ -1084,6 +1142,7 @@ def _entry_economics_component(
         qkernel_cost=econ_cost,
         qkernel_edge_lcb=econ_edge_lcb,
         qkernel_false_edge_rate=econ_false_edge_rate,
+        global_limit_bound_authorized=global_limit_bound_authorized,
         day0_observation_authority=(day0_authority_errors == ()),
     )
 def _entry_actionable_certificate_payload_and_component(

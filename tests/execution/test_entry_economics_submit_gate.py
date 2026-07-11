@@ -718,6 +718,62 @@ def test_entry_economics_blocks_submit_price_worse_than_qkernel_cost_basis():
     assert verdict["reason"] == "submit_price_worse_than_qkernel_cost"
 
 
+def test_entry_economics_allows_global_multilevel_limit_bound_by_max_spend():
+    verdict = _entry_economics_component(
+        _intent(
+            direction=Direction("buy_no"),
+            limit_price=0.33,
+            q_live=0.650529153286516,
+            q_lcb_5pct=0.607276716608429,
+            expected_edge=0.277276716608429,
+            qkernel_execution_economics=_econ(
+                side="NO",
+                payoff_q_point=0.650529153286516,
+                payoff_q_lcb=0.607276716608429,
+                cost=0.324617595758041,
+                edge_lcb=0.282659120850388,
+                selection_guard_q_safe=0.607276716608429,
+                global_actuation_identity="global-wellington-no",
+                global_limit_price="0.33",
+                global_target_shares="326.00",
+                global_max_spend_usd="107.5800000",
+            ),
+        ),
+        shares=326.0,
+    )
+
+    assert verdict["allowed"] is True
+    assert verdict["details"]["global_limit_bound_authorized"] is True
+
+
+def test_entry_economics_rejects_global_limit_without_matching_max_spend():
+    verdict = _entry_economics_component(
+        _intent(
+            direction=Direction("buy_no"),
+            limit_price=0.33,
+            q_live=0.650529153286516,
+            q_lcb_5pct=0.607276716608429,
+            expected_edge=0.277276716608429,
+            qkernel_execution_economics=_econ(
+                side="NO",
+                payoff_q_point=0.650529153286516,
+                payoff_q_lcb=0.607276716608429,
+                cost=0.324617595758041,
+                edge_lcb=0.282659120850388,
+                selection_guard_q_safe=0.607276716608429,
+                global_actuation_identity="global-wellington-no",
+                global_limit_price="0.33",
+                global_target_shares="326.00",
+                global_max_spend_usd="100.00",
+            ),
+        ),
+        shares=326.0,
+    )
+
+    assert verdict["allowed"] is False
+    assert verdict["reason"] == "submit_price_worse_than_qkernel_cost"
+
+
 def test_entry_economics_blocks_weak_jeddah_style_expensive_no_density():
     verdict = _entry_economics_component(
         _intent(
