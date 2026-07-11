@@ -24,7 +24,7 @@ import copy
 import json
 from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta, timezone
-from zoneinfo import ZoneInfo
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import numpy as np
 
@@ -54,7 +54,11 @@ from src.data.executable_forecast_reader import read_executable_forecast
 from src.data.forecast_fetch_plan import data_version_for_track, track_for_metric
 from src.data.forecast_source_registry import calibration_source_id_for_lookup
 from src.data.market_scanner import _parse_temp_range, get_last_scan_authority, get_sibling_outcomes
-from src.data.observation_client import Day0ObservationContext, get_current_observation
+from src.data.observation_client import (
+    _DAY0_COVERAGE_WINDOW_GRACE_HOURS,
+    Day0ObservationContext,
+    get_current_observation,
+)
 from src.data.polymarket_client import PolymarketClient
 from src.engine.evaluator import (
     DAY0_EXECUTABLE_OBSERVATION_SOURCES_BY_SETTLEMENT_TYPE,
@@ -3804,6 +3808,39 @@ def _would_use_day0_monitor_lane(pos: Position, city, target_d) -> bool:
     )
 
 
+def _within_day0_observation_start_grace(
+    city,
+    target_d,
+    *,
+    now: datetime | None = None,
+) -> bool:
+    """Whether the target local day began inside the observation coverage grace."""
+
+    if target_d is None:
+        return False
+    try:
+        target_date = (
+            target_d if isinstance(target_d, date) else date.fromisoformat(str(target_d))
+        )
+        tz = ZoneInfo(str(getattr(city, "timezone", "") or ""))
+        local_now = (now or datetime.now(timezone.utc)).astimezone(tz)
+    except (TypeError, ValueError, ZoneInfoNotFoundError):
+        return False
+    if local_now.date() != target_date:
+        return False
+    local_midnight = local_now.replace(
+        hour=0,
+        minute=0,
+        second=0,
+        microsecond=0,
+        fold=0,
+    )
+    elapsed = local_now - local_midnight
+    return timedelta(0) <= elapsed <= timedelta(
+        hours=_DAY0_COVERAGE_WINDOW_GRACE_HOURS
+    )
+
+
 def _refresh_day0_monitor_probability(
     pos: Position,
     *,
@@ -3840,6 +3877,7 @@ def _refresh_day0_monitor_probability(
     except ObservationUnavailableError:
         metric = resolve_position_metric(pos)[0]
         from src.engine.position_belief import (
+            SELECTED_METHOD_REPLACEMENT_POSTERIOR,
             load_replacement_belief,
             monitor_belief_max_age_hours,
         )
@@ -3861,6 +3899,20 @@ def _refresh_day0_monitor_probability(
                 exc,
             )
         if belief is not None and belief.fresh:
+            if _within_day0_observation_start_grace(city, target_d):
+                fresh_pos = replace(refresh_pos)
+                setattr(
+                    fresh_pos,
+                    "selected_method",
+                    SELECTED_METHOD_REPLACEMENT_POSTERIOR,
+                )
+                _append_monitor_validation(
+                    fresh_pos,
+                    "day0_observation_unavailable_within_start_grace:replacement_posterior_authority",
+                )
+                _append_monitor_validation(fresh_pos, belief.freshness_validation())
+                _set_monitor_probability_fresh(fresh_pos, True)
+                return float(belief.held_side_prob), fresh_pos, True
             _append_monitor_validation(
                 refresh_pos,
                 "day0_observation_unavailable:replacement_posterior_available_not_exit_authority",

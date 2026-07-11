@@ -18,12 +18,147 @@ Gate conditions tested:
 
 from __future__ import annotations
 
+from datetime import date, datetime, timezone
+from types import SimpleNamespace
 from unittest.mock import patch, MagicMock
+
+import pytest
 
 import src.engine.monitor_refresh as monitor_refresh_module
 from src.engine.monitor_refresh import _maybe_write_day0_nowcast
+from src.engine.position_belief import ReplacementBelief
 from src.observability.counters import read as read_counter, reset_all as reset_counters
 from src.state.portfolio import Position
+
+
+def _replacement_belief(*, fresh: bool = True) -> ReplacementBelief:
+    return ReplacementBelief(
+        held_side_prob=0.73,
+        q_yes_bin=0.27,
+        posterior_id="posterior-pre-first-observation",
+        computed_at="2026-07-11T23:05:00+00:00",
+        age_hours=0.1,
+        fresh=fresh,
+        bin_key="test-bin",
+        direction="buy_no",
+    )
+
+
+def test_day0_start_grace_is_bounded_to_target_local_day() -> None:
+    city = SimpleNamespace(timezone="Europe/London")
+    target = date(2026, 7, 12)
+
+    assert monitor_refresh_module._within_day0_observation_start_grace(
+        city,
+        target,
+        now=datetime(2026, 7, 11, 23, 30, tzinfo=timezone.utc),
+    )
+    assert not monitor_refresh_module._within_day0_observation_start_grace(
+        city,
+        target,
+        now=datetime(2026, 7, 12, 2, 1, tzinfo=timezone.utc),
+    )
+    assert not monitor_refresh_module._within_day0_observation_start_grace(
+        city,
+        target,
+        now=datetime(2026, 7, 11, 22, 59, tzinfo=timezone.utc),
+    )
+
+
+def test_pre_first_day0_observation_uses_fresh_replacement_belief(monkeypatch) -> None:
+    from src.contracts.exceptions import ObservationUnavailableError
+    from src.engine import position_belief
+
+    pos = _make_position()
+    pos.entry_method = "day0_observation"
+    pos.p_posterior = 0.41
+    monkeypatch.setattr(
+        monitor_refresh_module,
+        "recompute_native_probability",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            ObservationUnavailableError("first target-day observation not published")
+        ),
+    )
+    monkeypatch.setattr(
+        monitor_refresh_module,
+        "_within_day0_observation_start_grace",
+        lambda *args, **kwargs: True,
+    )
+    monkeypatch.setattr(
+        position_belief,
+        "load_replacement_belief",
+        lambda **kwargs: _replacement_belief(),
+    )
+
+    prob, refresh_pos, fresh = monitor_refresh_module._refresh_day0_monitor_probability(
+        pos,
+        conn=None,
+        city=SimpleNamespace(timezone="UTC"),
+        target_d=date(2026, 7, 12),
+    )
+
+    assert fresh is True
+    assert prob == pytest.approx(0.73)
+    assert refresh_pos.selected_method == "replacement_posterior"
+    assert (
+        "day0_observation_unavailable_within_start_grace:replacement_posterior_authority"
+        in refresh_pos.applied_validations
+    )
+
+
+@pytest.mark.parametrize(
+    ("belief_fresh", "inside_grace"),
+    [(False, True), (True, False)],
+)
+def test_day0_observation_absence_stays_stale_without_both_authorities(
+    monkeypatch,
+    belief_fresh: bool,
+    inside_grace: bool,
+) -> None:
+    from src.contracts.exceptions import ObservationUnavailableError
+    from src.engine import position_belief
+
+    pos = _make_position()
+    pos.entry_method = "day0_observation"
+    pos.p_posterior = 0.41
+    monkeypatch.setattr(
+        monitor_refresh_module,
+        "recompute_native_probability",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            ObservationUnavailableError("day0 observation unavailable")
+        ),
+    )
+    monkeypatch.setattr(
+        monitor_refresh_module,
+        "_within_day0_observation_start_grace",
+        lambda *args, **kwargs: inside_grace,
+    )
+    monkeypatch.setattr(
+        position_belief,
+        "load_replacement_belief",
+        lambda **kwargs: _replacement_belief(fresh=belief_fresh),
+    )
+    monkeypatch.setattr(
+        monitor_refresh_module,
+        "_attempt_held_belief_readthrough",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(
+        monitor_refresh_module,
+        "_enqueue_single_family_belief_reseed_failsoft",
+        lambda **kwargs: None,
+    )
+
+    prob, refresh_pos, fresh = monitor_refresh_module._refresh_day0_monitor_probability(
+        pos,
+        conn=None,
+        city=SimpleNamespace(timezone="UTC"),
+        target_d=date(2026, 7, 12),
+    )
+
+    assert fresh is False
+    assert prob == pytest.approx(pos.p_posterior)
+    assert refresh_pos.selected_method != "replacement_posterior"
 
 
 def test_held_monitor_releases_trade_transaction_before_probability_refresh(

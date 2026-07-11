@@ -34,6 +34,16 @@ persist a world-owned Day0 observation fact before releasing TRADE. The repair
 must commit earlier monitor writes before probability refresh and delay the
 trade-owned microstructure write until the WORLD observation write is complete.
 
+Fresh forward runtime evidence at the London local-day boundary exposed a
+probability-authority discontinuity: the monitor switched from a fresh
+replacement posterior to mandatory Day0 observation at local midnight, before
+EGLC had published the target day's first same-station observation. This made
+one held position probability-stale and froze every otherwise-independent
+global entry. The repair may use the fresh replacement posterior only inside
+the existing local-day-start coverage grace while no Day0 observation is
+available. Once an observation exists, after the grace expires, or when the
+replacement posterior is stale, the Day0 lane remains fail-closed.
+
 ## Deliverables
 - Keep Normal `q_json` as an immutable point estimate, never as executable certainty.
 - Widen the shared simplex carrier by the exact 51-member zero-hit limit and the
@@ -47,6 +57,10 @@ trade-owned microstructure write until the WORLD observation write is complete.
   probability carrier from reaching live redecision.
 - Make held-position probability refresh order explicit: release TRADE, write
   the current Day0 WORLD fact, then write TRADE quote/monitor evidence.
+- Preserve probability continuity before the first target-day observation:
+  inside the existing coverage grace, a fresh replacement posterior remains
+  monitor authority; this is not permission to use stale forecast belief or to
+  ignore any available Day0 observation.
 
 ## Verification
 - Focused first-principles antibody and settlement-preimage regressions pass.
@@ -58,6 +72,9 @@ trade-owned microstructure write until the WORLD observation write is complete.
   required separately from tests.
 - POSIX WAL-byte evidence shows no simultaneous opposite-order WORLD/TRADE
   writer hold after restart; reactor cycles progress beyond claim bounces.
+- A deterministic local-midnight antibody proves fresh replacement belief is
+  admitted only during the pre-observation coverage grace, with stale belief
+  and post-grace absence still rejected.
 
 ## Work record
 
@@ -77,3 +94,8 @@ trade-owned microstructure write until the WORLD observation write is complete.
 - 2026-07-11: post-deploy SIGUSR1 stack pinned the remaining inversion to
   `exit_monitor -> refresh_position -> write_day0_metric_fact`: TRADE was open
   before the WORLD fact write while price-channel held WORLD and awaited TRADE.
+- 2026-07-11: at London 00:00-00:14 local, WU returned HTTP 200 but no EGLC
+  sample belonged to the new target date; aviationweather's latest EGLC METAR
+  was 22:50 UTC / 23:50 local. The monitor therefore recorded three consecutive
+  stale probabilities despite a fresh replacement posterior, and live health
+  globally excluded multiple independent positive-EV YES candidates.
