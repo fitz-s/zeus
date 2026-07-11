@@ -15,7 +15,9 @@ out_of_scope:
 - src/contracts/settlement_semantics.py
 - docs/authority/**
 status: in_progress
-live_side_effects_allowed: false
+live_side_effects_allowed: true
+live_side_effect_allowlist:
+- scripts/deploy_live.py restart post-trade-capital --allow-dirty --allow-unpushed
 live_side_effect_denied:
 - venue submit, cancel, or exit
 - DB backup or copy
