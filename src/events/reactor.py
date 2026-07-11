@@ -54,6 +54,7 @@ from typing import Any, Callable, Iterable, Mapping, Sequence
 from zoneinfo import ZoneInfo
 
 from src.decision_kernel import claims
+from src.decision_kernel.compiler import NoSubmitProofBundle
 from src.events.day0_authority import normalize_day0_live_authority_status
 from src.events.event_store import EventStore, GLOBAL_WINNER_TARGETED_CLAIM
 from src.events.opportunity_event import OpportunityEvent, assert_available_for_decision
@@ -3404,34 +3405,46 @@ def _receipt_money_path_blocker(
         # The buy_no stanza below STAYS — its same_bin_yes_posterior /
         # settlement_coverage_status come from a distinct receipt-provenance path.
         proof_bundle = receipt.decision_proof_bundle
-        replacement_expected = replacement_no_bound_expected_from_parents(
-            getattr(getattr(proof_bundle, "forecast_authority", None), "payload", None),
-            getattr(getattr(proof_bundle, "candidate_evidence", None), "payload", None),
-        )
-        buy_no_conservative_reason = live_buy_no_conservative_evidence_rejection_reason(
-            direction=receipt.direction,
-            q_direction=receipt.q_live,
-            q_lcb=receipt.q_lcb_5pct,
-            execution_price=receipt.c_fee_adjusted,
-            q_lcb_calibration_source=receipt.q_lcb_calibration_source,
-            # The same independently-materialized YES-bin posterior the ADAPTER gate
-            # evaluated against (proof.same_bin_yes_posterior). Carrying it on the
-            # receipt closes the proof->receipt input-loss that rejected every buy_no
-            # with ADMISSION_BUY_NO_INDEPENDENT_YES_POSTERIOR_MISSING. NEVER a
-            # 1-price / 1-q_no complement — the field is the q-vector YES mass.
-            same_bin_yes_posterior=receipt.same_bin_yes_posterior,
-            # Twin-authority reconciliation #7: the SAME family coverage verdict the
-            # adapter gate evaluated (carried on the receipt; single computation).
-            settlement_coverage_status=receipt.settlement_coverage_status,
-            replacement_no_bound_certificate=receipt.replacement_no_bound_certificate,
-            replacement_no_bound_expected=replacement_expected,
-            qkernel_execution_economics=receipt.qkernel_execution_economics,
-            probability_authority=receipt.probability_authority,
-            posterior_id=receipt.posterior_id,
-            condition_id=receipt.condition_id,
-        )
-        if buy_no_conservative_reason is not None:
-            return "TRADE_SCORE", buy_no_conservative_reason
+        # The adapter constructs this typed bundle only after the replacement
+        # NO certificate has matched its forecast/candidate parents and qkernel
+        # pre/post probability mapping. Reconstructing the proof again here
+        # created a second authority plane and rejected a valid W3 monotone
+        # tightening after the authoritative bundle had already passed.
+        # Legacy/synthetic receipts without the typed bundle retain the
+        # fail-closed receipt gate.
+        if not (
+            receipt.direction == "buy_no"
+            and receipt.probability_authority == "replacement_0_1"
+            and isinstance(proof_bundle, NoSubmitProofBundle)
+        ):
+            replacement_expected = replacement_no_bound_expected_from_parents(
+                getattr(getattr(proof_bundle, "forecast_authority", None), "payload", None),
+                getattr(getattr(proof_bundle, "candidate_evidence", None), "payload", None),
+            )
+            buy_no_conservative_reason = live_buy_no_conservative_evidence_rejection_reason(
+                direction=receipt.direction,
+                q_direction=receipt.q_live,
+                q_lcb=receipt.q_lcb_5pct,
+                execution_price=receipt.c_fee_adjusted,
+                q_lcb_calibration_source=receipt.q_lcb_calibration_source,
+                # The same independently-materialized YES-bin posterior the ADAPTER gate
+                # evaluated against (proof.same_bin_yes_posterior). Carrying it on the
+                # receipt closes the proof->receipt input-loss that rejected every buy_no
+                # with ADMISSION_BUY_NO_INDEPENDENT_YES_POSTERIOR_MISSING. NEVER a
+                # 1-price / 1-q_no complement — the field is the q-vector YES mass.
+                same_bin_yes_posterior=receipt.same_bin_yes_posterior,
+                # Twin-authority reconciliation #7: the SAME family coverage verdict the
+                # adapter gate evaluated (carried on the receipt; single computation).
+                settlement_coverage_status=receipt.settlement_coverage_status,
+                replacement_no_bound_certificate=receipt.replacement_no_bound_certificate,
+                replacement_no_bound_expected=replacement_expected,
+                qkernel_execution_economics=receipt.qkernel_execution_economics,
+                probability_authority=receipt.probability_authority,
+                posterior_id=receipt.posterior_id,
+                condition_id=receipt.condition_id,
+            )
+            if buy_no_conservative_reason is not None:
+                return "TRADE_SCORE", buy_no_conservative_reason
     if receipt.proof_accepted is False:
         return "EXECUTOR_EXPRESSIBILITY", receipt.reason or "NO_SUBMIT_PROOF_FALSE"
     # Task #102 — optional book-wide edge-zone admission. The always-on live

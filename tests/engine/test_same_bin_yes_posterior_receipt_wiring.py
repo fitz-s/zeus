@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import json
 
+from src.decision_kernel.compiler import NoSubmitProofBundle
 from src.events.reactor import (
     EventSubmissionReceipt,
     ReactorConfig,
@@ -104,6 +105,21 @@ def test_receipt_gate_still_rejects_when_posterior_genuinely_absent() -> None:
     stage, reason = _receipt_money_path_blocker(receipt, ReactorConfig())
     assert stage == "TRADE_SCORE"
     assert reason == "ADMISSION_BUY_NO_INDEPENDENT_YES_POSTERIOR_MISSING"
+
+
+def test_typed_adapter_bundle_does_not_repeat_replacement_no_bound_gate() -> None:
+    """Adapter proof construction already validated parents and W3 tightening."""
+    receipt = _money_path_clean_buy_no_receipt(
+        same_bin_yes_posterior=0.35,
+        probability_authority="replacement_0_1",
+        decision_proof_bundle=object.__new__(NoSubmitProofBundle),
+        replacement_no_bound_certificate={"schema": "validated_by_adapter"},
+    )
+
+    stage, reason = _receipt_money_path_blocker(receipt, ReactorConfig())
+
+    assert stage is None
+    assert reason == ""
 
 
 def test_receipt_gate_material_yes_unlicensed_source_still_rejected() -> None:
