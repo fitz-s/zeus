@@ -4702,6 +4702,10 @@ def event_bound_live_adapter_from_trade_conn(
                 real_order_submit_enabled=real_order_submit_enabled,
             )
 
+        book_metadata_by_key: dict[
+            tuple[str, str], Mapping[str, object]
+        ] = {}
+
         def _current_book_epoch(probabilities, _at):
             from src.contracts.executable_market_snapshot import (
                 FRESHNESS_WINDOW_DEFAULT,
@@ -4755,6 +4759,12 @@ def event_bound_live_adapter_from_trade_conn(
                 max_workers=8,
                 metadata_sink=gamma_metadata,
             )
+            # The first call may discover missing native token identities through
+            # Gamma and therefore receives the exact market metadata needed to price
+            # those books.  The late whole-universe fence receives already-bound q,
+            # so token binding intentionally skips Gamma; keep the first call's
+            # metadata inside this one batch rather than re-discovering topology.
+            book_metadata_by_key.update(gamma_metadata)
             with PolymarketClient(public_http_timeout=timeout) as clob:
                 epoch = capture_current_global_book_epoch(
                     trade_conn,
@@ -4766,7 +4776,7 @@ def event_bound_live_adapter_from_trade_conn(
                     clock=lambda: datetime.now(UTC),
                     max_age=FRESHNESS_WINDOW_DEFAULT,
                     batch_size=batch_size,
-                    metadata_overrides=gamma_metadata,
+                    metadata_overrides=book_metadata_by_key,
                 )
             return bound_probabilities, epoch
 

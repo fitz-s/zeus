@@ -716,6 +716,9 @@ def test_current_global_probability_prepare_does_not_require_price_snapshot(monk
 
 
 def test_live_adapter_routes_global_scope_through_world_connection(monkeypatch):
+    import src.data.polymarket_client as polymarket_client
+    import src.engine.global_auction_universe as universe
+
     trade = sqlite3.connect(":memory:")
     forecast = sqlite3.connect(":memory:")
     topology = sqlite3.connect(":memory:")
@@ -753,6 +756,47 @@ def test_live_adapter_routes_global_scope_through_world_connection(monkeypatch):
     assert captured["forecast_conn"] is forecast
     assert captured["world_conn"] is not topology
     assert captured["portfolio_state_provider"] is None
+
+    metadata_calls = []
+    bind_calls = []
+    metadata_key = ("condition", "yes-token")
+    metadata = {"condition_id": "condition", "active": True}
+
+    def fake_bind(_forecast_conn, *, probability_witnesses, metadata_sink, **_):
+        bind_calls.append(1)
+        if len(bind_calls) == 1:
+            metadata_sink[metadata_key] = metadata
+        return probability_witnesses
+
+    def fake_capture(_trade_conn, *, metadata_overrides, **_):
+        metadata_calls.append(dict(metadata_overrides))
+        return SimpleNamespace(witness_identity=f"book-{len(metadata_calls)}")
+
+    class FakeClient:
+        def __init__(self, **_):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return False
+
+        def get_orderbook_snapshots(self, *_args, **_kwargs):
+            return {}
+
+    monkeypatch.setattr(universe, "bind_current_global_probability_tokens", fake_bind)
+    monkeypatch.setattr(universe, "capture_current_global_book_epoch", fake_capture)
+    monkeypatch.setattr(polymarket_client, "PolymarketClient", FakeClient)
+    provider = captured["current_book_epoch_provider"]
+    probabilities = {"family": object()}
+    provider(probabilities, _dt.datetime.now(_dt.timezone.utc))
+    provider(probabilities, _dt.datetime.now(_dt.timezone.utc))
+
+    assert metadata_calls == [
+        {metadata_key: metadata},
+        {metadata_key: metadata},
+    ]
 
 
 def test_current_global_scope_uses_latest_day0_carrier_per_family():
