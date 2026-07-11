@@ -68,6 +68,10 @@ from scipy.optimize import (
 )
 
 from src.contracts.executable_cost_curve import ExecutableCostCurve
+from src.contracts.execution_intent import (
+    quantize_submit_shares_for_venue,
+    quantize_submit_shares_for_venue_at_most,
+)
 from src.solve.exits import ZeroWealthOutcomeError
 from src.solve.kappa import KappaPolicy
 from src.solve.scenario_service import ScenarioService
@@ -102,7 +106,8 @@ _WEALTH_MARGIN = 1e-9
 # does not hide a binding budget); with real budget slack the single-coordinate optimum is global.
 _BUDGET_BIND_REL = 1e-3
 
-# Venue discretization: sizes on a 0.01 grid; the W2.1 batch executor submits ≤15 per plan.
+# Base share discretization. Immediate BUY feasibility is a price-dependent subset
+# of this grid because the venue also constrains SDK maker/taker amount precision.
 _SIZE_QUANTUM = Decimal("0.01")
 _MAX_ORDERS = 15
 
@@ -1024,6 +1029,48 @@ def _single_order_execution_boundary(
     return limit_price, raw_cost / Decimal(shares), Decimal(shares) * all_in_limit
 
 
+def _single_order_venue_legal_neighbor(
+    candidate: GlobalSingleOrderCandidate,
+    shares: Decimal,
+    *,
+    at_most: bool,
+) -> Decimal | None:
+    """Nearest venue-legal FOK BUY size on one side of ``shares``.
+
+    Venue legality depends on the deepest consumed price, while changing size can
+    change that price. Iterate the monotone normalization to a fixed point instead
+    of treating the 0.01-share base grid as the complete executable set.
+    """
+
+    current = Decimal(shares)
+    direction = "buy_yes" if candidate.side == "YES" else "buy_no"
+    quantize = (
+        quantize_submit_shares_for_venue_at_most
+        if at_most
+        else quantize_submit_shares_for_venue
+    )
+    # Each normalization is monotone and can cross a ladder boundary only once;
+    # one final pass proves stability at the last reached boundary.
+    for _ in range(len(candidate.executable_cost_curve.levels) + 2):
+        try:
+            limit_price, _, _ = _single_order_execution_boundary(candidate, current)
+            normalized = quantize(
+                direction,
+                current,
+                final_limit_price=limit_price,
+                order_type="FOK",
+                tick_size=candidate.executable_cost_curve.min_tick,
+            )
+        except ValueError:
+            return None
+        if normalized == current:
+            return current
+        if (at_most and normalized > current) or (not at_most and normalized < current):
+            raise AssertionError("venue share normalization moved in the wrong direction")
+        current = normalized
+    raise AssertionError("venue share normalization did not converge")
+
+
 def _single_order_metrics(
     candidate: GlobalSingleOrderCandidate,
     *,
@@ -1073,21 +1120,21 @@ def _score_global_single_order(
     spendable_cash_usd: Decimal,
     capital_limit_usd: Decimal,
 ) -> GlobalSingleOrderDecision:
-    """Find the exact venue-grid optimum for one full-depth candidate."""
+    """Find the exact executable-grid optimum for one full-depth candidate."""
 
     spend_limit = min(
         Decimal(capital_limit_usd),
         Decimal(spendable_cash_usd),
         Decimal(wealth_floor_usd) * (Decimal("1") - Decimal(str(_WEALTH_MARGIN))),
     )
-    max_shares = _single_order_max_shares(
+    raw_max_shares = _single_order_max_shares(
         candidate.executable_cost_curve,
         spend_limit_usd=spend_limit,
     )
-    min_shares = (
+    raw_min_shares = (
         candidate.executable_cost_curve.min_order_size / _SIZE_QUANTUM
     ).to_integral_value(rounding=ROUND_CEILING) * _SIZE_QUANTUM
-    if max_shares < min_shares:
+    if raw_max_shares < raw_min_shares:
         return GlobalSingleOrderDecision(
             candidate=None,
             shares=Decimal("0"),
@@ -1113,12 +1160,12 @@ def _score_global_single_order(
         except ValueError:
             return float("inf")
 
-    probes = {min_shares, max_shares}
-    if max_shares > min_shares:
+    raw_probes = {raw_min_shares, raw_max_shares}
+    if raw_max_shares > raw_min_shares:
         result = minimize_scalar(
             _continuous_objective,
             method="bounded",
-            bounds=(float(min_shares), float(max_shares)),
+            bounds=(float(raw_min_shares), float(raw_max_shares)),
             options={"xatol": 1e-10, "maxiter": 300},
         )
         if result.success and math.isfinite(float(result.x)):
@@ -1127,7 +1174,7 @@ def _score_global_single_order(
                 raw.to_integral_value(rounding=ROUND_FLOOR),
                 raw.to_integral_value(rounding=ROUND_CEILING),
             ):
-                probes.add(units * _SIZE_QUANTUM)
+                raw_probes.add(units * _SIZE_QUANTUM)
     cumulative = Decimal("0")
     for level in candidate.executable_cost_curve.levels:
         cumulative += level.size
@@ -1136,7 +1183,16 @@ def _score_global_single_order(
             raw.to_integral_value(rounding=ROUND_FLOOR),
             raw.to_integral_value(rounding=ROUND_CEILING),
         ):
-            probes.add(units * _SIZE_QUANTUM)
+            raw_probes.add(units * _SIZE_QUANTUM)
+
+    probes: set[Decimal] = set()
+    for raw_probe in raw_probes:
+        for at_most in (True, False):
+            legal = _single_order_venue_legal_neighbor(
+                candidate, raw_probe, at_most=at_most
+            )
+            if legal is not None:
+                probes.add(legal)
 
     best: tuple[
         float,
@@ -1149,7 +1205,7 @@ def _score_global_single_order(
         Decimal,
     ] | None = None
     for shares in sorted(probes):
-        if shares < min_shares or shares > max_shares:
+        if shares < raw_min_shares or shares > raw_max_shares:
             continue
         try:
             robust_du, robust_ev, efficiency, cost = _single_order_metrics(

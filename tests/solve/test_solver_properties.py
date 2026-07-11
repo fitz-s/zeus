@@ -24,6 +24,7 @@ import numpy as np
 import pytest
 
 from src.contracts.executable_cost_curve import BookLevel, ExecutableCostCurve, FeeModel
+from src.contracts.execution_intent import venue_submit_amount_precision_error
 from src.solve import solver as S
 from src.solve.kappa import Kappa, KappaPolicy
 from tests.solve import support as F
@@ -601,6 +602,17 @@ def _global_exact_oracle(candidate, *, floor="100", ceiling="100", cap="5"):
     best = None
     shares = min_shares
     while shares <= max_shares:
+        limit_price, _, _ = S._single_order_execution_boundary(candidate, shares)
+        direction = "buy_yes" if candidate.side == "YES" else "buy_no"
+        if venue_submit_amount_precision_error(
+            direction=direction,
+            final_limit_price=limit_price,
+            submitted_shares=shares,
+            order_type="FOK",
+            tick_size=candidate.executable_cost_curve.min_tick,
+        ) is not None:
+            shares += Decimal("0.01")
+            continue
         metrics = S._single_order_metrics(
             candidate,
             q_samples=q_samples,
@@ -786,6 +798,31 @@ def test_global_single_order_binds_exact_shares_to_fundable_deepest_limit():
     assert decision.limit_price == Decimal("0.50")
     assert decision.expected_fill_price_before_fee == Decimal("0.1666666666666666666666666667")
     assert decision.max_spend_usd == Decimal("6.0000")
+
+
+@pytest.mark.parametrize("side", ("YES", "NO"))
+def test_global_single_order_optimizes_on_price_dependent_venue_grid(side):
+    candidate = _global_candidate(
+        candidate_id=f"venue-grid-{side.lower()}",
+        family=f"venue-grid-{side.lower()}",
+        side=side,
+        q=0.99,
+        levels=(("0.37", "702.13"),),
+    )
+
+    decision = _global_select(
+        (candidate,), floor="10000", ceiling="10000", cash="1000", cap="1000"
+    )
+
+    assert decision.candidate is not None
+    assert decision.shares == Decimal("702.00")
+    assert venue_submit_amount_precision_error(
+        direction="buy_yes" if side == "YES" else "buy_no",
+        final_limit_price=decision.limit_price,
+        submitted_shares=decision.shares,
+        order_type="FOK",
+        tick_size=candidate.executable_cost_curve.min_tick,
+    ) is None
 
 
 def test_global_single_order_label_mirror_preserves_size_cost_and_objective():

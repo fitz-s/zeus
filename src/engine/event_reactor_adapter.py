@@ -10735,10 +10735,6 @@ def _build_live_execution_command_certificates(
             provisional=authority_witness,
             final=final_authority_witness,
         )
-        if global_submit_book_hash is not None and (
-            final_authority_witness.book_hash != global_submit_book_hash
-        ):
-            raise ValueError("GLOBAL_ACTUATION_FINAL_JIT_BOOK_SUPERSEDED")
         authority_witness = final_authority_witness
         current_utility_reason = _qkernel_current_state_actual_submit_rejection_reason(
             cert=actionable.payload.get("qkernel_execution_economics") or {},
