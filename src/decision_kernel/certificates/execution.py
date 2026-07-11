@@ -193,7 +193,11 @@ def build_final_intent_certificate_from_actionable(
         direction=str(action["direction"]),
         order_mode=order_spec.mode,
         limit_price=limit_price,
-        expected_fill_price=expected_fill_price,
+        expected_fill_price=(
+            sweep_expected_fill_price
+            if sweep_expected_fill_price is not None
+            else expected_fill_price
+        ),
     )
     executable_snapshot_hash = _required_text(executable_snapshot_cert.payload, "executable_snapshot_hash")
     cost_basis_hash = _required_text(cost_model_cert.payload, "cost_basis_hash")
@@ -356,7 +360,7 @@ def _declared_max_slippage_bps(
     direction: str,
     order_mode: str,
     limit_price: float,
-    expected_fill_price: float,
+    expected_fill_price: float | Decimal | str,
 ) -> float:
     if str(order_mode).strip().upper() != "TAKER":
         return 0.0

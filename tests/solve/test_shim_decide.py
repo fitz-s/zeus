@@ -15,6 +15,7 @@ from decimal import Decimal
 from types import SimpleNamespace
 
 import numpy as np
+import pytest
 
 from src.contracts.executable_cost_curve import BookLevel, ExecutableCostCurve, FeeModel
 from src.contracts.execution_price import ExecutionPrice
@@ -294,7 +295,7 @@ def test_shim_yes_no_mirror_uses_one_current_state_rule():
         assert candidate.selection_guard_abstained is False
 
 
-def test_shim_current_state_rescore_preserves_side_specific_served_lcb():
+def test_shim_current_state_rescore_ignores_historical_served_lcb():
     bin_ids = ("y", "n")
     band = _band(bin_ids, [0.70] * 64)
     yes = _route("yes_y", "y", "YES", 0.45)
@@ -307,9 +308,9 @@ def test_shim_current_state_rescore_preserves_side_specific_served_lcb():
     )
 
     by_side = {candidate.route.side: candidate for candidate in decision.candidate_decisions}
-    assert by_side["YES"].economics.payoff_q_lcb == 0.40
-    assert by_side["YES"].economics.edge_lcb < 0.0
-    assert by_side["NO"].economics.payoff_q_lcb == 0.60
+    assert by_side["YES"].economics.payoff_q_lcb == pytest.approx(0.70)
+    assert by_side["NO"].economics.payoff_q_lcb == pytest.approx(0.70)
+    assert by_side["YES"].economics.edge_lcb > 0.0
     assert by_side["NO"].economics.edge_lcb > 0.0
 
 

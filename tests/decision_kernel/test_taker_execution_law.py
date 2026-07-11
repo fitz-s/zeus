@@ -308,6 +308,32 @@ def test_global_exact_taker_preserves_deep_limit_and_exact_share_count():
     assert final_intent.payload["global_exact_order"] is True
 
 
+def test_global_exact_taker_slippage_uses_persisted_high_precision_vwap():
+    _, _, final_intent, parents = _taker_chain(
+        order_mode="TAKER",
+        actionable_overrides={
+            "c_fee_adjusted": 0.86,
+            "live_cap_reserved_notional_usd": 4.3,
+        },
+        quote_overrides={"best_ask": 0.86, "visible_depth": 5.0},
+        available_crossable_shares=5.0,
+        sweep_expected_fill_price="0.673158683960709666",
+        exact_taker_shares="5.00",
+        exact_taker_limit_price="0.86",
+        return_parents=True,
+    )
+
+    verify_final_intent(final_intent, parents)
+    native_hash = validate_final_intent_cert_for_existing_executor(final_intent)
+    assert native_hash
+    adverse = _adverse_slippage_bps(
+        direction="buy_yes",
+        reference_price=Decimal(final_intent.payload["expected_fill_price_before_fee"]),
+        final_limit_price=Decimal(str(final_intent.payload["limit_price"])),
+    )
+    assert Decimal(str(final_intent.payload["max_slippage_bps"])) >= adverse
+
+
 def test_global_exact_taker_certificate_rejects_share_binding_drift():
     _, _, final_intent, parents = _taker_chain(
         order_mode="TAKER",

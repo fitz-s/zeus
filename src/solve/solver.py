@@ -2561,8 +2561,11 @@ class SolveEngineShim:
     ):
         """Return symmetric YES/NO economics from the served band and live cost curves.
 
-        Missing or malformed current sizing evidence removes the leg from the executable menu;
-        it never falls back to the legacy settlement-derived guard output.
+        Missing or malformed current sizing evidence removes the leg from the executable menu.
+        ``served_payoff_q_lcb_by_side`` belongs to the pre-W3 proof surface and may carry a
+        settlement-history coverage shrink.  Current-state W3 instead derives every YES/NO
+        lower bound from ``legacy.band.samples`` inside ``compute_candidate_economics`` so the
+        local certificate and the global auction consume the same decision-time simplex.
         """
         from src.decision.payoff_vector import compute_candidate_economics
 
@@ -2576,11 +2579,6 @@ class SolveEngineShim:
             if sizing is None or not sizing.is_tradeable:
                 continue
             try:
-                guarded_payoff_q_lcb = None
-                if served_payoff_q_lcb_by_side is not None:
-                    guarded_payoff_q_lcb = served_payoff_q_lcb_by_side.get(
-                        (route.bin_id, route.side)
-                    )
                 economics = compute_candidate_economics(
                     route,
                     joint_q=legacy.joint_q,
@@ -2590,7 +2588,7 @@ class SolveEngineShim:
                     exposure=portfolio,
                     max_stake_usd=max_stake_usd,
                     alpha=alpha,
-                    guarded_payoff_q_lcb=guarded_payoff_q_lcb,
+                    guarded_payoff_q_lcb=None,
                 )
             except Exception:  # noqa: BLE001 - missing current economics is a fail-closed leg.
                 continue
