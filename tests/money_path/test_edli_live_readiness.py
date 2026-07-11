@@ -4995,7 +4995,7 @@ def test_gate84_jit_response_must_bind_requested_token(monkeypatch):
         provider(_gate84_final_intent(side="BUY"), object(), decision_time)
 
 
-def test_gate84_final_jit_witness_must_match_provisional_book(monkeypatch):
+def test_gate84_final_jit_witness_revalidates_intent_on_changed_book(monkeypatch):
     from src.engine import event_reactor_adapter as adapter
     from src.events import reactor
 
@@ -5019,17 +5019,24 @@ def test_gate84_final_jit_witness_must_match_provisional_book(monkeypatch):
     provisional = provider(provisional_intent, object(), decision_time)
     final = provider(_strict_jit_final_intent(), object(), decision_time)
 
-    adapter._assert_final_jit_witness_matches_provisional(
+    adapter._assert_final_jit_witness_revalidates_intent(
         provisional=provisional,
         final=final,
     )
-    with pytest.raises(
-        ValueError,
-        match="PRE_SUBMIT_BOOK_AUTHORITY_JIT_CHANGED_DURING_BUILD",
-    ):
-        adapter._assert_final_jit_witness_matches_provisional(
+    adapter._assert_final_jit_witness_revalidates_intent(
+        provisional=provisional,
+        final=replace(
+            final,
+            book_hash="different-book-hash",
+            current_best_bid=0.38,
+            current_best_ask=0.42,
+        ),
+    )
+
+    with pytest.raises(ValueError, match="PRE_SUBMIT_BOOK_AUTHORITY_JIT_REQUIRED"):
+        adapter._assert_final_jit_witness_revalidates_intent(
             provisional=provisional,
-            final=replace(final, book_hash="different-book-hash"),
+            final=replace(final, book_authority_id="cached_book"),
         )
 
 

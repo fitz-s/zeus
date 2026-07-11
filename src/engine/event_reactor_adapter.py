@@ -10745,7 +10745,7 @@ def _build_live_execution_command_certificates(
             executable_snapshot,
             decision_time,
         )
-        _assert_final_jit_witness_matches_provisional(
+        _assert_final_jit_witness_revalidates_intent(
             provisional=authority_witness,
             final=final_authority_witness,
         )
@@ -12115,37 +12115,27 @@ def _require_pre_submit_authority_witness(
     return witness
 
 
-def _assert_final_jit_witness_matches_provisional(
+def _assert_final_jit_witness_revalidates_intent(
     *,
     provisional: PreSubmitAuthorityWitness,
     final: PreSubmitAuthorityWitness,
 ) -> None:
-    """Bind final limit/size validation to the same JIT book used for re-decision."""
+    """Require two genuine JIT observations without freezing a moving book.
+
+    The provisional fetch supplies the touch used to build the intent.  The
+    final fetch independently validates that exact side, limit, and size against
+    current depth in the provider.  Requiring identical hashes or opposite-side
+    prices after that validation rejects harmless book movement and adds no
+    execution guarantee.
+    """
 
     if (
         provisional.book_authority_id != "clob_jit_book"
         or final.book_authority_id != "clob_jit_book"
+        or not provisional.book_hash
+        or not final.book_hash
     ):
         raise ValueError("PRE_SUBMIT_BOOK_AUTHORITY_JIT_REQUIRED")
-    if not provisional.book_hash or provisional.book_hash != final.book_hash:
-        raise ValueError(
-            "PRE_SUBMIT_BOOK_AUTHORITY_JIT_CHANGED_DURING_BUILD:"
-            f"provisional_hash={provisional.book_hash or 'missing'}:"
-            f"final_hash={final.book_hash or 'missing'}"
-        )
-    for field_name in ("current_best_bid", "current_best_ask"):
-        before = getattr(provisional, field_name)
-        after = getattr(final, field_name)
-        if before is None or after is None:
-            matches = before is None and after is None
-        else:
-            matches = math.isclose(float(before), float(after), rel_tol=0.0, abs_tol=1e-12)
-        if not matches:
-            raise ValueError(
-                "PRE_SUBMIT_BOOK_AUTHORITY_JIT_CHANGED_DURING_BUILD:"
-                f"field={field_name}:provisional={before}:final={after}:"
-                f"book_hash={final.book_hash}"
-            )
 
 
 def _final_intent_worst_case_entry_cost(final_intent: DecisionCertificate) -> float:
