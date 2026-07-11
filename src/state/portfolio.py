@@ -3086,6 +3086,22 @@ def _semantic_value(value: object) -> str:
 
 
 def _is_runtime_open_position(pos: Position) -> bool:
+    # Excision T-consolidations #2 investigation (docs/rebuild/quarantine_excision_2026-07-11.md):
+    # this quarantined+chain-risk carve-out was surveyed against the canonical
+    # redecision-eligibility predicate (cycle_runtime._quarantined_position_can_redecision)
+    # and found to answer a genuinely different, broader question — "does this
+    # position still carry live venue exposure that must count as open for risk
+    # purposes" — NOT "can this quarantined position actively redecision this
+    # cycle". Confirmed deltas: (1) `has_current_money_risk_chain_state` checks
+    # membership in the 4-value CURRENT_MONEY_RISK_CHAIN_STATES set (synced,
+    # chain_present, exit_pending_missing, entry_authority_quarantined), while
+    # the canonical predicate's chain-state gate is the 1-value
+    # REDECISION_ELIGIBLE_QUARANTINE_CHAIN_STATES set ({entry_authority_quarantined});
+    # (2) no direction gate here; (3) no is_quarantine_placeholder exclusion here;
+    # (4) 0.0 exposure epsilon here vs. 0.01 in the canonical predicate. Forcing
+    # delegation would silently narrow "open" and drop real exposure from risk
+    # accounting, so this stays independent — see
+    # tests/test_quarantine_excision_t_consolidations_characterization.py::test_is_runtime_open_position_broader_than_canonical_predicate.
     state = _semantic_value(getattr(pos, "state", ""))
     chain_state = _semantic_value(getattr(pos, "chain_state", ""))
     chain_shares = _positive_chain_exposure_shares(pos)

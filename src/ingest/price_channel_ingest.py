@@ -1678,7 +1678,25 @@ def _edli_candidate_priority_token_ids(world_conn, *, lookback_hours: float = 48
 
 
 def _edli_held_position_priority_token_ids(trade_conn) -> set[str]:
-    """Tokens for open local/chain exposure that need immediate quote evidence."""
+    """Tokens for open local/chain exposure that need immediate quote evidence.
+
+    Excision T-consolidations #2 investigation (docs/rebuild/quarantine_excision_2026-07-11.md):
+    the ``phase IN ('quarantined','voided') AND chain_state IN CURRENT_MONEY_RISK_CHAIN_STATES``
+    exposure clause below was surveyed against the canonical redecision-eligibility
+    predicate (cycle_runtime._quarantined_position_can_redecision) and found to
+    answer a different question — "does this token need EDLI quote-priority
+    because it might still carry live risk" — not "can this position actively
+    redecision this cycle". Confirmed deltas: (1) includes phase='voided', which
+    the canonical predicate never admits; (2) CURRENT_MONEY_RISK_CHAIN_STATES is
+    a 4-value set (synced, chain_present, exit_pending_missing,
+    entry_authority_quarantined) vs. the canonical predicate's 1-value
+    REDECISION_ELIGIBLE_QUARANTINE_CHAIN_STATES; (3) no direction gate;
+    (4) a 1e-6 chain_shares epsilon here vs. 0.01 in the canonical predicate.
+    Same broader-concept relationship as portfolio._is_runtime_open_position
+    (see the comment there); not consolidated to avoid silently narrowing quote
+    priority. See
+    tests/test_quarantine_excision_t_consolidations_characterization.py::test_edli_priority_tokens_includes_voided_phase_and_broader_chain_states.
+    """
 
     if trade_conn is None:
         return set()
