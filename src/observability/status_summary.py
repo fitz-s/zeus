@@ -175,6 +175,13 @@ def write_cycle_pulse(cycle_summary: dict | None = None) -> None:
         "mode": get_mode(),
         "version": "zeus_v2",
     }
+    # A BOOT_BLOCKED payload is written only when startup exits before the
+    # scheduler exists. Reaching this pulse in a running daemon proves the
+    # current startup passed; never preserve a prior process's startup-only
+    # projection as fresh current status.
+    if str(prior.get("status") or "") == "BOOT_BLOCKED":
+        for key in ("status", "failure_reason", "live_boot", "live_action_authorized"):
+            status.pop(key, None)
     if cycle_summary is not None:
         incoming_cycle = dict(cycle_summary)
         prior_cycle = prior.get("cycle") if isinstance(prior, dict) else None

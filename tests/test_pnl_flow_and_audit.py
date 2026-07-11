@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import sqlite3
 from datetime import date, datetime, timedelta, timezone
@@ -1570,6 +1571,44 @@ def test_write_cycle_pulse_refreshes_timestamp_without_full_status_read_model(mo
     assert refreshed["execution"]["current_open_entry_orders"]["status"] == "ok"
     assert refreshed["execution"]["current_open_entry_orders"]["count"] == 0
     assert refreshed["truth"]["authority"] == "VERIFIED"
+
+
+def test_write_cycle_pulse_clears_prior_process_boot_block(monkeypatch, tmp_path):
+    status_path = tmp_path / "status_summary.json"
+    db_path = tmp_path / "zeus.db"
+    conn = get_connection(db_path)
+    init_schema(conn)
+    conn.close()
+    status_path.write_text(
+        json.dumps(
+            {
+                "status": "BOOT_BLOCKED",
+                "failure_reason": "LIVE_SIDECAR_BOOT_BLOCKED: old process",
+                "live_action_authorized": False,
+                "live_boot": {"ok": False, "boot_sha": "old"},
+                "timestamp": "2026-04-02T00:00:00+00:00",
+            }
+        )
+    )
+
+    monkeypatch.setattr(status_summary_module, "STATUS_PATH", status_path)
+    monkeypatch.setattr(
+        status_summary_module,
+        "get_trade_connection_with_world",
+        lambda: get_connection(db_path),
+    )
+    monkeypatch.setattr(status_summary_module, "_get_execution_capability_status", lambda: {})
+
+    status_summary_module.write_cycle_pulse(
+        {"mode": "edli_event_reactor", "candidates": 0}
+    )
+    refreshed = json.loads(status_path.read_text())
+
+    assert refreshed["process"]["pid"] == os.getpid()
+    assert "status" not in refreshed
+    assert "failure_reason" not in refreshed
+    assert "live_boot" not in refreshed
+    assert "live_action_authorized" not in refreshed
 
 
 def test_inv_write_status_drops_stale_pause_cycle_when_refreshing_after_resume(monkeypatch, tmp_path):
