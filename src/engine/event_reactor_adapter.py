@@ -5781,26 +5781,82 @@ def _global_jit_snapshot_advanced(
     )
 
 
-def _global_execution_curve_economically_unchanged(
+def _global_selected_order_economics_preserved(
     *,
-    selected_candidate: object,
+    decision: object,
     current_candidate: object,
 ) -> bool:
-    """Ignore evidence carriers but preserve the complete native ask economy."""
+    """Prove the fixed winning order remains executable without worse economics.
 
-    from src.solve.solver import executable_curve_identity
+    The whole ask ladder cannot be frozen between cross-market selection and venue
+    submit.  Only the selected order's exact share prefix is economically relevant
+    at that boundary.  Preserve the venue contract, then require that prefix to be
+    fully fillable at no higher raw VWAP, all-in cost, limit, or worst-case spend.
+    """
 
+    selected_candidate = getattr(decision, "candidate", None)
     selected = getattr(selected_candidate, "executable_cost_curve", None)
     current = getattr(current_candidate, "executable_cost_curve", None)
     if selected is None or current is None:
         return False
-    aligned = dataclass_replace(
-        selected,
-        snapshot_id=current.snapshot_id,
-        book_hash=current.book_hash,
-        quote_ttl=current.quote_ttl,
+    if any(
+        left != right
+        for left, right in (
+            (selected.token_id, current.token_id),
+            (selected.side, current.side),
+            (selected.fee_model, current.fee_model),
+            (selected.min_tick, current.min_tick),
+            (selected.min_order_size, current.min_order_size),
+        )
+    ):
+        return False
+    try:
+        shares = Decimal(str(getattr(decision, "shares")))
+        selected_cost = Decimal(str(getattr(decision, "cost_usd")))
+        selected_limit = Decimal(str(getattr(decision, "limit_price")))
+        selected_raw_vwap = Decimal(
+            str(getattr(decision, "expected_fill_price_before_fee"))
+        )
+        selected_max_spend = Decimal(str(getattr(decision, "max_spend_usd")))
+    except (ArithmeticError, TypeError, ValueError):
+        return False
+    if not all(
+        value.is_finite()
+        for value in (
+            shares,
+            selected_cost,
+            selected_limit,
+            selected_raw_vwap,
+            selected_max_spend,
+        )
+    ) or shares <= 0 or shares < current.min_order_size:
+        return False
+
+    remaining = shares
+    raw_cost = Decimal("0")
+    all_in_cost = Decimal("0")
+    current_limit: Decimal | None = None
+    for level in current.levels:
+        take = min(level.size, remaining)
+        if take > 0:
+            current_limit = level.price
+            raw_cost += take * level.price
+            all_in_cost += take * current.fee_model.all_in_price(level.price)
+            remaining -= take
+        if remaining <= Decimal("1e-18"):
+            break
+    if remaining > Decimal("1e-18") or current_limit is None:
+        return False
+
+    tolerance = Decimal("1e-12")
+    current_raw_vwap = raw_cost / shares
+    current_max_spend = shares * current.fee_model.all_in_price(current_limit)
+    return bool(
+        current_limit <= selected_limit
+        and current_raw_vwap <= selected_raw_vwap + tolerance
+        and all_in_cost <= selected_cost + tolerance
+        and current_max_spend <= selected_max_spend + tolerance
     )
-    return executable_curve_identity(aligned) == executable_curve_identity(current)
 
 
 def _global_actuation_selected_proof(
@@ -5900,14 +5956,11 @@ def _global_actuation_selected_proof(
             "GLOBAL_ACTUATION_EXECUTION_BINDING_SUPERSEDED:identity:"
             + ",".join(execution_identity_drift)
         )
-    # Snapshot, TTL, and the venue's full-book hash may differ after JIT recapture.
-    # The global optimum remains valid only when the complete executable native
-    # ask curve is economically identical.  Align evidence-only carriers, then
-    # require token, side, every ask level, fee, tick, and minimum order to remain
-    # byte-identical.  Any depth change can change the optimal shares and must be
-    # re-auctioned, even when the previously selected prefix still fills unchanged.
-    if not _global_execution_curve_economically_unchanged(
-        selected_candidate=candidate,
+    # Selection already compared the complete fresh universe.  Submit-time truth
+    # cannot atomically freeze every book; require the selected fixed-share prefix
+    # to remain fully executable and no worse than its certified boundaries.
+    if not _global_selected_order_economics_preserved(
+        decision=decision,
         current_candidate=rebound,
     ):
         raise ValueError(

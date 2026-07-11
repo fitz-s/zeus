@@ -293,8 +293,11 @@ def _jit_curve(
     )
 
 
-@pytest.mark.parametrize(("side", "token_id", "touch"), (("YES", "yes-1", "0.40"), ("NO", "no-1", "0.55")))
-def test_global_jit_curve_allows_only_evidence_carrier_churn(
+@pytest.mark.parametrize(
+    ("side", "token_id", "touch"),
+    (("YES", "yes-1", "0.40"), ("NO", "no-1", "0.55")),
+)
+def test_global_jit_curve_allows_evidence_and_irrelevant_tail_churn(
     side: str,
     token_id: str,
     touch: str,
@@ -305,24 +308,50 @@ def test_global_jit_curve_allows_only_evidence_carrier_churn(
         snapshot_id="selected",
         book_hash="selected-book",
         levels=((touch, "5"), ("0.70", "100")),
+        fee_rate="0.02",
     )
     current = _jit_curve(
         side=side,
         token_id=token_id,
         snapshot_id="jit",
         book_hash="jit-book",
-        levels=((touch, "5"), ("0.70", "100")),
+        levels=((touch, "5"), ("0.80", "99")),
+        fee_rate="0.02",
     )
 
-    assert era._global_execution_curve_economically_unchanged(
-        selected_candidate=SimpleNamespace(executable_cost_curve=selected),
+    all_in_touch = FeeModel(fee_rate=Decimal("0.02")).all_in_price(
+        Decimal(touch)
+    )
+    decision = SimpleNamespace(
+        candidate=SimpleNamespace(executable_cost_curve=selected),
+        shares=Decimal("5"),
+        cost_usd=Decimal("5") * all_in_touch,
+        limit_price=Decimal(touch),
+        expected_fill_price_before_fee=Decimal(touch),
+        max_spend_usd=Decimal("5") * all_in_touch,
+    )
+    assert era._global_selected_order_economics_preserved(
+        decision=decision,
         current_candidate=SimpleNamespace(executable_cost_curve=current),
     )
 
 
-@pytest.mark.parametrize(("side", "token_id", "touch"), (("YES", "yes-1", "0.40"), ("NO", "no-1", "0.55")))
-@pytest.mark.parametrize("drift", ("deep_price", "deep_size", "fee", "tick", "min_order"))
-def test_global_jit_curve_rejects_any_economic_drift(
+@pytest.mark.parametrize(
+    ("side", "token_id", "touch"),
+    (("YES", "yes-1", "0.40"), ("NO", "no-1", "0.55")),
+)
+@pytest.mark.parametrize(
+    "drift",
+    (
+        "selected_price",
+        "selected_size",
+        "insufficient_depth",
+        "fee",
+        "tick",
+        "min_order",
+    ),
+)
+def test_global_jit_curve_rejects_selected_order_economic_drift(
     side: str,
     token_id: str,
     touch: str,
@@ -345,10 +374,15 @@ def test_global_jit_curve_rejects_any_economic_drift(
         "min_tick": "0.01",
         "min_order_size": "5",
     }
-    if drift == "deep_price":
-        current_kwargs["levels"] = ((touch, "5"), ("0.71", "100"))
-    elif drift == "deep_size":
-        current_kwargs["levels"] = ((touch, "5"), ("0.70", "101"))
+    if drift == "selected_price":
+        current_kwargs["levels"] = (
+            (str(Decimal(touch) + Decimal("0.01")), "5"),
+            ("0.70", "100"),
+        )
+    elif drift == "selected_size":
+        current_kwargs["levels"] = ((touch, "4"), ("0.70", "100"))
+    elif drift == "insufficient_depth":
+        current_kwargs["levels"] = ((touch, "4"),)
     elif drift == "fee":
         current_kwargs["fee_rate"] = "0.02"
     elif drift == "tick":
@@ -357,30 +391,46 @@ def test_global_jit_curve_rejects_any_economic_drift(
         current_kwargs["min_order_size"] = "6"
     current = _jit_curve(**current_kwargs)
 
-    assert not era._global_execution_curve_economically_unchanged(
-        selected_candidate=SimpleNamespace(executable_cost_curve=selected),
+    decision = SimpleNamespace(
+        candidate=SimpleNamespace(executable_cost_curve=selected),
+        shares=Decimal("5"),
+        cost_usd=Decimal("5") * Decimal(touch),
+        limit_price=Decimal(touch),
+        expected_fill_price_before_fee=Decimal(touch),
+        max_spend_usd=Decimal("5") * Decimal(touch),
+    )
+    assert not era._global_selected_order_economics_preserved(
+        decision=decision,
         current_candidate=SimpleNamespace(executable_cost_curve=current),
     )
 
 
-def test_global_jit_curve_rejects_critic_deeper_liquidity_counterexample():
+def test_global_jit_curve_accepts_cheaper_selected_prefix():
     selected = _jit_curve(
         side="YES",
         token_id="yes-1",
         snapshot_id="selected",
         book_hash="selected-book",
-        levels=(("0.40", "5"), ("0.90", "100")),
+        levels=(("0.40", "10"), ("0.90", "100")),
     )
     current = _jit_curve(
         side="YES",
         token_id="yes-1",
         snapshot_id="jit",
         book_hash="jit-book",
-        levels=(("0.40", "5"), ("0.41", "100")),
+        levels=(("0.39", "5"), ("0.40", "5"), ("0.99", "100")),
     )
 
-    assert not era._global_execution_curve_economically_unchanged(
-        selected_candidate=SimpleNamespace(executable_cost_curve=selected),
+    decision = SimpleNamespace(
+        candidate=SimpleNamespace(executable_cost_curve=selected),
+        shares=Decimal("10"),
+        cost_usd=Decimal("4"),
+        limit_price=Decimal("0.40"),
+        expected_fill_price_before_fee=Decimal("0.40"),
+        max_spend_usd=Decimal("4"),
+    )
+    assert era._global_selected_order_economics_preserved(
+        decision=decision,
         current_candidate=SimpleNamespace(executable_cost_curve=current),
     )
 
