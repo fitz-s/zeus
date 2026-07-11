@@ -1127,6 +1127,7 @@ def _single_order_metrics(
     wealth_floor_usd: Decimal,
     wealth_ceiling_usd: Decimal,
     alpha: float,
+    robust_q: float | None = None,
 ) -> tuple[float, float, float, Decimal]:
     """Return robust Δlog, robust EV, Δlog/cost, and exact cost.
 
@@ -1142,18 +1143,17 @@ def _single_order_metrics(
     win_wealth = ceiling - float(cost) + float(shares)
     if lose_wealth <= 0.0 or win_wealth <= 0.0:
         return float("-inf"), float("-inf"), float("-inf"), cost
-    q = np.asarray(q_samples, dtype=np.float64)
-    # Coupling-robust endowment bound. A positive payoff's Δlog decreases with baseline
-    # wealth, so use the portfolio ceiling on wins. A loss's Δlog increases with baseline
-    # wealth, so use the floor on losses. This lower-bounds every unknown cross-family
-    # coupling without pairing marginal q draws or pretending the account is pure cash.
-    draw_du = q * math.log(win_wealth / ceiling) + (1.0 - q) * math.log(
-        lose_wealth / floor
-    )
-    weights = np.ones(q.size, dtype=np.float64)
-    robust_du = _lower_cvar(draw_du, weights, alpha)
-    draw_ev = q * float(shares) - float(cost)
-    robust_ev = _lower_cvar(draw_ev, weights, alpha)
+    if robust_q is None:
+        q = np.asarray(q_samples, dtype=np.float64)
+        robust_q = _lower_cvar(q, np.ones(q.size, dtype=np.float64), alpha)
+    # Coupling-robust endowment bound: wins use the portfolio ceiling and losses
+    # use the floor. Both outcome returns are positive-slope affine transforms of
+    # q; lower-CVaR is translation-equivariant and positive-homogeneous, so one
+    # tail reduction of q exactly serves every stake probe for this candidate.
+    lose_du = math.log(lose_wealth / floor)
+    win_du = math.log(win_wealth / ceiling)
+    robust_du = lose_du + float(robust_q) * (win_du - lose_du)
+    robust_ev = float(robust_q) * float(shares) - float(cost)
     efficiency = robust_du / float(cost) if cost > 0 else float("-inf")
     return float(robust_du), float(robust_ev), float(efficiency), cost
 
@@ -1161,8 +1161,7 @@ def _single_order_metrics(
 def _single_order_stationary_probes(
     curve: ExecutableCostCurve,
     *,
-    q_samples: np.ndarray,
-    alpha: float,
+    robust_q: Decimal,
     wealth_floor_usd: Decimal,
     wealth_ceiling_usd: Decimal,
     min_shares: Decimal,
@@ -1178,8 +1177,6 @@ def _single_order_stationary_probes(
     boundaries.  Venue-grid neighbors are applied by the caller.
     """
 
-    q = np.asarray(q_samples, dtype=np.float64)
-    robust_q = Decimal(str(_lower_cvar(q, np.ones(q.size, dtype=np.float64), alpha)))
     one = Decimal("1")
     probes = {Decimal(min_shares), Decimal(max_shares)}
     level_start = Decimal("0")
@@ -1264,10 +1261,11 @@ def _score_global_single_order(
             rejection_reasons={candidate.candidate_id: "DEPTH_INFEASIBLE"},
         )
 
+    q = np.asarray(q_samples, dtype=np.float64)
+    robust_q = _lower_cvar(q, np.ones(q.size, dtype=np.float64), band_alpha)
     raw_probes = _single_order_stationary_probes(
         candidate.executable_cost_curve,
-        q_samples=q_samples,
-        alpha=band_alpha,
+        robust_q=Decimal(str(robust_q)),
         wealth_floor_usd=wealth_floor_usd,
         wealth_ceiling_usd=wealth_ceiling_usd,
         min_shares=raw_min_shares,
@@ -1304,6 +1302,7 @@ def _score_global_single_order(
                 wealth_floor_usd=wealth_floor_usd,
                 wealth_ceiling_usd=wealth_ceiling_usd,
                 alpha=band_alpha,
+                robust_q=robust_q,
             )
             limit_price, expected_fill_price, max_spend = _single_order_execution_boundary(
                 candidate, shares
@@ -1366,6 +1365,7 @@ def _score_global_single_order(
                 wealth_floor_usd=wealth_floor_usd,
                 wealth_ceiling_usd=wealth_ceiling_usd,
                 alpha=band_alpha,
+                robust_q=robust_q,
             )
             limit_price, expected_fill_price, max_spend = _single_order_execution_boundary(
                 candidate, shares

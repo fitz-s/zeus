@@ -1313,6 +1313,72 @@ def test_global_single_order_binary_metric_has_only_win_one_and_lose_zero_states
     assert abs(robust_ev - (0.70 * 5.0 - float(cost))) < 1e-15
 
 
+def test_global_single_order_metrics_reuse_one_exact_probability_tail():
+    candidate = _global_candidate(
+        candidate_id="tail-reuse", family="tail-reuse", side="YES", q=0.70
+    )
+    q = np.linspace(0.31, 0.91, 401, dtype=np.float64)
+    alpha = 0.17
+    shares = Decimal("7.25")
+    floor = Decimal("83.25")
+    ceiling = Decimal("127.40")
+    cost = S._single_order_cost(candidate.executable_cost_curve, shares)
+    lose_du = np.log((float(floor) - float(cost)) / float(floor))
+    win_du = np.log(
+        (float(ceiling) - float(cost) + float(shares)) / float(ceiling)
+    )
+    weights = np.ones(q.size, dtype=np.float64)
+    expected_du = S._lower_cvar(q * win_du + (1.0 - q) * lose_du, weights, alpha)
+    expected_ev = S._lower_cvar(q * float(shares) - float(cost), weights, alpha)
+    robust_q = S._lower_cvar(q, weights, alpha)
+
+    robust_du, robust_ev, _efficiency, actual_cost = S._single_order_metrics(
+        candidate,
+        q_samples=q,
+        shares=shares,
+        wealth_floor_usd=floor,
+        wealth_ceiling_usd=ceiling,
+        alpha=alpha,
+        robust_q=robust_q,
+    )
+
+    assert actual_cost == cost
+    assert abs(robust_du - expected_du) < 1e-15
+    assert abs(robust_ev - expected_ev) < 1e-15
+
+
+def test_global_single_order_scores_probability_tail_once(monkeypatch):
+    candidate = _global_candidate(
+        candidate_id="one-tail-sort",
+        family="one-tail-sort",
+        side="YES",
+        q=0.70,
+        levels=(("0.19", "1.37"), ("0.34", "4.11"), ("0.57", "20")),
+    )
+    q = np.linspace(0.31, 0.91, 401, dtype=np.float64)
+    original = S._lower_cvar
+    calls = 0
+
+    def counted(values, weights, alpha):
+        nonlocal calls
+        calls += 1
+        return original(values, weights, alpha)
+
+    monkeypatch.setattr(S, "_lower_cvar", counted)
+    score = S._score_global_single_order(
+        candidate,
+        q_samples=q,
+        band_alpha=0.17,
+        wealth_floor_usd=Decimal("83.25"),
+        wealth_ceiling_usd=Decimal("127.40"),
+        spendable_cash_usd=Decimal("50"),
+        capital_limit_usd=Decimal("20"),
+    )
+
+    assert score.candidate is not None
+    assert calls == 1
+
+
 def test_global_single_order_excludes_superseded_q_book_and_capital_identity():
     q_old = _global_candidate(candidate_id="q-old", family="q", side="YES", q=0.70)
     book_old = _global_candidate(candidate_id="book-old", family="book", side="YES", q=0.70)
