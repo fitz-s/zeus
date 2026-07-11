@@ -23,6 +23,7 @@ from src.contracts.executable_market_snapshot import (
     fee_details_from_gamma_fee_schedule,
     fee_rate_fraction_from_details,
 )
+from src.contracts.fee_authority import resolve_taker_fee_fraction
 from src.events.candidate_binding import weather_family_id
 from src.events.event_writer import EventWriter
 from src.events.opportunity_event import OpportunityEvent
@@ -276,7 +277,9 @@ def _global_book_curve(
     )
     try:
         fee_details = json.loads(str(metadata.get("fee_details_json") or "{}"))
-        fee_rate = Decimal(str(fee_rate_fraction_from_details(fee_details)))
+        schedule_fee = fee_rate_fraction_from_details(fee_details)
+        fee_rate, _fee_source = resolve_taker_fee_fraction(schedule_fee)
+        fee_rate = Decimal(str(fee_rate))
     except (TypeError, ValueError, json.JSONDecodeError) as exc:
         raise ValueError(f"GLOBAL_BOOK_FEE_INVALID:{token_id}") from exc
     raw_hash = str(raw_book.get("hash") or "").strip()

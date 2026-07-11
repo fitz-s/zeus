@@ -33,6 +33,7 @@ import pytest
 import src.engine.qkernel_spine_bridge as bridge
 import src.engine.event_reactor_adapter as era
 import src.engine.global_batch_runtime as global_batch_runtime
+import src.engine.global_auction_universe as universe
 from src.decision_kernel import claims
 from src.decision_kernel.certificate import build_certificate
 from src.engine.global_single_order_auction import (
@@ -1343,6 +1344,38 @@ def _global_book_metadata_conn(probability):
                 (binding.condition_id, token, snapshot_id),
             )
     return conn
+
+
+def test_global_book_curve_uses_same_realized_fee_authority_as_jit(monkeypatch):
+    observed = []
+
+    def realized_fee(schedule):
+        observed.append(schedule)
+        return 0.0, "realized_test"
+
+    monkeypatch.setattr(universe, "resolve_taker_fee_fraction", realized_fee)
+    curve = universe._global_book_curve(
+        family_key="City|2026-07-11|high",
+        bin_id="bin-1",
+        condition_id="condition-1",
+        side="NO",
+        token_id="no-1",
+        raw_book={
+            "hash": "book-1",
+            "tick_size": "0.01",
+            "min_order_size": "5",
+            "asks": [{"price": "0.30", "size": "100"}],
+        },
+        metadata={"fee_details_json": '{"fee_rate_fraction":0.05}'},
+        captured_at_utc=_dt.datetime(
+            2026, 7, 11, 3, 0, tzinfo=_dt.timezone.utc
+        ),
+        max_age=_dt.timedelta(seconds=30),
+    )
+
+    assert observed == pytest.approx([0.05])
+    assert curve is not None
+    assert curve.fee_model.fee_rate == Decimal("0.0")
 
 
 def test_current_global_book_epoch_reads_yes_and_no_symmetrically():
