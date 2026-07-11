@@ -226,7 +226,7 @@ test_trust_policy:
     tests/money_path/test_edli_order_lifecycle.py: {created: "2026-05-25", last_used: "2026-05-25"}
     tests/money_path/test_edli_live_bridge_allocator_refresh.py: {created: "2026-05-31", last_used: "2026-05-31"}
     tests/money_path/test_edli_bankroll_warm_cycle.py: {created: "2026-05-31", last_used: "2026-05-31"}
-    tests/money_path/test_edli_market_substrate_warm_cycle.py: {created: "2026-06-01", last_used: "2026-06-26", note: "Warm-lane decoupling + venue-close warm-skip relationship tests. Extended 2026-06-26 to assert main/substrate snapshot refresh paths keep cross-process substrate orchestration locks but route per-row trade snapshot persist+commit through the unified write coordinator, not the legacy long db_writer_lock."}
+    tests/money_path/test_edli_market_substrate_warm_cycle.py: {created: "2026-06-01", last_used: "2026-07-11", note: "Warm-lane decoupling + venue-close warm-skip relationship tests. Extended 2026-07-11 to prove exact selected-winner recapture waits through a transient sidecar cross-process lock collision while preserving bounded fail-closed behavior."}
     tests/money_path/test_edli_durable_fill_bridge_scan.py: {created: "2026-06-01", last_used: "2026-06-03"}
     tests/state/test_edli_table_ownership.py: {created: "2026-05-24", last_used: "2026-06-26", note: "EDLI world/trade table ownership, including execution_feasibility_latest trade ownership."}
     tests/state/test_write_coordinator.py: {created: "2026-06-26", last_used: "2026-06-26", note: "Runtime DB write coordinator skeleton antibodies: same-file LIVE/BULK serialization, canonical multi-DB lease ordering, single-DB BEGIN IMMEDIATE commit/rollback telemetry, and rejection of fake independent multi-DB transactions."}

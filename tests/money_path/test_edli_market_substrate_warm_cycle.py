@@ -1,5 +1,5 @@
 # Created: 2026-06-01
-# Last reused/audited: 2026-07-08
+# Last reused/audited: 2026-07-11
 # Authority basis (2026-06-13 add): docs/archive/2026-Q2/operations_historical/live_inventory_warm_skip_2026-06-13.md —
 #   venue-close warm-skip relationship tests (live-inventory focus; market_phase.family_venue_closed).
 # Authority basis: src/main.py:_edli_event_reactor_cycle (historical inline substrate refresh
@@ -1144,6 +1144,72 @@ def test_money_path_priority_default_budget_can_finish_hot_snapshot_backlog(monk
     assert "timeout=lock_wait_s" in inspect.getsource(
         substrate_observer._edli_money_path_substrate_priority_cycle
     )
+
+
+def test_inline_winner_refresh_waits_through_sidecar_lock_collision(monkeypatch):
+    """A transient sidecar lock must not discard the exact FC-03 winner recapture."""
+
+    import src.data.dual_run_lock as dual_run_lock
+    import src.state.db as state_db
+
+    monkeypatch.delenv("ZEUS_MONEY_PATH_INLINE_SUBSTRATE_LOCK_WAIT_SECONDS", raising=False)
+    assert substrate_observer._inline_refresh_lock_wait_seconds() == pytest.approx(4.0)
+
+    lock_attempts: list[bool] = []
+    lock_exits: list[bool] = []
+    sleep_calls: list[float] = []
+
+    class _LockContext:
+        def __init__(self, acquired: bool):
+            self.acquired = acquired
+
+        def __enter__(self):
+            lock_attempts.append(self.acquired)
+            return self.acquired
+
+        def __exit__(self, *_args):
+            lock_exits.append(self.acquired)
+
+    lock_results = iter((False, True))
+    monkeypatch.setattr(
+        dual_run_lock,
+        "acquire_lock",
+        lambda _name: _LockContext(next(lock_results)),
+    )
+    monkeypatch.setattr(substrate_observer.time, "sleep", sleep_calls.append)
+
+    class _Conn:
+        def execute(self, sql, _params=()):
+            if sql == "PRAGMA database_list":
+                return self
+            return self
+
+        def fetchall(self):
+            return [(0, "main", "")]
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(state_db, "get_world_connection", _Conn)
+    monkeypatch.setattr(state_db, "get_forecasts_connection_read_only", _Conn)
+    monkeypatch.setattr(
+        substrate_observer,
+        "_refresh_pending_family_snapshots",
+        lambda *_args, **_kwargs: {"status": "refreshed", "inserted": 2},
+    )
+
+    summary = substrate_observer.refresh_money_path_substrate_now(
+        families=[("Wellington", "2026-07-12", "high")],
+        condition_ids=["winner-condition"],
+        force_refresh=True,
+    )
+
+    assert summary["status"] == "refreshed"
+    assert summary["inserted"] == 2
+    assert summary["lock_wait_seconds"] == pytest.approx(4.0)
+    assert lock_attempts == [False, True]
+    assert lock_exits == [False, True]
+    assert sleep_calls and sleep_calls[0] <= 0.05
 
 
 def test_open_rest_condition_scope_maps_unpulled_rests_to_priority_conditions():

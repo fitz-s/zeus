@@ -1,5 +1,5 @@
 # Created: 2026-06-08
-# Last reused or audited: 2026-06-29
+# Last reused or audited: 2026-07-11
 # Authority basis: docs/architecture/system_decomposition_plan.md
 #   §4.1 (Executable-Substrate Observer), §6 (P2 row), §7 I1 (no-back-coupling),
 #   §8 Step 1 (lift + DELETE outer pending gates), §9 (regression-unconstructable proof).
@@ -233,6 +233,17 @@ def _priority_refresh_lock_wait_seconds() -> float:
     except (TypeError, ValueError):
         value = 6.0
     return max(0.0, min(value, 15.0))
+
+
+def _inline_refresh_lock_wait_seconds() -> float:
+    """Bounded wait for the exact selected-winner refresh behind sidecar work."""
+
+    raw = os.environ.get("ZEUS_MONEY_PATH_INLINE_SUBSTRATE_LOCK_WAIT_SECONDS", "4.0")
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        value = 4.0
+    return max(0.0, min(value, 10.0))
 
 
 def _priority_snapshot_reserve_seconds(refresh_budget_s: float) -> float:
@@ -2846,13 +2857,22 @@ def refresh_money_path_substrate_now(
             "condition_ids_requested": 0,
         }
 
-    substrate_acquired = _market_substrate_refresh_lock.acquire(blocking=False)
+    lock_wait_s = _inline_refresh_lock_wait_seconds()
+    lock_wait_started = time.monotonic()
+    lock_deadline = lock_wait_started + lock_wait_s
+    substrate_acquired = (
+        _market_substrate_refresh_lock.acquire(blocking=False)
+        if lock_wait_s <= 0.0
+        else _market_substrate_refresh_lock.acquire(timeout=lock_wait_s)
+    )
     if not substrate_acquired:
         return {
             "status": "inline_skipped_in_process_lock_busy",
             "reason": str(reason or ""),
             "families_requested": len(clean_families),
             "condition_ids_requested": len(clean_condition_ids),
+            "lock_wait_seconds": lock_wait_s,
+            "lock_wait_elapsed_seconds": time.monotonic() - lock_wait_started,
         }
 
     process_lock_ctx = None
@@ -2861,15 +2881,25 @@ def refresh_money_path_substrate_now(
     try:
         from src.data.dual_run_lock import acquire_lock
 
-        process_lock_ctx = acquire_lock("market_substrate_refresh")
-        substrate_process_acquired = process_lock_ctx.__enter__()
-        if not substrate_process_acquired:
-            return {
-                "status": "inline_skipped_cross_process_lock_busy",
-                "reason": str(reason or ""),
-                "families_requested": len(clean_families),
-                "condition_ids_requested": len(clean_condition_ids),
-            }
+        while True:
+            process_lock_ctx = acquire_lock("market_substrate_refresh")
+            substrate_process_acquired = process_lock_ctx.__enter__()
+            if substrate_process_acquired:
+                break
+            process_lock_ctx.__exit__(None, None, None)
+            process_lock_ctx = None
+            lock_remaining_s = lock_deadline - time.monotonic()
+            if lock_remaining_s <= 0.0:
+                return {
+                    "status": "inline_skipped_cross_process_lock_busy",
+                    "reason": str(reason or ""),
+                    "families_requested": len(clean_families),
+                    "condition_ids_requested": len(clean_condition_ids),
+                    "lock_wait_seconds": lock_wait_s,
+                    "lock_wait_elapsed_seconds": time.monotonic() - lock_wait_started,
+                }
+            time.sleep(min(0.05, lock_remaining_s))
+        lock_wait_elapsed_s = time.monotonic() - lock_wait_started
 
         from src.state.db import (
             ZEUS_FORECASTS_DB_PATH,
@@ -2907,6 +2937,8 @@ def refresh_money_path_substrate_now(
                 "reason": str(reason or ""),
                 "families_requested": len(clean_families),
                 "condition_ids_requested": len(clean_condition_ids),
+                "lock_wait_seconds": lock_wait_s,
+                "lock_wait_elapsed_seconds": lock_wait_elapsed_s,
             }
         )
         logger.info("money-path substrate inline refresh: %r", out)
