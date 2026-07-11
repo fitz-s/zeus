@@ -567,6 +567,56 @@ def test_global_target_is_visible_beyond_old_pending_active_scan_window():
     assert [event.event_id for event in fetched] == [target.event_id]
 
 
+def test_latest_global_target_crosses_a_full_page_of_older_family_targets():
+    """Only the latest global winner owns the next-claim lane across families."""
+
+    conn, store = _store()
+    from src.engine.global_batch_runtime import _next_claim_carrier
+
+    older = []
+    for index in range(13):
+        base = _forecast_event(
+            f"older-global-target-{index}",
+            target_date=f"2026-06-{index + 1:02d}",
+        )
+        target = _next_claim_carrier(
+            base,
+            targeted_at=_DT_VENUE_OPEN + timedelta(seconds=index),
+            economic_identity=f"older-economic-identity-{index}",
+            payload=json.loads(base.payload_json),
+        )
+        assert store.prioritize_global_winner(target)
+        older.append(target)
+
+    base = _forecast_event("latest-global-target", target_date="2026-05-25")
+    latest = _next_claim_carrier(
+        base,
+        targeted_at=_DT_VENUE_OPEN + timedelta(seconds=13),
+        economic_identity="latest-economic-identity",
+        payload=json.loads(base.payload_json),
+    )
+    assert store.prioritize_global_winner(latest)
+
+    # Mirror the live ordering: finalization touches a full claimed page after
+    # materializing the new target, making the older targets newer by updated_at.
+    for index, target in enumerate(older[:12], start=1):
+        conn.execute(
+            "UPDATE opportunity_event_processing SET updated_at = ? WHERE event_id = ?",
+            (
+                (_DT_VENUE_OPEN + timedelta(minutes=1, seconds=index)).isoformat(),
+                target.event_id,
+            ),
+        )
+
+    fetched = store.fetch_pending(
+        decision_time=(_DT_VENUE_OPEN + timedelta(minutes=2)).isoformat(),
+        limit=12,
+    )
+
+    assert fetched[0].event_id == latest.event_id
+    assert latest.event_id not in {event.event_id for event in fetched[1:]}
+
+
 def test_global_target_does_not_preempt_stale_processing_recovery():
     conn, store = _store()
     stale = _day0_event("stale")

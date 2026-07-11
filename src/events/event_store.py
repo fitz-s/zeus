@@ -484,6 +484,33 @@ class EventStore:
         # only, then point-read events by event_id and do tier/city ranking in Python.
         active_limit = max(limit * 512, limit + 20_000)
         active_rows: list[tuple[str, int, str, int]] = []
+        # A target is inserted before the current batch's claimed rows are
+        # finalized.  Finalization then updates as many as ``limit`` older target
+        # rows after the new target, so the generic newest-row probe below can
+        # page the actual winner out by exactly one slot.  Read one extra targeted
+        # row through the status/update index; after event rows are loaded we keep
+        # only the carrier with the newest ``received_at`` as the global target.
+        active_rows.extend(
+            (str(row[0] or ""), _safe_int(row[1]), str(row[2] or ""), 0)
+            for row in self.conn.execute(
+                """
+                SELECT p.event_id, p.attempt_count, p.last_error
+                  FROM opportunity_event_processing p
+                       INDEXED BY idx_opportunity_event_processing_status
+                 WHERE p.consumer_name = ?
+                   AND p.processing_status = 'pending'
+                   AND p.claimed_at IS NULL
+                   AND p.last_error = ?
+                 ORDER BY p.updated_at DESC
+                 LIMIT ?
+                """,
+                (
+                    self.consumer_name,
+                    GLOBAL_WINNER_TARGETED_CLAIM,
+                    max(1, limit + 1),
+                ),
+            ).fetchall()
+        )
         # A global-auction winner that was outside the current claim page is
         # materialized as a fresh pending row with
         # last_error=GLOBAL_WINNER_TARGETED_CLAIM.  The debt/fairness probe below
@@ -623,8 +650,14 @@ class EventStore:
             decision_time_utc=parsed_decision_time,
         )
         rank_rows = []
+        targeted_generations: dict[str, str] = {}
         for row in rows:
             event = _event_from_row(row)
+            if (
+                last_error_by_event.get(event.event_id)
+                == GLOBAL_WINNER_TARGETED_CLAIM
+            ):
+                targeted_generations[event.event_id] = event.received_at
             payload = _event_payload_dict(event)
             family_key = _forecast_family_key_from_payload(payload)
             redecision_origin = str(payload.get("redecision_origin") or "").strip().lower()
@@ -656,9 +689,17 @@ class EventStore:
                 )
 
         targeted_event_ids = frozenset(
-            event_id
-            for event_id, reason in last_error_by_event.items()
-            if reason == GLOBAL_WINNER_TARGETED_CLAIM
+            {
+                max(
+                    targeted_generations,
+                    key=lambda event_id: (
+                        targeted_generations[event_id],
+                        event_id,
+                    ),
+                )
+            }
+            if targeted_generations
+            else ()
         )
         ranked = _rank_pending_rows_python(
             rank_rows,
