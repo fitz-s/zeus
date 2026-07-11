@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-# Lifecycle: created=2026-05-11; last_reviewed=2026-05-18; last_reused=2026-05-22
+# Lifecycle: created=2026-05-11; last_reviewed=2026-07-11; last_reused=2026-07-11
 # Purpose: One-shot live health signal for daemon, forecast-live owner, riskguard, status summary, and entry capability.
 # Reuse: Run when live process ownership, forecast-live heartbeat semantics, or operator health alerts change.
 # Created: 2026-05-11
-# Last reused/audited: 2026-07-09
+# Last reused/audited: 2026-07-11
 # Authority basis: docs/archive/2026-Q2/task_2026-05-15_live_order_e2e_verification/LIVE_ORDER_E2E_VERIFICATION_PLAN.md; docs/archive/2026-Q2/task_2026-05-16_live_continuous_run_package/LIVE_CONTINUOUS_RUN_PACKAGE_PLAN.md Phase C; 2026-05-17 volatile runtime-artifact code-plane contract.
 """One-shot live health probe.
 
@@ -773,20 +773,35 @@ def _entry_probability_evidence_status(root):
     """Read-only proof that active exposure has strict entry q_lcb evidence."""
 
     trade_db = os.path.join(root, "state/zeus_trades.db")
+    world_db = os.path.join(root, "state/zeus-world.db")
     if not os.path.exists(trade_db):
         return {"ok": True, "evaluated": False, "issue": "TRADE_DB_MISSING"}
+    if not os.path.exists(world_db):
+        return {
+            "ok": False,
+            "evaluated": True,
+            "issue": "ENTRY_PROBABILITY_EVIDENCE_WORLD_DB_MISSING",
+        }
+    trade_conn = None
+    world_conn = None
     try:
-        conn = sqlite3.connect(f"file:{trade_db}?mode=ro", uri=True, timeout=5)
-        conn.row_factory = sqlite3.Row
+        trade_conn = sqlite3.connect(f"file:{trade_db}?mode=ro", uri=True, timeout=5)
+        world_conn = sqlite3.connect(f"file:{world_db}?mode=ro", uri=True, timeout=5)
+        trade_conn.row_factory = sqlite3.Row
+        world_conn.row_factory = sqlite3.Row
     except sqlite3.Error as exc:
+        if trade_conn is not None:
+            trade_conn.close()
+        if world_conn is not None:
+            world_conn.close()
         return {
             "ok": False,
             "evaluated": True,
             "issue": f"ENTRY_PROBABILITY_EVIDENCE_READ_UNAVAILABLE:{exc}",
         }
     try:
-        position_columns = _table_columns(conn, "position_current")
-        certificate_columns = _table_columns(conn, "decision_certificates")
+        position_columns = _table_columns(trade_conn, "position_current")
+        certificate_columns = _table_columns(world_conn, "decision_certificates")
         if not position_columns:
             return {
                 "ok": False,
@@ -836,7 +851,7 @@ def _entry_probability_evidence_status(root):
 
         positions = [
             dict(row)
-            for row in conn.execute(
+            for row in trade_conn.execute(
                 """
                 SELECT position_id, phase, order_status, shares, chain_shares,
                        entry_price, p_posterior, direction, condition_id, token_id,
@@ -855,7 +870,7 @@ def _entry_probability_evidence_status(root):
         nonpositive = []
         covered = 0
         samples = []
-        certificates = _entry_probability_certificate_map(conn, positions)
+        certificates = _entry_probability_certificate_map(world_conn, positions)
         for position in positions:
             entry_price = _finite_float(position.get("entry_price"))
             certificate = certificates.get(_entry_probability_expected_key(position))
@@ -936,7 +951,10 @@ def _entry_probability_evidence_status(root):
             "issue": f"ENTRY_PROBABILITY_EVIDENCE_READ_UNAVAILABLE:{exc}",
         }
     finally:
-        conn.close()
+        if trade_conn is not None:
+            trade_conn.close()
+        if world_conn is not None:
+            world_conn.close()
 
 
 def _direct_head_live_health_surfaces(root, *, status_summary, heartbeat):

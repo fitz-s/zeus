@@ -563,7 +563,7 @@ test_trust_policy:
     tests/test_ecmwf_opendata_ingest_schedule.py: {created: "2026-05-23", last_used: "2026-05-23"}
     tests/test_check_data_pipeline_live_e2e.py: {created: "2026-05-15", last_used: "2026-05-15"}
     tests/test_check_live_order_e2e.py: {created: "2026-05-15", last_used: "2026-05-15"}
-    tests/test_live_health_probe_forecast_owner.py: {created: "2026-05-15", last_used: "2026-07-09", note: "Extended stale-composite-schema antibody: live_health_probe distinguishes daemon-written composite missing new surfaces from direct HEAD read-only pending-exit/monitor freshness truth."}
+    tests/test_live_health_probe_forecast_owner.py: {created: "2026-05-15", last_used: "2026-07-11", note: "Extended canonical-owner and stale-composite-schema antibody: live_health_probe joins trade-DB exposure to world-DB decision certificates and distinguishes daemon-written composite gaps from direct HEAD read-only truth."}
     tests/test_admission_severity_schema.py: {created: "2026-05-07", last_used: "2026-05-07"}
     tests/test_attach_narrow_except.py: {created: "2026-05-05", last_used: "2026-05-05"}
     tests/test_backfill_harvester_settlements_isolation.py: {created: "2026-05-11", last_used: "2026-05-11"}

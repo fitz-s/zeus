@@ -1,8 +1,8 @@
-# Lifecycle: created=2026-05-15; last_reviewed=2026-07-08; last_reused=2026-07-08
+# Lifecycle: created=2026-05-15; last_reviewed=2026-07-11; last_reused=2026-07-11
 # Purpose: Lock forecast-live as the canonical forecast owner for live health alerts.
 # Reuse: Run when live_health_probe process/heartbeat classification or forecast-live launch ownership changes.
 # Created: 2026-05-15
-# Last reused or audited: 2026-07-09
+# Last reused or audited: 2026-07-11
 # Authority basis: docs/archive/2026-Q2/task_2026-05-15_live_order_e2e_verification/LIVE_ORDER_E2E_VERIFICATION_PLAN.md; docs/archive/2026-Q2/task_2026-05-16_live_continuous_run_package/LIVE_CONTINUOUS_RUN_PACKAGE_PLAN.md Phase C; 2026-05-17 volatile runtime-artifact code-plane contract.
 
 from __future__ import annotations
@@ -306,9 +306,11 @@ def _write_trade_db_with_entry_probability_evidence(
     q_lcb: float = 0.72,
     entry_price: float = 0.60,
 ) -> None:
-    db_path = root / "state" / "zeus_trades.db"
-    db_path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(db_path)
+    trade_db = root / "state" / "zeus_trades.db"
+    world_db = root / "state" / "zeus-world.db"
+    trade_db.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(trade_db)
+    world = sqlite3.connect(world_db)
     try:
         conn.execute(
             """
@@ -340,7 +342,7 @@ def _write_trade_db_with_entry_probability_evidence(
             )
             """
         )
-        conn.execute(
+        world.execute(
             """
             CREATE TABLE decision_certificates (
                 certificate_id TEXT PRIMARY KEY,
@@ -391,7 +393,7 @@ def _write_trade_db_with_entry_probability_evidence(
                     "source": "qkernel_spine",
                 },
             }
-            conn.execute(
+            world.execute(
                 """
                 INSERT INTO decision_certificates (
                     certificate_id, certificate_type, decision_time, created_at,
@@ -406,8 +408,10 @@ def _write_trade_db_with_entry_probability_evidence(
                 (json.dumps(payload),),
             )
         conn.commit()
+        world.commit()
     finally:
         conn.close()
+        world.close()
 
 
 def test_data_ingest_support_daemon_required_even_when_forecast_live_owner_alive(
