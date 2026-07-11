@@ -600,8 +600,22 @@ def _global_score(
     )
 
 
-def _global_exact_oracle(candidate, *, floor="100", ceiling="100", cap="5"):
-    q_samples, alpha = _global_probability_projection(candidate)
+def _global_exact_oracle(
+    candidate,
+    *,
+    floor="100",
+    ceiling="100",
+    cap="5",
+    q_samples=None,
+    alpha=None,
+):
+    projected_q, projected_alpha = _global_probability_projection(candidate)
+    q_samples = (
+        projected_q
+        if q_samples is None
+        else np.asarray(q_samples, dtype=float)
+    )
+    alpha = projected_alpha if alpha is None else float(alpha)
     max_shares = S._single_order_max_shares(
         candidate.executable_cost_curve,
         spend_limit_usd=min(Decimal(floor) * Decimal("0.999999999"), Decimal(cap)),
@@ -633,6 +647,51 @@ def _global_exact_oracle(candidate, *, floor="100", ceiling="100", cap="5"):
             best = (*metrics, shares)
         shares += Decimal("0.01")
     return best
+
+
+@pytest.mark.parametrize("side", ("YES", "NO"))
+@pytest.mark.parametrize(
+    ("floor", "ceiling", "q_samples", "alpha"),
+    (
+        ("83.25", "127.40", np.linspace(0.51, 0.91, 80), 0.10),
+        ("250.75", "401.20", np.linspace(0.62, 0.84, 41), 0.20),
+        ("91.10", "91.10", np.array([0.58] * 20 + [0.86] * 60), 0.25),
+    ),
+)
+def test_global_single_order_closed_form_matches_exact_venue_grid_oracle(
+    side, floor, ceiling, q_samples, alpha
+):
+    candidate = _global_candidate(
+        candidate_id=f"closed-form-{side}-{floor}",
+        family=f"closed-form-{side}-{floor}",
+        side=side,
+        q=0.70,
+        levels=(("0.19", "1.37"), ("0.34", "4.11"), ("0.57", "20")),
+        fee="0.035",
+    )
+    oracle = _global_exact_oracle(
+        candidate,
+        floor=floor,
+        ceiling=ceiling,
+        cap="7.25",
+        q_samples=q_samples,
+        alpha=alpha,
+    )
+    score = S._score_global_single_order(
+        candidate,
+        q_samples=q_samples,
+        band_alpha=alpha,
+        wealth_floor_usd=Decimal(floor),
+        wealth_ceiling_usd=Decimal(ceiling),
+        spendable_cash_usd=Decimal("100"),
+        capital_limit_usd=Decimal("7.25"),
+    )
+
+    assert oracle is not None
+    assert score.candidate is not None
+    assert score.shares == oracle[4]
+    assert score.cost_usd == oracle[3]
+    assert abs(score.robust_delta_log_wealth - oracle[0]) < 1e-12
 
 
 def _global_witness(

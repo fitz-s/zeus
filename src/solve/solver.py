@@ -64,7 +64,6 @@ from scipy.optimize import (
     LinearConstraint,
     NonlinearConstraint,
     minimize,
-    minimize_scalar,
 )
 
 from src.contracts.executable_cost_curve import ExecutableCostCurve
@@ -1159,6 +1158,59 @@ def _single_order_metrics(
     return float(robust_du), float(robust_ev), float(efficiency), cost
 
 
+def _single_order_stationary_probes(
+    curve: ExecutableCostCurve,
+    *,
+    q_samples: np.ndarray,
+    alpha: float,
+    wealth_floor_usd: Decimal,
+    wealth_ceiling_usd: Decimal,
+    min_shares: Decimal,
+    max_shares: Decimal,
+) -> set[Decimal]:
+    """Return every continuous optimum candidate on a piecewise-linear ladder.
+
+    For positive shares the win-vs-lose log-return gap is positive, so lower-CVaR
+    of the affine-in-q objective is the same objective evaluated at lower-CVaR(q).
+    On one ladder level ``cost(s) = p*s + d``; the resulting binary log-wealth
+    objective is concave and has at most one stationary point.  Therefore the
+    global continuous optimum is among those stationary points and ladder/capital
+    boundaries.  Venue-grid neighbors are applied by the caller.
+    """
+
+    q = np.asarray(q_samples, dtype=np.float64)
+    robust_q = Decimal(str(_lower_cvar(q, np.ones(q.size, dtype=np.float64), alpha)))
+    one = Decimal("1")
+    probes = {Decimal(min_shares), Decimal(max_shares)}
+    level_start = Decimal("0")
+    cost_start = Decimal("0")
+    for level in curve.levels:
+        price = curve.fee_model.all_in_price(level.price)
+        level_end = level_start + level.size
+        segment_lo = max(level_start, min_shares)
+        segment_hi = min(level_end, max_shares)
+        if segment_lo <= segment_hi:
+            probes.update((segment_lo, segment_hi))
+            denominator = price * (one - price)
+            if denominator != 0:
+                cost_intercept = cost_start - price * level_start
+                stationary = (
+                    robust_q
+                    * (one - price)
+                    * (wealth_floor_usd - cost_intercept)
+                    - (one - robust_q)
+                    * price
+                    * (wealth_ceiling_usd - cost_intercept)
+                ) / denominator
+                if segment_lo <= stationary <= segment_hi:
+                    probes.add(stationary)
+        if level_end >= max_shares:
+            break
+        cost_start += level.size * price
+        level_start = level_end
+    return probes
+
+
 def _score_global_single_order(
     candidate: GlobalSingleOrderCandidate,
     *,
@@ -1212,44 +1264,15 @@ def _score_global_single_order(
             rejection_reasons={candidate.candidate_id: "DEPTH_INFEASIBLE"},
         )
 
-    def _continuous_objective(raw_shares: float) -> float:
-        shares = Decimal(str(raw_shares))
-        try:
-            return -_single_order_metrics(
-                candidate,
-                q_samples=q_samples,
-                shares=shares,
-                wealth_floor_usd=wealth_floor_usd,
-                wealth_ceiling_usd=wealth_ceiling_usd,
-                alpha=band_alpha,
-            )[0]
-        except ValueError:
-            return float("inf")
-
-    raw_probes = {raw_min_shares, raw_max_shares}
-    if raw_max_shares > raw_min_shares:
-        result = minimize_scalar(
-            _continuous_objective,
-            method="bounded",
-            bounds=(float(raw_min_shares), float(raw_max_shares)),
-            options={"xatol": 1e-10, "maxiter": 300},
-        )
-        if result.success and math.isfinite(float(result.x)):
-            raw = Decimal(str(result.x)) / _SIZE_QUANTUM
-            for units in (
-                raw.to_integral_value(rounding=ROUND_FLOOR),
-                raw.to_integral_value(rounding=ROUND_CEILING),
-            ):
-                raw_probes.add(units * _SIZE_QUANTUM)
-    cumulative = Decimal("0")
-    for level in candidate.executable_cost_curve.levels:
-        cumulative += level.size
-        raw = cumulative / _SIZE_QUANTUM
-        for units in (
-            raw.to_integral_value(rounding=ROUND_FLOOR),
-            raw.to_integral_value(rounding=ROUND_CEILING),
-        ):
-            raw_probes.add(units * _SIZE_QUANTUM)
+    raw_probes = _single_order_stationary_probes(
+        candidate.executable_cost_curve,
+        q_samples=q_samples,
+        alpha=band_alpha,
+        wealth_floor_usd=wealth_floor_usd,
+        wealth_ceiling_usd=wealth_ceiling_usd,
+        min_shares=raw_min_shares,
+        max_shares=raw_max_shares,
+    )
 
     probes: set[Decimal] = set()
     for raw_probe in raw_probes:
