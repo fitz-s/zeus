@@ -429,6 +429,18 @@ def process_current_global_batch(
         )
         stage_started = now
 
+    def log_no_trade(stage: str, decision: object) -> None:
+        counts: dict[str, int] = {}
+        for reason in getattr(decision, "rejection_reasons", {}).values():
+            key = str(reason or "unknown")
+            counts[key] = counts.get(key, 0) + 1
+        _LOG.info(
+            "global batch no-trade detail: stage=%s reason=%s rejections=%s",
+            stage,
+            str(getattr(decision, "no_trade_reason", "") or "unknown"),
+            dict(sorted(counts.items())),
+        )
+
     def current_time() -> datetime:
         now = current_time_provider()
         if now.tzinfo is None:
@@ -632,6 +644,7 @@ def process_current_global_batch(
         selected = select_once(probabilities, book_epoch, prepared_by_event)
         log_stage("select_initial", families=len(prepared_by_event))
         if selected.decision.candidate is None:
+            log_no_trade("select_initial", selected.decision)
             return reject(
                 "GLOBAL_AUCTION_NO_TRADE:"
                 f"{selected.decision.no_trade_reason or 'unknown'}"
@@ -697,6 +710,7 @@ def process_current_global_batch(
             )
             log_stage("select_fence", families=len(prepared_by_event))
             if selected.decision.candidate is None:
+                log_no_trade("select_fence", selected.decision)
                 return reject(
                     "GLOBAL_REAUCTION_NO_TRADE:"
                     f"{selected.decision.no_trade_reason or 'unknown'}"
@@ -765,6 +779,7 @@ def process_current_global_batch(
                 }
                 selected = select_once(probabilities_1, book_epoch_1, prepared_1)
                 if selected.decision.candidate is None:
+                    log_no_trade("select_curve_overlay", selected.decision)
                     return reject(
                         "GLOBAL_REAUCTION_NO_TRADE:"
                         f"{selected.decision.no_trade_reason or 'unknown'}"
