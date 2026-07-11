@@ -62,13 +62,14 @@ REQUIRED_LIVE_HEALTH_SURFACES = (
     "forecast_pipeline",
     "forecast_event_bridge",
     "entry_q_version",
-    "entry_probability_evidence",
     "pending_exit_release_loop",
     "monitor_probability_freshness",
     "day0_decision_trace",
     "status_summary",
     "execution_capability",
 )
+# Entry probability evidence is computed by this probe from canonical trade/world
+# DBs and classified separately; it is not a daemon-composite-owned surface.
 DIRECT_HEAD_LIVE_HEALTH_SURFACES = (
     "runtime_code",
     "forecast_event_bridge",

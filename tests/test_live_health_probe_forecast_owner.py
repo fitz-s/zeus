@@ -489,6 +489,12 @@ def test_live_probe_entry_probability_evidence_accepts_positive_q_lcb(tmp_path):
     assert status["covered_sample"][0]["q_lcb"] == 0.72
 
 
+def test_entry_probability_evidence_is_not_composite_owned():
+    module = _load_module()
+
+    assert "entry_probability_evidence" not in module.REQUIRED_LIVE_HEALTH_SURFACES
+
+
 def test_live_probe_alerts_on_missing_entry_probability_evidence(
     tmp_path, monkeypatch, capsys
 ):
