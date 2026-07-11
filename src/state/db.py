@@ -5020,6 +5020,10 @@ _TRADE_CLASS_TABLES: frozenset[str] = frozenset({
     "_migrations_applied",
     "book_hash_transitions",
     "decision_integrity_quarantine",
+    # Quarantine excision foundation (docs/rebuild/quarantine_excision_2026-07-11.md):
+    # owner-local ReviewWorkItem table + its sibling exposure-fact table.
+    "review_work_items",
+    "entry_exposure_obligations",
     "execution_fact",
     "execution_feasibility_evidence",
     "executable_market_snapshots",
@@ -5953,6 +5957,15 @@ def init_schema_trade_only(conn: sqlite3.Connection) -> None:
     # PR-E (2026-05-22): decision_integrity_quarantine lives on the trade DB.
     from src.state.schema.decision_integrity_quarantine_schema import ensure_table as _ensure_decision_integrity_quarantine_table
     _ensure_decision_integrity_quarantine_table(conn)
+    # Quarantine excision foundation (docs/rebuild/quarantine_excision_2026-07-11.md
+    # "Consult adjudication"): review_work_items is the owner-local ReviewWorkItem
+    # table, instantiated trade-DB-first; entry_exposure_obligations is its sibling
+    # exposure-fact table (BLOCKER-1). Neither is consumed by any runtime seam yet —
+    # T2/T4/T5 wire consumers in later packets.
+    from src.state.schema.review_work_items_schema import ensure_table as _ensure_review_work_items_table
+    _ensure_review_work_items_table(conn)
+    from src.state.schema.entry_exposure_obligations_schema import ensure_table as _ensure_entry_exposure_obligations_table
+    _ensure_entry_exposure_obligations_table(conn)
     try:
         conn.execute("ALTER TABLE trade_decisions ADD COLUMN env TEXT NOT NULL DEFAULT 'live';")
     except sqlite3.OperationalError:

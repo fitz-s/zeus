@@ -483,6 +483,13 @@ files:
     why: Carries edge provenance across strategy/execution seams.
     downstream:
     - src/engine/monitor_refresh.py
+  src/contracts/entry_exposure_obligation.py:
+    zone: K0_frozen_kernel
+    authority_role: entry_exposure_obligation_contract
+    why: "Quarantine excision foundation (2026-07-11, docs/rebuild/quarantine_excision_2026-07-11.md BLOCKER-1): the conservative-bound (or unbounded) leg of the three-way per-command exposure law (authoritative settled economics | bounded EntryExposureObligation | unbounded -> DATA_DEGRADED via a ReviewWorkItem). shares x $1 long-only-CTF worst-case bound documented prominently; storage is a SIBLING trade-DB table to review_work_items, not a shared row shape (see src/state/schema/entry_exposure_obligations_schema.py docstring). Foundation only — not consumed by any runtime seam in this packet; T2 wires total_open_obligation_usd/has_unbounded_obligation into exposure/heat accounting."
+    downstream:
+    - src/state/entry_exposure_obligation.py
+    - src/state/schema/entry_exposure_obligations_schema.py
   src/contracts/epistemic_context.py:
     zone: K0_frozen_kernel
     authority_role: uncertainty_contract
@@ -610,6 +617,14 @@ files:
     why: Verifies reality contracts against current evidence.
     downstream:
     - src/contracts/reality_contract.py
+  src/contracts/review_work_item.py:
+    zone: K0_frozen_kernel
+    authority_role: review_work_item_contract
+    why: "Quarantine excision foundation (2026-07-11, docs/rebuild/quarantine_excision_2026-07-11.md Consult adjudication): the owner-local ReviewWorkItem protocol contract replacing scattered quarantine-state mechanisms — frozen dataclass, extensible ReviewReasonCode vocabulary (not DB-CHECK-constrained, see src/state/schema/review_work_items_schema.py docstring), closed WorkItemStatus (OPEN/RESOLVED/SUPERSEDED), and the ResolveWorkItemRequest operator-command shape T6 will bind to a live release valve. FamilyKey is a structural mirror of src.strategy.family_exclusive_dedup.WeatherFamilyKey (K0 must not import K3; src/state/review_work_items.py converts 1:1). Foundation only — not consumed by any runtime seam in this packet."
+    downstream:
+    - src/state/review_work_items.py
+    - src/state/schema/review_work_items_schema.py
+    - src/contracts/entry_exposure_obligation.py
   src/contracts/semantic_types.py:
     zone: K0_frozen_kernel
     authority_role: semantic_atom_contracts
@@ -2645,6 +2660,20 @@ files:
     - src/state/db.py
     - src/events/triggers/market_channel_ingestor.py
     - src/ingest/price_channel_ingest.py
+  src/state/schema/review_work_items_schema.py:
+    zone: K2_runtime
+    authority_role: review_work_items_schema_owner
+    why: "Quarantine excision foundation (2026-07-11): DDL owner for review_work_items, callable against ANY owning-DB conn (trade first via init_schema_trade_only; forecasts/world instantiate the identical shape later against their own connections). Partial unique index on (owner_table, subject_id, reason_code, authority_revision) WHERE status='OPEN' is the idempotent-open guarantee; reason_code deliberately has no CHECK (extensible vocabulary, avoids SQLite's cannot-ALTER-CHECK rebuild churn)."
+    downstream:
+    - src/state/db.py
+    - src/state/review_work_items.py
+  src/state/schema/entry_exposure_obligations_schema.py:
+    zone: K2_runtime
+    authority_role: entry_exposure_obligations_schema_owner
+    why: "Quarantine excision foundation (2026-07-11, BLOCKER-1): DDL owner for entry_exposure_obligations, SIBLING to review_work_items on the trade DB (see module docstring for the shape-separation rationale vs. co-locating in review_work_items)."
+    downstream:
+    - src/state/db.py
+    - src/state/entry_exposure_obligation.py
   src/state/schema/market_channel_connectivity_schema.py:
     zone: K2_runtime
     authority_role: market_channel_connectivity_schema_owner
@@ -2673,6 +2702,20 @@ files:
     - shoulder_exposure_ledger
     downstream:
     - src/strategy/shoulder_cluster_cap.py
+  src/state/review_work_items.py:
+    zone: K2_runtime
+    authority_role: review_work_items_writer_reader
+    why: "Quarantine excision foundation (2026-07-11): writer/reader for review_work_items. open_work_item (idempotent via the partial unique index), resolve_work_item (CAS on authority_revision), supersede_on_new_revision, due_work (status='OPEN' AND next_attempt_at<=now ORDER BY priority,next_attempt_at LIMIT N), open_items_by_family, open_unbounded_count, blocked_family_keys (family-block read helper T2's candidate filter will consult — reads both open family-scoped work items and blocking ChainOnlyFacts off a caller-supplied portfolio; a prefilter, never an enforcement authority per the adjudication). INV-37: all functions require caller-supplied conn. Not wired into cycle_runner/evaluator/fill_tracker/riskguard by this packet."
+    write_routes:
+    - review_work_items
+    downstream: []
+  src/state/entry_exposure_obligation.py:
+    zone: K2_runtime
+    authority_role: entry_exposure_obligation_writer_reader
+    why: "Quarantine excision foundation (2026-07-11, BLOCKER-1): writer/reader for entry_exposure_obligations. open_entry_exposure_obligation (upsert-open keyed by command_id — a live fact, not an append log; meant to be called atomically on a command's failure path), resolve_entry_exposure_obligation, total_open_obligation_usd (SUM of bounded OPEN shares x $1), has_unbounded_obligation (EXISTS OPEN unbounded row -> DATA_DEGRADED trigger). INV-37: all functions require caller-supplied conn. Not wired into any runtime seam by this packet."
+    write_routes:
+    - entry_exposure_obligations
+    downstream: []
   src/strategy/shoulder_cluster_cap.py:
     zone: K2_runtime
     authority_role: shoulder_cluster_cap_gate
