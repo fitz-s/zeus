@@ -46,7 +46,7 @@ from src.execution.executor import (
     execute_intent,
     _persist_pre_submit_envelope,
 )
-from src.riskguard.risk_level import RiskLevel
+from src.riskguard.risk_level import RiskLevel, overall_level
 from src.riskguard.riskguard import get_current_level, get_force_exit_review, tick_with_portfolio
 from src.state.canonical_write import commit_then_export
 from src.state.db import (
@@ -120,39 +120,6 @@ def __getattr__(name: str):
         from src.strategy.strategy_profile import live_safe_keys
         return live_safe_keys()
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
-
-
-def _semantic_value(value) -> str:
-    return str(getattr(value, "value", value) or "")
-
-
-def _has_quarantined_positions(portfolio: PortfolioState) -> bool:
-    # PR C2 (Finding 3, 2026-05-27): also consult portfolio.chain_only_facts
-    # for mid-cycle chain-only-quarantine detection. Chain reconcile now
-    # emits typed ChainOnlyFact entries instead of synthetic Position rows.
-    # PR D1 (Finding D1, Part-2 audit, 2026-05-27): gate fires only on facts
-    # whose review_state still blocks entry (fresh UNRESOLVED or operator
-    # ACKNOWLEDGED). EXPIRED/RESOLVED facts are review debt, not current
-    # entry blockers — see ChainOnlyFact.blocks_entry.
-    chain_only_facts = getattr(portfolio, "chain_only_facts", None) or []
-    if any(getattr(fact, "blocks_entry", True) for fact in chain_only_facts):
-        return True
-    for pos in portfolio.positions:
-        chain_state = _semantic_value(getattr(pos, "chain_state", ""))
-        if chain_state in {"quarantined", "quarantine_expired"}:
-            return True
-        if _semantic_value(getattr(pos, "state", "")) != "quarantined":
-            continue
-        if _runtime._quarantined_position_can_redecision(pos):
-            continue
-        if chain_state in {
-            "chain_absent_confirmed_position_unattributed",
-            "chain_confirmed_zero",
-            "entry_authority_quarantined",
-        }:
-            continue
-        return True
-    return False
 
 
 # DT#2 P9B (INV-19): terminal position states are excluded from the RED
@@ -376,7 +343,6 @@ def _discovery_gates_allow_entries(
     governor_status: dict,
     current_posture: str,
     chain_ready: bool,
-    has_quarantine: bool,
     force_exit: bool,
     freshness_allows_entries: bool,
     entry_bankroll,
@@ -396,10 +362,22 @@ def _discovery_gates_allow_entries(
     - Status dicts missing the "entry" key default to not allowing submit.
     - Degraded/unknown forecast freshness blocks entries while monitor/exit
       lanes continue; it is not an observability-only tag.
+
+    Quarantine excision T2 (docs/rebuild/quarantine_excision_2026-07-11.md):
+    the portfolio-wide ``has_quarantine`` kwarg is REMOVED — the disease it
+    guarded against (any one quarantine fact freezing ALL new entries) routed
+    through two replacements instead: (1) an OPEN unbounded
+    EntryExposureObligation now folds into ``risk_level`` as DATA_DEGRADED at
+    the RiskGuard tick (src.riskguard.riskguard._unresolved_exposure_data_
+    degraded_level), so ``_risk_allows_new_entries(risk_level)`` above already
+    carries that signal — no separate kwarg needed; (2) family-scoped blocks
+    (open ChainOnlyFact / family-blocking ReviewWorkItem / OPEN
+    EntryExposureObligation / bridging quarantined-position family) are
+    handled PER-CANDIDATE at the evaluator's candidate-screening seam
+    (src.engine.evaluator.evaluate_candidate), never in this global fold.
     """
     return (
         chain_ready
-        and not has_quarantine
         and not force_exit
         and freshness_allows_entries
         and not entries_paused
@@ -416,8 +394,7 @@ def _discovery_gates_allow_entries(
 
 
 # P0.3 (INV-27): surface pending execution-truth holes that are not already
-# represented by a canonical entry gate. Quarantine is intentionally excluded:
-# _has_quarantined_positions() is the live entry blocker for that state.
+# represented by a canonical entry gate.
 _PENDING_STATE_PREFIX = "pending_"
 
 
@@ -425,8 +402,7 @@ def _collect_execution_truth_warnings(portfolio: PortfolioState) -> list[dict]:
     """Scan portfolio for pending positions with unknown command authority.
 
     Returns a list of warning dicts. Each warning carries enough identity
-    (trade_id, state) for an operator to investigate. It is not a duplicate
-    quarantine surface; quarantine already blocks via _has_quarantined_positions.
+    (trade_id, state) for an operator to investigate.
 
     Detection rule:
     - Position in any pending_* state with empty `order_id`
@@ -710,6 +686,32 @@ def run_cycle(mode: DiscoveryMode, *, edli_event_context: dict | None = None) ->
         # the pre-lookup per DT#6 semantics. Canonical value for this cycle is
         # whatever tick_with_portfolio returned (typically RiskLevel.DATA_DEGRADED).
         summary["risk_level"] = risk_level.value
+
+    # T2 (quarantine excision, BLOCKER-1 "unbounded obligation -> DATA_DEGRADED"
+    # leg): replaces the deleted portfolio-wide `_has_quarantined_positions`
+    # global gate. RiskGuard's own tick (src.riskguard.riskguard.
+    # _unresolved_exposure_data_degraded_level) folds this into the PERSISTED
+    # risk_state row already; this direct in-cycle check additionally escalates
+    # THIS cycle's risk_level immediately (no wait for the next ~60s tick) using
+    # the trade conn already open here — same escalate-never-weaken pattern as
+    # the portfolio_loader_degraded branch above (overall_level never
+    # downgrades an existing RED/ORANGE/YELLOW).
+    try:
+        from src.state.entry_exposure_obligation import has_unbounded_obligation
+        unbounded_obligation = has_unbounded_obligation(conn)
+    except Exception as _obligation_exc:
+        logger.error(
+            "has_unbounded_obligation check failed: %s; treating as DATA_DEGRADED "
+            "fail-closed (an obligation read failure is itself missing risk-input truth)",
+            _obligation_exc,
+            exc_info=True,
+        )
+        unbounded_obligation = True
+        summary["unbounded_entry_exposure_obligation_check_failed"] = True
+    if unbounded_obligation:
+        risk_level = overall_level(risk_level, RiskLevel.DATA_DEGRADED)
+        summary["risk_level"] = risk_level.value
+        summary["unbounded_entry_exposure_obligation"] = True
     try:
         from src.control.heartbeat_supervisor import summary as _heartbeat_summary
         from src.control.ws_gap_guard import summary as _ws_gap_summary
@@ -842,7 +844,47 @@ def run_cycle(mode: DiscoveryMode, *, edli_event_context: dict | None = None) ->
     tracker_dirty = tracker_dirty or t_dirty
 
     current_heat = portfolio_heat_for_bankroll(portfolio, entry_bankroll or 0.0)
+    # T2 (quarantine excision item 2, exposure conservatism): extend heat to
+    # ChainOnlyFact worst case (shares x $1 CTF payout bound, canonical-token
+    # deduped against already-open Positions) + OPEN bounded
+    # EntryExposureObligations (never counted by portfolio.total_exposure_usd,
+    # which sums Position.effective_cost_basis_usd only). Least-invasive seam:
+    # this local `current_heat` add, not a signature change to
+    # total_exposure_usd/portfolio_heat_for_bankroll (both have other
+    # consumers, e.g. evaluator.py, that this packet does not touch).
+    from src.state.canonical_asset_exposure import chain_only_worst_case_add_usd
+    from src.state.entry_exposure_obligation import total_open_obligation_usd
+    try:
+        _chain_only_add_usd, _chain_only_family_unmapped = chain_only_worst_case_add_usd(conn, portfolio)
+        _obligation_add_usd = total_open_obligation_usd(conn) if conn is not None else 0.0
+    except sqlite3.Error as _exposure_exc:
+        # Fail-soft on a conn reachable but missing the entry_exposure_
+        # obligations/review_work_items tables (e.g. a partial-schema test
+        # harness, or a not-yet-migrated legacy DB) — never crash the whole
+        # cycle over an observability/heat-accounting extension. Production
+        # always has both tables (src.state.db.init_schema_trade_only).
+        logger.error(
+            "T2 exposure accounting (chain_only_worst_case_add_usd/"
+            "total_open_obligation_usd) failed: %s; treating worst-case add "
+            "as 0 for this cycle only (has_unbounded_obligation fail-closed "
+            "check above already covers the DATA_DEGRADED safety net)",
+            _exposure_exc,
+            exc_info=True,
+        )
+        _chain_only_add_usd, _chain_only_family_unmapped, _obligation_add_usd = 0.0, False, 0.0
+    _worst_case_add_usd = _chain_only_add_usd + _obligation_add_usd
+    if entry_bankroll:
+        current_heat += _worst_case_add_usd / entry_bankroll
     summary["portfolio_heat_pct"] = round(current_heat * 100.0, 2) if entry_bankroll else 0.0
+    summary["portfolio_heat_worst_case_add_usd"] = round(_worst_case_add_usd, 2)
+    if _chain_only_family_unmapped:
+        # Unmappable family identity for a real ChainOnlyFact — DATA_DEGRADED
+        # signal (never a silent skip of its dollar exposure, which is already
+        # added above). Escalate-never-weaken, same pattern as the unbounded-
+        # obligation fold above.
+        risk_level = overall_level(risk_level, RiskLevel.DATA_DEGRADED)
+        summary["risk_level"] = risk_level.value
+        summary["chain_only_family_unmapped"] = True
     exposure_gate_hit = entry_bankroll is not None and entry_bankroll > 0 and current_heat >= limits.max_portfolio_heat_pct * 0.95
 
     # INV-27 / P0.3: surface execution-truth warnings for operator visibility.
@@ -853,7 +895,6 @@ def run_cycle(mode: DiscoveryMode, *, edli_event_context: dict | None = None) ->
         summary["execution_truth_warnings"] = _exec_truth_warnings
 
     entries_blocked_reason = None
-    has_quarantine = _has_quarantined_positions(portfolio)
     # 2026-05-04 bankroll truth-chain cleanup tail: the legacy ONE-TIME
     # aggregate-exposure brake (added 2026-04-12 after the first live cycle
     # placed too many canary orders) has been removed. Smoke-testing must run
@@ -865,7 +906,7 @@ def run_cycle(mode: DiscoveryMode, *, edli_event_context: dict | None = None) ->
     # Posture is recorded in `summary["posture"]` for operator visibility on
     # every cycle. It also blocks new entries when non-NORMAL — but only as
     # the FALLBACK reason when no more-specific gate fires. Specific gates
-    # (chain_sync, quarantine, force_exit, risk_level, bankroll, exposure,
+    # (chain_sync, force_exit, risk_level, bankroll, exposure,
     # entries_paused) take precedence so operators see actionable detail
     # rather than the outermost branch posture. Monitor, exit, and
     # reconciliation paths continue regardless of posture.
@@ -956,8 +997,6 @@ def run_cycle(mode: DiscoveryMode, *, edli_event_context: dict | None = None) ->
 
     if not chain_ready:
         entries_blocked_reason = "chain_sync_unavailable"
-    elif has_quarantine:
-        entries_blocked_reason = "portfolio_quarantined"
     elif force_exit:
         entries_blocked_reason = "force_exit_review_daily_loss_red"
     elif not freshness_allows_entries:
@@ -967,6 +1006,9 @@ def run_cycle(mode: DiscoveryMode, *, edli_event_context: dict | None = None) ->
         # populate entries_blocked_reason so operators see a reason code in
         # summary / status_summary / Discord reports. Pre-P9A: DATA_DEGRADED
         # fell through to None while entries were silently blocked.
+        # T2 (quarantine excision): DATA_DEGRADED from an unbounded
+        # EntryExposureObligation or an unmapped ChainOnlyFact family also
+        # surfaces here — same reason string, no separate quarantine branch.
         entries_blocked_reason = f"risk_level={risk_level.value}"
     elif entry_bankroll is None:
         entries_blocked_reason = cap_summary.get("entry_block_reason", "entry_bankroll_unavailable")
@@ -974,9 +1016,6 @@ def run_cycle(mode: DiscoveryMode, *, edli_event_context: dict | None = None) ->
         entries_blocked_reason = "entry_bankroll_non_positive"
     elif exposure_gate_hit:
         entries_blocked_reason = "near_max_exposure"
-
-    if has_quarantine:
-        summary["portfolio_quarantined"] = True
 
     entries_paused = is_entries_paused()
     # entries_blocked_reason: operator-facing observability string mirroring the
@@ -1047,7 +1086,6 @@ def run_cycle(mode: DiscoveryMode, *, edli_event_context: dict | None = None) ->
         governor_status=_governor_status,
         current_posture=_current_posture,
         chain_ready=chain_ready,
-        has_quarantine=has_quarantine,
         force_exit=force_exit,
         freshness_allows_entries=freshness_allows_entries,
         entry_bankroll=entry_bankroll,

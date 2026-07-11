@@ -20,6 +20,18 @@ Antibody contracts (sed-flip verifiable):
   T-clean: all-clear kwargs → gate returns True.
   T-registry-independence: block registry snapshots are not hidden entry gates.
   T-comment-rot: "observability only; not consulted" must be gone from cycle_runner.py.
+
+Quarantine excision T2 (docs/rebuild/quarantine_excision_2026-07-11.md): the
+``has_quarantine`` kwarg is REMOVED from the gate signature — the disease it
+guarded against (any one quarantine fact freezing ALL new entries
+portfolio-wide) now routes through (a) risk_level DATA_DEGRADED (an OPEN
+unbounded EntryExposureObligation folds in at the RiskGuard tick /
+in-cycle check, so ``_risk_allows_new_entries(risk_level)`` already covers
+it — see ``test_gate_blocks_on_non_green_risk``), and (b) family-scoped
+blocks handled PER-CANDIDATE at the evaluator's candidate-screening seam
+(src.engine.evaluator.evaluate_candidate), never in this global fold.
+T-quarantine-kwarg-gone (new): ``has_quarantine`` must NOT appear in the
+gate signature — the inverse of the removed T-quarantine test.
 """
 
 from __future__ import annotations
@@ -52,7 +64,6 @@ def test_gate_signature_is_kwargs_only():
         "current_posture",
         "chain_ready",
         "exposure_gate_hit",
-        "has_quarantine",
         "freshness_allows_entries",
         "risk_level",
         "heartbeat_status",
@@ -67,6 +78,24 @@ def test_gate_signature_is_kwargs_only():
             f"P0-1 SENTINEL FAIL: required arg '{arg}' not found in "
             "src/engine/cycle_runner.py — kwarg was dropped from gate signature."
         )
+
+
+def test_gate_signature_has_no_quarantine_kwarg():
+    """T-quarantine-kwarg-gone (T2 excision): ``has_quarantine`` must NOT be a
+    gate kwarg — the portfolio-wide quarantine gate is deleted; its effect now
+    routes through risk_level DATA_DEGRADED (unbounded EntryExposureObligation)
+    and the evaluator's per-candidate family-scoped block, neither of which is
+    this global fold's concern.
+    """
+    from pathlib import Path
+    src = Path(__file__).resolve().parents[1] / "src" / "engine" / "cycle_runner.py"
+    text = src.read_text()
+    func_start = text.index("def _discovery_gates_allow_entries(")
+    func_body = text[func_start : func_start + 1200]
+    assert "has_quarantine" not in func_body, (
+        "T2 REGRESSION: has_quarantine reappeared in _discovery_gates_allow_entries — "
+        "the portfolio-wide quarantine gate must stay deleted."
+    )
 
 
 def test_no_misleading_observability_comment():
@@ -97,7 +126,6 @@ def _ok_kwargs() -> dict:
         governor_status={"entry": {"allow_submit": True}},
         current_posture="NORMAL",
         chain_ready=True,
-        has_quarantine=False,
         force_exit=False,
         freshness_allows_entries=True,
         entry_bankroll=1000.0,
@@ -134,13 +162,6 @@ def test_gate_blocks_on_chain_not_ready():
     """T-chain: chain_ready=False → gate returns False."""
     kwargs = _ok_kwargs()
     kwargs["chain_ready"] = False
-    assert _discovery_gates_allow_entries(**kwargs) is False
-
-
-def test_gate_blocks_on_quarantine():
-    """T-quarantine: has_quarantine=True → gate returns False."""
-    kwargs = _ok_kwargs()
-    kwargs["has_quarantine"] = True
     assert _discovery_gates_allow_entries(**kwargs) is False
 
 

@@ -37,7 +37,7 @@ from src.contracts.position_truth import (
     ChainOnlyFact,
     ChainOnlyReviewState,
 )
-from src.engine.cycle_runner import _has_quarantined_positions
+from src.state.canonical_asset_exposure import chain_only_worst_case_add_usd
 from src.state.portfolio import (
     PortfolioState,
     _derive_chain_only_review_state,
@@ -135,6 +135,14 @@ def test_blocks_entry_property() -> None:
 
 
 def test_entry_gate_blocks_on_unresolved_chain_only_fact() -> None:
+    """Quarantine excision T2: the retired portfolio-wide
+    ``_has_quarantined_positions`` gate is replaced by the worst-case exposure
+    reducer (src.state.canonical_asset_exposure.chain_only_worst_case_add_usd)
+    + family-scoped block (blocked_family_keys) — both still respect
+    ChainOnlyFact.blocks_entry exactly as the retired gate did. This test
+    asserts the exposure leg: an UNRESOLVED fact's size counts (shares x $1
+    CTF bound), same review_state gating the retired gate used.
+    """
     fact = ChainOnlyFact(
         token_id="t", condition_id="c", size=1.0, avg_price=0.4,
         cost_basis=0.4, first_seen_at="2026-05-27T11:00:00Z",
@@ -142,7 +150,8 @@ def test_entry_gate_blocks_on_unresolved_chain_only_fact() -> None:
         review_state=ChainOnlyReviewState.UNRESOLVED,
     )
     portfolio = PortfolioState(positions=[], chain_only_facts=[fact])
-    assert _has_quarantined_positions(portfolio) is True
+    add_usd, _any_unmapped = chain_only_worst_case_add_usd(None, portfolio)
+    assert add_usd == 1.0
 
 
 def test_entry_gate_does_not_block_on_resolved_chain_only_fact() -> None:
@@ -153,7 +162,8 @@ def test_entry_gate_does_not_block_on_resolved_chain_only_fact() -> None:
         review_state=ChainOnlyReviewState.RESOLVED,
     )
     portfolio = PortfolioState(positions=[], chain_only_facts=[fact])
-    assert _has_quarantined_positions(portfolio) is False
+    add_usd, _any_unmapped = chain_only_worst_case_add_usd(None, portfolio)
+    assert add_usd == 0.0
 
 
 def test_entry_gate_does_not_block_on_expired_chain_only_fact() -> None:
@@ -165,4 +175,5 @@ def test_entry_gate_does_not_block_on_expired_chain_only_fact() -> None:
         review_state=ChainOnlyReviewState.EXPIRED,
     )
     portfolio = PortfolioState(positions=[], chain_only_facts=[fact])
-    assert _has_quarantined_positions(portfolio) is False
+    add_usd, _any_unmapped = chain_only_worst_case_add_usd(None, portfolio)
+    assert add_usd == 0.0

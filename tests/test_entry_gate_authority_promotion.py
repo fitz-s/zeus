@@ -74,7 +74,6 @@ def _ok_kwargs() -> dict:
         governor_status={"entry": {"allow_submit": True}},
         current_posture="NORMAL",
         chain_ready=True,
-        has_quarantine=False,
         force_exit=False,
         freshness_allows_entries=True,
         entry_bankroll=1000.0,
@@ -85,7 +84,6 @@ def _ok_kwargs() -> dict:
 
 _BLOCKER_CASES: list[tuple[str, dict]] = [
     ("chain_sync_unavailable", {"chain_ready": False}),
-    ("portfolio_quarantined", {"has_quarantine": True}),
     ("force_exit_review_daily_loss_red", {"force_exit": True}),
     ("freshness_degraded", {"freshness_allows_entries": False}),
     ("entry_bankroll_unavailable", {"entry_bankroll": None}),
