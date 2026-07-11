@@ -1,6 +1,6 @@
 # Created: 2026-06-06
-# Last reused/audited: 2026-06-06
-# Lifecycle: created=2026-06-06; last_reviewed=2026-06-06; last_reused=2026-06-06
+# Last reused/audited: 2026-07-11
+# Lifecycle: created=2026-06-06; last_reviewed=2026-07-11; last_reused=2026-07-11
 # Purpose: Protect replacement posterior bundle reader no-bypass semantics.
 # Reuse: Run before wiring replacement posterior into executable forecast reader or event reactor.
 # Authority basis: Operator-directed live replacement forecast bundle reader semantics.
@@ -442,3 +442,56 @@ def test_replacement_bundle_reader_enforce_raw_input_hwm_allows_fresh_serve() ->
 
     assert result.ok is True
     assert result.reason_code == "REPLACEMENT_POSTERIOR_READY"
+
+
+def test_raw_hwm_reuses_bound_posterior_provenance() -> None:
+    conn = _conn()
+    posterior_id = _insert_posterior(conn)
+    provenance = {
+        "reader_test": True,
+        "replacement_q_mode": "FUSED_NORMAL_FULL",
+        "bin_topology_hash": "topology-hash",
+        "bayes_precision_fusion": {
+            "used_models": ["ecmwf_ifs", "gfs"],
+            "current_value_serving": {
+                "ecmwf_ifs": {"raw_model_forecast_id": 1},
+                "gfs": {"raw_model_forecast_id": 2},
+            },
+        },
+    }
+    conn.execute(
+        "UPDATE forecast_posteriors SET provenance_json = ? WHERE posterior_id = ?",
+        (json.dumps(provenance), posterior_id),
+    )
+    for model in ("ecmwf_ifs", "gfs"):
+        _insert_raw_model_forecast(
+            conn,
+            model=model,
+            source_cycle_time=_dt(0),
+            captured_at=_dt(0, 5),
+            source_available_at=_dt(0, 5),
+        )
+    traced: list[str] = []
+    conn.set_trace_callback(traced.append)
+
+    result = read_replacement_forecast_bundle(
+        conn,
+        baseline_bundle=_BaselineBundle(_Evidence("b0-run")),
+        readiness=_readiness(posterior_id=posterior_id),
+        city="Shanghai",
+        target_date="2026-06-07",
+        temperature_metric="high",
+        decision_time=_dt(4),
+        current_bin_topology_hash="topology-hash",
+        enforce_raw_input_hwm=True,
+    )
+    conn.set_trace_callback(None)
+
+    assert result.ok is True
+    duplicate_provenance_reads = [
+        statement
+        for statement in traced
+        if "SELECT PROVENANCE_JSON" in statement.upper()
+        and "WHERE CITY" in statement.upper()
+    ]
+    assert duplicate_provenance_reads == []

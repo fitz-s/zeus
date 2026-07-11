@@ -692,6 +692,7 @@ def read_replacement_forecast_bundle(
             decision_time=decision_utc,
             posterior_source_cycle_time=row_map["source_cycle_time"],
             posterior_computed_at=row_map["computed_at"],
+            posterior_provenance=provenance,
         )
         if raw_lag_reason is not None:
             return ReplacementForecastBundleReadResult(

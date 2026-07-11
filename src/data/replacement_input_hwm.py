@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from collections.abc import Mapping
 from datetime import datetime, timezone
 from functools import lru_cache
 
@@ -401,6 +402,12 @@ def _posterior_used_models_for_cycle(
     if not provenance:
         return frozenset()
 
+    return _used_models_from_provenance(provenance)
+
+
+def _used_models_from_provenance(
+    provenance: Mapping[str, object],
+) -> frozenset[str]:
     candidates: list[object] = []
     candidates.append(provenance.get("used_models"))
     fusion = provenance.get("bayes_precision_fusion")
@@ -425,21 +432,9 @@ def _posterior_used_models_for_cycle(
     return frozenset(models)
 
 
-def _posterior_has_current_value_serving_for_cycle(
-    conn: sqlite3.Connection,
-    *,
-    city: str,
-    target_date: object,
-    metric: str,
-    posterior_source_cycle_time: object,
+def _provenance_has_current_value_serving(
+    provenance: Mapping[str, object],
 ) -> bool:
-    provenance = _posterior_provenance_for_cycle(
-        conn,
-        city=city,
-        target_date=target_date,
-        metric=metric,
-        posterior_source_cycle_time=posterior_source_cycle_time,
-    )
     fusion = provenance.get("bayes_precision_fusion")
     if not isinstance(fusion, dict):
         return False
@@ -455,15 +450,20 @@ def latest_used_raw_model_input_mark(
     metric: str,
     decision_time: datetime,
     posterior_source_cycle_time: object,
+    posterior_provenance: Mapping[str, object] | None = None,
 ) -> tuple[datetime, datetime | None] | None:
     """Latest used-model raw cycle plus latest row evidence timestamp."""
 
-    used_models = _posterior_used_models_for_cycle(
-        conn,
-        city=city,
-        target_date=target_date,
-        metric=metric,
-        posterior_source_cycle_time=posterior_source_cycle_time,
+    used_models = (
+        _used_models_from_provenance(posterior_provenance)
+        if posterior_provenance is not None
+        else _posterior_used_models_for_cycle(
+            conn,
+            city=city,
+            target_date=target_date,
+            metric=metric,
+            posterior_source_cycle_time=posterior_source_cycle_time,
+        )
     )
     if not used_models:
         return None
@@ -591,18 +591,24 @@ def replacement_live_input_lag_reason(
     decision_time: datetime,
     posterior_source_cycle_time: object,
     posterior_computed_at: object | None = None,
+    posterior_provenance: Mapping[str, object] | None = None,
 ) -> str | None:
     posterior_cycle = _parse_source_cycle_utc(posterior_source_cycle_time)
     if posterior_cycle is None:
         return f"posterior_source_cycle_unparseable={posterior_source_cycle_time!s}"
     posterior_computed = _parse_source_cycle_utc(posterior_computed_at)
-    rich_used_input_provenance = _posterior_has_current_value_serving_for_cycle(
-        conn,
-        city=city,
-        target_date=target_date,
-        metric=metric,
-        posterior_source_cycle_time=posterior_source_cycle_time,
+    provenance = (
+        posterior_provenance
+        if posterior_provenance is not None
+        else _posterior_provenance_for_cycle(
+            conn,
+            city=city,
+            target_date=target_date,
+            metric=metric,
+            posterior_source_cycle_time=posterior_source_cycle_time,
+        )
     )
+    rich_used_input_provenance = _provenance_has_current_value_serving(provenance)
     used_raw_mark = latest_used_raw_model_input_mark(
         conn,
         city=city,
@@ -610,6 +616,7 @@ def replacement_live_input_lag_reason(
         metric=metric,
         decision_time=decision_time,
         posterior_source_cycle_time=posterior_source_cycle_time,
+        posterior_provenance=provenance,
     )
     if (
         rich_used_input_provenance
