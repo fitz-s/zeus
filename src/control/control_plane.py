@@ -14,14 +14,18 @@ from typing import Iterable
 from src.architecture.decorators import capability, protects
 from src.config import state_path
 from src.control.gate_decision import GateDecision, ReasonCode
+from src.contracts.review_work_item import ResolveWorkItemRequest
 from src.state.db import (
     DEFAULT_CONTROL_OVERRIDE_PRECEDENCE,
     expire_control_override,
+    get_trade_connection,
     get_world_connection,
     get_world_connection_with_trades_required,
     query_control_override_state,
     upsert_control_override,
 )
+from src.state.review_work_items import resolve_work_item
+from src.state.schema.review_work_items_schema import ensure_table as _ensure_review_work_items_table
 
 # Live-blockers 2026-05-01: auto-pause overrides default to a 15-minute
 # expiry so a single transient API/DB failure cannot permanently lock out
@@ -72,7 +76,7 @@ COMMANDS = {
     "tighten_risk",                 # Double edge thresholds temporarily
     "request_status",               # Force status_summary write
     "set_strategy_gate",            # Enable/disable individual strategies
-    "acknowledge_quarantine_clear", # Explicit operator intent before ignore/non-resurrection
+    "resolve_review_item",          # CAS-resolve an operator-cleared ReviewWorkItem (T6)
     "pause_source",                 # Ingest: skip ticks for a named source until cleared
     "resume_source",                # Ingest: clear pause_source for a named source
 }
@@ -123,9 +127,9 @@ def _write_control_payload(commands: list[dict], acks: list[dict]) -> None:
 
 
 
-def _extract_quarantine_token_id(payload: dict) -> str:
-    token_id = payload.get("token_id") or payload.get("tokenId") or ""
-    return str(token_id) if token_id else ""
+def _extract_review_work_id(payload: dict) -> str:
+    work_id = payload.get("work_id") or payload.get("workId") or ""
+    return str(work_id) if work_id else ""
 
 
 
@@ -502,24 +506,8 @@ def _refresh_live_allowed_strategy_cache(conn=None) -> None:
 
 
 
-def get_acknowledged_quarantine_clear_tokens() -> set[str]:
-    data = _load_control_payload()
-    acknowledged: set[str] = set()
-    for ack in data.get("acks", []):
-        if ack.get("command") != "acknowledge_quarantine_clear":
-            continue
-        if ack.get("status") != "executed":
-            continue
-        token_id = _extract_quarantine_token_id(ack)
-        if token_id:
-            acknowledged.add(token_id)
-    return acknowledged
-
-
-
 def refresh_control_state() -> None:
     data = _load_control_payload()
-    acknowledged_tokens: set[str] = set()
     entries_paused = False
     edge_threshold_multiplier = DEFAULT_EDGE_THRESHOLD_MULTIPLIER
     gates: dict[str, bool] = {}
@@ -550,15 +538,6 @@ def refresh_control_state() -> None:
     # Tombstone reader retired 2026-05-04 — gate-purge Stage 2.
     # entries_paused now comes only from DB control_overrides (gate 3).
 
-    for ack in data.get("acks", []):
-        if ack.get("status") != "executed":
-            continue
-        command = ack.get("command")
-        if command == "acknowledge_quarantine_clear":
-            token_id = _extract_quarantine_token_id(ack)
-            if token_id:
-                acknowledged_tokens.add(token_id)
-            continue
     _control_state["entries_paused"] = entries_paused
     _control_state["entries_pause_source"] = durable_state.get("entries_pause_source")
     _control_state["entries_pause_reason"] = durable_state.get("entries_pause_reason")
@@ -566,7 +545,6 @@ def refresh_control_state() -> None:
     _control_state["entries_pause_effective_until"] = durable_state.get("entries_pause_effective_until")
     _control_state["entries_pause_issued_by"] = durable_state.get("entries_pause_issued_by")
     _control_state["edge_threshold_multiplier"] = edge_threshold_multiplier
-    _control_state["acknowledged_quarantine_clear_tokens"] = acknowledged_tokens
     _control_state["strategy_gates"] = gates
     _control_state["durable_override_status"] = durable_state.get("status", "unknown")
 
@@ -578,29 +556,15 @@ def clear_control_state() -> None:
 
 
 
-def acknowledged_quarantine_clear_tokens() -> set[str]:
-    tokens = _control_state.get("acknowledged_quarantine_clear_tokens")
-    if tokens is None:
-        refresh_control_state()
-        tokens = _control_state.get("acknowledged_quarantine_clear_tokens", set())
-    return set(tokens)
-
-
-
-def has_acknowledged_quarantine_clear(token_id: str) -> bool:
-    return token_id in acknowledged_quarantine_clear_tokens()
-
-
-
 def _acknowledge_command(name: str, cmd: dict, *, status: str, reason: str = "") -> dict:
     ack = {
         "command": name,
         "acked_at": datetime.now(timezone.utc).isoformat(),
         "status": status,
     }
-    token_id = _extract_quarantine_token_id(cmd)
-    if token_id:
-        ack["token_id"] = token_id
+    work_id = _extract_review_work_id(cmd)
+    if work_id:
+        ack["work_id"] = work_id
     if cmd.get("strategy"):
         ack["strategy"] = cmd["strategy"]
     if isinstance(cmd.get("enabled"), bool):
@@ -715,10 +679,46 @@ def _apply_command(name: str, cmd: dict) -> tuple[bool, str]:
                 precedence=precedence,
             )
             return result["status"] in {"written", "skipped_missing_table"}, "" if result["status"] != "skipped_missing_table" else "missing_control_overrides_table"
-        if name == "acknowledge_quarantine_clear":
-            if not _extract_quarantine_token_id(cmd):
-                return False, "missing_token_id"
-            return True, ""
+        if name == "resolve_review_item":
+            work_id = _extract_review_work_id(cmd)
+            resolver_identity = str(cmd.get("resolver_identity") or issued_by)
+            resolution_evidence = str(cmd.get("resolution_evidence") or note)
+            if not work_id:
+                return False, "missing_work_id"
+            if not resolution_evidence:
+                return False, "missing_resolution_evidence"
+            try:
+                authority_revision = int(cmd.get("authority_revision"))
+            except (TypeError, ValueError):
+                return False, "missing_authority_revision"
+            try:
+                request = ResolveWorkItemRequest(
+                    work_id=work_id,
+                    authority_revision=authority_revision,
+                    resolver_identity=resolver_identity,
+                    resolution_evidence=resolution_evidence,
+                    evidence_refs=tuple(cmd.get("evidence_refs") or ()),
+                    requested_at=issued_at,
+                )
+            except ValueError as exc:
+                return False, f"invalid_resolve_review_item:{exc}"
+            trade_conn = None
+            try:
+                trade_conn = get_trade_connection()
+                _ensure_review_work_items_table(trade_conn)
+                resolved = resolve_work_item(
+                    trade_conn,
+                    work_id=request.work_id,
+                    authority_revision=request.authority_revision,
+                    resolver_identity=request.resolver_identity,
+                    resolution_evidence=request.resolution_evidence,
+                    resolved_at=request.requested_at or issued_at,
+                )
+                trade_conn.commit()
+            finally:
+                if trade_conn is not None:
+                    trade_conn.close()
+            return resolved, "" if resolved else "stale_or_missing_work_item"
         if name == "pause_source":
             source_id = str(cmd.get("source") or "")
             if not source_id:
@@ -891,10 +891,21 @@ def read_control_payload() -> dict:
 
 
 
-def build_quarantine_clear_command(*, token_id: str, condition_id: str = "", note: str = "") -> dict:
-    command = {"command": "acknowledge_quarantine_clear", "token_id": token_id}
-    if condition_id:
-        command["condition_id"] = condition_id
+def build_resolve_review_item_command(
+    *,
+    work_id: str,
+    authority_revision: int,
+    resolver_identity: str,
+    resolution_evidence: str,
+    note: str = "",
+) -> dict:
+    command = {
+        "command": "resolve_review_item",
+        "work_id": work_id,
+        "authority_revision": authority_revision,
+        "resolver_identity": resolver_identity,
+        "resolution_evidence": resolution_evidence,
+    }
     if note:
         command["note"] = note
     return command

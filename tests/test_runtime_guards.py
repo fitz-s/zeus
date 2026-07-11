@@ -7055,64 +7055,65 @@ def test_quarantine_no_longer_sets_portfolio_wide_block(monkeypatch, tmp_path):
     assert summary["candidates"] == 0
 
 
-def test_operator_clear_ack_applies_ignored_token_only_after_explicit_ack(monkeypatch, tmp_path):
-    db_path = tmp_path / "zeus.db"
-    control_path = tmp_path / "control_plane.json"
-    conn = get_connection(db_path)
-    init_schema(conn)
-    conn.close()
-    portfolio = PortfolioState(positions=[_position(direction="unknown", chain_state="quarantined", token_id="tok-clear", no_token_id="tok-clear-no")])
+def test_resolve_review_item_command_cas_resolves_open_work_item(monkeypatch, tmp_path):
+    """T6 replacement for the retired acknowledge_quarantine_clear ack lane
+    (docs/rebuild/quarantine_excision_2026-07-11.md): the operator release
+    valve for a stuck review item is now a control-plane `resolve_review_item`
+    command that CAS-resolves a review_work_items row, not a token-suppression
+    ignore-list mutation.
+    """
+    from src.contracts.review_work_item import ReviewReasonCode
+    from src.state.review_work_items import open_work_item
+    from src.state.schema.review_work_items_schema import ensure_table
 
-    class DummyClob:
-        def __init__(self):
-            pass
+    control_path = tmp_path / "control_plane.json"
+    trade_db_path = tmp_path / "zeus_trades.db"
+    trade_conn = get_connection(trade_db_path)
+    ensure_table(trade_conn)
+    item = open_work_item(
+        trade_conn,
+        owner_domain="trade",
+        owner_table="position_current",
+        subject_id="trade-clear-1",
+        reason_code=ReviewReasonCode.CONFIRMED_FILL_CHAIN_ABSENCE_CONFLICT,
+        evidence_refs=("test_evidence",),
+        exposure_bound_usd=10.0,
+    )
+    trade_conn.commit()
+    trade_conn.close()
 
     control_plane_module.clear_control_state()
-
-    monkeypatch.setattr(cycle_runner, "get_current_level", lambda: RiskLevel.GREEN)
-    monkeypatch.setattr(cycle_runner, "get_connection", lambda: get_connection(db_path))
-    monkeypatch.setattr(cycle_runner, "load_portfolio", lambda: portfolio)
-    monkeypatch.setattr(cycle_runner, "save_portfolio", lambda state, *args, **kwargs: None)
-    monkeypatch.setattr(cycle_runner, "PolymarketClient", DummyClob)
-    monkeypatch.setattr(cycle_runner, "get_tracker", lambda: StrategyTracker())
-    monkeypatch.setattr(cycle_runner, "save_tracker", lambda tracker: None)
-    monkeypatch.setattr(cycle_runner, "find_weather_markets", lambda **kwargs: [])
-    monkeypatch.setattr("src.observability.status_summary.write_status", lambda cycle_summary=None: None)
     monkeypatch.setattr(control_plane_module, "CONTROL_PATH", control_path)
-
-    summary = cycle_runner.run_cycle(DiscoveryMode.OPENING_HUNT)
-    assert portfolio.ignored_tokens == []
-    assert summary.get("operator_clears_applied", 0) == 0
+    monkeypatch.setattr(control_plane_module, "get_trade_connection", lambda **kwargs: get_connection(trade_db_path))
 
     control_plane_module.write_commands([
-        control_plane_module.build_quarantine_clear_command(
-            token_id="tok-clear",
-            condition_id="cond-clear",
-            note="operator acknowledged",
+        control_plane_module.build_resolve_review_item_command(
+            work_id=item.work_id,
+            authority_revision=item.authority_revision,
+            resolver_identity="operator:test",
+            resolution_evidence="manually verified chain balance restored",
         )
     ])
 
-    summary = cycle_runner.run_cycle(DiscoveryMode.OPENING_HUNT)
-    assert portfolio.ignored_tokens == ["tok-clear"]
-    assert summary["operator_clears_applied"] == 1
-    conn = get_connection(db_path)
+    processed = control_plane_module.process_commands()
+    assert processed == ["resolve_review_item"]
+
+    conn = get_connection(trade_db_path)
     row = conn.execute(
-        """
-        SELECT suppression_reason, source_module
-        FROM token_suppression
-        WHERE token_id = 'tok-clear'
-        """
+        "SELECT status, resolver_identity, resolution_evidence FROM review_work_items WHERE work_id = ?",
+        (item.work_id,),
     ).fetchone()
     conn.close()
     assert dict(row) == {
-        "suppression_reason": "operator_quarantine_clear",
-        "source_module": "src.engine.cycle_runtime",
+        "status": "RESOLVED",
+        "resolver_identity": "operator:test",
+        "resolution_evidence": "manually verified chain balance restored",
     }
 
     payload = control_plane_module.read_control_payload()
-    assert payload["acks"][-1]["command"] == "acknowledge_quarantine_clear"
+    assert payload["acks"][-1]["command"] == "resolve_review_item"
     assert payload["acks"][-1]["status"] == "executed"
-    assert payload["acks"][-1]["token_id"] == "tok-clear"
+    assert payload["acks"][-1]["work_id"] == item.work_id
 
 
 def test_unknown_direction_positions_are_not_monitored(monkeypatch, tmp_path):
@@ -11487,7 +11488,6 @@ def _monitor_chain_deps(now: datetime):
         logger=logging.getLogger("test_monitor_chain_missing"),
         cities_by_name={"NYC": NYC},
         _utcnow=lambda: now,
-        has_acknowledged_quarantine_clear=lambda token_id: False,
     )
 
 

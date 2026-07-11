@@ -39,7 +39,6 @@ from src.state.chain_reconciliation import (
     QUARANTINE_REVIEW_REQUIRED,
 )
 from src.control.control_plane import (
-    build_quarantine_clear_command,
     clear_control_state,
     process_commands,
     write_commands,
@@ -363,7 +362,6 @@ def test_monitoring_phase_defers_held_positions_when_cycle_budget_exhausted(monk
             "logger": logging.getLogger("test_monitor_budget"),
             "cities_by_name": {},
             "_utcnow": staticmethod(lambda: datetime(2026, 7, 2, 18, 0, tzinfo=timezone.utc)),
-            "has_acknowledged_quarantine_clear": staticmethod(lambda token_id: False),
         },
     )
 
@@ -3168,7 +3166,6 @@ def test_pending_exit_backoff_exhausted_reenters_redecision_when_still_held(monk
             "logger": logging.getLogger("test_backoff_exhausted_redecision"),
             "cities_by_name": {"Miami": type("City", (), {"timezone": "America/New_York"})()},
             "_utcnow": staticmethod(lambda: datetime(2026, 7, 1, 12, 0, tzinfo=timezone.utc)),
-            "has_acknowledged_quarantine_clear": staticmethod(lambda token_id: False),
         },
     )
 
@@ -3256,7 +3253,6 @@ def test_pending_exit_backoff_exhausted_dust_hold_does_not_emit_exit_intent(monk
             "logger": logging.getLogger("test_backoff_exhausted_dust_hold"),
             "cities_by_name": {"Kuala Lumpur": type("City", (), {"timezone": "Asia/Kuala_Lumpur"})()},
             "_utcnow": staticmethod(lambda: datetime(2026, 7, 8, 9, 30, tzinfo=timezone.utc)),
-            "has_acknowledged_quarantine_clear": staticmethod(lambda token_id: False),
         },
     )
 
@@ -3417,7 +3413,6 @@ def test_monitoring_marks_quarantine_for_admin_resolution_once(monkeypatch):
             "logger": logging.getLogger("test_quarantine_admin_resolution"),
             "cities_by_name": {},
             "_utcnow": staticmethod(lambda: now),
-            "has_acknowledged_quarantine_clear": staticmethod(lambda token_id: False),
         },
     )
 
@@ -3488,7 +3483,6 @@ def test_monitoring_skips_fill_authority_quarantine_without_chain_quarantine(mon
             "logger": logging.getLogger("test_fill_authority_quarantine_monitor_skip"),
             "cities_by_name": {},
             "_utcnow": staticmethod(lambda: datetime(2026, 4, 1, 5, 30, tzinfo=timezone.utc)),
-            "has_acknowledged_quarantine_clear": staticmethod(lambda token_id: False),
         },
     )
 
@@ -3607,7 +3601,6 @@ def test_entry_authority_quarantined_exposure_reaches_redecision(monkeypatch):
             "logger": logging.getLogger("test_entry_authority_quarantine_redecision"),
             "cities_by_name": {"Lucknow": type("City", (), {"timezone": "Asia/Kolkata"})()},
             "_utcnow": staticmethod(lambda: datetime(2026, 6, 28, 8, 0, tzinfo=timezone.utc)),
-            "has_acknowledged_quarantine_clear": staticmethod(lambda token_id: False),
         },
     )
 
@@ -3789,7 +3782,6 @@ def test_chain_absent_confirmed_recent_projection_skips_redecision(monkeypatch):
             "logger": logging.getLogger("test_chain_absence_quarantine_redecision"),
             "cities_by_name": {"Chongqing": type("City", (), {"timezone": "Asia/Shanghai"})()},
             "_utcnow": staticmethod(lambda: datetime.now(timezone.utc)),
-            "has_acknowledged_quarantine_clear": staticmethod(lambda token_id: False),
         },
     )
 
@@ -3921,7 +3913,6 @@ def test_chain_absent_confirmed_recent_projection_does_not_reach_exit_lifecycle(
             "logger": logging.getLogger("test_chain_absence_quarantine_exit_lifecycle"),
             "cities_by_name": {"Singapore": type("City", (), {"timezone": "Asia/Singapore"})()},
             "_utcnow": staticmethod(lambda: datetime.now(timezone.utc)),
-            "has_acknowledged_quarantine_clear": staticmethod(lambda token_id: False),
         },
     )
 
@@ -4930,7 +4921,6 @@ def test_monitoring_skips_blocking_review_fact_position_without_exit(monkeypatch
             "logger": logging.getLogger("test_blocking_review_fact_monitor_skip"),
             "cities_by_name": {},
             "_utcnow": staticmethod(lambda: datetime(2026, 6, 7, 1, 30, tzinfo=timezone.utc)),
-            "has_acknowledged_quarantine_clear": staticmethod(lambda token_id: False),
         },
     )
 
@@ -4989,7 +4979,6 @@ def test_monitoring_unknown_direction_report_has_no_fresh_probability(monkeypatc
             "logger": logging.getLogger("test_unknown_direction_monitor_report"),
             "cities_by_name": {},
             "_utcnow": staticmethod(lambda: datetime(2026, 4, 1, 5, 30, tzinfo=timezone.utc)),
-            "has_acknowledged_quarantine_clear": staticmethod(lambda token_id: False),
         },
     )
 
@@ -5062,7 +5051,6 @@ def test_day0_closed_non_accepting_market_skips_exit_monitor_chain_missing(monke
             "logger": logging.getLogger("test_closed_day0_market_monitor_skip"),
             "cities_by_name": {"Chicago": type("City", (), {"timezone": "America/Chicago"})()},
             "_utcnow": staticmethod(lambda: datetime(2026, 4, 1, 18, 30, tzinfo=timezone.utc)),
-            "has_acknowledged_quarantine_clear": staticmethod(lambda token_id: False),
         },
     )
     monkeypatch.setattr(
@@ -5177,7 +5165,6 @@ def test_quarantine_expired_marks_distinct_admin_resolution_reason(monkeypatch):
             "logger": logging.getLogger("test_quarantine_expired_admin_resolution"),
             "cities_by_name": {},
             "_utcnow": staticmethod(lambda: now),
-            "has_acknowledged_quarantine_clear": staticmethod(lambda token_id: False),
         },
     )
 
@@ -5757,7 +5744,6 @@ def test_quarantined_chain_risk_hard_fact_monitor_does_not_reopen_phase(tmp_path
             "logger": logging.getLogger("test_quarantined_chain_risk_hard_fact_monitor"),
             "cities_by_name": {"Manila": type("City", (), {"timezone": "Asia/Manila"})()},
             "_utcnow": staticmethod(lambda: datetime(2026, 6, 30, 10, 0, tzinfo=timezone.utc)),
-            "has_acknowledged_quarantine_clear": staticmethod(lambda token_id: False),
         },
     )
     summary = {"monitors": 0, "exits": 0}
@@ -6019,7 +6005,6 @@ def test_venue_confirmed_local_only_fill_is_monitored_without_reclassifying_open
             "logger": logging.getLogger("test_venue_confirmed_local_only_fill_is_monitored"),
             "cities_by_name": {},
             "_utcnow": staticmethod(lambda: datetime(2026, 7, 1, 22, 30, tzinfo=timezone.utc)),
-            "has_acknowledged_quarantine_clear": staticmethod(lambda token_id: False),
         },
     )
 
@@ -6149,7 +6134,6 @@ def test_monitoring_phase_persists_monitor_decision_with_refresh(tmp_path, monke
             "logger": logging.getLogger("test_monitoring_phase_persists_monitor_evidence"),
             "cities_by_name": {},
             "_utcnow": staticmethod(lambda: datetime(2026, 4, 1, 5, 0, tzinfo=timezone.utc)),
-            "has_acknowledged_quarantine_clear": staticmethod(lambda token_id: False),
         },
     )
 

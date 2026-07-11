@@ -3975,42 +3975,6 @@ def reconcile_pending_positions(portfolio, clob, tracker, *, deps):
     return summary
 
 
-def _apply_acknowledged_quarantine_clears(portfolio, summary: dict, *, deps, conn=None) -> bool:
-    portfolio_dirty = False
-    for pos in list(portfolio.positions):
-        if _position_chain_state_value(pos) not in {"quarantined", "quarantine_expired"}:
-            continue
-        token_id = pos.token_id if _position_direction_value(pos) != "buy_no" else pos.no_token_id
-        if not token_id:
-            continue
-        if token_id in getattr(portfolio, "ignored_tokens", []):
-            continue
-        if not deps.has_acknowledged_quarantine_clear(token_id):
-            continue
-        result = deps.record_token_suppression(
-            conn,
-            token_id=token_id,
-            condition_id=getattr(pos, "condition_id", ""),
-            suppression_reason="operator_quarantine_clear",
-            source_module="src.engine.cycle_runtime",
-            evidence={"trade_id": getattr(pos, "trade_id", "")},
-        )
-        if result.get("status") != "written":
-            summary["operator_clears_suppression_failed"] = (
-                summary.get("operator_clears_suppression_failed", 0) + 1
-            )
-            deps.logger.warning(
-                "Quarantine clear for %s was acknowledged but token suppression was not persisted: %s",
-                token_id,
-                result,
-            )
-            continue
-        portfolio.ignored_tokens.append(token_id)
-        summary["operator_clears_applied"] = summary.get("operator_clears_applied", 0) + 1
-        portfolio_dirty = True
-    return portfolio_dirty
-
-
 def _semantic_value(value) -> str:
     return str(getattr(value, "value", value) or "")
 
@@ -4954,13 +4918,6 @@ def execute_monitoring_phase(
     tracker_dirty = False
 
     if run_exit_preflight:
-        portfolio_dirty = _apply_acknowledged_quarantine_clears(
-            portfolio,
-            summary,
-            deps=deps,
-            conn=conn,
-        )
-
         try:
             exit_stats = check_pending_exits(portfolio, clob, conn=conn)
         except Exception as exc:  # noqa: BLE001 - one pending-exit fault must not blind held monitoring.
