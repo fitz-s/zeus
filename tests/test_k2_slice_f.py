@@ -8,6 +8,7 @@ Bug #47: get_open_orders / get_positions_from_api must re-raise, not return []/N
 """
 
 import sqlite3
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -118,6 +119,87 @@ class TestRunChainSync:
         with patch("src.engine.cycle_runtime.chain_positions_from_api", return_value=None):
             with pytest.raises(RuntimeError, match="returned None"):
                 run_chain_sync(portfolio, clob, deps=deps)
+
+    def test_adapter_ctf_balance_corrects_data_api_omission(self):
+        from src.contracts.semantic_types import Direction
+        from src.engine.cycle_runtime import run_chain_sync
+        from src.state.chain_reconciliation import ChainPosition
+
+        token_id = "token-pending-exit"
+        position = SimpleNamespace(
+            state="pending_exit",
+            chain_state="synced",
+            direction=Direction.NO,
+            token_id="yes-token",
+            no_token_id=token_id,
+            condition_id="condition-1",
+            effective_shares=53.0081,
+        )
+        portfolio = SimpleNamespace(positions=[position])
+        adapter = SimpleNamespace(
+            get_ctf_collateral_payload=lambda **_kwargs: {
+                "authority_tier": "CHAIN",
+                "ctf_token_balances_units": {token_id: 8180},
+            }
+        )
+        clob = SimpleNamespace(
+            get_positions_from_api=lambda: [],
+            _ensure_v2_adapter=lambda: adapter,
+        )
+        captured = {}
+
+        def reconcile(_portfolio, chain_positions, conn=None):
+            captured["positions"] = chain_positions
+            return {"updated": 1}
+
+        deps = SimpleNamespace(
+            ChainPosition=ChainPosition,
+            reconcile_with_chain=reconcile,
+        )
+        with patch("src.engine.cycle_runtime._assert_token_aggregate_invariant"):
+            stats, ready = run_chain_sync(portfolio, clob, deps=deps)
+
+        assert ready is True
+        assert len(captured["positions"]) == 1
+        assert captured["positions"][0].token_id == token_id
+        assert captured["positions"][0].size == pytest.approx(0.00818)
+        assert captured["positions"][0].balance_authority == "CHAIN"
+        assert (
+            captured["positions"][0].balance_source
+            == "targeted_ctf_balance_allowance"
+        )
+        assert stats["ctf_balance_tokens_refreshed"] == 1
+        assert stats["ctf_balance_authority"] == "CHAIN"
+
+    def test_direct_ctf_balance_fails_closed_on_incomplete_response(self):
+        from src.engine.cycle_runtime import run_chain_sync
+        from src.state.chain_reconciliation import ChainPosition
+
+        position = SimpleNamespace(
+            state="pending_exit",
+            chain_state="synced",
+            direction="buy_yes",
+            token_id="token-pending-exit",
+            no_token_id="",
+            condition_id="condition-1",
+            effective_shares=5,
+        )
+        portfolio = SimpleNamespace(positions=[position])
+        clob = SimpleNamespace(
+            get_positions_from_api=lambda: [],
+            get_ctf_collateral_payload=lambda **_kwargs: {
+                "authority_tier": "CHAIN",
+                "ctf_token_balances_units": {},
+            },
+        )
+        deps = SimpleNamespace(
+            ChainPosition=ChainPosition,
+            reconcile_with_chain=MagicMock(),
+        )
+
+        with pytest.raises(RuntimeError, match="response is incomplete"):
+            run_chain_sync(portfolio, clob, deps=deps)
+        deps.reconcile_with_chain.assert_not_called()
 
 
 # ── Bug #47: polymarket client methods ──────────────────────────────────

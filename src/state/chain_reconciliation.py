@@ -167,6 +167,8 @@ class ChainPosition:
     avg_price: float
     cost: float = 0.0
     condition_id: str = ""
+    balance_authority: str = ""
+    balance_source: str = ""
 
 
 @dataclass(frozen=True)
@@ -901,6 +903,68 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
                 getattr(position, "trade_id", "?"), exc,
             )
             return False
+        return True
+
+    def _append_canonical_chain_zero_if_available(
+        position: Position,
+        *,
+        balance_authority: str,
+        balance_source: str,
+    ) -> bool:
+        """Project current zero balance without inventing closure economics."""
+        if conn is None:
+            return False
+        trade_id = str(getattr(position, "trade_id", "") or "")
+        current_phase = _canonical_chain_observation_phase(trade_id)
+        if not current_phase:
+            return False
+        row_exists, persisted_shares, _, persisted_state = (
+            _canonical_current_chain_shares(trade_id)
+        )
+        if not row_exists:
+            return False
+        if (
+            persisted_shares is not None
+            and abs(float(persisted_shares)) <= 1e-9
+            and persisted_state == "chain_confirmed_zero"
+        ):
+            return False
+
+        from src.engine.lifecycle_events import build_chain_size_corrected_canonical_write
+        from src.state.db import append_many_and_project
+
+        local_before = (
+            float(persisted_shares)
+            if persisted_shares is not None
+            else float(getattr(position, "effective_shares", 0.0) or 0.0)
+        )
+        try:
+            events, projection = build_chain_size_corrected_canonical_write(
+                position,
+                local_shares_before=local_before,
+                sequence_no=_next_canonical_sequence_no(trade_id),
+                phase_after=current_phase,
+                source_module="src.state.chain_reconciliation",
+            )
+            payload = json.loads(events[0]["payload_json"])
+            payload.update(
+                {
+                    "reason": "targeted_ctf_balance_confirmed_zero",
+                    "evidence_source": balance_source,
+                    "balance_authority": balance_authority,
+                }
+            )
+            events[0]["payload_json"] = json.dumps(
+                payload,
+                default=str,
+                sort_keys=True,
+            )
+            _preserve_existing_chain_noop_projection_fields(projection, trade_id)
+            append_many_and_project(conn, events, projection)
+        except Exception as exc:
+            raise RuntimeError(
+                f"canonical targeted CTF zero write failed for {trade_id}: {exc}"
+            ) from exc
         return True
 
     def _append_canonical_review_required(position: Position, *, reason: str) -> bool:
@@ -1803,6 +1867,38 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
             continue
 
         chain = chain_by_token.get(tid)
+        if (
+            chain is not None
+            and float(chain.size) == 0.0
+            and str(getattr(chain, "balance_authority", "") or "") == "CHAIN"
+            and str(getattr(chain, "balance_source", "") or "")
+            == "targeted_ctf_balance_allowance"
+        ):
+            corrected = replace(pos)
+            corrected.chain_state = "chain_confirmed_zero"
+            corrected.chain_shares = 0.0
+            corrected.chain_avg_price = 0.0
+            corrected.chain_cost_basis_usd = 0.0
+            corrected.last_chain_absence_observed_at = now
+            if _append_canonical_chain_zero_if_available(
+                corrected,
+                balance_authority=str(chain.balance_authority),
+                balance_source=str(chain.balance_source),
+            ):
+                stats["chain_confirmed_zero_persisted"] = (
+                    stats.get("chain_confirmed_zero_persisted", 0) + 1
+                )
+            pos.chain_state = corrected.chain_state
+            pos.chain_shares = corrected.chain_shares
+            pos.chain_avg_price = corrected.chain_avg_price
+            pos.chain_cost_basis_usd = corrected.chain_cost_basis_usd
+            pos.last_chain_absence_observed_at = (
+                corrected.last_chain_absence_observed_at
+            )
+            stats["chain_confirmed_zero"] = (
+                stats.get("chain_confirmed_zero", 0) + 1
+            )
+            continue
         if _is_current_money_risk_quarantine(pos):
             if chain is None:
                 stats["skipped_current_risk_quarantine_missing_chain"] = (

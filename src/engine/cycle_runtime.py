@@ -10,6 +10,7 @@ function here receives a `deps` object, typically the cycle_runner module.
 
 from __future__ import annotations
 
+import inspect
 import json
 import logging
 import math
@@ -1888,6 +1889,132 @@ def chain_positions_from_api(payload, *, ChainPosition):
     return chain_positions
 
 
+_CHAIN_BALANCE_UNITS = Decimal("1000000")
+_CHAIN_BALANCE_PHASES = frozenset(
+    {"entered", "holding", "active", "day0_window", "pending_exit", "quarantined"}
+)
+
+
+def _current_money_risk_token_metadata(portfolio) -> dict[str, str]:
+    tokens: dict[str, str] = {}
+    for position in tuple(getattr(portfolio, "positions", ()) or ()):
+        state = str(
+            getattr(
+                getattr(position, "state", ""),
+                "value",
+                getattr(position, "state", ""),
+            )
+            or ""
+        ).strip()
+        if state not in _CHAIN_BALANCE_PHASES:
+            continue
+        chain_state = str(
+            getattr(
+                getattr(position, "chain_state", ""),
+                "value",
+                getattr(position, "chain_state", ""),
+            )
+            or ""
+        ).strip()
+        if not has_current_money_risk_chain_state(chain_state):
+            continue
+        raw_shares = getattr(position, "effective_shares", None)
+        if raw_shares is None:
+            raw_shares = getattr(position, "chain_shares", None)
+        if raw_shares is None:
+            raw_shares = getattr(position, "shares", 0)
+        try:
+            if Decimal(str(raw_shares or 0)) <= 0:
+                continue
+        except (InvalidOperation, ValueError):
+            continue
+        raw_direction = getattr(position, "direction", "")
+        direction = str(
+            getattr(raw_direction, "value", raw_direction) or ""
+        ).lower()
+        token_id = (
+            getattr(position, "no_token_id", "")
+            if direction == "buy_no"
+            else getattr(position, "token_id", "")
+        )
+        token = str(token_id or "").strip()
+        if token:
+            tokens.setdefault(token, str(getattr(position, "condition_id", "") or ""))
+    return tokens
+
+
+def _overlay_current_ctf_balances(
+    portfolio,
+    clob,
+    api_positions,
+    *,
+    ChainPosition,
+):
+    """Overlay direct CTF balances for local money-risk tokens.
+
+    The Data API may omit dust or an almost-fully-exited position. A targeted
+    conditional-token balance is direct current chain truth, so it must replace
+    the API aggregate for the same token before canonical reconciliation.
+    """
+
+    token_metadata = _current_money_risk_token_metadata(portfolio)
+    if not token_metadata:
+        return api_positions, {"ctf_balance_tokens_refreshed": 0}
+
+    try:
+        inspect.getattr_static(clob, "get_ctf_collateral_payload")
+    except AttributeError:
+        reader = None
+    else:
+        reader = getattr(clob, "get_ctf_collateral_payload", None)
+    if not callable(reader):
+        try:
+            inspect.getattr_static(clob, "_ensure_v2_adapter")
+        except AttributeError:
+            ensure_adapter = None
+        else:
+            ensure_adapter = getattr(clob, "_ensure_v2_adapter", None)
+        adapter = ensure_adapter() if callable(ensure_adapter) else None
+        reader = getattr(adapter, "get_ctf_collateral_payload", None)
+    if not callable(reader):
+        return api_positions, {"ctf_balance_reader_unavailable": 1}
+
+    payload = dict(reader(token_ids=sorted(token_metadata)) or {})
+    authority = str(payload.get("authority_tier") or "").strip().upper()
+    if authority not in {"CHAIN", "VENUE"}:
+        raise RuntimeError("targeted CTF balance authority is not current")
+    balances = payload.get("ctf_token_balances_units")
+    if not isinstance(balances, dict) or not set(token_metadata).issubset(balances):
+        raise RuntimeError("targeted CTF balance response is incomplete")
+
+    by_token = {str(position.token_id): position for position in api_positions}
+    for token_id, condition_id in token_metadata.items():
+        try:
+            units = int(balances[token_id])
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError("targeted CTF balance is invalid") from exc
+        if units < 0:
+            raise RuntimeError("targeted CTF balance is negative")
+        prior = by_token.get(token_id)
+        by_token[token_id] = ChainPosition(
+            token_id=token_id,
+            size=float(Decimal(units) / _CHAIN_BALANCE_UNITS),
+            avg_price=float(getattr(prior, "avg_price", 0) or 0),
+            cost=float(getattr(prior, "cost", 0) or 0),
+            condition_id=(
+                str(getattr(prior, "condition_id", "") or condition_id)
+                if prior is not None
+                else condition_id
+            ),
+            balance_authority=authority,
+            balance_source="targeted_ctf_balance_allowance",
+        )
+    return list(by_token.values()), {
+        "ctf_balance_tokens_refreshed": len(token_metadata),
+        "ctf_balance_authority": authority,
+    }
+
+
 # PR-S1 Bug #3: per-token block-list for aggregate reconciliation violations.
 # Lifetime: daemon process. Populated by _assert_token_aggregate_invariant().
 # Cleared automatically (N1) when the invariant no longer fires for the token.
@@ -1990,7 +2117,14 @@ def run_chain_sync(portfolio, clob, conn=None, *, deps):
     api_positions = chain_positions_from_api(clob.get_positions_from_api(), ChainPosition=deps.ChainPosition)
     if api_positions is None:
         raise RuntimeError("chain sync returned None — API call succeeded but returned no data")
+    api_positions, ctf_stats = _overlay_current_ctf_balances(
+        portfolio,
+        clob,
+        api_positions,
+        ChainPosition=deps.ChainPosition,
+    )
     reconcile_stats = deps.reconcile_with_chain(portfolio, api_positions, conn=conn)
+    reconcile_stats.update(ctf_stats)
     # Gate the invariant on authoritative chain state only.
     # reconcile() sets "skipped_void_incomplete_api" in stats when it detects
     # CHAIN_UNKNOWN (empty-but-suspect API response). Running the aggregate

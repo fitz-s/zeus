@@ -30,6 +30,7 @@ Three relationship assertions:
 """
 from __future__ import annotations
 
+import json
 import os
 import sqlite3
 import tempfile
@@ -1008,6 +1009,88 @@ def test_current_risk_quarantine_missing_from_nonempty_snapshot_is_not_voided() 
     assert row["chain_shares"] == pytest.approx(2.0)
     assert stats.get("voided", 0) == 0
     assert stats.get("skipped_current_risk_quarantine_missing_chain", 0) == 1
+
+
+def test_targeted_ctf_zero_removes_current_risk_without_inventing_close() -> None:
+    """Current zero balance changes capital truth, not fill or lifecycle history."""
+    trade_id = "pending-exit-targeted-zero"
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db_path = os.path.join(tmpdir, "world.db")
+        conn = _setup_db_on_disk(db_path)
+        pos = _make_position(
+            trade_id=trade_id,
+            token_id="tok-targeted-zero",
+            shares=53.0081,
+        )
+        pos.state = "pending_exit"
+        pos.chain_shares = 53.0081
+        _seed_position_current(
+            conn,
+            pos,
+            chain_shares=53.0081,
+            phase="pending_exit",
+            exit_reason="missing_exit_attribution",
+            exit_retry_count=3,
+        )
+        chain = ChainPosition(
+            token_id=pos.token_id,
+            size=0.0,
+            avg_price=0.0,
+            condition_id=pos.condition_id,
+            balance_authority="CHAIN",
+            balance_source="targeted_ctf_balance_allowance",
+        )
+
+        first_stats = reconcile(PortfolioState(positions=[pos]), [chain], conn=conn)
+        first = conn.execute(
+            """
+            SELECT phase, chain_state, chain_shares, shares, exit_reason,
+                   exit_retry_count, chain_absence_at
+              FROM position_current
+             WHERE position_id = ?
+            """,
+            (trade_id,),
+        ).fetchone()
+        first_events = conn.execute(
+            """
+            SELECT payload_json
+              FROM position_events
+             WHERE position_id = ?
+               AND event_type = 'CHAIN_SIZE_CORRECTED'
+               AND json_extract(payload_json, '$.reason') =
+                   'targeted_ctf_balance_confirmed_zero'
+            """,
+            (trade_id,),
+        ).fetchall()
+
+        second_stats = reconcile(PortfolioState(positions=[pos]), [chain], conn=conn)
+        second_event_count = conn.execute(
+            """
+            SELECT COUNT(*)
+              FROM position_events
+             WHERE position_id = ?
+               AND event_type = 'CHAIN_SIZE_CORRECTED'
+               AND json_extract(payload_json, '$.reason') =
+                   'targeted_ctf_balance_confirmed_zero'
+            """,
+            (trade_id,),
+        ).fetchone()[0]
+        conn.close()
+
+    assert first["phase"] == "pending_exit"
+    assert first["chain_state"] == "chain_confirmed_zero"
+    assert first["chain_shares"] == pytest.approx(0.0)
+    assert first["shares"] == pytest.approx(53.0081)
+    assert first["exit_reason"] == "missing_exit_attribution"
+    assert first["exit_retry_count"] == 3
+    assert first["chain_absence_at"]
+    assert first_stats.get("chain_confirmed_zero_persisted", 0) == 1
+    assert len(first_events) == 1
+    payload = json.loads(first_events[0]["payload_json"])
+    assert payload["evidence_source"] == "targeted_ctf_balance_allowance"
+    assert payload["balance_authority"] == "CHAIN"
+    assert second_stats.get("chain_confirmed_zero_persisted", 0) == 0
+    assert second_event_count == 1
 
 
 def test_blank_chain_seen_at_refresh_projects_observation_time_once() -> None:
