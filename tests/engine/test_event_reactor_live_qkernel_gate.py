@@ -762,6 +762,10 @@ def test_current_state_marker_requires_decision_and_posterior_identity(missing_f
     cert.pop(missing_field)
 
     assert era._qkernel_current_state_solve_economics(cert) is False
+    assert (
+        era._qkernel_current_state_solve_economics_rejection_reason(cert)
+        == missing_field
+    )
 
 
 def test_current_state_marker_rejects_unsealed_economics_mutation():

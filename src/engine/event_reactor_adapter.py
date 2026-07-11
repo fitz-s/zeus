@@ -2871,8 +2871,14 @@ def _qkernel_current_state_solve_economics(cert: Any) -> bool:
     side/ROI/settlement-fit gates; it does not relax any current-q, cost, utility,
     identity, freshness, risk, or executable-book check.
     """
+    return _qkernel_current_state_solve_economics_rejection_reason(cert) is None
+
+
+def _qkernel_current_state_solve_economics_rejection_reason(cert: Any) -> str | None:
+    """Return the exact broken identity field for a current-band certificate."""
+
     if not isinstance(cert, Mapping):
-        return False
+        return "payload_not_mapping"
     basis = "CURRENT_POSTERIOR_BAND"
     sample_hash = str(cert.get("sample_hash") or "").strip()
     q_lcb_sample_hash = str(cert.get("q_lcb_guard_cell_key") or "").strip()
@@ -2880,23 +2886,36 @@ def _qkernel_current_state_solve_economics(cert: Any) -> bool:
     try:
         n_draws = int(cert.get("selection_guard_n") or 0)
     except (TypeError, ValueError):
-        return False
-    return (
-        str(cert.get("source") or "").strip() == "qkernel_spine"
-        and bool(str(cert.get("decision_id") or "").strip())
-        and bool(str(cert.get("receipt_hash") or "").strip())
-        and bool(str(cert.get("q_version") or "").strip())
-        and str(cert.get("current_state_identity_hash") or "").strip()
-        == qkernel_current_state_identity_hash(cert)
-        and str(cert.get("q_lcb_guard_basis") or "").strip() == basis
-        and str(cert.get("selection_guard_basis") or "").strip() == basis
-        and cert.get("q_lcb_guard_abstained") is False
-        and cert.get("selection_guard_abstained") is False
-        and bool(sample_hash)
-        and q_lcb_sample_hash == sample_hash
-        and selection_hash == sample_hash
-        and n_draws >= 2
+        return "selection_guard_n_invalid"
+    checks = (
+        (str(cert.get("source") or "").strip() == "qkernel_spine", "source"),
+        (bool(str(cert.get("decision_id") or "").strip()), "decision_id"),
+        (bool(str(cert.get("receipt_hash") or "").strip()), "receipt_hash"),
+        (bool(str(cert.get("q_version") or "").strip()), "q_version"),
+        (str(cert.get("q_lcb_guard_basis") or "").strip() == basis, "q_lcb_guard_basis"),
+        (
+            str(cert.get("selection_guard_basis") or "").strip() == basis,
+            "selection_guard_basis",
+        ),
+        (cert.get("q_lcb_guard_abstained") is False, "q_lcb_guard_abstained"),
+        (
+            cert.get("selection_guard_abstained") is False,
+            "selection_guard_abstained",
+        ),
+        (bool(sample_hash), "sample_hash"),
+        (q_lcb_sample_hash == sample_hash, "q_lcb_guard_cell_key"),
+        (selection_hash == sample_hash, "selection_guard_cell_key"),
+        (n_draws >= 2, "selection_guard_n"),
+        (
+            str(cert.get("current_state_identity_hash") or "").strip()
+            == qkernel_current_state_identity_hash(cert),
+            "current_state_identity_hash",
+        ),
     )
+    for passed, field in checks:
+        if not passed:
+            return field
+    return None
 
 
 def _qkernel_current_state_belief_identity_fields(cert: Any) -> dict[str, object]:
@@ -6232,8 +6251,13 @@ def _global_current_state_execution_economics(
     current["current_state_identity_hash"] = qkernel_current_state_identity_hash(
         current
     )
-    if not _qkernel_current_state_solve_economics(current):
-        raise ValueError("GLOBAL_CURRENT_STATE_CERTIFICATE_INVALID")
+    current_state_reason = _qkernel_current_state_solve_economics_rejection_reason(
+        current
+    )
+    if current_state_reason is not None:
+        raise ValueError(
+            f"GLOBAL_CURRENT_STATE_CERTIFICATE_INVALID:{current_state_reason}"
+        )
     return current
 
 
