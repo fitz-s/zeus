@@ -1175,9 +1175,9 @@ def _forecast_to_event_bridge_surface(
             world_db,
             f"""
             SELECT event_id, entity_key, created_at, {payload_select}
-              FROM opportunity_events
+             FROM opportunity_events
              WHERE event_type = 'FORECAST_SNAPSHOT_READY'
-             ORDER BY datetime(created_at) DESC, rowid DESC
+             ORDER BY rowid DESC
              LIMIT 1
             """,
         )
@@ -1386,10 +1386,37 @@ def _forecast_to_event_bridge_surface(
         "event_queue": queue_detail,
         "max_lag_seconds": FORECAST_TO_EVENT_BRIDGE_BUDGET_SECONDS,
     }
+    queue_progress_at = _parse_iso_utc(
+        queue_detail.get("latest_active_fsr_processing_updated_at")
+    )
+    queue_progress_age = (
+        max(
+            0.0,
+            (now.astimezone(timezone.utc) - queue_progress_at).total_seconds(),
+        )
+        if queue_progress_at is not None
+        else None
+    )
+    active_carrier_progress = bool(
+        queue_detail.get("evaluated")
+        and int(queue_detail.get("active_fsr_count") or 0) > 0
+        and int(queue_detail.get("terminal_quality_retry_debt_count") or 0) == 0
+        and queue_progress_age is not None
+        and queue_progress_age <= FORECAST_TO_EVENT_BRIDGE_BUDGET_SECONDS
+    )
+    detail["active_carrier_progress"] = active_carrier_progress
+    detail["active_carrier_progress_age_seconds"] = queue_progress_age
     global_bridge_stalled = (
         lag_seconds > FORECAST_TO_EVENT_BRIDGE_BUDGET_SECONDS
         and posterior_age > FORECAST_TO_EVENT_BRIDGE_BUDGET_SECONDS
     )
+    if global_bridge_stalled and active_carrier_progress:
+        return {
+            "ok": True,
+            "issue": None,
+            "bridge_mode": "active_fsr_carrier_progress",
+            **detail,
+        }
     if identity_match is not None:
         if (
             identity_to_latest_lag_seconds is not None

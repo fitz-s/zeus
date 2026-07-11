@@ -1913,6 +1913,58 @@ def test_forecast_event_bridge_reports_active_queue_context(
     assert queue["cause_hints"] == ["terminal_quality_retry_debt", "active_fsr_backlog"]
 
 
+def test_forecast_event_bridge_accepts_recent_active_carrier_progress(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Bounded event dedup may reuse a pending carrier for newer posterior truth."""
+    sd = tmp_path / "state"
+    sd.mkdir()
+    _setup_healthy_state(sd)
+    monkeypatch.setattr(
+        live_health,
+        "_main_daemon_surface",
+        lambda status_summary, heartbeat: {
+            "ok": True,
+            "issue": None,
+            "attested": True,
+            "pid": 123,
+            "command": "python -m src.main",
+        },
+    )
+    now = datetime.now(timezone.utc)
+    _write_forecast_event_bridge_dbs(
+        sd,
+        posterior_computed_at=(now - timedelta(minutes=20)).isoformat(),
+        fsr_created_at=(now - timedelta(hours=2)).isoformat(),
+    )
+    world_conn = sqlite3.connect(sd / "zeus-world.db")
+    try:
+        world_conn.execute(
+            "CREATE TABLE opportunity_event_processing ("
+            "consumer_name TEXT, event_id TEXT, processing_status TEXT, "
+            "last_error TEXT, updated_at TEXT)"
+        )
+        world_conn.execute(
+            "INSERT INTO opportunity_event_processing VALUES "
+            "('edli_reactor_v1', 'fsr-1', 'pending', "
+            "'GLOBAL_WINNER_AWAITS_CLAIM', ?)",
+            ((now - timedelta(seconds=30)).isoformat(),),
+        )
+        world_conn.commit()
+    finally:
+        world_conn.close()
+
+    result = compute_composite_live_health(state_dir=sd, now=now)
+
+    bridge = result["surfaces"]["forecast_event_bridge"]
+    assert bridge["ok"] is True
+    assert bridge["bridge_mode"] == "active_fsr_carrier_progress"
+    assert bridge["active_carrier_progress"] is True
+    assert bridge["active_carrier_progress_age_seconds"] == 30.0
+    assert "forecast_event_bridge" not in result["failing_surfaces"]
+
+
 def test_forecast_event_bridge_degrades_when_live_posterior_stale_even_with_newer_fsr(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
