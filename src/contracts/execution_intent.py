@@ -39,6 +39,7 @@ DepthProofSource = Literal["CLOB_SWEEP", "PASSIVE_LIMIT", "UNVERIFIED"]
 CORRECTED_PRICING_SEMANTICS_VERSION: CorrectedPricingSemanticsVersion = (
     "corrected_executable_cost_v1"
 )
+POLYMARKET_MARKETABLE_BUY_MIN_NOTIONAL_USD = Decimal("1")
 _ALLOWED_ORDER_POLICIES = frozenset(
     {
         "limit_may_take_conservative",

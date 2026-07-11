@@ -28,7 +28,10 @@ from src.config import get_mode, state_path
 from src.contracts.canonical_lifecycle import is_cancel_confirmed_status
 from src.contracts.decision_evidence import DecisionEvidence, EvidenceAsymmetryError
 from src.contracts.effective_kelly_context import EffectiveKellyContext
-from src.contracts.execution_intent import DecisionSourceContext
+from src.contracts.execution_intent import (
+    DecisionSourceContext,
+    POLYMARKET_MARKETABLE_BUY_MIN_NOTIONAL_USD,
+)
 from src.contracts.position_truth import (
     REDECISION_ELIGIBLE_QUARANTINE_CHAIN_STATES,
     has_current_money_risk_chain_state,
@@ -120,9 +123,6 @@ _LIVE_DISCOVERY_EVAL_BUDGET_DEFAULT_SECONDS = 360.0
 _HELD_POSITION_MONITOR_BUDGET_ENV = "ZEUS_HELD_POSITION_MONITOR_BUDGET_SECONDS"
 _HELD_POSITION_MONITOR_BUDGET_DEFAULT_SECONDS = 75.0
 _QUARANTINE_MONITOR_TARGET_DATE_GRACE_DAYS = 1
-POLYMARKET_MARKETABLE_BUY_MIN_NOTIONAL_USD = Decimal("1")
-
-
 def _held_position_monitor_budget_seconds(override: float | None = None) -> float:
     raw = override
     if raw is None:

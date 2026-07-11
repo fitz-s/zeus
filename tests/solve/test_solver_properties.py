@@ -620,7 +620,11 @@ def _global_exact_oracle(
         candidate.executable_cost_curve,
         spend_limit_usd=min(Decimal(floor) * Decimal("0.999999999"), Decimal(cap)),
     )
-    min_shares = candidate.executable_cost_curve.min_order_size
+    min_shares = S._single_order_min_marketable_shares(
+        candidate.executable_cost_curve
+    )
+    if min_shares is None:
+        return None
     best = None
     shares = min_shares
     while shares <= max_shares:
@@ -843,13 +847,13 @@ def test_global_single_order_sizes_each_native_side_inside_current_capital_envel
     bounded = _global_select(
         (yes,),
         cap="5",
-        candidate_capital_limit_resolver=lambda _candidate: Decimal("0.80"),
+        candidate_capital_limit_resolver=lambda _candidate: Decimal("1.20"),
     )
 
-    assert unrestricted.max_spend_usd > Decimal("0.80")
+    assert unrestricted.max_spend_usd > Decimal("1.20")
     assert bounded.candidate is not None
     assert bounded.candidate.candidate_id == yes.candidate_id
-    assert bounded.max_spend_usd <= Decimal("0.80")
+    assert bounded.max_spend_usd <= Decimal("1.20")
     assert bounded.robust_delta_log_wealth > 0.0
 
 
@@ -1076,7 +1080,10 @@ def test_global_single_order_fractional_kelly_scales_full_optimum_once_for_both_
 
     expected = S._single_order_venue_legal_neighbor(
         yes,
-        full_yes.shares * Decimal("0.03125"),
+        max(
+            full_yes.shares * Decimal("0.03125"),
+            S._single_order_min_marketable_shares(yes.executable_cost_curve),
+        ),
         at_most=False,
     )
     assert expected is not None
@@ -1092,6 +1099,32 @@ def test_global_single_order_fractional_kelly_scales_full_optimum_once_for_both_
     assert fractional_yes.max_spend_usd < full_yes.max_spend_usd
     assert capacity_bounded.max_spend_usd <= Decimal("3")
     assert capacity_bounded.shares < fractional_yes.shares
+
+
+@pytest.mark.parametrize("side", ("YES", "NO"))
+def test_global_single_order_promotes_cheap_claim_to_marketable_notional(side):
+    candidate = _global_candidate(
+        candidate_id=f"marketable-min-{side.lower()}",
+        family=f"marketable-min-{side.lower()}",
+        side=side,
+        q=0.58,
+        levels=(("0.06", "100"),),
+    )
+
+    decision = _global_select(
+        (candidate,),
+        floor="1000",
+        ceiling="1000",
+        cash="100",
+        cap="100",
+        fractional_kelly_multiplier="0.03125",
+    )
+
+    assert decision.candidate is not None
+    assert decision.shares == Decimal("17.00")
+    assert decision.shares * decision.limit_price >= Decimal("1")
+    assert decision.robust_delta_log_wealth > 0.0
+    assert decision.robust_ev_usd > 0.0
 
 
 @pytest.mark.parametrize("multiplier", ("0", "-0.1", "NaN", "1.01"))
@@ -1355,7 +1388,7 @@ def test_global_single_order_scores_probability_tail_once(monkeypatch):
         q=0.70,
         levels=(("0.19", "1.37"), ("0.34", "4.11"), ("0.57", "20")),
     )
-    q = np.linspace(0.31, 0.91, 401, dtype=np.float64)
+    q = np.linspace(0.71, 0.91, 401, dtype=np.float64)
     original = S._lower_cvar
     calls = 0
 

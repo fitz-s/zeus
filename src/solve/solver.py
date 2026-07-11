@@ -68,6 +68,7 @@ from scipy.optimize import (
 
 from src.contracts.executable_cost_curve import ExecutableCostCurve
 from src.contracts.execution_intent import (
+    POLYMARKET_MARKETABLE_BUY_MIN_NOTIONAL_USD,
     quantize_submit_shares_for_venue,
     quantize_submit_shares_for_venue_at_most,
     venue_submit_amount_precision_error,
@@ -1004,6 +1005,35 @@ def _single_order_max_shares(
     return (shares / _SIZE_QUANTUM).to_integral_value(rounding=ROUND_FLOOR) * _SIZE_QUANTUM
 
 
+def _single_order_min_marketable_shares(
+    curve: ExecutableCostCurve,
+) -> Decimal | None:
+    """Smallest share-grid size satisfying both venue minimums.
+
+    The venue share floor and the marketable BUY notional floor are separate
+    constraints.  The submitted notional uses the deepest raw limit price, so
+    scan the monotone ask ladder instead of dividing by one assumed price.
+    """
+
+    level_start = Decimal("0")
+    for level in curve.levels:
+        level_end = level_start + level.size
+        required = max(
+            curve.min_order_size,
+            POLYMARKET_MARKETABLE_BUY_MIN_NOTIONAL_USD / level.price,
+            level_start,
+        )
+        required = (
+            required / _SIZE_QUANTUM
+        ).to_integral_value(rounding=ROUND_CEILING) * _SIZE_QUANTUM
+        if level_start > 0 and required <= level_start:
+            required += _SIZE_QUANTUM
+        if required <= level_end:
+            return required
+        level_start = level_end
+    return None
+
+
 def _single_order_execution_boundary(
     candidate: GlobalSingleOrderCandidate,
     shares: Decimal,
@@ -1246,10 +1276,14 @@ def _score_global_single_order(
         candidate.executable_cost_curve,
         spend_limit_usd=optimization_limit,
     )
-    raw_min_shares = (
-        candidate.executable_cost_curve.min_order_size / _SIZE_QUANTUM
-    ).to_integral_value(rounding=ROUND_CEILING) * _SIZE_QUANTUM
-    if raw_max_shares < raw_min_shares or capacity_max_shares < raw_min_shares:
+    raw_min_shares = _single_order_min_marketable_shares(
+        candidate.executable_cost_curve
+    )
+    if (
+        raw_min_shares is None
+        or raw_max_shares < raw_min_shares
+        or capacity_max_shares < raw_min_shares
+    ):
         return GlobalSingleOrderDecision(
             candidate=None,
             shares=Decimal("0"),

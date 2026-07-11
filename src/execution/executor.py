@@ -41,6 +41,9 @@ from src.contracts.execution_price import (
     ExecutionPrice,
     ExecutionPriceContractError,
 )
+from src.contracts.execution_intent import (
+    POLYMARKET_MARKETABLE_BUY_MIN_NOTIONAL_USD,
+)
 from src.types import BinEdge
 from src.architecture.decorators import capability, protects
 from src.decision.family_decision_engine import (
@@ -4081,7 +4084,7 @@ def _final_intent_target_size_usd(intent: FinalExecutionIntent, shares: float) -
     return float(Decimal(str(shares)) * intent.final_limit_price)
 
 
-MIN_MARKETABLE_BUY_NOTIONAL_USD = Decimal("1")
+MIN_MARKETABLE_BUY_NOTIONAL_USD = POLYMARKET_MARKETABLE_BUY_MIN_NOTIONAL_USD
 
 
 def _assert_final_intent_buy_notional_meets_venue_minimum(
