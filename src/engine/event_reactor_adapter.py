@@ -6162,18 +6162,13 @@ def _global_current_state_execution_economics(
         )
     except (ArithmeticError, TypeError, ValueError) as exc:
         raise ValueError("GLOBAL_CURRENT_STATE_PRIOR_LCB_INVALID") from exc
-    try:
-        unit_cost = Decimal(str(cert.get("cost")))
-    except (ArithmeticError, TypeError, ValueError) as exc:
-        raise ValueError("GLOBAL_CURRENT_STATE_UNIT_COST_INVALID") from exc
     if shares <= 0 or cost <= 0 or not robust_ev.is_finite():
         raise ValueError("GLOBAL_CURRENT_STATE_DECISION_ECONOMICS_INVALID")
     if not point_q.is_finite():
         raise ValueError("GLOBAL_CURRENT_STATE_POINT_Q_INVALID")
     if prior_payoff_lcb is not None and not prior_payoff_lcb.is_finite():
         raise ValueError("GLOBAL_CURRENT_STATE_PRIOR_LCB_INVALID")
-    if not unit_cost.is_finite():
-        raise ValueError("GLOBAL_CURRENT_STATE_UNIT_COST_INVALID")
+    unit_cost = cost / shares
     current_band_payoff_q_lcb = (robust_ev + cost) / shares
     if served_lcb is None:
         served_lcb = current_band_payoff_q_lcb
@@ -6210,10 +6205,11 @@ def _global_current_state_execution_economics(
             "payoff_q_point": float(point_q),
             "q_dot_payoff": float(point_q),
             "payoff_q_lcb": float(payoff_q_lcb),
+            "cost": float(unit_cost),
+            "cost_basis": float(unit_cost),
+            "route_cost": float(unit_cost),
             "edge_lcb": float(edge_lcb),
-            "route_edge_lcb": float(
-                payoff_q_lcb - Decimal(str(cert.get("route_cost", unit_cost)))
-            ),
+            "route_edge_lcb": float(edge_lcb),
             "false_edge_rate": alpha,
             "sample_hash": sample_hash,
             "q_lcb_guard_basis": "CURRENT_POSTERIOR_BAND",
