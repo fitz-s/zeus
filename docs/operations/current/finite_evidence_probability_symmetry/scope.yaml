@@ -1,0 +1,31 @@
+id: finite_evidence_probability_symmetry
+status: active
+owner: agent
+frontier:
+- source-clock probability authority
+- current-evidence ambiguity carrier
+- live posterior materialization and auction proof
+allowed_files:
+- docs/operations/current/finite_evidence_probability_symmetry/**
+- docs/operations/current_state.md
+- docs/authority/replacement_final_form_2026_06_09.md
+- src/data/replacement_forecast_materializer.py
+- tests/test_finite_evidence_probability_symmetry.py
+- tests/solve/test_shim_decide.py
+- tests/integration/test_qkernel_spine_blockers_pr409.py
+- tests/AGENTS.md
+- architecture/test_topology.yaml
+forbidden_files:
+- state/zeus-world.db
+- state/zeus-world.db-*
+live_side_effects_allowed: true
+supersedes: null
+tests:
+- tests/test_finite_evidence_probability_symmetry.py
+- tests/test_replacement_fused_q_shape.py::current-evidence subset
+- tests/test_replacement_0_1_bayes_precision_fusion_materializer_wiring.py::source-clock subset
+- tests/solve/test_solver_properties.py
+- tests/solve/test_shim_decide.py
+- tests/integration/test_w3_solve_seam_g3.py
+- tests/integration/test_qkernel_spine_blockers_pr409.py
+closeout_required: true

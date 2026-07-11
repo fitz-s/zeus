@@ -1181,6 +1181,10 @@ class _BayesPrecisionFusionFusionOverride:
     # target, while the between component comes from the same current provider
     # values that produced the center.
     current_evidence_shape: Mapping[str, object] | None = None
+    # In-memory only: exact current members used to count settlement-preimage
+    # hits for the executable ambiguity band. The persisted shape carries their
+    # hash, not a duplicated 51-value payload.
+    current_evidence_members_c: tuple[float, ...] | None = None
 
 
 @dataclass(frozen=True)
@@ -1190,6 +1194,8 @@ class _CurrentEvidenceShape:
     snapshot_id: int
     source_cycle_time: str
     source_available_at: str
+    members_c: tuple[float, ...]
+    member_values_hash: str
     member_count: int
     provider_count: int
     effective_provider_count: float
@@ -1200,7 +1206,9 @@ class _CurrentEvidenceShape:
     shape_hash: str
 
     def as_payload(self) -> dict[str, object]:
-        return asdict(self)
+        payload = asdict(self)
+        payload.pop("members_c")
+        return payload
 
 
 def _current_evidence_shape_from_values(
@@ -1277,10 +1285,13 @@ def _current_evidence_shape_from_values(
         "predictive_sigma_c": sigma,
         "center_sigma_c": center_sigma,
     }
+    member_values_hash = str(identity["member_values_hash"])
     return _CurrentEvidenceShape(
         snapshot_id=int(snapshot_id),
         source_cycle_time=str(source_cycle_time),
         source_available_at=str(source_available_at),
+        members_c=members,
+        member_values_hash=member_values_hash,
         member_count=len(members),
         provider_count=len(normalized),
         effective_provider_count=effective_providers,
@@ -2328,6 +2339,11 @@ def _replacement_bayes_precision_fusion_override(
                 if _source_clock_current_shape is None
                 else _source_clock_current_shape.as_payload()
             ),
+            current_evidence_members_c=(
+                None
+                if _source_clock_current_shape is None
+                else _source_clock_current_shape.members_c
+            ),
         )
     except Exception as exc:  # fail-soft: never break blocked-candidate materialization
         try:
@@ -2398,14 +2414,133 @@ _QLCB_SEED = 0x5EED_F09  # deterministic per-posterior rng (provenance-stable bo
 # for any bin where q_point[bin] < FAR_TAIL_Q_POINT_THRESH apply:
 #   q_lcb[bin] = min(q_lcb[bin], FAR_TAIL_LCB_FLOOR)
 # This is a monotone CEILING on q_lcb (can only decrease it), never zero (the floor is
-# 0.003 > 0 so q_point is still > 0 for any winning bin → no -log blowup). The NO lower
-# bound uses q_ucb_yes; this code does NOT touch q_ucb.
+# 0.003 > 0 so q_point is still > 0 for any winning bin → no -log blowup).
 # ---------------------------------------------------------------------------
 # Forward-validated threshold: q_point bins < this value are in the "far-tail YES" region.
 FAR_TAIL_Q_POINT_THRESH: float = 0.05   # §evidence doc: "served q_point < ~0.05"
 # Forward-validated floor: the realized far-tail frequency (~0.006 mean; 0.003 is conservative
 # and ensures self-reject at the observed fill floor ~0.01 after cost).
 FAR_TAIL_LCB_FLOOR: float = 0.003       # §evidence doc "realized far-tail floor (~0.003)"
+
+# A 95% band uses the exact Clopper-Pearson upper bound from current member hits;
+# its zero-hit value is the narrowest possible, even under the optimistic
+# assumption that every member is independent. Current mean and variance also
+# imply an exact one-sided Cantelli ambiguity bound for bins lying wholly on one
+# side of the mean. These are current-evidence algebra, not fitted historical
+# floors. They widen the coherent carrier used by both YES and NO.
+_FINITE_EVIDENCE_BAND_ALPHA = 0.05
+
+
+def _finite_evidence_binomial_ucb(
+    hit_count: int,
+    member_count: int,
+    *,
+    alpha: float = _FINITE_EVIDENCE_BAND_ALPHA,
+) -> float:
+    """Exact one-sided Clopper-Pearson UCB for current member hits."""
+
+    k = int(hit_count)
+    n = int(member_count)
+    a = float(alpha)
+    if n < 1 or k < 0 or k > n or not math.isfinite(a) or not 0.0 < a < 0.5:
+        raise ValueError(
+            "finite-evidence tail bound requires 0<=hits<=n, n>=1, alpha in (0, 0.5)"
+        )
+    if k == n:
+        return 1.0
+    from scipy.special import betaincinv  # noqa: PLC0415
+
+    return float(betaincinv(k + 1, n - k, 1.0 - a))
+
+
+def _finite_evidence_zero_hit_ucb_floor(
+    member_count: int,
+    *,
+    alpha: float = _FINITE_EVIDENCE_BAND_ALPHA,
+) -> float:
+    """Smallest exact binomial UCB possible with ``member_count`` samples."""
+
+    return _finite_evidence_binomial_ucb(0, member_count, alpha=alpha)
+
+
+def _current_evidence_tail_ucb_floors(
+    *,
+    mu_star: float,
+    predictive_sigma_c: float,
+    bins: Sequence[object],
+    half_step: float,
+    rounding_rule: str,
+    members_c: Sequence[float],
+) -> dict[str, float]:
+    """Per-bin UCB floors from exact member hits and current first two moments."""
+
+    from src.contracts.settlement_semantics import settlement_preimage_offsets  # noqa: PLC0415
+
+    mu = float(mu_star)
+    sigma = float(predictive_sigma_c)
+    if not math.isfinite(mu) or not math.isfinite(sigma) or sigma <= 0.0:
+        raise ValueError("current-evidence tail bound requires finite mu and positive sigma")
+    low_off, high_off = settlement_preimage_offsets(
+        rounding_rule,
+        half_step=half_step,
+    )
+    members = tuple(float(value) for value in members_c)
+    if len(members) < 1 or any(not math.isfinite(value) for value in members):
+        raise ValueError("current-evidence tail bound requires finite members")
+    hit_counts = _current_evidence_member_hit_counts(
+        bins=bins,
+        half_step=half_step,
+        rounding_rule=rounding_rule,
+        members_c=members,
+    )
+    variance = sigma * sigma
+    floors: dict[str, float] = {}
+    for bin_ in bins:
+        low = None if bin_.lower_c is None else float(bin_.lower_c) + low_off
+        high = None if bin_.upper_c is None else float(bin_.upper_c) + high_off
+        moment = 0.0
+        if low is not None and low > mu:
+            gap = low - mu
+            moment = variance / (variance + gap * gap)
+        elif high is not None and high < mu:
+            gap = mu - high
+            moment = variance / (variance + gap * gap)
+        sample_ucb = _finite_evidence_binomial_ucb(
+            hit_counts[str(bin_.bin_id)],
+            len(members),
+        )
+        floors[str(bin_.bin_id)] = max(sample_ucb, moment)
+    return floors
+
+
+def _current_evidence_member_hit_counts(
+    *,
+    bins: Sequence[object],
+    half_step: float,
+    rounding_rule: str,
+    members_c: Sequence[float],
+) -> dict[str, int]:
+    """Count current members inside each exact settlement preimage."""
+
+    from src.contracts.settlement_semantics import settlement_preimage_offsets  # noqa: PLC0415
+
+    members = tuple(float(value) for value in members_c)
+    if len(members) < 1 or any(not math.isfinite(value) for value in members):
+        raise ValueError("current-evidence hit counts require finite members")
+    low_off, high_off = settlement_preimage_offsets(
+        rounding_rule,
+        half_step=half_step,
+    )
+    hits: dict[str, int] = {}
+    for bin_ in bins:
+        low = None if bin_.lower_c is None else float(bin_.lower_c) + low_off
+        high = None if bin_.upper_c is None else float(bin_.upper_c) + high_off
+        hits[str(bin_.bin_id)] = sum(
+            1
+            for value in members
+            if (low is None or value >= low) and (high is None or value < high)
+        )
+    return hits
 
 # Live rows carry only certified fused-center bootstrap bounds. Degraded or
 # missing-capture carriers are not written into the live posterior table.
@@ -2791,6 +2926,7 @@ def _build_fused_q_bounds(
     rounding_rule: str = "wmo_half_up",
     day0_observed_extreme_c: float | None = None,
     day0_metric: str | None = None,
+    evidence_members_c: Sequence[float] | None = None,
     return_samples: bool = False,
 ) -> tuple[dict[str, float], dict[str, float]] | tuple[
     dict[str, float], dict[str, float], dict[str, list[float]]
@@ -2905,6 +3041,51 @@ def _build_fused_q_bounds(
     if np.any(_safe):
         probs[_safe, :] = probs[_safe, :] / _row_sums[_safe, :]
 
+    # FINITE CURRENT-EVIDENCE TAIL BAND. Center bootstrap alone conditions on a
+    # Normal family and can make a far-bin q_ucb arbitrarily close to zero. With
+    # N observed members, exact settlement-preimage hits give a Clopper-Pearson
+    # UCB (zero hits still licenses 1-alpha^(1/N)); trusting only the current mean
+    # and variance also licenses the one-sided Cantelli ambiguity mass
+    # sigma^2/(sigma^2+gap^2). Use the larger per-bin value.
+    # Encode it inside coherent simplex rows so lower-CVaR and scalar bounds see
+    # one probability world. Day0 absorbing facts remain outside this forecast
+    # ambiguity band.
+    if evidence_members_c is not None and day0_obs is None:
+        finite_floors = _current_evidence_tail_ucb_floors(
+            mu_star=mu_star,
+            predictive_sigma_c=predictive_sigma_c,
+            bins=bins,
+            half_step=half_step,
+            rounding_rule=rounding_rule,
+            members_c=evidence_members_c,
+        )
+        required_ucb = np.array([finite_floors[bin_id] for bin_id in bin_ids])
+        raw_ucb = np.percentile(probs, 95.0, axis=0)
+        targets = np.flatnonzero(raw_ucb < required_ucb)
+        stress_rows = int(math.floor(_FINITE_EVIDENCE_BAND_ALPHA * int(n_draws))) + 1
+        if int(targets.size) * stress_rows > int(n_draws):
+            raise ValueError(
+                "finite-evidence tail stress exceeds coherent bootstrap carrier"
+            )
+        available = np.ones(int(n_draws), dtype=bool)
+        for target in targets.tolist():
+            target_floor = float(required_ucb[target])
+            ranked = np.argsort(-probs[:, target], kind="stable")
+            rows = ranked[available[ranked]][:stress_rows]
+            if int(rows.size) != stress_rows:
+                raise ValueError("finite-evidence tail stress rows unavailable")
+            old = probs[rows, target]
+            if np.any(old >= 1.0):
+                raise ValueError("finite-evidence tail stress cannot widen a certain bin")
+            scale = (1.0 - target_floor) / (1.0 - old)
+            probs[rows, :] = probs[rows, :] * scale[:, None]
+            probs[rows, target] = target_floor
+            available[rows] = False
+        if not np.isfinite(probs).all() or not np.allclose(
+            probs.sum(axis=1), 1.0, atol=1e-12
+        ):
+            raise ValueError("finite-evidence tail stress broke simplex coherence")
+
     q_lcb_vec = np.percentile(probs, 5.0, axis=0)  # (M,) marginal quantile of coherent rows
     q_ucb_vec = np.percentile(probs, 95.0, axis=0)  # (M,)
 
@@ -2920,14 +3101,16 @@ def _build_fused_q_bounds(
         # Defensive ordering clips: q_lcb in [0, q_point], q_ucb >= q_point.
         lcb = min(max(lcb, 0.0), max(q_pt, 0.0))
         ucb = max(ucb, q_pt)
-        # FAR-TAIL q_lcb HONESTY (2026-06-22) — monotone ceiling for far-tail YES bins.
+        # FAR-TAIL q_lcb HONESTY (2026-06-22) — legacy/non-source-clock only.
         # Authority: docs/evidence/live_order_pathology/2026-06-22_qlcb_lowerbound_honesty.md
         # For bins where the served q_point < FAR_TAIL_Q_POINT_THRESH (0.05), the raw
         # bootstrap p5 quantile is ~0.07-0.10 due to centre-uncertainty draws but the
         # realized frequency is ~0.003. Cap q_lcb at FAR_TAIL_LCB_FLOOR (0.003) so these
-        # bins self-reject at typical fill prices. q_point is NEVER modified; q_ucb is
-        # NEVER modified (buy_no path invariant preserved). Identity for q_point >= 0.05.
-        if q_pt < FAR_TAIL_Q_POINT_THRESH:
+        # bins self-reject at typical fill prices. q_point is NEVER modified. The
+        # source-clock route instead derives both sides solely from the current
+        # coherent carrier above; historical floors are forbidden on that route.
+        # Identity for q_point >= 0.05.
+        if evidence_members_c is None and q_pt < FAR_TAIL_Q_POINT_THRESH:
             lcb = min(lcb, FAR_TAIL_LCB_FLOOR)
         q_lcb_map[bin_id] = lcb
         q_ucb_map[bin_id] = ucb
@@ -3084,6 +3267,12 @@ def _compute_posterior_payload(
     # far-tail honesty (q_point < FAR_TAIL_Q_POINT_THRESH). 0 = no far-tail bins / cap did
     # not fire (identity). Stamped in provenance_payload as a plain fact of the live value.
     _far_tail_honesty_count: int = 0
+    _finite_evidence_members_c: tuple[float, ...] | None = None
+    _finite_evidence_member_count: int | None = None
+    _finite_evidence_ucb_floor: float | None = None
+    _finite_evidence_member_hits_by_bin: dict[str, int] | None = None
+    _finite_evidence_ucb_floor_by_bin: dict[str, float] | None = None
+    _finite_evidence_tail_bin_count: int = 0
     if bayes_precision_fusion_override is not None:
         # An override exists. Default mode while we attempt the fused-q build below.
         replacement_q_mode = REPLACEMENT_Q_MODE_FUSED_CENTER_ONLY_NORMAL
@@ -3114,6 +3303,21 @@ def _compute_posterior_payload(
             # construction rule, no knob.
             _sigma_pred_raw = float(bayes_precision_fusion_override.predictive_sigma_c)
             _current_shape = bayes_precision_fusion_override.current_evidence_shape
+            if _current_shape is not None and _day0_obs_extreme_c is None:
+                _finite_evidence_members_c = tuple(
+                    float(value)
+                    for value in (
+                        bayes_precision_fusion_override.current_evidence_members_c or ()
+                    )
+                )
+                _finite_evidence_member_count = int(_current_shape["member_count"])
+                if len(_finite_evidence_members_c) != _finite_evidence_member_count:
+                    raise ValueError(
+                        "source-clock current member values do not match member_count"
+                    )
+                _finite_evidence_ucb_floor = _finite_evidence_zero_hit_ucb_floor(
+                    _finite_evidence_member_count
+                )
             replacement_sigma_basis = (
                 "decision_time_current_ensemble_within_plus_provider_between"
                 if _current_shape is not None
@@ -3169,6 +3373,21 @@ def _compute_posterior_payload(
             # GLOBAL q — the proven family pair. Byte-identical to the prior in-line construction (the
             # pure builder is a verbatim extraction). Its k/floor provenance describes the GLOBAL layer.
             _sigma_used = _resolve_sigma_used(_k, _floor_steps)
+            if _finite_evidence_member_count is not None:
+                _finite_evidence_member_hits_by_bin = _current_evidence_member_hit_counts(
+                    bins=request.bins,
+                    half_step=_half_step,
+                    rounding_rule=_rounding_rule,
+                    members_c=_finite_evidence_members_c or (),
+                )
+                _finite_evidence_ucb_floor_by_bin = _current_evidence_tail_ucb_floors(
+                    mu_star=_mu_anchor,
+                    predictive_sigma_c=_sigma_used,
+                    bins=request.bins,
+                    half_step=_half_step,
+                    rounding_rule=_rounding_rule,
+                    members_c=_finite_evidence_members_c,
+                )
             # k provenance: stamped iff the scale fired (k != 1.0, k > 0.0) — the k=1 no-op stays None.
             _sigma_after_k = _sigma_pred_raw * _k if (_k != 1.0 and _k > 0.0) else _sigma_pred_raw
             if _k != 1.0 and _k > 0.0:
@@ -3301,6 +3520,7 @@ def _compute_posterior_payload(
                     rounding_rule=_rounding_rule,
                     day0_observed_extreme_c=_day0_obs_extreme_c,
                     day0_metric=metric,
+                    evidence_members_c=_finite_evidence_members_c,
                     return_samples=True,
                 )
                 if _city_sigma_used is not None and _city_rho > 0.0:
@@ -3314,6 +3534,7 @@ def _compute_posterior_payload(
                         rounding_rule=_rounding_rule,
                         day0_observed_extreme_c=_day0_obs_extreme_c,
                         day0_metric=metric,
+                        evidence_members_c=_finite_evidence_members_c,
                         return_samples=True,
                     )
                     _lcb_map = _mix_q_by_rho(_lcb_g, _lcb_c, _city_rho, renormalize=False)
@@ -3324,10 +3545,17 @@ def _compute_posterior_payload(
                     for _bid in list(_lcb_map):
                         _qpt = float(q.get(_bid, 0.0))
                         _lo = min(max(_lcb_map[_bid], 0.0), max(_qpt, 0.0))
-                        if _qpt < FAR_TAIL_Q_POINT_THRESH:
+                        if (
+                            _finite_evidence_member_count is None
+                            and _qpt < FAR_TAIL_Q_POINT_THRESH
+                        ):
                             _lo = min(_lo, FAR_TAIL_LCB_FLOOR)
                         _lcb_map[_bid] = _lo
-                        _ucb_map[_bid] = max(_ucb_map.get(_bid, _qpt), _qpt)
+                        _ucb_map[_bid] = max(
+                            _ucb_map.get(_bid, _qpt),
+                            _qpt,
+                            (_finite_evidence_ucb_floor_by_bin or {}).get(_bid, 0.0),
+                        )
                     q_bootstrap_samples_by_bin = _mix_q_samples_by_rho(
                         _samples_g,
                         _samples_c,
@@ -3350,11 +3578,19 @@ def _compute_posterior_payload(
                 # (the cap is min(lcb, FLOOR) so equality holds when the floor bit). A bin
                 # where q_point < THRESH but lcb was already ≤ FLOOR before the cap is also
                 # counted (the floor was effectively applied).
-                _far_tail_honesty_count = sum(
-                    1 for _bid, _lcb in _lcb_map.items()
-                    if float(q.get(_bid, 1.0)) < FAR_TAIL_Q_POINT_THRESH
-                    and _lcb <= FAR_TAIL_LCB_FLOOR + 1e-12
-                )
+                if _finite_evidence_member_count is None:
+                    _far_tail_honesty_count = sum(
+                        1 for _bid, _lcb in _lcb_map.items()
+                        if float(q.get(_bid, 1.0)) < FAR_TAIL_Q_POINT_THRESH
+                        and _lcb <= FAR_TAIL_LCB_FLOOR + 1e-12
+                    )
+                if _finite_evidence_ucb_floor_by_bin is not None:
+                    _finite_evidence_tail_bin_count = sum(
+                        1
+                        for _bid in _ucb_map
+                        if float(q.get(_bid, 1.0))
+                        < _finite_evidence_ucb_floor_by_bin[_bid]
+                    )
             except Exception as _qexc:
                 q_lcb_map = None
                 q_ucb_map = None
@@ -3684,6 +3920,16 @@ def _compute_posterior_payload(
         # Authority: docs/evidence/live_order_pathology/2026-06-22_qlcb_lowerbound_honesty.md
         "q_lcb_far_tail_honesty_applied": _far_tail_honesty_count > 0,
         "q_lcb_far_tail_honesty_bin_count": _far_tail_honesty_count,
+        # Current finite-evidence ambiguity: exact settlement-preimage member
+        # hits produce a Clopper-Pearson UCB, then current moment ambiguity may
+        # widen it. This is written into the coherent carrier, so BUY NO consumes
+        # the exact complement instead of an unearned near-one probability.
+        "finite_evidence_tail_band_applied": _finite_evidence_tail_bin_count > 0,
+        "finite_evidence_member_count": _finite_evidence_member_count,
+        "finite_evidence_member_hits_by_bin": _finite_evidence_member_hits_by_bin,
+        "finite_evidence_zero_hit_ucb_floor": _finite_evidence_ucb_floor,
+        "finite_evidence_tail_ucb_floor_by_bin": _finite_evidence_ucb_floor_by_bin,
+        "finite_evidence_tail_bin_count": _finite_evidence_tail_bin_count,
         # Q_LCB / Q_UCB provenance. The role is BASIS-AWARE so the certified fused-center bootstrap
         # bound and any legacy fallback bound never alias: only the
         # bootstrap basis carries the calibration credential (event_reactor_adapter basis-exact
@@ -3719,7 +3965,12 @@ def _compute_posterior_payload(
             "served_rho_mixed_simplex_v2"
             if q_lcb_basis == _QLCB_BASIS and city_calibration_layer_applied
             else (
-                "global_simplex_v1"
+                "global_simplex_current_finite_moment_evidence_v3"
+                if (
+                    q_lcb_basis == _QLCB_BASIS
+                    and _finite_evidence_tail_bin_count > 0
+                )
+                else "global_simplex_v1"
                 if q_lcb_basis == _QLCB_BASIS
                 else None
             )

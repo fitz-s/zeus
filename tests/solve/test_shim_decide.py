@@ -1,5 +1,6 @@
 # Created: 2026-07-03
-# Last reused/audited: 2026-07-09
+# Last reused/audited: 2026-07-11
+# Authority basis: W3 SOLVE design packet and current global capital-optimality evaluator.
 """SolveEngineShim.decide() — phase-1 shim + LegacyDecisionProjection (W3.3 sub-slice 3).
 
 The shim composes an inner engine for the FamilyDecision scaffolding and REPLACES the selection

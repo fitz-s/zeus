@@ -28,6 +28,7 @@ test_trust_policy:
   # Machine-readable registry: tests with valid lifecycle headers.
   # Tests not in this list require audit before running.
   trusted_tests:
+    tests/test_finite_evidence_probability_symmetry.py: {created: "2026-07-11", last_used: "2026-07-11", note: "INV-06/INV-41 current-evidence probability antibody: source-clock YES/NO share one coherent simplex carrier widened by exact settlement-preimage member-hit Clopper-Pearson and distribution-free current-moment tail ambiguity limits; historical far-tail floors are unreachable; Day0 absorbing truth dominates."}
     tests/test_replacement_fused_q_shape.py: {created: "2026-06-09", last_used: "2026-07-11", note: "Probability authority antibody: current target-specific ensemble within-spread plus simultaneous provider between-spread reproduces Wellington no-edge at the order-time book; YES/NO remain exact complements; source-clock current q cannot consult historical k/w/floor/city transforms."}
     tests/test_replacement_seed_coverage_gate.py: {created: "2026-06-10", last_used: "2026-07-11", note: "Replacement input-HWM and seed coverage contracts, including one batched raw-artifact HWM query per frozen target transaction rather than one query per city."}
     tests/solve/test_solver_properties.py: {created: "2026-07-03", last_used: "2026-07-11", note: "Order-engine rebuild SOLVE and global one-order properties: symmetric YES/NO terminal wealth, current full-simplex q/token binding, full native depth, current universe/book/wealth authorities, exact depth oracles, one operator-owned fractional-Kelly projection on both sides, and non-executable siblings retained in the MECE simplex without fabricating missing token authority."}
@@ -36,7 +37,7 @@ test_trust_policy:
     tests/integration/test_w3_solve_seam_g3.py: {created: "2026-07-03", last_used: "2026-07-11", note: "W3 promotion seam plus current global auction binding. Extended 2026-07-11 to prove one venue-side-effect-free winner preflight is fenced by full probability/book/wealth authority, threads the one fractional-Kelly multiplier into global selection, may trigger only one fresh-book re-auction, uses one-shot capabilities, rejects probability drift, and preserves Gamma metadata across same-batch book fences."}
     tests/engine/test_s3_native_side_candidate_materialization.py: {created: "2026-06-08", last_used: "2026-07-10", note: "Native YES/NO candidate materialization, including global-auction refusal of scalar execution-price fallback when full depth is absent."}
     tests/solve/test_wealth_builder.py: {created: "2026-07-03", last_used: "2026-07-03", note: "Order-engine rebuild W3.3 build_wealth_by_atom antibody (inert, pure): entry-side wealth-by-atom from INJECTED spendable cash (net of reservations) + per-atom holdings payout — cash-only endowment, holdings add per-atom payout, reservations recorded while cash stays net, ledger_snapshot_id/source_positions round-trip, zero/negative-wealth atom -> ZeroWealthOutcomeError."}
-    tests/solve/test_shim_decide.py: {created: "2026-07-03", last_used: "2026-07-03", note: "Order-engine rebuild W3.3 SolveEngineShim.decide() antibody (inert, pure): composes an inner engine (injected fake) for the FamilyDecision scaffolding and REPLACES selection with the joint solver — trades a clear edge and stamps the LegacyDecisionProjection standalone post-haircut ΔU into selected (coherence_allows=True lockstep, receipt_hash re-stamped, validator green); solver no-trade (zero edge) surfaces as a shim no-trade; a two-leg hedge (each leg alone negative) -> UNSAFE_PREFIX_DECOMPOSITION no-trade (never submits a primary leg good only because of an unexecuted hedge); ineligible legacy no-q passthrough; and the phase-1 gate refuses when the primary order's item is absent from the executable menu (PHASE1_PRIMARY_LEG_NOT_TRADEABLE)."}
+    tests/solve/test_shim_decide.py: {created: "2026-07-03", last_used: "2026-07-11", note: "Order-engine rebuild W3.3 SolveEngineShim.decide() antibody (inert, pure): composes an inner engine (injected fake) for the FamilyDecision scaffolding and REPLACES selection with the joint solver — trades a clear edge and stamps the LegacyDecisionProjection standalone post-haircut ΔU into selected (coherence_allows=True lockstep, receipt_hash re-stamped, validator green); solver no-trade (zero edge) surfaces as a shim no-trade; a two-leg hedge (each leg alone negative) -> UNSAFE_PREFIX_DECOMPOSITION no-trade (never submits a primary leg good only because of an unexecuted hedge); ineligible legacy no-q passthrough; and the phase-1 gate refuses when the primary order's item is absent from the executable menu (PHASE1_PRIMARY_LEG_NOT_TRADEABLE)."}
     tests/solve/test_types_validation.py: {created: "2026-07-03", last_used: "2026-07-03", note: "Order-engine rebuild W3.2 interface antibody (inert, pure) per consult REV-2: JointOutcomeScenarioSet constructor validation (finite/simplex/negative/shape/dtype/degenerate-alpha/draw-weights), row-sum normalization enforced for ALL three semantics (PRODUCT_MEASURE/MEASURED_JOINT sum=0 or sum=5 rows rejected, not just POSTERIOR_Q_DRAWS), schema-covering scenario hash (weights+provider+semantics sensitive), Kappa Decimal value object bounds + canonical serialization + double-shading guard, and the SolutionPlan invariants (non-empty plan requires a certificate with repaired_objective > 0, budget_after_repair_usd >= 0, and all safe-prefix bounds > 0; no-trade requires a reason). REV-2 follow-up: PlannedOrder __post_init__ (non-empty q_version/order_id, positive size, nonnegative prefix index)."}
     tests/solve/test_contract_validator.py: {created: "2026-07-03", last_used: "2026-07-03", note: "Order-engine rebuild W3.2 FamilyDecision contract antibody (inert, pure) per consult REV-2 blocker 5: validate_family_decision_contract catches missing/nulled/wrong-type consumer fields loudly BEFORE the getattr-with-default facts writer degrades attribution silently — proven with a sentinel facts-writer that records which fields fell back to a default; enforces non-null decision_id/receipt_hash, candidate_decisions tuple, and exactly-one selected/no_trade_reason. REV-2 follow-up: an AST sentinel statically extracts every getattr(decision, ...) field the REAL _record_qkernel_selection_family_facts consumer reads and asserts the validator's required-field list is a superset (a new uncovered consumer breaks the test)."}
     tests/solve/test_menu_adapter.py: {created: "2026-07-03", last_used: "2026-07-03", note: "Order-engine rebuild W3.2 build_solve_menu antibody (inert, pure): direct_yes/direct_no RouteCost → net after-cost unit payoff (payoff_vector − avg_cost), non-executable routes kept with reason (audit trail), sell_holding lane priced at the conservative worst-bid floor capped at bid depth, conversion_routes never synthesized, hold_cash last with zero payoff, deterministic cost-sensitive menu_hash. REV-2 follow-up: max_units capped at min(max_shares, priced shares), synthetic/pair/basket routes non-executable in phase-1 (PHASE1_NON_DIRECT_ROUTE), direct NO buys quantize on the no_asks ladder."}
@@ -868,6 +869,7 @@ test_trust_policy:
 
 categories:
   core_law_antibody:
+    - tests/test_finite_evidence_probability_symmetry.py
     # T0-1 conn-across-IO ordering invariant (2026-06-13): riskguard._tick_once
     # must fetch the bankroll (wallet NETWORK fetch) BEFORE opening any
     # write-class DB conn. RED-on-revert relationship test.
@@ -3765,6 +3767,19 @@ test_metadata:
       side, complement symmetry permits either YES or NO when executable edge
       exists, and historical shape transforms are unreachable on this route.
     created: 2026-06-09
+    last_reused_or_audited: 2026-07-11
+
+  tests/test_finite_evidence_probability_symmetry.py:
+    cohort: law_antibody
+    trust: trusted
+    authority_docs:
+      - docs/authority/replacement_final_form_2026_06_09.md
+    notes: >
+      INV-06/INV-41 source-clock probability symmetry: exact current
+      settlement-preimage member hits and current predictive moments widen one
+      coherent simplex carrier consumed by YES and pointwise-complement NO.
+      Historical far-tail floors are absent; Day0 observations dominate.
+    created: 2026-07-11
     last_reused_or_audited: 2026-07-11
 
   tests/test_bayes_precision_fusion_model_selection_gate.py:

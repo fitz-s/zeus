@@ -3,7 +3,7 @@
 **Status:** Live replacement probability law. Runtime rows use `forecast_posteriors.runtime_layer='live'`; `LIVE_AUTHORITY`, `trade_authority_status`, and shadow/diagnostic labels are not live execution authority.
 **Supersedes:** `BAYES_PRECISION_FUSION_SPEC.md` (deleted).  
 **Created:** 2026-06-09  
-**Last audited:** 2026-07-11 (source-clock live q shape moved to decision-time current evidence; historical residual/floor/mixture shape is diagnostic-only on that route)
+**Last audited:** 2026-07-11 (source-clock live q uses decision-time current evidence; its executable band now combines finite-member and distribution-free moment ambiguity symmetrically for YES/NO)
 **Authority basis:** Commits 140d75ff6d · 6860f00a21 · edc598b440 · 94b584cc3f · 49492f1528 · 2b6936d3b5 · 9c594c9fc3 · df8199ef8e · e80c101c4c · 8541bc93cd · 8f20d39863 · a70436d478 · a1c2163e46 plus June 18 live-runtime cleanup. Historical experiment reports remain evidence only; they do not define the live execution layer.
 
 ---
@@ -100,6 +100,55 @@ current center and variance; it does not add a fitted tail or a market anchor.
 YES and NO are exact complements of this one probability world. Side selection
 therefore depends only on executable cost and the same robust objective, never on
 a side-specific probability recipe.
+
+### 1f. Finite current-evidence tail limit
+
+The Normal point vector is a model expectation, not permission to claim
+arbitrary certainty. For each bin, count the `h` current ENS members inside its
+settlement preimage. Its one-sided `(1-alpha)` exact Clopper-Pearson upper bound
+is:
+
+```
+q_ucb_sample(h, N, alpha) = BetaInv(1-alpha; h+1, N-h)
+q_ucb_min(N, alpha) = q_ucb_sample(0, N, alpha) = 1 - alpha^(1/N)
+alpha = 0.05
+N and h = current target-specific ENS evidence
+```
+
+For `N=51`, the finite-member term is `q_ucb_min≈0.05705`; therefore even before
+other uncertainty the executable complement satisfies
+`q_lcb(NO)=1-q_ucb(YES)≤0.94295`. This is optimistic because it treats all
+members as independent; member dependence cannot justify a narrower interval.
+
+The Normal tail is also an assumption, not current evidence. For a settlement
+bin wholly above or below the current center, let `d` be the distance from the
+center to the nearest settlement-preimage boundary. Trusting only the current
+predictive mean and variance gives the exact one-sided Cantelli ambiguity mass:
+
+```
+q_ucb_moment = sigma_pred^2 / (sigma_pred^2 + d^2)
+q_ucb_required = max(q_ucb_sample, q_ucb_moment)
+```
+
+This makes the executable band distribution-robust while leaving the Normal
+point estimate intact. For example, a current center `36.5151°C`, predictive
+sigma `0.527789°C`, and `39°C` WMO point bin (`[38.5,39.5)`) imply
+`q_ucb_required≈0.0661`, hence executable NO confidence below `0.934`, even if
+the Normal point complement displays near `0.9999`.
+
+`replacement_forecast_materializer._build_fused_q_bounds` writes this ambiguity
+into disjoint stress rows of the same coherent simplex carrier consumed by the
+global lower-CVaR selector, then derives `q_lcb_json` / `q_ucb_json` from that
+carrier. The Normal point `q_json` remains immutable audit provenance. The rule
+is symmetric: YES consumes the column, NO consumes its exact pointwise
+complement, and both ranking and submit-time bounds see the same current-evidence
+world. Current member values stay in memory for settlement-preimage hit counts;
+their hash, count, and resulting per-bin bounds are persisted as provenance. The
+historical `FAR_TAIL_LCB_FLOOR` is not applied on this source-clock route. Day0
+absorbing observation facts dominate the forecast ambiguity band and are not
+widened by it. Missing or invalid current members block source-clock bound
+construction; it never invents an arbitrary probability cap or historical
+fallback.
 
 ### 1e-bis. Post-2026-06-12 q corrections (ADDENDUM — fitted artifacts + single authority)
 
@@ -207,7 +256,7 @@ These make error categories **unconstructable**, not merely less likely.
 
 **Live runtime semantics:** All required replacement policy flags true -> rows may be materialized/read as `runtime_layer='live'`. Execution and monitoring must consume the live row set only. Historical row labels such as `LIVE_AUTHORITY`, `trade_authority_status`, `SHADOW_ONLY`, `SHADOW_VETO_ONLY`, and `DIAGNOSTIC_ONLY` are not live authority and must not be joined into the execution or monitor decision path.
 
-**q_lcb requirement:** The live replacement path requires fused-q certified bootstrap `q_lcb_json` / `q_ucb_json`. On the source-clock route the bootstrap consumes `σ_center` and `σ_pred` from the same current-evidence shape. A missing current ENS carrier or bound blocks live materialization/readiness; it must not fall back through historical residual calibration, baseline, or retired experiment provenance.
+**q_lcb requirement:** The live replacement path requires fused-q certified bootstrap `q_lcb_json` / `q_ucb_json`. On the source-clock route the bootstrap consumes `σ_center`, `σ_pred`, and `member_count` from the same current-evidence shape; the coherent carrier includes the finite-member tail limit in §1f. A missing current ENS carrier or bound blocks live materialization/readiness; it must not fall back through historical residual calibration, baseline, or retired experiment provenance.
 
 **FSR dependency (commit 8c6e028066):** The replacement forecast is an OVERLAY authority — it writes posteriors and readiness that depend on `baseline_b0 (ecmwf_open_data)` source_run. It emits no source_run or ensemble_snapshots of its own. The opendata baseline producer (mx2t6_high / mn2t6_low) MUST remain enabled; disabling it starves FSR.
 
