@@ -865,6 +865,25 @@ def test_live_input_posterior_cycle_alignment_blocks_newer_raw_cycle(
     assert result.evidence["samples"][0]["risk"] == "live_posterior_cycle_lag"
     assert result.evidence["samples"][0]["raw_cycle"] == raw_cycle.isoformat()
     assert result.evidence["samples"][0]["posterior_cycle"] == posterior_cycle.isoformat()
+    assert result.restart_blocking is False
+
+
+def test_entry_only_probability_gap_does_not_block_daemon_restart():
+    alignment = preflight.CheckResult(
+        "live_input_posterior_cycle_alignment",
+        False,
+        "newer raw input lacks a current posterior",
+        {"lagged_or_missing_count": 1},
+        restart_blocking=False,
+    )
+    restart = preflight.CheckResult("process_absent", False, "still running", {})
+
+    blockers, entry_blockers = preflight._failed_check_groups([alignment, restart])
+
+    assert [check["name"] for check in blockers] == ["process_absent"]
+    assert [check["name"] for check in entry_blockers] == [
+        "live_input_posterior_cycle_alignment"
+    ]
 
 
 def test_live_input_posterior_cycle_alignment_ignores_closed_old_targets(

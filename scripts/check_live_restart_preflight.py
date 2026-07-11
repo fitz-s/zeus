@@ -223,6 +223,7 @@ class CheckResult:
     ok: bool
     detail: str
     evidence: dict[str, Any]
+    restart_blocking: bool = True
 
 
 def _connect_live_ro():
@@ -3712,11 +3713,13 @@ def _posterior_summary() -> CheckResult:
 
 
 def _live_input_posterior_cycle_alignment_check() -> CheckResult:
-    """Fail restart when current raw live inputs are newer than live posteriors.
+    """Report when current raw live inputs are newer than live posteriors.
 
     A latest posterior can still be inside the wall-clock freshness window while a
-    newer source cycle has already landed in ``raw_model_forecasts``. Restarting
-    the trader in that state lets entry and monitor lanes use an obsolete belief.
+    newer source cycle has already landed in ``raw_model_forecasts``. This blocks
+    new entries through the live probability gates, but it must not keep the main
+    daemon stopped: monitoring, exits, reconciliation, and settlement still need
+    the cycle while probability authority is degraded.
     """
 
     now = datetime.now(timezone.utc)
@@ -3983,6 +3986,7 @@ def _live_input_posterior_cycle_alignment_check() -> CheckResult:
         if ok
         else "raw live-input cycles are newer than, or missing from, live posteriors",
         evidence,
+        restart_blocking=False,
     )
 
 
@@ -5813,6 +5817,22 @@ def _monitor_day0_semantic_restart_gate_check() -> CheckResult:
         conn.close()
 
 
+def _failed_check_groups(
+    checks: list[CheckResult],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    blockers = [
+        asdict(check)
+        for check in checks
+        if not check.ok and check.restart_blocking
+    ]
+    entry_blockers = [
+        asdict(check)
+        for check in checks
+        if not check.ok and not check.restart_blocking
+    ]
+    return blockers, entry_blockers
+
+
 def evaluate() -> dict[str, Any]:
     cfg = _settings()
     real_submit = bool((cfg.get("edli") or {}).get("real_order_submit_enabled", False))
@@ -5873,7 +5893,7 @@ def evaluate() -> dict[str, Any]:
         _monitor_day0_semantic_restart_gate_check(),
         _monitor_cadence_restart_evidence_check(rows),
     ]
-    blockers = [asdict(check) for check in checks if not check.ok]
+    blockers, entry_blockers = _failed_check_groups(checks)
     return {
         "ok": not blockers,
         "generated_at": datetime.now(timezone.utc).isoformat(),
@@ -5886,6 +5906,7 @@ def evaluate() -> dict[str, Any]:
         "real_order_submit_enabled": real_submit,
         "checks": [asdict(check) for check in checks],
         "blockers": blockers,
+        "entry_blockers": entry_blockers,
     }
 
 
@@ -5900,7 +5921,13 @@ def main(argv: list[str] | None = None) -> int:
         print(f"live restart preflight: {'PASS' if result['ok'] else 'FAIL'}")
         print(f"generated_at={result['generated_at']} git_head={result['git_head']}")
         for check in result["checks"]:
-            status = "PASS" if check["ok"] else "FAIL"
+            status = (
+                "PASS"
+                if check["ok"]
+                else "FAIL"
+                if check["restart_blocking"]
+                else "ENTRY_BLOCK"
+            )
             print(f"{status} {check['name']}: {check['detail']}")
     return 0 if result["ok"] else 1
 
