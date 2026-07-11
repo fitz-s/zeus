@@ -956,9 +956,35 @@ def test_global_actuation_current_band_refuses_non_positive_bound():
         )
 
 
-def test_global_actuation_current_band_reports_missing_prior_lcb():
+def test_global_actuation_current_band_uses_current_bound_when_prior_is_absent():
     cert = _current_qkernel_cert(side="YES")
     cert.pop("payoff_q_lcb")
+    cert.update(cost=0.01, edge_lcb=0.09, route_cost=0.01, route_edge_lcb=0.09)
+    decision = SimpleNamespace(
+        shares=Decimal("100"),
+        cost_usd=Decimal("1"),
+        robust_ev_usd=Decimal("9"),
+    )
+    witness = SimpleNamespace(
+        sample_matrix_identity="global-current-sample",
+        yes_q_samples=SimpleNamespace(shape=(400, 2)),
+        band_alpha=0.05,
+    )
+
+    current = era._global_current_state_execution_economics(
+        cert,
+        decision=decision,
+        witness=witness,
+    )
+
+    assert current["global_current_band_payoff_q_lcb"] == pytest.approx(0.10)
+    assert current["global_current_prior_payoff_q_lcb"] == pytest.approx(0.10)
+    assert current["payoff_q_lcb"] == pytest.approx(0.10)
+
+
+def test_global_actuation_current_band_rejects_malformed_present_prior_lcb():
+    cert = _current_qkernel_cert(side="YES")
+    cert["payoff_q_lcb"] = "not-a-probability"
     decision = SimpleNamespace(
         shares=Decimal("100"),
         cost_usd=Decimal("1"),
