@@ -2614,6 +2614,40 @@ tables:
       on trade DB; cross-DB read-join against forecasts.ensemble_snapshots.
       Authority: docs/archive/2026-Q2/operations_historical/P0_FORECAST_EXTREMA_AUTHORITY_2026-05-22.md.
 
+  - name: review_work_items
+    db: trade
+    schema_class: trade_class
+    schema_version_owner: null
+    created_by: "db.py:init_schema_trade_only + src.state.schema.review_work_items_schema.ensure_table"
+    pk_col: work_id
+    notes: >
+      Quarantine excision foundation (2026-07-11, docs/rebuild/quarantine_excision_2026-07-11.md
+      "Consult adjudication"): owner-local ReviewWorkItem protocol table — one shape
+      instantiated per owning DB, trade first. Replaces the scattered "mint a quarantine
+      state, exclude forever" mechanisms T1-T7 excise; reason vocabulary is intentionally
+      NOT CHECK-constrained (see module docstring), status IS (OPEN/RESOLVED/SUPERSEDED).
+      Partial unique index on (owner_table, subject_id, reason_code, authority_revision)
+      WHERE status='OPEN' is the idempotent-open guarantee. Writer/reader
+      src/state/review_work_items.py; contract src/contracts/review_work_item.py. Not
+      wired into cycle_runner/evaluator/fill_tracker/riskguard by this packet — T2/T4/T5
+      consume it from their own seams.
+
+  - name: entry_exposure_obligations
+    db: trade
+    schema_class: trade_class
+    schema_version_owner: null
+    created_by: "db.py:init_schema_trade_only + src.state.schema.entry_exposure_obligations_schema.ensure_table"
+    pk_col: command_id
+    notes: >
+      Quarantine excision foundation (2026-07-11): BLOCKER-1's conservative-bound
+      exposure fact, SIBLING to review_work_items (see that schema module's docstring
+      for the shape-separation rationale). One row per command_id (upsert-open, a live
+      fact not an append log). shares x $1 long-only-CTF bound documented in
+      src/contracts/entry_exposure_obligation.py. Writer/reader
+      src/state/entry_exposure_obligation.py. Not wired into any runtime seam by this
+      packet — T2 consumes total_open_obligation_usd/has_unbounded_obligation when it
+      extends exposure/heat accounting to ChainOnlyFact worst case.
+
   - name: exit_mutex_holdings
     db: trade
     schema_class: trade_class

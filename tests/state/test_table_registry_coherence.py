@@ -76,6 +76,12 @@ EXPECTED_RUNTIME_TRADE_TABLES = frozenset({
     # W0.2 2026-07-02: blind-window metric transition log (ensure_table wired
     # into init_schema_trade_only via market_channel_connectivity_schema.py).
     "market_channel_connectivity_events",
+    # Quarantine excision foundation 2026-07-11: owner-local ReviewWorkItem
+    # table + its sibling exposure-fact table (ensure_table wired into
+    # init_schema_trade_only via review_work_items_schema.py /
+    # entry_exposure_obligations_schema.py).
+    "review_work_items",
+    "entry_exposure_obligations",
     "position_current",
     "position_events",
     "position_lots",
