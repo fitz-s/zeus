@@ -2911,7 +2911,14 @@ def test_chain_only_fact_position_only_scope_does_not_freeze_new_entries():
 
 
 def test_expired_chain_only_fact_does_not_freeze_new_entries():
-    from src.engine.cycle_runner import _has_quarantined_positions
+    """Quarantine excision T2: the retired portfolio-wide
+    ``_has_quarantined_positions`` gate is replaced by the family-scoped block
+    (blocked_family_keys) + worst-case exposure reducer
+    (chain_only_worst_case_add_usd) — both still respect
+    ChainOnlyFact.blocks_entry exactly as the retired gate did. An EXPIRED
+    fact contributes zero exposure and is never family-blocking.
+    """
+    from src.state.canonical_asset_exposure import chain_only_worst_case_add_usd
 
     expired_fact = ChainOnlyFact(
         token_id="expired-token",
@@ -2928,7 +2935,8 @@ def test_expired_chain_only_fact_does_not_freeze_new_entries():
     portfolio.chain_only_facts.append(expired_fact)
 
     assert expired_fact.blocks_entry is False
-    assert _has_quarantined_positions(portfolio) is False
+    add_usd, _any_unmapped = chain_only_worst_case_add_usd(None, portfolio)
+    assert add_usd == 0.0
 
 
 def test_chain_reconciliation_does_not_void_verified_entry_waiting_for_chain():
@@ -3274,19 +3282,38 @@ def test_collateral_check_blocks_underfunded_sell():
 # not purge the read-side vocabulary in this slice — blast-radius honesty).
 
 
-def test_quarantine_expired_blocks_new_entries_until_resolved():
-    """Quarantine-expired positions still block discovery until authoritative resolution."""
-    from src.engine.cycle_runner import _has_quarantined_positions
+def test_quarantine_expired_legacy_chain_state_does_not_freeze_portfolio():
+    """Quarantine excision T2 (docs/rebuild/quarantine_excision_2026-07-11.md):
+    the retired ``_has_quarantined_positions`` blocked ALL new entries
+    portfolio-wide the instant ANY position carried chain_state in
+    {"quarantined", "quarantine_expired"} — regardless of that position's own
+    phase. That over-broad widening (a per-position signal freezing the whole
+    portfolio) is exactly the disease this excision removes. The replacement
+    bridging shim (src.engine.evaluator._quarantined_position_bridging_
+    family_keys) is scoped to item 4's literal target: phase='quarantined' +
+    chain_state='entry_authority_quarantined' (the 4 live rows per the
+    2026-07-11 census). A "holding"-phase position with a legacy
+    chain_state="quarantine_expired" value (P0b 2026-07-04: the timer that
+    minted this is retired) contributes NOTHING to the bridging shim.
+    """
+    from src.engine.evaluator import _quarantined_position_bridging_family_keys
 
     pos = _make_position(chain_state="quarantine_expired")
     portfolio = _make_portfolio(pos)
 
-    assert _has_quarantined_positions(portfolio) is True
+    assert _quarantined_position_bridging_family_keys(portfolio) == set()
 
 
-def test_recent_entry_authority_quarantine_redecision_exposure_does_not_block_entries():
-    """A monitor-managed real exposure quarantine must not freeze all new entries."""
-    from src.engine.cycle_runner import _has_quarantined_positions
+def test_recent_entry_authority_quarantine_feeds_bridging_shim_for_its_family_only():
+    """T2 item 4: a monitor-managed real-exposure quarantine (phase='quarantined',
+    chain_state='entry_authority_quarantined') feeds the family-scoped block for
+    ITS OWN family via the bridging shim — never a portfolio-wide freeze (the
+    retired ``_has_quarantined_positions`` behavior). Unrelated families are
+    untouched (see the empty-set assertion in the legacy-value test above and
+    the "other families still trade" acceptance test).
+    """
+    from src.engine.evaluator import _quarantined_position_bridging_family_keys
+    from src.strategy.family_exclusive_dedup import WeatherFamilyKey
 
     observed_at = datetime.now(timezone.utc).isoformat()
     pos = _make_position(
@@ -3300,7 +3327,9 @@ def test_recent_entry_authority_quarantine_redecision_exposure_does_not_block_en
     )
     portfolio = _make_portfolio(pos)
 
-    assert _has_quarantined_positions(portfolio) is False
+    assert _quarantined_position_bridging_family_keys(portfolio) == {
+        WeatherFamilyKey(pos.city, pos.target_date, pos.temperature_metric, "")
+    }
 
 
 @pytest.mark.parametrize(
@@ -3308,12 +3337,16 @@ def test_recent_entry_authority_quarantine_redecision_exposure_does_not_block_en
     [
         "chain_absent_confirmed_position_unattributed",
         "chain_confirmed_zero",
-        "entry_authority_quarantined",
     ],
 )
-def test_stale_resolved_quarantine_projection_does_not_block_entries(chain_state):
-    """Old explicit chain-resolution projections must not freeze unrelated entry flow."""
-    from src.engine.cycle_runner import _has_quarantined_positions
+def test_stale_resolved_quarantine_projection_does_not_feed_bridging_shim(chain_state):
+    """Old explicit chain-resolution projections (resolved absence/zero, not the
+    live entry_authority_quarantined redecision state) must not feed the
+    bridging shim — these chain_states are outside item 4's literal scope
+    (only entry_authority_quarantined bridges), matching the retired gate's
+    own explicit continue-list for these two states.
+    """
+    from src.engine.evaluator import _quarantined_position_bridging_family_keys
 
     pos = _make_position(
         direction="buy_no",
@@ -3326,7 +3359,7 @@ def test_stale_resolved_quarantine_projection_does_not_block_entries(chain_state
     )
     portfolio = _make_portfolio(pos)
 
-    assert _has_quarantined_positions(portfolio) is False
+    assert _quarantined_position_bridging_family_keys(portfolio) == set()
 
 
 def test_monitoring_marks_quarantine_for_admin_resolution_once(monkeypatch):

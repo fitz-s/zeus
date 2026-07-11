@@ -1756,9 +1756,11 @@ class PortfolioState:
     # Replaces the synthetic `Position(direction="unknown", ...)` construction
     # formerly in chain_reconciliation (that constructor is deleted; see the
     # PR E2 note below load_portfolio). Consumers that gate on chain-only
-    # inventory (e.g. cycle_runner._has_quarantined_positions) consult both
-    # `positions` (loader no longer emits synthetic placeholders here) AND
-    # `chain_only_facts` (typed signal from reconcile).
+    # inventory (e.g. src.state.review_work_items.blocked_family_keys, T2
+    # excision — replaces the retired portfolio-wide cycle_runner.
+    # _has_quarantined_positions gate) consult both `positions` (loader no
+    # longer emits synthetic placeholders here) AND `chain_only_facts` (typed
+    # signal from reconcile).
     chain_only_facts: list = field(default_factory=list)
     # P4 (Tier 2.1): when True, DB projection failed and portfolio is empty.
     # Cycle runner must suppress new entries when this flag is set.
@@ -2596,8 +2598,10 @@ def _derive_chain_only_review_state(
 # `_chain_only_fact_from_row` (defined above) to emit typed
 # `ChainOnlyFact` review-queue entries on `PortfolioState.chain_only_facts`
 # instead of synthetic `Position(direction="unknown")` rows on
-# `PortfolioState.positions`. The cycle entry gate
-# `_has_quarantined_positions` consults both signals (see PR C2).
+# `PortfolioState.positions`. The family-scoped entry block
+# (src.state.review_work_items.blocked_family_keys, T2 excision — replaces
+# the retired portfolio-wide cycle_runner._has_quarantined_positions gate)
+# consults both signals (see PR C2).
 
 
 def load_runtime_open_portfolio(conn: sqlite3.Connection) -> PortfolioState:
@@ -2768,9 +2772,10 @@ def load_portfolio(path: Optional[Path] = None) -> PortfolioState:
         _guard_deprecated_portfolio_json(path)
         # PR E2 (Finding 3, 2026-05-27): chain-only quarantine rows now
         # populate `chain_only_facts` as typed ChainOnlyFact entries instead
-        # of synthesizing fake Position objects. `_has_quarantined_positions`
-        # in cycle_runner already consults this list (since PR C2), so the
-        # entry gate continues to fire on these rows.
+        # of synthesizing fake Position objects. The family-scoped entry
+        # block (src.state.review_work_items.blocked_family_keys, T2
+        # excision) already consults this list (since PR C2), so the entry
+        # gate continues to fire on these rows for their own family.
         degraded_facts = [
             _chain_only_fact_from_row(row)
             for row in chain_only_quarantines

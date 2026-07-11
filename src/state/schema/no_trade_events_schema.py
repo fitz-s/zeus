@@ -39,6 +39,13 @@ schema_version CHECK includes 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26
   - 29: settlement_capture physical-interval reasons: +4 NoTradeReason members
         (PHYSICAL_INTERVAL_DATA_GATED, PHYSICAL_INTERVAL_OVERLAP,
         PHYSICAL_INTERVAL_UNPROFITABLE, SETTLEMENT_CAPTURE_NOT_LOCKED).
+  - quarantine excision T2 (2026-07-11): +1 NoTradeReason member
+        (FAMILY_ENTRY_BLOCKED) replacing the portfolio-wide quarantine gate's
+        implicit rejection with a named, family-scoped reason. The
+        enum-iteration rebuild guard in _rebuild_stale_no_trade_events_table
+        picks this up on next boot without a schema_version bump (see Note
+        below); no dedicated version row added since the CHECK range mismatch
+        against SCHEMA_VERSION already forces the guard's rebuild path.
 
 Note: _REASON_VALUES_SQL is enum-derived (iterates NoTradeReason) so adding
 SHOULDER_* members to the enum automatically extends the reason CHECK constraint —

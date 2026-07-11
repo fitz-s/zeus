@@ -242,9 +242,43 @@ def has_unbounded_obligation(conn: sqlite3.Connection) -> bool:
     return bool(row[0]) if row is not None else False
 
 
+def open_obligation_family_keys(conn: sqlite3.Connection) -> set[FamilyKey]:
+    """Distinct family keys carried by OPEN entry_exposure_obligations rows.
+
+    T2 (docs/rebuild/quarantine_excision_2026-07-11.md, family-scoped block):
+    an OPEN obligation is real-or-unknown exposure for a command whose fate
+    (fill vs. no-fill) is not yet settled truth — the same category of "must
+    not admit a sibling bin in this family" risk as an open ChainOnlyFact or
+    family-blocking ReviewWorkItem. Consumed by
+    ``src.state.review_work_items.blocked_family_keys`` so the candidate
+    filter sees ONE unioned blocked-family view. Rows with no family_key
+    (NULL family_city) are omitted here — they still count toward
+    ``total_open_obligation_usd``/``has_unbounded_obligation``, just not
+    toward a family-scoped block.
+
+    INV-37: caller supplies conn.
+    """
+
+    rows = conn.execute(
+        "SELECT DISTINCT family_city, family_target_date, family_temperature_metric, "
+        "family_market_family_id FROM entry_exposure_obligations "
+        "WHERE status = 'OPEN' AND family_city IS NOT NULL"
+    ).fetchall()
+    return {
+        FamilyKey(
+            city=str(city),
+            target_date=str(target_date or ""),
+            temperature_metric=str(metric or ""),
+            market_family_id=str(market_family_id or ""),
+        )
+        for city, target_date, metric, market_family_id in rows
+    }
+
+
 __all__ = [
     "open_entry_exposure_obligation",
     "resolve_entry_exposure_obligation",
     "total_open_obligation_usd",
     "has_unbounded_obligation",
+    "open_obligation_family_keys",
 ]

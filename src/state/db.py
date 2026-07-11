@@ -11670,8 +11670,10 @@ def query_token_suppression_tokens(conn: sqlite3.Connection | None) -> list[str]
     economically_closed/quarantined). Without this, reconcile_with_chain
     Rule 3 re-quarantines these tokens every cycle from the chain API
     response, regenerating chain-only quarantine positions in PortfolioState
-    and re-arming _has_quarantined_positions even when the load-portfolio
-    path correctly excludes them. The terminal-phase guard mirrors the one
+    and re-arming the family-scoped entry block (src.state.review_work_items.
+    blocked_family_keys, T2 excision — replaces the retired portfolio-wide
+    _has_quarantined_positions gate) even when the load-portfolio path
+    correctly excludes them. The terminal-phase guard mirrors the one
     in query_chain_only_quarantine_rows so both injection paths agree.
     Skipped when position_current is absent (test envs).
     """

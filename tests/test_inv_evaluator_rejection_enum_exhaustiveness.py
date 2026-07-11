@@ -36,7 +36,8 @@ from typing import FrozenSet
 import pytest
 
 # ---------------------------------------------------------------------------
-# Migration plan: 76 callsites -> canonical NoTradeReason member value
+# Migration plan: 77 callsites -> canonical NoTradeReason member value
+# (76 + 1: quarantine excision T2, 2026-07-11, FAMILY_ENTRY_BLOCKED)
 # Source: T2_NO_TRADE_EVENTS_SCAFFOLD.md §3 (original 70) + 2026-06-14
 #   gate-mass-collapse reconciliation (+10 live evaluator emitters that were
 #   false orphans once the shadow-candidate exempt set shrank).
@@ -126,9 +127,12 @@ MIGRATION_TABLE: list[tuple[int, str, str]] = [
     (6248, "SHOULDER_CLUSTER_CAP_EXCEEDED", "shoulder_cluster_cap_exceeded"),
     (1427, "STRATEGY_ECONOMIC_FLOOR (economic floor helper)", "strategy_economic_floor"),
     (1419, "ULTRA_LOW_PRICE_NOT_AUTHORIZED (ultra-low-price helper)", "ultra_low_price_not_authorized"),
+    # Quarantine excision T2 (docs/rebuild/quarantine_excision_2026-07-11.md):
+    # family-scoped block replacing the deleted portfolio-wide quarantine gate.
+    (3543, "FAMILY_ENTRY_BLOCKED (family-scoped block)", "family_entry_blocked"),
 ]
 
-assert len(MIGRATION_TABLE) == 76, f"Migration table must have 76 rows, got {len(MIGRATION_TABLE)}"
+assert len(MIGRATION_TABLE) == 77, f"Migration table must have 77 rows, got {len(MIGRATION_TABLE)}"
 
 
 def _get_evaluator_path() -> pathlib.Path:

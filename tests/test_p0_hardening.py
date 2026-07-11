@@ -784,11 +784,18 @@ def test_inv27_execution_truth_warnings_law_registered():
 
 class TestRWExecutionTruthWarnings:
     """R-W: cycle summary surfaces operator-visible warnings for pending
-    positions whose command truth is unknown. Quarantine is not duplicated here;
-    the canonical quarantine gate blocks entries. INV-27.
+    positions whose command truth is unknown. INV-27.
 
     Detection rules under K4-deferred heuristics:
     - pending_* state + empty order_id → pending_state_missing_order_id
+
+    Quarantine excision T2 (docs/rebuild/quarantine_excision_2026-07-11.md):
+    the portfolio-wide quarantine gate (``_has_quarantined_positions``) is
+    DELETED — quarantined positions no longer have a dedicated "canonical
+    entry gate" to defer to here. This class now only asserts that a
+    quarantined position does not ALSO spuriously surface as a
+    pending_state_missing_order_id warning (a quarantined position is not a
+    pending_* state).
     """
 
     def _make_position(self, *, state: str, order_id: str = "", trade_id: str = "pos-test"):
@@ -810,11 +817,17 @@ class TestRWExecutionTruthWarnings:
             order_id=order_id,
         )
 
-    def test_quarantined_without_order_id_uses_canonical_entry_gate_not_warning(self):
-        from src.engine.cycle_runner import (
-            _collect_execution_truth_warnings,
-            _has_quarantined_positions,
-        )
+    def test_quarantined_without_order_id_does_not_surface_pending_warning(self):
+        """A quarantined position is not a pending_* state, so it must not
+        spuriously surface as pending_state_missing_order_id. T2 excision:
+        the retired ``_has_quarantined_positions`` global gate no longer
+        exists to assert on here — quarantined-position family blocking now
+        routes through src.engine.evaluator._quarantined_position_bridging_
+        family_keys (see tests/test_cross_module_invariants.py) and
+        risk_level DATA_DEGRADED (unbounded EntryExposureObligation), neither
+        of which this warnings-collector function is responsible for.
+        """
+        from src.engine.cycle_runner import _collect_execution_truth_warnings
         from src.state.portfolio import PortfolioState
 
         portfolio = PortfolioState(
@@ -822,7 +835,6 @@ class TestRWExecutionTruthWarnings:
             bankroll=211.37,
         )
         assert _collect_execution_truth_warnings(portfolio) == []
-        assert _has_quarantined_positions(portfolio) is True
 
     def test_pending_state_without_order_id_surfaces_warning(self):
         from src.engine.cycle_runner import _collect_execution_truth_warnings

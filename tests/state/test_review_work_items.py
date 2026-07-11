@@ -41,6 +41,12 @@ from src.strategy.family_exclusive_dedup import WeatherFamilyKey
 def _make_conn() -> sqlite3.Connection:
     conn = sqlite3.connect(":memory:")
     ensure_table(conn)
+    # T2 (docs/rebuild/quarantine_excision_2026-07-11.md): blocked_family_keys
+    # now also unions OPEN entry_exposure_obligations family keys — both
+    # tables always coexist in production (src.state.db.init_schema_trade_only
+    # ensures both on the same trade-DB conn).
+    from src.state.schema.entry_exposure_obligations_schema import ensure_table as _ensure_obligations_table
+    _ensure_obligations_table(conn)
     return conn
 
 
@@ -624,3 +630,43 @@ class TestBlockedFamilyKeys:
         portfolio = _FakePortfolio([_FakeChainOnlyFact(condition_id="cond-1", blocks_entry=False)])
         keys = blocked_family_keys(conn, portfolio=portfolio)
         assert keys == set()
+
+    def test_includes_open_entry_exposure_obligation_family_keys(self) -> None:
+        """T2: an OPEN EntryExposureObligation (a command whose fill/no-fill
+        fate is not yet settled truth) unions into the family-scoped block —
+        same category of risk as an open ChainOnlyFact/ReviewWorkItem.
+        """
+        from src.contracts.review_work_item import FamilyKey as _FamilyKey
+        from src.state.entry_exposure_obligation import open_entry_exposure_obligation
+
+        conn = _make_conn()
+        open_entry_exposure_obligation(
+            conn,
+            command_id="cmd-reservation-1",
+            owner_domain="trade",
+            shares=5.0,
+            cost_basis_usd=2.0,
+            family_key=_FamilyKey(city="Denver", target_date="2026-08-02", temperature_metric="high"),
+        )
+        keys = blocked_family_keys(conn, portfolio=None)
+        assert WeatherFamilyKey("Denver", "2026-08-02", "high", "") in keys
+
+    def test_excludes_resolved_entry_exposure_obligation_family_keys(self) -> None:
+        from src.contracts.review_work_item import FamilyKey as _FamilyKey
+        from src.state.entry_exposure_obligation import (
+            open_entry_exposure_obligation,
+            resolve_entry_exposure_obligation,
+        )
+
+        conn = _make_conn()
+        obligation = open_entry_exposure_obligation(
+            conn,
+            command_id="cmd-reservation-2",
+            owner_domain="trade",
+            shares=5.0,
+            cost_basis_usd=2.0,
+            family_key=_FamilyKey(city="Denver", target_date="2026-08-02", temperature_metric="high"),
+        )
+        resolve_entry_exposure_obligation(conn, command_id=obligation.command_id)
+        keys = blocked_family_keys(conn, portfolio=None)
+        assert WeatherFamilyKey("Denver", "2026-08-02", "high", "") not in keys

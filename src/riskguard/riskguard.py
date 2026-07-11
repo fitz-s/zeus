@@ -124,6 +124,40 @@ def _portfolio_consistency_level(consistency_lock: str) -> RiskLevel:
     return RiskLevel.GREEN if consistency_lock == "pass" else RiskLevel.DATA_DEGRADED
 
 
+def _unresolved_exposure_data_degraded_level(zeus_conn: sqlite3.Connection, portfolio) -> RiskLevel:
+    """T2 (quarantine excision, BLOCKER-1 "unbounded obligation -> DATA_DEGRADED"
+    leg): DATA_DEGRADED iff any OPEN EntryExposureObligation carries unknown
+    (unbounded) exposure — a command that may have caused venue/chain exposure
+    with no usable size/cost figure yet.
+
+    DATA_DEGRADED (YELLOW-equivalent: no new entries, monitor/exit/
+    reconciliation continue), never RED — an unknown-exposure fact is missing
+    truth input, not a confirmed loss event.
+
+    Scope note: the sibling "unmapped ChainOnlyFact family identity ->
+    DATA_DEGRADED" leg (canonical-asset dedup reducer, T2 item 1) is NOT
+    folded in here — ``portfolio`` on this call site comes from
+    ``_load_riskguard_portfolio_truth``, a Position-only loader view that
+    never populates ``chain_only_facts`` (a 60-second hot-tick perf
+    tradeoff documented on that loader; see its docstring). That leg IS
+    wired at src.engine.cycle_runner.run_cycle, which loads the full
+    ``PortfolioState`` via ``load_portfolio()`` including ``chain_only_facts``.
+    ``portfolio`` is accepted here for call-site symmetry / a future wire once
+    chain-only facts are cheaply available on this loader path.
+    """
+    try:
+        from src.state.entry_exposure_obligation import has_unbounded_obligation
+
+        if has_unbounded_obligation(zeus_conn):
+            return RiskLevel.DATA_DEGRADED
+    except sqlite3.Error:
+        # Fail-soft on a transient/degraded read of this specific signal —
+        # every OTHER risk component above still evaluates on its own merits;
+        # a read error here must not crash the whole tick.
+        return RiskLevel.GREEN
+    return RiskLevel.GREEN
+
+
 def _finite_float_or_none(value):
     if value is None:
         return None
@@ -2654,6 +2688,17 @@ def _tick_once() -> RiskLevel:
         portfolio_consistency_level = _portfolio_consistency_level(
             portfolio_truth.get("consistency_lock", "pass")
         )
+        # T2 (quarantine excision, BLOCKER-1 "unbounded obligation -> DATA_DEGRADED"
+        # leg + "unmappable family identity... never silent skip"): an OPEN
+        # unbounded EntryExposureObligation, or a blocking ChainOnlyFact whose
+        # family identity cannot be resolved, is missing risk-input truth —
+        # existing DATA_DEGRADED lane (blocks NEW entries via
+        # _risk_allows_new_entries/riskguard_allows_new_entries requiring
+        # GREEN; monitor/exit/reconciliation lanes are untouched by risk_level).
+        # This replaces the portfolio-wide quarantine gate's global freeze with
+        # the SAME risk lane every other "missing truth input" condition
+        # already uses, single-seam.
+        unresolved_exposure_level = _unresolved_exposure_data_degraded_level(zeus_conn, portfolio)
 
         level = overall_level(
             brier_level,
@@ -2664,6 +2709,7 @@ def _tick_once() -> RiskLevel:
             weekly_loss_level,
             collateral_identity_level,
             portfolio_consistency_level,
+            unresolved_exposure_level,
         )
 
         # B5: force_exit_review when daily loss reaches RED
@@ -2692,6 +2738,9 @@ def _tick_once() -> RiskLevel:
                 "settlement_quality_level": settlement_quality_level.value,
                 "execution_quality_level": execution_quality_level.value,
                 "strategy_signal_level": strategy_signal_level.value,
+                # T2 (quarantine excision, BLOCKER-1): unbounded obligation or
+                # unmapped-family ChainOnlyFact -> DATA_DEGRADED leg.
+                "unresolved_exposure_level": unresolved_exposure_level.value,
                 "daily_loss_level": daily_loss_level.value,
                 "weekly_loss_level": weekly_loss_level.value,
                 "daily_loss": None if daily_loss is None else round(float(daily_loss), 2),

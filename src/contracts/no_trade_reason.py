@@ -145,5 +145,13 @@ class NoTradeReason(StrEnum):
     PROBABILITY_LOW_PRICE_EDGE_BIN_DISAGREEMENT = auto()  # low-price edge bin: market disagrees AND member support absent — hard reject
     PROBABILITY_TAIL_SHAPE_ANOMALY_HARD = auto()       # tail shape anomaly detected and gate in hard mode — hard reject
 
+    # ── Family-scoped entry block (quarantine excision T2, 2026-07-11) ───────
+    # A candidate's WeatherFamilyKey (city, target_date, temperature_metric) is
+    # currently blocked by an open ChainOnlyFact, a family-blocking
+    # ReviewWorkItem, an OPEN EntryExposureObligation, or a bridging
+    # phase='quarantined' position — see src.state.review_work_items.
+    # blocked_family_keys. Family-scoped, never portfolio-wide.
+    FAMILY_ENTRY_BLOCKED = auto()
+
     # ── Fallback (§13) ────────────────────────────────────────────────────────
     UNCATEGORIZED = auto()

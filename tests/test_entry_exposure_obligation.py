@@ -21,6 +21,7 @@ from src.contracts.review_work_item import FamilyKey
 from src.state.entry_exposure_obligation import (
     has_unbounded_obligation,
     open_entry_exposure_obligation,
+    open_obligation_family_keys,
     resolve_entry_exposure_obligation,
     total_open_obligation_usd,
 )
@@ -198,4 +199,34 @@ class TestAccounting:
         open_entry_exposure_obligation(conn, command_id="cmd2", owner_domain="trade", unbounded=True)
         assert has_unbounded_obligation(conn) is True
         resolve_entry_exposure_obligation(conn, command_id="cmd2")
-        assert has_unbounded_obligation(conn) is False
+
+
+class TestOpenObligationFamilyKeys:
+    """T2 (family-scoped block seam consumed by
+    src.state.review_work_items.blocked_family_keys)."""
+
+    def test_returns_distinct_family_keys_for_open_rows_only(self) -> None:
+        conn = _make_conn()
+        fam_a = FamilyKey(city="NYC", target_date="2026-07-15", temperature_metric="high")
+        fam_b = FamilyKey(city="Chicago", target_date="2026-07-16", temperature_metric="low")
+        open_entry_exposure_obligation(
+            conn, command_id="cmd1", owner_domain="trade", shares=1.0, cost_basis_usd=0.5,
+            family_key=fam_a,
+        )
+        open_entry_exposure_obligation(
+            conn, command_id="cmd2", owner_domain="trade", shares=2.0, cost_basis_usd=1.0,
+            family_key=fam_a,
+        )
+        resolved_cmd = open_entry_exposure_obligation(
+            conn, command_id="cmd3", owner_domain="trade", shares=3.0, cost_basis_usd=1.5,
+            family_key=fam_b,
+        )
+        resolve_entry_exposure_obligation(conn, command_id=resolved_cmd.command_id)
+        open_entry_exposure_obligation(conn, command_id="cmd4", owner_domain="trade", shares=1.0, cost_basis_usd=0.5)
+
+        assert open_obligation_family_keys(conn) == {fam_a}
+
+    def test_empty_when_no_open_family_scoped_rows(self) -> None:
+        conn = _make_conn()
+        open_entry_exposure_obligation(conn, command_id="cmd1", owner_domain="trade", unbounded=True)
+        assert open_obligation_family_keys(conn) == set()

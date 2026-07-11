@@ -546,14 +546,43 @@ invariants:
 
   - id: INV-27
     zones: [K2_runtime]
-    statement: Cycle summary must surface execution-truth warnings for pending_* positions without order_id. Quarantined positions must not be duplicated as warnings because they are already covered by the canonical quarantine entry blocker.
-    why: Without explicit operator visibility into pending command-truth gaps, pending positions without order_id silently accumulate. P0 surfaces them; K4 will replace heuristic detection with durable command-journal lookup. Quarantine remains a real entry blocker through _has_quarantined_positions instead of a duplicate observability warning.
+    statement: >
+      Cycle summary must surface execution-truth warnings for pending_*
+      positions without order_id. Quarantine excision T2
+      (docs/rebuild/quarantine_excision_2026-07-11.md): quarantine is no
+      longer "the canonical entry blocker" — the portfolio-wide
+      _has_quarantined_positions gate is DELETED. The invariant is now:
+      unknown-exposure facts (ChainOnlyFact, family-blocking ReviewWorkItem,
+      OPEN EntryExposureObligation, bridging phase='quarantined' positions)
+      must reach the risk view through either (a) a family-scoped entry block
+      at the evaluator's candidate-screening seam
+      (src.state.review_work_items.blocked_family_keys, consumed by
+      src.engine.evaluator.evaluate_candidate), or (b) worst-case exposure
+      accounting + risk_level DATA_DEGRADED for unbounded/unmapped exposure
+      (src.state.canonical_asset_exposure.chain_only_worst_case_add_usd,
+      src.state.entry_exposure_obligation.has_unbounded_obligation, folded in
+      at src.riskguard.riskguard._unresolved_exposure_data_degraded_level and
+      src.engine.cycle_runner.run_cycle). Silent exclusion of an
+      unknown-exposure fact from BOTH legs is forbidden.
+    why: >
+      Without explicit operator visibility into pending command-truth gaps,
+      pending positions without order_id silently accumulate. P0 surfaces
+      them; K4 will replace heuristic detection with durable command-journal
+      lookup. The retired portfolio-wide quarantine gate was DISEASE (any one
+      quarantine fact froze ALL new entries portfolio-wide, per
+      docs/rebuild/quarantine_excision_2026-07-11.md's excision rationale);
+      the replacement scopes blocking to the affected weather family and
+      counts unknown exposure conservatively rather than freezing everything.
     enforced_by:
       tests:
-        - tests/test_p0_hardening.py::TestRWExecutionTruthWarnings::test_quarantined_without_order_id_uses_canonical_entry_gate_not_warning
+        - tests/test_p0_hardening.py::TestRWExecutionTruthWarnings::test_quarantined_without_order_id_does_not_surface_pending_warning
         - tests/test_p0_hardening.py::TestRWExecutionTruthWarnings::test_pending_state_without_order_id_surfaces_warning
         - tests/test_p0_hardening.py::TestRWExecutionTruthWarnings::test_clean_portfolio_emits_no_warnings_key
         - tests/test_p0_hardening.py::TestRWExecutionTruthWarnings::test_warnings_do_not_block_entries
+        - tests/test_quarantine_excision_t2.py::TestEvaluatorFamilyScopedBlock
+        - tests/test_quarantine_excision_t2.py::TestUnboundedObligationDataDegraded
+        - tests/test_quarantine_excision_t2.py::TestAcceptanceSequence::test_full_acceptance_sequence
+        - tests/test_cycle_runner_discovery_gate_authority.py::test_gate_signature_has_no_quarantine_kwarg
     capability_tags: []
     relationship_tests: []
     sunset_date: 2027-05-06

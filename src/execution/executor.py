@@ -3072,6 +3072,100 @@ def _reserve_collateral_for_sell(
     CollateralLedger(conn).reserve_tokens_for_sell(command_id, token_id, shares)
 
 
+def _open_entry_risk_reservation(
+    conn: sqlite3.Connection,
+    *,
+    command_id: str,
+    intent: "ExecutionIntent",
+    shares: float,
+    cost_basis_usd: float,
+) -> None:
+    """EntryRiskReservation (T2, BLOCKER-1): persist a conservative bounded
+    EntryExposureObligation for this ENTRY command in the SAME transaction as
+    command admission, BEFORE network post — see the caller
+    (``insert_command``/``append_event``/``_reserve_collateral_for_buy`` all
+    share this transaction, committed together at the caller's
+    ``conn.commit()``).
+
+    BLOCKER-1 law: "every durable command that may have caused venue/chain
+    exposure has exactly one of {authoritative settled economics | conservative
+    bounded EntryExposureObligation | unbounded obligation -> DATA_DEGRADED},
+    created ATOMICALLY on the failure path (before return)". This call makes
+    that invariant hold from the MOMENT the command becomes durable (this
+    function), not only on a later failure — the command HAS NOT been posted
+    to the venue yet, so its fate (fill vs. no-fill) is not yet settled truth.
+    ``_release_entry_risk_reservation`` (below) resolves this row once fill
+    confirmation or confirmed absence supersedes the conservative estimate;
+    until then this obligation covers the exact BLOCKER-1 gap (a durable
+    command whose venue/chain fate is unresolved carrying zero Portfolio
+    exposure while RiskGuard's unprojected-fill compensation misses it).
+
+    Worst-case bound: shares x $1 (long-only CTF payout bound — see
+    src.contracts.entry_exposure_obligation module docstring). Family identity
+    is a best-effort market_events lookup keyed by intent.market_id (the
+    Polymarket condition id at this seam) / intent.token_id; ``None`` is
+    passed through unresolved rather than guessed (an obligation with no
+    family_key still counts toward total_open_obligation_usd/has_unbounded_
+    obligation, just not toward family-scoped blocking).
+
+    INV-37: caller supplies conn; this function never commits.
+    """
+    from src.contracts.review_work_item import FamilyKey
+    from src.state.entry_exposure_obligation import open_entry_exposure_obligation
+    from src.state.review_work_items import family_key_for_condition_or_token
+    from src.state.schema.entry_exposure_obligations_schema import ensure_table as _ensure_obligations_table
+
+    # Idempotent DDL (CREATE TABLE/INDEX IF NOT EXISTS): production always has
+    # this table already via src.state.db.init_schema_trade_only; calling here
+    # too guarantees correctness on any conn regardless of which schema-init
+    # path the caller used, at negligible per-call cost (no-op when present).
+    _ensure_obligations_table(conn)
+
+    condition_id = str(getattr(intent, "market_id", "") or "")
+    token_id = str(getattr(intent, "token_id", "") or "")
+    weather_family_key = family_key_for_condition_or_token(
+        conn, condition_id=condition_id, token_id=token_id
+    )
+    family_key = (
+        FamilyKey(
+            city=weather_family_key.city,
+            target_date=weather_family_key.target_date,
+            temperature_metric=weather_family_key.temperature_metric,
+            market_family_id=weather_family_key.market_family_id,
+        )
+        if weather_family_key is not None
+        else None
+    )
+    open_entry_exposure_obligation(
+        conn,
+        command_id=command_id,
+        owner_domain="trade",
+        token_id=token_id,
+        condition_id=condition_id,
+        shares=float(shares),
+        cost_basis_usd=float(cost_basis_usd),
+        unbounded=False,
+        family_key=family_key,
+    )
+
+
+def _release_entry_risk_reservation(conn: sqlite3.Connection, *, command_id: str) -> bool:
+    """Resolve an EntryRiskReservation once the command's true fate is settled
+    truth — a real fill (Position row materialized) or a confirmed absence
+    (no fill, venue/chain-confirmed). Returns True iff an OPEN row existed and
+    was resolved. Safe to call on a command with no obligation (returns False,
+    never raises) — not every ENTRY command necessarily has one (e.g. rejected
+    before the reservation seam).
+
+    INV-37: caller supplies conn; this function never commits.
+    """
+    from src.state.entry_exposure_obligation import resolve_entry_exposure_obligation
+    from src.state.schema.entry_exposure_obligations_schema import ensure_table as _ensure_obligations_table
+
+    _ensure_obligations_table(conn)
+    return resolve_entry_exposure_obligation(conn, command_id=command_id)
+
+
 def _persist_pre_submit_envelope(
     conn: sqlite3.Connection,
     *,
@@ -6233,6 +6327,19 @@ def _live_order(
                 conn,
                 spend_micro=required_pusd_micro,
             )
+            # T2 (quarantine excision, BLOCKER-1): EntryRiskReservation —
+            # persist a conservative bounded EntryExposureObligation for THIS
+            # command in the SAME transaction as command admission, BEFORE
+            # network post (client.place_limit_order below runs after this
+            # commit). See _open_entry_risk_reservation for the full BLOCKER-1
+            # rationale.
+            _open_entry_risk_reservation(
+                conn,
+                command_id=command_id,
+                intent=intent,
+                shares=shares,
+                cost_basis_usd=required_pusd_micro / 1_000_000.0,
+            )
             conn.commit()
         except MarketSnapshotError as exc:
             return OrderResult(
@@ -6423,6 +6530,11 @@ def _live_order(
                         "exception_message": str(exc),
                     },
                 )
+                # T2 (BLOCKER-1): confirmed no venue side effect occurred —
+                # release the EntryRiskReservation opened before this command's
+                # commit (a client-construction failure is confirmed absence,
+                # never an ambiguous/unknown outcome).
+                _release_entry_risk_reservation(conn, command_id=command_id)
                 if _own_conn:
                     conn.commit()
             except Exception as inner:
@@ -6459,6 +6571,9 @@ def _live_order(
                     occurred_at=rej_time,
                     payload={"reason": "v2_preflight_failed", "detail": str(exc)},
                 )
+                # T2 (BLOCKER-1): confirmed no venue side effect occurred —
+                # preflight fails BEFORE place_limit_order is called.
+                _release_entry_risk_reservation(conn, command_id=command_id)
                 if _own_conn:
                     conn.commit()
             except Exception as inner:
@@ -6497,6 +6612,9 @@ def _live_order(
                         "exception_message": str(exc),
                     },
                 )
+                # T2 (BLOCKER-1): confirmed no venue side effect occurred —
+                # preflight fails BEFORE place_limit_order is called.
+                _release_entry_risk_reservation(conn, command_id=command_id)
                 if _own_conn:
                     conn.commit()
             except Exception as inner:
@@ -6731,6 +6849,13 @@ def _live_order(
                         **final_envelope_payload,
                     },
                 )
+                # T2 (BLOCKER-1): venue synchronously confirmed rejection
+                # (success=False) — confirmed absence, safe to release. Only
+                # reached when the SUBMIT_REJECTED append_event itself
+                # succeeded; the `except` branch below is the ambiguous
+                # persistence-failure-after-side-effect case and must NOT
+                # release (exactly BLOCKER-1's target gap).
+                _release_entry_risk_reservation(conn, command_id=command_id)
                 if _own_conn:
                     conn.commit()
             except Exception as inner:
@@ -6786,6 +6911,10 @@ def _live_order(
                     occurred_at=ack_time,
                     payload={"reason": "missing_order_id", **final_envelope_payload},
                 )
+                # T2 (BLOCKER-1): treated as confirmed non-placement by this
+                # same existing SUBMIT_REJECTED classification — release only
+                # on the happy path; the `except` branch is the ambiguous case.
+                _release_entry_risk_reservation(conn, command_id=command_id)
                 if _own_conn:
                     conn.commit()
             except Exception as inner:

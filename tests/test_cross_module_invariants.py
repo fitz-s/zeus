@@ -47,38 +47,17 @@ def _ensure_sklearn_stub_for_cycle_runner_import() -> None:
     sys.modules.setdefault("sklearn.linear_model", linear_model)
 
 
-def test_cycle_runner_quarantine_gate_preserves_chain_state_enum_meaning():
-    """Cycle entry blocking must treat ChainState enum and wire strings identically."""
+def test_cycle_runner_discovery_gate_all_clear_without_quarantine_kwarg():
+    """Quarantine excision T2 (docs/rebuild/quarantine_excision_2026-07-11.md):
+    _discovery_gates_allow_entries no longer takes ``has_quarantine`` — the
+    portfolio-wide gate and its backing ``_has_quarantined_positions`` are
+    deleted. This test keeps the cross-module all-clear/DATA_DEGRADED check
+    (the gate's replacement signal) without the retired kwarg.
+    """
     _ensure_sklearn_stub_for_cycle_runner_import()
 
-    from src.contracts.semantic_types import ChainState
-    from src.engine.cycle_runner import _discovery_gates_allow_entries, _has_quarantined_positions
+    from src.engine.cycle_runner import _discovery_gates_allow_entries
     from src.riskguard.risk_level import RiskLevel
-    from src.state.portfolio import PortfolioState, Position
-
-    def _position(trade_id: str, chain_state: object) -> Position:
-        return Position(
-            trade_id=trade_id,
-            market_id="m1",
-            city="NYC",
-            cluster="NYC",
-            target_date="2026-04-01",
-            bin_label="39-40°F",
-            direction="buy_yes",
-            chain_state=chain_state,
-        )
-
-    quarantined = _position("chain-state-enum", "quarantined")
-    expired = _position("chain-state-expired", ChainState.QUARANTINE_EXPIRED)
-    synced = _position("chain-state-synced", ChainState.SYNCED)
-    fill_quarantined = _position("fill-quarantine", ChainState.SYNCED)
-    fill_quarantined.state = "quarantined"
-
-    assert quarantined.chain_state is ChainState.QUARANTINED
-    assert _has_quarantined_positions(PortfolioState(positions=[quarantined])) is True
-    assert _has_quarantined_positions(PortfolioState(positions=[expired])) is True
-    assert _has_quarantined_positions(PortfolioState(positions=[fill_quarantined])) is True
-    assert _has_quarantined_positions(PortfolioState(positions=[synced])) is False
 
     green_gate = {"entry": {"allow_submit": True}}
     all_clear = {
@@ -89,7 +68,6 @@ def test_cycle_runner_quarantine_gate_preserves_chain_state_enum_meaning():
         "governor_status": green_gate,
         "current_posture": "NORMAL",
         "chain_ready": True,
-        "has_quarantine": False,
         "force_exit": False,
         "freshness_allows_entries": True,
         "entry_bankroll": 1000.0,
@@ -97,7 +75,50 @@ def test_cycle_runner_quarantine_gate_preserves_chain_state_enum_meaning():
         "entries_paused": False,
     }
     assert _discovery_gates_allow_entries(**all_clear) is True
-    assert _discovery_gates_allow_entries(**{**all_clear, "has_quarantine": True}) is False
+    # DATA_DEGRADED now carries the replacement signal (unbounded
+    # EntryExposureObligation / unmapped ChainOnlyFact family) — any
+    # non-GREEN risk_level still blocks, same as before the excision.
+    assert _discovery_gates_allow_entries(**{**all_clear, "risk_level": RiskLevel.DATA_DEGRADED}) is False
+
+
+def test_evaluator_quarantined_position_bridging_preserves_chain_state_enum_meaning():
+    """Cross-module invariant (T2 excision replacement): the bridging shim
+    that feeds phase='quarantined' positions into the family-scoped block
+    (src.engine.evaluator._quarantined_position_bridging_family_keys) must
+    treat the ChainState enum and its raw wire-string form identically — the
+    same enum/string-boundary invariant the retired
+    ``_has_quarantined_positions`` used to cover for the (now-deleted)
+    portfolio-wide gate.
+    """
+    _ensure_sklearn_stub_for_cycle_runner_import()
+
+    from src.contracts.semantic_types import ChainState
+    from src.engine.evaluator import _quarantined_position_bridging_family_keys
+    from src.state.portfolio import PortfolioState, Position
+    from src.strategy.family_exclusive_dedup import WeatherFamilyKey
+
+    def _position(trade_id: str, chain_state: object) -> Position:
+        return Position(
+            trade_id=trade_id,
+            market_id="m1",
+            city="NYC",
+            cluster="NYC",
+            target_date="2026-04-01",
+            bin_label="39-40°F",
+            direction="buy_yes",
+            temperature_metric="high",
+            state="quarantined",
+            chain_state=chain_state,
+        )
+
+    quarantined_enum = _position("chain-state-enum", ChainState.ENTRY_AUTHORITY_QUARANTINED)
+    quarantined_str = _position("chain-state-str", "entry_authority_quarantined")
+    synced = _position("chain-state-synced", ChainState.SYNCED)
+
+    expected = {WeatherFamilyKey("NYC", "2026-04-01", "high", "")}
+    assert _quarantined_position_bridging_family_keys(PortfolioState(positions=[quarantined_enum])) == expected
+    assert _quarantined_position_bridging_family_keys(PortfolioState(positions=[quarantined_str])) == expected
+    assert _quarantined_position_bridging_family_keys(PortfolioState(positions=[synced])) == set()
 
 
 def test_structural_linter_gate():

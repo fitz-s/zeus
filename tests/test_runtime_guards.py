@@ -7000,10 +7000,27 @@ def test_load_portfolio_dedupes_chain_only_fact_when_projection_already_has_toke
     assert [pos.token_id for pos in state.positions] == ["yes-chain-only"]
 
 
-def test_quarantine_blocks_new_entries(monkeypatch, tmp_path):
+def test_quarantine_no_longer_sets_portfolio_wide_block(monkeypatch, tmp_path):
+    """Quarantine excision T2 (docs/rebuild/quarantine_excision_2026-07-11.md):
+    the retired portfolio-wide quarantine gate (_has_quarantined_positions)
+    used to freeze ALL new entries the instant any one position carried
+    chain_state='quarantined', regardless of that position's family or scope
+    — the exact disease this excision removes. run_cycle() must no longer
+    surface the deleted `summary["portfolio_quarantined"]` key or the deleted
+    `entries_blocked_reason == "portfolio_quarantined"` value for this signal.
+    The replacement mechanisms (family-scoped block at the evaluator seam,
+    risk_level DATA_DEGRADED for unbounded obligations) are covered by
+    tests/test_quarantine_excision_t2.py and tests/test_live_safety_
+    invariants.py's bridging-shim tests, not this run_cycle() harness test —
+    evaluate_candidate is never invoked by run_cycle in the live/EDLI system
+    (legacy discovery is an intentional no-op path; see cycle_runner's own
+    comment at the discovery-gate call site).
+    """
     db_path = tmp_path / "zeus.db"
     conn = get_connection(db_path)
     init_schema(conn)
+    from src.state.db import init_schema_trade_only
+    init_schema_trade_only(conn)
     conn.close()
     portfolio = PortfolioState(positions=[_position(direction="unknown", chain_state="quarantined")])
 
@@ -7030,16 +7047,11 @@ def test_quarantine_blocks_new_entries(monkeypatch, tmp_path):
     monkeypatch.setattr(cycle_runner, "find_weather_markets", lambda **kwargs: [])
     monkeypatch.setattr("src.control.control_plane.process_commands", lambda: [])
     monkeypatch.setattr("src.observability.status_summary.write_status", lambda cycle_summary=None: None)
-    monkeypatch.setattr(
-        cycle_runner,
-        "evaluate_candidate",
-        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("entries should stay blocked while quarantined")),
-    )
 
     summary = cycle_runner.run_cycle(DiscoveryMode.OPENING_HUNT)
 
-    assert summary["portfolio_quarantined"] is True
-    assert summary["entries_blocked_reason"] == "portfolio_quarantined"
+    assert "portfolio_quarantined" not in summary
+    assert summary.get("entries_blocked_reason") != "portfolio_quarantined"
     assert summary["candidates"] == 0
 
 

@@ -383,18 +383,22 @@ def _attached_schema_names(conn: sqlite3.Connection) -> tuple[str, ...]:
     return tuple(dict.fromkeys(names)) or ("main",)
 
 
-def _family_key_for_chain_only_fact(conn: sqlite3.Connection, fact: object) -> Optional[WeatherFamilyKey]:
-    """Best-effort market_events lookup for a ChainOnlyFact's family identity.
+def family_key_for_condition_or_token(
+    conn: sqlite3.Connection, *, condition_id: str = "", token_id: str = ""
+) -> Optional[WeatherFamilyKey]:
+    """Best-effort market_events lookup for a family identity by condition/token id.
 
     Prefilter read helper (adjudication: "evaluator filtering stays a
     prefilter, never an enforcement authority") — returns None rather than
-    raising when market_events is not reachable on this connection or the
-    fact's token/condition id has no match; callers must not treat None as
-    proof the fact is unscoped.
+    raising when market_events is not reachable on this connection or neither
+    id has a match; callers must not treat None as proof the subject is
+    unscoped (contrast: silent-skip is forbidden for the exposure DOLLAR
+    figure — a caller with real exposure and no family match must still route
+    to DATA_DEGRADED rather than drop the fact).
     """
 
-    condition_id = str(getattr(fact, "condition_id", "") or "")
-    token_id = str(getattr(fact, "token_id", "") or "")
+    condition_id = str(condition_id or "")
+    token_id = str(token_id or "")
     if not condition_id and not token_id:
         return None
     for schema in _attached_schema_names(conn):
@@ -414,18 +418,34 @@ def _family_key_for_chain_only_fact(conn: sqlite3.Connection, fact: object) -> O
     return None
 
 
+def _family_key_for_chain_only_fact(conn: sqlite3.Connection, fact: object) -> Optional[WeatherFamilyKey]:
+    """ChainOnlyFact-shaped wrapper over ``family_key_for_condition_or_token``."""
+
+    return family_key_for_condition_or_token(
+        conn,
+        condition_id=str(getattr(fact, "condition_id", "") or ""),
+        token_id=str(getattr(fact, "token_id", "") or ""),
+    )
+
+
 def blocked_family_keys(
     conn: sqlite3.Connection,
     portfolio: object = None,
 ) -> set[WeatherFamilyKey]:
     """Return the set of WeatherFamilyKey values currently blocked by open
-    family-scoped review work items (FAMILY_BLOCKING_REASON_CODES) or by
-    blocking ChainOnlyFacts on ``portfolio.chain_only_facts``.
+    family-scoped review work items (FAMILY_BLOCKING_REASON_CODES), by
+    blocking ChainOnlyFacts on ``portfolio.chain_only_facts``, or by OPEN
+    EntryExposureObligations carrying a family_key.
 
     This is the seam T2's candidate filter will consult — a read helper, not
     an enforcement authority itself. ``portfolio`` may be None or any object
     exposing a ``chain_only_facts`` iterable of ChainOnlyFact-like objects
     (duck-typed: reads ``.condition_id``/``.token_id``/``.blocks_entry``).
+
+    The EntryExposureObligation leg (T2, BLOCKER-1): a command whose
+    fill/no-fill fate is not yet settled truth is the same category of "must
+    not admit a sibling bin in this family" risk as an open ChainOnlyFact —
+    see src.state.entry_exposure_obligation.open_obligation_family_keys.
 
     INV-37: caller supplies conn.
     """
@@ -448,6 +468,11 @@ def blocked_family_keys(
         key = _family_key_for_chain_only_fact(conn, fact)
         if key is not None:
             keys.add(key)
+
+    from src.state.entry_exposure_obligation import open_obligation_family_keys
+
+    for fam in open_obligation_family_keys(conn):
+        keys.add(WeatherFamilyKey(fam.city, fam.target_date, fam.temperature_metric, fam.market_family_id))
     return keys
 
 
