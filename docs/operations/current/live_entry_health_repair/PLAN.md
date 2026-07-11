@@ -261,3 +261,12 @@ Restore truthful live entry admission after the global auction reached a real wi
 - Files authorized: `src/engine/event_reactor_adapter.py`, `tests/engine/test_s3_native_side_candidate_materialization.py`, and this packet.
 - Acceptance: an AST antibody rejects any positional call to the keyword-only full-depth builder; the native-side/global-auction affected suite passes; official deploy advances to the next exact verdict or a real order with all five proof lines.
 - Pre-deploy verification: the actuation call now supplies the same `family_key/proof` keyword contract used by spine construction; no probability, book, sizing, or submission code changed. The AST callback antibody plus global-auction affected suite pass `55/55`; module compilation, freshness metadata, planning evidence, and `git diff --check` pass.
+
+## Slice B18 -- Split global actuation supersession evidence
+
+- B17 live proof: loaded SHA `d54ad4aa1`; callback TypeError is gone. Two consecutive epochs select the same Wellington family, refresh its substrate as fresh, then fail closed on the composite `GLOBAL_ACTUATION_EXECUTION_BINDING_SUPERSEDED`; order proof deltas remain zero.
+- First-principles diagnostic: identity drift and executable-curve drift have different causes and remedies. A single reason erases the distinction and makes any attempted fix guesswork.
+- Minimal change: preserve both rejection branches and expose only the mismatched identity field names or the two execution-curve identity hashes in the typed reason. Do not change comparison inputs, equality, requeue behavior, q, book refresh, sizing, or submission.
+- Files authorized: `src/engine/event_reactor_adapter.py` and this packet.
+- Acceptance: affected suite remains green; official deploy identifies which exact fail-closed branch is active without creating a command/order.
+- Pre-deploy verification: both former comparisons remain byte-for-byte strict; only typed evidence is refined. Global-auction affected suite passes `55/55`, module compilation and `git diff --check` pass.

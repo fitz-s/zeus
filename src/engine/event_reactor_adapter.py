@@ -5593,19 +5593,25 @@ def _global_actuation_selected_proof(
         ledger_snapshot_id=candidate.ledger_snapshot_id,
         book_captured_at_utc=candidate.book_captured_at_utc,
     )
-    if any(
-        getattr(rebound, field) != getattr(candidate, field)
-        for field in (
-            "family_key",
-            "bin_id",
-            "condition_id",
-            "side",
-            "token_id",
-            "probability_witness_identity",
-            "resolution_identity",
+    execution_identity_fields = (
+        "family_key",
+        "bin_id",
+        "condition_id",
+        "side",
+        "token_id",
+        "probability_witness_identity",
+        "resolution_identity",
+    )
+    execution_identity_drift = tuple(
+        field
+        for field in execution_identity_fields
+        if getattr(rebound, field) != getattr(candidate, field)
+    )
+    if execution_identity_drift:
+        raise ValueError(
+            "GLOBAL_ACTUATION_EXECUTION_BINDING_SUPERSEDED:identity:"
+            + ",".join(execution_identity_drift)
         )
-    ):
-        raise ValueError("GLOBAL_ACTUATION_EXECUTION_BINDING_SUPERSEDED")
     # The global batch epoch is in-memory while the forced JIT winner refresh is
     # persisted, so snapshot ids and TTL carriers differ by construction. Align
     # only those carriers and require every economic field — raw book hash, full
@@ -5615,8 +5621,12 @@ def _global_actuation_selected_proof(
         snapshot_id=rebound.executable_cost_curve.snapshot_id,
         quote_ttl=rebound.executable_cost_curve.quote_ttl,
     )
-    if executable_curve_identity(aligned_curve) != rebound.execution_curve_identity:
-        raise ValueError("GLOBAL_ACTUATION_EXECUTION_BINDING_SUPERSEDED")
+    aligned_curve_identity = executable_curve_identity(aligned_curve)
+    if aligned_curve_identity != rebound.execution_curve_identity:
+        raise ValueError(
+            "GLOBAL_ACTUATION_EXECUTION_BINDING_SUPERSEDED:curve:"
+            f"selected={aligned_curve_identity}:current={rebound.execution_curve_identity}"
+        )
     current_probability = current_global_probability_authority(
         forecast_conn,
         event,
