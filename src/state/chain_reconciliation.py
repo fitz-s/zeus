@@ -29,7 +29,11 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 
-from src.contracts.position_truth import CHAIN_ONLY_REVIEW_WINDOW_HOURS, ChainOnlyFact
+from src.contracts.position_truth import (
+    CHAIN_ONLY_REVIEW_WINDOW_HOURS,
+    ChainOnlyFact,
+    has_current_money_risk_chain_state,
+)
 from src.contracts.semantic_types import LifecycleState
 from src.state.chain_state import ChainSnapshotCompleteness, classify_chain_state
 from src.state.lifecycle_manager import (
@@ -534,7 +538,9 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
         must fold the current canonical phase to itself.  Pending entries remain
         excluded because entry-fill detection owns that race; pending exits are
         included because exit_lifecycle still needs fresh chain facts while a
-        sell attempt is backoff/exhausted/in flight.
+        sell attempt is backoff/exhausted/in flight. Current-money-risk
+        quarantines are included only for a phase-preserving positive chain
+        observation; the observation cannot resolve their authority review.
         """
         if conn is None:
             return None
@@ -556,6 +562,7 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
             LifecyclePhase.ACTIVE.value,
             LifecyclePhase.DAY0_WINDOW.value,
             LifecyclePhase.PENDING_EXIT.value,
+            LifecyclePhase.QUARANTINED.value,
         }:
             raise RuntimeError(
                 f"canonical chain-observation baseline phase is not open: got {phase!r}"
@@ -744,6 +751,7 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
         position: Position,
         *,
         prior_chain_state: str = "",
+        preserve_chain_state: bool = False,
     ) -> bool:
         """Persist chain economics for a SYNCED (matched, no size-mismatch)
         position whose persisted chain_shares is NULL (first-population), has
@@ -797,12 +805,17 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
               (chain economics match, but the canonical visibility projection
               still misleads monitor/redecision).
 
+        ``preserve_chain_state`` admits a current-money-risk quarantine without
+        converting its unresolved authority state to ``synced``. Its persisted
+        timestamp still controls idempotency, so a 2-minute chain poll does not
+        create an event storm inside the 30-minute freshness window.
+
         Gating mirrors _append_canonical_size_correction_if_available:
           - conn present; skip pending_entry phase (don't fight fill detection);
           - canonical row must exist in an open chain-observable phase
-            (active/day0_window/pending_exit) — a missing projection with prior
-            history or terminal phase is a contract violation surfaced by the
-            shared baseline gate.
+            (active/day0_window/pending_exit or current-risk quarantine) — a
+            missing projection with prior history is a contract violation
+            surfaced by the shared baseline gate.
 
         Fail-closed: any unexpected error is swallowed (logged) so reconcile
         never crashes. The next cycle re-detects and retries the write.
@@ -841,7 +854,9 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
                 persisted_chain_shares is not None
                 and abs(float(persisted_chain_shares) - float(target_chain_shares)) <= 1e-9
             )
-            if shares_unchanged and persisted_chain_state == "synced":
+            if shares_unchanged and (
+                persisted_chain_state == "synced" or preserve_chain_state
+            ):
                 # Check timestamp freshness (case c vs d/e).
                 timestamp_fresh = False
                 if persisted_seen_at:
@@ -861,7 +876,7 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
                     return False  # case c: nothing to write
                 # Case d vs e: stale timestamp. Only re-emit for long-lived
                 # synced positions (fix #121 idempotency guard).
-                if prior_chain_state != "synced":
+                if prior_chain_state != "synced" and not preserve_chain_state:
                     return False  # case e: transitioning to synced this cycle
 
             from src.engine.lifecycle_events import (
@@ -1117,6 +1132,14 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
         "rescued_pending": 0,
     }
     now = datetime.now(timezone.utc).isoformat()
+
+    def _is_current_money_risk_quarantine(position: Position) -> bool:
+        state = getattr(position.state, "value", position.state)
+        chain_state = getattr(position.chain_state, "value", position.chain_state)
+        return (
+            str(state) == LifecyclePhase.QUARANTINED.value
+            and has_current_money_risk_chain_state(str(chain_state or ""))
+        )
 
     def _pending_exit_owned_by_exit_lifecycle(position: Position) -> bool:
         return (
@@ -1662,6 +1685,20 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
                     aggregate_backed_set.add(_al.trade_id)
     # ────────────────────────────────────────────────────────────────────────
 
+    current_risk_quarantines_by_token: dict[str, list[Position]] = {}
+    for candidate in portfolio.positions:
+        if not _is_current_money_risk_quarantine(candidate):
+            continue
+        candidate_token = (
+            candidate.token_id
+            if candidate.direction == "buy_yes"
+            else candidate.no_token_id
+        )
+        if candidate_token:
+            current_risk_quarantines_by_token.setdefault(candidate_token, []).append(
+                candidate
+            )
+
     for pos in list(portfolio.positions):
         tid = pos.token_id if pos.direction == "buy_yes" else pos.no_token_id
         if not tid:
@@ -1765,13 +1802,60 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
             stats["quarantined"] += 1
             continue
 
+        chain = chain_by_token.get(tid)
+        if _is_current_money_risk_quarantine(pos):
+            if chain is None:
+                stats["skipped_current_risk_quarantine_missing_chain"] = (
+                    stats.get("skipped_current_risk_quarantine_missing_chain", 0) + 1
+                )
+                continue
+            peers = current_risk_quarantines_by_token.get(tid, [])
+            observed = replace(pos)
+            if len(peers) > 1:
+                local_total = sum(float(peer.effective_shares) for peer in peers)
+                if abs(local_total - chain.size) > _ALLOCATE_DUST:
+                    stats["skipped_current_risk_quarantine_aggregate_mismatch"] = (
+                        stats.get(
+                            "skipped_current_risk_quarantine_aggregate_mismatch", 0
+                        )
+                        + 1
+                    )
+                    continue
+                observed.chain_shares = float(pos.effective_shares)
+            else:
+                observed.chain_shares = chain.size
+                if chain.avg_price > 0:
+                    observed.chain_avg_price = chain.avg_price
+                if chain.cost > 0:
+                    observed.chain_cost_basis_usd = chain.cost
+            observed.chain_verified_at = now
+            observed.condition_id = observed.condition_id or chain.condition_id
+            if _append_canonical_chain_observation_if_available(
+                observed,
+                prior_chain_state=str(
+                    getattr(pos.chain_state, "value", pos.chain_state) or ""
+                ),
+                preserve_chain_state=True,
+            ):
+                stats["quarantine_chain_observation_persisted"] = (
+                    stats.get("quarantine_chain_observation_persisted", 0) + 1
+                )
+            pos.chain_shares = observed.chain_shares
+            pos.chain_avg_price = observed.chain_avg_price
+            pos.chain_cost_basis_usd = observed.chain_cost_basis_usd
+            pos.chain_verified_at = observed.chain_verified_at
+            pos.condition_id = observed.condition_id
+            stats["quarantine_chain_refreshed"] = (
+                stats.get("quarantine_chain_refreshed", 0) + 1
+            )
+            continue
+
         if pos.state in INACTIVE_RUNTIME_STATES:
             state_name = getattr(pos.state, "value", pos.state)
             key = f"skipped_{state_name}"
             stats[key] = stats.get(key, 0) + 1
             continue
 
-        chain = chain_by_token.get(tid)
         if pos.state == "pending_tracked":
             if chain is None:
                 stats["skipped_pending"] += 1

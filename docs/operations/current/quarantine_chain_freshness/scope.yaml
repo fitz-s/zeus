@@ -1,0 +1,23 @@
+packet: current/quarantine_chain_freshness
+in_scope:
+- docs/operations/current/quarantine_chain_freshness/**
+- src/state/chain_reconciliation.py
+- tests/test_chain_shares_persist_synced.py
+allow_companions:
+- architecture/source_rationale.yaml
+- architecture/test_topology.yaml
+- docs/operations/current_state.md
+out_of_scope:
+- state/**
+- src/execution/**
+- src/venue/**
+- src/state/lifecycle_manager.py
+- src/contracts/settlement_semantics.py
+- docs/authority/**
+status: in_progress
+live_side_effects_allowed: false
+live_side_effect_denied:
+- venue submit, cancel, or exit
+- DB backup or copy
+- manual SQL writes
+- lifecycle phase mutation
