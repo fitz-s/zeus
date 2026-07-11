@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 # Created: 2026-06-06
-# Last reused/audited: 2026-06-06
+# Last reused/audited: 2026-07-11
 # Authority basis: Operator request — Opportunity Book evidence must persist in no-submit receipt_json without schema migration.
 
 import json
@@ -24,6 +24,20 @@ def test_opportunity_book_omitted_from_receipt_json_when_absent():
     )
 
     assert "opportunity_book" not in payload
+
+
+def test_global_jit_candidate_is_internal_receipt_transport_only():
+    payload = json.loads(
+        _receipt_json(
+            EventSubmissionReceipt(
+                submitted=False,
+                event_id="event-jit",
+                global_jit_candidate=object(),
+            )
+        )
+    )
+
+    assert "global_jit_candidate" not in payload
 
 
 def test_opportunity_book_included_in_receipt_json_when_present():

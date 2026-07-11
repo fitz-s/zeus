@@ -2640,7 +2640,7 @@ def test_global_jit_overlay_replaces_only_selected_native_curve():
         ("family", "bin", "condition", "YES", "token", "EXECUTABLE", "book-new"),
     )
     assert overlaid.witness_identity != epoch.witness_identity
-    with pytest.raises(ValueError, match="GLOBAL_JIT_OVERLAY_AUTHORITY_MISMATCH"):
+    with pytest.raises(ValueError, match="GLOBAL_JIT_OVERLAY_IDENTITY_MISMATCH"):
         global_batch_runtime._overlay_current_global_book_epoch(
             epoch,
             selected,

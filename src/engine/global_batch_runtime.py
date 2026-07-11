@@ -131,26 +131,27 @@ def _overlay_current_global_book_epoch(
 ) -> CurrentGlobalBookEpoch:
     """Replace only the JIT winner curve in one frozen complete book epoch."""
 
-    fields = ("family_key", "bin_id", "condition_id", "side", "token_id")
-    selected_key = tuple(
-        str(getattr(selected_candidate, field, "") or "") for field in fields
-    )
-    replacement_key = tuple(
-        str(getattr(replacement_candidate, field, "") or "") for field in fields
-    )
-    if not all(selected_key) or replacement_key != selected_key:
-        raise ValueError("GLOBAL_JIT_OVERLAY_IDENTITY_MISMATCH")
-    semantic_fields = (
+    identity_fields = (
+        "family_key",
+        "bin_id",
+        "condition_id",
+        "side",
+        "token_id",
         "probability_witness_identity",
         "resolution_identity",
         "ledger_snapshot_id",
     )
-    if any(
+    selected_identity = tuple(
         str(getattr(selected_candidate, field, "") or "")
-        != str(getattr(replacement_candidate, field, "") or "")
-        for field in semantic_fields
-    ):
-        raise ValueError("GLOBAL_JIT_OVERLAY_AUTHORITY_MISMATCH")
+        for field in identity_fields
+    )
+    replacement_identity = tuple(
+        str(getattr(replacement_candidate, field, "") or "")
+        for field in identity_fields
+    )
+    if not all(selected_identity) or replacement_identity != selected_identity:
+        raise ValueError("GLOBAL_JIT_OVERLAY_IDENTITY_MISMATCH")
+    selected_key = selected_identity[:5]
     replacement_curve = getattr(replacement_candidate, "executable_cost_curve", None)
     replacement_at = getattr(replacement_candidate, "book_captured_at_utc", None)
     selected_at = getattr(selected_candidate, "book_captured_at_utc", None)
@@ -172,6 +173,7 @@ def _overlay_current_global_book_epoch(
 
     assets: list[CurrentGlobalBookAsset] = []
     matched_asset = 0
+    selected_book_hash = ""
     for asset in book_epoch.assets:
         asset_key = (
             asset.family_key,
@@ -188,6 +190,7 @@ def _overlay_current_global_book_epoch(
         ):
             raise ValueError("GLOBAL_JIT_OVERLAY_SELECTED_CURVE_MISMATCH")
         matched_asset += 1
+        selected_book_hash = str(asset.curve.book_hash)
         assets.append(
             replace(
                 asset,
@@ -204,7 +207,11 @@ def _overlay_current_global_book_epoch(
         if tuple(state[:5]) != selected_key:
             states.append(state)
             continue
-        if len(state) != 7 or state[5] != "EXECUTABLE":
+        if (
+            len(state) != 7
+            or state[5] != "EXECUTABLE"
+            or state[6] != selected_book_hash
+        ):
             raise ValueError("GLOBAL_JIT_OVERLAY_STATE_INVALID")
         matched_state += 1
         states.append((*state[:6], str(replacement_curve.book_hash)))
@@ -704,11 +711,14 @@ def process_current_global_batch(
             if venue_submit_count() != before_preflight:
                 return reject("GLOBAL_PREFLIGHT_VENUE_SIDE_EFFECT")
             if preflight.status == "CURVE_SUPERSEDED":
-                book_epoch_1 = _overlay_current_global_book_epoch(
-                    book_epoch_fence,
-                    selected.decision.candidate,
-                    preflight.replacement_candidate,
-                )
+                try:
+                    book_epoch_1 = _overlay_current_global_book_epoch(
+                        book_epoch_fence,
+                        selected.decision.candidate,
+                        preflight.replacement_candidate,
+                    )
+                except ValueError as exc:
+                    return reject(f"GLOBAL_REAUCTION_OVERLAY_FAILED:{exc}")
                 probabilities_1 = probabilities_fence
                 prepared_1 = {
                     event_id: replace(
