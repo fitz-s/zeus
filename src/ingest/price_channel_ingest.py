@@ -215,6 +215,13 @@ class _PriceChannelWorldTradeWriteGate:
 
         stack = contextlib.ExitStack()
         try:
+            # Global lock order is legacy world writer mutex first, then the
+            # canonical multi-DB coordinator.  The money path already enters
+            # the world mutex before it reaches trade-owned writes.  Taking the
+            # coordinator's WORLD+TRADE gates first here creates the inverse
+            # edge and can deadlock both daemons (price channel waits for the
+            # world mutex while entry/exit waits for a trade writer gate).
+            stack.enter_context(_world_write_mutex())
             stack.enter_context(
                 default_runtime_write_coordinator().lease(
                     (DBIdentity.WORLD, DBIdentity.TRADE),
@@ -224,7 +231,6 @@ class _PriceChannelWorldTradeWriteGate:
                     max_hold_ms=PRICE_CHANNEL_DB_WRITE_MAX_HOLD_MS,
                 )
             )
-            stack.enter_context(_world_write_mutex())
         except BaseException:
             stack.close()
             raise

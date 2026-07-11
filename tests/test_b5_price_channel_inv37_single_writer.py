@@ -20,6 +20,7 @@ a schema-qualified feasibility insert.
 from __future__ import annotations
 
 import ast
+import contextlib
 import sqlite3
 from pathlib import Path
 
@@ -148,14 +149,63 @@ def test_refresh_feasibility_write_is_schema_qualified_trades(func_name):
 
 @pytest.mark.parametrize("func_name", _REFRESH_FUNCS)
 def test_refresh_seed_chunks_use_unified_world_trade_gate(func_name):
-    """The DB write chunk must enter the unified world+trade coordinator gate before
-    the legacy world mutex, not the bare world mutex by itself."""
+    """The DB write chunk must use the composed world+trade gate, not the bare
+    world mutex by itself."""
     node = _func_node(func_name)
     world_mutex_calls = _world_mutex_keyword_call_names(node, "seed_rest_books_in_chunks")
     assert world_mutex_calls == ["_edli_price_channel_world_trade_write_gate"], (
         f"{func_name} must pass _edli_price_channel_world_trade_write_gate(...) as "
         f"seed_rest_books_in_chunks(world_mutex=...), got {world_mutex_calls!r}"
     )
+
+
+def test_unified_gate_takes_world_mutex_before_coordinator(monkeypatch):
+    """Money-path and price-channel writers must share one global lock order.
+
+    Taking coordinator WORLD+TRADE before the world mutex deadlocks against the
+    entry/exit path, which already holds the world mutex when it reaches a
+    trade writer gate. ExitStack unwinds the reverse acquisition order.
+    """
+    from src.events.triggers import market_channel_ingestor
+    from src.ingest.price_channel_ingest import _PriceChannelWorldTradeWriteGate
+    from src.state import write_coordinator
+
+    events: list[str] = []
+
+    @contextlib.contextmanager
+    def _world_mutex():
+        events.append("enter:world_mutex")
+        try:
+            yield
+        finally:
+            events.append("exit:world_mutex")
+
+    class _Coordinator:
+        @contextlib.contextmanager
+        def lease(self, *_args, **_kwargs):
+            events.append("enter:coordinator")
+            try:
+                yield
+            finally:
+                events.append("exit:coordinator")
+
+    monkeypatch.setattr(market_channel_ingestor, "_world_write_mutex", _world_mutex)
+    monkeypatch.setattr(
+        write_coordinator,
+        "default_runtime_write_coordinator",
+        lambda: _Coordinator(),
+    )
+
+    with _PriceChannelWorldTradeWriteGate(owner="lock-order-antibody"):
+        events.append("body")
+
+    assert events == [
+        "enter:world_mutex",
+        "enter:coordinator",
+        "body",
+        "exit:coordinator",
+        "exit:world_mutex",
+    ]
 
 
 def test_forever_ingestor_uses_single_attached_connection():
