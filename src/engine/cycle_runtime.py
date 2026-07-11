@@ -5528,6 +5528,17 @@ def execute_monitoring_phase(
                 summary["monitors"] += 1
                 continue
 
+            # Earlier pending-exit/Day0 lifecycle work may have opened a TRADE
+            # write transaction. Release it before probability refresh can
+            # persist a world-owned Day0 observation fact. Otherwise the
+            # monitor holds TRADE while waiting for WORLD, inverse to the
+            # price-channel WORLD-main+TRADE-attached writer.
+            _release_monitor_write_lock_boundary(
+                conn,
+                summary,
+                deps,
+                boundary="before_probability_refresh",
+            )
             edge_ctx = refresh_position(conn, clob, pos)
             # === DAY0 HARD-FACT verdict — computed before the exit decision and
             # before closed-market pre-emption above. Settlement-authority hard

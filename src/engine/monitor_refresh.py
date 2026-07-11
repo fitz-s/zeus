@@ -2524,24 +2524,6 @@ def _day0_one_sided_monitor_quote(conn, clob: PolymarketClient, pos: Position, t
         if bid_f <= 0.0 and ask_f is None:
             return None
         source_timestamp = datetime.now(timezone.utc).isoformat()
-        try:
-            from src.state.db import log_microstructure
-
-            log_microstructure(
-                conn,
-                token_id=token_id,
-                city=pos.city,
-                target_date=pos.target_date,
-                range_label=pos.bin_label,
-                price=bid_f,
-                volume=bid_sz_f + ask_sz_f,
-                bid=bid_f,
-                ask=ask_f,
-                spread=(round(float(ask_f - bid_f), 4) if ask_f is not None and ask_f >= bid_f else None),
-                source_timestamp=source_timestamp,
-            )
-        except Exception as exc:
-            logger.debug("Day0 one-sided microstructure log failed for %s: %s", pos.trade_id, exc)
         return HeldTokenMonitorQuote(
             token_id=token_id,
             best_bid=bid_f,
@@ -2557,7 +2539,7 @@ def _day0_one_sided_monitor_quote(conn, clob: PolymarketClient, pos: Position, t
 
 
 def monitor_quote_refresh(conn, clob: PolymarketClient, pos: Position) -> HeldTokenMonitorQuote | None:
-    """Refresh held-token executable quote without feeding posterior belief."""
+    """Refresh held-token executable quote without opening a DB write."""
 
     tid = pos.token_id if pos.direction == "buy_yes" else pos.no_token_id
     if not tid:
@@ -2575,26 +2557,6 @@ def monitor_quote_refresh(conn, clob: PolymarketClient, pos: Position) -> HeldTo
             else float(vwmp(bid_f, ask_f, bid_sz_f, ask_sz_f))
         )
         source_timestamp = datetime.now(timezone.utc).isoformat()
-
-        try:
-            # Injection Point 7: Data completeness - record microstructure snapshot.
-            from src.state.db import log_microstructure
-
-            log_microstructure(
-                conn,
-                token_id=tid,
-                city=pos.city,
-                target_date=pos.target_date,
-                range_label=pos.bin_label,
-                price=float(diagnostic_market_price),
-                volume=float(bid_sz_f + ask_sz_f),
-                bid=float(bid_f),
-                ask=float(ask_f),
-                spread=round(float(ask_f - bid_f), 4) if ask_f >= bid_f else 0.0,
-                source_timestamp=source_timestamp,
-            )
-        except Exception as exc:
-            logger.debug("Microstructure log failed for %s: %s", pos.trade_id, exc)
         return HeldTokenMonitorQuote(
             token_id=tid,
             best_bid=bid_f,
@@ -2610,6 +2572,37 @@ def monitor_quote_refresh(conn, clob: PolymarketClient, pos: Position) -> HeldTo
             return one_sided_quote
         logger.debug("VWMP refresh failed for %s: %s", pos.trade_id, e)
         return None
+
+
+def _persist_monitor_quote(conn, pos: Position, quote: HeldTokenMonitorQuote | None) -> None:
+    """Write quote evidence only after probability-side WORLD writes finish."""
+
+    if conn is None or quote is None:
+        return
+    try:
+        from src.state.db import log_microstructure
+
+        ask = quote.best_ask
+        spread = (
+            round(float(ask - quote.best_bid), 4)
+            if ask is not None and ask >= quote.best_bid
+            else None
+        )
+        log_microstructure(
+            conn,
+            token_id=quote.token_id,
+            city=pos.city,
+            target_date=pos.target_date,
+            range_label=pos.bin_label,
+            price=float(quote.diagnostic_market_price),
+            volume=float(quote.bid_size + quote.ask_size),
+            bid=float(quote.best_bid),
+            ask=(float(ask) if ask is not None else None),
+            spread=spread,
+            source_timestamp=quote.source_timestamp,
+        )
+    except Exception as exc:
+        logger.debug("Monitor microstructure log failed for %s: %s", pos.trade_id, exc)
 
 
 def _refresh_day0_observation(
@@ -4177,6 +4170,11 @@ def refresh_position(conn, clob: PolymarketClient, pos: Position) -> EdgeContext
         current_p_posterior = float("nan")
         pos.last_monitor_edge = float("nan")
         _append_monitor_validation(pos, "monitor_probability_refresh_failed")
+
+    # Probability refresh may persist a world-owned Day0 observation fact.
+    # Start the trade-owned quote evidence only after that write completes, so
+    # this thread cannot hold TRADE while waiting for WORLD.
+    _persist_monitor_quote(conn, pos, quote)
 
     _track_belief_staleness(pos)
 

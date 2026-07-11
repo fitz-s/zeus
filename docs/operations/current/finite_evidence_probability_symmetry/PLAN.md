@@ -28,6 +28,12 @@ orders. The repair must make command-recovery hold the existing canonical
 WORLD+TRADE live flocks for each short apply transaction; increasing timeouts or
 editing processing rows is outside scope.
 
+Fresh post-deploy stack evidence exposed the second half of the same inversion:
+the held-position monitor could open a TRADE transaction, fetch a quote, then
+persist a world-owned Day0 observation fact before releasing TRADE. The repair
+must commit earlier monitor writes before probability refresh and delay the
+trade-owned microstructure write until the WORLD observation write is complete.
+
 ## Deliverables
 - Keep Normal `q_json` as an immutable point estimate, never as executable certainty.
 - Widen the shared simplex carrier by the exact 51-member zero-hit limit and the
@@ -39,6 +45,8 @@ editing processing rows is outside scope.
   newly materialized canonical posterior and live auction/order receipts.
 - Remove the WORLD/TRADE writer-order inversion that prevents the corrected
   probability carrier from reaching live redecision.
+- Make held-position probability refresh order explicit: release TRADE, write
+  the current Day0 WORLD fact, then write TRADE quote/monitor evidence.
 
 ## Verification
 - Focused first-principles antibody and settlement-preimage regressions pass.
@@ -66,3 +74,6 @@ editing processing rows is outside scope.
 - 2026-07-11: live WAL byte-range locks isolated an execution deadlock:
   price-channel held WORLD while main held TRADE; command recovery and
   price-channel used opposite MAIN/ATTACH order. No DB rows were edited.
+- 2026-07-11: post-deploy SIGUSR1 stack pinned the remaining inversion to
+  `exit_monitor -> refresh_position -> write_day0_metric_fact`: TRADE was open
+  before the WORLD fact write while price-channel held WORLD and awaited TRADE.

@@ -1,7 +1,7 @@
 # Created: 2026-05-20
-# Last reused or audited: 2026-07-09
+# Last reused or audited: 2026-07-11
 # Authority basis: PHASE_2_ULTRAPLAN.md §8.2 + §8.3 — monitor_refresh nowcast wiring; live release proof P2-3 nowcast failure telemetry
-# Lifecycle: created=2026-05-20; last_reviewed=2026-05-21; last_reused=2026-07-09
+# Lifecycle: created=2026-05-20; last_reviewed=2026-05-21; last_reused=2026-07-11
 # Purpose: T5 GREEN antibody — _maybe_write_day0_nowcast gate conditions + write_nowcast_run call.
 # Reuse: Run when _maybe_write_day0_nowcast, write_nowcast_run wiring, or day0 gate logic changes.
 """
@@ -24,6 +24,101 @@ import src.engine.monitor_refresh as monitor_refresh_module
 from src.engine.monitor_refresh import _maybe_write_day0_nowcast
 from src.observability.counters import read as read_counter, reset_all as reset_counters
 from src.state.portfolio import Position
+
+
+def test_held_monitor_releases_trade_transaction_before_probability_refresh(
+    monkeypatch,
+) -> None:
+    """The exit monitor cannot hold TRADE while Day0 refresh writes WORLD."""
+    import sqlite3
+    import types
+    from datetime import datetime, timezone
+
+    import numpy as np
+    from src.engine import cycle_runtime
+    from src.state.decision_chain import CycleArtifact, MonitorResult
+    from src.state.portfolio import ExitDecision, PortfolioState
+    from src.state.strategy_tracker import StrategyTracker
+
+    pos = _make_position()
+    pos.city = "TestCity"
+    pos.target_date = "2026-06-15"
+    pos.state = "holding"
+    pos.entry_price = 0.44
+    pos.p_posterior = 0.61
+    portfolio = PortfolioState(positions=[pos])
+    conn = sqlite3.connect(":memory:")
+    conn.execute("CREATE TABLE preflight_write (v INTEGER)")
+    conn.execute("INSERT INTO preflight_write VALUES (1)")
+    assert conn.in_transaction is True
+
+    monkeypatch.setattr(
+        cycle_runtime,
+        "_monitoring_phase_positions",
+        lambda *args, **kwargs: [pos],
+    )
+    monkeypatch.setattr(
+        cycle_runtime,
+        "_closed_non_accepting_market_info",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(
+        cycle_runtime,
+        "_emit_monitor_refreshed_canonical_if_available",
+        lambda *args, **kwargs: True,
+    )
+    monkeypatch.setattr(
+        cycle_runtime,
+        "_emit_portfolio_rotation_evaluation_status",
+        lambda *args, **kwargs: None,
+    )
+
+    def _refresh_position(conn_arg, clob, refreshed_pos):
+        assert conn_arg.in_transaction is False
+        refreshed_pos.last_monitor_prob = 0.61
+        refreshed_pos.last_monitor_prob_is_fresh = True
+        refreshed_pos.last_monitor_market_price = 0.44
+        refreshed_pos.last_monitor_market_price_is_fresh = True
+        refreshed_pos.last_monitor_best_bid = 0.43
+        refreshed_pos.last_monitor_best_ask = 0.45
+        return types.SimpleNamespace(
+            p_market=np.array([0.44]),
+            p_posterior=0.61,
+            divergence_score=0.0,
+            market_velocity_1h=0.0,
+            forward_edge=0.17,
+        )
+
+    monkeypatch.setattr("src.engine.monitor_refresh.refresh_position", _refresh_position)
+    monkeypatch.setattr(
+        Position,
+        "evaluate_exit",
+        lambda self, ctx: ExitDecision(False, "NO_EXIT"),
+    )
+    deps = types.SimpleNamespace(
+        cities_by_name={
+            "TestCity": types.SimpleNamespace(timezone="UTC")
+        },
+        _utcnow=lambda: datetime(2026, 6, 14, 12, tzinfo=timezone.utc),
+        logger=types.SimpleNamespace(
+            warning=lambda *args, **kwargs: None,
+            error=lambda *args, **kwargs: None,
+        ),
+        MonitorResult=MonitorResult,
+    )
+
+    cycle_runtime.execute_monitoring_phase(
+        conn=conn,
+        clob=types.SimpleNamespace(),
+        portfolio=portfolio,
+        artifact=CycleArtifact(mode="exit_monitor", started_at="2026-06-14T12:00:00Z"),
+        tracker=StrategyTracker(),
+        summary={"monitors": 0, "exits": 0},
+        deps=deps,
+        exit_order_submit_enabled=False,
+        run_exit_preflight=False,
+    )
+    conn.close()
 
 
 def _make_position(market_slug: str | None = None) -> Position:

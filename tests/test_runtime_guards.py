@@ -1,7 +1,7 @@
 """Runtime guard and live-cycle wiring tests."""
-# Lifecycle: created=2026-04-28; last_reviewed=2026-07-10; last_reused=2026-07-10
+# Lifecycle: created=2026-04-28; last_reviewed=2026-07-10; last_reused=2026-07-11
 # Created: 2026-04-28
-# Last reused/audited: 2026-07-10
+# Last reused/audited: 2026-07-11
 # Authority basis: docs/archive/2026-Q2/task_2026-05-15_live_order_e2e_verification/LIVE_ORDER_E2E_VERIFICATION_PLAN.md; task_2026-04-28_contamination_remediation Batch G; Phase 1B ENS snapshot persistence; Phase 1D forecast source policy; PR #56 MarketPhaseEvidence sidecar propagation; Wave26 explicit position env authority; task.md B3 exit executable snapshot identity; docs/operations/task_2026-05-21_live_side_effect_risk_boundaries/task.md P1-2 cluster projection; docs/archive/2026-Q2/task_2026-05-22_crosscheck_valid_window/CROSSCHECK_VALID_WINDOW_PLAN.md.
 # Purpose: Lock runtime guard and live-cycle wiring contracts.
 # Reuse: Run for runtime guard, live-only cleanup, and cycle wiring changes.
@@ -693,6 +693,44 @@ def test_monitor_quote_refresh_survives_microstructure_log_failure(monkeypatch):
     assert pos.last_monitor_market_price == pytest.approx(0.45)
     assert edge_ctx.p_market[0] == pytest.approx(0.45)
     assert edge_ctx.p_posterior == pytest.approx(0.63)
+
+
+def test_monitor_quote_persists_only_after_probability_world_writes(monkeypatch):
+    """TRADE quote evidence must not precede Day0 WORLD probability writes."""
+    from src.engine import monitor_refresh
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        "CREATE TABLE token_price_log (token_id TEXT, price REAL, timestamp TEXT)"
+    )
+    order = []
+
+    def _fresh_probability(position, *, conn, city, target_d):
+        order.append("probability_world_write")
+        monitor_refresh._set_monitor_probability_fresh(position, True)
+        return 0.63, position, True
+
+    def _log_microstructure(*args, **kwargs):
+        order.append("trade_quote_write")
+
+    monkeypatch.setattr(monitor_refresh, "monitor_probability_refresh", _fresh_probability)
+    monkeypatch.setattr("src.state.db.log_microstructure", _log_microstructure)
+    monkeypatch.setattr(
+        monitor_refresh,
+        "_detect_whale_toxicity_from_orderbook",
+        lambda *args, **kwargs: False,
+    )
+
+    pos = _position(entry_price=0.44, p_posterior=0.58)
+    monitor_refresh.refresh_position(
+        conn,
+        _MonitorQuoteSplitClob(bid=0.40, ask=0.50, bid_size=100.0, ask_size=100.0),
+        pos,
+    )
+
+    assert order == ["probability_world_write", "trade_quote_write"]
+    conn.close()
 
 
 def test_refresh_position_support_topology_stale_blocks_exit_probability(monkeypatch):
