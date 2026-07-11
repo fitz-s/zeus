@@ -13,7 +13,9 @@ out_of_scope:
 - config/**
 - docs/authority/**
 status: in_progress
-live_side_effects_allowed: false
+live_side_effects_allowed: true
+live_side_effect_allowlist:
+- scripts/deploy_live.py restart all --allow-dirty --allow-unpushed
 live_side_effect_denied:
 - venue submit, cancel, or exit
 - DB backup, copy, or manual write
