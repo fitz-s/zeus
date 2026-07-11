@@ -53,6 +53,7 @@ import ast
 import inspect
 import json
 import sqlite3
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from types import SimpleNamespace
@@ -293,11 +294,63 @@ def _jit_curve(
     )
 
 
+def _jit_decision(curve: ExecutableCostCurve, shares: str) -> SimpleNamespace:
+    size = Decimal(shares)
+    remaining = size
+    raw_cost = Decimal("0")
+    all_in_cost = Decimal("0")
+    limit = Decimal("0")
+    for level in curve.levels:
+        take = min(level.size, remaining)
+        if take > 0:
+            limit = level.price
+            raw_cost += take * level.price
+            all_in_cost += take * curve.fee_model.all_in_price(level.price)
+            remaining -= take
+        if remaining <= Decimal("1e-18"):
+            break
+    assert remaining <= Decimal("1e-18")
+    return SimpleNamespace(
+        candidate=SimpleNamespace(executable_cost_curve=curve),
+        shares=size,
+        cost_usd=all_in_cost,
+        limit_price=limit,
+        expected_fill_price_before_fee=raw_cost / size,
+        max_spend_usd=size * curve.fee_model.all_in_price(limit),
+    )
+
+
+def test_opportunity_book_projects_exact_global_selected_proof():
+    row = _row()
+    local = _proof(
+        direction="buy_yes",
+        row=row,
+        token_id="yes-1",
+        q_posterior=0.70,
+        q_lcb_5pct=0.60,
+        execution_price=_priced(row, token_id="yes-1", direction="buy_yes"),
+    )
+    global_selected = replace(
+        local,
+        qkernel_execution_economics={"global_actuation_identity": "global-1"},
+        selection_authority_applied="qkernel_spine",
+    )
+
+    assert era._opportunity_book_proofs_with_global_selected_authority(
+        (local,),
+        global_selected,
+    ) == (global_selected,)
+    assert era._opportunity_book_proofs_with_global_selected_authority(
+        (local,),
+        local,
+    ) == (local,)
+
+
 @pytest.mark.parametrize(
     ("side", "token_id", "touch"),
     (("YES", "yes-1", "0.40"), ("NO", "no-1", "0.55")),
 )
-def test_global_jit_curve_allows_only_evidence_carrier_churn(
+def test_global_jit_curve_allows_evidence_and_irrelevant_tail_churn(
     side: str,
     token_id: str,
     touch: str,
@@ -308,17 +361,19 @@ def test_global_jit_curve_allows_only_evidence_carrier_churn(
         snapshot_id="selected",
         book_hash="selected-book",
         levels=((touch, "5"), ("0.70", "100")),
+        fee_rate="0.02",
     )
     current = _jit_curve(
         side=side,
         token_id=token_id,
         snapshot_id="jit",
         book_hash="jit-book",
-        levels=((touch, "5"), ("0.70", "100")),
+        levels=((touch, "5"), ("0.80", "99")),
+        fee_rate="0.02",
     )
 
-    assert era._global_execution_curve_economically_unchanged(
-        selected_candidate=SimpleNamespace(executable_cost_curve=selected),
+    assert era._global_selected_order_economics_preserved(
+        decision=_jit_decision(selected, "5"),
         current_candidate=SimpleNamespace(executable_cost_curve=current),
     )
 
@@ -328,9 +383,17 @@ def test_global_jit_curve_allows_only_evidence_carrier_churn(
     (("YES", "yes-1", "0.40"), ("NO", "no-1", "0.55")),
 )
 @pytest.mark.parametrize(
-    "drift", ("deep_price", "deep_size", "fee", "tick", "min_order"),
+    "drift",
+    (
+        "selected_price",
+        "selected_size",
+        "insufficient_depth",
+        "fee",
+        "tick",
+        "min_order",
+    ),
 )
-def test_global_jit_curve_rejects_any_economic_drift(
+def test_global_jit_curve_rejects_selected_order_economic_drift(
     side: str,
     token_id: str,
     touch: str,
@@ -353,10 +416,15 @@ def test_global_jit_curve_rejects_any_economic_drift(
         "min_tick": "0.01",
         "min_order_size": "5",
     }
-    if drift == "deep_price":
-        current_kwargs["levels"] = ((touch, "5"), ("0.71", "100"))
-    elif drift == "deep_size":
-        current_kwargs["levels"] = ((touch, "5"), ("0.70", "101"))
+    if drift == "selected_price":
+        current_kwargs["levels"] = (
+            (str(Decimal(touch) + Decimal("0.01")), "5"),
+            ("0.70", "100"),
+        )
+    elif drift == "selected_size":
+        current_kwargs["levels"] = ((touch, "4"), ("0.70", "100"))
+    elif drift == "insufficient_depth":
+        current_kwargs["levels"] = ((touch, "4"),)
     elif drift == "fee":
         current_kwargs["fee_rate"] = "0.02"
     elif drift == "tick":
@@ -365,30 +433,36 @@ def test_global_jit_curve_rejects_any_economic_drift(
         current_kwargs["min_order_size"] = "6"
     current = _jit_curve(**current_kwargs)
 
-    assert not era._global_execution_curve_economically_unchanged(
-        selected_candidate=SimpleNamespace(executable_cost_curve=selected),
-        current_candidate=SimpleNamespace(executable_cost_curve=current),
+    decision = _jit_decision(selected, "5")
+    current_candidate = SimpleNamespace(executable_cost_curve=current)
+    assert not era._global_selected_order_economics_preserved(
+        decision=decision,
+        current_candidate=current_candidate,
+    )
+    assert era._global_selected_order_economics_drift(
+        decision=decision,
+        current_candidate=current_candidate,
     )
 
 
-def test_global_jit_curve_rejects_critic_deeper_liquidity_counterexample():
+def test_global_jit_curve_accepts_cheaper_selected_prefix():
     selected = _jit_curve(
         side="YES",
         token_id="yes-1",
         snapshot_id="selected",
         book_hash="selected-book",
-        levels=(("0.40", "5"), ("0.90", "100")),
+        levels=(("0.40", "10"), ("0.90", "100")),
     )
     current = _jit_curve(
         side="YES",
         token_id="yes-1",
         snapshot_id="jit",
         book_hash="jit-book",
-        levels=(("0.40", "5"), ("0.41", "100")),
+        levels=(("0.39", "5"), ("0.40", "5"), ("0.99", "100")),
     )
 
-    assert not era._global_execution_curve_economically_unchanged(
-        selected_candidate=SimpleNamespace(executable_cost_curve=selected),
+    assert era._global_selected_order_economics_preserved(
+        decision=_jit_decision(selected, "10"),
         current_candidate=SimpleNamespace(executable_cost_curve=current),
     )
 
