@@ -1,5 +1,4 @@
-# Created: 2026-06-11
-# Last reused or audited: 2026-06-11
+# Lifecycle: created=2026-06-11; last_reviewed=2026-07-10; last_reused=2026-07-10
 # Authority basis: production defect — Shanghai|2026-06-12|high 32°C buy_no
 #   (trade_score +0.0448) rejected ADMISSION_BUY_NO_INDEPENDENT_YES_POSTERIOR_MISSING;
 #   docs/evidence/settlement_guard/2026-06-11_yesq_wiring_plan.md.
@@ -189,6 +188,10 @@ def test_receipt_projection_round_trips_posterior_through_raw_receipt() -> None:
         "trade_score": _SHANGHAI_TRADE_SCORE,
         "q_lcb_calibration_source": "FORECAST_BOOTSTRAP",
         "same_bin_yes_posterior": _SHANGHAI_YES_Q,
+        "replacement_no_bound_certificate": {
+            "schema": "replacement_native_no_bound_v1",
+            "certificate_hash": "a" * 64,
+        },
         "reason": "event_bound_final_intent_no_submit",
     }
     receipt = _event_submission_receipt_from_typed_receipt_payload(raw_receipt, _Evt())
@@ -196,3 +199,6 @@ def test_receipt_projection_round_trips_posterior_through_raw_receipt() -> None:
         "the proof->receipt projection dropped same_bin_yes_posterior — the "
         "receipt-level buy_no gate will be starved and reject every buy_no"
     )
+    assert receipt.replacement_no_bound_certificate == raw_receipt[
+        "replacement_no_bound_certificate"
+    ]

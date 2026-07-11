@@ -256,6 +256,9 @@ def build_final_intent_certificate_from_actionable(
         "q_lcb_calibration_source": action.get("q_lcb_calibration_source"),
         "same_bin_yes_posterior": action.get("same_bin_yes_posterior"),
         "settlement_coverage_status": action.get("settlement_coverage_status"),
+        "replacement_no_bound_certificate": action.get(
+            "replacement_no_bound_certificate"
+        ),
         "posterior_id": action.get("posterior_id"),
         "probability_authority": action.get("probability_authority"),
         "trade_score": action.get("trade_score"),
@@ -446,6 +449,12 @@ def build_execution_command_certificate_from_final_intent(
             "mode": "LIVE",
         }
     )
+    replacement_no_bound = final_intent.get("replacement_no_bound_certificate")
+    replacement_no_bound_hash = (
+        replacement_no_bound.get("certificate_hash")
+        if isinstance(replacement_no_bound, Mapping)
+        else None
+    )
     payload = {
         "event_id": action["event_id"],
         "event_type": final_intent.get("event_type"),
@@ -475,6 +484,7 @@ def build_execution_command_certificate_from_final_intent(
         "aggregate_execution_command_event_hash": pre_submit_revalidation_cert.payload.get(
             "aggregate_execution_command_event_hash"
         ),
+        "replacement_no_bound_certificate_hash": replacement_no_bound_hash,
         "submitted": False,
         "venue_order_id": None,
     }

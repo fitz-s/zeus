@@ -254,10 +254,14 @@ from src.strategy.market_phase import (
     market_phase_admits,
 )
 from src.strategy.live_inference.live_admission import (
+    REPLACEMENT_BOOTSTRAP_MIN_DRAWS,
     coverage_unlicensed_tail_rejection_reason,
     live_buy_no_conservative_evidence_rejection_reason,
     live_capital_efficiency_rejection_reason,
     live_near_settled_entry_price_rejection_reason,
+    replacement_no_bound_certificate_matches,
+    replacement_no_bound_expected_from_parents,
+    replacement_probability_bundle_hash,
 )
 
 _SELECTION_DIAGNOSTIC_PI_MIN = 0.90
@@ -433,6 +437,7 @@ class _CandidateProof:
     # selected-leg evidence the proof-generation gate saw.
     settlement_coverage_status: str | None = None
     replacement_calibration_credential: dict[str, Any] | None = None
+    replacement_no_bound_certificate: dict[str, Any] | None = None
     # H2_E2E (REAUDIT_0_1.md §2/§4): carry the bundle posterior_id +
     # probability_authority from the evidence dict
     # (_replacement_authority_probability_and_fdr_proof :5752-5754) through to the
@@ -4522,6 +4527,7 @@ def event_bound_live_adapter_from_trade_conn(
             q_lcb_calibration_source=no_submit_receipt.q_lcb_calibration_source,
             same_bin_yes_posterior=no_submit_receipt.same_bin_yes_posterior,
             settlement_coverage_status=no_submit_receipt.settlement_coverage_status,
+            replacement_no_bound_certificate=no_submit_receipt.replacement_no_bound_certificate,
             posterior_id=no_submit_receipt.posterior_id,
             probability_authority=no_submit_receipt.probability_authority,
             global_actuation=no_submit_receipt.global_actuation,
@@ -6967,6 +6973,7 @@ def _build_event_bound_no_submit_receipt_core(
             q_lcb_calibration_source=proof.q_lcb_calibration_source,
             same_bin_yes_posterior=proof.same_bin_yes_posterior,
             settlement_coverage_status=proof.settlement_coverage_status,
+            replacement_no_bound_certificate=proof.replacement_no_bound_certificate,
             posterior_id=proof.posterior_id,
             probability_authority=proof.probability_authority,
             opportunity_book=(
@@ -7940,6 +7947,7 @@ def _build_event_bound_no_submit_receipt_core(
             q_lcb_calibration_source=proof.q_lcb_calibration_source,
             same_bin_yes_posterior=proof.same_bin_yes_posterior,
             settlement_coverage_status=proof.settlement_coverage_status,
+            replacement_no_bound_certificate=proof.replacement_no_bound_certificate,
             posterior_id=proof.posterior_id,
             probability_authority=proof.probability_authority,
             opportunity_book=(
@@ -8047,6 +8055,9 @@ def _build_event_bound_no_submit_receipt_core(
             # twin gate (events.reactor._receipt_money_path_blocker) evaluates the
             # SAME settled-record evidence — lockstep, never starved.
             "settlement_coverage_status": proof.settlement_coverage_status,
+            "replacement_no_bound_certificate": _json_finite(
+                proof.replacement_no_bound_certificate
+            ),
             "q_source": proof.q_source,  # #120 calibrator provenance
             # B3 authority stamp must ride the receipt round-trip alongside q_source:
             # qkernel_spine_bridge preserves q_source as the probability-track label
@@ -8665,6 +8676,11 @@ def _event_submission_receipt_from_typed_receipt_payload(
         settlement_coverage_status=(
             str(raw_receipt["settlement_coverage_status"])
             if raw_receipt.get("settlement_coverage_status") is not None
+            else None
+        ),
+        replacement_no_bound_certificate=(
+            raw_receipt.get("replacement_no_bound_certificate")
+            if isinstance(raw_receipt.get("replacement_no_bound_certificate"), dict)
             else None
         ),
         posterior_id=_optional_int(raw_receipt.get("posterior_id")),  # H2_E2E
@@ -10808,6 +10824,9 @@ def _actionable_payload_from_receipt(
         "q_lcb_calibration_source": receipt.q_lcb_calibration_source,
         "same_bin_yes_posterior": receipt.same_bin_yes_posterior,
         "settlement_coverage_status": receipt.settlement_coverage_status,
+        "replacement_no_bound_certificate": _json_finite(
+            receipt.replacement_no_bound_certificate
+        ),
         "posterior_id": receipt.posterior_id,
         "probability_authority": receipt.probability_authority,
         "c_fee_adjusted": receipt.c_fee_adjusted,
@@ -10926,6 +10945,9 @@ def _live_decision_audit_payload(
         "q_lcb_calibration_source": receipt.q_lcb_calibration_source,
         "same_bin_yes_posterior": receipt.same_bin_yes_posterior,
         "settlement_coverage_status": receipt.settlement_coverage_status,
+        "replacement_no_bound_certificate": _json_finite(
+            receipt.replacement_no_bound_certificate
+        ),
         "q_live": receipt.q_live,
         "q_lcb_5pct": receipt.q_lcb_5pct,
         "c_fee_adjusted": receipt.c_fee_adjusted,
@@ -11485,6 +11507,9 @@ def _pre_submit_revalidation_payload_from_final_intent(
         "q_lcb_calibration_source": payload.get("q_lcb_calibration_source"),
         "same_bin_yes_posterior": payload.get("same_bin_yes_posterior"),
         "settlement_coverage_status": payload.get("settlement_coverage_status"),
+        "replacement_no_bound_certificate": payload.get(
+            "replacement_no_bound_certificate"
+        ),
         "posterior_id": payload.get("posterior_id"),
         "probability_authority": payload.get("probability_authority"),
         "expected_edge": payload.get("trade_score"),
@@ -12936,6 +12961,52 @@ def _build_no_submit_proof_bundle_from_adapter_evidence(
     # final-intent certificates match the executable parent instead of an older
     # trigger-row projection.
     raw_receipt["neg_risk"] = executable_snapshot_neg_risk
+    replacement_candidate_fields: dict[str, object] = {}
+    if (
+        str(proof.probability_authority or "") == "replacement_0_1"
+        and proof.direction == "buy_no"
+    ):
+        certificate = proof.replacement_no_bound_certificate
+        if not isinstance(certificate, Mapping):
+            raise ValueError("REPLACEMENT_NO_BOUND_CERTIFICATE_MISSING")
+        canonical_bin_id = _candidate_replacement_bin_id_from_topology(
+            proof.candidate,
+            forecast_payload.get("replacement_bin_topology"),
+        )
+        if not canonical_bin_id:
+            raise ValueError("REPLACEMENT_NO_BOUND_CANONICAL_BIN_MISSING")
+        qkernel_economics = proof.qkernel_execution_economics
+        if isinstance(qkernel_economics, Mapping):
+            served_lcb = _optional_float(
+                qkernel_economics.get("pre_qkernel_q_lcb_5pct")
+            )
+        else:
+            served_lcb = float(proof.q_lcb_5pct)
+        if served_lcb is None:
+            raise ValueError("REPLACEMENT_NO_BOUND_SERVED_LCB_MISSING")
+        replacement_candidate_fields = {
+            "replacement_no_bound_bin_id": canonical_bin_id,
+            "replacement_no_bound_served_lcb": served_lcb,
+        }
+        expected = replacement_no_bound_expected_from_parents(
+            forecast_payload,
+            {
+                "condition_id": raw_receipt.get("condition_id"),
+                **replacement_candidate_fields,
+            },
+        )
+        if not replacement_no_bound_certificate_matches(
+            certificate,
+            expected=expected,
+            q_direction=float(proof.q_posterior),
+            q_lcb=float(proof.q_lcb_5pct),
+            same_bin_yes_posterior=float(proof.same_bin_yes_posterior),
+            qkernel_execution_economics=proof.qkernel_execution_economics,
+            probability_authority=proof.probability_authority,
+            posterior_id=proof.posterior_id,
+            condition_id=str(raw_receipt.get("condition_id") or ""),
+        ):
+            raise ValueError("REPLACEMENT_NO_BOUND_CERTIFICATE_PARENT_MISMATCH")
     return NoSubmitProofBundle(
         final_intent_id=str(raw_receipt.get("final_intent_id") or ""),
         source_truth=AuthorityEvidence(
@@ -13192,6 +13263,7 @@ def _build_no_submit_proof_bundle_from_adapter_evidence(
                 "selected_token_id": proof.token_id,
                 "direction": proof.direction,
                 "hypothesis_id": hypothesis_id,
+                **replacement_candidate_fields,
             },
             decision_clock,
             "zeus.events.decision_engine",
@@ -13406,7 +13478,8 @@ def _forecast_authority_payload_from_posterior(
         prow = conn.execute(
             f"""
             SELECT source_id, source_cycle_time, source_available_at, computed_at,
-                   posterior_identity_hash, data_version
+                   posterior_identity_hash, data_version, posterior_id, family_id,
+                   bin_topology_hash, q_json, q_lcb_json, q_ucb_json, provenance_json
               FROM {posterior_table}
              WHERE product_id = ?
                AND city = ? AND target_date = ? AND temperature_metric = ?
@@ -13430,6 +13503,13 @@ def _forecast_authority_payload_from_posterior(
         p_computed_at,
         p_identity_hash,
         p_data_version,
+        p_posterior_id,
+        p_family_id,
+        p_bin_topology_hash,
+        p_q_json,
+        p_q_lcb_json,
+        p_q_ucb_json,
+        p_provenance_json,
     ) = prow
     if not p_identity_hash or not p_source_cycle_time:
         return None
@@ -13442,6 +13522,50 @@ def _forecast_authority_payload_from_posterior(
     )
     if raw_lag_reason is not None:
         raise ValueError(f"REPLACEMENT_LIVE_INPUT_LAG:{raw_lag_reason}")
+    try:
+        p_q = json.loads(str(p_q_json))
+        p_q_lcb = json.loads(str(p_q_lcb_json))
+        p_q_ucb = json.loads(str(p_q_ucb_json))
+        p_provenance = json.loads(str(p_provenance_json))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return None
+    if not all(isinstance(value, Mapping) and value for value in (p_q, p_q_lcb, p_q_ucb, p_provenance)):
+        return None
+    try:
+        p_bootstrap_draws = int(p_provenance.get("q_lcb_bootstrap_draws"))
+        p_posterior_id = int(p_posterior_id)
+    except (TypeError, ValueError):
+        return None
+    p_q_mode = str(p_provenance.get("replacement_q_mode") or "").strip()
+    p_q_lcb_basis = str(p_provenance.get("q_lcb_basis") or "").strip()
+    p_q_ucb_role = str(p_provenance.get("q_ucb_json_role") or "").strip()
+    p_samples_hash = str(p_provenance.get("q_bootstrap_samples_hash") or "").strip()
+    p_family_id = str(p_family_id or "").strip()
+    p_bin_topology_hash = str(p_bin_topology_hash or "").strip()
+    p_bin_topology = p_provenance.get("bin_topology")
+    if (
+        not isinstance(p_bin_topology, list)
+        or not p_bin_topology
+        or stable_hash(p_bin_topology) != p_bin_topology_hash
+    ):
+        return None
+    try:
+        p_canonical_bound_hash = replacement_probability_bundle_hash(
+            posterior_id=p_posterior_id,
+            posterior_identity_hash=str(p_identity_hash),
+            family_id=p_family_id,
+            bin_topology_hash=p_bin_topology_hash,
+            q_mode=p_q_mode,
+            q_lcb_basis=p_q_lcb_basis,
+            q_ucb_role=p_q_ucb_role,
+            bootstrap_draws=p_bootstrap_draws,
+            joint_samples_hash=p_samples_hash,
+            q=p_q,
+            q_lcb=p_q_lcb,
+            q_ucb=p_q_ucb,
+        )
+    except (TypeError, ValueError):
+        return None
     # The decorrelated multi-model member set for this family/cycle (the SAME set the spine used).
     members = _spine_multimodel_members_for_event(
         conn, event=event, family=family, decision_time=decision_time
@@ -13538,6 +13662,22 @@ def _forecast_authority_payload_from_posterior(
         "source_run_id": source_run_id,
         "coverage_id": str(p_identity_hash),
         "posterior_identity_hash": str(p_identity_hash),
+        "replacement_posterior_id": p_posterior_id,
+        "replacement_family_id": p_family_id,
+        "replacement_bin_topology_hash": p_bin_topology_hash,
+        "replacement_q_mode": p_q_mode,
+        "replacement_q_lcb_basis": p_q_lcb_basis,
+        "replacement_q_ucb_role": p_q_ucb_role,
+        "replacement_bootstrap_draws": p_bootstrap_draws,
+        "replacement_joint_samples_hash": p_samples_hash,
+        "replacement_canonical_bound_hash": p_canonical_bound_hash,
+        # The family digest alone cannot prove selected-bin membership. Carry the
+        # small canonical maps so the ActionableTrade verifier can recompute the
+        # digest and bind this leg's YES point/UCB to the forecast parent.
+        "replacement_q": dict(p_q),
+        "replacement_q_lcb": dict(p_q_lcb),
+        "replacement_q_ucb": dict(p_q_ucb),
+        "replacement_bin_topology": p_bin_topology,
         "manifest_hash": str(p_identity_hash),
         # Posterior completeness-by-construction: model COUNT is the completeness metric (the
         # ensemble member/step floors do not apply). expected==observed==count, count>=3.
@@ -16966,6 +17106,51 @@ def _generate_candidate_proofs(
                     coverage_verdict=coverage_verdict_by_direction.get(coverage_key),
                     family=family,
                 )
+            replacement_no_bound_certificate = None
+            replacement_no_bound_expected = None
+            if direction == "buy_no" and replacement_bundle_for_credential is not None:
+                replacement_no_bound_certificate = _build_replacement_no_bound_certificate(
+                    replacement_bundle=replacement_bundle_for_credential,
+                    calibration_credential=replacement_calibration_credential,
+                    authority=probability_evidence.get("replacement_no_bound_authority"),
+                    candidate=candidate,
+                    condition_id=condition_id,
+                    yes_q=float(yes_q),
+                    no_q=float(q_value),
+                    no_q_lcb=float(q_lcb),
+                )
+                if replacement_no_bound_certificate is not None:
+                    authority = probability_evidence.get(
+                        "replacement_no_bound_authority"
+                    )
+                    canonical_bin_id = _candidate_replacement_bin_id(
+                        candidate,
+                        replacement_bundle_for_credential,
+                    )
+                    bundle_q = getattr(
+                        replacement_bundle_for_credential,
+                        "q",
+                        None,
+                    )
+                    bundle_q_ucb = getattr(
+                        replacement_bundle_for_credential,
+                        "q_ucb",
+                        None,
+                    )
+                    if (
+                        isinstance(authority, Mapping)
+                        and canonical_bin_id
+                        and isinstance(bundle_q, Mapping)
+                        and isinstance(bundle_q_ucb, Mapping)
+                    ):
+                        replacement_no_bound_expected = {
+                            **dict(authority),
+                            "condition_id": condition_id,
+                            "bin_id": canonical_bin_id,
+                            "yes_q": bundle_q.get(canonical_bin_id),
+                            "yes_q_ucb": bundle_q_ucb.get(canonical_bin_id),
+                            "side_q_lcb_served": float(q_lcb),
+                        }
             row = rows_by_direction.get((condition_id, direction))
             # bin-selection S2: q_lcb <= q_point is now an UPSTREAM structural guarantee
             # (ProbabilityUncertainty for YES, the 1 - q_ucb_yes complement clamped under
@@ -17090,6 +17275,12 @@ def _generate_candidate_proofs(
                 q_lcb_calibration_source=q_lcb_source,
                 same_bin_yes_posterior=yes_q,
                 settlement_coverage_status=settlement_coverage_status,
+                replacement_no_bound_certificate=replacement_no_bound_certificate,
+                replacement_no_bound_expected=replacement_no_bound_expected,
+                qkernel_execution_economics=None,
+                probability_authority=probability_evidence.get("probability_authority"),
+                posterior_id=probability_evidence.get("posterior_id"),
+                condition_id=condition_id,
             )
             if buy_no_conservative_evidence_reason is not None:
                 score = 0.0
@@ -17178,6 +17369,7 @@ def _generate_candidate_proofs(
                     same_bin_yes_posterior=yes_q,
                     settlement_coverage_status=settlement_coverage_status,
                     replacement_calibration_credential=replacement_calibration_credential,
+                    replacement_no_bound_certificate=replacement_no_bound_certificate,
                     # H2_E2E: carry posterior_id + probability_authority from the
                     # probability evidence dict. Present only on the replacement_0_1
                     # path; None (absent key) on canonical. posterior_id is emitted
@@ -19531,7 +19723,7 @@ _FUSED_BOOTSTRAP_CERT_COVERAGE_STATUSES = frozenset(
     {"LICENSED", "UNLICENSED"}
 )
 _FUSED_BOOTSTRAP_MIN_LIVE_SAMPLES = 30
-_FUSED_BOOTSTRAP_MIN_BOOTSTRAP_DRAWS = 100
+_FUSED_BOOTSTRAP_MIN_BOOTSTRAP_DRAWS = REPLACEMENT_BOOTSTRAP_MIN_DRAWS
 # The only q_lcb_basis marker the materializer writes for certified fused-center bootstrap
 # bounds; the credential's bounds leg requires an EXACT match (basis-pinned, no aliasing).
 _FUSED_BOOTSTRAP_QLCB_BASIS = "fused_center_bootstrap_p05"
@@ -19693,6 +19885,153 @@ def _build_replacement_calibration_credential(
     }
 
 
+def _build_replacement_no_bound_certificate(
+    *,
+    replacement_bundle: object,
+    calibration_credential: Mapping[str, Any] | None,
+    authority: Mapping[str, Any] | None,
+    candidate: object,
+    condition_id: str,
+    yes_q: float,
+    no_q: float,
+    no_q_lcb: float,
+) -> dict[str, Any] | None:
+    """Bind an exact native-NO complement bound to one replacement posterior leg."""
+
+    if not isinstance(calibration_credential, Mapping):
+        return None
+    if calibration_credential.get("q_lcb_basis") != _FUSED_BOOTSTRAP_QLCB_BASIS:
+        return None
+    posterior_id = calibration_credential.get("posterior_id")
+    if isinstance(posterior_id, bool):
+        return None
+    try:
+        posterior_id = int(posterior_id)
+    except (TypeError, ValueError):
+        return None
+    if posterior_id <= 0:
+        return None
+    if not isinstance(authority, Mapping):
+        return None
+    if authority.get("posterior_id") != posterior_id:
+        return None
+    if calibration_credential.get("q_mode") != authority.get("q_mode"):
+        return None
+    try:
+        credential_draws = int(calibration_credential.get("bootstrap_draws"))
+    except (TypeError, ValueError):
+        return None
+    if credential_draws != authority.get("bootstrap_draws"):
+        return None
+    bin_id = _candidate_replacement_bin_id(candidate, replacement_bundle)
+    q_ucb = getattr(replacement_bundle, "q_ucb", None)
+    if not bin_id or not isinstance(q_ucb, Mapping) or bin_id not in q_ucb:
+        return None
+    try:
+        yes_q_value = float(yes_q)
+        yes_ucb = float(q_ucb[bin_id])
+        no_q_value = float(no_q)
+        no_lcb_value = float(no_q_lcb)
+    except (TypeError, ValueError):
+        return None
+    values = (yes_q_value, yes_ucb, no_q_value, no_lcb_value)
+    if not all(math.isfinite(value) and 0.0 <= value <= 1.0 for value in values):
+        return None
+    if yes_ucb < yes_q_value or no_lcb_value > no_q_value:
+        return None
+    if not math.isclose(no_q_value, 1.0 - yes_q_value, rel_tol=0.0, abs_tol=1e-12):
+        return None
+    raw_no_lcb = 1.0 - yes_ucb
+    if no_lcb_value > raw_no_lcb + 1e-12:
+        return None
+    certificate = {
+        "schema": "replacement_native_no_bound_v1",
+        "probability_authority": "replacement_0_1",
+        **dict(authority),
+        "condition_id": condition_id,
+        "bin_id": bin_id,
+        "side": "buy_no",
+        "yes_q": yes_q_value,
+        "yes_q_ucb": yes_ucb,
+        "side_q_point": no_q_value,
+        "side_q_lcb_raw": raw_no_lcb,
+        "side_q_lcb_served": no_lcb_value,
+        "coverage_shrink_applied": no_lcb_value < raw_no_lcb - 1e-12,
+    }
+    return {**certificate, "certificate_hash": stable_hash(certificate)}
+
+
+def _replacement_no_bound_authority(
+    replacement_bundle: object,
+    *,
+    posterior_identity_hash: str,
+) -> dict[str, Any] | None:
+    provenance = getattr(replacement_bundle, "provenance_json", None)
+    q = getattr(replacement_bundle, "q", None)
+    q_lcb = getattr(replacement_bundle, "q_lcb", None)
+    q_ucb = getattr(replacement_bundle, "q_ucb", None)
+    if not all(isinstance(value, Mapping) and value for value in (provenance, q, q_lcb, q_ucb)):
+        return None
+    posterior_id = getattr(replacement_bundle, "posterior_id", None)
+    family_id = str(getattr(replacement_bundle, "family_id", "") or "").strip()
+    topology_hash = str(getattr(replacement_bundle, "bin_topology_hash", "") or "").strip()
+    identity_hash = str(posterior_identity_hash or "").strip()
+    q_mode = str(provenance.get("replacement_q_mode") or "").strip()
+    q_lcb_basis = str(provenance.get("q_lcb_basis") or "").strip()
+    q_ucb_role = str(provenance.get("q_ucb_json_role") or "").strip()
+    samples_hash = str(provenance.get("q_bootstrap_samples_hash") or "").strip()
+    bin_topology = provenance.get("bin_topology")
+    bootstrap_draws = provenance.get("q_lcb_bootstrap_draws")
+    if isinstance(posterior_id, bool) or isinstance(bootstrap_draws, bool):
+        return None
+    try:
+        posterior_id = int(posterior_id)
+        bootstrap_draws = int(bootstrap_draws)
+    except (TypeError, ValueError):
+        return None
+    if (
+        posterior_id <= 0
+        or not family_id
+        or len(identity_hash) != 64
+        or len(topology_hash) != 64
+        or q_mode not in _REPLACEMENT_Q_MODE_LIVE_ELIGIBLE
+        or q_lcb_basis != _FUSED_BOOTSTRAP_QLCB_BASIS
+        or q_ucb_role != "fused_center_bootstrap_ucb"
+        or bootstrap_draws < REPLACEMENT_BOOTSTRAP_MIN_DRAWS
+        or len(samples_hash) != 64
+        or not isinstance(bin_topology, list)
+        or not bin_topology
+        or stable_hash(bin_topology) != topology_hash
+    ):
+        return None
+    canonical_bound_hash = replacement_probability_bundle_hash(
+        posterior_id=posterior_id,
+        posterior_identity_hash=identity_hash,
+        family_id=family_id,
+        bin_topology_hash=topology_hash,
+        q_mode=q_mode,
+        q_lcb_basis=q_lcb_basis,
+        q_ucb_role=q_ucb_role,
+        bootstrap_draws=bootstrap_draws,
+        joint_samples_hash=samples_hash,
+        q=q,
+        q_lcb=q_lcb,
+        q_ucb=q_ucb,
+    )
+    return {
+        "posterior_id": posterior_id,
+        "posterior_identity_hash": identity_hash,
+        "family_id": family_id,
+        "bin_topology_hash": topology_hash,
+        "q_mode": q_mode,
+        "q_lcb_basis": q_lcb_basis,
+        "q_ucb_role": q_ucb_role,
+        "bootstrap_draws": bootstrap_draws,
+        "joint_samples_hash": samples_hash,
+        "canonical_bound_hash": canonical_bound_hash,
+    }
+
+
 def _replacement_calibration_payload_from_credential(
     credential: Mapping[str, Any],
     *,
@@ -19808,7 +20147,18 @@ def _candidate_replacement_bin_id(candidate: object, replacement_bundle: object)
     provenance = getattr(replacement_bundle, "provenance_json", None) or {}
     if not isinstance(provenance, Mapping):
         return None
-    topology = provenance.get("bin_topology")
+    return _candidate_replacement_bin_id_from_topology(
+        candidate,
+        provenance.get("bin_topology"),
+    )
+
+
+def _candidate_replacement_bin_id_from_topology(
+    candidate: object,
+    topology: object,
+) -> str | None:
+    """Resolve one market condition's bin from canonical posterior topology."""
+
     if not isinstance(topology, list) or not topology:
         return None
     bin_obj = getattr(candidate, "bin", None)
@@ -20659,6 +21009,10 @@ def _replacement_authority_probability_and_fdr_proof(
     if not posterior_identity_hash:
         raise ValueError("REPLACEMENT_POSTERIOR_IDENTITY_HASH_MISSING")
     payload["_edli_spine_posterior_identity_hash"] = posterior_identity_hash
+    replacement_no_bound_authority = _replacement_no_bound_authority(
+        replacement_bundle,
+        posterior_identity_hash=posterior_identity_hash,
+    )
     joint_samples_key = "_edli_spine_served_joint_q_samples_by_condition"
     joint_samples_reason_key = "_edli_spine_joint_q_samples_unavailable_reason"
     try:
@@ -20897,6 +21251,8 @@ def _replacement_authority_probability_and_fdr_proof(
         "forecast_mu_c": _replacement_anchor_mu_c(replacement_bundle),
         "forecast_predictive_sigma_c": _replacement_predictive_sigma_c(replacement_bundle),
         "posterior_id": str(replacement_bundle.posterior_id),
+        "posterior_identity_hash": posterior_identity_hash,
+        "replacement_no_bound_authority": replacement_no_bound_authority,
         "replacement_product_id": replacement_bundle.product_id,
         "p_cal_vector_hash": _probability_vector_hash(
             q_by_condition[str(candidate.condition_id or "")]

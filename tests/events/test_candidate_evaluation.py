@@ -266,7 +266,7 @@ def test_opportunity_book_counts_qkernel_selected_candidate_as_live_admitted():
     assert book["selected_objective"]["authority"] == "qkernel_spine"
 
 
-def test_candidate_evaluation_rejects_buy_no_when_yes_bin_is_material():
+def test_candidate_evaluation_projects_upstream_buy_no_rejection():
     evaluation = CandidateEvaluation(
         candidate_id="cand-1",
         family_id="family-1",
@@ -284,11 +284,41 @@ def test_candidate_evaluation_rejects_buy_no_when_yes_bin_is_material():
         passed_prefilter=True,
         native_quote_available=True,
         same_bin_yes_posterior=0.23,
+        missing_reason=(
+            "ADMISSION_BUY_NO_CONSERVATIVE_EVIDENCE_MISSING:"
+            "yes_posterior=0.230000"
+        ),
     )
 
     assert evaluation.admitted is False
     assert evaluation.live_buy_no_conservative_evidence_reason is not None
     assert evaluation.live_buy_no_conservative_evidence_reason.startswith("ADMISSION_BUY_NO_CONSERVATIVE_EVIDENCE_MISSING:")
+
+
+def test_candidate_evaluation_does_not_redecide_certified_buy_no_projection():
+    evaluation = CandidateEvaluation(
+        candidate_id="cand-1",
+        family_id="family-1",
+        condition_id="condition-1",
+        token_id="token-1",
+        direction="buy_no",
+        bin_label="33C",
+        execution_price=0.32,
+        q_posterior=0.652,
+        q_lcb_5pct=0.617,
+        c_cost_95pct=0.33,
+        p_fill_lcb=0.84,
+        trade_score=0.20,
+        p_value=0.01,
+        passed_prefilter=True,
+        native_quote_available=True,
+        q_lcb_calibration_source="FORECAST_BOOTSTRAP",
+        same_bin_yes_posterior=0.348,
+        settlement_coverage_status="INSUFFICIENT_DATA",
+    )
+
+    assert evaluation.live_buy_no_conservative_evidence_reason is None
+    assert evaluation.admitted is True
 
 
 def test_candidate_evaluation_objective_prioritizes_lcb_kelly_growth():

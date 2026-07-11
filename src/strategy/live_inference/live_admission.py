@@ -6,8 +6,8 @@ than per-family ranking. They do not change q, price, FDR, Kelly, or venue state
 
 from __future__ import annotations
 
-from collections.abc import Mapping
 import math
+from collections.abc import Mapping
 
 # BUY-NO MATERIAL-BIN VOCABULARY: this is stricter than the replacement certificate
 # coverage predicate. A typed INSUFFICIENT_DATA verdict proves the coverage authority ran
@@ -16,6 +16,7 @@ import math
 from src.calibration.settlement_backward_coverage import (
     settlement_coverage_refutes_claim,
 )
+from src.decision_kernel.canonicalization import stable_hash
 
 
 # Operator objective for ordinary binary replacement/NO-side candidates: real
@@ -45,6 +46,7 @@ LIVE_NEAR_DAY0_RAW_EXTREMA_MARGIN_NATIVE = 1.0
 # never gate a live buy-NO.
 LIVE_BUY_NO_MATERIAL_YES_POSTERIOR = 0.20
 LIVE_BUY_NO_MATERIAL_ALLOWED_LCB_SOURCES = frozenset({"EMOS_ANALYTIC", "SETTLEMENT_ISOTONIC"})
+REPLACEMENT_BOOTSTRAP_MIN_DRAWS = 100
 
 # Settlement-backward coverage verdict statuses under which the buy-NO material-bin
 # conservative-evidence gate admits a fused-bootstrap q_lcb. This is intentionally
@@ -394,6 +396,12 @@ def live_buy_no_conservative_evidence_rejection_reason(
     q_lcb_calibration_source: str | None,
     same_bin_yes_posterior: float | int | None = None,
     settlement_coverage_status: str | None = None,
+    replacement_no_bound_certificate: Mapping[str, object] | None = None,
+    replacement_no_bound_expected: Mapping[str, object] | None = None,
+    qkernel_execution_economics: Mapping[str, object] | None = None,
+    probability_authority: str | None = None,
+    posterior_id: int | str | None = None,
+    condition_id: str | None = None,
     material_yes_posterior: float = LIVE_BUY_NO_MATERIAL_YES_POSTERIOR,
     allowed_lcb_sources: frozenset[str] = LIVE_BUY_NO_MATERIAL_ALLOWED_LCB_SOURCES,
 ) -> str | None:
@@ -409,6 +417,12 @@ def live_buy_no_conservative_evidence_rejection_reason(
     verdict. When the q_lcb source is not in the allow-list, this special buy-NO
     gate admits only LICENSED or UNLICENSED-after-shrink semantics. INSUFFICIENT_DATA
     is allowed at the certificate layer but is not a material-bin buy-NO waiver.
+
+    The single-authority replacement path is different: it can carry an exact
+    selected-leg certificate proving ``q_no = 1 - q_yes`` and
+    ``lcb_no = 1 - ucb_yes`` from one posterior.  That is native conservative NO
+    evidence, not a source-name waiver.  Every scalar is rechecked here; an
+    authority string or partial certificate alone never admits.
     """
 
     if direction != "buy_no":
@@ -436,6 +450,26 @@ def live_buy_no_conservative_evidence_rejection_reason(
     if material_floor <= 0.0 or material_floor >= 1.0:
         raise ValueError("buy-NO material-bin posterior floor must be in (0, 1)")
 
+    replacement_authority = str(probability_authority or "").strip() == "replacement_0_1"
+    if replacement_no_bound_certificate_matches(
+        replacement_no_bound_certificate,
+        expected=replacement_no_bound_expected,
+        q_direction=q_value,
+        q_lcb=q_lcb_value,
+        same_bin_yes_posterior=yes_posterior,
+        qkernel_execution_economics=qkernel_execution_economics,
+        probability_authority=probability_authority,
+        posterior_id=posterior_id,
+        condition_id=condition_id,
+    ):
+        return None
+    if replacement_authority:
+        return (
+            "ADMISSION_BUY_NO_REPLACEMENT_BOUND_CERTIFICATE_MISSING:"
+            f"yes_posterior={yes_posterior:.6f}:no_q={q_value:.6f}:"
+            f"no_q_lcb={q_lcb_value:.6f}"
+        )
+
     if yes_posterior >= material_floor:
         source = str(q_lcb_calibration_source or "").strip()
         if source not in allowed_lcb_sources:
@@ -456,6 +490,287 @@ def live_buy_no_conservative_evidence_rejection_reason(
                 f"coverage_status={status or 'missing'}"
             )
     return None
+
+
+def replacement_no_bound_certificate_matches(
+    certificate: Mapping[str, object] | None,
+    *,
+    expected: Mapping[str, object] | None,
+    q_direction: float,
+    q_lcb: float,
+    same_bin_yes_posterior: float,
+    qkernel_execution_economics: Mapping[str, object] | None,
+    probability_authority: str | None,
+    posterior_id: int | str | None,
+    condition_id: str | None,
+) -> bool:
+    """Verify one replacement posterior's binary YES/NO bound identity."""
+
+    if not isinstance(certificate, Mapping) or not isinstance(expected, Mapping):
+        return False
+    if certificate.get("schema") != "replacement_native_no_bound_v1":
+        return False
+    if certificate.get("probability_authority") != "replacement_0_1":
+        return False
+    if str(probability_authority or "").strip() != "replacement_0_1":
+        return False
+    if certificate.get("q_lcb_basis") != "fused_center_bootstrap_p05":
+        return False
+    if certificate.get("q_ucb_role") != "fused_center_bootstrap_ucb":
+        return False
+    if certificate.get("q_mode") not in {"FUSED_NORMAL_FULL", "FUSED_NORMAL_PARTIAL"}:
+        return False
+    if certificate.get("side") != "buy_no":
+        return False
+    certificate_posterior_id = certificate.get("posterior_id")
+    if (
+        isinstance(certificate_posterior_id, bool)
+        or not isinstance(certificate_posterior_id, int)
+        or certificate_posterior_id <= 0
+    ):
+        return False
+    if isinstance(posterior_id, bool):
+        return False
+    try:
+        receipt_posterior_id = int(posterior_id)
+    except (TypeError, ValueError):
+        return False
+    if receipt_posterior_id != certificate_posterior_id:
+        return False
+    certificate_condition_id = str(certificate.get("condition_id") or "").strip()
+    if not certificate_condition_id or str(condition_id or "").strip() != certificate_condition_id:
+        return False
+    if not str(certificate.get("bin_id") or "").strip():
+        return False
+    if not str(certificate.get("family_id") or "").strip():
+        return False
+
+    def valid_hash(value: object) -> bool:
+        text = str(value or "").strip()
+        if len(text) != 64:
+            return False
+        try:
+            int(text, 16)
+        except ValueError:
+            return False
+        return True
+
+    for field in (
+        "posterior_identity_hash",
+        "bin_topology_hash",
+        "joint_samples_hash",
+    ):
+        if not valid_hash(certificate.get(field)):
+            return False
+    bootstrap_draws = certificate.get("bootstrap_draws")
+    if isinstance(bootstrap_draws, bool) or not isinstance(bootstrap_draws, int):
+        return False
+    if bootstrap_draws < REPLACEMENT_BOOTSTRAP_MIN_DRAWS:
+        return False
+    certificate_hash = certificate.get("certificate_hash")
+    if not valid_hash(certificate_hash):
+        return False
+    certificate_body = dict(certificate)
+    certificate_body.pop("certificate_hash", None)
+    if stable_hash(certificate_body) != certificate_hash:
+        return False
+    for field in (
+        "posterior_id",
+        "posterior_identity_hash",
+        "family_id",
+        "bin_topology_hash",
+        "condition_id",
+        "bin_id",
+        "q_mode",
+        "q_lcb_basis",
+        "q_ucb_role",
+        "bootstrap_draws",
+        "joint_samples_hash",
+        "canonical_bound_hash",
+    ):
+        if expected.get(field) != certificate.get(field):
+            return False
+    for field in ("yes_q", "yes_q_ucb"):
+        try:
+            expected_value = float(expected[field])
+            certificate_value = float(certificate[field])
+        except (KeyError, TypeError, ValueError):
+            return False
+        if not math.isclose(
+            expected_value,
+            certificate_value,
+            rel_tol=0.0,
+            abs_tol=1e-12,
+        ):
+            return False
+    try:
+        expected_served_lcb = float(expected["side_q_lcb_served"])
+        certificate_served_lcb = float(certificate["side_q_lcb_served"])
+    except (KeyError, TypeError, ValueError):
+        return False
+    if not math.isclose(
+        expected_served_lcb,
+        certificate_served_lcb,
+        rel_tol=0.0,
+        abs_tol=1e-12,
+    ):
+        return False
+    try:
+        yes_q = float(certificate["yes_q"])
+        yes_ucb = float(certificate["yes_q_ucb"])
+        no_q = float(certificate["side_q_point"])
+        no_lcb_raw = float(certificate["side_q_lcb_raw"])
+        no_lcb_served = float(certificate["side_q_lcb_served"])
+    except (KeyError, TypeError, ValueError):
+        return False
+    values = (yes_q, yes_ucb, no_q, no_lcb_raw, no_lcb_served)
+    if not all(math.isfinite(value) and 0.0 <= value <= 1.0 for value in values):
+        return False
+    if yes_ucb < yes_q or no_lcb_raw > no_q or no_lcb_served > no_lcb_raw + 1e-12:
+        return False
+
+    def same(left: float, right: float) -> bool:
+        return math.isclose(left, right, rel_tol=0.0, abs_tol=1e-12)
+
+    if not all(
+        (
+            same(yes_q, same_bin_yes_posterior),
+            same(no_q, q_direction),
+            same(no_q, 1.0 - yes_q),
+            same(no_lcb_raw, 1.0 - yes_ucb),
+            bool(certificate.get("coverage_shrink_applied"))
+            == (no_lcb_served < no_lcb_raw - 1e-12),
+            q_lcb <= no_lcb_served + 1e-12,
+        )
+    ):
+        return False
+    if same(q_lcb, no_lcb_served):
+        return True
+    economics = qkernel_execution_economics
+    if not isinstance(economics, Mapping):
+        return False
+    if economics.get("q_lcb_authority") != "qkernel_payoff_bound":
+        return False
+    if economics.get("probability_authority") != "qkernel_payoff_direct_route":
+        return False
+    try:
+        pre_q = float(economics["pre_qkernel_q_posterior"])
+        pre_lcb = float(economics["pre_qkernel_q_lcb_5pct"])
+        payoff_q = float(economics["payoff_q_point"])
+        payoff_lcb = float(economics["payoff_q_lcb"])
+    except (KeyError, TypeError, ValueError):
+        return False
+    return all(
+        math.isfinite(value) for value in (pre_q, pre_lcb, payoff_q, payoff_lcb)
+    ) and all(
+        (
+            same(pre_q, no_q),
+            same(pre_lcb, no_lcb_served),
+            same(payoff_q, q_direction),
+            same(payoff_lcb, q_lcb),
+        )
+    )
+
+
+def replacement_probability_bundle_hash(
+    *,
+    posterior_id: int,
+    posterior_identity_hash: str,
+    family_id: str,
+    bin_topology_hash: str,
+    q_mode: str,
+    q_lcb_basis: str,
+    q_ucb_role: str,
+    bootstrap_draws: int,
+    joint_samples_hash: str,
+    q: Mapping[str, object],
+    q_lcb: Mapping[str, object],
+    q_ucb: Mapping[str, object],
+) -> str:
+    """Hash the canonical replacement probability carrier used by both cert planes."""
+
+    return stable_hash(
+        {
+            "posterior_id": int(posterior_id),
+            "posterior_identity_hash": str(posterior_identity_hash),
+            "family_id": str(family_id),
+            "bin_topology_hash": str(bin_topology_hash),
+            "q_mode": str(q_mode),
+            "q_lcb_basis": str(q_lcb_basis),
+            "q_ucb_role": str(q_ucb_role),
+            "bootstrap_draws": int(bootstrap_draws),
+            "joint_samples_hash": str(joint_samples_hash),
+            "q": dict(q),
+            "q_lcb": dict(q_lcb),
+            "q_ucb": dict(q_ucb),
+        }
+    )
+
+
+def replacement_no_bound_expected_from_parents(
+    forecast: Mapping[str, object] | None,
+    candidate: Mapping[str, object] | None,
+) -> dict[str, object] | None:
+    """Map DecisionKernel forecast/candidate parents to the bound validator schema."""
+
+    if not isinstance(forecast, Mapping) or not isinstance(candidate, Mapping):
+        return None
+    field_map = {
+        "posterior_id": "replacement_posterior_id",
+        "posterior_identity_hash": "posterior_identity_hash",
+        "family_id": "replacement_family_id",
+        "bin_topology_hash": "replacement_bin_topology_hash",
+        "q_mode": "replacement_q_mode",
+        "q_lcb_basis": "replacement_q_lcb_basis",
+        "q_ucb_role": "replacement_q_ucb_role",
+        "bootstrap_draws": "replacement_bootstrap_draws",
+        "joint_samples_hash": "replacement_joint_samples_hash",
+        "canonical_bound_hash": "replacement_canonical_bound_hash",
+    }
+    expected = {target: forecast.get(source) for target, source in field_map.items()}
+    q = forecast.get("replacement_q")
+    q_lcb = forecast.get("replacement_q_lcb")
+    q_ucb = forecast.get("replacement_q_ucb")
+    if not all(isinstance(value, Mapping) and value for value in (q, q_lcb, q_ucb)):
+        return None
+    bin_id = candidate.get("replacement_no_bound_bin_id")
+    if bin_id in (None, ""):
+        return None
+    try:
+        canonical_bound_hash = replacement_probability_bundle_hash(
+            posterior_id=int(expected["posterior_id"]),
+            posterior_identity_hash=str(expected["posterior_identity_hash"]),
+            family_id=str(expected["family_id"]),
+            bin_topology_hash=str(expected["bin_topology_hash"]),
+            q_mode=str(expected["q_mode"]),
+            q_lcb_basis=str(expected["q_lcb_basis"]),
+            q_ucb_role=str(expected["q_ucb_role"]),
+            bootstrap_draws=int(expected["bootstrap_draws"]),
+            joint_samples_hash=str(expected["joint_samples_hash"]),
+            q=q,
+            q_lcb=q_lcb,
+            q_ucb=q_ucb,
+        )
+        expected_yes_q = float(q[bin_id])
+        expected_yes_ucb = float(q_ucb[bin_id])
+    except (KeyError, TypeError, ValueError):
+        return None
+    if canonical_bound_hash != expected.get("canonical_bound_hash"):
+        return None
+    expected.update(
+        {
+            "condition_id": candidate.get("condition_id"),
+            "bin_id": bin_id,
+            "yes_q": expected_yes_q,
+            "yes_q_ucb": expected_yes_ucb,
+            "side_q_lcb_served": candidate.get(
+                "replacement_no_bound_served_lcb"
+            ),
+        }
+    )
+    if any(value in (None, "") for value in expected.values()):
+        return None
+    return expected
 
 
 # ---------------------------------------------------------------------------

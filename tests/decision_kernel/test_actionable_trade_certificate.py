@@ -1,5 +1,6 @@
-# Created: 2026-05-25
-# Last reused or audited: 2026-07-09
+# Lifecycle: created=2026-05-25; last_reviewed=2026-07-10; last_reused=2026-07-10
+# Purpose: Prove actionable trade certificates bind every live probability and execution parent.
+# Reuse: Re-audit canonical parent identity and selected-leg probability closure before live use.
 # Authority basis: docs/operations/edli_v1/EDLI_REDEMPTION_FINAL_PACKAGE_SPEC.md §14 full-live increment.
 from __future__ import annotations
 
@@ -9,14 +10,159 @@ from datetime import datetime, timezone
 import pytest
 
 from src.decision_kernel import claims
-from src.decision_kernel.canonicalization import qkernel_current_state_identity_hash
+from src.decision_kernel.canonicalization import (
+    qkernel_current_state_identity_hash,
+    stable_hash,
+)
 from src.decision_kernel.certificate import ParentEdge, build_certificate
 from src.decision_kernel.errors import CertificateVerificationError
 from src.decision_kernel.ledger import DecisionCertificateLedger
 from src.decision_kernel.verifier import verify_actionable_trade
+from src.strategy.live_inference.live_admission import (
+    replacement_probability_bundle_hash,
+)
 
 
 NOW = datetime(2026, 5, 25, 12, tzinfo=timezone.utc)
+_REPLACEMENT_Q = {"11C": 0.348, "other": 0.652}
+_REPLACEMENT_Q_LCB = {"11C": 0.30, "other": 0.60}
+_REPLACEMENT_Q_UCB = {"11C": 0.383, "other": 0.70}
+_REPLACEMENT_CANONICAL_BOUND_HASH = replacement_probability_bundle_hash(
+    posterior_id=29872,
+    posterior_identity_hash="1" * 64,
+    family_id="family-1",
+    bin_topology_hash="2" * 64,
+    q_mode="FUSED_NORMAL_FULL",
+    q_lcb_basis="fused_center_bootstrap_p05",
+    q_ucb_role="fused_center_bootstrap_ucb",
+    bootstrap_draws=400,
+    joint_samples_hash="3" * 64,
+    q=_REPLACEMENT_Q,
+    q_lcb=_REPLACEMENT_Q_LCB,
+    q_ucb=_REPLACEMENT_Q_UCB,
+)
+
+
+def _replacement_no_bound() -> dict:
+    body = {
+        "schema": "replacement_native_no_bound_v1",
+        "probability_authority": "replacement_0_1",
+        "posterior_id": 29872,
+        "posterior_identity_hash": "1" * 64,
+        "family_id": "family-1",
+        "bin_topology_hash": "2" * 64,
+        "q_mode": "FUSED_NORMAL_FULL",
+        "q_lcb_basis": "fused_center_bootstrap_p05",
+        "q_ucb_role": "fused_center_bootstrap_ucb",
+        "bootstrap_draws": 400,
+        "joint_samples_hash": "3" * 64,
+        "canonical_bound_hash": _REPLACEMENT_CANONICAL_BOUND_HASH,
+        "condition_id": "condition-1",
+        "bin_id": "11C",
+        "side": "buy_no",
+        "yes_q": 0.348,
+        "yes_q_ucb": 0.383,
+        "side_q_point": 0.652,
+        "side_q_lcb_raw": 0.617,
+        "side_q_lcb_served": 0.617,
+        "coverage_shrink_applied": False,
+    }
+    return {**body, "certificate_hash": stable_hash(body)}
+
+
+def _replacement_actionable_overrides() -> tuple[dict, dict[str, dict]]:
+    bound = _replacement_no_bound()
+    action = {
+        "token_id": "no-1",
+        "direction": "buy_no",
+        "q_live": 0.652,
+        "q_lcb_5pct": 0.60,
+        "c_fee_adjusted": 0.32,
+        "c_cost_95pct": 0.32,
+        "trade_score": 0.28,
+        "action_score": 0.28,
+        "same_bin_yes_posterior": 0.348,
+        "q_lcb_calibration_source": "FORECAST_BOOTSTRAP",
+        "settlement_coverage_status": "INSUFFICIENT_DATA",
+        "probability_authority": "replacement_0_1",
+        "posterior_id": 29872,
+        "replacement_no_bound_certificate": bound,
+        "qkernel_execution_economics": {
+            **_action_payload()["qkernel_execution_economics"],
+            "side": "NO",
+            "payoff_q_point": 0.652,
+            "payoff_q_lcb": 0.60,
+            "cost": 0.32,
+            "edge_lcb": 0.28,
+            "selection_guard_q_safe": 0.60,
+            "pre_qkernel_q_posterior": 0.652,
+            "pre_qkernel_q_lcb_5pct": 0.617,
+            "q_lcb_authority": "qkernel_payoff_bound",
+            "probability_authority": "qkernel_payoff_direct_route",
+        },
+    }
+    parent = {
+        claims.FORECAST_AUTHORITY: {
+            "posterior_identity_hash": "1" * 64,
+            "replacement_posterior_id": 29872,
+            "replacement_family_id": "family-1",
+            "replacement_bin_topology_hash": "2" * 64,
+            "replacement_q_mode": "FUSED_NORMAL_FULL",
+            "replacement_q_lcb_basis": "fused_center_bootstrap_p05",
+            "replacement_q_ucb_role": "fused_center_bootstrap_ucb",
+            "replacement_bootstrap_draws": 400,
+            "replacement_joint_samples_hash": "3" * 64,
+            "replacement_canonical_bound_hash": _REPLACEMENT_CANONICAL_BOUND_HASH,
+            "replacement_q": _REPLACEMENT_Q,
+            "replacement_q_lcb": _REPLACEMENT_Q_LCB,
+            "replacement_q_ucb": _REPLACEMENT_Q_UCB,
+        },
+        claims.CALIBRATION: {
+            "authority": "FUSED_BOOTSTRAP_CONSERVATIVE_Q_LCB",
+            "coverage_status": "INSUFFICIENT_DATA",
+            "q_lcb_basis": "fused_center_bootstrap_p05",
+            "bootstrap_draws": 400,
+        },
+        claims.EXECUTABLE_SNAPSHOT: {"token_id": "no-1"},
+        claims.QUOTE_FEASIBILITY: {"token_id": "no-1", "direction": "buy_no"},
+        claims.COST_MODEL: {"token_id": "no-1", "direction": "buy_no"},
+        claims.CANDIDATE_EVIDENCE: {
+            "selected_token_id": "no-1",
+            "direction": "buy_no",
+            "hypothesis_id": "family-1:no-1",
+            "replacement_no_bound_bin_id": "11C",
+            "replacement_no_bound_served_lcb": 0.617,
+        },
+        claims.FDR: {"selected_hypotheses": ("family-1:no-1",)},
+    }
+    return action, parent
+
+
+def test_actionable_replacement_no_bound_binds_canonical_parents_after_qkernel_tightening():
+    action_payload, parent_overrides = _replacement_actionable_overrides()
+    parents, action = actionable_graph(
+        action_payload=action_payload,
+        parent_overrides=parent_overrides,
+    )
+
+    verify_actionable_trade(action, parents)
+
+
+def test_actionable_replacement_no_bound_rejects_canonical_parent_mismatch():
+    action_payload, parent_overrides = _replacement_actionable_overrides()
+    parent_overrides[claims.FORECAST_AUTHORITY]["replacement_canonical_bound_hash"] = (
+        "5" * 64
+    )
+    parents, action = actionable_graph(
+        action_payload=action_payload,
+        parent_overrides=parent_overrides,
+    )
+
+    with pytest.raises(
+        CertificateVerificationError,
+        match="replacement NO bound certificate invalid",
+    ):
+        verify_actionable_trade(action, parents)
 
 
 def test_actionable_requires_live_mode():

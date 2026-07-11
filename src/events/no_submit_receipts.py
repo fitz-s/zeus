@@ -304,6 +304,8 @@ def _receipt_json(receipt: EventSubmissionReceipt) -> str:
     # same_bin_yes_posterior above.
     if payload.get("settlement_coverage_status") is None:
         payload.pop("settlement_coverage_status", None)
+    if payload.get("replacement_no_bound_certificate") is None:
+        payload.pop("replacement_no_bound_certificate", None)
     # DecisionProvenanceEnvelope (operator law 2026-06-11): ALWAYS excluded from receipt_json —
     # never hashed. The envelope embeds decision_time-dependent ages (cycle_age_h, book age_s),
     # so a retried event would recompute different envelope bytes for the SAME

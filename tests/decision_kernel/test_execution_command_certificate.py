@@ -1,5 +1,6 @@
-# Created: 2026-05-25
-# Last reused or audited: 2026-05-25
+# Lifecycle: created=2026-05-25; last_reviewed=2026-07-10; last_reused=2026-07-10
+# Purpose: Prove live execution certificates preserve authority, sizing, and submit invariants.
+# Reuse: Re-audit final-intent, pre-submit, command, and verifier field closure before relying on it.
 # Authority basis: docs/operations/edli_v1/EDLI_REDEMPTION_FINAL_PACKAGE_SPEC.md §14 full-live increment.
 from __future__ import annotations
 
@@ -419,6 +420,24 @@ def test_final_intent_matches_actionable_event_token_condition_direction():
     parents, final_intent = final_intent_graph()
 
     verify_final_intent(final_intent, parents)
+
+
+def test_replacement_no_bound_certificate_survives_final_presubmit_and_command() -> None:
+    bound = {
+        "schema": "replacement_native_no_bound_v1",
+        "certificate_hash": "f" * 64,
+    }
+    parents, command = execution_graph(
+        actionable_payload={"replacement_no_bound_certificate": bound},
+    )
+    by_type = {parent.certificate_type: parent for parent in parents}
+    final_intent = by_type[claims.FINAL_INTENT]
+    pre_submit = by_type[claims.PRE_SUBMIT_REVALIDATION]
+
+    assert final_intent.payload["replacement_no_bound_certificate"] == bound
+    assert pre_submit.payload["replacement_no_bound_certificate"] == bound
+    assert command.payload["replacement_no_bound_certificate_hash"] == "f" * 64
+    verify_execution_command(command, parents)
 
 
 def test_final_intent_rejects_wrong_token():
@@ -1337,6 +1356,7 @@ def _actionable_payload() -> dict:
 
 
 def _command_payload(actionable) -> dict:
+    bound = actionable.payload.get("replacement_no_bound_certificate")
     return {
         "event_id": "event-1",
         "event_type": actionable.payload.get("event_type", "FORECAST_SNAPSHOT_READY"),
@@ -1363,6 +1383,9 @@ def _command_payload(actionable) -> dict:
         "aggregate_id": "event-1:intent-1",
         "aggregate_pre_submit_event_hash": "pre-submit-hash",
         "aggregate_execution_command_event_hash": "command-hash",
+        "replacement_no_bound_certificate_hash": (
+            bound.get("certificate_hash") if isinstance(bound, dict) else None
+        ),
         "submitted": False,
     }
 
@@ -1441,6 +1464,9 @@ def _pre_submit_cert(final_intent, live_cap, command_payload: dict | None = None
                 },
             ),
         ),
+        "replacement_no_bound_certificate": final_intent.payload.get(
+            "replacement_no_bound_certificate"
+        ),
         "would_cross_book": False,
         "tick_size": command_payload.get("tick_size", 0.01),
         "tick_aligned": command_payload.get("tick_aligned", True),
@@ -1518,6 +1544,9 @@ def _final_intent_payload(actionable) -> dict:
         "min_submit_edge_density": payload.get("min_submit_edge_density"),
         "selection_authority_applied": payload.get("selection_authority_applied"),
         "qkernel_execution_economics": payload.get("qkernel_execution_economics"),
+        "replacement_no_bound_certificate": payload.get(
+            "replacement_no_bound_certificate"
+        ),
         "size": 10.0,
         "notional_usd": 4.0,
         "executable_snapshot_id": payload["executable_snapshot_id"],

@@ -1,5 +1,4 @@
-# Created: 2026-06-11
-# Last reused or audited: 2026-06-14
+# Lifecycle: created=2026-06-11; last_reviewed=2026-07-10; last_reused=2026-07-10
 # Authority basis: production defect (15:03Z+ burst, 2026-06-11): 12 of 21 families'
 #   best candidates (ev/$ +0.04..+0.30; Atlanta q_lcb=0.7842 price=0.6021, HK
 #   0.7613/0.6318, Warsaw, Moscow, Busan, Helsinki, Shanghai, Mexico City, Cape Town,
@@ -30,6 +29,9 @@ CROSS-MODULE INVARIANTS pinned here:
 """
 from __future__ import annotations
 
+from types import SimpleNamespace
+
+from src.decision_kernel.canonicalization import stable_hash
 from src.events.no_submit_receipts import _receipt_json
 from src.events.reactor import (
     EventSubmissionReceipt,
@@ -39,6 +41,8 @@ from src.events.reactor import (
 from src.strategy.live_inference.live_admission import (
     SETTLEMENT_COVERAGE_LICENSING_STATUSES,
     live_buy_no_conservative_evidence_rejection_reason,
+    replacement_no_bound_expected_from_parents,
+    replacement_probability_bundle_hash,
 )
 
 # Real-shaped values from the 15:03Z burst (Atlanta high 2026-06-12 buy_no):
@@ -52,6 +56,100 @@ _ATLANTA = dict(
     q_lcb_calibration_source="FORECAST_BOOTSTRAP",
     same_bin_yes_posterior=0.22,
 )
+
+_CERTIFIED_REPLACEMENT_Q = {"bin-atlanta-high": 0.22, "other": 0.78}
+_CERTIFIED_REPLACEMENT_Q_LCB = {"bin-atlanta-high": 0.18, "other": 0.70}
+_CERTIFIED_REPLACEMENT_Q_UCB = {"bin-atlanta-high": 0.25, "other": 0.82}
+_CERTIFIED_REPLACEMENT_CANONICAL_BOUND_HASH = replacement_probability_bundle_hash(
+    posterior_id=314159,
+    posterior_identity_hash="4" * 64,
+    family_id="Atlanta|2026-06-12|high",
+    bin_topology_hash="5" * 64,
+    q_mode="FUSED_NORMAL_FULL",
+    q_lcb_basis="fused_center_bootstrap_p05",
+    q_ucb_role="fused_center_bootstrap_ucb",
+    bootstrap_draws=200,
+    joint_samples_hash="6" * 64,
+    q=_CERTIFIED_REPLACEMENT_Q,
+    q_lcb=_CERTIFIED_REPLACEMENT_Q_LCB,
+    q_ucb=_CERTIFIED_REPLACEMENT_Q_UCB,
+)
+_CERTIFIED_REPLACEMENT_CERT_BODY = {
+    "schema": "replacement_native_no_bound_v1",
+    "probability_authority": "replacement_0_1",
+    "posterior_id": 314159,
+    "posterior_identity_hash": "4" * 64,
+    "family_id": "Atlanta|2026-06-12|high",
+    "bin_topology_hash": "5" * 64,
+    "condition_id": "cond-atlanta-high",
+    "bin_id": "bin-atlanta-high",
+    "q_mode": "FUSED_NORMAL_FULL",
+    "q_lcb_basis": "fused_center_bootstrap_p05",
+    "q_ucb_role": "fused_center_bootstrap_ucb",
+    "bootstrap_draws": 200,
+    "joint_samples_hash": "6" * 64,
+    "canonical_bound_hash": _CERTIFIED_REPLACEMENT_CANONICAL_BOUND_HASH,
+    "side": "buy_no",
+    "yes_q": 0.22,
+    "yes_q_ucb": 0.25,
+    "side_q_point": 0.78,
+    "side_q_lcb_raw": 0.75,
+    "side_q_lcb_served": 0.75,
+    "coverage_shrink_applied": False,
+}
+_CERTIFIED_REPLACEMENT_CERT = {
+    **_CERTIFIED_REPLACEMENT_CERT_BODY,
+    "certificate_hash": stable_hash(_CERTIFIED_REPLACEMENT_CERT_BODY),
+}
+_CERTIFIED_REPLACEMENT_FORECAST_PARENT = {
+    "replacement_posterior_id": 314159,
+    "posterior_identity_hash": "4" * 64,
+    "replacement_family_id": "Atlanta|2026-06-12|high",
+    "replacement_bin_topology_hash": "5" * 64,
+    "replacement_q_mode": "FUSED_NORMAL_FULL",
+    "replacement_q_lcb_basis": "fused_center_bootstrap_p05",
+    "replacement_q_ucb_role": "fused_center_bootstrap_ucb",
+    "replacement_bootstrap_draws": 200,
+    "replacement_joint_samples_hash": "6" * 64,
+    "replacement_canonical_bound_hash": _CERTIFIED_REPLACEMENT_CANONICAL_BOUND_HASH,
+    "replacement_q": _CERTIFIED_REPLACEMENT_Q,
+    "replacement_q_lcb": _CERTIFIED_REPLACEMENT_Q_LCB,
+    "replacement_q_ucb": _CERTIFIED_REPLACEMENT_Q_UCB,
+}
+_CERTIFIED_REPLACEMENT_CANDIDATE_PARENT = {
+    "condition_id": "cond-atlanta-high",
+    "replacement_no_bound_bin_id": "bin-atlanta-high",
+    "replacement_no_bound_served_lcb": 0.75,
+}
+_CERTIFIED_REPLACEMENT_EXPECTED = replacement_no_bound_expected_from_parents(
+    _CERTIFIED_REPLACEMENT_FORECAST_PARENT,
+    _CERTIFIED_REPLACEMENT_CANDIDATE_PARENT,
+)
+_CERTIFIED_REPLACEMENT = dict(
+    direction="buy_no",
+    q_direction=0.78,
+    q_lcb=0.75,
+    execution_price=0.6021,
+    q_lcb_calibration_source="FORECAST_BOOTSTRAP",
+    same_bin_yes_posterior=0.22,
+    settlement_coverage_status="INSUFFICIENT_DATA",
+    probability_authority="replacement_0_1",
+    posterior_id=314159,
+    condition_id="cond-atlanta-high",
+    replacement_no_bound_certificate=_CERTIFIED_REPLACEMENT_CERT,
+    replacement_no_bound_expected=_CERTIFIED_REPLACEMENT_EXPECTED,
+)
+
+
+def _replacement_proof_bundle() -> SimpleNamespace:
+    return SimpleNamespace(
+        forecast_authority=SimpleNamespace(
+            payload=_CERTIFIED_REPLACEMENT_FORECAST_PARENT
+        ),
+        candidate_evidence=SimpleNamespace(
+            payload=_CERTIFIED_REPLACEMENT_CANDIDATE_PARENT
+        ),
+    )
 
 
 # --- (a) record-BACKED verdict admits the bootstrap q_lcb --------------------------------------
@@ -92,6 +190,14 @@ def test_material_yes_bootstrap_with_insufficient_data_rejects() -> None:
     assert reason is not None
     assert reason.startswith("ADMISSION_BUY_NO_CONSERVATIVE_EVIDENCE_MISSING:")
     assert ":coverage_status=INSUFFICIENT_DATA" in reason
+
+
+def test_exact_replacement_complement_bound_supersedes_the_no_only_waiver() -> None:
+    """The one replacement authority already provides native NO uncertainty."""
+
+    assert live_buy_no_conservative_evidence_rejection_reason(
+        **_CERTIFIED_REPLACEMENT
+    ) is None
 
 
 def test_material_yes_bootstrap_with_no_verdict_rejected_with_missing_status() -> None:
@@ -214,6 +320,93 @@ def test_twin_sites_lockstep_for_one_fixture() -> None:
     )
 
 
+def test_twin_sites_admit_only_the_same_exact_replacement_bound_certificate() -> None:
+    direct = live_buy_no_conservative_evidence_rejection_reason(
+        **_CERTIFIED_REPLACEMENT
+    )
+    receipt = _money_path_clean_buy_no_receipt(
+        q_live=0.78,
+        q_lcb_5pct=0.75,
+        trade_score=0.1479,
+        same_bin_yes_posterior=0.22,
+        settlement_coverage_status="INSUFFICIENT_DATA",
+        posterior_id=314159,
+        probability_authority="replacement_0_1",
+        condition_id="cond-atlanta-high",
+        replacement_no_bound_certificate=_CERTIFIED_REPLACEMENT[
+            "replacement_no_bound_certificate"
+        ],
+        decision_proof_bundle=_replacement_proof_bundle(),
+    )
+    stage, reason = _receipt_money_path_blocker(receipt, ReactorConfig())
+    assert direct is None and stage is None, (direct, stage, reason)
+
+    broken = {
+        **_CERTIFIED_REPLACEMENT["replacement_no_bound_certificate"],
+        "yes_q_ucb": 0.26,
+    }
+    direct = live_buy_no_conservative_evidence_rejection_reason(
+        **{**_CERTIFIED_REPLACEMENT, "replacement_no_bound_certificate": broken}
+    )
+    receipt = _money_path_clean_buy_no_receipt(
+        q_live=0.78,
+        q_lcb_5pct=0.75,
+        trade_score=0.1479,
+        same_bin_yes_posterior=0.22,
+        settlement_coverage_status="INSUFFICIENT_DATA",
+        posterior_id=314159,
+        probability_authority="replacement_0_1",
+        condition_id="cond-atlanta-high",
+        replacement_no_bound_certificate=broken,
+        decision_proof_bundle=_replacement_proof_bundle(),
+    )
+    stage, reason = _receipt_money_path_blocker(receipt, ReactorConfig())
+    assert stage == "TRADE_SCORE"
+    assert reason == direct
+
+
+def test_receipt_accepts_qkernel_monotone_tightening_below_coverage_bound() -> None:
+    economics = {
+        "q_lcb_authority": "qkernel_payoff_bound",
+        "probability_authority": "qkernel_payoff_direct_route",
+        "pre_qkernel_q_posterior": 0.78,
+        "pre_qkernel_q_lcb_5pct": 0.75,
+        "payoff_q_point": 0.78,
+        "payoff_q_lcb": 0.70,
+    }
+    direct = live_buy_no_conservative_evidence_rejection_reason(
+        **{
+            **_CERTIFIED_REPLACEMENT,
+            "q_lcb": 0.70,
+            "qkernel_execution_economics": economics,
+        }
+    )
+    receipt = _money_path_clean_buy_no_receipt(
+        q_live=0.78,
+        q_lcb_5pct=0.70,
+        trade_score=0.0979,
+        same_bin_yes_posterior=0.22,
+        settlement_coverage_status="INSUFFICIENT_DATA",
+        posterior_id=314159,
+        probability_authority="replacement_0_1",
+        condition_id="cond-atlanta-high",
+        replacement_no_bound_certificate=_CERTIFIED_REPLACEMENT_CERT,
+        qkernel_execution_economics=economics,
+        decision_proof_bundle=_replacement_proof_bundle(),
+    )
+    stage, reason = _receipt_money_path_blocker(receipt, ReactorConfig())
+    assert direct is None and stage is None, (direct, stage, reason)
+
+    loosened = {**economics, "payoff_q_lcb": 0.76}
+    assert live_buy_no_conservative_evidence_rejection_reason(
+        **{
+            **_CERTIFIED_REPLACEMENT,
+            "q_lcb": 0.76,
+            "qkernel_execution_economics": loosened,
+        }
+    ) is not None
+
+
 # --- receipt-hash stability: status omitted-when-None, present when set ------------------------
 
 
@@ -227,4 +420,19 @@ def test_receipt_json_omits_status_when_none_for_hash_stability() -> None:
     blob_with = _receipt_json(receipt_with)
     assert '"settlement_coverage_status":"LICENSED"' in blob_with, (
         "an evaluated verdict must be recoverable from the receipt blob (provenance law)"
+    )
+
+
+def test_receipt_json_round_trips_replacement_no_bound_certificate() -> None:
+    receipt = _money_path_clean_buy_no_receipt(
+        replacement_no_bound_certificate=_CERTIFIED_REPLACEMENT[
+            "replacement_no_bound_certificate"
+        ]
+    )
+    blob = _receipt_json(receipt)
+    assert '"replacement_no_bound_certificate"' in blob
+    assert '"yes_q_ucb":0.25' in blob
+
+    assert '"replacement_no_bound_certificate"' not in _receipt_json(
+        _money_path_clean_buy_no_receipt()
     )

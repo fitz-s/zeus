@@ -60,6 +60,7 @@ from src.events.opportunity_event import OpportunityEvent, assert_available_for_
 from src.state.db import get_trade_connection_read_only, get_world_connection_read_only, world_write_mutex
 from src.strategy.live_inference.live_admission import (
     live_buy_no_conservative_evidence_rejection_reason,
+    replacement_no_bound_expected_from_parents,
 )
 
 UTC = timezone.utc
@@ -559,6 +560,11 @@ class EventSubmissionReceipt:
     # selected-leg value.
     # Omitted-when-None from receipt_json so existing hashes stay byte-stable.
     settlement_coverage_status: str | None = None
+    # Selected-leg proof that replacement_0_1 constructed native NO from the same
+    # posterior as YES: q_no=1-q_yes, raw_lcb_no=1-ucb_yes, and any served
+    # settlement shrink only lowers that raw bound. None on canonical/legacy/YES
+    # receipts; the admission helper revalidates every scalar and identity hash.
+    replacement_no_bound_certificate: dict[str, Any] | None = None
     # H2_E2E (REAUDIT_0_1.md §2/§4): typed carriers so every replacement_0_1 order
     # is SQL-reconstructable forecast(posterior_id) -> ... -> fill WITHOUT
     # JSON_EXTRACT. None on canonical/legacy receipts (observability only — these
@@ -3393,6 +3399,11 @@ def _receipt_money_path_blocker(
         # carries verbatim copies, so neither could ever fire for an admitted candidate.
         # The buy_no stanza below STAYS — its same_bin_yes_posterior /
         # settlement_coverage_status come from a distinct receipt-provenance path.
+        proof_bundle = receipt.decision_proof_bundle
+        replacement_expected = replacement_no_bound_expected_from_parents(
+            getattr(getattr(proof_bundle, "forecast_authority", None), "payload", None),
+            getattr(getattr(proof_bundle, "candidate_evidence", None), "payload", None),
+        )
         buy_no_conservative_reason = live_buy_no_conservative_evidence_rejection_reason(
             direction=receipt.direction,
             q_direction=receipt.q_live,
@@ -3408,6 +3419,12 @@ def _receipt_money_path_blocker(
             # Twin-authority reconciliation #7: the SAME family coverage verdict the
             # adapter gate evaluated (carried on the receipt; single computation).
             settlement_coverage_status=receipt.settlement_coverage_status,
+            replacement_no_bound_certificate=receipt.replacement_no_bound_certificate,
+            replacement_no_bound_expected=replacement_expected,
+            qkernel_execution_economics=receipt.qkernel_execution_economics,
+            probability_authority=receipt.probability_authority,
+            posterior_id=receipt.posterior_id,
+            condition_id=receipt.condition_id,
         )
         if buy_no_conservative_reason is not None:
             return "TRADE_SCORE", buy_no_conservative_reason

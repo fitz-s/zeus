@@ -24,7 +24,10 @@ from src.decision.family_decision_engine import (
     roi_frontier_useful_values,
 )
 from src.strategy.live_inference.live_admission import (
+    REPLACEMENT_BOOTSTRAP_MIN_DRAWS,
     live_entry_probability_quality_rejection_reason,
+    replacement_no_bound_certificate_matches,
+    replacement_no_bound_expected_from_parents,
 )
 from src.events.day0_authority import (
     Day0AuthorityError,
@@ -88,7 +91,7 @@ FUSED_BOOTSTRAP_CALIBRATION_AUTHORITY = "FUSED_BOOTSTRAP_SETTLEMENT_COVERAGE"
 DAY0_OBSERVATION_CALIBRATION_AUTHORITY = "DAY0_LIVE_OBSERVATION_HARD_FACT"
 DAY0_REMAINING_WINDOW_CALIBRATION_AUTHORITY = "DAY0_REMAINING_WINDOW_PROBABILITY"
 FUSED_BOOTSTRAP_MIN_LIVE_SAMPLES = 30
-FUSED_BOOTSTRAP_MIN_BOOTSTRAP_DRAWS = 100
+FUSED_BOOTSTRAP_MIN_BOOTSTRAP_DRAWS = REPLACEMENT_BOOTSTRAP_MIN_DRAWS
 FUSED_BOOTSTRAP_LIVE_COVERAGE_STATUSES = frozenset({"LICENSED", "UNLICENSED"})
 # K1.3 (consolidated overhaul 2026-06-11): the ALT-credential carve-out is ONE constant +
 # ONE predicate, consumed by BOTH the verifier and the compiler. History: the carve-out
@@ -618,6 +621,7 @@ def _verify_actionable_parent_consistency(
     causal = _required_parent_payload(parent, claims.CAUSAL_EVENT)
     topology = _required_parent_payload(parent, claims.MARKET_TOPOLOGY)
     family = _required_parent_payload(parent, claims.FAMILY_CLOSURE)
+    forecast = _required_parent_payload(parent, claims.FORECAST_AUTHORITY)
     belief = _required_parent_payload(parent, claims.BELIEF)
     executable = _required_parent_payload(parent, claims.EXECUTABLE_SNAPSHOT)
     quote = _required_parent_payload(parent, claims.QUOTE_FEASIBILITY)
@@ -642,6 +646,29 @@ def _verify_actionable_parent_consistency(
                 economics.get(economics_field),
                 f"belief.{belief_field}",
                 belief.get(belief_field),
+            )
+
+    if (
+        payload.get("probability_authority") == "replacement_0_1"
+        and payload.get("direction") == "buy_no"
+    ):
+        expected = replacement_no_bound_expected_from_parents(forecast, candidate)
+        if not replacement_no_bound_certificate_matches(
+            payload.get("replacement_no_bound_certificate"),
+            expected=expected,
+            q_direction=_finite_float(payload.get("q_live"), "actionable q_live"),
+            q_lcb=_finite_float(payload.get("q_lcb_5pct"), "actionable q_lcb"),
+            same_bin_yes_posterior=_finite_float(
+                payload.get("same_bin_yes_posterior"),
+                "actionable same_bin_yes_posterior",
+            ),
+            qkernel_execution_economics=payload.get("qkernel_execution_economics"),
+            probability_authority=payload.get("probability_authority"),
+            posterior_id=payload.get("posterior_id"),
+            condition_id=payload.get("condition_id"),
+        ):
+            raise CertificateVerificationError(
+                "actionable replacement NO bound certificate invalid"
             )
 
     _require_equal("actionable.event_id", payload.get("event_id"), "causal.event_id", causal.get("event_id"))
@@ -731,6 +758,18 @@ def _verify_execution_command_payload(
     _require_equal("final_intent.token_id", final_intent.get("token_id"), "actionable.token_id", actionable.get("token_id"))
     _require_equal("final_intent.condition_id", final_intent.get("condition_id"), "actionable.condition_id", actionable.get("condition_id"))
     _require_equal("final_intent.strategy_key", final_intent.get("strategy_key"), "actionable.strategy_key", actionable.get("strategy_key"))
+    final_bound = final_intent.get("replacement_no_bound_certificate")
+    final_bound_hash = (
+        final_bound.get("certificate_hash")
+        if isinstance(final_bound, Mapping)
+        else None
+    )
+    _require_equal(
+        "execution_command.replacement_no_bound_certificate_hash",
+        payload.get("replacement_no_bound_certificate_hash"),
+        "final_intent.replacement_no_bound_certificate.certificate_hash",
+        final_bound_hash,
+    )
     _require_equal("expressibility.strategy_key", expressibility.get("strategy_key"), "final_intent.strategy_key", final_intent.get("strategy_key"))
     _require_equal("live_cap.usage_id", live_cap.get("usage_id"), "actionable.live_cap_usage_id", actionable.get("live_cap_usage_id"))
     for field in (
@@ -845,6 +884,12 @@ def _verify_pre_submit_revalidation_for_command(
         command.get("aggregate_pre_submit_event_hash"),
         "pre_submit.aggregate_event_hash",
         pre_submit.get("aggregate_event_hash"),
+    )
+    _require_equal(
+        "pre_submit.replacement_no_bound_certificate",
+        pre_submit.get("replacement_no_bound_certificate"),
+        "final_intent.replacement_no_bound_certificate",
+        final_intent.get("replacement_no_bound_certificate"),
     )
     if not pre_submit.get("aggregate_event_hash"):
         raise CertificateVerificationError("pre-submit revalidation aggregate_event_hash missing")
@@ -995,6 +1040,12 @@ def _verify_final_intent_payload(
         payload.get("strategy_key"),
         "actionable.strategy_key",
         actionable.get("strategy_key"),
+    )
+    _require_equal(
+        "final_intent.replacement_no_bound_certificate",
+        payload.get("replacement_no_bound_certificate"),
+        "actionable.replacement_no_bound_certificate",
+        actionable.get("replacement_no_bound_certificate"),
     )
     if payload.get("strategy_key") in (None, ""):
         raise CertificateVerificationError("final intent strategy_key missing")

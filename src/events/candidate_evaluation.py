@@ -8,7 +8,6 @@ from typing import Any
 from src.contracts.probability_arithmetic import one_minus, payout_odds
 from src.strategy.live_inference.live_admission import (
     LIVE_DIRECTION_WIN_RATE_FLOOR,
-    live_buy_no_conservative_evidence_rejection_reason,
     live_capital_efficiency_rejection_reason,
     live_lcb_consistency_rejection_reason,
     live_win_rate_floor_rejection_reason,
@@ -144,15 +143,22 @@ class CandidateEvaluation:
 
     @property
     def live_buy_no_conservative_evidence_reason(self) -> str | None:
-        return live_buy_no_conservative_evidence_rejection_reason(
-            direction=self.direction,
-            q_direction=self.q_posterior,
-            q_lcb=self.q_lcb_5pct,
-            execution_price=self.execution_price,
-            q_lcb_calibration_source=self.q_lcb_calibration_source,
-            same_bin_yes_posterior=self.same_bin_yes_posterior,
-            settlement_coverage_status=self.settlement_coverage_status,
-        )
+        """Project the proof-generation verdict; never mint probability authority.
+
+        ``CandidateEvaluation`` is a display/receipt projection produced only after
+        the material candidate gate.  Recomputing BUY_NO admission here would need
+        the canonical forecast parent and replacement bound certificate, neither of
+        which this legacy scalar shape owns.  The proof builder records a typed
+        ``missing_reason`` and clears ``passed_prefilter`` when that authoritative
+        gate rejects; this projection reports that verdict verbatim.
+        """
+
+        if self.direction != "buy_no":
+            return None
+        reason = str(self.missing_reason or "")
+        if reason.startswith("ADMISSION_BUY_NO_"):
+            return reason
+        return None
 
     @property
     def live_buy_no_conservative_evidence_admissible(self) -> bool:

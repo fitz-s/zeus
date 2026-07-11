@@ -298,6 +298,10 @@ def test_selector_excludes_buy_no_on_material_yes_bin():
         q_lcb_5pct=0.667,
         trade_score=0.021,
         same_bin_yes_posterior=0.23,
+        missing_reason=(
+            "ADMISSION_BUY_NO_CONSERVATIVE_EVIDENCE_MISSING:"
+            "yes_posterior=0.230000"
+        ),
     )
     stable_edge = _evaluation(
         candidate_id="cand-stable-edge",

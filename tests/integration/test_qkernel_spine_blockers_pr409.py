@@ -1,5 +1,6 @@
-# Created: 2026-06-15
-# Lifecycle: created=2026-06-15; last_reviewed=2026-06-19; last_reused=2026-06-29
+# Lifecycle: created=2026-06-15; last_reviewed=2026-07-10; last_reused=2026-07-10
+# Purpose: Prove the live q-kernel bridge preserves probability and execution invariants.
+# Reuse: Re-audit overlay probability authority and live blockers before q-kernel changes.
 # Authority basis: docs/rebuild/consult_review_pr409.md §5/§7 + the round-2
 #   corrections docs/rebuild/consult_review_pr409_round2.md §1/§3/§5. RED-on-revert
 #   tests for the FOUR live-path blockers in the q-kernel integration bridge, folding
@@ -26,6 +27,7 @@ import pytest
 
 from src.engine import event_reactor_adapter as era
 from src.engine import qkernel_spine_bridge as bridge
+from src.decision_kernel.canonicalization import stable_hash
 from src.events.candidate_binding import (
     EventBoundCandidateFamily,
     MarketTopologyCandidate,
@@ -1478,6 +1480,7 @@ def _overlay_proof(
     q_lcb_guard_basis="OOF_WILSON_95",
     q_lcb_guard_abstained=False,
     q_lcb_guard_cell_key=None,
+    replacement_no_bound_certificate=None,
 ):
     """Build a real reactor ``_CandidateProof`` and overlay the given spine economics."""
     from dataclasses import replace
@@ -1495,6 +1498,11 @@ def _overlay_proof(
         q_lcb_5pct=q_lcb_5pct,
         bin_obj=Bin(low=20.0, high=20.0, unit="C", label="20C"),
     )
+    if replacement_no_bound_certificate is not None:
+        proof = replace(
+            proof,
+            replacement_no_bound_certificate=replacement_no_bound_certificate,
+        )
     if missing_reason is not None:
         proof = replace(
             proof,
@@ -1563,6 +1571,85 @@ def test_overlay_uses_qkernel_probability_fields_and_updates_score():
     assert new_proof.qkernel_execution_economics["q_lcb_authority"] == "qkernel_payoff_bound"
     assert new_proof.qkernel_execution_economics["probability_authority"] == (
         "qkernel_payoff_direct_route"
+    )
+
+
+def test_overlay_preserves_replacement_no_bound_and_allows_only_monotone_tightening():
+    body = {
+        "schema": "replacement_native_no_bound_v1",
+        "probability_authority": "replacement_0_1",
+        "posterior_id": 1,
+        "posterior_identity_hash": "1" * 64,
+        "family_id": "family-1",
+        "bin_topology_hash": "2" * 64,
+        "q_mode": "FUSED_NORMAL_FULL",
+        "q_lcb_basis": "fused_center_bootstrap_p05",
+        "q_ucb_role": "fused_center_bootstrap_ucb",
+        "bootstrap_draws": 400,
+        "joint_samples_hash": "3" * 64,
+        "canonical_bound_hash": "4" * 64,
+        "condition_id": "cond-overlay",
+        "bin_id": "b1",
+        "side": "buy_no",
+        "yes_q": 0.348,
+        "yes_q_ucb": 0.383,
+        "side_q_point": 0.652,
+        "side_q_lcb_raw": 0.617,
+        "side_q_lcb_served": 0.617,
+        "coverage_shrink_applied": False,
+    }
+    bound = {**body, "certificate_hash": stable_hash(body)}
+    economics = _selected_economics(
+        edge_lcb=0.28,
+        cost=0.32,
+        q_dot_payoff=0.652,
+        point_ev=0.332,
+    )
+
+    new_proof = _overlay_proof(
+        q_posterior=0.652,
+        q_lcb_5pct=0.617,
+        economics=economics,
+        replacement_no_bound_certificate=bound,
+    )
+    expected = {
+        key: bound[key]
+        for key in (
+            "posterior_id",
+            "posterior_identity_hash",
+            "family_id",
+            "bin_topology_hash",
+            "condition_id",
+            "bin_id",
+            "q_mode",
+            "q_lcb_basis",
+            "q_ucb_role",
+            "bootstrap_draws",
+            "joint_samples_hash",
+            "canonical_bound_hash",
+            "certificate_hash",
+        )
+    }
+    expected.update(
+        {
+            "yes_q": 0.348,
+            "yes_q_ucb": 0.383,
+            "side_q_lcb_served": 0.617,
+        }
+    )
+
+    assert new_proof.replacement_no_bound_certificate == bound
+    assert new_proof.q_lcb_5pct == pytest.approx(0.60)
+    assert era.replacement_no_bound_certificate_matches(
+        new_proof.replacement_no_bound_certificate,
+        expected=expected,
+        q_direction=new_proof.q_posterior,
+        q_lcb=new_proof.q_lcb_5pct,
+        same_bin_yes_posterior=0.348,
+        qkernel_execution_economics=new_proof.qkernel_execution_economics,
+        probability_authority="replacement_0_1",
+        posterior_id=1,
+        condition_id="cond-overlay",
     )
 
 
