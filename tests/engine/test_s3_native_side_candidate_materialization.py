@@ -528,7 +528,7 @@ def test_global_jit_requires_a_newer_distinct_winner_snapshot():
     )
 
 
-def test_global_submit_rebinds_to_actuation_jit_book_hash():
+def test_global_submit_requires_complete_candidate_bound_jit_identity():
     candidate = SimpleNamespace(candidate_id="global-candidate")
     payload = {
         "qkernel_execution_economics": {

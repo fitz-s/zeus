@@ -10276,10 +10276,15 @@ def _build_live_execution_command_certificates(
         quote_feasibility = _required_cert(base_certs, claims.QUOTE_FEASIBILITY)
         cost_model = _required_cert(base_certs, claims.COST_MODEL)
         quote_payload = quote_feasibility.payload
-        global_submit_book_hash = _global_jit_book_hash_for_submit(
-            actionable_payload=actionable.payload,
-            global_candidate=global_candidate,
-        )
+        if global_candidate is not None:
+            # Validate that the global certificate carries a complete,
+            # candidate-bound JIT identity. Its book hash is provenance, not an
+            # invariant that a later CLOB witness can preserve. Fresh economic
+            # safety is enforced below by reservation-touch and taker-depth gates.
+            _global_jit_book_hash_for_submit(
+                actionable_payload=actionable.payload,
+                global_candidate=global_candidate,
+            )
         from types import SimpleNamespace
 
         side = "BUY" if str(actionable.payload.get("direction")) in {"buy_yes", "buy_no"} else "SELL"
@@ -10298,14 +10303,6 @@ def _build_live_execution_command_certificates(
             executable_snapshot,
             decision_time,
         )
-        if global_submit_book_hash is not None and (
-            authority_witness.book_hash != global_submit_book_hash
-        ):
-            raise ValueError(
-                "GLOBAL_ACTUATION_JIT_BOOK_SUPERSEDED:"
-                f"actuation_jit={global_submit_book_hash}:"
-                f"jit={authority_witness.book_hash}"
-            )
         fresh_best_bid = _optional_float(authority_witness.current_best_bid)
         fresh_best_ask = _optional_float(authority_witness.current_best_ask)
         # K=1 STAGE 1 (k1_final_snapshot_authority_plan_2026-06-11.md §4): persist the
