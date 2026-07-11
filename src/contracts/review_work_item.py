@@ -72,6 +72,12 @@ class ReviewReasonCode(str, Enum):
     # DIQ (decision_integrity revocation replacement): a certificate's
     # validity has been revoked; pre-submit / recovery gates must refuse it.
     CERTIFICATE_REVOKED = "CERTIFICATE_REVOKED"
+    # T4 (fill_tracker, BLOCKER-3): a pending-entry order timed out with no
+    # definitive venue (CLOB) classification, and the ChainObservationEnvelope
+    # available at the call site does not qualify as a confirmed-absence vote
+    # (missing / stale / not post-command-watermarked). Chain is the arbiter —
+    # this position stays pending_tracked, never force-voided on ambiguity.
+    TIMEOUT_ABSENCE_UNCONFIRMED = "TIMEOUT_ABSENCE_UNCONFIRMED"
 
 
 # Reason codes whose open work items represent REAL or UNKNOWN exposure on a
@@ -86,6 +92,7 @@ FAMILY_BLOCKING_REASON_CODES: frozenset[ReviewReasonCode] = frozenset(
         ReviewReasonCode.CHAIN_ONLY_UNKNOWN_ASSET,
         ReviewReasonCode.CONFIRMED_FILL_CHAIN_ABSENCE_CONFLICT,
         ReviewReasonCode.TERMINAL_RESTORE_EXPOSURE,
+        ReviewReasonCode.TIMEOUT_ABSENCE_UNCONFIRMED,
     }
 )
 

@@ -18,7 +18,11 @@ from types import SimpleNamespace
 from typing import Any, Optional
 
 from src.contracts.canonical_lifecycle import VenueOrderStatus, VenueTradeStatus
-from src.contracts.semantic_types import LifecycleState
+from src.contracts.chain_observation_envelope import (
+    UNOBSERVED_CHAIN_ENVELOPE,
+    ChainObservationEnvelope,
+)
+from src.contracts.review_work_item import ReviewReasonCode
 from src.state.lifecycle_manager import (
     enter_filled_entry_runtime_state,
     enter_voided_entry_runtime_state,
@@ -54,13 +58,23 @@ CANCEL_STATUSES = frozenset({VenueOrderStatus.EXPIRED.value, "CANCELLED", "CANCE
 # can be tracked — without it the command_id join yields NO_FACT for post_only
 # GTC orders and the maker fill-rate measurement loop is blind.
 RESTING_OPEN_STATUSES = frozenset({"LIVE", "RESTING", "OPEN", "ACCEPTED"})
-FILL_AUTHORITY_QUARANTINE_REVIEW_REQUIRED = "FILL_AUTHORITY_QUARANTINE_REVIEW_REQUIRED"
-FILL_LEDGER_QUARANTINE_REVIEW_REQUIRED = "FILL_LEDGER_QUARANTINE_REVIEW_REQUIRED"
-FILL_CANONICAL_WRITE_QUARANTINE_REVIEW_REQUIRED = "FILL_CANONICAL_WRITE_QUARANTINE_REVIEW_REQUIRED"
-VOID_CANONICAL_WRITE_QUARANTINE_REVIEW_REQUIRED = "VOID_CANONICAL_WRITE_QUARANTINE_REVIEW_REQUIRED"
+
+# T4 (docs/rebuild/, 2026-07-11 lifecycle-scar excision plan):
+# pending-entry uncertainty resolves through chain/venue truth, never through a
+# lifecycle scar. The order_status strings each _hold_pending_* helper sets
+# (below) are diagnostic breadcrumbs only — the position stays
+# "pending_tracked" and a ReviewWorkItem (see _open_review_work_item) carries
+# the real reason code, exposure bound, and retry schedule.
 
 # Void pending entries after this many cycles without resolution
 MAX_PENDING_CYCLES_WITHOUT_ORDER_ID = 2
+
+# BLOCKER-3 freshness bound for a ChainObservationEnvelope used in the
+# ambiguous-timeout void gate: two chain_mirror_reconciler cycles (~10 min
+# cadence each — src.state.chain_mirror_reconciler's own two-consecutive-run
+# threshold) rather than a single read, so a single stale/lagging snapshot can
+# never itself justify a void.
+_CHAIN_OBSERVATION_FRESHNESS_MAX_AGE_SECONDS = 1200
 
 
 def check_pending_entries(
@@ -381,6 +395,15 @@ def _maybe_append_venue_fill_observation(
                 except ValueError:
                     pass
                 if unsupported_explicit_trade_status:
+                    # T4: was silent at the Python level — only the DB event
+                    # row above recorded this. A venue status Zeus does not
+                    # recognize is real review debt, not a fill.
+                    logger.error(
+                        "Venue fill semantic conflict for order=%s reason=poll_unknown_trade_status "
+                        "incoming_trade_status=%s (no trade identity)",
+                        order_id,
+                        explicit_trade_status,
+                    )
                     conn.commit()
                     return False
 
@@ -404,6 +427,13 @@ def _maybe_append_venue_fill_observation(
                 )
             except ValueError:
                 pass
+            logger.error(
+                "Venue fill semantic conflict for order=%s trade_id=%s reason=poll_unknown_trade_status "
+                "incoming_trade_status=%s",
+                order_id,
+                trade_id,
+                explicit_trade_status,
+            )
             conn.commit()
             return False
         trade_state_requires_fill_economics = trade_state in TRADE_FILL_ECONOMICS_STATUSES
@@ -839,6 +869,19 @@ def _append_trade_lifecycle_review_required(
     reason: str,
     payload_extra: dict | None = None,
 ) -> None:
+    # T4: this semantic-conflict early-return used to be silent at the Python
+    # level (only a DB event row recorded it). A local bug must not relabel
+    # venue truth, but it must also never be invisible — loud ERROR here
+    # regardless of whether the append_event write below succeeds.
+    logger.error(
+        "Venue fill semantic conflict for order=%s trade_id=%s reason=%s "
+        "existing_state=%s incoming_state=%s",
+        order_id,
+        trade_id,
+        reason,
+        latest_fact.get("state"),
+        trade_state,
+    )
     try:
         append_event(
             conn,
@@ -872,66 +915,353 @@ def _extract_explicit_fill_price(payload) -> Optional[float]:
     return _extract_float(payload, "avgPrice", "avg_price", "fillPrice", "fill_price")
 
 
-def _quarantine_missing_fill_economics(
+def _work_item_conn(deps):
+    if deps is None or not hasattr(deps, "get_connection"):
+        return None
+    return deps.get_connection()
+
+
+def _position_family_key(pos: Position):
+    """Best-effort FamilyKey straight off the Position's own identity fields —
+    a pending entry always knows its own city/target_date/temperature_metric
+    (Blueprint v2 §2 entry context), so this never needs the ChainOnlyFact-style
+    market_events lookup src.state.review_work_items.family_key_for_condition_or_token
+    performs for facts with no local intent.
+    """
+    from src.contracts.review_work_item import FamilyKey
+
+    city = str(getattr(pos, "city", "") or "")
+    target_date = str(getattr(pos, "target_date", "") or "")
+    metric = str(getattr(pos, "temperature_metric", "") or "")
+    if not (city and target_date and metric):
+        return None
+    return FamilyKey(city=city, target_date=target_date, temperature_metric=metric)
+
+
+def _open_review_work_item(
+    pos: Position,
+    deps,
+    *,
+    reason_code: ReviewReasonCode,
+    detail: str,
+    last_error_class: str = "",
+    exposure_bound_usd: float | None = None,
+    unbounded: bool = False,
+) -> None:
+    """Idempotently open a ReviewWorkItem for this pending entry (T4).
+
+    Never raises into the poll loop: work-item bookkeeping failing must not
+    itself become a new failure mode — a missed open here just means the next
+    cycle's identical call tries again (open_work_item is itself idempotent).
+    """
+    conn = None
+    try:
+        conn = _work_item_conn(deps)
+        if conn is None:
+            return
+        from src.state.review_work_items import open_work_item
+        from src.state.schema.review_work_items_schema import ensure_table
+
+        ensure_table(conn)
+        bound = exposure_bound_usd
+        is_unbounded = bool(unbounded)
+        if bound is None and not is_unbounded:
+            # BLOCKER-1 worst-case bound: shares x $1/share (long-only CTF
+            # payout bound). Unknown shares -> genuinely unbounded, never
+            # silently treated as zero exposure.
+            shares = float(getattr(pos, "shares_submitted", 0.0) or getattr(pos, "shares", 0.0) or 0.0)
+            if shares > 0:
+                bound = shares
+            else:
+                is_unbounded = True
+        open_work_item(
+            conn,
+            owner_domain="trade",
+            owner_table="position_current",
+            subject_id=str(pos.trade_id),
+            reason_code=reason_code,
+            evidence_refs=(detail,),
+            family_key=_position_family_key(pos),
+            exposure_bound_usd=bound,
+            unbounded=is_unbounded,
+            last_error_class=last_error_class,
+            last_error_detail=detail,
+        )
+        conn.commit()
+    except Exception as exc:
+        logger.error(
+            "Review work item open failed for %s (%s): %s",
+            getattr(pos, "trade_id", ""),
+            reason_code,
+            exc,
+        )
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+
+def _resolve_review_work_items_for_position(pos: Position, deps, *, resolution_evidence: str) -> None:
+    """Resolve every OPEN ReviewWorkItem for this position's subject identity —
+    T4 item 5: once truth lands (a confirmed fill, or a confirmed void), every
+    open review debt this pending entry accumulated (missing economics,
+    missing authority, local write failures, unconfirmed-timeout absence) is
+    moot. Never raises into the poll loop.
+    """
+    conn = None
+    try:
+        conn = _work_item_conn(deps)
+        if conn is None:
+            return
+        from src.state.review_work_items import resolve_all_open_for_subject
+        from src.state.schema.review_work_items_schema import ensure_table
+
+        ensure_table(conn)
+        resolve_all_open_for_subject(
+            conn,
+            owner_table="position_current",
+            subject_id=str(pos.trade_id),
+            resolver_identity="fill_tracker",
+            resolution_evidence=resolution_evidence,
+        )
+        conn.commit()
+    except Exception as exc:
+        logger.error(
+            "Review work item resolve failed for %s: %s",
+            getattr(pos, "trade_id", ""),
+            exc,
+        )
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+
+def _release_entry_risk_reservation(pos: Position, deps) -> None:
+    """Resolve the T2 EntryRiskReservation (EntryExposureObligation) opened at
+    command-admission time (src.execution.executor._open_entry_risk_reservation),
+    now that this command's true fate is settled truth (fill confirmed, or
+    confirmed void). Calls the same underlying
+    src.state.entry_exposure_obligation.resolve_entry_exposure_obligation
+    primitive executor.py's own release helper wraps — fill_tracker does not
+    import executor.py (a K3-scale module) just for this one call; both
+    call sites share the identical writer, so there is exactly one resolution
+    behavior regardless of which module observes the command's fate first.
+    Safe to call on a command with no obligation (no-op, never raises).
+    """
+    conn = None
+    try:
+        conn = _work_item_conn(deps)
+        if conn is None:
+            return
+        order_id = str(getattr(pos, "entry_order_id", "") or getattr(pos, "order_id", "") or "").strip()
+        if not order_id:
+            return
+        row = conn.execute(
+            "SELECT command_id FROM venue_commands WHERE venue_order_id = ? "
+            "ORDER BY updated_at DESC, created_at DESC LIMIT 1",
+            (order_id,),
+        ).fetchone()
+        if row is None:
+            return
+        command_id = str(row[0])
+        if not command_id:
+            return
+        from src.state.entry_exposure_obligation import resolve_entry_exposure_obligation
+        from src.state.schema.entry_exposure_obligations_schema import ensure_table as _ensure_obligations_table
+
+        _ensure_obligations_table(conn)
+        resolve_entry_exposure_obligation(conn, command_id=command_id)
+        conn.commit()
+    except Exception as exc:
+        logger.error(
+            "Entry risk reservation release failed for %s: %s",
+            getattr(pos, "trade_id", ""),
+            exc,
+        )
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+
+def _chain_observation_for_position(pos: Position) -> ChainObservationEnvelope:
+    """Best-effort ChainObservationEnvelope from fields
+    src.state.chain_reconciliation already maintains on Position (T4/BLOCKER-3
+    — see src.contracts.chain_observation_envelope module docstring for the
+    upgrade path). ``last_chain_absence_observed_at`` is the only positive
+    absence signal available synchronously here: fill_tracker has no live
+    chain client of its own and must not add one merely to arbitrate a
+    poll-loop timeout — that arbitration belongs to
+    src.state.chain_mirror_reconciler's own two-consecutive-run protocol.
+
+    BLOCKER-3: "a positive chain observation always overrides local absence
+    evidence" — ``chain_verified_at`` (positive presence) at or after the
+    absence timestamp means the chain currently shows the token IS held, so no
+    qualifying absence envelope is ever built in that case.
+    """
+    absence_at = str(getattr(pos, "last_chain_absence_observed_at", "") or "")
+    if not absence_at:
+        return UNOBSERVED_CHAIN_ENVELOPE
+    presence_at = str(getattr(pos, "chain_verified_at", "") or "")
+    if presence_at and presence_at >= absence_at:
+        return UNOBSERVED_CHAIN_ENVELOPE
+    posted_at = str(getattr(pos, "order_posted_at", "") or "")
+    post_command = bool(posted_at) and absence_at >= posted_at
+    return ChainObservationEnvelope(
+        account_scope="wallet:zeus_operator",
+        fetched_at=absence_at,
+        # chain_reconciliation's absence detection reads the wallet's full,
+        # unfiltered get_positions_from_api() snapshot — the only "positive
+        # evidence of a full read" this call site can offer today.
+        complete=True,
+        post_command_watermark=post_command,
+        source="chain_reconciliation",
+    )
+
+
+def _chain_observation_is_fresh(envelope: ChainObservationEnvelope, now: datetime) -> bool:
+    fetched = _parse_iso(envelope.fetched_at)
+    if fetched is None:
+        return False
+    return (now - fetched).total_seconds() <= _CHAIN_OBSERVATION_FRESHNESS_MAX_AGE_SECONDS
+
+
+def _confirmed_absent_or_defer(pos: Position, now: datetime) -> bool:
+    """BLOCKER-3 gate for the ambiguous (no definitive CLOB status) timeout
+    branch: True iff the position's own chain observation qualifies to
+    support a force-void decision right now. False means the caller must
+    defer (stay pending, open/refresh a review work item) — the
+    chain-mirror reconciler's own two-consecutive-absence protocol remains
+    the authority that eventually force-closes a genuinely absent position,
+    independent of this poll loop's cadence.
+    """
+    envelope = _chain_observation_for_position(pos)
+    if not envelope.qualifies_for_absence_vote():
+        return False
+    return _chain_observation_is_fresh(envelope, now)
+
+
+def _hold_pending_missing_fill_economics(
     pos: Position,
     *,
     status: str,
     missing: tuple[str, ...],
+    deps=None,
 ) -> tuple[str, bool, bool]:
-    _mark_entry_quarantined(
-        pos,
-        reason=FILL_AUTHORITY_QUARANTINE_REVIEW_REQUIRED,
-        order_status=f"{str(status or 'fill').lower()}_missing_fill_economics",
-    )
+    order_status = f"{str(status or 'fill').lower()}_missing_fill_economics"
     pos.entry_fill_verified = False
     pos.fill_authority = FILL_AUTHORITY_NONE
     _refresh_corrected_economics_eligibility(pos)
+    pos.order_status = order_status
     logger.error(
-        "Fill economics missing for %s status=%s missing=%s; quarantining pending entry",
+        "Fill economics missing for %s status=%s missing=%s; venue truth gap — "
+        "holding pending entry for review, no lifecycle scar",
         getattr(pos, "trade_id", ""),
         status,
         ",".join(missing),
     )
+    _open_review_work_item(
+        pos,
+        deps,
+        reason_code=ReviewReasonCode.MISSING_FILL_ECONOMICS,
+        detail=f"{order_status}:{','.join(missing)}",
+        last_error_class="MissingFillEconomics",
+    )
     return "still_pending", True, False
 
 
-def _quarantine_missing_fill_authority(
+def _hold_pending_missing_fill_authority(
     pos: Position,
     *,
     status: str,
     missing: tuple[str, ...],
+    deps=None,
 ) -> tuple[str, bool, bool]:
     reason = "_".join(missing) if missing else "authority"
-    _mark_entry_quarantined(
-        pos,
-        reason=FILL_AUTHORITY_QUARANTINE_REVIEW_REQUIRED,
-        order_status=f"{str(status or 'fill').lower()}_missing_{reason}",
-    )
+    order_status = f"{str(status or 'fill').lower()}_missing_{reason}"
     pos.entry_fill_verified = False
     pos.fill_authority = FILL_AUTHORITY_NONE
     _refresh_corrected_economics_eligibility(pos)
+    pos.order_status = order_status
     logger.error(
-        "Fill authority missing for %s status=%s missing=%s; quarantining pending entry",
+        "Fill authority missing for %s status=%s missing=%s; venue truth gap — "
+        "holding pending entry for review, no lifecycle scar",
         getattr(pos, "trade_id", ""),
         status,
         ",".join(missing),
     )
+    _open_review_work_item(
+        pos,
+        deps,
+        reason_code=ReviewReasonCode.MISSING_FILL_AUTHORITY,
+        detail=f"{order_status}:{','.join(missing)}",
+        last_error_class="MissingFillAuthority",
+    )
     return "still_pending", True, False
 
 
-def _semantic_value(value) -> str:
-    return str(getattr(value, "value", value) or "")
-
-
-def _mark_entry_quarantined(pos: Position, *, reason: str, order_status: str) -> None:
-    pos.state = "quarantined"
-    pos.admin_exit_reason = reason
-    pos.exit_reason = reason
+def _hold_pending_timeout_absence_unconfirmed(
+    pos: Position,
+    *,
+    deps=None,
+) -> tuple[str, bool, bool]:
+    """T4/BLOCKER-3: an ambiguous timeout (no definitive CLOB status, cancel
+    attempt itself unconfirmed) whose chain observation does not qualify for
+    a confirmed-absence vote. Stays pending_tracked; the chain-mirror
+    reconciler's own two-consecutive-absence protocol remains the authority
+    that eventually force-closes a genuinely absent position.
+    """
+    order_status = "timeout_awaiting_chain_confirmation"
     pos.order_status = order_status
+    logger.warning(
+        "Pending entry timeout for %s has no venue confirmation and no "
+        "qualifying chain absence observation; holding pending, not voiding",
+        getattr(pos, "trade_id", ""),
+    )
+    _open_review_work_item(
+        pos,
+        deps,
+        reason_code=ReviewReasonCode.TIMEOUT_ABSENCE_UNCONFIRMED,
+        detail=order_status,
+        last_error_class="AmbiguousTimeout",
+    )
+    return "still_pending", True, False
 
 
-def _is_entry_quarantined(pos: Position) -> bool:
-    return _semantic_value(getattr(pos, "state", "")) == "quarantined"
+def _hold_pending_local_write_failure(
+    pos: Position,
+    *,
+    order_status: str,
+    detail: str,
+    deps=None,
+) -> tuple[str, bool, bool]:
+    """T4 sites 988/1050/1114/1165/1240/1287: a LOCAL ledger/canonical/void
+    write failed. Venue/chain truth is NOT in question — a local bug must
+    never relabel venue truth, so this stays pending_tracked (in the
+    check_pending_entries scan set) and retries next cycle.
+    """
+    pos.order_status = order_status
+    logger.error(
+        "Local write failed for %s (%s); a local bug must not relabel venue "
+        "truth — holding pending entry for retry, no lifecycle scar",
+        getattr(pos, "trade_id", ""),
+        detail,
+    )
+    _open_review_work_item(
+        pos,
+        deps,
+        reason_code=ReviewReasonCode.LOCAL_WRITE_FAILURE,
+        detail=detail,
+        last_error_class="LocalWriteFailure",
+    )
+    return "still_pending", True, False
 
 
 def _missing_fill_economics(
@@ -985,12 +1315,12 @@ def _record_non_fill_progress_trade_if_present(
         deps=deps,
     )
     if not ledger_ok:
-        _mark_entry_quarantined(
+        return _hold_pending_local_write_failure(
             pos,
-            reason=FILL_LEDGER_QUARANTINE_REVIEW_REQUIRED,
             order_status=order_status_on_failure,
+            detail=order_status_on_failure,
+            deps=deps,
         )
-        return "still_pending", True, False
     return None
 
 
@@ -1031,10 +1361,11 @@ def _mark_entry_filled(
         return non_fill_progress
     missing = _missing_fill_economics(fill_price=fill_price, shares=shares)
     if missing:
-        return _quarantine_missing_fill_economics(
+        return _hold_pending_missing_fill_economics(
             pos,
             status=observed_status,
             missing=missing,
+            deps=deps,
         )
 
     ledger_ok = _maybe_append_venue_fill_observation(
@@ -1047,17 +1378,18 @@ def _mark_entry_filled(
         deps=deps,
     )
     if not ledger_ok:
-        _mark_entry_quarantined(
+        return _hold_pending_local_write_failure(
             pos,
-            reason=FILL_LEDGER_QUARANTINE_REVIEW_REQUIRED,
             order_status="fill_ledger_write_failed",
+            detail="fill_ledger_write_failed",
+            deps=deps,
         )
-        return "still_pending", True, False
     if not trade_id:
-        return _quarantine_missing_fill_authority(
+        return _hold_pending_missing_fill_authority(
             pos,
             status=observed_status,
             missing=("trade_identity",),
+            deps=deps,
         )
 
     _apply_entry_fill_economics(
@@ -1103,20 +1435,20 @@ def _mark_entry_filled(
     # (3) is the honest reconcile-confirmed entry instant: a reconciled fill
     # carries no WS match time, and the canonical lifecycle builder requires a
     # non-empty timestamp, so the prior honest-absent "" terminal was invalid
-    # (it quarantined every reconcile entry). Never the bare clock over a real
-    # venue time.
+    # (it held every reconcile entry pending forever with no fill_authority).
+    # Never the bare clock over a real venue time.
     _venue_match_time = _payload_timestamp(payload if isinstance(payload, dict) else {})
     pos.entered_at = _venue_match_time or pos.entered_at or now.isoformat()
 
     lc_ok = _maybe_update_trade_lifecycle(pos, deps=deps)
     cf_ok = _maybe_emit_canonical_entry_fill(pos, deps=deps)
     if not lc_ok or not cf_ok:
-        _mark_entry_quarantined(
+        return _hold_pending_local_write_failure(
             pos,
-            reason=FILL_CANONICAL_WRITE_QUARANTINE_REVIEW_REQUIRED,
             order_status="fill_canonical_write_failed",
+            detail="fill_canonical_write_failed",
+            deps=deps,
         )
-        return "still_pending", True, False
 
     _maybe_log_execution_fill(
         pos,
@@ -1124,6 +1456,13 @@ def _mark_entry_filled(
         shares=shares,
         execution_status=execution_status,
         deps=deps,
+    )
+    # T4 item 5: fill economics are now confirmed applied — release the T2
+    # EntryRiskReservation and resolve any open review debt for this subject
+    # (both no-ops when none exist; never raise into the poll loop).
+    _release_entry_risk_reservation(pos, deps)
+    _resolve_review_work_items_for_position(
+        pos, deps, resolution_evidence="fill_confirmed"
     )
     if tracker is not None:
         tracker.record_entry(pos)
@@ -1137,7 +1476,16 @@ def _record_partial_entry_observed(
     now: datetime,
     *,
     deps=None,
-) -> tuple[str, bool, bool]:
+) -> tuple[str, bool, bool, bool]:
+    """Returns (outcome, dirty, tracker_dirty, held_for_review).
+
+    ``held_for_review`` (T4) is True iff this call short-circuited into a
+    hold-pending-review outcome (venue truth gap or local write failure) —
+    the caller (_check_entry_fill) must NOT then also evaluate this cycle's
+    timeout/cancel logic against fill state this call could not durably
+    establish (that would let a local write failure silently relabel venue
+    truth as "no exposure, safe to void" — exactly the disease T4 removes).
+    """
     fill_price = _extract_explicit_fill_price(payload)
     shares = _extract_filled_shares(payload, allow_order_size_fallback=False)
     non_fill_progress = _record_non_fill_progress_trade_if_present(
@@ -1149,9 +1497,9 @@ def _record_partial_entry_observed(
         order_status_on_failure="partial_fill_ledger_write_failed",
     )
     if non_fill_progress is not None:
-        return non_fill_progress
+        return (*non_fill_progress, True)
     if shares is None or shares <= 0:
-        return _update_pending_status(pos, "partial")
+        return (*_update_pending_status(pos, "partial"), False)
     ledger_ok = _maybe_append_venue_fill_observation(
         pos,
         payload,
@@ -1162,19 +1510,26 @@ def _record_partial_entry_observed(
         deps=deps,
     )
     if not ledger_ok:
-        _mark_entry_quarantined(
-            pos,
-            reason=FILL_LEDGER_QUARANTINE_REVIEW_REQUIRED,
-            order_status="partial_fill_ledger_write_failed",
+        return (
+            *_hold_pending_local_write_failure(
+                pos,
+                order_status="partial_fill_ledger_write_failed",
+                detail="partial_fill_ledger_write_failed",
+                deps=deps,
+            ),
+            True,
         )
-        return "still_pending", True, False
 
     missing = _missing_fill_economics(fill_price=fill_price, shares=shares)
     if missing:
-        return _quarantine_missing_fill_economics(
-            pos,
-            status="PARTIALLY_MATCHED",
-            missing=missing,
+        return (
+            *_hold_pending_missing_fill_economics(
+                pos,
+                status="PARTIALLY_MATCHED",
+                missing=missing,
+                deps=deps,
+            ),
+            True,
         )
 
     _apply_entry_fill_economics(
@@ -1194,7 +1549,7 @@ def _record_partial_entry_observed(
         pos.size_usd = actual_cost_basis
         pos.cost_basis_usd = actual_cost_basis
     pos.order_status = "partial"
-    return "still_pending", True, False
+    return "still_pending", True, False, False
 
 
 def _record_optimistic_entry_observed(
@@ -1221,10 +1576,11 @@ def _record_optimistic_entry_observed(
         return _update_pending_status(pos, status.lower())
     missing = _missing_fill_economics(fill_price=fill_price, shares=shares)
     if missing:
-        return _quarantine_missing_fill_economics(
+        return _hold_pending_missing_fill_economics(
             pos,
             status=status,
             missing=missing,
+            deps=deps,
         )
 
     ledger_ok = _maybe_append_venue_fill_observation(
@@ -1237,12 +1593,12 @@ def _record_optimistic_entry_observed(
         deps=deps,
     )
     if not ledger_ok:
-        _mark_entry_quarantined(
+        return _hold_pending_local_write_failure(
             pos,
-            reason=FILL_LEDGER_QUARANTINE_REVIEW_REQUIRED,
             order_status="optimistic_fill_ledger_write_failed",
+            detail="optimistic_fill_ledger_write_failed",
+            deps=deps,
         )
-        return "still_pending", True, False
 
     _apply_entry_fill_economics(
         pos,
@@ -1284,13 +1640,24 @@ def _mark_entry_voided(
         
     lc_ok = _maybe_update_trade_lifecycle(target, deps=deps)
     if not lc_ok:
-        _mark_entry_quarantined(
+        # T4 site 1287: the void write itself failed locally. Venue/chain
+        # truth about this order's fate is not in question — a local bug must
+        # not relabel it. Stay pending; the void re-derives from the same
+        # durable inputs next cycle.
+        return _hold_pending_local_write_failure(
             target,
-            reason=VOID_CANONICAL_WRITE_QUARANTINE_REVIEW_REQUIRED,
             order_status="void_canonical_write_failed",
+            detail="void_canonical_write_failed",
+            deps=deps,
         )
-        return "still_pending", True, False
-        
+
+    # T4 item 5 (BLOCKER-1 law): confirmed absence also supersedes the
+    # conservative EntryRiskReservation estimate, same as a confirmed fill —
+    # release it and resolve any open review debt for this subject.
+    _release_entry_risk_reservation(target, deps)
+    _resolve_review_work_items_for_position(
+        target, deps, resolution_evidence="confirmed_void"
+    )
     return "voided", True, False
 
 
@@ -1354,10 +1721,11 @@ def _check_entry_fill(
             )
             if non_fill_progress is not None:
                 return non_fill_progress
-            return _quarantine_missing_fill_authority(
+            return _hold_pending_missing_fill_authority(
                 pos,
                 status=f"{status}_TRADE_{trade_status_conflict}",
                 missing=("confirmed_trade_status",),
+                deps=deps,
             )
         return _mark_entry_filled(
             pos,
@@ -1384,8 +1752,10 @@ def _check_entry_fill(
         )
 
     if status in _partial_fill_statuses(deps):
-        outcome, dirty, tracker_dirty = _record_partial_entry_observed(pos, payload, now, deps=deps)
-        if _is_entry_quarantined(pos):
+        outcome, dirty, tracker_dirty, held_for_review = _record_partial_entry_observed(
+            pos, payload, now, deps=deps
+        )
+        if held_for_review:
             return outcome, dirty, tracker_dirty
         if _pending_order_timed_out(pos, now):
             cancel_succeeded = _cancel_order_remainder(pos, clob, deps=deps)
@@ -1409,8 +1779,10 @@ def _check_entry_fill(
         dirty = False
         tracker_dirty = False
         if _extract_filled_shares(payload, allow_order_size_fallback=False):
-            outcome, dirty, tracker_dirty = _record_partial_entry_observed(pos, payload, now, deps=deps)
-            if _is_entry_quarantined(pos):
+            outcome, dirty, tracker_dirty, held_for_review = _record_partial_entry_observed(
+                pos, payload, now, deps=deps
+            )
+            if held_for_review:
                 return outcome, dirty, tracker_dirty
         if _position_has_observed_exposure(pos):
             pos.fill_authority = FILL_AUTHORITY_CANCELLED_REMAINDER
@@ -1425,6 +1797,9 @@ def _check_entry_fill(
     if _pending_order_timed_out(pos, now):
         cancel_succeeded = _cancel_order_remainder(pos, clob, deps=deps)
         if cancel_succeeded:
+            # Venue-confirmed cancel lane (CLOB itself confirmed the
+            # cancellation) — kept as-is, no chain gate needed: this is
+            # unambiguous venue truth about the order, not an inference.
             if _position_has_observed_exposure(pos):
                 pos.fill_authority = FILL_AUTHORITY_CANCELLED_REMAINDER
                 _refresh_corrected_economics_eligibility(pos)
@@ -1433,7 +1808,18 @@ def _check_entry_fill(
                     "partial_remainder_cancelled",
                 )
             return _mark_entry_voided(portfolio, pos, "UNFILLED_ORDER", deps=deps)
-        return "still_pending", False, False
+        # T4/BLOCKER-3: ambiguous branch — CLOB gave no definitive status at
+        # all AND the cancel attempt itself did not confirm cancellation.
+        # Chain is the arbiter for absence (reconciliation order law), never
+        # fill_tracker's own inference from a bare timeout. Void only if this
+        # position's own chain observation qualifies as a confirmed-absence
+        # vote right now; otherwise defer (stay pending, open/refresh a
+        # review work item) and let the chain-mirror reconciler's own
+        # two-consecutive-absence protocol eventually force-close a
+        # genuinely absent position on its own cadence.
+        if _confirmed_absent_or_defer(pos, now):
+            return _mark_entry_voided(portfolio, pos, "UNFILLED_ORDER", deps=deps)
+        return _hold_pending_timeout_absence_unconfirmed(pos, deps=deps)
 
     if status:
         if status in RESTING_OPEN_STATUSES:
@@ -1453,23 +1839,28 @@ def _handle_no_order_id(
     now: datetime,
     deps=None,
 ) -> tuple[str, bool, bool]:
-    """Handle pending entries with no order ID. Void after grace period."""
+    """Handle pending entries with no order ID at all.
+
+    T4: no order id means Zeus has no way to ask the venue what happened — a
+    genuine authority gap, not something to destroy or scar. Stays
+    pending_tracked forever (in the check_pending_entries scan
+    set) with an open MISSING_FILL_AUTHORITY review work item; it may still
+    resolve later via chain reconciliation adopting the position, or an
+    operator investigating the review debt directly.
+    """
     # Track age via order_posted_at
     if not pos.order_posted_at:
         # First time seeing this — give it one more cycle
         pos.order_posted_at = now.isoformat()
         return "still_pending", True, False
 
-    # If it's been pending for too long without an order ID, quarantine it
-    # rather than destroying it, since it may have hit the exchange engine.
-    # PR E (Finding 2, 2026-05-27): previous string "quarantine_no_order_id"
-    # was outside LifecycleState; phase_for_runtime_position mapped it to
-    # UNKNOWN. The "no_order_id" sub-reason is preserved in the log warning
-    # one stack frame up; state itself carries the canonical phase. There
-    # are zero consumers of the old literal in src/ or tests/ — verified
-    # via grep before this change.
-    pos.state = LifecycleState.QUARANTINED.value
-    _maybe_update_trade_lifecycle(pos, deps=deps)
+    _open_review_work_item(
+        pos,
+        deps,
+        reason_code=ReviewReasonCode.MISSING_FILL_AUTHORITY,
+        detail="no_order_id_after_grace_period",
+        last_error_class="NoOrderId",
+    )
     return "still_pending", True, False
 
 

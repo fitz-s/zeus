@@ -316,6 +316,47 @@ def supersede_on_new_revision(
     return cur.rowcount
 
 
+def resolve_all_open_for_subject(
+    conn: sqlite3.Connection,
+    *,
+    owner_table: str,
+    subject_id: str,
+    resolver_identity: str,
+    resolution_evidence: str,
+    resolved_at: Optional[str] = None,
+) -> int:
+    """CAS-resolve every OPEN work item for one subject, regardless of reason_code.
+
+    Used when a subject's underlying uncertainty is fully resolved (e.g. T4 fill
+    confirmation): every open review debt tracked against it — missing economics,
+    missing authority, unconfirmed-timeout absence, local write failures — is
+    moot once truth lands. Each row is resolved with ITS OWN live
+    authority_revision (read immediately before the CAS update), so a row that
+    moved on between the read and the write is safely skipped rather than
+    corrupted. Returns the number of rows actually resolved.
+
+    INV-37: caller supplies conn.
+    """
+
+    rows = conn.execute(
+        "SELECT work_id, authority_revision FROM review_work_items "
+        "WHERE owner_table = ? AND subject_id = ? AND status = 'OPEN'",
+        (owner_table, subject_id),
+    ).fetchall()
+    resolved = 0
+    for work_id, authority_revision in rows:
+        if resolve_work_item(
+            conn,
+            work_id=str(work_id),
+            authority_revision=int(authority_revision),
+            resolver_identity=resolver_identity,
+            resolution_evidence=resolution_evidence,
+            resolved_at=resolved_at,
+        ):
+            resolved += 1
+    return resolved
+
+
 def due_work(
     conn: sqlite3.Connection,
     *,
@@ -479,6 +520,7 @@ def blocked_family_keys(
 __all__ = [
     "open_work_item",
     "resolve_work_item",
+    "resolve_all_open_for_subject",
     "supersede_on_new_revision",
     "due_work",
     "open_items_by_family",

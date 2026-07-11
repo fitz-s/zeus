@@ -682,8 +682,14 @@ def test_confirmed_fill_survives_stale_deps_fill_statuses():
     assert pos.order_status == "confirmed"
 
 
-def test_confirmed_without_explicit_fill_price_quarantines_entry():
-    """CONFIRMED order status is not fill economics without venue fill price."""
+def test_confirmed_without_explicit_fill_price_holds_pending_for_review():
+    """CONFIRMED order status is not fill economics without venue fill price.
+
+    T4 (quarantine excision): a venue-truth gap (missing fill economics) stays
+    pending_tracked with a MISSING_FILL_ECONOMICS review work item — no
+    lifecycle scar, and the position keeps blocking same-city-range re-entry
+    (it never actually stopped being live risk).
+    """
     from src.execution.fill_tracker import check_pending_entries
 
     pos = _make_position(
@@ -708,8 +714,8 @@ def test_confirmed_without_explicit_fill_price_quarantines_entry():
 
     assert stats["entered"] == 0
     assert stats["still_pending"] == 1
-    assert pos.state == "quarantined"
-    assert pos.admin_exit_reason == "FILL_AUTHORITY_QUARANTINE_REVIEW_REQUIRED"
+    assert pos.state == "pending_tracked"
+    assert pos.admin_exit_reason == ""
     assert pos.order_status == "confirmed_missing_fill_economics"
     assert pos.entry_fill_verified is False
     assert pos.entered_at == ""
@@ -724,12 +730,22 @@ def test_confirmed_without_explicit_fill_price_quarantines_entry():
     assert pos.has_fill_economics_authority is False
     from src.state.portfolio import has_same_city_range_open, total_exposure_usd
 
+    # BLOCKER-1: is_pending_entry_without_fill_authority still zeroes
+    # effective exposure for this pending_tracked/no-fill-authority row — the
+    # gap that made EntryRiskReservation (T2) necessary in the first place.
     assert total_exposure_usd(portfolio) == 0.0
-    assert has_same_city_range_open(portfolio, pos.city, pos.bin_label) is False
+    # But unlike the old quarantine scar (INACTIVE_RUNTIME_STATES), staying
+    # pending_tracked correctly still blocks a duplicate same-city-range
+    # re-entry while this order's fate is unresolved.
+    assert has_same_city_range_open(portfolio, pos.city, pos.bin_label) is True
 
 
-def test_confirmed_without_trade_identity_quarantines_entry():
-    """Order-only CONFIRMED is not executable fill finality."""
+def test_confirmed_without_trade_identity_holds_pending_for_review():
+    """Order-only CONFIRMED is not executable fill finality.
+
+    T4: missing trade identity is a MISSING_FILL_AUTHORITY venue-truth gap —
+    stays pending_tracked, no lifecycle scar.
+    """
     from src.execution.fill_tracker import check_pending_entries
 
     pos = _make_position(
@@ -755,7 +771,7 @@ def test_confirmed_without_trade_identity_quarantines_entry():
 
     assert stats["entered"] == 0
     assert stats["still_pending"] == 1
-    assert pos.state == "quarantined"
+    assert pos.state == "pending_tracked"
     assert pos.order_status == "confirmed_missing_trade_identity"
     assert pos.entry_fill_verified is False
     assert pos.entered_at == ""
@@ -840,7 +856,7 @@ def test_confirmed_without_trade_identity_marks_command_review_not_filled(tmp_pa
 
     assert stats["entered"] == 0
     assert stats["still_pending"] == 1
-    assert pos.state == "quarantined"
+    assert pos.state == "pending_tracked"
     conn = get_connection(db_path)
     command_state = conn.execute(
         "SELECT state FROM venue_commands WHERE command_id = 'cmd-confirmed-no-trade'"
@@ -874,8 +890,11 @@ def test_confirmed_without_trade_identity_marks_command_review_not_filled(tmp_pa
     assert "order_status_confirmed_is_not_fill_economics_authority" in review_payload
 
 
-def test_confirmed_without_explicit_filled_size_quarantines_entry():
-    """CONFIRMED fill price alone must not invent shares from order size."""
+def test_confirmed_without_explicit_filled_size_holds_pending_for_review():
+    """CONFIRMED fill price alone must not invent shares from order size.
+
+    T4: venue-truth gap — stays pending_tracked, no lifecycle scar.
+    """
     from src.execution.fill_tracker import check_pending_entries
 
     pos = _make_position(
@@ -900,7 +919,7 @@ def test_confirmed_without_explicit_filled_size_quarantines_entry():
 
     assert stats["entered"] == 0
     assert stats["still_pending"] == 1
-    assert pos.state == "quarantined"
+    assert pos.state == "pending_tracked"
     assert pos.order_status == "confirmed_missing_fill_economics"
     assert pos.entry_fill_verified is False
     assert pos.entered_at == ""
@@ -922,8 +941,11 @@ def test_confirmed_without_explicit_filled_size_quarantines_entry():
         ("filledSize", math.inf),
     ],
 )
-def test_confirmed_with_nonfinite_fill_economics_quarantines_entry(field, value):
-    """Non-finite venue economics are not executable fill evidence."""
+def test_confirmed_with_nonfinite_fill_economics_holds_pending_for_review(field, value):
+    """Non-finite venue economics are not executable fill evidence.
+
+    T4: venue-truth gap — stays pending_tracked, no lifecycle scar.
+    """
     from src.execution.fill_tracker import check_pending_entries
 
     pos = _make_position(
@@ -951,7 +973,7 @@ def test_confirmed_with_nonfinite_fill_economics_quarantines_entry(field, value)
 
     assert stats["entered"] == 0
     assert stats["still_pending"] == 1
-    assert pos.state == "quarantined"
+    assert pos.state == "pending_tracked"
     assert pos.order_status == "confirmed_missing_fill_economics"
     assert pos.entry_fill_verified is False
     assert pos.entered_at == ""
@@ -961,8 +983,11 @@ def test_confirmed_with_nonfinite_fill_economics_quarantines_entry(field, value)
     assert pos.has_fill_economics_authority is False
 
 
-def test_matched_with_filled_size_but_missing_fill_price_quarantines_entry():
-    """Optimistic fill observations need fill price before economics authority."""
+def test_matched_with_filled_size_but_missing_fill_price_holds_pending_for_review():
+    """Optimistic fill observations need fill price before economics authority.
+
+    T4: venue-truth gap — stays pending_tracked, no lifecycle scar.
+    """
     from src.execution.fill_tracker import check_pending_entries
 
     pos = _make_position(
@@ -987,7 +1012,7 @@ def test_matched_with_filled_size_but_missing_fill_price_quarantines_entry():
 
     assert stats["entered"] == 0
     assert stats["still_pending"] == 1
-    assert pos.state == "quarantined"
+    assert pos.state == "pending_tracked"
     assert pos.order_status == "matched_missing_fill_economics"
     assert pos.entry_fill_verified is False
     assert pos.shares == 0.0
@@ -1238,7 +1263,7 @@ def test_legacy_polling_failed_trade_status_is_not_fill_progress_authority(tmp_p
 
     assert stats["entered"] == 0
     assert stats["still_pending"] == 1
-    assert pos.state == "quarantined"
+    assert pos.state == "pending_tracked"
     assert pos.order_status == "optimistic_fill_ledger_write_failed"
     assert pos.entry_fill_verified is False
     assert pos.fill_authority == FILL_AUTHORITY_NONE
@@ -1412,7 +1437,7 @@ def test_legacy_polling_failed_without_fill_economics_rolls_back_optimistic_lot(
 
     assert stats["entered"] == 0
     assert stats["still_pending"] == 1
-    assert pos.state == "quarantined"
+    assert pos.state == "pending_tracked"
     assert pos.has_fill_economics_authority is False
 
     conn = get_connection(db_path)
@@ -1577,7 +1602,7 @@ def test_legacy_polling_duplicate_failed_trade_fact_still_fails_closed(tmp_path)
 
     assert stats["entered"] == 0
     assert stats["still_pending"] == 1
-    assert pos.state == "quarantined"
+    assert pos.state == "pending_tracked"
     assert pos.order_status == "optimistic_fill_ledger_write_failed"
     assert pos.entry_fill_verified is False
     assert pos.fill_authority == FILL_AUTHORITY_NONE
@@ -1717,7 +1742,7 @@ def test_legacy_polling_unknown_trade_status_fails_closed(tmp_path):
 
     assert stats["entered"] == 0
     assert stats["still_pending"] == 1
-    assert pos.state == "quarantined"
+    assert pos.state == "pending_tracked"
     assert pos.order_status == "optimistic_fill_ledger_write_failed"
     assert pos.entry_fill_verified is False
     assert pos.fill_authority == FILL_AUTHORITY_NONE
@@ -1872,7 +1897,7 @@ def test_legacy_polling_trade_lifecycle_requires_stable_fill_economics(tmp_path)
 
     assert stats["entered"] == 0
     assert stats["still_pending"] == 1
-    assert pos.state == "quarantined"
+    assert pos.state == "pending_tracked"
     assert pos.entry_fill_verified is False
     assert pos.fill_authority != FILL_AUTHORITY_VENUE_CONFIRMED_FULL
     assert pos.has_fill_economics_authority is False
@@ -2223,7 +2248,7 @@ def test_deps_path_missing_fill_price_writes_no_fill_authority_surfaces(tmp_path
 
     assert stats["entered"] == 0
     assert stats["still_pending"] == 1
-    assert pos.state == "quarantined"
+    assert pos.state == "pending_tracked"
     assert pos.order_status == "matched_missing_fill_economics"
     assert pos.entry_fill_verified is False
     assert pos.fill_authority == FILL_AUTHORITY_NONE
@@ -2302,8 +2327,11 @@ def test_partial_remainder_cancel_preserves_filled_exposure():
     clob.cancel_order.assert_called_once_with("buy_123")
 
 
-def test_partial_with_filled_size_but_missing_fill_price_quarantines_entry():
-    """Partial size evidence is not enough to assign cost basis or exposure grade."""
+def test_partial_with_filled_size_but_missing_fill_price_holds_pending_for_review():
+    """Partial size evidence is not enough to assign cost basis or exposure grade.
+
+    T4: venue-truth gap — stays pending_tracked, no lifecycle scar.
+    """
     from src.execution.fill_tracker import check_pending_entries
 
     pos = _make_position(
@@ -2333,7 +2361,7 @@ def test_partial_with_filled_size_but_missing_fill_price_quarantines_entry():
     assert stats["entered"] == 0
     assert stats["voided"] == 0
     assert stats["still_pending"] == 1
-    assert pos.state == "quarantined"
+    assert pos.state == "pending_tracked"
     assert pos.order_status == "partially_matched_missing_fill_economics"
     assert pos.entry_fill_verified is False
     assert pos.shares == 0.0
@@ -2344,7 +2372,7 @@ def test_partial_with_filled_size_but_missing_fill_price_quarantines_entry():
     clob.cancel_order.assert_not_called()
 
 
-def test_live_order_with_positive_size_matched_records_partial_fact_before_quarantine(tmp_path):
+def test_live_order_with_positive_size_matched_records_partial_fact_before_review(tmp_path):
     """A CLOB LIVE order can still carry filled shares while the remainder rests."""
     from src.execution.fill_tracker import check_pending_entries
     from src.state.db import get_connection, init_schema
@@ -2394,7 +2422,7 @@ def test_live_order_with_positive_size_matched_records_partial_fact_before_quara
     assert stats["entered"] == 0
     assert stats["voided"] == 0
     assert stats["still_pending"] == 1
-    assert pos.state == "quarantined"
+    assert pos.state == "pending_tracked"
     assert pos.order_status == "partially_matched_missing_fill_economics"
 
     verify = get_connection(db_path)
