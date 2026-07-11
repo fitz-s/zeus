@@ -16756,6 +16756,76 @@ def _qkernel_actual_submit_quality_rejection_reason(
     """
 
     raw_cert = getattr(proof, "qkernel_execution_economics", None)
+    # A sealed global actuation is its own current-state utility certificate.
+    # It is selected from the complete executable curve and current posterior
+    # sample matrix, so it need not pretend to carry the legacy family-route
+    # optimizer fields (route_id, delta_u_at_min, optimal_stake_usd, ...).
+    # Validate the exact current probability/cost tuple and the global utility
+    # envelope directly; requiring unrelated legacy fields here made otherwise
+    # valid native YES candidates fail only at the actual-submit boundary.
+    if (
+        isinstance(raw_cert, Mapping)
+        and str(raw_cert.get("global_actuation_identity") or "").strip()
+        and _qkernel_current_state_solve_economics(raw_cert)
+    ):
+        try:
+            stake = float(actual_stake_usd)
+            cost = float(actual_cost)
+            certified_cost = float(raw_cert.get("cost"))
+            payoff_q_point = float(raw_cert.get("payoff_q_point"))
+            payoff_q_lcb = float(raw_cert.get("payoff_q_lcb"))
+            edge_lcb = float(raw_cert.get("edge_lcb"))
+        except (TypeError, ValueError):
+            return (
+                "QKERNEL_ACTUAL_SUBMIT_QUALITY_FLOOR:"
+                "global_current_submit_economics_invalid"
+            )
+        values = (
+            stake,
+            cost,
+            certified_cost,
+            payoff_q_point,
+            payoff_q_lcb,
+            edge_lcb,
+        )
+        if not all(math.isfinite(value) for value in values):
+            return (
+                "QKERNEL_ACTUAL_SUBMIT_QUALITY_FLOOR:"
+                "global_current_submit_economics_non_finite"
+            )
+        native_side = _native_curve_side_for_direction(
+            str(getattr(proof, "direction", "") or "")
+        )
+        side = str(raw_cert.get("side") or "").strip().upper()
+        if side not in {"YES", "NO"} or native_side != side:
+            return (
+                "QKERNEL_ACTUAL_SUBMIT_QUALITY_FLOOR:"
+                f"global_current_submit_side_mismatch:side={side or 'UNKNOWN'}:"
+                f"direction={getattr(proof, 'direction', '') or 'UNKNOWN'}"
+            )
+        if not (
+            stake > 0.0
+            and 0.0 < cost < 1.0
+            and 0.0 < certified_cost < 1.0
+            and 0.0 <= payoff_q_lcb <= payoff_q_point <= 1.0
+            and edge_lcb > 0.0
+            and math.isclose(
+                payoff_q_lcb,
+                certified_cost + edge_lcb,
+                rel_tol=1e-9,
+                abs_tol=1e-9,
+            )
+            and payoff_q_lcb - cost > 0.0
+        ):
+            return (
+                "QKERNEL_ACTUAL_SUBMIT_QUALITY_FLOOR:"
+                "global_current_submit_economics_non_positive"
+            )
+        return _qkernel_current_state_actual_submit_rejection_reason(
+            cert=raw_cert,
+            actual_stake_usd=stake,
+            actual_cost=cost,
+        )
     cert = _valid_qkernel_execution_economics_payload(
         raw_cert,
         direction=str(getattr(proof, "direction", "") or ""),

@@ -933,6 +933,58 @@ def test_low_probability_current_band_taker_is_symmetric_and_price_relative(
     assert negative["reason"] == "negative_current_band_after_cost_surplus"
 
 
+@pytest.mark.parametrize(("side", "direction"), (("YES", "buy_yes"), ("NO", "buy_no")))
+def test_global_current_submit_does_not_require_legacy_route_optimizer_fields(
+    side,
+    direction,
+):
+    cert = _current_qkernel_cert(side=side)
+    for field in (
+        "candidate_id",
+        "route_id",
+        "delta_u_at_min",
+        "optimal_stake_usd",
+        "optimal_delta_u",
+        "direction_law_ok",
+        "coherence_allows",
+    ):
+        cert.pop(field)
+    cert.update(
+        payoff_q_point=0.70,
+        payoff_q_lcb=0.60,
+        cost=0.40,
+        edge_lcb=0.20,
+        global_actuation_identity="global-actuation-1",
+        global_max_spend_usd="5",
+        global_expected_cost_usd="4",
+        global_target_shares="10",
+        global_robust_delta_log_wealth=0.01,
+        global_robust_ev_usd=2.0,
+    )
+    _seal_current_qkernel_cert(cert)
+    proof = SimpleNamespace(
+        direction=direction,
+        candidate=SimpleNamespace(metric="high"),
+        qkernel_execution_economics=cert,
+    )
+
+    assert era._qkernel_actual_submit_quality_rejection_reason(
+        proof=proof,
+        strategy_policy_event_type="FORECAST_SNAPSHOT_READY",
+        actual_stake_usd=4.0,
+        actual_cost=0.40,
+    ) is None
+    assert (
+        era._qkernel_actual_submit_quality_rejection_reason(
+            proof=proof,
+            strategy_policy_event_type="FORECAST_SNAPSHOT_READY",
+            actual_stake_usd=4.0,
+            actual_cost=0.41,
+        )
+        == "GLOBAL_ACTUATION_EXPECTED_COST_EXCEEDED"
+    )
+
+
 def test_global_actuation_current_band_refuses_non_positive_bound():
     cert = _current_qkernel_cert(side="NO")
     cert.update(
