@@ -62,6 +62,20 @@ class GlobalPreflightAuthority:
             raise ValueError("GLOBAL_PREFLIGHT_AUTHORITY_INCOMPLETE")
 
 
+class GlobalOneShotActuator:
+    """Consume exactly one final-actuation capability for one batch."""
+
+    def __init__(self, callback: Callable[..., EventSubmissionReceipt]) -> None:
+        self._callback = callback
+        self._consumed = False
+
+    def consume(self, *args) -> EventSubmissionReceipt:
+        if self._consumed:
+            raise RuntimeError("GLOBAL_ACTUATION_CAPABILITY_CONSUMED")
+        self._consumed = True
+        return self._callback(*args)
+
+
 def _probability_manifest(probabilities: Mapping[str, object]) -> tuple[tuple[str, str], ...]:
     """Freeze q plus token bindings while allowing only book and wealth to move."""
 
@@ -260,11 +274,7 @@ def process_current_global_batch(
         GlobalWinnerPreflight,
     ]
     | None = None,
-    actuate_preflighted_winner: Callable[
-        [OpportunityEvent, object, datetime, object, GlobalPreflightAuthority],
-        EventSubmissionReceipt,
-    ]
-    | None = None,
+    actuate_preflighted_winner: GlobalOneShotActuator | None = None,
     portfolio_state_provider: Callable[[], object] | None = None,
     current_book_epoch_provider: Callable[
         [Mapping[str, object], datetime],
@@ -600,7 +610,7 @@ def process_current_global_batch(
         before_calls = venue_submit_count()
         release_selection_snapshot()
         winner_receipt = (
-            actuate_preflighted_winner(
+            actuate_preflighted_winner.consume(
                 winner,
                 selected.actuation,
                 current_time(),

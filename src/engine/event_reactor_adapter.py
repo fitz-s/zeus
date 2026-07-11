@@ -4572,6 +4572,7 @@ def event_bound_live_adapter_from_trade_conn(
 
     def _process_global_batch(events, decision_time):
         from src.engine.global_batch_runtime import (
+            GlobalOneShotActuator,
             GlobalWinnerPreflight,
             process_current_global_batch,
         )
@@ -4788,7 +4789,9 @@ def event_bound_live_adapter_from_trade_conn(
                 ),
                 actuate_winner=_actuate,
                 preflight_winner=_preflight,
-                actuate_preflighted_winner=_actuate_preflighted,
+                actuate_preflighted_winner=GlobalOneShotActuator(
+                    _actuate_preflighted
+                ),
                 stamp_receipt=lambda receipt: _stamp_live_adapter_lane(
                     receipt,
                     real_order_submit_enabled=real_order_submit_enabled,

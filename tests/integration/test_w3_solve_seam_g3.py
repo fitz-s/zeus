@@ -2417,81 +2417,17 @@ def test_global_batch_actuates_exactly_one_claimed_global_winner(monkeypatch):
     )
 
 
-def test_global_batch_rejects_multi_venue_actuator(monkeypatch):
-    decision_at = _dt.datetime(2026, 7, 10, 8, 0, tzinfo=_dt.timezone.utc)
-    event = _global_scope_event(city="Alpha", source_run_id="run-a")
-    scope = current_global_auction_scope_from_events(
-        (event,), captured_at_utc=decision_at
-    )
-    prepared = SimpleNamespace(
-        probability_witness=SimpleNamespace(
-            family_key=scope.family_keys[0],
-            captured_at_utc=decision_at,
-            posterior_identity_hash="run-a",
-        )
-    )
-    selected = SimpleNamespace(
-        decision=SimpleNamespace(candidate=object(), no_trade_reason=None),
-        winner_event_id=event.event_id,
-        actuation=SimpleNamespace(actuation_identity="actuation-a"),
-    )
-    calls = {"venue": 0}
-    monkeypatch.setattr(
-        global_batch_runtime, "scan_current_global_auction_scope", lambda **_: scope
-    )
-    monkeypatch.setattr(
-        global_batch_runtime,
-        "current_portfolio_wealth_witness",
-        lambda *_, **__: SimpleNamespace(
-            spendable_cash_usd=Decimal("10"),
-            witness_identity="wealth",
-            economic_identity="wealth-economics",
-        ),
-    )
-    monkeypatch.setattr(
-        global_batch_runtime,
-        "current_venue_auction_identity",
-        lambda *_, **__: "venue",
-    )
-    monkeypatch.setattr(
-        global_batch_runtime, "select_prepared_global_auction", lambda *_, **__: selected
+def test_global_one_shot_actuator_refuses_second_consumption():
+    calls = []
+    receipt = EventSubmissionReceipt(False, "event")
+    actuator = global_batch_runtime.GlobalOneShotActuator(
+        lambda value: calls.append(value) or receipt
     )
 
-    def invalid_actuator(winner, _actuation, _at):
-        calls["venue"] += 2
-        return EventSubmissionReceipt(
-            True,
-            winner.event_id,
-            winner.causal_snapshot_id,
-            proof_accepted=True,
-            side_effect_status="SUBMITTED",
-        )
-
-    result = global_batch_runtime.process_current_global_batch(
-        (event,),
-        decision_time=decision_at,
-        world_conn=object(),
-        forecast_conn=object(),
-        trade_conn=object(),
-        payload_reader=lambda current: json.loads(current.payload_json),
-        prepare_event=lambda current, _at: EventSubmissionReceipt(
-            False,
-            current.event_id,
-            current.causal_snapshot_id,
-            prepared_global_family=prepared,
-        ),
-        actuate_winner=invalid_actuator,
-        stamp_receipt=lambda receipt: receipt,
-        venue_submit_count=lambda: calls["venue"],
-        current_execution=lambda *_: object(),
-        current_time_provider=lambda: decision_at,
-    )
-
-    assert calls["venue"] == 2
-    assert result.venue_submit_count == 0
-    assert result.receipts[event.event_id].reason == (
-        "GLOBAL_AUCTION_FAILED:RuntimeError:GLOBAL_ACTUATION_VENUE_COUNT_INVALID"
-    )
+    assert actuator.consume("first") is receipt
+    with pytest.raises(RuntimeError, match="GLOBAL_ACTUATION_CAPABILITY_CONSUMED"):
+        actuator.consume("second")
+    assert calls == ["first"]
 
 
 def _global_test_book(identity: str, *, price: str):
@@ -2638,7 +2574,9 @@ def test_global_batch_reauctions_once_on_full_universe_curve_drift(monkeypatch):
         prepare_event=prepare,
         actuate_winner=lambda *_: pytest.fail("preflighted lane owns actuation"),
         preflight_winner=preflight,
-        actuate_preflighted_winner=actuate_preflighted,
+        actuate_preflighted_winner=global_batch_runtime.GlobalOneShotActuator(
+            actuate_preflighted
+        ),
         stamp_receipt=lambda receipt: receipt,
         venue_submit_count=lambda: calls["venue"],
         current_execution=lambda *_: object(),
@@ -2658,7 +2596,7 @@ def test_global_batch_reauctions_once_on_full_universe_curve_drift(monkeypatch):
     assert result.receipts[event_b.event_id].submitted is True
 
 
-def test_global_batch_second_curve_supersession_exhausts_without_venue(monkeypatch):
+def test_global_batch_fence_curve_supersession_exhausts_without_venue(monkeypatch):
     decision_at = _dt.datetime(2026, 7, 10, 8, 0, tzinfo=_dt.timezone.utc)
     event = _global_scope_event(city="Alpha", source_run_id="run-a")
     scope = current_global_auction_scope_from_events(
@@ -2722,7 +2660,9 @@ def test_global_batch_second_curve_supersession_exhausts_without_venue(monkeypat
         ),
         actuate_winner=lambda *_: pytest.fail("must not actuate"),
         preflight_winner=preflight,
-        actuate_preflighted_winner=lambda *_: pytest.fail("must not actuate"),
+        actuate_preflighted_winner=global_batch_runtime.GlobalOneShotActuator(
+            lambda *_: pytest.fail("must not actuate")
+        ),
         stamp_receipt=lambda receipt: receipt,
         venue_submit_count=lambda: calls["venue"],
         current_execution=lambda *_: object(),
@@ -2733,11 +2673,11 @@ def test_global_batch_second_curve_supersession_exhausts_without_venue(monkeypat
         ),
     )
 
-    assert calls == {"preflight": 2, "venue": 0}
+    assert calls == {"preflight": 1, "venue": 0}
     assert result.venue_submit_count == 0
     assert result.winner_event_id is None
     assert result.receipts[event.event_id].reason == (
-        "GLOBAL_REAUCTION_EXHAUSTED:curve moved 2"
+        "GLOBAL_REAUCTION_EXHAUSTED:curve moved 1"
     )
 
 
@@ -2822,7 +2762,9 @@ def test_global_batch_reauction_rejects_probability_cut_drift(monkeypatch):
         ),
         actuate_winner=lambda *_: pytest.fail("must not actuate"),
         preflight_winner=preflight,
-        actuate_preflighted_winner=lambda *_: pytest.fail("must not actuate"),
+        actuate_preflighted_winner=global_batch_runtime.GlobalOneShotActuator(
+            lambda *_: pytest.fail("must not actuate")
+        ),
         stamp_receipt=lambda receipt: receipt,
         venue_submit_count=lambda: calls["venue"],
         current_execution=lambda *_: object(),
