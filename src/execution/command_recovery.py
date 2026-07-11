@@ -57,6 +57,9 @@ from src.execution.command_bus import (
 )
 from src.execution.exit_safety import reconcile_review_required_exit_mutex_releases
 from src.decision_kernel.canonicalization import canonical_json, stable_hash
+from src.state.decision_integrity_quarantine import (
+    decision_certificate_is_quarantined as _decision_certificate_is_quarantined,
+)
 from src.state.venue_command_repo import (
     find_unresolved_commands,
     append_event,
@@ -751,15 +754,6 @@ def _decision_certificates_ref(conn: sqlite3.Connection) -> str | None:
         return "world.decision_certificates"
     if _table_exists(conn, "decision_certificates"):
         return "decision_certificates"
-    return None
-
-
-def _decision_integrity_quarantine_ref(conn: sqlite3.Connection) -> str | None:
-    attached = {str(row[1]) for row in conn.execute("PRAGMA database_list").fetchall()}
-    if "trade" in attached and _attached_table_exists(conn, "trade", "decision_integrity_quarantine"):
-        return "trade.decision_integrity_quarantine"
-    if "main" in attached and _table_exists(conn, "decision_integrity_quarantine"):
-        return "decision_integrity_quarantine"
     return None
 
 
@@ -3039,41 +3033,10 @@ def _edli_certificate_payload(
     return {}
 
 
-def _decision_certificate_is_quarantined(
-    conn: sqlite3.Connection,
-    *,
-    certificate_hash: str,
-) -> bool:
-    certificate_hash = str(certificate_hash or "").strip()
-    if not certificate_hash:
-        return False
-    q_ref = _decision_integrity_quarantine_ref(conn)
-    if q_ref is None:
-        return False
-    try:
-        from src.state.decision_integrity_quarantine import (
-            DECISION_CERTIFICATES_TABLE,
-            REASON_INVALID_LIVE_ACTIONABLE,
-            REASON_INVALID_LIVE_PARENT_MODE,
-        )
-    except Exception:  # pragma: no cover - import fallback for degraded recovery shells
-        DECISION_CERTIFICATES_TABLE = "decision_certificates"
-        REASON_INVALID_LIVE_ACTIONABLE = "QUARANTINED_INVALID_LIVE_ACTIONABLE_CERTIFICATE"
-        REASON_INVALID_LIVE_PARENT_MODE = "QUARANTINED_INVALID_LIVE_MONEY_PARENT_MODE"
-    reason_codes = (REASON_INVALID_LIVE_ACTIONABLE, REASON_INVALID_LIVE_PARENT_MODE)
-    placeholders = ",".join("?" for _ in reason_codes)
-    row = conn.execute(
-        f"""
-        SELECT 1
-          FROM {q_ref}
-         WHERE table_name = ?
-           AND row_id = ?
-           AND reason_code IN ({placeholders})
-         LIMIT 1
-        """,
-        (DECISION_CERTIFICATES_TABLE, certificate_hash, *reason_codes),
-    ).fetchone()
-    return row is not None
+# _decision_certificate_is_quarantined consolidated (excision T-consolidations #1,
+# docs/rebuild/quarantine_excision_2026-07-11.md): now imported at module top as
+# src.state.decision_integrity_quarantine.decision_certificate_is_quarantined,
+# the single shared implementation this module and executor.py both call.
 
 
 def _verified_edli_actionable_payload(

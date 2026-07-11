@@ -50,6 +50,9 @@ from src.decision.family_decision_engine import (
 from src.state.db import (
     get_trade_connection_with_world_required,
 )
+from src.state.decision_integrity_quarantine import (
+    decision_certificate_is_quarantined as _decision_certificate_is_quarantined,
+)
 from src.state.lifecycle_manager import LifecyclePhase, TERMINAL_STATES
 
 logger = logging.getLogger(__name__)
@@ -1381,45 +1384,10 @@ def _actionable_certificate_intent_mismatch_reason(
     return ""
 
 
-def _decision_certificate_is_quarantined(
-    conn: sqlite3.Connection,
-    certificate_hash: str,
-) -> bool:
-    if not certificate_hash:
-        return False
-    try:
-        from src.state.decision_integrity_quarantine import (
-            DECISION_CERTIFICATES_TABLE,
-            REASON_INVALID_LIVE_ACTIONABLE,
-            REASON_INVALID_LIVE_PARENT_MODE,
-        )
-    except Exception:
-        DECISION_CERTIFICATES_TABLE = "decision_certificates"
-        REASON_INVALID_LIVE_ACTIONABLE = "QUARANTINED_INVALID_LIVE_ACTIONABLE_CERTIFICATE"
-        REASON_INVALID_LIVE_PARENT_MODE = "QUARANTINED_INVALID_LIVE_MONEY_PARENT_MODE"
-    reason_codes = (REASON_INVALID_LIVE_ACTIONABLE, REASON_INVALID_LIVE_PARENT_MODE)
-    for schema in _attached_schema_names(conn):
-        try:
-            if not _table_exists_in_schema(conn, schema, "decision_integrity_quarantine"):
-                continue
-            schema_sql = _quote_sql_identifier(schema)
-            placeholders = ",".join("?" for _ in reason_codes)
-            row = conn.execute(
-                f"""
-                SELECT 1
-                  FROM {schema_sql}.decision_integrity_quarantine
-                 WHERE table_name = ?
-                   AND row_id = ?
-                   AND reason_code IN ({placeholders})
-                 LIMIT 1
-                """,
-                (DECISION_CERTIFICATES_TABLE, certificate_hash, *reason_codes),
-            ).fetchone()
-        except sqlite3.Error:
-            continue
-        if row is not None:
-            return True
-    return False
+# _decision_certificate_is_quarantined consolidated (excision T-consolidations #1,
+# docs/rebuild/quarantine_excision_2026-07-11.md): now imported at module top as
+# src.state.decision_integrity_quarantine.decision_certificate_is_quarantined,
+# the single shared implementation this module and command_recovery.py both call.
 
 
 def _parse_sqlite_timestamp(value: object) -> datetime | None:

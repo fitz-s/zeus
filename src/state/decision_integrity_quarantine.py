@@ -456,6 +456,87 @@ def _quarantine_ref(conn: sqlite3.Connection) -> str:
     return "trade.decision_integrity_quarantine" if "trade" in attached else "decision_integrity_quarantine"
 
 
+def _attached_schema_names(conn: sqlite3.Connection) -> tuple[str, ...]:
+    try:
+        rows = conn.execute("PRAGMA database_list").fetchall()
+    except sqlite3.Error:
+        return ("main",)
+    names: list[str] = []
+    for row in rows:
+        try:
+            name = row["name"] if isinstance(row, sqlite3.Row) else row[1]
+        except (IndexError, KeyError, TypeError):
+            continue
+        text = str(name or "").strip()
+        if text:
+            names.append(text)
+    return tuple(dict.fromkeys(names)) or ("main",)
+
+
+def _quote_sql_identifier(identifier: str) -> str:
+    if not identifier or not all(ch.isalnum() or ch == "_" for ch in identifier):
+        raise ValueError(f"unsafe sqlite identifier: {identifier!r}")
+    return '"' + identifier.replace('"', '""') + '"'
+
+
+def _schema_has_quarantine_table(conn: sqlite3.Connection, schema: str) -> bool:
+    schema_sql = _quote_sql_identifier(schema)
+    row = conn.execute(
+        f"SELECT 1 FROM {schema_sql}.sqlite_master WHERE type IN ('table', 'view') AND name = ?",
+        ("decision_integrity_quarantine",),
+    ).fetchone()
+    return row is not None
+
+
+def decision_certificate_is_quarantined(conn: sqlite3.Connection, certificate_hash: str) -> bool:
+    """Return True if ``certificate_hash`` is tagged invalid-live in decision_integrity_quarantine.
+
+    Excision T-consolidations #1 (docs/rebuild/quarantine_excision_2026-07-11.md):
+    replaces two independent implementations that had drifted apart —
+    src/execution/executor.py:1384 and src/execution/command_recovery.py:3042.
+
+    Semantics = union of both originals: iterate every schema attached to
+    ``conn`` (a strict superset of command_recovery's old trade-then-main-only
+    ``_decision_integrity_quarantine_ref`` lookup, since 'trade' and 'main' are
+    themselves attached schema names returned by PRAGMA database_list) and
+    swallow per-schema sqlite3.Error (executor's defensive posture — a locked
+    or missing companion DB must not abort a pre-submit gate check). In
+    production decision_integrity_quarantine lives only in the trade DB
+    (architecture/db_table_ownership.yaml), so both original implementations
+    returned identical results on live data; the only behavior this merge
+    changes is the theoretical case of a query erroring mid-read against a
+    table already confirmed to exist — command_recovery previously let that
+    propagate, and now (like executor before it) treats it as "not found in
+    that schema" and keeps checking the remaining attached schemas.
+    """
+    certificate_hash = str(certificate_hash or "").strip()
+    if not certificate_hash:
+        return False
+    reason_codes = (REASON_INVALID_LIVE_ACTIONABLE, REASON_INVALID_LIVE_PARENT_MODE)
+    placeholders = ",".join("?" for _ in reason_codes)
+    for schema in _attached_schema_names(conn):
+        try:
+            if not _schema_has_quarantine_table(conn, schema):
+                continue
+            schema_sql = _quote_sql_identifier(schema)
+            row = conn.execute(
+                f"""
+                SELECT 1
+                  FROM {schema_sql}.decision_integrity_quarantine
+                 WHERE table_name = ?
+                   AND row_id = ?
+                   AND reason_code IN ({placeholders})
+                 LIMIT 1
+                """,
+                (DECISION_CERTIFICATES_TABLE, certificate_hash, *reason_codes),
+            ).fetchone()
+        except sqlite3.Error:
+            continue
+        if row is not None:
+            return True
+    return False
+
+
 def _quarantine_table_via_snapshot(
     conn: sqlite3.Connection,
     *,

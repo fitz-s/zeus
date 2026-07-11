@@ -3937,13 +3937,32 @@ def _chain_absent_quarantine_is_fresh_enough_for_redecision(pos) -> bool:
     )
 
 
+def _redecision_eligible_quarantine_chain_state_and_direction(chain_state: str, direction: str) -> bool:
+    """Shared chain_state+direction gate for redecision eligibility.
+
+    Excision T-consolidations #2 (docs/rebuild/quarantine_excision_2026-07-11.md):
+    extracted so ``_quarantined_position_can_redecision`` (Position-object callers)
+    and ``_canonical_monitor_position_rows`` (raw position_current row callers)
+    cannot drift on this specific check again. Both already shared the
+    ``_REDECISION_QUARANTINE_CHAIN_STATES`` constant before this extraction; this
+    only removes the duplicated boolean expression, not a duplicated constant.
+
+    NOT shared with portfolio.py's ``_is_runtime_open_position`` or
+    price_channel_ingest.py's EDLI exposure-clause SQL — both of those check
+    membership in the broader ``CURRENT_MONEY_RISK_CHAIN_STATES`` set for a
+    different question ("still has live chain risk" / "needs quote priority"),
+    not "can redecision now"; see the comments at those two sites.
+    """
+    return chain_state in _REDECISION_QUARANTINE_CHAIN_STATES and direction in {"buy_yes", "buy_no"}
+
+
 def _quarantined_position_can_redecision(pos) -> bool:
     if _position_state_value(pos) != "quarantined":
         return False
     chain_state = _position_chain_state_value(pos)
-    if chain_state not in _REDECISION_QUARANTINE_CHAIN_STATES:
-        return False
-    if _position_direction_value(pos) not in {"buy_yes", "buy_no"}:
+    if not _redecision_eligible_quarantine_chain_state_and_direction(
+        chain_state, _position_direction_value(pos)
+    ):
         return False
     if _position_real_exposure_shares(pos) <= 0.01:
         return False
@@ -4063,9 +4082,9 @@ def _canonical_monitor_position_rows(conn, *, now_utc: datetime | None = None) -
         if phase == "quarantined":
             chain_state = str(_row_get(row, "chain_state", "") or "").strip()
             direction = str(_row_get(row, "direction", "") or "").strip()
-            if chain_state not in _REDECISION_QUARANTINE_CHAIN_STATES:
-                continue
-            if direction not in {"buy_yes", "buy_no"}:
+            # Shared with _quarantined_position_can_redecision (excision
+            # T-consolidations #2) — see that helper's docstring.
+            if not _redecision_eligible_quarantine_chain_state_and_direction(chain_state, direction):
                 continue
             if not _quarantine_target_date_still_actionable(
                 _row_get(row, "target_date"),
