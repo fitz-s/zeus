@@ -3415,7 +3415,10 @@ def _receipt_money_path_blocker(
         if not (
             receipt.direction == "buy_no"
             and receipt.probability_authority == "replacement_0_1"
-            and isinstance(proof_bundle, NoSubmitProofBundle)
+            and (
+                isinstance(proof_bundle, NoSubmitProofBundle)
+                or bool(_execution_receipt_certificate_bundle(receipt))
+            )
         ):
             replacement_expected = replacement_no_bound_expected_from_parents(
                 getattr(getattr(proof_bundle, "forecast_authority", None), "payload", None),

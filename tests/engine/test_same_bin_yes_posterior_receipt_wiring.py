@@ -25,7 +25,9 @@ complement of the NO direction posterior.
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 
+from src.decision_kernel import claims
 from src.decision_kernel.compiler import NoSubmitProofBundle
 from src.events.reactor import (
     EventSubmissionReceipt,
@@ -113,6 +115,23 @@ def test_typed_adapter_bundle_does_not_repeat_replacement_no_bound_gate() -> Non
         same_bin_yes_posterior=0.35,
         probability_authority="replacement_0_1",
         decision_proof_bundle=object.__new__(NoSubmitProofBundle),
+        replacement_no_bound_certificate={"schema": "validated_by_adapter"},
+    )
+
+    stage, reason = _receipt_money_path_blocker(receipt, ReactorConfig())
+
+    assert stage is None
+    assert reason == ""
+
+
+def test_compiled_execution_bundle_does_not_repeat_replacement_no_bound_gate() -> None:
+    """A terminal execution certificate proves the adapter chain already compiled."""
+    receipt = _money_path_clean_buy_no_receipt(
+        same_bin_yes_posterior=0.35,
+        probability_authority="replacement_0_1",
+        decision_proof_bundle=(
+            SimpleNamespace(certificate_type=claims.EXECUTION_RECEIPT),
+        ),
         replacement_no_bound_certificate={"schema": "validated_by_adapter"},
     )
 
