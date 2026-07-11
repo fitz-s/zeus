@@ -5894,6 +5894,25 @@ def _global_selected_order_economics_preserved(
     )
 
 
+def _global_actuation_sweep_cost_worsened(
+    *,
+    selected: object,
+    current: object,
+) -> bool:
+    """Return whether a fresh BUY sweep is costlier than the selected winner."""
+
+    try:
+        selected_cost = Decimal(str(selected))
+        current_cost = Decimal(str(current))
+    except (ArithmeticError, TypeError, ValueError):
+        return True
+    return bool(
+        not selected_cost.is_finite()
+        or not current_cost.is_finite()
+        or current_cost > selected_cost + Decimal("1e-12")
+    )
+
+
 class _GlobalCurveSuperseded(ValueError):
     """Typed submit-boundary drift carrying the current selected native curve."""
 
@@ -10642,14 +10661,9 @@ def _build_live_execution_command_certificates(
                         str(_venue_quantized_sweep.average_price)
                         if _venue_quantized_sweep.average_price is not None else None
                     )
-                    if global_decision is not None and (
-                        sweep_expected_fill_price is None
-                        or not math.isclose(
-                            float(sweep_expected_fill_price),
-                            float(global_decision.expected_fill_price_before_fee),
-                            rel_tol=0.0,
-                            abs_tol=1e-12,
-                        )
+                    if global_decision is not None and _global_actuation_sweep_cost_worsened(
+                        selected=global_decision.expected_fill_price_before_fee,
+                        current=sweep_expected_fill_price,
                     ):
                         raise ValueError(
                             "GLOBAL_ACTUATION_SWEEP_COST_SUPERSEDED:"

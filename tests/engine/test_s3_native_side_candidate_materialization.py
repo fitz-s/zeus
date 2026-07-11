@@ -467,6 +467,17 @@ def test_global_jit_curve_accepts_cheaper_selected_prefix():
     )
 
 
+@pytest.mark.parametrize(
+    ("current", "worsened"),
+    (("0.39", False), ("0.40", False), ("0.4000000000005", False), ("0.41", True)),
+)
+def test_global_actuation_sweep_accepts_equal_or_cheaper_buy_cost(current, worsened):
+    assert era._global_actuation_sweep_cost_worsened(
+        selected="0.40",
+        current=current,
+    ) is worsened
+
+
 def test_global_jit_refresh_targets_winner_sibling_not_trigger_row():
     rows = (
         {
