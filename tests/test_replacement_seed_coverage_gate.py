@@ -1,5 +1,5 @@
 # Created: 2026-06-10
-# Last reused or audited: 2026-06-10
+# Last reused or audited: 2026-07-11
 # Authority basis: operator staleness/cycle-physics directive 2026-06-10 (#1 graceful-degradation:
 #   readiness expiring + no fresher cycle => re-materialize from newest persisted cycle) +
 #   tradeable-grade coverage antibody (a NULL-q_lcb / untradeable posterior must not satisfy the
@@ -28,7 +28,10 @@ import sqlite3
 from datetime import datetime, timedelta, timezone
 
 from src.data.replacement_forecast_live_materialization_queue import SOURCE_ID, _seed_already_covered
-from src.data.replacement_input_hwm import latest_raw_artifact_input_cycle
+from src.data.replacement_input_hwm import (
+    _raw_artifact_cycles_for_frozen_target,
+    latest_raw_artifact_input_cycle,
+)
 from src.state.db import _create_readiness_state
 from src.state.schema.v2_schema import apply_canonical_schema
 
@@ -398,3 +401,58 @@ def test_artifact_without_target_day_samples_is_not_an_input_hwm(tmp_path) -> No
         metric=_METRIC,
         decision_time=datetime(2026, 6, 7, 13, tzinfo=UTC),
     ) is None
+
+
+def test_frozen_selection_batches_artifact_hwm_for_same_target() -> None:
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        """
+        CREATE TABLE raw_forecast_artifacts (
+            source_id TEXT,
+            source_cycle_time TEXT,
+            captured_at TEXT,
+            source_available_at TEXT,
+            artifact_metadata_json TEXT
+        )
+        """
+    )
+    conn.executemany(
+        "INSERT INTO raw_forecast_artifacts VALUES (?, ?, ?, ?, ?)",
+        (
+            (
+                "openmeteo_ecmwf_ifs_9km",
+                "2026-06-07T06:00:00+00:00",
+                "2026-06-07T12:00:00+00:00",
+                "2026-06-07T12:00:00+00:00",
+                json.dumps(
+                    {"city": city, "target_date": _TARGET_DATE, "metric": _METRIC}
+                ),
+            )
+            for city in ("Shanghai", "Tokyo")
+        ),
+    )
+    conn.commit()
+    conn.execute("BEGIN")
+    traced: list[str] = []
+    conn.set_trace_callback(traced.append)
+    decision_time = datetime(2026, 6, 7, 13, tzinfo=UTC)
+
+    cycles = {
+        city: latest_raw_artifact_input_cycle(
+            conn,
+            city=city,
+            target_date=_TARGET_DATE,
+            metric=_METRIC,
+            decision_time=decision_time,
+        )
+        for city in ("Shanghai", "Tokyo")
+    }
+    conn.set_trace_callback(None)
+    conn.rollback()
+    _raw_artifact_cycles_for_frozen_target.cache_clear()
+
+    assert all(cycle is not None for cycle in cycles.values())
+    assert sum(
+        "FROM RAW_FORECAST_ARTIFACTS" in statement.upper() for statement in traced
+    ) == 1

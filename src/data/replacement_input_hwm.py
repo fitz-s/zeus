@@ -25,6 +25,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from datetime import datetime, timezone
+from functools import lru_cache
 
 from src.data.market_topology_rows import _table_columns, _table_exists
 
@@ -181,6 +182,25 @@ def latest_raw_artifact_input_cycle(
         predicates.append("source_id = 'openmeteo_ecmwf_ifs_9km'")
     can_verify_payload = "artifact_path" in columns
     select_payload = ", artifact_path" if can_verify_payload else ""
+    if conn.in_transaction:
+        try:
+            data_version_row = conn.execute("PRAGMA data_version").fetchone()
+            data_version = int(data_version_row[0]) if data_version_row is not None else -1
+            cached = dict(
+                _raw_artifact_cycles_for_frozen_target(
+                    conn,
+                    table_ref,
+                    frozenset(columns),
+                    str(target_date),
+                    metric,
+                    decision_iso,
+                    data_version,
+                    conn.total_changes,
+                )
+            )
+        except Exception:  # noqa: BLE001 - live gate must fail closed at the caller
+            return None
+        return cached.get(city)
     try:
         rows = conn.execute(
             f"""
@@ -232,6 +252,85 @@ def latest_raw_artifact_input_cycle(
                 continue
         return _parse_source_cycle_utc(raw_value)
     return None
+
+
+@lru_cache(maxsize=16)
+def _raw_artifact_cycles_for_frozen_target(
+    conn: sqlite3.Connection,
+    table_ref: str,
+    columns: frozenset[str],
+    target_date: str,
+    metric: str,
+    decision_iso: str,
+    data_version: int,
+    total_changes: int,
+) -> tuple[tuple[str, datetime], ...]:
+    """Resolve all city HWMs once inside one frozen selection transaction."""
+
+    predicates = [
+        "json_extract(artifact_metadata_json, '$.target_date') = ?",
+        "json_extract(artifact_metadata_json, '$.metric') = ?",
+        "datetime(captured_at) <= datetime(?)",
+        "datetime(source_available_at) <= datetime(?)",
+    ]
+    params: list[object] = [target_date, metric, decision_iso, decision_iso]
+    if "source_id" in columns:
+        predicates.append("source_id = 'openmeteo_ecmwf_ifs_9km'")
+    select_path = "artifact_path" if "artifact_path" in columns else "NULL"
+    rows = conn.execute(
+        f"""
+        SELECT json_extract(artifact_metadata_json, '$.city') AS artifact_city,
+               source_cycle_time,
+               {select_path} AS artifact_path,
+               artifact_metadata_json
+          FROM {table_ref}
+         WHERE {' AND '.join(predicates)}
+           AND datetime(source_cycle_time) <= datetime(?)
+         GROUP BY artifact_city, source_cycle_time
+         ORDER BY artifact_city, datetime(source_cycle_time) DESC
+        """,
+        tuple([*params, decision_iso]),
+    ).fetchall()
+
+    from src.config import cities_by_name
+    from src.data.replacement_forecast_current_target_plan import (
+        _openmeteo_payload_covers_target_local_day,
+    )
+
+    cycles: dict[str, datetime] = {}
+    for row in rows:
+        try:
+            artifact_city = str(row["artifact_city"] or "")
+            raw_cycle = row["source_cycle_time"]
+            artifact_path = str(row["artifact_path"] or "")
+            metadata_raw = row["artifact_metadata_json"]
+        except Exception:  # noqa: BLE001 - tuple row compatibility
+            artifact_city = str(row[0] or "")
+            raw_cycle = row[1]
+            artifact_path = str(row[2] or "")
+            metadata_raw = row[3]
+        if not artifact_city or artifact_city in cycles:
+            continue
+        try:
+            metadata = json.loads(str(metadata_raw or "{}"))
+        except (TypeError, ValueError):
+            continue
+        if not isinstance(metadata, dict):
+            continue
+        if "artifact_path" in columns:
+            city_cfg = cities_by_name.get(artifact_city)
+            city_timezone = str(getattr(city_cfg, "timezone", "") or "") or None
+            if not _openmeteo_payload_covers_target_local_day(
+                metadata,
+                artifact_path=artifact_path,
+                city_timezone=city_timezone,
+                target_date=target_date,
+            ):
+                continue
+        cycle = _parse_source_cycle_utc(raw_cycle)
+        if cycle is not None:
+            cycles[artifact_city] = cycle
+    return tuple(sorted(cycles.items()))
 
 
 def _posterior_provenance_for_cycle(
