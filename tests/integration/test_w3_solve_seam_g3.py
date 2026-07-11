@@ -636,7 +636,17 @@ def _global_scope_event(*, city: str, source_run_id: str):
     )
 
 
-def test_current_global_probability_prepare_does_not_require_price_snapshot(monkeypatch):
+@pytest.mark.parametrize(
+    "bootstrap_basis",
+    (
+        "global_simplex_v1",
+        "global_simplex_current_finite_moment_evidence_v3",
+    ),
+)
+def test_current_global_probability_prepare_does_not_require_price_snapshot(
+    monkeypatch,
+    bootstrap_basis,
+):
     import src.data.replacement_forecast_bundle_reader as bundle_reader
     import src.engine.replacement_forecast_hook_factory as hook_factory
 
@@ -692,7 +702,7 @@ def test_current_global_probability_prepare_does_not_require_price_snapshot(monk
         posterior_config_hash="config-1",
         q={key: probability for (key, _lo, _hi), probability in zip(posterior_bins, probabilities)},
         provenance_json={
-            "q_bootstrap_samples_basis": "global_simplex_v1",
+            "q_bootstrap_samples_basis": bootstrap_basis,
             "q_bootstrap_samples_by_bin": {
                 key: [probability] * 400
                 for (key, _lo, _hi), probability in zip(posterior_bins, probabilities)
@@ -736,7 +746,7 @@ def test_current_global_probability_prepare_does_not_require_price_snapshot(monk
     witness = prepared.probability_witness
     assert prepared.candidate_seeds == ()
     assert witness.yes_q_samples.shape == (400, 3)
-    assert witness.band_basis == "global_simplex_v1"
+    assert witness.band_basis == bootstrap_basis
     assert [binding.yes_token_id for binding in witness.bindings] == ["yes0", "yes1", "yes2"]
     assert all(binding.no_token_id is None for binding in witness.bindings)
     assert witness.yes_q_samples[0].tolist() == pytest.approx(list(probabilities))

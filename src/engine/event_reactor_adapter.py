@@ -21300,7 +21300,11 @@ def _replacement_global_probability_components(
     if city_mix_applied:
         if basis != "served_rho_mixed_simplex_v2":
             return None
-    elif basis not in {"global_simplex_v1", "served_rho_mixed_simplex_v2"}:
+    elif basis not in {
+        "global_simplex_v1",
+        "global_simplex_current_finite_moment_evidence_v3",
+        "served_rho_mixed_simplex_v2",
+    }:
         return None
 
     bin_key_by_condition = {
