@@ -71,6 +71,7 @@ from src.contracts.executable_cost_curve import ExecutableCostCurve
 from src.contracts.execution_intent import (
     quantize_submit_shares_for_venue,
     quantize_submit_shares_for_venue_at_most,
+    venue_submit_amount_precision_error,
 )
 from src.solve.exits import ZeroWealthOutcomeError
 from src.solve.kappa import KappaPolicy
@@ -1044,23 +1045,71 @@ def _single_order_venue_legal_neighbor(
 
     current = Decimal(shares)
     direction = "buy_yes" if candidate.side == "YES" else "buy_no"
-    quantize = (
-        quantize_submit_shares_for_venue_at_most
-        if at_most
-        else quantize_submit_shares_for_venue
-    )
     # Each normalization is monotone and can cross a ladder boundary only once;
     # one final pass proves stability at the last reached boundary.
     for _ in range(len(candidate.executable_cost_curve.levels) + 2):
         try:
             limit_price, _, _ = _single_order_execution_boundary(candidate, current)
-            normalized = quantize(
-                direction,
-                current,
-                final_limit_price=limit_price,
-                order_type="FOK",
-                tick_size=candidate.executable_cost_curve.min_tick,
+            tick = candidate.executable_cost_curve.min_tick
+            price_decimals = abs(tick.normalize().as_tuple().exponent)
+            scale = 10 ** price_decimals
+            price_units = int(round(float(limit_price) * scale))
+            legal_step = scale // math.gcd(abs(price_units), scale)
+            raw_units = int(
+                (current / _SIZE_QUANTUM).to_integral_value(
+                    rounding=ROUND_FLOOR if at_most else ROUND_CEILING
+                )
             )
+            anchor = raw_units // legal_step
+            unit_candidates = {
+                multiple * legal_step + offset
+                for multiple in range(max(0, anchor - 2), anchor + 4)
+                for offset in range(-2, 3)
+                if multiple * legal_step + offset > 0
+            }
+            bounded = sorted(
+                (
+                    Decimal(units) * _SIZE_QUANTUM
+                    for units in unit_candidates
+                    if (
+                        Decimal(units) * _SIZE_QUANTUM <= current
+                        if at_most
+                        else Decimal(units) * _SIZE_QUANTUM >= current
+                    )
+                ),
+                reverse=at_most,
+            )
+            normalized = next(
+                (
+                    candidate_shares
+                    for candidate_shares in bounded
+                    if venue_submit_amount_precision_error(
+                        direction=direction,
+                        final_limit_price=limit_price,
+                        submitted_shares=candidate_shares,
+                        order_type="FOK",
+                        tick_size=tick,
+                    )
+                    is None
+                ),
+                None,
+            )
+            if normalized is None:
+                # Preserve the canonical SDK-faithful contract as a correctness
+                # fallback for any future tick/rounding shape the modular bound
+                # does not cover.
+                quantize = (
+                    quantize_submit_shares_for_venue_at_most
+                    if at_most
+                    else quantize_submit_shares_for_venue
+                )
+                normalized = quantize(
+                    direction,
+                    current,
+                    final_limit_price=limit_price,
+                    order_type="FOK",
+                    tick_size=tick,
+                )
         except ValueError:
             return None
         if normalized == current:

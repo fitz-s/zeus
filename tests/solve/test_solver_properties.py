@@ -24,7 +24,11 @@ import numpy as np
 import pytest
 
 from src.contracts.executable_cost_curve import BookLevel, ExecutableCostCurve, FeeModel
-from src.contracts.execution_intent import venue_submit_amount_precision_error
+from src.contracts.execution_intent import (
+    quantize_submit_shares_for_venue,
+    quantize_submit_shares_for_venue_at_most,
+    venue_submit_amount_precision_error,
+)
 from src.solve import solver as S
 from src.solve.kappa import Kappa, KappaPolicy
 from tests.solve import support as F
@@ -823,6 +827,67 @@ def test_global_single_order_optimizes_on_price_dependent_venue_grid(side):
         order_type="FOK",
         tick_size=candidate.executable_cost_curve.min_tick,
     ) is None
+
+
+@pytest.mark.parametrize("price", ("0.001", "0.008", "0.037", "0.37", "0.70"))
+@pytest.mark.parametrize("raw", ("5.01", "99.99", "702.13"))
+def test_global_venue_neighbor_matches_sdk_faithful_quantizer(price, raw):
+    candidate = _global_candidate(
+        candidate_id=f"venue-neighbor-{price}-{raw}",
+        family=f"venue-neighbor-{price}-{raw}",
+        side="YES",
+        q=0.99,
+        levels=((price, "2000"),),
+    )
+    shares = Decimal(raw)
+
+    try:
+        expected_at_most = quantize_submit_shares_for_venue_at_most(
+            "buy_yes",
+            shares,
+            final_limit_price=Decimal(price),
+            order_type="FOK",
+            tick_size=candidate.executable_cost_curve.min_tick,
+        )
+    except ValueError:
+        expected_at_most = None
+
+    assert S._single_order_venue_legal_neighbor(
+        candidate, shares, at_most=True
+    ) == expected_at_most
+    assert S._single_order_venue_legal_neighbor(
+        candidate, shares, at_most=False
+    ) == quantize_submit_shares_for_venue(
+        "buy_yes",
+        shares,
+        final_limit_price=Decimal(price),
+        order_type="FOK",
+        tick_size=candidate.executable_cost_curve.min_tick,
+    )
+
+
+def test_global_venue_neighbor_validation_is_bounded(monkeypatch):
+    candidate = _global_candidate(
+        candidate_id="venue-neighbor-bounded",
+        family="venue-neighbor-bounded",
+        side="NO",
+        q=0.99,
+        levels=(("0.001", "2000"),),
+    )
+    calls = 0
+    original = S.venue_submit_amount_precision_error
+
+    def counted(**kwargs):
+        nonlocal calls
+        calls += 1
+        return original(**kwargs)
+
+    monkeypatch.setattr(S, "venue_submit_amount_precision_error", counted)
+
+    assert S._single_order_venue_legal_neighbor(
+        candidate, Decimal("99.99"), at_most=True
+    ) == Decimal("90.00")
+    assert calls <= 25
 
 
 def test_global_single_order_label_mirror_preserves_size_cost_and_objective():
