@@ -1055,4 +1055,5 @@ def process_current_global_batch(
             venue_submit_count=venue_delta,
         )
     except Exception as exc:  # noqa: BLE001 - one authority fault invalidates epoch
+        _LOG.exception("global auction epoch failed closed")
         return reject(f"GLOBAL_AUCTION_FAILED:{type(exc).__name__}:{exc}")
