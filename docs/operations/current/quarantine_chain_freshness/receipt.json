@@ -1,0 +1,39 @@
+{
+  "packet": "current/quarantine_chain_freshness",
+  "branch": "p2-quarantine-chain-freshness",
+  "head": "51b7d9ec0",
+  "closed_at_utc": "2026-07-11T11:43:11.774923+00:00",
+  "scope": {
+    "in_scope": [
+      "docs/operations/current/quarantine_chain_freshness/**",
+      "src/state/chain_reconciliation.py",
+      "tests/test_chain_shares_persist_synced.py"
+    ],
+    "allow_companions": [
+      "architecture/source_rationale.yaml",
+      "architecture/test_topology.yaml",
+      "docs/operations/current_state.md"
+    ],
+    "out_of_scope": [
+      "state/**",
+      "src/execution/**",
+      "src/venue/**",
+      "src/state/lifecycle_manager.py",
+      "src/contracts/settlement_semantics.py",
+      "docs/authority/**"
+    ]
+  },
+  "commit_log": [
+    "51b7d9ec0 chore(packet): admit chain refresh sidecar deploy",
+    "7dedc084f fix(state): refresh quarantined chain evidence",
+    "376cf357d chore(trading): log global winner economics",
+    "13672f7c6 perf(data): reuse posterior provenance for lag guard",
+    "f9f49f165 fix(events): prefer current raw carrier coverage",
+    "a649495c1 perf(data): batch frozen artifact high-water marks",
+    "96a8469e5 perf(events): rank posterior readiness once",
+    "43e04f3d6 perf(events): batch posterior member coverage",
+    "67ee027c3 chore(trading): log global epoch rejection causes",
+    "cf5287679 perf(solve): reuse one probability tail per asset"
+  ],
+  "deliverables": "see plan.md and work_log.md"
+}

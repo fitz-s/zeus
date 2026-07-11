@@ -14,7 +14,7 @@ out_of_scope:
 - src/state/lifecycle_manager.py
 - src/contracts/settlement_semantics.py
 - docs/authority/**
-status: in_progress
+status: landed
 live_side_effects_allowed: true
 live_side_effect_allowlist:
 - scripts/deploy_live.py restart post-trade-capital --allow-dirty --allow-unpushed

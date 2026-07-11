@@ -12,7 +12,7 @@ Role: single live control pointer for the repo. Thin by law — this file points
 
 ## Active work
 
-Active execution packet: `current/quarantine_chain_freshness` — refresh current-money-risk quarantine chain evidence without lifecycle or venue actuation.
+Active execution packet: none (work routes through the plans index below; freeze a packet here before starting a new implementation slice).
 
 - Live improvement journal: `docs/operations/current/plans/hourly_capital_gains_improvement_loop.md`
 - Plan index: `docs/operations/current/plans/INDEX.md`
@@ -36,3 +36,4 @@ Closed packet bodies: `docs/archive_registry.md` (bodies untracked under `docs/a
 - 2026-07-10 packet `current/runtime_open_exposure_snapshot` landed (head 6aa976985). <!-- zpkt landed: current/runtime_open_exposure_snapshot -->
 - 2026-07-10 packet `current/runtime_claim_contention` landed (head 666642225). <!-- zpkt landed: current/runtime_claim_contention -->
 - 2026-07-10 packet `current/chain_absence_livelock` landed (head 16cec04f6). <!-- zpkt landed: current/chain_absence_livelock -->
+- 2026-07-11 packet `current/quarantine_chain_freshness` landed (head 51b7d9ec0). <!-- zpkt landed: current/quarantine_chain_freshness -->
