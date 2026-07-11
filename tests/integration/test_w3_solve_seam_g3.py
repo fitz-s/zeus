@@ -1935,6 +1935,13 @@ def test_two_prepared_families_choose_one_globally_unique_order():
         prepared_by_event,
         **auction_kwargs,
     )
+    fallthrough = select_prepared_global_auction(
+        prepared_by_event,
+        preflight_excluded_by_family={
+            selected.decision.candidate.family_key: "candidate-local-block"
+        },
+        **auction_kwargs,
+    )
     partial = select_prepared_global_auction(
         {"event-a": prepared_by_event["event-a"]},
         **auction_kwargs,
@@ -1964,6 +1971,12 @@ def test_two_prepared_families_choose_one_globally_unique_order():
         probability_witness=selected.actuation.probability_witness,
         wealth_economic_identity=wealth.economic_identity,
     )
+    assert fallthrough.decision.candidate is not None
+    assert (
+        fallthrough.decision.candidate.family_key
+        != selected.decision.candidate.family_key
+    )
+    assert fallthrough.winner_event_id != selected.winner_event_id
     assert partial.decision.candidate is None
     assert partial.actuation is None
     assert partial.decision.no_trade_reason == "GLOBAL_FEASIBLE_SET_INCOMPLETE"
@@ -2891,6 +2904,169 @@ def test_global_batch_reauctions_once_on_full_universe_curve_drift(monkeypatch):
     assert result.winner_event_id == event_b.event_id
     assert result.venue_submit_count == 1
     assert result.receipts[event_b.event_id].submitted is True
+
+
+def test_global_batch_falls_through_candidate_local_preflight_block(monkeypatch):
+    decision_at = _dt.datetime(2026, 7, 10, 8, 0, tzinfo=_dt.timezone.utc)
+    event_a = _global_scope_event(city="Alpha", source_run_id="run-a")
+    event_b = _global_scope_event(city="Beta", source_run_id="run-b")
+    scope = current_global_auction_scope_from_events(
+        (event_a, event_b), captured_at_utc=decision_at
+    )
+    witnesses = {
+        family_key: SimpleNamespace(
+            family_key=family_key,
+            captured_at_utc=decision_at,
+            posterior_identity_hash=run_id,
+            witness_identity=f"q-{run_id}",
+        )
+        for family_key, run_id in zip(scope.family_keys, ("run-a", "run-b"))
+    }
+    prepared = {
+        event.event_id: SimpleNamespace(
+            probability_witness=witnesses[family_key]
+        )
+        for event, family_key in zip((event_a, event_b), scope.family_keys)
+    }
+    candidates = {
+        event_a.event_id: SimpleNamespace(family_key=scope.family_keys[0]),
+        event_b.event_id: SimpleNamespace(family_key=scope.family_keys[1]),
+    }
+    selections = iter(
+        SimpleNamespace(
+            decision=SimpleNamespace(
+                candidate=candidates[event.event_id], no_trade_reason=None
+            ),
+            winner_event_id=event.event_id,
+            actuation=SimpleNamespace(
+                actuation_identity=actuation_id,
+                wealth_witness_identity=wealth_id,
+            ),
+        )
+        for event, actuation_id, wealth_id in (
+            (event_a, "actuation-a-initial", "wealth-1"),
+            (event_a, "actuation-a-fence", "wealth-2"),
+            (event_b, "actuation-b-fallthrough", "wealth-3"),
+        )
+    )
+    books = iter(
+        (
+            _global_test_book("book-0", price="0.40"),
+            _global_test_book("book-1", price="0.41"),
+        )
+    )
+    blocked_reason = "SHIFT_BIN_NO_SUBMIT:SHIFT_OLD_LEG_BELIEF_NOT_WEAKENED"
+    calls = {
+        "prepare": 0,
+        "books": 0,
+        "wealth": 0,
+        "preflight": [],
+        "excluded": [],
+        "epoch": [],
+        "venue": 0,
+    }
+
+    monkeypatch.setattr(
+        global_batch_runtime, "scan_current_global_auction_scope", lambda **_: scope
+    )
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "replace",
+        lambda value, **changes: SimpleNamespace(**(vars(value) | changes)),
+    )
+
+    def wealth(*_, **__):
+        calls["wealth"] += 1
+        return SimpleNamespace(
+            spendable_cash_usd=Decimal("10"),
+            witness_identity=f"wealth-{calls['wealth']}",
+            economic_identity=f"wealth-economics-{calls['wealth']}",
+        )
+
+    monkeypatch.setattr(
+        global_batch_runtime, "current_portfolio_wealth_witness", wealth
+    )
+
+    def select(_prepared, **kwargs):
+        calls["excluded"].append(kwargs["preflight_excluded_by_family"])
+        calls["epoch"].append(kwargs["selection_epoch_identity"])
+        return next(selections)
+
+    monkeypatch.setattr(global_batch_runtime, "select_prepared_global_auction", select)
+
+    def prepare(event, _at):
+        calls["prepare"] += 1
+        return EventSubmissionReceipt(
+            False,
+            event.event_id,
+            event.causal_snapshot_id,
+            prepared_global_family=prepared[event.event_id],
+        )
+
+    def book_provider(probabilities, _at):
+        calls["books"] += 1
+        return probabilities, next(books)
+
+    def preflight(event, _actuation, _at, _authority):
+        calls["preflight"].append(event.event_id)
+        if event.event_id == event_a.event_id:
+            return global_batch_runtime.GlobalWinnerPreflight(
+                status="BLOCKED", reason=blocked_reason
+            )
+        return global_batch_runtime.GlobalWinnerPreflight(
+            status="STABLE", binding_token="binding-b"
+        )
+
+    def actuate_preflighted(event, actuation, _at, token, _authority):
+        assert event.event_id == event_b.event_id
+        assert actuation.actuation_identity == "actuation-b-fallthrough"
+        assert token == "binding-b"
+        calls["venue"] += 1
+        return EventSubmissionReceipt(
+            True,
+            event.event_id,
+            event.causal_snapshot_id,
+            proof_accepted=True,
+            side_effect_status="SUBMITTED",
+        )
+
+    result = global_batch_runtime.process_current_global_batch(
+        (event_a, event_b),
+        decision_time=decision_at,
+        world_conn=object(),
+        forecast_conn=object(),
+        trade_conn=object(),
+        payload_reader=lambda current: json.loads(current.payload_json),
+        prepare_event=prepare,
+        actuate_winner=lambda *_: pytest.fail("preflighted lane owns actuation"),
+        preflight_winner=preflight,
+        actuate_preflighted_winner=global_batch_runtime.GlobalOneShotActuator(
+            actuate_preflighted
+        ),
+        stamp_receipt=lambda receipt: receipt,
+        venue_submit_count=lambda: calls["venue"],
+        current_execution=lambda *_: object(),
+        current_time_provider=lambda: decision_at,
+        current_book_epoch_provider=book_provider,
+    )
+
+    assert calls["prepare"] == 2
+    assert calls["books"] == 2
+    assert calls["wealth"] == 3
+    assert calls["preflight"] == [event_a.event_id, event_b.event_id]
+    assert calls["excluded"] == [
+        None,
+        None,
+        {scope.family_keys[0]: blocked_reason},
+    ]
+    assert calls["epoch"][2] != calls["epoch"][1]
+    assert calls["venue"] == 1
+    assert result.winner_event_id == event_b.event_id
+    assert result.venue_submit_count == 1
+    assert result.receipts[event_b.event_id].submitted is True
+    assert result.receipts[event_a.event_id].reason == (
+        f"GLOBAL_PREFLIGHT_FAMILY_INELIGIBLE:{blocked_reason}"
+    )
 
 
 def test_global_batch_second_curve_supersession_exhausts_without_venue(monkeypatch):

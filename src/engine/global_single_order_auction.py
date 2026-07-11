@@ -239,13 +239,16 @@ def select_prepared_global_auction(
         [GlobalSingleOrderCandidate, str, str], Decimal
     ]
     | None = None,
+    preflight_excluded_by_family: Mapping[str, str] | None = None,
 ) -> PreparedGlobalAuctionResult:
     """Compare every prepared family and return at most one current winner.
 
     A family is the probability authority, while an event is only the later
     actuation owner.  Therefore exactly one prepared event may represent each
     family in an epoch.  A malformed seed is fatal to the epoch: silently
-    dropping it would shrink the feasible set and make ``global`` false.
+    dropping it would shrink the feasible set and make ``global`` false.  The
+    only permitted candidate removal is a typed, non-empty preflight rejection
+    from this same epoch; its family remains in the probability/book universe.
     """
 
     if (
@@ -254,6 +257,16 @@ def select_prepared_global_auction(
         or selection_cut_at_utc > decision_at_utc
     ):
         return _no_trade("GLOBAL_SELECTION_EPOCH_IDENTITY_MISSING")
+    excluded_by_family = {
+        str(family_key or "").strip(): str(reason or "").strip()
+        for family_key, reason in (preflight_excluded_by_family or {}).items()
+    }
+    if any(
+        not family_key or not reason
+        for family_key, reason in excluded_by_family.items()
+    ):
+        return _no_trade("GLOBAL_EXCLUDED_FAMILY_INVALID")
+    excluded = frozenset(excluded_by_family)
     probability_witnesses = {}
     event_by_family: dict[str, str] = {}
     candidates: list[GlobalSingleOrderCandidate] = []
@@ -267,6 +280,8 @@ def select_prepared_global_auction(
             return _no_trade("GLOBAL_FAMILY_EVENT_AMBIGUOUS")
         event_by_family[family_key] = event_key
         probability_witnesses[family_key] = probability
+        if family_key in excluded:
+            continue
         if book_epoch is None:
             for seed in getattr(prepared, "candidate_seeds", ()):
                 try:
@@ -284,6 +299,9 @@ def select_prepared_global_auction(
                         f"{type(exc).__name__}:{exc}"
                     )
 
+    if not excluded.issubset(probability_witnesses):
+        return _no_trade("GLOBAL_EXCLUDED_FAMILY_UNKNOWN")
+
     if book_epoch is not None:
         if venue_universe_identity != book_epoch.witness_identity:
             return _no_trade("GLOBAL_BOOK_EPOCH_IDENTITY_MISMATCH")
@@ -292,6 +310,8 @@ def select_prepared_global_auction(
             probability = probability_witnesses.get(asset.family_key)
             if probability is None:
                 return _no_trade("GLOBAL_BOOK_FAMILY_PROBABILITY_MISSING")
+            if asset.family_key in excluded:
+                continue
             native = SimpleNamespace(
                 no_trade_reason=None,
                 executable_cost_curve=asset.curve,

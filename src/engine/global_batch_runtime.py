@@ -347,6 +347,21 @@ def _selection_epoch_identity(
     return digest.hexdigest()
 
 
+def _selection_epoch_identity_with_preflight_exclusions(
+    selection_epoch_identity: str,
+    excluded_by_family: Mapping[str, str],
+) -> str:
+    """Bind candidate-local preflight failures into a fallthrough re-auction."""
+
+    digest = hashlib.sha256()
+    digest.update(str(selection_epoch_identity or "").encode("utf-8"))
+    digest.update(b"\x1f")
+    for family_key, reason in sorted(excluded_by_family.items()):
+        digest.update(repr((family_key, reason)).encode("utf-8"))
+        digest.update(b"\x1f")
+    return digest.hexdigest()
+
+
 def _next_claim_carrier(
     event: OpportunityEvent,
     *,
@@ -679,6 +694,9 @@ def process_current_global_batch(
             attempt_probabilities: Mapping[str, object],
             attempt_book_epoch: CurrentGlobalBookEpoch | None,
             attempt_prepared: Mapping[str, object],
+            *,
+            attempt_selection_epoch_identity: str = selection_epoch_identity,
+            preflight_excluded_by_family: Mapping[str, str] | None = None,
         ):
             selection_at = current_time()
             state = portfolio_state_provider() if portfolio_state_provider else None
@@ -715,7 +733,7 @@ def process_current_global_batch(
 
             return select_prepared_global_auction(
                 attempt_prepared,
-                selection_epoch_identity=selection_epoch_identity,
+                selection_epoch_identity=attempt_selection_epoch_identity,
                 selection_cut_at_utc=scope_at,
                 current_scope=scope,
                 current_scope_identity_resolver=lambda: scope.scope_identity,
@@ -735,6 +753,7 @@ def process_current_global_batch(
                 decision_at_utc=selection_at,
                 book_epoch=attempt_book_epoch,
                 current_capital_limit_resolver=current_capital_limit_resolver,
+                preflight_excluded_by_family=preflight_excluded_by_family,
             )
 
         selected = select_once(probabilities, book_epoch, prepared_by_event)
@@ -775,6 +794,7 @@ def process_current_global_batch(
             )
 
         binding_token = None
+        preflight_ineligible_by_event: dict[str, str] = {}
         if preflight_winner is not None:
             if actuate_preflighted_winner is None:
                 return reject("GLOBAL_PREFLIGHT_ACTUATOR_MISSING")
@@ -787,7 +807,6 @@ def process_current_global_batch(
             log_stage("book_epoch_fence", families=len(prepared_by_event))
             if _probability_manifest(probabilities_fence) != probability_manifest:
                 return reject("GLOBAL_PREFLIGHT_PROBABILITY_CUT_DRIFT")
-            fence_economics = _book_economics_manifest(book_epoch_fence)
             prepared_fence = {
                 event_id: replace(
                     prepared,
@@ -840,48 +859,93 @@ def process_current_global_batch(
                         payload=payload_reader(target),
                     ),
                 )
-            preflight_authority = GlobalPreflightAuthority(
-                probability_manifest=probability_manifest,
-                book_epoch_identity=book_epoch_fence.witness_identity,
-                book_economics_manifest=fence_economics,
-                wealth_witness_identity=selected.actuation.wealth_witness_identity,
-            )
-            before_preflight = venue_submit_count()
-            preflight = preflight_winner(
-                winner,
-                selected.actuation,
-                current_time(),
-                preflight_authority,
-            )
-            log_stage("winner_preflight", families=len(prepared_by_event))
-            if venue_submit_count() != before_preflight:
-                return reject("GLOBAL_PREFLIGHT_VENUE_SIDE_EFFECT")
-            if preflight.status == "CURVE_SUPERSEDED":
-                try:
-                    book_epoch_1 = _overlay_current_global_book_epoch(
-                        book_epoch_fence,
-                        selected.decision.candidate,
-                        preflight.replacement_candidate,
+            attempt_book_epoch = book_epoch_fence
+            excluded_by_family: dict[str, str] = {}
+            curve_reauction_used = False
+            while True:
+                preflight_authority = GlobalPreflightAuthority(
+                    probability_manifest=probability_manifest,
+                    book_epoch_identity=attempt_book_epoch.witness_identity,
+                    book_economics_manifest=_book_economics_manifest(
+                        attempt_book_epoch
+                    ),
+                    wealth_witness_identity=selected.actuation.wealth_witness_identity,
+                )
+                before_preflight = venue_submit_count()
+                preflight = preflight_winner(
+                    winner,
+                    selected.actuation,
+                    current_time(),
+                    preflight_authority,
+                )
+                log_stage("winner_preflight", families=len(prepared_by_event))
+                if venue_submit_count() != before_preflight:
+                    return reject("GLOBAL_PREFLIGHT_VENUE_SIDE_EFFECT")
+                if preflight.status == "STABLE":
+                    break
+                if preflight.status == "CURVE_SUPERSEDED":
+                    if curve_reauction_used:
+                        return reject(
+                            "GLOBAL_REAUCTION_EXHAUSTED:"
+                            f"{preflight.reason or preflight.status}"
+                        )
+                    try:
+                        attempt_book_epoch = _overlay_current_global_book_epoch(
+                            attempt_book_epoch,
+                            selected.decision.candidate,
+                            preflight.replacement_candidate,
+                        )
+                    except ValueError as exc:
+                        return reject(f"GLOBAL_REAUCTION_OVERLAY_FAILED:{exc}")
+                    curve_reauction_used = True
+                else:
+                    family_key = str(
+                        getattr(selected.decision.candidate, "family_key", "") or ""
                     )
-                except ValueError as exc:
-                    return reject(f"GLOBAL_REAUCTION_OVERLAY_FAILED:{exc}")
-                probabilities_1 = probabilities_fence
-                prepared_1 = {
-                    event_id: replace(
-                        prepared,
-                        probability_witness=probabilities_1[
-                            prepared.probability_witness.family_key
-                        ],
+                    if not family_key or winner_id is None:
+                        return reject("GLOBAL_PREFLIGHT_BLOCKED_FAMILY_MISSING")
+                    reason = preflight.reason or "GLOBAL_WINNER_PREFLIGHT_REJECTED"
+                    excluded_by_family[family_key] = reason
+                    preflight_ineligible_by_event[winner_id] = reason
+                    _LOG.info(
+                        "global batch preflight family excluded: family=%s "
+                        "event=%s reason=%s excluded=%d",
+                        family_key,
+                        winner_id,
+                        reason,
+                        len(excluded_by_family),
                     )
-                    for event_id, prepared in prepared_by_event.items()
-                }
-                selected = select_once(probabilities_1, book_epoch_1, prepared_1)
+                fallthrough_epoch_identity = (
+                    _selection_epoch_identity_with_preflight_exclusions(
+                        selection_epoch_identity,
+                        excluded_by_family,
+                    )
+                    if excluded_by_family
+                    else selection_epoch_identity
+                )
+                selected = select_once(
+                    probabilities_fence,
+                    attempt_book_epoch,
+                    prepared_fence,
+                    attempt_selection_epoch_identity=fallthrough_epoch_identity,
+                    preflight_excluded_by_family=excluded_by_family,
+                )
+                log_stage(
+                    "select_preflight_fallthrough",
+                    families=len(prepared_by_event) - len(excluded_by_family),
+                )
                 if selected.decision.candidate is None:
-                    log_no_trade("select_curve_overlay", selected.decision)
+                    log_no_trade("select_preflight_fallthrough", selected.decision)
                     return reject(
-                        "GLOBAL_REAUCTION_NO_TRADE:"
-                        f"{selected.decision.no_trade_reason or 'unknown'}"
+                        "GLOBAL_PREFLIGHT_ACTION_SET_EXHAUSTED:"
+                        f"{selected.decision.no_trade_reason or 'unknown'}:"
+                        f"excluded={len(excluded_by_family)}"
                     )
+                log_winner(
+                    "select_preflight_fallthrough",
+                    selected,
+                    probabilities_fence,
+                )
                 winner_id = selected.winner_event_id
                 winner = next(
                     (event for event in event_tuple if event.event_id == winner_id),
@@ -909,30 +973,6 @@ def process_current_global_batch(
                             payload=payload_reader(target),
                         ),
                     )
-                preflight_authority = GlobalPreflightAuthority(
-                    probability_manifest=probability_manifest,
-                    book_epoch_identity=book_epoch_1.witness_identity,
-                    book_economics_manifest=_book_economics_manifest(book_epoch_1),
-                    wealth_witness_identity=selected.actuation.wealth_witness_identity,
-                )
-                before_second_preflight = venue_submit_count()
-                preflight = preflight_winner(
-                    winner,
-                    selected.actuation,
-                    current_time(),
-                    preflight_authority,
-                )
-                if venue_submit_count() != before_second_preflight:
-                    return reject("GLOBAL_PREFLIGHT_VENUE_SIDE_EFFECT")
-                if preflight.status != "STABLE":
-                    return reject(
-                        "GLOBAL_REAUCTION_EXHAUSTED:"
-                        f"{preflight.reason or preflight.status}"
-                    )
-            elif preflight.status != "STABLE":
-                return reject(
-                    f"GLOBAL_WINNER_PREFLIGHT_BLOCKED:{preflight.reason}"
-                )
             binding_token = preflight.binding_token
 
         before_calls = venue_submit_count()
@@ -981,6 +1021,19 @@ def process_current_global_batch(
                     )
                 )
                 if event.event_id in ineligible_by_event
+                else stamp_receipt(
+                    EventSubmissionReceipt(
+                        False,
+                        event.event_id,
+                        event.causal_snapshot_id,
+                        reason=(
+                            "GLOBAL_PREFLIGHT_FAMILY_INELIGIBLE:"
+                            f"{preflight_ineligible_by_event[event.event_id]}"
+                        ),
+                        proof_accepted=False,
+                    )
+                )
+                if event.event_id in preflight_ineligible_by_event
                 else stamp_receipt(
                     EventSubmissionReceipt(
                         False,
