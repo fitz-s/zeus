@@ -1772,6 +1772,52 @@ def test_overlay_preserves_replacement_no_bound_and_allows_only_monotone_tighten
         condition_id="cond-overlay",
     )
 
+    current_cert = {
+        **new_proof.qkernel_execution_economics,
+        "payoff_q_lcb": 0.58,
+        "edge_lcb": 0.26,
+    }
+    current_proof = era._bind_global_current_state_economics_to_proof(
+        new_proof,
+        current_cert,
+    )
+
+    assert current_proof.q_lcb_5pct == pytest.approx(0.58)
+    assert current_proof.trade_score == pytest.approx(0.26)
+    assert era.replacement_no_bound_certificate_matches(
+        current_proof.replacement_no_bound_certificate,
+        expected=expected,
+        q_direction=current_proof.q_posterior,
+        q_lcb=current_proof.q_lcb_5pct,
+        same_bin_yes_posterior=0.348,
+        qkernel_execution_economics=current_proof.qkernel_execution_economics,
+        probability_authority="replacement_0_1",
+        posterior_id=1,
+        condition_id="cond-overlay",
+    )
+
+
+def test_global_current_state_proof_cannot_loosen_qkernel_bound():
+    economics = _selected_economics(
+        edge_lcb=0.28,
+        cost=0.32,
+        q_dot_payoff=0.652,
+        point_ev=0.332,
+    )
+    proof = _overlay_proof(
+        q_posterior=0.652,
+        q_lcb_5pct=0.617,
+        economics=economics,
+    )
+    cert = {
+        **proof.qkernel_execution_economics,
+        "payoff_q_lcb": 0.61,
+        "edge_lcb": 0.29,
+    }
+
+    with pytest.raises(ValueError, match="GLOBAL_CURRENT_STATE_PROOF_LCB_LOOSENED"):
+        era._bind_global_current_state_economics_to_proof(proof, cert)
+
 
 def test_overlay_rejects_qkernel_point_probability_that_is_not_served_belief():
     """A direct route cannot mint a qkernel probability from a different q-space."""
