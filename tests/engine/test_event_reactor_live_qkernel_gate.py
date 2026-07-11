@@ -939,6 +939,39 @@ def test_global_actuation_current_band_can_tighten_served_bound(side):
 
 
 @pytest.mark.parametrize("side", ("YES", "NO"))
+def test_global_actuation_uses_current_band_when_legacy_bound_is_absent(side):
+    cert = _current_qkernel_cert(side=side)
+    cert.pop("pre_qkernel_q_lcb_5pct", None)
+    cert.update(
+        payoff_q_point=0.30,
+        payoff_q_lcb=0.20,
+        cost=0.10,
+        edge_lcb=0.10,
+    )
+    decision = SimpleNamespace(
+        shares=Decimal("10"),
+        cost_usd=Decimal("1"),
+        robust_ev_usd=0.5,
+    )
+    witness = SimpleNamespace(
+        sample_matrix_identity="global-current-no-legacy-bound",
+        yes_q_samples=SimpleNamespace(shape=(400, 2)),
+        band_alpha=0.05,
+    )
+
+    current = era._global_current_state_execution_economics(
+        cert,
+        decision=decision,
+        witness=witness,
+    )
+
+    assert current["global_current_band_payoff_q_lcb"] == pytest.approx(0.15)
+    assert current["global_current_served_payoff_q_lcb"] == pytest.approx(0.15)
+    assert current["payoff_q_lcb"] == pytest.approx(0.15)
+    assert era._qkernel_current_state_solve_economics(current) is True
+
+
+@pytest.mark.parametrize("side", ("YES", "NO"))
 def test_global_actuation_cannot_loosen_prior_qkernel_bound(side):
     cert = _current_qkernel_cert(side=side)
     cert.update(

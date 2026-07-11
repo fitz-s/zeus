@@ -6137,7 +6137,12 @@ def _global_current_state_execution_economics(
                 raise ValueError("GLOBAL_CURRENT_STATE_SIDE_INVALID")
         else:
             point_q = Decimal(str(raw_point_q))
-        served_lcb = Decimal(str(cert.get("pre_qkernel_q_lcb_5pct")))
+        raw_served_lcb = cert.get("pre_qkernel_q_lcb_5pct")
+        served_lcb = (
+            Decimal(str(raw_served_lcb))
+            if raw_served_lcb not in {None, ""}
+            else None
+        )
         prior_payoff_lcb = Decimal(str(cert.get("payoff_q_lcb")))
         unit_cost = Decimal(str(cert.get("cost")))
     except (ArithmeticError, AttributeError, TypeError, ValueError) as exc:
@@ -6147,12 +6152,15 @@ def _global_current_state_execution_economics(
         or cost <= 0
         or not robust_ev.is_finite()
         or not point_q.is_finite()
-        or not served_lcb.is_finite()
         or not prior_payoff_lcb.is_finite()
         or not unit_cost.is_finite()
     ):
         raise ValueError("GLOBAL_CURRENT_STATE_ECONOMICS_INVALID")
     current_band_payoff_q_lcb = (robust_ev + cost) / shares
+    if served_lcb is None:
+        served_lcb = current_band_payoff_q_lcb
+    if not served_lcb.is_finite():
+        raise ValueError("GLOBAL_CURRENT_STATE_ECONOMICS_INVALID")
     payoff_q_lcb = min(
         current_band_payoff_q_lcb,
         served_lcb,
