@@ -272,3 +272,4 @@ evidence/topology_v_next_shadow/archive/*.jsonl.gz
 # Operator-local working dirs (never tracked)
 .local/
 .ai-bridge/
+.agents/skills.disabled/
