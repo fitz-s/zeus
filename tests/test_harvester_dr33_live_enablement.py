@@ -8,7 +8,7 @@
 # 9 tests covering:
 #   T1-T3: _find_winning_bin UMA-vote gate + fail-closed branches
 #   T4:    _canonical_bin_label all 4 shapes + round-trip through _parse_temp_range
-#   T5-T6: _write_settlement_truth VERIFIED/QUARANTINED authority gating
+#   T5-T6: _write_settlement_truth VERIFIED/DISPUTED authority gating
 #   T7:    _write_settlement_truth does NOT call conn.commit()
 #   T8:    run_harvester early-returns when feature flag OFF
 #   T9:    canonical labels round-trip cleanly (sanity guard against re-introduction of ≥/≤)
@@ -162,7 +162,7 @@ def scratch_db(tmp_path):
         settlement_source TEXT,
         settled_at TEXT,
         authority TEXT NOT NULL DEFAULT 'UNVERIFIED'
-          CHECK (authority IN ('VERIFIED', 'UNVERIFIED', 'QUARANTINED')),
+          CHECK (authority IN ('VERIFIED', 'UNVERIFIED', 'DISPUTED')),
         pm_bin_lo REAL, pm_bin_hi REAL, unit TEXT, settlement_source_type TEXT,
         temperature_metric TEXT CHECK (temperature_metric IS NULL OR temperature_metric IN ('high','low')),
         physical_quantity TEXT,
@@ -188,11 +188,11 @@ def scratch_db(tmp_path):
     CREATE TRIGGER IF NOT EXISTS settlements_authority_monotonic
     BEFORE UPDATE OF authority ON settlements
     WHEN (OLD.authority = 'VERIFIED' AND NEW.authority = 'UNVERIFIED')
-      OR (OLD.authority = 'QUARANTINED' AND NEW.authority = 'VERIFIED'
+      OR (OLD.authority = 'DISPUTED' AND NEW.authority = 'VERIFIED'
           AND (NEW.provenance_json IS NULL
                OR json_extract(NEW.provenance_json, '$.reactivated_by') IS NULL))
     BEGIN
-        SELECT RAISE(ABORT, 'settlements.authority transition forbidden: VERIFIED->UNVERIFIED blocked, or QUARANTINED->VERIFIED missing provenance_json.reactivated_by');
+        SELECT RAISE(ABORT, 'settlements.authority transition forbidden: VERIFIED->UNVERIFIED blocked, or DISPUTED->VERIFIED missing provenance_json.reactivated_by');
     END;
     """)
     yield conn
@@ -235,8 +235,8 @@ def test_T5_write_settlement_verified_path(scratch_db):
     assert result["authority"] == "VERIFIED"
 
 
-def test_T6_write_settlement_quarantined_outside_bin(scratch_db):
-    """obs.high_temp outside [pm_bin_lo, pm_bin_hi] → QUARANTINED with enumerable reason."""
+def test_T6_write_settlement_disputed_outside_bin(scratch_db):
+    """obs.high_temp outside [pm_bin_lo, pm_bin_hi] → DISPUTED with enumerable reason."""
     city = _mock_city()
     _write_settlement_truth(
         scratch_db, city, "2026-04-15",
@@ -250,15 +250,15 @@ def test_T6_write_settlement_quarantined_outside_bin(scratch_db):
         "SELECT authority, settlement_value, winning_bin, provenance_json FROM settlements"
     ).fetchone()
     authority, sv, wb, pjs = row
-    assert authority == "QUARANTINED"
+    assert authority == "DISPUTED"
     assert sv == 22.0  # evidence preserved
-    assert wb is None  # winning_bin NULL on QUARANTINED
+    assert wb is None  # winning_bin NULL on DISPUTED
     prov = json.loads(pjs)
-    assert prov["quarantine_reason"] == "harvester_live_obs_outside_bin"
+    assert prov["dispute_reason"] == "harvester_live_obs_outside_bin"
 
 
-def test_T6b_write_settlement_quarantined_no_obs(scratch_db):
-    """obs_row is None → QUARANTINED with harvester_live_no_obs reason; no crash."""
+def test_T6b_write_settlement_disputed_no_obs(scratch_db):
+    """obs_row is None → DISPUTED with harvester_live_no_obs reason; no crash."""
     city = _mock_city()
     _write_settlement_truth(
         scratch_db, city, "2026-04-15",
@@ -271,10 +271,10 @@ def test_T6b_write_settlement_quarantined_no_obs(scratch_db):
         "SELECT authority, settlement_value, provenance_json FROM settlements"
     ).fetchone()
     authority, sv, pjs = row
-    assert authority == "QUARANTINED"
+    assert authority == "DISPUTED"
     assert sv is None
     prov = json.loads(pjs)
-    assert prov["quarantine_reason"] == "harvester_live_no_obs"
+    assert prov["dispute_reason"] == "harvester_live_no_obs"
     assert prov["decision_time_snapshot_id"] is None
 
 
@@ -535,8 +535,8 @@ def test_T12_integration_flag_on_processes_event(monkeypatch, tmp_path):
     assert result.get("disabled_by_flag") is not True
 
 
-def test_T12b_quarantined_truth_does_not_settle_positions_or_train(monkeypatch, tmp_path):
-    """Relationship guard: QUARANTINED settlement truth cannot become P&L or learning authority."""
+def test_T12b_disputed_truth_does_not_settle_positions_or_train(monkeypatch, tmp_path):
+    """Relationship guard: DISPUTED settlement truth cannot become P&L or learning authority."""
     from src.execution import harvester as hv
 
     event = _event_with_market(
@@ -555,7 +555,7 @@ def test_T12b_quarantined_truth_does_not_settle_positions_or_train(monkeypatch, 
     def _fake_write(*a, **kw):
         write_calls.append((a, kw))
         return {
-            "authority": "QUARANTINED",
+            "authority": "DISPUTED",
             "settlement_value": 18.0,
             "winning_bin": None,
             "reason": "harvester_live_obs_outside_bin",
@@ -564,7 +564,7 @@ def test_T12b_quarantined_truth_does_not_settle_positions_or_train(monkeypatch, 
     monkeypatch.setattr(hv, "_match_city", lambda title, slug: london)
     monkeypatch.setattr(hv, "_extract_target_date", lambda ev: "2026-04-15")
     monkeypatch.setattr(hv, "_fetch_settled_events", lambda: [event])
-    dummy_db_path = tmp_path / "quarantined.db"
+    dummy_db_path = tmp_path / "disputed.db"
     dummy_conn = sqlite3.connect(dummy_db_path, isolation_level=None)
     monkeypatch.setattr(hv, "get_trade_connection", lambda: dummy_conn)
     monkeypatch.setattr(hv, "get_forecasts_connection", lambda: dummy_conn)

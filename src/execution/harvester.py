@@ -48,7 +48,12 @@ from src.state.db import (
     query_settlement_events,
     record_token_suppression,
 )
-from src.state.settlement_writers import dispatch_era_basis, write_settlement_with_era_provenance
+from src.state.settlement_writers import (
+    SETTLEMENT_AUTHORITY_DISPUTED,
+    SETTLEMENT_DISPUTE_REASON_KEY,
+    dispatch_era_basis,
+    write_settlement_with_era_provenance,
+)
 from src.architecture.decorators import capability, protects
 from src.state.canonical_write import commit_then_export
 from src.state.portfolio import (
@@ -487,7 +492,7 @@ def _lookup_settlement_obs(
       - wu_icao   → observations.source='wu_icao_history'
       - noaa      → observations.source LIKE 'ogimet_metar_%'
       - hko       → observations.source='hko_daily_api'
-      - cwa_station → no accepted proxy (returns None; row will quarantine)
+      - cwa_station → no accepted proxy (returns None; row will be written DISPUTED)
     """
     metric_identity = _metric_identity_for(temperature_metric)
     st = city.settlement_source_type
@@ -526,7 +531,7 @@ def _lookup_settlement_obs(
         # local date equals target_date by construction (verified live: 100% of
         # populated rows), which is the settlement contract day dispatch_era_basis
         # keys on. Guard with `in columns` (live DB diverges from db.py CREATE);
-        # absent -> None -> writer routes to the honest-NULL/QUARANTINED path.
+        # absent -> None -> writer routes to the honest-NULL/DISPUTED path.
         _local_time_field = "low_local_time" if metric_field == "low_temp" else "high_local_time"
         _observation_local_time = (
             _row_value(r, _local_time_field) if _local_time_field in columns else None
@@ -994,8 +999,8 @@ def run_harvester() -> dict:
                         temperature_metric=temperature_metric,
                     )
                     if obs_row is None:
-                        # No obs yet; don't write a quarantine row — retry next cycle when obs lands.
-                        # (Alternative: write QUARANTINED with harvester_live_no_obs; skip for DR-33-A
+                        # No obs yet; don't write a disputed row — retry next cycle when obs lands.
+                        # (Alternative: write DISPUTED with harvester_live_no_obs; skip for DR-33-A
                         # to avoid polluting the table with transient no-obs rows during obs-collector lag.)
                         logger.debug(
                             "harvester_live: skipping %s %s — no source-correct obs yet",
@@ -1132,13 +1137,75 @@ def run_harvester() -> dict:
         except Exception as _exp_exc:
             logger.warning("harvester: JSON export failed (non-fatal): %s", _exp_exc)
 
+    # T2b excision packet consult condition (a), 2026-07-11:
+    # drain must be part of the normal settlement cycle, not a manual-script-only
+    # mechanism. Bounded, best-effort, fail-soft — never allowed to affect this
+    # cycle's primary settled_events result even if the whole pass errors.
+    dispute_rediscovery = rediscover_disputed_settlements()
+
     return {
         "settlements_found": len(settled_events),
         "pairs_created": total_pairs,
         "positions_settled": positions_settled,
         "legacy_settlement_records_skipped": legacy_settlement_records_skipped,
+        "dispute_rediscovery": dispute_rediscovery,
         **stage2_preflight,
     }
+
+
+# Bounded per-cycle row budget for rediscover_disputed_settlements — small and fixed so a
+# backlog of DISPUTED rows cannot turn every harvester tick into an unbounded Gamma-API sweep
+# (T2b consult condition (a): "bounded per-pass count"). The full-sweep path remains
+# scripts/drain_settlement_disputes.py (operator accelerator, no bound).
+_DISPUTE_REDISCOVERY_MAX_ROWS_PER_CYCLE = 5
+
+
+def rediscover_disputed_settlements(
+    *, max_rows: int = _DISPUTE_REDISCOVERY_MAX_ROWS_PER_CYCLE,
+) -> dict:
+    """Bounded per-cycle re-resolution pass over settlement_outcomes DISPUTED rows.
+
+    T2b consult condition (a): the drain mechanism must be wired into the normal harvester
+    settlement re-discovery cycle so DISPUTED rows heal through the same lane that minted
+    them, bounded per-pass, using an updated_at-derived cadence — `recorded_at ASC` (the
+    existing "last write attempt" column; no new schema needed) — rather than a
+    manual-script-only drain. Reuses scripts/drain_settlement_disputes.py::drain() (the SAME
+    venue-resolution-authoritative logic the operator accelerator script runs) with
+    `max_rows` set and the two known-missing-market backfill skipped (an operator-triage
+    concern, not part of the bounded per-cycle budget).
+
+    Runs on its OWN connection + WriteClass.BULK writer fence (never the harvester's live
+    settlement SAVEPOINT) so a slow/flaky Gamma lookup can never hold up or abort the
+    primary settled_events cycle. Fail-soft: any exception is caught and reported, never
+    raised — a rediscovery hiccup must not break the harvester tick that calls it.
+    """
+    if os.environ.get("ZEUS_HARVESTER_LIVE_ENABLED", "0") != "1":
+        return {"status": "disabled_by_feature_flag"}
+    try:
+        from scripts.drain_settlement_disputes import drain as _drain_disputes
+        from src.state.db import ZEUS_FORECASTS_DB_PATH, get_forecasts_connection
+        from src.state.db_writer_lock import WriteClass, db_writer_lock
+
+        with db_writer_lock(ZEUS_FORECASTS_DB_PATH, WriteClass.BULK):
+            conn = get_forecasts_connection()
+            try:
+                report = _drain_disputes(
+                    conn,
+                    apply=True,
+                    max_rows=max_rows,
+                    skip_missing_markets=True,
+                )
+            finally:
+                conn.close()
+        return {
+            "status": "ran",
+            "attempted": report.get("disputed_before"),
+            "disposition_counts": report.get("disposition_counts"),
+            "verified_settlement_ids": report.get("verified_settlement_ids"),
+        }
+    except Exception as exc:
+        logger.warning("harvester_live: dispute rediscovery pass failed (non-fatal): %s", exc, exc_info=True)
+        return {"status": "failed", "error": str(exc)}
 
 
 def _fetch_settled_events() -> list[dict]:
@@ -1473,7 +1540,7 @@ def _write_settlement_truth(
       2. Apply SettlementSemantics.for_city(city).assert_settlement_value(obs.high_temp)
       3. Containment check: rounded value ∈ [pm_bin_lo, pm_bin_hi]?
          - Yes → authority='VERIFIED', settlement_value=rounded, winning_bin=canonical label
-         - No → authority='QUARANTINED' with enumerable reason
+         - No → authority='DISPUTED' with enumerable reason
       4. Populate all 4 INV-14 identity fields + provenance_json with decision_time_snapshot_id
 
     Does NOT call conn.commit() — caller owns the transaction boundary (P-H
@@ -1494,13 +1561,13 @@ def _write_settlement_truth(
     # genuine station-reported observation instant, NEVER the cron wall-clock.
     # recorded_at is the legitimately-now() write/reconstruction time and is kept
     # as a SEPARATE variable. When the observation time is absent, settled_at is
-    # an honest NULL and the row is forced QUARANTINED (not gradable) — never a
+    # an honest NULL and the row is forced DISPUTED (not gradable) — never a
     # guessed now().
     recorded_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
     settled_at = obs_row.get("observation_local_time") if obs_row is not None else None
     settlement_time_missing = settled_at is None
 
-    authority = "QUARANTINED"
+    authority = SETTLEMENT_AUTHORITY_DISPUTED
     settlement_value: Optional[float] = None
     winning_bin: Optional[str] = None
     reason: Optional[str] = None
@@ -1548,15 +1615,15 @@ def _write_settlement_truth(
                     winning_bin = _canonical_bin_label(pm_bin_lo, pm_bin_hi, city.settlement_unit)
                     reason = None
                 else:
-                    # Quarantined — preserve rounded as evidence
+                    # Disputed — preserve rounded as evidence
                     settlement_value = rounded
                     reason = "harvester_live_obs_outside_bin"
 
     # M1: a settlement with no genuine event time (settled_at is NULL) is NOT
-    # gradable — force QUARANTINED even if the value was bin-contained. The
+    # gradable — force DISPUTED even if the value was bin-contained. The
     # cron clock is never substituted for the missing observation instant.
     if settlement_time_missing and authority == "VERIFIED":
-        authority = "QUARANTINED"
+        authority = SETTLEMENT_AUTHORITY_DISPUTED
         if reason is None:
             reason = "harvester_live_no_observation_time"
 
@@ -1584,7 +1651,7 @@ def _write_settlement_truth(
         "audit_ref": "docs/operations/task_2026-04-23_live_harvester_enablement_dr33/plan.md",
     }
     if reason is not None:
-        provenance["quarantine_reason"] = reason
+        provenance[SETTLEMENT_DISPUTE_REASON_KEY] = reason
 
     # INSERT OR REPLACE matches P-E's canonical DELETE+INSERT idempotency;
     # REOPEN-2 makes this an upsert per (city, target_date, temperature_metric).
@@ -1620,9 +1687,9 @@ def _write_settlement_truth(
         # correct EraAuthorityBasis from the settled_at (settlement-event) date.
         # M1: dispatch_era_basis RAISES on a None date, and a NULL settled_at
         # means the settlement is not era-gradable — so skip the era path
-        # entirely and write the QUARANTINED row directly via log_settlement
-        # (which accepts settled_at=None). recorded_at is the real write time on
-        # BOTH paths (never aliased to settled_at).
+        # entirely and write the DISPUTED row directly via log_settlement
+        # (which accepts settled_at=None). recorded_at is the real write time
+        # on BOTH paths (never aliased to settled_at).
         from datetime import date as _date
         _era_result = None
         if not settlement_time_missing:

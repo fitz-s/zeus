@@ -19,12 +19,12 @@ Post-S2.2: two triggers reject these structural-integrity violations
 at DB write time:
 - `settlements_verified_insert_integrity` — INSERT-path gate
 - `settlements_verified_update_integrity` — UPDATE-path gate
-  (covers the case where a QUARANTINED row gets flipped to VERIFIED
+  (covers the case where a DISPUTED row gets flipped to VERIFIED
    via UPDATE but still has NULL settlement_value / empty winning_bin)
 
 Both triggers fire ONLY when the NEW row has authority='VERIFIED' and
-is missing a required field. QUARANTINED / UNVERIFIED rows with NULL
-settlement_value are legitimate (quarantine semantic) and pass through.
+is missing a required field. DISPUTED / UNVERIFIED rows with NULL
+settlement_value are legitimate (dispute semantic) and pass through.
 """
 
 from __future__ import annotations
@@ -110,32 +110,32 @@ def test_verified_insert_with_all_required_fields_accepted():
 
 
 # ---------------------------------------------------------------------------
-# INSERT-path non-regression — QUARANTINED rows with NULLs still allowed
+# INSERT-path non-regression — DISPUTED rows with NULLs still allowed
 # ---------------------------------------------------------------------------
 
 
-def test_quarantined_insert_with_null_settlement_value_accepted():
-    """QUARANTINED is the semantic for rows EXCLUDED from authority. A
-    QUARANTINED row with NULL settlement_value is legitimate — the row
+def test_disputed_insert_with_null_settlement_value_accepted():
+    """DISPUTED is the semantic for rows EXCLUDED from authority. A
+    DISPUTED row with NULL settlement_value is legitimate — the row
     records that we saw a settlement event but could not determine the
     canonical value. The trigger MUST NOT fire on such rows."""
     conn = _setup()
     sql, params = _insert_sql(
-        authority="QUARANTINED", settlement_value=None, winning_bin="15-16"
+        authority="DISPUTED", settlement_value=None, winning_bin="15-16"
     )
     conn.execute(sql, params)
     row = conn.execute(
         "SELECT authority, settlement_value, winning_bin FROM settlements WHERE city='paris'"
     ).fetchone()
-    assert row == ("QUARANTINED", None, "15-16")
+    assert row == ("DISPUTED", None, "15-16")
 
 
-def test_quarantined_insert_with_all_nulls_accepted():
-    """Strongest QUARANTINED form — both settlement_value AND winning_bin
+def test_disputed_insert_with_all_nulls_accepted():
+    """Strongest DISPUTED form — both settlement_value AND winning_bin
     null. Common for 'we can't even determine the bin' cases."""
     conn = _setup()
     sql, params = _insert_sql(
-        authority="QUARANTINED", settlement_value=None, winning_bin=None
+        authority="DISPUTED", settlement_value=None, winning_bin=None
     )
     conn.execute(sql, params)
 
@@ -155,14 +155,14 @@ def test_unverified_insert_with_null_settlement_value_accepted():
 # ---------------------------------------------------------------------------
 
 
-def test_update_quarantined_to_verified_without_settlement_value_rejected():
-    """A QUARANTINED row with NULL settlement_value must not become VERIFIED
+def test_update_disputed_to_verified_without_settlement_value_rejected():
+    """A DISPUTED row with NULL settlement_value must not become VERIFIED
     via UPDATE while still missing the value. Trigger on UPDATE of
     authority fires BEFORE the authority-monotonic trigger's reactivated_by
     gate, so caller sees the integrity-violation message first."""
     conn = _setup()
     sql, params = _insert_sql(
-        authority="QUARANTINED", settlement_value=None, winning_bin="15-16"
+        authority="DISPUTED", settlement_value=None, winning_bin="15-16"
     )
     conn.execute(sql, params)
     with pytest.raises(sqlite3.IntegrityError) as exc_info:

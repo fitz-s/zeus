@@ -41,7 +41,7 @@ DB_PATH = REPO_ROOT / "state" / "zeus-world.db"
 TEST_SOURCE = os.environ.get("PE_TEST_SOURCE", "plan")
 
 EXPECTED_TOTAL = 1561
-ALLOWED_AUTHORITIES = {"VERIFIED", "QUARANTINED"}
+ALLOWED_AUTHORITIES = {"VERIFIED", "DISPUTED"}
 ALLOWED_TEMPERATURE_METRIC = {"high", "low"}
 ALLOWED_OBSERVATION_FIELD = {"high_temp", "low_temp"}
 ALLOWED_ROUNDING = {"wmo_half_up", "oracle_truncate"}
@@ -51,7 +51,7 @@ ALLOWED_DATA_VERSION = {
     "hko_daily_api",
     "cwa_no_collector",
 }
-CLOSED_QUARANTINE_REASONS = {
+CLOSED_DISPUTE_REASONS = {
     # P-F carried-forward (6)
     "pc_audit_dst_spring_forward_bin_mismatch",
     "pc_audit_shenzhen_drift_nonreproducible",
@@ -65,7 +65,7 @@ CLOSED_QUARANTINE_REASONS = {
     "pe_unit_mismatch_obs_vs_settlement",
 }
 
-WHOLE_BUCKET_QUARANTINE_REASONS = {
+WHOLE_BUCKET_DISPUTE_REASONS = {
     "pc_audit_shenzhen_drift_nonreproducible",
     "pc_audit_station_remap_needed_no_cwa_collector",
     "pc_audit_source_role_collapse_no_source_correct_obs_available",
@@ -130,7 +130,7 @@ def _db_rows_as_plan() -> list[dict]:
             "new_data_version": r["data_version"],
             "new_settlement_source": r["settlement_source"],
             "new_provenance_json": prov,
-            "quarantine_reason": prov.get("quarantine_reason"),
+            "dispute_reason": prov.get("dispute_reason"),
         })
     return plan
 
@@ -158,8 +158,8 @@ def _verified_rows(plan: list[dict]) -> list[dict]:
     return [p for p in plan if p["new_authority"] == "VERIFIED"]
 
 
-def _quarantined_rows(plan: list[dict]) -> list[dict]:
-    return [p for p in plan if p["new_authority"] == "QUARANTINED"]
+def _disputed_rows(plan: list[dict]) -> list[dict]:
+    return [p for p in plan if p["new_authority"] == "DISPUTED"]
 
 
 def test_T1_self_consistency_verified(plan):
@@ -203,29 +203,29 @@ def test_T1_self_consistency_verified(plan):
         assert prov["reconstruction_method"] == "obs_plus_settlement_semantics"
 
 
-def test_T2_self_consistency_quarantined_obs_outside_bin(plan):
-    """Quarantined with `pe_obs_outside_bin`: round(obs) NOT in [lo,hi] AND
-    settlement_value preserved as evidence AND authority=QUARANTINED."""
-    outside = [p for p in plan if p.get("quarantine_reason") == "pe_obs_outside_bin"]
+def test_T2_self_consistency_disputed_obs_outside_bin(plan):
+    """Disputed with `pe_obs_outside_bin`: round(obs) NOT in [lo,hi] AND
+    settlement_value preserved as evidence AND authority=DISPUTED."""
+    outside = [p for p in plan if p.get("dispute_reason") == "pe_obs_outside_bin"]
     for p in outside:
-        assert p["new_authority"] == "QUARANTINED"
+        assert p["new_authority"] == "DISPUTED"
         assert p["obs_found"], f"pe_obs_outside_bin without obs: {p['city']}/{p['target_date']}"
         assert p["contained"] is False
         # settlement_value preserved as evidence
         assert p["new_settlement_value"] is not None
 
 
-def test_T3_self_consistency_quarantined_no_obs(plan):
-    """Quarantined with pe_no_source_correct_obs OR AP-4 OR CWA reasons:
+def test_T3_self_consistency_disputed_no_obs(plan):
+    """Disputed with pe_no_source_correct_obs OR AP-4 OR CWA reasons:
     obs_id IS None AND obs_high_temp IS None AND decision_time_snapshot_id IS None."""
     no_obs_reasons = {
         "pe_no_source_correct_obs",
         "pc_audit_source_role_collapse_no_source_correct_obs_available",
         "pc_audit_station_remap_needed_no_cwa_collector",
     }
-    no_obs_rows = [p for p in plan if p.get("quarantine_reason") in no_obs_reasons]
+    no_obs_rows = [p for p in plan if p.get("dispute_reason") in no_obs_reasons]
     for p in no_obs_rows:
-        assert p["new_authority"] == "QUARANTINED"
+        assert p["new_authority"] == "DISPUTED"
         assert p["obs_found"] is False, (
             f"row {p['city']}/{p['target_date']} claims no_obs reason but obs_found=True"
         )
@@ -309,24 +309,24 @@ def test_T9_authority_enum(plan):
         assert p["new_authority"] in ALLOWED_AUTHORITIES, p
 
 
-def test_T10_quarantine_reason_enum(plan):
-    """All quarantine reasons are from the closed set."""
+def test_T10_dispute_reason_enum(plan):
+    """All dispute reasons are from the closed set."""
     for p in plan:
-        if p["new_authority"] == "QUARANTINED":
-            r = p.get("quarantine_reason")
-            assert r in CLOSED_QUARANTINE_REASONS, (
-                f"unknown quarantine_reason: {r} on {p['city']}/{p['target_date']}"
+        if p["new_authority"] == "DISPUTED":
+            r = p.get("dispute_reason")
+            assert r in CLOSED_DISPUTE_REASONS, (
+                f"unknown dispute_reason: {r} on {p['city']}/{p['target_date']}"
             )
 
 
-def test_T11_whole_bucket_quarantine_no_verified_leak(plan):
-    """For rows whose prior_quarantine_reason is a whole-bucket reason, NONE can
+def test_T11_whole_bucket_dispute_no_verified_leak(plan):
+    """For rows whose prior_dispute_reason is a whole-bucket reason, NONE can
     end up VERIFIED even if containment passes by coincidence. Critic-opus P-C
     caveat for Shenzhen."""
     for p in plan:
-        prior = p["new_provenance_json"]["prior_quarantine_reason"]
-        if prior in WHOLE_BUCKET_QUARANTINE_REASONS:
-            assert p["new_authority"] == "QUARANTINED", (
+        prior = p["new_provenance_json"]["prior_dispute_reason"]
+        if prior in WHOLE_BUCKET_DISPUTE_REASONS:
+            assert p["new_authority"] == "DISPUTED", (
                 f"{p['city']}/{p['target_date']} leaked to VERIFIED despite whole-bucket reason {prior}"
             )
 

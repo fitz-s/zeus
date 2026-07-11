@@ -52,7 +52,7 @@ def main() -> None:
 
     # settlement truth keyed by (city, metric, target_date). settlements uses
     # `temperature_metric` ('high'/'low') == raw_model_forecasts.metric; unit is 'F'/'C';
-    # authority must be VERIFIED (drop QUARANTINED).
+    # authority must be VERIFIED (drop DISPUTED).
     settle: dict[tuple, tuple[float, str]] = {}
     scols = [r[1] for r in c.execute("PRAGMA table_info(settlements)")]
     has_unit = "unit" in scols

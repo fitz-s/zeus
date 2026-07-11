@@ -2459,7 +2459,10 @@ scripts:
       - src/config.py::cities_by_name
     required_tests: []
 
-  drain_settlement_quarantine.py:
+  drain_settlement_disputes.py:
+    # nee drain_settlement_quarantine.py, renamed 2026-07-11 per
+    # docs/rebuild/quarantine_excision_2026-07-11.md §T2b (settlements/observations
+    # authority tier QUARANTINED -> DISPUTED). Behavior unchanged.
     class: one_time_repair
     status: active
     lifecycle: long_lived
@@ -2470,12 +2473,12 @@ scripts:
     target_db: state/zeus-forecasts.db
     read_targets: [state/zeus-forecasts.db]
     write_targets: [state/zeus-forecasts.db]
-    canonical_command: "python scripts/drain_settlement_quarantine.py [--apply] [--json] [--db PATH]"
+    canonical_command: "python scripts/drain_settlement_disputes.py [--apply] [--json] [--db PATH]"
     external_inputs: ["Polymarket Gamma API (GET /events?slug=..., read-only)"]
     delete_policy: retain_for_audit
     reuse_when: >
       P0a market-semantics purity plan (2026-07-04, operator-corrected same day): re-resolve
-      settlement_outcomes QUARANTINED rows (383 of 8,527 as of 2026-07-04) and the two known
+      settlement_outcomes DISPUTED rows (383 of 8,527 as of 2026-07-04) and the two known
       fully-missing markets (Hong Kong 2026-06-25 low, Helsinki 2026-07-02 high) against the
       VENUE'S RESOLVED OUTCOME (PAYMENT FACT) — a resolved market has already paid real money
       on a specific bin; a v1 local-observation-only grading authority recovered 0 of 383 rows
@@ -2489,13 +2492,17 @@ scripts:
       oracle_truncate vs wu_icao/noaa wmo_half_up) is recorded alongside as a SEPARATE fact for
       forecast-skill calibration and never blocks VERIFY; a disagreement is stamped
       `resolution_conflict='venue_vs_declared_source'` without altering settlement_value away
-      from the payment fact. `pc_audit_*`-prefixed quarantine reasons carry prior HUMAN audit
+      from the payment fact. `pc_audit_*`-prefixed dispute reasons carry prior HUMAN audit
       judgment and are NEVER auto-reactivated even when the venue has since resolved (reported
       separately as `operator_review_venue_resolved`). A Gamma network fault FAILS CLOSED (row
-      stays QUARANTINED, no partial write) — never recorded as unresolved. Repeatable, not
+      stays DISPUTED, no partial write) — never recorded as unresolved. Repeatable, not
       one-shot: rerun as new markets resolve on-venue. Idempotent — a VERIFIED row is simply
-      absent from the next WHERE authority='QUARANTINED' scan. Read-only network access only;
-      zero venue mutation (no orders, cancels, or redeems).
+      absent from the next WHERE authority='DISPUTED' scan. Read-only network access only;
+      zero venue mutation (no orders, cancels, or redeems). T2b (2026-07-11) also wires bounded
+      re-resolution into the normal harvester settlement-write pass (src/execution/harvester.py
+      rediscover_disputed_settlements, recorded_at-ordered cadence) — this script remains the
+      operator accelerator for the on-demand full sweep + the two missing-market backfills the
+      cycle-integrated pass does not attempt.
     do_not_use_when: >
       Do not expect this script to resolve a market that has genuinely not yet resolved on the
       venue (`venue_unresolved` — nothing invented) or a Gamma outage (`venue_fetch_error` —
@@ -2520,7 +2527,7 @@ scripts:
       - src/execution/harvester.py::_label_temperature_unit
       - src/data/market_scanner.py::_gamma_get
     required_tests:
-      - tests/scripts/test_drain_settlement_quarantine.py
+      - tests/scripts/test_drain_settlement_disputes.py
 
   backfill_edli_total_residual_sd.py:
     class: one_time_repair

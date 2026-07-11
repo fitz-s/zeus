@@ -178,8 +178,8 @@ def test_f_bin_c_city_obs_in_converted_range_is_verified():
 # T2: F bin + C city -> obs 10C outside converted bin -> obs_outside_bin
 # ---------------------------------------------------------------------------
 
-def test_f_bin_c_city_obs_outside_converted_range_is_quarantined():
-    """RELATIONSHIP: obs 10C is outside converted bin [4.44, 5.0C] -> quarantine."""
+def test_f_bin_c_city_obs_outside_converted_range_is_disputed():
+    """RELATIONSHIP: obs 10C is outside converted bin [4.44, 5.0C] -> dispute."""
     conn = _make_world_conn()
     city = _london_city()
     result = _write_settlement_truth(
@@ -188,7 +188,7 @@ def test_f_bin_c_city_obs_outside_converted_range_is_quarantined():
         obs_row=_obs_c(10.0),  # 10C >> 5.0C hi-bound
         pm_bin_unit="F",
     )
-    assert result["authority"] == "QUARANTINED"
+    assert result["authority"] == "DISPUTED"
     assert result["reason"] == "harvester_live_obs_outside_bin"
 
 
@@ -333,7 +333,7 @@ def test_f_bin_integer_snap_40_41_obs_5_is_verified():
 
 
 def test_f_bin_integer_snap_40_41_obs_6_is_outside():
-    """BOUNDARY fix #264: [40,41]F -> {4,5}C. obs=6 not in set -> QUARANTINED."""
+    """BOUNDARY fix #264: [40,41]F -> {4,5}C. obs=6 not in set -> DISPUTED."""
     conn = _make_world_conn()
     city = _london_city()
     result = _write_settlement_truth(
@@ -342,8 +342,8 @@ def test_f_bin_integer_snap_40_41_obs_6_is_outside():
         obs_row=_obs_c(6.0),
         pm_bin_unit="F",
     )
-    assert result["authority"] == "QUARANTINED", (
-        f"Expected QUARANTINED: [40,41]F -> {{4,5}}C, obs=6 not in set. "
+    assert result["authority"] == "DISPUTED", (
+        f"Expected DISPUTED: [40,41]F -> {{4,5}}C, obs=6 not in set. "
         f"Got {result['authority']!r}."
     )
     assert result["reason"] in (

@@ -953,7 +953,7 @@ def list_active_platt_models(conn: sqlite3.Connection) -> list[dict]:
     K1-compliant pure-SELECT lister — counterpart to single-bucket
     load_platt_model (L515). Returns one dict per (temperature_metric,
     cluster, season, data_version, input_space) bucket where is_active=1
-    AND authority='VERIFIED'. Inactive + UNVERIFIED + QUARANTINED rows are
+    AND authority='VERIFIED'. Inactive + UNVERIFIED + DISPUTED rows are
     excluded so the result reflects only what the live evaluator would
     actually consult via load_platt_model.
 

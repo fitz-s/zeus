@@ -1,8 +1,8 @@
 # Created: 2026-07-04
 # Last reused or audited: 2026-07-04
-# Authority basis: P0a market-semantics purity plan — settlement_outcomes QUARANTINE
+# Authority basis: P0a market-semantics purity plan — settlement_outcomes DISPUTE
 #   backlog drain. src/state/chain_mirror_reconciler.py::load_settlement_lookup grades
-#   legacy positions ONLY against authority='VERIFIED'; QUARANTINED rows can never close
+#   legacy positions ONLY against authority='VERIFIED'; DISPUTED rows can never close
 #   a position until re-verified. Operator correction 2026-07-04: grading authority is the
 #   VENUE'S RESOLVED OUTCOME (payment fact), not a local recomputation — a resolved market
 #   has already paid real money on a specific bin. The declared-source observation is a
@@ -11,10 +11,10 @@
 #   never hand-rounded — an apparent venue-vs-declared-source disagreement can dissolve once
 #   the correct source rounding rule (e.g. HKO oracle_truncate vs wu_icao wmo_half_up) is
 #   applied to the same raw reading.
-"""Antibody tests: scripts/drain_settlement_quarantine.
+"""Antibody tests: scripts/drain_settlement_disputes.
 
 All Gamma network calls are mocked via monkeypatching
-scripts.drain_settlement_quarantine._fetch_venue_event_by_slug — no test makes a real HTTP
+scripts.drain_settlement_disputes._fetch_venue_event_by_slug — no test makes a real HTTP
 request. Builds a SYNTHETIC forecasts DB (settlement_outcomes + observations, with the real
 VERIFIED-unit guard triggers) and asserts:
   - a venue-resolved market (point / finite_range / open_shoulder bins) VERIFIES with
@@ -28,10 +28,10 @@ VERIFIED-unit guard triggers) and asserts:
     blocking VERIFY, and settlement_value never contradicts its own winning bin;
   - pc_audit_*-prefixed reasons are NEVER auto-reactivated even when the venue has since
     resolved — reported separately as operator_review_venue_resolved;
-  - an unresolved venue market stays QUARANTINED/absent — nothing invented;
-  - a network fault fails closed: the row stays QUARANTINED, no partial write, error reported;
+  - an unresolved venue market stays DISPUTED/absent — nothing invented;
+  - a network fault fails closed: the row stays DISPUTED, no partial write, error reported;
   - dry-run (apply=False) writes nothing; --apply is idempotent;
-  - a missing market backfills from venue resolution the same way a QUARANTINED row does.
+  - a missing market backfills from venue resolution the same way a DISPUTED row does.
 """
 from __future__ import annotations
 
@@ -43,15 +43,15 @@ import pytest
 
 from src.config import City
 from src.contracts.settlement_semantics import SettlementSemantics
-from scripts.drain_settlement_quarantine import (
+from scripts.drain_settlement_disputes import (
     DEFAULT_MISSING_MARKETS,
     VenueFetchError,
     declared_source_fact,
     drain,
     resolve_missing_market,
-    resolve_quarantined_row,
+    resolve_disputed_row,
 )
-import scripts.drain_settlement_quarantine as dsq
+import scripts.drain_settlement_disputes as dsq
 
 _SETTLEMENT_OUTCOMES_DDL = """
 CREATE TABLE settlement_outcomes (
@@ -65,7 +65,7 @@ CREATE TABLE settlement_outcomes (
     settlement_source TEXT,
     settled_at TEXT,
     authority TEXT NOT NULL DEFAULT 'UNVERIFIED'
-        CHECK (authority IN ('VERIFIED', 'UNVERIFIED', 'QUARANTINED')),
+        CHECK (authority IN ('VERIFIED', 'UNVERIFIED', 'DISPUTED')),
     provenance_json TEXT NOT NULL DEFAULT '{}',
     recorded_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     settlement_unit TEXT CHECK (settlement_unit IS NULL OR settlement_unit IN ('F', 'C')),
@@ -118,7 +118,7 @@ def _make_db(path: Path) -> sqlite3.Connection:
     return conn
 
 
-def _insert_quarantined(
+def _insert_disputed(
     conn: sqlite3.Connection,
     *,
     city: str,
@@ -133,7 +133,7 @@ def _insert_quarantined(
         """INSERT INTO settlement_outcomes
            (city, target_date, temperature_metric, authority, market_slug, settlement_value,
             winning_bin, provenance_json)
-           VALUES (?, ?, ?, 'QUARANTINED', ?, ?, ?, ?)""",
+           VALUES (?, ?, ?, 'DISPUTED', ?, ?, ?, ?)""",
         (city, target_date, metric, market_slug, settlement_value, winning_bin, json.dumps(provenance)),
     )
     conn.commit()
@@ -253,15 +253,15 @@ def _mock_venue(monkeypatch: pytest.MonkeyPatch, *, event: dict | None = None, r
 def test_venue_resolved_point_bin_verifies_with_provenance(db, monkeypatch):
     city_map = {"Testville": _wu_city("Testville")}
     _insert_obs(db, city="Testville", target_date="2026-06-01", source="wu_icao_history", high_temp=20.0)
-    sid = _insert_quarantined(
+    sid = _insert_disputed(
         db, city="Testville", target_date="2026-06-01", metric="high",
         market_slug="highest-temperature-in-testville-on-june-1-2026",
-        provenance={"quarantine_reason": "harvester_live_obs_outside_bin"},
+        provenance={"dispute_reason": "harvester_live_obs_outside_bin"},
     )
     _mock_venue(monkeypatch, event=_resolved_event("20°C"))
 
     row = db.execute("SELECT * FROM settlement_outcomes WHERE settlement_id=?", (sid,)).fetchone()
-    decision = resolve_quarantined_row(db, city_map, row)
+    decision = resolve_disputed_row(db, city_map, row)
     assert decision["disposition"] == "verify"
     assert decision["rounded_value"] == 20.0
     assert decision["winning_bin"] == "20°C"
@@ -281,24 +281,24 @@ def test_venue_resolved_point_bin_verifies_with_provenance(db, monkeypatch):
     assert prov["venue_resolution"]["condition_id"] == "0xcond"
     assert prov["declared_source_type"] == "WU"
     assert prov["declared_source_observed_value"] == 20.0
-    assert prov["prior_authority"] == "QUARANTINED"
-    assert prov["prior_quarantine_reason"] == "harvester_live_obs_outside_bin"
-    assert prov["reactivated_by"] == "scripts.drain_settlement_quarantine"
-    assert prov["prior_provenance"]["quarantine_reason"] == "harvester_live_obs_outside_bin"
+    assert prov["prior_authority"] == "DISPUTED"
+    assert prov["prior_dispute_reason"] == "harvester_live_obs_outside_bin"
+    assert prov["reactivated_by"] == "scripts.drain_settlement_disputes"
+    assert prov["prior_provenance"]["dispute_reason"] == "harvester_live_obs_outside_bin"
 
 
 def test_venue_resolved_finite_range_bin_verifies(db, monkeypatch):
     city_map = {"Testville": _wu_city("Testville", unit="F")}
     _insert_obs(db, city="Testville", target_date="2026-06-01", source="wu_icao_history", high_temp=50.6, unit="F")
-    sid = _insert_quarantined(
+    sid = _insert_disputed(
         db, city="Testville", target_date="2026-06-01", metric="high",
         market_slug="highest-temperature-in-testville-on-june-1-2026",
-        provenance={"quarantine_reason": "harvester_live_obs_outside_bin"},
+        provenance={"dispute_reason": "harvester_live_obs_outside_bin"},
     )
     _mock_venue(monkeypatch, event=_resolved_event("50-51°F"))
 
     row = db.execute("SELECT * FROM settlement_outcomes WHERE settlement_id=?", (sid,)).fetchone()
-    decision = resolve_quarantined_row(db, city_map, row)
+    decision = resolve_disputed_row(db, city_map, row)
     assert decision["disposition"] == "verify"
     assert decision["winning_bin"] == "50-51°F"
     assert decision["rounded_value"] == 51.0  # WMO half-up: 50.6 -> 51, contained in [50,51]
@@ -307,15 +307,15 @@ def test_venue_resolved_finite_range_bin_verifies(db, monkeypatch):
 def test_venue_resolved_open_shoulder_bin_verifies(db, monkeypatch):
     city_map = {"Testville": _wu_city("Testville")}
     _insert_obs(db, city="Testville", target_date="2026-06-01", source="wu_icao_history", low_temp=5.0)
-    sid = _insert_quarantined(
+    sid = _insert_disputed(
         db, city="Testville", target_date="2026-06-01", metric="low",
         market_slug="lowest-temperature-in-testville-on-june-1-2026",
-        provenance={"quarantine_reason": "harvester_live_obs_outside_bin"},
+        provenance={"dispute_reason": "harvester_live_obs_outside_bin"},
     )
     _mock_venue(monkeypatch, event=_resolved_event("6°C or below"))
 
     row = db.execute("SELECT * FROM settlement_outcomes WHERE settlement_id=?", (sid,)).fetchone()
-    decision = resolve_quarantined_row(db, city_map, row)
+    decision = resolve_disputed_row(db, city_map, row)
     assert decision["disposition"] == "verify"
     assert decision["winning_bin"] == "6°C or below"
 
@@ -324,15 +324,15 @@ def test_f_bin_on_c_city_conversion_and_snap(db, monkeypatch):
     # Fix #262 case: Gamma label posed in F, city settles in C. 48F -> 8.888C -> snap to 9.
     city_map = {"London": _wu_city("London", unit="C")}
     _insert_obs(db, city="London", target_date="2026-06-01", source="wu_icao_history", high_temp=9.0)
-    sid = _insert_quarantined(
+    sid = _insert_disputed(
         db, city="London", target_date="2026-06-01", metric="high",
         market_slug="highest-temperature-in-london-on-june-1-2026",
-        provenance={"quarantine_reason": "harvester_live_obs_outside_bin"},
+        provenance={"dispute_reason": "harvester_live_obs_outside_bin"},
     )
     _mock_venue(monkeypatch, event=_resolved_event("48°F"))
 
     row = db.execute("SELECT * FROM settlement_outcomes WHERE settlement_id=?", (sid,)).fetchone()
-    decision = resolve_quarantined_row(db, city_map, row)
+    decision = resolve_disputed_row(db, city_map, row)
     assert decision["disposition"] == "verify"
     assert decision["winning_bin"] == "9°C"
 
@@ -378,15 +378,15 @@ def test_hko_correct_rounding_dissolves_apparent_conflict(db, monkeypatch):
     of the same raw value would have rounded to 27 and wrongly flagged a conflict."""
     city_map = {"Hong Kong": _hko_city()}
     _insert_obs(db, city="Hong Kong", target_date="2026-06-26", source="hko_daily_api", low_temp=26.8, station_id="HKO")
-    sid = _insert_quarantined(
+    sid = _insert_disputed(
         db, city="Hong Kong", target_date="2026-06-26", metric="low",
         market_slug="lowest-temperature-in-hong-kong-on-june-26-2026",
-        provenance={"quarantine_reason": "harvester_source_disagreement_within_tolerance"},
+        provenance={"dispute_reason": "harvester_source_disagreement_within_tolerance"},
     )
     _mock_venue(monkeypatch, event=_resolved_event("26°C"))
 
     row = db.execute("SELECT * FROM settlement_outcomes WHERE settlement_id=?", (sid,)).fetchone()
-    decision = resolve_quarantined_row(db, city_map, row)
+    decision = resolve_disputed_row(db, city_map, row)
     assert decision["disposition"] == "verify"
     assert decision["declared_source_observed_value"] == 26.0
     assert decision["resolution_conflict"] is None
@@ -399,15 +399,15 @@ def test_wu_icao_city_same_raw_value_would_conflict(db, monkeypatch):
     conflict, correctly source-rounded (not a false negative from under-rounding either)."""
     city_map = {"Testville": _wu_city("Testville")}
     _insert_obs(db, city="Testville", target_date="2026-06-26", source="wu_icao_history", low_temp=26.8)
-    sid = _insert_quarantined(
+    sid = _insert_disputed(
         db, city="Testville", target_date="2026-06-26", metric="low",
         market_slug="lowest-temperature-in-testville-on-june-26-2026",
-        provenance={"quarantine_reason": "harvester_source_disagreement_within_tolerance"},
+        provenance={"dispute_reason": "harvester_source_disagreement_within_tolerance"},
     )
     _mock_venue(monkeypatch, event=_resolved_event("26°C"))
 
     row = db.execute("SELECT * FROM settlement_outcomes WHERE settlement_id=?", (sid,)).fetchone()
-    decision = resolve_quarantined_row(db, city_map, row)
+    decision = resolve_disputed_row(db, city_map, row)
     assert decision["disposition"] == "verify"  # venue resolution still grades it — payment fact
     assert decision["declared_source_observed_value"] == 27.0
     assert decision["resolution_conflict"] == "venue_vs_declared_source"
@@ -423,15 +423,15 @@ def test_declared_source_disagreement_verifies_and_records_conflict(db, monkeypa
     # HKO obs correctly source-rounds to 27 (floor(27.0)=27) — genuinely outside the venue's
     # resolved 26°C bin. This is the real Hong Kong 2026-06-26 audit case.
     _insert_obs(db, city="Hong Kong", target_date="2026-06-26", source="hko_daily_api", low_temp=27.0, station_id="HKO")
-    sid = _insert_quarantined(
+    sid = _insert_disputed(
         db, city="Hong Kong", target_date="2026-06-26", metric="low",
         market_slug="lowest-temperature-in-hong-kong-on-june-26-2026",
-        provenance={"quarantine_reason": "harvester_source_disagreement_within_tolerance"},
+        provenance={"dispute_reason": "harvester_source_disagreement_within_tolerance"},
     )
     _mock_venue(monkeypatch, event=_resolved_event("26°C"))
 
     row = db.execute("SELECT * FROM settlement_outcomes WHERE settlement_id=?", (sid,)).fetchone()
-    decision = resolve_quarantined_row(db, city_map, row)
+    decision = resolve_disputed_row(db, city_map, row)
     assert decision["disposition"] == "verify"
     assert decision["winning_bin"] == "26°C"
     assert decision["declared_source_type"] == "HKO"
@@ -456,21 +456,21 @@ def test_declared_source_disagreement_verifies_and_records_conflict(db, monkeypa
 
 def test_pc_audit_reason_reserved_when_venue_unresolved(db, monkeypatch):
     city_map = {"Testville": _wu_city("Testville")}
-    sid = _insert_quarantined(
+    sid = _insert_disputed(
         db, city="Testville", target_date="2026-03-08", metric="high",
         market_slug="highest-temperature-in-testville-on-march-8-2026",
-        provenance={"quarantine_reason": "pc_audit_dst_spring_forward_bin_mismatch"},
+        provenance={"dispute_reason": "pc_audit_dst_spring_forward_bin_mismatch"},
     )
     _mock_venue(monkeypatch, event=None)  # venue has no such event / not yet resolved
 
     row = db.execute("SELECT * FROM settlement_outcomes WHERE settlement_id=?", (sid,)).fetchone()
-    decision = resolve_quarantined_row(db, city_map, row)
+    decision = resolve_disputed_row(db, city_map, row)
     assert decision["disposition"] == "manual_audit_reserved"
 
     report = drain(db, apply=True, city_map=city_map)
     assert report["disposition_counts"].get("verify", 0) == 0
     after = db.execute("SELECT authority FROM settlement_outcomes WHERE settlement_id=?", (sid,)).fetchone()
-    assert after["authority"] == "QUARANTINED"
+    assert after["authority"] == "DISPUTED"
 
 
 def test_pc_audit_reason_reported_not_reactivated_when_venue_resolved(db, monkeypatch):
@@ -478,15 +478,15 @@ def test_pc_audit_reason_reported_not_reactivated_when_venue_resolved(db, monkey
     reported separately for operator review (the one honesty carve-out)."""
     city_map = {"Testville": _wu_city("Testville")}
     _insert_obs(db, city="Testville", target_date="2026-03-20", source="wu_icao_history", high_temp=29.0)
-    sid = _insert_quarantined(
+    sid = _insert_disputed(
         db, city="Testville", target_date="2026-03-20", metric="high",
         market_slug="highest-temperature-in-testville-on-march-20-2026",
-        provenance={"quarantine_reason": "pc_audit_shenzhen_drift_nonreproducible"},
+        provenance={"dispute_reason": "pc_audit_shenzhen_drift_nonreproducible"},
     )
     _mock_venue(monkeypatch, event=_resolved_event("29°C"))
 
     row = db.execute("SELECT * FROM settlement_outcomes WHERE settlement_id=?", (sid,)).fetchone()
-    decision = resolve_quarantined_row(db, city_map, row)
+    decision = resolve_disputed_row(db, city_map, row)
     assert decision["disposition"] == "operator_review_venue_resolved"
     assert "venue_resolution" in decision
 
@@ -494,58 +494,58 @@ def test_pc_audit_reason_reported_not_reactivated_when_venue_resolved(db, monkey
     assert report["disposition_counts"].get("verify", 0) == 0
     assert report["disposition_counts"]["operator_review_venue_resolved"] == 1
     after = db.execute("SELECT authority FROM settlement_outcomes WHERE settlement_id=?", (sid,)).fetchone()
-    assert after["authority"] == "QUARANTINED"  # never auto-written
+    assert after["authority"] == "DISPUTED"  # never auto-written
 
 
 # ---------------------------------------------------------------------------
 # Venue unresolved / network fault — fail closed, nothing invented
 # ---------------------------------------------------------------------------
 
-def test_venue_unresolved_stays_quarantined(db, monkeypatch):
+def test_venue_unresolved_stays_disputed(db, monkeypatch):
     city_map = {"Testville": _wu_city("Testville")}
     _insert_obs(db, city="Testville", target_date="2026-06-01", source="wu_icao_history", high_temp=20.0)
-    sid = _insert_quarantined(
+    sid = _insert_disputed(
         db, city="Testville", target_date="2026-06-01", metric="high",
         market_slug="highest-temperature-in-testville-on-june-1-2026",
-        provenance={"quarantine_reason": "harvester_live_obs_outside_bin"},
+        provenance={"dispute_reason": "harvester_live_obs_outside_bin"},
     )
     _mock_venue(monkeypatch, event=_unresolved_event("20-21°C"))
 
     row = db.execute("SELECT * FROM settlement_outcomes WHERE settlement_id=?", (sid,)).fetchone()
-    decision = resolve_quarantined_row(db, city_map, row)
+    decision = resolve_disputed_row(db, city_map, row)
     assert decision["disposition"] == "venue_unresolved"
 
     drain(db, apply=True, city_map=city_map)
     after = db.execute("SELECT authority FROM settlement_outcomes WHERE settlement_id=?", (sid,)).fetchone()
-    assert after["authority"] == "QUARANTINED"
+    assert after["authority"] == "DISPUTED"
 
 
-def test_venue_no_event_found_stays_quarantined(db, monkeypatch):
+def test_venue_no_event_found_stays_disputed(db, monkeypatch):
     city_map = {"Testville": _wu_city("Testville")}
-    sid = _insert_quarantined(
+    sid = _insert_disputed(
         db, city="Testville", target_date="2026-06-01", metric="high",
         market_slug="highest-temperature-in-testville-on-june-1-2026",
-        provenance={"quarantine_reason": "harvester_live_obs_outside_bin"},
+        provenance={"dispute_reason": "harvester_live_obs_outside_bin"},
     )
     _mock_venue(monkeypatch, event=None)
 
     row = db.execute("SELECT * FROM settlement_outcomes WHERE settlement_id=?", (sid,)).fetchone()
-    decision = resolve_quarantined_row(db, city_map, row)
+    decision = resolve_disputed_row(db, city_map, row)
     assert decision["disposition"] == "venue_unresolved"
 
 
 def test_synthetic_uma_backfill_slug_falls_back_to_derived_candidate(db, monkeypatch):
-    """Live-DB finding (2026-07-04): 2,077 rows repo-wide (181 of the 383 QUARANTINED) carry a
+    """Live-DB finding (2026-07-04): 2,077 rows repo-wide (181 of the 383 DISPUTED) carry a
     SYNTHETIC market_slug like 'uma_backfill_nyc_2026-01-02_high' — not a real, queryable Gamma
     slug (real slugs are hyphen-only kebab-case; this one has underscores). Trusting it as
     authoritative silently means every one of these rows always resolves 'no event found' even
     when the market DOES exist under the standard derived slug. This is the fix that took the
     live recoverable count from 93 to 260 of 383."""
     city_map = {"NYC": _wu_city("NYC")}
-    sid = _insert_quarantined(
+    sid = _insert_disputed(
         db, city="NYC", target_date="2026-01-02", metric="high",
         market_slug="uma_backfill_nyc_2026-01-02_high",
-        provenance={"quarantine_reason": "harvester_live_obs_outside_bin"},
+        provenance={"dispute_reason": "harvester_live_obs_outside_bin"},
     )
     _insert_obs(db, city="NYC", target_date="2026-01-02", source="wu_icao_history", high_temp=30.0, unit="C")
 
@@ -560,7 +560,7 @@ def test_synthetic_uma_backfill_slug_falls_back_to_derived_candidate(db, monkeyp
     monkeypatch.setattr(dsq, "_fetch_venue_event_by_slug", fake_fetch)
 
     row = db.execute("SELECT * FROM settlement_outcomes WHERE settlement_id=?", (sid,)).fetchone()
-    decision = resolve_quarantined_row(db, city_map, row)
+    decision = resolve_disputed_row(db, city_map, row)
     assert decision["disposition"] == "verify"
     assert decision["winning_bin"] == "30°C"
 
@@ -569,10 +569,10 @@ def test_real_gamma_slug_is_queried_directly_without_derivation(db, monkeypatch)
     """A real, persisted market_slug (no underscores) is queried as-is — the derived-candidate
     fallback path must never be reached when the real slug already resolves."""
     city_map = {"Testville": _wu_city("Testville")}
-    sid = _insert_quarantined(
+    sid = _insert_disputed(
         db, city="Testville", target_date="2026-06-01", metric="high",
         market_slug="highest-temperature-in-testville-on-june-1-2026",
-        provenance={"quarantine_reason": "harvester_live_obs_outside_bin"},
+        provenance={"dispute_reason": "harvester_live_obs_outside_bin"},
     )
     _insert_obs(db, city="Testville", target_date="2026-06-01", source="wu_icao_history", high_temp=20.0)
 
@@ -585,7 +585,7 @@ def test_real_gamma_slug_is_queried_directly_without_derivation(db, monkeypatch)
     monkeypatch.setattr(dsq, "_fetch_venue_event_by_slug", fake_fetch)
 
     row = db.execute("SELECT * FROM settlement_outcomes WHERE settlement_id=?", (sid,)).fetchone()
-    decision = resolve_quarantined_row(db, city_map, row)
+    decision = resolve_disputed_row(db, city_map, row)
     assert decision["disposition"] == "verify"
     assert queried_slugs == ["highest-temperature-in-testville-on-june-1-2026"]
 
@@ -596,16 +596,16 @@ def test_venue_resolution_stamps_market_level_uma_status(db, monkeypatch):
     silent top-level miss (a real live-DB bug this drain script's own diagnosis run caught: the
     event-level lookup always returned null)."""
     city_map = {"Testville": _wu_city("Testville")}
-    sid = _insert_quarantined(
+    sid = _insert_disputed(
         db, city="Testville", target_date="2026-06-01", metric="high",
         market_slug="highest-temperature-in-testville-on-june-1-2026",
-        provenance={"quarantine_reason": "harvester_live_obs_outside_bin"},
+        provenance={"dispute_reason": "harvester_live_obs_outside_bin"},
     )
     _insert_obs(db, city="Testville", target_date="2026-06-01", source="wu_icao_history", high_temp=20.0)
     _mock_venue(monkeypatch, event=_resolved_event("20°C", uma_status="resolved"))
 
     row = db.execute("SELECT * FROM settlement_outcomes WHERE settlement_id=?", (sid,)).fetchone()
-    decision = resolve_quarantined_row(db, city_map, row)
+    decision = resolve_disputed_row(db, city_map, row)
     assert decision["disposition"] == "verify"
     assert decision["venue_resolution"]["umaResolutionStatus"] == "resolved"
 
@@ -615,15 +615,15 @@ def test_venue_fetch_error_fails_closed_no_partial_write(db, monkeypatch):
     the row stays exactly as it was, and the error is reported."""
     city_map = {"Testville": _wu_city("Testville")}
     _insert_obs(db, city="Testville", target_date="2026-06-01", source="wu_icao_history", high_temp=20.0)
-    sid = _insert_quarantined(
+    sid = _insert_disputed(
         db, city="Testville", target_date="2026-06-01", metric="high",
         market_slug="highest-temperature-in-testville-on-june-1-2026",
-        provenance={"quarantine_reason": "harvester_live_obs_outside_bin"},
+        provenance={"dispute_reason": "harvester_live_obs_outside_bin"},
     )
     _mock_venue(monkeypatch, raises=True)
 
     row = db.execute("SELECT * FROM settlement_outcomes WHERE settlement_id=?", (sid,)).fetchone()
-    decision = resolve_quarantined_row(db, city_map, row)
+    decision = resolve_disputed_row(db, city_map, row)
     assert decision["disposition"] == "venue_fetch_error"
     assert "simulated network fault" in decision["detail"]
 
@@ -631,9 +631,9 @@ def test_venue_fetch_error_fails_closed_no_partial_write(db, monkeypatch):
     assert report["disposition_counts"]["venue_fetch_error"] == 1
     assert report["disposition_counts"].get("verify", 0) == 0
     after = db.execute("SELECT * FROM settlement_outcomes WHERE settlement_id=?", (sid,)).fetchone()
-    assert after["authority"] == "QUARANTINED"
+    assert after["authority"] == "DISPUTED"
     assert after["winning_bin"] is None
-    assert after["provenance_json"] == json.dumps({"quarantine_reason": "harvester_live_obs_outside_bin"})
+    assert after["provenance_json"] == json.dumps({"dispute_reason": "harvester_live_obs_outside_bin"})
 
 
 # ---------------------------------------------------------------------------
@@ -643,10 +643,10 @@ def test_venue_fetch_error_fails_closed_no_partial_write(db, monkeypatch):
 def test_dry_run_writes_nothing(db, monkeypatch):
     city_map = {"Testville": _wu_city("Testville")}
     _insert_obs(db, city="Testville", target_date="2026-06-01", source="wu_icao_history", high_temp=20.0)
-    sid = _insert_quarantined(
+    sid = _insert_disputed(
         db, city="Testville", target_date="2026-06-01", metric="high",
         market_slug="highest-temperature-in-testville-on-june-1-2026",
-        provenance={"quarantine_reason": "harvester_live_obs_outside_bin"},
+        provenance={"dispute_reason": "harvester_live_obs_outside_bin"},
     )
     _mock_venue(monkeypatch, event=_resolved_event("20°C"))
 
@@ -654,16 +654,16 @@ def test_dry_run_writes_nothing(db, monkeypatch):
     assert report["applied"] is False
     assert report["disposition_counts"]["verify"] == 1  # decision computed...
     after = db.execute("SELECT authority FROM settlement_outcomes WHERE settlement_id=?", (sid,)).fetchone()
-    assert after["authority"] == "QUARANTINED"  # ...but never written
+    assert after["authority"] == "DISPUTED"  # ...but never written
 
 
 def test_apply_is_idempotent(db, monkeypatch):
     city_map = {"Testville": _wu_city("Testville")}
     _insert_obs(db, city="Testville", target_date="2026-06-01", source="wu_icao_history", high_temp=20.0)
-    sid = _insert_quarantined(
+    sid = _insert_disputed(
         db, city="Testville", target_date="2026-06-01", metric="high",
         market_slug="highest-temperature-in-testville-on-june-1-2026",
-        provenance={"quarantine_reason": "harvester_live_obs_outside_bin"},
+        provenance={"dispute_reason": "harvester_live_obs_outside_bin"},
     )
     _mock_venue(monkeypatch, event=_resolved_event("20°C"))
 
@@ -671,7 +671,7 @@ def test_apply_is_idempotent(db, monkeypatch):
     assert first["disposition_counts"]["verify"] == 1
 
     second = drain(db, apply=True, city_map=city_map)
-    assert second["quarantined_before"] == 0
+    assert second["disputed_before"] == 0
     assert second["disposition_counts"].get("verify", 0) == 0
 
     row = db.execute("SELECT * FROM settlement_outcomes WHERE settlement_id=?", (sid,)).fetchone()
@@ -732,12 +732,12 @@ def test_missing_market_fetch_error_does_not_insert(db, monkeypatch):
 def test_missing_market_already_present_is_not_touched(db, monkeypatch):
     city_map = {"Testville": _wu_city("Testville")}
     city_name, target_date, metric = "Testville", "2026-06-01", "high"
-    sid = _insert_quarantined(
+    sid = _insert_disputed(
         db, city=city_name, target_date=target_date, metric=metric,
-        provenance={"quarantine_reason": "harvester_live_no_obs"},
+        provenance={"dispute_reason": "harvester_live_no_obs"},
     )
     _mock_venue(monkeypatch, event=None)
     report = drain(db, apply=True, missing_markets=((city_name, target_date, metric),), city_map=city_map)
     assert report["missing_markets"][0]["disposition"] == "already_present"
     row = db.execute("SELECT * FROM settlement_outcomes WHERE settlement_id=?", (sid,)).fetchone()
-    assert row["authority"] == "QUARANTINED"  # untouched by the missing-market path
+    assert row["authority"] == "DISPUTED"  # untouched by the missing-market path

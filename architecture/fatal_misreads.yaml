@@ -178,7 +178,10 @@ misreads:
       the absence of LOW settlement rows for (city, date) tuples that fall
       outside this scope is NOT a backfill miss, NOT a scraper bug, NOT a
       schema gap, and NOT actionable. Do not write retro-scrapers, do not
-      open quarantine reactivation tickets, do not search archives.
+      open dispute reactivation tickets (nee "quarantine reactivation
+      tickets" — settlements.authority renamed QUARANTINED -> DISPUTED
+      2026-07-11 per docs/rebuild/quarantine_excision_2026-07-11.md §T2b),
+      do not search archives.
       Confirmed via gamma-api.polymarket.com 2026-04-28: 48 closed LOW
       events / 18 active, dates 2026-04-15..2026-04-29. The HIGH (max
       temperature) market series predates LOW by ~2 years — this

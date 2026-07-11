@@ -24,7 +24,7 @@ Eleven relationship tests covering:
   8. test_bootstrap_stats_correctness — synthetic 100-bootstrap params → known std/p5/p95 math
   9. test_sample_quality_boundaries — exactly 10/30/100 boundaries (LOW-CAVEAT-EO-2-2 lesson)
   10. test_in_window_flag — fitted_at inside vs outside window
-  11. test_unverified_quarantined_inactive_all_excluded — defense in depth: triple filter
+  11. test_unverified_disputed_inactive_all_excluded — defense in depth: triple filter
 """
 from __future__ import annotations
 
@@ -147,7 +147,7 @@ def test_list_active_platt_models_filters_to_active_verified():
     _insert_v2_raw(conn, cluster="A", season="DJF", is_active=1, authority="VERIFIED")
     _insert_v2_raw(conn, cluster="B", season="DJF", is_active=0, authority="VERIFIED")
     _insert_v2_raw(conn, cluster="C", season="DJF", is_active=1, authority="UNVERIFIED")
-    _insert_v2_raw(conn, cluster="D", season="DJF", is_active=1, authority="QUARANTINED")
+    _insert_v2_raw(conn, cluster="D", season="DJF", is_active=1, authority="DISPUTED")
     rows = list_active_platt_models(conn)
     clusters = sorted(r["cluster"] for r in rows)
     assert clusters == ["A"], f"only A is active+VERIFIED; got {clusters}"
@@ -161,7 +161,7 @@ def test_list_active_platt_models_filters_to_active_verified_canonical():
     _insert_legacy_raw(conn, bucket_key="A_DJF", is_active=1, authority="VERIFIED")
     _insert_legacy_raw(conn, bucket_key="B_DJF", is_active=0, authority="VERIFIED")
     _insert_legacy_raw(conn, bucket_key="C_DJF", is_active=1, authority="UNVERIFIED")
-    _insert_legacy_raw(conn, bucket_key="D_DJF", is_active=1, authority="QUARANTINED")
+    _insert_legacy_raw(conn, bucket_key="D_DJF", is_active=1, authority="DISPUTED")
     rows = list_active_platt_models(conn)
     # B3cont: rows keyed by model_key (not bucket_key). Only A_DJF is active+VERIFIED.
     assert len(rows) == 1, f"only A_DJF row is active+VERIFIED; got {len(rows)} rows"
@@ -363,8 +363,8 @@ def test_in_window_flag():
     assert snapshot[_model_key_for_bucket("b_old")]["in_window"] is False
 
 
-def test_unverified_quarantined_inactive_all_excluded():
-    """RELATIONSHIP: defense-in-depth — UNVERIFIED, QUARANTINED, AND is_active=0
+def test_unverified_disputed_inactive_all_excluded():
+    """RELATIONSHIP: defense-in-depth — UNVERIFIED, DISPUTED, AND is_active=0
     rows ALL excluded from the projection. This pins the upstream-clipping
     invariant documented at module docstring (LOW-NUANCE-WP-2-1 carry-forward).
     """
@@ -372,7 +372,7 @@ def test_unverified_quarantined_inactive_all_excluded():
     _insert_legacy_raw(conn, bucket_key="ok",         is_active=1, authority="VERIFIED")
     _insert_legacy_raw(conn, bucket_key="inactive",   is_active=0, authority="VERIFIED")
     _insert_legacy_raw(conn, bucket_key="unverified", is_active=1, authority="UNVERIFIED")
-    _insert_legacy_raw(conn, bucket_key="quaran",     is_active=1, authority="QUARANTINED")
+    _insert_legacy_raw(conn, bucket_key="disput",     is_active=1, authority="DISPUTED")
     snapshot = compute_platt_parameter_snapshot_per_bucket(conn)
     # B3cont: snapshot keyed by model_key, not bucket_key
     expected_key = _model_key_for_bucket("ok")

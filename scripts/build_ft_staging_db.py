@@ -57,7 +57,7 @@ CREATE TABLE IF NOT EXISTS calibration_pairs_v2 (
     bias_corrected INTEGER NOT NULL DEFAULT 0
         CHECK (bias_corrected IN (0, 1)),
     authority TEXT NOT NULL DEFAULT 'UNVERIFIED'
-        CHECK (authority IN ('VERIFIED', 'UNVERIFIED', 'QUARANTINED')),
+        CHECK (authority IN ('VERIFIED', 'UNVERIFIED', 'DISPUTED')),
     bin_source TEXT NOT NULL DEFAULT 'legacy',
     snapshot_id INTEGER REFERENCES ensemble_snapshots(snapshot_id),
     data_version TEXT NOT NULL,

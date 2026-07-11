@@ -1,15 +1,18 @@
 # Created: 2026-05-01
-# Last reused/audited: 2026-05-01
+# Last reused/audited: 2026-07-11
 # Authority basis: ultrareview25_remediation 2026-05-01 P1-3 +
 #                  repo_review_2026-05-01 SYNTHESIS K-C +
-#                  INV-23 (DEGRADED_PROJECTION must be a distinct non-VERIFIED label)
+#                  INV-23 (DEGRADED_PROJECTION must be a distinct non-VERIFIED label) +
+#                  docs/rebuild excision packet T2b, 2026-07-11 (third authority-tier
+#                  member renamed to DISPUTED: a per-row scoped dispute with an
+#                  evidence-backed release path, not a global freeze)
 """Closed enumeration for truth-file authority labels (grammar A).
 
 Why this exists
 ---------------
 Before this module landed, `src/state/portfolio.py:_TRUTH_AUTHORITY_MAP` used
 bare string values (`"VERIFIED"`, `"UNVERIFIED"`, `"DEGRADED_PROJECTION"`,
-`"QUARANTINED"`). The 2026-05-01 multi-lane review found that:
+`"DISPUTED"`). The 2026-05-01 multi-lane review found that:
 
 1. Producers stamped these correctly.
 2. **No production consumer reads `truth["authority"]`** (verified by grep
@@ -18,7 +21,8 @@ bare string values (`"VERIFIED"`, `"UNVERIFIED"`, `"DEGRADED_PROJECTION"`,
    forward-looking, not retroactive.
 3. The DB CHECK constraints across `src/state/db.py` and
    `src/state/schema/v2_schema.py` enumerate a 3-set
-   (`VERIFIED, UNVERIFIED, QUARANTINED`); `DEGRADED_PROJECTION` lives
+   (`VERIFIED, UNVERIFIED, DISPUTED` — the third member renamed 2026-07-11
+   per the T2b excision packet); `DEGRADED_PROJECTION` lives
    ONLY in the JSON truth-stamp lane. Persisting it to a DB row would
    violate every CHECK constraint by design.
 
@@ -83,7 +87,7 @@ class TruthAuthority(StrEnum):
 
     VERIFIED = "VERIFIED"
     UNVERIFIED = "UNVERIFIED"
-    QUARANTINED = "QUARANTINED"
+    DISPUTED = "DISPUTED"  # renamed 2026-07-11, T2b excision packet (name only; semantics unchanged)
     DEGRADED_PROJECTION = "DEGRADED_PROJECTION"
 
 
@@ -93,7 +97,7 @@ class TruthAuthority(StrEnum):
 # Why these exist:
 #   The 2026-05-01 P1-3 audit found 10 production sites that reduce authority
 #   to an implicit two-value boolean (`!= "VERIFIED"`, `not in {"VERIFIED",
-#   "UNVERIFIED", "QUARANTINED"}`, etc.). Refactoring those 10 call sites
+#   "UNVERIFIED", "DISPUTED"}`, etc.). Refactoring those 10 call sites
 #   inline is high blast-radius (5 of 10 are wrong-grammar — ScanAuthority,
 #   not TruthAuthority — per audit §3.4). Instead, we expose two NAMED
 #   predicates so future consumers reach for the right semantic without
@@ -132,8 +136,9 @@ def is_authoritative(a: TruthAuthority) -> bool:
 def requires_human_review(a: TruthAuthority) -> bool:
     """Return True iff `a` represents a state that should not auto-progress.
 
-    `QUARANTINED` and `DEGRADED_PROJECTION` both fall into this bucket:
-      - QUARANTINED: explicit operator-flagged held-state per INV-23.
+    `DISPUTED` and `DEGRADED_PROJECTION` both fall into this bucket:
+      - DISPUTED: explicit operator-flagged held-state per INV-23 (renamed
+        2026-07-11, T2b excision packet; semantics unchanged).
       - DEGRADED_PROJECTION: producer admitted "we cannot prove this row
         is canonical-DB sourced" (INV-23 distinct non-VERIFIED label).
 
@@ -141,7 +146,7 @@ def requires_human_review(a: TruthAuthority) -> bool:
     "no claim made yet"; a fresh `build_truth_metadata()` row is
     UNVERIFIED but doesn't need human attention until it survives an
     upgrade cycle. New consumers gating on "should I page a human"
-    should call this rather than `a in {"QUARANTINED", "DEGRADED_PROJECTION"}`.
+    should call this rather than `a in {"DISPUTED", "DEGRADED_PROJECTION"}`.
 
     Type-only: refuses bare strings (same rationale as `is_authoritative`).
     """
@@ -150,7 +155,7 @@ def requires_human_review(a: TruthAuthority) -> bool:
             f"requires_human_review requires a TruthAuthority instance; got "
             f"{type(a).__name__}. Coerce via `TruthAuthority(value)`."
         )
-    return a in {TruthAuthority.QUARANTINED, TruthAuthority.DEGRADED_PROJECTION}
+    return a in {TruthAuthority.DISPUTED, TruthAuthority.DEGRADED_PROJECTION}
 
 
 __all__ = ["TruthAuthority", "is_authoritative", "requires_human_review"]

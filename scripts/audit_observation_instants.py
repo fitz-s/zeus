@@ -28,7 +28,7 @@ What it reports
   ``tier_resolver.expected_source_for_city(city)`` (per-city check;
   catches Moscow-with-LLBG-source).
 - ``authority_unverified_rows``: count of rows with authority='UNVERIFIED'
-  or 'QUARANTINED' (readers filter these out; writing them is forbidden
+  or 'DISPUTED' (readers filter these out; writing them is forbidden
   by the writer, but audit sweeps the base table for legacy rows).
 - ``openmeteo_rows``: count of rows with source LIKE '%openmeteo%'
   (AC4 — Day-0 ghost-trade regression pin).
@@ -204,7 +204,7 @@ def _authority_unverified_rows(
 ) -> int:
     (count,) = conn.execute(
         "SELECT COUNT(*) FROM observation_instants "
-        "WHERE data_version = ? AND authority IN ('UNVERIFIED', 'QUARANTINED')",
+        "WHERE data_version = ? AND authority IN ('UNVERIFIED', 'DISPUTED')",
         (data_version,),
     ).fetchone()
     return int(count)

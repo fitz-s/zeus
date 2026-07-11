@@ -56,7 +56,7 @@ CREATE TABLE settlement_outcomes (
     settlement_source TEXT,
     settled_at TEXT,
     authority TEXT NOT NULL DEFAULT 'UNVERIFIED'
-        CHECK (authority IN ('VERIFIED', 'UNVERIFIED', 'QUARANTINED')),
+        CHECK (authority IN ('VERIFIED', 'UNVERIFIED', 'DISPUTED')),
     provenance_json TEXT NOT NULL DEFAULT '{}',
     recorded_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     UNIQUE(city, target_date, temperature_metric)

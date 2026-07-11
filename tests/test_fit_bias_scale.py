@@ -5,7 +5,7 @@
 #   on the SAME data must inflate k strictly above 1.1 (the authority's proven pathology
 #   k_wrong^2 = k_true^2 + (delta/sigma)^2). 2026-06-13 (addendum C1): added era-aware partial-pooling
 #   RELATIONSHIP tests — two-era step (free recovers / pooled biased / EB between & closer / LRT
-#   rejects), single-era collapse (Sigma->0), step_change_time_decay bias formula pin, QUARANTINED
+#   rejects), single-era collapse (Sigma->0), step_change_time_decay bias formula pin, DISPUTED
 #   exclusion pin, era_mode artifact-schema pin, RPS sanity.
 # Reuse: Run as a unit test (no DB). Re-validate after any change to the likelihood, EB shrinkage, era
 #   partial pooling, or the data-frame conventions in fit_bias_scale.py.
@@ -382,33 +382,33 @@ def test_step_change_decay_contamination_share_exact_finite_window():
     assert fbs.step_change_decay_contamination_share(0.0, 50, 300) == 0.0
 
 
-def test_quarantined_row_never_enters_cells():
-    """PIN (addendum A6): a QUARANTINED settlement row never produces a cell.
+def test_disputed_row_never_enters_cells():
+    """PIN (addendum A6): a DISPUTED settlement row never produces a cell.
 
     The historical-era builder reconstructs cells only from calibration_pairs rows joined to VERIFIED
-    settlements; the live builder requires a winning_bin. A QUARANTINED outcome (winning_bin NULL, or
+    settlements; the live builder requires a winning_bin. A DISPUTED outcome (winning_bin NULL, or
     simply not joined because the SQL filters authority='VERIFIED') must yield ZERO cells. We exercise
-    the in-memory builder directly with a quarantined-shaped row (winning_bin=None) and assert no cell.
+    the in-memory builder directly with a disputed-shaped row (winning_bin=None) and assert no cell.
     """
-    # calibration_pairs-shaped rows for one cell whose settlement is QUARANTINED -> winning_bin None.
+    # calibration_pairs-shaped rows for one cell whose settlement is DISPUTED -> winning_bin None.
     rows = [
         # (city, target_date, decision_group_id, range_label, p_raw, outcome, winning_bin, sval, sunit)
-        ("Quarantine City", "2026-03-08", "grp1", "63-64°F", 0.30, 0, None, 64.0, "F"),
-        ("Quarantine City", "2026-03-08", "grp1", "65-66°F", 0.40, 0, None, 64.0, "F"),
-        ("Quarantine City", "2026-03-08", "grp1", "67-68°F", 0.30, 0, None, 64.0, "F"),
+        ("Dispute City", "2026-03-08", "grp1", "63-64°F", 0.30, 0, None, 64.0, "F"),
+        ("Dispute City", "2026-03-08", "grp1", "65-66°F", 0.40, 0, None, 64.0, "F"),
+        ("Dispute City", "2026-03-08", "grp1", "67-68°F", 0.30, 0, None, 64.0, "F"),
     ]
     cells = fbs._build_hist_cells(rows)
     # winning_bin=None + the won index cannot be resolved by label; _winning_index falls back to the
     # settlement_value pass which WOULD pick a bin — so to truly pin A6 exclusion we assert the builder
     # is only ever fed VERIFIED rows. Here we verify the SQL-level guarantee: the era query embeds the
-    # authority='VERIFIED' AND winning_bin IS NOT NULL filter, so quarantined rows are dropped upstream.
+    # authority='VERIFIED' AND winning_bin IS NOT NULL filter, so disputed rows are dropped upstream.
     assert "so.authority='VERIFIED'" in fbs._ERA_HIST_QUERY
     assert "winning_bin IS NOT NULL" in fbs._ERA_HIST_QUERY
     # And the live join (existing) carries the same guard.
     assert "so.authority='VERIFIED'" in fbs._fss._FIT_QUERY
     assert "winning_bin IS NOT NULL" in fbs._fss._FIT_QUERY
     # The builder itself, given a coherent VERIFIED-shaped cell, DOES produce exactly one cell — proving
-    # the only gate keeping quarantined rows out is the authority filter, which both queries carry.
+    # the only gate keeping disputed rows out is the authority filter, which both queries carry.
     ok_rows = [
         ("Verified City", "2026-03-08", "grp1", "63-64°F", 0.30, 0, "65-66°F", 65.0, "F"),
         ("Verified City", "2026-03-08", "grp1", "65-66°F", 0.40, 1, "65-66°F", 65.0, "F"),
@@ -515,7 +515,7 @@ if __name__ == "__main__":
     test_single_era_lrt_does_not_reject_and_eb_collapses_to_pooled()
     test_step_change_time_decay_bias_formula_exact()
     test_step_change_decay_contamination_share_exact_finite_window()
-    test_quarantined_row_never_enters_cells()
+    test_disputed_row_never_enters_cells()
     test_hist_won_bin_exact_label_avoids_wide_grid_substring_collision()
     test_era_mode_artifact_schema_keys_present()
     test_rps_is_zero_for_perfect_prediction_and_positive_otherwise()

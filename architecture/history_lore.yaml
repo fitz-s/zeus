@@ -1753,7 +1753,7 @@ cards:
       against writers that bypass them.
     trigger_context:
       - settlement writes
-      - authority-grade transitions (VERIFIED / UNVERIFIED / QUARANTINED)
+      - authority-grade transitions (VERIFIED / UNVERIFIED / DISPUTED, nee QUARANTINED)
       - data migrations that touch authority columns
       - direct SQL ad-hoc queries on the operations DB
     wrong_moves:
@@ -1780,7 +1780,7 @@ cards:
       Only a complete replacement of SQLite with an engine whose CHECK /
       trigger semantics differ materially supersedes this rule.
     routing:
-      task_terms: [authority, monotonicity, settlement authority, DB trigger, VERIFIED, QUARANTINED]
+      task_terms: [authority, monotonicity, settlement authority, DB trigger, VERIFIED, DISPUTED, QUARANTINED]
       file_patterns:
         - src/state/db.py
         - tests/test_settlements_*.py
@@ -2068,7 +2068,7 @@ cards:
     trigger_context:
       - authority-grade columns on bulk-imported data
       - migrations that back-stamp historical rows
-      - VERIFIED / UNVERIFIED / QUARANTINED taxonomies
+      - VERIFIED / UNVERIFIED / DISPUTED (nee QUARANTINED) taxonomies
     wrong_moves:
       - default unknown-provenance rows to VERIFIED on migration
       - treat absence of provenance as verified-by-proxy (nothing flagged it)
@@ -2076,7 +2076,9 @@ cards:
     correct_rule: >
       VERIFIED is a strong claim that requires per-row evidence. A row
       without verifiable source + timestamp + authority chain CANNOT
-      be VERIFIED; it is UNVERIFIED or QUARANTINED. Authority inflation
+      be VERIFIED; it is UNVERIFIED or DISPUTED (nee QUARANTINED,
+      renamed 2026-07-11 per docs/rebuild/quarantine_excision_2026-07-11.md
+      §T2b). Authority inflation
       is the canonical data provenance antipattern and the direct
       embodiment of Fitz Constraint #4 "data provenance > code
       correctness".
@@ -2105,7 +2107,7 @@ cards:
       - risk actions that depend on settlement authority
     zero_context_digest: >
       VERIFIED without per-row evidence is a lie the system tells
-      itself. Demote to UNVERIFIED/QUARANTINED until evidence lands.
+      itself. Demote to UNVERIFIED/DISPUTED until evidence lands.
 
   - id: DATA_COLLECTION_AND_TRADING_DAEMON_ARE_INDEPENDENT
     status: active_law
@@ -2245,7 +2247,7 @@ cards:
     residual_risk: >
       Legacy rows pre-INV-14 do not carry the spine. Migration backfills
       the spine when source+metric are derivable; otherwise row is
-      QUARANTINED.
+      DISPUTED (nee QUARANTINED).
     invalidation_condition: >
       Only a replacement identity scheme (e.g. content-addressable
       hashes derived from full canonical context) supersedes the
@@ -2483,7 +2485,11 @@ cards:
       existing - (P1) durable command truth - (P2) semantic loop
       closure - (P3) decision law. Skipping phases re-admits inference.
 
-  - id: CWA_STATION_IS_LEGACY_QUARANTINE_PATH_NOT_DEAD_CODE
+  - id: CWA_STATION_IS_LEGACY_DISPUTED_PATH_NOT_DEAD_CODE
+    # nee CWA_STATION_IS_LEGACY_QUARANTINE_PATH_NOT_DEAD_CODE, renamed 2026-07-11
+    # per docs/rebuild/quarantine_excision_2026-07-11.md §T2b (settlements.authority
+    # QUARANTINED -> DISPUTED). Lesson is unchanged: this is legacy-retroactive
+    # writer behavior, NOT dead code — do not delete the dispatch entry.
     status: active_knowledge
     severity: medium
     sources:
@@ -2513,31 +2519,31 @@ cards:
       cwa_station is a LEGACY RETROACTIVE path Taipei used pre-2026-04-15
       before migrating to wu_icao. The dispatch entry remains because
       harvester retroactive reconstruction of pre-migration dates still
-      writes via this path; every row it produces is authority='QUARANTINED'
-      because there is no accepted CWA proxy (confirmed at
+      writes via this path; every row it produces is authority='DISPUTED'
+      (nee 'QUARANTINED') because there is no accepted CWA proxy (confirmed at
       src/execution/harvester.py:273). The 7 live cwa_no_collector_v0
       rows in settlements are all Taipei city, target_dates 2026-03-16
-      through 2026-03-22, all QUARANTINED, all settled_at 2026-04-23T19:50:34
+      through 2026-03-22, all DISPUTED, all settled_at 2026-04-23T19:50:34
       (single batch P-E reconstruction after migration). tier_resolver.py:72
       comment is accurate (no currently-active city uses cwa_station) AND
-      the dispatch entry is needed (past QUARANTINED rows still write
+      the dispatch entry is needed (past DISPUTED rows still write
       correctly). Three-way apparent inconsistency reconciles as
-      legacy-retroactive-quarantine, not dead code.
+      legacy-retroactive-dispute, not dead code.
     antibodies:
       docs:
         - architecture/history_lore.yaml (this card)
         - src/execution/harvester.py:273
         - src/data/tier_resolver.py:72
       pattern:
-        - sqlite3 state/zeus-world.db probe confirms 7 Taipei QUARANTINED rows
+        - sqlite3 state/zeus-world.db probe confirms 7 Taipei DISPUTED rows
         - CANONICAL_SETTLEMENT_DATA_VERSIONS retains cwa_no_collector_v0
     residual_risk: >
       If any future city is added with settlement_source_type='cwa_station',
-      it will hit the 'no accepted proxy' path and produce QUARANTINED rows.
+      it will hit the 'no accepted proxy' path and produce DISPUTED rows.
       Before adding such a city, a CWA collector must be implemented OR
       the city must be configured with a different source_type. The
       historical 7-row residue does NOT contaminate training because
-      QUARANTINED authority is filtered by every canonical reader.
+      DISPUTED authority is filtered by every canonical reader.
     invalidation_condition: >
       Implementing a working CWA collector promotes cwa_station to an
       active writer path; update tier_resolver comment and this card
@@ -2553,9 +2559,9 @@ cards:
       - canonical settlement data_version allowlist
       - Phase 0 tier eligibility
     zero_context_digest: >
-      cwa_station is legacy-retroactive-QUARANTINE. 7 Taipei pre-migration
-      (2026-04-15) rows exist with data_version=cwa_no_collector_v0, all
-      QUARANTINED, all written by harvester retroactive reconstruction.
+      cwa_station is legacy-retroactive-DISPUTED (nee QUARANTINE). 7 Taipei
+      pre-migration (2026-04-15) rows exist with data_version=cwa_no_collector_v0,
+      all DISPUTED, all written by harvester retroactive reconstruction.
       tier_resolver comment 'no city uses this today' is correct; harvester
       dispatch entry is needed for historical paths. Not dead code, not
       active writer — legacy reconstruction shell.

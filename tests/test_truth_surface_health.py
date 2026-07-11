@@ -1497,14 +1497,14 @@ class TestTrainingReadinessP0:
         assert check["status"] == "FAIL"
         assert check["count"] == 1
 
-    def test_training_readiness_does_not_count_quarantined_legacy_value_gaps(self, tmp_path):
-        db_path = tmp_path / "legacy-quarantined-value-gap-world.db"
+    def test_training_readiness_does_not_count_disputed_legacy_value_gaps(self, tmp_path):
+        db_path = tmp_path / "legacy-disputed-value-gap-world.db"
         conn = sqlite3.connect(db_path)
         _seed_minimal_ready_training_tables(conn, seed_observations=True)
         _create_legacy_settlements_table(conn)
         _insert_legacy_settlement(
             conn,
-            authority="QUARANTINED",
+            authority="DISPUTED",
             settlement_value=None,
             winning_bin=None,
             unit=None,
@@ -1644,7 +1644,7 @@ class TestTrainingReadinessP0:
         assert check["status"] == "FAIL"
         assert check["count"] == 1
 
-    @pytest.mark.parametrize("authority", [None, "", "UNVERIFIED", "QUARANTINED"])
+    @pytest.mark.parametrize("authority", [None, "", "UNVERIFIED", "DISPUTED"])
     def test_training_readiness_fails_when_observation_instants_v2_authority_is_unsafe(
         self, tmp_path, authority
     ):

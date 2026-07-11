@@ -133,7 +133,7 @@ def test_target_date_must_match_local_timestamp_local_date():
 # ----------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("bad_authority", ["UNVERIFIED", "QUARANTINED", "", "random"])
+@pytest.mark.parametrize("bad_authority", ["UNVERIFIED", "DISPUTED", "", "random"])
 def test_a1_rejects_non_write_authority(bad_authority):
     with pytest.raises(InvalidObsV2RowError, match="A1 violation.*authority"):
         _make_row(authority=bad_authority)

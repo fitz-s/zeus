@@ -2,11 +2,11 @@
 # Last reused or audited: 2026-07-04
 # Lifecycle: created=2026-07-04; last_reviewed=2026-07-04; last_reused=never
 #
-# Purpose: Drain the settlement_outcomes QUARANTINED backlog in zeus-forecasts.db so the
+# Purpose: Drain the settlement_outcomes DISPUTED backlog in zeus-forecasts.db so the
 #   chain-mirror reconciler (src/state/chain_mirror_reconciler.py::load_settlement_lookup,
 #   10-min lane) — which grades legacy positions ONLY against authority='VERIFIED' — can
 #   close every gradable legacy position. As of 2026-07-04 (audit finding): 383 of 8,527
-#   settlement_outcomes rows are stuck QUARANTINED; two markets (Hong Kong 2026-06-25 low,
+#   settlement_outcomes rows are stuck DISPUTED; two markets (Hong Kong 2026-06-25 low,
 #   Helsinki 2026-07-02 high) have NO row at all.
 #
 # AUTHORITY MODEL (operator correction 2026-07-04 — v1 of this script graded from persisted
@@ -39,7 +39,7 @@
 #   neither lane re-derives the other's fact.
 #
 # Method:
-#   1. Classify every QUARANTINED row by provenance_json.quarantine_reason.
+#   1. Classify every DISPUTED row by provenance_json.dispute_reason.
 #   2. `pc_audit_*`-prefixed reasons carry PRIOR HUMAN AUDIT judgment (a named operator
 #      investigation already concluded non-reproducible / needs-collector / station-drift for
 #      these specific rows — see docs/evidence/timing_audit/fallback_outcome_quality_2026-06-16.md
@@ -47,7 +47,7 @@
 #      that would silently overrule a documented human judgment call without the same human
 #      reviewing the new evidence. If venue resolution now covers one of these rows it is
 #      reported separately as `operator_review_venue_resolved` (report-only; never written).
-#   3. All other (mechanically-quarantined) rows, plus the two known MISSING markets, are
+#   3. All other (mechanically-disputed) rows, plus the two known MISSING markets, are
 #      re-resolved from venue evidence:
 #        a. Resolve the market's Gamma slug: use the row's own persisted `market_slug` when
 #           present; otherwise derive candidate slugs from `city.slug_names` + the standard
@@ -60,7 +60,7 @@
 #           umaResolutionStatus + binary-outcomePrices typed gate the live harvester write
 #           path uses — fail-closed on ambiguous data, never assumes a winner).
 #        d. No event found / not yet resolved / ambiguous winner -> `venue_unresolved` — stays
-#           QUARANTINED (or absent for a missing market); nothing invented.
+#           DISPUTED (or absent for a missing market); nothing invented.
 #        e. A network fault (Gamma unreachable after retries, non-JSON response) ->
 #           `venue_fetch_error` — FAILS CLOSED: the row is left exactly as it was, no partial
 #           write, the error is reported. A transient outage must never be recorded as
@@ -79,9 +79,9 @@
 #   4. A VERIFY write is a narrow UPDATE/INSERT (authority, settlement_value, winning_bin,
 #      settlement_unit, provenance_json only — settled_at/market_slug/settlement_source are
 #      NOT touched on existing rows). provenance_json is never overwritten wholesale: the
-#      prior authority + quarantine_reason + full prior provenance are preserved under
+#      prior authority + dispute_reason + full prior provenance are preserved under
 #      `prior_provenance`, and `reactivated_by`/`reactivated_at`/`drain_script` are stamped
-#      (mirrors the `settlements.authority` monotonic-trigger discipline: QUARANTINED->VERIFIED
+#      (mirrors the `settlements.authority` monotonic-trigger discipline: DISPUTED->VERIFIED
 #      requires a non-empty text `reactivated_by`, even though settlement_outcomes has no such
 #      trigger).
 #
@@ -91,8 +91,8 @@
 #   --apply commits.
 #
 # Run:
-#   dry-run (default):  python scripts/drain_settlement_quarantine.py [--json]
-#   apply:               python scripts/drain_settlement_quarantine.py --apply
+#   dry-run (default):  python scripts/drain_settlement_disputes.py [--json]
+#   apply:               python scripts/drain_settlement_disputes.py --apply
 from __future__ import annotations
 
 import argparse
@@ -119,7 +119,7 @@ from src.contracts.settlement_semantics import SettlementSemantics  # noqa: E402
 from src.data import market_scanner as market_scanner_mod  # noqa: E402
 from src.execution import harvester as harvester_mod  # noqa: E402
 
-DRAIN_SCRIPT_ID = "scripts.drain_settlement_quarantine"
+DRAIN_SCRIPT_ID = "scripts.drain_settlement_disputes"
 
 _DECLARED_SOURCE_LABEL = {"wu_icao": "WU", "hko": "HKO", "noaa": "NOAA", "cwa_station": "CWA"}
 
@@ -368,10 +368,10 @@ def _settlement_value_and_conflict(
     return point_value, None
 
 
-def resolve_quarantined_row(
+def resolve_disputed_row(
     conn: sqlite3.Connection, city_map: dict[str, City], row: sqlite3.Row
 ) -> dict:
-    """Decide the fate of one QUARANTINED settlement_outcomes row.
+    """Decide the fate of one DISPUTED settlement_outcomes row.
 
     Grading authority is the venue's resolved outcome (PAYMENT FACT), fetched read-only from
     the Gamma API. The declared-source observation (DECLARED-SOURCE TRUTH) is recorded
@@ -391,14 +391,14 @@ def resolve_quarantined_row(
             provenance = {}
     except (json.JSONDecodeError, TypeError):
         provenance = {}
-    reason = provenance.get("quarantine_reason", "")
+    reason = provenance.get("dispute_reason", "")
 
     base = {
         "settlement_id": settlement_id,
         "city": city_name,
         "target_date": target_date,
         "temperature_metric": metric,
-        "quarantine_reason": reason,
+        "dispute_reason": reason,
     }
 
     city = city_map.get(city_name)
@@ -452,7 +452,7 @@ def resolve_quarantined_row(
 def resolve_missing_market(
     conn: sqlite3.Connection, city_map: dict[str, City], city_name: str, target_date: str, metric: str
 ) -> dict:
-    """Same venue-resolution-authoritative re-resolution as resolve_quarantined_row, for a
+    """Same venue-resolution-authoritative re-resolution as resolve_disputed_row, for a
     market with NO settlement_outcomes row at all — the market knows its own outcome even
     though nothing was ever persisted locally for it."""
     base = {"city": city_name, "target_date": target_date, "temperature_metric": metric}
@@ -493,8 +493,8 @@ def resolve_missing_market(
 def _verify_provenance(prior_provenance: dict, decision: dict, *, now: str) -> dict:
     new_provenance = dict(prior_provenance)
     new_provenance["prior_provenance"] = prior_provenance
-    new_provenance["prior_authority"] = "QUARANTINED"
-    new_provenance["prior_quarantine_reason"] = prior_provenance.get("quarantine_reason")
+    new_provenance["prior_authority"] = "DISPUTED"
+    new_provenance["prior_dispute_reason"] = prior_provenance.get("dispute_reason")
     new_provenance["source"] = "venue_resolution"
     new_provenance["venue_resolution"] = decision["venue_resolution"]
     new_provenance["declared_source_type"] = decision.get("declared_source_type")
@@ -504,7 +504,7 @@ def _verify_provenance(prior_provenance: dict, decision: dict, *, now: str) -> d
         new_provenance["resolution_conflict"] = decision["resolution_conflict"]
     new_provenance["reactivated_by"] = DRAIN_SCRIPT_ID
     new_provenance["reactivated_at"] = now
-    new_provenance["drain_script"] = "scripts/drain_settlement_quarantine.py"
+    new_provenance["drain_script"] = "scripts/drain_settlement_disputes.py"
     return new_provenance
 
 
@@ -525,7 +525,7 @@ def _apply_verify(conn: sqlite3.Connection, row: sqlite3.Row, decision: dict, ci
                winning_bin=?,
                settlement_unit=?,
                provenance_json=?
-         WHERE settlement_id=? AND authority='QUARANTINED'
+         WHERE settlement_id=? AND authority='DISPUTED'
         """,
         (
             decision["rounded_value"],
@@ -542,7 +542,7 @@ def _insert_missing_verified(
 ) -> None:
     provenance = _verify_provenance({}, decision, now=now)
     provenance["writer"] = DRAIN_SCRIPT_ID
-    provenance["writer_script"] = "scripts/drain_settlement_quarantine.py"
+    provenance["writer_script"] = "scripts/drain_settlement_disputes.py"
     provenance["reconstruction_method"] = "drain_missing_market_backfill"
     conn.execute(
         """
@@ -565,43 +565,60 @@ def drain(
     apply: bool,
     missing_markets: tuple[tuple[str, str, str], ...] = DEFAULT_MISSING_MARKETS,
     city_map: dict[str, City] | None = None,
+    max_rows: int | None = None,
+    skip_missing_markets: bool = False,
 ) -> dict:
-    """Diagnose + (dry-run or apply) drain the QUARANTINED backlog. Never touches VERIFIED rows.
+    """Diagnose + (dry-run or apply) drain the DISPUTED backlog. Never touches VERIFIED rows.
 
     Always runs inside a SAVEPOINT; rolls back unless apply=True. Idempotent: a second run
-    over an already-drained DB reclassifies verified rows as no longer QUARANTINED (they are
-    simply absent from the WHERE authority='QUARANTINED' scan) and touches nothing. Makes
+    over an already-drained DB reclassifies verified rows as no longer DISPUTED (they are
+    simply absent from the WHERE authority='DISPUTED' scan) and touches nothing. Makes
     read-only Gamma network calls (per-row venue resolution lookup); never mutates any venue.
 
     city_map defaults to the real `src.config.load_cities()` universe; tests inject a
     synthetic map instead of touching config/cities.json.
+
+    max_rows (T2b consult condition (a), 2026-07-11): when set, bounds the pass to the
+    OLDEST `max_rows` DISPUTED rows by `recorded_at ASC` — the natural last-attempt cadence
+    (no new schema column needed). Used by src.execution.harvester's cycle-integrated
+    rediscovery pass so drain is no longer a manual-script-only mechanism; the standalone
+    operator invocation leaves this None (full sweep, unbounded, existing behavior).
+    skip_missing_markets: when True, skip the two known-fully-missing-market backfill (an
+    operator-triage concern, not part of the bounded per-cycle row budget).
     """
     if city_map is None:
         city_map = {c.name: c for c in load_cities()}
     now = datetime.now(timezone.utc).isoformat(timespec="seconds")
 
-    rows = conn.execute(
-        "SELECT * FROM settlement_outcomes WHERE authority='QUARANTINED'"
-    ).fetchall()
+    if max_rows is not None:
+        rows = conn.execute(
+            "SELECT * FROM settlement_outcomes WHERE authority='DISPUTED' "
+            "ORDER BY recorded_at ASC LIMIT ?",
+            (max_rows,),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT * FROM settlement_outcomes WHERE authority='DISPUTED'"
+        ).fetchall()
 
     disposition_counts: Counter[str] = Counter()
     reason_breakdown: Counter[str] = Counter()
     verified_ids: list[int] = []
     decisions: list[dict] = []
 
-    conn.execute("SAVEPOINT drain_settlement_quarantine")
+    conn.execute("SAVEPOINT drain_settlement_disputes")
     try:
         for row in rows:
-            decision = resolve_quarantined_row(conn, city_map, row)
+            decision = resolve_disputed_row(conn, city_map, row)
             disposition_counts[decision["disposition"]] += 1
-            reason_breakdown[decision.get("quarantine_reason") or "NO_REASON_FIELD"] += 1
+            reason_breakdown[decision.get("dispute_reason") or "NO_REASON_FIELD"] += 1
             decisions.append(decision)
             if decision["disposition"] == "verify":
                 _apply_verify(conn, row, decision, city_map[row["city"]], now=now)
                 verified_ids.append(decision["settlement_id"])
 
         missing_decisions: list[dict] = []
-        for city_name, target_date, metric in missing_markets:
+        for city_name, target_date, metric in (() if skip_missing_markets else missing_markets):
             existing = conn.execute(
                 "SELECT 1 FROM settlement_outcomes WHERE city=? AND target_date=? AND temperature_metric=?",
                 (city_name, target_date, metric),
@@ -620,19 +637,19 @@ def drain(
         verified_after = conn.execute(
             "SELECT COUNT(*) FROM settlement_outcomes WHERE authority='VERIFIED'"
         ).fetchone()[0]
-        quarantined_after = conn.execute(
-            "SELECT COUNT(*) FROM settlement_outcomes WHERE authority='QUARANTINED'"
+        disputed_after = conn.execute(
+            "SELECT COUNT(*) FROM settlement_outcomes WHERE authority='DISPUTED'"
         ).fetchone()[0]
 
         report = {
             "db_path": None,
-            "quarantined_before": len(rows),
-            "quarantine_reason_distribution": dict(reason_breakdown),
+            "disputed_before": len(rows),
+            "dispute_reason_distribution": dict(reason_breakdown),
             "disposition_counts": dict(disposition_counts),
             "verified_settlement_ids": verified_ids,
             "missing_markets": missing_decisions,
             "verified_total_in_txn": int(verified_after),
-            "quarantined_total_in_txn": int(quarantined_after),
+            "disputed_total_in_txn": int(disputed_after),
             "applied": False,
             # Per-row detail for operator audit (--json only prints this; the compact
             # human-readable summary sticks to the aggregated keys above). Every value here
@@ -642,15 +659,15 @@ def drain(
         }
 
         if apply:
-            conn.execute("RELEASE SAVEPOINT drain_settlement_quarantine")
+            conn.execute("RELEASE SAVEPOINT drain_settlement_disputes")
             conn.commit()
             report["applied"] = True
         else:
-            conn.execute("ROLLBACK TO SAVEPOINT drain_settlement_quarantine")
-            conn.execute("RELEASE SAVEPOINT drain_settlement_quarantine")
+            conn.execute("ROLLBACK TO SAVEPOINT drain_settlement_disputes")
+            conn.execute("RELEASE SAVEPOINT drain_settlement_disputes")
     except Exception:
-        conn.execute("ROLLBACK TO SAVEPOINT drain_settlement_quarantine")
-        conn.execute("RELEASE SAVEPOINT drain_settlement_quarantine")
+        conn.execute("ROLLBACK TO SAVEPOINT drain_settlement_disputes")
+        conn.execute("RELEASE SAVEPOINT drain_settlement_disputes")
         raise
 
     return report
@@ -674,11 +691,11 @@ def _standalone(argv: list[str] | None = None) -> int:
     if args.json:
         print(json.dumps(report, indent=2, sort_keys=True, default=str))
     else:
-        print("settlement_outcomes QUARANTINE drain — REPORT")
+        print("settlement_outcomes DISPUTE drain — REPORT")
         for key in (
-            "db_path", "quarantined_before", "quarantine_reason_distribution",
+            "db_path", "disputed_before", "dispute_reason_distribution",
             "disposition_counts", "verified_settlement_ids", "missing_markets",
-            "verified_total_in_txn", "quarantined_total_in_txn", "applied",
+            "verified_total_in_txn", "disputed_total_in_txn", "applied",
         ):
             print(f"  {key}: {report[key]}")
         if not args.apply:

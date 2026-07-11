@@ -178,7 +178,10 @@ def legacy_outcome_type_to_resolution_state(
     auth = str(authority or "").strip().upper()
     if auth == "VERIFIED" and winning_bin:
         return SettlementResolutionState.VENUE_RESOLVED
-    if auth == "QUARANTINED":
+    # nee `auth == "QUARANTINED"`: settlements.authority renamed QUARANTINED -> DISPUTED
+    # 2026-07-11 (T2b excision packet) — this mapping is now identity, kept for the
+    # explicit fail-closed branch shape and the historical note.
+    if auth == "DISPUTED":
         return SettlementResolutionState.DISPUTED
     return SettlementResolutionState.UNRESOLVED
 

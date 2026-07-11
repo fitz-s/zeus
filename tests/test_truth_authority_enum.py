@@ -42,7 +42,7 @@ from src.types.truth_authority import TruthAuthority
 _EXPECTED_MEMBERS = frozenset({
     "VERIFIED",
     "UNVERIFIED",
-    "QUARANTINED",
+    "DISPUTED",
     "DEGRADED_PROJECTION",
 })
 
@@ -115,13 +115,13 @@ def test_truth_authority_strenum_wire_compat_set_and_equality():
     """Wire-compat antibody #2: equality and set membership against bare
     strings. Existing consumers (e.g., `harvester_truth_writer.py:150`'s
     `!= "VERIFIED"`, `db.py:2453`'s `not in {"VERIFIED","UNVERIFIED",
-    "QUARANTINED"}`) compare against bare strings. StrEnum equality MUST
+    "DISPUTED"}`) compare against bare strings. StrEnum equality MUST
     match bare-string equality in both directions or every existing
     consumer breaks silently.
     """
     assert TruthAuthority.VERIFIED == "VERIFIED"
     assert "VERIFIED" == TruthAuthority.VERIFIED
-    assert TruthAuthority.VERIFIED in {"VERIFIED", "UNVERIFIED", "QUARANTINED"}
+    assert TruthAuthority.VERIFIED in {"VERIFIED", "UNVERIFIED", "DISPUTED"}
     assert "VERIFIED" in {TruthAuthority.VERIFIED, TruthAuthority.UNVERIFIED}
     # f-string interpolation must produce the bare value, not the
     # qualified `TruthAuthority.VERIFIED` repr.
@@ -152,7 +152,7 @@ def test_is_authoritative_truth_table():
     expected = {
         TruthAuthority.VERIFIED: True,
         TruthAuthority.UNVERIFIED: False,
-        TruthAuthority.QUARANTINED: False,
+        TruthAuthority.DISPUTED: False,
         TruthAuthority.DEGRADED_PROJECTION: False,
     }
     assert set(expected.keys()) == set(TruthAuthority), (
@@ -179,7 +179,7 @@ def test_is_authoritative_refuses_bare_string():
 
 
 def test_requires_human_review_truth_table():
-    """`requires_human_review` must return True for QUARANTINED and
+    """`requires_human_review` must return True for DISPUTED and
     DEGRADED_PROJECTION (the two not-yet-canonical-but-not-fail-closed
     states), False for VERIFIED and UNVERIFIED. This locks the
     operator-paging surface."""
@@ -188,7 +188,7 @@ def test_requires_human_review_truth_table():
     expected = {
         TruthAuthority.VERIFIED: False,
         TruthAuthority.UNVERIFIED: False,  # fail-closed default; not yet flagged
-        TruthAuthority.QUARANTINED: True,
+        TruthAuthority.DISPUTED: True,
         TruthAuthority.DEGRADED_PROJECTION: True,
     }
     assert set(expected.keys()) == set(TruthAuthority)

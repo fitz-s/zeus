@@ -550,7 +550,7 @@ def test_empty_target_identity_pairs_do_not_write_transfer_evidence(
     assert _count_rows(conn) == 0
 
 
-@pytest.mark.parametrize("authority", ["UNVERIFIED", "QUARANTINED"])
+@pytest.mark.parametrize("authority", ["UNVERIFIED", "DISPUTED"])
 def test_non_verified_source_platt_models_do_not_write_transfer_evidence(authority: str) -> None:
     """Source Platt models must be verified before they can generate OOS evidence."""
     conn = _make_conn()

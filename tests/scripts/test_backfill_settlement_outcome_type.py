@@ -62,8 +62,8 @@ class TestAuthorityToOutcome:
     def test_unverified(self):
         assert _authority_to_outcome("UNVERIFIED", None) == int(SettlementOutcome.UNRESOLVED)
 
-    def test_quarantined(self):
-        assert _authority_to_outcome("QUARANTINED", None) == int(SettlementOutcome.DISPUTED)
+    def test_disputed(self):
+        assert _authority_to_outcome("DISPUTED", None) == int(SettlementOutcome.DISPUTED)
 
     def test_unknown_authority_fallback(self):
         assert _authority_to_outcome("UNKNOWN", None) == int(SettlementOutcome.UNRESOLVED)
@@ -76,7 +76,7 @@ class TestAuthorityToOutcome:
 class TestRunBackfill:
     def _make_1k_rows(self) -> list[dict]:
         rows = []
-        authorities = ["VERIFIED", "UNVERIFIED", "QUARANTINED"]
+        authorities = ["VERIFIED", "UNVERIFIED", "DISPUTED"]
         for i in range(1000):
             auth = authorities[i % 3]
             rows.append({
@@ -97,10 +97,10 @@ class TestRunBackfill:
         row = conn.execute("SELECT outcome_type FROM settlements_v2").fetchone()
         assert row[0] == 3  # VENUE_RESOLVED_WIN
 
-    def test_quarantined_maps_to_100(self):
+    def test_disputed_maps_to_100(self):
         conn = _make_conn([{
             "city": "Dallas", "target_date": "2026-07-04", "temperature_metric": "high",
-            "authority": "QUARANTINED",
+            "authority": "DISPUTED",
         }])
         run_backfill(conn, dry_run=False)
         row = conn.execute("SELECT outcome_type FROM settlements_v2").fetchone()

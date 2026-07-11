@@ -8,7 +8,9 @@
 
 """Antibody for `settlements_authority_monotonic` trigger hardening.
 
-Pre-S2.1 trigger rejected `QUARANTINED->VERIFIED` transitions only when
+Pre-S2.1 trigger rejected `DISPUTED->VERIFIED` (nee QUARANTINED->VERIFIED,
+renamed 2026-07-11 per docs/rebuild/quarantine_excision_2026-07-11.md §T2b)
+transitions only when
 `provenance_json.reactivated_by` was NULL or missing. A non-null but
 semantically-empty value (boolean `false`, integer `0`, empty string
 `""`, JSON object `{}`, JSON array `[]`) silently satisfied the
@@ -35,7 +37,7 @@ from src.state.db import init_schema
 
 
 def _insert_quarantined_row(conn: sqlite3.Connection, provenance: dict | None) -> None:
-    """Seed a QUARANTINED settlement row that we'll then try to update."""
+    """Seed a DISPUTED settlement row that we'll then try to update."""
     conn.execute(
         """
         INSERT INTO settlements (
@@ -44,7 +46,7 @@ def _insert_quarantined_row(conn: sqlite3.Connection, provenance: dict | None) -
             temperature_metric, physical_quantity, observation_field, data_version
         ) VALUES (
             'paris', '2026-04-23', '15-16', 15.5,
-            'test', '2026-04-23T00:00:00', 'QUARANTINED', ?,
+            'test', '2026-04-23T00:00:00', 'DISPUTED', ?,
             'high', 'daily_maximum_air_temperature', 'high_temp', 'wu_icao_history'
         )
         """,
@@ -209,7 +211,7 @@ def test_trigger_drop_and_recreate_is_idempotent():
             temperature_metric, physical_quantity, observation_field, data_version
         ) VALUES (
             'paris', '2026-04-23', '15-16', 15.5,
-            'test', '2026-04-23T00:00:00', 'QUARANTINED', '{"reactivated_by": false}',
+            'test', '2026-04-23T00:00:00', 'DISPUTED', '{"reactivated_by": false}',
             'high', 'daily_maximum_air_temperature', 'high_temp', 'wu_icao_history'
         )
         """

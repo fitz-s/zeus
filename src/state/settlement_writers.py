@@ -39,6 +39,24 @@ from src.contracts.resolution_era import (
 
 
 # ---------------------------------------------------------------------------
+# Settlement authority tier — single source of truth for the DISPUTED literal
+# ---------------------------------------------------------------------------
+# Nee QUARANTINED, renamed 2026-07-11 per docs/rebuild/quarantine_excision_2026-07-11.md
+# §T2b. src/execution/harvester.py and src/ingest/harvester_truth_writer.py are a
+# duplicated writer pair for settlements.authority (world.db); both import this
+# constant rather than independently hardcoding the literal, so the two copies
+# cannot silently diverge on what "not-yet-resolved" is spelled (consult condition
+# (b): ONE authoritative writer predicate for the DISPUTED value). Must match
+# src/types/truth_authority.py::TruthAuthority.DISPUTED and the CHECK literal in
+# src/state/db.py / src/state/schema/v2_schema.py.
+SETTLEMENT_AUTHORITY_DISPUTED = "DISPUTED"
+
+# Nee "quarantine_reason" — the provenance_json key both writers set alongside
+# authority=DISPUTED to record why the row could not be graded.
+SETTLEMENT_DISPUTE_REASON_KEY = "dispute_reason"
+
+
+# ---------------------------------------------------------------------------
 # Era authority basis singletons — compile-time snapshots
 # ---------------------------------------------------------------------------
 
@@ -113,7 +131,7 @@ def dispatch_era_basis(settled_at_utc: date) -> EraDispatchResult:
             reason_code="no_era_match",
             reason_message=(
                 f"settled_at {settled_at_utc} predates all known era starts. "
-                "Dispatcher must raise or quarantine; never write settlement row."
+                "Dispatcher must raise or dispute; never write settlement row."
             ),
         )
 
@@ -194,7 +212,7 @@ def write_settlement_with_era_provenance(
             settlement_value=settlement.get("settlement_value"),
             settlement_source=settlement.get("settlement_source"),
             settled_at=settlement.get("settled_at"),
-            authority=settlement.get("authority", "QUARANTINED"),
+            authority=settlement.get("authority", SETTLEMENT_AUTHORITY_DISPUTED),
             provenance=merged_provenance,
             recorded_at=settlement.get("recorded_at"),
             settlement_unit=settlement.get("settlement_unit"),

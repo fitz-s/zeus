@@ -189,7 +189,7 @@ def _settled_cells(
     """Settled (city, target_date, metric, settlement_value) rows since a date.
 
     Only VERIFIED/UNVERIFIED authority rows with a non-null settlement_value
-    enter the audit (QUARANTINED settlements are excluded — they are not trusted
+    enter the audit (DISPUTED settlements are excluded — they are not trusted
     truth)."""
     if not city_names:
         return []

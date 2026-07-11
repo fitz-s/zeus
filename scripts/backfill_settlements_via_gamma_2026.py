@@ -222,8 +222,8 @@ def run_backfill(*, from_date: str, to_date: str, dry_run: bool = False) -> dict
         if obs_row is None:
             logger.debug("No obs: %s %s %s", city.name, target_date, metric)
             skipped_no_obs += 1
-            # Write QUARANTINED row so the gap is recorded
-            _write_quarantined_gamma_row(
+            # Write DISPUTED row so the gap is recorded
+            _write_disputed_gamma_row(
                 conn, city, target_date, metric,
                 pm_bin_lo, pm_bin_hi, event_slug,
             )
@@ -298,7 +298,7 @@ def run_backfill(*, from_date: str, to_date: str, dry_run: bool = False) -> dict
     }
 
 
-def _write_quarantined_gamma_row(
+def _write_disputed_gamma_row(
     conn,
     city,
     target_date: str,
@@ -307,14 +307,14 @@ def _write_quarantined_gamma_row(
     pm_bin_hi,
     event_slug: str,
 ) -> None:
-    """Write a QUARANTINED placeholder row for Gamma events with no local obs."""
+    """Write a DISPUTED placeholder row for Gamma events with no local obs."""
     from src.state.db import log_settlement
     settled_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
     provenance = {
         "writer": "backfill_gamma_2026",
         "writer_script": "scripts/backfill_settlements_via_gamma_2026.py",
         "reconstruction_method": "gamma_backfill",
-        "quarantine_reason": "gamma_backfill_no_local_obs",
+        "dispute_reason": "gamma_backfill_no_local_obs",
         "pm_bin_lo": pm_bin_lo,
         "pm_bin_hi": pm_bin_hi,
         "temperature_metric": metric,
@@ -332,7 +332,7 @@ def _write_quarantined_gamma_row(
         settlement_value=None,
         settlement_source=city.settlement_source,
         settled_at=settled_at,
-        authority="QUARANTINED",
+        authority="DISPUTED",
         provenance=provenance,
         recorded_at=settled_at,
     )

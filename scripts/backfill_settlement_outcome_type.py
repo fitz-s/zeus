@@ -10,7 +10,8 @@
 Mapping (per plan §T4):
   authority='VERIFIED'   + winning_bin NOT NULL → VENUE_RESOLVED_WIN (3)
   authority='UNVERIFIED'                        → UNRESOLVED (0)
-  authority='QUARANTINED'                       → DISPUTED (100)
+  authority='DISPUTED' (nee 'QUARANTINED', renamed 2026-07-11 per
+    docs/rebuild/quarantine_excision_2026-07-11.md §T2b)  → DISPUTED (100)
 
 Rows with outcome_type already set are skipped (idempotent).
 Chunked 500 rows per SAVEPOINT for safe partial-progress on large DBs.
@@ -47,12 +48,12 @@ def _authority_to_outcome(authority: str, winning_bin: object) -> int:
     VERIFIED + winning_bin non-null → VENUE_RESOLVED_WIN (settlements_v2 stores
     winning side only; LOSE is not derivable from existing columns alone).
     UNVERIFIED → UNRESOLVED.
-    QUARANTINED → DISPUTED.
+    DISPUTED (nee QUARANTINED) → DISPUTED.
     Any other / unknown → UNRESOLVED (fail-closed).
     """
     if authority == "VERIFIED" and winning_bin is not None and str(winning_bin).strip():
         return int(SettlementOutcome.VENUE_RESOLVED_WIN)
-    if authority == "QUARANTINED":
+    if authority == "DISPUTED":
         return int(SettlementOutcome.DISPUTED)
     # UNVERIFIED or any unknown authority
     return int(SettlementOutcome.UNRESOLVED)

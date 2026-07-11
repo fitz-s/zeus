@@ -12,7 +12,7 @@
 The cross-module invariant under test (raw_model_forecasts -> settlement_outcomes):
   (1) NO LEAK: only rows with target_date STRICTLY < decision_date enter the history.
   (2) PROVENANCE GATE: only settlement authority='VERIFIED' rows contribute (UNVERIFIED /
-      QUARANTINED excluded).
+      DISPUTED excluded).
   (3) ENDPOINT GATE: only endpoint='previous_runs' (fixed-lead) rows train; single_runs
       (live-capture, variable-lead) NEVER enter the train window (run_time != available_at).
   (4) UNIT COHERENCE: residual = forecast_value_c - settlement_in_C; an F-settlement city's
@@ -136,7 +136,7 @@ def test_history_excludes_non_verified_settlement() -> None:
     _insert_raw(conn, model="gfs_global", city="Paris", target_date="2026-04-02", metric="high", forecast_value_c=20.0)
     _insert_settlement(conn, city="Paris", target_date="2026-04-02", metric="high", settlement_value=19.0, authority="UNVERIFIED")
     _insert_raw(conn, model="gfs_global", city="Paris", target_date="2026-04-03", metric="high", forecast_value_c=20.0)
-    _insert_settlement(conn, city="Paris", target_date="2026-04-03", metric="high", settlement_value=19.0, authority="QUARANTINED")
+    _insert_settlement(conn, city="Paris", target_date="2026-04-03", metric="high", settlement_value=19.0, authority="DISPUTED")
 
     provider = BayesPrecisionFusionHistoryProvider(conn)
     hist = provider(city="Paris", metric="high", lead_days=1, target_date=date(2026, 5, 1), models=["gfs_global"])

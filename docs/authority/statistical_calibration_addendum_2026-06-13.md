@@ -83,11 +83,13 @@ freeze, fit G on held-out folds.
 - THIS IS THE DEPLOY UNLOCK for the 6117 historical settlements: old eras enter
   as partially-pooled evidence, never as naively pooled rows.
 
-### A6. QUARANTINED rows: exclude or model, never down-weight
+### A6. DISPUTED rows (nee QUARANTINED — settlements.authority renamed 2026-07-11
+### per docs/rebuild/quarantine_excision_2026-07-11.md §T2b, rule unchanged):
+### exclude or model, never down-weight
 Exactly two unbiased treatments (score-unbiasedness proofs in raw doc):
 (A) exclude, valid under A⊥C|X; (B) explicit measurement-error likelihood
 `π̃_o = Σ_c M_oc π_c` (confusion matrix) or variance convolution BEFORE binning.
-Arbitrary weights 0<w≤1 on quarantined labels reduce but never remove bias.
+Arbitrary weights 0<w≤1 on disputed labels reduce but never remove bias.
 PRIMARY = exclude; sensitivity model with estimated M only if overlapping
 settlement sources exist.
 
@@ -175,7 +177,7 @@ Adopted refinements (supersede the corresponding lines above where they differ):
   a pool/no-pool switch (pretest-estimator risk unbounded near the null). The
   LRT/score/boundary tests are reported diagnostics. Σ̂_era→0 recovers full
   pooling automatically; newest era converges to its own MLE as n grows.
-- **D2 (refines A6)**: preferred QUARANTINED treatment = CAR interval-widening
+- **D2 (refines A6)**: preferred DISPUTED (nee QUARANTINED) treatment = CAR interval-widening
   (observe ambiguity set A_i → censoring interval [min A_i, max A_i]); unbiased
   and strictly more efficient than exclusion; composes directly with the
   interval-censored likelihood. Exclusion = fallback when A_i unrecoverable or
