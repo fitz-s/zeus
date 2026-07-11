@@ -1,0 +1,37 @@
+{
+  "packet": "current/pending_exit_restart_redecision",
+  "branch": "p2-pending-exit-restart-redecision",
+  "head": "a49c07254",
+  "closed_at_utc": "2026-07-11T11:49:15.905883+00:00",
+  "scope": {
+    "in_scope": [
+      "docs/operations/current/pending_exit_restart_redecision/**",
+      "scripts/check_live_restart_preflight.py",
+      "tests/test_check_live_restart_preflight.py"
+    ],
+    "allow_companions": [
+      "architecture/script_manifest.yaml",
+      "architecture/test_topology.yaml",
+      "docs/operations/current_state.md"
+    ],
+    "out_of_scope": [
+      "state/**",
+      "src/**",
+      "config/**",
+      "docs/authority/**"
+    ]
+  },
+  "commit_log": [
+    "a49c07254 chore(packet): admit paused mesh restart",
+    "af6c660f6 fix(ops): admit pre-submit exit retry recovery",
+    "f73bf1162 perf(data): prime frozen artifact high-water marks",
+    "f92c14e3a chore(packet): close quarantine chain freshness",
+    "51b7d9ec0 chore(packet): admit chain refresh sidecar deploy",
+    "7dedc084f fix(state): refresh quarantined chain evidence",
+    "376cf357d chore(trading): log global winner economics",
+    "13672f7c6 perf(data): reuse posterior provenance for lag guard",
+    "f9f49f165 fix(events): prefer current raw carrier coverage",
+    "a649495c1 perf(data): batch frozen artifact high-water marks"
+  ],
+  "deliverables": "see plan.md and work_log.md"
+}

@@ -12,7 +12,7 @@ out_of_scope:
 - src/**
 - config/**
 - docs/authority/**
-status: in_progress
+status: landed
 live_side_effects_allowed: true
 live_side_effect_allowlist:
 - scripts/deploy_live.py restart all --allow-dirty --allow-unpushed
