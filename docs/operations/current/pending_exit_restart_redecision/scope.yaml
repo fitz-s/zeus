@@ -1,0 +1,20 @@
+packet: current/pending_exit_restart_redecision
+in_scope:
+- docs/operations/current/pending_exit_restart_redecision/**
+- scripts/check_live_restart_preflight.py
+- tests/test_check_live_restart_preflight.py
+allow_companions:
+- architecture/script_manifest.yaml
+- architecture/test_topology.yaml
+- docs/operations/current_state.md
+out_of_scope:
+- state/**
+- src/**
+- config/**
+- docs/authority/**
+status: in_progress
+live_side_effects_allowed: false
+live_side_effect_denied:
+- venue submit, cancel, or exit
+- DB backup, copy, or manual write
+- bypassing restart preflight

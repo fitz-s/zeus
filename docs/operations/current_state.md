@@ -12,7 +12,7 @@ Role: single live control pointer for the repo. Thin by law — this file points
 
 ## Active work
 
-Active execution packet: none (work routes through the plans index below; freeze a packet here before starting a new implementation slice).
+Active execution packet: `current/pending_exit_restart_redecision` — admit canonical pre-submit retry recovery into fresh boot redecision.
 
 - Live improvement journal: `docs/operations/current/plans/hourly_capital_gains_improvement_loop.md`
 - Plan index: `docs/operations/current/plans/INDEX.md`

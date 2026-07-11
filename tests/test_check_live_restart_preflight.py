@@ -4796,7 +4796,7 @@ def test_preflight_tolerates_pre_submit_exit_retry_without_exit_command(monkeypa
             'retry-no-command-pos', 'pending_exit', 'Singapore', '2026-06-26', 'high',
             'Will the highest temperature in Singapore be 30°C on June 26?',
             'buy_yes', 1.031967, 1.0319, 'filled', 'DAY0_HARD_FACT_BIN_DEAD',
-            9, '2026-06-26T10:58:15+00:00', 0.0, 1, 0.031, 1,
+            0, '2026-06-26T10:58:15+00:00', 0.0, 1, 0.031, 1,
             '2026-06-26T10:06:50+00:00'
         )
         """

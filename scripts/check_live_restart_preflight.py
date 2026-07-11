@@ -5182,7 +5182,6 @@ def _exit_retry_resumable_by_position() -> dict[str, dict[str, Any]]:
                AND latest_exit.command_id IS NULL
                AND latest_event.event_type = 'EXIT_ORDER_REJECTED'
                AND LOWER(COALESCE(latest_event.venue_status, '')) = 'retry_pending'
-               AND COALESCE(pc.exit_retry_count, 0) > 0
                AND COALESCE(pc.next_exit_retry_at, '') != ''
             """
         ).fetchall()
