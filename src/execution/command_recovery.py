@@ -15880,12 +15880,18 @@ def _reconcile_passes_short_conn(client, summary: dict, started_at: str, *, scop
         assert_no_open_connection,
         capture_venue_read_snapshot,
         default_trade_conn_factory,
+        default_trade_read_conn_factory,
         open_tracked,
         run_db_only_pass,
         run_three_phase,
     )
 
     conn_factory = default_trade_conn_factory
+    read_conn_factory = (
+        default_trade_read_conn_factory
+        if getattr(conn_factory, "requires_writer_flocks", False)
+        else conn_factory
+    )
     lock_retry_delays = (2.0, 5.0, 10.0)
 
     def _run_pass_with_lock_retry(label: str, fn):
@@ -15936,7 +15942,9 @@ def _reconcile_passes_short_conn(client, summary: dict, started_at: str, *, scop
             label,
             lambda: run_three_phase(
                 _snapshot, _network, _apply,
-                conn_factory=conn_factory, label=f"recovery.{label}",
+                conn_factory=conn_factory,
+                snapshot_conn_factory=read_conn_factory,
+                label=f"recovery.{label}",
             ),
         )
 
@@ -15993,6 +16001,7 @@ def _reconcile_passes_short_conn(client, summary: dict, started_at: str, *, scop
                 _network,
                 _apply,
                 conn_factory=conn_factory,
+                snapshot_conn_factory=read_conn_factory,
                 label="recovery.edli_post_submit_unknown_absence_fast",
             ),
         )
@@ -16278,7 +16287,7 @@ def _reconcile_passes_short_conn(client, summary: dict, started_at: str, *, scop
         )
 
     # -- PHASE 1: SNAPSHOT (collect priming keys on a short read connection) ----
-    with open_tracked(conn_factory, label="recovery.priming:snapshot") as conn:
+    with open_tracked(read_conn_factory, label="recovery.priming:snapshot") as conn:
         priming = _collect_recovery_priming_keys(conn, scope=scope)
 
     # -- PHASE 2: NETWORK (no connection in scope) -----------------------------
@@ -16348,7 +16357,9 @@ def _reconcile_passes_short_conn(client, summary: dict, started_at: str, *, scop
             lambda conn: None,
             lambda _snap: venue_snapshot,
             _apply_inflight,
-            conn_factory=conn_factory, label="recovery.inflight_scan",
+            conn_factory=conn_factory,
+            snapshot_conn_factory=read_conn_factory,
+            label="recovery.inflight_scan",
         ),
     )
 

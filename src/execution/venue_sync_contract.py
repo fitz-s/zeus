@@ -205,6 +205,7 @@ def run_three_phase(
     apply: Callable[[sqlite3.Connection, R], A],
     *,
     conn_factory: Callable[[], sqlite3.Connection],
+    snapshot_conn_factory: Callable[[], sqlite3.Connection] | None = None,
     label: str,
 ) -> A:
     """Run one snapshot -> network -> apply unit with strict phase separation.
@@ -214,7 +215,8 @@ def run_three_phase(
     one bounded BEGIN IMMEDIATE ... COMMIT transaction. No connection survives
     across the network boundary or across two phases.
     """
-    with open_tracked(conn_factory, label=f"{label}:snapshot") as conn:
+    read_factory = snapshot_conn_factory or conn_factory
+    with open_tracked(read_factory, label=f"{label}:snapshot") as conn:
         snap = snapshot(conn)
 
     assert_no_open_connection(f"{label}:network")
@@ -322,6 +324,17 @@ def default_trade_conn_factory() -> sqlite3.Connection:
     context = trade_connection_with_world_flocked(write_class="live")
     conn = context.__enter__()
     return _CanonicalFlockedConnection(conn, context)  # type: ignore[return-value]
+
+
+default_trade_conn_factory.requires_writer_flocks = True  # type: ignore[attr-defined]
+
+
+def default_trade_read_conn_factory() -> sqlite3.Connection:
+    """Canonical attached recovery read connection without writer flocks."""
+
+    from src.state.db import get_trade_connection_with_world_required
+
+    return get_trade_connection_with_world_required(write_class=None)
 
 
 class SnapshotMissError(RuntimeError):

@@ -41,6 +41,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import logging
 import math
 import os
 import sqlite3
@@ -1175,10 +1176,16 @@ class OpportunityEventReactor:
             ):
                 raise ValueError("global batch winner is not a claimed event")
             if batch_result.next_claim_event is not None:
-                self._queue_global_winner_for_claim(
+                queued = self._queue_global_winner_for_claim(
                     batch_result.next_claim_event,
                     current_batch_claim_generations=claim_generations,
                 )
+                if not queued:
+                    logging.getLogger("zeus.events.reactor").info(
+                        "global winner claim deferred: target=%s; "
+                        "a claim lease changed or the target is not currently pending",
+                        batch_result.next_claim_event.event_id,
+                    )
         except Exception as exc:  # noqa: BLE001 - every claimed event must close its unit
             for event in claimed:
                 self._finalize_deferred_event_unit(
@@ -1209,7 +1216,7 @@ class OpportunityEventReactor:
         event: OpportunityEvent,
         *,
         current_batch_claim_generations: dict[str, str],
-    ) -> None:
+    ) -> bool:
         """Persist the auction winner's next legal claim outside submit I/O."""
 
         mutex = world_write_mutex()
@@ -1219,12 +1226,12 @@ class OpportunityEventReactor:
                 raise RuntimeError("GLOBAL_WINNER_QUEUE_WORLD_TXN_OPEN")
             self._store.conn.execute("BEGIN IMMEDIATE")
             try:
-                if not self._store.prioritize_global_winner(
+                queued = self._store.prioritize_global_winner(
                     event,
                     current_batch_claim_generations=current_batch_claim_generations,
-                ):
-                    raise RuntimeError("GLOBAL_WINNER_TARGET_NOT_PENDING")
+                )
                 self._store.conn.commit()
+                return queued
             except Exception:
                 self._store.conn.rollback()
                 raise

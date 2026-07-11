@@ -1522,7 +1522,15 @@ def test_live_tick_releases_stale_rebalance_before_broad_venue_snapshot(monkeypa
     def fake_run_db_only_pass(apply, *, conn_factory=None, label=None):
         return apply(object())
 
-    def fake_run_three_phase(snapshot, network, apply, *, conn_factory=None, label=None):
+    def fake_run_three_phase(
+        snapshot,
+        network,
+        apply,
+        *,
+        conn_factory=None,
+        snapshot_conn_factory=None,
+        label=None,
+    ):
         snap = snapshot(object())
         payload = network(snap)
         return apply(object(), payload)
@@ -2135,6 +2143,33 @@ def test_capture_snapshot_runs_off_connection_at_runtime():
             )
 
 
+def test_three_phase_uses_distinct_snapshot_and_write_factories():
+    """Slow read snapshots must never open the writer-flocked factory."""
+    from src.execution import venue_sync_contract as vsc
+
+    events = []
+
+    def _read_factory():
+        events.append("read")
+        return sqlite3.connect(":memory:")
+
+    def _write_factory():
+        events.append("write")
+        return sqlite3.connect(":memory:")
+
+    result = vsc.run_three_phase(
+        lambda conn: conn.execute("SELECT 1").fetchone()[0],
+        lambda snap: events.append("network") or snap,
+        lambda conn, payload: conn.execute("SELECT ?", (payload,)).fetchone()[0],
+        conn_factory=_write_factory,
+        snapshot_conn_factory=_read_factory,
+        label="test.distinct_factories",
+    )
+
+    assert result == 1
+    assert events == ["read", "network", "write"]
+
+
 def test_default_factory_holds_canonical_cross_db_flocks_until_close(monkeypatch):
     """Recovery cannot expose TRADE-main lock order to WORLD-main writers."""
     from src.execution import venue_sync_contract as vsc
@@ -2161,6 +2196,26 @@ def test_default_factory_holds_canonical_cross_db_flocks_until_close(monkeypatch
     conn.close()
     conn.close()
     assert events == [("enter", "live"), ("exit", "live")]
+
+
+def test_default_read_factory_does_not_take_writer_flocks(monkeypatch):
+    """A slow recovery snapshot must not exclude live world writers."""
+    from src.execution import venue_sync_contract as vsc
+    from src.state import db
+
+    calls = []
+    conn = sqlite3.connect(":memory:")
+
+    def _required(*, write_class):
+        calls.append(write_class)
+        return conn
+
+    monkeypatch.setattr(db, "get_trade_connection_with_world_required", _required)
+
+    read_conn = vsc.default_trade_read_conn_factory()
+
+    assert read_conn is conn
+    assert calls == [None]
 
 
 def test_recovery_waits_before_taking_trade_when_world_main_writer_is_active(

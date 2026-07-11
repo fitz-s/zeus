@@ -431,7 +431,7 @@ def test_global_batch_materializes_unclaimed_winner_as_next_claim():
     )[0].event_id == target.event_id
 
 
-def test_global_batch_rejects_target_when_claim_is_reclaimed_during_solve():
+def test_global_batch_defers_target_when_claim_is_reclaimed_during_solve():
     from src.engine.global_batch_runtime import _next_claim_carrier
 
     conn, store = _store()
@@ -456,6 +456,7 @@ def test_global_batch_rejects_target_when_claim_is_reclaimed_during_solve():
             events[0].event_id,
             claimed_at="2026-05-25T06:16:00+00:00",
         )
+        conn.commit()
         return process_batch(events, decision_time)
 
     reactor._submit.process_global_batch = _reclaim_then_solve
@@ -468,6 +469,10 @@ def test_global_batch_rejects_target_when_claim_is_reclaimed_during_solve():
         "SELECT 1 FROM opportunity_events WHERE event_id = ?",
         (target.event_id,),
     ).fetchone() is None
+    assert conn.execute(
+        "SELECT last_error FROM opportunity_event_processing WHERE event_id = ?",
+        (claimed.event_id,),
+    ).fetchone()[0] == "SUBMIT_ABORTED_PRICE_MOVED:GLOBAL_TEST_NO_CURRENT_WINNER"
 
 
 def test_global_target_keeps_claim_priority_after_transient_epoch():
