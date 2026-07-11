@@ -1252,7 +1252,7 @@ def test_posterior_raw_member_counts_are_batched_for_global_scope():
     ) == 1
 
 
-def test_posterior_bound_complete_provenance_skips_raw_history_scan():
+def test_posterior_bound_complete_provenance_fills_missing_raw_coverage():
     conn = sqlite3.connect(":memory:")
     conn.execute(
         """
@@ -1287,7 +1287,49 @@ def test_posterior_bound_complete_provenance_skips_raw_history_scan():
     conn.set_trace_callback(None)
 
     assert enriched[0]["observed_members"] == 3
-    assert not any("RAW_MODEL_FORECASTS" in statement.upper() for statement in traced)
+    assert sum(
+        "COUNT(DISTINCT RAW.MODEL)" in statement.upper() for statement in traced
+    ) == 1
+
+
+def test_current_raw_coverage_overrides_larger_posterior_provenance():
+    conn = sqlite3.connect(":memory:")
+    conn.execute(
+        """
+        CREATE TABLE raw_model_forecasts (
+            model TEXT, city TEXT, target_date TEXT, metric TEXT,
+            source_cycle_time TEXT, source_available_at TEXT, forecast_value_c REAL
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO raw_model_forecasts VALUES (
+            'ecmwf', 'Chicago', '2026-07-12', 'high',
+            '2026-07-11T00:00:00+00:00', '2026-07-11T01:00:00+00:00', 20.0
+        )
+        """
+    )
+    row = {
+        "city": "Chicago",
+        "target_local_date": "2026-07-12",
+        "temperature_metric": "high",
+        "sr_source_cycle_time": "2026-07-11T00:00:00+00:00",
+        "provenance_json": json.dumps(
+            {
+                "bayes_precision_fusion": {
+                    "decorrelated_providers_complete": True,
+                    "raw_model_forecast_ids": [101, 102, 103],
+                }
+            }
+        ),
+    }
+
+    assert _with_posterior_raw_member_counts(
+        conn,
+        [row],
+        decision_iso="2026-07-11T02:00:00+00:00",
+    ) == []
 
 
 def test_scan_emits_only_for_families_with_a_market_when_markets_exist():

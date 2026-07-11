@@ -1432,11 +1432,7 @@ def _raw_model_member_counts_for_posterior_rows(
         for row in rows
     ]
     requested = sorted(
-        {
-            key
-            for key, provenance_count in zip(keys, provenance_counts)
-            if provenance_count <= 0 and all(key[:3]) and len(key[3]) == 10
-        }
+        {key for key in keys if all(key[:3]) and len(key[3]) == 10}
     )
     counts: dict[tuple[str, str, str, str], int] = {}
     if requested:
@@ -1475,7 +1471,9 @@ def _raw_model_member_counts_for_posterior_rows(
 
     out: list[int] = []
     for row, key, provenance_count in zip(rows, keys, provenance_counts):
-        count = provenance_count if provenance_count > 0 else counts.get(key, 0)
+        count = counts.get(key, 0)
+        if count <= 0:
+            count = provenance_count
         if count <= 0:
             posterior_id = row.get("posterior_id") or row.get("coverage_id")
             if posterior_id not in (None, ""):
