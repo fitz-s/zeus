@@ -2330,6 +2330,36 @@ def _append_matched_order_fill_projection(
     observed_at: str,
     order_fact_source: str = "REST",
 ) -> None:
+    command_id = str(command.get("command_id") or "")
+    if _edli_event_id_from_decision_id(str(command.get("decision_id") or "")):
+        candidates = [
+            candidate
+            for candidate in _latest_unprojected_filled_entry_candidates(conn)
+            if str(candidate.get("command_id") or "") == command_id
+        ]
+        if len(candidates) == 1:
+            try:
+                if _append_filled_entry_projection_repair(
+                    conn,
+                    candidate=candidates[0],
+                ):
+                    return
+            except Exception:
+                logger.exception(
+                    "recovery: certificate-bound EDLI entry fill projection failed "
+                    "for command %s order %s",
+                    command_id,
+                    venue_order_id,
+                )
+                return
+        logger.error(
+            "recovery: certificate-bound EDLI entry fill projection requires exactly "
+            "one unprojected candidate command=%s order=%s candidates=%d",
+            command_id,
+            venue_order_id,
+            len(candidates),
+        )
+        return
     try:
         from src.execution.exchange_reconcile import _ensure_entry_fill_position_event
 
@@ -4947,11 +4977,38 @@ def reconcile_edli_entry_posterior_projection_repairs(
                 conn.execute("RELEASE SAVEPOINT " + sp_name)
                 summary["stayed"] += 1
                 continue
+            strategy_key = _canonical_projection_strategy_key(
+                str(
+                    trade_case.get("strategy_key")
+                    or trade_case.get("strategy")
+                    or ""
+                ).strip()
+            )
+            edge_source = str(trade_case.get("edge_source") or strategy_key).strip()
+            discovery_mode = str(
+                trade_case.get("discovery_mode") or "update_reaction"
+            ).strip()
+            entry_ci_width = float(
+                _decimal_or_none(trade_case.get("entry_ci_width")) or Decimal("0")
+            )
+            decision_snapshot_id = str(
+                trade_case.get("decision_snapshot_id") or candidate.get("snapshot_id") or ""
+            ).strip()
+            if strategy_key not in _CANONICAL_STRATEGY_KEYS:
+                conn.execute("RELEASE SAVEPOINT " + sp_name)
+                summary["stayed"] += 1
+                continue
+            updated_at = _now_iso()
             cursor = conn.execute(
                 """
                 UPDATE position_current
                    SET p_posterior = ?,
+                       entry_ci_width = ?,
                        entry_method = ?,
+                       strategy_key = ?,
+                       edge_source = ?,
+                       discovery_mode = ?,
+                       decision_snapshot_id = COALESCE(NULLIF(?, ''), decision_snapshot_id),
                        updated_at = ?
                  WHERE position_id = ?
                    AND (
@@ -4960,9 +5017,36 @@ def reconcile_edli_entry_posterior_projection_repairs(
                        OR COALESCE(entry_method, '') != 'qkernel_spine'
                    )
                 """,
-                (posterior, entry_method, _now_iso(), position_id),
+                (
+                    posterior,
+                    entry_ci_width,
+                    entry_method,
+                    strategy_key,
+                    edge_source,
+                    discovery_mode,
+                    decision_snapshot_id,
+                    updated_at,
+                    position_id,
+                ),
             )
             if cursor.rowcount > 0:
+                current = _dict_row(
+                    conn.execute(
+                        "SELECT * FROM position_current WHERE position_id = ?",
+                        (position_id,),
+                    ).fetchone()
+                )
+                _void_absorbed_chain_only_projection(
+                    conn,
+                    position=SimpleNamespace(
+                        **{
+                            **current,
+                            "trade_id": position_id,
+                            "command_id": str(hydrated.get("command_id") or ""),
+                            "decision_id": str(hydrated.get("decision_id") or ""),
+                        }
+                    ),
+                )
                 summary["advanced"] += 1
             else:
                 summary["stayed"] += 1
@@ -16300,6 +16384,11 @@ def _reconcile_passes_short_conn(client, summary: dict, started_at: str, *, scop
             "terminal_positive_entry_projection_repair",
             reconcile_terminal_positive_entry_projection_repairs,
             "terminal_positive_entry_projection_repair",
+        )
+        _db_pass(
+            "edli_entry_posterior_projection_repair",
+            reconcile_edli_entry_posterior_projection_repairs,
+            "edli_entry_posterior_projection_repair",
         )
         _db_pass(
             "filled_exit_trade_fact_tx_repair",

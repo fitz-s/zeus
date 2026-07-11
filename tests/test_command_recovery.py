@@ -2377,6 +2377,38 @@ class TestRecoveryResolutionTable:
         assert summary["advanced"] >= 1
         adapter.get_trades.assert_called_once_with()
 
+    def test_matched_edli_fill_prefers_certificate_bound_projection(
+        self, conn, monkeypatch
+    ):
+        from src.execution import command_recovery
+
+        candidate = {"command_id": "cmd-edli-projection"}
+        calls = []
+        monkeypatch.setattr(
+            command_recovery,
+            "_latest_unprojected_filled_entry_candidates",
+            lambda _conn: [candidate],
+        )
+        monkeypatch.setattr(
+            command_recovery,
+            "_append_filled_entry_projection_repair",
+            lambda _conn, *, candidate, client=None: calls.append(candidate) or True,
+        )
+
+        command_recovery._append_matched_order_fill_projection(
+            conn,
+            command={
+                "command_id": "cmd-edli-projection",
+                "decision_id": "edli_exec_cmd:evt-projection:intent:tok:tok:buy_yes",
+            },
+            venue_order_id="ord-edli-projection",
+            matched_size="10",
+            fill_price="0.50",
+            observed_at="2026-04-26T00:02:00Z",
+        )
+
+        assert calls == [candidate]
+
     def test_restart_preflight_admits_only_exact_confirmed_matched_submit_review(
         self, conn
     ):
@@ -6999,7 +7031,6 @@ class TestRecoveryResolutionTable:
             )
             """
         )
-
         from src.execution.command_recovery import reconcile_filled_entry_position_link_repairs
 
         summary = reconcile_filled_entry_position_link_repairs(conn)
@@ -8044,6 +8075,23 @@ class TestRecoveryResolutionTable:
             )
             """
         )
+        conn.execute(
+            """
+            INSERT INTO position_current (
+                position_id, phase, strategy_key, updated_at, temperature_metric,
+                token_id, no_token_id, condition_id, direction, chain_state,
+                shares, chain_shares, cost_basis_usd, chain_cost_basis_usd,
+                entry_method, edge_source, discovery_mode
+            ) VALUES (
+                'chain-only-edli-existing', 'quarantined',
+                'chain_only_reconciliation', '2026-04-26T00:05:01Z', 'high',
+                'tok-001', 'tok-001-no', 'condition-test', 'buy_yes',
+                'entry_authority_quarantined', 5.0, 5.0, 0.06, 0.06,
+                'chain_only_reconciliation', 'chain_only_quarantine',
+                'chain_reconciliation'
+            )
+            """
+        )
 
         from src.execution.command_recovery import (
             reconcile_edli_entry_posterior_projection_repairs,
@@ -8053,10 +8101,32 @@ class TestRecoveryResolutionTable:
 
         assert summary == {"scanned": 1, "advanced": 1, "stayed": 0, "errors": 0}
         current = conn.execute(
-            "SELECT p_posterior, entry_method FROM position_current WHERE position_id = 'pos-001'"
+            """
+            SELECT p_posterior, entry_method, strategy_key, edge_source,
+                   discovery_mode, decision_snapshot_id
+              FROM position_current
+             WHERE position_id = 'pos-001'
+            """
         ).fetchone()
         assert current["p_posterior"] == pytest.approx(0.62)
         assert current["entry_method"] == "qkernel_spine"
+        assert current["strategy_key"] == "forecast_qkernel_entry"
+        assert current["edge_source"] == "forecast_qkernel_entry"
+        assert current["discovery_mode"] == "update_reaction"
+        assert current["decision_snapshot_id"] == "forecast-snap-edli"
+        absorbed = conn.execute(
+            """
+            SELECT phase, shares, chain_shares, cost_basis_usd
+              FROM position_current
+             WHERE position_id = 'chain-only-edli-existing'
+            """
+        ).fetchone()
+        assert dict(absorbed) == {
+            "phase": "voided",
+            "shares": 0.0,
+            "chain_shares": 0.0,
+            "cost_basis_usd": 0.0,
+        }
 
     def test_edli_entry_posterior_projection_repair_refuses_quarantined_actionable_certificate(
         self,
