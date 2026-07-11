@@ -44,7 +44,7 @@ def append_confirmed_trade_facts_to_edli(
     rows = conn.execute(
         f"""
         WITH execution_commands AS (
-            SELECT aggregate_id,
+            SELECT DISTINCT aggregate_id,
                    json_extract(payload_json, '$.event_id') AS event_id,
                    json_extract(payload_json, '$.final_intent_id') AS final_intent_id,
                    json_extract(payload_json, '$.execution_command_id') AS execution_command_id
@@ -52,7 +52,7 @@ def append_confirmed_trade_facts_to_edli(
              WHERE event_type = 'ExecutionCommandCreated'
         ),
         submit_acks AS (
-            SELECT aggregate_id,
+            SELECT DISTINCT aggregate_id,
                    json_extract(payload_json, '$.venue_order_id') AS venue_order_id
               FROM edli_live_order_events
              WHERE event_type = 'VenueSubmitAcknowledged'
@@ -169,7 +169,7 @@ def append_rest_filled_orphan_trade_facts_to_edli(
     rows = conn.execute(
         f"""
         WITH execution_commands AS (
-            SELECT aggregate_id,
+            SELECT DISTINCT aggregate_id,
                    json_extract(payload_json, '$.event_id') AS event_id,
                    json_extract(payload_json, '$.final_intent_id') AS final_intent_id,
                    json_extract(payload_json, '$.execution_command_id') AS execution_command_id
@@ -177,7 +177,7 @@ def append_rest_filled_orphan_trade_facts_to_edli(
              WHERE event_type = 'ExecutionCommandCreated'
         ),
         submit_acks AS (
-            SELECT aggregate_id,
+            SELECT DISTINCT aggregate_id,
                    json_extract(payload_json, '$.venue_order_id') AS venue_order_id
               FROM edli_live_order_events
              WHERE event_type = 'VenueSubmitAcknowledged'

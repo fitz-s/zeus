@@ -1,4 +1,5 @@
 # Created: 2026-06-06
+# Last reused/audited: 2026-07-11
 # Purpose: Lock EDLI fill-audit bridge from authenticated WS trade facts.
 from __future__ import annotations
 
@@ -127,6 +128,48 @@ def test_bridge_prefers_attached_trades_over_ghost_world_tables(tmp_path):
 
     assert append_confirmed_trade_facts_to_edli(world_conn, now=NOW, trade_db_path=trade_path) == 1
     assert world_conn.execute(
+        "SELECT COUNT(*) FROM edli_live_order_events WHERE event_type='UserTradeObserved'"
+    ).fetchone()[0] == 1
+
+
+def test_bridge_deduplicates_redecision_execution_command_events():
+    conn = _conn()
+    ledger = LiveOrderAggregateLedger(conn)
+    _seed_edli_chain(ledger)
+    conn.execute(
+        """
+        INSERT INTO edli_live_order_events (
+            aggregate_event_id, aggregate_id, event_sequence, event_type,
+            parent_event_hash, event_hash, payload_json, payload_hash,
+            source_authority, occurred_at, created_at, schema_version
+        )
+        SELECT 'duplicate-execution-command', aggregate_id, 50, event_type,
+               parent_event_hash, 'duplicate-execution-command-hash', payload_json,
+               payload_hash, source_authority, occurred_at, created_at, schema_version
+          FROM edli_live_order_events
+         WHERE aggregate_id = 'event-1:intent-1'
+           AND event_type = 'ExecutionCommandCreated'
+         LIMIT 1
+        """
+    )
+    _insert_command(conn)
+    append_trade_fact(
+        conn,
+        trade_id="trade-redecision",
+        venue_order_id="venue-1",
+        command_id="cmd-1",
+        state="CONFIRMED",
+        filled_size="7",
+        fill_price="0.72",
+        source="WS_USER",
+        observed_at=NOW,
+        venue_timestamp=NOW,
+        raw_payload_hash="e" * 64,
+        raw_payload_json="{}",
+    )
+
+    assert append_confirmed_trade_facts_to_edli(conn, now=NOW) == 1
+    assert conn.execute(
         "SELECT COUNT(*) FROM edli_live_order_events WHERE event_type='UserTradeObserved'"
     ).fetchone()[0] == 1
 
