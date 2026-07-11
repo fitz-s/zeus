@@ -130,9 +130,9 @@ def _insert_position_current(
     cost_basis_usd: float = 0.0,
     last_monitor_market_price: float | None = None,
     temperature_metric: str = "high",
-    token_id: str = "",
-    no_token_id: str = "",
-    condition_id: str = "",
+    token_id: str = "yes-test-token",
+    no_token_id: str = "no-test-token",
+    condition_id: str = "condition-test",
 ) -> None:
     conn.execute(
         """
@@ -142,8 +142,8 @@ def _insert_position_current(
             last_monitor_prob, last_monitor_edge, last_monitor_market_price,
             decision_snapshot_id, entry_method, strategy_key, edge_source, discovery_mode,
             chain_state, token_id, no_token_id, condition_id, order_id, order_status, updated_at,
-            temperature_metric
-        ) VALUES (?, ?, ?, 'm-test', 'NYC', 'NYC', '2026-04-01', '39-40°F', 'buy_yes', 'F', ?, ?, ?, NULL, NULL, NULL, NULL, ?, '', '', ?, '', '', 'unknown', ?, ?, ?, '', '', ?, ?)
+            temperature_metric, fill_authority
+        ) VALUES (?, ?, ?, 'm-test', 'NYC', 'NYC', '2026-04-01', '39-40°F', 'buy_yes', 'F', ?, ?, ?, ?, NULL, NULL, NULL, ?, '', '', ?, '', '', 'unknown', ?, ?, ?, '', '', ?, ?, 'none')
         """,
         (
             position_id,
@@ -152,6 +152,7 @@ def _insert_position_current(
             size_usd,
             shares,
             cost_basis_usd,
+            cost_basis_usd / shares if shares else 0.0,
             last_monitor_market_price,
             strategy_key,
             token_id,
@@ -1054,7 +1055,10 @@ class TestRiskGuardSettlementSource:
         assert details["portfolio_truth_source"] == "position_current"
         assert details["portfolio_loader_status"] == "ok"
         assert details["portfolio_fallback_active"] is False
-        assert details["portfolio_position_count"] == 2
+        # RiskGuard consumes current-money-risk rows only; terminal history is
+        # graded through the separate settlement path and must not inflate the
+        # live exposure count or force a full-table sort every minute.
+        assert details["portfolio_position_count"] == 1
         assert details["portfolio_capital_source"] == "canonical_loader_view"
         # Bankroll truth axis: provider-sourced wallet cash plus canonical
         # open-position value, with no realized-PnL fold-in.
@@ -1073,6 +1077,23 @@ class TestRiskGuardSettlementSource:
         assert details["realized_pnl_source"] == "strategy_health.realized_pnl_30d"
         assert details["realized_pnl_window_days"] == 30
         assert details["unrealized_pnl"] == pytest.approx(5.0)
+
+    def test_portfolio_loader_reads_only_current_money_risk_projection(self, monkeypatch):
+        observed = {}
+
+        def _loader(conn, **kwargs):
+            observed["conn"] = conn
+            observed.update(kwargs)
+            return {"status": "ok", "table": "position_current", "positions": []}
+
+        sentinel = object()
+        monkeypatch.setattr(riskguard_module, "query_portfolio_loader_view", _loader)
+
+        portfolio, truth = riskguard_module._load_riskguard_portfolio_truth(sentinel)
+
+        assert observed == {"conn": sentinel, "runtime_exposure_only": True}
+        assert portfolio.positions == []
+        assert truth["source"] == "position_current"
 
     def test_portfolio_loader_fill_authority_preserved_into_riskguard_position(self, monkeypatch, tmp_path):
         zeus_db = tmp_path / "zeus.db"

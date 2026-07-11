@@ -350,7 +350,15 @@ def _riskguard_position_status_view_from_loader_rows(
 
 
 def _load_riskguard_portfolio_truth(zeus_conn: sqlite3.Connection) -> tuple[PortfolioState, dict]:
-    loader_view = query_portfolio_loader_view(zeus_conn)
+    # RiskGuard protects current capital. Loading terminal position history here
+    # makes every 60-second tick scan and sort the full projection table even
+    # though settlements have their own canonical read below. The runtime view
+    # retains every current-money-risk phase plus unresolved quarantine while
+    # using the phase index on the live hot path.
+    loader_view = query_portfolio_loader_view(
+        zeus_conn,
+        runtime_exposure_only=True,
+    )
     policy = choose_portfolio_truth_source(loader_view.get("status"))
     if policy.source != "canonical_db":
         raise RuntimeError(
