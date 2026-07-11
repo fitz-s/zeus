@@ -2,7 +2,7 @@
 # Last reused/audited: 2026-05-08
 # Authority basis: docs/operations/task_2026-05-08_post_merge_full_chain/TASK.md
 #   Phase C — fix #263 SOURCE_DISAGREEMENT isolation layer
-"""Antibody: _write_settlement_truth SOURCE_DISAGREEMENT quarantine reason.
+"""Antibody: _write_settlement_truth SOURCE_DISAGREEMENT dispute reason.
 
 Root cause (fix #263): when obs rounds to within ±tolerance of the nearest bin
 edge, the disagreement is measurement/rounding variance, not a genuine
@@ -12,13 +12,13 @@ source-family disagreement (one source passes, other just misses) from
 observations genuinely far outside any bin.
 
 Fix: if rounded obs is within ±tolerance of the nearest bin edge → emit
-'harvester_source_disagreement_within_tolerance' (QUARANTINED).
+'harvester_source_disagreement_within_tolerance' (DISPUTED).
 If obs is far outside (> tolerance from nearest edge) → keep 'harvester_live_obs_outside_bin'.
 null-bin rows remain 'harvester_live_no_bin_info' (precedence unchanged).
 
 Test matrix
 -----------
-  T1: both agree + bin contains → VERIFIED, no quarantine
+  T1: both agree + bin contains → VERIFIED, no dispute
   T2: obs within tolerance of bin edge (just misses) → SOURCE_DISAGREEMENT
   T3: both outside bin (obs far from edge) → obs_outside_bin
   T4: both bins None → no_bin_info (precedence unchanged — regression guard)
@@ -122,7 +122,7 @@ def _obs(val: float, unit: str = "F") -> dict:
 # ---------------------------------------------------------------------------
 
 def test_agree_bin_contains_is_verified():
-    """Baseline: obs inside bin → VERIFIED, no quarantine reason."""
+    """Baseline: obs inside bin → VERIFIED, no dispute reason."""
     conn = _make_world_conn()
     city = _make_city_f()
     result = _write_settlement_truth(
@@ -139,7 +139,7 @@ def test_agree_bin_contains_is_verified():
 # ---------------------------------------------------------------------------
 
 def test_obs_within_tolerance_of_bin_edge_is_source_disagreement():
-    """Obs just misses bin edge by ≤1°F → SOURCE_DISAGREEMENT, QUARANTINED."""
+    """Obs just misses bin edge by ≤1°F → SOURCE_DISAGREEMENT, DISPUTED."""
     conn = _make_world_conn()
     city = _make_city_f()
     # Bin is [44, 46]. Obs rounds to 43 — 1°F below lo edge. Distance = 1.0 ≤ tol=1.0.
@@ -152,7 +152,7 @@ def test_obs_within_tolerance_of_bin_edge_is_source_disagreement():
         f"Expected SOURCE_DISAGREEMENT, got {result['reason']!r} — "
         "obs within tolerance of bin edge must not be labelled obs_outside_bin"
     )
-    assert result["authority"] == "QUARANTINED"
+    assert result["authority"] == "DISPUTED"
 
 
 # ---------------------------------------------------------------------------
@@ -172,7 +172,7 @@ def test_obs_far_outside_bin_is_obs_outside_bin():
     assert result["reason"] == "harvester_live_obs_outside_bin", (
         f"Expected obs_outside_bin for obs far from edge, got {result['reason']!r}"
     )
-    assert result["authority"] == "QUARANTINED"
+    assert result["authority"] == "DISPUTED"
 
 
 # ---------------------------------------------------------------------------

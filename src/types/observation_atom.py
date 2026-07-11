@@ -89,7 +89,7 @@ class ObservationAtom:
     data_source_version: str  # e.g. "wu_icao_v1_2026"
 
     # === Authority + validation ===
-    authority: Literal["VERIFIED", "UNVERIFIED", "QUARANTINED"]
+    authority: Literal["VERIFIED", "UNVERIFIED", "DISPUTED"]
     validation_pass: bool
 
     # === Extensibility escape hatch — stored as JSON TEXT in DB ===
@@ -109,10 +109,10 @@ class ObservationAtom:
                 f"{self.city}/{self.target_date}: validation_pass=True requires "
                 f"authority='VERIFIED', got 'UNVERIFIED'"
             )
-        if self.authority == "QUARANTINED" and self.validation_pass:
+        if self.authority == "DISPUTED" and self.validation_pass:
             raise IngestionRejected(
                 f"{self.city}/{self.target_date}: validation_pass=True cannot "
-                "be paired with authority='QUARANTINED'"
+                "be paired with authority='DISPUTED'"
             )
         if not math.isfinite(float(self.value)):
             raise IngestionRejected(f"{self.city}/{self.target_date}: value is not finite")

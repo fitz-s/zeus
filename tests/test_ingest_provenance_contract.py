@@ -62,9 +62,9 @@ class TestValidProvenancePasses:
         guard = ProvenanceGuard()
         guard.validate_write(**_valid_write_kwargs(authority="UNVERIFIED"))
 
-    def test_quarantined_authority_is_valid(self):
+    def test_disputed_authority_is_valid(self):
         guard = ProvenanceGuard()
-        guard.validate_write(**_valid_write_kwargs(authority="QUARANTINED"))
+        guard.validate_write(**_valid_write_kwargs(authority="DISPUTED"))
 
     def test_extra_provenance_keys_allowed(self):
         guard = ProvenanceGuard()

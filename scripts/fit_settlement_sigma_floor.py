@@ -40,7 +40,7 @@
 #      UNCHANGED; only the stored value's meaning and k change. sigma_floor_c stored = the floor itself.
 #
 # READ-ONLY over state/zeus-forecasts.db (forecast_posteriors + settlement_outcomes, authority=VERIFIED
-# only — Fitz #4: UNVERIFIED/QUARANTINED do not enter the chain). Writes state/settlement_sigma_floor.json
+# only — Fitz #4: UNVERIFIED/DISPUTED do not enter the chain). Writes state/settlement_sigma_floor.json
 # via the script's sanctioned atomic-replace path. Run as new settlements arrive (recommend daily).
 """Fit the EMPIRICAL settlement σ-floor table from FORECAST RESIDUALS.
 

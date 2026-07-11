@@ -411,7 +411,7 @@ def _candidate_data_versions_for_metric_source(
     legacy LOW data_version for modern source-tagged requests: a live forecast
     with source/cycle/horizon provenance must not be rescued by a metric-only
     historical LOW bucket whose local-day construction law is not the same
-    contract-window authority. Missing/UNVERIFIED/QUARANTINED/low-n LOW buckets
+    contract-window authority. Missing/UNVERIFIED/DISPUTED/low-n LOW buckets
     surface as RAW_UNCALIBRATED at the live read seam rather than silently
     borrowing a legacy or sibling-cluster Platt transform.
     """
@@ -1005,7 +1005,7 @@ def get_calibrator(
                 return cal, level
 
     # LOW has no contract-bin-preserving fallback proof yet.  If the exact
-    # LOW primary bucket is missing, UNVERIFIED, QUARANTINED, or below the live
+    # LOW primary bucket is missing, UNVERIFIED, DISPUTED, or below the live
     # n_eff floor, return uncalibrated instead of silently borrowing another
     # cluster's Platt transform.
     if temperature_metric == "low":

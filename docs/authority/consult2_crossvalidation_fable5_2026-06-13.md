@@ -20,7 +20,7 @@ section D.
 | Era fitting | EB partial pooling + LRT decision rule | EB partial pooling; LRT = DIAGNOSTIC ONLY (pretest estimator has unbounded relative risk near null) | CONVERGENT + refinement (always partial-pool) |
 | Boundary variance test | Self–Liang / bootstrap | Self–Liang ½χ²₀+½χ²₁ mixture | CONVERGENT |
 | Decay step bias | −Δλ^{n1} | exact share s=λ^{n1}(1−λ^{n0})/(1−λ^{n1+n0}); λ=0.999, n1=400, n0=4000 → 66% contamination | CONVERGENT (Fable exact form) |
-| QUARANTINED | exclude OR confusion-matrix measurement error; weights biased | exclude OR **CAR interval-widening** (Heitjan–Rubin); weights biased for ANY w>0 (estimating-equation proof) | CONVERGENT + refinement (CAR composes with censored likelihood) |
+| DISPUTED (nee QUARANTINED) | exclude OR confusion-matrix measurement error; weights biased | exclude OR **CAR interval-widening** (Heitjan–Rubin); weights biased for ANY w>0 (estimating-equation proof) | CONVERGENT + refinement (CAR composes with censored likelihood) |
 | Stage-1→2 inflation | ṽ_m = v_m + C_ε,mm; δ=−wᵀε; RMS √(wᵀC_εw) | identical; adds: common settlement-noise component ⇒ offset does NOT average away in M | CONVERGENT |
 | Joint estimator | two-way provider×location×era GLS | identical; normalization Σ_m b_m = 0 (provider effects = pure contrasts) | CONVERGENT |
 | Identifiability | provider–location graph connected | identical (union-find check) | CONVERGENT |
@@ -37,13 +37,14 @@ section D.
    pooling unconditionally — Σ̂_era→0 recovers full pooling automatically, large
    era effects recover near-separate fits; the newest era converges to its own
    MLE as n grows. LRT/score test is REPORTED as a diagnostic only.
-2. **CAR quarantine treatment**: when the per-row settlement ambiguity set A_i
+2. **CAR disputed-row treatment** (nee "CAR quarantine treatment"): when the
+   per-row settlement ambiguity set A_i
    (union of bins consistent with competing sources) is recoverable and
    contiguous, replace the censoring interval with [min A_i lower, max A_i upper]
    — coarsened-at-random likelihood (Heitjan & Rubin 1991), unbiased and strictly
    more efficient than exclusion. Exclusion remains the fallback when A_i is
    unrecoverable or the ambiguity is directional (diagnostic: compare clean vs
-   quarantined covariate distributions + source-disagreement direction).
+   disputed covariate distributions + source-disagreement direction).
 3. **Tweedie's formula** for the candidate-edge cross-section when daily N≥200:
    E[e|ê] = ê + s²·(d/dê) log f̂(ê) — nonparametric selection-bias correction from
    the marginal density of all candidate edges (Efron 2011).

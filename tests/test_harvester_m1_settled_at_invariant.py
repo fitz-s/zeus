@@ -7,18 +7,18 @@ The M1 invariant (harvester.py:1453-1523):
   - settled_at is derived from obs_row["observation_local_time"] — the REAL station
     observation instant, NEVER the cron write clock (recorded_at = datetime.now()).
   - When observation_local_time is missing → settled_at is honest-NULL and the row
-    is forced QUARANTINED even if the observation value is bin-contained.
+    is forced DISPUTED even if the observation value is bin-contained.
   - Line ~1520 guard: if settlement_time_missing and authority == "VERIFIED":
-        authority = "QUARANTINED"; reason = "harvester_live_no_observation_time"
+        authority = "DISPUTED"; reason = "harvester_live_no_observation_time"
 
 Tests:
-  M1-case1: obs_row=None → authority QUARANTINED, persisted settled_at IS NULL,
+  M1-case1: obs_row=None → authority DISPUTED, persisted settled_at IS NULL,
              reason "harvester_live_no_obs".
   M1-case2: obs_row with bin-contained value AND observation_local_time set →
              authority VERIFIED, persisted settled_at equals observation_local_time
              (not the now() clock).
   M1-case3: obs_row with bin-contained value BUT observation_local_time=None →
-             authority forced QUARANTINED (the critical M1 guard),
+             authority forced DISPUTED (the critical M1 guard),
              persisted settled_at IS NULL, reason "harvester_live_no_observation_time".
 """
 from __future__ import annotations
@@ -50,7 +50,7 @@ def _make_settlements_conn() -> sqlite3.Connection:
             settlement_source TEXT,
             settled_at TEXT,
             authority TEXT NOT NULL DEFAULT 'UNVERIFIED'
-                CHECK (authority IN ('VERIFIED', 'UNVERIFIED', 'QUARANTINED')),
+                CHECK (authority IN ('VERIFIED', 'UNVERIFIED', 'DISPUTED')),
             pm_bin_lo REAL,
             pm_bin_hi REAL,
             unit TEXT,
@@ -110,11 +110,11 @@ def _select_settlement(conn: sqlite3.Connection, city: str, target_date: str) ->
 
 
 # ---------------------------------------------------------------------------
-# M1-case1: obs_row=None → QUARANTINED, settled_at NULL, reason harvester_live_no_obs
+# M1-case1: obs_row=None → DISPUTED, settled_at NULL, reason harvester_live_no_obs
 # ---------------------------------------------------------------------------
 
-def test_M1_case1_no_obs_row_quarantined_null_settled_at():
-    """When obs_row is None, the row is QUARANTINED with NULL settled_at.
+def test_M1_case1_no_obs_row_disputed_null_settled_at():
+    """When obs_row is None, the row is DISPUTED with NULL settled_at.
     Reason must be 'harvester_live_no_obs' (the obs-absent branch)."""
     conn = _make_settlements_conn()
     city = _make_city()
@@ -130,8 +130,8 @@ def test_M1_case1_no_obs_row_quarantined_null_settled_at():
     conn.commit()
 
     # Returned dict
-    assert result["authority"] == "QUARANTINED", (
-        f"Expected QUARANTINED, got {result['authority']}"
+    assert result["authority"] == "DISPUTED", (
+        f"Expected DISPUTED, got {result['authority']}"
     )
     assert result["reason"] == "harvester_live_no_obs", (
         f"Expected reason 'harvester_live_no_obs', got {result['reason']!r}"
@@ -143,7 +143,7 @@ def test_M1_case1_no_obs_row_quarantined_null_settled_at():
     assert row["settled_at"] is None, (
         f"Expected NULL settled_at, got {row['settled_at']!r}"
     )
-    assert row["authority"] == "QUARANTINED"
+    assert row["authority"] == "DISPUTED"
 
 
 # ---------------------------------------------------------------------------
@@ -190,15 +190,15 @@ def test_M1_case2_verified_settled_at_equals_obs_time_not_now():
 
 
 # ---------------------------------------------------------------------------
-# M1-case3 (CRITICAL): bin-contained obs BUT observation_local_time=None → QUARANTINED
+# M1-case3 (CRITICAL): bin-contained obs BUT observation_local_time=None → DISPUTED
 # This is the line-1520 guard — the whole point of M1.
 # ---------------------------------------------------------------------------
 
-def test_M1_case3_bin_contained_but_no_obs_time_forced_quarantined():
+def test_M1_case3_bin_contained_but_no_obs_time_forced_disputed():
     """CRITICAL M1 GUARD (harvester.py:1520):
     Even when the observation value is bin-contained and would otherwise be VERIFIED,
     if observation_local_time is None then settled_at is NULL and authority is forced
-    to QUARANTINED. The cron clock is NEVER substituted.
+    to DISPUTED. The cron clock is NEVER substituted.
 
     This test will FAIL if the M1 guard is removed or regressed."""
     conn = _make_settlements_conn()
@@ -217,10 +217,10 @@ def test_M1_case3_bin_contained_but_no_obs_time_forced_quarantined():
     )
     conn.commit()
 
-    # Returned dict: must be forced QUARANTINED by the M1 guard
-    assert result["authority"] == "QUARANTINED", (
+    # Returned dict: must be forced DISPUTED by the M1 guard
+    assert result["authority"] == "DISPUTED", (
         f"M1 GUARD FAILURE: authority={result['authority']!r}. "
-        "A bin-contained value with no observation_local_time must be QUARANTINED "
+        "A bin-contained value with no observation_local_time must be DISPUTED "
         "(harvester.py:1520: 'if settlement_time_missing and authority == VERIFIED')."
     )
     assert result["reason"] == "harvester_live_no_observation_time", (
@@ -234,4 +234,4 @@ def test_M1_case3_bin_contained_but_no_obs_time_forced_quarantined():
         f"M1 VIOLATION: settled_at={row['settled_at']!r} is not NULL. "
         "The cron write clock was substituted for the missing observation time."
     )
-    assert row["authority"] == "QUARANTINED"
+    assert row["authority"] == "DISPUTED"

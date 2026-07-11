@@ -378,7 +378,7 @@ def test_e2e_join_skips_unverified_settlement():
     )
     conn.execute(
         "INSERT INTO forecasts.settlement_outcomes VALUES (?,?,?,?,?,?,?)",
-        ("Tokyo", "2026-06-08", "low", 19.0, "C", NOW.isoformat(), "QUARANTINED"),
+        ("Tokyo", "2026-06-08", "low", 19.0, "C", NOW.isoformat(), "DISPUTED"),
     )
     # No VERIFIED settlement → fill is not gradeable yet → 0 graded fills.
     assert load_graded_fills(conn) == []

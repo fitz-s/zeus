@@ -771,10 +771,10 @@ def test_harvester_market_events_update_refuses_token_mismatch(harvester_conn):
     assert outcome is None
 
 
-def test_harvester_quarantined_settlement_does_not_write_market_events_outcome(harvester_conn):
-    """market_events has no authority column, so quarantined settlement cannot resolve it."""
-    city = _make_city("v2_outcome_quarantine")
-    market_slug = "highest-temperature-in-v2-outcome-quarantine-on-april-24-2026"
+def test_harvester_disputed_settlement_does_not_write_market_events_outcome(harvester_conn):
+    """market_events has no authority column, so disputed settlement cannot resolve it."""
+    city = _make_city("v2_outcome_dispute")
+    market_slug = "highest-temperature-in-v2-outcome-dispute-on-april-24-2026"
     _insert_market_event_v2(
         harvester_conn,
         market_slug=market_slug,
@@ -808,7 +808,7 @@ def test_harvester_quarantined_settlement_does_not_write_market_events_outcome(h
         ],
     )
 
-    assert result["authority"] == "QUARANTINED"
+    assert result["authority"] == "DISPUTED"
     assert result["market_events"]["status"] == "skipped_unverified_settlement"
     outcome = harvester_conn.execute(
         """
@@ -856,9 +856,9 @@ def test_harvester_settlement_without_market_slug_skips_settlement_outcomes(harv
     assert v2_count == 0
 
 
-def test_harvester_settlement_mirrors_quarantine_to_settlement_outcomes(harvester_conn):
-    """Quarantined legacy settlements do not get promoted to VERIFIED in v2."""
-    city = _make_city("v2_quarantined")
+def test_harvester_settlement_mirrors_dispute_to_settlement_outcomes(harvester_conn):
+    """Disputed legacy settlements do not get promoted to VERIFIED in v2."""
+    city = _make_city("v2_disputed")
 
     result = harvester_mod._write_settlement_truth(
         harvester_conn,
@@ -866,7 +866,7 @@ def test_harvester_settlement_mirrors_quarantine_to_settlement_outcomes(harveste
         "2026-04-24",
         pm_bin_lo=65.0,
         pm_bin_hi=75.0,
-        event_slug="highest-temperature-in-v2-quarantined-on-april-24-2026",
+        event_slug="highest-temperature-in-v2-disputed-on-april-24-2026",
         obs_row={
             "high_temp": 80.0,
             "source": "wu_icao_history",
@@ -875,7 +875,7 @@ def test_harvester_settlement_mirrors_quarantine_to_settlement_outcomes(harveste
         },
     )
 
-    assert result["authority"] == "QUARANTINED"
+    assert result["authority"] == "DISPUTED"
     row = harvester_conn.execute(
         """
         SELECT authority, settlement_value, winning_bin, provenance_json
@@ -886,11 +886,11 @@ def test_harvester_settlement_mirrors_quarantine_to_settlement_outcomes(harveste
     ).fetchone()
 
     assert row is not None
-    assert row["authority"] == "QUARANTINED"
+    assert row["authority"] == "DISPUTED"
     assert row["settlement_value"] == 80.0
     assert row["winning_bin"] is None
     provenance = json.loads(row["provenance_json"])
-    assert provenance["quarantine_reason"] == "harvester_live_obs_outside_bin"
+    assert provenance["dispute_reason"] == "harvester_live_obs_outside_bin"
 
 
 def test_harvester_settlement_outcomes_mirror_is_idempotent(harvester_conn):

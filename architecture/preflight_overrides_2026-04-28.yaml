@@ -1,4 +1,11 @@
 # Status: ACTIVE
+# Addendum (2026-07-11, docs/rebuild/quarantine_excision_2026-07-11.md §T2b): the
+# settlements/observations.authority value this file's resolutions call
+# "QUARANTINED" was renamed to "DISPUTED" repo-wide. This directive's body below
+# is a signed historical resolution and stays VERBATIM (including literal
+# evidence-file paths like gate34_fill_quarantine_apply_2026-04-28.json, which
+# name real files on disk and are not renamed); read "QUARANTINED" below as the
+# pre-rename spelling of the same authority value.
 schema_version: 1
 drift_residual:
   rationale: '16 wu_icao_history rows with 1F/1C drift between row value and

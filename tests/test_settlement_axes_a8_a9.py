@@ -165,7 +165,7 @@ def test_legacy_null_outcome_type_falls_back_to_authority() -> None:
         None, authority="UNVERIFIED", winning_bin=None
     ) is SettlementResolutionState.UNRESOLVED
     assert legacy_outcome_type_to_resolution_state(
-        None, authority="QUARANTINED", winning_bin=None
+        None, authority="DISPUTED", winning_bin=None
     ) is SettlementResolutionState.DISPUTED
 
 

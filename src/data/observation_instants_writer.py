@@ -12,7 +12,7 @@ It refuses to write rows that would silently undermine the migration:
 
 A1 (missing-provenance rejection)
     authority, data_version, and provenance_json MUST be explicitly set
-    and non-default. UNVERIFIED/QUARANTINED authorities are rejected —
+    and non-default. UNVERIFIED/DISPUTED authorities are rejected —
     readers filter to {VERIFIED, ICAO_STATION_NATIVE} per A4.
 
 A2 (source-tier consistency)
@@ -63,7 +63,7 @@ from src.data.tier_resolver import (
 
 
 # Allowed authority strings on WRITE (plan v3 A4 reader filter complement).
-# 'UNVERIFIED' and 'QUARANTINED' would be silently excluded by downstream
+# 'UNVERIFIED' and 'DISPUTED' would be silently excluded by downstream
 # consumers, so rejecting at write time makes the failure loud.
 _ALLOWED_WRITE_AUTHORITIES: frozenset[str] = frozenset(
     {"VERIFIED", "ICAO_STATION_NATIVE"}
@@ -168,7 +168,7 @@ class ObsV2Row:
             raise InvalidObsV2RowError(
                 f"A1 violation (city={self.city}, utc={self.utc_timestamp}): "
                 f"authority={self.authority!r} not in {sorted(_ALLOWED_WRITE_AUTHORITIES)}. "
-                "UNVERIFIED/QUARANTINED rows are filtered out by readers; "
+                "UNVERIFIED/DISPUTED rows are filtered out by readers; "
                 "writing them creates phantom data."
             )
         if not self.data_version or not _DATA_VERSION_RE.match(self.data_version):

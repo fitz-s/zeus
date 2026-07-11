@@ -98,9 +98,9 @@ def test_atom_refuses_unverified_with_validation_pass():
         ObservationAtom(**kwargs)
 
 
-def test_atom_refuses_quarantined_with_validation_pass():
-    kwargs = _valid_atom_kwargs(authority="QUARANTINED", validation_pass=True)
-    with pytest.raises(IngestionRejected, match="QUARANTINED"):
+def test_atom_refuses_disputed_with_validation_pass():
+    kwargs = _valid_atom_kwargs(authority="DISPUTED", validation_pass=True)
+    with pytest.raises(IngestionRejected, match="DISPUTED"):
         ObservationAtom(**kwargs)
 
 

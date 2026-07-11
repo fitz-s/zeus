@@ -107,7 +107,7 @@ def _create_settlement_outcomes(conn: sqlite3.Connection) -> None:
             settlement_source TEXT,
             settled_at TEXT,
             authority TEXT NOT NULL DEFAULT 'UNVERIFIED'
-                CHECK (authority IN ('VERIFIED', 'UNVERIFIED', 'QUARANTINED')),
+                CHECK (authority IN ('VERIFIED', 'UNVERIFIED', 'DISPUTED')),
             provenance_json TEXT NOT NULL DEFAULT '{}',
             recorded_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')),
             outcome_type INTEGER,
@@ -125,6 +125,17 @@ def _create_settlement_outcomes(conn: sqlite3.Connection) -> None:
             UNIQUE(city, target_date, temperature_metric)
         )
     """)
+    # T2b (2026-07-11, docs/rebuild/quarantine_excision_2026-07-11.md): authority
+    # CHECK literal QUARANTINED -> DISPUTED with data migration of any live
+    # QUARANTINED rows (383 of 8,527 as of the 2026-07-04 drain-script audit —
+    # scripts/drain_settlement_disputes.py is the operator accelerator for the
+    # subset this migration alone can't resolve, e.g. missing markets). Local
+    # import: v2_schema.py cannot import src.state.db at module level (db.py
+    # imports apply_canonical_schema from here), so this follows the existing
+    # local-import convention used elsewhere in this module tree to avoid a cycle.
+    from src.state.db import _migrate_authority_tier_disputed
+    _migrate_authority_tier_disputed(conn, "settlement_outcomes")
+
     conn.execute("""
         CREATE INDEX IF NOT EXISTS idx_settlement_outcomes_city_date_metric
             ON settlement_outcomes(city, target_date, temperature_metric)
@@ -137,7 +148,7 @@ def _create_settlement_outcomes(conn: sqlite3.Connection) -> None:
     # W2 (2026-06-03): VERIFIED rows must carry settlement_unit.
     # Two triggers cover INSERT and UPDATE so the invariant cannot be bypassed
     # via INSERT(UNVERIFIED, NULL) → UPDATE authority='VERIFIED'.
-    # Legacy/UNVERIFIED/QUARANTINED rows are not constrained so existing rows
+    # Legacy/UNVERIFIED/DISPUTED rows are not constrained so existing rows
     # are unaffected. All callers that write VERIFIED rows are updated in the
     # same change (ordering-trap mitigation: no caller-update-lag window).
     conn.execute("""
@@ -270,7 +281,7 @@ def _create_ensemble_snapshots(conn: sqlite3.Connection) -> None:
             manifest_hash TEXT,
             provenance_json TEXT NOT NULL DEFAULT '{}',
             authority TEXT NOT NULL DEFAULT 'VERIFIED'
-                CHECK (authority IN ('VERIFIED', 'UNVERIFIED', 'QUARANTINED')),
+                CHECK (authority IN ('VERIFIED', 'UNVERIFIED', 'DISPUTED')),
             recorded_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')),
             UNIQUE(city, target_date, temperature_metric, issue_time, dataset_id)
         )
@@ -866,7 +877,7 @@ def _create_calibration_pairs(conn: sqlite3.Connection) -> None:
             bias_corrected INTEGER NOT NULL DEFAULT 0
                 CHECK (bias_corrected IN (0, 1)),
             authority TEXT NOT NULL DEFAULT 'UNVERIFIED'
-                CHECK (authority IN ('VERIFIED', 'UNVERIFIED', 'QUARANTINED')),
+                CHECK (authority IN ('VERIFIED', 'UNVERIFIED', 'DISPUTED')),
             bin_source TEXT NOT NULL DEFAULT 'legacy',
             snapshot_id INTEGER REFERENCES ensemble_snapshots(snapshot_id),
             dataset_id TEXT NOT NULL,
@@ -1170,7 +1181,7 @@ def apply_canonical_schema(conn: sqlite3.Connection, *, forecast_tables: bool = 
                 is_active INTEGER NOT NULL DEFAULT 1
                     CHECK (is_active IN (0, 1)),
                 authority TEXT NOT NULL DEFAULT 'UNVERIFIED'
-                    CHECK (authority IN ('VERIFIED', 'UNVERIFIED', 'QUARANTINED')),
+                    CHECK (authority IN ('VERIFIED', 'UNVERIFIED', 'DISPUTED')),
                 bucket_key TEXT,
                 cycle TEXT NOT NULL DEFAULT '00',
                 source_id TEXT NOT NULL DEFAULT 'tigge_mars',
@@ -1307,7 +1318,7 @@ def apply_canonical_schema(conn: sqlite3.Connection, *, forecast_tables: bool = 
                 source_file TEXT,
                 imported_at TEXT NOT NULL,
                 authority TEXT NOT NULL DEFAULT 'UNVERIFIED'
-                    CHECK (authority IN ('VERIFIED', 'UNVERIFIED', 'QUARANTINED', 'ICAO_STATION_NATIVE')),
+                    CHECK (authority IN ('VERIFIED', 'UNVERIFIED', 'DISPUTED', 'ICAO_STATION_NATIVE')),
                 data_version TEXT NOT NULL DEFAULT 'v1',
                 provenance_json TEXT NOT NULL DEFAULT '{}',
                 CHECK (

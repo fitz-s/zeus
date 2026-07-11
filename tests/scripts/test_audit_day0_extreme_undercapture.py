@@ -216,8 +216,8 @@ def test_over_capture_classified_over(dbs):
     assert crow.cells[0].classification == OVER
 
 
-def test_quarantined_settlement_excluded(dbs):
-    """QUARANTINED settlements are not trusted truth and never enter the audit."""
+def test_disputed_settlement_excluded(dbs):
+    """DISPUTED settlements are not trusted truth and never enter the audit."""
     world, forecasts = dbs
     city = _fixture_city()
     _insert_obs(
@@ -226,7 +226,7 @@ def test_quarantined_settlement_excluded(dbs):
     )
     _insert_settlement(
         forecasts,
-        [("Testville", "2026-06-01", "high", 73.0, "F", "KTST", "QUARANTINED")],
+        [("Testville", "2026-06-01", "high", 73.0, "F", "KTST", "DISPUTED")],
     )
     report = run_undercapture_audit(
         days=3650, world_db_path=world, forecasts_db_path=forecasts, cities=[city],

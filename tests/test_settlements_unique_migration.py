@@ -102,7 +102,7 @@ def _seed_legacy_post_reopen2_without_harvester_live_columns(
             settlement_source TEXT,
             settled_at TEXT,
             authority TEXT NOT NULL DEFAULT 'UNVERIFIED'
-                CHECK (authority IN ('VERIFIED', 'UNVERIFIED', 'QUARANTINED')),
+                CHECK (authority IN ('VERIFIED', 'UNVERIFIED', 'DISPUTED')),
             temperature_metric TEXT
                 CHECK (temperature_metric IS NULL OR temperature_metric IN ('high','low')),
             physical_quantity TEXT,
@@ -235,7 +235,7 @@ def test_legacy_db_gets_migrated_to_new_unique():
         )
         conn.execute(
             "INSERT INTO settlements (city, target_date, authority) "
-            "VALUES ('nyc', '2026-04-22', 'QUARANTINED')"
+            "VALUES ('nyc', '2026-04-22', 'DISPUTED')"
         )
         conn.commit()
         pre_count = conn.execute("SELECT COUNT(*) FROM settlements").fetchone()[0]
@@ -354,10 +354,10 @@ def test_migration_preserves_authority_groups():
     conn = sqlite3.connect(":memory:")
     try:
         _seed_legacy_pre_reopen2_schema(conn)
-        # Seed 2 VERIFIED + 1 QUARANTINED
+        # Seed 2 VERIFIED + 1 DISPUTED
         conn.execute("INSERT INTO settlements (city, target_date, authority) VALUES ('a', '2026-01-01', 'VERIFIED')")
         conn.execute("INSERT INTO settlements (city, target_date, authority) VALUES ('b', '2026-01-02', 'VERIFIED')")
-        conn.execute("INSERT INTO settlements (city, target_date, authority) VALUES ('c', '2026-01-03', 'QUARANTINED')")
+        conn.execute("INSERT INTO settlements (city, target_date, authority) VALUES ('c', '2026-01-03', 'DISPUTED')")
         conn.commit()
         pre_groups = dict(conn.execute("SELECT authority, COUNT(*) FROM settlements GROUP BY authority").fetchall())
 

@@ -1,4 +1,12 @@
 # Status: ACTIVE
+# Addendum (2026-07-11, docs/rebuild/quarantine_excision_2026-07-11.md §T2b): the
+# settlements/observations.authority value this file's resolutions call
+# "QUARANTINED" was renamed to "DISPUTED" repo-wide. This directive's body below
+# is a signed historical resolution and stays VERBATIM (including literal
+# evidence-file path strings and the source_contract_quarantine.json reference,
+# which is a DIFFERENT mechanism — source-contract blocking, not settlement
+# authority — and is out of this rename's scope); read "QUARANTINED" below as the
+# pre-rename spelling of the settlement-authority value.
 schema_version: 1
 paris_station_lfpb_canonical:
   rationale: |

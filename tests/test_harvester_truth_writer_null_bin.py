@@ -8,11 +8,11 @@ Root cause (Cluster B, 181 rows): when pm_bin_lo=None AND pm_bin_hi=None,
 `contained` stays False and reason was set to 'harvester_live_obs_outside_bin'.
 This is wrong — the observation is not outside any bin; there simply is no bin.
 
-Fix: check both-None first; emit 'harvester_live_no_bin_info' with QUARANTINED.
+Fix: check both-None first; emit 'harvester_live_no_bin_info' with DISPUTED.
 
 Tests:
-  T1: both bins None → quarantine_reason='harvester_live_no_bin_info', NOT 'obs_outside_bin'
-  T2: both bins None → authority stays QUARANTINED, settlement_value recorded
+  T1: both bins None → dispute_reason='harvester_live_no_bin_info', NOT 'obs_outside_bin'
+  T2: both bins None → authority stays DISPUTED, settlement_value recorded
   T3: lo only → open-shoulder containment still works (regression guard)
   T4: hi only → open-shoulder containment still works (regression guard)
   T5: lo+hi range → normal containment VERIFIED (regression guard)
@@ -113,10 +113,10 @@ def test_null_bin_reason_is_no_bin_info_not_outside_bin():
 
 
 # ---------------------------------------------------------------------------
-# T2: both bins None → QUARANTINED authority, settlement_value recorded
+# T2: both bins None → DISPUTED authority, settlement_value recorded
 # ---------------------------------------------------------------------------
 
-def test_null_bin_authority_is_quarantined_with_value():
+def test_null_bin_authority_is_disputed_with_value():
     conn = _make_world_conn()
     city = _make_city("F")
     result = _write_settlement_truth(
@@ -124,8 +124,8 @@ def test_null_bin_authority_is_quarantined_with_value():
         event_slug="uma_backfill_nyc_2026-01-02_high",
         obs_row=_obs(30.0, "F"),
     )
-    assert result["authority"] == "QUARANTINED"
-    assert result["settlement_value"] == 30.0  # obs recorded even when QUARANTINED
+    assert result["authority"] == "DISPUTED"
+    assert result["settlement_value"] == 30.0  # obs recorded even when DISPUTED
 
 
 # ---------------------------------------------------------------------------
@@ -187,5 +187,5 @@ def test_range_bin_obs_outside_is_obs_outside_bin():
         event_slug="slug-outside",
         obs_row=_obs(36.0, "F"),
     )
-    assert result["authority"] == "QUARANTINED"
+    assert result["authority"] == "DISPUTED"
     assert result["reason"] == "harvester_live_obs_outside_bin"

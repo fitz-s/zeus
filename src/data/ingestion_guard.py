@@ -586,7 +586,7 @@ class IngestionGuard:
 # Phase 2: ProvenanceGuard — write-time provenance contract (§2.4 + §6 #9)
 # ---------------------------------------------------------------------------
 
-_VALID_AUTHORITIES = frozenset({"VERIFIED", "UNVERIFIED", "QUARANTINED"})
+_VALID_AUTHORITIES = frozenset({"VERIFIED", "UNVERIFIED", "DISPUTED"})
 
 _REQUIRED_PROVENANCE_KEYS = frozenset({"request_url", "fetched_at", "parser_version"})
 
@@ -610,7 +610,7 @@ class ProvenanceGuard:
 
     Every new write to world DB tables must carry:
       - source: non-empty string (e.g. "wu_icao", "ecmwf_open_data")
-      - authority: one of VERIFIED | UNVERIFIED | QUARANTINED
+      - authority: one of VERIFIED | UNVERIFIED | DISPUTED
       - data_version: non-empty string
       - provenance_json: dict with at least {request_url, fetched_at, parser_version}
 
@@ -647,7 +647,7 @@ class ProvenanceGuard:
         source:
             Non-empty string identifying the upstream data source.
         authority:
-            One of "VERIFIED", "UNVERIFIED", "QUARANTINED".
+            One of "VERIFIED", "UNVERIFIED", "DISPUTED".
         data_version:
             Non-empty string versioning the ingestion schema/parser.
         provenance_json:

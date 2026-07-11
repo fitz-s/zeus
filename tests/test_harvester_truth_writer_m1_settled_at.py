@@ -9,7 +9,7 @@
 Invariant:
   - settled_at = obs_row["fetched_at"] (the settling observation's availability time), NEVER now().
   - recorded_at = the separate now() write time (NOT aliased to settled_at).
-  - obs_row present but fetched_at is None -> settled_at NULL -> authority forced QUARANTINED
+  - obs_row present but fetched_at is None -> settled_at NULL -> authority forced DISPUTED
     (reason 'harvester_truth_no_settlement_time'), even when the value is bin-contained.
 Antibody: reverting to `settled_at = datetime.now()` re-introduces the backfill-style corruption that
 made target_date<d walk-forward leak settlement availability.
@@ -110,14 +110,14 @@ def test_recorded_at_is_separate_write_time_not_settled_at():
     assert str(prov["reconstructed_at"]).startswith("202")  # a real ISO now() stamp
 
 
-def test_missing_obs_fetch_time_forces_quarantine():
-    # obs present + value bin-contained, but fetched_at=None -> no genuine settlement time -> QUARANTINED.
+def test_missing_obs_fetch_time_forces_dispute():
+    # obs present + value bin-contained, but fetched_at=None -> no genuine settlement time -> DISPUTED.
     conn = _make_world_conn()
     result = _write_settlement_truth(
         conn, _make_city("F"), "2026-05-07", 30.0, 31.0,
         event_slug="slug-noft", obs_row=_obs(30.0, "F", fetched_at=None),
     )
-    assert result["authority"] == "QUARANTINED"
+    assert result["authority"] == "DISPUTED"
     assert result["reason"] == "harvester_truth_no_settlement_time"
     row = conn.execute(
         "SELECT settled_at FROM settlements WHERE market_slug='slug-noft'"

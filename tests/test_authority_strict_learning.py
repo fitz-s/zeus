@@ -8,7 +8,7 @@
 PR #19 workbook F8: legacy position metric fallback returns
 `("high", "UNVERIFIED", "position_missing_metric:<repr>")` when the
 position has no temperature_metric. Strict downstream learning consumers
-must filter on `authority = 'VERIFIED'` so quarantine placeholders /
+must filter on `authority = 'VERIFIED'` so dispute placeholders /
 stale JSON reconstructions / legacy rows do not silently become training
 evidence.
 

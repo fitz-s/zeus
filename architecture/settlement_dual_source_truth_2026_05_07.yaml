@@ -61,7 +61,9 @@ provenance_field_contract:
     - writer_script           # which script wrote this row
     - operator_authorization  # date of authorization (e.g. "2026-05-07")
   optional_keys:
-    - quarantine_reason       # set when authority=QUARANTINED (no local obs)
+    - dispute_reason          # nee quarantine_reason; set when authority=DISPUTED
+                               # (no local obs) — renamed 2026-07-11 per
+                               # docs/rebuild/quarantine_excision_2026-07-11.md §T2b
 
 references:
   - architecture/fatal_misreads.yaml  # polymarket_low_market_history_starts_2026_04_15

@@ -21,7 +21,8 @@
 #   Migration order Step 1 (interval-censored categorical likelihood, identifiability proof, EB
 #   shrinkage S_l = tau^2/(tau^2+s_l^2), prequential paired log-loss gate);
 #   docs/authority/statistical_calibration_addendum_2026-06-13.md A5 (era-aware EB partial pooling,
-#   decision rule), A6 (QUARANTINED exclusion), A9 (dual log-loss + RPS report), C1 (the era-mode
+#   decision rule), A6 (DISPUTED exclusion, nee QUARANTINED — renamed 2026-07-11 per
+#   docs/rebuild/quarantine_excision_2026-07-11.md §T2b), A9 (dual log-loss + RPS report), C1 (the era-mode
 #   deploy unlock); reference impls era_lrt / eb_era_diag / eb_era_full_given_sigma /
 #   step_change_time_decay_bias from consult2_era_contamination_fdr_maker_2026-06-13_raw.txt Q1.
 #   Data pipeline REUSED from scripts/fit_sigma_scale.py (provenance-audited 2026-06-12:
@@ -256,7 +257,7 @@ def _build_hist_cells(rows):
     winning_bin, settlement_value, settlement_unit). One coherent posterior per settled cell: the
     decision_group whose single highest p_raw is the max over the cell (its p_raw sums to 1, a
     self-consistent distribution — verified 2026-06-13). The chosen group's {range_label: p_raw} is a
-    q-distribution fed through the SAME _cell_from_q_dict path as the live era. QUARANTINED settlements
+    q-distribution fed through the SAME _cell_from_q_dict path as the live era. DISPUTED settlements
     never appear here (the SQL filters authority='VERIFIED'); they are counted separately for A6.
 
     WON-BIN PROVENANCE (critical — fixed 2026-06-13 after the won-minus-mode audit): the FINE
@@ -1385,21 +1386,21 @@ def main() -> int:
         cur = con.cursor()
         cur.execute(_FIT_QUERY)
         rows = cur.fetchall()
-        # Era-mode loads the historical calibration_pairs era + counts QUARANTINED exclusions (A6).
+        # Era-mode loads the historical calibration_pairs era + counts DISPUTED exclusions (A6).
         era_cells = []
-        quarantined_excluded = None
+        disputed_excluded = None
         if args.era_mode:
-            # Count QUARANTINED first (separate cursor state), then STREAM the historical era so the
+            # Count DISPUTED first (separate cursor state), then STREAM the historical era so the
             # 48M-row calibration_pairs join never materializes in RAM (rows arrive ordered by city,date).
-            quarantined_excluded = cur.execute(
+            disputed_excluded = cur.execute(
                 "SELECT COUNT(*) FROM settlement_outcomes "
-                "WHERE temperature_metric='high' AND authority='QUARANTINED'").fetchone()[0]
-            # addendum D2: per-era quarantined counts (a quarantined (city,date) overlapping each era's
+                "WHERE temperature_metric='high' AND authority='DISPUTED'").fetchone()[0]
+            # addendum D2: per-era disputed counts (a disputed (city,date) overlapping each era's
             # date span) + whether provenance_json carries a recoverable ambiguity set (the union of
             # plausible bins from competing sources) that a future CAR interval-widening upgrade could use.
-            quarantined_provenance_has_ambiguity = cur.execute(
+            disputed_provenance_has_ambiguity = cur.execute(
                 "SELECT COUNT(*) FROM settlement_outcomes "
-                "WHERE temperature_metric='high' AND authority='QUARANTINED' "
+                "WHERE temperature_metric='high' AND authority='DISPUTED' "
                 "  AND provenance_json IS NOT NULL "
                 "  AND (provenance_json LIKE '%ambig%' OR provenance_json LIKE '%candidate%' "
                 "    OR provenance_json LIKE '%competing%')").fetchone()[0]
@@ -1503,10 +1504,10 @@ def main() -> int:
                            "sigma": "implied from mode-bin p_raw", "n_cells": len(era_cells),
                            "date_range": (f"{hist_days[0]}..{hist_days[-1]}" if hist_days else None)},
             },
-            "quarantined_settlements_excluded_high": quarantined_excluded,
-            "quarantine_treatment": "EXCLUDE (addendum A6 primary): authority='VERIFIED' filter drops them; never down-weighted.",
-            "quarantine_car_note": (  # addendum D2: future CAR interval-widening hook
-                f"{quarantined_provenance_has_ambiguity} of {quarantined_excluded} quarantined 'high' "
+            "disputed_settlements_excluded_high": disputed_excluded,
+            "dispute_treatment": "EXCLUDE (addendum A6 primary): authority='VERIFIED' filter drops them; never down-weighted.",
+            "dispute_car_note": (  # addendum D2: future CAR interval-widening hook
+                f"{disputed_provenance_has_ambiguity} of {disputed_excluded} disputed 'high' "
                 "rows carry an ambiguity/candidate/competing marker in provenance_json. If the plausible-"
                 "bin set is recoverable, the sanctioned FUTURE upgrade is CAR interval-widening (censor "
                 "over [min lower, max upper] of the competing bins) instead of exclusion. NOT implemented "
@@ -1518,7 +1519,7 @@ def main() -> int:
             era_mode_block = _run_era_mode(all_era_cells, args.k_old, w_old,
                                            bootstrap_reps=args.era_bootstrap_reps)
             era_mode_block["data_audit"] = data_audit
-            era_mode_block["quarantined_excluded"] = quarantined_excluded
+            era_mode_block["disputed_excluded"] = disputed_excluded
             era_mode_block["thin_window"] = bool(len(cells) < 60)  # live era still thin; kept for semantics
         else:
             era_mode_block = {"schema_block": "era_mode", "status": "INSUFFICIENT_ERA_CELLS",
@@ -1597,7 +1598,7 @@ def main() -> int:
         print("    --- ERA-MODE (addendum C1: full-history era-aware partial pooling) ---")
         em = era_mode_block
         da = em.get("data_audit", {})
-        print(f"        QUARANTINED settlements excluded (A6): {em.get('quarantined_excluded')}")
+        print(f"        DISPUTED settlements excluded (A6): {em.get('disputed_excluded')}")
         print(f"        window widening: {da.get('window_widening')}")
         if em.get("status") == "INSUFFICIENT_ERA_CELLS":
             print(f"        status={em['status']} n_total_era_cells={em['n_total_era_cells']}")

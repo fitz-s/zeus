@@ -1664,7 +1664,91 @@ def get_connection(
 # CI hook scripts/check_schema_version.py diffs the sqlite_master hash of
 # a fresh-init DB against tests/state/_schema_pinned_hash.txt and fails
 # the PR if SCHEMA_VERSION did not change in lockstep.
-SCHEMA_VERSION = 42  # 2026-05-28 F1 (docs/archive/2026-Q2/findings_historical/findings_2026_05_28.md §F1): position_current gains chain_avg_price + chain_cost_basis_usd so balance-only rescue persists chain-observed economics without overwriting submitted entry_price/cost_basis_usd/size_usd. Prior: 41 = merge #349+#352.
+SCHEMA_VERSION = 43  # 2026-07-11 T2b (docs/rebuild/quarantine_excision_2026-07-11.md §T2b): settlements.authority + observations.authority CHECK literal QUARANTINED -> DISPUTED. Prior: 42 = position_current chain_avg_price/chain_cost_basis_usd (F1).
+
+
+def _migrate_authority_tier_disputed(conn: "sqlite3.Connection", table: str) -> None:
+    """Idempotent REOPEN-2-style table rebuild: authority CHECK literal
+    'QUARANTINED' -> 'DISPUTED' on `table`, with a CASE-mapped data migration of
+    every existing 'QUARANTINED' row to 'DISPUTED' in the same INSERT SELECT
+    (SQLite forbids inserting a value the new CHECK doesn't allow, so the rename
+    and the data migration cannot be split into two steps).
+
+    Renamed 2026-07-11 per docs/rebuild/quarantine_excision_2026-07-11.md §T2b —
+    the settlement/observation authority tier's QUARANTINED member is a per-row
+    scoped dispute with an evidence-backed release path (settlements_authority_monotonic
+    trigger), not a global freeze; DISPUTED names that shape correctly.
+
+    No-op when `table` doesn't exist yet (a fresh DB's CREATE TABLE IF NOT EXISTS
+    already declares the DISPUTED CHECK) or has already been migrated (detected via
+    absence of the literal 'QUARANTINED' in the table's own sqlite_master SQL).
+
+    Reuses the table's OWN recorded DDL text (with only the CHECK literal and the
+    CREATE TABLE target renamed) rather than a hand-transcribed parallel schema, so
+    any columns added by earlier ALTER TABLE statements since the original CREATE
+    are carried over exactly — no separate drift risk between this migration and
+    the live ALTER history.
+
+    Called for both `settlements` (world.db) and `observations` (world.db AND,
+    via `_create_observations`, forecasts.db) — both carry the same
+    VERIFIED/UNVERIFIED/QUARANTINED tri-state CHECK on `authority`.
+    """
+    try:
+        row = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE name=? AND type='table'", (table,)
+        ).fetchone()
+        table_sql = row[0] if row else ""
+        if not table_sql or "'QUARANTINED'" not in table_sql:
+            return  # absent (fresh-DB CREATE below handles it) or already migrated
+        cols = [r[1] for r in conn.execute(f"PRAGMA table_info({table})")]
+        if "authority" not in cols:
+            return  # not an authority-tier table
+        migrated_name = f"{table}_disputed_migrated"
+        new_sql = table_sql.replace("'QUARANTINED'", "'DISPUTED'")
+        # sqlite_master normalizes CREATE TABLE text: leading comments, "IF NOT
+        # EXISTS", and surrounding whitespace are all stripped by SQLite itself
+        # (verified empirically), so the stored text always starts with exactly
+        # "CREATE TABLE <name> (". Rename only that leading identifier.
+        prefix_plain = f"CREATE TABLE {table}"
+        if new_sql.startswith(prefix_plain):
+            new_sql = f"CREATE TABLE {migrated_name}" + new_sql[len(prefix_plain):]
+        else:
+            raise RuntimeError(
+                f"T2b authority-disputed migration: unrecognized CREATE TABLE prefix "
+                f"for {table} — refusing to rebuild blind"
+            )
+        col_list = ", ".join(cols)
+        select_list = ", ".join(
+            "CASE WHEN authority = 'QUARANTINED' THEN 'DISPUTED' ELSE authority END"
+            if c == "authority" else c
+            for c in cols
+        )
+        pre_count = conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+        conn.execute(new_sql)
+        conn.execute(
+            f"INSERT INTO {migrated_name} ({col_list}) SELECT {select_list} FROM {table}"
+        )
+        post_count = conn.execute(f"SELECT COUNT(*) FROM {migrated_name}").fetchone()[0]
+        if post_count != pre_count:
+            raise RuntimeError(
+                f"T2b authority-disputed migration row-count drift on {table}: "
+                f"pre={pre_count} post={post_count} — ABORT to prevent data loss"
+            )
+        # DROP TABLE cascades removal of indexes on `table`; capture their SQL
+        # first and recreate against the renamed table.
+        index_rows = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='index' AND tbl_name=? "
+            "AND sql IS NOT NULL",
+            (table,),
+        ).fetchall()
+        conn.execute(f"DROP TABLE {table}")
+        conn.execute(f"ALTER TABLE {migrated_name} RENAME TO {table}")
+        for (index_sql,) in index_rows:
+            conn.execute(index_sql)
+    except sqlite3.OperationalError:
+        # Table doesn't exist yet on a fresh DB — CREATE TABLE IF NOT EXISTS below
+        # (which now declares the DISPUTED CHECK) handles it. No action needed.
+        pass
 
 
 def init_schema(
@@ -1736,7 +1820,7 @@ def init_schema(
             settlement_value REAL,
             settlement_source TEXT,
             settled_at TEXT,
-            authority TEXT NOT NULL DEFAULT 'UNVERIFIED' CHECK (authority IN ('VERIFIED', 'UNVERIFIED', 'QUARANTINED')),
+            authority TEXT NOT NULL DEFAULT 'UNVERIFIED' CHECK (authority IN ('VERIFIED', 'UNVERIFIED', 'DISPUTED')),
             pm_bin_lo REAL,
             pm_bin_hi REAL,
             unit TEXT,
@@ -1799,7 +1883,7 @@ def init_schema(
             rebuild_run_id TEXT,
             data_source_version TEXT,
             -- K1 additions: authority + extensibility
-            authority TEXT NOT NULL DEFAULT 'UNVERIFIED' CHECK (authority IN ('VERIFIED', 'UNVERIFIED', 'QUARANTINED')),
+            authority TEXT NOT NULL DEFAULT 'UNVERIFIED' CHECK (authority IN ('VERIFIED', 'UNVERIFIED', 'DISPUTED')),
             high_provenance_metadata TEXT,  -- JSON
             low_provenance_metadata TEXT,  -- JSON
             UNIQUE(city, target_date, source)
@@ -3119,8 +3203,17 @@ def init_schema(
         # No action needed.
         pass
 
+    # T2b (2026-07-11, docs/rebuild/quarantine_excision_2026-07-11.md): authority
+    # CHECK literal QUARANTINED -> DISPUTED, with the ~92 live QUARANTINED rows
+    # data-migrated in the same rebuild. Runs BEFORE the trigger DROP+CREATE block
+    # below (same ordering rule as the UNIQUE migration above) so the trigger
+    # installs against the rebuilt table's new CHECK.
+    _migrate_authority_tier_disputed(conn, "settlements")
+    _migrate_authority_tier_disputed(conn, "observations")
+
     # P-B authority-monotonic trigger (INV-FP-5 enforcement).
-    # Reactivation contract: QUARANTINED->VERIFIED requires a top-level JSON key
+    # Reactivation contract: DISPUTED->VERIFIED (nee QUARANTINED->VERIFIED,
+    # renamed 2026-07-11 per T2b) requires a top-level JSON key
     # `reactivated_by` that is a non-empty text value in provenance_json.
     # Substring LIKE is intentionally avoided to prevent false-positive matches
     # on keys like "not_reactivated_by". DROP + CREATE (not CREATE IF NOT EXISTS)
@@ -3135,13 +3228,13 @@ def init_schema(
             CREATE TRIGGER settlements_authority_monotonic
             BEFORE UPDATE OF authority ON settlements
             WHEN (OLD.authority = 'VERIFIED' AND NEW.authority = 'UNVERIFIED')
-              OR (OLD.authority = 'QUARANTINED' AND NEW.authority = 'VERIFIED'
+              OR (OLD.authority = 'DISPUTED' AND NEW.authority = 'VERIFIED'
                   AND (NEW.provenance_json IS NULL
                        OR json_extract(NEW.provenance_json, '$.reactivated_by') IS NULL
                        OR json_type(NEW.provenance_json, '$.reactivated_by') != 'text'
                        OR length(json_extract(NEW.provenance_json, '$.reactivated_by')) = 0))
             BEGIN
-                SELECT RAISE(ABORT, 'settlements.authority transition forbidden: VERIFIED->UNVERIFIED blocked, or QUARANTINED->VERIFIED requires provenance_json.reactivated_by to be a non-empty text value');
+                SELECT RAISE(ABORT, 'settlements.authority transition forbidden: VERIFIED->UNVERIFIED blocked, or DISPUTED->VERIFIED requires provenance_json.reactivated_by to be a non-empty text value');
             END;
             """
         )
@@ -3188,13 +3281,16 @@ def init_schema(
     # only — any writer that bypasses the function bypasses the check). These
     # two triggers enforce the minimum VERIFIED-row invariants structurally at
     # DB-write time: a row with authority='VERIFIED' must carry non-null
-    # settlement_value AND non-empty winning_bin. QUARANTINED rows may have
-    # NULL settlement_value (that is the quarantine semantic — row is excluded
-    # from the authoritative set until reactivation).
+    # settlement_value AND non-empty winning_bin. DISPUTED rows (nee QUARANTINED,
+    # renamed 2026-07-11 per T2b) may have NULL settlement_value (that is the
+    # dispute semantic — row is excluded from the authoritative set until
+    # reactivation).
     #
-    # Pre-apply probe against live DB (1,469 VERIFIED + 92 QUARANTINED rows):
+    # Pre-apply probe against live DB (1,469 VERIFIED + 92 QUARANTINED rows, as of
+    # the original 2026-04-24 audit — the T2b rename 2026-07-11 relabels these same
+    # rows DISPUTED, counts unchanged):
     #   VERIFIED: 0 with null settlement_value / 0 with null winning_bin → none rejected
-    #   QUARANTINED: 49 with null settlement_value / 92 with null winning_bin → trigger does not fire (WHEN gates on authority='VERIFIED')
+    #   QUARANTINED/DISPUTED: 49 with null settlement_value / 92 with null winning_bin → trigger does not fire (WHEN gates on authority='VERIFIED')
     # So no legitimate historical rows are rejected by this trigger.
     #
     # DROP + CREATE (not CREATE IF NOT EXISTS) so a future refactor that
@@ -3630,7 +3726,7 @@ def _create_observations(conn: sqlite3.Connection) -> None:
             rebuild_run_id TEXT,
             data_source_version TEXT,
             authority TEXT NOT NULL DEFAULT 'UNVERIFIED'
-                CHECK (authority IN ('VERIFIED', 'UNVERIFIED', 'QUARANTINED')),
+                CHECK (authority IN ('VERIFIED', 'UNVERIFIED', 'DISPUTED')),
             high_provenance_metadata TEXT,
             low_provenance_metadata TEXT,
             UNIQUE(city, target_date, source)
@@ -7728,7 +7824,7 @@ def log_settlement(
                 if not value
             ),
         }
-    if clean_authority not in {"VERIFIED", "UNVERIFIED", "QUARANTINED"}:
+    if clean_authority not in {"VERIFIED", "UNVERIFIED", "DISPUTED"}:
         return {
             "status": "refused_invalid_authority",
             "table": table,

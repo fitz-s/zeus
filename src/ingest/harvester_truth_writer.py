@@ -81,7 +81,12 @@ from src.state.db import (
     log_market_event_outcomes,
     log_settlement,
 )
-from src.state.settlement_writers import dispatch_era_basis, write_settlement_with_era_provenance
+from src.state.settlement_writers import (
+    SETTLEMENT_AUTHORITY_DISPUTED,
+    SETTLEMENT_DISPUTE_REASON_KEY,
+    dispatch_era_basis,
+    write_settlement_with_era_provenance,
+)
 from src.types.metric_identity import MetricIdentity
 
 logger = logging.getLogger(__name__)
@@ -381,7 +386,7 @@ def _disagreement_tolerance() -> float:
     """Tolerance (in settlement units) for SOURCE_DISAGREEMENT classification (fix #263).
 
     If the rounded obs is within this distance of the nearest bin edge, the
-    quarantine reason is 'harvester_source_disagreement_within_tolerance' rather
+    dispute reason is 'harvester_source_disagreement_within_tolerance' rather
     than 'harvester_live_obs_outside_bin'.  1.0 unit = one settlement integer step.
     """
     return 1.0
@@ -441,12 +446,13 @@ def _write_settlement_truth(
     # fix in src/execution/harvester.py:1485-1495 (M1), which this reconstruction writer never
     # received — so the bulk-reconstructed window carried a ~21-day-lagged backfill constant in
     # settled_at that silently leaked every no-leak settlement walk-forward (PR #419 review finding).
-    # settled_at is NULL when no observation exists → the row is forced QUARANTINED below (no genuine
-    # settlement time → not gradable), exactly as the live harvester does.
+    # settled_at is NULL when no observation exists → the row is forced DISPUTED
+    # below (no genuine settlement time → not gradable), exactly as the
+    # live harvester does.
     recorded_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
     settled_at = obs_row.get("fetched_at") if obs_row is not None else None
 
-    authority = "QUARANTINED"
+    authority = SETTLEMENT_AUTHORITY_DISPUTED
     settlement_value: Optional[float] = None
     winning_bin: Optional[str] = None
     reason: Optional[str] = None
@@ -476,7 +482,7 @@ def _write_settlement_truth(
             contained = False
             if pm_bin_lo is None and pm_bin_hi is None:
                 # No bin information available -- cannot evaluate containment.
-                # Record the observation value but quarantine with a distinct reason
+                # Record the observation value but dispute with a distinct reason
                 # so data consumers can distinguish "obs outside known bin" from
                 # "no bin was provided at all" (e.g. uma_backfill synthetic slugs).
                 settlement_value = rounded
@@ -538,7 +544,7 @@ def _write_settlement_truth(
                     # obs_outside_bin. If the obs rounds to within ±tolerance of
                     # the nearest bin edge (i.e. one source passes, the other
                     # just misses due to measurement/rounding variance), emit a
-                    # distinct quarantine reason so operators can triage separately.
+                    # distinct dispute reason so operators can triage separately.
                     # "Both outside bin" scenario: obs is far from the bin — keep
                     # obs_outside_bin. When only one source fails containment and
                     # they are within tolerance, emit source_disagreement.
@@ -557,9 +563,10 @@ def _write_settlement_truth(
                         reason = "harvester_live_obs_outside_bin"
 
     # M1 guard (mirrors execution/harvester.py): a row with no genuine settlement-availability time
-    # (no observation fetch time) cannot be graded — force QUARANTINED even if value-contained.
+    # (no observation fetch time) cannot be graded — force DISPUTED
+    # even if value-contained.
     if authority == "VERIFIED" and settled_at is None:
-        authority = "QUARANTINED"
+        authority = SETTLEMENT_AUTHORITY_DISPUTED
         winning_bin = None
         reason = "harvester_truth_no_settlement_time"
 
@@ -586,7 +593,7 @@ def _write_settlement_truth(
         "audit_ref": "docs/operations/task_2026-04-30_two_system_independence/design.md §5 Phase 1.5",
     }
     if reason is not None:
-        provenance["quarantine_reason"] = reason
+        provenance[SETTLEMENT_DISPUTE_REASON_KEY] = reason
 
     settlement_result: dict = {}
     market_events_result: dict = {}
@@ -614,7 +621,7 @@ def _write_settlement_truth(
         # Route to era-aware writer (PR 1). dispatch_era_basis selects the correct
         # EraAuthorityBasis from the settlement date — the REAL obs-availability date now
         # (a May market reconstructed in June grades under May's era, not the batch date).
-        # When settled_at is NULL (quarantined no-settle row, not gradable) fall back to the
+        # When settled_at is NULL (disputed no-settle row, not gradable) fall back to the
         # write date so the dispatch never sees None; the row is non-admittable anyway.
         from datetime import date as _date
         _settled_date = _date.fromisoformat(str(settled_at or recorded_at)[:10])

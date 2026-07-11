@@ -17,7 +17,7 @@ connection (both tables are FORECAST_CLASS on the same DB -> intra-DB JOIN, INV-
 THE NO-LEAK GUARANTEE (IRON RULE #3, structural — not a comment):
   - endpoint = 'previous_runs' ONLY: single_runs (live capture, variable-lead) NEVER trains
     (SPEC §3 antibody "previous-runs-for-live-decision"; run_time != source_available_at).
-  - settlement authority = 'VERIFIED' ONLY: UNVERIFIED / QUARANTINED excluded (provenance gate).
+  - settlement authority = 'VERIFIED' ONLY: UNVERIFIED / DISPUTED excluded (provenance gate).
   - r.target_date < :decision_date (STRICT): same-day and future settlement can never leak.
   - residual = forecast_value_c - settlement_in_C: an F-settlement city's settlement_value
     (degF) is converted to degC BEFORE the residual so forecast_value_c (always degC) and the
@@ -136,7 +136,7 @@ class BayesPrecisionFusionHistoryProvider:
             # Single-DB intra-DB JOIN (raw_model_forecasts + settlement_outcomes both on
             # zeus-forecasts.db). The WHERE clause IS the no-leak antibody:
             #   endpoint='previous_runs'  -> fixed-lead train only (never single_runs)
-            #   authority='VERIFIED'      -> provenance gate (no UNVERIFIED/QUARANTINED)
+            #   authority='VERIFIED'      -> provenance gate (no UNVERIFIED/DISPUTED)
             #   r.target_date < :decision -> strict no-leak (no same-day / future settlement)
             sql = f"""
                 SELECT r.model AS model,
