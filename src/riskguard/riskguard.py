@@ -55,7 +55,6 @@ from src.state.db import (
 from src.state.fill_dedup import canonical_trade_fact_cte
 from src.state.portfolio import (
     ENTRY_ECONOMICS_LEGACY_UNKNOWN,
-    FILL_GRADE_ENTRY_AUTHORITIES,
     FILL_GRADE_FILL_AUTHORITIES,
     FILL_AUTHORITY_NONE,
     PortfolioState,
@@ -208,7 +207,7 @@ def _portfolio_position_from_loader_row(row: dict) -> Position:
 
     entry_authority = str(row.get("entry_economics_authority") or ENTRY_ECONOMICS_LEGACY_UNKNOWN)
     fill_authority = str(row.get("fill_authority") or FILL_AUTHORITY_NONE)
-    if entry_authority in FILL_GRADE_ENTRY_AUTHORITIES or fill_authority in FILL_GRADE_FILL_AUTHORITIES:
+    if fill_authority in FILL_GRADE_FILL_AUTHORITIES:
         if str(row.get("entry_economics_source") or "") != "execution_fact":
             raise ValueError("fill-grade loader row missing execution_fact source provenance")
         if not str(row.get("execution_fact_intent_id") or ""):

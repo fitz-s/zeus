@@ -1345,6 +1345,43 @@ class TestRiskGuardSettlementSource:
         with pytest.raises(ValueError, match="execution_fact_filled_at"):
             riskguard_module._portfolio_position_from_loader_row(loader_row)
 
+    def test_portfolio_loader_accepts_balance_only_chain_observed_economics(self):
+        """Current chain exposure is not a claim of verified fill history."""
+        loader_row = {
+            "trade_id": "balance-only-chain-row",
+            "market_id": "condition-1",
+            "city": "Tokyo",
+            "cluster": "Asia",
+            "target_date": "2026-07-13",
+            "bin_label": "31C",
+            "direction": "buy_no",
+            "unit": "C",
+            "temperature_metric": "high",
+            "env": "live",
+            "size_usd": 2.432,
+            "shares": 3.8,
+            "cost_basis_usd": 2.432,
+            "entry_price": 0.64,
+            "entry_economics_authority": "corrected_executable_cost_basis",
+            "fill_authority": "venue_position_observed",
+            "entry_economics_source": "position_current_chain_observed",
+            "execution_fact_intent_id": "",
+            "execution_fact_filled_at": "",
+            "chain_state": "entry_authority_quarantined",
+            "chain_shares": 3.8,
+            "chain_avg_price": 0.64,
+            "chain_cost_basis_usd": 2.432,
+            "state": "quarantined",
+        }
+
+        position = riskguard_module._portfolio_position_from_loader_row(loader_row)
+
+        assert position.fill_authority == "venue_position_observed"
+        assert position.has_chain_observed_authority is True
+        assert position.has_fill_economics_authority is False
+        assert position.effective_shares == pytest.approx(3.8)
+        assert position.effective_cost_basis_usd == pytest.approx(2.432)
+
     def test_loader_excludes_unloadable_row_instead_of_failing_whole_tick(
         self, monkeypatch, tmp_path
     ):
