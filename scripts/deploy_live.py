@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Lifecycle: created=2026-06-12; last_reviewed=2026-07-10; last_reused=2026-07-10
+# Lifecycle: created=2026-06-12; last_reviewed=2026-07-11; last_reused=2026-07-11
 # Purpose: make live daemon restarts SAFE — refuse `launchctl kickstart` while the LIVE
 #   checkout's runtime surface is uncommitted/unpushed, and require live restart preflight
 #   before booting the trading daemon.
@@ -1038,6 +1038,78 @@ def _pause_entries_for_live_restart_if_needed(labels: list[str]) -> tuple[bool, 
     return True, f"live restart entry pause guard armed: {tail}"
 
 
+def _resume_entries_after_verified_live_restart_if_needed(
+    labels: list[str],
+) -> tuple[bool, str]:
+    """Clear only this deploy's guard after every post-start proof is green."""
+
+    if LIVE_TRADING_LABEL not in labels:
+        return True, "entry resume not required for this daemon"
+    live_repo = _require_live_repo()
+    py = os.path.join(live_repo, ".venv", "bin", "python")
+    if not os.path.exists(py):
+        py = sys.executable
+    code = textwrap.dedent(
+        """
+        from datetime import datetime, timezone
+        from src.control.control_plane import resume_entries
+        from src.state.db import get_world_connection
+
+        now = datetime.now(timezone.utc).isoformat()
+        conn = get_world_connection()
+        try:
+            row = conn.execute(
+                '''
+                SELECT reason, issued_by
+                  FROM control_overrides
+                 WHERE target_type = 'global'
+                   AND target_key = 'entries'
+                   AND action_type = 'gate'
+                   AND lower(COALESCE(value, '')) IN ('1', 'true', 'yes', 'on')
+                   AND issued_by IN ('control_plane', 'operator')
+                   AND (effective_until IS NULL OR effective_until > ?)
+                   AND issued_at <= ?
+                 ORDER BY precedence DESC, issued_at DESC, override_id DESC
+                 LIMIT 1
+                ''',
+                (now, now),
+            ).fetchone()
+        finally:
+            conn.close()
+
+        if row is None:
+            print('entries pause guard already clear')
+        elif row[0] == 'deploy_live_restart_guard' and row[1] == 'control_plane':
+            resume_entries(
+                'deploy_live_restart_guard_verified_runtime_queue_monitor',
+                issued_by='control_plane',
+            )
+            print('deploy live restart guard cleared')
+        else:
+            print(
+                'entries pause guard preserved after deploy: '
+                f"issued_by={row[1]} reason={row[0]}"
+            )
+        """
+    ).strip()
+    try:
+        res = subprocess.run(
+            [py, "-c", code],
+            cwd=live_repo,
+            env=_live_trading_subprocess_env(),
+            capture_output=True,
+            text=True,
+            timeout=30.0,
+        )
+    except Exception as exc:  # noqa: BLE001
+        return False, f"verified live restart entry resume could not run: {exc}"
+    output = (res.stdout or res.stderr or "").strip()
+    tail = "\n".join(output.splitlines()[-20:]) if output else "<no output>"
+    if res.returncode != 0:
+        return False, f"verified live restart entry resume failed rc={res.returncode}:\n{tail}"
+    return True, f"verified live restart entry posture: {tail}"
+
+
 def _dedupe_labels(labels: list[str]) -> list[str]:
     deduped: list[str] = []
     seen: set[str] = set()
@@ -1228,6 +1300,13 @@ def cmd_restart(args: argparse.Namespace) -> int:
                 print(monitor_detail)
                 if not monitor_ok:
                     rc_all = 1
+                if queue_ok and monitor_ok:
+                    resume_ok, resume_detail = (
+                        _resume_entries_after_verified_live_restart_if_needed(labels)
+                    )
+                    print(resume_detail)
+                    if not resume_ok:
+                        rc_all = 1
         else:
             rc_all = 1
             print(detail, file=sys.stderr)

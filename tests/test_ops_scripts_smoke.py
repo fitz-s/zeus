@@ -2712,6 +2712,10 @@ def test_deploy_live_live_restart_runs_recovery_before_preflight(monkeypatch, ca
         calls.append(("queue", "post-start"))
         return True, "post-start EDLI queue progress verified"
 
+    def _resume(labels):
+        calls.append(("resume_entries", tuple(labels)))
+        return True, "verified live restart entry posture"
+
     monkeypatch.setattr(dl, "_stop_label", _stop)
     monkeypatch.setattr(dl, "_pause_entries_for_live_restart_if_needed", _pause)
     monkeypatch.setattr(dl, "_run_restart_recovery_if_needed", _recovery)
@@ -2721,6 +2725,11 @@ def test_deploy_live_live_restart_runs_recovery_before_preflight(monkeypatch, ca
     monkeypatch.setattr(dl, "_wait_for_live_runtime_fresh", _verify)
     monkeypatch.setattr(dl, "_wait_for_post_start_edli_queue_progress", _queue)
     monkeypatch.setattr(dl, "_wait_for_post_start_monitor_cadence", _monitor)
+    monkeypatch.setattr(
+        dl,
+        "_resume_entries_after_verified_live_restart_if_needed",
+        _resume,
+    )
 
     rc = dl.main(["restart", "live-trading"])
 
@@ -2745,6 +2754,7 @@ def test_deploy_live_live_restart_runs_recovery_before_preflight(monkeypatch, ca
         ("verify", "cccccccc"),
         ("queue", "post-start"),
         ("monitor", "post-start"),
+        ("resume_entries", tuple(expanded_labels)),
     ]
     assert "live restart preflight passed" in capsys.readouterr().out
 
@@ -2835,6 +2845,88 @@ def test_deploy_live_restart_pause_preserves_existing_operator_pause(monkeypatch
     assert pause_calls == []
     assert sql_calls
     assert "effective_until IS NULL" in sql_calls[0][0]
+
+
+def test_deploy_live_verified_restart_clears_only_its_control_plane_guard(
+    monkeypatch,
+    tmp_path,
+):
+    dl = _load("deploy_live_restart_resume_exact_guard", "deploy_live.py")
+    resume_calls = []
+
+    monkeypatch.setattr(dl, "_require_live_repo", lambda: str(tmp_path))
+    monkeypatch.setattr(dl, "_live_trading_subprocess_env", lambda: {})
+
+    control_mod = types.ModuleType("src.control.control_plane")
+    state_db_mod = types.ModuleType("src.state.db")
+    control_mod.resume_entries = lambda *args, **kwargs: resume_calls.append((args, kwargs))
+
+    class _Cursor:
+        def fetchone(self):
+            return ("deploy_live_restart_guard", "control_plane")
+
+    class _Conn:
+        def execute(self, _sql, _params=()):
+            return _Cursor()
+
+        def close(self):
+            return None
+
+    state_db_mod.get_world_connection = lambda: _Conn()
+    monkeypatch.setitem(sys.modules, "src.control.control_plane", control_mod)
+    monkeypatch.setitem(sys.modules, "src.state.db", state_db_mod)
+
+    class Result:
+        returncode = 0
+        stderr = ""
+
+        def __init__(self, stdout):
+            self.stdout = stdout
+
+    def fake_run(args, **_kwargs):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            exec(args[2], {})
+        return Result(out.getvalue())
+
+    monkeypatch.setattr(dl.subprocess, "run", fake_run)
+
+    ok, detail = dl._resume_entries_after_verified_live_restart_if_needed(
+        [dl.LIVE_TRADING_LABEL]
+    )
+
+    assert ok is True
+    assert "restart guard cleared" in detail
+    assert resume_calls == [
+        (
+            ("deploy_live_restart_guard_verified_runtime_queue_monitor",),
+            {"issued_by": "control_plane"},
+        )
+    ]
+
+
+def test_deploy_live_verified_restart_preserves_non_deploy_pause(monkeypatch, tmp_path):
+    dl = _load("deploy_live_restart_resume_preserves_operator", "deploy_live.py")
+
+    monkeypatch.setattr(dl, "_require_live_repo", lambda: str(tmp_path))
+    monkeypatch.setattr(dl, "_live_trading_subprocess_env", lambda: {})
+
+    class Result:
+        returncode = 0
+        stdout = (
+            "entries pause guard preserved after deploy: "
+            "issued_by=operator reason=operator_investigation\n"
+        )
+        stderr = ""
+
+    monkeypatch.setattr(dl.subprocess, "run", lambda *_args, **_kwargs: Result())
+
+    ok, detail = dl._resume_entries_after_verified_live_restart_if_needed(
+        [dl.LIVE_TRADING_LABEL]
+    )
+
+    assert ok is True
+    assert "operator_investigation" in detail
 
 
 def test_deploy_live_all_restarts_sidecars_before_live_preflight(monkeypatch):
