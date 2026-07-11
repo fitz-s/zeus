@@ -757,7 +757,6 @@ def test_live_adapter_routes_global_scope_through_world_connection(monkeypatch):
     assert captured["forecast_conn"] is forecast
     assert captured["world_conn"] is not topology
     assert captured["portfolio_state_provider"] is None
-
     metadata_calls = []
     bind_calls = []
     metadata_key = ("condition", "yes-token")
@@ -798,6 +797,34 @@ def test_live_adapter_routes_global_scope_through_world_connection(monkeypatch):
         {metadata_key: metadata},
         {metadata_key: metadata},
     ]
+
+
+def test_global_curve_supersession_keeps_typed_current_candidate():
+    candidate = object()
+    reason = (
+        "GLOBAL_ACTUATION_EXECUTION_BINDING_SUPERSEDED:curve_economics:"
+        "detail=prefix_price"
+    )
+    exc = era._GlobalCurveSuperseded(reason, candidate)
+    receipt = era.EventSubmissionReceipt(
+        False,
+        "event-1",
+        "snapshot-1",
+        reason=str(exc),
+        global_jit_candidate=exc.replacement_candidate,
+    )
+
+    assert era._global_curve_supersession_from_receipt(receipt) == (
+        "CURVE_SUPERSEDED",
+        candidate,
+        reason,
+    )
+    missing = replace(receipt, global_jit_candidate=None)
+    assert era._global_curve_supersession_from_receipt(missing) == (
+        "BLOCKED",
+        None,
+        f"{reason}:replacement_candidate_missing",
+    )
 
 
 def test_current_global_scope_uses_latest_day0_carrier_per_family():
@@ -2534,6 +2561,93 @@ def _global_test_book(identity: str, *, price: str):
     )
 
 
+def test_global_jit_overlay_replaces_only_selected_native_curve():
+    captured = _dt.datetime(2026, 7, 10, 8, 0, tzinfo=_dt.timezone.utc)
+    old_curve = era.ExecutableCostCurve(
+        token_id="token",
+        side="YES",
+        snapshot_id="snapshot-old",
+        book_hash="book-old",
+        levels=(era.BookLevel(price=Decimal("0.40"), size=Decimal("10")),),
+        fee_model=era.FeeModel(fee_rate=Decimal("0.01")),
+        min_tick=Decimal("0.001"),
+        min_order_size=Decimal("1"),
+        quote_ttl=_dt.timedelta(seconds=30),
+    )
+    new_curve = replace(
+        old_curve,
+        snapshot_id="snapshot-new",
+        book_hash="book-new",
+        levels=(era.BookLevel(price=Decimal("0.41"), size=Decimal("9")),),
+    )
+    states = (("family", "bin", "condition", "YES", "token", "EXECUTABLE", "book-old"),)
+    epoch = universe.CurrentGlobalBookEpoch(
+        assets=(
+            universe.CurrentGlobalBookAsset(
+                family_key="family",
+                bin_id="bin",
+                condition_id="condition",
+                side="YES",
+                token_id="token",
+                curve=old_curve,
+                captured_at_utc=captured,
+            ),
+        ),
+        asset_states=states,
+        captured_at_utc=captured,
+        max_age=_dt.timedelta(seconds=30),
+        witness_identity=universe.current_global_book_epoch_identity(
+            asset_states=states,
+            captured_at_utc=captured,
+        ),
+    )
+    selected = SimpleNamespace(
+        family_key="family",
+        bin_id="bin",
+        condition_id="condition",
+        side="YES",
+        token_id="token",
+        probability_witness_identity="probability",
+        resolution_identity="resolution",
+        ledger_snapshot_id="ledger",
+        book_captured_at_utc=captured,
+        execution_curve_identity=global_batch_runtime.executable_curve_identity(old_curve),
+    )
+    replacement = SimpleNamespace(
+        family_key="family",
+        bin_id="bin",
+        condition_id="condition",
+        side="YES",
+        token_id="token",
+        probability_witness_identity="probability",
+        resolution_identity="resolution",
+        ledger_snapshot_id="ledger",
+        executable_cost_curve=new_curve,
+        book_captured_at_utc=captured + _dt.timedelta(seconds=1),
+        execution_curve_identity=global_batch_runtime.executable_curve_identity(new_curve),
+    )
+
+    overlaid = global_batch_runtime._overlay_current_global_book_epoch(
+        epoch,
+        selected,
+        replacement,
+    )
+
+    assert epoch.assets[0].curve is old_curve
+    assert overlaid.assets[0].curve is new_curve
+    assert overlaid.assets[0].captured_at_utc == replacement.book_captured_at_utc
+    assert overlaid.asset_states == (
+        ("family", "bin", "condition", "YES", "token", "EXECUTABLE", "book-new"),
+    )
+    assert overlaid.witness_identity != epoch.witness_identity
+    with pytest.raises(ValueError, match="GLOBAL_JIT_OVERLAY_AUTHORITY_MISMATCH"):
+        global_batch_runtime._overlay_current_global_book_epoch(
+            epoch,
+            selected,
+            SimpleNamespace(**(vars(replacement) | {"resolution_identity": "other"})),
+        )
+
+
 def test_global_batch_reauctions_once_on_full_universe_curve_drift(monkeypatch):
     decision_at = _dt.datetime(2026, 7, 10, 8, 0, tzinfo=_dt.timezone.utc)
     event_a = _global_scope_event(city="Alpha", source_run_id="run-a")
@@ -2581,9 +2695,9 @@ def test_global_batch_reauctions_once_on_full_universe_curve_drift(monkeypatch):
         (
             _global_test_book("book-0", price="0.40"),
             _global_test_book("book-1", price="0.41"),
-            _global_test_book("book-2", price="0.42"),
         )
     )
+    replacement_candidate = object()
     calls = {"prepare": 0, "books": 0, "wealth": 0, "preflight": [], "venue": 0}
 
     monkeypatch.setattr(
@@ -2631,11 +2745,25 @@ def test_global_batch_reauctions_once_on_full_universe_curve_drift(monkeypatch):
         calls["preflight"].append(event.event_id)
         if len(calls["preflight"]) == 1:
             return global_batch_runtime.GlobalWinnerPreflight(
-                status="CURVE_SUPERSEDED", reason="curve moved"
+                status="CURVE_SUPERSEDED",
+                replacement_candidate=replacement_candidate,
+                reason="curve moved",
             )
         return global_batch_runtime.GlobalWinnerPreflight(
             status="STABLE", binding_token="binding-b"
         )
+
+    def overlay(book, selected_candidate, replacement):
+        assert book.witness_identity == "book-1"
+        assert selected_candidate is not None
+        assert replacement is replacement_candidate
+        return _global_test_book("book-2", price="0.42")
+
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "_overlay_current_global_book_epoch",
+        overlay,
+    )
 
     def actuate_preflighted(event, actuation, _at, token, authority):
         assert event.event_id == event_b.event_id
@@ -2673,7 +2801,7 @@ def test_global_batch_reauctions_once_on_full_universe_curve_drift(monkeypatch):
 
     assert calls == {
         "prepare": 2,
-        "books": 3,
+        "books": 2,
         "wealth": 3,
         "preflight": [event_b.event_id, event_b.event_id],
         "venue": 1,
@@ -2729,8 +2857,16 @@ def test_global_batch_second_curve_supersession_exhausts_without_venue(monkeypat
     def preflight(*_):
         calls["preflight"] += 1
         return global_batch_runtime.GlobalWinnerPreflight(
-            status="CURVE_SUPERSEDED", reason=f"curve moved {calls['preflight']}"
+            status="CURVE_SUPERSEDED",
+            replacement_candidate=object(),
+            reason=f"curve moved {calls['preflight']}",
         )
+
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "_overlay_current_global_book_epoch",
+        lambda book, _selected, _replacement: book,
+    )
 
     result = global_batch_runtime.process_current_global_batch(
         (event,),
@@ -2831,7 +2967,9 @@ def test_global_batch_reauction_rejects_probability_cut_drift(monkeypatch):
     def preflight(*_):
         calls["preflight"] += 1
         return global_batch_runtime.GlobalWinnerPreflight(
-            status="CURVE_SUPERSEDED", reason="curve moved"
+            status="CURVE_SUPERSEDED",
+            replacement_candidate=object(),
+            reason="curve moved",
         )
 
     result = global_batch_runtime.process_current_global_batch(

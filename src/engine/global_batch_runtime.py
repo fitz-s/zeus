@@ -10,7 +10,9 @@ from typing import Callable, Mapping, Sequence
 
 from src.contracts.executable_market_snapshot import FRESHNESS_WINDOW_DEFAULT
 from src.engine.global_auction_universe import (
+    CurrentGlobalBookAsset,
     CurrentGlobalBookEpoch,
+    current_global_book_epoch_identity,
     current_global_auction_scope_from_events,
     current_portfolio_wealth_witness,
     current_venue_auction_identity,
@@ -20,7 +22,7 @@ from src.engine.global_single_order_auction import select_prepared_global_auctio
 from src.events.candidate_binding import weather_family_id
 from src.events.opportunity_event import OpportunityEvent, make_opportunity_event
 from src.events.reactor import EventSubmissionReceipt, GlobalBatchSubmitResult
-from src.solve.solver import CurrentFamilyProbabilityAuthority
+from src.solve.solver import CurrentFamilyProbabilityAuthority, executable_curve_identity
 from src.state.collateral_ledger import COLLATERAL_SNAPSHOT_MAX_AGE_SECONDS
 
 UTC = timezone.utc
@@ -32,6 +34,7 @@ class GlobalWinnerPreflight:
 
     status: str
     binding_token: object | None = None
+    replacement_candidate: object | None = None
     reason: str = ""
 
     def __post_init__(self) -> None:
@@ -39,6 +42,10 @@ class GlobalWinnerPreflight:
             raise ValueError("GLOBAL_WINNER_PREFLIGHT_STATUS_INVALID")
         if (self.status == "STABLE") != (self.binding_token is not None):
             raise ValueError("GLOBAL_WINNER_PREFLIGHT_TOKEN_INVALID")
+        if (self.status == "CURVE_SUPERSEDED") != (
+            self.replacement_candidate is not None
+        ):
+            raise ValueError("GLOBAL_WINNER_PREFLIGHT_REPLACEMENT_INVALID")
         if self.status != "STABLE" and not str(self.reason or "").strip():
             raise ValueError("GLOBAL_WINNER_PREFLIGHT_REASON_MISSING")
 
@@ -115,6 +122,106 @@ def _book_economics_manifest(
     if not manifest:
         raise ValueError("GLOBAL_BOOK_ECONOMICS_MISSING")
     return manifest
+
+
+def _overlay_current_global_book_epoch(
+    book_epoch: CurrentGlobalBookEpoch,
+    selected_candidate: object,
+    replacement_candidate: object,
+) -> CurrentGlobalBookEpoch:
+    """Replace only the JIT winner curve in one frozen complete book epoch."""
+
+    fields = ("family_key", "bin_id", "condition_id", "side", "token_id")
+    selected_key = tuple(
+        str(getattr(selected_candidate, field, "") or "") for field in fields
+    )
+    replacement_key = tuple(
+        str(getattr(replacement_candidate, field, "") or "") for field in fields
+    )
+    if not all(selected_key) or replacement_key != selected_key:
+        raise ValueError("GLOBAL_JIT_OVERLAY_IDENTITY_MISMATCH")
+    semantic_fields = (
+        "probability_witness_identity",
+        "resolution_identity",
+        "ledger_snapshot_id",
+    )
+    if any(
+        str(getattr(selected_candidate, field, "") or "")
+        != str(getattr(replacement_candidate, field, "") or "")
+        for field in semantic_fields
+    ):
+        raise ValueError("GLOBAL_JIT_OVERLAY_AUTHORITY_MISMATCH")
+    replacement_curve = getattr(replacement_candidate, "executable_cost_curve", None)
+    replacement_at = getattr(replacement_candidate, "book_captured_at_utc", None)
+    selected_at = getattr(selected_candidate, "book_captured_at_utc", None)
+    if (
+        replacement_curve is None
+        or replacement_curve.side != selected_key[3]
+        or replacement_curve.token_id != selected_key[4]
+        or executable_curve_identity(replacement_curve)
+        != str(
+            getattr(replacement_candidate, "execution_curve_identity", "") or ""
+        )
+        or replacement_at is None
+        or replacement_at.tzinfo is None
+        or selected_at is None
+        or selected_at.tzinfo is None
+        or replacement_at < selected_at
+    ):
+        raise ValueError("GLOBAL_JIT_OVERLAY_CURVE_INVALID")
+
+    assets: list[CurrentGlobalBookAsset] = []
+    matched_asset = 0
+    for asset in book_epoch.assets:
+        asset_key = (
+            asset.family_key,
+            asset.bin_id,
+            asset.condition_id,
+            asset.side,
+            asset.token_id,
+        )
+        if asset_key != selected_key:
+            assets.append(asset)
+            continue
+        if executable_curve_identity(asset.curve) != str(
+            getattr(selected_candidate, "execution_curve_identity", "") or ""
+        ):
+            raise ValueError("GLOBAL_JIT_OVERLAY_SELECTED_CURVE_MISMATCH")
+        matched_asset += 1
+        assets.append(
+            replace(
+                asset,
+                curve=replacement_curve,
+                captured_at_utc=replacement_at,
+            )
+        )
+    if matched_asset != 1:
+        raise ValueError(f"GLOBAL_JIT_OVERLAY_ASSET_CARDINALITY:{matched_asset}")
+
+    states: list[tuple[str, ...]] = []
+    matched_state = 0
+    for state in book_epoch.asset_states:
+        if tuple(state[:5]) != selected_key:
+            states.append(state)
+            continue
+        if len(state) != 7 or state[5] != "EXECUTABLE":
+            raise ValueError("GLOBAL_JIT_OVERLAY_STATE_INVALID")
+        matched_state += 1
+        states.append((*state[:6], str(replacement_curve.book_hash)))
+    if matched_state != 1:
+        raise ValueError(f"GLOBAL_JIT_OVERLAY_STATE_CARDINALITY:{matched_state}")
+
+    witness_identity = current_global_book_epoch_identity(
+        asset_states=states,
+        captured_at_utc=book_epoch.captured_at_utc,
+    )
+    return CurrentGlobalBookEpoch(
+        assets=tuple(assets),
+        asset_states=tuple(states),
+        captured_at_utc=book_epoch.captured_at_utc,
+        max_age=book_epoch.max_age,
+        witness_identity=witness_identity,
+    )
 
 
 def _begin_selection_read_snapshot(
@@ -597,12 +704,12 @@ def process_current_global_batch(
             if venue_submit_count() != before_preflight:
                 return reject("GLOBAL_PREFLIGHT_VENUE_SIDE_EFFECT")
             if preflight.status == "CURVE_SUPERSEDED":
-                probabilities_1, book_epoch_1 = current_book_epoch_provider(
-                    probabilities_fence,
-                    current_time(),
+                book_epoch_1 = _overlay_current_global_book_epoch(
+                    book_epoch_fence,
+                    selected.decision.candidate,
+                    preflight.replacement_candidate,
                 )
-                if _probability_manifest(probabilities_1) != probability_manifest:
-                    return reject("GLOBAL_REAUCTION_PROBABILITY_CUT_DRIFT")
+                probabilities_1 = probabilities_fence
                 prepared_1 = {
                     event_id: replace(
                         prepared,

@@ -4645,12 +4645,13 @@ def event_bound_live_adapter_from_trade_conn(
                         receipt=receipt,
                     ),
                 )
-            if reason.startswith(
-                "GLOBAL_ACTUATION_EXECUTION_BINDING_SUPERSEDED:curve_economics:"
-            ):
+            curve_supersession = _global_curve_supersession_from_receipt(receipt)
+            if curve_supersession is not None:
+                status, replacement_candidate, preflight_reason = curve_supersession
                 return GlobalWinnerPreflight(
-                    status="CURVE_SUPERSEDED",
-                    reason=reason,
+                    status=status,
+                    replacement_candidate=replacement_candidate,
+                    reason=preflight_reason,
                 )
             return GlobalWinnerPreflight(
                 status="BLOCKED",
@@ -5893,6 +5894,29 @@ def _global_selected_order_economics_preserved(
     )
 
 
+class _GlobalCurveSuperseded(ValueError):
+    """Typed submit-boundary drift carrying the current selected native curve."""
+
+    def __init__(self, reason: str, replacement_candidate: object) -> None:
+        super().__init__(reason)
+        self.replacement_candidate = replacement_candidate
+
+
+def _global_curve_supersession_from_receipt(
+    receipt: EventSubmissionReceipt,
+) -> tuple[str, object | None, str] | None:
+    """Lift a typed current curve into the side-effect-free global preflight."""
+
+    reason = str(receipt.reason or "")
+    prefix = "GLOBAL_ACTUATION_EXECUTION_BINDING_SUPERSEDED:curve_economics:"
+    if not reason.startswith(prefix):
+        return None
+    replacement = receipt.global_jit_candidate
+    if replacement is None:
+        return "BLOCKED", None, f"{reason}:replacement_candidate_missing"
+    return "CURVE_SUPERSEDED", replacement, reason
+
+
 def _global_actuation_selected_proof(
     *,
     global_actuation: object,
@@ -5998,11 +6022,14 @@ def _global_actuation_selected_proof(
         current_candidate=rebound,
     )
     if execution_drift is not None:
-        raise ValueError(
-            "GLOBAL_ACTUATION_EXECUTION_BINDING_SUPERSEDED:curve_economics:"
-            f"detail={execution_drift}:"
-            f"selected={candidate.execution_curve_identity}:"
-            f"current={rebound.execution_curve_identity}"
+        raise _GlobalCurveSuperseded(
+            (
+                "GLOBAL_ACTUATION_EXECUTION_BINDING_SUPERSEDED:curve_economics:"
+                f"detail={execution_drift}:"
+                f"selected={candidate.execution_curve_identity}:"
+                f"current={rebound.execution_curve_identity}"
+            ),
+            rebound,
         )
     current_probability = current_global_probability_authority(
         forecast_conn,
@@ -6852,6 +6879,18 @@ def _build_event_bound_no_submit_receipt_core(
                 forecast_conn=source_conn,
                 trade_conn=trade_conn,
                 decision_time=decision_time,
+            )
+        except _GlobalCurveSuperseded as exc:
+            return EventSubmissionReceipt(
+                False,
+                event.event_id,
+                event.causal_snapshot_id,
+                reason=str(exc),
+                city=family.city,
+                target_date=family.target_date,
+                metric=family.metric,
+                family_id=family.family_id,
+                global_jit_candidate=exc.replacement_candidate,
             )
         except ValueError as exc:
             return EventSubmissionReceipt(

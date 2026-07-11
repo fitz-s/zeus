@@ -608,6 +608,10 @@ class EventSubmissionReceipt:
     # from a complete current universe; the live certificate builder consumes its
     # immutable shares/limit/book/wealth identities and may not re-size it locally.
     global_actuation: "Any | None" = field(default=None, repr=False, compare=False)
+    # Submit-time curve observed by the side-effect-free winner preflight when it
+    # supersedes the selected curve. Internal only: the global runtime overlays it
+    # into the frozen complete universe and reruns the same optimizer.
+    global_jit_candidate: "Any | None" = field(default=None, repr=False, compare=False)
     # D1 FILL-UP LEASE CONTEXT (2026-06-22 lifecycle consult REQ-20260622-060011).
     # When this receipt is an APPROVED same-token fill-up (stake overridden to the
     # residual delta), the family-rebalance lease intent_id + the owned-exposure
