@@ -1412,7 +1412,7 @@ def test_current_global_book_epoch_reads_yes_and_no_symmetrically():
     proofs = tuple(
         replace(
             proof,
-            row={**proof.row, "captured_at": "2026-07-10T07:59:59+00:00"},
+            row={**proof.row, "captured_at": "2026-06-13T07:59:59+00:00"},
         )
         for proof in proofs
     )
@@ -1421,7 +1421,7 @@ def test_current_global_book_epoch_reads_yes_and_no_symmetrically():
         family=family,
         payload=payload,
         proofs=proofs,
-        decision_time=_dt.datetime(2026, 7, 10, 8, 0, tzinfo=_dt.timezone.utc),
+        decision_time=_dt.datetime(2026, 6, 13, 8, 0, tzinfo=_dt.timezone.utc),
         native_side_candidate_from_proof=era._native_side_candidate_from_proof,
         global_native_side_candidate_from_proof=era._full_depth_native_side_candidate_from_proof,
         require_global_probability_witness=True,
@@ -1449,7 +1449,7 @@ def test_current_global_book_epoch_reads_yes_and_no_symmetrically():
 
     conn.set_authorizer(metadata_authorizer)
     requested = []
-    at = _dt.datetime(2026, 7, 10, 8, 0, tzinfo=_dt.timezone.utc)
+    at = _dt.datetime(2026, 6, 13, 8, 0, tzinfo=_dt.timezone.utc)
     times = iter((at, at + _dt.timedelta(seconds=1)))
 
     def books(tokens):
@@ -1503,7 +1503,7 @@ def test_current_global_book_epoch_rejects_one_missing_native_side():
     proofs = tuple(
         replace(
             proof,
-            row={**proof.row, "captured_at": "2026-07-10T07:59:59+00:00"},
+            row={**proof.row, "captured_at": "2026-06-13T07:59:59+00:00"},
         )
         for proof in proofs
     )
@@ -1512,7 +1512,7 @@ def test_current_global_book_epoch_rejects_one_missing_native_side():
         family=family,
         payload=payload,
         proofs=proofs,
-        decision_time=_dt.datetime(2026, 7, 10, 8, 0, tzinfo=_dt.timezone.utc),
+        decision_time=_dt.datetime(2026, 6, 13, 8, 0, tzinfo=_dt.timezone.utc),
         native_side_candidate_from_proof=era._native_side_candidate_from_proof,
         global_native_side_candidate_from_proof=era._full_depth_native_side_candidate_from_proof,
         require_global_probability_witness=True,
@@ -1527,7 +1527,7 @@ def test_current_global_book_epoch_rejects_one_missing_native_side():
     assert result.global_family is not None
     probability = result.global_family.probability_witness
     conn = _global_book_metadata_conn(probability)
-    at = _dt.datetime(2026, 7, 10, 8, 0, tzinfo=_dt.timezone.utc)
+    at = _dt.datetime(2026, 6, 13, 8, 0, tzinfo=_dt.timezone.utc)
     times = iter((at, at + _dt.timedelta(seconds=1)))
 
     def incomplete_books(tokens):
@@ -1559,7 +1559,7 @@ def test_current_gamma_identity_fills_missing_no_without_changing_q():
     proofs = tuple(
         replace(
             proof,
-            row={**proof.row, "captured_at": "2026-07-10T07:59:59+00:00"},
+            row={**proof.row, "captured_at": "2026-06-13T07:59:59+00:00"},
         )
         for proof in proofs
     )
@@ -1568,7 +1568,7 @@ def test_current_gamma_identity_fills_missing_no_without_changing_q():
         family=family,
         payload=payload,
         proofs=proofs,
-        decision_time=_dt.datetime(2026, 7, 10, 8, 0, tzinfo=_dt.timezone.utc),
+        decision_time=_dt.datetime(2026, 6, 13, 8, 0, tzinfo=_dt.timezone.utc),
         native_side_candidate_from_proof=era._native_side_candidate_from_proof,
         global_native_side_candidate_from_proof=era._full_depth_native_side_candidate_from_proof,
         require_global_probability_witness=True,

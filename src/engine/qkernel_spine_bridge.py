@@ -95,6 +95,7 @@ from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Any, Mapping, Optional, Sequence
+from zoneinfo import ZoneInfo
 
 import numpy as np
 
@@ -143,9 +144,9 @@ NO_TRADE_SPINE_NO_SELECTION = "SPINE_NO_SELECTION"
 # it — the minimum-safe realization restricts the engine to direct routes and REFUSES
 # (never silently single-leg-maps) any non-direct selection as this typed no-trade.
 NO_TRADE_ROUTE_NOT_DIRECTLY_EXECUTABLE = "NO_TRADE_ROUTE_NOT_DIRECTLY_EXECUTABLE"
-# v1 lead-bucket restriction (consult_review_pr409_round2.md §3): only the 24h lead
-# bucket has its own settlement-EV replay, so live qkernel is restricted to it. A case
-# outside the replayed bucket is a typed no-trade until that bucket is EV-replayed.
+# Compatibility label for a forecast carrier that reaches the current/past city-local
+# target day without the Day0 observation carrier.  The old name is retained in receipts,
+# but admission is based on local-calendar causality, never the source-cycle lead bucket.
 NO_TRADE_QKERNEL_LEAD_BUCKET_NOT_REPLAYED = "QKERNEL_LEAD_BUCKET_NOT_REPLAYED"
 _LEGACY_ROUNDED_MU_DIRECTION_REJECTION_PREFIX = "DIRECTION_LAW_BIN_FORECAST_MISMATCH"
 
@@ -463,6 +464,29 @@ def _city_resolver(family: Any):
         return cities.get(str(getattr(family, "city", "")))
     except Exception:  # noqa: BLE001
         return None
+
+
+def _forecast_requires_day0_event(
+    family: Any,
+    *,
+    decision_time: datetime,
+) -> bool:
+    """True once the city's target local day has begun.
+
+    Forecast lead measures source-cycle age. Day0 measures whether observations from
+    the target local calendar day can exist. They are independent clocks: a <24h source
+    lead for tomorrow's local date remains a forecast, while a current-local-day family
+    must route through the observation-bearing Day0 event.
+    """
+
+    city = _city_resolver(family)
+    timezone_name = str(getattr(city, "timezone", "") or "")
+    try:
+        target = _coerce_target_date(getattr(family, "target_date", None))
+        local_today = decision_time.astimezone(ZoneInfo(timezone_name)).date()
+    except Exception:
+        return True
+    return target <= local_today
 
 
 def _candidate_bin_id_for(candidate: Any) -> str:
@@ -1496,9 +1520,10 @@ def decide_family_via_spine(
         # edge. For DAY0_EXTREME_UPDATED, the same family optimizer is now fed the live
         # observed extreme through ``day0_reader``; Day0 is a belief input, not a separate
         # legacy selector.
-        from src.forecast.sigma_authority import lead_bucket_for
-
-        if lead_bucket_for(case) == "day0" and not is_day0_family:
+        if not is_day0_family and _forecast_requires_day0_event(
+            family,
+            decision_time=decision_time,
+        ):
             return SpineDecisionResult(
                 selected_proof=None,
                 no_trade_reason=NO_TRADE_QKERNEL_LEAD_BUCKET_NOT_REPLAYED,

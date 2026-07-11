@@ -478,6 +478,57 @@ def test_forecast_lead_buckets_beyond_24h_are_admitted():
     assert result.no_trade_reason != bridge.NO_TRADE_QKERNEL_LEAD_BUCKET_NOT_REPLAYED
 
 
+def test_sub_24h_source_lead_for_future_local_date_remains_forecast_eligible():
+    family, _bins = _three_bin_family()
+    proofs = _proofs_for(
+        family,
+        yes_asks=[0.05, 0.20, 0.20, 0.05],
+        no_asks=[0.92, 0.75, 0.75, 0.92],
+        q_by_bin=[0.05, 0.45, 0.40, 0.10],
+        q_lcb_by_bin=[0.02, 0.32, 0.28, 0.05],
+    )
+    payload = _payload(
+        mu=20.4,
+        sigma=1.2,
+        members=[19.8, 20.1, 20.5, 21.0, 20.7],
+        source_cycle="2026-06-13T12:00:00Z",
+    )
+
+    result = _drive(family, proofs, payload, decision_time=DECISION_TIME)
+
+    assert result.no_trade_reason != bridge.NO_TRADE_QKERNEL_LEAD_BUCKET_NOT_REPLAYED
+
+
+def test_current_local_target_day_requires_observation_bearing_day0_event():
+    family, _bins = _three_bin_family()
+    proofs = _proofs_for(
+        family,
+        yes_asks=[0.05, 0.20, 0.20, 0.05],
+        no_asks=[0.92, 0.75, 0.75, 0.92],
+        q_by_bin=[0.05, 0.45, 0.40, 0.10],
+        q_lcb_by_bin=[0.02, 0.32, 0.28, 0.05],
+    )
+    payload = _payload(
+        mu=20.4,
+        sigma=1.2,
+        members=[19.8, 20.1, 20.5, 21.0, 20.7],
+        source_cycle="2026-06-13T00:00:00Z",
+    )
+    current_local_day = _dt.datetime(
+        2026, 6, 14, 12, 0, tzinfo=_dt.timezone.utc
+    )
+
+    result = _drive(
+        family,
+        proofs,
+        payload,
+        decision_time=current_local_day,
+    )
+
+    assert result.selected_proof is None
+    assert result.no_trade_reason == bridge.NO_TRADE_QKERNEL_LEAD_BUCKET_NOT_REPLAYED
+
+
 # ===========================================================================
 # BLOCKER 2 — route identity (PROOF-NATIVE single-leg, maker AND taker).
 # ===========================================================================
