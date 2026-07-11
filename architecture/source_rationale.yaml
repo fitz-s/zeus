@@ -617,14 +617,21 @@ files:
     why: Verifies reality contracts against current evidence.
     downstream:
     - src/contracts/reality_contract.py
+  src/contracts/chain_observation_envelope.py:
+    zone: K0_frozen_kernel
+    authority_role: chain_observation_envelope_contract
+    why: "Quarantine excision T4 (2026-07-11, docs/rebuild/quarantine_excision_2026-07-11.md Consult adjudication BLOCKER-3): the observation-quality contract a chain observation must satisfy before it may cast a confirmed-absence vote — account_scope, fetched_at, complete (positive evidence of a full unfiltered read, never assumed True), post_command_watermark, source. A positive chain observation always overrides local absence evidence; this type deliberately has no representation for presence, only for a candidate absence vote. Minimal shape buildable from what src.state.chain_reconciliation actually persists onto Position today (last_chain_absence_observed_at / chain_verified_at) — no new chain-read plumbing. Consumed by src.execution.fill_tracker's ambiguous-timeout gate (_confirmed_absent_or_defer)."
+    downstream:
+    - src/execution/fill_tracker.py
   src/contracts/review_work_item.py:
     zone: K0_frozen_kernel
     authority_role: review_work_item_contract
-    why: "Quarantine excision foundation (2026-07-11, docs/rebuild/quarantine_excision_2026-07-11.md Consult adjudication): the owner-local ReviewWorkItem protocol contract replacing scattered quarantine-state mechanisms — frozen dataclass, extensible ReviewReasonCode vocabulary (not DB-CHECK-constrained, see src/state/schema/review_work_items_schema.py docstring), closed WorkItemStatus (OPEN/RESOLVED/SUPERSEDED), and the ResolveWorkItemRequest operator-command shape T6 will bind to a live release valve. FamilyKey is a structural mirror of src.strategy.family_exclusive_dedup.WeatherFamilyKey (K0 must not import K3; src/state/review_work_items.py converts 1:1). Foundation only — not consumed by any runtime seam in this packet."
+    why: "Quarantine excision foundation (2026-07-11, docs/rebuild/quarantine_excision_2026-07-11.md Consult adjudication): the owner-local ReviewWorkItem protocol contract replacing scattered quarantine-state mechanisms — frozen dataclass, extensible ReviewReasonCode vocabulary (not DB-CHECK-constrained, see src/state/schema/review_work_items_schema.py docstring), closed WorkItemStatus (OPEN/RESOLVED/SUPERSEDED), and the ResolveWorkItemRequest operator-command shape T6 will bind to a live release valve. FamilyKey is a structural mirror of src.strategy.family_exclusive_dedup.WeatherFamilyKey (K0 must not import K3; src/state/review_work_items.py converts 1:1). T4 (2026-07-11) added TIMEOUT_ABSENCE_UNCONFIRMED (ambiguous pending-entry timeout awaiting chain confirmation; family-blocking) and is the first runtime consumer — MISSING_FILL_ECONOMICS/MISSING_FILL_AUTHORITY/LOCAL_WRITE_FAILURE were already-defined members it also now opens."
     downstream:
     - src/state/review_work_items.py
     - src/state/schema/review_work_items_schema.py
     - src/contracts/entry_exposure_obligation.py
+    - src/execution/fill_tracker.py
   src/contracts/semantic_types.py:
     zone: K0_frozen_kernel
     authority_role: semantic_atom_contracts
@@ -1943,7 +1950,7 @@ files:
   src/execution/fill_tracker.py:
     zone: K2_runtime
     authority_role: fill_tracking
-    why: Tracks fills/timeouts for execution learning and lifecycle updates.
+    why: "Tracks fills/timeouts for execution learning and lifecycle updates. T4 (quarantine excision, docs/rebuild/quarantine_excision_2026-07-11.md, 2026-07-11): retired all 8 lifecycle-scar mints (_mark_entry_quarantined and its callers) — venue-truth gaps (missing fill economics/authority) and local ledger/canonical/void write failures now stay pending_tracked with an open src.state.review_work_items ReviewWorkItem (MISSING_FILL_ECONOMICS / MISSING_FILL_AUTHORITY / LOCAL_WRITE_FAILURE / TIMEOUT_ABSENCE_UNCONFIRMED) instead of minting a scar; a confirmed fill or confirmed void releases the T2 EntryRiskReservation (src.state.entry_exposure_obligation) and resolves open review debt for that subject. BLOCKER-3: the ambiguous (no definitive CLOB status) timeout branch voids only when this position's own src.contracts.chain_observation_envelope.ChainObservationEnvelope qualifies as a fresh, post-command, complete absence observation — otherwise it defers to src.state.chain_mirror_reconciler's own two-consecutive-absence protocol rather than inferring absence itself."
     downstream:
     - src/engine/cycle_runtime.py
   src/execution/harvester.py:
@@ -2705,17 +2712,19 @@ files:
   src/state/review_work_items.py:
     zone: K2_runtime
     authority_role: review_work_items_writer_reader
-    why: "Quarantine excision foundation (2026-07-11): writer/reader for review_work_items. open_work_item (idempotent via the partial unique index), resolve_work_item (CAS on authority_revision), supersede_on_new_revision, due_work (status='OPEN' AND next_attempt_at<=now ORDER BY priority,next_attempt_at LIMIT N), open_items_by_family, open_unbounded_count, blocked_family_keys (family-block read helper T2's candidate filter will consult — reads both open family-scoped work items and blocking ChainOnlyFacts off a caller-supplied portfolio; a prefilter, never an enforcement authority per the adjudication). INV-37: all functions require caller-supplied conn. Not wired into cycle_runner/evaluator/fill_tracker/riskguard by this packet."
+    why: "Quarantine excision foundation (2026-07-11): writer/reader for review_work_items. open_work_item (idempotent via the partial unique index), resolve_work_item (CAS on authority_revision), resolve_all_open_for_subject (T4, 2026-07-11: CAS-resolves every OPEN item for one subject regardless of reason_code — each row resolved with its own live authority_revision), supersede_on_new_revision, due_work (status='OPEN' AND next_attempt_at<=now ORDER BY priority,next_attempt_at LIMIT N), open_items_by_family, open_unbounded_count, blocked_family_keys (family-block read helper T2's candidate filter consults — reads both open family-scoped work items and blocking ChainOnlyFacts off a caller-supplied portfolio; a prefilter, never an enforcement authority per the adjudication). INV-37: all functions require caller-supplied conn. T4 (2026-07-11) is the first fill_tracker consumer — open_work_item/resolve_all_open_for_subject on its venue-truth-gap/local-write-failure/ambiguous-timeout seams."
     write_routes:
     - review_work_items
-    downstream: []
+    downstream:
+    - src/execution/fill_tracker.py
   src/state/entry_exposure_obligation.py:
     zone: K2_runtime
     authority_role: entry_exposure_obligation_writer_reader
-    why: "Quarantine excision foundation (2026-07-11, BLOCKER-1): writer/reader for entry_exposure_obligations. open_entry_exposure_obligation (upsert-open keyed by command_id — a live fact, not an append log; meant to be called atomically on a command's failure path), resolve_entry_exposure_obligation, total_open_obligation_usd (SUM of bounded OPEN shares x $1), has_unbounded_obligation (EXISTS OPEN unbounded row -> DATA_DEGRADED trigger). INV-37: all functions require caller-supplied conn. Not wired into any runtime seam by this packet."
+    why: "Quarantine excision foundation (2026-07-11, BLOCKER-1): writer/reader for entry_exposure_obligations. open_entry_exposure_obligation (upsert-open keyed by command_id — a live fact, not an append log; meant to be called atomically on a command's failure path), resolve_entry_exposure_obligation, total_open_obligation_usd (SUM of bounded OPEN shares x $1), has_unbounded_obligation (EXISTS OPEN unbounded row -> DATA_DEGRADED trigger). INV-37: all functions require caller-supplied conn. T4 (2026-07-11): fill_tracker's fill-confirmation and confirmed-void success paths both call resolve_entry_exposure_obligation directly (same primitive src.execution.executor._release_entry_risk_reservation wraps) once a command's true fate is settled truth."
     write_routes:
     - entry_exposure_obligations
-    downstream: []
+    downstream:
+    - src/execution/fill_tracker.py
   src/strategy/shoulder_cluster_cap.py:
     zone: K2_runtime
     authority_role: shoulder_cluster_cap_gate
