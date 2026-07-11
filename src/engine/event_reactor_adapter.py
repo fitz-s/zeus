@@ -6118,13 +6118,30 @@ def _global_current_state_execution_economics(
 ) -> dict[str, Any]:
     """Bind actuation to the current global band without loosening served belief."""
 
-    shares = Decimal(str(getattr(decision, "shares", "0") or "0"))
-    cost = Decimal(str(getattr(decision, "cost_usd", "0") or "0"))
-    robust_ev = Decimal(str(getattr(decision, "robust_ev_usd", "nan")))
-    point_q = Decimal(str(cert.get("payoff_q_point")))
-    served_lcb = Decimal(str(cert.get("pre_qkernel_q_lcb_5pct")))
-    prior_payoff_lcb = Decimal(str(cert.get("payoff_q_lcb")))
-    unit_cost = Decimal(str(cert.get("cost")))
+    try:
+        shares = Decimal(str(getattr(decision, "shares", "0") or "0"))
+        cost = Decimal(str(getattr(decision, "cost_usd", "0") or "0"))
+        robust_ev = Decimal(str(getattr(decision, "robust_ev_usd", "nan")))
+        raw_point_q = cert.get("payoff_q_point")
+        if raw_point_q in {None, ""}:
+            candidate = getattr(decision, "candidate", None)
+            bin_id = str(getattr(candidate, "bin_id", "") or "")
+            side = str(getattr(candidate, "side", "") or "").upper()
+            column = tuple(getattr(witness, "bin_ids", ()) or ()).index(bin_id)
+            point_q = Decimal(
+                str(float(getattr(witness, "yes_q_samples")[:, column].mean()))
+            )
+            if side == "NO":
+                point_q = Decimal("1") - point_q
+            elif side != "YES":
+                raise ValueError("GLOBAL_CURRENT_STATE_SIDE_INVALID")
+        else:
+            point_q = Decimal(str(raw_point_q))
+        served_lcb = Decimal(str(cert.get("pre_qkernel_q_lcb_5pct")))
+        prior_payoff_lcb = Decimal(str(cert.get("payoff_q_lcb")))
+        unit_cost = Decimal(str(cert.get("cost")))
+    except (ArithmeticError, AttributeError, TypeError, ValueError) as exc:
+        raise ValueError("GLOBAL_CURRENT_STATE_ECONOMICS_INVALID") from exc
     if (
         shares <= 0
         or cost <= 0
@@ -6162,6 +6179,8 @@ def _global_current_state_execution_economics(
     current = dict(cert)
     current.update(
         {
+            "payoff_q_point": float(point_q),
+            "q_dot_payoff": float(point_q),
             "payoff_q_lcb": float(payoff_q_lcb),
             "edge_lcb": float(edge_lcb),
             "route_edge_lcb": float(

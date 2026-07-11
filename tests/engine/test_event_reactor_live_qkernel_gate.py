@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from types import SimpleNamespace
 
+import numpy as np
 import pytest
 
 import src.engine.event_reactor_adapter as era
@@ -869,6 +870,40 @@ def test_global_actuation_current_band_refuses_non_positive_bound():
             decision=decision,
             witness=witness,
         )
+
+
+def test_global_actuation_recovers_missing_point_from_current_bound_witness():
+    cert = _current_qkernel_cert(side="NO")
+    cert.pop("payoff_q_point")
+    cert.update(
+        payoff_q_lcb=0.15,
+        pre_qkernel_q_lcb_5pct=0.15,
+        cost=0.10,
+        edge_lcb=0.05,
+    )
+    decision = SimpleNamespace(
+        candidate=SimpleNamespace(bin_id="bin-1", side="NO"),
+        shares=Decimal("10"),
+        cost_usd=Decimal("1"),
+        robust_ev_usd=0.5,
+    )
+    witness = SimpleNamespace(
+        bin_ids=("bin-1", "bin-2"),
+        sample_matrix_identity="global-current-missing-point",
+        yes_q_samples=np.tile(np.array([[0.8, 0.2]]), (400, 1)),
+        band_alpha=0.05,
+    )
+
+    current = era._global_current_state_execution_economics(
+        cert,
+        decision=decision,
+        witness=witness,
+    )
+
+    assert current["payoff_q_point"] == pytest.approx(0.2)
+    assert current["q_dot_payoff"] == pytest.approx(0.2)
+    assert current["payoff_q_lcb"] == pytest.approx(0.15)
+    assert era._qkernel_current_state_solve_economics(current) is True
 
 
 @pytest.mark.parametrize("side", ("YES", "NO"))
