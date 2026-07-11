@@ -1388,6 +1388,10 @@ def select_global_single_order(
     wealth_witness: PortfolioWealthWitness,
     capital_limit_usd: Decimal,
     decision_at_utc: datetime,
+    candidate_capital_limit_resolver: Callable[
+        [GlobalSingleOrderCandidate], Decimal
+    ]
+    | None = None,
 ) -> GlobalSingleOrderDecision:
     """Select one current executable order across every family and native side.
 
@@ -1575,6 +1579,29 @@ def select_global_single_order(
 
     scored: list[GlobalSingleOrderDecision] = []
     for candidate, q_samples, band_alpha, _band_basis in eligible:
+        candidate_capital_limit = capital_limit_usd
+        if candidate_capital_limit_resolver is not None:
+            try:
+                candidate_capital_limit = min(
+                    capital_limit_usd,
+                    Decimal(candidate_capital_limit_resolver(candidate)),
+                )
+            except Exception:  # noqa: BLE001 - lost allocator authority invalidates the epoch
+                return GlobalSingleOrderDecision(
+                    candidate=None,
+                    shares=Decimal("0"),
+                    cost_usd=Decimal("0"),
+                    robust_delta_log_wealth=0.0,
+                    robust_ev_usd=0.0,
+                    capital_efficiency=0.0,
+                    no_trade_reason="GLOBAL_EPOCH_SUPERSEDED",
+                    rejection_reasons={
+                        candidate.candidate_id: "CAPITAL_CONSTRAINT_UNAVAILABLE"
+                    },
+                )
+        if candidate_capital_limit <= 0:
+            rejections[candidate.candidate_id] = "CAPITAL_CAPACITY_EXHAUSTED"
+            continue
         score = _score_global_single_order(
             candidate,
             q_samples=q_samples,
@@ -1582,7 +1609,7 @@ def select_global_single_order(
             wealth_floor_usd=wealth_witness.wealth_floor_usd,
             wealth_ceiling_usd=wealth_witness.wealth_ceiling_usd,
             spendable_cash_usd=wealth_witness.spendable_cash_usd,
-            capital_limit_usd=capital_limit_usd,
+            capital_limit_usd=candidate_capital_limit,
         )
         if score.candidate is None:
             rejections.update(score.rejection_reasons)

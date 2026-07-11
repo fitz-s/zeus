@@ -4781,6 +4781,22 @@ def event_bound_live_adapter_from_trade_conn(
                 )
             return bound_probabilities, epoch
 
+        def _current_entry_capital_limit(
+            candidate,
+            market_event_id,
+            owner_event_id,
+        ):
+            from src.risk_allocator import current_global_entry_capacity_usd
+
+            return current_global_entry_capacity_usd(
+                market_id=str(candidate.condition_id),
+                event_id=str(market_event_id),
+                resolution_window="default",
+                correlation_key=(
+                    f"edli_intent:{owner_event_id}:{candidate.token_id}"
+                ),
+            )
+
         try:
             return process_current_global_batch(
                 events,
@@ -4825,6 +4841,7 @@ def event_bound_live_adapter_from_trade_conn(
                 # positions from this same canonical trade connection at selection.
                 portfolio_state_provider=None,
                 current_book_epoch_provider=_current_book_epoch,
+                current_capital_limit_resolver=_current_entry_capital_limit,
                 selection_snapshot_connections=(
                     forecast_conn,
                 ),

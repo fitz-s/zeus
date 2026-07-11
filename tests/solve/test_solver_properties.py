@@ -694,6 +694,7 @@ def _global_select(
     probability_witnesses=None, current_probabilities=None,
     current_executions=None, current_wealth_identity=None, universe=None,
     current_universe_identity=None,
+    candidate_capital_limit_resolver=None,
 ):
     candidates = tuple(candidates)
     if probability_witnesses is None:
@@ -740,6 +741,7 @@ def _global_select(
         wealth_witness=wealth,
         capital_limit_usd=Decimal(cap),
         decision_at_utc=_DECISION_AT,
+        candidate_capital_limit_resolver=candidate_capital_limit_resolver,
     )
 
 
@@ -762,6 +764,57 @@ def test_global_single_order_yes_best_matches_full_depth_exact_oracle():
     assert decision.shares == oracle[4]
     assert decision.cost_usd == oracle[3]
     assert abs(decision.robust_delta_log_wealth - oracle[0]) < 1e-12
+
+
+def test_global_single_order_sizes_each_native_side_inside_current_capital_envelope():
+    yes = _global_candidate(
+        candidate_id="capital-bounded-yes",
+        family="capital-yes",
+        side="YES",
+        q=0.82,
+        levels=(("0.40", "100"),),
+    )
+    unrestricted = _global_select((yes,), cap="5")
+    bounded = _global_select(
+        (yes,),
+        cap="5",
+        candidate_capital_limit_resolver=lambda _candidate: Decimal("0.80"),
+    )
+
+    assert unrestricted.max_spend_usd > Decimal("0.80")
+    assert bounded.candidate is not None
+    assert bounded.candidate.candidate_id == yes.candidate_id
+    assert bounded.max_spend_usd <= Decimal("0.80")
+    assert bounded.robust_delta_log_wealth > 0.0
+
+
+def test_global_single_order_excludes_capacity_exhausted_winner_and_ranks_runner_up():
+    exhausted = _global_candidate(
+        candidate_id="exhausted-yes",
+        family="exhausted",
+        side="YES",
+        q=0.90,
+    )
+    feasible = _global_candidate(
+        candidate_id="feasible-no",
+        family="feasible",
+        side="NO",
+        q=0.70,
+    )
+    decision = _global_select(
+        (exhausted, feasible),
+        candidate_capital_limit_resolver=lambda candidate: (
+            Decimal("0")
+            if candidate.candidate_id == exhausted.candidate_id
+            else Decimal("5")
+        ),
+    )
+
+    assert decision.candidate is not None
+    assert decision.candidate.candidate_id == feasible.candidate_id
+    assert decision.rejection_reasons[exhausted.candidate_id] == (
+        "CAPITAL_CAPACITY_EXHAUSTED"
+    )
 
 
 def test_global_single_order_no_best_matches_full_depth_exact_oracle():

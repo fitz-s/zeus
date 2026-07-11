@@ -1310,6 +1310,7 @@ def _global_book_metadata_conn(probability):
         """
         CREATE TABLE executable_market_snapshots (
             snapshot_id TEXT PRIMARY KEY,
+            event_id TEXT NOT NULL,
             condition_id TEXT NOT NULL,
             selected_outcome_token_id TEXT NOT NULL,
             yes_token_id TEXT NOT NULL,
@@ -1346,9 +1347,10 @@ def _global_book_metadata_conn(probability):
             snapshot_id = f"metadata-{binding.condition_id}-{side}"
             conn.execute(
                 "INSERT INTO executable_market_snapshots VALUES "
-                "(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     snapshot_id,
+                    f"market-event-{probability.family_key}",
                     binding.condition_id,
                     token,
                     binding.yes_token_id,
@@ -1631,6 +1633,7 @@ def test_current_gamma_identity_fills_missing_no_without_changing_q():
         ],
     )
     gamma_event = {
+        "id": "gamma-event-current",
         "markets": [
             {
                 "conditionId": binding.condition_id,
@@ -1729,8 +1732,9 @@ def test_current_gamma_identity_fills_missing_no_without_changing_q():
     ambiguous.execute(
         """
         INSERT INTO executable_market_snapshots
-        SELECT 'conflicting-topology', condition_id, 'conflicting-selected',
-               'conflicting-yes', 'conflicting-no', enable_orderbook, active,
+            SELECT 'conflicting-topology', event_id, condition_id,
+                   'conflicting-selected', 'conflicting-yes', 'conflicting-no',
+                   enable_orderbook, active,
                closed, accepting_orders, fee_details_json, min_tick_size,
                min_order_size, captured_at, freshness_deadline,
                tradeability_status_json, orderbook_depth_json
@@ -2543,6 +2547,7 @@ def _global_test_book(identity: str, *, price: str):
                 family_key="family",
                 bin_id="bin",
                 condition_id="condition",
+                market_event_id="market-event",
                 side="YES",
                 token_id="token",
                 curve=SimpleNamespace(
@@ -2580,13 +2585,25 @@ def test_global_jit_overlay_replaces_only_selected_native_curve():
         book_hash="book-new",
         levels=(era.BookLevel(price=Decimal("0.41"), size=Decimal("9")),),
     )
-    states = (("family", "bin", "condition", "YES", "token", "EXECUTABLE", "book-old"),)
+    states = (
+        (
+            "family",
+            "bin",
+            "condition",
+            "YES",
+            "token",
+            "EXECUTABLE",
+            "book-old",
+            "market-event",
+        ),
+    )
     epoch = universe.CurrentGlobalBookEpoch(
         assets=(
             universe.CurrentGlobalBookAsset(
                 family_key="family",
                 bin_id="bin",
                 condition_id="condition",
+                market_event_id="market-event",
                 side="YES",
                 token_id="token",
                 curve=old_curve,
@@ -2637,7 +2654,16 @@ def test_global_jit_overlay_replaces_only_selected_native_curve():
     assert overlaid.assets[0].curve is new_curve
     assert overlaid.assets[0].captured_at_utc == replacement.book_captured_at_utc
     assert overlaid.asset_states == (
-        ("family", "bin", "condition", "YES", "token", "EXECUTABLE", "book-new"),
+        (
+            "family",
+            "bin",
+            "condition",
+            "YES",
+            "token",
+            "EXECUTABLE",
+            "book-new",
+            "market-event",
+        ),
     )
     assert overlaid.witness_identity != epoch.witness_identity
     with pytest.raises(ValueError, match="GLOBAL_JIT_OVERLAY_IDENTITY_MISMATCH"):

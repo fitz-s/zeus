@@ -234,6 +234,10 @@ def select_prepared_global_auction(
     capital_limit_usd: Decimal,
     decision_at_utc: datetime,
     book_epoch: CurrentGlobalBookEpoch | None = None,
+    current_capital_limit_resolver: Callable[
+        [GlobalSingleOrderCandidate, str, str], Decimal
+    ]
+    | None = None,
 ) -> PreparedGlobalAuctionResult:
     """Compare every prepared family and return at most one current winner.
 
@@ -334,6 +338,28 @@ def select_prepared_global_auction(
             return None
         return universe_witness.witness_identity
 
+    def _candidate_capital_limit(candidate: GlobalSingleOrderCandidate) -> Decimal:
+        if current_capital_limit_resolver is None:
+            return capital_limit_usd
+        if book_epoch is None:
+            raise ValueError("GLOBAL_CAPITAL_LIMIT_BOOK_EPOCH_MISSING")
+        asset = book_epoch.asset_by_key.get(
+            (
+                candidate.family_key,
+                candidate.bin_id,
+                candidate.side,
+                candidate.token_id,
+            )
+        )
+        owner_event_id = event_by_family.get(candidate.family_key)
+        if asset is None or owner_event_id is None:
+            raise ValueError("GLOBAL_CAPITAL_LIMIT_SCOPE_MISSING")
+        return current_capital_limit_resolver(
+            candidate,
+            asset.market_event_id,
+            owner_event_id,
+        )
+
     decision = select_global_single_order(
         tuple(candidates),
         probability_witnesses=probability_witnesses,
@@ -345,6 +371,7 @@ def select_prepared_global_auction(
         wealth_witness=wealth_witness,
         capital_limit_usd=capital_limit_usd,
         decision_at_utc=decision_at_utc,
+        candidate_capital_limit_resolver=_candidate_capital_limit,
     )
     if decision.candidate is None:
         return PreparedGlobalAuctionResult(decision=decision, winner_event_id=None)

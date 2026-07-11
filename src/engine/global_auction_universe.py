@@ -88,6 +88,7 @@ class CurrentGlobalBookAsset:
     family_key: str
     bin_id: str
     condition_id: str
+    market_event_id: str
     side: str
     token_id: str
     curve: ExecutableCostCurve
@@ -102,6 +103,7 @@ class CurrentGlobalBookAsset:
                     self.family_key,
                     self.bin_id,
                     self.condition_id,
+                    self.market_event_id,
                     self.token_id,
                 )
             )
@@ -213,6 +215,7 @@ def _global_book_snapshot_rows(
         cur = trade_conn.execute(
             f"""
             SELECT s.snapshot_id,
+                   s.event_id,
                    s.condition_id,
                    s.selected_outcome_token_id,
                    s.yes_token_id,
@@ -421,6 +424,11 @@ def capture_current_global_book_epoch(
         ).strip()
         if raw_asset_id != token_id:
             raise ValueError(f"GLOBAL_BOOK_TOKEN_MISMATCH:{token_id}")
+        market_event_id = str(metadata.get("event_id") or "").strip()
+        if not market_event_id:
+            raise ValueError(
+                f"GLOBAL_BOOK_MARKET_EVENT_ID_MISSING:{condition_id}:{token_id}"
+            )
         book_hash = str(raw_book.get("hash") or "").strip() or hashlib.sha256(
             json.dumps(raw_book, sort_keys=True, separators=(",", ":")).encode("utf-8")
         ).hexdigest()
@@ -465,6 +473,7 @@ def capture_current_global_book_epoch(
                 token_id,
                 status,
                 book_hash,
+                market_event_id,
             )
         )
         if curve is not None:
@@ -473,6 +482,7 @@ def capture_current_global_book_epoch(
                     family_key=family_key,
                     bin_id=bin_id,
                     condition_id=condition_id,
+                    market_event_id=market_event_id,
                     side=side,
                     token_id=token_id,
                     curve=curve,
@@ -703,6 +713,12 @@ def bind_current_global_probability_tokens(
                             fee_type=str(raw.get("feeType") or "") or None,
                         )
                         base = {
+                            "event_id": str(
+                                event.get("id")
+                                or event.get("event_id")
+                                or event.get("slug")
+                                or ""
+                            ),
                             "condition_id": condition_id,
                             "yes_token_id": yes,
                             "no_token_id": no,

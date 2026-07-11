@@ -149,7 +149,11 @@ class AllocationDecision:
     allowed: bool
     reason: str
     requested_micro: int
+    available_capacity_micro: int = 0
     remaining_market_capacity_micro: int = 0
+    remaining_event_capacity_micro: int = 0
+    remaining_resolution_capacity_micro: int = 0
+    remaining_correlated_capacity_micro: int = 0
     confirmed_exposure_micro: int = 0
     optimistic_exposure_micro: int = 0
     weighted_existing_exposure_micro: int = 0
@@ -188,14 +192,56 @@ class RiskAllocator:
 
         return cls(cap_policy, load_position_lots(conn))
 
-    def can_allocate(self, intent: ExecutionIntent, governor_state: GovernorState) -> AllocationDecision:
-        requested = _intent_notional_micro(intent)
-        reduce_only = _is_reduce_only_intent(intent)
-        confirmed, optimistic, weighted_market = self._market_exposure(str(intent.market_id))
-        remaining_market = max(int(self.cap_policy.max_per_market_micro) - weighted_market, 0)
+    def entry_capacity(
+        self,
+        *,
+        market_id: str,
+        event_id: str,
+        resolution_window: str,
+        correlation_key: str,
+        governor_state: GovernorState,
+        reduce_only: bool = False,
+    ) -> AllocationDecision:
+        """Return the current entry capacity shared by selection and submit."""
+
+        market = str(market_id or "").strip()
+        event = str(event_id or market).strip()
+        resolution = str(resolution_window or "default").strip() or "default"
+        correlation = str(correlation_key or event).strip()
+        if not market or not event or not correlation:
+            return AllocationDecision(False, "allocation_scope_missing", 0)
+        confirmed, optimistic, weighted_market = self._market_exposure(market)
+        remaining_market = max(
+            int(self.cap_policy.max_per_market_micro) - weighted_market,
+            0,
+        )
+        remaining_event = self._remaining_capacity(
+            "event", event, self.cap_policy.max_per_event_micro
+        )
+        window_cap = self.cap_policy.max_per_resolution_window_micro.get(
+            resolution,
+            self.cap_policy.max_per_resolution_window_micro.get(
+                "default", self.cap_policy.max_per_event_micro
+            ),
+        )
+        remaining_resolution = self._remaining_capacity(
+            "resolution", resolution, window_cap
+        )
+        remaining_correlated = self._remaining_capacity(
+            "correlation", correlation, self.cap_policy.max_correlated_exposure_micro
+        )
+        available = min(
+            remaining_market,
+            remaining_event,
+            remaining_resolution,
+            remaining_correlated,
+        )
         base = {
-            "requested_micro": requested,
+            "available_capacity_micro": available,
             "remaining_market_capacity_micro": remaining_market,
+            "remaining_event_capacity_micro": remaining_event,
+            "remaining_resolution_capacity_micro": remaining_resolution,
+            "remaining_correlated_capacity_micro": remaining_correlated,
             "confirmed_exposure_micro": confirmed,
             "optimistic_exposure_micro": optimistic,
             "weighted_existing_exposure_micro": weighted_market,
@@ -203,27 +249,62 @@ class RiskAllocator:
         }
         kill_reason = self.kill_switch_reason(governor_state)
         if kill_reason:
-            return AllocationDecision(False, kill_reason, **base)
-        if str(intent.market_id) in set(governor_state.unknown_side_effect_markets):
-            return AllocationDecision(False, "unknown_side_effect_same_market", **base)
+            return AllocationDecision(False, kill_reason, 0, **base)
+        if market in set(governor_state.unknown_side_effect_markets):
+            return AllocationDecision(False, "unknown_side_effect_same_market", 0, **base)
         if self.reduce_only_mode_active(governor_state) and not reduce_only:
-            return AllocationDecision(False, "reduce_only_mode_active", **base)
-        if requested > remaining_market:
-            return AllocationDecision(False, "per_market_cap_exceeded", **base)
-        event_remaining = self._remaining_capacity("event", str(_intent_event_id(intent)), self.cap_policy.max_per_event_micro)
-        if requested > event_remaining:
-            return AllocationDecision(False, "per_event_cap_exceeded", **base)
+            return AllocationDecision(False, "reduce_only_mode_active", 0, **base)
+        for remaining, reason in (
+            (remaining_market, "per_market_cap_exceeded"),
+            (remaining_event, "per_event_cap_exceeded"),
+            (remaining_resolution, "per_resolution_window_cap_exceeded"),
+            (remaining_correlated, "correlated_market_cap_exceeded"),
+        ):
+            if remaining <= 0:
+                return AllocationDecision(False, reason, 0, **base)
+        return AllocationDecision(True, "allowed", 0, **base)
+
+    def can_allocate(self, intent: ExecutionIntent, governor_state: GovernorState) -> AllocationDecision:
+        requested = _intent_notional_micro(intent)
+        reduce_only = _is_reduce_only_intent(intent)
         resolution_label = str(getattr(intent, "resolution_window", "default") or "default")
-        window_cap = self.cap_policy.max_per_resolution_window_micro.get(
-            resolution_label,
-            self.cap_policy.max_per_resolution_window_micro.get("default", self.cap_policy.max_per_event_micro),
-        )
-        if requested > self._remaining_capacity("resolution", resolution_label, window_cap):
-            return AllocationDecision(False, "per_resolution_window_cap_exceeded", **base)
         correlation_key = str(getattr(intent, "correlation_key", None) or _intent_event_id(intent))
-        if requested > self._remaining_capacity("correlation", correlation_key, self.cap_policy.max_correlated_exposure_micro):
-            return AllocationDecision(False, "correlated_market_cap_exceeded", **base)
-        return AllocationDecision(True, "allowed", **base)
+        capacity = self.entry_capacity(
+            market_id=str(intent.market_id),
+            event_id=str(_intent_event_id(intent)),
+            resolution_window=resolution_label,
+            correlation_key=correlation_key,
+            governor_state=governor_state,
+            reduce_only=reduce_only,
+        )
+        if not capacity.allowed:
+            return replace(
+                capacity,
+                requested_micro=requested,
+                reduce_only=reduce_only,
+            )
+        for remaining, reason in (
+            (capacity.remaining_market_capacity_micro, "per_market_cap_exceeded"),
+            (capacity.remaining_event_capacity_micro, "per_event_cap_exceeded"),
+            (
+                capacity.remaining_resolution_capacity_micro,
+                "per_resolution_window_cap_exceeded",
+            ),
+            (capacity.remaining_correlated_capacity_micro, "correlated_market_cap_exceeded"),
+        ):
+            if requested > remaining:
+                return replace(
+                    capacity,
+                    allowed=False,
+                    reason=reason,
+                    requested_micro=requested,
+                    reduce_only=reduce_only,
+                )
+        return replace(
+            capacity,
+            requested_micro=requested,
+            reduce_only=reduce_only,
+        )
 
     def maker_or_taker(self, snapshot: Any, governor_state: GovernorState) -> OrderMode:
         if self.kill_switch_reason(governor_state):
@@ -387,6 +468,36 @@ def assert_global_allocation_allows(intent: ExecutionIntent) -> AllocationDecisi
     if not decision.allowed:
         raise AllocationDenied(decision)
     return decision
+
+
+def current_global_entry_capacity_usd(
+    *,
+    market_id: str,
+    event_id: str,
+    resolution_window: str = "default",
+    correlation_key: str = "",
+) -> Decimal:
+    """Read the current candidate-specific entry envelope without reserving it."""
+
+    if _GLOBAL_ALLOCATOR is None or _GLOBAL_GOVERNOR_STATE is None:
+        raise AllocationDenied(AllocationDecision(False, "allocator_not_configured", 0))
+    decision = _GLOBAL_ALLOCATOR.entry_capacity(
+        market_id=market_id,
+        event_id=event_id,
+        resolution_window=resolution_window,
+        correlation_key=correlation_key,
+        governor_state=_GLOBAL_GOVERNOR_STATE,
+    )
+    if not decision.allowed:
+        if decision.reason in {
+            "per_market_cap_exceeded",
+            "per_event_cap_exceeded",
+            "per_resolution_window_cap_exceeded",
+            "correlated_market_cap_exceeded",
+        }:
+            return Decimal("0")
+        raise AllocationDenied(decision)
+    return Decimal(decision.available_capacity_micro) / Decimal("1000000")
 
 
 def assert_global_submit_allows(*, reduce_only: bool = False) -> AllocationDecision:

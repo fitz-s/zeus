@@ -35,6 +35,7 @@ from src.risk_allocator import (
     configure_global_allocator,
     count_open_reconcile_findings,
     count_unknown_side_effects,
+    current_global_entry_capacity_usd,
     load_cap_policy,
     load_position_lots,
     refresh_global_allocator,
@@ -174,6 +175,45 @@ def test_per_market_cap_enforced():
     assert not decision.allowed
     assert decision.reason == "per_market_cap_exceeded"
     assert decision.confirmed_exposure_micro == 100_000_000
+
+
+def test_current_entry_capacity_exposes_same_remaining_envelope_as_submit_gate():
+    allocator = RiskAllocator(
+        CapPolicy(max_per_market_micro=150_000_000),
+        [
+            ExposureLot(
+                "m1",
+                "e1",
+                "day0",
+                "t1",
+                100_000_000,
+                "CONFIRMED_EXPOSURE",
+                correlation_key="corr-1",
+            )
+        ],
+    )
+    state = _state()
+    capacity = allocator.entry_capacity(
+        market_id="m1",
+        event_id="e1",
+        resolution_window="day0",
+        correlation_key="corr-1",
+        governor_state=state,
+    )
+
+    assert capacity.allowed
+    assert capacity.available_capacity_micro == 50_000_000
+    assert capacity.remaining_market_capacity_micro == 50_000_000
+    configure_global_allocator(allocator, state)
+    try:
+        assert current_global_entry_capacity_usd(
+            market_id="m1",
+            event_id="e1",
+            resolution_window="day0",
+            correlation_key="corr-1",
+        ) == Decimal("50")
+    finally:
+        clear_global_allocator()
 
 
 def test_correlated_market_cap_via_multiple_outcome_tokens_enforced():

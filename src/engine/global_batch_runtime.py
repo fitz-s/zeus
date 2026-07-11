@@ -110,6 +110,7 @@ def _book_economics_manifest(
                 asset.family_key,
                 asset.bin_id,
                 asset.condition_id,
+                asset.market_event_id,
                 asset.side,
                 asset.token_id,
                 str(curve.fee_model.fee_rate),
@@ -208,13 +209,13 @@ def _overlay_current_global_book_epoch(
             states.append(state)
             continue
         if (
-            len(state) != 7
+            len(state) != 8
             or state[5] != "EXECUTABLE"
             or state[6] != selected_book_hash
         ):
             raise ValueError("GLOBAL_JIT_OVERLAY_STATE_INVALID")
         matched_state += 1
-        states.append((*state[:6], str(replacement_curve.book_hash)))
+        states.append((*state[:6], str(replacement_curve.book_hash), state[7]))
     if matched_state != 1:
         raise ValueError(f"GLOBAL_JIT_OVERLAY_STATE_CARDINALITY:{matched_state}")
 
@@ -396,6 +397,8 @@ def process_current_global_batch(
     ]
     | None = None,
     selection_snapshot_connections: Sequence[sqlite3.Connection] = (),
+    current_capital_limit_resolver: Callable[[object, str, str], object]
+    | None = None,
 ) -> GlobalBatchSubmitResult:
     """Select once from every family holding a current q certificate."""
 
@@ -597,6 +600,7 @@ def process_current_global_batch(
                 capital_limit_usd=wealth.spendable_cash_usd,
                 decision_at_utc=selection_at,
                 book_epoch=attempt_book_epoch,
+                current_capital_limit_resolver=current_capital_limit_resolver,
             )
 
         selected = select_once(probabilities, book_epoch, prepared_by_event)
