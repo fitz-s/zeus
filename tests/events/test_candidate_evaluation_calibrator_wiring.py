@@ -94,12 +94,8 @@ def test_calibrator_deflates_qlcb_and_blocks_toxic_no():
 
 def test_buy_yes_genuine_edge_survives_live_calibrator(monkeypatch):
     monkeypatch.delenv("ZEUS_SELECTION_CALIBRATOR_LIVE", raising=False)
-    # q_lcb_5pct must clear LIVE_DIRECTION_WIN_RATE_FLOOR (0.51,
-    # src/strategy/live_inference/live_admission.py) — a separate, unrelated
-    # admission gate — or `admitted` is False regardless of calibrator
-    # wiring. Values below keep the original deflation shape (q_lcb_5pct
-    # slightly under raw_yes, hit_rate slightly over raw_yes) scaled up to
-    # clear that floor.
+    # Values keep the original deflation shape: q_lcb_5pct slightly under the
+    # point probability and calibrated evidence still above executable cost.
     raw_yes = 0.56
     bidx, _ = sc.raw_prob_bucket(raw_yes)
     art = {

@@ -31,6 +31,7 @@ from src.engine.event_reactor_adapter import (
 from src.events.candidate_binding import MarketTopologyCandidate
 from src.contracts.execution_intent import DecisionSourceContext
 from src.decision_kernel import claims
+from src.decision_kernel.canonicalization import stable_hash
 from src.decision_kernel.certificate import build_certificate
 from src.types.market import Bin
 
@@ -702,7 +703,7 @@ def test_event_bound_strategy_key_treats_forecast_family_as_qkernel_entry():
     )
 
 
-def test_live_entry_qkernel_gate_rejects_buenos_aires_low_quality_yes():
+def test_live_entry_qkernel_gate_accepts_underpriced_buenos_aires_yes():
     cert = _qkernel_cert()
     cert.update(
         cost=0.053828064525010946,
@@ -712,20 +713,19 @@ def test_live_entry_qkernel_gate_rejects_buenos_aires_low_quality_yes():
         selection_guard_q_safe=0.0990451308919892,
     )
 
-    with pytest.raises(ValueError, match="ADMISSION_QKERNEL_CENTER_YES_QUALITY_FLOOR"):
-        _assert_live_entry_submit_authority(
-            {
-                "event_type": "FORECAST_SNAPSHOT_READY",
-                "selection_authority_applied": "qkernel_spine",
-                "direction": "buy_yes",
-                "strategy_key": "forecast_qkernel_entry",
-                "candidate_bin_id": "bin-1",
-                "q_live": 0.24833093804728934,
-                "q_lcb_5pct": 0.0990451308919892,
-                "min_entry_price": 0.02,
-                "qkernel_execution_economics": cert,
-            }
-        )
+    _assert_live_entry_submit_authority(
+        {
+            "event_type": "FORECAST_SNAPSHOT_READY",
+            "selection_authority_applied": "qkernel_spine",
+            "direction": "buy_yes",
+            "strategy_key": "forecast_qkernel_entry",
+            "candidate_bin_id": "bin-1",
+            "q_live": 0.24833093804728934,
+            "q_lcb_5pct": 0.0990451308919892,
+            "min_entry_price": 0.02,
+            "qkernel_execution_economics": cert,
+        }
+    )
 
 
 @pytest.mark.parametrize(("side", "direction"), (("YES", "buy_yes"), ("NO", "buy_no")))
@@ -1125,7 +1125,7 @@ def test_qkernel_actual_submit_floor_uses_actual_stake_not_cert_optimal_size():
     assert "floor=1.000000" in reason
 
 
-def test_qkernel_actual_submit_floor_rejects_invalid_qkernel_evidence():
+def test_qkernel_actual_submit_floor_accepts_price_relative_positive_economics():
     cert = _qkernel_cert()
     cert.update(
         route_id="DIRECT_YES:bin-1@proof",
@@ -1153,11 +1153,7 @@ def test_qkernel_actual_submit_floor_rejects_invalid_qkernel_evidence():
         actual_cost=0.053828064525010946,
     )
 
-    assert reason is not None
-    assert reason.startswith(
-        "QKERNEL_ACTUAL_SUBMIT_QUALITY_FLOOR:"
-        "QKERNEL_EXECUTION_ECONOMICS_ROI_FRONTIER_NOT_USEFUL:"
-    )
+    assert reason is None
 
 
 def test_qkernel_selection_rejection_names_no_positive_edge_not_generic_invalid():
@@ -1328,7 +1324,7 @@ def test_live_entry_qkernel_gate_rejects_failed_near_day0_consistency_verdict():
         )
 
 
-def test_live_entry_qkernel_gate_rejects_low_price_yes_tail_below_roi_frontier_floor():
+def test_live_entry_qkernel_gate_accepts_underpriced_low_probability_yes():
     cert = _qkernel_cert()
     cert.update(
         route_id="DIRECT_YES:b34@proof",
@@ -1344,23 +1340,22 @@ def test_live_entry_qkernel_gate_rejects_low_price_yes_tail_below_roi_frontier_f
         selection_guard_q_safe=0.06052567908958011,
     )
 
-    with pytest.raises(ValueError, match="ADMISSION_QKERNEL_CENTER_YES_QUALITY_FLOOR"):
-        _assert_live_entry_submit_authority(
-            {
-                "event_type": "FORECAST_SNAPSHOT_READY",
-                "selection_authority_applied": "qkernel_spine",
-                "direction": "buy_yes",
-                "strategy_key": "forecast_qkernel_entry",
-                "candidate_bin_id": "b34",
-                "q_live": 0.12180248510788458,
-                "q_lcb_5pct": 0.06052567908958011,
-                "min_entry_price": 0.02,
-                "qkernel_execution_economics": cert,
-            }
-        )
+    _assert_live_entry_submit_authority(
+        {
+            "event_type": "FORECAST_SNAPSHOT_READY",
+            "selection_authority_applied": "qkernel_spine",
+            "direction": "buy_yes",
+            "strategy_key": "forecast_qkernel_entry",
+            "candidate_bin_id": "b34",
+            "q_live": 0.12180248510788458,
+            "q_lcb_5pct": 0.06052567908958011,
+            "min_entry_price": 0.02,
+            "qkernel_execution_economics": cert,
+        }
+    )
 
 
-def test_live_entry_qkernel_gate_rejects_six_to_eight_cent_barely_positive_yes():
+def test_live_entry_qkernel_gate_accepts_six_to_eight_cent_positive_yes():
     cert = _qkernel_cert()
     cert.update(
         route_id="DIRECT_YES:b67@proof",
@@ -1376,20 +1371,19 @@ def test_live_entry_qkernel_gate_rejects_six_to_eight_cent_barely_positive_yes()
         selection_guard_q_safe=0.078120,
     )
 
-    with pytest.raises(ValueError, match="ADMISSION_QKERNEL_CENTER_YES_QUALITY_FLOOR"):
-        _assert_live_entry_submit_authority(
-            {
-                "event_type": "FORECAST_SNAPSHOT_READY",
-                "selection_authority_applied": "qkernel_spine",
-                "direction": "buy_yes",
-                "strategy_key": "center_buy",
-                "candidate_bin_id": "b67",
-                "q_live": 0.100000,
-                "q_lcb_5pct": 0.078120,
-                "min_entry_price": 0.02,
-                "qkernel_execution_economics": cert,
-            }
-        )
+    _assert_live_entry_submit_authority(
+        {
+            "event_type": "FORECAST_SNAPSHOT_READY",
+            "selection_authority_applied": "qkernel_spine",
+            "direction": "buy_yes",
+            "strategy_key": "center_buy",
+            "candidate_bin_id": "b67",
+            "q_live": 0.100000,
+            "q_lcb_5pct": 0.078120,
+            "min_entry_price": 0.02,
+            "qkernel_execution_economics": cert,
+        }
+    )
 
 
 def test_live_entry_qkernel_gate_rejects_nonpositive_delta_u_at_min():
@@ -2122,6 +2116,19 @@ def test_replacement_forecast_authority_binds_selected_proof_posterior_id(monkey
 
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
+    topology = [{"bin_id": "25C", "lower_c": 25.0, "upper_c": 25.0}]
+    topology_hash = stable_hash(topology)
+    provenance_json = json.dumps(
+        {
+            "bin_topology": topology,
+            "replacement_q_mode": "FUSED_NORMAL_FULL",
+            "q_lcb_basis": "fused_center_bootstrap_p05",
+            "q_ucb_json_role": "fused_center_bootstrap_ucb",
+            "q_lcb_bootstrap_draws": 200,
+            "q_bootstrap_samples_hash": "b" * 64,
+        },
+        sort_keys=True,
+    )
     conn.execute(
         """
         CREATE TABLE forecast_posteriors (
@@ -2135,7 +2142,13 @@ def test_replacement_forecast_authority_binds_selected_proof_posterior_id(monkey
             source_cycle_time TEXT,
             source_available_at TEXT,
             computed_at TEXT,
-            posterior_identity_hash TEXT
+                posterior_identity_hash TEXT,
+                family_id TEXT,
+                bin_topology_hash TEXT,
+                q_json TEXT,
+                q_lcb_json TEXT,
+                q_ucb_json TEXT,
+                provenance_json TEXT
         )
         """
     )
@@ -2147,9 +2160,10 @@ def test_replacement_forecast_authority_binds_selected_proof_posterior_id(monkey
         INSERT INTO forecast_posteriors (
             posterior_id, product_id, source_id, data_version, city, target_date,
             temperature_metric, source_cycle_time, source_available_at, computed_at,
-            posterior_identity_hash
-        )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                posterior_identity_hash, family_id, bin_topology_hash,
+                q_json, q_lcb_json, q_ucb_json, provenance_json
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         [
             (
@@ -2162,9 +2176,15 @@ def test_replacement_forecast_authority_binds_selected_proof_posterior_id(monkey
                 "high",
                 "2026-07-08T06:00:00+00:00",
                 "2026-07-08T12:31:30+00:00",
-                "2026-07-08T12:49:13+00:00",
-                "f" * 64,
-            ),
+                    "2026-07-08T12:49:13+00:00",
+                    "f" * 64,
+                    "Seoul|2026-07-10|high",
+                    topology_hash,
+                    '{"25C": 1.0}',
+                    '{"25C": 0.8}',
+                    '{"25C": 1.0}',
+                    provenance_json,
+                ),
             (
                 42,
                 "openmeteo_ecmwf_ifs9_bayes_fusion_v1",
@@ -2175,9 +2195,15 @@ def test_replacement_forecast_authority_binds_selected_proof_posterior_id(monkey
                 "high",
                 "2026-07-08T06:00:00+00:00",
                 "2026-07-08T12:31:30+00:00",
-                "2026-07-08T12:38:00+00:00",
-                "a" * 64,
-            ),
+                    "2026-07-08T12:38:00+00:00",
+                    "a" * 64,
+                    "Seoul|2026-07-10|high",
+                    topology_hash,
+                    '{"25C": 1.0}',
+                    '{"25C": 0.8}',
+                    '{"25C": 1.0}',
+                    provenance_json,
+                ),
         ],
     )
 

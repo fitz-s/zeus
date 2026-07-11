@@ -257,7 +257,7 @@ def test_entry_economics_blocks_low_price_even_when_strategy_floor_allows_it():
     assert verdict["details"]["live_min_entry_price"] == 0.10
 
 
-def test_entry_economics_blocks_center_buy_micro_tail_yes_below_quality_floor():
+def test_entry_economics_allows_micro_tail_yes_when_robust_edge_pays_hurdles():
     verdict = _entry_economics_component(
         _intent(
             limit_price=0.024,
@@ -284,12 +284,12 @@ def test_entry_economics_blocks_center_buy_micro_tail_yes_below_quality_floor():
         },
     )
 
-    assert verdict["allowed"] is False
-    assert verdict["reason"].startswith("ADMISSION_QKERNEL_CENTER_YES_QUALITY_FLOOR:")
+    assert verdict["allowed"] is True
+    assert verdict["reason"] == "allowed"
     assert verdict["details"]["q_lcb_5pct"] == pytest.approx(0.074)
 
 
-def test_entry_economics_blocks_buenos_aires_tail_yes_live_incident():
+def test_entry_economics_allows_buenos_aires_shape_on_executable_economics():
     verdict = _entry_economics_component(
         _intent(
             limit_price=0.041,
@@ -319,8 +319,8 @@ def test_entry_economics_blocks_buenos_aires_tail_yes_live_incident():
         },
     )
 
-    assert verdict["allowed"] is False
-    assert verdict["reason"].startswith("ADMISSION_QKERNEL_CENTER_YES_QUALITY_FLOOR:")
+    assert verdict["allowed"] is True
+    assert verdict["reason"] == "allowed"
     assert verdict["details"]["q_lcb_5pct"] == pytest.approx(0.0990451308919892)
 
 
@@ -392,7 +392,7 @@ def test_entry_economics_allows_center_buy_yes_when_symmetric_quality_floor_clea
     assert verdict["details"]["q_lcb_5pct"] == pytest.approx(0.52)
 
 
-def test_entry_economics_blocks_low_price_yes_below_center_yes_quality_floor():
+def test_entry_economics_allows_low_price_yes_with_positive_robust_edge():
     verdict = _entry_economics_component(
         _intent(
             limit_price=0.031,
@@ -421,8 +421,8 @@ def test_entry_economics_blocks_low_price_yes_below_center_yes_quality_floor():
         },
     )
 
-    assert verdict["allowed"] is False
-    assert verdict["reason"].startswith("ADMISSION_QKERNEL_CENTER_YES_QUALITY_FLOOR:")
+    assert verdict["allowed"] is True
+    assert verdict["reason"] == "allowed"
     assert verdict["details"]["q_lcb_5pct"] == pytest.approx(0.06052567908958011)
 
 

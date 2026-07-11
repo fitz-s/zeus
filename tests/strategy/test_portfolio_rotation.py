@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 # Created: 2026-06-06
-# Last reused/audited: 2026-06-07
-# Authority basis: Operator request — portfolio rotation must be universal and must not rotate live capital into lower-than-51% win-rate lottery legs.
+# Last reused/audited: 2026-07-11
+# Authority basis: portfolio rotation compares current executable replacement value
+# against held value without an absolute hit-rate veto.
 
 import pytest
 
@@ -130,7 +131,7 @@ def test_best_rotation_is_global_not_first_or_city_specific() -> None:
     assert decision.candidate.event_id == "large"
 
 
-def test_rotation_rejects_low_win_rate_positive_ev_lottery_candidate() -> None:
+def test_rotation_accepts_low_probability_candidate_when_replacement_value_dominates() -> None:
     hold = _hold(shares=24.68, held_probability=0.94, held_side_best_bid=0.70)
     lottery_candidate = _candidate(
         event_id="low-q-positive-ev",
@@ -145,9 +146,9 @@ def test_rotation_rejects_low_win_rate_positive_ev_lottery_candidate() -> None:
 
     decision = evaluate_rotation(hold, lottery_candidate, fee_rate=0.05)
 
-    assert decision.action == "HOLD"
-    assert decision.reason.startswith("ADMISSION_WIN_RATE_FLOOR:")
-    assert decision.candidate_future_value_usd == 0.0
+    assert decision.action == "ROTATE"
+    assert decision.reason == "ROTATION_REPLACE_CANDIDATE"
+    assert decision.candidate_future_value_usd > decision.hold_future_value_usd
 
 
 def test_hurdles_prevent_churn_on_tiny_improvements() -> None:

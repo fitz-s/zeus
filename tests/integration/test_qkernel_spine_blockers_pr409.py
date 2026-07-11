@@ -2227,8 +2227,8 @@ def test_qkernel_receipt_annotation_keeps_live_positive_profit_roi_frontier_cand
     assert annotated.q_lcb_5pct == pytest.approx(0.77877)
 
 
-def test_qkernel_receipt_annotation_rejects_low_price_yes_tail_without_strong_safe_q():
-    """Receipt overlay must mirror the live ROI frontier low-price YES floor."""
+def test_qkernel_receipt_annotation_accepts_low_price_yes_with_robust_edge():
+    """Receipt overlay admits low absolute q when price-relative economics pass."""
 
     row = _row(
         condition_id="cond-qk-kl-tail-yes",
@@ -2275,10 +2275,10 @@ def test_qkernel_receipt_annotation_rejects_low_price_yes_tail_without_strong_sa
         qkernel_economics_by_bin_side={(era._candidate_bin_id(proof), "YES"): cert},
     )
 
-    assert annotated.passed_prefilter is False
-    assert annotated.trade_score == 0.0
-    assert annotated.missing_reason.startswith("ADMISSION_QKERNEL_CENTER_YES_QUALITY_FLOOR:")
-    assert "q_lcb=0.0605" in annotated.missing_reason
+    assert annotated.passed_prefilter is True
+    assert annotated.trade_score == pytest.approx(0.020510409830349664)
+    assert annotated.missing_reason is None
+    assert annotated.q_lcb_5pct == pytest.approx(0.06052567908958011)
 
 
 def test_qkernel_receipt_annotation_rejects_nonpositive_min_order_utility():
@@ -3240,8 +3240,8 @@ def test_qkernel_scope_does_not_let_legacy_admission_filter_center_yes(monkeypat
     assert center_yes[0].economics.optimal_delta_u > 0.0
 
 
-def test_qkernel_scope_uses_roi_not_legacy_win_rate_floor_for_yes():
-    """Qkernel can score low-cost YES by ROI instead of legacy q_lcb >= 51% admission."""
+def test_qkernel_scope_has_no_legacy_absolute_win_rate_floor_for_yes():
+    """All current selection scopes expose YES to price-relative economics."""
 
     family, bins = _three_bin_family()
     row = _row(
@@ -3269,7 +3269,7 @@ def test_qkernel_scope_uses_roi_not_legacy_win_rate_floor_for_yes():
         enforce_win_rate_floor=False,
     )
 
-    assert legacy_scoped == ()
+    assert legacy_scoped == (center_yes,)
     assert qkernel_scoped == (center_yes,)
     assert family.family_id
 

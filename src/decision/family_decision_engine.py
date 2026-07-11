@@ -246,9 +246,6 @@ _OOF_LIVE_RELIABILITY_BASES = frozenset(
 DAY0_REMAINING_DAY_GUARD_BASIS = "DAY0_REMAINING_DAY_Q_LCB"
 _ROI_FRONTIER_MIN_PROFIT_LCB_USD = 0.25
 _ROI_FRONTIER_MIN_PAYOFF_Q_LCB = qkernel_center_yes_quality_floor()
-_ROI_FRONTIER_CHEAP_YES_COST_CEILING = 0.15
-_ROI_FRONTIER_CHEAP_YES_MIN_PAYOFF_Q_LCB = qkernel_center_yes_quality_floor()
-_ROI_FRONTIER_CHEAP_YES_MAX_EDGE_MARGIN = 0.05
 LIVE_ENTRY_MIN_ENTRY_PRICE = 0.10
 CENTER_BUY_YES_MIN_ENTRY_PRICE = 0.02
 
@@ -261,36 +258,15 @@ class EntryPriceFloorDecision:
 
 
 def roi_frontier_min_payoff_q_lcb(*, side: str | None, cost: float) -> float:
-    """Conservative live floor for cheap YES routes.
+    """Return the symmetric absolute qLCB floor for legacy frontier routing.
 
-    Cheap YES routes are valid when the forecast genuinely prices a center
-    point-bin too low, but raw edge/cost over-rewards lottery-like tails whose
-    lower bound merely clears the book. The live selector uses the same q-kernel
-    center-YES quality floor as submit/executor, while NO remains on the ordinary
-    binary win-rate floor.
+    Side-native executable cost and robust edge are evaluated separately. An
+    absolute probability floor would reject underpriced low-q claims and make
+    label-mirrored YES/NO books select differently.
     """
 
-    side_text = str(side or "").strip().upper()
-    floor = (
-        qkernel_center_yes_quality_floor()
-        if side_text == "YES"
-        else float(LIVE_DIRECTION_WIN_RATE_FLOOR)
-    )
-    if (
-        side_text == "YES"
-        and np.isfinite(cost)
-        and 0.0 < float(cost) < _ROI_FRONTIER_CHEAP_YES_COST_CEILING
-    ):
-        cost_f = float(cost)
-        edge_margin = float(_ROI_FRONTIER_CHEAP_YES_MAX_EDGE_MARGIN) * (
-            1.0 - (cost_f / float(_ROI_FRONTIER_CHEAP_YES_COST_CEILING))
-        )
-        floor = max(
-            floor,
-            float(_ROI_FRONTIER_CHEAP_YES_MIN_PAYOFF_Q_LCB),
-            cost_f + max(0.0, edge_margin),
-        )
-    return floor
+    del side, cost
+    return float(LIVE_DIRECTION_WIN_RATE_FLOOR)
 
 
 def roi_frontier_min_profit_lcb_usd() -> float:

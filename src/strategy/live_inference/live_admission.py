@@ -19,15 +19,14 @@ from src.calibration.settlement_backward_coverage import (
 from src.decision_kernel.canonicalization import stable_hash
 
 
-# Operator objective for every executable selected side: its conservative hit
-# probability must be greater than 51%. Price and payoff still decide edge and
-# sizing, but a cheap exact-bin YES does not earn a weaker final-admission
-# standard merely because its ROI denominator is small.
-LIVE_DIRECTION_WIN_RATE_FLOOR = 0.51
+# Compatibility default for callers that can optionally request a hit-rate
+# constraint. The capital objective has no positive absolute probability floor:
+# executable price, fees, robust edge, and robust delta-log wealth decide.
+LIVE_DIRECTION_WIN_RATE_FLOOR = 0.0
 LIVE_NEAR_SETTLED_ENTRY_PRICE_CEILING = 0.99
-# Candidate-generation floor retained for the legacy family selector. Final
-# executable admission below uses LIVE_DIRECTION_WIN_RATE_FLOOR for both sides.
-LIVE_QKERNEL_CENTER_YES_MIN_Q_LCB = 0.25
+# Exact-bin YES and native NO share the same zero absolute floor. Their own
+# current side-native executable cost supplies the economically meaningful bar.
+LIVE_QKERNEL_CENTER_YES_MIN_Q_LCB = LIVE_DIRECTION_WIN_RATE_FLOOR
 LIVE_QKERNEL_EXACT_YES_STRATEGY_KEYS = frozenset({
     "center_buy",
     "forecast_qkernel_entry",
@@ -69,7 +68,7 @@ def live_win_rate_floor_rejection_reason(
     q_lcb: float | int | None,
     floor: float = LIVE_DIRECTION_WIN_RATE_FLOOR,
 ) -> str | None:
-    """Return a live admission blocker when the direction LCB is below floor."""
+    """Validate qLCB and apply only an explicitly requested absolute floor."""
 
     try:
         q_value = float(q_lcb)
@@ -78,15 +77,17 @@ def live_win_rate_floor_rejection_reason(
         return f"ADMISSION_WIN_RATE_FLOOR:q_lcb=missing:min={float(floor):.4f}"
     if not math.isfinite(q_value):
         return f"ADMISSION_WIN_RATE_FLOOR:q_lcb=nonfinite:min={floor_value:.4f}"
-    if not math.isfinite(floor_value) or floor_value <= 0.0 or floor_value >= 1.0:
-        raise ValueError(f"live win-rate floor must be in (0, 1), got {floor!r}")
+    if not math.isfinite(floor_value) or floor_value < 0.0 or floor_value >= 1.0:
+        raise ValueError(f"live win-rate floor must be in [0, 1), got {floor!r}")
+    if q_value < 0.0 or q_value > 1.0:
+        return f"ADMISSION_PROBABILITY_QUALITY:q_lcb={q_value:.4f}:range=[0,1]"
     if q_value < floor_value:
         return f"ADMISSION_WIN_RATE_FLOOR:q_lcb={q_value:.4f}:min={floor_value:.4f}"
     return None
 
 
 def qkernel_center_yes_quality_floor() -> float:
-    """Legacy candidate-generation floor for exact-bin q-kernel YES routes."""
+    """Absolute qLCB floor; zero because executable economics own admission."""
 
     return float(LIVE_QKERNEL_CENTER_YES_MIN_Q_LCB)
 
@@ -106,11 +107,9 @@ def live_entry_probability_quality_rejection_reason(
 ) -> str | None:
     """Return the probability-quality blocker for a live entry candidate.
 
-    Every selected side uses one conservative hit-probability floor. Q-kernel
-    center-buy YES keeps a distinct rejection label for attribution, not a
-    weaker numerical standard. This prevents cheap longshot tails from passing
-    on ROI optics while preserving YES eligibility whenever its own bound clears
-    the same bar as NO.
+    YES and NO share one validity rule, not a hit-rate target. A low-q claim is
+    admissible only when downstream current executable economics prove positive
+    robust edge and delta-log wealth; a high q cannot compensate for overpaying.
     """
 
     direction_value = getattr(direction, "value", direction)

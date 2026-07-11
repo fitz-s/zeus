@@ -116,7 +116,7 @@ def test_candidate_evaluation_low_volume_is_not_an_admission_reject():
     assert evaluation.to_receipt_dict()["low_volume_usd"] == 0.0
 
 
-def test_candidate_evaluation_low_win_rate_positive_ev_is_not_live_admitted():
+def test_candidate_evaluation_low_probability_is_not_rejected_by_absolute_q():
     evaluation = CandidateEvaluation(
         candidate_id="cand-1",
         family_id="family-1",
@@ -138,9 +138,10 @@ def test_candidate_evaluation_low_win_rate_positive_ev_is_not_live_admitted():
     receipt = evaluation.to_receipt_dict()
 
     assert evaluation.admitted is False
-    assert evaluation.live_win_rate_admissible is False
-    assert receipt["live_win_rate_admissible"] is False
-    assert receipt["live_win_rate_floor"] == 0.51
+    assert evaluation.live_win_rate_admissible is True
+    assert evaluation.selection_calibrator_admissible is False
+    assert receipt["live_win_rate_admissible"] is True
+    assert receipt["live_win_rate_floor"] == 0.0
 
 
 def test_candidate_evaluation_keeps_positive_ev_low_payout_for_ranking():
@@ -199,10 +200,10 @@ def test_opportunity_book_keeps_admission_separate_from_live_selection():
     ).to_receipt_dict()
     receipt = book["candidates"][0]
 
-    assert evaluation.admitted is False
-    assert receipt["admitted"] is False
+    assert evaluation.admitted is True
+    assert receipt["admitted"] is True
     assert receipt["live_decision_selected"] is False
-    assert book["admitted_count"] == 0
+    assert book["admitted_count"] == 1
 
 
 def test_opportunity_book_counts_qkernel_selected_candidate_as_live_admitted():
@@ -257,7 +258,7 @@ def test_opportunity_book_counts_qkernel_selected_candidate_as_live_admitted():
     ).to_receipt_dict()
     receipt = book["candidates"][0]
 
-    assert evaluation.admitted is False
+    assert evaluation.admitted is True
     assert receipt["admitted"] is True
     assert receipt["live_decision_selected"] is True
     assert receipt["live_selection_authority"] == "qkernel_spine"

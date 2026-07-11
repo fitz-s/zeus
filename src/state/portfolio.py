@@ -54,7 +54,6 @@ from src.contracts.semantic_types import VenueVisibilityStatus, Direction, Direc
 from src.contracts.settlement_outcome import SettlementOutcome
 from src.contracts.hold_value import HoldValue
 from src.strategy.correlation import get_correlation
-from src.strategy.live_inference.live_admission import LIVE_DIRECTION_WIN_RATE_FLOOR
 from src.state.lifecycle_manager import (
     TERMINAL_STATES as _TERMINAL_POSITION_STATES,
     enter_admin_closed_runtime_state,
@@ -1091,50 +1090,6 @@ class Position:
         )
         applied.append("forward_edge_compute")
 
-        def _live_floor_revoked_decision() -> ExitDecision | None:
-            entry_held_prob = (
-                float(exit_context.entry_posterior)
-                if ExitContext._is_finite(exit_context.entry_posterior)
-                else float(self.p_posterior or 0.0)
-            )
-            current_held_prob = float(exit_context.fresh_prob)
-            entry_held_lcb = _held_side_lcb_or_point(exit_context.entry_ci, entry_held_prob)
-            current_held_lcb = _held_side_lcb_or_point(exit_context.current_ci, current_held_prob)
-            if not (
-                entry_held_lcb is not None
-                and current_held_lcb is not None
-                and current_held_lcb < LIVE_DIRECTION_WIN_RATE_FLOOR
-                and entry_held_lcb < LIVE_DIRECTION_WIN_RATE_FLOOR
-                and not (exit_context.day0_active and current_held_prob <= 1e-9)
-            ):
-                return None
-            applied.append("live_win_rate_floor_revoked")
-            if not ExitContext._is_finite(exit_context.best_bid):
-                applied.append("best_bid_unavailable")
-                applied.append("exit_context_incomplete")
-                self.applied_validations = _dedupe_validations(applied)
-                return ExitDecision(
-                    False,
-                    "INCOMPLETE_EXIT_CONTEXT (missing=best_bid)",
-                    selected_method=self.selected_method or self.entry_method,
-                    applied_validations=list(self.applied_validations),
-                    trigger="LIVE_WIN_RATE_FLOOR_REVOKED_CONTEXT_INCOMPLETE",
-                )
-            self.neg_edge_count = 0
-            self.applied_validations = _dedupe_validations(applied)
-            return ExitDecision(
-                True,
-                (
-                    "LIVE_WIN_RATE_FLOOR_REVOKED "
-                    f"(entry_lcb={entry_held_lcb:.4f}, current_lcb={current_held_lcb:.4f}, "
-                    f"entry_point={entry_held_prob:.4f}, current_point={current_held_prob:.4f}, "
-                    f"floor={LIVE_DIRECTION_WIN_RATE_FLOOR:.4f})"
-                ),
-                selected_method=self.selected_method or self.entry_method,
-                applied_validations=list(self.applied_validations),
-                trigger="LIVE_WIN_RATE_FLOOR_REVOKED",
-            )
-
         if exit_context.day0_active:
             applied.append("day0_observation_authority")
             applied.append("day0_standard_exit_optimizer")
@@ -1437,26 +1392,42 @@ class Position:
             # terminal hold here prevents the standard EV/consecutive optimizer from
             # ever reacting to the same fresh belief. Keep the overlap as evidence,
             # but let Day0 continue into the normal exit optimizer.
-            floor_revoked_decision = _live_floor_revoked_decision()
-            if floor_revoked_decision is not None:
-                return floor_revoked_decision
             if exit_context.day0_active:
                 applied.append("ci_overlap_nonterminal_day0")
             else:
+                sell_value_dominates = self._sell_value_exceeds_hold_value(
+                    current_p_posterior=float(exit_context.fresh_prob),
+                    best_bid=exit_context.best_bid,
+                    hours_to_settlement=exit_context.hours_to_settlement,
+                    applied=applied,
+                    portfolio_positions=exit_context.portfolio_positions,
+                    bankroll=exit_context.bankroll,
+                )
                 self.neg_edge_count = 0
-                applied.append("ci_overlap_hold")
+                if sell_value_dominates is True:
+                    applied.append("ci_overlap_sell_value_dominates")
+                    self.applied_validations = _dedupe_validations(applied)
+                    return ExitDecision(
+                        True,
+                        "CI_OVERLAP_SELL_VALUE_DOMINATES",
+                        selected_method=self.selected_method or self.entry_method,
+                        applied_validations=list(self.applied_validations),
+                        trigger="CI_OVERLAP_SELL_VALUE_DOMINATES",
+                    )
+                if sell_value_dominates is None:
+                    applied.append("ci_overlap_exit_context_incomplete_hold")
+                    reason = "CI_OVERLAP_EXIT_CONTEXT_INCOMPLETE_HOLD"
+                else:
+                    applied.append("ci_overlap_hold_value_dominates")
+                    reason = "CI_OVERLAP_HOLD_VALUE_DOMINATES"
                 self.applied_validations = _dedupe_validations(applied)
                 return ExitDecision(
                     False,
-                    "CI_OVERLAP_HOLD",
+                    reason,
                     selected_method=self.selected_method or self.entry_method,
                     applied_validations=list(self.applied_validations),
-                    trigger="CI_OVERLAP_HOLD",
+                    trigger=reason,
                 )
-
-        floor_revoked_decision = _live_floor_revoked_decision()
-        if floor_revoked_decision is not None:
-            return floor_revoked_decision
 
         # Direction-specific exit logic
         if self.direction == "buy_no":

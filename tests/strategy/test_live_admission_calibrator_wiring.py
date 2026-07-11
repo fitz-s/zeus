@@ -19,29 +19,30 @@ from src.decision import city_skill_gate as csg
         ("buy_no", "center_buy", "qkernel_spine", {"source": "qkernel_spine"}),
     ),
 )
-def test_selected_side_probability_quality_floor_is_yes_no_symmetric(
+def test_selected_side_probability_validity_is_yes_no_symmetric(
     direction,
     strategy_key,
     authority,
     economics,
 ):
-    below = la.live_entry_probability_quality_rejection_reason(
-        q_lcb=0.50,
+    underpriced = la.live_entry_probability_quality_rejection_reason(
+        q_lcb=0.13,
         direction=direction,
         strategy_key=strategy_key,
         selection_authority_applied=authority,
         qkernel_execution_economics=economics,
     )
-    above = la.live_entry_probability_quality_rejection_reason(
-        q_lcb=0.52,
+    invalid = la.live_entry_probability_quality_rejection_reason(
+        q_lcb=-0.01,
         direction=direction,
         strategy_key=strategy_key,
         selection_authority_applied=authority,
         qkernel_execution_economics=economics,
     )
 
-    assert below is not None
-    assert above is None
+    assert underpriced is None
+    assert invalid is not None
+    assert invalid.startswith("ADMISSION_PROBABILITY_QUALITY:")
 
 
 # --------------------------------------------------------------------------------------------------

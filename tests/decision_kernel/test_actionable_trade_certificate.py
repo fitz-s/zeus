@@ -438,7 +438,7 @@ def test_actionable_rejects_q_lcb_above_q_live():
         verify_actionable_trade(action, parents)
 
 
-def test_actionable_rejects_center_yes_below_quality_floor():
+def test_actionable_accepts_underpriced_low_probability_yes():
     parents, action = actionable_graph(
         action_payload={
             "q_live": 0.24833093804728934,
@@ -458,11 +458,7 @@ def test_actionable_rejects_center_yes_below_quality_floor():
         }
     )
 
-    with pytest.raises(
-        CertificateVerificationError,
-        match="ADMISSION_QKERNEL_CENTER_YES_QUALITY_FLOOR",
-    ):
-        verify_actionable_trade(action, parents)
+    verify_actionable_trade(action, parents)
 
 
 def test_actionable_current_state_solver_skips_legacy_quality_and_roi_floors():

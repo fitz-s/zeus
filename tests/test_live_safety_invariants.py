@@ -5672,7 +5672,7 @@ def test_monitor_refresh_preserves_chain_corrected_entry_economics(tmp_path):
     assert current["size_usd"] == pytest.approx(44.4)
     assert current["shares"] == pytest.approx(60.0)
     assert current["cost_basis_usd"] == pytest.approx(44.4)
-    assert current["chain_state"] == "synced"
+    assert current["chain_state"] == "local_only"
     assert current["chain_shares"] == pytest.approx(60.0)
     assert current["chain_cost_basis_usd"] == pytest.approx(44.4)
     assert current["last_monitor_prob"] == pytest.approx(0.869)
@@ -8903,8 +8903,8 @@ def test_day0_buy_yes_point_reversal_requires_stronger_evidence():
     assert "consecutive_cycle_check" in decision.applied_validations
 
 
-def test_low_win_rate_lottery_position_exits_before_ci_overlap_hold():
-    """A live-invalid tail position must not be held forever by CI overlap."""
+def test_low_probability_position_holds_when_terminal_value_beats_sell_value():
+    """Low absolute hit rate is not an exit when the executable bid is worse."""
 
     pos = _make_position(
         direction="buy_yes",
@@ -8932,13 +8932,13 @@ def test_low_win_rate_lottery_position_exits_before_ci_overlap_hold():
         )
     )
 
-    assert decision.should_exit is True
-    assert decision.trigger == "LIVE_WIN_RATE_FLOOR_REVOKED"
-    assert "live_win_rate_floor_revoked" in decision.applied_validations
+    assert decision.should_exit is False
+    assert decision.trigger == "CI_OVERLAP_HOLD_VALUE_DOMINATES"
+    assert "ci_overlap_hold_value_dominates" in decision.applied_validations
 
 
-def test_low_lcb_position_exits_even_when_point_probability_is_high_and_ci_overlaps():
-    """The live floor is q_lcb, not point q; CI overlap cannot hold an invalid bound."""
+def test_wide_ci_position_holds_when_terminal_value_beats_sell_value():
+    """CI width and q_lcb do not override current hold-versus-sell economics."""
 
     pos = _make_position(
         direction="buy_yes",
@@ -8966,10 +8966,43 @@ def test_low_lcb_position_exits_even_when_point_probability_is_high_and_ci_overl
         )
     )
 
+    assert decision.should_exit is False
+    assert decision.trigger == "CI_OVERLAP_HOLD_VALUE_DOMINATES"
+    assert "ci_overlap_hold_value_dominates" in decision.applied_validations
+
+
+def test_low_probability_position_sells_when_executable_repricing_beats_hold_value():
+    """A low-q claim monetizes current repricing only when a fresh bid dominates hold EV."""
+
+    pos = _make_position(
+        direction="buy_yes",
+        p_posterior=0.13,
+        entry_price=0.03,
+        entry_ci_width=0.10,
+        shares=100.0,
+        cost_basis_usd=3.0,
+    )
+
+    decision = pos.evaluate_exit(
+        ExitContext(
+            fresh_prob=0.13,
+            fresh_prob_is_fresh=True,
+            current_market_price=0.20,
+            current_market_price_is_fresh=True,
+            best_bid=0.20,
+            best_ask=0.21,
+            hours_to_settlement=10.0,
+            position_state="holding",
+            day0_active=False,
+            entry_posterior=0.13,
+            entry_ci=(0.08, 0.18),
+            current_ci=(0.08, 0.18),
+        )
+    )
+
     assert decision.should_exit is True
-    assert decision.trigger == "LIVE_WIN_RATE_FLOOR_REVOKED"
-    assert "live_win_rate_floor_revoked" in decision.applied_validations
-    assert "ci_overlap_hold" not in decision.applied_validations
+    assert decision.trigger == "CI_OVERLAP_SELL_VALUE_DOMINATES"
+    assert "ci_overlap_sell_value_dominates" in decision.applied_validations
 
 
 def test_day0_buy_no_point_reversal_requires_stronger_evidence():

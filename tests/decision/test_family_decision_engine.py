@@ -887,8 +887,8 @@ def test_select_roi_frontier_keeps_small_stake_high_confidence_yes(monkeypatch):
     assert selected is high_confidence_yes
 
 
-def test_select_roi_frontier_rejects_six_cent_yes_with_barely_positive_safe_q(monkeypatch):
-    """A 6c YES needs more than a barely-positive q_lcb edge to avoid tail punts."""
+def test_select_roi_frontier_accepts_six_cent_yes_with_positive_robust_edge(monkeypatch):
+    """Absolute hit rate cannot veto executable positive robust economics."""
     case = _case()
     space = _outcome_space(case)
     barely_positive_yes = _hand_decision(
@@ -909,13 +909,13 @@ def test_select_roi_frontier_rejects_six_cent_yes_with_barely_positive_safe_q(mo
     selected, reason = engine._select([barely_positive_yes])
 
     assert engine._profit_lcb_usd(barely_positive_yes) > 0.25
-    assert engine._payoff_q_lcb(barely_positive_yes) < fde_mod.roi_frontier_min_payoff_q_lcb(
+    assert engine._payoff_q_lcb(barely_positive_yes) >= fde_mod.roi_frontier_min_payoff_q_lcb(
         side="YES",
         cost=0.06,
     )
-    assert engine._roi_frontier_useful(barely_positive_yes) is False
-    assert selected is None
-    assert reason == "NO_ROI_FRONTIER_USEFUL_CANDIDATE"
+    assert engine._roi_frontier_useful(barely_positive_yes) is True
+    assert selected is barely_positive_yes
+    assert reason is None
 
 
 def test_select_roi_frontier_keeps_strong_cheap_center_yes(monkeypatch):
@@ -948,8 +948,8 @@ def test_select_roi_frontier_keeps_strong_cheap_center_yes(monkeypatch):
     assert selected is strong_center_yes
 
 
-def test_select_roi_frontier_rejects_buenos_aires_low_quality_tail_yes(monkeypatch):
-    """BA live incident: q_lcb below center-YES quality floor is not a family optimum."""
+def test_select_roi_frontier_accepts_underpriced_buenos_aires_tail_yes(monkeypatch):
+    """BA shape is admitted when q_lcb clears executable cost and utility gates."""
     case = _case()
     space = _outcome_space(case)
     ba_tail_yes = _hand_decision(
@@ -969,13 +969,13 @@ def test_select_roi_frontier_rejects_buenos_aires_low_quality_tail_yes(monkeypat
     )
     selected, reason = engine._select([ba_tail_yes])
 
-    assert engine._payoff_q_lcb(ba_tail_yes) < fde_mod.roi_frontier_min_payoff_q_lcb(
+    assert engine._payoff_q_lcb(ba_tail_yes) >= fde_mod.roi_frontier_min_payoff_q_lcb(
         side="YES",
         cost=0.041,
     )
-    assert engine._roi_frontier_useful(ba_tail_yes) is False
-    assert selected is None
-    assert reason == "NO_ROI_FRONTIER_USEFUL_CANDIDATE"
+    assert engine._roi_frontier_useful(ba_tail_yes) is True
+    assert selected is ba_tail_yes
+    assert reason is None
 
 
 def test_select_roi_frontier_rejects_low_confidence_tail_over_strong_no(monkeypatch):
@@ -1014,8 +1014,8 @@ def test_select_roi_frontier_rejects_low_confidence_tail_over_strong_no(monkeypa
     assert selected is strong_no
 
 
-def test_select_roi_frontier_rejects_dust_candidates(monkeypatch):
-    """A tiny high-ratio but low-confidence candidate must not become a filler live order."""
+def test_select_roi_frontier_accepts_small_probability_when_absolute_profit_clears_floor(monkeypatch):
+    """Low absolute q is admissible; profit and utility floors still govern dust."""
     case = _case()
     space = _outcome_space(case)
     dust_route = _hand_route(space, side="YES", bin_id="b25", cost=0.005)
@@ -1035,13 +1035,15 @@ def test_select_roi_frontier_rejects_dust_candidates(monkeypatch):
     )
     selected, reason = engine._select([dust])
 
-    assert engine._payoff_q_lcb(dust) < fde_mod._ROI_FRONTIER_MIN_PAYOFF_Q_LCB
-    assert selected is None
-    assert reason == "NO_ROI_FRONTIER_USEFUL_CANDIDATE"
+    assert engine._payoff_q_lcb(dust) >= fde_mod._ROI_FRONTIER_MIN_PAYOFF_Q_LCB
+    assert engine._profit_lcb_usd(dust) >= fde_mod.roi_frontier_min_profit_lcb_usd()
+    assert engine._roi_frontier_useful(dust) is True
+    assert selected is dust
+    assert reason is None
 
 
-def test_select_roi_frontier_rejects_low_price_yes_tail_without_strong_safe_q(monkeypatch):
-    """Kuala Lumpur live shape: a 3-4c tail YES needs more than thin positive edge."""
+def test_select_roi_frontier_accepts_underpriced_kuala_lumpur_tail_yes(monkeypatch):
+    """KL shape is admitted by robust price-relative economics, not absolute q."""
     case = _case()
     space = _outcome_space(case)
     kl_tail = _hand_decision(
@@ -1061,12 +1063,13 @@ def test_select_roi_frontier_rejects_low_price_yes_tail_without_strong_safe_q(mo
     )
     selected, reason = engine._select([kl_tail])
 
-    assert engine._payoff_q_lcb(kl_tail) < fde_mod.roi_frontier_min_payoff_q_lcb(
+    assert engine._payoff_q_lcb(kl_tail) >= fde_mod.roi_frontier_min_payoff_q_lcb(
         side="YES",
         cost=0.04001526925923045,
     )
-    assert selected is None
-    assert reason == "NO_ROI_FRONTIER_USEFUL_CANDIDATE"
+    assert engine._roi_frontier_useful(kl_tail) is True
+    assert selected is kl_tail
+    assert reason is None
 
 
 def test_select_roi_frontier_uses_chosen_stake_cost_not_route_cost(monkeypatch):

@@ -1019,7 +1019,7 @@ def test_qkernel_selection_skips_candidate_that_cannot_clear_final_submit_floor(
     )
 
 
-def test_qkernel_selection_default_scopes_out_low_win_rate_tail_yes():
+def test_qkernel_selection_keeps_low_probability_tail_yes_in_symmetric_scope():
     low_tail_row = _snapshot_row(
         yes_asks=(("0.041", "1000000"),),
         condition_id="cond-low-tail",
@@ -1057,11 +1057,11 @@ def test_qkernel_selection_default_scopes_out_low_win_rate_tail_yes():
         decision_time=datetime(2026, 7, 1, tzinfo=timezone.utc),
     )
 
-    assert scoped == (high_confidence_proof,)
+    assert scoped == (low_tail_proof, high_confidence_proof)
 
 
-def test_qkernel_selection_rescores_legacy_win_rate_floor_rejection_for_yes():
-    """Qkernel production scoping must not let the old binary floor hide center YES."""
+def test_qkernel_selection_ignores_deprecated_absolute_win_rate_rejection():
+    """Qkernel production scoping must not let an old binary floor hide YES."""
 
     row = _snapshot_row(
         yes_asks=(("0.12", "1000000"),),
@@ -1085,13 +1085,10 @@ def test_qkernel_selection_rescores_legacy_win_rate_floor_rejection_for_yes():
         trade_score=0.0,
     )
 
-    assert (
-        era._selection_scoped_proofs(
-            proofs=(legacy_rejected,),
-            honor_admission_rejections=False,
-        )
-        == ()
-    )
+    assert era._selection_scoped_proofs(
+        proofs=(legacy_rejected,),
+        honor_admission_rejections=False,
+    ) == (legacy_rejected,)
     assert era._selection_scoped_proofs(
         proofs=(legacy_rejected,),
         honor_admission_rejections=False,
@@ -1099,7 +1096,7 @@ def test_qkernel_selection_rescores_legacy_win_rate_floor_rejection_for_yes():
     ) == (legacy_rejected,)
 
 
-def test_qkernel_selection_scopes_out_low_payoff_lcb_even_when_legacy_lcb_is_high():
+def test_qkernel_selection_rejects_served_belief_mismatch_not_low_absolute_q():
     row = _snapshot_row(
         yes_asks=(("0.041", "1000000"),),
         condition_id="cond-buenos-low-payoff",
@@ -1144,7 +1141,7 @@ def test_qkernel_selection_scopes_out_low_payoff_lcb_even_when_legacy_lcb_is_hig
     )
 
     assert proofs[0].missing_reason is not None
-    assert proofs[0].missing_reason.startswith("ADMISSION_QKERNEL_CENTER_YES_QUALITY_FLOOR:")
+    assert proofs[0].missing_reason == "QKERNEL_SERVED_BELIEF_INVALID"
     assert era._selection_scoped_proofs(
         proofs=proofs,
         strategy_policy_event_type="FORECAST_SNAPSHOT_READY",
@@ -1600,6 +1597,7 @@ def test_forecast_with_proven_family_exposure_ranks_management_scope():
             target_date TEXT,
             temperature_metric TEXT,
             condition_id TEXT,
+            direction TEXT,
             bin_label TEXT,
             token_id TEXT,
             no_token_id TEXT,
@@ -1612,10 +1610,10 @@ def test_forecast_with_proven_family_exposure_ranks_management_scope():
         """
         INSERT INTO position_current (
             position_id, phase, city, target_date, temperature_metric,
-            condition_id, bin_label, token_id, no_token_id, shares, cost_basis_usd
+            condition_id, direction, bin_label, token_id, no_token_id, shares, cost_basis_usd
         ) VALUES (
             'pos-held-family', 'active', 'paris', '2026-06-10', 'high',
-            'cond-A', '60-61F', 'yes-A', '', 7.0, 5.53
+            'cond-A', 'buy_yes', '60-61F', 'yes-A', '', 7.0, 5.53
         )
         """
     )

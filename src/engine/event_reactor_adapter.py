@@ -17217,6 +17217,7 @@ _REJECTION_CLASS_PREFIXES: tuple[tuple[str, str], ...] = (
         "near_day0_raw_extrema",
     ),
     ("ADMISSION_WIN_RATE_FLOOR", "win_rate_floor"),
+    ("ADMISSION_SELECTION_CALIBRATOR", "selection_calibrator"),
     ("ADMISSION_LCB_CONSISTENCY", "lcb_consistency"),
     ("STRATEGY_POLICY_GATED", "strategy_policy"),
     ("STRATEGY_POLICY_EXIT_ONLY", "strategy_policy"),
@@ -17281,7 +17282,8 @@ def _family_all_candidates_rejected_reason(book: OpportunityBook) -> str | None:
         # ``missing_reason`` (set at proof generation when capital-efficiency /
         # direction-law / buy-NO-evidence rejected it); a bookless loser carries a
         # native-ask marker. The class taxonomy reads that verdict verbatim.
-        class_name = _classify_rejection_missing_reason(ev.missing_reason)
+        effective_reason = ev.missing_reason or book.loser_reasons.get(ev.candidate_id)
+        class_name = _classify_rejection_missing_reason(effective_reason)
         class_counts[class_name] = class_counts.get(class_name, 0) + 1
         if ev.execution_price is not None:
             priced_rejected.append(ev)
@@ -17308,7 +17310,9 @@ def _family_all_candidates_rejected_reason(book: OpportunityBook) -> str | None:
         f"{name}={class_counts[name]}" for name in sorted(class_counts)
     )
     best_price = best.execution_price
-    best_reason = str(best.missing_reason or "").strip() or "UNKNOWN"
+    best_reason = str(
+        best.missing_reason or book.loser_reasons.get(best.candidate_id) or ""
+    ).strip() or "UNKNOWN"
     best_reason_class = _classify_rejection_missing_reason(best_reason)
     return (
         "EVENT_BOUND_ALL_CANDIDATES_REJECTED:"

@@ -359,14 +359,8 @@ def test_beijing_lie_real_path_selects_none_and_relabels_to_all_rejected():
     assert all("CAPITAL_EFFICIENCY" in (e["missing_reason"] or "") for e in projection)
 
 
-def test_low_win_rate_cheap_yes_relabels_to_win_rate_floor_not_unknown():
-    """A priced positive-EV lottery YES excluded by live selection must say why.
-
-    The live selector rejects q_lcb below the win-rate floor before ranking.  The
-    opportunity book must project the same reason; otherwise durable no-trade rows
-    show ``missing_reason=UNKNOWN`` for exactly the cheap YES shape operators need
-    to audit.
-    """
+def test_low_probability_cheap_yes_is_not_absolutely_rejected_and_reason_stays_typed():
+    """A cheap positive-EV YES remains selectable; any later veto must say why."""
 
     proof = _priced_yes_proof(
         "cond-low-yes",
@@ -375,7 +369,7 @@ def test_low_win_rate_cheap_yes_relabels_to_win_rate_floor_not_unknown():
         q_live=0.08,
         q_lcb=0.02,
     )
-    assert era._selection_scoped_proofs(proofs=(proof,)) == ()
+    assert era._selection_scoped_proofs(proofs=(proof,)) == (proof,)
 
     book = era._opportunity_book_from_proofs(
         event_id="evt-low-yes",
@@ -386,9 +380,9 @@ def test_low_win_rate_cheap_yes_relabels_to_win_rate_floor_not_unknown():
     reason = era._family_all_candidates_rejected_reason(book)
 
     assert reason is not None
-    assert "win_rate_floor=1" in reason
-    assert "reason_class=win_rate_floor" in reason
-    assert "missing_reason=ADMISSION_WIN_RATE_FLOOR:q_lcb=0.0200:min=0.5100" in reason
+    assert "selection_calibrator=1" in reason
+    assert "reason_class=selection_calibrator" in reason
+    assert "missing_reason=ADMISSION_SELECTION_CALIBRATOR:" in reason
     assert "missing_reason=UNKNOWN" not in reason
 
 
