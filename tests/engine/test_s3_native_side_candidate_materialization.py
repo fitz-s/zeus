@@ -1,5 +1,6 @@
-# Created: 2026-06-08
-# Last reused/audited: 2026-07-10
+# Lifecycle: created=2026-06-08; last_reviewed=2026-07-11; last_reused=2026-07-11
+# Purpose: Prove one native YES/NO candidate shape and its callback contracts.
+# Reuse: Re-audit identity, full-depth, and call-shape seams before auction changes.
 # Authority basis: "bin selection.md" §14.2 (NativeSideCandidate per bin per side) +
 #   §6 pseudocode (evaluate_family: a YES and a NO NativeSideCandidate per bin) +
 #   §4 (native YES/NO separation: belief / executable / portfolio spaces;
@@ -48,6 +49,8 @@ correctness).
 """
 from __future__ import annotations
 
+import ast
+import inspect
 import json
 import sqlite3
 from datetime import datetime, timezone
@@ -594,6 +597,25 @@ def test_global_candidate_rejects_scalar_curve_fallback_without_full_depth():
     assert legacy.no_trade_reason is None
     assert global_candidate.no_trade_reason is CandidateNoTradeReason.NATIVE_QUOTE_MISSING
     assert global_candidate.executable_cost_curve is None
+
+
+def test_full_depth_builder_calls_are_keyword_bound() -> None:
+    """Actuation binds family identity and proof to the keyword-only builder."""
+
+    tree = ast.parse(inspect.getsource(era))
+    calls = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "_full_depth_native_side_candidate_from_proof"
+    ]
+    assert calls
+    assert all(not call.args for call in calls)
+    assert all(
+        {keyword.arg for keyword in call.keywords} == {"family_key", "proof"}
+        for call in calls
+    )
 
 
 def test_no_runtime_flag_routes_materialization():

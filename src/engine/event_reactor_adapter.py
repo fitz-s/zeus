@@ -5583,7 +5583,10 @@ def _global_actuation_selected_proof(
             "GLOBAL_ACTUATION_PROOF_NO_LONGER_ELIGIBLE:"
             f"{proof.missing_reason or 'prefilter_failed'}"
         )
-    native = _full_depth_native_side_candidate_from_proof(proof)
+    native = _full_depth_native_side_candidate_from_proof(
+        family_key=candidate.family_key,
+        proof=proof,
+    )
     rebound = global_candidate_from_native(
         native,
         probability_witness=witness,
