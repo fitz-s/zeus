@@ -436,6 +436,94 @@ history section.
   bug, flagged). UNRECOVERABLE_MANUAL_REVIEW operator-only terminal added.
 - Verifier evidence: evidence/verifier/verify_quarantine_excision_t3_t7_2026-07-11.md.
 
+## Consult adjudication (2026-07-11, GPT-5.6 Pro deep review — answer at
+## /tmp/cgc/answer_REQ-20260711-140149-0f9584.txt; verdict adopted)
+
+Verdict: direction correct; RQ-2/RQ-3 NO-GO as previously drafted. Two defenses may
+not be removed before their accidental safety invariants are replaced:
+
+BLOCKER-1 (largest live-money hole): an unresolved/partially-persisted entry can
+carry ZERO effective Portfolio exposure while RiskGuard's unprojected-fill
+compensation misses it (venue fact never persisted). The global gate is overbroad
+but currently fail-safe against this undercount. LAW: every durable command that may
+have caused venue/chain exposure has exactly one of {authoritative settled
+economics | conservative bounded **EntryExposureObligation** | unbounded obligation
+→ DATA_DEGRADED}, created ATOMICALLY on the failure path (before return), not on a
+later load/reconcile. Final admission = ONE candidate-aware fold (evolution of
+`_discovery_gates_allow_entries`) that persists an **EntryRiskReservation** in the
+same transaction before network post; evaluator filtering stays a prefilter, never
+an enforcement authority.
+
+BLOCKER-2 (T5): three-DB table rebuilds are NOT crash-atomic under WAL (SQLite:
+attached-DB commit is atomic per file under WAL). T5 executes as an offline RED
+cutover: full writer-plane fence (all daemons/scripts, not just cycle_runner) →
+WAL checkpoint+truncate → synchronized 3-DB backup set → dedicated NON-WAL
+rollback-journal connection (never `_connect()`, it re-enables WAL) → ONE attached
+transaction (create targets → backfill+parity(counts+payload hashes) → chronicler
+provenance → rebuild carrying tables → cross-DB invariant validation → stamp
+identical schema_epoch ×3 → commit) → target binary refuses ANY mixed epoch at
+startup. Kill-point crash matrix (SIGKILL at every DDL/copy/validate/stamp/commit
+boundary) is the acceptance gate. Rollback = all three backups together or forward
+fix; never one file alone; never old binary after any target write.
+
+BLOCKER-3 (T4): "two mirror misses" ≠ confirmed absence without an observation
+contract. Chain observations feeding force-void carry a typed
+**ChainObservationEnvelope**: account/network scope, completeness (not
+paginated/truncated/rate-limited), freshness bound, post-command watermark,
+independence interval, finality, uncontradicted by venue trade/balance/open-order.
+Stale/incomplete observation = DATA_DEGRADED, never an absence vote; positive chain
+observation always overrides local absence evidence.
+
+Adopted target shape (supersedes scattered typed facts; refines critic I-1):
+**one ReviewWorkItem PROTOCOL, physically owner-local** — one schema/reason
+vocabulary/scheduler/operator contract instantiated in EACH fact's owning DB
+(same-DB transaction with its fact; read-only union = operator atlas). Typed domain
+facts (ChainOnlyFact, SettlementDispute/DISPUTED, CertificateRevocation, source
+block, ingestion rejection, EntryExposureObligation) remain the authorities; work
+items schedule re-observation/retry/operator resolution and are rebuildable from
+facts. Work item carries: subject identity, reason_code, authority_revision,
+evidence refs, family key, exposure bound | unbounded, attempt/next_attempt
+(indexed due-work scheduler: `status='OPEN' AND next_attempt_at<=now ORDER BY
+priority,next_attempt_at LIMIT N`), OPEN/RESOLVED/SUPERSEDED with CAS resolution on
+authority_revision, partial unique index on OPEN. Eligibility permanent; execution
+frequency and ACTIVE CARDINALITY bounded (per-cycle budgets segregate fresh fills /
+pending polls / old retries / settlement rediscovery / EDLI; active-work high-water
+→ DATA_DEGRADED). Family risk reducer dedups by canonical token/asset identity
+FIRST (Position + ChainOnlyFact for same token = ONE exposure), then maps to
+WeatherFamilyKey; unmappable → DATA_DEGRADED, never skipped. shares×$1 bound valid
+long-only-CTF only (documented assumption).
+
+Wave gating (adopted):
+- T3 GO (done, merged). T7 GO (done, merged). Census GO (done, committed).
+- T1 CONDITIONAL: + idempotent drain (verify aggregate hasn't already materialized
+  canonical records before re-drive), receipt categories {materialized,
+  already-materialized, settled-accounting, bounded-retry, unbounded/DATA_DEGRADED}.
+  Indexed scheduler optional at current row counts (~21), mandatory if table grows.
+- T2 GATED on: canonical asset dedup reducer + ChainOnlyFact exposure + family
+  mapping + unbounded handling + EntryRiskReservation + single final fold, ONE
+  packet. Acceptance test: command admitted → venue submit maybe-succeeded → fill
+  observation write FAILS pre-RiskGuard-fact → position pending → obligation enters
+  family+total risk → next candidate rejected/reduced → monitor/exit/reconcile
+  continue.
+- T2b CONDITIONAL GO, EXCLUSIVE owner of settlements/observations rebuild, HARD
+  predecessor of T5 (T5 only asserts the invariant already holds). + bounded
+  rediscovery (next_attempt_at), new-evidence wake, writer fence on rebuild.
+- T4 GATED on ReviewWorkItem machinery + BLOCKER-3 envelope + idempotency keys.
+- DIQ CONDITIONAL: shared `is_fact_revoked(owner_domain, table, row_id)` API;
+  migrate under RED: create → backfill → per-reason count + payload-hash parity →
+  switch readers → assert parity → drop old; executor + command_recovery move same
+  packet.
+- T5+T6 HARD GATED: all minters closed, T2b done, replacement operator command
+  live, current rows safely mapped (ambiguous rows ABORT, never forced void),
+  crash-matrix passed.
+- T8 zero-grep LAST: conformance check after semantic tests+migrations, never a
+  safety release criterion.
+
+Provenance note: consult reviewed the pinned public tree; docs/rebuild plan +
+ledgers + EXECUTION_MASTER were not pushed at that SHA and were supplied as
+premises in the prompt context; PR #431 is unrelated (riskguard freshness). Its
+code-level citations were independently spot-checked locally where load-bearing.
+
 ## Ordering and packet plan
 
 Wave RQ-1 (parallel, self-contained): T1, T3, T7, T8-census (classification ledger
