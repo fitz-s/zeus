@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 import hashlib
 import sqlite3
@@ -24,6 +24,37 @@ from src.solve.solver import CurrentFamilyProbabilityAuthority
 from src.state.collateral_ledger import COLLATERAL_SNAPSHOT_MAX_AGE_SECONDS
 
 UTC = timezone.utc
+
+
+@dataclass(frozen=True)
+class GlobalWinnerPreflight:
+    """Typed, venue-side-effect-free binding of one selected winner."""
+
+    status: str
+    binding_token: object | None = None
+    reason: str = ""
+
+    def __post_init__(self) -> None:
+        if self.status not in {"STABLE", "CURVE_SUPERSEDED", "BLOCKED"}:
+            raise ValueError("GLOBAL_WINNER_PREFLIGHT_STATUS_INVALID")
+        if (self.status == "STABLE") != (self.binding_token is not None):
+            raise ValueError("GLOBAL_WINNER_PREFLIGHT_TOKEN_INVALID")
+        if self.status != "STABLE" and not str(self.reason or "").strip():
+            raise ValueError("GLOBAL_WINNER_PREFLIGHT_REASON_MISSING")
+
+
+def _probability_manifest(probabilities: Mapping[str, object]) -> tuple[tuple[str, str], ...]:
+    """Freeze q plus token bindings while allowing only book and wealth to move."""
+
+    return tuple(
+        sorted(
+            (
+                str(family_key),
+                str(getattr(witness, "witness_identity", "") or ""),
+            )
+            for family_key, witness in probabilities.items()
+        )
+    )
 
 
 def _begin_selection_read_snapshot(
@@ -178,6 +209,14 @@ def process_current_global_batch(
     venue_submit_count: Callable[[], int],
     current_execution: Callable[[object, datetime], object | None],
     current_time_provider: Callable[[], datetime],
+    preflight_winner: Callable[
+        [OpportunityEvent, object, datetime], GlobalWinnerPreflight
+    ]
+    | None = None,
+    actuate_preflighted_winner: Callable[
+        [OpportunityEvent, object, datetime, object], EventSubmissionReceipt
+    ]
+    | None = None,
     portfolio_state_provider: Callable[[], object] | None = None,
     current_book_epoch_provider: Callable[
         [Mapping[str, object], datetime],
@@ -320,66 +359,75 @@ def process_current_global_batch(
                 )
                 for event_id, prepared in prepared_by_event.items()
             }
+        probability_manifest = _probability_manifest(probabilities)
         # Selection is a comparison over one immutable information vector.  Scope and
         # q are frozen at ``scope_at``; the complete native YES/NO book and wealth
         # witnesses join that vector below.  A later family update belongs to the next
         # epoch.  Only the selected winner is allowed to cross into the side-effect
         # path, where probability, exact book/curve, and free cash are rebuilt JIT.
-        selection_at = current_time()
-        state = portfolio_state_provider() if portfolio_state_provider else None
         wealth_age = timedelta(seconds=float(COLLATERAL_SNAPSHOT_MAX_AGE_SECONDS))
-        wealth = current_portfolio_wealth_witness(
-            trade_conn,
-            decision_at_utc=selection_at,
-            max_age=wealth_age,
-            portfolio_state=state,
-        )
-        venue_identity = (
-            book_epoch.witness_identity
-            if book_epoch is not None
-            else current_venue_auction_identity(
+
+        def select_once(
+            attempt_probabilities: Mapping[str, object],
+            attempt_book_epoch: CurrentGlobalBookEpoch | None,
+            attempt_prepared: Mapping[str, object],
+        ):
+            selection_at = current_time()
+            state = portfolio_state_provider() if portfolio_state_provider else None
+            wealth = current_portfolio_wealth_witness(
                 trade_conn,
-                probability_witnesses=probabilities,
+                decision_at_utc=selection_at,
+                max_age=wealth_age,
+                portfolio_state=state,
             )
-        )
-
-        def probability_resolver(family_key):
-            witness = probabilities.get(family_key)
-            return (
-                CurrentFamilyProbabilityAuthority.from_witness(witness)
-                if witness is not None
-                else None
-            )
-
-        def execution_resolver(candidate):
-            if book_epoch is not None:
-                return book_epoch.execution_authority(
-                    candidate,
-                    checked_at_utc=selection_at,
+            venue_identity = (
+                attempt_book_epoch.witness_identity
+                if attempt_book_epoch is not None
+                else current_venue_auction_identity(
+                    trade_conn,
+                    probability_witnesses=attempt_probabilities,
                 )
-            return current_execution(candidate, selection_at)
+            )
 
-        selected = select_prepared_global_auction(
-            prepared_by_event,
-            selection_epoch_identity=selection_epoch_identity,
-            selection_cut_at_utc=scope_at,
-            current_scope=scope,
-            current_scope_identity_resolver=lambda: scope.scope_identity,
-            venue_universe_identity=venue_identity,
-            current_venue_universe_identity_resolver=lambda: venue_identity,
-            universe_max_age=(
-                book_epoch.max_age
-                if book_epoch is not None
-                else FRESHNESS_WINDOW_DEFAULT
-            ),
-            current_probability_resolver=probability_resolver,
-            current_execution_resolver=execution_resolver,
-            current_wealth_identity_resolver=lambda: wealth.economic_identity,
-            wealth_witness=wealth,
-            capital_limit_usd=wealth.spendable_cash_usd,
-            decision_at_utc=selection_at,
-            book_epoch=book_epoch,
-        )
+            def probability_resolver(family_key):
+                witness = attempt_probabilities.get(family_key)
+                return (
+                    CurrentFamilyProbabilityAuthority.from_witness(witness)
+                    if witness is not None
+                    else None
+                )
+
+            def execution_resolver(candidate):
+                if attempt_book_epoch is not None:
+                    return attempt_book_epoch.execution_authority(
+                        candidate,
+                        checked_at_utc=selection_at,
+                    )
+                return current_execution(candidate, selection_at)
+
+            return select_prepared_global_auction(
+                attempt_prepared,
+                selection_epoch_identity=selection_epoch_identity,
+                selection_cut_at_utc=scope_at,
+                current_scope=scope,
+                current_scope_identity_resolver=lambda: scope.scope_identity,
+                venue_universe_identity=venue_identity,
+                current_venue_universe_identity_resolver=lambda: venue_identity,
+                universe_max_age=(
+                    attempt_book_epoch.max_age
+                    if attempt_book_epoch is not None
+                    else FRESHNESS_WINDOW_DEFAULT
+                ),
+                current_probability_resolver=probability_resolver,
+                current_execution_resolver=execution_resolver,
+                current_wealth_identity_resolver=lambda: wealth.economic_identity,
+                wealth_witness=wealth,
+                capital_limit_usd=wealth.spendable_cash_usd,
+                decision_at_utc=selection_at,
+                book_epoch=attempt_book_epoch,
+            )
+
+        selected = select_once(probabilities, book_epoch, prepared_by_event)
         if selected.decision.candidate is None:
             return reject(
                 "GLOBAL_AUCTION_NO_TRADE:"
@@ -413,9 +461,100 @@ def process_current_global_batch(
                 ),
             )
 
+        binding_token = None
+        if preflight_winner is not None:
+            if actuate_preflighted_winner is None:
+                return reject("GLOBAL_PREFLIGHT_ACTUATOR_MISSING")
+            before_preflight = venue_submit_count()
+            preflight = preflight_winner(
+                winner,
+                selected.actuation,
+                current_time(),
+            )
+            if venue_submit_count() != before_preflight:
+                return reject("GLOBAL_PREFLIGHT_VENUE_SIDE_EFFECT")
+            if preflight.status == "CURVE_SUPERSEDED":
+                if current_book_epoch_provider is None:
+                    return reject("GLOBAL_REAUCTION_BOOK_PROVIDER_MISSING")
+                probabilities_1, book_epoch_1 = current_book_epoch_provider(
+                    probabilities,
+                    current_time(),
+                )
+                if _probability_manifest(probabilities_1) != probability_manifest:
+                    return reject("GLOBAL_REAUCTION_PROBABILITY_CUT_DRIFT")
+                prepared_1 = {
+                    event_id: replace(
+                        prepared,
+                        probability_witness=probabilities_1[
+                            prepared.probability_witness.family_key
+                        ],
+                    )
+                    for event_id, prepared in prepared_by_event.items()
+                }
+                selected = select_once(probabilities_1, book_epoch_1, prepared_1)
+                if selected.decision.candidate is None:
+                    return reject(
+                        "GLOBAL_REAUCTION_NO_TRADE:"
+                        f"{selected.decision.no_trade_reason or 'unknown'}"
+                    )
+                winner_id = selected.winner_event_id
+                winner = next(
+                    (event for event in event_tuple if event.event_id == winner_id),
+                    None,
+                )
+                if selected.actuation is None:
+                    return reject("GLOBAL_REAUCTION_ACTUATION_MISSING")
+                if winner is None:
+                    target = next(
+                        (
+                            event
+                            for event in full_scope_event_by_family.values()
+                            if event.event_id == winner_id
+                        ),
+                        None,
+                    )
+                    if target is None:
+                        return reject("GLOBAL_REAUCTION_WINNER_IDENTITY_MISSING")
+                    return reject(
+                        "GLOBAL_REAUCTION_WINNER_AWAITS_CLAIM",
+                        next_claim_event=_next_claim_carrier(
+                            target,
+                            targeted_at=current_time(),
+                            economic_identity=selected.actuation.economic_identity,
+                            payload=payload_reader(target),
+                        ),
+                    )
+                before_second_preflight = venue_submit_count()
+                preflight = preflight_winner(
+                    winner,
+                    selected.actuation,
+                    current_time(),
+                )
+                if venue_submit_count() != before_second_preflight:
+                    return reject("GLOBAL_PREFLIGHT_VENUE_SIDE_EFFECT")
+                if preflight.status != "STABLE":
+                    return reject(
+                        "GLOBAL_REAUCTION_EXHAUSTED:"
+                        f"{preflight.reason or preflight.status}"
+                    )
+            elif preflight.status != "STABLE":
+                return reject(
+                    f"GLOBAL_WINNER_PREFLIGHT_BLOCKED:{preflight.reason}"
+                )
+            binding_token = preflight.binding_token
+
         before_calls = venue_submit_count()
         release_selection_snapshot()
-        winner_receipt = actuate_winner(winner, selected.actuation, current_time())
+        winner_receipt = (
+            actuate_preflighted_winner(
+                winner,
+                selected.actuation,
+                current_time(),
+                binding_token,
+            )
+            if preflight_winner is not None
+            else actuate_winner(winner, selected.actuation, current_time())
+        )
         receipts = {
             event.event_id: (
                 winner_receipt

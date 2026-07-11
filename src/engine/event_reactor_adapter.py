@@ -3887,6 +3887,8 @@ def event_bound_live_adapter_from_trade_conn(
         decision_time: datetime,
         *,
         global_actuation: "Any | None" = None,
+        preflight_only: bool = False,
+        preflight_receipt: EventSubmissionReceipt | None = None,
     ) -> EventSubmissionReceipt:
         # FINAL ADAPTER BOUNDARY SCOPE GATE. Production supports one scope:
         # forecast_plus_day0. Both forecast and Day0 events continue into the
@@ -3968,25 +3970,45 @@ def event_bound_live_adapter_from_trade_conn(
                     reason=f"live_health_entry_authority:{live_health_block_reason}",
                     proof_accepted=False,
                 )
-        no_submit_receipt = build_event_bound_no_submit_receipt(
-            event,
-            trade_conn=trade_conn,
-            decision_time=decision_time,
-            forecast_conn=forecast_conn,
-            topology_conn=topology_conn,
-            calibration_conn=calibration_conn,
-            get_current_level=get_current_level,
-            bankroll_usd_provider=bankroll_usd_provider,
-            free_cash_usd_provider=free_cash_usd_provider,
-            portfolio_state_provider=portfolio_state_provider,
-            portfolio_reservation=portfolio_reservation,
-            locked_opportunity_conn=live_cap_conn or trade_conn,
-            replacement_forecast_hook=resolved_replacement_forecast_hook,
-            replacement_forecast_promotion_evidence=replacement_forecast_promotion_evidence,
-            replacement_forecast_capital_objective_evidence=replacement_forecast_capital_objective_evidence,
-            family_snapshot_refresher=family_snapshot_refresher,
-            global_actuation=global_actuation,
-        )
+        if preflight_receipt is not None:
+            receipt_actuation = preflight_receipt.global_actuation
+            if (
+                global_actuation is None
+                or receipt_actuation is None
+                or preflight_receipt.event_id != event.event_id
+                or getattr(receipt_actuation, "actuation_identity", None)
+                != getattr(global_actuation, "actuation_identity", None)
+            ):
+                return EventSubmissionReceipt(
+                    False,
+                    event.event_id,
+                    event.causal_snapshot_id,
+                    reason="GLOBAL_PREFLIGHT_BINDING_TOKEN_INVALID",
+                    proof_accepted=False,
+                )
+            no_submit_receipt = preflight_receipt
+        else:
+            no_submit_receipt = build_event_bound_no_submit_receipt(
+                event,
+                trade_conn=trade_conn,
+                decision_time=decision_time,
+                forecast_conn=forecast_conn,
+                topology_conn=topology_conn,
+                calibration_conn=calibration_conn,
+                get_current_level=get_current_level,
+                bankroll_usd_provider=bankroll_usd_provider,
+                free_cash_usd_provider=free_cash_usd_provider,
+                portfolio_state_provider=portfolio_state_provider,
+                portfolio_reservation=portfolio_reservation,
+                locked_opportunity_conn=live_cap_conn or trade_conn,
+                replacement_forecast_hook=resolved_replacement_forecast_hook,
+                replacement_forecast_promotion_evidence=replacement_forecast_promotion_evidence,
+                replacement_forecast_capital_objective_evidence=replacement_forecast_capital_objective_evidence,
+                family_snapshot_refresher=family_snapshot_refresher,
+                global_actuation=global_actuation,
+            )
+        if preflight_only:
+            return no_submit_receipt
         # D2 SHIFT-BIN CLOSE-BEFORE-OPEN — old-leg exit submission (2026-06-22 consult
         # §"Shift-bin sequencing" step 3). A SHIFT_BIN EXIT_OLD_LEG receipt is a TYPED
         # no-submit for the NEW bin (proof_accepted=False) that carries the lease + the
@@ -4534,7 +4556,10 @@ def event_bound_live_adapter_from_trade_conn(
         )
 
     def _process_global_batch(events, decision_time):
-        from src.engine.global_batch_runtime import process_current_global_batch
+        from src.engine.global_batch_runtime import (
+            GlobalWinnerPreflight,
+            process_current_global_batch,
+        )
 
         if forecast_conn is None or topology_conn is None or calibration_conn is None:
             from src.events.reactor import GlobalBatchSubmitResult
@@ -4560,6 +4585,67 @@ def event_bound_live_adapter_from_trade_conn(
         def _actuate(event, actuation, at):
             return _stamp_live_adapter_lane(
                 _submit_inner(event, at, global_actuation=actuation),
+                real_order_submit_enabled=real_order_submit_enabled,
+            )
+
+        def _preflight(event, actuation, at):
+            receipt = _submit_inner(
+                event,
+                at,
+                global_actuation=actuation,
+                preflight_only=True,
+            )
+            reason = str(receipt.reason or "")
+            if (
+                receipt.proof_accepted is True
+                and receipt.decision_proof_bundle is not None
+            ):
+                return GlobalWinnerPreflight(
+                    status="STABLE",
+                    binding_token=(
+                        event.event_id,
+                        str(getattr(actuation, "actuation_identity", "") or ""),
+                        receipt,
+                    ),
+                )
+            if reason.startswith(
+                "GLOBAL_ACTUATION_EXECUTION_BINDING_SUPERSEDED:curve_economics:"
+            ):
+                return GlobalWinnerPreflight(
+                    status="CURVE_SUPERSEDED",
+                    reason=reason,
+                )
+            return GlobalWinnerPreflight(
+                status="BLOCKED",
+                reason=reason or "GLOBAL_WINNER_PREFLIGHT_REJECTED",
+            )
+
+        def _actuate_preflighted(event, actuation, at, token):
+            if (
+                not isinstance(token, tuple)
+                or len(token) != 3
+                or token[0] != event.event_id
+                or token[1]
+                != str(getattr(actuation, "actuation_identity", "") or "")
+                or not isinstance(token[2], EventSubmissionReceipt)
+            ):
+                return _stamp_live_adapter_lane(
+                    EventSubmissionReceipt(
+                        False,
+                        event.event_id,
+                        event.causal_snapshot_id,
+                        reason="GLOBAL_PREFLIGHT_BINDING_TOKEN_INVALID",
+                        proof_accepted=False,
+                    ),
+                    real_order_submit_enabled=real_order_submit_enabled,
+                )
+            return _stamp_live_adapter_lane(
+                _submit_inner(
+                    event,
+                    at,
+                    global_actuation=actuation,
+                    preflight_receipt=token[2],
+                ),
                 real_order_submit_enabled=real_order_submit_enabled,
             )
 
@@ -4649,6 +4735,8 @@ def event_bound_live_adapter_from_trade_conn(
                     selection_conn=forecast_conn,
                 ),
                 actuate_winner=_actuate,
+                preflight_winner=_preflight,
+                actuate_preflighted_winner=_actuate_preflighted,
                 stamp_receipt=lambda receipt: _stamp_live_adapter_lane(
                     receipt,
                     real_order_submit_enabled=real_order_submit_enabled,
