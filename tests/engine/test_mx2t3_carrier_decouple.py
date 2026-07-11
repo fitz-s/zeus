@@ -21,7 +21,6 @@ import pytest
 
 import src.engine.event_reactor_adapter as adapter
 import src.engine.replacement_forecast_hook_factory as hook_factory
-import src.engine.replacement_forecast_hook_factory as hook_factory
 import src.events.triggers.forecast_snapshot_ready as fsr
 from src.decision_kernel.compiler import (
     _validate_forecast_authority_payload as compiler_validate_forecast,
