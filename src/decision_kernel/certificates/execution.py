@@ -372,7 +372,13 @@ def _declared_max_slippage_bps(
         return 0.0
     if adverse <= 0:
         return 0.0
-    return float(adverse / expected * Decimal("10000"))
+    exact = adverse / expected * Decimal("10000")
+    # The validator reconstructs the exact Decimal ratio from the intent while
+    # this certificate field crosses a JSON float boundary.  Emit the adjacent
+    # representable upper bound so a downward float rounding cannot make the
+    # budget smaller than the value it certifies.  This adds one ULP only; any
+    # real adverse slippage above the derived boundary remains rejected.
+    return math.nextafter(float(exact), math.inf)
 
 
 def build_executor_expressibility_certificate(

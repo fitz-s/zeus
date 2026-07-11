@@ -27,6 +27,7 @@ from decimal import Decimal
 import pytest
 
 from src.decision_kernel.certificates.execution import (
+    _declared_max_slippage_bps,
     build_executor_expressibility_certificate,
     build_final_intent_certificate_from_actionable,
 )
@@ -40,6 +41,7 @@ from src.engine.event_bound_final_intent import (
     validate_final_intent_cert_for_existing_executor,
 )
 from src.contracts.execution_intent import (
+    _adverse_slippage_bps,
     quantize_submit_shares_for_venue_at_most,
     venue_submit_amount_precision_error,
 )
@@ -54,6 +56,29 @@ from src.decision_kernel import claims
 
 
 _UNSET = object()
+
+
+def test_declared_taker_slippage_is_a_decimal_upper_bound_after_float_round_trip():
+    expected = 0.3808146118721461
+    limit = 0.5778658536585366
+
+    declared = Decimal(
+        str(
+            _declared_max_slippage_bps(
+                direction="buy_yes",
+                order_mode="TAKER",
+                limit_price=limit,
+                expected_fill_price=expected,
+            )
+        )
+    )
+    exact = _adverse_slippage_bps(
+        direction="buy_yes",
+        reference_price=Decimal(str(expected)),
+        final_limit_price=Decimal(str(limit)),
+    )
+
+    assert declared >= exact
 
 
 def _taker_chain(*, order_mode: str = "TAKER", actionable_overrides: dict | None = None,
