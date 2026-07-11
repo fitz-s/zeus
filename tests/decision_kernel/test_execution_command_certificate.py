@@ -28,6 +28,7 @@ from src.decision_kernel.certificates.execution import (
 )
 from src.engine.event_bound_final_intent import (
     _final_execution_intent_from_payload,
+    conservative_submit_expected_edge,
     validate_final_intent_cert_for_existing_executor,
 )
 
@@ -261,6 +262,38 @@ def test_event_bound_final_intent_normalizes_legacy_fractional_maker_size():
     assert native.size_value == native.submitted_shares
     assert native.submitted_shares == Decimal("5.06")
     assert native.actionable_certificate_hash == final_intent.payload["actionable_certificate_hash"]
+
+
+def test_final_intent_uses_submit_bound_not_curve_expected_cost_edge():
+    _actionable, final_intent, _expressibility, _live_cap = builder_chain()
+    payload = {
+        **final_intent.payload,
+        "q_lcb_5pct": 0.7271700502061007,
+        "trade_score": 0.11478477120202057,
+        "limit_price": 0.68,
+        "expected_fill_price_before_fee": 0.5856334913112164,
+        "executor_order_type": "FOK",
+        "time_in_force": "FOK",
+        "post_only": False,
+        "maker_intent": False,
+        "taker_quality_proof": {"passed": True},
+        "max_slippage_bps": "2000",
+        "qkernel_execution_economics": {
+            **final_intent.payload["qkernel_execution_economics"],
+            "edge_lcb": 0.11478477120202057,
+            "global_actuation_identity": "global-live-order",
+            "global_max_spend_usd": "107.61",
+            "global_target_shares": "158.25",
+        },
+    }
+
+    expected = 0.7271700502061007 - 0.68
+
+    assert conservative_submit_expected_edge(payload, limit_price=0.68) == pytest.approx(
+        expected
+    )
+    native = _final_execution_intent_from_payload(payload)
+    assert native.expected_edge == pytest.approx(expected)
 
 
 def test_day0_final_intent_preserves_observation_authority_fields():

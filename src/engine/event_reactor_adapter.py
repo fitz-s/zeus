@@ -210,6 +210,7 @@ from src.decision_kernel.verifier import (
     DAY0_REMAINING_WINDOW_CALIBRATION_AUTHORITY,
 )
 from src.engine.event_bound_final_intent import (
+    conservative_submit_expected_edge,
     EventBoundExecutorSubmitResult,
     EventBoundFinalIntent,
     build_event_bound_final_intent_receipt,
@@ -12172,23 +12173,7 @@ def _pre_submit_expected_edge(
     still fail closed instead of being repaired here.
     """
 
-    raw_score = payload.get("trade_score")
-    score = _optional_float(raw_score)
-    q_lcb = _optional_float(payload.get("q_lcb_5pct"))
-    if score is None or q_lcb is None:
-        return raw_score
-    bounds = [score, q_lcb - float(limit_price)]
-    economics = payload.get("qkernel_execution_economics")
-    if isinstance(economics, Mapping):
-        qkernel_edge = _optional_float(economics.get("edge_lcb"))
-        if qkernel_edge is not None:
-            bounds.append(qkernel_edge)
-        if str(economics.get("global_actuation_identity") or "").strip():
-            max_spend = _optional_float(economics.get("global_max_spend_usd"))
-            shares = _optional_float(economics.get("global_target_shares"))
-            if max_spend is not None and shares is not None and shares > 0.0:
-                bounds.append(q_lcb - (max_spend / shares))
-    return min(bounds)
+    return conservative_submit_expected_edge(payload, limit_price=limit_price)
 
 
 def _require_pre_submit_authority_witness(

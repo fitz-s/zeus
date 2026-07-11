@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 import sqlite3
-from typing import Literal
+from typing import Literal, Mapping
 
 from src.contracts.execution_price import ExecutionPrice
 from src.decision_kernel.canonicalization import stable_hash
@@ -102,6 +102,40 @@ class PreVenueSubmitError(ValueError):
     =True), leaving an unresolved-submit + held-cap that crash-loops boot at the
     edli_live readiness gate.
     """
+
+
+def conservative_submit_expected_edge(
+    payload: Mapping[str, object],
+    *,
+    limit_price: Decimal | float,
+) -> object:
+    """Return the strongest edge lower bound shared by selection and submit."""
+
+    def finite_decimal(value: object) -> Decimal | None:
+        try:
+            parsed = Decimal(str(value))
+        except (ArithmeticError, TypeError, ValueError):
+            return None
+        return parsed if parsed.is_finite() else None
+
+    raw_score = payload.get("trade_score")
+    score = finite_decimal(raw_score)
+    q_lcb = finite_decimal(payload.get("q_lcb_5pct"))
+    limit = finite_decimal(limit_price)
+    if score is None or q_lcb is None or limit is None:
+        return raw_score
+    bounds = [score, q_lcb - limit]
+    economics = payload.get("qkernel_execution_economics")
+    if isinstance(economics, Mapping):
+        qkernel_edge = finite_decimal(economics.get("edge_lcb"))
+        if qkernel_edge is not None:
+            bounds.append(qkernel_edge)
+        if str(economics.get("global_actuation_identity") or "").strip():
+            max_spend = finite_decimal(economics.get("global_max_spend_usd"))
+            shares = finite_decimal(economics.get("global_target_shares"))
+            if max_spend is not None and shares is not None and shares > 0:
+                bounds.append(q_lcb - (max_spend / shares))
+    return float(min(bounds))
 
 
 def submit_event_bound_final_intent_via_existing_executor(
@@ -327,7 +361,10 @@ def _final_execution_intent_from_payload(final_payload: dict):
         ),
         q_live=final_payload.get("q_live"),
         q_lcb_5pct=final_payload.get("q_lcb_5pct"),
-        expected_edge=final_payload.get("trade_score"),
+        expected_edge=conservative_submit_expected_edge(
+            final_payload,
+            limit_price=limit_price,
+        ),
         min_entry_price=final_payload.get("min_entry_price"),
         min_expected_profit_usd=final_payload.get("min_expected_profit_usd"),
         min_submit_edge_density=final_payload.get("min_submit_edge_density"),
