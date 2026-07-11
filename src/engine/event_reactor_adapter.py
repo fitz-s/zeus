@@ -21430,19 +21430,9 @@ def _prepare_current_global_probability_family(
         if lag_reason is not None:
             raise ValueError(f"GLOBAL_DAY0_OBSERVATION_LAG:{lag_reason}")
 
-    identity_row = forecast_conn.execute(
-        """
-        SELECT posterior_identity_hash, dependency_hash, posterior_config_hash
-          FROM forecast_posteriors
-         WHERE posterior_id = ?
-        """,
-        (bundle.posterior_id,),
-    ).fetchone()
-    if identity_row is None:
-        raise ValueError("GLOBAL_CURRENT_POSTERIOR_IDENTITY_MISSING")
-    posterior_identity_hash = str(identity_row[0] or "").strip()
-    dependency_hash = str(identity_row[1] or "").strip()
-    posterior_config_hash = str(identity_row[2] or "").strip()
+    posterior_identity_hash = str(bundle.posterior_identity_hash or "").strip()
+    dependency_hash = str(bundle.dependency_hash or "").strip()
+    posterior_config_hash = str(bundle.posterior_config_hash or "").strip()
     if not all((posterior_identity_hash, dependency_hash, posterior_config_hash)):
         raise ValueError("GLOBAL_CURRENT_POSTERIOR_IDENTITY_INCOMPLETE")
 

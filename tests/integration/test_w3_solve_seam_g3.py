@@ -653,7 +653,8 @@ def test_current_global_probability_prepare_does_not_require_price_snapshot(monk
         """
     )
     forecast.execute(
-        "INSERT INTO forecast_posteriors VALUES (1, 'posterior-1', 'dependency-1', 'config-1')"
+        "INSERT INTO forecast_posteriors VALUES "
+        "(1, 'db-posterior', 'db-dependency', 'db-config')"
     )
     forecast.execute(
         """
@@ -686,6 +687,9 @@ def test_current_global_probability_prepare_does_not_require_price_snapshot(monk
     probabilities = (0.2, 0.3, 0.5)
     bundle = SimpleNamespace(
         posterior_id=1,
+        posterior_identity_hash="posterior-1",
+        dependency_hash="dependency-1",
+        posterior_config_hash="config-1",
         q={key: probability for (key, _lo, _hi), probability in zip(posterior_bins, probabilities)},
         provenance_json={
             "q_bootstrap_samples_basis": "global_simplex_v1",
@@ -716,6 +720,8 @@ def test_current_global_probability_prepare_does_not_require_price_snapshot(monk
         ),
     )
 
+    traced: list[str] = []
+    forecast.set_trace_callback(traced.append)
     prepared = era._prepare_current_global_probability_family(
         _global_scope_event(city="Dallas", source_run_id="run-dallas"),
         forecast_conn=forecast,
@@ -723,6 +729,7 @@ def test_current_global_probability_prepare_does_not_require_price_snapshot(monk
         decision_time=_dt.datetime(2026, 7, 10, 8, 10, tzinfo=_dt.timezone.utc),
         max_age=_dt.timedelta(seconds=30),
     )
+    forecast.set_trace_callback(None)
 
     witness = prepared.probability_witness
     assert prepared.candidate_seeds == ()
@@ -732,6 +739,12 @@ def test_current_global_probability_prepare_does_not_require_price_snapshot(monk
     assert all(binding.no_token_id is None for binding in witness.bindings)
     assert witness.yes_q_samples[0].tolist() == pytest.approx(list(probabilities))
     assert (1.0 - witness.yes_q_samples[:, 1]).tolist() == pytest.approx([0.7] * 400)
+    assert witness.posterior_identity_hash == "posterior-1"
+    assert not any(
+        "SELECT POSTERIOR_IDENTITY_HASH, DEPENDENCY_HASH, POSTERIOR_CONFIG_HASH"
+        in statement.upper()
+        for statement in traced
+    )
 
 
 def test_live_adapter_routes_global_scope_through_world_connection(monkeypatch):
@@ -3260,6 +3273,38 @@ def test_global_selection_read_snapshot_holds_one_readiness_cut(tmp_path):
     selection.rollback()
     selection.close()
     writer.close()
+
+
+def test_global_selection_schema_reads_are_cached_only_inside_owned_snapshot():
+    import src.data.market_topology_rows as topology_rows
+
+    conn = sqlite3.connect(":memory:")
+    conn.execute("CREATE TABLE sample (value TEXT NOT NULL)")
+    traced: list[str] = []
+    conn.set_trace_callback(traced.append)
+    release_snapshot = global_batch_runtime._begin_selection_read_snapshot((conn,))
+    release_schema = topology_rows.prime_frozen_schema_reads((conn,))
+    try:
+        for _ in range(2):
+            assert "main" in topology_rows._database_names(conn)
+            assert topology_rows._table_ref_exists(conn, "sample") is True
+            assert topology_rows._table_ref_columns(conn, "sample") == {"value"}
+    finally:
+        release_schema()
+        release_snapshot()
+
+    assert "main" in topology_rows._database_names(conn)
+    assert topology_rows._table_ref_exists(conn, "sample") is True
+    assert topology_rows._table_ref_columns(conn, "sample") == {"value"}
+    conn.set_trace_callback(None)
+
+    normalized = [" ".join(statement.upper().split()) for statement in traced]
+    assert sum(statement == "PRAGMA DATABASE_LIST" for statement in normalized) == 2
+    assert sum(
+        "FROM SQLITE_MASTER" in statement and "NAME = 'SAMPLE'" in statement
+        for statement in normalized
+    ) == 2
+    assert sum(statement == "PRAGMA TABLE_INFO(SAMPLE)" for statement in normalized) == 2
 
 
 # --- (d) OFF-path import-isolation (subprocess) -----------------------------

@@ -12,6 +12,7 @@ import time
 from typing import Callable, Mapping, Sequence
 
 from src.contracts.executable_market_snapshot import FRESHNESS_WINDOW_DEFAULT
+from src.data.market_topology_rows import prime_frozen_schema_reads
 from src.engine.global_auction_universe import (
     CurrentGlobalBookAsset,
     CurrentGlobalBookEpoch,
@@ -527,6 +528,21 @@ def process_current_global_batch(
         release_selection_snapshot = _begin_selection_read_snapshot(
             selection_snapshot_connections
         )
+        release_schema = prime_frozen_schema_reads(selection_snapshot_connections)
+        release_snapshot_only = release_selection_snapshot
+        released_schema = False
+
+        def release_schema_snapshot() -> None:
+            nonlocal released_schema
+            if released_schema:
+                return
+            released_schema = True
+            try:
+                release_schema()
+            finally:
+                release_snapshot_only()
+
+        release_selection_snapshot = release_schema_snapshot
         log_stage("selection_snapshot")
         scope_at = current_time()
         full_scope = scan_current_global_auction_scope(

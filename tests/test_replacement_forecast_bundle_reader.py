@@ -219,12 +219,38 @@ def test_replacement_bundle_reader_returns_posterior_when_b0_and_readiness_match
     assert result.bundle.q == pytest.approx({"cold": 0.2, "warm": 0.8})
     assert result.bundle.q_lcb == pytest.approx({"cold": 0.1, "warm": 0.7})
     assert result.bundle.runtime_layer == LIVE_RUNTIME_LAYER
+    assert result.bundle.posterior_identity_hash == (
+        f"identity-{_dt(3, 5).isoformat()}-{_dt(3).isoformat()}"
+    )
+    assert result.bundle.dependency_hash == "dependency-hash"
+    assert result.bundle.posterior_config_hash == "config-hash"
 
 
 def test_replacement_bundle_reader_binds_to_readiness_posterior_not_latest_scope_row() -> None:
     conn = _conn()
     certified_posterior_id = _insert_posterior(conn, computed_at=_dt(3, 5))
     newer_posterior_id = _insert_posterior(conn, computed_at=_dt(3, 20))
+    conn.execute(
+        """
+        UPDATE forecast_posteriors
+           SET posterior_identity_hash = ?, dependency_hash = ?, posterior_config_hash = ?
+         WHERE posterior_id = ?
+        """,
+        (
+            "certified-identity",
+            "certified-dependency",
+            "certified-config",
+            certified_posterior_id,
+        ),
+    )
+    conn.execute(
+        """
+        UPDATE forecast_posteriors
+           SET posterior_identity_hash = ?, dependency_hash = ?, posterior_config_hash = ?
+         WHERE posterior_id = ?
+        """,
+        ("latest-identity", "latest-dependency", "latest-config", newer_posterior_id),
+    )
 
     result = read_replacement_forecast_bundle(
         conn,
@@ -242,6 +268,9 @@ def test_replacement_bundle_reader_binds_to_readiness_posterior_not_latest_scope
     assert result.bundle is not None
     assert result.bundle.posterior_id == certified_posterior_id
     assert result.bundle.posterior_id != newer_posterior_id
+    assert result.bundle.posterior_identity_hash == "certified-identity"
+    assert result.bundle.dependency_hash == "certified-dependency"
+    assert result.bundle.posterior_config_hash == "certified-config"
 
 
 def test_replacement_bundle_reader_blocks_unready_readiness_or_mismatched_ids() -> None:
@@ -508,3 +537,10 @@ def test_raw_hwm_reuses_bound_posterior_provenance(monkeypatch) -> None:
     ]
     assert duplicate_provenance_reads == []
     assert provenance_parses == 1
+    posterior_reads = [
+        statement
+        for statement in traced
+        if statement.lstrip().upper().startswith("SELECT")
+        and "FROM FORECAST_POSTERIORS" in statement.upper()
+    ]
+    assert len(posterior_reads) == 1

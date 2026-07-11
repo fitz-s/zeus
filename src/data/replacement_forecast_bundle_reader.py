@@ -26,6 +26,7 @@ from src.data.replacement_forecast_readiness import (
     ReplacementForecastReadinessDecision,
 )
 from src.data.replacement_input_hwm import replacement_live_input_lag_reason
+from src.data.market_topology_rows import _table_columns
 
 
 _FORBIDDEN_TRANSCRIPT_ALIAS = "h" + "3"
@@ -79,6 +80,9 @@ class ReplacementForecastPosteriorBundle:
     dependency_json: Mapping[str, Any]
     provenance_json: Mapping[str, Any]
     runtime_layer: str
+    posterior_identity_hash: str
+    dependency_hash: str
+    posterior_config_hash: str
 
     def __post_init__(self) -> None:
         for field_name, value in (("source_id", self.source_id), ("product_id", self.product_id), ("data_version", self.data_version)):
@@ -97,6 +101,15 @@ class ReplacementForecastPosteriorBundle:
                 raise ValueError("q_ucb keys must exactly match q keys")
         if not self.bin_topology_hash.strip():
             raise ValueError("bin_topology_hash is required")
+        if not all(
+            value.strip()
+            for value in (
+                self.posterior_identity_hash,
+                self.dependency_hash,
+                self.posterior_config_hash,
+            )
+        ):
+            raise ValueError("replacement posterior bundle identity is incomplete")
 
 
 @dataclass(frozen=True)
@@ -211,10 +224,6 @@ def _parse_utc(value: str, *, field_name: str) -> datetime:
     if parsed.tzinfo is None or parsed.utcoffset() is None:
         raise ValueError(f"{field_name} must be timezone-aware")
     return parsed.astimezone(timezone.utc)
-
-
-def _table_columns(conn: sqlite3.Connection, table_name: str) -> set[str]:
-    return {str(row[1]) for row in conn.execute(f"PRAGMA table_info({table_name})").fetchall()}
 
 
 def _live_grade_provenance(
@@ -566,34 +575,39 @@ def read_replacement_forecast_bundle(
     if latest_row is None:
         return ReplacementForecastBundleReadResult("BLOCKED", "REPLACEMENT_POSTERIOR_MISSING")
     latest_row_map = dict(latest_row)
-    certified_row = conn.execute(
-        """
-        SELECT * FROM forecast_posteriors
-        WHERE posterior_id = ?
-          AND city = ?
-          AND target_date = ?
-          AND temperature_metric = ?
-          AND source_id = ?
-          AND product_id = ?
-          AND data_version = ?
-          AND training_allowed = 0
-          AND runtime_layer = ?
-        LIMIT 1
-        """,
-        (
-            readiness_bound_posterior_id,
-            city,
-            target_date_text,
-            metric,
-            SOURCE_ID,
-            PRODUCT_ID,
-            data_version,
-            LIVE_RUNTIME_LAYER,
-        ),
-    ).fetchone()
-    if certified_row is None:
-        return ReplacementForecastBundleReadResult("BLOCKED", "REPLACEMENT_POSTERIOR_READINESS_MISMATCH")
-    row_map = dict(certified_row)
+    if int(latest_row_map["posterior_id"]) == readiness_bound_posterior_id:
+        row_map = latest_row_map
+    else:
+        certified_row = conn.execute(
+            """
+            SELECT * FROM forecast_posteriors
+            WHERE posterior_id = ?
+              AND city = ?
+              AND target_date = ?
+              AND temperature_metric = ?
+              AND source_id = ?
+              AND product_id = ?
+              AND data_version = ?
+              AND training_allowed = 0
+              AND runtime_layer = ?
+            LIMIT 1
+            """,
+            (
+                readiness_bound_posterior_id,
+                city,
+                target_date_text,
+                metric,
+                SOURCE_ID,
+                PRODUCT_ID,
+                data_version,
+                LIVE_RUNTIME_LAYER,
+            ),
+        ).fetchone()
+        if certified_row is None:
+            return ReplacementForecastBundleReadResult(
+                "BLOCKED", "REPLACEMENT_POSTERIOR_READINESS_MISMATCH"
+            )
+        row_map = dict(certified_row)
     provenance = _live_grade_provenance(row_map)
     if provenance is None:
         return ReplacementForecastBundleReadResult("BLOCKED", "REPLACEMENT_POSTERIOR_READINESS_NOT_LIVE_GRADE")
@@ -721,5 +735,8 @@ def read_replacement_forecast_bundle(
         dependency_json=dependency_json,
         provenance_json=provenance,
         runtime_layer=str(row_map["runtime_layer"]),
+        posterior_identity_hash=str(row_map["posterior_identity_hash"]),
+        dependency_hash=str(row_map["dependency_hash"]),
+        posterior_config_hash=str(row_map["posterior_config_hash"]),
     )
     return ReplacementForecastBundleReadResult(READY_STATUS, "REPLACEMENT_POSTERIOR_READY", bundle)

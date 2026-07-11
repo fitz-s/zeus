@@ -1,6 +1,6 @@
 # Created: 2026-06-06
-# Last reused/audited: 2026-06-06
-# Lifecycle: created=2026-06-06; last_reviewed=2026-06-06; last_reused=2026-06-06
+# Last reused/audited: 2026-07-11
+# Lifecycle: created=2026-06-06; last_reviewed=2026-07-11; last_reused=2026-07-11
 # Purpose: Protect replacement live event payload provenance without mutating baseline FSR wire format.
 # Reuse: Run before wiring replacement live payloads into the event reactor.
 # Authority basis: Operator-directed live replacement forecast materializer/readiness/payload semantics.
@@ -76,6 +76,9 @@ def _bundle() -> ReplacementForecastPosteriorBundle:
         runtime_layer=LIVE_RUNTIME_LAYER,
         bin_topology_hash="topology-hash",
         family_id="Shanghai|2026-06-07|high",
+        posterior_identity_hash="posterior-identity-hash",
+        dependency_hash="dependency-hash",
+        posterior_config_hash="posterior-config-hash",
     )
 
 

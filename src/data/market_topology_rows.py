@@ -18,19 +18,125 @@ byte-identical; only the definition site moved.
 from __future__ import annotations
 
 import sqlite3
+from collections.abc import Callable, Iterable
+from contextvars import ContextVar
+from dataclasses import dataclass, field
 from typing import Any
 
 
-def _table_exists(conn: sqlite3.Connection, table_name: str) -> bool:
-    return (
-        conn.execute(
-            "SELECT 1 FROM sqlite_master WHERE type='table' AND name = ?",
-            (table_name,),
-        ).fetchone()
-        is not None
+@dataclass
+class _SchemaReadState:
+    conn: sqlite3.Connection
+    database_names: frozenset[str] | None = None
+    table_exists: dict[str, bool] = field(default_factory=dict)
+    table_columns: dict[str, frozenset[str]] = field(default_factory=dict)
+
+
+_SCHEMA_READ_STATES: ContextVar[tuple[_SchemaReadState, ...]] = ContextVar(
+    "market_topology_schema_read_states",
+    default=(),
+)
+
+
+def _schema_read_state(conn: sqlite3.Connection) -> _SchemaReadState | None:
+    return next(
+        (state for state in _SCHEMA_READ_STATES.get() if state.conn is conn),
+        None,
     )
+
+
+def prime_frozen_schema_reads(
+    connections: Iterable[sqlite3.Connection],
+) -> Callable[[], None]:
+    """Cache schema metadata only for the lifetime of owned read transactions."""
+
+    states: list[_SchemaReadState] = []
+    seen: set[int] = set()
+    for conn in connections:
+        identity = id(conn)
+        if (
+            identity in seen
+            or not isinstance(conn, sqlite3.Connection)
+            or not conn.in_transaction
+        ):
+            continue
+        seen.add(identity)
+        states.append(_SchemaReadState(conn=conn))
+    if not states:
+        return lambda: None
+    token = _SCHEMA_READ_STATES.set(tuple(states))
+    released = False
+
+    def release() -> None:
+        nonlocal released
+        if released:
+            return
+        released = True
+        _SCHEMA_READ_STATES.reset(token)
+
+    return release
+
+
+def _database_names(conn: sqlite3.Connection) -> frozenset[str]:
+    state = _schema_read_state(conn)
+    if state is not None and state.database_names is not None:
+        return state.database_names
+    names = frozenset(str(row[1]) for row in conn.execute("PRAGMA database_list"))
+    if state is not None:
+        state.database_names = names
+    return names
+
+
+def _table_ref_exists(conn: sqlite3.Connection, table_ref: str) -> bool:
+    state = _schema_read_state(conn)
+    if state is not None and table_ref in state.table_exists:
+        return state.table_exists[table_ref]
+    if "." in table_ref:
+        schema, table = table_ref.split(".", 1)
+        exists = (
+            conn.execute(
+                f"SELECT 1 FROM {schema}.sqlite_master "
+                "WHERE type='table' AND name = ?",
+                (table,),
+            ).fetchone()
+            is not None
+        )
+    else:
+        exists = (
+            conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name = ?",
+                (table_ref,),
+            ).fetchone()
+            is not None
+        )
+    if state is not None:
+        state.table_exists[table_ref] = exists
+    return exists
+
+
+def _table_ref_columns(conn: sqlite3.Connection, table_ref: str) -> set[str]:
+    state = _schema_read_state(conn)
+    if state is not None and table_ref in state.table_columns:
+        return set(state.table_columns[table_ref])
+    if "." in table_ref:
+        schema, table = table_ref.split(".", 1)
+        rows = conn.execute(f"PRAGMA {schema}.table_info({table})").fetchall()
+    else:
+        rows = conn.execute(f"PRAGMA table_info({table_ref})").fetchall()
+    columns = frozenset(str(row[1]) for row in rows)
+    if state is not None:
+        state.table_columns[table_ref] = columns
+    return set(columns)
+
+
+def _table_exists(conn: sqlite3.Connection, table_name: str) -> bool:
+    return _table_ref_exists(conn, table_name)
+
+
 def _table_columns(conn: sqlite3.Connection, table_name: str) -> set[str]:
-    return {row[1] for row in conn.execute(f"PRAGMA table_info({table_name})").fetchall()}
+    return _table_ref_columns(conn, table_name)
+
+
 class FamilyKeyingError(ValueError):
     """A market_events sibling of the bound family carries no resolved condition_id.
 
@@ -51,12 +157,8 @@ class FamilyKeyingError(ValueError):
     """
 def _market_events_table_ref(conn: sqlite3.Connection) -> str | None:
     try:
-        attached = {str(row[1]) for row in conn.execute("PRAGMA database_list").fetchall()}
-        if "forecasts" in attached:
-            exists = conn.execute(
-                "SELECT 1 FROM forecasts.sqlite_master WHERE type='table' AND name='market_events'"
-            ).fetchone()
-            if exists is not None:
+        if "forecasts" in _database_names(conn):
+            if _table_ref_exists(conn, "forecasts.market_events"):
                 return "forecasts.market_events"
     except Exception:
         pass
@@ -64,10 +166,7 @@ def _market_events_table_ref(conn: sqlite3.Connection) -> str | None:
         return "market_events"
     return None
 def _market_events_columns(conn: sqlite3.Connection, table_ref: str) -> set[str]:
-    if "." in table_ref:
-        schema, table = table_ref.split(".", 1)
-        return {row[1] for row in conn.execute(f"PRAGMA {schema}.table_info({table})").fetchall()}
-    return _table_columns(conn, table_ref)
+    return _table_ref_columns(conn, table_ref)
 def _optional_column_expr(columns: set[str], column: str) -> str:
     if column in columns:
         return column

@@ -31,7 +31,11 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from functools import lru_cache
 
-from src.data.market_topology_rows import _table_columns, _table_exists
+from src.data.market_topology_rows import (
+    _database_names,
+    _table_ref_columns,
+    _table_ref_exists,
+)
 
 UTC = timezone.utc
 _LOG = logging.getLogger(__name__)
@@ -72,33 +76,18 @@ def _latest_utc_timestamp(*values: object) -> datetime | None:
 
 def _authority_table_ref(conn: sqlite3.Connection, table_name: str) -> str | None:
     try:
-        attached = {str(row[1]) for row in conn.execute("PRAGMA database_list").fetchall()}
+        attached = _database_names(conn)
         if "forecasts" in attached:
-            exists = conn.execute(
-                "SELECT 1 FROM forecasts.sqlite_master WHERE type='table' AND name=?",
-                (table_name,),
-            ).fetchone()
-            if exists is not None:
+            if _table_ref_exists(conn, f"forecasts.{table_name}"):
                 return f"forecasts.{table_name}"
         if "world" in attached:
-            exists = conn.execute(
-                "SELECT 1 FROM world.sqlite_master WHERE type='table' AND name=?",
-                (table_name,),
-            ).fetchone()
-            if exists is not None:
+            if _table_ref_exists(conn, f"world.{table_name}"):
                 return f"world.{table_name}"
     except Exception:  # noqa: BLE001 - live gate must fail closed at the caller
         pass
-    if _table_exists(conn, table_name):
+    if _table_ref_exists(conn, table_name):
         return table_name
     return None
-
-
-def _table_ref_columns(conn: sqlite3.Connection, table_ref: str) -> set[str]:
-    if "." in table_ref:
-        schema, table = table_ref.split(".", 1)
-        return {row[1] for row in conn.execute(f"PRAGMA {schema}.table_info({table})").fetchall()}
-    return _table_columns(conn, table_ref)
 
 
 def latest_raw_model_input_cycle(
