@@ -17,7 +17,10 @@ import math
 from dataclasses import dataclass
 from typing import Any
 
-from src.decision_kernel.canonicalization import stable_hash
+from src.decision_kernel.canonicalization import (
+    qkernel_current_state_identity_hash,
+    stable_hash,
+)
 from src.events.candidate_evaluation import CandidateEvaluation
 from src.events.opportunity_selector import select_best_family_candidate
 
@@ -30,6 +33,96 @@ def _finite_float(value: Any) -> float | None:
     if not math.isfinite(parsed):
         return None
     return parsed
+
+
+_GLOBAL_CURRENT_ECONOMICS_MARKERS = frozenset(
+    {
+        "global_actuation_identity",
+        "global_candidate_id",
+        "global_target_shares",
+        "global_expected_cost_usd",
+        "global_max_spend_usd",
+        "global_robust_delta_log_wealth",
+        "global_robust_ev_usd",
+    }
+)
+
+
+def _declares_global_current_economics(economics: dict[str, Any]) -> bool:
+    return any(field in economics for field in _GLOBAL_CURRENT_ECONOMICS_MARKERS)
+
+
+def _global_current_economics_live_admitted(economics: dict[str, Any]) -> bool:
+    """Keep receipt admission coherent with a sealed global current-state winner."""
+
+    if not str(economics.get("global_actuation_identity") or "").strip():
+        return False
+    if str(economics.get("current_state_identity_hash") or "").strip() != (
+        qkernel_current_state_identity_hash(economics)
+    ):
+        return False
+    side = str(economics.get("side") or "").strip().upper()
+    if side not in {"YES", "NO"}:
+        return False
+    for field in (
+        "global_candidate_id",
+        "global_universe_witness_identity",
+        "global_wealth_witness_identity",
+        "global_selection_epoch_identity",
+        "global_jit_book_hash",
+        "global_jit_venue_book_hash",
+        "global_jit_book_snapshot_id",
+        "global_jit_execution_curve_identity",
+    ):
+        if not str(economics.get(field) or "").strip():
+            return False
+    point = _finite_float(economics.get("payoff_q_point"))
+    lcb = _finite_float(economics.get("payoff_q_lcb"))
+    cost = _finite_float(economics.get("cost"))
+    edge = _finite_float(economics.get("edge_lcb"))
+    shares = _finite_float(economics.get("global_target_shares"))
+    expected_cost = _finite_float(economics.get("global_expected_cost_usd"))
+    max_spend = _finite_float(economics.get("global_max_spend_usd"))
+    robust_du = _finite_float(economics.get("global_robust_delta_log_wealth"))
+    robust_ev = _finite_float(economics.get("global_robust_ev_usd"))
+    if None in (
+        point,
+        lcb,
+        cost,
+        edge,
+        shares,
+        expected_cost,
+        max_spend,
+        robust_du,
+        robust_ev,
+    ):
+        return False
+    assert point is not None
+    assert lcb is not None
+    assert cost is not None
+    assert edge is not None
+    assert shares is not None
+    assert expected_cost is not None
+    assert max_spend is not None
+    assert robust_du is not None
+    assert robust_ev is not None
+    return bool(
+        0.0 <= lcb <= point <= 1.0
+        and 0.0 < cost < 1.0
+        and edge > 0.0
+        and math.isclose(lcb, cost + edge, rel_tol=1e-9, abs_tol=1e-9)
+        and shares > 0.0
+        and expected_cost > 0.0
+        and max_spend + 1e-9 >= expected_cost
+        and robust_du > 0.0
+        and robust_ev > 0.0
+        and math.isclose(
+            cost,
+            expected_cost / shares,
+            rel_tol=1e-9,
+            abs_tol=1e-9,
+        )
+    )
 
 
 def _qkernel_selected_economics_live_admitted(economics: Any) -> bool:
@@ -45,6 +138,8 @@ def _qkernel_selected_economics_live_admitted(economics: Any) -> bool:
         return False
     if str(economics.get("source") or "").strip() != "qkernel_spine":
         return False
+    if _declares_global_current_economics(economics):
+        return _global_current_economics_live_admitted(economics)
     if not str(economics.get("candidate_id") or "").strip():
         return False
     if not str(economics.get("route_id") or "").strip().startswith(("DIRECT_YES:", "DIRECT_NO:")):
@@ -104,6 +199,24 @@ def _qkernel_selected_objective(economics: Any) -> dict[str, Any] | None:
     assert isinstance(economics, dict)
     cost = float(economics["cost"])
     edge_lcb = float(economics["edge_lcb"])
+    if _declares_global_current_economics(economics):
+        expected_cost = float(economics["global_expected_cost_usd"])
+        robust_ev = float(economics["global_robust_ev_usd"])
+        robust_du = float(economics["global_robust_delta_log_wealth"])
+        robust_kelly_fraction = edge_lcb / (1.0 - cost)
+        return {
+            "authority": "qkernel_global_current_state",
+            "robust_ev_per_dollar": robust_ev / expected_cost,
+            "robust_kelly_fraction_lcb": robust_kelly_fraction,
+            "robust_kelly_growth_score": robust_du,
+            "capital_weighted_growth_score": robust_ev,
+            "expected_robust_dollars": robust_ev,
+            "q_lcb_5pct": float(economics["payoff_q_lcb"]),
+            "trade_score": edge_lcb,
+            "execution_price": cost,
+            "optimal_stake_usd": expected_cost,
+            "optimal_delta_u": robust_du,
+        }
     optimal_stake = float(economics["optimal_stake_usd"])
     robust_ev_per_dollar = edge_lcb / cost
     expected_robust_dollars = robust_ev_per_dollar * optimal_stake

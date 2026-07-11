@@ -86,6 +86,44 @@ def _seal_current_qkernel_cert(cert: dict) -> None:
     cert["current_state_identity_hash"] = era.qkernel_current_state_identity_hash(cert)
 
 
+def _global_current_qkernel_cert(*, side: str = "YES") -> dict:
+    cert = _current_qkernel_cert(side=side)
+    for field in (
+        "candidate_id",
+        "route_id",
+        "delta_u_at_min",
+        "optimal_stake_usd",
+        "optimal_delta_u",
+        "direction_law_ok",
+        "coherence_allows",
+    ):
+        cert.pop(field)
+    cert.update(
+        payoff_q_point=0.70,
+        payoff_q_lcb=0.60,
+        cost=0.04,
+        edge_lcb=0.56,
+        global_actuation_identity="global-actuation-1",
+        global_candidate_id="global-candidate-1",
+        global_universe_witness_identity="global-universe-1",
+        global_wealth_witness_identity="global-wealth-1",
+        global_selection_epoch_identity="global-epoch-1",
+        global_selection_cut_at="2026-07-11T23:00:00+00:00",
+        global_selection_decision_at="2026-07-11T23:00:01+00:00",
+        global_jit_book_hash="jit-book-1",
+        global_jit_venue_book_hash="jit-venue-book-1",
+        global_jit_book_snapshot_id="jit-snapshot-1",
+        global_jit_execution_curve_identity="jit-curve-1",
+        global_target_shares="25",
+        global_expected_cost_usd="1",
+        global_max_spend_usd="1",
+        global_robust_delta_log_wealth=0.01,
+        global_robust_ev_usd=14.0,
+    )
+    _seal_current_qkernel_cert(cert)
+    return cert
+
+
 def _day0_probability_fields(
     *,
     condition_id: str = "condition-1",
@@ -938,30 +976,7 @@ def test_global_current_submit_does_not_require_legacy_route_optimizer_fields(
     side,
     direction,
 ):
-    cert = _current_qkernel_cert(side=side)
-    for field in (
-        "candidate_id",
-        "route_id",
-        "delta_u_at_min",
-        "optimal_stake_usd",
-        "optimal_delta_u",
-        "direction_law_ok",
-        "coherence_allows",
-    ):
-        cert.pop(field)
-    cert.update(
-        payoff_q_point=0.70,
-        payoff_q_lcb=0.60,
-        cost=0.40,
-        edge_lcb=0.20,
-        global_actuation_identity="global-actuation-1",
-        global_max_spend_usd="5",
-        global_expected_cost_usd="4",
-        global_target_shares="10",
-        global_robust_delta_log_wealth=0.01,
-        global_robust_ev_usd=2.0,
-    )
-    _seal_current_qkernel_cert(cert)
+    cert = _global_current_qkernel_cert(side=side)
     proof = SimpleNamespace(
         direction=direction,
         candidate=SimpleNamespace(metric="high"),
@@ -971,17 +986,106 @@ def test_global_current_submit_does_not_require_legacy_route_optimizer_fields(
     assert era._qkernel_actual_submit_quality_rejection_reason(
         proof=proof,
         strategy_policy_event_type="FORECAST_SNAPSHOT_READY",
-        actual_stake_usd=4.0,
-        actual_cost=0.40,
+        actual_stake_usd=1.0,
+        actual_cost=0.04,
     ) is None
     assert (
         era._qkernel_actual_submit_quality_rejection_reason(
             proof=proof,
             strategy_policy_event_type="FORECAST_SNAPSHOT_READY",
-            actual_stake_usd=4.0,
-            actual_cost=0.41,
+            actual_stake_usd=1.0,
+            actual_cost=0.05,
         )
         == "GLOBAL_ACTUATION_EXPECTED_COST_EXCEEDED"
+    )
+
+
+@pytest.mark.parametrize(("side", "direction"), (("YES", "buy_yes"), ("NO", "buy_no")))
+def test_global_current_certificate_is_selectable_without_legacy_route_fields(
+    side,
+    direction,
+):
+    cert = _global_current_qkernel_cert(side=side)
+    proof = SimpleNamespace(
+        direction=direction,
+        q_lcb_5pct=cert["payoff_q_lcb"],
+        q_source="qkernel_spine",
+        selection_authority_applied="qkernel_spine",
+        qkernel_execution_economics=cert,
+    )
+
+    assert (
+        era._valid_selected_qkernel_execution_economics_payload(
+            cert,
+            direction=direction,
+        )
+        is cert
+    )
+    assert (
+        era._live_selection_rejection_reason(
+            proof,
+            enforce_win_rate_floor=False,
+        )
+        is None
+    )
+
+
+def test_global_current_certificate_fails_closed_on_side_or_envelope_mismatch():
+    side_mismatch = _global_current_qkernel_cert(side="NO")
+    assert (
+        era._global_current_state_execution_economics_rejection_reason(
+            side_mismatch,
+            direction="buy_yes",
+        )
+        == "side_direction_mismatch"
+    )
+
+    broken_envelope = _global_current_qkernel_cert()
+    broken_envelope["global_robust_ev_usd"] = 0.0
+    _seal_current_qkernel_cert(broken_envelope)
+    assert (
+        era._valid_selected_qkernel_execution_economics_payload(
+            broken_envelope,
+            direction="buy_yes",
+        )
+        is None
+    )
+
+
+def test_broken_global_certificate_cannot_fall_back_to_legacy_route_fields():
+    cert = _global_current_qkernel_cert()
+    cert.update(
+        candidate_id="YES:bin-1:DIRECT_YES:bin-1@proof",
+        route_id="DIRECT_YES:bin-1@proof",
+        delta_u_at_min=0.01,
+        optimal_stake_usd=1.0,
+        optimal_delta_u=0.02,
+        direction_law_ok=True,
+        coherence_allows=True,
+    )
+    cert.pop("global_actuation_identity")
+    _seal_current_qkernel_cert(cert)
+    proof = SimpleNamespace(
+        direction="buy_yes",
+        candidate=SimpleNamespace(metric="high"),
+        qkernel_execution_economics=cert,
+    )
+
+    assert era._declares_global_current_state_execution_economics(cert) is True
+    assert (
+        era._valid_selected_qkernel_execution_economics_payload(
+            cert,
+            direction="buy_yes",
+        )
+        is None
+    )
+    assert era._qkernel_actual_submit_quality_rejection_reason(
+        proof=proof,
+        actual_stake_usd=1.0,
+        actual_cost=0.04,
+    ).startswith(
+        "QKERNEL_ACTUAL_SUBMIT_QUALITY_FLOOR:"
+        "GLOBAL_CURRENT_STATE_EXECUTION_ECONOMICS_INVALID:"
     )
 
 

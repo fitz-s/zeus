@@ -1404,7 +1404,6 @@ def test_opportunity_book_records_valid_qkernel_selection_before_legacy_projecti
         "selection_guard_basis": "SELECTION_BETA_95",
         "selection_guard_abstained": False,
         "selection_guard_q_safe": 0.30,
-        "global_actuation_identity": "global-actuation-1",
     }
     selected = replace(
         proof,
@@ -1419,7 +1418,7 @@ def test_opportunity_book_records_valid_qkernel_selection_before_legacy_projecti
     book = era._opportunity_book_from_proofs(
         event_id="event-global-qk",
         family_id="family-global-qk",
-        proofs=(proof,),
+        proofs=(selected,),
         selected_proof=selected,
         enforce_win_rate_floor=False,
     )
@@ -1430,6 +1429,130 @@ def test_opportunity_book_records_valid_qkernel_selection_before_legacy_projecti
     assert payload["selection_authority"] == "qkernel_spine"
     assert payload["candidates"][0]["admitted"] is True
     assert payload["candidates"][0]["live_admission_authority"] == "qkernel_spine"
+
+
+def test_global_current_winner_survives_book_and_sizes_from_its_sealed_curve():
+    """The global winner is consumed as one certificate, not a legacy route shim."""
+
+    from dataclasses import replace
+
+    row = _row(
+        condition_id="cond-global-current",
+        yes_token="yes-global-current",
+        no_token="no-global-current",
+        yes_ask=0.04,
+        no_ask=0.96,
+        snapshot_id="snap-global-current",
+    )
+    proof = _proof(
+        direction="buy_yes",
+        row=row,
+        token_id="yes-global-current",
+        q_posterior=0.70,
+        q_lcb_5pct=0.60,
+        bin_obj=Bin(low=22.0, high=22.0, unit="C", label="22C"),
+    )
+    cert = {
+        "source": "qkernel_spine",
+        "decision_id": "decision-global-current",
+        "receipt_hash": "receipt-global-current",
+        "q_version": "q-global-current",
+        "sample_hash": "samples-global-current",
+        "q_lcb_guard_basis": "CURRENT_POSTERIOR_BAND",
+        "q_lcb_guard_abstained": False,
+        "q_lcb_guard_cell_key": "samples-global-current",
+        "selection_guard_basis": "CURRENT_POSTERIOR_BAND",
+        "selection_guard_abstained": False,
+        "selection_guard_cell_key": "samples-global-current",
+        "selection_guard_n": 400,
+        "side": "YES",
+        "payoff_q_point": 0.70,
+        "payoff_q_lcb": 0.60,
+        "cost": 0.04,
+        "edge_lcb": 0.56,
+        "global_actuation_identity": "global-actuation-current",
+        "global_candidate_id": "global-candidate-current",
+        "global_universe_witness_identity": "global-universe-current",
+        "global_wealth_witness_identity": "global-wealth-current",
+        "global_selection_epoch_identity": "global-epoch-current",
+        "global_selection_cut_at": "2026-07-11T23:00:00+00:00",
+        "global_selection_decision_at": "2026-07-11T23:00:01+00:00",
+        "global_jit_book_hash": "jit-book-current",
+        "global_jit_venue_book_hash": "jit-venue-current",
+        "global_jit_book_snapshot_id": "jit-snapshot-current",
+        "global_jit_execution_curve_identity": "jit-curve-current",
+        "global_target_shares": "25",
+        "global_expected_cost_usd": "1",
+        "global_max_spend_usd": "1",
+        "global_robust_delta_log_wealth": 0.01,
+        "global_robust_ev_usd": 14.0,
+    }
+    cert["current_state_identity_hash"] = era.qkernel_current_state_identity_hash(cert)
+    selected = replace(
+        proof,
+        trade_score=0.56,
+        q_source="qkernel_spine",
+        selection_authority_applied="qkernel_spine",
+        qkernel_execution_economics=cert,
+    )
+
+    book = era._opportunity_book_from_proofs(
+        event_id="event-global-current",
+        family_id="family-global-current",
+        proofs=(proof,),
+        selected_proof=selected,
+        enforce_win_rate_floor=False,
+    )
+    stake, price = era._robust_marginal_utility_stake_and_price(
+        family_key="family-global-current",
+        selected_proof=selected,
+        all_proofs=(selected,),
+        extra_exposure_by_bin_id=None,
+        bankroll_usd=1000.0,
+        kelly_multiplier=0.125,
+        free_cash_usd=100.0,
+    )
+
+    payload = book.to_receipt_dict()
+    assert payload["selected_candidate_id"] == era._candidate_evaluation_id(selected)
+    assert payload["candidates"][0]["admitted"] is True
+    assert payload["selected_objective"]["authority"] == (
+        "qkernel_global_current_state"
+    )
+    assert payload["selected_objective"]["optimal_stake_usd"] == pytest.approx(1.0)
+    assert payload["selected_objective"]["expected_robust_dollars"] == pytest.approx(
+        14.0
+    )
+    receipt = era.EventSubmissionReceipt(
+        submitted=False,
+        event_id="event-global-current",
+        condition_id="cond-global-current",
+        token_id="yes-global-current",
+        direction="buy_yes",
+        q_live=0.70,
+        q_lcb_5pct=0.60,
+        q_source="qkernel_spine",
+        qkernel_execution_economics=cert,
+        opportunity_book=payload,
+    )
+    assert (
+        era._assert_receipt_qkernel_execution_economics(
+            receipt,
+            payload,
+            payload["selected_candidate_id"],
+        )
+        is cert
+    )
+    assert stake == pytest.approx(1.0)
+    assert price is not None and price.value == pytest.approx(0.04)
+
+    invalid_receipt_cert = dict(cert, global_robust_ev_usd=0.0)
+    invalid_receipt_cert["current_state_identity_hash"] = (
+        era.qkernel_current_state_identity_hash(invalid_receipt_cert)
+    )
+    from src.events.opportunity_book import _qkernel_selected_economics_live_admitted
+
+    assert _qkernel_selected_economics_live_admitted(invalid_receipt_cert) is False
 
 
 def test_selection_exposure_fails_closed_for_same_family_position_outside_bound_topology():

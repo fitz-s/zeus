@@ -2864,6 +2864,132 @@ def _valid_qkernel_execution_economics_payload(
     return cert
 
 
+def _global_current_state_execution_economics_rejection_reason(
+    cert: Any,
+    *,
+    direction: str | None = None,
+) -> str | None:
+    """Validate the sealed global winner without requiring legacy route fields."""
+
+    if not isinstance(cert, Mapping):
+        return "payload_not_mapping"
+    if not str(cert.get("global_actuation_identity") or "").strip():
+        return "global_actuation_identity"
+    if str(cert.get("source") or "").strip() != "qkernel_spine":
+        return "source"
+    if not _qkernel_current_state_solve_economics(cert):
+        return "current_state_identity"
+    side = str(cert.get("side") or "").strip().upper()
+    native_side = _native_curve_side_for_direction(str(direction or ""))
+    if side not in {"YES", "NO"}:
+        return "side"
+    if native_side is not None and side != native_side:
+        return "side_direction_mismatch"
+    for field in (
+        "global_candidate_id",
+        "global_universe_witness_identity",
+        "global_wealth_witness_identity",
+        "global_selection_epoch_identity",
+        "global_selection_cut_at",
+        "global_selection_decision_at",
+        "global_jit_book_hash",
+        "global_jit_venue_book_hash",
+        "global_jit_book_snapshot_id",
+        "global_jit_execution_curve_identity",
+    ):
+        if not str(cert.get(field) or "").strip():
+            return field
+    numeric: dict[str, float] = {}
+    for field in (
+        "payoff_q_point",
+        "payoff_q_lcb",
+        "cost",
+        "edge_lcb",
+        "global_target_shares",
+        "global_expected_cost_usd",
+        "global_max_spend_usd",
+        "global_robust_delta_log_wealth",
+        "global_robust_ev_usd",
+    ):
+        try:
+            value = float(cert.get(field))
+        except (TypeError, ValueError):
+            return f"{field}_invalid"
+        if not math.isfinite(value):
+            return f"{field}_non_finite"
+        numeric[field] = value
+    point = numeric["payoff_q_point"]
+    lcb = numeric["payoff_q_lcb"]
+    cost = numeric["cost"]
+    edge = numeric["edge_lcb"]
+    shares = numeric["global_target_shares"]
+    expected_cost = numeric["global_expected_cost_usd"]
+    max_spend = numeric["global_max_spend_usd"]
+    robust_du = numeric["global_robust_delta_log_wealth"]
+    robust_ev = numeric["global_robust_ev_usd"]
+    if not (0.0 <= lcb <= point <= 1.0):
+        return "probability_order"
+    if not (0.0 < cost < 1.0 and edge > 0.0):
+        return "execution_edge"
+    if not math.isclose(lcb, cost + edge, rel_tol=1e-9, abs_tol=1e-9):
+        return "edge_identity"
+    if not (
+        shares > 0.0
+        and expected_cost > 0.0
+        and max_spend + 1e-9 >= expected_cost
+        and robust_du > 0.0
+        and robust_ev > 0.0
+    ):
+        return "global_utility_envelope"
+    if not math.isclose(
+        cost,
+        expected_cost / shares,
+        rel_tol=1e-9,
+        abs_tol=1e-9,
+    ):
+        return "global_cost_identity"
+    return None
+
+
+_GLOBAL_CURRENT_STATE_EXECUTION_MARKERS = frozenset(
+    {
+        "global_actuation_identity",
+        "global_candidate_id",
+        "global_target_shares",
+        "global_expected_cost_usd",
+        "global_max_spend_usd",
+        "global_robust_delta_log_wealth",
+        "global_robust_ev_usd",
+    }
+)
+
+
+def _declares_global_current_state_execution_economics(cert: Any) -> bool:
+    return isinstance(cert, Mapping) and any(
+        field in cert for field in _GLOBAL_CURRENT_STATE_EXECUTION_MARKERS
+    )
+
+
+def _valid_selected_qkernel_execution_economics_payload(
+    cert: Any,
+    *,
+    direction: str | None = None,
+) -> Mapping[str, Any] | None:
+    """Accept exactly one certificate grammar: sealed global or legacy route."""
+
+    if _declares_global_current_state_execution_economics(cert):
+        if (
+            _global_current_state_execution_economics_rejection_reason(
+                cert,
+                direction=direction,
+            )
+            is None
+        ):
+            return cert
+        return None
+    return _valid_qkernel_execution_economics_payload(cert, direction=direction)
+
+
 def _qkernel_current_state_solve_economics(cert: Any) -> bool:
     """Whether the economics were derived solely from this decision's served q band.
 
@@ -3177,7 +3303,7 @@ def _assert_receipt_qkernel_execution_economics(
         if q_source == "qkernel_spine":
             raise ValueError("EDLI_LIVE_QKERNEL_EXECUTION_ECONOMICS_INVALID")
         return None
-    receipt_cert = _valid_qkernel_execution_economics_payload(
+    receipt_cert = _valid_selected_qkernel_execution_economics_payload(
         receipt.qkernel_execution_economics,
         direction=receipt.direction,
     )
@@ -3202,7 +3328,7 @@ def _assert_receipt_qkernel_execution_economics(
             "EDLI_LIVE_QKERNEL_SELECTED_BOOK_CANDIDATE_NON_POSITIVE_SCORE:"
             f"trade_score={selected_trade_score:.9f}"
         )
-    book_cert = _valid_qkernel_execution_economics_payload(
+    book_cert = _valid_selected_qkernel_execution_economics_payload(
         selected_candidate.get("qkernel_execution_economics"),
         direction=receipt.direction,
     )
@@ -15561,6 +15687,22 @@ def _qkernel_execution_economics(proof: "_CandidateProof") -> Mapping[str, Any] 
     return _qkernel_bound_execution_economics(proof, enforce_false_edge_alpha=True)
 
 
+def _selected_qkernel_execution_economics(
+    proof: "_CandidateProof",
+) -> Mapping[str, Any] | None:
+    """Return the selected certificate under its own exact grammar."""
+
+    if not _proof_uses_qkernel_spine(proof):
+        return None
+    cert = getattr(proof, "qkernel_execution_economics", None)
+    if _declares_global_current_state_execution_economics(cert):
+        return _valid_selected_qkernel_execution_economics_payload(
+            cert,
+            direction=str(getattr(proof, "direction", "") or ""),
+        )
+    return _qkernel_execution_economics(proof)
+
+
 def _qkernel_fdr_execution_economics(proof: "_CandidateProof") -> Mapping[str, Any] | None:
     """Return a selected qkernel certificate for FDR accounting.
 
@@ -16609,14 +16751,23 @@ def _live_selection_rejection_reason(
     rest_policy_reason = _qkernel_rest_then_cross_not_actionable_reason(proof, cert)
     if rest_policy_reason is not None:
         return rest_policy_reason
-    if _valid_qkernel_execution_economics_payload(
+    selected_cert = _valid_selected_qkernel_execution_economics_payload(
         cert,
         direction=str(getattr(proof, "direction", "") or ""),
-    ) is None:
+    )
+    if selected_cert is None:
+        if _declares_global_current_state_execution_economics(cert):
+            detail = _global_current_state_execution_economics_rejection_reason(
+                cert,
+                direction=str(getattr(proof, "direction", "") or ""),
+            )
+            return f"GLOBAL_CURRENT_STATE_EXECUTION_ECONOMICS_INVALID:{detail}"
         return _qkernel_selection_economics_rejection_reason(
             cert,
             direction=str(getattr(proof, "direction", "") or ""),
         )
+    if _declares_global_current_state_execution_economics(selected_cert):
+        return None
     final_floor_reason = _qkernel_final_submit_floor_rejection_reason(
         proof=proof,
         cert=cert,
@@ -16771,11 +16922,20 @@ def _qkernel_actual_submit_quality_rejection_reason(
     # Validate the exact current probability/cost tuple and the global utility
     # envelope directly; requiring unrelated legacy fields here made otherwise
     # valid native YES candidates fail only at the actual-submit boundary.
-    if (
-        isinstance(raw_cert, Mapping)
-        and str(raw_cert.get("global_actuation_identity") or "").strip()
-        and _qkernel_current_state_solve_economics(raw_cert)
-    ):
+    if _declares_global_current_state_execution_economics(raw_cert):
+        global_cert = _valid_selected_qkernel_execution_economics_payload(
+            raw_cert,
+            direction=str(getattr(proof, "direction", "") or ""),
+        )
+        if global_cert is None:
+            detail = _global_current_state_execution_economics_rejection_reason(
+                raw_cert,
+                direction=str(getattr(proof, "direction", "") or ""),
+            )
+            return (
+                "QKERNEL_ACTUAL_SUBMIT_QUALITY_FLOOR:"
+                f"GLOBAL_CURRENT_STATE_EXECUTION_ECONOMICS_INVALID:{detail}"
+            )
         try:
             stake = float(actual_stake_usd)
             cost = float(actual_cost)
@@ -17586,7 +17746,7 @@ def _opportunity_book_from_proofs(
     selected_qkernel_authority = bool(
         selected_proof is not None
         and _proof_uses_qkernel_spine(selected_proof)
-        and _qkernel_execution_economics(selected_proof) is not None
+        and _selected_qkernel_execution_economics(selected_proof) is not None
     )
     decided_candidate_id = (
         selected_candidate_id_raw
@@ -19318,6 +19478,83 @@ def _robust_marginal_utility_stake_and_price(
     # Wave-1 2026-06-12: the DAY0 EXPOSURE CAP kernel bound is DELETED (operator no-caps
     # law). max_stake is governed by the fractional-Kelly budget + concentration ceiling +
     # free-cash bound ONLY — no day0-specific notional clamp.
+    raw_qkernel_cert = getattr(selected_proof, "qkernel_execution_economics", None)
+    declares_global_qkernel = _declares_global_current_state_execution_economics(
+        raw_qkernel_cert
+    )
+    global_qkernel_cert = (
+        _selected_qkernel_execution_economics(selected_proof)
+        if declares_global_qkernel
+        else None
+    )
+    if declares_global_qkernel:
+        if global_qkernel_cert is None:
+            return 0.0, None
+        selected_candidate = _native_side_candidate_from_proof(
+            family_key=family_key,
+            proof=selected_proof,
+        )
+        if (
+            not selected_candidate.is_tradeable
+            or selected_candidate.executable_cost_curve is None
+        ):
+            return 0.0, None
+        try:
+            target_cost = Decimal(
+                str(global_qkernel_cert.get("global_expected_cost_usd"))
+            )
+            max_spend = Decimal(
+                str(global_qkernel_cert.get("global_max_spend_usd"))
+            )
+        except (ArithmeticError, TypeError, ValueError):
+            return 0.0, None
+        chosen = min(target_cost, max_spend, max_stake)
+        if free_cash_usd is not None and float(free_cash_usd) >= 0.0:
+            free_cash = Decimal(str(free_cash_usd))
+            if chosen > free_cash:
+                chosen = free_cash
+                if stake_floor_out is not None:
+                    stake_floor_out["stake_floor"] = "FREE_CASH_BOUND"
+                    stake_floor_out["stake_floor_free_cash_usd"] = float(free_cash)
+        if chosen <= Decimal("0"):
+            return 0.0, None
+        try:
+            price = _chosen_stake_execution_price(
+                selected_candidate.executable_cost_curve,
+                chosen,
+            )
+        except ValueError as exc:
+            if "min_order_size" in str(exc) or "below" in str(exc):
+                raise _StakeBelowMinOrder(
+                    f"global chosen-stake pricing rejected below min order: {exc}"
+                ) from exc
+            return 0.0, None
+        except (ArithmeticError, ExecutionPriceContractError):
+            return 0.0, None
+        envelope_reason = _qkernel_current_state_actual_submit_rejection_reason(
+            cert=global_qkernel_cert,
+            actual_stake_usd=float(chosen),
+            actual_cost=float(price.value),
+        )
+        if envelope_reason is not None:
+            return 0.0, None
+        if stake_floor_out is not None:
+            stake_floor_out["qkernel_execution_economics"] = {
+                "payoff_q_lcb": float(global_qkernel_cert["payoff_q_lcb"]),
+                "payoff_q_point": float(global_qkernel_cert["payoff_q_point"]),
+                "submit_edge": float(global_qkernel_cert["payoff_q_lcb"])
+                - float(price.value),
+                "edge_lcb": float(global_qkernel_cert["edge_lcb"]),
+                "global_expected_cost_usd": float(target_cost),
+                "global_target_shares": float(
+                    global_qkernel_cert["global_target_shares"]
+                ),
+                "global_actuation_identity": global_qkernel_cert.get(
+                    "global_actuation_identity"
+                ),
+            }
+        return float(chosen), price
+
     qkernel_cert = _qkernel_execution_economics(selected_proof)
     if qkernel_cert is None and _proof_uses_qkernel_spine(selected_proof):
         # qkernel-spine proofs deliberately preserve q_posterior/q_lcb_5pct as
