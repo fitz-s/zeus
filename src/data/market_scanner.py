@@ -5354,6 +5354,7 @@ def refresh_executable_market_substrate_snapshots(
         "executable_snapshot_candidate_count": candidate_count,
         "executable_snapshot_candidate_rejection_counts": candidate_rejection_counts,
         "executable_snapshot_candidate_override_counts": candidate_override_counts,
+        "forced_condition_count": len(forced_conditions),
         "selected_executable_snapshot_count": len(selected_candidates),
         "executable_candidate_city_count": len(candidate_cities),
         "selected_executable_city_count": len(selected_cities),

@@ -827,6 +827,7 @@ def test_decision_refresher_invokes_scoped_producer_and_proves_freshness(monkeyp
         refreshed.append(kwargs)
         return {
             "status": "refreshed",
+            "forced_condition_count": 1,
             "attempted": 2,
             "inserted": 2,
             "prefetched_orderbook_count": 2,
@@ -891,12 +892,11 @@ def test_global_winner_refresher_requests_exact_condition_recapture(monkeypatch)
         lambda **kwargs: refreshed.append(kwargs)
         or {
             "status": "refreshed",
+            "forced_condition_count": 1,
             "attempted": 2,
             "inserted": 2,
             "prefetched_orderbook_count": 2,
-            "executable_snapshot_candidate_override_counts": {
-                "forced_selected_token_recapture": 2,
-            },
+            "executable_snapshot_candidate_override_counts": {},
         },
     )
     monkeypatch.setattr(
@@ -949,7 +949,19 @@ def test_global_winner_refresher_rejects_lock_busy_cached_fresh_row(monkeypatch)
     ) is False
 
 
-def test_forced_producer_recaptures_both_fresh_native_sides_from_network(monkeypatch):
+@pytest.mark.parametrize(
+    ("fresh_tokens", "expected_override_count"),
+    (
+        (set(), 0),
+        ({"winner-yes"}, 1),
+        ({"winner-yes", "winner-no"}, 2),
+    ),
+)
+def test_forced_producer_recaptures_both_native_sides_from_network(
+    monkeypatch,
+    fresh_tokens,
+    expected_override_count,
+):
     """The exact winner force reaches below cache and feasibility freshness."""
 
     market = {
@@ -969,7 +981,7 @@ def test_forced_producer_recaptures_both_fresh_native_sides_from_network(monkeyp
     monkeypatch.setattr(
         market_scanner,
         "_snapshot_condition_refresh_state",
-        lambda *_args, **_kwargs: ((0, 0.0), {"winner-yes", "winner-no"}),
+        lambda *_args, **_kwargs: ((0, 0.0), set(fresh_tokens)),
     )
     monkeypatch.setattr(
         market_scanner,
@@ -1023,14 +1035,6 @@ def test_forced_producer_recaptures_both_fresh_native_sides_from_network(monkeyp
         ),
     )
 
-    ordinary = market_scanner.refresh_executable_market_substrate_snapshots(
-        sqlite3.connect(":memory:"),
-        markets=[market],
-        clob=object(),
-        captured_at=datetime(2026, 7, 11, 1, 47, tzinfo=timezone.utc),
-        max_outcomes=0,
-        priority_condition_ids={"winner-condition"},
-    )
     forced = market_scanner.refresh_executable_market_substrate_snapshots(
         sqlite3.connect(":memory:"),
         markets=[market],
@@ -1041,16 +1045,16 @@ def test_forced_producer_recaptures_both_fresh_native_sides_from_network(monkeyp
         force_refresh_condition_ids={"winner-condition"},
     )
 
-    assert ordinary["attempted"] == 0
-    assert ordinary["executable_snapshot_candidate_rejection_counts"] == {
-        "selected_token_already_fresh": 2,
-    }
     assert forced["attempted"] == forced["inserted"] == 2
+    assert forced["forced_condition_count"] == 1
     assert forced["prefetched_orderbook_count"] == 2
-    assert forced["executable_snapshot_candidate_override_counts"] == {
-        "forced_selected_token_recapture": 2,
-    }
-    assert feasibility_candidate_counts == [0, 0]
+    expected_overrides = (
+        {"forced_selected_token_recapture": expected_override_count}
+        if expected_override_count
+        else {}
+    )
+    assert forced["executable_snapshot_candidate_override_counts"] == expected_overrides
+    assert feasibility_candidate_counts == [0]
     assert set(network_tokens) == {"winner-yes", "winner-no"}
     assert set(captured_tokens) == {"winner-yes", "winner-no"}
 
