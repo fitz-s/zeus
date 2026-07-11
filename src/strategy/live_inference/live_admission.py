@@ -506,44 +506,71 @@ def replacement_no_bound_certificate_matches(
 ) -> bool:
     """Verify one replacement posterior's binary YES/NO bound identity."""
 
+    return replacement_no_bound_certificate_mismatch_reason(
+        certificate,
+        expected=expected,
+        q_direction=q_direction,
+        q_lcb=q_lcb,
+        same_bin_yes_posterior=same_bin_yes_posterior,
+        qkernel_execution_economics=qkernel_execution_economics,
+        probability_authority=probability_authority,
+        posterior_id=posterior_id,
+        condition_id=condition_id,
+    ) is None
+
+
+def replacement_no_bound_certificate_mismatch_reason(
+    certificate: Mapping[str, object] | None,
+    *,
+    expected: Mapping[str, object] | None,
+    q_direction: float,
+    q_lcb: float,
+    same_bin_yes_posterior: float,
+    qkernel_execution_economics: Mapping[str, object] | None,
+    probability_authority: str | None,
+    posterior_id: int | str | None,
+    condition_id: str | None,
+) -> str | None:
+    """Name the first broken parent binding without weakening admission."""
+
     if not isinstance(certificate, Mapping) or not isinstance(expected, Mapping):
-        return False
+        return "parent_mapping_missing"
     if certificate.get("schema") != "replacement_native_no_bound_v1":
-        return False
+        return "certificate_schema"
     if certificate.get("probability_authority") != "replacement_0_1":
-        return False
+        return "certificate_probability_authority"
     if str(probability_authority or "").strip() != "replacement_0_1":
-        return False
+        return "served_probability_authority"
     if certificate.get("q_lcb_basis") != "fused_center_bootstrap_p05":
-        return False
+        return "certificate_q_lcb_basis"
     if certificate.get("q_ucb_role") != "fused_center_bootstrap_ucb":
-        return False
+        return "certificate_q_ucb_role"
     if certificate.get("q_mode") not in {"FUSED_NORMAL_FULL", "FUSED_NORMAL_PARTIAL"}:
-        return False
+        return "certificate_q_mode"
     if certificate.get("side") != "buy_no":
-        return False
+        return "certificate_side"
     certificate_posterior_id = certificate.get("posterior_id")
     if (
         isinstance(certificate_posterior_id, bool)
         or not isinstance(certificate_posterior_id, int)
         or certificate_posterior_id <= 0
     ):
-        return False
+        return "certificate_posterior_id"
     if isinstance(posterior_id, bool):
-        return False
+        return "served_posterior_id"
     try:
         receipt_posterior_id = int(posterior_id)
     except (TypeError, ValueError):
-        return False
+        return "served_posterior_id"
     if receipt_posterior_id != certificate_posterior_id:
-        return False
+        return "served_posterior_id_mismatch"
     certificate_condition_id = str(certificate.get("condition_id") or "").strip()
     if not certificate_condition_id or str(condition_id or "").strip() != certificate_condition_id:
-        return False
+        return "served_condition_id_mismatch"
     if not str(certificate.get("bin_id") or "").strip():
-        return False
+        return "certificate_bin_id"
     if not str(certificate.get("family_id") or "").strip():
-        return False
+        return "certificate_family_id"
 
     def valid_hash(value: object) -> bool:
         text = str(value or "").strip()
@@ -561,19 +588,19 @@ def replacement_no_bound_certificate_matches(
         "joint_samples_hash",
     ):
         if not valid_hash(certificate.get(field)):
-            return False
+            return f"certificate_hash_field:{field}"
     bootstrap_draws = certificate.get("bootstrap_draws")
     if isinstance(bootstrap_draws, bool) or not isinstance(bootstrap_draws, int):
-        return False
+        return "certificate_bootstrap_draws"
     if bootstrap_draws < REPLACEMENT_BOOTSTRAP_MIN_DRAWS:
-        return False
+        return "certificate_bootstrap_draws_floor"
     certificate_hash = certificate.get("certificate_hash")
     if not valid_hash(certificate_hash):
-        return False
+        return "certificate_hash"
     certificate_body = dict(certificate)
     certificate_body.pop("certificate_hash", None)
     if stable_hash(certificate_body) != certificate_hash:
-        return False
+        return "certificate_hash_mismatch"
     for field in (
         "posterior_id",
         "posterior_identity_hash",
@@ -589,32 +616,32 @@ def replacement_no_bound_certificate_matches(
         "canonical_bound_hash",
     ):
         if expected.get(field) != certificate.get(field):
-            return False
+            return f"parent_field:{field}"
     for field in ("yes_q", "yes_q_ucb"):
         try:
             expected_value = float(expected[field])
             certificate_value = float(certificate[field])
         except (KeyError, TypeError, ValueError):
-            return False
+            return f"parent_probability_missing:{field}"
         if not math.isclose(
             expected_value,
             certificate_value,
             rel_tol=0.0,
             abs_tol=1e-12,
         ):
-            return False
+            return f"parent_probability:{field}"
     try:
         expected_served_lcb = float(expected["side_q_lcb_served"])
         certificate_served_lcb = float(certificate["side_q_lcb_served"])
     except (KeyError, TypeError, ValueError):
-        return False
+        return "parent_probability_missing:side_q_lcb_served"
     if not math.isclose(
         expected_served_lcb,
         certificate_served_lcb,
         rel_tol=0.0,
         abs_tol=1e-12,
     ):
-        return False
+        return "parent_probability:side_q_lcb_served"
     try:
         yes_q = float(certificate["yes_q"])
         yes_ucb = float(certificate["yes_q_ucb"])
@@ -622,54 +649,57 @@ def replacement_no_bound_certificate_matches(
         no_lcb_raw = float(certificate["side_q_lcb_raw"])
         no_lcb_served = float(certificate["side_q_lcb_served"])
     except (KeyError, TypeError, ValueError):
-        return False
+        return "certificate_probability_fields"
     values = (yes_q, yes_ucb, no_q, no_lcb_raw, no_lcb_served)
     if not all(math.isfinite(value) and 0.0 <= value <= 1.0 for value in values):
-        return False
+        return "certificate_probability_range"
     if yes_ucb < yes_q or no_lcb_raw > no_q or no_lcb_served > no_lcb_raw + 1e-12:
-        return False
+        return "certificate_probability_order"
 
     def same(left: float, right: float) -> bool:
         return math.isclose(left, right, rel_tol=0.0, abs_tol=1e-12)
 
-    if not all(
-        (
-            same(yes_q, same_bin_yes_posterior),
-            same(no_q, q_direction),
-            same(no_q, 1.0 - yes_q),
-            same(no_lcb_raw, 1.0 - yes_ucb),
-            bool(certificate.get("coverage_shrink_applied"))
-            == (no_lcb_served < no_lcb_raw - 1e-12),
-            q_lcb <= no_lcb_served + 1e-12,
-        )
+    if not same(yes_q, same_bin_yes_posterior):
+        return "served_yes_q"
+    if not same(no_q, q_direction):
+        return "served_no_q"
+    if not same(no_q, 1.0 - yes_q):
+        return "binary_complement_q"
+    if not same(no_lcb_raw, 1.0 - yes_ucb):
+        return "binary_complement_lcb"
+    if bool(certificate.get("coverage_shrink_applied")) != (
+        no_lcb_served < no_lcb_raw - 1e-12
     ):
-        return False
+        return "coverage_shrink_flag"
+    if q_lcb > no_lcb_served + 1e-12:
+        return "served_no_lcb_loosened"
     if same(q_lcb, no_lcb_served):
-        return True
+        return None
     economics = qkernel_execution_economics
     if not isinstance(economics, Mapping):
-        return False
+        return "qkernel_economics_missing"
     if economics.get("q_lcb_authority") != "qkernel_payoff_bound":
-        return False
+        return "qkernel_q_lcb_authority"
     if economics.get("probability_authority") != "qkernel_payoff_direct_route":
-        return False
+        return "qkernel_probability_authority"
     try:
         pre_q = float(economics["pre_qkernel_q_posterior"])
         pre_lcb = float(economics["pre_qkernel_q_lcb_5pct"])
         payoff_q = float(economics["payoff_q_point"])
         payoff_lcb = float(economics["payoff_q_lcb"])
     except (KeyError, TypeError, ValueError):
-        return False
-    return all(
-        math.isfinite(value) for value in (pre_q, pre_lcb, payoff_q, payoff_lcb)
-    ) and all(
-        (
-            same(pre_q, no_q),
-            same(pre_lcb, no_lcb_served),
-            same(payoff_q, q_direction),
-            same(payoff_lcb, q_lcb),
-        )
-    )
+        return "qkernel_probability_fields"
+    if not all(math.isfinite(value) for value in (pre_q, pre_lcb, payoff_q, payoff_lcb)):
+        return "qkernel_probability_nonfinite"
+    if not same(pre_q, no_q):
+        return "qkernel_pre_q"
+    if not same(pre_lcb, no_lcb_served):
+        return "qkernel_pre_lcb"
+    if not same(payoff_q, q_direction):
+        return "qkernel_payoff_q"
+    if not same(payoff_lcb, q_lcb):
+        return "qkernel_payoff_lcb"
+    return None
 
 
 def replacement_probability_bundle_hash(

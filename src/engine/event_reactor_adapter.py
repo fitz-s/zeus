@@ -260,7 +260,8 @@ from src.strategy.live_inference.live_admission import (
     live_buy_no_conservative_evidence_rejection_reason,
     live_capital_efficiency_rejection_reason,
     live_near_settled_entry_price_rejection_reason,
-    replacement_no_bound_certificate_matches,
+    replacement_no_bound_certificate_matches,  # noqa: F401 - compatibility test surface
+    replacement_no_bound_certificate_mismatch_reason,
     replacement_no_bound_expected_from_parents,
     replacement_probability_bundle_hash,
 )
@@ -13729,7 +13730,7 @@ def _build_no_submit_proof_bundle_from_adapter_evidence(
                 **replacement_candidate_fields,
             },
         )
-        if not replacement_no_bound_certificate_matches(
+        mismatch_reason = replacement_no_bound_certificate_mismatch_reason(
             certificate,
             expected=expected,
             q_direction=float(proof.q_posterior),
@@ -13739,8 +13740,12 @@ def _build_no_submit_proof_bundle_from_adapter_evidence(
             probability_authority=proof.probability_authority,
             posterior_id=proof.posterior_id,
             condition_id=str(raw_receipt.get("condition_id") or ""),
-        ):
-            raise ValueError("REPLACEMENT_NO_BOUND_CERTIFICATE_PARENT_MISMATCH")
+        )
+        if mismatch_reason is not None:
+            raise ValueError(
+                "REPLACEMENT_NO_BOUND_CERTIFICATE_PARENT_MISMATCH:"
+                f"{mismatch_reason}"
+            )
     return NoSubmitProofBundle(
         final_intent_id=str(raw_receipt.get("final_intent_id") or ""),
         source_truth=AuthorityEvidence(

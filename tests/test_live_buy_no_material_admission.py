@@ -27,6 +27,7 @@ from src.strategy.live_inference.live_admission import (
     LIVE_BUY_NO_MATERIAL_ALLOWED_LCB_SOURCES,
     live_buy_no_conservative_evidence_rejection_reason,
     live_near_settled_entry_price_rejection_reason,
+    replacement_no_bound_certificate_mismatch_reason,
     replacement_no_bound_expected_from_parents,
     replacement_probability_bundle_hash,
 )
@@ -103,6 +104,25 @@ _REPLACEMENT_NO_EXPECTED = replacement_no_bound_expected_from_parents(
         "replacement_no_bound_served_lcb": 0.62,
     },
 )
+
+
+def test_replacement_no_bound_mismatch_names_exact_parent_field() -> None:
+    assert _REPLACEMENT_NO_EXPECTED is not None
+    expected = {**_REPLACEMENT_NO_EXPECTED, "posterior_identity_hash": "9" * 64}
+
+    reason = replacement_no_bound_certificate_mismatch_reason(
+        _REPLACEMENT_NO_CERT,
+        expected=expected,
+        q_direction=0.65,
+        q_lcb=0.62,
+        same_bin_yes_posterior=0.35,
+        qkernel_execution_economics=None,
+        probability_authority="replacement_0_1",
+        posterior_id=271828,
+        condition_id="cond-wellington-high-24c",
+    )
+
+    assert reason == "parent_field:posterior_identity_hash"
 
 
 def test_material_yes_buy_no_without_allowed_source_is_rejected_even_with_positive_edge() -> None:
