@@ -854,6 +854,51 @@ class ForecastSnapshotReadyTrigger:
                 " AND fp.runtime_layer = 'live' AND fp.training_allowed = 0"
             )
             _select_sql_base = f"""
+                WITH ranked_ready AS (
+                    SELECT
+                        rs.*,
+                        ROW_NUMBER() OVER (
+                            PARTITION BY
+                                rs.scope_type,
+                                rs.strategy_key,
+                                rs.source_id,
+                                rs.data_version,
+                                rs.city,
+                                rs.target_local_date,
+                                rs.temperature_metric
+                            ORDER BY julianday(rs.computed_at) DESC,
+                                     rs.readiness_id DESC
+                        ) AS _family_rank
+                      FROM readiness_state AS rs
+                     WHERE rs.strategy_key = '{REPLACEMENT_STRATEGY_KEY}'
+                       AND rs.scope_type = 'strategy'
+                       AND rs.source_id = '{REPLACEMENT_SOURCE_ID}'
+                       AND julianday(rs.computed_at) <= julianday(?)
+                ),
+                ready_posterior AS (
+                    SELECT rs.*, dep.value AS dependency
+                      FROM ranked_ready AS rs,
+                           json_each(
+                               CASE
+                                   WHEN json_valid(rs.dependency_json)
+                                   THEN rs.dependency_json
+                                   ELSE '{{}}'
+                               END,
+                               '$.dependencies'
+                           ) AS dep
+                     WHERE rs._family_rank = 1
+                       AND rs.status = '{REPLACEMENT_READY_STATUS}'
+                       AND rs.expires_at IS NOT NULL
+                       AND julianday(rs.expires_at) > julianday(?)
+                       AND json_extract(dep.value, '$.role') = 'soft_anchor_posterior'
+                       AND json_extract(dep.value, '$.source_id') = rs.source_id
+                       AND json_extract(dep.value, '$.status') = '{REPLACEMENT_READY_STATUS}'
+                       AND json_type(dep.value, '$.source_available_at') = 'text'
+                       AND julianday(
+                           json_extract(dep.value, '$.source_available_at')
+                       ) <= julianday(?)
+                       AND json_type(dep.value, '$.posterior_id') = 'integer'
+                )
                 SELECT
                     fp.posterior_id AS coverage_id,
                     fp.posterior_identity_hash AS source_run_id,
@@ -900,7 +945,12 @@ class ForecastSnapshotReadyTrigger:
                     fp.posterior_identity_hash AS snapshot_manifest_hash,
                     fp.provenance_json AS provenance_json,
                     NULL AS snapshot_members_json
-                  FROM forecast_posteriors fp
+                  FROM ready_posterior AS rs
+                  JOIN forecast_posteriors AS fp
+                    ON fp.posterior_id = json_extract(
+                        rs.dependency,
+                        '$.posterior_id'
+                    )
                  WHERE fp.product_id = '{REPLACEMENT_0_1_PRODUCT_ID}'
                    {_posterior_runtime_filter}
                    {_family_filter_sql}
@@ -913,76 +963,30 @@ class ForecastSnapshotReadyTrigger:
                        fp.computed_at IS NULL
                        OR julianday(fp.computed_at) <= julianday(?)
                    )
-                   AND EXISTS (
-                        SELECT 1
-                          FROM readiness_state AS rs,
-                               json_each(
-                                   CASE
-                                       WHEN json_valid(rs.dependency_json)
-                                       THEN rs.dependency_json
-                                       ELSE '{{}}'
-                                   END,
-                                   '$.dependencies'
-                               ) AS dep
-                         WHERE rs.strategy_key = '{REPLACEMENT_STRATEGY_KEY}'
-                           AND rs.scope_type = 'strategy'
-                           AND rs.source_id = '{REPLACEMENT_SOURCE_ID}'
-                           AND rs.data_version = CASE fp.temperature_metric
-                                WHEN 'high' THEN '{REPLACEMENT_HIGH_DATA_VERSION}'
-                                WHEN 'low' THEN '{REPLACEMENT_LOW_DATA_VERSION}'
-                           END
-                           AND rs.status = '{REPLACEMENT_READY_STATUS}'
-                           AND julianday(rs.computed_at) <= julianday(?)
-                           AND rs.expires_at IS NOT NULL
-                           AND julianday(rs.expires_at) > julianday(?)
-                           AND fp.source_id = rs.source_id
-                           AND fp.data_version = rs.data_version
-                           AND rs.city = fp.city
-                           AND rs.target_local_date = fp.target_date
-                           AND rs.temperature_metric = fp.temperature_metric
-                           AND json_extract(dep.value, '$.role') = 'soft_anchor_posterior'
-                           AND json_extract(dep.value, '$.source_id') = rs.source_id
-                           AND json_extract(dep.value, '$.product_id') = fp.product_id
-                           AND json_extract(dep.value, '$.data_version') = rs.data_version
-                           AND json_extract(dep.value, '$.status') = '{REPLACEMENT_READY_STATUS}'
-                           AND json_type(dep.value, '$.source_available_at') = 'text'
-                           AND julianday(
-                               json_extract(dep.value, '$.source_available_at')
-                           ) <= julianday(?)
-                           AND json_type(dep.value, '$.posterior_id') = 'integer'
-                           AND json_extract(dep.value, '$.posterior_id') = fp.posterior_id
-                           AND NOT EXISTS (
-                               SELECT 1
-                                 FROM readiness_state AS newer_rs
-                                WHERE newer_rs.scope_type = rs.scope_type
-                                  AND newer_rs.strategy_key = rs.strategy_key
-                                  AND newer_rs.source_id = rs.source_id
-                                  AND newer_rs.data_version = rs.data_version
-                                  AND newer_rs.city = rs.city
-                                  AND newer_rs.target_local_date = rs.target_local_date
-                                  AND newer_rs.temperature_metric = rs.temperature_metric
-                                  AND julianday(newer_rs.computed_at) <= julianday(?)
-                                  AND (
-                                      julianday(newer_rs.computed_at) > julianday(rs.computed_at)
-                                      OR (
-                                          julianday(newer_rs.computed_at) = julianday(rs.computed_at)
-                                          AND newer_rs.readiness_id > rs.readiness_id
-                                      )
-                                  )
-                           )
-                   ){posterior_market_filter}
+                   AND rs.data_version = CASE fp.temperature_metric
+                        WHEN 'high' THEN '{REPLACEMENT_HIGH_DATA_VERSION}'
+                        WHEN 'low' THEN '{REPLACEMENT_LOW_DATA_VERSION}'
+                   END
+                   AND fp.source_id = rs.source_id
+                   AND fp.data_version = rs.data_version
+                   AND rs.city = fp.city
+                   AND rs.target_local_date = fp.target_date
+                   AND rs.temperature_metric = fp.temperature_metric
+                   AND json_extract(rs.dependency, '$.product_id') = fp.product_id
+                   AND json_extract(rs.dependency, '$.data_version') = rs.data_version
+                   AND json_extract(rs.dependency, '$.posterior_id') = fp.posterior_id
+                   {posterior_market_filter}
                 ORDER BY fp.source_cycle_time DESC, fp.computed_at DESC
                 """
             rows = _dict_rows(
                 forecasts_conn,
                 _select_sql_base,
                 (
+                    _decision_iso,
+                    _decision_iso,
+                    _decision_iso,
                     *_family_filter_params,
                     _target_date_floor,
-                    _decision_iso,
-                    _decision_iso,
-                    _decision_iso,
-                    _decision_iso,
                     _decision_iso,
                     _decision_iso,
                 ),
