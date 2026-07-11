@@ -2299,17 +2299,9 @@ def _refresh_exit_collateral_snapshot_for_submit(
     token_id: str | None = None,
     shares: float | None = None,
 ) -> dict:
-    """Refresh CTF inventory truth before exit sell preflight."""
+    """Refresh CTF truth before preflight; periodic pUSD snapshots omit it."""
     from src.execution.collateral import refresh_collateral_snapshot_for_submit
-    from src.state.collateral_ledger import CollateralInsufficient, CollateralLedger
 
-    if token_id and shares is not None:
-        try:
-            CollateralLedger(conn).sell_preflight(token_id=token_id, size=shares)
-        except CollateralInsufficient as exc:
-            reason = str(exc)
-            if reason.startswith(("ctf_tokens_insufficient", "ctf_allowance_insufficient")):
-                raise
     return refresh_collateral_snapshot_for_submit(
         conn,
         action="exit_submit",
