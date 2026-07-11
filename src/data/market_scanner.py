@@ -4770,6 +4770,7 @@ def refresh_executable_market_substrate_snapshots(
     budget_seconds: float | None = None,
     capture_reserve_seconds: float | None = None,
     priority_condition_ids: set[str] | frozenset[str] | tuple[str, ...] | list[str] | None = None,
+    force_refresh_condition_ids: set[str] | frozenset[str] | tuple[str, ...] | list[str] | None = None,
     snapshot_write_context_factory: Callable[[], contextlib.AbstractContextManager[object]] | None = None,
 ) -> dict[str, Any]:
     """Capture fresh executable snapshots for the live reader substrate.
@@ -4794,6 +4795,13 @@ def refresh_executable_market_substrate_snapshots(
         for condition_id in (priority_condition_ids or ())
         if str(condition_id or "").strip()
     }
+    forced_conditions = {
+        str(condition_id or "").strip()
+        for condition_id in (force_refresh_condition_ids or ())
+        if str(condition_id or "").strip()
+    }
+    if not forced_conditions.issubset(priority_conditions):
+        raise ValueError("forced snapshot recapture requires exact priority scope")
     priority_condition_rank: dict[str, int] = {}
     for raw_condition_id in priority_condition_ids or ():
         condition_id = str(raw_condition_id or "").strip()
@@ -4897,9 +4905,12 @@ def refresh_executable_market_substrate_snapshots(
                     continue
                 selected_token = _selected_token_for_direction(outcome, direction)
                 if selected_token and selected_token in fresh_selected_tokens:
-                    _reject_candidate("selected_token_already_fresh")
-                    skipped += 1
-                    continue
+                    if condition_id in forced_conditions:
+                        _override_candidate("forced_selected_token_recapture")
+                    else:
+                        _reject_candidate("selected_token_already_fresh")
+                        skipped += 1
+                        continue
                 seen_snapshot_sides.add(snapshot_side)
                 candidate_count += 1
                 candidate_cities.add(city_key)
@@ -5084,12 +5095,17 @@ def refresh_executable_market_substrate_snapshots(
         # witness surface. Hydrate from it first, then spend network time only on
         # missing books. Doing the CLOB batch first lets a single slow /books call
         # consume the entire reserve before the cheap local witness can be used.
+        feasibility_candidates = [
+            candidate
+            for candidate in selected_candidates
+            if str(candidate[5] or "").strip() not in forced_conditions
+        ]
         prefetched_books.update(
             {
                 token_id: book
                 for token_id, book in _prefetch_selected_orderbooks_from_feasibility(
                     conn,
-                    selected_candidates,
+                    feasibility_candidates,
                     captured=captured,
                     already_prefetched=set(prefetched_books),
                     deadline=prefetch_deadline,

@@ -825,7 +825,15 @@ def test_decision_refresher_invokes_scoped_producer_and_proves_freshness(monkeyp
 
     def _refresh_now(**kwargs):
         refreshed.append(kwargs)
-        return {"status": "refreshed", "inserted": 2}
+        return {
+            "status": "refreshed",
+            "attempted": 2,
+            "inserted": 2,
+            "prefetched_orderbook_count": 2,
+            "executable_snapshot_candidate_override_counts": {
+                "forced_selected_token_recapture": 2,
+            },
+        }
 
     def _fresh_scope(scope, *, now_utc):
         assert now_utc.tzinfo is not None
@@ -880,7 +888,16 @@ def test_global_winner_refresher_requests_exact_condition_recapture(monkeypatch)
     monkeypatch.setattr(
         substrate_observer_module,
         "refresh_money_path_substrate_now",
-        lambda **kwargs: refreshed.append(kwargs) or {"status": "refreshed"},
+        lambda **kwargs: refreshed.append(kwargs)
+        or {
+            "status": "refreshed",
+            "attempted": 2,
+            "inserted": 2,
+            "prefetched_orderbook_count": 2,
+            "executable_snapshot_candidate_override_counts": {
+                "forced_selected_token_recapture": 2,
+            },
+        },
     )
     monkeypatch.setattr(
         reactor,
@@ -930,6 +947,112 @@ def test_global_winner_refresher_rejects_lock_busy_cached_fresh_row(monkeypatch)
         condition_ids=("winner-condition",),
         force_refresh=True,
     ) is False
+
+
+def test_forced_producer_recaptures_both_fresh_native_sides_from_network(monkeypatch):
+    """The exact winner force reaches below cache and feasibility freshness."""
+
+    market = {
+        "city": "Wellington",
+        "slug": "highest-temperature-in-wellington-on-july-12-2026",
+        "target_date": "2026-07-12",
+        "temperature_metric": "high",
+        "outcomes": [
+            {
+                "condition_id": "winner-condition",
+                "market_id": "winner-condition",
+                "token_id": "winner-yes",
+                "no_token_id": "winner-no",
+            }
+        ],
+    }
+    monkeypatch.setattr(
+        market_scanner,
+        "_snapshot_condition_refresh_state",
+        lambda *_args, **_kwargs: ((0, 0.0), {"winner-yes", "winner-no"}),
+    )
+    monkeypatch.setattr(
+        market_scanner,
+        "_configured_batch_orderbook_getter",
+        lambda _clob: lambda _tokens: {},
+    )
+    feasibility_candidate_counts: list[int] = []
+    monkeypatch.setattr(
+        market_scanner,
+        "_prefetch_selected_orderbooks_from_feasibility",
+        lambda _conn, candidates, **_kwargs: feasibility_candidate_counts.append(
+            len(candidates)
+        )
+        or {},
+    )
+    network_tokens: list[str] = []
+
+    def _network_books(_clob, candidates, **_kwargs):
+        books = {}
+        for candidate in candidates:
+            token = market_scanner._selected_token_for_direction(
+                candidate[4], candidate[6]
+            )
+            network_tokens.append(token)
+            books[token] = {
+                "asset_id": token,
+                "hash": f"hash-{token}",
+                "bids": [],
+                "asks": [{"price": "0.40", "size": "100"}],
+            }
+        return books
+
+    monkeypatch.setattr(
+        market_scanner,
+        "_prefetch_selected_orderbooks",
+        _network_books,
+    )
+    monkeypatch.setattr(
+        market_scanner,
+        "_prefetch_selected_clob_market_info",
+        lambda *_args, **_kwargs: ({}, set()),
+    )
+    captured_tokens: list[str] = []
+    monkeypatch.setattr(
+        market_scanner,
+        "capture_executable_market_snapshot",
+        lambda _conn, *, decision, **_kwargs: captured_tokens.append(
+            market_scanner._selected_token_for_direction(
+                market["outcomes"][0], decision.edge.direction
+            )
+        ),
+    )
+
+    ordinary = market_scanner.refresh_executable_market_substrate_snapshots(
+        sqlite3.connect(":memory:"),
+        markets=[market],
+        clob=object(),
+        captured_at=datetime(2026, 7, 11, 1, 47, tzinfo=timezone.utc),
+        max_outcomes=0,
+        priority_condition_ids={"winner-condition"},
+    )
+    forced = market_scanner.refresh_executable_market_substrate_snapshots(
+        sqlite3.connect(":memory:"),
+        markets=[market],
+        clob=object(),
+        captured_at=datetime(2026, 7, 11, 1, 47, tzinfo=timezone.utc),
+        max_outcomes=0,
+        priority_condition_ids={"winner-condition"},
+        force_refresh_condition_ids={"winner-condition"},
+    )
+
+    assert ordinary["attempted"] == 0
+    assert ordinary["executable_snapshot_candidate_rejection_counts"] == {
+        "selected_token_already_fresh": 2,
+    }
+    assert forced["attempted"] == forced["inserted"] == 2
+    assert forced["prefetched_orderbook_count"] == 2
+    assert forced["executable_snapshot_candidate_override_counts"] == {
+        "forced_selected_token_recapture": 2,
+    }
+    assert feasibility_candidate_counts == [0, 0]
+    assert set(network_tokens) == {"winner-yes", "winner-no"}
+    assert set(captured_tokens) == {"winner-yes", "winner-no"}
 
 
 def test_background_substrate_warm_leaves_lock_window_for_money_path_refresh():

@@ -293,25 +293,8 @@ def _jit_curve(
     )
 
 
-def _exact_order_decision(curve: ExecutableCostCurve) -> SimpleNamespace:
-    from src.solve.solver import exact_single_order_execution_terms
-
-    shares = Decimal("5")
-    cost, limit, vwap, max_spend = exact_single_order_execution_terms(
-        SimpleNamespace(executable_cost_curve=curve),
-        shares,
-    )
-    return SimpleNamespace(
-        shares=shares,
-        cost_usd=cost,
-        limit_price=limit,
-        expected_fill_price_before_fee=vwap,
-        max_spend_usd=max_spend,
-    )
-
-
 @pytest.mark.parametrize(("side", "token_id", "touch"), (("YES", "yes-1", "0.40"), ("NO", "no-1", "0.55")))
-def test_global_jit_exact_order_ignores_only_unused_depth_churn(
+def test_global_jit_curve_allows_only_evidence_carrier_churn(
     side: str,
     token_id: str,
     touch: str,
@@ -328,18 +311,18 @@ def test_global_jit_exact_order_ignores_only_unused_depth_churn(
         token_id=token_id,
         snapshot_id="jit",
         book_hash="jit-book",
-        levels=((touch, "5"), ("0.80", "250")),
+        levels=((touch, "5"), ("0.70", "100")),
     )
 
-    assert era._global_exact_order_execution_rejection_reason(
+    assert era._global_execution_curve_economically_unchanged(
+        selected_candidate=SimpleNamespace(executable_cost_curve=selected),
         current_candidate=SimpleNamespace(executable_cost_curve=current),
-        decision=_exact_order_decision(selected),
-    ) is None
+    )
 
 
 @pytest.mark.parametrize(("side", "token_id", "touch"), (("YES", "yes-1", "0.40"), ("NO", "no-1", "0.55")))
-@pytest.mark.parametrize("drift", ("price", "used_depth", "fee", "insufficient_depth", "min_order"))
-def test_global_jit_exact_order_rejects_adverse_or_unexecutable_drift(
+@pytest.mark.parametrize("drift", ("deep_price", "deep_size", "fee", "tick", "min_order"))
+def test_global_jit_curve_rejects_any_economic_drift(
     side: str,
     token_id: str,
     touch: str,
@@ -357,60 +340,110 @@ def test_global_jit_exact_order_rejects_adverse_or_unexecutable_drift(
         "token_id": token_id,
         "snapshot_id": "jit",
         "book_hash": f"jit-{drift}",
-        "levels": ((touch, "5"), ("0.80", "250")),
+        "levels": ((touch, "5"), ("0.70", "100")),
         "fee_rate": "0",
+        "min_tick": "0.01",
         "min_order_size": "5",
     }
-    if drift == "price":
-        current_kwargs["levels"] = ((str(Decimal(touch) + Decimal("0.01")), "5"),)
-    elif drift == "used_depth":
-        current_kwargs["levels"] = ((touch, "2"), (str(Decimal(touch) + Decimal("0.01")), "3"))
+    if drift == "deep_price":
+        current_kwargs["levels"] = ((touch, "5"), ("0.71", "100"))
+    elif drift == "deep_size":
+        current_kwargs["levels"] = ((touch, "5"), ("0.70", "101"))
     elif drift == "fee":
         current_kwargs["fee_rate"] = "0.02"
-    elif drift == "insufficient_depth":
-        current_kwargs["levels"] = ((touch, "4"),)
+    elif drift == "tick":
+        current_kwargs["min_tick"] = "0.05"
     elif drift == "min_order":
         current_kwargs["min_order_size"] = "6"
     current = _jit_curve(**current_kwargs)
 
-    reason = era._global_exact_order_execution_rejection_reason(
+    assert not era._global_execution_curve_economically_unchanged(
+        selected_candidate=SimpleNamespace(executable_cost_curve=selected),
         current_candidate=SimpleNamespace(executable_cost_curve=current),
-        decision=_exact_order_decision(selected),
     )
 
-    assert reason is not None
-    if drift in {"insufficient_depth", "min_order"}:
-        assert reason.startswith("exact_order_unexecutable=")
-    else:
-        assert reason.startswith("exact_order_drift=")
 
-
-@pytest.mark.parametrize(("side", "token_id", "touch"), (("YES", "yes-1", "0.40"), ("NO", "no-1", "0.55")))
-def test_global_jit_exact_order_accepts_current_tick_when_order_stays_on_grid(
-    side: str,
-    token_id: str,
-    touch: str,
-):
+def test_global_jit_curve_rejects_critic_deeper_liquidity_counterexample():
     selected = _jit_curve(
-        side=side,
-        token_id=token_id,
+        side="YES",
+        token_id="yes-1",
         snapshot_id="selected",
         book_hash="selected-book",
-        levels=((touch, "5"), ("0.70", "100")),
+        levels=(("0.40", "5"), ("0.90", "100")),
     )
     current = _jit_curve(
-        side=side,
-        token_id=token_id,
+        side="YES",
+        token_id="yes-1",
         snapshot_id="jit",
         book_hash="jit-book",
-        levels=((touch, "5"), ("0.80", "250")),
-        min_tick="0.05",
+        levels=(("0.40", "5"), ("0.41", "100")),
     )
 
-    assert era._global_exact_order_execution_rejection_reason(
+    assert not era._global_execution_curve_economically_unchanged(
+        selected_candidate=SimpleNamespace(executable_cost_curve=selected),
         current_candidate=SimpleNamespace(executable_cost_curve=current),
-        decision=_exact_order_decision(selected),
-    ) is None
+    )
+
+
+def test_global_jit_refresh_targets_winner_sibling_not_trigger_row():
+    rows = (
+        {
+            "snapshot_id": "trigger-snapshot",
+            "condition_id": "trigger-condition",
+            "selected_outcome_token_id": "trigger-yes",
+            "yes_token_id": "trigger-yes",
+            "no_token_id": "trigger-no",
+            "captured_at": "2026-07-11T01:00:02+00:00",
+        },
+        {
+            "snapshot_id": "winner-snapshot",
+            "condition_id": "winner-condition",
+            "selected_outcome_token_id": "winner-no",
+            "yes_token_id": "winner-yes",
+            "no_token_id": "winner-no",
+            "captured_at": "2026-07-11T01:00:01+00:00",
+        },
+    )
+    winner = SimpleNamespace(
+        condition_id="winner-condition",
+        token_id="winner-no",
+        side="NO",
+    )
+
+    row = era._global_candidate_snapshot_row(rows, winner)
+    conditions, token = era._decision_snapshot_refresh_target(
+        row=rows[0],
+        payload={"token_id": "trigger-yes"},
+        family_condition_ids=("trigger-condition", "winner-condition"),
+        global_candidate=winner,
+    )
+
+    assert row is not None
+    assert row["snapshot_id"] == "winner-snapshot"
+    assert conditions == ("winner-condition",)
+    assert token == "winner-no"
+
+
+def test_global_jit_requires_a_newer_distinct_winner_snapshot():
+    before = {
+        "snapshot_id": "winner-before",
+        "captured_at": "2026-07-11T01:00:00+00:00",
+    }
+    assert era._global_jit_snapshot_advanced(
+        before=before,
+        after={
+            "snapshot_id": "winner-after",
+            "captured_at": "2026-07-11T01:00:01+00:00",
+        },
+    )
+    assert not era._global_jit_snapshot_advanced(before=before, after=before)
+    assert not era._global_jit_snapshot_advanced(
+        before=before,
+        after={
+            "snapshot_id": "winner-other",
+            "captured_at": "2026-07-11T00:59:59+00:00",
+        },
+    )
 
 
 def test_global_submit_rebinds_to_actuation_jit_book_hash():

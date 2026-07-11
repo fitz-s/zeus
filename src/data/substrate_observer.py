@@ -2144,6 +2144,7 @@ def _refresh_pending_family_snapshots(
                     budget_seconds=snapshot_budget_s,
                     capture_reserve_seconds=snapshot_reserve_s,
                     priority_condition_ids=priority_conditions,
+                    force_refresh_condition_ids=forced_conditions,
                     snapshot_write_context_factory=_substrate_snapshot_trade_write_context_factory(
                         "substrate_pending_family_snapshot_refresh"
                     ),

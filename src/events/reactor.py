@@ -6703,7 +6703,18 @@ def _edli_decision_family_snapshot_refresher(topology_conn):
         if clean_condition_ids:
             try:
                 refresh_completed = (
-                    str((summary or {}).get("status") or "") == "refreshed"
+                    (
+                        str((summary or {}).get("status") or "") == "refreshed"
+                        and int((summary or {}).get("attempted") or 0) >= 2
+                        and int((summary or {}).get("inserted") or 0) >= 2
+                        and int((summary or {}).get("prefetched_orderbook_count") or 0) >= 2
+                        and int(
+                            ((summary or {}).get("executable_snapshot_candidate_override_counts") or {}).get(
+                                "forced_selected_token_recapture", 0
+                            )
+                        )
+                        >= 2
+                    )
                     if force_refresh
                     else True
                 )

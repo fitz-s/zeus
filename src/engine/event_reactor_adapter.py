@@ -5515,46 +5515,6 @@ def _record_qkernel_selection_family_facts(
     }
 
 
-def _global_exact_order_execution_rejection_reason(
-    *,
-    current_candidate: object,
-    decision: object,
-) -> str | None:
-    """Reject JIT curves that change the globally selected exact BUY."""
-
-    from src.solve.solver import exact_single_order_execution_terms
-
-    shares = getattr(decision, "shares", None)
-    if shares is None:
-        return "exact_order_unexecutable=shares_missing"
-    try:
-        current_terms = exact_single_order_execution_terms(
-            current_candidate,
-            shares,
-        )
-    except (TypeError, ValueError) as exc:
-        return f"exact_order_unexecutable={exc}"
-    selected_terms = (
-        getattr(decision, "cost_usd", None),
-        getattr(decision, "limit_price", None),
-        getattr(decision, "expected_fill_price_before_fee", None),
-        getattr(decision, "max_spend_usd", None),
-    )
-    drift = tuple(
-        name
-        for name, selected_value, current_value in zip(
-            ("cost", "limit", "vwap", "max_spend"),
-            selected_terms,
-            current_terms,
-            strict=True,
-        )
-        if current_value != selected_value
-    )
-    if drift:
-        return "exact_order_drift=" + ",".join(drift)
-    return None
-
-
 def _global_jit_book_hash_for_submit(
     *,
     actionable_payload: Mapping[str, Any],
@@ -5581,6 +5541,108 @@ def _global_jit_book_hash_for_submit(
     return str(cert["global_jit_venue_book_hash"])
 
 
+def _global_candidate_snapshot_row(
+    rows: Sequence[Mapping[str, Any]],
+    candidate: object,
+) -> dict[str, Any] | None:
+    """Return the exact native-side snapshot row for the global winner."""
+
+    condition_id = str(getattr(candidate, "condition_id", "") or "").strip()
+    token_id = str(getattr(candidate, "token_id", "") or "").strip()
+    side = str(getattr(candidate, "side", "") or "").strip().upper()
+    if not condition_id or not token_id or side not in {"YES", "NO"}:
+        return None
+    token_field = "yes_token_id" if side == "YES" else "no_token_id"
+    bound = [
+        dict(row)
+        for row in rows
+        if str(row.get("condition_id") or "") == condition_id
+        and str(row.get(token_field) or "") == token_id
+    ]
+    if not bound:
+        return None
+    exact = [
+        row
+        for row in bound
+        if str(row.get("selected_outcome_token_id") or "") == token_id
+    ]
+    candidates = exact or bound
+    return max(
+        candidates,
+        key=lambda row: (
+            _utc_datetime_or_none(row.get("captured_at"))
+            or datetime.min.replace(tzinfo=UTC),
+            str(row.get("snapshot_id") or ""),
+        ),
+    )
+
+
+def _decision_snapshot_refresh_target(
+    *,
+    row: Mapping[str, Any],
+    payload: Mapping[str, Any],
+    family_condition_ids: Sequence[str],
+    global_candidate: object | None,
+) -> tuple[tuple[str, ...], str | None]:
+    """Target the global winner; ordinary decisions retain trigger scope."""
+
+    condition_id = str(
+        getattr(global_candidate, "condition_id", "")
+        if global_candidate is not None
+        else row.get("condition_id") or ""
+    ).strip()
+    token_id = str(
+        getattr(global_candidate, "token_id", "")
+        if global_candidate is not None
+        else payload.get("token_id") or ""
+    ).strip()
+    conditions = (condition_id,) if condition_id else tuple(family_condition_ids)
+    return conditions, token_id or None
+
+
+def _global_jit_snapshot_advanced(
+    *,
+    before: Mapping[str, Any],
+    after: Mapping[str, Any],
+) -> bool:
+    """Prove the exact winner row was recaptured after its pre-JIT row."""
+
+    before_id = str(before.get("snapshot_id") or "").strip()
+    after_id = str(after.get("snapshot_id") or "").strip()
+    before_at = _utc_datetime_or_none(before.get("captured_at"))
+    after_at = _utc_datetime_or_none(after.get("captured_at"))
+    return bool(
+        before_id
+        and after_id
+        and before_id != after_id
+        and before_at is not None
+        and after_at is not None
+        and after_at > before_at
+    )
+
+
+def _global_execution_curve_economically_unchanged(
+    *,
+    selected_candidate: object,
+    current_candidate: object,
+) -> bool:
+    """Ignore evidence carriers but preserve the complete native ask economy."""
+
+    from src.solve.solver import executable_curve_identity
+
+    selected = getattr(selected_candidate, "executable_cost_curve", None)
+    current = getattr(current_candidate, "executable_cost_curve", None)
+    if selected is None or current is None:
+        return False
+    aligned = dataclass_replace(
+        selected,
+        snapshot_id=current.snapshot_id,
+        book_hash=current.book_hash,
+        quote_ttl=current.quote_ttl,
+    )
+    return executable_curve_identity(aligned) == executable_curve_identity(current)
+
+
 def _global_actuation_selected_proof(
     *,
     global_actuation: object,
@@ -5595,7 +5657,7 @@ def _global_actuation_selected_proof(
 ) -> "_CandidateProof":
     """Bind the exact global winner back to one current family proof."""
 
-    from src.solve.solver import executable_curve_identity, global_candidate_from_native
+    from src.solve.solver import global_candidate_from_native
 
     decision = getattr(global_actuation, "decision", None)
     candidate = getattr(decision, "candidate", None)
@@ -5678,31 +5740,21 @@ def _global_actuation_selected_proof(
             "GLOBAL_ACTUATION_EXECUTION_BINDING_SUPERSEDED:identity:"
             + ",".join(execution_identity_drift)
         )
-    # The global batch epoch is in-memory while the forced JIT winner refresh is
-    # persisted, so snapshot ids and TTL carriers differ by construction.  A
-    # full-book hash can also change when unused deeper levels move.  That does
-    # not change the selected order.  Admit a different full curve only when the
-    # exact selected native-side BUY still has identical cost, limit, VWAP, and
-    # fee-aware maximum spend on the current JIT curve.  Any used-depth, fee,
-    # price, or capacity change remains fail-closed and is re-auctioned.
-    aligned_curve = dataclass_replace(
-        candidate.executable_cost_curve,
-        snapshot_id=rebound.executable_cost_curve.snapshot_id,
-        quote_ttl=rebound.executable_cost_curve.quote_ttl,
-    )
-    aligned_curve_identity = executable_curve_identity(aligned_curve)
-    if aligned_curve_identity != rebound.execution_curve_identity:
-        exact_order_rejection = _global_exact_order_execution_rejection_reason(
-            current_candidate=rebound,
-            decision=decision,
+    # Snapshot, TTL, and the venue's full-book hash may differ after JIT recapture.
+    # The global optimum remains valid only when the complete executable native
+    # ask curve is economically identical.  Align evidence-only carriers, then
+    # require token, side, every ask level, fee, tick, and minimum order to remain
+    # byte-identical.  Any depth change can change the optimal shares and must be
+    # re-auctioned, even when the previously selected prefix still fills unchanged.
+    if not _global_execution_curve_economically_unchanged(
+        selected_candidate=candidate,
+        current_candidate=rebound,
+    ):
+        raise ValueError(
+            "GLOBAL_ACTUATION_EXECUTION_BINDING_SUPERSEDED:curve_economics:"
+            f"selected={candidate.execution_curve_identity}:"
+            f"current={rebound.execution_curve_identity}"
         )
-        if exact_order_rejection is not None:
-            raise ValueError(
-                "GLOBAL_ACTUATION_EXECUTION_BINDING_SUPERSEDED:curve:"
-                f"selected={aligned_curve_identity}:"
-                f"current={rebound.execution_curve_identity}:"
-                f"{exact_order_rejection}"
-            )
     current_probability = current_global_probability_authority(
         forecast_conn,
         event,
@@ -5994,7 +6046,13 @@ def _build_event_bound_no_submit_receipt_core(
             event.causal_snapshot_id,
             reason=f"EVENT_BOUND_MARKET_TOPOLOGY_INVALID:{exc}",
         )
-    row = _selected_snapshot_row_for_event(family_rows, payload)
+    global_decision = getattr(global_actuation, "decision", None)
+    global_candidate = getattr(global_decision, "candidate", None)
+    row = (
+        _global_candidate_snapshot_row(family_rows, global_candidate)
+        if global_actuation is not None and global_candidate is not None
+        else _selected_snapshot_row_for_event(family_rows, payload)
+    )
     # DecisionProvenanceEnvelope (operator law 2026-06-11): record the EXACT executable
     # snapshot row this decision binds to (book + market_end_at + captured_at). The wrapper
     # assembles the envelope from this capture for EVERY receipt — including every rejection
@@ -6049,11 +6107,14 @@ def _build_event_bound_no_submit_receipt_core(
         (selected_stale_reason is not None or global_actuation is not None)
         and family_snapshot_refresher is not None
     ):
+        pre_refresh_row = dict(row)
         refreshed = False
         try:
-            selected_condition_id = str(row.get("condition_id") or "")
-            refresh_condition_ids = (
-                (selected_condition_id,) if selected_condition_id else family_condition_ids
+            refresh_condition_ids, refresh_token_id = _decision_snapshot_refresh_target(
+                row=row,
+                payload=payload,
+                family_condition_ids=family_condition_ids,
+                global_candidate=global_candidate,
             )
             # Drop the read snapshot so the NET fetch holds no trade-DB txn and the
             # re-read observes the refresher's committed rows (WAL visibility).
@@ -6067,7 +6128,7 @@ def _build_event_bound_no_submit_receipt_core(
                     target_date=str(payload.get("target_date") or ""),
                     metric=str(payload.get("metric") or payload.get("temperature_metric") or ""),
                     condition_ids=refresh_condition_ids,
-                    selected_token_id=str(payload.get("token_id") or "") or None,
+                    selected_token_id=refresh_token_id,
                     force_refresh=global_actuation is not None,
                 )
             )
@@ -6123,10 +6184,20 @@ def _build_event_bound_no_submit_receipt_core(
                         event.causal_snapshot_id,
                         reason=f"EVENT_BOUND_MARKET_TOPOLOGY_INVALID:{exc}",
                     )
-                refreshed_row = _selected_snapshot_row_for_event(family_rows, payload)
+                refreshed_row = (
+                    _global_candidate_snapshot_row(family_rows, global_candidate)
+                    if global_candidate is not None
+                    else _selected_snapshot_row_for_event(family_rows, payload)
+                )
                 if refreshed_row is not None:
                     row = refreshed_row
-                    global_jit_rebound = True
+                    global_jit_rebound = (
+                        global_actuation is None
+                        or _global_jit_snapshot_advanced(
+                            before=pre_refresh_row,
+                            after=row,
+                        )
+                    )
                     if provenance_capture is not None:
                         provenance_capture["snapshot_row"] = row
                     selected_stale_reason = _snapshot_price_stale_reason(row, decision_time=decision_time)
