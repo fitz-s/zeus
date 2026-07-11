@@ -138,15 +138,17 @@ class SupervisorCommand:
     """Venus's only write interface to Zeus: control plane commands."""
     command: Literal[
         "pause_entries", "resume", "tighten_risk",
-        "request_status", "set_strategy_gate", "acknowledge_quarantine_clear",
+        "request_status", "set_strategy_gate", "resolve_review_item",
     ]
     reason: str
     ttl_minutes: Optional[int] = None
     scope: Optional[str] = None
     strategy: Optional[str] = None
     enabled: Optional[bool] = None
-    token_id: Optional[str] = None
-    condition_id: Optional[str] = None
+    work_id: Optional[str] = None
+    authority_revision: Optional[int] = None
+    resolver_identity: Optional[str] = None
+    resolution_evidence: Optional[str] = None
     note: Optional[str] = None
     env: str = ""
     source: str = "venus"
@@ -172,10 +174,11 @@ class SupervisorCommand:
                 raise SupervisorContractError(
                     "set_strategy_gate requires strategy and enabled flags"
                 )
-        elif self.command == "acknowledge_quarantine_clear":
-            if not self.token_id:
+        elif self.command == "resolve_review_item":
+            if not self.work_id or self.authority_revision is None or not self.resolution_evidence:
                 raise SupervisorContractError(
-                    "acknowledge_quarantine_clear requires token_id"
+                    "resolve_review_item requires work_id, authority_revision, "
+                    "and resolution_evidence"
                 )
 
 

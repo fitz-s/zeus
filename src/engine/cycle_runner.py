@@ -14,7 +14,7 @@ from datetime import datetime, timezone
 
 from src.config import STATE_DIR, cities_by_name, get_mode, settings
 from src.control import cutover_guard
-from src.control.control_plane import has_acknowledged_quarantine_clear, is_entries_paused, is_strategy_enabled
+from src.control.control_plane import is_entries_paused, is_strategy_enabled
 # 2026-05-04 (live-block antibody — structural fix #4): operator snapshot for
 # "why are entries blocked right now?" across current runtime blocker probes.
 # Runtime entry authority remains _discovery_gates_allow_entries() below.
