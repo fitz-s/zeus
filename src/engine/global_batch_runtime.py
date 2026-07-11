@@ -6,7 +6,9 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 import hashlib
+import logging
 import sqlite3
+import time
 from typing import Callable, Mapping, Sequence
 
 from src.contracts.executable_market_snapshot import FRESHNESS_WINDOW_DEFAULT
@@ -27,6 +29,7 @@ from src.solve.solver import CurrentFamilyProbabilityAuthority, executable_curve
 from src.state.collateral_ledger import COLLATERAL_SNAPSHOT_MAX_AGE_SECONDS
 
 UTC = timezone.utc
+_LOG = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -409,6 +412,22 @@ def process_current_global_batch(
     decision_time = decision_time.astimezone(UTC)
     event_tuple = tuple(events)
     release_selection_snapshot: Callable[[], None] = lambda: None
+    batch_started = time.monotonic()
+    stage_started = batch_started
+
+    def log_stage(stage: str, *, families: int | None = None) -> None:
+        nonlocal stage_started
+        now = time.monotonic()
+        _LOG.info(
+            "global batch stage completed: %s elapsed_s=%.3f total_s=%.3f "
+            "events=%d families=%s",
+            stage,
+            now - stage_started,
+            now - batch_started,
+            len(event_tuple),
+            families if families is not None else "unknown",
+        )
+        stage_started = now
 
     def current_time() -> datetime:
         now = current_time_provider()
@@ -447,12 +466,14 @@ def process_current_global_batch(
         release_selection_snapshot = _begin_selection_read_snapshot(
             selection_snapshot_connections
         )
+        log_stage("selection_snapshot")
         scope_at = current_time()
         full_scope = scan_current_global_auction_scope(
             world_conn=world_conn,
             forecasts_conn=forecast_conn,
             decision_at_utc=scope_at,
         )
+        log_stage("scope_scan", families=len(full_scope.events_by_family))
         claimed_by_family = {}
         duplicate_owner_by_event: dict[str, str] = {}
         for event in event_tuple:
@@ -492,6 +513,7 @@ def process_current_global_batch(
                     f"GLOBAL_PROBABILITY_EPOCH_CARRIER_MISMATCH:{family_key}"
                 )
             prepared_by_event[owner.event_id] = prepared
+        log_stage("prepare_families", families=len(prepared_by_event))
         if not prepared_by_event:
             return reject("GLOBAL_AUCTION_NO_CURRENT_PROBABILITY_FAMILY")
 
@@ -536,6 +558,7 @@ def process_current_global_batch(
                 )
                 for event_id, prepared in prepared_by_event.items()
             }
+        log_stage("book_epoch_initial", families=len(prepared_by_event))
         probability_manifest = _probability_manifest(probabilities)
         # Selection is a comparison over one immutable information vector.  Scope and
         # q are frozen at ``scope_at``; the complete native YES/NO book and wealth
@@ -607,6 +630,7 @@ def process_current_global_batch(
             )
 
         selected = select_once(probabilities, book_epoch, prepared_by_event)
+        log_stage("select_initial", families=len(prepared_by_event))
         if selected.decision.candidate is None:
             return reject(
                 "GLOBAL_AUCTION_NO_TRADE:"
@@ -650,6 +674,7 @@ def process_current_global_batch(
                 probabilities,
                 current_time(),
             )
+            log_stage("book_epoch_fence", families=len(prepared_by_event))
             if _probability_manifest(probabilities_fence) != probability_manifest:
                 return reject("GLOBAL_PREFLIGHT_PROBABILITY_CUT_DRIFT")
             fence_economics = _book_economics_manifest(book_epoch_fence)
@@ -670,6 +695,7 @@ def process_current_global_batch(
                 book_epoch_fence,
                 prepared_fence,
             )
+            log_stage("select_fence", families=len(prepared_by_event))
             if selected.decision.candidate is None:
                 return reject(
                     "GLOBAL_REAUCTION_NO_TRADE:"
@@ -715,6 +741,7 @@ def process_current_global_batch(
                 current_time(),
                 preflight_authority,
             )
+            log_stage("winner_preflight", families=len(prepared_by_event))
             if venue_submit_count() != before_preflight:
                 return reject("GLOBAL_PREFLIGHT_VENUE_SIDE_EFFECT")
             if preflight.status == "CURVE_SUPERSEDED":

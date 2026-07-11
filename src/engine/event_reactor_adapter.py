@@ -4719,6 +4719,8 @@ def event_bound_live_adapter_from_trade_conn(
             )
             from src.data.market_scanner import _gamma_get
 
+            _book_started = _time.monotonic()
+
             timeout = max(
                 1.0,
                 float(os.environ.get("ZEUS_GLOBAL_AUCTION_BOOK_TIMEOUT_SECONDS", "8.0")),
@@ -4761,12 +4763,20 @@ def event_bound_live_adapter_from_trade_conn(
                 max_workers=8,
                 metadata_sink=gamma_metadata,
             )
+            logging.getLogger(__name__).info(
+                "global book epoch stage completed: token_bind elapsed_s=%.3f "
+                "families=%d metadata=%d",
+                _time.monotonic() - _book_started,
+                len(bound_probabilities),
+                len(gamma_metadata),
+            )
             # The first call may discover missing native token identities through
             # Gamma and therefore receives the exact market metadata needed to price
             # those books.  The late whole-universe fence receives already-bound q,
             # so token binding intentionally skips Gamma; keep the first call's
             # metadata inside this one batch rather than re-discovering topology.
             book_metadata_by_key.update(gamma_metadata)
+            _capture_started = _time.monotonic()
             with PolymarketClient(public_http_timeout=timeout) as clob:
                 epoch = capture_current_global_book_epoch(
                     trade_conn,
@@ -4780,6 +4790,14 @@ def event_bound_live_adapter_from_trade_conn(
                     batch_size=batch_size,
                     metadata_overrides=book_metadata_by_key,
                 )
+            logging.getLogger(__name__).info(
+                "global book epoch stage completed: book_capture elapsed_s=%.3f "
+                "total_s=%.3f families=%d assets=%d",
+                _time.monotonic() - _capture_started,
+                _time.monotonic() - _book_started,
+                len(bound_probabilities),
+                len(getattr(epoch, "assets", ())),
+            )
             return bound_probabilities, epoch
 
         def _current_entry_capital_limit(
