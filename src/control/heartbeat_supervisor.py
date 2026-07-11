@@ -1252,6 +1252,9 @@ def run_heartbeat_keeper(
     cadence = heartbeat_cadence_seconds_from_env() if cadence_seconds is None else int(cadence_seconds)
     if adapter is None:
         install_dedicated_heartbeat_http_timeout(cadence_seconds=cadence)
+        from src.data.proxy_health import bypass_dead_proxy_env_vars
+
+        bypass_dead_proxy_env_vars()
         from src.data.polymarket_client import PolymarketClient
 
         adapter = PolymarketClient()._ensure_v2_adapter()

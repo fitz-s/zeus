@@ -1,8 +1,8 @@
-# Lifecycle: created=2026-04-27; last_reviewed=2026-07-04; last_reused=2026-07-04
+# Lifecycle: created=2026-04-27; last_reviewed=2026-07-11; last_reused=2026-07-11
 # Purpose: Lock R3 Z3 HeartbeatSupervisor fail-closed resting-order gate behavior.
 # Reuse: Run when heartbeat supervision, executor submit gating, or R3 live-money readiness changes.
 # Created: 2026-04-27
-# Last reused/audited: 2026-07-04
+# Last reused/audited: 2026-07-11
 # Authority basis: docs/operations/task_2026-04-26_ultimate_plan/r3/slice_cards/Z3.yaml
 #                  + docs/archive/2026-Q2/task_2026-05-15_live_order_e2e_verification/LIVE_ORDER_E2E_VERIFICATION_PLAN.md
 #                  + 2026-05-17 CLOB venue-heartbeat critical-path split
@@ -916,6 +916,41 @@ def test_heartbeat_keeper_writes_status_without_order_side_effects(tmp_path):
     assert payload["last_error"] is None
     assert payload["resting_order_safe"] is True
     assert payload["consecutive_successes"] == 1
+    assert adapter.heartbeat_ids == [""]
+
+
+def test_heartbeat_keeper_bypasses_dead_proxy_before_client_creation(tmp_path, monkeypatch):
+    """The external keeper must match src.main's pre-client proxy health gate."""
+
+    calls: list[str] = []
+    adapter = FakeHeartbeatAdapter([HeartbeatAck(ok=True, raw={"heartbeat_id": "keeper-A"})])
+
+    monkeypatch.setattr(
+        "src.data.proxy_health.bypass_dead_proxy_env_vars",
+        lambda: calls.append("proxy_health"),
+    )
+
+    class Client:
+        def __init__(self):
+            calls.append("client_created")
+
+        def _ensure_v2_adapter(self):
+            return adapter
+
+    monkeypatch.setattr("src.data.polymarket_client.PolymarketClient", Client)
+    monkeypatch.setattr(
+        heartbeat_supervisor_module,
+        "maybe_recover_missing_live_trading_launchd",
+        lambda **_kwargs: None,
+    )
+
+    run_heartbeat_keeper(
+        status_path=tmp_path / "venue-heartbeat-keeper.json",
+        cadence_seconds=5,
+        max_ticks=1,
+    )
+
+    assert calls == ["proxy_health", "client_created"]
     assert adapter.heartbeat_ids == [""]
 
 

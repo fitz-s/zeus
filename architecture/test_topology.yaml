@@ -484,7 +484,7 @@ test_trust_policy:
     tests/test_zpkt_current_package.py: {created: "2026-05-22", last_used: "2026-05-22"}
     tests/test_z0_plan_lock.py: {created: "2026-04-27", last_used: "2026-04-27"}
     tests/test_cutover_guard.py: {created: "2026-04-27", last_used: "2026-04-27"}
-    tests/test_heartbeat_supervisor.py: {created: "2026-04-27", last_used: "2026-06-26", note: "Heartbeat supervisor fail-closed and market-discovery scheduler antibodies. Extended 2026-06-26 to assert substrate discovery no longer outer-commits snapshot refresh; commit is owned by per-row refresh persist context."}
+    tests/test_heartbeat_supervisor.py: {created: "2026-04-27", last_used: "2026-07-11", note: "Heartbeat supervisor fail-closed and market-discovery scheduler antibodies. Extended 2026-07-11 to prove the external keeper runs the dead-proxy bypass before constructing its CLOB client, matching src.main startup semantics."}
     tests/test_v2_adapter.py: {created: "2026-04-27", last_used: "2026-04-29"}
     tests/test_collateral_ledger.py: {created: "2026-04-27", last_used: "2026-04-27"}
     tests/test_executable_market_snapshot.py: {created: "2026-04-27", last_used: "2026-06-26", note: "Executable snapshot persistence/freshness/command antibodies. Extended 2026-06-26 to prove executable_market_snapshot_latest upsert semantics and refresh-priority latest reads without append scans."}
