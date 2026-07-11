@@ -441,6 +441,55 @@ def process_current_global_batch(
             dict(sorted(counts.items())),
         )
 
+    def log_winner(
+        stage: str,
+        selected: object,
+        witnesses: Mapping[str, object],
+    ) -> None:
+        decision = getattr(selected, "decision", None)
+        candidate = getattr(decision, "candidate", None)
+        if candidate is None:
+            return
+        family_key = str(getattr(candidate, "family_key", "") or "")
+        bin_id = str(getattr(candidate, "bin_id", "") or "")
+        side = str(getattr(candidate, "side", "") or "")
+        if not family_key or not bin_id or side not in {"YES", "NO"}:
+            return
+        witness = witnesses.get(family_key)
+        q_mean = None
+        if witness is not None:
+            try:
+                column = tuple(witness.bin_ids).index(bin_id)
+                yes = witness.yes_q_samples[:, column]
+                q_mean = float(yes.mean())
+                if side == "NO":
+                    q_mean = 1.0 - q_mean
+            except (AttributeError, TypeError, ValueError):
+                q_mean = None
+        _LOG.info(
+            "global batch winner detail: stage=%s family=%s bin=%s side=%s "
+            "condition=%s token=%s "
+            "q_mean=%s shares=%s cost_usd=%s fill_price=%s limit_price=%s "
+            "max_spend_usd=%s robust_ev_usd=%.6f robust_dlog=%.12f "
+            "capital_efficiency=%.12f candidate=%s",
+            stage,
+            family_key,
+            bin_id,
+            side,
+            getattr(candidate, "condition_id", "unknown"),
+            getattr(candidate, "token_id", "unknown"),
+            "unknown" if q_mean is None else f"{q_mean:.9f}",
+            getattr(decision, "shares", "unknown"),
+            getattr(decision, "cost_usd", "unknown"),
+            getattr(decision, "expected_fill_price_before_fee", "unknown"),
+            getattr(decision, "limit_price", "unknown"),
+            getattr(decision, "max_spend_usd", "unknown"),
+            float(getattr(decision, "robust_ev_usd", 0.0) or 0.0),
+            float(getattr(decision, "robust_delta_log_wealth", 0.0) or 0.0),
+            float(getattr(decision, "capital_efficiency", 0.0) or 0.0),
+            getattr(candidate, "candidate_id", "unknown"),
+        )
+
     def current_time() -> datetime:
         now = current_time_provider()
         if now.tzinfo is None:
@@ -649,6 +698,7 @@ def process_current_global_batch(
                 "GLOBAL_AUCTION_NO_TRADE:"
                 f"{selected.decision.no_trade_reason or 'unknown'}"
             )
+        log_winner("select_initial", selected, probabilities)
         winner_id = selected.winner_event_id
         winner = next(
             (event for event in event_tuple if event.event_id == winner_id),
@@ -715,6 +765,7 @@ def process_current_global_batch(
                     "GLOBAL_REAUCTION_NO_TRADE:"
                     f"{selected.decision.no_trade_reason or 'unknown'}"
                 )
+            log_winner("select_fence", selected, probabilities_fence)
             winner_id = selected.winner_event_id
             winner = next(
                 (event for event in event_tuple if event.event_id == winner_id),
