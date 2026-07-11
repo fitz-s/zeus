@@ -2317,6 +2317,146 @@ class TestRecoveryResolutionTable:
             "bound_venue_order_id_matches_trade"
         ] is True
 
+    def test_matched_submit_missing_trade_id_reads_v2_adapter_trades(
+        self, conn
+    ):
+        from src.state.venue_command_repo import append_event
+
+        command_id = "cmd-matched-wrapper-client"
+        order_id = "ord-matched-wrapper-client"
+        token_id = "tok-matched-wrapper-client"
+        _insert(
+            conn,
+            command_id=command_id,
+            position_id="pos-matched-wrapper-client",
+            decision_id="dec-matched-wrapper-client",
+            token_id=token_id,
+            size=31.5,
+            price=0.74,
+        )
+        _advance_to_submitting(
+            conn,
+            command_id=command_id,
+            venue_order_id=order_id,
+        )
+        append_event(
+            conn,
+            command_id=command_id,
+            event_type="REVIEW_REQUIRED",
+            occurred_at="2026-04-26T00:01:00Z",
+            payload={"reason": "matched_submit_missing_trade_id"},
+        )
+
+        adapter = MagicMock(spec_set=["get_trades"])
+        adapter.get_trades.return_value = [
+            {
+                "id": "trade-matched-wrapper-client",
+                "status": "CONFIRMED",
+                "match_time": "2026-04-26T00:02:00Z",
+                "transaction_hash": "0xtx-matched-wrapper-client",
+                "asset_id": token_id,
+                "taker_order_id": order_id,
+                "side": "BUY",
+                "price": "0.74",
+                "size": "31.5",
+            }
+        ]
+
+        class WrapperClient:
+            def get_open_orders(self):
+                return []
+
+            def _ensure_v2_adapter(self):
+                return adapter
+
+        from src.execution.command_recovery import reconcile_unresolved_commands
+
+        summary = reconcile_unresolved_commands(conn, WrapperClient())
+
+        assert _get_state(conn, command_id) == "FILLED"
+        assert summary["advanced"] >= 1
+        adapter.get_trades.assert_called_once_with()
+
+    def test_restart_preflight_admits_only_exact_confirmed_matched_submit_review(
+        self, conn
+    ):
+        from src.execution.command_recovery import (
+            _restart_preflight_unresolved_commands,
+        )
+        from src.state.venue_command_repo import append_event
+
+        command_id = "cmd-restart-matched-submit"
+        order_id = "ord-restart-matched-submit"
+        _insert(
+            conn,
+            command_id=command_id,
+            position_id="pos-restart-matched-submit",
+            decision_id="dec-restart-matched-submit",
+            token_id="tok-restart-matched-submit",
+            size=31.5,
+            price=0.74,
+        )
+        _advance_to_submitting(
+            conn,
+            command_id=command_id,
+            venue_order_id=order_id,
+        )
+        append_event(
+            conn,
+            command_id=command_id,
+            event_type="REVIEW_REQUIRED",
+            occurred_at="2026-04-26T00:01:00Z",
+            payload={"reason": "matched_submit_missing_trade_id"},
+        )
+        _append_confirmed_trade_fact(
+            conn,
+            command_id=command_id,
+            order_id=order_id,
+            trade_id="trade-restart-matched-submit",
+            filled_size="31.5",
+            fill_price="0.74",
+        )
+
+        rows = _restart_preflight_unresolved_commands(conn)
+
+        assert [row["command_id"] for row in rows] == [command_id]
+
+        partial_command_id = "cmd-restart-matched-submit-partial"
+        partial_order_id = "ord-restart-matched-submit-partial"
+        _insert(
+            conn,
+            command_id=partial_command_id,
+            position_id="pos-restart-matched-submit-partial",
+            decision_id="dec-restart-matched-submit-partial",
+            token_id="tok-restart-matched-submit-partial",
+            size=31.5,
+            price=0.74,
+        )
+        _advance_to_submitting(
+            conn,
+            command_id=partial_command_id,
+            venue_order_id=partial_order_id,
+        )
+        append_event(
+            conn,
+            command_id=partial_command_id,
+            event_type="REVIEW_REQUIRED",
+            occurred_at="2026-04-26T00:01:00Z",
+            payload={"reason": "matched_submit_missing_trade_id"},
+        )
+        _append_confirmed_trade_fact(
+            conn,
+            command_id=partial_command_id,
+            order_id=partial_order_id,
+            trade_id="trade-restart-matched-submit-partial",
+            filled_size="31.48",
+            fill_price="0.74",
+        )
+        assert [
+            row["command_id"]
+            for row in _restart_preflight_unresolved_commands(conn)
+        ] == [command_id]
+
     def test_review_required_recovery_no_venue_order_id_confirmed_trade_stays_when_order_open(
         self, conn, mock_client
     ):

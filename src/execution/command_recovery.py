@@ -14088,7 +14088,7 @@ def _review_required_confirmed_trade_match(
 ) -> tuple[dict, dict, list[dict]] | None:
     try:
         open_orders = [_raw_payload(order) for order in list(client.get_open_orders() or [])]
-        trades = [_raw_payload(trade) for trade in list(client.get_trades() or [])]
+        trades = _client_trade_payloads(client)
     except Exception:
         logger.debug("recovery: confirmed-trade review proof venue read failed", exc_info=True)
         raise
@@ -15419,11 +15419,48 @@ def _restart_preflight_unresolved_commands(conn: sqlite3.Connection) -> list[dic
         CommandState.UNKNOWN.value,
         CommandState.SUBMIT_UNKNOWN_SIDE_EFFECT.value,
     }
-    return [
-        row
-        for row in find_unresolved_commands(conn)
-        if str(row.get("state") or "") in restart_states
-    ]
+    rows: list[dict] = []
+    for row in find_unresolved_commands(conn):
+        state = str(row.get("state") or "")
+        if state in restart_states:
+            rows.append(row)
+            continue
+        if state != CommandState.REVIEW_REQUIRED.value:
+            continue
+        command_id = str(row.get("command_id") or "")
+        venue_order_id = str(row.get("venue_order_id") or "")
+        latest_reason = _latest_review_required_payload(
+            _command_events(conn, command_id)
+        ).get("reason")
+        if latest_reason != "matched_submit_missing_trade_id" or not venue_order_id:
+            continue
+        trade_facts = conn.execute(
+            "WITH " + _canonical_trade_fact_cte() + """
+            SELECT state, filled_size, fill_price, source, observed_at
+              FROM canonical_trade_fact
+             WHERE command_id = ?
+               AND venue_order_id = ?
+               AND state = 'CONFIRMED'
+               AND source IN ('REST', 'WS_USER')
+               AND CAST(COALESCE(filled_size, '0') AS REAL) > 0
+               AND CAST(COALESCE(fill_price, '0') AS REAL) > 0
+             ORDER BY proof_rank DESC, local_sequence DESC
+            """,
+            (command_id, venue_order_id),
+        ).fetchall()
+        if len(trade_facts) != 1:
+            continue
+        trade_fact = _dict_row(trade_facts[0])
+        if not _decimal_matches(trade_fact.get("fill_price"), row.get("price")):
+            continue
+        command_size = _decimal_or_none(row.get("size"))
+        filled_size = _positive_decimal_or_none(trade_fact.get("filled_size"))
+        if command_size is None or filled_size is None:
+            continue
+        if abs(command_size - filled_size) >= Decimal("0.01"):
+            continue
+        rows.append(row)
+    return rows
 
 
 def _collect_recovery_priming_keys(conn: sqlite3.Connection, *, scope: str = "full") -> dict:
