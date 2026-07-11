@@ -974,6 +974,7 @@ def test_global_actuation_current_band_uses_current_bound_when_prior_is_absent()
     cert.update(
         global_actuation_identity="global-actuation-1",
         global_economic_identity="global-economic-1",
+        pre_qkernel_q_lcb_5pct=0.12,
     )
     decision = SimpleNamespace(
         shares=Decimal("100"),
@@ -995,6 +996,7 @@ def test_global_actuation_current_band_uses_current_bound_when_prior_is_absent()
 
     assert current["global_current_band_payoff_q_lcb"] == pytest.approx(0.10)
     assert current["global_current_prior_payoff_q_lcb"] == pytest.approx(0.10)
+    assert current["global_current_served_payoff_q_lcb"] == pytest.approx(0.12)
     assert current["payoff_q_lcb"] == pytest.approx(0.10)
     assert current["cost"] == pytest.approx(0.01)
     assert current["route_cost"] == pytest.approx(0.01)

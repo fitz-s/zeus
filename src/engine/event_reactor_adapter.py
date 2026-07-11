@@ -6456,6 +6456,11 @@ def _global_actuation_selected_proof(
     cert = dict(proof.qkernel_execution_economics or {})
     cert.update(
         {
+            # The immutable served point remains the point estimate.  The global
+            # sample matrix owns the robust band/selection, not a replacement
+            # point estimate; its lower tail may only tighten this served proof.
+            "payoff_q_point": float(proof.q_posterior),
+            "pre_qkernel_q_lcb_5pct": float(proof.q_lcb_5pct),
             "global_actuation_identity": str(
                 getattr(global_actuation, "actuation_identity", "") or ""
             ),
