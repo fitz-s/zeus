@@ -23,14 +23,33 @@ names and signatures (``family=...``) so its existing call sites and tests
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
-from collections.abc import Mapping
+from collections.abc import Callable, Iterable, Mapping
+from contextvars import ContextVar
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from functools import lru_cache
 
 from src.data.market_topology_rows import _table_columns, _table_exists
 
 UTC = timezone.utc
+_LOG = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class _FrozenInputHwm:
+    conn: sqlite3.Connection
+    decision_iso: str
+    requests: frozenset[tuple[str, str, str]]
+    artifact_loaded: bool
+    artifact_cycles: Mapping[tuple[str, str, str], datetime]
+
+
+_FROZEN_INPUT_HWM: ContextVar[_FrozenInputHwm | None] = ContextVar(
+    "replacement_frozen_input_hwm",
+    default=None,
+)
 
 
 def _parse_source_cycle_utc(value: object) -> datetime | None:
@@ -90,6 +109,7 @@ def latest_raw_model_input_cycle(
     metric: str,
     decision_time: datetime,
 ) -> datetime | None:
+    decision_iso = decision_time.astimezone(UTC).isoformat()
     table_ref = _authority_table_ref(conn, "raw_model_forecasts")
     if table_ref is None:
         return None
@@ -99,7 +119,6 @@ def latest_raw_model_input_cycle(
         return None
     predicates = ["city = ?", "target_date = ?", "metric = ?"]
     params: list[object] = [city, target_date, metric]
-    decision_iso = decision_time.astimezone(UTC).isoformat()
     if "endpoint" in columns:
         predicates.append("endpoint = 'single_runs'")
     if "coverage_status" in columns:
@@ -152,6 +171,17 @@ def latest_raw_artifact_input_cycle(
     metric: str,
     decision_time: datetime,
 ) -> datetime | None:
+    decision_iso = decision_time.astimezone(UTC).isoformat()
+    key = (city, str(target_date), metric)
+    frozen = _FROZEN_INPUT_HWM.get()
+    if (
+        frozen is not None
+        and frozen.conn is conn
+        and frozen.decision_iso == decision_iso
+        and frozen.artifact_loaded
+        and key in frozen.requests
+    ):
+        return frozen.artifact_cycles.get(key)
     table_ref = _authority_table_ref(conn, "raw_forecast_artifacts")
     if table_ref is None:
         return None
@@ -171,7 +201,6 @@ def latest_raw_artifact_input_cycle(
         "datetime(captured_at) <= datetime(?)",
         "datetime(source_available_at) <= datetime(?)",
     ]
-    decision_iso = decision_time.astimezone(UTC).isoformat()
     params: list[object] = [
         city,
         target_date,
@@ -281,8 +310,18 @@ def _raw_artifact_cycles_for_frozen_target(
     rows = conn.execute(
         f"""
         SELECT json_extract(artifact_metadata_json, '$.city') AS artifact_city,
+               json_extract(artifact_metadata_json, '$.target_date') AS artifact_target_date,
+               json_extract(artifact_metadata_json, '$.metric') AS artifact_metric,
                source_cycle_time,
                {select_path} AS artifact_path,
+               CASE WHEN json_valid(artifact_metadata_json)
+                    THEN json_type(artifact_metadata_json) END AS metadata_type,
+               CASE WHEN json_valid(artifact_metadata_json)
+                    THEN json_type(artifact_metadata_json, '$.openmeteo_payload_json')
+               END AS payload_path_type,
+               CASE WHEN json_valid(artifact_metadata_json)
+                    THEN json_extract(artifact_metadata_json, '$.openmeteo_payload_json')
+               END AS payload_path,
                artifact_metadata_json
           FROM {table_ref}
          WHERE {' AND '.join(predicates)}
@@ -293,32 +332,67 @@ def _raw_artifact_cycles_for_frozen_target(
         tuple([*params, decision_iso]),
     ).fetchall()
 
+    cycles = _artifact_cycles_from_rows(rows, columns=columns)
+    return tuple(
+        sorted(
+            (city, cycle)
+            for (city, row_target, row_metric), cycle in cycles.items()
+            if row_target == target_date and row_metric == metric
+        )
+    )
+
+
+def _artifact_cycles_from_rows(
+    rows: Iterable[sqlite3.Row | tuple[object, ...]],
+    *,
+    columns: frozenset[str],
+) -> dict[tuple[str, str, str], datetime]:
     from src.config import cities_by_name
     from src.data.replacement_forecast_current_target_plan import (
         _openmeteo_payload_covers_target_local_day,
     )
 
-    cycles: dict[str, datetime] = {}
+    cycles: dict[tuple[str, str, str], datetime] = {}
     for row in rows:
         try:
             artifact_city = str(row["artifact_city"] or "")
+            target_date = str(row["artifact_target_date"] or "")
+            metric = str(row["artifact_metric"] or "")
             raw_cycle = row["source_cycle_time"]
             artifact_path = str(row["artifact_path"] or "")
+            metadata_type = str(row["metadata_type"] or "")
+            payload_path_type = str(row["payload_path_type"] or "")
+            payload_path = row["payload_path"]
             metadata_raw = row["artifact_metadata_json"]
         except Exception:  # noqa: BLE001 - tuple row compatibility
             artifact_city = str(row[0] or "")
-            raw_cycle = row[1]
-            artifact_path = str(row[2] or "")
-            metadata_raw = row[3]
-        if not artifact_city or artifact_city in cycles:
+            target_date = str(row[1] or "")
+            metric = str(row[2] or "")
+            raw_cycle = row[3]
+            artifact_path = str(row[4] or "")
+            metadata_type = str(row[5] or "")
+            payload_path_type = str(row[6] or "")
+            payload_path = row[7]
+            metadata_raw = row[8]
+        key = (artifact_city, target_date, metric)
+        if not all(key) or key in cycles:
             continue
-        try:
-            metadata = json.loads(str(metadata_raw or "{}"))
-        except (TypeError, ValueError):
-            continue
-        if not isinstance(metadata, dict):
+        if metadata_type != "object":
             continue
         if "artifact_path" in columns:
+            if payload_path_type in {"", "null", "text"}:
+                metadata = (
+                    {"openmeteo_payload_json": payload_path}
+                    if payload_path_type == "text"
+                    else {}
+                )
+            else:
+                try:
+                    metadata = json.loads(str(metadata_raw or "{}"))
+                except (TypeError, ValueError):
+                    continue
+                if not isinstance(metadata, dict):
+                    continue
             city_cfg = cities_by_name.get(artifact_city)
             city_timezone = str(getattr(city_cfg, "timezone", "") or "") or None
             if not _openmeteo_payload_covers_target_local_day(
@@ -330,8 +404,139 @@ def _raw_artifact_cycles_for_frozen_target(
                 continue
         cycle = _parse_source_cycle_utc(raw_cycle)
         if cycle is not None:
-            cycles[artifact_city] = cycle
-    return tuple(sorted(cycles.items()))
+            cycles[key] = cycle
+    return cycles
+
+
+def _batch_artifact_cycles(
+    conn: sqlite3.Connection,
+    *,
+    requests: frozenset[tuple[str, str, str]],
+    decision_iso: str,
+) -> tuple[bool, dict[tuple[str, str, str], datetime]]:
+    table_ref = _authority_table_ref(conn, "raw_forecast_artifacts")
+    if table_ref is None:
+        return True, {}
+    columns = frozenset(_table_ref_columns(conn, table_ref))
+    required = {
+        "source_cycle_time",
+        "captured_at",
+        "source_available_at",
+        "artifact_metadata_json",
+    }
+    if not required.issubset(columns):
+        return True, {}
+    select_path = "artifact.artifact_path" if "artifact_path" in columns else "NULL"
+    source_predicate = (
+        "artifact.source_id = 'openmeteo_ecmwf_ifs_9km'"
+        if "source_id" in columns
+        else "1 = 1"
+    )
+    cycles: dict[tuple[str, str, str], datetime] = {}
+    limit = conn.getlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER)
+    chunk_size = max(1, (limit - 3) // 3)
+    ordered = sorted(requests)
+    for offset in range(0, len(ordered), chunk_size):
+        chunk = ordered[offset : offset + chunk_size]
+        values_sql = ",".join("(?,?,?)" for _ in chunk)
+        rows = conn.execute(
+            f"""
+            WITH requested(city, target_date, metric) AS (VALUES {values_sql})
+            SELECT requested.city AS artifact_city,
+                   requested.target_date AS artifact_target_date,
+                   requested.metric AS artifact_metric,
+                   artifact.source_cycle_time,
+                   {select_path} AS artifact_path,
+                   CASE WHEN json_valid(artifact.artifact_metadata_json)
+                        THEN json_type(artifact.artifact_metadata_json)
+                   END AS metadata_type,
+                   CASE WHEN json_valid(artifact.artifact_metadata_json)
+                        THEN json_type(
+                            artifact.artifact_metadata_json,
+                            '$.openmeteo_payload_json'
+                        )
+                   END AS payload_path_type,
+                   CASE WHEN json_valid(artifact.artifact_metadata_json)
+                        THEN json_extract(
+                            artifact.artifact_metadata_json,
+                            '$.openmeteo_payload_json'
+                        )
+                   END AS payload_path,
+                   artifact.artifact_metadata_json
+              FROM {table_ref} AS artifact
+              JOIN requested
+                ON json_extract(
+                    artifact.artifact_metadata_json, '$.city'
+                ) = requested.city
+               AND json_extract(
+                    artifact.artifact_metadata_json, '$.target_date'
+                ) = requested.target_date
+               AND json_extract(
+                    artifact.artifact_metadata_json, '$.metric'
+                ) = requested.metric
+             WHERE {source_predicate}
+               AND datetime(artifact.captured_at) <= datetime(?)
+               AND datetime(artifact.source_available_at) <= datetime(?)
+               AND datetime(artifact.source_cycle_time) <= datetime(?)
+             GROUP BY requested.city, requested.target_date, requested.metric,
+                      artifact.source_cycle_time
+             ORDER BY requested.city, requested.target_date, requested.metric,
+                      datetime(artifact.source_cycle_time) DESC
+            """,
+            (*[value for key in chunk for value in key], decision_iso, decision_iso, decision_iso),
+        ).fetchall()
+        cycles.update(_artifact_cycles_from_rows(rows, columns=columns))
+    return True, cycles
+
+
+def prime_frozen_replacement_artifact_hwm(
+    conn: sqlite3.Connection,
+    *,
+    requests: Iterable[tuple[str, str, str]],
+    decision_time: datetime,
+) -> Callable[[], None]:
+    """Prime artifact HWMs for one explicitly owned read transaction."""
+
+    if not isinstance(conn, sqlite3.Connection) or not conn.in_transaction:
+        return lambda: None
+    normalized = frozenset(
+        (str(city), str(target_date), str(metric))
+        for city, target_date, metric in requests
+        if city and target_date and metric
+    )
+    if not normalized:
+        return lambda: None
+    decision_iso = decision_time.astimezone(UTC).isoformat()
+    artifact_loaded = False
+    artifact_cycles: dict[tuple[str, str, str], datetime] = {}
+    try:
+        artifact_loaded, artifact_cycles = _batch_artifact_cycles(
+            conn,
+            requests=normalized,
+            decision_iso=decision_iso,
+        )
+    except Exception as exc:  # noqa: BLE001 - scalar fail-closed fallback remains authoritative
+        _LOG.warning("frozen artifact HWM prime failed; using scalar reads: %s", exc)
+
+    token = _FROZEN_INPUT_HWM.set(
+        _FrozenInputHwm(
+            conn=conn,
+            decision_iso=decision_iso,
+            requests=normalized,
+            artifact_loaded=artifact_loaded,
+            artifact_cycles=artifact_cycles,
+        )
+    )
+    released = False
+
+    def release() -> None:
+        nonlocal released
+        if released:
+            return
+        released = True
+        _FROZEN_INPUT_HWM.reset(token)
+
+    return release
 
 
 def _posterior_provenance_for_cycle(

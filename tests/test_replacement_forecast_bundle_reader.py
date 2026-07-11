@@ -444,7 +444,9 @@ def test_replacement_bundle_reader_enforce_raw_input_hwm_allows_fresh_serve() ->
     assert result.reason_code == "REPLACEMENT_POSTERIOR_READY"
 
 
-def test_raw_hwm_reuses_bound_posterior_provenance() -> None:
+def test_raw_hwm_reuses_bound_posterior_provenance(monkeypatch) -> None:
+    import src.data.replacement_forecast_bundle_reader as reader
+
     conn = _conn()
     posterior_id = _insert_posterior(conn)
     provenance = {
@@ -472,6 +474,16 @@ def test_raw_hwm_reuses_bound_posterior_provenance() -> None:
             source_available_at=_dt(0, 5),
         )
     traced: list[str] = []
+    provenance_parses = 0
+    original_json_mapping = reader._json_mapping
+
+    def counted_json_mapping(value, *, field_name):
+        nonlocal provenance_parses
+        if field_name == "provenance_json":
+            provenance_parses += 1
+        return original_json_mapping(value, field_name=field_name)
+
+    monkeypatch.setattr(reader, "_json_mapping", counted_json_mapping)
     conn.set_trace_callback(traced.append)
 
     result = read_replacement_forecast_bundle(
@@ -495,3 +507,4 @@ def test_raw_hwm_reuses_bound_posterior_provenance() -> None:
         and "WHERE CITY" in statement.upper()
     ]
     assert duplicate_provenance_reads == []
+    assert provenance_parses == 1

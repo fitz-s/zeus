@@ -31,6 +31,7 @@ from src.data.replacement_forecast_live_materialization_queue import SOURCE_ID, 
 from src.data.replacement_input_hwm import (
     _raw_artifact_cycles_for_frozen_target,
     latest_raw_artifact_input_cycle,
+    prime_frozen_replacement_artifact_hwm,
 )
 from src.state.db import _create_readiness_state
 from src.state.schema.v2_schema import apply_canonical_schema
@@ -456,3 +457,94 @@ def test_frozen_selection_batches_artifact_hwm_for_same_target() -> None:
     assert sum(
         "FROM RAW_FORECAST_ARTIFACTS" in statement.upper() for statement in traced
     ) == 1
+
+
+def test_global_frozen_artifact_prime_matches_scalar_selector(monkeypatch) -> None:
+    import src.data.replacement_input_hwm as input_hwm
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        """
+        CREATE TABLE raw_forecast_artifacts (
+            source_id TEXT, source_cycle_time TEXT, captured_at TEXT,
+            source_available_at TEXT, artifact_metadata_json TEXT
+        )
+        """
+    )
+    requests = (
+        ("Shanghai", _TARGET_DATE, _METRIC),
+        ("Tokyo", "2026-06-08", _METRIC),
+    )
+    for city, target_date, metric in requests:
+        conn.execute(
+            "INSERT INTO raw_forecast_artifacts VALUES (?, ?, ?, ?, ?)",
+            (
+                "openmeteo_ecmwf_ifs_9km",
+                "2026-06-07T06:00:00+00:00",
+                "2026-06-07T12:00:00+00:00",
+                "2026-06-07T12:00:00+00:00",
+                json.dumps({"city": city, "target_date": target_date, "metric": metric}),
+            ),
+        )
+    conn.commit()
+    conn.execute("BEGIN")
+    decision_time = datetime(2026, 6, 7, 13, tzinfo=UTC)
+
+    def read_cycles() -> dict[tuple[str, str, str], datetime | None]:
+        return {
+            request: latest_raw_artifact_input_cycle(
+                conn,
+                city=request[0],
+                target_date=request[1],
+                metric=request[2],
+                decision_time=decision_time,
+            )
+            for request in requests
+        }
+
+    scalar = read_cycles()
+    traced: list[str] = []
+    conn.set_trace_callback(traced.append)
+    release = prime_frozen_replacement_artifact_hwm(
+        conn,
+        requests=requests,
+        decision_time=decision_time,
+    )
+    assert input_hwm._FROZEN_INPUT_HWM.get() is not None
+    primed = read_cycles()
+    release()
+    assert input_hwm._FROZEN_INPUT_HWM.get() is None
+    conn.set_trace_callback(None)
+
+    assert primed == scalar
+    assert all(cycle is not None for cycle in primed.values())
+    assert sum(
+        "FROM RAW_FORECAST_ARTIFACTS AS ARTIFACT" in statement.upper()
+        for statement in traced
+    ) == 1
+
+    def fail_prime(*_args, **_kwargs):
+        raise sqlite3.OperationalError("forced prime failure")
+
+    monkeypatch.setattr(input_hwm, "_batch_artifact_cycles", fail_prime)
+    _raw_artifact_cycles_for_frozen_target.cache_clear()
+    fallback_trace: list[str] = []
+    conn.set_trace_callback(fallback_trace.append)
+    release = prime_frozen_replacement_artifact_hwm(
+        conn,
+        requests=requests,
+        decision_time=decision_time,
+    )
+    fallback = read_cycles()
+    release()
+    conn.set_trace_callback(None)
+    conn.rollback()
+    _raw_artifact_cycles_for_frozen_target.cache_clear()
+
+    assert fallback == scalar
+    assert input_hwm._FROZEN_INPUT_HWM.get() is None
+    assert any(
+        "FROM RAW_FORECAST_ARTIFACTS" in statement.upper()
+        for statement in fallback_trace
+    )

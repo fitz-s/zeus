@@ -535,6 +535,37 @@ def process_current_global_batch(
             decision_at_utc=scope_at,
         )
         log_stage("scope_scan", families=len(full_scope.events_by_family))
+        from src.data.replacement_input_hwm import (
+            prime_frozen_replacement_artifact_hwm,
+        )
+
+        release_hwm = prime_frozen_replacement_artifact_hwm(
+            forecast_conn,
+            requests=(
+                (
+                    str(payload.get("city") or ""),
+                    str(payload.get("target_date") or ""),
+                    str(payload.get("metric") or ""),
+                )
+                for _, event in full_scope.events_by_family
+                for payload in (payload_reader(event),)
+            ),
+            decision_time=scope_at,
+        )
+        release_read_snapshot = release_selection_snapshot
+        released_hwm = False
+
+        def release_primed_snapshot() -> None:
+            nonlocal released_hwm
+            if released_hwm:
+                return
+            released_hwm = True
+            try:
+                release_hwm()
+            finally:
+                release_read_snapshot()
+
+        release_selection_snapshot = release_primed_snapshot
         claimed_by_family = {}
         duplicate_owner_by_event: dict[str, str] = {}
         for event in event_tuple:

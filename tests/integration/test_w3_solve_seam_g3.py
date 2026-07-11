@@ -2428,6 +2428,8 @@ def test_global_batch_excludes_typed_current_q_ineligible_family(monkeypatch):
 
 
 def test_global_batch_rejects_unexpected_probability_prepare_failure(monkeypatch):
+    import src.data.replacement_input_hwm as input_hwm
+
     decision_at = _dt.datetime(2026, 7, 10, 8, 0, tzinfo=_dt.timezone.utc)
     event = _global_scope_event(city="Alpha", source_run_id="run-a")
     scope = current_global_auction_scope_from_events(
@@ -2437,31 +2439,42 @@ def test_global_batch_rejects_unexpected_probability_prepare_failure(monkeypatch
     monkeypatch.setattr(
         global_batch_runtime, "scan_current_global_auction_scope", lambda **_: scope
     )
+    selection = sqlite3.connect(":memory:")
+    prime_seen = []
+
+    def prepare(current, _at):
+        prime_seen.append(input_hwm._FROZEN_INPUT_HWM.get() is not None)
+        return EventSubmissionReceipt(
+            False,
+            current.event_id,
+            current.causal_snapshot_id,
+            reason=reason,
+        )
 
     result = global_batch_runtime.process_current_global_batch(
         (event,),
         decision_time=decision_at,
         world_conn=object(),
-        forecast_conn=object(),
+        forecast_conn=selection,
         trade_conn=object(),
         payload_reader=lambda current: json.loads(current.payload_json),
-        prepare_event=lambda current, _at: EventSubmissionReceipt(
-            False,
-            current.event_id,
-            current.causal_snapshot_id,
-            reason=reason,
-        ),
+        prepare_event=prepare,
         actuate_winner=lambda *_: pytest.fail("unexpected failure must not actuate"),
         stamp_receipt=lambda receipt: receipt,
         venue_submit_count=lambda: 0,
         current_execution=lambda *_: object(),
         current_time_provider=lambda: decision_at,
+        selection_snapshot_connections=(selection,),
     )
 
+    assert prime_seen == [True]
+    assert input_hwm._FROZEN_INPUT_HWM.get() is None
+    assert selection.in_transaction is False
     assert result.venue_submit_count == 0
     assert result.receipts[event.event_id].reason == (
         f"GLOBAL_PREPARED_FAMILY_INCOMPLETE:{scope.family_keys[0]}:{reason}"
     )
+    selection.close()
 
 
 def test_global_batch_actuates_exactly_one_claimed_global_winner(monkeypatch):
@@ -3060,6 +3073,8 @@ def test_global_batch_reauction_rejects_probability_cut_drift(monkeypatch):
 def test_global_batch_freezes_cut_then_releases_before_winner_jit(
     monkeypatch, tmp_path
 ):
+    import src.data.replacement_input_hwm as input_hwm
+
     decision_at = _dt.datetime(2026, 7, 10, 8, 0, tzinfo=_dt.timezone.utc)
     event = _global_scope_event(city="Alpha", source_run_id="run-a")
     scope = current_global_auction_scope_from_events((event,), captured_at_utc=decision_at)
@@ -3096,6 +3111,7 @@ def test_global_batch_freezes_cut_then_releases_before_winner_jit(
 
     def prepare(current, _at):
         assert selection.execute("SELECT value FROM readiness_state").fetchone()[0] == "cut"
+        assert input_hwm._FROZEN_INPUT_HWM.get() is not None
         return EventSubmissionReceipt(
             False,
             current.event_id,
@@ -3105,6 +3121,7 @@ def test_global_batch_freezes_cut_then_releases_before_winner_jit(
 
     def actuate(winner, _chosen, _at):
         assert selection.execute("SELECT value FROM readiness_state").fetchone()[0] == "after-cut"
+        assert input_hwm._FROZEN_INPUT_HWM.get() is None
         return EventSubmissionReceipt(
             True,
             winner.event_id,
@@ -3139,7 +3156,7 @@ def test_global_batch_freezes_cut_then_releases_before_winner_jit(
         (event,),
         decision_time=decision_at,
         world_conn=object(),
-        forecast_conn=object(),
+        forecast_conn=selection,
         trade_conn=object(),
         payload_reader=lambda current: json.loads(current.payload_json),
         prepare_event=prepare,
@@ -3155,6 +3172,7 @@ def test_global_batch_freezes_cut_then_releases_before_winner_jit(
     assert result.venue_submit_count == 1
     assert result.winner_event_id == event.event_id
     assert result.receipts[event.event_id].submitted is True
+    assert input_hwm._FROZEN_INPUT_HWM.get() is None
     selection.close()
     writer.close()
 

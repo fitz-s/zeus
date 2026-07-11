@@ -217,19 +217,21 @@ def _table_columns(conn: sqlite3.Connection, table_name: str) -> set[str]:
     return {str(row[1]) for row in conn.execute(f"PRAGMA table_info({table_name})").fetchall()}
 
 
-def _row_is_live_grade(row_map: Mapping[str, Any]) -> bool:
-    """A posterior row is executable iff it is live and has the certified live q carrier."""
+def _live_grade_provenance(
+    row_map: Mapping[str, Any],
+) -> Mapping[str, Any] | None:
+    """Return the parsed provenance only when the row is executable."""
     if str(row_map.get("runtime_layer") or "") != LIVE_RUNTIME_LAYER:
-        return False
+        return None
     if not row_map.get("q_lcb_json"):
-        return False
+        return None
     if not row_map.get("q_ucb_json"):
-        return False
+        return None
     provenance = _json_mapping(row_map.get("provenance_json"), field_name="provenance_json")
     mode = provenance.get("replacement_q_mode")
     if not isinstance(mode, str) or not mode:
-        return False
-    return mode in _REPLACEMENT_Q_MODE_LIVE_ELIGIBLE
+        return None
+    return provenance if mode in _REPLACEMENT_Q_MODE_LIVE_ELIGIBLE else None
 
 
 def _readiness_posterior_id(
@@ -592,7 +594,8 @@ def read_replacement_forecast_bundle(
     if certified_row is None:
         return ReplacementForecastBundleReadResult("BLOCKED", "REPLACEMENT_POSTERIOR_READINESS_MISMATCH")
     row_map = dict(certified_row)
-    if not _row_is_live_grade(row_map):
+    provenance = _live_grade_provenance(row_map)
+    if provenance is None:
         return ReplacementForecastBundleReadResult("BLOCKED", "REPLACEMENT_POSTERIOR_READINESS_NOT_LIVE_GRADE")
     # Fallback case: we are serving an OLDER live row because a NEWER non-live
     # row sits on top. The scope readiness (per-scope upsert) now points at that newer non-executable
@@ -602,7 +605,7 @@ def read_replacement_forecast_bundle(
     # served row (staleness, intermediate-cycle, topology-to-current-market, identity hashes).
     _served_via_tradeable_fallback = (
         int(row_map["posterior_id"]) != int(latest_row_map["posterior_id"])
-        and not _row_is_live_grade(latest_row_map)
+        and _live_grade_provenance(latest_row_map) is None
     )
     _newer_non_executable_posterior_id = (
         int(latest_row_map["posterior_id"]) if _served_via_tradeable_fallback else None
@@ -653,7 +656,6 @@ def read_replacement_forecast_bundle(
     q_lcb = _normalize_probability_map(q_lcb_raw, field_name="q_lcb", require_sum=False) if q_lcb_raw is not None else None
     q_ucb_raw = _json_mapping(row_map["q_ucb_json"], field_name="q_ucb_json") if row_map.get("q_ucb_json") else None
     q_ucb = _normalize_probability_map(q_ucb_raw, field_name="q_ucb", require_sum=False) if q_ucb_raw is not None else None
-    provenance = _json_mapping(row_map["provenance_json"], field_name="provenance_json")
     row_topology_hash = str(row_map.get("bin_topology_hash") or "").strip()
     provenance_topology_hash = str(provenance.get("bin_topology_hash") or "").strip()
     if not row_topology_hash or not provenance_topology_hash:
