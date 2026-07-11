@@ -5781,26 +5781,116 @@ def _global_jit_snapshot_advanced(
     )
 
 
-def _global_execution_curve_economically_unchanged(
+def _global_selected_order_economics_drift(
     *,
-    selected_candidate: object,
+    decision: object,
     current_candidate: object,
-) -> bool:
-    """Ignore evidence carriers but preserve the complete native ask economy."""
+) -> str | None:
+    """Describe why the fixed winning order lost its executable boundary.
 
-    from src.solve.solver import executable_curve_identity
+    A cross-market selection cannot atomically freeze every venue ladder until
+    submit. Preserve the venue contract and the selected exact-share prefix;
+    unrelated tail liquidity is not part of the order being submitted.
+    """
 
+    selected_candidate = getattr(decision, "candidate", None)
     selected = getattr(selected_candidate, "executable_cost_curve", None)
     current = getattr(current_candidate, "executable_cost_curve", None)
     if selected is None or current is None:
-        return False
-    aligned = dataclass_replace(
-        selected,
-        snapshot_id=current.snapshot_id,
-        book_hash=current.book_hash,
-        quote_ttl=current.quote_ttl,
+        return "curve_missing"
+    contract_fields = (
+        ("token", selected.token_id, current.token_id),
+        ("side", selected.side, current.side),
+        ("fee", selected.fee_model.fee_rate, current.fee_model.fee_rate),
+        ("tick", selected.min_tick, current.min_tick),
+        ("min_order", selected.min_order_size, current.min_order_size),
     )
-    return executable_curve_identity(aligned) == executable_curve_identity(current)
+    contract_drift = tuple(
+        f"{name}={left}->{right}"
+        for name, left, right in contract_fields
+        if left != right
+    )
+    if contract_drift:
+        return "contract:" + ",".join(contract_drift)
+    try:
+        shares = Decimal(str(getattr(decision, "shares")))
+        selected_cost = Decimal(str(getattr(decision, "cost_usd")))
+        selected_limit = Decimal(str(getattr(decision, "limit_price")))
+        selected_raw_vwap = Decimal(
+            str(getattr(decision, "expected_fill_price_before_fee"))
+        )
+        selected_max_spend = Decimal(str(getattr(decision, "max_spend_usd")))
+    except (ArithmeticError, TypeError, ValueError):
+        return "decision_invalid"
+    if not all(
+        value.is_finite()
+        for value in (
+            shares,
+            selected_cost,
+            selected_limit,
+            selected_raw_vwap,
+            selected_max_spend,
+        )
+    ) or shares <= 0 or shares < current.min_order_size:
+        return (
+            "shares_invalid:"
+            f"shares={shares}:current_min_order={current.min_order_size}"
+        )
+
+    remaining = shares
+    raw_cost = Decimal("0")
+    all_in_cost = Decimal("0")
+    current_limit: Decimal | None = None
+    for level in current.levels:
+        take = min(level.size, remaining)
+        if take > 0:
+            current_limit = level.price
+            raw_cost += take * level.price
+            all_in_cost += take * current.fee_model.all_in_price(level.price)
+            remaining -= take
+        if remaining <= Decimal("1e-18"):
+            break
+    if remaining > Decimal("1e-18") or current_limit is None:
+        return f"depth:shares={shares}:remaining={remaining}"
+
+    tolerance = Decimal("1e-12")
+    current_raw_vwap = raw_cost / shares
+    current_max_spend = shares * current.fee_model.all_in_price(current_limit)
+    breaches = tuple(
+        name
+        for name, breached in (
+            ("limit", current_limit > selected_limit),
+            ("raw_vwap", current_raw_vwap > selected_raw_vwap + tolerance),
+            ("all_in_cost", all_in_cost > selected_cost + tolerance),
+            ("max_spend", current_max_spend > selected_max_spend + tolerance),
+        )
+        if breached
+    )
+    if not breaches:
+        return None
+    return (
+        f"prefix={','.join(breaches)}:shares={shares}:"
+        f"limit={selected_limit}->{current_limit}:"
+        f"raw_vwap={selected_raw_vwap}->{current_raw_vwap}:"
+        f"all_in_cost={selected_cost}->{all_in_cost}:"
+        f"max_spend={selected_max_spend}->{current_max_spend}"
+    )
+
+
+def _global_selected_order_economics_preserved(
+    *,
+    decision: object,
+    current_candidate: object,
+) -> bool:
+    """Return whether current native depth preserves the selected order boundary."""
+
+    return (
+        _global_selected_order_economics_drift(
+            decision=decision,
+            current_candidate=current_candidate,
+        )
+        is None
+    )
 
 
 def _global_actuation_selected_proof(
@@ -5900,14 +5990,17 @@ def _global_actuation_selected_proof(
             "GLOBAL_ACTUATION_EXECUTION_BINDING_SUPERSEDED:identity:"
             + ",".join(execution_identity_drift)
         )
-    # Any depth change can alter the global argmax or its optimal shares. Align
-    # evidence-only carriers, then require the complete native ask economy.
-    if not _global_execution_curve_economically_unchanged(
-        selected_candidate=candidate,
+    # The whole-universe fence chose the order from fresh books. At submit, bind
+    # the exact shares to no-worse current economics; no venue can freeze every
+    # competitor and irrelevant tail level across that network boundary.
+    execution_drift = _global_selected_order_economics_drift(
+        decision=decision,
         current_candidate=rebound,
-    ):
+    )
+    if execution_drift is not None:
         raise ValueError(
             "GLOBAL_ACTUATION_EXECUTION_BINDING_SUPERSEDED:curve_economics:"
+            f"detail={execution_drift}:"
             f"selected={candidate.execution_curve_identity}:"
             f"current={rebound.execution_curve_identity}"
         )
