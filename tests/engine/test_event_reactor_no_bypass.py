@@ -1211,7 +1211,16 @@ def _insert_replacement_forecast_fixture(conn: sqlite3.Connection) -> None:
             "dependencies": [
                 {"role": "baseline_b0", "source_run_id": "run-1"},
                 {"role": "openmeteo_ifs9_anchor", "source_run_id": "run-1"},
-                {"role": "soft_anchor_posterior", "posterior_id": posterior_id, "source_run_id": "run-1"},
+                {
+                    "role": "soft_anchor_posterior",
+                    "source_id": REPLACEMENT_SOURCE_ID,
+                    "product_id": REPLACEMENT_PRODUCT_ID,
+                    "data_version": REPLACEMENT_HIGH_DATA_VERSION,
+                    "status": "READY",
+                    "source_available_at": "2026-05-24T08:10:00+00:00",
+                    "posterior_id": posterior_id,
+                    "source_run_id": "run-1",
+                },
             ],
         },
         separators=(",", ":"),
@@ -1296,8 +1305,8 @@ def _insert_replacement_forecast_fixture(conn: sqlite3.Connection) -> None:
             dependency_json, provenance_json
         ) VALUES (
             'replacement-readiness-1',
-            'city_metric|Chicago|America/Chicago|2026-05-25|high|temperature|high_temp|openmeteo_ecmwf_ifs9_bayes_fusion_high_v1|replacement||openmeteo_ecmwf_ifs9_bayes_fusion|operational|',
-            'city_metric',
+            'strategy|Chicago|America/Chicago|2026-05-25|high|temperature|high_temp|openmeteo_ecmwf_ifs9_bayes_fusion_high_v1|replacement||openmeteo_ecmwf_ifs9_bayes_fusion|operational|',
+            'strategy',
             'Chicago', 'Chicago', 'America/Chicago',
             '2026-05-25', NULL, 'high', 'temperature',
             'high_temp', ?,

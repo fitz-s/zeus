@@ -1,5 +1,6 @@
-# Created: 2026-06-17
-# Last audited: 2026-06-17
+# Lifecycle: created=2026-06-17; last_reviewed=2026-07-10; last_reused=2026-07-10
+# Purpose: Prove replacement forecast carriers do not fall back to legacy ensemble authority.
+# Reuse: Re-audit readiness-to-posterior binding before changing replacement FSR selection.
 # Authority basis: operator single-truth law + residual_legacy_sources.md (GATE-1 carrier
 #   decouple). RED-on-revert antibodies for the mx2t3 → forecast_posteriors/raw_model_forecasts
 #   carrier decouple: the forecast-decision lifecycle (FSR readiness, spine causal-cycle pin, and
@@ -10,6 +11,7 @@
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from datetime import datetime, timezone
 from types import SimpleNamespace
@@ -18,6 +20,8 @@ from unittest import mock
 import pytest
 
 import src.engine.event_reactor_adapter as adapter
+import src.engine.replacement_forecast_hook_factory as hook_factory
+import src.engine.replacement_forecast_hook_factory as hook_factory
 import src.events.triggers.forecast_snapshot_ready as fsr
 from src.decision_kernel.compiler import (
     _validate_forecast_authority_payload as compiler_validate_forecast,
@@ -26,6 +30,7 @@ from src.decision_kernel.verifier import (
     POSTERIOR_MEMBERS_JSON_SOURCE,
     _validate_posterior_forecast_authority_payload,
 )
+from src.decision_kernel.canonicalization import stable_hash
 
 UTC = timezone.utc
 _DT = datetime(2026, 6, 17, 12, 0, tzinfo=UTC)
@@ -34,21 +39,82 @@ _DT = datetime(2026, 6, 17, 12, 0, tzinfo=UTC)
 def _posteriors_only_conn() -> sqlite3.Connection:
     """A forecasts DB carrying forecast_posteriors + raw_model_forecasts but NO ensemble tables."""
     con = sqlite3.connect(":memory:")
+    con.row_factory = sqlite3.Row
     con.execute(
         """CREATE TABLE forecast_posteriors (
             posterior_id INTEGER PRIMARY KEY AUTOINCREMENT, product_id TEXT, source_id TEXT,
             data_version TEXT, city TEXT, target_date TEXT, temperature_metric TEXT,
             source_cycle_time TEXT, source_available_at TEXT, computed_at TEXT,
-            posterior_identity_hash TEXT)"""
+            posterior_identity_hash TEXT, family_id TEXT, bin_topology_hash TEXT,
+            q_json TEXT, q_lcb_json TEXT, q_ucb_json TEXT, provenance_json TEXT,
+            runtime_layer TEXT, training_allowed INTEGER)"""
     )
+    topology = [{"bin_id": "30C", "lower_c": 30.0, "upper_c": 30.0}]
+    topology_hash = stable_hash(topology)
     con.execute(
         """INSERT INTO forecast_posteriors (product_id, source_id, data_version, city, target_date,
             temperature_metric, source_cycle_time, source_available_at, computed_at,
-            posterior_identity_hash) VALUES (?,?,?,?,?,?,?,?,?,?)""",
+            posterior_identity_hash, family_id, bin_topology_hash, q_json, q_lcb_json,
+            q_ucb_json, provenance_json, runtime_layer, training_allowed)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (
-            fsr.REPLACEMENT_0_1_PRODUCT_ID, "openmeteo", "v1", "Tokyo", "2026-06-19", "high",
+            fsr.REPLACEMENT_0_1_PRODUCT_ID, fsr.REPLACEMENT_SOURCE_ID,
+            fsr.REPLACEMENT_HIGH_DATA_VERSION, "Tokyo", "2026-06-19", "high",
             "2026-06-17T00:00:00+00:00", "2026-06-17T06:00:00+00:00", "2026-06-17T06:30:00+00:00",
-            "pid-hash-xyz",
+            "a" * 64, "fam-1", topology_hash, '{"30C":1.0}', '{"30C":0.8}',
+            '{"30C":1.0}',
+            json.dumps(
+                {
+                    "bin_topology": topology,
+                    "replacement_q_mode": "FUSED_NORMAL_FULL",
+                    "q_lcb_basis": "fused_center_bootstrap_p05",
+                    "q_ucb_json_role": "fused_center_bootstrap_ucb",
+                    "q_lcb_bootstrap_draws": 200,
+                    "q_bootstrap_samples_hash": "b" * 64,
+                },
+                sort_keys=True,
+            ),
+            "live",
+            0,
+        ),
+    )
+    posterior_id = con.execute("SELECT posterior_id FROM forecast_posteriors").fetchone()[0]
+    con.execute(
+        """CREATE TABLE readiness_state (
+            readiness_id TEXT, scope_type TEXT, strategy_key TEXT, source_id TEXT,
+            data_version TEXT, status TEXT,
+            city TEXT, target_local_date TEXT, temperature_metric TEXT,
+            computed_at TEXT, expires_at TEXT, dependency_json TEXT)"""
+    )
+    con.execute(
+        "INSERT INTO readiness_state VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+        (
+            "replacement-readiness:tokyo-high",
+            "strategy",
+            fsr.REPLACEMENT_STRATEGY_KEY,
+            fsr.REPLACEMENT_SOURCE_ID,
+            fsr.REPLACEMENT_HIGH_DATA_VERSION,
+            fsr.REPLACEMENT_READY_STATUS,
+            "Tokyo",
+            "2026-06-19",
+            "high",
+            "2026-06-17T06:30:00+00:00",
+            "2026-06-18T00:00:00+00:00",
+            json.dumps(
+                {
+                    "dependencies": [
+                        {
+                            "role": "soft_anchor_posterior",
+                            "source_id": fsr.REPLACEMENT_SOURCE_ID,
+                            "product_id": fsr.REPLACEMENT_0_1_PRODUCT_ID,
+                            "data_version": fsr.REPLACEMENT_HIGH_DATA_VERSION,
+                            "status": fsr.REPLACEMENT_READY_STATUS,
+                            "source_available_at": "2026-06-17T06:30:00+00:00",
+                            "posterior_id": posterior_id,
+                        }
+                    ]
+                }
+            ),
         ),
     )
     con.execute(
@@ -122,6 +188,90 @@ def test_a2_posterior_lane_requires_same_cycle_raw_model_spine_members():
     assert results == []
 
 
+def test_a2b_posterior_lane_requires_live_runtime_schema():
+    con = _posteriors_only_conn()
+    con.execute("ALTER TABLE forecast_posteriors DROP COLUMN runtime_layer")
+
+    with mock.patch.object(fsr, "_replacement_live_enabled", return_value=True):
+        trig = fsr.ForecastSnapshotReadyTrigger(SimpleNamespace())
+        assert trig.build_committed_snapshot_events(
+            forecasts_conn=con,
+            decision_time=_DT,
+            received_at=_DT.isoformat(),
+            limit=10,
+        ) == []
+
+
+def test_a3_reactor_readiness_is_exact_scope_metric_and_point_in_time():
+    con = _posteriors_only_conn()
+    con.execute(
+        """INSERT INTO readiness_state VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+        (
+            "replacement-readiness:future",
+            "strategy",
+            fsr.REPLACEMENT_STRATEGY_KEY,
+            fsr.REPLACEMENT_SOURCE_ID,
+            fsr.REPLACEMENT_HIGH_DATA_VERSION,
+            fsr.REPLACEMENT_READY_STATUS,
+            "Tokyo",
+            "2026-06-19",
+            "high",
+            "2026-06-17T08:00:00-05:00",
+            "2026-06-18T00:00:00+00:00",
+            '{"dependencies":[]}',
+        ),
+    )
+    con.execute(
+        """INSERT INTO readiness_state VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+        (
+            "replacement-readiness:wrong-scope",
+            "global",
+            fsr.REPLACEMENT_STRATEGY_KEY,
+            fsr.REPLACEMENT_SOURCE_ID,
+            fsr.REPLACEMENT_HIGH_DATA_VERSION,
+            fsr.REPLACEMENT_READY_STATUS,
+            "Tokyo",
+            "2026-06-19",
+            "high",
+            "2026-06-17T11:00:00+00:00",
+            "2026-06-18T00:00:00+00:00",
+            '{"dependencies":[]}',
+        ),
+    )
+    readiness = hook_factory._latest_replacement_readiness(
+        con,
+        city="Tokyo",
+        target_date="2026-06-19",
+        temperature_metric="high",
+        decision_time=_DT,
+    )
+    assert readiness is not None
+    assert readiness.readiness_id == "replacement-readiness:tokyo-high"
+    assert hook_factory._latest_replacement_readiness(
+        con,
+        city="Tokyo",
+        target_date="2026-06-19",
+        temperature_metric="low",
+        decision_time=_DT,
+    ) is None
+
+    con.execute(
+        "DELETE FROM readiness_state WHERE readiness_id IN (?, ?)",
+        ("replacement-readiness:future", "replacement-readiness:wrong-scope"),
+    )
+    con.execute(
+        "UPDATE readiness_state SET dependency_json='{' WHERE readiness_id=?",
+        ("replacement-readiness:tokyo-high",),
+    )
+    assert hook_factory._latest_replacement_readiness(
+        con,
+        city="Tokyo",
+        target_date="2026-06-19",
+        temperature_metric="high",
+        decision_time=_DT,
+    ) is None
+
+
 # ---------------------------------------------------------------------------
 # (B) The spine causal cycle is parsed from the neutral id — no ensemble row needed.
 # ---------------------------------------------------------------------------
@@ -151,7 +301,7 @@ def test_c_no_submit_cert_forecast_authority_from_posterior_passes_validation():
         event_type="FORECAST_SNAPSHOT_READY",
         causal_snapshot_id="rmf-Tokyo|2026-06-19|high|2026-06-17",
     )
-    payload = {"source_id": "openmeteo", "source_run_id": "pid-hash-xyz"}
+    payload = {"source_id": "openmeteo", "source_run_id": "a" * 64}
     city = SimpleNamespace(timezone="Asia/Tokyo", settlement_unit="C")
     with mock.patch.object(adapter, "runtime_cities_by_name", return_value={"Tokyo": city}):
         res = adapter._forecast_authority_payload_from_posterior(
@@ -161,7 +311,7 @@ def test_c_no_submit_cert_forecast_authority_from_posterior_passes_validation():
     pl, clock = res
     assert pl["members_json_source"] == POSTERIOR_MEMBERS_JSON_SOURCE
     assert pl["members_json_source"] != "ensemble_snapshots.daily_extrema"
-    assert pl["source_run_id"] == "pid-hash-xyz"
+    assert pl["source_run_id"] == "a" * 64
     assert pl["forecast_source_id"] == "openmeteo"
     assert pl["observed_members"] == 5 and pl["expected_members"] == 5
     # Validates through BOTH the verifier and compiler posterior branches (no raise).

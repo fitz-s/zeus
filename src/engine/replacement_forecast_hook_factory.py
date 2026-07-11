@@ -101,45 +101,63 @@ def _latest_replacement_readiness(
     city: str,
     target_date: str,
     temperature_metric: str,
+    decision_time: datetime,
 ) -> ReplacementForecastReadinessDecision | None:
+    metric = str(temperature_metric).strip().lower()
+    if metric not in {"high", "low"}:
+        return None
+    data_version = HIGH_DATA_VERSION if metric == "high" else LOW_DATA_VERSION
+    decision_iso = _to_utc(decision_time).isoformat()
     row = conn.execute(
         """
         SELECT *
         FROM readiness_state
-        WHERE strategy_key = ?
+        WHERE scope_type = 'strategy'
+          AND strategy_key = ?
           AND source_id = ?
-          AND data_version IN (?, ?)
+          AND data_version = ?
           AND city = ?
           AND target_local_date = ?
           AND temperature_metric = ?
-        ORDER BY computed_at DESC
+          AND julianday(computed_at) <= julianday(?)
+        ORDER BY julianday(computed_at) DESC, readiness_id DESC
         LIMIT 1
         """,
         (
             STRATEGY_KEY,
             SOURCE_ID,
-            HIGH_DATA_VERSION,
-            LOW_DATA_VERSION,
+            data_version,
             city,
             target_date,
-            temperature_metric,
+            metric,
+            decision_iso,
         ),
     ).fetchone()
     if row is None:
         return None
     row_map = dict(row)
-    status = normalize_replacement_readiness_status(str(row_map.get("status") or "BLOCKED"))
-    return ReplacementForecastReadinessDecision(
-        readiness_id=str(row_map["readiness_id"]),
-        status=status if status in {READY_STATUS, "BLOCKED"} else "BLOCKED",
-        reason_codes=_json_reasons(row_map.get("reason_codes_json")) or ("REPLACEMENT_READINESS_STATE_LOADED",),
-        dependency_json=_json_mapping(row_map.get("dependency_json"), field_name="dependency_json"),
-        provenance_json=_json_mapping(row_map.get("provenance_json"), field_name="provenance_json"),
-        expires_at=row_map.get("expires_at") if status == READY_STATUS else None,
-        source_id=SOURCE_ID,
-        product_id=PRODUCT_ID,
-        strategy_key=STRATEGY_KEY,
-    )
+    try:
+        status = normalize_replacement_readiness_status(
+            str(row_map.get("status") or "BLOCKED")
+        )
+        return ReplacementForecastReadinessDecision(
+            readiness_id=str(row_map["readiness_id"]),
+            status=status if status in {READY_STATUS, "BLOCKED"} else "BLOCKED",
+            reason_codes=_json_reasons(row_map.get("reason_codes_json"))
+            or ("REPLACEMENT_READINESS_STATE_LOADED",),
+            dependency_json=_json_mapping(
+                row_map.get("dependency_json"), field_name="dependency_json"
+            ),
+            provenance_json=_json_mapping(
+                row_map.get("provenance_json"), field_name="provenance_json"
+            ),
+            expires_at=row_map.get("expires_at") if status == READY_STATUS else None,
+            source_id=SOURCE_ID,
+            product_id=PRODUCT_ID,
+            strategy_key=STRATEGY_KEY,
+        )
+    except (KeyError, TypeError, ValueError):
+        return None
 
 
 def _available_tables(conn: sqlite3.Connection, required: tuple[str, ...] | None = None) -> tuple[str, ...]:
@@ -507,6 +525,7 @@ def build_replacement_forecast_event_hook(
             city=city,
             target_date=target_date,
             temperature_metric=temperature_metric,
+            decision_time=decision_time,
         )
         switch_decision = evaluate_replacement_forecast_switch_decision(
             ReplacementForecastSwitchDecisionInput(

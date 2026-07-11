@@ -1,6 +1,6 @@
-# Created: 2026-06-07
-# Last reused or audited: 2026-06-07
-# Authority basis: REAUDIT_0_1.md §2 H3 (expires_at loaded but never compared to decision_time) + §4.
+# Lifecycle: created=2026-06-07; last_reviewed=2026-07-11; last_reused=2026-07-11
+# Purpose: Prove expired readiness and over-age forecast cycles fail closed for new entries.
+# Reuse: Re-audit both point-in-time gates whenever live replacement selection changes.
 """H3 antibody — readiness expiry / source-cycle age must be a HARD gate.
 
 Relationship test across the readiness->bundle boundary: a READY posterior whose
@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, datetime, timezone
 
 import pytest
@@ -62,6 +62,7 @@ def _dt(day: int, hour: int, minute: int = 0) -> datetime:
 
 def _provenance() -> dict[str, object]:
     return {
+        "replacement_q_mode": "FUSED_NORMAL_FULL",
         "bin_topology_hash": _TOPO_HASH,
         "bin_topology": [
             {
@@ -92,7 +93,7 @@ def _insert_posterior(
             temperature_metric, source_cycle_time, source_available_at,
             computed_at, q_json, q_lcb_json, posterior_method,
             dependency_source_run_ids_json, provenance_json,
-            trade_authority_status, training_allowed,
+            training_allowed, runtime_layer,
             bin_topology_hash, posterior_identity_hash, dependency_hash,
             posterior_config_hash, q_ucb_json
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -118,13 +119,13 @@ def _insert_posterior(
                 }
             ),
             json.dumps(_provenance()),
-            "BLOCKED",
             0,
+            "live",
             _TOPO_HASH,
             "pid-hash",
             "dep-hash",
             "cfg-hash",
-            None,
+            json.dumps({"cold": 0.3, "warm": 0.9}),
         ),
     )
     return int(conn.execute("SELECT posterior_id FROM forecast_posteriors").fetchone()[0])
@@ -179,14 +180,8 @@ def _readiness(*, posterior_id: int, computed_at: datetime, expires_at: datetime
     )
 
 
-def test_bundle_reader_serves_expired_readiness_with_brand() -> None:
-    """OPERATOR LAW (2026-06-11, "没有新的就用老的"): expired readiness BRANDS, never blocks.
-
-    The forecast was computed early and its readiness EXPIRED before the decision
-    moment. The reader serves the freshest tradeable row that exists, carrying the
-    expiry as a staleness_violations provenance brand (plan:
-    docs/evidence/settlement_guard/2026-06-11_serve_freshest_available_plan.md).
-    """
+def test_bundle_reader_blocks_expired_readiness() -> None:
+    """Expired point-in-time authority cannot license a new capital decision."""
     conn = _conn()
     posterior_id = _insert_posterior(
         conn,
@@ -210,18 +205,12 @@ def test_bundle_reader_serves_expired_readiness_with_brand() -> None:
         decision_time=_dt(6, 12),      # ... but the decision happens at 12:00 (expired)
         current_bin_topology_hash=_TOPO_HASH,
     )
-    assert result.ok is True
-    violations = (result.bundle.provenance_json or {}).get("staleness_violations") or []
-    assert any("READINESS_EXPIRED" in v for v in violations), violations
+    assert result.ok is False
+    assert result.reason_code == "REPLACEMENT_LIVE_READINESS_EXPIRED"
 
 
-def test_bundle_reader_serves_stale_source_cycle_with_brand() -> None:
-    """A source cycle beyond the staleness bound (60h) serves WITH the age brand.
-
-    OPERATOR LAW: the bound drives the download/re-seed pursuit and the brand —
-    never darkness. The served bundle's provenance carries the parseable
-    CYCLE_AGE_EXCEEDS_BOUND violation (source_cycle + age_hours).
-    """
+def test_bundle_reader_blocks_stale_source_cycle() -> None:
+    """A source cycle beyond the live staleness bound fails closed."""
     conn = _conn()
     posterior_id = _insert_posterior(
         conn,
@@ -245,9 +234,59 @@ def test_bundle_reader_serves_stale_source_cycle_with_brand() -> None:
         decision_time=_dt(6, 12),
         current_bin_topology_hash=_TOPO_HASH,
     )
-    assert result.ok is True
-    violations = (result.bundle.provenance_json or {}).get("staleness_violations") or []
-    assert any("CYCLE_AGE_EXCEEDS_BOUND" in v and "age_hours=60.0" in v for v in violations), violations
+    assert result.ok is False
+    assert result.reason_code == "REPLACEMENT_LIVE_CYCLE_AGE_EXCEEDS_BOUND"
+
+
+@pytest.mark.parametrize(
+    ("field", "bad_value"),
+    (
+        ("source_id", "wrong-source"),
+        ("product_id", "wrong-product"),
+        ("data_version", "wrong-data"),
+        ("status", "BLOCKED"),
+        ("source_available_at", "2026-06-06T12:01:00+00:00"),
+        ("posterior_id", "1"),
+    ),
+)
+def test_bundle_reader_rejects_forged_soft_anchor_dependency(
+    field: str,
+    bad_value: object,
+) -> None:
+    conn = _conn()
+    posterior_id = _insert_posterior(
+        conn,
+        source_cycle_time=_dt(6, 0),
+        source_available_at=_dt(6, 7),
+        computed_at=_dt(6, 7, 30),
+    )
+    readiness = _readiness(
+        posterior_id=posterior_id,
+        computed_at=_dt(6, 11),
+        expires_at=_dt(6, 23),
+        decision_time=_dt(6, 11),
+    )
+    dependency_json = json.loads(json.dumps(readiness.dependency_json))
+    soft_anchor = next(
+        item
+        for item in dependency_json["dependencies"]
+        if item["role"] == "soft_anchor_posterior"
+    )
+    soft_anchor[field] = bad_value
+    forged = replace(readiness, dependency_json=dependency_json)
+
+    result = read_replacement_forecast_bundle(
+        conn,
+        baseline_bundle=_BaselineBundle(_Evidence("b0-run")),
+        readiness=forged,
+        city="Shanghai",
+        target_date=date(2026, 6, 7),
+        temperature_metric="high",
+        decision_time=_dt(6, 12),
+        current_bin_topology_hash=_TOPO_HASH,
+    )
+    assert result.ok is False
+    assert result.reason_code == "REPLACEMENT_POSTERIOR_READINESS_MISMATCH"
 
 
 def test_bundle_reader_accepts_fresh_readiness() -> None:

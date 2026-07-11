@@ -9,6 +9,13 @@ from datetime import date, datetime, timedelta, timezone
 from typing import Any, Callable
 
 from src.data.forecast_target_contract import OPENDATA_MAX_STEP_HOURS
+from src.data.replacement_forecast_readiness import (
+    HIGH_DATA_VERSION as REPLACEMENT_HIGH_DATA_VERSION,
+    LOW_DATA_VERSION as REPLACEMENT_LOW_DATA_VERSION,
+    READY_STATUS as REPLACEMENT_READY_STATUS,
+    SOURCE_ID as REPLACEMENT_SOURCE_ID,
+    STRATEGY_KEY as REPLACEMENT_STRATEGY_KEY,
+)
 from src.events.event_writer import EventWriter, EventWriteResult
 from src.events.opportunity_event import (
     ForecastSnapshotReadyPayload,
@@ -28,9 +35,8 @@ REPLACEMENT_0_1_TRACK_LABEL = "replacement_0_1_openmeteo_bayes_fusion"
 # deterministic snapshot identity is minted per family-cycle as
 # ``rmf-<city>|<target>|<metric>|<cycle_date>`` (no ensemble_snapshots row needed). Rows
 # carrying this data_version short-circuit ``classify_forecast_snapshot`` to COMPLETE: a
-# forecast_posteriors row exists ONLY after the materializer's own decorrelated-model +
-# topology completeness gates pass, so existence IS completeness (a DIFFERENT certified
-# authority, not a relaxed gate). The legacy ensemble path is untouched for flag-OFF.
+# posterior is executable only when the current strategy-scope readiness certificate binds
+# that exact row and dependency identity. The legacy ensemble path is untouched for flag-OFF.
 POSTERIOR_BACKED_DATA_VERSION = "forecast_posteriors.replacement_0_1_neutral_carrier"
 _POSTERIOR_SNAPSHOT_ID_PREFIX = "rmf-"
 _POSTERIOR_RAW_MODEL_REQUIRED_COLUMNS = {
@@ -41,6 +47,21 @@ _POSTERIOR_RAW_MODEL_REQUIRED_COLUMNS = {
     "source_cycle_time",
     "source_available_at",
     "forecast_value_c",
+}
+_POSTERIOR_LIVE_REQUIRED_COLUMNS = {
+    "posterior_id",
+    "product_id",
+    "source_id",
+    "data_version",
+    "city",
+    "target_date",
+    "temperature_metric",
+    "source_cycle_time",
+    "source_available_at",
+    "computed_at",
+    "posterior_identity_hash",
+    "runtime_layer",
+    "training_allowed",
 }
 
 
@@ -729,19 +750,24 @@ class ForecastSnapshotReadyTrigger:
         # mx2t3 carrier-decouple (GATE-1 C-A2): under the replacement lane readiness rides
         # ``forecast_posteriors`` (mx2t3-independent), so the required-table guard switches to it —
         # otherwise this scan early-returns ``[]`` once the cold ensemble tables freeze/absent.
-        _posterior_lane = (
-            _replacement_live_enabled()
-            and _table_exists(forecasts_conn, "forecast_posteriors")
-        )
-        if _posterior_lane:
+        _replacement_posterior_lane = _replacement_live_enabled()
+        _posterior_lane = False
+        if _replacement_posterior_lane:
             if not _table_exists(forecasts_conn, "forecast_posteriors"):
                 return []
+            if not _table_exists(forecasts_conn, "readiness_state"):
+                return []
             if not _table_exists(forecasts_conn, "raw_model_forecasts"):
+                return []
+            if not _POSTERIOR_LIVE_REQUIRED_COLUMNS.issubset(
+                _table_columns(forecasts_conn, "forecast_posteriors")
+            ):
                 return []
             if not _POSTERIOR_RAW_MODEL_REQUIRED_COLUMNS.issubset(
                 _table_columns(forecasts_conn, "raw_model_forecasts")
             ):
                 return []
+            _posterior_lane = True
         elif not all(_table_exists(forecasts_conn, table) for table in _FORECAST_TABLES):
             return []
         # Decision-first emission: a family with no Polymarket market (no market_events row)
@@ -809,9 +835,10 @@ class ForecastSnapshotReadyTrigger:
             # Project the SAME row aliases the legacy ensemble path produced (so _source_run_from_join
             # / _coverage_from_join / _snapshot_from_join are unchanged) but mint a NEUTRAL synthesized
             # snapshot identity (rmf-<city>|<target>|<metric>|<cycle_date>) — no ensemble_snapshots row.
-            # completeness_status='COMPLETE' / readiness_status='LIVE_ELIGIBLE' are correct by
-            # construction (a posterior row exists only after the materializer's own decorrelated-model
-            # + topology gates pass). members_json is NULL (the spine re-sources members from
+            # completeness_status='COMPLETE' / readiness_status='LIVE_ELIGIBLE' are licensed by
+            # the exact READY dependency below. A posterior may be appended before its readiness
+            # certificate is durable, so recency alone is never carrier authority. members_json is
+            # NULL (the spine re-sources members from
             # raw_model_forecasts; the FSR members never feed belief on this lane), but the event's
             # member counters must still describe that same raw-model carrier instead of falling back
             # to legacy 51-member ensemble telemetry.
@@ -824,14 +851,7 @@ class ForecastSnapshotReadyTrigger:
             # the carrier count to the currently-emittable family/cycle set.
             _posterior_columns = _table_columns(forecasts_conn, "forecast_posteriors")
             _posterior_runtime_filter = (
-                " AND fp.runtime_layer = 'live'"
-                if "runtime_layer" in _posterior_columns
-                else ""
-            )
-            _posterior_newer_runtime_filter = (
-                " AND newer.runtime_layer = fp.runtime_layer"
-                if "runtime_layer" in _posterior_columns
-                else ""
+                " AND fp.runtime_layer = 'live' AND fp.training_allowed = 0"
             )
             _select_sql_base = f"""
                 SELECT
@@ -885,29 +905,70 @@ class ForecastSnapshotReadyTrigger:
                    {_posterior_runtime_filter}
                    {_family_filter_sql}
                    AND fp.target_date >= ?
-                   AND (fp.source_available_at IS NULL OR fp.source_available_at <= ?)
-                   AND (fp.computed_at IS NULL OR fp.computed_at <= ?)
-                   AND NOT EXISTS (
+                   AND (
+                       fp.source_available_at IS NULL
+                       OR julianday(fp.source_available_at) <= julianday(?)
+                   )
+                   AND (
+                       fp.computed_at IS NULL
+                       OR julianday(fp.computed_at) <= julianday(?)
+                   )
+                   AND EXISTS (
                         SELECT 1
-                          FROM forecast_posteriors newer
-                         WHERE newer.product_id = fp.product_id
-                           {_posterior_newer_runtime_filter}
-                           AND newer.city = fp.city
-                           AND newer.target_date = fp.target_date
-                           AND newer.temperature_metric = fp.temperature_metric
-                           AND (newer.source_available_at IS NULL OR newer.source_available_at <= ?)
-                           AND (newer.computed_at IS NULL OR newer.computed_at <= ?)
-                           AND (
-                                COALESCE(newer.source_cycle_time, '') > COALESCE(fp.source_cycle_time, '')
-                             OR (
-                                    COALESCE(newer.source_cycle_time, '') = COALESCE(fp.source_cycle_time, '')
-                                AND COALESCE(newer.computed_at, '') > COALESCE(fp.computed_at, '')
-                             )
-                             OR (
-                                    COALESCE(newer.source_cycle_time, '') = COALESCE(fp.source_cycle_time, '')
-                                AND COALESCE(newer.computed_at, '') = COALESCE(fp.computed_at, '')
-                                AND newer.posterior_id > fp.posterior_id
-                             )
+                          FROM readiness_state AS rs,
+                               json_each(
+                                   CASE
+                                       WHEN json_valid(rs.dependency_json)
+                                       THEN rs.dependency_json
+                                       ELSE '{{}}'
+                                   END,
+                                   '$.dependencies'
+                               ) AS dep
+                         WHERE rs.strategy_key = '{REPLACEMENT_STRATEGY_KEY}'
+                           AND rs.scope_type = 'strategy'
+                           AND rs.source_id = '{REPLACEMENT_SOURCE_ID}'
+                           AND rs.data_version = CASE fp.temperature_metric
+                                WHEN 'high' THEN '{REPLACEMENT_HIGH_DATA_VERSION}'
+                                WHEN 'low' THEN '{REPLACEMENT_LOW_DATA_VERSION}'
+                           END
+                           AND rs.status = '{REPLACEMENT_READY_STATUS}'
+                           AND julianday(rs.computed_at) <= julianday(?)
+                           AND rs.expires_at IS NOT NULL
+                           AND julianday(rs.expires_at) > julianday(?)
+                           AND fp.source_id = rs.source_id
+                           AND fp.data_version = rs.data_version
+                           AND rs.city = fp.city
+                           AND rs.target_local_date = fp.target_date
+                           AND rs.temperature_metric = fp.temperature_metric
+                           AND json_extract(dep.value, '$.role') = 'soft_anchor_posterior'
+                           AND json_extract(dep.value, '$.source_id') = rs.source_id
+                           AND json_extract(dep.value, '$.product_id') = fp.product_id
+                           AND json_extract(dep.value, '$.data_version') = rs.data_version
+                           AND json_extract(dep.value, '$.status') = '{REPLACEMENT_READY_STATUS}'
+                           AND json_type(dep.value, '$.source_available_at') = 'text'
+                           AND julianday(
+                               json_extract(dep.value, '$.source_available_at')
+                           ) <= julianday(?)
+                           AND json_type(dep.value, '$.posterior_id') = 'integer'
+                           AND json_extract(dep.value, '$.posterior_id') = fp.posterior_id
+                           AND NOT EXISTS (
+                               SELECT 1
+                                 FROM readiness_state AS newer_rs
+                                WHERE newer_rs.scope_type = rs.scope_type
+                                  AND newer_rs.strategy_key = rs.strategy_key
+                                  AND newer_rs.source_id = rs.source_id
+                                  AND newer_rs.data_version = rs.data_version
+                                  AND newer_rs.city = rs.city
+                                  AND newer_rs.target_local_date = rs.target_local_date
+                                  AND newer_rs.temperature_metric = rs.temperature_metric
+                                  AND julianday(newer_rs.computed_at) <= julianday(?)
+                                  AND (
+                                      julianday(newer_rs.computed_at) > julianday(rs.computed_at)
+                                      OR (
+                                          julianday(newer_rs.computed_at) = julianday(rs.computed_at)
+                                          AND newer_rs.readiness_id > rs.readiness_id
+                                      )
+                                  )
                            )
                    ){posterior_market_filter}
                 ORDER BY fp.source_cycle_time DESC, fp.computed_at DESC
@@ -918,6 +979,8 @@ class ForecastSnapshotReadyTrigger:
                 (
                     *_family_filter_params,
                     _target_date_floor,
+                    _decision_iso,
+                    _decision_iso,
                     _decision_iso,
                     _decision_iso,
                     _decision_iso,

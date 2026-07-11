@@ -20587,6 +20587,7 @@ def _prepare_current_global_probability_family(
         city=family.city,
         target_date=family.target_date,
         temperature_metric=family.metric,
+        decision_time=decision_time,
     )
     if readiness is None:
         raise ValueError("GLOBAL_CURRENT_REPLACEMENT_READINESS_MISSING")
@@ -20852,6 +20853,7 @@ def current_global_probability_authority(
         city=city,
         target_date=target_date,
         temperature_metric=metric,
+        decision_time=decision_time,
     )
     if readiness is None:
         return None
@@ -20983,6 +20985,7 @@ def _replacement_authority_probability_and_fdr_proof(
         city=str(family.city),
         target_date=str(family.target_date),
         temperature_metric=str(family.metric),
+        decision_time=decision_time,
     )
     if readiness is None:
         raise ValueError("REPLACEMENT_0_1_LIVE_READINESS_MISSING")

@@ -1,5 +1,6 @@
-# Created: 2026-05-24
-# Last reused/audited: 2026-07-09
+# Lifecycle: created=2026-05-24; last_reviewed=2026-07-10; last_reused=2026-07-10
+# Purpose: Prove FSR emits only complete, current, authority-bound forecast carriers.
+# Reuse: Re-audit replacement readiness binding and event clocks before trigger changes.
 # Authority basis: EDLI v1 implementation prompt §8 ForecastSnapshotReadyTrigger contract.
 from __future__ import annotations
 
@@ -86,6 +87,60 @@ def _snapshot(available_at: str = "2026-05-24T04:15:00+00:00") -> dict:
 
 def _decision_time() -> datetime:
     return datetime(2026, 5, 24, 5, 0, tzinfo=UTC)
+
+
+def _bind_replacement_readiness(
+    conn: sqlite3.Connection,
+    *,
+    posterior_id: int,
+    city: str,
+    target_date: str,
+    metric: str,
+    computed_at: str,
+) -> None:
+    data_version = (
+        "openmeteo_ecmwf_ifs9_bayes_fusion_high_v1"
+        if metric == "high"
+        else "openmeteo_ecmwf_ifs9_bayes_fusion_low_v1"
+    )
+    dependency = json.dumps(
+        {
+            "dependencies": [
+                {
+                    "role": "soft_anchor_posterior",
+                    "source_id": "openmeteo_ecmwf_ifs9_bayes_fusion",
+                    "product_id": "openmeteo_ecmwf_ifs9_bayes_fusion_v1",
+                    "data_version": data_version,
+                    "status": "READY",
+                    "source_available_at": computed_at,
+                    "posterior_id": posterior_id,
+                }
+            ]
+        },
+        sort_keys=True,
+    )
+    conn.execute(
+        """INSERT OR REPLACE INTO readiness_state (
+            readiness_id, scope_key, scope_type, city, target_local_date,
+            temperature_metric, data_version, source_id, strategy_key, status,
+            reason_codes_json, computed_at, expires_at, dependency_json, provenance_json,
+            token_ids_json
+        ) VALUES (?, ?, 'strategy', ?, ?, ?, ?, ?, ?, 'READY',
+                  '[]', ?, ?, ?, '{}', '[]')""",
+        (
+            f"replacement-readiness:{city}:{target_date}:{metric}",
+            f"{city}|{target_date}|{metric}",
+            city,
+            target_date,
+            metric,
+            data_version,
+            "openmeteo_ecmwf_ifs9_bayes_fusion",
+            "openmeteo_ecmwf_ifs9_bayes_fusion",
+            computed_at,
+            f"{target_date}T23:59:59+00:00",
+            dependency,
+        ),
+    )
 
 
 def test_complete_snapshot_emits_once():
@@ -722,7 +777,7 @@ def test_replacement_authority_scan_requires_matching_0_1_posterior(monkeypatch)
     )
     assert without_posterior == []
 
-    forecasts_conn.execute(
+    posterior_cursor = forecasts_conn.execute(
         """
         INSERT INTO forecast_posteriors (
             source_id, product_id, data_version, city, target_date, temperature_metric,
@@ -742,6 +797,33 @@ def test_replacement_authority_scan_requires_matching_0_1_posterior(monkeypatch)
             '[]', '{}', 'live', 0, 'posterior-hash-chicago-high-20260524'
         )
         """
+    )
+    _bind_replacement_readiness(
+        forecasts_conn,
+        posterior_id=int(posterior_cursor.lastrowid),
+        city="Chicago",
+        target_date="2026-05-24",
+        metric="high",
+        computed_at="2026-05-24T04:16:00+00:00",
+    )
+    newer_cursor = forecasts_conn.execute(
+        """INSERT INTO forecast_posteriors (
+            source_id, product_id, data_version, city, target_date, temperature_metric,
+            source_cycle_time, source_available_at, computed_at, q_json, q_lcb_json,
+            q_ucb_json, posterior_method, dependency_source_run_ids_json,
+            provenance_json, runtime_layer, training_allowed, posterior_identity_hash
+        ) VALUES (
+            'openmeteo_ecmwf_ifs9_bayes_fusion',
+            'openmeteo_ecmwf_ifs9_bayes_fusion_v1',
+            'openmeteo_ecmwf_ifs9_bayes_fusion_high_v1',
+            'Chicago', '2026-05-24', 'high',
+            '2026-05-24T00:00:00+00:00',
+            '2026-05-24T04:15:00+00:00',
+            '2026-05-24T04:16:30+00:00',
+            '{"bin:28":0.43}', NULL, NULL,
+            'openmeteo_ecmwf_ifs9_bayes_fusion',
+            '[]', '{}', 'live', 0, 'uncertified-newer-posterior'
+        )"""
     )
     forecasts_conn.execute(
         """
@@ -788,8 +870,151 @@ def test_replacement_authority_scan_requires_matching_0_1_posterior(monkeypatch)
 
     payload = json.loads(world_conn.execute("SELECT payload_json FROM opportunity_events").fetchone()[0])
     assert payload["track"] == "replacement_0_1_openmeteo_bayes_fusion"
+    assert payload["source_run_id"] == "posterior-hash-chicago-high-20260524"
     assert payload["member_count"] == 3
     assert payload["expected_members"] == 3
+
+    _bind_replacement_readiness(
+        forecasts_conn,
+        posterior_id=int(newer_cursor.lastrowid),
+        city="Chicago",
+        target_date="2026-05-24",
+        metric="high",
+        computed_at="2026-05-24T04:16:30+00:00",
+    )
+    advanced = trigger.build_committed_snapshot_events(
+        forecasts_conn=forecasts_conn,
+        decision_time=_decision_time(),
+        received_at="2026-05-24T04:19:00+00:00",
+    )
+    assert len(advanced) == 1
+    assert json.loads(advanced[0].payload_json)["source_run_id"] == (
+        "uncertified-newer-posterior"
+    )
+
+    def _assert_no_carrier() -> None:
+        assert trigger.build_committed_snapshot_events(
+            forecasts_conn=forecasts_conn,
+            decision_time=_decision_time(),
+            received_at="2026-05-24T05:00:00+00:00",
+        ) == []
+
+    forecasts_conn.execute("UPDATE readiness_state SET scope_type='global' WHERE city='Chicago'")
+    _assert_no_carrier()
+    forecasts_conn.execute("UPDATE readiness_state SET scope_type='strategy' WHERE city='Chicago'")
+    forecasts_conn.execute(
+        "UPDATE readiness_state SET expires_at='2026-05-24T04:59:59+00:00' WHERE city='Chicago'"
+    )
+    _assert_no_carrier()
+    forecasts_conn.execute(
+        "UPDATE readiness_state SET expires_at='2026-05-24T23:59:59+00:00' WHERE city='Chicago'"
+    )
+    forecasts_conn.execute(
+        "UPDATE forecast_posteriors SET source_id='wrong-source' WHERE posterior_id=?",
+        (int(newer_cursor.lastrowid),),
+    )
+    _assert_no_carrier()
+    forecasts_conn.execute(
+        "UPDATE forecast_posteriors SET source_id='openmeteo_ecmwf_ifs9_bayes_fusion' "
+        "WHERE posterior_id=?",
+        (int(newer_cursor.lastrowid),),
+    )
+
+    good_dependency = json.loads(
+        forecasts_conn.execute(
+            "SELECT dependency_json FROM readiness_state WHERE city='Chicago'"
+        ).fetchone()[0]
+    )
+    for field, bad_value in (
+        ("source_id", "wrong-source"),
+        ("product_id", "wrong-product"),
+        ("data_version", "wrong-data"),
+        ("status", "BLOCKED"),
+        ("source_available_at", "2026-05-24T05:01:00+00:00"),
+    ):
+        forged = json.loads(json.dumps(good_dependency))
+        forged["dependencies"][0][field] = bad_value
+        forecasts_conn.execute(
+            "UPDATE readiness_state SET dependency_json=? WHERE city='Chicago'",
+            (json.dumps(forged, sort_keys=True),),
+        )
+        _assert_no_carrier()
+    forecasts_conn.execute(
+        "UPDATE readiness_state SET dependency_json=? WHERE city='Chicago'",
+        (json.dumps(good_dependency, sort_keys=True),),
+    )
+
+    _bind_replacement_readiness(
+        forecasts_conn,
+        posterior_id=int(newer_cursor.lastrowid),
+        city="Chicago",
+        target_date="2026-05-24",
+        metric="high",
+        computed_at="2026-05-24T00:01:00-05:00",
+    )
+    assert trigger.build_committed_snapshot_events(
+        forecasts_conn=forecasts_conn,
+        decision_time=_decision_time(),
+        received_at="2026-05-24T05:00:00+00:00",
+    ) == []
+
+    forecasts_conn.execute(
+        "UPDATE readiness_state SET computed_at=?, dependency_json=? "
+        "WHERE city='Chicago'",
+        (
+            "2026-05-24T04:16:30+00:00",
+            json.dumps(
+                {
+                    "dependencies": [
+                        {
+                            "role": "soft_anchor_posterior",
+                            "posterior_id": str(newer_cursor.lastrowid),
+                        }
+                    ]
+                }
+            ),
+        ),
+    )
+    assert trigger.build_committed_snapshot_events(
+        forecasts_conn=forecasts_conn,
+        decision_time=_decision_time(),
+        received_at="2026-05-24T05:00:00+00:00",
+    ) == []
+
+    forecasts_conn.execute(
+        "UPDATE readiness_state SET computed_at=?, data_version=?, dependency_json=? "
+        "WHERE city='Chicago'",
+        (
+            "2026-05-24T04:16:30+00:00",
+            "openmeteo_ecmwf_ifs9_bayes_fusion_low_v1",
+            json.dumps(
+                {
+                    "dependencies": [
+                        {
+                            "role": "soft_anchor_posterior",
+                            "posterior_id": int(newer_cursor.lastrowid),
+                        }
+                    ]
+                }
+            ),
+        ),
+    )
+    assert trigger.build_committed_snapshot_events(
+        forecasts_conn=forecasts_conn,
+        decision_time=_decision_time(),
+        received_at="2026-05-24T05:00:00+00:00",
+    ) == []
+
+    forecasts_conn.execute(
+        "UPDATE readiness_state SET computed_at=?, dependency_json='{' "
+        "WHERE city='Chicago' AND target_local_date='2026-05-24'",
+        ("2026-05-24T04:16:30+00:00",),
+    )
+    assert trigger.build_committed_snapshot_events(
+        forecasts_conn=forecasts_conn,
+        decision_time=_decision_time(),
+        received_at="2026-05-24T05:00:00+00:00",
+    ) == []
 
 
 def test_replacement_authority_scan_accepts_posterior_provenance_carrier_count(monkeypatch):
@@ -804,7 +1029,7 @@ def test_replacement_authority_scan_accepts_posterior_provenance_carrier_count(m
     from src.state.db import init_schema_forecasts
 
     init_schema_forecasts(forecasts_conn)
-    forecasts_conn.execute(
+    posterior_cursor = forecasts_conn.execute(
         """
         INSERT INTO forecast_posteriors (
             source_id, product_id, data_version, city, target_date, temperature_metric,
@@ -814,7 +1039,7 @@ def test_replacement_authority_scan_accepts_posterior_provenance_carrier_count(m
         ) VALUES (
             'openmeteo_ecmwf_ifs9_bayes_fusion',
             'openmeteo_ecmwf_ifs9_bayes_fusion_v1',
-            'openmeteo_ecmwf_ifs9_bayes_fusion_high_v1',
+            'openmeteo_ecmwf_ifs9_bayes_fusion_low_v1',
             'Shanghai', '2026-07-09', 'low',
             '2026-07-09T00:00:00+00:00',
             '2026-07-09T08:17:02+00:00',
@@ -845,6 +1070,14 @@ def test_replacement_authority_scan_accepts_posterior_provenance_carrier_count(m
                 sort_keys=True,
             ),
         ),
+    )
+    _bind_replacement_readiness(
+        forecasts_conn,
+        posterior_id=int(posterior_cursor.lastrowid),
+        city="Shanghai",
+        target_date="2026-07-09",
+        metric="low",
+        computed_at="2026-07-09T08:21:20+00:00",
     )
 
     world_conn = sqlite3.connect(":memory:")
@@ -916,6 +1149,22 @@ def test_restricted_redecision_counts_raw_members_only_for_screened_family(monke
             ("Denver", "2026-05-24T04:17:00+00:00"),
         ],
     )
+    for city, computed_at in (
+        ("Chicago", "2026-05-24T04:16:00+00:00"),
+        ("Denver", "2026-05-24T04:17:00+00:00"),
+    ):
+        posterior_id = forecasts_conn.execute(
+            "SELECT posterior_id FROM forecast_posteriors WHERE city=?",
+            (city,),
+        ).fetchone()[0]
+        _bind_replacement_readiness(
+            forecasts_conn,
+            posterior_id=int(posterior_id),
+            city=city,
+            target_date="2026-05-24",
+            metric="high",
+            computed_at=computed_at,
+        )
 
     world_conn = sqlite3.connect(":memory:")
     init_schema(world_conn)

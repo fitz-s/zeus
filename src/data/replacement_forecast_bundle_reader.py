@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import hashlib
-import logging
 import math
 import sqlite3
 from dataclasses import dataclass
@@ -56,7 +55,6 @@ _REPLACEMENT_Q_MODE_LIVE_ELIGIBLE = frozenset(
 _replacement_source_cycle_max_age_hours = replacement_source_cycle_max_age_hours
 
 
-logger = logging.getLogger("zeus.replacement_forecast_bundle_reader")
 
 
 @dataclass(frozen=True)
@@ -234,14 +232,32 @@ def _row_is_live_grade(row_map: Mapping[str, Any]) -> bool:
     return mode in _REPLACEMENT_Q_MODE_LIVE_ELIGIBLE
 
 
-def _readiness_posterior_id(readiness: ReplacementForecastReadinessDecision) -> int | None:
+def _readiness_posterior_id(
+    readiness: ReplacementForecastReadinessDecision,
+    *,
+    data_version: str,
+    decision_time: datetime,
+) -> int | None:
     dependency = _readiness_dependency_by_role(readiness, "soft_anchor_posterior")
     if dependency is None:
         return None
-    try:
-        return int(dependency.get("posterior_id") or -1)
-    except (TypeError, ValueError):
+    if (
+        dependency.get("source_id") != SOURCE_ID
+        or dependency.get("product_id") != PRODUCT_ID
+        or dependency.get("data_version") != data_version
+        or dependency.get("status") != READY_STATUS
+    ):
         return None
+    available_at = dependency.get("source_available_at")
+    if not isinstance(available_at, str):
+        return None
+    try:
+        if _parse_utc(available_at, field_name="source_available_at") > decision_time:
+            return None
+    except ValueError:
+        return None
+    posterior_id = dependency.get("posterior_id")
+    return posterior_id if type(posterior_id) is int and posterior_id > 0 else None
 
 
 def _canonical_json(value: object) -> str:
@@ -508,35 +524,20 @@ def read_replacement_forecast_bundle(
         raise ValueError("decision_time must be timezone-aware")
     decision_utc = decision_utc.astimezone(timezone.utc)
 
-    # SERVE-FRESHEST-AVAILABLE (operator law, stated three times, last 2026-06-11
-    # "没有新的就用老的" — plan: docs/evidence/settlement_guard/
-    # 2026-06-11_serve_freshest_available_plan.md). The former H3 HARD block here turned
-    # whole scopes DARK at the staleness bound even when nothing fresher existed anywhere
-    # (2026-06-11T12:00Z: every bucket-whitelist-excluded city died hours before its 00Z
-    # replacement could structurally exist). The bound's job is to PURSUE fresher data
-    # (downloads / polls / re-seeds key off it, unchanged) and to BRAND age honestly —
-    # never to refuse the freshest live row that exists. Expiry is recorded as a provenance
-    # staleness violation on the served bundle (observable, alarm-able) instead of a
-    # block. Selection below serves the freshest live-grade row by construction, so
-    # the served row is always the best available.
-    staleness_violations: list[str] = []
+    # New-entry probability authority is point-in-time truth. Expired readiness cannot
+    # license capital, even when it is the newest row present; callers must pursue a fresh
+    # certificate and fail closed meanwhile.
     if readiness.expires_at is not None and readiness.expires_at <= decision_utc:
-        staleness_violations.append(
-            "REPLACEMENT_LIVE_READINESS_EXPIRED:"
-            f"expires_at={readiness.expires_at.isoformat()}"
-        )
-        logger.warning(
-            "serve-freshest-available: readiness expired for %s %s %s "
-            "(expires_at=%s <= decision=%s) — serving freshest live row with "
-            "staleness brand instead of going dark",
-            city,
-            target_date_text,
-            metric,
-            readiness.expires_at.isoformat(),
-            decision_utc.isoformat(),
+        return ReplacementForecastBundleReadResult(
+            "BLOCKED",
+            "REPLACEMENT_LIVE_READINESS_EXPIRED",
         )
 
-    readiness_bound_posterior_id = _readiness_posterior_id(readiness)
+    readiness_bound_posterior_id = _readiness_posterior_id(
+        readiness,
+        data_version=data_version,
+        decision_time=decision_utc,
+    )
     if readiness_bound_posterior_id is None:
         return ReplacementForecastBundleReadResult("BLOCKED", "REPLACEMENT_POSTERIOR_READINESS_MISMATCH")
 
@@ -619,23 +620,9 @@ def read_replacement_forecast_bundle(
     # (src/data/replacement_forecast_cycle_policy.py) so the two gates can never drift.
     _source_cycle_utc = _parse_utc(str(row_map["source_cycle_time"]), field_name="source_cycle_time")
     if cycle_age_exceeds_bound(decision_utc, _source_cycle_utc):
-        # SERVE-FRESHEST-AVAILABLE (operator law — see the readiness-expiry brand above):
-        # the selected row IS the freshest live row that exists for this scope; an
-        # over-bound age becomes a provenance brand + WARN, never darkness. The bound
-        # keeps driving the download/re-seed pursuit unchanged.
-        _age_hours = (decision_utc - _source_cycle_utc).total_seconds() / 3600.0
-        staleness_violations.append(
-            "REPLACEMENT_LIVE_CYCLE_AGE_EXCEEDS_BOUND:"
-            f"source_cycle={_source_cycle_utc.isoformat()}:age_hours={_age_hours:.1f}"
-        )
-        logger.warning(
-            "serve-freshest-available: %s %s %s serving cycle %s aged %.1fh beyond the "
-            "staleness bound — freshest live row that exists; branded, not blocked",
-            city,
-            target_date_text,
-            metric,
-            _source_cycle_utc.isoformat(),
-            _age_hours,
+        return ReplacementForecastBundleReadResult(
+            "BLOCKED",
+            "REPLACEMENT_LIVE_CYCLE_AGE_EXCEEDS_BOUND",
         )
 
     dependency_json = _json_mapping(row_map["dependency_source_run_ids_json"], field_name="dependency_source_run_ids_json")
@@ -695,13 +682,6 @@ def read_replacement_forecast_bundle(
                 "newer_non_executable_posterior_id": _newer_non_executable_posterior_id,
                 "reason": "newer_row_not_live_grade_served_older_live_bounds",
             },
-        }
-    if staleness_violations:
-        # SERVE-FRESHEST-AVAILABLE brand: the served bundle carries its staleness
-        # violations in provenance (telemetry/alarm surface; receipts inherit it).
-        provenance = {
-            **provenance,
-            "staleness_violations": list(staleness_violations),
         }
     if enforce_raw_input_hwm:
         raw_lag_reason = replacement_live_input_lag_reason(
