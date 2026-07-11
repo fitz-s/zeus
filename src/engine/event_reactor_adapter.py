@@ -21275,6 +21275,9 @@ def _global_day0_execution_payload(
     }
 
 
+_GLOBAL_SERVED_SIMPLEX_BAND_BASIS = "replacement_served_current_simplex_v1"
+
+
 def _replacement_global_probability_components(
     replacement_bundle: object,
     *,
@@ -21356,10 +21359,15 @@ def _replacement_global_probability_components(
         or not math.isclose(float(point_q.sum()), 1.0, rel_tol=0.0, abs_tol=1e-9)
     ):
         return None
+    # Producer basis records how the current served draws were constructed
+    # (plain, finite-evidence widened, or rho-mixed). The global optimizer needs
+    # their common decision semantics: each row is a current coherent settlement
+    # simplex evaluated at one shared alpha. Canonicalize that semantic contract
+    # here while posterior identity and sample hash retain the exact producer.
     return (
         np.ascontiguousarray(matrix, dtype=np.float64),
         np.ascontiguousarray(point_q, dtype=np.float64),
-        basis,
+        _GLOBAL_SERVED_SIMPLEX_BAND_BASIS,
     )
 
 
