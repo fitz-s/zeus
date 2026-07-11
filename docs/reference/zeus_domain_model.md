@@ -178,8 +178,14 @@ Reconciliation is mandatory on every cycle (Zeus is live; non-live execution was
 ```
 pending_entry → active → day0_window → pending_exit → economically_closed → settled
                                     ↗ (can also go directly from active)
-Terminal states: voided, quarantined, admin_closed
+Terminal states: voided, admin_closed
 ```
+
+`quarantined` is NOT terminal — its fold widened to `{quarantined, settled,
+voided}` (P0c 2026-07-04, `docs/rebuild/chain_mirror_state_model_2026-07-04.md`
+§5) so the chain-mirror reconciler can close a quarantined row once chain
+truth grades it. It is a review/investigation phase, retired entirely when
+`docs/rebuild/quarantine_excision_2026-07-11.md` (T5) lands.
 
 Critical distinctions:
 - **Exit ≠ close**: `EXIT_INTENT` is a lifecycle event; economic closure is separate

@@ -42,12 +42,12 @@ _ARCHIVABLE_STATUSES = frozenset({"ARCHIVED"})
 # CURRENT_HISTORICAL is archivable only when archival_ok=true; handled in logic.
 
 # Status values that are NOT any of the archivable set → LOAD_BEARING
-# Covers: CURRENT_LOAD_BEARING, STALE_REWRITE_NEEDED, DEMOTE, QUARANTINE
+# Covers: CURRENT_LOAD_BEARING, STALE_REWRITE_NEEDED, DEMOTE, SUPERSEDED_UNREVIEWED
 _ALWAYS_LOAD_BEARING_STATUSES = frozenset({
     "CURRENT_LOAD_BEARING",
     "STALE_REWRITE_NEEDED",
     "DEMOTE",
-    "QUARANTINE",
+    "SUPERSEDED_UNREVIEWED",
 })
 
 
@@ -196,7 +196,7 @@ def check_authority_status(path: Path, registry_path: Path) -> ArchivalCheckResu
         )
 
     # Any other status (CURRENT_LOAD_BEARING, STALE_REWRITE_NEEDED, DEMOTE,
-    # QUARANTINE, CURRENT_HISTORICAL without archival_ok) → LOAD_BEARING
+    # SUPERSEDED_UNREVIEWED, CURRENT_HISTORICAL without archival_ok) → LOAD_BEARING
     return ArchivalCheckResult(
         verdict="LOAD_BEARING",
         reason=(

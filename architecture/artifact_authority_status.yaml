@@ -8,11 +8,15 @@
 # Schema deviation note (for WAVE 1.9 opus critic):
 #   The WAVE 1 executor brief listed status values: ACTIVE_LAW|DRAFT|ARCHIVED|CURRENT_HISTORICAL
 #   The design docs (UNIVERSAL_TOPOLOGY_DESIGN §13 + ZEUS_BINDING_LAYER §8) specify:
-#     CURRENT_LOAD_BEARING | CURRENT_HISTORICAL | STALE_REWRITE_NEEDED | DEMOTE | QUARANTINE | ARCHIVED
+#     CURRENT_LOAD_BEARING | CURRENT_HISTORICAL | STALE_REWRITE_NEEDED | DEMOTE | SUPERSEDED_UNREVIEWED | ARCHIVED
 #   Per brief's own instruction ("Read those sections first for exact schema"), the
 #   canonical 6-value enum from the design docs is used here. Code in archival_check_0.py
 #   uses ARCHIVED + CURRENT_HISTORICAL which aligns with design enum.
 #   Brief's ACTIVE_LAW is closest to CURRENT_LOAD_BEARING; DRAFT has no design-doc equivalent.
+#   (2026-07-11: the design-doc value was originally named QUARANTINE; renamed to
+#   SUPERSEDED_UNREVIEWED per docs/rebuild/quarantine_excision_2026-07-11.md §T7 — a
+#   doc-artifact disposition has no semantic relation to position-lifecycle quarantine
+#   and the shared word was conflating two unrelated mechanisms in lexical search.)
 #
 # cross-repo reference note:
 #   ~/.openclaw/CLAUDE.md (project root) is outside this git tree. It is registered here
@@ -21,7 +25,7 @@
 #
 # Fields:
 #   path: file or directory path (relative to zeus repo root, or absolute for cross-repo)
-#   status: CURRENT_LOAD_BEARING | CURRENT_HISTORICAL | STALE_REWRITE_NEEDED | DEMOTE | QUARANTINE | ARCHIVED
+#   status: CURRENT_LOAD_BEARING | CURRENT_HISTORICAL | STALE_REWRITE_NEEDED | DEMOTE | SUPERSEDED_UNREVIEWED | ARCHIVED
 #   last_confirmed: YYYY-MM-DD of last human or automated verification
 #   confirmation_ttl_days: advisory fires on next admission if stale beyond this
 #   owner: responsible party (default: fitz)
@@ -35,7 +39,7 @@ allowed_statuses:
 - CURRENT_HISTORICAL
 - STALE_REWRITE_NEEDED
 - DEMOTE
-- QUARANTINE
+- SUPERSEDED_UNREVIEWED
 - ARCHIVED
 metadata:
   created: "2026-05-16"

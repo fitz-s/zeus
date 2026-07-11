@@ -109,12 +109,12 @@ class TestRegistryHitLoadBearing:
         assert result.verdict == "LOAD_BEARING"
         assert "CURRENT_HISTORICAL" in result.reason
 
-    def test_quarantine_returns_load_bearing(self, tmp_path: Path) -> None:
+    def test_superseded_unreviewed_returns_load_bearing(self, tmp_path: Path) -> None:
         candidate = tmp_path / "docs/operations/task_2026-04-01_bad_packet"
         registry = _write_registry(tmp_path, [
             {
                 "path": "docs/operations/task_2026-04-01_bad_packet",
-                "status": "QUARANTINE",
+                "status": "SUPERSEDED_UNREVIEWED",
                 "last_confirmed": "2026-05-01",
                 "confirmation_ttl_days": 7,
                 "owner": "fitz",

@@ -5098,8 +5098,10 @@ CREATE TABLE IF NOT EXISTS position_events (
         'VENUE_POSITION_OBSERVED',
         'REVIEW_REQUIRED'
     )),
+    -- 2026-07-11: 'QUARANTINE' sentinel literal removed (dead — see
+    -- architecture/2026_04_02_architecture_kernel.sql occurred_at CHECK comment).
     occurred_at TEXT NOT NULL
-        CHECK (occurred_at LIKE '____-__-__T%' OR occurred_at = 'QUARANTINE'),
+        CHECK (occurred_at LIKE '____-__-__T%'),
     phase_before TEXT CHECK (phase_before IS NULL OR phase_before IN (
         'pending_entry','active','day0_window','pending_exit',
         'economically_closed','settled','voided','quarantined','admin_closed'

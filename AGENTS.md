@@ -167,7 +167,7 @@ Risk levels change behavior; advisory-only risk is forbidden by INV-05.
 
 Overall risk is max(individual levels). Genuine computation error -> RED fail-closed. Missing/stale truth input -> DATA_DEGRADED, YELLOW-equivalent: block new entries, preserve held positions, alert. Only RED sweeps active positions. Key file: `src/riskguard/risk_level.py`.
 
-Lifecycle is enum-governed in `src/state/lifecycle_manager.py`: `pending_entry -> active -> day0_window -> pending_exit -> economically_closed -> settled`; terminals are `voided`, `quarantined`, `admin_closed`; `unknown` is transient/recovery only. Exit intent is not closure; settlement is not exit; no code may invent lifecycle strings.
+Lifecycle is enum-governed in `src/state/lifecycle_manager.py`: `pending_entry -> active -> day0_window -> pending_exit -> economically_closed -> settled`; terminals are `voided`, `settled`, `admin_closed`; `quarantined` is a review/investigation phase (folds to `settled`/`voided`, P0c 2026-07-04), not terminal; `unknown` is transient/recovery only. Chain-only unknown assets never enter the Position lifecycle — they are typed `ChainOnlyFact` records, not a phase. Exit intent is not closure; settlement is not exit; no code may invent lifecycle strings.
 
 Chain reconciliation order: `Chain (Polymarket CLOB) > Chronicler (event log) > Portfolio (local cache)`. Local+chain match -> synced. Local exists, not on chain -> void local hallucination. Chain exists, not local -> quarantine unknown asset and evaluate forced exit. Key file: `src/state/chain_reconciliation.py`.
 
