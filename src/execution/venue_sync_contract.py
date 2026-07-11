@@ -1,5 +1,5 @@
 # Created: 2026-06-11
-# Last reused or audited: 2026-06-11
+# Last reused or audited: 2026-07-11
 # Authority basis: operator directive 2026-06-11 ("cleanest STRUCTURAL fix, no patches")
 #   + the dependency_db_locked live incident (riskguard DATA_DEGRADED since ~03:36Z,
 #   all submissions RISK_GUARD_BLOCKED). Lock holder was the EDLI command-recovery
@@ -81,6 +81,30 @@ class ConnectionHeldAcrossIOError(RuntimeError):
     it turns a silent WAL-write-lock starvation wedge into an immediate, named
     error at the exact call site that held the connection across the I/O.
     """
+
+
+class _CanonicalFlockedConnection:
+    """Release canonical cross-DB flocks with the wrapped connection.
+
+    Recovery uses TRADE as MAIN with WORLD attached. Price-channel uses the
+    inverse SQLite layout, so ``BEGIN IMMEDIATE`` alone can reserve the two WAL
+    writers in opposite orders. The outer canonical flocks make that internal
+    SQLite order unobservable to concurrent writers.
+    """
+
+    def __init__(self, conn: sqlite3.Connection, context) -> None:
+        self._conn = conn
+        self._context = context
+        self._closed = False
+
+    def __getattr__(self, name):
+        return getattr(self._conn, name)
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        self._context.__exit__(None, None, None)
 
 
 # Thread-local set of currently-open tracked connections. Thread-local because
@@ -289,13 +313,15 @@ class _NetworkAssertingClient:
 def default_trade_conn_factory() -> sqlite3.Connection:
     """The sanctioned live trade connection factory for the recovery sweep.
 
-    Mirrors the exact flavour the legacy long-conn path used
-    (``get_trade_connection_with_world_required(write_class="live")``) so the
-    short-conn path writes to the same canonical truth with the same ATTACHes.
+    Each short connection holds the canonical WORLD+TRADE live flocks until
+    ``close()``. This prevents inverse MAIN/ATTACH layouts from deadlocking at
+    ``BEGIN IMMEDIATE`` while preserving the same canonical schemas.
     """
-    from src.state.db import get_trade_connection_with_world_required
+    from src.state.db import trade_connection_with_world_flocked
 
-    return get_trade_connection_with_world_required(write_class="live")
+    context = trade_connection_with_world_flocked(write_class="live")
+    conn = context.__enter__()
+    return _CanonicalFlockedConnection(conn, context)  # type: ignore[return-value]
 
 
 class SnapshotMissError(RuntimeError):

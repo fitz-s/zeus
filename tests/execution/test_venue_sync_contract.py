@@ -6,7 +6,7 @@
 #   byte-identical reconciliation events vs the legacy long-connection path.
 # Reuse: Run when command_recovery orchestration, venue_sync_contract, or the
 #   scheduled _edli_command_recovery_cycle connection topology changes.
-# Last reused/audited: 2026-06-17
+# Last reused/audited: 2026-07-11
 # Authority basis: operator directive 2026-06-11 ("cleanest STRUCTURAL fix") +
 #   the dependency_db_locked live incident (riskguard DATA_DEGRADED since ~03:36Z).
 """Relationship tests for the three-phase venue/DB sync contract.
@@ -29,8 +29,11 @@ reconciliation semantics.
 from __future__ import annotations
 
 import ast
+import contextlib
 import json
 import sqlite3
+import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -2130,6 +2133,110 @@ def test_capture_snapshot_runs_off_connection_at_runtime():
                 _RecordingClient(_Recorder()),
                 order_ids=["x"],
             )
+
+
+def test_default_factory_holds_canonical_cross_db_flocks_until_close(monkeypatch):
+    """Recovery cannot expose TRADE-main lock order to WORLD-main writers."""
+    from src.execution import venue_sync_contract as vsc
+    from src.state import db
+
+    events = []
+
+    @contextlib.contextmanager
+    def _flocked(*, write_class):
+        events.append(("enter", write_class))
+        conn = sqlite3.connect(":memory:")
+        try:
+            yield conn
+        finally:
+            conn.close()
+            events.append(("exit", write_class))
+
+    monkeypatch.setattr(db, "trade_connection_with_world_flocked", _flocked)
+
+    conn = vsc.default_trade_conn_factory()
+    assert events == [("enter", "live")]
+    assert conn.execute("SELECT 1").fetchone()[0] == 1
+
+    conn.close()
+    conn.close()
+    assert events == [("enter", "live"), ("exit", "live")]
+
+
+def test_recovery_waits_before_taking_trade_when_world_main_writer_is_active(
+    monkeypatch, tmp_path
+):
+    """Canonical flocks prevent the observed WORLD-held/TRADE-held inversion."""
+    from src.execution import venue_sync_contract as vsc
+    from src.state import db
+
+    world_path = tmp_path / "zeus-world.db"
+    trade_path = tmp_path / "zeus_trades.db"
+    for path, ddl in ((world_path, "CREATE TABLE w (v INTEGER)"), (trade_path, "CREATE TABLE t (v INTEGER)")):
+        conn = sqlite3.connect(path)
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute(ddl)
+        conn.commit()
+        conn.close()
+
+    monkeypatch.setattr(db, "ZEUS_WORLD_DB_PATH", world_path)
+    monkeypatch.setattr(db, "_zeus_trade_db_path", lambda: trade_path)
+
+    world_written = threading.Event()
+    release_world = threading.Event()
+    recovery_opened = threading.Event()
+    errors = []
+
+    def _world_main_writer():
+        mutex = db.world_write_mutex()
+        acquired = mutex.acquire(timeout=1.0)
+        try:
+            assert acquired
+            conn = sqlite3.connect(world_path, timeout=2.0)
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("ATTACH DATABASE ? AS trades", (str(trade_path),))
+            conn.execute("INSERT INTO w VALUES (1)")
+            world_written.set()
+            assert release_world.wait(2.0)
+            conn.execute("INSERT INTO trades.t VALUES (1)")
+            conn.commit()
+            conn.close()
+        except BaseException as exc:  # noqa: BLE001 - surface thread failures
+            errors.append(exc)
+        finally:
+            if acquired:
+                mutex.release()
+
+    def _trade_main_recovery():
+        try:
+            assert world_written.wait(2.0)
+            conn = vsc.default_trade_conn_factory()
+            recovery_opened.set()
+            conn.execute("BEGIN IMMEDIATE")
+            conn.execute("INSERT INTO t VALUES (2)")
+            conn.commit()
+            conn.close()
+        except BaseException as exc:  # noqa: BLE001 - surface thread failures
+            errors.append(exc)
+
+    world_thread = threading.Thread(target=_world_main_writer, daemon=True)
+    recovery_thread = threading.Thread(target=_trade_main_recovery, daemon=True)
+    world_thread.start()
+    assert world_written.wait(2.0)
+    recovery_thread.start()
+    time.sleep(0.1)
+    try:
+        assert not recovery_opened.is_set(), (
+            "recovery opened TRADE while the inverse WORLD-main writer held WORLD"
+        )
+    finally:
+        release_world.set()
+        world_thread.join(3.0)
+        recovery_thread.join(3.0)
+
+    assert not world_thread.is_alive() and not recovery_thread.is_alive()
+    assert errors == []
+    assert recovery_opened.is_set()
 
 
 # ---------------------------------------------------------------------------

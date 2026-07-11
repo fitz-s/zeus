@@ -20,6 +20,14 @@ current-evidence band -> symmetric YES/NO samples -> global lower-CVaR order
 selection. Harmonizes executable source, the active replacement authority, and
 test topology under INV-06 and INV-41; supersedes no independent authority.
 
+The live proof loop also owns one execution-liveness defect discovered after
+deployment: command recovery opened TRADE as MAIN with WORLD attached, while
+price-channel opened WORLD as MAIN with TRADE attached. Concurrent
+``BEGIN IMMEDIATE`` calls therefore reserved the two WAL writers in opposite
+orders. The repair must make command-recovery hold the existing canonical
+WORLD+TRADE live flocks for each short apply transaction; increasing timeouts or
+editing processing rows is outside scope.
+
 ## Deliverables
 - Keep Normal `q_json` as an immutable point estimate, never as executable certainty.
 - Widen the shared simplex carrier by the exact 51-member zero-hit limit and the
@@ -29,6 +37,8 @@ test topology under INV-06 and INV-41; supersedes no independent authority.
 - Preserve Day0 absorbing physical facts as dominant.
 - Commit, deploy through the official restart path, then prove the result from a
   newly materialized canonical posterior and live auction/order receipts.
+- Remove the WORLD/TRADE writer-order inversion that prevents the corrected
+  probability carrier from reaching live redecision.
 
 ## Verification
 - Focused first-principles antibody and settlement-preimage regressions pass.
@@ -38,6 +48,8 @@ test topology under INV-06 and INV-41; supersedes no independent authority.
   confidence without changing its Normal point q.
 - Existing global capital-optimality evaluator passes; fresh runtime evidence is
   required separately from tests.
+- POSIX WAL-byte evidence shows no simultaneous opposite-order WORLD/TRADE
+  writer hold after restart; reactor cycles progress beyond claim bounces.
 
 ## Work record
 
@@ -51,3 +63,6 @@ test topology under INV-06 and INV-41; supersedes no independent authority.
   evidence NO LCB and 5% lower-CVaR 0.933965; all 400 carrier rows remain simplex.
 - 2026-07-11: focused antibody 3/3, current source-clock contracts 7/7, and
   global capital-optimality evaluator 226/226 passed before final deploy audit.
+- 2026-07-11: live WAL byte-range locks isolated an execution deadlock:
+  price-channel held WORLD while main held TRADE; command recovery and
+  price-channel used opposite MAIN/ATTACH order. No DB rows were edited.
