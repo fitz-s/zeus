@@ -772,6 +772,95 @@ def test_current_state_marker_rejects_unsealed_economics_mutation():
     assert era._valid_qkernel_execution_economics_payload(cert, direction="buy_yes") is None
 
 
+@pytest.mark.parametrize(("side", "direction"), (("YES", "buy_yes"), ("NO", "buy_no")))
+def test_global_actuation_rebinds_submit_gate_to_exact_current_band(
+    monkeypatch,
+    side,
+    direction,
+):
+    cert = _current_qkernel_cert(side=side)
+    cert.update(
+        payoff_q_point=0.7801526877016629,
+        payoff_q_lcb=0.7271700502061007,
+        cost=0.6087637988435255,
+        edge_lcb=0.11840625136257521,
+        route_cost=0.55,
+        route_edge_lcb=0.17717005020610066,
+    )
+    decision = SimpleNamespace(
+        shares=Decimal("158.25"),
+        cost_usd=Decimal("91.3482"),
+        robust_ev_usd=26.924691368844275,
+    )
+    witness = SimpleNamespace(
+        sample_matrix_identity="global-current-sample",
+        yes_q_samples=SimpleNamespace(shape=(400, 11)),
+        band_alpha=0.05,
+    )
+
+    current = era._global_current_state_execution_economics(
+        cert,
+        decision=decision,
+        witness=witness,
+    )
+    expected_q = (decision.robust_ev_usd + float(decision.cost_usd)) / float(
+        decision.shares
+    )
+
+    assert current["payoff_q_lcb"] == pytest.approx(expected_q)
+    assert current["q_lcb_guard_basis"] == "CURRENT_POSTERIOR_BAND"
+    assert current["selection_guard_basis"] == "CURRENT_POSTERIOR_BAND"
+    assert current["sample_hash"] == witness.sample_matrix_identity
+    assert era._qkernel_current_state_solve_economics(current) is True
+
+    def legacy_selection_curse_must_not_run(**_kwargs):
+        raise AssertionError("global current-band certificate was downgraded")
+
+    monkeypatch.setattr(
+        era,
+        "_event_bound_q_exec_lcb",
+        legacy_selection_curse_must_not_run,
+    )
+    proof = era._build_event_bound_taker_quality_proof(
+        actionable_payload={
+            "direction": direction,
+            "selection_authority_applied": "qkernel_spine",
+            "candidate_bin_id": "bin-1",
+            "q_live": current["payoff_q_point"],
+            "q_lcb_5pct": current["payoff_q_lcb"],
+            "live_cap_reserved_notional_usd": "107.61",
+            "qkernel_execution_economics": current,
+        },
+        order_mode="TAKER",
+        fresh_best_bid=0.54,
+        fresh_best_ask=0.55,
+    )
+    assert proof is not None and proof["passed"] is True
+    assert proof["q_exec_lcb_basis"] == "CURRENT_POSTERIOR_BAND"
+
+
+def test_global_actuation_current_band_refuses_non_positive_bound():
+    cert = _current_qkernel_cert(side="NO")
+    cert.update(payoff_q_point=0.70, cost=0.60, edge_lcb=0.10)
+    decision = SimpleNamespace(
+        shares=Decimal("10"),
+        cost_usd=Decimal("6"),
+        robust_ev_usd=-0.1,
+    )
+    witness = SimpleNamespace(
+        sample_matrix_identity="global-current-sample",
+        yes_q_samples=SimpleNamespace(shape=(400, 2)),
+        band_alpha=0.05,
+    )
+
+    with pytest.raises(ValueError, match="GLOBAL_CURRENT_STATE_ECONOMICS_NON_POSITIVE"):
+        era._global_current_state_execution_economics(
+            cert,
+            decision=decision,
+            witness=witness,
+        )
+
+
 @pytest.mark.parametrize("side", ("YES", "NO"))
 def test_current_state_path_has_no_yes_only_near_day0_veto(side):
     cert = _current_qkernel_cert(side=side)

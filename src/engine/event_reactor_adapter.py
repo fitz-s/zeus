@@ -5953,6 +5953,76 @@ def _global_curve_supersession_from_receipt(
     return "CURVE_SUPERSEDED", replacement, reason
 
 
+def _global_current_state_execution_economics(
+    cert: Mapping[str, Any],
+    *,
+    decision: object,
+    witness: object,
+) -> dict[str, Any]:
+    """Bind the actuation certificate to the exact band the global solver used."""
+
+    shares = Decimal(str(getattr(decision, "shares", "0") or "0"))
+    cost = Decimal(str(getattr(decision, "cost_usd", "0") or "0"))
+    robust_ev = Decimal(str(getattr(decision, "robust_ev_usd", "nan")))
+    point_q = Decimal(str(cert.get("payoff_q_point")))
+    unit_cost = Decimal(str(cert.get("cost")))
+    if (
+        shares <= 0
+        or cost <= 0
+        or not robust_ev.is_finite()
+        or not point_q.is_finite()
+        or not unit_cost.is_finite()
+    ):
+        raise ValueError("GLOBAL_CURRENT_STATE_ECONOMICS_INVALID")
+    payoff_q_lcb = (robust_ev + cost) / shares
+    edge_lcb = payoff_q_lcb - unit_cost
+    if not (
+        Decimal("0") <= payoff_q_lcb <= point_q <= Decimal("1")
+        and edge_lcb > 0
+    ):
+        raise ValueError("GLOBAL_CURRENT_STATE_ECONOMICS_NON_POSITIVE")
+    sample_hash = str(getattr(witness, "sample_matrix_identity", "") or "").strip()
+    samples = getattr(witness, "yes_q_samples", None)
+    try:
+        n_draws = int(samples.shape[0])
+        alpha = float(getattr(witness, "band_alpha"))
+    except (AttributeError, TypeError, ValueError) as exc:
+        raise ValueError("GLOBAL_CURRENT_STATE_BAND_INVALID") from exc
+    if not sample_hash or n_draws < 2 or not (0.0 < alpha < 0.5):
+        raise ValueError("GLOBAL_CURRENT_STATE_BAND_INVALID")
+
+    current = dict(cert)
+    current.update(
+        {
+            "payoff_q_lcb": float(payoff_q_lcb),
+            "edge_lcb": float(edge_lcb),
+            "route_edge_lcb": float(
+                payoff_q_lcb - Decimal(str(cert.get("route_cost", unit_cost)))
+            ),
+            "false_edge_rate": alpha,
+            "sample_hash": sample_hash,
+            "q_lcb_guard_basis": "CURRENT_POSTERIOR_BAND",
+            "q_lcb_guard_abstained": False,
+            "q_lcb_guard_cell_key": sample_hash,
+            "selection_guard_basis": "CURRENT_POSTERIOR_BAND",
+            "selection_guard_abstained": False,
+            "selection_guard_cell_key": sample_hash,
+            "selection_guard_n": n_draws,
+            "selection_guard_q_safe": float(payoff_q_lcb),
+            "global_current_band_payoff_q_lcb": float(payoff_q_lcb),
+            "global_current_band_sample_identity": sample_hash,
+            "global_current_band_n": n_draws,
+            "global_current_band_alpha": alpha,
+        }
+    )
+    current["current_state_identity_hash"] = qkernel_current_state_identity_hash(
+        current
+    )
+    if not _qkernel_current_state_solve_economics(current):
+        raise ValueError("GLOBAL_CURRENT_STATE_CERTIFICATE_INVALID")
+    return current
+
+
 def _global_actuation_selected_proof(
     *,
     global_actuation: object,
@@ -6135,6 +6205,11 @@ def _global_actuation_selected_proof(
             "global_capital_efficiency": decision.capital_efficiency,
             "global_optimum_semantics": "CUT_TIME_GLOBAL_OPTIMUM",
         }
+    )
+    cert = _global_current_state_execution_economics(
+        cert,
+        decision=decision,
+        witness=witness,
     )
     if not all(
         str(cert.get(field) or "").strip()
