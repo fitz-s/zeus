@@ -1,5 +1,5 @@
 # Created: 2026-07-03
-# Last reused/audited: 2026-07-10
+# Last reused/audited: 2026-07-11
 """G3 harness for the W3 SOLVE promotion seam (qkernel_spine_bridge.py w3_solve_enabled flag).
 
 Proves the promotion flag is a SAFE, reversible, single-point cutover before any live enablement:
@@ -737,6 +737,9 @@ def test_live_adapter_routes_global_scope_through_world_connection(monkeypatch):
         forecast_conn=forecast,
         topology_conn=topology,
         calibration_conn=world,
+        portfolio_state_provider=lambda: pytest.fail(
+            "cycle-start portfolio must not back global selection wealth"
+        ),
     )
     event = _global_scope_event(city="Dallas", source_run_id="run-dallas")
 
@@ -749,6 +752,7 @@ def test_live_adapter_routes_global_scope_through_world_connection(monkeypatch):
     assert captured["world_conn"] is world
     assert captured["forecast_conn"] is forecast
     assert captured["world_conn"] is not topology
+    assert captured["portfolio_state_provider"] is None
 
 
 def test_current_global_scope_uses_latest_day0_carrier_per_family():

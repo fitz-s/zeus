@@ -4662,7 +4662,14 @@ def event_bound_live_adapter_from_trade_conn(
                     )
                 ),
                 current_time_provider=lambda: datetime.now(UTC),
-                portfolio_state_provider=portfolio_state_provider,
+                # The reactor's injected provider is a cycle-start exposure snapshot.
+                # Global selection happens after emit/reconcile work and must bind
+                # wealth to selection-time chain truth; passing the older snapshot can
+                # make a newly refreshed chain_seen_at look "future" or leave an
+                # actually stale position frozen for the whole cycle. None delegates
+                # to current_portfolio_wealth_witness, which reloads runtime-open
+                # positions from this same canonical trade connection at selection.
+                portfolio_state_provider=None,
                 current_book_epoch_provider=_current_book_epoch,
                 selection_snapshot_connections=(
                     forecast_conn,
