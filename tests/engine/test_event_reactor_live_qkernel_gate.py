@@ -904,6 +904,39 @@ def test_global_actuation_current_band_can_tighten_served_bound(side):
 
 
 @pytest.mark.parametrize("side", ("YES", "NO"))
+def test_global_actuation_cannot_loosen_prior_qkernel_bound(side):
+    cert = _current_qkernel_cert(side=side)
+    cert.update(
+        payoff_q_point=0.80,
+        payoff_q_lcb=0.55,
+        pre_qkernel_q_lcb_5pct=0.70,
+        cost=0.40,
+        edge_lcb=0.15,
+    )
+    decision = SimpleNamespace(
+        shares=Decimal("10"),
+        cost_usd=Decimal("4"),
+        robust_ev_usd=2.0,
+    )
+    witness = SimpleNamespace(
+        sample_matrix_identity="global-current-prior-bound-sample",
+        yes_q_samples=SimpleNamespace(shape=(400, 2)),
+        band_alpha=0.05,
+    )
+
+    current = era._global_current_state_execution_economics(
+        cert,
+        decision=decision,
+        witness=witness,
+    )
+
+    assert current["global_current_band_payoff_q_lcb"] == pytest.approx(0.60)
+    assert current["global_current_prior_payoff_q_lcb"] == pytest.approx(0.55)
+    assert current["payoff_q_lcb"] == pytest.approx(0.55)
+    assert era._qkernel_current_state_solve_economics(current) is True
+
+
+@pytest.mark.parametrize("side", ("YES", "NO"))
 def test_current_state_path_has_no_yes_only_near_day0_veto(side):
     cert = _current_qkernel_cert(side=side)
     cert["near_day0_raw_extrema_consistency"] = {

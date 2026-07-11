@@ -5966,6 +5966,7 @@ def _global_current_state_execution_economics(
     robust_ev = Decimal(str(getattr(decision, "robust_ev_usd", "nan")))
     point_q = Decimal(str(cert.get("payoff_q_point")))
     served_lcb = Decimal(str(cert.get("pre_qkernel_q_lcb_5pct")))
+    prior_payoff_lcb = Decimal(str(cert.get("payoff_q_lcb")))
     unit_cost = Decimal(str(cert.get("cost")))
     if (
         shares <= 0
@@ -5973,14 +5974,20 @@ def _global_current_state_execution_economics(
         or not robust_ev.is_finite()
         or not point_q.is_finite()
         or not served_lcb.is_finite()
+        or not prior_payoff_lcb.is_finite()
         or not unit_cost.is_finite()
     ):
         raise ValueError("GLOBAL_CURRENT_STATE_ECONOMICS_INVALID")
     current_band_payoff_q_lcb = (robust_ev + cost) / shares
-    payoff_q_lcb = min(current_band_payoff_q_lcb, served_lcb)
+    payoff_q_lcb = min(
+        current_band_payoff_q_lcb,
+        served_lcb,
+        prior_payoff_lcb,
+    )
     edge_lcb = payoff_q_lcb - unit_cost
     if not (
         Decimal("0") <= served_lcb <= point_q <= Decimal("1")
+        and Decimal("0") <= prior_payoff_lcb <= point_q
         and Decimal("0") <= current_band_payoff_q_lcb <= point_q
         and edge_lcb > 0
     ):
@@ -6015,6 +6022,7 @@ def _global_current_state_execution_economics(
             "selection_guard_q_safe": float(payoff_q_lcb),
             "global_current_band_payoff_q_lcb": float(current_band_payoff_q_lcb),
             "global_current_served_payoff_q_lcb": float(served_lcb),
+            "global_current_prior_payoff_q_lcb": float(prior_payoff_lcb),
             "global_current_effective_payoff_q_lcb": float(payoff_q_lcb),
             "global_current_band_sample_identity": sample_hash,
             "global_current_band_n": n_draws,
