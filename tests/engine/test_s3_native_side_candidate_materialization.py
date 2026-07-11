@@ -53,13 +53,17 @@ import ast
 import inspect
 import json
 import sqlite3
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from types import SimpleNamespace
 
 import pytest
 
-from src.contracts.executable_cost_curve import ExecutableCostCurve
+from src.contracts.executable_cost_curve import (
+    BookLevel,
+    ExecutableCostCurve,
+    FeeModel,
+)
 from src.contracts.execution_price import ExecutionPrice
 from src.contracts.native_side_candidate import (
     CandidateNoTradeReason,
@@ -260,6 +264,192 @@ def test_current_global_execution_authority_uses_latest_full_native_ladder():
         decision_time=decision_time,
     ) is None
     conn.close()
+
+
+def _jit_curve(
+    *,
+    side: str,
+    token_id: str,
+    snapshot_id: str,
+    book_hash: str,
+    levels: tuple[tuple[str, str], ...],
+    fee_rate: str = "0",
+    min_tick: str = "0.01",
+    min_order_size: str = "5",
+) -> ExecutableCostCurve:
+    return ExecutableCostCurve(
+        token_id=token_id,
+        side=side,
+        snapshot_id=snapshot_id,
+        book_hash=book_hash,
+        levels=tuple(
+            BookLevel(price=Decimal(price), size=Decimal(size))
+            for price, size in levels
+        ),
+        fee_model=FeeModel(fee_rate=Decimal(fee_rate)),
+        min_tick=Decimal(min_tick),
+        min_order_size=Decimal(min_order_size),
+        quote_ttl=timedelta(seconds=30),
+    )
+
+
+def _exact_order_decision(curve: ExecutableCostCurve) -> SimpleNamespace:
+    from src.solve.solver import exact_single_order_execution_terms
+
+    shares = Decimal("5")
+    cost, limit, vwap, max_spend = exact_single_order_execution_terms(
+        SimpleNamespace(executable_cost_curve=curve),
+        shares,
+    )
+    return SimpleNamespace(
+        shares=shares,
+        cost_usd=cost,
+        limit_price=limit,
+        expected_fill_price_before_fee=vwap,
+        max_spend_usd=max_spend,
+    )
+
+
+@pytest.mark.parametrize(("side", "token_id", "touch"), (("YES", "yes-1", "0.40"), ("NO", "no-1", "0.55")))
+def test_global_jit_exact_order_ignores_only_unused_depth_churn(
+    side: str,
+    token_id: str,
+    touch: str,
+):
+    selected = _jit_curve(
+        side=side,
+        token_id=token_id,
+        snapshot_id="selected",
+        book_hash="selected-book",
+        levels=((touch, "5"), ("0.70", "100")),
+    )
+    current = _jit_curve(
+        side=side,
+        token_id=token_id,
+        snapshot_id="jit",
+        book_hash="jit-book",
+        levels=((touch, "5"), ("0.80", "250")),
+    )
+
+    assert era._global_exact_order_execution_rejection_reason(
+        current_candidate=SimpleNamespace(executable_cost_curve=current),
+        decision=_exact_order_decision(selected),
+    ) is None
+
+
+@pytest.mark.parametrize(("side", "token_id", "touch"), (("YES", "yes-1", "0.40"), ("NO", "no-1", "0.55")))
+@pytest.mark.parametrize("drift", ("price", "used_depth", "fee", "insufficient_depth", "min_order"))
+def test_global_jit_exact_order_rejects_adverse_or_unexecutable_drift(
+    side: str,
+    token_id: str,
+    touch: str,
+    drift: str,
+):
+    selected = _jit_curve(
+        side=side,
+        token_id=token_id,
+        snapshot_id="selected",
+        book_hash="selected-book",
+        levels=((touch, "5"), ("0.70", "100")),
+    )
+    current_kwargs = {
+        "side": side,
+        "token_id": token_id,
+        "snapshot_id": "jit",
+        "book_hash": f"jit-{drift}",
+        "levels": ((touch, "5"), ("0.80", "250")),
+        "fee_rate": "0",
+        "min_order_size": "5",
+    }
+    if drift == "price":
+        current_kwargs["levels"] = ((str(Decimal(touch) + Decimal("0.01")), "5"),)
+    elif drift == "used_depth":
+        current_kwargs["levels"] = ((touch, "2"), (str(Decimal(touch) + Decimal("0.01")), "3"))
+    elif drift == "fee":
+        current_kwargs["fee_rate"] = "0.02"
+    elif drift == "insufficient_depth":
+        current_kwargs["levels"] = ((touch, "4"),)
+    elif drift == "min_order":
+        current_kwargs["min_order_size"] = "6"
+    current = _jit_curve(**current_kwargs)
+
+    reason = era._global_exact_order_execution_rejection_reason(
+        current_candidate=SimpleNamespace(executable_cost_curve=current),
+        decision=_exact_order_decision(selected),
+    )
+
+    assert reason is not None
+    if drift in {"insufficient_depth", "min_order"}:
+        assert reason.startswith("exact_order_unexecutable=")
+    else:
+        assert reason.startswith("exact_order_drift=")
+
+
+@pytest.mark.parametrize(("side", "token_id", "touch"), (("YES", "yes-1", "0.40"), ("NO", "no-1", "0.55")))
+def test_global_jit_exact_order_accepts_current_tick_when_order_stays_on_grid(
+    side: str,
+    token_id: str,
+    touch: str,
+):
+    selected = _jit_curve(
+        side=side,
+        token_id=token_id,
+        snapshot_id="selected",
+        book_hash="selected-book",
+        levels=((touch, "5"), ("0.70", "100")),
+    )
+    current = _jit_curve(
+        side=side,
+        token_id=token_id,
+        snapshot_id="jit",
+        book_hash="jit-book",
+        levels=((touch, "5"), ("0.80", "250")),
+        min_tick="0.05",
+    )
+
+    assert era._global_exact_order_execution_rejection_reason(
+        current_candidate=SimpleNamespace(executable_cost_curve=current),
+        decision=_exact_order_decision(selected),
+    ) is None
+
+
+def test_global_submit_rebinds_to_actuation_jit_book_hash():
+    candidate = SimpleNamespace(candidate_id="global-candidate")
+    payload = {
+        "qkernel_execution_economics": {
+            "global_candidate_id": "global-candidate",
+            "global_jit_book_hash": "jit-book",
+            "global_jit_venue_book_hash": "jit-venue-book",
+            "global_jit_book_snapshot_id": "jit-snapshot",
+            "global_jit_execution_curve_identity": "jit-curve",
+        }
+    }
+
+    assert era._global_jit_book_hash_for_submit(
+        actionable_payload=payload,
+        global_candidate=candidate,
+    ) == "jit-venue-book"
+
+
+@pytest.mark.parametrize(
+    "economics",
+    (
+        {},
+        {"global_candidate_id": "wrong"},
+        {
+            "global_candidate_id": "global-candidate",
+            "global_jit_book_hash": "jit-book",
+            "global_jit_venue_book_hash": "jit-venue-book",
+            "global_jit_book_snapshot_id": "jit-snapshot",
+        },
+    ),
+)
+def test_global_submit_rebind_requires_complete_candidate_bound_jit_identity(economics):
+    with pytest.raises(ValueError, match="GLOBAL_ACTUATION_JIT_BOOK"):
+        era._global_jit_book_hash_for_submit(
+            actionable_payload={"qkernel_execution_economics": economics},
+            global_candidate=SimpleNamespace(candidate_id="global-candidate"),
+        )
 
 
 # ===========================================================================

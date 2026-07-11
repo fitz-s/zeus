@@ -1024,6 +1024,23 @@ def _single_order_execution_boundary(
     return limit_price, raw_cost / Decimal(shares), Decimal(shares) * all_in_limit
 
 
+def exact_single_order_execution_terms(
+    candidate: GlobalSingleOrderCandidate,
+    shares: Decimal,
+) -> tuple[Decimal, Decimal, Decimal, Decimal]:
+    """Return cost and venue boundary for one exact native-side BUY.
+
+    The full book identity is intentionally not part of this value.  Levels
+    deeper than ``shares`` cannot change the submitted order.  The returned
+    tuple binds every economic term that can: all-in cost, raw limit, raw VWAP,
+    and fee-aware maximum spend.
+    """
+
+    cost = _single_order_cost(candidate.executable_cost_curve, shares)
+    limit, vwap, max_spend = _single_order_execution_boundary(candidate, shares)
+    return cost, limit, vwap, max_spend
+
+
 def _single_order_metrics(
     candidate: GlobalSingleOrderCandidate,
     *,

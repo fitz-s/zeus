@@ -5515,6 +5515,72 @@ def _record_qkernel_selection_family_facts(
     }
 
 
+def _global_exact_order_execution_rejection_reason(
+    *,
+    current_candidate: object,
+    decision: object,
+) -> str | None:
+    """Reject JIT curves that change the globally selected exact BUY."""
+
+    from src.solve.solver import exact_single_order_execution_terms
+
+    shares = getattr(decision, "shares", None)
+    if shares is None:
+        return "exact_order_unexecutable=shares_missing"
+    try:
+        current_terms = exact_single_order_execution_terms(
+            current_candidate,
+            shares,
+        )
+    except (TypeError, ValueError) as exc:
+        return f"exact_order_unexecutable={exc}"
+    selected_terms = (
+        getattr(decision, "cost_usd", None),
+        getattr(decision, "limit_price", None),
+        getattr(decision, "expected_fill_price_before_fee", None),
+        getattr(decision, "max_spend_usd", None),
+    )
+    drift = tuple(
+        name
+        for name, selected_value, current_value in zip(
+            ("cost", "limit", "vwap", "max_spend"),
+            selected_terms,
+            current_terms,
+            strict=True,
+        )
+        if current_value != selected_value
+    )
+    if drift:
+        return "exact_order_drift=" + ",".join(drift)
+    return None
+
+
+def _global_jit_book_hash_for_submit(
+    *,
+    actionable_payload: Mapping[str, Any],
+    global_candidate: object | None,
+) -> str | None:
+    """Return the actuation-recaptured book that pre-submit must preserve."""
+
+    if global_candidate is None:
+        return None
+    cert = actionable_payload.get("qkernel_execution_economics")
+    if not isinstance(cert, Mapping):
+        raise ValueError("GLOBAL_ACTUATION_JIT_BOOK_IDENTITY_MISSING")
+    candidate_id = str(getattr(global_candidate, "candidate_id", "") or "")
+    if str(cert.get("global_candidate_id") or "") != candidate_id:
+        raise ValueError("GLOBAL_ACTUATION_JIT_BOOK_CANDIDATE_MISMATCH")
+    required = (
+        "global_jit_book_hash",
+        "global_jit_venue_book_hash",
+        "global_jit_book_snapshot_id",
+        "global_jit_execution_curve_identity",
+    )
+    if not all(str(cert.get(field) or "").strip() for field in required):
+        raise ValueError("GLOBAL_ACTUATION_JIT_BOOK_IDENTITY_MISSING")
+    return str(cert["global_jit_venue_book_hash"])
+
+
 def _global_actuation_selected_proof(
     *,
     global_actuation: object,
@@ -5613,9 +5679,12 @@ def _global_actuation_selected_proof(
             + ",".join(execution_identity_drift)
         )
     # The global batch epoch is in-memory while the forced JIT winner refresh is
-    # persisted, so snapshot ids and TTL carriers differ by construction. Align
-    # only those carriers and require every economic field — raw book hash, full
-    # depth, fee, tick, min order, token and side — to remain byte-identical.
+    # persisted, so snapshot ids and TTL carriers differ by construction.  A
+    # full-book hash can also change when unused deeper levels move.  That does
+    # not change the selected order.  Admit a different full curve only when the
+    # exact selected native-side BUY still has identical cost, limit, VWAP, and
+    # fee-aware maximum spend on the current JIT curve.  Any used-depth, fee,
+    # price, or capacity change remains fail-closed and is re-auctioned.
     aligned_curve = dataclass_replace(
         candidate.executable_cost_curve,
         snapshot_id=rebound.executable_cost_curve.snapshot_id,
@@ -5623,10 +5692,17 @@ def _global_actuation_selected_proof(
     )
     aligned_curve_identity = executable_curve_identity(aligned_curve)
     if aligned_curve_identity != rebound.execution_curve_identity:
-        raise ValueError(
-            "GLOBAL_ACTUATION_EXECUTION_BINDING_SUPERSEDED:curve:"
-            f"selected={aligned_curve_identity}:current={rebound.execution_curve_identity}"
+        exact_order_rejection = _global_exact_order_execution_rejection_reason(
+            current_candidate=rebound,
+            decision=decision,
         )
+        if exact_order_rejection is not None:
+            raise ValueError(
+                "GLOBAL_ACTUATION_EXECUTION_BINDING_SUPERSEDED:curve:"
+                f"selected={aligned_curve_identity}:"
+                f"current={rebound.execution_curve_identity}:"
+                f"{exact_order_rejection}"
+            )
     current_probability = current_global_probability_authority(
         forecast_conn,
         event,
@@ -5648,6 +5724,14 @@ def _global_actuation_selected_proof(
     ):
         raise ValueError("GLOBAL_ACTUATION_BOOK_SUPERSEDED")
 
+    jit_depth = _json_object(
+        (proof.row or {}).get("orderbook_depth_json")
+        or (proof.row or {}).get("orderbook_depth_jsonb")
+        or {}
+    )
+    jit_venue_book_hash = str(jit_depth.get("hash") or "").strip()
+    if not jit_venue_book_hash:
+        raise ValueError("GLOBAL_ACTUATION_JIT_VENUE_BOOK_HASH_MISSING")
     cert = dict(proof.qkernel_execution_economics or {})
     cert.update(
         {
@@ -5671,6 +5755,10 @@ def _global_actuation_selected_proof(
             ),
             "global_candidate_id": candidate.candidate_id,
             "global_book_hash": candidate.executable_cost_curve.book_hash,
+            "global_jit_book_hash": rebound.executable_cost_curve.book_hash,
+            "global_jit_venue_book_hash": jit_venue_book_hash,
+            "global_jit_book_snapshot_id": rebound.book_snapshot_id,
+            "global_jit_execution_curve_identity": rebound.execution_curve_identity,
             "global_target_shares": str(decision.shares),
             "global_expected_cost_usd": str(decision.cost_usd),
             "global_limit_price": str(decision.limit_price),
@@ -5980,6 +6068,7 @@ def _build_event_bound_no_submit_receipt_core(
                     metric=str(payload.get("metric") or payload.get("temperature_metric") or ""),
                     condition_ids=refresh_condition_ids,
                     selected_token_id=str(payload.get("token_id") or "") or None,
+                    force_refresh=global_actuation is not None,
                 )
             )
         except Exception as exc:  # noqa: BLE001 — refresh is fail-soft; stale rejection stands
@@ -9828,6 +9917,10 @@ def _build_live_execution_command_certificates(
         quote_feasibility = _required_cert(base_certs, claims.QUOTE_FEASIBILITY)
         cost_model = _required_cert(base_certs, claims.COST_MODEL)
         quote_payload = quote_feasibility.payload
+        global_submit_book_hash = _global_jit_book_hash_for_submit(
+            actionable_payload=actionable.payload,
+            global_candidate=global_candidate,
+        )
         from types import SimpleNamespace
 
         side = "BUY" if str(actionable.payload.get("direction")) in {"buy_yes", "buy_no"} else "SELL"
@@ -9846,13 +9939,12 @@ def _build_live_execution_command_certificates(
             executable_snapshot,
             decision_time,
         )
-        if global_candidate is not None and (
-            authority_witness.book_hash
-            != global_candidate.executable_cost_curve.book_hash
+        if global_submit_book_hash is not None and (
+            authority_witness.book_hash != global_submit_book_hash
         ):
             raise ValueError(
                 "GLOBAL_ACTUATION_JIT_BOOK_SUPERSEDED:"
-                f"selected={global_candidate.executable_cost_curve.book_hash}:"
+                f"actuation_jit={global_submit_book_hash}:"
                 f"jit={authority_witness.book_hash}"
             )
         fresh_best_bid = _optional_float(authority_witness.current_best_bid)
@@ -10287,9 +10379,8 @@ def _build_live_execution_command_certificates(
             provisional=authority_witness,
             final=final_authority_witness,
         )
-        if global_candidate is not None and (
-            final_authority_witness.book_hash
-            != global_candidate.executable_cost_curve.book_hash
+        if global_submit_book_hash is not None and (
+            final_authority_witness.book_hash != global_submit_book_hash
         ):
             raise ValueError("GLOBAL_ACTUATION_FINAL_JIT_BOOK_SUPERSEDED")
         authority_witness = final_authority_witness

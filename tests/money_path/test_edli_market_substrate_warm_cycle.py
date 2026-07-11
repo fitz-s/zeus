@@ -860,8 +860,76 @@ def test_decision_refresher_invokes_scoped_producer_and_proves_freshness(monkeyp
             "refresh_budget_seconds": 8.0,
             "snapshot_reserve_seconds": 2.0,
             "include_money_risk_families": False,
+            "force_refresh": False,
         }
     ]
+
+
+def test_global_winner_refresher_requests_exact_condition_recapture(monkeypatch):
+    """A submit-time winner check must not accept an older TTL-fresh DB row."""
+
+    import src.data.substrate_observer as substrate_observer_module
+    import src.data.substrate_priority as substrate_priority
+
+    refreshed: list[dict] = []
+    monkeypatch.setattr(
+        substrate_priority,
+        "mark_money_path_substrate_priority",
+        lambda **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        substrate_observer_module,
+        "refresh_money_path_substrate_now",
+        lambda **kwargs: refreshed.append(kwargs) or {"status": "refreshed"},
+    )
+    monkeypatch.setattr(
+        reactor,
+        "_edli_families_with_fresh_scoped_executable_substrate",
+        lambda scope, **_kwargs: set(scope),
+    )
+
+    refresher = reactor._edli_decision_family_snapshot_refresher(None)
+    assert refresher(
+        city="Wellington",
+        target_date="2026-07-12",
+        metric="high",
+        condition_ids=("winner-condition",),
+        force_refresh=True,
+    ) is True
+    assert refreshed[0]["condition_ids"] == ("winner-condition",)
+    assert refreshed[0]["force_refresh"] is True
+
+
+def test_global_winner_refresher_rejects_lock_busy_cached_fresh_row(monkeypatch):
+    """An old TTL-fresh row is not proof that forced FC-03 recapture occurred."""
+
+    import src.data.substrate_observer as substrate_observer_module
+    import src.data.substrate_priority as substrate_priority
+
+    monkeypatch.setattr(
+        substrate_priority,
+        "mark_money_path_substrate_priority",
+        lambda **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        substrate_observer_module,
+        "refresh_money_path_substrate_now",
+        lambda **_kwargs: {"status": "inline_skipped_cross_process_lock_busy"},
+    )
+    monkeypatch.setattr(
+        reactor,
+        "_edli_families_with_fresh_scoped_executable_substrate",
+        lambda scope, **_kwargs: set(scope),
+    )
+
+    refresher = reactor._edli_decision_family_snapshot_refresher(None)
+    assert refresher(
+        city="Wellington",
+        target_date="2026-07-12",
+        metric="high",
+        condition_ids=("winner-condition",),
+        force_refresh=True,
+    ) is False
 
 
 def test_background_substrate_warm_leaves_lock_window_for_money_path_refresh():
@@ -2419,6 +2487,37 @@ def test_scoped_priority_condition_prune_preserves_unscoped_claim_family(monkeyp
     assert stale_submitted == 3
     assert [out["condition_id"] for out in pruned[0]["outcomes"]] == ["cond-31"]
     assert [out["condition_id"] for out in pruned[1]["outcomes"]] == ["cond-21", "cond-22"]
+
+
+def test_exact_force_refresh_bypasses_fresh_prune_only_for_scoped_condition(monkeypatch):
+    """FC-03 recaptures the winner while preserving unrelated fresh skips."""
+
+    monkeypatch.setattr(
+        substrate_observer,
+        "_condition_buy_sides_fresh",
+        lambda *_args, **_kwargs: True,
+    )
+    market = {
+        "condition_ids": ["winner", "sibling"],
+        "outcomes": [
+            {"condition_id": "winner", "token_id": "yes-winner"},
+            {"condition_id": "sibling", "token_id": "yes-sibling"},
+        ],
+    }
+
+    pruned, fresh_skipped, stale_submitted = (
+        substrate_observer._prune_fresh_market_outcomes_for_snapshot_refresh(
+            _FakeConn(),
+            [market],
+            fresh_at_iso="2026-07-11T01:00:00+00:00",
+            restrict_to_condition_ids={"winner"},
+            force_refresh_condition_ids={"winner"},
+        )
+    )
+
+    assert fresh_skipped == 0
+    assert stale_submitted == 1
+    assert [row["condition_id"] for row in pruned[0]["outcomes"]] == ["winner"]
 
 
 def test_substrate_daemon_scheduler_health_uses_business_result(monkeypatch):

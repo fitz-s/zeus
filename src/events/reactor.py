@@ -6628,7 +6628,15 @@ def _edli_decision_family_snapshot_refresher(topology_conn):
     import logging as _logging
     _log = _logging.getLogger("zeus.events.reactor")
 
-    def _refresh(*, city, target_date, metric, condition_ids=(), selected_token_id=None):
+    def _refresh(
+        *,
+        city,
+        target_date,
+        metric,
+        condition_ids=(),
+        selected_token_id=None,
+        force_refresh=False,
+    ):
         family = (
             str(city or "").strip(),
             str(target_date or "").strip(),
@@ -6680,6 +6688,7 @@ def _edli_decision_family_snapshot_refresher(topology_conn):
                 refresh_budget_seconds=refresh_budget_s,
                 snapshot_reserve_seconds=snapshot_reserve_s,
                 include_money_risk_families=False,
+                force_refresh=bool(force_refresh),
             )
         except Exception as exc:  # noqa: BLE001
             _log.warning(
@@ -6693,9 +6702,16 @@ def _edli_decision_family_snapshot_refresher(topology_conn):
         proved_fresh = False
         if clean_condition_ids:
             try:
-                proved_fresh = family in _edli_families_with_fresh_scoped_executable_substrate(
-                    {family: set(clean_condition_ids)},
-                    now_utc=datetime.now(timezone.utc),
+                refresh_completed = (
+                    str((summary or {}).get("status") or "") == "refreshed"
+                    if force_refresh
+                    else True
+                )
+                proved_fresh = refresh_completed and family in (
+                    _edli_families_with_fresh_scoped_executable_substrate(
+                        {family: set(clean_condition_ids)},
+                        now_utc=datetime.now(timezone.utc),
+                    )
                 )
             except Exception as exc:  # noqa: BLE001
                 _log.debug(

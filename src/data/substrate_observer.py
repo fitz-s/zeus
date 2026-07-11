@@ -832,12 +832,20 @@ def _prune_fresh_market_outcomes_for_snapshot_refresh(
     *,
     fresh_at_iso: str,
     restrict_to_condition_ids: Iterable[str] | None = None,
+    force_refresh_condition_ids: Iterable[str] | None = None,
 ) -> tuple[list[dict], int, int]:
     scoped_conditions = {
         str(condition_id or "").strip()
         for condition_id in (restrict_to_condition_ids or ())
         if str(condition_id or "").strip()
     }
+    forced_conditions = {
+        str(condition_id or "").strip()
+        for condition_id in (force_refresh_condition_ids or ())
+        if str(condition_id or "").strip()
+    }
+    if not forced_conditions.issubset(scoped_conditions):
+        raise ValueError("forced refresh conditions must be inside the exact condition scope")
     pruned: list[dict] = []
     fresh_conditions_skipped = 0
     stale_conditions_submitted = 0
@@ -856,7 +864,11 @@ def _prune_fresh_market_outcomes_for_snapshot_refresh(
             cid = str(outcome.get("condition_id") or outcome.get("market_id") or "").strip()
             if restrict_this_market and cid not in scoped_conditions:
                 continue
-            if cid and _condition_buy_sides_fresh(write_conn, cid, fresh_at_iso):
+            if (
+                cid
+                and cid not in forced_conditions
+                and _condition_buy_sides_fresh(write_conn, cid, fresh_at_iso)
+            ):
                 fresh_conditions_skipped += 1
                 continue
             stale_outcomes.append(outcome)
@@ -1121,6 +1133,7 @@ def _refresh_pending_family_snapshots(
     extra_priority_families: Iterable[tuple[str, str, str]] | None = None,
     include_pending_families: bool = True,
     priority_condition_ids: Iterable[str] | None = None,
+    force_refresh_condition_ids: Iterable[str] | None = None,
     refresh_budget_seconds: float | None = None,
     snapshot_reserve_seconds: float | None = None,
     include_money_risk_families: bool = True,
@@ -1162,6 +1175,13 @@ def _refresh_pending_family_snapshots(
         if str(condition_id or "").strip()
     }
     explicit_priority_conditions = set(priority_conditions)
+    forced_conditions = {
+        str(condition_id or "").strip()
+        for condition_id in (force_refresh_condition_ids or ())
+        if str(condition_id or "").strip()
+    }
+    if not forced_conditions.issubset(explicit_priority_conditions):
+        raise ValueError("forced refresh conditions require exact priority scope")
 
     # Step 1: Collect distinct (city, target_date, metric) for pending events.
     if include_pending_families:
@@ -1489,7 +1509,7 @@ def _refresh_pending_family_snapshots(
                     if cid:
                         priority_conditions.add(cid)
 
-            any_stale = False
+            any_stale = bool(scoped_topology_condition_ids & forced_conditions)
             if snapshot_read_conn is None:
                 any_stale = True
             else:
@@ -2055,6 +2075,7 @@ def _refresh_pending_family_snapshots(
                     restrict_to_condition_ids=(
                         explicit_priority_conditions if explicit_priority_conditions else None
                     ),
+                    force_refresh_condition_ids=forced_conditions,
                 )
             )
         if not markets_for_refresh:
@@ -2782,6 +2803,7 @@ def refresh_money_path_substrate_now(
     refresh_budget_seconds: float | None = None,
     snapshot_reserve_seconds: float | None = None,
     include_money_risk_families: bool = False,
+    force_refresh: bool = False,
 ) -> dict:
     """Synchronously refresh the exact executable substrate needed by a money-path decision.
 
@@ -2808,6 +2830,13 @@ def refresh_money_path_substrate_now(
         for condition_id in (condition_ids or ())
         if str(condition_id or "").strip()
     }
+    if force_refresh and not clean_condition_ids:
+        return {
+            "status": "force_refresh_scope_missing",
+            "reason": str(reason or ""),
+            "families_requested": len(clean_families),
+            "condition_ids_requested": 0,
+        }
     if not clean_families and not clean_condition_ids:
         return {
             "status": "no_money_path_refresh_scope",
@@ -2865,6 +2894,7 @@ def refresh_money_path_substrate_now(
             extra_priority_families=clean_families,
             include_pending_families=False,
             priority_condition_ids=clean_condition_ids,
+            force_refresh_condition_ids=(clean_condition_ids if force_refresh else ()),
             refresh_budget_seconds=refresh_budget_seconds,
             snapshot_reserve_seconds=snapshot_reserve_seconds,
             include_money_risk_families=include_money_risk_families,
