@@ -11945,6 +11945,7 @@ def _pre_submit_revalidation_payload_from_final_intent(
         current_best_bid=current_best_bid,
         current_best_ask=current_best_ask,
     )
+    expected_edge = _pre_submit_expected_edge(payload, limit_price=limit_price)
     return {
         "event_id": payload["event_id"],
         "event_type": payload.get("event_type"),
@@ -11982,7 +11983,7 @@ def _pre_submit_revalidation_payload_from_final_intent(
         ),
         "posterior_id": payload.get("posterior_id"),
         "probability_authority": payload.get("probability_authority"),
-        "expected_edge": payload.get("trade_score"),
+        "expected_edge": expected_edge,
         "action_score": payload.get("action_score"),
         "size": payload.get("size"),
         "min_entry_price": payload.get("min_entry_price"),
@@ -12048,6 +12049,40 @@ def _pre_submit_revalidation_payload_from_final_intent(
         "cost_basis_source_certificate_hash": payload.get("cost_basis_hash"),
         "final_intent_certificate_hash": final_intent.certificate_hash,
     }
+
+
+def _pre_submit_expected_edge(
+    payload: Mapping[str, object],
+    *,
+    limit_price: float,
+) -> object:
+    """Return the strongest edge lower bound every submit authority supports.
+
+    ``trade_score`` is evaluated at the selected curve's expected cost.  A BUY
+    limit instead exposes capital to its worst executable price; for a global
+    multi-level FOK the fee-aware bound is ``global_max_spend / shares``.  The
+    pre-submit certificate must never claim more edge than either view proves.
+    Invalid source fields are left untouched so downstream certificate checks
+    still fail closed instead of being repaired here.
+    """
+
+    raw_score = payload.get("trade_score")
+    score = _optional_float(raw_score)
+    q_lcb = _optional_float(payload.get("q_lcb_5pct"))
+    if score is None or q_lcb is None:
+        return raw_score
+    bounds = [score, q_lcb - float(limit_price)]
+    economics = payload.get("qkernel_execution_economics")
+    if isinstance(economics, Mapping):
+        qkernel_edge = _optional_float(economics.get("edge_lcb"))
+        if qkernel_edge is not None:
+            bounds.append(qkernel_edge)
+        if str(economics.get("global_actuation_identity") or "").strip():
+            max_spend = _optional_float(economics.get("global_max_spend_usd"))
+            shares = _optional_float(economics.get("global_target_shares"))
+            if max_spend is not None and shares is not None and shares > 0.0:
+                bounds.append(q_lcb - (max_spend / shares))
+    return min(bounds)
 
 
 def _require_pre_submit_authority_witness(

@@ -1063,15 +1063,25 @@ def _validate_pre_submit_revalidation_payload(payload: dict[str, Any]) -> None:
         raise LiveOrderAggregateError("PreSubmitRevalidated requires expected_edge_source_certificate_hash")
     if not str(payload.get("cost_basis_source_certificate_hash") or "").strip():
         raise LiveOrderAggregateError("PreSubmitRevalidated requires cost_basis_source_certificate_hash")
-    submit_edge = q_lcb - limit_price
+    submit_cost_bound = _pre_submit_cost_bound(
+        payload,
+        economics=economics,
+        limit_price=limit_price,
+        size=size,
+    )
+    submit_edge = q_lcb - submit_cost_bound
     if submit_edge <= 0.0:
-        raise LiveOrderAggregateError("PreSubmitRevalidated requires positive submit q_lcb-minus-limit")
+        raise LiveOrderAggregateError(
+            "PreSubmitRevalidated requires positive submit q_lcb-minus-cost-bound"
+        )
     if expected_edge > submit_edge + 1e-6:
-        raise LiveOrderAggregateError("PreSubmitRevalidated expected_edge exceeds submit q_lcb-minus-limit")
+        raise LiveOrderAggregateError(
+            "PreSubmitRevalidated expected_edge exceeds conservative submit edge"
+        )
     submit_expected_profit_usd = submit_edge * size
     if submit_expected_profit_usd + 1e-9 < min_expected_profit_usd:
         raise LiveOrderAggregateError("PreSubmitRevalidated expected profit below strategy floor")
-    submit_edge_density = submit_edge / limit_price
+    submit_edge_density = submit_edge / submit_cost_bound
     if submit_edge_density + 1e-9 < min_submit_edge_density:
         raise LiveOrderAggregateError("PreSubmitRevalidated submit edge density below strategy floor")
     _validate_pre_submit_probability_authority(payload, q_live=q_live, q_lcb=q_lcb)
@@ -1230,7 +1240,15 @@ def _validate_qkernel_submit_probability(payload: dict[str, Any], *, q_live: flo
     if not math.isclose(payoff_q_lcb, cost + edge_lcb, rel_tol=1e-9, abs_tol=1e-9):
         raise LiveOrderAggregateError("PreSubmitRevalidated qkernel payoff edge inconsistent")
     limit_price = _positive_number(payload.get("limit_price"), "limit_price")
-    if limit_price > cost + 1e-6:
+    size = _positive_number(payload.get("size"), "size")
+    global_submit = bool(str(economics.get("global_actuation_identity") or "").strip())
+    _pre_submit_cost_bound(
+        payload,
+        economics=economics,
+        limit_price=limit_price,
+        size=size,
+    )
+    if not global_submit and limit_price > cost + 1e-6:
         raise LiveOrderAggregateError("PreSubmitRevalidated submit price worse than qkernel cost")
     expected_edge = _positive_number(payload.get("expected_edge"), "expected_edge")
     if expected_edge > edge_lcb + 1e-6:
@@ -1244,6 +1262,72 @@ def _validate_qkernel_submit_probability(payload: dict[str, Any], *, q_live: flo
         delta_u_at_min=delta_u_at_min,
     ):
         raise LiveOrderAggregateError("PreSubmitRevalidated qkernel roi frontier not useful")
+
+
+def _pre_submit_cost_bound(
+    payload: Mapping[str, Any],
+    *,
+    economics: Any,
+    limit_price: float,
+    size: float,
+) -> float:
+    """Return the fee-aware worst unit cost for the exact submitted order.
+
+    Legacy/single-price orders are bounded by their limit.  A global multi-level
+    FOK carries an exact share/limit binding plus the solver's fee-aware maximum
+    spend; that maximum, not its raw deepest price or expected VWAP, is the
+    capital actually exposed by the command.
+    """
+
+    if not isinstance(economics, Mapping) or not str(
+        economics.get("global_actuation_identity") or ""
+    ).strip():
+        return limit_price
+    if str(economics.get("global_optimum_semantics") or "") != "CUT_TIME_GLOBAL_OPTIMUM":
+        raise LiveOrderAggregateError(
+            "PreSubmitRevalidated global submit optimum semantics invalid"
+        )
+    target_shares = _positive_number(
+        economics.get("global_target_shares"),
+        "qkernel_execution_economics.global_target_shares",
+    )
+    global_limit = _positive_number(
+        economics.get("global_limit_price"),
+        "qkernel_execution_economics.global_limit_price",
+    )
+    expected_fill = _positive_number(
+        economics.get("global_expected_fill_price_before_fee"),
+        "qkernel_execution_economics.global_expected_fill_price_before_fee",
+    )
+    expected_cost = _positive_number(
+        economics.get("global_expected_cost_usd"),
+        "qkernel_execution_economics.global_expected_cost_usd",
+    )
+    max_spend = _positive_number(
+        economics.get("global_max_spend_usd"),
+        "qkernel_execution_economics.global_max_spend_usd",
+    )
+    if not math.isclose(size, target_shares, rel_tol=0.0, abs_tol=1e-9):
+        raise LiveOrderAggregateError(
+            "PreSubmitRevalidated global target shares mismatch"
+        )
+    if not math.isclose(limit_price, global_limit, rel_tol=0.0, abs_tol=1e-9):
+        raise LiveOrderAggregateError(
+            "PreSubmitRevalidated global limit price mismatch"
+        )
+    if expected_fill > global_limit + 1e-9:
+        raise LiveOrderAggregateError(
+            "PreSubmitRevalidated global expected fill exceeds limit"
+        )
+    if expected_cost > max_spend + 1e-9:
+        raise LiveOrderAggregateError(
+            "PreSubmitRevalidated global expected cost exceeds max spend"
+        )
+    if expected_cost + 1e-9 < expected_fill * target_shares:
+        raise LiveOrderAggregateError(
+            "PreSubmitRevalidated global expected cost below raw sweep cost"
+        )
+    return max_spend / target_shares
 
 
 def _non_negative_number(value: Any, name: str) -> float:

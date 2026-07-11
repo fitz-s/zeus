@@ -1751,6 +1751,70 @@ def test_day0_pre_submit_payload_preserves_observation_authority_and_qkernel():
     assert payload["live_authority_status"] == "live"
 
 
+def test_pre_submit_payload_uses_fee_aware_global_worst_cost_edge():
+    qkernel_cert = _qkernel_cert()
+    qkernel_cert.update(
+        {
+            "global_actuation_identity": "global-actuation-1",
+            "global_target_shares": "10",
+            "global_max_spend_usd": "4.5",
+        }
+    )
+    final_intent = SimpleNamespace(
+        certificate_hash="final-hash",
+        payload={
+            "event_id": "event-1",
+            "final_intent_id": "intent-1",
+            "condition_id": "condition-1",
+            "token_id": "token-yes",
+            "side": "BUY",
+            "direction": "buy_yes",
+            "order_type": "FOK",
+            "time_in_force": "FOK",
+            "post_only": False,
+            "limit_price": 0.44,
+            "q_live": 0.70,
+            "q_lcb_5pct": 0.60,
+            "trade_score": 0.25,
+            "size": 10.0,
+            "qkernel_execution_economics": qkernel_cert,
+        },
+    )
+    witness = PreSubmitAuthorityWitness(
+        quote_seen_at="2026-05-24T18:59:59+00:00",
+        book_hash="book-hash",
+        current_best_bid=0.39,
+        current_best_ask=0.41,
+        tick_size=0.01,
+        min_order_size=5.0,
+        neg_risk=False,
+        heartbeat_status="OK",
+        user_ws_status="OK",
+        venue_connectivity_status="OK",
+        balance_allowance_status="OK",
+        book_authority_id="clob_jit_book",
+        book_captured_at="2026-05-24T18:59:59+00:00",
+        heartbeat_authority_id="heartbeat_supervisor",
+        heartbeat_checked_at="2026-05-24T19:00:00+00:00",
+        user_ws_authority_id="ws_gap_guard",
+        user_ws_checked_at="2026-05-24T19:00:00+00:00",
+        venue_connectivity_authority_id="polymarket_public_orderbook",
+        venue_connectivity_checked_at="2026-05-24T19:00:00+00:00",
+        balance_allowance_authority_id="polymarket_wallet_readonly",
+        balance_allowance_checked_at="2026-05-24T19:00:00+00:00",
+        checked_at="2026-05-24T19:00:00+00:00",
+    )
+
+    payload = _pre_submit_revalidation_payload_from_final_intent(
+        final_intent=final_intent,
+        executable_snapshot=SimpleNamespace(payload={}),
+        decision_time=datetime(2026, 5, 24, 19, tzinfo=timezone.utc),
+        authority_witness=witness,
+    )
+
+    assert payload["expected_edge"] == pytest.approx(0.15)
+
+
 def test_live_entry_gate_rejects_unknown_event_type_even_with_qkernel_cert():
     with pytest.raises(ValueError, match="LIVE_ENTRY_AUTHORITY_UNSUPPORTED_EVENT_TYPE"):
         _assert_live_entry_submit_authority(
