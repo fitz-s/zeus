@@ -6221,6 +6221,20 @@ def _global_current_state_execution_economics(
     current = dict(cert)
     current.update(
         {
+            "source": str(cert.get("source") or "qkernel_spine"),
+            "decision_id": str(
+                cert.get("decision_id")
+                or cert.get("global_actuation_identity")
+                or ""
+            ),
+            "receipt_hash": str(
+                cert.get("receipt_hash")
+                or cert.get("global_economic_identity")
+                or ""
+            ),
+            "q_version": str(
+                cert.get("q_version") or getattr(witness, "q_version", "") or ""
+            ),
             "payoff_q_point": float(point_q),
             "q_dot_payoff": float(point_q),
             "payoff_q_lcb": float(payoff_q_lcb),
@@ -6444,6 +6458,9 @@ def _global_actuation_selected_proof(
         {
             "global_actuation_identity": str(
                 getattr(global_actuation, "actuation_identity", "") or ""
+            ),
+            "global_economic_identity": str(
+                getattr(global_actuation, "economic_identity", "") or ""
             ),
             "global_universe_witness_identity": str(
                 getattr(global_actuation, "universe_witness_identity", "") or ""

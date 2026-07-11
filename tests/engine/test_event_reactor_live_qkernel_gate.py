@@ -962,8 +962,19 @@ def test_global_actuation_current_band_refuses_non_positive_bound():
 
 def test_global_actuation_current_band_uses_current_bound_when_prior_is_absent():
     cert = _current_qkernel_cert(side="YES")
-    cert.pop("payoff_q_lcb")
-    cert.pop("cost")
+    for field in (
+        "source",
+        "decision_id",
+        "receipt_hash",
+        "q_version",
+        "payoff_q_lcb",
+        "cost",
+    ):
+        cert.pop(field)
+    cert.update(
+        global_actuation_identity="global-actuation-1",
+        global_economic_identity="global-economic-1",
+    )
     decision = SimpleNamespace(
         shares=Decimal("100"),
         cost_usd=Decimal("1"),
@@ -973,6 +984,7 @@ def test_global_actuation_current_band_uses_current_bound_when_prior_is_absent()
         sample_matrix_identity="global-current-sample",
         yes_q_samples=SimpleNamespace(shape=(400, 2)),
         band_alpha=0.05,
+        q_version="global-q-version-1",
     )
 
     current = era._global_current_state_execution_economics(
@@ -987,6 +999,10 @@ def test_global_actuation_current_band_uses_current_bound_when_prior_is_absent()
     assert current["cost"] == pytest.approx(0.01)
     assert current["route_cost"] == pytest.approx(0.01)
     assert current["edge_lcb"] == pytest.approx(0.09)
+    assert current["source"] == "qkernel_spine"
+    assert current["decision_id"] == "global-actuation-1"
+    assert current["receipt_hash"] == "global-economic-1"
+    assert current["q_version"] == "global-q-version-1"
 
 
 def test_global_actuation_current_band_rejects_malformed_present_prior_lcb():
