@@ -178,7 +178,7 @@ Reconciliation is mandatory on every cycle (Zeus is live; non-live execution was
 ```
 pending_entry → active → day0_window → pending_exit → economically_closed → settled
                                     ↗ (can also go directly from active)
-Terminal states: voided, admin_closed
+Terminal states: voided, settled, admin_closed
 ```
 
 `quarantined` is NOT terminal — its fold widened to `{quarantined, settled,

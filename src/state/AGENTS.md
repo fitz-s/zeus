@@ -49,7 +49,7 @@ Derived surfaces may never become truth by being convenient.
 
 - **Lifecycle phases come only from `LifecyclePhase` enum.** The 10 enum
   values are: `pending_entry → active → day0_window → pending_exit →
-  economically_closed → settled`. Terminal: `voided`, `admin_closed`.
+  economically_closed → settled`. Terminal: `voided`, `settled`, `admin_closed`.
   `quarantined` is NOT terminal — fold widened to {quarantined, settled,
   voided} (P0c 2026-07-04) so the chain-mirror reconciler can close it once
   chain truth grades it; investigation status, retired entirely when
