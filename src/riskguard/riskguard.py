@@ -111,6 +111,20 @@ def _collateral_identity_level(zeus_conn: sqlite3.Connection) -> RiskLevel:
     return RiskLevel.RED if findings else RiskLevel.GREEN
 
 
+def _portfolio_consistency_level(consistency_lock: str) -> RiskLevel:
+    """Route the RiskGuard loader's row-exclusion verdict into the risk lane.
+
+    consistency_lock == "pass" (zero excluded rows, counts reconcile) is the
+    only GREEN case. "degraded" (a known, reconciled row exclusion — B052) and
+    "mismatched" (counts don't reconcile) both mean real exposure may be
+    missing from the risk view: an excluded/unaccounted position row is
+    missing truth input, so it is DATA_DEGRADED (YELLOW-equivalent: no new
+    entries, monitor/exit continue) — never RED, since crash-the-tick / fail-
+    closed-RED-on-one-bad-row was the original B052 bug this loader fixed.
+    """
+    return RiskLevel.GREEN if consistency_lock == "pass" else RiskLevel.DATA_DEGRADED
+
+
 def _finite_float_or_none(value):
     if value is None:
         return None
@@ -248,6 +262,36 @@ def _portfolio_position_from_loader_row(row: dict) -> Position:
     )
 
 
+def _riskguard_unloadable_row_is_excluded_duplicate(
+    row: dict, loaded_positions: list[Position]
+) -> bool:
+    """Conservative proof that an unloadable row's exposure is already
+    accounted for by a successfully loaded canonical position (the B052
+    dual-id recovered-fill DUPLICATE case, riskguard.py comment above) —
+    NOT a genuine missing-exposure gap.
+
+    Returns True only when the excluded row carries a non-empty on-chain
+    token_id AND a loaded position for that SAME token_id already covers
+    at least as many shares as the excluded row claims — i.e. the excluded
+    row cannot add unaccounted exposure even in the worst case. Any row this
+    cannot positively prove (no token_id, no matching loaded position, or a
+    loaded match that covers fewer shares) is NOT classified as a duplicate
+    and must degrade the verdict — proof of safety is required, absence of
+    proof of danger is not enough on a money-risk view.
+    """
+    token_id = str(row.get("token_id") or "")
+    if not token_id:
+        return False
+    excluded_shares = _finite_float_or_none(row.get("shares")) or 0.0
+    for position in loaded_positions:
+        if str(getattr(position, "token_id", "") or "") != token_id:
+            continue
+        loaded_shares = _finite_float_or_none(getattr(position, "shares", None)) or 0.0
+        if loaded_shares >= excluded_shares:
+            return True
+    return False
+
+
 def _riskguard_position_status_view_from_loader_rows(
     rows: list[dict],
     *,
@@ -353,8 +397,8 @@ def _load_riskguard_portfolio_truth(zeus_conn: sqlite3.Connection) -> tuple[Port
     # RiskGuard protects current capital. Loading terminal position history here
     # makes every 60-second tick scan and sort the full projection table even
     # though settlements have their own canonical read below. The runtime view
-    # retains every current-money-risk phase plus unresolved quarantine while
-    # using the phase index on the live hot path.
+    # retains every current-money-risk phase plus unresolved unloadable rows
+    # while using the phase index on the live hot path.
     loader_view = query_portfolio_loader_view(
         zeus_conn,
         runtime_exposure_only=True,
@@ -366,13 +410,12 @@ def _load_riskguard_portfolio_truth(zeus_conn: sqlite3.Connection) -> tuple[Port
         )
     loader_rows = list(loader_view.get("positions", []))
     positions = []
-    quarantined: list[dict] = []
-    quarantine_reason_counts: dict[str, int] = {}
+    unloadable_raw: list[tuple[dict, str]] = []
     for row in loader_rows:
         try:
             positions.append(_portfolio_position_from_loader_row(row))
         except ValueError as exc:
-            # B052 (2026-06-16 incident fix): QUARANTINE the un-loadable row and CONTINUE
+            # B052 (2026-06-16 incident fix): EXCLUDE the un-loadable row and CONTINUE
             # the tick — do NOT re-raise. The prior `raise` turned ONE un-loadable canonical
             # row into a failed tick -> RiskGuard STALE -> trader fail-closed RED -> ALL
             # trading blocked. Disabling the entire risk system because of a single bad row
@@ -380,34 +423,62 @@ def _load_riskguard_portfolio_truth(zeus_conn: sqlite3.Connection) -> tuple[Port
             # dual-id recovered-fill DUPLICATE (its on-chain exposure already accounted via
             # the canonical position, so excluding it neither double- nor under-counts), but
             # the resilience is general. "Avoid silent masking" (the original B052 intent) is
-            # preserved by a LOUD, COUNTED, EXPOSED quarantine (ERROR log + quarantined_count
-            # in the returned truth dict) — not by crashing the whole tick.
-            reason = str(exc)
-            quarantine_reason_counts[reason] = quarantine_reason_counts.get(reason, 0) + 1
-            quarantined.append(
-                {"trade_id": row.get("trade_id"), "state": row.get("state"), "reason": reason}
-            )
+            # preserved by a LOUD, COUNTED, VERDICT-DEGRADING exclusion (ERROR log +
+            # unloadable_count in the returned truth dict, consistency_lock forced off
+            # "pass" unless PROVEN accounted for — see
+            # `_riskguard_unloadable_row_is_excluded_duplicate` and the classification
+            # pass below) — not by crashing the whole tick and not by reporting a
+            # healthy verdict while real exposure is missing from the risk view.
+            unloadable_raw.append((row, str(exc)))
             continue
-    if quarantined:
+
+    # Classification pass (runs after ALL rows are loaded, since a dual-id duplicate's
+    # canonical counterpart may appear anywhere in loader_rows, not necessarily before
+    # the bad row). Two evidentiary tiers, per operator directive (2026-07-11 critic
+    # amendment M-2): a blanket "any exclusion degrades" over-blocks the documented
+    # benign B052 trigger (a dual-id recovered-fill DUPLICATE whose exposure is already
+    # counted via the canonical position) with a false YELLOW halt.
+    #   - "excluded_duplicate": PROVEN accounted for by a loaded position (same
+    #     token_id, loaded shares >= excluded shares) — pass-eligible, still
+    #     counted + logged, never silently dropped from the truth dict.
+    #   - anything else ("excluded_unaccounted"): cannot be proven safe — degrades.
+    unloadable: list[dict] = []
+    unloadable_reason_counts: dict[str, int] = {}
+    excluded_duplicate_count = 0
+    for row, reason in unloadable_raw:
+        unloadable_reason_counts[reason] = unloadable_reason_counts.get(reason, 0) + 1
+        is_duplicate = _riskguard_unloadable_row_is_excluded_duplicate(row, positions)
+        if is_duplicate:
+            excluded_duplicate_count += 1
+        unloadable.append({
+            "trade_id": row.get("trade_id"),
+            "state": row.get("state"),
+            "reason": reason,
+            "classification": "excluded_duplicate" if is_duplicate else "excluded_unaccounted",
+        })
+    if unloadable:
         logger.error(
-            "RiskGuard quarantined %d un-loadable canonical portfolio rows "
-            "(excluded from risk view; tick CONTINUES): reasons=%s sample=%s",
-            len(quarantined),
-            quarantine_reason_counts,
-            quarantined[:5],
+            "RiskGuard excluded %d un-loadable canonical portfolio rows "
+            "(excluded_duplicate=%d proven-accounted, excluded_unaccounted=%d; "
+            "excluded from risk view; tick CONTINUES): reasons=%s sample=%s",
+            len(unloadable),
+            excluded_duplicate_count,
+            len(unloadable) - excluded_duplicate_count,
+            unloadable_reason_counts,
+            unloadable[:5],
         )
 
     # B053 count lock, reduced to a single authoritative snapshot. RiskGuard used
     # to call load_portfolio() here as "capital metadata", but that function reads
     # the same canonical loader view again. Count the current loader rows instead:
-    # loaded + quarantined must account for every canonical row in this tick.
+    # loaded + unloadable must account for every canonical row in this tick.
     loader_position_count = len(loader_rows)
-    if (len(positions) + len(quarantined)) != loader_position_count:
+    if (len(positions) + len(unloadable)) != loader_position_count:
         logger.error(
-            "B053 Consistency Mismatch: canonical_db loaded %d positions (+%d quarantined) "
+            "B053 Consistency Mismatch: canonical_db loaded %d positions (+%d unloadable) "
             "from %d loader rows. RiskGuard blending MUST NOT proceed without caller-side "
             "consistency_lock check.",
-            len(positions), len(quarantined), loader_position_count
+            len(positions), len(unloadable), loader_position_count
         )
 
     # Bankroll truth comes from the live bankroll path upstream. Keep PortfolioState
@@ -424,16 +495,33 @@ def _load_riskguard_portfolio_truth(zeus_conn: sqlite3.Connection) -> tuple[Port
         recent_exits=[],
         ignored_tokens=[],
     )
-    # B053 consistency lock accounts for QUARANTINED rows: a row excluded by the loader
-    # above is a KNOWN exclusion, not silent drift, so the canonical/metadata comparison
-    # adds them back. Otherwise every quarantine would falsely read as 'mismatched' and
-    # could fail-close a healthy tick — re-creating the very block this fix removes.
-    canonical_known_count = len(positions) + len(quarantined)
+    # B053 count reconciliation accounts for unloadable rows: a row excluded by the
+    # loader above is a KNOWN exclusion, not silent drift, so the canonical/metadata
+    # comparison adds them back to check the counts reconcile. This does NOT make the
+    # verdict "pass" by itself — an unloadable row means real exposure MIGHT be missing
+    # from the risk view, UNLESS it is proven "excluded_duplicate" (see classification
+    # pass above): a row whose exposure a loaded position already covers cannot add
+    # unaccounted risk, so it does not need to block new entries. consistency_lock is
+    # therefore: "pass" with zero exclusions, OR with exclusions that are ALL proven
+    # excluded_duplicate; "degraded" when at least one exclusion is NOT proven accounted
+    # for (an excluded_unaccounted row — the general, conservative case); "mismatched"
+    # when counts don't reconcile at all — still not RED (crash-the-tick was the
+    # original B052 bug), but strictly less trustworthy than either pass path.
+    canonical_known_count = len(positions) + len(unloadable)
+    unaccounted_unloadable = [
+        row for row in unloadable if row["classification"] != "excluded_duplicate"
+    ]
+    if canonical_known_count != loader_position_count:
+        consistency_lock = "mismatched"
+    elif not unaccounted_unloadable:
+        consistency_lock = "pass"
+    else:
+        consistency_lock = "degraded"
     strategy_health_position_view = _riskguard_position_status_view_from_loader_rows(
         loader_rows,
         excluded_trade_ids={
             str(row.get("trade_id") or "")
-            for row in quarantined
+            for row in unloadable
             if str(row.get("trade_id") or "")
         },
     )
@@ -443,10 +531,11 @@ def _load_riskguard_portfolio_truth(zeus_conn: sqlite3.Connection) -> tuple[Port
         "fallback_active": False,
         "fallback_reason": "",
         "position_count": len(positions),
-        "quarantined_count": len(quarantined),
-        "quarantined_rows": quarantined,
+        "unloadable_count": len(unloadable),
+        "unloadable_rows": unloadable,
+        "excluded_duplicate_count": excluded_duplicate_count,
         "capital_source": "canonical_loader_view",
-        "consistency_lock": "pass" if canonical_known_count == loader_position_count else "mismatched",
+        "consistency_lock": consistency_lock,
         # Preserve the legacy key while it now means the single loader snapshot
         # count, not a second load_portfolio() pass.
         "metadata_position_count": loader_position_count,
@@ -2563,6 +2652,9 @@ def _tick_once() -> RiskLevel:
         daily_loss_level = daily_loss_snapshot["level"]
         weekly_loss_level = weekly_loss_snapshot["level"]
         collateral_identity_level = _collateral_identity_level(zeus_conn)
+        portfolio_consistency_level = _portfolio_consistency_level(
+            portfolio_truth.get("consistency_lock", "pass")
+        )
 
         level = overall_level(
             brier_level,
@@ -2572,6 +2664,7 @@ def _tick_once() -> RiskLevel:
             daily_loss_level,
             weekly_loss_level,
             collateral_identity_level,
+            portfolio_consistency_level,
         )
 
         # B5: force_exit_review when daily loss reaches RED
@@ -2657,6 +2750,10 @@ def _tick_once() -> RiskLevel:
                 "portfolio_fallback_reason": portfolio_truth["fallback_reason"],
                 "portfolio_position_count": portfolio_truth["position_count"],
                 "portfolio_capital_source": portfolio_truth.get("capital_source", "unknown"),
+                "portfolio_consistency_lock": portfolio_truth.get("consistency_lock", "pass"),
+                "portfolio_consistency_level": portfolio_consistency_level.value,
+                "portfolio_unloadable_count": portfolio_truth.get("unloadable_count", 0),
+                "portfolio_excluded_duplicate_count": portfolio_truth.get("excluded_duplicate_count", 0),
                 "realized_truth_source": realized_truth_source,
                 "realized_degraded": realized_degraded,
                 "settlement_sample_size": len(p_forecasts),
@@ -2794,6 +2891,16 @@ def _tick_once() -> RiskLevel:
                     alert_warning("Daily Loss Monitoring", 0.0, 0.0, detail="DATA_DEGRADED: Missing trailing loss baseline")
                 if weekly_loss_level == RiskLevel.DATA_DEGRADED:
                     alert_warning("Weekly Loss Monitoring", 0.0, 0.0, detail="DATA_DEGRADED: Missing trailing loss baseline")
+                if portfolio_consistency_level == RiskLevel.DATA_DEGRADED:
+                    alert_warning(
+                        "Portfolio Consistency",
+                        float(portfolio_truth.get("unloadable_count", 0)),
+                        0.0,
+                        detail=(
+                            f"DATA_DEGRADED: consistency_lock="
+                            f"{portfolio_truth.get('consistency_lock', 'pass')}"
+                        ),
+                    )
         except Exception as exc:
             logger.warning("Discord alert emission failed: %s", exc)
 
@@ -2814,6 +2921,7 @@ def _tick_once() -> RiskLevel:
             "daily_loss": daily_loss_level,
             "weekly_loss": weekly_loss_level,
             "collateral_identity": collateral_identity_level,
+            "portfolio_consistency": portfolio_consistency_level,
         }
         component_detail = {
             "brier": f"score={b_score:.4f} (n={len(p_forecasts)}, red>={thresholds['brier_red']})",
@@ -2845,6 +2953,11 @@ def _tick_once() -> RiskLevel:
                 f"status={weekly_loss_snapshot['status']}"
             ),
             "collateral_identity": "unresolved_collateral_identity_mismatch_finding",
+            "portfolio_consistency": (
+                f"consistency_lock={portfolio_truth.get('consistency_lock', 'pass')} "
+                f"unloadable={portfolio_truth.get('unloadable_count', 0)} "
+                f"excluded_duplicate={portfolio_truth.get('excluded_duplicate_count', 0)}"
+            ),
         }
         driving, breakdown = _component_breakdown(level, component_levels, component_detail)
         log_fn = logger.warning if level != RiskLevel.GREEN else logger.info

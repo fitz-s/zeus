@@ -1345,7 +1345,7 @@ class TestRiskGuardSettlementSource:
         with pytest.raises(ValueError, match="execution_fact_filled_at"):
             riskguard_module._portfolio_position_from_loader_row(loader_row)
 
-    def test_loader_quarantines_unloadable_row_instead_of_failing_whole_tick(
+    def test_loader_excludes_unloadable_row_instead_of_failing_whole_tick(
         self, monkeypatch, tmp_path
     ):
         """One un-loadable canonical row must NOT take down the whole RiskGuard loader.
@@ -1353,9 +1353,14 @@ class TestRiskGuardSettlementSource:
         Regression guard (2026-06-16 incident): a single fill-grade row missing
         execution_fact provenance (a dual-id recovered-fill duplicate) caused the loader
         to RAISE -> RiskGuard tick failed -> RiskGuard went STALE -> trader fail-closed
-        RED -> ALL trading blocked. The loader must QUARANTINE the bad row (exclude +
+        RED -> ALL trading blocked. The loader must EXCLUDE the bad row (exclude +
         log + count) and CONTINUE loading the valid rows. RED-on-revert: restoring the
         `raise RuntimeError(...)` makes `_load_riskguard_portfolio_truth` raise here.
+
+        T3 fix (2026-07-11): a row exclusion is real missing exposure, so the verdict
+        must NOT read "pass" — it degrades to consistency_lock="degraded", which the
+        tick() caller routes to RiskLevel.DATA_DEGRADED (see
+        `_portfolio_consistency_level`, src/riskguard/riskguard.py).
         """
         zeus_db = tmp_path / "zeus.db"
         conn = get_connection(zeus_db)
@@ -1409,13 +1414,179 @@ class TestRiskGuardSettlementSource:
         # MUST NOT raise (pre-fix this raised RuntimeError("RiskGuard DB loader fault")).
         portfolio, truth = riskguard_module._load_riskguard_portfolio_truth(conn)
 
-        assert truth["quarantined_count"] == 1
-        assert truth["quarantined_rows"][0]["trade_id"] == "bad-dup-1"
+        assert truth["unloadable_count"] == 1
+        assert truth["unloadable_rows"][0]["trade_id"] == "bad-dup-1"
+        # No token_id on the excluded row -> duplication cannot be proven ->
+        # "excluded_unaccounted", the conservative default.
+        assert truth["unloadable_rows"][0]["classification"] == "excluded_unaccounted"
         assert [p.trade_id for p in portfolio.positions] == ["valid-good-1"]
-        # Quarantine is a KNOWN exclusion -> consistency stays 'pass' (1 loaded + 1 quarantined == 2 metadata).
-        assert truth["consistency_lock"] == "pass"
+        # A row exclusion is a KNOWN, reconciled exclusion (1 loaded + 1 unloadable ==
+        # 2 metadata rows), but it is STILL missing real exposure from the risk view ->
+        # consistency_lock must degrade, never report 'pass' (the verdict lie this
+        # packet fixes).
+        assert truth["consistency_lock"] == "degraded"
+        # And the caller-side risk lane wiring: degraded routes to DATA_DEGRADED
+        # (YELLOW-equivalent: no new entries, monitor/exit continue), never RED.
+        assert (
+            riskguard_module._portfolio_consistency_level(truth["consistency_lock"])
+            == RiskLevel.DATA_DEGRADED
+        )
 
-    def test_loader_quarantine_logs_one_summary_for_multiple_bad_rows(
+    def test_loader_excluded_duplicate_row_does_not_degrade_consistency(
+        self, monkeypatch, tmp_path
+    ):
+        """Critic amendment M-2 (2026-07-11): a blanket "any exclusion degrades"
+        over-blocks the documented benign B052 trigger — a dual-id recovered-fill
+        DUPLICATE whose on-chain exposure is already accounted for via the loaded
+        canonical position (see the B052 comment at riskguard.py). When the excluded
+        row's token_id matches a LOADED position's token_id with >= shares, it is
+        PROVEN accounted for ("excluded_duplicate") and must NOT force a false
+        YELLOW halt — consistency_lock stays "pass" (still counted + logged).
+        """
+        conn = get_connection(tmp_path / "zeus.db")
+
+        # Canonical, successfully-loaded position already covering the on-chain
+        # exposure for token "tok-shared-1" (10 shares).
+        valid_row = {
+            "trade_id": "valid-good-1", "market_id": "m-good", "city": "NYC",
+            "target_date": "2026-06-17", "direction": "buy_yes", "unit": "F",
+            "env": "live", "size_usd": 10.0, "shares": 10.0, "cost_basis_usd": 10.0,
+            "entry_price": 2.5, "entry_economics_authority": "legacy_unknown",
+            "fill_authority": "none",
+            "entry_economics_source": "position_current_projection",
+            "execution_fact_intent_id": "", "execution_fact_filled_at": "",
+            "state": "entered", "chain_state": "unknown",
+            "token_id": "tok-shared-1",
+        }
+        # Dual-id recovered-fill DUPLICATE of the SAME on-chain token, fewer shares,
+        # fill-grade but missing execution_fact provenance -> raises ValueError exactly
+        # like the live B052 incident row.
+        duplicate_row = {
+            "trade_id": "bad-dup-1", "market_id": "m-bad", "city": "Houston",
+            "target_date": "2026-06-17", "direction": "buy_no", "unit": "F",
+            "env": "live", "size_usd": 3.24, "shares": 5.07, "cost_basis_usd": 3.24,
+            "entry_price": 0.64,
+            "entry_economics_authority": "legacy_unknown",
+            "fill_authority": "venue_confirmed_full",
+            "entry_economics_source": "position_current_projection",
+            "execution_fact_intent_id": "", "execution_fact_filled_at": "",
+            "state": "entered", "chain_state": "unknown",
+            "token_id": "tok-shared-1",
+        }
+
+        monkeypatch.setattr(
+            riskguard_module,
+            "query_portfolio_loader_view",
+            lambda _conn, **_kw: {"status": "ok", "table": "position_current",
+                                  "positions": [valid_row, duplicate_row]},
+        )
+
+        portfolio, truth = riskguard_module._load_riskguard_portfolio_truth(conn)
+
+        assert truth["unloadable_count"] == 1
+        assert truth["unloadable_rows"][0]["trade_id"] == "bad-dup-1"
+        assert truth["unloadable_rows"][0]["classification"] == "excluded_duplicate"
+        assert truth["excluded_duplicate_count"] == 1
+        assert [p.trade_id for p in portfolio.positions] == ["valid-good-1"]
+        # Proven-accounted exclusion is pass-eligible: no false YELLOW halt.
+        assert truth["consistency_lock"] == "pass"
+        assert (
+            riskguard_module._portfolio_consistency_level(truth["consistency_lock"])
+            == RiskLevel.GREEN
+        )
+
+    def test_loader_excluded_duplicate_with_insufficient_loaded_shares_still_degrades(
+        self, monkeypatch, tmp_path
+    ):
+        """The duplicate-proof requires the loaded position to cover AT LEAST as many
+        shares as the excluded row claims. A loaded match that covers FEWER shares
+        cannot prove the excluded row adds no unaccounted exposure, so it must stay
+        "excluded_unaccounted" / degraded — proof of safety is required here, not
+        absence of proof of danger.
+        """
+        conn = get_connection(tmp_path / "zeus.db")
+
+        valid_row = {
+            "trade_id": "valid-good-1", "market_id": "m-good", "city": "NYC",
+            "target_date": "2026-06-17", "direction": "buy_yes", "unit": "F",
+            "env": "live", "size_usd": 10.0, "shares": 1.0, "cost_basis_usd": 10.0,
+            "entry_price": 2.5, "entry_economics_authority": "legacy_unknown",
+            "fill_authority": "none",
+            "entry_economics_source": "position_current_projection",
+            "execution_fact_intent_id": "", "execution_fact_filled_at": "",
+            "state": "entered", "chain_state": "unknown",
+            "token_id": "tok-shared-1",
+        }
+        duplicate_row = {
+            "trade_id": "bad-dup-1", "market_id": "m-bad", "city": "Houston",
+            "target_date": "2026-06-17", "direction": "buy_no", "unit": "F",
+            "env": "live", "size_usd": 3.24, "shares": 5.07, "cost_basis_usd": 3.24,
+            "entry_price": 0.64,
+            "entry_economics_authority": "legacy_unknown",
+            "fill_authority": "venue_confirmed_full",
+            "entry_economics_source": "position_current_projection",
+            "execution_fact_intent_id": "", "execution_fact_filled_at": "",
+            "state": "entered", "chain_state": "unknown",
+            "token_id": "tok-shared-1",
+        }
+
+        monkeypatch.setattr(
+            riskguard_module,
+            "query_portfolio_loader_view",
+            lambda _conn, **_kw: {"status": "ok", "table": "position_current",
+                                  "positions": [valid_row, duplicate_row]},
+        )
+
+        _portfolio, truth = riskguard_module._load_riskguard_portfolio_truth(conn)
+
+        assert truth["unloadable_rows"][0]["classification"] == "excluded_unaccounted"
+        assert truth["excluded_duplicate_count"] == 0
+        assert truth["consistency_lock"] == "degraded"
+
+    def test_loader_zero_exclusions_reports_pass(self, monkeypatch, tmp_path):
+        """No unloadable rows -> consistency_lock stays 'pass' (unchanged behavior)."""
+        conn = get_connection(tmp_path / "zeus.db")
+
+        valid_row = {
+            "trade_id": "valid-good-1", "market_id": "m-good", "city": "NYC",
+            "target_date": "2026-06-17", "direction": "buy_yes", "unit": "F",
+            "env": "live", "size_usd": 10.0, "shares": 4.0, "cost_basis_usd": 10.0,
+            "entry_price": 2.5, "entry_economics_authority": "legacy_unknown",
+            "fill_authority": "none",
+            "entry_economics_source": "position_current_projection",
+            "execution_fact_intent_id": "", "execution_fact_filled_at": "",
+            "state": "entered", "chain_state": "unknown",
+        }
+
+        monkeypatch.setattr(
+            riskguard_module,
+            "query_portfolio_loader_view",
+            lambda _conn, **_kw: {"status": "ok", "table": "position_current",
+                                  "positions": [valid_row]},
+        )
+        monkeypatch.setattr(
+            riskguard_module,
+            "load_portfolio",
+            lambda: PortfolioState(
+                bankroll=100.0,
+                positions=[
+                    Position(trade_id="valid-good-1", market_id="m-good", city="NYC",
+                             cluster="NYC", target_date="2026-06-17", bin_label="b",
+                             direction="buy_yes"),
+                ],
+            ),
+        )
+
+        _portfolio, truth = riskguard_module._load_riskguard_portfolio_truth(conn)
+
+        assert truth["unloadable_count"] == 0
+        assert truth["consistency_lock"] == "pass"
+        assert (
+            riskguard_module._portfolio_consistency_level(truth["consistency_lock"])
+            == RiskLevel.GREEN
+        )
+
+    def test_loader_exclusion_logs_one_summary_for_multiple_bad_rows(
         self, monkeypatch, tmp_path, caplog
     ):
         conn = get_connection(tmp_path / "zeus.db")
@@ -1474,14 +1645,15 @@ class TestRiskGuardSettlementSource:
 
         _portfolio, truth = riskguard_module._load_riskguard_portfolio_truth(conn)
 
-        quarantine_logs = [
+        exclusion_logs = [
             record
             for record in caplog.records
-            if "RiskGuard quarantined" in record.getMessage()
+            if "RiskGuard excluded" in record.getMessage()
         ]
-        assert truth["quarantined_count"] == 2
-        assert len(quarantine_logs) == 1
-        assert "quarantined 2 un-loadable" in quarantine_logs[0].getMessage()
+        assert truth["unloadable_count"] == 2
+        assert len(exclusion_logs) == 1
+        assert "excluded 2 un-loadable" in exclusion_logs[0].getMessage()
+        assert truth["consistency_lock"] == "degraded"
 
     def test_tick_records_explicit_portfolio_fallback_when_projection_unavailable(self, monkeypatch, tmp_path):
         zeus_db = tmp_path / "zeus.db"
