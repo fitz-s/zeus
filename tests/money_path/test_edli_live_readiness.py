@@ -2971,6 +2971,44 @@ def test_entry_live_health_authority_ignores_business_plane_only_degraded():
     assert reason is None
 
 
+def test_entry_live_health_authority_ignores_exit_health_only_degraded():
+    from src.engine import event_reactor_adapter as adapter
+
+    decision_time = datetime(2026, 5, 24, 18, 10, tzinfo=timezone.utc)
+    payload = _healthy_entry_live_health_provider(decision_time)()
+    payload["surfaces"]["pending_exit_release_loop"] = {
+        "ok": False,
+        "issue": "PENDING_EXIT_RUNTIME_GATE_BLOCK:n=1",
+    }
+    payload["failing_surfaces"] = ["pending_exit_release_loop"]
+
+    reason = adapter._entry_live_health_authority_block_reason(
+        lambda: payload,
+        now=decision_time + timedelta(seconds=30),
+    )
+
+    assert reason is None
+
+
+def test_entry_live_health_authority_still_blocks_global_runtime_failure():
+    from src.engine import event_reactor_adapter as adapter
+
+    decision_time = datetime(2026, 5, 24, 18, 10, tzinfo=timezone.utc)
+    payload = _healthy_entry_live_health_provider(decision_time)()
+    payload["surfaces"]["runtime_code"] = {
+        "ok": False,
+        "issue": "LOADED_SHA_MISMATCH",
+    }
+    payload["failing_surfaces"] = ["runtime_code"]
+
+    reason = adapter._entry_live_health_authority_block_reason(
+        lambda: payload,
+        now=decision_time + timedelta(seconds=30),
+    )
+
+    assert reason == "failing_surfaces=runtime_code"
+
+
 def test_live_adapter_submit_enabled_canary_enabled_calls_executor_mock(monkeypatch, tmp_path):
     from src.engine import event_reactor_adapter as adapter
     from src.engine.event_bound_final_intent import EventBoundExecutorSubmitResult
