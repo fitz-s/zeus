@@ -874,6 +874,21 @@ def test_global_curve_supersession_keeps_typed_current_candidate():
     )
 
 
+@pytest.mark.parametrize(
+    ("reason", "status"),
+    (
+        ("entries_paused:deployment_freshness_mismatch", "BATCH_BLOCKED"),
+        ("live_health_entry_authority:failing_surfaces=runtime_code", "BATCH_BLOCKED"),
+        ("EDLI_DURABLE_SUBMIT_OUTBOX_REQUIRED", "BATCH_BLOCKED"),
+        ("EXECUTOR_BOUNDARY_MISSING", "BATCH_BLOCKED"),
+        ("OPERATOR_ARM_REQUIRED", "BATCH_BLOCKED"),
+        ("SHIFT_BIN_NO_SUBMIT:OLD_LEG_STILL_STRONG", "BLOCKED"),
+    ),
+)
+def test_global_preflight_block_scope_is_explicit(reason, status):
+    assert era._global_preflight_block_status(reason) == status
+
+
 def test_current_global_scope_uses_latest_day0_carrier_per_family():
     forecast_alpha = _global_scope_event(city="Alpha", source_run_id="run-a")
     forecast_beta = _global_scope_event(city="Beta", source_run_id="run-b")
@@ -3518,6 +3533,101 @@ def test_global_batch_falls_through_candidate_local_preflight_block(monkeypatch)
     assert result.receipts[event_b.event_id].submitted is True
     assert result.receipts[event_a.event_id].reason == (
         f"GLOBAL_PREFLIGHT_FAMILY_INELIGIBLE:{blocked_reason}"
+    )
+
+
+def test_global_batch_stops_on_batch_wide_preflight_block(monkeypatch):
+    decision_at = _dt.datetime(2026, 7, 10, 8, 0, tzinfo=_dt.timezone.utc)
+    event = _global_scope_event(city="Alpha", source_run_id="run-a")
+    scope = current_global_auction_scope_from_events(
+        (event,), captured_at_utc=decision_at
+    )
+    witness = SimpleNamespace(
+        family_key=scope.family_keys[0],
+        captured_at_utc=decision_at,
+        posterior_identity_hash="run-a",
+        witness_identity="q-run-a",
+    )
+    prepared = SimpleNamespace(probability_witness=witness)
+    selected = SimpleNamespace(
+        decision=SimpleNamespace(
+            candidate=SimpleNamespace(family_key=scope.family_keys[0]),
+            no_trade_reason=None,
+        ),
+        winner_event_id=event.event_id,
+        actuation=SimpleNamespace(
+            actuation_identity="actuation-a",
+            wealth_witness_identity="wealth-1",
+        ),
+    )
+    calls = {"books": 0, "select": 0, "preflight": 0, "venue": 0}
+    monkeypatch.setattr(
+        global_batch_runtime, "scan_current_global_auction_scope", lambda **_: scope
+    )
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "replace",
+        lambda value, **changes: SimpleNamespace(**(vars(value) | changes)),
+    )
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "current_portfolio_wealth_witness",
+        lambda *_, **__: SimpleNamespace(
+            spendable_cash_usd=Decimal("10"),
+            witness_identity="wealth-1",
+            economic_identity="wealth-economics-1",
+        ),
+    )
+
+    def select(*_args, **_kwargs):
+        calls["select"] += 1
+        return selected
+
+    def books(probabilities, _at):
+        calls["books"] += 1
+        return probabilities, _global_test_book("book-fence", price="0.40")
+
+    def preflight(*_args):
+        calls["preflight"] += 1
+        return global_batch_runtime.GlobalWinnerPreflight(
+            status="BATCH_BLOCKED",
+            reason="live_health_entry_authority:failing_surfaces=runtime_code",
+        )
+
+    monkeypatch.setattr(
+        global_batch_runtime, "select_prepared_global_auction", select
+    )
+    result = global_batch_runtime.process_current_global_batch(
+        (event,),
+        decision_time=decision_at,
+        world_conn=object(),
+        forecast_conn=object(),
+        trade_conn=object(),
+        payload_reader=lambda current: json.loads(current.payload_json),
+        prepare_event=lambda current, _at: EventSubmissionReceipt(
+            False,
+            current.event_id,
+            current.causal_snapshot_id,
+            prepared_global_family=prepared,
+        ),
+        actuate_winner=lambda *_: pytest.fail("batch block must not actuate"),
+        preflight_winner=preflight,
+        actuate_preflighted_winner=global_batch_runtime.GlobalOneShotActuator(
+            lambda *_: pytest.fail("batch block must not actuate")
+        ),
+        stamp_receipt=lambda receipt: receipt,
+        venue_submit_count=lambda: calls["venue"],
+        current_execution=lambda *_: object(),
+        current_time_provider=lambda: decision_at,
+        current_book_epoch_provider=books,
+    )
+
+    assert calls == {"books": 1, "select": 1, "preflight": 1, "venue": 0}
+    assert result.winner_event_id is None
+    assert result.venue_submit_count == 0
+    assert result.receipts[event.event_id].reason == (
+        "GLOBAL_PREFLIGHT_BATCH_BLOCKED:"
+        "live_health_entry_authority:failing_surfaces=runtime_code"
     )
 
 

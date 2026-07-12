@@ -46,7 +46,12 @@ class GlobalWinnerPreflight:
     reason: str = ""
 
     def __post_init__(self) -> None:
-        if self.status not in {"STABLE", "CURVE_SUPERSEDED", "BLOCKED"}:
+        if self.status not in {
+            "STABLE",
+            "CURVE_SUPERSEDED",
+            "BLOCKED",
+            "BATCH_BLOCKED",
+        }:
             raise ValueError("GLOBAL_WINNER_PREFLIGHT_STATUS_INVALID")
         if (self.status == "STABLE") != (self.binding_token is not None):
             raise ValueError("GLOBAL_WINNER_PREFLIGHT_TOKEN_INVALID")
@@ -928,6 +933,11 @@ def process_current_global_batch(
                     return reject("GLOBAL_PREFLIGHT_VENUE_SIDE_EFFECT")
                 if preflight.status == "STABLE":
                     break
+                if preflight.status == "BATCH_BLOCKED":
+                    return reject(
+                        "GLOBAL_PREFLIGHT_BATCH_BLOCKED:"
+                        f"{preflight.reason or preflight.status}"
+                    )
                 if preflight.status == "CURVE_SUPERSEDED":
                     if curve_reauction_used:
                         return reject(

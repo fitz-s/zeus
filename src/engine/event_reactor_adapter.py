@@ -4940,7 +4940,7 @@ def event_bound_live_adapter_from_trade_conn(
                     reason=preflight_reason,
                 )
             return GlobalWinnerPreflight(
-                status="BLOCKED",
+                status=_global_preflight_block_status(reason),
                 reason=reason or "GLOBAL_WINNER_PREFLIGHT_REJECTED",
             )
 
@@ -6260,6 +6260,20 @@ def _global_curve_supersession_from_receipt(
     if replacement is None:
         return "BLOCKED", None, f"{reason}:replacement_candidate_missing"
     return "CURVE_SUPERSEDED", replacement, reason
+
+
+def _global_preflight_block_status(reason: str) -> str:
+    """Distinguish batch-wide submit authority loss from candidate rejection."""
+
+    if reason.startswith(
+        ("entries_paused:", "live_health_entry_authority:")
+    ) or reason in {
+        "EDLI_DURABLE_SUBMIT_OUTBOX_REQUIRED",
+        "EXECUTOR_BOUNDARY_MISSING",
+        "OPERATOR_ARM_REQUIRED",
+    }:
+        return "BATCH_BLOCKED"
+    return "BLOCKED"
 
 
 def _global_current_state_execution_economics(
