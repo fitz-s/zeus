@@ -83,6 +83,9 @@ EXPECTED_RUNTIME_TRADE_TABLES = frozenset({
     # entry_exposure_obligations_schema.py).
     "review_work_items",
     "entry_exposure_obligations",
+    # T5 migration epoch marker 2026-07-12 (SCHEMA_EPOCH_TABLE_DDL in
+    # init_schema_trade_only; stamped by the T5 migration, presence-only here).
+    "schema_epoch",
     "position_current",
     "position_events",
     "position_lots",

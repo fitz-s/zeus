@@ -1842,6 +1842,11 @@ def init_schema(
     _busy_ms = int(os.environ.get("ZEUS_DB_BUSY_TIMEOUT_MS", "30000"))
     conn.execute(f"PRAGMA busy_timeout = {_busy_ms}")
 
+    # T5 migration epoch marker (registry: schema_epoch, all three DBs). The
+    # migration stamps the row; init only guarantees the table exists so a
+    # fresh DB matches the registry.
+    conn.execute(SCHEMA_EPOCH_TABLE_DDL)
+
     conn.executescript("""
         -- Migration-created world-class tables promoted from legacy_archived (2026-07-01, atlas §6C):
         -- declared world_class in db_table_ownership.yaml + hold live data; created here so init == registry.
@@ -4164,6 +4169,9 @@ _FORECAST_TABLES = (
     # (init_schema_forecasts calls ensure_table directly; not copied via the
     # world_src ATTACH path).
     "fact_revocations",
+    # T5 migration epoch marker (2026-07-12) — created directly by
+    # init_schema_forecasts, not via the world_src ATTACH path.
+    "schema_epoch",
 )
 
 
@@ -4961,6 +4969,9 @@ def init_schema_forecasts(conn: sqlite3.Connection) -> None:
 
     _busy_ms = int(os.environ.get("ZEUS_DB_BUSY_TIMEOUT_MS", "30000"))
     conn.execute(f"PRAGMA busy_timeout = {_busy_ms}")
+
+    # T5 migration epoch marker (see init_schema) — table presence only.
+    conn.execute(SCHEMA_EPOCH_TABLE_DDL)
 
     world_path = str(ZEUS_WORLD_DB_PATH)
     # Fingerprint-safety: when called with a :memory: connection (e.g.
@@ -6123,6 +6134,9 @@ def init_schema_trade_only(conn: sqlite3.Connection) -> None:
 
     # Install custom SQLite scalar functions required by position_lots triggers.
     _install_connection_functions(conn)
+
+    # T5 migration epoch marker (see init_schema) — table presence only.
+    conn.execute(SCHEMA_EPOCH_TABLE_DDL)
 
     # Create the per-DB migration ledger from the migration framework's single
     # authority. The boot registry assertion treats it as a real trade DB table,
