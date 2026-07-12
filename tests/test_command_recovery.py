@@ -33,11 +33,21 @@ def conn():
     from src.state.db import init_schema
     from src.state.collateral_ledger import init_collateral_schema
     from src.state.collateral_ledger import init_collateral_schema
+    from tests._helpers.legacy_quarantine_schema import (
+        downgrade_position_current_to_legacy_quarantine_check,
+    )
 
     c = sqlite3.connect(":memory:")
     c.row_factory = sqlite3.Row
     init_schema(c)
     init_collateral_schema(c)
+    # T5 (docs/rebuild/quarantine_excision_2026-07-11.md): several tests below
+    # deliberately seed a pre-migration legacy row with phase='quarantined' /
+    # chain_state='entry_authority_quarantined' to exercise command_recovery's
+    # mixed-epoch bridge handling; the CHECK constraint no longer permits that
+    # literal on a fresh schema post-migration, so downgrade this throwaway
+    # fixture connection back to the pre-migration shape.
+    downgrade_position_current_to_legacy_quarantine_check(c)
     yield c
     c.close()
 
@@ -455,12 +465,19 @@ def test_boot_fast_repairs_confirmed_chain_absence_positive_projection(
     from src.execution import venue_sync_contract
     from src.state.db import init_schema
     from src.state.collateral_ledger import init_collateral_schema
+    from tests._helpers.legacy_quarantine_schema import (
+        downgrade_position_current_to_legacy_quarantine_check,
+    )
 
     db_path = tmp_path / "boot-fast-chain-absence.db"
     seed = sqlite3.connect(db_path)
     seed.row_factory = sqlite3.Row
     init_schema(seed)
     init_collateral_schema(seed)
+    # T5 (docs/rebuild/quarantine_excision_2026-07-11.md): seeds a
+    # pre-migration legacy row with phase='quarantined'; the CHECK constraint
+    # no longer permits that literal on a fresh schema post-migration.
+    downgrade_position_current_to_legacy_quarantine_check(seed)
     seed.execute(
         """
         INSERT INTO position_current (

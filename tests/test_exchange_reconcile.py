@@ -27,6 +27,9 @@ _DEFAULT_FILL_PRICE = object()
 def conn():
     from src.state.collateral_ledger import init_collateral_schema
     from src.state.db import init_schema
+    from tests._helpers.legacy_quarantine_schema import (
+        downgrade_position_current_to_legacy_quarantine_check,
+    )
 
     c = sqlite3.connect(":memory:")
     c.row_factory = sqlite3.Row
@@ -35,6 +38,13 @@ def conn():
     # Single-connection fixture plays both DB roles; world init_schema no
     # longer creates trade-class collateral tables (K1 split, 1b51db387).
     init_collateral_schema(c)
+    # T5 (docs/rebuild/quarantine_excision_2026-07-11.md): at least one test
+    # below deliberately seeds a pre-migration legacy row with
+    # phase='quarantined' to exercise the mixed-epoch reconcile path; the
+    # CHECK constraint no longer permits that literal on a fresh schema
+    # post-migration, so downgrade this throwaway fixture connection back to
+    # the pre-migration shape.
+    downgrade_position_current_to_legacy_quarantine_check(c)
     yield c
     c.close()
 

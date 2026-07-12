@@ -834,6 +834,7 @@ test_trust_policy:
     tests/test_fee_authority.py: {created: "2026-06-12", last_used: "2026-06-12", note: "fee schedule-vs-realized data-semantics antibody: realized-fill evidence governs EV fee fraction; schedule CAP only as thin/stale fallback"}
     tests/test_cotenant_staging_guard.py: {created: "2026-06-12", last_used: "2026-06-12", note: "BLOCKING cotenant hook antibody: broad-add forms block, inline/env bypass honored, git -C worktree exemption (external review 2026-06-12)"}
     tests/test_fill_bridge_dispositions_migration.py: {created: "2026-06-13", last_used: "2026-06-13", note: "fill-bridge retry-storm pair antibody: ensure_table rebuilds legacy NOT NULL disposition (CREATE IF NOT EXISTS cannot relax constraints — quarantine was unreachable live 2026-06-12); orphan bridge excludes terminal-RECONCILED aggregates + poison row never aborts batch"}
+    tests/test_t5_quarantine_phase_retirement_migration.py: {created: "2026-07-12", last_used: "2026-07-12", note: "T5 MIGRATION acceptance gate (docs/rebuild/quarantine_excision_2026-07-11.md BLOCKER-2): kill-point crash matrix over all 7 named checkpoints (post_fence_check/post_backup/mid_ddl/mid_copy/post_validate/post_stamp/pre_commit) via subprocess os._exit injection — asserts the 3-DB set is always either untouched (rollback journal recovered) or fully migrated, never mixed; also covers writer-plane fence refusal, startup mixed-epoch refusal, and idempotent re-run"}
     tests/test_day0_connection_burst_antibody.py: {created: "2026-06-13", last_used: "2026-06-13", note: "lock-storm regression 347f713d antibody: monitoring phase with composite conn opens ZERO independent world connections; kill-memo recovery raises typed error on absent conn (no silent connection fallback)"}
     tests/test_preflight_restart_check_reads_edli_flags.py: {created: "2026-06-08", last_used: "2026-06-08", note: "PR#400 BLOCKER 1 RT: preflight_restart_check.py reads flags from correct scope (edli_v1/feature_flags), not top-level cfg dict"}
     tests/test_openmeteo_call_budget.py: {created: "2026-06-13", last_used: "2026-06-13", note: "RED-on-revert: API self-DoS collapse antibody (K=4 structural redundancies); INVARIANT 1 no metric double-fetch, INVARIANT 2 models batched (<=2 calls/city×date), INVARIANT 3 projected daily <=2000 (per-model revert -> ~9600 FAILS); R3 jma/gem cadence gate at 06Z/18Z"}
@@ -881,6 +882,10 @@ categories:
     # fill-bridge retry-storm pair (2026-06-13): legacy NOT NULL disposition rebuild
     # + orphan bridge terminal-RECONCILED exclusion + poison-row batch immunity.
     - tests/test_fill_bridge_dispositions_migration.py
+    # T5 quarantine phase retirement offline migration (2026-07-12, BLOCKER-2):
+    # kill-point crash matrix is the acceptance gate — the 3-DB set must always
+    # come out either untouched or fully migrated, never mixed.
+    - tests/test_t5_quarantine_phase_retirement_migration.py
     - tests/test_day0_connection_burst_antibody.py
     - tests/test_solar_append_future_window.py
     - tests/test_architecture_contracts.py

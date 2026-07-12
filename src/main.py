@@ -598,6 +598,32 @@ def _run_schema_guards() -> list:
     except Exception as exc:
         results.append(("trade_registry", False, str(exc)))
 
+    # T5 MIGRATION (docs/rebuild/quarantine_excision_2026-07-11.md, deliverable
+    # B): mixed schema_epoch across the three DBs means a partially-applied
+    # scripts/migrations/2026_07_quarantine_phase_retirement.py run or a
+    # crash mid-migration — the same guard the real boot path in main()
+    # enforces unconditionally, exercised here for the read-only smoke too.
+    try:
+        from src.state.db import assert_schema_epoch_not_mixed, read_schema_epoch
+
+        def _epoch(path):
+            if not path.exists():
+                return None
+            _c = _ro_conn(path)
+            try:
+                return read_schema_epoch(_c)
+            finally:
+                _c.close()
+
+        assert_schema_epoch_not_mixed(
+            world_epoch=_epoch(ZEUS_WORLD_DB_PATH),
+            forecasts_epoch=_epoch(ZEUS_FORECASTS_DB_PATH),
+            trade_epoch=_epoch(_zeus_trade_db_path()),
+        )
+        results.append(("schema_epoch", True, "schema_epoch not mixed — OK"))
+    except Exception as exc:
+        results.append(("schema_epoch", False, str(exc)))
+
     return results
 
 
@@ -5604,6 +5630,36 @@ def main():
         finally:
             _trade_conn_reg.close()
     conn.close()
+
+    # T5 MIGRATION (docs/rebuild/quarantine_excision_2026-07-11.md, deliverable
+    # B): fail-closed refusal if the three canonical DBs carry a MIXED
+    # schema_epoch (a partially-applied scripts/migrations/
+    # 2026_07_quarantine_phase_retirement.py run or a crash mid-migration).
+    # Unconditional — never gated behind ZEUS_BOOT_REGISTRY_ASSERT_ENABLED
+    # (that env var only exists for intentional table-set registry drift
+    # windows, not for booting past a half-migrated DB set).
+    from src.state.db import (
+        ZEUS_FORECASTS_DB_PATH,
+        ZEUS_WORLD_DB_PATH,
+        _zeus_trade_db_path,
+        assert_schema_epoch_not_mixed,
+        read_schema_epoch,
+    )
+
+    def _read_epoch_ro(path):
+        if not path.exists():
+            return None
+        _c = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+        try:
+            return read_schema_epoch(_c)
+        finally:
+            _c.close()
+
+    assert_schema_epoch_not_mixed(
+        world_epoch=_read_epoch_ro(ZEUS_WORLD_DB_PATH),
+        forecasts_epoch=_read_epoch_ro(ZEUS_FORECASTS_DB_PATH),
+        trade_epoch=_read_epoch_ro(_zeus_trade_db_path()),
+    )
 
     # W0-T2/T3: calibration pin shape + staleness guards (2026-06-03).
     # _run_boot_guards is the DRY helper shared with --validate-boot so the

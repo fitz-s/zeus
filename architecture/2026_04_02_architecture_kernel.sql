@@ -7,6 +7,15 @@ CREATE TABLE IF NOT EXISTS position_events (
     position_id TEXT NOT NULL,
     event_version INTEGER NOT NULL DEFAULT 1 CHECK (event_version >= 1),
     sequence_no INTEGER NOT NULL CHECK (sequence_no >= 1),
+    -- 2026-07-12 T5 MIGRATION (docs/rebuild/quarantine_excision_2026-07-11.md,
+    -- scripts/migrations/2026_07_quarantine_phase_retirement.py): the retired
+    -- chain-quarantine event type (formerly between CHAIN_SIZE_CORRECTED and
+    -- MONITOR_REFRESHED below) is dropped from this CHECK; a historical row
+    -- still carrying it is rewritten to REVIEW_REQUIRED by that migration
+    -- (already a valid member below). No quoted retired literal in this
+    -- comment — see tests/test_architecture_contracts.py's INV-07 SQL/Python
+    -- consistency antibody, which naively comma-splits the CHECK list text
+    -- and would otherwise misparse a mid-list comment as a phantom member.
     event_type TEXT NOT NULL CHECK (event_type IN (
         'POSITION_OPEN_INTENT',
         'ENTRY_ORDER_POSTED',
@@ -16,7 +25,6 @@ CREATE TABLE IF NOT EXISTS position_events (
         'DAY0_WINDOW_ENTERED',
         'CHAIN_SYNCED',
         'CHAIN_SIZE_CORRECTED',
-        'CHAIN_QUARANTINED',
         'MONITOR_REFRESHED',
         'EXIT_INTENT',
         'EXIT_ORDER_POSTED',
@@ -40,6 +48,14 @@ CREATE TABLE IF NOT EXISTS position_events (
     -- of this kernel file, and never hit that fallback branch on live data).
     occurred_at TEXT NOT NULL
         CHECK (occurred_at LIKE '____-__-__T%'),
+    -- 2026-07-12 T5 MIGRATION (docs/rebuild/quarantine_excision_2026-07-11.md,
+    -- scripts/migrations/2026_07_quarantine_phase_retirement.py): the retired
+    -- quarantine phase literal is dropped from phase_before/phase_after/phase
+    -- (all three below) here. A legacy row is rewritten to the position's
+    -- true phase by that migration (REPLACEMENT PHASE LAW). Comment kept
+    -- OUTSIDE the parenthesized IN(...) lists — see
+    -- tests/test_architecture_contracts.py's INV-07 antibody, which naively
+    -- comma-splits the CHECK list text.
     phase_before TEXT CHECK (phase_before IS NULL OR phase_before IN (
         'pending_entry',
         'active',
@@ -48,7 +64,6 @@ CREATE TABLE IF NOT EXISTS position_events (
         'economically_closed',
         'settled',
         'voided',
-        'quarantined',
         'admin_closed'
     )),
     phase_after TEXT CHECK (phase_after IS NULL OR phase_after IN (
@@ -59,7 +74,6 @@ CREATE TABLE IF NOT EXISTS position_events (
         'economically_closed',
         'settled',
         'voided',
-        'quarantined',
         'admin_closed'
     )),
     strategy_key TEXT NOT NULL,
@@ -97,6 +111,8 @@ END;
 
 CREATE TABLE IF NOT EXISTS position_current (
     position_id TEXT PRIMARY KEY,
+    -- 2026-07-12 T5 MIGRATION: see the phase_before comment above — same
+    -- retired-literal drop, same rationale, applies to this phase CHECK too.
     phase TEXT NOT NULL CHECK (phase IN (
         'pending_entry',
         'active',
@@ -105,7 +121,6 @@ CREATE TABLE IF NOT EXISTS position_current (
         'economically_closed',
         'settled',
         'voided',
-        'quarantined',
         'admin_closed'
     )),
     trade_id TEXT,

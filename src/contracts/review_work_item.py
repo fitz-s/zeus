@@ -66,6 +66,13 @@ class ReviewReasonCode(str, Enum):
     # T5 (critic I-2): terminal-restore path recovered exposure that needs
     # operator/re-observation review before it is trusted as final.
     TERMINAL_RESTORE_EXPOSURE = "TERMINAL_RESTORE_EXPOSURE"
+    # T5 MIGRATION (scripts/migrations/2026_07_quarantine_phase_retirement.py,
+    # BLOCKER-2 offline cutover): a position_current row that carried
+    # phase='quarantined' before the schema migration ran. The migration
+    # remaps the row to its TRUE phase (active/pending_exit) and opens this
+    # work item so the pre-migration dispute stays operator-visible instead
+    # of vanishing into a phase string (REPLACEMENT PHASE LAW).
+    LEGACY_QUARANTINE_MIGRATED = "LEGACY_QUARANTINE_MIGRATED"
     # T2 (chain-only unknown asset): venue token inventory with no matching
     # local intent — family-scoped entry block + worst-case exposure.
     CHAIN_ONLY_UNKNOWN_ASSET = "CHAIN_ONLY_UNKNOWN_ASSET"

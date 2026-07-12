@@ -48,6 +48,93 @@ REPO_ROOT = Path(__file__).parent.parent.parent
 EXIT_LIFECYCLE_PATH = REPO_ROOT / "src" / "execution" / "exit_lifecycle.py"
 
 
+def _downgrade_position_current_to_legacy_quarantine_check(conn: sqlite3.Connection) -> None:
+    """T5 MIGRATION (docs/rebuild/quarantine_excision_2026-07-11.md,
+    scripts/migrations/2026_07_quarantine_phase_retirement.py): the kernel SQL
+    CHECK constraint on position_current.phase no longer permits the retired
+    'quarantined' literal — apply_architecture_kernel_schema() now builds the
+    POST-migration shape. Two tests below deliberately simulate a pre-
+    migration legacy row still carrying phase='quarantined' (the exact
+    mixed-epoch bridge scenario src.state.portfolio's
+    _normalize_runtime_lifecycle_state/_normalize_runtime_chain_state and
+    src.state.canonical_write's phase_before preservation exist to handle
+    until the T5 migration runs). Rebuild just the two carrying tables here
+    with the pre-migration CHECK so those tests keep exercising the SAME
+    bridge behavior against a legacy-shaped row, instead of a state that can
+    no longer be constructed once a DB has actually run the migration."""
+    conn.executescript(
+        """
+        DROP TABLE position_events;
+        DROP TABLE position_current;
+        CREATE TABLE position_current (
+            position_id TEXT PRIMARY KEY,
+            phase TEXT NOT NULL CHECK (phase IN (
+                'pending_entry','active','day0_window','pending_exit',
+                'economically_closed','settled','voided','quarantined','admin_closed'
+            )),
+            trade_id TEXT, market_id TEXT, city TEXT, cluster TEXT, target_date TEXT,
+            bin_label TEXT,
+            direction TEXT CHECK (direction IS NULL OR direction IN ('buy_yes','buy_no','unknown')),
+            unit TEXT CHECK (unit IS NULL OR unit IN ('F','C')),
+            size_usd REAL, shares REAL, cost_basis_usd REAL, entry_price REAL,
+            p_posterior REAL, entry_ci_width REAL, last_monitor_prob REAL,
+            last_monitor_prob_is_fresh INTEGER, last_monitor_edge REAL,
+            last_monitor_market_price REAL, last_monitor_market_price_is_fresh INTEGER,
+            last_monitor_best_bid REAL, last_monitor_best_ask REAL, last_monitor_market_vig REAL,
+            decision_snapshot_id TEXT, entry_method TEXT, strategy_key TEXT NOT NULL,
+            edge_source TEXT, discovery_mode TEXT, chain_state TEXT, token_id TEXT,
+            no_token_id TEXT, condition_id TEXT, order_id TEXT, order_status TEXT,
+            updated_at TEXT NOT NULL,
+            temperature_metric TEXT NOT NULL CHECK (temperature_metric IN ('high','low')),
+            fill_authority TEXT, recovery_authority TEXT, chain_shares REAL,
+            chain_avg_price REAL, chain_cost_basis_usd REAL, chain_seen_at TEXT,
+            chain_absence_at TEXT, realized_pnl_usd REAL, exit_price REAL,
+            settlement_price REAL, settled_at TEXT, exit_reason TEXT,
+            exit_retry_count INTEGER, next_exit_retry_at TEXT
+        );
+        CREATE TABLE position_events (
+            event_id TEXT PRIMARY KEY,
+            position_id TEXT NOT NULL,
+            event_version INTEGER NOT NULL DEFAULT 1 CHECK (event_version >= 1),
+            sequence_no INTEGER NOT NULL CHECK (sequence_no >= 1),
+            event_type TEXT NOT NULL CHECK (event_type IN (
+                'POSITION_OPEN_INTENT','ENTRY_ORDER_POSTED','ENTRY_ORDER_FILLED',
+                'ENTRY_ORDER_VOIDED','ENTRY_ORDER_REJECTED','DAY0_WINDOW_ENTERED',
+                'CHAIN_SYNCED','CHAIN_SIZE_CORRECTED','CHAIN_QUARANTINED',
+                'MONITOR_REFRESHED','EXIT_INTENT','EXIT_ORDER_POSTED','EXIT_ORDER_FILLED',
+                'EXIT_ORDER_VOIDED','EXIT_ORDER_REJECTED','EXIT_RETRY_RELEASED','SETTLED',
+                'ADMIN_VOIDED','MANUAL_OVERRIDE_APPLIED','VENUE_POSITION_OBSERVED','REVIEW_REQUIRED'
+            )),
+            occurred_at TEXT NOT NULL CHECK (occurred_at LIKE '____-__-__T%'),
+            phase_before TEXT CHECK (phase_before IS NULL OR phase_before IN (
+                'pending_entry','active','day0_window','pending_exit',
+                'economically_closed','settled','voided','quarantined','admin_closed'
+            )),
+            phase_after TEXT CHECK (phase_after IS NULL OR phase_after IN (
+                'pending_entry','active','day0_window','pending_exit',
+                'economically_closed','settled','voided','quarantined','admin_closed'
+            )),
+            strategy_key TEXT NOT NULL, decision_id TEXT, snapshot_id TEXT, order_id TEXT,
+            command_id TEXT, caused_by TEXT, idempotency_key TEXT UNIQUE, venue_status TEXT,
+            source_module TEXT NOT NULL,
+            env TEXT NOT NULL CHECK (env IN ('live','test','replay','backtest')),
+            payload_json TEXT NOT NULL,
+            UNIQUE(position_id, sequence_no)
+        );
+        CREATE TRIGGER trg_position_events_require_env
+        BEFORE INSERT ON position_events
+        WHEN NEW.env IS NULL OR TRIM(NEW.env) = ''
+        BEGIN SELECT RAISE(FAIL, 'position_events.env is required'); END;
+        CREATE TRIGGER trg_position_events_no_update
+        BEFORE UPDATE ON position_events
+        BEGIN SELECT RAISE(FAIL, 'position_events is append-only'); END;
+        CREATE TRIGGER trg_position_events_no_delete
+        BEFORE DELETE ON position_events
+        BEGIN SELECT RAISE(FAIL, 'position_events is append-only'); END;
+        """
+    )
+
+
 # Helpers that internally pair _mark_pending_exit with the canonical writer.
 # Calling any of these counts as a paired transition for the enclosing
 # function.
@@ -323,6 +410,7 @@ def test_entry_authority_quarantined_position_can_transition_to_pending_exit():
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     apply_architecture_kernel_schema(conn)
+    _downgrade_position_current_to_legacy_quarantine_check(conn)
     pos = Position(
         trade_id="entry-authority-quarantine-1",
         market_id="mkt-entry-authority-1",
@@ -428,6 +516,7 @@ def test_chain_absent_confirmed_position_cannot_transition_to_pending_exit():
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     apply_architecture_kernel_schema(conn)
+    _downgrade_position_current_to_legacy_quarantine_check(conn)
     pos = Position(
         trade_id="chain-absence-quarantine-1",
         market_id="mkt-chain-absence-1",
