@@ -2746,7 +2746,7 @@ def test_global_batch_claims_unpaged_cut_time_winner_and_continues_actuation(
             economic_identity=fence_economic_identity,
         ),
     )
-    selections = iter((selected, fence_selected))
+    selections = iter((fence_selected,))
     fence_selection_calls = [0]
 
     def _select_fence(*_args, **_kwargs):
@@ -2808,7 +2808,7 @@ def test_global_batch_claims_unpaged_cut_time_winner_and_continues_actuation(
     assert claimed_targets[0].source.endswith(f":{fence_economic_identity}")
     assert fenced.winner_event_id == claimed_targets[0].event_id
     assert fenced.venue_submit_count == 1
-    assert fence_selection_calls[0] == 2
+    assert fence_selection_calls[0] == 1
     assert set(fenced.receipts) == {
         event_a.event_id,
         claimed_targets[0].event_id,
@@ -3233,14 +3233,11 @@ def test_global_batch_reauctions_once_on_full_universe_curve_drift(monkeypatch):
         )
         for event, family_key in zip((event_a, event_b), scope.family_keys)
     }
-    actuation_a = SimpleNamespace(
-        actuation_identity="actuation-a", wealth_witness_identity="wealth-1"
-    )
     actuation_b_fence = SimpleNamespace(
-        actuation_identity="actuation-b-fence", wealth_witness_identity="wealth-2"
+        actuation_identity="actuation-b-fence", wealth_witness_identity="wealth-1"
     )
     actuation_b_final = SimpleNamespace(
-        actuation_identity="actuation-b-final", wealth_witness_identity="wealth-3"
+        actuation_identity="actuation-b-final", wealth_witness_identity="wealth-2"
     )
     selections = iter(
         SimpleNamespace(
@@ -3249,17 +3246,11 @@ def test_global_batch_reauctions_once_on_full_universe_curve_drift(monkeypatch):
             actuation=actuation,
         )
         for event, actuation in (
-            (event_a, actuation_a),
             (event_b, actuation_b_fence),
             (event_b, actuation_b_final),
         )
     )
-    books = iter(
-        (
-            _global_test_book("book-0", price="0.40"),
-            _global_test_book("book-1", price="0.41"),
-        )
-    )
+    books = iter((_global_test_book("book-1", price="0.41"),))
     replacement_candidate = object()
     calls = {"prepare": 0, "books": 0, "wealth": 0, "preflight": [], "venue": 0}
 
@@ -3364,8 +3355,8 @@ def test_global_batch_reauctions_once_on_full_universe_curve_drift(monkeypatch):
 
     assert calls == {
         "prepare": 2,
-        "books": 2,
-        "wealth": 3,
+        "books": 1,
+        "wealth": 2,
         "preflight": [event_b.event_id, event_b.event_id],
         "venue": 1,
     }
@@ -3412,17 +3403,11 @@ def test_global_batch_falls_through_candidate_local_preflight_block(monkeypatch)
             ),
         )
         for event, actuation_id, wealth_id in (
-            (event_a, "actuation-a-initial", "wealth-1"),
-            (event_a, "actuation-a-fence", "wealth-2"),
-            (event_b, "actuation-b-fallthrough", "wealth-3"),
+            (event_a, "actuation-a-fence", "wealth-1"),
+            (event_b, "actuation-b-fallthrough", "wealth-2"),
         )
     )
-    books = iter(
-        (
-            _global_test_book("book-0", price="0.40"),
-            _global_test_book("book-1", price="0.41"),
-        )
-    )
+    books = iter((_global_test_book("book-1", price="0.41"),))
     blocked_reason = "SHIFT_BIN_NO_SUBMIT:SHIFT_OLD_LEG_BELIEF_NOT_WEAKENED"
     calls = {
         "prepare": 0,
@@ -3519,15 +3504,14 @@ def test_global_batch_falls_through_candidate_local_preflight_block(monkeypatch)
     )
 
     assert calls["prepare"] == 2
-    assert calls["books"] == 2
-    assert calls["wealth"] == 3
+    assert calls["books"] == 1
+    assert calls["wealth"] == 2
     assert calls["preflight"] == [event_a.event_id, event_b.event_id]
     assert calls["excluded"] == [
         None,
-        None,
         {scope.family_keys[0]: blocked_reason},
     ]
-    assert calls["epoch"][2] != calls["epoch"][1]
+    assert calls["epoch"][1] != calls["epoch"][0]
     assert calls["venue"] == 1
     assert result.winner_event_id == event_b.event_id
     assert result.venue_submit_count == 1
@@ -3630,7 +3614,7 @@ def test_global_batch_second_curve_supersession_exhausts_without_venue(monkeypat
     )
 
 
-def test_global_batch_reauction_rejects_probability_cut_drift(monkeypatch):
+def test_global_batch_uses_one_probability_and_book_fence_cut(monkeypatch):
     decision_at = _dt.datetime(2026, 7, 10, 8, 0, tzinfo=_dt.timezone.utc)
     event = _global_scope_event(city="Alpha", source_run_id="run-a")
     scope = current_global_auction_scope_from_events(
@@ -3641,12 +3625,6 @@ def test_global_batch_reauction_rejects_probability_cut_drift(monkeypatch):
         captured_at_utc=decision_at,
         posterior_identity_hash="run-a",
         witness_identity="q-cut-a",
-    )
-    drifted_witness = SimpleNamespace(
-        family_key=scope.family_keys[0],
-        captured_at_utc=decision_at,
-        posterior_identity_hash="run-a",
-        witness_identity="q-cut-b",
     )
     prepared = SimpleNamespace(probability_witness=initial_witness)
     selected = SimpleNamespace(
@@ -3681,21 +3659,24 @@ def test_global_batch_reauction_rejects_probability_cut_drift(monkeypatch):
 
     def book_provider(probabilities, _at):
         calls["books"] += 1
-        rebound = (
-            probabilities
-            if calls["books"] == 1
-            else {scope.family_keys[0]: drifted_witness}
-        )
-        return rebound, _global_test_book(
-            f"book-{calls['books']}", price="0.40"
-        )
+        return probabilities, _global_test_book("book-fence", price="0.40")
 
     def preflight(*_):
         calls["preflight"] += 1
         return global_batch_runtime.GlobalWinnerPreflight(
-            status="CURVE_SUPERSEDED",
-            replacement_candidate=object(),
-            reason="curve moved",
+            status="STABLE",
+            binding_token="binding-a",
+        )
+
+    def actuate(event, _actuation, _at, token, _authority):
+        assert token == "binding-a"
+        calls["venue"] += 1
+        return EventSubmissionReceipt(
+            True,
+            event.event_id,
+            event.causal_snapshot_id,
+            proof_accepted=True,
+            side_effect_status="SUBMITTED",
         )
 
     result = global_batch_runtime.process_current_global_batch(
@@ -3714,7 +3695,7 @@ def test_global_batch_reauction_rejects_probability_cut_drift(monkeypatch):
         actuate_winner=lambda *_: pytest.fail("must not actuate"),
         preflight_winner=preflight,
         actuate_preflighted_winner=global_batch_runtime.GlobalOneShotActuator(
-            lambda *_: pytest.fail("must not actuate")
+            actuate
         ),
         stamp_receipt=lambda receipt: receipt,
         venue_submit_count=lambda: calls["venue"],
@@ -3723,12 +3704,10 @@ def test_global_batch_reauction_rejects_probability_cut_drift(monkeypatch):
         current_book_epoch_provider=book_provider,
     )
 
-    assert calls == {"books": 2, "preflight": 0, "venue": 0}
-    assert result.venue_submit_count == 0
-    assert result.winner_event_id is None
-    assert result.receipts[event.event_id].reason == (
-        "GLOBAL_PREFLIGHT_PROBABILITY_CUT_DRIFT"
-    )
+    assert calls == {"books": 1, "preflight": 1, "venue": 1}
+    assert result.venue_submit_count == 1
+    assert result.winner_event_id == event.event_id
+    assert result.receipts[event.event_id].submitted is True
 
 
 def test_global_batch_freezes_cut_then_releases_before_winner_jit(

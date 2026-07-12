@@ -775,7 +775,12 @@ def process_current_global_batch(
                 )
                 for event_id, prepared in prepared_by_event.items()
             }
-        log_stage("book_epoch_initial", families=len(prepared_by_event))
+        initial_book_stage = (
+            "book_epoch_fence"
+            if preflight_winner is not None
+            else "book_epoch_initial"
+        )
+        log_stage(initial_book_stage, families=len(prepared_by_event))
         probability_manifest = _probability_manifest(probabilities)
         # Selection is a comparison over one immutable information vector.  Scope and
         # q are frozen at ``scope_at``; the complete native YES/NO book and wealth
@@ -851,14 +856,17 @@ def process_current_global_batch(
             )
 
         selected = select_once(probabilities, book_epoch, prepared_by_event)
-        log_stage("select_initial", families=len(prepared_by_event))
+        initial_select_stage = (
+            "select_fence" if preflight_winner is not None else "select_initial"
+        )
+        log_stage(initial_select_stage, families=len(prepared_by_event))
         if selected.decision.candidate is None:
-            log_no_trade("select_initial", selected.decision)
+            log_no_trade(initial_select_stage, selected.decision)
             return reject(
                 "GLOBAL_AUCTION_NO_TRADE:"
                 f"{selected.decision.no_trade_reason or 'unknown'}"
             )
-        log_winner("select_initial", selected, probabilities)
+        log_winner(initial_select_stage, selected, probabilities)
         if selected.actuation is None:
             return reject("GLOBAL_WINNER_ACTUATION_MISSING")
         winner_id = selected.winner_event_id
@@ -884,40 +892,9 @@ def process_current_global_batch(
                 return reject("GLOBAL_PREFLIGHT_ACTUATOR_MISSING")
             if current_book_epoch_provider is None or book_epoch is None:
                 return reject("GLOBAL_PREFLIGHT_BOOK_PROVIDER_MISSING")
-            probabilities_fence, book_epoch_fence = current_book_epoch_provider(
-                probabilities,
-                current_time(),
-            )
-            log_stage("book_epoch_fence", families=len(prepared_by_event))
-            if _probability_manifest(probabilities_fence) != probability_manifest:
-                return reject("GLOBAL_PREFLIGHT_PROBABILITY_CUT_DRIFT")
-            prepared_fence = {
-                event_id: replace(
-                    prepared,
-                    probability_witness=probabilities_fence[
-                        prepared.probability_witness.family_key
-                    ],
-                )
-                for event_id, prepared in prepared_by_event.items()
-            }
-            # The fence is also the single permitted re-auction even when books are
-            # economically unchanged: selection-time wealth must be reacquired at the
-            # same late boundary as the whole-universe book.
-            selected = select_once(
-                probabilities_fence,
-                book_epoch_fence,
-                prepared_fence,
-            )
-            log_stage("select_fence", families=len(prepared_by_event))
-            if selected.decision.candidate is None:
-                log_no_trade("select_fence", selected.decision)
-                return reject(
-                    "GLOBAL_REAUCTION_NO_TRADE:"
-                    f"{selected.decision.no_trade_reason or 'unknown'}"
-                )
-            log_winner("select_fence", selected, probabilities_fence)
-            if selected.actuation is None:
-                return reject("GLOBAL_REAUCTION_ACTUATION_MISSING")
+            probabilities_fence = probabilities
+            book_epoch_fence = book_epoch
+            prepared_fence = prepared_by_event
             selected, winner, next_claim = bind_selected_winner(selected)
             if winner is None:
                 if next_claim is None:
