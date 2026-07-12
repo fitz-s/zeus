@@ -118,7 +118,7 @@ def test_assert_data_version_allowed_rejects_observation_data_version():
     Disjoint-namespace design would silently fail if a future merge
     pointed assert_data_version_allowed at the union."""
     from src.contracts.ensemble_snapshot_provenance import (
-        DataVersionQuarantinedError,
+        DataVersionRejectedError,
         assert_data_version_allowed,
     )
     import pytest
@@ -127,7 +127,7 @@ def test_assert_data_version_allowed_rejects_observation_data_version():
     assert observation_dv in mod.CANONICAL_OBSERVATION_DATA_VERSIONS
     assert observation_dv not in mod.CANONICAL_ENSEMBLE_DATA_VERSIONS
 
-    with pytest.raises(DataVersionQuarantinedError):
+    with pytest.raises(DataVersionRejectedError):
         assert_data_version_allowed(observation_dv, context="T2-S4_behavioral_test")
 
 

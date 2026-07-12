@@ -60,7 +60,7 @@ authoritative machine registry is `architecture/test_topology.yaml`.
 | `test_invariant_citations.py` | Pytest wrapper for check_invariant_test_citations.py; two-ring invariant citation enforcement (created 2026-05-01) |
 | `test_learning_loop_observation.py` | Cross-module antibody: settlement-corpus->calibration update pipeline per R3 §1 #2 LEARNING_LOOP packet (created 2026-04-29) |
 | `test_learning_loop_observation_weekly.py` | End-to-end runner antibody for learning loop batch-3 weekly dispatch (created 2026-04-29) |
-| `test_loop_guard.py` | 24/7 improvement-loop guard antibodies: allowlist enforce/quarantine, circuit breaker, HALT, flock single-flight, interval gate, query escrow, commit-auto pathspec discipline (created 2026-07-08) |
+| `test_loop_guard.py` | 24/7 improvement-loop guard antibodies: allowlist enforce/restore, circuit breaker, HALT, flock single-flight, interval gate, query escrow, commit-auto pathspec discipline (created 2026-07-08) |
 | `test_main_module_scope.py` | Antibody #8: Phase 3 module-scope enforcement for src.main (two-system independence; created 2026-04-30) |
 | `test_no_edge_rule1_guard.py` | Stop-hook advisory guard antibody: Chinese/paraphrased no-edge conclusions trigger RULE 1 while real evidence-backed edge conclusions pass (created 2026-07-08) |
 | `test_no_raw_world_attach.py` | Antibody #13: no raw ATTACH DATABASE or get_trade_connection_with_world in trading-lane source modules (created 2026-04-30) |

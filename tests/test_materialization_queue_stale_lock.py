@@ -4,7 +4,7 @@
 #   ("your regression") stalled live ~12h. A holder SIGKILL'd mid-run never ran its
 #   finally-unlink, so its lock blocked the queue forever -> materializer dark -> readiness
 #   (3h TTL) expired -> reactor READINESS_EXPIRED -> zero trades. Relationship tests for the
-#   stale-lock self-heal antibody (dead-PID detection + quarantine + steal) in
+#   stale-lock self-heal antibody (dead-PID detection + archive + steal) in
 #   src/data/replacement_forecast_live_materialization_queue.py.
 """Relationship tests: an orphaned queue lock from a DEAD holder cannot block the queue.
 
@@ -13,7 +13,7 @@ is released only by the holder's ``finally`` unlink. A holder killed with SIGKIL
 ``finally`` entirely, orphaning the lock; every later acquirer then sees ``FileExistsError`` and
 gives up -> the materializer goes dark and readiness silently expires. These tests pin the
 boundary between *holder liveness* and *queue acquirability*: a dead holder's lock is
-auto-quarantined and stolen, a live holder still blocks, and an unparseable lock never wedges
+auto-archived and stolen, a live holder still blocks, and an unparseable lock never wedges
 the queue forever.
 """
 from __future__ import annotations
@@ -48,15 +48,15 @@ def test_dead_holder_lock_is_stolen_not_blocking(tmp_path):
     assert not lock.exists(), "the stealing acquirer releases its lock on exit"
 
 
-def test_dead_holder_lock_is_quarantined_for_audit(tmp_path):
+def test_dead_holder_lock_is_archived_for_audit(tmp_path):
     lock = tmp_path / ".materialization_queue.lock"
     dead = _dead_pid()
     _write_lock(lock, dead)
     with _queue_lock(lock) as acquired:
         assert acquired is True
-    qdir = tmp_path / "quarantined_stale_locks"
-    quarantined = list(qdir.glob(f"*pid{dead}*")) if qdir.exists() else []
-    assert quarantined, "a stolen stale lock must be quarantined (audit trail), never silently deleted"
+    qdir = tmp_path / "archived_stale_locks"
+    archived = list(qdir.glob(f"*pid{dead}*")) if qdir.exists() else []
+    assert archived, "a stolen stale lock must be archived (audit trail), never silently deleted"
 
 
 def test_live_holder_lock_still_blocks(tmp_path):

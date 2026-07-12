@@ -822,31 +822,31 @@ def test_R12b_obs_anchor_still_rejects_canonical_unit_errors_post_2026_05_12():
 
 
 # ---------------------------------------------------------------------------
-# R14 — ensemble_snapshots data_version quarantine contract
+# R14 — ensemble_snapshots data_version rejection contract
 # ---------------------------------------------------------------------------
 
 
-def test_R14_quarantine_rejects_known_bad_exact_match():
+def test_R14_rejection_rejects_known_bad_exact_match():
     from src.contracts.ensemble_snapshot_provenance import (
-        DataVersionQuarantinedError,
+        DataVersionRejectedError,
         assert_data_version_allowed,
-        is_quarantined,
+        is_rejected,
     )
     for dv in (
         "tigge_step024_v1_near_peak",
         "tigge_step024_v1_overnight_snapshot",
         "tigge_partial_legacy",
     ):
-        assert is_quarantined(dv), dv
-        with pytest.raises(DataVersionQuarantinedError, match=r"quarantined"):
+        assert is_rejected(dv), dv
+        with pytest.raises(DataVersionRejectedError, match=r"rejected"):
             assert_data_version_allowed(dv, context="test")
 
 
-def test_R14_quarantine_rejects_prefix_families():
+def test_R14_rejection_rejects_prefix_families():
     from src.contracts.ensemble_snapshot_provenance import (
-        DataVersionQuarantinedError,
+        DataVersionRejectedError,
         assert_data_version_allowed,
-        is_quarantined,
+        is_rejected,
     )
     # Future variants of the same wrong physical quantity
     for dv in (
@@ -855,18 +855,18 @@ def test_R14_quarantine_rejects_prefix_families():
         "tigge_param167_v99",
         "tigge_2t_instant_experimental",
     ):
-        assert is_quarantined(dv), dv
-        with pytest.raises(DataVersionQuarantinedError):
+        assert is_rejected(dv), dv
+        with pytest.raises(DataVersionRejectedError):
             assert_data_version_allowed(dv)
 
 
-def test_R14_quarantine_allows_replacement_tag():
+def test_R14_rejection_allows_replacement_tag():
     """The canonical dual-track replacement data_versions must pass the guard.
 
     T2.a 2026-04-23: the earlier fixture listed
     `tigge_mx2t6_local_peak_window_max_v1` as an allowed replacement, but
     per `src/contracts/ensemble_snapshot_provenance.py:87,102` that
-    peak-window tag is now explicitly quarantined (superseded by
+    peak-window tag is now explicitly rejected (superseded by
     `tigge_mx2t6_local_calendar_day_max_v1` canonical-day semantics). The
     positive allowlist at L141 also rejects anything outside
     CANONICAL_ENSEMBLE_DATA_VERSIONS, so the only versions that pass the full
@@ -876,23 +876,23 @@ def test_R14_quarantine_allows_replacement_tag():
     from src.contracts.ensemble_snapshot_provenance import (
         CANONICAL_ENSEMBLE_DATA_VERSIONS,
         assert_data_version_allowed,
-        is_quarantined,
+        is_rejected,
     )
     assert len(CANONICAL_ENSEMBLE_DATA_VERSIONS) >= 2, (
         "Expected at least the high and low track canonical data_versions"
     )
     for dv in sorted(CANONICAL_ENSEMBLE_DATA_VERSIONS):
-        assert not is_quarantined(dv), dv
+        assert not is_rejected(dv), dv
         assert_data_version_allowed(dv)  # must not raise
 
 
 def test_R14_filter_allowed_partitions_rows():
-    """T2.a 2026-04-23: peak_window_max_v1 (id 1) is now quarantined
+    """T2.a 2026-04-23: peak_window_max_v1 (id 1) is now rejected
     per src/contracts/ensemble_snapshot_provenance.py:87,102
     (peak-window semantics superseded by local-calendar-day). id 4
-    (openmeteo_ens_v1) has no matching quarantine prefix or exact tag,
-    so is_quarantined returns False and filter_allowed routes it to the
-    allowed bucket (filter_allowed checks quarantine only, not the
+    (openmeteo_ens_v1) has no matching rejection prefix or exact tag,
+    so is_rejected returns False and filter_allowed routes it to the
+    allowed bucket (filter_allowed checks rejection only, not the
     positive allowlist at assert_data_version_allowed's stage 2).
     """
     from src.contracts.ensemble_snapshot_provenance import filter_allowed
@@ -902,9 +902,9 @@ def test_R14_filter_allowed_partitions_rows():
         {"id": 3, "data_version": "tigge_step048_v1_future"},
         {"id": 4, "data_version": "openmeteo_ens_v1"},
     ]
-    allowed, quarantined = filter_allowed(rows)
+    allowed, rejected = filter_allowed(rows)
     assert [r["id"] for r in allowed] == [4]
-    assert [r["id"] for r in quarantined] == [1, 2, 3]
+    assert [r["id"] for r in rejected] == [1, 2, 3]
 
 
 # ---------------------------------------------------------------------------

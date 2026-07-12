@@ -476,7 +476,7 @@ class TestPreDay0LowCarryover:
             last_receipt_time=datetime(2026, 6, 17, 22, 41, tzinfo=timezone.utc),
             sample_count=3,
             skipped_unit_law=0,
-            quarantined_implausible=0,
+            held_implausible=0,
         )
         monkey = pytest.MonkeyPatch()
         monkey.setattr(era, "runtime_cities_by_name", lambda: {"London": city})

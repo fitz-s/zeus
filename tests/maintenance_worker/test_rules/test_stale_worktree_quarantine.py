@@ -5,7 +5,7 @@
 Tests for maintenance_worker.rules.stale_worktree_quarantine.
 
 6 tests:
-  1. Idle clean worktree → STALE_QUARANTINE_CANDIDATE
+  1. Idle clean worktree → STALE_ARCHIVE_CANDIDATE
   2. Main/current-branch worktree → SKIP_CURRENT_BRANCH
   3. Worktree with uncommitted changes → SKIP_UNCOMMITTED
   4. apply() always dry_run_only + mock diff
@@ -99,14 +99,14 @@ def _make_entry(ttl_days: int = 21) -> TaskCatalogEntry:
 
 
 # ---------------------------------------------------------------------------
-# Test 1: Idle clean worktree → STALE_QUARANTINE_CANDIDATE
+# Test 1: Idle clean worktree → STALE_ARCHIVE_CANDIDATE
 # ---------------------------------------------------------------------------
 
 
 def test_idle_clean_worktree_is_stale_candidate(tmp_path: Path) -> None:
     """
     A worktree with no uncommitted changes and last activity > ttl_days ago
-    should be classified as STALE_QUARANTINE_CANDIDATE.
+    should be classified as STALE_ARCHIVE_CANDIDATE.
     """
     ctx = _make_ctx(tmp_path)
     entry = _make_entry(ttl_days=21)
@@ -190,7 +190,7 @@ def test_main_worktree_skipped(tmp_path: Path) -> None:
 def test_uncommitted_worktree_skipped(tmp_path: Path) -> None:
     """
     A worktree with uncommitted changes must be classified SKIP_UNCOMMITTED
-    regardless of idle status — never quarantine dirty worktrees.
+    regardless of idle status — never archive dirty worktrees.
     """
     ctx = _make_ctx(tmp_path)
     entry = _make_entry()

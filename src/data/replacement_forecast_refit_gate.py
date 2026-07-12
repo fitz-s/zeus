@@ -19,7 +19,7 @@ REQUIRED_REFIT_EVIDENCE = (
     "same_clob_after_cost_replay_positive",
     "source_availability_no_lookahead",
     "baseline_calibration_not_reused",
-    "emos_cells_product_keyed_or_quarantined",
+    "emos_cells_product_keyed_or_rejected",
     "rollback_plan_available",
 )
 BASELINE_CALIBRATION_METHODS = {"platt", "extended_platt", "emos", "raw_honest", "sigma_floor"}

@@ -537,8 +537,8 @@ _CLOB_ARCHIVED_CACHE: dict[str, tuple[bool, bool]] = {}
 _SLUG_DISCOVERY_CURSOR: int = 0
 CLOB_BASE = "https://clob.polymarket.com"
 
-SOURCE_CONTRACT_QUARANTINE_PATH_ENV = "ZEUS_SOURCE_CONTRACT_QUARANTINE_PATH"
-SOURCE_CONTRACT_QUARANTINE_SCHEMA_VERSION = 1
+SOURCE_CONTRACT_BLOCK_PATH_ENV = "ZEUS_SOURCE_CONTRACT_BLOCK_PATH"
+SOURCE_CONTRACT_BLOCK_SCHEMA_VERSION = 1
 SOURCE_CONTRACT_ALERT_STATUSES = frozenset({"AMBIGUOUS", "MISMATCH", "UNSUPPORTED"})
 REQUIRED_SOURCE_CONVERSION_EVIDENCE = (
     "config_updated",
@@ -552,25 +552,25 @@ SOURCE_CONVERSION_EVIDENCE_DESCRIPTIONS = {
     "config_updated": "config/cities.json reflects the new settlement source contract.",
     "source_validity_updated": "docs/operations/current_source_validity.md records fresh source audit evidence.",
     "backfill_completed": "affected city/date/metric/source-role rows have been backfilled or explicitly declared not required.",
-    "settlements_rebuilt": "affected settlement rows have been rebuilt or quarantined with row-level provenance.",
+    "settlements_rebuilt": "affected settlement rows have been rebuilt or disputed with row-level provenance.",
     "calibration_rebuilt": "affected calibration pairs and Platt calibration buckets have been rebuilt.",
     "verification_passed": "focused scanner/watch/rebuild/calibration verification has passed.",
 }
 PENDING_SOURCE_CONVERSIONS_CONFIG_KEY = "_source_contract_pending_conversions"
 
 
-def source_contract_quarantine_path(path: str | Path | None = None) -> Path:
+def source_contract_block_path(path: str | Path | None = None) -> Path:
     if path is not None:
         return Path(path)
-    override = os.environ.get(SOURCE_CONTRACT_QUARANTINE_PATH_ENV)
+    override = os.environ.get(SOURCE_CONTRACT_BLOCK_PATH_ENV)
     if override:
         return Path(override)
-    return state_path("source_contract_quarantine.json")
+    return state_path("source_contract_block.json")
 
 
-def _empty_source_contract_quarantine_payload() -> dict:
+def _empty_source_contract_block_payload() -> dict:
     return {
-        "schema_version": SOURCE_CONTRACT_QUARANTINE_SCHEMA_VERSION,
+        "schema_version": SOURCE_CONTRACT_BLOCK_SCHEMA_VERSION,
         "updated_at": None,
         "cities": {},
         "transition_history": [],
@@ -580,44 +580,68 @@ def _empty_source_contract_quarantine_payload() -> dict:
 def _canonical_city_name(city_name: str) -> str:
     candidate = str(city_name or "").strip()
     if not candidate:
-        raise ValueError("source-contract quarantine requires city_name")
+        raise ValueError("source-contract block requires city_name")
     for configured_name in runtime_config.runtime_cities_by_name():
         if configured_name.lower() == candidate.lower():
             return configured_name
     return candidate
 
 
-def load_source_contract_quarantines(path: str | Path | None = None) -> dict:
-    quarantine_path = source_contract_quarantine_path(path)
+def load_source_contract_blocks(path: str | Path | None = None) -> dict:
+    block_path = source_contract_block_path(path)
     try:
-        payload = json.loads(quarantine_path.read_text(encoding="utf-8"))
+        payload = json.loads(block_path.read_text(encoding="utf-8"))
     except FileNotFoundError:
-        return _empty_source_contract_quarantine_payload()
+        # T8 residue sweep (docs/rebuild/quarantine_excision_2026-07-11.md):
+        # the runtime file was renamed source_contract_quarantine.json ->
+        # source_contract_block.json. One-shot read-fallback: if a caller
+        # did not pass an explicit path (default deployment location) and
+        # the pre-rename file still exists there, load it so live blocked
+        # cities are not silently dropped mid-deploy, then migrate it onto
+        # the new canonical path so every later call reads only the new
+        # name. Never a permanent dual-read.
+        if path is None:
+            legacy_path = block_path.with_name("source_contract_quarantine.json")
+            try:
+                legacy_text = legacy_path.read_text(encoding="utf-8")
+            except FileNotFoundError:
+                return _empty_source_contract_block_payload()
+            logger.warning(
+                "SOURCE_CONTRACT_BLOCK_LEGACY_FILENAME_MIGRATED: found %s, "
+                "migrating to %s",
+                legacy_path,
+                block_path,
+            )
+            block_path.parent.mkdir(parents=True, exist_ok=True)
+            block_path.write_text(legacy_text, encoding="utf-8")
+            payload = json.loads(legacy_text)
+        else:
+            return _empty_source_contract_block_payload()
     if not isinstance(payload, dict):
-        raise ValueError(f"{quarantine_path} must contain a JSON object")
+        raise ValueError(f"{block_path} must contain a JSON object")
     cities = payload.get("cities")
     if not isinstance(cities, dict):
-        raise ValueError(f"{quarantine_path} missing object field 'cities'")
+        raise ValueError(f"{block_path} missing object field 'cities'")
     transition_history = payload.setdefault("transition_history", [])
     if not isinstance(transition_history, list):
-        raise ValueError(f"{quarantine_path} field 'transition_history' must be a list")
+        raise ValueError(f"{block_path} field 'transition_history' must be a list")
     return payload
 
 
-def _write_source_contract_quarantines(payload: dict, path: str | Path | None = None) -> Path:
-    quarantine_path = source_contract_quarantine_path(path)
-    quarantine_path.parent.mkdir(parents=True, exist_ok=True)
-    tmp_path = quarantine_path.with_name(f".{quarantine_path.name}.tmp")
+def _write_source_contract_blocks(payload: dict, path: str | Path | None = None) -> Path:
+    block_path = source_contract_block_path(path)
+    block_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = block_path.with_name(f".{block_path.name}.tmp")
     tmp_path.write_text(
         json.dumps(payload, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
     )
-    tmp_path.replace(quarantine_path)
-    return quarantine_path
+    tmp_path.replace(block_path)
+    return block_path
 
 
-def active_source_contract_quarantines(path: str | Path | None = None) -> dict[str, dict]:
-    payload = load_source_contract_quarantines(path)
+def active_source_contract_blocks(path: str | Path | None = None) -> dict[str, dict]:
+    payload = load_source_contract_blocks(path)
     active: dict[str, dict] = {}
     for city_name, entry in payload.get("cities", {}).items():
         if isinstance(entry, dict) and entry.get("status") == "active":
@@ -679,15 +703,15 @@ def pending_source_contract_conversion(
     return pending
 
 
-def is_city_source_quarantined(city_name: str, path: str | Path | None = None) -> bool:
+def is_city_source_blocked(city_name: str, path: str | Path | None = None) -> bool:
     try:
         canonical = _canonical_city_name(city_name)
-        if canonical in active_source_contract_quarantines(path):
+        if canonical in active_source_contract_blocks(path):
             return True
         return pending_source_contract_conversion(canonical, path=path) is not None
     except Exception as exc:
         logger.error(
-            "Source-contract quarantine state unreadable; blocking new entries fail-closed: %s",
+            "Source-contract block state unreadable; blocking new entries fail-closed: %s",
             exc,
         )
         return True
@@ -732,9 +756,9 @@ def _sorted_unique(values) -> list[str]:
 
 
 def source_contract_transition_branch(entry: dict | None) -> str:
-    """Classify the source-change branch represented by a quarantine entry."""
+    """Classify the source-change branch represented by a source-contract block entry."""
     if not isinstance(entry, dict):
-        return "no_active_quarantine"
+        return "no_active_block"
     events = ((entry.get("evidence") or {}).get("events") or [])
     statuses = set()
     observed_families = set()
@@ -808,7 +832,7 @@ def _source_contract_transition_record(
     to_stations = _sorted_unique(contract.get("station_id") for contract in contracts)
 
     return {
-        "schema_version": SOURCE_CONTRACT_QUARANTINE_SCHEMA_VERSION,
+        "schema_version": SOURCE_CONTRACT_BLOCK_SCHEMA_VERSION,
         "city": city,
         "status": "released",
         "reason": entry.get("reason"),
@@ -841,7 +865,7 @@ def source_contract_transition_history(
     path: str | Path | None = None,
 ) -> list[dict]:
     """Return recorded source-contract conversion history, optionally by city."""
-    payload = load_source_contract_quarantines(path)
+    payload = load_source_contract_blocks(path)
     history = [
         dict(record)
         for record in payload.get("transition_history", [])
@@ -857,7 +881,7 @@ def source_contract_transition_history(
     ]
 
 
-def upsert_source_contract_quarantine(
+def upsert_source_contract_block(
     city_name: str,
     *,
     reason: str,
@@ -868,7 +892,7 @@ def upsert_source_contract_quarantine(
 ) -> dict:
     canonical = _canonical_city_name(city_name)
     now = observed_at or datetime.now(timezone.utc).isoformat()
-    payload = load_source_contract_quarantines(path)
+    payload = load_source_contract_blocks(path)
     cities = payload.setdefault("cities", {})
     existing = cities.get(canonical, {}) if isinstance(cities.get(canonical), dict) else {}
     first_seen_at = (
@@ -886,18 +910,18 @@ def upsert_source_contract_quarantine(
         "evidence": dict(evidence or {}),
     }
     cities[canonical] = entry
-    payload["schema_version"] = SOURCE_CONTRACT_QUARANTINE_SCHEMA_VERSION
+    payload["schema_version"] = SOURCE_CONTRACT_BLOCK_SCHEMA_VERSION
     payload["updated_at"] = now
-    quarantine_path = _write_source_contract_quarantines(payload, path)
+    block_path = _write_source_contract_blocks(payload, path)
     return {
         "status": "written",
         "city": canonical,
-        "path": str(quarantine_path),
+        "path": str(block_path),
         "entry": entry,
     }
 
 
-def release_source_contract_quarantine(
+def release_source_contract_block(
     city_name: str,
     *,
     released_by: str,
@@ -916,7 +940,7 @@ def release_source_contract_quarantine(
         }
 
     now = released_at or datetime.now(timezone.utc).isoformat()
-    payload = load_source_contract_quarantines(path)
+    payload = load_source_contract_blocks(path)
     cities = payload.setdefault("cities", {})
     entry = cities.get(canonical)
     if not isinstance(entry, dict) or entry.get("status") != "active":
@@ -941,13 +965,13 @@ def release_source_contract_quarantine(
     )
     cities[canonical] = released_entry
     payload.setdefault("transition_history", []).append(transition_record)
-    payload["schema_version"] = SOURCE_CONTRACT_QUARANTINE_SCHEMA_VERSION
+    payload["schema_version"] = SOURCE_CONTRACT_BLOCK_SCHEMA_VERSION
     payload["updated_at"] = now
-    quarantine_path = _write_source_contract_quarantines(payload, path)
+    block_path = _write_source_contract_blocks(payload, path)
     return {
         "status": "released",
         "city": canonical,
-        "path": str(quarantine_path),
+        "path": str(block_path),
         "entry": released_entry,
         "transition_record": transition_record,
     }
@@ -1251,9 +1275,9 @@ def _parse_and_persist_weather_events(
                 continue
             city = parsed.get("city")
             city_name = city.name if city else ""
-            if city_name and is_city_source_quarantined(city_name):
+            if city_name and is_city_source_blocked(city_name):
                 logger.warning(
-                    "Skipping Gamma market while city source-contract quarantine is active: "
+                    "Skipping Gamma market while city source-contract block is active: "
                     "city=%s event=%s",
                     city_name,
                     parsed.get("event_id"),

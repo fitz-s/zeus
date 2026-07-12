@@ -29,7 +29,7 @@ from maintenance_worker.core.guards import (
     check_kill_switch,
     check_no_pause_flag,
     check_oncall_quiet,
-    check_self_quarantined,
+    check_self_halted,
     check_dirty_repo,
     evaluate_all,
 )
@@ -55,22 +55,22 @@ def test_check_kill_switch_fails_when_present(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# check_self_quarantined
+# check_self_halted
 # ---------------------------------------------------------------------------
 
 
-def test_check_self_quarantined_passes_when_absent(tmp_path: Path) -> None:
-    result = check_self_quarantined(tmp_path)
+def test_check_self_halted_passes_when_absent(tmp_path: Path) -> None:
+    result = check_self_halted(tmp_path)
     assert result.ok is True
 
 
-def test_check_self_quarantined_fails_when_present(tmp_path: Path) -> None:
-    (tmp_path / "SELF_QUARANTINE").write_text("quarantine reason")
-    result = check_self_quarantined(tmp_path)
+def test_check_self_halted_fails_when_present(tmp_path: Path) -> None:
+    (tmp_path / "SELF_HALT").write_text("halt reason")
+    result = check_self_halted(tmp_path)
     assert result.ok is False
-    assert result.reason == RefusalReason.SELF_QUARANTINED.value
+    assert result.reason == RefusalReason.SELF_HALTED.value
     assert result.details["severity"] == SEVERITY_REFUSE_FATAL
-    assert "quarantine reason" in result.details["quarantine_content"]
+    assert "halt reason" in result.details["halt_content"]
 
 
 # ---------------------------------------------------------------------------
@@ -247,7 +247,7 @@ def test_guard_severity_split_6_refuse_fatal_2_skip_tick(tmp_path: Path) -> None
 
     # Trigger file-based guard failures
     (state_dir / "KILL_SWITCH").touch()
-    (state_dir / "SELF_QUARANTINE").write_text("test")
+    (state_dir / "SELF_HALT").write_text("test")
     (state_dir / "INFLIGHT_MAINTENANCE_PR").write_text("https://github.com/r/p/42")
     (state_dir / "MAINTENANCE_PAUSED").touch()
     (state_dir / "ONCALL_QUIET").touch()
@@ -272,7 +272,7 @@ def test_guard_severity_split_6_refuse_fatal_2_skip_tick(tmp_path: Path) -> None
 
     results = [
         check_kill_switch(state_dir),          # hard
-        check_self_quarantined(state_dir),      # hard
+        check_self_halted(state_dir),      # hard
         check_inflight_pr(state_dir),           # hard
         check_active_rebase(tmp_path),          # hard
         dirty_repo_result,                      # hard
@@ -290,7 +290,7 @@ def test_guard_severity_split_6_refuse_fatal_2_skip_tick(tmp_path: Path) -> None
     skip_tick_count = sum(
         1 for r in results if r.details.get("severity") == SEVERITY_SKIP_TICK
     )
-    # 6 hard: kill_switch, self_quarantined, inflight_pr, active_rebase, dirty_repo, disk_free
+    # 6 hard: kill_switch, self_haltd, inflight_pr, active_rebase, dirty_repo, disk_free
     # 2 soft: pause_flag, oncall_quiet
     assert refuse_fatal_count == 6
     assert skip_tick_count == 2

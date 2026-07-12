@@ -917,7 +917,7 @@ state_machines:
       - BLOCK_LIVE
       - REPLACE_SAME_IDEMPOTENCY_KEY   # LateArrivalPolicy values
       - APPEND_REVISION
-      - QUARANTINE
+      - HOLD
       - IGNORE_IF_LIVE_CLOSED
       - BACKFILL_ONLY
       - DERIVED_FROM_DISSEMINATION   # source_time_frontier authority_tier values (PR #329 D)

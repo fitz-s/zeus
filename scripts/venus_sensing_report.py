@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # Lifecycle: created=2026-04-07; last_reviewed=2026-05-15; last_reused=2026-05-15
-# Purpose: Venus daemon-independent sensing report, including source-contract drift watch, quarantine, and diagnostic authority labels.
+# Purpose: Venus daemon-independent sensing report, including source-contract drift watch, source-block, and diagnostic authority labels.
 # Reuse: Run from Venus/cron for runtime truth sensing; inspect architecture/script_manifest.yaml before changing write targets.
 # Authority basis: docs/archive/2026-Q2/task_2026-05-14_k1_followups/PLAN.md §4.5 (K1 broken-script remediation)
 """Venus sensing report generator.
@@ -271,7 +271,7 @@ def _source_watch_unavailable(authority: str, *, city: str | None = None) -> dic
         "next_actions": [
             "Do not rely on source monitor output until Gamma fetch recovers."
         ],
-        "quarantine_actions": [],
+        "block_actions": [],
     }
 
 
@@ -295,17 +295,17 @@ def _collect_source_contract_watch() -> dict:
             authority=authority,
         )
         if _env_truthy(os.environ.get(SOURCE_WATCH_REPORT_ONLY_ENV)):
-            report["quarantine_actions"] = []
+            report["block_actions"] = []
         else:
             try:
-                report["quarantine_actions"] = (
-                    watch_source_contract.apply_source_quarantines(report)
+                report["block_actions"] = (
+                    watch_source_contract.apply_source_blocks(report)
                 )
             except Exception as exc:
-                report["quarantine_actions"] = [
-                    {"action": "quarantine_city_source", "status": "error"}
+                report["block_actions"] = [
+                    {"action": "block_city_source", "status": "error"}
                 ]
-                report["quarantine_error"] = str(exc)
+                report["block_error"] = str(exc)
         return report
     except Exception as exc:
         report = _source_watch_unavailable("ERROR", city=city)

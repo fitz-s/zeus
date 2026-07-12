@@ -158,7 +158,7 @@ def compute_realized_edge_per_strategy(
         strategy = row.get("strategy")
         if strategy not in per_strategy:
             # Unknown strategy_key (e.g., legacy data with strategy="" or some other
-            # tag). Quarantine: do not include outside the governed buckets. Per
+            # tag). Reject: do not include outside the governed buckets. Per
             # AGENTS.md §"strategy families" — strategy_key is sole governance ID;
             # only the registered boot-allowed families exist on current law.
             continue

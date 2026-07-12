@@ -26,7 +26,7 @@ SEV-2 #4 structural fix (carry-forward from P5.1):
 
 Path A invariant (SCAFFOLD §3 lines 190-195):
   validate_action() returning FORBIDDEN_* → caller calls refuse_fatal().
-  validate_action() NEVER calls write_self_quarantine() (Path B only).
+  validate_action() NEVER calls write_self_halt() (Path B only).
   Tested explicitly in test_validator.py.
 
 Dry-run floor:
@@ -462,7 +462,7 @@ class ActionValidator:
           MISSING_PRECHECK       — caller must use specialized guard (*_EXEC ops)
           ALLOWED_BUT_DRY_RUN_ONLY — emit proposal, do NOT mutate
 
-        Path A invariant: this method NEVER calls write_self_quarantine().
+        Path A invariant: this method NEVER calls write_self_halt().
         FORBIDDEN_* → caller calls refuse_fatal(). Next tick starts clean.
 
         SEV-2 #4 structural fix:

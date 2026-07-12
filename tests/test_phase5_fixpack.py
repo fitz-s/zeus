@@ -14,7 +14,7 @@ R-AP (TestClassifyBoundaryLowBehavioral): classify_boundary_low polarity contrac
 R-AQ (TestRuntimeTruthReadAuthority): read_runtime_truth_json must reject retired
     selector metadata and accept live runtime-state metadata.
 
-R-AR (TestQuarantinedValueNativeUnitIsNone): quarantined snapshot members must emit
+R-AR (TestRejectedValueNativeUnitIsNone): rejected snapshot members must emit
     value_native_unit=None, not inner_min. Anchored to exec-dan finding.
 
 R-AS (TestDSTStepHorizonTargetDateOffset): _compute_required_max_step must use
@@ -26,7 +26,7 @@ R-AT (TestObservationClientLazyImport): observation_client.py must not raise Sys
     Anchored to testeng-grace finding: module-level guard is test-topology land mine.
 
 R-AU (TestRebuildDataVersionAssertion): rebuild must reject unknown data_version strings,
-    not just quarantined-list strings. Positive allowlist, not negative quarantine.
+    not just rejected-list strings. Positive allowlist, not negative rejection.
     Anchored to exec-emma finding: data_version sourced from snapshot row, not spec.
 """
 from __future__ import annotations
@@ -83,7 +83,7 @@ class TestClassifyBoundaryLowBehavioral:
         """R-AP-1 (rejection): boundary_min <= inner_min → boundary_ambiguous=True, effective_min is None.
 
         Synthetic: inner bucket gives 5.0 K, boundary bucket gives 4.5 K.
-        boundary_min (4.5) <= inner_min (5.0) → boundary WINS → quarantine.
+        boundary_min (4.5) <= inner_min (5.0) → boundary WINS → rejection.
 
         Geometry: London summer, UTC+1. Local day 2026-07-15 starts at 2026-07-14 23:00Z.
         issue_utc = 2026-07-14 18:00Z. Step "0-6" = window 18:00Z-00:00Z (next day UTC),
@@ -227,22 +227,22 @@ class TestRuntimeTruthReadAuthority:
 
 
 # ---------------------------------------------------------------------------
-# R-AR: quarantined value_native_unit = None (exec-dan finding)
+# R-AR: rejected value_native_unit = None (exec-dan finding)
 # ---------------------------------------------------------------------------
 
 
-class TestQuarantinedValueNativeUnitIsNone:
+class TestRejectedValueNativeUnitIsNone:
     """R-AR: when boundary_ambiguous=True, output members must carry value_native_unit=None.
 
     Anchors: exec-dan §1 'BoundaryClassification.effective_min behavior when any_boundary_ambiguous=True'.
     Current code at extract_tigge_mn2t6_localday_min.py:288 emits clf.inner_min (non-null)
-    for quarantined snapshots. Fix: emit None.
+    for rejected snapshots. Fix: emit None.
     This is a silent trap: downstream consumers can read value_native_unit without checking
     training_allowed and get a contaminated value.
     """
 
     def _make_member_step_values_boundary_ambiguous(self) -> dict[int, dict[str, float]]:
-        """51 members where member 0 has boundary_min <= inner_min → whole snapshot quarantined.
+        """51 members where member 0 has boundary_min <= inner_min → whole snapshot rejected.
 
         Geometry: issue_utc=2026-01-14 19:00Z, target_date=2026-01-15, London (UTC+0 winter).
         day_start=2026-01-15 00:00Z, day_end=2026-01-16 00:00Z.
@@ -283,16 +283,16 @@ class TestQuarantinedValueNativeUnitIsNone:
         )
 
         assert payload["boundary_policy"]["boundary_ambiguous"] is True, (
-            "Test precondition: snapshot must be quarantined (boundary_ambiguous=True)"
+            "Test precondition: snapshot must be rejected (boundary_ambiguous=True)"
         )
         assert payload["training_allowed"] is False, (
-            "Test precondition: training_allowed must be False for quarantined snapshot"
+            "Test precondition: training_allowed must be False for rejected snapshot"
         )
 
-        # THE CONTRACT: every member must have value_native_unit=None for quarantined snapshots
+        # THE CONTRACT: every member must have value_native_unit=None for rejected snapshots
         for entry in payload["members"]:
             assert entry["value_native_unit"] is None, (
-                f"Member {entry['member']}: value_native_unit must be None for quarantined "
+                f"Member {entry['member']}: value_native_unit must be None for rejected "
                 f"snapshot (boundary_ambiguous=True), got {entry['value_native_unit']!r}. "
                 "Fix: emit None, not clf.inner_min, when any_boundary_ambiguous=True."
             )
@@ -304,7 +304,7 @@ class TestQuarantinedValueNativeUnitIsNone:
         """
         from scripts.extract_tigge_mn2t6_localday_min import build_low_snapshot_json
 
-        # All members have boundary_min > inner_min → no quarantine
+        # All members have boundary_min > inner_min → no rejection
         member_step_values: dict[int, dict[str, float]] = {}
         for m in range(51):
             member_step_values[m] = {"12-18": 270.0, "0-6": 275.0}  # inner < boundary
@@ -533,7 +533,7 @@ class TestRebuildDataVersionAssertion:
 
     Anchors: exec-emma §1 'rebuild_calibration_pairs.py — data_version sourced from
     snapshot row, not from MetricIdentity'. Current code at line 216 calls
-    assert_data_version_allowed (quarantine-BLOCK only). The per-spec cross-check
+    assert_data_version_allowed (rejection-BLOCK only). The per-spec cross-check
     row["data_version"] == spec.allowed_data_version is ABSENT inside _process_snapshot_v2.
 
     Without this check, a HIGH_LOCALDAY_MAX snapshot (data_version='tigge_mx2t6_local_calendar_day_max')
@@ -541,7 +541,7 @@ class TestRebuildDataVersionAssertion:
     this in the normal path, but _process_snapshot_v2 has no write-time assertion.
 
     Fix: add `spec: CalibrationMetricSpec` param to _process_snapshot_v2; add assertion
-        `if snapshot["data_version"] != spec.allowed_data_version: raise DataVersionQuarantinedError(...)`
+        `if snapshot["data_version"] != spec.allowed_data_version: raise DataVersionRejectedError(...)`
     before any DB writes. This is a write-time contract, not a query-time hint.
     """
 
@@ -619,7 +619,7 @@ class TestRebuildDataVersionAssertion:
         """
         from src.contracts.ensemble_snapshot_provenance import (
             assert_data_version_allowed,
-            DataVersionQuarantinedError,
+            DataVersionRejectedError,
         )
         from src.types.metric_identity import HIGH_LOCALDAY_MAX, LOW_LOCALDAY_MIN
 
@@ -627,11 +627,11 @@ class TestRebuildDataVersionAssertion:
         try:
             assert_data_version_allowed(HIGH_LOCALDAY_MAX.data_version, context="R-AU-1-high")
             assert_data_version_allowed(LOW_LOCALDAY_MIN.data_version, context="R-AU-1-low")
-        except DataVersionQuarantinedError as e:
+        except DataVersionRejectedError as e:
             pytest.fail(f"Canonical data_version incorrectly blocked by global guard: {e}")
 
         # Unknown version must be blocked
-        with pytest.raises((DataVersionQuarantinedError, AssertionError, ValueError)):
+        with pytest.raises((DataVersionRejectedError, AssertionError, ValueError)):
             assert_data_version_allowed(
                 "tigge_experimental_v99",
                 context="rebuild_calibration_pairs",
@@ -666,7 +666,7 @@ class TestRebuildDataVersionAssertion:
 
         Regression guard: the fix must not refuse canonical same-spec pairings.
         Processing may still stop early (no observation in :memory: DB) — that is acceptable;
-        a DataVersionQuarantinedError / AssertionError from the spec cross-check is a failure.
+        a DataVersionRejectedError / AssertionError from the spec cross-check is a failure.
         """
         import sqlite3
         from scripts.rebuild_calibration_pairs import (
@@ -675,7 +675,7 @@ class TestRebuildDataVersionAssertion:
             RebuildStatsV2,
         )
         from src.types.metric_identity import HIGH_LOCALDAY_MAX
-        from src.contracts.ensemble_snapshot_provenance import DataVersionQuarantinedError
+        from src.contracts.ensemble_snapshot_provenance import DataVersionRejectedError
 
         conn = sqlite3.connect(":memory:")
         high_row = self._make_snapshot_row(conn, HIGH_LOCALDAY_MAX.data_version)
@@ -695,7 +695,7 @@ class TestRebuildDataVersionAssertion:
                 rng=np.random.default_rng(42),
                 stats=stats,
             )
-        except (DataVersionQuarantinedError, AssertionError) as e:
+        except (DataVersionRejectedError, AssertionError) as e:
             pytest.fail(
                 f"Matching-spec row was incorrectly rejected by per-spec cross-check: {e}. "
                 "Fix must only reject cross-spec mismatches."

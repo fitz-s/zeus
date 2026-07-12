@@ -126,7 +126,7 @@ def _fetch_hourly_chunk(
 
     tz = ZoneInfo(city.timezone)
     out: list[dict] = []
-    quarantine_count = 0
+    parse_failure_count = 0
     for raw_time, temp in zip(times, temps):
         if temp is None:
             continue
@@ -158,11 +158,11 @@ def _fetch_hourly_chunk(
             })
         except (ValueError, AttributeError) as e:
             logger.debug("parse failed %s %s: %s", city.name, raw_time, e)
-            quarantine_count += 1
+            parse_failure_count += 1
             continue
 
-    if len(temps) > 0 and quarantine_count > len(temps) * 0.1:
-        raise ValueError(f"Quarantine threshold exceeded for {city.name}: {quarantine_count} failures")
+    if len(temps) > 0 and parse_failure_count > len(temps) * 0.1:
+        raise ValueError(f"Parse-failure threshold exceeded for {city.name}: {parse_failure_count} failures")
     return out
 
 

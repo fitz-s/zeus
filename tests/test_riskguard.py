@@ -2417,8 +2417,8 @@ class TestRiskGuardOrangeLocalization:
         assert details["brier_level"] == "GREEN"
         assert details["brier_all_strategies_level"] == "ORANGE"
         assert details["brier_active_portfolio_level"] == "GREEN"
-        assert details["localized_orange_quarantine"] is True
-        assert details["brier_strategy_localization"]["status"] == "localized_orange_quarantine"
+        assert details["localized_orange_scope"] is True
+        assert details["brier_strategy_localization"]["status"] == "localized_orange_scope"
         assert details["brier_strategy_localization"]["gated_strategies"] == ["opening_inertia"]
         assert details["brier_strategy_localization"]["gate_confirmation"] == {"opening_inertia": True}
         assert dict(gate_row) == {"strategy_key": "opening_inertia", "status": "active"}
@@ -2453,7 +2453,7 @@ class TestRiskGuardOrangeLocalization:
         assert details["portfolio_brier_level"] == "ORANGE"
         assert details["brier_level"] == "ORANGE"
         assert details["brier_active_portfolio_level"] == "ORANGE"
-        assert details["localized_orange_quarantine"] is False
+        assert details["localized_orange_scope"] is False
         assert details["brier_strategy_localization"]["status"] == "not_localized"
         assert details["brier_strategy_breakdown"]["unclassified_count"] == 3
 
@@ -2491,7 +2491,7 @@ class TestRiskGuardOrangeLocalization:
         assert level == RiskLevel.ORANGE
         assert risk_row["level"] == RiskLevel.ORANGE.value
         assert details["brier_level"] == "ORANGE"
-        assert details["localized_orange_quarantine"] is False
+        assert details["localized_orange_scope"] is False
         assert (
             details["brier_strategy_localization"]["status"]
             == "durable_strategy_gate_unconfirmed_global_orange"
@@ -2539,7 +2539,7 @@ class TestRiskGuardOrangeLocalization:
         assert level == RiskLevel.ORANGE
         assert risk_row["level"] == RiskLevel.ORANGE.value
         assert details["brier_level"] == "ORANGE"
-        assert details["localized_orange_quarantine"] is False
+        assert details["localized_orange_scope"] is False
         assert details["brier_strategy_localization"]["status"] == "orange_residual_portfolio_not_green"
         assert details["brier_strategy_localization"]["residual_brier_level"] == "ORANGE"
         assert details["brier_strategy_localization"]["gate_confirmation"] == {"opening_inertia": True}
@@ -2605,7 +2605,7 @@ class TestRiskGuardOrangeLocalization:
         assert details["brier_level"] == "RED"
         assert details["brier_all_strategies_level"] == "RED"
         assert details["brier_active_portfolio_level"] == "RED"
-        assert details["localized_orange_quarantine"] is False
+        assert details["localized_orange_scope"] is False
         assert details["brier_strategy_localization"]["status"] == "not_localized"
 
     def test_orange_stays_global_when_read_after_write_confirmation_finds_no_gate_row(
@@ -2651,7 +2651,7 @@ class TestRiskGuardOrangeLocalization:
         assert level == RiskLevel.ORANGE
         assert risk_row["level"] == RiskLevel.ORANGE.value
         assert details["brier_level"] == "ORANGE"
-        assert details["localized_orange_quarantine"] is False
+        assert details["localized_orange_scope"] is False
         assert (
             details["brier_strategy_localization"]["status"]
             == "durable_strategy_gate_unconfirmed_global_orange"

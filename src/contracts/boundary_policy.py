@@ -21,7 +21,7 @@ field; land together when monitor_refresh LOW wiring activates.
 
 Pre-P9B state: `boundary_ambiguous` field exists in
 snapshot_ingest_contract.py + ensemble_snapshots schema (training-time
-quarantine gate); ZERO runtime consumer in evaluator.py. P9B closes the
+rejection gate); ZERO runtime consumer in evaluator.py. P9B closes the
 contract gap; P9C closes the enforcement gap.
 """
 

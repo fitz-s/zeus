@@ -22,7 +22,7 @@ Six relationship tests (per dispatch §"BATCH 1" + boot §2):
   3. test_empty_result_safety — no rows → every governed strategy returns n_trades=0
   4. test_degraded_rows_excluded — degraded row should not contribute
   5. test_window_filter — settled_at outside window → excluded
-  6. test_strategy_filter_only_reportable_known — unknown strategy_key → quarantined
+  6. test_strategy_filter_only_reportable_known — unknown strategy_key → rejected
 """
 from __future__ import annotations
 
@@ -235,7 +235,7 @@ def test_strategy_filter_only_reportable_known():
     """RELATIONSHIP: only governed/reportable strategy_keys appear in output.
 
     Schema is intentionally wide enough to retain historical/imported rows.
-    The computation layer owns quarantine: unknown strategy_key rows are skipped
+    The computation layer owns rejection: unknown strategy_key rows are skipped
     and every governed output bucket is still present.
     """
     conn = _make_conn()

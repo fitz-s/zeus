@@ -73,8 +73,8 @@ def _holes_by_city_count(conn, data_table: str) -> dict[str, int]:
         return {}
 
 
-def _last_quarantine_reason(conn) -> str | None:
-    """Return the most recent quarantine reason from availability_fact."""
+def _last_ingest_block_reason(conn) -> str | None:
+    """Return the most recent ingest-block reason from availability_fact."""
     try:
         cur = conn.execute(
             """
@@ -188,14 +188,14 @@ def write_ingest_status(
         "holes_by_city_count": _holes_by_city_count(world_conn, "observations"),
     }
 
-    last_quarantine = _last_quarantine_reason(world_conn)
+    last_block_reason = _last_ingest_block_reason(world_conn)
     source_health = _read_source_health(state_dir)
 
     payload = {
         "written_at": _now_iso(),
         "observation_instants_max_imported_at": obs_max_imported_at,
         "tables": table_stats,
-        "last_quarantine_reason": last_quarantine,
+        "last_block_reason": last_block_reason,
         "source_health_written_at": source_health.get("written_at") if source_health else None,
         "source_health_summary": {
             src: {

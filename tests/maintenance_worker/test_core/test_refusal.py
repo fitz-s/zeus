@@ -6,7 +6,7 @@ Tests for maintenance_worker.core.refusal.
 
 Covers:
 - refuse_fatal: exits non-zero, unique codes per RefusalReason, writes errors.tsv
-- refuse_fatal: does NOT write SELF_QUARANTINE (C2 / Path A invariant)
+- refuse_fatal: does NOT write SELF_HALT (C2 / Path A invariant)
 - skip_tick: returns normally (no sys.exit), writes errors.tsv
 - exit code uniqueness across all RefusalReasons
 """
@@ -65,7 +65,7 @@ def _make_ctx(tmp_path: Path) -> TickContext:
         RefusalReason.ACTIVE_REBASE,
         RefusalReason.LOW_DISK,
         RefusalReason.INFLIGHT_PR,
-        RefusalReason.SELF_QUARANTINED,
+        RefusalReason.SELF_HALTED,
         RefusalReason.FORBIDDEN_PATH_VIOLATION,
         RefusalReason.FORBIDDEN_OPERATION_VIOLATION,
     ],
@@ -94,19 +94,19 @@ def test_refuse_fatal_writes_errors_tsv(tmp_path: Path) -> None:
     assert "test kill switch" in content
 
 
-def test_refuse_fatal_does_not_write_self_quarantine(tmp_path: Path) -> None:
+def test_refuse_fatal_does_not_write_self_halt(tmp_path: Path) -> None:
     """
-    Critical C2 invariant (Path A): refuse_fatal must NOT write SELF_QUARANTINE.
-    SELF_QUARANTINE is written ONLY by post_mutation_detector (Path B).
+    Critical C2 invariant (Path A): refuse_fatal must NOT write SELF_HALT.
+    SELF_HALT is written ONLY by post_mutation_detector (Path B).
     """
     ctx = _make_ctx(tmp_path)
     state_dir = ctx.config.state_dir
     state_dir.mkdir(parents=True, exist_ok=True)
     with pytest.raises(SystemExit):
         refuse_fatal(RefusalReason.FORBIDDEN_PATH_VIOLATION, ctx)
-    quarantine_file = state_dir / "SELF_QUARANTINE"
-    assert not quarantine_file.exists(), (
-        "refuse_fatal must NOT write SELF_QUARANTINE (Path A invariant violated)"
+    halt_file = state_dir / "SELF_HALT"
+    assert not halt_file.exists(), (
+        "refuse_fatal must NOT write SELF_HALT (Path A invariant violated)"
     )
 
 
@@ -118,7 +118,7 @@ def test_refuse_fatal_distinct_codes_for_each_hard_reason(tmp_path: Path) -> Non
         RefusalReason.ACTIVE_REBASE,
         RefusalReason.LOW_DISK,
         RefusalReason.INFLIGHT_PR,
-        RefusalReason.SELF_QUARANTINED,
+        RefusalReason.SELF_HALTED,
     ]
     codes = {_exit_code_for(r) for r in hard_reasons}
     assert len(codes) == len(hard_reasons)

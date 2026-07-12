@@ -278,7 +278,7 @@ def cmd_status(config: EngineConfig) -> int:
     # Sentinel files
     sentinels = [
         "KILL_SWITCH", "MAINTENANCE_PAUSED", "ONCALL_QUIET",
-        "SELF_QUARANTINE", "DRY_RUN_OVERRIDE",
+        "SELF_HALT", "DRY_RUN_OVERRIDE",
     ]
     for name in sentinels:
         path = config.state_dir / name

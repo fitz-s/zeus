@@ -1,7 +1,7 @@
 # Lifecycle: created=2026-07-08; last_reviewed=2026-07-08; last_reused=2026-07-08
 # Purpose: TDD coverage for scripts/ops/loop_guard.py — the testable core of
 #   loop/tick.sh and loop/daily.sh (24/7 improvement loop v2). Covers HALT
-#   semantics, the pre/post-tick allowlist diff enforcement (quarantine
+#   semantics, the pre/post-tick allowlist diff enforcement (restore
 #   restore of out-of-scope changes, operator-dirty files never touched),
 #   the diff circuit breaker, the flock-run single-flight lock, and the
 #   guard-escape hardening history:
@@ -170,9 +170,9 @@ def test_enforce_allows_in_allowlist_change(tmp_path):
 
 
 # --------------------------------------------------------------------------
-# quarantine trigger: out-of-allowlist file is hard-restored + VIOLATION logged
+# restore trigger: out-of-allowlist file is hard-restored + VIOLATION logged
 # --------------------------------------------------------------------------
-def test_enforce_quarantines_out_of_allowlist_new_file(tmp_path):
+def test_enforce_restores_out_of_allowlist_new_file(tmp_path):
     repo = tmp_path / "repo"
     _init_repo(repo)
     allowlist_ref = _allowlist_ref(repo)
@@ -189,7 +189,7 @@ def test_enforce_quarantines_out_of_allowlist_new_file(tmp_path):
     assert "src/sneaky.py" in journal.read_text()
 
 
-def test_enforce_quarantines_out_of_allowlist_modification_and_restores_content(tmp_path):
+def test_enforce_restores_out_of_allowlist_modification_and_restores_content(tmp_path):
     repo = tmp_path / "repo"
     _init_repo(repo)
     allowlist_ref = _allowlist_ref(repo)
@@ -318,7 +318,7 @@ def test_enforce_allowlist_tamper_defeated_by_git_ref(tmp_path):
 
     rc = _enforce(repo, snapshot, allowlist_ref, journal)
     assert rc == 1
-    # The src/ exploit attempt must be quarantined regardless of the live
+    # The src/ exploit attempt must be restored regardless of the live
     # (tampered) allowlist content.
     assert not (repo / "src" / "sneaky.py").exists()
     text = journal.read_text()

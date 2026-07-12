@@ -2,7 +2,7 @@
 # Last reused/audited: 2026-06-06
 # Lifecycle: created=2026-06-06; last_reviewed=2026-06-06; last_reused=2026-06-06
 # Purpose: Prove replacement forecast EMOS refit uses product-keyed identity, not live B0 EMOS cells.
-# Reuse: Run before changing replacement forecast refit, EMOS keying, or calibration quarantine.
+# Reuse: Run before changing replacement forecast refit, EMOS keying, or calibration block.
 # Authority basis: Operator-directed replacement forecast worktree integration; EMOS refit must be product-isolated.
 """Replacement forecast EMOS identity tests."""
 

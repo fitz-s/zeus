@@ -93,7 +93,7 @@ _AUTH_METHOD_SUFFIXES: tuple[str, ...] = (
 # and 'cwa_station' name the SAME observation authority as the forecast's 'noaa' and 'cwa' tags
 # (operator-confirmed same-truth 2026-05-29) — so both write-sites reduce to one family and the
 # pairing gate reconciles them instead of silently dropping the city (P2 SEV-2). A token outside
-# the known families RAISES (loud quarantine), never passes through to a silent mismatch.
+# the known families RAISES (loud rejection), never passes through to a silent mismatch.
 _AUTHORITY_SYNONYMS: dict[str, str] = {
     "ogimet": "noaa",      # ogimet collects the NWS/NOAA-published international airport METAR
     "cwa_station": "cwa",  # forecast-side tag for the Taiwan CWA station family
@@ -104,7 +104,7 @@ _KNOWN_SETTLEMENT_AUTHORITIES: frozenset[str] = frozenset({"wu_icao", "noaa", "h
 class UnknownSettlementAuthorityError(ValueError):
     """Raised when a settlement authority token reduces to a family outside the known registry.
 
-    Refusing to pair on an unreconciled authority is a LOUD quarantine — it must not silently
+    Refusing to pair on an unreconciled authority is a LOUD rejection — it must not silently
     drop (which would starve a whole city's residual ledger, P2 SEV-2). Resolve by adding the
     family to ``_AUTHORITY_SYNONYMS`` / ``_KNOWN_SETTLEMENT_AUTHORITIES`` or fixing the tag.
     """
@@ -121,7 +121,7 @@ def normalize_settlement_authority(raw: str) -> str:
       'noaa' -> 'noaa' ; 'cwa_station' -> 'cwa' ; 'wu_icao' -> 'wu_icao'.
 
     Raises ``UnknownSettlementAuthorityError`` on any token outside the known families so an
-    unreconciled authority is quarantined loudly rather than dropped silently.
+    unreconciled authority is rejected loudly rather than dropped silently.
     """
     s = _AUTH_VERSION_RE.sub("", str(raw).strip())
     for suffix in _AUTH_METHOD_SUFFIXES:
@@ -133,7 +133,7 @@ def normalize_settlement_authority(raw: str) -> str:
         raise UnknownSettlementAuthorityError(
             f"settlement authority {raw!r} reduced to {s!r}, not a known authority family "
             f"{sorted(_KNOWN_SETTLEMENT_AUTHORITIES)}. Refusing to pair on an unreconciled "
-            f"authority (loud quarantine, not a silent drop): add the family to the registry "
+            f"authority (loud rejection, not a silent drop): add the family to the registry "
             f"or fix the source tag."
         )
     return s

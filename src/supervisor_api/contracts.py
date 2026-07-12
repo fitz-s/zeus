@@ -41,7 +41,7 @@ def is_unverified_env(env: str) -> bool:
 
     Callers that make env-scoped decisions (mode-routing, dashboard
     segmentation, live-mode P&L attribution) should refuse or
-    quarantine rows where this returns True, rather than silently
+    exclude rows where this returns True, rather than silently
     bucketing them into the current runtime mode.
     """
     return env in _UNVERIFIED_ENVS

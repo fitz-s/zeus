@@ -5,7 +5,7 @@
 Tests for maintenance_worker.rules.in_repo_scratch_quarantine.
 
 4 tests:
-  1. Stale scratch file matching pattern → SCRATCH_QUARANTINE_CANDIDATE
+  1. Stale scratch file matching pattern → SCRATCH_ARCHIVE_CANDIDATE
   2. File inside src/ → SKIP_FORBIDDEN_PATH (forbidden dir)
   3. Fresh scratch file (< ttl_days) → SKIP_TOO_FRESH
   4. apply() always returns dry_run_only=True + mock diff
@@ -70,7 +70,7 @@ def _make_entry(ttl_days: int = 7) -> TaskCatalogEntry:
             "config": {
                 "scratch_ttl_days": ttl_days,
                 "scratch_patterns": ["tmp", "tmp/*", "scratch", "debug_*", "*.tmp"],
-                "quarantine_dir": ".archive/scratch",
+                "archive_dir": ".archive/scratch",
             },
             "safety": {
                 "forbidden_paths": ["src/**", "tests/**", "architecture/**",
@@ -87,13 +87,13 @@ def _set_old_mtime(path: Path, age_days: float = 10) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Test 1: Stale scratch file → SCRATCH_QUARANTINE_CANDIDATE
+# Test 1: Stale scratch file → SCRATCH_ARCHIVE_CANDIDATE
 # ---------------------------------------------------------------------------
 
 
 def test_stale_scratch_file_is_candidate(tmp_path: Path) -> None:
     """
-    A file matching scratch_patterns older than ttl_days → SCRATCH_QUARANTINE_CANDIDATE.
+    A file matching scratch_patterns older than ttl_days → SCRATCH_ARCHIVE_CANDIDATE.
     """
     scratch_file = tmp_path / "debug_output.tmp"
     scratch_file.write_text("debug stuff", encoding="utf-8")
@@ -112,7 +112,7 @@ def test_stale_scratch_file_is_candidate(tmp_path: Path) -> None:
 
 def test_stale_tmp_dir_is_candidate(tmp_path: Path) -> None:
     """
-    A 'tmp' directory older than ttl_days → SCRATCH_QUARANTINE_CANDIDATE.
+    A 'tmp' directory older than ttl_days → SCRATCH_ARCHIVE_CANDIDATE.
     """
     tmp_dir = tmp_path / "tmp"
     tmp_dir.mkdir()
@@ -156,7 +156,7 @@ def test_src_dir_is_forbidden(tmp_path: Path) -> None:
 
     # src/ itself and its contents must NOT appear as CANDIDATE
     candidate_paths = [c.path for c in results if c.verdict == VERDICT_CANDIDATE]
-    assert src_dir not in candidate_paths, "src/ dir must not be a quarantine candidate"
+    assert src_dir not in candidate_paths, "src/ dir must not be a archive candidate"
     for cp in candidate_paths:
         assert not str(cp).startswith(str(src_dir)), (
             f"No file under src/ should be a candidate; found: {cp}"

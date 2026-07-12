@@ -98,7 +98,7 @@ def seed(out_path: Path, cities: list[str]) -> dict[str, int]:
     # Training-flag hygiene — NARROW. The rebuild's eligibility query selects all
     # training_allowed=1 rows for the metric (data_version is only filtered when
     # --data-version is passed), then _pre_compute_snapshot_v2 hard-RAISES
-    # DataVersionQuarantinedError on any row whose data_version is OUTSIDE the
+    # DataVersionRejectedError on any row whose data_version is OUTSIDE the
     # spec's allowed_data_versions set. The live DB carries a handful of
     # training_allowed=1 rows on a data_version that is off-spec for EVERY metric
     # (e.g. ecmwf_opendata_mx2t6_local_calendar_day_max_v1). We flip ONLY those

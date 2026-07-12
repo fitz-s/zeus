@@ -726,7 +726,7 @@ def test_resolve_serve_method_downscaled_only_city(tmp_path) -> None:
             "verdict": "MISMATCH", "city": "Tokyo", "max_abs_delta_c": 2.2},
         "2026-06-10T06:00:00+00:00::bucket_downscaled::Tokyo": {
             "verdict": "VERIFIED", "city": "Tokyo", "max_abs_delta_c": 0.03},
-        # Amsterdam: downscaled MISMATCH (real residual bias) ⇒ stays quarantined
+        # Amsterdam: downscaled MISMATCH (real residual bias) ⇒ stays non-admitted
         "2026-06-10T06:00:00+00:00::bucket_downscaled::Amsterdam": {
             "verdict": "MISMATCH", "city": "Amsterdam", "max_abs_delta_c": 0.25},
     }))

@@ -280,7 +280,7 @@ class MaintenanceEngine:
 
         # ── Phase 5b: POST_DETECT (post-mutation detector) ─────────────────
         # Runs after APPLY_DECISIONS to catch any forbidden-path disk divergence.
-        # Path B: divergence → write_self_quarantine + sys.exit(50).
+        # Path B: divergence → write_self_halt + sys.exit(50).
         for entry in entries:
             task_id = entry.spec.task_id
             manifest = manifests.get(task_id, ProposalManifest(task_id=task_id))
@@ -532,7 +532,7 @@ class MaintenanceEngine:
         live-default + floor-exempt (i.e. capable of real mutations), force
         dry_run_only=True on the ctx passed to the handler. This prevents the
         live mutation → empty manifest → post_mutation_detector mismatch →
-        SELF_QUARANTINE → exit(50) brick pattern. Remove this gate when P5.5
+        SELF_HALT → exit(50) brick pattern. Remove this gate when P5.5
         _emit_dry_run_proposal() ships real manifest entries (Codex PR #124 P2).
         """
         task = entry.spec
@@ -549,10 +549,10 @@ class MaintenanceEngine:
             if floor_result == "ALLOWED_BUT_DRY_RUN_ONLY":
                 return ApplyResult(task_id=task.task_id, dry_run_only=True)
 
-        # P5.5 GATE: protect against live-mutation + empty-manifest → SELF_QUARANTINE brick.
+        # P5.5 GATE: protect against live-mutation + empty-manifest → SELF_HALT brick.
         # _emit_dry_run_proposal() is a stub returning ProposalManifest with all-empty tuples.
         # post_mutation_detector compares ApplyResult.deleted/moved against manifest entries;
-        # mismatch writes SELF_QUARANTINE + exit(50), bricking all future ticks permanently.
+        # mismatch writes SELF_HALT + exit(50), bricking all future ticks permanently.
         # Condition: manifest is empty stub AND handler is live-default + floor-exempt.
         # Remove this gate when P5.5 evidence_writer populates real manifest entries.
         effective_ctx = ctx

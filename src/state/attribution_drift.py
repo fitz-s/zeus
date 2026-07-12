@@ -205,7 +205,7 @@ def detect_attribution_drift(row: dict[str, Any]) -> AttributionVerdict:
     """
     sig = _build_signature(row)
 
-    # Quarantine: unknown persisted strategy_key.
+    # Reject: unknown persisted strategy_key.
     if sig.label_strategy not in STRATEGY_KEYS:
         return AttributionVerdict(
             kind="insufficient_signal",

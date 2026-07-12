@@ -228,8 +228,8 @@ def _try_bucket_rung_three(
             f"(rung-2 refusal: {meta_refusal})"
         )
     # condition 3: HOW may the bucket serve this city — "raw" (nearest-gridpoint read verified)
-    # OR "downscaled" (terrain land-cell + lapse-rate read verified) OR None (quarantined).
-    # A city verified by NEITHER class stays quarantined and falls to rungs 1-2 (honest; the
+    # OR "downscaled" (terrain land-cell + lapse-rate read verified) OR None (non-admitted).
+    # A city verified by NEITHER class stays non-admitted and falls to rungs 1-2 (honest; the
     # 0.1C cross-check tolerance is never weakened — coastal/terrain cities the downscaling
     # cannot reproduce do not get served).
     serve_method = resolve_bucket_serve_method(city)

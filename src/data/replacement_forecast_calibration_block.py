@@ -1,4 +1,4 @@
-"""Calibration quarantine checks for replacement forecast products.
+"""Calibration block checks for replacement forecast products.
 
 This checker prevents B0
 OpenData/TIGGE/period-extrema calibration, raw_honest fallback, and sigma floors
@@ -101,7 +101,7 @@ def _contains_b0_lineage(*values: str) -> bool:
     return any(token in joined for token in _B0_LINEAGE_TOKENS)
 
 
-def evaluate_replacement_forecast_calibration_quarantine(
+def evaluate_replacement_forecast_calibration_block(
     request: ReplacementForecastCalibrationRequest,
 ) -> ReplacementForecastCalibrationDecision:
     """Return whether a calibration artifact may serve replacement evidence."""

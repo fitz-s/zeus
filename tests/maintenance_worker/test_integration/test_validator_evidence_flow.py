@@ -105,7 +105,7 @@ def test_refuse_fatal_writes_errors_tsv(tmp_path: Path) -> None:
     """
     refuse_fatal() writes a TSV row to evidence_dir/errors.tsv before exiting.
 
-    Path A invariant: only errors.tsv is written; no quarantine file is touched.
+    Path A invariant: only errors.tsv is written; no halt file is touched.
     """
     config = _make_engine_config(tmp_path)
     ctx = _make_tick_ctx(config)
@@ -358,10 +358,10 @@ def test_validator_forbidden_path_leads_to_errors_tsv(tmp_path: Path) -> None:
     assert "FORBIDDEN_PATH_VIOLATION" in content
     assert ctx.run_id in content
 
-    # Verify quarantine file NOT written (Path A: no write_self_quarantine)
-    quarantine_file = config.state_dir / "self_quarantine"
-    assert not quarantine_file.exists(), (
-        "Path A (refuse_fatal) must NOT write quarantine file — that is Path B only"
+    # Verify halt file NOT written (Path A: no write_self_halt)
+    halt_file = config.state_dir / "self_halt"
+    assert not halt_file.exists(), (
+        "Path A (refuse_fatal) must NOT write halt file — that is Path B only"
     )
 
     mock_exit.assert_called_once()

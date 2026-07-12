@@ -147,7 +147,7 @@ def run_tests(api: Any) -> Any:
             api._issue(
                 "test_reverse_antibody_active",
                 str(item),
-                "active reverse-antibody must be rewritten or quarantined",
+                "active reverse-antibody must be rewritten or shelved",
             )
         )
     for path in sorted(actual):

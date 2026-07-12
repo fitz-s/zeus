@@ -461,36 +461,36 @@ def apply_day0_oracle_anomaly_action(
         raise ValueError(f"unknown day0 oracle anomaly action: {action.action!r}")
 
 
-#: Quarantined-print observability (adversarial review fix 4): counts per
-#: (city, target_date). Quarantine is NOT a pause — it excludes single prints
+#: Held-print observability (adversarial review fix 4): counts per
+#: (city, target_date). Holding is NOT a pause — it excludes single prints
 #: pending corroboration; the counter gives the anomaly surface visibility.
-_QUARANTINE_COUNTS: dict[tuple[str, str], int] = {}
-_QUARANTINE_LOCK = threading.Lock()
+_HELD_COUNTS: dict[tuple[str, str], int] = {}
+_HELD_LOCK = threading.Lock()
 
 
-def note_metar_quarantine(city: str, target_date: str, *, detail: str) -> None:
-    """Record (and loudly log) a quarantined METAR print for observability."""
+def note_metar_held(city: str, target_date: str, *, detail: str) -> None:
+    """Record (and loudly log) a held METAR print for observability."""
     key = (str(city), str(target_date))
-    with _QUARANTINE_LOCK:
-        _QUARANTINE_COUNTS[key] = _QUARANTINE_COUNTS.get(key, 0) + 1
-        count = _QUARANTINE_COUNTS[key]
+    with _HELD_LOCK:
+        _HELD_COUNTS[key] = _HELD_COUNTS.get(key, 0) + 1
+        count = _HELD_COUNTS[key]
     logger.warning(
-        "DAY0_METAR_QUARANTINE city=%s target_date=%s count=%d detail=%s",
+        "DAY0_METAR_HELD city=%s target_date=%s count=%d detail=%s",
         city, target_date, count, detail,
     )
 
 
-def metar_quarantine_counts() -> dict[tuple[str, str], int]:
-    with _QUARANTINE_LOCK:
-        return dict(_QUARANTINE_COUNTS)
+def metar_held_counts() -> dict[tuple[str, str], int]:
+    with _HELD_LOCK:
+        return dict(_HELD_COUNTS)
 
 
 def _reset_registry_for_tests() -> None:
     with _REGISTRY_LOCK:
         _REGISTRY.clear()
         _DB_MISS_CACHE.clear()
-    with _QUARANTINE_LOCK:
-        _QUARANTINE_COUNTS.clear()
+    with _HELD_LOCK:
+        _HELD_COUNTS.clear()
     with _WU_CHECK_MEMO_LOCK:
         _WU_CHECK_MEMO.clear()
         _WU_CHECK_FAILURE_MEMO.clear()

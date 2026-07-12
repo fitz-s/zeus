@@ -10,7 +10,7 @@ BOTH pre-Addendum bugs even after extract_open_ens_localday.py was fixed tonight
 
   Bug A — per-member: boundary_ambiguous when boundary_min <= inner_min (non-strict).
            Fix: strict < — ties are NOT ambiguous.
-  Bug B — snapshot: any() of per-member flags → whole snapshot quarantined.
+  Bug B — snapshot: any() of per-member flags → whole snapshot rejected.
            Fix: majority threshold (≥26/51) required.
 
 Both extractors consume the same physical product (ECMWF ensemble boundary logic)
@@ -105,7 +105,7 @@ def test_tigge_per_member_tie_is_not_boundary_ambiguous():
     pairs = [(15.0, 15.0)] * 51
     result = _tigge_boundary_policy(pairs)
     assert result["boundary_ambiguous"] is False, (
-        "TIGGE: all-tie snapshot must NOT be quarantined (tie is not ambiguous)"
+        "TIGGE: all-tie snapshot must NOT be rejected (tie is not ambiguous)"
     )
     assert result["training_allowed"] is True
     assert result["ambiguous_member_count"] == 0
@@ -119,12 +119,12 @@ def test_tigge_per_member_tie_is_not_boundary_ambiguous():
 
 
 # ---------------------------------------------------------------------------
-# Test B: minority ambiguous members do NOT quarantine snapshot
+# Test B: minority ambiguous members do NOT reject snapshot
 # ---------------------------------------------------------------------------
 
 
-def test_tigge_minority_ambiguous_members_do_not_quarantine():
-    """TIGGE: 17/51 ambiguous members (below majority=26) must NOT quarantine."""
+def test_tigge_minority_ambiguous_members_do_not_reject():
+    """TIGGE: 17/51 ambiguous members (below majority=26) must NOT reject."""
     # 17 members with boundary_min < inner_min (genuinely ambiguous), 34 ties
     ambiguous = [(10.0, 9.0)] * 17   # boundary < inner → ambiguous
     non_ambiguous = [(10.0, 10.0)] * 34  # tie → not ambiguous under strict <
@@ -133,25 +133,25 @@ def test_tigge_minority_ambiguous_members_do_not_quarantine():
     assert result["majority_threshold"] == 26
     assert result["ambiguous_member_count"] == 17
     assert result["boundary_ambiguous"] is False, (
-        "TIGGE: 17/51 ambiguous members is below majority threshold 26 → must NOT quarantine"
+        "TIGGE: 17/51 ambiguous members is below majority threshold 26 → must NOT reject"
     )
     assert result["training_allowed"] is True
 
 
 # ---------------------------------------------------------------------------
-# Test C: majority ambiguous members DO quarantine snapshot
+# Test C: majority ambiguous members DO reject snapshot
 # ---------------------------------------------------------------------------
 
 
-def test_tigge_majority_ambiguous_members_do_quarantine():
-    """TIGGE: 26/51 ambiguous members (at majority threshold) MUST quarantine."""
+def test_tigge_majority_ambiguous_members_do_reject():
+    """TIGGE: 26/51 ambiguous members (at majority threshold) MUST reject."""
     ambiguous = [(10.0, 9.0)] * 26   # boundary < inner → ambiguous
     non_ambiguous = [(10.0, 10.0)] * 25
     pairs = ambiguous + non_ambiguous
     result = _tigge_boundary_policy(pairs)
     assert result["majority_threshold"] == 26
     assert result["boundary_ambiguous"] is True, (
-        "TIGGE: 26/51 ambiguous members meets majority threshold → must quarantine"
+        "TIGGE: 26/51 ambiguous members meets majority threshold → must reject"
     )
     assert result["training_allowed"] is False
 

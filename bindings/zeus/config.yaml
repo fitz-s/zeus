@@ -89,7 +89,7 @@ task_allowlists:
   # launchagent_backup_quarantine: only Zeus-prefixed plist backups
   launchagent_backup_quarantine:
     target_glob: "~/Library/LaunchAgents/com.zeus.*"
-    quarantine_dir: "~/Library/LaunchAgents/.archive"
+    archive_dir: "~/Library/LaunchAgents/.archive"
   # stale_worktree_quarantine: Zeus worktrees only
   stale_worktree_quarantine:
     worktree_roots:
@@ -101,7 +101,7 @@ task_allowlists:
   in_repo_scratch_quarantine:
     scratch_roots:
       - "${ZEUS_REPO}/tmp"
-    quarantine_dir: "${ZEUS_REPO}/.archive/scratch"
+    archive_dir: "${ZEUS_REPO}/.archive/scratch"
 
 # ------------------------------------------------------------------
 # Log paths (written by launchd; not by the worker itself)

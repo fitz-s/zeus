@@ -19,7 +19,7 @@ apply(): always dry_run_only (live_default: false). Returns mock diff
   showing what `git worktree remove` would do.
 
 Verdict strings:
-  STALE_QUARANTINE_CANDIDATE — idle worktree, safe to remove
+  STALE_ARCHIVE_CANDIDATE — idle worktree, safe to remove
   SKIP_CURRENT_BRANCH        — skip: worktree is currently checked out
   SKIP_UNCOMMITTED           — skip: has uncommitted changes
   SKIP_OPEN_PR               — skip: branch appears in open PR (gh unavail → warn)
@@ -42,7 +42,7 @@ from maintenance_worker.types.specs import TaskSpec, TickContext
 logger = logging.getLogger(__name__)
 
 # Verdict strings
-VERDICT_STALE = "STALE_QUARANTINE_CANDIDATE"
+VERDICT_STALE = "STALE_ARCHIVE_CANDIDATE"
 VERDICT_SKIP_CURRENT = "SKIP_CURRENT_BRANCH"
 VERDICT_SKIP_UNCOMMITTED = "SKIP_UNCOMMITTED"
 VERDICT_SKIP_OPEN_PR = "SKIP_OPEN_PR"
@@ -66,7 +66,7 @@ def enumerate(entry: Any, ctx: TickContext) -> list[Candidate]:  # noqa: A001
       - Worktree with uncommitted changes
       - Worktree whose branch appears in an open PR, or whose PR status cannot be verified
 
-    Returns list[Candidate] with verdict STALE_QUARANTINE_CANDIDATE or SKIP_*.
+    Returns list[Candidate] with verdict STALE_ARCHIVE_CANDIDATE or SKIP_*.
     """
     spec: TaskSpec = entry.spec
     raw: dict = entry.raw
@@ -108,7 +108,7 @@ def enumerate(entry: Any, ctx: TickContext) -> list[Candidate]:  # noqa: A001
                 task_id=spec.task_id,
                 path=p,
                 verdict=VERDICT_SKIP_CURRENT,
-                reason="Main worktree (canonical checkout); never quarantine.",
+                reason="Main worktree (canonical checkout); never archive.",
                 evidence=evidence,
             ))
             continue
@@ -150,7 +150,7 @@ def enumerate(entry: Any, ctx: TickContext) -> list[Candidate]:  # noqa: A001
                     task_id=spec.task_id,
                     path=p,
                     verdict=VERDICT_SKIP_PR_CHECK_UNVERIFIED,
-                    reason="Open-PR check unverified (gh unavailable) — fail closed; skip quarantine.",
+                    reason="Open-PR check unverified (gh unavailable) — fail closed; skip archive.",
                     evidence=evidence,
                 ))
                 continue
@@ -198,7 +198,7 @@ def enumerate(entry: Any, ctx: TickContext) -> list[Candidate]:  # noqa: A001
 
 def apply(decision: Candidate, ctx: TickContext) -> ApplyResult:
     """
-    Apply worktree quarantine. Always dry_run_only (live_default: false in catalog).
+    Apply worktree archive. Always dry_run_only (live_default: false in catalog).
 
     Receives a single Candidate from the engine (C2 fix: typed Candidate, not
     ProposalManifest). Top-of-function guard per PLAN §1.5.4: defense-in-depth.
@@ -373,8 +373,8 @@ def _open_pr_check_for_branch(branch: str, repo_root: Path) -> dict:
       "NO_OPEN_PR"             — gh ok and no open PR uses this branch
 
     Fail-closed semantics: TASK_CATALOG.yaml:88-91 lists
-    any_worktree_whose_branch_appears_in_open_pr as forbidden quarantine target.
-    When gh is unavailable we cannot verify → must not quarantine.
+    any_worktree_whose_branch_appears_in_open_pr as forbidden archive target.
+    When gh is unavailable we cannot verify → must not archive.
     """
     import json as _json
 
@@ -440,7 +440,7 @@ def _open_pr_check_for_branch(branch: str, repo_root: Path) -> dict:
 def _mock_diff(decision: Any) -> tuple[str, ...]:
     """Return a mock diff tuple for dry-run proposals."""
     if decision is None:
-        return ("# dry-run: no worktree quarantine decisions to apply",)
+        return ("# dry-run: no worktree archive decisions to apply",)
     path_str = str(getattr(decision, "path", decision))
     branch = ""
     if hasattr(decision, "evidence") and isinstance(decision.evidence, dict):

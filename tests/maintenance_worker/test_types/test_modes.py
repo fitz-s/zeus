@@ -31,9 +31,9 @@ class TestRefusalReason:
         """SAFETY_CONTRACT §"Kill Switch": KILL_SWITCH is a hard guard."""
         assert RefusalReason.KILL_SWITCH in RefusalReason
 
-    def test_self_quarantined_present(self) -> None:
-        """SAFETY_CONTRACT §229-238: post-mutation self-quarantine guard."""
-        assert RefusalReason.SELF_QUARANTINED in RefusalReason
+    def test_self_haltd_present(self) -> None:
+        """SAFETY_CONTRACT §229-238: post-mutation self-halt guard."""
+        assert RefusalReason.SELF_HALTED in RefusalReason
 
     def test_maintenance_paused_is_soft_guard(self) -> None:
         """SAFETY_CONTRACT lines 207-213: MAINTENANCE_PAUSED is skip_tick not fatal."""
@@ -50,7 +50,7 @@ class TestRefusalReason:
             RefusalReason.ACTIVE_REBASE,
             RefusalReason.LOW_DISK,
             RefusalReason.INFLIGHT_PR,
-            RefusalReason.SELF_QUARANTINED,
+            RefusalReason.SELF_HALTED,
             RefusalReason.FORBIDDEN_PATH_VIOLATION,
             RefusalReason.FORBIDDEN_OPERATION_VIOLATION,
         }

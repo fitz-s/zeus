@@ -25,7 +25,7 @@ class Candidate:
     task_id: which TaskSpec produced this candidate.
     path:    primary filesystem path this candidate refers to.
     verdict: handler-specific verdict string, e.g. ARCHIVABLE,
-             LOAD_BEARING, STALE_QUARANTINE_CANDIDATE,
+             LOAD_BEARING, STALE_ARCHIVE_CANDIDATE,
              SKIP (forbidden), ARCHIVE_CANDIDATE.
     reason:  human-readable rationale for the verdict.
     evidence: structured diagnostic data (check results, matched

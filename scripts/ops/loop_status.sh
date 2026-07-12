@@ -5,7 +5,7 @@
 #   §2/§3 (three-file state, wrapper mechanism).
 #
 # WHAT: one-screen liveness report for the loop v2 machinery — last tick
-#   time, last journal entry, HALT state, quarantine (VIOLATION/ESCALATION)
+#   time, last journal entry, HALT state, restore (VIOLATION/ESCALATION)
 #   count. Read-only; does not start, stop, or touch anything.
 #
 # WHO WRITES: nothing (read-only). WHO READS: the operator, ad hoc, to
@@ -105,7 +105,7 @@ if [ -f "$JOURNAL" ]; then
   echo ""
   violations="$(grep -c '^VIOLATION:' "$JOURNAL" 2>/dev/null || true)"
   escalations="$(grep -c '^ESCALATION:' "$JOURNAL" 2>/dev/null || true)"
-  echo "quarantine counts (all-time, this journal file): VIOLATION=${violations:-0} ESCALATION=${escalations:-0}"
+  echo "restore counts (all-time, this journal file): VIOLATION=${violations:-0} ESCALATION=${escalations:-0}"
 else
   echo "JOURNAL.md  : does not exist yet (loop has never ticked)"
 fi

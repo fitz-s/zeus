@@ -19,7 +19,7 @@ AUTHORITY HIERARCHY:
 
 INVARIANTS (SCAFFOLD — bodies not yet implemented):
     INV-ERA-1: A market with settled_at >= 2026-02-21 AND era == UMA_OO_V2
-               is an anomaly. The dispatcher must raise or quarantine, not silently accept.
+               is an anomaly. The dispatcher must raise or reject, not silently accept.
     INV-ERA-2: on_chain_codehash in EraAuthorityBasis must match the value recorded
                at eth_call_resolution_authority.json at time of operator authorisation.
     INV-ERA-3: era_end_date_utc == None means the era is currently open. Only one
@@ -70,7 +70,7 @@ class EraDispatchOutcome(str, Enum):
         No era matches this market — fail-closed, never silent.
         This is NOT the same as an empty observation window.
         Causes: settled_at before all known era starts, or a gap in era coverage.
-        era_basis is None. Dispatcher must raise or quarantine; silent fallthrough
+        era_basis is None. Dispatcher must raise or reject; silent fallthrough
         is a correctness violation (Critic P4).
 
     ERA_EMPTY_OBSERVATION:

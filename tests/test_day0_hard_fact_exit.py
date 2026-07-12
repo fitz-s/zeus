@@ -22,7 +22,7 @@ Relationship contracts:
   R16. Resting-order cancel: open BUY entry orders on hard-fact-dead day0
        bins (or anomaly-paused families) are cancelled; alive bins, SELL
        orders, and non-day0 dates are untouched.
-  R17. Plausibility bound: an isolated implausible METAR print is quarantined
+  R17. Plausibility bound: an isolated implausible METAR print is held
        (no ratchet, no bin-kill); a corroborated frontal jump is accepted; the
        latest uncorroborated print waits one report.
   R18. Day0 exposure cap: reduce-only clamp; exhausted headroom is a
@@ -49,7 +49,7 @@ from src.execution.day0_hard_fact_exit import (
 from src.data.day0_oracle_anomaly import (
     _reset_registry_for_tests,
     flag_day0_oracle_anomaly,
-    metar_quarantine_counts,
+    metar_held_counts,
 )
 
 UTC = timezone.utc
@@ -108,7 +108,7 @@ def test_day0_hard_fact_eligible_for_quarantined_real_partial_exposure():
     # by Position.__post_init__'s mixed-epoch bridge — no live Position can
     # carry state=='quarantined', so _quarantined_position_can_redecision's
     # own gate (state == 'quarantined') is now permanently unreachable (see
-    # test_quarantine_excision_t_consolidations_characterization.py, which
+    # test_excision_t_consolidations_characterization.py, which
     # already pins this to always-False). All three legacy-"quarantined"
     # fixtures below resolve through the plain state-membership check
     # instead — they are all remapped to 'holding', which is eligible like
@@ -796,14 +796,14 @@ class TestPlausibilityBound:
             for m, t in temps_with_minutes
         ]
 
-    def test_isolated_spike_is_quarantined_no_ratchet(self):
+    def test_isolated_spike_is_held_no_ratchet(self):
         from src.data.day0_fast_obs import running_extremes_for_local_day
 
         reports = self._reports([(0, 22.0), (30, 23.0), (60, 45.0), (90, 23.5)])
         ex = running_extremes_for_local_day(reports, city=_tokyo(), target_date="2026-06-10")
-        assert ex.quarantined_implausible == 1
+        assert ex.held_implausible == 1
         assert ex.high_so_far == pytest.approx(23.5)  # the 45C print never ratchets
-        assert ("Tokyo", "2026-06-10") in metar_quarantine_counts()
+        assert ("Tokyo", "2026-06-10") in metar_held_counts()
 
     def test_corroborated_frontal_jump_is_accepted(self):
         from src.data.day0_fast_obs import running_extremes_for_local_day
@@ -811,7 +811,7 @@ class TestPlausibilityBound:
         # +9C in 30 min, but the NEXT report confirms the new level
         reports = self._reports([(0, 22.0), (30, 31.0), (60, 31.5)])
         ex = running_extremes_for_local_day(reports, city=_tokyo(), target_date="2026-06-10")
-        assert ex.quarantined_implausible == 0
+        assert ex.held_implausible == 0
         assert ex.high_so_far == pytest.approx(31.5)
 
     def test_latest_print_implausible_step_waits_for_corroboration(self):
@@ -819,7 +819,7 @@ class TestPlausibilityBound:
 
         reports = self._reports([(0, 22.0), (30, 22.5), (60, 40.0)])
         ex = running_extremes_for_local_day(reports, city=_tokyo(), target_date="2026-06-10")
-        assert ex.quarantined_implausible == 1
+        assert ex.held_implausible == 1
         assert ex.high_so_far == pytest.approx(22.5)
 
     def test_climatology_band_rejects_absurd_values(self):
@@ -827,10 +827,10 @@ class TestPlausibilityBound:
 
         base = datetime(2026, 6, 10, 0, 0, tzinfo=UTC)
         values = [(base, 22.0, None), (base + timedelta(minutes=30), 80.0, None)]
-        accepted, quarantined = filter_plausible_values(
+        accepted, held = filter_plausible_values(
             values, unit="C", city_name="Tokyo", month=6,
         )
-        assert quarantined >= 1
+        assert held >= 1
         assert all(v <= 60.0 for _, v, _ in accepted)
 
 

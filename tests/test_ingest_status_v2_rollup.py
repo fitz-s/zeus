@@ -107,7 +107,7 @@ def _make_world_db() -> sqlite3.Connection:
         )
     """)
 
-    # availability_fact — for _last_quarantine_reason
+    # availability_fact — for _last_ingest_block_reason
     conn.execute("""
         CREATE TABLE availability_fact (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -195,7 +195,7 @@ class TestIngestStatusV2Rollup:
         # Top-level fields that existing consumers depend on
         assert "written_at" in payload
         assert "tables" in payload
-        assert "last_quarantine_reason" in payload
+        assert "last_block_reason" in payload
         assert "source_health_written_at" in payload
         assert "source_health_summary" in payload
 

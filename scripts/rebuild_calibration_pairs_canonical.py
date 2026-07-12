@@ -75,9 +75,9 @@ from src.contracts.calibration_bins import (
     validate_members_vs_observation,
 )
 from src.contracts.ensemble_snapshot_provenance import (
-    DataVersionQuarantinedError,
+    DataVersionRejectedError,
     assert_data_version_allowed,
-    is_quarantined,
+    is_rejected,
 )
 from src.contracts.settlement_semantics import SettlementSemantics
 from src.signal.ensemble_signal import p_raw_vector_from_maxes
@@ -96,14 +96,14 @@ CANONICAL_BIN_SOURCE = "canonical_v1"
 # is aligned to the TIGGE window [2024-01-01, today].
 MIN_TRAINING_DATE = "2024-01-01"
 
-# Per-snapshot quarantine is now owned by
-# ``src/contracts/ensemble_snapshot_provenance.py``. Use ``is_quarantined``
+# Per-snapshot rejection is now owned by
+# ``src/contracts/ensemble_snapshot_provenance.py``. Use ``is_rejected``
 # for read-path filtering (below) and ``assert_data_version_allowed`` at
 # any future write site. The contract covers both exact-match known-bad
 # versions and prefix-match conservative blanket refusal of the whole
 # ``tigge_step*`` / ``tigge_param167*`` / ``tigge_2t_instant*`` families.
 # The future ``tigge_mx2t6_local_peak_window_max_v1`` data_version is
-# intentionally NOT quarantined — it is the replacement target.
+# intentionally NOT rejected — it is the replacement target.
 
 
 @dataclass
@@ -416,7 +416,7 @@ def rebuild(
     eligible: list[sqlite3.Row] = []
     for snap in snapshots:
         dv = (snap["dataset_id"] or "")
-        if is_quarantined(dv):
+        if is_rejected(dv):
             unaudited_ids.append(snap["snapshot_id"])
             if not allow_unaudited_ensemble:
                 continue

@@ -1,4 +1,4 @@
-"""Ensemble-snapshot provenance quarantine contract.
+"""Ensemble-snapshot provenance rejection contract.
 
 Single source of truth for which ``data_version`` values are forbidden
 on the ``ensemble_snapshots`` table. Any writer (live ingest, backfill,
@@ -7,7 +7,7 @@ reader that fetches snapshots for calibration MUST call
 ``assert_data_version_allowed`` on each row before forwarding it to
 the Platt training path.
 
-2026-04-14 quarantine rationale
+2026-04-14 rejection rationale
 -------------------------------
 The TIGGE ``param_167`` (``2t`` / ``stepType=instant``) archive was
 downloaded with the wrong physical quantity. Each stored
@@ -24,7 +24,7 @@ term can repair. The replacement archive is ``param=121.128`` / ``mx2t6``
 **local calendar-day max**, tagged in DB as
 ``tigge_mx2t6_local_calendar_day_max_v1`` (Phase 4 canonical).
 The intermediate ``tigge_mx2t6_local_peak_window_max_v1`` tag (peak-window
-semantics, now superseded) is also quarantined — it is a different physical
+semantics, now superseded) is also rejected — it is a different physical
 quantity than the local-calendar-day product the live path requires.
 
 Until that replacement lands, the old ``param_167`` variants must be
@@ -35,25 +35,25 @@ the refusal point.
 
 Semantics
 ---------
-- ``QUARANTINED_DATA_VERSIONS``: exact-match set — versions that are
+- ``REJECTED_DATA_VERSIONS``: exact-match set — versions that are
   known to exist in the archive and MUST never be touched.
-- ``QUARANTINED_DATA_VERSION_PREFIXES``: prefix-match tuple — catches
+- ``REJECTED_DATA_VERSION_PREFIXES``: prefix-match tuple — catches
   near-future variants (e.g. ``tigge_step024_v2_*`` that may be produced
   by an experimental ingest path). Prefix match is deliberately
   conservative: a legitimate ``tigge_mx2t6_*`` version does NOT match
-  any quarantine prefix.
+  any rejection prefix.
 - Both sets are additive; extend them if new failure modes surface.
 
 Failure mode on write
 ---------------------
 Writers call ``assert_data_version_allowed`` and let
-``DataVersionQuarantinedError`` propagate. That bubbles up the caller
+``DataVersionRejectedError`` propagate. That bubbles up the caller
 (live ingest, backfill, test fixture) and fails loudly, which is what
 we want — silent drops hide bugs.
 
 Failure mode on read
 --------------------
-Callers can use ``is_quarantined`` to partition rows (drop silently,
+Callers can use ``is_rejected`` to partition rows (drop silently,
 count, log). ``rebuild_calibration_pairs_canonical.py`` does this so
 dry-run reports always surface the refusal count even when
 ``--allow-unaudited-ensemble`` is passed.
@@ -184,15 +184,15 @@ CANONICAL_SETTLEMENT_DATA_VERSIONS: frozenset[str] = frozenset({
 })
 
 
-class DataVersionQuarantinedError(RuntimeError):
-    """Raised when a writer tries to persist a quarantined data_version."""
+class DataVersionRejectedError(RuntimeError):
+    """Raised when a writer tries to persist a rejected data_version."""
 
 
 # Known-bad exact matches. These are the two ``param_167`` variants
 # that exist in the 2026-04-14 TIGGE partial archive. Adding them by
 # name makes the refusal precise — a future legitimate ingest can use
 # any data_version not in this set without tripping the guard.
-QUARANTINED_DATA_VERSIONS: frozenset[str] = frozenset({
+REJECTED_DATA_VERSIONS: frozenset[str] = frozenset({
     "tigge_step024_v1_near_peak",
     "tigge_step024_v1_overnight_snapshot",
     "tigge_partial_legacy",
@@ -207,8 +207,8 @@ QUARANTINED_DATA_VERSIONS: frozenset[str] = frozenset({
 # point-in-time ``2t instant`` forecasts — structurally wrong physical
 # quantity — so they never belong in a Platt training set. The
 # replacement ``tigge_mx2t6_*`` family is intentionally NOT in the
-# quarantine list.
-QUARANTINED_DATA_VERSION_PREFIXES: tuple[str, ...] = (
+# rejection list.
+REJECTED_DATA_VERSION_PREFIXES: tuple[str, ...] = (
     "tigge_step",                    # any tigge_step*_v*
     "tigge_param167",                # any tigge_param167*
     "tigge_2t_instant",              # any hand-tagged point-forecast variant
@@ -216,20 +216,20 @@ QUARANTINED_DATA_VERSION_PREFIXES: tuple[str, ...] = (
 )
 
 
-def is_quarantined(data_version: str | None) -> bool:
+def is_rejected(data_version: str | None) -> bool:
     """True if ``data_version`` is forbidden for ensemble_snapshots writes."""
     if not data_version:
         return False
-    if data_version in QUARANTINED_DATA_VERSIONS:
+    if data_version in REJECTED_DATA_VERSIONS:
         return True
-    for prefix in QUARANTINED_DATA_VERSION_PREFIXES:
+    for prefix in REJECTED_DATA_VERSION_PREFIXES:
         if data_version.startswith(prefix):
             return True
     return False
 
 
 def assert_data_version_allowed(data_version: str | None, *, context: str = "") -> None:
-    """Raise ``DataVersionQuarantinedError`` if ``data_version`` is quarantined or unknown.
+    """Raise ``DataVersionRejectedError`` if ``data_version`` is rejected or unknown.
 
     Call this from every writer of ``ensemble_snapshots`` — live ingest,
     backfill, test fixtures, rebuild. The ``context`` parameter is
@@ -237,23 +237,23 @@ def assert_data_version_allowed(data_version: str | None, *, context: str = "") 
     tripped the guard.
 
     Two-stage check:
-    1. Quarantine block — rejects known-bad versions by exact name or prefix.
+    1. Rejection block — rejects known-bad versions by exact name or prefix.
     2. Positive allowlist — rejects any version NOT in the canonical set.
        Prevents unknown/experimental versions from silently entering training.
     """
-    if is_quarantined(data_version):
+    if is_rejected(data_version):
         ctx = f" (context={context})" if context else ""
-        raise DataVersionQuarantinedError(
+        raise DataVersionRejectedError(
             f"ensemble_snapshots write refused: data_version={data_version!r} "
-            f"is quarantined per src/contracts/ensemble_snapshot_provenance.py. "
-            f"Quarantine covers: param_167 point forecasts (wrong physical quantity), "
+            f"is rejected per src/contracts/ensemble_snapshot_provenance.py. "
+            f"Rejection covers: param_167 point forecasts (wrong physical quantity), "
             f"peak-window max (superseded by local-calendar-day semantics). "
             f"Use tigge_mx2t6_local_calendar_day_max_v1 (high track canonical, "
             f"Phase 4+) instead.{ctx}"
         )
     if data_version not in CANONICAL_ENSEMBLE_DATA_VERSIONS:
         ctx = f" (context={context})" if context else ""
-        raise DataVersionQuarantinedError(
+        raise DataVersionRejectedError(
             f"ensemble_snapshots write refused: data_version={data_version!r} "
             f"is not in the canonical allowlist {sorted(CANONICAL_ENSEMBLE_DATA_VERSIONS)}. "
             f"Only canonical dual-track versions are permitted in ensemble_snapshots.{ctx}"
@@ -270,8 +270,8 @@ def normalize_opendata_data_version(data_version: str | None) -> str:
     (``../51 source data/scripts/extract_open_ens_localday.py``) and was NOT
     reachable by that in-repo collapse, so it still hardcodes the ``_v1`` suffix
     in the payload JSON it emits. Without normalization, every live OpenData
-    ingest cycle tripped ``assert_data_version_allowed`` and quarantined — the
-    2026-05-30 ``DataVersionQuarantinedError`` that produced zero fresh
+    ingest cycle tripped ``assert_data_version_allowed`` and rejected — the
+    2026-05-30 ``DataVersionRejectedError`` that produced zero fresh
     ensemble_snapshots.
 
     This is the SINGLE shared normalizer that every OpenData ingest write-path
@@ -336,18 +336,18 @@ def filter_allowed(
     *,
     data_version_key: str = "data_version",
 ) -> tuple[list[dict], list[dict]]:
-    """Split an iterable of row-dicts into (allowed, quarantined).
+    """Split an iterable of row-dicts into (allowed, rejected).
 
     Reader-side helper. Lets ``rebuild_calibration_pairs_canonical.py``
-    report quarantine counts in its dry-run plan without crashing on
+    report rejection counts in its dry-run plan without crashing on
     legacy rows.
     """
     allowed: list[dict] = []
-    quarantined: list[dict] = []
+    rejected: list[dict] = []
     for row in rows:
         dv = row.get(data_version_key) if isinstance(row, dict) else None
-        if is_quarantined(dv):
-            quarantined.append(row)
+        if is_rejected(dv):
+            rejected.append(row)
         else:
             allowed.append(row)
-    return allowed, quarantined
+    return allowed, rejected

@@ -19,7 +19,7 @@ the same class defines what both sides emit and accept.
 
 HIGH track (mx2t6):
   - causality_status defaults to "OK" (pure forecast; boundary=False always)
-  - boundary_ambiguous defaults to False (no boundary quarantine law for MAX)
+  - boundary_ambiguous defaults to False (no boundary rejection law for MAX)
   - boundary_policy NOT emitted (high track has no boundary policy dict)
 
 LOW track (mn2t6):

@@ -211,10 +211,10 @@ def _pair_or_drop(
         )
         return pair_residual(forecast, settlement)
     except UnknownSettlementAuthorityError as exc:
-        # Loud quarantine (P2 SEV-2): an authority family we cannot reconcile must NOT vanish
+        # Loud rejection (P2 SEV-2): an authority family we cannot reconcile must NOT vanish
         # into the routine drop count — log at ERROR so a starved city is visible, not silent.
         logger.error(
-            "QUARANTINE unreconciled settlement authority city=%s metric=%s date=%s: %s",
+            "REJECT unreconciled settlement authority city=%s metric=%s date=%s: %s",
             forecast_row.get("city"),
             forecast_row.get("temperature_metric"),
             forecast_row.get("target_date"),

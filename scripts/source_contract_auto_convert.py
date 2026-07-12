@@ -4,10 +4,10 @@
 # Reuse: Inspect docs/operations/task_2026-04-30_source_auto_conversion/plan.md and architecture/script_manifest.yaml before enabling apply.
 """Plan or execute source-contract transitions from the runtime source monitor.
 
-Default mode writes quarantine/receipt artifacts only. ``--execute-apply
+Default mode writes block/receipt artifacts only. ``--execute-apply
 --force`` promotes a same-provider WU station change through deterministic
-config, backfill, settlement, calibration, verification, and quarantine-release
-steps. Hidden branches remain fail-closed and keep the city source quarantine
+config, backfill, settlement, calibration, verification, and block-release
+steps. Hidden branches remain fail-closed and keep the city source block
 active.
 """
 
@@ -51,7 +51,7 @@ DEFAULT_MINI_REPORT_SUFFIX = ".mini_report.md"
 DEFAULT_CITY_CONFIG_PATH = CONFIG_DIR / "cities.json"
 DEFAULT_SOURCE_VALIDITY_PATH = ROOT / "docs/operations/current_source_validity.md"
 DEFAULT_WORLD_DB_PATH = state_path("zeus-world.db")
-DEFAULT_SOURCE_QUARANTINE_PATH = ms.source_contract_quarantine_path()
+DEFAULT_SOURCE_BLOCK_PATH = ms.source_contract_block_path()
 DEFAULT_EVIDENCE_BASE = ROOT / "docs/operations/task_2026-04-30_source_auto_conversion/evidence"
 AVIATIONWEATHER_STATIONINFO_URL = "https://aviationweather.gov/api/data/stationinfo"
 
@@ -84,7 +84,7 @@ MANUAL_BRANCH_REASONS = {
     "ambiguous_source_requires_manual_market_attestation": "multiple source families or stations were observed",
     "source_contract_mismatch": "source mismatch did not satisfy same-provider station-change proof",
     "source_contract_review": "source evidence needs manual review",
-    "no_active_quarantine": "no active quarantine entry exists for this city",
+    "no_active_block": "no active block entry exists for this city",
 }
 
 
@@ -330,7 +330,7 @@ def _runtime_gaps(
         gaps.append(
             "affected market dates are not fetchable by WU history yet: "
             f"{future_or_recent}; executable_wu_fetch_end="
-            f"{date_scope.get('executable_wu_fetch_end')}; keep source quarantine active"
+            f"{date_scope.get('executable_wu_fetch_end')}; keep source block active"
         )
     return gaps
 
@@ -368,10 +368,10 @@ def _workspace_locator(
                 "purpose": "current cron output and mini execution contract",
             },
             {
-                "id": "source_quarantine",
-                "path": "state/source_contract_quarantine.json",
+                "id": "source_block",
+                "path": "state/source_contract_block.json",
                 "access": "read_write_by_controller_only",
-                "purpose": "city source quarantine; blocks new entries while old positions can monitor and exit",
+                "purpose": "city source block; blocks new entries while old positions can monitor and exit",
             },
             {
                 "id": "evidence_root",
@@ -391,20 +391,20 @@ def _workspace_locator(
             {
                 "id": "source_watch",
                 "path": "scripts/watch_source_contract.py",
-                "look_for": ["analyze_events", "apply_source_quarantines", "build_conversion_plan"],
-                "purpose": "Gamma source-contract analysis and quarantine writer",
+                "look_for": ["analyze_events", "apply_source_blocks", "build_conversion_plan"],
+                "purpose": "Gamma source-contract analysis and block writer",
                 "access": "read_or_run",
             },
             {
-                "id": "quarantine_helpers",
+                "id": "block_helpers",
                 "path": "src/data/market_scanner.py",
                 "look_for": [
                     "SOURCE_CONTRACT_ALERT_STATUSES",
                     "REQUIRED_SOURCE_CONVERSION_EVIDENCE",
-                    "release_source_contract_quarantine",
+                    "release_source_contract_block",
                     "source_contract_transition_branch",
                 ],
-                "purpose": "source-contract status classification, quarantine state, and release evidence contract",
+                "purpose": "source-contract status classification, block state, and release evidence contract",
                 "access": "read_only_in_this_phase",
             },
             {
@@ -497,7 +497,7 @@ def _safe_execution_contract(
         "source_change_branch_required": source_change_git.get("branch_name"),
         "cron_lock_path": str(DEFAULT_LOCK_PATH),
         "allowed_write_globs_current_phase": [
-            "state/source_contract_quarantine.json",
+            "state/source_contract_block.json",
             "state/source_contract_auto_convert/*.json",
             "state/source_contract_auto_convert/*.mini_report.md",
             "state/backfill_manifest_wu_daily_all_*.json",
@@ -608,12 +608,12 @@ def _mini_step_protocol(
             ],
         },
         {
-            "id": "detect_and_quarantine",
+            "id": "detect_and_block",
             "status": "done" if auto_confirmed or threshold_blockers else "noop",
             "allowed_actor": "deterministic_controller",
             "evidence_key": "source_watch",
             "allowed_command": dry_run_by_id.get("source_watch_confirm", {}).get("command"),
-            "stop_if": ["source watch data unavailable", "quarantine write failed"],
+            "stop_if": ["source watch data unavailable", "block write failed"],
         },
         {
             "id": "threshold_classification",
@@ -632,7 +632,7 @@ def _mini_step_protocol(
             "stop_if": [
                 "command exits non-zero",
                 "receipt status is not applied",
-                "source quarantine remains active after release",
+                "source block remains active after release",
             ],
         },
         {
@@ -706,7 +706,7 @@ def _mini_execution_packet(
             "Prefer the execute_apply_controller step when present; it runs the full deterministic workflow.",
             "Run only commands listed under step_protocol.allowed_command.",
             "Write a report summarizing status, blockers, next deterministic capability, and receipt path.",
-            "Keep source-contract quarantine active until release evidence refs are complete.",
+            "Keep source-contract block active until release evidence refs are complete.",
         ],
         "forbidden_actions": [
             "Do not invent source adapters or infer provider semantics from free text.",
@@ -714,7 +714,7 @@ def _mini_execution_packet(
             "Do not mutate production DB truth except through the exact scoped commands in this receipt after DB backup succeeds.",
             "Do not run --apply, --no-dry-run, or --force commands unless they exactly match a step_protocol.allowed_command.",
             "Do not run conversion apply from the stable cron repo when source_change_git requires an isolated worktree.",
-            "Do not release source quarantine while any evidence_manifest item is missing.",
+            "Do not release source block while any evidence_manifest item is missing.",
         ],
         "evidence_manifest": _evidence_manifest(run_id, city),
         "source_change_git": source_change_git or {},
@@ -740,12 +740,12 @@ def _mini_execution_packet(
         "report_template": {
             "city": city,
             "can_complete_remaining_conversion": can_complete,
-            "source_quarantine_should_remain_active": True,
+            "source_block_should_remain_active": True,
             "blocking_reasons": missing,
             "next_safe_action": (
                 "execute listed deterministic apply steps and collect evidence refs"
                 if can_complete
-                else "write report, keep quarantine active, and request missing deterministic capability"
+                else "write report, keep block active, and request missing deterministic capability"
             ),
         },
     }
@@ -802,7 +802,7 @@ def _command_plan(city: str, metrics: list[str], date_scope: dict[str, Any]) -> 
     plan = [
         {
             "id": "source_watch_confirm",
-            "mode": "read_or_quarantine",
+            "mode": "read_or_block",
             "command": [
                 python_bin,
                 "scripts/watch_source_contract.py",
@@ -810,7 +810,7 @@ def _command_plan(city: str, metrics: list[str], date_scope: dict[str, Any]) -> 
                 city,
                 "--json",
             ],
-            "writes": ["state/source_contract_quarantine.json"],
+            "writes": ["state/source_contract_block.json"],
         },
         {
             "id": "controller_apply",
@@ -832,7 +832,7 @@ def _command_plan(city: str, metrics: list[str], date_scope: dict[str, Any]) -> 
                 str(DEFAULT_EVIDENCE_BASE),
             ],
             "writes": [
-                "state/source_contract_quarantine.json",
+                "state/source_contract_block.json",
                 "state/source_contract_auto_convert/*.json",
                 "config/cities.json",
                 db_path,
@@ -1119,7 +1119,7 @@ def build_receipt(
     *,
     policy: RuntimePolicy,
     run_id: str | None = None,
-    quarantine_actions: list[dict[str, Any]] | None = None,
+    block_actions: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     resolved_run_id = run_id or f"source_contract_auto_convert_{_utcnow().strftime('%Y%m%dT%H%M%SZ')}"
     candidates = build_candidates(report, policy, run_id=resolved_run_id)
@@ -1148,7 +1148,7 @@ def build_receipt(
         "watch_summary": report.get("summary"),
         "watch_checked_event_count": report.get("checked_event_count"),
         "watch_event_count": report.get("event_count"),
-        "quarantine_actions": quarantine_actions if quarantine_actions is not None else report.get("quarantine_actions", []),
+        "block_actions": block_actions if block_actions is not None else report.get("block_actions", []),
         "candidates": candidates,
         "next_actions": _next_actions_for_receipt(status, candidates),
         "notification": {"attempted": False, "sent": False, "status": "not_requested"},
@@ -1506,7 +1506,7 @@ def write_source_validity_patch(
             f"- Source contract: `{source_contract.get('from_source_families')}/{source_contract.get('from_station_ids')}` -> `{source_contract.get('to_source_families')}/{source_contract.get('to_station_ids')}`.",
             f"- Affected market dates: `{dates.get('affected_market_start')}` to `{dates.get('affected_market_end')}`; backfill window `{dates.get('backfill_start')}` to `{dates.get('executable_wu_fetch_end')}`.",
             f"- Config artifact: `{evidence_root / 'config_update.json'}`.",
-            "- Runtime note: city remained source-quarantined until config, backfill, settlement, calibration, and verification evidence refs were complete.",
+            "- Runtime note: city remained source-blocked until config, backfill, settlement, calibration, and verification evidence refs were complete.",
             "",
         ]
     )
@@ -1615,8 +1615,8 @@ def _controller_apply_command_for_args(city: str, args: argparse.Namespace) -> l
         command.extend(["--today", args.today.isoformat()])
     if args.fixture is not None:
         command.extend(["--fixture", str(args.fixture)])
-    if args.quarantine_path is not None:
-        command.extend(["--quarantine-path", str(args.quarantine_path)])
+    if args.block_path is not None:
+        command.extend(["--source-block-path", str(args.block_path)])
     if args.station_metadata_path is not None:
         command.extend(["--station-metadata-path", str(args.station_metadata_path)])
     if args.no_station_metadata_network:
@@ -1652,10 +1652,10 @@ def stamp_runtime_invocation(receipt: dict[str, Any], args: argparse.Namespace) 
             if "--db" in command:
                 command = _replace_db_arg(command, args.db)
             if "scripts/watch_source_contract.py" in command:
-                command = _add_fixture_and_quarantine_args(
+                command = _add_fixture_and_block_args(
                     command,
                     fixture=args.fixture,
-                    quarantine_path=args.quarantine_path,
+                    block_path=args.block_path,
                 )
             step["command"] = command
         if command_plan:
@@ -1744,17 +1744,17 @@ def init_source_change_worktrees(receipt: dict[str, Any]) -> list[dict[str, Any]
     return actions
 
 
-def _add_fixture_and_quarantine_args(
+def _add_fixture_and_block_args(
     command: list[str],
     *,
     fixture: Path | None,
-    quarantine_path: Path | None,
+    block_path: Path | None,
 ) -> list[str]:
     result = [str(part) for part in command]
     if fixture is not None and "--fixture" not in result:
         result.extend(["--fixture", str(fixture)])
-    if quarantine_path is not None and "--quarantine-path" not in result:
-        result.extend(["--quarantine-path", str(quarantine_path)])
+    if block_path is not None and "--source-block-path" not in result:
+        result.extend(["--source-block-path", str(block_path)])
     return result
 
 
@@ -1769,7 +1769,7 @@ def _production_apply_surface_reasons(
     db_path: Path,
     config_path: Path,
     source_validity_path: Path,
-    quarantine_path: Path | None,
+    block_path: Path | None,
     evidence_root_base: Path | None,
 ) -> list[str]:
     reasons: list[str] = []
@@ -1779,8 +1779,8 @@ def _production_apply_surface_reasons(
         reasons.append("default city config")
     if _same_resolved_path(source_validity_path, DEFAULT_SOURCE_VALIDITY_PATH):
         reasons.append("default source-validity current fact")
-    if quarantine_path is None or _same_resolved_path(quarantine_path, DEFAULT_SOURCE_QUARANTINE_PATH):
-        reasons.append("default source quarantine")
+    if block_path is None or _same_resolved_path(block_path, DEFAULT_SOURCE_BLOCK_PATH):
+        reasons.append("default source block")
     if evidence_root_base is None or _same_resolved_path(evidence_root_base, DEFAULT_EVIDENCE_BASE):
         reasons.append("default evidence root")
     return reasons
@@ -1792,7 +1792,7 @@ def _assert_fixture_allowed_for_apply(
     db_path: Path,
     config_path: Path,
     source_validity_path: Path,
-    quarantine_path: Path | None,
+    block_path: Path | None,
     evidence_root_base: Path | None,
 ) -> None:
     if fixture is None:
@@ -1801,7 +1801,7 @@ def _assert_fixture_allowed_for_apply(
         db_path=db_path,
         config_path=config_path,
         source_validity_path=source_validity_path,
-        quarantine_path=quarantine_path,
+        block_path=block_path,
         evidence_root_base=evidence_root_base,
     )
     if production_reasons:
@@ -1828,7 +1828,7 @@ def execute_apply(
     db_path: Path,
     config_path: Path,
     source_validity_path: Path,
-    quarantine_path: Path | None,
+    block_path: Path | None,
     fixture: Path | None,
     station_metadata_path: Path | None,
     allow_station_metadata_network: bool,
@@ -1841,7 +1841,7 @@ def execute_apply(
         db_path=db_path,
         config_path=config_path,
         source_validity_path=source_validity_path,
-        quarantine_path=quarantine_path,
+        block_path=block_path,
         evidence_root_base=evidence_root_base,
     )
     candidates = receipt.get("candidates") or []
@@ -1870,9 +1870,9 @@ def execute_apply(
         original_source_validity_bytes = _snapshot_file_bytes(source_validity_path)
 
         try:
-            if not ms.is_city_source_quarantined(city, path=quarantine_path):
+            if not ms.is_city_source_blocked(city, path=block_path):
                 raise RuntimeError(
-                    f"{city} has no active source-contract quarantine; refusing apply without entry gate"
+                    f"{city} has no active source-contract block; refusing apply without entry gate"
                 )
             db_backup = backup_world_db(db_path, evidence_root=evidence_root)
             config_result = apply_config_update(
@@ -1964,10 +1964,10 @@ def execute_apply(
                 actual_artifact=str(evidence_root / "calibration_rebuild_receipt.json"),
             )
 
-            verify_command = _add_fixture_and_quarantine_args(
+            verify_command = _add_fixture_and_block_args(
                 plan_by_id["post_conversion_source_watch"]["command"],
                 fixture=fixture,
-                quarantine_path=quarantine_path,
+                block_path=block_path,
             )
             verification_receipt = _run_command(
                 verify_command,
@@ -1992,14 +1992,14 @@ def execute_apply(
             )
 
             release_evidence = _release_evidence_from_manifest(manifest)
-            release_result = ms.release_source_contract_quarantine(
+            release_result = ms.release_source_contract_block(
                 city,
                 released_by="source_contract_auto_convert",
                 evidence=release_evidence,
-                path=quarantine_path,
+                path=block_path,
             )
             if release_result.get("status") != "released":
-                raise RuntimeError(f"source quarantine release failed: {release_result}")
+                raise RuntimeError(f"source block release failed: {release_result}")
 
             candidate["release_ready"] = True
             candidate["apply_status"] = "applied"
@@ -2011,7 +2011,7 @@ def execute_apply(
             report_template.update(
                 {
                     "can_complete_remaining_conversion": True,
-                    "source_quarantine_should_remain_active": False,
+                    "source_block_should_remain_active": False,
                     "blocking_reasons": [],
                     "next_safe_action": "conversion complete; inspect transition history and normal monitoring",
                 }
@@ -2068,13 +2068,13 @@ def execute_apply(
     if failures:
         receipt["status"] = "failed"
         receipt["next_actions"] = [
-            "Keep failed cities in source-contract quarantine; old positions may still monitor and exit.",
+            "Keep failed cities in source-contract block; old positions may still monitor and exit.",
             "Read apply_failures and evidence artifacts, fix the deterministic blocker, then rerun --execute-apply --force.",
         ]
     elif apply_results:
         receipt["status"] = "applied"
         receipt["next_actions"] = [
-            "Source-contract conversion evidence is complete and affected city quarantine was released.",
+            "Source-contract conversion evidence is complete and affected city block was released.",
             "Run watch_source_contract --history CITY to inspect durable transition history.",
         ]
     return receipt
@@ -2085,14 +2085,14 @@ def _next_actions_for_receipt(status: str, candidates: list[dict[str, Any]]) -> 
         return ["No source-contract conversion candidate detected."]
     if status == "blocked":
         return [
-            "Keep affected cities in source-contract quarantine.",
+            "Keep affected cities in source-contract block.",
             "Resolve threshold_blockers before conversion; old positions may still monitor and exit.",
-            "Do not release quarantine until every required release evidence ref is present.",
+            "Do not release block until every required release evidence ref is present.",
         ]
     return [
-        "Keep affected cities in source-contract quarantine while executing the reviewed conversion plan.",
+        "Keep affected cities in source-contract block while executing the reviewed conversion plan.",
         "Run dry-run commands first and preserve their manifests/logs as release evidence refs.",
-        "Do not release quarantine until runtime_gaps_before_apply are resolved and verification passes.",
+        "Do not release block until runtime_gaps_before_apply are resolved and verification passes.",
     ]
 
 
@@ -2148,7 +2148,7 @@ def render_mini_report(receipt: dict[str, Any]) -> str:
                 f"- source_change_worktree: `{source_change_git.get('worktree_path')}`",
                 f"- confirmation: `{candidate.get('confirmation_status')}`",
                 f"- can_complete_remaining_conversion: `{report.get('can_complete_remaining_conversion')}`",
-                f"- keep_quarantine_active: `{report.get('source_quarantine_should_remain_active')}`",
+                f"- keep_block_active: `{report.get('source_block_should_remain_active')}`",
                 f"- affected_dates: `{dates.get('affected_market_start')}` to `{dates.get('affected_market_end')}`",
                 f"- affected_metrics: `{candidate.get('affected_metrics')}`",
                 f"- next_safe_action: `{report.get('next_safe_action')}`",
@@ -2360,8 +2360,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--city", help="Limit checks to one configured city name")
     parser.add_argument("--fixture", type=Path, help="Read Gamma events from JSON fixture")
     parser.add_argument("--include-unconfigured", action="store_true")
-    parser.add_argument("--report-only", action="store_true", help="Do not write source quarantine")
-    parser.add_argument("--quarantine-path", type=Path, help="Override source quarantine state path")
+    parser.add_argument("--report-only", action="store_true", help="Do not write source block")
+    parser.add_argument("--source-block-path", dest="block_path", type=Path, help="Override source block state path")
     parser.add_argument("--receipt-dir", type=Path, default=DEFAULT_RECEIPT_DIR)
     parser.add_argument("--lock-path", type=Path, default=DEFAULT_LOCK_PATH)
     parser.add_argument("--no-lock", action="store_true", help="Disable cron lock; intended only for tests")
@@ -2499,17 +2499,17 @@ def main(argv: list[str] | None = None) -> int:
                         include_unconfigured=args.include_unconfigured,
                         authority=authority,
                     )
-                    quarantine_actions = []
+                    block_actions = []
                     if not args.report_only:
-                        quarantine_actions = watch_source_contract.apply_source_quarantines(
+                        block_actions = watch_source_contract.apply_source_blocks(
                             report,
-                            quarantine_path=args.quarantine_path,
+                            block_path=args.block_path,
                         )
                     receipt = build_receipt(
                         report,
                         policy=policy,
                         run_id=args.run_id,
-                        quarantine_actions=quarantine_actions,
+                        block_actions=block_actions,
                     )
                     stamp_runtime_invocation(receipt, args)
                     if args.init_source_change_worktrees and receipt.get("candidates"):
@@ -2521,7 +2521,7 @@ def main(argv: list[str] | None = None) -> int:
                             db_path=args.db,
                             config_path=args.config_path,
                             source_validity_path=args.source_validity_path,
-                            quarantine_path=args.quarantine_path,
+                            block_path=args.block_path,
                             fixture=args.fixture,
                             station_metadata_path=args.station_metadata_path,
                             allow_station_metadata_network=not args.no_station_metadata_network,

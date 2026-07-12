@@ -21,7 +21,7 @@ Three type layers:
   * ``PartialPolicy``       — what an INCOMPLETE partition may authorize (calendar axis:
                               BLOCK_LIVE / BLOCK_LIVE / ALLOW).
   * ``LateArrivalPolicy``   — what to DO with a row that arrives later than expected
-                              (replace / append-revision / quarantine / ignore-if-closed /
+                              (replace / append-revision / hold / ignore-if-closed /
                               backfill-only). Orthogonal to PartialPolicy — the draft this
                               replaces conflated the two.
 
@@ -113,7 +113,7 @@ class LateArrivalPolicy(str, Enum):
 
     REPLACE_SAME_IDEMPOTENCY_KEY = "replace_same_idempotency_key"  # overwrite the keyed row
     APPEND_REVISION = "append_revision"                            # keep history, add a revision
-    QUARANTINE = "quarantine"                                      # hold out of the live chain
+    HOLD = "hold"                                                   # hold out of the live chain
     IGNORE_IF_LIVE_CLOSED = "ignore_if_live_closed"                # drop if the market already closed
     BACKFILL_ONLY = "backfill_only"                                # only ever a backfill write
 

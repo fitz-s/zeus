@@ -8,7 +8,7 @@ Tests for maintenance_worker.core.validator.
 Covers all 5 SAFETY_CONTRACT.md Validator Semantics guarantees (a–e),
 the SEV-2 #4 structural fix (in-place WRITE requires manifest.proposed_modifies),
 all 8 Operation enum members,
-Path A invariant (FORBIDDEN_* never writes SELF_QUARANTINE),
+Path A invariant (FORBIDDEN_* never writes SELF_HALT),
 and edge cases.
 
 Guarantee test naming convention:
@@ -504,14 +504,14 @@ def test_operation_subprocess_exec_returns_missing_precheck(tmp_path: Path) -> N
 
 
 # ---------------------------------------------------------------------------
-# Path A invariant: FORBIDDEN_* never writes SELF_QUARANTINE
+# Path A invariant: FORBIDDEN_* never writes SELF_HALT
 # ---------------------------------------------------------------------------
 
 
-def test_path_a_forbidden_path_does_not_write_self_quarantine(tmp_path: Path) -> None:
+def test_path_a_forbidden_path_does_not_write_self_halt(tmp_path: Path) -> None:
     """
     Critical Path A invariant: validate_action returning FORBIDDEN_PATH
-    must NOT write SELF_QUARANTINE. Only post_mutation_detector (Path B) does that.
+    must NOT write SELF_HALT. Only post_mutation_detector (Path B) does that.
     """
     v = _validator(tmp_path)
     state_dir = tmp_path / "state"
@@ -523,14 +523,14 @@ def test_path_a_forbidden_path_does_not_write_self_quarantine(tmp_path: Path) ->
     result = v.validate_action(state_db, Operation.READ)
     assert result == FORBIDDEN_PATH
 
-    quarantine_file = state_dir / "SELF_QUARANTINE"
-    assert not quarantine_file.exists(), (
-        "validate_action MUST NOT write SELF_QUARANTINE (Path A invariant)"
+    halt_file = state_dir / "SELF_HALT"
+    assert not halt_file.exists(), (
+        "validate_action MUST NOT write SELF_HALT (Path A invariant)"
     )
 
 
-def test_path_a_forbidden_operation_does_not_write_self_quarantine(tmp_path: Path) -> None:
-    """GIT_EXEC returning MISSING_PRECHECK must not write SELF_QUARANTINE."""
+def test_path_a_forbidden_operation_does_not_write_self_halt(tmp_path: Path) -> None:
+    """GIT_EXEC returning MISSING_PRECHECK must not write SELF_HALT."""
     v = _validator(tmp_path)
     state_dir = tmp_path / "state"
     state_dir.mkdir()
@@ -538,8 +538,8 @@ def test_path_a_forbidden_operation_does_not_write_self_quarantine(tmp_path: Pat
     result = v.validate_action(Path("."), Operation.GIT_EXEC)
     assert result == MISSING
 
-    quarantine_file = state_dir / "SELF_QUARANTINE"
-    assert not quarantine_file.exists()
+    halt_file = state_dir / "SELF_HALT"
+    assert not halt_file.exists()
 
 
 # ---------------------------------------------------------------------------

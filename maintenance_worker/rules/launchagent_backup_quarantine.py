@@ -8,7 +8,7 @@
 """
 Handler: launchagent_backup_quarantine
 
-Proposes quarantine of stale LaunchAgent backup/shrapnel files.
+Proposes archive of stale LaunchAgent backup/shrapnel files.
 
 enumerate(): walks ~/Library/LaunchAgents/ for files matching the backup
   regex pattern (*.bak, *.backup, *.replaced, *.locked, *.before_*);
@@ -17,7 +17,7 @@ enumerate(): walks ~/Library/LaunchAgents/ for files matching the backup
   backup file.
 
 apply(): always dry_run_only (live_default: false in catalog). Returns
-  mock diff showing planned move to quarantine_dir.
+  mock diff showing planned move to archive_dir.
 
 Verdict strings:
   LAUNCHAGENT_BACKUP_CANDIDATE  — stale backup file with active plist
@@ -46,11 +46,11 @@ VERDICT_SKIP_FRESH = "SKIP_TOO_FRESH"
 VERDICT_SKIP_FORBIDDEN = "SKIP_FORBIDDEN"
 
 DEFAULT_TTL_DAYS = 14
-DEFAULT_QUARANTINE_DIR = "~/Library/LaunchAgents/.archive"
-DEFAULT_QUARANTINE_RETENTION_DAYS = 90
+DEFAULT_ARCHIVE_DIR = "~/Library/LaunchAgents/.archive"
+DEFAULT_ARCHIVE_RETENTION_DAYS = 90
 # Catalog regex: files matching backup/shrapnel suffixes
 DEFAULT_BACKUP_REGEX = r"\.(bak|backup|replaced|locked|before_[a-z_]+)[-._]?[0-9TZ_:-]*(?:\.bak)?$"
-# Forbidden: active (non-backup) com.zeus.* plists must never be quarantined
+# Forbidden: active (non-backup) com.zeus.* plists must never be archived
 DEFAULT_FORBIDDEN_PATTERN = r"com\.zeus\.[^.]+\.plist$"
 
 # ---------------------------------------------------------------------------
@@ -71,7 +71,7 @@ def enumerate(entry: Any, ctx: TickContext) -> list[Candidate]:  # noqa: A001
     config: dict = raw.get("config", {})
 
     ttl_days: int = int(config.get("backup_ttl_days", DEFAULT_TTL_DAYS))
-    quarantine_dir_str: str = config.get("quarantine_dir", DEFAULT_QUARANTINE_DIR)
+    archive_dir_str: str = config.get("archive_dir", DEFAULT_ARCHIVE_DIR)
     backup_regex_str: str = config.get("regex", DEFAULT_BACKUP_REGEX)
 
     try:
@@ -155,10 +155,10 @@ def enumerate(entry: Any, ctx: TickContext) -> list[Candidate]:  # noqa: A001
 
 def apply(decision: Candidate, ctx: TickContext) -> ApplyResult:
     """
-    Apply LaunchAgent backup quarantine. Always dry_run_only (live_default: false).
+    Apply LaunchAgent backup archive. Always dry_run_only (live_default: false).
 
     TOP-OF-FUNCTION GUARD per PLAN §1.5.4 — defense-in-depth.
-    Returns ApplyResult with mock diff showing planned move to quarantine_dir.
+    Returns ApplyResult with mock diff showing planned move to archive_dir.
     """
     # This task is ALWAYS proposal-only — dry_run_only unconditionally.
     mock = _mock_diff(decision)
@@ -231,7 +231,7 @@ def _get_mtime(path: Path) -> float | None:
 
 
 def _mock_diff(decision: Candidate) -> tuple[str, ...]:
-    """Return a mock diff string showing planned move to quarantine dir."""
+    """Return a mock diff string showing planned move to archive dir."""
     return (
         f"[DRY RUN] would move: {decision.path}",
         f"       → ~/Library/LaunchAgents/.archive/{decision.path.name}",

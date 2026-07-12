@@ -57,10 +57,10 @@ from src.state.snapshot_repo import init_snapshot_schema, insert_snapshot
 
 @pytest.fixture(autouse=True)
 def _isolate_cache(monkeypatch, tmp_path):
-    """Reset scanner module state and isolate quarantine state around every test."""
+    """Reset scanner module state and isolate block state around every test."""
     monkeypatch.setenv(
-        ms.SOURCE_CONTRACT_QUARANTINE_PATH_ENV,
-        str(tmp_path / "source_contract_quarantine.json"),
+        ms.SOURCE_CONTRACT_BLOCK_PATH_ENV,
+        str(tmp_path / "source_contract_block.json"),
     )
     _clear_active_events_cache()
     yield
@@ -1075,7 +1075,7 @@ class TestSourceContractGate:
     def _pre_migration_paris(self, monkeypatch):
         # Many tests in this class assert pre-migration drift behavior:
         # cities.json has Paris=LFPG and the live Gamma market resolves on
-        # LFPB, so the parser/auto-converter must alert/quarantine.
+        # LFPB, so the parser/auto-converter must alert/block.
         # After the 2026-05-01 LFPG -> LFPB migration cities.json carries
         # LFPB and those drift assertions no longer fire. Swap the live
         # Paris entry for its pre-migration LFPG fixture so the
@@ -1476,7 +1476,7 @@ class TestSourceContractGate:
         assert compact["affected_cities"] == ["Paris"]
         assert [event["city"] for event in compact["alert_events"]] == ["Paris"]
         assert all(event["city"] != "Karachi" for event in compact["alert_events"])
-        assert compact["quarantine"] == {
+        assert compact["block"] == {
             "report_only": True,
             "written": False,
             "actions": [],
@@ -1500,13 +1500,13 @@ class TestSourceContractGate:
         assert exit_code_for_report(report, fail_on="WARN") == 1
         assert exit_code_for_report(report, fail_on="ALERT") == 0
 
-    def test_watch_alert_persists_city_quarantine_and_blocks_new_entries(
+    def test_watch_alert_persists_city_block_and_blocks_new_entries(
         self, monkeypatch, tmp_path
     ):
-        from scripts.watch_source_contract import analyze_events, apply_source_quarantines
+        from scripts.watch_source_contract import analyze_events, apply_source_blocks
 
-        quarantine_path = tmp_path / "source_contract_quarantine.json"
-        monkeypatch.setenv(ms.SOURCE_CONTRACT_QUARANTINE_PATH_ENV, str(quarantine_path))
+        block_path = tmp_path / "source_contract_block.json"
+        monkeypatch.setenv(ms.SOURCE_CONTRACT_BLOCK_PATH_ENV, str(block_path))
         drift_event = _gamma_temperature_event(
             title="Highest temperature in Paris on April 29?",
             slug="highest-temperature-in-paris-on-april-29-2026",
@@ -1521,22 +1521,22 @@ class TestSourceContractGate:
             checked_at_utc=datetime(2026, 4, 29, tzinfo=timezone.utc),
         )
 
-        actions = apply_source_quarantines(
+        actions = apply_source_blocks(
             report,
-            quarantine_path=quarantine_path,
+            block_path=block_path,
             observed_at="2026-04-29T00:00:00+00:00",
         )
 
         assert actions == [
             {
-                "action": "quarantine_city_source",
+                "action": "block_city_source",
                 "status": "written",
                 "city": "Paris",
-                "path": str(quarantine_path),
+                "path": str(block_path),
                 "event_ids": ["event1"],
             }
         ]
-        assert ms.is_city_source_quarantined("Paris", path=quarantine_path) is True
+        assert ms.is_city_source_blocked("Paris", path=block_path) is True
 
         matching_event_after_reconfig = _gamma_temperature_event(
             title="Highest temperature in Paris on April 30?",
@@ -1551,17 +1551,17 @@ class TestSourceContractGate:
 
         assert ms.find_weather_markets(min_hours_to_resolution=0.0) == []
 
-    def test_source_quarantine_does_not_block_existing_position_price_paths(
+    def test_source_block_does_not_block_existing_position_price_paths(
         self, monkeypatch, tmp_path
     ):
-        quarantine_path = tmp_path / "source_contract_quarantine.json"
-        monkeypatch.setenv(ms.SOURCE_CONTRACT_QUARANTINE_PATH_ENV, str(quarantine_path))
-        ms.upsert_source_contract_quarantine(
+        block_path = tmp_path / "source_contract_block.json"
+        monkeypatch.setenv(ms.SOURCE_CONTRACT_BLOCK_PATH_ENV, str(block_path))
+        ms.upsert_source_contract_block(
             "Paris",
             reason="source_contract_mismatch",
             evidence={"events": []},
             observed_at="2026-04-29T00:00:00+00:00",
-            path=quarantine_path,
+            path=block_path,
         )
         active_event = _gamma_temperature_event(
             market_id="paris-existing-market",
@@ -1587,10 +1587,10 @@ class TestSourceContractGate:
         monkeypatch,
         tmp_path,
     ):
-        quarantine_path = tmp_path / "source_contract_quarantine.json"
+        block_path = tmp_path / "source_contract_block.json"
         monkeypatch.setenv(
-            ms.SOURCE_CONTRACT_QUARANTINE_PATH_ENV,
-            str(quarantine_path),
+            ms.SOURCE_CONTRACT_BLOCK_PATH_ENV,
+            str(block_path),
         )
         monkeypatch.setattr(
             ms.runtime_config,
@@ -1633,28 +1633,28 @@ class TestSourceContractGate:
 
         assert parsed is not None
         assert parsed["source_contract"]["status"] == "MATCH"
-        assert quarantine_path.exists() is False
-        pending = ms.pending_source_contract_conversion("Paris", path=quarantine_path)
+        assert block_path.exists() is False
+        pending = ms.pending_source_contract_conversion("Paris", path=block_path)
         assert pending is not None
         assert pending["status"] == "pending_release"
-        assert ms.is_city_source_quarantined("Paris", path=quarantine_path) is True
+        assert ms.is_city_source_blocked("Paris", path=block_path) is True
         assert ms.find_weather_markets(min_hours_to_resolution=0.0) == []
-    def test_source_quarantine_release_requires_conversion_evidence_refs(self, tmp_path):
-        quarantine_path = tmp_path / "source_contract_quarantine.json"
-        ms.upsert_source_contract_quarantine(
+    def test_source_block_release_requires_conversion_evidence_refs(self, tmp_path):
+        block_path = tmp_path / "source_contract_block.json"
+        ms.upsert_source_contract_block(
             "Paris",
             reason="source_contract_mismatch",
             evidence={"event_ids": ["event1"]},
             observed_at="2026-04-29T00:00:00+00:00",
-            path=quarantine_path,
+            path=block_path,
         )
 
-        blocked = ms.release_source_contract_quarantine(
+        blocked = ms.release_source_contract_block(
             "Paris",
             released_by="operator",
             evidence={"config_updated": True},
             released_at="2026-04-29T01:00:00+00:00",
-            path=quarantine_path,
+            path=block_path,
         )
 
         assert blocked["status"] == "blocked"
@@ -1666,32 +1666,32 @@ class TestSourceContractGate:
             "calibration_rebuilt",
             "verification_passed",
         ]
-        assert ms.is_city_source_quarantined("Paris", path=quarantine_path) is True
+        assert ms.is_city_source_blocked("Paris", path=block_path) is True
 
         release_evidence = _complete_release_evidence()
-        released = ms.release_source_contract_quarantine(
+        released = ms.release_source_contract_block(
             "Paris",
             released_by="operator",
             evidence=release_evidence,
             released_at="2026-04-29T02:00:00+00:00",
-            path=quarantine_path,
+            path=block_path,
         )
 
         assert released["status"] == "released"
         assert released["entry"]["release_evidence"] == release_evidence
         assert released["transition_record"]["city"] == "Paris"
-        assert ms.is_city_source_quarantined("Paris", path=quarantine_path) is False
+        assert ms.is_city_source_blocked("Paris", path=block_path) is False
 
     def test_release_records_source_transition_history(self, tmp_path, capsys):
         from scripts.watch_source_contract import (
             analyze_events,
-            apply_source_quarantines,
+            apply_source_blocks,
             build_history_report,
             main as watch_source_contract_main,
             render_history_report,
         )
 
-        quarantine_path = tmp_path / "source_contract_quarantine.json"
+        block_path = tmp_path / "source_contract_block.json"
         drift_event = _gamma_temperature_event(
             title="Highest temperature in Paris on April 29?",
             slug="highest-temperature-in-paris-on-april-29-2026",
@@ -1705,21 +1705,21 @@ class TestSourceContractGate:
             [drift_event],
             checked_at_utc=datetime(2026, 4, 29, tzinfo=timezone.utc),
         )
-        apply_source_quarantines(
+        apply_source_blocks(
             report,
-            quarantine_path=quarantine_path,
+            block_path=block_path,
             observed_at="2026-04-29T00:00:00+00:00",
         )
         release_evidence = _complete_release_evidence(
             "docs/operations/source_transition/paris_2026-04-29"
         )
 
-        released = ms.release_source_contract_quarantine(
+        released = ms.release_source_contract_block(
             "Paris",
             released_by="operator",
             evidence=release_evidence,
             released_at="2026-04-29T02:00:00+00:00",
-            path=quarantine_path,
+            path=block_path,
         )
 
         assert released["status"] == "released"
@@ -1745,9 +1745,9 @@ class TestSourceContractGate:
                 "evidence_ref": release_evidence["evidence_refs"][key],
             }
 
-        history = ms.source_contract_transition_history("Paris", path=quarantine_path)
+        history = ms.source_contract_transition_history("Paris", path=block_path)
         assert history == [record]
-        history_report = build_history_report("Paris", quarantine_path=quarantine_path)
+        history_report = build_history_report("Paris", block_path=block_path)
         assert history_report["record_count"] == 1
         assert history_report["history"] == [record]
         text = render_history_report(history_report)
@@ -1760,8 +1760,8 @@ class TestSourceContractGate:
                 "--history",
                 "Paris",
                 "--json",
-                "--quarantine-path",
-                str(quarantine_path),
+                "--source-block-path",
+                str(block_path),
             ]
         )
         cli_report = json.loads(capsys.readouterr().out)
@@ -1769,47 +1769,47 @@ class TestSourceContractGate:
         assert cli_report["record_count"] == 1
         assert cli_report["history"][0]["to_source_contract"]["station_ids"] == ["LFPB"]
 
-    def test_requarantine_after_release_starts_new_detection_window(self, tmp_path):
-        quarantine_path = tmp_path / "source_contract_quarantine.json"
-        ms.upsert_source_contract_quarantine(
+    def test_reblock_after_release_starts_new_detection_window(self, tmp_path):
+        block_path = tmp_path / "source_contract_block.json"
+        ms.upsert_source_contract_block(
             "Paris",
             reason="source_contract_mismatch",
             evidence={"events": []},
             observed_at="2026-04-29T00:00:00+00:00",
-            path=quarantine_path,
+            path=block_path,
         )
-        released = ms.release_source_contract_quarantine(
+        released = ms.release_source_contract_block(
             "Paris",
             released_by="operator",
             evidence=_complete_release_evidence(),
             released_at="2026-04-29T02:00:00+00:00",
-            path=quarantine_path,
+            path=block_path,
         )
         assert released["status"] == "released"
 
-        ms.upsert_source_contract_quarantine(
+        ms.upsert_source_contract_block(
             "Paris",
             reason="source_contract_mismatch",
             evidence={"events": []},
             observed_at="2026-05-02T00:00:00+00:00",
-            path=quarantine_path,
+            path=block_path,
         )
 
-        active = ms.active_source_contract_quarantines(path=quarantine_path)
+        active = ms.active_source_contract_blocks(path=block_path)
         assert active["Paris"]["first_seen_at"] == "2026-05-02T00:00:00+00:00"
         assert active["Paris"]["last_seen_at"] == "2026-05-02T00:00:00+00:00"
-        history = ms.source_contract_transition_history("Paris", path=quarantine_path)
+        history = ms.source_contract_transition_history("Paris", path=block_path)
         assert len(history) == 1
         assert history[0]["released_at"] == "2026-04-29T02:00:00+00:00"
 
     def test_conversion_plan_classifies_same_provider_station_change(self, tmp_path):
         from scripts.watch_source_contract import (
             analyze_events,
-            apply_source_quarantines,
+            apply_source_blocks,
             build_conversion_plan,
         )
 
-        quarantine_path = tmp_path / "source_contract_quarantine.json"
+        block_path = tmp_path / "source_contract_block.json"
         drift_event = _gamma_temperature_event(
             title="Highest temperature in Paris on April 29?",
             slug="highest-temperature-in-paris-on-april-29-2026",
@@ -1823,15 +1823,15 @@ class TestSourceContractGate:
             [drift_event],
             checked_at_utc=datetime(2026, 4, 29, tzinfo=timezone.utc),
         )
-        apply_source_quarantines(
+        apply_source_blocks(
             report,
-            quarantine_path=quarantine_path,
+            block_path=block_path,
             observed_at="2026-04-29T00:00:00+00:00",
         )
 
-        plan = build_conversion_plan("Paris", quarantine_path=quarantine_path)
+        plan = build_conversion_plan("Paris", block_path=block_path)
 
-        assert plan["status"] == "active_quarantine"
+        assert plan["status"] == "active_block"
         assert plan["transition_branch"] == "same_provider_station_change"
         assert plan["release_contract"]["required_evidence"] == list(
             ms.REQUIRED_SOURCE_CONVERSION_EVIDENCE
@@ -1843,11 +1843,11 @@ class TestSourceContractGate:
     def test_conversion_plan_classifies_provider_family_change(self, tmp_path):
         from scripts.watch_source_contract import (
             analyze_events,
-            apply_source_quarantines,
+            apply_source_blocks,
             build_conversion_plan,
         )
 
-        quarantine_path = tmp_path / "source_contract_quarantine.json"
+        block_path = tmp_path / "source_contract_block.json"
         provider_change_event = _gamma_temperature_event(
             resolution_source="https://api.weather.gov/stations/KLAX/observations/latest"
         )
@@ -1855,31 +1855,31 @@ class TestSourceContractGate:
             [provider_change_event],
             checked_at_utc=datetime(2026, 4, 29, tzinfo=timezone.utc),
         )
-        apply_source_quarantines(
+        apply_source_blocks(
             report,
-            quarantine_path=quarantine_path,
+            block_path=block_path,
             observed_at="2026-04-29T00:00:00+00:00",
         )
 
-        plan = build_conversion_plan("Los Angeles", quarantine_path=quarantine_path)
+        plan = build_conversion_plan("Los Angeles", block_path=block_path)
 
-        assert plan["status"] == "active_quarantine"
+        assert plan["status"] == "active_block"
         assert plan["transition_branch"] == "provider_family_change_requires_new_source_role"
-        assert plan["quarantine_entry"]["evidence"]["events"][0]["source_contract"][
+        assert plan["block_entry"]["evidence"]["events"][0]["source_contract"][
             "source_family"
         ] == "noaa"
-        assert plan["quarantine_entry"]["evidence"]["events"][0]["source_contract"][
+        assert plan["block_entry"]["evidence"]["events"][0]["source_contract"][
             "configured_source_family"
         ] == "wu_icao"
 
     def test_conversion_plan_classifies_unsupported_source(self, tmp_path):
         from scripts.watch_source_contract import (
             analyze_events,
-            apply_source_quarantines,
+            apply_source_blocks,
             build_conversion_plan,
         )
 
-        quarantine_path = tmp_path / "source_contract_quarantine.json"
+        block_path = tmp_path / "source_contract_block.json"
         unsupported_event = _gamma_temperature_event(
             resolution_source="https://unsupported.example/weather/KLAX"
         )
@@ -1887,20 +1887,20 @@ class TestSourceContractGate:
             [unsupported_event],
             checked_at_utc=datetime(2026, 4, 29, tzinfo=timezone.utc),
         )
-        apply_source_quarantines(
+        apply_source_blocks(
             report,
-            quarantine_path=quarantine_path,
+            block_path=block_path,
             observed_at="2026-04-29T00:00:00+00:00",
         )
 
-        plan = build_conversion_plan("Los Angeles", quarantine_path=quarantine_path)
+        plan = build_conversion_plan("Los Angeles", block_path=block_path)
 
-        assert plan["status"] == "active_quarantine"
+        assert plan["status"] == "active_block"
         assert (
             plan["transition_branch"]
             == "unsupported_source_requires_manual_provider_adapter_review"
         )
-        assert plan["quarantine_entry"]["evidence"]["events"][0]["source_contract"][
+        assert plan["block_entry"]["evidence"]["events"][0]["source_contract"][
             "status"
         ] == "UNSUPPORTED"
 
@@ -1950,7 +1950,7 @@ class TestSourceContractGate:
                 today=auto.date(2026, 4, 30),
             ),
             run_id="test-run",
-            quarantine_actions=[],
+            block_actions=[],
         )
 
         assert receipt["status"] == "planned"
@@ -2022,9 +2022,9 @@ class TestSourceContractGate:
         assert mini_packet["report_template"] == {
             "city": "Paris",
             "can_complete_remaining_conversion": False,
-            "source_quarantine_should_remain_active": True,
+            "source_block_should_remain_active": True,
             "blocking_reasons": candidate["runtime_gaps_before_apply"],
-            "next_safe_action": "write report, keep quarantine active, and request missing deterministic capability",
+            "next_safe_action": "write report, keep block active, and request missing deterministic capability",
         }
         controller_apply = next(
             item for item in candidate["command_plan"] if item["id"] == "controller_apply"
@@ -2244,8 +2244,8 @@ class TestSourceContractGate:
                 str(tmp_path / "receipts"),
                 "--lock-path",
                 str(tmp_path / "source_auto.lock"),
-                "--quarantine-path",
-                str(tmp_path / "quarantine.json"),
+                "--source-block-path",
+                str(tmp_path / "block.json"),
                 "--run-id",
                 "cron-run",
                 "--today",
@@ -2270,7 +2270,7 @@ class TestSourceContractGate:
         )
         assert "--fixture" in controller_step["allowed_command"]
         assert str(fixture) in controller_step["allowed_command"]
-        assert "--quarantine-path" in controller_step["allowed_command"]
+        assert "--source-block-path" in controller_step["allowed_command"]
         receipt_path = tmp_path / "receipts" / "cron-run.json"
         latest_path = tmp_path / "receipts" / "latest.json"
         report_path = tmp_path / "receipts" / "cron-run.mini_report.md"
@@ -2326,8 +2326,8 @@ class TestSourceContractGate:
                 str(tmp_path / "receipts"),
                 "--lock-path",
                 str(tmp_path / "source_auto.lock"),
-                "--quarantine-path",
-                str(tmp_path / "quarantine.json"),
+                "--source-block-path",
+                str(tmp_path / "block.json"),
                 "--run-id",
                 "fixture-prod-block",
                 "--today",
@@ -2345,7 +2345,7 @@ class TestSourceContractGate:
         assert "default world DB" in output["error"]
         assert "default city config" in output["error"]
 
-    def test_auto_convert_execute_apply_writes_evidence_and_releases_quarantine(
+    def test_auto_convert_execute_apply_writes_evidence_and_releases_block(
         self, monkeypatch, tmp_path, capsys
     ):
         from scripts import source_contract_auto_convert as auto
@@ -2399,7 +2399,7 @@ class TestSourceContractGate:
         source_validity_path.write_text("# Current Source Validity\n", encoding="utf-8")
         db_path = tmp_path / "zeus-world.db"
         db_path.write_bytes(b"sqlite placeholder")
-        quarantine_path = tmp_path / "quarantine.json"
+        block_path = tmp_path / "block.json"
         receipts_dir = tmp_path / "receipts"
         evidence_base = tmp_path / "evidence"
         commands: list[list[str]] = []
@@ -2435,8 +2435,8 @@ class TestSourceContractGate:
                 str(receipts_dir),
                 "--lock-path",
                 str(tmp_path / "source_auto.lock"),
-                "--quarantine-path",
-                str(quarantine_path),
+                "--source-block-path",
+                str(block_path),
                 "--run-id",
                 "apply-run",
                 "--today",
@@ -2478,10 +2478,10 @@ class TestSourceContractGate:
         assert paris["lon"] == pytest.approx(2.44139)
         assert paris["wu_pws"] is None
 
-        history = ms.source_contract_transition_history("Paris", path=quarantine_path)
+        history = ms.source_contract_transition_history("Paris", path=block_path)
         assert len(history) == 1
         assert history[0]["to_source_contract"]["station_ids"] == ["LFPB"]
-        assert ms.is_city_source_quarantined("Paris", path=quarantine_path) is False
+        assert ms.is_city_source_blocked("Paris", path=block_path) is False
         assert "Source Auto-Conversion Applied: Paris" in source_validity_path.read_text(encoding="utf-8")
         assert (evidence_base / "apply-run" / "paris" / "db_backup.json").exists()
         assert any("scripts/backfill_wu_daily_all.py" in cmd for command in commands for cmd in command)
@@ -2554,7 +2554,7 @@ class TestSourceContractGate:
         source_validity_path.write_bytes(original_source_validity)
         db_path = tmp_path / "zeus-world.db"
         db_path.write_bytes(b"sqlite placeholder")
-        quarantine_path = tmp_path / "quarantine.json"
+        block_path = tmp_path / "block.json"
         evidence_base = tmp_path / "evidence"
 
         def _fail_run_command(command, *, cwd, artifact_path):
@@ -2570,8 +2570,8 @@ class TestSourceContractGate:
                 str(tmp_path / "receipts"),
                 "--lock-path",
                 str(tmp_path / "source_auto.lock"),
-                "--quarantine-path",
-                str(quarantine_path),
+                "--source-block-path",
+                str(block_path),
                 "--run-id",
                 "rollback-run",
                 "--today",
@@ -2659,14 +2659,14 @@ class TestSourceContractGate:
             ("MAM", "affected_v1")
         ]
 
-    def test_venus_sensing_report_source_watch_persists_quarantine(
+    def test_venus_sensing_report_source_watch_persists_block(
         self, monkeypatch, tmp_path
     ):
         from scripts import venus_sensing_report
         from scripts import watch_source_contract
 
-        quarantine_path = tmp_path / "source_contract_quarantine.json"
-        monkeypatch.setenv(ms.SOURCE_CONTRACT_QUARANTINE_PATH_ENV, str(quarantine_path))
+        block_path = tmp_path / "source_contract_block.json"
+        monkeypatch.setenv(ms.SOURCE_CONTRACT_BLOCK_PATH_ENV, str(block_path))
         monkeypatch.delenv(venus_sensing_report.SOURCE_WATCH_REPORT_ONLY_ENV, raising=False)
         drift_event = _gamma_temperature_event(
             title="Highest temperature in Paris on April 29?",
@@ -2686,16 +2686,16 @@ class TestSourceContractGate:
         report = venus_sensing_report._collect_source_contract_watch()
 
         assert report["status"] == "ALERT"
-        assert report["quarantine_actions"] == [
+        assert report["block_actions"] == [
             {
-                "action": "quarantine_city_source",
+                "action": "block_city_source",
                 "status": "written",
                 "city": "Paris",
-                "path": str(quarantine_path),
+                "path": str(block_path),
                 "event_ids": ["event1"],
             }
         ]
-        assert ms.is_city_source_quarantined("Paris", path=quarantine_path) is True
+        assert ms.is_city_source_blocked("Paris", path=block_path) is True
 
     def test_venus_sensing_report_source_watch_report_only_does_not_write(
         self, monkeypatch, tmp_path
@@ -2703,8 +2703,8 @@ class TestSourceContractGate:
         from scripts import venus_sensing_report
         from scripts import watch_source_contract
 
-        quarantine_path = tmp_path / "source_contract_quarantine.json"
-        monkeypatch.setenv(ms.SOURCE_CONTRACT_QUARANTINE_PATH_ENV, str(quarantine_path))
+        block_path = tmp_path / "source_contract_block.json"
+        monkeypatch.setenv(ms.SOURCE_CONTRACT_BLOCK_PATH_ENV, str(block_path))
         monkeypatch.setenv(venus_sensing_report.SOURCE_WATCH_REPORT_ONLY_ENV, "1")
         drift_event = _gamma_temperature_event(
             title="Highest temperature in Paris on April 29?",
@@ -2724,10 +2724,10 @@ class TestSourceContractGate:
         report = venus_sensing_report._collect_source_contract_watch()
 
         assert report["status"] == "ALERT"
-        assert report["quarantine_actions"] == []
-        assert quarantine_path.exists() is False
+        assert report["block_actions"] == []
+        assert block_path.exists() is False
 
-    def test_venus_sensing_report_preserves_alert_when_quarantine_write_fails(
+    def test_venus_sensing_report_preserves_alert_when_block_write_fails(
         self, monkeypatch
     ):
         from scripts import venus_sensing_report
@@ -2750,18 +2750,18 @@ class TestSourceContractGate:
         )
 
         def _raise(_report):
-            raise OSError("cannot write quarantine")
+            raise OSError("cannot write block")
 
-        monkeypatch.setattr(watch_source_contract, "apply_source_quarantines", _raise)
+        monkeypatch.setattr(watch_source_contract, "apply_source_blocks", _raise)
 
         report = venus_sensing_report._collect_source_contract_watch()
 
         assert report["status"] == "ALERT"
         assert report["summary"]["ALERT"] == 1
-        assert report["quarantine_actions"] == [
-            {"action": "quarantine_city_source", "status": "error"}
+        assert report["block_actions"] == [
+            {"action": "block_city_source", "status": "error"}
         ]
-        assert report["quarantine_error"] == "cannot write quarantine"
+        assert report["block_error"] == "cannot write block"
 
     def test_venus_sensing_report_labels_positions_json_as_legacy_telemetry(
         self, monkeypatch, tmp_path
