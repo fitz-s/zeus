@@ -72,7 +72,8 @@ retroactively turn a partial order fact into full-fill proof.
 - Require cumulative canonical EXIT fill quantity to cover the command and the
   current position before lifecycle alignment may emit `FILL_CONFIRMED` or
   economic close; cumulative order facts never stack on existing trade facts,
-  and a tx-hash aggregate alias never stacks on its exact child trade facts.
+  and a tx-hash aggregate alias never stacks on its exact child trade facts in
+  lifecycle finality, locked-token, journal, or capital-balance views.
 - Bind the global candidate's canonical YES/NO side into the current-state
   submit certificate. A missing legacy route `side` must not become `UNKNOWN`,
   while any real certificate/candidate side mismatch remains fail-closed.
