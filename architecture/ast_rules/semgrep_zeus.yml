@@ -94,7 +94,7 @@ rules:
       - pattern: $OBJ.state = "..."
 
   - id: zeus-no-strategy-default-fallback
-    message: "Default strategy fallback masks attribution contamination; use canonical strategy_key or reject/quarantine."
+    message: "Default strategy fallback masks attribution contamination; use canonical strategy_key or reject the row."
     languages: [python]
     severity: ERROR
     paths:

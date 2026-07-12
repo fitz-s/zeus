@@ -215,9 +215,9 @@ def test_run_tick_skip_on_oncall_quiet(tmp_path: Path) -> None:
     assert "ONCALL_QUIET" in result.skip_reason
 
 
-def test_run_tick_hard_guard_does_not_write_self_quarantine(tmp_path: Path) -> None:
+def test_run_tick_hard_guard_does_not_write_self_halt(tmp_path: Path) -> None:
     """
-    C2 invariant: hard guard failure (Path A) must NOT write SELF_QUARANTINE.
+    C2 invariant: hard guard failure (Path A) must NOT write SELF_HALT.
     Only post_mutation_detector (Path B) writes it.
     """
     config = _make_config(tmp_path)
@@ -230,8 +230,8 @@ def test_run_tick_hard_guard_does_not_write_self_quarantine(tmp_path: Path) -> N
         ):
             with pytest.raises(SystemExit):
                 run_tick(config)
-    quarantine = config.state_dir / "SELF_QUARANTINE"
-    assert not quarantine.exists(), "Hard guard must NOT write SELF_QUARANTINE (C2 invariant)"
+    halt = config.state_dir / "SELF_HALT"
+    assert not halt.exists(), "Hard guard must NOT write SELF_HALT (C2 invariant)"
 
 
 # ---------------------------------------------------------------------------
@@ -383,10 +383,10 @@ def test_tick_result_started_at_is_utc(tmp_path: Path) -> None:
     assert result.started_at.tzinfo is not None
 
 
-def test_run_tick_self_quarantined_guard_exits_nonzero(tmp_path: Path) -> None:
-    """SELF_QUARANTINE present → refuse_fatal(SELF_QUARANTINED) → SystemExit."""
+def test_run_tick_self_haltd_guard_exits_nonzero(tmp_path: Path) -> None:
+    """SELF_HALT present → refuse_fatal(SELF_HALTED) → SystemExit."""
     config = _make_config(tmp_path)
-    (config.state_dir / "SELF_QUARANTINE").write_text("prior quarantine")
+    (config.state_dir / "SELF_HALT").write_text("prior halt")
     mock_run, mock_disk = _clean_guards_context(tmp_path)
     with mock_run, mock_disk:
         with patch(
@@ -822,7 +822,7 @@ def test_empty_manifest_forces_dry_run_for_live_exempt_handler(
     force dry_run_only=True on the ctx passed to handler.apply().
 
     Without this gate: handler does a real delete/move → post_mutation_detector
-    compares against empty manifest → writes SELF_QUARANTINE → exit(50),
+    compares against empty manifest → writes SELF_HALT → exit(50),
     permanently bricking future ticks. (Codex PR #124 P2 finding.)
     """
     from datetime import datetime, timezone

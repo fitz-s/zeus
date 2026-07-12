@@ -7,7 +7,7 @@
 #   never touch dirty files, never stash).
 #
 # WHAT: the testable core of loop/tick.sh (v3 single tick). Pure Python so
-#   the safety-critical logic (allowlist enforcement, quarantine restore,
+#   the safety-critical logic (allowlist enforcement, violation restore,
 #   diff circuit breaker, HALT check, non-blocking single-flight lock) has
 #   unit test coverage instead of living only in shell. The wrapper scripts
 #   stay thin: they call this CLI and act on its exit code.
@@ -457,7 +457,7 @@ def _now_iso() -> str:
 # ---------------------------------------------------------------------------
 # *.db, *.db-wal, *.db-shm, *.db-journal are ALL globally gitignored
 # (.gitignore lines ~79-90) — git status never sees a write to any of them,
-# so the allowlist/quarantine mechanism above is structurally blind to the
+# so the allowlist/restore mechanism above is structurally blind to the
 # one class of file the prompts most emphasize never touching. This sentinel
 # is a separate, git-independent check: record (mtime, size) for every DB
 # file under state/ (recursive) plus repo-root decoy *.db* files (the same

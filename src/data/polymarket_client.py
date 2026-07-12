@@ -1043,7 +1043,7 @@ class PolymarketClient:
                 cash_pnl = float(item.get("cashPnl", 0) or 0)
                 cur_price = float(item.get("curPrice", 0) or 0)
             except (TypeError, ValueError) as e:
-                logger.warning("Quarantining token %s due to malformed metrics: %s", token_id, e)
+                logger.warning("Rejecting token %s due to malformed metrics: %s", token_id, e)
                 continue
 
             positions.append({

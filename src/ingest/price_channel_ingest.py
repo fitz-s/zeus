@@ -1701,7 +1701,7 @@ def _edli_held_position_priority_token_ids(trade_conn) -> set[str]:
     Same broader-concept relationship as portfolio._is_runtime_open_position
     (see the comment there); not consolidated to avoid silently narrowing quote
     priority. See
-    tests/test_quarantine_excision_t_consolidations_characterization.py::test_edli_priority_tokens_includes_voided_phase_and_broader_chain_states.
+    tests/test_excision_t_consolidations_characterization.py::test_edli_priority_tokens_includes_voided_phase_and_broader_chain_states.
     """
 
     if trade_conn is None:

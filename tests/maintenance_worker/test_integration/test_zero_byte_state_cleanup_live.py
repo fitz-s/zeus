@@ -108,7 +108,7 @@ def test_engine_live_deletes_stale_zero_byte_file(tmp_path: Path) -> None:
     MB3 (updated for PR #124 Codex P2 gate): engine drives zero_byte_state_cleanup
     enumerate() → apply() end-to-end, but with the P5.5 empty-manifest gate active,
     the apply() call receives dry_run_only=True — preventing the live deletion →
-    empty manifest → SELF_QUARANTINE brick pattern.
+    empty manifest → SELF_HALT brick pattern.
 
     The MB3 invariant (engine dispatches the handler) is preserved: the gate
     warning log proves the dispatch reached _apply_decisions and the gate fired.
@@ -149,7 +149,7 @@ def test_engine_live_deletes_stale_zero_byte_file(tmp_path: Path) -> None:
                 result = engine.run_tick(config)
 
     # P5.5 gate: all apply results must be dry_run_only=True while manifest is stub.
-    # Gate prevents: live delete → empty manifest mismatch → SELF_QUARANTINE → exit(50).
+    # Gate prevents: live delete → empty manifest mismatch → SELF_HALT → exit(50).
     task_results = [ar for ar in result.apply_results if ar.task_id == "zero_byte_state_cleanup"]
     assert len(task_results) >= 1, (
         "Engine must have dispatched zero_byte_state_cleanup and returned ≥1 ApplyResult"

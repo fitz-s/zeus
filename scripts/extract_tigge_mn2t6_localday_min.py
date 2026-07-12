@@ -1,7 +1,7 @@
 # Lifecycle: created=2026-04-17; last_reviewed=2026-04-29; last_reused=2026-04-29
 # Purpose: GRIB→JSON extractor for mn2t6 local-calendar-day min (low track);
 #          emits canonical payload per 08_TIGGE_DUAL_TRACK_INTEGRATION_zh.md §5;
-#          implements Phase 5B R-AG (boundary quarantine), R-AH (causality N/A), R-AI (data_version).
+#          implements Phase 5B R-AG (boundary rejection), R-AH (causality N/A), R-AI (data_version).
 # Reuse: Before running, confirm (1) config/cities.json canonical source,
 #        (2) 51 source data/docs/tigge_city_coordinate_manifest_full_latest.json aligns,
 #        (3) eccodes installed. Test contract: tests/test_phase5b_low_historical_lane.py.
@@ -22,7 +22,7 @@ Output contract matches ingest_grib_to_snapshots.py:ingest_json_file expectation
 - members           = 51 elements, member 0 = control, 1..50 = perturbed
 - causality         = always present; status="N/A_CAUSAL_DAY_ALREADY_STARTED" for
                       positive-offset cities where local day has already started at issue_utc
-- boundary_policy   = always present; boundary_ambiguous=True quarantines whole snapshot
+- boundary_policy   = always present; boundary_ambiguous=True rejects whole snapshot
                       from calibration training (training_allowed=False)
 
 Boundary-leakage law (§6 of TIGGE_MN2T6_LOCALDAY_MIN_REMEDIATION_PLAN.md):
@@ -31,7 +31,7 @@ Boundary-leakage law (§6 of TIGGE_MN2T6_LOCALDAY_MIN_REMEDIATION_PLAN.md):
 
 NOT a polarity swap of extract_tigge_mx2t6_localday_max.py. The boundary
 semantics differ — MIN's sunrise window often lands in a boundary bucket,
-making the conservative quarantine load-bearing (not just "close to edge").
+making the conservative rejection load-bearing (not just "close to edge").
 
 Dependencies: eccodes (system library; must be installed: brew install eccodes)
 """
@@ -134,7 +134,7 @@ class BoundaryClassification:
         Ambiguity also applies when there are no inner buckets (boundary-only coverage).
 
         Bug fix 2026-05-19 (SYNTHESIS Addendum 2 §2 Bug B): changed <= to < (strict).
-        Non-strict ties were quarantining the snapshot when boundary_min happened to
+        Non-strict ties were rejecting the snapshot when boundary_min happened to
         equal inner_min — e.g. both members landing on the same isotherm — despite
         providing zero look-ahead leakage signal.
         """
@@ -170,7 +170,7 @@ def classify_boundary_low(
 
     MIN-specific semantics: boundary_ambiguous = boundary_min <= inner_min.
     The sunrise hour frequently lands in a boundary bucket for some timezones,
-    so this rule can cause high quarantine rates — that is expected and intentional.
+    so this rule can cause high rejection rates — that is expected and intentional.
     """
     result = BoundaryClassification()
     for step_range, value_k in step_values.items():
@@ -305,9 +305,9 @@ def build_low_snapshot_json(
         1 for c in member_classifications.values() if c.boundary_ambiguous
     )
     # Bug fix 2026-05-19 (SYNTHESIS Addendum 2 §2 Bug A):
-    # Old rule: any(boundary_ambiguous) quarantined the whole 51-member snapshot when
+    # Old rule: any(boundary_ambiguous) rejected the whole 51-member snapshot when
     # even 1 member fired — probabilistically near-certain to trigger.
-    # New rule: majority threshold (≥26/51 ≈ 51%) before quarantine.
+    # New rule: majority threshold (≥26/51 ≈ 51%) before rejection.
     # Empirical basis: ensemble_snapshots last-7-days shows ambiguous_member_count
     # is continuously distributed 0-51; 26 (51% of 51-member ensemble) is the v1
     # default. Operator-tunable via AMBIGUITY_MAJORITY_THRESHOLD env var.
@@ -327,7 +327,7 @@ def build_low_snapshot_json(
     for m in range(MEMBER_COUNT):
         clf = member_classifications[m]
         if any_boundary_ambiguous:
-            # R-AR: whole snapshot quarantined — emit None, not inner_min.
+            # R-AR: whole snapshot rejected — emit None, not inner_min.
             # A non-null value would let downstream consumers read it without
             # checking training_allowed and get contaminated data.
             val_k = None

@@ -580,7 +580,7 @@ def resolve_bucket_serve_method(
 
     A city verified RAW is served raw (cheapest, one read, no static field needed). A city
     verified ONLY via downscaling is served downscaled. A city verified by neither stays
-    quarantined (None) — honest, never weakened. Missing receipts ⇒ None (fail-closed)."""
+    non-admitted (None) — honest, never weakened. Missing receipts ⇒ None (fail-closed)."""
     from pathlib import Path as _Path
 
     try:

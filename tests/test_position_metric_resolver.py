@@ -81,8 +81,8 @@ def test_position_missing_attribute_returns_unverified():
 
 def test_none_input_raises_type_error():
     """Slice P2-fix4 guard: None is a programmer-bug signal, not a legacy
-    quarantine case. Must crash loudly so the audit log doesn't conflate
-    caller bugs with legitimate quarantine defaults."""
+    fallback case. Must crash loudly so the audit log doesn't conflate
+    caller bugs with legitimate missing-metric defaults."""
     with pytest.raises(TypeError, match="got None"):
         resolve_position_metric(None)
 

@@ -28,7 +28,7 @@ Eight relationship tests covering:
   5. test_insufficient_signal_when_bin_topology_unknown — conservative classifier
   6. test_insufficient_signal_when_label_is_settlement_capture_no_discovery_mode
      — the asymmetry between STRATEGIES enum + evaluator dispatch rule
-  7. test_insufficient_signal_when_label_not_in_governed_strategy_keys — quarantine
+  7. test_insufficient_signal_when_label_not_in_governed_strategy_keys — reject
   8. test_bin_topology_classifier_recognizes_each_class — classifier unit tests
   9. test_detect_drifts_in_window_filters_by_metric_ready_and_window — wrapper
 """
@@ -180,7 +180,7 @@ def test_insufficient_signal_when_label_is_settlement_capture_no_discovery_mode(
 
 def test_insufficient_signal_when_label_not_in_governed_strategy_keys():
     """RELATIONSHIP: a position whose strategy field is not one of the 4
-    governed STRATEGY_KEYS is quarantined (insufficient_signal) rather than
+    governed STRATEGY_KEYS is rejected (insufficient_signal) rather than
     flagged as drift. AGENTS.md §strategy families says strategy_key is the
     sole governance identity; non-governed labels are upstream data quality
     issues, not attribution drift in the sense this packet measures."""

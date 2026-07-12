@@ -66,7 +66,7 @@ MIN_PRIOR_N = 5
 # (or any threshold change above) yields a new gate_set_hash, which makes the
 # reader auto-reject every row fit under the old gate set.
 # -sd2 (2026-05-28): MIN_PRIOR_N 2->5 + CONSERVATIVE_RESIDUAL_FLOOR_C added -> every
-# pre-SD2 STAGING row auto-quarantines; this rebuild is a one-time full reproduce.
+# pre-SD2 STAGING row auto-rejects; this rebuild is a one-time full reproduce.
 # -sd3 (2026-05-28): B1 hemisphere-aware season label + B6 training_cutoff threaded
 # into every fit loader. B1 changes the row PK semantics for SH cities (rows now
 # carry the SH-flipped label that matches reader queries). B6 changes the data the
@@ -87,7 +87,7 @@ def current_gate_set_hash() -> str:
     This is the structural antibody for the pre-gate-transport-delta contamination
     (2026-05-27 audit: 49% of stored rows were fit before MIN_PAIRED_N=5 existed).
     Rather than rename the family to a version suffix, the gate-set hash carries the
-    probability-domain identity: change a gate, and stale rows auto-quarantine at
+    probability-domain identity: change a gate, and stale rows auto-reject at
     read time. Deterministic across processes (sorted JSON, no dict ordering).
     """
     import hashlib

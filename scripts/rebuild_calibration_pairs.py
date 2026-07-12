@@ -3,8 +3,8 @@
 # Authority basis: FT_SHIP_MASTER_SPEC_2026-05-25 Phase 3 (additive, non-destructive)
 # P1 (2026-05-25): _scoped_pair_predicate scoped by error_model_family — delete is now
 #   family-scoped, making ft_v1 additive alongside existing 'none' rows.
-# P2 (2026-05-25): DataVersionQuarantinedError caught per-snapshot in dry-run and
-#   sequential live paths — spec-quarantined snapshots skip+count, do not abort run.
+# P2 (2026-05-25): DataVersionRejectedError caught per-snapshot in dry-run and
+#   sequential live paths — spec-rejected snapshots skip+count, do not abort run.
 # Purpose: Rebuild metric-aware calibration_pairs_v2 behind dry-run and preflight gates.
 # Reuse: Inspect architecture/script_manifest.yaml and active packet receipt before live writes.
 
@@ -49,7 +49,7 @@ SAFETY GATES:
   before bucket commits and mark it ``complete`` only after all post-write gates
   pass. Consumers must refuse a rebuilt scope unless the complete sentinel is
   present for that exact scope.
-- Quarantined snapshots (``is_quarantined(data_version)``) are skipped and counted.
+- Rejected snapshots (``is_rejected(data_version)``) are skipped and counted.
 - ``>30%`` no-observation ratio → abort.
 - Zero pairs written → abort.
 """
@@ -106,12 +106,12 @@ from src.contracts.calibration_bins import (
     validate_members_vs_observation,
 )
 from src.contracts.ensemble_snapshot_provenance import (
-    DataVersionQuarantinedError,
+    DataVersionRejectedError,
     ECMWF_OPENDATA_LOW_DATA_VERSION,
     ECMWF_OPENDATA_LOW_CONTRACT_WINDOW_DATA_VERSION,
     TIGGE_LOW_CONTRACT_WINDOW_DATA_VERSION,
     assert_data_version_allowed,
-    is_quarantined,
+    is_rejected,
 )
 from src.contracts.settlement_semantics import SettlementSemantics
 from src.signal.ensemble_signal import p_raw_vector_from_maxes
@@ -278,7 +278,7 @@ def _native_error_params_for_snapshot(
 class RebuildStatsV2:
     snapshots_scanned: int = 0
     snapshots_eligible: int = 0
-    snapshots_quarantined: int = 0
+    snapshots_rejected: int = 0
     snapshots_contract_evidence_rejected: int = 0
     snapshots_no_observation: int = 0
     snapshots_unit_rejected: int = 0
@@ -300,7 +300,7 @@ class RebuildStatsV2:
         return {
             "snapshots_scanned": self.snapshots_scanned,
             "snapshots_eligible": self.snapshots_eligible,
-            "snapshots_quarantined": self.snapshots_quarantined,
+            "snapshots_rejected": self.snapshots_rejected,
             "snapshots_contract_evidence_rejected": self.snapshots_contract_evidence_rejected,
             "snapshots_no_observation": self.snapshots_no_observation,
             "snapshots_unit_rejected": self.snapshots_unit_rejected,
@@ -932,7 +932,7 @@ def _fetch_eligible_snapshots_v2(
             "implicit HIGH default would hide HIGH/LOW recovery routing mistakes."
         )
     if data_version_filter and not spec.allows_data_version(data_version_filter):
-        raise DataVersionQuarantinedError(
+        raise DataVersionRejectedError(
             f"rebuild_calibration_pairs: --data-version={data_version_filter!r} "
             f"is not allowed for {spec.identity.temperature_metric} spec "
             f"{spec.allowed_data_versions!r}."
@@ -1203,14 +1203,14 @@ def _pre_compute_snapshot_v2(
 
     # Per-spec cross-check: write-time defense against cross-metric contamination (R-AU).
     if not spec.allows_data_version(data_version):
-        raise DataVersionQuarantinedError(
+        raise DataVersionRejectedError(
             f"rebuild_calibration_pairs: snapshot data_version={data_version!r} "
             f"does not match spec.allowed_data_versions={spec.allowed_data_versions!r}. "
             "Cross-metric contamination refused."
         )
 
-    # Quarantine guard (belt-and-suspenders: eligibility query already filters
-    # training_allowed=1, but data_version quarantine is a write-time contract)
+    # Rejection guard (belt-and-suspenders: eligibility query already filters
+    # training_allowed=1, but data_version rejection is a write-time contract)
     assert_data_version_allowed(data_version, context="rebuild_calibration_pairs")
 
     contract_evidence_rejection = _low_contract_evidence_rejection(snapshot, spec=spec)
@@ -1494,7 +1494,7 @@ def _dry_run_evaluate_snapshot_v2(
     data_version = snapshot["dataset_id"] or ""
 
     if not spec.allows_data_version(data_version):
-        raise DataVersionQuarantinedError(
+        raise DataVersionRejectedError(
             f"rebuild_calibration_pairs dry-run: snapshot data_version={data_version!r} "
             f"does not match spec.allowed_data_versions={spec.allowed_data_versions!r}."
         )
@@ -1619,16 +1619,16 @@ def rebuild(
     eligible: list[sqlite3.Row] = []
     for snap in snapshots:
         dv = snap["dataset_id"] or ""
-        if is_quarantined(dv):
-            stats.snapshots_quarantined += 1
-            print(f"  QUARANTINED snapshot_id={snap['snapshot_id']} data_version={dv!r}")
+        if is_rejected(dv):
+            stats.snapshots_rejected += 1
+            print(f"  REJECTED snapshot_id={snap['snapshot_id']} data_version={dv!r}")
             continue
         eligible.append(snap)
     stats.snapshots_eligible = len(eligible)
 
     print()
     print(f"Snapshots scanned:    {stats.snapshots_scanned}")
-    print(f"  quarantined:        {stats.snapshots_quarantined}")
+    print(f"  rejected:           {stats.snapshots_rejected}")
     print(f"  eligible:           {stats.snapshots_eligible}")
 
     stats.pre_delete_v2_pairs = _collect_pre_delete_count(
@@ -1659,15 +1659,15 @@ def rebuild(
                     spec=spec,
                     stats=stats,
                 )
-            except DataVersionQuarantinedError as _dve:
+            except DataVersionRejectedError as _dve:
                 # P2 (2026-05-25): spec.allows_data_version() raises for versions
                 # not in the spec's allowed list (e.g. ecmwf_opendata_mx2t6 which
-                # passed is_quarantined() but is outside the HIGH spec's positively-
+                # passed is_rejected() but is outside the HIGH spec's positively-
                 # allowed set). Catch per-snapshot so the dry-run traverses all
                 # cities×metrics rather than aborting on the first such snapshot.
-                stats.snapshots_quarantined += 1
+                stats.snapshots_rejected += 1
                 print(
-                    f"  SPEC-QUARANTINED (dry-run skip) "
+                    f"  SPEC-REJECTED (dry-run skip) "
                     f"snapshot_id={snap['snapshot_id']} "
                     f"data_version={snap['dataset_id']!r}: {_dve}"
                 )
@@ -1797,13 +1797,13 @@ def rebuild(
                             error_model_family=error_model_family,
                             error_cache=error_cache,
                         )
-                    except DataVersionQuarantinedError as _dve:
-                        # P2: spec-quarantined snapshot (passes is_quarantined() but
+                    except DataVersionRejectedError as _dve:
+                        # P2: spec-rejected snapshot (passes is_rejected() but
                         # outside this spec's positively-allowed data_version set).
                         # Skip + count; do not abort the city bucket.
-                        stats.snapshots_quarantined += 1
+                        stats.snapshots_rejected += 1
                         print(
-                            f"  SPEC-QUARANTINED (live skip) "
+                            f"  SPEC-REJECTED (live skip) "
                             f"snapshot_id={snap['snapshot_id']} "
                             f"data_version={snap['dataset_id']!r}: {_dve}"
                         )

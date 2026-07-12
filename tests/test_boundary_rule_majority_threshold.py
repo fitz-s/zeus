@@ -80,21 +80,21 @@ class TestMajorityThreshold:
         return ambiguous_member_count >= threshold
 
     def test_t1_one_ambiguous_member_not_rejected(self):
-        """1/51 ambiguous members: snapshot NOT quarantined (was rejected under old any())."""
+        """1/51 ambiguous members: snapshot NOT rejected (was rejected under old any())."""
         assert self._aggregate(1, 51) is False, (
-            "1/51 ambiguous must NOT trigger majority quarantine"
+            "1/51 ambiguous must NOT trigger majority rejection"
         )
 
-    def test_t2_threshold_exactly_quarantines(self):
-        """26/51 ambiguous members: snapshot IS quarantined (at threshold)."""
+    def test_t2_threshold_exactly_rejects(self):
+        """26/51 ambiguous members: snapshot IS rejected (at threshold)."""
         assert self._aggregate(26, 51) is True, (
-            "26/51 ambiguous must trigger majority quarantine"
+            "26/51 ambiguous must trigger majority rejection"
         )
 
-    def test_t3_one_below_threshold_not_quarantined(self):
-        """25/51 ambiguous members: snapshot NOT quarantined (just below threshold)."""
+    def test_t3_one_below_threshold_not_rejected(self):
+        """25/51 ambiguous members: snapshot NOT rejected (just below threshold)."""
         assert self._aggregate(25, 51) is False, (
-            "25/51 ambiguous must NOT trigger majority quarantine"
+            "25/51 ambiguous must NOT trigger majority rejection"
         )
 
 

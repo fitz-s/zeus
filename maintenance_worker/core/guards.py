@@ -9,7 +9,7 @@ guards — 8 pre-tick guard check functions and GuardReport aggregator.
 SCAFFOLD §6 ND3 split:
   6 refuse_fatal hard guards (CheckResult.ok=False → engine calls refuse_fatal):
     check_kill_switch, check_dirty_repo, check_active_rebase,
-    check_disk_free, check_inflight_pr, check_self_quarantined
+    check_disk_free, check_inflight_pr, check_self_halted
 
   2 skip_tick soft guards (CheckResult.ok=False → engine calls skip_tick):
     check_no_pause_flag, check_oncall_quiet
@@ -238,14 +238,14 @@ def check_inflight_pr(state_dir: Path) -> CheckResult:
     return CheckResult(ok=True, reason="", details={"severity": SEVERITY_REFUSE_FATAL})
 
 
-def check_self_quarantined(state_dir: Path) -> CheckResult:
+def check_self_halted(state_dir: Path) -> CheckResult:
     """
-    Hard guard: SELF_QUARANTINE file present → refuse_fatal(SELF_QUARANTINED).
+    Hard guard: SELF_HALT file present → refuse_fatal(SELF_HALTED).
 
     Written only by post_mutation_detector (Path B). Human must reconcile
     and delete to resume.
     """
-    qfile = state_dir / "SELF_QUARANTINE"
+    qfile = state_dir / "SELF_HALT"
     if qfile.exists():
         reason_text = ""
         try:
@@ -254,12 +254,12 @@ def check_self_quarantined(state_dir: Path) -> CheckResult:
             reason_text = "(unreadable)"
         return CheckResult(
             ok=False,
-            reason=RefusalReason.SELF_QUARANTINED.value,
+            reason=RefusalReason.SELF_HALTED.value,
             details={
                 "severity": SEVERITY_REFUSE_FATAL,
                 "file": str(qfile),
-                "quarantine_content": reason_text,
-                "message": "SELF_QUARANTINE present; human must reconcile and delete.",
+                "halt_content": reason_text,
+                "message": "SELF_HALT present; human must reconcile and delete.",
             },
         )
     return CheckResult(ok=True, reason="", details={"severity": SEVERITY_REFUSE_FATAL})
@@ -331,7 +331,7 @@ def evaluate_all(repo: Path, state_dir: Path) -> GuardReport:
 
     # Hard guards (6) — checked in priority order
     report.results.append(("check_kill_switch", check_kill_switch(state_dir)))
-    report.results.append(("check_self_quarantined", check_self_quarantined(state_dir)))
+    report.results.append(("check_self_halted", check_self_halted(state_dir)))
     report.results.append(("check_dirty_repo", check_dirty_repo(repo)))
     report.results.append(("check_active_rebase", check_active_rebase(repo)))
     report.results.append(("check_disk_free", check_disk_free(repo)))

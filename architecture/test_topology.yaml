@@ -1,7 +1,7 @@
 schema_version: 1
 metadata:
   created: "2026-04-13"
-  owner_packet: "Packet 5 test suite law gate and debt quarantine"
+  owner_packet: "Packet 5 test suite law gate and debt triage"
   note: >
     Test topology classifies the active pytest suite as law antibodies,
     regressions, transitional/advisory checks, diagnostics, stale/obsolete
@@ -1036,7 +1036,7 @@ categories:
     - tests/test_phase10a_hygiene.py
     - tests/test_phase10b_dt_seam_cleanup.py
     - tests/test_price_evidence_report.py
-    - tests/test_b066_quarantine_sentinel_ids.py
+    - tests/test_b066_sentinel_ids.py
     - tests/test_b070_control_overrides_history_v2.py
     - tests/test_metric_identity_spine.py
     - tests/test_phase3_source_registry_single_truth.py

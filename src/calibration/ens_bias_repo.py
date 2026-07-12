@@ -91,7 +91,7 @@ _CANONICAL_EXTENSION_COLUMNS: list[tuple[str, str]] = [
     # gate-set + coverage identity (domain-canonicality antibody, 2026-05-28).
     # gate_set_hash pins the active math-gate set (MIN_PAIRED_N, min_live_n,
     # min_prior_n, residual_floor) at fit time; the reader rejects any served
-    # row whose gate_set_hash != current so a future gate change auto-quarantines
+    # row whose gate_set_hash != current so a future gate change auto-rejects
     # stale rows (replaces version-suffix family renames — no full_transport_v2).
     # coverage_months records the months actually present in the fit window so a
     # season-labelled row cannot be misapplied to a month it never trained on.

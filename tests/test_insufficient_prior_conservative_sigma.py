@@ -106,6 +106,6 @@ def test_identity_model_widens_consumed_mc_distribution():
 def test_gate_change_invalidates_pre_sd2_hash():
     # SD2 changes the gate set (MIN_PRIOR_N 2->5 + CONSERVATIVE_RESIDUAL_FLOOR_C).
     # The pre-SD2 hash (68f1a05f8af33c0a) must no longer match: every row fit under
-    # the old gate set auto-quarantines at read time -> this rebuild is a one-time
+    # the old gate set auto-rejects at read time -> this rebuild is a one-time
     # full STAGING reproduce.
     assert current_gate_set_hash() != "68f1a05f8af33c0a"

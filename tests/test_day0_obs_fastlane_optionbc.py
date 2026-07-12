@@ -107,7 +107,7 @@ def _make_fast_extremes(
         last_receipt_time=last_receipt.astimezone(UTC),
         sample_count=sample_count,
         skipped_unit_law=0,
-        quarantined_implausible=0,
+        held_implausible=0,
     )
 
 

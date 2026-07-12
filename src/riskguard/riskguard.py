@@ -1772,7 +1772,7 @@ def _residual_active_portfolio_brier_level(
     """Recompute portfolio Brier EXCLUDING durably-gated strategies' rows.
 
     This is the ORANGE-localization residual check (condition #3): the
-    strategies already quarantined behind a confirmed durable gate are removed
+    strategies already scoped-out behind a confirmed durable gate are removed
     from the sample, and the REMAINING ("active") portfolio must itself land
     GREEN before admission may be relaxed from the global ORANGE. An empty
     residual sample (no remaining rows) is treated as GREEN, matching the
@@ -2547,7 +2547,7 @@ def _tick_once() -> RiskLevel:
                     brier_level = RiskLevel.GREEN
                     brier_strategy_localization = {
                         **brier_strategy_localization,
-                        "status": "localized_orange_quarantine",
+                        "status": "localized_orange_scope",
                         "durable_risk_action_status": durable_action_status.get("status"),
                         "gate_confirmation": gate_confirmation,
                         "residual_brier_level": residual_level.value,
@@ -2576,7 +2576,7 @@ def _tick_once() -> RiskLevel:
                     "gate_confirmation": gate_confirmation,
                 }
 
-        localized_orange_quarantine = brier_strategy_localization.get("status") == "localized_orange_quarantine"
+        localized_orange_scope = brier_strategy_localization.get("status") == "localized_orange_scope"
 
         # Execution-quality localization (same admissible-portfolio principle
         # as ORANGE Brier localization): a strategy already held behind a
@@ -2726,13 +2726,13 @@ def _tick_once() -> RiskLevel:
                 # ORANGE-localization audit surface (2026-07-04): the raw,
                 # unfiltered portfolio view (all strategies pooled) vs. the
                 # view that actually DRIVES admission after any localization
-                # (YELLOW-to-durable-gate or ORANGE-quarantine) is applied.
+                # (YELLOW-to-durable-gate or ORANGE-scope) is applied.
                 # Kept as an explicit alias of portfolio_brier_level/brier_level
                 # so downstream consumers see a coherent, self-describing pair
                 # regardless of which localization branch (if any) fired.
                 "brier_all_strategies_level": portfolio_brier_level.value,
                 "brier_active_portfolio_level": brier_level.value,
-                "localized_orange_quarantine": localized_orange_quarantine,
+                "localized_orange_scope": localized_orange_scope,
                 "brier_strategy_breakdown": brier_strategy_breakdown,
                 "brier_strategy_localization": brier_strategy_localization,
                 "settlement_quality_level": settlement_quality_level.value,

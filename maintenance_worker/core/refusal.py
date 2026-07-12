@@ -8,7 +8,7 @@ refusal — refuse_fatal() and skip_tick() refusal modes.
 
 refuse_fatal(): hard refusal, exits non-zero with a unique exit code per
   RefusalReason. Writes a tick-skipped row to errors.tsv for audit.
-  Does NOT write SELF_QUARANTINE (Path A per SCAFFOLD §3 lines 190-195).
+  Does NOT write SELF_HALT (Path A per SCAFFOLD §3 lines 190-195).
   Human must intervene to resume.
 
 skip_tick(): soft refusal, logs the skip and returns. Next tick retries
@@ -20,7 +20,7 @@ Exit codes: RefusalReason enum ordinal + 10 to avoid clash with OS codes.
 
 SCAFFOLD §6 verdict:
   6 refuse_fatal hard guards: KILL_SWITCH, DIRTY_REPO, ACTIVE_REBASE,
-    LOW_DISK, INFLIGHT_PR, SELF_QUARANTINED
+    LOW_DISK, INFLIGHT_PR, SELF_HALTED
   2 skip_tick soft guards: MAINTENANCE_PAUSED, ONCALL_QUIET
 
 Stdlib only. Imports only from maintenance_worker.types.*.
@@ -49,7 +49,7 @@ _REFUSE_FATAL_REASONS: frozenset[RefusalReason] = frozenset(
         RefusalReason.ACTIVE_REBASE,
         RefusalReason.LOW_DISK,
         RefusalReason.INFLIGHT_PR,
-        RefusalReason.SELF_QUARANTINED,
+        RefusalReason.SELF_HALTED,
         RefusalReason.FORBIDDEN_PATH_VIOLATION,
         RefusalReason.FORBIDDEN_OPERATION_VIOLATION,
     }
@@ -93,8 +93,8 @@ def refuse_fatal(reason: RefusalReason, ctx: TickContext, message: str = "") -> 
     """
     Hard refusal — exits non-zero. Human must intervene.
 
-    Path A per SCAFFOLD §3: does NOT write SELF_QUARANTINE.
-    Only post_mutation_detector() (Path B) writes the quarantine file.
+    Path A per SCAFFOLD §3: does NOT write SELF_HALT.
+    Only post_mutation_detector() (Path B) writes the halt file.
 
     Writes a row to errors.tsv, logs the reason, then sys.exit(code).
     """

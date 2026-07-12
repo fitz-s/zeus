@@ -43,6 +43,6 @@ Volatile external city/station evidence lives under `docs/artifacts/polymarket_c
 
 **Coordinate invariant**: `lat`/`lon` MUST correspond to the same physical station as `wu_station` / `hko_station` / CWA id. Do not use city-center or approximate coordinates — this drives ENS grid-point selection.
 
-**Pending conversion invariant**: a city listed in `_source_contract_pending_conversions` with `status="pending_release"` remains blocked for new entries even if its current market `resolutionSource` matches `cities.json`. Release requires complete `state/source_contract_quarantine.json` transition-history evidence refs for config, source-validity, backfill, settlements, calibration, and verification.
+**Pending conversion invariant**: a city listed in `_source_contract_pending_conversions` with `status="pending_release"` remains blocked for new entries even if its current market `resolutionSource` matches `cities.json`. Release requires complete `state/source_contract_block.json` transition-history evidence refs for config, source-validity, backfill, settlements, calibration, and verification.
 
 Use generated/audit evidence for dated city exception lists. Do not encode volatile city/station snapshots directly in this routing file.

@@ -496,7 +496,7 @@ files:
     why: Carries uncertainty context so raw confidence is not treated as certainty.
   src/contracts/ensemble_snapshot_provenance.py:
     zone: K0_frozen_kernel
-    authority_role: ensemble_snapshot_quarantine_contract
+    authority_role: ensemble_snapshot_rejection_contract
     hazards:
     - TRANSITIONAL_DO_NOT_DEEPEN
     why: 'Defines the refuse-list for ensemble_snapshots.data_version before live or backfill writes, and partitions quarantined

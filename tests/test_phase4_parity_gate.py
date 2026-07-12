@@ -1,7 +1,7 @@
 """Phase 4 parity gate tests: R-P (quarantine of old peak_window tag)
 
 R-P: assert_data_version_allowed('tigge_mx2t6_local_peak_window_max_v1') raises
-DataVersionQuarantinedError — the old high tag must be refused by the quarantine guard.
+DataVersionRejectedError — the old high tag must be refused by the quarantine guard.
 
 Also tests that the new canonical tag passes the guard, so Phase 4 ingest is unblocked.
 """
@@ -14,7 +14,7 @@ class TestDataVersionQuarantineGate:
     """R-P: The old peak_window data_version tag must be quarantined after 4A.1.
 
     Phase 4A.1 (exec-carol) adds 'tigge_mx2t6_local_peak_window_max_v1' to
-    QUARANTINED_DATA_VERSIONS in src/contracts/ensemble_snapshot_provenance.py.
+    REJECTED_DATA_VERSIONS in src/contracts/ensemble_snapshot_provenance.py.
 
     GREEN by design once 4A.1 lands — these are the 4A.1 enforcement tests, not
     pre-existing guardrails. If they go RED again, the quarantine was accidentally
@@ -22,17 +22,17 @@ class TestDataVersionQuarantineGate:
     must always pass the guard.
     """
 
-    def test_peak_window_tag_is_quarantined(self):
-        """R-P: 'tigge_mx2t6_local_peak_window_max_v1' must raise DataVersionQuarantinedError.
+    def test_peak_window_tag_is_rejected(self):
+        """R-P: 'tigge_mx2t6_local_peak_window_max_v1' must raise DataVersionRejectedError.
 
         GREEN once 4A.1 lands. Regression: going RED means quarantine was removed.
         """
         from src.contracts.ensemble_snapshot_provenance import (
-            DataVersionQuarantinedError,
+            DataVersionRejectedError,
             assert_data_version_allowed,
         )
 
-        with pytest.raises(DataVersionQuarantinedError):
+        with pytest.raises(DataVersionRejectedError):
             assert_data_version_allowed(
                 "tigge_mx2t6_local_peak_window_max_v1",
                 context="test_phase4_parity_gate",
@@ -57,20 +57,20 @@ class TestDataVersionQuarantineGate:
             context="test_phase4_parity_gate",
         )
 
-    def test_is_quarantined_returns_true_for_peak_window(self):
-        """R-P: is_quarantined() must return True for the peak_window tag."""
-        from src.contracts.ensemble_snapshot_provenance import is_quarantined
+    def test_is_rejected_returns_true_for_peak_window(self):
+        """R-P: is_rejected() must return True for the peak_window tag."""
+        from src.contracts.ensemble_snapshot_provenance import is_rejected
 
-        assert is_quarantined("tigge_mx2t6_local_peak_window_max_v1"), (
+        assert is_rejected("tigge_mx2t6_local_peak_window_max_v1"), (
             "'tigge_mx2t6_local_peak_window_max_v1' must be quarantined after Phase 4A.1 "
             "(R-P). The peak_window tag is superseded by the local_calendar_day_max tag."
         )
 
-    def test_is_quarantined_returns_false_for_canonical_tag(self):
-        """R-P complement: is_quarantined() must return False for the canonical replacement tag."""
-        from src.contracts.ensemble_snapshot_provenance import is_quarantined
+    def test_is_rejected_returns_false_for_canonical_tag(self):
+        """R-P complement: is_rejected() must return False for the canonical replacement tag."""
+        from src.contracts.ensemble_snapshot_provenance import is_rejected
 
-        assert not is_quarantined("tigge_mx2t6_local_calendar_day_max"), (
+        assert not is_rejected("tigge_mx2t6_local_calendar_day_max"), (
             "'tigge_mx2t6_local_calendar_day_max' must NOT be quarantined — "
             "it is the canonical Phase 4 replacement (R-P complement)."
         )
@@ -78,7 +78,7 @@ class TestDataVersionQuarantineGate:
     def test_existing_quarantine_prefixes_still_blocked(self):
         """R-P regression: Existing quarantine prefixes (tigge_step*, tigge_param167*) must still fire."""
         from src.contracts.ensemble_snapshot_provenance import (
-            DataVersionQuarantinedError,
+            DataVersionRejectedError,
             assert_data_version_allowed,
         )
 
@@ -88,32 +88,32 @@ class TestDataVersionQuarantineGate:
             "tigge_param167_instant",
             "tigge_2t_instant_v1",
         ]:
-            with pytest.raises(DataVersionQuarantinedError, match=tag):
+            with pytest.raises(DataVersionRejectedError, match=tag):
                 assert_data_version_allowed(tag, context="test_phase4_parity_gate_regression")
 
     def test_peak_window_version_bump_is_still_quarantined(self):
         """R-P M3: a version-bumped peak_window tag (e.g. _max_v2) must be caught by
-        the QUARANTINED_DATA_VERSION_PREFIXES prefix 'tigge_mx2t6_local_peak_window'.
+        the REJECTED_DATA_VERSION_PREFIXES prefix 'tigge_mx2t6_local_peak_window'.
 
         Before M3, only the exact string 'tigge_mx2t6_local_peak_window_max_v1' was in
-        QUARANTINED_DATA_VERSIONS. A version bump (_max_v2, _max_v3) would escape the set
+        REJECTED_DATA_VERSIONS. A version bump (_max_v2, _max_v3) would escape the set
         check. The prefix entry ensures it cannot.
         """
         from src.contracts.ensemble_snapshot_provenance import (
-            DataVersionQuarantinedError,
+            DataVersionRejectedError,
             assert_data_version_allowed,
-            is_quarantined,
+            is_rejected,
         )
         for bumped_tag in [
             "tigge_mx2t6_local_peak_window_max_v2",
             "tigge_mx2t6_local_peak_window_max_v3",
             "tigge_mx2t6_local_peak_window_other",
         ]:
-            assert is_quarantined(bumped_tag), (
+            assert is_rejected(bumped_tag), (
                 f"M3: '{bumped_tag}' must be quarantined by prefix rule "
                 "'tigge_mx2t6_local_peak_window' (R-P M3)."
             )
-            with pytest.raises(DataVersionQuarantinedError):
+            with pytest.raises(DataVersionRejectedError):
                 assert_data_version_allowed(bumped_tag, context="test_peak_window_version_bump")
 
     def test_ingest_grib_to_snapshots_calls_assert_data_version_before_insert(self):

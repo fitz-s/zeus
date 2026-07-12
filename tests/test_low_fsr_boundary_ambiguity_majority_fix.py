@@ -13,17 +13,17 @@ were already corrected in extract_tigge_mn2t6_localday_min.py (Addendum 2 §2):
 
   1. Per-member: boundary_ambiguous when boundary_min <= inner_min (non-strict).
      Fix: strict < — ties are NOT ambiguous.
-  2. Snapshot: any() of per-member flags → whole snapshot quarantined.
+  2. Snapshot: any() of per-member flags → whole snapshot rejected.
      Fix: majority threshold (≥26/51) required.
 
 For UTC-offset cities like Miami/Paris/Hong Kong, the 6h steps from any ECMWF run
 frequently produce "tie" members (boundary_min == inner_min) because midnight
-temperatures are stable.  With <=, even 1/51 tie members triggered quarantine
+temperatures are stable.  With <=, even 1/51 tie members triggered rejection
 (boundary_ambiguous=1), blocking LIVE_ELIGIBLE for those cities.
 
 These tests pin:
   (a) Per-member strict-< rule: tie member is NOT boundary-ambiguous.
-  (b) Majority threshold: minority ambiguous count does NOT quarantine snapshot.
+  (b) Majority threshold: minority ambiguous count does NOT reject snapshot.
   (c) End-to-end: a snapshot with <26 ambiguous members produces boundary_ambiguous=False
       in the emitted payload, which allows LIVE_ELIGIBLE readiness.
 """
@@ -92,11 +92,11 @@ def test_per_member_tie_is_not_boundary_ambiguous():
 
 
 # ---------------------------------------------------------------------------
-# Test (b): majority threshold — minority ambiguous count does not quarantine.
+# Test (b): majority threshold — minority ambiguous count does not reject.
 # ---------------------------------------------------------------------------
 
 
-def test_minority_ambiguous_members_do_not_quarantine_snapshot():
+def test_minority_ambiguous_members_do_not_reject_snapshot():
     """Bug A fix: <26/51 ambiguous members must NOT set snapshot boundary_ambiguous=True."""
     # 17 ambiguous members is less than the majority threshold (26/51).
     # Pre-fix: any() → True.  Post-fix: majority (≥26) → False.
@@ -108,12 +108,12 @@ def test_minority_ambiguous_members_do_not_quarantine_snapshot():
     majority_rule = ambiguous_member_count >= majority_threshold  # new rule
 
     assert any_rule, "Pre-fix any() rule flags 17 ambiguous members (confirms the bug)"
-    assert not majority_rule, "Post-fix majority rule must NOT quarantine at 17/51"
+    assert not majority_rule, "Post-fix majority rule must NOT reject at 17/51"
 
     # Also verify the exact threshold boundary
     assert (majority_threshold - 1) < majority_threshold  # sanity
-    assert not (majority_threshold - 1) >= majority_threshold  # 25 < 26 → not quarantined
-    assert (majority_threshold) >= majority_threshold  # 26 >= 26 → quarantined (correct)
+    assert not (majority_threshold - 1) >= majority_threshold  # 25 < 26 → not rejected
+    assert (majority_threshold) >= majority_threshold  # 26 >= 26 → rejected (correct)
 
 
 # ---------------------------------------------------------------------------
@@ -136,26 +136,26 @@ def _make_payload_boundary_policy(ambiguous_member_count: int, total: int = 51) 
     }
 
 
-def test_payload_minority_ambiguous_not_quarantined():
+def test_payload_minority_ambiguous_not_rejected():
     """17 ambiguous members (Miami-like) → boundary_ambiguous=False in payload."""
     payload = _make_payload_boundary_policy(17)
     assert payload["boundary_ambiguous"] is False, (
-        "City with 17/51 boundary-ambiguous members must NOT be quarantined"
+        "City with 17/51 boundary-ambiguous members must NOT be rejected"
     )
     assert payload["boundary_policy"]["boundary_ambiguous"] is False
     assert payload["boundary_policy"]["ambiguous_member_count"] == 17
 
 
-def test_payload_majority_ambiguous_is_quarantined():
-    """26+ ambiguous members → boundary_ambiguous=True (still correctly quarantined)."""
+def test_payload_majority_ambiguous_is_rejected():
+    """26+ ambiguous members → boundary_ambiguous=True (still correctly rejected)."""
     payload = _make_payload_boundary_policy(26)
     assert payload["boundary_ambiguous"] is True, (
-        "City with 26/51 (majority) boundary-ambiguous members MUST be quarantined"
+        "City with 26/51 (majority) boundary-ambiguous members MUST be rejected"
     )
     assert payload["boundary_policy"]["boundary_ambiguous"] is True
 
 
-def test_payload_zero_ambiguous_not_quarantined():
+def test_payload_zero_ambiguous_not_rejected():
     """Seoul/Tokyo-like: 0 ambiguous members → boundary_ambiguous=False."""
     payload = _make_payload_boundary_policy(0)
     assert payload["boundary_ambiguous"] is False
@@ -191,7 +191,7 @@ def test_live_eligible_invariant_low_city_with_fresh_inputs():
     snapshot_boundary_ambiguous = ambiguous_count >= majority_threshold
     assert not snapshot_boundary_ambiguous, (
         f"City with {ambiguous_count}/{total_members} ambiguous members "
-        f"(threshold={majority_threshold}) must NOT be quarantined"
+        f"(threshold={majority_threshold}) must NOT be rejected"
     )
 
     # With boundary_ambiguous=False and 51/51 members present,
@@ -206,19 +206,19 @@ def test_live_eligible_invariant_low_city_with_fresh_inputs():
     if snapshot_boundary_ambiguous:
         simulated_block_reasons.append("boundary_ambiguous")
 
-    # Also confirm missing_members=[] (51 complete members from non-quarantined snapshot)
-    # For a quarantined snapshot all member values are None → missing_members=51.
-    # For a non-quarantined snapshot with 17 partially-ambiguous members:
+    # Also confirm missing_members=[] (51 complete members from non-rejected snapshot)
+    # For a rejected snapshot all member values are None → missing_members=51.
+    # For a non-rejected snapshot with 17 partially-ambiguous members:
     # those 17 emit value=inner_min (boundary didn't win for their inner_min).
     # Only members where inner_min IS None are missing.
-    # We assert: non-quarantined snapshot with valid inner values has 0 missing members.
+    # We assert: non-rejected snapshot with valid inner values has 0 missing members.
     inner_min_available = True  # all 51 members have inner data
     missing_count = 0 if (not snapshot_boundary_ambiguous and inner_min_available) else total_members
 
     assert not simulated_block_reasons, (
-        f"block_reasons must be empty for non-quarantined snapshot; got {simulated_block_reasons}"
+        f"block_reasons must be empty for non-rejected snapshot; got {simulated_block_reasons}"
     )
     assert missing_count == 0, (
-        f"Non-quarantined snapshot with complete inner data must have 0 missing members"
+        f"Non-rejected snapshot with complete inner data must have 0 missing members"
     )
     # Both conditions → contributes_to_target_extrema=1 → LIVE_ELIGIBLE achievable

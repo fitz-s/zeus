@@ -8,7 +8,7 @@
 """
 Handler: untracked_top_level_quarantine
 
-Proposes quarantine of stale untracked top-level files.
+Proposes archive of stale untracked top-level files.
 
 enumerate(): shells `git ls-files --others --exclude-standard` to find
   untracked files; filters by mtime > untracked_ttl_days; respects
@@ -17,10 +17,10 @@ enumerate(): shells `git ls-files --others --exclude-standard` to find
   not_under_active_packet_dir.
 
 apply(): always dry_run_only (live_default: false in catalog). Returns
-  mock diff showing what move to quarantine_dir would do.
+  mock diff showing what move to archive_dir would do.
 
 Verdict strings:
-  UNTRACKED_QUARANTINE_CANDIDATE — stale untracked file, safe to quarantine
+  UNTRACKED_ARCHIVE_CANDIDATE — stale untracked file, safe to archive
   SKIP_FORBIDDEN_PATH            — matches a forbidden pattern
   SKIP_TOO_FRESH                 — mtime within untracked_ttl_days
   SKIP_ACTIVE_PACKET_DIR         — lives under an active task_* packet dir
@@ -41,13 +41,13 @@ from maintenance_worker.types.specs import TaskSpec, TickContext
 logger = logging.getLogger(__name__)
 
 # Verdict strings
-VERDICT_CANDIDATE = "UNTRACKED_QUARANTINE_CANDIDATE"
+VERDICT_CANDIDATE = "UNTRACKED_ARCHIVE_CANDIDATE"
 VERDICT_SKIP_FORBIDDEN = "SKIP_FORBIDDEN_PATH"
 VERDICT_SKIP_FRESH = "SKIP_TOO_FRESH"
 VERDICT_SKIP_ACTIVE_PACKET = "SKIP_ACTIVE_PACKET_DIR"
 
 DEFAULT_TTL_DAYS = 14
-DEFAULT_QUARANTINE_DIR = ".archive/untracked"
+DEFAULT_ARCHIVE_DIR = ".archive/untracked"
 DEFAULT_FORBIDDEN_PATHS = [
     "docs/operations/task_*/**",
     ".env*",
@@ -66,7 +66,7 @@ def enumerate(entry: Any, ctx: TickContext) -> list[Candidate]:  # noqa: A001
     Find stale untracked files via `git ls-files --others --exclude-standard`.
 
     Skips: forbidden patterns, active packet dirs, fresh files (< ttl_days).
-    Returns list[Candidate] with UNTRACKED_QUARANTINE_CANDIDATE or SKIP_*.
+    Returns list[Candidate] with UNTRACKED_ARCHIVE_CANDIDATE or SKIP_*.
     """
     raw: dict = entry.raw
     config: dict = raw.get("config", {})
@@ -136,10 +136,10 @@ def enumerate(entry: Any, ctx: TickContext) -> list[Candidate]:  # noqa: A001
 
 def apply(decision: Candidate, ctx: TickContext) -> ApplyResult:
     """
-    Apply untracked file quarantine. Always dry_run_only (live_default: false).
+    Apply untracked file archive. Always dry_run_only (live_default: false).
 
     TOP-OF-FUNCTION GUARD per PLAN §1.5.4 — defense-in-depth.
-    Returns ApplyResult with mock diff showing planned move to quarantine_dir.
+    Returns ApplyResult with mock diff showing planned move to archive_dir.
     """
     # This task is ALWAYS proposal-only — dry_run_only unconditionally.
     mock = _mock_diff(decision)
@@ -199,7 +199,7 @@ def _is_under_active_packet_dir(rel_path: str, repo_root: Path) -> bool:
     """
     Return True if rel_path is under docs/operations/task_*/.
 
-    These directories are active packet dirs and must never be quarantined.
+    These directories are active packet dirs and must never be archived.
     """
     parts = Path(rel_path).parts
     # Check for docs/operations/task_*/ prefix
@@ -218,7 +218,7 @@ def _get_mtime(path: Path) -> float | None:
 
 
 def _mock_diff(decision: Candidate) -> tuple[str, ...]:
-    """Return a mock diff string showing planned move to quarantine dir."""
+    """Return a mock diff string showing planned move to archive dir."""
     return (
         f"[DRY RUN] would move: {decision.path}",
         f"       → .archive/untracked/{decision.path.name}",

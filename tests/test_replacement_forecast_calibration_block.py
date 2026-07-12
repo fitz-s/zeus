@@ -4,19 +4,19 @@
 # Purpose: Protect replacement forecast products from baseline calibration authority reuse.
 # Reuse: Run before wiring replacement posterior evidence into calibration, q builders, or training rows.
 # Authority basis: Operator-directed Open-Meteo ECMWF IFS 9km + AIFS ENS sampled-2t integration.
-"""Replacement forecast calibration quarantine tests."""
+"""Replacement forecast calibration block tests."""
 
 from __future__ import annotations
 
 import pytest
 
-from src.data.replacement_forecast_calibration_quarantine import (
+from src.data.replacement_forecast_calibration_block import (
     AIFS_PRODUCT_ID,
     AIFS_SOURCE_ID,
     REPLACEMENT_PRODUCT_ID,
     REPLACEMENT_SOURCE_ID,
     ReplacementForecastCalibrationRequest,
-    evaluate_replacement_forecast_calibration_quarantine,
+    evaluate_replacement_forecast_calibration_block,
 )
 
 
@@ -36,7 +36,7 @@ def _request(**overrides) -> ReplacementForecastCalibrationRequest:
 
 
 def test_product_specific_calibration_is_allowed_only_when_isolated_from_baseline() -> None:
-    decision = evaluate_replacement_forecast_calibration_quarantine(_request())
+    decision = evaluate_replacement_forecast_calibration_block(_request())
 
     assert decision.allowed is True
     assert decision.status == "ALLOWED"
@@ -52,7 +52,7 @@ def test_baseline_platt_emos_raw_and_sigma_floor_are_blocked() -> None:
         ("sigma_floor", "ecmwf_open_data", "ecmwf_opendata_ifs_ens_0p25", "ecmwf_opendata_mx2t3_local_calendar_day_max"),
     ]
     for method, source_id, product_id, data_version in cases:
-        decision = evaluate_replacement_forecast_calibration_quarantine(
+        decision = evaluate_replacement_forecast_calibration_block(
             _request(
                 calibration_source_id=source_id,
                 calibration_product_id=product_id,
@@ -67,7 +67,7 @@ def test_baseline_platt_emos_raw_and_sigma_floor_are_blocked() -> None:
 
 
 def test_aifs_sampled_2t_cannot_use_period_extrema_calibration() -> None:
-    decision = evaluate_replacement_forecast_calibration_quarantine(
+    decision = evaluate_replacement_forecast_calibration_block(
         _request(
             target_source_id=AIFS_SOURCE_ID,
             target_product_id=AIFS_PRODUCT_ID,
@@ -84,7 +84,7 @@ def test_aifs_sampled_2t_cannot_use_period_extrema_calibration() -> None:
 
 
 def test_training_authority_is_blocked() -> None:
-    decision = evaluate_replacement_forecast_calibration_quarantine(
+    decision = evaluate_replacement_forecast_calibration_block(
         _request(training_allowed=True)
     )
 
@@ -93,7 +93,7 @@ def test_training_authority_is_blocked() -> None:
 
 
 def test_non_replacement_targets_and_short_alias_are_rejected() -> None:
-    decision = evaluate_replacement_forecast_calibration_quarantine(
+    decision = evaluate_replacement_forecast_calibration_block(
         _request(
             target_source_id="ecmwf_open_data",
             target_product_id="ecmwf_opendata_ifs_ens_0p25",

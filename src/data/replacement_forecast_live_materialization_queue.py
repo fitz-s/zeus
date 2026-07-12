@@ -179,9 +179,9 @@ def _pid_is_alive(pid: int) -> bool:
     return True
 
 
-def _quarantine_stale_lock(lock_path: Path, *, holder_pid: int | None) -> Path | None:
-    """Move an orphaned lock into ``quarantined_stale_locks/`` (audit trail; never silent-delete)."""
-    qdir = lock_path.parent / "quarantined_stale_locks"
+def _archive_stale_lock(lock_path: Path, *, holder_pid: int | None) -> Path | None:
+    """Move an orphaned lock into ``archived_stale_locks/`` (audit trail; never silent-delete)."""
+    qdir = lock_path.parent / "archived_stale_locks"
     qdir.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     pid_tag = holder_pid if holder_pid is not None else "unknown"
@@ -202,7 +202,7 @@ def _queue_lock(lock_path: Path):
     ``finally`` entirely, so its lock file would block every future acquirer FOREVER (the ~12h
     live stall: materializer dark -> readiness expired -> reactor READINESS_EXPIRED -> zero
     trades). On ``FileExistsError`` we now probe the recorded holder PID: a DEAD (or
-    unparseable) holder means the lock is orphaned, so we quarantine it for audit and steal the
+    unparseable) holder means the lock is orphaned, so we archive it for audit and steal the
     lock by retrying the exclusive create once; a genuinely ALIVE holder still blocks (no
     concurrent double-run). ``fd`` stays None on the blocked path, so we never unlink a live
     holder's lock.
@@ -217,7 +217,7 @@ def _queue_lock(lock_path: Path):
             if holder_pid is not None and _pid_is_alive(holder_pid):
                 yield False
                 return
-            _quarantine_stale_lock(lock_path, holder_pid=holder_pid)
+            _archive_stale_lock(lock_path, holder_pid=holder_pid)
             try:
                 fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
             except FileExistsError:

@@ -496,7 +496,7 @@ def test_rebuild_shards_transactions_commit_per_city(rebuild_mod):
         patch.object(rebuild_mod, "_fetch_eligible_snapshots_v2", return_value=rows),
         patch.object(rebuild_mod, "_collect_pre_delete_count", return_value=0),
         patch.object(rebuild_mod, "_delete_canonical_v2_slice", return_value=None),
-        patch.object(rebuild_mod, "is_quarantined", return_value=False),
+        patch.object(rebuild_mod, "is_rejected", return_value=False),
         patch.object(rebuild_mod, "_process_snapshot_v2", return_value=None),
         patch.object(rebuild_mod, "cities_by_name", {
             city_a: cities_by_name[city_a],
@@ -557,7 +557,7 @@ def test_rebuild_all_v2_no_outer_savepoint(rebuild_mod):
         patch.object(rebuild_mod, "_fetch_eligible_snapshots_v2", return_value=[FakeRow(r) for r in rows]),
         patch.object(rebuild_mod, "_collect_pre_delete_count", return_value=0),
         patch.object(rebuild_mod, "_delete_canonical_v2_slice", return_value=None),
-        patch.object(rebuild_mod, "is_quarantined", return_value=False),
+        patch.object(rebuild_mod, "is_rejected", return_value=False),
         patch.object(rebuild_mod, "_process_snapshot_v2", return_value=None),
         patch.object(rebuild_mod, "cities_by_name", {city_a: cities_by_name[city_a]}),
         patch.object(rebuild_mod, "METRIC_SPECS", [high_spec]),
@@ -624,7 +624,7 @@ def test_rebuild_marks_scope_in_progress_then_complete(rebuild_mod):
         patch.object(rebuild_mod, "_fetch_eligible_snapshots_v2", return_value=rows),
         patch.object(rebuild_mod, "_collect_pre_delete_count", return_value=0),
         patch.object(rebuild_mod, "_delete_canonical_v2_slice", return_value=None),
-        patch.object(rebuild_mod, "is_quarantined", return_value=False),
+        patch.object(rebuild_mod, "is_rejected", return_value=False),
         patch.object(rebuild_mod, "_process_snapshot_v2", side_effect=successful_process),
         patch.object(rebuild_mod, "cities_by_name", {city_a: cities_by_name[city_a]}),
     ):
@@ -666,7 +666,7 @@ def test_rebuild_validation_failure_leaves_scope_in_progress_not_complete(rebuil
         patch.object(rebuild_mod, "_fetch_eligible_snapshots_v2", return_value=rows),
         patch.object(rebuild_mod, "_collect_pre_delete_count", return_value=0),
         patch.object(rebuild_mod, "_delete_canonical_v2_slice", return_value=None),
-        patch.object(rebuild_mod, "is_quarantined", return_value=False),
+        patch.object(rebuild_mod, "is_rejected", return_value=False),
         patch.object(rebuild_mod, "_process_snapshot_v2", return_value=None),
         patch.object(rebuild_mod, "cities_by_name", {city_a: cities_by_name[city_a]}),
     ):

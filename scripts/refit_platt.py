@@ -83,7 +83,7 @@ class RefitStatsV2:
     buckets_skipped_maturity: int = 0
     buckets_fit: int = 0
     buckets_failed: int = 0
-    buckets_quarantined: int = 0
+    buckets_rejected: int = 0
     refused: bool = False
     deactivated_rows: int = 0
     per_bucket: dict[str, str] = field(default_factory=dict)
@@ -673,25 +673,25 @@ def _fit_bucket(
     # in-sample sigmoid latches onto noise) and would lose money live.
     #
     # Run BEFORE deactivate_model + save_platt_model so a noisy refit
-    # never overwrites a previously healthy VERIFIED row with a QUARANTINED
+    # never overwrites a previously healthy VERIFIED row with a REJECTED
     # one (PR #70 Copilot review): the loader filters authority='VERIFIED',
-    # so writing QUARANTINED-replacing-VERIFIED would silently downgrade live
+    # so writing REJECTED-replacing-VERIFIED would silently downgrade live
     # serving from a real calibrator to the season-pool fallback. Instead we
-    # leave the existing row intact (if any) and report+count the quarantine.
-    # Operator can review the QUARANTINE log line and decide whether to accept
+    # leave the existing row intact (if any) and report+count the rejection.
+    # Operator can review the REJECT log line and decide whether to accept
     # the noisy refit or tighten regularisation.
     # Threshold A<0 catches strict inversion; A in [0, 0.3) is weak but
     # mathematically valid (kept VERIFIED).
     if cal.A < 0:
-        quarantine_reason = f"INVERTED_SLOPE A={cal.A:+.4f} (Platt slope < 0)"
+        rejection_reason = f"INVERTED_SLOPE A={cal.A:+.4f} (Platt slope < 0)"
         print(
-            f"QUARANTINE {bucket_key}: {quarantine_reason}; "
+            f"REJECT {bucket_key}: {rejection_reason}; "
             f"keeping existing VERIFIED row intact (if present); no save, no deactivate.",
             file=sys.stderr,
         )
-        print(f"QUAR {bucket_key:50s} {summary} [{quarantine_reason}]")
-        stats.buckets_quarantined += 1
-        stats.per_bucket[bucket_key] = f"QUARANTINED {quarantine_reason} {summary}"
+        print(f"REJ {bucket_key:50s} {summary} [{rejection_reason}]")
+        stats.buckets_rejected += 1
+        stats.per_bucket[bucket_key] = f"REJECTED {rejection_reason} {summary}"
         return
 
     if (
@@ -1000,7 +1000,7 @@ def refit(
     print(f"Buckets fit:             {stats.buckets_fit}")
     print(f"Buckets skipped:         {stats.buckets_skipped_maturity}")
     print(f"Buckets failed:          {stats.buckets_failed}")
-    print(f"Buckets quarantined:     {stats.buckets_quarantined}")
+    print(f"Buckets rejected:        {stats.buckets_rejected}")
     if not dry_run:
         print(f"Prior rows replaced:     {stats.deactivated_rows}")
 

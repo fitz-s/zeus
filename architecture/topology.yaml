@@ -986,7 +986,7 @@ digest_profiles:
       - "docs/operations/AGENTS.md"
       - "docs/archives/packets/task_2026-04-30_source_auto_conversion/**"
     downstream:
-      - "state/source_contract_quarantine.json"
+      - "state/source_contract_block.json"
       - "state/source_contract_auto_convert/latest.json"
       - "docs/operations/current_source_validity.md"
       - "scripts/backfill_wu_daily_all.py"

@@ -292,7 +292,7 @@ class FastObsExtremes:
     last_receipt_time: Optional[datetime]
     sample_count: int
     skipped_unit_law: int
-    quarantined_implausible: int = 0
+    held_implausible: int = 0
 
 
 @dataclass(frozen=True)
@@ -318,7 +318,7 @@ class PreDay0LowWindow:
     last_receipt_time: Optional[datetime]
     sample_count: int
     skipped_unit_law: int
-    quarantined_implausible: int = 0
+    held_implausible: int = 0
 
 
 # --- METAR PLAUSIBILITY BOUND (adversarial review 2026-06-10 fix 4) ----------
@@ -327,15 +327,15 @@ class PreDay0LowWindow:
 # BEFORE extremes are computed:
 #   1. ABSOLUTE BAND: value outside the city's monthly climatology band
 #      (config/city_monthly_bounds.json p01/p99, degC) +- a record-headroom
-#      allowance -> quarantined outright.
+#      allowance -> held outright.
 #   2. SPIKE RULE: a value whose step from the previous accepted report exceeds
 #      the physical rate bound is accepted ONLY when the NEXT report
 #      corroborates it (stays within the bound of the suspect value). The
-#      LATEST report (no next yet) with an implausible step is quarantined
+#      LATEST report (no next yet) with an implausible step is held
 #      PENDING corroboration — the next fetch cycle re-evaluates it with its
 #      successor present. Genuine frontal jumps corroborate within one report
 #      interval (~30-60 min) — bounded delay, never a permanent loss.
-# Quarantined prints are excluded from extremes (no bin-kill), counted on the
+# Held prints are excluded from extremes (no bin-kill), counted on the
 # extremes object, WARN-logged, and reported to the oracle-anomaly module.
 _MAX_PLAUSIBLE_STEP_PER_HOUR = {"C": 10.0, "F": 18.0}
 _MIN_STEP_ALLOWANCE = {"C": 3.0, "F": 5.4}
@@ -389,16 +389,16 @@ def filter_plausible_values(
     city_name: str,
     month: int,
 ) -> tuple[list[tuple[datetime, float, Optional[datetime]]], int]:
-    """(accepted, quarantined_count). ``values`` must be time-sorted."""
+    """(accepted, held_count). ``values`` must be time-sorted."""
     band = _monthly_band_unit(city_name, month, unit)
     accepted: list[tuple[datetime, float, Optional[datetime]]] = []
-    quarantined = 0
+    held = 0
     for index, item in enumerate(values):
         ts, value, receipt = item
         if band is not None and not (band[0] <= value <= band[1]):
-            quarantined += 1
+            held += 1
             logger.warning(
-                "METAR_PRINT_QUARANTINED city=%s reason=climatology_band value=%.1f%s band=[%.1f,%.1f] ts=%s",
+                "METAR_PRINT_HELD city=%s reason=climatology_band value=%.1f%s band=[%.1f,%.1f] ts=%s",
                 city_name, value, unit, band[0], band[1], ts.isoformat(),
             )
             continue
@@ -406,16 +406,16 @@ def filter_plausible_values(
             nxt = values[index + 1] if index + 1 < len(values) else None
             corroborated = nxt is not None and not _step_exceeds((ts, value), (nxt[0], nxt[1]), unit)
             if not corroborated:
-                quarantined += 1
+                held += 1
                 logger.warning(
-                    "METAR_PRINT_QUARANTINED city=%s reason=%s value=%.1f%s prev=%.1f%s ts=%s",
+                    "METAR_PRINT_HELD city=%s reason=%s value=%.1f%s prev=%.1f%s ts=%s",
                     city_name,
                     "implausible_step_pending_corroboration" if nxt is None else "isolated_spike",
                     value, unit, accepted[-1][1], unit, ts.isoformat(),
                 )
                 continue
         accepted.append(item)
-    return accepted, quarantined
+    return accepted, held
 
 
 def running_extremes_for_local_day(
@@ -430,7 +430,7 @@ def running_extremes_for_local_day(
     Local-day membership via ZoneInfo on the report obs time (DST-correct).
     ``as_of`` truncates samples at/before that UTC instant — used by the
     oracle-anomaly detector to compare against a slower WU snapshot over the
-    SAME observation window. Implausible prints are quarantined (fix 4) before
+    SAME observation window. Implausible prints are held (fix 4) before
     extremes are computed — for emission AND for the anomaly comparison.
     """
     tz = ZoneInfo(str(getattr(city, "timezone")))
@@ -456,16 +456,16 @@ def running_extremes_for_local_day(
 
     values.sort(key=lambda item: item[0])
     city_name = str(getattr(city, "name", ""))
-    values, quarantined = filter_plausible_values(
+    values, held = filter_plausible_values(
         values, unit=unit, city_name=city_name, month=target.month
     )
-    if quarantined:
+    if held:
         try:
-            from src.data.day0_oracle_anomaly import note_metar_quarantine
+            from src.data.day0_oracle_anomaly import note_metar_held
 
-            note_metar_quarantine(
+            note_metar_held(
                 city_name, target.isoformat(),
-                detail=f"{quarantined} implausible METAR print(s) quarantined (station {station})",
+                detail=f"{held} implausible METAR print(s) held (station {station})",
             )
         except Exception:  # noqa: BLE001 — notification is best-effort
             pass
@@ -476,7 +476,7 @@ def running_extremes_for_local_day(
             high_so_far=None, low_so_far=None, current_temp=None,
             first_obs_time=None, last_obs_time=None, last_receipt_time=None,
             sample_count=0, skipped_unit_law=skipped,
-            quarantined_implausible=quarantined,
+            held_implausible=held,
         )
     temps = [v for _, v, _ in values]
     receipts = [r for _, _, r in values if r is not None]
@@ -487,7 +487,7 @@ def running_extremes_for_local_day(
         first_obs_time=values[0][0], last_obs_time=values[-1][0],
         last_receipt_time=max(receipts) if receipts else None,
         sample_count=len(values), skipped_unit_law=skipped,
-        quarantined_implausible=quarantined,
+        held_implausible=held,
     )
 
 
@@ -546,7 +546,7 @@ def pre_day0_low_window_for_target(
 
     values.sort(key=lambda item: item[0])
     city_name = str(getattr(city, "name", ""))
-    values, quarantined = filter_plausible_values(
+    values, held = filter_plausible_values(
         values, unit=unit, city_name=city_name, month=previous_local_day.month
     )
     if not values:
@@ -569,7 +569,7 @@ def pre_day0_low_window_for_target(
         last_receipt_time=max(receipts) if receipts else None,
         sample_count=len(values),
         skipped_unit_law=skipped,
-        quarantined_implausible=quarantined,
+        held_implausible=held,
     )
 
 

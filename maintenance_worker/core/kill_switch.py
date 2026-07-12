@@ -3,16 +3,16 @@
 # Authority basis: docs/operations/task_2026-05-15_p5_maintenance_worker_core/SCAFFOLD.md §3 core/ kill_switch.py
 #                  docs/operations/task_2026-05-15_runtime_improvement_engineering_package/02_daily_maintenance_agent/SAFETY_CONTRACT.md §"Kill Switch" + §"What If A Forbidden Mutation Already Happened"
 """
-kill_switch — kill-switch checks, self-quarantine, and post-mutation detector.
+kill_switch — kill-switch checks, self-halt, and post-mutation detector.
 
 SCAFFOLD §3 Path A vs Path B (lines 190-202):
   Path A: validate_action() returns FORBIDDEN_* → refuse_fatal() only.
-          SELF_QUARANTINE is NOT written on Path A.
+          SELF_HALT is NOT written on Path A.
 
   Path B: post_mutation_detector() sees divergence AFTER disk state changed
-          → write_self_quarantine() + URGENT alert + non-zero exit.
+          → write_self_halt() + URGENT alert + non-zero exit.
 
-write_self_quarantine() has EXACTLY ONE CALLER: post_mutation_detector().
+write_self_halt() has EXACTLY ONE CALLER: post_mutation_detector().
 This constraint is enforced by convention (C2 per SCAFFOLD BATCH_DONE).
 
 Stdlib only. Imports only from maintenance_worker.types.*.
@@ -33,7 +33,7 @@ logger = logging.getLogger(__name__)
 # File names per SAFETY_CONTRACT.md §"Kill Switch"
 _KILL_SWITCH_FILE = "KILL_SWITCH"
 _MAINTENANCE_PAUSED_FILE = "MAINTENANCE_PAUSED"
-_SELF_QUARANTINE_FILE = "SELF_QUARANTINE"
+_SELF_HALT_FILE = "SELF_HALT"
 
 # Exit code for post-mutation detector divergence (distinct from refusal codes).
 _POST_MUTATION_EXIT_CODE = 50
@@ -54,24 +54,24 @@ def is_paused(state_dir: Path) -> bool:
     return (state_dir / _MAINTENANCE_PAUSED_FILE).exists()
 
 
-def is_self_quarantined(state_dir: Path) -> bool:
+def is_self_halted(state_dir: Path) -> bool:
     """
-    True if SELF_QUARANTINE file exists.
+    True if SELF_HALT file exists.
 
     Checked every tick in CHECK_GUARDS per SCAFFOLD §3 lines 166.
-    If True, the engine calls refuse_fatal(SELF_QUARANTINED, ...).
+    If True, the engine calls refuse_fatal(SELF_HALTED, ...).
     """
-    return (state_dir / _SELF_QUARANTINE_FILE).exists()
+    return (state_dir / _SELF_HALT_FILE).exists()
 
 
 # ---------------------------------------------------------------------------
-# Self-quarantine writer — ONE caller only: post_mutation_detector
+# Self-halt writer — ONE caller only: post_mutation_detector
 # ---------------------------------------------------------------------------
 
 
-def write_self_quarantine(state_dir: Path, reason: str) -> None:
+def write_self_halt(state_dir: Path, reason: str) -> None:
     """
-    Write SELF_QUARANTINE file to state_dir.
+    Write SELF_HALT file to state_dir.
 
     MUST be called ONLY by post_mutation_detector() (Path B, SCAFFOLD §3
     lines 197-202). Never call from validate_action() violations or guard
@@ -80,15 +80,15 @@ def write_self_quarantine(state_dir: Path, reason: str) -> None:
     Writes the reason and UTC timestamp for human investigation.
     Uses atomic tmp→replace pattern per OpenClaw state-update convention.
     """
-    target = state_dir / _SELF_QUARANTINE_FILE
+    target = state_dir / _SELF_HALT_FILE
     state_dir.mkdir(parents=True, exist_ok=True)
     timestamp = datetime.now(tz=timezone.utc).isoformat()
-    content = f"SELF_QUARANTINE\ntimestamp: {timestamp}\nreason: {reason}\n"
+    content = f"SELF_HALT\ntimestamp: {timestamp}\nreason: {reason}\n"
     tmp = target.with_suffix(".tmp")
     tmp.write_text(content, encoding="utf-8")
     tmp.replace(target)
     logger.critical(
-        "SELF_QUARANTINE written: state_dir=%s reason=%s", state_dir, reason
+        "SELF_HALT written: state_dir=%s reason=%s", state_dir, reason
     )
 
 
@@ -105,7 +105,7 @@ def post_mutation_detector(
     """
     Compare applied filesystem diff against the allowed-write set in manifest.
 
-    Any divergence → write_self_quarantine() + log URGENT + sys.exit(50).
+    Any divergence → write_self_halt() + log URGENT + sys.exit(50).
     No divergence → returns normally.
 
     Divergence definition:
@@ -116,7 +116,7 @@ def post_mutation_detector(
     Only the SOURCE path of a move pair is checked against proposed_moves
     source paths (destination is the move target, not a new write surface).
 
-    Per SAFETY_CONTRACT.md §229-238: this is the only trigger for SELF_QUARANTINE.
+    Per SAFETY_CONTRACT.md §229-238: this is the only trigger for SELF_HALT.
     The PR (if any) is left unmerged for human inspection. Human reconciles;
     agent never auto-reverts.
     """
@@ -156,8 +156,8 @@ def post_mutation_detector(
     )
     logger.critical("URGENT: %s", reason)
 
-    # write_self_quarantine is the ONLY caller site; any violation goes here.
-    write_self_quarantine(state_dir, reason)
+    # write_self_halt is the ONLY caller site; any violation goes here.
+    write_self_halt(state_dir, reason)
     sys.exit(_POST_MUTATION_EXIT_CODE)
 
 

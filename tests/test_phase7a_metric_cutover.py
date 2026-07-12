@@ -458,10 +458,10 @@ class TestR_BN_SchemaRefusesMinimalInsert:
 class TestR_BO_BackfillDataVersionContract:
     """R-BO: backfill must call assert_data_version_allowed before UPDATE."""
 
-    def test_R_BO_1_backfill_rejects_quarantined_data_version(self, conn):
-        """Synthetic row with quarantined data_version → backfill raises DataVersionQuarantinedError."""
+    def test_R_BO_1_backfill_rejects_rejected_data_version(self, conn):
+        """Synthetic row with rejected data_version → backfill raises DataVersionRejectedError."""
         from scripts.backfill_tigge_snapshot_p_raw import backfill, METRIC_SPECS
-        from src.contracts.ensemble_snapshot_provenance import DataVersionQuarantinedError
+        from src.contracts.ensemble_snapshot_provenance import DataVersionRejectedError
 
         _insert_canonical_pair(conn, city="Chicago", target_date="2026-06-15",
                                temperature_metric="high", range_label="80-84")
@@ -486,7 +486,7 @@ class TestR_BO_BackfillDataVersionContract:
         )
 
         high_spec = METRIC_SPECS[0]
-        with pytest.raises(DataVersionQuarantinedError, match="tigge_experimental_v99"):
+        with pytest.raises(DataVersionRejectedError, match="tigge_experimental_v99"):
             backfill(conn, dry_run=False, force=True, spec=high_spec)
 
         # Row must not have been updated (rollback / no write)
@@ -494,5 +494,5 @@ class TestR_BO_BackfillDataVersionContract:
             "SELECT p_raw_json FROM ensemble_snapshots WHERE dataset_id = 'tigge_experimental_v99'"
         ).fetchone()
         assert row["p_raw_json"] is None, (
-            "Backfill must NOT write p_raw to quarantined-data_version rows"
+            "Backfill must NOT write p_raw to rejected-data_version rows"
         )

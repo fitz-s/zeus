@@ -111,6 +111,6 @@ allowed_write_extensions:
   - path: "${ZEUS_REPO}/state/maintenance_evidence/**"
     reason: "Per-tick evidence trail, proposals, applied records, rollback recipes"
   - path: "${ZEUS_REPO}/.archive/**"
-    reason: "In-repo quarantine root for reversible quarantine moves"
+    reason: "In-repo archive root for reversible archive moves"
   - path: "~/Library/LaunchAgents/.archive/**"
-    reason: "LaunchAgents backup quarantine destination (Category 1)"
+    reason: "LaunchAgents backup archive destination (Category 1)"

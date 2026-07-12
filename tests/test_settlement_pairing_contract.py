@@ -77,7 +77,7 @@ def test_normalize_reconciles_collector_vocabulary_to_authority_family():
 
 
 def test_normalize_unknown_authority_raises_loud_not_silent():
-    """An authority token outside the known family registry must RAISE (loud quarantine), never
+    """An authority token outside the known family registry must RAISE (loud rejection), never
     pass through to a silent mismatch/drop that could starve the ledger."""
     with pytest.raises(UnknownSettlementAuthorityError):
         normalize_settlement_authority("frobnicate_satellite_v3")

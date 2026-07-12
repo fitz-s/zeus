@@ -16,10 +16,10 @@ enumerate(): walks repo root for files/dirs matching scratch_patterns +
   candidates regardless of name match.
 
 apply(): always dry_run_only (live_default: false). Returns mock diff
-  showing what move to quarantine_dir would do.
+  showing what move to archive_dir would do.
 
 Verdict strings:
-  SCRATCH_QUARANTINE_CANDIDATE — stale scratch item, safe to quarantine
+  SCRATCH_ARCHIVE_CANDIDATE — stale scratch item, safe to archive
   SKIP_FORBIDDEN_PATH          — inside a forbidden directory
   SKIP_TOO_FRESH               — modified within ttl_days
   SKIP_NO_PATTERN_MATCH        — does not match any scratch_pattern
@@ -41,7 +41,7 @@ from maintenance_worker.types.specs import TaskSpec, TickContext
 logger = logging.getLogger(__name__)
 
 # Verdict strings
-VERDICT_CANDIDATE = "SCRATCH_QUARANTINE_CANDIDATE"
+VERDICT_CANDIDATE = "SCRATCH_ARCHIVE_CANDIDATE"
 VERDICT_SKIP_FORBIDDEN = "SKIP_FORBIDDEN_PATH"
 VERDICT_SKIP_FRESH = "SKIP_TOO_FRESH"
 VERDICT_SKIP_NO_MATCH = "SKIP_NO_PATTERN_MATCH"
@@ -55,7 +55,7 @@ DEFAULT_SCRATCH_PATTERNS = [
 DEFAULT_FORBIDDEN_PATHS = [
     "src", "tests", "architecture", "docs", "state", "config", "scripts",
 ]
-DEFAULT_QUARANTINE_DIR = ".archive/scratch"
+DEFAULT_ARCHIVE_DIR = ".archive/scratch"
 
 
 # ---------------------------------------------------------------------------
@@ -191,7 +191,7 @@ def enumerate(entry: Any, ctx: TickContext) -> list[Candidate]:  # noqa: A001
             ))
 
     logger.info(
-        "in_repo_scratch_quarantine: found %d candidates (%d quarantinable)",
+        "in_repo_scratch_quarantine: found %d candidates (%d archivable)",
         len(candidates),
         sum(1 for c in candidates if c.verdict == VERDICT_CANDIDATE),
     )
@@ -200,10 +200,10 @@ def enumerate(entry: Any, ctx: TickContext) -> list[Candidate]:  # noqa: A001
 
 def apply(decision: Any, ctx: TickContext) -> ApplyResult:
     """
-    Apply scratch quarantine. Always dry_run_only (live_default: false in catalog).
+    Apply scratch archive. Always dry_run_only (live_default: false in catalog).
 
     Top-of-function guard per PLAN §1.5.4: defense-in-depth.
-    Returns ApplyResult with mock diff showing what move to quarantine_dir would do.
+    Returns ApplyResult with mock diff showing what move to archive_dir would do.
     """
     # TOP-OF-FUNCTION GUARD
     mock = _mock_diff(decision, ctx)
@@ -282,11 +282,11 @@ def _walk_dir(directory: Path):
 def _mock_diff(decision: Any, ctx: TickContext) -> tuple[str, ...]:
     """Return a mock diff tuple for dry-run proposals."""
     if decision is None:
-        return ("# dry-run: no scratch quarantine decisions to apply",)
+        return ("# dry-run: no scratch archive decisions to apply",)
     path_str = str(getattr(decision, "path", decision))
     raw = getattr(ctx.config, "env_vars", {})
-    quarantine_dir = raw.get("quarantine_dir", ".archive/scratch") if isinstance(raw, dict) else ".archive/scratch"
-    dest = str(Path(quarantine_dir) / Path(path_str).name)
+    archive_dir = raw.get("archive_dir", ".archive/scratch") if isinstance(raw, dict) else ".archive/scratch"
+    dest = str(Path(archive_dir) / Path(path_str).name)
     return (
         f"# dry-run proposal for in_repo_scratch_quarantine",
         f"# would execute: mv {path_str} {dest}",

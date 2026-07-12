@@ -71,8 +71,8 @@ def _make_entry(ttl_days: int = 14) -> TaskCatalogEntry:
             "live_default": False,
             "config": {
                 "backup_ttl_days": ttl_days,
-                "quarantine_dir": "~/Library/LaunchAgents/.archive",
-                "quarantine_retention_days": 90,
+                "archive_dir": "~/Library/LaunchAgents/.archive",
+                "archive_retention_days": 90,
                 "regex": r"\.(bak|backup|replaced|locked|before_[a-z_]+)[-._]?[0-9TZ]*(?:\.bak)?$",
             },
             "safety": {

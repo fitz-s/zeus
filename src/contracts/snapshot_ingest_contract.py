@@ -1,7 +1,7 @@
 # Created: 2026-04-17
 # Last reused/audited: 2026-04-17
 # Authority basis: zeus_dual_track_refactor_package_v2_2026-04-16/04_CODE_SNIPPETS/ingest_snapshot_contract.py + R-AF/R-AH/R-AJ
-"""Snapshot ingest contract — 3-law quarantine gating for low-track snapshots.
+"""Snapshot ingest contract — 3-law rejection gating for low-track snapshots.
 
 Phase 5B (B078 / SD-1): enforces the dual-track ingest boundary laws:
   Law 1 (low only): boundary_ambiguous=True → training_allowed=False

@@ -110,7 +110,7 @@ def test_calendar_entries_have_safe_fetch_for_live() -> None:
 def test_partial_and_late_arrival_are_distinct_axes() -> None:
     """Antibody: the partial-completeness axis (calendar partial_policy:
     BLOCK_LIVE/ALLOW) must NOT be conflated with the late-write
-    disposition axis (LateArrivalPolicy: replace/append/quarantine/ignore/backfill).
+    disposition axis (LateArrivalPolicy: replace/append/hold/ignore/backfill).
 
     A prior draft collapsed these into one enum; this locks them apart by value sets.
     """
@@ -123,7 +123,7 @@ def test_partial_and_late_arrival_are_distinct_axes() -> None:
     assert late_values == {
         "replace_same_idempotency_key",
         "append_revision",
-        "quarantine",
+        "hold",
         "ignore_if_live_closed",
         "backfill_only",
     }, late_values

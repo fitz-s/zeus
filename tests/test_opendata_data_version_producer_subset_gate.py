@@ -3,10 +3,10 @@
 # Authority basis: src/contracts/ensemble_snapshot_provenance.py
 #   (CANONICAL_ENSEMBLE_DATA_VERSIONS gate) + ingest_grib_to_snapshots.py
 #   inline _v1 normalization (commit referenced "#38 / #362"). Antibody for
-#   the 2026-05-30 DataVersionQuarantinedError on
+#   the 2026-05-30 DataVersionRejectedError on
 #   data_version='ecmwf_opendata_mx2t3_local_calendar_day_max_v1'.
 # Lifecycle: created=2026-06-04; last_reviewed=2026-06-05; last_reused=2026-06-05
-# Purpose: Relationship antibody — the OpenData producer's data_version must be a subset of the CANONICAL_ENSEMBLE_DATA_VERSIONS gate (no _v1 quarantine drift).
+# Purpose: Relationship antibody — the OpenData producer's data_version must be a subset of the CANONICAL_ENSEMBLE_DATA_VERSIONS gate (no _v1 rejection drift).
 # Reuse: Re-run when CANONICAL_ENSEMBLE_DATA_VERSIONS or the OpenData ingest normalization changes.
 """Relationship test: OpenData producer ⊆ ensemble_snapshots gate.
 
@@ -30,14 +30,14 @@ The ONLY thing keeping the live forecast-ingest path green across this boundary
 is the normalization in ``ingest_grib_to_snapshots`` that strips the trailing
 ``_v1`` from ``ecmwf_opendata_*`` versions before calling
 ``assert_data_version_allowed``. On 2026-05-30 that normalization did not yet
-exist and every OpenData cycle quarantined — zero fresh ensemble_snapshots.
+exist and every OpenData cycle rejected — zero fresh ensemble_snapshots.
 
-This test makes that quarantine CATEGORY unconstructable for the OpenData path:
+This test makes that rejection CATEGORY unconstructable for the OpenData path:
 it asserts that, for every canonical OpenData data_version, the producer's
 ``_v1``-suffixed emission, after the shared normalization, is a member of the
 gate. If a future edit deletes the normalization (believing the ``_v1`` era is
 over) while the out-of-repo extractor still emits ``_v1``, this test goes RED
-BEFORE the live daemon silently re-quarantines.
+BEFORE the live daemon silently re-rejects.
 
 Relationship, not function: it crosses producer-emit → normalize → gate-admit.
 """

@@ -5,7 +5,7 @@
 Tests for maintenance_worker.rules.untracked_top_level_quarantine.
 
 4 tests:
-  1. Stale untracked file → UNTRACKED_QUARANTINE_CANDIDATE
+  1. Stale untracked file → UNTRACKED_ARCHIVE_CANDIDATE
   2. File under docs/operations/task_*/ → SKIP_ACTIVE_PACKET_DIR
   3. File matching secret pattern (*credential*) → SKIP_FORBIDDEN_PATH
   4. apply() always dry_run_only + mock diff
@@ -70,7 +70,7 @@ def _make_entry(ttl_days: int = 14) -> TaskCatalogEntry:
             "schedule": "daily",
             "config": {
                 "untracked_ttl_days": ttl_days,
-                "quarantine_dir": ".archive/untracked",
+                "archive_dir": ".archive/untracked",
             },
             "safety": {
                 "forbidden_paths": [
@@ -86,14 +86,14 @@ def _make_entry(ttl_days: int = 14) -> TaskCatalogEntry:
 
 
 # ---------------------------------------------------------------------------
-# Test 1: Stale untracked file → UNTRACKED_QUARANTINE_CANDIDATE
+# Test 1: Stale untracked file → UNTRACKED_ARCHIVE_CANDIDATE
 # ---------------------------------------------------------------------------
 
 
 def test_stale_untracked_file_is_candidate(tmp_path: Path) -> None:
     """
     An untracked file with mtime > ttl_days and no forbidden match should
-    be classified UNTRACKED_QUARANTINE_CANDIDATE.
+    be classified UNTRACKED_ARCHIVE_CANDIDATE.
     """
     ctx = _make_ctx(tmp_path)
     entry = _make_entry(ttl_days=14)
@@ -127,7 +127,7 @@ def test_stale_untracked_file_is_candidate(tmp_path: Path) -> None:
 def test_file_under_task_packet_skipped(tmp_path: Path) -> None:
     """
     A file under docs/operations/task_<anything>/ must be classified
-    SKIP_ACTIVE_PACKET_DIR — never quarantine active packet dirs.
+    SKIP_ACTIVE_PACKET_DIR — never archive active packet dirs.
     """
     ctx = _make_ctx(tmp_path)
     entry = _make_entry()

@@ -293,7 +293,7 @@ def run_bucket_downscaled_anchor_cross_check_cycle(forecast_db: Path) -> dict[st
     run-pinned single-runs API serves that run, the stored DOWNSCALED series is compared to the
     API series for the SAME city. VERIFIED (<=0.1C) ⇒ the city joins the downscaled whitelist
     class (receipt key ``<cycle>::bucket_downscaled::<city>``) and is served downscaled by
-    rung 3; MISMATCH ⇒ ERROR + receipt — the city STAYS quarantined (the tolerance is NEVER
+    rung 3; MISMATCH ⇒ ERROR + receipt — the city STAYS non-admitted (the tolerance is NEVER
     weakened; a city the downscaling cannot reproduce honestly falls through to rungs 1-2).
 
     Identical structure to ``run_bucket_anchor_cross_check_cycle`` but on the downscaled
@@ -373,7 +373,7 @@ def run_bucket_downscaled_anchor_cross_check_cycle(forecast_db: Path) -> dict[st
                 logger.error(
                     "ANCHOR BUCKET-DOWNSCALED MISMATCH cycle=%s city=%s max_abs_delta_c=%s — "
                     "the downscaled (cell_selection=land + lapse-rate) series diverged from the "
-                    "run-pinned API beyond %.3fC; city STAYS quarantined (tolerance not weakened; "
+                    "run-pinned API beyond %.3fC; city STAYS non-admitted (tolerance not weakened; "
                     "falls through to rungs 1-2) (receipts: %s)",
                     cycle_iso,
                     meta.get("city"),

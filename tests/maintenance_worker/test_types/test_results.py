@@ -50,7 +50,7 @@ class TestRefusalReasonReexport:
     def test_hard_guards_present(self) -> None:
         hard = {
             "KILL_SWITCH", "DIRTY_REPO", "ACTIVE_REBASE", "LOW_DISK",
-            "INFLIGHT_PR", "SELF_QUARANTINED",
+            "INFLIGHT_PR", "SELF_HALTED",
             "FORBIDDEN_PATH_VIOLATION", "FORBIDDEN_OPERATION_VIOLATION",
         }
         actual = {r.value for r in RefusalReason}

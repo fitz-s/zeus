@@ -1,13 +1,13 @@
 # Lifecycle: created=2026-04-29; last_reviewed=2026-04-29; last_reused=never
-# Purpose: Polymarket Gamma settlement-source contract watch and city quarantine writer for configured weather cities.
-# Reuse: Inspect src/data/market_scanner.py source-contract/quarantine helpers and architecture/script_manifest.yaml before relying on alerts.
+# Purpose: Polymarket Gamma settlement-source contract watch and city block writer for configured weather cities.
+# Reuse: Inspect src/data/market_scanner.py source-contract/block helpers and architecture/script_manifest.yaml before relying on alerts.
 """Watch Polymarket resolution sources against configured city contracts.
 
 This script is designed for Venus/cron-style monitoring. It fetches active
 Gamma weather events, compares their resolutionSource metadata to Zeus city
 source contracts, prints a machine-readable or text report, and exits non-zero
 when configured source proof is missing or wrong. ALERT mismatches also persist
-a city-level source-contract quarantine unless --report-only is supplied.
+a city-level source-contract block unless --report-only is supplied.
 """
 
 from __future__ import annotations
@@ -42,7 +42,7 @@ SOURCE_STATUS_SEVERITY = {
     "MISMATCH": "ALERT",
     "UNSUPPORTED": "ALERT",
 }
-QUARANTINE_STATUSES = ms.SOURCE_CONTRACT_ALERT_STATUSES
+BLOCK_ALERT_STATUSES = ms.SOURCE_CONTRACT_ALERT_STATUSES
 
 
 def _event_id(event: dict[str, Any]) -> str:
@@ -256,7 +256,7 @@ def build_compact_alert_report(
             if event.get("city")
         }
     )
-    quarantine_actions = list(report.get("quarantine_actions") or [])
+    block_actions = list(report.get("block_actions") or [])
     return {
         "schema_version": COMPACT_SCHEMA_VERSION,
         "status": report.get("status"),
@@ -272,10 +272,10 @@ def build_compact_alert_report(
         "affected_cities": affected_cities,
         "alert_events": alert_events,
         "warn_events": warn_events,
-        "quarantine": {
+        "block": {
             "report_only": bool(report_only),
-            "written": bool(quarantine_actions),
-            "actions": quarantine_actions,
+            "written": bool(block_actions),
+            "actions": block_actions,
             "mode": "read_only_no_write" if report_only else "write_on_alert",
         },
         "audit_persistence": report.get("audit_persistence"),
@@ -298,7 +298,7 @@ def _next_actions(status: str, events: list[dict[str, Any]]) -> list[str]:
     if any(event["severity"] == "ALERT" for event in events):
         actions.extend(
             [
-                "Keep the affected city in source-contract quarantine so new entries stay blocked while old positions can still monitor and exit.",
+                "Keep the affected city in source-contract block so new entries stay blocked while old positions can still monitor and exit.",
                 "If the source change is real, update config/cities.json and current_source_validity.md from packet evidence.",
                 "Backfill only the affected city-date-metric/source-role rows, then rebuild settlements, calibration pairs, and Platt calibration for that bucket before release.",
             ]
@@ -306,7 +306,7 @@ def _next_actions(status: str, events: list[dict[str, Any]]) -> list[str]:
     return actions
 
 
-def _quarantine_evidence_for_city(report: dict[str, Any], events: list[dict[str, Any]]) -> dict[str, Any]:
+def _block_evidence_for_city(report: dict[str, Any], events: list[dict[str, Any]]) -> dict[str, Any]:
     return {
         "checked_at_utc": report.get("checked_at_utc"),
         "authority": report.get("authority"),
@@ -326,13 +326,13 @@ def _quarantine_evidence_for_city(report: dict[str, Any], events: list[dict[str,
     }
 
 
-def apply_source_quarantines(
+def apply_source_blocks(
     report: dict[str, Any],
     *,
-    quarantine_path: Path | None = None,
+    block_path: Path | None = None,
     observed_at: str | None = None,
 ) -> list[dict[str, Any]]:
-    """Persist city quarantines for ALERT source-contract mismatches."""
+    """Persist city blocks for ALERT source-contract mismatches."""
     grouped: dict[str, list[dict[str, Any]]] = {}
     for event in report.get("events", []):
         city = event.get("city")
@@ -341,24 +341,24 @@ def apply_source_quarantines(
             continue
         if event.get("severity") != "ALERT":
             continue
-        if contract.get("status") not in QUARANTINE_STATUSES:
+        if contract.get("status") not in BLOCK_ALERT_STATUSES:
             continue
         grouped.setdefault(str(city), []).append(event)
 
     actions: list[dict[str, Any]] = []
     observed = observed_at or str(report.get("checked_at_utc") or "")
     for city, events in sorted(grouped.items()):
-        result = ms.upsert_source_contract_quarantine(
+        result = ms.upsert_source_contract_block(
             city,
             reason="source_contract_mismatch",
-            evidence=_quarantine_evidence_for_city(report, events),
+            evidence=_block_evidence_for_city(report, events),
             observed_at=observed or None,
             source="watch_source_contract",
-            path=quarantine_path,
+            path=block_path,
         )
         actions.append(
             {
-                "action": "quarantine_city_source",
+                "action": "block_city_source",
                 "status": result["status"],
                 "city": result["city"],
                 "path": result["path"],
@@ -378,7 +378,7 @@ def load_release_evidence(path: Path) -> dict[str, Any]:
 def render_release_result(result: dict[str, Any]) -> str:
     if result.get("status") == "blocked":
         return (
-            f"source-contract-quarantine release blocked city={result.get('city')} "
+            f"source-contract-block release blocked city={result.get('city')} "
             f"missing_evidence={result.get('missing_evidence')}"
         )
     transition = result.get("transition_record") or {}
@@ -390,7 +390,7 @@ def render_release_result(result: dict[str, Any]) -> str:
             f"to={transition.get('to_source_contract')}"
         )
     return (
-        f"source-contract-quarantine release {result.get('status')} "
+        f"source-contract-block release {result.get('status')} "
         f"city={result.get('city')} path={result.get('path')}{transition_suffix}"
     )
 
@@ -398,9 +398,9 @@ def render_release_result(result: dict[str, Any]) -> str:
 def build_conversion_plan(
     city: str,
     *,
-    quarantine_path: Path | None = None,
+    block_path: Path | None = None,
 ) -> dict[str, Any]:
-    active = ms.active_source_contract_quarantines(path=quarantine_path)
+    active = ms.active_source_contract_blocks(path=block_path)
     entry = active.get(city)
     if entry is None:
         for candidate, candidate_entry in active.items():
@@ -411,9 +411,9 @@ def build_conversion_plan(
     branch = ms.source_contract_transition_branch(entry)
     return {
         "city": city,
-        "status": "active_quarantine" if entry else "not_quarantined",
+        "status": "active_block" if entry else "not_blocked",
         "transition_branch": branch,
-        "quarantine_entry": entry,
+        "block_entry": entry,
         "release_contract": {
             "required_evidence": list(ms.REQUIRED_SOURCE_CONVERSION_EVIDENCE),
             "required_evidence_refs": {
@@ -471,9 +471,9 @@ def render_conversion_plan(plan: dict[str, Any]) -> str:
 def build_history_report(
     city: str | None = None,
     *,
-    quarantine_path: Path | None = None,
+    block_path: Path | None = None,
 ) -> dict[str, Any]:
-    history = ms.source_contract_transition_history(city, path=quarantine_path)
+    history = ms.source_contract_transition_history(city, path=block_path)
     return {
         "status": "ok",
         "city_filter": city,
@@ -578,9 +578,9 @@ def render_text(report: dict[str, Any]) -> str:
         )
     for action in report["next_actions"]:
         lines.append(f"next: {action}")
-    for action in report.get("quarantine_actions", []):
+    for action in report.get("block_actions", []):
         lines.append(
-            f"quarantine: {action['status']} city={action['city']} "
+            f"block: {action['status']} city={action['city']} "
             f"events={action.get('event_ids')} path={action.get('path')}"
         )
     return "\n".join(lines)
@@ -595,10 +595,10 @@ def render_compact_alert_text(report: dict[str, Any]) -> str:
             f"affected_cities={report.get('affected_cities')}"
         )
     ]
-    quarantine = report.get("quarantine") or {}
+    block = report.get("block") or {}
     lines.append(
-        "quarantine: "
-        f"mode={quarantine.get('mode')} written={quarantine.get('written')}"
+        "block: "
+        f"mode={block.get('mode')} written={block.get('written')}"
     )
     audit_persistence = report.get("audit_persistence") or {}
     if audit_persistence:
@@ -647,12 +647,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--report-only",
         action="store_true",
-        help="Do not write source-contract quarantine state on ALERT",
+        help="Do not write source-contract block state on ALERT",
     )
     parser.add_argument(
-        "--quarantine-path",
+        "--source-block-path",
+        dest="block_path",
         type=Path,
-        help="Override source-contract quarantine state path",
+        help="Override source-contract block state path",
     )
     parser.add_argument(
         "--audit-db-path",
@@ -661,11 +662,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--release-city",
-        help="Release a city source-contract quarantine after conversion evidence is complete",
+        help="Release a city source-contract block after conversion evidence is complete",
     )
     parser.add_argument(
         "--conversion-plan",
-        help="Print the required conversion protocol for a quarantined city",
+        help="Print the required conversion protocol for a blocked city",
     )
     parser.add_argument(
         "--history",
@@ -698,7 +699,7 @@ def main(argv: list[str] | None = None) -> int:
         city_filter = args.history or None
         report = build_history_report(
             city_filter,
-            quarantine_path=args.quarantine_path,
+            block_path=args.block_path,
         )
         print(
             json.dumps(report, indent=2, sort_keys=True)
@@ -710,7 +711,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.conversion_plan:
         plan = build_conversion_plan(
             args.conversion_plan,
-            quarantine_path=args.quarantine_path,
+            block_path=args.block_path,
         )
         print(
             json.dumps(plan, indent=2, sort_keys=True)
@@ -722,11 +723,11 @@ def main(argv: list[str] | None = None) -> int:
     if args.release_city:
         if args.release_evidence is None:
             parser.error("--release-city requires --release-evidence")
-        result = ms.release_source_contract_quarantine(
+        result = ms.release_source_contract_block(
             args.release_city,
             released_by="watch_source_contract",
             evidence=load_release_evidence(args.release_evidence),
-            path=args.quarantine_path,
+            path=args.block_path,
         )
         print(
             json.dumps(result, indent=2, sort_keys=True)
@@ -757,7 +758,7 @@ def main(argv: list[str] | None = None) -> int:
                 "summary": {"OK": 0, "WARN": 0, "ALERT": 0, "DATA_UNAVAILABLE": 1},
                 "events": [],
                 "next_actions": ["Do not rely on source monitor output until Gamma fetch recovers."],
-                "quarantine_actions": [],
+                "block_actions": [],
             }
             audit_result = persist_audit_report(report, audit_db_path=args.audit_db_path)
             if audit_result is not None:
@@ -784,10 +785,10 @@ def main(argv: list[str] | None = None) -> int:
         include_unconfigured=args.include_unconfigured,
         authority=authority,
     )
-    report["quarantine_actions"] = (
+    report["block_actions"] = (
         []
         if args.report_only
-        else apply_source_quarantines(report, quarantine_path=args.quarantine_path)
+        else apply_source_blocks(report, block_path=args.block_path)
     )
     audit_result = persist_audit_report(report, audit_db_path=args.audit_db_path)
     if audit_result is not None:

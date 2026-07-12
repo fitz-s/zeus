@@ -187,7 +187,7 @@ def test_inv1_metric_keyed_no_crossing_and_low_serves(monkeypatch):
     # METRIC ANTIBODY (2026-06-04): cells are keyed city|season|metric. HIGH and LOW are
     # physically different quantities (daily max vs min); a LOW lookup resolves ONLY a LOW
     # cell. Proves: (1) a LOW market is NEVER served the HIGH fit; (2) when a LOW cell exists
-    # the LOW path serves from it (LOW is calibrated, not quarantined).
+    # the LOW path serves from it (LOW is calibrated, not rejected).
     mod = importlib.import_module("src.calibration.emos_q_builder")
     members = np.array([10.0, 11.0, 12.0, 13.0], dtype=float)
     bins = [(None, 11.0), (12.0, 12.0), (13.0, None)]

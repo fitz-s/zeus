@@ -15,7 +15,7 @@
 #   1. Inject `ZEUS_HARVESTER_LIVE_ENABLED=1` into both daemon plists.
 #      This is the DR-33-A safety flag; without it,
 #      harvester_truth_writer is a no-op and every settlement is
-#      `quarantine_reason=no_observation_for_target_date`.
+#      `dispute_reason=no_observation_for_target_date`.
 #   1b. Inject `ZEUS_USER_CHANNEL_WS_ENABLED=1` and
 #      `ZEUS_USER_CHANNEL_WS_AUTO_DERIVE=1` into both daemon plists.
 #      Master toggle + auto-derive switch for the M3 Polymarket user-channel
