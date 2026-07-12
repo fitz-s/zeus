@@ -6331,6 +6331,9 @@ def _global_preflight_block_status(reason: str) -> str:
         "EDLI_DURABLE_SUBMIT_OUTBOX_REQUIRED",
         "EXECUTOR_BOUNDARY_MISSING",
         "OPERATOR_ARM_REQUIRED",
+        "GLOBAL_CURRENT_STATE_PAYOFF_Q_TIGHTENED_REAUCTION_REQUIRED",
+        "GLOBAL_CURRENT_STATE_ROBUST_MAJORITY_LOSS",
+        "GLOBAL_CURRENT_STATE_ECONOMICS_NON_POSITIVE",
     }:
         return "BATCH_BLOCKED"
     return "BLOCKED"
@@ -6483,6 +6486,10 @@ def _global_current_state_execution_economics(
         if payoff_q_lcb <= Decimal("0.5"):
             raise ValueError("GLOBAL_CURRENT_STATE_ROBUST_MAJORITY_LOSS")
         raise ValueError("GLOBAL_CURRENT_STATE_ECONOMICS_NON_POSITIVE")
+    if payoff_q_lcb < current_band_payoff_q_lcb:
+        raise ValueError(
+            "GLOBAL_CURRENT_STATE_PAYOFF_Q_TIGHTENED_REAUCTION_REQUIRED"
+        )
     sample_hash = str(getattr(witness, "sample_matrix_identity", "") or "").strip()
     samples = getattr(witness, "yes_q_samples", None)
     try:

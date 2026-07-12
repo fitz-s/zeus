@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import json
+import math
 import sqlite3
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -81,19 +82,27 @@ def _current_qkernel_cert(*, side: str = "YES") -> dict:
     return cert
 
 
-def _global_decision(*, shares: str, cost: str, q: str, candidate=None):
+def _global_decision(
+    *,
+    shares: str,
+    cost: str,
+    q: str,
+    candidate=None,
+    wealth: str = "1000",
+):
     shares_decimal = Decimal(shares)
     cost_decimal = Decimal(cost)
     q_decimal = Decimal(q)
     robust_ev = q_decimal * shares_decimal - cost_decimal
+    wealth_decimal = Decimal(wealth)
     terminal = SimpleNamespace(
         win_probability_lcb=float(q_decimal),
         loss_probability_ucb=float(Decimal("1") - q_decimal),
         loss_payoff_usd=-cost_decimal,
         win_payoff_usd=shares_decimal - cost_decimal,
         median_payoff_usd=shares_decimal - cost_decimal,
-        wealth_after_loss_usd=Decimal("1000") - cost_decimal,
-        wealth_after_win_usd=Decimal("1000") + shares_decimal - cost_decimal,
+        wealth_after_loss_usd=wealth_decimal - cost_decimal,
+        wealth_after_win_usd=wealth_decimal + shares_decimal - cost_decimal,
         expected_value_diagnostic_usd=float(robust_ev),
     )
     return SimpleNamespace(
@@ -871,7 +880,7 @@ def test_global_actuation_rebinds_submit_gate_to_exact_current_band(
     decision = _global_decision(
         shares="158.25",
         cost="91.3482",
-        q="0.747377",
+        q="0.7271700502061007",
     )
     witness = SimpleNamespace(
         sample_matrix_identity="global-current-sample",
@@ -1350,7 +1359,7 @@ def test_global_actuation_legacy_bound_absence_cannot_rescue_majority_loss(side)
 
 
 @pytest.mark.parametrize("side", ("YES", "NO"))
-def test_global_actuation_cannot_loosen_prior_qkernel_bound(side):
+def test_global_actuation_probability_tightening_requires_reauction(side):
     cert = _current_qkernel_cert(side=side)
     cert.update(
         payoff_q_point=0.80,
@@ -1366,16 +1375,58 @@ def test_global_actuation_cannot_loosen_prior_qkernel_bound(side):
         band_alpha=0.05,
     )
 
-    current = era._global_current_state_execution_economics(
-        cert,
-        decision=decision,
-        witness=witness,
+    with pytest.raises(
+        ValueError,
+        match="GLOBAL_CURRENT_STATE_PAYOFF_Q_TIGHTENED_REAUCTION_REQUIRED",
+    ):
+        era._global_current_state_execution_economics(
+            cert,
+            decision=decision,
+            witness=witness,
+        )
+
+
+@pytest.mark.parametrize("side", ("YES", "NO"))
+def test_global_actuation_rejects_negative_log_stale_size_after_q_tightening(side):
+    wealth = 100.0
+    shares = 80.0
+    cost = 40.0
+    tightened_q = 0.55
+    tightened_delta_log = (
+        tightened_q * math.log((wealth + shares - cost) / wealth)
+        + (1.0 - tightened_q) * math.log((wealth - cost) / wealth)
+    )
+    assert tightened_delta_log < 0.0
+
+    cert = _current_qkernel_cert(side=side)
+    cert.update(
+        payoff_q_point=0.80,
+        payoff_q_lcb=tightened_q,
+        pre_qkernel_q_lcb_5pct=0.70,
+        cost=0.50,
+        edge_lcb=0.05,
+    )
+    decision = _global_decision(
+        shares=str(shares),
+        cost=str(cost),
+        q="0.70",
+        wealth=str(wealth),
+    )
+    witness = SimpleNamespace(
+        sample_matrix_identity=f"global-negative-log-tightening-{side.lower()}",
+        yes_q_samples=SimpleNamespace(shape=(400, 2)),
+        band_alpha=0.05,
     )
 
-    assert current["global_current_band_payoff_q_lcb"] == pytest.approx(0.60)
-    assert current["global_current_prior_payoff_q_lcb"] == pytest.approx(0.55)
-    assert current["payoff_q_lcb"] == pytest.approx(0.55)
-    assert era._qkernel_current_state_solve_economics(current) is True
+    with pytest.raises(
+        ValueError,
+        match="GLOBAL_CURRENT_STATE_PAYOFF_Q_TIGHTENED_REAUCTION_REQUIRED",
+    ):
+        era._global_current_state_execution_economics(
+            cert,
+            decision=decision,
+            witness=witness,
+        )
 
 
 @pytest.mark.parametrize("side", ("YES", "NO"))
