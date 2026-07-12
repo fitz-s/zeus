@@ -1,33 +1,50 @@
-# Created: 2026-05-22
-# Last reused or audited: 2026-05-23
-# Authority basis: docs/archive/2026-Q2/operations_historical/P0_FORECAST_EXTREMA_AUTHORITY_2026-05-22.md §PR-E
+# Created: 2026-07-12
+# Last reused or audited: 2026-07-12
+# Authority basis: docs/rebuild/quarantine_excision_2026-07-11.md DIQ packet
+#   (Consult adjudication "DIQ CONDITIONAL"); supersedes
+#   src/state/decision_integrity_quarantine.py (PR-E 2026-05-22).
 
-"""PR-E — Quarantine tooling for decisions backed by non-contributing forecast snapshots.
+"""fact_revocations — owner-local fact-revocation records (DIQ packet).
 
-Tags fact-table rows whose associated ensemble snapshot had
-contributes_to_target_extrema=0 OR forecast_window_attribution_status='UNKNOWN'
-with reason QUARANTINED_NON_CONTRIBUTING_FORECAST_EXTREMA.
+Quarantine excision (docs/rebuild/quarantine_excision_2026-07-11.md): the old
+``decision_integrity_quarantine`` side-table lived ONLY in the trade DB while
+tagging rows across all three physical DBs (a cross-DB existence-authority).
+This module re-implements the same function — a genuine second
+existence-authority, row-existence = revocation, keyed
+(table_name, row_id, reason_code) with reason multiplicity and a meta_json
+audit payload — as an OWNER-LOCAL record: each physical DB that owns a
+revocable table gets its own local ``fact_revocations`` table
+(src/state/schema/fact_revocations_schema.py), written in the SAME
+transaction as (or immediately after) the fact it revokes, on THAT table's
+own connection. This is a typed domain FACT (an authority), not a
+ReviewWorkItem — see src/contracts/review_work_item.py module docstring
+("Typed domain facts ... CertificateRevocation ... remain the AUTHORITIES").
 
-Tables quarantined (all via forecast-snapshot linkage):
-  - opportunity_fact           — direct: snapshot_id TEXT → ensemble_snapshots
-  - calibration_pairs       — direct: snapshot_id INTEGER → ensemble_snapshots
-  - probability_trace_fact     — direct: decision_snapshot_id TEXT (CAST) → ensemble_snapshots
-  - selection_family_fact      — direct: decision_snapshot_id TEXT (CAST) → ensemble_snapshots
-  - selection_hypothesis_fact  — indirect: family_id → selection_family_fact → ensemble_snapshots
-  - decision_events            — indirect: decision_event_id → opportunity_fact → ensemble_snapshots
+Two independent revocation lanes share this one table shape:
+  1. Forecast-snapshot linkage (PR-E, 2026-05-22): tags fact-table rows whose
+     ensemble snapshot had contributes_to_target_extrema=0 or
+     forecast_window_attribution_status='UNKNOWN'. Tables: opportunity_fact
+     (trade), calibration_pairs (forecasts), probability_trace_fact,
+     selection_family_fact, selection_hypothesis_fact, decision_events
+     (world).
+  2. Live money-certificate integrity: revokes LIVE decision_certificates
+     rows (world) that fail current verifier semantics or whose live-money
+     ancestry chain is not entirely LIVE.
 
-Tables intentionally SKIPPED (no forecast snapshot linkage):
-  - no_trade_events    — composite PK only, no single row_id column usable as quarantine key
-  - calibration_pairs  — legacy table, no snapshot_id column
+Read side is generic and schema-agnostic: ``is_fact_revoked`` /
+``is_certificate_revoked`` iterate every schema ATTACHed to the caller's
+connection (a caller does not need to know in advance which DB the
+revocation record for a given row lives in).
 
-Design choices:
-  - NON-destructive: rows are tagged in decision_integrity_quarantine, never deleted.
-  - Idempotent: uses INSERT OR IGNORE backed by UNIQUE(table_name, row_id, reason_code).
-  - One reason code for both bad-contributes and UNKNOWN-attribution.
-  - Cross-DB join: conn must have zeus-forecasts.db ATTACHed as 'forecasts'. Falls back
-    to unqualified table name when 'forecasts' schema not detected (test pattern).
-  - NULL passthrough: legacy rows with contributes_to_target_extrema IS NULL are NOT
-    quarantined — they predate the bug and were not affected.
+Write side is owner-local by construction: each bulk/single writer accepts a
+``target_schema`` naming which schema on ``conn`` to write into (default
+"main" — the common case where the caller's connection is already rooted at
+the owning DB). Cross-DB writers (e.g. a world-main connection revoking a
+trade-owned opportunity_fact row) pass ``target_schema="trade"`` after
+ATTACHing it and calling ``fact_revocations_schema.ensure_table_in_schema``.
+
+NON-destructive: rows are tagged, never deleted. Idempotent: INSERT OR
+IGNORE, backed by UNIQUE(table_name, row_id, reason_code).
 
 INV-37: caller supplies conn; never auto-opens.
 """
@@ -42,12 +59,15 @@ from datetime import datetime, timezone
 
 logger = logging.getLogger(__name__)
 
-# Reason code written into decision_integrity_quarantine.
-REASON_NON_CONTRIBUTING = "QUARANTINED_NON_CONTRIBUTING_FORECAST_EXTREMA"
-REASON_INVALID_LIVE_ACTIONABLE = "QUARANTINED_INVALID_LIVE_ACTIONABLE_CERTIFICATE"
-REASON_INVALID_LIVE_PARENT_MODE = "QUARANTINED_INVALID_LIVE_MONEY_PARENT_MODE"
+# Reason codes written into fact_revocations.reason_code. Values renamed from
+# the QUARANTINED_* predecessor vocabulary (quarantine excision word-and-shape
+# removal); constant NAMES are unchanged so importers only need a module path
+# update, not a call-site rename.
+REASON_NON_CONTRIBUTING = "REVOKED_NON_CONTRIBUTING_FORECAST_EXTREMA"
+REASON_INVALID_LIVE_ACTIONABLE = "REVOKED_INVALID_LIVE_ACTIONABLE_CERTIFICATE"
+REASON_INVALID_LIVE_PARENT_MODE = "REVOKED_INVALID_LIVE_MONEY_PARENT_MODE"
 
-# Table name tagged in quarantine rows for the original opportunity_fact function.
+# Table name tagged in revocation rows for the original opportunity_fact function.
 TARGET_TABLE = "opportunity_fact"
 DECISION_CERTIFICATES_TABLE = "decision_certificates"
 LIVE_MONEY_CERTIFICATE_PARENT_MODE_TYPES = (
@@ -61,24 +81,26 @@ LIVE_MONEY_CERTIFICATE_PARENT_MODE_TYPES = (
 )
 
 
-def quarantine_invalid_live_actionable_certificates(
+def revoke_invalid_live_actionable_certificates(
     conn: sqlite3.Connection,
     *,
     dry_run: bool = False,
     lookback_hours: float | None = None,
+    target_schema: str = "main",
 ) -> dict:
     """Tag LIVE ActionableTradeCertificate rows that fail current money-law semantics.
 
-    The row remains immutable in ``decision_certificates``.  The quarantine tag
+    The row remains immutable in ``decision_certificates``. The revocation tag
     is the durable live-reader exclusion proof: old VERIFIED rows may still
     exist for audit, but they are no longer consumable as executable authority.
 
-    ``conn`` is expected to expose ``decision_certificates`` in main and may
-    ATTACH the trade DB as ``trade`` for the quarantine write.  In tests, the
-    quarantine table may live unqualified in the same in-memory DB.
+    decision_certificates is world-owned (src/state/domains.py); ``conn`` is
+    expected to be rooted at (or expose via ATTACH) the world DB, and
+    ``target_schema`` names the schema fact_revocations is written into
+    (default "main" — the world-main case; owner-local, no cross-DB write).
     """
 
-    q_ref = _quarantine_ref(conn)
+    ref = _revocations_ref(conn, target_schema)
     recorded_at = datetime.now(timezone.utc).isoformat()
     params: list[object] = []
     since_clause = ""
@@ -103,13 +125,13 @@ def quarantine_invalid_live_actionable_certificates(
             params,
         ).fetchall()
     except sqlite3.OperationalError as exc:
-        msg = f"invalid live actionable quarantine scan failed: {exc}"
+        msg = f"invalid live actionable revocation scan failed: {exc}"
         logger.error(msg)
         return {
             "checked_count": 0,
             "candidates_found": 0,
-            "already_quarantined": 0,
-            "newly_quarantined": 0,
+            "already_revoked": 0,
+            "newly_revoked": 0,
             "dry_run": dry_run,
             "error": msg,
         }
@@ -136,18 +158,18 @@ def quarantine_invalid_live_actionable_certificates(
         return {
             "checked_count": checked_count,
             "candidates_found": len(candidates),
-            "already_quarantined": 0,
-            "newly_quarantined": 0,
+            "already_revoked": 0,
+            "newly_revoked": 0,
             "dry_run": dry_run,
         }
 
     pre_count = conn.execute(
-        f"SELECT COUNT(*) FROM {q_ref} WHERE table_name=? AND reason_code=?",
+        f"SELECT COUNT(*) FROM {ref} WHERE table_name=? AND reason_code=?",
         (DECISION_CERTIFICATES_TABLE, REASON_INVALID_LIVE_ACTIONABLE),
     ).fetchone()[0]
     conn.executemany(
         f"""
-        INSERT OR IGNORE INTO {q_ref}
+        INSERT OR IGNORE INTO {ref}
             (table_name, row_id, reason_code, forecast_snapshot_id, recorded_at, meta_json)
         VALUES (?, ?, ?, NULL, ?, ?)
         """,
@@ -159,7 +181,7 @@ def quarantine_invalid_live_actionable_certificates(
                 recorded_at,
                 json.dumps(
                     {
-                        "source": "quarantine_invalid_live_actionable_certificates",
+                        "source": "revoke_invalid_live_actionable_certificates",
                         "certificate_id": cert_id,
                         "decision_time": decision_time,
                         "verification_error": reason,
@@ -171,33 +193,35 @@ def quarantine_invalid_live_actionable_certificates(
         ],
     )
     post_count = conn.execute(
-        f"SELECT COUNT(*) FROM {q_ref} WHERE table_name=? AND reason_code=?",
+        f"SELECT COUNT(*) FROM {ref} WHERE table_name=? AND reason_code=?",
         (DECISION_CERTIFICATES_TABLE, REASON_INVALID_LIVE_ACTIONABLE),
     ).fetchone()[0]
-    newly_quarantined = post_count - pre_count
+    newly_revoked = post_count - pre_count
     return {
         "checked_count": checked_count,
         "candidates_found": len(candidates),
-        "already_quarantined": len(candidates) - newly_quarantined,
-        "newly_quarantined": newly_quarantined,
+        "already_revoked": len(candidates) - newly_revoked,
+        "newly_revoked": newly_revoked,
         "dry_run": False,
     }
 
 
-def quarantine_invalid_live_money_parent_modes(
+def revoke_invalid_live_money_parent_modes(
     conn: sqlite3.Connection,
     *,
     dry_run: bool = False,
     lookback_hours: float | None = None,
+    target_schema: str = "main",
 ) -> dict:
     """Tag LIVE money-boundary certificates whose parent ancestry is not LIVE.
 
     Historical mixed-mode certificates are immutable evidence, but they cannot
-    remain consumable execution authority.  This writes a non-destructive
-    quarantine row keyed by the child certificate hash.
+    remain consumable execution authority. This writes a non-destructive
+    revocation row keyed by the child certificate hash. Owner-local: see
+    ``revoke_invalid_live_actionable_certificates`` docstring.
     """
 
-    q_ref = _quarantine_ref(conn)
+    ref = _revocations_ref(conn, target_schema)
     recorded_at = datetime.now(timezone.utc).isoformat()
     params: list[object] = list(LIVE_MONEY_CERTIFICATE_PARENT_MODE_TYPES)
     placeholders = ",".join("?" for _ in LIVE_MONEY_CERTIFICATE_PARENT_MODE_TYPES)
@@ -242,13 +266,13 @@ def quarantine_invalid_live_money_parent_modes(
             params,
         ).fetchall()
     except sqlite3.OperationalError as exc:
-        msg = f"invalid live money parent-mode quarantine scan failed: {exc}"
+        msg = f"invalid live money parent-mode revocation scan failed: {exc}"
         logger.error(msg)
         return {
             "checked_count": 0,
             "candidates_found": 0,
-            "already_quarantined": 0,
-            "newly_quarantined": 0,
+            "already_revoked": 0,
+            "newly_revoked": 0,
             "dry_run": dry_run,
             "error": msg,
         }
@@ -258,18 +282,18 @@ def quarantine_invalid_live_money_parent_modes(
         return {
             "checked_count": candidates_found,
             "candidates_found": candidates_found,
-            "already_quarantined": 0,
-            "newly_quarantined": 0,
+            "already_revoked": 0,
+            "newly_revoked": 0,
             "dry_run": dry_run,
         }
 
     pre_count = conn.execute(
-        f"SELECT COUNT(*) FROM {q_ref} WHERE table_name=? AND reason_code=?",
+        f"SELECT COUNT(*) FROM {ref} WHERE table_name=? AND reason_code=?",
         (DECISION_CERTIFICATES_TABLE, REASON_INVALID_LIVE_PARENT_MODE),
     ).fetchone()[0]
     conn.executemany(
         f"""
-        INSERT OR IGNORE INTO {q_ref}
+        INSERT OR IGNORE INTO {ref}
             (table_name, row_id, reason_code, forecast_snapshot_id, recorded_at, meta_json)
         VALUES (?, ?, ?, NULL, ?, ?)
         """,
@@ -281,7 +305,7 @@ def quarantine_invalid_live_money_parent_modes(
                 recorded_at,
                 json.dumps(
                     {
-                        "source": "quarantine_invalid_live_money_parent_modes",
+                        "source": "revoke_invalid_live_money_parent_modes",
                         "certificate_id": str(row["certificate_id"] if isinstance(row, sqlite3.Row) else row[0]),
                         "certificate_type": str(row["certificate_type"] if isinstance(row, sqlite3.Row) else row[2]),
                         "decision_time": str(row["decision_time"] if isinstance(row, sqlite3.Row) else row[3]),
@@ -295,60 +319,59 @@ def quarantine_invalid_live_money_parent_modes(
         ],
     )
     post_count = conn.execute(
-        f"SELECT COUNT(*) FROM {q_ref} WHERE table_name=? AND reason_code=?",
+        f"SELECT COUNT(*) FROM {ref} WHERE table_name=? AND reason_code=?",
         (DECISION_CERTIFICATES_TABLE, REASON_INVALID_LIVE_PARENT_MODE),
     ).fetchone()[0]
-    newly_quarantined = post_count - pre_count
+    newly_revoked = post_count - pre_count
     return {
         "checked_count": candidates_found,
         "candidates_found": candidates_found,
-        "already_quarantined": candidates_found - newly_quarantined,
-        "newly_quarantined": newly_quarantined,
+        "already_revoked": candidates_found - newly_revoked,
+        "newly_revoked": newly_revoked,
         "dry_run": False,
     }
 
 
-def quarantine_decisions_for_noncontributing_forecast(
+def revoke_decisions_for_noncontributing_forecast(
     conn: sqlite3.Connection,
     *,
     dry_run: bool = False,
+    target_schema: str = "main",
 ) -> dict:
     """Tag opportunity_fact rows whose forecast snapshot has contributes=0 or attribution UNKNOWN.
 
-    Args:
-        conn: Trade DB connection with zeus-forecasts.db ATTACHed as 'forecasts'.
-              In test contexts, 'forecasts.' schema can be a second ATTACH or the
-              same in-memory DB when ensemble_snapshots is co-located.
+    opportunity_fact is trade-owned (src/state/domains.py). Args:
+        conn: connection exposing opportunity_fact and ensemble_snapshots
+              (production: a world-main connection with forecasts ATTACHed as
+              'forecasts' for the snapshot join, and trade ATTACHed for the
+              owner-local revocation write — see target_schema).
         dry_run: If True, return counts without writing anything.
+        target_schema: schema on ``conn`` fact_revocations is written into
+              (default "main"; production callers pass "trade" since
+              opportunity_fact's revocation record is owner-local to the
+              trade DB, cross-DB from a world-main connection).
 
     Returns:
         Dict with keys:
           - candidates_found: int — opportunity rows matching bad-snapshot criteria
-          - already_quarantined: int — rows already tagged (skipped by INSERT OR IGNORE)
-          - newly_quarantined: int — rows newly written this run
+          - already_revoked: int — rows already tagged (skipped by INSERT OR IGNORE)
+          - newly_revoked: int — rows newly written this run
           - dry_run: bool
 
     INV-37: caller supplies conn; never auto-opens.
 
     Note on the cross-DB join:
         In production the query uses 'forecasts.ensemble_snapshots', which requires
-        the forecasts DB to be ATTACHed as alias 'forecasts'.  When 'forecasts' is not
+        the forecasts DB to be ATTACHed as alias 'forecasts'. When 'forecasts' is not
         attached (detected via PRAGMA database_list), the query falls back to the
         unqualified 'ensemble_snapshots' — this supports in-memory test DBs that
         carry the table without an ATTACH.
-        See tests/test_decision_integrity_quarantine.py for the test fixture pattern.
     """
     recorded_at = datetime.now(timezone.utc).isoformat()
 
-    # Determine which ensemble_snapshots prefix to use.
-    # In production: 'forecasts.ensemble_snapshots' (ATTACHed forecasts DB).
-    # In tests using a single in-memory DB: 'ensemble_snapshots' (no ATTACH needed).
     attached = {row[1] for row in conn.execute("PRAGMA database_list").fetchall()}
     snap_ref = "forecasts.ensemble_snapshots" if "forecasts" in attached else "ensemble_snapshots"
 
-    # Find qualifying opportunity_fact rows.
-    # A snapshot qualifies if contributes_to_target_extrema != 1 OR attribution is UNKNOWN.
-    # snapshot_id in opportunity_fact is TEXT; snapshot_id in ensemble_snapshots is INTEGER.
     find_sql = f"""
         SELECT
             of.decision_id,
@@ -359,7 +382,7 @@ def quarantine_decisions_for_noncontributing_forecast(
         WHERE of.snapshot_id IS NOT NULL
           -- Align with the live reader gate (PR-A), which only acts when
           -- contributes_to_target_extrema is EXPLICITLY set; legacy NULL rows
-          -- pass through live and must NOT be quarantined.
+          -- pass through live and must NOT be revoked.
           AND esv.contributes_to_target_extrema IS NOT NULL
           AND (
               esv.contributes_to_target_extrema != 1
@@ -372,46 +395,44 @@ def quarantine_decisions_for_noncontributing_forecast(
         candidates = conn.execute(find_sql).fetchall()
     except sqlite3.OperationalError as exc:
         msg = (
-            f"quarantine query failed — ensure forecasts DB is ATTACHed as 'forecasts': {exc}"
+            f"revocation query failed — ensure forecasts DB is ATTACHed as 'forecasts': {exc}"
         )
         logger.error(msg)
         return {
             "candidates_found": 0,
-            "already_quarantined": 0,
-            "newly_quarantined": 0,
+            "already_revoked": 0,
+            "newly_revoked": 0,
             "dry_run": dry_run,
             "error": msg,
         }
 
     candidates_found = len(candidates)
     logger.info(
-        "quarantine_decisions: found %d candidate opportunity_fact rows with non-contributing snapshot",
+        "revoke_decisions: found %d candidate opportunity_fact rows with non-contributing snapshot",
         candidates_found,
     )
 
     if dry_run or candidates_found == 0:
         return {
             "candidates_found": candidates_found,
-            "already_quarantined": 0,
-            "newly_quarantined": 0,
+            "already_revoked": 0,
+            "newly_revoked": 0,
             "dry_run": dry_run,
         }
 
-    q_ref = _quarantine_ref(conn)
+    ref = _revocations_ref(conn, target_schema)
 
-    # Count pre-existing quarantine rows for accurate delta.
     pre_count = conn.execute(
-        f"SELECT COUNT(*) FROM {q_ref} WHERE table_name=? AND reason_code=?",
+        f"SELECT COUNT(*) FROM {ref} WHERE table_name=? AND reason_code=?",
         (TARGET_TABLE, REASON_NON_CONTRIBUTING),
     ).fetchone()[0]
 
-    # INSERT OR IGNORE — idempotent by UNIQUE(table_name, row_id, reason_code).
     insert_sql = f"""
-        INSERT OR IGNORE INTO {q_ref}
+        INSERT OR IGNORE INTO {ref}
             (table_name, row_id, reason_code, forecast_snapshot_id, recorded_at, meta_json)
         VALUES (?, ?, ?, ?, ?, ?)
     """
-    meta = json.dumps({"source": "quarantine_decisions_for_noncontributing_forecast"})
+    meta = json.dumps({"source": "revoke_decisions_for_noncontributing_forecast"})
     rows_to_insert = [
         (TARGET_TABLE, decision_id, REASON_NON_CONTRIBUTING, str(snapshot_id), recorded_at, meta)
         for decision_id, snapshot_id in candidates
@@ -419,41 +440,47 @@ def quarantine_decisions_for_noncontributing_forecast(
     conn.executemany(insert_sql, rows_to_insert)
 
     post_count = conn.execute(
-        f"SELECT COUNT(*) FROM {q_ref} WHERE table_name=? AND reason_code=?",
+        f"SELECT COUNT(*) FROM {ref} WHERE table_name=? AND reason_code=?",
         (TARGET_TABLE, REASON_NON_CONTRIBUTING),
     ).fetchone()[0]
 
-    newly_quarantined = post_count - pre_count
-    already_quarantined = candidates_found - newly_quarantined
+    newly_revoked = post_count - pre_count
+    already_revoked = candidates_found - newly_revoked
 
     logger.info(
-        "quarantine_decisions: newly=%d already=%d total_after=%d",
-        newly_quarantined,
-        already_quarantined,
+        "revoke_decisions: newly=%d already=%d total_after=%d",
+        newly_revoked,
+        already_revoked,
         post_count,
     )
 
     return {
         "candidates_found": candidates_found,
-        "already_quarantined": already_quarantined,
-        "newly_quarantined": newly_quarantined,
+        "already_revoked": already_revoked,
+        "newly_revoked": newly_revoked,
         "dry_run": False,
     }
 
 
 # ---------------------------------------------------------------------------
-# Shared helper
+# Shared helpers
 # ---------------------------------------------------------------------------
 
-def _quarantine_ref(conn: sqlite3.Connection) -> str:
-    """Return qualified or unqualified decision_integrity_quarantine reference.
+def _revocations_ref(conn: sqlite3.Connection, schema: str = "main") -> str:
+    """Return the fact_revocations table reference for ``schema`` on ``conn``.
 
-    In production, the quarantine table lives in the trade DB (zeus_trades.db),
-    which may be ATTACHed as 'trade' on a world or forecasts connection.
-    Falls back to unqualified name for in-memory test DBs.
+    Owner-local write helper: unlike the predecessor's auto-detecting
+    ``_quarantine_ref`` (which guessed at a single, always-trade target), this
+    is a thin explicit qualifier — the caller already knows which physical DB
+    owns the table it is revoking a row from (src/state/domains.py) and names
+    that schema. "main" (the default) covers the common case where the
+    caller's connection is already rooted at the owning DB.
     """
-    attached = {row[1] for row in conn.execute("PRAGMA database_list").fetchall()}
-    return "trade.decision_integrity_quarantine" if "trade" in attached else "decision_integrity_quarantine"
+    if schema in ("", "main"):
+        return "fact_revocations"
+    if not all(ch.isalnum() or ch == "_" for ch in schema):
+        raise ValueError(f"unsafe sqlite schema identifier: {schema!r}")
+    return f"{schema}.fact_revocations"
 
 
 def _attached_schema_names(conn: sqlite3.Connection) -> tuple[str, ...]:
@@ -479,56 +506,58 @@ def _quote_sql_identifier(identifier: str) -> str:
     return '"' + identifier.replace('"', '""') + '"'
 
 
-def _schema_has_quarantine_table(conn: sqlite3.Connection, schema: str) -> bool:
+def _schema_has_fact_revocations_table(conn: sqlite3.Connection, schema: str) -> bool:
     schema_sql = _quote_sql_identifier(schema)
     row = conn.execute(
         f"SELECT 1 FROM {schema_sql}.sqlite_master WHERE type IN ('table', 'view') AND name = ?",
-        ("decision_integrity_quarantine",),
+        ("fact_revocations",),
     ).fetchone()
     return row is not None
 
 
-def decision_certificate_is_quarantined(conn: sqlite3.Connection, certificate_hash: str) -> bool:
-    """Return True if ``certificate_hash`` is tagged invalid-live in decision_integrity_quarantine.
+def is_fact_revoked(
+    conn: sqlite3.Connection,
+    *,
+    table_name: str,
+    row_id: str,
+    reason_codes: tuple[str, ...] | None = None,
+) -> bool:
+    """Return True if (table_name, row_id) is tagged revoked in any schema
+    ATTACHed to ``conn`` (optionally filtered to ``reason_codes``).
 
-    Excision T-consolidations #1 (docs/rebuild/quarantine_excision_2026-07-11.md):
-    replaces two independent implementations that had drifted apart —
-    src/execution/executor.py:1384 and src/execution/command_recovery.py:3042.
+    Generic read predicate — the DIQ-adjudicated "shared is_fact_revoked
+    (owner_domain, table, row_id) API". Iterates every attached schema name
+    (a strict superset of any single hardcoded owner schema) and swallows
+    per-schema sqlite3.Error defensively (a locked or missing companion DB
+    must not abort a caller's gate check).
 
-    Semantics = union of both originals: iterate every schema attached to
-    ``conn`` (a strict superset of command_recovery's old trade-then-main-only
-    ``_decision_integrity_quarantine_ref`` lookup, since 'trade' and 'main' are
-    themselves attached schema names returned by PRAGMA database_list) and
-    swallow per-schema sqlite3.Error (executor's defensive posture — a locked
-    or missing companion DB must not abort a pre-submit gate check). In
-    production decision_integrity_quarantine lives only in the trade DB
-    (architecture/db_table_ownership.yaml), so both original implementations
-    returned identical results on live data; the only behavior this merge
-    changes is the theoretical case of a query erroring mid-read against a
-    table already confirmed to exist — command_recovery previously let that
-    propagate, and now (like executor before it) treats it as "not found in
-    that schema" and keeps checking the remaining attached schemas.
+    INV-37: caller supplies conn; never auto-opens/attaches.
     """
-    certificate_hash = str(certificate_hash or "").strip()
-    if not certificate_hash:
+    row_id = str(row_id or "").strip()
+    if not row_id:
         return False
-    reason_codes = (REASON_INVALID_LIVE_ACTIONABLE, REASON_INVALID_LIVE_PARENT_MODE)
-    placeholders = ",".join("?" for _ in reason_codes)
+    if reason_codes:
+        placeholders = ",".join("?" for _ in reason_codes)
+        reason_clause = f" AND reason_code IN ({placeholders})"
+        reason_params: tuple = tuple(reason_codes)
+    else:
+        reason_clause = ""
+        reason_params = ()
     for schema in _attached_schema_names(conn):
         try:
-            if not _schema_has_quarantine_table(conn, schema):
+            if not _schema_has_fact_revocations_table(conn, schema):
                 continue
             schema_sql = _quote_sql_identifier(schema)
             row = conn.execute(
                 f"""
                 SELECT 1
-                  FROM {schema_sql}.decision_integrity_quarantine
+                  FROM {schema_sql}.fact_revocations
                  WHERE table_name = ?
                    AND row_id = ?
-                   AND reason_code IN ({placeholders})
+                   {reason_clause}
                  LIMIT 1
                 """,
-                (DECISION_CERTIFICATES_TABLE, certificate_hash, *reason_codes),
+                (table_name, row_id, *reason_params),
             ).fetchone()
         except sqlite3.Error:
             continue
@@ -537,46 +566,100 @@ def decision_certificate_is_quarantined(conn: sqlite3.Connection, certificate_ha
     return False
 
 
-def _quarantine_table_via_snapshot(
+def is_certificate_revoked(conn: sqlite3.Connection, certificate_hash: str) -> bool:
+    """Return True if ``certificate_hash`` is tagged invalid-live in fact_revocations.
+
+    Drop-in replacement for the predecessor's
+    ``decision_certificate_is_quarantined`` (excision T-consolidations #1
+    consolidated executor.py:1384 and command_recovery.py:3042 into one
+    shared implementation; this DIQ packet re-implements that shared
+    implementation as a fact-revocation lookup). Semantics unchanged: union
+    over every attached schema, optional per-schema errors swallowed.
+    """
+    return is_fact_revoked(
+        conn,
+        table_name=DECISION_CERTIFICATES_TABLE,
+        row_id=certificate_hash,
+        reason_codes=(REASON_INVALID_LIVE_ACTIONABLE, REASON_INVALID_LIVE_PARENT_MODE),
+    )
+
+
+def revoke_fact(
+    conn: sqlite3.Connection,
+    *,
+    table_name: str,
+    row_id: str,
+    reason_code: str,
+    meta: dict | None = None,
+    forecast_snapshot_id: str | None = None,
+    target_schema: str = "main",
+    recorded_at: str | None = None,
+) -> bool:
+    """Generic single-row owner-local revocation writer.
+
+    Returns True iff a new row was inserted (False when already revoked for
+    this exact (table_name, row_id, reason_code) — idempotent via INSERT OR
+    IGNORE on the UNIQUE constraint).
+
+    INV-37: caller supplies conn; never auto-opens.
+    """
+    ref = _revocations_ref(conn, target_schema)
+    at = recorded_at or datetime.now(timezone.utc).isoformat()
+    cur = conn.execute(
+        f"""
+        INSERT OR IGNORE INTO {ref}
+            (table_name, row_id, reason_code, forecast_snapshot_id, recorded_at, meta_json)
+        VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        (
+            table_name,
+            str(row_id),
+            reason_code,
+            forecast_snapshot_id,
+            at,
+            json.dumps(meta or {}, sort_keys=True),
+        ),
+    )
+    return cur.rowcount == 1
+
+
+def _revoke_table_via_snapshot(
     conn: sqlite3.Connection,
     *,
     target_table: str,
     find_sql: str,
     dry_run: bool,
+    target_schema: str = "main",
 ) -> dict:
-    """Generic quarantine writer: execute find_sql, tag qualifying rows.
+    """Generic revocation writer: execute find_sql, tag qualifying rows.
 
     find_sql must SELECT (row_id TEXT, snapshot_id INTEGER|TEXT, source_run_id TEXT|NULL).
     Caller builds find_sql; this function handles INSERT OR IGNORE + counting.
 
-    The quarantine table is referenced via _quarantine_ref(conn), which qualifies
-    as 'trade.decision_integrity_quarantine' when the trade DB is ATTACHed, or falls
-    back to unqualified for test in-memory DBs.
-
     INV-37: caller supplies conn; never auto-opens.
     """
     recorded_at = datetime.now(timezone.utc).isoformat()
-    q_ref = _quarantine_ref(conn)
+    ref = _revocations_ref(conn, target_schema)
 
     try:
         candidates = conn.execute(find_sql).fetchall()
     except sqlite3.OperationalError as exc:
         msg = (
-            f"quarantine query for {target_table} failed — "
+            f"revocation query for {target_table} failed — "
             f"ensure forecasts DB is ATTACHed as 'forecasts': {exc}"
         )
         logger.error(msg)
         return {
             "candidates_found": 0,
-            "already_quarantined": 0,
-            "newly_quarantined": 0,
+            "already_revoked": 0,
+            "newly_revoked": 0,
             "dry_run": dry_run,
             "error": msg,
         }
 
     candidates_found = len(candidates)
     logger.info(
-        "quarantine %s: found %d candidate rows with non-contributing snapshot",
+        "revoke %s: found %d candidate rows with non-contributing snapshot",
         target_table,
         candidates_found,
     )
@@ -584,18 +667,18 @@ def _quarantine_table_via_snapshot(
     if dry_run or candidates_found == 0:
         return {
             "candidates_found": candidates_found,
-            "already_quarantined": 0,
-            "newly_quarantined": 0,
+            "already_revoked": 0,
+            "newly_revoked": 0,
             "dry_run": dry_run,
         }
 
     pre_count = conn.execute(
-        f"SELECT COUNT(*) FROM {q_ref} WHERE table_name=? AND reason_code=?",
+        f"SELECT COUNT(*) FROM {ref} WHERE table_name=? AND reason_code=?",
         (target_table, REASON_NON_CONTRIBUTING),
     ).fetchone()[0]
 
     insert_sql = f"""
-        INSERT OR IGNORE INTO {q_ref}
+        INSERT OR IGNORE INTO {ref}
             (table_name, row_id, reason_code, forecast_snapshot_id, recorded_at, meta_json)
         VALUES (?, ?, ?, ?, ?, ?)
     """
@@ -604,7 +687,7 @@ def _quarantine_table_via_snapshot(
         row_id = str(row[0])
         snapshot_id = str(row[1]) if row[1] is not None else None
         source_run_id = row[2] if len(row) > 2 else None
-        meta: dict = {"source": f"quarantine_{target_table}_for_noncontributing_forecast"}
+        meta: dict = {"source": f"revoke_{target_table}_for_noncontributing_forecast"}
         if source_run_id is not None:
             meta["source_run_id"] = source_run_id
         rows_to_insert.append(
@@ -613,24 +696,24 @@ def _quarantine_table_via_snapshot(
     conn.executemany(insert_sql, rows_to_insert)
 
     post_count = conn.execute(
-        f"SELECT COUNT(*) FROM {q_ref} WHERE table_name=? AND reason_code=?",
+        f"SELECT COUNT(*) FROM {ref} WHERE table_name=? AND reason_code=?",
         (target_table, REASON_NON_CONTRIBUTING),
     ).fetchone()[0]
 
-    newly_quarantined = post_count - pre_count
-    already_quarantined = candidates_found - newly_quarantined
+    newly_revoked = post_count - pre_count
+    already_revoked = candidates_found - newly_revoked
 
     logger.info(
-        "quarantine %s: newly=%d already=%d total_after=%d",
+        "revoke %s: newly=%d already=%d total_after=%d",
         target_table,
-        newly_quarantined,
-        already_quarantined,
+        newly_revoked,
+        already_revoked,
         post_count,
     )
     return {
         "candidates_found": candidates_found,
-        "already_quarantined": already_quarantined,
-        "newly_quarantined": newly_quarantined,
+        "already_revoked": already_revoked,
+        "newly_revoked": newly_revoked,
         "dry_run": False,
     }
 
@@ -642,21 +725,22 @@ def _snap_ref(conn: sqlite3.Connection) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Per-table quarantine entry points
+# Per-table revocation entry points
 # ---------------------------------------------------------------------------
 
-def quarantine_calibration_pairs_for_noncontributing_forecast(
+def revoke_calibration_pairs_for_noncontributing_forecast(
     conn: sqlite3.Connection,
     *,
     dry_run: bool = False,
+    target_schema: str = "main",
 ) -> dict:
     """Tag calibration_pairs rows whose forecast snapshot is non-contributing.
 
-    calibration_pairs lives in zeus-forecasts.db; in production, conn must be a
-    forecasts connection (or have forecasts as 'main'). ensemble_snapshots is
-    in the same forecasts DB, so no ATTACH is needed for this table.
+    calibration_pairs is forecasts-owned (src/state/domains.py); in
+    production ``conn`` is a forecasts connection, so the owner-local
+    revocation write targets "main" (default) — no cross-DB ATTACH needed.
 
-    row_id = str(pair_id)  (INTEGER PK, stored as TEXT in quarantine).
+    row_id = str(pair_id)  (INTEGER PK, stored as TEXT in fact_revocations).
     forecast_snapshot_id = str(snapshot_id).
 
     INV-37: caller supplies conn; never auto-opens.
@@ -677,20 +761,25 @@ def quarantine_calibration_pairs_for_noncontributing_forecast(
           )
         ORDER BY cp2.pair_id
     """
-    return _quarantine_table_via_snapshot(
+    return _revoke_table_via_snapshot(
         conn,
         target_table="calibration_pairs",
         find_sql=find_sql,
         dry_run=dry_run,
+        target_schema=target_schema,
     )
 
 
-def quarantine_probability_trace_fact_for_noncontributing_forecast(
+def revoke_probability_trace_fact_for_noncontributing_forecast(
     conn: sqlite3.Connection,
     *,
     dry_run: bool = False,
+    target_schema: str = "main",
 ) -> dict:
     """Tag probability_trace_fact rows whose forecast snapshot is non-contributing.
+
+    probability_trace_fact is world-owned; owner-local write targets "main"
+    (default) on a world-main connection.
 
     probability_trace_fact.decision_snapshot_id is TEXT; cast to INTEGER for join.
     row_id = ptf.trace_id (TEXT PK).
@@ -714,20 +803,25 @@ def quarantine_probability_trace_fact_for_noncontributing_forecast(
           )
         ORDER BY ptf.trace_id
     """
-    return _quarantine_table_via_snapshot(
+    return _revoke_table_via_snapshot(
         conn,
         target_table="probability_trace_fact",
         find_sql=find_sql,
         dry_run=dry_run,
+        target_schema=target_schema,
     )
 
 
-def quarantine_selection_family_fact_for_noncontributing_forecast(
+def revoke_selection_family_fact_for_noncontributing_forecast(
     conn: sqlite3.Connection,
     *,
     dry_run: bool = False,
+    target_schema: str = "main",
 ) -> dict:
     """Tag selection_family_fact rows whose forecast snapshot is non-contributing.
+
+    selection_family_fact is world-owned; owner-local write targets "main"
+    (default) on a world-main connection.
 
     selection_family_fact.decision_snapshot_id is TEXT; cast to INTEGER for join.
     row_id = sff.family_id (TEXT PK).
@@ -751,20 +845,25 @@ def quarantine_selection_family_fact_for_noncontributing_forecast(
           )
         ORDER BY sff.family_id
     """
-    return _quarantine_table_via_snapshot(
+    return _revoke_table_via_snapshot(
         conn,
         target_table="selection_family_fact",
         find_sql=find_sql,
         dry_run=dry_run,
+        target_schema=target_schema,
     )
 
 
-def quarantine_selection_hypothesis_fact_for_noncontributing_forecast(
+def revoke_selection_hypothesis_fact_for_noncontributing_forecast(
     conn: sqlite3.Connection,
     *,
     dry_run: bool = False,
+    target_schema: str = "main",
 ) -> dict:
     """Tag selection_hypothesis_fact rows whose backing family has a non-contributing snapshot.
+
+    selection_hypothesis_fact is world-owned; owner-local write targets
+    "main" (default) on a world-main connection.
 
     Joins: selection_hypothesis_fact → selection_family_fact → ensemble_snapshots.
     row_id = shf.hypothesis_id (TEXT PK).
@@ -789,11 +888,12 @@ def quarantine_selection_hypothesis_fact_for_noncontributing_forecast(
           )
         ORDER BY shf.hypothesis_id
     """
-    return _quarantine_table_via_snapshot(
+    return _revoke_table_via_snapshot(
         conn,
         target_table="selection_hypothesis_fact",
         find_sql=find_sql,
         dry_run=dry_run,
+        target_schema=target_schema,
     )
 
 
@@ -817,12 +917,16 @@ def _de_natural_pk_hash(
     return "de_pk_" + hashlib.sha256(key.encode()).hexdigest()[:32]
 
 
-def quarantine_decision_events_for_noncontributing_forecast(
+def revoke_decision_events_for_noncontributing_forecast(
     conn: sqlite3.Connection,
     *,
     dry_run: bool = False,
+    target_schema: str = "main",
 ) -> dict:
     """Tag decision_events rows whose backing opportunity_fact snapshot is non-contributing.
+
+    decision_events is world-owned; owner-local write targets "main"
+    (default) on a world-main connection.
 
     Joins: decision_events → opportunity_fact (via decision_event_id = decision_id)
            → ensemble_snapshots.
@@ -865,45 +969,45 @@ def quarantine_decision_events_for_noncontributing_forecast(
     """
 
     recorded_at = datetime.now(timezone.utc).isoformat()
-    q_ref = _quarantine_ref(conn)
+    ref = _revocations_ref(conn, target_schema)
 
     try:
         raw_rows = conn.execute(find_sql).fetchall()
     except sqlite3.OperationalError as exc:
         msg = (
-            f"quarantine query for decision_events failed — "
+            f"revocation query for decision_events failed — "
             f"ensure forecasts DB is ATTACHed as 'forecasts': {exc}"
         )
         logger.error(msg)
         return {
             "candidates_found": 0,
-            "already_quarantined": 0,
-            "newly_quarantined": 0,
+            "already_revoked": 0,
+            "newly_revoked": 0,
             "dry_run": dry_run,
             "error": msg,
         }
 
     candidates_found = len(raw_rows)
     logger.info(
-        "quarantine decision_events: found %d candidate rows with non-contributing snapshot",
+        "revoke decision_events: found %d candidate rows with non-contributing snapshot",
         candidates_found,
     )
 
     if dry_run or candidates_found == 0:
         return {
             "candidates_found": candidates_found,
-            "already_quarantined": 0,
-            "newly_quarantined": 0,
+            "already_revoked": 0,
+            "newly_revoked": 0,
             "dry_run": dry_run,
         }
 
     pre_count = conn.execute(
-        f"SELECT COUNT(*) FROM {q_ref} WHERE table_name='decision_events' AND reason_code=?",
+        f"SELECT COUNT(*) FROM {ref} WHERE table_name='decision_events' AND reason_code=?",
         (REASON_NON_CONTRIBUTING,),
     ).fetchone()[0]
 
     insert_sql = f"""
-        INSERT OR IGNORE INTO {q_ref}
+        INSERT OR IGNORE INTO {ref}
             (table_name, row_id, reason_code, forecast_snapshot_id, recorded_at, meta_json)
         VALUES ('decision_events', ?, ?, ?, ?, ?)
     """
@@ -918,7 +1022,7 @@ def quarantine_decision_events_for_noncontributing_forecast(
             market_slug, temperature_metric, target_date, observation_time, decision_seq
         )
         meta: dict = {
-            "source": "quarantine_decision_events_for_noncontributing_forecast",
+            "source": "revoke_decision_events_for_noncontributing_forecast",
             "natural_pk": {
                 "market_slug": market_slug,
                 "temperature_metric": temperature_metric,
@@ -935,79 +1039,68 @@ def quarantine_decision_events_for_noncontributing_forecast(
     conn.executemany(insert_sql, rows_to_insert)
 
     post_count = conn.execute(
-        f"SELECT COUNT(*) FROM {q_ref} WHERE table_name='decision_events' AND reason_code=?",
+        f"SELECT COUNT(*) FROM {ref} WHERE table_name='decision_events' AND reason_code=?",
         (REASON_NON_CONTRIBUTING,),
     ).fetchone()[0]
 
-    newly_quarantined = post_count - pre_count
-    already_quarantined = candidates_found - newly_quarantined
+    newly_revoked = post_count - pre_count
+    already_revoked = candidates_found - newly_revoked
 
     logger.info(
-        "quarantine decision_events: newly=%d already=%d total_after=%d",
-        newly_quarantined,
-        already_quarantined,
+        "revoke decision_events: newly=%d already=%d total_after=%d",
+        newly_revoked,
+        already_revoked,
         post_count,
     )
     return {
         "candidates_found": candidates_found,
-        "already_quarantined": already_quarantined,
-        "newly_quarantined": newly_quarantined,
+        "already_revoked": already_revoked,
+        "newly_revoked": newly_revoked,
         "dry_run": False,
     }
 
 
-def quarantine_all_tables_for_noncontributing_forecast(
+def revoke_all_tables_for_noncontributing_forecast(
     conn: sqlite3.Connection,
     *,
     dry_run: bool = False,
 ) -> dict:
-    """Run quarantine across all supported tables on a SINGLE connection.
+    """Run revocation across all supported tables on a SINGLE connection.
 
     This convenience wrapper requires conn to have BOTH 'forecasts' and 'trade'
-    ATTACHed (or be an in-memory test DB with all tables co-located).
-
-    IMPORTANT — K1 DB-split production usage:
-        calibration_pairs lives in zeus-forecasts.db (forecasts DB).
-        decision_integrity_quarantine lives in zeus_trades.db (trade DB).
-        World tables (opportunity_fact, decision_events, probability_trace_fact,
-        selection_family_fact, selection_hypothesis_fact) live in zeus-world.db.
-
-        For production: use the CLI scripts/quarantine_bad_forecast_decisions.py
-        which opens per-DB connections with correct ATTACHes. This wrapper is
-        intended for in-memory integration tests and operator one-shots where
-        all tables are co-located.
+    ATTACHed (or be an in-memory test DB with all tables co-located); it
+    always writes to "main" (co-located test/one-shot usage) — production
+    per-DB fan-out uses the per-table functions directly with an explicit
+    target_schema (see scripts/revoke_bad_forecast_decisions.py).
 
     Raises ValueError if 'forecasts' is not attached/present (calibration_pairs
-    cannot be quarantined without it and would silently no-op).
+    cannot be revoked without it and would silently no-op).
 
     INV-37: caller supplies conn; never auto-opens.
     """
-    # Verify forecasts tables are reachable before starting any writes.
     try:
         conn.execute("SELECT 1 FROM ensemble_snapshots LIMIT 0")
     except sqlite3.OperationalError:
-        # Try forecasts-qualified name.
         try:
             conn.execute("SELECT 1 FROM forecasts.ensemble_snapshots LIMIT 0")
         except sqlite3.OperationalError:
             raise ValueError(
-                "quarantine_all_tables_for_noncontributing_forecast: "
+                "revoke_all_tables_for_noncontributing_forecast: "
                 "ensemble_snapshots not found — ensure the forecasts DB is "
                 "ATTACHed as 'forecasts' OR all tables are co-located (in-memory test)."
             )
-    # Mapping from function to the table name it quarantines.
     fn_table_pairs = [
-        (quarantine_decisions_for_noncontributing_forecast, "opportunity_fact"),
-        (quarantine_calibration_pairs_for_noncontributing_forecast, "calibration_pairs"),
-        (quarantine_probability_trace_fact_for_noncontributing_forecast, "probability_trace_fact"),
-        (quarantine_selection_family_fact_for_noncontributing_forecast, "selection_family_fact"),
-        (quarantine_selection_hypothesis_fact_for_noncontributing_forecast, "selection_hypothesis_fact"),
-        (quarantine_decision_events_for_noncontributing_forecast, "decision_events"),
+        (revoke_decisions_for_noncontributing_forecast, "opportunity_fact"),
+        (revoke_calibration_pairs_for_noncontributing_forecast, "calibration_pairs"),
+        (revoke_probability_trace_fact_for_noncontributing_forecast, "probability_trace_fact"),
+        (revoke_selection_family_fact_for_noncontributing_forecast, "selection_family_fact"),
+        (revoke_selection_hypothesis_fact_for_noncontributing_forecast, "selection_hypothesis_fact"),
+        (revoke_decision_events_for_noncontributing_forecast, "decision_events"),
     ]
     aggregate: dict = {
         "candidates_found": 0,
-        "already_quarantined": 0,
-        "newly_quarantined": 0,
+        "already_revoked": 0,
+        "newly_revoked": 0,
         "dry_run": dry_run,
         "per_table": {},
     }
@@ -1015,6 +1108,6 @@ def quarantine_all_tables_for_noncontributing_forecast(
         result = fn(conn, dry_run=dry_run)
         aggregate["per_table"][tname] = result
         aggregate["candidates_found"] += result.get("candidates_found", 0)
-        aggregate["already_quarantined"] += result.get("already_quarantined", 0)
-        aggregate["newly_quarantined"] += result.get("newly_quarantined", 0)
+        aggregate["already_revoked"] += result.get("already_revoked", 0)
+        aggregate["newly_revoked"] += result.get("newly_revoked", 0)
     return aggregate

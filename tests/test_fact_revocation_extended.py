@@ -1,24 +1,27 @@
 # Created: 2026-05-23
-# Last reused or audited: 2026-05-23
-# Authority basis: docs/archive/2026-Q2/operations_historical/P0_FORECAST_EXTREMA_AUTHORITY_2026-05-22.md §PR-E
-# Lifecycle: created=2026-05-23; last_reviewed=2026-05-23; last_reused=never
-# Purpose: Unit tests for extended quarantine functions (PR-E) and downstream
+# Last reused or audited: 2026-07-12
+# Authority basis: docs/archive/2026-Q2/operations_historical/P0_FORECAST_EXTREMA_AUTHORITY_2026-05-22.md §PR-E;
+#   docs/rebuild/quarantine_excision_2026-07-11.md DIQ packet (owner-local reshape).
+# Lifecycle: created=2026-05-23; last_reviewed=2026-07-12; last_reused=never
+# Purpose: Unit tests for extended revocation functions (PR-E) and downstream
 #          exclusion filters in evidence_report + refit_platt.
-# Reuse: Run when any per-table quarantine function, evidence_report.py exclusion,
+#          Supersedes tests/test_decision_integrity_quarantine_extended.py.
+# Reuse: Run when any per-table revocation function, evidence_report.py exclusion,
 #        or refit_platt exclusion changes.
 
-"""PR-E — Extended quarantine + downstream exclusion tests.
+"""DIQ packet — Extended revocation + downstream exclusion tests.
 
 Coverage:
-  1. Tag-coverage: all six new per-table quarantine functions tag qualifying rows
+  1. Tag-coverage: all six per-table revocation functions tag qualifying rows
      and pass through NULL contributes (legacy).
-  2. test_promotion_readiness_excludes_quarantined_decisions: build_evidence_report
-     excludes decision_events rows tagged in decision_integrity_quarantine.
-  3. test_calibration_rebuild_excludes_quarantined_pairs: _fetch_pairs_for_bucket
-     (via refit_platt) excludes calibration_pairs rows tagged in quarantine.
-  4. test_regret_decomposition_excludes_quarantined_rows: build_evidence_report
-     excludes regret_decompositions rows whose decision_event_id is quarantined.
-  5. quarantine_all_tables_for_noncontributing_forecast aggregates per-table results.
+  2. test_promotion_readiness_excludes_revoked_decisions: build_evidence_report
+     excludes decision_events rows tagged in fact_revocations.
+  3. test_calibration_rebuild_excludes_revoked_pairs: _fetch_pairs_for_bucket
+     (via refit_platt) excludes calibration_pairs rows tagged in fact_revocations
+     (owner-local: co-located in the forecasts DB, no ATTACH needed).
+  4. test_regret_decomposition_excludes_revoked_rows: build_evidence_report
+     excludes regret_decompositions rows whose decision_event_id is revoked.
+  5. revoke_all_tables_for_noncontributing_forecast aggregates per-table results.
 """
 
 from __future__ import annotations
@@ -35,18 +38,18 @@ _SCRIPTS_DIR = Path(__file__).parent.parent / "scripts"
 if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
 
-from src.state.decision_integrity_quarantine import (
+from src.state.fact_revocation import (
     REASON_NON_CONTRIBUTING,
     _de_natural_pk_hash,
-    quarantine_all_tables_for_noncontributing_forecast,
-    quarantine_calibration_pairs_for_noncontributing_forecast,
-    quarantine_decision_events_for_noncontributing_forecast,
-    quarantine_decisions_for_noncontributing_forecast,
-    quarantine_probability_trace_fact_for_noncontributing_forecast,
-    quarantine_selection_family_fact_for_noncontributing_forecast,
-    quarantine_selection_hypothesis_fact_for_noncontributing_forecast,
+    revoke_all_tables_for_noncontributing_forecast,
+    revoke_calibration_pairs_for_noncontributing_forecast,
+    revoke_decision_events_for_noncontributing_forecast,
+    revoke_decisions_for_noncontributing_forecast,
+    revoke_probability_trace_fact_for_noncontributing_forecast,
+    revoke_selection_family_fact_for_noncontributing_forecast,
+    revoke_selection_hypothesis_fact_for_noncontributing_forecast,
 )
-from src.state.schema.decision_integrity_quarantine_schema import ensure_table
+from src.state.schema.fact_revocations_schema import ensure_table
 
 
 # ---------------------------------------------------------------------------
@@ -54,7 +57,7 @@ from src.state.schema.decision_integrity_quarantine_schema import ensure_table
 # ---------------------------------------------------------------------------
 
 def _make_db() -> sqlite3.Connection:
-    """In-memory DB with ensemble_snapshots + quarantine table."""
+    """In-memory DB with ensemble_snapshots + fact_revocations table."""
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     conn.execute("""
@@ -85,16 +88,16 @@ def _snap(conn, *, contributes, attribution="OK", source_run_id=None) -> int:
     return cur.lastrowid
 
 
-def _quarantine_count(conn, table_name: str) -> int:
+def _revocation_count(conn, table_name: str) -> int:
     return conn.execute(
-        "SELECT COUNT(*) FROM decision_integrity_quarantine WHERE table_name=? AND reason_code=?",
+        "SELECT COUNT(*) FROM fact_revocations WHERE table_name=? AND reason_code=?",
         (table_name, REASON_NON_CONTRIBUTING),
     ).fetchone()[0]
 
 
-def _quarantined_ids(conn, table_name: str) -> set[str]:
+def _revoked_ids(conn, table_name: str) -> set[str]:
     rows = conn.execute(
-        "SELECT row_id FROM decision_integrity_quarantine WHERE table_name=? AND reason_code=?",
+        "SELECT row_id FROM fact_revocations WHERE table_name=? AND reason_code=?",
         (table_name, REASON_NON_CONTRIBUTING),
     ).fetchall()
     return {row[0] for row in rows}
@@ -143,45 +146,45 @@ def _cp2_insert(conn, *, snapshot_id) -> int:
     return cur.lastrowid
 
 
-def test_calibration_pairs_contributes_zero_quarantined(cp2_db):
+def test_calibration_pairs_contributes_zero_revoked(cp2_db):
     snap_id = _snap(cp2_db, contributes=0)
     pair_id = _cp2_insert(cp2_db, snapshot_id=snap_id)
-    result = quarantine_calibration_pairs_for_noncontributing_forecast(cp2_db)
-    assert result["newly_quarantined"] == 1
-    assert str(pair_id) in _quarantined_ids(cp2_db, "calibration_pairs")
+    result = revoke_calibration_pairs_for_noncontributing_forecast(cp2_db)
+    assert result["newly_revoked"] == 1
+    assert str(pair_id) in _revoked_ids(cp2_db, "calibration_pairs")
 
 
 def test_calibration_pairs_contributes_one_skipped(cp2_db):
     snap_id = _snap(cp2_db, contributes=1)
     _cp2_insert(cp2_db, snapshot_id=snap_id)
-    result = quarantine_calibration_pairs_for_noncontributing_forecast(cp2_db)
+    result = revoke_calibration_pairs_for_noncontributing_forecast(cp2_db)
     assert result["candidates_found"] == 0
-    assert _quarantine_count(cp2_db, "calibration_pairs") == 0
+    assert _revocation_count(cp2_db, "calibration_pairs") == 0
 
 
-def test_calibration_pairs_null_contributes_not_quarantined(cp2_db):
+def test_calibration_pairs_null_contributes_not_revoked(cp2_db):
     snap_id = _snap(cp2_db, contributes=None)
     _cp2_insert(cp2_db, snapshot_id=snap_id)
-    result = quarantine_calibration_pairs_for_noncontributing_forecast(cp2_db)
+    result = revoke_calibration_pairs_for_noncontributing_forecast(cp2_db)
     assert result["candidates_found"] == 0
 
 
 def test_calibration_pairs_dry_run(cp2_db):
     snap_id = _snap(cp2_db, contributes=0)
     _cp2_insert(cp2_db, snapshot_id=snap_id)
-    result = quarantine_calibration_pairs_for_noncontributing_forecast(cp2_db, dry_run=True)
+    result = revoke_calibration_pairs_for_noncontributing_forecast(cp2_db, dry_run=True)
     assert result["dry_run"] is True
     assert result["candidates_found"] == 1
-    assert _quarantine_count(cp2_db, "calibration_pairs") == 0
+    assert _revocation_count(cp2_db, "calibration_pairs") == 0
 
 
 def test_calibration_pairs_source_run_id_in_meta(cp2_db):
     snap_id = _snap(cp2_db, contributes=0, source_run_id="run-abc")
     _cp2_insert(cp2_db, snapshot_id=snap_id)
-    quarantine_calibration_pairs_for_noncontributing_forecast(cp2_db)
+    revoke_calibration_pairs_for_noncontributing_forecast(cp2_db)
     import json
     meta_json = cp2_db.execute(
-        "SELECT meta_json FROM decision_integrity_quarantine WHERE table_name='calibration_pairs'"
+        "SELECT meta_json FROM fact_revocations WHERE table_name='calibration_pairs'"
     ).fetchone()[0]
     meta = json.loads(meta_json)
     assert meta.get("source_run_id") == "run-abc"
@@ -218,18 +221,18 @@ def _ptf_insert(conn, *, trace_id, snapshot_id) -> None:
     conn.commit()
 
 
-def test_probability_trace_fact_contributes_zero_quarantined(ptf_db):
+def test_probability_trace_fact_contributes_zero_revoked(ptf_db):
     snap_id = _snap(ptf_db, contributes=0)
     _ptf_insert(ptf_db, trace_id="trace-1", snapshot_id=snap_id)
-    result = quarantine_probability_trace_fact_for_noncontributing_forecast(ptf_db)
-    assert result["newly_quarantined"] == 1
-    assert "trace-1" in _quarantined_ids(ptf_db, "probability_trace_fact")
+    result = revoke_probability_trace_fact_for_noncontributing_forecast(ptf_db)
+    assert result["newly_revoked"] == 1
+    assert "trace-1" in _revoked_ids(ptf_db, "probability_trace_fact")
 
 
 def test_probability_trace_fact_null_contributes_skipped(ptf_db):
     snap_id = _snap(ptf_db, contributes=None)
     _ptf_insert(ptf_db, trace_id="trace-null", snapshot_id=snap_id)
-    result = quarantine_probability_trace_fact_for_noncontributing_forecast(ptf_db)
+    result = revoke_probability_trace_fact_for_noncontributing_forecast(ptf_db)
     assert result["candidates_found"] == 0
 
 
@@ -267,18 +270,18 @@ def _sff_insert(conn, *, family_id, snapshot_id) -> None:
     conn.commit()
 
 
-def test_selection_family_fact_contributes_zero_quarantined(sff_db):
+def test_selection_family_fact_contributes_zero_revoked(sff_db):
     snap_id = _snap(sff_db, contributes=0)
     _sff_insert(sff_db, family_id="fam-1", snapshot_id=snap_id)
-    result = quarantine_selection_family_fact_for_noncontributing_forecast(sff_db)
-    assert result["newly_quarantined"] == 1
-    assert "fam-1" in _quarantined_ids(sff_db, "selection_family_fact")
+    result = revoke_selection_family_fact_for_noncontributing_forecast(sff_db)
+    assert result["newly_revoked"] == 1
+    assert "fam-1" in _revoked_ids(sff_db, "selection_family_fact")
 
 
 def test_selection_family_fact_null_contributes_skipped(sff_db):
     snap_id = _snap(sff_db, contributes=None)
     _sff_insert(sff_db, family_id="fam-null", snapshot_id=snap_id)
-    result = quarantine_selection_family_fact_for_noncontributing_forecast(sff_db)
+    result = revoke_selection_family_fact_for_noncontributing_forecast(sff_db)
     assert result["candidates_found"] == 0
 
 
@@ -317,7 +320,7 @@ def shf_db():
     conn.close()
 
 
-def test_selection_hypothesis_fact_contributes_zero_quarantined(shf_db):
+def test_selection_hypothesis_fact_contributes_zero_revoked(shf_db):
     snap_id = _snap(shf_db, contributes=0)
     shf_db.execute(
         "INSERT INTO selection_family_fact (family_id, decision_snapshot_id) VALUES ('fam-A', ?)",
@@ -327,9 +330,9 @@ def test_selection_hypothesis_fact_contributes_zero_quarantined(shf_db):
         "INSERT INTO selection_hypothesis_fact (hypothesis_id, family_id) VALUES ('hyp-1', 'fam-A')"
     )
     shf_db.commit()
-    result = quarantine_selection_hypothesis_fact_for_noncontributing_forecast(shf_db)
-    assert result["newly_quarantined"] == 1
-    assert "hyp-1" in _quarantined_ids(shf_db, "selection_hypothesis_fact")
+    result = revoke_selection_hypothesis_fact_for_noncontributing_forecast(shf_db)
+    assert result["newly_revoked"] == 1
+    assert "hyp-1" in _revoked_ids(shf_db, "selection_hypothesis_fact")
 
 
 def test_selection_hypothesis_fact_null_contributes_skipped(shf_db):
@@ -342,7 +345,7 @@ def test_selection_hypothesis_fact_null_contributes_skipped(shf_db):
         "INSERT INTO selection_hypothesis_fact (hypothesis_id, family_id) VALUES ('hyp-null', 'fam-B')"
     )
     shf_db.commit()
-    result = quarantine_selection_hypothesis_fact_for_noncontributing_forecast(shf_db)
+    result = revoke_selection_hypothesis_fact_for_noncontributing_forecast(shf_db)
     assert result["candidates_found"] == 0
 
 
@@ -400,44 +403,44 @@ def _de_insert(conn, *, decision_event_id, snapshot_id) -> None:
     conn.commit()
 
 
-def test_decision_events_contributes_zero_quarantined(de_db):
+def test_decision_events_contributes_zero_revoked(de_db):
     snap_id = _snap(de_db, contributes=0)
     _de_insert(de_db, decision_event_id="dec-evt-1", snapshot_id=snap_id)
-    result = quarantine_decision_events_for_noncontributing_forecast(de_db)
-    assert result["newly_quarantined"] == 1
+    result = revoke_decision_events_for_noncontributing_forecast(de_db)
+    assert result["newly_revoked"] == 1
     # row_id is the 5-col natural PK hash (MAJOR-1 fix), not decision_event_id.
     expected_id = _de_natural_pk_hash(
         "BKK-high-ge30", "high", "2026-05-22", "2026-05-22T12:00:00", 1
     )
-    assert expected_id in _quarantined_ids(de_db, "decision_events")
+    assert expected_id in _revoked_ids(de_db, "decision_events")
 
 
 def test_decision_events_contributes_one_skipped(de_db):
     snap_id = _snap(de_db, contributes=1)
     _de_insert(de_db, decision_event_id="dec-evt-good", snapshot_id=snap_id)
-    result = quarantine_decision_events_for_noncontributing_forecast(de_db)
+    result = revoke_decision_events_for_noncontributing_forecast(de_db)
     assert result["candidates_found"] == 0
 
 
 def test_decision_events_null_contributes_skipped(de_db):
     snap_id = _snap(de_db, contributes=None)
     _de_insert(de_db, decision_event_id="dec-evt-null", snapshot_id=snap_id)
-    result = quarantine_decision_events_for_noncontributing_forecast(de_db)
+    result = revoke_decision_events_for_noncontributing_forecast(de_db)
     assert result["candidates_found"] == 0
 
 
 # ---------------------------------------------------------------------------
-# Downstream exclusion: test_promotion_readiness_excludes_quarantined_decisions
+# Downstream exclusion: test_promotion_readiness_excludes_revoked_decisions
 # ---------------------------------------------------------------------------
 
 def _make_evidence_report_db() -> sqlite3.Connection:
-    """In-memory DB with decision_events + decision_certificates + decision_integrity_quarantine.
+    """In-memory DB with decision_events + decision_certificates + fact_revocations.
 
     C2 (2026-06-16): build_evidence_report's n_decisions denominator now reads
     decision_certificates (FinalIntentCertificate, strategy_key in payload_json), since
     decision_events is a 0-row dead lane in production. We create both tables: decision_events
     is retained because the regret/settled-analytics join still goes through it (and that path
-    still applies quarantine exclusion — see test_regret_decomposition_excludes_quarantined_rows).
+    still applies revocation exclusion — see test_regret_decomposition_excludes_revoked_rows).
     """
     from src.state.schema.decision_certificates_schema import CREATE_CERTIFICATES_SQL
 
@@ -476,7 +479,7 @@ def _insert_final_intent_certificate(
     Mirrors the active C2 denominator lane (strategy_key embedded in payload_json). No
     decision_event_id is carried — the production FinalIntentCertificate payload does not
     have one (src/decision_kernel/certificates/execution.py:167-228), which is exactly why
-    quarantine exclusion (keyed on opportunity_fact.decision_id = decision_event_id) cannot
+    revocation exclusion (keyed on opportunity_fact.decision_id = decision_event_id) cannot
     be applied to this denominator.
     """
     import json
@@ -489,28 +492,28 @@ def _insert_final_intent_certificate(
             authority_id, authority_version, algorithm_id, algorithm_version,
             payload_json, payload_hash, certificate_hash, verifier_status, created_at
         ) VALUES (?, 'FinalIntentCertificate', 1, '1.0',
-                  ?, 'FINAL_INTENT', 'SHADOW', ?,
+                  ?, 'FINAL_INTENT', 'NO_SUBMIT', ?,
                   'test_authority', '1.0', 'test_algorithm', '1.0',
                   ?, 'hash_' || ?, 'cert_hash_' || ?, 'VERIFIED', ?)""",
         (cert_id, cert_id, decision_time, payload, cert_id, cert_id, decision_time),
     )
 
 
-def test_promotion_readiness_excludes_quarantined_decisions():
-    """C2 (2026-06-16): n_decisions reads decision_certificates and is NOT narrowed by quarantine.
+def test_promotion_readiness_excludes_revoked_decisions():
+    """C2 (2026-06-16): n_decisions reads decision_certificates and is NOT narrowed by revocation.
 
     History: this test verified that the OLD decision_events-based n_decisions denominator
-    excluded quarantined rows (NOT EXISTS on opportunity_fact.row_id = de.decision_event_id).
+    excluded revoked rows (NOT EXISTS on opportunity_fact.row_id = de.decision_event_id).
     The C2 fix migrated the denominator to decision_certificates (decision_events is a 0-row
     dead lane). FinalIntentCertificate payloads carry no decision_event_id, so there is no key
-    to join the quarantine rows against — the denominator exclusion is therefore not
+    to join the revocation rows against — the denominator exclusion is therefore not
     reconstructible on certificates. This is acceptable because:
       - n_decisions is telemetry-only (no ARM/promotion gate reads it; only reported in
         promotion_readiness_job.py), and
-      - quarantine integrity on the GATE-relevant settled analytics (n_settled / n_wins, joined
+      - revocation integrity on the GATE-relevant settled analytics (n_settled / n_wins, joined
         through decision_events.decision_event_id) is RETAINED and covered by
-        test_regret_decomposition_excludes_quarantined_rows.
-    This test now pins the new contract: quarantining a decision does NOT change n_decisions.
+        test_regret_decomposition_excludes_revoked_rows.
+    This test now pins the new contract: revoking a decision does NOT change n_decisions.
     """
     from src.analysis.evidence_report import build_evidence_report
 
@@ -538,32 +541,32 @@ def test_promotion_readiness_excludes_quarantined_decisions():
     )
     assert report_before.n_decisions == 2
 
-    # Quarantine dec-evt-1 under opportunity_fact. The certificate denominator has no
+    # Revoke dec-evt-1 under opportunity_fact. The certificate denominator has no
     # decision_event_id to match, so the count is unaffected (the C2 contract).
     conn.execute(
-        """INSERT INTO decision_integrity_quarantine
+        """INSERT INTO fact_revocations
            (table_name, row_id, reason_code, forecast_snapshot_id, recorded_at, meta_json)
            VALUES ('opportunity_fact', 'dec-evt-1', ?, NULL, ?, '{}')""",
         (REASON_NON_CONTRIBUTING, now),
     )
     conn.commit()
 
-    # After quarantine: n_decisions UNCHANGED (telemetry-only denominator, no cert join key).
+    # After revocation: n_decisions UNCHANGED (telemetry-only denominator, no cert join key).
     # Settled-analytics exclusion is covered separately (test_regret_decomposition_*).
     report_after = build_evidence_report(
         "strat-A", 0, conn=conn, breakeven_win_rate=0.52
     )
     assert report_after.n_decisions == 2, (
-        f"C2: certificate denominator is not narrowed by quarantine, got {report_after.n_decisions}"
+        f"C2: certificate denominator is not narrowed by revocation, got {report_after.n_decisions}"
     )
 
 
 # ---------------------------------------------------------------------------
-# Downstream exclusion: test_regret_decomposition_excludes_quarantined_rows
+# Downstream exclusion: test_regret_decomposition_excludes_revoked_rows
 # ---------------------------------------------------------------------------
 
 def _make_regret_db() -> sqlite3.Connection:
-    """In-memory DB with decision_events + regret_decompositions + quarantine."""
+    """In-memory DB with decision_events + regret_decompositions + fact_revocations."""
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     conn.execute("""
@@ -601,8 +604,8 @@ def _make_regret_db() -> sqlite3.Connection:
     return conn
 
 
-def test_regret_decomposition_excludes_quarantined_rows():
-    """build_evidence_report excludes regret rows whose decision_event_id is quarantined."""
+def test_regret_decomposition_excludes_revoked_rows():
+    """build_evidence_report excludes regret rows whose decision_event_id is revoked."""
     from src.analysis.evidence_report import build_evidence_report
 
     conn = _make_regret_db()
@@ -633,10 +636,10 @@ def test_regret_decomposition_excludes_quarantined_rows():
     # Both settled regret rows visible.
     assert report_before.n_settled == 2
 
-    # Quarantine rde-evt-1 under opportunity_fact (evidence_report regret filter checks
+    # Revoke rde-evt-1 under opportunity_fact (evidence_report regret filter checks
     # table_name='opportunity_fact' AND row_id = rd.decision_event_id, same anchor).
     conn.execute(
-        """INSERT INTO decision_integrity_quarantine
+        """INSERT INTO fact_revocations
            (table_name, row_id, reason_code, forecast_snapshot_id, recorded_at, meta_json)
            VALUES ('opportunity_fact', 'rde-evt-1', ?, NULL, ?, '{}')""",
         (REASON_NON_CONTRIBUTING, now),
@@ -647,16 +650,16 @@ def test_regret_decomposition_excludes_quarantined_rows():
         "strat-B", 0, conn=conn, breakeven_win_rate=0.52
     )
     assert report_after.n_settled == 1, (
-        f"Expected 1 settled after quarantine, got {report_after.n_settled}"
+        f"Expected 1 settled after revocation, got {report_after.n_settled}"
     )
 
 
 # ---------------------------------------------------------------------------
-# Downstream exclusion: test_calibration_rebuild_excludes_quarantined_pairs
+# Downstream exclusion: test_calibration_rebuild_excludes_revoked_pairs
 # ---------------------------------------------------------------------------
 
 def _make_platt_db() -> sqlite3.Connection:
-    """In-memory DB with calibration_pairs + decision_integrity_quarantine."""
+    """In-memory DB with calibration_pairs + fact_revocations (co-located, owner-local)."""
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     conn.execute("""
@@ -691,8 +694,8 @@ def _make_platt_db() -> sqlite3.Connection:
     return conn
 
 
-def test_calibration_rebuild_excludes_quarantined_pairs():
-    """_fetch_pairs_for_bucket excludes calibration_pairs rows tagged in quarantine."""
+def test_calibration_rebuild_excludes_revoked_pairs():
+    """_fetch_pairs_for_bucket excludes calibration_pairs rows tagged in fact_revocations."""
     import refit_platt as rp2
 
     from src.types.metric_identity import HIGH_LOCALDAY_MAX
@@ -716,38 +719,38 @@ def test_calibration_rebuild_excludes_quarantined_pairs():
 
     metric_id = HIGH_LOCALDAY_MAX
 
-    # Both pairs returned before quarantine.
+    # Both pairs returned before revocation.
     rows_before = rp2._fetch_pairs_for_bucket(
         conn, "C1", "winter", dv, "00", "tigge_mars", "full", metric_id
     )
     assert len(rows_before) == 2
 
-    # Quarantine pair_id=1 (first pair).
+    # Revoke pair_id=1 (first pair).
     now = datetime.now(timezone.utc).isoformat()
     conn.execute(
-        """INSERT INTO decision_integrity_quarantine
+        """INSERT INTO fact_revocations
            (table_name, row_id, reason_code, forecast_snapshot_id, recorded_at, meta_json)
            VALUES ('calibration_pairs', '1', ?, NULL, ?, '{}')""",
         (REASON_NON_CONTRIBUTING, now),
     )
     conn.commit()
 
-    # Only 1 pair returned after quarantine.
+    # Only 1 pair returned after revocation.
     rows_after = rp2._fetch_pairs_for_bucket(
         conn, "C1", "winter", dv, "00", "tigge_mars", "full", metric_id
     )
     assert len(rows_after) == 1, (
-        f"Expected 1 pair after quarantine, got {len(rows_after)}"
+        f"Expected 1 pair after revocation, got {len(rows_after)}"
     )
 
 
 # ---------------------------------------------------------------------------
-# quarantine_all_tables aggregation
+# revoke_all_tables aggregation
 # ---------------------------------------------------------------------------
 
 @pytest.fixture()
 def all_tables_db():
-    """DB with enough tables to exercise quarantine_all_tables_for_noncontributing_forecast."""
+    """DB with enough tables to exercise revoke_all_tables_for_noncontributing_forecast."""
     conn = _make_db()
     # opportunity_fact
     conn.execute("""
@@ -839,8 +842,8 @@ def all_tables_db():
     conn.close()
 
 
-def test_quarantine_all_tables_aggregates(all_tables_db):
-    """quarantine_all_tables runs across all tables and sums counts."""
+def test_revoke_all_tables_aggregates(all_tables_db):
+    """revoke_all_tables runs across all tables and sums counts."""
     snap_id = _snap(all_tables_db, contributes=0)
 
     # Insert one qualifying row per table.
@@ -872,20 +875,20 @@ def test_quarantine_all_tables_aggregates(all_tables_db):
     )
     all_tables_db.commit()
 
-    result = quarantine_all_tables_for_noncontributing_forecast(all_tables_db)
+    result = revoke_all_tables_for_noncontributing_forecast(all_tables_db)
     # 6 tables: opportunity_fact, calibration_pairs, probability_trace_fact,
     # selection_family_fact, selection_hypothesis_fact, decision_events.
-    assert result["newly_quarantined"] == 6
-    assert result["per_table"]["opportunity_fact"]["newly_quarantined"] == 1
-    assert result["per_table"]["calibration_pairs"]["newly_quarantined"] == 1
-    assert result["per_table"]["probability_trace_fact"]["newly_quarantined"] == 1
-    assert result["per_table"]["selection_family_fact"]["newly_quarantined"] == 1
-    assert result["per_table"]["selection_hypothesis_fact"]["newly_quarantined"] == 1
-    assert result["per_table"]["decision_events"]["newly_quarantined"] == 1
+    assert result["newly_revoked"] == 6
+    assert result["per_table"]["opportunity_fact"]["newly_revoked"] == 1
+    assert result["per_table"]["calibration_pairs"]["newly_revoked"] == 1
+    assert result["per_table"]["probability_trace_fact"]["newly_revoked"] == 1
+    assert result["per_table"]["selection_family_fact"]["newly_revoked"] == 1
+    assert result["per_table"]["selection_hypothesis_fact"]["newly_revoked"] == 1
+    assert result["per_table"]["decision_events"]["newly_revoked"] == 1
 
 
-def test_quarantine_all_tables_dry_run(all_tables_db):
-    """quarantine_all_tables with dry_run=True writes nothing."""
+def test_revoke_all_tables_dry_run(all_tables_db):
+    """revoke_all_tables with dry_run=True writes nothing."""
     snap_id = _snap(all_tables_db, contributes=0)
     all_tables_db.execute(
         "INSERT INTO opportunity_fact (decision_id, snapshot_id) VALUES ('dec-dry', ?)",
@@ -893,9 +896,9 @@ def test_quarantine_all_tables_dry_run(all_tables_db):
     )
     all_tables_db.commit()
 
-    result = quarantine_all_tables_for_noncontributing_forecast(all_tables_db, dry_run=True)
+    result = revoke_all_tables_for_noncontributing_forecast(all_tables_db, dry_run=True)
     assert result["dry_run"] is True
     total = all_tables_db.execute(
-        "SELECT COUNT(*) FROM decision_integrity_quarantine"
+        "SELECT COUNT(*) FROM fact_revocations"
     ).fetchone()[0]
     assert total == 0

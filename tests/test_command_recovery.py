@@ -1452,17 +1452,17 @@ def _insert_actionable_certificate_for_recovery(
         ),
     )
     if quarantine:
-        from src.state.decision_integrity_quarantine import (
+        from src.state.fact_revocation import (
             DECISION_CERTIFICATES_TABLE,
             REASON_INVALID_LIVE_ACTIONABLE,
         )
-        from src.state.schema.decision_integrity_quarantine_schema import ensure_table
+        from src.state.schema.fact_revocations_schema import ensure_table
 
         ensure_table(conn)
 
         conn.execute(
             """
-            INSERT INTO decision_integrity_quarantine
+            INSERT INTO fact_revocations
                 (table_name, row_id, reason_code, recorded_at)
             VALUES (?, ?, ?, ?)
             """,

@@ -66,7 +66,13 @@ CANONICAL_OWNER: dict[str, Domain] = {
     'decision_certificates': Domain.WORLD,
     'decision_compile_failures': Domain.WORLD,
     'decision_events': Domain.WORLD,
-    'decision_integrity_quarantine': Domain.TRADE,
+    # 'fact_revocations' intentionally NOT registered here: DIQ packet
+    # (docs/rebuild/quarantine_excision_2026-07-11.md) made it owner-local —
+    # ONE table name instantiated per-domain (trade/world/forecasts each carry
+    # their own local instance), which the single-Domain-per-table-name shape
+    # of this map cannot express. Same precedent as review_work_items (still
+    # single-domain here pending its own multi-instance rollout). See
+    # architecture/db_table_ownership.yaml for the per-DB registration.
     'decision_log': Domain.TRADE,
     'deterministic_forecast_anchors': Domain.FORECASTS,
     'diurnal_curves': Domain.WORLD,

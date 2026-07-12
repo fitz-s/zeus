@@ -178,6 +178,9 @@ _102 base tables_
     created_at:TEXT, schema_version:INTEGER
 - **exit_mutex_holdings**  (rows≈0, cols=5)
     mutex_key:TEXT, command_id:TEXT, acquired_at:TEXT, released_at:TEXT, release_reason:TEXT
+- **fact_revocations**  (rows≈0, cols=7)
+    id:INTEGER, table_name:TEXT, row_id:TEXT, reason_code:TEXT, forecast_snapshot_id:TEXT,
+    recorded_at:TEXT, meta_json:TEXT
 - **forecast_skill**  (rows≈23590, cols=11)
     id:INTEGER, city:TEXT, target_date:TEXT, source:TEXT, lead_days:INTEGER, forecast_temp:REAL,
     actual_temp:REAL, error:REAL, temp_unit:TEXT, season:TEXT, available_at:TEXT
@@ -543,9 +546,6 @@ _75 base tables_
     ens_q50_remaining_extreme:REAL, ens_q90_remaining_extreme:REAL, ens_spread:REAL,
     settlement_value:REAL, residual_to_settlement:REAL, fact_status:TEXT, missing_reason_json:TEXT,
     recorded_at:TEXT
-- **decision_integrity_quarantine**  (rows≈0, cols=7)
-    id:INTEGER, table_name:TEXT, row_id:TEXT, reason_code:TEXT, forecast_snapshot_id:TEXT,
-    recorded_at:TEXT, meta_json:TEXT
 - **decision_log**  (rows≈10534, cols=7)
     id:INTEGER, mode:TEXT, started_at:TEXT, completed_at:TEXT, artifact_json:TEXT, timestamp:TEXT,
     env:TEXT
@@ -594,6 +594,9 @@ _75 base tables_
     command_id:TEXT, posterior_id:INTEGER
 - **exit_mutex_holdings**  (rows≈19, cols=5)
     mutex_key:TEXT, command_id:TEXT, acquired_at:TEXT, released_at:TEXT, release_reason:TEXT
+- **fact_revocations**  (rows≈0, cols=7)
+    id:INTEGER, table_name:TEXT, row_id:TEXT, reason_code:TEXT, forecast_snapshot_id:TEXT,
+    recorded_at:TEXT, meta_json:TEXT
 - **forecast_skill**  (rows≈0, cols=11)
     id:INTEGER, city:TEXT, target_date:TEXT, source:TEXT, lead_days:INTEGER, forecast_temp:REAL,
     actual_temp:REAL, error:REAL, temp_unit:TEXT, season:TEXT, available_at:TEXT
@@ -1062,6 +1065,9 @@ _116 base tables_
     created_at:TEXT, schema_version:INTEGER
 - **exit_mutex_holdings**  (rows≈0, cols=5)
     mutex_key:TEXT, command_id:TEXT, acquired_at:TEXT, released_at:TEXT, release_reason:TEXT
+- **fact_revocations**  (rows≈0, cols=7)
+    id:INTEGER, table_name:TEXT, row_id:TEXT, reason_code:TEXT, forecast_snapshot_id:TEXT,
+    recorded_at:TEXT, meta_json:TEXT
 - **forecast_posteriors**  (rows≈2500, cols=26)
     posterior_id:INTEGER, source_id:TEXT, product_id:TEXT, data_version:TEXT, city:TEXT,
     target_date:TEXT, temperature_metric:TEXT, source_cycle_time:TEXT, source_available_at:TEXT,

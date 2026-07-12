@@ -14,7 +14,7 @@ from datetime import datetime, timedelta, timezone
 
 from scripts import check_live_restart_preflight as preflight
 from src.decision import qlcb_reliability_guard as guard_mod
-from src.state.decision_integrity_quarantine import (
+from src.state.fact_revocation import (
     DECISION_CERTIFICATES_TABLE,
     REASON_INVALID_LIVE_ACTIONABLE,
 )
@@ -1635,25 +1635,29 @@ def test_live_actionable_certificate_semantics_excludes_quarantined_invalid_rows
         },
     }
     _init_actionable_world_db(world_db, payload)
-    trade = sqlite3.connect(trade_db)
-    trade.execute(
+    # DIQ packet (docs/rebuild/quarantine_excision_2026-07-11.md): decision_certificates
+    # is world-owned (src/state/domains.py), so its owner-local fact_revocations
+    # record lives in the WORLD DB, not trade (predecessor decision_integrity_quarantine
+    # always lived in trade regardless of what it tagged).
+    world_conn = sqlite3.connect(world_db)
+    world_conn.execute(
         """
-        CREATE TABLE decision_integrity_quarantine (
+        CREATE TABLE fact_revocations (
             table_name TEXT NOT NULL,
             row_id TEXT NOT NULL,
             reason_code TEXT NOT NULL
         )
         """
     )
-    trade.execute(
+    world_conn.execute(
         """
-        INSERT INTO decision_integrity_quarantine (table_name, row_id, reason_code)
+        INSERT INTO fact_revocations (table_name, row_id, reason_code)
         VALUES (?, 'hash-test', ?)
         """,
         (DECISION_CERTIFICATES_TABLE, REASON_INVALID_LIVE_ACTIONABLE),
     )
-    trade.commit()
-    trade.close()
+    world_conn.commit()
+    world_conn.close()
     monkeypatch.setattr(preflight, "WORLD_DB", world_db)
     monkeypatch.setattr(preflight, "TRADE_DB", trade_db)
 

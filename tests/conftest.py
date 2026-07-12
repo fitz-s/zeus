@@ -345,7 +345,7 @@ _WLA_RESIDUAL_ALLOWLIST = frozenset({
     "src/data/market_scanner.py",       # pending_track_a6: daemon INSERT writes to market_events; no db_writer_lock yet
     "src/state/chunk_boundary_events.py",  # pending_track_a6: F11 daemon-thread observability write; intentionally separate conn from BulkChunker's conn to avoid lock-order conflict; failure-silent
     # --- scripts/ utilities: standalone CLI tools, not daemon src/ ---
-    "scripts/quarantine_bad_forecast_decisions.py",  # pending_track_a6: standalone quarantine CLI; PR-E work in progress
+    "scripts/revoke_bad_forecast_decisions.py",  # pending_track_a6: standalone revocation CLI; PR-E work in progress
     "scripts/build_ft_staging_db.py",               # pending_track_a6: Zeus #64 FT-ship operator staging script; one-shot CLI, not daemon src/
     "scripts/promote_model_bias_ens.py",         # pending_track_a6: Zeus #64 FT-ship F3 promote CLI; --db override path only, not daemon src/
     "scripts/probe_full_live_path_to_submit.py", # pending_track_a6: standalone live-path probe script; operator diagnostic tool, not daemon src/

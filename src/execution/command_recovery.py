@@ -57,8 +57,8 @@ from src.execution.command_bus import (
 )
 from src.execution.exit_safety import reconcile_review_required_exit_mutex_releases
 from src.decision_kernel.canonicalization import canonical_json, stable_hash
-from src.state.decision_integrity_quarantine import (
-    decision_certificate_is_quarantined as _decision_certificate_is_quarantined,
+from src.state.fact_revocation import (
+    is_certificate_revoked as _certificate_is_revoked,
 )
 from src.state.venue_command_repo import (
     find_unresolved_commands,
@@ -3122,10 +3122,13 @@ def _edli_certificate_payload(
     return {}
 
 
-# _decision_certificate_is_quarantined consolidated (excision T-consolidations #1,
-# docs/rebuild/quarantine_excision_2026-07-11.md): now imported at module top as
-# src.state.decision_integrity_quarantine.decision_certificate_is_quarantined,
-# the single shared implementation this module and executor.py both call.
+# _certificate_is_revoked consolidated (excision T-consolidations #1,
+# docs/rebuild/quarantine_excision_2026-07-11.md): imported at module top as
+# src.state.fact_revocation.is_certificate_revoked, the single shared
+# implementation this module and executor.py both call. DIQ packet
+# (2026-07-12) re-implemented the predecessor decision_integrity_quarantine
+# side-table as owner-local fact_revocations records. World is already
+# ATTACHed by this point via _decision_certificates_ref -> _maybe_attach_world_for_recovery.
 
 
 def _verified_edli_actionable_payload(
@@ -3160,7 +3163,7 @@ def _verified_edli_actionable_payload(
         ):
             continue
         cert_hash = str(record.get("certificate_hash") or "").strip()
-        if _decision_certificate_is_quarantined(conn, certificate_hash=cert_hash):
+        if _certificate_is_revoked(conn, certificate_hash=cert_hash):
             logger.warning(
                 "recovery: EDLI Actionable certificate is quarantined; refusing "
                 "entry projection authority event_id=%s token_id=%s certificate_hash=%s",

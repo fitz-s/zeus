@@ -3520,6 +3520,13 @@ def init_schema(
         )
     """)
 
+    # DIQ packet (docs/rebuild/quarantine_excision_2026-07-11.md): fact_revocations
+    # is owner-local — this world-DB instance carries decision_certificates,
+    # decision_events, probability_trace_fact, selection_family_fact, and
+    # selection_hypothesis_fact revocations.
+    from src.state.schema.fact_revocations_schema import ensure_table as _ensure_fact_revocations_table
+    _ensure_fact_revocations_table(conn)
+
     if own_conn:
         conn.commit()
         conn.close()
@@ -4091,6 +4098,11 @@ _FORECAST_TABLES = (
     "raw_model_forecast_request_conflicts",
     "cycle_advance_enqueues",
     "fusion_upgrade_enqueues",
+    # DIQ packet (2026-07-12, docs/rebuild/quarantine_excision_2026-07-11.md):
+    # fact_revocations owner-local instance, forecasts-DB-local static helper
+    # (init_schema_forecasts calls ensure_table directly; not copied via the
+    # world_src ATTACH path).
+    "fact_revocations",
 )
 
 
@@ -5087,6 +5099,13 @@ def init_schema_forecasts(conn: sqlite3.Connection) -> None:
     )
     _create_replacement_live(conn)
 
+    # DIQ packet (docs/rebuild/quarantine_excision_2026-07-11.md): fact_revocations
+    # is owner-local — this forecasts-DB instance carries calibration_pairs
+    # revocations. Forecasts-only static helper; never copied from world_src and
+    # never created on world/trade DBs (keeps boot-time registry equality aligned).
+    from src.state.schema.fact_revocations_schema import ensure_table as _ensure_fact_revocations_table
+    _ensure_fact_revocations_table(conn)
+
     conn.commit()
 
 
@@ -5115,7 +5134,7 @@ def init_schema_world_only(conn: Optional[sqlite3.Connection] = None) -> None:
 _TRADE_CLASS_TABLES: frozenset[str] = frozenset({
     "_migrations_applied",
     "book_hash_transitions",
-    "decision_integrity_quarantine",
+    "fact_revocations",
     # Quarantine excision foundation (docs/rebuild/quarantine_excision_2026-07-11.md):
     # owner-local ReviewWorkItem table + its sibling exposure-fact table.
     "review_work_items",
@@ -6050,9 +6069,11 @@ def init_schema_trade_only(conn: sqlite3.Connection) -> None:
     # §1 A2): durable WS connect/disconnect/reconnect transition log. Trade DB owner.
     from src.state.schema.market_channel_connectivity_schema import ensure_table as _ensure_market_channel_connectivity_table
     _ensure_market_channel_connectivity_table(conn)
-    # PR-E (2026-05-22): decision_integrity_quarantine lives on the trade DB.
-    from src.state.schema.decision_integrity_quarantine_schema import ensure_table as _ensure_decision_integrity_quarantine_table
-    _ensure_decision_integrity_quarantine_table(conn)
+    # DIQ packet (docs/rebuild/quarantine_excision_2026-07-11.md): fact_revocations
+    # is owner-local — this trade-DB instance carries opportunity_fact revocations
+    # (PR-E 2026-05-22 lineage). Superseded the old trade-only decision_integrity_quarantine.
+    from src.state.schema.fact_revocations_schema import ensure_table as _ensure_fact_revocations_table
+    _ensure_fact_revocations_table(conn)
     # Quarantine excision foundation (docs/rebuild/quarantine_excision_2026-07-11.md
     # "Consult adjudication"): review_work_items is the owner-local ReviewWorkItem
     # table, instantiated trade-DB-first; entry_exposure_obligations is its sibling

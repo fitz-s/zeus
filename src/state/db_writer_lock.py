@@ -669,7 +669,7 @@ SQLITE_CONNECT_ALLOWLIST: frozenset[str] = frozenset(
         "scripts/audit_yes_no_selection_skew.py",  # read_only_ro_uri: opens trade DB mode=ro; SELECT-only over edli_live_order_events DecisionProofAccepted payloads to explain YES/NO selection skew; never writes canonical DBs
         "scripts/audit_live_probability_reality.py",  # read_only_ro_uri: opens trade/world DBs mode=ro; SELECT-only over settled positions, position_events, outcome_fact, and settlement_attribution to audit probability-vs-reality and monitor evidence; never writes canonical DBs
         "scripts/dev/replay_position_phase.py",  # read_only_ro_uri: INV-PROJ-1 replay-diff opens the trades DB via file:...?mode=ro uri; SELECT-only over position_current ⋈ position_events (phase vs latest event phase_after); never writes; atlas §5 projection-recomputability verifier (2026-06-30)
-        "scripts/quarantine_invalid_live_actionable_certificates.py",  # operator_invoked + guarded: dry-run inspects world/trade certificate rows; --apply writes trade.decision_integrity_quarantine under db_writer_lock(BULK)
+        "scripts/revoke_invalid_live_actionable_certificates.py",  # operator_invoked + guarded: dry-run inspects world certificate rows; --apply writes world.fact_revocations (owner-local, DIQ packet) under db_writer_lock(BULK)
         "scripts/repair_hko_runtime_monitoring_observations.py",  # operator_invoked + guarded: dry-run inspects forecasts observation_instants; --apply updates forecasts DB under db_writer_lock(BULK)
         "scripts/query_decision_provenance.py",  # read_only_ro_uri: decision-provenance query opens zeus-world.db mode=ro, SELECT-only over regret/no_submit receipts — operator "一切可被溯源" query entry 2026-06-11 (docs/evidence/settlement_guard/2026-06-11_decision_provenance_plan.md)
         "scripts/sigma_scale_before_after.py",  # read_only_ro_uri: sigma-scale before/after evidence table, opens forecasts/trades DBs mode=ro, SELECT-only (docs/archive/2026-Q2/operations_historical/c3_sigma_calibration_surface_2026-06-12.md)
@@ -771,6 +771,7 @@ SQLITE_CONNECT_ALLOWLIST: frozenset[str] = frozenset(
         # --- K1 migration scripts: operator-mediated, not runtime daemon ---
         "scripts/migrate_world_to_forecasts.py",            # k1_migration: operator-mediated bulk copy to zeus-forecasts.db
         "scripts/migrate_world_observations_to_forecasts.py",  # k1_p0_migration: operator-mediated; copies stale obs rows
+        "scripts/migrate_decision_integrity_quarantine_to_fact_revocations.py",  # DIQ packet (docs/rebuild/quarantine_excision_2026-07-11.md): operator-mediated 3-DB backfill; --dry-run default, --apply requires --confirm-backup, db_writer_lock(BULK) on trade under --apply; daemon never imports
         # --- K1 P1 registry CI hook ---
         "scripts/check_table_registry_coherence.py",    # ci_hook: opens :memory: + tmp on-disk DBs; not runtime daemon
         # --- K1 P3 ghost table cleanup ---

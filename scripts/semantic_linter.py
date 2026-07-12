@@ -82,7 +82,7 @@ CALIBRATION_PAIRS_SELECT_ALLOWLIST: frozenset[str] = frozenset({
     # B3 (2026-05-28): calibration_pairs_v2 renamed to calibration_pairs.
     # Both files queried calibration_pairs_v2 directly (K2 exempt) and now
     # query the canonical name. Same domain-internal-query rationale as above.
-    "decision_integrity_quarantine.py",  # src/state/decision_integrity_quarantine.py — K2_struct approved
+    "fact_revocation.py",  # src/state/fact_revocation.py — K2_struct approved (DIQ packet, supersedes decision_integrity_quarantine.py)
     "calibration_transfer_policy.py",    # src/data/calibration_transfer_policy.py — K2_struct approved
 })
 

@@ -3282,76 +3282,120 @@ test_metadata:
     created: 2026-05-22
     last_reused_or_audited: 2026-05-22
 
-  tests/test_decision_integrity_quarantine.py:
+  tests/test_fact_revocation.py:
     modules: [state]
     category: unit_antibody
     kind: antibody
     profile: p0_forecast_extrema_authority_pr_e
     blocks_commit: true
     asserted_invariants:
-      - DECISION_INTEGRITY_QUARANTINE_LOGIC
-      - DECISION_INTEGRITY_QUARANTINE_IDEMPOTENT
+      - FACT_REVOCATION_LOGIC
+      - FACT_REVOCATION_IDEMPOTENT
     source_under_test:
-      - src/state/decision_integrity_quarantine.py
-      - src/state/schema/decision_integrity_quarantine_schema.py
+      - src/state/fact_revocation.py
+      - src/state/schema/fact_revocations_schema.py
     law_dependencies:
       - docs/archive/2026-Q2/operations_historical/P0_FORECAST_EXTREMA_AUTHORITY_2026-05-22.md
+      - docs/rebuild/quarantine_excision_2026-07-11.md
     notes: >
-      Unit tests for quarantine_decisions_for_noncontributing_forecast: only
-      contributes=0 and UNKNOWN attribution rows quarantined; contributes=1 rows
-      skipped; idempotency (run twice → no duplicates); ensure_table idempotency.
+      DIQ packet (owner-local reshape) — supersedes tests/test_decision_integrity_quarantine.py.
+      Unit tests for revoke_decisions_for_noncontributing_forecast: only
+      contributes=0 and UNKNOWN attribution rows revoked; contributes=1 rows
+      skipped; NULL contributes (legacy) passed through untouched; idempotency
+      (run twice → no duplicates); dry_run writes nothing; ensure_table
+      idempotency. Also covers revoke_invalid_live_actionable_certificates and
+      revoke_invalid_live_money_parent_modes (decision_certificates lane).
       Uses in-memory single-DB (no ATTACH) fixture — fallback path exercised.
     created: 2026-05-22
-    last_reused_or_audited: 2026-05-22
+    last_reused_or_audited: 2026-07-12
 
-  tests/test_decision_integrity_quarantine_extended.py:
+  tests/test_fact_revocation_extended.py:
     modules: [state, analysis, calibration]
     category: unit_antibody
     kind: antibody
     profile: p0_forecast_extrema_authority_pr_e
     blocks_commit: true
     asserted_invariants:
-      - DECISION_INTEGRITY_QUARANTINE_LOGIC
-      - DECISION_INTEGRITY_QUARANTINE_IDEMPOTENT
-      - QUARANTINE_DOWNSTREAM_EXCLUSION_EVIDENCE_REPORT
-      - QUARANTINE_DOWNSTREAM_EXCLUSION_PLATT_REFIT
+      - FACT_REVOCATION_LOGIC
+      - FACT_REVOCATION_IDEMPOTENT
+      - REVOCATION_DOWNSTREAM_EXCLUSION_EVIDENCE_REPORT
+      - REVOCATION_DOWNSTREAM_EXCLUSION_PLATT_REFIT
     source_under_test:
-      - src/state/decision_integrity_quarantine.py
+      - src/state/fact_revocation.py
       - src/analysis/evidence_report.py
       - scripts/refit_platt.py
     law_dependencies:
       - docs/archive/2026-Q2/operations_historical/P0_FORECAST_EXTREMA_AUTHORITY_2026-05-22.md
+      - docs/rebuild/quarantine_excision_2026-07-11.md
     notes: >
-      PR-E extended quarantine: tag-coverage tests for calibration_pairs_v2,
-      probability_trace_fact, selection_family_fact, selection_hypothesis_fact,
-      decision_events. Downstream exclusion tests: test_promotion_readiness_excludes_quarantined_decisions
-      (build_evidence_report n_decisions), test_calibration_rebuild_excludes_quarantined_pairs
-      (_fetch_pairs_for_bucket), test_regret_decomposition_excludes_quarantined_rows
-      (build_evidence_report n_settled). quarantine_all_tables aggregation.
+      DIQ packet (owner-local reshape) — supersedes
+      tests/test_decision_integrity_quarantine_extended.py. Extended (PR-E)
+      revocation: tag-coverage tests for calibration_pairs, probability_trace_fact,
+      selection_family_fact, selection_hypothesis_fact, decision_events (each
+      owner-local, co-located with the fact table it tags). Downstream exclusion
+      tests: test_promotion_readiness_excludes_revoked_decisions (build_evidence_report
+      n_decisions — pins the C2 contract that the certificate-based denominator is
+      NOT narrowed by revocation), test_calibration_rebuild_excludes_revoked_pairs
+      (_fetch_pairs_for_bucket), test_regret_decomposition_excludes_revoked_rows
+      (build_evidence_report n_settled). revoke_all_tables_for_noncontributing_forecast
+      aggregation across all six owner-local tables.
     created: 2026-05-23
+    last_reused_or_audited: 2026-07-12
 
-  tests/test_decision_integrity_quarantine_crossdb.py:
+  tests/test_fact_revocation_crossdb.py:
     modules: [state, analysis]
     category: integration
     kind: antibody
     profile: p0_forecast_extrema_authority_pr_e
     blocks_commit: true
     asserted_invariants:
-      - QUARANTINE_CROSSDB_WRITE_TRADE_ATTACH
-      - QUARANTINE_CROSSDB_READER_AUTO_ATTACH
+      - REVOCATION_CROSSDB_WRITE_TRADE_ATTACH
+      - REVOCATION_CROSSDB_READER_AUTO_ATTACH
     source_under_test:
-      - src/state/decision_integrity_quarantine.py
+      - src/state/fact_revocation.py
       - src/analysis/evidence_report.py
     law_dependencies:
       - docs/archive/2026-Q2/operations_historical/P0_FORECAST_EXTREMA_AUTHORITY_2026-05-22.md
+      - docs/rebuild/quarantine_excision_2026-07-11.md
     notes: >
-      PR-E MINOR finding: cross-DB integration tests with separate world/trade/forecasts
-      tempfile SQLite DBs ATTACHed as production does. test_writer_crossdb_attach proves
-      quarantine rows land in trade DB (not world DB) and row_id is natural-PK hash.
-      test_reader_crossdb_attach proves evidence_report auto-ATTACHes trade DB and
-      applies opportunity_fact exclusion across the DB boundary.
+      DIQ packet (owner-local reshape) — supersedes
+      tests/test_decision_integrity_quarantine_crossdb.py. Cross-DB integration
+      tests with separate world/trade/forecasts tempfile SQLite DBs ATTACHed as
+      production does; the owner-local reshape supersedes PR-E's single
+      trade-DB-only quarantine shape — most revocable tables now write LOCALLY
+      into their own DB's fact_revocations (writer_local scenario: decision_events
+      in world), with only opportunity_fact (trade-owned) still requiring
+      cross-DB ATTACH from a world-main connection (writer_crossdb scenario,
+      target_schema="trade"). test_reader_crossdb_attach proves evidence_report
+      auto-ATTACHes trade DB and applies opportunity_fact revocation exclusion
+      across the DB boundary.
     created: 2026-05-23
-    last_reused_or_audited: 2026-05-23
+    last_reused_or_audited: 2026-07-12
+
+  tests/test_migrate_decision_integrity_quarantine_to_fact_revocations.py:
+    modules: [state]
+    category: unit_antibody
+    kind: antibody
+    profile: p0_forecast_extrema_authority_pr_e
+    blocks_commit: true
+    asserted_invariants:
+      - REVOCATION_MIGRATION_PARITY
+      - REVOCATION_MIGRATION_ABORT_ON_MISMATCH
+    source_under_test:
+      - scripts/migrate_decision_integrity_quarantine_to_fact_revocations.py
+    law_dependencies:
+      - docs/rebuild/quarantine_excision_2026-07-11.md
+    notes: >
+      DIQ packet — fixture-DB tests for the one-time 3-DB backfill script that
+      copies rows from the predecessor central decision_integrity_quarantine
+      table (trade DB) into the owner-local fact_revocations tables
+      (trade/world/forecasts), routed by table_name. Covers the parity-check
+      abort path (migration must fail closed on any row-count mismatch between
+      source and destination). No live code path depends on this script outside
+      the one-time migration; the old table/module names appear here only as the
+      migration's documented source, never as a live import.
+    created: 2026-07-12
+    last_reused_or_audited: 2026-07-12
 
   tests/test_day0_observation_reader.py:
     modules: [data]
