@@ -2586,9 +2586,19 @@ def test_global_batch_claims_unpaged_cut_time_winner_and_continues_actuation(
         expected_fill_price_before_fee=Decimal("0.40"),
         max_spend_usd=Decimal("4"),
         robust_delta_log_wealth=0.01,
-        robust_ev_usd=1.0,
+        robust_ev_usd=2.0,
         capital_efficiency=0.25,
         no_trade_reason=None,
+        terminal_wealth=SimpleNamespace(
+            win_probability_lcb=0.60,
+            loss_probability_ucb=0.40,
+            loss_payoff_usd=Decimal("-4"),
+            win_payoff_usd=Decimal("6"),
+            median_payoff_usd=Decimal("6"),
+            wealth_after_loss_usd=Decimal("96"),
+            wealth_after_win_usd=Decimal("106"),
+            expected_value_diagnostic_usd=2.0,
+        ),
     )
     wealth_economic_identity = "wealth-economic"
     economic_identity = global_single_order_economic_identity(

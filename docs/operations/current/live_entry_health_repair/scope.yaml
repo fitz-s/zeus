@@ -8,6 +8,10 @@ in_scope:
 - src/engine/event_reactor_adapter.py
 - src/engine/global_batch_runtime.py
 - src/engine/global_auction_universe.py
+- src/engine/global_single_order_auction.py
+- src/decision_kernel/canonicalization.py
+- src/solve/solver.py
+- src/solve/AGENTS.md
 - src/execution/exit_lifecycle.py
 - tests/test_p4_post_trade_capital_lift.py
 - tests/test_run_mode_failure_surfaces.py
@@ -15,10 +19,15 @@ in_scope:
 - tests/events/test_continuous_redecision_emit.py
 - tests/events/test_reactor.py
 - tests/integration/test_w3_solve_seam_g3.py
+- tests/integration/test_qkernel_spine_blockers_pr409.py
+- tests/engine/test_event_reactor_live_qkernel_gate.py
+- tests/solve/test_solver_properties.py
 - tests/test_phase2_exit_emitter_revival.py
 allow_companions:
 - architecture/test_topology.yaml
 - docs/operations/current_state.md
+- docs/rebuild/order_engine_first_principles_design_2026-07-02.md
+- docs/rebuild/schema_packets/w3_solve_design_packet_2026-07-03.md
 out_of_scope:
 - state/**
 - src/execution/** except src/execution/exit_lifecycle.py

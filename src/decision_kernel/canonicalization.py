@@ -84,6 +84,19 @@ _QKERNEL_CURRENT_STATE_IDENTITY_FIELDS: tuple[str, ...] = (
     "coherence_allows",
     "robust_trade_score",
     "false_edge_rate",
+    "global_cut_time_win_probability_lcb",
+    "global_cut_time_loss_probability_ucb",
+    "global_terminal_win_probability_lcb",
+    "global_terminal_loss_probability_ucb",
+    "global_terminal_loss_payoff_usd",
+    "global_terminal_win_payoff_usd",
+    "global_terminal_median_payoff_usd",
+    "global_terminal_wealth_after_loss_usd",
+    "global_terminal_wealth_after_win_usd",
+    "global_cut_time_expected_value_diagnostic_usd",
+    "global_expected_value_diagnostic_usd",
+    "global_expected_value_semantics",
+    "global_terminal_payoff_semantics",
 )
 
 

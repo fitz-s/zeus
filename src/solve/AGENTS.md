@@ -55,8 +55,11 @@ current scope, book, wealth, probability, RiskGuard, and venue receipt evidence 
   identities before scoring. A current venue-universe witness must prove every active family is
   represented; a partial reactor page is not global and fails closed. One `PortfolioWealthWitness` binds ledger generation, positions,
   reservations, spendable cash, and wealth bounds. Stale, mismatched, maker-contingent, or
-  non-positive candidates are unrankable. Rank the current epoch by coupling-robust lower-CVaR
-  Δlog-wealth; numerical ties prefer higher robust Δlog per dollar, then lower cash. A
+  non-positive candidates are unrankable. Before sizing, payoff-side lower-CVaR win probability
+  must be strictly above one half; this makes the exact binary payoff vector's median positive.
+  Rank admitted candidates by coupling-robust lower-CVaR Δlog-wealth; numerical ties prefer
+  higher robust Δlog per dollar, then lower cash. Expected value remains diagnostic and must
+  never be named realized capital gain. A
   capital-time rate is forbidden without an authoritative release/arrival/reinvestment model.
   This is not multi-order portfolio optimality.
 - **κ single-owner, typed.** κ=1.0 throughout W3/W4 (the downstream haircut still shades);
