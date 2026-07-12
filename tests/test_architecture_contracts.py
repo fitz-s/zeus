@@ -1284,23 +1284,29 @@ def test_lifecycle_builders_map_runtime_states_to_canonical_phases():
         )
         == "pending_exit"
     )
+    # T5 (docs/rebuild/quarantine_excision_2026-07-11.md): 'quarantined' is
+    # retired from LifecycleState/ChainState. Position.__post_init__'s
+    # mixed-epoch bridge remaps a legacy row carrying these values to its
+    # TRUE runtime state/chain_state (holding/synced) before this function
+    # ever sees it, so it now folds to 'active' like any other open position
+    # — the dispute is tracked by an open ReviewWorkItem, not the phase.
     assert (
         canonical_phase_for_position(
             _runtime_position(state="quarantined", chain_state="quarantined")
         )
-        == "quarantined"
+        == "active"
     )
     assert (
         canonical_phase_for_position(
             _runtime_position(state="holding", chain_state="quarantined")
         )
-        == "quarantined"
+        == "active"
     )
     assert (
         canonical_phase_for_position(
             _runtime_position(state="holding", chain_state="quarantine_expired")
         )
-        == "quarantined"
+        == "active"
     )
     assert canonical_phase_for_position(_runtime_position(state="voided")) == "voided"
     assert (
@@ -1357,6 +1363,14 @@ def test_inv07_lifecycle_grammar_sql_python_consistency():
         )
 
     python_phases = {p.value for p in LifecyclePhase} - {"unknown"}
+    # T5 (docs/rebuild/quarantine_excision_2026-07-11.md): 'quarantined' is
+    # retired from LifecyclePhase (no writer mints it going forward), but the
+    # kernel SQL CHECK clauses still permit the literal — legacy rows written
+    # before this change carry it, and the schema migration that rewrites
+    # them (docs/rebuild item 5) is a separate follow-up packet. It is a
+    # known, intentional, temporary SQL-only value during the mixed-epoch
+    # bridge window, exactly like 'unknown' is intentionally Python-only.
+    canonical_sql_phases = canonical_sql_phases - {"quarantined"}
     assert python_phases == canonical_sql_phases, (
         "INV-07 schema-vs-code drift: the kernel SQL phase CHECK clauses and "
         "the Python LifecyclePhase enum disagree.\n"
@@ -1365,7 +1379,9 @@ def test_inv07_lifecycle_grammar_sql_python_consistency():
         "If you added a new phase, update both sites in lockstep. If you "
         "removed one, audit existing rows AND every consumer of the enum "
         "value before removing from this comparison. The 'unknown' sentinel "
-        "is intentionally excluded from the SQL set (in-flight only)."
+        "is intentionally excluded from the SQL set (in-flight only); "
+        "'quarantined' is intentionally excluded from the Python set until "
+        "the T5 schema migration (docs/rebuild item 5) rewrites legacy rows."
     )
 
 
@@ -1388,6 +1404,12 @@ def test_inv07_fold_rejects_invented_phase_strings():
 def test_lifecycle_phase_kernel_exposes_exact_p5_vocabulary():
     from src.state.lifecycle_manager import LIFECYCLE_PHASE_VOCABULARY
 
+    # T5 (docs/rebuild/quarantine_excision_2026-07-11.md): 'quarantined' is
+    # retired from LifecyclePhase (no writer mints it going forward). The
+    # kernel SQL CHECK clauses still permit the legacy literal for existing
+    # rows until the schema migration (docs/rebuild item 5, a separate
+    # follow-up packet) rewrites them — see test_inv07_lifecycle_grammar_
+    # sql_python_consistency for that mixed-epoch bridge carve-out.
     assert LIFECYCLE_PHASE_VOCABULARY == (
         "pending_entry",
         "active",
@@ -1396,7 +1418,6 @@ def test_lifecycle_phase_kernel_exposes_exact_p5_vocabulary():
         "economically_closed",
         "settled",
         "voided",
-        "quarantined",
         "admin_closed",
         "unknown",
     )
@@ -1405,6 +1426,10 @@ def test_lifecycle_phase_kernel_exposes_exact_p5_vocabulary():
 def test_lifecycle_phase_kernel_accepts_current_canonical_builder_folds():
     from src.state.lifecycle_manager import fold_lifecycle_phase
 
+    # T5 (docs/rebuild/quarantine_excision_2026-07-11.md): folds targeting
+    # 'quarantined' are removed — QUARANTINED is retired from LifecyclePhase
+    # and no builder mints it going forward (REPLACEMENT PHASE LAW: a
+    # position keeps its TRUE phase; the dispute lives in a ReviewWorkItem).
     allowed = [
         (None, "pending_entry"),
         ("pending_entry", "pending_entry"),
@@ -1416,13 +1441,10 @@ def test_lifecycle_phase_kernel_accepts_current_canonical_builder_folds():
         ("day0_window", "settled"),
         ("pending_exit", "pending_exit"),
         ("pending_exit", "settled"),
-        ("pending_exit", "quarantined"),
         ("economically_closed", "economically_closed"),
         ("economically_closed", "settled"),
         ("settled", "settled"),
         ("voided", "voided"),
-        (None, "quarantined"),
-        ("quarantined", "quarantined"),
         ("admin_closed", "admin_closed"),
     ]
 
@@ -1995,68 +2017,12 @@ def test_chain_size_corrected_builder_emits_chain_size_corrected_event_and_proje
     conn.close()
 
 
-def test_chain_quarantined_builder_requires_explicit_strategy_key():
-    from src.engine.lifecycle_events import build_chain_quarantined_canonical_write
-
-    pos = _runtime_position(state="holding", chain_state="quarantined")
-    pos.trade_id = "quarantine_tok_1"
-    pos.direction = "unknown"
-    pos.strategy_key = ""
-    pos.strategy = ""
-    pos.quarantined_at = "2026-04-03T00:30:00Z"
-    pos.chain_verified_at = "2026-04-03T00:30:00Z"
-    pos.token_id = "tok-1"
-    pos.condition_id = "cond-1"
-
-    try:
-        build_chain_quarantined_canonical_write(
-            pos,
-            strategy_key="",
-            sequence_no=1,
-            source_module="src.state.chain_reconciliation",
-        )
-    except ValueError as exc:
-        assert "requires explicit strategy_key" in str(exc)
-    else:
-        raise AssertionError("expected missing strategy_key to fail loudly")
-
-
-def test_chain_quarantined_builder_emits_quarantined_event_and_projection():
-    from src.engine.lifecycle_events import build_chain_quarantined_canonical_write
-
-    pos = _runtime_position(state="holding", chain_state="quarantined")
-    pos.trade_id = "quarantine_tok_1"
-    pos.direction = "unknown"
-    pos.strategy_key = ""
-    pos.strategy = ""
-    pos.quarantined_at = "2026-04-03T00:30:00Z"
-    pos.chain_verified_at = "2026-04-03T00:30:00Z"
-    pos.token_id = "tok-1"
-    pos.condition_id = "cond-1"
-    pos.size_usd = 11.0
-    pos.cost_basis_usd = 11.0
-    pos.chain_shares = 22.0
-    pos.shares = 22.0
-
-    events, projection = build_chain_quarantined_canonical_write(
-        pos,
-        strategy_key="center_buy",
-        sequence_no=1,
-        source_module="src.state.chain_reconciliation",
-    )
-
-    event = events[0]
-    payload = json.loads(event["payload_json"])
-    assert event["event_type"] == "CHAIN_QUARANTINED"
-    assert event["phase_before"] is None
-    assert event["phase_after"] == "quarantined"
-    assert event["strategy_key"] == "center_buy"
-    assert payload["reason"] == "chain_only_quarantined"
-    assert payload["token_id"] == "tok-1"
-    assert projection["phase"] == "quarantined"
-    assert projection["strategy_key"] == "center_buy"
-    assert payload["token_id"] == "tok-1"
-    assert projection["phase"] == "quarantined"
+# T5 (docs/rebuild/quarantine_excision_2026-07-11.md): build_chain_quarantined_canonical_write
+# was dead (zero production callers — the only chain-only writer path is the
+# typed ChainOnlyFact in src.state.chain_reconciliation) and is deleted along
+# with the retired PositionPhase.QUARANTINED / LifecycleState.QUARANTINED /
+# ChainState.{QUARANTINED,QUARANTINE_EXPIRED,ENTRY_AUTHORITY_QUARANTINED}
+# members. The tests that exercised it are removed with it.
     assert projection["strategy_key"] == "center_buy"
 
 

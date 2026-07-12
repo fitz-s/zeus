@@ -54,7 +54,9 @@ UNRESOLVED_LOT_STATES = (
     "OPTIMISTIC_EXPOSURE",
     "CONFIRMED_EXPOSURE",
     "EXIT_PENDING",
-    "QUARANTINED",
+    # T5 (docs/rebuild/quarantine_excision_2026-07-11.md): 'QUARANTINED'
+    # removed — 0 live position_lots rows, no writer (rollback_optimistic_
+    # lot_for_failed_trade now appends ECONOMICALLY_CLOSED_OPTIMISTIC).
 )
 TRADE_FILL_ECONOMICS_STATUSES = {"MATCHED", "MINED", "CONFIRMED"}
 

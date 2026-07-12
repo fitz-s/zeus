@@ -56,7 +56,7 @@ def _make_active_position(**overrides: Any) -> Any:
     return Position(**defaults)
 
 
-def _make_quarantined_position(**overrides: Any) -> Any:
+def _make_under_review_position(**overrides: Any) -> Any:
     from src.state.portfolio import Position
 
     defaults: dict[str, Any] = dict(
@@ -72,13 +72,12 @@ def _make_quarantined_position(**overrides: Any) -> Any:
         p_posterior=0.55,
         shares=25.0,
         cost_basis_usd=10.0,
-        state="quarantined",
+        state="holding",
         chain_state="size_mismatch_unresolved",
         token_id="tok-f2-q",
         unit="F",
         env="live",
-        quarantined_at="2026-05-01T00:00:00Z",       # stale legacy timestamp
-        chain_verified_at="2026-05-10T00:00:00Z",     # also stale
+        chain_verified_at="2026-05-10T00:00:00Z",     # stale legacy timestamp
         condition_id="cond-f2-q",
         strategy_key="center_buy",
         strategy="center_buy",
@@ -134,22 +133,20 @@ def test_venue_position_observed_uses_venue_observed_at_not_entered_at() -> None
 
 
 # ---------------------------------------------------------------------------
-# Test 2: REVIEW_REQUIRED.occurred_at = review_detected_at, not quarantined_at
+# Test 2: REVIEW_REQUIRED.occurred_at = review_detected_at, not chain_verified_at
 # ---------------------------------------------------------------------------
 
-def test_review_required_uses_review_detected_at_not_quarantined_at() -> None:
+def test_review_required_uses_review_detected_at_not_chain_verified_at() -> None:
     """F2 invariant: REVIEW_REQUIRED.occurred_at must equal the explicit
-    review_detected_at parameter, NOT the legacy position.quarantined_at or
-    position.chain_verified_at attributes.
+    review_detected_at parameter, NOT the legacy position.chain_verified_at
+    attribute.
     """
     from src.engine.lifecycle_events import build_review_required_canonical_write
 
-    stale_quarantined_at = "2026-05-01T00:00:00Z"
     stale_chain_verified_at = "2026-05-10T00:00:00Z"
     review_detected_at = "2026-05-28T14:45:00Z"
 
-    pos = _make_quarantined_position(
-        quarantined_at=stale_quarantined_at,
+    pos = _make_under_review_position(
         chain_verified_at=stale_chain_verified_at,
     )
 
@@ -158,6 +155,7 @@ def test_review_required_uses_review_detected_at_not_quarantined_at() -> None:
         review_detected_at=review_detected_at,
         reason="size_mismatch_unresolved_no_canonical_baseline",
         sequence_no=1,
+        phase_after="active",
         source_module="tests.state.test_inv_f2_typed_event_timestamps",
     )
 
@@ -167,9 +165,8 @@ def test_review_required_uses_review_detected_at_not_quarantined_at() -> None:
     assert ev["occurred_at"] == review_detected_at, (
         f"REVIEW_REQUIRED.occurred_at must equal review_detected_at={review_detected_at!r}; "
         f"got {ev['occurred_at']!r}. Pre-F2 behaviour would have returned the stale "
-        f"quarantined_at={stale_quarantined_at!r} via _non_empty fallback."
+        f"chain_verified_at={stale_chain_verified_at!r} via _non_empty fallback."
     )
-    assert ev["occurred_at"] != stale_quarantined_at
     assert ev["occurred_at"] != stale_chain_verified_at
 
 

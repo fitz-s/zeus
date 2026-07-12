@@ -167,6 +167,12 @@ def transition_phase(
                     return True
             return False
 
+        # T5 (docs/rebuild/quarantine_excision_2026-07-11.md): no writer mints
+        # phase/chain_state='quarantined' going forward, but this is a raw-SQL
+        # read of the current DB row, so the bare string literals stay as a
+        # mixed-epoch bridge: a LEGACY row still carrying these values (until
+        # the T5 schema migration, docs/rebuild item 5, rewrites it) must
+        # still be recognized as an exit-eligible chain-risk position.
         redecision_quarantine_exit = (
             current_phase == "quarantined"
             and current_chain_state
@@ -184,12 +190,28 @@ def transition_phase(
         ).fetchone()
         sequence_no = int(sequence_no_row[0] or 0) + 1
         occurred_at = _dt.now(_tz.utc).isoformat()
-        phase_before = phase_for_runtime_position(
-            state=getattr(position, "pre_exit_state", "") or "holding",
-        ).value
+        raw_pre_exit_state = str(getattr(position, "pre_exit_state", "") or "holding")
+        if raw_pre_exit_state == "quarantined":
+            # Mixed-epoch bridge (T5, docs/rebuild/quarantine_excision_2026-07-11.md):
+            # 'quarantined' is retired from LifecyclePhase and now derives to
+            # UNKNOWN — but the position_events.phase_before DB CHECK still
+            # permits the literal until the T5 schema migration (docs/rebuild
+            # item 5) rewrites history. Preserve it verbatim for a legacy
+            # pre_exit_state rather than let this write start violating the
+            # CHECK for exactly the rows this bridge exists to keep working.
+            phase_before = "quarantined"
+        else:
+            phase_before = phase_for_runtime_position(state=raw_pre_exit_state).value
+        # redecision_quarantine_exit is already the authoritative (DB-verified)
+        # signal for the legacy chain-risk-quarantine exit case — it no longer
+        # needs corroboration from phase_before (a legacy pre_exit_state of
+        # 'quarantined' now derives to 'unknown', not 'quarantined', since
+        # that state is retired from LifecyclePhase; requiring the stale
+        # comparison here would silently break this exit path for exactly
+        # the legacy rows it exists to serve).
         phase_after = (
             "pending_exit"
-            if redecision_quarantine_exit and phase_before == "quarantined"
+            if redecision_quarantine_exit
             else fold_lifecycle_phase(phase_before, "pending_exit").value
         )
         projection_position = _copy.copy(position)

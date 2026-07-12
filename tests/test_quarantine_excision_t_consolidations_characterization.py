@@ -53,7 +53,18 @@ def _make_position(**overrides) -> Position:
 # ---------------------------------------------------------------------------
 
 
-def test_canonical_predicate_true_for_entry_authority_quarantined():
+def test_canonical_predicate_false_after_t5_mixed_epoch_remap():
+    """T5 (docs/rebuild/quarantine_excision_2026-07-11.md, REPLACEMENT PHASE
+    LAW) supersedes this characterization: a state='quarantined' input is now
+    remapped by Position.__post_init__ to its TRUE state ('holding') before
+    construction — no writer mints 'quarantined' going forward — so
+    _quarantined_position_can_redecision's own gate (state == 'quarantined')
+    can never fire for a live Position anymore. This is intentional and safe:
+    the position this predicate used to rescue into the family-monitor
+    widening is now genuinely active and already included via the normal
+    get_open_positions() path (see src.engine.cycle_runtime module-level
+    comment at _REDECISION_QUARANTINE_CHAIN_STATES for the full rationale).
+    """
     from src.engine import cycle_runtime
 
     pos = _make_position(
@@ -63,7 +74,8 @@ def test_canonical_predicate_true_for_entry_authority_quarantined():
         shares=12.7,
         chain_shares=12.7,
     )
-    assert cycle_runtime._quarantined_position_can_redecision(pos) is True
+    assert pos.state == "holding"
+    assert cycle_runtime._quarantined_position_can_redecision(pos) is False
 
 
 def test_canonical_predicate_false_for_non_quarantine_chain_state():

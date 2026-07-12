@@ -81,44 +81,16 @@ def test_cycle_runner_discovery_gate_all_clear_without_quarantine_kwarg():
     assert _discovery_gates_allow_entries(**{**all_clear, "risk_level": RiskLevel.DATA_DEGRADED}) is False
 
 
-def test_evaluator_quarantined_position_bridging_preserves_chain_state_enum_meaning():
-    """Cross-module invariant (T2 excision replacement): the bridging shim
-    that feeds phase='quarantined' positions into the family-scoped block
-    (src.engine.evaluator._quarantined_position_bridging_family_keys) must
-    treat the ChainState enum and its raw wire-string form identically — the
-    same enum/string-boundary invariant the retired
-    ``_has_quarantined_positions`` used to cover for the (now-deleted)
-    portfolio-wide gate.
-    """
-    _ensure_sklearn_stub_for_cycle_runner_import()
-
-    from src.contracts.semantic_types import ChainState
-    from src.engine.evaluator import _quarantined_position_bridging_family_keys
-    from src.state.portfolio import PortfolioState, Position
-    from src.strategy.family_exclusive_dedup import WeatherFamilyKey
-
-    def _position(trade_id: str, chain_state: object) -> Position:
-        return Position(
-            trade_id=trade_id,
-            market_id="m1",
-            city="NYC",
-            cluster="NYC",
-            target_date="2026-04-01",
-            bin_label="39-40°F",
-            direction="buy_yes",
-            temperature_metric="high",
-            state="quarantined",
-            chain_state=chain_state,
-        )
-
-    quarantined_enum = _position("chain-state-enum", ChainState.ENTRY_AUTHORITY_QUARANTINED)
-    quarantined_str = _position("chain-state-str", "entry_authority_quarantined")
-    synced = _position("chain-state-synced", ChainState.SYNCED)
-
-    expected = {WeatherFamilyKey("NYC", "2026-04-01", "high", "")}
-    assert _quarantined_position_bridging_family_keys(PortfolioState(positions=[quarantined_enum])) == expected
-    assert _quarantined_position_bridging_family_keys(PortfolioState(positions=[quarantined_str])) == expected
-    assert _quarantined_position_bridging_family_keys(PortfolioState(positions=[synced])) == set()
+# T5 (docs/rebuild/quarantine_excision_2026-07-11.md, REPLACEMENT PHASE LAW):
+# test_evaluator_quarantined_position_bridging_preserves_chain_state_enum_meaning
+# retired along with src.engine.evaluator._quarantined_position_bridging_
+# family_keys and ChainState.ENTRY_AUTHORITY_QUARANTINED — no writer mints
+# phase/chain_state='quarantined' going forward, so the bridging shim's own
+# gate could never fire for a live Position; a confirmed-fill/chain-absence-
+# conflict dispute now opens a ReviewWorkItem directly, which evaluator's
+# DB-backed blocked_family_keys() already consults (see
+# tests/test_live_safety_invariants.py's retirement note at the same test
+# cluster for the full rationale).
 
 
 def test_structural_linter_gate():

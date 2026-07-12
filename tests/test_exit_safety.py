@@ -5693,7 +5693,14 @@ def test_market_closed_hold_preserves_chain_backed_quarantine_phase(conn):
 
     mark_market_closed_hold_to_settlement(position, conn=conn)
 
-    assert position.state == "quarantined"
+    # T5 (docs/rebuild/quarantine_excision_2026-07-11.md): the legacy
+    # state='quarantined'/chain_state='entry_authority_quarantined'
+    # constructor inputs are remapped to their TRUE values (holding/synced)
+    # by Position.__post_init__'s mixed-epoch bridge before this function
+    # ever sees them, so the held-to-settlement hold now folds a holding
+    # position to day0_window like any other open position — never a
+    # quarantine scar.
+    assert position.state == "day0_window"
     current = conn.execute(
         """
         SELECT phase, chain_state, order_status, exit_reason
@@ -5703,8 +5710,8 @@ def test_market_closed_hold_preserves_chain_backed_quarantine_phase(conn):
         (position.trade_id,),
     ).fetchone()
     assert dict(current) == {
-        "phase": "quarantined",
-        "chain_state": "entry_authority_quarantined",
+        "phase": "day0_window",
+        "chain_state": "synced",
         "order_status": "filled",
         "exit_reason": "MARKET_CLOSED_AWAITING_SETTLEMENT",
     }
@@ -5718,7 +5725,7 @@ def test_market_closed_hold_preserves_chain_backed_quarantine_phase(conn):
         """,
         (position.trade_id,),
     ).fetchone()
-    assert event["phase_after"] == "quarantined"
+    assert event["phase_after"] == "day0_window"
     payload = json.loads(event["payload_json"])
     assert payload["semantic_event"] == "MARKET_CLOSED_HOLD_TO_SETTLEMENT"
 

@@ -11914,10 +11914,16 @@ class TestRecoveryResolutionTable:
             """,
             (position_id,),
         ).fetchone()
+        # T5 (docs/rebuild/quarantine_excision_2026-07-11.md, REPLACEMENT
+        # PHASE LAW): restored to its TRUE (active) phase, never a
+        # quarantine scar; chain_state/exit_reason are left as their honest
+        # pre-existing values (no writer overwrites them to a retired
+        # ChainState member anymore) — the dispute is tracked by an open
+        # CONFIRMED_FILL_CHAIN_ABSENCE_CONFLICT ReviewWorkItem instead.
         assert dict(current) == {
-            "phase": "quarantined",
-            "chain_state": "entry_authority_quarantined",
-            "exit_reason": "entry_authority_chain_absence_conflict",
+            "phase": "active",
+            "chain_state": "synced",
+            "exit_reason": "PHANTOM_NOT_ON_CHAIN",
             "shares": 5.06,
             "chain_shares": pytest.approx(5.0599),
         }
@@ -11935,10 +11941,19 @@ class TestRecoveryResolutionTable:
         assert event["event_type"] == "REVIEW_REQUIRED"
         assert event["sequence_no"] == 5
         assert event["phase_before"] == "voided"
-        assert event["phase_after"] == "quarantined"
+        assert event["phase_after"] == "active"
         assert event["source_module"] == "src.execution.command_recovery"
         assert payload["held_token_id"] == "tok-no"
         assert payload["proof_class"] == "confirmed_fill_phantom_void_reclassified_to_review"
+
+        from src.state.review_work_items import due_work
+
+        open_items = due_work(conn, limit=10)
+        assert any(
+            item.subject_id == position_id
+            and item.reason_code.value == "CONFIRMED_FILL_CHAIN_ABSENCE_CONFLICT"
+            for item in open_items
+        )
 
     def test_confirmed_phantom_void_repair_uses_trade_facts_when_fill_authority_missing(
         self,
@@ -12032,10 +12047,13 @@ class TestRecoveryResolutionTable:
             """,
             (position_id,),
         ).fetchone()
+        # T5 (docs/rebuild/quarantine_excision_2026-07-11.md, REPLACEMENT
+        # PHASE LAW): restored to its TRUE (active) phase; chain_state/
+        # exit_reason are left as their honest pre-existing values.
         assert dict(current) == {
-            "phase": "quarantined",
-            "chain_state": "entry_authority_quarantined",
-            "exit_reason": "entry_authority_chain_absence_conflict",
+            "phase": "active",
+            "chain_state": "synced",
+            "exit_reason": "ENTRY_SELECTION_GUARD_INVALID_EXIT",
             "fill_authority": "cancelled_remainder",
             "chain_shares": pytest.approx(85.17),
         }
@@ -12136,11 +12154,14 @@ class TestRecoveryResolutionTable:
             """,
             (position_id,),
         ).fetchone()
+        # T5 (docs/rebuild/quarantine_excision_2026-07-11.md, REPLACEMENT
+        # PHASE LAW): restored to its TRUE (active) phase; chain_state/
+        # exit_reason are left as their honest pre-existing values.
         assert dict(current) == {
-            "phase": "quarantined",
-            "chain_state": "entry_authority_quarantined",
+            "phase": "active",
+            "chain_state": "synced",
             "fill_authority": "cancelled_remainder",
-            "exit_reason": "entry_authority_chain_absence_conflict",
+            "exit_reason": "PHANTOM_NOT_ON_CHAIN",
             "shares": 0.0,
             "chain_shares": 5.07,
             "chain_avg_price": 0.75,
@@ -12159,7 +12180,7 @@ class TestRecoveryResolutionTable:
         payload = json.loads(event["payload_json"])
         assert event["event_type"] == "REVIEW_REQUIRED"
         assert event["phase_before"] == "voided"
-        assert event["phase_after"] == "quarantined"
+        assert event["phase_after"] == "active"
         assert payload["positive_trade_fact_proof"]["has_positive_trade_fact"] is True
         assert payload["proof_class"] == "confirmed_fill_phantom_void_reclassified_to_review"
 
@@ -12461,11 +12482,17 @@ class TestRecoveryResolutionTable:
             """,
             (position_id,),
         ).fetchone()
+        # T5 (docs/rebuild/quarantine_excision_2026-07-11.md, REPLACEMENT
+        # PHASE LAW): positive trade-fact proof restores the TRUE phase
+        # (active) and chain_state (synced), never a quarantine scar;
+        # exit_reason is left as its honest pre-existing value — the
+        # dispute is tracked by an open CONFIRMED_FILL_CHAIN_ABSENCE_CONFLICT
+        # ReviewWorkItem instead.
         assert dict(current) == {
-            "phase": "quarantined",
-            "chain_state": "entry_authority_quarantined",
+            "phase": "active",
+            "chain_state": "synced",
             "fill_authority": "venue_confirmed_full",
-            "exit_reason": "entry_authority_chain_absence_conflict",
+            "exit_reason": "chain_absent_confirmed_position_unattributed",
             "shares": 29.14,
             "cost_basis_usd": 21.27,
             "chain_shares": 29.14,
@@ -12487,12 +12514,21 @@ class TestRecoveryResolutionTable:
         assert event["event_type"] == "REVIEW_REQUIRED"
         assert event["sequence_no"] == 5
         assert event["phase_before"] == "quarantined"
-        assert event["phase_after"] == "quarantined"
+        assert event["phase_after"] == "active"
         assert event["source_module"] == "src.execution.command_recovery"
         assert payload["positive_trade_fact_proof"]["has_positive_trade_fact"] is True
         assert (
             payload["proof_class"]
             == "confirmed_fill_chain_absence_projection_preserved_current_money_risk"
+        )
+
+        from src.state.review_work_items import due_work
+
+        open_items = due_work(conn, limit=10)
+        assert any(
+            item.subject_id == position_id
+            and item.reason_code.value == "CONFIRMED_FILL_CHAIN_ABSENCE_CONFLICT"
+            for item in open_items
         )
 
     def test_confirmed_chain_absence_trade_fact_repairs_after_chain_fields_cleared(
@@ -12595,17 +12631,31 @@ class TestRecoveryResolutionTable:
             """,
             (position_id,),
         ).fetchone()
+        # T5 (docs/rebuild/quarantine_excision_2026-07-11.md, REPLACEMENT
+        # PHASE LAW): restored to TRUE phase (active) and chain_state
+        # (synced) even though the row's own chain fields started at
+        # zero — positive venue trade-fact proof backfills chain_shares/
+        # chain_avg_price/chain_cost_basis_usd from the local projection.
         assert dict(current) == {
-            "phase": "quarantined",
-            "chain_state": "entry_authority_quarantined",
+            "phase": "active",
+            "chain_state": "synced",
             "fill_authority": "venue_confirmed_full",
-            "exit_reason": "entry_authority_chain_absence_conflict",
+            "exit_reason": "chain_absent_confirmed_position_unattributed",
             "shares": 29.14,
             "cost_basis_usd": 21.27,
             "chain_shares": 29.14,
             "chain_avg_price": 0.73,
             "chain_cost_basis_usd": 21.27,
         }
+
+        from src.state.review_work_items import due_work
+
+        open_items = due_work(conn, limit=10)
+        assert any(
+            item.subject_id == position_id
+            and item.reason_code.value == "CONFIRMED_FILL_CHAIN_ABSENCE_CONFLICT"
+            for item in open_items
+        )
 
     def test_exit_matched_trade_fact_repairs_retry_pending_projection(
         self,

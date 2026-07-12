@@ -221,7 +221,11 @@ _POSITION_LOT_STATES = frozenset(
         "ECONOMICALLY_CLOSED_OPTIMISTIC",
         "ECONOMICALLY_CLOSED_CONFIRMED",
         "SETTLED",
-        "QUARANTINED",
+        # T5 (docs/rebuild/quarantine_excision_2026-07-11.md): 'QUARANTINED'
+        # removed from the WRITE-time contract — rollback_optimistic_lot_for_
+        # failed_trade now appends ECONOMICALLY_CLOSED_OPTIMISTIC (0 live
+        # QUARANTINED rows; the DB CHECK still permits the literal until the
+        # T5 schema migration, docs/rebuild item 5, narrows it).
     }
 )
 _POSITION_LOT_EXPOSURE_TRADE_STATES = {
@@ -343,12 +347,16 @@ def _optimistic_source_trade_fact_ids_for_failed_trade(
                AND tf.state IN ('MATCHED', 'MINED')
                AND lot.state = 'OPTIMISTIC_EXPOSURE'
                AND NOT EXISTS (
+                   -- T5 (docs/rebuild/quarantine_excision_2026-07-11.md):
+                   -- rollback_optimistic_lot_for_failed_trade appends
+                   -- ECONOMICALLY_CLOSED_OPTIMISTIC now, not QUARANTINED —
+                   -- this idempotency check matches the same state.
                    SELECT 1
-                     FROM position_lots quarantined
+                     FROM position_lots reversed
                      JOIN venue_trade_facts failed
-                       ON failed.trade_fact_id = quarantined.source_trade_fact_id
-                    WHERE quarantined.position_id = lot.position_id
-                      AND quarantined.state = 'QUARANTINED'
+                       ON failed.trade_fact_id = reversed.source_trade_fact_id
+                    WHERE reversed.position_id = lot.position_id
+                      AND reversed.state = 'ECONOMICALLY_CLOSED_OPTIMISTIC'
                       AND failed.trade_id = tf.trade_id
                       AND failed.state = 'FAILED'
                )
@@ -3306,7 +3314,15 @@ def rollback_optimistic_lot_for_failed_trade(
     failed_trade_fact_id: int,
     state_changed_at: str | datetime.datetime,
 ) -> int:
-    """Append a QUARANTINED lot when a previously matched trade fails."""
+    """Append an ECONOMICALLY_CLOSED_OPTIMISTIC lot when a previously matched
+    trade fails — the optimistic exposure it estimated never became real and
+    is now closed/reversed (T5, docs/rebuild/quarantine_excision_2026-07-11.md:
+    position_lots holds only active-exposure or closed-exposure values, never
+    a review/quarantine scar — see src.contracts.canonical_lifecycle module
+    docstring: "closure/exit/settlement/quarantine are derived elsewhere, not
+    lot states"). Reuses an already-CHECK-permitted lot state so this needs no
+    schema migration.
+    """
 
     with _row_factory_as(conn, sqlite3.Row):
         lot = conn.execute(
@@ -3332,7 +3348,7 @@ def rollback_optimistic_lot_for_failed_trade(
         SELECT lot_id
           FROM position_lots
          WHERE position_id = ?
-           AND state = 'QUARANTINED'
+           AND state = 'ECONOMICALLY_CLOSED_OPTIMISTIC'
            AND source_trade_fact_id = ?
          ORDER BY lot_id DESC
          LIMIT 1
@@ -3344,7 +3360,7 @@ def rollback_optimistic_lot_for_failed_trade(
     return append_position_lot(
         conn,
         position_id=int(lot["position_id"]),
-        state="QUARANTINED",
+        state="ECONOMICALLY_CLOSED_OPTIMISTIC",
         shares=str(lot["shares"]),
         entry_price_avg=str(lot["entry_price_avg"]),
         exit_price_avg=lot["exit_price_avg"],

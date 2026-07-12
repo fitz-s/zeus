@@ -63,8 +63,14 @@ def test_trade_position_blocking_phases_sourced_from_position_phase() -> None:
     assert set(_TRADE_POSITION_BLOCKING_PHASES) == {
         "pending_entry", "active", "day0_window", "pending_exit", "quarantined",
     }
-    # every member is a real PositionPhase value (enum-sourced, not a raw literal)
-    assert set(_TRADE_POSITION_BLOCKING_PHASES) <= {p.value for p in PositionPhase}
+    # T5 (docs/rebuild/quarantine_excision_2026-07-11.md): 'quarantined' is
+    # retired from PositionPhase — no writer mints it going forward — but it
+    # stays in _TRADE_POSITION_BLOCKING_PHASES as a mixed-epoch bridge literal
+    # for the raw-SQL `phase IN (...)` family-dedup query (a LEGACY row still
+    # carrying it, until the T5 schema migration, docs/rebuild item 5,
+    # rewrites history, must keep blocking a same-family re-entry). Every
+    # OTHER member is still a real PositionPhase value (enum-sourced).
+    assert set(_TRADE_POSITION_BLOCKING_PHASES) - {"quarantined"} <= {p.value for p in PositionPhase}
 
 
 def test_trade_fact_blocking_states_sourced_from_venue_trade_status() -> None:

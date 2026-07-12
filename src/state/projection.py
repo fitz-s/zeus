@@ -254,20 +254,17 @@ _CONDITION_ID_REQUIRED_PHASES = frozenset(_F109_OPEN_PHASES)
 _REALIZED_PNL_REQUIRED_PHASES = frozenset(
     {LifecyclePhase.ECONOMICALLY_CLOSED.value, LifecyclePhase.SETTLED.value}
 )
-# P0c: QUARANTINED is retained explicitly — it dropped out of the canonical
-# TERMINAL_STATES when its fold widened to {QUARANTINED, SETTLED, VOIDED}
-# (docs/rebuild/chain_mirror_state_model_2026-07-04.md §5), but the
-# upsert_position_current reopen guard below still must not let a quarantined
-# row silently reopen into a non-absorbing (active) phase. This does not
-# block the mirror's quarantined -> settled/voided fold: that guard only
-# fires when `candidate_phase` itself is non-absorbing.
+# T5 (docs/rebuild/quarantine_excision_2026-07-11.md): 'quarantined' is no
+# longer a LifecyclePhase member — no writer mints it going forward — but
+# this raw-SQL reopen guard reads position_current.phase directly from the
+# DB, so the bare string literal stays as a mixed-epoch bridge: a LEGACY row
+# still carrying phase='quarantined' (until the T5 schema migration,
+# docs/rebuild item 5, rewrites it) must still be treated as absorbing/
+# non-reopenable here. This does not block the mirror's quarantined ->
+# settled/voided fold: that guard only fires when `candidate_phase` itself is
+# non-absorbing.
 _ABSORBING_POSITION_PHASES = frozenset(
-    set(TERMINAL_STATES) | {LifecyclePhase.ECONOMICALLY_CLOSED.value, LifecyclePhase.QUARANTINED.value}
-)
-_REDECISION_QUARANTINE_CHAIN_STATES = frozenset(
-    {
-        "entry_authority_quarantined",
-    }
+    set(TERMINAL_STATES) | {LifecyclePhase.ECONOMICALLY_CLOSED.value, "quarantined"}
 )
 _REDECISION_QUARANTINE_EXIT_EVENTS = frozenset(
     {
@@ -546,13 +543,49 @@ def _has_positive_chain_observation(projection: dict) -> bool:
 
 
 def _projection_allows_redecision_quarantine_pending_exit(projection: dict) -> bool:
+    """T5 (docs/rebuild/quarantine_excision_2026-07-11.md): the caller already
+    gates this on the EXISTING row's raw DB phase=='quarantined' (mixed-epoch
+    bridge, see _ABSORBING_POSITION_PHASES) before calling here — that is the
+    authoritative legacy-row signal now. This no longer corroborates against
+    projection['chain_state'] == 'entry_authority_quarantined': that value is
+    retired from ChainState, and Position.__post_init__ remaps any legacy
+    chain_state input to its TRUE value (e.g. 'synced') before construction,
+    so the projection built from an in-memory Position never carries the
+    retired literal even when restoring a genuine legacy quarantined row —
+    requiring it here would silently break this exit path for exactly the
+    rows it exists to serve.
+    """
     if str(projection.get("phase") or "") != "pending_exit":
         return False
     if str(projection.get("_canonical_event_type") or "") not in _REDECISION_QUARANTINE_EXIT_EVENTS:
         return False
-    chain_state = projection.get("chain_state")
-    chain_state_value = str(getattr(chain_state, "value", chain_state) or "")
-    if chain_state_value not in _REDECISION_QUARANTINE_CHAIN_STATES:
+    for field in ("chain_shares", "shares"):
+        try:
+            value = float(projection.get(field) or 0.0)
+        except (TypeError, ValueError):
+            continue
+        if value > 0.01:
+            return True
+    return False
+
+
+def _projection_allows_terminal_restore_exposure(projection: dict) -> bool:
+    """T5 (docs/rebuild/quarantine_excision_2026-07-11.md, REPLACEMENT PHASE
+    LAW): a confirmed-fill/chain-absence-conflict or terminal-restore-exposure
+    repair (src.state.chain_reconciliation._preserve_confirmed_fill_chain_absence_conflict
+    / _restore_terminal_chain_exposure_if_available / the false-phantom-void
+    inline repair) now writes the position's TRUE phase (active/pending_exit)
+    directly — never a quarantine scar — even when the EXISTING row is a
+    terminal/absorbing phase (e.g. voided) that chain/local evidence proves
+    was wrong. Pre-T5 this same repair wrote phase='quarantined' (itself an
+    absorbing phase per _ABSORBING_POSITION_PHASES), so the F109 guard's
+    outer condition never even fired for it; writing the TRUE open phase now
+    needs its own escape hatch, keyed on the same REVIEW_REQUIRED event type +
+    positive chain/local evidence signal the redecision-quarantine escape
+    hatch above already uses."""
+    if str(projection.get("phase") or "") not in {"active", "pending_exit"}:
+        return False
+    if str(projection.get("_canonical_event_type") or "") != "REVIEW_REQUIRED":
         return False
     for field in ("chain_shares", "shares"):
         try:
@@ -590,8 +623,11 @@ def upsert_position_current(conn: sqlite3.Connection, projection: dict) -> None:
         ).fetchone()
         existing_phase = str(existing_phase_row[0] if existing_phase_row else "")
         if existing_phase in _ABSORBING_POSITION_PHASES and not (
-            existing_phase == LifecyclePhase.QUARANTINED.value
-            and _projection_allows_redecision_quarantine_pending_exit(projection)
+            (
+                existing_phase == "quarantined"  # mixed-epoch bridge — see _ABSORBING_POSITION_PHASES
+                and _projection_allows_redecision_quarantine_pending_exit(projection)
+            )
+            or _projection_allows_terminal_restore_exposure(projection)
         ):
             raise ValueError(
                 "position_current absorbing non-open phase cannot be reopened: "

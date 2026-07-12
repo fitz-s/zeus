@@ -1084,7 +1084,9 @@ def mark_market_closed_hold_to_settlement(
 
     current_state = _runtime_state_value(position)
     if current_state in {
-        LifecyclePhase.QUARANTINED.value,
+        # T5 (docs/rebuild/quarantine_excision_2026-07-11.md): QUARANTINED
+        # retired — no writer mints it; Position.__post_init__ remaps any
+        # legacy row before pos.state ever sees it.
         LifecyclePhase.ECONOMICALLY_CLOSED.value,
         LifecyclePhase.SETTLED.value,
         LifecyclePhase.VOIDED.value,

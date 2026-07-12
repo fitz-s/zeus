@@ -29,7 +29,7 @@ PENDING_EXIT_RUNTIME_STATES = frozenset(
 LIFECYCLE_PHASE_VOCABULARY = tuple(phase.value for phase in LifecyclePhase)
 
 LEGAL_LIFECYCLE_FOLDS: dict[LifecyclePhase | None, frozenset[LifecyclePhase]] = {
-    None: frozenset({LifecyclePhase.PENDING_ENTRY, LifecyclePhase.QUARANTINED}),
+    None: frozenset({LifecyclePhase.PENDING_ENTRY}),
     LifecyclePhase.PENDING_ENTRY: frozenset(
         {
             LifecyclePhase.PENDING_ENTRY,
@@ -62,10 +62,6 @@ LEGAL_LIFECYCLE_FOLDS: dict[LifecyclePhase | None, frozenset[LifecyclePhase]] = 
             LifecyclePhase.DAY0_WINDOW,
             LifecyclePhase.ECONOMICALLY_CLOSED,
             LifecyclePhase.SETTLED,
-            # A quarantined row may temporarily enter pending_exit when real
-            # inventory needs an exit attempt. If no sell order is actually
-            # posted, recovery must be able to restore the review state.
-            LifecyclePhase.QUARANTINED,
             LifecyclePhase.ADMIN_CLOSED,
             LifecyclePhase.VOIDED,
         }
@@ -79,23 +75,10 @@ LEGAL_LIFECYCLE_FOLDS: dict[LifecyclePhase | None, frozenset[LifecyclePhase]] = 
     ),
     LifecyclePhase.SETTLED: frozenset({LifecyclePhase.SETTLED}),
     LifecyclePhase.VOIDED: frozenset({LifecyclePhase.VOIDED}),
-    # P0c (2026-07-04, docs/rebuild/chain_mirror_state_model_2026-07-04.md §5
-    # follow-up): widened from frozenset({QUARANTINED}) so the chain-mirror
-    # reconciler has a legal fold path out of quarantine once chain truth
-    # grades the position — "quarantined" is an investigation status, not a
-    # market state, and must not be a durable dead end. QUARANTINED is
-    # therefore NO LONGER in TERMINAL_STATES (derived below); callers that
-    # need "excluded from active/order-management processing" semantics for
-    # quarantined rows specifically (not just fold-legality) retain an
-    # explicit local QUARANTINED check alongside TERMINAL_STATES.
-    LifecyclePhase.QUARANTINED: frozenset(
-        {LifecyclePhase.QUARANTINED, LifecyclePhase.SETTLED, LifecyclePhase.VOIDED}
-    ),
     LifecyclePhase.ADMIN_CLOSED: frozenset({LifecyclePhase.ADMIN_CLOSED}),
     LifecyclePhase.UNKNOWN: frozenset(
         {
             LifecyclePhase.UNKNOWN,
-            LifecyclePhase.QUARANTINED,
             LifecyclePhase.VOIDED,
         }
     ),
@@ -112,13 +95,13 @@ LEGAL_LIFECYCLE_FOLDS: dict[LifecyclePhase | None, frozenset[LifecyclePhase]] = 
 # Currently: SETTLED, VOIDED, ADMIN_CLOSED.
 # Notably NOT terminal: ECONOMICALLY_CLOSED (folds to {ECONOMICALLY_CLOSED,
 # SETTLED, VOIDED}). Pre-B1, src/engine/cycle_runner.py:341 hardcoded a
-# wrong set including economically_closed and excluding quarantined; that
-# semantic bug is fixed by routing through is_terminal_state below.
+# wrong set including economically_closed; that semantic bug is fixed by
+# routing through is_terminal_state below.
 #
-# P0c (2026-07-04): QUARANTINED is ALSO no longer terminal — its fold widened
-# to {QUARANTINED, SETTLED, VOIDED} so the chain-mirror reconciler can legally
-# close a quarantined row once chain truth grades it. See
-# docs/rebuild/chain_mirror_state_model_2026-07-04.md §5.
+# T5 (docs/rebuild/quarantine_excision_2026-07-11.md): QUARANTINED retired
+# from LifecyclePhase entirely (REPLACEMENT PHASE LAW) — no writer mints it;
+# real-exposure positions keep their TRUE phase and the dispute lives in a
+# ReviewWorkItem instead.
 TERMINAL_STATES: frozenset[str] = frozenset(
     phase.value
     for phase, fold in LEGAL_LIFECYCLE_FOLDS.items()
@@ -170,7 +153,15 @@ def _legacy_runtime_phase_dispatch(
     (tests/test_a5_phase_equivalence.py). NOT called at runtime — the runtime authority
     is phase_for_runtime_position, which now delegates to the reducer. Do not edit this
     body: if phase semantics must change, change the reducer and update both together so
-    the antibody keeps proving they agree."""
+    the antibody keeps proving they agree.
+
+    T5 (docs/rebuild/quarantine_excision_2026-07-11.md, REPLACEMENT PHASE LAW):
+    'quarantined' is no longer a recognized state/chain_state input — no
+    writer mints it (Position.__post_init__ remaps any legacy DB row before
+    it reaches this function). An unrecognized state string now correctly
+    falls through to UNKNOWN, same as any other retired/garbage vocabulary
+    word, instead of being special-cased into a scar phase.
+    """
     normalized_state = _normalized_state(state)
     normalized_exit_state = _normalized_state(exit_state)
     normalized_chain_state = _normalized_state(chain_state)
@@ -183,12 +174,8 @@ def _legacy_runtime_phase_dispatch(
         return LifecyclePhase.ECONOMICALLY_CLOSED
     if normalized_state == "admin_closed":
         return LifecyclePhase.ADMIN_CLOSED
-    if normalized_state == "quarantined":
-        return LifecyclePhase.QUARANTINED
     if normalized_state == "pending_exit":
         return LifecyclePhase.PENDING_EXIT
-    if normalized_chain_state in {"quarantined", "quarantine_expired"}:
-        return LifecyclePhase.QUARANTINED
     if (
         normalized_exit_state in PENDING_EXIT_RUNTIME_STATES
         or normalized_chain_state == "exit_pending_missing"
@@ -242,9 +229,14 @@ def derive_runtime_position_phase(
     runtime domain (tests/test_a5_phase_equivalence.py).
 
     NOT yet wired into any writer: the canonical runtime projection remains
-    phase_for_runtime_position until the A5 cutover. This is the proven-equivalent
-    reducer the cutover will switch to (it eliminates the stranding bug where a chain-
-    quarantine flag would re-quarantine an economically_closed / pending_exit position).
+    phase_for_runtime_position until the A5 cutover.
+
+    T5 (docs/rebuild/quarantine_excision_2026-07-11.md, REPLACEMENT PHASE LAW):
+    the explicit-quarantine / chain-quarantine-fallback inputs are retired —
+    no writer mints 'quarantined' going forward; a confirmed-fill/chain-
+    absence dispute keeps its TRUE phase (active/pending_exit, reached via
+    has_positive_exposure / has_exit_fallback below) and the dispute lives in
+    a ReviewWorkItem, never in the phase itself.
     """
     normalized_state = _normalized_state(state)
     normalized_exit_state = _normalized_state(exit_state)
@@ -254,11 +246,7 @@ def derive_runtime_position_phase(
         is_voided=(normalized_state == "voided"),
         has_settlement=(normalized_state == "settled"),
         has_economic_close=(normalized_state == "economically_closed"),
-        has_explicit_quarantine=(normalized_state == "quarantined"),
         has_explicit_pending_exit=(normalized_state == "pending_exit"),
-        has_chain_quarantine_fallback=(
-            normalized_chain_state in {"quarantined", "quarantine_expired"}
-        ),
         has_exit_fallback=(
             normalized_exit_state in PENDING_EXIT_RUNTIME_STATES
             or normalized_chain_state == "exit_pending_missing"
@@ -304,16 +292,25 @@ def enter_pending_exit_runtime_state(
         exit_state=exit_state,
         chain_state=chain_state,
     )
+    normalized_state = _normalized_state(current_state)
     normalized_chain_state = _normalized_state(chain_state)
-    if (
-        current_phase == LifecyclePhase.QUARANTINED
-        and normalized_chain_state
-        in {
+    # T5 (docs/rebuild/quarantine_excision_2026-07-11.md): 'quarantined' is no
+    # longer a recognized state — derive_runtime_position_phase now maps it to
+    # UNKNOWN like any other retired/garbage string, so current_phase can never
+    # equal a quarantine phase anymore. A caller may still pass a legacy raw
+    # state string directly (this is a pure function, not gated behind
+    # Position.__post_init__'s mixed-epoch remap), so the pre-T5 crash-safety
+    # contract is preserved explicitly on the RAW state string: a confirmed-
+    # fill/chain-absence-conflict dispute (real exposure) may still transition
+    # to pending_exit; any other legacy quarantined origin remains a safe
+    # no-op instead of raising.
+    if normalized_state == "quarantined":
+        if normalized_chain_state in {
             "entry_authority_quarantined",
             "chain_absent_confirmed_position_unattributed",
-        }
-    ):
-        return LifecyclePhase.PENDING_EXIT.value
+        }:
+            return LifecyclePhase.PENDING_EXIT.value
+        return "quarantined"
     # Idempotency: positions that have already advanced past PENDING_EXIT
     # (economically_closed via market resolution, terminal phases, etc.) cannot
     # legally transition back to PENDING_EXIT — there is no remaining inventory
@@ -329,16 +326,8 @@ def enter_pending_exit_runtime_state(
     # fold-table edits cannot silently miss new terminal phases. ECONOMICALLY_CLOSED
     # is NOT terminal (folds to {ECONOMICALLY_CLOSED, SETTLED, VOIDED}), so it
     # must be layered explicitly here as the originally-observed crash case.
-    #
-    # P0c (2026-07-04): QUARANTINED is ALSO no longer terminal (folds to
-    # {QUARANTINED, SETTLED, VOIDED}), but for THIS guard's purpose — a
-    # generic quarantined origin with no entry-authority-conflict chain state
-    # (handled above) still has no legal pending_exit fold and must remain a
-    # no-op, not raise. Layered explicitly for the same reason ECONOMICALLY_CLOSED
-    # is: docs/rebuild/chain_mirror_state_model_2026-07-04.md §5.
     if (
         current_phase == LifecyclePhase.ECONOMICALLY_CLOSED
-        or current_phase == LifecyclePhase.QUARANTINED
         or is_terminal_state(current_phase)
     ):
         return current_phase.value
@@ -389,11 +378,6 @@ def rescue_pending_runtime_state(
     return "entered"
 
 
-def enter_chain_quarantined_runtime_state() -> str:
-    fold_lifecycle_phase(None, LifecyclePhase.QUARANTINED)
-    return LifecyclePhase.QUARANTINED.value
-
-
 def enter_economically_closed_runtime_state(
     current_state: object,
     *,
@@ -424,17 +408,23 @@ def enter_settled_runtime_state(
         exit_state=exit_state,
         chain_state=chain_state,
     )
+    # T5 (docs/rebuild/quarantine_excision_2026-07-11.md): QUARANTINED
+    # retired — no writer mints it. A legacy 'quarantined' raw state string
+    # now derives to UNKNOWN; the chain-mirror reconciler still needs a
+    # legal fold path to grade such a legacy row directly against chain
+    # truth (docs/rebuild/chain_mirror_state_model_2026-07-04.md §5), so it
+    # is recognized explicitly on the RAW state string (mixed-epoch bridge)
+    # rather than widening UNKNOWN's general fold legality.
+    if _normalized_state(current_state) == "quarantined":
+        return LifecyclePhase.SETTLED.value
     if current_phase not in {
         LifecyclePhase.ACTIVE,
         LifecyclePhase.DAY0_WINDOW,
         LifecyclePhase.ECONOMICALLY_CLOSED,
         LifecyclePhase.PENDING_EXIT,
-        # P0c: the chain-mirror reconciler grades a quarantined row directly
-        # against chain truth — see docs/rebuild/chain_mirror_state_model_2026-07-04.md §5.
-        LifecyclePhase.QUARANTINED,
     }:
         raise ValueError(
-            f"settlement requires active/day0/economically_closed/pending_exit/quarantined runtime phase, "
+            f"settlement requires active/day0/economically_closed/pending_exit runtime phase, "
             f"got {current_phase.value!r}"
         )
     fold_lifecycle_phase(current_phase, LifecyclePhase.SETTLED)
@@ -477,14 +467,16 @@ def enter_voided_runtime_state(
         LifecyclePhase.DAY0_WINDOW,
         LifecyclePhase.PENDING_EXIT,
         LifecyclePhase.ECONOMICALLY_CLOSED,
+        # T5 (docs/rebuild/quarantine_excision_2026-07-11.md): QUARANTINED
+        # retired — no writer mints it. A legacy 'quarantined' raw state
+        # string now derives to UNKNOWN (already allowed here), so the
+        # chain-mirror reconciler's force-resolve path (P0b, quarantined ->
+        # voided) keeps working via the UNKNOWN leg without a dedicated
+        # QUARANTINED member.
         LifecyclePhase.UNKNOWN,
-        # P0c: the chain-mirror reconciler's force-resolve path (P0b) needs a
-        # legal quarantined -> voided fold — see
-        # docs/rebuild/chain_mirror_state_model_2026-07-04.md §5.
-        LifecyclePhase.QUARANTINED,
     }:
         raise ValueError(
-            "void transition requires pending/active/day0/pending_exit/economically_closed/unknown/quarantined "
+            "void transition requires pending/active/day0/pending_exit/economically_closed/unknown "
             f"runtime phase, got {current_phase.value!r}"
         )
     fold_lifecycle_phase(current_phase, LifecyclePhase.VOIDED)

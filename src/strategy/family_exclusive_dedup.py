@@ -430,13 +430,20 @@ _TRADE_FACT_BLOCKING_STATES = frozenset(
 )
 # Position phases that block re-entry, sourced from the canonical PositionPhase enum
 # (the pre-terminal "family is live" phases). Byte-identical to the prior literals.
+# T5 (docs/rebuild/quarantine_excision_2026-07-11.md): 'quarantined' is no
+# longer a PositionPhase member — no writer mints it going forward — but this
+# set feeds a raw-SQL `phase IN (...)` query against position_current below,
+# so the bare string literal stays as a mixed-epoch bridge: a LEGACY row
+# still carrying phase='quarantined' (until the T5 schema migration,
+# docs/rebuild item 5, rewrites it) represents real/disputed exposure and
+# must keep blocking a same-family re-entry.
 _TRADE_POSITION_BLOCKING_PHASES = frozenset(
     {
         PositionPhase.PENDING_ENTRY.value,
         PositionPhase.ACTIVE.value,
         PositionPhase.DAY0_WINDOW.value,
         PositionPhase.PENDING_EXIT.value,
-        PositionPhase.QUARANTINED.value,
+        "quarantined",
     }
 )
 

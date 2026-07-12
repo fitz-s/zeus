@@ -36,17 +36,19 @@ _SCAR_RE = re.compile(
 )
 
 # Frozen scar baseline (2026-06-30). May only SHRINK as the ReviewWorkItem migration retires them.
+# T5 (docs/rebuild/quarantine_excision_2026-07-11.md, REPLACEMENT PHASE LAW):
+# QUARANTINED / QUARANTINE_EXPIRED / ENTRY_AUTHORITY_QUARANTINED retired from
+# all three lifecycle enums together (three-enum law) — ratcheted per the
+# antibody's own instruction ("a scar retired from the enum... remove it from
+# _SCAR_BASELINE").
 _SCAR_BASELINE: dict[str, frozenset[str]] = {
-    "PositionPhase": frozenset({"QUARANTINED"}),
-    "LifecycleState": frozenset({"QUARANTINED"}),
+    "PositionPhase": frozenset(),
+    "LifecycleState": frozenset(),
     "ChainState": frozenset({
         "EXIT_PENDING_MISSING",
-        "QUARANTINED",
-        "QUARANTINE_EXPIRED",
         "SIZE_MISMATCH_UNRESOLVED",
         "CHAIN_CONFIRMED_ZERO",
         "CHAIN_ABSENT_CONFIRMED_UNATTRIBUTED",
-        "ENTRY_AUTHORITY_QUARANTINED",
     }),
 }
 

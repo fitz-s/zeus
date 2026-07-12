@@ -42,11 +42,11 @@ if TYPE_CHECKING:
 
 _CHAIN_LOCAL_NON_ACTIVE_STATES = frozenset(
     set(TERMINAL_STATES)
-    # P0c: QUARANTINED dropped out of TERMINAL_STATES when its fold widened to
-    # {QUARANTINED, SETTLED, VOIDED} (docs/rebuild/chain_mirror_state_model_2026-07-04.md
-    # §5). A quarantined row is still non-active for this call site's purposes
-    # until the chain-mirror reconciler resolves it, so it is retained explicitly.
-    | {LifecyclePhase.ECONOMICALLY_CLOSED.value, LifecyclePhase.QUARANTINED.value, "pending_tracked"}
+    # T5 (docs/rebuild/quarantine_excision_2026-07-11.md): QUARANTINED retired
+    # from LifecyclePhase — no writer mints it, and Position.__post_init__
+    # remaps any legacy row before pos.state (checked below) ever sees it, so
+    # this call site needs no quarantine literal at all.
+    | {LifecyclePhase.ECONOMICALLY_CLOSED.value, "pending_tracked"}
 )
 
 

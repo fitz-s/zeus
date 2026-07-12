@@ -641,10 +641,13 @@ def test_chain_reconciliation_does_not_void_chain_observed_aggregate_lot():
 
 
 def test_chain_reconciliation_confirmed_absent_position_quarantines_not_voids(tmp_path):
-    """Relationship: confirmed fills missing on-chain require attribution, not void."""
+    """Relationship: confirmed fills missing on-chain require attribution, not
+    void — T5 (docs/rebuild/quarantine_excision_2026-07-11.md, REPLACEMENT
+    PHASE LAW): the position keeps its TRUE phase/chain_state; the dispute is
+    tracked by an open ReviewWorkItem (CONFIRMED_FILL_CHAIN_ABSENCE_CONFLICT),
+    never a quarantine scar."""
 
     from src.state.chain_reconciliation import (
-        ENTRY_AUTHORITY_CHAIN_ABSENCE_CHAIN_STATE,
         ENTRY_AUTHORITY_CHAIN_ABSENCE_REVIEW_REASON,
         ChainPosition,
         reconcile,
@@ -662,6 +665,10 @@ def test_chain_reconciliation_confirmed_absent_position_quarantines_not_voids(tm
         direction="buy_no",
         token_id="tok-confirmed-yes",
         no_token_id="tok-confirmed-no",
+        # T5: the position keeps its TRUE (open) phase now — Fix B's
+        # condition_id-required-on-open-phases guard applies, matching the
+        # condition_id already seeded on the position_current row below.
+        condition_id="cond-confirmed-absent",
         shares=5.06,
         chain_shares=5.0599,
         cost_basis_usd=3.795,
@@ -743,8 +750,10 @@ def test_chain_reconciliation_confirmed_absent_position_quarantines_not_voids(tm
 
     assert stats["voided"] == 0
     assert stats["confirmed_fill_chain_absence_conflict_preserved"] == 1
-    assert row["phase"] == "quarantined"
-    assert row["chain_state"] == ENTRY_AUTHORITY_CHAIN_ABSENCE_CHAIN_STATE
+    # T5: TRUE phase/chain_state preserved (never overwritten to a quarantine
+    # scar) — the dispute lives in an open ReviewWorkItem instead.
+    assert row["phase"] == "day0_window"
+    assert row["chain_state"] == "synced"
     assert row["shares"] == pos.shares
     assert row["chain_shares"] == pos.chain_shares
     assert [event["event_type"] for event in events] == ["REVIEW_REQUIRED"]
@@ -968,10 +977,11 @@ def test_chain_reconciliation_uses_canonical_recent_positive_when_runtime_chain_
 
 
 def test_chain_reconciliation_venue_partial_fill_fact_prevents_phantom_void(tmp_path):
-    """A live partial fill is real exposure even before local fill authority catches up."""
+    """A live partial fill is real exposure even before local fill authority
+    catches up — T5: TRUE phase/chain_state preserved, dispute tracked by an
+    open ReviewWorkItem instead of a quarantine scar."""
 
     from src.state.chain_reconciliation import (
-        ENTRY_AUTHORITY_CHAIN_ABSENCE_CHAIN_STATE,
         ENTRY_AUTHORITY_CHAIN_ABSENCE_REVIEW_REASON,
         ChainPosition,
         reconcile,
@@ -989,6 +999,10 @@ def test_chain_reconciliation_venue_partial_fill_fact_prevents_phantom_void(tmp_
         direction="buy_yes",
         token_id="tok-partial-fill-yes",
         no_token_id="tok-partial-fill-no",
+        # T5: the position keeps its TRUE (open) phase now — Fix B's
+        # condition_id-required-on-open-phases guard applies, matching the
+        # condition_id already seeded on the position_current row below.
+        condition_id="cond-venue-partial-fill",
         shares=85.17,
         chain_shares=0.0,
         cost_basis_usd=4.3436,
@@ -1111,18 +1125,19 @@ def test_chain_reconciliation_venue_partial_fill_fact_prevents_phantom_void(tmp_
 
     assert stats["voided"] == 0
     assert stats["confirmed_fill_chain_absence_conflict_preserved"] == 1
-    assert row["phase"] == "quarantined"
-    assert row["chain_state"] == ENTRY_AUTHORITY_CHAIN_ABSENCE_CHAIN_STATE
+    assert row["phase"] == "active"
+    assert row["chain_state"] == "synced"
     assert row["shares"] == pos.shares
     assert [event["event_type"] for event in events] == ["REVIEW_REQUIRED"]
     assert events[0]["details"]["reason"] == ENTRY_AUTHORITY_CHAIN_ABSENCE_REVIEW_REASON
 
 
 def test_chain_reconciliation_restores_false_phantom_void_with_positive_exposure(tmp_path):
-    """A false PHANTOM void with positive exposure must re-enter redecision quarantine."""
+    """A false PHANTOM void with positive exposure must be restored to its
+    TRUE (active) phase — T5 REPLACEMENT PHASE LAW, never a quarantine scar;
+    tracked by an open TERMINAL_RESTORE_EXPOSURE ReviewWorkItem."""
 
     from src.state.chain_reconciliation import (
-        ENTRY_AUTHORITY_CHAIN_ABSENCE_CHAIN_STATE,
         ENTRY_AUTHORITY_CHAIN_ABSENCE_REVIEW_REASON,
         ChainPosition,
         reconcile,
@@ -1139,6 +1154,10 @@ def test_chain_reconciliation_restores_false_phantom_void_with_positive_exposure
         direction="buy_yes",
         token_id="tok-false-phantom-yes",
         no_token_id="tok-false-phantom-no",
+        # T5: restored to its TRUE (open) phase now — Fix B's condition_id-
+        # required-on-open-phases guard applies, matching the condition_id
+        # already seeded on the position_current row below.
+        condition_id="cond-false-phantom",
         shares=85.17,
         chain_shares=85.17,
         cost_basis_usd=4.3436,
@@ -1221,8 +1240,8 @@ def test_chain_reconciliation_restores_false_phantom_void_with_positive_exposure
     conn.close()
 
     assert stats["false_phantom_void_positive_exposure_restored"] == 1
-    assert row["phase"] == "quarantined"
-    assert row["chain_state"] == ENTRY_AUTHORITY_CHAIN_ABSENCE_CHAIN_STATE
+    assert row["phase"] == "active"
+    assert row["chain_state"] == "synced"
     assert row["shares"] == pytest.approx(85.17)
     assert row["chain_shares"] == pytest.approx(85.17)
     assert [event["event_type"] for event in events] == ["REVIEW_REQUIRED"]
@@ -1230,7 +1249,10 @@ def test_chain_reconciliation_restores_false_phantom_void_with_positive_exposure
 
 
 def test_chain_reconciliation_restores_terminal_no_fill_void_when_chain_holds_token(tmp_path):
-    """A terminal no-fill projection is not final if chain later proves exposure."""
+    """A terminal no-fill projection is not final if chain later proves
+    exposure — T5 REPLACEMENT PHASE LAW: restored to TRUE (active) phase,
+    never a quarantine scar; tracked by an open TERMINAL_RESTORE_EXPOSURE
+    ReviewWorkItem."""
 
     from src.state.chain_reconciliation import ChainPosition, reconcile
     from src.state.db import query_position_events
@@ -1339,8 +1361,8 @@ def test_chain_reconciliation_restores_terminal_no_fill_void_when_chain_holds_to
     conn.close()
 
     assert stats["terminal_chain_exposure_restored"] == 1
-    assert row["phase"] == "quarantined"
-    assert row["chain_state"] == "entry_authority_quarantined"
+    assert row["phase"] == "active"
+    assert row["chain_state"] == "synced"
     assert row["shares"] == pytest.approx(10.7)
     assert row["chain_shares"] == pytest.approx(10.7)
     assert row["fill_authority"] == FILL_AUTHORITY_VENUE_POSITION_OBSERVED

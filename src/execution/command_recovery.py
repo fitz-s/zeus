@@ -179,6 +179,10 @@ _EXIT_FILL_ORDER_FACT_STATES = frozenset({
 _EXIT_LIVE_ORDER_RESTORE_PHASES = frozenset({
     "active",
     "day0_window",
+    # T5 (docs/rebuild/quarantine_excision_2026-07-11.md): no writer mints
+    # phase='quarantined' going forward — bare string kept as a mixed-epoch
+    # bridge so a legacy row (pre T5 schema migration, docs/rebuild item 5)
+    # with a live venue exit order still restores correctly.
     "quarantined",
 })
 _SHIFT_BIN_EXIT_ACTIVE_STATUSES = frozenset({
@@ -4069,7 +4073,19 @@ def _void_absorbed_chain_only_projection(
     *,
     position: SimpleNamespace,
 ) -> int:
-    """Deactivate chain-only stubs represented by the repaired canonical fill."""
+    """Deactivate chain-only stubs represented by the repaired canonical fill.
+
+    T5 (docs/rebuild/quarantine_excision_2026-07-11.md): the fake
+    Position(trade_id="chain-only-...") minting path
+    (chain_reconciliation._materialize_chain_only_position_if_resolvable) is
+    DELETED — no writer produces a new phase='quarantined'
+    chain_state='entry_authority_quarantined' position_id LIKE 'chain-only-%'
+    row going forward (chain-only unknown assets are always a typed
+    ChainOnlyFact). This is a raw-SQL read (no enum reference, nothing to
+    break on enum retirement) kept as a mixed-epoch bridge purely to still
+    absorb any LEGACY chain-only-% stub row that predates this packet, until
+    the T5 schema migration (docs/rebuild item 5) purges/rewrites them.
+    """
 
     if not _table_exists(conn, "position_current"):
         return 0
@@ -5079,7 +5095,6 @@ def reconcile_edli_entry_posterior_projection_repairs(
 
 
 _INVALID_ENTRY_AUTHORITY_OPEN_PHASES = ("pending_entry", "active", "day0_window", "pending_exit")
-_ENTRY_AUTHORITY_REVIEW_PHASES = (*_INVALID_ENTRY_AUTHORITY_OPEN_PHASES, "quarantined")
 INVALID_ENTRY_AUTHORITY_REVIEW_REASON = "invalid_entry_actionable_certificate_authority"
 INVALID_PENDING_ENTRY_AUTHORITY_CANCEL_REASON = "INVALID_PENDING_ENTRY_ACTIONABLE_CERTIFICATE_AUTHORITY"
 
@@ -8271,12 +8286,64 @@ def _positive_trade_fact_proof_for_position(
     }
 
 
+def _open_confirmed_fill_chain_absence_review_work_item(
+    conn: sqlite3.Connection, row: dict, *, detail: str
+) -> None:
+    """T5 (docs/rebuild/quarantine_excision_2026-07-11.md, REPLACEMENT PHASE
+    LAW): open a CONFIRMED_FILL_CHAIN_ABSENCE_CONFLICT ReviewWorkItem for a
+    position command_recovery is restoring from a wrongly-terminal/no-risk
+    write back to its TRUE chain-confirmed-fill exposure. Never raises: a
+    missed open here just means the next repair pass retries (open_work_item
+    is itself idempotent). Same connection/transaction as the SQL repair
+    (INV-37 same-DB-transaction ownership) — caller commits both together.
+    """
+    try:
+        from src.contracts.review_work_item import FamilyKey, ReviewReasonCode
+        from src.state.review_work_items import open_work_item
+        from src.state.schema.review_work_items_schema import ensure_table
+
+        ensure_table(conn)
+        position_id = str(row.get("position_id") or "")
+        city = str(row.get("city") or "")
+        target_date = str(row.get("target_date") or "")
+        metric = str(row.get("temperature_metric") or "")
+        family_key = (
+            FamilyKey(city=city, target_date=target_date, temperature_metric=metric)
+            if city and target_date and metric
+            else None
+        )
+        shares = float(row.get("shares") or 0.0)
+        bound = shares if shares > 0.0 else None
+        open_work_item(
+            conn,
+            owner_domain="trade",
+            owner_table="position_current",
+            subject_id=position_id,
+            reason_code=ReviewReasonCode.CONFIRMED_FILL_CHAIN_ABSENCE_CONFLICT,
+            evidence_refs=(detail,),
+            family_key=family_key,
+            exposure_bound_usd=bound,
+            unbounded=(bound is None),
+            last_error_class="command_recovery",
+            last_error_detail=detail,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.error(
+            "Review work item open failed for %s: %s",
+            row.get("position_id"),
+            exc,
+        )
+
+
 def repair_confirmed_phantom_voids(conn: sqlite3.Connection) -> dict:
     """Recover confirmed fills that chain reconciliation wrongly voided as phantom.
 
     A venue-confirmed fill is real economic history. If its held token later
     disappears from chain without an attributed exit/settlement/redeem record,
-    the correct state is REVIEW_REQUIRED/quarantined, not ADMIN_VOIDED.
+    the correct state is REVIEW_REQUIRED, restored to its TRUE phase (active)
+    per T5 REPLACEMENT PHASE LAW (docs/rebuild/quarantine_excision_2026-07-11.md)
+    — never a quarantine scar; an open ReviewWorkItem
+    (CONFIRMED_FILL_CHAIN_ABSENCE_CONFLICT) tracks the dispute.
     """
 
     summary = {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
@@ -8287,7 +8354,6 @@ def repair_confirmed_phantom_voids(conn: sqlite3.Connection) -> dict:
         from src.state.chain_reconciliation import (
             CONFIRMED_CHAIN_ABSENCE_CHAIN_STATE,
             CONFIRMED_CHAIN_ABSENCE_REVIEW_REASON,
-            ENTRY_AUTHORITY_CHAIN_ABSENCE_CHAIN_STATE,
             ENTRY_AUTHORITY_CHAIN_ABSENCE_REVIEW_REASON,
         )
         from src.state.portfolio import (
@@ -8439,7 +8505,7 @@ def repair_confirmed_phantom_voids(conn: sqlite3.Connection) -> dict:
             "proof_class": "confirmed_fill_phantom_void_reclassified_to_review",
             "position_id": position_id,
             "phase_before": "voided",
-            "phase_after": "quarantined",
+            "phase_after": "active",
             "latest_void_event_id": str(row.get("latest_void_event_id") or ""),
             "latest_void_payload_json": str(row.get("latest_void_payload_json") or ""),
             "held_token_id": held_token_id,
@@ -8465,7 +8531,7 @@ def repair_confirmed_phantom_voids(conn: sqlite3.Connection) -> dict:
                     strategy_key, decision_id, snapshot_id, order_id,
                     command_id, caused_by, idempotency_key, venue_status,
                     source_module, payload_json, env
-                ) VALUES (?, ?, 1, ?, 'REVIEW_REQUIRED', ?, 'voided', 'quarantined',
+                ) VALUES (?, ?, 1, ?, 'REVIEW_REQUIRED', ?, 'voided', 'active',
                           ?, NULL, ?, ?, NULL, ?, ?, 'review_required', ?, ?, 'live')
                 """,
                 (
@@ -8485,8 +8551,7 @@ def repair_confirmed_phantom_voids(conn: sqlite3.Connection) -> dict:
             cursor = conn.execute(
                 """
                 UPDATE position_current
-                   SET phase = 'quarantined',
-                       chain_state = ?,
+                   SET phase = 'active',
                        chain_shares = CASE
                            WHEN ABS(COALESCE(chain_shares, 0)) > 0.000000001
                                THEN chain_shares
@@ -8502,7 +8567,6 @@ def repair_confirmed_phantom_voids(conn: sqlite3.Connection) -> dict:
                                THEN chain_cost_basis_usd
                            ELSE COALESCE(cost_basis_usd, 0)
                        END,
-                       exit_reason = ?,
                        fill_authority = CASE
                            WHEN COALESCE(fill_authority, '') IN ('', 'none', 'optimistic_submitted') THEN ?
                            ELSE fill_authority
@@ -8517,8 +8581,6 @@ def repair_confirmed_phantom_voids(conn: sqlite3.Connection) -> dict:
                    AND LOWER(COALESCE(chain_state, '')) != 'chain_confirmed_zero'
                 """,
                 (
-                    ENTRY_AUTHORITY_CHAIN_ABSENCE_CHAIN_STATE,
-                    ENTRY_AUTHORITY_CHAIN_ABSENCE_REVIEW_REASON,
                     (
                         repaired_fill_authority
                         if repaired_fill_authority
@@ -8531,6 +8593,11 @@ def repair_confirmed_phantom_voids(conn: sqlite3.Connection) -> dict:
             )
             if cursor.rowcount != 1:
                 raise RuntimeError("position_current update did not affect exactly one row")
+            _open_confirmed_fill_chain_absence_review_work_item(
+                conn,
+                row,
+                detail=f"{ENTRY_AUTHORITY_CHAIN_ABSENCE_REVIEW_REASON}: repair_confirmed_phantom_voids",
+            )
             conn.execute(f"RELEASE SAVEPOINT {sp_name}")
             summary["advanced"] += 1
         except Exception as exc:  # noqa: BLE001
@@ -8590,10 +8657,13 @@ def repair_confirmed_chain_absence_positive_projections(conn: sqlite3.Connection
     """Repair contradictory chain-absent positive exposure projections.
 
     ``chain_absent_confirmed_position_unattributed`` is no-current-risk only
-    when no positive venue fill fact backs the row. If venue trade facts prove a
-    fill, the row is current-risk reconciliation debt and must be promoted to
-    ``entry_authority_quarantined`` so monitor/redecision/family exposure can
-    manage it. Rows without fill facts are stale projection debt and are cleared.
+    when no positive venue fill fact backs the row. If venue trade facts prove
+    a fill, the row is current-risk reconciliation debt and is restored to its
+    TRUE phase (active, or left as-is if already open) per T5 REPLACEMENT
+    PHASE LAW (docs/rebuild/quarantine_excision_2026-07-11.md) — never a
+    quarantine scar; an open ReviewWorkItem (CONFIRMED_FILL_CHAIN_ABSENCE_CONFLICT)
+    tracks the dispute. Rows without fill facts are stale projection debt and
+    are cleared.
     """
 
     summary = {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
@@ -8601,7 +8671,6 @@ def repair_confirmed_chain_absence_positive_projections(conn: sqlite3.Connection
         from src.state.chain_reconciliation import (
             CONFIRMED_CHAIN_ABSENCE_CHAIN_STATE,
             CONFIRMED_CHAIN_ABSENCE_REVIEW_REASON,
-            ENTRY_AUTHORITY_CHAIN_ABSENCE_CHAIN_STATE,
             ENTRY_AUTHORITY_CHAIN_ABSENCE_REVIEW_REASON,
         )
         from src.state.portfolio import (
@@ -8633,9 +8702,19 @@ def repair_confirmed_chain_absence_positive_projections(conn: sqlite3.Connection
             proof_class = "confirmed_fill_chain_absence_projection_preserved_current_money_risk"
             source_reason = (
                 "positive venue trade facts prove current exposure risk; "
-                "chain absence conflict must stay in live redecision as entry authority quarantine"
+                "chain absence conflict restores the position's TRUE phase and "
+                "stays in live monitor/redecision under an open ReviewWorkItem"
             )
-            phase_after = "quarantined"
+            # T5 REPLACEMENT PHASE LAW: never quarantine — restore to the
+            # TRUE phase. Already-open phases (active/day0_window/pending_exit)
+            # fold to themselves; anything else (a wrongly-closed/voided row)
+            # is restored to active.
+            current_phase = str(row.get("phase") or "").strip().lower()
+            phase_after = (
+                current_phase
+                if current_phase in ("active", "day0_window", "pending_exit")
+                else "active"
+            )
         else:
             repair_reason = CONFIRMED_CHAIN_ABSENCE_REVIEW_REASON
             proof_class = "confirmed_chain_absence_projection_chain_fields_cleared"
@@ -8703,8 +8782,8 @@ def repair_confirmed_chain_absence_positive_projections(conn: sqlite3.Connection
                 cursor = conn.execute(
                     """
                     UPDATE position_current
-                       SET phase = 'quarantined',
-                           chain_state = ?,
+                       SET phase = ?,
+                           chain_state = 'synced',
                            chain_shares = CASE
                                WHEN ABS(COALESCE(chain_shares, 0)) > 0.000000001
                                    THEN chain_shares
@@ -8724,7 +8803,6 @@ def repair_confirmed_chain_absence_positive_projections(conn: sqlite3.Connection
                                WHEN COALESCE(fill_authority, '') IN ('', 'none', 'optimistic_submitted') THEN ?
                                ELSE fill_authority
                            END,
-                           exit_reason = ?,
                            chain_absence_at = CASE
                                WHEN COALESCE(chain_absence_at, '') = '' THEN ?
                                ELSE chain_absence_at
@@ -8748,15 +8826,23 @@ def repair_confirmed_chain_absence_positive_projections(conn: sqlite3.Connection
                        )
                     """,
                     (
-                        ENTRY_AUTHORITY_CHAIN_ABSENCE_CHAIN_STATE,
+                        phase_after,
                         FILL_AUTHORITY_VENUE_CONFIRMED_FULL,
-                        ENTRY_AUTHORITY_CHAIN_ABSENCE_REVIEW_REASON,
                         now,
                         now,
                         position_id,
                         CONFIRMED_CHAIN_ABSENCE_CHAIN_STATE,
                     ),
                 )
+                if cursor.rowcount == 1:
+                    _open_confirmed_fill_chain_absence_review_work_item(
+                        conn,
+                        row,
+                        detail=(
+                            f"{ENTRY_AUTHORITY_CHAIN_ABSENCE_REVIEW_REASON}: "
+                            "repair_confirmed_chain_absence_positive_projections"
+                        ),
+                    )
             else:
                 cursor = conn.execute(
                     """

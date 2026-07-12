@@ -76,10 +76,12 @@ def test_is_terminal_state_canonical_terminals():
 
 
 def test_is_terminal_state_quarantined_is_not_terminal():
-    """P0c anchor: QUARANTINED folds to {QUARANTINED, SETTLED, VOIDED} — it
-    has legal next states, so (like ECONOMICALLY_CLOSED) it is NOT terminal."""
+    """T5 (docs/rebuild/quarantine_excision_2026-07-11.md): QUARANTINED is
+    retired from LifecyclePhase entirely — no writer mints it, and it is not
+    a recognized phase value at all anymore (like any other unrecognized
+    string), so it is trivially NOT terminal (TERMINAL_STATES never
+    contained it, even in the pre-T5 P0c-widened-fold era)."""
     assert is_terminal_state("quarantined") is False
-    assert is_terminal_state(LifecyclePhase.QUARANTINED) is False
 
 
 def test_is_terminal_state_economically_closed_is_not_terminal():

@@ -10,7 +10,8 @@ governor.py currently inlines via local frozensets. The predicates must be
 BEHAVIOR-IDENTICAL to governor's current logic (equivalence-preserving pilot):
 ACTIVE = {OPTIMISTIC_EXPOSURE, CONFIRMED_EXPOSURE, EXIT_PENDING}; CLOSED =
 {ECONOMICALLY_CLOSED_OPTIMISTIC, ECONOMICALLY_CLOSED_CONFIRMED, SETTLED};
-QUARANTINED and anything else contribute zero exposure.
+anything else (including a stray legacy 'QUARANTINED' lot-state string) is
+neither and contributes zero exposure.
 """
 
 from __future__ import annotations
@@ -42,9 +43,11 @@ from src.state.canonical_projections import (
 # --------------------------------------------------------------------------- #
 
 def test_position_phase_membership() -> None:
+    # T5 (docs/rebuild/quarantine_excision_2026-07-11.md): 'quarantined'
+    # retired — REPLACEMENT PHASE LAW, real exposure keeps its TRUE phase.
     assert {s.value for s in PositionPhase} == {
         "pending_entry", "active", "day0_window", "pending_exit",
-        "economically_closed", "settled", "voided", "quarantined",
+        "economically_closed", "settled", "voided",
         "admin_closed", "unknown",
     }
 
@@ -77,45 +80,13 @@ def test_phase_economic_close_beats_exposure() -> None:
     assert derive_position_phase(has_positive_exposure=True, has_explicit_pending_exit=True, has_economic_close=True) is PositionPhase.ECONOMICALLY_CLOSED
 
 
-def test_phase_explicit_quarantine() -> None:
-    assert derive_position_phase(has_explicit_quarantine=True, has_positive_exposure=True) is PositionPhase.QUARANTINED
-
-
-# --- the consult ruling (6a42bc3d): A5 authority beats chain-quarantine FALLBACK -- #
-
-def test_phase_economic_close_beats_chain_quarantine_fallback() -> None:
-    # A closed economic state keeps its phase; a chain-quarantine fallback is a
-    # review overlay, not a hard A5 override (else settlement machinery is stranded).
-    assert derive_position_phase(
-        has_economic_close=True, has_chain_quarantine_fallback=True
-    ) is PositionPhase.ECONOMICALLY_CLOSED
-
-
-def test_phase_explicit_pending_exit_beats_chain_quarantine_fallback() -> None:
-    assert derive_position_phase(
-        has_explicit_pending_exit=True, has_chain_quarantine_fallback=True
-    ) is PositionPhase.PENDING_EXIT
-
-
-def test_phase_chain_quarantine_fallback_projects_when_no_stronger_authority() -> None:
-    # With no economic/exit A5 authority above it, the chain-quarantine fallback DOES
-    # project the phase to QUARANTINED (over exposure / exit-fallback / intent).
-    assert derive_position_phase(
-        has_positive_exposure=True, has_chain_quarantine_fallback=True
-    ) is PositionPhase.QUARANTINED
-    assert derive_position_phase(
-        has_exit_fallback=True, has_chain_quarantine_fallback=True
-    ) is PositionPhase.QUARANTINED
-
-
-def test_phase_explicit_quarantine_beats_exit_fallback() -> None:
-    assert derive_position_phase(
-        has_explicit_quarantine=True, has_exit_fallback=True
-    ) is PositionPhase.QUARANTINED
-
-
-def test_phase_voided_beats_quarantine() -> None:
-    assert derive_position_phase(is_voided=True, has_explicit_quarantine=True) is PositionPhase.VOIDED
+# T5 (docs/rebuild/quarantine_excision_2026-07-11.md, REPLACEMENT PHASE LAW):
+# has_explicit_quarantine / has_chain_quarantine_fallback are retired — there
+# is no quarantine phase target. A confirmed-fill/chain-absence dispute keeps
+# its TRUE phase (active/pending_exit/economically_closed/etc, reached via the
+# existing exposure/exit-fallback/primary-state facts below); the dispute
+# lives in a ReviewWorkItem (see test_position_phase_projection_* below for
+# the review-visibility overlay, now driven by has_open_review_fact).
 
 
 def test_phase_nonstrict_prefers_voided_over_settled() -> None:
@@ -139,11 +110,14 @@ def test_phase_strict_mode_raises_on_conflicting_terminals() -> None:
 
 
 def test_position_phase_projection_preserves_chain_review_overlay() -> None:
-    # A7 chain-review must stay visible even when A5 phase authority wins (ruling [S2]).
+    # T5 (docs/rebuild/quarantine_excision_2026-07-11.md): the review overlay
+    # is now driven by has_open_review_fact (e.g. an open ReviewWorkItem) and
+    # NEVER overrides the phase — a real discrepancy stays visible even when
+    # A5 phase authority wins (ruling [S2] shape, updated input).
     from src.state.canonical_projections import project_position_phase
     proj = project_position_phase(
         has_economic_close=True,
-        has_chain_quarantine_fallback=True,
+        has_open_review_fact=True,
         chain_review_reason="chain_shares_mismatch",
     )
     assert proj.phase is PositionPhase.ECONOMICALLY_CLOSED
