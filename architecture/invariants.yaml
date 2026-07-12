@@ -579,9 +579,9 @@ invariants:
         - tests/test_p0_hardening.py::TestRWExecutionTruthWarnings::test_pending_state_without_order_id_surfaces_warning
         - tests/test_p0_hardening.py::TestRWExecutionTruthWarnings::test_clean_portfolio_emits_no_warnings_key
         - tests/test_p0_hardening.py::TestRWExecutionTruthWarnings::test_warnings_do_not_block_entries
-        - tests/test_quarantine_excision_t2.py::TestEvaluatorFamilyScopedBlock
-        - tests/test_quarantine_excision_t2.py::TestUnboundedObligationDataDegraded
-        - tests/test_quarantine_excision_t2.py::TestAcceptanceSequence::test_full_acceptance_sequence
+        - tests/test_excision_t2.py::TestEvaluatorFamilyScopedBlock
+        - tests/test_excision_t2.py::TestUnboundedObligationDataDegraded
+        - tests/test_excision_t2.py::TestAcceptanceSequence::test_full_acceptance_sequence
         - tests/test_cycle_runner_discovery_gate_authority.py::test_gate_signature_has_no_quarantine_kwarg
     capability_tags: []
     relationship_tests: []

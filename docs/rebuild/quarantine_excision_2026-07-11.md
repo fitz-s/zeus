@@ -472,6 +472,47 @@ history section.
   labels FACT_REVOCATION_* / REVOCATION_* in test_topology.yaml. 457 tests
   green; 1 preflight failure + topology_doctor 33 failures reproduce at base
   638852bd2 (pre-existing). No live import of the old module remains.
+- T5-MIGRATION: LANDED 37f10d9ec (agent 0912348ef). BLOCKER-2 protocol script
+  scripts/migrations/2026_07_quarantine_phase_retirement.py (writer fence, WAL
+  checkpoint+truncate, synchronized 3-DB backup, dedicated journal_mode=DELETE
+  connection, ONE attached transaction, schema_epoch stamp ×3); startup
+  mixed-epoch refusal wired unconditionally into src/main.py boot +
+  --validate-boot; kill-point crash matrix 7/7 (every boundary → untouched or
+  fully-migrated, integrity_check ok, resume converges); kernel SQL CHECKs +
+  kernel_manifest.yaml quarantine literals dropped in lockstep (discovered
+  _TRADE_CLASS_DDL in db.py is the actual live DDL source for
+  position_current/position_events, kernel .sql no-ops after — both fixed);
+  position_events.phase_before/after + event_type CHAIN_QUARANTINED →
+  REVIEW_REQUIRED covered. Post-merge runtime_guards failure set byte-identical
+  pre/post in clean worktrees (45 pre-existing). OPERATOR ACTION: run per
+  docs/rebuild/t5_migration_runbook.md in a RED window; follow-up packet then
+  retires the portfolio.py load bridge + canonical_write.py:193 branch.
+- T8 RESIDUE SWEEP: LANDED e94e17398 + f6f5e2cf5 (agent bd641e5fb, 107 files).
+  B2 renames: ensemble refuse-list is_rejected/REJECTED_DATA_VERSIONS;
+  market_scanner source_contract_block.json + is_city_source_blocked (one-shot
+  legacy-filename read migration); materialization-queue _archive_stale_lock;
+  maintenance_worker SELF_HALT + archive_dir config key; day0 held_implausible/
+  METAR_PRINT_HELD; ingest_status_writer _last_ingest_block_reason;
+  refit_platt buckets_rejected; TIGGE/LOOP-GUARD prose; riskguard
+  localized_orange_scope; LateArrivalPolicy.HOLD ('hold' value);
+  replacement_forecast_calibration_block.py module rename; test files
+  test_b066_sentinel_ids / test_excision_t_consolidations_characterization /
+  test_excision_t2 / test_excision_t4. Full-suite failures cross-checked: only
+  3 intersect touched files, all pre-existing.
+- COMPLETION GATE STATUS (rg -i quarantin, 2026-07-12): remaining hits are all
+  classified, zero MISSED: (1) mixed-epoch bridge cluster in src/state,
+  src/engine, src/execution + their tests — INTENTIONAL until the operator runs
+  the T5 migration; a follow-up packet deletes the bridge and this cluster
+  afterward; (2) migration-source-required (scripts/migrations/*, DIQ migration,
+  dated backfills, fixtures) — must name the OLD values they migrate FROM;
+  (3) historical notes ("nee QUARANTINED", predecessor docstrings) — accurate
+  history, kept; (4) maintenance_worker/rules/*_quarantine.py FILENAMES —
+  deferred: module filename doubles as dynamic-import key against an external
+  TASK_CATALOG.yaml not in this repo; follow-up once catalog location is
+  confirmed; (5) settlement_commands_era_quarantine physical table name —
+  persisted-value lane, needs its own migration if renamed; (6) archives/
+  ledgers/plan (exempt). TRUE ZERO in live vocabulary arrives when (1) retires
+  post-migration; (2)/(3)/(6) are permanent legitimate residue.
 
 ## Consult adjudication (2026-07-11, GPT-5.6 Pro deep review — answer at
 ## /tmp/cgc/answer_REQ-20260711-140149-0f9584.txt; verdict adopted)
