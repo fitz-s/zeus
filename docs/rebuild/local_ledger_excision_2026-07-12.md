@@ -2,7 +2,7 @@
 
 **Operator law(逐字):** 消除所有的本地记账。这些东西和 quarantine 一样是疾病。不允许本地记账,不允许本地计算链上已经有的内容;需要的信息直接也仅从链上同步。不符合第一性原理的全部执行。
 
-**Status: PLANNING — census 4 路在跑;consult 对撞未发;不动代码。**
+**Status: ADJUDICATED — census 4 路收口;consult 深评已裁(2026-07-13,GPT-5.6 Pro,答案原文 `/tmp/cgc/answer_REQ-20260713-004546-1e919f.txt`,thread 6a541c54-4bec-83ea-8db1-a6c55bfafbc1);计划已按裁决重写;待操作员裁 §Operator forks 后开工。**
 方法论 = `quarantine_excision_2026-07-11.md` 同型:疾病定义 → 全量 census → 摘除目标 T-系列 → consult 裁决 → wave 排包 → 逐包对抗 verifier。
 
 ## Disease definition(什么算病)
@@ -87,6 +87,56 @@ LX-5 LX-T8 sweep 到 zero-grep 门。
 
 每包:provenance-audit 先行;TDD;对抗 verifier(money-path opus);测试 diff 零新增;registries 同 commit;PREPARE 级排队操作员,绝不自主 merge money-path。
 
-## Consult 裁决(census 齐,今日发)
+## Consult 裁决(2026-07-13 已裁;原文入库 `docs/rebuild/consult_answers/local_ledger_excision_adjudication_2026-07-13.txt`)
 
-送审包:本文件 + 四份 census 全文。裁决重点:Q1-Q6、BORDERLINE B1-B5、LX 排序攻击(找会让 live money path 摸黑的序)、KEEP spine 的完备性(漏了什么会在删除后才发现)、data-api /positions 无 order 键在 CTF token 枚举上的残余依赖是否构成隐性权威。
+**总判:原 LX-0..5 序 NO-GO(confidence 0.93);摘除目标本身 GO,条件 = fenced truth-epoch cutover + 持续源同步 + sync-owned collateral head + 保真本地 protocol facts。** 核心架构令(采纳为本计划宪法):
+
+> 业务工作流永不创建或修复持久化的派生经济权威。外部真相只能以不可变 observation 或 sync-owned current head 落地。本地第一性事实留本地。派生视图可算可物化,但必须 disposable、可重建、永非权威。
+
+### 逐 T 判决(全部采纳)
+
+- **LX-T1 GATED**:payout observer 要 reorg-aware(block hash/number+log index 键)、UNKNOWN/UNRESOLVED/RESOLVED_ZERO/RESOLVED_NONZERO 四态、**缺数据 = PENDING 永不为 0**、无签名权、不在 grading 关键路径上(WU grade 与 chain realization 互不覆盖)。
+- **LX-T2 WRONG-as-stated → 重构**:101k 行快照史死,但其 latest-state 职能不死 —— 换 `wallet_balance_head`(sync-owned 单行)+ 可选 observation 史;`available = head − reservations − venue-observed commitments − unsettled − margin`;同一 command 不得在 reservation 和 observed-order 两桶同时扣;**RiskGuard/preflight/bankroll/Kelly 同一 activation epoch 原子切换,先停写后切读 = 不安全**。共享钱包下本地 CAS 无法防人类 co-trader —— 保守 freshness + 安全边际 + submit-time 复验 + fail-closed 入场是无隔离下的最强姿态。
+- **LX-T3 GATED**:economics 列停当权威 ✓,但 derive-on-read 的默认形 = **物化 read model(在 trades DB 内,非第四 DB)**,纯 SQL view 只有 production-copy benchmark 证 p99/锁行为后才许。门:单一确定性 reducer+版本、单一 economic-fill identity、fees/partial/cancel/reorg 全覆盖、发布 generation/coverage vector、cent-equivalent 历史 replay、所有 money reader 一起切、切后无 legacy 回退。
+- **LX-T4 GATED**:venue_trade_facts 是 append-only observation log = **正确架构,留**;需 economic identity/alias graph(provider trade IDs × child fills × tx hash/log identity × order/command IDs)、原始 alias 保留(canonicalization 是 reducer 派生结果)、每 economic fill(含 fee)恰好贡献一次、归属只经久性 Zeus intent 证据、外部 fill 留 observation 但不入 Zeus equity、**同步器持续跑 + durable coverage watermark(一次性 replay 不够 —— replay 后 reader 切换前落的 fill 是 Attack A)**。
+- **LX-T5 WRONG → 拆分**:命令态非链可知。KEEP:intent/idempotency/envelope/POST-before-ACK 未知态/cancel 协议/lease/restart preflight/external-close 证据/归属链/review。DELETE:派生经济学修复工作流、纯投影 lifecycle 列、"本地派生拷贝 vs 本地派生拷贝"的 reconcile 环。
+- **LX-T6 GATED**:single-home 证明(全读写者 census + 不可变 ID 保引用 + 无跨 DB mutation)。
+- **LX-T7 GATED**:结算拆两域记录 —— **world grade**(冻结证书 × WU 证据 × SettlementSemantics 版本 × graded receipt)与 **chain realization**(attributed fills × fees × payout observations);互不覆盖,分歧 = dispute;历史重建永不查今天的 WU/chain head。
+- **LX-T8 WRONG → 语义门**:zero-grep 换成:无 runtime write 到已摘除经济学(migration 白名单外)、money 面无 runtime read、旧字段只许出现在 archival adapter/migration、drop-and-rebuild 集成测试、stale-binary capability fencing、grep+AST+SQL-inventory+runtime 访问检查带 allowlist。
+
+### B1-B5 答案(采纳)
+
+B1 phase 列可降 CACHE(确定性投影),但**转移证据不删**(历史 phase timing 无法从已剪枝事实重建);B2 chain-mirror 回执 KEEP,契约 = "源 S 在 T 对范围 X 返回 P"(带 block/coverage/supersession),业务逻辑永不编辑;B3 reservation 留本地权威,链余额归 sync-owned head,手递手状态机(pre-visibility reservation → venue-observed obligation → terminal release)带"单一承诺单桶扣除"不变量;B4 WU=world grade / chain payout=money realization,互不近似互不覆盖;B5 ReviewWorkItem KEEP,但 drop 属主表前先把 subject 迁到稳定 ID(command/fact-set/condition/dispute ID)。
+
+### 排序攻击(7 个,全部实锤原序)
+
+A fill 落在 replay 后 reader 切换前;B RiskGuard 补偿器双计/漏计(补偿器与 position 读必须同 epoch,最好消灭补偿器);C 快照先停写 → 陈旧余额喂 Kelly;D 结算落在 payout ingester 未齐窗口(→ PENDING 非零、WU grade 独立可用);E 滚动部署下旧 daemon 复写已摘除投影(→ truth-epoch + capability fence,旧 build 拿不到 lease);F /positions 漏 token = 幻零仓(→ durable token registry 从 Zeus commands/fills/topology/transfer obs 构建,/positions 只做 discovery,**absence 永不证零**);G reservation 与 observed-obligation 双扣(→ identity+watermark 手递手)。
+
+### 修订执行序(LX-0R..5R,取代原 LX-0..5)
+
+- **LX-0R 契约+激活控制**:冻结 fact schema/canonical identity/单位/reducer 版本/结算双域名;trades-DB truth epoch(LEGACY→PREPARE→ACTIVE_NEW)+ 进程 capability 广告 + 入场/money-read 要求 active epoch。**(既有资产:T5 migration 的 schema_epoch×3 + startup mixed-epoch refusal 是同型先例,扩展非新造。)** 不做三 DB 分布式事务。
+- **LX-1R 源 spine 上线**:持续 fill/order 同步、payout observer+backfill、balance head、token registry+精确 CTF 读、coverage/finality 元数据、alias graph、supersession facts。**激活前就跑 —— 采集生产事实非影子决策,不违 no-shadow 公理。**
+- **LX-2R reducer/read-model 建成+证明**:回填四类读契约(position/collateral/phase/settlement);time-boxed replay + cent-equivalence 门;新 binary 全网部署但旧 epoch 仍权威(不按消费族分批启用)。
+- **LX-3R 单次 fenced activation**:PREPARE(入场 fail closed,exit 按充分 venue 真相继续)→ 在飞 entry 清干净分类 → 全 daemon lease 广告新 epoch → 源 freshness+coverage 达标 → 发布 ACTIVE_NEW 一次。此界后:所有 money reader 用新契约、业务停写旧经济学、旧 build 失去 command admission。**永不双写竞争投影。**
+- **LX-4R 隔离旧 schema + 只删病灶**:旧经济学列物理保留但不读不写(有界回滚窗);只删混合模块的 derived-value 修复半边;restart recovery/unknown-side-effect/cancel 协议/归属/lease/review/external-close 全留。
+- **LX-5R 破坏性 drop**:replay+cent-equivalence 过、源 freshness 稳、restart+stale-daemon 测试过、payout/bankroll 断供下 exit 仍走、结算故障注入证双域独立、read model 从零重建过 —— 全绿后才 drop。**drop 后回滚 = 从事实 forward rebuild,永不恢复归档账本当权威。**
+
+Exit 充分真相路(激活后不依赖 Kelly/bankroll/payout ingester):`safe_exit_qty = max(0, min(zeus_attributed_unclosed_shares, wallet_token_balance − observed_open_sell_remainder))`;证据陈旧/歧义 → ReviewWorkItem,不做不安全卖出。
+
+### KEEP-spine 完备性补遗(consult 攻击出的漏项,census 未列全)
+
+同步控制态(durable cursors/watermarks/pagination coverage/finality/supersession);token-discovery 史(五源:intent/topology/attributed fills/transfer logs/direct balance obs);reservation 手递手身份关系;归属图+歧义证据(foreign/ambiguous 留 observation 不丢);冻结 walk-forward 输入全清单(证书×WU 证据 hash×semantics 版本×单位/舍入版本×fills×fees×payouts×reducer 版本);read-model lineage(generation×coverage vector×input fingerprint —— RiskGuard 组合不同 watermark 的仓位必须可检测);units/fees/topology 映射;历史 codec(归档解码器里的旧字段名非残余权威);reorg/供应商更正 supersession;降级态显式化(**timeout/空响应/缺页/stale 永不编码为 0**)。
+
+### Read-model 诚实不变量(何以不是平行账本)
+
+`ReadModel[g] = Reducer_v(ImmutableFacts through coverage vector C[g])`,且:外部事实只有同步器写;read model 只有 reducer 写;删全表不失真相;确定性重建 cent-equivalent;全 lineage;无反馈权威(结果看着不对不能改源事实);无手工经济修复(更正 = superseding fact + 重算);无 stale 回退;reorg-aware 重算;定期离线全量 replay 审计;**portfolio 发布按完整 generation,不按 per-row latest**。
+
+### Bankroll/Kelly 三量分立(激活后)
+
+钱包可花 collateral(head−承诺,管新单硬可行性)≠ **Zeus strategy equity**(显式配额策略 × attributed fills/fees/exposure/payouts,Kelly 的正确基数)≠ 钱包总 equity(含操作员资产,只做遥测/全局安全限)。/positions 的 currentValue/avgPrice/cashPnl 永不做 Zeus 权威;归属查询失败不默认全归 Zeus;入场 sizing 在 Zeus-equity 不完整时 fail closed。
+
+## Operator forks(裁决后仅剩的操作员决定)
+
+1. **Zeus 资本配额**:共享钱包下 Zeus-specific Kelly 数学上未定义,除非 ①显式 Zeus capital-allocation policy(一个数/一条规则,操作员定)或 ②钱包隔离。Consult 判两者必居其一 —— 你选哪个?(现状 bankroll 读钱包聚合值 = 把操作员资产喂进 Zeus Kelly,是 HIGH 级错账。)
+2. **修订计划批准**:LX-0R..5R 取代原序 + §Excision targets 按逐 T 判决执行 —— 批准即开 LX-0R 契约包(纯契约/schema/epoch 定义,PREPARE 级)。
+3. **回滚窗长度**(LX-4R 旧列隔离期):建议 ≥7 个交易日再 LX-5R drop。

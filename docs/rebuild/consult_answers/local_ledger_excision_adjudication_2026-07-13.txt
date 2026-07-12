@@ -1,0 +1,1277 @@
+VERDICT: NO-GO on the submitted LX-0..LX-5 plan as ordered and scoped; GO on the excision objective only after a fenced truth-epoch cutover, continuous source ingestion, a sync-owned collateral head, and preservation of genuine local protocol facts. Confidence: high, 0.93.
+
+No local execution results were included in this message, so there is no new evidence on which to revise an earlier finding. The adjudication below therefore re-emits the completed answer. Any reported local contradiction would need to identify the deployed branch, test, or runtime observation that differs.
+
+The core architectural call is:
+
+No business workflow may create or repair durable derived economic authority. External truth may be persisted only as immutable observations or sync-owned current heads. Local first-principles facts remain local. Derived views may be computed or materialized, but must be disposable, reproducible, and never authoritative.
+
+The submitted plan correctly targets mutable local economics—shares, cost basis, realized or unrealized P&L, settlement projections, and bankroll projections—as dangerous parallel authority. It is wrong where it treats all local state as bookkeeping. Zeus intent, idempotency, reservations, unknown side effects, frozen decision evidence, operator dispositions, and retry or dispute state are facts the chain cannot know. Immutable chain or venue observations and a rebuildable sync-owned read model are also legitimate architecture.
+
+Principal findings
+
+[BLOCKER] migration ordering — docs/rebuild/local_ledger_excision_2026-07-12.md:LX-0..LX-5 — reader-family cutovers can coexist with old writers, opportunistic fill ingestion, and stale collateral state, producing omitted or double-counted live exposure — replace the sequence with a daemon-wide truth epoch: install continuous source spines, catch up, fence entry admission, atomically activate all money readers, then stop legacy economics writers and later drop schema — verify locally: fault-inject an old daemon after activation and prove it cannot admit a command or mutate an excised projection.
+
+[BLOCKER] fill completeness — docs/rebuild/census_local_ledger/census_chain_sources.md and src/state/fill_dedup.py — a one-time attribution replay does not close the live gap, and transaction-hash aliases can cause duplicate or omitted economic fills — deploy a continuous fill synchronizer with durable coverage watermarks and a canonical economic-fill identity or alias graph before moving any money reader — verify locally: replay all production venue_trade_facts through the proposed reducer and require exactly one economic contribution per fill, including fees and aggregate-transaction/child-trade aliases.
+
+[BLOCKER] collateral availability — src/state/collateral_ledger.py, src/riskguard/riskguard.py, and docs/rebuild/census_local_ledger/census_ledgers.md — deleting collateral_ledger_snapshots without a replacement current head blinds RiskGuard, reservations, preflight, and Kelly or leaves them operating on stale shared-wallet assumptions — replace snapshot history with a sync-owned wallet-balance head while retaining local reservations and unsettled obligations as separate first-principles facts.
+
+[BLOCKER] local command truth — src/contracts/canonical_lifecycle.py and docs/rebuild/census_local_ledger/census_drift_machinery.md — deleting command state as “chain-knowable” would lose intent, idempotency, POST-before-ACK uncertainty, cancel state, and restart recovery, enabling duplicate entries or stranded exits — preserve append-only command events, attribution links, leases, and unknown-side-effect state; delete only derived economic projections and repair loops.
+
+[HIGH] settlement domains — src/contracts/settlement_semantics.py and settlement census sections — allowing the new payout ingester to become the settlement-grading authority makes its liveness and interpretation a new single point of failure and conflates world truth with chain money — keep frozen WU grading and chain payout realization as separate, non-overwriting records; missing payout data means PENDING, never zero.
+
+[HIGH] mixed RiskGuard accounting — src/riskguard/riskguard.py — migrating active-position derivation while retaining the old “unprojected fill” compensator can count a fill twice or not at all — switch RiskGuard, compensators, bankroll, Kelly, allocator, preflight, monitor, exit sizing, and settlement under one activation epoch.
+
+[HIGH] token discovery authority — docs/rebuild/census_local_ledger/census_chain_sources.md — using wallet-aggregate /positions as the token-set authority lets provider omission masquerade as a zero position and cannot distinguish Zeus from operator fills — demote /positions to discovery telemetry; construct the mandatory token registry from Zeus intent, market topology, attributed fills, and wallet transfer observations, then query exact token balances directly.
+
+[HIGH] shared-wallet attribution — src/runtime/bankroll_provider.py and local-truth census — chain wallet balance cannot reveal how much capital the operator intended Zeus to risk, and same-condition operator trades defeat condition-level classification — keep an explicit Zeus capital-allocation policy or segregate the wallet; do not feed aggregate wallet position value into Zeus-specific Kelly.
+
+[HIGH] destructive residue gate — LX-T8 — a literal zero-grep will remove legitimate historical codecs and can still miss semantic reads hidden behind aliases or generic APIs — use runtime write/read inventories, AST or query checks, process capability fencing, rebuild tests, and a narrow historical-adapter allowlist.
+
+[MEDIUM] derive-on-read performance — src/state/fill_dedup.py and the census cardinalities — the reported cadence is not inherently excessive, but repeated windowed dedup, portfolio-wide aggregation, generation consistency, and SQLite contention make unbenchmarked ad hoc derivation unsafe — prefer a deterministic, rebuildable materialized read model in the existing trade DB unless a production-copy benchmark proves the pure query path.
+
+1. Verdict for LX-T1 through LX-T8
+
+LX-T1: GATED-on a complete, reorg-aware payout observation contract and removal from the grading critical path
+
+A chain payout ingester is necessary because Zeus does not submit redeem transactions and the existing world-resolution signal is not itself the numeric chain payout required for monetary realization. It must be a read-only observer, not a new settlement oracle.
+
+The gate is:
+
+Record immutable payout observations keyed by chain, contract, condition, outcome index, and chain observation identity—normally block hash and number plus log index, or a block-pinned state read.
+
+Distinguish UNKNOWN, UNRESOLVED, RESOLVED_ZERO, and RESOLVED_NONZERO.
+
+Treat timeout, empty response, partial pagination, provider failure, stale state, and unparsable data as unavailable evidence, never as zero payout.
+
+Persist backfill cursors, pagination or scope coverage, observation block, finality state, and reorg supersession.
+
+Permit a single logical canonical writer but not a single process: active/passive instances can use a lease and idempotent uniqueness constraints.
+
+Give the observer no signing key and no redeem capability.
+
+Make payout lag produce PENDING chain realization, not failure of WU grading or unrelated trading paths.
+
+SettlementSemantics remains the sole gate for world-value grading. The payout observer feeds only actual chain monetary realization. A disagreement creates a dispute containing both evidence domains; neither overwrites the other.
+
+LX-T2: WRONG-because it conflates obsolete snapshot history with the required synchronized balance head and reservation boundary
+
+The roughly 101,000-row, 30-second-cadence history can be removed. Its latest-state function cannot.
+
+The replacement should be:
+
+wallet_balance_observations: optional immutable chain observations with block, source, freshness, and coverage metadata.
+
+wallet_balance_head: one sync-owned current row per wallet and asset.
+
+Local reservations, unknown-side-effect commitments, and unsettled obligations, retained separately.
+
+A transactionally enforced local availability calculation:
+
+available = canonical_balance_head − local_previsibility_reservations − venue_observed_open_commitments − unsettled_obligations − safety_margin
+
+The same command must not be subtracted as both a local reservation and an observed open order. The handoff requires command or order identity and a post-command venue observation watermark.
+
+Do not perform chain RPC while holding the SQLite reservation transaction. Remote I/O cannot be atomic with an operator’s external wallet action and would extend the database lock.
+
+With a shared wallet, no local CAS can guarantee that a human co-trader will not spend collateral immediately after Zeus observes it. Hard exclusivity requires a Zeus-only wallet, segregated allowance or escrow, or operator coordination. Without segregation, the strongest safe design is conservative freshness, a safety reserve, submit-time revalidation, and fail-closed entry admission. Zeus can prevent its own commands from over-reserving; it cannot guarantee exclusivity against an uncoordinated co-trader.
+
+RiskGuard, order preflight, bankroll, and Kelly must move to the replacement head in the same activation epoch. Stopping snapshot writes first is unsafe.
+
+LX-T3: GATED-on a deterministic reducer, a consistent generation contract, and a coordinated reader cutover
+
+The economic columns in position_current should cease to be authority. That does not prove every consumer should independently derive economics on every read.
+
+The census reports an approximately 87 GB trades database, about 1,000 current-position rows, and comparatively modest current venue-trade-fact cardinality. One read per two minutes per position is nominally around 8.3 derivations per second. Properly indexed point derivation may be viable.
+
+The operational hazards are:
+
+repeated windowed fill deduplication;
+
+burst synchronization across many monitor processes;
+
+RiskGuard’s portfolio-wide reads;
+
+consistent source coverage across positions;
+
+SQLite page-cache and writer-lock behavior;
+
+reorg or alias corrections requiring recomputation.
+
+The preferred design is a position_economics_read_model in the existing trade database, not a fourth database. A pure SQL view is acceptable only if production-copy benchmarks prove p99 latency and lock behavior.
+
+The activation gate is:
+
+one deterministic reducer and version;
+
+one canonical economic-fill identity;
+
+complete treatment of fees, partial fills, cancels, remaining orders, settlement, and reorg supersession;
+
+a published read generation or coverage vector;
+
+cent-equivalent historical replay;
+
+all live-money readers switched together;
+
+no fallback to legacy economics after activation.
+
+position_current may remain as a local identity or coordination object, but not as a business-written store of chain-derived shares, cost basis, mark value, or P&L.
+
+LX-T4: GATED-on economic-fill identity proof, continuous ingestion, and conservative attribution
+
+venue_trade_facts must remain. It is an append-only observation log and the correct source boundary, not a parallel ledger.
+
+Aggregate wallet positions cannot prove fill identity or Zeus attribution. Repeated trade lifecycle revisions must be deduplicated, but a bare transaction hash is also insufficient because one transaction may contain multiple economic fills.
+
+Before T4 can proceed:
+
+Build a canonical economic identity or alias graph connecting provider trade IDs, child fills, transaction hashes or log identities, order IDs, command IDs, and immutable submission-envelope evidence.
+
+Preserve raw aliases; canonicalization is a derived reducer result.
+
+Require each economic fill, including fees, to contribute exactly once.
+
+Attribute a fill to Zeus only through durable Zeus intent, envelope, order, or equivalent evidence.
+
+Keep foreign fills as observations, but exclude them from Zeus equity.
+
+Classify unmatched or ambiguous fills as unresolved work and use a conservative lower-bound position.
+
+Run the fill synchronizer continuously with durable source coverage watermarks.
+
+A one-time LX-0 replay is not sufficient because a fill can arrive immediately after replay and before reader activation.
+
+LX-T5: WRONG-because venue command state is not chain-knowable
+
+CommandTruthState and the durable command journal contain Zeus-local protocol facts:
+
+intent;
+
+idempotency key;
+
+signed payload or envelope identity;
+
+submission attempt;
+
+POST-before-ACK uncertainty;
+
+acknowledgement;
+
+cancel intent and cancel attempt;
+
+unresolved side effect;
+
+retry or operator disposition.
+
+The chain cannot reconstruct those facts. Removing them can cause duplicate submissions after a crash, abandonment of a live order, premature release of collateral, or an over-sized exit.
+
+The exact excision line is:
+
+Delete or rewrite
+
+mutable local shares, cost basis, P&L, settlement outcome, or current-value projection;
+
+business workflows that “repair” those derived economics;
+
+lifecycle columns that are only disposable projections of retained command events and venue facts;
+
+drift loops whose sole purpose is reconciling one local derived copy with another.
+
+Keep
+
+immutable command intent and events;
+
+idempotency;
+
+submission and acknowledgement evidence;
+
+unknown-side-effect state;
+
+leases and fencing;
+
+cancel/remainder protocol;
+
+open-order evidence;
+
+restart preflight;
+
+external-close evidence;
+
+attribution links;
+
+local reservations;
+
+review and dispute scheduling;
+
+operator dispositions.
+
+A sound refactor is append-only command events plus a disposable current command-state projection. Deleting the command journal is unsound.
+
+LX-T6: GATED-on single-home proof under the three-database law
+
+Removing a duplicated EDLI authority is correct only if one database remains its declared owner and every consumer is migrated to a stable read-only reference or immutable ID.
+
+The gate is a deployment-commit census of:
+
+all readers and writers;
+
+decision-certificate references;
+
+command or report payload references;
+
+historical decoders;
+
+restart and repair tools;
+
+reporting and learning jobs;
+
+any implicit cross-database lookup.
+
+The migration must preserve immutable IDs referenced by old commands and decision certificates. It must not create cross-database mutations, path-dependent ownership, or a fourth authority.
+
+LX-T7: GATED-on an explicit two-domain settlement model
+
+“Settlement” must be split into two named records.
+
+World grade
+
+Frozen decision certificate.
+
+Frozen WU observation or evidence hash.
+
+Versioned SettlementSemantics.
+
+Frozen graded receipt.
+
+Answers whether the decision was correct under the declared world semantics.
+
+Chain monetary realization
+
+Attributed fills and shares.
+
+Fees.
+
+Immutable payout observations.
+
+Actual monetary result.
+
+Answers what the chain paid for the attributed position.
+
+The world-grade corpus supports reproducible walk-forward evaluation. Chain realization supports actual wallet P&L. A mismatch is preserved as a dispute; it is not repaired by overwriting one value with the other.
+
+Historical reproducibility requires retention of:
+
+decision certificate;
+
+WU evidence and observation identity;
+
+settlement-semantics version;
+
+rounding and unit version;
+
+attributed fills;
+
+fee facts;
+
+payout facts;
+
+reducer version.
+
+Historical reconstruction must not query today’s WU value or current chain head.
+
+LX-T8: WRONG-because zero-grep is not a semantic authority test
+
+Legacy names can legitimately remain in:
+
+schema migrations;
+
+historical payload codecs;
+
+compatibility readers for frozen records;
+
+archival export code;
+
+tests proving old fields are not authoritative.
+
+Conversely, generic helper names can continue to read an obsolete column without matching a legacy-name grep.
+
+The correct acceptance gate is:
+
+no runtime write to excised economics outside a narrowly scoped migration;
+
+no runtime read of those fields in risk, sizing, order admission, exit sizing, settlement, restart, or learning labels;
+
+no business-layer import of an old mutation API;
+
+old field names permitted only in explicit archival adapters and migrations;
+
+an integration test that drops the read model and rebuilds it from immutable facts;
+
+stale-binary capability fencing;
+
+targeted grep, AST, SQL-inventory, and runtime access checks with an allowlist.
+
+2. BORDERLINE answers
+
+B1: Phase-column derivability
+
+Derivable as a deterministic projection; not chain-only.
+
+Current phase depends on a mixture of:
+
+chain or venue exposure;
+
+local entry and exit intent;
+
+pending or unknown side effects;
+
+settlement state;
+
+local administrative or void decisions;
+
+review overlays.
+
+The stored phase column may cease to be authoritative and can be dropped if all underlying facts survive. A materialized phase projection is acceptable.
+
+Do not delete transition evidence if historical phase timing matters. A current-state reducer cannot recreate a phase history from facts that were already pruned.
+
+B2: Chain-mirror event receipts
+
+KEEP them under an immutable observation-receipt contract.
+
+A legitimate receipt states:
+
+Source S returned payload P for scope X at observation time T, with source position or block B and coverage or completeness C.
+
+It does not claim that the value remains current forever.
+
+A usable receipt should contain, as applicable:
+
+chain and provider identity;
+
+account, contract, condition, or token scope;
+
+source time or block hash and number;
+
+local observed time;
+
+raw payload or content hash;
+
+pagination and completeness metadata;
+
+finality or canonicality;
+
+correction or supersession link;
+
+synchronizer version.
+
+Only synchronizers append or supersede these facts. Business logic must not edit them to force a desired position, grade, or P&L.
+
+Legitimate examples are venue trade facts, payout observations, exact token-balance observations, transfer observations, and wallet-balance observations.
+
+A mutable row saying “Zeus owns 47.2 shares at this basis and settled profit is X,” repaired by monitors, is derived-value booking and should die.
+
+B3: Collateral reservations versus chain balance
+
+Chain balance becomes sync-owned external state; reservations remain local authoritative intent.
+
+The handoff state machine is:
+
+Before a complete venue observation, the Zeus reservation represents the command’s pre-visibility commitment.
+
+Once a post-command observation proves the open order and remaining quantity, the venue-observed obligation replaces the reservation.
+
+Once terminal venue evidence exists, the obligation is released.
+
+UNKNOWN_SIDE_EFFECT remains conservatively reserved until resolved.
+
+Invariant:
+
+A single economic commitment is deducted from availability in exactly one bucket at a time.
+
+Without that invariant, the migration either double-subtracts collateral or releases it too early.
+
+A separate local capital-allocation limit may also remain. The chain knows wallet balance; it does not know how much of a shared wallet the operator authorized Zeus to risk.
+
+B4: WU settlement value versus chain payout
+
+WU determines world grade through SettlementSemantics; chain payout determines money realization.
+
+The WU record answers whether the decision was correct under its frozen certificate and settlement semantics.
+
+The chain record answers what the attributed position actually paid.
+
+Neither is an approximation of the other. Neither may overwrite the other. A disagreement generates a durable dispute or ReviewWorkItem containing both evidence references.
+
+Historical model performance uses the frozen world grade. Actual wallet P&L uses attributed fills, fees, and chain payout.
+
+B5: ReviewWorkItem
+
+KEEP.
+
+A ReviewWorkItem is operational liveness and human-resolution state, not economic authority. The external facts remain elsewhere, but these facts are local and non-derivable:
+
+attempt history;
+
+backoff;
+
+next-attempt time;
+
+lease or ownership;
+
+escalation;
+
+operator disposition;
+
+resolution rationale.
+
+Before dropping owner tables such as position_current, migrate work-item subjects to stable identifiers such as command ID, fact-set ID, condition/token, settlement-dispute ID, or decision-certificate ID. Otherwise unresolved live-money cases become orphaned.
+
+3. Ordering attack on LX-0 through LX-5
+
+The submitted ordering is unsafe while the daemon mesh continues trading.
+
+Attack A: fill lands after replay but before reader cutover
+
+LX-0 completes a one-time attribution replay.
+
+A Zeus order fills.
+
+The old projection path learns the fill through reconciliation, while the new fact path has not yet polled it—or the reverse.
+
+RiskGuard or Kelly is moved to the new reader during LX-2.
+
+The fill is absent from one source universe.
+
+Impact: understated exposure, overstated free collateral, or inconsistent exit size.
+
+Fix: continuous ingestion must be running and publishing a durable coverage watermark before any reader moves.
+
+Attack B: RiskGuard compensator double-counts or omits a fill
+
+Current RiskGuard combines position values with a compensator for entry fills not yet represented in the old projection.
+
+During mixed migration:
+
+The fill is in the new derived position but absent from old projection tables: the new position includes it and the old compensator adds it again.
+
+The fill is absent from a lagging new read model but present in old tables: the compensator suppresses it and the new model omits it.
+
+Impact: direct double-count or zero-count of live exposure.
+
+Fix: migrate active-position reads and all compensators together. Better, eliminate the compensator by deriving both projected exposure and pending obligations from one fact generation.
+
+Attack C: collateral snapshots stop before bankroll and risk move
+
+The legacy 30-second snapshot writer is disabled.
+
+Reservation or RiskGuard still reads the old latest snapshot.
+
+The operator spends from the shared wallet.
+
+A long-lived balance cache or stale snapshot continues to support Kelly or order admission.
+
+Impact: order sizing against collateral that no longer exists.
+
+Fix: run and prove the new balance-head sync first; switch RiskGuard, reservation CAS, preflight, bankroll, and Kelly atomically; then stop old snapshot writes.
+
+Attack D: market resolves while payout ingestion is incomplete
+
+Settlement readers stop using old local settlement columns.
+
+T1 has not yet observed a complete and sufficiently final payout vector.
+
+Missing outcome data is treated as zero or settlement blocks entirely.
+
+Separately, the old WU workflow may still write a generic settlement result.
+
+Impact: false loss, overwritten world grade, or settlement outage caused by one ingester.
+
+Fix: split world grade and chain realization before reader migration. Missing payout yields PENDING; WU grading remains available from frozen evidence.
+
+Attack E: stale daemon writes after activation
+
+New binaries switch readers or schema.
+
+An old daemon remains alive under a rolling deployment.
+
+It writes an excised projection, retries a command using old semantics, or crashes on a removed column.
+
+Another process consumes the new model.
+
+Impact: stale local economics re-enter the system, duplicate commands, or persistent restart loops.
+
+Fix: every command admission and money decision is fenced by an active truth epoch and process capability. Old builds cannot acquire or renew the relevant lease after activation.
+
+Attack F: /positions omits a token
+
+Zeus uses the provider’s wallet aggregate response to choose which CTF token balances to query.
+
+The provider omits a token because of lag, pagination, dust filtering, or an indexing defect.
+
+Zeus never performs the direct token read.
+
+The system concludes that no position exists.
+
+Impact: stranded exit or false free-collateral calculation.
+
+Fix: maintain a durable token registry from Zeus commands, fills, market mappings, and wallet transfer observations. /positions may add candidates but absence cannot prove zero.
+
+Attack G: reservation and open-order obligation overlap
+
+A local reservation exists for a submitted order.
+
+The new venue synchronizer observes the order as open.
+
+There is no atomic or identity-based handoff.
+
+The availability reducer subtracts both.
+
+Impact: false collateral exhaustion and unnecessary entry shutdown.
+
+The converse—releasing the reservation before venue visibility—is worse: collateral can be reused while an order is live.
+
+Fix: encode the reservation-to-observed-obligation transition with command/order identity and a source watermark.
+
+Safe replacement sequence
+
+LX-0R: define contracts and activation control
+
+Freeze:
+
+fact schemas;
+
+canonical identities;
+
+units and decimals;
+
+reducer versions;
+
+settlement-domain names;
+
+source freshness and completeness semantics.
+
+Add a trade-DB-owned truth epoch with states such as LEGACY, PREPARE, and ACTIVE_NEW. Every live process advertises a build and capability. Entry admission and money reads require the active epoch.
+
+Do not attempt a three-database distributed SQL transaction. The three-database split remains intact. The trade DB owns trading activation; world and forecast data retain their own ownership.
+
+LX-1R: install the complete source spine
+
+Deploy and run:
+
+continuous fill and order ingestion;
+
+payout observation and backfill;
+
+pUSD or collateral balance observations and current head;
+
+token registry and exact CTF balance observation;
+
+source coverage and finality metadata;
+
+attribution alias graph;
+
+correction and supersession facts.
+
+The new spine may run before activation because it is collecting production facts, not generating alternate trading decisions. That is not a prohibited shadow decision mode.
+
+LX-2R: build and prove reducers or read models
+
+Backfill the deterministic position, collateral, phase, and settlement read contracts.
+
+Run the time-boxed replay and cent-equivalence gate against frozen historical cases.
+
+Deploy new-capable binaries everywhere while the old epoch remains active. The new readers are not enabled by consumer family.
+
+Catch the source spine and read model up to a declared coverage vector.
+
+LX-3R: one fenced activation
+
+Enter PREPARE.
+
+Fail closed for new entries.
+
+Continue exits using sufficient venue truth.
+
+Drain or classify every in-flight entry as acknowledged, rejected, open, terminal, or unknown side effect.
+
+Require all live daemon leases to advertise support for the new epoch.
+
+Require source freshness and coverage.
+
+Publish ACTIVE_NEW once.
+
+At that boundary:
+
+every money reader uses the new fact/read-model contract;
+
+business modules stop writing old economics;
+
+synchronizers remain the only external-fact writers;
+
+reducers remain the only read-model writers;
+
+local intent, reservations, reviews, and command protocol continue;
+
+old builds lose command-admission authority.
+
+Do not dual-write competing economic projections. The active epoch selects one authority path.
+
+LX-4R: quarantine old schema and remove only diseased machinery
+
+Leave old economics columns physically present but unread and unwritten for a bounded rollback window.
+
+Delete only the derived-value repair parts of mixed modules. Preserve restart recovery, unknown-side-effect handling, cancel/remainder logic, attribution, leases, review state, and external-close evidence.
+
+LX-5R: destructive drop
+
+Drop old economic columns, large collateral snapshot history, duplicated EDLI authority, and dead repair APIs only after:
+
+replay and cent-equivalence pass;
+
+live source freshness is stable;
+
+restart and stale-daemon tests pass;
+
+exits work during payout and bankroll outages;
+
+settlement fault injection proves WU grade and chain realization remain separate;
+
+the read model rebuilds from zero.
+
+After destructive drop, rollback is a forward rebuild from facts. Restoring an archived local ledger as authority would violate the architecture.
+
+Rollback under the no-shadow-mode law
+
+Before activation, rollback means remain on the old epoch.
+
+After activation, old projections are intentionally stale because they are not dual-written. An immediate flip back is unsafe. To run an old binary again:
+
+Stop new entries.
+
+Continue sufficient-truth exits.
+
+Rebuild the old projection deterministically through the current source watermark.
+
+Activate it only after its completeness is proven.
+
+The preferable rollback is a forward code correction while retaining the new truth contract.
+
+Sufficient-truth exit path
+
+Exit execution must not depend on Kelly, aggregate bankroll, or the payout ingester.
+
+For a known Zeus token, sufficient truth is:
+
+exact wallet/token balance;
+
+complete current open-order view for that token;
+
+Zeus-attributed net filled shares;
+
+attributed prior exits;
+
+local pending or unknown exit commands;
+
+fresh source coverage.
+
+A conservative quantity is:
+
+safe_exit_qty = max(0, min(zeus_attributed_unclosed_shares, wallet_token_balance − observed_open_sell_remainder))
+
+Stale or ambiguous evidence should create a ReviewWorkItem and prevent an unsafe sell. It should not force exits to wait for settlement grading or strategy bankroll.
+
+Because the wallet is shared, a direct token balance cannot physically distinguish operator shares from Zeus shares. The Zeus-attributed cap is an economic convention. Strict ownership isolation requires wallet segregation.
+
+4. Completeness attack on the KEEP spine
+
+The documented KEEP spine is directionally correct but incomplete. The following items are likely to be missed only after a crash, rare race, provider correction, historical replay, or market resolution.
+
+Command-side-effect evidence
+
+Keep intent, idempotency, signed-envelope identity, submission attempt, acknowledgement, POST-before-ACK uncertainty, cancel attempt, remaining quantity, and operator resolution.
+
+Without these, restart can duplicate an entry, abandon a live order, or over-sell after a cancel race.
+
+Synchronization control state
+
+Keep durable source cursors or high-watermarks, account and token scope, pagination coverage, source time, block identity, finality, correction or supersession, retry state, and lag alarms.
+
+A source response that does not prove complete scope cannot prove absence.
+
+Token-discovery history
+
+Keep every token observed through:
+
+Zeus intent;
+
+market or condition topology;
+
+attributed fills;
+
+wallet transfer logs;
+
+direct balance observations.
+
+Otherwise a later /positions omission makes a valid position undiscoverable.
+
+Reservation handoff identity
+
+Keep the relation that transitions one command from pre-visibility reservation to observed venue obligation.
+
+Without it, availability either subtracts twice or releases too early.
+
+Attribution graph and ambiguity evidence
+
+Keep:
+
+command → submission envelope → order ID → provider trade aliases/log identity → position → settlement
+
+Keep foreign and ambiguous observations instead of discarding them. Aggregate wallet state cannot recreate provenance after deletion.
+
+Frozen walk-forward inputs and version manifests
+
+Keep:
+
+frozen decision certificate;
+
+cited market and WU evidence;
+
+evidence hashes;
+
+SettlementSemantics version;
+
+unit and rounding definitions;
+
+graded receipt;
+
+attributed fills and fees;
+
+payout observations;
+
+reducer version.
+
+These are required to reproduce historical grades and P&L after convenience columns disappear.
+
+Review, dispute, and operator history
+
+Keep ReviewWorkItems, settlement disputes, external-close evidence, operator-confirmed attribution decisions, and resolution rationale.
+
+Re-deriving “this appears unresolved” does not reconstruct prior attempts or a human disposition.
+
+Daemon epoch, capability, and lease state
+
+Keep schema generation, truth epoch, process capability, and startup fencing.
+
+Without them, a stale daemon can resume old writes after activation.
+
+Read-model lineage
+
+Keep, per published generation:
+
+reducer version;
+
+complete source-watermark vector;
+
+computed time;
+
+input fingerprint;
+
+freshness or health;
+
+correction generation.
+
+Otherwise RiskGuard can aggregate positions built against inconsistent source horizons without detecting it.
+
+Units, fees, and topology
+
+Keep condition-to-token and outcome mappings, asset decimals, chain and contract identifiers, fee inputs, and monetary-unit versions.
+
+These are often embedded implicitly in old rows and discovered missing only when rebuilds disagree by cents.
+
+Three-database ownership
+
+Keep explicit ownership of trade, world, and forecast facts and stable immutable identifiers for cross-database reads.
+
+Do not replace deleted duplication with cross-database mutation or a fourth database.
+
+Historical codecs and downstream consumers
+
+Keep versioned readers for old decision certificates, receipts, reports, model-training corpora, and audit exports.
+
+A historical field name in an archival decoder is not residual authority. Deleting it may break reproducibility months after migration.
+
+Chain reorg and provider-correction handling
+
+Keep canonicality and supersession facts. An old observation must not be silently edited in place.
+
+The reducer should recompute affected read-model generations from the corrected fact set.
+
+Source degradation state
+
+Keep explicit degraded states for stale, incomplete, rate-limited, or contradictory source observations.
+
+Do not encode degradation as zero balance, zero payout, no order, or no position.
+
+5. Derive-on-read viability at 87 GB
+
+Pure derive-on-read is not disproven by the headline database size. The reported position count and monitor cadence produce a modest nominal point-read rate.
+
+It is nevertheless not a complete design because operational work is not just one indexed SUM:
+
+canonical fill aliasing and dedup may use windows or joins;
+
+RiskGuard needs portfolio-level consistency;
+
+monitor processes can align and burst;
+
+corrections or reorgs invalidate prior reductions;
+
+SQLite read and write contention matters;
+
+a multi-position read can span inconsistent source watermarks;
+
+repeated computation burns the same CPU and page-cache work.
+
+The superior default is a materialized, deterministic read model in the existing trade DB. It does not violate the three-database law and need not become a ledger.
+
+Invariant that keeps the read model honest
+
+For generation g:
+
+ReadModel[g] = Reducer_v(ImmutableFacts through complete coverage vector C[g])
+
+The model is not a parallel ledger only when all of these hold:
+
+Exclusive external-fact writers
+
+Venue or chain facts are appended only by synchronizers.
+
+Exclusive read-model writer
+
+Only the deterministic reducer can publish the materialized view. RiskGuard, monitor, execution, settlement, operator tools, and repair jobs cannot update its economic values.
+
+No lost information on deletion
+
+Dropping every read-model row loses no command intent, source observation, decision evidence, reservation, or operator disposition.
+
+Deterministic rebuild
+
+An empty model rebuilt from the same facts, reducer version, and coverage vector produces cent-equivalent output.
+
+Complete lineage
+
+Rows carry reducer version, generation, source coverage, computed time, and ideally an input fingerprint.
+
+No feedback authority
+
+The system cannot invent or alter a source fact merely because the materialized result appears wrong.
+
+No manual economic repair
+
+Corrections are represented as new or superseding facts and followed by recomputation. No operator or monitor performs an UPDATE to force shares or P&L to a desired value.
+
+No stale fallback
+
+Readers reject stale or incomplete generations. They do not silently fall back to the excised ledger.
+
+Canonicality-aware recomputation
+
+Reorgs and provider corrections update fact canonicality or supersession and trigger deterministic rebuild.
+
+Periodic full replay audit
+
+An offline rebuild is compared with incremental output. It is a correctness test, not a second live decision mode.
+
+Consistent portfolio publication
+
+Per-row “latest” is insufficient for RiskGuard. A portfolio can otherwise combine one position processed through fill watermark N and another through N−1.
+
+Publish a generation only when its declared coverage vector is complete. Incremental work can occur in staging, but live readers consume a single published generation or a transactionally consistent snapshot.
+
+Pure derive-on-read alternative
+
+A view or direct reducer is acceptable if production-copy testing proves:
+
+indexed point-query p99 within monitor budget;
+
+portfolio-query p99 within RiskGuard budget;
+
+acceptable WAL and writer lock behavior;
+
+no pathological plan from the 87 GB file size;
+
+stable behavior under synchronized daemon bursts;
+
+deterministic alias dedup.
+
+verify locally: benchmark the canonical reducer on a production-copy database under representative concurrent readers and writers, covering single-position monitor reads, full portfolio RiskGuard reads, incremental materialization, and full rebuild.
+
+6. Exact line: observation receipt versus derived-value booking
+
+Legitimate observation receipt
+
+An observation receipt records what an external source exposed, with enough provenance to assess whether the observation is usable.
+
+Examples:
+
+provider trade event;
+
+chain transfer log;
+
+direct token balance at block B;
+
+wallet collateral balance at block B;
+
+payout vector at block B;
+
+open-order response for a complete account scope;
+
+acknowledgement returned for an order command.
+
+Required properties:
+
+append-only or superseded, not silently mutated;
+
+external source identified;
+
+exact scope identified;
+
+raw value or payload hash retained;
+
+source time or block retained;
+
+observation time retained;
+
+completeness and pagination retained;
+
+canonicality or finality retained where applicable;
+
+no business module can rewrite it to obtain a desired outcome.
+
+It is legitimate even when the chain already “knows” the value because local persistence is an observation and replay boundary, not a competing assertion of economic truth.
+
+Legitimate local first-principles fact
+
+A local fact records something only Zeus or its operator can know.
+
+Examples:
+
+command intent;
+
+idempotency key;
+
+signed envelope hash;
+
+submission attempt;
+
+unknown side effect;
+
+reservation;
+
+capital-allocation policy;
+
+frozen decision certificate;
+
+ReviewWorkItem;
+
+operator attribution disposition;
+
+truth epoch or lease.
+
+These are authoritative local protocol facts and must not be excised merely because they influence money.
+
+Legitimate rebuildable read model
+
+A read model is a disposable computation over retained facts.
+
+Examples:
+
+current attributed shares;
+
+cost basis;
+
+unrealized or realized P&L;
+
+current lifecycle phase;
+
+collateral availability;
+
+chain monetary realization;
+
+portfolio exposure.
+
+It is acceptable only under the invariant above: sync or reducer-only writes, full lineage, deterministic rebuild, no manual repair, and no authority if deleted.
+
+Diseased derived-value booking
+
+A derived booking is diseased when a workflow writes an economic result as durable authority and later processes reconcile or repair it independently of the immutable facts.
+
+Examples:
+
+monitor incrementing current_shares;
+
+exit handler decrementing a local position ledger;
+
+settlement job writing a generic won or pnl that overwrites WU or chain evidence;
+
+recovery daemon patching cost basis;
+
+local cached bankroll updated from assumed Zeus-only wallet movements;
+
+manually editing a materialized position to make it agree with a dashboard.
+
+The failure is not that the value is stored. The failure is that it can be authored or repaired independently of its source facts and is then treated as money authority.
+
+7. Bankroll and Kelly after excision
+
+The system must distinguish three quantities.
+
+Wallet spendable collateral
+
+Derived from:
+
+sync-owned direct collateral balance;
+
+local pre-visibility reservations;
+
+venue-observed open commitments;
+
+unsettled obligations;
+
+safety margin.
+
+This controls hard feasibility of a new order.
+
+Zeus strategy equity
+
+Derived from:
+
+explicit Zeus capital-allocation policy;
+
+Zeus-attributed fills and fees;
+
+Zeus-attributed token exposure;
+
+chain payouts;
+
+accepted mark policy.
+
+This is the appropriate basis for strategy Kelly.
+
+Wallet total equity
+
+Includes operator and Zeus assets. It can support account-level telemetry or global safety limits but must not be labeled Zeus strategy P&L or blindly fed into Zeus Kelly.
+
+Consequences:
+
+/positions.currentValue, aggregate size, avgPrice, and provider cash P&L cannot be Zeus strategy authority.
+
+A failed attribution/classification query must not default all wallet positions to Zeus.
+
+Same-condition operator trading cannot be resolved by condition-level classification.
+
+Entry sizing fails closed when Zeus-specific equity is incomplete.
+
+Exit sizing bypasses Kelly and uses sufficient truth.
+
+Whether Zeus may use all free wallet cash is a local operator policy, not a chain-derived fact.
+
+If the operator rejects both wallet segregation and an explicit allocation policy, Zeus-specific Kelly is mathematically undefined. The chain knows assets, not ownership intent inside a shared fungible wallet.
+
+8. /positions authority determination
+
+Using data-api /positions as the source of the CTF token set is an implicit authority leak.
+
+It has two independent deficiencies:
+
+It is wallet aggregate and has no Zeus order key, so it cannot prove attribution.
+
+If its result determines which direct token reads occur, an omitted token is treated as nonexistent.
+
+Correct use:
+
+/positions may suggest additional tokens.
+
+Zeus commands, envelopes, fills, condition mappings, and transfer observations establish the mandatory registry.
+
+Exact token balances are queried directly for money decisions.
+
+Absence from /positions never proves zero.
+
+Aggregate current value never defines Zeus equity.
+
+Provider/direct-chain disagreement creates telemetry or review, not a repair write.
+
+9. Security, concurrency, and boundary requirements
+
+External synchronizers ingest untrusted data. Validate:
+
+chain ID;
+
+account or funder;
+
+contract address;
+
+condition and token mapping;
+
+outcome index;
+
+integer units and decimals;
+
+source scope;
+
+pagination;
+
+block or source identity;
+
+finality;
+
+correction lineage.
+
+The payout observer must have no signing or redeem authority.
+
+Fact insertion and reducer publication must be idempotent. Duplicate source responses should be harmless; conflicting responses should create superseding facts or disputes.
+
+Process boundaries should prevent business logic from mutating source facts or read models. SQLite lacks granular table roles, so use narrow repository APIs, process separation, file permissions where feasible, append-only constraints or triggers, and tests rejecting business-layer writes.
+
+Persist command intent before external submission. The migration does not weaken the outbox/idempotency rule.
+
+Never translate the following into zero:
+
+timeout;
+
+missing page;
+
+empty provider response;
+
+stale source;
+
+missing payout;
+
+missing token;
+
+API exception;
+
+unresolved reorg;
+
+contradictory source result.
+
+They are unknown or degraded states.
+
+10. Strongest alternative considered
+
+The strongest alternative is literal direct-source architecture: query the chain or venue for every money decision and retain no local mirror or materialized current view.
+
+Its advantage is that it eliminates cache drift and simplifies the claim that the chain is authoritative.
+
+It is inferior here because:
+
+the chain cannot supply Zeus intent, idempotency, reservations, decision certificates, or operator dispositions;
+
+CLOB submission has off-chain acknowledgement uncertainty;
+
+aggregate wallet state cannot reconstruct Zeus attribution;
+
+remote reads cannot be made atomic with the local reservation transaction;
+
+provider liveness and pagination gaps would enter the order-admission hot path;
+
+historical walk-forward replay requires event-time evidence;
+
+portfolio risk requires a consistent multi-source generation rather than unrelated point reads.
+
+A segregated Zeus wallet, complete order-attributed venue APIs, strong point-read guarantees, and reduced historical requirements would make direct reads more attractive. Immutable intent and frozen decision evidence would still remain local.
+
+11. Actionable decision
+
+Claude Code should not implement the submitted LX phases literally.
+
+Approve implementation only after the plan is amended to state:
+
+venue_trade_facts, balance or payout observations, transfer logs, and equivalent source receipts are retained as immutable observations.
+
+Command events, reservations, ReviewWorkItems, decision certificates, operator dispositions, leases, and truth epochs remain local first-principles facts.
+
+Snapshot history is replaced by a sync-owned current collateral head before deletion.
+
+Fill ingestion is continuous before any reader migration.
+
+Attribution has one canonical economic-fill identity and explicitly handles transaction-hash aliases.
+
+WU grade and chain realization are separate records.
+
+All money readers activate under one fenced truth epoch.
+
+Exit execution has a reduced sufficient-truth path independent of bankroll, Kelly, and payout ingestion.
+
+Materialized read models are allowed only under the no-authority invariant.
+
+/positions is discovery telemetry, never proof of attribution, token absence, or Zeus equity.
+
+Old economics columns are quarantined unread and unwritten before destructive drop.
+
+Rollback after activation requires deterministic rebuild; there is no stale projection flip-back.
+
+The final residue gate is semantic and capability-based, not a raw zero-grep.
+
+Sources and limitations
+
+The adjudication is grounded in the supplied pinned repository snapshot and the requested close-reading files:
+
+docs/rebuild/local_ledger_excision_2026-07-12.md
+
+docs/rebuild/census_local_ledger/census_ledgers.md
+
+docs/rebuild/census_local_ledger/census_drift_machinery.md
+
+docs/rebuild/census_local_ledger/census_chain_sources.md
+
+docs/rebuild/census_local_ledger/census_local_truth.md
+
+It also follows the relevant implementation contracts and consumers identified in the prior review:
+
+src/contracts/canonical_lifecycle.py
+
+src/contracts/chain_observation_envelope.py
+
+src/contracts/position_truth.py
+
+src/contracts/review_work_item.py
+
+src/contracts/settlement_semantics.py
+
+src/contracts/venue_submission_envelope.py
+
+src/state/canonical_projections.py
+
+src/state/collateral_ledger.py
+
+src/state/fill_dedup.py
+
+src/riskguard/riskguard.py
+
+src/runtime/bankroll_provider.py
+
+I did not receive the referenced local execution results in the re-emission request. Therefore I have not revised any finding based on local runtime evidence.
+
+Load-bearing assumptions are:
+
+shared-wallet operator co-trading remains;
+
+Zeus never signs or submits redeem transactions;
+
+WU evidence interpreted through SettlementSemantics remains the sole world-grade gate;
+
+the three-database split is immutable;
+
+no-shadow mode prohibits dual live decision authorities, not pre-activation source ingestion or offline replay;
+
+entries may fail closed during a bounded activation barrier;
+
+exits must continue when exact venue truth is sufficient;
+
+immutable receipts, local protocol facts, and disposable read models are compatible with the operator’s intent.
+
+The smallest runtime fact that could materially soften the overall NO-GO is proof that the deployment branch already has a daemon-wide truth-epoch capability fence, a continuously synchronized balance head, and an atomic cutover contract consumed by every RiskGuard, Kelly, preflight, reservation, monitor, and settlement path. The supplied plan and pinned source did not establish that.
