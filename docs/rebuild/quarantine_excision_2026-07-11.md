@@ -450,6 +450,28 @@ history section.
   'quarantined' → 'holding' + OPEN ReviewWorkItem(LEGACY_QUARANTINE_MIGRATED);
   chain_state legacy trio → 'synced'; load bridge retires only after the
   migration stamps schema_epoch ×3.
+- LAW-SURFACE DOCS: LANDED 727f9a0a1 (agent 436b3411d, 11 files). AGENTS.md:170/172
+  → ChainOnlyFact + ReviewWorkItem; lifecycle reference rewritten (9-state enum,
+  legacy-bridge notes); INV-09 test citation repointed; zeus_current_architecture
+  §8.2/§9/§11, scoped AGENTS, provenance-audit skill verdict QUARANTINED→
+  STALE_ISOLATE. Kernel SQL CHECKs + kernel_manifest confirmed-deferred to T5
+  migration packet. semgrep message accurate pre-DIQ, superseded below.
+- DIQ: LANDED 27238fbfa + registry fix 81eeda9e7 (agent b23149ab5, 34 files;
+  worktree destroyed mid-task by reaper race, full state recovered from
+  stash@{0} — tracked diff + all 7 untracked new files survived).
+  decision_integrity_quarantine (trade-DB single side-table) →
+  src/state/fact_revocation.py, owner-local fact_revocations in EACH owning DB
+  (world/trades/forecasts). API decision_certificate_is_quarantined →
+  is_certificate_revoked; reason codes QUARANTINED_* → REVOKED_*; CLI scripts
+  renamed revoke_bad_forecast_decisions.py /
+  revoke_invalid_live_actionable_certificates.py (latter registered in
+  script_manifest — closed a pre-existing gap). Migration:
+  scripts/migrate_decision_integrity_quarantine_to_fact_revocations.py
+  (3-DB backfill, per-reason count + payload-hash parity, abort-on-mismatch,
+  --apply gate; OPERATOR RUNS IT — not yet run against live DBs). Invariant
+  labels FACT_REVOCATION_* / REVOCATION_* in test_topology.yaml. 457 tests
+  green; 1 preflight failure + topology_doctor 33 failures reproduce at base
+  638852bd2 (pre-existing). No live import of the old module remains.
 
 ## Consult adjudication (2026-07-11, GPT-5.6 Pro deep review — answer at
 ## /tmp/cgc/answer_REQ-20260711-140149-0f9584.txt; verdict adopted)
