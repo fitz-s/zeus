@@ -2685,6 +2685,37 @@ tables:
       _fetch_pairs_for_bucket training-data exclusion (co-located, no ATTACH
       needed — simplification vs the predecessor's always-trade-ATTACH design).
 
+  - name: schema_epoch
+    db: trade
+    schema_class: trade_class
+    schema_version_owner: null
+    created_by: "scripts/migrations/2026_07_quarantine_phase_retirement.py (T5 migration)"
+    pk_col: "[epoch]"
+    notes: >
+      Single-row epoch marker stamped identically on all three canonical DBs
+      by the T5 quarantine-phase-retirement migration (2026-07-12, BLOCKER-2
+      protocol). Startup guard src/state/db.py:assert_schema_epoch_not_mixed
+      refuses to boot on ANY mixed epoch; all-NULL (pre-migration) and
+      all-equal are the only legal states. Columns: epoch TEXT, stamped_at TEXT.
+
+  - name: schema_epoch
+    db: world
+    schema_class: world_class
+    schema_version_owner: null
+    created_by: "scripts/migrations/2026_07_quarantine_phase_retirement.py (T5 migration)"
+    pk_col: "[epoch]"
+    notes: >
+      Sibling of the trade-DB schema_epoch entry above — see it for the law.
+
+  - name: schema_epoch
+    db: forecasts
+    schema_class: forecast_class
+    schema_version_owner: null
+    created_by: "scripts/migrations/2026_07_quarantine_phase_retirement.py (T5 migration)"
+    pk_col: "[epoch]"
+    notes: >
+      Sibling of the trade-DB schema_epoch entry above — see it for the law.
+
   - name: review_work_items
     db: trade
     schema_class: trade_class
