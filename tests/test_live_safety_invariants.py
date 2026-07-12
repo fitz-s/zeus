@@ -4712,8 +4712,11 @@ def test_replacement_forecast_authority_missing_posterior_does_not_fallback(monk
 
 
 def test_monitoring_skips_blocking_review_fact_position_without_exit(monkeypatch):
-    """Invalid entry-proof review facts must stop automatic monitor/exit churn."""
+    """Review facts stop automatic exit but still emit an explicit monitor hold."""
     from src.engine import cycle_runtime
+    from src.engine.lifecycle_events import build_position_current_projection
+    from src.state.db import init_schema
+    from src.state.projection import upsert_position_current
 
     pos = _make_position(
         trade_id="invalid-proof-position",
@@ -4723,8 +4726,14 @@ def test_monitoring_skips_blocking_review_fact_position_without_exit(monkeypatch
         token_id="yes-invalid-proof",
         no_token_id="no-invalid-proof",
         condition_id="condition-invalid-proof",
+        strategy_key="forecast_qkernel_entry",
+        entered_at="2026-06-07T01:00:00+00:00",
     )
     portfolio = _make_portfolio(pos)
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    init_schema(conn)
+    upsert_position_current(conn, build_position_current_projection(pos))
     portfolio.chain_only_facts.append(
         ChainOnlyFact(
             token_id="no-invalid-proof",
@@ -4762,27 +4771,37 @@ def test_monitoring_skips_blocking_review_fact_position_without_exit(monkeypatch
             AssertionError("blocking review fact position must not reach monitor refresh")
         ),
     )
-
     portfolio_dirty, tracker_dirty = cycle_runtime.execute_monitoring_phase(
-        None,
+        conn,
         object(),
         portfolio,
         artifact,
         Tracker(),
         summary,
         deps=deps,
+        run_exit_preflight=False,
     )
 
     assert portfolio_dirty is False
     assert tracker_dirty is False
     assert summary["monitor_skipped_blocking_review_fact"] == 1
-    assert summary["monitors"] == 0
+    assert summary["monitors"] == 1
     assert summary["exits"] == 0
+    event = conn.execute(
+        "SELECT event_type, payload_json FROM position_events "
+        "WHERE position_id=? AND event_type='MONITOR_REFRESHED'",
+        (pos.trade_id,),
+    ).fetchone()
+    assert event is not None
+    assert json.loads(event["payload_json"])["exit_decision_reason"] == (
+        "REVIEW_REQUIRED_INVALID_ENTRY_PROOF"
+    )
     assert len(monitor_results) == 1
     assert monitor_results[0].exit_reason == "REVIEW_REQUIRED_INVALID_ENTRY_PROOF"
     assert monitor_results[0].should_exit is False
     assert monitor_results[0].fresh_prob is None
     assert monitor_results[0].fresh_edge is None
+    conn.close()
 
 
 def test_monitoring_unknown_direction_report_has_no_fresh_probability(monkeypatch):

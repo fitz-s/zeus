@@ -3320,12 +3320,9 @@ def _record_monitor_hold_decision(
         summary["monitor_canonical_write_failed"] = (
             summary.get("monitor_canonical_write_failed", 0) + 1
         )
-    monitor_fresh_prob = (
-        getattr(pos, "last_monitor_prob", None)
-        if bool(getattr(pos, "last_monitor_prob_is_fresh", False))
-        else None
+    monitor_fresh_prob, monitor_fresh_edge = (
+        _current_monitor_result_probability_and_edge(pos)
     )
-    monitor_fresh_edge = getattr(pos, "last_monitor_edge", None)
     artifact.add_monitor_result(
         deps.MonitorResult(
             position_id=pos.trade_id,
@@ -5195,20 +5192,17 @@ def execute_monitoring_phase(
 
         review_fact = _blocking_review_fact_for_position(portfolio, pos)
         if review_fact is not None:
-            artifact.add_monitor_result(
-                deps.MonitorResult(
-                    position_id=pos.trade_id,
-                    fresh_prob=None,
-                    fresh_edge=None,
-                    should_exit=False,
-                    exit_reason="REVIEW_REQUIRED_INVALID_ENTRY_PROOF",
-                    neg_edge_count=pos.neg_edge_count,
-                )
+            _record_monitor_hold_decision(
+                conn,
+                pos,
+                artifact=artifact,
+                deps=deps,
+                summary=summary,
+                reason="REVIEW_REQUIRED_INVALID_ENTRY_PROOF",
+                trigger="REVIEW_REQUIRED_INVALID_ENTRY_PROOF",
+                validation="blocking_review_fact_monitor_hold",
+                counter="monitor_skipped_blocking_review_fact",
             )
-            summary["monitor_skipped_blocking_review_fact"] = summary.get(
-                "monitor_skipped_blocking_review_fact",
-                0,
-            ) + 1
             continue
 
         if _position_direction_value(pos) not in {"buy_yes", "buy_no"}:
