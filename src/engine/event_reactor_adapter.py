@@ -3665,7 +3665,6 @@ _ENTRY_LIVE_HEALTH_REQUIRED_SURFACES = (
     "forecast_pipeline",
     "forecast_event_bridge",
     "entry_q_version",
-    "pending_exit_release_loop",
     "monitor_probability_freshness",
     "day0_decision_trace",
     "status_summary",
