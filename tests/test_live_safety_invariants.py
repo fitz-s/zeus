@@ -5976,8 +5976,9 @@ def test_monitoring_phase_persists_monitor_decision_with_refresh(tmp_path, monke
     conn.close()
 
 
-def test_family_monitor_point_value_cannot_veto_robust_exit_and_persists_payload():
-    """Point family value is diagnostic and cannot override a robust exit."""
+@pytest.mark.parametrize("direction", ["buy_yes", "buy_no"])
+def test_family_monitor_point_value_cannot_veto_robust_exit_and_persists_payload(direction):
+    """A near-one point estimate cannot override either side's robust exit."""
     from src.engine import cycle_runtime
     from src.engine.lifecycle_events import build_monitor_refreshed_canonical_write
     from src.state.lifecycle_manager import LifecyclePhase
@@ -5988,7 +5989,7 @@ def test_family_monitor_point_value_cannot_veto_robust_exit_and_persists_payload
         target_date="2026-06-19",
         temperature_metric="high",
         bin_label="29C",
-        direction="buy_no",
+        direction=direction,
         shares=7.0,
         entry_price=0.79,
         p_posterior=0.84,
@@ -6001,14 +6002,21 @@ def test_family_monitor_point_value_cannot_veto_robust_exit_and_persists_payload
         target_date="2026-06-19",
         temperature_metric="high",
         bin_label="31C",
-        direction="buy_no",
+        direction=direction,
         shares=5.55,
         entry_price=0.80,
         p_posterior=0.85,
         strategy_key="center_bin_buy",
         env="live",
     )
-    for pos, prob, bid in ((pos_a, 0.86, 0.71), (pos_b, 0.83, 0.75)):
+    # Live-shaped counterexample: q_point rounds to certainty while the
+    # side-correct current lower bound can still sit below the executable bid.
+    # The robust evaluator approved EXIT; the later point-only family summary
+    # must remain diagnostic.
+    for pos, prob, bid in (
+        (pos_a, 0.999999997246481, 0.95),
+        (pos_b, 0.9998, 0.96),
+    ):
         pos.last_monitor_at = "2026-06-18T23:25:00+00:00"
         pos.last_monitor_prob = prob
         pos.last_monitor_prob_is_fresh = True
@@ -6022,7 +6030,7 @@ def test_family_monitor_point_value_cannot_veto_robust_exit_and_persists_payload
     portfolio = _make_portfolio(pos_a, pos_b)
     single_leg_exit = ExitDecision(
         True,
-        reason="CI_SEPARATED_REVERSAL (entry=0.8900, current=0.8600)",
+        reason="CI_SEPARATED_REVERSAL (q_lcb=0.9430, bid=0.9500)",
         trigger="CI_SEPARATED_REVERSAL",
         selected_method="replacement_posterior",
         applied_validations=["replacement_posterior", "ci_separated_reversal"],
@@ -6060,6 +6068,7 @@ def test_family_monitor_point_value_cannot_veto_robust_exit_and_persists_payload
     assert family["preserved_exit_reason"] == single_leg_exit.reason
     assert family["value_authority"] == "point_estimate_diagnostic_only"
     assert family["can_veto_robust_exit"] is False
+    assert family["can_promote_robust_hold"] is False
     assert family["family_hold_value_usd"] > family["family_direct_sell_value_usd"]
 
 
@@ -6129,8 +6138,8 @@ def test_single_leg_monitor_records_family_redecision_value_payload():
     assert family["family_direct_sell_value_usd"] == pytest.approx(5.06 * 0.73)
 
 
-def test_family_monitor_overlay_promotes_hold_when_direct_sell_value_dominates():
-    """Continuous redecision must act when fresh family sell value beats hold value."""
+def test_family_monitor_point_value_cannot_promote_sell_over_robust_hold():
+    """Point family value is diagnostic and cannot override a robust hold."""
     from src.engine import cycle_runtime
     from src.engine.lifecycle_events import build_monitor_refreshed_canonical_write
     from src.state.lifecycle_manager import LifecyclePhase
@@ -6178,11 +6187,11 @@ def test_family_monitor_overlay_promotes_hold_when_direct_sell_value_dominates()
     )
     trigger = cycle_runtime._effective_exit_trigger(hold_decision, reason)
 
-    assert should_exit is True
-    assert reason == "FAMILY_DIRECT_SELL_DOMINATES_HOLD"
-    assert trigger == "FAMILY_DIRECT_SELL_DOMINATES_HOLD"
-    assert summary["family_redecision_hold_exits_promoted"] == 1
-    assert "family_direct_sell_dominates_hold_exit" in pos.applied_validations
+    assert should_exit is False
+    assert reason == hold_decision.reason
+    assert trigger == hold_decision.trigger
+    assert summary["family_redecision_robust_holds_preserved"] == 1
+    assert "family_point_value_cannot_promote_sell" in pos.applied_validations
 
     events, _projection = build_monitor_refreshed_canonical_write(
         pos,
@@ -6196,10 +6205,14 @@ def test_family_monitor_overlay_promotes_hold_when_direct_sell_value_dominates()
     )
     payload = json.loads(events[0]["payload_json"])
     family = payload["family_redecision"]
-    assert payload["exit_decision_should_exit"] is True
-    assert payload["exit_decision_reason"] == "FAMILY_DIRECT_SELL_DOMINATES_HOLD"
-    assert payload["exit_decision_trigger"] == "FAMILY_DIRECT_SELL_DOMINATES_HOLD"
-    assert family["decision"] == "FAMILY_DIRECT_SELL_DOMINATES_HOLD"
+    assert payload["exit_decision_should_exit"] is False
+    assert payload["exit_decision_reason"] == hold_decision.reason
+    assert payload["exit_decision_trigger"] == hold_decision.trigger
+    assert family["decision"] == "FAMILY_POINT_VALUE_DIAGNOSTIC_HOLD_PRESERVED"
+    assert family["preserved_hold_reason"] == hold_decision.reason
+    assert family["diagnostic_suggested_action"] == "SELL"
+    assert family["value_authority"] == "point_estimate_diagnostic_only"
+    assert family["can_promote_robust_hold"] is False
     assert family["belief_reversed_below_entry"] is True
     assert family["family_direct_sell_value_usd"] > family["family_hold_value_usd"]
     assert family["family_direct_sell_advantage_usd"] > family["family_direct_sell_advantage_threshold_usd"]

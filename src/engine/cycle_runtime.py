@@ -3747,13 +3747,13 @@ def _apply_family_monitor_overlay(
     exit_reason: str,
     summary: dict,
 ) -> tuple[bool, str]:
-    """Require a family value check before a statistical single-leg exit.
+    """Record family point value without overriding the robust exit decision.
 
     This is live monitor logic over already-refreshed held-side probabilities and
     held-side bids. It does not read replay data and it never creates a
-    new entry; it records the current family value evidence for every held
-    position and only prevents a single leg from liquidating when the current
-    family vector's hold value dominates its direct-sell value.
+    new entry. The point-value vector is diagnostic because it does not carry a
+    coherent current family probability distribution or the exit evaluator's
+    fee/time/crowding costs. It therefore cannot veto EXIT or promote SELL.
     """
 
     try:
@@ -3771,6 +3771,7 @@ def _apply_family_monitor_overlay(
         "mode": "live_family_hold_vs_direct_sell",
         "value_authority": "point_estimate_diagnostic_only",
         "can_veto_robust_exit": False,
+        "can_promote_robust_hold": False,
     }
     hold_value = 0.0
     sell_value = 0.0
@@ -3850,8 +3851,9 @@ def _apply_family_monitor_overlay(
         )
         return should_exit, exit_reason
 
-    # A high bid over a conservative belief is not a reversal by itself. Promote
-    # hold->sell here only when the held-side belief has fallen below entry.
+    # A high bid over a point belief is useful counterfactual evidence, not a
+    # second exit authority. Only Position.evaluate_exit owns the robust
+    # CI/cost-aware HOLD/EXIT decision.
     _entry_belief = getattr(pos, "p_posterior", None)
     _cur_belief = getattr(pos, "last_monitor_prob", None)
     _belief_reversed_below_entry = (
@@ -3874,17 +3876,18 @@ def _apply_family_monitor_overlay(
                 summary.get("family_redecision_day0_immature_exits_blocked", 0) + 1
             )
             return should_exit, exit_reason
-        payload["decision"] = "FAMILY_DIRECT_SELL_DOMINATES_HOLD"
-        payload["promoted_exit_reason"] = exit_reason
+        payload["decision"] = "FAMILY_POINT_VALUE_DIAGNOSTIC_HOLD_PRESERVED"
+        payload["preserved_hold_reason"] = exit_reason
+        payload["diagnostic_suggested_action"] = "SELL"
         payload["belief_reversed_below_entry"] = True
         setattr(pos, "_monitor_family_redecision", payload)
         validations = list(getattr(pos, "applied_validations", []) or [])
-        validations.append("family_direct_sell_dominates_hold_exit")
+        validations.append("family_point_value_cannot_promote_sell")
         pos.applied_validations = list(dict.fromkeys(validations))
-        summary["family_redecision_hold_exits_promoted"] = (
-            summary.get("family_redecision_hold_exits_promoted", 0) + 1
+        summary["family_redecision_robust_holds_preserved"] = (
+            summary.get("family_redecision_robust_holds_preserved", 0) + 1
         )
-        return True, "FAMILY_DIRECT_SELL_DOMINATES_HOLD"
+        return should_exit, exit_reason
 
     payload["decision"] = "FAMILY_OVERLAY_NO_OVERRIDE"
     setattr(pos, "_monitor_family_redecision", payload)
