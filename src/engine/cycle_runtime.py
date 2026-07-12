@@ -3803,6 +3803,11 @@ def _apply_family_monitor_overlay(
     leg_payloads: list[dict[str, object]] = []
     for leg in family_positions:
         shares, held_prob, best_bid, held_ci, reason = _monitor_value_inputs(leg)
+        # Only the position evaluated in this call is guaranteed to have a CI
+        # from this monitor cut. Sibling point values remain diagnostic; never
+        # reuse a sibling's transient bound from an earlier loop iteration.
+        if leg is not pos:
+            held_ci = None
         leg_payload: dict[str, object] = {
             "position_id": str(getattr(leg, "trade_id", "") or ""),
             "direction": str(getattr(leg, "direction", "") or ""),

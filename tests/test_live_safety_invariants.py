@@ -6081,6 +6081,7 @@ def test_family_monitor_point_value_cannot_veto_robust_exit_and_persists_payload
     assert family["legs"][0]["held_probability_ci_authority"] == (
         "current_edge_ci_shifted_to_held_probability"
     )
+    assert "held_probability_lcb" not in family["legs"][1]
 
 
 def test_single_leg_monitor_records_family_redecision_value_payload():
