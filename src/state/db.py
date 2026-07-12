@@ -11503,6 +11503,15 @@ def query_portfolio_loader_view(
         "chain_cost_basis_usd",
         "chain_seen_at",
         "chain_absence_at",
+        # Bug B (2026-07-12, docs live-DB evidence): the booked close economics
+        # (BUG #128's durable realized_pnl_usd / exit_price columns) must also
+        # round-trip through the loader. Without this, an economically_closed
+        # position reloads with Position.pnl/exit_price defaulted to 0.0,
+        # which the harvester's settlement projection then durably clobbers
+        # the correctly-booked values with (see
+        # tests/state/test_settlement_preserves_booked_close_economics.py).
+        "realized_pnl_usd",
+        "exit_price",
     )
     authority_select_expr = ", ".join(
         c if c in actual_cols else f"NULL AS {c}" for c in _authority_cols
@@ -11668,6 +11677,12 @@ def query_portfolio_loader_view(
                 "chain_avg_price": _finite_float_or_none(row["chain_avg_price"]) or 0.0,
                 "chain_cost_basis_usd": _finite_float_or_none(row["chain_cost_basis_usd"]) or 0.0,
                 "recovery_authority": str(row["recovery_authority"] or ""),
+                # Bug B (2026-07-12): booked close economics round-trip into
+                # Position.pnl / Position.exit_price via
+                # _position_from_projection_row. NULL (not 0.0-coerced) so an
+                # open/legacy row is distinguishable from a real $0.00 close.
+                "realized_pnl_usd": _finite_float_or_none(row["realized_pnl_usd"]),
+                "exit_price": _finite_float_or_none(row["exit_price"]),
             }
         )
     return {
