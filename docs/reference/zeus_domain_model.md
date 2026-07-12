@@ -181,11 +181,11 @@ pending_entry → active → day0_window → pending_exit → economically_close
 Terminal states: voided, settled, admin_closed
 ```
 
-`quarantined` is NOT terminal — its fold widened to `{quarantined, settled,
-voided}` (P0c 2026-07-04, `docs/rebuild/chain_mirror_state_model_2026-07-04.md`
-§5) so the chain-mirror reconciler can close a quarantined row once chain
-truth grades it. It is a review/investigation phase, retired entirely when
-`docs/rebuild/quarantine_excision_2026-07-11.md` (T5) lands.
+`quarantined` is retired from `LifecyclePhase` entirely (T5,
+`docs/rebuild/quarantine_excision_2026-07-11.md`) — no writer mints it. A
+confirmed-fill/chain-absence dispute keeps the position's TRUE phase and the
+dispute lives in a typed `ReviewWorkItem` (`src/contracts/review_work_item.py`),
+never in this enum.
 
 Critical distinctions:
 - **Exit ≠ close**: `EXIT_INTENT` is a lifecycle event; economic closure is separate

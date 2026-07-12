@@ -1969,7 +1969,9 @@ test_metadata:
       Relationship test. Parametrizes over (branch, eligible_flag). Eligible=True asserts
       no D6-field mutation and cost_basis_chain_mutation_blocked_total{field} emitted.
       Eligible=False asserts mutation proceeds unchanged (legacy invariant preserved).
-      Covers RESCUE, SIZE-MISMATCH, and QUARANTINE branches across all 4 locked D6 fields.
+      Covers RESCUE, SIZE-MISMATCH-with-baseline, and SIZE-MISMATCH-without-baseline
+      (mirror-shape correction, no state mutation — QUARANTINE branch retired
+      2026-07-11 per T5) branches across all 4 locked D6 fields.
   tests/test_position_projection_d6_counters.py:
     modules: [state]
     category: core_law_antibody

@@ -36,7 +36,7 @@ When fired, this SKILL ensures the agent reads:
    - 2. **Confirmed bounded** — change at bounded scope with discipline
    - 3. **Confirmed unbounded** — change at full scope (rare; multiple pass-gates required)
    - 4. **Inconclusive** — defer; iterate on the audit
-   - 5. **CONDITIONAL-REVERT-PENDING-OTHER-SESSION-COMPLETION (Stage-gated revert)** — for already-contaminated state across session boundaries; revert+quarantine NOW + condition future restoration on independent critic gate + staged restoration as evidence accumulates
+   - 5. **CONDITIONAL-REVERT-PENDING-OTHER-SESSION-COMPLETION (Stage-gated revert)** — for already-contaminated state across session boundaries; revert+isolate NOW + condition future restoration on independent critic gate + staged restoration as evidence accumulates
 
 4. **§5.Z2 codified gates** (mandatory before locking ANY % claim):
    - Bidirectional grep (forward: manifest cites field? + reverse: target system back-cites identity?)

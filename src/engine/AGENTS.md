@@ -37,7 +37,7 @@ evaluation.
   have separate orchestration paths or separate lifecycle rules.
 
 - **Reconciliation runs before evaluation every cycle.** The chain/local
-  convergence check (SYNCED/VOID/QUARANTINE) must complete before the
+  convergence check (SYNCED/VOID/CHAIN_ONLY) must complete before the
   evaluator makes new trading decisions. Skipping or reordering this
   creates stale position state.
 

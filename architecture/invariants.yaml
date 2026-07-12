@@ -143,7 +143,7 @@ invariants:
         - tests/test_k2_live_ingestion_relationships.py::test_R6_scanner_missing_flipped_to_written_by_append
         - tests/test_k2_live_ingestion_relationships.py::test_R9_written_cannot_be_downgraded_to_missing
         - tests/test_runtime_guards.py::test_day0_missing_observation_is_pre_vector_traceable
-        - tests/test_runtime_guards.py::test_load_portfolio_rehydrates_chain_only_quarantine_fact_when_projection_degraded
+        - tests/test_runtime_guards.py::test_load_portfolio_dedupes_chain_only_fact_when_projection_already_has_token
         - tests/test_runtime_guards.py::test_partial_stale_policy_uses_degraded_json_fallback
         - tests/test_collateral_ledger.py::test_authority_tier_DEGRADED_when_chain_unreachable
     capability_tags: []

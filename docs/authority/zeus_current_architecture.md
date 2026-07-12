@@ -238,18 +238,20 @@ Terminal phases:
 - `settled`
 - `admin_closed`
 
-`quarantined` is NOT terminal today: `LEGAL_LIFECYCLE_FOLDS` (P0c,
-2026-07-04) widened its fold to `{quarantined, settled, voided}` so the
-chain-mirror reconciler can legally close a quarantined row once chain truth
-grades it — see `docs/reference/zeus_execution_lifecycle_reference.md`
-§1.1-1.2 and `docs/rebuild/chain_mirror_state_model_2026-07-04.md` §5.
-`quarantined` is a review/investigation phase, not a market terminal.
-Retirement of the phase itself (and this note) is tracked by
-`docs/rebuild/quarantine_excision_2026-07-11.md` (T5).
+`quarantined` is retired from `LifecyclePhase` entirely (T5,
+`docs/rebuild/quarantine_excision_2026-07-11.md`) — no writer mints it. A
+confirmed-fill/chain-absence dispute keeps the position's TRUE phase
+(`active`/`pending_exit`) and the dispute lives in a typed `ReviewWorkItem`
+(`src/contracts/review_work_item.py`), never in a lifecycle phase.
+Chain-only unknown assets are not Position rows and carry no lifecycle
+phase — they are typed `ChainOnlyFact` records
+(`src/state/chain_reconciliation.py`) read directly by the risk view, with a
+family-scoped entry block and worst-case exposure counted into risk caps.
+See `docs/reference/zeus_execution_lifecycle_reference.md` §1.1-1.2, §2.2
+Rule 3.
 
-Exit intent is not closure. Settlement is not exit. Quarantine is not a normal
-holding state. No helper, report, strategy, or LLM-generated patch may invent
-phase strings.
+Exit intent is not closure. Settlement is not exit. No helper, report,
+strategy, or LLM-generated patch may invent phase strings.
 
 ### 8.3 Append-First Authority
 
@@ -278,7 +280,8 @@ It controls:
 `edge_source`, `discovery_mode`, `entry_method`, scheduler mode, and similar
 fields are metadata. They must not compete as governance centers.
 
-If exact attribution is missing, fail, quarantine, or mark the record degraded.
+If exact attribution is missing, fail or mark the record degraded —
+DATA_DEGRADED is the only non-failing lane for missing truth input.
 Do not invent fallback governance buckets.
 
 ---
@@ -357,7 +360,7 @@ Allowed autonomous control commands in the current phase:
 Advisory-only commands:
 
 - `set_strategy_gate`
-- `acknowledge_quarantine_clear`
+- `resolve_review_item`
 
 Human-gated commands:
 
