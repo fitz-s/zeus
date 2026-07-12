@@ -556,10 +556,23 @@ def _rebuild_table_drop_literals(
         conn.execute(f"ALTER TABLE {prefix}{migrated_name} RENAME TO {table}")
     finally:
         conn.execute("PRAGMA legacy_alter_table = OFF")
+    def _schema_qualify(sql: str) -> str:
+        # Recorded DDL never carries the schema; on this ATTACHed connection an
+        # unqualified CREATE INDEX/TRIGGER would land in main (the trade DB).
+        if not schema:
+            return sql
+        for kw in ("CREATE UNIQUE INDEX ", "CREATE INDEX ", "CREATE TRIGGER "):
+            if sql.startswith(kw):
+                return f"{kw}{schema}." + sql[len(kw):]
+        raise RuntimeError(
+            f"T5 rebuild: unrecognized DDL prefix while re-creating on "
+            f"{schema}.{table}: {sql[:60]!r}"
+        )
+
     for (index_sql,) in index_rows:
-        conn.execute(index_sql)
+        conn.execute(_schema_qualify(index_sql))
     for (trigger_sql,) in trigger_rows:
-        conn.execute(trigger_sql)
+        conn.execute(_schema_qualify(trigger_sql))
 
     post_hash = _table_content_hash(conn, schema, table, pk_col)
     return RebuildResult(
@@ -957,9 +970,10 @@ def main(argv: Optional[list[str]] = None) -> int:
         indent=2,
         sort_keys=True,
     ))
-    (backup_dir / "receipt.json").write_text(
-        json.dumps({"finished_at": receipt.finished_at, "epoch": TARGET_SCHEMA_EPOCH}, indent=2)
-    )
+    if not args.skip_backup:
+        (backup_dir / "receipt.json").write_text(
+            json.dumps({"finished_at": receipt.finished_at, "epoch": TARGET_SCHEMA_EPOCH}, indent=2)
+        )
     return 0
 
 
