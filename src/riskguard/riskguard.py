@@ -2362,7 +2362,22 @@ def _tick_once() -> RiskLevel:
         # a YELLOW breach that is fully attributable to canonical strategies can
         # be enforced through durable strategy gates. Stronger ORANGE/RED
         # breaches remain global fail-closed.
-        portfolio_brier_level = evaluate_brier(b_score, thresholds) if p_forecasts else RiskLevel.GREEN
+        portfolio_brier_raw_level = (
+            evaluate_brier(b_score, thresholds) if p_forecasts else RiskLevel.GREEN
+        )
+        portfolio_brier_thin_sample = (
+            0 < len(p_forecasts) < _STRATEGY_BRIER_MIN_SAMPLE
+        )
+        # A pooled probability score has no more authority than its evidence.
+        # One confident loss can exceed the RED threshold, but it cannot prove
+        # that every current candidate is unsafe.  Keep the raw score/level for
+        # learning and operator telemetry; only let it actuate RiskGuard once
+        # the same minimum evidence floor used by strategy attribution exists.
+        portfolio_brier_level = (
+            RiskLevel.GREEN
+            if portfolio_brier_thin_sample
+            else portfolio_brier_raw_level
+        )
         brier_level = portfolio_brier_level
         brier_strategy_breakdown = _strategy_brier_breakdown(brier_metric_rows, thresholds) if p_forecasts else {
             "by_strategy": {},
@@ -2372,7 +2387,11 @@ def _tick_once() -> RiskLevel:
         }
         brier_strategy_localization: dict[str, object] = {
             "status": "not_applicable",
-            "reason": "portfolio_brier_green",
+            "reason": (
+                "portfolio_brier_thin_sample_no_verdict"
+                if portfolio_brier_thin_sample
+                else "portfolio_brier_green"
+            ),
         }
         settlement_quality_level = RiskLevel.GREEN
         if settlement_rows and not settlement_metric_ready_rows:
@@ -2725,6 +2744,8 @@ def _tick_once() -> RiskLevel:
             json.dumps({
                 "brier_level": brier_level.value,
                 "portfolio_brier_level": portfolio_brier_level.value,
+                "portfolio_brier_raw_level": portfolio_brier_raw_level.value,
+                "portfolio_brier_thin_sample_no_verdict": portfolio_brier_thin_sample,
                 # ORANGE-localization audit surface (2026-07-04): the raw,
                 # unfiltered portfolio view (all strategies pooled) vs. the
                 # view that actually DRIVES admission after any localization

@@ -2947,6 +2947,76 @@ class TestStrategyBrierMinSample:
         assert "opening_inertia" not in out["degraded_strategies"]
         assert out["by_strategy"]["opening_inertia"]["thin_sample_no_verdict"] is True
 
+    @pytest.mark.parametrize(
+        ("sample_size", "expected_level", "expected_thin", "expected_reason"),
+        [
+            (1, RiskLevel.GREEN, True, "portfolio_brier_thin_sample_no_verdict"),
+            (10, RiskLevel.RED, False, "portfolio_brier_requires_global_level"),
+        ],
+    )
+    def test_portfolio_brier_requires_minimum_evidence(
+        self,
+        monkeypatch,
+        tmp_path,
+        sample_size,
+        expected_level,
+        expected_thin,
+        expected_reason,
+    ):
+        zeus_db = tmp_path / "zeus.db"
+        risk_db = tmp_path / "risk_state.db"
+
+        def _fake_get_connection(path=None, **_kwargs):
+            if path == riskguard_module.RISK_DB_PATH:
+                return get_connection(risk_db)
+            return get_connection(zeus_db)
+
+        _init_empty_canonical_portfolio_schema(zeus_db)
+        _patch_riskguard_bankroll(monkeypatch)
+        monkeypatch.setattr(riskguard_module, "get_connection", _fake_get_connection)
+        monkeypatch.setattr(
+            riskguard_module,
+            "load_portfolio",
+            lambda: PortfolioState(bankroll=211.37),
+        )
+        monkeypatch.setattr(
+            riskguard_module,
+            "load_tracker",
+            lambda: strategy_tracker_module.StrategyTracker(),
+        )
+        monkeypatch.setattr(
+            riskguard_module,
+            "query_authoritative_settlement_rows",
+            lambda *_, **__: [
+                _settlement_row(
+                    trade_id=f"loss-{i}",
+                    strategy="forecast_qkernel_entry",
+                    p_posterior=0.9033,
+                    outcome=0,
+                )
+                for i in range(sample_size)
+            ],
+        )
+
+        level = riskguard_module.tick()
+        row = get_connection(risk_db).execute(
+            "SELECT level, brier, details_json FROM risk_state ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        details = json.loads(row["details_json"])
+
+        assert row["brier"] > 0.8
+        assert details["portfolio_brier_raw_level"] == "RED"
+        assert details["portfolio_brier_level"] == expected_level.value
+        assert details["brier_level"] == expected_level.value
+        assert details["portfolio_brier_thin_sample_no_verdict"] is expected_thin
+        assert (
+            details["brier_strategy_localization"]["reason"]
+            == expected_reason
+        )
+        assert details["recommended_strategy_gates"] == []
+        assert level == expected_level
+        assert row["level"] == expected_level.value
+
 
 class TestRiskGuardExecutionQualityLocalization:
     """Regression guard (2026-07-05, INV-05): fill-rate is no longer a risk
