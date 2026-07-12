@@ -4424,6 +4424,38 @@ def _canonical_exit_trade_fact_cte(cte_name: str = "canonical_exit_trade_fact") 
     """
 
 
+def _economic_exit_trade_fact_cte(
+    *,
+    canonical_cte_name: str = "canonical_exit_trade_fact",
+    cte_name: str = "economic_exit_trade_fact",
+) -> str:
+    """Exclude a tx-hash alias once an exact child trade fact exists."""
+
+    return f"""
+        {cte_name} AS (
+            SELECT fact.*
+              FROM {canonical_cte_name} fact
+             WHERE NOT (
+                    TRIM(COALESCE(fact.tx_hash, '')) != ''
+                AND LOWER(TRIM(COALESCE(fact.trade_id, '')))
+                    = LOWER(TRIM(fact.tx_hash))
+                AND EXISTS (
+                        SELECT 1
+                          FROM {canonical_cte_name} exact
+                         WHERE exact.command_id = fact.command_id
+                           AND LOWER(TRIM(COALESCE(exact.tx_hash, '')))
+                               = LOWER(TRIM(fact.tx_hash))
+                           AND LOWER(TRIM(COALESCE(exact.trade_id, '')))
+                               != LOWER(TRIM(COALESCE(fact.trade_id, '')))
+                           AND UPPER(COALESCE(exact.state, ''))
+                               IN ('MATCHED', 'MINED', 'CONFIRMED')
+                           AND CAST(COALESCE(exact.filled_size, '0') AS REAL) > 0
+                    )
+                )
+        )
+    """
+
+
 def _exit_close_target_size(position: Position, command_size: object) -> Decimal | None:
     candidates = [
         _positive_decimal(command_size),
@@ -4465,6 +4497,8 @@ def _exit_trade_fact_close_candidate(
         row = conn.execute(
             "WITH "
             + _canonical_exit_trade_fact_cte()
+            + ", "
+            + _economic_exit_trade_fact_cte()
             + f"""
             SELECT cmd.command_id,
                    cmd.venue_order_id,
@@ -4478,7 +4512,7 @@ def _exit_trade_fact_close_candidate(
                    GROUP_CONCAT(DISTINCT UPPER(COALESCE(fact.state, ''))) AS fill_states,
                    MAX(COALESCE(NULLIF(fact.venue_timestamp, ''), fact.observed_at)) AS observed_at
               FROM venue_commands cmd
-              JOIN canonical_exit_trade_fact fact
+              JOIN economic_exit_trade_fact fact
                 ON fact.command_id = cmd.command_id
              WHERE cmd.position_id = ?
                AND UPPER(COALESCE(cmd.intent_kind, '')) = 'EXIT'
@@ -4549,6 +4583,8 @@ def _exit_trade_fact_confirmation_pending_candidate(
         row = conn.execute(
             "WITH "
             + _canonical_exit_trade_fact_cte()
+            + ", "
+            + _economic_exit_trade_fact_cte()
             + f"""
             SELECT cmd.command_id,
                    cmd.venue_order_id,
@@ -4562,7 +4598,7 @@ def _exit_trade_fact_confirmation_pending_candidate(
                    GROUP_CONCAT(DISTINCT UPPER(COALESCE(fact.state, ''))) AS fill_states,
                    MAX(COALESCE(NULLIF(fact.venue_timestamp, ''), fact.observed_at)) AS observed_at
               FROM venue_commands cmd
-              JOIN canonical_exit_trade_fact fact
+              JOIN economic_exit_trade_fact fact
                 ON fact.command_id = cmd.command_id
              WHERE cmd.position_id = ?
                AND UPPER(COALESCE(cmd.intent_kind, '')) = 'EXIT'

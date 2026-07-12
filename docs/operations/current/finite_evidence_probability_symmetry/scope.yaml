@@ -18,6 +18,7 @@ allowed_files:
 - src/execution/command_recovery.py
 - src/execution/exchange_reconcile.py
 - src/execution/executor.py
+- src/execution/exit_lifecycle.py
 - tests/engine/test_event_reactor_live_qkernel_gate.py
 - tests/test_finite_evidence_probability_symmetry.py
 - tests/execution/test_venue_sync_contract.py
@@ -26,6 +27,7 @@ allowed_files:
 - tests/test_command_recovery.py
 - tests/test_exchange_reconcile.py
 - tests/test_executor_command_split.py
+- tests/test_exit_safety.py
 - tests/solve/test_shim_decide.py
 - tests/integration/test_qkernel_spine_blockers_pr409.py
 - tests/AGENTS.md

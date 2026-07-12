@@ -1,6 +1,6 @@
 # Created: 2026-04-27
-# Last reused/audited: 2026-07-09
-# Lifecycle: created=2026-04-27; last_reviewed=2026-06-18; last_reused=2026-07-02
+# Last reused/audited: 2026-07-11
+# Lifecycle: created=2026-04-27; last_reviewed=2026-07-11; last_reused=2026-07-11
 # Authority basis: docs/operations/task_2026-04-26_ultimate_plan/r3/slice_cards/M4.yaml; task.md B1/B3 live-runtime follow-up
 # Purpose: Lock R3 M4 cancel/replace exit mutex, typed cancel outcomes, replacement gates, and CTF preflight.
 # Reuse: Run when exit_safety, executor exit submit, exit_lifecycle cancel retry, venue command transitions, or collateral sell preflight changes.
@@ -2413,6 +2413,60 @@ def test_pending_exit_existing_confirmed_trade_fact_closes_before_retry_or_cance
         "command_id": "cmd-exit-filled",
         "venue_status": "sell_filled",
     }
+
+
+def test_pending_exit_confirmed_tx_alias_cannot_fake_full_close(conn):
+    from src.execution.exit_lifecycle import _exit_trade_fact_close_candidate
+    from src.state.portfolio import Position
+    from src.state.venue_command_repo import append_trade_fact
+
+    position = Position(
+        trade_id="pos-partial-exit-alias",
+        market_id="condition-partial-exit-alias",
+        city="Paris",
+        cluster="Paris",
+        target_date="2026-07-08",
+        bin_label="Will the highest temperature in Paris be 34C on July 8?",
+        direction="buy_yes",
+        unit="C",
+        size_usd=50.0,
+        entry_price=0.5,
+        shares=100.0,
+        cost_basis_usd=50.0,
+        state="pending_exit",
+        exit_state="retry_pending",
+        token_id=YES_TOKEN,
+        no_token_id=NO_TOKEN,
+        chain_state="synced",
+        chain_shares=100.0,
+        last_exit_order_id="ord-partial-exit-alias",
+    )
+    _insert_exit_command(
+        conn,
+        command_id="cmd-partial-exit-alias",
+        position_id=position.trade_id,
+        size=100.0,
+        price=0.5,
+        venue_order_id="ord-partial-exit-alias",
+    )
+    tx_hash = "0xpartial-exit-alias"
+    for trade_id in ("trade-partial-exit-alias", tx_hash):
+        append_trade_fact(
+            conn,
+            trade_id=trade_id,
+            venue_order_id="ord-partial-exit-alias",
+            command_id="cmd-partial-exit-alias",
+            state="CONFIRMED",
+            filled_size="50",
+            fill_price="0.5",
+            source="WS_USER" if trade_id != tx_hash else "REST",
+            observed_at="2026-07-08T14:42:59+00:00",
+            raw_payload_hash=hashlib.sha256(trade_id.encode()).hexdigest(),
+            raw_payload_json={"trade_id": trade_id, "tx_hash": tx_hash},
+            tx_hash=tx_hash,
+        )
+
+    assert _exit_trade_fact_close_candidate(conn, position) is None
 
 
 @pytest.mark.parametrize("state", ["MATCHED", "MINED"])
