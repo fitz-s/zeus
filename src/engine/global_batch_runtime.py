@@ -861,15 +861,21 @@ def process_current_global_batch(
         log_winner("select_initial", selected, probabilities)
         if selected.actuation is None:
             return reject("GLOBAL_WINNER_ACTUATION_MISSING")
-        selected, winner, next_claim = bind_selected_winner(selected)
-        if winner is None:
-            if next_claim is None:
-                return reject("GLOBAL_WINNER_IDENTITY_MISSING")
-            return reject(
-                "GLOBAL_WINNER_AWAITS_CLAIM",
-                next_claim_event=next_claim,
-            )
-        winner_id = winner.event_id
+        winner_id = selected.winner_event_id
+        winner = next(
+            (event for event in event_tuple if event.event_id == winner_id),
+            None,
+        )
+        if preflight_winner is None:
+            selected, winner, next_claim = bind_selected_winner(selected)
+            if winner is None:
+                if next_claim is None:
+                    return reject("GLOBAL_WINNER_IDENTITY_MISSING")
+                return reject(
+                    "GLOBAL_WINNER_AWAITS_CLAIM",
+                    next_claim_event=next_claim,
+                )
+            winner_id = winner.event_id
 
         binding_token = None
         preflight_ineligible_by_event: dict[str, str] = {}

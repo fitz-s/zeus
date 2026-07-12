@@ -2651,15 +2651,14 @@ def test_global_batch_claims_unpaged_cut_time_winner_and_continues_actuation(
         ),
     )
 
-    assert len(claimed_targets) == 2
-    assert claimed_targets[0].event_id != claimed_targets[1].event_id
-    assert fenced.winner_event_id == claimed_targets[1].event_id
+    assert len(claimed_targets) == 1
+    assert claimed_targets[0].source.endswith(f":{fence_economic_identity}")
+    assert fenced.winner_event_id == claimed_targets[0].event_id
     assert fenced.venue_submit_count == 1
     assert fence_selection_calls[0] == 2
     assert set(fenced.receipts) == {
         event_a.event_id,
         claimed_targets[0].event_id,
-        claimed_targets[1].event_id,
     }
 
 
