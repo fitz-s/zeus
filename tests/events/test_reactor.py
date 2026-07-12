@@ -236,7 +236,12 @@ def _global_batch_probe_reactor(
         observations["direct_submit_calls"] += 1
         raise AssertionError("global batch path must not invoke per-event submit")
 
-    def _process_global_batch(events, _decision_time):
+    def _process_global_batch(
+        events,
+        _decision_time,
+        *,
+        claim_unpaged_winner=None,
+    ):
         observations["batch_calls"] += 1
         observations["batch_event_ids"] = tuple(event.event_id for event in events)
         observations["mutex_locked_at_batch"] = world_write_mutex().locked()
@@ -431,6 +436,116 @@ def test_global_batch_materializes_unclaimed_winner_as_next_claim():
     )[0].event_id == target.event_id
 
 
+def test_global_batch_claims_unpaged_winner_inside_same_epoch():
+    from src.engine.global_batch_runtime import _next_claim_carrier
+
+    conn, store = _store()
+    claimed = _forecast_event("same-epoch-owner", target_date="2099-05-25")
+    target = _next_claim_carrier(
+        claimed,
+        targeted_at=_DT_VENUE_OPEN,
+        economic_identity="same-epoch-economic-identity",
+        payload=json.loads(claimed.payload_json),
+    )
+    store.insert_or_ignore(claimed)
+    observations = {}
+    reactor = _global_batch_probe_reactor(store, observations)
+
+    def _same_epoch_batch(events, _decision_time, *, claim_unpaged_winner):
+        assert tuple(event.event_id for event in events) == (claimed.event_id,)
+        assert claim_unpaged_winner(target) is True
+        assert _processing_status(conn, target.event_id) == "processing"
+        receipts = {
+            event.event_id: EventSubmissionReceipt(
+                False,
+                event.event_id,
+                event.causal_snapshot_id,
+                reason="SUBMIT_ABORTED_PRICE_MOVED:GLOBAL_TEST_RETRY",
+                proof_accepted=False,
+            )
+            for event in (claimed, target)
+        }
+        return GlobalBatchSubmitResult(
+            receipts=receipts,
+            winner_event_id=target.event_id,
+            venue_submit_count=0,
+        )
+
+    reactor._submit.process_global_batch = _same_epoch_batch
+    result = reactor.process_pending(decision_time=_DT_VENUE_OPEN, limit=1)
+
+    assert result.retried == 2
+    assert _processing_status(conn, claimed.event_id) == "pending"
+    assert _processing_status(conn, target.event_id) == "pending"
+
+
+def test_global_batch_recovers_unpaged_claim_when_batch_raises():
+    from src.engine.global_batch_runtime import _next_claim_carrier
+
+    conn, store = _store()
+    claimed = _forecast_event("same-epoch-error", target_date="2099-05-25")
+    target = _next_claim_carrier(
+        claimed,
+        targeted_at=_DT_VENUE_OPEN,
+        economic_identity="same-epoch-error-economic-identity",
+        payload=json.loads(claimed.payload_json),
+    )
+    store.insert_or_ignore(claimed)
+    observations = {}
+    reactor = _global_batch_probe_reactor(store, observations)
+
+    def _raise_after_claim(events, _decision_time, *, claim_unpaged_winner):
+        assert claim_unpaged_winner(target) is True
+        raise RuntimeError("post-claim test failure")
+
+    reactor._submit.process_global_batch = _raise_after_claim
+    result = reactor.process_pending(decision_time=_DT_VENUE_OPEN, limit=1)
+
+    assert result.retried == 2
+    assert _processing_status(conn, claimed.event_id) == "pending"
+    assert _processing_status(conn, target.event_id) == "pending"
+    assert conn.execute(
+        "SELECT COUNT(*) FROM opportunity_event_processing "
+        "WHERE event_id IN (?, ?) AND processing_status='processing'",
+        (claimed.event_id, target.event_id),
+    ).fetchone()[0] == 0
+
+
+def test_same_epoch_winner_claim_rejects_changed_batch_generation():
+    from src.engine.global_batch_runtime import _next_claim_carrier
+
+    conn, store = _store()
+    claimed = _forecast_event("same-epoch-race", target_date="2099-05-25")
+    target = _next_claim_carrier(
+        claimed,
+        targeted_at=_DT_VENUE_OPEN,
+        economic_identity="same-epoch-race-economic-identity",
+        payload=json.loads(claimed.payload_json),
+    )
+    store.insert_or_ignore(claimed)
+    actual_generation = "2026-05-25T06:10:01+00:00"
+    assert store.claim(claimed.event_id, claimed_at=actual_generation)
+    conn.commit()
+    reactor = _global_batch_probe_reactor(store, {})
+
+    result = reactor._claim_global_winner_for_actuation(
+        target,
+        current_batch_claim_generations={
+            claimed.event_id: "2026-05-25T06:10:00+00:00"
+        },
+    )
+
+    assert result is None
+    assert conn.execute(
+        "SELECT 1 FROM opportunity_events WHERE event_id = ?",
+        (target.event_id,),
+    ).fetchone() is None
+    assert conn.execute(
+        "SELECT claimed_at FROM opportunity_event_processing WHERE event_id = ?",
+        (claimed.event_id,),
+    ).fetchone()[0] == actual_generation
+
+
 def test_global_batch_defers_target_when_claim_is_reclaimed_during_solve():
     from src.engine.global_batch_runtime import _next_claim_carrier
 
@@ -451,13 +566,13 @@ def test_global_batch_defers_target_when_claim_is_reclaimed_during_solve():
     )
     process_batch = reactor._submit.process_global_batch
 
-    def _reclaim_then_solve(events, decision_time):
+    def _reclaim_then_solve(events, decision_time, **kwargs):
         assert store.claim(
             events[0].event_id,
             claimed_at="2026-05-25T06:16:00+00:00",
         )
         conn.commit()
-        return process_batch(events, decision_time)
+        return process_batch(events, decision_time, **kwargs)
 
     reactor._submit.process_global_batch = _reclaim_then_solve
 

@@ -1160,14 +1160,40 @@ class OpportunityEventReactor:
         if not claimed:
             return attempted
 
-        claimed_ids = frozenset(event.event_id for event in claimed)
         process_batch = getattr(self._submit, "process_global_batch")
+
+        def _claim_unpaged_winner(event: OpportunityEvent) -> bool:
+            generation = self._claim_global_winner_for_actuation(
+                event,
+                current_batch_claim_generations=dict(claim_generations),
+            )
+            if generation is None:
+                return False
+            claimed.append(event)
+            claim_generations[event.event_id] = generation
+            return True
+
+        def _finalization_time(event: OpportunityEvent) -> datetime:
+            raw = claim_generations.get(event.event_id)
+            if not raw:
+                return decision_time
+            try:
+                claimed_at = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+            except ValueError:
+                return decision_time
+            if claimed_at.tzinfo is None:
+                return decision_time
+            return max(decision_time, claimed_at.astimezone(UTC))
+
         try:
             batch_result = process_batch(
-                tuple(claimed), decision_time.astimezone(UTC)
+                tuple(claimed),
+                decision_time.astimezone(UTC),
+                claim_unpaged_winner=_claim_unpaged_winner,
             )
             if not isinstance(batch_result, GlobalBatchSubmitResult):
                 raise TypeError("global batch adapter returned an invalid result")
+            claimed_ids = frozenset(event.event_id for event in claimed)
             if set(batch_result.receipts) != set(claimed_ids):
                 raise ValueError("global batch receipts do not cover exactly the claimed epoch")
             if (
@@ -1197,7 +1223,7 @@ class OpportunityEventReactor:
                         reason=f"GLOBAL_BATCH_FAILED:{type(exc).__name__}:{exc}",
                         proof_accepted=False,
                     ),
-                    decision_time=decision_time,
+                    decision_time=_finalization_time(event),
                     result=result,
                 )
             return attempted
@@ -1206,7 +1232,7 @@ class OpportunityEventReactor:
             self._finalize_deferred_event_unit(
                 event,
                 batch_result.receipts[event.event_id],
-                decision_time=decision_time,
+                decision_time=_finalization_time(event),
                 result=result,
             )
         return attempted
@@ -1232,6 +1258,39 @@ class OpportunityEventReactor:
                 )
                 self._store.conn.commit()
                 return queued
+            except Exception:
+                self._store.conn.rollback()
+                raise
+        finally:
+            mutex.release()
+
+    def _claim_global_winner_for_actuation(
+        self,
+        event: OpportunityEvent,
+        *,
+        current_batch_claim_generations: dict[str, str],
+    ) -> str | None:
+        """Atomically materialize and claim one unpaged cut-time winner."""
+
+        mutex = world_write_mutex()
+        mutex.acquire()
+        try:
+            if self._store.conn.in_transaction:
+                raise RuntimeError("GLOBAL_WINNER_CLAIM_WORLD_TXN_OPEN")
+            self._store.conn.execute("BEGIN IMMEDIATE")
+            try:
+                if not self._store.prioritize_global_winner(
+                    event,
+                    current_batch_claim_generations=current_batch_claim_generations,
+                ):
+                    self._store.conn.rollback()
+                    return None
+                claimed_at = datetime.now(UTC).isoformat()
+                if not self._store.claim(event.event_id, claimed_at=claimed_at):
+                    self._store.conn.rollback()
+                    return None
+                self._store.conn.commit()
+                return claimed_at
             except Exception:
                 self._store.conn.rollback()
                 raise

@@ -26,7 +26,7 @@ import sqlite3
 import subprocess
 import sys
 import textwrap
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from decimal import Decimal
 from types import SimpleNamespace
 
@@ -2356,6 +2356,311 @@ def test_global_batch_waits_until_global_winner_family_is_claimed(monkeypatch):
     )
     assert repeated.event_id == result.next_claim_event.event_id
     assert result.receipts[event_a.event_id].reason == "GLOBAL_WINNER_AWAITS_CLAIM"
+
+
+def test_global_batch_claims_unpaged_cut_time_winner_and_continues_actuation(
+    monkeypatch,
+):
+    from src.engine.global_single_order_auction import (
+        GlobalSingleOrderActuation,
+        PreparedGlobalAuctionResult,
+    )
+
+    decision_at = _dt.datetime(2026, 7, 10, 8, 0, tzinfo=_dt.timezone.utc)
+    event_a = _global_scope_event(city="Alpha", source_run_id="run-a")
+    event_b = _global_scope_event(city="Beta", source_run_id="run-b")
+    scope = current_global_auction_scope_from_events(
+        (event_a, event_b), captured_at_utc=decision_at
+    )
+    family_a, family_b = scope.family_keys
+
+    def _witness(family_key, suffix):
+        return SimpleNamespace(
+            family_key=family_key,
+            witness_identity=f"probability-{suffix}",
+            posterior_identity_hash=f"run-{suffix}",
+            q_version=f"q-{suffix}",
+            family_binding_identity=f"family-binding-{suffix}",
+            sample_matrix_identity=f"sample-matrix-{suffix}",
+            band_alpha=0.05,
+            band_basis="lower-tail",
+            captured_at_utc=decision_at,
+        )
+
+    witness_a = _witness(family_a, "a")
+    witness_b = _witness(family_b, "b")
+    curve = SimpleNamespace(
+        book_hash="book-b",
+        levels=(SimpleNamespace(price=Decimal("0.40"), size=Decimal("10")),),
+        fee_model=SimpleNamespace(fee_rate=Decimal("0")),
+        min_tick=Decimal("0.01"),
+        min_order_size=Decimal("5"),
+        quote_ttl=_dt.timedelta(seconds=30),
+    )
+    candidate = SimpleNamespace(
+        candidate_id="candidate-b",
+        family_key=family_b,
+        bin_id="20C",
+        condition_id="condition-b",
+        side="YES",
+        token_id="token-b",
+        probability_witness_identity=witness_b.witness_identity,
+        book_snapshot_id="book-snapshot-b",
+        execution_curve_identity="curve-b",
+        executable_cost_curve=curve,
+        resolution_identity="resolution-b",
+    )
+    decision = SimpleNamespace(
+        candidate=candidate,
+        shares=Decimal("10"),
+        cost_usd=Decimal("4"),
+        limit_price=Decimal("0.40"),
+        expected_fill_price_before_fee=Decimal("0.40"),
+        max_spend_usd=Decimal("4"),
+        robust_delta_log_wealth=0.01,
+        robust_ev_usd=1.0,
+        capital_efficiency=0.25,
+        no_trade_reason=None,
+    )
+    wealth_economic_identity = "wealth-economic"
+    economic_identity = global_single_order_economic_identity(
+        decision=decision,
+        probability_witness=witness_b,
+        wealth_economic_identity=wealth_economic_identity,
+    )
+    actuation_identity = global_single_order_actuation_identity(
+        decision=decision,
+        winner_event_id=event_b.event_id,
+        universe_witness_identity="universe",
+        wealth_witness_identity="wealth-witness",
+        selection_epoch_identity="selection-epoch",
+        selection_cut_at_utc=decision_at,
+        decision_at_utc=decision_at,
+    )
+    selected = PreparedGlobalAuctionResult(
+        decision=decision,
+        winner_event_id=event_b.event_id,
+        actuation=GlobalSingleOrderActuation(
+            decision=decision,
+            winner_event_id=event_b.event_id,
+            universe_witness_identity="universe",
+            wealth_witness_identity="wealth-witness",
+            selection_epoch_identity="selection-epoch",
+            probability_witness=witness_b,
+            selection_cut_at_utc=decision_at,
+            decision_at_utc=decision_at,
+            actuation_identity=actuation_identity,
+            wealth_economic_identity=wealth_economic_identity,
+            economic_identity=economic_identity,
+        ),
+    )
+
+    @dataclass(frozen=True)
+    class _Prepared:
+        probability_witness: object
+
+    prepared = {
+        event_a.event_id: _Prepared(probability_witness=witness_a),
+        event_b.event_id: _Prepared(probability_witness=witness_b),
+    }
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "scan_current_global_auction_scope",
+        lambda **_: scope,
+    )
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "current_portfolio_wealth_witness",
+        lambda *_, **__: SimpleNamespace(
+            spendable_cash_usd=Decimal("10"),
+            witness_identity="wealth-witness",
+            economic_identity=wealth_economic_identity,
+        ),
+    )
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "current_venue_auction_identity",
+        lambda *_, **__: "venue",
+    )
+    selection_calls = [0]
+
+    def _select(*_args, **_kwargs):
+        selection_calls[0] += 1
+        return selected
+
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "select_prepared_global_auction",
+        _select,
+    )
+    claimed_targets = []
+    actuated = []
+    venue_calls = [0]
+
+    def _claim(target):
+        claimed_targets.append(target)
+        return True
+
+    def _actuate(event, actuation, _at):
+        actuated.append((event, actuation))
+        venue_calls[0] += 1
+        return EventSubmissionReceipt(
+            True,
+            event.event_id,
+            event.causal_snapshot_id,
+            reason="SUBMITTED:test",
+            proof_accepted=True,
+        )
+
+    result = global_batch_runtime.process_current_global_batch(
+        (event_a,),
+        decision_time=decision_at,
+        world_conn=object(),
+        forecast_conn=object(),
+        trade_conn=object(),
+        payload_reader=lambda event: json.loads(event.payload_json),
+        prepare_event=lambda event, _at: EventSubmissionReceipt(
+            False,
+            event.event_id,
+            event.causal_snapshot_id,
+            prepared_global_family=prepared[event.event_id],
+        ),
+        actuate_winner=_actuate,
+        stamp_receipt=lambda receipt: receipt,
+        venue_submit_count=lambda: venue_calls[0],
+        current_execution=lambda *_: object(),
+        current_time_provider=lambda: decision_at,
+        claim_unpaged_winner=_claim,
+    )
+
+    assert len(claimed_targets) == 1
+    target = claimed_targets[0]
+    assert result.next_claim_event is None
+    assert result.winner_event_id == target.event_id
+    assert result.venue_submit_count == 1
+    assert selection_calls[0] == 1
+    assert set(result.receipts) == {event_a.event_id, target.event_id}
+    assert actuated[0][0] == target
+    rebound = actuated[0][1]
+    assert rebound.winner_event_id == target.event_id
+    assert rebound.actuation_identity != actuation_identity
+    assert rebound.economic_identity == economic_identity
+
+    actuated.clear()
+    venue_calls[0] = 0
+    selection_calls[0] = 0
+    resumed = global_batch_runtime.process_current_global_batch(
+        (target,),
+        decision_time=decision_at,
+        world_conn=object(),
+        forecast_conn=object(),
+        trade_conn=object(),
+        payload_reader=lambda event: json.loads(event.payload_json),
+        prepare_event=lambda event, _at: EventSubmissionReceipt(
+            False,
+            event.event_id,
+            event.causal_snapshot_id,
+            prepared_global_family=prepared[event.event_id],
+        ),
+        actuate_winner=_actuate,
+        stamp_receipt=lambda receipt: receipt,
+        venue_submit_count=lambda: venue_calls[0],
+        current_execution=lambda *_: object(),
+        current_time_provider=lambda: decision_at,
+        claim_unpaged_winner=lambda _target: pytest.fail(
+            "an already-claimed deterministic target must not be claimed again"
+        ),
+    )
+
+    assert resumed.next_claim_event is None
+    assert resumed.winner_event_id == target.event_id
+    assert resumed.venue_submit_count == 1
+    assert selection_calls[0] == 1
+    assert set(resumed.receipts) == {target.event_id}
+    assert actuated[0][0] == target
+
+    fence_wealth_economic_identity = "wealth-economic-fence"
+    fence_economic_identity = global_single_order_economic_identity(
+        decision=decision,
+        probability_witness=witness_b,
+        wealth_economic_identity=fence_wealth_economic_identity,
+    )
+    fence_selected = replace(
+        selected,
+        actuation=replace(
+            selected.actuation,
+            wealth_economic_identity=fence_wealth_economic_identity,
+            economic_identity=fence_economic_identity,
+        ),
+    )
+    selections = iter((selected, fence_selected))
+    fence_selection_calls = [0]
+
+    def _select_fence(*_args, **_kwargs):
+        fence_selection_calls[0] += 1
+        return next(selections)
+
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "select_prepared_global_auction",
+        _select_fence,
+    )
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "_book_economics_manifest",
+        lambda _epoch: (("book",),),
+    )
+    fake_epoch = SimpleNamespace(
+        max_age=_dt.timedelta(seconds=30),
+        witness_identity="book-epoch",
+    )
+    claimed_targets.clear()
+    actuated.clear()
+    venue_calls[0] = 0
+    fenced = global_batch_runtime.process_current_global_batch(
+        (event_a,),
+        decision_time=decision_at,
+        world_conn=object(),
+        forecast_conn=object(),
+        trade_conn=object(),
+        payload_reader=lambda event: json.loads(event.payload_json),
+        prepare_event=lambda event, _at: EventSubmissionReceipt(
+            False,
+            event.event_id,
+            event.causal_snapshot_id,
+            prepared_global_family=prepared[event.event_id],
+        ),
+        actuate_winner=_actuate,
+        stamp_receipt=lambda receipt: receipt,
+        venue_submit_count=lambda: venue_calls[0],
+        current_execution=lambda *_: object(),
+        current_time_provider=lambda: decision_at,
+        claim_unpaged_winner=_claim,
+        current_book_epoch_provider=lambda probabilities, _at: (
+            probabilities,
+            fake_epoch,
+        ),
+        preflight_winner=lambda *_: global_batch_runtime.GlobalWinnerPreflight(
+            status="STABLE",
+            binding_token=object(),
+        ),
+        actuate_preflighted_winner=global_batch_runtime.GlobalOneShotActuator(
+            lambda event, actuation, at, _token, _authority: _actuate(
+                event, actuation, at
+            )
+        ),
+    )
+
+    assert len(claimed_targets) == 2
+    assert claimed_targets[0].event_id != claimed_targets[1].event_id
+    assert fenced.winner_event_id == claimed_targets[1].event_id
+    assert fenced.venue_submit_count == 1
+    assert fence_selection_calls[0] == 2
+    assert set(fenced.receipts) == {
+        event_a.event_id,
+        claimed_targets[0].event_id,
+        claimed_targets[1].event_id,
+    }
 
 
 def test_global_batch_excludes_typed_current_q_ineligible_family(monkeypatch):

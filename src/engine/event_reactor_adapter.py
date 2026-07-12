@@ -4851,7 +4851,12 @@ def event_bound_live_adapter_from_trade_conn(
             global_actuation=no_submit_receipt.global_actuation,
         )
 
-    def _process_global_batch(events, decision_time):
+    def _process_global_batch(
+        events,
+        decision_time,
+        *,
+        claim_unpaged_winner=None,
+    ):
         from src.engine.global_batch_runtime import (
             GlobalOneShotActuator,
             GlobalWinnerPreflight,
@@ -5040,7 +5045,7 @@ def event_bound_live_adapter_from_trade_conn(
                 get_gamma_event=_gamma_event,
                 trade_conn=trade_conn,
                 checked_at_utc=_at,
-                max_workers=8,
+                max_workers=16,
                 metadata_sink=gamma_metadata,
             )
             logging.getLogger(__name__).info(
@@ -5144,6 +5149,7 @@ def event_bound_live_adapter_from_trade_conn(
                 fractional_kelly_multiplier=Decimal(
                     str(_runtime_kelly_multiplier())
                 ),
+                claim_unpaged_winner=claim_unpaged_winner,
                 selection_snapshot_connections=(
                     forecast_conn,
                 ),

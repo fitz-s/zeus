@@ -5,12 +5,15 @@ in_scope:
 - src/control/live_health.py
 - src/main.py
 - src/events/reactor.py
+- src/engine/event_reactor_adapter.py
+- src/engine/global_batch_runtime.py
 - src/execution/exit_lifecycle.py
 - tests/test_p4_post_trade_capital_lift.py
 - tests/test_run_mode_failure_surfaces.py
 - tests/events/test_claim_lock_storm.py
 - tests/events/test_continuous_redecision_emit.py
 - tests/events/test_reactor.py
+- tests/integration/test_w3_solve_seam_g3.py
 - tests/test_phase2_exit_emitter_revival.py
 allow_companions:
 - architecture/test_topology.yaml

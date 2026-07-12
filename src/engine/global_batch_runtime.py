@@ -22,7 +22,10 @@ from src.engine.global_auction_universe import (
     current_venue_auction_identity,
     scan_current_global_auction_scope,
 )
-from src.engine.global_single_order_auction import select_prepared_global_auction
+from src.engine.global_single_order_auction import (
+    global_single_order_actuation_identity,
+    select_prepared_global_auction,
+)
 from src.events.candidate_binding import weather_family_id
 from src.events.opportunity_event import OpportunityEvent, make_opportunity_event
 from src.events.reactor import EventSubmissionReceipt, GlobalBatchSubmitResult
@@ -420,6 +423,7 @@ def process_current_global_batch(
     current_capital_limit_resolver: Callable[[object, str, str], object]
     | None = None,
     fractional_kelly_multiplier: Decimal = Decimal("1"),
+    claim_unpaged_winner: Callable[[OpportunityEvent], bool] | None = None,
 ) -> GlobalBatchSubmitResult:
     """Select once from every family holding a current q certificate."""
 
@@ -427,6 +431,9 @@ def process_current_global_batch(
         raise ValueError("GLOBAL_AUCTION_DECISION_TIME_NAIVE")
     decision_time = decision_time.astimezone(UTC)
     event_tuple = tuple(events)
+    claimed_target_by_scope_and_economics: dict[
+        tuple[str, str], OpportunityEvent
+    ] = {}
     release_selection_snapshot: Callable[[], None] = lambda: None
     batch_started = time.monotonic()
     stage_started = batch_started
@@ -514,6 +521,93 @@ def process_current_global_batch(
         if now < decision_time:
             raise ValueError("GLOBAL_AUCTION_CLOCK_REGRESSION")
         return now
+
+    def bind_selected_winner(selected):
+        """Bind one selected scope event to a committed claim in this epoch."""
+
+        nonlocal event_tuple
+        scope_winner_id = str(getattr(selected, "winner_event_id", "") or "")
+        winner = next(
+            (event for event in event_tuple if event.event_id == scope_winner_id),
+            None,
+        )
+        if winner is not None:
+            return selected, winner, None
+        actuation = getattr(selected, "actuation", None)
+        if actuation is None:
+            raise ValueError("GLOBAL_WINNER_ACTUATION_MISSING")
+        target_key = (scope_winner_id, str(actuation.economic_identity or ""))
+        target = claimed_target_by_scope_and_economics.get(target_key)
+        if target is None:
+            scope_event = next(
+                (
+                    event
+                    for event in full_scope_event_by_family.values()
+                    if event.event_id == scope_winner_id
+                ),
+                None,
+            )
+            if scope_event is None:
+                return selected, None, None
+            target = _next_claim_carrier(
+                scope_event,
+                targeted_at=current_time(),
+                economic_identity=actuation.economic_identity,
+                payload=payload_reader(scope_event),
+            )
+            existing_target = next(
+                (event for event in event_tuple if event.event_id == target.event_id),
+                None,
+            )
+            if existing_target is not None:
+                semantic_fields = (
+                    "event_type",
+                    "entity_key",
+                    "source",
+                    "observed_at",
+                    "available_at",
+                    "causal_snapshot_id",
+                    "payload_hash",
+                    "idempotency_key",
+                    "priority",
+                    "expires_at",
+                    "payload_json",
+                    "schema_version",
+                )
+                if any(
+                    getattr(existing_target, field) != getattr(target, field)
+                    for field in semantic_fields
+                ):
+                    raise ValueError("GLOBAL_WINNER_TARGET_CARRIER_MISMATCH")
+                target = existing_target
+            else:
+                if claim_unpaged_winner is None or not claim_unpaged_winner(target):
+                    return selected, None, target
+                event_tuple = (*event_tuple, target)
+            claimed_target_by_scope_and_economics[target_key] = target
+        actuation = selected.actuation
+        rebound_actuation = replace(
+            actuation,
+            winner_event_id=target.event_id,
+            actuation_identity=global_single_order_actuation_identity(
+                decision=actuation.decision,
+                winner_event_id=target.event_id,
+                universe_witness_identity=actuation.universe_witness_identity,
+                wealth_witness_identity=actuation.wealth_witness_identity,
+                selection_epoch_identity=actuation.selection_epoch_identity,
+                selection_cut_at_utc=actuation.selection_cut_at_utc,
+                decision_at_utc=actuation.decision_at_utc,
+            ),
+        )
+        return (
+            replace(
+                selected,
+                winner_event_id=target.event_id,
+                actuation=rebound_actuation,
+            ),
+            target,
+            None,
+        )
 
     def reject(
         reason: str,
@@ -765,33 +859,17 @@ def process_current_global_batch(
                 f"{selected.decision.no_trade_reason or 'unknown'}"
             )
         log_winner("select_initial", selected, probabilities)
-        winner_id = selected.winner_event_id
-        winner = next(
-            (event for event in event_tuple if event.event_id == winner_id),
-            None,
-        )
         if selected.actuation is None:
             return reject("GLOBAL_WINNER_ACTUATION_MISSING")
+        selected, winner, next_claim = bind_selected_winner(selected)
         if winner is None:
-            target = next(
-                (
-                    event
-                    for event in full_scope_event_by_family.values()
-                    if event.event_id == winner_id
-                ),
-                None,
-            )
-            if target is None:
+            if next_claim is None:
                 return reject("GLOBAL_WINNER_IDENTITY_MISSING")
             return reject(
                 "GLOBAL_WINNER_AWAITS_CLAIM",
-                next_claim_event=_next_claim_carrier(
-                    target,
-                    targeted_at=current_time(),
-                    economic_identity=selected.actuation.economic_identity,
-                    payload=payload_reader(target),
-                ),
+                next_claim_event=next_claim,
             )
+        winner_id = winner.event_id
 
         binding_token = None
         preflight_ineligible_by_event: dict[str, str] = {}
@@ -832,33 +910,17 @@ def process_current_global_batch(
                     f"{selected.decision.no_trade_reason or 'unknown'}"
                 )
             log_winner("select_fence", selected, probabilities_fence)
-            winner_id = selected.winner_event_id
-            winner = next(
-                (event for event in event_tuple if event.event_id == winner_id),
-                None,
-            )
             if selected.actuation is None:
                 return reject("GLOBAL_REAUCTION_ACTUATION_MISSING")
+            selected, winner, next_claim = bind_selected_winner(selected)
             if winner is None:
-                target = next(
-                    (
-                        event
-                        for event in full_scope_event_by_family.values()
-                        if event.event_id == winner_id
-                    ),
-                    None,
-                )
-                if target is None:
+                if next_claim is None:
                     return reject("GLOBAL_REAUCTION_WINNER_IDENTITY_MISSING")
                 return reject(
                     "GLOBAL_REAUCTION_WINNER_AWAITS_CLAIM",
-                    next_claim_event=_next_claim_carrier(
-                        target,
-                        targeted_at=current_time(),
-                        economic_identity=selected.actuation.economic_identity,
-                        payload=payload_reader(target),
-                    ),
+                    next_claim_event=next_claim,
                 )
+            winner_id = winner.event_id
             attempt_book_epoch = book_epoch_fence
             excluded_by_family: dict[str, str] = {}
             curve_reauction_used = False
@@ -946,33 +1008,17 @@ def process_current_global_batch(
                     selected,
                     probabilities_fence,
                 )
-                winner_id = selected.winner_event_id
-                winner = next(
-                    (event for event in event_tuple if event.event_id == winner_id),
-                    None,
-                )
                 if selected.actuation is None:
                     return reject("GLOBAL_REAUCTION_ACTUATION_MISSING")
+                selected, winner, next_claim = bind_selected_winner(selected)
                 if winner is None:
-                    target = next(
-                        (
-                            event
-                            for event in full_scope_event_by_family.values()
-                            if event.event_id == winner_id
-                        ),
-                        None,
-                    )
-                    if target is None:
+                    if next_claim is None:
                         return reject("GLOBAL_REAUCTION_WINNER_IDENTITY_MISSING")
                     return reject(
                         "GLOBAL_REAUCTION_WINNER_AWAITS_CLAIM",
-                        next_claim_event=_next_claim_carrier(
-                            target,
-                            targeted_at=current_time(),
-                            economic_identity=selected.actuation.economic_identity,
-                            payload=payload_reader(target),
-                        ),
+                        next_claim_event=next_claim,
                     )
+                winner_id = winner.event_id
             binding_token = preflight.binding_token
 
         before_calls = venue_submit_count()
