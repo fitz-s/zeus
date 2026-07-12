@@ -872,6 +872,15 @@ def main(argv: Optional[list[str]] = None) -> int:
         help="Directory to write the synchronized 3-DB backup set into. "
         "Defaults to <state-dir>/backups.",
     )
+    parser.add_argument(
+        "--skip-backup",
+        action="store_true",
+        help="Operator-only: skip the synchronized 3-DB backup set. The "
+        "operator explicitly waived DB backups (2026-07-12 directive; the "
+        "agent-side DB-backup guard also forbids whole-DB copies). Rollback "
+        "after a crash then relies on the rollback journal alone — the ONE "
+        "attached transaction still guarantees untouched-or-complete.",
+    )
     args = parser.parse_args(argv)
 
     paths = _resolve_db_paths(args.state_dir)
@@ -899,8 +908,11 @@ def main(argv: Optional[list[str]] = None) -> int:
     for path in (paths.world, paths.forecasts, paths.trade):
         _checkpoint_truncate(path)
 
-    backup_dir = _backup_three(paths, backup_root)
-    print(f"backup set: {backup_dir}")
+    if args.skip_backup:
+        print("backup set: SKIPPED (--skip-backup, operator directive 2026-07-12)")
+    else:
+        backup_dir = _backup_three(paths, backup_root)
+        print(f"backup set: {backup_dir}")
     _maybe_crash("post_backup")
 
     conn = _open_dedicated_connection(paths)

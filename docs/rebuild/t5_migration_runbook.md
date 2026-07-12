@@ -79,6 +79,11 @@ docstring for why: WAL is not crash-atomic across an ATTACHed 3-DB set).
 Optional flags:
 - `--backup-dir PATH` — write the synchronized 3-DB backup set somewhere other
   than `state/backups/`.
+- `--skip-backup` — operator directive 2026-07-12: DB backups are waived
+  (disk-space precondition #2 then does not apply). Crash safety rests on the
+  single attached rollback-journal transaction (kill-point matrix proven:
+  untouched-or-complete at every boundary); there is no restore set, so a
+  mixed-epoch state after a crash is forward-fix-only.
 - `--state-dir PATH` — point at a fixture directory instead of the live
   `STATE_DIR` (tests only; never use this against real data).
 
