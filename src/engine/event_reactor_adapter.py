@@ -963,10 +963,16 @@ def _position_phase_or_positive_chain_clause(
 ) -> tuple[str, tuple[object, ...]]:
     """SQL clause for position rows that are monitor-owned or chain-exposed.
 
-    Local lifecycle labels can lag venue truth. A quarantined row with positive
-    chain exposure is still live risk only when chain_state itself asserts
-    current money risk. Confirmed chain absence stays reconciliation debt and
-    must not enter live family selection.
+    Local lifecycle labels can lag venue truth. A row with positive chain
+    exposure whose lifecycle phase isn't (yet) monitor-owned is still live
+    risk only when chain_state itself asserts current money risk. Confirmed
+    chain absence stays reconciliation debt and must not enter live family
+    selection.
+
+    T5 (docs/rebuild/quarantine_excision_2026-07-11.md): this used to also
+    admit a legacy phase='quarantined' row via a dedicated OR leg. The T5
+    schema migration has run and the DB CHECK no longer admits the literal,
+    so that leg is retired — the chain_state check alone covers this case.
     """
     if "phase" in columns:
         phase_sql = "phase IN ({})".format(",".join("?" for _ in phases))
@@ -982,14 +988,9 @@ def _position_phase_or_positive_chain_clause(
                 ",".join("?" for _ in _CURRENT_MONEY_RISK_CHAIN_STATES)
             )
             chain_params = list(_CURRENT_MONEY_RISK_CHAIN_STATES)
-        terminal_phase_sql = (
-            f"phase = 'quarantined' AND {chain_risk_sql}"
-            if "phase" in columns
-            else chain_risk_sql
-        )
         return (
             f"({phase_sql} OR (COALESCE(chain_shares, 0) > ? "
-            f"AND ({terminal_phase_sql})))",
+            f"AND ({chain_risk_sql})))",
             tuple([*params, _POSITIVE_CHAIN_EXPOSURE_EPS, *chain_params]),
         )
     return phase_sql, tuple(params)

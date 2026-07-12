@@ -635,7 +635,7 @@ def _active_position_equity_usd(conn: sqlite3.Connection, portfolio: PortfolioSt
         for position in getattr(portfolio, "positions", []) or []:
             phase = str(getattr(position, "state", "") or "").lower()
             exit_state = str(getattr(position, "exit_state", "") or "").lower()
-            if phase in {"settled", "voided", "quarantined", "admin_closed"}:
+            if phase in {"settled", "voided", "admin_closed"}:
                 continue
             if exit_state in {"settled", "voided", "admin_closed"}:
                 continue

@@ -5714,7 +5714,20 @@ def test_position_projection_round_trips_zero_monitor_bid(conn):
     assert restored.last_monitor_best_ask == pytest.approx(0.001)
 
 
-def test_market_closed_hold_preserves_chain_backed_quarantine_phase(conn):
+def test_market_closed_hold_preserves_chain_backed_open_phase(conn):
+    """BRIDGE RETIREMENT (docs/rebuild/quarantine_excision_2026-07-11.md,
+    post-T5-migration): this used to construct the position with
+    state='quarantined'/chain_state='entry_authority_quarantined', relying on
+    Position.__post_init__'s mixed-epoch bridge to remap those to their TRUE
+    values (holding/synced) before mark_market_closed_hold_to_settlement ever
+    saw them. The T5 schema migration has run, the DB CHECK no longer admits
+    those literals, and the remap has been deleted — Position construction
+    would now raise. Per REPLACEMENT PHASE LAW a confirmed-fill/chain-absence
+    dispute keeps its TRUE phase directly, so this constructs the position
+    with that TRUE shape (holding/synced) up front — same real assertion:
+    the held-to-settlement hold folds a holding position to day0_window like
+    any other open position, never a quarantine scar.
+    """
     from src.engine.lifecycle_events import build_position_current_projection
     from src.execution.exit_lifecycle import mark_market_closed_hold_to_settlement
     from src.state.portfolio import Position
@@ -5731,8 +5744,8 @@ def test_market_closed_hold_preserves_chain_backed_quarantine_phase(conn):
         token_id="yes-token",
         no_token_id="no-token",
         condition_id="condition-test",
-        state="quarantined",
-        chain_state="entry_authority_quarantined",
+        state="holding",
+        chain_state="synced",
         shares=29.14,
         chain_shares=29.14,
         cost_basis_usd=21.27,
@@ -5747,13 +5760,6 @@ def test_market_closed_hold_preserves_chain_backed_quarantine_phase(conn):
 
     mark_market_closed_hold_to_settlement(position, conn=conn)
 
-    # T5 (docs/rebuild/quarantine_excision_2026-07-11.md): the legacy
-    # state='quarantined'/chain_state='entry_authority_quarantined'
-    # constructor inputs are remapped to their TRUE values (holding/synced)
-    # by Position.__post_init__'s mixed-epoch bridge before this function
-    # ever sees them, so the held-to-settlement hold now folds a holding
-    # position to day0_window like any other open position — never a
-    # quarantine scar.
     assert position.state == "day0_window"
     current = conn.execute(
         """

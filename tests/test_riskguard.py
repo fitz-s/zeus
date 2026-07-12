@@ -1346,7 +1346,17 @@ class TestRiskGuardSettlementSource:
             riskguard_module._portfolio_position_from_loader_row(loader_row)
 
     def test_portfolio_loader_accepts_balance_only_chain_observed_economics(self):
-        """Current chain exposure is not a claim of verified fill history."""
+        """Current chain exposure is not a claim of verified fill history.
+
+        BRIDGE RETIREMENT (docs/rebuild/quarantine_excision_2026-07-11.md,
+        post-T5-migration): this used to use
+        state='quarantined'/chain_state='entry_authority_quarantined' — both
+        retired, DB CHECK no longer admits them, and Position construction
+        now raises instead of remapping. Per REPLACEMENT PHASE LAW a
+        disputed-entry position keeps its TRUE phase directly, so this uses
+        state='holding'/chain_state='synced' — same real assertions about
+        fill/chain-observed authority, unrelated to the phase label.
+        """
         loader_row = {
             "trade_id": "balance-only-chain-row",
             "market_id": "condition-1",
@@ -1367,11 +1377,11 @@ class TestRiskGuardSettlementSource:
             "entry_economics_source": "position_current_chain_observed",
             "execution_fact_intent_id": "",
             "execution_fact_filled_at": "",
-            "chain_state": "entry_authority_quarantined",
+            "chain_state": "synced",
             "chain_shares": 3.8,
             "chain_avg_price": 0.64,
             "chain_cost_basis_usd": 2.432,
-            "state": "quarantined",
+            "state": "holding",
         }
 
         position = riskguard_module._portfolio_position_from_loader_row(loader_row)

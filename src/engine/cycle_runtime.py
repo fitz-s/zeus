@@ -58,19 +58,13 @@ from src.state.portfolio import (
 logger = logging.getLogger(__name__)
 
 SOURCE_WRITER_FRONTIER_STALE_SECONDS = 5 * 60
-# T5 (docs/rebuild/quarantine_excision_2026-07-11.md): no writer mints
-# state='quarantined' going forward — Position.__post_init__ remaps any
-# legacy DB row to a true state before any in-memory Position ever shows
-# it — so _quarantined_position_can_redecision below (gated on
-# state=='quarantined') is a dead-but-harmless mixed-epoch safety net, not a
-# live gate. Kept as a bare local set (previously imported from
-# src.contracts.position_truth.REDECISION_ELIGIBLE_QUARANTINE_CHAIN_STATES,
-# now retired there) rather than deleted outright: this file is the live
-# functional core of branch p2-pending-exit-restart-redecision, so the
-# smallest, most conservative diff is preferred over restructuring a
-# money-path predicate whose full call graph this packet has not audited.
-_REDECISION_QUARANTINE_CHAIN_STATES = frozenset({"entry_authority_quarantined"})
-_CHAIN_ABSENT_QUARANTINE_REDECISION_SECONDS = 12 * 3600
+# T5 (docs/rebuild/quarantine_excision_2026-07-11.md): the T5 schema
+# migration has run — no writer mints state='quarantined', the DB CHECK no
+# longer admits the literal, and LifecycleState has no such member (Position
+# construction raises). The quarantine-redecision predicate that used to be
+# gated on state=='quarantined' (kept post-T5-CORE as a "dead-but-harmless
+# mixed-epoch safety net") is now provably unreachable in every caller and
+# has been retired along with its supporting constants/helpers.
 
 
 # H2 critic R6 (2026-05-04, rebuild fixes branch): the previously-hardcoded
@@ -113,16 +107,14 @@ STRATEGY_KEYS_BY_DISCOVERY_MODE = _strategy_keys_by_discovery_mode()
 NATIVE_BUY_NO_LIVE_APPROVED_CONTEXTS: frozenset[tuple[str, str, str]] = frozenset()
 NATIVE_BUY_NO_LIVE_PROMOTION_VALIDATION = "native_buy_no_live_promotion_approved"
 _FORWARD_PRICE_LINKAGE_OK_STATUSES = frozenset({"inserted", "unchanged"})
-# T5 (docs/rebuild/quarantine_excision_2026-07-11.md): 'quarantined' is no
-# longer a LifecyclePhase member — no writer mints it going forward — but the
-# orphan-order-ownership query below is raw SQL against position_current.phase,
-# so the bare string literal stays as a mixed-epoch bridge: a LEGACY row still
-# carrying phase='quarantined' (until the T5 schema migration, docs/rebuild
-# item 5, rewrites it) must still be treated as owning its order until the
-# chain-mirror reconciler resolves it. The query's `NOT IN (?, ?, ?, ?)`
-# placeholder count is hardcoded to this frozenset's size (4) — keep them in
+# T5 (docs/rebuild/quarantine_excision_2026-07-11.md): 'quarantined' retired
+# from LifecyclePhase; the T5 schema migration has run and the
+# position_current CHECK no longer admits the literal, so the mixed-epoch
+# bridge that used to keep the bare string literal in the orphan-order-
+# ownership raw-SQL query below is retired. The query's `NOT IN (?, ?, ?)`
+# placeholder count is hardcoded to this frozenset's size (3) — keep them in
 # lockstep.
-_ORDER_OWNERSHIP_TERMINAL_POSITION_PHASES = frozenset(TERMINAL_STATES | {"quarantined"})
+_ORDER_OWNERSHIP_TERMINAL_POSITION_PHASES = frozenset(TERMINAL_STATES)
 _ORDER_OWNERSHIP_TERMINAL_ORDER_STATUSES = frozenset(
     {"filled", "cancelled", "canceled", "expired", "rejected", "voided"}
 )
@@ -134,7 +126,6 @@ _LIVE_DISCOVERY_EVAL_BUDGET_ENV = "ZEUS_LIVE_DISCOVERY_EVAL_BUDGET_SECONDS"
 _LIVE_DISCOVERY_EVAL_BUDGET_DEFAULT_SECONDS = 360.0
 _HELD_POSITION_MONITOR_BUDGET_ENV = "ZEUS_HELD_POSITION_MONITOR_BUDGET_SECONDS"
 _HELD_POSITION_MONITOR_BUDGET_DEFAULT_SECONDS = 75.0
-_QUARANTINE_MONITOR_TARGET_DATE_GRACE_DAYS = 1
 def _held_position_monitor_budget_seconds(override: float | None = None) -> float:
     raw = override
     if raw is None:
@@ -1903,7 +1894,7 @@ def chain_positions_from_api(payload, *, ChainPosition):
 
 _CHAIN_BALANCE_UNITS = Decimal("1000000")
 _CHAIN_BALANCE_PHASES = frozenset(
-    {"entered", "holding", "active", "day0_window", "pending_exit", "quarantined"}
+    {"entered", "holding", "active", "day0_window", "pending_exit"}
 )
 
 
@@ -2183,7 +2174,7 @@ def cleanup_orphan_open_orders(portfolio, clob, *, deps, conn=None) -> int:
                       FROM position_current
                      WHERE order_id IS NOT NULL
                        AND order_id != ''
-                       AND lower(COALESCE(phase, '')) NOT IN (?, ?, ?, ?)
+                       AND lower(COALESCE(phase, '')) NOT IN (?, ?, ?)
                        AND lower(COALESCE(order_status, '')) NOT IN (?, ?, ?, ?, ?, ?)
                     """,
                     tuple(_ORDER_OWNERSHIP_TERMINAL_POSITION_PHASES)
@@ -3221,9 +3212,10 @@ def _monitor_refreshed_phase_for_position(pos) -> str:
     if state == "day0_window":
         return LifecyclePhase.DAY0_WINDOW.value
     # T5 (docs/rebuild/quarantine_excision_2026-07-11.md): 'quarantined' is
-    # no longer a reachable Position.state — no writer mints it, and
-    # Position.__post_init__ remaps any legacy row before this function ever
-    # sees it — so this falls straight to ACTIVE like any other held state.
+    # no longer a reachable Position.state — LifecycleState has no such
+    # member (construction raises) and the DB CHECK no longer admits the
+    # literal post-migration — so this falls straight to ACTIVE like any
+    # other held state.
     return LifecyclePhase.ACTIVE.value
 
 
@@ -3621,17 +3613,7 @@ def _family_monitor_positions(portfolio, pos) -> list:
     if key is None or portfolio is None:
         return [pos]
     out: list = []
-    candidates: list = []
-    seen_ids: set[int] = set()
-    for other in get_open_positions(portfolio):
-        candidates.append(other)
-        seen_ids.add(id(other))
-    for other in list(getattr(portfolio, "positions", []) or []):
-        if id(other) in seen_ids:
-            continue
-        if _quarantined_position_can_redecision(other):
-            candidates.append(other)
-            seen_ids.add(id(other))
+    candidates: list = list(get_open_positions(portfolio))
     for other in candidates:
         if _family_monitor_key(other) != key:
             continue
@@ -3647,18 +3629,7 @@ def _family_monitor_positions(portfolio, pos) -> list:
 
 
 def _family_monitor_position_has_live_risk(pos) -> bool:
-    phase = _position_state_value(pos)
-    if phase in {"entered", "holding", "active", "day0_window", "pending_exit"}:
-        return True
-    if phase != "quarantined":
-        return False
-    try:
-        chain_shares = float(getattr(pos, "chain_shares", 0.0) or 0.0)
-    except (TypeError, ValueError):
-        chain_shares = 0.0
-    return chain_shares > 0.01 and has_current_money_risk_chain_state(
-        getattr(pos, "chain_state", "")
-    )
+    return _position_state_value(pos) in {"entered", "holding", "active", "day0_window", "pending_exit"}
 
 
 _DAY0_IMMATURE_EXIT_AUTHORITY_PREFIXES = (
@@ -4060,68 +4031,6 @@ def _position_real_exposure_shares(pos) -> float:
     return 0.0
 
 
-def _position_timestamp_recent(value, *, max_age_seconds: int) -> bool:
-    if value in (None, ""):
-        return False
-    try:
-        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
-    except (TypeError, ValueError):
-        return False
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
-    age_seconds = (datetime.now(timezone.utc) - parsed.astimezone(timezone.utc)).total_seconds()
-    return 0.0 <= age_seconds <= max_age_seconds
-
-
-def _chain_absent_quarantine_is_fresh_enough_for_redecision(pos) -> bool:
-    return (
-        _position_timestamp_recent(
-            getattr(pos, "chain_verified_at", "") or "",
-            max_age_seconds=_CHAIN_ABSENT_QUARANTINE_REDECISION_SECONDS,
-        )
-        or _position_timestamp_recent(
-            getattr(pos, "last_chain_absence_observed_at", "") or "",
-            max_age_seconds=_CHAIN_ABSENT_QUARANTINE_REDECISION_SECONDS,
-        )
-    )
-
-
-def _redecision_eligible_quarantine_chain_state_and_direction(chain_state: str, direction: str) -> bool:
-    """Shared chain_state+direction gate for redecision eligibility.
-
-    Excision T-consolidations #2 (docs/rebuild/quarantine_excision_2026-07-11.md):
-    extracted so ``_quarantined_position_can_redecision`` (Position-object callers)
-    and ``_canonical_monitor_position_rows`` (raw position_current row callers)
-    cannot drift on this specific check again. Both already shared the
-    ``_REDECISION_QUARANTINE_CHAIN_STATES`` constant before this extraction; this
-    only removes the duplicated boolean expression, not a duplicated constant.
-
-    NOT shared with portfolio.py's ``_is_runtime_open_position`` or
-    price_channel_ingest.py's EDLI exposure-clause SQL — both of those check
-    membership in the broader ``CURRENT_MONEY_RISK_CHAIN_STATES`` set for a
-    different question ("still has live chain risk" / "needs quote priority"),
-    not "can redecision now"; see the comments at those two sites.
-    """
-    return chain_state in _REDECISION_QUARANTINE_CHAIN_STATES and direction in {"buy_yes", "buy_no"}
-
-
-def _quarantined_position_can_redecision(pos) -> bool:
-    if _position_state_value(pos) != "quarantined":
-        return False
-    chain_state = _position_chain_state_value(pos)
-    if not _redecision_eligible_quarantine_chain_state_and_direction(
-        chain_state, _position_direction_value(pos)
-    ):
-        return False
-    if _position_real_exposure_shares(pos) <= 0.01:
-        return False
-    if getattr(pos, "is_quarantine_placeholder", False):
-        return False
-    if chain_state == "entry_authority_quarantined":
-        return True
-    return _chain_absent_quarantine_is_fresh_enough_for_redecision(pos)
-
-
 def _day0_hard_fact_position_eligible(pos) -> bool:
     # Active same-day fills must not wait for a successful DAY0_WINDOW_ENTERED
     # projection before consuming settlement-grade observed-so-far facts.  The
@@ -4129,7 +4038,14 @@ def _day0_hard_fact_position_eligible(pos) -> bool:
     # families, so admitting active/holding states here is fail-closed for
     # future dates while preventing same-day positions from missing the only
     # sellable window after an absorbing observation update.
-    return _position_state_value(pos) in {"active", "entered", "holding", "day0_window"} or _quarantined_position_can_redecision(pos)
+    #
+    # T5 (docs/rebuild/quarantine_excision_2026-07-11.md): this used to also
+    # admit a quarantined position via the canonical redecision-eligibility
+    # predicate (_quarantined_position_can_redecision). That predicate's own
+    # gate (state == 'quarantined') is now provably unreachable — no writer
+    # mints the literal and the DB CHECK no longer admits it post-migration —
+    # so the predicate and its supporting helpers have been retired.
+    return _position_state_value(pos) in {"active", "entered", "holding", "day0_window"}
 
 
 def _venue_confirmed_local_fill_needs_monitor(pos) -> bool:
@@ -4162,23 +4078,7 @@ _CANONICAL_MONITOR_PHASE_PRIORITY = {
     "pending_exit": 0,
     "day0_window": 1,
     "active": 2,
-    "quarantined": 3,
 }
-
-
-def _quarantine_target_date_still_actionable(target_date: object, *, now_utc: datetime | None = None) -> bool:
-    """Quarantine rows from already-expired markets are reconciliation debt, not fast exit cadence."""
-
-    text = str(target_date or "").strip()
-    if not text:
-        return True
-    try:
-        target_day = date.fromisoformat(text[:10])
-    except ValueError:
-        return True
-    now_day = (now_utc or datetime.now(timezone.utc)).astimezone(timezone.utc).date()
-    floor = now_day - timedelta(days=_QUARANTINE_MONITOR_TARGET_DATE_GRACE_DAYS)
-    return target_day >= floor
 
 
 def _canonical_monitor_position_rows(conn, *, now_utc: datetime | None = None) -> list | None:
@@ -4228,18 +4128,6 @@ def _canonical_monitor_position_rows(conn, *, now_utc: datetime | None = None) -
         phase = str(_row_get(row, "phase", "") or "").strip().lower()
         if not position_id or phase not in _CANONICAL_MONITOR_PHASE_PRIORITY:
             continue
-        if phase == "quarantined":
-            chain_state = str(_row_get(row, "chain_state", "") or "").strip()
-            direction = str(_row_get(row, "direction", "") or "").strip()
-            # Shared with _quarantined_position_can_redecision (excision
-            # T-consolidations #2) — see that helper's docstring.
-            if not _redecision_eligible_quarantine_chain_state_and_direction(chain_state, direction):
-                continue
-            if not _quarantine_target_date_still_actionable(
-                _row_get(row, "target_date"),
-                now_utc=now_utc,
-            ):
-                continue
         shares = _finite_positive_or_none(_row_get(row, "shares"))
         chain_shares = _finite_positive_or_none(_row_get(row, "chain_shares"))
         if shares is None and chain_shares is None:
@@ -4500,12 +4388,9 @@ def _closed_non_accepting_market_info(clob, pos, conn=None, *, decision_time: da
 
 def _is_open_crowding_exposure(pos) -> bool:
     state_value = _position_state_value(pos)
-    chain_state = _position_chain_state_value(pos)
     if state_value in INACTIVE_RUNTIME_STATES:
         return False
     if state_value in {"pending_entry", "pending_tracked"}:
-        return False
-    if chain_state in {"quarantined", "quarantine_expired"}:
         return False
     return True
 
@@ -5058,7 +4943,7 @@ def execute_monitoring_phase(
         if pos.state == "pending_tracked":
             continue
         state_value = _position_state_value(pos)
-        if is_terminal_state(state_value) and state_value != "quarantined":
+        if is_terminal_state(state_value):
             summary["monitor_skipped_terminal"] = summary.get("monitor_skipped_terminal", 0) + 1
             continue
         if pos.state == "economically_closed":
@@ -5185,13 +5070,12 @@ def execute_monitoring_phase(
 
         # T5 (docs/rebuild/quarantine_excision_2026-07-11.md, REPLACEMENT
         # PHASE LAW): the quarantine-admin-resolution monitor branch is
-        # retired — no writer mints phase/chain_state='quarantined' going
-        # forward, and Position.__post_init__ remaps any legacy row to its
-        # TRUE state before it ever reaches the monitor loop (see
-        # src.state.portfolio._normalize_runtime_lifecycle_state /
-        # _normalize_runtime_chain_state). A real-exposure position that used
-        # to be diverted into this admin-resolution limbo now correctly flows
-        # through normal monitor refresh below instead of being stranded.
+        # retired — no writer mints phase/chain_state='quarantined', and the
+        # DB CHECK no longer admits the literal post-migration, so no
+        # position ever reaches the monitor loop carrying it. A real-exposure
+        # position that used to be diverted into this admin-resolution limbo
+        # now correctly flows through normal monitor refresh below instead of
+        # being stranded.
 
         review_fact = _blocking_review_fact_for_position(portfolio, pos)
         if review_fact is not None:
@@ -5399,17 +5283,16 @@ def execute_monitoring_phase(
                     from src.state.portfolio import ExitDecision as _ExitDecision
 
                     hard_fact_win = _hard_fact.action == "HOLD_STRUCTURAL_WIN"
-                    if _position_state_value(pos) != "quarantined":
-                        pos.state = "day0_window"
-                        pos.pre_exit_state = ""
-                        pos.exit_state = ""
-                        pos.next_exit_retry_at = ""
-                        pos.exit_retry_count = 0
-                        pos.exit_reason = ""
-                        pos.last_exit_error = (
-                            "MARKET_CLOSED_AWAITING_SETTLEMENT:"
-                            f"{closed_market_info.get('source') or 'market_closed_non_accepting_orders'}"
-                        )[:500]
+                    pos.state = "day0_window"
+                    pos.pre_exit_state = ""
+                    pos.exit_state = ""
+                    pos.next_exit_retry_at = ""
+                    pos.exit_retry_count = 0
+                    pos.exit_reason = ""
+                    pos.last_exit_error = (
+                        "MARKET_CLOSED_AWAITING_SETTLEMENT:"
+                        f"{closed_market_info.get('source') or 'market_closed_non_accepting_orders'}"
+                    )[:500]
                     pos.last_monitor_prob = 1.0 if hard_fact_win else 0.0
                     pos.last_monitor_prob_is_fresh = True
                     pos.last_monitor_edge = None
@@ -5456,21 +5339,20 @@ def execute_monitoring_phase(
                         final_exit_reason=exit_decision.reason,
                         final_exit_trigger=exit_decision.trigger,
                     )
-                    if _position_state_value(pos) != "quarantined":
-                        from src.execution.exit_lifecycle import mark_market_closed_hold_to_settlement
+                    from src.execution.exit_lifecycle import mark_market_closed_hold_to_settlement
 
-                        mark_market_closed_hold_to_settlement(
-                            pos,
-                            reason=exit_decision.trigger,
-                            error=str(
-                                closed_market_info.get("source")
-                                or "market_closed_non_accepting_orders"
-                            ),
-                            conn=conn,
-                        )
-                        summary["day0_hard_fact_closed_market_hold_to_settlement"] = (
-                            summary.get("day0_hard_fact_closed_market_hold_to_settlement", 0) + 1
-                        )
+                    mark_market_closed_hold_to_settlement(
+                        pos,
+                        reason=exit_decision.trigger,
+                        error=str(
+                            closed_market_info.get("source")
+                            or "market_closed_non_accepting_orders"
+                        ),
+                        conn=conn,
+                    )
+                    summary["day0_hard_fact_closed_market_hold_to_settlement"] = (
+                        summary.get("day0_hard_fact_closed_market_hold_to_settlement", 0) + 1
+                    )
                     artifact.add_monitor_result(
                         deps.MonitorResult(
                             position_id=pos.trade_id,

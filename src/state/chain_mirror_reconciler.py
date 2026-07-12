@@ -99,8 +99,10 @@ _SIZE_MISMATCH_TOLERANCE = 0.05  # shares; below this the chain/local delta is n
 # Phases considered "still open" for the purposes of the REVIEW (e) class —
 # mirrors the phases that require an on-chain holding per position_current's
 # own CHECK vocabulary (src/state/db.py CREATE TABLE position_current).
+# T5 (docs/rebuild/quarantine_excision_2026-07-11.md): 'quarantined' retired
+# from that CHECK vocabulary post-migration, so it is retired here too.
 _OPEN_LIKE_PHASES = frozenset(
-    {"pending_entry", "active", "day0_window", "pending_exit", "quarantined"}
+    {"pending_entry", "active", "day0_window", "pending_exit"}
 )
 
 # Already-closed phases. The reconciler never re-touches these: no grading

@@ -16,10 +16,9 @@ class Direction(str, Enum):
 
 class LifecycleState(str, Enum):
     """T5 (docs/rebuild/quarantine_excision_2026-07-11.md): QUARANTINED
-    retired — no writer mints it; Position.__post_init__ remaps any legacy
-    'quarantined' DB row to a true state (see
-    src.state.portfolio._normalize_runtime_lifecycle_state) before this enum
-    ever sees it."""
+    retired — no writer mints it, the T5 schema migration has run, and the
+    DB CHECK no longer admits the literal, so no row can ever reach this
+    enum carrying it."""
 
     PENDING_TRACKED = "pending_tracked"
     PENDING_EXIT = "pending_exit"
@@ -48,11 +47,11 @@ class ChainState(str, Enum):
     EXIT_PENDING_MISSING = "exit_pending_missing"
     # T5 (docs/rebuild/quarantine_excision_2026-07-11.md, REPLACEMENT PHASE
     # LAW): QUARANTINED / QUARANTINE_EXPIRED / ENTRY_AUTHORITY_QUARANTINED
-    # retired together (three-enum law) — no writer mints any of them.
-    # Position.__post_init__ remaps any legacy DB row to a true chain_state
-    # (see src.state.portfolio._normalize_runtime_chain_state) before this
-    # enum ever sees it. A confirmed-fill/chain-absence dispute now lives in
-    # a typed ReviewWorkItem, never in this enum.
+    # retired together (three-enum law) — no writer mints any of them, the
+    # T5 schema migration has run, and the DB CHECK no longer admits the
+    # literals, so no row can ever reach this enum carrying one. A
+    # confirmed-fill/chain-absence dispute now lives in a typed
+    # ReviewWorkItem, never in this enum.
     SIZE_MISMATCH_UNRESOLVED = "size_mismatch_unresolved"
     # Terminal closed-class: a position whose CTF tokens left the wallet via an
     # operator-confirmed EXTERNAL close (the operator manually sold Zeus's position on

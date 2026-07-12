@@ -173,13 +173,14 @@ def _canonical_phase_before_for_settlement(pos) -> str:
     return "day0_window" if getattr(pos, "day0_entered_at", "") else "active"
 
 
-# P0c: "quarantined" retained explicitly — it dropped out of the canonical
-# TERMINAL_STATES when its fold widened to {QUARANTINED, SETTLED, VOIDED}
-# (docs/rebuild/chain_mirror_state_model_2026-07-04.md §5). The harvester's
-# own settlement dual-write path still must skip a quarantined row (unchanged
-# behavior, documented as the root cause in that doc's §1); only the
-# chain-mirror reconciler is empowered to fold quarantined -> settled/voided.
-_TERMINAL_PHASES = frozenset(TERMINAL_STATES | {"quarantined"})
+# P0c: "quarantined" used to be retained explicitly here — it had dropped out
+# of the canonical TERMINAL_STATES when its fold widened to {QUARANTINED,
+# SETTLED, VOIDED} (docs/rebuild/chain_mirror_state_model_2026-07-04.md §5).
+# T5 (docs/rebuild/quarantine_excision_2026-07-11.md): QUARANTINED is now
+# retired from LifecyclePhase entirely and the DB CHECK no longer admits the
+# literal post-migration, so the explicit union is retired — TERMINAL_STATES
+# alone is authoritative again.
+_TERMINAL_PHASES = frozenset(TERMINAL_STATES)
 _HARVESTER_STAGE2_TRADE_TABLES = (
     "position_events",
     "position_current",
@@ -2513,8 +2514,7 @@ def _settle_positions(
         chain_state = getattr(pos, "chain_state", "")
         pending_exit_at_settlement = state_name == "pending_exit"
         if (
-            state_name in {"pending_tracked", "quarantined", "admin_closed", "voided", "settled"}
-            or chain_state in {"quarantined", "quarantine_expired"}
+            state_name in {"pending_tracked", "admin_closed", "voided", "settled"}
             or (
                 chain_state == "exit_pending_missing"
                 and not pending_exit_at_settlement

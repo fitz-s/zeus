@@ -28,13 +28,19 @@ Antibody contracts (sed-flip verifiable):
   T2: SETTLED origin → no raise; returns "settled".
   T3: VOIDED origin → no raise; returns "voided".
   T4: ADMIN_CLOSED origin → no raise; returns "admin_closed".
-  T5: QUARANTINED origin → no raise; returns "quarantined".
   T6: ACTIVE origin → existing behavior preserved; returns "pending_exit".
   T7: PENDING_EXIT origin → idempotent self-fold; returns "pending_exit".
-  T8 (sed-flip): removing the guard block makes T1-T5 raise ValueError.
-  T9: QUARANTINED + entry_authority_quarantined chain state may transition to
-      pending_exit so a real on-chain exposure is not stranded by bad entry
-      proof.
+  T8 (sed-flip): removing the guard block makes T1-T4 raise ValueError.
+
+T5/T9 RETIRED (BRIDGE RETIREMENT, docs/rebuild/quarantine_excision_2026-07-11.md,
+post-T5-migration): T5 pinned a raw legacy 'quarantined' origin as a no-op, and
+T9 pinned that a QUARANTINED + entry_authority_quarantined chain state could
+still transition to pending_exit. The T5 schema migration has run — no writer
+mints 'quarantined' and the DB CHECK no longer admits the literal — and this
+packet deleted the mixed-epoch tolerance branch from
+enter_pending_exit_runtime_state. A raw 'quarantined' origin now falls through
+to the normal UNKNOWN-phase handling and fails loudly (ValueError), matching
+every other invented/retired phase string (see test_pending_entry_origin_still_raises).
 """
 
 from __future__ import annotations
@@ -55,11 +61,6 @@ _TERMINAL_NOOP_ORIGINS = [
     ("settled", LifecyclePhase.SETTLED.value),
     ("voided", LifecyclePhase.VOIDED.value),
     ("admin_closed", LifecyclePhase.ADMIN_CLOSED.value),
-    # T5 (docs/rebuild/quarantine_excision_2026-07-11.md): 'quarantined' is no
-    # longer a LifecyclePhase member (no writer mints it) — but this guard's
-    # crash-safety contract is preserved explicitly on the raw legacy string
-    # (see enter_pending_exit_runtime_state), so the bare literal stays here.
-    ("quarantined", "quarantined"),
 ]
 
 
@@ -92,15 +93,6 @@ def test_pending_exit_origin_is_idempotent():
     )
 
 
-def test_entry_authority_quarantine_origin_can_transition_to_pending_exit():
-    """T9: bad entry authority does not mean real inventory can be ignored."""
-    result = enter_pending_exit_runtime_state(
-        "quarantined",
-        chain_state="entry_authority_quarantined",
-    )
-    assert result == LifecyclePhase.PENDING_EXIT.value
-
-
 def test_day0_window_origin_transitions_to_pending_exit():
     """T6b: DAY0_WINDOW → PENDING_EXIT is a legal transition (per fold table
     line 53-60). Ensure the guard does not over-block."""
@@ -115,3 +107,16 @@ def test_pending_entry_origin_still_raises():
     (line 36-43). Must still raise so the bug surfaces, not silently no-op."""
     with pytest.raises(ValueError, match="illegal lifecycle phase fold"):
         enter_pending_exit_runtime_state("pending_tracked")
+
+
+def test_legacy_quarantined_origin_now_fails_loud():
+    """BRIDGE RETIREMENT (docs/rebuild/quarantine_excision_2026-07-11.md,
+    post-T5-migration): a raw 'quarantined' origin string used to be a
+    special-cased no-op (T5, retired above). No writer mints it and the DB
+    CHECK no longer admits the literal post-migration, so it now derives to
+    UNKNOWN like any other invented/retired phase string and fails loudly,
+    matching test_pending_entry_origin_still_raises."""
+    with pytest.raises(ValueError, match="illegal lifecycle phase fold"):
+        enter_pending_exit_runtime_state(
+            "quarantined", chain_state="entry_authority_quarantined"
+        )

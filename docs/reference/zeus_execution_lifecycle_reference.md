@@ -36,12 +36,16 @@ Terminal phases: `SETTLED`, `VOIDED`, `ADMIN_CLOSED`.
 confirmed-fill/chain-absence dispute or a terminal-restore that needs
 operator review keeps the position's TRUE phase (`ACTIVE`/`PENDING_EXIT`) and
 the dispute lives in a typed `ReviewWorkItem` (`src/contracts/review_work_item.py`,
-`src/state/review_work_items.py`), never in this enum. A legacy row written
-before the T5 schema migration may still carry the raw string `"quarantined"`
-in `position_current.phase`/`chain_state` — the load bridge in
-`src/state/portfolio.py` (`_normalize_runtime_lifecycle_state`,
-`_normalize_runtime_chain_state`) remaps it to `HOLDING`/`SYNCED` at load
-time (WARNING logged) rather than crashing.
+`src/state/review_work_items.py`), never in this enum. The T5 schema
+migration (`scripts/migrations/2026_07_quarantine_phase_retirement.py`) has
+run against the live DBs (2026-07-12): the `position_current.phase` /
+`chain_state` CHECK constraints no longer admit `"quarantined"` /
+`"quarantine_expired"` / `"entry_authority_quarantined"`, and the mixed-epoch
+load bridge that used to remap a legacy row carrying one of those literals
+(formerly `src/state/portfolio.py`'s `_normalize_runtime_lifecycle_state` /
+`_normalize_runtime_chain_state`) has been retired (BRIDGE RETIREMENT packet,
+post-T5-migration cleanup) — a row can no longer carry the retired literal at
+all, so `Position` construction raises instead of remapping.
 
 ### 1.2 Legal transitions (from `LEGAL_LIFECYCLE_FOLDS`)
 
@@ -87,14 +91,16 @@ Where `PENDING_EXIT_RUNTIME_STATES = {"exit_intent", "sell_placed",
 T5 (`docs/rebuild/quarantine_excision_2026-07-11.md`, REPLACEMENT PHASE LAW):
 the explicit `state="quarantined"` row and the `chain_state ∈ {"quarantined",
 "quarantine_expired"}` fallback row are retired — no writer mints either
-input going forward. A confirmed-fill/chain-absence dispute keeps its TRUE
-phase (`ACTIVE`/`PENDING_EXIT`, reached via the normal `has_positive_exposure`/
+input, and the T5 schema migration has run so the DB CHECK no longer admits
+either literal. A confirmed-fill/chain-absence dispute keeps its TRUE phase
+(`ACTIVE`/`PENDING_EXIT`, reached via the normal `has_positive_exposure`/
 `has_exit_fallback` rows above) and the dispute lives in a `ReviewWorkItem`,
 never in the phase itself. A raw `state="quarantined"` string reaching this
-mapping today (an unmigrated legacy row) falls through to `UNKNOWN` — the
-legacy load bridge in `src/state/portfolio.py` remaps it to `"holding"`
-before `Position` construction, so this mapping only ever sees the legacy
-literal directly if called out-of-band.
+mapping falls through to `UNKNOWN` and fails loudly downstream (e.g.
+`fold_lifecycle_phase` raises) rather than being remapped — the mixed-epoch
+load bridge that used to remap it to `"holding"` before `Position`
+construction has been retired (BRIDGE RETIREMENT packet, post-T5-migration
+cleanup); the literal can no longer occur on any live row.
 
 ### 1.4 Runtime state helper contracts
 
@@ -449,23 +455,26 @@ Three overlapping dedup layers prevent duplicate settlement writes:
 
 1. **DB-level dedup** (`_dual_write_canonical_settlement_if_available()`):
    reads `position_current.phase` from DB — if already in terminal phase
-   (`{settled, voided, admin_closed}`, unioned with the legacy raw string
-   `quarantined` — no writer mints it, but a pre-T5-schema-migration row can
-   still carry it, and skipping it here is strictly correct: every legacy
-   quarantined row carried real venue-confirmed exposure, never a fresh
-   settlement target), skip. This is the authoritative dedup anchor. The
-   in-memory `pos` object may be stale (loaded from JSON fallback cache) but
-   the DB phase is real.
+   (`{settled, voided, admin_closed}` = `_TERMINAL_PHASES`), skip. This is the
+   authoritative dedup anchor. The in-memory `pos` object may be stale
+   (loaded from JSON fallback cache) but the DB phase is real. T5
+   (`docs/rebuild/quarantine_excision_2026-07-11.md`): `_TERMINAL_PHASES` used
+   to also union in the legacy raw string `quarantined` (P0c, pre-migration
+   tolerance — no writer minted it, but a pre-T5-schema-migration row could
+   still carry it). The T5 schema migration has run and the DB CHECK no
+   longer admits the literal, so that union has been retired
+   (BRIDGE RETIREMENT packet, post-T5-migration cleanup); `_TERMINAL_PHASES`
+   is now an alias of `TERMINAL_STATES`.
 
 2. **Iterator-level dedup** (`_settle_positions()`): queries
    `position_current` for all positions in this (city, target_date) market.
-   Positions whose DB phase is already terminal (same union above) are
-   skipped before any P&L computation.
+   Positions whose DB phase is already terminal (same `_TERMINAL_PHASES`
+   above) are skipped before any P&L computation.
 
 3. **Runtime state skip** (`_settle_positions()`): skips positions in states
-   `{pending_tracked, admin_closed, voided, settled}`, the same legacy
-   `quarantined`/`quarantine_expired` runtime strings, and positions with
-   active exit states.
+   `{pending_tracked, admin_closed, voided, settled}` and positions with
+   active exit states. The `quarantined`/`quarantine_expired` runtime-string
+   checks this used to also include are retired for the same reason as (1).
 
 ### 6.4 P&L computation
 

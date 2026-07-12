@@ -19,7 +19,14 @@ from src.contracts.position_truth import (
 MONITOR_CADENCE_EXPOSURE_EPS = 0.01
 MONITOR_CADENCE_FUTURE_TOLERANCE_SECONDS = 30.0
 MONITOR_CADENCE_POSITION_PHASES = frozenset({"active", "day0_window", "pending_exit"})
-NON_MONITOR_CHAIN_RISK_PHASES = frozenset({"quarantined", "voided"})
+# T5 (docs/rebuild/quarantine_excision_2026-07-11.md): 'quarantined' retired
+# from this set — the T5 schema migration has run and the DB CHECK no longer
+# admits the literal, so a live row can never carry it. A disputed-entry
+# position now keeps its TRUE phase (in MONITOR_CADENCE_POSITION_PHASES
+# above) per REPLACEMENT PHASE LAW, so it is normally monitored rather than
+# routing through this non-monitor bucket; 'voided' remains a genuine
+# not-actively-monitored-but-still-has-residual-chain-risk case.
+NON_MONITOR_CHAIN_RISK_PHASES = frozenset({"voided"})
 EXIT_REDECISION_EVENT_TYPES = frozenset({"EXIT_ORDER_REJECTED", "EXIT_RETRY_RELEASED"})
 EXIT_REDECISION_PHASES = frozenset({"day0_window", "pending_exit"})
 CLOSED_MARKET_PENDING_SETTLEMENT_VALIDATIONS = frozenset(

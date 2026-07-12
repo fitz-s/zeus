@@ -183,16 +183,18 @@ def _execute_force_exit_sweep(
         # so extract .value when available.
         raw_state = getattr(pos, "state", "") or ""
         state_val = str(getattr(raw_state, "value", raw_state)).strip().lower()
-        # P0c: "quarantined" is checked explicitly alongside
+        # P0c: "quarantined" used to be checked explicitly alongside
         # _TERMINAL_POSITION_STATES_FOR_SWEEP (rather than folded into that
-        # constant) because it dropped out of the canonical TERMINAL_STATES
-        # when its fold widened to {QUARANTINED, SETTLED, VOIDED}
-        # (docs/rebuild/chain_mirror_state_model_2026-07-04.md §5); the RED
-        # force-exit sweep must still skip quarantined positions (there is no
-        # legal quarantined -> pending_exit fold) and the module-level
-        # constant stays an identity alias of TERMINAL_STATES per
+        # constant) because it had dropped out of the canonical
+        # TERMINAL_STATES when its fold widened to {QUARANTINED, SETTLED,
+        # VOIDED} (docs/rebuild/chain_mirror_state_model_2026-07-04.md §5).
+        # T5 (docs/rebuild/quarantine_excision_2026-07-11.md): QUARANTINED is
+        # now retired from LifecyclePhase entirely and the DB CHECK no longer
+        # admits the literal post-migration, so pos.state can never carry it
+        # — the explicit disjunct is retired; the module-level constant stays
+        # an identity alias of TERMINAL_STATES per
         # test_cycle_runner_sweep_set_matches_canonical.
-        if state_val in _TERMINAL_POSITION_STATES_FOR_SWEEP or state_val == "quarantined":
+        if state_val in _TERMINAL_POSITION_STATES_FOR_SWEEP:
             skipped_terminal += 1
             continue
         existing_reason = str(getattr(pos, "exit_reason", "") or "").strip()
@@ -758,7 +760,16 @@ def run_cycle(mode: DiscoveryMode, *, edli_event_context: dict | None = None) ->
         chain_stats, chain_ready = {"error": str(exc)}, False
     if chain_stats:
         summary["chain_sync"] = chain_stats
-        if chain_stats.get("synced") or chain_stats.get("voided") or chain_stats.get("quarantined") or chain_stats.get("updated"):
+        # T5 (docs/rebuild/quarantine_excision_2026-07-11.md): the "quarantined"
+        # stats key this used to check is retired — reconcile_with_chain's
+        # REPLACEMENT PHASE LAW successor for a durable write is
+        # "review_required" (ReviewWorkItem creation).
+        if (
+            chain_stats.get("synced")
+            or chain_stats.get("voided")
+            or chain_stats.get("review_required")
+            or chain_stats.get("updated")
+        ):
             portfolio_dirty = True
 
     from src.state.chain_reconciliation import check_quarantine_timeouts

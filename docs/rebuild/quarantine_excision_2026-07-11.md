@@ -513,6 +513,49 @@ history section.
   persisted-value lane, needs its own migration if renamed; (6) archives/
   ledgers/plan (exempt). TRUE ZERO in live vocabulary arrives when (1) retires
   post-migration; (2)/(3)/(6) are permanent legitimate residue.
+- BRIDGE RETIREMENT (2026-07-12, post-T5-migration): the operator ran T5
+  MIGRATION against all three live DBs (schema_epoch='t5_quarantine_phase_retirement_v1'
+  stamped ×3, zero rows carry 'quarantined'/'entry_authority_quarantined'/
+  'quarantine_expired'/'CHAIN_QUARANTINED' literals, CHECK constraints no
+  longer admit them). This follow-up packet retired cluster (1) in full:
+  the mixed-epoch load bridge (`src/state/portfolio.py`
+  `_normalize_runtime_lifecycle_state`/`_normalize_runtime_chain_state` legacy
+  remap branches — the latter function deleted outright), the write-side
+  `phase_before='quarantined'` preservation branch in
+  `src/state/canonical_write.py::transition_phase`, the legacy-input tolerance
+  branches in `src/state/lifecycle_manager.py`
+  (`enter_pending_exit_runtime_state`/`enter_settled_runtime_state` — a raw
+  'quarantined' input now fails loudly via `fold_lifecycle_phase` instead of
+  being remapped), bridge literals in
+  `src/contracts/position_truth.py`'s `CURRENT_MONEY_RISK_CHAIN_STATES`/
+  `NO_CURRENT_MONEY_RISK_CHAIN_STATES`, and every raw-SQL/frozenset
+  mixed-epoch-tagged site across src/state, src/engine, src/execution
+  (`src/engine/cycle_runtime.py`'s `_quarantined_position_can_redecision`
+  predicate family — confirmed provably unreachable in every caller and
+  deleted along with its supporting helpers/constants;
+  `src/execution/command_recovery.py::_void_absorbed_chain_only_projection`
+  deleted outright; `src/execution/harvester.py::_TERMINAL_PHASES` now an
+  alias of `TERMINAL_STATES`; plus `src/state/projection.py`,
+  `src/state/chain_reconciliation.py`, `src/engine/lifecycle_events.py`,
+  `src/engine/event_reactor_adapter.py`, `src/execution/executor.py`,
+  `src/execution/exit_lifecycle.py`, `src/execution/exchange_reconcile.py`,
+  `src/engine/cycle_runner.py`, `src/state/db.py`,
+  `src/state/collateral_ledger.py`, `src/state/chain_mirror_reconciler.py`).
+  `tests/_helpers/legacy_quarantine_schema.py` (the pre-migration-schema test
+  fixture helper) and its consumer tests across
+  test_transition_phase_invariant/test_command_recovery/test_exchange_reconcile/
+  test_runtime_guards were deleted or rewritten to the current schema;
+  `tests/test_no_new_scar_state.py` baselines ratcheted accordingly. The
+  startup epoch guard (`src/state/db.py::assert_schema_epoch_not_mixed`), the
+  migration script itself, and `schema_epoch` registry entries are permanent
+  and were not touched. Cluster (1) is RETIRED — see the classified residual
+  grep in the packet's own verification report (evidence/ or the agent
+  session record) for what remains: DIQ/certificate-revocation vocabulary,
+  the still-ACTIVE `chain_only_quarantined`/`operator_quarantine_clear`
+  token_suppression mechanism (explicitly out of T5-migration scope per that
+  script's own docstring), source_contract_status 'QUARANTINED' (a distinct,
+  untouched domain), and historical/migration-lane text — all permanent
+  legitimate residue, not MISSED.
 
 ## Consult adjudication (2026-07-11, GPT-5.6 Pro deep review — answer at
 ## /tmp/cgc/answer_REQ-20260711-140149-0f9584.txt; verdict adopted)

@@ -1189,11 +1189,19 @@ def test_selection_exposure_projects_buy_no_to_non_own_outcomes(monkeypatch):
 
 
 def test_selection_exposure_includes_quarantined_chain_backed_position():
-    """Quarantined chain-backed exposure must still shape family selection.
+    """Chain-backed exposure on a disputed-entry position must still shape
+    family selection.
 
-    A local quarantine label is not proof that the venue exposure is gone when
-    chain_state still asserts current money risk. The selection exposure map
-    must see that old NO payoff before choosing a sibling route.
+    BRIDGE RETIREMENT (docs/rebuild/quarantine_excision_2026-07-11.md,
+    post-T5-migration): this used to construct the position with
+    state='quarantined'/chain_state='entry_authority_quarantined' — a local
+    quarantine label was not proof that the venue exposure was gone when
+    chain_state still asserted current money risk. Per REPLACEMENT PHASE LAW
+    the position now keeps its TRUE phase directly (no quarantine label at
+    all — the dispute lives in a ReviewWorkItem), so this constructs it with
+    state='holding'/chain_state='synced' (also a CURRENT_MONEY_RISK_CHAIN_STATES
+    member). Same real assertion: the selection exposure map must see that
+    old NO payoff before choosing a sibling route.
     """
     from types import SimpleNamespace
 
@@ -1219,8 +1227,8 @@ def test_selection_exposure_includes_quarantined_chain_backed_position():
         target_date=family.target_date,
         bin_label="30C",
         direction="buy_no",
-        state="quarantined",
-        chain_state="entry_authority_quarantined",
+        state="holding",
+        chain_state="synced",
         condition_id="cond-1",
         chain_shares=29.14,
         chain_cost_basis_usd=21.27,
@@ -1249,7 +1257,11 @@ def test_selection_exposure_reads_chain_backed_db_without_portfolio_provider():
 
     Restart/recovery adapter constructions can have ``held_position_conn`` but no
     provider. Munich-style chain-backed NO exposure must still shape the next
-    family selection in that shape.
+    family selection in that shape. BRIDGE RETIREMENT
+    (docs/rebuild/quarantine_excision_2026-07-11.md, post-T5-migration): this
+    used to seed phase='quarantined'/chain_state='entry_authority_quarantined'
+    — both retired, DB CHECK no longer admits them — now seeds a normal open
+    phase/chain_state with the same real chain-backed exposure.
     """
     import sqlite3
 
@@ -1283,7 +1295,7 @@ def test_selection_exposure_reads_chain_backed_db_without_portfolio_provider():
         """
             INSERT INTO position_current (
                 condition_id, direction, phase, chain_state, chain_shares, chain_cost_basis_usd
-            ) VALUES ('cond-1', 'buy_no', 'quarantined', 'entry_authority_quarantined', 29.14, 21.27)
+            ) VALUES ('cond-1', 'buy_no', 'active', 'synced', 29.14, 21.27)
             """
         )
 
@@ -1632,7 +1644,16 @@ def test_selection_exposure_fails_closed_for_same_family_position_outside_bound_
 
 
 def test_selection_exposure_excludes_chain_absent_quarantine():
-    """Confirmed chain absence must not be reintroduced as live family exposure."""
+    """Confirmed chain absence must not be reintroduced as live family exposure.
+
+    BRIDGE RETIREMENT (docs/rebuild/quarantine_excision_2026-07-11.md,
+    post-T5-migration): this used to construct the position with
+    state='quarantined' — retired, DB CHECK no longer admits it — now uses
+    state='holding' (the TRUE phase a disputed-entry position keeps per
+    REPLACEMENT PHASE LAW). The real assertion is unchanged: chain_state
+    still confirms absence, so portfolio._is_runtime_open_position excludes
+    it regardless of the phase label.
+    """
     from types import SimpleNamespace
 
     from src.state.portfolio import Position
@@ -1653,7 +1674,7 @@ def test_selection_exposure_excludes_chain_absent_quarantine():
         target_date=family.target_date,
         bin_label="30C",
         direction="buy_no",
-        state="quarantined",
+        state="holding",
         chain_state="chain_absent_confirmed_position_unattributed",
         condition_id="cond-1",
         chain_shares=29.14,

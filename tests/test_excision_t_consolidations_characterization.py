@@ -22,211 +22,28 @@ import sqlite3
 
 import pytest
 
-from src.state.portfolio import QUARANTINE_SENTINEL, Position
 from src.state.schema.fact_revocations_schema import ensure_table
 
 
-def _make_position(**overrides) -> Position:
-    defaults = dict(
-        trade_id="test_001",
-        market_id="mkt_001",
-        city="Chicago",
-        cluster="Great Lakes",
-        target_date="2026-04-15",
-        bin_label="60-65",
-        direction="buy_yes",
-        size_usd=10.0,
-        entry_price=0.40,
-        p_posterior=0.55,
-        edge=0.15,
-        shares=25.0,
-        cost_basis_usd=10.0,
-        state="holding",
-        token_id="tok_yes_001",
-        no_token_id="tok_no_001",
-        unit="F",
-        env="live",
-    )
-    defaults.update(overrides)
-    return Position(**defaults)
-
-
 # ---------------------------------------------------------------------------
-# CONSOLIDATION 1 — redecision-eligibility predicate
+# CONSOLIDATION 1 — redecision-eligibility predicate [RETIRED]
 # ---------------------------------------------------------------------------
-
-
-def test_canonical_predicate_false_after_t5_mixed_epoch_remap():
-    """T5 (docs/rebuild/quarantine_excision_2026-07-11.md, REPLACEMENT PHASE
-    LAW) supersedes this characterization: a state='quarantined' input is now
-    remapped by Position.__post_init__ to its TRUE state ('holding') before
-    construction — no writer mints 'quarantined' going forward — so
-    _quarantined_position_can_redecision's own gate (state == 'quarantined')
-    can never fire for a live Position anymore. This is intentional and safe:
-    the position this predicate used to rescue into the family-monitor
-    widening is now genuinely active and already included via the normal
-    get_open_positions() path (see src.engine.cycle_runtime module-level
-    comment at _REDECISION_QUARANTINE_CHAIN_STATES for the full rationale).
-    """
-    from src.engine import cycle_runtime
-
-    pos = _make_position(
-        direction="buy_yes",
-        state="quarantined",
-        chain_state="entry_authority_quarantined",
-        shares=12.7,
-        chain_shares=12.7,
-    )
-    assert pos.state == "holding"
-    assert cycle_runtime._quarantined_position_can_redecision(pos) is False
-
-
-def test_canonical_predicate_false_for_non_quarantine_chain_state():
-    from src.engine import cycle_runtime
-
-    # chain_state="synced" is in CURRENT_MONEY_RISK_CHAIN_STATES (used by
-    # portfolio._is_runtime_open_position) but NOT in the canonical predicate's
-    # single-value REDECISION_ELIGIBLE_QUARANTINE_CHAIN_STATES set.
-    pos = _make_position(
-        direction="buy_yes",
-        state="quarantined",
-        chain_state="synced",
-        shares=12.7,
-        chain_shares=12.7,
-    )
-    assert cycle_runtime._quarantined_position_can_redecision(pos) is False
-
-
-def test_canonical_predicate_false_for_placeholder():
-    from src.engine import cycle_runtime
-
-    pos = _make_position(
-        direction="buy_yes",
-        state="quarantined",
-        chain_state="entry_authority_quarantined",
-        shares=12.7,
-        chain_shares=12.7,
-        city=QUARANTINE_SENTINEL,
-    )
-    assert pos.is_quarantine_placeholder is True
-    assert cycle_runtime._quarantined_position_can_redecision(pos) is False
-
-
-def _make_position_current_conn(rows: list[dict]) -> sqlite3.Connection:
-    conn = sqlite3.connect(":memory:")
-    conn.row_factory = sqlite3.Row
-    conn.execute(
-        """
-        CREATE TABLE position_current (
-            position_id TEXT PRIMARY KEY,
-            phase TEXT,
-            shares REAL,
-            chain_shares REAL,
-            updated_at TEXT,
-            target_date TEXT,
-            chain_state TEXT,
-            direction TEXT,
-            order_status TEXT,
-            exit_retry_count INTEGER,
-            next_exit_retry_at TEXT,
-            exit_reason TEXT,
-            last_monitor_market_price_is_fresh INTEGER
-        )
-        """
-    )
-    for row in rows:
-        conn.execute(
-            """
-            INSERT INTO position_current
-                (position_id, phase, shares, chain_shares, updated_at, target_date,
-                 chain_state, direction, order_status, exit_retry_count,
-                 next_exit_retry_at, exit_reason, last_monitor_market_price_is_fresh)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                row.get("position_id"),
-                row.get("phase"),
-                row.get("shares", 1.0),
-                row.get("chain_shares", 1.0),
-                row.get("updated_at", "2026-07-11T00:00:00+00:00"),
-                row.get("target_date", "2026-07-11"),
-                row.get("chain_state", ""),
-                row.get("direction", "buy_yes"),
-                row.get("order_status", ""),
-                row.get("exit_retry_count", 0),
-                row.get("next_exit_retry_at", ""),
-                row.get("exit_reason", ""),
-                row.get("last_monitor_market_price_is_fresh", 1),
-            ),
-        )
-    conn.commit()
-    return conn
-
-
-def test_canonical_monitor_position_rows_admits_entry_authority_quarantined():
-    from src.engine import cycle_runtime
-
-    conn = _make_position_current_conn(
-        [
-            {
-                "position_id": "pos-1",
-                "phase": "quarantined",
-                "chain_state": "entry_authority_quarantined",
-                "direction": "buy_yes",
-            }
-        ]
-    )
-    rows = cycle_runtime._canonical_monitor_position_rows(conn)
-    assert rows is not None
-    ids = [str(r["position_id"]) for r in rows]
-    assert ids == ["pos-1"]
-
-
-def test_canonical_monitor_position_rows_excludes_non_redecision_chain_state():
-    from src.engine import cycle_runtime
-
-    # chain_state="synced" is admitted by portfolio._is_runtime_open_position's
-    # broader carve-out but must stay excluded here (matches canonical predicate).
-    conn = _make_position_current_conn(
-        [
-            {
-                "position_id": "pos-2",
-                "phase": "quarantined",
-                "chain_state": "synced",
-                "direction": "buy_yes",
-            }
-        ]
-    )
-    rows = cycle_runtime._canonical_monitor_position_rows(conn)
-    assert rows is not None
-    assert rows == []
-
-
-def test_is_runtime_open_position_broader_than_canonical_predicate():
-    """Documents the genuine divergence: portfolio.py's carve-out uses the
-    4-value CURRENT_MONEY_RISK_CHAIN_STATES set (synced/chain_present/
-    exit_pending_missing/entry_authority_quarantined), NOT the canonical
-    predicate's 1-value REDECISION_ELIGIBLE_QUARANTINE_CHAIN_STATES set, and
-    has no direction or is_quarantine_placeholder gating. This is intentional
-    (a different, broader "still exposed" concept than "can redecision now")
-    and consolidation must NOT silently narrow it.
-    """
-    from src.engine import cycle_runtime
-    from src.state.portfolio import _is_runtime_open_position
-
-    pos = _make_position(
-        # direction is a Position-validated enum (cannot be blank); the point
-        # of this case is that _is_runtime_open_position never inspects it.
-        direction="buy_no",
-        state="quarantined",
-        chain_state="synced",
-        shares=12.7,
-        chain_shares=12.7,
-    )
-    assert _is_runtime_open_position(pos) is True
-    # The canonical redecision predicate disagrees on this exact position —
-    # proving the two are NOT the same predicate.
-    assert cycle_runtime._quarantined_position_can_redecision(pos) is False
+#
+# T5 BRIDGE RETIREMENT (docs/rebuild/quarantine_excision_2026-07-11.md,
+# post-T5-migration cleanup): this section used to characterize
+# src.engine.cycle_runtime._quarantined_position_can_redecision and
+# _canonical_monitor_position_rows' phase='quarantined' handling — both gated
+# on a raw state/phase literal that could only ever appear on a pre-T5-
+# migration legacy row. The T5 schema migration
+# (scripts/migrations/2026_07_quarantine_phase_retirement.py) has run against
+# the live DBs: the position_current/position_events CHECK constraints no
+# longer admit 'quarantined', LifecycleState/PositionPhase have no such
+# member (Position construction now raises instead of remapping), and no row
+# can ever trigger the bridge again. _quarantined_position_can_redecision and
+# its supporting helpers were deleted as provably dead code; these tests
+# constructed Position(state="quarantined"), which is no longer constructible
+# at all, so they tested ONLY the retired bridge and are removed rather than
+# rewritten.
 
 
 def test_edli_priority_tokens_includes_voided_phase_and_broader_chain_states():

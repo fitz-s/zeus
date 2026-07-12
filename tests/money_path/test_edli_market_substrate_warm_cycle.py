@@ -630,11 +630,22 @@ def test_warm_lane_money_risk_priority_stays_ahead_of_pending_rotation():
     assert "ordinary_families[start_offset:] + ordinary_families[:start_offset]" in src
 
 
-def test_substrate_held_scope_includes_chain_backed_quarantine_and_voided(
+def test_substrate_held_scope_includes_chain_backed_disputed_and_voided(
     monkeypatch,
     tmp_path,
 ):
-    """Chain-positive quarantine/voided exposure must stay in hot substrate scope."""
+    """Chain-positive disputed-entry/voided exposure must stay in hot substrate scope.
+
+    BRIDGE RETIREMENT (docs/rebuild/quarantine_excision_2026-07-11.md,
+    post-T5-migration): Munich/Seoul used to carry phase='quarantined' — the
+    literal is retired and the DB CHECK no longer admits it. Per REPLACEMENT
+    PHASE LAW a disputed-entry position keeps its TRUE phase directly, so
+    Munich now uses phase='active'/chain_state='synced' (a real, currently-
+    money-risk-bearing position) instead of the old "quarantined phase +
+    chain_absent chain_state, included regardless of chain_state" bypass —
+    chain-confirmed-absent exposure is no longer force-included in hot scope
+    (chain is truth: confirmed absence means no live risk to warm-scan for).
+    """
 
     hot_target_date = datetime.now(timezone.utc).date().isoformat()
     db_path = tmp_path / "trades.db"
@@ -657,10 +668,10 @@ def test_substrate_held_scope_includes_chain_backed_quarantine_and_voided(
         conn.executemany(
             "INSERT INTO position_current VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                 [
-                    ("Munich", hot_target_date, "high", "cond-munich-30", "quarantined", "chain_absent_confirmed_position_unattributed", 29.14, 29.14),
+                    ("Munich", hot_target_date, "high", "cond-munich-30", "active", "synced", 29.14, 29.14),
                     ("Madrid", hot_target_date, "high", "cond-madrid-29", "voided", "synced", 4.5, 0.0),
                     ("Paris", hot_target_date, "low", "cond-paris-19", "day0_window", "synced", 5.0, 5.0),
-                    ("Seoul", hot_target_date, "high", "cond-zero", "quarantined", "synced", 0.0, 10.0),
+                    ("Seoul", hot_target_date, "high", "cond-zero", "active", "synced", 0.0, 10.0),
                     ("London", hot_target_date, "high", "cond-closed", "economically_closed", "synced", 7.0, 7.0),
                 ],
             )

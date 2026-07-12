@@ -284,7 +284,9 @@ def allocate_chain_truth(
 def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], conn=None) -> dict:
     """Three rules. No reasoning about WHY. Chain is truth.
 
-    Returns: {"synced": int, "voided": int, "quarantined": int}
+    Returns: {"synced": int, "voided": int, "review_required": int,
+    "chain_only_unresolved": int, "updated": int, "skipped_pending": int,
+    "rescued_pending": int}
 
     Safety: if chain returns 0 positions but local has N, the API likely
     returned incomplete data. Skip voiding to prevent false PHANTOM kills.
@@ -547,12 +549,11 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
         sell attempt is backoff/exhausted/in flight.
 
         T5 (docs/rebuild/quarantine_excision_2026-07-11.md): 'quarantined' is
-        no longer a LifecyclePhase member — no writer mints it going forward —
-        but this is a raw SQL read of a persisted column, so the bare string
-        literal stays here as a mixed-epoch bridge: any legacy row still
-        carrying phase='quarantined' from before the T5 schema migration
-        (docs/rebuild item 5) must remain readable as an open phase for a
-        phase-preserving chain-economics refresh, never raise.
+        no longer a LifecyclePhase member. The T5 schema migration has run and
+        the DB CHECK no longer admits the literal, so the mixed-epoch bridge
+        that used to keep the bare string literal in the allowed-phase set
+        below (for a legacy row that might still carry phase='quarantined')
+        is retired.
         """
         if conn is None:
             return None
@@ -574,7 +575,6 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
             LifecyclePhase.ACTIVE.value,
             LifecyclePhase.DAY0_WINDOW.value,
             LifecyclePhase.PENDING_EXIT.value,
-            "quarantined",  # mixed-epoch bridge — see docstring
         }:
             raise RuntimeError(
                 f"canonical chain-observation baseline phase is not open: got {phase!r}"
@@ -1310,9 +1310,9 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
     # T5 (docs/rebuild/quarantine_excision_2026-07-11.md, REPLACEMENT PHASE
     # LAW): _is_current_money_risk_quarantine (state == 'quarantined' and a
     # current-risk chain_state) and its consumer block below are RETIRED —
-    # no writer mints state='quarantined' going forward, and
-    # Position.__post_init__ remaps any legacy row to its TRUE runtime state
-    # before this function ever sees it, so the predicate was provably
+    # no writer mints state='quarantined' going forward, LifecycleState has
+    # no such member (construction raises), and the DB CHECK no longer
+    # admits the literal post-migration, so the predicate was provably
     # unreachable for any live Position (unlike a bare-string mixed-epoch
     # read, keeping this as "defensive dead code" was actively wrong: it
     # required 'quarantined' to also stay a member of

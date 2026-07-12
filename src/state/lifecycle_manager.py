@@ -292,25 +292,13 @@ def enter_pending_exit_runtime_state(
         exit_state=exit_state,
         chain_state=chain_state,
     )
-    normalized_state = _normalized_state(current_state)
-    normalized_chain_state = _normalized_state(chain_state)
     # T5 (docs/rebuild/quarantine_excision_2026-07-11.md): 'quarantined' is no
-    # longer a recognized state — derive_runtime_position_phase now maps it to
+    # longer a recognized state — derive_runtime_position_phase maps it to
     # UNKNOWN like any other retired/garbage string, so current_phase can never
-    # equal a quarantine phase anymore. A caller may still pass a legacy raw
-    # state string directly (this is a pure function, not gated behind
-    # Position.__post_init__'s mixed-epoch remap), so the pre-T5 crash-safety
-    # contract is preserved explicitly on the RAW state string: a confirmed-
-    # fill/chain-absence-conflict dispute (real exposure) may still transition
-    # to pending_exit; any other legacy quarantined origin remains a safe
-    # no-op instead of raising.
-    if normalized_state == "quarantined":
-        if normalized_chain_state in {
-            "entry_authority_quarantined",
-            "chain_absent_confirmed_position_unattributed",
-        }:
-            return LifecyclePhase.PENDING_EXIT.value
-        return "quarantined"
+    # equal a quarantine phase anymore. No writer mints it and the DB CHECK no
+    # longer admits the literal post-migration; a caller that still passes it
+    # falls through to the normal UNKNOWN-phase handling below (fold_lifecycle_
+    # phase raises loudly) rather than being silently remapped.
     # Idempotency: positions that have already advanced past PENDING_EXIT
     # (economically_closed via market resolution, terminal phases, etc.) cannot
     # legally transition back to PENDING_EXIT — there is no remaining inventory
@@ -409,14 +397,13 @@ def enter_settled_runtime_state(
         chain_state=chain_state,
     )
     # T5 (docs/rebuild/quarantine_excision_2026-07-11.md): QUARANTINED
-    # retired — no writer mints it. A legacy 'quarantined' raw state string
-    # now derives to UNKNOWN; the chain-mirror reconciler still needs a
-    # legal fold path to grade such a legacy row directly against chain
-    # truth (docs/rebuild/chain_mirror_state_model_2026-07-04.md §5), so it
-    # is recognized explicitly on the RAW state string (mixed-epoch bridge)
-    # rather than widening UNKNOWN's general fold legality.
-    if _normalized_state(current_state) == "quarantined":
-        return LifecyclePhase.SETTLED.value
+    # retired — no writer mints it and the DB CHECK no longer admits the
+    # literal post-migration. A raw 'quarantined' state string now derives to
+    # UNKNOWN and fails loudly below (not in the settled-eligible set) rather
+    # than being remapped, matching the retirement of the mixed-epoch bridge
+    # that used to recognize it explicitly here for the chain-mirror
+    # reconciler's legacy-row grading (docs/rebuild/chain_mirror_state_model_
+    # 2026-07-04.md §5).
     if current_phase not in {
         LifecyclePhase.ACTIVE,
         LifecyclePhase.DAY0_WINDOW,
@@ -467,12 +454,12 @@ def enter_voided_runtime_state(
         LifecyclePhase.DAY0_WINDOW,
         LifecyclePhase.PENDING_EXIT,
         LifecyclePhase.ECONOMICALLY_CLOSED,
-        # T5 (docs/rebuild/quarantine_excision_2026-07-11.md): QUARANTINED
-        # retired — no writer mints it. A legacy 'quarantined' raw state
-        # string now derives to UNKNOWN (already allowed here), so the
-        # chain-mirror reconciler's force-resolve path (P0b, quarantined ->
-        # voided) keeps working via the UNKNOWN leg without a dedicated
-        # QUARANTINED member.
+        # T5 (docs/rebuild/quarantine_excision_2026-07-11.md): QUARANTINED is
+        # retired and the DB CHECK no longer admits the literal post-
+        # migration. A raw 'quarantined' state string derives to UNKNOWN
+        # (already allowed here), so the chain-mirror reconciler's
+        # force-resolve path (P0b, quarantined -> voided) worked via the
+        # UNKNOWN leg without a dedicated QUARANTINED member.
         LifecyclePhase.UNKNOWN,
     }:
         raise ValueError(

@@ -6953,19 +6953,15 @@ def test_chain_quarantine_fails_closed_when_fact_write_fails(caplog):
 
 
 def test_load_portfolio_dedupes_chain_only_fact_when_projection_already_has_token(tmp_path):
-    from tests._helpers.legacy_quarantine_schema import (
-        downgrade_position_current_to_legacy_quarantine_check,
-    )
-
     db_path = tmp_path / "zeus.db"
     path = tmp_path / "positions-cache.json"
     conn = get_connection(db_path)
     init_schema(conn)
-    # T5 (docs/rebuild/quarantine_excision_2026-07-11.md): this test seeds a
-    # pre-migration legacy row with phase='quarantined' to exercise the
-    # chain-only dedup path against a mixed-epoch row; the CHECK constraint
-    # no longer permits that literal on a fresh schema post-migration.
-    downgrade_position_current_to_legacy_quarantine_check(conn)
+    # T5 (docs/rebuild/quarantine_excision_2026-07-11.md): this used to seed a
+    # phase='quarantined' row to exercise the chain-only dedup path — the
+    # dedup keys off token_id membership in `represented_tokens`, not off the
+    # position's own phase, so any real open-phase row exercises the same
+    # dedup logic on the current (post-T5) schema.
     conn.execute(
         """
         INSERT INTO position_current (
@@ -6975,11 +6971,11 @@ def test_load_portfolio_dedupes_chain_only_fact_when_projection_already_has_toke
             decision_snapshot_id, entry_method, strategy_key, edge_source, discovery_mode,
             chain_state, token_id, no_token_id, condition_id, order_id, order_status, updated_at, temperature_metric
         ) VALUES (
-            'db-chain-only', 'quarantined', 'db-chain-only', 'cond-1', 'UNKNOWN', 'Other', 'UNKNOWN', 'UNKNOWN',
+            'db-chain-only', 'active', 'db-chain-only', 'cond-1', 'UNKNOWN', 'Other', 'UNKNOWN', 'UNKNOWN',
             'unknown', 'F', 5.04, 12.0, 5.04, 0.42, 0.42,
             NULL, NULL, NULL,
             NULL, '', 'opening_inertia', NULL, NULL,
-            'quarantined', 'yes-chain-only', NULL, 'cond-1', NULL, NULL, '2026-04-04T00:00:00Z', 'high'
+            'unknown', 'yes-chain-only', NULL, 'cond-1', NULL, NULL, '2026-04-04T00:00:00Z', 'high'
         )
         """
     )
@@ -7009,59 +7005,15 @@ def test_load_portfolio_dedupes_chain_only_fact_when_projection_already_has_toke
     assert [pos.token_id for pos in state.positions] == ["yes-chain-only"]
 
 
-def test_quarantine_no_longer_sets_portfolio_wide_block(monkeypatch, tmp_path):
-    """Quarantine excision T2 (docs/rebuild/quarantine_excision_2026-07-11.md):
-    the retired portfolio-wide quarantine gate (_has_quarantined_positions)
-    used to freeze ALL new entries the instant any one position carried
-    chain_state='quarantined', regardless of that position's family or scope
-    — the exact disease this excision removes. run_cycle() must no longer
-    surface the deleted `summary["portfolio_quarantined"]` key or the deleted
-    `entries_blocked_reason == "portfolio_quarantined"` value for this signal.
-    The replacement mechanisms (family-scoped block at the evaluator seam,
-    risk_level DATA_DEGRADED for unbounded obligations) are covered by
-    tests/test_excision_t2.py and tests/test_live_safety_
-    invariants.py's bridging-shim tests, not this run_cycle() harness test —
-    evaluate_candidate is never invoked by run_cycle in the live/EDLI system
-    (legacy discovery is an intentional no-op path; see cycle_runner's own
-    comment at the discovery-gate call site).
-    """
-    db_path = tmp_path / "zeus.db"
-    conn = get_connection(db_path)
-    init_schema(conn)
-    from src.state.db import init_schema_trade_only
-    init_schema_trade_only(conn)
-    conn.close()
-    portfolio = PortfolioState(positions=[_position(direction="unknown", chain_state="quarantined")])
-
-    class DummyClob:
-        def __init__(self):
-            pass
-
-        def get_positions_from_api(self):
-            return []
-
-        def get_balance(self):
-            return 100.0
-
-        def get_open_orders(self):
-            return []
-
-    monkeypatch.setattr(cycle_runner, "get_current_level", lambda: RiskLevel.GREEN)
-    monkeypatch.setattr(cycle_runner, "get_connection", lambda: get_connection(db_path))
-    monkeypatch.setattr(cycle_runner, "load_portfolio", lambda: portfolio)
-    monkeypatch.setattr(cycle_runner, "save_portfolio", lambda state, *args, **kwargs: None)
-    monkeypatch.setattr(cycle_runner, "PolymarketClient", DummyClob)
-    monkeypatch.setattr(cycle_runner, "get_tracker", lambda: StrategyTracker())
-    monkeypatch.setattr(cycle_runner, "save_tracker", lambda tracker: None)
-    monkeypatch.setattr(cycle_runner, "find_weather_markets", lambda **kwargs: [])
-    monkeypatch.setattr("src.control.control_plane.process_commands", lambda: [])
-    monkeypatch.setattr("src.observability.status_summary.write_status", lambda cycle_summary=None: None)
-
-    summary = cycle_runner.run_cycle(DiscoveryMode.OPENING_HUNT)
-
-    assert "portfolio_quarantined" not in summary
-    assert summary.get("entries_blocked_reason") != "portfolio_quarantined"
-    assert summary["candidates"] == 0
+# T5 BRIDGE RETIREMENT (docs/rebuild/quarantine_excision_2026-07-11.md):
+# test_quarantine_no_longer_sets_portfolio_wide_block deleted. It constructed
+# a `_position(chain_state="quarantined")` to prove the already-retired
+# portfolio-wide quarantine gate (_has_quarantined_positions) does not
+# resurrect in run_cycle(). chain_state="quarantined" is no longer a
+# constructible Position value (raises ValueError at construction) post-T5,
+# so the scenario is structurally impossible to seed. Coverage for the
+# replacement mechanisms already lives in tests/test_excision_t2.py per this
+# test's own docstring.
 
 
 def test_resolve_review_item_command_cas_resolves_open_work_item(monkeypatch, tmp_path):
@@ -7773,18 +7725,15 @@ def test_runtime_open_portfolio_prunes_terminal_rows_before_hydration_and_preser
         shares=15.0,
         entry_price=0.40,
     )
-    persist_position(
-        "quarantine-chain-risk",
-        "quarantined",
-        city="Seoul",
-        size_usd=0.0,
-        shares=0.0,
-        entry_price=0.40,
-        chain_state="synced",
-        chain_shares=5.0,
-        chain_cost_basis_usd=2.0,
-        fill_authority="venue_position_observed",
-    )
+    # T5 BRIDGE RETIREMENT (docs/rebuild/quarantine_excision_2026-07-11.md):
+    # this used to also seed "quarantine-chain-risk" / "quarantine-zero" /
+    # "quarantine-closed-worthless" phase='quarantined' rows to exercise the
+    # now-deleted quarantine OR-leg in the runtime-exposure query (OPEN_
+    # EXPOSURE_PHASES alone is authoritative again post-T5; see
+    # src/state/db.py::query_portfolio_loader_view). phase='quarantined' can
+    # no longer be constructed or persisted, so that sub-scenario is gone;
+    # "active-chain-zero" below still exercises the real (unrelated)
+    # zero-economics pruning path this test also covers.
     persist_position(
         "active-chain-zero",
         "entered",
@@ -7793,27 +7742,6 @@ def test_runtime_open_portfolio_prunes_terminal_rows_before_hydration_and_preser
         shares=99.0,
         entry_price=1.0,
         chain_state="chain_confirmed_zero",
-    )
-    persist_position(
-        "quarantine-zero",
-        "quarantined",
-        city="Rome",
-        size_usd=99.0,
-        shares=99.0,
-        entry_price=1.0,
-        chain_state="chain_confirmed_zero",
-    )
-    persist_position(
-        "quarantine-closed-worthless",
-        "quarantined",
-        city="Seoul",
-        size_usd=2.0,
-        shares=5.0,
-        entry_price=0.40,
-        chain_state="closed_worthless",
-        chain_shares=5.0,
-        chain_cost_basis_usd=2.0,
-        fill_authority="venue_position_observed",
     )
     persist_position(
         "settled-history",
@@ -7856,16 +7784,13 @@ def test_runtime_open_portfolio_prunes_terminal_rows_before_hydration_and_preser
         "pending-partial",
         "pending-entry",
         "day0-held",
-        "quarantine-chain-risk",
         "active-chain-zero",
-        "quarantine-zero",
     }
     assert {pos.trade_id for pos in runtime_state.positions} == {
         "active-filled",
         "pending-partial",
         "pending-entry",
         "day0-held",
-        "quarantine-chain-risk",
     }
     pending_partial_runtime = next(
         pos for pos in runtime_state.positions if pos.trade_id == "pending-partial"
@@ -7874,7 +7799,9 @@ def test_runtime_open_portfolio_prunes_terminal_rows_before_hydration_and_preser
     assert pending_partial_runtime.fill_authority == FILL_AUTHORITY_VENUE_CONFIRMED_PARTIAL
     assert pending_partial_runtime.effective_shares == pytest.approx(10.0)
     assert pending_partial_runtime.effective_cost_basis_usd == pytest.approx(4.10)
-    assert total_exposure_usd(runtime_state) == pytest.approx(32.10)
+    # 30.10 (was 32.10 before the retired "quarantine-chain-risk" fixture's
+    # 2.0 chain_cost_basis_usd was removed above).
+    assert total_exposure_usd(runtime_state) == pytest.approx(30.10)
     assert runtime_state.authority == "canonical_db"
     assert runtime_state.authority_scope == "runtime_exposure"
     assert conn.in_transaction is False
@@ -7956,7 +7883,7 @@ def test_runtime_open_portfolio_rejects_malformed_chain_exposure(tmp_path):
     init_schema(conn)
     position = _position(
         trade_id="malformed-chain-exposure",
-        state="quarantined",
+        state="holding",
         chain_state="synced",
         chain_shares=2.0,
         chain_avg_price=0.50,
@@ -8006,7 +7933,7 @@ def test_runtime_open_portfolio_rejects_chain_economics_with_nonrisk_state(tmp_p
     init_schema(conn)
     position = _position(
         trade_id="contradictory-runtime-authority",
-        state="quarantined",
+        state="holding",
         chain_state="unknown",
         chain_shares=5.0,
         chain_avg_price=0.40,
@@ -12775,51 +12702,19 @@ def test_inactive_positions_do_not_count_as_same_city_range_open():
     assert has_same_city_range_open(portfolio, "NYC", "39-40°F") is False
 
 
-def test_quarantined_positions_do_not_count_as_open_exposure():
-    portfolio = PortfolioState(
-        bankroll=100.0,
-        positions=[
-            _position(trade_id="quarantine-1", state="quarantined", chain_state="quarantined", size_usd=10.0),
-            _position(trade_id="open-1", state="holding", size_usd=5.0, cost_basis_usd=5.0),
-        ],
-    )
-
-    assert total_exposure_usd(portfolio) == pytest.approx(5.0)
-    # portfolio_heat assertion removed
-
-
-def test_quarantine_expired_positions_do_not_count_as_same_city_range_open():
-    portfolio = PortfolioState(
-        positions=[
-            _position(
-                trade_id="quarantine-expired-1",
-                state="quarantined",
-                chain_state="quarantine_expired",
-                city="NYC",
-                bin_label="39-40°F",
-            ),
-        ],
-    )
-
-    assert has_same_city_range_open(portfolio, "NYC", "39-40°F") is False
-
-
-def test_quarantine_expired_positions_do_not_count_as_open_exposure():
-    portfolio = PortfolioState(
-        bankroll=100.0,
-        positions=[
-            _position(
-                trade_id="quarantine-expired-1",
-                state="quarantined",
-                chain_state="quarantine_expired",
-                size_usd=10.0,
-            ),
-            _position(trade_id="open-1", state="holding", size_usd=5.0, cost_basis_usd=5.0),
-        ],
-    )
-
-    assert total_exposure_usd(portfolio) == pytest.approx(5.0)
-    # portfolio_heat assertion removed
+# T5 BRIDGE RETIREMENT (docs/rebuild/quarantine_excision_2026-07-11.md):
+# test_quarantined_positions_do_not_count_as_open_exposure,
+# test_quarantine_expired_positions_do_not_count_as_same_city_range_open, and
+# test_quarantine_expired_positions_do_not_count_as_open_exposure deleted.
+# Each constructed a `_position(state="quarantined", chain_state=...)` to pin
+# that quarantined positions are excluded from exposure/same-city-range
+# accounting — state="quarantined" and chain_state in {"quarantined",
+# "quarantine_expired"} are no longer constructible Position values (raise
+# ValueError) post-T5, so the scenario is structurally impossible to seed.
+# The equivalent "inactive phase excluded from open accounting" behavior for
+# still-valid terminal phases is covered by
+# test_economically_closed_position_does_not_count_as_open_exposure and
+# test_inactive_positions_do_not_count_as_same_city_range_open above.
 
 
 def test_fill_authority_cost_basis_feeds_portfolio_exposure_helpers():
@@ -13255,7 +13150,12 @@ def test_lifecycle_kernel_releases_pending_exit_to_preserved_or_active_runtime_s
     assert release_pending_exit_runtime_state("entered") == "entered"
     assert release_pending_exit_runtime_state("", day0_entered_at="2026-04-04T00:00:00Z") == "day0_window"
     assert release_pending_exit_runtime_state("", day0_entered_at="") == "holding"
-    assert release_pending_exit_runtime_state("quarantined") == "quarantined"
+    # T5 (docs/rebuild/quarantine_excision_2026-07-11.md): a legacy
+    # 'quarantined' input used to survive the release path unchanged; it now
+    # maps to LifecyclePhase.UNKNOWN, which PENDING_EXIT cannot legally fold
+    # into, so the release now fails loudly instead of tolerating it.
+    with pytest.raises(ValueError, match="illegal lifecycle phase fold"):
+        release_pending_exit_runtime_state("quarantined")
 
 
 def test_lifecycle_kernel_allows_touched_portfolio_terminal_transitions():
@@ -13443,13 +13343,26 @@ def test_check_pending_exits_restores_day0_window_state_after_bare_exit_intent_r
     assert pos.state == "day0_window"
 
 
-def test_check_pending_exits_restores_quarantine_after_bare_exit_intent_release():
+# T5 BRIDGE RETIREMENT (docs/rebuild/quarantine_excision_2026-07-11.md): the
+# four tests below used to seed pre_exit_state='quarantined' (plus
+# chain_state='entry_authority_quarantined') to prove a pending_exit release
+# without a live order restores the position to its quarantined pre-exit
+# state and persists that phase. 'quarantined' is no longer a LifecyclePhase
+# member at all (coerce_lifecycle_phase("quarantined") itself now raises),
+# so the write path they exercised (fold_lifecycle_phase(PENDING_EXIT,
+# "quarantined")) can never be reached with that literal again. The
+# underlying mechanism (release_pending_exit_without_order_if_retryable /
+# EXIT_RETRY_RELEASED persistence) is real and still active, so these are
+# rewritten — not deleted — using pre_exit_state="entered" (folds to the
+# current "active" phase) as the REPLACEMENT PHASE LAW carrier.
+
+
+def test_check_pending_exits_restores_pre_exit_state_after_bare_exit_intent_release_no_conn():
     pos = _position(
         state="pending_exit",
-        pre_exit_state="quarantined",
+        pre_exit_state="entered",
         exit_state="exit_intent",
         order_status="exit_intent",
-        chain_state="entry_authority_quarantined",
     )
     pos.last_exit_error = ""
     portfolio = PortfolioState(positions=[pos])
@@ -13459,7 +13372,7 @@ def test_check_pending_exits_restores_quarantine_after_bare_exit_intent_release(
     assert stats["retried"] == 0
     assert stats["unchanged"] == 1
     assert pos.exit_state == ""
-    assert pos.state == "quarantined"
+    assert pos.state == "entered"
     assert pos.order_status == "filled"
 
 
@@ -13467,12 +13380,11 @@ def test_check_pending_exits_persists_bare_exit_intent_release(tmp_path):
     conn = get_connection(tmp_path / "zeus.db")
     init_schema(conn)
     pos = _position(
-        trade_id="quarantine-release-preflight-1",
+        trade_id="pre-exit-state-release-preflight-1",
         state="pending_exit",
-        pre_exit_state="quarantined",
+        pre_exit_state="entered",
         exit_state="exit_intent",
         order_status="exit_intent",
-        chain_state="entry_authority_quarantined",
     )
     pos.last_exit_error = ""
     portfolio = PortfolioState(positions=[pos])
@@ -13483,7 +13395,7 @@ def test_check_pending_exits_persists_bare_exit_intent_release(tmp_path):
     assert stats["unchanged"] == 0
     assert stats["released_no_order"] == 1
     assert pos.exit_state == ""
-    assert pos.state == "quarantined"
+    assert pos.state == "entered"
     assert pos.order_status == "filled"
     row = conn.execute(
         "SELECT phase, order_status, exit_retry_count, next_exit_retry_at "
@@ -13491,7 +13403,7 @@ def test_check_pending_exits_persists_bare_exit_intent_release(tmp_path):
         (pos.trade_id,),
     ).fetchone()
     assert dict(row) == {
-        "phase": "quarantined",
+        "phase": "active",
         "order_status": "filled",
         "exit_retry_count": 0,
         "next_exit_retry_at": "",
@@ -13504,21 +13416,20 @@ def test_check_pending_exits_persists_bare_exit_intent_release(tmp_path):
     assert dict(event) == {
         "event_type": "EXIT_RETRY_RELEASED",
         "phase_before": "pending_exit",
-        "phase_after": "quarantined",
+        "phase_after": "active",
     }
     conn.close()
 
 
-def test_pending_exit_without_order_release_persists_quarantine_restore(tmp_path):
+def test_pending_exit_without_order_release_persists_pre_exit_state_restore(tmp_path):
     conn = get_connection(tmp_path / "zeus.db")
     init_schema(conn)
     pos = _position(
-        trade_id="quarantine-release-1",
+        trade_id="pre-exit-state-release-1",
         state="pending_exit",
-        pre_exit_state="quarantined",
+        pre_exit_state="entered",
         exit_state="exit_intent",
         order_status="exit_intent",
-        chain_state="entry_authority_quarantined",
     )
 
     released = exit_lifecycle_module.release_pending_exit_without_order_if_retryable(
@@ -13527,7 +13438,7 @@ def test_pending_exit_without_order_release_persists_quarantine_restore(tmp_path
     )
 
     assert released is True
-    assert pos.state == "quarantined"
+    assert pos.state == "entered"
     assert pos.exit_state == ""
     row = conn.execute(
         "SELECT phase, order_status, exit_retry_count, next_exit_retry_at "
@@ -13535,7 +13446,7 @@ def test_pending_exit_without_order_release_persists_quarantine_restore(tmp_path
         (pos.trade_id,),
     ).fetchone()
     assert dict(row) == {
-        "phase": "quarantined",
+        "phase": "active",
         "order_status": "filled",
         "exit_retry_count": 0,
         "next_exit_retry_at": "",
@@ -13548,26 +13459,25 @@ def test_pending_exit_without_order_release_persists_quarantine_restore(tmp_path
     assert dict(event) == {
         "event_type": "EXIT_RETRY_RELEASED",
         "phase_before": "pending_exit",
-        "phase_after": "quarantined",
+        "phase_after": "active",
     }
 
 
-def test_check_pending_exits_releases_loaded_quarantined_bare_exit_intent_without_order(tmp_path):
+def test_check_pending_exits_releases_loaded_pre_exit_state_bare_exit_intent_without_order(tmp_path):
     from src.engine.lifecycle_events import build_position_current_projection
     from src.execution.exit_lifecycle import check_pending_exits
     from src.state.db import query_portfolio_loader_view
     from src.state.portfolio import PortfolioState, _position_from_projection_row
     from src.state.projection import upsert_position_current
 
-    conn = get_connection(tmp_path / "loaded-quarantine-exit-intent.db")
+    conn = get_connection(tmp_path / "loaded-pre-exit-state-exit-intent.db")
     init_schema(conn)
     pos = _position(
-        trade_id="loaded-quarantine-exit-intent-1",
+        trade_id="loaded-pre-exit-state-exit-intent-1",
         state="pending_exit",
-        pre_exit_state="quarantined",
+        pre_exit_state="entered",
         exit_state="exit_intent",
         order_status="exit_intent",
-        chain_state="entry_authority_quarantined",
     )
     upsert_position_current(conn, build_position_current_projection(pos))
     conn.execute(
@@ -13580,21 +13490,21 @@ def test_check_pending_exits_releases_loaded_quarantined_bare_exit_intent_withou
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
-            "evt-loaded-quarantine-exit-intent-1",
+            "evt-loaded-pre-exit-state-exit-intent-1",
             pos.trade_id,
             1,
             1,
             "EXIT_INTENT",
             "2026-07-09T05:00:54+00:00",
-            "quarantined",
+            "active",
             "pending_exit",
             pos.strategy_key,
-            "exit:loaded-quarantine-exit-intent-1",
+            "exit:loaded-pre-exit-state-exit-intent-1",
             pos.decision_snapshot_id,
             None,
             None,
             "transition_phase",
-            "loaded-quarantine-exit-intent-1:exit_intent",
+            "loaded-pre-exit-state-exit-intent-1:exit_intent",
             None,
             "src.execution.exit_lifecycle",
             json.dumps({"status": "exit_intent", "error": ""}),
@@ -13611,7 +13521,7 @@ def test_check_pending_exits_releases_loaded_quarantined_bare_exit_intent_withou
     loaded_pos = _position_from_projection_row(loaded, current_mode="live")
 
     assert loaded_pos.state == "pending_exit"
-    assert loaded_pos.pre_exit_state == "quarantined"
+    assert loaded_pos.pre_exit_state == "entered"
     assert loaded_pos.exit_state == "exit_intent"
     assert loaded_pos.order_status == "exit_intent"
 
@@ -13623,7 +13533,7 @@ def test_check_pending_exits_releases_loaded_quarantined_bare_exit_intent_withou
 
     assert stats["retried"] == 1
     assert stats["released_no_order"] == 1
-    assert loaded_pos.state == "quarantined"
+    assert loaded_pos.state == "entered"
     assert loaded_pos.exit_state == ""
     assert loaded_pos.order_status == "filled"
     row = conn.execute(
@@ -13635,7 +13545,7 @@ def test_check_pending_exits_releases_loaded_quarantined_bare_exit_intent_withou
         (pos.trade_id,),
     ).fetchone()
     assert dict(row) == {
-        "phase": "quarantined",
+        "phase": "active",
         "order_status": "filled",
         "exit_retry_count": 0,
         "next_exit_retry_at": "",
@@ -13654,7 +13564,7 @@ def test_check_pending_exits_releases_loaded_quarantined_bare_exit_intent_withou
     assert dict(event) == {
         "event_type": "EXIT_RETRY_RELEASED",
         "phase_before": "pending_exit",
-        "phase_after": "quarantined",
+        "phase_after": "active",
         "order_id": None,
         "command_id": None,
         "release_reason": "PENDING_EXIT_NO_ORDER_RELEASED",

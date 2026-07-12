@@ -33,21 +33,11 @@ def conn():
     from src.state.db import init_schema
     from src.state.collateral_ledger import init_collateral_schema
     from src.state.collateral_ledger import init_collateral_schema
-    from tests._helpers.legacy_quarantine_schema import (
-        downgrade_position_current_to_legacy_quarantine_check,
-    )
 
     c = sqlite3.connect(":memory:")
     c.row_factory = sqlite3.Row
     init_schema(c)
     init_collateral_schema(c)
-    # T5 (docs/rebuild/quarantine_excision_2026-07-11.md): several tests below
-    # deliberately seed a pre-migration legacy row with phase='quarantined' /
-    # chain_state='entry_authority_quarantined' to exercise command_recovery's
-    # mixed-epoch bridge handling; the CHECK constraint no longer permits that
-    # literal on a fresh schema post-migration, so downgrade this throwaway
-    # fixture connection back to the pre-migration shape.
-    downgrade_position_current_to_legacy_quarantine_check(c)
     yield c
     c.close()
 
@@ -57,91 +47,14 @@ def mock_client():
     return MagicMock(spec_set=["get_order", "get_open_orders", "get_trades", "get_clob_market_info", "v2_preflight"])
 
 
-def test_filled_projection_repair_voids_absorbed_chain_only_stub(conn):
-    from src.execution.command_recovery import _void_absorbed_chain_only_projection
-
-    token = "tok-canonical-fill"
-    conn.execute(
-        """
-        INSERT INTO position_current (
-            position_id, phase, strategy_key, updated_at, temperature_metric,
-            token_id, condition_id, chain_state, shares, cost_basis_usd,
-            chain_shares, chain_cost_basis_usd
-        ) VALUES (
-            'chain-only-fill', 'quarantined', 'chain_only_reconciliation',
-            '2026-07-02T02:23:43+00:00', 'high',
-            ?, 'cond-fill', 'entry_authority_quarantined', 40.25, 17.71,
-            40.25, 17.71
-        )
-        """,
-        (token,),
-    )
-    conn.execute(
-        """
-        INSERT INTO token_suppression (
-            token_id, condition_id, suppression_reason, source_module,
-            created_at, updated_at, evidence_json
-        ) VALUES (?, 'cond-fill', 'chain_only_quarantined', 'test',
-                  '2026-07-02T02:23:43+00:00',
-                  '2026-07-02T02:23:43+00:00', '{}')
-        """,
-        (token,),
-    )
-
-    cleared = _void_absorbed_chain_only_projection(
-        conn,
-        position=SimpleNamespace(
-            trade_id="canonical-fill",
-            direction="buy_yes",
-            token_id=token,
-            no_token_id="",
-            condition_id="cond-fill",
-            decision_id="decision-fill",
-            decision_snapshot_id="snapshot-fill",
-            order_id="order-fill",
-            command_id="command-fill",
-        ),
-    )
-
-    row = conn.execute(
-        """
-        SELECT phase, shares, cost_basis_usd, chain_shares, chain_cost_basis_usd,
-               exit_reason
-          FROM position_current
-         WHERE position_id = 'chain-only-fill'
-        """
-    ).fetchone()
-    suppression = conn.execute(
-        """
-        SELECT suppression_reason, source_module, evidence_json
-          FROM token_suppression
-         WHERE token_id = ?
-        """,
-        (token,),
-    ).fetchone()
-    event = conn.execute(
-        """
-        SELECT event_type, phase_after, command_id
-          FROM position_events
-         WHERE position_id = 'chain-only-fill'
-        """
-    ).fetchone()
-
-    assert cleared == 1
-    assert dict(row) == {
-        "phase": "voided",
-        "shares": 0.0,
-        "cost_basis_usd": 0.0,
-        "chain_shares": 0.0,
-        "chain_cost_basis_usd": 0.0,
-        "exit_reason": "chain_only_absorbed_by_canonical_filled_entry",
-    }
-    assert suppression["suppression_reason"] == "operator_quarantine_clear"
-    assert suppression["source_module"] == "src.execution.command_recovery"
-    assert json.loads(suppression["evidence_json"])["canonical_position_id"] == "canonical-fill"
-    assert event["event_type"] == "ADMIN_VOIDED"
-    assert event["phase_after"] == "voided"
-    assert event["command_id"] == "command-fill"
+# T5 BRIDGE RETIREMENT (docs/rebuild/quarantine_excision_2026-07-11.md):
+# test_filled_projection_repair_voids_absorbed_chain_only_stub deleted.
+# It exercised command_recovery._void_absorbed_chain_only_projection, which
+# only ever matched phase='quarantined' AND chain_state=
+# 'entry_authority_quarantined' rows -- a combination the CHECK constraint
+# no longer admits post-T5-migration. The function (and its 3 call sites)
+# were deleted as provably unreachable; there is no current-law replacement
+# scenario to rewrite this test into.
 
 
 def _valid_day0_pre_submit_payload(**overrides):
@@ -465,19 +378,17 @@ def test_boot_fast_repairs_confirmed_chain_absence_positive_projection(
     from src.execution import venue_sync_contract
     from src.state.db import init_schema
     from src.state.collateral_ledger import init_collateral_schema
-    from tests._helpers.legacy_quarantine_schema import (
-        downgrade_position_current_to_legacy_quarantine_check,
-    )
 
     db_path = tmp_path / "boot-fast-chain-absence.db"
     seed = sqlite3.connect(db_path)
     seed.row_factory = sqlite3.Row
     init_schema(seed)
     init_collateral_schema(seed)
-    # T5 (docs/rebuild/quarantine_excision_2026-07-11.md): seeds a
-    # pre-migration legacy row with phase='quarantined'; the CHECK constraint
-    # no longer permits that literal on a fresh schema post-migration.
-    downgrade_position_current_to_legacy_quarantine_check(seed)
+    # T5 REPLACEMENT PHASE LAW (docs/rebuild/quarantine_excision_2026-07-11.md):
+    # the candidate query for repair_confirmed_chain_absence_positive_projections
+    # keys off chain_state, not phase -- a normal open phase (active) is the
+    # current-law vehicle for "real exposure with a chain-absence conflict",
+    # never a quarantine scar.
     seed.execute(
         """
         INSERT INTO position_current (
@@ -488,7 +399,7 @@ def test_boot_fast_repairs_confirmed_chain_absence_positive_projection(
             condition_id, order_id, order_status, updated_at, temperature_metric,
             chain_shares, chain_avg_price, chain_cost_basis_usd, exit_reason
         ) VALUES (
-            'pos-boot-chain-absent-positive', 'quarantined', 'condition-munich',
+            'pos-boot-chain-absent-positive', 'active', 'condition-munich',
             'Munich', 'Europe', '2026-06-30',
             'Will the highest temperature in Munich be 30C on June 30?',
             'buy_no', 'C', 21.27, 29.14, 21.27, 0.73,
@@ -510,7 +421,7 @@ def test_boot_fast_repairs_confirmed_chain_absence_positive_projection(
         ) VALUES (
             'evt-boot-chain-absent-positive', 'pos-boot-chain-absent-positive',
             4, 'REVIEW_REQUIRED', '2026-06-30T00:22:00+00:00',
-            'active', 'quarantined', 'center_buy', 'dec-1', 'snap-1',
+            'active', 'active', 'center_buy', 'dec-1', 'snap-1',
             'ord-entry', NULL, 'chain_absent_confirmed_position_unattributed',
             'idem-boot-chain-absent-positive', 'review_required',
             'src.state.chain_reconciliation',
@@ -8092,23 +8003,16 @@ class TestRecoveryResolutionTable:
             )
             """
         )
-        conn.execute(
-            """
-            INSERT INTO position_current (
-                position_id, phase, strategy_key, updated_at, temperature_metric,
-                token_id, no_token_id, condition_id, direction, chain_state,
-                shares, chain_shares, cost_basis_usd, chain_cost_basis_usd,
-                entry_method, edge_source, discovery_mode
-            ) VALUES (
-                'chain-only-edli-existing', 'quarantined',
-                'chain_only_reconciliation', '2026-04-26T00:05:01Z', 'high',
-                'tok-001', 'tok-001-no', 'condition-test', 'buy_yes',
-                'entry_authority_quarantined', 5.0, 5.0, 0.06, 0.06,
-                'chain_only_reconciliation', 'chain_only_quarantine',
-                'chain_reconciliation'
-            )
-            """
-        )
+        # T5 BRIDGE RETIREMENT (docs/rebuild/quarantine_excision_2026-07-11.md):
+        # this test previously also seeded a second "chain-only-edli-existing"
+        # position (phase='quarantined', chain_state='entry_authority_
+        # quarantined') and asserted this repair voided it via
+        # command_recovery._void_absorbed_chain_only_projection. That
+        # absorption call site was deleted from
+        # reconcile_edli_entry_posterior_projection_repairs (provably
+        # unreachable post-migration), so the incidental seed/assertion is
+        # gone too; this test now covers only its real subject, the EDLI
+        # entry-posterior backfill for pos-001.
 
         from src.execution.command_recovery import (
             reconcile_edli_entry_posterior_projection_repairs,
@@ -8131,19 +8035,6 @@ class TestRecoveryResolutionTable:
         assert current["edge_source"] == "forecast_qkernel_entry"
         assert current["discovery_mode"] == "update_reaction"
         assert current["decision_snapshot_id"] == "forecast-snap-edli"
-        absorbed = conn.execute(
-            """
-            SELECT phase, shares, chain_shares, cost_basis_usd
-              FROM position_current
-             WHERE position_id = 'chain-only-edli-existing'
-            """
-        ).fetchone()
-        assert dict(absorbed) == {
-            "phase": "voided",
-            "shares": 0.0,
-            "chain_shares": 0.0,
-            "cost_basis_usd": 0.0,
-        }
 
     def test_edli_entry_posterior_projection_repair_refuses_quarantined_actionable_certificate(
         self,
@@ -11696,18 +11587,24 @@ class TestRecoveryResolutionTable:
         }
         assert not any(row["event_type"] == "EXIT_ORDER_FILLED" for row in lifecycle_events)
 
-    def test_live_exit_order_restores_quarantined_position_to_pending_exit(
+    def test_live_exit_order_restores_active_position_to_pending_exit(
         self,
         conn,
         mock_client,
     ):
+        # T5 REPLACEMENT PHASE LAW (docs/rebuild/quarantine_excision_2026-07-11.md):
+        # a live venue EXIT order is stronger current money-path truth than a
+        # stale projection; the CURRENT vehicle for "position's phase lags a
+        # resting exit order" is a normal open phase (active), which is in
+        # command_recovery._EXIT_LIVE_ORDER_RESTORE_PHASES -- never a
+        # quarantine scar (that member was retired from the set).
         _insert(conn, command_id="cmd-entry", position_id="pos-001", size=12.03, price=0.44)
         _advance_to_acked(conn, command_id="cmd-entry", venue_order_id="ord-entry")
         _seed_pending_entry_projection(conn, command_id="cmd-entry", order_id="ord-entry")
         conn.execute(
             """
             UPDATE position_current
-               SET phase = 'quarantined',
+               SET phase = 'active',
                    shares = 12.03,
                    chain_shares = 12.03,
                    cost_basis_usd = 5.2932,
@@ -11771,7 +11668,7 @@ class TestRecoveryResolutionTable:
         ).fetchone()
         assert dict(lifecycle_event) == {
             "event_type": "EXIT_ORDER_POSTED",
-            "phase_before": "quarantined",
+            "phase_before": "active",
             "phase_after": "pending_exit",
             "order_id": "ord-exit",
             "command_id": "cmd-exit",
@@ -11790,7 +11687,7 @@ class TestRecoveryResolutionTable:
         conn.execute(
             """
             UPDATE position_current
-               SET phase = 'quarantined',
+               SET phase = 'active',
                    shares = 15.23,
                    chain_shares = 15.23,
                    cost_basis_usd = 7.7673,
@@ -12426,7 +12323,7 @@ class TestRecoveryResolutionTable:
                 fill_authority, chain_shares, chain_avg_price,
                 chain_cost_basis_usd, chain_absence_at
             ) VALUES (
-                ?, 'quarantined', ?, 'mkt-munich', 'Munich', 'Europe',
+                ?, 'active', ?, 'mkt-munich', 'Munich', 'Europe',
                 '2026-06-30',
                 'Will the highest temperature in Munich be 30°C on June 30?',
                 'buy_no', 'C', 21.27, 29.14, 21.27, 0.73, 0.1449,
@@ -12449,7 +12346,7 @@ class TestRecoveryResolutionTable:
                 command_id, caused_by, idempotency_key, venue_status,
                 source_module, payload_json, env
             ) VALUES (?, ?, 1, 4, 'REVIEW_REQUIRED', '2026-06-30T00:22:00+00:00',
-                      'active', 'quarantined', 'center_buy', NULL,
+                      'active', 'active', 'center_buy', NULL,
                       'snap-munich', 'ord-entry', NULL,
                       'chain_absent_confirmed_position_unattributed',
                       ?, 'review_required', 'src.state.chain_reconciliation',
@@ -12480,8 +12377,13 @@ class TestRecoveryResolutionTable:
             """,
             (position_id,),
         ).fetchone()
+        # T5 REPLACEMENT PHASE LAW (docs/rebuild/quarantine_excision_2026-07-11.md):
+        # no positive trade fact backs this row, so the repair leaves phase
+        # untouched (it only clears stale chain projection fields) -- a
+        # normal open phase (active) is the current-law vehicle, never a
+        # quarantine scar.
         assert dict(current) == {
-            "phase": "quarantined",
+            "phase": "active",
             "chain_state": "chain_absent_confirmed_position_unattributed",
             "shares": 29.14,
             "cost_basis_usd": 21.27,
@@ -12505,8 +12407,8 @@ class TestRecoveryResolutionTable:
         payload = json.loads(event["payload_json"])
         assert event["event_type"] == "REVIEW_REQUIRED"
         assert event["sequence_no"] == 5
-        assert event["phase_before"] == "quarantined"
-        assert event["phase_after"] == "quarantined"
+        assert event["phase_before"] == "active"
+        assert event["phase_after"] == "active"
         assert event["source_module"] == "src.execution.command_recovery"
         assert payload["previous_chain_shares"] == 29.14
         assert payload["proof_class"] == "confirmed_chain_absence_projection_chain_fields_cleared"
@@ -12557,7 +12459,7 @@ class TestRecoveryResolutionTable:
                 fill_authority, chain_shares, chain_avg_price,
                 chain_cost_basis_usd, chain_absence_at
             ) VALUES (
-                ?, 'quarantined', ?, 'mkt-munich', 'Munich', 'Europe',
+                ?, 'voided', ?, 'mkt-munich', 'Munich', 'Europe',
                 '2026-06-30',
                 'Will the highest temperature in Munich be 30°C on June 30?',
                 'buy_no', 'C', 21.27, 29.14, 21.27, 0.73, 0.1449,
@@ -12580,7 +12482,7 @@ class TestRecoveryResolutionTable:
                 command_id, caused_by, idempotency_key, venue_status,
                 source_module, payload_json, env
             ) VALUES (?, ?, 1, 4, 'REVIEW_REQUIRED', '2026-06-30T00:22:00+00:00',
-                      'active', 'quarantined', 'center_buy', NULL,
+                      'active', 'voided', 'center_buy', NULL,
                       'snap-munich', 'ord-entry', NULL,
                       'chain_absent_confirmed_position_unattributed',
                       ?, 'review_required', 'src.state.chain_reconciliation',
@@ -12613,7 +12515,9 @@ class TestRecoveryResolutionTable:
         ).fetchone()
         # T5 (docs/rebuild/quarantine_excision_2026-07-11.md, REPLACEMENT
         # PHASE LAW): positive trade-fact proof restores the TRUE phase
-        # (active) and chain_state (synced), never a quarantine scar;
+        # (active) and chain_state (synced), never a quarantine scar; the
+        # row starts 'voided' (a wrongly-closed phase) to exercise the
+        # restoration branch, since already-open phases fold to themselves.
         # exit_reason is left as its honest pre-existing value — the
         # dispute is tracked by an open CONFIRMED_FILL_CHAIN_ABSENCE_CONFLICT
         # ReviewWorkItem instead.
@@ -12642,7 +12546,7 @@ class TestRecoveryResolutionTable:
         payload = json.loads(event["payload_json"])
         assert event["event_type"] == "REVIEW_REQUIRED"
         assert event["sequence_no"] == 5
-        assert event["phase_before"] == "quarantined"
+        assert event["phase_before"] == "voided"
         assert event["phase_after"] == "active"
         assert event["source_module"] == "src.execution.command_recovery"
         assert payload["positive_trade_fact_proof"]["has_positive_trade_fact"] is True
@@ -12706,7 +12610,7 @@ class TestRecoveryResolutionTable:
                 fill_authority, chain_shares, chain_avg_price,
                 chain_cost_basis_usd, chain_absence_at
             ) VALUES (
-                ?, 'quarantined', ?, 'mkt-munich', 'Munich', 'Europe',
+                ?, 'voided', ?, 'mkt-munich', 'Munich', 'Europe',
                 '2026-06-30',
                 'Will the highest temperature in Munich be 30°C on June 30?',
                 'buy_no', 'C', 21.27, 29.14, 21.27, 0.73, 0.1449,
@@ -12729,7 +12633,7 @@ class TestRecoveryResolutionTable:
                 command_id, caused_by, idempotency_key, venue_status,
                 source_module, payload_json, env
             ) VALUES (?, ?, 1, 4, 'REVIEW_REQUIRED', '2026-06-30T00:22:00+00:00',
-                      'active', 'quarantined', 'center_buy', NULL,
+                      'active', 'voided', 'center_buy', NULL,
                       'snap-munich', 'ord-entry', NULL,
                       'chain_absent_confirmed_position_unattributed',
                       ?, 'review_required', 'src.state.chain_reconciliation',
@@ -12765,6 +12669,8 @@ class TestRecoveryResolutionTable:
         # (synced) even though the row's own chain fields started at
         # zero — positive venue trade-fact proof backfills chain_shares/
         # chain_avg_price/chain_cost_basis_usd from the local projection.
+        # Row starts 'voided' (a wrongly-closed phase) to exercise the
+        # restoration branch, since already-open phases fold to themselves.
         assert dict(current) == {
             "phase": "active",
             "chain_state": "synced",

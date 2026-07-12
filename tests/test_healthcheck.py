@@ -1718,9 +1718,20 @@ def test_monitor_cadence_status_rejects_one_stale_position_when_another_is_fresh
     assert result["stale_or_missing_positions"][0]["position_id"] == "pos-2"
 
 
-def test_monitor_cadence_status_reports_quarantined_chain_risk_without_blocking(
+def test_monitor_cadence_status_reports_voided_chain_risk_without_blocking(
     monkeypatch, tmp_path
 ):
+    """BRIDGE RETIREMENT (docs/rebuild/quarantine_excision_2026-07-11.md,
+    post-T5-migration): this used to seed phase='quarantined'/
+    chain_state='entry_authority_quarantined' as its example of a
+    not-actively-monitored-but-chain-risky position. The T5 schema migration
+    has run and the DB CHECK no longer admits that literal, and
+    src.ops.monitor_cadence.NON_MONITOR_CHAIN_RISK_PHASES no longer includes
+    it (a disputed-entry position now keeps its TRUE phase and is normally
+    monitored per REPLACEMENT PHASE LAW). 'voided' is the one remaining real
+    member of that set: a voided position with residual chain shares still
+    needs reconciliation attention without blocking health.
+    """
     db_path = tmp_path / "zeus_trades.db"
     conn = sqlite3.connect(str(db_path))
     conn.execute(
@@ -1749,7 +1760,7 @@ def test_monitor_cadence_status_reports_quarantined_chain_risk_without_blocking(
         """
         INSERT INTO position_current (
             position_id, phase, shares, chain_shares, chain_state
-        ) VALUES ('pos-q', 'quarantined', 0.0, 4.0, 'entry_authority_quarantined')
+        ) VALUES ('pos-q', 'voided', 0.0, 4.0, 'synced')
         """
     )
     conn.commit()

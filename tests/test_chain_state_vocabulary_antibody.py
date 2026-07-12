@@ -123,27 +123,16 @@ def test_chain_absent_confirmed_unattributed_round_trips_through_position():
     assert pos.chain_state == VenueVisibilityStatus.CHAIN_ABSENT_CONFIRMED_UNATTRIBUTED
 
 
-def test_legacy_entry_authority_quarantined_remaps_loader_safe():
-    """T5 (docs/rebuild/quarantine_excision_2026-07-11.md, REPLACEMENT PHASE
-    LAW): ENTRY_AUTHORITY_QUARANTINED is retired from ChainState — no writer
-    mints it going forward (a confirmed-fill/chain-absence-conflict dispute
-    now opens a ReviewWorkItem instead, keeping the position's TRUE
-    chain_state). A LEGACY row still carrying this value (pre T5 schema
-    migration, docs/rebuild item 5) must remain loader-safe: Position.
-    __post_init__ remaps it to 'synced' rather than raising "not a valid
-    ChainState" and poisoning portfolio load — the exact riskguard-kill class
-    this antibody file exists to prevent, now handled at the mixed-epoch
-    boundary instead of by keeping the retired enum member alive.
-    """
-    from src.state.portfolio import Position
-
-    pos = Position(
-        trade_id="t-entry-authority", market_id="m", city="Lucknow", cluster="India",
-        target_date="2026-06-28", bin_label="b", direction="buy_yes",
-        unit="C", temperature_metric="high",
-        chain_state="entry_authority_quarantined",
-    )
-    assert pos.chain_state == VenueVisibilityStatus.SYNCED
+# test_legacy_entry_authority_quarantined_remaps_loader_safe RETIRED (BRIDGE
+# RETIREMENT, docs/rebuild/quarantine_excision_2026-07-11.md, post-T5-migration):
+# it pinned that a LEGACY chain_state='entry_authority_quarantined' row was
+# loader-safe via Position.__post_init__'s mixed-epoch remap to 'synced'. The
+# T5 schema migration has run — no writer mints the literal, the DB CHECK no
+# longer admits it, and this packet deleted the remap — so
+# Position(chain_state="entry_authority_quarantined") now raises ValueError at
+# construction (correct: the literal can never occur on a live row). The
+# riskguard-kill class this antibody file exists to prevent is now covered by
+# the CHECK constraint itself, not a load-time remap.
 
 
 def test_closed_exited_round_trips_through_position():

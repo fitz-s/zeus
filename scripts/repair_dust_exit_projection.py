@@ -156,7 +156,6 @@ def repair_candidates(conn: sqlite3.Connection) -> list[RepairCandidate]:
                     'settled',
                     'voided',
                     'admin_closed',
-                    'quarantined',
                     'economically_closed'
                  )
              AND (
