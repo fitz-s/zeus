@@ -620,22 +620,31 @@ state_machines:
     states:
       - EB_PARTIAL_POOLING
     invariant_tests: []
-  decision_integrity_quarantine_reason_codes:
-    owner: src/state/decision_integrity_quarantine.py
+  fact_revocation_reason_codes:
+    owner: src/state/fact_revocation.py
     description: >
-      Reason code constants written into decision_integrity_quarantine.reason_code
-      (PR-E 2026-05-23). NOT a lifecycle state machine — each constant names a
-      specific taint category applied to fact-table rows. Registered so the CI
+      Reason code constants written into fact_revocations.reason_code (DIQ
+      packet, 2026-07-12, docs/rebuild/quarantine_excision_2026-07-11.md;
+      supersedes decision_integrity_quarantine_reason_codes / PR-E 2026-05-23
+      QUARANTINED_* vocabulary — historical rows rewritten by
+      scripts/migrate_decision_integrity_quarantine_to_fact_revocations.py).
+      NOT a lifecycle state machine — each constant names a specific
+      revocation category applied to fact-table rows. Registered so the CI
       semantic classifier treats the all-caps constant as explicit, not accidental.
-      Tables tagged: opportunity_fact, calibration_pairs_v2, probability_trace_fact,
-      selection_family_fact, selection_hypothesis_fact, decision_events.
-      Tables skipped (no single-column row_id): no_trade_events, calibration_pairs (legacy).
-      Authority: docs/archive/2026-Q2/operations_historical/P0_FORECAST_EXTREMA_AUTHORITY_2026-05-22.md §PR-E.
+      Tables tagged: opportunity_fact, calibration_pairs, probability_trace_fact,
+      selection_family_fact, selection_hypothesis_fact, decision_events,
+      decision_certificates.
+      Tables skipped (no single-column row_id): no_trade_events, calibration_pairs_v2 (legacy).
+      Authority: docs/archive/2026-Q2/operations_historical/P0_FORECAST_EXTREMA_AUTHORITY_2026-05-22.md §PR-E;
+      docs/rebuild/quarantine_excision_2026-07-11.md (DIQ reshape).
     states:
-      - QUARANTINED_NON_CONTRIBUTING_FORECAST_EXTREMA
+      - REVOKED_NON_CONTRIBUTING_FORECAST_EXTREMA
+      - REVOKED_INVALID_LIVE_ACTIONABLE_CERTIFICATE
+      - REVOKED_INVALID_LIVE_MONEY_PARENT_MODE
     invariant_tests:
-      - tests/test_decision_integrity_quarantine.py
-      - tests/test_decision_integrity_quarantine_extended.py
+      - tests/test_fact_revocation.py
+      - tests/test_fact_revocation_extended.py
+      - tests/test_fact_revocation_crossdb.py
   replacement_forecast_authority:
     owner: src/engine/replacement_forecast_reactor_hook.py
     description: >

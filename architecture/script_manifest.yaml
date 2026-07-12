@@ -1671,32 +1671,35 @@ scripts:
     required_helpers: [src.contracts.execution_price.ExecutionPrice]
     required_tests: [tests/test_R2_bin_edge_executable_provenance.py]
 
-  scripts/quarantine_bad_forecast_decisions.py:
+  scripts/revoke_bad_forecast_decisions.py:
     class: data_repair
     status: active
     lifecycle: p0_forecast_extrema_authority_pr_e
-    packet: docs/archive/2026-Q2/operations_historical/P0_FORECAST_EXTREMA_AUTHORITY_2026-05-22.md
+    packet: docs/rebuild/quarantine_excision_2026-07-11.md
     authority_scope: operator_invoked
     dangerous_if_run: false
     dry_run_default: true
     apply_flag: "--apply"
-    target_db: state/zeus_trades.db
-    read_targets: [state/zeus-forecasts.db, state/zeus_trades.db]
-    write_targets: [state/zeus_trades.db]
-    canonical_command: "python scripts/quarantine_bad_forecast_decisions.py [--apply] [--trade-db PATH] [--forecasts-db PATH]"
+    target_db: "state/zeus-world.db, state/zeus_trades.db, state/zeus-forecasts.db"
+    read_targets: [state/zeus-forecasts.db, state/zeus-world.db, state/zeus_trades.db]
+    write_targets: [state/zeus-world.db, state/zeus_trades.db, state/zeus-forecasts.db]
+    canonical_command: "python scripts/revoke_bad_forecast_decisions.py [--apply] [--world-db PATH] [--trade-db PATH] [--forecasts-db PATH]"
     external_inputs: []
     delete_policy: retain_until_superseded
     reuse_when: >
-      PR-E cleanup: tag opportunity_fact rows in zeus_trades.db backed by
-      non-contributing forecasts (contributes_to_target_extrema=0 or attribution
-      UNKNOWN). NON-destructive — tags rows via decision_integrity_quarantine,
-      never deletes. Idempotent (safe to re-run). Default is dry-run; pass --apply
-      to write quarantine rows.
-    do_not_use_when: "decision_integrity_quarantine table absent from zeus_trades.db — run init_schema_trade_only first."
-    promotion_barrier: "Requires PR-A and PR-E merged and zeus_trades.db schema updated."
-    unguarded_write_rationale: "Non-destructive tag-only writes to decision_integrity_quarantine; INSERT OR IGNORE enforces idempotency."
-    required_helpers: [src.state.decision_integrity_quarantine.quarantine_decisions_for_noncontributing_forecast]
-    required_tests: [tests/test_decision_integrity_quarantine.py]
+      PR-E cleanup, owner-local since the DIQ packet (2026-07-12): tag
+      opportunity_fact (trade), decision_events/probability_trace_fact/
+      selection_family_fact/selection_hypothesis_fact (world), and
+      calibration_pairs (forecasts) rows backed by non-contributing forecasts
+      (contributes_to_target_extrema=0 or attribution UNKNOWN). NON-destructive
+      — tags rows via each owning DB's local fact_revocations table, never
+      deletes. Idempotent (safe to re-run). Default is dry-run; pass --apply
+      to write revocation rows.
+    do_not_use_when: "fact_revocations table absent from a target DB — run the relevant init_schema_* first."
+    promotion_barrier: "Requires PR-A and PR-E merged and all three DB schemas updated."
+    unguarded_write_rationale: "Non-destructive tag-only writes to fact_revocations; INSERT OR IGNORE enforces idempotency."
+    required_helpers: [src.state.fact_revocation.revoke_decisions_for_noncontributing_forecast]
+    required_tests: [tests/test_fact_revocation.py, tests/test_fact_revocation_extended.py, tests/test_fact_revocation_crossdb.py]
 
   scripts/verify_forecast_offset_fix.py:
     class: diagnostic_report_writer

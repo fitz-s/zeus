@@ -196,11 +196,13 @@ _BASELINE_PER_FILE: dict[str, int] = {
     # SCHEMA_VERSION and hardcoded schema SQL only; no user-controlled input.
     # 2026-06-03: db.py shrunk 50 → 47 (tighten baseline).
     "src/state/db.py": 47,
-    # 2026-05-24 (post-PR #337 merge-base): decision_integrity_quarantine.py is
-    # a new file with 6 f-string SQL sites. All sites interpolate {q_ref} which
-    # is a module-local qualified table-name built from ATTACH alias + literal
-    # table name (no user input). Pattern mirrors no_trade_events.py PRAGMA sites.
-    "src/state/decision_integrity_quarantine.py": 6,
+    # DIQ packet (2026-07-12, docs/rebuild/quarantine_excision_2026-07-11.md):
+    # decision_integrity_quarantine.py deleted; superseded by fact_revocation.py.
+    # All sites interpolate {ref}/{schema_sql} which are module-local qualified
+    # table-name refs built from an explicit target_schema/ATTACH alias +
+    # literal table name (no user input). Pattern mirrors no_trade_events.py
+    # PRAGMA sites. Baseline count measured against this packet's landed file.
+    "src/state/fact_revocation.py": 17,
     "src/state/decision_chain.py": 1,  # internal table-name constant; added P1
     # 2026-06-03: ledger.py grew 8 → 15 via additional SAVEPOINT + legacy-schema
     # reconciliation DDL over hardcoded tuples (no user-controlled identifier).

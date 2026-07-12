@@ -164,8 +164,9 @@ def build_evidence_report(
             "SELECT name FROM sqlite_master WHERE type='table'"
         ).fetchall()
     }
-    # Try to ATTACH the trade DB so we can read decision_integrity_quarantine
-    # (which lives in zeus_trades.db) from this world-DB connection.
+    # Try to ATTACH the trade DB so we can read fact_revocations (opportunity_fact
+    # is trade-owned, src/state/domains.py; its owner-local revocation record
+    # lives in zeus_trades.db) from this world-DB connection.
     # Safe to skip if the trade DB path is unavailable (tests, non-production envs).
     #
     # Priority order (ghost-table-safe):
@@ -174,10 +175,10 @@ def build_evidence_report(
     #   3. table co-located in main (test-only; no trade path) → use unqualified ref
     #
     # The unqualified fallback (3) is intentionally LAST so that a ghost
-    # decision_integrity_quarantine table in the world DB (e.g. from a mis-applied
+    # fact_revocations table in the world DB (e.g. from a mis-applied
     # ensure_table call) never masks the real trade table when the trade path is
     # resolvable. Only a pure in-memory test DB with no trade path reaches branch 3.
-    _quarantine_ref: str | None = None
+    _revocations_ref: str | None = None
     _trade_attached_here = False
     try:
         from src.state.db import _zeus_trade_db_path  # local import; avoid circular at module load
@@ -185,17 +186,17 @@ def build_evidence_report(
         _attached_schemas = {row[1] for row in conn.execute("PRAGMA database_list").fetchall()}
         if "trade" in _attached_schemas:
             # Branch 1: already attached by caller.
-            _quarantine_ref = "trade.decision_integrity_quarantine"
+            _revocations_ref = "trade.fact_revocations"
         elif Path(_trade_db_path).exists():
             # Branch 2: ATTACH trade DB (preferred over unqualified ghost fallback).
             conn.execute("ATTACH DATABASE ? AS trade", (str(_trade_db_path),))
             _trade_attached_here = True
-            _quarantine_ref = "trade.decision_integrity_quarantine"
-        elif "decision_integrity_quarantine" in tables:
+            _revocations_ref = "trade.fact_revocations"
+        elif "fact_revocations" in tables:
             # Branch 3: co-located (pure in-memory test DB; trade path not resolvable).
-            _quarantine_ref = "decision_integrity_quarantine"
+            _revocations_ref = "fact_revocations"
     except Exception:  # noqa: BLE001
-        # Non-fatal: quarantine exclusion is best-effort on learning paths.
+        # Non-fatal: revocation exclusion is best-effort on learning paths.
         pass
 
     # C2 dead-lane fix (2026-06-16): decision_events is 0-row (gated behind a
@@ -244,14 +245,14 @@ def build_evidence_report(
         if cohort_tag is not None:
             _rg_filter += " AND rd.cohort_tag = ?"
             _rg_params.append(cohort_tag)
-        # Exclude regret rows backed by quarantined decision_events
+        # Exclude regret rows backed by revoked decision_events
         # (non-contributing forecast extrema) from learning aggregates.
-        # Uses opportunity_fact quarantine (row_id = decision_id = decision_event_id)
-        # since that's the 1-to-1 forecast-linkage anchor.
-        if _quarantine_ref is not None:
+        # Uses opportunity_fact's revocation record (row_id = decision_id =
+        # decision_event_id) since that's the 1-to-1 forecast-linkage anchor.
+        if _revocations_ref is not None:
             _rg_filter += (
                 f" AND NOT EXISTS ("
-                f"SELECT 1 FROM {_quarantine_ref} q"
+                f"SELECT 1 FROM {_revocations_ref} q"
                 f" WHERE q.table_name = 'opportunity_fact'"
                 f" AND q.row_id = rd.decision_event_id)"
             )

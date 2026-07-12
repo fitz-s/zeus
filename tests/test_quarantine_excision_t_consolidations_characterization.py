@@ -7,10 +7,13 @@ behavior change): pin the pre-refactor behavior of the redecision-eligibility
 predicate call sites and the certificate-revocation checker call sites so the
 consolidation in src/engine/cycle_runtime.py, src/state/portfolio.py,
 src/ingest/price_channel_ingest.py, src/execution/executor.py,
-src/execution/command_recovery.py, and src/state/decision_integrity_quarantine.py
+src/execution/command_recovery.py, and src/state/fact_revocation.py (DIQ
+packet, 2026-07-12, supersedes src/state/decision_integrity_quarantine.py)
 can be verified byte-identical before/after.
 
 Run before the refactor (captures baseline) AND after (regression gate).
+CONSOLIDATION 2 section updated 2026-07-12 for the DIQ reshape (module path
+and private alias renamed; behavior/semantics unchanged).
 """
 
 from __future__ import annotations
@@ -20,7 +23,7 @@ import sqlite3
 import pytest
 
 from src.state.portfolio import QUARANTINE_SENTINEL, Position
-from src.state.schema.decision_integrity_quarantine_schema import ensure_table
+from src.state.schema.fact_revocations_schema import ensure_table
 
 
 def _make_position(**overrides) -> Position:
@@ -269,7 +272,7 @@ def test_edli_priority_tokens_includes_voided_phase_and_broader_chain_states():
 def _ensure_table_in_schema(conn: sqlite3.Connection, schema: str) -> None:
     conn.execute(
         f"""
-        CREATE TABLE IF NOT EXISTS {schema}.decision_integrity_quarantine (
+        CREATE TABLE IF NOT EXISTS {schema}.fact_revocations (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             table_name TEXT NOT NULL,
             row_id TEXT NOT NULL,
@@ -283,7 +286,7 @@ def _ensure_table_in_schema(conn: sqlite3.Connection, schema: str) -> None:
     )
 
 
-def _make_quarantine_conn(*, attach_trade: bool = False) -> sqlite3.Connection:
+def _make_revocation_conn(*, attach_trade: bool = False) -> sqlite3.Connection:
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     if attach_trade:
@@ -294,8 +297,8 @@ def _make_quarantine_conn(*, attach_trade: bool = False) -> sqlite3.Connection:
     return conn
 
 
-def _insert_quarantine_row(conn, *, schema: str = "main", certificate_hash: str, reason: str):
-    ref = "decision_integrity_quarantine" if schema == "main" else f"{schema}.decision_integrity_quarantine"
+def _insert_revocation_row(conn, *, schema: str = "main", certificate_hash: str, reason: str):
+    ref = "fact_revocations" if schema == "main" else f"{schema}.fact_revocations"
     conn.execute(
         f"INSERT INTO {ref} (table_name, row_id, reason_code) VALUES (?, ?, ?)",
         ("decision_certificates", certificate_hash, reason),
@@ -304,21 +307,21 @@ def _insert_quarantine_row(conn, *, schema: str = "main", certificate_hash: str,
 
 
 @pytest.mark.parametrize("attach_trade", [False, True])
-def test_executor_and_command_recovery_agree_on_quarantined_hash(attach_trade):
+def test_executor_and_command_recovery_agree_on_revoked_hash(attach_trade):
     from src.execution.command_recovery import (
-        _decision_certificate_is_quarantined as recovery_check,
+        _certificate_is_revoked as recovery_check,
     )
     from src.execution.executor import (
-        _decision_certificate_is_quarantined as executor_check,
+        _certificate_is_revoked as executor_check,
     )
 
-    conn = _make_quarantine_conn(attach_trade=attach_trade)
+    conn = _make_revocation_conn(attach_trade=attach_trade)
     schema = "trade" if attach_trade else "main"
-    _insert_quarantine_row(
+    _insert_revocation_row(
         conn,
         schema=schema,
         certificate_hash="cert-hash-1",
-        reason="QUARANTINED_INVALID_LIVE_ACTIONABLE_CERTIFICATE",
+        reason="REVOKED_INVALID_LIVE_ACTIONABLE_CERTIFICATE",
     )
 
     assert executor_check(conn, "cert-hash-1") is True
@@ -328,19 +331,19 @@ def test_executor_and_command_recovery_agree_on_quarantined_hash(attach_trade):
 @pytest.mark.parametrize("attach_trade", [False, True])
 def test_executor_and_command_recovery_agree_on_clean_hash(attach_trade):
     from src.execution.command_recovery import (
-        _decision_certificate_is_quarantined as recovery_check,
+        _certificate_is_revoked as recovery_check,
     )
     from src.execution.executor import (
-        _decision_certificate_is_quarantined as executor_check,
+        _certificate_is_revoked as executor_check,
     )
 
-    conn = _make_quarantine_conn(attach_trade=attach_trade)
+    conn = _make_revocation_conn(attach_trade=attach_trade)
     schema = "trade" if attach_trade else "main"
-    _insert_quarantine_row(
+    _insert_revocation_row(
         conn,
         schema=schema,
-        certificate_hash="cert-hash-quarantined",
-        reason="QUARANTINED_INVALID_LIVE_ACTIONABLE_CERTIFICATE",
+        certificate_hash="cert-hash-revoked",
+        reason="REVOKED_INVALID_LIVE_ACTIONABLE_CERTIFICATE",
     )
 
     assert executor_check(conn, "cert-hash-clean") is False
@@ -349,23 +352,23 @@ def test_executor_and_command_recovery_agree_on_clean_hash(attach_trade):
 
 def test_executor_and_command_recovery_agree_on_empty_hash():
     from src.execution.command_recovery import (
-        _decision_certificate_is_quarantined as recovery_check,
+        _certificate_is_revoked as recovery_check,
     )
     from src.execution.executor import (
-        _decision_certificate_is_quarantined as executor_check,
+        _certificate_is_revoked as executor_check,
     )
 
-    conn = _make_quarantine_conn(attach_trade=False)
+    conn = _make_revocation_conn(attach_trade=False)
     assert executor_check(conn, "") is False
     assert recovery_check(conn, certificate_hash="") is False
 
 
 def test_executor_and_command_recovery_agree_when_table_absent():
     from src.execution.command_recovery import (
-        _decision_certificate_is_quarantined as recovery_check,
+        _certificate_is_revoked as recovery_check,
     )
     from src.execution.executor import (
-        _decision_certificate_is_quarantined as executor_check,
+        _certificate_is_revoked as executor_check,
     )
 
     conn = sqlite3.connect(":memory:")

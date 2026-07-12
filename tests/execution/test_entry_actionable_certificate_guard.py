@@ -7,7 +7,7 @@ from src.contracts import Direction, ExecutionIntent
 from src.contracts.slippage_bps import SlippageBps
 from src.state import db as state_db
 from src.execution.executor import _entry_actionable_certificate_component, _live_order
-from src.state.decision_integrity_quarantine import (
+from src.state.fact_revocation import (
     DECISION_CERTIFICATES_TABLE,
     REASON_INVALID_LIVE_ACTIONABLE,
     REASON_INVALID_LIVE_PARENT_MODE,
@@ -31,7 +31,7 @@ def _conn_with_world_cert_table() -> sqlite3.Connection:
     )
     conn.execute(
         """
-        CREATE TABLE decision_integrity_quarantine (
+        CREATE TABLE fact_revocations (
             table_name TEXT NOT NULL,
             row_id TEXT NOT NULL,
             reason_code TEXT NOT NULL
@@ -322,7 +322,7 @@ def test_entry_actionable_certificate_guard_attaches_world_from_trade_main(
     )
     conn.execute(
         """
-        CREATE TABLE decision_integrity_quarantine (
+        CREATE TABLE fact_revocations (
             table_name TEXT NOT NULL,
             row_id TEXT NOT NULL,
             reason_code TEXT NOT NULL
@@ -360,7 +360,7 @@ def test_entry_actionable_certificate_guard_rejects_quarantined_certificate():
     _insert_actionable(conn)
     conn.execute(
         """
-        INSERT INTO decision_integrity_quarantine (table_name, row_id, reason_code)
+        INSERT INTO fact_revocations (table_name, row_id, reason_code)
         VALUES (?, ?, ?)
         """,
         (DECISION_CERTIFICATES_TABLE, "h1", REASON_INVALID_LIVE_ACTIONABLE),
@@ -378,7 +378,7 @@ def test_entry_actionable_certificate_guard_rejects_parent_mode_quarantine():
     _insert_actionable(conn)
     conn.execute(
         """
-        INSERT INTO decision_integrity_quarantine (table_name, row_id, reason_code)
+        INSERT INTO fact_revocations (table_name, row_id, reason_code)
         VALUES (?, ?, ?)
         """,
         (DECISION_CERTIFICATES_TABLE, "h1", REASON_INVALID_LIVE_PARENT_MODE),

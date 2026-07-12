@@ -1,21 +1,24 @@
 # Created: 2026-05-22
-# Last reused or audited: 2026-05-22
-# Authority basis: docs/archive/2026-Q2/operations_historical/P0_FORECAST_EXTREMA_AUTHORITY_2026-05-22.md §PR-E
-# Lifecycle: created=2026-05-22; last_reviewed=2026-05-22; last_reused=never
-# Purpose: Unit tests for decision_integrity_quarantine — quarantine logic, idempotency, ensure_table.
-# Reuse: Run when quarantine_decisions_for_noncontributing_forecast, ensure_table, or decision_integrity_quarantine schema changes.
+# Last reused or audited: 2026-07-12
+# Authority basis: docs/archive/2026-Q2/operations_historical/P0_FORECAST_EXTREMA_AUTHORITY_2026-05-22.md §PR-E;
+#   docs/rebuild/quarantine_excision_2026-07-11.md DIQ packet (owner-local reshape).
+# Lifecycle: created=2026-05-22; last_reviewed=2026-07-12; last_reused=never
+# Purpose: Unit tests for fact_revocation — revocation logic, idempotency, ensure_table.
+#          Supersedes tests/test_decision_integrity_quarantine.py.
+# Reuse: Run when revoke_decisions_for_noncontributing_forecast, ensure_table, or
+#        fact_revocations schema changes.
 
-"""PR-E — Tests for decision_integrity_quarantine tooling.
+"""DIQ packet — Tests for fact_revocation tooling.
 
-Tests quarantine_decisions_for_noncontributing_forecast against an in-memory
+Tests revoke_decisions_for_noncontributing_forecast against an in-memory
 SQLite DB with both opportunity_fact and ensemble_snapshots co-located
-(no ATTACH needed — auto-detected by the function).
+(no ATTACH needed — target_schema="main" default).
 
 Invariants verified:
-  1. Only contributes=0 rows are quarantined; contributes=1 rows are skipped.
-  2. UNKNOWN attribution rows are quarantined.
+  1. Only contributes=0 rows are revoked; contributes=1 rows are skipped.
+  2. UNKNOWN attribution rows are revoked.
   3. The function is idempotent (run twice → no duplicates).
-  4. decision_integrity_quarantine table created via ensure_table is idempotent.
+  4. fact_revocations table created via ensure_table is idempotent.
 """
 
 from __future__ import annotations
@@ -26,17 +29,17 @@ from datetime import datetime, timezone
 
 import pytest
 
-from src.state.decision_integrity_quarantine import (
+from src.state.fact_revocation import (
     DECISION_CERTIFICATES_TABLE,
     REASON_INVALID_LIVE_ACTIONABLE,
     REASON_INVALID_LIVE_PARENT_MODE,
     REASON_NON_CONTRIBUTING,
     TARGET_TABLE,
-    quarantine_decisions_for_noncontributing_forecast,
-    quarantine_invalid_live_actionable_certificates,
-    quarantine_invalid_live_money_parent_modes,
+    revoke_decisions_for_noncontributing_forecast,
+    revoke_invalid_live_actionable_certificates,
+    revoke_invalid_live_money_parent_modes,
 )
-from src.state.schema.decision_integrity_quarantine_schema import ensure_table
+from src.state.schema.fact_revocations_schema import ensure_table
 
 
 # ---------------------------------------------------------------------------
@@ -45,15 +48,13 @@ from src.state.schema.decision_integrity_quarantine_schema import ensure_table
 
 @pytest.fixture()
 def mem_db():
-    """In-memory SQLite with opportunity_fact + ensemble_snapshots + quarantine table.
+    """In-memory SQLite with opportunity_fact + ensemble_snapshots + fact_revocations.
 
-    No ATTACH needed — both tables in same DB; the function auto-detects
-    absence of 'forecasts' schema and uses bare table name.
+    No ATTACH needed — both tables in same DB; target_schema="main" default.
     """
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
 
-    # Create ensemble_snapshots (minimal columns needed for quarantine join).
     conn.execute("""
         CREATE TABLE ensemble_snapshots (
             snapshot_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -65,7 +66,6 @@ def mem_db():
         )
     """)
 
-    # Create opportunity_fact (minimal columns needed).
     conn.execute("""
         CREATE TABLE opportunity_fact (
             decision_id TEXT PRIMARY KEY,
@@ -75,7 +75,6 @@ def mem_db():
         )
     """)
 
-    # Create quarantine table.
     ensure_table(conn)
 
     conn.commit()
@@ -110,13 +109,13 @@ def _insert_opportunity(conn, *, decision_id: str, snapshot_id: int) -> None:
     conn.commit()
 
 
-def _quarantine_count(conn) -> int:
-    return conn.execute("SELECT COUNT(*) FROM decision_integrity_quarantine").fetchone()[0]
+def _revocation_count(conn) -> int:
+    return conn.execute("SELECT COUNT(*) FROM fact_revocations").fetchone()[0]
 
 
-def _quarantined_ids(conn) -> set[str]:
+def _revoked_ids(conn) -> set[str]:
     rows = conn.execute(
-        "SELECT row_id FROM decision_integrity_quarantine WHERE table_name=? AND reason_code=?",
+        "SELECT row_id FROM fact_revocations WHERE table_name=? AND reason_code=?",
         (TARGET_TABLE, REASON_NON_CONTRIBUTING),
     ).fetchall()
     return {row[0] for row in rows}
@@ -131,49 +130,49 @@ def test_ensure_table_idempotent(mem_db):
     ensure_table(mem_db)
     ensure_table(mem_db)
     count = mem_db.execute(
-        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='decision_integrity_quarantine'"
+        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='fact_revocations'"
     ).fetchone()[0]
     assert count == 1
 
 
-def test_contributes_zero_is_quarantined(mem_db):
+def test_contributes_zero_is_revoked(mem_db):
     """opportunity_fact row with contributes=0 snapshot is tagged."""
     snap_id = _insert_snapshot(mem_db, contributes=0, attribution="OK")
     _insert_opportunity(mem_db, decision_id="dec-bad-1", snapshot_id=snap_id)
 
-    result = quarantine_decisions_for_noncontributing_forecast(mem_db)
+    result = revoke_decisions_for_noncontributing_forecast(mem_db)
 
     assert result["candidates_found"] == 1
-    assert result["newly_quarantined"] == 1
-    assert result["already_quarantined"] == 0
-    assert "dec-bad-1" in _quarantined_ids(mem_db)
+    assert result["newly_revoked"] == 1
+    assert result["already_revoked"] == 0
+    assert "dec-bad-1" in _revoked_ids(mem_db)
 
 
-def test_contributes_one_is_not_quarantined(mem_db):
+def test_contributes_one_is_not_revoked(mem_db):
     """opportunity_fact row with contributes=1 snapshot is skipped."""
     snap_id = _insert_snapshot(mem_db, contributes=1, attribution="OK")
     _insert_opportunity(mem_db, decision_id="dec-good-1", snapshot_id=snap_id)
 
-    result = quarantine_decisions_for_noncontributing_forecast(mem_db)
+    result = revoke_decisions_for_noncontributing_forecast(mem_db)
 
     assert result["candidates_found"] == 0
-    assert result["newly_quarantined"] == 0
-    assert _quarantine_count(mem_db) == 0
+    assert result["newly_revoked"] == 0
+    assert _revocation_count(mem_db) == 0
 
 
-def test_unknown_attribution_is_quarantined(mem_db):
+def test_unknown_attribution_is_revoked(mem_db):
     """opportunity_fact row with attribution=UNKNOWN snapshot is tagged (even contributes=1)."""
     snap_id = _insert_snapshot(mem_db, contributes=1, attribution="UNKNOWN")
     _insert_opportunity(mem_db, decision_id="dec-unknown-1", snapshot_id=snap_id)
 
-    result = quarantine_decisions_for_noncontributing_forecast(mem_db)
+    result = revoke_decisions_for_noncontributing_forecast(mem_db)
 
     assert result["candidates_found"] == 1
-    assert result["newly_quarantined"] == 1
-    assert "dec-unknown-1" in _quarantined_ids(mem_db)
+    assert result["newly_revoked"] == 1
+    assert "dec-unknown-1" in _revoked_ids(mem_db)
 
 
-def test_mixed_only_bad_rows_quarantined(mem_db):
+def test_mixed_only_bad_rows_revoked(mem_db):
     """With one contributes=0 and one contributes=1, only the bad one is tagged."""
     bad_snap = _insert_snapshot(mem_db, contributes=0, attribution="OK")
     good_snap = _insert_snapshot(mem_db, contributes=1, attribution="OK")
@@ -181,30 +180,30 @@ def test_mixed_only_bad_rows_quarantined(mem_db):
     _insert_opportunity(mem_db, decision_id="dec-bad", snapshot_id=bad_snap)
     _insert_opportunity(mem_db, decision_id="dec-good", snapshot_id=good_snap)
 
-    result = quarantine_decisions_for_noncontributing_forecast(mem_db)
+    result = revoke_decisions_for_noncontributing_forecast(mem_db)
 
     assert result["candidates_found"] == 1
-    assert result["newly_quarantined"] == 1
-    ids = _quarantined_ids(mem_db)
+    assert result["newly_revoked"] == 1
+    ids = _revoked_ids(mem_db)
     assert "dec-bad" in ids
     assert "dec-good" not in ids
 
 
 def test_idempotent_no_duplicates(mem_db):
-    """Running quarantine twice produces no duplicate rows."""
+    """Running revocation twice produces no duplicate rows."""
     snap_id = _insert_snapshot(mem_db, contributes=0, attribution="OK")
     _insert_opportunity(mem_db, decision_id="dec-idem", snapshot_id=snap_id)
 
-    result1 = quarantine_decisions_for_noncontributing_forecast(mem_db)
-    result2 = quarantine_decisions_for_noncontributing_forecast(mem_db)
+    result1 = revoke_decisions_for_noncontributing_forecast(mem_db)
+    result2 = revoke_decisions_for_noncontributing_forecast(mem_db)
 
-    assert result1["newly_quarantined"] == 1
-    # Second run: candidate found but already quarantined — no new rows.
+    assert result1["newly_revoked"] == 1
+    # Second run: candidate found but already revoked — no new rows.
     assert result2["candidates_found"] == 1
-    assert result2["newly_quarantined"] == 0
-    assert result2["already_quarantined"] == 1
+    assert result2["newly_revoked"] == 0
+    assert result2["already_revoked"] == 1
     # Exactly one row in the table — no duplicates.
-    assert _quarantine_count(mem_db) == 1
+    assert _revocation_count(mem_db) == 1
 
 
 def test_dry_run_writes_nothing(mem_db):
@@ -212,28 +211,28 @@ def test_dry_run_writes_nothing(mem_db):
     snap_id = _insert_snapshot(mem_db, contributes=0, attribution="OK")
     _insert_opportunity(mem_db, decision_id="dec-dry", snapshot_id=snap_id)
 
-    result = quarantine_decisions_for_noncontributing_forecast(mem_db, dry_run=True)
+    result = revoke_decisions_for_noncontributing_forecast(mem_db, dry_run=True)
 
     assert result["candidates_found"] == 1
     assert result["dry_run"] is True
-    assert _quarantine_count(mem_db) == 0
+    assert _revocation_count(mem_db) == 0
 
 
-def test_null_contributes_is_not_quarantined(mem_db):
-    """NULL contributes_to_target_extrema (legacy snapshot) is NOT quarantined.
+def test_null_contributes_is_not_revoked(mem_db):
+    """NULL contributes_to_target_extrema (legacy snapshot) is NOT revoked.
 
     Aligns with the live reader gate (PR-A), which only acts when
     contributes_to_target_extrema is EXPLICITLY set; legacy NULL rows passed
     through live unblocked and were not bug-affected, so the cleanup must not
-    quarantine them (scope = exactly the decisions the bug touched).
+    revoke them (scope = exactly the decisions the bug touched).
     """
     snap_id = _insert_snapshot(mem_db, contributes=None, attribution="OK")
     _insert_opportunity(mem_db, decision_id="dec-null", snapshot_id=snap_id)
 
-    result = quarantine_decisions_for_noncontributing_forecast(mem_db)
+    result = revoke_decisions_for_noncontributing_forecast(mem_db)
 
     assert result["candidates_found"] == 0
-    assert "dec-null" not in _quarantined_ids(mem_db)
+    assert "dec-null" not in _revoked_ids(mem_db)
 
 
 def test_no_snapshot_id_skipped(mem_db):
@@ -245,10 +244,10 @@ def test_no_snapshot_id_skipped(mem_db):
     )
     conn.commit()
 
-    result = quarantine_decisions_for_noncontributing_forecast(conn)
+    result = revoke_decisions_for_noncontributing_forecast(conn)
 
     assert result["candidates_found"] == 0
-    assert _quarantine_count(conn) == 0
+    assert _revocation_count(conn) == 0
 
 
 def _valid_actionable_payload() -> dict:
@@ -295,7 +294,7 @@ def _valid_actionable_payload() -> dict:
     }
 
 
-def test_invalid_live_actionable_quarantine_tags_bad_verified_cert(mem_db):
+def test_invalid_live_actionable_revocation_tags_bad_verified_cert(mem_db):
     conn = mem_db
     conn.execute(
         """
@@ -328,18 +327,18 @@ def test_invalid_live_actionable_quarantine_tags_bad_verified_cert(mem_db):
     )
     conn.commit()
 
-    dry = quarantine_invalid_live_actionable_certificates(conn, dry_run=True)
-    applied = quarantine_invalid_live_actionable_certificates(conn)
-    applied_again = quarantine_invalid_live_actionable_certificates(conn)
+    dry = revoke_invalid_live_actionable_certificates(conn, dry_run=True)
+    applied = revoke_invalid_live_actionable_certificates(conn)
+    applied_again = revoke_invalid_live_actionable_certificates(conn)
 
     assert dry["candidates_found"] == 1
     assert dry["dry_run"] is True
-    assert applied["newly_quarantined"] == 1
-    assert applied_again["newly_quarantined"] == 0
+    assert applied["newly_revoked"] == 1
+    assert applied_again["newly_revoked"] == 0
     row = conn.execute(
         """
         SELECT row_id
-          FROM decision_integrity_quarantine
+          FROM fact_revocations
          WHERE table_name = ?
            AND reason_code = ?
         """,
@@ -348,7 +347,7 @@ def test_invalid_live_actionable_quarantine_tags_bad_verified_cert(mem_db):
     assert row[0] == "hash-1"
 
 
-def test_invalid_live_money_parent_mode_quarantine_tags_mixed_mode_child(mem_db):
+def test_invalid_live_money_parent_mode_revocation_tags_mixed_mode_child(mem_db):
     conn = mem_db
     conn.execute(
         """
@@ -405,17 +404,17 @@ def test_invalid_live_money_parent_mode_quarantine_tags_mixed_mode_child(mem_db)
     )
     conn.commit()
 
-    dry = quarantine_invalid_live_money_parent_modes(conn, dry_run=True)
-    applied = quarantine_invalid_live_money_parent_modes(conn)
-    applied_again = quarantine_invalid_live_money_parent_modes(conn)
+    dry = revoke_invalid_live_money_parent_modes(conn, dry_run=True)
+    applied = revoke_invalid_live_money_parent_modes(conn)
+    applied_again = revoke_invalid_live_money_parent_modes(conn)
 
     assert dry["candidates_found"] == 1
-    assert applied["newly_quarantined"] == 1
-    assert applied_again["newly_quarantined"] == 0
+    assert applied["newly_revoked"] == 1
+    assert applied_again["newly_revoked"] == 0
     row = conn.execute(
         """
         SELECT row_id, meta_json
-          FROM decision_integrity_quarantine
+          FROM fact_revocations
          WHERE table_name = ?
            AND reason_code = ?
         """,

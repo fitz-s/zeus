@@ -44,7 +44,8 @@ _REPO_ROOT = Path(__file__).parent.parent.parent
 
 # Pre-PR-S4b heritage: trade-class tables that pre-PR-S4b init_schema(trade_conn)
 # also created on world.db, so a legacy_archived ghost shell is expected on world
-# for these. Post-K1-split tables (decision_integrity_quarantine 2026-05-22,
+# for these. Post-K1-split tables (fact_revocations trade-DB instance,
+# DIQ packet 2026-07-12, supersedes decision_integrity_quarantine 2026-05-22;
 # settlement_day_observation_authority 2026-05-23) are trade-only and have no
 # world ghost — they are NOT in this set.
 PRE_PR_S4B_HERITAGE_TRADE_TABLES = frozenset({
@@ -66,7 +67,7 @@ PRE_PR_S4B_HERITAGE_TRADE_TABLES = frozenset({
 
 EXPECTED_RUNTIME_TRADE_TABLES = frozenset({
     "book_hash_transitions",
-    "decision_integrity_quarantine",  # PR-E 2026-05-22: trade-class quarantine
+    "fact_revocations",  # DIQ packet 2026-07-12 (supersedes PR-E 2026-05-22 decision_integrity_quarantine)
     "execution_fact",
     "execution_feasibility_evidence",
     "execution_feasibility_latest",

@@ -53,8 +53,8 @@ from src.decision.family_decision_engine import (
 from src.state.db import (
     get_trade_connection_with_world_required,
 )
-from src.state.decision_integrity_quarantine import (
-    decision_certificate_is_quarantined as _decision_certificate_is_quarantined,
+from src.state.fact_revocation import (
+    is_certificate_revoked as _certificate_is_revoked,
 )
 from src.state.lifecycle_manager import LifecyclePhase, TERMINAL_STATES
 
@@ -1259,14 +1259,18 @@ def _entry_actionable_certificate_payload_and_component(
             allowed=False,
             reason="missing_actionable_certificate_hash",
         ), None
-    if _decision_certificate_is_quarantined(conn, certificate_hash):
+    # World must be ATTACHed before the revocation check: decision_certificates
+    # (and its owner-local fact_revocations record) live in the world DB
+    # (src/state/domains.py), while this gate typically runs on a trade-main
+    # connection (DIQ packet, docs/rebuild/quarantine_excision_2026-07-11.md).
+    attach_error = _attach_world_for_trade_certificate_read(conn)
+    if _certificate_is_revoked(conn, certificate_hash):
         return _capability_component(
             "entry_actionable_certificate",
             allowed=False,
             reason="actionable_certificate_quarantined",
             certificate_hash=certificate_hash,
         ), None
-    attach_error = _attach_world_for_trade_certificate_read(conn)
     matching_schema = ""
     payload_json: str | None = None
     table_seen = False
@@ -1480,10 +1484,12 @@ def _actionable_certificate_intent_mismatch_reason(
     return ""
 
 
-# _decision_certificate_is_quarantined consolidated (excision T-consolidations #1,
-# docs/rebuild/quarantine_excision_2026-07-11.md): now imported at module top as
-# src.state.decision_integrity_quarantine.decision_certificate_is_quarantined,
-# the single shared implementation this module and command_recovery.py both call.
+# _certificate_is_revoked consolidated (excision T-consolidations #1,
+# docs/rebuild/quarantine_excision_2026-07-11.md): imported at module top as
+# src.state.fact_revocation.is_certificate_revoked, the single shared
+# implementation this module and command_recovery.py both call. DIQ packet
+# (2026-07-12) re-implemented the predecessor decision_integrity_quarantine
+# side-table as owner-local fact_revocations records.
 
 
 def _parse_sqlite_timestamp(value: object) -> datetime | None:

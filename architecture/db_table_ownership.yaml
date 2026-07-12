@@ -2598,21 +2598,69 @@ tables:
       src/state/book_hash_transitions.py; producer wired in market_scanner.py.
       cycle_id=NULL for scanner-path rows; live cycle rows carry cycle_id.
 
-  - name: decision_integrity_quarantine
+  - name: fact_revocations
     db: trade
     schema_class: trade_class
     schema_version_owner: SCHEMA_VERSION
-    created_by: "db.py:init_schema_trade_only + src.state.schema.decision_integrity_quarantine_schema.ensure_table"
+    created_by: "db.py:init_schema_trade_only + src.state.schema.fact_revocations_schema.ensure_table"
     pk_col: "[id]"
     notes: >
-      P0 2026-05-22 (PR-E): non-destructive companion table tagging
-      opportunity_fact (and future) rows backed by non-contributing forecast
-      snapshots (contributes_to_target_extrema=0 / attribution UNKNOWN).
-      UNIQUE(table_name, row_id, reason_code). Writer
-      src/state/decision_integrity_quarantine.py; CLI
-      scripts/quarantine_bad_forecast_decisions.py (dry-run default). Co-located
-      on trade DB; cross-DB read-join against forecasts.ensemble_snapshots.
-      Authority: docs/archive/2026-Q2/operations_historical/P0_FORECAST_EXTREMA_AUTHORITY_2026-05-22.md.
+      DIQ packet (2026-07-12, docs/rebuild/quarantine_excision_2026-07-11.md
+      "Consult adjudication"): owner-local fact-revocation record table — one
+      shape instantiated per owning DB (trade/world/forecasts), superseding the
+      single trade-DB-only decision_integrity_quarantine (PR-E 2026-05-22).
+      This trade-DB instance carries revocations for opportunity_fact (the
+      only trade-owned table it tags; src/state/domains.py). Sibling instances:
+      world DB (decision_certificates, decision_events, probability_trace_fact,
+      selection_family_fact, selection_hypothesis_fact) and forecasts DB
+      (calibration_pairs) — see those entries below. UNIQUE(table_name, row_id,
+      reason_code) preserves reason multiplicity; meta_json carries the audit
+      payload verbatim (migrated from the predecessor table by
+      scripts/migrate_decision_integrity_quarantine_to_fact_revocations.py).
+      Writer/reader src/state/fact_revocation.py; CLI
+      scripts/revoke_bad_forecast_decisions.py,
+      scripts/revoke_invalid_live_actionable_certificates.py (both
+      dry-run default). Cross-DB read-join against forecasts.ensemble_snapshots
+      for the forecast-snapshot-linkage lane.
+      Authority: docs/archive/2026-Q2/operations_historical/P0_FORECAST_EXTREMA_AUTHORITY_2026-05-22.md
+      (predecessor); docs/rebuild/quarantine_excision_2026-07-11.md (DIQ reshape).
+
+  - name: fact_revocations
+    db: world
+    schema_class: world_class
+    schema_version_owner: null
+    created_by: "db.py:init_schema + src.state.schema.fact_revocations_schema.ensure_table"
+    pk_col: "[id]"
+    notes: >
+      DIQ packet (2026-07-12) sibling of the trade-DB fact_revocations entry
+      above — owner-local instance for world-owned tagged tables:
+      decision_certificates (LIVE money-certificate integrity revocations,
+      reason codes REVOKED_INVALID_LIVE_ACTIONABLE_CERTIFICATE /
+      REVOKED_INVALID_LIVE_MONEY_PARENT_MODE), decision_events,
+      probability_trace_fact, selection_family_fact, selection_hypothesis_fact
+      (forecast-snapshot-linkage revocations, reason code
+      REVOKED_NON_CONTRIBUTING_FORECAST_EXTREMA). Same shape/UNIQUE constraint
+      as the trade instance. Writer/reader src/state/fact_revocation.py; CLI
+      scripts/revoke_invalid_live_actionable_certificates.py (certificate
+      lane, local write — no cross-DB ATTACH needed) and
+      scripts/revoke_bad_forecast_decisions.py (forecast-snapshot lane,
+      local write for world-owned tables).
+
+  - name: fact_revocations
+    db: forecasts
+    schema_class: forecast_class
+    schema_version_owner: null
+    created_by: "db.py:init_schema_forecasts + src.state.schema.fact_revocations_schema.ensure_table"
+    pk_col: "[id]"
+    notes: >
+      DIQ packet (2026-07-12) sibling of the trade/world fact_revocations
+      entries above — owner-local instance for calibration_pairs (the only
+      forecasts-owned tagged table), reason code
+      REVOKED_NON_CONTRIBUTING_FORECAST_EXTREMA. Same shape/UNIQUE constraint.
+      Writer/reader src/state/fact_revocation.py (revoke_calibration_pairs_
+      for_noncontributing_forecast); consumed by scripts/refit_platt.py's
+      _fetch_pairs_for_bucket training-data exclusion (co-located, no ATTACH
+      needed — simplification vs the predecessor's always-trade-ATTACH design).
 
   - name: review_work_items
     db: trade

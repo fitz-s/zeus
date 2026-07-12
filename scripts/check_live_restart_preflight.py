@@ -1091,7 +1091,7 @@ def _live_actionable_certificate_semantics_check() -> CheckResult:
     try:
         from src.decision_kernel.errors import CertificateVerificationError
         from src.decision_kernel.verifier import _verify_actionable_payload
-        from src.state.decision_integrity_quarantine import (
+        from src.state.fact_revocation import (
             DECISION_CERTIFICATES_TABLE,
             REASON_INVALID_LIVE_ACTIONABLE,
         )
@@ -1103,7 +1103,7 @@ def _live_actionable_certificate_semantics_check() -> CheckResult:
             "could not load current actionable certificate verifier",
             evidence,
         )
-    quarantined_hashes = _decision_certificate_quarantine_hashes(
+    quarantined_hashes = _decision_certificate_revoked_hashes(
         table_name=DECISION_CERTIFICATES_TABLE,
         reason_code=REASON_INVALID_LIVE_ACTIONABLE,
     )
@@ -2520,7 +2520,7 @@ def _live_money_certificate_parent_mode_check() -> CheckResult:
         hours=LIVE_ACTIONABLE_CERTIFICATE_LOOKBACK_HOURS
     )
     try:
-        from src.state.decision_integrity_quarantine import (
+        from src.state.fact_revocation import (
             DECISION_CERTIFICATES_TABLE,
             REASON_INVALID_LIVE_PARENT_MODE,
         )
@@ -2529,10 +2529,10 @@ def _live_money_certificate_parent_mode_check() -> CheckResult:
         return CheckResult(
             "live_money_certificate_parent_modes",
             False,
-            "could not load money certificate quarantine constants",
+            "could not load money certificate revocation constants",
             evidence,
         )
-    quarantined_hashes = _decision_certificate_quarantine_hashes(
+    quarantined_hashes = _decision_certificate_revoked_hashes(
         table_name=DECISION_CERTIFICATES_TABLE,
         reason_code=REASON_INVALID_LIVE_PARENT_MODE,
     )
@@ -2635,22 +2635,26 @@ def _live_money_certificate_parent_mode_check() -> CheckResult:
     )
 
 
-def _decision_certificate_quarantine_hashes(
+def _decision_certificate_revoked_hashes(
     *,
     table_name: str,
     reason_code: str,
 ) -> set[str]:
-    if not TRADE_DB.exists():
+    # DIQ packet (docs/rebuild/quarantine_excision_2026-07-11.md): decision_certificates
+    # is world-owned (src/state/domains.py), and so is its owner-local fact_revocations
+    # record — WORLD_DB, not TRADE_DB (predecessor decision_integrity_quarantine lived
+    # only in the trade DB).
+    if not WORLD_DB.exists():
         return set()
     try:
-        conn = sqlite3.connect(f"file:{TRADE_DB}?mode=ro", uri=True)
+        conn = sqlite3.connect(f"file:{WORLD_DB}?mode=ro", uri=True)
         conn.row_factory = sqlite3.Row
-        if not _table_exists(conn, "main", "decision_integrity_quarantine"):
+        if not _table_exists(conn, "main", "fact_revocations"):
             return set()
         rows = conn.execute(
             """
             SELECT row_id
-              FROM decision_integrity_quarantine
+              FROM fact_revocations
              WHERE table_name = ?
                AND reason_code = ?
             """,
