@@ -11852,6 +11852,118 @@ class TestRecoveryResolutionTable:
         assert current["order_status"] == "sell_filled"
         assert Decimal(str(current["exit_price"])) == Decimal("0.61")
 
+    def test_partial_matched_exit_order_fact_cannot_close_position(
+        self,
+        conn,
+        mock_client,
+    ):
+        """Legacy MATCHED/remaining=0 facts still need full command-size coverage."""
+        from src.state.venue_command_repo import append_order_fact
+
+        _insert(conn, command_id="cmd-entry", position_id="pos-001", size=60.0, price=0.2)
+        _advance_to_acked(conn, command_id="cmd-entry", venue_order_id="ord-entry")
+        _seed_pending_entry_projection(conn, command_id="cmd-entry", order_id="ord-entry")
+        conn.execute(
+            """
+            UPDATE position_current
+               SET phase = 'pending_exit',
+                   shares = 60.0,
+                   chain_shares = 60.0,
+                   cost_basis_usd = 12.0,
+                   entry_price = 0.2,
+                   order_status = 'sell_pending_confirmation',
+                   updated_at = '2026-04-26T00:04:00Z'
+             WHERE position_id = 'pos-001'
+            """
+        )
+        _insert(
+            conn,
+            command_id="cmd-exit",
+            position_id="pos-001",
+            intent_kind="EXIT",
+            side="SELL",
+            size=60.0,
+            price=0.16,
+            token_id="tok-001",
+        )
+        _advance_to_partial(conn, command_id="cmd-exit", venue_order_id="ord-exit")
+        _append_trade_fact(
+            conn,
+            command_id="cmd-exit",
+            order_id="ord-exit",
+            trade_id="trade-exit-partial",
+            state="MATCHED",
+            filled_size="46.59",
+            fill_price="0.161646276024898",
+            tx_hash="0xpartialexitfill",
+        )
+        _append_trade_fact(
+            conn,
+            command_id="cmd-exit",
+            order_id="ord-exit",
+            trade_id="0xpartialexitfill",
+            state="MATCHED",
+            filled_size="46.59",
+            fill_price="0.161646276024898",
+            tx_hash="0xpartialexitfill",
+        )
+        append_order_fact(
+            conn,
+            venue_order_id="ord-exit",
+            command_id="cmd-exit",
+            state="MATCHED",
+            remaining_size="0",
+            matched_size="46.59",
+            source="REST",
+            observed_at="2026-04-26T00:05:00Z",
+            venue_timestamp="2026-04-26T00:05:00Z",
+            raw_payload_hash="e" * 64,
+            raw_payload_json={
+                "submit_result": {
+                    "orderID": "ord-exit",
+                    "status": "matched",
+                    "side": "SELL",
+                    "makingAmount": "46.59",
+                    "takingAmount": "7.5311",
+                    "transactionsHashes": ["0xpartialexitfill"],
+                }
+            },
+        )
+
+        from src.execution.command_recovery import reconcile_unresolved_commands
+
+        summary = reconcile_unresolved_commands(conn, mock_client)
+
+        assert summary["exit_lifecycle_alignment_repair"] == {
+            "scanned": 1,
+            "advanced": 0,
+            "stayed": 1,
+            "errors": 0,
+        }
+        assert _get_state(conn, "cmd-exit") == "PARTIAL"
+        current = conn.execute(
+            "SELECT phase, order_status FROM position_current WHERE position_id = 'pos-001'"
+        ).fetchone()
+        assert dict(current) == {
+            "phase": "pending_exit",
+            "order_status": "sell_pending_confirmation",
+        }
+        command_events = [
+            row["event_type"] for row in _get_events(conn, "cmd-exit")
+        ]
+        assert "FILL_CONFIRMED" not in command_events
+        assert conn.execute(
+            """
+            SELECT COUNT(*)
+              FROM position_events
+             WHERE position_id = 'pos-001'
+               AND event_type = 'EXIT_ORDER_FILLED'
+            """
+        ).fetchone()[0] == 0
+        assert conn.execute(
+            "SELECT COUNT(*) FROM venue_trade_facts WHERE command_id = 'cmd-exit'"
+        ).fetchone()[0] == 2
+
 
     def test_confirmed_phantom_void_repair_quarantines_for_attribution(self, conn):
         position_id = "pos-confirmed-phantom-void"

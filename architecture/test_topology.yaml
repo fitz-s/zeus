@@ -391,7 +391,7 @@ test_trust_policy:
 
     tests/test_execution_price.py: {created: "2026-04-13", last_used: "2026-04-29"}
     tests/test_executor.py: {created: "2026-04-27", last_used: "2026-04-27"}
-    tests/test_executor_command_split.py: {created: "2026-04-26", last_used: "2026-04-29"}
+    tests/test_executor_command_split.py: {created: "2026-04-26", last_used: "2026-07-11"}
     tests/test_executor_db_target.py: {created: "2026-04-26", last_used: "2026-04-27"}
     tests/test_executor_typed_boundary.py: {created: "2026-04-23", last_used: "2026-04-27"}
     tests/test_fdr.py: {created: "2026-03-30", last_used: "2026-04-29"}
@@ -506,7 +506,7 @@ test_trust_policy:
     tests/test_unknown_side_effect.py: {created: "2026-04-27", last_used: "2026-04-30"}
     tests/test_user_channel_ingest.py: {created: "2026-04-27", last_used: "2026-04-27"}
     tests/test_exit_safety.py: {created: "2026-04-27", last_used: "2026-07-09", note: "Runtime submit gate block retry semantics and monitor-refresh projection guard for pending_exit dust holds: deployment freshness mismatch remains pending without consuming exit retry budget, and stale monitor projections cannot reopen a pending_exit/backoff hold."}
-    tests/test_exchange_reconcile.py: {created: "2026-04-27", last_used: "2026-07-02", note: "SCH-W1.2-ORDER-STATE: extended ghost-sell recovery test + added synthetic external-close test asserting q_version NULL BY RULE at both reconcile backfill INSERT sites, against a non-null entry q_version."}
+    tests/test_exchange_reconcile.py: {created: "2026-04-27", last_used: "2026-07-11", note: "SCH-W1.2-ORDER-STATE plus partial EXIT fill terminalization defense: economic close requires fill coverage of the command and current position after excluding tx-hash aggregate aliases while preserving distinct child fills."}
     tests/test_order_truth_reducer.py: {created: "2026-05-21", last_used: "2026-05-21"}
     tests/test_order_state_predicates.py: {created: "2026-07-02", last_used: "2026-07-03", note: "SCH-W1.2-ORDER-STATE: full truth table for is_stale_pending_cancel (incl. both INDETERMINATE branches, fail-closed), is_delayed, rest_deadline_exceeded (incl. NULL-q leak-closure case). First wired to the cancel path by W4.2 (tests/execution/test_staleness_cancel.py)."}
     tests/test_ddl_copies_normalized_identical.py: {created: "2026-07-02", last_used: "2026-07-02", note: "SCH-W1.2-ORDER-STATE critic ruling 1: normalized (not byte-equal) DDL lockstep guard over venue_order_facts and collateral pairs, closing the _TRADE_CLASS_DDL fingerprint blind spot."}

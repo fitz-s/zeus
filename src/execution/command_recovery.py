@@ -314,6 +314,38 @@ def _canonical_trade_fact_cte(cte_name: str = "canonical_trade_fact") -> str:
     """
 
 
+def _economic_trade_fact_cte(
+    *,
+    canonical_cte_name: str = "canonical_trade_fact",
+    cte_name: str = "economic_trade_fact",
+) -> str:
+    """Exclude a tx-hash alias once an exact child trade fact exists."""
+
+    return f"""
+        {cte_name} AS (
+            SELECT fact.*
+              FROM {canonical_cte_name} fact
+             WHERE NOT (
+                    TRIM(COALESCE(fact.tx_hash, '')) != ''
+                AND LOWER(TRIM(COALESCE(fact.trade_id, '')))
+                    = LOWER(TRIM(fact.tx_hash))
+                AND EXISTS (
+                        SELECT 1
+                          FROM {canonical_cte_name} exact
+                         WHERE exact.command_id = fact.command_id
+                           AND LOWER(TRIM(COALESCE(exact.tx_hash, '')))
+                               = LOWER(TRIM(fact.tx_hash))
+                           AND LOWER(TRIM(COALESCE(exact.trade_id, '')))
+                               != LOWER(TRIM(COALESCE(fact.trade_id, '')))
+                           AND UPPER(COALESCE(exact.state, ''))
+                               IN ('MATCHED', 'MINED', 'CONFIRMED')
+                           AND CAST(COALESCE(exact.filled_size, '0') AS REAL) > 0
+                    )
+                )
+        )
+    """
+
+
 class MissingPositionCurrentForTerminalOrder(ValueError):
     """Raised when terminal order facts arrive before the entry projection."""
 
@@ -1847,6 +1879,13 @@ def _latest_completed_partial_order_fact_candidates(conn: sqlite3.Connection) ->
             matched_size=candidate.get("order_fact_matched_size"),
         ):
             continue
+        if str(candidate.get("intent_kind") or "").upper() == "EXIT":
+            fill_summary = _positive_fill_trade_fact_summary(
+                conn,
+                str(candidate.get("command_id") or ""),
+            )
+            if _command_fill_coverage_state(candidate, fill_summary) != "complete":
+                continue
         candidates.append(candidate)
     return candidates
 
@@ -2270,9 +2309,10 @@ def _is_terminal_positive_match_candidate(candidate: Mapping[str, object]) -> bo
 
 def _matched_remaining_size(command: dict, matched_size: str, *, venue_status: str = "") -> str:
     matched = _decimal_or_none(matched_size)
-    if _venue_status_is_fully_matched(venue_status) and matched is not None and matched > 0:
-        return "0"
     command_size = _decimal_or_none(command.get("size"))
+    if str(command.get("intent_kind") or "").upper() != "EXIT":
+        if _venue_status_is_fully_matched(venue_status) and matched is not None and matched > 0:
+            return "0"
     if command_size is None or matched is None or matched >= command_size:
         return "0"
     return _decimal_text(command_size - matched)
@@ -2282,12 +2322,6 @@ def _matched_event_type(command: dict, matched_size: str, *, venue_status: str =
     if str(command.get("intent_kind") or "").upper() == "EXIT":
         matched = _decimal_or_none(matched_size)
         command_size = _decimal_or_none(command.get("size"))
-        if (
-            _venue_status_is_fully_matched(venue_status)
-            and matched is not None
-            and matched > 0
-        ):
-            return CommandEventType.FILL_CONFIRMED.value
         if command_size is not None and matched is not None and matched >= command_size:
             return CommandEventType.FILL_CONFIRMED.value
         return CommandEventType.PARTIAL_FILL_OBSERVED.value
@@ -2303,6 +2337,8 @@ def _matched_event_type(command: dict, matched_size: str, *, venue_status: str =
 def _matched_order_fact_state(*, event_type: str, venue_status: str, remaining_size: str) -> str:
     if event_type == CommandEventType.FILL_CONFIRMED.value:
         return "MATCHED"
+    if event_type == CommandEventType.PARTIAL_FILL_OBSERVED.value:
+        return "PARTIALLY_MATCHED"
     if str(venue_status or "").upper() in {"MATCHED", "FILLED", "MINED"}:
         return "MATCHED"
     if _decimal_is_zero(remaining_size):
@@ -2454,9 +2490,9 @@ def _decimal_text(value: Decimal) -> str:
 def _positive_fill_trade_fact_summary(conn: sqlite3.Connection, command_id: str) -> dict:
     if not _table_exists(conn, "venue_trade_facts"):
         return {"count": 0, "filled_size": "0"}
-    sql = "WITH " + _canonical_trade_fact_cte() + """
+    sql = "WITH " + _canonical_trade_fact_cte() + ", " + _economic_trade_fact_cte() + """
         SELECT fact.filled_size
-          FROM canonical_trade_fact fact
+          FROM economic_trade_fact fact
          WHERE fact.command_id = ?
            AND fact.state IN ('MATCHED', 'MINED', 'CONFIRMED')
         """
@@ -6169,7 +6205,7 @@ def _exit_pending_projection_candidates(conn: sqlite3.Connection) -> list[dict]:
     pc_select = ",\n               ".join(f"pc.{col} AS pc_{col}" for col in current_cols)
     placeholders = ", ".join("?" for _ in _EXIT_PENDING_PROJECTION_COMMAND_STATES)
     trade_placeholders = ", ".join("?" for _ in _EXIT_PENDING_PROJECTION_TRADE_STATES)
-    sql = "WITH " + _canonical_trade_fact_cte() + f""",
+    sql = "WITH " + _canonical_trade_fact_cte() + ", " + _economic_trade_fact_cte() + f""",
         exit_fill AS (
             SELECT fact.command_id,
                    COUNT(*) AS fill_fact_count,
@@ -6178,7 +6214,7 @@ def _exit_pending_projection_candidates(conn: sqlite3.Connection) -> list[dict]:
                        * CAST(COALESCE(fact.fill_price, '0') AS REAL)) AS fill_notional,
                    GROUP_CONCAT(DISTINCT fact.state) AS fill_states,
                    MAX(fact.observed_at) AS observed_at
-              FROM canonical_trade_fact fact
+              FROM economic_trade_fact fact
              WHERE fact.state IN ({trade_placeholders})
                AND CAST(COALESCE(fact.filled_size, '0') AS REAL) > 0
              GROUP BY fact.command_id
@@ -6239,11 +6275,14 @@ def _exit_close_target_size(candidate: dict, current: dict) -> Decimal | None:
 def _exit_trade_fact_covers_full_close(candidate: dict, current: dict) -> bool:
     filled_size = _positive_decimal_or_none(candidate.get("fill_filled_size"))
     fill_price = _positive_decimal_or_none(candidate.get("fill_avg_price"))
+    command_size = _positive_decimal_or_none(candidate.get("cmd_size"))
     target_size = _exit_close_target_size(candidate, current)
     return (
         filled_size is not None
         and fill_price is not None
+        and command_size is not None
         and target_size is not None
+        and filled_size >= command_size
         and filled_size + _EXIT_FULL_CLOSE_DUST_TOLERANCE >= target_size
     )
 
@@ -7771,9 +7810,7 @@ def _append_missing_exit_trade_fact_from_order_fact(
             venue_order_id=venue_order_id,
         )
     tx_hash = next(iter(tx_hashes), "")
-    if _fill_trade_fact_count(conn, command_id) > 0 and (
-        not tx_hash or _fill_trade_fact_with_tx_count(conn, command_id=command_id, tx_hash=tx_hash) > 0
-    ):
+    if _fill_trade_fact_count(conn, command_id) > 0:
         return
     trade_id = next(iter(trade_ids), "")
     if not trade_id:
@@ -7953,6 +7990,9 @@ def _repair_exit_matched_order_fact_projection(
         fill_price=fill_price,
         observed_at=occurred_at,
     )
+    fill_summary = _positive_fill_trade_fact_summary(conn, command_id)
+    if _command_fill_coverage_state(dict(candidate), fill_summary) != "complete":
+        return False
     if str(candidate.get("state") or "") != CommandState.FILLED.value:
         append_event(
             conn,

@@ -2205,9 +2205,29 @@ def _venue_submit_transaction_hashes(result: dict) -> tuple[str, ...]:
     )
 
 
-def _venue_submit_order_fact_state(result: dict) -> str:
+def _venue_submit_order_fact_state(
+    result: dict,
+    *,
+    matched_size: str | None = None,
+    submitted_size: float | Decimal | None = None,
+    side: str | None = None,
+) -> str:
     status = _venue_submit_status(result)
     if status in {"MATCHED", "FILLED"}:
+        side_value = _venue_submit_side(result, side=side)
+        matched = _decimal_or_none(
+            matched_size
+            if matched_size is not None
+            else _venue_submit_matched_size(result, side=side)
+        )
+        submitted = _decimal_or_none(submitted_size)
+        if (
+            side_value == "SELL"
+            and matched is not None
+            and submitted is not None
+            and Decimal("0") < matched < submitted
+        ):
+            return "PARTIALLY_MATCHED"
         return "MATCHED"
     if status in {"PARTIALLY_MATCHED", "PARTIAL", "PARTIALLY_FILLED"}:
         return "PARTIALLY_MATCHED"
@@ -2259,9 +2279,11 @@ def _venue_submit_remaining_size(
     )
     fallback = _decimal_or_none(fallback_size)
     if status in {"MATCHED", "FILLED"} and matched is not None:
-        if matched > Decimal("0"):
-            return "0"
-        if fallback is not None and fallback > matched:
+        if (
+            _venue_submit_side(result, side=side) == "SELL"
+            and fallback is not None
+            and fallback > matched
+        ):
             return _decimal_text(fallback - matched)
         return "0"
     for key in ("size", "original_size", "originalSize"):
@@ -5545,8 +5567,13 @@ def execute_exit_order(
                 command_state="REJECTED",
             )
 
-        order_fact_state = _venue_submit_order_fact_state(result)
         matched_size = _venue_submit_matched_size(result, side="SELL")
+        order_fact_state = _venue_submit_order_fact_state(
+            result,
+            matched_size=matched_size,
+            submitted_size=shares,
+            side="SELL",
+        )
         remaining_size = _venue_submit_remaining_size(
             result,
             shares,
@@ -7060,8 +7087,13 @@ def _live_order(
                 zeus_submit_intent_time=zeus_submit_intent_time,
                 venue_ack_time=ack_time,
             )
-        order_fact_state = _venue_submit_order_fact_state(result)
         matched_size = _venue_submit_matched_size(result, side="BUY")
+        order_fact_state = _venue_submit_order_fact_state(
+            result,
+            matched_size=matched_size,
+            submitted_size=shares,
+            side="BUY",
+        )
         remaining_size = _venue_submit_remaining_size(
             result,
             shares,
@@ -7117,6 +7149,12 @@ def _live_order(
                             iter(_venue_submit_transaction_hashes(fill_evidence)),
                             fill_tx_hash,
                         )
+            order_fact_state = _venue_submit_order_fact_state(
+                fill_evidence,
+                matched_size=matched_size,
+                submitted_size=shares,
+                side="BUY",
+            )
             fill_trade_id = next(iter(trade_ids), None)
             if fill_trade_id:
                 fill_event_type = (

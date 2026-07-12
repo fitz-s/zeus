@@ -132,6 +132,7 @@ _REDEEM_PENDING_WALLET_HOLDING_STATES = frozenset(
 )
 _CLOSED_POSITION_WALLET_HOLDING_PHASES = frozenset({"settled", "admin_closed", "voided"})
 _CLOSED_POSITION_WALLET_HOLDING_CHAIN_STATES = frozenset({"synced", "exit_pending_missing"})
+_EXIT_FULL_CLOSE_DUST_TOLERANCE = Decimal("0.011")
 # A terminal position whose CTF tokens left the wallet via an operator-confirmed
 # EXTERNAL close (the operator manually sold Zeus's position on the shared proxy
 # wallet). The tokens are provably no longer on-chain, so this chain_state is
@@ -207,6 +208,38 @@ def _canonical_trade_fact_cte(
                            ) scored
                    ) ranked
              WHERE ranked.canonical_rank = 1
+        )
+    """
+
+
+def _economic_trade_fact_cte(
+    *,
+    canonical_cte_name: str = "canonical_trade_fact",
+    cte_name: str = "economic_trade_fact",
+) -> str:
+    """Exclude a tx-hash alias once an exact child trade fact exists."""
+
+    return f"""
+        {cte_name} AS (
+            SELECT fact.*
+              FROM {canonical_cte_name} fact
+             WHERE NOT (
+                    TRIM(COALESCE(fact.tx_hash, '')) != ''
+                AND LOWER(TRIM(COALESCE(fact.trade_id, '')))
+                    = LOWER(TRIM(fact.tx_hash))
+                AND EXISTS (
+                        SELECT 1
+                          FROM {canonical_cte_name} exact
+                         WHERE exact.command_id = fact.command_id
+                           AND LOWER(TRIM(COALESCE(exact.tx_hash, '')))
+                               = LOWER(TRIM(fact.tx_hash))
+                           AND LOWER(TRIM(COALESCE(exact.trade_id, '')))
+                               != LOWER(TRIM(COALESCE(fact.trade_id, '')))
+                           AND UPPER(COALESCE(exact.state, ''))
+                               IN ('MATCHED', 'MINED', 'CONFIRMED')
+                           AND CAST(COALESCE(exact.filled_size, '0') AS REAL) > 0
+                    )
+                )
         )
     """
 
@@ -2024,7 +2057,7 @@ def _reconcile_recorded_nonfinal_exit_command_fill_state(
     ):
         return summary
     rows = conn.execute(
-        "WITH " + _canonical_trade_fact_cte() + """
+        "WITH " + _canonical_trade_fact_cte() + ", " + _economic_trade_fact_cte() + """
         SELECT
             cmd.command_id,
             cmd.venue_order_id,
@@ -2035,7 +2068,7 @@ def _reconcile_recorded_nonfinal_exit_command_fill_state(
             GROUP_CONCAT(DISTINCT tf.trade_id) AS trade_ids,
             MAX(tf.observed_at) AS fill_observed_at
           FROM venue_commands cmd
-          JOIN canonical_trade_fact tf
+          JOIN economic_trade_fact tf
             ON tf.command_id = cmd.command_id
          WHERE UPPER(COALESCE(cmd.intent_kind, '')) = 'EXIT'
            AND UPPER(COALESCE(cmd.side, '')) = 'SELL'
@@ -3640,9 +3673,13 @@ def _canonical_filled_size_for_command(conn: sqlite3.Connection, command_id: str
     if not command_id or not _table_exists(conn, "venue_trade_facts"):
         return Decimal("0")
     rows = conn.execute(
-        "WITH " + _canonical_trade_fact_cte(source_clause_sql="WHERE fact.command_id = ?") + """
+        "WITH "
+        + _canonical_trade_fact_cte(source_clause_sql="WHERE fact.command_id = ?")
+        + ", "
+        + _economic_trade_fact_cte()
+        + """
         SELECT filled_size
-          FROM canonical_trade_fact
+          FROM economic_trade_fact
          WHERE state IN ('MATCHED', 'MINED', 'CONFIRMED')
         """,
         (command_id,),
@@ -4752,6 +4789,36 @@ def _ensure_exit_fill_position_event(
     if fill_economics is None:
         return
     shares_dec, exit_price_dec = fill_economics
+    command_size = _positive_decimal_or_none(command.get("size"))
+    if command_size is None:
+        logger.warning(
+            "exchange_reconcile: refuse exit economic close without command size "
+            "command_id=%s filled=%s order_id=%s",
+            command.get("command_id"),
+            shares_dec,
+            venue_order_id,
+        )
+        return
+    close_sizes = [
+        command_size,
+        _positive_decimal_or_none(current.get("shares")),
+        _positive_decimal_or_none(current.get("chain_shares")),
+    ]
+    close_target = max(size for size in close_sizes if size is not None)
+    if (
+        shares_dec < command_size
+        or shares_dec + _EXIT_FULL_CLOSE_DUST_TOLERANCE < close_target
+    ):
+        logger.warning(
+            "exchange_reconcile: refuse partial exit economic close "
+            "command_id=%s filled=%s command_size=%s close_target=%s order_id=%s",
+            command.get("command_id"),
+            shares_dec,
+            command.get("size"),
+            close_target,
+            venue_order_id,
+        )
+        return
     occurred_at = observed_at.isoformat()
     exit_reason = _strategy_exit_reason_for_reconciled_fill(conn, position_id, current)
     # Bug A (truth-path PnL booking, 2026-07-07; structurally unified R0-a
@@ -4896,9 +4963,13 @@ def _exit_fill_economics_for_command(
     fallback_fill_price: str,
 ) -> tuple[Decimal, Decimal] | None:
     rows = conn.execute(
-        "WITH " + _canonical_trade_fact_cte(source_clause_sql="WHERE fact.command_id = ?") + """
+        "WITH "
+        + _canonical_trade_fact_cte(source_clause_sql="WHERE fact.command_id = ?")
+        + ", "
+        + _economic_trade_fact_cte()
+        + """
         SELECT tf.state, tf.filled_size, tf.fill_price
-          FROM canonical_trade_fact tf
+          FROM economic_trade_fact tf
          WHERE tf.state IN ('MATCHED', 'MINED', 'CONFIRMED')
         """,
         (command_id,),
@@ -5494,17 +5565,16 @@ def _journal_positions_by_token(
     non_current_exit_statuses = tuple(sorted(_PENDING_EXIT_NON_CURRENT_ORDER_STATUSES))
     non_current_exit_status_placeholders = ", ".join("?" for _ in non_current_exit_statuses)
     rows = conn.execute(
-        f"""
+        "WITH "
+        + _canonical_trade_fact_cte()
+        + ", "
+        + _economic_trade_fact_cte()
+        + f"""
         SELECT c.token_id, c.side, tf.filled_size, tf.fill_price
-          FROM venue_trade_facts tf
+          FROM economic_trade_fact tf
           JOIN venue_commands c ON c.command_id = tf.command_id
           LEFT JOIN position_current pc ON pc.position_id = c.position_id
-         WHERE tf.local_sequence = (
-               SELECT MAX(newer.local_sequence)
-                 FROM venue_trade_facts newer
-                WHERE newer.trade_id = tf.trade_id
-         )
-           AND tf.state IN ({state_placeholders})
+         WHERE tf.state IN ({state_placeholders})
            AND (
                 c.position_id IS NULL
                 OR c.position_id = ''

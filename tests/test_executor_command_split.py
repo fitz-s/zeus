@@ -1,8 +1,8 @@
-# Lifecycle: created=2026-04-26; last_reviewed=2026-05-21; last_reused=2026-07-01
+# Lifecycle: created=2026-04-26; last_reviewed=2026-07-11; last_reused=2026-07-11
 # Purpose: Lock executor command split phase ordering and ACK invariants.
 # Reuse: Run when venue command persistence, live order submission, or ACK handling changes.
 # Created: 2026-04-26
-# Last reused/audited: 2026-07-02
+# Last reused/audited: 2026-07-11
 # Authority basis: docs/operations/task_2026-04-26_execution_state_truth_p1_command_bus/implementation_plan.md §P1.S3
 #                  + docs/archive/2026-Q2/task_2026-05-15_live_order_e2e_goal/LIVE_ORDER_E2E_GOAL_PLAN.md
 #                  + docs/operations/task_2026-05-21_live_side_effect_risk_boundaries/task.md P1-4 side-effect boundary.
@@ -2792,8 +2792,8 @@ class TestLiveOrderCommandSplit:
                     status="matched",
                     success=True,
                     raw_extra={
-                        "makingAmount": "1.70",
-                        "takingAmount": "5",
+                        "makingAmount": "1.6966",
+                        "takingAmount": "4.99",
                         "transactionsHashes": ["0xhash-matched"],
                     },
                 )
@@ -4268,6 +4268,80 @@ class TestExitOrderCommandSplit:
             "tx_hash": "0xhash-exit-matched",
         }
 
+    def test_exit_matched_status_with_partial_size_stays_partial(self, mem_conn):
+        """Venue MATCHED text cannot terminalize fewer shares than were submitted."""
+        from src.execution.executor import execute_exit_order
+        from src.state.venue_command_repo import get_command
+
+        intent = _make_exit_intent(
+            mem_conn,
+            trade_id="trd-exit-partial-matched-sell",
+            shares=60.0,
+            current_price=0.17,
+        )
+        command_ids_seen: list[str] = []
+
+        import src.state.venue_command_repo as _repo
+        _real_insert = _repo.insert_command
+
+        def capturing_insert(*args, **kwargs):
+            command_ids_seen.append(kwargs["command_id"])
+            return _real_insert(*args, **kwargs)
+
+        with patch(
+            "src.state.venue_command_repo.insert_command", side_effect=capturing_insert
+        ), patch("src.data.polymarket_client.PolymarketClient") as MockClient:
+            mock_inst = MagicMock()
+            MockClient.return_value = mock_inst
+            bound = _capture_bound_submission_envelope(mock_inst)
+            mock_inst.place_limit_order.side_effect = (
+                lambda **kwargs: _final_submit_result(
+                    bound,
+                    order_id="ord-exit-partial-matched-sell",
+                    status="matched",
+                    success=True,
+                    raw_extra={
+                        "makingAmount": "46.59",
+                        "takingAmount": "7.5311",
+                        "transactionsHashes": ["0xhash-exit-partial-matched"],
+                    },
+                )
+            )
+
+            result = execute_exit_order(
+                intent=intent,
+                conn=mem_conn,
+                decision_id="dec-exit-partial-matched-sell",
+            )
+
+        command_id = command_ids_seen[0]
+        assert result.status == "partial"
+        assert get_command(mem_conn, command_id)["state"] == "PARTIAL"
+        order_fact = mem_conn.execute(
+            """
+            SELECT state, remaining_size, matched_size
+              FROM venue_order_facts
+             WHERE command_id = ?
+             ORDER BY local_sequence DESC
+             LIMIT 1
+            """,
+            (command_id,),
+        ).fetchone()
+        assert dict(order_fact) == {
+            "state": "PARTIALLY_MATCHED",
+            "remaining_size": "13.41",
+            "matched_size": "46.59",
+        }
+        event_types = [
+            row["event_type"]
+            for row in mem_conn.execute(
+                "SELECT event_type FROM venue_command_events WHERE command_id = ? ORDER BY sequence_no",
+                (command_id,),
+            ).fetchall()
+        ]
+        assert event_types[-1] == "PARTIAL_FILL_OBSERVED"
+        assert "FILL_CONFIRMED" not in event_types
+
     def test_exit_idempotency_key_collision_raises_before_submit(self, mem_conn):
         """Duplicate idempotency key (exit path): place_limit_order not called."""
         from src.execution.executor import execute_exit_order, create_exit_order_intent
@@ -4338,6 +4412,29 @@ class TestExitOrderCommandSplit:
         assert result.reason is not None and "idempotency_collision" in result.reason
         assert result.idempotency_key == idem.value
         mock_inst.place_limit_order.assert_not_called()
+
+
+def test_entry_matched_status_preserves_terminal_rounding_semantics():
+    """ENTRY keeps venue MATCHED authority for its known rounding residue."""
+    from src.execution.executor import (
+        _venue_submit_order_fact_state,
+        _venue_submit_remaining_size,
+    )
+
+    result = {"status": "MATCHED", "takingAmount": "4.99"}
+
+    assert _venue_submit_order_fact_state(
+        result,
+        matched_size="4.99",
+        submitted_size=5,
+        side="BUY",
+    ) == "MATCHED"
+    assert _venue_submit_remaining_size(
+        result,
+        5,
+        matched_size="4.99",
+        side="BUY",
+    ) == "0"
 
 
 # ---------------------------------------------------------------------------

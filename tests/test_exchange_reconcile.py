@@ -1,6 +1,6 @@
 # Created: 2026-04-27
-# Last reused/audited: 2026-06-24
-# Lifecycle: created=2026-04-27; last_reviewed=2026-05-07; last_reused=2026-06-24
+# Last reused/audited: 2026-07-11
+# Lifecycle: created=2026-04-27; last_reviewed=2026-07-11; last_reused=2026-07-11
 # Authority basis: docs/operations/task_2026-05-08_object_invariance_remaining_mainline/PLAN.md
 # Purpose: R3 M5 exchange reconciliation sweep antibodies.
 # Reuse: Run when exchange_reconcile, venue facts, findings, heartbeat/cutover reconciliation, or operator finding resolution changes.
@@ -436,6 +436,7 @@ def append_trade_fact(
     size="10",
     fill_price="0.50",
     state="CONFIRMED",
+    tx_hash=None,
 ):
     from src.state.venue_command_repo import append_trade_fact as append
 
@@ -449,6 +450,7 @@ def append_trade_fact(
         fill_price=fill_price,
         source="REST",
         observed_at=NOW,
+        tx_hash=tx_hash,
         raw_payload_hash=hashlib.sha256(f"{trade_id}:{token_id}:{size}:{fill_price}:{state}".encode()).hexdigest(),
         raw_payload_json={
             "trade_id": trade_id,
@@ -1892,6 +1894,44 @@ def test_exit_fill_economics_uses_canonical_trade_fact_over_later_weaker_fact(co
     ) == (Decimal("3"), Decimal("0.25"))
 
 
+def test_exit_fill_economics_keeps_distinct_child_trades_in_one_transaction(conn):
+    from src.execution.exchange_reconcile import _exit_fill_economics_for_command
+
+    tx_hash = "0xshared-child-fill-transaction"
+    seed_command(
+        conn,
+        command_id="cmd-exit-shared-tx",
+        venue_order_id="ord-exit-shared-tx",
+        side="SELL",
+        position_id="pos-exit-shared-tx",
+    )
+    append_trade_fact(
+        conn,
+        command_id="cmd-exit-shared-tx",
+        venue_order_id="ord-exit-shared-tx",
+        trade_id="trade-child-a",
+        size="3",
+        fill_price="0.20",
+        tx_hash=tx_hash,
+    )
+    append_trade_fact(
+        conn,
+        command_id="cmd-exit-shared-tx",
+        venue_order_id="ord-exit-shared-tx",
+        trade_id="trade-child-b",
+        size="2",
+        fill_price="0.30",
+        tx_hash=tx_hash,
+    )
+
+    assert _exit_fill_economics_for_command(
+        conn,
+        command_id="cmd-exit-shared-tx",
+        fallback_filled_size="1",
+        fallback_fill_price="0.99",
+    ) == (Decimal("5"), Decimal("0.24"))
+
+
 def test_entry_fill_projection_aggregates_multiple_trade_facts(conn):
     from src.execution.exchange_reconcile import run_reconcile_sweep
 
@@ -2803,6 +2843,42 @@ def test_recorded_nonfinal_full_exit_trade_terminalizes_command_without_economic
     )
 
 
+def test_recorded_nonfinal_exit_tx_alias_cannot_fake_full_command_coverage(conn):
+    from src.execution.exchange_reconcile import reconcile_recorded_maker_fill_economics
+
+    tx_hash = "0xrecorded-partial-exit"
+    seed_command(
+        conn,
+        command_id="cmd-recorded-partial-exit",
+        venue_order_id="ord-recorded-partial-exit",
+        position_id="pos-recorded-partial-exit",
+        token_id="recorded-partial-exit-token",
+        side="SELL",
+        size=15.5,
+        price=0.69,
+        state="PARTIAL",
+    )
+    for trade_id in ("trade-recorded-partial-exit", tx_hash):
+        append_trade_fact(
+            conn,
+            command_id="cmd-recorded-partial-exit",
+            venue_order_id="ord-recorded-partial-exit",
+            trade_id=trade_id,
+            size="7.75",
+            fill_price="0.7",
+            state="MATCHED",
+            tx_hash=tx_hash,
+        )
+
+    summary = reconcile_recorded_maker_fill_economics(conn, observed_at=NOW)
+
+    assert summary.get("exit_command_terminalized", 0) == 0
+    assert summary["stayed"] >= 1
+    assert conn.execute(
+        "SELECT state FROM venue_commands WHERE command_id = 'cmd-recorded-partial-exit'"
+    ).fetchone()["state"] == "PARTIAL"
+
+
 @pytest.mark.parametrize("status", ["MATCHED", "MINED"])
 def test_nonconfirmed_exit_trade_does_not_economically_close_position(conn, status):
     from src.execution.exchange_reconcile import run_reconcile_sweep
@@ -3022,6 +3098,103 @@ def test_full_size_nonconfirmed_exit_trade_leaves_actionable_finality_finding(co
         "venue_status": "FILLED",
         "terminal_exec_status": "filled",
     }
+
+
+def test_partial_exit_fill_cannot_project_economic_close_even_with_fill_event(conn):
+    """Final projection requires fill to cover the current position, not only the command."""
+    from src.execution.exchange_reconcile import _ensure_exit_fill_position_event
+
+    token = "exit-partial-terminal-guard-token"
+    seed_position_baseline(
+        conn,
+        position_id="pos-exit-partial-terminal-guard",
+        order_id="ord-entry-partial-terminal-guard",
+    )
+    conn.execute(
+        """
+        UPDATE position_current
+           SET phase = 'pending_exit',
+               token_id = ?,
+               order_id = 'ord-exit-partial-terminal-guard',
+               order_status = 'sell_pending_confirmation',
+               shares = 60.0,
+               chain_shares = 60.0,
+               cost_basis_usd = 12.0,
+               entry_price = 0.2,
+               updated_at = ?
+         WHERE position_id = 'pos-exit-partial-terminal-guard'
+        """,
+        (token, NOW.isoformat()),
+    )
+    seed_command(
+        conn,
+        command_id="cmd-exit-partial-terminal-guard",
+        venue_order_id="ord-exit-partial-terminal-guard",
+        position_id="pos-exit-partial-terminal-guard",
+        token_id=token,
+        side="SELL",
+        size=46.59,
+        price=0.16,
+        state="FILLED",
+    )
+    append_trade_fact(
+        conn,
+        command_id="cmd-exit-partial-terminal-guard",
+        venue_order_id="ord-exit-partial-terminal-guard",
+        token_id=token,
+        trade_id="trade-exit-partial-terminal-guard",
+        size="46.59",
+        fill_price="0.161646276024898",
+        state="CONFIRMED",
+        tx_hash="0xexit-partial-terminal-guard",
+    )
+    append_trade_fact(
+        conn,
+        command_id="cmd-exit-partial-terminal-guard",
+        venue_order_id="ord-exit-partial-terminal-guard",
+        token_id=token,
+        trade_id="0xexit-partial-terminal-guard",
+        size="46.59",
+        fill_price="0.161646276024898",
+        state="CONFIRMED",
+        tx_hash="0xexit-partial-terminal-guard",
+    )
+    command = dict(
+        conn.execute(
+            "SELECT * FROM venue_commands WHERE command_id = 'cmd-exit-partial-terminal-guard'"
+        ).fetchone()
+    )
+
+    _ensure_exit_fill_position_event(
+        conn,
+        command=command,
+        venue_order_id="ord-exit-partial-terminal-guard",
+        filled_size="46.59",
+        fill_price="0.161646276024898",
+        observed_at=NOW,
+        command_event="FILL_CONFIRMED",
+    )
+
+    current = conn.execute(
+        """
+        SELECT phase, order_status, chain_shares
+          FROM position_current
+         WHERE position_id = 'pos-exit-partial-terminal-guard'
+        """
+    ).fetchone()
+    assert dict(current) == {
+        "phase": "pending_exit",
+        "order_status": "sell_pending_confirmation",
+        "chain_shares": 60.0,
+    }
+    assert conn.execute(
+        """
+        SELECT COUNT(*)
+          FROM position_events
+         WHERE position_id = 'pos-exit-partial-terminal-guard'
+           AND event_type = 'EXIT_ORDER_FILLED'
+        """
+    ).fetchone()[0] == 0
 
 
 def test_trade_lifecycle_update_appends_confirmed_after_matched_without_double_counting(conn):
@@ -3852,6 +4025,45 @@ def test_position_drift_treats_venue_live_sell_as_locked_wallet_tokens(conn):
     )
 
     assert not any(finding.kind == "position_drift" for finding in result)
+
+
+def test_exit_trade_alias_not_double_counted_in_locked_and_journal_views(conn):
+    from src.execution.exchange_reconcile import (
+        _canonical_filled_size_for_command,
+        _journal_positions_by_token,
+    )
+
+    token = "exit-alias-balance-token"
+    tx_hash = "0xexit-alias-balance"
+    seed_command(
+        conn,
+        command_id="cmd-exit-alias-balance",
+        venue_order_id="ord-exit-alias-balance",
+        token_id=token,
+        side="SELL",
+        size=10.0,
+        price=0.5,
+        state="ACKED",
+    )
+    for trade_id in ("trade-exit-alias-balance", tx_hash):
+        append_trade_fact(
+            conn,
+            command_id="cmd-exit-alias-balance",
+            venue_order_id="ord-exit-alias-balance",
+            token_id=token,
+            trade_id=trade_id,
+            size="5",
+            fill_price="0.5",
+            state="MATCHED",
+            tx_hash=tx_hash,
+        )
+
+    assert _canonical_filled_size_for_command(
+        conn, "cmd-exit-alias-balance"
+    ) == Decimal("5")
+    assert _journal_positions_by_token(
+        conn, states=frozenset({"MATCHED"})
+    ) == {token: Decimal("-5")}
 
 
 def test_position_drift_requires_fresh_venue_live_sell_before_locking_wallet_tokens(conn):
