@@ -12,6 +12,7 @@ in_scope:
 - src/decision_kernel/canonicalization.py
 - src/solve/solver.py
 - src/solve/AGENTS.md
+- src/state/portfolio.py
 - src/execution/exit_lifecycle.py
 - tests/test_p4_post_trade_capital_lift.py
 - tests/test_run_mode_failure_surfaces.py
@@ -23,6 +24,7 @@ in_scope:
 - tests/engine/test_event_reactor_live_qkernel_gate.py
 - tests/solve/test_solver_properties.py
 - tests/test_phase2_exit_emitter_revival.py
+- tests/test_live_safety_invariants.py
 allow_companions:
 - architecture/test_topology.yaml
 - docs/operations/current_state.md
@@ -31,7 +33,7 @@ allow_companions:
 out_of_scope:
 - state/**
 - src/execution/** except src/execution/exit_lifecycle.py
-- src/state/**
+- src/state/** except src/state/portfolio.py
 - scripts/**
 - architecture/2026_04_02_architecture_kernel.sql
 - architecture/kernel_manifest.yaml
