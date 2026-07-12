@@ -485,13 +485,17 @@ def _rebuild_table_drop_literals(
         new_sql = _strip_check_literal(new_sql, lit)
 
     migrated_name = f"{table}_t5_migrated"
-    prefix_plain = f"CREATE TABLE {table}"
-    if not new_sql.startswith(prefix_plain):
+    # sqlite_master may record the identifier bare or double-quoted (a table
+    # ever touched by ALTER TABLE gets re-recorded quoted) — accept both.
+    for prefix_plain in (f'CREATE TABLE "{table}"', f"CREATE TABLE {table}"):
+        if new_sql.startswith(prefix_plain):
+            new_sql = f"CREATE TABLE {migrated_name}" + new_sql[len(prefix_plain):]
+            break
+    else:
         raise RuntimeError(
             f"T5 rebuild: unrecognized CREATE TABLE prefix for {schema}.{table} "
             "— refusing to rebuild blind"
         )
-    new_sql = f"CREATE TABLE {migrated_name}" + new_sql[len(prefix_plain):]
     if schema:
         new_sql = new_sql.replace(
             f"CREATE TABLE {migrated_name}", f"CREATE TABLE {schema}.{migrated_name}", 1
