@@ -691,13 +691,15 @@ def _unprojected_entry_fill_equity_usd(conn: sqlite3.Connection) -> float:
                 SELECT 1
                 FROM position_lots lot
                 WHERE lot.source_command_id = cmd.command_id
-                  AND lot.state IN ('OPTIMISTIC_EXPOSURE', 'CONFIRMED_EXPOSURE', 'EXIT_PENDING')
               )
               AND NOT EXISTS (
                 SELECT 1
                 FROM position_current pc
-                WHERE pc.order_id = cmd.venue_order_id
-                  AND pc.phase IN ('active', 'day0_window', 'pending_exit')
+                WHERE pc.position_id = cmd.position_id
+                   OR (
+                        cmd.venue_order_id IS NOT NULL
+                    AND pc.order_id = cmd.venue_order_id
+                   )
               )
             """
         ).fetchall()

@@ -9,6 +9,7 @@ in_scope:
 - src/engine/global_batch_runtime.py
 - src/engine/global_auction_universe.py
 - src/risk_allocator/governor.py
+- src/riskguard/riskguard.py
 - src/engine/global_single_order_auction.py
 - src/decision_kernel/canonicalization.py
 - src/solve/solver.py
@@ -22,6 +23,7 @@ in_scope:
 - tests/events/test_reactor.py
 - tests/integration/test_w3_solve_seam_g3.py
 - tests/test_risk_allocator.py
+- tests/test_riskguard.py
 - tests/integration/test_qkernel_spine_blockers_pr409.py
 - tests/engine/test_event_reactor_live_qkernel_gate.py
 - tests/solve/test_solver_properties.py

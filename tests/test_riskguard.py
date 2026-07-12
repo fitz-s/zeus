@@ -4298,6 +4298,7 @@ def _unprojected_equity_schema(conn: sqlite3.Connection) -> None:
         """
         CREATE TABLE venue_commands (
             command_id TEXT PRIMARY KEY,
+            position_id TEXT,
             intent_kind TEXT NOT NULL,
             side TEXT NOT NULL,
             state TEXT NOT NULL,
@@ -4317,6 +4318,7 @@ def _unprojected_equity_schema(conn: sqlite3.Connection) -> None:
             state TEXT
         );
         CREATE TABLE position_current (
+            position_id TEXT,
             order_id TEXT,
             phase TEXT
         );
@@ -4398,3 +4400,49 @@ def test_unprojected_entry_fill_equity_usd_single_trade_id_unchanged():
     result = riskguard_module._unprojected_entry_fill_equity_usd(conn)
 
     assert result == round(4.2 * 0.55, 2)
+
+
+def test_unprojected_entry_fill_equity_excludes_any_canonical_position_projection():
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    _unprojected_equity_schema(conn)
+    conn.execute(
+        "INSERT INTO venue_commands "
+        "(command_id, position_id, intent_kind, side, state, venue_order_id) "
+        "VALUES ('cmd-projected', 'pos-projected', 'ENTRY', 'BUY', 'FILLED', 'ord-entry')"
+    )
+    conn.execute(
+        "INSERT INTO venue_trade_facts "
+        "(trade_id, command_id, state, filled_size, fill_price, local_sequence) "
+        "VALUES ('trade-projected', 'cmd-projected', 'CONFIRMED', '41', '0.71', 1)"
+    )
+    conn.execute(
+        "INSERT INTO position_current (position_id, order_id, phase) "
+        "VALUES ('pos-projected', 'ord-replaced', 'settled')"
+    )
+    conn.commit()
+
+    assert riskguard_module._unprojected_entry_fill_equity_usd(conn) == 0.0
+
+
+def test_unprojected_entry_fill_equity_excludes_terminal_lot_projection():
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    _unprojected_equity_schema(conn)
+    conn.execute(
+        "INSERT INTO venue_commands "
+        "(command_id, position_id, intent_kind, side, state, venue_order_id) "
+        "VALUES ('cmd-lot', 'pos-lot', 'ENTRY', 'BUY', 'FILLED', 'ord-lot')"
+    )
+    conn.execute(
+        "INSERT INTO venue_trade_facts "
+        "(trade_id, command_id, state, filled_size, fill_price, local_sequence) "
+        "VALUES ('trade-lot', 'cmd-lot', 'CONFIRMED', '10', '0.50', 1)"
+    )
+    conn.execute(
+        "INSERT INTO position_lots (source_command_id, state) "
+        "VALUES ('cmd-lot', 'RELEASED')"
+    )
+    conn.commit()
+
+    assert riskguard_module._unprojected_entry_fill_equity_usd(conn) == 0.0
