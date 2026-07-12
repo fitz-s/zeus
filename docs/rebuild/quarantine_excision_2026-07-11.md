@@ -513,6 +513,37 @@ history section.
   persisted-value lane, needs its own migration if renamed; (6) archives/
   ledgers/plan (exempt). TRUE ZERO in live vocabulary arrives when (1) retires
   post-migration; (2)/(3)/(6) are permanent legitimate residue.
+- T5 MIGRATION EXECUTED LIVE (2026-07-12, operator-ordered, --skip-backup per
+  operator no-DB-backup directive): three attempts, three live-only defects
+  fixed in the script (quoted CREATE TABLE prefix in sqlite_master; ghost
+  cross-DB view aborting ALTER RENAME → legacy_alter_table; ATTACH-unqualified
+  index/trigger DDL recreation → schema-qualify), rollback journal left DBs
+  untouched at every failure. Final receipt: position_current 1000 rows (1
+  quarantined→holding + LEGACY_QUARANTINE_MIGRATED work item), position_events
+  161075 rows (phase_before 36840 + phase_after 37246 remapped,
+  CHAIN_QUARANTINED→REVIEW_REQUIRED), position_lots 205, all pre/post counts
+  equal, schema_epoch=t5_quarantine_phase_retirement_v1 ×3, idempotent re-run
+  no-op. schema_epoch registered in db_table_ownership ×3 + wired into all
+  three init paths (c660592e1).
+- BRIDGE RETIREMENT: LANDED c966f7fe2 (agent 43eb5c9d9, 55 files +925/−2174).
+  Cluster (1) at TRUE ZERO: portfolio.py legacy remap constants+branches gone
+  (_normalize_runtime_chain_state deleted outright), canonical_write
+  phase-preservation branch gone, lifecycle_manager tolerance gone,
+  cycle_runtime _quarantined_position_can_redecision +238-line support chain
+  gone, command_recovery _void_absorbed_chain_only_projection (213 lines)
+  gone, projection/preflight/dead-literal sweeps across ~30 files,
+  tests/_helpers/legacy_quarantine_schema.py deleted, ~17 bridge-only tests
+  deleted + ~10 rewritten to post-migration shape. Startup epoch guard and
+  migration script STAY (permanent). Known conductor note:
+  check_live_release_gate _proven_quarantined_zero_exposure_commands now
+  permanently returns 0 (documented in place; conservative direction) —
+  follow-up ticket if that release-gate leg still matters. Residual src grep
+  (59 files) fully classified: historical comments, migration lane,
+  chain_only_quarantined token_suppression (ACTIVE separate mechanism),
+  maintenance_worker filenames (deferred), era_quarantine table name
+  (persisted lane), legacy JSON-sidecar tolerance (pre-schema files, kept).
+  Two shared-worktree stash incidents during the packet, both fully recovered
+  (byte-verified) — stash ban re-affirmed in memory.
 - BRIDGE RETIREMENT (2026-07-12, post-T5-migration): the operator ran T5
   MIGRATION against all three live DBs (schema_epoch='t5_quarantine_phase_retirement_v1'
   stamped ×3, zero rows carry 'quarantined'/'entry_authority_quarantined'/
