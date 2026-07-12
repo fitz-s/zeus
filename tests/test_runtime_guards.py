@@ -7019,7 +7019,7 @@ def test_quarantine_no_longer_sets_portfolio_wide_block(monkeypatch, tmp_path):
     `entries_blocked_reason == "portfolio_quarantined"` value for this signal.
     The replacement mechanisms (family-scoped block at the evaluator seam,
     risk_level DATA_DEGRADED for unbounded obligations) are covered by
-    tests/test_quarantine_excision_t2.py and tests/test_live_safety_
+    tests/test_excision_t2.py and tests/test_live_safety_
     invariants.py's bridging-shim tests, not this run_cycle() harness test —
     evaluate_candidate is never invoked by run_cycle in the live/EDLI system
     (legacy discovery is an intentional no-op path; see cycle_runner's own

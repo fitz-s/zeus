@@ -157,7 +157,7 @@ def _seed_canonical_entry_baseline(db_path, position) -> None:
         position,
         phase_after=LifecyclePhase.PENDING_ENTRY.value,
         decision_id="dec-t4-baseline",
-        source_module="tests.test_quarantine_excision_t4",
+        source_module="tests.test_excision_t4",
     )
     append_many_and_project(conn, events, projection)
     conn.commit()
