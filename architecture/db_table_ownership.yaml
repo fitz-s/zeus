@@ -436,6 +436,29 @@ tables:
       Ghost copy of settlements on world.db post-K1-split.
       Authoritative on forecasts.db. Excluded. Drop after 2026-08-09.
 
+  - name: observations_disputed_migrated
+    db: world
+    schema_class: legacy_archived
+    schema_version_owner: SCHEMA_VERSION
+    created_by: _migrate_authority_tier_disputed
+    pk_col: null
+    notes: >
+      Stranded T2b rebuild intermediate on the world.db GHOST observations copy
+      (authoritative observations on forecasts.db already carry DISPUTED). The
+      rename-back never ran on the ghost; 164 rows fully duplicated by the
+      authoritative copy. Registered as legacy_archived so boot registry
+      passes; drop with the ghost observations after 2026-08-09.
+
+  - name: settlements_disputed_migrated
+    db: world
+    schema_class: legacy_archived
+    schema_version_owner: SCHEMA_VERSION
+    created_by: _migrate_authority_tier_disputed
+    pk_col: null
+    notes: >
+      Stranded T2b rebuild intermediate, 0 rows (see
+      observations_disputed_migrated). Drop after 2026-08-09.
+
   - name: settlement_outcomes
     db: world
     schema_class: legacy_archived
@@ -2989,6 +3012,19 @@ tables:
     created_by: edli_live_split_trade_ghost
     pk_col: null
     notes: Ghost on zeus_trades.db from EDLI full-live split (2026-05-25). Authoritative copy in zeus-world.db. Drop after 2026-08-30.
+
+  - name: decision_integrity_quarantine
+    db: trade
+    schema_class: legacy_archived
+    schema_version_owner: null
+    created_by: init_provenance_projection_schema
+    pk_col: null
+    notes: >
+      Predecessor of owner-local fact_revocations (DIQ packet,
+      docs/rebuild/quarantine_excision_2026-07-11.md). All 238 rows backfilled
+      to world.fact_revocations on 2026-07-12 with per-reason count parity
+      (118+120) and payload-hash parity verified. No live reader remains.
+      Drop after 2026-08-12.
 
   - name: fusion_upgrade_enqueues
     db: forecasts
