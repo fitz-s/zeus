@@ -546,7 +546,16 @@ def _rebuild_table_drop_literals(
     ).fetchall()
 
     conn.execute(f"DROP TABLE {prefix}{table}")
-    conn.execute(f"ALTER TABLE {prefix}{migrated_name} RENAME TO {table}")
+    # ALTER TABLE RENAME re-parses every view in every attached schema; a
+    # pre-existing broken view (e.g. a ghost view referencing a table that
+    # lives in another physical DB) aborts the rename even though it is
+    # unrelated to this table. legacy_alter_table skips that revalidation —
+    # the rename itself never rewrites view SQL anyway.
+    conn.execute("PRAGMA legacy_alter_table = ON")
+    try:
+        conn.execute(f"ALTER TABLE {prefix}{migrated_name} RENAME TO {table}")
+    finally:
+        conn.execute("PRAGMA legacy_alter_table = OFF")
     for (index_sql,) in index_rows:
         conn.execute(index_sql)
     for (trigger_sql,) in trigger_rows:
