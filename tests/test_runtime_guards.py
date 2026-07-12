@@ -6953,10 +6953,19 @@ def test_chain_quarantine_fails_closed_when_fact_write_fails(caplog):
 
 
 def test_load_portfolio_dedupes_chain_only_fact_when_projection_already_has_token(tmp_path):
+    from tests._helpers.legacy_quarantine_schema import (
+        downgrade_position_current_to_legacy_quarantine_check,
+    )
+
     db_path = tmp_path / "zeus.db"
     path = tmp_path / "positions-cache.json"
     conn = get_connection(db_path)
     init_schema(conn)
+    # T5 (docs/rebuild/quarantine_excision_2026-07-11.md): this test seeds a
+    # pre-migration legacy row with phase='quarantined' to exercise the
+    # chain-only dedup path against a mixed-epoch row; the CHECK constraint
+    # no longer permits that literal on a fresh schema post-migration.
+    downgrade_position_current_to_legacy_quarantine_check(conn)
     conn.execute(
         """
         INSERT INTO position_current (

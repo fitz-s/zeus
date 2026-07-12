@@ -39,9 +39,14 @@ semantic_atoms:
       - economically_closed
       - settled
       - voided
-      - quarantined
       - admin_closed
-    rationale: Authoritative lifecycle grammar.
+    rationale: >
+      Authoritative lifecycle grammar. 2026-07-12 T5 MIGRATION
+      (docs/rebuild/quarantine_excision_2026-07-11.md,
+      scripts/migrations/2026_07_quarantine_phase_retirement.py): the retired
+      quarantine phase member is dropped in lockstep with the
+      position_current.phase / position_events.phase_before / phase_after
+      CHECK constraints in architecture/2026_04_02_architecture_kernel.sql.
   truth_surface_kind:
     frozen: true
     allowed:
@@ -60,7 +65,10 @@ semantic_atoms:
       - ENTRY_ORDER_REJECTED
       - CHAIN_SYNCED
       - CHAIN_SIZE_CORRECTED
-      - CHAIN_QUARANTINED
+      # 2026-07-12 T5 MIGRATION (docs/rebuild/quarantine_excision_2026-07-11.md,
+      # scripts/migrations/2026_07_quarantine_phase_retirement.py): the retired
+      # chain-quarantine event type is dropped in lockstep with the
+      # position_events.event_type CHECK constraint.
       - MONITOR_REFRESHED
       - EXIT_INTENT
       - EXIT_ORDER_POSTED

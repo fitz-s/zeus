@@ -890,6 +890,8 @@ SQLITE_CONNECT_ALLOWLIST: frozenset[str] = frozenset(
         "src/reconcile/replay.py",  # read_only_ro_uri: main() demo/ops entry point opens trades+forecasts DBs via file:...?mode=ro uri; SELECT-only replay_window() call (apply=False always); never writes any canonical DB
         # --- allday improvement loop v3 (2026-07-08): sandboxed-tick query escrow ---
         "scripts/ops/loop_guard.py",  # read_only_ro_uri: run-queries opens forecasts/world/trades DBs via file:...?mode=ro uri + PRAGMA query_only + an authorizer denying ATTACH/DETACH; executes tick-authored SQL from loop/queries/pending/*.sql; SELECT-only, no canonical DB write path
+        # --- T5 quarantine phase retirement offline migration (2026-07-12, BLOCKER-2) ---
+        "scripts/migrations/2026_07_quarantine_phase_retirement.py",  # operator_invoked, deliberately OUTSIDE db_writer_lock/_connect(): BLOCKER-2 (docs/rebuild/quarantine_excision_2026-07-11.md) requires a DEDICATED non-WAL (journal_mode=DELETE) connection ATTACHing all three DBs in ONE transaction, crash-tested by tests/test_t5_quarantine_phase_retirement_migration.py's kill-point matrix — src.state.db._connect() would re-enable WAL, defeating the crash-atomicity guarantee this migration exists to provide; refuses to run unless the writer plane is fenced (--operator-confirms-fenced + a live-daemon process scan)
     }
 )
 

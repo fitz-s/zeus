@@ -1483,7 +1483,16 @@ def init_provenance_projection_schema(conn: sqlite3.Connection) -> None:
           state TEXT NOT NULL CHECK (state IN (
             'OPTIMISTIC_EXPOSURE','CONFIRMED_EXPOSURE',
             'EXIT_PENDING','ECONOMICALLY_CLOSED_OPTIMISTIC',
-            'ECONOMICALLY_CLOSED_CONFIRMED','SETTLED','QUARANTINED'
+            'ECONOMICALLY_CLOSED_CONFIRMED','SETTLED'
+            -- 2026-07-12 T5 MIGRATION (docs/rebuild/quarantine_excision_2026-07-11.md,
+            -- scripts/migrations/2026_07_quarantine_phase_retirement.py): the
+            -- retired quarantine-tier CHECK member is dropped here. A live row
+            -- still carrying it is rebuilt by that migration into the
+            -- confirmed-exposure tier with a loud operator-review log (0 live
+            -- rows expected per the 2026-07-11 census). Deliberately no quoted
+            -- literal in this comment text: the migration's idempotency check
+            -- greps sqlite_master.sql for the quoted retired literal, and a
+            -- quoted copy here would create a false "still needs migrating".
           )),
           shares TEXT NOT NULL,
           entry_price_avg TEXT NOT NULL,
@@ -1655,6 +1664,58 @@ def get_connection(
     if resolved is not None:
         _cnt_inc(f"db_get_connection_{resolved.value}_total")
     return conn
+
+
+# T5 MIGRATION (docs/rebuild/quarantine_excision_2026-07-11.md, BLOCKER-2):
+# a single small meta table, stamped identically on all three canonical DBs by
+# scripts/migrations/2026_07_quarantine_phase_retirement.py's one crash-safe
+# transaction. assert_schema_epoch_not_mixed is deliberately generic — it does
+# not hardcode any particular migration's epoch string, only that the three
+# DBs agree (all-NULL = pre-migration, allowed; all-equal-non-NULL = fully
+# migrated, allowed; anything else = a partially-applied migration or crash,
+# fail-closed). A later migration that stamps a NEW epoch value on all three
+# DBs together stays compatible with this same guard.
+SCHEMA_EPOCH_TABLE_DDL = """
+CREATE TABLE IF NOT EXISTS schema_epoch (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    epoch TEXT NOT NULL,
+    stamped_at TEXT NOT NULL
+)
+"""
+
+
+def read_schema_epoch(conn: sqlite3.Connection) -> Optional[str]:
+    """Return the stamped schema_epoch value on ``conn``, or None if the
+    table doesn't exist yet (pre-migration) or has no row."""
+    try:
+        row = conn.execute("SELECT epoch FROM schema_epoch WHERE id = 1").fetchone()
+    except sqlite3.OperationalError:
+        return None
+    return str(row[0]) if row else None
+
+
+def assert_schema_epoch_not_mixed(
+    *, world_epoch: Optional[str], forecasts_epoch: Optional[str], trade_epoch: Optional[str]
+) -> None:
+    """Fail-closed startup guard (T5 MIGRATION deliverable B): refuse to boot
+    if the three canonical DBs carry ANY mixed schema_epoch. All-NULL
+    (pre-migration) is allowed; all-equal-non-NULL (fully migrated) is
+    allowed; anything else means a migration crashed partway or only some of
+    the three DBs were migrated — never safe to run against.
+    """
+    values = {world_epoch, forecasts_epoch, trade_epoch}
+    if values == {None}:
+        return
+    if len(values) == 1:
+        return
+    raise RuntimeError(
+        "MIXED_SCHEMA_EPOCH: canonical DBs disagree on schema_epoch "
+        f"(world={world_epoch!r}, forecasts={forecasts_epoch!r}, trade={trade_epoch!r}). "
+        "This indicates a partially-applied migration or a crash mid-run. "
+        "DO NOT start the daemon against this DB set — restore the "
+        "synchronized 3-DB backup set together, or forward-fix under operator "
+        "supervision. See docs/rebuild/t5_migration_runbook.md."
+    )
 
 
 # Last reused or audited: 2026-05-11
@@ -5184,7 +5245,11 @@ CREATE TABLE IF NOT EXISTS position_events (
         'DAY0_WINDOW_ENTERED',
         'CHAIN_SYNCED',
         'CHAIN_SIZE_CORRECTED',
-        'CHAIN_QUARANTINED',
+        -- 2026-07-12 T5 MIGRATION (docs/rebuild/quarantine_excision_2026-07-11.md,
+        -- scripts/migrations/2026_07_quarantine_phase_retirement.py): the
+        -- retired chain-quarantine event type is dropped here; a historical
+        -- row still carrying it is rewritten to REVIEW_REQUIRED by that
+        -- migration (already a valid member below).
         'MONITOR_REFRESHED',
         'EXIT_INTENT',
         'EXIT_ORDER_POSTED',
@@ -5204,11 +5269,23 @@ CREATE TABLE IF NOT EXISTS position_events (
         CHECK (occurred_at LIKE '____-__-__T%'),
     phase_before TEXT CHECK (phase_before IS NULL OR phase_before IN (
         'pending_entry','active','day0_window','pending_exit',
-        'economically_closed','settled','voided','quarantined','admin_closed'
+        'economically_closed','settled','voided','admin_closed'
+        -- 2026-07-12 T5 MIGRATION (docs/rebuild/quarantine_excision_2026-07-11.md,
+        -- scripts/migrations/2026_07_quarantine_phase_retirement.py): the
+        -- retired quarantine phase literal is dropped here. A legacy row is
+        -- rewritten to the position's true phase by that migration
+        -- (REPLACEMENT PHASE LAW). No quoted literal in this comment — see
+        -- the position_lots comment above for why.
     )),
     phase_after TEXT CHECK (phase_after IS NULL OR phase_after IN (
         'pending_entry','active','day0_window','pending_exit',
-        'economically_closed','settled','voided','quarantined','admin_closed'
+        'economically_closed','settled','voided','admin_closed'
+        -- 2026-07-12 T5 MIGRATION (docs/rebuild/quarantine_excision_2026-07-11.md,
+        -- scripts/migrations/2026_07_quarantine_phase_retirement.py): the
+        -- retired quarantine phase literal is dropped here. A legacy row is
+        -- rewritten to the position's true phase by that migration
+        -- (REPLACEMENT PHASE LAW). No quoted literal in this comment — see
+        -- the position_lots comment above for why.
     )),
     strategy_key TEXT NOT NULL,
     decision_id TEXT,
@@ -5249,7 +5326,13 @@ CREATE TABLE IF NOT EXISTS position_current (
     position_id TEXT PRIMARY KEY,
     phase TEXT NOT NULL CHECK (phase IN (
         'pending_entry','active','day0_window','pending_exit',
-        'economically_closed','settled','voided','quarantined','admin_closed'
+        'economically_closed','settled','voided','admin_closed'
+        -- 2026-07-12 T5 MIGRATION (docs/rebuild/quarantine_excision_2026-07-11.md,
+        -- scripts/migrations/2026_07_quarantine_phase_retirement.py): the
+        -- retired quarantine phase literal is dropped here. A legacy row is
+        -- rewritten to the position's true phase by that migration
+        -- (REPLACEMENT PHASE LAW). No quoted literal in this comment — see
+        -- the position_lots comment above for why.
     )),
     trade_id TEXT,
     market_id TEXT,
@@ -5532,7 +5615,13 @@ CREATE TABLE IF NOT EXISTS position_lots (
   state TEXT NOT NULL CHECK (state IN (
     'OPTIMISTIC_EXPOSURE','CONFIRMED_EXPOSURE',
     'EXIT_PENDING','ECONOMICALLY_CLOSED_OPTIMISTIC',
-    'ECONOMICALLY_CLOSED_CONFIRMED','SETTLED','QUARANTINED'
+    'ECONOMICALLY_CLOSED_CONFIRMED','SETTLED'
+    -- 2026-07-12 T5 MIGRATION (docs/rebuild/quarantine_excision_2026-07-11.md,
+    -- scripts/migrations/2026_07_quarantine_phase_retirement.py): the retired
+    -- quarantine-tier CHECK member is dropped here too (this is the world-DB
+    -- ghost-shell copy of the same table; see init_provenance_projection_schema
+    -- for the trade-authoritative copy). No quoted literal in this comment —
+    -- see the sibling comment there for why.
   )),
   shares TEXT NOT NULL,
   entry_price_avg TEXT NOT NULL,
