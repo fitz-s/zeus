@@ -435,6 +435,21 @@ history section.
   1× F109 parallel-row guard (human review), 1× link-refuses-overwrite (latent code
   bug, flagged). UNRECOVERABLE_MANUAL_REVIEW operator-only terminal added.
 - Verifier evidence: evidence/verifier/verify_quarantine_excision_t3_t7_2026-07-11.md.
+- T5-CORE: LANDED 05a751290 (agent commit 4b564725b, 44 files +1286/−1505).
+  Three enums retired (PositionPhase/LifecycleState/ChainState + position_truth
+  root constants) in one step; chain_reconciliation minters → true phase +
+  ReviewWorkItem, :1595 chain-only materializer deleted; ~15 consumers re-keyed
+  to open-work-item predicate; mixed-epoch legacy-row load bridge in
+  portfolio.py:_normalize_runtime_lifecycle_state (state 'quarantined' →
+  'holding', WARNING per remap) and _normalize_runtime_chain_state
+  ({quarantined, quarantine_expired, entry_authority_quarantined} → 'synced').
+  Post-merge: scar ratchet + test_architecture_contracts 99 passed; 5 failures
+  (transition_phase_invariant ×2, test_lifecycle EDLI labels ×3) reproduce
+  verbatim on baseline 53c172dbe — pre-existing. gitleaks clean; fingerprint OK.
+  T5 MIGRATION mapping (input to the BLOCKER-2 script): positions.state
+  'quarantined' → 'holding' + OPEN ReviewWorkItem(LEGACY_QUARANTINE_MIGRATED);
+  chain_state legacy trio → 'synced'; load bridge retires only after the
+  migration stamps schema_epoch ×3.
 
 ## Consult adjudication (2026-07-11, GPT-5.6 Pro deep review — answer at
 ## /tmp/cgc/answer_REQ-20260711-140149-0f9584.txt; verdict adopted)
