@@ -3769,6 +3769,8 @@ def _apply_family_monitor_overlay(
         "family_key": "|".join(key) if key else "",
         "position_count": len(family_positions),
         "mode": "live_family_hold_vs_direct_sell",
+        "value_authority": "point_estimate_diagnostic_only",
+        "can_veto_robust_exit": False,
     }
     hold_value = 0.0
     sell_value = 0.0
@@ -3837,17 +3839,16 @@ def _apply_family_monitor_overlay(
     payload["family_direct_sell_advantage_threshold_usd"] = sell_advantage_threshold
 
     if should_exit and _is_statistical_single_leg_exit(exit_decision, exit_reason):
-        if hold_value + 1e-9 >= sell_value:
-            payload["decision"] = "FAMILY_HOLD_DOMINATES_SINGLE_LEG_EXIT"
-            payload["suppressed_exit_reason"] = exit_reason
-            setattr(pos, "_monitor_family_redecision", payload)
-            validations = list(getattr(pos, "applied_validations", []) or [])
-            validations.append("family_hold_dominates_single_leg_exit")
-            pos.applied_validations = list(dict.fromkeys(validations))
-            summary["family_redecision_single_leg_exits_suppressed"] = (
-                summary.get("family_redecision_single_leg_exits_suppressed", 0) + 1
-            )
-            return False, "FAMILY_HOLD_DOMINATES_SINGLE_LEG_EXIT"
+        payload["decision"] = "FAMILY_POINT_VALUE_DIAGNOSTIC_EXIT_PRESERVED"
+        payload["preserved_exit_reason"] = exit_reason
+        setattr(pos, "_monitor_family_redecision", payload)
+        validations = list(getattr(pos, "applied_validations", []) or [])
+        validations.append("family_point_value_cannot_veto_robust_exit")
+        pos.applied_validations = list(dict.fromkeys(validations))
+        summary["family_redecision_robust_exits_preserved"] = (
+            summary.get("family_redecision_robust_exits_preserved", 0) + 1
+        )
+        return should_exit, exit_reason
 
     # A high bid over a conservative belief is not a reversal by itself. Promote
     # hold->sell here only when the held-side belief has fallen below entry.

@@ -2,8 +2,8 @@
 # Lifecycle: created=2026-03-31; last_reviewed=2026-05-05; last_reused=2026-05-05
 # Purpose: Lock live-money safety invariants across fill, exit, chain, and P&L flows.
 # Reuse: Run for execution finality, live exit, chain reconciliation, and safety invariant changes.
-# Last reused/audited: 2026-07-08
-# Authority basis: midstream verdict v2 2026-04-23; docs/operations/task_2026-05-08_object_invariance_remaining_mainline/PLAN.md
+# Last reused/audited: 2026-07-12
+# Authority basis: midstream verdict v2; live_entry_health_repair B26 robust-exit precedence
 """Live safety invariant tests: relationship tests, not function tests.
 
 These verify cross-module relationships that prevent ghost positions,
@@ -5976,8 +5976,8 @@ def test_monitoring_phase_persists_monitor_decision_with_refresh(tmp_path, monke
     conn.close()
 
 
-def test_family_monitor_overlay_suppresses_single_leg_statistical_exit_and_persists_payload():
-    """Same-family holdings must not liquidate one leg before family value is checked."""
+def test_family_monitor_point_value_cannot_veto_robust_exit_and_persists_payload():
+    """Point family value is diagnostic and cannot override a robust exit."""
     from src.engine import cycle_runtime
     from src.engine.lifecycle_events import build_monitor_refreshed_canonical_write
     from src.state.lifecycle_manager import LifecyclePhase
@@ -6038,10 +6038,10 @@ def test_family_monitor_overlay_suppresses_single_leg_statistical_exit_and_persi
         summary=summary,
     )
 
-    assert should_exit is False
-    assert reason == "FAMILY_HOLD_DOMINATES_SINGLE_LEG_EXIT"
-    assert summary["family_redecision_single_leg_exits_suppressed"] == 1
-    assert "family_hold_dominates_single_leg_exit" in pos_a.applied_validations
+    assert should_exit is True
+    assert reason == single_leg_exit.reason
+    assert summary["family_redecision_robust_exits_preserved"] == 1
+    assert "family_point_value_cannot_veto_robust_exit" in pos_a.applied_validations
 
     events, _projection = build_monitor_refreshed_canonical_write(
         pos_a,
@@ -6053,10 +6053,14 @@ def test_family_monitor_overlay_suppresses_single_leg_statistical_exit_and_persi
         final_exit_reason=reason,
     )
     payload = json.loads(events[0]["payload_json"])
-    assert payload["exit_decision_should_exit"] is False
-    assert payload["exit_decision_reason"] == "FAMILY_HOLD_DOMINATES_SINGLE_LEG_EXIT"
-    assert payload["family_redecision"]["decision"] == "FAMILY_HOLD_DOMINATES_SINGLE_LEG_EXIT"
-    assert payload["family_redecision"]["family_hold_value_usd"] > payload["family_redecision"]["family_direct_sell_value_usd"]
+    assert payload["exit_decision_should_exit"] is True
+    assert payload["exit_decision_reason"] == single_leg_exit.reason
+    family = payload["family_redecision"]
+    assert family["decision"] == "FAMILY_POINT_VALUE_DIAGNOSTIC_EXIT_PRESERVED"
+    assert family["preserved_exit_reason"] == single_leg_exit.reason
+    assert family["value_authority"] == "point_estimate_diagnostic_only"
+    assert family["can_veto_robust_exit"] is False
+    assert family["family_hold_value_usd"] > family["family_direct_sell_value_usd"]
 
 
 def test_single_leg_monitor_records_family_redecision_value_payload():
