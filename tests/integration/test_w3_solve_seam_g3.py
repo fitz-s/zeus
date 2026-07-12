@@ -874,6 +874,35 @@ def test_global_curve_supersession_keeps_typed_current_candidate():
     )
 
 
+def test_global_probability_tightening_keeps_candidate_identity_and_bound():
+    candidate = SimpleNamespace(
+        family_key="family-a",
+        bin_id="bin-a",
+        side="NO",
+        token_id="token-no-a",
+        probability_witness_identity="witness-a",
+    )
+    actuation = SimpleNamespace(decision=SimpleNamespace(candidate=candidate))
+    exc = era._GlobalProbabilityTightened(0.71)
+    receipt = era.EventSubmissionReceipt(
+        False,
+        "event-1",
+        "snapshot-1",
+        reason=str(exc),
+        global_jit_payoff_q_lcb=exc.payoff_q_lcb,
+    )
+
+    tightening = era._global_probability_tightening_from_receipt(
+        receipt,
+        actuation,
+    )
+
+    assert tightening is not None
+    assert tightening.candidate_key == ("family-a", "bin-a", "NO", "token-no-a")
+    assert tightening.probability_witness_identity == "witness-a"
+    assert tightening.payoff_q_lcb == 0.71
+
+
 @pytest.mark.parametrize(
     ("reason", "status"),
     (
@@ -3394,6 +3423,166 @@ def test_global_batch_reauctions_once_on_full_universe_curve_drift(monkeypatch):
     assert result.winner_event_id == event_b.event_id
     assert result.venue_submit_count == 1
     assert result.receipts[event_b.event_id].submitted is True
+
+
+def test_global_batch_reauctions_with_tightened_candidate_q(monkeypatch):
+    decision_at = _dt.datetime(2026, 7, 10, 8, 0, tzinfo=_dt.timezone.utc)
+    event = _global_scope_event(city="Alpha", source_run_id="run-a")
+    scope = current_global_auction_scope_from_events(
+        (event,), captured_at_utc=decision_at
+    )
+    family_key = scope.family_keys[0]
+    witness = SimpleNamespace(
+        family_key=family_key,
+        captured_at_utc=decision_at,
+        posterior_identity_hash="run-a",
+        witness_identity="q-run-a",
+    )
+    prepared = SimpleNamespace(probability_witness=witness)
+    candidate = SimpleNamespace(
+        family_key=family_key,
+        bin_id="bin-a",
+        side="NO",
+        token_id="token-no-a",
+        probability_witness_identity="q-run-a",
+    )
+    selections = iter(
+        (
+            SimpleNamespace(
+                decision=SimpleNamespace(
+                    candidate=candidate,
+                    terminal_wealth=SimpleNamespace(win_probability_lcb=0.90),
+                    no_trade_reason=None,
+                ),
+                winner_event_id=event.event_id,
+                actuation=SimpleNamespace(
+                    actuation_identity="actuation-loose",
+                    wealth_witness_identity="wealth-1",
+                ),
+            ),
+            SimpleNamespace(
+                decision=SimpleNamespace(
+                    candidate=candidate,
+                    terminal_wealth=SimpleNamespace(win_probability_lcb=0.71),
+                    no_trade_reason=None,
+                ),
+                winner_event_id=event.event_id,
+                actuation=SimpleNamespace(
+                    actuation_identity="actuation-tight",
+                    wealth_witness_identity="wealth-2",
+                ),
+            ),
+        )
+    )
+    calls = {
+        "select_q": [],
+        "selection_epoch": [],
+        "preflight": 0,
+        "venue": 0,
+        "wealth": 0,
+    }
+    monkeypatch.setattr(
+        global_batch_runtime, "scan_current_global_auction_scope", lambda **_: scope
+    )
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "replace",
+        lambda value, **changes: SimpleNamespace(**(vars(value) | changes)),
+    )
+
+    def wealth(*_, **__):
+        calls["wealth"] += 1
+        return SimpleNamespace(
+            spendable_cash_usd=Decimal("10"),
+            witness_identity=f"wealth-{calls['wealth']}",
+            economic_identity=f"wealth-economics-{calls['wealth']}",
+        )
+
+    monkeypatch.setattr(
+        global_batch_runtime, "current_portfolio_wealth_witness", wealth
+    )
+
+    def select(*_args, **kwargs):
+        calls["select_q"].append(kwargs["payoff_q_lcb_by_candidate"])
+        calls["selection_epoch"].append(kwargs["selection_epoch_identity"])
+        return next(selections)
+
+    monkeypatch.setattr(
+        global_batch_runtime, "select_prepared_global_auction", select
+    )
+
+    def preflight(*_args):
+        calls["preflight"] += 1
+        if calls["preflight"] == 1:
+            return global_batch_runtime.GlobalWinnerPreflight(
+                status="PROBABILITY_TIGHTENED",
+                probability_tightening=(
+                    global_batch_runtime.GlobalCandidateProbabilityTightening(
+                        family_key=family_key,
+                        bin_id="bin-a",
+                        side="NO",
+                        token_id="token-no-a",
+                        probability_witness_identity="q-run-a",
+                        payoff_q_lcb=0.71,
+                    )
+                ),
+                reason="GLOBAL_CURRENT_STATE_PAYOFF_Q_TIGHTENED_REAUCTION_REQUIRED",
+            )
+        return global_batch_runtime.GlobalWinnerPreflight(
+            status="STABLE",
+            binding_token="binding-tight",
+        )
+
+    def actuate(event_arg, actuation, _at, token, _authority):
+        assert event_arg.event_id == event.event_id
+        assert actuation.actuation_identity == "actuation-tight"
+        assert token == "binding-tight"
+        calls["venue"] += 1
+        return EventSubmissionReceipt(
+            True,
+            event_arg.event_id,
+            event_arg.causal_snapshot_id,
+            proof_accepted=True,
+            side_effect_status="SUBMITTED",
+        )
+
+    result = global_batch_runtime.process_current_global_batch(
+        (event,),
+        decision_time=decision_at,
+        world_conn=object(),
+        forecast_conn=object(),
+        trade_conn=object(),
+        payload_reader=lambda current: json.loads(current.payload_json),
+        prepare_event=lambda current, _at: EventSubmissionReceipt(
+            False,
+            current.event_id,
+            current.causal_snapshot_id,
+            prepared_global_family=prepared,
+        ),
+        actuate_winner=lambda *_: pytest.fail("preflighted lane owns actuation"),
+        preflight_winner=preflight,
+        actuate_preflighted_winner=global_batch_runtime.GlobalOneShotActuator(
+            actuate
+        ),
+        stamp_receipt=lambda receipt: receipt,
+        venue_submit_count=lambda: calls["venue"],
+        current_execution=lambda *_: object(),
+        current_time_provider=lambda: decision_at,
+        current_book_epoch_provider=lambda probabilities, _at: (
+            probabilities,
+            _global_test_book("book-q", price="0.40"),
+        ),
+    )
+
+    key = (family_key, "bin-a", "NO", "token-no-a")
+    assert calls["select_q"] == [None, {key: 0.71}]
+    assert calls["selection_epoch"][1] != calls["selection_epoch"][0]
+    assert calls["preflight"] == 2
+    assert calls["venue"] == 1
+    assert calls["wealth"] == 2
+    assert result.winner_event_id == event.event_id
+    assert result.venue_submit_count == 1
+    assert result.receipts[event.event_id].submitted is True
 
 
 def test_global_batch_falls_through_candidate_local_preflight_block(monkeypatch):

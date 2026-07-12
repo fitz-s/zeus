@@ -614,6 +614,14 @@ class EventSubmissionReceipt:
     # supersedes the selected curve. Internal only: the global runtime overlays it
     # into the frozen complete universe and reruns the same optimizer.
     global_jit_candidate: "Any | None" = field(default=None, repr=False, compare=False)
+    # Candidate-local executable probability bound discovered by winner preflight.
+    # Internal only: the global runtime feeds it back into the same complete auction
+    # and re-sizes/re-ranks before any venue side effect.
+    global_jit_payoff_q_lcb: "float | None" = field(
+        default=None,
+        repr=False,
+        compare=False,
+    )
     # D1 FILL-UP LEASE CONTEXT (2026-06-22 lifecycle consult REQ-20260622-060011).
     # When this receipt is an APPROVED same-token fill-up (stake overridden to the
     # residual delta), the family-rebalance lease intent_id + the owned-exposure

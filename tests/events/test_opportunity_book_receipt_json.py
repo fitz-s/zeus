@@ -26,18 +26,20 @@ def test_opportunity_book_omitted_from_receipt_json_when_absent():
     assert "opportunity_book" not in payload
 
 
-def test_global_jit_candidate_is_internal_receipt_transport_only():
+def test_global_jit_refinements_are_internal_receipt_transport_only():
     payload = json.loads(
         _receipt_json(
             EventSubmissionReceipt(
                 submitted=False,
                 event_id="event-jit",
                 global_jit_candidate=object(),
+                global_jit_payoff_q_lcb=0.71,
             )
         )
     )
 
     assert "global_jit_candidate" not in payload
+    assert "global_jit_payoff_q_lcb" not in payload
 
 
 def test_opportunity_book_included_in_receipt_json_when_present():

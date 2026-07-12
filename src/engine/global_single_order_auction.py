@@ -262,6 +262,8 @@ def select_prepared_global_auction(
     ]
     | None = None,
     preflight_excluded_by_family: Mapping[str, str] | None = None,
+    payoff_q_lcb_by_candidate: Mapping[tuple[str, str, str, str], float]
+    | None = None,
 ) -> PreparedGlobalAuctionResult:
     """Compare every prepared family and return at most one current winner.
 
@@ -403,6 +405,20 @@ def select_prepared_global_auction(
             owner_event_id,
         )
 
+    def _candidate_payoff_q_lcb(
+        candidate: GlobalSingleOrderCandidate,
+    ) -> float | None:
+        if payoff_q_lcb_by_candidate is None:
+            return None
+        return payoff_q_lcb_by_candidate.get(
+            (
+                candidate.family_key,
+                candidate.bin_id,
+                candidate.side,
+                candidate.token_id,
+            )
+        )
+
     decision = select_global_single_order(
         tuple(candidates),
         probability_witnesses=probability_witnesses,
@@ -416,6 +432,7 @@ def select_prepared_global_auction(
         fractional_kelly_multiplier=fractional_kelly_multiplier,
         decision_at_utc=decision_at_utc,
         candidate_capital_limit_resolver=_candidate_capital_limit,
+        candidate_payoff_q_lcb_resolver=_candidate_payoff_q_lcb,
     )
     if decision.candidate is None:
         return PreparedGlobalAuctionResult(decision=decision, winner_event_id=None)

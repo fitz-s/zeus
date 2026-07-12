@@ -1491,6 +1491,38 @@ def test_global_single_order_scores_probability_tail_once(monkeypatch):
     assert calls == 1
 
 
+def test_global_single_order_resizes_on_candidate_executable_q_bound():
+    candidate = _global_candidate(
+        candidate_id="tightened-q",
+        family="tightened-q",
+        side="YES",
+        q=0.90,
+        levels=(("0.20", "400"),),
+    )
+    common = dict(
+        q_samples=np.full(401, 0.90, dtype=np.float64),
+        band_alpha=0.05,
+        wealth_floor_usd=Decimal("100"),
+        wealth_ceiling_usd=Decimal("100"),
+        spendable_cash_usd=Decimal("80"),
+        capital_limit_usd=Decimal("80"),
+    )
+
+    loose = S._score_global_single_order(candidate, **common)
+    tightened = S._score_global_single_order(
+        candidate,
+        payoff_q_lcb=0.55,
+        **common,
+    )
+
+    assert loose.candidate is not None
+    assert tightened.candidate is not None
+    assert tightened.shares < loose.shares
+    assert tightened.terminal_wealth is not None
+    assert tightened.terminal_wealth.win_probability_lcb == 0.55
+    assert tightened.robust_delta_log_wealth > 0.0
+
+
 def test_global_single_order_excludes_superseded_q_book_and_capital_identity():
     q_old = _global_candidate(candidate_id="q-old", family="q", side="YES", q=0.70)
     book_old = _global_candidate(candidate_id="book-old", family="book", side="YES", q=0.70)

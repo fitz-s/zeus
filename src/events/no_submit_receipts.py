@@ -238,6 +238,7 @@ def _receipt_json(receipt: EventSubmissionReceipt) -> str:
     payload: dict[str, Any] = asdict(receipt)
     payload.pop("decision_proof_bundle", None)
     payload.pop("global_jit_candidate", None)
+    payload.pop("global_jit_payoff_q_lcb", None)
     # BUG-2 fix (#135): omit mainstream_* fields when the gate was NOT evaluated
     # (all None) so receipt_hash is byte-identical to pre-gate baseline when the
     # flag is OFF. Presence of the fields with null values changes the JSON and

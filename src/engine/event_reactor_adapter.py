@@ -4998,6 +4998,16 @@ def event_bound_live_adapter_from_trade_conn(
                     replacement_candidate=replacement_candidate,
                     reason=preflight_reason,
                 )
+            probability_tightening = _global_probability_tightening_from_receipt(
+                receipt,
+                actuation,
+            )
+            if probability_tightening is not None:
+                return GlobalWinnerPreflight(
+                    status="PROBABILITY_TIGHTENED",
+                    probability_tightening=probability_tightening,
+                    reason=reason,
+                )
             return GlobalWinnerPreflight(
                 status=_global_preflight_block_status(reason),
                 reason=reason or "GLOBAL_WINNER_PREFLIGHT_REJECTED",
@@ -6306,6 +6316,14 @@ class _GlobalCurveSuperseded(ValueError):
         self.replacement_candidate = replacement_candidate
 
 
+class _GlobalProbabilityTightened(ValueError):
+    """Typed submit-boundary executable q tightening for global re-auction."""
+
+    def __init__(self, payoff_q_lcb: float) -> None:
+        super().__init__("GLOBAL_CURRENT_STATE_PAYOFF_Q_TIGHTENED_REAUCTION_REQUIRED")
+        self.payoff_q_lcb = float(payoff_q_lcb)
+
+
 def _global_curve_supersession_from_receipt(
     receipt: EventSubmissionReceipt,
 ) -> tuple[str, object | None, str] | None:
@@ -6319,6 +6337,32 @@ def _global_curve_supersession_from_receipt(
     if replacement is None:
         return "BLOCKED", None, f"{reason}:replacement_candidate_missing"
     return "CURVE_SUPERSEDED", replacement, reason
+
+
+def _global_probability_tightening_from_receipt(
+    receipt: EventSubmissionReceipt,
+    actuation: object,
+) -> object | None:
+    """Lift a candidate-local executable q bound into the complete re-auction."""
+
+    reason = str(receipt.reason or "")
+    if reason != "GLOBAL_CURRENT_STATE_PAYOFF_Q_TIGHTENED_REAUCTION_REQUIRED":
+        return None
+    raw_q = receipt.global_jit_payoff_q_lcb
+    decision = getattr(actuation, "decision", None)
+    candidate = getattr(decision, "candidate", None)
+    if raw_q is None or candidate is None:
+        return None
+    from src.engine.global_batch_runtime import GlobalCandidateProbabilityTightening
+
+    return GlobalCandidateProbabilityTightening(
+        family_key=candidate.family_key,
+        bin_id=candidate.bin_id,
+        side=candidate.side,
+        token_id=candidate.token_id,
+        probability_witness_identity=candidate.probability_witness_identity,
+        payoff_q_lcb=float(raw_q),
+    )
 
 
 def _global_preflight_block_status(reason: str) -> str:
@@ -6479,16 +6523,14 @@ def _global_current_state_execution_economics(
         Decimal("0") <= served_lcb <= point_q <= Decimal("1")
         and Decimal("0") <= prior_payoff_lcb <= point_q
         and Decimal("0") <= current_band_payoff_q_lcb <= point_q
-        and payoff_q_lcb > Decimal("0.5")
-        and edge_lcb > 0
     ):
-        if payoff_q_lcb <= Decimal("0.5"):
-            raise ValueError("GLOBAL_CURRENT_STATE_ROBUST_MAJORITY_LOSS")
-        raise ValueError("GLOBAL_CURRENT_STATE_ECONOMICS_NON_POSITIVE")
+        raise ValueError("GLOBAL_CURRENT_STATE_PROBABILITY_ORDER_INVALID")
     if payoff_q_lcb < current_band_payoff_q_lcb:
-        raise ValueError(
-            "GLOBAL_CURRENT_STATE_PAYOFF_Q_TIGHTENED_REAUCTION_REQUIRED"
-        )
+        raise _GlobalProbabilityTightened(float(payoff_q_lcb))
+    if payoff_q_lcb <= Decimal("0.5"):
+        raise ValueError("GLOBAL_CURRENT_STATE_ROBUST_MAJORITY_LOSS")
+    if edge_lcb <= 0:
+        raise ValueError("GLOBAL_CURRENT_STATE_ECONOMICS_NON_POSITIVE")
     sample_hash = str(getattr(witness, "sample_matrix_identity", "") or "").strip()
     samples = getattr(witness, "yes_q_samples", None)
     try:
@@ -7588,6 +7630,18 @@ def _build_event_bound_no_submit_receipt_core(
                 metric=family.metric,
                 family_id=family.family_id,
                 global_jit_candidate=exc.replacement_candidate,
+            )
+        except _GlobalProbabilityTightened as exc:
+            return EventSubmissionReceipt(
+                False,
+                event.event_id,
+                event.causal_snapshot_id,
+                reason=str(exc),
+                city=family.city,
+                target_date=family.target_date,
+                metric=family.metric,
+                family_id=family.family_id,
+                global_jit_payoff_q_lcb=exc.payoff_q_lcb,
             )
         except ValueError as exc:
             return EventSubmissionReceipt(

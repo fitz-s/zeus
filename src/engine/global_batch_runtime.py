@@ -43,12 +43,14 @@ class GlobalWinnerPreflight:
     status: str
     binding_token: object | None = None
     replacement_candidate: object | None = None
+    probability_tightening: "GlobalCandidateProbabilityTightening | None" = None
     reason: str = ""
 
     def __post_init__(self) -> None:
         if self.status not in {
             "STABLE",
             "CURVE_SUPERSEDED",
+            "PROBABILITY_TIGHTENED",
             "BLOCKED",
             "BATCH_BLOCKED",
         }:
@@ -59,8 +61,44 @@ class GlobalWinnerPreflight:
             self.replacement_candidate is not None
         ):
             raise ValueError("GLOBAL_WINNER_PREFLIGHT_REPLACEMENT_INVALID")
+        if (self.status == "PROBABILITY_TIGHTENED") != (
+            self.probability_tightening is not None
+        ):
+            raise ValueError("GLOBAL_WINNER_PREFLIGHT_Q_TIGHTENING_INVALID")
         if self.status != "STABLE" and not str(self.reason or "").strip():
             raise ValueError("GLOBAL_WINNER_PREFLIGHT_REASON_MISSING")
+
+
+@dataclass(frozen=True)
+class GlobalCandidateProbabilityTightening:
+    """A candidate-local executable q bound discovered by winner preflight."""
+
+    family_key: str
+    bin_id: str
+    side: str
+    token_id: str
+    probability_witness_identity: str
+    payoff_q_lcb: float
+
+    def __post_init__(self) -> None:
+        if (
+            not all(
+                str(value or "").strip()
+                for value in (
+                    self.family_key,
+                    self.bin_id,
+                    self.token_id,
+                    self.probability_witness_identity,
+                )
+            )
+            or self.side not in {"YES", "NO"}
+            or not 0.0 <= float(self.payoff_q_lcb) <= 1.0
+        ):
+            raise ValueError("GLOBAL_CANDIDATE_Q_TIGHTENING_INVALID")
+
+    @property
+    def candidate_key(self) -> tuple[str, str, str, str]:
+        return self.family_key, self.bin_id, self.side, self.token_id
 
 
 @dataclass(frozen=True)
@@ -358,14 +396,19 @@ def _selection_epoch_identity(
 def _selection_epoch_identity_with_preflight_exclusions(
     selection_epoch_identity: str,
     excluded_by_family: Mapping[str, str],
+    payoff_q_lcb_by_candidate: Mapping[tuple[str, str, str, str], float]
+    | None = None,
 ) -> str:
-    """Bind candidate-local preflight failures into a fallthrough re-auction."""
+    """Bind every candidate-local preflight refinement into re-auction."""
 
     digest = hashlib.sha256()
     digest.update(str(selection_epoch_identity or "").encode("utf-8"))
     digest.update(b"\x1f")
     for family_key, reason in sorted(excluded_by_family.items()):
         digest.update(repr((family_key, reason)).encode("utf-8"))
+        digest.update(b"\x1f")
+    for candidate_key, q_lcb in sorted((payoff_q_lcb_by_candidate or {}).items()):
+        digest.update(repr((*candidate_key, float(q_lcb))).encode("utf-8"))
         digest.update(b"\x1f")
     return digest.hexdigest()
 
@@ -812,6 +855,10 @@ def process_current_global_batch(
             *,
             attempt_selection_epoch_identity: str = selection_epoch_identity,
             preflight_excluded_by_family: Mapping[str, str] | None = None,
+            payoff_q_lcb_by_candidate: Mapping[
+                tuple[str, str, str, str], float
+            ]
+            | None = None,
         ):
             selection_at = current_time()
             state = portfolio_state_provider() if portfolio_state_provider else None
@@ -869,6 +916,7 @@ def process_current_global_batch(
                 book_epoch=attempt_book_epoch,
                 current_capital_limit_resolver=current_capital_limit_resolver,
                 preflight_excluded_by_family=preflight_excluded_by_family,
+                payoff_q_lcb_by_candidate=payoff_q_lcb_by_candidate,
             )
 
         selected = select_once(probabilities, book_epoch, prepared_by_event)
@@ -922,6 +970,9 @@ def process_current_global_batch(
             winner_id = winner.event_id
             attempt_book_epoch = book_epoch_fence
             excluded_by_family: dict[str, str] = {}
+            payoff_q_lcb_by_candidate: dict[
+                tuple[str, str, str, str], float
+            ] = {}
             curve_reauction_used = False
             while True:
                 preflight_authority = GlobalPreflightAuthority(
@@ -964,6 +1015,32 @@ def process_current_global_batch(
                     except ValueError as exc:
                         return reject(f"GLOBAL_REAUCTION_OVERLAY_FAILED:{exc}")
                     curve_reauction_used = True
+                elif preflight.status == "PROBABILITY_TIGHTENED":
+                    tightening = preflight.probability_tightening
+                    candidate = selected.decision.candidate
+                    terminal = selected.decision.terminal_wealth
+                    if tightening is None or candidate is None or terminal is None:
+                        return reject("GLOBAL_REAUCTION_Q_TIGHTENING_MISSING")
+                    selected_key = (
+                        candidate.family_key,
+                        candidate.bin_id,
+                        candidate.side,
+                        candidate.token_id,
+                    )
+                    if (
+                        tightening.candidate_key != selected_key
+                        or tightening.probability_witness_identity
+                        != candidate.probability_witness_identity
+                    ):
+                        return reject("GLOBAL_REAUCTION_Q_TIGHTENING_IDENTITY_MISMATCH")
+                    prior = payoff_q_lcb_by_candidate.get(selected_key)
+                    selected_q = float(terminal.win_probability_lcb)
+                    tightened_q = float(tightening.payoff_q_lcb)
+                    if tightened_q >= selected_q or (
+                        prior is not None and tightened_q >= prior
+                    ):
+                        return reject("GLOBAL_REAUCTION_Q_TIGHTENING_NO_PROGRESS")
+                    payoff_q_lcb_by_candidate[selected_key] = tightened_q
                 else:
                     family_key = str(
                         getattr(selected.decision.candidate, "family_key", "") or ""
@@ -985,8 +1062,9 @@ def process_current_global_batch(
                     _selection_epoch_identity_with_preflight_exclusions(
                         selection_epoch_identity,
                         excluded_by_family,
+                        payoff_q_lcb_by_candidate,
                     )
-                    if excluded_by_family
+                    if excluded_by_family or payoff_q_lcb_by_candidate
                     else selection_epoch_identity
                 )
                 selected = select_once(
@@ -995,6 +1073,7 @@ def process_current_global_batch(
                     prepared_fence,
                     attempt_selection_epoch_identity=fallthrough_epoch_identity,
                     preflight_excluded_by_family=excluded_by_family,
+                    payoff_q_lcb_by_candidate=payoff_q_lcb_by_candidate,
                 )
                 log_stage(
                     "select_preflight_fallthrough",

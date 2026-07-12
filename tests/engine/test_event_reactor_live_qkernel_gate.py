@@ -1303,7 +1303,7 @@ def test_global_actuation_current_band_can_tighten_served_bound(side):
 
 
 @pytest.mark.parametrize("side", ("YES", "NO"))
-def test_global_actuation_rejects_jit_bound_that_falls_below_majority(side):
+def test_global_actuation_reauctions_jit_bound_that_falls_below_majority(side):
     cert = _current_qkernel_cert(side=side)
     cert.update(
         payoff_q_point=0.80,
@@ -1319,15 +1319,13 @@ def test_global_actuation_rejects_jit_bound_that_falls_below_majority(side):
         band_alpha=0.05,
     )
 
-    with pytest.raises(
-        ValueError,
-        match="GLOBAL_CURRENT_STATE_ROBUST_MAJORITY_LOSS",
-    ):
+    with pytest.raises(era._GlobalProbabilityTightened) as raised:
         era._global_current_state_execution_economics(
             cert,
             decision=decision,
             witness=witness,
         )
+    assert raised.value.payoff_q_lcb == 0.49
 
 
 @pytest.mark.parametrize("side", ("YES", "NO"))

@@ -1321,6 +1321,7 @@ def _score_global_single_order(
     spendable_cash_usd: Decimal,
     capital_limit_usd: Decimal,
     fractional_kelly_multiplier: Decimal = Decimal("1"),
+    payoff_q_lcb: float | None = None,
 ) -> GlobalSingleOrderDecision:
     """Find the executable fractional-Kelly projection of one candidate.
 
@@ -1370,6 +1371,10 @@ def _score_global_single_order(
 
     q = np.asarray(q_samples, dtype=np.float64)
     robust_q = _lower_cvar(q, np.ones(q.size, dtype=np.float64), band_alpha)
+    if payoff_q_lcb is not None:
+        if not math.isfinite(payoff_q_lcb) or not 0.0 <= payoff_q_lcb <= 1.0:
+            raise ValueError("candidate payoff q lower bound must be finite in [0, 1]")
+        robust_q = min(robust_q, payoff_q_lcb)
     if not robust_q > 0.5:
         return GlobalSingleOrderDecision(
             candidate=None,
@@ -1620,6 +1625,10 @@ def select_global_single_order(
         [GlobalSingleOrderCandidate], Decimal
     ]
     | None = None,
+    candidate_payoff_q_lcb_resolver: Callable[
+        [GlobalSingleOrderCandidate], float | None
+    ]
+    | None = None,
 ) -> GlobalSingleOrderDecision:
     """Select one current executable order across every family and native side.
 
@@ -1833,6 +1842,19 @@ def select_global_single_order(
         if candidate_capital_limit <= 0:
             rejections[candidate.candidate_id] = "CAPITAL_CAPACITY_EXHAUSTED"
             continue
+        candidate_payoff_q_lcb = None
+        if candidate_payoff_q_lcb_resolver is not None:
+            try:
+                candidate_payoff_q_lcb = candidate_payoff_q_lcb_resolver(candidate)
+            except Exception:  # noqa: BLE001 - malformed bound invalidates this candidate
+                rejections[candidate.candidate_id] = "PAYOFF_Q_LCB_UNAVAILABLE"
+                continue
+            if candidate_payoff_q_lcb is not None and (
+                not math.isfinite(candidate_payoff_q_lcb)
+                or not 0.0 <= candidate_payoff_q_lcb <= 1.0
+            ):
+                rejections[candidate.candidate_id] = "PAYOFF_Q_LCB_INVALID"
+                continue
         score = _score_global_single_order(
             candidate,
             q_samples=q_samples,
@@ -1842,6 +1864,7 @@ def select_global_single_order(
             spendable_cash_usd=wealth_witness.spendable_cash_usd,
             capital_limit_usd=candidate_capital_limit,
             fractional_kelly_multiplier=multiplier,
+            payoff_q_lcb=candidate_payoff_q_lcb,
         )
         if score.candidate is None:
             rejections.update(score.rejection_reasons)
