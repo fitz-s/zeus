@@ -175,13 +175,16 @@ def _exit_order_type(selected_order_type: str) -> str:
     return normalized
 
 
-# P0c: "quarantined" retained explicitly — it dropped out of the canonical
-# TERMINAL_STATES when its fold widened to {QUARANTINED, SETTLED, VOIDED}
-# (docs/rebuild/chain_mirror_state_model_2026-07-04.md §5), but this gate
-# still must treat a quarantined row as non-open (i.e. not a duplicate-entry
-# blocker) until the chain-mirror reconciler resolves it.
+# T5 (docs/rebuild/quarantine_excision_2026-07-11.md): 'quarantined' is no
+# longer a LifecyclePhase member — no writer mints it going forward — but
+# this gate is raw SQL (`phase IN (...)` placeholders) against
+# position_current, so the bare string literal stays as a mixed-epoch
+# bridge: a LEGACY row still carrying phase='quarantined' (until the T5
+# schema migration, docs/rebuild item 5, rewrites it) must still be treated
+# as non-open (i.e. not a duplicate-entry blocker) until the chain-mirror
+# reconciler resolves it.
 _ENTRY_DUPLICATE_NON_OPEN_PHASES = frozenset(
-    set(TERMINAL_STATES) | {LifecyclePhase.ECONOMICALLY_CLOSED.value, LifecyclePhase.QUARANTINED.value}
+    set(TERMINAL_STATES) | {LifecyclePhase.ECONOMICALLY_CLOSED.value, "quarantined"}
 )
 _ENTRY_DUPLICATE_OPEN_COMMAND_STATES = frozenset(
     {

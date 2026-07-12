@@ -31,7 +31,11 @@ def test_phase_for_runtime_position_known_states_still_work():
     assert phase_for_runtime_position(state="settled") is LifecyclePhase.SETTLED
     assert phase_for_runtime_position(state="economically_closed") is LifecyclePhase.ECONOMICALLY_CLOSED
     assert phase_for_runtime_position(state="admin_closed") is LifecyclePhase.ADMIN_CLOSED
-    assert phase_for_runtime_position(state="quarantined") is LifecyclePhase.QUARANTINED
+    # T5 (docs/rebuild/quarantine_excision_2026-07-11.md): 'quarantined' is no
+    # longer a recognized state — it falls through to UNKNOWN like any other
+    # retired/garbage string (REPLACEMENT PHASE LAW: real exposure keeps its
+    # TRUE phase; no writer mints 'quarantined' anymore).
+    assert phase_for_runtime_position(state="quarantined") is LifecyclePhase.UNKNOWN
     assert phase_for_runtime_position(state="pending_exit") is LifecyclePhase.PENDING_EXIT
     assert phase_for_runtime_position(state="pending_tracked") is LifecyclePhase.PENDING_ENTRY
     assert phase_for_runtime_position(state="day0_window") is LifecyclePhase.DAY0_WINDOW
@@ -91,11 +95,6 @@ def test_settled_from_active_still_works():
 
 
 # --- Fold table: UNKNOWN transitions ---
-
-
-def test_unknown_phase_can_transition_to_quarantined():
-    result = fold_lifecycle_phase(LifecyclePhase.UNKNOWN, LifecyclePhase.QUARANTINED)
-    assert result is LifecyclePhase.QUARANTINED
 
 
 def test_unknown_phase_can_transition_to_voided():

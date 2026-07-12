@@ -47,8 +47,6 @@ from src.contracts.position_truth import (
     ChainOnlyReviewState,
     CURRENT_MONEY_RISK_CHAIN_STATES,
     NO_CURRENT_MONEY_RISK_CHAIN_STATES,
-    REDECISION_ELIGIBLE_QUARANTINE_CHAIN_STATES,
-    has_current_money_risk_chain_state,
 )
 from src.contracts.semantic_types import VenueVisibilityStatus, Direction, DirectionAlias, ExitState, LifecycleState
 from src.contracts.settlement_outcome import SettlementOutcome
@@ -57,7 +55,6 @@ from src.strategy.correlation import get_correlation
 from src.state.lifecycle_manager import (
     TERMINAL_STATES as _TERMINAL_POSITION_STATES,
     enter_admin_closed_runtime_state,
-    enter_chain_quarantined_runtime_state,
     enter_economically_closed_runtime_state,
     enter_settled_runtime_state,
     enter_voided_runtime_state,
@@ -86,12 +83,61 @@ _CANONICAL_PHASE_TO_RUNTIME_STATE: dict[str, str] = {
     "active": LifecycleState.ENTERED.value,
 }
 
+# T5 (docs/rebuild/quarantine_excision_2026-07-11.md, mixed-epoch bridge):
+# no writer mints state='quarantined' going forward, but the DB CHECK still
+# permits the literal until the T5 schema migration (docs/rebuild item 5)
+# rewrites history. A legacy row loaded before that migration runs must not
+# crash Position construction (LifecycleState('quarantined') would raise) —
+# remap it to its TRUE runtime state. Every legacy quarantined row on record
+# (docs/rebuild item, "Live blast radius") carried real venue-confirmed
+# exposure (that is precisely why it was quarantined instead of voided), so
+# HOLDING is the correct, conservative true state: it is picked up by normal
+# active-position monitor/exposure accounting instead of vanishing into a
+# scar bucket. Logged once per remap (WARNING) so an operator can see how
+# many legacy rows are still awaiting the schema migration.
+_LEGACY_QUARANTINED_STATE = "quarantined"
+_LEGACY_QUARANTINED_TRUE_STATE = LifecycleState.HOLDING.value
+
+# Same bridge for chain_state: 'quarantined' / 'quarantine_expired' /
+# 'entry_authority_quarantined' are retired ChainState members. 'synced' is
+# the safe remap target — it is never in NO_CURRENT_MONEY_RISK_CHAIN_STATES,
+# so a real-exposure position's accounting is not silently zeroed; the
+# operator-visible dispute lives in the position's ReviewWorkItem, not here.
+_LEGACY_CHAIN_STATES = frozenset(
+    {"quarantined", "quarantine_expired", "entry_authority_quarantined"}
+)
+_LEGACY_CHAIN_STATE_TRUE_VALUE = VenueVisibilityStatus.SYNCED.value
+
 
 def _normalize_runtime_lifecycle_state(value: str | LifecycleState) -> str | LifecycleState:
     if isinstance(value, LifecycleState):
         return value
     state_value = str(value or "")
+    if state_value == _LEGACY_QUARANTINED_STATE:
+        logger.warning(
+            "LEGACY_QUARANTINED_STATE_REMAPPED: pre-T5 row carried "
+            "state='quarantined' — remapped to %r pending the T5 schema "
+            "migration (docs/rebuild/quarantine_excision_2026-07-11.md item 5)",
+            _LEGACY_QUARANTINED_TRUE_STATE,
+        )
+        return _LEGACY_QUARANTINED_TRUE_STATE
     return _CANONICAL_PHASE_TO_RUNTIME_STATE.get(state_value, state_value)
+
+
+def _normalize_runtime_chain_state(value: object) -> object:
+    if isinstance(value, VenueVisibilityStatus):
+        return value
+    chain_state_value = str(getattr(value, "value", value) or "")
+    if chain_state_value in _LEGACY_CHAIN_STATES:
+        logger.warning(
+            "LEGACY_QUARANTINED_CHAIN_STATE_REMAPPED: pre-T5 row carried "
+            "chain_state=%r — remapped to %r pending the T5 schema migration "
+            "(docs/rebuild/quarantine_excision_2026-07-11.md item 5)",
+            chain_state_value,
+            _LEGACY_CHAIN_STATE_TRUE_VALUE,
+        )
+        return _LEGACY_CHAIN_STATE_TRUE_VALUE
+    return value
 
 # Portfolio authority labels are a separate grammar from observation authority.
 # ObservationAtom uses Literal["VERIFIED", "UNVERIFIED", "QUARANTINED"]
@@ -646,9 +692,6 @@ class Position:
     no_token_id: str = ""
     condition_id: str = ""
 
-    # Quarantine tracking
-    quarantined_at: str = ""  # ISO timestamp when quarantined
-
     # Exit state (persisted across monitor cycles — Blueprint v2 §7)
     neg_edge_count: int = 0
     # BUG#127: consecutive monitor cycles an adverse flash-crash-magnitude
@@ -726,6 +769,7 @@ class Position:
         self.state = _normalize_runtime_lifecycle_state(self.state)
         if not isinstance(self.state, LifecycleState):
             self.state = LifecycleState(self.state)
+        self.chain_state = _normalize_runtime_chain_state(self.chain_state)
         if not isinstance(self.chain_state, VenueVisibilityStatus):
             self.chain_state = VenueVisibilityStatus(self.chain_state)
         if not isinstance(self.exit_state, ExitState):
@@ -3031,15 +3075,19 @@ def _dedupe_validations(steps: list[str]) -> list[str]:
     return ordered
 
 
+# T5 (docs/rebuild/quarantine_excision_2026-07-11.md): 'quarantined' retired
+# — no writer mints it, and Position.__post_init__ remaps any legacy 'state'
+# input to its TRUE runtime state before construction (see
+# _normalize_runtime_lifecycle_state), so no live Position can ever carry
+# state=='quarantined' here anymore. Keeping the literal in this SET would be
+# actively wrong now, not merely dead: chain_reconciliation.py's per-position
+# loop uses `state not in INACTIVE_RUNTIME_STATES` to decide whether a token
+# is "claimed locally" — a stale 'quarantined' entry would make a
+# (now-impossible) quarantined-state position silently double-process
+# through both the current-risk-quarantine branch AND the "chain but not
+# local" restoration branch.
 INACTIVE_RUNTIME_STATES = frozenset(
-    # P0c: "quarantined" is retained explicitly — it dropped out of the
-    # canonical TERMINAL_STATES when its fold widened to
-    # {QUARANTINED, SETTLED, VOIDED}, but every consumer of
-    # INACTIVE_RUNTIME_STATES (chain_reconciliation.py, cycle_runtime.py,
-    # evaluator.py entry-dedup, exchange_reconcile.py) still needs a
-    # quarantined row treated as inactive/non-open until the chain-mirror
-    # reconciler resolves it. See docs/rebuild/chain_mirror_state_model_2026-07-04.md §5.
-    set(_TERMINAL_POSITION_STATES) | {"economically_closed", "quarantined"}
+    set(_TERMINAL_POSITION_STATES) | {"economically_closed"}
 )
 NO_EXPOSURE_CHAIN_STATES = NO_CURRENT_MONEY_RISK_CHAIN_STATES
 _POSITIVE_CHAIN_EXPOSURE_EPS = 1e-6
@@ -3062,34 +3110,19 @@ def _semantic_value(value: object) -> str:
 
 
 def _is_runtime_open_position(pos: Position) -> bool:
-    # Excision T-consolidations #2 investigation (docs/rebuild/quarantine_excision_2026-07-11.md):
-    # this quarantined+chain-risk carve-out was surveyed against the canonical
-    # redecision-eligibility predicate (cycle_runtime._quarantined_position_can_redecision)
-    # and found to answer a genuinely different, broader question — "does this
-    # position still carry live venue exposure that must count as open for risk
-    # purposes" — NOT "can this quarantined position actively redecision this
-    # cycle". Confirmed deltas: (1) `has_current_money_risk_chain_state` checks
-    # membership in the 4-value CURRENT_MONEY_RISK_CHAIN_STATES set (synced,
-    # chain_present, exit_pending_missing, entry_authority_quarantined), while
-    # the canonical predicate's chain-state gate is the 1-value
-    # REDECISION_ELIGIBLE_QUARANTINE_CHAIN_STATES set ({entry_authority_quarantined});
-    # (2) no direction gate here; (3) no is_quarantine_placeholder exclusion here;
-    # (4) 0.0 exposure epsilon here vs. 0.01 in the canonical predicate. Forcing
-    # delegation would silently narrow "open" and drop real exposure from risk
-    # accounting, so this stays independent — see
-    # tests/test_quarantine_excision_t_consolidations_characterization.py::test_is_runtime_open_position_broader_than_canonical_predicate.
+    # T5 (docs/rebuild/quarantine_excision_2026-07-11.md, REPLACEMENT PHASE
+    # LAW): the former quarantined+chain-risk carve-out (T-consolidations #2
+    # investigation found it answered a genuinely different, broader question
+    # than cycle_runtime's canonical redecision-eligibility predicate) is
+    # retired — no writer mints state='quarantined' going forward, and
+    # Position.__post_init__ remaps any legacy input to its TRUE runtime
+    # state before construction, so a real-exposure position is now simply
+    # ACTIVE/DAY0_WINDOW/PENDING_EXIT and already counts as open via the
+    # normal return below — the carve-out is provably unreachable, not merely
+    # unneeded.
     state = _semantic_value(getattr(pos, "state", ""))
     chain_state = _semantic_value(getattr(pos, "chain_state", ""))
     chain_shares = _positive_chain_exposure_shares(pos)
-    if (
-        chain_shares > 0.0
-        and (
-            state == "quarantined"
-            and has_current_money_risk_chain_state(chain_state)
-            or (not state and chain_state in REDECISION_ELIGIBLE_QUARANTINE_CHAIN_STATES)
-        )
-    ):
-        return True
     no_exposure_chain_state = chain_state in NO_EXPOSURE_CHAIN_STATES
     if state == "pending_exit" and chain_shares > 0.0:
         no_exposure_chain_state = False

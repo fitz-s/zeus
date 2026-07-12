@@ -383,9 +383,13 @@ def test_entry_authority_quarantined_position_can_transition_to_pending_exit():
         "SELECT phase, chain_state, order_status FROM position_current WHERE position_id = ?",
         (pos.trade_id,),
     ).fetchone()
+    # T5: the position's chain_state was remapped to its TRUE value ('synced')
+    # at construction (Position.__post_init__ mixed-epoch bridge) — the
+    # dispute this legacy row once encoded now lives in a ReviewWorkItem,
+    # never in chain_state.
     assert dict(row) == {
         "phase": LifecyclePhase.PENDING_EXIT.value,
-        "chain_state": "entry_authority_quarantined",
+        "chain_state": "synced",
         "order_status": "exit_intent",
     }
     event = conn.execute(
@@ -398,9 +402,16 @@ def test_entry_authority_quarantined_position_can_transition_to_pending_exit():
         """,
         (pos.trade_id,),
     ).fetchone()
+    # T5 (docs/rebuild/quarantine_excision_2026-07-11.md): QUARANTINED is
+    # retired from LifecyclePhase, but src.state.canonical_write.
+    # transition_phase preserves a legacy pre_exit_state='quarantined' input
+    # verbatim as phase_before (mixed-epoch bridge — the DB CHECK still
+    # permits the literal until the T5 schema migration, docs/rebuild item 5,
+    # rewrites history), rather than letting it derive to UNKNOWN and violate
+    # the CHECK constraint.
     assert dict(event) == {
         "event_type": "EXIT_INTENT",
-        "phase_before": LifecyclePhase.QUARANTINED.value,
+        "phase_before": "quarantined",
         "phase_after": LifecyclePhase.PENDING_EXIT.value,
     }
     conn.close()
@@ -478,7 +489,11 @@ def test_chain_absent_confirmed_position_cannot_transition_to_pending_exit():
         "SELECT phase, chain_state, order_status FROM position_current WHERE position_id = ?",
         (pos.trade_id,),
     ).fetchone()
-    assert row["phase"] == LifecyclePhase.QUARANTINED.value
+    # Raw DB read of a row this test seeded directly via SQL UPDATE (mixed-
+    # epoch bridge literal, not a live-minted value — T5,
+    # docs/rebuild/quarantine_excision_2026-07-11.md) — the failed transition
+    # leaves it unchanged.
+    assert row["phase"] == "quarantined"
     assert row["chain_state"] == "chain_absent_confirmed_position_unattributed"
     assert row["order_status"] != "exit_intent"
     event = conn.execute(

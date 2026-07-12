@@ -10,16 +10,17 @@ single-state-string dispatcher giving the primary `state` field authority, with
 `chain_state`/`exit_state` only as FALLBACKS that fire when the primary state has not
 already reached a stronger economic/exit/terminal disposition.
 
-The redesign's `derive_position_phase` is now authority-aware (consult 6a42bc3d
-ruling): it splits quarantine into explicit A5 quarantine vs A7 chain-quarantine
-FALLBACK, and pending-exit into explicit A5 pending-exit vs exit-state FALLBACK, with
-the fallbacks ranked BELOW economic-close / explicit-pending-exit. That makes it an
-EXACT decomposition of the live owner over the whole input domain — the previously
-"sanctioned" divergence (economically_closed/pending_exit + chain-quarantine being
-re-quarantined) is gone, because A5 authority now wins.
+T5 (docs/rebuild/quarantine_excision_2026-07-11.md, REPLACEMENT PHASE LAW): the
+former "explicit A5 quarantine vs A7 chain-quarantine FALLBACK" split is retired —
+there is no quarantine phase target. 'quarantined' / 'quarantine_expired' are no
+longer recognized state/chain_state values; both `derive_position_phase` and the
+live owner now fall through to UNKNOWN for them, exactly like any other
+unrecognized/retired vocabulary word (no special-casing). Real exposure disputes
+keep their TRUE phase and the dispute lives in a ReviewWorkItem, never here.
 
-This antibody proves 192/192 exact equivalence, so the authority-aware reducer is a
-behavior-preserving basis for a future A5 cutover. (No writer is cut over here.)
+This antibody proves the authority-aware reducer stays an EXACT decomposition of the
+live owner over the whole input domain (including the now-retired 'quarantined' /
+'quarantine_expired' inputs, which both sides must agree fall through identically).
 """
 
 from __future__ import annotations
@@ -38,6 +39,9 @@ from src.state.lifecycle_manager import (
 )
 
 # Full runtime-state domain of phase_for_runtime_position + the fallback inputs.
+# 'quarantined' / 'quarantine_expired' are RETAINED here deliberately (not as
+# recognized states — T5 retired them) so the antibody proves both sides agree
+# they now fall through to UNKNOWN like any other unrecognized string.
 _RUNTIME_STATES = [
     "voided", "settled", "economically_closed", "admin_closed", "quarantined",
     "pending_exit", "pending_tracked", "day0_window", "entered", "holding",
@@ -50,9 +54,10 @@ _CHAIN_STATES = ["", "quarantined", "quarantine_expired", "exit_pending_missing"
 def _runtime_state_to_phase_facts(state: str, exit_state: str = "", chain_state: str = "") -> dict:
     """Map the runtime (state, exit_state, chain_state) onto the authority-aware
     derive_position_phase inputs, replicating the live owner's authority model:
-    the primary `state` value sets exactly one EXPLICIT A5 fact; chain-quarantine and
-    exit-state set FALLBACK facts that project the phase only when no stronger A5
-    authority is present."""
+    the primary `state` value sets EXPLICIT A5 facts; exit-state sets the sole
+    remaining FALLBACK fact that projects the phase only when no stronger A5
+    authority is present. chain_state no longer feeds any phase fact (T5) — it
+    only still contributes to has_exit_fallback via exit_pending_missing."""
     s = str(state or "").strip().lower()
     es = str(exit_state or "").strip().lower()
     cs = str(chain_state or "").strip().lower()
@@ -61,9 +66,7 @@ def _runtime_state_to_phase_facts(state: str, exit_state: str = "", chain_state:
         is_voided=(s == "voided"),
         has_settlement=(s == "settled"),
         has_economic_close=(s == "economically_closed"),
-        has_explicit_quarantine=(s == "quarantined"),
         has_explicit_pending_exit=(s == "pending_exit"),
-        has_chain_quarantine_fallback=(cs in {"quarantined", "quarantine_expired"}),
         has_exit_fallback=(es in PENDING_EXIT_RUNTIME_STATES or cs == "exit_pending_missing"),
         has_positive_exposure=(s in {"entered", "holding", "day0_window"}),
         in_day0_window=(s == "day0_window"),
@@ -78,7 +81,7 @@ def _runtime_state_to_phase_facts(state: str, exit_state: str = "", chain_state:
     ("settled", PositionPhase.SETTLED),
     ("economically_closed", PositionPhase.ECONOMICALLY_CLOSED),
     ("admin_closed", PositionPhase.ADMIN_CLOSED),
-    ("quarantined", PositionPhase.QUARANTINED),
+    ("quarantined", PositionPhase.UNKNOWN),  # T5: retired, no longer recognized
     ("pending_exit", PositionPhase.PENDING_EXIT),
     ("pending_tracked", PositionPhase.PENDING_ENTRY),
     ("day0_window", PositionPhase.DAY0_WINDOW),
@@ -93,31 +96,34 @@ def test_single_state_derive_matches_live_owner(state: str, expected: PositionPh
     assert derived is expected
 
 
-# --- the ruling's explicit edge fixtures (state authority vs chain fallback) ----- #
+# --- T5: retired chain_state values no longer influence the phase at all -------- #
 
 @pytest.mark.parametrize("state,chain,expected", [
     ("economically_closed", "quarantined", PositionPhase.ECONOMICALLY_CLOSED),
     ("economically_closed", "quarantine_expired", PositionPhase.ECONOMICALLY_CLOSED),
     ("pending_exit", "quarantined", PositionPhase.PENDING_EXIT),
     ("pending_exit", "quarantine_expired", PositionPhase.PENDING_EXIT),
-    ("entered", "quarantined", PositionPhase.QUARANTINED),
-    ("day0_window", "quarantined", PositionPhase.QUARANTINED),
-    ("pending_tracked", "quarantined", PositionPhase.QUARANTINED),
+    # T5: a retired chain_state no longer forces QUARANTINED — the position
+    # keeps its TRUE phase (exposure/entry-intent facts win outright now).
+    ("entered", "quarantined", PositionPhase.ACTIVE),
+    ("day0_window", "quarantined", PositionPhase.DAY0_WINDOW),
+    ("pending_tracked", "quarantined", PositionPhase.PENDING_ENTRY),
 ])
-def test_state_authority_vs_chain_quarantine_fallback(state: str, chain: str, expected: PositionPhase) -> None:
+def test_state_authority_vs_retired_chain_state(state: str, chain: str, expected: PositionPhase) -> None:
     live = phase_for_runtime_position(state=state, chain_state=chain)
     derived = derive_position_phase(**_runtime_state_to_phase_facts(state, chain_state=chain))
     assert live is expected
     assert derived is expected
 
 
-def test_exit_fallback_with_chain_quarantine_is_quarantined() -> None:
-    # An exit-state fallback on a non-terminal state, with chain quarantine, is
-    # QUARANTINED (the chain fallback outranks the exit fallback).
+def test_exit_fallback_with_retired_chain_state_is_pending_exit() -> None:
+    # T5: an exit-state fallback on a non-terminal state, with a retired
+    # chain_state value present, is PENDING_EXIT — the retired chain value no
+    # longer outranks (or even participates in) the exit fallback.
     live = phase_for_runtime_position(state="entered", exit_state="exit_intent", chain_state="quarantined")
     derived = derive_position_phase(**_runtime_state_to_phase_facts("entered", "exit_intent", "quarantined"))
-    assert live is PositionPhase.QUARANTINED
-    assert derived is PositionPhase.QUARANTINED
+    assert live is PositionPhase.PENDING_EXIT
+    assert derived is PositionPhase.PENDING_EXIT
 
 
 # --- full-domain antibody: EXACT equivalence (zero divergence) post-ruling ------- #

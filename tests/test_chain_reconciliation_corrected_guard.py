@@ -403,7 +403,7 @@ class TestQuarantineBranch:
         with caplog.at_level(logging.WARNING, logger="src.state.chain_reconciliation"):
             stats = reconcile(portfolio, chain_positions, conn=conn)
 
-        assert stats.get("quarantined", 0) >= 1, "Expected at least 1 quarantined token"
+        assert stats.get("chain_only_unresolved", 0) >= 1, "Expected at least 1 chain-only unresolved token"
         # No fake Position is synthesized into the trading portfolio.
         assert portfolio.positions == [], (
             "chain-only token must NOT create a Position; it is a ChainOnlyFact"

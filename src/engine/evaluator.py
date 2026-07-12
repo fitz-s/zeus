@@ -3392,44 +3392,6 @@ def _resolve_unified_entry_bias_native(
         return None
 
 
-# Quarantine excision T2 (docs/rebuild/quarantine_excision_2026-07-11.md item 4):
-# chain_state values that still identify a position as carrying the retired
-# portfolio-wide quarantine gate's subject matter. Both the ChainState enum
-# member and its raw wire-string form are recognized (Python 3.14 str(enum)
-# returns "ClassName.MEMBER", so callers must extract `.value` when present —
-# same enum/string-boundary invariant covered by
-# tests/test_cross_module_invariants.py).
-_BRIDGING_QUARANTINE_CHAIN_STATES = frozenset({"entry_authority_quarantined"})
-
-
-def _quarantined_position_bridging_family_keys(portfolio: PortfolioState) -> set["WeatherFamilyKey"]:
-    """Bridging shim (T2 item 4): positions still carrying phase='quarantined'
-    with chain_state='entry_authority_quarantined' feed the family-scoped
-    block for their family, until T5 drains them into the typed
-    review/blocker-fact replacement. This is NOT a new global gate — only the
-    SPECIFIC family of each such position is affected; unrelated families
-    trade normally through the same family-scoped block as ChainOnlyFacts /
-    ReviewWorkItems / EntryExposureObligations (see blocked_family_keys).
-    """
-
-    keys: set[WeatherFamilyKey] = set()
-    for pos in getattr(portfolio, "positions", None) or ():
-        state_value = str(getattr(getattr(pos, "state", ""), "value", getattr(pos, "state", "")) or "")
-        if state_value.strip().lower() != "quarantined":
-            continue
-        chain_state_raw = getattr(pos, "chain_state", "")
-        chain_state_value = str(getattr(chain_state_raw, "value", chain_state_raw) or "")
-        if chain_state_value.strip().lower() not in _BRIDGING_QUARANTINE_CHAIN_STATES:
-            continue
-        city_name = str(getattr(pos, "city", "") or "")
-        target_date = str(getattr(pos, "target_date", "") or "")
-        metric = str(getattr(pos, "temperature_metric", "") or "")
-        if not (city_name and target_date and metric):
-            continue
-        keys.add(WeatherFamilyKey(city_name, target_date, metric, ""))
-    return keys
-
-
 def evaluate_candidate(
     candidate: MarketCandidate,
     conn,
@@ -3491,19 +3453,26 @@ def evaluate_candidate(
     # family-scoped block replaces the deleted portfolio-wide quarantine gate.
     # A candidate whose WeatherFamilyKey is currently blocked (open
     # ChainOnlyFact / family-blocking ReviewWorkItem / OPEN
-    # EntryExposureObligation via blocked_family_keys, OR a bridging
-    # phase='quarantined' position family — see
-    # _quarantined_position_bridging_family_keys) is rejected here, BEFORE
-    # the expensive signal pipeline runs. Family-scoped, never portfolio-wide:
-    # everything outside the blocked family still trades. Adjudication:
-    # "evaluator filtering stays a prefilter, never an enforcement authority"
-    # — the authoritative safety net is the executor's atomic
-    # EntryRiskReservation + RiskGuard's DATA_DEGRADED fold, both independent
-    # of this check.
-    _db_backed_blocked_keys: set = set()
+    # EntryExposureObligation via blocked_family_keys) is rejected here,
+    # BEFORE the expensive signal pipeline runs. Family-scoped, never
+    # portfolio-wide: everything outside the blocked family still trades.
+    # Adjudication: "evaluator filtering stays a prefilter, never an
+    # enforcement authority" — the authoritative safety net is the
+    # executor's atomic EntryRiskReservation + RiskGuard's DATA_DEGRADED
+    # fold, both independent of this check.
+    #
+    # T5 (docs/rebuild/quarantine_excision_2026-07-11.md): the T2 bridging
+    # shim (_quarantined_position_bridging_family_keys, keyed on
+    # phase='quarantined') is RETIRED here — no writer mints that phase
+    # going forward, and a confirmed-fill/chain-absence-conflict dispute now
+    # opens a CONFIRMED_FILL_CHAIN_ABSENCE_CONFLICT ReviewWorkItem directly
+    # (a FAMILY_BLOCKING_REASON_CODES member — see
+    # src.contracts.review_work_item), which blocked_family_keys already
+    # consults. The bridging shim's job is done by the DB-backed leg alone now.
+    blocked_keys: set = set()
     if conn is not None:
         try:
-            _db_backed_blocked_keys = blocked_family_keys(conn, portfolio)
+            blocked_keys = blocked_family_keys(conn, portfolio)
         except Exception as _family_block_exc:  # noqa: BLE001
             # Fail-soft, matching the adjudication's own framing ("evaluator
             # filtering stays a prefilter, never an enforcement authority"):
@@ -3517,16 +3486,13 @@ def evaluate_candidate(
             # whatever ``conn`` the caller supplies, and the family-block read
             # is explicitly a prefilter, never an enforcement authority — the
             # authoritative safety net (executor EntryRiskReservation +
-            # RiskGuard DATA_DEGRADED) does not depend on it, and the
-            # bridging-shim leg below (pure Python, no conn) still runs.
+            # RiskGuard DATA_DEGRADED) does not depend on it.
             logger.warning(
                 "evaluate_candidate: blocked_family_keys query failed (%s) — "
                 "skipping DB-backed family-block prefilter this call, never "
                 "treated as proof nothing is blocked",
                 _family_block_exc,
             )
-    # Bridging shim never needs conn (portfolio-only); runs unconditionally.
-    blocked_keys = _db_backed_blocked_keys | _quarantined_position_bridging_family_keys(portfolio)
     if blocked_keys:
         candidate_family_identity = (city.name, target_date, temperature_metric)
         # Compare (city, target_date, temperature_metric) only — market_family_id

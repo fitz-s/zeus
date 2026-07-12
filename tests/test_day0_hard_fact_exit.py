@@ -102,11 +102,23 @@ def test_day0_hard_fact_eligible_for_quarantined_real_partial_exposure():
         state="quarantined", chain_state="entry_authority_quarantined",
     )
 
+    # T5 (docs/rebuild/quarantine_excision_2026-07-11.md): the legacy
+    # state='quarantined'/chain_state='entry_authority_quarantined'
+    # constructor inputs are remapped to their TRUE values (holding/synced)
+    # by Position.__post_init__'s mixed-epoch bridge — no live Position can
+    # carry state=='quarantined', so _quarantined_position_can_redecision's
+    # own gate (state == 'quarantined') is now permanently unreachable (see
+    # test_quarantine_excision_t_consolidations_characterization.py, which
+    # already pins this to always-False). All three legacy-"quarantined"
+    # fixtures below resolve through the plain state-membership check
+    # instead — they are all remapped to 'holding', which is eligible like
+    # any other open position; the exposure/placeholder carve-outs this test
+    # once exercised were quarantine-scar bookkeeping that no longer applies.
     assert cycle_runtime._day0_hard_fact_position_eligible(day0) is True
     assert cycle_runtime._day0_hard_fact_position_eligible(active) is True
     assert cycle_runtime._day0_hard_fact_position_eligible(quarantined_partial) is True
-    assert cycle_runtime._day0_hard_fact_position_eligible(quarantined_placeholder) is False
-    assert cycle_runtime._day0_hard_fact_position_eligible(quarantined_no_exposure) is False
+    assert cycle_runtime._day0_hard_fact_position_eligible(quarantined_placeholder) is True
+    assert cycle_runtime._day0_hard_fact_position_eligible(quarantined_no_exposure) is True
 
 
 def _tokyo():

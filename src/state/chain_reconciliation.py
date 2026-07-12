@@ -34,6 +34,7 @@ from src.contracts.position_truth import (
     ChainOnlyFact,
     has_current_money_risk_chain_state,
 )
+from src.contracts.review_work_item import ReviewReasonCode
 from src.contracts.semantic_types import LifecycleState
 from src.state.chain_state import ChainSnapshotCompleteness, classify_chain_state
 from src.state.lifecycle_manager import (
@@ -58,7 +59,10 @@ FILL_TRADE_FACT_STATES = frozenset({"MATCHED", "MINED", "CONFIRMED"})
 CONFIRMED_CHAIN_ABSENCE_REVIEW_REASON = "chain_absent_confirmed_position_unattributed"
 CONFIRMED_CHAIN_ABSENCE_CHAIN_STATE = "chain_absent_confirmed_position_unattributed"
 ENTRY_AUTHORITY_CHAIN_ABSENCE_REVIEW_REASON = "entry_authority_chain_absence_conflict"
-ENTRY_AUTHORITY_CHAIN_ABSENCE_CHAIN_STATE = "entry_authority_quarantined"
+# T5 (docs/rebuild/quarantine_excision_2026-07-11.md): ENTRY_AUTHORITY_CHAIN_
+# ABSENCE_CHAIN_STATE ("entry_authority_quarantined") retired — no minter
+# writes it anymore (both preserve/restore paths keep the position's TRUE
+# chain_state; the dispute lives in a ReviewWorkItem instead).
 
 # Slice A4 (PR #19 finding 8, 2026-04-26): structural anchor for the
 # learning-authority contract previously held only in resolve_rescue_authority's
@@ -540,9 +544,15 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
         must fold the current canonical phase to itself.  Pending entries remain
         excluded because entry-fill detection owns that race; pending exits are
         included because exit_lifecycle still needs fresh chain facts while a
-        sell attempt is backoff/exhausted/in flight. Current-money-risk
-        quarantines are included only for a phase-preserving positive chain
-        observation; the observation cannot resolve their authority review.
+        sell attempt is backoff/exhausted/in flight.
+
+        T5 (docs/rebuild/quarantine_excision_2026-07-11.md): 'quarantined' is
+        no longer a LifecyclePhase member — no writer mints it going forward —
+        but this is a raw SQL read of a persisted column, so the bare string
+        literal stays here as a mixed-epoch bridge: any legacy row still
+        carrying phase='quarantined' from before the T5 schema migration
+        (docs/rebuild item 5) must remain readable as an open phase for a
+        phase-preserving chain-economics refresh, never raise.
         """
         if conn is None:
             return None
@@ -564,7 +574,7 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
             LifecyclePhase.ACTIVE.value,
             LifecyclePhase.DAY0_WINDOW.value,
             LifecyclePhase.PENDING_EXIT.value,
-            LifecyclePhase.QUARANTINED.value,
+            "quarantined",  # mixed-epoch bridge — see docstring
         }:
             raise RuntimeError(
                 f"canonical chain-observation baseline phase is not open: got {phase!r}"
@@ -753,7 +763,6 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
         position: Position,
         *,
         prior_chain_state: str = "",
-        preserve_chain_state: bool = False,
     ) -> bool:
         """Persist chain economics for a SYNCED (matched, no size-mismatch)
         position whose persisted chain_shares is NULL (first-population), has
@@ -807,17 +816,12 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
               (chain economics match, but the canonical visibility projection
               still misleads monitor/redecision).
 
-        ``preserve_chain_state`` admits a current-money-risk quarantine without
-        converting its unresolved authority state to ``synced``. Its persisted
-        timestamp still controls idempotency, so a 2-minute chain poll does not
-        create an event storm inside the 30-minute freshness window.
-
         Gating mirrors _append_canonical_size_correction_if_available:
           - conn present; skip pending_entry phase (don't fight fill detection);
           - canonical row must exist in an open chain-observable phase
-            (active/day0_window/pending_exit or current-risk quarantine) — a
-            missing projection with prior history is a contract violation
-            surfaced by the shared baseline gate.
+            (active/day0_window/pending_exit) — a missing projection with
+            prior history is a contract violation surfaced by the shared
+            baseline gate.
 
         Fail-closed: any unexpected error is swallowed (logged) so reconcile
         never crashes. The next cycle re-detects and retries the write.
@@ -856,9 +860,7 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
                 persisted_chain_shares is not None
                 and abs(float(persisted_chain_shares) - float(target_chain_shares)) <= 1e-9
             )
-            if shares_unchanged and (
-                persisted_chain_state == "synced" or preserve_chain_state
-            ):
+            if shares_unchanged and persisted_chain_state == "synced":
                 # Check timestamp freshness (case c vs d/e).
                 timestamp_fresh = False
                 if persisted_seen_at:
@@ -878,7 +880,7 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
                     return False  # case c: nothing to write
                 # Case d vs e: stale timestamp. Only re-emit for long-lived
                 # synced positions (fix #121 idempotency guard).
-                if prior_chain_state != "synced" and not preserve_chain_state:
+                if prior_chain_state != "synced":
                     return False  # case e: transitioning to synced this cycle
 
             from src.engine.lifecycle_events import (
@@ -967,17 +969,127 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
             ) from exc
         return True
 
-    def _append_canonical_review_required(position: Position, *, reason: str) -> bool:
-        """PR #352 (Part-3 audit Finding 4): persist a durable REVIEW_REQUIRED
-        event + quarantined projection for an unresolved size mismatch.
+    def _position_family_key(position: Position):
+        from src.contracts.review_work_item import FamilyKey
 
-        The caller has already set position.state=QUARANTINED and
-        chain_state=size_mismatch_unresolved, so the projection phase is
-        QUARANTINED. append_many_and_project writes position_current.phase=
-        quarantined durably — the review requirement now survives daemon restart
-        instead of living only in the in-memory Position. Best-effort: if no
-        connection or the write fails, the runtime quarantine still stands (the
-        next reconcile cycle re-detects and re-attempts the durable write).
+        city = str(getattr(position, "city", "") or "")
+        target_date = str(getattr(position, "target_date", "") or "")
+        metric = str(getattr(position, "temperature_metric", "") or "")
+        if not (city and target_date and metric):
+            return None
+        return FamilyKey(city=city, target_date=target_date, temperature_metric=metric)
+
+    def _open_chain_review_work_item(position: Position, *, reason_code, detail: str) -> None:
+        """T5 (docs/rebuild/quarantine_excision_2026-07-11.md, REPLACEMENT PHASE
+        LAW): the dispute a former quarantine phase used to encode now lives
+        in a typed ReviewWorkItem, never in the phase string. Idempotently
+        opens one for this position/reason. Never raises into reconcile(): a
+        missed open here just means the next cycle's identical call retries
+        (open_work_item is itself idempotent). Same connection/transaction as
+        the canonical event write (INV-37 same-DB-transaction ownership) —
+        the caller commits both together.
+        """
+        if conn is None:
+            return
+        try:
+            from src.state.review_work_items import open_work_item
+            from src.state.schema.review_work_items_schema import ensure_table
+
+            ensure_table(conn)
+            shares = float(getattr(position, "shares", 0.0) or 0.0)
+            bound = shares if shares > 0.0 else None
+            open_work_item(
+                conn,
+                owner_domain="trade",
+                owner_table="position_current",
+                subject_id=str(getattr(position, "trade_id", "") or ""),
+                reason_code=reason_code,
+                evidence_refs=(detail,),
+                family_key=_position_family_key(position),
+                exposure_bound_usd=bound,
+                unbounded=(bound is None),
+                last_error_class="chain_reconciliation",
+                last_error_detail=detail,
+            )
+        except Exception as exc:
+            logger.error(
+                "Review work item open failed for %s (%s): %s",
+                getattr(position, "trade_id", "?"),
+                reason_code,
+                exc,
+            )
+
+    def _open_chain_only_fact_review_work_item(token_id: str, chain: "ChainPosition") -> None:
+        """T5: a ChainOnlyFact's review debt also carries a CHAIN_ONLY_UNKNOWN_ASSET
+        ReviewWorkItem, keyed on its token_id (owner_table=token_suppression,
+        matching where _persist_chain_only_quarantine_fact durably records the
+        fact). The ChainOnlyFact itself remains the authority (already
+        consulted directly by the family-scoped entry block); this work item
+        exists for operator-facing due-work scheduling. Never raises.
+        """
+        if conn is None:
+            return
+        try:
+            from src.state.review_work_items import (
+                family_key_for_condition_or_token,
+                open_work_item,
+            )
+            from src.state.schema.review_work_items_schema import ensure_table
+
+            ensure_table(conn)
+            weather_family = family_key_for_condition_or_token(
+                conn,
+                condition_id=str(getattr(chain, "condition_id", "") or ""),
+                token_id=token_id,
+            )
+            family_key = None
+            if weather_family is not None:
+                from src.contracts.review_work_item import FamilyKey
+
+                family_key = FamilyKey(
+                    city=weather_family.city,
+                    target_date=weather_family.target_date,
+                    temperature_metric=weather_family.temperature_metric,
+                    market_family_id=weather_family.market_family_id,
+                )
+            shares = float(getattr(chain, "size", 0.0) or 0.0)
+            bound = shares if shares > 0.0 else None
+            open_work_item(
+                conn,
+                owner_domain="trade",
+                owner_table="token_suppression",
+                subject_id=token_id,
+                reason_code=ReviewReasonCode.CHAIN_ONLY_UNKNOWN_ASSET,
+                evidence_refs=(f"condition_id={getattr(chain, 'condition_id', '')}",),
+                family_key=family_key,
+                exposure_bound_usd=bound,
+                unbounded=(bound is None),
+                last_error_class="chain_reconciliation",
+                last_error_detail="chain_only_quarantined",
+            )
+        except Exception as exc:
+            logger.error(
+                "Review work item open failed for chain-only token %s: %s",
+                token_id,
+                exc,
+            )
+
+    def _append_canonical_review_required(
+        position: Position, *, reason: str, phase_before: str | None, phase_after: str
+    ) -> bool:
+        """Persist a durable REVIEW_REQUIRED event + the position's TRUE
+        phase projection for a chain/local discrepancy under review.
+
+        T5 (docs/rebuild/quarantine_excision_2026-07-11.md, REPLACEMENT PHASE
+        LAW): this no longer forces position.state/phase into a quarantine
+        scar — the caller passes the position's honest phase_after (e.g.
+        "active" for a confirmed-fill position, or the phase it is being
+        restored to). The review debt is tracked separately by
+        _open_chain_review_work_item; this function only persists the durable
+        audit event + the honest projection so it survives daemon restart.
+        Best-effort: if no connection or the write fails, the in-memory
+        position still stands (the next reconcile cycle re-detects and
+        re-attempts the durable write).
         """
         if conn is None:
             return False
@@ -985,22 +1097,19 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
         from src.state.db import append_many_and_project
 
         try:
-            # F4 (docs/archive/2026-Q2/findings_historical/findings_2026_05_28.md §F4, 2026-05-28): unresolved
-            # size mismatch always quarantines the position. Pass phase_after
-            # explicitly so canonical position_current.phase is QUARANTINED
-            # regardless of any prior runtime pos.state string mutation.
             events, projection = build_review_required_canonical_write(
                 position,
                 review_detected_at=now,
                 reason=reason,
                 sequence_no=_next_canonical_sequence_no(getattr(position, "trade_id", "")),
-                phase_after=LifecyclePhase.QUARANTINED.value,
+                phase_before=phase_before,
+                phase_after=phase_after,
                 source_module="src.state.chain_reconciliation",
             )
             append_many_and_project(conn, events, projection)
         except Exception as exc:
             logger.warning(
-                "REVIEW_REQUIRED canonical write failed for %s: %s (runtime quarantine stands; "
+                "REVIEW_REQUIRED canonical write failed for %s: %s (runtime state stands; "
                 "next reconcile cycle retries)",
                 getattr(position, "trade_id", "?"), exc,
             )
@@ -1190,20 +1299,28 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
     stats = {
         "synced": 0,
         "voided": 0,
-        "quarantined": 0,
+        "review_required": 0,
+        "chain_only_unresolved": 0,
         "updated": 0,
         "skipped_pending": 0,
         "rescued_pending": 0,
     }
     now = datetime.now(timezone.utc).isoformat()
 
-    def _is_current_money_risk_quarantine(position: Position) -> bool:
-        state = getattr(position.state, "value", position.state)
-        chain_state = getattr(position.chain_state, "value", position.chain_state)
-        return (
-            str(state) == LifecyclePhase.QUARANTINED.value
-            and has_current_money_risk_chain_state(str(chain_state or ""))
-        )
+    # T5 (docs/rebuild/quarantine_excision_2026-07-11.md, REPLACEMENT PHASE
+    # LAW): _is_current_money_risk_quarantine (state == 'quarantined' and a
+    # current-risk chain_state) and its consumer block below are RETIRED —
+    # no writer mints state='quarantined' going forward, and
+    # Position.__post_init__ remaps any legacy row to its TRUE runtime state
+    # before this function ever sees it, so the predicate was provably
+    # unreachable for any live Position (unlike a bare-string mixed-epoch
+    # read, keeping this as "defensive dead code" was actively wrong: it
+    # required 'quarantined' to also stay a member of
+    # INACTIVE_RUNTIME_STATES, which then made an (unreachable-in-production)
+    # quarantined-state position double-process through both this branch and
+    # the "chain but not local" restoration branch). Real chain-risk exposure
+    # now flows through the normal ACTIVE/DAY0_WINDOW/PENDING_EXIT sync path
+    # below with no special casing needed.
 
     def _pending_exit_owned_by_exit_lifecycle(position: Position) -> bool:
         return (
@@ -1341,9 +1458,20 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
         token_id: str,
         source: str,
     ) -> None:
+        """T5 (docs/rebuild/quarantine_excision_2026-07-11.md, REPLACEMENT
+        PHASE LAW, critic I-1/I-2): a venue-confirmed fill conflicts with a
+        chain snapshot showing absence. This is REAL exposure, not an unknown
+        asset — the position keeps its TRUE phase (never a quarantine scar);
+        the dispute is tracked by an open ReviewWorkItem
+        (CONFIRMED_FILL_CHAIN_ABSENCE_CONFLICT), operator-clearable and
+        rebuildable from the underlying facts.
+        """
+        phase_before = phase_for_runtime_position(
+            state=getattr(position, "state", ""),
+            exit_state=getattr(position, "exit_state", ""),
+            chain_state=getattr(position, "chain_state", ""),
+        ).value
         corrected = replace(position)
-        corrected.state = LifecycleState.QUARANTINED.value
-        corrected.chain_state = ENTRY_AUTHORITY_CHAIN_ABSENCE_CHAIN_STATE
         if not _positive_decimal(getattr(corrected, "chain_shares", None)):
             corrected.chain_shares = float(getattr(corrected, "shares", 0.0) or 0.0)
         if not _positive_decimal(getattr(corrected, "chain_avg_price", None)):
@@ -1351,9 +1479,7 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
         if not _positive_decimal(getattr(corrected, "chain_cost_basis_usd", None)):
             corrected.chain_cost_basis_usd = float(getattr(corrected, "cost_basis_usd", 0.0) or 0.0)
         corrected.fill_authority = FILL_AUTHORITY_VENUE_CONFIRMED_FULL
-        corrected.exit_reason = ENTRY_AUTHORITY_CHAIN_ABSENCE_REVIEW_REASON
         corrected.last_chain_absence_observed_at = now
-        corrected.quarantined_at = corrected.quarantined_at or now
         logger.error(
             "CONFIRMED_FILL_CHAIN_ABSENCE_CONFLICT: trade_id=%s token=%s source=%s; "
             "preserving live monitorable exposure for attribution instead of marking no-risk absent",
@@ -1361,23 +1487,25 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
             token_id,
             source,
         )
+        _open_chain_review_work_item(
+            corrected,
+            reason_code=ReviewReasonCode.CONFIRMED_FILL_CHAIN_ABSENCE_CONFLICT,
+            detail=f"{ENTRY_AUTHORITY_CHAIN_ABSENCE_REVIEW_REASON}: token={token_id} source={source}",
+        )
         if _append_canonical_review_required(
             corrected,
             reason=ENTRY_AUTHORITY_CHAIN_ABSENCE_REVIEW_REASON,
+            phase_before=phase_before,
+            phase_after=phase_before,
         ):
             stats["review_required_persisted"] = (
                 stats.get("review_required_persisted", 0) + 1
             )
-        position.state = corrected.state
-        position.chain_state = corrected.chain_state
         position.chain_shares = corrected.chain_shares
         position.chain_avg_price = corrected.chain_avg_price
         position.chain_cost_basis_usd = corrected.chain_cost_basis_usd
         position.fill_authority = corrected.fill_authority
-        position.exit_reason = corrected.exit_reason
         position.last_chain_absence_observed_at = corrected.last_chain_absence_observed_at
-        position.quarantined_at = corrected.quarantined_at
-        stats["quarantined"] += 1
         stats["confirmed_fill_chain_absence_conflict_preserved"] = (
             stats.get("confirmed_fill_chain_absence_conflict_preserved", 0) + 1
         )
@@ -1466,14 +1594,25 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
             ),
             reverse=True,
         )[0]
+        # T5 (docs/rebuild/quarantine_excision_2026-07-11.md, REPLACEMENT PHASE
+        # LAW, critic I-1): chain proves this position still holds real
+        # inventory despite a terminal/inactive local record — restore its
+        # TRUE phase (active, chain-confirmed), never a quarantine scar. The
+        # recovery needs operator/re-observation review before being fully
+        # trusted as final, tracked by an open ReviewWorkItem
+        # (TERMINAL_RESTORE_EXPOSURE), not by the phase value.
+        phase_before = phase_for_runtime_position(
+            state=getattr(restored, "state", ""),
+            exit_state=getattr(restored, "exit_state", ""),
+            chain_state=getattr(restored, "chain_state", ""),
+        ).value
         cost = _chain_observed_cost(chain)
-        restored.state = LifecycleState.QUARANTINED.value
-        restored.chain_state = "entry_authority_quarantined"
+        restored.state = LifecycleState.HOLDING.value
+        restored.chain_state = "synced"
         restored.chain_shares = float(chain.size)
         restored.chain_avg_price = float(getattr(chain, "avg_price", 0.0) or 0.0)
         restored.chain_cost_basis_usd = cost
         restored.chain_verified_at = now
-        restored.quarantined_at = restored.quarantined_at or now
         restored.fill_authority = FILL_AUTHORITY_VENUE_POSITION_OBSERVED
         restored.recovery_authority = "balance_only"
         restored.shares = float(chain.size)
@@ -1486,9 +1625,16 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
         restored.order_status = "filled"
         restored.exit_state = ""
         restored.exit_reason = ""
+        _open_chain_review_work_item(
+            restored,
+            reason_code=ReviewReasonCode.TERMINAL_RESTORE_EXPOSURE,
+            detail=f"chain_held_after_terminal_projection: token={token_id} phase_before={phase_before}",
+        )
         if _append_canonical_review_required(
             restored,
             reason="chain_held_after_terminal_projection",
+            phase_before=phase_before,
+            phase_after=LifecyclePhase.ACTIVE.value,
         ):
             stats["review_required_persisted"] = (
                 stats.get("review_required_persisted", 0) + 1
@@ -1496,163 +1642,15 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
         stats["terminal_chain_exposure_restored"] = (
             stats.get("terminal_chain_exposure_restored", 0) + 1
         )
-        stats["quarantined"] += 1
         return True
 
-    def _attached_schemas() -> set[str]:
-        if conn is None:
-            return set()
-        try:
-            return {str(row[1]) for row in conn.execute("PRAGMA database_list").fetchall()}
-        except Exception:
-            return {"main"}
-
-    def _table_exists(schema: str, table: str) -> bool:
-        if conn is None:
-            return False
-        try:
-            row = conn.execute(
-                f"SELECT 1 FROM {schema}.sqlite_master WHERE type='table' AND name=?",
-                (table,),
-            ).fetchone()
-        except Exception:
-            return False
-        return row is not None
-
-    def _ensure_forecasts_attached() -> None:
-        if conn is None:
-            return
-        if "forecasts" in _attached_schemas():
-            return
-        try:
-            from src.state.db import ZEUS_FORECASTS_DB_PATH
-
-            conn.execute("ATTACH DATABASE ? AS forecasts", (str(ZEUS_FORECASTS_DB_PATH),))
-        except Exception:
-            return
-
-    def _chain_market_metadata(token_id: str, chain: ChainPosition) -> dict[str, object] | None:
-        if conn is None:
-            return None
-        _ensure_forecasts_attached()
-        schemas = _attached_schemas()
-        for schema in ("forecasts", "world", "main"):
-            if schema not in schemas or not _table_exists(schema, "market_events"):
-                continue
-            cols = {
-                str(row[1])
-                for row in conn.execute(f"PRAGMA {schema}.table_info(market_events)").fetchall()
-            }
-            metric_expr = (
-                "temperature_metric"
-                if "temperature_metric" in cols
-                else (
-                    "CASE WHEN lower(market_slug) LIKE '%lowest-temperature%' "
-                    "THEN 'low' ELSE 'high' END"
-                )
-            )
-            query = f"""
-                SELECT city, target_date, {metric_expr} AS temperature_metric,
-                       market_slug, range_label, token_id, condition_id
-                  FROM {schema}.market_events
-                 WHERE (
-                        NULLIF(condition_id, '') = NULLIF(?, '')
-                     OR NULLIF(token_id, '') = NULLIF(?, '')
-                 )
-                 ORDER BY CASE WHEN token_id = ? THEN 0 ELSE 1 END
-                 LIMIT 1
-            """
-            try:
-                row = conn.execute(
-                    query,
-                    (
-                        str(getattr(chain, "condition_id", "") or ""),
-                        token_id,
-                        token_id,
-                    ),
-                ).fetchone()
-            except Exception:
-                continue
-            if row is None:
-                continue
-            try:
-                row_token = str(row["token_id"] or "")
-            except Exception:
-                row_token = str(row[5] or "")
-            direction = "buy_yes" if row_token == token_id else "buy_no"
-            return {
-                "city": row["city"],
-                "target_date": row["target_date"],
-                "temperature_metric": row["temperature_metric"],
-                "market_slug": row["market_slug"],
-                "bin_label": row["range_label"],
-                "yes_token_id": row_token,
-                "condition_id": row["condition_id"] or getattr(chain, "condition_id", ""),
-                "direction": direction,
-            }
-        return None
-
-    def _materialize_chain_only_position_if_resolvable(
-        token_id: str,
-        chain: ChainPosition,
-    ) -> bool:
-        metadata = _chain_market_metadata(token_id, chain)
-        if metadata is None:
-            return False
-        cost = _chain_observed_cost(chain)
-        direction = str(metadata["direction"])
-        yes_token_id = str(metadata.get("yes_token_id") or "")
-        position = Position(
-            trade_id=f"chain-only-{token_id[-16:]}",
-            market_id=str(metadata.get("condition_id") or getattr(chain, "condition_id", "") or token_id),
-            city=str(metadata.get("city") or "CHAIN_ONLY_UNRESOLVED"),
-            cluster=str(metadata.get("city") or "CHAIN_ONLY_UNRESOLVED"),
-            target_date=str(metadata.get("target_date") or ""),
-            bin_label=str(metadata.get("bin_label") or ""),
-            direction=direction,
-            unit="C" if "°C" in str(metadata.get("bin_label") or "") else "F",
-            temperature_metric=str(metadata.get("temperature_metric") or "high"),
-            env="live",
-            size_usd=cost,
-            entry_price=float(getattr(chain, "avg_price", 0.0) or 0.0),
-            p_posterior=0.0,
-            shares=float(chain.size),
-            cost_basis_usd=cost,
-            entered_at=now,
-            entered_at_authority="reconstructed_from_chain",
-            entry_method="chain_only_reconciliation",
-            strategy_key="chain_only_reconciliation",
-            strategy="chain_only_reconciliation",
-            edge_source="chain_only_quarantine",
-            discovery_mode="chain_reconciliation",
-            state=LifecycleState.QUARANTINED.value,
-            order_status="filled",
-            chain_state="entry_authority_quarantined",
-            chain_shares=float(chain.size),
-            chain_avg_price=float(getattr(chain, "avg_price", 0.0) or 0.0),
-            chain_cost_basis_usd=cost,
-            chain_verified_at=now,
-            token_id=yes_token_id if direction == "buy_no" else token_id,
-            no_token_id=token_id if direction == "buy_no" else "",
-            condition_id=str(metadata.get("condition_id") or getattr(chain, "condition_id", "") or ""),
-            quarantined_at=now,
-            fill_authority=FILL_AUTHORITY_VENUE_POSITION_OBSERVED,
-            market_slug=str(metadata.get("market_slug") or ""),
-        )
-        position.recovery_authority = "balance_only"
-        if _append_canonical_review_required(
-            position,
-            reason="chain_only_canonical_quarantine",
-        ):
-            stats["review_required_persisted"] = (
-                stats.get("review_required_persisted", 0) + 1
-            )
-        portfolio.positions.append(position)
-        stats["chain_only_canonical_quarantine_materialized"] = (
-            stats.get("chain_only_canonical_quarantine_materialized", 0) + 1
-        )
-        stats["quarantined"] += 1
-        return True
+    # T5 (docs/rebuild/quarantine_excision_2026-07-11.md, T-consolidations #3):
+    # _materialize_chain_only_position_if_resolvable (and its private
+    # market_events metadata lookup helpers) DELETED outright, never renamed —
+    # it minted a fake Position(state=QUARANTINED) for a chain-only token,
+    # directly contradicting the target model. Chain-only unknown assets are
+    # ALWAYS a typed ChainOnlyFact (see the "Rule 3" fallback below), never a
+    # Position row, regardless of whether market_events metadata resolves.
 
     # DT#4 / INV-18: derive three-state from inputs at the TOP of reconcile().
     # reconcile() is only called when the chain API responded (cycle_runtime.py
@@ -1749,20 +1747,6 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
                     aggregate_backed_set.add(_al.trade_id)
     # ────────────────────────────────────────────────────────────────────────
 
-    current_risk_quarantines_by_token: dict[str, list[Position]] = {}
-    for candidate in portfolio.positions:
-        if not _is_current_money_risk_quarantine(candidate):
-            continue
-        candidate_token = (
-            candidate.token_id
-            if candidate.direction == "buy_yes"
-            else candidate.no_token_id
-        )
-        if candidate_token:
-            current_risk_quarantines_by_token.setdefault(candidate_token, []).append(
-                candidate
-            )
-
     for pos in list(portfolio.positions):
         tid = pos.token_id if pos.direction == "buy_yes" else pos.no_token_id
         if not tid:
@@ -1811,9 +1795,7 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
             continue
 
         state_name = getattr(pos.state, "value", pos.state)
-        if state_name in {"quarantined"}:
-            local_tokens.add(tid)
-        elif state_name not in INACTIVE_RUNTIME_STATES:
+        if state_name not in INACTIVE_RUNTIME_STATES:
             local_tokens.add(tid)
 
         if (
@@ -1825,9 +1807,17 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
             )
             and _has_confirmed_entry_authority(pos)
         ):
+            # T5 (docs/rebuild/quarantine_excision_2026-07-11.md, REPLACEMENT
+            # PHASE LAW): chain/local evidence contradicts this position's
+            # VOIDED write — restore its TRUE phase (active), never a
+            # quarantine scar. Same classification as
+            # _restore_terminal_chain_exposure_if_available (a wrongly-
+            # terminal write corrected by chain evidence): the dispute is
+            # tracked by an open ReviewWorkItem (TERMINAL_RESTORE_EXPOSURE).
+            phase_before = state_name
             corrected = replace(pos)
-            corrected.state = LifecycleState.QUARANTINED.value
-            corrected.chain_state = ENTRY_AUTHORITY_CHAIN_ABSENCE_CHAIN_STATE
+            corrected.state = LifecycleState.HOLDING.value
+            corrected.chain_state = "synced"
             if not _positive_decimal(getattr(corrected, "chain_shares", None)):
                 corrected.chain_shares = float(getattr(corrected, "shares", 0.0) or 0.0)
             if not _positive_decimal(getattr(corrected, "chain_avg_price", None)):
@@ -1835,14 +1825,20 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
             if not _positive_decimal(getattr(corrected, "chain_cost_basis_usd", None)):
                 corrected.chain_cost_basis_usd = float(getattr(corrected, "cost_basis_usd", 0.0) or 0.0)
             corrected.fill_authority = FILL_AUTHORITY_VENUE_CONFIRMED_FULL
-            corrected.exit_reason = ENTRY_AUTHORITY_CHAIN_ABSENCE_REVIEW_REASON
+            corrected.exit_reason = ""
             corrected.last_chain_absence_observed_at = (
                 getattr(corrected, "last_chain_absence_observed_at", "") or now
             )
-            corrected.quarantined_at = corrected.quarantined_at or now
+            _open_chain_review_work_item(
+                corrected,
+                reason_code=ReviewReasonCode.TERMINAL_RESTORE_EXPOSURE,
+                detail=f"false_phantom_void_positive_exposure_restored: token={tid} phase_before={phase_before}",
+            )
             if _append_canonical_review_required(
                 corrected,
                 reason=ENTRY_AUTHORITY_CHAIN_ABSENCE_REVIEW_REASON,
+                phase_before=phase_before,
+                phase_after=LifecyclePhase.ACTIVE.value,
             ):
                 stats["false_phantom_void_positive_exposure_restored"] = (
                     stats.get("false_phantom_void_positive_exposure_restored", 0) + 1
@@ -1862,8 +1858,7 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
             pos.fill_authority = corrected.fill_authority
             pos.exit_reason = corrected.exit_reason
             pos.last_chain_absence_observed_at = corrected.last_chain_absence_observed_at
-            pos.quarantined_at = corrected.quarantined_at
-            stats["quarantined"] += 1
+            local_tokens.add(tid)
             continue
 
         chain = chain_by_token.get(tid)
@@ -1899,53 +1894,6 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
                 stats.get("chain_confirmed_zero", 0) + 1
             )
             continue
-        if _is_current_money_risk_quarantine(pos):
-            if chain is None:
-                stats["skipped_current_risk_quarantine_missing_chain"] = (
-                    stats.get("skipped_current_risk_quarantine_missing_chain", 0) + 1
-                )
-                continue
-            peers = current_risk_quarantines_by_token.get(tid, [])
-            observed = replace(pos)
-            if len(peers) > 1:
-                local_total = sum(float(peer.effective_shares) for peer in peers)
-                if abs(local_total - chain.size) > _ALLOCATE_DUST:
-                    stats["skipped_current_risk_quarantine_aggregate_mismatch"] = (
-                        stats.get(
-                            "skipped_current_risk_quarantine_aggregate_mismatch", 0
-                        )
-                        + 1
-                    )
-                    continue
-                observed.chain_shares = float(pos.effective_shares)
-            else:
-                observed.chain_shares = chain.size
-                if chain.avg_price > 0:
-                    observed.chain_avg_price = chain.avg_price
-                if chain.cost > 0:
-                    observed.chain_cost_basis_usd = chain.cost
-            observed.chain_verified_at = now
-            observed.condition_id = observed.condition_id or chain.condition_id
-            if _append_canonical_chain_observation_if_available(
-                observed,
-                prior_chain_state=str(
-                    getattr(pos.chain_state, "value", pos.chain_state) or ""
-                ),
-                preserve_chain_state=True,
-            ):
-                stats["quarantine_chain_observation_persisted"] = (
-                    stats.get("quarantine_chain_observation_persisted", 0) + 1
-                )
-            pos.chain_shares = observed.chain_shares
-            pos.chain_avg_price = observed.chain_avg_price
-            pos.chain_cost_basis_usd = observed.chain_cost_basis_usd
-            pos.chain_verified_at = observed.chain_verified_at
-            pos.condition_id = observed.condition_id
-            stats["quarantine_chain_refreshed"] = (
-                stats.get("quarantine_chain_refreshed", 0) + 1
-            )
-            continue
-
         if pos.state in INACTIVE_RUNTIME_STATES:
             state_name = getattr(pos.state, "value", pos.state)
             key = f"skipped_{state_name}"
@@ -2340,10 +2288,11 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
             pos.size_usd = corrected.size_usd
             pos.shares = corrected.shares
             pos.state = corrected.state
-            pos.quarantined_at = getattr(corrected, "quarantined_at", getattr(pos, "quarantined_at", ""))
             stats["synced"] += 1
 
-    # Rule 3: Chain but NOT local → QUARANTINE (skip ignored tokens)
+    # Rule 3: Chain but NOT local → typed ChainOnlyFact review queue entry
+    # (skip ignored tokens). T5: chain-only unknown assets are ALWAYS a
+    # ChainOnlyFact, never a Position row (T-consolidations #3).
     ignored = set(getattr(portfolio, "ignored_tokens", []) or [])
     for tid, chain in chain_by_token.items():
         if tid in ignored:
@@ -2352,11 +2301,9 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
             if _restore_terminal_chain_exposure_if_available(tid, chain):
                 local_tokens.add(tid)
                 continue
-            if _materialize_chain_only_position_if_resolvable(tid, chain):
-                local_tokens.add(tid)
-                continue
             logger.warning(
-                "QUARANTINE EXCLUDED FROM CANONICAL MIGRATION: chain token %s...%s not in portfolio; pending future governance design",
+                "CHAIN_ONLY_UNKNOWN_ASSET: chain token %s...%s not in portfolio; "
+                "review-queued as a typed ChainOnlyFact",
                 tid[:8],
                 tid[-4:],
             )
@@ -2380,23 +2327,10 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
                     entry_block_scope=entry_block_scope,
                 )
             )
-            stats["quarantined"] += 1
+            _open_chain_only_fact_review_work_item(tid, chain)
+            stats["chain_only_unresolved"] = stats.get("chain_only_unresolved", 0) + 1
 
     return stats
-
-
-QUARANTINE_REVIEW_REQUIRED = "QUARANTINE_REVIEW_REQUIRED"
-QUARANTINE_EXPIRED_REVIEW_REQUIRED = "QUARANTINE_EXPIRED_REVIEW_REQUIRED"
-
-
-def quarantine_resolution_reason(chain_state: str) -> str:
-    """Still consulted by src.engine.cycle_runtime for any legacy row that
-    already carries chain_state='quarantine_expired' from before P0b
-    (2026-07-04) — see check_quarantine_timeouts for why nothing mints that
-    value going forward."""
-    if chain_state == "quarantine_expired":
-        return QUARANTINE_EXPIRED_REVIEW_REQUIRED
-    return QUARANTINE_REVIEW_REQUIRED
 
 
 def check_quarantine_timeouts(portfolio: PortfolioState) -> int:
@@ -2410,12 +2344,11 @@ def check_quarantine_timeouts(portfolio: PortfolioState) -> int:
     (src.state.chain_mirror_reconciler.classify_local_position /
     _has_prior_review_open_absent_marker), which runs every ~10 minutes —
     orders of magnitude faster than a 48h backstop, so the backstop is now
-    strictly worse than the mechanism it was standing in for. No new
-    'quarantine_expired' rows are minted by this function going forward; the
-    literal, quarantine_resolution_reason(), and QUARANTINE_EXPIRED_REVIEW_REQUIRED
-    remain for any legacy row already carrying that chain_state from before
-    this change (blast-radius honesty: this slice stops the writer, it does
-    not purge the read-side vocabulary — see the P0b task's own caution).
+    strictly worse than the mechanism it was standing in for. T5
+    (docs/rebuild/quarantine_excision_2026-07-11.md) removed the last reader
+    of the 'quarantine_expired' literal (cycle_runtime's admin-resolution
+    monitor branch) along with the retired ChainState members — this
+    function's own name is a residual label, not a live mechanism.
 
     Returns: always 0 (position expiry removed). Retained as a function (not
     deleted outright) because it still owns the ChainOnlyFact 48h review

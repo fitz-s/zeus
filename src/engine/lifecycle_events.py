@@ -39,13 +39,29 @@ DAY0_WINDOW = LifecyclePhase.DAY0_WINDOW.value
 PENDING_EXIT = LifecyclePhase.PENDING_EXIT.value
 ECONOMICALLY_CLOSED = LifecyclePhase.ECONOMICALLY_CLOSED.value
 SETTLED = LifecyclePhase.SETTLED.value
-QUARANTINED = LifecyclePhase.QUARANTINED.value
 
 
 def _normalized_state(value: object) -> str:
     if hasattr(value, "value"):
         return str(getattr(value, "value"))
     return str(value or "")
+
+
+def _self_fold_or_legacy_phase(phase_after: str) -> str:
+    """Validate+normalize a no-transition phase_after via the self-fold trick
+    (fold_lifecycle_phase(phase_after, phase_after)), except for the T5
+    mixed-epoch bridge literal 'quarantined' (docs/rebuild/quarantine_
+    excision_2026-07-11.md): that value is no longer a LifecyclePhase member
+    — no writer mints it going forward — but a LEGACY row's no-op refresh
+    write (e.g. a chain-observation persist) may still carry it as the
+    caller's current-phase argument (src.state.chain_reconciliation.
+    _canonical_chain_observation_phase reads it straight off the DB) until
+    the T5 schema migration (docs/rebuild item 5) rewrites history. Passing
+    it through fold_lifecycle_phase would raise; return it verbatim instead.
+    """
+    if phase_after == "quarantined":
+        return phase_after
+    return fold_lifecycle_phase(phase_after, phase_after).value
 
 
 def _non_empty(*values: object) -> str:
@@ -603,10 +619,10 @@ def build_monitor_refreshed_canonical_write(
     final_exit_trigger: str | None = None,
 ) -> tuple[list[dict], dict]:
     """Persist a no-transition monitor refresh for an open position."""
-    if phase_after not in {ACTIVE, DAY0_WINDOW, PENDING_EXIT, QUARANTINED}:
+    if phase_after not in {ACTIVE, DAY0_WINDOW, PENDING_EXIT}:
         raise ValueError(
             "monitor refreshed canonical builder requires phase_after in "
-            f"{{ACTIVE, DAY0_WINDOW, PENDING_EXIT, QUARANTINED}}, got {phase_after!r}"
+            f"{{ACTIVE, DAY0_WINDOW, PENDING_EXIT}}, got {phase_after!r}"
     )
     projection = build_position_current_projection(position)
     projection["phase"] = phase_after
@@ -1125,7 +1141,7 @@ def build_chain_size_corrected_canonical_write(
         )
     projection = build_position_current_projection(position)
     projection["phase"] = phase_after
-    phase = fold_lifecycle_phase(phase_after, phase_after).value
+    phase = _self_fold_or_legacy_phase(phase_after)
     occurred_at = _non_empty(
         getattr(position, "chain_verified_at", ""),
         projection["updated_at"],
@@ -1219,7 +1235,7 @@ def build_chain_economics_observed_canonical_write(
         )
     projection = build_position_current_projection(position)
     projection["phase"] = phase_after
-    phase = fold_lifecycle_phase(phase_after, phase_after).value
+    phase = _self_fold_or_legacy_phase(phase_after)
     if not chain_observed_at:
         raise ValueError(
             "chain_observed_at is required for build_chain_economics_observed_canonical_write"
@@ -1274,35 +1290,32 @@ def build_review_required_canonical_write(
     review_detected_at: str,
     reason: str,
     sequence_no: int,
-    phase_after: str = QUARANTINED,
+    phase_after: str,
+    phase_before: str | None = None,
     source_module: str = "src.state.chain_reconciliation",
 ) -> tuple[list[dict], dict]:
     """PR #352 (Part-3 audit Finding 4, 2026-05-27): durable REVIEW_REQUIRED event.
 
-    Emitted when chain reconciliation detects an unresolved chain/local size
-    mismatch but has NO canonical baseline to write a CHAIN_SIZE_CORRECTED
-    against. Before this builder, that branch only mutated the runtime Position
-    (state=QUARANTINED, chain_state=size_mismatch_unresolved) and bumped a stats
-    counter — nothing was persisted, so on daemon restart position_current still
-    showed the position as active and the review requirement was lost.
-
-    The caller sets the runtime Position to the quarantined/size-mismatch state
-    BEFORE calling this builder, so the projection phase is QUARANTINED and
-    append_many_and_project() persists position_current.phase=quarantined +
-    chain_state=size_mismatch_unresolved durably alongside the audit event.
+    T5 (docs/rebuild/quarantine_excision_2026-07-11.md, REPLACEMENT PHASE LAW):
+    this builder no longer forces a quarantine scar phase. The caller passes
+    the position's TRUE, honest phase (e.g. ``active`` for a confirmed-fill
+    position chain evidence disputes, or the phase it is being restored to
+    when reconciliation proves a prior terminal write was wrong) as
+    ``phase_after`` — the review debt itself is tracked by a separate
+    ``ReviewWorkItem`` (see src.state.review_work_items), never by the phase
+    value. ``phase_before`` is recorded for audit accuracy when the caller
+    knows it (e.g. restoring a wrongly-VOIDED position); this event type
+    represents an exceptional evidence-driven correction, so the write does
+    not additionally enforce LEGAL_LIFECYCLE_FOLDS legality between the two
+    (mirrors the existing self-fold idiom used by other refresh-style events
+    in this module) — ``phase_after`` is still validated as a real
+    ``LifecyclePhase`` member via the self-fold.
 
     Args:
         review_detected_at: ISO8601 UTC timestamp when the review condition was
             detected (callers pass their ``now`` timestamp). F2 invariant: must
             be explicit, not derived from legacy position attributes.
     """
-    # F4 (docs/archive/2026-Q2/findings_historical/findings_2026_05_28.md §F4, 2026-05-28): REVIEW_REQUIRED always
-    # folds to QUARANTINED. phase_after is explicit (default QUARANTINED).
-    if phase_after != QUARANTINED:
-        raise ValueError(
-            f"review_required canonical builder requires phase_after=QUARANTINED, "
-            f"got {phase_after!r}"
-        )
     projection = build_position_current_projection(position)
     projection["phase"] = phase_after
     # F2 (docs/archive/2026-Q2/findings_historical/findings_2026_05_28.md §F2, 2026-05-28): occurred_at must be
@@ -1339,8 +1352,8 @@ def build_review_required_canonical_write(
         "sequence_no": sequence_no,
         "event_type": "REVIEW_REQUIRED",
         "occurred_at": occurred_at,
-        "phase_before": None,
-        "phase_after": fold_lifecycle_phase(None, QUARANTINED).value,
+        "phase_before": phase_before,
+        "phase_after": fold_lifecycle_phase(phase_after, phase_after).value,
         "strategy_key": _strategy_key(position),
         "decision_id": None,
         "snapshot_id": _nullable(getattr(position, "decision_snapshot_id", "")),
@@ -1353,78 +1366,4 @@ def build_review_required_canonical_write(
         "env": _position_env(position),
         "payload_json": payload,
     }
-    return [event], projection
-
-
-def build_chain_quarantined_canonical_write(
-    position: Any,
-    *,
-    strategy_key: str,
-    sequence_no: int,
-    phase_after: str = QUARANTINED,
-    source_module: str = "src.state.chain_reconciliation",
-) -> tuple[list[dict], dict]:
-    if not strategy_key:
-        raise ValueError("chain quarantine canonical builder requires explicit strategy_key")
-
-    # F4 (docs/archive/2026-Q2/findings_historical/findings_2026_05_28.md §F4, 2026-05-28): chain-only quarantine
-    # always folds to QUARANTINED. phase_after is explicit (default QUARANTINED).
-    if phase_after != QUARANTINED:
-        raise ValueError(
-            f"chain quarantine canonical builder requires phase_after=QUARANTINED, "
-            f"got {phase_after!r}"
-        )
-
-    original_strategy_key = getattr(position, "strategy_key", "")
-    original_strategy = getattr(position, "strategy", "")
-    setattr(position, "strategy_key", strategy_key)
-    setattr(position, "strategy", strategy_key)
-    try:
-        projection = build_position_current_projection(position)
-    finally:
-        setattr(position, "strategy_key", original_strategy_key)
-        setattr(position, "strategy", original_strategy)
-    projection["phase"] = phase_after
-
-    occurred_at = _non_empty(
-        getattr(position, "quarantined_at", ""),
-        getattr(position, "chain_verified_at", ""),
-        projection["updated_at"],
-    )
-    payload = json.dumps(
-        {
-            "source": "chain_reconciliation",
-            "reason": "chain_only_quarantined",
-            "condition_id": getattr(position, "condition_id", ""),
-            "token_id": getattr(position, "token_id", ""),
-            "chain_shares": getattr(position, "chain_shares", None),
-            "cost_basis_usd": getattr(position, "cost_basis_usd", None),
-            "size_usd": getattr(position, "size_usd", None),
-            "chain_state": getattr(position, "chain_state", ""),
-        },
-        default=str,
-        sort_keys=True,
-    )
-    event = {
-        "event_id": f"{getattr(position, 'trade_id')}:chain_quarantined:{sequence_no}",
-        "position_id": getattr(position, "trade_id"),
-        "event_version": 1,
-        "sequence_no": sequence_no,
-        "event_type": "CHAIN_QUARANTINED",
-        "occurred_at": occurred_at,
-        "phase_before": None,
-        "phase_after": fold_lifecycle_phase(None, QUARANTINED).value,
-        "strategy_key": strategy_key,
-        "decision_id": None,
-        "snapshot_id": _nullable(getattr(position, "decision_snapshot_id", "")),
-        "order_id": _nullable(getattr(position, "order_id", "")),
-        "command_id": None,
-        "caused_by": "chain_only_quarantined",
-        "idempotency_key": f"{getattr(position, 'trade_id')}:chain_quarantined:{sequence_no}",
-        "venue_status": None,
-        "source_module": source_module,
-        "env": _position_env(position),
-        "payload_json": payload,
-    }
-    projection["strategy_key"] = strategy_key
     return [event], projection

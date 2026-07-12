@@ -845,170 +845,19 @@ def test_chain_seen_at_refresh_does_not_emit_immediate_duplicate_observation() -
     assert second_count == 1
 
 
-def test_current_risk_quarantine_refreshes_chain_seen_without_resolving_quarantine() -> None:
-    """A positive chain observation must keep quarantine wealth evidence current.
-
-    Quarantine is inactive for ordinary lifecycle work, but
-    ``entry_authority_quarantined`` with positive chain shares is still current
-    money risk.  Reconciliation must refresh that positive observation without
-    changing the phase or erasing the unresolved entry-authority reason.
-    """
-    from datetime import datetime, timedelta, timezone
-
-    from src.state.chain_reconciliation import _CHAIN_SEEN_AT_MAX_AGE_SECONDS
-    from src.state.portfolio import FILL_AUTHORITY_VENUE_POSITION_OBSERVED
-
-    chain_size = 3.8
-    trade_id = "quarantine-chain-refresh"
-    stale_ts = (
-        datetime.now(timezone.utc)
-        - timedelta(seconds=_CHAIN_SEEN_AT_MAX_AGE_SECONDS + 120)
-    ).isoformat()
-
-    with tempfile.TemporaryDirectory() as tmpdir:
-        db_path = os.path.join(tmpdir, "world.db")
-        conn = _setup_db_on_disk(db_path)
-        pos = _make_position(
-            trade_id=trade_id,
-            token_id="tok-quarantine-refresh",
-            shares=chain_size,
-            chain_state="entry_authority_quarantined",
-        )
-        pos.state = "quarantined"
-        pos.fill_authority = FILL_AUTHORITY_VENUE_POSITION_OBSERVED
-        pos.chain_shares = chain_size
-        pos.chain_avg_price = 0.37
-        pos.chain_cost_basis_usd = chain_size * 0.37
-        pos.chain_verified_at = stale_ts
-        _seed_position_current(
-            conn,
-            pos,
-            chain_shares=chain_size,
-            phase="quarantined",
-        )
-        conn.execute(
-            """
-            UPDATE position_current
-               SET chain_state = 'entry_authority_quarantined',
-                   chain_seen_at = ?,
-                   chain_avg_price = ?,
-                   chain_cost_basis_usd = ?,
-                   fill_authority = ?
-             WHERE position_id = ?
-            """,
-            (
-                stale_ts,
-                pos.chain_avg_price,
-                pos.chain_cost_basis_usd,
-                FILL_AUTHORITY_VENUE_POSITION_OBSERVED,
-                trade_id,
-            ),
-        )
-        conn.commit()
-        chain = ChainPosition(
-            token_id=pos.token_id,
-            size=chain_size,
-            avg_price=pos.chain_avg_price,
-            cost=pos.chain_cost_basis_usd,
-            condition_id=pos.condition_id,
-        )
-
-        first_stats = reconcile(PortfolioState(positions=[pos]), [chain], conn=conn)
-        first = conn.execute(
-            """
-            SELECT phase, chain_state, chain_shares, chain_seen_at
-              FROM position_current
-             WHERE position_id = ?
-            """,
-            (trade_id,),
-        ).fetchone()
-        first_count = conn.execute(
-            """
-            SELECT COUNT(*)
-              FROM position_events
-             WHERE position_id = ?
-               AND event_type = 'CHAIN_SIZE_CORRECTED'
-               AND json_extract(payload_json, '$.reason') = 'chain_economics_observed'
-            """,
-            (trade_id,),
-        ).fetchone()[0]
-
-        second_stats = reconcile(PortfolioState(positions=[pos]), [chain], conn=conn)
-        second_count = conn.execute(
-            """
-            SELECT COUNT(*)
-              FROM position_events
-             WHERE position_id = ?
-               AND event_type = 'CHAIN_SIZE_CORRECTED'
-               AND json_extract(payload_json, '$.reason') = 'chain_economics_observed'
-            """,
-            (trade_id,),
-        ).fetchone()[0]
-        conn.close()
-
-    assert first["phase"] == "quarantined"
-    assert first["chain_state"] == "entry_authority_quarantined"
-    assert first["chain_shares"] == pytest.approx(chain_size)
-    assert first["chain_seen_at"] > stale_ts
-    assert first_stats.get("quarantine_chain_observation_persisted", 0) == 1
-    assert first_count == 1
-    assert second_stats.get("quarantine_chain_observation_persisted", 0) == 0
-    assert second_count == 1
-
-
-def test_current_risk_quarantine_missing_from_nonempty_snapshot_is_not_voided() -> None:
-    """A missing token is not positive evidence and cannot resolve quarantine."""
-    trade_id = "quarantine-missing-chain"
-    with tempfile.TemporaryDirectory() as tmpdir:
-        db_path = os.path.join(tmpdir, "world.db")
-        conn = _setup_db_on_disk(db_path)
-        pos = _make_position(
-            trade_id=trade_id,
-            token_id="tok-quarantine-missing",
-            shares=2.0,
-            chain_state="entry_authority_quarantined",
-        )
-        pos.state = "quarantined"
-        pos.chain_shares = 2.0
-        _seed_position_current(conn, pos, chain_shares=2.0, phase="quarantined")
-        conn.execute(
-            """
-            UPDATE position_current
-               SET chain_state = 'entry_authority_quarantined'
-             WHERE position_id = ?
-            """,
-            (trade_id,),
-        )
-        conn.commit()
-
-        stats = reconcile(
-            PortfolioState(positions=[pos]),
-            [
-                ChainPosition(
-                    token_id="different-chain-token",
-                    size=1.0,
-                    avg_price=0.5,
-                    cost=0.5,
-                    condition_id="different-condition",
-                )
-            ],
-            conn=conn,
-        )
-        row = conn.execute(
-            """
-            SELECT phase, chain_state, chain_shares
-              FROM position_current
-             WHERE position_id = ?
-            """,
-            (trade_id,),
-        ).fetchone()
-        conn.close()
-
-    assert row["phase"] == "quarantined"
-    assert row["chain_state"] == "entry_authority_quarantined"
-    assert row["chain_shares"] == pytest.approx(2.0)
-    assert stats.get("voided", 0) == 0
-    assert stats.get("skipped_current_risk_quarantine_missing_chain", 0) == 1
+# T5 (docs/rebuild/quarantine_excision_2026-07-11.md, REPLACEMENT PHASE LAW):
+# test_current_risk_quarantine_refreshes_chain_seen_without_resolving_quarantine
+# and test_current_risk_quarantine_missing_from_nonempty_snapshot_is_not_voided
+# retired along with src.state.chain_reconciliation._is_current_money_risk_quarantine
+# and its consumer block. Both tests forced pos.state = "quarantined" via a
+# direct POST-construction attribute assignment (bypassing Position.
+# __post_init__'s mixed-epoch remap) to simulate a runtime state that no
+# longer exists for any live Position — no writer mints state='quarantined'
+# going forward, so the "current-risk quarantine" chain-observation-refresh
+# path they exercised was already provably unreachable in production and has
+# been removed. Real chain-risk exposure flows through the normal
+# ACTIVE/DAY0_WINDOW/PENDING_EXIT chain-observation refresh path instead
+# (see test_matched_no_size_mismatch_persists_chain_shares above).
 
 
 def test_targeted_ctf_zero_removes_current_risk_without_inventing_close() -> None:

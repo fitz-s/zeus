@@ -55,7 +55,11 @@ _TERMINAL_NOOP_ORIGINS = [
     ("settled", LifecyclePhase.SETTLED.value),
     ("voided", LifecyclePhase.VOIDED.value),
     ("admin_closed", LifecyclePhase.ADMIN_CLOSED.value),
-    ("quarantined", LifecyclePhase.QUARANTINED.value),
+    # T5 (docs/rebuild/quarantine_excision_2026-07-11.md): 'quarantined' is no
+    # longer a LifecyclePhase member (no writer mints it) — but this guard's
+    # crash-safety contract is preserved explicitly on the raw legacy string
+    # (see enter_pending_exit_runtime_state), so the bare literal stays here.
+    ("quarantined", "quarantined"),
 ]
 
 

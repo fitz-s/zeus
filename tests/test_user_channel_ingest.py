@@ -1101,21 +1101,31 @@ def test_exit_sell_confirmed_trade_does_not_mint_positive_exposure_lot(conn):
     assert _command_state(conn) == "FILLED"
 
 
-def test_failed_after_matched_quarantines_or_reverses_optimistic_projection(conn):
+def test_failed_after_matched_reverses_optimistic_projection(conn):
     ingestor = _ingestor(conn)
     ingestor.handle_message(_trade_message("MATCHED"))
     ingestor.handle_message(_trade_message("FAILED"))
 
-    assert [r["state"] for r in _rows(conn, "position_lots")] == ["OPTIMISTIC_EXPOSURE", "QUARANTINED"]
+    # T5 (docs/rebuild/quarantine_excision_2026-07-11.md): a failed trade
+    # reverses its optimistic lot to ECONOMICALLY_CLOSED_OPTIMISTIC, never a
+    # quarantine scar state (src.state.venue_command_repo.
+    # rollback_optimistic_lot_for_failed_trade).
+    assert [r["state"] for r in _rows(conn, "position_lots")] == [
+        "OPTIMISTIC_EXPOSURE",
+        "ECONOMICALLY_CLOSED_OPTIMISTIC",
+    ]
     assert [r["state"] for r in _rows(conn, "venue_trade_facts")] == ["MATCHED", "FAILED"]
 
 
-def test_failed_after_mined_quarantines_optimistic_projection(conn):
+def test_failed_after_mined_reverses_optimistic_projection(conn):
     ingestor = _ingestor(conn)
     ingestor.handle_message(_trade_message("MINED", transaction_hash="0xmined", confirmation_count=0))
     ingestor.handle_message(_trade_message("FAILED"))
 
-    assert [r["state"] for r in _rows(conn, "position_lots")] == ["OPTIMISTIC_EXPOSURE", "QUARANTINED"]
+    assert [r["state"] for r in _rows(conn, "position_lots")] == [
+        "OPTIMISTIC_EXPOSURE",
+        "ECONOMICALLY_CLOSED_OPTIMISTIC",
+    ]
     assert [r["state"] for r in _rows(conn, "venue_trade_facts")] == ["MINED", "FAILED"]
 
 
@@ -1136,7 +1146,10 @@ def test_failed_without_fill_economics_after_fill_observation_rolls_back_optimis
     assert result["command_event"] is None
     assert [r["state"] for r in _rows(conn, "venue_trade_facts")] == [previous_status, "FAILED"]
     lots = _rows(conn, "position_lots")
-    assert [r["state"] for r in lots] == ["OPTIMISTIC_EXPOSURE", "QUARANTINED"]
+    # T5 (docs/rebuild/quarantine_excision_2026-07-11.md): the failed-trade
+    # rollback lot is ECONOMICALLY_CLOSED_OPTIMISTIC, never a quarantine scar
+    # state (src.state.venue_command_repo.rollback_optimistic_lot_for_failed_trade).
+    assert [r["state"] for r in lots] == ["OPTIMISTIC_EXPOSURE", "ECONOMICALLY_CLOSED_OPTIMISTIC"]
     assert lots[-1]["source_trade_fact_id"] == result["trade_fact_id"]
 
 

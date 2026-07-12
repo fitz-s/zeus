@@ -7,13 +7,19 @@
 
 Finding 4 (Part-3 audit): when chain reconciliation detects a chain/local size
 mismatch but has no canonical baseline to correct against, the pre-fix code only
-mutated the in-memory Position (state=QUARANTINED, chain_state=
-size_mismatch_unresolved) and bumped a stats counter. position_current stayed
+mutated the in-memory Position and bumped a stats counter. position_current stayed
 'active' on disk, so on the next daemon restart the loader rebuilt the position
 as active and the review requirement vanished — live exposure risk.
 
-PR #352 emits a durable REVIEW_REQUIRED event and persists the quarantined
-projection via append_many_and_project, so the review survives restart.
+PR #352 emits a durable REVIEW_REQUIRED event and persists the projection via
+append_many_and_project, so the review survives restart.
+
+T5 (docs/rebuild/quarantine_excision_2026-07-11.md, REPLACEMENT PHASE LAW):
+build_review_required_canonical_write no longer forces a quarantine scar phase
+— the caller passes the position's TRUE phase (here: active, since this is a
+confirmed-fill position under chain/local size-mismatch review, not an unknown
+asset). The review debt is tracked by a separate ReviewWorkItem, never by the
+phase value.
 """
 from __future__ import annotations
 
@@ -31,7 +37,7 @@ from src.state.ledger import (
 )
 
 
-def _quarantined_position(**overrides: Any) -> Any:
+def _under_review_position(**overrides: Any) -> Any:
     from src.state.portfolio import Position
 
     defaults: dict[str, Any] = dict(
@@ -48,7 +54,7 @@ def _quarantined_position(**overrides: Any) -> Any:
         edge=0.15,
         shares=25.0,
         cost_basis_usd=10.0,
-        state=LifecycleState.QUARANTINED.value,
+        state=LifecycleState.HOLDING.value,
         chain_state="size_mismatch_unresolved",
         chain_shares=40.0,
         token_id="tok_f4",
@@ -57,7 +63,6 @@ def _quarantined_position(**overrides: Any) -> Any:
         env="live",
         entered_at="2026-05-27T12:00:00Z",
         chain_verified_at="2026-05-27T13:00:00Z",
-        quarantined_at="2026-05-27T13:00:00Z",
         condition_id="cond-f4",
         strategy_key="settlement_capture",
         strategy="settlement_capture",
@@ -66,16 +71,20 @@ def _quarantined_position(**overrides: Any) -> Any:
     return Position(**defaults)
 
 
-def test_review_required_builder_emits_quarantined_projection() -> None:
-    pos = _quarantined_position()
+def test_review_required_builder_emits_true_phase_projection() -> None:
+    pos = _under_review_position()
     events, projection = build_review_required_canonical_write(
-        pos, review_detected_at="2026-05-27T12:00:00Z", reason="size_mismatch_unresolved_no_canonical_baseline", sequence_no=2
+        pos,
+        review_detected_at="2026-05-27T12:00:00Z",
+        reason="size_mismatch_unresolved_no_canonical_baseline",
+        sequence_no=2,
+        phase_after="active",
     )
     assert len(events) == 1
     ev = events[0]
     assert ev["event_type"] == "REVIEW_REQUIRED"
-    assert ev["phase_after"] == "quarantined"
-    assert projection["phase"] == "quarantined"
+    assert ev["phase_after"] == "active"
+    assert projection["phase"] == "active"
     assert projection["chain_state"] == "size_mismatch_unresolved"
 
 
@@ -105,16 +114,21 @@ def test_fresh_db_check_accepts_review_required(tmp_path: Path) -> None:
 
 def test_review_required_survives_restart_via_position_current(tmp_path: Path) -> None:
     """The core durability invariant: after the durable write, re-reading
-    position_current (a restart proxy) shows phase=quarantined, not active."""
+    position_current (a restart proxy) shows the position's TRUE phase
+    (active) — never a quarantine scar phase (REPLACEMENT PHASE LAW)."""
     from src.state.db import append_many_and_project
 
     db_path = tmp_path / "f4_durable.db"
     conn = sqlite3.connect(str(db_path))
     try:
         apply_architecture_kernel_schema(conn)
-        pos = _quarantined_position()
+        pos = _under_review_position()
         events, projection = build_review_required_canonical_write(
-            pos, review_detected_at="2026-05-27T12:00:00Z", reason="size_mismatch_unresolved_no_canonical_baseline", sequence_no=1
+            pos,
+            review_detected_at="2026-05-27T12:00:00Z",
+            reason="size_mismatch_unresolved_no_canonical_baseline",
+            sequence_no=1,
+            phase_after="active",
         )
         append_many_and_project(conn, events, projection)
         conn.commit()
@@ -128,7 +142,7 @@ def test_review_required_survives_restart_via_position_current(tmp_path: Path) -
             "SELECT phase, chain_state FROM position_current WHERE position_id='f4-001'"
         ).fetchone()
         assert phase is not None, "position_current row not persisted — review lost on restart"
-        assert phase[0] == "quarantined"
+        assert phase[0] == "active"
         assert phase[1] == "size_mismatch_unresolved"
         ev = conn2.execute(
             "SELECT event_type FROM position_events WHERE position_id='f4-001' "

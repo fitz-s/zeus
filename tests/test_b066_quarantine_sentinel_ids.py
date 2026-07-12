@@ -10,8 +10,12 @@ from src.state.portfolio import QUARANTINE_SENTINEL
 class TestB066QuarantinePositionSentinelIds:
     def _build_quarantine_position(self):
         from src.state.portfolio import Position
-        from src.state.lifecycle_manager import enter_chain_quarantined_runtime_state
 
+        # T5 (docs/rebuild/quarantine_excision_2026-07-11.md):
+        # enter_chain_quarantined_runtime_state deleted (dead — 0 production
+        # callers). This antibody only cares about sentinel-ID hygiene on the
+        # identifier fields, not the lifecycle state value, so a plain
+        # "holding" state exercises the same B066 regression check.
         return Position(
             trade_id=QUARANTINE_SENTINEL,
             market_id=QUARANTINE_SENTINEL,
@@ -26,12 +30,12 @@ class TestB066QuarantinePositionSentinelIds:
             edge=0.0,
             entered_at="unknown_entered_at",
             token_id="token_xyz_chain_only",
-            state=enter_chain_quarantined_runtime_state(),
+            state="holding",
             strategy="",
             edge_source="",
             cost_basis_usd=7.0,
             shares=10.0,
-            chain_state="quarantined",
+            chain_state="synced",
             chain_shares=10.0,
         )
 

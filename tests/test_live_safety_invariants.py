@@ -34,10 +34,6 @@ from src.execution.exit_lifecycle import (
     execute_exit,
     is_exit_cooldown_active,
 )
-from src.state.chain_reconciliation import (
-    QUARANTINE_EXPIRED_REVIEW_REQUIRED,
-    QUARANTINE_REVIEW_REQUIRED,
-)
 from src.control.control_plane import (
     clear_control_state,
     process_commands,
@@ -1472,9 +1468,11 @@ def test_legacy_polling_failed_without_fill_economics_rolls_back_optimistic_lot(
         ("MATCHED", "12.5", "0.42"),
         ("FAILED", "0", "0"),
     ]
+    # T5 (docs/rebuild/quarantine_excision_2026-07-11.md): the failed-trade
+    # rollback lot is ECONOMICALLY_CLOSED_OPTIMISTIC, never a quarantine scar.
     assert [(r["state"], r["shares"]) for r in lot_rows] == [
         ("OPTIMISTIC_EXPOSURE", "12.5"),
-        ("QUARANTINED", "12.5"),
+        ("ECONOMICALLY_CLOSED_OPTIMISTIC", "12.5"),
     ]
     assert lot_rows[-1]["source_trade_fact_id"] == trade_rows[-1]["trade_fact_id"]
     assert "REVIEW_REQUIRED" in event_types
@@ -2644,10 +2642,10 @@ def test_lifecycle_kernel_rejects_rescue_from_non_pending_runtime_state():
         rescue_pending_runtime_state("entered")
 
 
-def test_lifecycle_kernel_enters_chain_quarantined_runtime_state():
-    from src.state.lifecycle_manager import enter_chain_quarantined_runtime_state
-
-    assert enter_chain_quarantined_runtime_state() == "quarantined"
+# T5 (docs/rebuild/quarantine_excision_2026-07-11.md): enter_chain_quarantined_
+# runtime_state deleted (dead — 0 production callers; the fake-Position
+# chain-only minting path it supported is gone, replaced by typed
+# ChainOnlyFact). The antibody that exercised it is removed with it.
 
 
 def test_chain_reconciliation_rescue_updates_trade_lifecycle_row(tmp_path):
@@ -2895,7 +2893,7 @@ def test_chain_reconciliation_economically_closed_local_does_not_mask_chain_only
         [ChainPosition(token_id="tok_econ_001", size=25.0, avg_price=0.40, cost=10.0, condition_id="cond-live-1")],
     )
 
-    assert stats["quarantined"] == 1
+    assert stats["chain_only_unresolved"] == 1
     # PR C2 (Finding 3, 2026-05-27): chain-only inventory is now a typed
     # ChainOnlyFact in portfolio.chain_only_facts, not a synthetic Position
     # in portfolio.positions. Verify the new signal carries the same identity
@@ -3301,227 +3299,59 @@ def test_collateral_check_blocks_underfunded_sell():
 # 48h. That timer is retired — see
 # docs/rebuild/chain_mirror_state_model_2026-07-04.md §5 follow-up — in favor
 # of the chain-mirror reconciler's two-consecutive-mirror-runs force-resolve
-# (runs every ~10 minutes). Read-side handling of a legacy
-# chain_state="quarantine_expired" row is still covered below (this repo does
-# not purge the read-side vocabulary in this slice — blast-radius honesty).
+# (runs every ~10 minutes).
+#
+# T5 (docs/rebuild/quarantine_excision_2026-07-11.md, REPLACEMENT PHASE LAW):
+# the T2 "bridging shim" (src.engine.evaluator._quarantined_position_bridging_
+# family_keys, keyed on phase='quarantined' + chain_state=
+# 'entry_authority_quarantined') is RETIRED along with it. No writer mints
+# phase='quarantined' going forward — Position.__post_init__ remaps any
+# legacy DB row to its TRUE state before construction (see
+# src.state.portfolio._normalize_runtime_lifecycle_state /
+# _normalize_runtime_chain_state) — so the bridging shim's own gate
+# (`state == "quarantined"`) can never fire for a live Position anymore. A
+# confirmed-fill/chain-absence-conflict dispute now opens a
+# CONFIRMED_FILL_CHAIN_ABSENCE_CONFLICT ReviewWorkItem directly (a
+# FAMILY_BLOCKING_REASON_CODES member), which evaluator's DB-backed
+# blocked_family_keys() call already consults — the three tests that
+# exercised the bridging shim's scoping (legacy chain_state exclusion, own-
+# family-only feed, stale-resolved-state exclusion) are retired with it.
 
 
-def test_quarantine_expired_legacy_chain_state_does_not_freeze_portfolio():
-    """Quarantine excision T2 (docs/rebuild/quarantine_excision_2026-07-11.md):
-    the retired ``_has_quarantined_positions`` blocked ALL new entries
-    portfolio-wide the instant ANY position carried chain_state in
-    {"quarantined", "quarantine_expired"} — regardless of that position's own
-    phase. That over-broad widening (a per-position signal freezing the whole
-    portfolio) is exactly the disease this excision removes. The replacement
-    bridging shim (src.engine.evaluator._quarantined_position_bridging_
-    family_keys) is scoped to item 4's literal target: phase='quarantined' +
-    chain_state='entry_authority_quarantined' (the 4 live rows per the
-    2026-07-11 census). A "holding"-phase position with a legacy
-    chain_state="quarantine_expired" value (P0b 2026-07-04: the timer that
-    minted this is retired) contributes NOTHING to the bridging shim.
-    """
-    from src.engine.evaluator import _quarantined_position_bridging_family_keys
-
-    pos = _make_position(chain_state="quarantine_expired")
-    portfolio = _make_portfolio(pos)
-
-    assert _quarantined_position_bridging_family_keys(portfolio) == set()
-
-
-def test_recent_entry_authority_quarantine_feeds_bridging_shim_for_its_family_only():
-    """T2 item 4: a monitor-managed real-exposure quarantine (phase='quarantined',
-    chain_state='entry_authority_quarantined') feeds the family-scoped block for
-    ITS OWN family via the bridging shim — never a portfolio-wide freeze (the
-    retired ``_has_quarantined_positions`` behavior). Unrelated families are
-    untouched (see the empty-set assertion in the legacy-value test above and
-    the "other families still trade" acceptance test).
-    """
-    from src.engine.evaluator import _quarantined_position_bridging_family_keys
-    from src.strategy.family_exclusive_dedup import WeatherFamilyKey
-
-    observed_at = datetime.now(timezone.utc).isoformat()
-    pos = _make_position(
-        direction="buy_yes",
-        state="quarantined",
-        chain_state="entry_authority_quarantined",
-        shares=65.0,
-        chain_shares=65.0,
-        last_chain_absence_observed_at=observed_at,
-        chain_verified_at=observed_at,
-    )
-    portfolio = _make_portfolio(pos)
-
-    assert _quarantined_position_bridging_family_keys(portfolio) == {
-        WeatherFamilyKey(pos.city, pos.target_date, pos.temperature_metric, "")
-    }
-
-
-@pytest.mark.parametrize(
-    "chain_state",
-    [
-        "chain_absent_confirmed_position_unattributed",
-        "chain_confirmed_zero",
-    ],
-)
-def test_stale_resolved_quarantine_projection_does_not_feed_bridging_shim(chain_state):
-    """Old explicit chain-resolution projections (resolved absence/zero, not the
-    live entry_authority_quarantined redecision state) must not feed the
-    bridging shim — these chain_states are outside item 4's literal scope
-    (only entry_authority_quarantined bridges), matching the retired gate's
-    own explicit continue-list for these two states.
-    """
-    from src.engine.evaluator import _quarantined_position_bridging_family_keys
-
-    pos = _make_position(
-        direction="buy_no",
-        state="quarantined",
-        chain_state=chain_state,
-        shares=10.0,
-        chain_shares=0.0 if chain_state == "chain_confirmed_zero" else 10.0,
-        last_chain_absence_observed_at="2026-06-20T00:00:00+00:00",
-        chain_verified_at="2026-06-20T00:00:00+00:00",
-    )
-    portfolio = _make_portfolio(pos)
-
-    assert _quarantined_position_bridging_family_keys(portfolio) == set()
-
-
-def test_monitoring_marks_quarantine_for_admin_resolution_once(monkeypatch):
-    """Quarantine must enter an explicit admin-resolution path instead of passive skipping."""
-    from src.engine import cycle_runtime
-
-    pos = _make_position(direction="unknown", chain_state="quarantined")
-    portfolio = _make_portfolio(pos)
-
-    class LiveClob:
-        def get_best_bid_ask(self, token_id):
-            return 0.41, 0.41, 100.0, 100.0
-
-    class Tracker:
-        def record_exit(self, position):
-            raise AssertionError("No exit expected in quarantine admin-resolution test")
-
-    monitor_results = []
-    artifact = type("Artifact", (), {"add_monitor_result": lambda self, result: monitor_results.append(result)})()
-    summary = {"monitors": 0, "exits": 0}
-    now = datetime(2026, 4, 1, 5, 30, tzinfo=timezone.utc)
-    deps = type(
-        "Deps",
-        (),
-        {
-            "MonitorResult": type("MonitorResult", (), {"__init__": lambda self, **kwargs: self.__dict__.update(kwargs)}),
-            "logger": logging.getLogger("test_quarantine_admin_resolution"),
-            "cities_by_name": {},
-            "_utcnow": staticmethod(lambda: now),
-        },
-    )
-
-    portfolio_dirty, tracker_dirty = cycle_runtime.execute_monitoring_phase(
-        None,
-        LiveClob(),
-        portfolio,
-        artifact,
-        Tracker(),
-        summary,
-        deps=deps,
-    )
-
-    assert portfolio_dirty is True
-    assert tracker_dirty is False
-    assert pos.admin_exit_reason == QUARANTINE_REVIEW_REQUIRED
-    assert pos.exit_reason == QUARANTINE_REVIEW_REQUIRED
-    assert pos.last_exit_at == now.isoformat()
-    assert summary["quarantine_resolution_marked"] == 1
-    assert summary["monitor_skipped_quarantine_resolution"] == 1
-    assert summary["monitors"] == 0
-    assert len(monitor_results) == 1
-    assert monitor_results[0].exit_reason == QUARANTINE_REVIEW_REQUIRED
-    assert monitor_results[0].fresh_prob is None
-    assert monitor_results[0].fresh_edge is None
-
-    portfolio_dirty, tracker_dirty = cycle_runtime.execute_monitoring_phase(
-        None,
-        LiveClob(),
-        portfolio,
-        artifact,
-        Tracker(),
-        summary,
-        deps=deps,
-    )
-
-    assert portfolio_dirty is False
-    assert tracker_dirty is False
-    assert pos.admin_exit_reason == QUARANTINE_REVIEW_REQUIRED
-    assert summary["quarantine_resolution_marked"] == 1
-    assert summary["monitor_skipped_quarantine_resolution"] == 2
-
-
-def test_monitoring_skips_fill_authority_quarantine_without_chain_quarantine(monkeypatch):
-    """Fill-authority quarantine is a non-trading state even when chain_state is not quarantined."""
-    from src.engine import cycle_runtime
-
-    pos = _make_position(
-        state="quarantined",
-        chain_state="local_only",
-        admin_exit_reason="FILL_AUTHORITY_QUARANTINE_REVIEW_REQUIRED",
-        exit_reason="FILL_AUTHORITY_QUARANTINE_REVIEW_REQUIRED",
-    )
-    portfolio = _make_portfolio(pos)
-
-    class Tracker:
-        def record_exit(self, position):
-            raise AssertionError("fill-authority quarantine should not be exited by monitor loop")
-
-    monitor_results = []
-    artifact = type("Artifact", (), {"add_monitor_result": lambda self, result: monitor_results.append(result)})()
-    summary = {"monitors": 0, "exits": 0}
-    deps = type(
-        "Deps",
-        (),
-        {
-            "MonitorResult": type("MonitorResult", (), {"__init__": lambda self, **kwargs: self.__dict__.update(kwargs)}),
-            "logger": logging.getLogger("test_fill_authority_quarantine_monitor_skip"),
-            "cities_by_name": {},
-            "_utcnow": staticmethod(lambda: datetime(2026, 4, 1, 5, 30, tzinfo=timezone.utc)),
-        },
-    )
-
-    monkeypatch.setattr(
-        "src.engine.monitor_refresh.refresh_position",
-        lambda *args, **kwargs: (_ for _ in ()).throw(
-            AssertionError("fill-authority quarantine must not reach monitor refresh")
-        ),
-    )
-
-    portfolio_dirty, tracker_dirty = cycle_runtime.execute_monitoring_phase(
-        None,
-        object(),
-        portfolio,
-        artifact,
-        Tracker(),
-        summary,
-        deps=deps,
-    )
-
-    assert portfolio_dirty is False
-    assert tracker_dirty is False
-    assert summary["monitor_skipped_quarantine_resolution"] == 1
-    assert summary["monitors"] == 0
-    assert monitor_results[0].exit_reason == "FILL_AUTHORITY_QUARANTINE_REVIEW_REQUIRED"
-    assert monitor_results[0].fresh_prob is None
-    assert monitor_results[0].fresh_edge is None
+# T5 (docs/rebuild/quarantine_excision_2026-07-11.md, REPLACEMENT PHASE LAW):
+# the two admin-resolution monitor-branch tests that lived here
+# (test_monitoring_marks_quarantine_for_admin_resolution_once,
+# test_monitoring_skips_fill_authority_quarantine_without_chain_quarantine)
+# exercised src.engine.cycle_runtime's _requires_quarantine_monitor_resolution
+# branch, now retired: no writer mints phase/chain_state='quarantined' going
+# forward, and Position.__post_init__ remaps any legacy row to its TRUE state
+# before it ever reaches the monitor loop, so the branch was provably
+# unreachable for any live Position. A real-exposure position that used to be
+# diverted into this admin-resolution limbo now flows through normal monitor
+# refresh instead (see test_entry_authority_quarantined_exposure_reaches_redecision).
 
 
 def test_entry_authority_quarantined_exposure_reaches_redecision(monkeypatch):
-    """A real held position with bad entry proof must still be monitor-managed."""
+    """A real held position with bad entry proof must still be monitor-managed.
+
+    T5 (docs/rebuild/quarantine_excision_2026-07-11.md, REPLACEMENT PHASE
+    LAW): a position that used to be forced into phase='quarantined' with
+    chain_state='entry_authority_quarantined' now keeps its TRUE phase
+    (active/holding) — Position.__post_init__ remaps any legacy input before
+    construction. It flows through NORMAL monitor + exit evaluation directly;
+    there is no more special "quarantined redecision" branch to route
+    through (src.engine.cycle_runtime's admin-resolution monitor branch is
+    retired — real exposure was never excluded from monitoring in the first
+    place under the new model).
+    """
     from src.contracts import EdgeContext, EntryMethod
     from src.engine import cycle_runtime
 
     pos = _make_position(
         trade_id="entry-authority-quarantine-position",
         direction="buy_no",
-        state="quarantined",
-        chain_state="entry_authority_quarantined",
+        state="holding",
+        chain_state="synced",
         shares=19.88,
         chain_shares=19.88,
         city="Lucknow",
@@ -3529,8 +3359,6 @@ def test_entry_authority_quarantined_exposure_reaches_redecision(monkeypatch):
         token_id="yes-lucknow",
         no_token_id="no-lucknow",
         condition_id="condition-lucknow",
-        admin_exit_reason="invalid_entry_actionable_certificate_authority",
-        exit_reason="invalid_entry_actionable_certificate_authority",
     )
     portfolio = _make_portfolio(pos)
 
@@ -3614,17 +3442,14 @@ def test_entry_authority_quarantined_exposure_reaches_redecision(monkeypatch):
         deps=deps,
     )
 
-    assert portfolio_dirty is True
     assert tracker_dirty is False
     assert observed_refresh == [(
         "entry-authority-quarantine-position",
-        "quarantined",
-        "entry_authority_quarantined",
+        "day0_window",
+        "synced",
     )]
     assert observed_exit_contexts
-    assert observed_exit_contexts[0].position_state == "quarantined"
-    assert summary["quarantined_exposure_routed_to_redecision"] == 1
-    assert summary.get("monitor_skipped_quarantine_resolution", 0) == 0
+    assert observed_exit_contexts[0].position_state == "day0_window"
     assert summary["monitors"] == 1
     assert len(monitor_results) == 1
     assert monitor_results[0].fresh_prob == 0.62
@@ -3795,18 +3620,21 @@ def test_chain_absent_confirmed_recent_projection_skips_redecision(monkeypatch):
         deps=deps,
     )
 
-    assert portfolio_dirty is True
+    # T5 (docs/rebuild/quarantine_excision_2026-07-11.md, REPLACEMENT PHASE
+    # LAW): the position keeps its TRUE (holding) phase now — no more
+    # quarantine-admin-resolution branch — but a chain_state confirming
+    # no-current-money-risk (chain_absent_confirmed_position_unattributed)
+    # still correctly excludes it from the monitored set entirely, via the
+    # pre-existing exposure/risk classification this excision did not touch.
+    # "Confirmed chain absence is reconciliation debt, not live monitor-
+    # managed exposure" holds true through the ordinary risk-classification
+    # path now, without a dedicated quarantine bucket.
+    assert portfolio_dirty is False
     assert tracker_dirty is False
     assert observed_refresh == []
     assert observed_exit_contexts == []
-    assert summary.get("quarantined_exposure_routed_to_redecision", 0) == 0
-    assert summary["monitor_skipped_quarantine_resolution"] == 1
     assert summary["monitors"] == 0
-    assert len(monitor_results) == 1
-    assert monitor_results[0].fresh_prob is None
-    assert monitor_results[0].fresh_edge is None
-    assert monitor_results[0].should_exit is False
-    assert monitor_results[0].exit_reason == "QUARANTINE_REVIEW_REQUIRED"
+    assert monitor_results == []
 
 
 def test_chain_absent_confirmed_recent_projection_does_not_reach_exit_lifecycle(monkeypatch):
@@ -3926,16 +3754,20 @@ def test_chain_absent_confirmed_recent_projection_does_not_reach_exit_lifecycle(
         deps=deps,
     )
 
-    assert portfolio_dirty is True
+    # T5 (docs/rebuild/quarantine_excision_2026-07-11.md, REPLACEMENT PHASE
+    # LAW): the position keeps its TRUE (holding) phase now — no more
+    # quarantine-admin-resolution branch — but a chain_state confirming
+    # no-current-money-risk (chain_absent_confirmed_position_unattributed)
+    # still correctly excludes it from the monitored set entirely (see
+    # test_chain_absent_confirmed_recent_projection_skips_redecision), so it
+    # never reaches exit evaluation either.
+    assert portfolio_dirty is False
     assert tracker_dirty is False
-    assert summary.get("quarantined_exposure_routed_to_redecision", 0) == 0
-    assert summary["monitor_skipped_quarantine_resolution"] == 1
     assert summary["monitors"] == 0
     assert summary.get("exits", 0) == 0
-    assert monitor_results[0].should_exit is False
-    assert monitor_results[0].exit_reason == "QUARANTINE_REVIEW_REQUIRED"
+    assert monitor_results == []
     assert observed_execute == []
-    assert pos.state == "quarantined"
+    assert pos.state == "holding"
 
 
 def test_chain_absent_confirmed_positive_projection_does_not_redecision():
@@ -5138,54 +4970,13 @@ def test_day0_closed_market_detection_uses_static_market_end_when_clob_info_miss
     assert info["accepting_orders"] is False
 
 
-def test_quarantine_expired_marks_distinct_admin_resolution_reason(monkeypatch):
-    """Expired quarantine keeps the same protective path but with explicit expired provenance."""
-    from src.engine import cycle_runtime
-
-    pos = _make_position(direction="unknown", chain_state="quarantine_expired")
-    portfolio = _make_portfolio(pos)
-
-    class LiveClob:
-        def get_best_bid_ask(self, token_id):
-            return 0.41, 0.41, 100.0, 100.0
-
-    class Tracker:
-        def record_exit(self, position):
-            raise AssertionError("No exit expected in quarantine-expired admin-resolution test")
-
-    monitor_results = []
-    artifact = type("Artifact", (), {"add_monitor_result": lambda self, result: monitor_results.append(result)})()
-    summary = {"monitors": 0, "exits": 0}
-    now = datetime(2026, 4, 1, 5, 30, tzinfo=timezone.utc)
-    deps = type(
-        "Deps",
-        (),
-        {
-            "MonitorResult": type("MonitorResult", (), {"__init__": lambda self, **kwargs: self.__dict__.update(kwargs)}),
-            "logger": logging.getLogger("test_quarantine_expired_admin_resolution"),
-            "cities_by_name": {},
-            "_utcnow": staticmethod(lambda: now),
-        },
-    )
-
-    portfolio_dirty, tracker_dirty = cycle_runtime.execute_monitoring_phase(
-        None,
-        LiveClob(),
-        portfolio,
-        artifact,
-        Tracker(),
-        summary,
-        deps=deps,
-    )
-
-    assert portfolio_dirty is True
-    assert tracker_dirty is False
-    assert pos.admin_exit_reason == QUARANTINE_EXPIRED_REVIEW_REQUIRED
-    assert pos.exit_reason == QUARANTINE_EXPIRED_REVIEW_REQUIRED
-    assert len(monitor_results) == 1
-    assert monitor_results[0].exit_reason == QUARANTINE_EXPIRED_REVIEW_REQUIRED
-    assert monitor_results[0].fresh_prob is None
-    assert monitor_results[0].fresh_edge is None
+# T5 (docs/rebuild/quarantine_excision_2026-07-11.md, REPLACEMENT PHASE LAW):
+# test_quarantine_expired_marks_distinct_admin_resolution_reason retired with
+# it — it exercised the same now-dead admin-resolution monitor branch
+# (chain_state='quarantine_expired' is itself also a retired ChainState
+# member; Position.__post_init__ remaps it to 'synced' before construction,
+# so the position it built now flows through normal monitor refresh like any
+# other active position, same as the other two admin-resolution tests above).
 
 
 def test_monitoring_transitions_holding_position_into_day0_window(monkeypatch):
@@ -5669,8 +5460,21 @@ def test_monitor_refresh_preserves_chain_corrected_entry_economics(tmp_path):
     conn.close()
 
 
-def test_quarantined_chain_risk_hard_fact_monitor_does_not_reopen_phase(tmp_path, monkeypatch):
-    """Hard-fact monitor receipts for chain-risk quarantine must not reopen phase."""
+def test_chain_risk_hard_fact_monitor_holds_true_active_phase(tmp_path, monkeypatch):
+    """Hard-fact monitor receipts for a real-exposure chain-risk position must
+    reflect its TRUE (active) phase, never a quarantine scar (T5 REPLACEMENT
+    PHASE LAW, docs/rebuild/quarantine_excision_2026-07-11.md).
+
+    Pre-T5 this test forced position_current.phase='quarantined' directly via
+    SQL to simulate a chain-risk quarantine and asserted the monitor loop
+    preserved that scar phase. T5 retires the scar: Position.__post_init__
+    now remaps any legacy 'quarantined'/'entry_authority_quarantined' input to
+    its true state at construction (see
+    src.state.portfolio._normalize_runtime_lifecycle_state /
+    _normalize_runtime_chain_state), so there is no longer a quarantine phase
+    for the monitor loop to preserve — it correctly reports ACTIVE for this
+    real chain-confirmed-exposure position instead.
+    """
     from src.engine import cycle_runtime
     from src.engine.lifecycle_events import build_entry_canonical_write
     from src.execution.day0_hard_fact_exit import HardFactVerdict
@@ -5681,7 +5485,7 @@ def test_quarantined_chain_risk_hard_fact_monitor_does_not_reopen_phase(tmp_path
     init_schema(conn)
     pos = _make_position(
         trade_id="quarantine-hard-fact-monitor-1",
-        state="quarantined",
+        state="holding",
         city="Manila",
         target_date="2026-06-29",
         order_id="o-quarantine-hard-fact-monitor",
@@ -5694,8 +5498,7 @@ def test_quarantined_chain_risk_hard_fact_monitor_does_not_reopen_phase(tmp_path
         direction="buy_no",
         shares=18.1,
         chain_shares=18.1,
-        chain_state="entry_authority_quarantined",
-        exit_reason="entry_authority_chain_absence_conflict",
+        chain_state="synced",
         no_token_id="tok-manila-32-no",
         token_id="tok-manila-32-yes",
     )
@@ -5706,17 +5509,6 @@ def test_quarantined_chain_risk_hard_fact_monitor_does_not_reopen_phase(tmp_path
         source_module="tests/test_quarantined_hard_fact_monitor",
     )
     append_many_and_project(conn, entry_events, entry_projection)
-    conn.execute(
-        """
-        UPDATE position_current
-           SET phase = 'quarantined',
-               chain_state = 'entry_authority_quarantined',
-               chain_shares = 18.1,
-               exit_reason = 'entry_authority_chain_absence_conflict'
-         WHERE position_id = ?
-        """,
-        (pos.trade_id,),
-    )
     conn.commit()
     monkeypatch.setattr(
         cycle_runtime,
@@ -5768,10 +5560,13 @@ def test_quarantined_chain_risk_hard_fact_monitor_does_not_reopen_phase(tmp_path
         """,
         (pos.trade_id,),
     ).fetchone()
-    assert current["phase"] == LifecyclePhase.QUARANTINED.value
-    assert current["chain_state"] == "entry_authority_quarantined"
+    # Note: the fixture's target_date (2026-06-29) is still within the day0
+    # observation window at the monkeypatched _utcnow (2026-06-30T10:00), so
+    # the monitor's TRUE phase for this real-exposure position is DAY0_WINDOW
+    # (not a stale ACTIVE) — never a quarantine scar either way (T5).
+    assert current["phase"] == LifecyclePhase.DAY0_WINDOW.value
+    assert current["chain_state"] == "synced"
     assert current["chain_shares"] == pytest.approx(18.1)
-    assert current["exit_reason"] == "entry_authority_chain_absence_conflict"
     assert current["last_monitor_prob"] == pytest.approx(0.0)
     assert current["last_monitor_prob_is_fresh"] == 1
     event = conn.execute(
@@ -5783,11 +5578,11 @@ def test_quarantined_chain_risk_hard_fact_monitor_does_not_reopen_phase(tmp_path
         (pos.trade_id,),
     ).fetchone()
     assert event is not None
-    assert event["phase_before"] == LifecyclePhase.QUARANTINED.value
-    assert event["phase_after"] == LifecyclePhase.QUARANTINED.value
+    assert event["phase_before"] == LifecyclePhase.DAY0_WINDOW.value
+    assert event["phase_after"] == LifecyclePhase.DAY0_WINDOW.value
     payload = json.loads(event["payload_json"])
     assert payload["exit_decision_reason"].startswith("DAY0_HARD_FACT_BIN_DEAD_MARKET_CLOSED")
-    assert payload["phase_after"] == LifecyclePhase.QUARANTINED.value
+    assert payload["phase_after"] == LifecyclePhase.DAY0_WINDOW.value
     assert monitor_results[0].should_exit is False
     conn.close()
 
@@ -8761,14 +8556,21 @@ def test_runtime_exit_context_uses_fill_authority_cost_basis_for_crowding_exposu
         fill_authority=FILL_AUTHORITY_VENUE_CONFIRMED_FULL,
     )
     closed = _make_position(trade_id="closed-pos", state="economically_closed", size_usd=1000.0)
-    quarantined = _make_position(
+    # T5 (docs/rebuild/quarantine_excision_2026-07-11.md, REPLACEMENT PHASE
+    # LAW): a legacy state='quarantined'/chain_state='quarantined' input is
+    # remapped by Position.__post_init__ to its TRUE (holding/synced) state —
+    # no writer mints the retired values going forward. This position is
+    # therefore genuinely active now and correctly counts toward crowding
+    # exposure below, same as any other held position (real exposure is no
+    # longer hidden behind a quarantine bucket).
+    formerly_quarantined = _make_position(
         trade_id="quarantined-pos",
         state="quarantined",
         chain_state="quarantined",
         size_usd=1000.0,
     )
     pending_entry = _make_position(trade_id="pending-entry-pos", state="pending_tracked", size_usd=1000.0)
-    portfolio = SimpleNamespace(bankroll=200.0, positions=[pos, other, closed, quarantined, pending_entry])
+    portfolio = SimpleNamespace(bankroll=200.0, positions=[pos, other, closed, formerly_quarantined, pending_entry])
     edge_ctx = SimpleNamespace(
         p_posterior=0.10,
         p_market=[0.50],
@@ -8786,6 +8588,7 @@ def test_runtime_exit_context_uses_fill_authority_cost_basis_for_crowding_exposu
 
     assert exit_context.portfolio_positions == (
         (other.cluster, other.effective_cost_basis_usd, other.trade_id),
+        (formerly_quarantined.cluster, formerly_quarantined.effective_cost_basis_usd, formerly_quarantined.trade_id),
     )
     assert exit_context.portfolio_positions[0][1] != pytest.approx(other.size_usd)
 

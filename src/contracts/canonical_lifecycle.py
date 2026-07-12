@@ -148,7 +148,14 @@ class PositionPhase(StrEnum):
     """A5 — coarse position lifecycle phase. A PROJECTION over command/order/trade/
     chain/settlement truth, not a source. Values match the existing LifecyclePhase
     (which becomes an alias of this in the A5 unification step). UNKNOWN is a
-    runtime-only fallback never stored in the position_current.phase DB CHECK."""
+    runtime-only fallback never stored in the position_current.phase DB CHECK.
+
+    T5 (docs/rebuild/quarantine_excision_2026-07-11.md, REPLACEMENT PHASE LAW):
+    QUARANTINED retired — no writer mints it. A confirmed-fill/chain-absence
+    dispute keeps its TRUE phase (ACTIVE/PENDING_EXIT) and the dispute lives
+    in a typed ReviewWorkItem (src.contracts.review_work_item), never in this
+    enum. The position_current.phase DB CHECK still permits the literal
+    'quarantined' until the T5 schema migration (docs/rebuild item 5)."""
 
     PENDING_ENTRY = "pending_entry"
     ACTIVE = "active"
@@ -157,7 +164,6 @@ class PositionPhase(StrEnum):
     ECONOMICALLY_CLOSED = "economically_closed"
     SETTLED = "settled"
     VOIDED = "voided"
-    QUARANTINED = "quarantined"
     ADMIN_CLOSED = "admin_closed"
     UNKNOWN = "unknown"
 

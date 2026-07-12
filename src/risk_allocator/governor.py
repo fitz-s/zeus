@@ -40,7 +40,8 @@ ExposureState = Literal[
     "ECONOMICALLY_CLOSED_OPTIMISTIC",
     "ECONOMICALLY_CLOSED_CONFIRMED",
     "SETTLED",
-    "QUARANTINED",
+    # T5 (docs/rebuild/quarantine_excision_2026-07-11.md): 'QUARANTINED'
+    # removed — 0 live position_lots rows, no writer.
 ]
 
 # A4 exposure classification now lives in src.state.canonical_projections

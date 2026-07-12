@@ -40,8 +40,17 @@ from check_data_pipeline_live_e2e import _connect_live_readonly
 from src.config import STATE_DIR as DEFAULT_RUNTIME_STATE_DIR
 from src.contracts.position_truth import (
     CURRENT_MONEY_RISK_CHAIN_STATES,
-    REDECISION_ELIGIBLE_QUARANTINE_CHAIN_STATES,
 )
+
+# T5 (docs/rebuild/quarantine_excision_2026-07-11.md): previously imported
+# from src.contracts.position_truth.REDECISION_ELIGIBLE_QUARANTINE_CHAIN_STATES,
+# now retired there (no writer mints state='quarantined' going forward — see
+# Position.__post_init__'s mixed-epoch remap). This script reads
+# position_current.phase/chain_state via raw SQL row dicts (not coerced
+# Position objects), so the bare string set stays as a mixed-epoch bridge for
+# any LEGACY row until the T5 schema migration (docs/rebuild item 5)
+# rewrites history.
+REDECISION_ELIGIBLE_QUARANTINE_CHAIN_STATES = frozenset({"entry_authority_quarantined"})
 from src.ops.monitor_cadence import collect_monitor_cadence_evidence
 from src.state.fill_dedup import canonical_trade_fact_cte
 

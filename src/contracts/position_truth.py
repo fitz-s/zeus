@@ -38,23 +38,24 @@ from enum import Enum
 from typing import Optional
 
 
-# Quarantined is a local lifecycle bucket, not proof that money is no longer at
-# risk. Only chain states that still assert current venue exposure may keep a
-# quarantined row in live monitor/redecision lanes. A plain confirmed chain
-# absence is no-current-risk reconciliation debt; a confirmed venue fill with a
-# missing/contradictory chain snapshot is represented as entry_authority_quarantined.
+# T5 (docs/rebuild/quarantine_excision_2026-07-11.md, REPLACEMENT PHASE LAW): a
+# confirmed venue fill with a missing/contradictory chain snapshot keeps its
+# TRUE lifecycle phase (active/pending_exit) — the dispute lives in a typed
+# ReviewWorkItem, never in a bespoke "quarantined" chain_state carve-out. No
+# writer mints "entry_authority_quarantined" / "quarantined" /
+# "quarantine_expired" going forward (the retired ChainState members). The
+# bare string literals below stay in these two sets ONLY as a mixed-epoch
+# bridge for raw-SQL readers (e.g. src.state.portfolio.has_same_token_open_db,
+# src.ingest.price_channel_ingest) that must keep classifying any LEGACY row
+# still carrying one of these values correctly until the T5 schema migration
+# (docs/rebuild item 5) rewrites history — they are plain strings, not enum
+# references, so they do not depend on the retired enum members existing.
 CURRENT_MONEY_RISK_CHAIN_STATES = frozenset(
     {
         "synced",
         "chain_present",
         "exit_pending_missing",
-        "entry_authority_quarantined",
-    }
-)
-
-REDECISION_ELIGIBLE_QUARANTINE_CHAIN_STATES = frozenset(
-    {
-        "entry_authority_quarantined",
+        "entry_authority_quarantined",  # mixed-epoch bridge — see comment above
     }
 )
 
@@ -72,8 +73,8 @@ NO_CURRENT_MONEY_RISK_CHAIN_STATES = frozenset(
         "chain_confirmed_zero",
         "external_operator_closed",
         "local_only",
-        "quarantined",
-        "quarantine_expired",
+        "quarantined",  # mixed-epoch bridge — see comment above
+        "quarantine_expired",  # mixed-epoch bridge — see comment above
     }
 ) | TERMINAL_NO_CURRENT_MONEY_RISK_CHAIN_STATES
 
