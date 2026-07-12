@@ -174,6 +174,35 @@ class RiskAllocator:
     def __init__(self, cap_policy: CapPolicy | None = None, exposure_lots: Sequence[ExposureLot] | None = None) -> None:
         self.cap_policy = cap_policy or CapPolicy()
         self._lots = tuple(exposure_lots or ())
+        market: dict[str, list[int]] = {}
+        event: dict[str, int] = {}
+        resolution: dict[str, int] = {}
+        correlation: dict[str, int] = {}
+        for lot in self._lots:
+            if is_closed_exposure(lot.state):
+                continue
+            weighted = self._weighted_lot_exposure(lot)
+            totals = market.setdefault(lot.market_id, [0, 0, 0])
+            if is_optimistic_exposure(lot.state):
+                totals[1] += int(lot.exposure_micro)
+                totals[2] += weighted
+            elif counts_as_active_exposure(lot.state):
+                totals[0] += int(lot.exposure_micro)
+                totals[2] += weighted
+            event[lot.event_id] = event.get(lot.event_id, 0) + weighted
+            resolution[lot.resolution_window] = (
+                resolution.get(lot.resolution_window, 0) + weighted
+            )
+            correlation_key = lot.correlation_key or lot.event_id
+            correlation[correlation_key] = correlation.get(correlation_key, 0) + weighted
+        self._market_exposure_by_id = {
+            key: tuple(values) for key, values in market.items()
+        }
+        self._weighted_exposure_by_scope = {
+            "event": event,
+            "resolution": resolution,
+            "correlation": correlation,
+        }
 
     @property
     def exposure_lots(self) -> tuple[ExposureLot, ...]:
@@ -357,32 +386,10 @@ class RiskAllocator:
         return None
 
     def _market_exposure(self, market_id: str) -> tuple[int, int, int]:
-        confirmed = 0
-        optimistic = 0
-        weighted = 0
-        for lot in self._lots:
-            if lot.market_id != market_id or is_closed_exposure(lot.state):
-                continue
-            if is_optimistic_exposure(lot.state):
-                optimistic += int(lot.exposure_micro)
-                weighted += int(round(lot.exposure_micro * self.cap_policy.optimistic_exposure_weight))
-            elif counts_as_active_exposure(lot.state):
-                confirmed += int(lot.exposure_micro)
-                weighted += int(lot.exposure_micro)
-        return confirmed, optimistic, weighted
+        return self._market_exposure_by_id.get(market_id, (0, 0, 0))
 
     def _remaining_capacity(self, scope: str, key: str, cap: int) -> int:
-        exposure = 0
-        for lot in self._lots:
-            if is_closed_exposure(lot.state):
-                continue
-            if scope == "event" and lot.event_id != key:
-                continue
-            if scope == "resolution" and lot.resolution_window != key:
-                continue
-            if scope == "correlation" and (lot.correlation_key or lot.event_id) != key:
-                continue
-            exposure += self._weighted_lot_exposure(lot)
+        exposure = self._weighted_exposure_by_scope.get(scope, {}).get(key, 0)
         return max(int(cap) - exposure, 0)
 
     def _weighted_lot_exposure(self, lot: ExposureLot) -> int:

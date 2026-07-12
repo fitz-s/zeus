@@ -216,6 +216,95 @@ def test_current_entry_capacity_exposes_same_remaining_envelope_as_submit_gate()
         clear_global_allocator()
 
 
+def test_allocator_indexes_match_reference_scans_and_rebuild_with_lots():
+    from src.state.canonical_projections import (
+        counts_as_active_exposure,
+        is_closed_exposure,
+        is_optimistic_exposure,
+    )
+
+    class ScanRiskAllocator(RiskAllocator):
+        def _market_exposure(self, market_id):
+            confirmed = optimistic = weighted = 0
+            for lot in self.exposure_lots:
+                if lot.market_id != market_id or is_closed_exposure(lot.state):
+                    continue
+                if is_optimistic_exposure(lot.state):
+                    optimistic += int(lot.exposure_micro)
+                    weighted += self._weighted_lot_exposure(lot)
+                elif counts_as_active_exposure(lot.state):
+                    confirmed += int(lot.exposure_micro)
+                    weighted += self._weighted_lot_exposure(lot)
+            return confirmed, optimistic, weighted
+
+        def _remaining_capacity(self, scope, key, cap):
+            exposure = 0
+            for lot in self.exposure_lots:
+                if is_closed_exposure(lot.state):
+                    continue
+                if scope == "event" and lot.event_id != key:
+                    continue
+                if scope == "resolution" and lot.resolution_window != key:
+                    continue
+                if scope == "correlation" and (lot.correlation_key or lot.event_id) != key:
+                    continue
+                exposure += self._weighted_lot_exposure(lot)
+            return max(int(cap) - exposure, 0)
+
+    policy = CapPolicy(
+        max_per_market_micro=500_000_000,
+        max_per_event_micro=600_000_000,
+        max_per_resolution_window_micro={"default": 700_000_000, "day0": 350_000_000},
+        max_correlated_exposure_micro=400_000_000,
+        optimistic_exposure_weight=0.35,
+    )
+    lots = (
+        ExposureLot("m1", "e1", "day0", "t1", 101_000_001, "CONFIRMED_EXPOSURE", "c1"),
+        ExposureLot("m1", "e1", "day0", "t2", 99_000_001, "OPTIMISTIC_EXPOSURE", "c1"),
+        ExposureLot("m2", "e2", "later", "t3", 80_000_000, "EXIT_PENDING", None),
+        ExposureLot("m1", "e1", "day0", "t4", 300_000_000, "SETTLED", "c1"),
+    )
+    indexed = RiskAllocator(policy, lots)
+    scanned = ScanRiskAllocator(policy, lots)
+    for market, event, window, correlation in (
+        ("m1", "e1", "day0", "c1"),
+        ("m2", "e2", "later", "e2"),
+        ("missing", "missing", "default", "missing"),
+    ):
+        indexed_decision = indexed.entry_capacity(
+            market_id=market,
+            event_id=event,
+            resolution_window=window,
+            correlation_key=correlation,
+            governor_state=_state(),
+        )
+        scanned_decision = scanned.entry_capacity(
+            market_id=market,
+            event_id=event,
+            resolution_window=window,
+            correlation_key=correlation,
+            governor_state=_state(),
+        )
+        assert indexed_decision == scanned_decision
+
+    rebuilt = indexed.with_lots(
+        (*lots, ExposureLot("m1", "e1", "day0", "t5", 200_000_000, "CONFIRMED_EXPOSURE", "c1"))
+    )
+    assert rebuilt.entry_capacity(
+        market_id="m1",
+        event_id="e1",
+        resolution_window="day0",
+        correlation_key="c1",
+        governor_state=_state(),
+    ).remaining_market_capacity_micro < indexed.entry_capacity(
+        market_id="m1",
+        event_id="e1",
+        resolution_window="day0",
+        correlation_key="c1",
+        governor_state=_state(),
+    ).remaining_market_capacity_micro
+
+
 def test_correlated_market_cap_via_multiple_outcome_tokens_enforced():
     allocator = RiskAllocator(
         CapPolicy(max_correlated_exposure_micro=150_000_000, max_per_market_micro=500_000_000, max_per_event_micro=500_000_000),

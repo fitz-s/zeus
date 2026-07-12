@@ -8,6 +8,7 @@ in_scope:
 - src/engine/event_reactor_adapter.py
 - src/engine/global_batch_runtime.py
 - src/engine/global_auction_universe.py
+- src/risk_allocator/governor.py
 - src/execution/exit_lifecycle.py
 - tests/test_p4_post_trade_capital_lift.py
 - tests/test_run_mode_failure_surfaces.py
@@ -15,6 +16,7 @@ in_scope:
 - tests/events/test_continuous_redecision_emit.py
 - tests/events/test_reactor.py
 - tests/integration/test_w3_solve_seam_g3.py
+- tests/test_risk_allocator.py
 - tests/test_phase2_exit_emitter_revival.py
 allow_companions:
 - architecture/test_topology.yaml
