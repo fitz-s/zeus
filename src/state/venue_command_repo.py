@@ -223,9 +223,9 @@ _POSITION_LOT_STATES = frozenset(
         "SETTLED",
         # T5 (docs/rebuild/quarantine_excision_2026-07-11.md): 'QUARANTINED'
         # removed from the WRITE-time contract — rollback_optimistic_lot_for_
-        # failed_trade now appends ECONOMICALLY_CLOSED_OPTIMISTIC (0 live
-        # QUARANTINED rows; the DB CHECK still permits the literal until the
-        # T5 schema migration, docs/rebuild item 5, narrows it).
+        # failed_trade now appends ECONOMICALLY_CLOSED_OPTIMISTIC. The T5
+        # schema migration has run and the DB CHECK no longer admits the
+        # literal.
     }
 )
 _POSITION_LOT_EXPOSURE_TRADE_STATES = {

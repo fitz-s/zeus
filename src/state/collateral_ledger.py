@@ -879,7 +879,7 @@ def _has_active_ctf_exposure(conn: sqlite3.Connection) -> bool:
               FROM position_current
              WHERE COALESCE(CAST(chain_shares AS REAL), CAST(shares AS REAL), 0.0) > 0.0
                AND phase NOT IN (
-                    'settled', 'economically_closed', 'voided', 'quarantined', 'admin_closed'
+                    'settled', 'economically_closed', 'voided', 'admin_closed'
                )
              LIMIT 1
             """

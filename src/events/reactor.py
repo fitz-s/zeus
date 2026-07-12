@@ -7888,27 +7888,22 @@ def _edli_current_held_position_condition_scope() -> dict[tuple[str, str, str], 
             return {}
         from src.contracts.position_truth import CURRENT_MONEY_RISK_CHAIN_STATES
 
+        # T5 (docs/rebuild/quarantine_excision_2026-07-11.md): this used to
+        # also OR in a phase='quarantined' branch — retired, DB CHECK no
+        # longer admits the literal post-migration.
         chain_state_values = tuple(sorted(CURRENT_MONEY_RISK_CHAIN_STATES))
         chain_placeholders = ",".join("?" for _ in chain_state_values)
         rows = trade_ro.execute(
             f"""
             SELECT city, target_date, temperature_metric, condition_id
               FROM position_current
-             WHERE (
-                    (
-                        phase IN ('active', 'day0_window', 'pending_exit')
-                        AND COALESCE(chain_state, '') IN ({chain_placeholders})
-                    )
-                    OR (
-                        phase = 'quarantined'
-                        AND COALESCE(chain_state, '') IN ({chain_placeholders})
-                    )
-                   )
+             WHERE phase IN ('active', 'day0_window', 'pending_exit')
+               AND COALESCE(chain_state, '') IN ({chain_placeholders})
                AND condition_id IS NOT NULL
                AND TRIM(condition_id) != ''
                AND COALESCE(chain_shares, 0) > 0.000001
             """,
-            (*chain_state_values, *chain_state_values),
+            chain_state_values,
         ).fetchall()
         for row in rows:
             family_key = (

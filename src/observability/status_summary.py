@@ -50,11 +50,16 @@ logger = logging.getLogger(__name__)
 
 STATUS_PATH = state_path("status_summary.json")
 LEGACY_POSITIONS_PATH = state_path("positions.json")
-# P0c: "quarantined" retained explicitly in both sets below — it dropped out
-# of the canonical TERMINAL_STATES when its fold widened to
+# P0c: "quarantined" retained explicitly here (JSON-only, see below) — it
+# dropped out of the canonical TERMINAL_STATES when its fold widened to
 # {QUARANTINED, SETTLED, VOIDED} (docs/rebuild/chain_mirror_state_model_2026-07-04.md
-# §5), but a quarantined row is still inactive/no-new-entry for status display
-# purposes until the chain-mirror reconciler resolves it.
+# §5). T5 (docs/rebuild/quarantine_excision_2026-07-11.md): retired from
+# LifecyclePhase entirely and the DB CHECK no longer admits the literal
+# post-migration, so no live DB row can carry it — but this set also filters
+# the LEGACY positions.json sidecar file, which is not schema-CHECK-protected
+# and could still contain a pre-T5-CORE "quarantined" string on disk; kept
+# here defensively for that JSON-only path (mirrors
+# src.state.portfolio._load_portfolio_from_json_data's identical carve-out).
 _LEGACY_JSON_INACTIVE_POSITION_STATES = set(TERMINAL_STATES) | {
     "closed",
     "exited",
@@ -77,7 +82,10 @@ _TERMINAL_ENTRY_ORDER_STATUSES = {
     "rejected",
     "voided",
 }
-_TERMINAL_ENTRY_PHASES = set(TERMINAL_STATES) | {"quarantined"}
+# T5 (docs/rebuild/quarantine_excision_2026-07-11.md): 'quarantined' retired
+# from this set — the T5 schema migration has run and the DB CHECK no longer
+# admits the literal, so a live position_current row can never carry it.
+_TERMINAL_ENTRY_PHASES = set(TERMINAL_STATES)
 _TERMINAL_VENUE_ORDER_STATES = {
     "MATCHED",
     "FILLED",

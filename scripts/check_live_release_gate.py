@@ -492,6 +492,15 @@ def _check_trade_state(trade_db: Path) -> GateResult:
 
 
 def _proven_quarantined_zero_exposure_commands(conn: sqlite3.Connection) -> int:
+    # T5 (docs/rebuild/quarantine_excision_2026-07-11.md): the T5 schema
+    # migration has run and the DB CHECK no longer admits phase='quarantined',
+    # so the query below can never match a live row and this now always
+    # returns 0 — _check_trade_state becomes strictly more conservative
+    # (an UNKNOWN command is never auto-excused by this proof anymore), which
+    # is the safe direction. Left as-is deliberately: redefining what
+    # "proven zero exposure" means for a live-money release gate under the
+    # REPLACEMENT PHASE LAW is a gate-design decision outside BRIDGE
+    # RETIREMENT's scope, not a bare literal cleanup.
     if not _table_exists(conn, "position_current"):
         return 0
     command_columns = _table_columns(conn, "venue_commands")

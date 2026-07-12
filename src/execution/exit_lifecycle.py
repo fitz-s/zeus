@@ -60,7 +60,6 @@ _PENDING_EXIT_SCAN_INACTIVE_STATES = frozenset(
         "settled",
         "voided",
         "admin_closed",
-        "quarantined",
         "economically_closed",
     }
 )
@@ -1085,8 +1084,8 @@ def mark_market_closed_hold_to_settlement(
     current_state = _runtime_state_value(position)
     if current_state in {
         # T5 (docs/rebuild/quarantine_excision_2026-07-11.md): QUARANTINED
-        # retired — no writer mints it; Position.__post_init__ remaps any
-        # legacy row before pos.state ever sees it.
+        # retired — no writer mints it, LifecycleState has no such member,
+        # and the DB CHECK no longer admits the literal post-migration.
         LifecyclePhase.ECONOMICALLY_CLOSED.value,
         LifecyclePhase.SETTLED.value,
         LifecyclePhase.VOIDED.value,
@@ -6085,7 +6084,7 @@ def _check_monitor_cadence_watchdog(conn, summary: dict) -> dict | None:
                        )
                    )
               FROM position_current pc
-             WHERE pc.phase IN ('active', 'day0_window', 'pending_exit', 'quarantined')
+             WHERE pc.phase IN ('active', 'day0_window', 'pending_exit')
             """
         ).fetchone()
     except Exception:

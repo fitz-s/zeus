@@ -42,15 +42,6 @@ from src.contracts.position_truth import (
     CURRENT_MONEY_RISK_CHAIN_STATES,
 )
 
-# T5 (docs/rebuild/quarantine_excision_2026-07-11.md): previously imported
-# from src.contracts.position_truth.REDECISION_ELIGIBLE_QUARANTINE_CHAIN_STATES,
-# now retired there (no writer mints state='quarantined' going forward — see
-# Position.__post_init__'s mixed-epoch remap). This script reads
-# position_current.phase/chain_state via raw SQL row dicts (not coerced
-# Position objects), so the bare string set stays as a mixed-epoch bridge for
-# any LEGACY row until the T5 schema migration (docs/rebuild item 5)
-# rewrites history.
-REDECISION_ELIGIBLE_QUARANTINE_CHAIN_STATES = frozenset({"entry_authority_quarantined"})
 from src.ops.monitor_cadence import collect_monitor_cadence_evidence
 from src.state.fill_dedup import canonical_trade_fact_cte
 
@@ -1686,7 +1677,6 @@ def _restart_relevant_entry_command_invalid_open_authority_recoverable(
         "active",
         "day0_window",
         "pending_exit",
-        "quarantined",
     }:
         return False
     if not _restart_relevant_entry_command_has_positive_exposure(command):
@@ -2319,7 +2309,7 @@ def _edli_confirmed_fill_bridge_coverage_check() -> CheckResult:
                            AND (
                                  pc.position_id IS NULL
                                  OR LOWER(COALESCE(pc.phase, '')) NOT IN (
-                                      'settled', 'voided', 'quarantined', 'admin_closed'
+                                      'settled', 'voided', 'admin_closed'
                                  )
                                )
                 """
@@ -3033,7 +3023,7 @@ def _resting_venue_command_boot_recoverable(
     if (
         risk == "resting_exit_order_without_pending_exit_lifecycle"
         and intent_kind == "EXIT"
-        and phase in {"active", "day0_window", "quarantined"}
+        and phase in {"active", "day0_window"}
         and fact_state in {"LIVE", "OPEN", "RESTING", "PARTIALLY_MATCHED", "PARTIAL"}
     ):
         return {
@@ -4007,8 +3997,11 @@ _POSITIVE_CHAIN_EXPOSURE_EPS = 1e-6
 _RESTART_REDECISION_POSITION_PHASES = frozenset(
     {"active", "day0_window", "pending_exit"}
 )
+# T5 (docs/rebuild/quarantine_excision_2026-07-11.md): 'quarantined' retired
+# from this set — the T5 schema migration has run and the DB CHECK no longer
+# admits the literal, so a live row can never carry it.
 _RESTART_REDECISION_CHAIN_EXPOSURE_PHASES = frozenset(
-    {"quarantined", "voided"}
+    {"voided"}
 )
 
 
@@ -4296,7 +4289,7 @@ def _position_current_projection_integrity_check(rows: list[sqlite3.Row]) -> Che
             chain_shares = float(row["chain_shares"] or 0.0)
         except (TypeError, ValueError):
             chain_shares = 0.0
-        terminal_chain_exposure = phase in {"quarantined", "voided"} and chain_shares > _POSITIVE_CHAIN_EXPOSURE_EPS
+        terminal_chain_exposure = phase == "voided" and chain_shares > _POSITIVE_CHAIN_EXPOSURE_EPS
         position_id = str(row["position_id"] or "")
         item = {
             "position_id": position_id,
@@ -4312,18 +4305,6 @@ def _position_current_projection_integrity_check(rows: list[sqlite3.Row]) -> Che
             "p_posterior": row["p_posterior"],
             "cost_basis_usd": row["cost_basis_usd"],
         }
-        if _chain_backed_quarantine_requires_redecision(row, chain_shares=chain_shares):
-            redecision_required.append(
-                {
-                    **item,
-                    "restart_resolution": "chain_backed_quarantine_redecision_required",
-                    "reason": (
-                        "current chain-backed exposure is already quarantined; "
-                        "restart must route it through monitor/redecision, not new-entry authority"
-                    ),
-                }
-            )
-            continue
         terminal = terminal_by_position.get(position_id)
         if terminal is not None:
             boot_fast_repair = boot_fast_repair_by_position.get(position_id)
@@ -4523,23 +4504,6 @@ def _positive_trade_fact_proofs_by_position(
         }
         for row in rows
     }
-
-
-def _chain_backed_quarantine_requires_redecision(
-    row: sqlite3.Row,
-    *,
-    chain_shares: float,
-) -> bool:
-    if str(row["phase"] or "").strip().lower() != "quarantined":
-        return False
-    if chain_shares <= _POSITIVE_CHAIN_EXPOSURE_EPS:
-        return False
-    if str(row["direction"] or "").strip() not in {"buy_yes", "buy_no"}:
-        return False
-    return (
-        str(row["chain_state"] or "").strip()
-        in REDECISION_ELIGIBLE_QUARANTINE_CHAIN_STATES
-    )
 
 
 def _economically_closed_sell_projection_exposure_check() -> CheckResult:

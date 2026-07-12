@@ -32,7 +32,7 @@ from src.strategy.family_exclusive_dedup import (
 @pytest.mark.parametrize("state", [
     "LIVE", "RESTING", "PARTIALLY_MATCHED", "MATCHED", "ACKED",
     "UNKNOWN", "REVIEW_REQUIRED", "active", "pending_entry", "day0_window",
-    "pending_exit", "quarantined", "partially_filled", "filled", "submitting",
+    "pending_exit", "partially_filled", "filled", "submitting",
 ])
 def test_live_family_states_block_reentry(state: str) -> None:
     # An entry that is live / partially-matched / filled / unknown / under review
@@ -60,17 +60,17 @@ def test_empty_phase_blocks_defensively() -> None:
 # --- value-lock: the 3 sourced blocking sets are byte-identical to golden ------ #
 
 def test_trade_position_blocking_phases_sourced_from_position_phase() -> None:
+    # T5 (docs/rebuild/quarantine_excision_2026-07-11.md): 'quarantined' used
+    # to stay in _TRADE_POSITION_BLOCKING_PHASES as a mixed-epoch bridge
+    # literal for the raw-SQL `phase IN (...)` family-dedup query (a LEGACY
+    # row still carrying it had to keep blocking a same-family re-entry).
+    # BRIDGE RETIREMENT (post-T5-migration): the T5 schema migration has run
+    # and the DB CHECK no longer admits the literal, so it is retired here —
+    # every member is now sourced directly from PositionPhase.
     assert set(_TRADE_POSITION_BLOCKING_PHASES) == {
-        "pending_entry", "active", "day0_window", "pending_exit", "quarantined",
+        "pending_entry", "active", "day0_window", "pending_exit",
     }
-    # T5 (docs/rebuild/quarantine_excision_2026-07-11.md): 'quarantined' is
-    # retired from PositionPhase — no writer mints it going forward — but it
-    # stays in _TRADE_POSITION_BLOCKING_PHASES as a mixed-epoch bridge literal
-    # for the raw-SQL `phase IN (...)` family-dedup query (a LEGACY row still
-    # carrying it, until the T5 schema migration, docs/rebuild item 5,
-    # rewrites history, must keep blocking a same-family re-entry). Every
-    # OTHER member is still a real PositionPhase value (enum-sourced).
-    assert set(_TRADE_POSITION_BLOCKING_PHASES) - {"quarantined"} <= {p.value for p in PositionPhase}
+    assert set(_TRADE_POSITION_BLOCKING_PHASES) <= {p.value for p in PositionPhase}
 
 
 def test_trade_fact_blocking_states_sourced_from_venue_trade_status() -> None:

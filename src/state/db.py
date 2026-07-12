@@ -1304,7 +1304,6 @@ PORTFOLIO_LOADER_PHASE_TO_RUNTIME_STATE = {
     "economically_closed": "economically_closed",
     "settled": "settled",
     "voided": "voided",
-    "quarantined": "quarantined",
     "admin_closed": "admin_closed",
 }
 
@@ -11471,25 +11470,15 @@ def query_portfolio_loader_view(
         predicates.append("temperature_metric = ?")
         params.append(temperature_metric)
     if runtime_exposure_only:
-        from src.contracts.position_truth import (
-            TERMINAL_NO_CURRENT_MONEY_RISK_CHAIN_STATES,
-        )
-
+        # T5 (docs/rebuild/quarantine_excision_2026-07-11.md): this used to
+        # also OR in every phase='quarantined' row (unless chain truth had
+        # already proved the asset exited/redeemed/worthless). The T5 schema
+        # migration has run and the DB CHECK no longer admits the literal, so
+        # that extra leg is retired — OPEN_EXPOSURE_PHASES alone is
+        # authoritative again.
         placeholders = ", ".join("?" for _ in OPEN_EXPOSURE_PHASES)
         runtime_open_predicate = f"phase IN ({placeholders})"
         params.extend(OPEN_EXPOSURE_PHASES)
-        # Quarantine is a current risk-review set, not historical closure.
-        # Load every quarantined row unless chain truth has already proved the
-        # asset exited, redeemed, or worthless. Those rows retain historical
-        # shares/cost and lifecycle debt but own no current wealth; malformed or
-        # unknown chain authority still enters strict validation below.
-        terminal_no_risk = tuple(sorted(TERMINAL_NO_CURRENT_MONEY_RISK_CHAIN_STATES))
-        terminal_placeholders = ", ".join("?" for _ in terminal_no_risk)
-        runtime_open_predicate = (
-            f"({runtime_open_predicate} OR (phase = 'quarantined' "
-            f"AND COALESCE(chain_state, '') NOT IN ({terminal_placeholders})))"
-        )
-        params.extend(terminal_no_risk)
         predicates.append(runtime_open_predicate)
     where_clause = f"WHERE {' AND '.join(predicates)}" if predicates else ""
 
@@ -11887,7 +11876,7 @@ def query_token_suppression_tokens(conn: sqlite3.Connection | None) -> list[str]
 
     2026-05-27 fitz: ALSO include chain_only_quarantined tokens whose parent
     market has reached a chain-terminal phase (settled/voided/admin_closed/
-    economically_closed/quarantined). Without this, reconcile_with_chain
+    economically_closed). Without this, reconcile_with_chain
     Rule 3 re-quarantines these tokens every cycle from the chain API
     response, regenerating chain-only quarantine positions in PortfolioState
     and re-arming the family-scoped entry block (src.state.review_work_items.
@@ -11919,7 +11908,7 @@ def query_token_suppression_tokens(conn: sqlite3.Connection | None) -> list[str]
                   SELECT 1 FROM position_current pc
                   WHERE (pc.token_id = ts.token_id OR pc.no_token_id = ts.token_id)
                     AND pc.phase IN ('settled', 'voided', 'admin_closed',
-                                     'economically_closed', 'quarantined')
+                                     'economically_closed')
               )
             ORDER BY ts.created_at ASC, ts.token_id ASC
             """
@@ -12087,20 +12076,21 @@ def query_chain_only_quarantine_rows(conn: sqlite3.Connection | None) -> list[di
     projects the latest row per token_id from the append-only history.
 
     2026-05-27 fitz: exclude rows whose parent market has reached a runtime-
-    inactive phase (settled / voided / admin_closed / economically_closed /
-    quarantined). Per the chain-is-truth principle, once chain (or admin)
-    finalizes a market, any chain-only-quarantined token on that market
-    carries no live exposure and must not appear in the portfolio as a
-    quarantined position blocking new entries. The suppression row remains
-    in the append-only history for audit; this query filters it out of
-    runtime consumption.
+    inactive phase (settled / voided / admin_closed / economically_closed).
+    Per the chain-is-truth principle, once chain (or admin) finalizes a
+    market, any chain-only-quarantined token on that market carries no live
+    exposure and must not appear in the portfolio blocking new entries. The
+    suppression row remains in the append-only history for audit; this query
+    filters it out of runtime consumption.
 
     Note the deliberate divergence from ``_CHAIN_TERMINAL_POSITION_PHASES``
     in ``src/execution/exchange_reconcile.py``, which is the stricter 3-phase
     chain-terminal set (settled / voided / admin_closed) used for drift
-    suppression. The 5-phase set here matches INACTIVE_RUNTIME_STATES and is
+    suppression. The 4-phase set here matches INACTIVE_RUNTIME_STATES and is
     also used in ``query_token_suppression_tokens`` (Rule-3 ignored_tokens
-    path).
+    path). T5 (docs/rebuild/quarantine_excision_2026-07-11.md): this set used
+    to also include 'quarantined' — the T5 schema migration has run and the
+    DB CHECK no longer admits the literal, so it is retired.
     """
     if conn is None or not _table_or_view_exists(conn, "token_suppression"):
         return []
@@ -12125,7 +12115,7 @@ def query_chain_only_quarantine_rows(conn: sqlite3.Connection | None) -> list[di
           AND NOT EXISTS (
               SELECT 1 FROM position_current pc
               WHERE (pc.token_id = ts.token_id OR pc.no_token_id = ts.token_id)
-                AND pc.phase IN ('settled', 'voided', 'admin_closed', 'economically_closed', 'quarantined')
+                AND pc.phase IN ('settled', 'voided', 'admin_closed', 'economically_closed')
           )
         ORDER BY ts.created_at ASC, ts.token_id ASC
         """

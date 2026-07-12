@@ -755,6 +755,10 @@ def _edli_current_held_position_scope_rows() -> list[tuple[tuple[str, str, str],
             target_floor = (
                 datetime.now(timezone.utc).date() - timedelta(days=1)
             ).isoformat()
+            # T5 (docs/rebuild/quarantine_excision_2026-07-11.md): the second
+            # OR branch below used to also match phase='quarantined' —
+            # retired, DB CHECK no longer admits the literal post-migration;
+            # 'voided' remains a genuine residual-chain-shares case.
             chain_state_values = tuple(sorted(CURRENT_MONEY_RISK_CHAIN_STATES))
             if "chain_state" in cols:
                 chain_state_filter = "AND COALESCE(chain_state, '') IN ({})".format(
@@ -778,7 +782,7 @@ def _edli_current_held_position_scope_rows() -> list[tuple[tuple[str, str, str],
                             {chain_state_filter}
                         )
                         OR (
-                            phase IN ('quarantined', 'voided')
+                            phase = 'voided'
                             AND COALESCE(chain_shares, 0) > 0.000001
                         )
                        )

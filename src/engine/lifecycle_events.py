@@ -49,18 +49,16 @@ def _normalized_state(value: object) -> str:
 
 def _self_fold_or_legacy_phase(phase_after: str) -> str:
     """Validate+normalize a no-transition phase_after via the self-fold trick
-    (fold_lifecycle_phase(phase_after, phase_after)), except for the T5
-    mixed-epoch bridge literal 'quarantined' (docs/rebuild/quarantine_
-    excision_2026-07-11.md): that value is no longer a LifecyclePhase member
-    — no writer mints it going forward — but a LEGACY row's no-op refresh
-    write (e.g. a chain-observation persist) may still carry it as the
-    caller's current-phase argument (src.state.chain_reconciliation.
-    _canonical_chain_observation_phase reads it straight off the DB) until
-    the T5 schema migration (docs/rebuild item 5) rewrites history. Passing
-    it through fold_lifecycle_phase would raise; return it verbatim instead.
+    (fold_lifecycle_phase(phase_after, phase_after)).
+
+    T5 (docs/rebuild/quarantine_excision_2026-07-11.md): this used to also
+    pass the literal 'quarantined' through verbatim (bypassing
+    fold_lifecycle_phase, which would raise) for a LEGACY row's no-op refresh
+    write. The T5 schema migration has run and the DB CHECK no longer admits
+    the literal — src.state.chain_reconciliation._canonical_chain_observation_phase
+    (the caller that used to read it straight off the DB) can no longer
+    produce it either — so that bridge branch is retired.
     """
-    if phase_after == "quarantined":
-        return phase_after
     return fold_lifecycle_phase(phase_after, phase_after).value
 
 

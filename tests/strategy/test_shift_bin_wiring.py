@@ -206,7 +206,17 @@ def test_sibling_different_bin_reads_attached_position_current_schema():
 
 
 def test_sibling_reads_attached_chain_backed_zero_cost_quarantine():
-    """Chain-backed quarantine is old-leg exposure even before fill economics bind."""
+    """Chain-backed exposure on a disputed-entry position is old-leg exposure
+    even before fill economics bind.
+
+    BRIDGE RETIREMENT (docs/rebuild/quarantine_excision_2026-07-11.md,
+    post-T5-migration): this used to seed phase='quarantined'/
+    chain_state='entry_authority_quarantined' — both retired, DB CHECK no
+    longer admits them. Per REPLACEMENT PHASE LAW the position now keeps its
+    TRUE phase directly, so this seeds phase='active'/chain_state='synced'
+    (also a CURRENT_MONEY_RISK_CHAIN_STATES member) — same real chain-backed
+    exposure.
+    """
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     conn.execute("ATTACH DATABASE ':memory:' AS trade")
@@ -220,10 +230,10 @@ def test_sibling_reads_attached_chain_backed_zero_cost_quarantine():
             entry_ci_width, cost_basis_usd, chain_cost_basis_usd, shares, chain_shares,
             size_usd, updated_at, chain_state
         ) VALUES (
-            'p-chain-risk', 'quarantined', 'yes-30', 'no-30', '30C', 'buy_no',
+            'p-chain-risk', 'active', 'yes-30', 'no-30', '30C', 'buy_no',
             'cond-30', 'Munich', '2026-06-30', 'high', 0.88, 0.20,
             0.0, 0.0, 0.0, 29.14, 0.0, '2026-06-30T05:00:00',
-            'entry_authority_quarantined'
+            'synced'
         )
         """
     )
@@ -482,19 +492,26 @@ def test_old_leg_residual_keeps_synced_chain_position_over_collateral_zero():
 
 
 def test_old_leg_residual_keeps_zero_cost_current_risk_chain_position():
-    """Current chain risk keeps share sellability without fabricating USD residual."""
+    """Current chain risk keeps share sellability without fabricating USD residual.
+
+    BRIDGE RETIREMENT (docs/rebuild/quarantine_excision_2026-07-11.md,
+    post-T5-migration): this used to seed phase='quarantined'/
+    chain_state='entry_authority_quarantined' — both retired, DB CHECK no
+    longer admits them. Seeds phase='active'/chain_state='synced' instead
+    (also a CURRENT_MONEY_RISK_CHAIN_STATES member) — same real chain risk.
+    """
 
     conn = _conn()
     _insert_held(
         conn,
         token_id="yes-30",
         no_token_id="no-30",
-        phase="quarantined",
+        phase="active",
         direction="buy_no",
         cost_basis_usd=0.0,
         chain_cost_basis_usd=0.0,
         chain_shares=29.14,
-        chain_state="entry_authority_quarantined",
+        chain_state="synced",
     )
     _insert_chain_collateral(conn, {})
 

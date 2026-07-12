@@ -279,11 +279,13 @@ def _classify_identity_truth(
 # Active-positions query (read-only)
 # ---------------------------------------------------------------------------
 
+# T5 (docs/rebuild/quarantine_excision_2026-07-11.md): 'quarantined' retired
+# from this set — the T5 schema migration has run and the DB CHECK no longer
+# admits the literal, so a live position_current row can never carry it.
 _INACTIVE_STATES = frozenset({
     "voided",
     "settled",
     "economically_closed",
-    "quarantined",
     "admin_closed",
 })
 

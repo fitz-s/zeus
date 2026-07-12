@@ -27,9 +27,6 @@ _DEFAULT_FILL_PRICE = object()
 def conn():
     from src.state.collateral_ledger import init_collateral_schema
     from src.state.db import init_schema
-    from tests._helpers.legacy_quarantine_schema import (
-        downgrade_position_current_to_legacy_quarantine_check,
-    )
 
     c = sqlite3.connect(":memory:")
     c.row_factory = sqlite3.Row
@@ -38,13 +35,6 @@ def conn():
     # Single-connection fixture plays both DB roles; world init_schema no
     # longer creates trade-class collateral tables (K1 split, 1b51db387).
     init_collateral_schema(c)
-    # T5 (docs/rebuild/quarantine_excision_2026-07-11.md): at least one test
-    # below deliberately seeds a pre-migration legacy row with
-    # phase='quarantined' to exercise the mixed-epoch reconcile path; the
-    # CHECK constraint no longer permits that literal on a fresh schema
-    # post-migration, so downgrade this throwaway fixture connection back to
-    # the pre-migration shape.
-    downgrade_position_current_to_legacy_quarantine_check(c)
     yield c
     c.close()
 
@@ -2606,18 +2596,27 @@ def test_recorded_confirmed_exit_trade_repair_hook_economically_closes_projectio
     }
 
 
-def test_recorded_confirmed_exit_trade_economically_closes_quarantined_projection(conn):
+def test_recorded_confirmed_exit_trade_economically_closes_disputed_chain_state_projection(conn):
+    # BRIDGE RETIREMENT (docs/rebuild/quarantine_excision_2026-07-11.md): this
+    # test used to seed phase='quarantined' via a mixed-epoch downgrade
+    # fixture to prove exit-projection zeroes chain_shares/chain_avg_price/
+    # chain_cost_basis_usd even when the position carries an unresolved
+    # chain-state dispute. That phase literal is retired and now rejected by
+    # the position_current CHECK constraint; the real dispute-with-exposure
+    # shape is a normal open-phase position (phase='active') carrying the
+    # still-current chain_state='size_mismatch_unresolved', so the test is
+    # rewritten to that current-schema equivalent rather than deleted.
     from src.execution.exchange_reconcile import reconcile_recorded_maker_fill_economics
 
-    token = "exit-quarantined-confirmed-token"
-    seed_position_baseline(conn, position_id="pos-exit-quarantined-confirmed", order_id="ord-entry-quarantine")
+    token = "exit-disputed-confirmed-token"
+    seed_position_baseline(conn, position_id="pos-exit-disputed-confirmed", order_id="ord-entry-disputed")
     conn.execute(
         """
         UPDATE position_current
-           SET phase = 'quarantined',
+           SET phase = 'active',
                chain_state = 'size_mismatch_unresolved',
                token_id = ?,
-               order_id = 'ord-entry-quarantine',
+               order_id = 'ord-entry-disputed',
                order_status = 'filled',
                shares = 11.09,
                chain_shares = 11.09,
@@ -2625,15 +2624,15 @@ def test_recorded_confirmed_exit_trade_economically_closes_quarantined_projectio
                chain_cost_basis_usd = 6.10,
                entry_price = 0.55,
                updated_at = ?
-         WHERE position_id = 'pos-exit-quarantined-confirmed'
+         WHERE position_id = 'pos-exit-disputed-confirmed'
         """,
         (token, NOW.isoformat()),
     )
     seed_command(
         conn,
-        command_id="cmd-quarantined-exit-confirmed",
-        venue_order_id="ord-quarantined-exit-confirmed",
-        position_id="pos-exit-quarantined-confirmed",
+        command_id="cmd-disputed-exit-confirmed",
+        venue_order_id="ord-disputed-exit-confirmed",
+        position_id="pos-exit-disputed-confirmed",
         token_id=token,
         side="SELL",
         size=11.09,
@@ -2642,10 +2641,10 @@ def test_recorded_confirmed_exit_trade_economically_closes_quarantined_projectio
     )
     append_trade_fact(
         conn,
-        command_id="cmd-quarantined-exit-confirmed",
-        venue_order_id="ord-quarantined-exit-confirmed",
+        command_id="cmd-disputed-exit-confirmed",
+        venue_order_id="ord-disputed-exit-confirmed",
         token_id=token,
-        trade_id="trade-quarantined-exit-confirmed",
+        trade_id="trade-disputed-exit-confirmed",
         size="11.09",
         fill_price="0.54",
         state="CONFIRMED",
@@ -2659,7 +2658,7 @@ def test_recorded_confirmed_exit_trade_economically_closes_quarantined_projectio
         SELECT phase, order_status, exit_reason, shares, chain_shares,
                chain_avg_price, chain_cost_basis_usd
           FROM position_current
-         WHERE position_id = 'pos-exit-quarantined-confirmed'
+         WHERE position_id = 'pos-exit-disputed-confirmed'
         """
     ).fetchone()
     assert dict(projection) == {
@@ -2675,7 +2674,7 @@ def test_recorded_confirmed_exit_trade_economically_closes_quarantined_projectio
         """
         SELECT event_type, phase_before, phase_after, order_id, command_id
           FROM position_events
-         WHERE position_id = 'pos-exit-quarantined-confirmed'
+         WHERE position_id = 'pos-exit-disputed-confirmed'
            AND event_type = 'EXIT_ORDER_FILLED'
         """
     ).fetchone()
@@ -2683,8 +2682,8 @@ def test_recorded_confirmed_exit_trade_economically_closes_quarantined_projectio
         "event_type": "EXIT_ORDER_FILLED",
         "phase_before": "pending_exit",
         "phase_after": "economically_closed",
-        "order_id": "ord-quarantined-exit-confirmed",
-        "command_id": "cmd-quarantined-exit-confirmed",
+        "order_id": "ord-disputed-exit-confirmed",
+        "command_id": "cmd-disputed-exit-confirmed",
     }
 
 

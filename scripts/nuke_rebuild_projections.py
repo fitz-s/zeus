@@ -38,7 +38,10 @@ if str(REPO_ROOT) not in _sys.path:
 
 from src.state.db_writer_lock import WriteClass, db_writer_lock  # noqa: E402
 
-TERMINAL_PHASES = frozenset({"settled", "voided", "admin_closed", "quarantined"})
+# T5 (docs/rebuild/quarantine_excision_2026-07-11.md): 'quarantined' retired
+# from this set — the T5 schema migration has run and the DB CHECK no longer
+# admits the literal, so a live position_current row can never carry it.
+TERMINAL_PHASES = frozenset({"settled", "voided", "admin_closed"})
 
 
 def open_db(db_path: Path) -> sqlite3.Connection:

@@ -83,61 +83,21 @@ _CANONICAL_PHASE_TO_RUNTIME_STATE: dict[str, str] = {
     "active": LifecycleState.ENTERED.value,
 }
 
-# T5 (docs/rebuild/quarantine_excision_2026-07-11.md, mixed-epoch bridge):
-# no writer mints state='quarantined' going forward, but the DB CHECK still
-# permits the literal until the T5 schema migration (docs/rebuild item 5)
-# rewrites history. A legacy row loaded before that migration runs must not
-# crash Position construction (LifecycleState('quarantined') would raise) —
-# remap it to its TRUE runtime state. Every legacy quarantined row on record
-# (docs/rebuild item, "Live blast radius") carried real venue-confirmed
-# exposure (that is precisely why it was quarantined instead of voided), so
-# HOLDING is the correct, conservative true state: it is picked up by normal
-# active-position monitor/exposure accounting instead of vanishing into a
-# scar bucket. Logged once per remap (WARNING) so an operator can see how
-# many legacy rows are still awaiting the schema migration.
-_LEGACY_QUARANTINED_STATE = "quarantined"
-_LEGACY_QUARANTINED_TRUE_STATE = LifecycleState.HOLDING.value
-
-# Same bridge for chain_state: 'quarantined' / 'quarantine_expired' /
-# 'entry_authority_quarantined' are retired ChainState members. 'synced' is
-# the safe remap target — it is never in NO_CURRENT_MONEY_RISK_CHAIN_STATES,
-# so a real-exposure position's accounting is not silently zeroed; the
-# operator-visible dispute lives in the position's ReviewWorkItem, not here.
-_LEGACY_CHAIN_STATES = frozenset(
-    {"quarantined", "quarantine_expired", "entry_authority_quarantined"}
-)
-_LEGACY_CHAIN_STATE_TRUE_VALUE = VenueVisibilityStatus.SYNCED.value
+# T5 (docs/rebuild/quarantine_excision_2026-07-11.md): the mixed-epoch load
+# bridge that used to remap a legacy state='quarantined' /
+# chain_state in {'quarantined', 'quarantine_expired',
+# 'entry_authority_quarantined'} row to its TRUE runtime state has been
+# retired. The T5 schema migration (docs/rebuild item 5) has run: the DB
+# CHECK constraints no longer admit these literals and no live row can carry
+# them, so LifecycleState/VenueVisibilityStatus construction below is the
+# single normalization path.
 
 
 def _normalize_runtime_lifecycle_state(value: str | LifecycleState) -> str | LifecycleState:
     if isinstance(value, LifecycleState):
         return value
     state_value = str(value or "")
-    if state_value == _LEGACY_QUARANTINED_STATE:
-        logger.warning(
-            "LEGACY_QUARANTINED_STATE_REMAPPED: pre-T5 row carried "
-            "state='quarantined' — remapped to %r pending the T5 schema "
-            "migration (docs/rebuild/quarantine_excision_2026-07-11.md item 5)",
-            _LEGACY_QUARANTINED_TRUE_STATE,
-        )
-        return _LEGACY_QUARANTINED_TRUE_STATE
     return _CANONICAL_PHASE_TO_RUNTIME_STATE.get(state_value, state_value)
-
-
-def _normalize_runtime_chain_state(value: object) -> object:
-    if isinstance(value, VenueVisibilityStatus):
-        return value
-    chain_state_value = str(getattr(value, "value", value) or "")
-    if chain_state_value in _LEGACY_CHAIN_STATES:
-        logger.warning(
-            "LEGACY_QUARANTINED_CHAIN_STATE_REMAPPED: pre-T5 row carried "
-            "chain_state=%r — remapped to %r pending the T5 schema migration "
-            "(docs/rebuild/quarantine_excision_2026-07-11.md item 5)",
-            chain_state_value,
-            _LEGACY_CHAIN_STATE_TRUE_VALUE,
-        )
-        return _LEGACY_CHAIN_STATE_TRUE_VALUE
-    return value
 
 # Portfolio authority labels are a separate grammar from observation authority.
 # ObservationAtom uses Literal["VERIFIED", "UNVERIFIED", "QUARANTINED"]
@@ -785,7 +745,6 @@ class Position:
         self.state = _normalize_runtime_lifecycle_state(self.state)
         if not isinstance(self.state, LifecycleState):
             self.state = LifecycleState(self.state)
-        self.chain_state = _normalize_runtime_chain_state(self.chain_state)
         if not isinstance(self.chain_state, VenueVisibilityStatus):
             self.chain_state = VenueVisibilityStatus(self.chain_state)
         if not isinstance(self.exit_state, ExitState):
@@ -1954,12 +1913,15 @@ class DeprecatedStateFileError(RuntimeError):
 # `_TERMINAL_POSITION_STATES` for zero call-site churn at L1008/L1343.
 #
 # P0c (2026-07-04): QUARANTINED dropped out of TERMINAL_STATES when its fold
-# widened to {QUARANTINED, SETTLED, VOIDED} so the chain-mirror reconciler can
-# legally close it (docs/rebuild/chain_mirror_state_model_2026-07-04.md §5). A
-# quarantined row is still not an "active position" for this file's read/
-# write-side filters until the reconciler resolves it, so each call site below
-# ORs in "quarantined" explicitly alongside `_TERMINAL_POSITION_STATES` rather
-# than relying on the (now narrower) canonical set alone.
+# widened to {QUARANTINED, SETTLED, VOIDED} so the chain-mirror reconciler could
+# legally close it (docs/rebuild/chain_mirror_state_model_2026-07-04.md §5).
+# T5 (docs/rebuild/quarantine_excision_2026-07-11.md): QUARANTINED is now
+# retired from LifecyclePhase entirely — an in-memory Position can never carry
+# state=='quarantined' (enum construction would raise), so the write-side
+# filter (save_portfolio) needs no explicit OR anymore. The JSON read-side
+# filter below still checks the raw string literal defensively: a stale
+# positions.json sidecar written before this retirement could still contain
+# it, and that path reads untyped JSON before Position construction.
 
 
 def _load_portfolio_json_payload(path: Path) -> dict:
@@ -3064,7 +3026,7 @@ def save_portfolio(
     active_positions = [
         p for p in state.positions
         if _semantic_value(getattr(p, "state", "")).strip().lower()
-        not in (_TERMINAL_POSITION_STATES | {"quarantined"})
+        not in _TERMINAL_POSITION_STATES
     ]
     data = {
         "positions": [asdict(p) for p in active_positions],
@@ -3215,16 +3177,15 @@ def _dedupe_validations(steps: list[str]) -> list[str]:
 
 
 # T5 (docs/rebuild/quarantine_excision_2026-07-11.md): 'quarantined' retired
-# — no writer mints it, and Position.__post_init__ remaps any legacy 'state'
-# input to its TRUE runtime state before construction (see
-# _normalize_runtime_lifecycle_state), so no live Position can ever carry
-# state=='quarantined' here anymore. Keeping the literal in this SET would be
-# actively wrong now, not merely dead: chain_reconciliation.py's per-position
-# loop uses `state not in INACTIVE_RUNTIME_STATES` to decide whether a token
-# is "claimed locally" — a stale 'quarantined' entry would make a
-# (now-impossible) quarantined-state position silently double-process
-# through both the current-risk-quarantine branch AND the "chain but not
-# local" restoration branch.
+# — no writer mints it, LifecycleState has no such member (construction
+# raises), and the DB CHECK no longer admits the literal post-migration, so
+# no live Position can ever carry state=='quarantined' here. Keeping the
+# literal in this SET would be actively wrong, not merely dead:
+# chain_reconciliation.py's per-position loop uses `state not in
+# INACTIVE_RUNTIME_STATES` to decide whether a token is "claimed locally" —
+# a stale 'quarantined' entry would make a (now-impossible) quarantined-state
+# position silently double-process through both the current-risk-quarantine
+# branch AND the "chain but not local" restoration branch.
 INACTIVE_RUNTIME_STATES = frozenset(
     set(_TERMINAL_POSITION_STATES) | {"economically_closed"}
 )
@@ -3817,8 +3778,7 @@ def has_same_token_open_db(conn, token_id: str) -> bool:
     """Decision-time dedup gate: queries position_current directly at call time.
     Non-terminal phases: active, day0_window, pending_exit, pending_entry,
       phantom_not_on_chain, and any future open state.
-    Non-open (excluded): voided, economically_closed, settled, quarantined,
-      admin_closed.
+    Non-open (excluded): voided, economically_closed, settled, admin_closed.
 
     Checks BOTH token_id (YES side) and no_token_id (NO side) columns so buy_no
     positions are not invisible to the dedup gate.
@@ -3834,16 +3794,12 @@ def has_same_token_open_db(conn, token_id: str) -> bool:
     }
     if "chain_shares" in columns:
         chain_state_values = tuple(sorted(CURRENT_MONEY_RISK_CHAIN_STATES))
-        if "phase" in columns and "chain_state" in columns:
-            chain_truth_sql = "phase = 'quarantined' AND chain_state IN ({})".format(
-                ",".join("?" for _ in chain_state_values)
-            )
-        elif "chain_state" in columns:
+        if "chain_state" in columns:
             chain_truth_sql = "chain_state IN ({})".format(
                 ",".join("?" for _ in chain_state_values)
             )
         else:
-            chain_truth_sql = "phase IN ('voided', 'quarantined')"
+            chain_truth_sql = "phase IN ('voided')"
             chain_state_values = ()
         positive_chain_clause = (
             " OR (COALESCE(chain_shares, 0) > ? "

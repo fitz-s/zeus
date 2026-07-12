@@ -175,16 +175,13 @@ def _exit_order_type(selected_order_type: str) -> str:
     return normalized
 
 
-# T5 (docs/rebuild/quarantine_excision_2026-07-11.md): 'quarantined' is no
-# longer a LifecyclePhase member — no writer mints it going forward — but
-# this gate is raw SQL (`phase IN (...)` placeholders) against
-# position_current, so the bare string literal stays as a mixed-epoch
-# bridge: a LEGACY row still carrying phase='quarantined' (until the T5
-# schema migration, docs/rebuild item 5, rewrites it) must still be treated
-# as non-open (i.e. not a duplicate-entry blocker) until the chain-mirror
-# reconciler resolves it.
+# T5 (docs/rebuild/quarantine_excision_2026-07-11.md): 'quarantined' retired
+# from LifecyclePhase; the T5 schema migration has run (docs/rebuild item 5)
+# and the position_current CHECK no longer admits the literal, so the
+# mixed-epoch bridge that used to keep it in this raw-SQL `phase IN (...)`
+# gate is retired.
 _ENTRY_DUPLICATE_NON_OPEN_PHASES = frozenset(
-    set(TERMINAL_STATES) | {LifecyclePhase.ECONOMICALLY_CLOSED.value, "quarantined"}
+    set(TERMINAL_STATES) | {LifecyclePhase.ECONOMICALLY_CLOSED.value}
 )
 _ENTRY_DUPLICATE_OPEN_COMMAND_STATES = frozenset(
     {

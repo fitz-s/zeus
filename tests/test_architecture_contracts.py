@@ -1285,29 +1285,17 @@ def test_lifecycle_builders_map_runtime_states_to_canonical_phases():
         == "pending_exit"
     )
     # T5 (docs/rebuild/quarantine_excision_2026-07-11.md): 'quarantined' is
-    # retired from LifecycleState/ChainState. Position.__post_init__'s
-    # mixed-epoch bridge remaps a legacy row carrying these values to its
-    # TRUE runtime state/chain_state (holding/synced) before this function
-    # ever sees it, so it now folds to 'active' like any other open position
-    # — the dispute is tracked by an open ReviewWorkItem, not the phase.
-    assert (
-        canonical_phase_for_position(
-            _runtime_position(state="quarantined", chain_state="quarantined")
-        )
-        == "active"
-    )
-    assert (
-        canonical_phase_for_position(
-            _runtime_position(state="holding", chain_state="quarantined")
-        )
-        == "active"
-    )
-    assert (
-        canonical_phase_for_position(
-            _runtime_position(state="holding", chain_state="quarantine_expired")
-        )
-        == "active"
-    )
+    # retired from LifecycleState/ChainState. This used to also assert that
+    # a legacy row carrying state/chain_state='quarantined' (or
+    # chain_state='quarantine_expired') folded to 'active' via the
+    # mixed-epoch load bridge (Position.__post_init__'s
+    # _normalize_runtime_lifecycle_state / _normalize_runtime_chain_state).
+    # BRIDGE RETIREMENT (post-T5-migration cleanup): the T5 schema migration
+    # has run, the DB CHECK no longer admits those literals, and the bridge
+    # has been deleted — Position(state="quarantined", ...) now raises
+    # ValueError at construction instead of remapping, so that scenario is no
+    # longer constructible and these assertions are retired. The dispute is
+    # tracked by an open ReviewWorkItem, not the phase.
     assert canonical_phase_for_position(_runtime_position(state="voided")) == "voided"
     assert (
         canonical_phase_for_position(_runtime_position(state="economically_closed"))
@@ -1363,14 +1351,13 @@ def test_inv07_lifecycle_grammar_sql_python_consistency():
         )
 
     python_phases = {p.value for p in LifecyclePhase} - {"unknown"}
-    # T5 (docs/rebuild/quarantine_excision_2026-07-11.md): 'quarantined' is
-    # retired from LifecyclePhase (no writer mints it going forward), but the
-    # kernel SQL CHECK clauses still permit the literal — legacy rows written
-    # before this change carry it, and the schema migration that rewrites
-    # them (docs/rebuild item 5) is a separate follow-up packet. It is a
-    # known, intentional, temporary SQL-only value during the mixed-epoch
-    # bridge window, exactly like 'unknown' is intentionally Python-only.
-    canonical_sql_phases = canonical_sql_phases - {"quarantined"}
+    # T5 (docs/rebuild/quarantine_excision_2026-07-11.md): 'quarantined' used
+    # to be retired from LifecyclePhase while the kernel SQL CHECK clauses
+    # still permitted the legacy literal (mixed-epoch bridge window, pending
+    # the schema migration). BRIDGE RETIREMENT (post-T5-migration cleanup):
+    # the T5 schema migration has run — the kernel SQL CHECK clauses no
+    # longer admit 'quarantined' either, so SQL and Python are directly
+    # comparable again with no carve-out.
     assert python_phases == canonical_sql_phases, (
         "INV-07 schema-vs-code drift: the kernel SQL phase CHECK clauses and "
         "the Python LifecyclePhase enum disagree.\n"
@@ -1379,9 +1366,7 @@ def test_inv07_lifecycle_grammar_sql_python_consistency():
         "If you added a new phase, update both sites in lockstep. If you "
         "removed one, audit existing rows AND every consumer of the enum "
         "value before removing from this comparison. The 'unknown' sentinel "
-        "is intentionally excluded from the SQL set (in-flight only); "
-        "'quarantined' is intentionally excluded from the Python set until "
-        "the T5 schema migration (docs/rebuild item 5) rewrites legacy rows."
+        "is intentionally excluded from the SQL set (in-flight only)."
     )
 
 
@@ -1405,11 +1390,10 @@ def test_lifecycle_phase_kernel_exposes_exact_p5_vocabulary():
     from src.state.lifecycle_manager import LIFECYCLE_PHASE_VOCABULARY
 
     # T5 (docs/rebuild/quarantine_excision_2026-07-11.md): 'quarantined' is
-    # retired from LifecyclePhase (no writer mints it going forward). The
-    # kernel SQL CHECK clauses still permit the legacy literal for existing
-    # rows until the schema migration (docs/rebuild item 5, a separate
-    # follow-up packet) rewrites them — see test_inv07_lifecycle_grammar_
-    # sql_python_consistency for that mixed-epoch bridge carve-out.
+    # retired from LifecyclePhase (no writer mints it going forward). The T5
+    # schema migration has run and the kernel SQL CHECK clauses no longer
+    # admit the legacy literal either (see
+    # test_inv07_lifecycle_grammar_sql_python_consistency).
     assert LIFECYCLE_PHASE_VOCABULARY == (
         "pending_entry",
         "active",

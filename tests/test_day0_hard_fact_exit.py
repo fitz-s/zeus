@@ -70,55 +70,20 @@ def _clean_state(monkeypatch):
     _reset_wu_memo_for_tests()
 
 
-def test_day0_hard_fact_eligible_for_quarantined_real_partial_exposure():
-    from src.engine import cycle_runtime
-    from src.state.portfolio import QUARANTINE_SENTINEL, Position
-
-    day0 = Position(
-        trade_id="day0-pos", market_id="m", city="Tokyo", cluster="asia",
-        target_date="2026-06-10", bin_label="25C", direction="buy_yes",
-        state="day0_window", shares=1.0,
-    )
-    active = Position(
-        trade_id="active-pos", market_id="m", city="Tokyo", cluster="asia",
-        target_date="2026-06-10", bin_label="25C", direction="buy_yes",
-        state="active", shares=1.0,
-    )
-    quarantined_partial = Position(
-        trade_id="q-pos", market_id="m", city="Lucknow", cluster="asia",
-        target_date="2026-06-10", bin_label="35C or below", direction="buy_yes",
-        state="quarantined", chain_state="entry_authority_quarantined",
-        shares_filled=20.0, filled_cost_basis_usd=1.20,
-    )
-    quarantined_placeholder = Position(
-        trade_id="q-placeholder", market_id="m", city=QUARANTINE_SENTINEL,
-        cluster="unknown", target_date="2026-06-10", bin_label="UNKNOWN",
-        direction="buy_yes", state="quarantined",
-        chain_state="entry_authority_quarantined", shares_filled=20.0,
-    )
-    quarantined_no_exposure = Position(
-        trade_id="q-empty", market_id="m", city="Tokyo", cluster="asia",
-        target_date="2026-06-10", bin_label="25C", direction="buy_yes",
-        state="quarantined", chain_state="entry_authority_quarantined",
-    )
-
-    # T5 (docs/rebuild/quarantine_excision_2026-07-11.md): the legacy
-    # state='quarantined'/chain_state='entry_authority_quarantined'
-    # constructor inputs are remapped to their TRUE values (holding/synced)
-    # by Position.__post_init__'s mixed-epoch bridge — no live Position can
-    # carry state=='quarantined', so _quarantined_position_can_redecision's
-    # own gate (state == 'quarantined') is now permanently unreachable (see
-    # test_excision_t_consolidations_characterization.py, which
-    # already pins this to always-False). All three legacy-"quarantined"
-    # fixtures below resolve through the plain state-membership check
-    # instead — they are all remapped to 'holding', which is eligible like
-    # any other open position; the exposure/placeholder carve-outs this test
-    # once exercised were quarantine-scar bookkeeping that no longer applies.
-    assert cycle_runtime._day0_hard_fact_position_eligible(day0) is True
-    assert cycle_runtime._day0_hard_fact_position_eligible(active) is True
-    assert cycle_runtime._day0_hard_fact_position_eligible(quarantined_partial) is True
-    assert cycle_runtime._day0_hard_fact_position_eligible(quarantined_placeholder) is True
-    assert cycle_runtime._day0_hard_fact_position_eligible(quarantined_no_exposure) is True
+# T5 BRIDGE RETIREMENT (docs/rebuild/quarantine_excision_2026-07-11.md,
+# post-T5-migration cleanup):
+# test_day0_hard_fact_eligible_for_quarantined_real_partial_exposure
+# previously pinned that three legacy state='quarantined'/
+# chain_state='entry_authority_quarantined' constructor inputs (a partial-
+# exposure leg, a QUARANTINE_SENTINEL placeholder leg, and a no-exposure leg)
+# were remapped to 'holding' by Position.__post_init__'s mixed-epoch bridge
+# and therefore stayed day0-hard-fact eligible. The T5 schema migration has
+# run against the live DBs and the bridge is deleted: that same literal now
+# raises ValueError at construction instead of remapping, so none of the
+# three fixtures can be built anymore — the scenario is structurally
+# impossible. The remaining day0/active eligibility assertions this test also
+# carried were a trivial state-membership check with no quarantine-specific
+# content, so the test is retired rather than split.
 
 
 def _tokyo():

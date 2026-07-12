@@ -113,11 +113,11 @@ _TERMINAL_ENTRY_COMMAND_STATES = frozenset(
     {"CANCELLED", "CANCELED", "EXPIRED", "REJECTED", "SUBMIT_REJECTED", "FILLED"}
 )
 _CHAIN_CONFIRMED_HELD_PHASES = frozenset({"active", "day0_window"})
-# A quarantined local row is not tradable exposure, but a confirmed EXIT sell for
-# the same position is stronger venue truth and must be allowed to economically
-# close the stale projection instead of leaving close-before-open leases blocked.
+# T5 (docs/rebuild/quarantine_excision_2026-07-11.md): 'quarantined' retired
+# from LifecyclePhase; the T5 schema migration has run and the DB CHECK no
+# longer admits the literal, so it is no longer a member of this set.
 _EXIT_FILL_PROJECTION_PHASES = frozenset(
-    {"active", "day0_window", "pending_exit", "economically_closed", "quarantined"}
+    {"active", "day0_window", "pending_exit", "economically_closed"}
 )
 _TERMINAL_ORDER_FACT_STATES = frozenset({"MATCHED", "CANCEL_CONFIRMED", "EXPIRED", "VENUE_WIPED"})
 _PENDING_EXIT_NON_CURRENT_ORDER_STATUSES = frozenset({"filled", "sell_filled"})
@@ -2211,7 +2211,7 @@ def _reconcile_recorded_exit_fill_projections(
            )
            AND UPPER(COALESCE(cmd.intent_kind, '')) = 'EXIT'
            AND UPPER(COALESCE(cmd.side, '')) = 'SELL'
-           AND pc.phase IN ('active', 'day0_window', 'pending_exit', 'economically_closed', 'quarantined')
+           AND pc.phase IN ('active', 'day0_window', 'pending_exit', 'economically_closed')
          ORDER BY tf.observed_at, tf.trade_fact_id
         """
     ).fetchall()

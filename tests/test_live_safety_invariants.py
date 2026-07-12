@@ -108,68 +108,20 @@ def test_operator_scripts_filter_verified_settlement_rows_before_outputs_or_back
         assert snippet in source, rel_path
 
 
-def test_monitor_selection_uses_canonical_live_rows_not_historical_quarantine():
-    from src.engine import cycle_runtime
-
-    conn = sqlite3.connect(":memory:")
-    conn.row_factory = sqlite3.Row
-    conn.execute(
-        """
-        CREATE TABLE position_current (
-            position_id TEXT PRIMARY KEY,
-            phase TEXT,
-            shares REAL,
-            chain_shares REAL,
-            updated_at TEXT,
-            last_monitor_market_price_is_fresh INTEGER
-        )
-        """
-    )
-    stale_quarantine = _make_position(
-        trade_id="old-entry-authority-quarantine",
-        state="quarantined",
-        city="Wellington",
-        target_date="2026-06-24",
-        direction="buy_no",
-        shares=2.4255,
-        chain_shares=2.4255,
-        chain_state="entry_authority_quarantined",
-    )
-    live_day0 = _make_position(
-        trade_id="live-day0-wellington",
-        state="day0_window",
-        city="Wellington",
-        target_date="2026-07-02",
-        direction="buy_yes",
-        shares=15.0,
-        chain_shares=15.0,
-        chain_state="synced",
-    )
-    conn.execute(
-        """
-        INSERT INTO position_current (
-            position_id, phase, shares, chain_shares, updated_at,
-            last_monitor_market_price_is_fresh
-        ) VALUES (?, ?, ?, ?, ?, ?)
-        """,
-        ("old-entry-authority-quarantine", "quarantined", 2.4255, 2.4255, "2026-07-02T12:00:00+00:00", 1),
-    )
-    conn.execute(
-        """
-        INSERT INTO position_current (
-            position_id, phase, shares, chain_shares, updated_at,
-            last_monitor_market_price_is_fresh
-        ) VALUES (?, ?, ?, ?, ?, ?)
-        """,
-        ("live-day0-wellington", "day0_window", 15.0, 15.0, "2026-07-02T12:37:25+00:00", 0),
-    )
-
-    selected = cycle_runtime._monitoring_phase_positions(
-        _make_portfolio(stale_quarantine, live_day0),
-        conn=conn,
-    )
-
-    assert selected == [live_day0]
+# T5 BRIDGE RETIREMENT (docs/rebuild/quarantine_excision_2026-07-11.md,
+# post-T5-migration cleanup): test_monitor_selection_uses_canonical_live_rows_
+# not_historical_quarantine previously pinned that a historical
+# phase='quarantined' canonical DB row is dropped by
+# _monitoring_phase_positions in favor of a live day0 row. The T5 schema
+# migration (scripts/migrations/2026_07_quarantine_phase_retirement.py) has
+# run against the live DBs: position_current's phase CHECK constraint no
+# longer admits 'quarantined' and Position(state="quarantined", ...) now
+# raises ValueError at construction, so no row or Position can ever
+# reconstruct this scenario again. Retired rather than rewritten — the
+# canonical-DB-wins-over-stale-runtime-state behavior this test partially
+# also covered is still exercised by
+# test_monitor_selection_syncs_pending_exit_projection_over_stale_runtime_state
+# below.
 
 
 def test_monitor_selection_keeps_unprojected_venue_confirmed_local_fill_with_canonical_db():
@@ -3458,60 +3410,19 @@ def test_entry_authority_quarantined_exposure_reaches_redecision(monkeypatch):
     assert monitor_results[0].exit_reason == "ENTRY_AUTHORITY_QUARANTINE_REDECISION_HOLD"
 
 
-def test_canonical_monitor_order_includes_entry_authority_quarantined_exposure():
-    """Canonical DB ordering must not drop chain-backed quarantine before monitor."""
-    from src.engine import cycle_runtime
-
-    conn = sqlite3.connect(":memory:")
-    conn.row_factory = sqlite3.Row
-    conn.execute(
-        """
-        CREATE TABLE position_current (
-            position_id TEXT PRIMARY KEY,
-            phase TEXT,
-            shares REAL,
-            chain_shares REAL,
-            updated_at TEXT,
-            chain_state TEXT,
-            direction TEXT,
-            last_monitor_market_price_is_fresh INTEGER
-        )
-        """
-    )
-    conn.executemany(
-        """
-        INSERT INTO position_current (
-            position_id, phase, shares, chain_shares, updated_at,
-            chain_state, direction, last_monitor_market_price_is_fresh
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        [
-            (
-                "entry-authority-quarantine-position",
-                "quarantined",
-                19.88,
-                19.88,
-                "2026-06-28T08:00:00+00:00",
-                "entry_authority_quarantined",
-                "buy_no",
-                0,
-            ),
-            (
-                "chain-absence-quarantine-position",
-                "quarantined",
-                12.7,
-                12.7,
-                "2026-06-28T08:00:00+00:00",
-                "chain_absent_confirmed_position_unattributed",
-                "buy_yes",
-                0,
-            ),
-        ],
-    )
-
-    assert cycle_runtime._canonical_monitor_position_order(conn) == [
-        "entry-authority-quarantine-position"
-    ]
+# T5 BRIDGE RETIREMENT (docs/rebuild/quarantine_excision_2026-07-11.md,
+# post-T5-migration cleanup):
+# test_canonical_monitor_order_includes_entry_authority_quarantined_exposure
+# previously pinned that a raw phase='quarantined' canonical row with
+# chain_state='entry_authority_quarantined' still reaches monitor ordering.
+# _CANONICAL_MONITOR_PHASE_PRIORITY no longer has a "quarantined" entry (only
+# pending_exit/day0_window/active), so a phase='quarantined' row is now
+# unconditionally excluded regardless of chain_state — and no writer mints
+# that phase for genuinely exposed positions anymore (they keep their TRUE
+# phase). _canonical_monitor_position_rows' ordering never inspected
+# chain_state at all, so there is no current-shape rewrite that would still
+# exercise the "chain-backed quarantine" distinction this test was named for;
+# retired rather than rewritten.
 
 
 def test_chain_absent_confirmed_recent_projection_skips_redecision(monkeypatch):
@@ -3520,10 +3431,16 @@ def test_chain_absent_confirmed_recent_projection_skips_redecision(monkeypatch):
     from src.engine import cycle_runtime
 
     observed_at = datetime.now(timezone.utc).isoformat()
+    # T5 BRIDGE RETIREMENT (docs/rebuild/quarantine_excision_2026-07-11.md):
+    # a real held position now keeps its TRUE phase ("holding") — no writer
+    # mints state="quarantined" going forward, and construction with that
+    # literal now raises. The chain_absent_confirmed_position_unattributed
+    # chain_state alone (a NO_CURRENT_MONEY_RISK_CHAIN_STATES member) still
+    # correctly excludes it from monitor via the ordinary risk classification.
     pos = _make_position(
         trade_id="chain-absence-quarantine-position",
         direction="buy_yes",
-        state="quarantined",
+        state="holding",
         chain_state="chain_absent_confirmed_position_unattributed",
         shares=65.0,
         chain_shares=65.0,
@@ -3643,10 +3560,13 @@ def test_chain_absent_confirmed_recent_projection_does_not_reach_exit_lifecycle(
     from src.engine import cycle_runtime
 
     observed_at = datetime.now(timezone.utc).isoformat()
+    # T5 BRIDGE RETIREMENT (docs/rebuild/quarantine_excision_2026-07-11.md):
+    # see test_chain_absent_confirmed_recent_projection_skips_redecision above
+    # — real held phase, no writer mints "quarantined" going forward.
     pos = _make_position(
         trade_id="chain-absence-quarantine-exit-position",
         direction="buy_yes",
-        state="quarantined",
+        state="holding",
         chain_state="chain_absent_confirmed_position_unattributed",
         shares=12.7,
         chain_shares=12.7,
@@ -3771,12 +3691,20 @@ def test_chain_absent_confirmed_recent_projection_does_not_reach_exit_lifecycle(
 
 
 def test_chain_absent_confirmed_positive_projection_does_not_redecision():
-    """Stale local shares on a confirmed-absent quarantine do not create live exposure."""
-    from src.engine import cycle_runtime
+    """Stale local shares on a confirmed-absent chain state do not create live exposure."""
+    from src.contracts.position_truth import has_current_money_risk_chain_state
 
+    # T5 BRIDGE RETIREMENT (docs/rebuild/quarantine_excision_2026-07-11.md):
+    # cycle_runtime._quarantined_position_can_redecision (the canonical
+    # redecision-eligibility predicate this test used to call directly) is
+    # deleted — its own gate (state == "quarantined") could never fire once
+    # no writer mints that phase. The current equivalent "does this chain
+    # state represent live money risk" check is
+    # has_current_money_risk_chain_state, which the deleted predicate itself
+    # deferred to.
     pos = _make_position(
         direction="buy_yes",
-        state="quarantined",
+        state="holding",
         chain_state="chain_absent_confirmed_position_unattributed",
         shares=12.7,
         chain_shares=12.7,
@@ -3784,7 +3712,7 @@ def test_chain_absent_confirmed_positive_projection_does_not_redecision():
         chain_verified_at="",
     )
 
-    assert cycle_runtime._quarantined_position_can_redecision(pos) is False
+    assert has_current_money_risk_chain_state(pos.chain_state) is False
 
 
 def test_pending_exit_chain_absent_positive_exposure_stays_open_for_exit_lifecycle():
@@ -4064,10 +3992,15 @@ def test_monitor_entry_selection_guard_invalidity_requires_independent_exit():
             ),
         ),
     )
+    # T5 BRIDGE RETIREMENT (docs/rebuild/quarantine_excision_2026-07-11.md):
+    # a real held position now keeps its TRUE phase — no writer mints
+    # state="quarantined" going forward, and construction with that literal
+    # now raises. This test is about entry-proof-invalidity vs live exit
+    # authority, independent of lifecycle phase.
     pos = _make_position(
         trade_id="pos-unarmed",
         direction="buy_yes",
-        state="quarantined",
+        state="holding",
         chain_state="chain_absent_confirmed_position_unattributed",
         shares=65.0,
         chain_shares=65.0,
@@ -6606,6 +6539,14 @@ def test_family_monitor_overlay_includes_entry_authority_quarantined_family_expo
         last_monitor_market_price_is_fresh=True,
         last_monitor_best_bid=0.57,
     )
+    # T5 BRIDGE RETIREMENT (docs/rebuild/quarantine_excision_2026-07-11.md,
+    # REPLACEMENT PHASE LAW): this leg used to be forced into
+    # state="quarantined"/chain_state="entry_authority_quarantined" to prove
+    # chain-backed exposure still reaches family value math. It now keeps its
+    # TRUE (day0_window/synced) phase — no writer mints the retired literals,
+    # and construction with them now raises. Real exposure enters family math
+    # the same way any other open-phase position does; there is no dedicated
+    # quarantine bucket to exercise separately anymore.
     quarantined = _make_position(
         trade_id="munich-30-no-quarantined",
         city="Munich",
@@ -6615,10 +6556,10 @@ def test_family_monitor_overlay_includes_entry_authority_quarantined_family_expo
         direction="buy_no",
         shares=29.14,
         chain_shares=29.14,
-        chain_state="entry_authority_quarantined",
+        chain_state="synced",
         entry_price=0.73,
         p_posterior=0.879883784472759,
-        state="quarantined",
+        state="day0_window",
         last_monitor_prob=0.99,
         last_monitor_prob_is_fresh=True,
         last_monitor_market_price=0.74,
@@ -7005,6 +6946,10 @@ def test_family_monitor_overlay_keeps_chain_backed_quarantine_in_family_vector()
     """Chain-backed quarantine remains live family risk for hold-vs-sell math."""
     from src.engine import cycle_runtime
 
+    # T5 BRIDGE RETIREMENT (docs/rebuild/quarantine_excision_2026-07-11.md):
+    # real chain-backed exposure now keeps its TRUE (day0_window/synced)
+    # phase — see test_family_monitor_overlay_includes_entry_authority_
+    # quarantined_family_exposure above.
     old_leg = _make_position(
         trade_id="munich-30-quarantine",
         city="Munich",
@@ -7014,8 +6959,8 @@ def test_family_monitor_overlay_keeps_chain_backed_quarantine_in_family_vector()
         direction="buy_no",
         shares=29.14,
         chain_shares=29.14,
-        chain_state="entry_authority_quarantined",
-        state="quarantined",
+        chain_state="synced",
+        state="day0_window",
         entry_price=0.73,
         p_posterior=0.88,
         strategy_key="center_bin_buy",
@@ -8658,21 +8603,18 @@ def test_runtime_exit_context_uses_fill_authority_cost_basis_for_crowding_exposu
         fill_authority=FILL_AUTHORITY_VENUE_CONFIRMED_FULL,
     )
     closed = _make_position(trade_id="closed-pos", state="economically_closed", size_usd=1000.0)
-    # T5 (docs/rebuild/quarantine_excision_2026-07-11.md, REPLACEMENT PHASE
-    # LAW): a legacy state='quarantined'/chain_state='quarantined' input is
-    # remapped by Position.__post_init__ to its TRUE (holding/synced) state —
-    # no writer mints the retired values going forward. This position is
-    # therefore genuinely active now and correctly counts toward crowding
-    # exposure below, same as any other held position (real exposure is no
-    # longer hidden behind a quarantine bucket).
-    formerly_quarantined = _make_position(
-        trade_id="quarantined-pos",
-        state="quarantined",
-        chain_state="quarantined",
-        size_usd=1000.0,
-    )
+    # T5 BRIDGE RETIREMENT (docs/rebuild/quarantine_excision_2026-07-11.md):
+    # this leg used to represent a legacy state='quarantined'/
+    # chain_state='quarantined' input that Position.__post_init__'s
+    # mixed-epoch bridge remapped to its TRUE (holding/synced) state —
+    # proving the remapped position still counted toward crowding exposure.
+    # That bridge is deleted: the same literal now raises ValueError at
+    # construction instead of remapping, so the scenario this leg exercised
+    # ("a legacy quarantined input turns out to be real exposure") is
+    # structurally impossible and the leg is removed rather than rewritten as
+    # a plain active position, which `other` above already covers.
     pending_entry = _make_position(trade_id="pending-entry-pos", state="pending_tracked", size_usd=1000.0)
-    portfolio = SimpleNamespace(bankroll=200.0, positions=[pos, other, closed, formerly_quarantined, pending_entry])
+    portfolio = SimpleNamespace(bankroll=200.0, positions=[pos, other, closed, pending_entry])
     edge_ctx = SimpleNamespace(
         p_posterior=0.10,
         p_market=[0.50],
@@ -8690,7 +8632,6 @@ def test_runtime_exit_context_uses_fill_authority_cost_basis_for_crowding_exposu
 
     assert exit_context.portfolio_positions == (
         (other.cluster, other.effective_cost_basis_usd, other.trade_id),
-        (formerly_quarantined.cluster, formerly_quarantined.effective_cost_basis_usd, formerly_quarantined.trade_id),
     )
     assert exit_context.portfolio_positions[0][1] != pytest.approx(other.size_usd)
 

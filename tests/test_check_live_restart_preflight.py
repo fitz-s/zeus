@@ -2112,59 +2112,19 @@ def test_position_projection_integrity_blocks_edli_legacy_projection(
     assert result.evidence["risky"][0]["position_id"] == "pos-1"
 
 
-def test_position_projection_integrity_routes_chain_backed_quarantine_to_redecision(
-    monkeypatch, tmp_path
-):
-    trade_db = tmp_path / "zeus_trades.db"
-    world_db = tmp_path / "zeus-world.db"
-    forecast_db = tmp_path / "zeus-forecasts.db"
-    sqlite3.connect(world_db).close()
-    sqlite3.connect(forecast_db).close()
-    _init_entry_provenance_trade_db(
-        trade_db,
-        submit_payload={"execution_capability": {"components": []}},
-    )
-    trade = sqlite3.connect(trade_db)
-    trade.execute("ALTER TABLE position_current ADD COLUMN entry_method TEXT")
-    trade.execute("ALTER TABLE position_current ADD COLUMN p_posterior REAL")
-    trade.execute("ALTER TABLE position_current ADD COLUMN cost_basis_usd REAL")
-    trade.execute("ALTER TABLE position_current ADD COLUMN chain_state TEXT")
-    trade.execute(
-        """
-        UPDATE position_current
-           SET phase = 'quarantined',
-               chain_state = 'entry_authority_quarantined',
-               entry_method = 'ens_member_counting',
-               p_posterior = 0.0,
-               cost_basis_usd = 0.1192,
-               chain_shares = 20.0
-         WHERE position_id = 'pos-1'
-        """
-    )
-    trade.execute(
-        """
-        UPDATE venue_commands
-           SET decision_id = 'edli_exec_cmd:edli_evt_lucknow:intent:token-1:token-1:buy_yes'
-         WHERE command_id = 'cmd-1'
-        """
-    )
-    trade.commit()
-    trade.close()
-    monkeypatch.setattr(preflight, "TRADE_DB", trade_db)
-    monkeypatch.setattr(preflight, "WORLD_DB", world_db)
-    monkeypatch.setattr(preflight, "FORECAST_DB", forecast_db)
-
-    result = preflight._position_current_projection_integrity_check(
-        preflight._open_positions()
-    )
-
-    assert result.ok is True
-    assert result.evidence["risky"] == []
-    assert result.evidence["covered_count"] == 0
-    assert result.evidence["redecision_required_count"] == 1
-    required = result.evidence["redecision_required"][0]
-    assert required["position_id"] == "pos-1"
-    assert required["restart_resolution"] == "chain_backed_quarantine_redecision_required"
+# test_position_projection_integrity_routes_chain_backed_quarantine_to_redecision
+# RETIRED (BRIDGE RETIREMENT, docs/rebuild/quarantine_excision_2026-07-11.md,
+# post-T5-migration): it pinned that a position seeded with
+# phase='quarantined'/chain_state='entry_authority_quarantined' routed into a
+# dedicated "chain_backed_quarantine_redecision_required" evidence bucket
+# (_chain_backed_quarantine_requires_redecision in
+# scripts/check_live_restart_preflight.py). The T5 schema migration has run —
+# no writer mints either literal and the DB CHECK no longer admits them, so
+# the predicate's own gate (phase == 'quarantined') is provably unreachable
+# on the live DB this script queries — the function and its dedicated bucket
+# have been deleted. Per REPLACEMENT PHASE LAW such a position now keeps its
+# TRUE phase and is covered by the normal risky/covered categorization above,
+# not a quarantine-specific bucket.
 
 
 def test_position_projection_integrity_blocks_hard_terminal_reactivation(
@@ -2933,12 +2893,16 @@ def _init_resting_command_trade_db(path, *, phase: str, intent_kind: str = "EXIT
 
 
 def test_resting_exit_order_is_boot_recoverable_when_position_not_pending_exit(monkeypatch, tmp_path):
+    # BRIDGE RETIREMENT (docs/rebuild/quarantine_excision_2026-07-11.md,
+    # post-T5-migration): this used to seed phase="quarantined" as its example
+    # of "an open, non-pending_exit phase" — retired, DB CHECK no longer
+    # admits it. "active" is the same real scenario (open, not pending_exit).
     trade_db = tmp_path / "zeus_trades.db"
     world_db = tmp_path / "zeus-world.db"
     forecast_db = tmp_path / "zeus-forecasts.db"
     sqlite3.connect(world_db).close()
     sqlite3.connect(forecast_db).close()
-    _init_resting_command_trade_db(trade_db, phase="quarantined")
+    _init_resting_command_trade_db(trade_db, phase="active")
     monkeypatch.setattr(preflight, "TRADE_DB", trade_db)
     monkeypatch.setattr(preflight, "WORLD_DB", world_db)
     monkeypatch.setattr(preflight, "FORECAST_DB", forecast_db)
@@ -6709,9 +6673,18 @@ def test_monitor_cadence_restart_evidence_accepts_closed_market_settlement_recov
     assert result.evidence["settlement_recoverable_positions"][0]["position_id"] == "pos-1"
 
 
-def test_monitor_cadence_restart_evidence_reports_entry_authority_quarantine_as_reconciliation_risk(
+def test_monitor_cadence_restart_evidence_reports_voided_chain_risk_as_reconciliation_risk(
     monkeypatch, tmp_path
 ):
+    # BRIDGE RETIREMENT (docs/rebuild/quarantine_excision_2026-07-11.md,
+    # post-T5-migration): this used to seed phase='quarantined'/
+    # chain_state='entry_authority_quarantined' as its example of a
+    # not-actively-monitored-but-chain-risky position — both retired, DB
+    # CHECK no longer admits them, and
+    # src.ops.monitor_cadence.NON_MONITOR_CHAIN_RISK_PHASES no longer
+    # includes 'quarantined' (a disputed-entry position now keeps its TRUE
+    # phase and is normally monitored per REPLACEMENT PHASE LAW). 'voided'
+    # is the one remaining real member of that set.
     trade_db = tmp_path / "zeus_trades.db"
     world_db = tmp_path / "zeus-world.db"
     forecast_db = tmp_path / "zeus-forecasts.db"
@@ -6731,10 +6704,10 @@ def test_monitor_cadence_restart_evidence_reports_entry_authority_quarantine_as_
             last_monitor_market_price, last_monitor_market_price_is_fresh,
             updated_at, chain_state
         ) VALUES (
-            'pos-1', 'quarantined', 'Manila', ?, 'high',
+            'pos-1', 'voided', 'Manila', ?, 'high',
             'Will the highest temperature in Manila be 32°C on July 2?',
             'buy_yes', 10.0, 10.0, 'filled', NULL, 0, NULL,
-            0.0, 1, NULL, 0, ?, 'entry_authority_quarantined'
+            0.0, 1, NULL, 0, ?, 'synced'
         )
         """,
         (target_date, now.isoformat()),
@@ -6755,9 +6728,16 @@ def test_monitor_cadence_restart_evidence_reports_entry_authority_quarantine_as_
     assert result.evidence["non_monitor_chain_risk_positions"][0]["position_id"] == "pos-1"
 
 
-def test_monitor_cadence_restart_evidence_classifies_expired_quarantine_as_reconciliation_risk(
+def test_monitor_cadence_restart_evidence_classifies_expired_voided_chain_risk_as_reconciliation_risk(
     monkeypatch, tmp_path
 ):
+    # BRIDGE RETIREMENT (docs/rebuild/quarantine_excision_2026-07-11.md,
+    # post-T5-migration): this used to seed phase='quarantined'/
+    # chain_state='entry_authority_quarantined' — both retired, DB CHECK no
+    # longer admits them, and 'quarantined' is no longer a
+    # NON_MONITOR_CHAIN_RISK_PHASES member. 'voided' is the same real
+    # not-actively-monitored-but-chain-risky scenario, with an expired
+    # target_date, which is the real point of this test.
     trade_db = tmp_path / "zeus_trades.db"
     world_db = tmp_path / "zeus-world.db"
     forecast_db = tmp_path / "zeus-forecasts.db"
@@ -6777,10 +6757,10 @@ def test_monitor_cadence_restart_evidence_classifies_expired_quarantine_as_recon
             last_monitor_market_price, last_monitor_market_price_is_fresh,
             updated_at, chain_state
         ) VALUES (
-            'expired-quarantine', 'quarantined', 'Manila', ?, 'high',
+            'expired-voided', 'voided', 'Manila', ?, 'high',
             'Will the highest temperature in Manila be 32°C on July 2?',
             'buy_yes', 10.0, 10.0, 'filled', NULL, 0, NULL,
-            0.0, 1, NULL, 0, ?, 'entry_authority_quarantined'
+            0.0, 1, NULL, 0, ?, 'synced'
         )
         """,
         (expired_target_date, now.isoformat()),
@@ -6798,7 +6778,7 @@ def test_monitor_cadence_restart_evidence_classifies_expired_quarantine_as_recon
     assert result.evidence["open_position_count"] == 0
     assert result.evidence["stale_or_missing_position_count"] == 0
     assert result.evidence["non_monitor_chain_risk_position_count"] == 1
-    assert result.evidence["non_monitor_chain_risk_positions"][0]["position_id"] == "expired-quarantine"
+    assert result.evidence["non_monitor_chain_risk_positions"][0]["position_id"] == "expired-voided"
 
 
 def test_monitor_cadence_restart_evidence_accepts_pending_exit_redecision_event(
