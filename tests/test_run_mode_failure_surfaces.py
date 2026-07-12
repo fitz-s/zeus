@@ -1389,6 +1389,7 @@ def _write_monitor_probability_freshness_db(
     stale_event_age: timedelta = timedelta(minutes=3),
     latest_event_age: timedelta = timedelta(minutes=1),
     day0_daily_extrema_receipt: str | None = None,
+    review_hold: bool = False,
 ) -> None:
     trade_conn = sqlite3.connect(sd / "zeus_trades.db")
     try:
@@ -1460,6 +1461,15 @@ def _write_monitor_probability_freshness_db(
             "last_monitor_prob": 0.42,
             "last_monitor_prob_is_fresh": latest_event_fresh,
         }
+        if review_hold:
+            latest_payload_obj.update(
+                {
+                    "applied_validations": ["blocking_review_fact_monitor_hold"],
+                    "exit_decision_reason": "REVIEW_REQUIRED_INVALID_ENTRY_PROOF",
+                    "exit_decision_selected_method": "chain_only_reconciliation",
+                    "exit_decision_should_exit": False,
+                }
+            )
         if day0_daily_extrema_receipt == "unconditioned":
             latest_payload_obj["day0_monitor_probability_receipt"] = {
                 "selected_method": "day0_observation_remaining_window",
@@ -3327,6 +3337,55 @@ def test_monitor_probability_freshness_allows_resolved_recent_stale(
     surface = result["surfaces"]["monitor_probability_freshness"]
     assert surface["ok"] is True
     assert surface["latest_stale_monitor_count"] == 0
+    assert "monitor_probability_freshness" not in result["failing_surfaces"]
+
+
+def test_monitor_probability_freshness_keeps_scoped_review_hold_out_of_global_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sd = tmp_path / "state"
+    sd.mkdir()
+    _setup_healthy_state(sd)
+    monkeypatch.setattr(live_health, "_dirty_runtime_worktree_paths", lambda **_kwargs: ())
+    monkeypatch.setattr(
+        live_health,
+        "_main_daemon_surface",
+        lambda status_summary, heartbeat: {
+            "ok": True,
+            "issue": None,
+            "attested": True,
+            "pid": 123,
+            "command": "python -m src.main",
+        },
+    )
+    monkeypatch.setattr(
+        live_health,
+        "_process_code_surface",
+        lambda main_daemon_surface: {"ok": True, "issue": None, "evaluated": True},
+    )
+    now = datetime.now(timezone.utc)
+    _write_forecast_event_bridge_dbs(
+        sd,
+        posterior_computed_at=(now - timedelta(seconds=30)).isoformat(),
+        fsr_created_at=(now - timedelta(seconds=20)).isoformat(),
+    )
+    _write_monitor_probability_freshness_db(
+        sd,
+        now=now,
+        latest_event_fresh=False,
+        projection_fresh=False,
+        review_hold=True,
+    )
+
+    result = compute_composite_live_health(state_dir=sd, now=now)
+
+    surface = result["surfaces"]["monitor_probability_freshness"]
+    assert surface["ok"] is True
+    assert surface["current_stale_projection_count"] == 0
+    assert surface["latest_stale_monitor_count"] == 0
+    assert surface["scoped_review_hold_count"] == 1
+    assert surface["scoped_review_hold_sample"][0]["position_id"] == "pos-monitor"
     assert "monitor_probability_freshness" not in result["failing_surfaces"]
 
 

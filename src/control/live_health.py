@@ -2952,6 +2952,72 @@ def _monitor_probability_freshness_surface(
         - timedelta(seconds=MONITOR_PROBABILITY_STALE_LOOKBACK_SECONDS)
     ).isoformat()
 
+    scoped_review_hold_sample: list[dict] = []
+    if has_monitor_events:
+        scoped_review_hold_sample, review_hold_err = _sqlite_ro_rows(
+            trade_db,
+            """
+            SELECT pc.position_id,
+                   pc.phase,
+                   pc.order_status,
+                   pc.shares,
+                   pc.chain_shares,
+                   latest.occurred_at AS latest_monitor_at,
+                   pc.city,
+                   pc.target_date,
+                   pc.bin_label,
+                   pc.direction
+              FROM position_current pc
+              JOIN position_events latest
+                ON latest.rowid = (
+                    SELECT e.rowid
+                      FROM position_events e
+                     WHERE e.position_id = pc.position_id
+                       AND e.event_type = 'MONITOR_REFRESHED'
+                     ORDER BY e.sequence_no DESC, datetime(e.occurred_at) DESC
+                     LIMIT 1
+                )
+             WHERE pc.phase IN ('active', 'day0_window', 'pending_exit')
+               AND (
+                   COALESCE(CAST(pc.chain_shares AS REAL), 0.0) > 0.0
+                   OR COALESCE(CAST(pc.shares AS REAL), 0.0) > 0.0
+               )
+               AND json_extract(latest.payload_json, '$.exit_decision_reason')
+                   = 'REVIEW_REQUIRED_INVALID_ENTRY_PROOF'
+               AND json_extract(
+                       latest.payload_json,
+                       '$.exit_decision_selected_method'
+                   ) = 'chain_only_reconciliation'
+               AND json_extract(
+                       latest.payload_json,
+                       '$.exit_decision_should_exit'
+                   ) IN (0, 'false')
+               AND EXISTS (
+                   SELECT 1
+                     FROM json_each(
+                         json_extract(
+                             latest.payload_json,
+                             '$.applied_validations'
+                         )
+                     )
+                    WHERE json_each.value = 'blocking_review_fact_monitor_hold'
+               )
+             ORDER BY datetime(latest.occurred_at) DESC, pc.position_id
+            """,
+        )
+        if review_hold_err:
+            return {
+                "ok": False,
+                "issue": f"MONITOR_PROBABILITY_FRESHNESS_READ_UNAVAILABLE:{review_hold_err}",
+                "evaluated": True,
+            }
+    review_hold_ids = {
+        str(row["position_id"])
+        for row in scoped_review_hold_sample
+        if row.get("position_id") is not None
+    }
+    sample_limit = MONITOR_PROBABILITY_STALE_SAMPLE_LIMIT + len(review_hold_ids)
+
     current_sample, current_err = _sqlite_ro_rows(
         trade_db,
         """
@@ -2967,17 +3033,17 @@ def _monitor_probability_freshness_surface(
                target_date,
                bin_label,
                direction
-          FROM position_current
-         WHERE phase IN ('active', 'day0_window', 'pending_exit')
+          FROM position_current pc
+         WHERE pc.phase IN ('active', 'day0_window', 'pending_exit')
            AND (
-               COALESCE(CAST(chain_shares AS REAL), 0.0) > 0.0
-               OR COALESCE(CAST(shares AS REAL), 0.0) > 0.0
+               COALESCE(CAST(pc.chain_shares AS REAL), 0.0) > 0.0
+               OR COALESCE(CAST(pc.shares AS REAL), 0.0) > 0.0
            )
-           AND COALESCE(CAST(last_monitor_prob_is_fresh AS INTEGER), 0) != 1
-         ORDER BY updated_at DESC, position_id
+           AND COALESCE(CAST(pc.last_monitor_prob_is_fresh AS INTEGER), 0) != 1
+         ORDER BY pc.updated_at DESC, pc.position_id
          LIMIT ?
         """,
-        (MONITOR_PROBABILITY_STALE_SAMPLE_LIMIT,),
+        (sample_limit,),
     )
     if current_err:
         return {
@@ -2985,6 +3051,9 @@ def _monitor_probability_freshness_surface(
             "issue": f"MONITOR_PROBABILITY_FRESHNESS_READ_UNAVAILABLE:{current_err}",
             "evaluated": True,
         }
+    current_sample = [
+        row for row in current_sample if str(row.get("position_id")) not in review_hold_ids
+    ][:MONITOR_PROBABILITY_STALE_SAMPLE_LIMIT]
 
     latest_stale_sample: list[dict] = []
     latest_monitor_age_sample: list[dict] = []
@@ -3048,7 +3117,7 @@ def _monitor_probability_freshness_surface(
              ORDER BY datetime(recent.occurred_at) DESC, pc.position_id
              LIMIT ?
             """,
-            (cutoff, MONITOR_PROBABILITY_STALE_SAMPLE_LIMIT),
+            (cutoff, sample_limit),
         )
         if latest_err:
             return {
@@ -3056,6 +3125,11 @@ def _monitor_probability_freshness_surface(
                 "issue": f"MONITOR_PROBABILITY_FRESHNESS_READ_UNAVAILABLE:{latest_err}",
                 "evaluated": True,
             }
+        latest_stale_sample = [
+            row
+            for row in latest_stale_sample
+            if str(row.get("position_id")) not in review_hold_ids
+        ][:MONITOR_PROBABILITY_STALE_SAMPLE_LIMIT]
 
         latest_monitor_age_sample, latest_age_err = _sqlite_ro_rows(
             trade_db,
@@ -3229,6 +3303,8 @@ def _monitor_probability_freshness_surface(
         "day0_daily_extrema_unconditioned_sample": (
             day0_daily_extrema_unconditioned_sample
         ),
+        "scoped_review_hold_count": len(scoped_review_hold_sample),
+        "scoped_review_hold_sample": scoped_review_hold_sample,
         "position_events_evaluated": has_monitor_events,
     }
     active_failure_parts = []

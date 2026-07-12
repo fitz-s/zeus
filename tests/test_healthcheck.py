@@ -1364,7 +1364,7 @@ def test_monitor_probability_freshness_status_accepts_active_fresh_projection(
     assert result["current_stale_projection_count"] == 0
 
 
-def test_monitor_probability_freshness_status_skips_without_daemon_attestation(
+def test_monitor_probability_freshness_status_evaluates_without_daemon_attestation(
     monkeypatch, tmp_path
 ):
     db_path = tmp_path / "zeus_trades.db"
@@ -1378,9 +1378,10 @@ def test_monitor_probability_freshness_status_skips_without_daemon_attestation(
 
     result = _ORIGINAL_MONITOR_PROBABILITY_FRESHNESS_STATUS()
 
-    assert result["ok"] is True
-    assert result["evaluated"] is False
-    assert result["issue"] == "NOT_EVALUATED_MAIN_DAEMON_NOT_ATTESTED"
+    assert result["ok"] is False
+    assert result["evaluated"] is True
+    assert result["issue"] == "MONITOR_PROBABILITY_STALE_CURRENT:n=1"
+    assert result["main_daemon_attested"] is False
 
 
 def test_venue_commands_schema_status_rejects_missing_q_version(monkeypatch, tmp_path):
