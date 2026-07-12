@@ -2592,6 +2592,22 @@ def _position_from_projection_row(row: dict, *, current_mode: str) -> Position:
         chain_cost_basis_usd=float(row.get("chain_cost_basis_usd") or 0.0),
         fill_authority=str(row.get("fill_authority") or FILL_AUTHORITY_NONE),
     )
+    # Bug B (2026-07-12, live DB evidence): booked close economics
+    # (realized_pnl_usd / exit_price) must round-trip into the runtime
+    # Position, else an economically_closed row reloads with pnl/exit_price
+    # defaulted to 0.0 and the settlement path durably clobbers the correctly
+    # booked values with that default (see BUG #128's _has_realized_close /
+    # _settled_economics_value in src/engine/lifecycle_events.py, which treat
+    # a non-empty last_exit_at as proof the in-memory pnl/exit_price are
+    # real). Hydrate ONLY when the row's column is non-NULL so an open/legacy
+    # row keeps the dataclass default 0.0 with no last_exit_at -- BUG #128's
+    # NULL-vs-0.0 distinction for open positions is unaffected.
+    row_realized_pnl_usd = row.get("realized_pnl_usd")
+    if row_realized_pnl_usd is not None:
+        payload["pnl"] = float(row_realized_pnl_usd)
+    row_exit_price = row.get("exit_price")
+    if row_exit_price is not None:
+        payload["exit_price"] = float(row_exit_price)
     for field_name in {f.name for f in fields(Position)}:
         if field_name in payload:
             continue
