@@ -1701,6 +1701,32 @@ scripts:
     required_helpers: [src.state.fact_revocation.revoke_decisions_for_noncontributing_forecast]
     required_tests: [tests/test_fact_revocation.py, tests/test_fact_revocation_extended.py, tests/test_fact_revocation_crossdb.py]
 
+  scripts/revoke_invalid_live_actionable_certificates.py:
+    class: data_repair
+    status: active
+    lifecycle: p0_forecast_extrema_authority_pr_e
+    packet: docs/rebuild/quarantine_excision_2026-07-11.md
+    authority_scope: operator_invoked
+    dangerous_if_run: false
+    dry_run_default: true
+    apply_flag: "--apply"
+    target_db: "state/zeus-world.db"
+    read_targets: [state/zeus-world.db]
+    write_targets: [state/zeus-world.db]
+    canonical_command: "python scripts/revoke_invalid_live_actionable_certificates.py [--apply] [--world-db PATH] [--lookback-hours H]"
+    external_inputs: []
+    delete_policy: retain_until_superseded
+    reuse_when: >
+      Revoke invalid LIVE money-path certificate rows so immutable historical
+      certificates remain auditable but cannot be consumed as live executable
+      authority. Owner-local since the DIQ packet (2026-07-12): writes the
+      world DB's fact_revocations table (decision_certificates is
+      world-owned). NON-destructive tag-only; idempotent; default dry-run.
+    do_not_use_when: "fact_revocations table absent from the world DB — run init_schema first."
+    unguarded_write_rationale: "Non-destructive tag-only writes to fact_revocations; INSERT OR IGNORE enforces idempotency; BULK writer lock taken on --apply."
+    required_helpers: [src.state.fact_revocation.revoke_invalid_live_actionable_certificates, src.state.fact_revocation.revoke_invalid_live_money_parent_modes]
+    required_tests: [tests/test_fact_revocation.py, tests/test_fact_revocation_extended.py]
+
   scripts/verify_forecast_offset_fix.py:
     class: diagnostic_report_writer
     status: active
