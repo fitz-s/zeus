@@ -7,6 +7,7 @@ in_scope:
 - src/events/reactor.py
 - src/engine/event_reactor_adapter.py
 - src/engine/global_batch_runtime.py
+- src/engine/global_auction_universe.py
 - src/execution/exit_lifecycle.py
 - tests/test_p4_post_trade_capital_lift.py
 - tests/test_run_mode_failure_surfaces.py

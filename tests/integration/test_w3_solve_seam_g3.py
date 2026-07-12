@@ -26,6 +26,7 @@ import sqlite3
 import subprocess
 import sys
 import textwrap
+import threading
 from dataclasses import dataclass, replace
 from decimal import Decimal
 from types import SimpleNamespace
@@ -1544,7 +1545,7 @@ def test_current_global_book_epoch_reads_yes_and_no_symmetrically():
         )
 
 
-def test_current_global_book_epoch_rejects_one_missing_native_side():
+def _current_global_book_probability():
     family, proofs, payload = _corpus()[0]
     proofs = tuple(
         replace(
@@ -1571,7 +1572,11 @@ def test_current_global_book_epoch_rejects_one_missing_native_side():
         extra_exposure_by_bin_id=None,
     )
     assert result.global_family is not None
-    probability = result.global_family.probability_witness
+    return result.global_family.probability_witness
+
+
+def test_current_global_book_epoch_rejects_one_missing_native_side():
+    probability = _current_global_book_probability()
     conn = _global_book_metadata_conn(probability)
     at = _dt.datetime(2026, 6, 13, 8, 0, tzinfo=_dt.timezone.utc)
     times = iter((at, at + _dt.timedelta(seconds=1)))
@@ -1597,6 +1602,154 @@ def test_current_global_book_epoch_rejects_one_missing_native_side():
             clock=lambda: next(times),
             max_age=_dt.timedelta(seconds=30),
             batch_size=500,
+        )
+
+
+def test_current_global_book_epoch_overlaps_chunks_and_preserves_window():
+    probability = _current_global_book_probability()
+    tokens = [
+        token
+        for binding in probability.bindings
+        for token in (binding.yes_token_id, binding.no_token_id)
+    ]
+    assert len(tokens) >= 2
+    caller_thread = threading.get_ident()
+    barrier = threading.Barrier(2)
+    lock = threading.Lock()
+    active = 0
+    max_active = 0
+    worker_threads = set()
+
+    def books(chunk):
+        nonlocal active, max_active
+        with lock:
+            active += 1
+            max_active = max(max_active, active)
+            worker_threads.add(threading.get_ident())
+        try:
+            barrier.wait(timeout=2)
+            return {
+                token: {
+                    "asset_id": token,
+                    "hash": f"book-{token}",
+                    "tick_size": "0.01",
+                    "min_order_size": "5",
+                    "bids": [{"price": "0.20", "size": "100"}],
+                    "asks": [{"price": "0.30", "size": "100"}],
+                }
+                for token in chunk
+            }
+        finally:
+            with lock:
+                active -= 1
+
+    at = _dt.datetime(2026, 6, 13, 8, 0, tzinfo=_dt.timezone.utc)
+    times = iter((at, at + _dt.timedelta(seconds=1)))
+    epoch = capture_current_global_book_epoch(
+        _global_book_metadata_conn(probability),
+        probability_witnesses={probability.family_key: probability},
+        get_books=books,
+        clock=lambda: next(times),
+        max_age=_dt.timedelta(seconds=30),
+        batch_size=(len(tokens) + 1) // 2,
+        book_fetch_workers=2,
+    )
+
+    assert max_active == 2
+    assert len(worker_threads) == 2
+    assert caller_thread not in worker_threads
+    assert len(epoch.assets) == len(tokens)
+    assert epoch.captured_at_utc == at
+    with pytest.raises(StopIteration):
+        next(times)
+
+    sequential_times = iter((at, at + _dt.timedelta(seconds=1)))
+    sequential = capture_current_global_book_epoch(
+        _global_book_metadata_conn(probability),
+        probability_witnesses={probability.family_key: probability},
+        get_books=lambda chunk: {
+            token: {
+                "asset_id": token,
+                "hash": f"book-{token}",
+                "tick_size": "0.01",
+                "min_order_size": "5",
+                "bids": [{"price": "0.20", "size": "100"}],
+                "asks": [{"price": "0.30", "size": "100"}],
+            }
+            for token in chunk
+        },
+        clock=lambda: next(sequential_times),
+        max_age=_dt.timedelta(seconds=30),
+        batch_size=(len(tokens) + 1) // 2,
+    )
+    assert epoch.asset_states == sequential.asset_states
+    assert epoch.witness_identity == sequential.witness_identity
+
+
+def test_current_global_book_epoch_one_chunk_stays_synchronous():
+    probability = _current_global_book_probability()
+    caller_thread = threading.get_ident()
+    called_threads = []
+
+    def books(tokens):
+        called_threads.append(threading.get_ident())
+        return {
+            token: {
+                "asset_id": token,
+                "hash": f"book-{token}",
+                "tick_size": "0.01",
+                "min_order_size": "5",
+                "bids": [{"price": "0.20", "size": "100"}],
+                "asks": [{"price": "0.30", "size": "100"}],
+            }
+            for token in tokens
+        }
+
+    at = _dt.datetime(2026, 6, 13, 8, 0, tzinfo=_dt.timezone.utc)
+    times = iter((at, at + _dt.timedelta(seconds=1)))
+    capture_current_global_book_epoch(
+        _global_book_metadata_conn(probability),
+        probability_witnesses={probability.family_key: probability},
+        get_books=books,
+        clock=lambda: next(times),
+        max_age=_dt.timedelta(seconds=30),
+        batch_size=500,
+        book_fetch_workers=2,
+    )
+
+    assert called_threads == [caller_thread]
+
+
+def test_current_global_book_epoch_rejects_parallel_chunk_error():
+    probability = _current_global_book_probability()
+    failed_token = probability.bindings[0].no_token_id
+
+    def books(tokens):
+        if failed_token in tokens:
+            raise RuntimeError("chunk failure")
+        return {
+            token: {
+                "asset_id": token,
+                "hash": f"book-{token}",
+                "tick_size": "0.01",
+                "min_order_size": "5",
+                "bids": [],
+                "asks": [{"price": "0.30", "size": "100"}],
+            }
+            for token in tokens
+        }
+
+    at = _dt.datetime(2026, 6, 13, 8, 0, tzinfo=_dt.timezone.utc)
+    times = iter((at, at + _dt.timedelta(seconds=1)))
+    with pytest.raises(RuntimeError, match="chunk failure"):
+        capture_current_global_book_epoch(
+            _global_book_metadata_conn(probability),
+            probability_witnesses={probability.family_key: probability},
+            get_books=books,
+            clock=lambda: next(times),
+            max_age=_dt.timedelta(seconds=30),
+            batch_size=1,
+            book_fetch_workers=2,
         )
 
 

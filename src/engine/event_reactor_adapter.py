@@ -5073,6 +5073,7 @@ def event_bound_live_adapter_from_trade_conn(
                     clock=lambda: datetime.now(UTC),
                     max_age=FRESHNESS_WINDOW_DEFAULT,
                     batch_size=batch_size,
+                    book_fetch_workers=2,
                     metadata_overrides=book_metadata_by_key,
                 )
             logging.getLogger(__name__).info(

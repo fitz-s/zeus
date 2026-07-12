@@ -325,11 +325,16 @@ def capture_current_global_book_epoch(
     clock: Callable[[], datetime],
     max_age: timedelta,
     batch_size: int = 500,
+    book_fetch_workers: int = 1,
     metadata_overrides: Mapping[tuple[str, str], Mapping[str, object]] | None = None,
 ) -> CurrentGlobalBookEpoch:
     """Fetch every bound native book; no missing token may shrink the feasible set."""
 
-    if max_age <= timedelta(0) or not 1 <= batch_size <= 500:
+    if (
+        max_age <= timedelta(0)
+        or not 1 <= batch_size <= 500
+        or not 1 <= book_fetch_workers <= 2
+    ):
         raise ValueError("GLOBAL_BOOK_FETCH_CONTRACT_INVALID")
     bindings: list[tuple[str, str, str, str, str]] = []
     for family_key, witness in sorted(probability_witnesses.items()):
@@ -363,10 +368,13 @@ def capture_current_global_book_epoch(
         raise ValueError("GLOBAL_BOOK_CLOCK_INVALID")
     started_at = started_at.astimezone(timezone.utc)
     tokens = [row[4] for row in bindings]
+    chunks = [
+        tokens[offset : offset + batch_size]
+        for offset in range(0, len(tokens), batch_size)
+    ]
     books: dict[str, Mapping[str, object]] = {}
-    for offset in range(0, len(tokens), batch_size):
-        chunk = tokens[offset : offset + batch_size]
-        batch = get_books(chunk)
+
+    def _merge_batch(batch: Mapping[str, Mapping[str, object]]) -> None:
         if not isinstance(batch, Mapping):
             raise ValueError("GLOBAL_BOOK_BATCH_RESPONSE_INVALID")
         books.update(
@@ -376,6 +384,19 @@ def capture_current_global_book_epoch(
                 if isinstance(raw, Mapping)
             }
         )
+
+    if len(chunks) == 1 or book_fetch_workers == 1:
+        for chunk in chunks:
+            _merge_batch(get_books(chunk))
+    else:
+        from concurrent.futures import ThreadPoolExecutor
+
+        with ThreadPoolExecutor(
+            max_workers=min(book_fetch_workers, len(chunks))
+        ) as executor:
+            futures = [executor.submit(get_books, chunk) for chunk in chunks]
+            for future in futures:
+                _merge_batch(future.result())
     finished_at = clock()
     if finished_at.tzinfo is None:
         raise ValueError("GLOBAL_BOOK_CLOCK_INVALID")
