@@ -6026,6 +6026,8 @@ def test_family_monitor_point_value_cannot_veto_robust_exit_and_persists_payload
         pos.last_monitor_best_ask = min(0.99, bid + 0.02)
         pos.last_monitor_edge = prob - bid
         pos.applied_validations = ["replacement_posterior", "ci_separated_reversal"]
+    pos_a._monitor_current_held_ci = (0.942952047639557, 0.999999999991716)
+    pos_b._monitor_current_held_ci = (0.91, 1.0)
 
     portfolio = _make_portfolio(pos_a, pos_b)
     single_leg_exit = ExitDecision(
@@ -6070,6 +6072,15 @@ def test_family_monitor_point_value_cannot_veto_robust_exit_and_persists_payload
     assert family["can_veto_robust_exit"] is False
     assert family["can_promote_robust_hold"] is False
     assert family["family_hold_value_usd"] > family["family_direct_sell_value_usd"]
+    assert family["legs"][0]["held_probability_lcb"] == pytest.approx(
+        0.942952047639557
+    )
+    assert family["legs"][0]["robust_hold_value_lcb_usd"] == pytest.approx(
+        pos_a.shares * 0.942952047639557
+    )
+    assert family["legs"][0]["held_probability_ci_authority"] == (
+        "current_edge_ci_shifted_to_held_probability"
+    )
 
 
 def test_single_leg_monitor_records_family_redecision_value_payload():
@@ -8088,6 +8099,60 @@ def test_day0_monitor_context_missing_bid_cannot_reach_submit_decision():
     assert decision.should_exit is False
     assert decision.reason == "INCOMPLETE_EXIT_CONTEXT (missing=best_bid)"
     assert decision.trigger == ""
+
+
+@pytest.mark.parametrize("direction", ["buy_yes", "buy_no"])
+def test_exit_context_stamps_side_correct_current_probability_ci_for_receipt(direction):
+    """The same held-side CI authority feeds YES/NO exit and receipt paths."""
+    from types import SimpleNamespace
+
+    from src.engine.cycle_runtime import _build_exit_context
+
+    pos = _make_position(
+        direction=direction,
+        size_usd=5.0,
+        entry_price=0.40,
+        entry_ci_width=0.02,
+        p_posterior=0.80,
+    )
+    pos.last_monitor_prob = 0.999999997246481
+    pos.last_monitor_prob_is_fresh = True
+    pos.last_monitor_market_price = 0.95
+    pos.last_monitor_market_price_is_fresh = True
+    pos.last_monitor_best_bid = 0.95
+    pos.chain_state = "synced"
+    edge_ctx = SimpleNamespace(
+        p_posterior=pos.last_monitor_prob,
+        p_market=[0.95],
+        confidence_band_lower=0.942952047639557 - 0.95,
+        confidence_band_upper=1.0 - 0.95,
+        divergence_score=0.0,
+        market_velocity_1h=0.0,
+    )
+
+    context = _build_exit_context(
+        pos,
+        edge_ctx,
+        hours_to_settlement=12.0,
+        ExitContext=ExitContext,
+    )
+
+    assert context.current_ci == pytest.approx((0.942952047639557, 1.0))
+    assert pos._monitor_current_held_ci == pytest.approx(context.current_ci)
+
+    no_ci_context = _build_exit_context(
+        pos,
+        SimpleNamespace(
+            p_posterior=pos.last_monitor_prob,
+            p_market=[0.95],
+            divergence_score=0.0,
+            market_velocity_1h=0.0,
+        ),
+        hours_to_settlement=12.0,
+        ExitContext=ExitContext,
+    )
+    assert no_ci_context.current_ci is None
+    assert pos._monitor_current_held_ci is None
 
 
 def test_day0_stale_probability_bypass_tokens_are_not_produced_by_source():

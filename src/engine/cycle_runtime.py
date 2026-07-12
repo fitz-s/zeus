@@ -3689,27 +3689,51 @@ def _exit_trigger_requires_mature_day0_authority(exit_trigger: str) -> bool:
     )
 
 
-def _monitor_value_inputs(position) -> tuple[float, float | None, float | None, str | None]:
+def _monitor_value_inputs(
+    position,
+) -> tuple[
+    float,
+    float | None,
+    float | None,
+    tuple[float, float] | None,
+    str | None,
+]:
     try:
         shares = float(getattr(position, "effective_shares", getattr(position, "shares", 0.0)) or 0.0)
     except (TypeError, ValueError):
-        return 0.0, None, None, "shares_unavailable"
+        return 0.0, None, None, None, "shares_unavailable"
     if shares <= 0.0:
-        return 0.0, None, None, "shares_non_positive"
+        return 0.0, None, None, None, "shares_non_positive"
     if getattr(position, "last_monitor_prob_is_fresh", False) is not True:
-        return shares, None, None, "probability_not_fresh"
+        return shares, None, None, None, "probability_not_fresh"
     if getattr(position, "last_monitor_market_price_is_fresh", False) is not True:
-        return shares, None, None, "market_price_not_fresh"
+        return shares, None, None, None, "market_price_not_fresh"
     try:
         held_prob = float(getattr(position, "last_monitor_prob"))
         best_bid = float(getattr(position, "last_monitor_best_bid"))
     except (TypeError, ValueError):
-        return shares, None, None, "value_inputs_non_numeric"
+        return shares, None, None, None, "value_inputs_non_numeric"
     if not (math.isfinite(held_prob) and 0.0 <= held_prob <= 1.0):
-        return shares, None, None, "probability_invalid"
+        return shares, None, None, None, "probability_invalid"
     if not (math.isfinite(best_bid) and 0.0 <= best_bid <= 1.0):
-        return shares, None, None, "best_bid_invalid"
-    return shares, held_prob, best_bid, None
+        return shares, None, None, None, "best_bid_invalid"
+    held_ci = getattr(position, "_monitor_current_held_ci", None)
+    if isinstance(held_ci, tuple) and len(held_ci) == 2:
+        try:
+            lo, hi = float(held_ci[0]), float(held_ci[1])
+        except (TypeError, ValueError):
+            held_ci = None
+        else:
+            held_ci = (
+                (lo, hi)
+                if math.isfinite(lo)
+                and math.isfinite(hi)
+                and 0.0 <= lo <= held_prob <= hi <= 1.0
+                else None
+            )
+    else:
+        held_ci = None
+    return shares, held_prob, best_bid, held_ci, None
 
 
 def _is_statistical_single_leg_exit(exit_decision, exit_reason: str) -> bool:
@@ -3778,7 +3802,7 @@ def _apply_family_monitor_overlay(
     missing: list[dict[str, str]] = []
     leg_payloads: list[dict[str, object]] = []
     for leg in family_positions:
-        shares, held_prob, best_bid, reason = _monitor_value_inputs(leg)
+        shares, held_prob, best_bid, held_ci, reason = _monitor_value_inputs(leg)
         leg_payload: dict[str, object] = {
             "position_id": str(getattr(leg, "trade_id", "") or ""),
             "direction": str(getattr(leg, "direction", "") or ""),
@@ -3807,6 +3831,17 @@ def _apply_family_monitor_overlay(
                     "evidence_status": "complete",
                 }
             )
+            if held_ci is not None:
+                leg_payload.update(
+                    {
+                        "held_probability_lcb": held_ci[0],
+                        "held_probability_ucb": held_ci[1],
+                        "robust_hold_value_lcb_usd": shares * held_ci[0],
+                        "held_probability_ci_authority": (
+                            "current_edge_ci_shifted_to_held_probability"
+                        ),
+                    }
+                )
         leg_payloads.append(leg_payload)
 
     payload["legs"] = leg_payloads
@@ -4657,6 +4692,10 @@ def _build_exit_context(
         _entry_ci = (_entry_posterior - _ci_half, _entry_posterior + _ci_half)
         # Shift edge-space band → belief space by adding the held-side price back.
         _current_ci = (float(_cb_lo) + float(_held_price), float(_cb_hi) + float(_held_price))
+
+    # Receipt-only evidence for the later family diagnostic. Always overwrite
+    # so a missing current CI cannot reuse a prior monitor cycle's bound.
+    setattr(pos, "_monitor_current_held_ci", _current_ci)
 
     # The monitor refresh writes the authoritative held-side probability onto
     # the position and stamps its freshness. Use that single surface at the
