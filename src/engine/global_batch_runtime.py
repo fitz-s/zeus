@@ -498,7 +498,8 @@ def process_current_global_batch(
             "global batch winner detail: stage=%s family=%s bin=%s side=%s "
             "condition=%s token=%s "
             "q_mean=%s shares=%s cost_usd=%s fill_price=%s limit_price=%s "
-            "max_spend_usd=%s robust_ev_usd=%.6f robust_dlog=%.12f "
+            "max_spend_usd=%s win_probability_lcb=%s loss_probability_ucb=%s "
+            "ev_diagnostic_usd=%.6f robust_dlog=%.12f "
             "capital_efficiency=%.12f candidate=%s",
             stage,
             family_key,
@@ -512,6 +513,16 @@ def process_current_global_batch(
             getattr(decision, "expected_fill_price_before_fee", "unknown"),
             getattr(decision, "limit_price", "unknown"),
             getattr(decision, "max_spend_usd", "unknown"),
+            getattr(
+                getattr(decision, "terminal_wealth", None),
+                "win_probability_lcb",
+                "unknown",
+            ),
+            getattr(
+                getattr(decision, "terminal_wealth", None),
+                "loss_probability_ucb",
+                "unknown",
+            ),
             float(getattr(decision, "robust_ev_usd", 0.0) or 0.0),
             float(getattr(decision, "robust_delta_log_wealth", 0.0) or 0.0),
             float(getattr(decision, "capital_efficiency", 0.0) or 0.0),

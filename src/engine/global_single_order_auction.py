@@ -62,7 +62,8 @@ def global_single_order_actuation_identity(
     decision_at_utc: datetime,
 ) -> str:
     candidate = decision.candidate
-    if candidate is None:
+    terminal = decision.terminal_wealth
+    if candidate is None or terminal is None:
         raise ValueError("global actuation requires a trade decision")
     digest = hashlib.sha256()
     for value in (
@@ -89,6 +90,14 @@ def global_single_order_actuation_identity(
         repr(decision.robust_delta_log_wealth),
         repr(decision.robust_ev_usd),
         repr(decision.capital_efficiency),
+        repr(terminal.win_probability_lcb),
+        repr(terminal.loss_probability_ucb),
+        terminal.loss_payoff_usd,
+        terminal.win_payoff_usd,
+        terminal.median_payoff_usd,
+        terminal.wealth_after_loss_usd,
+        terminal.wealth_after_win_usd,
+        repr(terminal.expected_value_diagnostic_usd),
     ):
         digest.update(str(value).encode("utf-8"))
         digest.update(b"\x1f")
@@ -104,7 +113,12 @@ def global_single_order_economic_identity(
     """Bind one order's economics without observation or epoch clocks."""
 
     candidate = decision.candidate
-    if candidate is None or not str(wealth_economic_identity or "").strip():
+    terminal = decision.terminal_wealth
+    if (
+        candidate is None
+        or terminal is None
+        or not str(wealth_economic_identity or "").strip()
+    ):
         raise ValueError("global economic identity requires a trade and current wealth")
     if getattr(probability_witness, "family_key", None) != candidate.family_key:
         raise ValueError("global economic identity probability family mismatch")
@@ -136,6 +150,14 @@ def global_single_order_economic_identity(
         repr(decision.robust_delta_log_wealth),
         repr(decision.robust_ev_usd),
         repr(decision.capital_efficiency),
+        repr(terminal.win_probability_lcb),
+        repr(terminal.loss_probability_ucb),
+        terminal.loss_payoff_usd,
+        terminal.win_payoff_usd,
+        terminal.median_payoff_usd,
+        terminal.wealth_after_loss_usd,
+        terminal.wealth_after_win_usd,
+        repr(terminal.expected_value_diagnostic_usd),
     ):
         digest.update(str(value).encode("utf-8"))
         digest.update(b"\x1f")

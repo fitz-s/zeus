@@ -254,8 +254,11 @@ the probability certificate and exact native book/curve. A current venue-univers
 that every active family is present; a bounded reactor page is never renamed "global". The wealth witness binds ledger
 generation, reconciled positions, reservations, spendable cash, and wealth bounds. Unknown
 coupling is lower-bounded by evaluating wins against the portfolio ceiling and losses against
-the floor. The current-epoch primary score is lower-CVaR Δlog-wealth; numerical ties use robust
-Δlog per dollar, then lower cash. A `/capital-hour` score is forbidden until capital release,
+the floor. Before that score is admitted, lower-tail-CVaR payoff-side win probability must be
+strictly above one half, so the exact binary payoff vector has positive median payoff; otherwise
+the typed result is `ROBUST_MAJORITY_LOSS`. The current-epoch primary score among admitted
+candidates is lower-CVaR Δlog-wealth; numerical ties use robust Δlog per dollar, then lower cash.
+Expected value is diagnostic only, not realized capital gain. A `/capital-hour` score is forbidden until capital release,
 future opportunity arrivals, and reinvestment policy have current authority. Maker-contingent
 assets and any stale/mismatched certificate fail closed. The event reactor now owns
 `prepare all -> choose one -> JIT recapture -> submit once`; implementation alone is not a

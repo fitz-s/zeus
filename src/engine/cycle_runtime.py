@@ -3689,27 +3689,51 @@ def _exit_trigger_requires_mature_day0_authority(exit_trigger: str) -> bool:
     )
 
 
-def _monitor_value_inputs(position) -> tuple[float, float | None, float | None, str | None]:
+def _monitor_value_inputs(
+    position,
+) -> tuple[
+    float,
+    float | None,
+    float | None,
+    tuple[float, float] | None,
+    str | None,
+]:
     try:
         shares = float(getattr(position, "effective_shares", getattr(position, "shares", 0.0)) or 0.0)
     except (TypeError, ValueError):
-        return 0.0, None, None, "shares_unavailable"
+        return 0.0, None, None, None, "shares_unavailable"
     if shares <= 0.0:
-        return 0.0, None, None, "shares_non_positive"
+        return 0.0, None, None, None, "shares_non_positive"
     if getattr(position, "last_monitor_prob_is_fresh", False) is not True:
-        return shares, None, None, "probability_not_fresh"
+        return shares, None, None, None, "probability_not_fresh"
     if getattr(position, "last_monitor_market_price_is_fresh", False) is not True:
-        return shares, None, None, "market_price_not_fresh"
+        return shares, None, None, None, "market_price_not_fresh"
     try:
         held_prob = float(getattr(position, "last_monitor_prob"))
         best_bid = float(getattr(position, "last_monitor_best_bid"))
     except (TypeError, ValueError):
-        return shares, None, None, "value_inputs_non_numeric"
+        return shares, None, None, None, "value_inputs_non_numeric"
     if not (math.isfinite(held_prob) and 0.0 <= held_prob <= 1.0):
-        return shares, None, None, "probability_invalid"
+        return shares, None, None, None, "probability_invalid"
     if not (math.isfinite(best_bid) and 0.0 <= best_bid <= 1.0):
-        return shares, None, None, "best_bid_invalid"
-    return shares, held_prob, best_bid, None
+        return shares, None, None, None, "best_bid_invalid"
+    held_ci = getattr(position, "_monitor_current_held_ci", None)
+    if isinstance(held_ci, tuple) and len(held_ci) == 2:
+        try:
+            lo, hi = float(held_ci[0]), float(held_ci[1])
+        except (TypeError, ValueError):
+            held_ci = None
+        else:
+            held_ci = (
+                (lo, hi)
+                if math.isfinite(lo)
+                and math.isfinite(hi)
+                and 0.0 <= lo <= held_prob <= hi <= 1.0
+                else None
+            )
+    else:
+        held_ci = None
+    return shares, held_prob, best_bid, held_ci, None
 
 
 def _is_statistical_single_leg_exit(exit_decision, exit_reason: str) -> bool:
@@ -3747,13 +3771,13 @@ def _apply_family_monitor_overlay(
     exit_reason: str,
     summary: dict,
 ) -> tuple[bool, str]:
-    """Require a family value check before a statistical single-leg exit.
+    """Record family point value without overriding the robust exit decision.
 
     This is live monitor logic over already-refreshed held-side probabilities and
     held-side bids. It does not read replay data and it never creates a
-    new entry; it records the current family value evidence for every held
-    position and only prevents a single leg from liquidating when the current
-    family vector's hold value dominates its direct-sell value.
+    new entry. The point-value vector is diagnostic because it does not carry a
+    coherent current family probability distribution or the exit evaluator's
+    fee/time/crowding costs. It therefore cannot veto EXIT or promote SELL.
     """
 
     try:
@@ -3769,13 +3793,21 @@ def _apply_family_monitor_overlay(
         "family_key": "|".join(key) if key else "",
         "position_count": len(family_positions),
         "mode": "live_family_hold_vs_direct_sell",
+        "value_authority": "point_estimate_diagnostic_only",
+        "can_veto_robust_exit": False,
+        "can_promote_robust_hold": False,
     }
     hold_value = 0.0
     sell_value = 0.0
     missing: list[dict[str, str]] = []
     leg_payloads: list[dict[str, object]] = []
     for leg in family_positions:
-        shares, held_prob, best_bid, reason = _monitor_value_inputs(leg)
+        shares, held_prob, best_bid, held_ci, reason = _monitor_value_inputs(leg)
+        # Only the position evaluated in this call is guaranteed to have a CI
+        # from this monitor cut. Sibling point values remain diagnostic; never
+        # reuse a sibling's transient bound from an earlier loop iteration.
+        if leg is not pos:
+            held_ci = None
         leg_payload: dict[str, object] = {
             "position_id": str(getattr(leg, "trade_id", "") or ""),
             "direction": str(getattr(leg, "direction", "") or ""),
@@ -3804,6 +3836,17 @@ def _apply_family_monitor_overlay(
                     "evidence_status": "complete",
                 }
             )
+            if held_ci is not None:
+                leg_payload.update(
+                    {
+                        "held_probability_lcb": held_ci[0],
+                        "held_probability_ucb": held_ci[1],
+                        "robust_hold_value_lcb_usd": shares * held_ci[0],
+                        "held_probability_ci_authority": (
+                            "current_edge_ci_shifted_to_held_probability"
+                        ),
+                    }
+                )
         leg_payloads.append(leg_payload)
 
     payload["legs"] = leg_payloads
@@ -3837,20 +3880,20 @@ def _apply_family_monitor_overlay(
     payload["family_direct_sell_advantage_threshold_usd"] = sell_advantage_threshold
 
     if should_exit and _is_statistical_single_leg_exit(exit_decision, exit_reason):
-        if hold_value + 1e-9 >= sell_value:
-            payload["decision"] = "FAMILY_HOLD_DOMINATES_SINGLE_LEG_EXIT"
-            payload["suppressed_exit_reason"] = exit_reason
-            setattr(pos, "_monitor_family_redecision", payload)
-            validations = list(getattr(pos, "applied_validations", []) or [])
-            validations.append("family_hold_dominates_single_leg_exit")
-            pos.applied_validations = list(dict.fromkeys(validations))
-            summary["family_redecision_single_leg_exits_suppressed"] = (
-                summary.get("family_redecision_single_leg_exits_suppressed", 0) + 1
-            )
-            return False, "FAMILY_HOLD_DOMINATES_SINGLE_LEG_EXIT"
+        payload["decision"] = "FAMILY_POINT_VALUE_DIAGNOSTIC_EXIT_PRESERVED"
+        payload["preserved_exit_reason"] = exit_reason
+        setattr(pos, "_monitor_family_redecision", payload)
+        validations = list(getattr(pos, "applied_validations", []) or [])
+        validations.append("family_point_value_cannot_veto_robust_exit")
+        pos.applied_validations = list(dict.fromkeys(validations))
+        summary["family_redecision_robust_exits_preserved"] = (
+            summary.get("family_redecision_robust_exits_preserved", 0) + 1
+        )
+        return should_exit, exit_reason
 
-    # A high bid over a conservative belief is not a reversal by itself. Promote
-    # hold->sell here only when the held-side belief has fallen below entry.
+    # A high bid over a point belief is useful counterfactual evidence, not a
+    # second exit authority. Only Position.evaluate_exit owns the robust
+    # CI/cost-aware HOLD/EXIT decision.
     _entry_belief = getattr(pos, "p_posterior", None)
     _cur_belief = getattr(pos, "last_monitor_prob", None)
     _belief_reversed_below_entry = (
@@ -3873,17 +3916,18 @@ def _apply_family_monitor_overlay(
                 summary.get("family_redecision_day0_immature_exits_blocked", 0) + 1
             )
             return should_exit, exit_reason
-        payload["decision"] = "FAMILY_DIRECT_SELL_DOMINATES_HOLD"
-        payload["promoted_exit_reason"] = exit_reason
+        payload["decision"] = "FAMILY_POINT_VALUE_DIAGNOSTIC_HOLD_PRESERVED"
+        payload["preserved_hold_reason"] = exit_reason
+        payload["diagnostic_suggested_action"] = "SELL"
         payload["belief_reversed_below_entry"] = True
         setattr(pos, "_monitor_family_redecision", payload)
         validations = list(getattr(pos, "applied_validations", []) or [])
-        validations.append("family_direct_sell_dominates_hold_exit")
+        validations.append("family_point_value_cannot_promote_sell")
         pos.applied_validations = list(dict.fromkeys(validations))
-        summary["family_redecision_hold_exits_promoted"] = (
-            summary.get("family_redecision_hold_exits_promoted", 0) + 1
+        summary["family_redecision_robust_holds_preserved"] = (
+            summary.get("family_redecision_robust_holds_preserved", 0) + 1
         )
-        return True, "FAMILY_DIRECT_SELL_DOMINATES_HOLD"
+        return should_exit, exit_reason
 
     payload["decision"] = "FAMILY_OVERLAY_NO_OVERRIDE"
     setattr(pos, "_monitor_family_redecision", payload)
@@ -4653,6 +4697,10 @@ def _build_exit_context(
         _entry_ci = (_entry_posterior - _ci_half, _entry_posterior + _ci_half)
         # Shift edge-space band → belief space by adding the held-side price back.
         _current_ci = (float(_cb_lo) + float(_held_price), float(_cb_hi) + float(_held_price))
+
+    # Receipt-only evidence for the later family diagnostic. Always overwrite
+    # so a missing current CI cannot reuse a prior monitor cycle's bound.
+    setattr(pos, "_monitor_current_held_ci", _current_ci)
 
     # The monitor refresh writes the authoritative held-side probability onto
     # the position and stamps its freshness. Use that single surface at the

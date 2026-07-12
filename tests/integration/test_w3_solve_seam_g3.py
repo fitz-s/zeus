@@ -882,6 +882,12 @@ def test_global_curve_supersession_keeps_typed_current_candidate():
         ("EDLI_DURABLE_SUBMIT_OUTBOX_REQUIRED", "BATCH_BLOCKED"),
         ("EXECUTOR_BOUNDARY_MISSING", "BATCH_BLOCKED"),
         ("OPERATOR_ARM_REQUIRED", "BATCH_BLOCKED"),
+        (
+            "GLOBAL_CURRENT_STATE_PAYOFF_Q_TIGHTENED_REAUCTION_REQUIRED",
+            "BATCH_BLOCKED",
+        ),
+        ("GLOBAL_CURRENT_STATE_ROBUST_MAJORITY_LOSS", "BATCH_BLOCKED"),
+        ("GLOBAL_CURRENT_STATE_ECONOMICS_NON_POSITIVE", "BATCH_BLOCKED"),
         ("SHIFT_BIN_NO_SUBMIT:OLD_LEG_STILL_STRONG", "BLOCKED"),
     ),
 )
@@ -2586,9 +2592,19 @@ def test_global_batch_claims_unpaged_cut_time_winner_and_continues_actuation(
         expected_fill_price_before_fee=Decimal("0.40"),
         max_spend_usd=Decimal("4"),
         robust_delta_log_wealth=0.01,
-        robust_ev_usd=1.0,
+        robust_ev_usd=2.0,
         capital_efficiency=0.25,
         no_trade_reason=None,
+        terminal_wealth=SimpleNamespace(
+            win_probability_lcb=0.60,
+            loss_probability_ucb=0.40,
+            loss_payoff_usd=Decimal("-4"),
+            win_payoff_usd=Decimal("6"),
+            median_payoff_usd=Decimal("6"),
+            wealth_after_loss_usd=Decimal("96"),
+            wealth_after_win_usd=Decimal("106"),
+            expected_value_diagnostic_usd=2.0,
+        ),
     )
     wealth_economic_identity = "wealth-economic"
     economic_identity = global_single_order_economic_identity(
@@ -3536,11 +3552,21 @@ def test_global_batch_falls_through_candidate_local_preflight_block(monkeypatch)
     )
 
 
-def test_global_batch_stops_on_batch_wide_preflight_block(monkeypatch):
+@pytest.mark.parametrize(
+    "batch_reason",
+    (
+        "live_health_entry_authority:failing_surfaces=runtime_code",
+        "GLOBAL_CURRENT_STATE_PAYOFF_Q_TIGHTENED_REAUCTION_REQUIRED",
+        "GLOBAL_CURRENT_STATE_ROBUST_MAJORITY_LOSS",
+        "GLOBAL_CURRENT_STATE_ECONOMICS_NON_POSITIVE",
+    ),
+)
+def test_global_batch_stops_on_batch_wide_preflight_block(monkeypatch, batch_reason):
     decision_at = _dt.datetime(2026, 7, 10, 8, 0, tzinfo=_dt.timezone.utc)
     event = _global_scope_event(city="Alpha", source_run_id="run-a")
+    runner_up = _global_scope_event(city="Beta", source_run_id="run-b")
     scope = current_global_auction_scope_from_events(
-        (event,), captured_at_utc=decision_at
+        (event, runner_up), captured_at_utc=decision_at
     )
     witness = SimpleNamespace(
         family_key=scope.family_keys[0],
@@ -3549,6 +3575,14 @@ def test_global_batch_stops_on_batch_wide_preflight_block(monkeypatch):
         witness_identity="q-run-a",
     )
     prepared = SimpleNamespace(probability_witness=witness)
+    runner_up_prepared = SimpleNamespace(
+        probability_witness=SimpleNamespace(
+            family_key=scope.family_keys[1],
+            captured_at_utc=decision_at,
+            posterior_identity_hash="run-b",
+            witness_identity="q-run-b",
+        )
+    )
     selected = SimpleNamespace(
         decision=SimpleNamespace(
             candidate=SimpleNamespace(family_key=scope.family_keys[0]),
@@ -3591,14 +3625,14 @@ def test_global_batch_stops_on_batch_wide_preflight_block(monkeypatch):
         calls["preflight"] += 1
         return global_batch_runtime.GlobalWinnerPreflight(
             status="BATCH_BLOCKED",
-            reason="live_health_entry_authority:failing_surfaces=runtime_code",
+            reason=batch_reason,
         )
 
     monkeypatch.setattr(
         global_batch_runtime, "select_prepared_global_auction", select
     )
     result = global_batch_runtime.process_current_global_batch(
-        (event,),
+        (event, runner_up),
         decision_time=decision_at,
         world_conn=object(),
         forecast_conn=object(),
@@ -3608,7 +3642,9 @@ def test_global_batch_stops_on_batch_wide_preflight_block(monkeypatch):
             False,
             current.event_id,
             current.causal_snapshot_id,
-            prepared_global_family=prepared,
+            prepared_global_family=(
+                prepared if current.event_id == event.event_id else runner_up_prepared
+            ),
         ),
         actuate_winner=lambda *_: pytest.fail("batch block must not actuate"),
         preflight_winner=preflight,
@@ -3626,8 +3662,10 @@ def test_global_batch_stops_on_batch_wide_preflight_block(monkeypatch):
     assert result.winner_event_id is None
     assert result.venue_submit_count == 0
     assert result.receipts[event.event_id].reason == (
-        "GLOBAL_PREFLIGHT_BATCH_BLOCKED:"
-        "live_health_entry_authority:failing_surfaces=runtime_code"
+        f"GLOBAL_PREFLIGHT_BATCH_BLOCKED:{batch_reason}"
+    )
+    assert result.receipts[runner_up.event_id].reason == (
+        f"GLOBAL_PREFLIGHT_BATCH_BLOCKED:{batch_reason}"
     )
 
 

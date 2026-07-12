@@ -185,6 +185,7 @@ GlobalEligibilityReason = Literal[
     "CAPITAL_IDENTITY_SUPERSEDED",
     "COLLATERAL_UNKNOWN",
     "DEPTH_INFEASIBLE",
+    "ROBUST_MAJORITY_LOSS",
     "NON_POSITIVE_ROBUST_OBJECTIVE",
 ]
 
@@ -781,6 +782,41 @@ def global_candidate_from_native(
 
 
 @dataclass(frozen=True)
+class BinaryTerminalWealthCertificate:
+    """Exact 0/1 payoff branches plus conservative branch probabilities."""
+
+    win_probability_lcb: float
+    loss_probability_ucb: float
+    loss_payoff_usd: Decimal
+    win_payoff_usd: Decimal
+    median_payoff_usd: Decimal
+    wealth_after_loss_usd: Decimal
+    wealth_after_win_usd: Decimal
+    expected_value_diagnostic_usd: float
+
+    def __post_init__(self) -> None:
+        if (
+            not math.isfinite(self.win_probability_lcb)
+            or not math.isfinite(self.loss_probability_ucb)
+            or not math.isclose(
+                self.win_probability_lcb + self.loss_probability_ucb,
+                1.0,
+                rel_tol=0.0,
+                abs_tol=1e-12,
+            )
+            or not 0.5 < self.win_probability_lcb <= 1.0
+            or not 0.0 <= self.loss_probability_ucb < 0.5
+            or self.loss_payoff_usd >= 0
+            or self.win_payoff_usd <= 0
+            or self.median_payoff_usd != self.win_payoff_usd
+            or self.wealth_after_loss_usd <= 0
+            or self.wealth_after_win_usd <= 0
+            or not math.isfinite(self.expected_value_diagnostic_usd)
+        ):
+            raise ValueError("terminal-wealth certificate is not majority-win coherent")
+
+
+@dataclass(frozen=True)
 class GlobalSingleOrderDecision:
     """The one order that wins the current cross-family feasible-set auction."""
 
@@ -794,6 +830,7 @@ class GlobalSingleOrderDecision:
     limit_price: Decimal = Decimal("0")
     expected_fill_price_before_fee: Decimal = Decimal("0")
     max_spend_usd: Decimal = Decimal("0")
+    terminal_wealth: BinaryTerminalWealthCertificate | None = None
     rejection_reasons: Mapping[str, str] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -806,6 +843,7 @@ class GlobalSingleOrderDecision:
                 self.limit_price != 0
                 or self.expected_fill_price_before_fee != 0
                 or self.max_spend_usd != 0
+                or self.terminal_wealth is not None
             ):
                 raise ValueError("global no-trade decision cannot carry an execution boundary")
         elif (
@@ -816,6 +854,15 @@ class GlobalSingleOrderDecision:
             or self.expected_fill_price_before_fee <= 0
             or self.expected_fill_price_before_fee > self.limit_price
             or self.max_spend_usd < self.cost_usd
+            or self.terminal_wealth is None
+            or self.terminal_wealth.loss_payoff_usd != -self.cost_usd
+            or self.terminal_wealth.win_payoff_usd != self.shares - self.cost_usd
+            or not math.isclose(
+                self.terminal_wealth.expected_value_diagnostic_usd,
+                self.robust_ev_usd,
+                rel_tol=0.0,
+                abs_tol=1e-12,
+            )
         ):
             raise ValueError(
                 "global trade decision requires positive shares/cost/limit and sufficient max spend"
@@ -1188,6 +1235,32 @@ def _single_order_metrics(
     return float(robust_du), float(robust_ev), float(efficiency), cost
 
 
+def _binary_terminal_wealth_certificate(
+    *,
+    robust_q: float,
+    shares: Decimal,
+    cost_usd: Decimal,
+    wealth_floor_usd: Decimal,
+    wealth_ceiling_usd: Decimal,
+) -> BinaryTerminalWealthCertificate:
+    """Certify the only two settlement branches without renaming EV as profit."""
+
+    loss_payoff = -Decimal(cost_usd)
+    win_payoff = Decimal(shares) - Decimal(cost_usd)
+    return BinaryTerminalWealthCertificate(
+        win_probability_lcb=float(robust_q),
+        loss_probability_ucb=float(1.0 - robust_q),
+        loss_payoff_usd=loss_payoff,
+        win_payoff_usd=win_payoff,
+        median_payoff_usd=win_payoff,
+        wealth_after_loss_usd=Decimal(wealth_floor_usd) + loss_payoff,
+        wealth_after_win_usd=Decimal(wealth_ceiling_usd) + win_payoff,
+        expected_value_diagnostic_usd=(
+            float(robust_q) * float(shares) - float(cost_usd)
+        ),
+    )
+
+
 def _single_order_stationary_probes(
     curve: ExecutableCostCurve,
     *,
@@ -1297,6 +1370,17 @@ def _score_global_single_order(
 
     q = np.asarray(q_samples, dtype=np.float64)
     robust_q = _lower_cvar(q, np.ones(q.size, dtype=np.float64), band_alpha)
+    if not robust_q > 0.5:
+        return GlobalSingleOrderDecision(
+            candidate=None,
+            shares=Decimal("0"),
+            cost_usd=Decimal("0"),
+            robust_delta_log_wealth=0.0,
+            robust_ev_usd=0.0,
+            capital_efficiency=0.0,
+            no_trade_reason="ROBUST_MAJORITY_LOSS",
+            rejection_reasons={candidate.candidate_id: "ROBUST_MAJORITY_LOSS"},
+        )
     raw_probes = _single_order_stationary_probes(
         candidate.executable_cost_curve,
         robust_q=Decimal(str(robust_q)),
@@ -1456,6 +1540,13 @@ def _score_global_single_order(
         limit_price=limit_price,
         expected_fill_price_before_fee=expected_fill_price,
         max_spend_usd=max_spend,
+        terminal_wealth=_binary_terminal_wealth_certificate(
+            robust_q=robust_q,
+            shares=shares,
+            cost_usd=cost,
+            wealth_floor_usd=wealth_floor_usd,
+            wealth_ceiling_usd=wealth_ceiling_usd,
+        ),
     )
 
 
@@ -1758,6 +1849,12 @@ def select_global_single_order(
             scored.append(score)
 
     if not scored:
+        no_trade_reason = (
+            "ROBUST_MAJORITY_LOSS"
+            if rejections
+            and set(rejections.values()) == {"ROBUST_MAJORITY_LOSS"}
+            else "NO_CURRENT_EXECUTABLE_POSITIVE_ORDER"
+        )
         return GlobalSingleOrderDecision(
             candidate=None,
             shares=Decimal("0"),
@@ -1765,7 +1862,7 @@ def select_global_single_order(
             robust_delta_log_wealth=0.0,
             robust_ev_usd=0.0,
             capital_efficiency=0.0,
-            no_trade_reason="NO_CURRENT_EXECUTABLE_POSITIVE_ORDER",
+            no_trade_reason=no_trade_reason,
             rejection_reasons=rejections,
         )
 
@@ -1794,6 +1891,7 @@ def select_global_single_order(
         limit_price=winner.limit_price,
         expected_fill_price_before_fee=winner.expected_fill_price_before_fee,
         max_spend_usd=winner.max_spend_usd,
+        terminal_wealth=winner.terminal_wealth,
         rejection_reasons=rejections,
     )
 

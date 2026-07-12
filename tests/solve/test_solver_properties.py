@@ -1182,6 +1182,85 @@ def test_unverified_13pct_tail_is_lottery_not_an_executable_edge():
     assert decision.no_trade_reason == "GLOBAL_FEASIBLE_SET_INCOMPLETE"
 
 
+def test_current_13pct_at_one_cent_is_rejected_as_majority_loss():
+    tail = _global_candidate(
+        candidate_id="current-13pct-one-cent",
+        family="tail",
+        side="YES",
+        q=0.13,
+        levels=(("0.01", "1000"),),
+    )
+
+    decision = _global_select((tail,))
+
+    assert decision.candidate is None
+    assert decision.no_trade_reason == "ROBUST_MAJORITY_LOSS"
+    assert decision.rejection_reasons[tail.candidate_id] == "ROBUST_MAJORITY_LOSS"
+
+
+def test_current_13pct_cannot_outrank_a_majority_win_order():
+    tail = _global_candidate(
+        candidate_id="current-13pct-one-cent",
+        family="tail",
+        side="YES",
+        q=0.13,
+        levels=(("0.01", "1000"),),
+    )
+    majority_no = _global_candidate(
+        candidate_id="current-majority-no",
+        family="majority",
+        side="NO",
+        q=0.65,
+        levels=(("0.60", "100"),),
+    )
+
+    decision = _global_select((tail, majority_no))
+
+    assert decision.candidate is majority_no
+    assert decision.rejection_reasons[tail.candidate_id] == "ROBUST_MAJORITY_LOSS"
+
+
+@pytest.mark.parametrize(("q", "eligible"), ((0.5, False), (0.500001, True)))
+def test_global_single_order_majority_boundary_is_strict(q, eligible):
+    candidate = _global_candidate(
+        candidate_id=f"majority-boundary-{q}",
+        family=f"majority-boundary-{q}",
+        side="YES",
+        q=q,
+        levels=(("0.10", "100"),),
+    )
+
+    decision = _global_select((candidate,))
+
+    assert (decision.candidate is not None) is eligible
+    if not eligible:
+        assert decision.no_trade_reason == "ROBUST_MAJORITY_LOSS"
+
+
+@pytest.mark.parametrize("side", ("YES", "NO"))
+def test_global_single_order_certifies_exact_binary_terminal_payoffs(side):
+    candidate = _global_candidate(
+        candidate_id=f"terminal-certificate-{side.lower()}",
+        family=f"terminal-certificate-{side.lower()}",
+        side=side,
+        q=0.70,
+        levels=(("0.35", "100"),),
+    )
+
+    decision = _global_select((candidate,))
+
+    assert decision.candidate is not None
+    cert = decision.terminal_wealth
+    assert cert is not None
+    assert cert.win_probability_lcb == pytest.approx(0.70)
+    assert cert.loss_probability_ucb == pytest.approx(0.30)
+    assert cert.win_probability_lcb + cert.loss_probability_ucb == pytest.approx(1.0)
+    assert cert.loss_payoff_usd == -decision.cost_usd
+    assert cert.win_payoff_usd == decision.shares - decision.cost_usd
+    assert cert.median_payoff_usd == cert.win_payoff_usd > 0
+    assert cert.expected_value_diagnostic_usd == pytest.approx(decision.robust_ev_usd)
+
+
 def test_global_single_order_self_issued_13pct_without_external_current_is_rejected():
     tail = _global_candidate(
         candidate_id="self-issued-13pct",
@@ -1733,8 +1812,16 @@ def test_global_single_order_matches_exhaustive_grid_on_random_full_depth_books(
         candidate = _replace_global_q_samples(candidate, q_samples)
         oracle = _global_exact_oracle(candidate, cap="3")
         score = _global_score(candidate, cap="3")
+        robust_q = S._lower_cvar(
+            q_samples,
+            np.ones(q_samples.size, dtype=np.float64),
+            ALPHA,
+        )
 
-        if oracle is None or oracle[0] <= 0.0 or oracle[1] <= 0.0:
+        if robust_q <= 0.5:
+            assert score.candidate is None
+            assert score.no_trade_reason == "ROBUST_MAJORITY_LOSS"
+        elif oracle is None or oracle[0] <= 0.0 or oracle[1] <= 0.0:
             assert score.candidate is None
         else:
             assert score.shares == oracle[4]

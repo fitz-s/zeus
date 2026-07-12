@@ -2896,6 +2896,8 @@ def _global_current_state_execution_economics_rejection_reason(
         "global_jit_venue_book_hash",
         "global_jit_book_snapshot_id",
         "global_jit_execution_curve_identity",
+        "global_expected_value_semantics",
+        "global_terminal_payoff_semantics",
     ):
         if not str(cert.get(field) or "").strip():
             return field
@@ -2910,6 +2912,17 @@ def _global_current_state_execution_economics_rejection_reason(
         "global_max_spend_usd",
         "global_robust_delta_log_wealth",
         "global_robust_ev_usd",
+        "global_cut_time_win_probability_lcb",
+        "global_cut_time_loss_probability_ucb",
+        "global_terminal_win_probability_lcb",
+        "global_terminal_loss_probability_ucb",
+        "global_terminal_loss_payoff_usd",
+        "global_terminal_win_payoff_usd",
+        "global_terminal_median_payoff_usd",
+        "global_terminal_wealth_after_loss_usd",
+        "global_terminal_wealth_after_win_usd",
+        "global_cut_time_expected_value_diagnostic_usd",
+        "global_expected_value_diagnostic_usd",
     ):
         try:
             value = float(cert.get(field))
@@ -2927,6 +2940,17 @@ def _global_current_state_execution_economics_rejection_reason(
     max_spend = numeric["global_max_spend_usd"]
     robust_du = numeric["global_robust_delta_log_wealth"]
     robust_ev = numeric["global_robust_ev_usd"]
+    cut_win = numeric["global_cut_time_win_probability_lcb"]
+    cut_loss = numeric["global_cut_time_loss_probability_ucb"]
+    terminal_win = numeric["global_terminal_win_probability_lcb"]
+    terminal_loss = numeric["global_terminal_loss_probability_ucb"]
+    loss_payoff = numeric["global_terminal_loss_payoff_usd"]
+    win_payoff = numeric["global_terminal_win_payoff_usd"]
+    median_payoff = numeric["global_terminal_median_payoff_usd"]
+    wealth_after_loss = numeric["global_terminal_wealth_after_loss_usd"]
+    wealth_after_win = numeric["global_terminal_wealth_after_win_usd"]
+    cut_ev_diagnostic = numeric["global_cut_time_expected_value_diagnostic_usd"]
+    ev_diagnostic = numeric["global_expected_value_diagnostic_usd"]
     if not (0.0 <= lcb <= point <= 1.0):
         return "probability_order"
     if not (0.0 < cost < 1.0 and edge > 0.0):
@@ -2948,6 +2972,42 @@ def _global_current_state_execution_economics_rejection_reason(
         abs_tol=1e-9,
     ):
         return "global_cost_identity"
+    if not (
+        0.5 < terminal_win <= cut_win <= 1.0
+        and 0.0 <= cut_loss <= terminal_loss < 0.5
+        and math.isclose(cut_win + cut_loss, 1.0, rel_tol=0.0, abs_tol=1e-12)
+        and math.isclose(
+            terminal_win + terminal_loss, 1.0, rel_tol=0.0, abs_tol=1e-12
+        )
+        and math.isclose(terminal_win, lcb, rel_tol=0.0, abs_tol=1e-12)
+    ):
+        return "global_terminal_probability_identity"
+    if not (
+        math.isclose(loss_payoff, -expected_cost, rel_tol=0.0, abs_tol=1e-12)
+        and math.isclose(
+            win_payoff, shares - expected_cost, rel_tol=0.0, abs_tol=1e-12
+        )
+        and math.isclose(median_payoff, win_payoff, rel_tol=0.0, abs_tol=1e-12)
+        and median_payoff > 0.0
+        and wealth_after_loss > 0.0
+        and wealth_after_win > 0.0
+        and math.isclose(
+            cut_ev_diagnostic, robust_ev, rel_tol=0.0, abs_tol=1e-12
+        )
+        and math.isclose(
+            ev_diagnostic,
+            terminal_win * shares - expected_cost,
+            rel_tol=0.0,
+            abs_tol=1e-12,
+        )
+    ):
+        return "global_terminal_payoff_identity"
+    if cert["global_expected_value_semantics"] != (
+        "DIAGNOSTIC_EXPECTATION_NOT_REALIZED_GAIN"
+    ):
+        return "global_expected_value_semantics"
+    if cert["global_terminal_payoff_semantics"] != "BINARY_0_1":
+        return "global_terminal_payoff_semantics"
     return None
 
 
@@ -6271,6 +6331,9 @@ def _global_preflight_block_status(reason: str) -> str:
         "EDLI_DURABLE_SUBMIT_OUTBOX_REQUIRED",
         "EXECUTOR_BOUNDARY_MISSING",
         "OPERATOR_ARM_REQUIRED",
+        "GLOBAL_CURRENT_STATE_PAYOFF_Q_TIGHTENED_REAUCTION_REQUIRED",
+        "GLOBAL_CURRENT_STATE_ROBUST_MAJORITY_LOSS",
+        "GLOBAL_CURRENT_STATE_ECONOMICS_NON_POSITIVE",
     }:
         return "BATCH_BLOCKED"
     return "BLOCKED"
@@ -6288,6 +6351,17 @@ def _global_current_state_execution_economics(
         shares = Decimal(str(getattr(decision, "shares", "0") or "0"))
         cost = Decimal(str(getattr(decision, "cost_usd", "0") or "0"))
         robust_ev = Decimal(str(getattr(decision, "robust_ev_usd", "nan")))
+        terminal = getattr(decision, "terminal_wealth")
+        cut_win_probability = Decimal(str(terminal.win_probability_lcb))
+        cut_loss_probability = Decimal(str(terminal.loss_probability_ucb))
+        loss_payoff = Decimal(terminal.loss_payoff_usd)
+        win_payoff = Decimal(terminal.win_payoff_usd)
+        median_payoff = Decimal(terminal.median_payoff_usd)
+        wealth_after_loss = Decimal(terminal.wealth_after_loss_usd)
+        wealth_after_win = Decimal(terminal.wealth_after_win_usd)
+        expected_value_diagnostic = Decimal(
+            str(terminal.expected_value_diagnostic_usd)
+        )
     except (ArithmeticError, AttributeError, TypeError, ValueError) as exc:
         raise ValueError("GLOBAL_CURRENT_STATE_DECISION_ECONOMICS_INVALID") from exc
     candidate = getattr(decision, "candidate", None)
@@ -6335,14 +6409,61 @@ def _global_current_state_execution_economics(
         )
     except (ArithmeticError, TypeError, ValueError) as exc:
         raise ValueError("GLOBAL_CURRENT_STATE_PRIOR_LCB_INVALID") from exc
-    if shares <= 0 or cost <= 0 or not robust_ev.is_finite():
+    if (
+        shares <= 0
+        or cost <= 0
+        or not all(
+            value.is_finite()
+            for value in (
+                robust_ev,
+                cut_win_probability,
+                cut_loss_probability,
+                loss_payoff,
+                win_payoff,
+                median_payoff,
+                wealth_after_loss,
+                wealth_after_win,
+                expected_value_diagnostic,
+            )
+        )
+        or not math.isclose(
+            float(cut_win_probability + cut_loss_probability),
+            1.0,
+            rel_tol=0.0,
+            abs_tol=1e-12,
+        )
+        or loss_payoff != -cost
+        or win_payoff != shares - cost
+        or median_payoff != win_payoff
+        or median_payoff <= 0
+        or wealth_after_loss <= 0
+        or wealth_after_win <= 0
+        or not math.isclose(
+            float(expected_value_diagnostic),
+            float(robust_ev),
+            rel_tol=0.0,
+            abs_tol=1e-12,
+        )
+    ):
         raise ValueError("GLOBAL_CURRENT_STATE_DECISION_ECONOMICS_INVALID")
+    if (
+        cut_win_probability <= Decimal("0.5")
+        or cut_loss_probability >= Decimal("0.5")
+    ):
+        raise ValueError("GLOBAL_CURRENT_STATE_ROBUST_MAJORITY_LOSS")
     if not point_q.is_finite():
         raise ValueError("GLOBAL_CURRENT_STATE_POINT_Q_INVALID")
     if prior_payoff_lcb is not None and not prior_payoff_lcb.is_finite():
         raise ValueError("GLOBAL_CURRENT_STATE_PRIOR_LCB_INVALID")
     unit_cost = cost / shares
-    current_band_payoff_q_lcb = (robust_ev + cost) / shares
+    current_band_payoff_q_lcb = cut_win_probability
+    if not math.isclose(
+        float(robust_ev),
+        float(current_band_payoff_q_lcb * shares - cost),
+        rel_tol=0.0,
+        abs_tol=1e-12,
+    ):
+        raise ValueError("GLOBAL_CURRENT_STATE_DECISION_ECONOMICS_INVALID")
     if served_lcb is None:
         served_lcb = current_band_payoff_q_lcb
     if prior_payoff_lcb is None:
@@ -6359,9 +6480,16 @@ def _global_current_state_execution_economics(
         Decimal("0") <= served_lcb <= point_q <= Decimal("1")
         and Decimal("0") <= prior_payoff_lcb <= point_q
         and Decimal("0") <= current_band_payoff_q_lcb <= point_q
+        and payoff_q_lcb > Decimal("0.5")
         and edge_lcb > 0
     ):
+        if payoff_q_lcb <= Decimal("0.5"):
+            raise ValueError("GLOBAL_CURRENT_STATE_ROBUST_MAJORITY_LOSS")
         raise ValueError("GLOBAL_CURRENT_STATE_ECONOMICS_NON_POSITIVE")
+    if payoff_q_lcb < current_band_payoff_q_lcb:
+        raise ValueError(
+            "GLOBAL_CURRENT_STATE_PAYOFF_Q_TIGHTENED_REAUCTION_REQUIRED"
+        )
     sample_hash = str(getattr(witness, "sample_matrix_identity", "") or "").strip()
     samples = getattr(witness, "yes_q_samples", None)
     try:
@@ -6412,6 +6540,27 @@ def _global_current_state_execution_economics(
             "global_current_served_payoff_q_lcb": float(served_lcb),
             "global_current_prior_payoff_q_lcb": float(prior_payoff_lcb),
             "global_current_effective_payoff_q_lcb": float(payoff_q_lcb),
+            "global_cut_time_win_probability_lcb": float(cut_win_probability),
+            "global_cut_time_loss_probability_ucb": float(cut_loss_probability),
+            "global_terminal_win_probability_lcb": float(payoff_q_lcb),
+            "global_terminal_loss_probability_ucb": float(
+                Decimal("1") - payoff_q_lcb
+            ),
+            "global_terminal_loss_payoff_usd": str(loss_payoff),
+            "global_terminal_win_payoff_usd": str(win_payoff),
+            "global_terminal_median_payoff_usd": str(median_payoff),
+            "global_terminal_wealth_after_loss_usd": str(wealth_after_loss),
+            "global_terminal_wealth_after_win_usd": str(wealth_after_win),
+            "global_cut_time_expected_value_diagnostic_usd": float(
+                expected_value_diagnostic
+            ),
+            "global_expected_value_diagnostic_usd": float(
+                payoff_q_lcb * shares - cost
+            ),
+            "global_expected_value_semantics": (
+                "DIAGNOSTIC_EXPECTATION_NOT_REALIZED_GAIN"
+            ),
+            "global_terminal_payoff_semantics": "BINARY_0_1",
             "global_current_band_sample_identity": sample_hash,
             "global_current_band_n": n_draws,
             "global_current_band_alpha": alpha,

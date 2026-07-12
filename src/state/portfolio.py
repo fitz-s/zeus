@@ -197,26 +197,42 @@ def _ci_intervals_separated(
     return (hi_a < lo_b - _CI_SEP_EPS) or (hi_b < lo_a - _CI_SEP_EPS)
 
 
-def _held_side_lcb_or_point(
+def _held_side_ci_lcb(
     ci: Optional[tuple],
     point: Optional[float],
 ) -> Optional[float]:
-    if ci is not None:
-        try:
-            lower = float(min(ci))
-        except (TypeError, ValueError):
-            lower = float("nan")
-        if math.isfinite(lower):
-            return lower
-    if point is None:
+    if ci is None or point is None:
         return None
     try:
+        if len(ci) != 2:
+            return None
+        lower, upper = (float(value) for value in ci)
         point_float = float(point)
     except (TypeError, ValueError):
         return None
-    if math.isfinite(point_float):
-        return point_float
-    return None
+    if not all(math.isfinite(value) for value in (lower, upper, point_float)):
+        return None
+    if not (0.0 <= lower <= point_float <= upper <= 1.0):
+        return None
+    return lower
+
+
+def _entry_ci_contains_point(ci: Optional[tuple], point: Optional[float]) -> bool:
+    """Validate the legacy entry interval shape without treating it as a q bound."""
+
+    if ci is None or point is None:
+        return False
+    try:
+        if len(ci) != 2:
+            return False
+        lower, upper = (float(value) for value in ci)
+        point_float = float(point)
+    except (TypeError, ValueError):
+        return False
+    return (
+        all(math.isfinite(value) for value in (lower, upper, point_float))
+        and lower <= point_float <= upper
+    )
 
 
 @dataclass(frozen=True)
@@ -976,7 +992,16 @@ class Position:
                 fee_cost=0.0,
                 time_cost=0.0,
             )
-        return shares * executable_bid > hold_value.net_value
+        # The fee belongs to the executable SELL, not to hold-to-settlement.
+        # compute_with_exit_costs exposes that immediate fee as fee_cost; move
+        # it across the comparison instead of making both sides optimistic in
+        # opposite directions.
+        sell_value = shares * executable_bid - hold_value.fee_cost
+        terminal_hold_value = hold_value.net_value + hold_value.fee_cost
+        if hold_value.fee_cost > 0.0:
+            applied.append("exit_fee_applied_to_sell_value")
+            applied.append("hold_terminal_value_excludes_exit_fee")
+        return sell_value > terminal_hold_value
 
     def _near_settlement_hold_confirmation_reason(
         self,
@@ -1018,7 +1043,34 @@ class Position:
         skip this path — they have their own risk-containment via
         nowcast/causality; DT#2 RED is orthogonal to Day0 evaluator logic.
         """
-        applied = list(self.applied_validations)
+        prior_day0_robust_confirmation = (
+            "day0_robust_sell_value_awaits_confirmation"
+            in self.applied_validations
+        )
+        prior_day0_robust_count = (
+            int(self.neg_edge_count or 0)
+            if prior_day0_robust_confirmation
+            else 0
+        )
+        if prior_day0_robust_confirmation:
+            self.neg_edge_count = 0
+        decision_scoped_value_validations = {
+            "ev_gate",
+            "hold_value_exit_costs_enabled",
+            "hold_value_hours_unknown_time_cost_zero",
+            "hold_value_correlation_crowding_applied",
+            "hold_value_probability_basis:current_q_lcb",
+            "exit_fee_applied_to_sell_value",
+            "hold_terminal_value_excludes_exit_fee",
+            "current_held_ci_invalid",
+            "entry_held_ci_invalid",
+            "day0_robust_sell_value_awaits_confirmation",
+        }
+        applied = [
+            validation
+            for validation in self.applied_validations
+            if validation not in decision_scoped_value_validations
+        ]
 
         # DT#2 RED force-exit sweep short-circuit (Phase 9B ITERATE, R-BY).
         # Must run BEFORE the missing-authority fail-closed check: when the
@@ -1192,34 +1244,67 @@ class Position:
                         )
                     applied.append("day0_zero_probability_hold_value_dominates")
 
+        current_hold_q_lcb = _held_side_ci_lcb(
+            exit_context.current_ci,
+            exit_context.fresh_prob,
+        )
+        current_ci_invalid = (
+            exit_context.current_ci is not None and current_hold_q_lcb is None
+        )
+
         # Settlement imminent (<1h). The blanket force-sell here is a FALSE EXIT for a position
         # whose hold-to-settlement EV still dominates selling now (operator-reported 2026-06-23: a
         # confirmed-win NO at 99.9c was force-sold). Route the decision through the SAME EV(hold)
         # vs EV(sell) authority the rest of the exit path uses - HoldValue net of exit costs vs
-        # shares*bid. HOLD only for explicitly confirmed winner postures. A physics REVERSAL the
-        # market has not priced (fresh belief low) OR a market overpaying our fresh belief both SELL
-        # ("sell before the market notices"); an unprovable EV (no executable bid / no shares ->
-        # None) keeps the conservative force-sell. Freshness of fresh_prob is already gated by the
-        # missing-authority check above, so a stale belief cannot drive this branch.
+        # shares*bid. A valid current CI obeys strict net-value dominance; without one, retain the
+        # legacy confirmed-winner exception and otherwise exit. A physics REVERSAL the market has
+        # not priced (fresh belief low) OR a market overpaying our fresh belief both SELL ("sell
+        # before the market notices"); an unprovable EV (no executable bid / no shares -> None)
+        # keeps the conservative force-sell. Freshness of fresh_prob is already gated by the missing-
+        # authority check above, so a stale belief cannot drive this branch.
         if exit_context.hours_to_settlement is not None and exit_context.hours_to_settlement < 1.0:
-            near_settlement_hold_reason = self._near_settlement_hold_confirmation_reason(
-                current_p_posterior=float(exit_context.fresh_prob),
-                best_bid=exit_context.best_bid,
-            )
-            if near_settlement_hold_reason is not None:
-                # Confirmed-win hold: do NOT blanket force-sell at 99c+ and do NOT let
-                # model-divergence telemetry rename the decision into a panic exit.
-                applied.append("near_settlement_confirmed_win_hold")
-                if near_settlement_hold_reason != "near_settlement_confirmed_win_hold":
-                    applied.append(near_settlement_hold_reason)
+            if current_ci_invalid:
+                applied.append("current_held_ci_invalid")
+                applied.append("evidence_unavailable_third_state")
+                applied.append("near_settlement_gate")
                 self.applied_validations = _dedupe_validations(applied)
                 return ExitDecision(
-                    False,
+                    True,
+                    "SETTLEMENT_IMMINENT",
+                    "immediate",
                     selected_method=self.selected_method or self.entry_method,
                     applied_validations=list(self.applied_validations),
+                    trigger="SETTLEMENT_IMMINENT",
                 )
+            if current_hold_q_lcb is None:
+                legacy_hold_reason = self._near_settlement_hold_confirmation_reason(
+                    current_p_posterior=float(exit_context.fresh_prob),
+                    best_bid=exit_context.best_bid,
+                )
+                if legacy_hold_reason is not None:
+                    applied.append("near_settlement_confirmed_win_hold")
+                    if legacy_hold_reason != "near_settlement_confirmed_win_hold":
+                        applied.append(legacy_hold_reason)
+                    self.applied_validations = _dedupe_validations(applied)
+                    return ExitDecision(
+                        False,
+                        selected_method=self.selected_method or self.entry_method,
+                        applied_validations=list(self.applied_validations),
+                    )
+                applied.append("near_settlement_gate")
+                self.applied_validations = _dedupe_validations(applied)
+                return ExitDecision(
+                    True,
+                    "SETTLEMENT_IMMINENT",
+                    "immediate",
+                    selected_method=self.selected_method or self.entry_method,
+                    applied_validations=list(self.applied_validations),
+                    trigger="SETTLEMENT_IMMINENT",
+                )
+            hold_probability = current_hold_q_lcb
+            applied.append("hold_value_probability_basis:current_q_lcb")
             sell_beats_hold = self._sell_value_exceeds_hold_value(
-                current_p_posterior=float(exit_context.fresh_prob),
+                current_p_posterior=hold_probability,
                 best_bid=exit_context.best_bid,
                 hours_to_settlement=exit_context.hours_to_settlement,
                 applied=applied,
@@ -1237,16 +1322,22 @@ class Position:
                     applied_validations=list(self.applied_validations),
                     trigger="SETTLEMENT_IMMINENT",
                 )
-            # Hold-EV is mathematically positive but not a confirmed win. Near settlement this is not
-            # enough to hand control to panic/divergence gates; exit under the deterministic time gate.
-            applied.append("near_settlement_hold_ev_unconfirmed")
-            applied.append("near_settlement_gate")
+            near_settlement_hold_reason = self._near_settlement_hold_confirmation_reason(
+                current_p_posterior=hold_probability,
+                best_bid=exit_context.best_bid,
+            )
+            if near_settlement_hold_reason is not None:
+                applied.append("near_settlement_confirmed_win_hold")
+                if near_settlement_hold_reason != "near_settlement_confirmed_win_hold":
+                    applied.append(near_settlement_hold_reason)
+            applied.append("near_settlement_hold_value_dominates")
             self.applied_validations = _dedupe_validations(applied)
             return ExitDecision(
-                True, "SETTLEMENT_IMMINENT", "immediate",
+                False,
+                "NEAR_SETTLEMENT_HOLD_VALUE_DOMINATES",
                 selected_method=self.selected_method or self.entry_method,
                 applied_validations=list(self.applied_validations),
-                trigger="SETTLEMENT_IMMINENT",
+                trigger="NEAR_SETTLEMENT_HOLD_VALUE_DOMINATES",
             )
 
         # Whale toxicity
@@ -1322,6 +1413,40 @@ class Position:
                 trigger="VIG_EXTREME",
             )
 
+        if current_ci_invalid:
+            applied.append("ci_separation_gate")
+            applied.append("current_held_ci_invalid")
+            applied.append("evidence_unavailable_third_state")
+            self.applied_validations = _dedupe_validations(applied)
+            return ExitDecision(
+                False,
+                "EVIDENCE_UNAVAILABLE",
+                selected_method=self.selected_method or self.entry_method,
+                applied_validations=list(self.applied_validations),
+                trigger="EVIDENCE_UNAVAILABLE",
+            )
+
+        entry_ci_invalid = (
+            exit_context.entry_ci is not None
+            and exit_context.entry_posterior is not None
+            and not _entry_ci_contains_point(
+                exit_context.entry_ci,
+                exit_context.entry_posterior,
+            )
+        )
+        if entry_ci_invalid:
+            applied.append("ci_separation_gate")
+            applied.append("entry_held_ci_invalid")
+            applied.append("evidence_unavailable_third_state")
+            self.applied_validations = _dedupe_validations(applied)
+            return ExitDecision(
+                False,
+                "EVIDENCE_UNAVAILABLE",
+                selected_method=self.selected_method or self.entry_method,
+                applied_validations=list(self.applied_validations),
+                trigger="EVIDENCE_UNAVAILABLE",
+            )
+
         # BUG#113 (守護 SD-7) — CI-SEPARATION belief-reversal gate (the 120-min 守護 guarantee:
         # "exit only when the belief CI has SEPARATED below entry, NEVER on a bare/large price
         # move whose CI still overlaps entry"). This lifts the severed screen_exit logic onto the
@@ -1333,6 +1458,7 @@ class Position:
         separated = _ci_intervals_separated(exit_context.entry_ci, exit_context.current_ci)
         if separated is not None and exit_context.entry_posterior is not None:
             applied.append("ci_separation_gate")
+            assert current_hold_q_lcb is not None
             current_held = float(exit_context.fresh_prob)
             below = current_held < float(exit_context.entry_posterior) - _CI_SEP_EPS
             if separated and below:
@@ -1350,8 +1476,9 @@ class Position:
                     if not exit_context.day0_zero_probability_exit_authority:
                         applied.append("day0_zero_probability_exit_authority_blocked")
                     else:
+                        applied.append("hold_value_probability_basis:current_q_lcb")
                         sell_value_dominates = self._sell_value_exceeds_hold_value(
-                            current_p_posterior=current_held,
+                            current_p_posterior=current_hold_q_lcb,
                             best_bid=exit_context.best_bid,
                             hours_to_settlement=exit_context.hours_to_settlement,
                             applied=applied,
@@ -1389,8 +1516,9 @@ class Position:
                         applied_validations=list(self.applied_validations),
                         trigger=hold_reason,
                     )
+                applied.append("hold_value_probability_basis:current_q_lcb")
                 sell_value_dominates = self._sell_value_exceeds_hold_value(
-                    current_p_posterior=current_held,
+                    current_p_posterior=current_hold_q_lcb,
                     best_bid=exit_context.best_bid,
                     hours_to_settlement=exit_context.hours_to_settlement,
                     applied=applied,
@@ -1430,40 +1558,62 @@ class Position:
                     applied_validations=list(self.applied_validations),
                     trigger="CI_SEPARATED_REVERSAL",
                 )
-            # CI present but NOT a separated-below reversal: for ordinary positions,
-            # a noisy overlapping interval suppresses flat exits. For Day0 the
-            # observed-boundary remaining-window CI is often deliberately wide; a
-            # terminal hold here prevents the standard EV/consecutive optimizer from
-            # ever reacting to the same fresh belief. Keep the overlap as evidence,
-            # but let Day0 continue into the normal exit optimizer.
+            # The interval may overlap entry, but HOLD still competes with an
+            # executable sale on this same current cut. Day0 must retain its
+            # observation/consecutive-confirmation gate and known exit trigger
+            # so the downstream maturity lock remains authoritative.
             if exit_context.day0_active:
                 applied.append("ci_overlap_nonterminal_day0")
-            else:
+                applied.append("hold_value_probability_basis:current_q_lcb")
                 sell_value_dominates = self._sell_value_exceeds_hold_value(
-                    current_p_posterior=float(exit_context.fresh_prob),
+                    current_p_posterior=current_hold_q_lcb,
                     best_bid=exit_context.best_bid,
                     hours_to_settlement=exit_context.hours_to_settlement,
                     applied=applied,
                     portfolio_positions=exit_context.portfolio_positions,
                     bankroll=exit_context.bankroll,
                 )
-                self.neg_edge_count = 0
                 if sell_value_dominates is True:
+                    self.neg_edge_count = (
+                        prior_day0_robust_count + 1
+                        if prior_day0_robust_confirmation
+                        else 1
+                    )
+                else:
+                    self.neg_edge_count = 0
+                applied.append("day0_observation_gate")
+                applied.append("consecutive_cycle_check")
+                if (
+                    sell_value_dominates is True
+                    and self.neg_edge_count >= consecutive_confirmations()
+                ):
+                    self.neg_edge_count = 0
                     applied.append("ci_overlap_sell_value_dominates")
                     self.applied_validations = _dedupe_validations(applied)
                     return ExitDecision(
                         True,
-                        "CI_OVERLAP_SELL_VALUE_DOMINATES",
+                        "DAY0_ROBUST_SELL_VALUE_DOMINATES",
                         selected_method=self.selected_method or self.entry_method,
                         applied_validations=list(self.applied_validations),
-                        trigger="CI_OVERLAP_SELL_VALUE_DOMINATES",
+                        trigger="EDGE_REVERSAL",
                     )
-                if sell_value_dominates is None:
-                    applied.append("ci_overlap_exit_context_incomplete_hold")
-                    reason = "CI_OVERLAP_EXIT_CONTEXT_INCOMPLETE_HOLD"
-                else:
-                    applied.append("ci_overlap_hold_value_dominates")
-                    reason = "CI_OVERLAP_HOLD_VALUE_DOMINATES"
+                if sell_value_dominates is True:
+                    applied.append("day0_robust_sell_value_awaits_confirmation")
+                    reason = "DAY0_ROBUST_SELL_VALUE_AWAITS_CONFIRMATION"
+                    self.applied_validations = _dedupe_validations(applied)
+                    return ExitDecision(
+                        False,
+                        reason,
+                        selected_method=self.selected_method or self.entry_method,
+                        applied_validations=list(self.applied_validations),
+                        trigger=reason,
+                    )
+                reason = (
+                    "CI_OVERLAP_EXIT_CONTEXT_INCOMPLETE_HOLD"
+                    if sell_value_dominates is None
+                    else "CI_OVERLAP_HOLD_VALUE_DOMINATES"
+                )
+                applied.append(reason.lower())
                 self.applied_validations = _dedupe_validations(applied)
                 return ExitDecision(
                     False,
@@ -1472,6 +1622,40 @@ class Position:
                     applied_validations=list(self.applied_validations),
                     trigger=reason,
                 )
+            applied.append("hold_value_probability_basis:current_q_lcb")
+            sell_value_dominates = self._sell_value_exceeds_hold_value(
+                current_p_posterior=current_hold_q_lcb,
+                best_bid=exit_context.best_bid,
+                hours_to_settlement=exit_context.hours_to_settlement,
+                applied=applied,
+                portfolio_positions=exit_context.portfolio_positions,
+                bankroll=exit_context.bankroll,
+            )
+            self.neg_edge_count = 0
+            if sell_value_dominates is True:
+                applied.append("ci_overlap_sell_value_dominates")
+                self.applied_validations = _dedupe_validations(applied)
+                return ExitDecision(
+                    True,
+                    "CI_OVERLAP_SELL_VALUE_DOMINATES",
+                    selected_method=self.selected_method or self.entry_method,
+                    applied_validations=list(self.applied_validations),
+                    trigger="CI_OVERLAP_SELL_VALUE_DOMINATES",
+                )
+            if sell_value_dominates is None:
+                applied.append("ci_overlap_exit_context_incomplete_hold")
+                reason = "CI_OVERLAP_EXIT_CONTEXT_INCOMPLETE_HOLD"
+            else:
+                applied.append("ci_overlap_hold_value_dominates")
+                reason = "CI_OVERLAP_HOLD_VALUE_DOMINATES"
+            self.applied_validations = _dedupe_validations(applied)
+            return ExitDecision(
+                False,
+                reason,
+                selected_method=self.selected_method or self.entry_method,
+                applied_validations=list(self.applied_validations),
+                trigger=reason,
+            )
 
         # Direction-specific exit logic
         if self.direction == "buy_no":
@@ -1565,37 +1749,15 @@ class Position:
         # Layer 4: EV gate
         shares = self.effective_shares
         if best_bid is not None and shares > 0:
-            applied.append("ev_gate")
-            if hold_value_exit_costs_enabled():
-                applied.append("hold_value_exit_costs_enabled")
-                if hours_to_settlement is None or hours_to_settlement < 0.0:
-                    applied.append("hold_value_hours_unknown_time_cost_zero")
-                _crowding = _compute_exit_correlation_crowding(
-                    this_cluster=self.cluster,
-                    portfolio_positions=portfolio_positions,
-                    bankroll=bankroll,
-                    shares=shares,
-                    best_bid=best_bid,
-                    crowding_rate=exit_correlation_crowding_rate(),
-                )
-                if _crowding > 0.0:
-                    applied.append("hold_value_correlation_crowding_applied")
-                hold_value = HoldValue.compute_with_exit_costs(
-                    shares=shares,
-                    current_p_posterior=current_p_posterior,
-                    best_bid=best_bid,
-                    hours_to_settlement=hours_to_settlement,
-                    fee_rate=exit_fee_rate(),
-                    daily_hurdle_rate=exit_daily_hurdle_rate(),
-                    correlation_crowding=_crowding,
-                )
-            else:
-                hold_value = HoldValue.compute(
-                    gross_value=shares * current_p_posterior,
-                    fee_cost=0.0,
-                    time_cost=0.0,
-                )
-            if shares * best_bid <= hold_value.net_value:
+            sell_value_dominates = self._sell_value_exceeds_hold_value(
+                current_p_posterior=current_p_posterior,
+                best_bid=best_bid,
+                hours_to_settlement=hours_to_settlement,
+                applied=applied,
+                portfolio_positions=portfolio_positions,
+                bankroll=bankroll,
+            )
+            if sell_value_dominates is not True:
                 self.applied_validations = _dedupe_validations(applied)
                 return ExitDecision(
                     False,
@@ -1688,38 +1850,15 @@ class Position:
                 )
             shares = self.effective_shares
             if shares > 0:
-                applied.append("ev_gate")
-                if hold_value_exit_costs_enabled():
-                    applied.append("hold_value_exit_costs_enabled")
-                    if hours_to_settlement is None or hours_to_settlement < 0.0:
-                        applied.append("hold_value_hours_unknown_time_cost_zero")
-                    _crowding = _compute_exit_correlation_crowding(
-                        this_cluster=self.cluster,
-                        portfolio_positions=portfolio_positions,
-                        bankroll=bankroll,
-                        shares=shares,
-                        best_bid=best_bid,
-                        crowding_rate=exit_correlation_crowding_rate(),
-                    )
-                    if _crowding > 0.0:
-                        applied.append("hold_value_correlation_crowding_applied")
-                    hold_value = HoldValue.compute_with_exit_costs(
-                        shares=shares,
-                        current_p_posterior=current_p_posterior,
-                        best_bid=best_bid,
-                        hours_to_settlement=hours_to_settlement,
-                        fee_rate=exit_fee_rate(),
-                        daily_hurdle_rate=exit_daily_hurdle_rate(),
-                        correlation_crowding=_crowding,
-                    )
-                else:
-                    hold_value = HoldValue.compute(
-                        gross_value=shares * current_p_posterior,
-                        fee_cost=0.0,
-                        time_cost=0.0,
-                    )
-                sell_value = shares * best_bid
-                if sell_value <= hold_value.net_value:
+                sell_value_dominates = self._sell_value_exceeds_hold_value(
+                    current_p_posterior=current_p_posterior,
+                    best_bid=best_bid,
+                    hours_to_settlement=hours_to_settlement,
+                    applied=applied,
+                    portfolio_positions=portfolio_positions,
+                    bankroll=bankroll,
+                )
+                if sell_value_dominates is not True:
                     self.applied_validations = _dedupe_validations(applied)
                     return ExitDecision(
                         False,

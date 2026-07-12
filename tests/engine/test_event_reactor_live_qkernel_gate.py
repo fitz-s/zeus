@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import json
+import math
 import sqlite3
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -14,7 +15,6 @@ import numpy as np
 import pytest
 
 import src.engine.event_reactor_adapter as era
-from src.execution.executor import _entry_taker_quality_component
 from src.engine.event_reactor_adapter import (
     PreSubmitAuthorityWitness,
     _assert_live_entry_submit_authority,
@@ -82,6 +82,38 @@ def _current_qkernel_cert(*, side: str = "YES") -> dict:
     return cert
 
 
+def _global_decision(
+    *,
+    shares: str,
+    cost: str,
+    q: str,
+    candidate=None,
+    wealth: str = "1000",
+):
+    shares_decimal = Decimal(shares)
+    cost_decimal = Decimal(cost)
+    q_decimal = Decimal(q)
+    robust_ev = q_decimal * shares_decimal - cost_decimal
+    wealth_decimal = Decimal(wealth)
+    terminal = SimpleNamespace(
+        win_probability_lcb=float(q_decimal),
+        loss_probability_ucb=float(Decimal("1") - q_decimal),
+        loss_payoff_usd=-cost_decimal,
+        win_payoff_usd=shares_decimal - cost_decimal,
+        median_payoff_usd=shares_decimal - cost_decimal,
+        wealth_after_loss_usd=wealth_decimal - cost_decimal,
+        wealth_after_win_usd=wealth_decimal + shares_decimal - cost_decimal,
+        expected_value_diagnostic_usd=float(robust_ev),
+    )
+    return SimpleNamespace(
+        candidate=candidate,
+        shares=shares_decimal,
+        cost_usd=cost_decimal,
+        robust_ev_usd=robust_ev,
+        terminal_wealth=terminal,
+    )
+
+
 def _seal_current_qkernel_cert(cert: dict) -> None:
     cert["current_state_identity_hash"] = era.qkernel_current_state_identity_hash(cert)
 
@@ -119,6 +151,19 @@ def _global_current_qkernel_cert(*, side: str = "YES") -> dict:
         global_max_spend_usd="1",
         global_robust_delta_log_wealth=0.01,
         global_robust_ev_usd=14.0,
+        global_cut_time_win_probability_lcb=0.60,
+        global_cut_time_loss_probability_ucb=0.40,
+        global_terminal_win_probability_lcb=0.60,
+        global_terminal_loss_probability_ucb=0.40,
+        global_terminal_loss_payoff_usd="-1",
+        global_terminal_win_payoff_usd="24",
+        global_terminal_median_payoff_usd="24",
+        global_terminal_wealth_after_loss_usd="99",
+        global_terminal_wealth_after_win_usd="124",
+        global_cut_time_expected_value_diagnostic_usd=14.0,
+        global_expected_value_diagnostic_usd=14.0,
+        global_expected_value_semantics="DIAGNOSTIC_EXPECTATION_NOT_REALIZED_GAIN",
+        global_terminal_payoff_semantics="BINARY_0_1",
     )
     _seal_current_qkernel_cert(cert)
     return cert
@@ -832,10 +877,10 @@ def test_global_actuation_rebinds_submit_gate_to_exact_current_band(
         route_cost=0.55,
         route_edge_lcb=0.17717005020610066,
     )
-    decision = SimpleNamespace(
-        shares=Decimal("158.25"),
-        cost_usd=Decimal("91.3482"),
-        robust_ev_usd=26.924691368844275,
+    decision = _global_decision(
+        shares="158.25",
+        cost="91.3482",
+        q="0.7271700502061007",
     )
     witness = SimpleNamespace(
         sample_matrix_identity="global-current-sample",
@@ -848,9 +893,7 @@ def test_global_actuation_rebinds_submit_gate_to_exact_current_band(
         decision=decision,
         witness=witness,
     )
-    current_band_q = (decision.robust_ev_usd + float(decision.cost_usd)) / float(
-        decision.shares
-    )
+    current_band_q = decision.terminal_wealth.win_probability_lcb
 
     assert current["global_current_band_payoff_q_lcb"] == pytest.approx(current_band_q)
     assert current["payoff_q_lcb"] == pytest.approx(0.7271700502061007)
@@ -889,7 +932,7 @@ def test_global_actuation_rebinds_submit_gate_to_exact_current_band(
 
 
 @pytest.mark.parametrize(("side", "direction"), (("YES", "buy_yes"), ("NO", "buy_no")))
-def test_low_probability_current_band_taker_is_symmetric_and_price_relative(
+def test_low_probability_current_band_taker_is_symmetric_majority_loss(
     side,
     direction,
 ):
@@ -905,72 +948,21 @@ def test_low_probability_current_band_taker_is_symmetric_and_price_relative(
         selection_guard_q_safe=0.13,
     )
     _seal_current_qkernel_cert(cert)
-    decision = SimpleNamespace(
-        shares=Decimal("100"),
-        cost_usd=Decimal("3"),
-        robust_ev_usd=Decimal("10"),
-    )
+    decision = _global_decision(shares="100", cost="3", q="0.13")
     witness = SimpleNamespace(
         sample_matrix_identity=f"current-sample-{side.lower()}",
         yes_q_samples=SimpleNamespace(shape=(400, 11)),
         band_alpha=0.05,
     )
-    current = era._global_current_state_execution_economics(
-        cert,
-        decision=decision,
-        witness=witness,
-    )
-    proof = era._build_event_bound_taker_quality_proof(
-        actionable_payload={
-            "direction": direction,
-            "selection_authority_applied": "qkernel_spine",
-            "candidate_bin_id": "bin-1",
-            "q_live": current["payoff_q_point"],
-            "q_lcb_5pct": current["payoff_q_lcb"],
-            "live_cap_reserved_notional_usd": "3",
-            "qkernel_execution_economics": current,
-        },
-        order_mode="TAKER",
-        fresh_best_bid=0.02,
-        fresh_best_ask=0.03,
-    )
-
-    assert proof is not None and proof["passed"] is True
-    assert Decimal(str(proof["model_confidence"])) < Decimal("0.60")
-    assert Decimal(str(proof["taker_fee_adjusted_edge"])) > Decimal("0")
-    admission = _entry_taker_quality_component(
-        effective_order_type="FOK",
-        post_only=False,
-        intent_order_type="FOK",
-        taker_quality_proof=proof,
-        selection_authority_applied="qkernel_spine",
-        qkernel_execution_economics=current,
-    )
-    assert admission["allowed"] is True
-    assert admission["reason"] == "taker_quality_passed"
-
-    tampered = dict(current, payoff_q_lcb=0.14)
-    invalid_identity = _entry_taker_quality_component(
-        effective_order_type="FOK",
-        post_only=False,
-        taker_quality_proof=proof,
-        selection_authority_applied="qkernel_spine",
-        qkernel_execution_economics=tampered,
-    )
-    assert invalid_identity["allowed"] is False
-    assert invalid_identity["reason"] == "current_band_taker_quality_proof_invalid"
-
-    negative = _entry_taker_quality_component(
-        effective_order_type="FOK",
-        post_only=False,
-        taker_quality_proof=dict(proof, taker_fee_adjusted_edge="-0.001"),
-        selection_authority_applied="qkernel_spine",
-        qkernel_execution_economics=current,
-    )
-    assert negative["allowed"] is False
-    assert negative["reason"] == "negative_current_band_after_cost_surplus"
-
-
+    with pytest.raises(
+        ValueError,
+        match="GLOBAL_CURRENT_STATE_ROBUST_MAJORITY_LOSS",
+    ):
+        era._global_current_state_execution_economics(
+            cert,
+            decision=decision,
+            witness=witness,
+        )
 @pytest.mark.parametrize(("side", "direction"), (("YES", "buy_yes"), ("NO", "buy_no")))
 def test_global_current_submit_does_not_require_legacy_route_optimizer_fields(
     side,
@@ -1052,6 +1044,36 @@ def test_global_current_certificate_fails_closed_on_side_or_envelope_mismatch():
     )
 
 
+@pytest.mark.parametrize(
+    ("field", "replacement"),
+    (
+        ("global_terminal_win_probability_lcb", None),
+        ("global_terminal_loss_probability_ucb", 0.60),
+        ("global_terminal_loss_payoff_usd", "-0.99"),
+        ("global_terminal_median_payoff_usd", "23"),
+        ("global_expected_value_semantics", "REALIZED_GAIN"),
+    ),
+)
+def test_global_current_certificate_rejects_missing_or_forged_terminal_branch(
+    field,
+    replacement,
+):
+    cert = _global_current_qkernel_cert()
+    if replacement is None:
+        cert.pop(field)
+    else:
+        cert[field] = replacement
+    _seal_current_qkernel_cert(cert)
+
+    assert (
+        era._valid_selected_qkernel_execution_economics_payload(
+            cert,
+            direction="buy_yes",
+        )
+        is None
+    )
+
+
 def test_broken_global_certificate_cannot_fall_back_to_legacy_route_fields():
     cert = _global_current_qkernel_cert()
     cert.update(
@@ -1097,11 +1119,7 @@ def test_global_actuation_current_band_refuses_non_positive_bound():
         cost=0.60,
         edge_lcb=0.10,
     )
-    decision = SimpleNamespace(
-        shares=Decimal("10"),
-        cost_usd=Decimal("6"),
-        robust_ev_usd=-0.1,
-    )
+    decision = _global_decision(shares="10", cost="6", q="0.59")
     witness = SimpleNamespace(
         sample_matrix_identity="global-current-sample",
         yes_q_samples=SimpleNamespace(shape=(400, 2)),
@@ -1127,11 +1145,11 @@ def test_global_actuation_current_band_binds_candidate_side_when_cert_omits_it(s
         cost=0.40,
         edge_lcb=0.20,
     )
-    decision = SimpleNamespace(
+    decision = _global_decision(
+        shares="10",
+        cost="4",
+        q="0.60",
         candidate=SimpleNamespace(side=side),
-        shares=Decimal("10"),
-        cost_usd=Decimal("4"),
-        robust_ev_usd=Decimal("2"),
     )
     witness = SimpleNamespace(
         sample_matrix_identity="global-current-sample",
@@ -1150,11 +1168,11 @@ def test_global_actuation_current_band_binds_candidate_side_when_cert_omits_it(s
 
 def test_global_actuation_current_band_refuses_candidate_cert_side_mismatch():
     cert = _current_qkernel_cert(side="NO")
-    decision = SimpleNamespace(
+    decision = _global_decision(
+        shares="10",
+        cost="4",
+        q="0.60",
         candidate=SimpleNamespace(side="YES"),
-        shares=Decimal("10"),
-        cost_usd=Decimal("4"),
-        robust_ev_usd=Decimal("2"),
     )
     witness = SimpleNamespace(
         sample_matrix_identity="global-current-sample",
@@ -1170,7 +1188,7 @@ def test_global_actuation_current_band_refuses_candidate_cert_side_mismatch():
         )
 
 
-def test_global_actuation_current_band_uses_current_bound_when_prior_is_absent():
+def test_global_actuation_current_band_missing_prior_still_rejects_majority_loss():
     cert = _current_qkernel_cert(side="YES")
     for field in (
         "source",
@@ -1186,11 +1204,7 @@ def test_global_actuation_current_band_uses_current_bound_when_prior_is_absent()
         global_economic_identity="global-economic-1",
         pre_qkernel_q_lcb_5pct=0.12,
     )
-    decision = SimpleNamespace(
-        shares=Decimal("100"),
-        cost_usd=Decimal("1"),
-        robust_ev_usd=Decimal("9"),
-    )
+    decision = _global_decision(shares="100", cost="1", q="0.10")
     witness = SimpleNamespace(
         sample_matrix_identity="global-current-sample",
         yes_q_samples=SimpleNamespace(shape=(400, 2)),
@@ -1198,33 +1212,21 @@ def test_global_actuation_current_band_uses_current_bound_when_prior_is_absent()
         q_version="global-q-version-1",
     )
 
-    current = era._global_current_state_execution_economics(
-        cert,
-        decision=decision,
-        witness=witness,
-    )
-
-    assert current["global_current_band_payoff_q_lcb"] == pytest.approx(0.10)
-    assert current["global_current_prior_payoff_q_lcb"] == pytest.approx(0.10)
-    assert current["global_current_served_payoff_q_lcb"] == pytest.approx(0.12)
-    assert current["payoff_q_lcb"] == pytest.approx(0.10)
-    assert current["cost"] == pytest.approx(0.01)
-    assert current["route_cost"] == pytest.approx(0.01)
-    assert current["edge_lcb"] == pytest.approx(0.09)
-    assert current["source"] == "qkernel_spine"
-    assert current["decision_id"] == "global-actuation-1"
-    assert current["receipt_hash"] == "global-economic-1"
-    assert current["q_version"] == "global-q-version-1"
+    with pytest.raises(
+        ValueError,
+        match="GLOBAL_CURRENT_STATE_ROBUST_MAJORITY_LOSS",
+    ):
+        era._global_current_state_execution_economics(
+            cert,
+            decision=decision,
+            witness=witness,
+        )
 
 
 def test_global_actuation_current_band_rejects_malformed_present_prior_lcb():
     cert = _current_qkernel_cert(side="YES")
     cert["payoff_q_lcb"] = "not-a-probability"
-    decision = SimpleNamespace(
-        shares=Decimal("100"),
-        cost_usd=Decimal("1"),
-        robust_ev_usd=Decimal("9"),
-    )
+    decision = _global_decision(shares="100", cost="1", q="0.60")
     witness = SimpleNamespace(
         sample_matrix_identity="global-current-sample",
         yes_q_samples=SimpleNamespace(shape=(400, 2)),
@@ -1239,7 +1241,7 @@ def test_global_actuation_current_band_rejects_malformed_present_prior_lcb():
         )
 
 
-def test_global_actuation_recovers_missing_point_from_current_bound_witness():
+def test_global_actuation_missing_point_does_not_rescue_majority_loss():
     cert = _current_qkernel_cert(side="NO")
     cert.pop("payoff_q_point")
     cert.update(
@@ -1248,11 +1250,11 @@ def test_global_actuation_recovers_missing_point_from_current_bound_witness():
         cost=0.10,
         edge_lcb=0.05,
     )
-    decision = SimpleNamespace(
+    decision = _global_decision(
+        shares="10",
+        cost="1",
+        q="0.15",
         candidate=SimpleNamespace(bin_id="bin-1", side="NO"),
-        shares=Decimal("10"),
-        cost_usd=Decimal("1"),
-        robust_ev_usd=0.5,
     )
     witness = SimpleNamespace(
         bin_ids=("bin-1", "bin-2"),
@@ -1261,16 +1263,15 @@ def test_global_actuation_recovers_missing_point_from_current_bound_witness():
         band_alpha=0.05,
     )
 
-    current = era._global_current_state_execution_economics(
-        cert,
-        decision=decision,
-        witness=witness,
-    )
-
-    assert current["payoff_q_point"] == pytest.approx(0.2)
-    assert current["q_dot_payoff"] == pytest.approx(0.2)
-    assert current["payoff_q_lcb"] == pytest.approx(0.15)
-    assert era._qkernel_current_state_solve_economics(current) is True
+    with pytest.raises(
+        ValueError,
+        match="GLOBAL_CURRENT_STATE_ROBUST_MAJORITY_LOSS",
+    ):
+        era._global_current_state_execution_economics(
+            cert,
+            decision=decision,
+            witness=witness,
+        )
 
 
 @pytest.mark.parametrize("side", ("YES", "NO"))
@@ -1282,11 +1283,7 @@ def test_global_actuation_current_band_can_tighten_served_bound(side):
         cost=0.40,
         edge_lcb=0.30,
     )
-    decision = SimpleNamespace(
-        shares=Decimal("10"),
-        cost_usd=Decimal("4"),
-        robust_ev_usd=2.0,
-    )
+    decision = _global_decision(shares="10", cost="4", q="0.60")
     witness = SimpleNamespace(
         sample_matrix_identity="global-current-tighter-sample",
         yes_q_samples=SimpleNamespace(shape=(400, 2)),
@@ -1306,7 +1303,35 @@ def test_global_actuation_current_band_can_tighten_served_bound(side):
 
 
 @pytest.mark.parametrize("side", ("YES", "NO"))
-def test_global_actuation_uses_current_band_when_legacy_bound_is_absent(side):
+def test_global_actuation_rejects_jit_bound_that_falls_below_majority(side):
+    cert = _current_qkernel_cert(side=side)
+    cert.update(
+        payoff_q_point=0.80,
+        payoff_q_lcb=0.49,
+        pre_qkernel_q_lcb_5pct=0.49,
+        cost=0.10,
+        edge_lcb=0.39,
+    )
+    decision = _global_decision(shares="10", cost="1", q="0.60")
+    witness = SimpleNamespace(
+        sample_matrix_identity="global-current-majority-drop",
+        yes_q_samples=SimpleNamespace(shape=(400, 2)),
+        band_alpha=0.05,
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="GLOBAL_CURRENT_STATE_ROBUST_MAJORITY_LOSS",
+    ):
+        era._global_current_state_execution_economics(
+            cert,
+            decision=decision,
+            witness=witness,
+        )
+
+
+@pytest.mark.parametrize("side", ("YES", "NO"))
+def test_global_actuation_legacy_bound_absence_cannot_rescue_majority_loss(side):
     cert = _current_qkernel_cert(side=side)
     cert.pop("pre_qkernel_q_lcb_5pct", None)
     cert.update(
@@ -1315,31 +1340,26 @@ def test_global_actuation_uses_current_band_when_legacy_bound_is_absent(side):
         cost=0.10,
         edge_lcb=0.10,
     )
-    decision = SimpleNamespace(
-        shares=Decimal("10"),
-        cost_usd=Decimal("1"),
-        robust_ev_usd=0.5,
-    )
+    decision = _global_decision(shares="10", cost="1", q="0.15")
     witness = SimpleNamespace(
         sample_matrix_identity="global-current-no-legacy-bound",
         yes_q_samples=SimpleNamespace(shape=(400, 2)),
         band_alpha=0.05,
     )
 
-    current = era._global_current_state_execution_economics(
-        cert,
-        decision=decision,
-        witness=witness,
-    )
-
-    assert current["global_current_band_payoff_q_lcb"] == pytest.approx(0.15)
-    assert current["global_current_served_payoff_q_lcb"] == pytest.approx(0.15)
-    assert current["payoff_q_lcb"] == pytest.approx(0.15)
-    assert era._qkernel_current_state_solve_economics(current) is True
+    with pytest.raises(
+        ValueError,
+        match="GLOBAL_CURRENT_STATE_ROBUST_MAJORITY_LOSS",
+    ):
+        era._global_current_state_execution_economics(
+            cert,
+            decision=decision,
+            witness=witness,
+        )
 
 
 @pytest.mark.parametrize("side", ("YES", "NO"))
-def test_global_actuation_cannot_loosen_prior_qkernel_bound(side):
+def test_global_actuation_probability_tightening_requires_reauction(side):
     cert = _current_qkernel_cert(side=side)
     cert.update(
         payoff_q_point=0.80,
@@ -1348,27 +1368,65 @@ def test_global_actuation_cannot_loosen_prior_qkernel_bound(side):
         cost=0.40,
         edge_lcb=0.15,
     )
-    decision = SimpleNamespace(
-        shares=Decimal("10"),
-        cost_usd=Decimal("4"),
-        robust_ev_usd=2.0,
-    )
+    decision = _global_decision(shares="10", cost="4", q="0.60")
     witness = SimpleNamespace(
         sample_matrix_identity="global-current-prior-bound-sample",
         yes_q_samples=SimpleNamespace(shape=(400, 2)),
         band_alpha=0.05,
     )
 
-    current = era._global_current_state_execution_economics(
-        cert,
-        decision=decision,
-        witness=witness,
+    with pytest.raises(
+        ValueError,
+        match="GLOBAL_CURRENT_STATE_PAYOFF_Q_TIGHTENED_REAUCTION_REQUIRED",
+    ):
+        era._global_current_state_execution_economics(
+            cert,
+            decision=decision,
+            witness=witness,
+        )
+
+
+@pytest.mark.parametrize("side", ("YES", "NO"))
+def test_global_actuation_rejects_negative_log_stale_size_after_q_tightening(side):
+    wealth = 100.0
+    shares = 80.0
+    cost = 40.0
+    tightened_q = 0.55
+    tightened_delta_log = (
+        tightened_q * math.log((wealth + shares - cost) / wealth)
+        + (1.0 - tightened_q) * math.log((wealth - cost) / wealth)
+    )
+    assert tightened_delta_log < 0.0
+
+    cert = _current_qkernel_cert(side=side)
+    cert.update(
+        payoff_q_point=0.80,
+        payoff_q_lcb=tightened_q,
+        pre_qkernel_q_lcb_5pct=0.70,
+        cost=0.50,
+        edge_lcb=0.05,
+    )
+    decision = _global_decision(
+        shares=str(shares),
+        cost=str(cost),
+        q="0.70",
+        wealth=str(wealth),
+    )
+    witness = SimpleNamespace(
+        sample_matrix_identity=f"global-negative-log-tightening-{side.lower()}",
+        yes_q_samples=SimpleNamespace(shape=(400, 2)),
+        band_alpha=0.05,
     )
 
-    assert current["global_current_band_payoff_q_lcb"] == pytest.approx(0.60)
-    assert current["global_current_prior_payoff_q_lcb"] == pytest.approx(0.55)
-    assert current["payoff_q_lcb"] == pytest.approx(0.55)
-    assert era._qkernel_current_state_solve_economics(current) is True
+    with pytest.raises(
+        ValueError,
+        match="GLOBAL_CURRENT_STATE_PAYOFF_Q_TIGHTENED_REAUCTION_REQUIRED",
+    ):
+        era._global_current_state_execution_economics(
+            cert,
+            decision=decision,
+            witness=witness,
+        )
 
 
 @pytest.mark.parametrize("side", ("YES", "NO"))

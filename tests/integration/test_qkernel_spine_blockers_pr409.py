@@ -1486,6 +1486,21 @@ def test_global_current_winner_survives_book_and_sizes_from_its_sealed_curve():
         "global_max_spend_usd": "1",
         "global_robust_delta_log_wealth": 0.01,
         "global_robust_ev_usd": 14.0,
+        "global_cut_time_win_probability_lcb": 0.60,
+        "global_cut_time_loss_probability_ucb": 0.40,
+        "global_terminal_win_probability_lcb": 0.60,
+        "global_terminal_loss_probability_ucb": 0.40,
+        "global_terminal_loss_payoff_usd": "-1",
+        "global_terminal_win_payoff_usd": "24",
+        "global_terminal_median_payoff_usd": "24",
+        "global_terminal_wealth_after_loss_usd": "999",
+        "global_terminal_wealth_after_win_usd": "1024",
+        "global_cut_time_expected_value_diagnostic_usd": 14.0,
+        "global_expected_value_diagnostic_usd": 14.0,
+        "global_expected_value_semantics": (
+            "DIAGNOSTIC_EXPECTATION_NOT_REALIZED_GAIN"
+        ),
+        "global_terminal_payoff_semantics": "BINARY_0_1",
     }
     cert["current_state_identity_hash"] = era.qkernel_current_state_identity_hash(cert)
     selected = replace(
