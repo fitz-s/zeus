@@ -1158,7 +1158,12 @@ def _write_pending_exit_projection_regression_db(
         trade_conn.close()
 
 
-def _write_pending_exit_runtime_gate_block_db(sd: Path, *, now: datetime) -> None:
+def _write_pending_exit_runtime_gate_block_db(
+    sd: Path,
+    *,
+    now: datetime,
+    event_ages_minutes: tuple[int, int] = (2, 1),
+) -> None:
     trade_conn = sqlite3.connect(sd / "zeus_trades.db")
     try:
         trade_conn.execute(
@@ -1218,14 +1223,14 @@ def _write_pending_exit_runtime_gate_block_db(sd: Path, *, now: datetime) -> Non
             )
             """
         )
-        for seq in (10, 20):
+        for seq, age_minutes in zip((10, 20), event_ages_minutes, strict=True):
             trade_conn.execute(
                 "INSERT INTO position_events VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     "pos-runtime-gate",
                     seq,
                     "EXIT_ORDER_REJECTED",
-                    (now - timedelta(minutes=3 - (seq // 10))).isoformat(),
+                    (now - timedelta(minutes=age_minutes)).isoformat(),
                     "pending_exit",
                     "pending_exit",
                     "retry_pending",
@@ -3105,6 +3110,51 @@ def test_pending_exit_runtime_gate_block_yields_degraded(
     assert sample["latest_runtime_gate_status"] == "retry_pending"
     assert sample["latest_runtime_gate_error"] == "structured_runtime_gate_block_without_legacy_text"
     assert "pending_exit_release_loop" in result["failing_surfaces"]
+
+
+def test_pending_exit_historical_runtime_gate_block_ages_out(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A prior runtime gate failure is not current authority forever."""
+    sd = tmp_path / "state"
+    sd.mkdir()
+    _setup_healthy_state(sd)
+    monkeypatch.setattr(live_health, "_dirty_runtime_worktree_paths", lambda **_kwargs: ())
+    monkeypatch.setattr(
+        live_health,
+        "_main_daemon_surface",
+        lambda status_summary, heartbeat: {
+            "ok": True,
+            "issue": None,
+            "attested": True,
+            "pid": 123,
+            "command": "python -m src.main",
+        },
+    )
+    monkeypatch.setattr(
+        live_health,
+        "_process_code_surface",
+        lambda main_daemon_surface: {"ok": True, "issue": None, "evaluated": True},
+    )
+    now = datetime.now(timezone.utc)
+    _write_forecast_event_bridge_dbs(
+        sd,
+        posterior_computed_at=(now - timedelta(seconds=30)).isoformat(),
+        fsr_created_at=(now - timedelta(seconds=20)).isoformat(),
+    )
+    _write_pending_exit_runtime_gate_block_db(
+        sd,
+        now=now,
+        event_ages_minutes=(35, 34),
+    )
+
+    result = compute_composite_live_health(state_dir=sd, now=now)
+
+    surface = result["surfaces"]["pending_exit_release_loop"]
+    assert surface["ok"] is True
+    assert surface["pending_exit_runtime_gate_block_count"] == 0
+    assert "pending_exit_release_loop" not in result["failing_surfaces"]
 
 
 def test_pending_exit_multiple_failure_issue_keeps_all_active_counts(

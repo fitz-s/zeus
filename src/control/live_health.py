@@ -2682,9 +2682,10 @@ def _pending_exit_release_loop_surface(
                    MAX(e.occurred_at) AS latest_runtime_gate_reject_at,
                    MAX(e.sequence_no) AS latest_runtime_gate_reject_sequence
               FROM open_positions op
-              JOIN position_events e
+             JOIN position_events e
                 ON e.position_id = op.position_id
              WHERE e.event_type = 'EXIT_ORDER_REJECTED'
+               AND datetime(e.occurred_at) >= datetime(?)
                AND (
                    json_extract(e.payload_json, '$.runtime_submit_gate_block') IN (1, 'true')
                    OR json_extract(e.payload_json, '$.status') = 'runtime_submit_gate_blocked'
@@ -2725,7 +2726,7 @@ def _pending_exit_release_loop_surface(
                   op.position_id
          LIMIT ?
         """,
-        (PENDING_EXIT_RELEASE_LOOP_SAMPLE_LIMIT,),
+        (cutoff, PENDING_EXIT_RELEASE_LOOP_SAMPLE_LIMIT),
     )
     if runtime_gate_err:
         return {
