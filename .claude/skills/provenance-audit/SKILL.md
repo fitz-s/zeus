@@ -15,7 +15,7 @@ Zeus law changes faster than its code. A helper that was correct months ago may 
    - `CURRENT_REUSABLE` — assumptions verified current; safe to reuse as-is.
    - `STALE_REWRITE` — core logic sound, assumptions drifted; rewrite before reuse.
    - `DEAD_DELETE` — no current caller or purpose; delete via registry route.
-   - `QUARANTINED` — violates current law but load-bearing; isolate, do not extend.
+   - `STALE_ISOLATE` — violates current law but load-bearing; isolate, do not extend.
 4. **Log the verdict** in-repo (evidence doc, commit message, or inline comment) so the next session skips re-auditing.
 
 ## File-header contract

@@ -47,15 +47,16 @@ Derived surfaces may never become truth by being convenient.
   
   Separating steps 1 and 2 into different transactions creates torn state.
 
-- **Lifecycle phases come only from `LifecyclePhase` enum.** The 10 enum
+- **Lifecycle phases come only from `LifecyclePhase` enum.** The 9 enum
   values are: `pending_entry → active → day0_window → pending_exit →
-  economically_closed → settled`. Terminal: `voided`, `settled`, `admin_closed`.
-  `quarantined` is NOT terminal — fold widened to {quarantined, settled,
-  voided} (P0c 2026-07-04) so the chain-mirror reconciler can close it once
-  chain truth grades it; investigation status, retired entirely when
-  excision T5 lands. Runtime sentinel: `unknown` (fallback for unmapped
-  states; participates in LEGAL_LIFECYCLE_FOLDS). No code may invent phase
-  strings.
+  economically_closed → settled`, plus `voided`, `admin_closed`, `unknown`.
+  Terminal: `voided`, `settled`, `admin_closed`. `quarantined` is retired
+  from the enum entirely (T5, `docs/rebuild/quarantine_excision_2026-07-11.md`)
+  — no writer mints it; a confirmed-fill/chain-absence dispute keeps its TRUE
+  phase and the dispute lives in a typed `ReviewWorkItem`
+  (`src/contracts/review_work_item.py`), never in this enum. Runtime
+  sentinel: `unknown` (fallback for unmapped states; participates in
+  LEGAL_LIFECYCLE_FOLDS). No code may invent phase strings.
 
 - **Exit intent ≠ economic close ≠ settlement.** These are three separate
   lifecycle events with different semantic meaning:

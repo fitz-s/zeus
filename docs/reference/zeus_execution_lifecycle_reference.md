@@ -12,7 +12,7 @@ on disagreement with this document.
 
 ### 1.1 Phases
 
-10 states in `LifecyclePhase` (str, Enum). The 10th — `UNKNOWN` — exists as
+9 states in `LifecyclePhase` (str, Enum). The 9th — `UNKNOWN` — exists as
 a catch-all for unmapped runtime strings; code that produces UNKNOWN is a bug,
 not a feature.
 
@@ -25,28 +25,35 @@ class LifecyclePhase(str, Enum):
     ECONOMICALLY_CLOSED = "economically_closed"
     SETTLED             = "settled"
     VOIDED              = "voided"
-    QUARANTINED         = "quarantined"
     ADMIN_CLOSED        = "admin_closed"
     UNKNOWN             = "unknown"
 ```
 
 Terminal phases: `SETTLED`, `VOIDED`, `ADMIN_CLOSED`.
-`QUARANTINED` is an investigation/review phase, not a market terminal; it can
-fold to `SETTLED` or `VOIDED`, and a no-order pending-exit recovery may restore
-it from `PENDING_EXIT`.
+
+`QUARANTINED` is retired from this enum entirely (T5, quarantine excision
+`docs/rebuild/quarantine_excision_2026-07-11.md`) — no writer mints it. A
+confirmed-fill/chain-absence dispute or a terminal-restore that needs
+operator review keeps the position's TRUE phase (`ACTIVE`/`PENDING_EXIT`) and
+the dispute lives in a typed `ReviewWorkItem` (`src/contracts/review_work_item.py`,
+`src/state/review_work_items.py`), never in this enum. A legacy row written
+before the T5 schema migration may still carry the raw string `"quarantined"`
+in `position_current.phase`/`chain_state` — the load bridge in
+`src/state/portfolio.py` (`_normalize_runtime_lifecycle_state`,
+`_normalize_runtime_chain_state`) remaps it to `HOLDING`/`SYNCED` at load
+time (WARNING logged) rather than crashing.
 
 ### 1.2 Legal transitions (from `LEGAL_LIFECYCLE_FOLDS`)
 
 ```
-None             → {pending_entry, quarantined}
+None             → {pending_entry}
 pending_entry    → {pending_entry, active, day0_window, voided}
 active           → {active, day0_window, pending_exit, settled, voided}
 day0_window      → {day0_window, pending_exit, settled, voided}
 pending_exit     → {pending_exit, active, day0_window, economically_closed,
-                    settled, quarantined, admin_closed, voided}
+                    settled, admin_closed, voided}
 economically_closed → {economically_closed, settled, voided}
-quarantined      → {quarantined, settled, voided}
-unknown          → {unknown, quarantined, voided}
+unknown          → {unknown, voided}
 ```
 
 `fold_lifecycle_phase()` enforces these transitions. Any illegal transition
@@ -67,9 +74,7 @@ Mapping rules (evaluated in priority order):
 | `state="settled"` | SETTLED |
 | `state="economically_closed"` | ECONOMICALLY_CLOSED |
 | `state="admin_closed"` | ADMIN_CLOSED |
-| `state="quarantined"` | QUARANTINED |
 | `state="pending_exit"` | PENDING_EXIT |
-| `chain_state ∈ {"quarantined", "quarantine_expired"}` | QUARANTINED |
 | `exit_state ∈ PENDING_EXIT_RUNTIME_STATES` or `chain_state="exit_pending_missing"` | PENDING_EXIT |
 | `state="pending_tracked"` | PENDING_ENTRY |
 | `state="day0_window"` | DAY0_WINDOW |
@@ -78,6 +83,18 @@ Mapping rules (evaluated in priority order):
 
 Where `PENDING_EXIT_RUNTIME_STATES = {"exit_intent", "sell_placed",
 "sell_pending", "retry_pending", "backoff_exhausted"}`.
+
+T5 (`docs/rebuild/quarantine_excision_2026-07-11.md`, REPLACEMENT PHASE LAW):
+the explicit `state="quarantined"` row and the `chain_state ∈ {"quarantined",
+"quarantine_expired"}` fallback row are retired — no writer mints either
+input going forward. A confirmed-fill/chain-absence dispute keeps its TRUE
+phase (`ACTIVE`/`PENDING_EXIT`, reached via the normal `has_positive_exposure`/
+`has_exit_fallback` rows above) and the dispute lives in a `ReviewWorkItem`,
+never in the phase itself. A raw `state="quarantined"` string reaching this
+mapping today (an unmigrated legacy row) falls through to `UNKNOWN` — the
+legacy load bridge in `src/state/portfolio.py` remaps it to `"holding"`
+before `Position` construction, so this mapping only ever sees the legacy
+literal directly if called out-of-band.
 
 ### 1.4 Runtime state helper contracts
 
@@ -154,16 +171,24 @@ Updates local position with chain truth: `chain_state="synced"`,
 `chain_shares`, `chain_verified_at`, `entry_price` (from chain avg_price),
 `cost_basis_usd` (from chain cost).
 
-Size mismatch handling (when `|chain.size - local_shares| > 0.01`):
-- If canonical baseline is available → emit `SIZE_CORRECTED` event → update
-  shares to chain value
-- If no canonical baseline → quarantine position with
-  `state=LifecycleState.QUARANTINED.value` and
-  `chain_state="size_mismatch_unresolved"` (the size-mismatch discriminator
-  lives in chain_state; state carries the canonical phase). Keep local
-  shares. *(PR C1 fix, 2026-05-27 — previously wrote the illegal string
-  `"quarantine_size_mismatch"` which phase_for_runtime_position mapped to
-  UNKNOWN.)*
+Size mismatch handling (when `|chain.size - local_shares| > 0.01`, and the
+position is not aggregate-backed):
+- If a canonical lifecycle baseline is available → emit `SIZE_CORRECTED`
+  event → update shares to chain value.
+- If no canonical baseline exists yet for this `position_id` → apply the
+  chain-truth correction via the SAME `CHAIN_SIZE_CORRECTED` event shape the
+  chain-mirror reconciler uses (an append-only event + a `chain_shares`
+  projection update), keeping the position in its CURRENT phase — no
+  state/chain_state mutation. *(P0b, 2026-07-04 — chain size is truth
+  regardless of whether a canonical lifecycle baseline exists yet; the prior
+  behavior minted a durable `quarantined`/`size_mismatch_unresolved` dead
+  end, exactly the invented state the chain-mirror reconciler exists to
+  drain.)*
+- If no `position_current` row exists at all for the `position_id` (e.g. a
+  legacy/pre-canonical position) → the in-memory correction still stands but
+  there is no durable row to correct; the next cycle that sees a canonical
+  row for this `position_id` picks the correction back up. No quarantine, no
+  invented state.
 
 **Rule 2: Local but NOT on chain → VOID.**
 Only fires when the per-cycle classifier reports `ChainSnapshotCompleteness.
@@ -206,12 +231,26 @@ Authority resolution for rescue:
 - Position with missing/invalid metric → `"high"` fallback + `UNVERIFIED` +
   `"position_missing_metric:{value}"`
 
-### 2.4 Quarantine timeout
+### 2.4 ChainOnlyFact review escalation
 
-`check_quarantine_timeouts()` runs separately. After 48 hours
-(`QUARANTINE_TIMEOUT_HOURS`), quarantined positions transition to
-`chain_state="quarantine_expired"`, making them eligible for exit evaluation.
-Missing or unparseable `quarantined_at` timestamps → immediate expiry.
+The 48-hour position-quarantine timer (formerly minting
+`chain_state="quarantine_expired"`) is RETIRED (P0b, 2026-07-04 — "a 48h
+timer on an invented state"). A confirmed-fill/chain-absence dispute now
+resolves through the chain-mirror reconciler's two-consecutive-mirror-runs
+force-resolve (`src.state.chain_mirror_reconciler.classify_local_position`,
+~10min cadence) — orders of magnitude faster than the retired 48h backstop,
+and the dispute lives in a `ReviewWorkItem`, not a position phase.
+
+`check_quarantine_timeouts()` survives only as the entry point for a
+different, still-live mechanism: ChainOnlyFact 48h review escalation. For
+each open `ChainOnlyFact` in `portfolio.chain_only_facts` whose
+`review_state != "resolved"`, once `first_seen_at` is older than
+`CHAIN_ONLY_REVIEW_WINDOW_HOURS` (48h) it logs a WARNING that operator
+review is required — read-only escalation (the fact's `review_state` is
+derived, not written here); resolution is operator-driven via the
+suppression row. A missing/unparseable `first_seen_at` also logs a WARNING.
+This never freezes unrelated entries; the function always returns `0`
+(position-phase expiry itself was removed).
 
 **Key files**: `src/state/chain_reconciliation.py`, `src/state/chain_state.py`
 
@@ -410,18 +449,23 @@ Three overlapping dedup layers prevent duplicate settlement writes:
 
 1. **DB-level dedup** (`_dual_write_canonical_settlement_if_available()`):
    reads `position_current.phase` from DB — if already in terminal phase
-   (`{settled, voided, admin_closed, quarantined}`), skip. This is the
-   authoritative dedup anchor. The in-memory `pos` object may be stale
-   (loaded from JSON fallback cache) but the DB phase is real.
+   (`{settled, voided, admin_closed}`, unioned with the legacy raw string
+   `quarantined` — no writer mints it, but a pre-T5-schema-migration row can
+   still carry it, and skipping it here is strictly correct: every legacy
+   quarantined row carried real venue-confirmed exposure, never a fresh
+   settlement target), skip. This is the authoritative dedup anchor. The
+   in-memory `pos` object may be stale (loaded from JSON fallback cache) but
+   the DB phase is real.
 
 2. **Iterator-level dedup** (`_settle_positions()`): queries
    `position_current` for all positions in this (city, target_date) market.
-   Positions whose DB phase is already terminal are skipped before any
-   P&L computation.
+   Positions whose DB phase is already terminal (same union above) are
+   skipped before any P&L computation.
 
 3. **Runtime state skip** (`_settle_positions()`): skips positions in states
-   `{pending_tracked, quarantined, admin_closed, voided, settled}` and
-   positions with active exit states.
+   `{pending_tracked, admin_closed, voided, settled}`, the same legacy
+   `quarantined`/`quarantine_expired` runtime strings, and positions with
+   active exit states.
 
 ### 6.4 P&L computation
 
