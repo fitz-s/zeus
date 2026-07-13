@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # Created: 2026-06-07
-# Last reused/audited: 2026-06-07
-# Lifecycle: created=2026-06-07; last_reviewed=2026-06-07
+# Last reused/audited: 2026-07-13
+# Lifecycle: created=2026-06-07; last_reviewed=2026-07-13
 # Purpose: Download current-target Open-Meteo ECMWF IFS 9km raw inputs for replacement forecast materialization.
 # Reuse: Run before live replacement materialization when dry-run reports current-target coverage gaps.
 # Authority basis: Raw artifacts are live inputs only after the replacement materializer emits
@@ -12,7 +12,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
+import tempfile
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -163,9 +165,22 @@ def _write_json(path: Path, payload: object) -> None:
     # is worse than a missing payload because manifest discovery will keep
     # reusing it for every held-position reseed.
     json.loads(body)
-    tmp = path.with_name(f".{path.name}.tmp")
-    tmp.write_text(body, encoding="utf-8")
-    tmp.replace(path)
+    fd, tmp = tempfile.mkstemp(
+        prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent)
+    )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(body)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp, path)
+        tmp = ""
+    finally:
+        if tmp:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
 
 
 def _json_file_valid(path: Path) -> bool:

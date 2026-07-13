@@ -437,3 +437,32 @@ def test_existing_corrupt_openmeteo_payload_is_not_reused(tmp_path: Path) -> Non
     dl._write_json(payload, {"hourly": {"time": [], "temperature_2m": []}})
 
     assert dl._json_file_valid(payload) is True
+
+
+def test_concurrent_payload_publishers_use_distinct_temp_files(
+    tmp_path: Path, monkeypatch
+) -> None:
+    import json
+    import os
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+
+    import scripts.download_replacement_forecast_current_targets as dl
+
+    target = tmp_path / "openmeteo_Seoul_2026-07-14_high.json"
+    payloads = ({"writer": 1}, {"writer": 2})
+    barrier = threading.Barrier(2)
+    real_replace = os.replace
+
+    def synchronized_replace(source, destination):
+        barrier.wait(timeout=5)
+        real_replace(source, destination)
+
+    monkeypatch.setattr(os, "replace", synchronized_replace)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futures = [pool.submit(dl._write_json, target, payload) for payload in payloads]
+        for future in futures:
+            future.result(timeout=10)
+
+    assert json.loads(target.read_text(encoding="utf-8")) in payloads
+    assert list(tmp_path.glob(f".{target.name}.*.tmp")) == []
