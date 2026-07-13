@@ -4284,7 +4284,7 @@ def _last_exit_order_id(
     conn: sqlite3.Connection | None = None,
 ) -> str:
     explicit = str(getattr(position, "last_exit_order_id", "") or "").strip()
-    if explicit:
+    if explicit and conn is None:
         return explicit
 
     # Legacy rows sometimes keep the ENTRY venue order in ``position.order_id`` even
@@ -4299,6 +4299,8 @@ def _last_exit_order_id(
             return ""
         fallback = str(getattr(position, "order_id", "") or "").strip()
         candidates: list[str] = []
+        if explicit:
+            candidates.append(explicit)
         if fallback:
             candidates.append(fallback)
         try:
@@ -4346,7 +4348,7 @@ def _last_exit_order_id(
             placeholders = ", ".join("?" for _ in candidates)
             rows = conn.execute(
                 f"""
-                SELECT venue_order_id
+                SELECT venue_order_id, state
                   FROM venue_commands
                  WHERE position_id = ?
                    AND intent_kind = 'EXIT'
@@ -4354,9 +4356,25 @@ def _last_exit_order_id(
                 """,
                 (trade_id, *candidates),
             ).fetchall()
-            command_order_ids = {str(row[0] if row is not None else "") for row in rows}
+            terminal_states = {"CANCELLED", "EXPIRED", "REJECTED", "SUBMIT_REJECTED"}
+            command_states: dict[str, set[str]] = {}
+            for row in rows:
+                order_id = str(row[0] if row is not None else "")
+                state = str(row[1] if row is not None else "").upper()
+                command_states.setdefault(order_id, set()).add(state)
+            command_order_ids = {
+                order_id
+                for order_id, states in command_states.items()
+                if any(state not in terminal_states for state in states)
+            }
+            terminal_command_order_ids = {
+                order_id
+                for order_id, states in command_states.items()
+                if states and states.issubset(terminal_states)
+            }
         except sqlite3.OperationalError:
             command_order_ids = set()
+            terminal_command_order_ids = set()
         try:
             rows = conn.execute(
                 f"""
@@ -4374,6 +4392,10 @@ def _last_exit_order_id(
             event_order_ids = set()
         for candidate in candidates:
             if candidate in command_order_ids:
+                return candidate
+            if candidate in terminal_command_order_ids:
+                continue
+            if explicit and candidate == explicit:
                 return candidate
             try:
                 retry_count = int(getattr(position, "exit_retry_count", 0) or 0)

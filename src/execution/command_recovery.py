@@ -8786,7 +8786,7 @@ def _partial_remainder_candidates(
         phase_placeholders = ",".join("?" for _ in _HARD_TERMINAL_REPAIR_PHASES)
         rows = conn.execute(
             f"""
-            SELECT cmd.*
+            SELECT cmd.*, pc.condition_id AS position_condition_id
               FROM venue_commands cmd
               JOIN position_current pc
                 ON pc.position_id = cmd.position_id
@@ -8823,19 +8823,24 @@ def _partial_remainder_candidates(
 
     open_phase_placeholders = ",".join("?" for _ in _RUNTIME_OPEN_REPAIR_PHASES)
     sql = "WITH " + _canonical_order_truth_cte() + f"""
-        SELECT cmd.*
+        SELECT cmd.*, pc.condition_id AS position_condition_id
           FROM venue_commands cmd
           LEFT JOIN canonical_order_truth fact
             ON fact.command_id = cmd.command_id
            AND fact.venue_order_id = cmd.venue_order_id
           LEFT JOIN position_current pc
             ON pc.position_id = cmd.position_id
-         WHERE cmd.intent_kind = 'ENTRY'
-           AND cmd.state IN ({state_placeholders})
+         WHERE (
+                (cmd.intent_kind = 'ENTRY' AND cmd.state IN ({state_placeholders}))
+                OR
+                (cmd.intent_kind = 'EXIT' AND cmd.state = 'PARTIAL'
+                 AND pc.phase = 'pending_exit')
+           )
            AND COALESCE(cmd.venue_order_id, '') != ''
            AND (? IS NULL OR cmd.updated_at < ?)
            AND (
-                cmd.state != 'FILLED'
+                cmd.intent_kind = 'EXIT'
+                OR cmd.state != 'FILLED'
                 OR CAST(COALESCE(fact.remaining_size, '0') AS REAL) > 0
                 OR COALESCE(pc.phase, '') IN ({open_phase_placeholders})
            )
@@ -9695,21 +9700,28 @@ def _append_partial_remainder_terminal_order_fact(
 
 
 def _terminal_exit_confirmed_trade_legs(client, command: dict) -> dict:
-    """Return the complete authenticated fill set for one stale terminal EXIT.
+    """Return the complete authenticated fill set for one stale EXIT remainder.
 
-    A terminal lifecycle phase proves the position must not be reopened; it does
-    not prove the command's fill economics. Only exact, CONFIRMED account-trade
-    legs for the bound order may repair those append-only facts.
+    Open-order absence and a terminal point read close the remainder, but neither
+    proves fill economics. Only exact, CONFIRMED account-trade legs for the bound
+    order may repair those append-only facts.
     """
 
     command_id = str(command.get("command_id") or "")
     venue_order_id = str(command.get("venue_order_id") or "")
     token_id = str(command.get("token_id") or "")
-    market_id = str(command.get("market_id") or "")
+    market_ids = {
+        str(value)
+        for value in (
+            command.get("position_condition_id"),
+            command.get("market_id"),
+        )
+        if str(value or "").strip()
+    }
     side = str(command.get("side") or "").upper()
     command_price = _positive_decimal_or_none(command.get("price"))
     command_size = _positive_decimal_or_none(command.get("size"))
-    if not all((command_id, venue_order_id, token_id, market_id, side)):
+    if not all((command_id, venue_order_id, token_id, market_ids, side)):
         raise RuntimeError("terminal EXIT trade recovery lacks command identity")
     if command_price is None or command_size is None:
         raise RuntimeError("terminal EXIT trade recovery lacks positive command economics")
@@ -9770,14 +9782,23 @@ def _terminal_exit_confirmed_trade_legs(client, command: dict) -> dict:
                 raise RuntimeError(
                     f"terminal EXIT trade {trade_id} does not match token/side identity"
                 )
-            if leg_price is None or leg_price != command_price or leg_size is None:
+            price_slop = Decimal("0.000001")
+            price_is_valid = (
+                leg_price is not None
+                and (
+                    leg_price + price_slop >= command_price
+                    if side == "SELL"
+                    else leg_price <= command_price + price_slop
+                )
+            )
+            if not price_is_valid or leg_size is None:
                 raise RuntimeError(
                     f"terminal EXIT trade {trade_id} does not match price/fill economics"
                 )
             filled_size += leg_size
             weighted_price += leg_size * leg_price
         raw_market = str(trade.get("market") or trade.get("market_id") or "").strip()
-        if not raw_market or raw_market != market_id:
+        if not raw_market or raw_market not in market_ids:
             raise RuntimeError(f"terminal EXIT trade {trade_id} does not match market identity")
         fill_price = weighted_price / filled_size
         leg = {
@@ -9847,15 +9868,14 @@ def _backfill_terminal_exit_trade_facts(
                 or str(fact.get("venue_order_id") or "").lower() != venue_order_id.lower()
             ):
                 raise RuntimeError(f"trade {trade_id} is already bound to another command/order")
-            if str(fact.get("state") or "").upper() != "CONFIRMED":
-                continue
             if (
                 not _decimal_matches(fact.get("filled_size"), leg["filled_size"])
                 or not _decimal_matches(fact.get("fill_price"), leg["fill_price"])
                 or str(fact.get("tx_hash") or "").lower() != str(leg["tx_hash"]).lower()
             ):
                 raise RuntimeError(f"confirmed trade {trade_id} conflicts with account truth")
-            exact_confirmed = True
+            if str(fact.get("state") or "").upper() == "CONFIRMED":
+                exact_confirmed = True
         if exact_confirmed:
             continue
         trade = dict(leg["trade"])
@@ -10097,7 +10117,7 @@ def reconcile_partial_remainders(
                     summary["stayed"] += 1
                 continue
             authenticated = None
-            if terminal_exit_only:
+            if str(command.get("intent_kind") or "").upper() == "EXIT":
                 authenticated = _terminal_exit_confirmed_trade_legs(client, command)
             if fill_summary["count"] <= 0 and authenticated is None:
                 append_event(
@@ -10220,6 +10240,149 @@ def reconcile_partial_remainders(
             logger.error(
                 "recovery: partial remainder reconciliation failed for command %s: %s",
                 command_id,
+                exc,
+            )
+            summary["errors"] += 1
+    return summary
+
+
+def reconcile_pending_exit_terminal_order_releases(conn: sqlite3.Connection) -> dict:
+    """Return held remainders with no live EXIT order to normal redecision.
+
+    A terminal command is not a resting order.  Preserve the real residual
+    exposure, but release ``pending_exit`` so the next monitor cycle decides
+    from a fresh book instead of polling the dead order forever.
+    """
+
+    summary = {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
+    if not all(
+        _table_exists(conn, table)
+        for table in ("venue_commands", "venue_order_facts", "position_current")
+    ):
+        return summary
+
+    pc_columns = _table_columns(conn, "position_current")
+    pc_select = ", ".join(f"pc.{column} AS pc_{column}" for column in pc_columns)
+    rows = conn.execute(
+        "WITH " + _canonical_order_truth_cte() + f"""
+        SELECT cmd.command_id,
+               cmd.decision_id,
+               cmd.snapshot_id,
+               cmd.venue_order_id,
+               cmd.state AS command_state,
+               fact.fact_id AS order_fact_id,
+               fact.state AS order_fact_state,
+               fact.matched_size AS order_fact_matched_size,
+               fact.observed_at AS order_fact_observed_at,
+               {pc_select}
+          FROM venue_commands cmd
+          JOIN canonical_order_truth fact
+            ON fact.command_id = cmd.command_id
+           AND fact.venue_order_id = cmd.venue_order_id
+          JOIN position_current pc
+            ON pc.position_id = cmd.position_id
+         WHERE cmd.intent_kind = 'EXIT'
+           AND cmd.state IN ('CANCELLED', 'EXPIRED')
+           AND fact.state IN ('CANCEL_CONFIRMED', 'EXPIRED', 'VENUE_WIPED')
+           AND CAST(COALESCE(fact.matched_size, '0') AS REAL) > 0
+           AND pc.phase = 'pending_exit'
+           AND pc.order_status = 'sell_pending_confirmation'
+           AND pc.order_id = cmd.venue_order_id
+           AND NOT EXISTS (
+                SELECT 1
+                  FROM venue_commands live
+                 WHERE live.position_id = cmd.position_id
+                   AND live.intent_kind = 'EXIT'
+                   AND live.command_id != cmd.command_id
+                   AND live.state NOT IN (
+                        'CANCELLED', 'EXPIRED', 'REJECTED', 'SUBMIT_REJECTED'
+                   )
+           )
+         ORDER BY fact.observed_at, cmd.command_id
+        """
+    ).fetchall()
+
+    from src.state.ledger import append_many_and_project
+    from src.state.projection import upsert_position_current
+
+    for row in rows:
+        candidate = _dict_row(row)
+        summary["scanned"] += 1
+        command_id = str(candidate.get("command_id") or "")
+        position_id = str(candidate.get("pc_position_id") or "")
+        event_key = f"{position_id}:terminal_exit_remainder_released:{command_id}"
+        try:
+            current = {
+                column: candidate.get(f"pc_{column}")
+                for column in pc_columns
+            }
+            occurred_at = _now_iso()
+            phase_after = _phase_after_terminal_exit_no_fill(
+                {
+                    "position_city": current.get("city"),
+                    "position_target_date": current.get("target_date"),
+                },
+                observed_at=occurred_at,
+            )
+            projection = dict(current)
+            projection.update(
+                {
+                    "phase": phase_after,
+                    "order_id": None,
+                    "order_status": "filled",
+                    "exit_reason": "PARTIAL_EXIT_REMAINDER_TERMINAL_RELEASED",
+                    "exit_retry_count": 0,
+                    "next_exit_retry_at": None,
+                    "updated_at": occurred_at,
+                }
+            )
+            existing = conn.execute(
+                "SELECT 1 FROM position_events WHERE idempotency_key = ? LIMIT 1",
+                (event_key,),
+            ).fetchone()
+            if existing is not None:
+                upsert_position_current(conn, projection)
+                summary["advanced"] += 1
+                continue
+            event = {
+                "event_id": event_key,
+                "position_id": position_id,
+                "event_version": 1,
+                "sequence_no": _latest_position_sequence(conn, position_id) + 1,
+                "event_type": "EXIT_RETRY_RELEASED",
+                "occurred_at": occurred_at,
+                "phase_before": "pending_exit",
+                "phase_after": phase_after,
+                "strategy_key": current.get("strategy_key"),
+                "decision_id": candidate.get("decision_id"),
+                "snapshot_id": candidate.get("snapshot_id"),
+                "order_id": candidate.get("venue_order_id"),
+                "command_id": command_id,
+                "caused_by": f"venue_command:{command_id}",
+                "idempotency_key": event_key,
+                "venue_status": candidate.get("command_state"),
+                "source_module": "src.execution.command_recovery",
+                "env": _latest_position_env(conn, position_id),
+                "payload_json": json.dumps(
+                    {
+                        "reason": "terminal_partial_exit_remainder_returned_to_redecision",
+                        "proof_class": "terminal_positive_exit_order_fact",
+                        "command_state": candidate.get("command_state"),
+                        "order_fact_id": candidate.get("order_fact_id"),
+                        "order_fact_state": candidate.get("order_fact_state"),
+                        "matched_size": candidate.get("order_fact_matched_size"),
+                        "residual_shares": current.get("chain_shares") or current.get("shares"),
+                    },
+                    sort_keys=True,
+                    default=str,
+                ),
+            }
+            append_many_and_project(conn, [event], projection)
+            summary["advanced"] += 1
+        except Exception as exc:
+            logger.error(
+                "recovery: pending EXIT terminal-order release failed for %s: %s",
+                position_id,
                 exc,
             )
             summary["errors"] += 1
@@ -15648,6 +15811,12 @@ def _reconcile_passes_inline(
         summary["stayed"] += partial_summary["stayed"]
         summary["errors"] += partial_summary["errors"]
 
+        terminal_exit_release_summary = reconcile_pending_exit_terminal_order_releases(conn)
+        summary["pending_exit_terminal_order_releases"] = terminal_exit_release_summary
+        summary["advanced"] += terminal_exit_release_summary["advanced"]
+        summary["stayed"] += terminal_exit_release_summary["stayed"]
+        summary["errors"] += terminal_exit_release_summary["errors"]
+
         from src.execution.exchange_reconcile import reconcile_recorded_maker_fill_economics
 
         maker_fill_summary = reconcile_recorded_maker_fill_economics(
@@ -16823,6 +16992,11 @@ def _reconcile_passes_short_conn(client, summary: dict, started_at: str, *, scop
                 updated_before=started_at,
                 live_tick_scope=True,
             )
+            _db_pass(
+                "pending_exit_terminal_order_releases",
+                reconcile_pending_exit_terminal_order_releases,
+                "pending_exit_terminal_order_releases",
+            )
         summary["scope"] = scope
         summary["deferred_full_sweep"] = True
         return
@@ -16899,6 +17073,11 @@ def _reconcile_passes_short_conn(client, summary: dict, started_at: str, *, scop
     )
     _client_pass("partial_remainders",
                  reconcile_partial_remainders, "partial_remainders", updated_before=started_at)
+    _db_pass(
+        "pending_exit_terminal_order_releases",
+        reconcile_pending_exit_terminal_order_releases,
+        "pending_exit_terminal_order_releases",
+    )
 
     from src.execution.exchange_reconcile import reconcile_recorded_maker_fill_economics
 

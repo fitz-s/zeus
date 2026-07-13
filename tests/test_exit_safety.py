@@ -1722,6 +1722,7 @@ def test_pending_exit_without_order_releases_for_redecision(conn):
     assert event["phase_after"] == "active"
     assert event["venue_status"] == "ready"
     assert payload["release_reason"] == "PENDING_EXIT_NO_ORDER_RELEASED"
+    assert payload["release_reason"] == "PENDING_EXIT_NO_ORDER_RELEASED"
 
 
 def test_pending_exit_phantom_sell_projection_releases_before_no_order_retry(conn):
@@ -2223,7 +2224,72 @@ def test_pending_exit_does_not_poll_entry_order_as_exit_order(conn):
     assert event["phase_before"] == "pending_exit"
     assert event["phase_after"] == "active"
     assert event["venue_status"] == "ready"
-    assert payload["release_reason"] == "PENDING_EXIT_NO_ORDER_RELEASED"
+
+
+def test_pending_exit_releases_terminal_exit_order_without_polling_it(conn):
+    from src.execution import exit_lifecycle
+    from src.state.portfolio import PortfolioState, Position
+    from src.state.venue_command_repo import append_event
+
+    position = Position(
+        trade_id="pos-terminal-exit-order-release",
+        market_id="mkt-terminal-exit-order-release",
+        city="Paris",
+        cluster="Paris",
+        target_date="2026-06-20",
+        bin_label="19C",
+        direction="buy_no",
+        strategy_key="opening_inertia",
+        size_usd=0.01,
+        entry_price=0.75,
+        shares=0.006614,
+        chain_shares=0.006614,
+        cost_basis_usd=0.005,
+        state="pending_exit",
+        exit_state="sell_pending",
+        order_id="ord-terminal-exit-order-release",
+        order_status="sell_pending_confirmation",
+        last_exit_order_id="ord-terminal-exit-order-release",
+        token_id=YES_TOKEN,
+        no_token_id=NO_TOKEN,
+        condition_id="condition-terminal-exit-order-release",
+    )
+    _insert_exit_command(
+        conn,
+        command_id="cmd-terminal-exit-order-release",
+        position_id=position.trade_id,
+        venue_order_id=position.last_exit_order_id,
+        size=37.2,
+        price=0.99,
+    )
+    _ack_exit(
+        conn,
+        command_id="cmd-terminal-exit-order-release",
+        venue_order_id=position.last_exit_order_id,
+    )
+    append_event(
+        conn,
+        command_id="cmd-terminal-exit-order-release",
+        event_type="EXPIRED",
+        occurred_at=_NOW.isoformat(),
+        payload={"reason": "terminal_partial_remainder"},
+    )
+
+    class FakeClob:
+        def get_order_status(self, order_id):
+            raise AssertionError(f"terminal EXIT order must not be polled: {order_id}")
+
+    stats = exit_lifecycle.check_pending_exits(
+        PortfolioState(positions=[position]),
+        FakeClob(),
+        conn=conn,
+    )
+
+    assert stats["retried"] == 1
+    assert stats["released_no_order"] == 1
+    assert position.state == "holding"
+    assert position.exit_state == ""
+    assert position.order_status == "filled"
 
 
 def test_exit_lifecycle_full_fill_logs_commanded_execution_fact(conn):

@@ -1457,6 +1457,232 @@ def test_restart_preflight_backfills_all_settled_exit_fills_before_terminalizing
         )
 
 
+def test_live_tick_closes_pending_exit_remainder_from_complete_account_trades(
+    monkeypatch,
+    tmp_path,
+):
+    """A pending EXIT cannot keep full sell collateral after its order is gone."""
+    import hashlib
+
+    import tests.test_exchange_reconcile as h
+    from src.execution import command_recovery, venue_sync_contract
+    from src.state.collateral_ledger import init_collateral_schema
+    from src.state.db import init_schema
+    from src.state.venue_command_repo import append_order_fact
+
+    db_path = tmp_path / "recovery-live-pending-exit-partial.db"
+    seed_conn = sqlite3.connect(str(db_path))
+    seed_conn.row_factory = sqlite3.Row
+    init_schema(seed_conn)
+    init_collateral_schema(seed_conn)
+    command_id = "cmd-live-pending-exit-partial"
+    order_id = "ord-live-pending-exit-partial"
+    position_id = "pos-live-pending-exit-partial"
+    token = "live-pending-exit-partial-token"
+    condition_id = "condition-m5"
+    h.seed_position_baseline(seed_conn, position_id=position_id, order_id="ord-entry")
+    seed_conn.execute(
+        """
+        UPDATE position_current
+           SET phase = 'pending_exit', chain_state = 'synced',
+               shares = 0.006614, chain_shares = 0.006614,
+               order_status = 'sell_pending_confirmation', updated_at = ?
+         WHERE position_id = ?
+        """,
+        (h.NOW.isoformat(), position_id),
+    )
+    h.seed_command(
+        seed_conn,
+        command_id=command_id,
+        venue_order_id=order_id,
+        position_id=position_id,
+        token_id=token,
+        side="SELL",
+        size=37.2,
+        price=0.99,
+        state="PARTIAL",
+    )
+    first_tx = "0xfirst-fill"
+    h.append_trade_fact(
+        seed_conn,
+        command_id=command_id,
+        venue_order_id=order_id,
+        token_id=token,
+        trade_id=first_tx,
+        size="10",
+        fill_price="0.9905",
+        state="MATCHED",
+        tx_hash=first_tx,
+    )
+    append_order_fact(
+        seed_conn,
+        venue_order_id=order_id,
+        command_id=command_id,
+        state="PARTIALLY_MATCHED",
+        remaining_size="27.2",
+        matched_size="10",
+        source="REST",
+        observed_at=h.NOW,
+        raw_payload_hash=hashlib.sha256(b"live-pending-exit-partial").hexdigest(),
+        raw_payload_json={"orderID": order_id, "status": "MATCHED"},
+    )
+    seed_conn.execute(
+        """
+        INSERT INTO collateral_reservations (
+            command_id, reservation_type, token_id, amount,
+            converted_amount, created_at
+        ) VALUES (?, 'CTF_SELL', ?, 37200000, 0, ?)
+        """,
+        (command_id, token, h.NOW.isoformat()),
+    )
+    seed_conn.commit()
+    seed_conn.close()
+
+    venue_trades = [
+        {
+            "id": "venue-trade-first",
+            "status": "CONFIRMED",
+            "market": condition_id,
+            "order_id": order_id,
+            "asset_id": token,
+            "side": "SELL",
+            "price": "0.991",
+            "size": "10",
+            "match_time": "1783941027",
+            "transaction_hash": first_tx,
+        },
+        {
+            "id": "venue-trade-second",
+            "status": "CONFIRMED",
+            "market": condition_id,
+            "match_time": "1783941029",
+            "transaction_hash": "0xsecond-fill",
+            "maker_orders": [{
+                "order_id": order_id,
+                "asset_id": token,
+                "side": "SELL",
+                "price": "0.9899999553453086",
+                "matched_amount": "20.423386",
+            }],
+        },
+        {
+            "id": "venue-trade-third",
+            "status": "CONFIRMED",
+            "market": condition_id,
+            "match_time": "1783941032",
+            "transaction_hash": "0xthird-fill",
+            "maker_orders": [{
+                "order_id": order_id,
+                "asset_id": token,
+                "side": "SELL",
+                "price": "0.99",
+                "matched_amount": "6.77",
+            }],
+        },
+    ]
+    recorder = _Recorder()
+    monkeypatch.setattr(
+        venue_sync_contract,
+        "default_trade_conn_factory",
+        _make_conn_factory(db_path, recorder),
+    )
+    client = _RecordingClient(
+        recorder,
+        orders={},
+        open_orders=[],
+        trades=venue_trades,
+    )
+
+    summary = command_recovery.reconcile_unresolved_commands(
+        conn=None,
+        client=client,
+        scope="live_tick",
+    )
+
+    assert summary["partial_remainders"] == {
+        "scanned": 1,
+        "advanced": 1,
+        "stayed": 0,
+        "errors": 0,
+    }
+    verify = sqlite3.connect(str(db_path))
+    verify.row_factory = sqlite3.Row
+    try:
+        command = verify.execute(
+            "SELECT state FROM venue_commands WHERE command_id = ?",
+            (command_id,),
+        ).fetchone()
+        fact = verify.execute(
+            """
+            SELECT state, matched_size, remaining_size
+              FROM venue_order_facts
+             WHERE command_id = ?
+             ORDER BY local_sequence DESC
+             LIMIT 1
+            """,
+            (command_id,),
+        ).fetchone()
+        trades = verify.execute(
+            """
+            WITH latest AS (
+                SELECT *, ROW_NUMBER() OVER (
+                    PARTITION BY trade_id ORDER BY local_sequence DESC
+                ) AS rn
+                  FROM venue_trade_facts
+                 WHERE command_id = ?
+            )
+            SELECT trade_id, state, filled_size, fill_price, tx_hash
+              FROM latest WHERE rn = 1
+            """,
+            (command_id,),
+        ).fetchall()
+        reservation = verify.execute(
+            """
+            SELECT converted_amount, released_at, release_reason
+              FROM collateral_reservations
+             WHERE command_id = ?
+            """,
+            (command_id,),
+        ).fetchone()
+        position = verify.execute(
+            """
+            SELECT phase, order_status, shares, chain_shares
+              FROM position_current
+             WHERE position_id = ?
+            """,
+            (position_id,),
+        ).fetchone()
+    finally:
+        verify.close()
+    assert command["state"] == "EXPIRED"
+    assert dict(fact) == {
+        "state": "EXPIRED",
+        "matched_size": "37.193386",
+        "remaining_size": "0",
+    }
+    exact_trades = [row for row in trades if row["trade_id"] != row["tx_hash"]]
+    assert len(trades) == 4
+    assert len(exact_trades) == 3
+    assert all(row["state"] == "CONFIRMED" for row in exact_trades)
+    assert sum(
+        (Decimal(row["filled_size"]) for row in exact_trades),
+        Decimal("0"),
+    ) == Decimal("37.193386")
+    assert reservation["converted_amount"] == 37_193_386
+    assert reservation["released_at"] is not None
+    assert reservation["release_reason"] == "CONVERTED_ON_FILL"
+    assert dict(position) == {
+        "phase": "day0_window",
+        "order_status": "filled",
+        "shares": 0.006614,
+        "chain_shares": 0.006614,
+    }
+    for method, open_ids, open_labels in recorder.client_calls:
+        assert not open_ids, (
+            f"venue call {method} occurred while DB connections were open: {open_labels}"
+        )
+
+
 @pytest.mark.parametrize(
     "failure_mode",
     ("local_conflict", "missing_market", "mismatched_market", "point_timeout"),
