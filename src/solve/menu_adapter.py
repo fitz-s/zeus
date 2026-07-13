@@ -1,5 +1,5 @@
 # Created: 2026-07-03
-# Last reused or audited: 2026-07-09
+# Last reused or audited: 2026-07-13
 # Authority basis: architecture doc §1 SOLVE row (menu from negrisk_routes, REUSE-grade);
 #   W3.MATH brief (RouteCost/NegRiskRouteSet field inventory, conversion_routes stays ());
 #   CONSULT REV-2 rulings 2026-07-03 (typed atom payoff projector; per-leg tick/min-size;
@@ -27,8 +27,9 @@ rounds each order on its own grid.
 
 SELL LANE: a ledger-bound native holding supplies exact position/side/token identity. Selling
 YES on bin ``b`` gives up ``e_b``; selling NO gives up ``1-e_b``. Both receive bid proceeds in
-cash in every atom. Proceeds use the holding side's own ladder and are floored at its WORST
-resting bid level, pending the size-aware bid walk that lands with the exits/W_a sub-slice.
+cash in every atom. Proceeds use the holding side's own ladder, current executable holding/depth
+cap, and fee-deducted full-size VWAP. That linear VWAP is conservative for smaller sizes because
+the native bid ladder is best-first.
 
 MAKER LANE DISABLED (consult REV-2 ruling 6): W3 is taker-only; a maker quote is a contingent
 asset (fill-state/latency/cancel-risk) the current MenuItem cannot value, so no maker item is
@@ -41,6 +42,7 @@ import hashlib
 from decimal import Decimal
 from typing import TYPE_CHECKING, Optional
 
+from src.contracts.execution_price import polymarket_fee
 from src.solve.types import (
     AtomPayoffProjector,
     JointOutcomeAtom,
@@ -57,6 +59,73 @@ if TYPE_CHECKING:
 
 _DEFAULT_TICK = Decimal("0.01")
 _DEFAULT_MIN_ORDER = Decimal("0.01")
+
+
+def native_holdings_snapshot_from_positions(
+    *,
+    family_key: str,
+    omega,
+    positions,
+    ledger_snapshot_id: str,
+) -> NativeHoldingsSnapshot:
+    """Bind canonical open positions to the exact native claims in ``omega``.
+
+    The wealth vector cannot reveal whether exposure came from YES or NO.  This adapter uses
+    the position's condition, direction, token and chain shares, and refuses any mismatch with
+    the current settlement topology.  Foreign-family positions are irrelevant to this family's
+    menu and are skipped; the caller owns the complete-family scope check.
+    """
+
+    bindings = {str(outcome.condition_id or ""): outcome for outcome in omega.bins}
+    if not family_key.strip() or not ledger_snapshot_id.strip() or not bindings:
+        raise ValueError("native holdings snapshot requires family, ledger, and omega identities")
+    holdings: list[NativeHolding] = []
+    for position in tuple(positions or ()):
+        condition_id = str(getattr(position, "condition_id", "") or "")
+        outcome = bindings.get(condition_id)
+        if outcome is None:
+            continue
+        direction_raw = getattr(position, "direction", "")
+        direction = str(getattr(direction_raw, "value", direction_raw) or "").lower()
+        if direction == "buy_yes":
+            side = "YES"
+            token_id = str(getattr(position, "token_id", "") or "")
+            expected_token = str(getattr(outcome, "yes_token_id", "") or "")
+        elif direction == "buy_no":
+            side = "NO"
+            token_id = str(getattr(position, "no_token_id", "") or "")
+            expected_token = str(getattr(outcome, "no_token_id", "") or "")
+        else:
+            raise ValueError(
+                f"position {getattr(position, 'trade_id', '')!r} has unsupported direction "
+                f"{direction!r}"
+            )
+        if not token_id or token_id != expected_token:
+            raise ValueError(
+                f"position {getattr(position, 'trade_id', '')!r} token does not match "
+                f"current omega for {condition_id}"
+            )
+        shares = Decimal(str(getattr(position, "chain_shares", 0) or 0))
+        position_id = str(
+            getattr(position, "position_id", "")
+            or getattr(position, "trade_id", "")
+            or ""
+        )
+        holdings.append(
+            NativeHolding(
+                position_id=position_id,
+                family_key=family_key,
+                bin_id=str(outcome.bin_id),
+                side=side,  # type: ignore[arg-type]
+                token_id=token_id,
+                shares=shares,
+            )
+        )
+    return NativeHoldingsSnapshot(
+        family_key=family_key,
+        ledger_snapshot_id=ledger_snapshot_id,
+        holdings=tuple(holdings),
+    )
 
 
 def _ladder_tick_min(ladder) -> tuple[Decimal, Decimal]:
@@ -120,16 +189,40 @@ def _route_menu_item(
 def _sell_holding_item(
     *, holding: NativeHolding, bin_ids: tuple[str, ...], market
 ) -> MenuItem:
-    """One exact YES/NO holding → a native SELL item on its own bid ladder."""
+    """One exact YES/NO holding → a conservative size-aware native SELL item.
+
+    The linear menu price is the fee-deducted VWAP for selling the whole executable
+    ``max_units`` through current bid depth.  Because bids are best-first, this full-size
+    VWAP is a lower bound for every smaller size the solver may choose; using the ladder's
+    worst displayed bid would be needlessly pessimistic whenever the holding does not reach
+    that level.
+    """
     ladder_name = "yes_bids" if holding.side == "YES" else "no_bids"
     ladder = getattr(market, ladder_name, None)
     bids = tuple(getattr(ladder, "levels", ()) or ())
     if bids:
-        proceeds = float(bids[-1].price)  # worst resting bid = conservative proceeds floor
         depth = sum((Decimal(lvl.size) for lvl in bids), Decimal("0"))
         max_units = min(Decimal(holding.shares), depth)
-        executable = max_units > 0
-        reason = None if executable else "NO_BID_DEPTH"
+        _, min_order = _ladder_tick_min(ladder)
+        executable = max_units >= min_order
+        reason = None if executable else "HOLDING_OR_BID_DEPTH_BELOW_MIN_ORDER"
+        remaining = max_units
+        net_proceeds = Decimal("0")
+        fee_rate = float(getattr(ladder, "fee_rate", 0.0) or 0.0)
+        for level in bids:
+            take = min(remaining, Decimal(level.size))
+            price = Decimal(level.price)
+            fee = (
+                Decimal(str(polymarket_fee(float(price), fee_rate)))
+                if fee_rate > 0.0 and Decimal("0") < price < Decimal("1")
+                else Decimal("0")
+            )
+            net_price = price - fee
+            net_proceeds += take * max(net_price, Decimal("0"))
+            remaining -= take
+            if remaining <= 0:
+                break
+        proceeds = float(net_proceeds / max_units) if max_units > 0 else 0.0
     else:
         proceeds = 0.0
         max_units = Decimal("0")
