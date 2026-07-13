@@ -392,6 +392,62 @@ def _entry_reprice_cancel_reason(
     return None
 
 
+def _entry_fok_no_fill_rejection_is_redecidable(
+    conn: sqlite3.Connection,
+    *,
+    command_id: str,
+) -> bool:
+    """Prove the prior FOK was killed before creating venue exposure."""
+
+    if (
+        not command_id
+        or not _table_exists(conn, "venue_command_events")
+        or not _table_exists(conn, "venue_commands")
+        or "venue_order_id" not in _table_column_names(conn, "venue_commands")
+    ):
+        return False
+    order_column = "rowid"
+    if "sequence_no" in _table_column_names(conn, "venue_command_events"):
+        order_column = "sequence_no"
+    try:
+        row = conn.execute(
+            f"""
+            SELECT events.payload_json, commands.venue_order_id
+              FROM venue_command_events AS events
+              JOIN venue_commands AS commands
+                ON commands.command_id = events.command_id
+             WHERE events.command_id = ?
+               AND events.event_type = 'SUBMIT_REJECTED'
+             ORDER BY events.{order_column} DESC
+             LIMIT 1
+            """,
+            (command_id,),
+        ).fetchone()
+    except sqlite3.Error:
+        return False
+    if row is None:
+        return False
+    raw_payload = row["payload_json"] if isinstance(row, sqlite3.Row) else row[0]
+    venue_order_id = row["venue_order_id"] if isinstance(row, sqlite3.Row) else row[1]
+    if str(venue_order_id or "").strip():
+        return False
+    try:
+        payload = json.loads(str(raw_payload or "{}"))
+    except (TypeError, ValueError):
+        return False
+    if not isinstance(payload, dict):
+        return False
+    if payload.get("proof_class") != "deterministic_venue_400":
+        return False
+    if payload.get("venue_order_created") is not False:
+        return False
+    message = " ".join(str(payload.get("exception_message") or "").lower().split())
+    return (
+        "order couldn't be fully filled" in message
+        and "fok orders are fully filled or killed" in message
+    )
+
+
 def _pending_entry_terminal_no_fill_allows_entry(
     conn: sqlite3.Connection,
     row: sqlite3.Row | tuple,
@@ -1775,6 +1831,26 @@ def _entry_same_token_cooldown_component(
             ),
             "cooldown_seconds": cooldown_seconds,
             "remaining_seconds": int(remaining_seconds),
+            "existing_command_id": command_id,
+            "existing_position_id": position_id,
+            "existing_command_state": state,
+            "existing_updated_at": str(updated_at or ""),
+            "existing_created_at": str(created_at or ""),
+            "existing_price": str(prior_price or ""),
+            "existing_size": str(prior_size or ""),
+            "candidate_price": str(limit_price or ""),
+            "candidate_shares": str(shares or ""),
+        }
+    if terminal_no_fill and _entry_fok_no_fill_rejection_is_redecidable(
+        conn,
+        command_id=command_id,
+    ):
+        return {
+            "component": "entry_same_token_cooldown",
+            "allowed": True,
+            "reason": "allowed_terminal_fok_no_fill_redecision",
+            "cooldown_seconds": cooldown_seconds,
+            "age_seconds": int(age_seconds),
             "existing_command_id": command_id,
             "existing_position_id": position_id,
             "existing_command_state": state,

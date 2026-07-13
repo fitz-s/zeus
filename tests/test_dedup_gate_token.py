@@ -851,6 +851,137 @@ def test_terminal_no_fill_redecision_after_cooldown_requires_actual_reprice(mem_
     assert result["candidate_price"] == "0.73"
 
 
+@pytest.mark.parametrize("token_id", [TOKEN_X, TOKEN_X_NO])
+def test_terminal_fok_no_fill_redecision_allows_same_price_after_cooldown(
+    mem_db,
+    token_id,
+):
+    mem_db.execute(
+        """INSERT INTO venue_commands
+           (command_id, position_id, token_id, intent_kind, side, size, price,
+            venue_order_id, state, created_at, updated_at)
+           VALUES ('cmd-fok-killed', 'prior-candidate', ?, 'ENTRY', 'BUY',
+                   1018, 0.005, NULL, 'REJECTED',
+                   '2026-07-13T15:20:29+00:00', '2026-07-13T15:20:32+00:00')""",
+        (token_id,),
+    )
+    mem_db.execute(
+        """INSERT INTO venue_command_events
+           (event_id, command_id, sequence_no, event_type, occurred_at,
+            payload_json, state_after)
+           VALUES ('evt-fok-killed', 'cmd-fok-killed', 3, 'SUBMIT_REJECTED',
+                   '2026-07-13T15:20:32+00:00', ?, 'REJECTED')""",
+        (
+            '{"proof_class":"deterministic_venue_400",'
+            '"venue_order_created":false,'
+            '"exception_message":"order couldn\'t be fully filled. '
+            'FOK orders are fully filled or killed."}',
+        ),
+    )
+    mem_db.commit()
+
+    cooling = _entry_same_token_cooldown_component(
+        mem_db,
+        token_id=token_id,
+        candidate_position_id="fresh-candidate",
+        limit_price=0.005,
+        shares=1016,
+        now=datetime.fromisoformat("2026-07-13T15:21:32+00:00"),
+    )
+    ready = _entry_same_token_cooldown_component(
+        mem_db,
+        token_id=token_id,
+        candidate_position_id="fresh-candidate",
+        limit_price=0.005,
+        shares=1016,
+        now=datetime.fromisoformat("2026-07-13T15:22:33+00:00"),
+    )
+
+    assert cooling["allowed"] is False
+    assert cooling["reason"] == "same_token_terminal_no_fill_cooling_down"
+    assert ready["allowed"] is True
+    assert ready["reason"] == "allowed_terminal_fok_no_fill_redecision"
+    assert ready["existing_price"] == "0.005"
+    assert ready["candidate_price"] == "0.005"
+    assert ready["existing_size"] == "1018.0"
+    assert ready["candidate_shares"] == "1016"
+
+
+def test_other_deterministic_rejection_still_requires_reprice(mem_db):
+    mem_db.execute(
+        """INSERT INTO venue_commands
+           (command_id, position_id, token_id, intent_kind, side, size, price,
+            venue_order_id, state, created_at, updated_at)
+           VALUES ('cmd-invalid', 'prior-candidate', ?, 'ENTRY', 'BUY',
+                   12.7, 0.73, NULL, 'REJECTED',
+                   '2026-06-18T09:15:14+00:00', '2026-06-18T09:59:00+00:00')""",
+        (TOKEN_X,),
+    )
+    mem_db.execute(
+        """INSERT INTO venue_command_events
+           (event_id, command_id, sequence_no, event_type, occurred_at,
+            payload_json, state_after)
+           VALUES ('evt-invalid', 'cmd-invalid', 3, 'SUBMIT_REJECTED',
+                   '2026-06-18T09:59:00+00:00', ?, 'REJECTED')""",
+        (
+            '{"proof_class":"deterministic_venue_invalid_amount_400",'
+            '"venue_order_created":false,'
+            '"exception_message":"invalid amounts"}',
+        ),
+    )
+    mem_db.commit()
+
+    result = _entry_same_token_cooldown_component(
+        mem_db,
+        token_id=TOKEN_X,
+        candidate_position_id="fresh-candidate",
+        limit_price=0.73,
+        shares=12.7,
+        now=datetime.fromisoformat("2026-06-18T10:02:01+00:00"),
+    )
+
+    assert result["allowed"] is False
+    assert result["reason"] == "same_token_terminal_no_fill_requires_reprice"
+
+
+def test_fok_rejection_with_venue_order_id_still_requires_reprice(mem_db):
+    mem_db.execute(
+        """INSERT INTO venue_commands
+           (command_id, position_id, token_id, intent_kind, side, size, price,
+            venue_order_id, state, created_at, updated_at)
+           VALUES ('cmd-fok-order-id', 'prior-candidate', ?, 'ENTRY', 'BUY',
+                   12.7, 0.73, 'unexpected-order-id', 'REJECTED',
+                   '2026-06-18T09:15:14+00:00', '2026-06-18T09:59:00+00:00')""",
+        (TOKEN_X,),
+    )
+    mem_db.execute(
+        """INSERT INTO venue_command_events
+           (event_id, command_id, sequence_no, event_type, occurred_at,
+            payload_json, state_after)
+           VALUES ('evt-fok-order-id', 'cmd-fok-order-id', 3, 'SUBMIT_REJECTED',
+                   '2026-06-18T09:59:00+00:00', ?, 'REJECTED')""",
+        (
+            '{"proof_class":"deterministic_venue_400",'
+            '"venue_order_created":false,'
+            '"exception_message":"order couldn\'t be fully filled. '
+            'FOK orders are fully filled or killed."}',
+        ),
+    )
+    mem_db.commit()
+
+    result = _entry_same_token_cooldown_component(
+        mem_db,
+        token_id=TOKEN_X,
+        candidate_position_id="fresh-candidate",
+        limit_price=0.73,
+        shares=12.7,
+        now=datetime.fromisoformat("2026-06-18T10:02:01+00:00"),
+    )
+
+    assert result["allowed"] is False
+    assert result["reason"] == "same_token_terminal_no_fill_requires_reprice"
+
+
 def test_cancelled_entry_without_zero_fill_fact_still_blocks_redecision(mem_db):
     mem_db.execute(
         """INSERT INTO venue_commands
