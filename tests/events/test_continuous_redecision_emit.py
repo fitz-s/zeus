@@ -1820,6 +1820,7 @@ def test_unready_replacement_sweep_batches_forecast_reads():
     assert "latest_cycle_by_family" in src
     assert "member_count_by_family_cycle" in src
     assert "COUNT(DISTINCT forecast.model)" in src
+    assert "INDEXED BY idx_opportunity_event_processing_status" in src
 
 
 def test_unready_replacement_sweep_is_gated_by_active_rmf_queue():
@@ -1846,11 +1847,27 @@ def test_unready_replacement_sweep_is_gated_by_active_rmf_queue():
             )
         )
 
+    traced_sql = []
+    world.set_trace_callback(traced_sql.append)
     assert reactor._edli_active_rmf_forecast_snapshot_pending_count(world, limit=2) == 2
     assert reactor._edli_active_rmf_forecast_snapshot_pending_count(world, limit=10) == 3
+    world.set_trace_callback(None)
+
+    count_sql = next(
+        statement
+        for statement in reversed(traced_sql)
+        if "SELECT COUNT(*)" in statement and "causal_snapshot_id LIKE 'rmf-%'" in statement
+    )
+    plan = "\n".join(
+        str(row[3]) for row in world.execute(f"EXPLAIN QUERY PLAN {count_sql}")
+    )
+    assert "idx_opportunity_event_processing_status" in plan
+    assert "sqlite_autoindex_opportunity_events_1" in plan
 
     cfg_src = inspect.getsource(reactor._edli_unready_fsr_prune_min_active_pending)
     assert "reactor_unready_fsr_prune_min_active_pending" in cfg_src
+    count_src = inspect.getsource(reactor._edli_active_rmf_forecast_snapshot_pending_count)
+    assert "INDEXED BY idx_opportunity_event_processing_status" in count_src
     prune_src = inspect.getsource(reactor._edli_prune_pending_working_set)
     assert prune_src.index("_edli_active_rmf_forecast_snapshot_pending_count") < prune_src.index(
         "_edli_expire_unready_forecast_snapshot_pending"

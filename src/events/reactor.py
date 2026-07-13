@@ -5618,6 +5618,7 @@ def _edli_expire_unready_forecast_snapshot_pending(
                    json_extract(e.payload_json, '$.target_date') AS target_date,
                    json_extract(e.payload_json, '$.metric') AS metric
               FROM opportunity_event_processing p
+                   INDEXED BY idx_opportunity_event_processing_status
               JOIN opportunity_events e ON e.event_id = p.event_id
              WHERE p.consumer_name = 'edli_reactor_v1'
                AND p.processing_status = 'pending'
@@ -5900,6 +5901,7 @@ def _edli_active_rmf_forecast_snapshot_pending_count(world_conn, *, limit: int) 
               FROM (
                     SELECT 1
                       FROM opportunity_event_processing p
+                           INDEXED BY idx_opportunity_event_processing_status
                       JOIN opportunity_events e ON e.event_id = p.event_id
                      WHERE p.consumer_name = 'edli_reactor_v1'
                        AND p.processing_status = 'pending'
