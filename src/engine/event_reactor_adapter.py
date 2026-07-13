@@ -5682,7 +5682,7 @@ def _day0_selected_route_fdr_proof(
     if str(getattr(selected_proof, "probability_authority", "") or "").strip() != (
         "day0_absorbing_hard_fact"
     ):
-        return _proof(False)
+        return None
     try:
         q_lcb = float(selected_proof.q_lcb_5pct)
         price = float(selected_proof.execution_price.value)  # type: ignore[union-attr]

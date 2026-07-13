@@ -2201,6 +2201,95 @@ def test_day0_absorbing_hard_fact_route_fdr_passes_before_qkernel_false_edge():
     assert fdr.selected_post_fdr == ("h7",)
 
 
+def test_day0_replacement_route_delegates_fdr_to_bound_qkernel_certificate():
+    proof = _bound_day0_qkernel_route_proof(
+        q_live=1.0,
+        q_lcb=1.0,
+        price=0.00315,
+        trade_score=0.99685,
+        false_edge_rate=0.05,
+    )
+    proof.probability_authority = "replacement_0_1"
+    family_id = "Hong Kong|2026-07-13|high"
+    hypothesis_ids = tuple(f"h{i}" for i in range(22))
+
+    day0_fdr = _day0_selected_route_fdr_proof(
+        event_type="DAY0_EXTREME_UPDATED",
+        family_id=family_id,
+        all_hypothesis_ids=hypothesis_ids,
+        selected_hypothesis_id="h7",
+        selected_proof=proof,
+    )
+    qkernel_fdr = era._qkernel_selected_route_fdr_proof(
+        family_id=family_id,
+        all_hypothesis_ids=hypothesis_ids,
+        selected_hypothesis_id="h7",
+        selected_proof=proof,
+    )
+
+    assert day0_fdr is None
+    assert qkernel_fdr is not None
+    assert qkernel_fdr.passed is True
+    assert qkernel_fdr.selected_post_fdr == ("h7",)
+
+
+def test_day0_replacement_route_without_qkernel_certificate_uses_legacy_fdr():
+    proof = SimpleNamespace(
+        passed_prefilter=True,
+        probability_authority="replacement_0_1",
+        selection_authority_applied=None,
+        qkernel_execution_economics=None,
+    )
+
+    day0_fdr = _day0_selected_route_fdr_proof(
+        event_type="DAY0_EXTREME_UPDATED",
+        family_id="Hong Kong|2026-07-13|high",
+        all_hypothesis_ids=("h7",),
+        selected_hypothesis_id="h7",
+        selected_proof=proof,
+    )
+    qkernel_fdr = era._qkernel_selected_route_fdr_proof(
+        family_id="Hong Kong|2026-07-13|high",
+        all_hypothesis_ids=("h7",),
+        selected_hypothesis_id="h7",
+        selected_proof=proof,
+    )
+
+    assert day0_fdr is None
+    assert qkernel_fdr is None
+
+
+def test_day0_replacement_route_stops_on_failed_bound_qkernel_certificate():
+    proof = _bound_day0_qkernel_route_proof(
+        q_live=0.80,
+        q_lcb=0.75,
+        price=0.40,
+        trade_score=0.35,
+        false_edge_rate=0.50,
+    )
+    proof.probability_authority = "replacement_0_1"
+    family_id = "Hong Kong|2026-07-13|high"
+
+    day0_fdr = _day0_selected_route_fdr_proof(
+        event_type="DAY0_EXTREME_UPDATED",
+        family_id=family_id,
+        all_hypothesis_ids=("h7",),
+        selected_hypothesis_id="h7",
+        selected_proof=proof,
+    )
+    qkernel_fdr = era._qkernel_selected_route_fdr_proof(
+        family_id=family_id,
+        all_hypothesis_ids=("h7",),
+        selected_hypothesis_id="h7",
+        selected_proof=proof,
+    )
+
+    assert day0_fdr is None
+    assert qkernel_fdr is not None
+    assert qkernel_fdr.passed is False
+    assert qkernel_fdr.selected_post_fdr == ()
+
+
 def test_day0_monotone_hard_fact_cert_can_dominate_served_proof_q():
     cert = _day0_qkernel_cert(q_live=1.0, q_lcb=1.0)
     cert.update(
