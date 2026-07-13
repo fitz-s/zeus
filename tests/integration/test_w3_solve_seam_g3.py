@@ -98,12 +98,108 @@ def test_global_actuation_does_not_blanket_block_existing_family_exposure():
     assert "Coupling-robust endowment bound" in metrics_source
 
 
+def test_current_gamma_market_fetch_batches_concurrently_and_fails_closed():
+    condition_ids = tuple(f"condition-{index}" for index in range(205))
+    barrier = threading.Barrier(3)
+    chunks = []
+    lock = threading.Lock()
+
+    def gamma_get(path, *, params, timeout):
+        assert path == "/markets"
+        assert timeout == 4.0
+        chunk = tuple(params["condition_ids"])
+        assert params["limit"] == len(chunk)
+        with lock:
+            chunks.append(chunk)
+        barrier.wait(timeout=2.0)
+        return SimpleNamespace(
+            status_code=200,
+            json=lambda: [{"conditionId": condition_id} for condition_id in chunk],
+        )
+
+    markets, request_count = universe.fetch_current_gamma_markets(
+        condition_ids,
+        gamma_get=gamma_get,
+        timeout=4.0,
+        max_workers=3,
+    )
+    assert request_count == 3
+    assert sorted(map(len, chunks)) == [5, 100, 100]
+    assert {market["conditionId"] for market in markets} == set(condition_ids)
+
+    def response(payload, status_code=200):
+        return SimpleNamespace(status_code=status_code, json=lambda: payload)
+
+    with pytest.raises(ValueError, match="GLOBAL_CURRENT_GAMMA_MARKETS_HTTP:503"):
+        universe.fetch_current_gamma_markets(
+            ("condition-0",),
+            gamma_get=lambda *_args, **_kwargs: response([], 503),
+            timeout=4.0,
+        )
+    with pytest.raises(
+        ValueError, match="GLOBAL_CURRENT_GAMMA_MARKETS_RESPONSE_INVALID"
+    ):
+        universe.fetch_current_gamma_markets(
+            ("condition-0",),
+            gamma_get=lambda *_args, **_kwargs: response({}),
+            timeout=4.0,
+        )
+    with pytest.raises(ValueError, match="GLOBAL_CURRENT_GAMMA_MARKET_INVALID"):
+        universe.fetch_current_gamma_markets(
+            ("condition-0",),
+            gamma_get=lambda *_args, **_kwargs: response([None]),
+            timeout=4.0,
+        )
+
+    def worker_error(_path, *, params, timeout):
+        del timeout
+        if "condition-100" in params["condition_ids"]:
+            raise RuntimeError("worker failed")
+        return response([])
+
+    with pytest.raises(RuntimeError, match="worker failed"):
+        universe.fetch_current_gamma_markets(
+            tuple(f"condition-{index}" for index in range(101)),
+            gamma_get=worker_error,
+            timeout=4.0,
+            max_workers=2,
+        )
+
+
+_SPINE_DECISION_AT = _dt.datetime(2026, 6, 13, 12, 0, tzinfo=_dt.timezone.utc)
+
+
+def _spine_wealth_witness() -> PortfolioWealthWitness:
+    identity = portfolio_wealth_identity(
+        ledger_snapshot_id="spine-ledger",
+        position_set_hash="spine-empty-positions",
+        wealth_floor_usd=Decimal("1000"),
+        wealth_ceiling_usd=Decimal("1000"),
+        spendable_cash_usd=Decimal("1000"),
+        reservations_usd=Decimal("0"),
+        collateral_authority="CHAIN",
+        captured_at_utc=_SPINE_DECISION_AT,
+    )
+    return PortfolioWealthWitness(
+        ledger_snapshot_id="spine-ledger",
+        position_set_hash="spine-empty-positions",
+        wealth_floor_usd=Decimal("1000"),
+        wealth_ceiling_usd=Decimal("1000"),
+        spendable_cash_usd=Decimal("1000"),
+        reservations_usd=Decimal("0"),
+        collateral_authority="CHAIN",
+        captured_at_utc=_SPINE_DECISION_AT,
+        max_age=_dt.timedelta(seconds=5),
+        witness_identity=identity,
+    )
+
+
 def _drive(family, proofs, payload):
     """Drive decide_family_via_spine with a FIXED positive baseline so the fixture's wealth is
     deterministic (the module bankroll provider is not warm in-test); identical for OFF and ON."""
     return bridge.decide_family_via_spine(
         family=family, payload=payload, proofs=proofs,
-        decision_time=_dt.datetime(2026, 6, 13, 12, 0, tzinfo=_dt.timezone.utc),
+        decision_time=_SPINE_DECISION_AT,
         native_side_candidate_from_proof=era._native_side_candidate_from_proof,
         candidate_bin_id=era._candidate_bin_id,
         payoff_matrix_over_bins=utility_ranker.FamilyPayoffMatrix.over_bins,
@@ -111,6 +207,8 @@ def _drive(family, proofs, payload):
         baseline_usd_provider=lambda: Decimal("1000"),
         per_bin_yes_q_lcb=era._per_bin_yes_q_lcb(proofs),
         extra_exposure_by_bin_id=None,
+        solve_wealth_witness=_spine_wealth_witness(),
+        solve_positions=(),
     )
 
 
@@ -1822,9 +1920,10 @@ def test_current_global_book_epoch_overlaps_chunks_and_preserves_window():
         for binding in probability.bindings
         for token in (binding.yes_token_id, binding.no_token_id)
     ]
-    assert len(tokens) >= 2
+    assert len(tokens) >= 4
+    batch_size = max(1, len(tokens) // 4)
     caller_thread = threading.get_ident()
-    barrier = threading.Barrier(2)
+    barrier = threading.Barrier(4)
     lock = threading.Lock()
     active = 0
     max_active = 0
@@ -1861,12 +1960,12 @@ def test_current_global_book_epoch_overlaps_chunks_and_preserves_window():
         get_books=books,
         clock=lambda: next(times),
         max_age=_dt.timedelta(seconds=30),
-        batch_size=(len(tokens) + 1) // 2,
-        book_fetch_workers=2,
+        batch_size=batch_size,
+        book_fetch_workers=4,
     )
 
-    assert max_active == 2
-    assert len(worker_threads) == 2
+    assert max_active == 4
+    assert len(worker_threads) == 4
     assert caller_thread not in worker_threads
     assert len(epoch.assets) == len(tokens)
     assert epoch.captured_at_utc == at
@@ -1890,10 +1989,25 @@ def test_current_global_book_epoch_overlaps_chunks_and_preserves_window():
         },
         clock=lambda: next(sequential_times),
         max_age=_dt.timedelta(seconds=30),
-        batch_size=(len(tokens) + 1) // 2,
+        batch_size=batch_size,
     )
     assert epoch.asset_states == sequential.asset_states
     assert epoch.witness_identity == sequential.witness_identity
+
+
+def test_current_global_book_epoch_rejects_excessive_parallelism():
+    probability = _current_global_book_probability()
+    at = _dt.datetime(2026, 6, 13, 8, 0, tzinfo=_dt.timezone.utc)
+
+    with pytest.raises(ValueError, match="GLOBAL_BOOK_FETCH_CONTRACT_INVALID"):
+        capture_current_global_book_epoch(
+            _global_book_metadata_conn(probability),
+            probability_witnesses={probability.family_key: probability},
+            get_books=lambda _tokens: {},
+            clock=lambda: at,
+            max_age=_dt.timedelta(seconds=30),
+            book_fetch_workers=5,
+        )
 
 
 def test_current_global_book_epoch_one_chunk_stays_synchronous():
@@ -2043,6 +2157,7 @@ def test_current_gamma_identity_fills_missing_no_without_changing_q():
     )
     gamma_event = {
         "id": "gamma-event-current",
+        "endDate": "2026-07-14T12:00:00Z",
         "markets": [
             {
                 "conditionId": binding.condition_id,
@@ -2118,6 +2233,88 @@ def test_current_gamma_identity_fills_missing_no_without_changing_q():
     assert complete_calls == ["current-family-slug"]
     assert len(closed_metadata) == 2 * len(original.bindings)
     assert {row["accepting_orders"] for row in closed_metadata.values()} == {False}
+
+    batch_calls = []
+    batch_metadata = {}
+    batch_event = {
+        key: value for key, value in gamma_event.items() if key != "markets"
+    }
+    batch_markets = tuple(
+        {**market, "events": [batch_event]}
+        for market in gamma_event["markets"]
+    )
+    batched = bind_current_global_probability_tokens(
+        forecast,
+        probability_witnesses={original.family_key: original},
+        get_gamma_event=lambda _slug: pytest.fail("per-event Gamma fallback used"),
+        get_gamma_markets=lambda condition_ids: (
+            batch_calls.append(tuple(condition_ids)) or batch_markets
+        ),
+        metadata_sink=batch_metadata,
+    )[original.family_key]
+    assert batch_calls == [tuple(binding.condition_id for binding in original.bindings)]
+    assert batched.witness_identity == original.witness_identity
+    assert batched.bindings == original.bindings
+    assert batched.sample_matrix_identity == original.sample_matrix_identity
+    assert batch_metadata == gamma_metadata
+    assert {
+        row["market_end_at"] for row in batch_metadata.values()
+    } == {"2026-07-14T12:00:00Z"}
+    with pytest.raises(ValueError, match="GLOBAL_CURRENT_GAMMA_MARKETS_INCOMPLETE"):
+        bind_current_global_probability_tokens(
+            forecast,
+            probability_witnesses={original.family_key: original},
+            get_gamma_event=lambda _slug: pytest.fail("per-event Gamma fallback used"),
+            get_gamma_markets=lambda _condition_ids: batch_markets[:-1],
+            metadata_sink={},
+        )
+    with pytest.raises(ValueError, match="GLOBAL_CURRENT_GAMMA_MARKET_AMBIGUOUS"):
+        bind_current_global_probability_tokens(
+            forecast,
+            probability_witnesses={original.family_key: original},
+            get_gamma_event=lambda _slug: pytest.fail("per-event Gamma fallback used"),
+            get_gamma_markets=lambda _condition_ids: (*batch_markets, batch_markets[0]),
+            metadata_sink={},
+        )
+    with pytest.raises(ValueError, match="GLOBAL_CURRENT_GAMMA_MARKET_INVALID"):
+        bind_current_global_probability_tokens(
+            forecast,
+            probability_witnesses={original.family_key: original},
+            get_gamma_event=lambda _slug: pytest.fail("per-event Gamma fallback used"),
+            get_gamma_markets=lambda _condition_ids: (*batch_markets, None),
+            metadata_sink={},
+        )
+    conflicting_events = (
+        {**batch_markets[0], "events": [{"id": "different-event"}]},
+        *batch_markets[1:],
+    )
+    with pytest.raises(
+        ValueError, match="GLOBAL_CURRENT_GAMMA_EVENT_IDENTITY_AMBIGUOUS"
+    ):
+        bind_current_global_probability_tokens(
+            forecast,
+            probability_witnesses={original.family_key: original},
+            get_gamma_event=lambda _slug: pytest.fail("per-event Gamma fallback used"),
+            get_gamma_markets=lambda _condition_ids: conflicting_events,
+            metadata_sink={},
+        )
+    conflicting_event_metadata = (
+        {
+            **batch_markets[0],
+            "events": [{**batch_event, "endDate": "2026-07-15T12:00:00Z"}],
+        },
+        *batch_markets[1:],
+    )
+    with pytest.raises(
+        ValueError, match="GLOBAL_CURRENT_GAMMA_EVENT_METADATA_AMBIGUOUS"
+    ):
+        bind_current_global_probability_tokens(
+            forecast,
+            probability_witnesses={original.family_key: original},
+            get_gamma_event=lambda _slug: pytest.fail("per-event Gamma fallback used"),
+            get_gamma_markets=lambda _condition_ids: conflicting_event_metadata,
+            metadata_sink={},
+        )
 
     at = _dt.datetime(2026, 7, 10, 8, 0, tzinfo=_dt.timezone.utc)
     times = iter((at, at + _dt.timedelta(seconds=1)))
@@ -2486,6 +2683,46 @@ def test_current_portfolio_wealth_witness_uses_one_chain_generation():
     assert witness.wealth_floor_usd == Decimal("22")
     assert witness.wealth_ceiling_usd == Decimal("22")
     assert repeated.witness_identity == witness.witness_identity
+
+
+def test_current_solve_ledger_inputs_bind_positions_and_cash_in_one_read_snapshot(
+    monkeypatch,
+):
+    conn = sqlite3.connect(":memory:")
+    at = _dt.datetime(2026, 7, 13, 20, 0, tzinfo=_dt.timezone.utc)
+    state = SimpleNamespace(positions=[SimpleNamespace(position_id="position-1")])
+    witness = SimpleNamespace(ledger_snapshot_id="ledger-1")
+
+    from src.engine import global_auction_universe
+    from src.state import portfolio
+
+    def load(current_conn):
+        assert current_conn is conn
+        assert conn.in_transaction
+        return state
+
+    def build(current_conn, *, decision_at_utc, max_age, portfolio_state):
+        assert current_conn is conn
+        assert conn.in_transaction
+        assert decision_at_utc == at
+        assert max_age.total_seconds() > 0
+        assert portfolio_state is state
+        return witness
+
+    monkeypatch.setattr(portfolio, "load_runtime_open_portfolio", load)
+    monkeypatch.setattr(
+        global_auction_universe,
+        "current_portfolio_wealth_witness",
+        build,
+    )
+
+    actual_witness, positions = era._current_solve_ledger_inputs(
+        conn,
+        decision_time=at,
+    )
+    assert actual_witness is witness
+    assert positions == tuple(state.positions)
+    assert not conn.in_transaction
 
 
 def test_current_portfolio_wealth_economic_identity_ignores_heartbeat_time_only():

@@ -243,20 +243,18 @@ def p_raw_vector_from_maxes(
             _h.update(str(_b).encode())
         rng = np.random.default_rng(int(_h.hexdigest()[:16], 16))
 
-    n_bins = len(bins)
     n_members = len(member_maxes)
-    p = np.zeros(n_bins)
     sig = sigma_instrument_for_city(city)
     # Combine instrument noise with the (optional) forecast/station residual SD in
     # quadrature. extra_member_sigma=0.0 => effective sigma == instrument sigma exactly.
     effective_sigma = float(np.hypot(sig.value, extra_member_sigma))
-
-    for _ in range(n_mc):
-        noised = member_maxes + rng.normal(0, effective_sigma, n_members)
-        measured = settlement_semantics.round_values(noised)
-
-        p += bin_counts_from_array(measured, bins)
-
+    noised = member_maxes + rng.normal(
+        0,
+        effective_sigma,
+        (n_mc, n_members),
+    )
+    measured = settlement_semantics.round_values(noised)
+    p = bin_counts_from_array(measured.reshape(-1), bins).astype(float)
     p = p / (float(n_members) * n_mc)
 
     total = p.sum()
@@ -343,7 +341,6 @@ def analytic_p_raw_vector_from_maxes(
 
     sig = sigma_instrument_for_city(city)
     effective_sigma = float(np.hypot(sig.value, extra_member_sigma))
-    n_members = len(member_maxes)
     n_bins = len(bins)
     prec = settlement_semantics.precision
     rule = settlement_semantics.rounding_rule

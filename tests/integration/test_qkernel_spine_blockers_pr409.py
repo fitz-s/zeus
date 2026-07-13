@@ -345,6 +345,33 @@ def _drive(
     extra_exposure=None,
     selection_proofs=None,
 ):
+    from src.solve.solver import PortfolioWealthWitness, portfolio_wealth_identity
+
+    ledger_snapshot_id = "pr409-current-ledger"
+    position_set_hash = "pr409-empty-positions"
+    captured_at = decision_time.astimezone(_dt.timezone.utc)
+    wealth_identity = portfolio_wealth_identity(
+        ledger_snapshot_id=ledger_snapshot_id,
+        position_set_hash=position_set_hash,
+        wealth_floor_usd=Decimal("1000"),
+        wealth_ceiling_usd=Decimal("1000"),
+        spendable_cash_usd=Decimal("1000"),
+        reservations_usd=Decimal("0"),
+        collateral_authority="CHAIN",
+        captured_at_utc=captured_at,
+    )
+    wealth = PortfolioWealthWitness(
+        ledger_snapshot_id=ledger_snapshot_id,
+        position_set_hash=position_set_hash,
+        wealth_floor_usd=Decimal("1000"),
+        wealth_ceiling_usd=Decimal("1000"),
+        spendable_cash_usd=Decimal("1000"),
+        reservations_usd=Decimal("0"),
+        collateral_authority="CHAIN",
+        captured_at_utc=captured_at,
+        max_age=_dt.timedelta(seconds=5),
+        witness_identity=wealth_identity,
+    )
     return bridge.decide_family_via_spine(
         family=family,
         payload=payload,
@@ -358,6 +385,8 @@ def _drive(
         baseline_usd_provider=era._robust_marginal_utility_baseline_usd,
         per_bin_yes_q_lcb=era._per_bin_yes_q_lcb(proofs),
         extra_exposure_by_bin_id=extra_exposure,
+        solve_wealth_witness=wealth,
+        solve_positions=(),
     )
 
 

@@ -2824,7 +2824,10 @@ class SolveEngineShim:
             legacy.family_book, shares=shares_for_routing, enable_negrisk_routes=self._enable_negrisk_routes
         )
 
-        # Endowment wealth = legacy A_y (like-for-like); spendable cash for the budget is INJECTED.
+        # Spendable cash and native holdings must come from one ledger generation.  The legacy
+        # ``portfolio`` vector is only a compatibility fallback for the pre-wiring test seam; once
+        # a holdings provider is present, terminal wealth is derived from exact held YES/NO shares
+        # instead of interpreting cost-basis exposure as a settlement payoff.
         spendable = float(self._spendable_cash_provider()) if self._spendable_cash_provider is not None else None
         if spendable is None:
             # No injected ledger read (pre-seam-swap default): fall back to the endowment min so the
@@ -2833,19 +2836,37 @@ class SolveEngineShim:
         ledger_snapshot_id = (
             self._ledger_snapshot_id_provider() if self._ledger_snapshot_id_provider is not None else None
         )
-        holdings_payout = {
-            JointOutcomeAtom.canonical_id({family_key: b}): float(portfolio.a(b)) - spendable
-            for b in bin_ids
-        }
-        wealth = build_wealth_by_atom(
-            family_key=family_key, atom_ids=atom_ids, holdings_payout_by_atom_id=holdings_payout,
-            spendable_cash_usd=spendable, ledger_snapshot_id=ledger_snapshot_id,
-        )
         holdings = None
         if self._holdings_snapshot_provider is not None:
             holdings = self._holdings_snapshot_provider(family_key, ledger_snapshot_id)
             if holdings is None:
                 raise ValueError("holdings_snapshot_provider returned no ledger snapshot")
+            if holdings.ledger_snapshot_id != ledger_snapshot_id:
+                raise ValueError("holdings and spendable cash use different ledger snapshots")
+            holdings_payout = {
+                JointOutcomeAtom.canonical_id({family_key: b}): sum(
+                    float(holding.shares)
+                    for holding in holdings.holdings
+                    if (
+                        b == holding.bin_id
+                        if holding.side == "YES"
+                        else b != holding.bin_id
+                    )
+                )
+                for b in bin_ids
+            }
+            source_positions = tuple(holding.position_id for holding in holdings.holdings)
+        else:
+            holdings_payout = {
+                JointOutcomeAtom.canonical_id({family_key: b}): float(portfolio.a(b)) - spendable
+                for b in bin_ids
+            }
+            source_positions = ()
+        wealth = build_wealth_by_atom(
+            family_key=family_key, atom_ids=atom_ids, holdings_payout_by_atom_id=holdings_payout,
+            spendable_cash_usd=spendable, ledger_snapshot_id=ledger_snapshot_id,
+            source_positions=source_positions,
+        )
         menu = build_solve_menu(
             route_set,
             family_key=family_key,

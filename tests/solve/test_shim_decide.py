@@ -266,7 +266,7 @@ def test_shim_no_trade_on_zero_edge():
     validate_family_decision_contract(d)
 
 
-def test_shim_holding_provider_puts_exact_sell_in_same_solve_plan():
+def test_shim_holding_provider_puts_exact_sell_in_same_solve_plan(monkeypatch):
     bin_ids = ("y", "n")
     band = _band(bin_ids, [0.10] * 64)
     route = _route("buy_y", "y", "YES", 0.90)
@@ -295,16 +295,59 @@ def test_shim_holding_provider_puts_exact_sell_in_same_solve_plan():
         ),
     )
     shim = _shim(legacy, _route_set({"y": route}), holdings=holdings)
-    decision = _decide(shim, bin_ids=bin_ids, portfolio_extra={"y": 10})
+    from src.solve import exits
+
+    captured_wealth_inputs = {}
+    real_builder = exits.build_wealth_by_atom
+
+    def capture_wealth(**kwargs):
+        captured_wealth_inputs.update(kwargs)
+        return real_builder(**kwargs)
+
+    monkeypatch.setattr(exits, "build_wealth_by_atom", capture_wealth)
+    # Deliberately wrong legacy exposure proves the ledger-bound native holding, not cost-basis
+    # exposure, owns terminal wealth once the provider is wired.
+    decision = _decide(shim, bin_ids=bin_ids, portfolio_extra={"y": 999})
 
     assert shim.last_plan is not None
     sell = next(order for order in shim.last_plan.orders if order.kind == "sell_holding")
     assert sell.token_id == "tok_held_yes_y"
     assert sell.ledger_snapshot_id == "snap1"
+    assert captured_wealth_inputs["holdings_payout_by_atom_id"] == {
+        F.atom_id("y"): 10.0,
+        F.atom_id("n"): 0,
+    }
+    assert captured_wealth_inputs["source_positions"] == ("pos_y",)
     # The current FamilyDecision projection can submit only native BUY candidates.  It must not
     # relabel a SELL as a BUY; the plan remains available for the future plan executor seam.
     assert decision.selected is None
     assert decision.no_trade_reason == "PHASE1_PRIMARY_LEG_NOT_TRADEABLE"
+    from src.engine.qkernel_spine_bridge import _solve_artifacts
+
+    carried_plan, carried_projection = _solve_artifacts(shim, enabled=True)
+    assert carried_plan is shim.last_plan
+    assert carried_projection is shim.last_projection
+    assert carried_projection.primary_order_id == sell.order_id
+    assert carried_projection.projected_selected == sell.menu_item_id
+
+
+def test_solve_artifact_binding_rejects_projection_drift():
+    from src.engine.qkernel_spine_bridge import _solve_artifacts
+
+    order = SimpleNamespace(
+        order_id="sell-order",
+        menu_item_id="sell-menu",
+        safe_prefix_index=0,
+    )
+    engine = SimpleNamespace(
+        last_plan=SimpleNamespace(orders=(order,)),
+        last_projection=SimpleNamespace(
+            primary_order_id="different-order",
+            projected_selected="sell-menu",
+        ),
+    )
+    with pytest.raises(ValueError, match="W3_SOLUTION_PROJECTION_PRIMARY_MISMATCH"):
+        _solve_artifacts(engine, enabled=True)
 
 
 def test_shim_holdings_provider_must_return_a_snapshot():

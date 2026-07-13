@@ -367,7 +367,7 @@ def capture_current_global_book_epoch(
     if (
         max_age <= timedelta(0)
         or not 1 <= batch_size <= 500
-        or not 1 <= book_fetch_workers <= 2
+        or not 1 <= book_fetch_workers <= 4
     ):
         raise ValueError("GLOBAL_BOOK_FETCH_CONTRACT_INVALID")
     bindings: list[tuple[str, str, str, str, str]] = []
@@ -628,11 +628,74 @@ def _rebind_probability_witness_tokens(
     )
 
 
+def fetch_current_gamma_markets(
+    condition_ids: Sequence[str],
+    *,
+    gamma_get: Callable[..., object],
+    timeout: float,
+    chunk_size: int = 100,
+    max_workers: int = 16,
+) -> tuple[tuple[Mapping[str, object], ...], int]:
+    """Fetch one complete current Gamma market batch or fail closed."""
+
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    conditions = tuple(
+        dict.fromkeys(
+            condition_id
+            for raw in condition_ids
+            if (condition_id := str(raw or "").strip())
+        )
+    )
+    size = max(1, int(chunk_size))
+    chunks = tuple(
+        conditions[offset : offset + size]
+        for offset in range(0, len(conditions), size)
+    )
+    if not chunks:
+        return (), 0
+
+    def _fetch(chunk: Sequence[str]) -> tuple[Mapping[str, object], ...]:
+        response = gamma_get(
+            "/markets",
+            params={"condition_ids": list(chunk), "limit": len(chunk)},
+            timeout=timeout,
+        )
+        if getattr(response, "status_code", None) != 200:
+            raise ValueError(
+                "GLOBAL_CURRENT_GAMMA_MARKETS_HTTP:"
+                f"{getattr(response, 'status_code', None)}"
+            )
+        payload = response.json()
+        if not isinstance(payload, list):
+            raise ValueError("GLOBAL_CURRENT_GAMMA_MARKETS_RESPONSE_INVALID")
+        if any(not isinstance(market, Mapping) for market in payload):
+            raise ValueError("GLOBAL_CURRENT_GAMMA_MARKET_INVALID")
+        return tuple(payload)
+
+    if len(chunks) == 1:
+        return _fetch(chunks[0]), 1
+    markets: list[Mapping[str, object]] = []
+    workers = max(1, min(int(max_workers), len(chunks)))
+    with ThreadPoolExecutor(
+        max_workers=workers,
+        thread_name_prefix="global-market-metadata",
+    ) as pool:
+        futures = tuple(pool.submit(_fetch, chunk) for chunk in chunks)
+        for future in as_completed(futures):
+            markets.extend(future.result())
+    return tuple(markets), len(chunks)
+
+
 def bind_current_global_probability_tokens(
     forecasts_conn: sqlite3.Connection,
     *,
     probability_witnesses: Mapping[str, JointOutcomeProbabilityWitness],
-    get_gamma_event: Callable[[str], Mapping[str, object] | None],
+    get_gamma_event: Callable[[str], Mapping[str, object] | None] | None = None,
+    get_gamma_markets: Callable[
+        [Sequence[str]], Sequence[Mapping[str, object]]
+    ]
+    | None = None,
     trade_conn: sqlite3.Connection | None = None,
     checked_at_utc: datetime | None = None,
     max_workers: int = 8,
@@ -699,50 +762,114 @@ def bind_current_global_probability_tokens(
                 )
             local_tokens[condition_id] = pair
 
-    slug_by_family: dict[str, str] = {}
-    for family_key, witness in work_by_family.items():
-        tokens_bound = all(
-            (binding.yes_token_id and binding.no_token_id)
-            or binding.condition_id in local_tokens
-            for binding in witness.bindings
-        )
-        if tokens_bound and not refresh_metadata:
-            continue
-        condition_ids = tuple(binding.condition_id for binding in witness.bindings)
-        placeholders = ",".join("?" for _ in condition_ids)
-        row = forecasts_conn.execute(
-            f"""
-            SELECT market_slug
-              FROM market_events
-             WHERE condition_id IN ({placeholders})
-               AND market_slug IS NOT NULL
-               AND TRIM(market_slug) != ''
-             ORDER BY created_at DESC
-             LIMIT 1
-            """,
-            condition_ids,
-        ).fetchone()
-        slug = str((row or ("",))[0] or "").strip()
-        if not slug:
-            raise ValueError(f"GLOBAL_GAMMA_SLUG_MISSING:{family_key}")
-        slug_by_family[family_key] = slug
-
     from concurrent.futures import ThreadPoolExecutor
     from src.data.market_scanner import _boolish_market_field, _extract_outcomes
 
     events: dict[str, Mapping[str, object] | None] = {}
-    if slug_by_family:
-        workers = max(1, min(int(max_workers), 16, len(slug_by_family)))
-        with ThreadPoolExecutor(
-            max_workers=workers,
-            thread_name_prefix="global-token-identity",
-        ) as pool:
-            futures = {
-                family_key: pool.submit(get_gamma_event, slug)
-                for family_key, slug in slug_by_family.items()
+    if refresh_metadata and get_gamma_markets is not None:
+        condition_ids = tuple(
+            dict.fromkeys(
+                binding.condition_id
+                for witness in work_by_family.values()
+                for binding in witness.bindings
+            )
+        )
+        requested_conditions = frozenset(condition_ids)
+        markets = get_gamma_markets(condition_ids)
+        market_by_condition: dict[str, Mapping[str, object]] = {}
+        for market in markets:
+            if not isinstance(market, Mapping):
+                raise ValueError("GLOBAL_CURRENT_GAMMA_MARKET_INVALID")
+            condition_id = str(market.get("conditionId") or "").strip()
+            if not condition_id or condition_id not in requested_conditions:
+                continue
+            if condition_id in market_by_condition:
+                raise ValueError(
+                    f"GLOBAL_CURRENT_GAMMA_MARKET_AMBIGUOUS:{condition_id}"
+                )
+            market_by_condition[condition_id] = market
+        missing_conditions = requested_conditions.difference(market_by_condition)
+        if missing_conditions:
+            raise ValueError(
+                "GLOBAL_CURRENT_GAMMA_MARKETS_INCOMPLETE:"
+                + ",".join(sorted(missing_conditions))
+            )
+        for family_key, witness in work_by_family.items():
+            family_markets = tuple(
+                market_by_condition[binding.condition_id]
+                for binding in witness.bindings
+            )
+            event_by_id: dict[str, Mapping[str, object]] = {}
+            for market in family_markets:
+                nested_events = market.get("events")
+                if not isinstance(nested_events, list):
+                    continue
+                for nested_event in nested_events:
+                    if not isinstance(nested_event, Mapping):
+                        raise ValueError(
+                            f"GLOBAL_CURRENT_GAMMA_EVENT_INVALID:{family_key}"
+                        )
+                    event_id = str(nested_event.get("id") or "").strip()
+                    if not event_id:
+                        continue
+                    previous = event_by_id.get(event_id)
+                    if previous is not None and dict(previous) != dict(nested_event):
+                        raise ValueError(
+                            "GLOBAL_CURRENT_GAMMA_EVENT_METADATA_AMBIGUOUS:"
+                            f"{family_key}"
+                        )
+                    event_by_id[event_id] = nested_event
+            if len(event_by_id) != 1:
+                raise ValueError(
+                    f"GLOBAL_CURRENT_GAMMA_EVENT_IDENTITY_AMBIGUOUS:{family_key}"
+                )
+            event = next(iter(event_by_id.values()))
+            events[family_key] = {
+                **event,
+                "markets": family_markets,
             }
-            for family_key, future in futures.items():
-                events[family_key] = future.result()
+    else:
+        slug_by_family: dict[str, str] = {}
+        for family_key, witness in work_by_family.items():
+            tokens_bound = all(
+                (binding.yes_token_id and binding.no_token_id)
+                or binding.condition_id in local_tokens
+                for binding in witness.bindings
+            )
+            if tokens_bound and not refresh_metadata:
+                continue
+            condition_ids = tuple(binding.condition_id for binding in witness.bindings)
+            placeholders = ",".join("?" for _ in condition_ids)
+            row = forecasts_conn.execute(
+                f"""
+                SELECT market_slug
+                  FROM market_events
+                 WHERE condition_id IN ({placeholders})
+                   AND market_slug IS NOT NULL
+                   AND TRIM(market_slug) != ''
+                 ORDER BY created_at DESC
+                 LIMIT 1
+                """,
+                condition_ids,
+            ).fetchone()
+            slug = str((row or ("",))[0] or "").strip()
+            if not slug:
+                raise ValueError(f"GLOBAL_GAMMA_SLUG_MISSING:{family_key}")
+            slug_by_family[family_key] = slug
+        if slug_by_family:
+            if get_gamma_event is None:
+                raise ValueError("GLOBAL_GAMMA_EVENT_READER_MISSING")
+            workers = max(1, min(int(max_workers), 16, len(slug_by_family)))
+            with ThreadPoolExecutor(
+                max_workers=workers,
+                thread_name_prefix="global-token-identity",
+            ) as pool:
+                futures = {
+                    family_key: pool.submit(get_gamma_event, slug)
+                    for family_key, slug in slug_by_family.items()
+                }
+                for family_key, future in futures.items():
+                    events[family_key] = future.result()
 
     rebound: dict[str, JointOutcomeProbabilityWitness] = {}
     for family_key, witness in probability_witnesses.items():

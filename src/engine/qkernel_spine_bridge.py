@@ -226,19 +226,70 @@ def w3_solve_enabled() -> bool:
         return False
 
 
-def _wrap_engine_with_solve_shim(engine: Any) -> Any:
+def _wrap_engine_with_solve_shim(
+    engine: Any,
+    *,
+    wealth_witness: Any,
+    holdings_snapshot: Any,
+) -> Any:
     """Compose the W3 joint solver over the already-constructed engine (ON-mode ONLY).
 
     The ``src.solve`` import is LAZY, inside this ON-branch helper, so with the flag OFF the
-    bridge never imports the solve package (G3 import-isolation). No ledger handle is reachable
-    at the construction site (see ``decide_family_via_spine`` signature — no spendable-cash
-    provider is threaded), so the shim's spendable-cash provider is left unset and its
-    conservative endowment floor applies; the real CAS-ledger read is threaded by the seam-swap
-    operator, not here (that would touch beyond the bridge construction site).
+    bridge never imports the solve package (G3 import-isolation).  ON-mode requires one current
+    wealth witness and the exact native holdings snapshot bound to its ledger generation; an
+    unbound fallback would make current-state BUY/HOLD/SELL comparison fictitious.
     """
     from src.solve.solver import SolveEngineShim
 
-    return SolveEngineShim(engine=engine)
+    if (
+        wealth_witness is None
+        or holdings_snapshot is None
+        or holdings_snapshot.ledger_snapshot_id != wealth_witness.ledger_snapshot_id
+    ):
+        raise ValueError("W3_CURRENT_LEDGER_INPUTS_UNBOUND")
+    return SolveEngineShim(
+        engine=engine,
+        spendable_cash_provider=lambda: wealth_witness.spendable_cash_usd,
+        ledger_snapshot_id_provider=lambda: wealth_witness.ledger_snapshot_id,
+        holdings_snapshot_provider=lambda family_key, ledger_snapshot_id: (
+            holdings_snapshot
+            if (
+                family_key == holdings_snapshot.family_key
+                and ledger_snapshot_id == holdings_snapshot.ledger_snapshot_id
+            )
+            else None
+        ),
+    )
+
+
+def _solve_artifacts(engine: Any, *, enabled: bool) -> tuple[Any | None, Any | None]:
+    """Return the W3 plan and its legacy projection without collapsing their meanings.
+
+    ``FamilyDecision.selected`` can represent only a native BUY.  A current-state solve may
+    instead choose ``sell_holding``; dropping ``last_plan`` at this seam made that valid action
+    disappear and left the legacy no-trade projection as the only downstream fact.  Keep the
+    complete plan beside the projection and make their primary-order binding fail loudly.
+    """
+
+    if not enabled:
+        return None, None
+    plan = getattr(engine, "last_plan", None)
+    projection = getattr(engine, "last_projection", None)
+    if (plan is None) != (projection is None):
+        raise ValueError("W3_SOLUTION_ARTIFACTS_INCOMPLETE")
+    if plan is None:
+        return None, None
+    orders = tuple(getattr(plan, "orders", ()) or ())
+    if orders:
+        primary = min(orders, key=lambda order: order.safe_prefix_index)
+        if (
+            getattr(projection, "primary_order_id", None) != primary.order_id
+            or getattr(projection, "projected_selected", None) != primary.menu_item_id
+        ):
+            raise ValueError("W3_SOLUTION_PROJECTION_PRIMARY_MISMATCH")
+    elif getattr(projection, "primary_order_id", None) is not None:
+        raise ValueError("W3_NOTRADE_PROJECTION_CARRIES_ORDER")
+    return plan, projection
 
 
 def _qkernel_spine_band_alpha() -> float:
@@ -288,16 +339,20 @@ class SpineDecisionResult:
     decision: Optional[FamilyDecision]
     global_family: Optional["PreparedGlobalFamily"] = None
     global_prepare_reason: Optional[str] = None
+    solution_plan: Optional[Any] = None
+    solution_projection: Optional[Any] = None
     decided_by_spine: bool = True
 
 
 @dataclass(frozen=True)
 class PreparedGlobalFamily:
-    """One complete family belief plus every full-depth native order seed."""
+    """One complete family belief, entry seeds, and the current-state action plan."""
 
     decision_id: str
     probability_witness: Any
     candidate_seeds: tuple["PreparedGlobalCandidateSeed", ...]
+    solution_plan: Optional[Any] = None
+    solution_projection: Optional[Any] = None
 
 
 @dataclass(frozen=True)
@@ -336,6 +391,8 @@ def _prepare_global_family(
     posterior_identity_hash: str,
     captured_at_utc: datetime,
     max_age: timedelta,
+    solution_plan: Any | None = None,
+    solution_projection: Any | None = None,
 ) -> PreparedGlobalFamily:
     """Bind the full row-simplex q to its ordered condition/token topology."""
 
@@ -418,6 +475,8 @@ def _prepare_global_family(
         decision_id=decision.decision_id,
         probability_witness=witness,
         candidate_seeds=tuple(seeds),
+        solution_plan=solution_plan,
+        solution_projection=solution_projection,
     )
 
 
@@ -1446,6 +1505,9 @@ def decide_family_via_spine(
     per_bin_yes_q_lcb: Mapping[str, float],
     extra_exposure_by_bin_id: Optional[Mapping[str, float]] = None,
     max_stake_usd: Optional[Decimal] = None,
+    solve_wealth_witness: Any = None,
+    solve_positions: Sequence[Any] = (),
+    solve_ledger_input_provider: Any = None,
 ) -> SpineDecisionResult:
     """Route ONE family's decision through the rebuilt spine and remap the selection.
 
@@ -1473,6 +1535,9 @@ def decide_family_via_spine(
         baseline_usd_provider: the reactor's ``_robust_marginal_utility_baseline_usd``.
         per_bin_yes_q_lcb: the reactor's per-bin YES q_lcb (the robust π the matrix uses).
         extra_exposure_by_bin_id / max_stake_usd: the existing-exposure / cash bound.
+        solve_wealth_witness / solve_positions: injected current canonical ledger generation.
+        solve_ledger_input_provider: production lazy reader returning that same pair; it is called
+            only in W3 ON-mode so the OFF path neither imports solve nor reads a new authority.
 
     Returns a ``SpineDecisionResult`` — a selected proof OR a typed no-trade, plus the
     ``FamilyDecision`` for the receipt. Never raises into the reactor hot path.
@@ -1643,7 +1708,41 @@ def decide_family_via_spine(
         # W3 SOLVE promotion seam (time-boxed flag, deleted at promotion): ON → the joint solver
         # selects; OFF/absent → this guard is skipped and the legacy path is byte-identical.
         if use_w3_solve:
-            engine = _wrap_engine_with_solve_shim(engine)
+            if solve_wealth_witness is None and solve_ledger_input_provider is not None:
+                solve_wealth_witness, solve_positions = solve_ledger_input_provider()
+            if solve_wealth_witness is None:
+                raise FamilyDecisionError("W3_CURRENT_WEALTH_WITNESS_MISSING")
+            witness_at = getattr(solve_wealth_witness, "captured_at_utc", None)
+            witness_max_age = getattr(solve_wealth_witness, "max_age", None)
+            witness_age = (
+                decision_time.astimezone(timezone.utc)
+                - witness_at.astimezone(timezone.utc)
+                if isinstance(witness_at, datetime) and witness_at.tzinfo is not None
+                else None
+            )
+            if (
+                not isinstance(witness_at, datetime)
+                or witness_at.tzinfo is None
+                or witness_max_age is None
+                or witness_max_age <= timedelta(0)
+                or witness_age is None
+                or witness_age.total_seconds() < 0.0
+                or witness_age > witness_max_age
+            ):
+                raise FamilyDecisionError("W3_CURRENT_WEALTH_WITNESS_EXPIRED")
+            from src.solve.menu_adapter import native_holdings_snapshot_from_positions
+
+            holdings_snapshot = native_holdings_snapshot_from_positions(
+                family_key=case.family_id,
+                omega=omega,
+                positions=solve_positions,
+                ledger_snapshot_id=str(solve_wealth_witness.ledger_snapshot_id),
+            )
+            engine = _wrap_engine_with_solve_shim(
+                engine,
+                wealth_witness=solve_wealth_witness,
+                holdings_snapshot=holdings_snapshot,
+            )
         decision = engine.decide(
             case,
             omega,
@@ -1660,6 +1759,10 @@ def decide_family_via_spine(
             served_band=served_band,
             served_payoff_q_lcb_by_side=served_payoff_q_lcb_by_side,
         )
+        solution_plan, solution_projection = _solve_artifacts(
+            engine,
+            enabled=use_w3_solve,
+        )
         prepared_global_family = None
         global_prepare_reason = None
         if require_global_probability_witness:
@@ -1673,6 +1776,8 @@ def decide_family_via_spine(
                     ),
                     captured_at_utc=captured_at_utc,
                     max_age=global_probability_max_age,
+                    solution_plan=solution_plan,
+                    solution_projection=solution_projection,
                 )
             except Exception as exc:  # noqa: BLE001 - legacy family decision remains usable
                 global_prepare_reason = (
@@ -1726,6 +1831,8 @@ def decide_family_via_spine(
             decision=decision,
             global_family=prepared_global_family,
             global_prepare_reason=global_prepare_reason,
+            solution_plan=solution_plan,
+            solution_projection=solution_projection,
         )
 
     # ROUTE IDENTITY GUARD (consult_review_pr409.md §5 BLOCKER). The unchanged submit
@@ -1744,6 +1851,8 @@ def decide_family_via_spine(
             decision=decision,
             global_family=prepared_global_family,
             global_prepare_reason=global_prepare_reason,
+            solution_plan=solution_plan,
+            solution_projection=solution_projection,
         )
 
     proof_index = _proof_by_bin_side(route_proofs, candidate_bin_id)
@@ -1761,6 +1870,8 @@ def decide_family_via_spine(
             decision=decision,
             global_family=prepared_global_family,
             global_prepare_reason=global_prepare_reason,
+            solution_plan=solution_plan,
+            solution_projection=solution_projection,
         )
 
     overlay_result = _overlay_spine_economics_onto_proof_with_reason(selected_proof, decision)
@@ -1775,6 +1886,8 @@ def decide_family_via_spine(
             decision=decision,
             global_family=prepared_global_family,
             global_prepare_reason=global_prepare_reason,
+            solution_plan=solution_plan,
+            solution_projection=solution_projection,
         )
     return SpineDecisionResult(
         selected_proof=overlay_result.proof,
@@ -1782,6 +1895,8 @@ def decide_family_via_spine(
         decision=decision,
         global_family=prepared_global_family,
         global_prepare_reason=global_prepare_reason,
+        solution_plan=solution_plan,
+        solution_projection=solution_projection,
     )
 
 

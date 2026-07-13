@@ -392,8 +392,10 @@ def entry_price_floor_decision(
     declared_floor = _finite_submit_float(declared_min_entry_price)
     if declared_floor is None:
         declared_floor = 0.0
-    # Current-state solving may replace legacy ranking heuristics; it must not
-    # weaken the executable floor declared by the selected intent.
+    # A legacy qkernel marker may select the side-specific live floor, but it
+    # cannot lower the price floor already declared by the intent.  Only the
+    # separately identity-bound current-state certificate bypasses legacy
+    # price heuristics at its downstream verification boundaries.
     effective_min_entry_price = max(declared_floor, live_floor)
     return EntryPriceFloorDecision(
         live_min_entry_price=live_floor,

@@ -288,7 +288,7 @@ from src.strategy.redecision import (
     SubmitRecaptureDecision,
     SUBMIT_ABORT_STATES,
 )
-from src.types.market import Bin
+from src.types.market import Bin, bin_counts_from_array
 # QLCB_HONESTY.md FIX-C — the EXISTING settlement σ-floor (state/settlement_sigma_floor.json,
 # 232 cells, median 3.18C realized residual) + its WMO-aware settlement-preimage bin
 # integrator. Module-level so the live replacement q_lcb floor reuses the SAME antibody
@@ -5078,6 +5078,7 @@ def event_bound_live_adapter_from_trade_conn(
             from src.engine.global_auction_universe import (
                 bind_current_global_probability_tokens,
                 capture_current_global_book_epoch,
+                fetch_current_gamma_markets,
             )
             from src.data.market_scanner import _gamma_get
 
@@ -5099,27 +5100,22 @@ def event_bound_live_adapter_from_trade_conn(
                 float(os.environ.get("ZEUS_GLOBAL_AUCTION_GAMMA_TIMEOUT_SECONDS", "6.0")),
             )
 
-            def _gamma_event(slug):
-                response = _gamma_get(
-                    "/events",
-                    params={"slug": slug},
+            gamma_batch_requests = 0
+
+            def _gamma_markets(condition_ids):
+                nonlocal gamma_batch_requests
+                markets, gamma_batch_requests = fetch_current_gamma_markets(
+                    condition_ids,
+                    gamma_get=_gamma_get,
                     timeout=gamma_timeout,
                 )
-                if response.status_code != 200:
-                    return None
-                payload = response.json()
-                if isinstance(payload, list):
-                    return next(
-                        (event for event in payload if isinstance(event, Mapping)),
-                        None,
-                    )
-                return payload if isinstance(payload, Mapping) else None
+                return markets
 
             gamma_metadata = {}
             bound_probabilities = bind_current_global_probability_tokens(
                 forecast_conn,
                 probability_witnesses=probabilities,
-                get_gamma_event=_gamma_event,
+                get_gamma_markets=_gamma_markets,
                 trade_conn=trade_conn,
                 checked_at_utc=_at,
                 max_workers=16,
@@ -5127,10 +5123,11 @@ def event_bound_live_adapter_from_trade_conn(
             )
             logging.getLogger(__name__).info(
                 "global book epoch stage completed: token_bind elapsed_s=%.3f "
-                "families=%d metadata=%d",
+                "families=%d metadata=%d gamma_requests=%d",
                 _time.monotonic() - _book_started,
                 len(bound_probabilities),
                 len(gamma_metadata),
+                gamma_batch_requests,
             )
             # Every whole-universe fence refreshes current Gamma tradeability.
             # Cached rows remain useful only as a complete batch-local overlay;
@@ -5148,7 +5145,7 @@ def event_bound_live_adapter_from_trade_conn(
                     clock=lambda: datetime.now(UTC),
                     max_age=FRESHNESS_WINDOW_DEFAULT,
                     batch_size=batch_size,
-                    book_fetch_workers=2,
+                    book_fetch_workers=4,
                     metadata_overrides=book_metadata_by_key,
                 )
             logging.getLogger(__name__).info(
@@ -6961,6 +6958,34 @@ def _global_actuation_current_wealth_block_reason(
     return None
 
 
+def _current_solve_ledger_inputs(
+    trade_conn: sqlite3.Connection,
+    *,
+    decision_time: datetime,
+) -> tuple[object, tuple[object, ...]]:
+    """Read spendable cash and exact open claims from one canonical DB snapshot."""
+
+    from src.engine.global_auction_universe import current_portfolio_wealth_witness
+    from src.state.collateral_ledger import COLLATERAL_SNAPSHOT_MAX_AGE_SECONDS
+    from src.state.portfolio import load_runtime_open_portfolio
+
+    owns_txn = not trade_conn.in_transaction
+    if owns_txn:
+        trade_conn.execute("BEGIN")
+    try:
+        state = load_runtime_open_portfolio(trade_conn)
+        witness = current_portfolio_wealth_witness(
+            trade_conn,
+            decision_at_utc=decision_time,
+            max_age=timedelta(seconds=float(COLLATERAL_SNAPSHOT_MAX_AGE_SECONDS)),
+            portfolio_state=state,
+        )
+        return witness, tuple(state.positions)
+    finally:
+        if owns_txn and trade_conn.in_transaction:
+            trade_conn.rollback()
+
+
 def _current_global_actuation_prepared_family(
     event: OpportunityEvent,
     *,
@@ -7440,6 +7465,17 @@ def _build_event_bound_no_submit_receipt_core(
         qkernel_spine_enabled,
     )
 
+    _solve_ledger_inputs_cache: tuple[object, tuple[object, ...]] | None = None
+
+    def _event_solve_ledger_inputs() -> tuple[object, tuple[object, ...]]:
+        nonlocal _solve_ledger_inputs_cache
+        if _solve_ledger_inputs_cache is None:
+            _solve_ledger_inputs_cache = _current_solve_ledger_inputs(
+                trade_conn,
+                decision_time=decision_time,
+            )
+        return _solve_ledger_inputs_cache
+
     # DAY0 is the same family optimizer with an observed-boundary input. The qkernel
     # bridge now reads DAY0_EXTREME_UPDATED payload authority into a Day0ObservationState
     # and consumes the reactor-served Day0 q/q_lcb proof surface, so it must not fall
@@ -7530,6 +7566,7 @@ def _build_event_bound_no_submit_receipt_core(
                     baseline_usd_provider=_robust_marginal_utility_baseline_usd,
                     per_bin_yes_q_lcb=_per_bin_yes_q_lcb(proofs),
                     extra_exposure_by_bin_id=(_selection_exposure or None),
+                    solve_ledger_input_provider=_event_solve_ledger_inputs,
                 )
                 proof = _spine_result.selected_proof
                 _spine_no_trade_reason = _spine_result.no_trade_reason
@@ -10874,9 +10911,7 @@ def _build_event_bound_taker_quality_proof(
         "qkernel_low_price_floor_authorized": str(
             floor_decision.qkernel_low_price_floor_authorized
         ),
-        "entry_price_floor_applies": str(
-            not floor_decision.qkernel_low_price_floor_authorized
-        ),
+        "entry_price_floor_applies": str(not current_state_solve),
         "entry_price_floor_pass": str(entry_price_floor_pass),
         "min_expected_profit_usd": str(min_expected_profit),
         "min_submit_edge_density": str(min_submit_edge_density),
@@ -24559,9 +24594,8 @@ def _make_emos_bootstrap_sampler(mu_native: float, sigma_native: float):
     def _sampler(analysis, n_members):
         draws = analysis._rng.normal(float(mu_native), float(sigma_native), int(n_members))
         measured = analysis._settle(draws)
-        vec = np.array(
-            [analysis._bin_probability(measured, bb) for bb in analysis.bins], dtype=float
-        )
+        vec = bin_counts_from_array(measured, analysis.bins).astype(float)
+        vec /= float(len(measured))
         # Guard: NaN/inf or zero-sum => fall back to p_cal so the caller always
         # receives a valid finite normalized distribution (avoids fail-close in
         # _finite_probability_distribution when the flag is ON).
@@ -24710,9 +24744,8 @@ def _make_day0_bootstrap_sampler(
             else:
                 draws = np.minimum(draws, float(rounded))
         measured = analysis._settle(draws)
-        vec = np.array(
-            [analysis._bin_probability(measured, bb) for bb in analysis.bins], dtype=float
-        )
+        vec = bin_counts_from_array(measured, analysis.bins).astype(float)
+        vec /= float(len(measured))
         if vec.shape == mask_arr.shape:
             vec = vec * mask_arr
         if not np.all(np.isfinite(vec)):

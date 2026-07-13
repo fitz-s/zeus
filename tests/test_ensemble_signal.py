@@ -21,8 +21,13 @@ import pytest
 
 from src.config import City
 from src.contracts.settlement_semantics import SettlementSemantics
-from src.signal.ensemble_signal import EnsembleSignal, SIGMA_INSTRUMENT, p_raw_vector_from_maxes
+from src.signal.ensemble_signal import (
+    EnsembleSignal,
+    p_raw_vector_from_maxes,
+    sigma_instrument_for_city,
+)
 from src.types import Bin
+from src.types.market import bin_counts_from_array
 
 
 # Test city fixture
@@ -400,3 +405,58 @@ class TestDeterministicMCSeed:
         np.testing.assert_array_equal(p_a, p_b, err_msg=(
             "Permuted member_maxes must produce identical p_raw — sorted hash invariant broken"
         ))
+
+
+@pytest.mark.parametrize(
+    ("semantics", "bins", "extra_member_sigma", "n_mc"),
+    (
+        (NYC_SEMANTICS, NYC_BINS, 0.0, 1),
+        (NYC_SEMANTICS, NYC_BINS, 0.75, 257),
+        (
+            SettlementSemantics(
+                resolution_source="floor-test",
+                measurement_unit="F",
+                precision=1.0,
+                rounding_rule="floor",
+                finalization_time="12:00:00Z",
+            ),
+            NYC_BINS[2:-2],
+            0.25,
+            503,
+        ),
+    ),
+)
+def test_vectorized_mc_is_bit_identical_to_scalar_oracle(
+    semantics,
+    bins,
+    extra_member_sigma,
+    n_mc,
+) -> None:
+    members = np.linspace(31.25, 52.75, 51)
+    effective_sigma = float(
+        np.hypot(
+            sigma_instrument_for_city(NYC).value,
+            extra_member_sigma,
+        )
+    )
+    scalar_rng = np.random.default_rng(20260713)
+    expected = np.zeros(len(bins))
+    for _ in range(n_mc):
+        noised = members + scalar_rng.normal(0, effective_sigma, len(members))
+        measured = semantics.round_values(noised)
+        expected += bin_counts_from_array(measured, bins)
+    expected /= float(len(members) * n_mc)
+    if (total := expected.sum()) > 0:
+        expected /= total
+
+    actual = p_raw_vector_from_maxes(
+        members,
+        NYC,
+        semantics,
+        bins,
+        n_mc=n_mc,
+        rng=np.random.default_rng(20260713),
+        extra_member_sigma=extra_member_sigma,
+    )
+
+    np.testing.assert_array_equal(actual, expected)
