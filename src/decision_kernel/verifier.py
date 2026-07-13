@@ -11,6 +11,7 @@ from src.decision_kernel import claims
 from src.decision_kernel.canonicalization import (
     qkernel_declares_current_state,
     qkernel_current_state_identity_hash,
+    qkernel_global_current_state_rejection_reason,
     stable_hash,
 )
 from src.decision_kernel.certificate import DecisionCertificate, certificate_hash_for
@@ -516,9 +517,8 @@ def _verify_actionable_qkernel_economics(
         raise CertificateVerificationError("actionable qkernel_execution_economics missing")
     if str(economics.get("source") or "").strip() != "qkernel_spine":
         raise CertificateVerificationError("actionable qkernel source must be qkernel_spine")
-    if qkernel_declares_current_state(economics) and not _current_state_solve_payload(
-        payload
-    ):
+    current_state_solve = _current_state_solve_payload(payload)
+    if qkernel_declares_current_state(economics) and not current_state_solve:
         raise CertificateVerificationError("actionable qkernel current-state identity invalid")
     _verify_qkernel_selection_guard(economics, label="actionable qkernel")
     if str(payload.get("event_type") or "").strip() == DAY0_ACTIONABLE_EVENT_TYPE:
@@ -547,45 +547,45 @@ def _verify_actionable_qkernel_economics(
         raise CertificateVerificationError("actionable qkernel payoff_q_lcb mismatches q_lcb_5pct")
     cost = _finite_float(economics.get("cost"), "actionable qkernel cost")
     edge_lcb = _finite_float(economics.get("edge_lcb"), "actionable qkernel edge_lcb")
-    optimal_delta_u = _finite_float(
-        economics.get("optimal_delta_u"), "actionable qkernel optimal_delta_u"
-    )
-    delta_u_at_min = _finite_float(
-        economics.get("delta_u_at_min"), "actionable qkernel delta_u_at_min"
-    )
-    optimal_stake_usd = _finite_float(
-        economics.get("optimal_stake_usd"), "actionable qkernel optimal_stake_usd"
-    )
-    false_edge_rate = _finite_float(
-        economics.get("false_edge_rate"), "actionable qkernel false_edge_rate"
-    )
     if cost <= 0.0 or cost >= 1.0:
         raise CertificateVerificationError("actionable qkernel cost must be in (0, 1)")
     if edge_lcb <= 0.0:
         raise CertificateVerificationError("actionable qkernel edge_lcb must be positive")
-    if optimal_delta_u <= 0.0:
-        raise CertificateVerificationError(
-            "actionable qkernel optimal_delta_u must be positive"
-        )
-    if delta_u_at_min <= 0.0:
-        raise CertificateVerificationError(
-            "actionable qkernel delta_u_at_min must be positive"
-        )
-    if optimal_stake_usd <= 0.0:
-        raise CertificateVerificationError(
-            "actionable qkernel optimal_stake_usd must be positive"
-        )
-    try:
-        from src.strategy.selection_family import DEFAULT_FDR_ALPHA
-
-        max_false_edge_rate = float(DEFAULT_FDR_ALPHA)
-    except Exception:  # noqa: BLE001
-        max_false_edge_rate = 0.05
-    if not (0.0 < false_edge_rate <= max_false_edge_rate):
-        raise CertificateVerificationError("actionable qkernel false_edge_rate blocks")
     if abs((payoff_q_lcb - cost) - edge_lcb) > 1e-6:
         raise CertificateVerificationError("actionable qkernel payoff edge inconsistent")
-    if not _current_state_solve_payload(payload):
+    if not current_state_solve:
+        optimal_delta_u = _finite_float(
+            economics.get("optimal_delta_u"), "actionable qkernel optimal_delta_u"
+        )
+        delta_u_at_min = _finite_float(
+            economics.get("delta_u_at_min"), "actionable qkernel delta_u_at_min"
+        )
+        optimal_stake_usd = _finite_float(
+            economics.get("optimal_stake_usd"), "actionable qkernel optimal_stake_usd"
+        )
+        false_edge_rate = _finite_float(
+            economics.get("false_edge_rate"), "actionable qkernel false_edge_rate"
+        )
+        if optimal_delta_u <= 0.0:
+            raise CertificateVerificationError(
+                "actionable qkernel optimal_delta_u must be positive"
+            )
+        if delta_u_at_min <= 0.0:
+            raise CertificateVerificationError(
+                "actionable qkernel delta_u_at_min must be positive"
+            )
+        if optimal_stake_usd <= 0.0:
+            raise CertificateVerificationError(
+                "actionable qkernel optimal_stake_usd must be positive"
+            )
+        try:
+            from src.strategy.selection_family import DEFAULT_FDR_ALPHA
+
+            max_false_edge_rate = float(DEFAULT_FDR_ALPHA)
+        except Exception:  # noqa: BLE001
+            max_false_edge_rate = 0.05
+        if not (0.0 < false_edge_rate <= max_false_edge_rate):
+            raise CertificateVerificationError("actionable qkernel false_edge_rate blocks")
         quality_reason = live_entry_probability_quality_rejection_reason(
             q_lcb=payoff_q_lcb,
             direction=payload.get("direction"),
@@ -606,9 +606,12 @@ def _verify_actionable_qkernel_economics(
             raise CertificateVerificationError(
                 "actionable qkernel roi frontier not useful"
             )
-    if not _qkernel_direction_admitted(economics, direction=payload.get("direction")):
+    if not current_state_solve and not _qkernel_direction_admitted(
+        economics,
+        direction=payload.get("direction"),
+    ):
         raise CertificateVerificationError("actionable qkernel direction admission missing")
-    if economics.get("coherence_allows") is not True:
+    if not current_state_solve and economics.get("coherence_allows") is not True:
         raise CertificateVerificationError("actionable qkernel coherence_allows must be true")
 
 
@@ -1662,7 +1665,7 @@ def _current_state_solve_payload(payload: dict) -> bool:
         n_draws = int(economics.get("selection_guard_n") or 0)
     except (TypeError, ValueError):
         return False
-    return (
+    current_state_valid = (
         str(payload.get("selection_authority_applied") or "").strip() == "qkernel_spine"
         and str(economics.get("source") or "").strip() == "qkernel_spine"
         and bool(str(economics.get("decision_id") or "").strip())
@@ -1678,6 +1681,25 @@ def _current_state_solve_payload(payload: dict) -> bool:
         and q_lcb_sample_hash == sample_hash
         and selection_hash == sample_hash
         and n_draws >= 2
+    )
+    if not current_state_valid:
+        return False
+    global_declared = any(
+        field in economics
+        for field in (
+            "global_actuation_identity",
+            "global_candidate_id",
+            "global_target_shares",
+            "global_expected_cost_usd",
+            "global_max_spend_usd",
+        )
+    )
+    return not global_declared or (
+        qkernel_global_current_state_rejection_reason(
+            economics,
+            direction=str(payload.get("direction") or ""),
+        )
+        is None
     )
 
 
@@ -1814,9 +1836,8 @@ def _verify_pre_submit_qkernel_economics(
         raise CertificateVerificationError("pre-submit qkernel_execution_economics missing")
     if not isinstance(economics, dict):
         raise CertificateVerificationError("pre-submit qkernel_execution_economics must be object")
-    if qkernel_declares_current_state(economics) and not _current_state_solve_payload(
-        pre_submit
-    ):
+    current_state_solve = _current_state_solve_payload(pre_submit)
+    if qkernel_declares_current_state(economics) and not current_state_solve:
         raise CertificateVerificationError("pre-submit qkernel current-state identity invalid")
     if str(pre_submit.get("selection_authority_applied") or "").strip() != "qkernel_spine":
         raise CertificateVerificationError("pre-submit qkernel selection authority missing")
@@ -1856,9 +1877,12 @@ def _verify_pre_submit_qkernel_economics(
         raise CertificateVerificationError("pre-submit qkernel payoff_q_point mismatches q_live")
     if not math.isclose(payoff_q_lcb, q_lcb, rel_tol=1e-9, abs_tol=1e-6):
         raise CertificateVerificationError("pre-submit qkernel payoff_q_lcb mismatches q_lcb_5pct")
-    if not _qkernel_direction_admitted(economics, direction=pre_submit.get("direction")):
+    if not current_state_solve and not _qkernel_direction_admitted(
+        economics,
+        direction=pre_submit.get("direction"),
+    ):
         raise CertificateVerificationError("pre-submit qkernel direction admission missing")
-    if economics.get("coherence_allows") is not True:
+    if not current_state_solve and economics.get("coherence_allows") is not True:
         raise CertificateVerificationError("pre-submit qkernel coherence_allows must be true")
 
 

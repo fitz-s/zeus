@@ -30,6 +30,7 @@ from src.engine.event_reactor_adapter import (
     _record_qkernel_selection_family_facts,
 )
 from src.events.candidate_binding import MarketTopologyCandidate
+from src.events.reactor import EventSubmissionReceipt
 from src.contracts.execution_intent import DecisionSourceContext
 from src.decision_kernel import claims
 from src.decision_kernel.canonicalization import stable_hash
@@ -122,6 +123,7 @@ def _global_current_qkernel_cert(*, side: str = "YES") -> dict:
     cert = _current_qkernel_cert(side=side)
     for field in (
         "candidate_id",
+        "bin_id",
         "route_id",
         "delta_u_at_min",
         "optimal_stake_usd",
@@ -138,6 +140,7 @@ def _global_current_qkernel_cert(*, side: str = "YES") -> dict:
         global_actuation_identity="global-actuation-1",
         global_optimum_semantics="CUT_TIME_GLOBAL_OPTIMUM",
         global_candidate_id="global-candidate-1",
+        global_bin_id="bin-1",
         global_universe_witness_identity="global-universe-1",
         global_wealth_witness_identity="global-wealth-1",
         global_selection_epoch_identity="global-epoch-1",
@@ -1094,6 +1097,7 @@ def test_global_current_certificate_accepts_live_complement_rounding(
 @pytest.mark.parametrize(
     ("field", "replacement"),
     (
+        ("global_bin_id", None),
         ("global_terminal_win_probability_lcb", None),
         ("global_terminal_loss_probability_ucb", 0.60),
         ("global_terminal_loss_payoff_usd", "-0.99"),
@@ -1155,6 +1159,122 @@ def test_broken_global_certificate_cannot_fall_back_to_legacy_route_fields():
     ).startswith(
         "QKERNEL_ACTUAL_SUBMIT_QUALITY_FLOOR:"
         "GLOBAL_CURRENT_STATE_EXECUTION_ECONOMICS_INVALID:"
+    )
+
+
+@pytest.mark.parametrize(
+    ("side", "direction"),
+    (("YES", "buy_yes"), ("NO", "buy_no")),
+)
+def test_actionable_payload_preserves_sealed_global_execution_economics(
+    side,
+    direction,
+):
+    cert = _global_current_qkernel_cert(side=side)
+    receipt = EventSubmissionReceipt(
+        False,
+        "global-event-1",
+        "global-snapshot-1",
+        proof_accepted=True,
+        strategy_key="forecast_qkernel_entry",
+        family_id="family-1",
+        candidate_id="global-candidate-1",
+        condition_id="condition-1",
+        token_id=f"{side.lower()}-1",
+        direction=direction,
+        candidate_bin_id="bin-1",
+        q_source="replacement_0_1",
+        selection_authority_applied="qkernel_spine",
+        q_live=0.70,
+        q_lcb_5pct=0.60,
+        qkernel_execution_economics=cert,
+    )
+    live_cap = SimpleNamespace(
+        payload={
+            "usage_id": "usage-1",
+            "reserved_notional_usd": 1.0,
+        }
+    )
+
+    payload = era._actionable_payload_from_receipt(receipt, live_cap)
+    payload["event_type"] = "FORECAST_SNAPSHOT_READY"
+
+    assert payload["qkernel_execution_economics"] == cert
+    _assert_live_entry_submit_authority(payload)
+    taker = era._build_event_bound_taker_quality_proof(
+        actionable_payload=payload,
+        order_mode="TAKER",
+        fresh_best_bid=0.03,
+        fresh_best_ask=0.04,
+    )
+    assert taker is not None and taker["passed"] is True
+
+
+def test_global_bin_identity_mutation_breaks_current_state_seal():
+    cert = _global_current_qkernel_cert()
+    sealed = cert["current_state_identity_hash"]
+
+    cert["global_bin_id"] = "other-bin"
+
+    assert era.qkernel_current_state_identity_hash(cert) != sealed
+    assert (
+        era._valid_selected_qkernel_execution_economics_payload(
+            cert,
+            direction="buy_yes",
+        )
+        is None
+    )
+
+
+def test_global_actuation_submit_revalidates_current_wealth_economics(monkeypatch):
+    from src.engine import global_auction_universe
+
+    monkeypatch.setattr(
+        global_auction_universe,
+        "current_portfolio_wealth_witness",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            economic_identity="wealth-economics-1"
+        ),
+    )
+    actuation = SimpleNamespace(wealth_economic_identity="wealth-economics-1")
+
+    assert era._global_actuation_current_wealth_block_reason(
+        object(),
+        global_actuation=actuation,
+        decision_time=datetime.now(timezone.utc),
+    ) is None
+
+    actuation.wealth_economic_identity = "wealth-economics-old"
+    assert era._global_actuation_current_wealth_block_reason(
+        object(),
+        global_actuation=actuation,
+        decision_time=datetime.now(timezone.utc),
+    ) == "GLOBAL_PREFLIGHT_WEALTH_SUPERSEDED"
+
+
+def test_global_actuation_submit_blocks_ambiguous_current_wealth(monkeypatch):
+    from src.engine import global_auction_universe
+
+    def ambiguous(*_args, **_kwargs):
+        raise ValueError("CURRENT_WEALTH_INFLIGHT_BUY_AMBIGUOUS")
+
+    monkeypatch.setattr(
+        global_auction_universe,
+        "current_portfolio_wealth_witness",
+        ambiguous,
+    )
+
+    reason = era._global_actuation_current_wealth_block_reason(
+        object(),
+        global_actuation=SimpleNamespace(
+            wealth_economic_identity="wealth-economics-1"
+        ),
+        decision_time=datetime.now(timezone.utc),
+    )
+
+    assert reason == (
+        "GLOBAL_PREFLIGHT_WEALTH_UNAVAILABLE:ValueError:"
+        "CURRENT_WEALTH_INFLIGHT_BUY_AMBIGUOUS"
     )
 
 

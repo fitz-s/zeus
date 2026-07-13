@@ -66,6 +66,7 @@ def _global_current_economics_live_admitted(economics: dict[str, Any]) -> bool:
         return False
     for field in (
         "global_candidate_id",
+        "global_bin_id",
         "global_universe_witness_identity",
         "global_wealth_witness_identity",
         "global_selection_epoch_identity",

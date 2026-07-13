@@ -52,6 +52,7 @@ def _current_state_econ(**overrides) -> dict:
         global_actuation_identity="global-current-1",
         global_optimum_semantics="CUT_TIME_GLOBAL_OPTIMUM",
         global_candidate_id="candidate-current-1",
+        global_bin_id="bin-1",
         global_universe_witness_identity="universe-current-1",
         global_wealth_witness_identity="wealth-current-1",
         global_selection_epoch_identity="epoch-current-1",
@@ -83,6 +84,15 @@ def _current_state_econ(**overrides) -> dict:
         global_terminal_payoff_semantics="BINARY_0_1",
         **overrides,
     )
+    for legacy_field in (
+        "delta_u_at_min",
+        "optimal_stake_usd",
+        "optimal_delta_u",
+        "false_edge_rate",
+        "direction_law_ok",
+        "coherence_allows",
+    ):
+        payload.pop(legacy_field, None)
     payload["current_state_identity_hash"] = qkernel_current_state_identity_hash(
         payload
     )

@@ -1485,6 +1485,7 @@ def test_global_current_winner_survives_book_and_sizes_from_its_sealed_curve():
             "global_actuation_identity": "global-actuation-current",
             "global_optimum_semantics": "CUT_TIME_GLOBAL_OPTIMUM",
             "global_candidate_id": "global-candidate-current",
+            "global_bin_id": "bin-1",
         "global_universe_witness_identity": "global-universe-current",
         "global_wealth_witness_identity": "global-wealth-current",
         "global_selection_epoch_identity": "global-epoch-current",

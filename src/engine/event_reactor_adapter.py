@@ -2918,6 +2918,19 @@ def _valid_selected_qkernel_execution_economics_payload(
     return _valid_qkernel_execution_economics_payload(cert, direction=direction)
 
 
+def _selected_qkernel_execution_bin_id(cert: Mapping[str, Any]) -> str:
+    """Return the leg identity from the selected certificate's own grammar."""
+
+    if _declares_global_current_state_execution_economics(cert):
+        return str(cert.get("global_bin_id") or "").strip()
+    bin_id = str(cert.get("bin_id") or "").strip()
+    if bin_id:
+        return bin_id
+    candidate_id = str(cert.get("candidate_id") or "").strip()
+    parts = candidate_id.split(":", 2)
+    return parts[1].strip() if len(parts) >= 2 else ""
+
+
 def _qkernel_current_state_solve_economics(cert: Any) -> bool:
     """Whether the economics were derived solely from this decision's served q band.
 
@@ -5026,6 +5039,22 @@ def event_bound_live_adapter_from_trade_conn(
                     ),
                     real_order_submit_enabled=real_order_submit_enabled,
                 )
+            wealth_block = _global_actuation_current_wealth_block_reason(
+                trade_conn,
+                global_actuation=actuation,
+                decision_time=now,
+            )
+            if wealth_block is not None:
+                return _stamp_live_adapter_lane(
+                    EventSubmissionReceipt(
+                        False,
+                        event.event_id,
+                        event.causal_snapshot_id,
+                        reason=wealth_block,
+                        proof_accepted=False,
+                    ),
+                    real_order_submit_enabled=real_order_submit_enabled,
+                )
             _consumed_global_preflight_tokens[token.token_id] = token.expires_at
             return _stamp_live_adapter_lane(
                 _submit_inner(
@@ -6812,6 +6841,7 @@ def _global_actuation_selected_proof(
                 getattr(global_actuation, "decision_at_utc", "") or ""
             ),
             "global_candidate_id": candidate.candidate_id,
+            "global_bin_id": candidate.bin_id,
             "global_book_hash": candidate.executable_cost_curve.book_hash,
             "global_jit_book_hash": rebound.executable_cost_curve.book_hash,
             "global_jit_venue_book_hash": jit_venue_book_hash,
@@ -6876,6 +6906,58 @@ def _global_actuation_local_spine_failure_reason(
     ):
         return None
     return reason
+
+
+def _global_actuation_family_rebalance_block_reason(
+    trade_conn: sqlite3.Connection,
+    *,
+    family_key: str,
+) -> str | None:
+    """Keep a sealed global order behind any active same-family order lease."""
+
+    from src.strategy.family_rebalance import active_rebalance_lease_for_family
+
+    lease = active_rebalance_lease_for_family(
+        trade_conn,
+        family_key=family_key,
+    )
+    if lease is None:
+        return None
+    return (
+        "GLOBAL_ACTUATION_FAMILY_REBALANCE_IN_FLIGHT:"
+        f"{lease.operation}:{lease.status}"
+    )
+
+
+def _global_actuation_current_wealth_block_reason(
+    trade_conn: sqlite3.Connection,
+    *,
+    global_actuation: object,
+    decision_time: datetime,
+) -> str | None:
+    """Rebuild capital truth immediately before consuming the submit capability."""
+
+    from src.engine.global_auction_universe import current_portfolio_wealth_witness
+    from src.state.collateral_ledger import COLLATERAL_SNAPSHOT_MAX_AGE_SECONDS
+
+    expected = str(
+        getattr(global_actuation, "wealth_economic_identity", "") or ""
+    ).strip()
+    if not expected:
+        return "GLOBAL_PREFLIGHT_WEALTH_ECONOMIC_IDENTITY_MISSING"
+    try:
+        current = current_portfolio_wealth_witness(
+            trade_conn,
+            decision_at_utc=decision_time,
+            max_age=timedelta(
+                seconds=float(COLLATERAL_SNAPSHOT_MAX_AGE_SECONDS)
+            ),
+        )
+    except Exception as exc:  # noqa: BLE001 - capital ambiguity is a submit veto.
+        return f"GLOBAL_PREFLIGHT_WEALTH_UNAVAILABLE:{type(exc).__name__}:{exc}"
+    if current.economic_identity != expected:
+        return "GLOBAL_PREFLIGHT_WEALTH_SUPERSEDED"
+    return None
 
 
 def _current_global_actuation_prepared_family(
@@ -8436,8 +8518,11 @@ def _build_event_bound_no_submit_receipt_core(
         # family-total targets, so same-token selections become residual fill-up and
         # sibling selections become close-before-open SHIFT_BIN. A sealed global
         # actuation already prices the current portfolio as endowment and sizes one
-        # incremental order against its joint terminal wealth; reapplying the local
-        # family-total transform would change that optimum after certification.
+        # incremental order against its certified conservative terminal-wealth
+        # envelope; reapplying the local family-total transform would change that
+        # optimum after certification. Active family-rebalance leases remain a hard
+        # veto: global sizing does not license a second order beside an in-flight exit
+        # or counter-entry.
         #
         # For a freshly-selected winning leg that is the SAME token as an existing held
         # position, the family-total ΔU stake (_robust_stake_usd) is NOT what we submit
@@ -8449,6 +8534,37 @@ def _build_event_bound_no_submit_receipt_core(
         # bound: overriding _robust_stake_usd here keeps the portfolio reservation,
         # cost-basis hash, receipt kelly_size_usd, actionable cert and USD->shares
         # conversion ALL coherent off the one value (consult: the single chokepoint).
+        if _recapture.may_submit and global_actuation is not None:
+            _global_shift_block = _global_actuation_family_rebalance_block_reason(
+                trade_conn,
+                family_key=str(family.family_id or ""),
+            )
+            if _global_shift_block is not None:
+                return _with_shrink(EventSubmissionReceipt(
+                    False,
+                    event.event_id,
+                    event.causal_snapshot_id,
+                    reason=_global_shift_block,
+                    city=family.city,
+                    target_date=family.target_date,
+                    metric=family.metric,
+                    condition_id=str(candidate.condition_id or ""),
+                    token_id=selected_token_id,
+                    executable_snapshot_id=proof.executable_snapshot_id,
+                    family_id=family.family_id,
+                    bin_label=candidate.bin.label,
+                    direction=direction,
+                    q_live=receipt_q_live,
+                    q_lcb_5pct=receipt_q_lcb,
+                    **_coverage_hierarchy_receipt_kwargs,
+                    c_fee_adjusted=execution_price.value,
+                    c_cost_95pct=proof.c_cost_95pct,
+                    p_fill_lcb=proof.p_fill_lcb,
+                    trade_score=trade_score,
+                    native_quote_available=True,
+                    source_status="MATCH",
+                    family_complete=True,
+                ))
         if _recapture.may_submit and global_actuation is None:
             _family_key = str(family.family_id or "")
             _existing_shift_lease = _shift_bin_wiring.active_shift_lease_for_family(
@@ -10441,8 +10557,8 @@ def _build_event_bound_taker_quality_proof(
         # ALSO be (a) under qkernel execution authority for THIS payload
         # (q_source == "qkernel_spine"), and (b) bound to the SELECTED candidate the
         # payload is for (cert.candidate_id == payload.candidate_id). The cert's own
-        # source/route/side/bin consistency is enforced by
-        # _valid_qkernel_execution_economics_payload. Any absence OR mismatch FAILS
+        # source/side/bin consistency is enforced by the selected certificate grammar.
+        # Any absence OR mismatch FAILS
         # CLOSED here (passed=False with a typed reason) — it does NOT silently fall
         # through to the q_lcb_5pct path, because a present-but-unbound/unstamped cert is
         # a provenance fault, not a license to size off a different authority's q. This
@@ -10473,7 +10589,7 @@ def _build_event_bound_taker_quality_proof(
                 "maker_expected_profit_usd": "0",
                 "incremental_expected_profit_usd": "0",
             }
-        qkernel_cert = _valid_qkernel_execution_economics_payload(
+        qkernel_cert = _valid_selected_qkernel_execution_economics_payload(
             actionable_payload.get("qkernel_execution_economics"),
             direction=direction,
         )
@@ -10501,15 +10617,10 @@ def _build_event_bound_taker_quality_proof(
         # bridge._candidate_bin_id_for), threaded onto the payload as candidate_bin_id.
         # Identity holds if EITHER a full candidate_id match (test/legacy, same space)
         # OR a bin_id match (live spine) — both are sufficient proofs of the same leg,
-        # and the side is already validated by _valid_qkernel_execution_economics_payload
+        # and the side is already validated by the selected certificate validator
         # (bin_id + side == full leg identity), so the OR never loosens the foreign-cert
         # guard: a cert for a different bin/side fails both disjuncts.
-        cert_bin_id = str(qkernel_cert.get("bin_id") or "").strip()
-        if not cert_bin_id and cert_candidate_id:
-            # bin_id is the middle segment of the qkernel candidate_id (SIDE:bin_id:route_id)
-            _cid_parts = cert_candidate_id.split(":", 2)
-            if len(_cid_parts) >= 2:
-                cert_bin_id = _cid_parts[1].strip()
+        cert_bin_id = _selected_qkernel_execution_bin_id(qkernel_cert)
         payload_bin_id = str(actionable_payload.get("candidate_bin_id") or "").strip()
         _candidate_id_match = bool(
             cert_candidate_id
@@ -11799,7 +11910,7 @@ def _assert_forecast_entry_uses_qkernel_authority(actionable_payload: Mapping[st
     if str(actionable_payload.get("selection_authority_applied") or "").strip() != "qkernel_spine":
         raise ValueError("LIVE_ENTRY_QKERNEL_AUTHORITY_REQUIRED")
     direction = str(actionable_payload.get("direction") or "")
-    cert = _valid_qkernel_execution_economics_payload(
+    cert = _valid_selected_qkernel_execution_economics_payload(
         actionable_payload.get("qkernel_execution_economics"),
         direction=direction,
     )
@@ -11827,12 +11938,7 @@ def _assert_forecast_entry_uses_qkernel_authority(actionable_payload: Mapping[st
     near_day0_reason = _qkernel_near_day0_cert_rejection_reason(cert)
     if near_day0_reason is not None:
         raise ValueError(near_day0_reason)
-    cert_bin_id = str(cert.get("bin_id") or "").strip()
-    if not cert_bin_id:
-        cert_candidate_id = str(cert.get("candidate_id") or "").strip()
-        parts = cert_candidate_id.split(":", 2)
-        if len(parts) >= 2:
-            cert_bin_id = parts[1].strip()
+    cert_bin_id = _selected_qkernel_execution_bin_id(cert)
     payload_bin_id = str(actionable_payload.get("candidate_bin_id") or "").strip()
     if not cert_bin_id or not payload_bin_id or cert_bin_id != payload_bin_id:
         raise ValueError(
@@ -11954,7 +12060,7 @@ def _actionable_payload_from_receipt(
         proof_mode_fields["rest_then_cross_policy"] = str(receipt.rest_then_cross_policy)
     qkernel_execution_economics = None
     if receipt.qkernel_execution_economics is not None:
-        qkernel_cert = _valid_qkernel_execution_economics_payload(
+        qkernel_cert = _valid_selected_qkernel_execution_economics_payload(
             receipt.qkernel_execution_economics,
             direction=str(receipt.direction or ""),
         )

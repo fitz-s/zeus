@@ -116,10 +116,13 @@ def test_old_leg_residual_ambiguous_truth_is_inf_never_enter():
 # the old leg is live. Through the wiring this is EXIT_OLD_LEG, allow_entry False.
 # ---------------------------------------------------------------------------
 def test_reactor_runs_same_family_management_for_forecast_selections_too():
-    """Local forecast selection manages family totals; global actuation owns endowment."""
+    """Global sizing skips local transforms but still honors active shift leases."""
 
     src = inspect.getsource(era._build_event_bound_no_submit_receipt_core)
     assert "if _recapture.may_submit and allow_same_family_monitor_owned" not in src
+    global_lease_gate = src.index(
+        "_global_actuation_family_rebalance_block_reason("
+    )
     local_gate = src.index(
         "if _recapture.may_submit and global_actuation is None:"
     )
@@ -128,7 +131,42 @@ def test_reactor_runs_same_family_management_for_forecast_selections_too():
     )
     entry_build = src.index("kelly = dataclass_replace(", sibling_read)
 
-    assert local_gate < sibling_read < entry_build
+    assert global_lease_gate < local_gate < sibling_read < entry_build
+
+
+@pytest.mark.parametrize(
+    ("operation", "status"),
+    (
+        ("SHIFT_BIN", "ENTRY_UNKNOWN"),
+        ("SHIFT_BIN", "EXIT_PARTIAL"),
+        ("FILL_UP", "ENTRY_SUBMITTED"),
+    ),
+)
+def test_global_actuation_blocks_active_family_lease(operation, status):
+    conn = _conn()
+    family_key = "live|Tokyo|2026-06-23|high"
+    lease = sbw.acquire_rebalance_lease(
+        conn,
+        family_key=family_key,
+        operation=operation,
+        now_iso="t0",
+        held_position_id="p-old",
+        held_token_id="tok-A",
+        held_bin_id="60-61F",
+        selected_token_id="tok-B",
+        selected_bin_id="62-63F",
+        event_id="event-1",
+    )
+    assert lease is not None
+    conn.execute(
+        "UPDATE family_rebalance_intents SET status=? WHERE intent_id=?",
+        (status, lease),
+    )
+
+    assert era._global_actuation_family_rebalance_block_reason(
+        conn,
+        family_key=family_key,
+    ) == f"GLOBAL_ACTUATION_FAMILY_REBALANCE_IN_FLIGHT:{operation}:{status}"
 
 
 def test_existing_and_new_shift_paths_share_old_leg_live_predicate():

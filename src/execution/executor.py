@@ -1171,7 +1171,10 @@ def _entry_economics_component(
         and (econ_optimal_delta_u is None or econ_optimal_delta_u <= 0.0)
     ):
         reason = "qkernel_optimal_delta_u_non_positive"
-    elif econ_false_edge_rate is None or not (0.0 < econ_false_edge_rate <= max_false_edge_rate):
+    elif not current_state_solve and (
+        econ_false_edge_rate is None
+        or not (0.0 < econ_false_edge_rate <= max_false_edge_rate)
+    ):
         reason = "qkernel_false_edge_rate_blocks"
     elif payoff_q_point is None or payoff_q_lcb is None:
         reason = "qkernel_payoff_probability_missing"
@@ -1181,9 +1184,9 @@ def _entry_economics_component(
         reason = "qkernel_payoff_q_point_mismatch_q_live"
     elif not math.isclose(payoff_q_lcb, q_lcb, rel_tol=0.0, abs_tol=1e-6):
         reason = "qkernel_payoff_q_lcb_mismatch_q_lcb"
-    elif economics.get("direction_law_ok") is not True:
+    elif not current_state_solve and economics.get("direction_law_ok") is not True:
         reason = "qkernel_direction_law_not_ok"
-    elif economics.get("coherence_allows") is not True:
+    elif not current_state_solve and economics.get("coherence_allows") is not True:
         reason = "qkernel_coherence_blocks"
     elif not current_state_solve and live_probability_quality_reason is not None:
         reason = live_probability_quality_reason
@@ -1479,14 +1482,6 @@ def _actionable_certificate_intent_mismatch_reason(
     if isinstance(intent_economics, Mapping):
         if not isinstance(payload_economics, Mapping):
             return "actionable_certificate_qkernel_economics_missing"
-        for key in (
-            "source",
-            "side",
-            "direction_law_ok",
-            "coherence_allows",
-        ):
-            if payload_economics.get(key) != intent_economics.get(key):
-                return f"actionable_certificate_qkernel_{key}_mismatch"
         intent_current = qkernel_declares_current_state(intent_economics)
         payload_current = qkernel_declares_current_state(payload_economics)
         if intent_current or payload_current:
@@ -1496,6 +1491,14 @@ def _actionable_certificate_intent_mismatch_reason(
                 return "actionable_certificate_qkernel_current_state_downgrade"
             if canonical_json(payload_economics) != canonical_json(intent_economics):
                 return "actionable_certificate_qkernel_current_state_mismatch"
+        for key in (
+            "source",
+            "side",
+            "direction_law_ok",
+            "coherence_allows",
+        ):
+            if payload_economics.get(key) != intent_economics.get(key):
+                return f"actionable_certificate_qkernel_{key}_mismatch"
         for key in (
             "cost",
             "edge_lcb",

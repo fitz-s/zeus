@@ -1234,9 +1234,9 @@ def _validate_qkernel_submit_probability(
         and not route_id.startswith("DIRECT_")
     ):
         return
-    if economics.get("direction_law_ok") is not True:
+    if not current_state_solve and economics.get("direction_law_ok") is not True:
         raise LiveOrderAggregateError("PreSubmitRevalidated qkernel direction_law_ok must be true")
-    if economics.get("coherence_allows") is not True:
+    if not current_state_solve and economics.get("coherence_allows") is not True:
         raise LiveOrderAggregateError("PreSubmitRevalidated qkernel coherence_allows must be true")
     selection_guard_basis = str(economics.get("selection_guard_basis") or "").strip()
     if not selection_guard_basis:
@@ -1277,24 +1277,25 @@ def _validate_qkernel_submit_probability(
         raise LiveOrderAggregateError("PreSubmitRevalidated qkernel payoff_q_lcb mismatches submit q_lcb_5pct")
     cost = _positive_number(economics.get("cost"), "qkernel_execution_economics.cost")
     edge_lcb = _positive_number(economics.get("edge_lcb"), "qkernel_execution_economics.edge_lcb")
-    false_edge_rate = _positive_number(
-        economics.get("false_edge_rate"),
-        "qkernel_execution_economics.false_edge_rate",
-    )
-    if false_edge_rate > 1.0:
-        raise LiveOrderAggregateError(
-            "PreSubmitRevalidated qkernel false_edge_rate requires probability"
+    if not current_state_solve:
+        false_edge_rate = _positive_number(
+            economics.get("false_edge_rate"),
+            "qkernel_execution_economics.false_edge_rate",
         )
-    try:
-        from src.strategy.selection_family import DEFAULT_FDR_ALPHA
+        if false_edge_rate > 1.0:
+            raise LiveOrderAggregateError(
+                "PreSubmitRevalidated qkernel false_edge_rate requires probability"
+            )
+        try:
+            from src.strategy.selection_family import DEFAULT_FDR_ALPHA
 
-        max_false_edge_rate = float(DEFAULT_FDR_ALPHA)
-    except Exception:  # noqa: BLE001
-        max_false_edge_rate = 0.05
-    if false_edge_rate > max_false_edge_rate:
-        raise LiveOrderAggregateError(
-            "PreSubmitRevalidated qkernel false_edge_rate blocks"
-        )
+            max_false_edge_rate = float(DEFAULT_FDR_ALPHA)
+        except Exception:  # noqa: BLE001
+            max_false_edge_rate = 0.05
+        if false_edge_rate > max_false_edge_rate:
+            raise LiveOrderAggregateError(
+                "PreSubmitRevalidated qkernel false_edge_rate blocks"
+            )
     if not math.isclose(payoff_q_lcb, cost + edge_lcb, rel_tol=1e-9, abs_tol=1e-9):
         raise LiveOrderAggregateError("PreSubmitRevalidated qkernel payoff edge inconsistent")
     limit_price = _positive_number(payload.get("limit_price"), "limit_price")

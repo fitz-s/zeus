@@ -754,6 +754,17 @@ def test_actionable_current_state_solver_skips_legacy_quality_and_roi_floors():
         "selection_guard_n": 64,
         "selection_guard_q_safe": q_lcb,
     }
+    for legacy_field in (
+        "route_id",
+        "route_type",
+        "delta_u_at_min",
+        "optimal_stake_usd",
+        "optimal_delta_u",
+        "false_edge_rate",
+        "direction_law_ok",
+        "coherence_allows",
+    ):
+        economics.pop(legacy_field, None)
     economics["current_state_identity_hash"] = qkernel_current_state_identity_hash(economics)
     parents, action = actionable_graph(
         parent_overrides={

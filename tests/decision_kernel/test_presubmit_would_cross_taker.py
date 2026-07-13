@@ -383,6 +383,17 @@ class TestLayer2VerifyPreSubmitForCommand:
                 "selection_guard_n": 64,
             }
         )
+        for legacy_field in (
+            "route_id",
+            "route_type",
+            "delta_u_at_min",
+            "optimal_stake_usd",
+            "optimal_delta_u",
+            "false_edge_rate",
+            "direction_law_ok",
+            "coherence_allows",
+        ):
+            economics.pop(legacy_field, None)
         economics["current_state_identity_hash"] = qkernel_current_state_identity_hash(
             economics
         )
