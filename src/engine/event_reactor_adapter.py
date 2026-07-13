@@ -14688,13 +14688,18 @@ _POSTERIOR_MEMBERS_JSON_SOURCE = "raw_model_forecasts.multimodel"
 _REPLACEMENT_0_1_PRODUCT_ID = "openmeteo_ecmwf_ifs9_bayes_fusion_v1"
 # The posterior applied-validations set the cert verifier/compiler require for posterior provenance
 # (verifier.REQUIRED_POSTERIOR_FORECAST_VALIDATIONS). Stamped only when the posterior row exists and
-# the decorrelated model floor is met — never fabricated.
+# either the legacy decorrelated-model floor or the certified source-clock configured set is met.
 _POSTERIOR_APPLIED_VALIDATIONS: tuple[str, ...] = (
     "posterior_complete_by_construction",
     "decorrelated_model_count_floor",
     "causality_status_ok",
     "authority_verified",
     "available_at_not_future",
+)
+_SOURCE_CLOCK_MODEL_COUNT_BASIS = "source_clock_configured_sources"
+_SOURCE_CLOCK_READY_STATUS = "GRID_CAP10_LIVE_READY"
+_SOURCE_CLOCK_CONFIGURED_COMPLETENESS_VALIDATION = (
+    "source_clock_configured_source_completeness"
 )
 
 
@@ -14930,9 +14935,14 @@ def _forecast_authority_payload_from_posterior(
         members_native = None if legacy_members is None else tuple(legacy_members[0])
     else:
         members_native = None
+    source_clock_present, source_clock_certificate = (
+        _source_clock_model_count_certificate(p_provenance)
+    )
+    if source_clock_present and source_clock_certificate is None:
+        return None
     if members_native is None:
         return None
-    if len(members_native) < 3:
+    if not source_clock_present and len(members_native) < 3:
         return None
     member_count = len(members_native)
     members_json_hash = stable_hash(tuple(sorted(float(v) for v in members_native)))
@@ -15039,7 +15049,8 @@ def _forecast_authority_payload_from_posterior(
         "replacement_bin_topology": p_bin_topology,
         "manifest_hash": str(p_identity_hash),
         # Posterior completeness-by-construction: model COUNT is the completeness metric (the
-        # ensemble member/step floors do not apply). expected==observed==count, count>=3.
+        # ensemble member/step floors do not apply). Legacy requires >=3; source-clock requires
+        # its configured, used, weighted, and currently served source sets to be identical.
         "expected_members": member_count,
         "observed_members": member_count,
         "required_steps": (str(p_source_cycle_time)[:10],),
@@ -15048,12 +15059,21 @@ def _forecast_authority_payload_from_posterior(
         "source_run_completeness_status": "COMPLETE",
         "coverage_completeness_status": "COMPLETE",
         "coverage_readiness_status": "LIVE_ELIGIBLE",
-        "applied_validations": _POSTERIOR_APPLIED_VALIDATIONS,
+        "applied_validations": (
+            _POSTERIOR_APPLIED_VALIDATIONS
+            + (
+                (_SOURCE_CLOCK_CONFIGURED_COMPLETENESS_VALIDATION,)
+                if source_clock_certificate is not None
+                else ()
+            )
+        ),
         "source_available_at": _nonnull(p_source_available_at),
         "fetch_started_at": source_fetch_started_at or None,
         "fetch_finished_at": source_fetch_finished_at or _nonnull(p_computed_at),
         "captured_at": _nonnull(p_computed_at),
     }
+    if source_clock_certificate is not None:
+        payload_out.update(source_clock_certificate)
     source_time = _parse_utc(p_source_available_at)
     agent_time = _parse_utc(p_computed_at) or source_time
     persisted_time = _parse_utc(p_computed_at) or source_time
@@ -15083,8 +15103,13 @@ def _posterior_bound_multimodel_members(
     ):
         return None
     models = tuple(str(model or "").strip() for model in raw_models)
+    source_clock_present, source_clock_certificate = (
+        _source_clock_model_count_certificate(provenance)
+    )
+    if source_clock_present and source_clock_certificate is None:
+        return None
     if (
-        len(models) < 3
+        (not source_clock_present and len(models) < 3)
         or any(not model for model in models)
         or len(set(models)) != len(models)
     ):
@@ -15131,6 +15156,81 @@ def _posterior_bound_multimodel_members(
             return None
         members.append(value_c if unit == "C" else value_c * 9.0 / 5.0 + 32.0)
     return tuple(members)
+
+
+def _source_clock_model_count_certificate(
+    provenance: Mapping[str, object],
+) -> tuple[bool, dict[str, object] | None]:
+    """Return the source-clock configured-source completeness certificate.
+
+    Absence means the legacy posterior contract still requires three models.
+    Presence is fail-closed unless configured, used, and currently served sources
+    are the same complete set and the one-scheme walk-forward verdict is ready.
+    """
+    fusion = provenance.get("bayes_precision_fusion")
+    if not isinstance(fusion, Mapping):
+        return False, None
+    scheme = fusion.get("source_clock_one_scheme")
+    if scheme is None:
+        return False, None
+    if not isinstance(scheme, Mapping):
+        return True, None
+
+    configured_raw = scheme.get("configured_sources")
+    used_raw = fusion.get("used_models")
+    serving = fusion.get("current_value_serving")
+    used_weights = scheme.get("used_weights")
+    missing_raw = scheme.get("missing_sources")
+    if (
+        not isinstance(configured_raw, (list, tuple))
+        or not isinstance(used_raw, (list, tuple))
+        or not isinstance(serving, Mapping)
+        or not isinstance(used_weights, Mapping)
+        or not isinstance(missing_raw, (list, tuple))
+    ):
+        return True, None
+
+    configured = tuple(str(value or "").strip() for value in configured_raw)
+    used = tuple(str(value or "").strip() for value in used_raw)
+    served = tuple(str(value or "").strip() for value in serving)
+    weighted = tuple(str(value or "").strip() for value in used_weights)
+    missing = tuple(str(value or "").strip() for value in missing_raw)
+    expected = fusion.get("decorrelated_providers_expected")
+    observed = fusion.get("decorrelated_providers_served")
+    try:
+        expected = int(expected)
+        observed = int(observed)
+    except (TypeError, ValueError):
+        return True, None
+    if (
+        len(configured) < 2
+        or any(not value for value in configured)
+        or len(set(configured)) != len(configured)
+        or len(used) != len(configured)
+        or len(served) != len(configured)
+        or len(weighted) != len(configured)
+        or set(used) != set(configured)
+        or set(served) != set(configured)
+        or set(weighted) != set(configured)
+        or missing
+        or scheme.get("one_scheme_status") != _SOURCE_CLOCK_READY_STATUS
+        or scheme.get("walkforward_pass") is not True
+        or fusion.get("decorrelated_providers_complete") is not True
+        or expected != len(configured)
+        or observed != len(configured)
+    ):
+        return True, None
+    canonical = tuple(sorted(configured))
+    return True, {
+        "posterior_model_count_basis": _SOURCE_CLOCK_MODEL_COUNT_BASIS,
+        "posterior_completeness_status": _SOURCE_CLOCK_READY_STATUS,
+        "posterior_configured_sources": canonical,
+        "posterior_served_sources": canonical,
+        "posterior_missing_sources": (),
+        "posterior_walkforward_pass": True,
+        "posterior_configured_model_count": len(canonical),
+        "posterior_served_model_count": len(canonical),
+    }
 
 
 def _posterior_horizon_profile(source_cycle_time: str) -> str:

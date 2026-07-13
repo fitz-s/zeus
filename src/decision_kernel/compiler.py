@@ -20,6 +20,10 @@ from src.decision_kernel.verifier import (
     FORECAST_ACTIONABLE_EVENT_TYPES,
     POSTERIOR_MEMBERS_JSON_SOURCE,
     POSTERIOR_MIN_DECORRELATED_MODELS,
+    SOURCE_CLOCK_CONFIGURED_COMPLETENESS_VALIDATION,
+    SOURCE_CLOCK_POSTERIOR_MIN_CONFIGURED_MODELS,
+    SOURCE_CLOCK_POSTERIOR_MODEL_COUNT_BASIS,
+    SOURCE_CLOCK_POSTERIOR_READY_STATUS,
     REQUIRED_POSTERIOR_FORECAST_VALIDATIONS,
     calibration_maturity_too_low,
 )
@@ -659,8 +663,8 @@ def _validate_source_truth_payload(source: dict[str, Any]) -> None:
 def _validate_posterior_forecast_authority_payload(forecast: dict[str, Any]) -> None:
     """EQUALLY-STRICT compiler validation for a posterior-provenance FORECAST_AUTHORITY
     (mx2t3 carrier-decouple GATE-1 C). Mirrors verifier._validate_posterior_forecast_authority_payload:
-    coverage COMPLETE/LIVE_ELIGIBLE, posterior identity + members hash present, the decorrelated
-    model-count floor (>= the spine's own >=3-member floor), and the posterior applied-validations
+    coverage COMPLETE/LIVE_ELIGIBLE, posterior identity + members hash present, either the legacy
+    >=3-model floor or a complete configured source-clock set, and the posterior applied-validations
     set. Reads a DIFFERENT certified completeness authority; does NOT weaken the ensemble gates."""
     for field in (
         "coverage_readiness_status",
@@ -686,7 +690,30 @@ def _validate_posterior_forecast_authority_payload(forecast: dict[str, Any]) -> 
         raise ValueError("forecast.expected/observed decorrelated model count missing")
     if observed_models < expected_models:
         raise ValueError("forecast.observed_members below expected_members (posterior)")
-    if observed_models < POSTERIOR_MIN_DECORRELATED_MODELS:
+    count_basis = forecast.get("posterior_model_count_basis")
+    if count_basis == SOURCE_CLOCK_POSTERIOR_MODEL_COUNT_BASIS:
+        configured = tuple(forecast.get("posterior_configured_sources") or ())
+        served = tuple(forecast.get("posterior_served_sources") or ())
+        missing_sources = tuple(forecast.get("posterior_missing_sources") or ())
+        if (
+            forecast.get("posterior_completeness_status")
+            != SOURCE_CLOCK_POSTERIOR_READY_STATUS
+            or forecast.get("posterior_walkforward_pass") is not True
+            or missing_sources
+            or len(configured) < SOURCE_CLOCK_POSTERIOR_MIN_CONFIGURED_MODELS
+            or len(set(configured)) != len(configured)
+            or tuple(sorted(configured)) != tuple(sorted(served))
+            or expected_models != len(configured)
+            or observed_models != len(served)
+            or forecast.get("posterior_configured_model_count") != len(configured)
+            or forecast.get("posterior_served_model_count") != len(served)
+        ):
+            raise ValueError(
+                "forecast source-clock configured-source completeness invalid"
+            )
+    elif count_basis not in (None, ""):
+        raise ValueError("forecast.posterior_model_count_basis is unknown")
+    elif observed_models < POSTERIOR_MIN_DECORRELATED_MODELS:
         raise ValueError(
             f"forecast.observed_members below posterior decorrelated-model floor "
             f"({POSTERIOR_MIN_DECORRELATED_MODELS})"
@@ -698,6 +725,13 @@ def _validate_posterior_forecast_authority_payload(forecast: dict[str, Any]) -> 
     if missing:
         raise ValueError(
             f"forecast.applied_validations missing required posterior validations: {sorted(missing)}"
+        )
+    if (
+        count_basis == SOURCE_CLOCK_POSTERIOR_MODEL_COUNT_BASIS
+        and SOURCE_CLOCK_CONFIGURED_COMPLETENESS_VALIDATION not in applied_validations
+    ):
+        raise ValueError(
+            "forecast.applied_validations missing source-clock completeness"
         )
 
 

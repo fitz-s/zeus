@@ -1,4 +1,4 @@
-# Lifecycle: created=2026-06-17; last_reviewed=2026-07-10; last_reused=2026-07-10
+# Lifecycle: created=2026-06-17; last_reviewed=2026-07-13; last_reused=2026-07-13
 # Purpose: Prove replacement forecast carriers do not fall back to legacy ensemble authority.
 # Reuse: Re-audit readiness-to-posterior binding before changing replacement FSR selection.
 # Authority basis: operator single-truth law + residual_legacy_sources.md (GATE-1 carrier
@@ -29,6 +29,7 @@ from src.decision_kernel.verifier import (
     POSTERIOR_MEMBERS_JSON_SOURCE,
     _validate_posterior_forecast_authority_payload,
 )
+from src.decision_kernel.errors import CertificateVerificationError
 from src.decision_kernel.canonicalization import stable_hash
 
 UTC = timezone.utc
@@ -316,6 +317,77 @@ def test_c_no_submit_cert_forecast_authority_from_posterior_passes_validation():
     # Validates through BOTH the verifier and compiler posterior branches (no raise).
     _validate_posterior_forecast_authority_payload({**pl, "bin_labels_hash": "bh"})
     compiler_validate_forecast({**pl, "bin_labels_hash": "bh", "metric": "high"})
+
+    source_clock = {
+        **pl,
+        "expected_members": 2,
+        "observed_members": 2,
+        "posterior_model_count_basis": "source_clock_configured_sources",
+        "posterior_completeness_status": "GRID_CAP10_LIVE_READY",
+        "posterior_configured_sources": ("ecmwf_ifs", "ukmo_global_deterministic_10km"),
+        "posterior_served_sources": ("ecmwf_ifs", "ukmo_global_deterministic_10km"),
+        "posterior_missing_sources": (),
+        "posterior_walkforward_pass": True,
+        "posterior_configured_model_count": 2,
+        "posterior_served_model_count": 2,
+        "applied_validations": (
+            *pl["applied_validations"],
+            "source_clock_configured_source_completeness",
+        ),
+    }
+    source_clock_verifier = {**source_clock, "bin_labels_hash": "bh"}
+    source_clock_compiler = {
+        **source_clock,
+        "bin_labels_hash": "bh",
+        "metric": "high",
+    }
+    _validate_posterior_forecast_authority_payload(source_clock_verifier)
+    compiler_validate_forecast(source_clock_compiler)
+
+    source_clock_certificate_fields = {
+        "posterior_model_count_basis",
+        "posterior_completeness_status",
+        "posterior_configured_sources",
+        "posterior_served_sources",
+        "posterior_missing_sources",
+        "posterior_walkforward_pass",
+        "posterior_configured_model_count",
+        "posterior_served_model_count",
+    }
+    legacy_two = {
+        key: value
+        for key, value in source_clock.items()
+        if key not in source_clock_certificate_fields
+    }
+    legacy_two["applied_validations"] = pl["applied_validations"]
+    with pytest.raises(
+        CertificateVerificationError,
+        match="below posterior decorrelated-model floor",
+    ):
+        _validate_posterior_forecast_authority_payload(
+            {**legacy_two, "bin_labels_hash": "bh"}
+        )
+    with pytest.raises(ValueError, match="below posterior decorrelated-model floor"):
+        compiler_validate_forecast(
+            {**legacy_two, "bin_labels_hash": "bh", "metric": "high"}
+        )
+
+    incomplete = {
+        **source_clock,
+        "posterior_served_sources": ("ecmwf_ifs",),
+        "posterior_served_model_count": 1,
+    }
+    with pytest.raises(
+        CertificateVerificationError,
+        match="configured-source completeness invalid",
+    ):
+        _validate_posterior_forecast_authority_payload(
+            {**incomplete, "bin_labels_hash": "bh"}
+        )
+    with pytest.raises(ValueError, match="configured-source completeness invalid"):
+        compiler_validate_forecast(
+            {**incomplete, "bin_labels_hash": "bh", "metric": "high"}
+        )
 
 
 def test_c_posterior_cert_fork_only_fires_under_replacement_flag_and_non_day0():

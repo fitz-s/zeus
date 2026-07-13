@@ -65,6 +65,12 @@ REQUIRED_POSTERIOR_FORECAST_VALIDATIONS = frozenset(
 # The minimum decorrelated model count a posterior-provenance forecast authority must carry (the
 # SAME floor the spine member producer enforces: fewer than 3 decorrelated members fails closed).
 POSTERIOR_MIN_DECORRELATED_MODELS = 3
+SOURCE_CLOCK_POSTERIOR_MODEL_COUNT_BASIS = "source_clock_configured_sources"
+SOURCE_CLOCK_POSTERIOR_READY_STATUS = "GRID_CAP10_LIVE_READY"
+SOURCE_CLOCK_POSTERIOR_MIN_CONFIGURED_MODELS = 2
+SOURCE_CLOCK_CONFIGURED_COMPLETENESS_VALIDATION = (
+    "source_clock_configured_source_completeness"
+)
 REQUIRED_FORECAST_VALIDATIONS = frozenset(
     {
         "source_run_completeness_status",
@@ -1502,8 +1508,8 @@ def _validate_posterior_forecast_authority_payload(forecast: dict) -> None:
     decorrelated-model + topology gates — and is enforced here with NO LESS rigor:
       * coverage/readiness COMPLETE + LIVE_ELIGIBLE (same as ensemble);
       * a stable posterior identity (posterior_identity_hash) AND members_json_hash present;
-      * the decorrelated model count (expected==observed==count) AND count >= the floor the spine
-        member producer itself enforces (>=3 decorrelated members);
+      * legacy posterior count >=3, or a source-clock certificate proving its complete configured
+        source set (>=2) exactly matches used, weighted, and currently served sources;
       * the posterior-appropriate applied_validations set (model-count completeness replaces the
         ensemble member/step floors; causality + authority + freshness unchanged).
     """
@@ -1537,7 +1543,32 @@ def _validate_posterior_forecast_authority_payload(forecast: dict) -> None:
         raise CertificateVerificationError("forecast.expected/observed decorrelated model count missing")
     if observed_models < expected_models:
         raise CertificateVerificationError("forecast.observed_members below expected_members (posterior)")
-    if observed_models < POSTERIOR_MIN_DECORRELATED_MODELS:
+    count_basis = forecast.get("posterior_model_count_basis")
+    if count_basis == SOURCE_CLOCK_POSTERIOR_MODEL_COUNT_BASIS:
+        configured = tuple(forecast.get("posterior_configured_sources") or ())
+        served = tuple(forecast.get("posterior_served_sources") or ())
+        missing_sources = tuple(forecast.get("posterior_missing_sources") or ())
+        if (
+            forecast.get("posterior_completeness_status")
+            != SOURCE_CLOCK_POSTERIOR_READY_STATUS
+            or forecast.get("posterior_walkforward_pass") is not True
+            or missing_sources
+            or len(configured) < SOURCE_CLOCK_POSTERIOR_MIN_CONFIGURED_MODELS
+            or len(set(configured)) != len(configured)
+            or tuple(sorted(configured)) != tuple(sorted(served))
+            or expected_models != len(configured)
+            or observed_models != len(served)
+            or forecast.get("posterior_configured_model_count") != len(configured)
+            or forecast.get("posterior_served_model_count") != len(served)
+        ):
+            raise CertificateVerificationError(
+                "forecast source-clock configured-source completeness invalid"
+            )
+    elif count_basis not in (None, ""):
+        raise CertificateVerificationError(
+            "forecast.posterior_model_count_basis is unknown"
+        )
+    elif observed_models < POSTERIOR_MIN_DECORRELATED_MODELS:
         raise CertificateVerificationError(
             f"forecast.observed_members below posterior decorrelated-model floor "
             f"({POSTERIOR_MIN_DECORRELATED_MODELS})"
@@ -1549,6 +1580,13 @@ def _validate_posterior_forecast_authority_payload(forecast: dict) -> None:
     if missing:
         raise CertificateVerificationError(
             f"forecast.applied_validations missing required posterior validations: {sorted(missing)}"
+        )
+    if (
+        count_basis == SOURCE_CLOCK_POSTERIOR_MODEL_COUNT_BASIS
+        and SOURCE_CLOCK_CONFIGURED_COMPLETENESS_VALIDATION not in validations
+    ):
+        raise CertificateVerificationError(
+            "forecast.applied_validations missing source-clock completeness"
         )
     if forecast.get("members_extrema_metric_identity") != forecast.get("temperature_metric"):
         raise CertificateVerificationError("forecast.members_extrema_metric_identity mismatch")

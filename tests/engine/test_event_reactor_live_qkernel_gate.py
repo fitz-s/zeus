@@ -3224,6 +3224,64 @@ def test_posterior_cycle_members_do_not_depend_on_forecast_carrier(monkeypatch):
     )
 
     assert members == (33.0, 34.0, 35.0)
+
+    source_clock = json.loads(json.dumps(provenance))
+    fusion = source_clock["bayes_precision_fusion"]
+    fusion["used_models"] = ["a", "b"]
+    fusion["current_value_serving"].pop("c")
+    fusion.update(
+        {
+            "decorrelated_providers_complete": True,
+            "decorrelated_providers_expected": 2,
+            "decorrelated_providers_served": 2,
+            "source_clock_one_scheme": {
+                "configured_sources": ["a", "b"],
+                "used_weights": {"a": 0.5, "b": 0.5},
+                "missing_sources": [],
+                "one_scheme_status": "GRID_CAP10_LIVE_READY",
+                "walkforward_pass": True,
+            },
+        }
+    )
+    assert era._posterior_bound_multimodel_members(
+        conn,
+        family=family,
+        source_cycle_time="2026-07-13T06:00:00+00:00",
+        provenance=source_clock,
+    ) == (33.0, 34.0)
+    present, certificate = era._source_clock_model_count_certificate(source_clock)
+    assert present is True
+    assert certificate == {
+        "posterior_model_count_basis": "source_clock_configured_sources",
+        "posterior_completeness_status": "GRID_CAP10_LIVE_READY",
+        "posterior_configured_sources": ("a", "b"),
+        "posterior_served_sources": ("a", "b"),
+        "posterior_missing_sources": (),
+        "posterior_walkforward_pass": True,
+        "posterior_configured_model_count": 2,
+        "posterior_served_model_count": 2,
+    }
+
+    legacy_two = json.loads(json.dumps(source_clock))
+    legacy_two["bayes_precision_fusion"].pop("source_clock_one_scheme")
+    assert era._posterior_bound_multimodel_members(
+        conn,
+        family=family,
+        source_cycle_time="2026-07-13T06:00:00+00:00",
+        provenance=legacy_two,
+    ) is None
+
+    incomplete = json.loads(json.dumps(source_clock))
+    incomplete["bayes_precision_fusion"]["source_clock_one_scheme"][
+        "missing_sources"
+    ] = ["b"]
+    assert era._posterior_bound_multimodel_members(
+        conn,
+        family=family,
+        source_cycle_time="2026-07-13T06:00:00+00:00",
+        provenance=incomplete,
+    ) is None
+
     provenance["bayes_precision_fusion"]["current_value_serving"]["c"][
         "raw_model_forecast_id"
     ] = 99
