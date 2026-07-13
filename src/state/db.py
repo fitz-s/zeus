@@ -6185,6 +6185,13 @@ def init_schema_trade_only(conn: sqlite3.Connection) -> None:
     _ensure_review_work_items_table(conn)
     from src.state.schema.entry_exposure_obligations_schema import ensure_table as _ensure_entry_exposure_obligations_table
     _ensure_entry_exposure_obligations_table(conn)
+    # LX-T1 (docs/rebuild/local_ledger_excision_2026-07-12.md, GATED verdict):
+    # append-only ConditionalTokens payout observation log, written by
+    # src.ingest.payout_observer. Read-only chain observer; not consumed by
+    # settlement grading in this packet (WU grade / chain realization lanes
+    # stay independent per the adjudication).
+    from src.state.schema.payout_observations_schema import ensure_table as _ensure_payout_observations_table
+    _ensure_payout_observations_table(conn)
     try:
         conn.execute("ALTER TABLE trade_decisions ADD COLUMN env TEXT NOT NULL DEFAULT 'live';")
     except sqlite3.OperationalError:

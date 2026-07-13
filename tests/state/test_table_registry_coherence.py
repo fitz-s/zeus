@@ -86,6 +86,10 @@ EXPECTED_RUNTIME_TRADE_TABLES = frozenset({
     # T5 migration epoch marker 2026-07-12 (SCHEMA_EPOCH_TABLE_DDL in
     # init_schema_trade_only; stamped by the T5 migration, presence-only here).
     "schema_epoch",
+    # LX-T1 2026-07-13 (docs/rebuild/local_ledger_excision_2026-07-12.md):
+    # append-only ConditionalTokens payout observation log (ensure_table wired
+    # into init_schema_trade_only via payout_observations_schema.py).
+    "payout_observations",
     "position_current",
     "position_events",
     "position_lots",

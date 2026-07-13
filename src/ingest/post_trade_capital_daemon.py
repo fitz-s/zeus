@@ -22,8 +22,13 @@ used to bundle with exit monitoring:
   - ``_wrap_submitter_cycle``      (2-min)
   - ``_wrap_reconciler_cycle``     (2-min)
   - ``collateral_snapshot_refresh_cycle`` (30s; pUSD/CTF collateral truth)
+  - ``payout_observer_cycle``      (10-min; LX-T1 read-only ConditionalTokens
+    payout observation, ``src.ingest.payout_observer`` — NOT a
+    cascade-liveness required poller, not on the settlement-grading path)
 
-All cycle bodies live in ``src.execution.post_trade_capital``. The EXIT-monitoring /
+All cycle bodies live in ``src.execution.post_trade_capital`` (payout_observer_cycle
+lives in ``src.ingest.payout_observer`` instead — it is a read-only chain observer,
+not a capital-lifecycle state machine). The EXIT-monitoring /
 exit-SUBMIT phase of the former ``_chain_sync_and_exit_monitor_cycle`` STAYS in the order
 daemon (it posts real sell orders) — §8 Step 2. This process NEVER posts a sell order.
 
@@ -306,6 +311,11 @@ def main() -> None:
         _wrap_submitter_cycle,
         _wrap_reconciler_cycle,
     )
+    # LX-T1 (docs/rebuild/local_ledger_excision_2026-07-12.md, GATED verdict):
+    # read-only ConditionalTokens payout observer. Not a cascade-liveness
+    # required poller (read-only, not on the settlement-grading critical path
+    # per the adjudication) — absence does not fail boot.
+    from src.ingest.payout_observer import payout_observer_cycle
 
     # Pre-flight (system_decomposition_plan §8 Step 2 mitigation): assert this process can open
     # the trades-DB and world-DB writer connections under the sanctioned path before entering
@@ -384,6 +394,15 @@ def main() -> None:
         "interval", seconds=30, id="collateral_snapshot_refresh",
         max_instances=1, coalesce=True,
         next_run_time=datetime.now(timezone.utc),
+    )
+    # LX-T1: read-only chain payout observer, 10-min cadence (same order of
+    # magnitude as redeem_reconciler; payout resolution does not need
+    # sub-minute freshness). Not in _OWNED_CASCADE_POLLER_IDS — read-only,
+    # not required for boot liveness.
+    _scheduler.add_job(
+        _scheduler_job("payout_observer")(payout_observer_cycle),
+        "interval", minutes=10, id="payout_observer",
+        max_instances=1, coalesce=True,
     )
 
     # 60s liveness heartbeat (file-only). The heartbeat-sensor watches this file's mtime.

@@ -2750,6 +2750,31 @@ tables:
       packet — T2 consumes total_open_obligation_usd/has_unbounded_obligation when it
       extends exposure/heat accounting to ChainOnlyFact worst case.
 
+  - name: payout_observations
+    db: trade
+    schema_class: trade_class
+    schema_version_owner: null
+    created_by: "db.py:init_schema_trade_only + src.state.schema.payout_observations_schema.ensure_table"
+    pk_col: id
+    notes: >
+      LX-T1 (docs/rebuild/local_ledger_excision_2026-07-12.md, GATED verdict;
+      census_chain_sources.md "Resolution payouts — NEEDS NEW INGESTER"):
+      append-only ConditionalTokens payoutNumerators/payoutDenominator
+      observation log, one row per (condition_id, outcome_index) sweep,
+      written by src.ingest.payout_observer via the EXISTING
+      polymarket_v2_adapter._json_rpc_call seam (read-only eth_call, no
+      signing capability). state ∈ {UNKNOWN, UNRESOLVED, RESOLVED_ZERO,
+      RESOLVED_NONZERO}; missing/timeout/partial/unparsable data always
+      classifies UNKNOWN, never a fabricated zero (CHECK-constrained).
+      block_number/block_hash pin every read to one explicit block (reorg
+      marker). superseded_by is a forward audit pointer set at most once per
+      row (BEFORE UPDATE trigger enforces immutability of every other
+      column); rows are never deleted (BEFORE DELETE trigger). Scheduled
+      ~10-min in src/ingest/post_trade_capital_daemon.py (job id
+      "payout_observer"). Not consumed by settlement grading in this packet —
+      WU grade / chain realization stay independent lanes per the LX-T1
+      adjudication; DISPUTED-lane wiring on disagreement is a later packet.
+
   - name: exit_mutex_holdings
     db: trade
     schema_class: trade_class
