@@ -21,6 +21,7 @@ from __future__ import annotations
 import datetime as _dt
 import json
 from decimal import Decimal
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -1980,6 +1981,21 @@ def test_global_current_state_proof_cannot_loosen_qkernel_bound():
 
     with pytest.raises(ValueError, match="GLOBAL_CURRENT_STATE_PROOF_LCB_LOOSENED"):
         era._bind_global_current_state_economics_to_proof(proof, cert)
+
+
+def test_global_current_state_seed_seals_probability_parent_without_local_overlay():
+    proof = SimpleNamespace(
+        q_posterior=0.652,
+        q_lcb_5pct=0.617,
+        qkernel_execution_economics=None,
+    )
+
+    assert era._global_current_state_economics_seed(proof) == {
+        "pre_qkernel_q_posterior": pytest.approx(0.652),
+        "pre_qkernel_q_lcb_5pct": pytest.approx(0.617),
+        "q_lcb_authority": "qkernel_payoff_bound",
+        "probability_authority": "qkernel_payoff_direct_route",
+    }
 
 
 def test_overlay_rejects_qkernel_point_probability_that_is_not_served_belief():

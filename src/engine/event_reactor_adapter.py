@@ -6627,10 +6627,13 @@ def _global_current_state_execution_economics(
 
 
 def _global_current_state_economics_seed(proof: "_CandidateProof") -> dict[str, Any]:
-    """Preserve the replacement-served bound before global tail tightening."""
+    """Preserve the served belief before the global qkernel tail tightens it."""
 
     cert = dict(proof.qkernel_execution_economics or {})
+    cert.setdefault("pre_qkernel_q_posterior", float(proof.q_posterior))
     cert.setdefault("pre_qkernel_q_lcb_5pct", float(proof.q_lcb_5pct))
+    cert.setdefault("q_lcb_authority", "qkernel_payoff_bound")
+    cert.setdefault("probability_authority", "qkernel_payoff_direct_route")
     return cert
 
 
