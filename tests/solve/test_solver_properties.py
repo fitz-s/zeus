@@ -1035,7 +1035,7 @@ def test_global_single_order_label_mirror_preserves_size_cost_and_objective():
     assert yes_score.robust_delta_log_wealth == no_score.robust_delta_log_wealth
 
 
-def test_global_single_order_fractional_kelly_scales_full_optimum_once_for_both_sides():
+def test_global_single_order_fractional_kelly_reoptimizes_loss_budget_once_for_both_sides():
     yes = _global_candidate(
         candidate_id="fractional-yes",
         family="fractional-yes",
@@ -1078,7 +1078,7 @@ def test_global_single_order_fractional_kelly_scales_full_optimum_once_for_both_
         multiplier="0.03125",
     )
 
-    expected = S._single_order_venue_legal_neighbor(
+    share_scaled = S._single_order_venue_legal_neighbor(
         yes,
         max(
             full_yes.shares * Decimal("0.03125"),
@@ -1086,8 +1086,19 @@ def test_global_single_order_fractional_kelly_scales_full_optimum_once_for_both_
         ),
         at_most=False,
     )
-    assert expected is not None
-    assert fractional_yes.shares == expected
+    assert share_scaled is not None
+    loss_budget = full_yes.cost_usd * Decimal("0.03125")
+    assert fractional_yes.cost_usd <= loss_budget
+    share_scaled_du = S._single_order_metrics(
+        yes,
+        q_samples=_global_probability_projection(yes)[0],
+        shares=share_scaled,
+        wealth_floor_usd=Decimal("1253.44"),
+        wealth_ceiling_usd=Decimal("1253.44"),
+        alpha=_global_probability_projection(yes)[1],
+    )[0]
+    assert fractional_yes.shares > share_scaled
+    assert fractional_yes.robust_delta_log_wealth > share_scaled_du
     assert fractional_yes.shares == fractional_no.shares
     assert fractional_yes.cost_usd == fractional_no.cost_usd
     assert fractional_yes.max_spend_usd == fractional_no.max_spend_usd
@@ -1099,6 +1110,63 @@ def test_global_single_order_fractional_kelly_scales_full_optimum_once_for_both_
     assert fractional_yes.max_spend_usd < full_yes.max_spend_usd
     assert capacity_bounded.max_spend_usd <= Decimal("3")
     assert capacity_bounded.shares < fractional_yes.shares
+
+
+def test_global_single_order_fractional_loss_budget_uses_cheap_depth_before_stopping():
+    candidate = _global_candidate(
+        candidate_id="cheap-depth",
+        family="cheap-depth",
+        side="YES",
+        q=0.9187643552930886,
+        levels=(
+            ("0.001", "2063.59"),
+            ("0.028", "70"),
+            ("0.029", "129"),
+            ("0.030", "265.8"),
+            ("0.033", "73.36"),
+            ("0.300", "500"),
+            ("0.600", "1000"),
+            ("0.900", "2000"),
+        ),
+        fee="0.1",
+    )
+    decision = _global_score(
+        candidate,
+        floor="1189.71",
+        ceiling="1189.71",
+        cash="1189.71",
+        cap="107.58",
+        multiplier="0.03125",
+    )
+
+    assert decision.candidate is not None
+    assert decision.shares > Decimal("1000")
+    assert decision.max_spend_usd <= Decimal("107.58")
+    old_du = S._single_order_metrics(
+        candidate,
+        q_samples=_global_probability_projection(candidate)[0],
+        shares=Decimal("1000"),
+        wealth_floor_usd=Decimal("1189.71"),
+        wealth_ceiling_usd=Decimal("1189.71"),
+        alpha=_global_probability_projection(candidate)[1],
+    )[0]
+    assert decision.robust_delta_log_wealth > old_du
+
+
+def test_global_single_order_capacity_frontier_never_shrinks_on_a_deeper_price_jump():
+    candidate = _global_candidate(
+        candidate_id="monotone-capacity",
+        family="monotone-capacity",
+        side="YES",
+        q=0.90,
+        levels=(("0.001", "2063"), ("0.033", "500"), ("0.300", "500")),
+        fee="0",
+    )
+
+    assert S._single_order_max_shares(
+        candidate.executable_cost_curve,
+        spend_limit_usd=Decimal("107.58"),
+    ) == Decimal("2563.00")
 
 
 @pytest.mark.parametrize("side", ("YES", "NO"))

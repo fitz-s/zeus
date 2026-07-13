@@ -1027,6 +1027,31 @@ def _single_order_cost(curve: ExecutableCostCurve, shares: Decimal) -> Decimal:
     raise ValueError("share size exceeds executable depth")
 
 
+def _single_order_max_shares_by_cost(
+    curve: ExecutableCostCurve,
+    *,
+    cost_limit_usd: Decimal,
+) -> Decimal:
+    """Largest share-grid size whose depth-walked loss fits ``cost_limit_usd``."""
+
+    remaining = Decimal(cost_limit_usd)
+    if remaining <= 0:
+        return Decimal("0")
+    shares = Decimal("0")
+    fee_model = curve.fee_model
+    for level in curve.levels:
+        unit_cost = fee_model.all_in_price(level.price)
+        take = min(level.size, remaining / unit_cost)
+        if take > 0:
+            shares += take
+            remaining -= take * unit_cost
+        if take < level.size:
+            break
+    return (
+        shares / _SIZE_QUANTUM
+    ).to_integral_value(rounding=ROUND_FLOOR) * _SIZE_QUANTUM
+
+
 def _single_order_max_shares(
     curve: ExecutableCostCurve,
     *,
@@ -1044,9 +1069,13 @@ def _single_order_max_shares(
     cumulative = Decimal("0")
     shares = Decimal("0")
     for level in curve.levels:
+        prior_cumulative = cumulative
         price = curve.fee_model.all_in_price(level.price)
         cumulative += level.size
-        shares = min(cumulative, spend_limit / price)
+        affordable_at_limit = spend_limit / price
+        if affordable_at_limit < prior_cumulative:
+            break
+        shares = min(cumulative, affordable_at_limit)
         if shares < cumulative:
             break
     return (shares / _SIZE_QUANTUM).to_integral_value(rounding=ROUND_FLOOR) * _SIZE_QUANTUM
@@ -1323,12 +1352,14 @@ def _score_global_single_order(
     fractional_kelly_multiplier: Decimal = Decimal("1"),
     payoff_q_lcb: float | None = None,
 ) -> GlobalSingleOrderDecision:
-    """Find the executable fractional-Kelly projection of one candidate.
+    """Find the executable fractional-Kelly optimum for one candidate.
 
     The current book and terminal-wealth objective first identify the full-Kelly
-    optimum. The operator-owned fractional multiplier then scales that exact
-    share quantity once; the projected order is re-priced and re-scored on the
-    venue-legal grid. Cash and allocator capacity remain hard outer bounds.
+    optimum. The operator-owned multiplier scales its depth-walked capital loss
+    once; the solver then re-optimizes robust terminal log wealth inside that
+    fractional loss budget on the current non-linear ladder. Scaling raw shares
+    is not equivalent when price changes by level. Cash and allocator capacity
+    remain independent hard outer bounds on the executable request.
     """
 
     multiplier = Decimal(fractional_kelly_multiplier)
@@ -1462,23 +1493,48 @@ def _score_global_single_order(
             rejection_reasons={candidate.candidate_id: "NON_POSITIVE_ROBUST_OBJECTIVE"},
         )
 
-    projected_shares = min(full_best[4] * multiplier, capacity_max_shares)
-    projected_probes = {
-        legal
-        for at_most in (True, False)
-        if (
-            legal := _single_order_venue_legal_neighbor(
-                candidate,
-                max(projected_shares, raw_min_shares),
-                at_most=at_most,
-            )
+    legal_min_shares = _single_order_venue_legal_neighbor(
+        candidate, raw_min_shares, at_most=False
+    )
+    if legal_min_shares is None:
+        legal_min_shares = raw_min_shares
+    try:
+        min_order_cost = _single_order_cost(
+            candidate.executable_cost_curve, legal_min_shares
         )
-        is not None
-    }
+    except ValueError:
+        min_order_cost = Decimal("0")
+    fractional_cost_budget = max(full_best[3] * multiplier, min_order_cost)
+    fractional_max_shares = min(
+        capacity_max_shares,
+        _single_order_max_shares_by_cost(
+            candidate.executable_cost_curve,
+            cost_limit_usd=fractional_cost_budget,
+        ),
+    )
+    if fractional_max_shares < legal_min_shares:
+        projected_probes: set[Decimal] = set()
+    else:
+        fractional_raw_probes = _single_order_stationary_probes(
+            candidate.executable_cost_curve,
+            robust_q=Decimal(str(robust_q)),
+            wealth_floor_usd=wealth_floor_usd,
+            wealth_ceiling_usd=wealth_ceiling_usd,
+            min_shares=legal_min_shares,
+            max_shares=fractional_max_shares,
+        )
+        projected_probes = set()
+        for raw_probe in fractional_raw_probes:
+            for at_most in (True, False):
+                legal = _single_order_venue_legal_neighbor(
+                    candidate, raw_probe, at_most=at_most
+                )
+                if legal is not None:
+                    projected_probes.add(legal)
 
     best = None
     for shares in sorted(projected_probes):
-        if shares < raw_min_shares or shares > capacity_max_shares:
+        if shares < legal_min_shares or shares > fractional_max_shares:
             continue
         try:
             robust_du, robust_ev, efficiency, cost = _single_order_metrics(
@@ -1495,7 +1551,7 @@ def _score_global_single_order(
             )
         except ValueError:
             continue
-        if max_spend > spend_limit:
+        if cost > fractional_cost_budget or max_spend > spend_limit:
             continue
         if best is None or robust_du > best[0] + 1e-15 or (
             math.isclose(robust_du, best[0], rel_tol=0.0, abs_tol=1e-15)
