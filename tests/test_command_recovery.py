@@ -1,8 +1,8 @@
 # Created: 2026-04-26
-# Lifecycle: created=2026-04-26; last_reviewed=2026-05-21; last_reused=2026-07-11
+# Lifecycle: created=2026-04-26; last_reviewed=2026-07-13; last_reused=2026-07-13
 # Purpose: Lock INV-31 command recovery behavior plus snapshot-gated command inserts.
 # Reuse: Run when command recovery, command journal schema, or executable snapshot gating changes.
-# Last reused/audited: 2026-07-11
+# Last reused/audited: 2026-07-13
 # Authority basis: docs/operations/task_2026-04-26_execution_state_truth_p1_command_bus/implementation_plan.md u00a7P1.S4
 """INV-31 anchor tests: command recovery loop.
 
@@ -4519,6 +4519,103 @@ class TestRecoveryResolutionTable:
         assert "ord-filled-scope" in boot_fast["order_ids"]
         assert "ord-filled-scope" in full["order_ids"]
 
+    def test_live_tick_does_not_overprime_filled_terminal_exit_with_stale_remainder(
+        self,
+        conn,
+    ):
+        from src.execution.command_recovery import _collect_recovery_priming_keys
+        from src.state.venue_command_repo import append_event
+
+        _insert(conn, intent_kind="EXIT", side="SELL", size=10.0)
+        _advance_to_acked(conn, venue_order_id="ord-filled-terminal-exit")
+        append_event(
+            conn,
+            command_id="cmd-001",
+            event_type="FILL_CONFIRMED",
+            occurred_at="2026-04-26T00:06:00Z",
+            payload={
+                "venue_order_id": "ord-filled-terminal-exit",
+                "trade_id": "trade-filled-terminal-exit",
+                "filled_size": "10",
+                "fill_price": "0.5",
+            },
+        )
+        _seed_pending_entry_projection(conn, order_id="ord-filled-terminal-exit")
+        conn.execute(
+            "UPDATE position_current SET phase = 'settled' WHERE position_id = 'pos-001'"
+        )
+        _append_order_fact(
+            conn,
+            order_id="ord-filled-terminal-exit",
+            state="PARTIALLY_MATCHED",
+            matched_size="8",
+            remaining_size="2",
+        )
+
+        live_tick = _collect_recovery_priming_keys(conn, scope="live_tick")
+        boot_fast = _collect_recovery_priming_keys(conn, scope="boot_fast")
+        full = _collect_recovery_priming_keys(conn, scope="full")
+
+        assert "ord-filled-terminal-exit" not in live_tick["order_ids"]
+        assert "ord-filled-terminal-exit" in boot_fast["order_ids"]
+        assert "ord-filled-terminal-exit" in full["order_ids"]
+
+    def test_live_partial_remainder_seek_does_not_demote_stronger_canonical_fact(
+        self,
+        conn,
+    ):
+        from src.execution.command_recovery import _partial_remainder_candidates
+        from src.state.venue_command_repo import append_event
+
+        _insert(conn, size=5.0)
+        _advance_to_acked(conn, venue_order_id="ord-partial-seek")
+        append_event(
+            conn,
+            command_id="cmd-001",
+            event_type="FILL_CONFIRMED",
+            occurred_at="2026-04-26T00:06:00Z",
+            payload={
+                "venue_order_id": "ord-partial-seek",
+                "trade_id": "trade-partial-seek",
+                "filled_size": "5",
+                "fill_price": "0.5",
+            },
+        )
+        _seed_pending_entry_projection(conn, order_id="ord-partial-seek")
+        conn.execute(
+            "UPDATE position_current SET phase = 'economically_closed' WHERE position_id = 'pos-001'"
+        )
+        _append_order_fact(
+            conn,
+            order_id="ord-partial-seek",
+            state="MATCHED",
+            matched_size="5",
+            remaining_size="0",
+        )
+        _append_order_fact(
+            conn,
+            order_id="ord-partial-seek",
+            state="RESTING",
+            matched_size="0",
+            remaining_size="5",
+        )
+
+        sql_trace = []
+        conn.set_trace_callback(sql_trace.append)
+        candidates = _partial_remainder_candidates(
+            conn,
+            updated_before=None,
+            live_tick_scope=True,
+        )
+        conn.set_trace_callback(None)
+
+        assert candidates == []
+        assert any(
+            "SELECT latest.fact_id FROM venue_order_facts latest"
+            in " ".join(query.split())
+            for query in sql_trace
+        )
+
     def test_live_tick_does_not_prime_terminal_zero_fill_matched_recovery_debt(
         self,
         conn,
@@ -4564,6 +4661,196 @@ class TestRecoveryResolutionTable:
             row["command_id"] != "cmd-terminal-zero"
             for row in live_tick_candidates
         )
+
+    @pytest.mark.parametrize(
+        ("position_phase", "live_tick_expected"),
+        [
+            ("settled", False),
+            ("voided", False),
+            ("admin_closed", False),
+            ("economically_closed", True),
+            ("day0_window", True),
+        ],
+    )
+    def test_live_tick_skips_only_durably_filled_hard_terminal_matched_orders(
+        self,
+        conn,
+        position_phase,
+        live_tick_expected,
+    ):
+        from src.execution.command_recovery import (
+            _collect_recovery_priming_keys,
+            _latest_matched_order_fact_candidates,
+        )
+        from src.state.venue_command_repo import append_event
+
+        _insert(conn, size=10.0)
+        _advance_to_cancel_pending(conn, venue_order_id="ord-terminal-filled")
+        append_event(
+            conn,
+            command_id="cmd-001",
+            event_type="CANCEL_ACKED",
+            occurred_at="2026-04-26T00:04:00Z",
+            payload={"venue_order_id": "ord-terminal-filled", "venue_status": "CANCELED"},
+        )
+        _seed_pending_entry_projection(conn, order_id="ord-terminal-filled")
+        conn.execute(
+            "UPDATE position_current SET phase = ? WHERE position_id = 'pos-001'",
+            (position_phase,),
+        )
+        _append_order_fact(
+            conn,
+            order_id="ord-terminal-filled",
+            state="CANCEL_CONFIRMED",
+            matched_size="10",
+            remaining_size="0",
+        )
+        _append_trade_fact(
+            conn,
+            order_id="ord-terminal-filled",
+            trade_id="trade-terminal-filled",
+            state="CONFIRMED",
+            filled_size="10",
+            fill_price="0.5",
+        )
+
+        sql_trace = []
+        conn.set_trace_callback(sql_trace.append)
+        live_tick_candidates = _latest_matched_order_fact_candidates(
+            conn,
+            skip_stale_terminal_zero=True,
+            skip_projected_hard_terminal=True,
+        )
+        conn.set_trace_callback(None)
+        full_candidates = _latest_matched_order_fact_candidates(conn)
+        live_tick = _collect_recovery_priming_keys(conn, scope="live_tick")
+        boot_fast = _collect_recovery_priming_keys(conn, scope="boot_fast")
+
+        assert (
+            any(row["command_id"] == "cmd-001" for row in live_tick_candidates)
+            is live_tick_expected
+        )
+        assert any(row["command_id"] == "cmd-001" for row in full_candidates)
+        assert (
+            "ord-terminal-filled" in live_tick["order_ids"]
+        ) is live_tick_expected
+        assert "ord-terminal-filled" in boot_fast["order_ids"]
+        assert not any(
+            "SELECT COUNT(*) AS count FROM venue_trade_facts WHERE command_id" in " ".join(query.split())
+            for query in sql_trace
+        )
+        assert any(
+            "JOIN matched_candidate_commands scope ON scope.command_id = fact.command_id"
+            in " ".join(query.split())
+            for query in sql_trace
+        )
+
+    def test_live_tick_matched_apply_avoids_venue_read_for_projected_hard_terminal(
+        self,
+        conn,
+        mock_client,
+    ):
+        from src.execution.command_recovery import reconcile_matched_order_facts
+        from src.state.venue_command_repo import append_event
+
+        _insert(conn, size=10.0)
+        _advance_to_cancel_pending(conn, venue_order_id="ord-terminal-filled")
+        append_event(
+            conn,
+            command_id="cmd-001",
+            event_type="CANCEL_ACKED",
+            occurred_at="2026-04-26T00:04:00Z",
+            payload={"venue_order_id": "ord-terminal-filled", "venue_status": "CANCELED"},
+        )
+        _seed_pending_entry_projection(conn, order_id="ord-terminal-filled")
+        conn.execute(
+            "UPDATE position_current SET phase = 'settled' WHERE position_id = 'pos-001'"
+        )
+        _append_order_fact(
+            conn,
+            order_id="ord-terminal-filled",
+            state="CANCEL_CONFIRMED",
+            matched_size="10",
+            remaining_size="0",
+        )
+        _append_trade_fact(
+            conn,
+            order_id="ord-terminal-filled",
+            trade_id="trade-terminal-filled",
+            state="CONFIRMED",
+            filled_size="10",
+            fill_price="0.5",
+        )
+
+        summary = reconcile_matched_order_facts(
+            conn,
+            mock_client,
+            skip_stale_terminal_zero=True,
+            skip_projected_hard_terminal=True,
+        )
+
+        assert summary == {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
+        mock_client.get_order.assert_not_called()
+
+    @pytest.mark.parametrize("incomplete_proof", ["missing_trade_fact", "missing_position", "review_required"])
+    def test_live_tick_keeps_terminal_matched_orders_without_complete_local_proof(
+        self,
+        conn,
+        incomplete_proof,
+    ):
+        from src.execution.command_recovery import (
+            _collect_recovery_priming_keys,
+            _latest_matched_order_fact_candidates,
+        )
+        from src.state.venue_command_repo import append_event
+
+        _insert(conn, size=10.0)
+        if incomplete_proof == "review_required":
+            _advance_to_cancel_unknown_review_required(
+                conn,
+                venue_order_id="ord-incomplete-terminal",
+            )
+        else:
+            _advance_to_cancel_pending(conn, venue_order_id="ord-incomplete-terminal")
+            append_event(
+                conn,
+                command_id="cmd-001",
+                event_type="CANCEL_ACKED",
+                occurred_at="2026-04-26T00:04:00Z",
+                payload={"venue_order_id": "ord-incomplete-terminal", "venue_status": "CANCELED"},
+            )
+        _seed_pending_entry_projection(conn, order_id="ord-incomplete-terminal")
+        conn.execute(
+            "UPDATE position_current SET phase = 'settled' WHERE position_id = 'pos-001'"
+        )
+        _append_order_fact(
+            conn,
+            order_id="ord-incomplete-terminal",
+            state="CANCEL_CONFIRMED",
+            matched_size="10",
+            remaining_size="0",
+        )
+        if incomplete_proof != "missing_trade_fact":
+            _append_trade_fact(
+                conn,
+                order_id="ord-incomplete-terminal",
+                trade_id="trade-incomplete-terminal",
+                state="CONFIRMED",
+                filled_size="10",
+                fill_price="0.5",
+            )
+        if incomplete_proof == "missing_position":
+            conn.execute("DELETE FROM position_current WHERE position_id = 'pos-001'")
+
+        candidates = _latest_matched_order_fact_candidates(
+            conn,
+            skip_stale_terminal_zero=True,
+            skip_projected_hard_terminal=True,
+        )
+        priming = _collect_recovery_priming_keys(conn, scope="live_tick")
+
+        assert any(row["command_id"] == "cmd-001" for row in candidates)
+        assert "ord-incomplete-terminal" in priming["order_ids"]
 
     def test_live_tick_scopes_recorded_maker_fill_economics(
         self,

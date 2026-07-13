@@ -234,10 +234,34 @@ _NO_VENUE_EXPOSURE_REVIEW_REASONS = frozenset({
 })
 
 
+def _order_fact_proof_rank_sql(alias: str) -> str:
+    return f"""
+        CASE
+            WHEN UPPER(COALESCE({alias}.state, '')) IN ('MATCHED', 'FILLED')
+                 AND CAST(COALESCE({alias}.matched_size, '0') AS REAL) > 0
+                 AND CAST(COALESCE({alias}.remaining_size, '0') AS REAL) = 0
+            THEN 600
+            WHEN UPPER(COALESCE({alias}.state, '')) IN ('CANCEL_CONFIRMED', 'EXPIRED', 'VENUE_WIPED')
+                 AND CAST(COALESCE({alias}.matched_size, '0') AS REAL) > 0
+            THEN 550
+            WHEN UPPER(COALESCE({alias}.state, '')) IN ('PARTIALLY_MATCHED', 'PARTIAL')
+                 AND CAST(COALESCE({alias}.matched_size, '0') AS REAL) > 0
+            THEN 400
+            WHEN UPPER(COALESCE({alias}.state, '')) IN ('CANCEL_CONFIRMED', 'EXPIRED', 'VENUE_WIPED')
+                 AND CAST(COALESCE({alias}.matched_size, '0') AS REAL) = 0
+            THEN 300
+            WHEN UPPER(COALESCE({alias}.state, '')) IN ('LIVE', 'OPEN', 'RESTING')
+            THEN 200
+            ELSE 100
+        END
+    """
+
+
 def _canonical_order_truth_cte(
     *,
     cte_name: str = "canonical_order_truth",
     partition_by_venue_order: bool = False,
+    command_scope_cte: str | None = None,
 ) -> str:
     """SQL CTE that prevents weaker later order facts from demoting truth.
 
@@ -247,6 +271,12 @@ def _canonical_order_truth_cte(
     """
 
     partition = "command_id, venue_order_id" if partition_by_venue_order else "command_id"
+    command_scope_join = (
+        f"JOIN {command_scope_cte} scope ON scope.command_id = fact.command_id"
+        if command_scope_cte
+        else ""
+    )
+    proof_rank = _order_fact_proof_rank_sql("fact")
     return f"""
         {cte_name} AS (
             SELECT ranked.*
@@ -258,25 +288,9 @@ def _canonical_order_truth_cte(
                            ) AS canonical_rank
                       FROM (
                             SELECT fact.*,
-                                   CASE
-                                       WHEN UPPER(COALESCE(fact.state, '')) IN ('MATCHED', 'FILLED')
-                                            AND CAST(COALESCE(fact.matched_size, '0') AS REAL) > 0
-                                            AND CAST(COALESCE(fact.remaining_size, '0') AS REAL) = 0
-                                       THEN 600
-                                       WHEN UPPER(COALESCE(fact.state, '')) IN ('CANCEL_CONFIRMED', 'EXPIRED', 'VENUE_WIPED')
-                                            AND CAST(COALESCE(fact.matched_size, '0') AS REAL) > 0
-                                       THEN 550
-                                       WHEN UPPER(COALESCE(fact.state, '')) IN ('PARTIALLY_MATCHED', 'PARTIAL')
-                                            AND CAST(COALESCE(fact.matched_size, '0') AS REAL) > 0
-                                       THEN 400
-                                       WHEN UPPER(COALESCE(fact.state, '')) IN ('CANCEL_CONFIRMED', 'EXPIRED', 'VENUE_WIPED')
-                                            AND CAST(COALESCE(fact.matched_size, '0') AS REAL) = 0
-                                       THEN 300
-                                       WHEN UPPER(COALESCE(fact.state, '')) IN ('LIVE', 'OPEN', 'RESTING')
-                                       THEN 200
-                                       ELSE 100
-                                   END AS proof_rank
+                                   {proof_rank} AS proof_rank
                               FROM venue_order_facts fact
+                              {command_scope_join}
                            ) scored
                    ) ranked
              WHERE ranked.canonical_rank = 1
@@ -1734,6 +1748,7 @@ def _latest_matched_order_fact_candidates(
     conn: sqlite3.Connection,
     *,
     skip_stale_terminal_zero: bool = False,
+    skip_projected_hard_terminal: bool = False,
     now: datetime | None = None,
 ) -> list[dict]:
     if not _table_exists(conn, "venue_order_facts"):
@@ -1755,7 +1770,37 @@ def _latest_matched_order_fact_candidates(
     command_placeholders = ", ".join("?" for _ in command_states)
     fact_placeholders = ", ".join("?" for _ in fact_states)
     source_placeholders = ", ".join("?" for _ in sources)
-    sql = "WITH " + _canonical_order_truth_cte() + f"""
+    trade_fact_exists = (
+        """EXISTS (
+                SELECT 1
+                  FROM venue_trade_facts trade
+                 WHERE trade.command_id = cmd.command_id
+                   AND trade.state IN ('MATCHED', 'MINED', 'CONFIRMED')
+                   AND CAST(COALESCE(trade.filled_size, '0') AS REAL) > 0
+            )"""
+        if _table_exists(conn, "venue_trade_facts")
+        else "0"
+    )
+    position_phase = "pc.phase" if _table_exists(conn, "position_current") else "NULL"
+    position_join = (
+        "LEFT JOIN position_current pc ON pc.position_id = cmd.position_id"
+        if _table_exists(conn, "position_current")
+        else ""
+    )
+    command_scope = f"""
+        matched_candidate_commands AS (
+            SELECT command_id
+              FROM venue_commands
+             WHERE intent_kind IN ('ENTRY', 'EXIT')
+               AND state IN ({command_placeholders})
+               AND venue_order_id IS NOT NULL
+        ),
+    """
+    sql = (
+        "WITH "
+        + command_scope
+        + _canonical_order_truth_cte(command_scope_cte="matched_candidate_commands")
+        + f"""
         SELECT
             cmd.*,
             fact.fact_id AS order_fact_id,
@@ -1765,19 +1810,23 @@ def _latest_matched_order_fact_candidates(
             fact.remaining_size AS order_fact_remaining_size,
             fact.matched_size AS order_fact_matched_size,
             fact.source AS order_fact_source,
-            fact.raw_payload_json AS order_fact_raw_payload_json
+            fact.raw_payload_json AS order_fact_raw_payload_json,
+            {trade_fact_exists} AS existing_fill_trade_fact,
+            {position_phase} AS position_phase
           FROM venue_commands cmd
           JOIN canonical_order_truth fact
             ON fact.command_id = cmd.command_id
+          {position_join}
          WHERE cmd.intent_kind IN ('ENTRY', 'EXIT')
            AND cmd.state IN ({command_placeholders})
            AND fact.state IN ({fact_placeholders})
            AND fact.source IN ({source_placeholders})
            AND cmd.venue_order_id IS NOT NULL
         """
+    )
     rows = conn.execute(
         sql,
-        (*command_states, *fact_states, *sources),
+        (*command_states, *command_states, *fact_states, *sources),
     ).fetchall()
     candidates: list[dict] = []
     terminal_no_fill_fact_states = {"CANCEL_CONFIRMED", "EXPIRED", "VENUE_WIPED"}
@@ -1790,6 +1839,7 @@ def _latest_matched_order_fact_candidates(
         )
         terminal_positive_fact = _is_terminal_positive_match_candidate(candidate)
         review_required = command_state == CommandState.REVIEW_REQUIRED.value
+        existing_fill_trade_fact = bool(candidate.get("existing_fill_trade_fact"))
         if (
             review_required
             and str(candidate.get("order_fact_state") or "").upper() in terminal_no_fill_fact_states
@@ -1807,7 +1857,15 @@ def _latest_matched_order_fact_candidates(
         ):
             continue
         if (
-            _fill_trade_fact_count(conn, str(candidate.get("command_id") or "")) > 0
+            skip_projected_hard_terminal
+            and existing_fill_trade_fact
+            and not review_required
+            and str(candidate.get("position_phase") or "").lower()
+            in {"settled", "voided", "admin_closed"}
+        ):
+            continue
+        if (
+            existing_fill_trade_fact
             and not (terminal_positive_fact or review_required)
         ):
             continue
@@ -7190,6 +7248,7 @@ def reconcile_matched_order_facts(
     *,
     command_id: str | None = None,
     skip_stale_terminal_zero: bool = False,
+    skip_projected_hard_terminal: bool = False,
 ) -> dict:
     """Recover ACKED command fill facts when point-order truth says the order matched."""
 
@@ -7200,6 +7259,7 @@ def reconcile_matched_order_facts(
     for row in _latest_matched_order_fact_candidates(
         conn,
         skip_stale_terminal_zero=skip_stale_terminal_zero,
+        skip_projected_hard_terminal=skip_projected_hard_terminal,
     ):
         if target_command_id and str(row.get("command_id") or "") != target_command_id:
             continue
@@ -8822,11 +8882,18 @@ def _partial_remainder_candidates(
         return [_dict_row(row) for row in rows]
 
     open_phase_placeholders = ",".join("?" for _ in _RUNTIME_OPEN_REPAIR_PHASES)
-    sql = "WITH " + _canonical_order_truth_cte() + f"""
+    proof_rank = _order_fact_proof_rank_sql("latest")
+    sql = f"""
         SELECT cmd.*, pc.condition_id AS position_condition_id
           FROM venue_commands cmd
-          LEFT JOIN canonical_order_truth fact
-            ON fact.command_id = cmd.command_id
+          LEFT JOIN venue_order_facts fact
+            ON fact.fact_id = (
+                SELECT latest.fact_id
+                  FROM venue_order_facts latest
+                 WHERE latest.command_id = cmd.command_id
+                 ORDER BY {proof_rank} DESC, latest.local_sequence DESC
+                 LIMIT 1
+            )
            AND fact.venue_order_id = cmd.venue_order_id
           LEFT JOIN position_current pc
             ON pc.position_id = cmd.position_id
@@ -15889,51 +15956,24 @@ def _accumulate(
 def _active_venue_command_priming_rows(
     conn: sqlite3.Connection,
     *,
-    live_tick_scope: bool = False,
+    include_filled: bool = True,
 ) -> list[dict]:
     if not _table_exists(conn, "venue_commands"):
         return []
     active_states = tuple(sorted(_ACKED_ORDER_STATES | _PARTIAL_REMAINDER_STATES))
+    if not include_filled:
+        active_states = tuple(state for state in active_states if state != CommandState.FILLED.value)
     placeholders = ",".join("?" for _ in active_states)
-    if not live_tick_scope:
-        rows = conn.execute(
-            f"""
-            SELECT command_id, venue_order_id, idempotency_key, intent_kind, state
-              FROM venue_commands
-             WHERE state IN ({placeholders})
-               AND COALESCE(venue_order_id, '') != ''
-               AND intent_kind IN ('ENTRY', 'EXIT')
-             ORDER BY updated_at, command_id
-            """,
-            active_states,
-        ).fetchall()
-        return [_dict_row(row) for row in rows]
-
-    open_phase_placeholders = ",".join("?" for _ in _RUNTIME_OPEN_REPAIR_PHASES)
     rows = conn.execute(
-        "WITH " + _canonical_order_truth_cte() + f"""
-        SELECT cmd.command_id,
-               cmd.venue_order_id,
-               cmd.idempotency_key,
-               cmd.intent_kind,
-               cmd.state
-          FROM venue_commands cmd
-          LEFT JOIN canonical_order_truth fact
-            ON fact.command_id = cmd.command_id
-           AND fact.venue_order_id = cmd.venue_order_id
-          LEFT JOIN position_current pc
-            ON pc.position_id = cmd.position_id
-         WHERE cmd.state IN ({placeholders})
-           AND COALESCE(cmd.venue_order_id, '') != ''
-           AND cmd.intent_kind IN ('ENTRY', 'EXIT')
-           AND (
-                cmd.state != 'FILLED'
-                OR CAST(COALESCE(fact.remaining_size, '0') AS REAL) > 0
-                OR COALESCE(pc.phase, '') IN ({open_phase_placeholders})
-           )
-         ORDER BY cmd.updated_at, cmd.command_id
+        f"""
+        SELECT command_id, venue_order_id, idempotency_key, intent_kind, state
+          FROM venue_commands
+         WHERE state IN ({placeholders})
+           AND COALESCE(venue_order_id, '') != ''
+           AND intent_kind IN ('ENTRY', 'EXIT')
+         ORDER BY updated_at, command_id
         """,
-        (*active_states, *_RUNTIME_OPEN_REPAIR_PHASES),
+        active_states,
     ).fetchall()
     return [_dict_row(row) for row in rows]
 
@@ -16046,11 +16086,14 @@ def _collect_recovery_priming_keys(conn: sqlite3.Connection, *, scope: str = "fu
         _harvest(
             _active_venue_command_priming_rows(
                 conn,
-                live_tick_scope=scope == "live_tick",
+                include_filled=scope != "live_tick",
             )
         )
     except Exception:  # noqa: BLE001 — a missing table just means no candidates
-        logger.debug("recovery: priming candidate _active_venue_command_priming_rows failed", exc_info=True)
+        logger.debug(
+            "recovery: priming candidate _active_venue_command_priming_rows failed",
+            exc_info=True,
+        )
     if scope in {"live_tick", "boot_fast"}:
         for candidate_fn in (
             _local_orphan_no_fill_candidates,
@@ -16066,6 +16109,7 @@ def _collect_recovery_priming_keys(conn: sqlite3.Connection, *, scope: str = "fu
                 _latest_matched_order_fact_candidates(
                     conn,
                     skip_stale_terminal_zero=True,
+                    skip_projected_hard_terminal=scope == "live_tick",
                 )
             )
         except Exception:  # noqa: BLE001
@@ -16915,7 +16959,8 @@ def _reconcile_passes_short_conn(client, summary: dict, started_at: str, *, scop
         _client_pass("matched_order_facts",
                      reconcile_matched_order_facts,
                      "matched_order_facts",
-                     skip_stale_terminal_zero=True)
+                     skip_stale_terminal_zero=True,
+                     skip_projected_hard_terminal=scope == "live_tick")
         _db_pass(
             "filled_exit_trade_fact_tx_repair",
             reconcile_filled_exit_trade_fact_tx_repairs,
