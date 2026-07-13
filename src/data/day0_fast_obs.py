@@ -1296,11 +1296,15 @@ def _recover_kill_memo_from_events(
               AND json_extract(payload_json, '$.target_date') = ?
               AND json_extract(payload_json, '$.metric') = ?
               AND json_extract(payload_json, '$.source_authorized_status') = 'AUTHORIZED'
+              AND json_extract(payload_json, '$.settlement_source') = ?
               AND json_extract(payload_json, '$.local_date_status') = 'MATCH'
               AND json_extract(payload_json, '$.dst_status') = 'UNAMBIGUOUS'
               AND json_extract(payload_json, '$.rounded_value') IS NOT NULL
         """
-        row = conn.execute(sql, (city_name, target_date, metric)).fetchone()
+        row = conn.execute(
+            sql,
+            (city_name, target_date, metric, FAST_OBS_SOURCE_ID),
+        ).fetchone()
         if row is None:
             return None
         value = row[0]

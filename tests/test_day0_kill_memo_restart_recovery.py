@@ -25,6 +25,7 @@ import json
 import sqlite3
 
 from src.data.day0_fast_obs import (
+    FAST_OBS_SOURCE_ID,
     Day0FastObsEmitter,
     _recover_kill_memo_from_events,
 )
@@ -57,6 +58,7 @@ def _insert_event(
     source_authorized_status: str = "AUTHORIZED",
     local_date_status: str = "MATCH",
     dst_status: str = "UNAMBIGUOUS",
+    settlement_source: str = FAST_OBS_SOURCE_ID,
 ) -> None:
     payload = {
         "city": city,
@@ -66,6 +68,7 @@ def _insert_event(
         "source_authorized_status": source_authorized_status,
         "local_date_status": local_date_status,
         "dst_status": dst_status,
+        "settlement_source": settlement_source,
     }
     conn.execute(
         "INSERT INTO opportunity_events (event_id, event_type, payload_json) VALUES (?,?,?)",
@@ -119,6 +122,28 @@ def test_recovery_excludes_non_memo_safe_events():
         city_name="Chicago", target_date="2026-06-01", metric="high", world_conn=conn
     )
     assert recovered == 71
+
+
+def test_recovery_excludes_authorized_events_from_another_day0_source():
+    conn = _events_conn()
+    _insert_event(
+        conn,
+        event_id="hko",
+        city="Hong Kong",
+        target_date="2026-07-13",
+        metric="high",
+        rounded_value=34,
+        settlement_source="hko_hourly_accumulator",
+    )
+
+    recovered = _recover_kill_memo_from_events(
+        city_name="Hong Kong",
+        target_date="2026-07-13",
+        metric="high",
+        world_conn=conn,
+    )
+
+    assert recovered is None
 
 
 def test_recovery_none_when_no_events():

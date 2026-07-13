@@ -116,6 +116,13 @@ def _manila():
     )
 
 
+def _hong_kong():
+    return SimpleNamespace(
+        name="Hong Kong", timezone="Asia/Hong_Kong", settlement_unit="C",
+        wu_station=None, settlement_source_type="hko",
+    )
+
+
 def _position(**over):
     base = dict(
         trade_id="hf-test-1", city="Tokyo", target_date="2026-06-10",
@@ -511,6 +518,15 @@ class TestSourceDiscipline:
             city=_wellington(), target_date="2026-06-10", metric="high", now=NOW,
         )
         assert effective == pytest.approx(26.0)
+
+    def test_non_wu_city_cannot_consume_fast_lane_kill_memo(self, monkeypatch):
+        _set_metar_memo(monkeypatch, 34)
+        effective, source = settlement_grade_effective_extreme(
+            city=_hong_kong(), target_date="2026-07-13", metric="high", now=NOW,
+        )
+
+        assert effective is None
+        assert source == ""
 
     def test_wu_kills_at_face_value_and_composes_with_metar(self, monkeypatch):
         monkeypatch.setattr(

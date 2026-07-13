@@ -33,6 +33,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from src.data.day0_fast_obs import (
+    FAST_OBS_SOURCE_ID,
     Day0FastObsEmitter,
     _recover_kill_memo_from_events,
 )
@@ -70,6 +71,7 @@ def _insert_event(
     source_authorized_status: str = "AUTHORIZED",
     local_date_status: str = "MATCH",
     dst_status: str = "UNAMBIGUOUS",
+    settlement_source: str = FAST_OBS_SOURCE_ID,
 ) -> None:
     payload = {
         "city": city,
@@ -79,6 +81,7 @@ def _insert_event(
         "source_authorized_status": source_authorized_status,
         "local_date_status": local_date_status,
         "dst_status": dst_status,
+        "settlement_source": settlement_source,
     }
     conn.execute(
         "INSERT INTO opportunity_events (event_id, event_type, payload_json) VALUES (?,?,?)",

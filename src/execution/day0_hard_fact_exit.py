@@ -559,8 +559,11 @@ def settlement_grade_effective_extreme(
         wu_value = None
         wu_source = ""
 
+    from src.data.day0_fast_obs import fast_obs_source_for_city
+
     metar_value = None
-    margin = _metar_kill_margin_units(city_name, unit)
+    fast_source = fast_obs_source_for_city(city)
+    margin = _metar_kill_margin_units(city_name, unit) if fast_source is not None else None
     if margin is not None:
         raw = _metar_rounded_extreme(city_name, target_date, metric, world_conn=world_conn)
         if raw is not None:
