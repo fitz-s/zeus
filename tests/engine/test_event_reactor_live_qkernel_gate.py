@@ -1350,6 +1350,36 @@ def test_global_actuation_current_band_can_tighten_served_bound(side):
 
 
 @pytest.mark.parametrize("side", ("YES", "NO"))
+def test_global_actuation_reauctions_sample_band_above_served_point(side):
+    """A coherent sample tail cannot loosen the separately served point bound."""
+
+    served = 0.9187643552930886
+    cert = _current_qkernel_cert(side=side)
+    cert.update(
+        payoff_q_point=served,
+        payoff_q_lcb=served,
+        pre_qkernel_q_lcb_5pct=served,
+        cost=0.001,
+        edge_lcb=served - 0.001,
+    )
+    decision = _global_decision(shares="1000", cost="1", q="0.9375885546392851")
+    witness = SimpleNamespace(
+        sample_matrix_identity=f"global-current-point-cap-{side.lower()}",
+        yes_q_samples=SimpleNamespace(shape=(400, 11)),
+        band_alpha=0.05,
+    )
+
+    with pytest.raises(era._GlobalProbabilityTightened) as raised:
+        era._global_current_state_execution_economics(
+            cert,
+            decision=decision,
+            witness=witness,
+        )
+
+    assert raised.value.payoff_q_lcb == pytest.approx(served)
+
+
+@pytest.mark.parametrize("side", ("YES", "NO"))
 def test_global_actuation_reauctions_jit_bound_that_falls_below_majority(side):
     cert = _current_qkernel_cert(side=side)
     cert.update(
