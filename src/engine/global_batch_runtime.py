@@ -9,6 +9,7 @@ import hashlib
 import logging
 import sqlite3
 import time
+from types import SimpleNamespace
 from typing import Callable, Mapping, Sequence
 
 from src.contracts.executable_market_snapshot import FRESHNESS_WINDOW_DEFAULT
@@ -134,6 +135,34 @@ class GlobalOneShotActuator:
         return self._callback(*args)
 
 
+def _bind_selection_holdings(
+    prepared_by_event: Mapping[str, object],
+    *,
+    portfolio_state: object,
+    ledger_snapshot_id: str,
+) -> dict[str, object]:
+    """Bind every family holding to the same selection-time ledger generation."""
+
+    from src.solve.menu_adapter import native_holdings_snapshot_from_positions
+
+    positions = tuple(getattr(portfolio_state, "positions", ()) or ())
+    rebound: dict[str, object] = {}
+    for event_id, prepared in prepared_by_event.items():
+        witness = getattr(prepared, "probability_witness", None)
+        family_key = str(getattr(witness, "family_key", "") or "")
+        bindings = tuple(getattr(witness, "bindings", ()) or ())
+        if not family_key or not bindings:
+            raise ValueError("GLOBAL_HOLDINGS_PROBABILITY_BINDING_MISSING")
+        holdings = native_holdings_snapshot_from_positions(
+            family_key=family_key,
+            omega=SimpleNamespace(bins=bindings),
+            positions=positions,
+            ledger_snapshot_id=ledger_snapshot_id,
+        )
+        rebound[event_id] = replace(prepared, holdings_snapshot=holdings)
+    return rebound
+
+
 def _probability_manifest(probabilities: Mapping[str, object]) -> tuple[tuple[str, str], ...]:
     """Freeze q plus token bindings while allowing only book and wealth to move."""
 
@@ -158,6 +187,23 @@ def _book_economics_manifest(
         curve = asset.curve
         rows.append(
             (
+                asset.family_key,
+                asset.bin_id,
+                asset.condition_id,
+                asset.market_event_id,
+                asset.side,
+                asset.token_id,
+                str(curve.fee_model.fee_rate),
+                str(curve.min_tick),
+                str(curve.min_order_size),
+                tuple((str(level.price), str(level.size)) for level in curve.levels),
+            )
+        )
+    for asset in getattr(book_epoch, "sell_assets", ()):
+        curve = asset.curve
+        rows.append(
+            (
+                "SELL",
                 asset.family_key,
                 asset.bin_id,
                 asset.condition_id,
@@ -280,6 +326,7 @@ def _overlay_current_global_book_epoch(
         captured_at_utc=book_epoch.captured_at_utc,
         max_age=book_epoch.max_age,
         witness_identity=witness_identity,
+        sell_assets=tuple(getattr(book_epoch, "sell_assets", ())),
     )
 
 
@@ -862,12 +909,23 @@ def process_current_global_batch(
         ):
             selection_at = current_time()
             state = portfolio_state_provider() if portfolio_state_provider else None
+            if state is None and hasattr(trade_conn, "execute"):
+                from src.state.portfolio import load_runtime_open_portfolio
+
+                state = load_runtime_open_portfolio(trade_conn)
             wealth = current_portfolio_wealth_witness(
                 trade_conn,
                 decision_at_utc=selection_at,
                 max_age=wealth_age,
                 portfolio_state=state,
             )
+            prepared_for_selection = attempt_prepared
+            if attempt_book_epoch is not None and state is not None:
+                prepared_for_selection = _bind_selection_holdings(
+                    attempt_prepared,
+                    portfolio_state=state,
+                    ledger_snapshot_id=wealth.ledger_snapshot_id,
+                )
             venue_identity = (
                 attempt_book_epoch.witness_identity
                 if attempt_book_epoch is not None
@@ -894,7 +952,7 @@ def process_current_global_batch(
                 return current_execution(candidate, selection_at)
 
             return select_prepared_global_auction(
-                attempt_prepared,
+                prepared_for_selection,
                 selection_epoch_identity=attempt_selection_epoch_identity,
                 selection_cut_at_utc=scope_at,
                 current_scope=scope,

@@ -23,10 +23,12 @@ from src.engine.global_auction_universe import (
 from src.solve.solver import (
     CurrentExecutionAuthority,
     CurrentFamilyProbabilityAuthority,
-    GlobalSingleOrderCandidate,
+    GlobalSingleOrderAnyCandidate,
     GlobalSingleOrderDecision,
+    GlobalSingleOrderSellCandidate,
     PortfolioWealthWitness,
     global_candidate_from_native,
+    global_sell_candidate_from_holding,
     select_global_single_order,
 )
 
@@ -65,6 +67,17 @@ def global_single_order_actuation_identity(
     terminal = decision.terminal_wealth
     if candidate is None or terminal is None:
         raise ValueError("global actuation requires a trade decision")
+    action = str(getattr(candidate, "action", "BUY") or "BUY")
+    curve = (
+        candidate.executable_sell_curve
+        if action == "SELL"
+        else candidate.executable_cost_curve
+    )
+    sell_identity = (
+        (action, candidate.position_id, candidate.held_shares, decision.cash_proceeds_usd)
+        if action == "SELL"
+        else ()
+    )
     digest = hashlib.sha256()
     for value in (
         winner_event_id,
@@ -78,10 +91,11 @@ def global_single_order_actuation_identity(
         candidate.condition_id,
         candidate.side,
         candidate.token_id,
+        *sell_identity,
         candidate.probability_witness_identity,
         candidate.book_snapshot_id,
         candidate.execution_curve_identity,
-        candidate.executable_cost_curve.book_hash,
+        curve.book_hash,
         decision.shares,
         decision.cost_usd,
         decision.limit_price,
@@ -122,7 +136,17 @@ def global_single_order_economic_identity(
         raise ValueError("global economic identity requires a trade and current wealth")
     if getattr(probability_witness, "family_key", None) != candidate.family_key:
         raise ValueError("global economic identity probability family mismatch")
-    curve = candidate.executable_cost_curve
+    action = str(getattr(candidate, "action", "BUY") or "BUY")
+    curve = (
+        candidate.executable_sell_curve
+        if action == "SELL"
+        else candidate.executable_cost_curve
+    )
+    sell_identity = (
+        (action, candidate.position_id, candidate.held_shares, decision.cash_proceeds_usd)
+        if action == "SELL"
+        else ()
+    )
     digest = hashlib.sha256()
     for value in (
         candidate.family_key,
@@ -130,6 +154,7 @@ def global_single_order_economic_identity(
         candidate.condition_id,
         candidate.side,
         candidate.token_id,
+        *sell_identity,
         candidate.resolution_identity,
         probability_witness.family_binding_identity,
         probability_witness.sample_matrix_identity,
@@ -249,7 +274,7 @@ def select_prepared_global_auction(
         [str], CurrentFamilyProbabilityAuthority | None
     ],
     current_execution_resolver: Callable[
-        [GlobalSingleOrderCandidate], CurrentExecutionAuthority | None
+        [GlobalSingleOrderAnyCandidate], CurrentExecutionAuthority | None
     ],
     current_wealth_identity_resolver: Callable[[], str | None],
     wealth_witness: PortfolioWealthWitness,
@@ -258,7 +283,7 @@ def select_prepared_global_auction(
     decision_at_utc: datetime,
     book_epoch: CurrentGlobalBookEpoch | None = None,
     current_capital_limit_resolver: Callable[
-        [GlobalSingleOrderCandidate, str, str], Decimal
+        [GlobalSingleOrderAnyCandidate, str, str], Decimal
     ]
     | None = None,
     preflight_excluded_by_family: Mapping[str, str] | None = None,
@@ -293,7 +318,8 @@ def select_prepared_global_auction(
     excluded = frozenset(excluded_by_family)
     probability_witnesses = {}
     event_by_family: dict[str, str] = {}
-    candidates: list[GlobalSingleOrderCandidate] = []
+    candidates: list[GlobalSingleOrderAnyCandidate] = []
+    holdings_by_family = {}
     for event_id, prepared in sorted(prepared_by_event.items()):
         event_key = str(event_id or "").strip()
         probability = getattr(prepared, "probability_witness", None)
@@ -304,6 +330,16 @@ def select_prepared_global_auction(
             return _no_trade("GLOBAL_FAMILY_EVENT_AMBIGUOUS")
         event_by_family[family_key] = event_key
         probability_witnesses[family_key] = probability
+        holdings = getattr(prepared, "holdings_snapshot", None)
+        if book_epoch is not None:
+            if (
+                holdings is None
+                or str(getattr(holdings, "family_key", "") or "") != family_key
+                or str(getattr(holdings, "ledger_snapshot_id", "") or "")
+                != wealth_witness.ledger_snapshot_id
+            ):
+                return _no_trade("GLOBAL_HOLDINGS_SNAPSHOT_MISSING")
+            holdings_by_family[family_key] = holdings
         if family_key in excluded:
             continue
         if book_epoch is None:
@@ -362,6 +398,36 @@ def select_prepared_global_auction(
                     "GLOBAL_BOOK_CANDIDATE_MATERIALIZATION_FAILED:"
                     f"{type(exc).__name__}:{exc}"
                 )
+        for family_key, holdings in holdings_by_family.items():
+            probability = probability_witnesses[family_key]
+            if family_key in excluded:
+                continue
+            for holding in holdings.holdings:
+                asset = book_epoch.sell_asset_by_key.get(
+                    (
+                        family_key,
+                        str(holding.bin_id),
+                        str(holding.side),
+                        str(holding.token_id),
+                    )
+                )
+                if asset is None:
+                    continue
+                try:
+                    candidates.append(
+                        global_sell_candidate_from_holding(
+                            holding,
+                            probability_witness=probability,
+                            ledger_snapshot_id=holdings.ledger_snapshot_id,
+                            executable_sell_curve=asset.curve,
+                            book_captured_at_utc=asset.captured_at_utc,
+                        )
+                    )
+                except Exception as exc:  # noqa: BLE001 - malformed holding invalidates globality
+                    return _no_trade(
+                        "GLOBAL_SELL_CANDIDATE_MATERIALIZATION_FAILED:"
+                        f"{type(exc).__name__}:{exc}"
+                    )
 
     try:
         universe_witness = global_universe_witness_from_scope(
@@ -383,7 +449,7 @@ def select_prepared_global_auction(
             return None
         return universe_witness.witness_identity
 
-    def _candidate_capital_limit(candidate: GlobalSingleOrderCandidate) -> Decimal:
+    def _candidate_capital_limit(candidate: GlobalSingleOrderAnyCandidate) -> Decimal:
         if current_capital_limit_resolver is None:
             return capital_limit_usd
         if book_epoch is None:
@@ -406,8 +472,10 @@ def select_prepared_global_auction(
         )
 
     def _candidate_payoff_q_lcb(
-        candidate: GlobalSingleOrderCandidate,
+        candidate: GlobalSingleOrderAnyCandidate,
     ) -> float | None:
+        if isinstance(candidate, GlobalSingleOrderSellCandidate):
+            return None
         if payoff_q_lcb_by_candidate is None:
             return None
         return payoff_q_lcb_by_candidate.get(

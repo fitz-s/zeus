@@ -622,6 +622,14 @@ class EventSubmissionReceipt:
         repr=False,
         compare=False,
     )
+    # Direct reduce-only executor boundary facts.  They are internal control
+    # evidence: reactor disposition and live counters must never infer venue
+    # contact or ACK from an outcome string.
+    venue_call_started: bool = field(default=False, repr=False, compare=False)
+    venue_ack_received: bool = field(default=False, repr=False, compare=False)
+    venue_command_id: str | None = field(default=None, repr=False, compare=False)
+    venue_command_state: str | None = field(default=None, repr=False, compare=False)
+    venue_order_type: str | None = field(default=None, repr=False, compare=False)
     # D1 FILL-UP LEASE CONTEXT (2026-06-22 lifecycle consult REQ-20260622-060011).
     # When this receipt is an APPROVED same-token fill-up (stake overridden to the
     # residual delta), the family-rebalance lease intent_id + the owned-exposure
@@ -711,6 +719,32 @@ class EventSubmissionReceipt:
     def __post_init__(self) -> None:
         if self.proof_accepted is None:
             object.__setattr__(self, "proof_accepted", bool(self.submitted))
+
+
+def _is_global_reduce_only_exit_receipt(receipt: EventSubmissionReceipt) -> bool:
+    """Recognize only the exact global SELL handoff already owned by exit law."""
+
+    actuation = receipt.global_actuation
+    decision = getattr(actuation, "decision", None)
+    candidate = getattr(decision, "candidate", None)
+    side = str(getattr(candidate, "side", "") or "")
+    return bool(
+        receipt.submitted
+        and receipt.proof_accepted is True
+        and receipt.side_effect_status == "EXIT_SUBMITTED"
+        and receipt.venue_call_started
+        and bool(receipt.venue_command_id)
+        and receipt.venue_order_type == "FAK"
+        and str(receipt.reason or "").startswith(
+            ("GLOBAL_SELL_EXIT:", "GLOBAL_SELL_EXIT_UNKNOWN:")
+        )
+        and getattr(candidate, "action", "BUY") == "SELL"
+        and str(getattr(actuation, "winner_event_id", "") or "")
+        == receipt.event_id
+        and str(getattr(candidate, "token_id", "") or "") == receipt.token_id
+        and receipt.direction == f"sell_{side.lower()}"
+        and side in {"YES", "NO"}
+    )
 
 
 Submit = Callable[[OpportunityEvent, datetime], bool | None | EventSubmissionReceipt]
@@ -2610,6 +2644,22 @@ class OpportunityEventReactor:
                 receipt=receipt,
                 decision_time=decision_time,
             )
+        if _is_global_reduce_only_exit_receipt(receipt):
+            # The global SELL certificate is persisted with the canonical
+            # EXIT_INTENT/venue command in the trade DB by exit_lifecycle.  It is
+            # not an entry DecisionCertificate and must not be reinterpreted by
+            # entry-only trade-score/FDR/Kelly/final-intent checks here.
+            if not self._config.real_order_submit_enabled:
+                return self._reject_or_retry_post_submit(
+                    event,
+                    "EXECUTOR_EXPRESSIBILITY",
+                    "GLOBAL_SELL_LIVE_SIDE_EFFECT_FORBIDDEN",
+                    result,
+                    receipt=receipt,
+                    decision_time=decision_time,
+                )
+            result.proof_accepted += 1
+            return None
         proof_stage, proof_reason = _receipt_money_path_blocker(receipt, self._config)
         if proof_stage is not None:
             return self._reject_or_retry_post_submit(
@@ -3504,7 +3554,24 @@ def _receipt_matches_event(event: OpportunityEvent, receipt: EventSubmissionRece
     if event.causal_snapshot_id and receipt.causal_snapshot_id != event.causal_snapshot_id:
         return False
     payload = _payload_dict(event)
-    for field in ("city", "target_date", "metric", "condition_id", "token_id"):
+    for field in ("city", "target_date", "metric"):
+        expected = payload.get(field)
+        observed = getattr(receipt, field)
+        if expected and observed != expected:
+            return False
+    actuation = receipt.global_actuation
+    candidate = getattr(getattr(actuation, "decision", None), "candidate", None)
+    if actuation is not None:
+        return bool(
+            candidate is not None
+            and str(getattr(actuation, "winner_event_id", "") or "")
+            == event.event_id
+            and receipt.condition_id
+            == str(getattr(candidate, "condition_id", "") or "")
+            and receipt.token_id == str(getattr(candidate, "token_id", "") or "")
+            and receipt.family_id == str(getattr(candidate, "family_key", "") or "")
+        )
+    for field in ("condition_id", "token_id"):
         expected = payload.get(field)
         observed = getattr(receipt, field)
         if expected and observed != expected:

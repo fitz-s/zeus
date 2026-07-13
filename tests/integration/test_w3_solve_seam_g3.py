@@ -61,16 +61,23 @@ from src.events.opportunity_event import (
 )
 from src.events.reactor import EventSubmissionReceipt
 from src.solve.solver import (
+    BinaryTerminalWealthCertificate,
     CurrentExecutionAuthority,
     CurrentFamilyProbabilityAuthority,
+    ExecutableSellCurve,
+    GlobalSingleOrderDecision,
+    GlobalSingleOrderSellCandidate,
     JointOutcomeProbabilityWitness,
     OutcomeTokenBinding,
     PortfolioWealthWitness,
     global_candidate_from_native,
+    global_sell_fill_prefix_objective,
+    executable_curve_identity,
     joint_probability_witness_identity,
     portfolio_wealth_identity,
     validate_family_decision_contract,
 )
+from src.contracts.executable_cost_curve import BookLevel, FeeModel
 from src.strategy import utility_ranker
 from src.state.collateral_ledger import init_collateral_schema
 from src.state.portfolio import PortfolioState
@@ -80,6 +87,63 @@ from src.state.schema.opportunity_events_schema import (
 from tests.integration import test_qkernel_spine_routing as R
 
 _BRIDGE_PATH = bridge.__file__
+
+
+def test_global_selection_binds_holdings_to_exact_wealth_ledger_generation():
+    binding_a = OutcomeTokenBinding(
+        bin_id="bin-a",
+        condition_id="condition-a",
+        yes_token_id="yes-a",
+        no_token_id="no-a",
+    )
+    binding_b = OutcomeTokenBinding(
+        bin_id="bin-b",
+        condition_id="condition-b",
+        yes_token_id="yes-b",
+        no_token_id="no-b",
+    )
+    prepared = {
+        "event-a": bridge.PreparedGlobalFamily(
+            decision_id="decision-a",
+            probability_witness=SimpleNamespace(
+                family_key="family-a", bindings=(binding_a,)
+            ),
+            candidate_seeds=(),
+        ),
+        "event-b": bridge.PreparedGlobalFamily(
+            decision_id="decision-b",
+            probability_witness=SimpleNamespace(
+                family_key="family-b", bindings=(binding_b,)
+            ),
+            candidate_seeds=(),
+        ),
+    }
+    state = SimpleNamespace(
+        positions=(
+            SimpleNamespace(
+                position_id="position-a",
+                condition_id="condition-a",
+                direction="buy_yes",
+                token_id="yes-a",
+                no_token_id="no-a",
+                chain_shares=Decimal("7.25"),
+            ),
+        )
+    )
+
+    rebound = global_batch_runtime._bind_selection_holdings(
+        prepared,
+        portfolio_state=state,
+        ledger_snapshot_id="ledger-selection-cut",
+    )
+
+    holding_a = rebound["event-a"].holdings_snapshot
+    holding_b = rebound["event-b"].holdings_snapshot
+    assert holding_a.ledger_snapshot_id == "ledger-selection-cut"
+    assert holding_b.ledger_snapshot_id == "ledger-selection-cut"
+    assert holding_a.holdings[0].position_id == "position-a"
+    assert holding_a.holdings[0].shares == Decimal("7.25")
+    assert holding_b.holdings == ()
 
 
 def test_global_actuation_does_not_blanket_block_existing_family_exposure():
@@ -1799,8 +1863,13 @@ def test_current_global_book_epoch_reads_yes_and_no_symmetrically():
     assert len(requested) == expected
     assert len(epoch.asset_states) == expected
     assert len(epoch.assets) == expected
+    assert len(epoch.sell_assets) == expected
     assert {asset.side for asset in epoch.assets} == {"YES", "NO"}
+    assert {asset.side for asset in epoch.sell_assets} == {"YES", "NO"}
     assert all(asset.curve.token_id == asset.token_id for asset in epoch.assets)
+    assert all(
+        asset.curve.token_id == asset.token_id for asset in epoch.sell_assets
+    )
 
     required_conn = _global_book_metadata_conn(probability)
     denied_columns.clear()
@@ -4809,3 +4878,505 @@ def test_g3_off_path_does_not_import_src_solve():
     )
     proc = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True, cwd=".")
     assert "ISOLATION_OK" in proc.stdout, f"stdout={proc.stdout}\nstderr={proc.stderr[-2000:]}"
+
+
+def _adapter_sell_actuation(event):
+    at = _dt.datetime(2026, 7, 13, 12, 0, tzinfo=_dt.timezone.utc)
+    curve = ExecutableSellCurve(
+        token_id="yes-token",
+        side="YES",
+        snapshot_id="selected-sell-book",
+        book_hash="selected-sell-hash",
+        levels=(
+            BookLevel(price=Decimal("0.60"), size=Decimal("4")),
+            BookLevel(price=Decimal("0.50"), size=Decimal("6")),
+        ),
+        fee_model=FeeModel(fee_rate=Decimal("0")),
+        min_tick=Decimal("0.01"),
+        min_order_size=Decimal("5"),
+        quote_ttl=_dt.timedelta(seconds=30),
+    )
+    candidate = GlobalSingleOrderSellCandidate(
+        candidate_id="sell-position-1",
+        family_key="Alpha|2026-07-14|high",
+        bin_id="20C",
+        condition_id="condition-1",
+        side="YES",
+        token_id="yes-token",
+        position_id="position-1",
+        held_shares=Decimal("10"),
+        probability_witness_identity="probability-1",
+        book_snapshot_id=curve.snapshot_id,
+        book_captured_at_utc=at,
+        execution_curve_identity=executable_curve_identity(curve),
+        ledger_snapshot_id="ledger-1",
+        executable_sell_curve=curve,
+        resolution_identity="resolution-1",
+    )
+    proceeds = Decimal("5.4")
+    loss_at_risk = Decimal("4.6")
+    robust_q = 0.70
+    robust_du = (1.0 - robust_q) * np.log(105.4 / 110.0) + robust_q * np.log(
+        105.4 / 100.0
+    )
+    robust_ev = robust_q * 10.0 - float(loss_at_risk)
+    decision = GlobalSingleOrderDecision(
+        candidate=candidate,
+        shares=Decimal("10"),
+        cost_usd=loss_at_risk,
+        robust_delta_log_wealth=float(robust_du),
+        robust_ev_usd=robust_ev,
+        capital_efficiency=float(robust_du) / float(loss_at_risk),
+        no_trade_reason=None,
+        limit_price=Decimal("0.50"),
+        expected_fill_price_before_fee=Decimal("0.54"),
+        cash_proceeds_usd=proceeds,
+        terminal_wealth=BinaryTerminalWealthCertificate(
+            win_probability_lcb=robust_q,
+            loss_probability_ucb=1.0 - robust_q,
+            loss_payoff_usd=-loss_at_risk,
+            win_payoff_usd=proceeds,
+            median_payoff_usd=proceeds,
+            wealth_after_loss_usd=Decimal("105.4"),
+            wealth_after_win_usd=Decimal("105.4"),
+            expected_value_diagnostic_usd=robust_ev,
+        ),
+    )
+    witness = SimpleNamespace(
+        bin_ids=("20C",),
+        yes_q_samples=np.asarray([[0.30], [0.30]], dtype=np.float64),
+    )
+    return SimpleNamespace(
+        decision=decision,
+        winner_event_id=event.event_id,
+        probability_witness=witness,
+        actuation_identity="sell-actuation-1",
+        wealth_economic_identity="wealth-1",
+    )
+
+
+def test_global_sell_adapter_bypasses_entry_lane_and_uses_reduce_only_exit(
+    monkeypatch,
+):
+    event = _global_scope_event(city="Alpha", source_run_id="run-sell")
+    actuation = _adapter_sell_actuation(event)
+    position = SimpleNamespace(
+        trade_id="position-1",
+        direction="buy_yes",
+        token_id="yes-token",
+        no_token_id="no-token",
+        condition_id="condition-1",
+        chain_shares=10.0,
+        effective_shares=10.0,
+        exit_state="",
+        last_exit_order_id="",
+        state="holding",
+    )
+    portfolio = SimpleNamespace(
+        authority="canonical_db",
+        authority_scope="runtime_exposure",
+        positions=[position],
+    )
+    monkeypatch.setattr(
+        era, "_current_global_actuation_prepared_family", lambda *_, **__: object()
+    )
+    monkeypatch.setattr(
+        era,
+        "_global_actuation_current_wealth_block_reason",
+        lambda *_, **__: None,
+    )
+    monkeypatch.setattr(
+        "src.state.portfolio.load_runtime_open_portfolio", lambda _conn: portfolio
+    )
+
+    class Clob:
+        def __init__(self, **_kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def get_orderbook_snapshots(self, tokens, *, timeout):
+            assert timeout >= 1.0
+            assert tokens == ["yes-token"]
+            return {
+                "yes-token": {
+                    "asset_id": "yes-token",
+                    "hash": "jit-sell-hash",
+                    "tick_size": "0.01",
+                    "min_order_size": "5",
+                    "bids": [
+                        {"price": "0.60", "size": "4"},
+                        {"price": "0.50", "size": "6"},
+                    ],
+                }
+            }
+
+        def get_fee_rate_details(self, token_id):
+            assert token_id == "yes-token"
+            return {"fee_rate_fraction": 0}
+
+    monkeypatch.setattr("src.data.polymarket_client.PolymarketClient", Clob)
+    exits = []
+
+    def execute_exit(portfolio_arg, position_arg, context, **kwargs):
+        exits.append((portfolio_arg, position_arg, context, kwargs))
+        assert kwargs["exit_intent"].exact_limit_price == pytest.approx(0.50)
+        assert kwargs["exit_intent"].shares == pytest.approx(10.0)
+        assert kwargs["exit_intent"].submit_order_type == "FAK"
+        evidence = kwargs["execution_evidence"]
+        evidence.venue_call_started = True
+        evidence.venue_ack_received = True
+        evidence.command_id = "command-1"
+        evidence.command_state = "ACKED"
+        evidence.order_type = "FAK"
+        evidence.result_status = "pending"
+        return "sell_placed: order=sell-1"
+
+    monkeypatch.setattr("src.execution.exit_lifecycle.execute_exit", execute_exit)
+    conn = sqlite3.connect(":memory:")
+    at = _dt.datetime(2026, 7, 13, 12, 0, tzinfo=_dt.timezone.utc)
+    preflight = era._submit_current_global_sell(
+        event,
+        decision_time=at,
+        global_actuation=actuation,
+        trade_conn=conn,
+        forecast_conn=object(),
+        topology_conn=object(),
+        calibration_conn=object(),
+        real_order_submit_enabled=True,
+        preflight_only=True,
+        preflight_receipt=None,
+    )
+    assert preflight.reason == "GLOBAL_SELL_PREFLIGHT_STABLE"
+    assert preflight.proof_accepted is True
+    receipt = era._submit_current_global_sell(
+        event,
+        decision_time=at,
+        global_actuation=actuation,
+        trade_conn=conn,
+        forecast_conn=object(),
+        topology_conn=object(),
+        calibration_conn=object(),
+        real_order_submit_enabled=True,
+        preflight_only=False,
+        preflight_receipt=preflight,
+    )
+    assert receipt.submitted is True
+    assert receipt.side_effect_status == "EXIT_SUBMITTED"
+    assert receipt.reason == "GLOBAL_SELL_EXIT:sell_placed: order=sell-1"
+    assert receipt.venue_call_started is True
+    assert receipt.venue_ack_received is True
+    assert receipt.venue_command_id == "command-1"
+    assert receipt.venue_command_state == "ACKED"
+    assert receipt.venue_order_type == "FAK"
+    from src.events.reactor import (
+        _is_global_reduce_only_exit_receipt,
+        _receipt_matches_event,
+    )
+
+    assert _is_global_reduce_only_exit_receipt(receipt) is True
+    assert _receipt_matches_event(event, receipt) is True
+    assert len(exits) == 1
+
+    def fail_before_venue(*_args, **_kwargs):
+        raise RuntimeError("intent persistence failed")
+
+    monkeypatch.setattr(
+        "src.execution.exit_lifecycle.execute_exit",
+        fail_before_venue,
+    )
+    rejected = era._submit_current_global_sell(
+        event,
+        decision_time=at,
+        global_actuation=actuation,
+        trade_conn=conn,
+        forecast_conn=object(),
+        topology_conn=object(),
+        calibration_conn=object(),
+        real_order_submit_enabled=True,
+        preflight_only=False,
+        preflight_receipt=preflight,
+    )
+    assert rejected.submitted is False
+    assert rejected.proof_accepted is False
+    assert rejected.venue_call_started is False
+    assert rejected.venue_ack_received is False
+    assert rejected.reason.startswith("GLOBAL_SELL_EXECUTION_FAILED:RuntimeError:")
+
+    def fail_after_unknown_call(*_args, **kwargs):
+        evidence = kwargs["execution_evidence"]
+        evidence.venue_call_started = True
+        evidence.venue_ack_received = False
+        evidence.command_id = "command-unknown"
+        evidence.command_state = "SUBMIT_UNKNOWN_SIDE_EFFECT"
+        evidence.order_type = "FAK"
+        evidence.result_status = "unknown_side_effect"
+        raise TimeoutError("venue result unknown")
+
+    monkeypatch.setattr(
+        "src.execution.exit_lifecycle.execute_exit",
+        fail_after_unknown_call,
+    )
+    unknown = era._submit_current_global_sell(
+        event,
+        decision_time=at,
+        global_actuation=actuation,
+        trade_conn=conn,
+        forecast_conn=object(),
+        topology_conn=object(),
+        calibration_conn=object(),
+        real_order_submit_enabled=True,
+        preflight_only=False,
+        preflight_receipt=preflight,
+    )
+    assert unknown.submitted is True
+    assert unknown.proof_accepted is True
+    assert unknown.venue_call_started is True
+    assert unknown.venue_ack_received is False
+    assert unknown.venue_command_id == "command-unknown"
+    assert unknown.reason.startswith("GLOBAL_SELL_EXIT_UNKNOWN:TimeoutError:")
+    assert _is_global_reduce_only_exit_receipt(unknown) is True
+
+    source = inspect.getsource(era.event_bound_live_adapter_from_trade_conn)
+    assert source.index("if _global_sell_candidate(global_actuation) is not None") < source.index(
+        "if real_order_submit_enabled and not durable_submit_outbox_enabled"
+    )
+    assert "executor_submit" not in inspect.getsource(era._submit_current_global_sell)
+
+
+def test_global_sell_worse_jit_bid_batch_blocks_without_buy_overlay():
+    event = _global_scope_event(city="Alpha", source_run_id="run-sell")
+    actuation = _adapter_sell_actuation(event)
+    worse = era._global_sell_candidate_from_raw_book(
+        actuation.decision.candidate,
+        {
+            "asset_id": "yes-token",
+            "hash": "worse",
+            "tick_size": "0.01",
+            "min_order_size": "5",
+            "bids": [{"price": "0.49", "size": "10"}],
+        },
+        captured_at_utc=_dt.datetime.now(_dt.timezone.utc),
+    )
+    drift = era._global_sell_execution_economics_drift(
+        decision=actuation.decision,
+        current_candidate=worse,
+    )
+    assert drift is not None
+    receipt = era._global_sell_receipt(
+        event,
+        global_actuation=actuation,
+        reason=(
+            "GLOBAL_ACTUATION_EXECUTION_BINDING_SUPERSEDED:"
+            f"curve_economics:{drift}"
+        ),
+        proof_accepted=False,
+        jit_candidate=worse,
+    )
+    assert era._global_curve_supersession_from_receipt(receipt) == (
+        "BATCH_BLOCKED",
+        None,
+        receipt.reason,
+    )
+
+
+def test_global_sell_uses_complement_probability_and_every_fak_prefix_is_positive():
+    event = _global_scope_event(city="Alpha", source_run_id="run-sell")
+    actuation = _adapter_sell_actuation(event)
+    witness = SimpleNamespace(
+        bin_ids=("20C",),
+        yes_q_samples=np.asarray([[0.20], [0.30]], dtype=np.float64),
+    )
+    assert era._global_sell_held_probability(
+        SimpleNamespace(bin_id="20C", side="YES"), witness
+    ) == pytest.approx(0.25)
+    assert era._global_sell_held_probability(
+        SimpleNamespace(bin_id="20C", side="NO"), witness
+    ) == pytest.approx(0.75)
+
+    decision = actuation.decision
+    curve = decision.candidate.executable_sell_curve
+    for cents in range(1, 1001):
+        shares = Decimal(cents) / Decimal("100")
+        remaining = shares
+        proceeds = Decimal("0")
+        for level in curve.levels:
+            take = min(remaining, level.size)
+            proceeds += take * curve.net_price(level.price)
+            remaining -= take
+            if remaining <= 0:
+                break
+        robust_du, robust_ev = global_sell_fill_prefix_objective(
+            decision,
+            filled_shares=shares,
+            net_proceeds_usd=proceeds,
+        )
+        assert robust_du > 0.0
+        assert robust_ev > 0.0
+
+
+def test_exact_sell_limit_is_audited_and_off_tick_is_rejected_before_submit(
+    monkeypatch,
+):
+    from src.execution.executor import (
+        ExitOrderIntent,
+        _align_sell_limit_price_to_tick,
+        _exit_base_limit_price,
+        _resolve_exit_order_type,
+        execute_exit_order,
+    )
+    from src.execution.exit_lifecycle import ExitIntent, _exit_intent_audit_payload
+
+    assert _align_sell_limit_price_to_tick(0.50, Decimal("0.01")) == pytest.approx(
+        0.50
+    )
+    assert _resolve_exit_order_type("GTC", "FAK") == "FAK"
+    assert _exit_base_limit_price(0.001, Decimal("0.001")) == pytest.approx(
+        0.001
+    )
+    assert _exit_base_limit_price(0.01, Decimal("0.01")) == pytest.approx(0.01)
+    audit = _exit_intent_audit_payload(
+        ExitIntent(
+            trade_id="position-1",
+            reason="GLOBAL_CAPITAL_OPTIMAL_SELL",
+            token_id="yes-token",
+            shares=10.0,
+            current_market_price=0.54,
+            best_bid=0.60,
+            exact_limit_price=0.50,
+            submit_order_type="FAK",
+            capital_certificate={"robust_delta_log_wealth": 0.01},
+        )
+    )
+    assert audit["exit_intent_exact_limit_price"] == pytest.approx(0.50)
+    assert audit["exit_intent_submit_order_type"] == "FAK"
+    assert audit["exit_intent_capital_certificate"] == {
+        "robust_delta_log_wealth": 0.01
+    }
+    monkeypatch.setattr("src.architecture.gate_runtime.check", lambda *_: None)
+    result = execute_exit_order(
+        ExitOrderIntent(
+            trade_id="position-1",
+            token_id="yes-token",
+            shares=10.0,
+            current_price=0.54,
+            best_bid=0.60,
+            exact_limit_price=0.505,
+            executable_snapshot_min_tick_size="0.01",
+        )
+    )
+    assert result.status == "rejected"
+    assert result.reason.startswith("exact_limit_price_not_tick_aligned:")
+
+
+def test_global_sell_fak_reaches_exit_envelope_and_sdk_when_allocator_is_gtc(
+    monkeypatch,
+):
+    from tests import test_executor as executor_fixtures
+    from src.execution.executor import create_exit_order_intent, execute_exit_order
+    from src.state.db import init_schema
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys=ON")
+    init_schema(conn)
+    old_test_conn = executor_fixtures._TEST_CONN
+    executor_fixtures._TEST_CONN = conn
+    captured = {}
+
+    class DummyClient:
+        def __init__(self):
+            self.bound_envelope = None
+
+        def bind_submission_envelope(self, envelope):
+            self.bound_envelope = envelope
+
+        def place_limit_order(self, *, token_id, price, size, side, order_type):
+            captured.update(
+                token_id=token_id,
+                price=price,
+                size=size,
+                side=side,
+                order_type=order_type,
+                envelope_order_type=self.bound_envelope.order_type,
+            )
+            return executor_fixtures._final_submit_result(
+                self.bound_envelope,
+                order_id="global-sell-fak-1",
+            )
+
+    monkeypatch.setattr("src.data.polymarket_client.PolymarketClient", DummyClient)
+    monkeypatch.setattr(
+        "src.execution.executor._refresh_exit_collateral_snapshot_for_submit",
+        lambda *_args, **_kwargs: {
+            "component": "collateral_snapshot_refresh",
+            "allowed": True,
+        },
+    )
+    monkeypatch.setattr(
+        "src.execution.executor._assert_collateral_allows_sell",
+        lambda *_args, **_kwargs: {
+            "component": "collateral_sell_preflight",
+            "allowed": True,
+        },
+    )
+    monkeypatch.setattr(
+        "src.execution.executor._select_risk_allocator_order_type",
+        lambda *_args, **_kwargs: "GTC",
+    )
+    monkeypatch.setattr(
+        "src.execution.executor._reserve_collateral_for_sell",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        "src.control.cutover_guard.assert_submit_allowed",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        "src.control.heartbeat_supervisor.assert_heartbeat_allows_order_type",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        "src.control.ws_gap_guard.assert_ws_allows_submit",
+        lambda *_args, **_kwargs: None,
+    )
+    try:
+        result = execute_exit_order(
+            create_exit_order_intent(
+                trade_id="position-global-fak",
+                token_id="yes-token",
+                shares=10.0,
+                current_price=0.54,
+                best_bid=0.60,
+                exact_limit_price=0.50,
+                submit_order_type="FAK",
+                **executor_fixtures._snapshot_kwargs("yes-token"),
+            ),
+            conn=conn,
+            decision_id="global-capital-sell-fak",
+        )
+    finally:
+        executor_fixtures._TEST_CONN = old_test_conn
+
+    assert result.status == "pending"
+    assert result.venue_call_started is True
+    assert result.venue_ack_received is True
+    assert result.submitted_order_type == "FAK"
+    assert captured["side"] == "SELL"
+    assert captured["order_type"] == "FAK"
+    assert captured["envelope_order_type"] == "FAK"
+    envelope = conn.execute(
+        """
+        SELECT e.order_type
+          FROM venue_commands c
+          JOIN venue_submission_envelopes e ON e.envelope_id = c.envelope_id
+         WHERE c.decision_id = ?
+        """,
+        ("global-capital-sell-fak",),
+    ).fetchone()
+    assert dict(envelope) == {"order_type": "FAK"}
+    conn.close()

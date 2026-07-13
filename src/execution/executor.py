@@ -180,6 +180,28 @@ def _exit_order_type(selected_order_type: str) -> str:
     return normalized
 
 
+def _resolve_exit_order_type(
+    selected_order_type: str,
+    submit_order_type: str | None,
+) -> str:
+    """Bind an explicit exit time-in-force without weakening allocator safety."""
+
+    intended = str(submit_order_type or "").strip().upper()
+    if not intended:
+        return _exit_order_type(selected_order_type)
+    if intended not in {"FOK", "FAK", "GTC", "GTD"}:
+        raise ValueError(f"unsupported_exit_submit_order_type:{intended}")
+    if not _risk_allocator_order_type_allows_intent(
+        selected_order_type=selected_order_type,
+        intent_order_type=intended,
+    ):
+        raise ValueError(
+            "risk_allocator_exit_order_type_mismatch:"
+            f"selected={selected_order_type}:intended={intended}"
+        )
+    return _exit_order_type(intended)
+
+
 # T5 (docs/rebuild/quarantine_excision_2026-07-11.md): 'quarantined' retired
 # from LifecyclePhase; the T5 schema migration has run (docs/rebuild item 5)
 # and the position_current CHECK no longer admits the literal, so the
@@ -3958,6 +3980,23 @@ class OrderResult:
     # only populated after the SDK submit boundary has been reached.
     zeus_submit_intent_time: Optional[str] = None
     venue_ack_time: Optional[str] = None
+    # Direct executor boundary facts.  Callers must not infer venue contact or
+    # ACK from an outcome string or from the mere existence of a command row.
+    venue_call_started: bool = False
+    venue_ack_received: bool = False
+    submitted_order_type: Optional[str] = None
+
+
+def _with_venue_boundary(
+    result: "OrderResult",
+    *,
+    order_type: str,
+    ack_received: bool,
+) -> "OrderResult":
+    result.venue_call_started = True
+    result.venue_ack_received = bool(ack_received)
+    result.submitted_order_type = str(order_type or "").strip().upper() or None
+    return result
 
 
 @dataclass(frozen=True)
@@ -3969,6 +4008,8 @@ class ExitOrderIntent:
     shares: float
     current_price: float
     best_bid: Optional[float] = None
+    exact_limit_price: Optional[float] = None
+    submit_order_type: Optional[str] = None
     intent_id: Optional[str] = None
     idempotency_key: Optional[str] = None
     executable_snapshot_id: str = ""
@@ -4312,6 +4353,16 @@ def _align_sell_limit_price_to_tick(limit_price: float, min_tick_size: Decimal |
     elif aligned > max_price:
         aligned = max_price
     return float(aligned)
+
+
+def _exit_base_limit_price(
+    current_price: float,
+    min_tick_size: Decimal | str | float,
+) -> float:
+    """Return a venue-valid one-tick-down SELL price at the lower boundary."""
+
+    tick = _submit_tick_size_or_raise(min_tick_size)
+    return max(float(tick), float(current_price) - float(tick))
 
 
 def _entry_buy_submit_shares(target_size_usd: float, limit_price: float) -> float:
@@ -4760,6 +4811,8 @@ def create_exit_order_intent(
     shares: float,
     current_price: float,
     best_bid: Optional[float] = None,
+    exact_limit_price: Optional[float] = None,
+    submit_order_type: Optional[str] = None,
     executable_snapshot_id: str = "",
     executable_snapshot_hash: str = "",
     executable_snapshot_min_tick_size: Decimal | str | None = None,
@@ -4774,6 +4827,8 @@ def create_exit_order_intent(
         shares=shares,
         current_price=current_price,
         best_bid=best_bid,
+        exact_limit_price=exact_limit_price,
+        submit_order_type=submit_order_type,
         intent_id=f"{trade_id}:exit",
         idempotency_key=f"{trade_id}:exit:{token_id}",
         executable_snapshot_id=executable_snapshot_id,
@@ -4856,10 +4911,14 @@ def execute_exit_order(
         if intent.executable_snapshot_min_tick_size is not None
         else Decimal(str(tick.value))
     )
-    base_price = current_price - float(effective_min_tick_size)
-    limit_price = base_price
+    base_price = _exit_base_limit_price(current_price, effective_min_tick_size)
+    limit_price = (
+        float(intent.exact_limit_price)
+        if intent.exact_limit_price is not None
+        else base_price
+    )
 
-    if best_bid is not None and best_bid < base_price:
+    if intent.exact_limit_price is None and best_bid is not None and best_bid < base_price:
         # Slice P3.3b (PR #19 phase 4 closeout, 2026-04-26): typed
         # anticipated-slippage at the price-planning seam. Pre-fix used
         # raw `slippage = current_price - best_bid` + raw `slippage /
@@ -4892,7 +4951,28 @@ def execute_exit_order(
             intent_id=intent.intent_id,
             idempotency_key=intent.idempotency_key,
         )
-    limit_price = _align_sell_limit_price_to_tick(limit_price, effective_min_tick_size)
+    aligned_limit_price = _align_sell_limit_price_to_tick(
+        limit_price,
+        effective_min_tick_size,
+    )
+    if intent.exact_limit_price is not None and not math.isclose(
+        aligned_limit_price,
+        float(intent.exact_limit_price),
+        rel_tol=0.0,
+        abs_tol=1e-12,
+    ):
+        return OrderResult(
+            trade_id=intent.trade_id,
+            status="rejected",
+            reason=(
+                "exact_limit_price_not_tick_aligned:"
+                f"price={intent.exact_limit_price}:tick={effective_min_tick_size}"
+            ),
+            order_role="exit",
+            intent_id=intent.intent_id,
+            idempotency_key=intent.idempotency_key,
+        )
+    limit_price = aligned_limit_price
 
     shares = math.floor(intent.shares * 100 + 1e-9) / 100.0
     if shares <= 0:
@@ -4988,7 +5068,22 @@ def execute_exit_order(
         # so a thin/dying book realizes a partial exit instead of killing the
         # whole sell (live 2026-06-24: Houston FOK rejects, market 0.356->0.076).
         selected_order_type = _select_risk_allocator_order_type(conn, intent.executable_snapshot_id)
-        order_type = _exit_order_type(selected_order_type)
+        try:
+            order_type = _resolve_exit_order_type(
+                selected_order_type,
+                intent.submit_order_type,
+            )
+        except ValueError as exc:
+            return OrderResult(
+                trade_id=intent.trade_id,
+                status="rejected",
+                reason=str(exc),
+                submitted_price=limit_price,
+                shares=shares,
+                order_role="exit",
+                intent_id=intent.intent_id,
+                idempotency_key=idem.value,
+            )
         heartbeat_component = _assert_heartbeat_allows_submit(order_type)
         ws_gap_component = _assert_ws_gap_allows_submit(intent.token_id)
 
@@ -5483,7 +5578,7 @@ def execute_exit_order(
                 )
             logger.error("Live exit order SDK exception: %s", exc)
             if deterministic_rejection_payload is not None:
-                return OrderResult(
+                return _with_venue_boundary(OrderResult(
                     trade_id=intent.trade_id,
                     status="rejected",
                     reason=f"{deterministic_rejection_payload['reason']}: {exc}",
@@ -5494,8 +5589,8 @@ def execute_exit_order(
                     idempotency_key=idem.value,
                     command_id=command_id,
                     command_state="REJECTED",
-                )
-            return OrderResult(
+                ), order_type=order_type, ack_received=False)
+            return _with_venue_boundary(OrderResult(
                 trade_id=intent.trade_id,
                 status="unknown_side_effect",
                 reason=f"submit_unknown_side_effect: {exc}",
@@ -5506,7 +5601,7 @@ def execute_exit_order(
                     idempotency_key=idem.value,
                     command_id=command_id,
                     command_state="SUBMIT_UNKNOWN_SIDE_EFFECT",
-                )
+                ), order_type=order_type, ack_received=False)
 
         # -----------------------------------------------------------------------
         # ack phase — durable journal record of outcome
@@ -5532,7 +5627,7 @@ def execute_exit_order(
                     "submission envelope (command_id=%s): %s",
                     command_id, inner,
                 )
-            return OrderResult(
+            return _with_venue_boundary(OrderResult(
                 trade_id=intent.trade_id,
                 status="unknown_side_effect",
                 reason="final_submission_envelope_persistence_failed: place_limit_order returned None",
@@ -5543,7 +5638,7 @@ def execute_exit_order(
                 idempotency_key=idem.value,
                 command_id=command_id,
                 command_state="REVIEW_REQUIRED",
-            )
+            ), order_type=order_type, ack_received=False)
 
         try:
             final_envelope_payload = _persist_final_submission_envelope_payload(
@@ -5572,7 +5667,7 @@ def execute_exit_order(
                     "submission envelope persistence failure (command_id=%s): inner=%s original=%s",
                     command_id, inner, exc,
                 )
-            return OrderResult(
+            return _with_venue_boundary(OrderResult(
                 trade_id=intent.trade_id,
                 status="unknown_side_effect",
                 reason=f"final_submission_envelope_persistence_failed: {exc}",
@@ -5586,7 +5681,7 @@ def execute_exit_order(
                 idempotency_key=idem.value,
                 command_id=command_id,
                 command_state="REVIEW_REQUIRED",
-            )
+            ), order_type=order_type, ack_received=True)
         order_id = _submit_result_order_id(result)
         if result.get("success") is False:
             rejection_reason = (
@@ -5624,7 +5719,7 @@ def execute_exit_order(
                     idempotency_key=idem.value,
                     order_role="exit",
                 )
-                return OrderResult(
+                return _with_venue_boundary(OrderResult(
                     trade_id=intent.trade_id,
                     status="unknown_side_effect",
                     reason="terminal_rejection_persistence_failed_after_side_effect",
@@ -5636,8 +5731,8 @@ def execute_exit_order(
                     venue_status=str(result.get("status") or ""),
                     command_id=command_id,
                     command_state=durable_state or "REVIEW_REQUIRED",
-                )
-            return OrderResult(
+                ), order_type=order_type, ack_received=True)
+            return _with_venue_boundary(OrderResult(
                 trade_id=intent.trade_id,
                 status="rejected",
                 reason=str(rejection_reason),
@@ -5649,7 +5744,7 @@ def execute_exit_order(
                 venue_status=str(result.get("status") or ""),
                 command_id=command_id,  # F7: propagate so log_execution_fact records FK
                 command_state="REJECTED",
-            )
+            ), order_type=order_type, ack_received=False)
         if not order_id:
             try:
                 append_event(
@@ -5676,7 +5771,7 @@ def execute_exit_order(
                     idempotency_key=idem.value,
                     order_role="exit",
                 )
-                return OrderResult(
+                return _with_venue_boundary(OrderResult(
                     trade_id=intent.trade_id,
                     status="unknown_side_effect",
                     reason="terminal_rejection_persistence_failed_after_side_effect",
@@ -5688,8 +5783,8 @@ def execute_exit_order(
                     venue_status=str(result.get("status") or ""),
                     command_id=command_id,
                     command_state=durable_state or "REVIEW_REQUIRED",
-                )
-            return OrderResult(
+                ), order_type=order_type, ack_received=True)
+            return _with_venue_boundary(OrderResult(
                 trade_id=intent.trade_id,
                 status="rejected",
                 reason="missing_order_id",
@@ -5701,7 +5796,7 @@ def execute_exit_order(
                 venue_status=str(result.get("status") or ""),
                 command_id=command_id,  # F7: propagate so log_execution_fact records FK
                 command_state="REJECTED",
-            )
+            ), order_type=order_type, ack_received=False)
 
         matched_size = _venue_submit_matched_size(result, side="SELL")
         order_fact_state = _venue_submit_order_fact_state(
@@ -5862,7 +5957,7 @@ def execute_exit_order(
                 idempotency_key=idem.value,
                 order_role="exit_order",
             )
-            return OrderResult(
+            return _with_venue_boundary(OrderResult(
                 trade_id=intent.trade_id,
                 status="unknown_side_effect",
                 reason=f"exit_ack_persistence_failed_after_side_effect: {inner}",
@@ -5876,7 +5971,7 @@ def execute_exit_order(
                 venue_status=str(result.get("status") or "placed"),
                 idempotency_key=idem.value,
                 command_state=durable_state,
-            )
+            ), order_type=order_type, ack_received=True)
 
         durable_state = _current_command_state_value(conn, command_id) or "ACKED"
         result_obj = OrderResult(
@@ -5918,7 +6013,11 @@ def execute_exit_order(
             )
         except Exception as exc:
             logger.warning("Discord trade alert failed for exit order: %s", exc)
-        return result_obj
+        return _with_venue_boundary(
+            result_obj,
+            order_type=order_type,
+            ack_received=True,
+        )
     finally:
         if _own_conn:
             conn.close()

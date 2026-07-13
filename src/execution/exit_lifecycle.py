@@ -665,6 +665,9 @@ class ExitIntent:
     shares: float
     current_market_price: float
     best_bid: float | None
+    exact_limit_price: float | None = None
+    submit_order_type: str | None = None
+    capital_certificate: Mapping[str, object] | None = None
     fresh_prob: float | None = None
     fresh_prob_is_fresh: bool | None = None
     best_ask: float | None = None
@@ -674,6 +677,28 @@ class ExitIntent:
     day0_active: bool | None = None
 
 
+@dataclass
+class ExitExecutionEvidence:
+    """Facts observed at the executor/venue boundary for one exit attempt."""
+
+    venue_call_started: bool = False
+    venue_ack_received: bool = False
+    command_id: str = ""
+    command_state: str = ""
+    order_type: str = ""
+    result_status: str = ""
+    result_reason: str = ""
+
+    def observe(self, result: OrderResult) -> None:
+        self.venue_call_started = bool(result.venue_call_started)
+        self.venue_ack_received = bool(result.venue_ack_received)
+        self.command_id = str(result.command_id or "")
+        self.command_state = str(result.command_state or "")
+        self.order_type = str(result.submitted_order_type or "")
+        self.result_status = str(result.status or "")
+        self.result_reason = str(result.reason or "")
+
+
 def place_sell_order(
     *,
     trade_id: str,
@@ -681,6 +706,8 @@ def place_sell_order(
     shares: float,
     current_price: float,
     best_bid: float | None = None,
+    exact_limit_price: float | None = None,
+    submit_order_type: str | None = None,
     executable_snapshot_id: str = "",
     executable_snapshot_hash: str = "",
     executable_snapshot_min_tick_size: str | None = None,
@@ -698,6 +725,8 @@ def place_sell_order(
         shares=shares,
         current_price=current_price,
         best_bid=best_bid,
+        exact_limit_price=exact_limit_price,
+        submit_order_type=submit_order_type,
         executable_snapshot_id=executable_snapshot_id,
         executable_snapshot_hash=executable_snapshot_hash,
         executable_snapshot_min_tick_size=executable_snapshot_min_tick_size,
@@ -1867,6 +1896,19 @@ def _validate_exit_intent(position: Position, exit_context: ExitContext, exit_in
         raise ValueError("exit_intent best_bid mismatch")
     if exit_context.best_ask is not None and exit_intent.best_ask is not None and abs(exit_intent.best_ask - float(exit_context.best_ask)) > 1e-9:
         raise ValueError("exit_intent best_ask mismatch")
+    if exit_intent.exact_limit_price is not None and (
+        not math.isfinite(float(exit_intent.exact_limit_price))
+        or not 0.0 < float(exit_intent.exact_limit_price) < 1.0
+    ):
+        raise ValueError("exit_intent exact_limit_price must be finite and inside (0, 1)")
+    if exit_intent.submit_order_type is not None and (
+        str(exit_intent.submit_order_type).strip().upper() not in {"FOK", "FAK", "GTC", "GTD"}
+    ):
+        raise ValueError("exit_intent submit_order_type is unsupported")
+    if exit_intent.capital_certificate is not None and not isinstance(
+        exit_intent.capital_certificate, Mapping
+    ):
+        raise ValueError("exit_intent capital_certificate must be a mapping")
 
 
 def is_exit_cooldown_active(position: Position) -> bool:
@@ -2812,6 +2854,13 @@ def _exit_intent_audit_payload(exit_intent: ExitIntent) -> dict[str, object]:
         "exit_intent_shares": exit_intent.shares,
         "exit_intent_current_market_price": exit_intent.current_market_price,
         "exit_intent_best_bid": exit_intent.best_bid,
+        "exit_intent_exact_limit_price": exit_intent.exact_limit_price,
+        "exit_intent_submit_order_type": exit_intent.submit_order_type,
+        "exit_intent_capital_certificate": (
+            dict(exit_intent.capital_certificate)
+            if exit_intent.capital_certificate is not None
+            else None
+        ),
         "exit_intent_best_ask": exit_intent.best_ask,
         "exit_intent_market_vig": exit_intent.market_vig,
         "exit_intent_fresh_prob": exit_intent.fresh_prob,
@@ -2932,6 +2981,7 @@ def execute_exit(
     clob=None,
     conn: sqlite3.Connection | None = None,
     exit_intent: ExitIntent | None = None,
+    execution_evidence: ExitExecutionEvidence | None = None,
 ) -> str:
     """Execute an exit decision. Returns outcome description.
 
@@ -2998,6 +3048,7 @@ def execute_exit(
         exit_intent,
         clob,
         conn=conn,
+        execution_evidence=execution_evidence,
     )
 
 
@@ -3009,6 +3060,7 @@ def _execute_live_exit(
     clob,
     *,
     conn: sqlite3.Connection | None,
+    execution_evidence: ExitExecutionEvidence | None,
 ) -> str:
     """Live exit: place sell, check fill, retry on failure."""
     if conn is not None:
@@ -3383,10 +3435,14 @@ def _execute_live_exit(
             shares=position.effective_shares,
             current_price=current_market_price,
             best_bid=best_bid,
+            exact_limit_price=exit_intent.exact_limit_price,
+            submit_order_type=exit_intent.submit_order_type,
             decision_id=f"exit:{position.trade_id}",
             **snapshot_context,
         )
         sell_result = _coerce_sell_result(position.trade_id, raw_sell_result)
+        if execution_evidence is not None:
+            execution_evidence.observe(sell_result)
 
         if sell_result.status == "rejected":
             sell_error = sell_result.reason or "sell_rejected"

@@ -33,6 +33,7 @@ from src.events.triggers.forecast_snapshot_ready import (
 )
 from src.solve.solver import (
     CurrentExecutionAuthority,
+    ExecutableSellCurve,
     GlobalAuctionUniverseWitness,
     JointOutcomeProbabilityWitness,
     OutcomeTokenBinding,
@@ -114,6 +115,39 @@ class CurrentGlobalBookAsset:
             raise ValueError("GLOBAL_BOOK_ASSET_INVALID")
 
 
+@dataclass(frozen=True)
+class CurrentGlobalSellAsset:
+    """One current side-native bid ladder for an exact held-position SELL."""
+
+    family_key: str
+    bin_id: str
+    condition_id: str
+    market_event_id: str
+    side: str
+    token_id: str
+    curve: ExecutableSellCurve
+    captured_at_utc: datetime
+
+    def __post_init__(self) -> None:
+        if (
+            self.side not in {"YES", "NO"}
+            or not all(
+                str(value).strip()
+                for value in (
+                    self.family_key,
+                    self.bin_id,
+                    self.condition_id,
+                    self.market_event_id,
+                    self.token_id,
+                )
+            )
+            or self.curve.side != self.side
+            or self.curve.token_id != self.token_id
+            or self.captured_at_utc.tzinfo is None
+        ):
+            raise ValueError("GLOBAL_SELL_BOOK_ASSET_INVALID")
+
+
 def current_global_book_epoch_identity(
     *,
     asset_states: Sequence[tuple[str, ...]],
@@ -138,12 +172,18 @@ class CurrentGlobalBookEpoch:
     captured_at_utc: datetime
     max_age: timedelta
     witness_identity: str
+    sell_assets: tuple[CurrentGlobalSellAsset, ...] = ()
 
     def __post_init__(self) -> None:
         states = tuple(sorted(tuple(str(value) for value in row) for row in self.asset_states))
+        sell_keys = tuple(
+            (asset.family_key, asset.bin_id, asset.side, asset.token_id)
+            for asset in self.sell_assets
+        )
         if (
             not states
             or len(set(states)) != len(states)
+            or len(set(sell_keys)) != len(sell_keys)
             or self.captured_at_utc.tzinfo is None
             or self.max_age <= timedelta(0)
         ):
@@ -161,6 +201,15 @@ class CurrentGlobalBookEpoch:
         return {
             (asset.family_key, asset.bin_id, asset.side, asset.token_id): asset
             for asset in self.assets
+        }
+
+    @cached_property
+    def sell_asset_by_key(
+        self,
+    ) -> Mapping[tuple[str, str, str, str], CurrentGlobalSellAsset]:
+        return {
+            (asset.family_key, asset.bin_id, asset.side, asset.token_id): asset
+            for asset in self.sell_assets
         }
 
     def current_identity(self, checked_at_utc: datetime) -> str | None:
@@ -187,7 +236,12 @@ class CurrentGlobalBookEpoch:
             str(getattr(candidate, "side", "") or ""),
             str(getattr(candidate, "token_id", "") or ""),
         )
-        asset = self.asset_by_key.get(key)
+        action = str(getattr(candidate, "action", "BUY") or "BUY")
+        asset = (
+            self.sell_asset_by_key.get(key)
+            if action == "SELL"
+            else self.asset_by_key.get(key)
+        )
         if asset is None:
             return None
         return CurrentExecutionAuthority(
@@ -195,6 +249,7 @@ class CurrentGlobalBookEpoch:
             side=asset.side,  # type: ignore[arg-type]
             book_snapshot_id=asset.curve.snapshot_id,
             execution_curve_identity=executable_curve_identity(asset.curve),
+            action=action,  # type: ignore[arg-type]
         )
 
 
@@ -311,6 +366,80 @@ def _global_book_curve(
         book_hash=raw_hash,
         levels=tuple(levels),
         fee_model=FeeModel(fee_rate=fee_rate),
+        min_tick=tick,
+        min_order_size=min_order,
+        quote_ttl=max_age,
+    )
+
+
+def _global_sell_curve(
+    *,
+    family_key: str,
+    bin_id: str,
+    condition_id: str,
+    side: str,
+    token_id: str,
+    raw_book: Mapping[str, object],
+    metadata: Mapping[str, object],
+    captured_at_utc: datetime,
+    max_age: timedelta,
+) -> ExecutableSellCurve | None:
+    raw_bids = raw_book.get("bids")
+    if not isinstance(raw_bids, list):
+        raise ValueError(f"GLOBAL_BOOK_BIDS_INVALID:{token_id}")
+    if not raw_bids:
+        return None
+    try:
+        levels = tuple(
+            BookLevel(
+                price=Decimal(str(raw.get("price"))),
+                size=Decimal(str(raw.get("size"))),
+            )
+            for raw in raw_bids
+            if isinstance(raw, Mapping)
+        )
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"GLOBAL_BOOK_BID_LEVEL_INVALID:{token_id}") from exc
+    if len(levels) != len(raw_bids):
+        raise ValueError(f"GLOBAL_BOOK_BID_LEVEL_INVALID:{token_id}")
+    try:
+        tick = Decimal(
+            str(raw_book.get("tick_size") or metadata.get("min_tick_size") or "")
+        )
+        min_order = Decimal(
+            str(raw_book.get("min_order_size") or metadata.get("min_order_size") or "")
+        )
+        fee_details = json.loads(str(metadata.get("fee_details_json") or "{}"))
+        schedule_fee = fee_rate_fraction_from_details(fee_details)
+        fee_rate, _fee_source = resolve_taker_fee_fraction(schedule_fee)
+    except (TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise ValueError(f"GLOBAL_BOOK_FEE_INVALID:{token_id}") from exc
+    raw_hash = str(raw_book.get("hash") or "").strip()
+    if not raw_hash:
+        raw_hash = hashlib.sha256(
+            json.dumps(raw_book, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
+    snapshot_id = hashlib.sha256(
+        "|".join(
+            (
+                "global-sell-book",
+                family_key,
+                bin_id,
+                condition_id,
+                side,
+                token_id,
+                raw_hash,
+                captured_at_utc.isoformat(),
+            )
+        ).encode("utf-8")
+    ).hexdigest()
+    return ExecutableSellCurve(
+        token_id=token_id,
+        side=side,  # type: ignore[arg-type]
+        snapshot_id=snapshot_id,
+        book_hash=raw_hash,
+        levels=levels,
+        fee_model=FeeModel(fee_rate=Decimal(str(fee_rate))),
         min_tick=tick,
         min_order_size=min_order,
         quote_ttl=max_age,
@@ -459,6 +588,7 @@ def capture_current_global_book_epoch(
     for key, row in (metadata_overrides or {}).items():
         metadata_by_key[(str(key[0]), str(key[1]))] = dict(row)
     assets: list[CurrentGlobalBookAsset] = []
+    sell_assets: list[CurrentGlobalSellAsset] = []
     states: list[tuple[str, ...]] = []
     for family_key, bin_id, condition_id, side, token_id in bindings:
         metadata = metadata_by_key.get((condition_id, token_id))
@@ -509,6 +639,7 @@ def capture_current_global_book_epoch(
             )
         )
         curve = None
+        sell_curve = None
         status = (
             "VENUE_NOT_EXECUTABLE"
             if metadata_current
@@ -516,6 +647,17 @@ def capture_current_global_book_epoch(
         )
         if executable_metadata:
             curve = _global_book_curve(
+                family_key=family_key,
+                bin_id=bin_id,
+                condition_id=condition_id,
+                side=side,
+                token_id=token_id,
+                raw_book=raw_book,
+                metadata=metadata,
+                captured_at_utc=started_at,
+                max_age=max_age,
+            )
+            sell_curve = _global_sell_curve(
                 family_key=family_key,
                 bin_id=bin_id,
                 condition_id=condition_id,
@@ -552,6 +694,19 @@ def capture_current_global_book_epoch(
                     captured_at_utc=started_at,
                 )
             )
+        if sell_curve is not None:
+            sell_assets.append(
+                CurrentGlobalSellAsset(
+                    family_key=family_key,
+                    bin_id=bin_id,
+                    condition_id=condition_id,
+                    market_event_id=market_event_id,
+                    side=side,
+                    token_id=token_id,
+                    curve=sell_curve,
+                    captured_at_utc=started_at,
+                )
+            )
     identity = current_global_book_epoch_identity(
         asset_states=states,
         captured_at_utc=started_at,
@@ -562,6 +717,7 @@ def capture_current_global_book_epoch(
         captured_at_utc=started_at,
         max_age=max_age,
         witness_identity=identity,
+        sell_assets=tuple(sell_assets),
     )
 
 

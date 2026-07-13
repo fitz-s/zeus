@@ -66,7 +66,7 @@ from scipy.optimize import (
     minimize,
 )
 
-from src.contracts.executable_cost_curve import ExecutableCostCurve
+from src.contracts.executable_cost_curve import BookLevel, ExecutableCostCurve, FeeModel
 from src.contracts.execution_intent import (
     POLYMARKET_MARKETABLE_BUY_MIN_NOTIONAL_USD,
     quantize_submit_shares_for_venue,
@@ -190,10 +190,79 @@ GlobalEligibilityReason = Literal[
 ]
 
 
-def executable_curve_identity(curve: ExecutableCostCurve) -> str:
+@dataclass(frozen=True)
+class ExecutableSellCurve:
+    """Fee-deducted native BID depth for selling one already-held claim."""
+
+    token_id: str
+    side: Literal["YES", "NO"]
+    snapshot_id: str
+    book_hash: str
+    levels: tuple[BookLevel, ...]
+    fee_model: FeeModel
+    min_tick: Decimal
+    min_order_size: Decimal
+    quote_ttl: timedelta
+
+    def __post_init__(self) -> None:
+        if (
+            self.side not in {"YES", "NO"}
+            or not self.token_id
+            or not self.snapshot_id
+            or not self.book_hash
+            or not self.levels
+            or self.min_tick <= 0
+            or self.min_order_size <= 0
+            or self.quote_ttl <= timedelta(0)
+        ):
+            raise ValueError("executable sell curve is incomplete")
+        for level in self.levels:
+            ratio = level.price / self.min_tick
+            if abs(ratio - ratio.to_integral_value()) > Decimal("1e-9"):
+                raise ValueError("sell level is not aligned to the venue tick")
+        object.__setattr__(
+            self,
+            "levels",
+            tuple(sorted(self.levels, key=lambda level: level.price, reverse=True)),
+        )
+
+    def net_price(self, price: Decimal) -> Decimal:
+        return price - self.fee_model.fee_per_share(price)
+
+    def proceeds_for_shares(
+        self, shares: Decimal
+    ) -> tuple[Decimal, Decimal, Decimal]:
+        """Return net proceeds, gross VWAP, and the deepest executable bid."""
+
+        remaining = Decimal(shares)
+        if remaining <= 0:
+            raise ValueError("sell shares must be positive")
+        net = Decimal("0")
+        gross = Decimal("0")
+        limit = Decimal("0")
+        for level in self.levels:
+            take = min(remaining, level.size)
+            if take <= 0:
+                continue
+            net += take * self.net_price(level.price)
+            gross += take * level.price
+            limit = level.price
+            remaining -= take
+            if remaining <= Decimal("1e-9"):
+                break
+        if remaining > Decimal("1e-9"):
+            raise ValueError("sell depth cannot fill the exact holding")
+        return net, gross / Decimal(shares), limit
+
+
+def executable_curve_identity(
+    curve: ExecutableCostCurve | ExecutableSellCurve,
+) -> str:
     """Bind depth, fee, tick, token, and snapshot into one execution certificate."""
 
     digest = hashlib.sha256()
+    if isinstance(curve, ExecutableSellCurve):
+        digest.update(b"SELL\x1f")
     for value in (
         curve.token_id,
         curve.side,
@@ -485,6 +554,7 @@ class CurrentExecutionAuthority:
     side: Literal["YES", "NO"]
     book_snapshot_id: str
     execution_curve_identity: str
+    action: Literal["BUY", "SELL"] = "BUY"
 
 
 def global_auction_universe_identity(
@@ -782,8 +852,125 @@ def global_candidate_from_native(
 
 
 @dataclass(frozen=True)
+class GlobalSingleOrderSellCandidate:
+    """One exact ledger holding offered against its own current native BID depth."""
+
+    candidate_id: str
+    family_key: str
+    bin_id: str
+    condition_id: str
+    side: Literal["YES", "NO"]
+    token_id: str
+    position_id: str
+    held_shares: Decimal
+    probability_witness_identity: str
+    book_snapshot_id: str
+    book_captured_at_utc: datetime
+    execution_curve_identity: str
+    ledger_snapshot_id: str
+    executable_sell_curve: ExecutableSellCurve
+    resolution_identity: str
+    action: Literal["SELL"] = "SELL"
+    eligibility_reason: GlobalEligibilityReason | None = None
+
+    def __post_init__(self) -> None:
+        if self.side not in {"YES", "NO"}:
+            raise ValueError(f"unsupported native side: {self.side!r}")
+        if not all(
+            str(value).strip()
+            for value in (
+                self.candidate_id,
+                self.family_key,
+                self.bin_id,
+                self.condition_id,
+                self.token_id,
+                self.position_id,
+                self.probability_witness_identity,
+                self.ledger_snapshot_id,
+                self.resolution_identity,
+            )
+        ):
+            raise ValueError("global sell candidate identities must be non-empty")
+        if (
+            not Decimal(self.held_shares).is_finite()
+            or Decimal(self.held_shares) <= 0
+            or Decimal(self.held_shares) % Decimal("0.01") != 0
+        ):
+            raise ValueError("global sell requires exact venue-legal centishares")
+        curve = self.executable_sell_curve
+        if curve.side != self.side or curve.token_id != self.token_id:
+            raise ValueError("sell candidate must use its held token's native bid curve")
+        if self.book_captured_at_utc.tzinfo is None:
+            raise ValueError("book_captured_at_utc must be timezone-aware")
+        if (
+            self.book_snapshot_id != curve.snapshot_id
+            or self.execution_curve_identity != executable_curve_identity(curve)
+        ):
+            object.__setattr__(self, "eligibility_reason", "BOOK_CERTIFICATE_MISMATCH")
+
+
+def global_sell_candidate_from_holding(
+    holding: Any,
+    *,
+    probability_witness: JointOutcomeProbabilityWitness,
+    ledger_snapshot_id: str,
+    executable_sell_curve: ExecutableSellCurve,
+    book_captured_at_utc: datetime,
+) -> GlobalSingleOrderSellCandidate:
+    """Materialize a SELL only from exact ledger identity and current token topology."""
+
+    try:
+        column = probability_witness.bin_ids.index(str(holding.bin_id))
+    except ValueError as exc:
+        raise ValueError("holding bin is absent from the family probability witness") from exc
+    binding = probability_witness.bindings[column]
+    side = str(holding.side)
+    expected_token = binding.yes_token_id if side == "YES" else binding.no_token_id
+    if (
+        side not in {"YES", "NO"}
+        or str(holding.family_key) != probability_witness.family_key
+        or not expected_token
+        or str(holding.token_id) != expected_token
+        or executable_sell_curve.token_id != expected_token
+        or executable_sell_curve.side != side
+    ):
+        raise ValueError("holding condition/token does not own the selected q column")
+    return GlobalSingleOrderSellCandidate(
+        candidate_id=_hash(
+            "SELL",
+            probability_witness.family_key,
+            str(holding.position_id),
+            binding.bin_id,
+            binding.condition_id,
+            side,
+            str(expected_token),
+            str(holding.shares),
+        ),
+        family_key=probability_witness.family_key,
+        bin_id=binding.bin_id,
+        condition_id=binding.condition_id,
+        side=side,  # type: ignore[arg-type]
+        token_id=str(expected_token),
+        position_id=str(holding.position_id),
+        held_shares=Decimal(holding.shares),
+        probability_witness_identity=probability_witness.witness_identity,
+        book_snapshot_id=executable_sell_curve.snapshot_id,
+        book_captured_at_utc=book_captured_at_utc,
+        execution_curve_identity=executable_curve_identity(executable_sell_curve),
+        ledger_snapshot_id=str(ledger_snapshot_id),
+        executable_sell_curve=executable_sell_curve,
+        resolution_identity=probability_witness.resolution_identity,
+    )
+
+
+GlobalSingleOrderAnyCandidate = (
+    GlobalSingleOrderCandidate | GlobalSingleOrderSellCandidate
+)
+
+
+@dataclass(frozen=True)
 class BinaryTerminalWealthCertificate:
-    """Exact 0/1 payoff branches plus conservative branch probabilities."""
+    """Exact binary payoff branches plus conservative branch probabilities."""
 
     win_probability_lcb: float
     loss_probability_ucb: float
@@ -795,6 +982,16 @@ class BinaryTerminalWealthCertificate:
     expected_value_diagnostic_usd: float
 
     def __post_init__(self) -> None:
+        if self.win_probability_lcb > 0.5:
+            median_coherent = self.median_payoff_usd == self.win_payoff_usd
+        elif self.win_probability_lcb < 0.5:
+            median_coherent = self.median_payoff_usd == self.loss_payoff_usd
+        else:
+            median_coherent = (
+                self.loss_payoff_usd
+                <= self.median_payoff_usd
+                <= self.win_payoff_usd
+            )
         if (
             not math.isfinite(self.win_probability_lcb)
             or not math.isfinite(self.loss_probability_ucb)
@@ -804,23 +1001,23 @@ class BinaryTerminalWealthCertificate:
                 rel_tol=0.0,
                 abs_tol=1e-12,
             )
-            or not 0.5 < self.win_probability_lcb <= 1.0
-            or not 0.0 <= self.loss_probability_ucb < 0.5
+            or not 0.0 <= self.win_probability_lcb <= 1.0
+            or not 0.0 <= self.loss_probability_ucb <= 1.0
             or self.loss_payoff_usd >= 0
             or self.win_payoff_usd <= 0
-            or self.median_payoff_usd != self.win_payoff_usd
+            or not median_coherent
             or self.wealth_after_loss_usd <= 0
             or self.wealth_after_win_usd <= 0
             or not math.isfinite(self.expected_value_diagnostic_usd)
         ):
-            raise ValueError("terminal-wealth certificate is not majority-win coherent")
+            raise ValueError("terminal-wealth certificate is not branch coherent")
 
 
 @dataclass(frozen=True)
 class GlobalSingleOrderDecision:
     """The one order that wins the current cross-family feasible-set auction."""
 
-    candidate: GlobalSingleOrderCandidate | None
+    candidate: GlobalSingleOrderAnyCandidate | None
     shares: Decimal
     cost_usd: Decimal
     robust_delta_log_wealth: float
@@ -830,6 +1027,7 @@ class GlobalSingleOrderDecision:
     limit_price: Decimal = Decimal("0")
     expected_fill_price_before_fee: Decimal = Decimal("0")
     max_spend_usd: Decimal = Decimal("0")
+    cash_proceeds_usd: Decimal = Decimal("0")
     terminal_wealth: BinaryTerminalWealthCertificate | None = None
     rejection_reasons: Mapping[str, str] = field(default_factory=dict)
 
@@ -843,10 +1041,34 @@ class GlobalSingleOrderDecision:
                 self.limit_price != 0
                 or self.expected_fill_price_before_fee != 0
                 or self.max_spend_usd != 0
+                or self.cash_proceeds_usd != 0
                 or self.terminal_wealth is not None
             ):
                 raise ValueError("global no-trade decision cannot carry an execution boundary")
-        elif (
+            return
+        if getattr(self.candidate, "action", "BUY") == "SELL":
+            if (
+                self.no_trade_reason is not None
+                or self.shares != self.candidate.held_shares
+                or self.cost_usd <= 0
+                or self.cash_proceeds_usd <= 0
+                or self.cash_proceeds_usd != self.shares - self.cost_usd
+                or self.limit_price <= 0
+                or self.expected_fill_price_before_fee < self.limit_price
+                or self.max_spend_usd != 0
+                or self.terminal_wealth is None
+                or self.terminal_wealth.loss_payoff_usd != -self.cost_usd
+                or self.terminal_wealth.win_payoff_usd != self.cash_proceeds_usd
+                or not math.isclose(
+                    self.terminal_wealth.expected_value_diagnostic_usd,
+                    self.robust_ev_usd,
+                    rel_tol=0.0,
+                    abs_tol=1e-12,
+                )
+            ):
+                raise ValueError("global sell decision is not exact-holding coherent")
+            return
+        if (
             self.no_trade_reason is not None
             or self.shares <= 0
             or self.cost_usd <= 0
@@ -854,6 +1076,7 @@ class GlobalSingleOrderDecision:
             or self.expected_fill_price_before_fee <= 0
             or self.expected_fill_price_before_fee > self.limit_price
             or self.max_spend_usd < self.cost_usd
+            or self.cash_proceeds_usd != 0
             or self.terminal_wealth is None
             or self.terminal_wealth.loss_payoff_usd != -self.cost_usd
             or self.terminal_wealth.win_payoff_usd != self.shares - self.cost_usd
@@ -1611,8 +1834,183 @@ def _score_global_single_order(
     )
 
 
+def global_sell_fill_prefix_objective(
+    decision: GlobalSingleOrderDecision,
+    *,
+    filled_shares: Decimal,
+    net_proceeds_usd: Decimal,
+) -> tuple[float, float]:
+    """Score any FAK SELL prefix against continuing to hold those claims."""
+
+    candidate = decision.candidate
+    terminal = decision.terminal_wealth
+    shares = Decimal(filled_shares)
+    proceeds = Decimal(net_proceeds_usd)
+    if (
+        candidate is None
+        or getattr(candidate, "action", "BUY") != "SELL"
+        or terminal is None
+        or shares <= 0
+        or shares > decision.shares
+        or proceeds <= 0
+        or proceeds >= shares
+    ):
+        raise ValueError("sell fill prefix is not certificate-coherent")
+    loss_baseline = terminal.wealth_after_loss_usd - terminal.loss_payoff_usd
+    win_baseline = terminal.wealth_after_win_usd - terminal.win_payoff_usd
+    loss_after = loss_baseline - shares + proceeds
+    win_after = win_baseline + proceeds
+    if min(loss_baseline, win_baseline, loss_after, win_after) <= 0:
+        return float("-inf"), float("-inf")
+    robust_du = terminal.loss_probability_ucb * math.log(
+        float(loss_after / loss_baseline)
+    ) + terminal.win_probability_lcb * math.log(float(win_after / win_baseline))
+    robust_ev = terminal.win_probability_lcb * float(shares) - float(
+        shares - proceeds
+    )
+    return robust_du, robust_ev
+
+
+def _score_global_single_order_sell(
+    candidate: GlobalSingleOrderSellCandidate,
+    *,
+    held_payoff_q_samples: np.ndarray,
+    band_alpha: float,
+    wealth_floor_usd: Decimal,
+    wealth_ceiling_usd: Decimal,
+) -> GlobalSingleOrderDecision:
+    """Score one full-position SELL relative to continuing to hold the claim."""
+
+    shares = Decimal(candidate.held_shares)
+    curve = candidate.executable_sell_curve
+    if shares < curve.min_order_size:
+        return GlobalSingleOrderDecision(
+            candidate=None,
+            shares=Decimal("0"),
+            cost_usd=Decimal("0"),
+            robust_delta_log_wealth=0.0,
+            robust_ev_usd=0.0,
+            capital_efficiency=0.0,
+            no_trade_reason="DEPTH_INFEASIBLE",
+            rejection_reasons={candidate.candidate_id: "DEPTH_INFEASIBLE"},
+        )
+    try:
+        proceeds, expected_fill_price, limit_price = curve.proceeds_for_shares(shares)
+    except ValueError:
+        return GlobalSingleOrderDecision(
+            candidate=None,
+            shares=Decimal("0"),
+            cost_usd=Decimal("0"),
+            robust_delta_log_wealth=0.0,
+            robust_ev_usd=0.0,
+            capital_efficiency=0.0,
+            no_trade_reason="DEPTH_INFEASIBLE",
+            rejection_reasons={candidate.candidate_id: "DEPTH_INFEASIBLE"},
+        )
+    loss_at_risk = shares - proceeds
+    if proceeds <= 0 or loss_at_risk <= 0:
+        raise ValueError("sell proceeds must define a positive bounded hold-relative loss")
+
+    held_q = np.asarray(held_payoff_q_samples, dtype=np.float64)
+    favorable_q_samples = 1.0 - held_q
+    robust_q = _lower_cvar(
+        favorable_q_samples,
+        np.ones(favorable_q_samples.size, dtype=np.float64),
+        band_alpha,
+    )
+
+    floor = Decimal(wealth_floor_usd)
+    ceiling = Decimal(wealth_ceiling_usd)
+    loss_baseline = floor + shares
+    loss_after = floor + proceeds
+    win_baseline = ceiling
+    win_after = ceiling + proceeds
+    if min(loss_baseline, loss_after, win_baseline, win_after) <= 0:
+        robust_du = float("-inf")
+    else:
+        loss_du = math.log(float(loss_after / loss_baseline))
+        win_du = math.log(float(win_after / win_baseline))
+        robust_du = loss_du + robust_q * (win_du - loss_du)
+    robust_ev = robust_q * float(shares) - float(loss_at_risk)
+    efficiency = robust_du / float(loss_at_risk)
+    if not (robust_du > 0.0 and robust_ev > 0.0):
+        return GlobalSingleOrderDecision(
+            candidate=None,
+            shares=Decimal("0"),
+            cost_usd=Decimal("0"),
+            robust_delta_log_wealth=0.0,
+            robust_ev_usd=0.0,
+            capital_efficiency=0.0,
+            no_trade_reason="NON_POSITIVE_ROBUST_OBJECTIVE",
+            rejection_reasons={
+                candidate.candidate_id: "NON_POSITIVE_ROBUST_OBJECTIVE"
+            },
+        )
+    terminal = BinaryTerminalWealthCertificate(
+        win_probability_lcb=float(robust_q),
+        loss_probability_ucb=float(1.0 - robust_q),
+        loss_payoff_usd=-loss_at_risk,
+        win_payoff_usd=proceeds,
+        median_payoff_usd=(
+            proceeds if robust_q > 0.5 else -loss_at_risk
+        ),
+        wealth_after_loss_usd=loss_after,
+        wealth_after_win_usd=win_after,
+        expected_value_diagnostic_usd=float(robust_ev),
+    )
+    scored = GlobalSingleOrderDecision(
+        candidate=candidate,
+        shares=shares,
+        cost_usd=loss_at_risk,
+        robust_delta_log_wealth=float(robust_du),
+        robust_ev_usd=float(robust_ev),
+        capital_efficiency=float(efficiency),
+        no_trade_reason=None,
+        limit_price=limit_price,
+        expected_fill_price_before_fee=expected_fill_price,
+        max_spend_usd=Decimal("0"),
+        cash_proceeds_usd=proceeds,
+        terminal_wealth=terminal,
+    )
+    # FAK may stop at any point on the consumed BID prefix.  Within a level the
+    # robust log objective is concave; positive values at every level boundary
+    # (including the exact full size) prove every intermediate prefix remains
+    # strictly better than CASH. Earlier bids are never worse than later bids.
+    filled = Decimal("0")
+    prefix_proceeds = Decimal("0")
+    remaining = shares
+    for level in curve.levels:
+        take = min(remaining, level.size)
+        if take <= 0:
+            continue
+        filled += take
+        prefix_proceeds += take * curve.net_price(level.price)
+        prefix_du, prefix_ev = global_sell_fill_prefix_objective(
+            scored,
+            filled_shares=filled,
+            net_proceeds_usd=prefix_proceeds,
+        )
+        if not (prefix_du > 0.0 and prefix_ev > 0.0):
+            return GlobalSingleOrderDecision(
+                candidate=None,
+                shares=Decimal("0"),
+                cost_usd=Decimal("0"),
+                robust_delta_log_wealth=0.0,
+                robust_ev_usd=0.0,
+                capital_efficiency=0.0,
+                no_trade_reason="NON_POSITIVE_ROBUST_OBJECTIVE",
+                rejection_reasons={
+                    candidate.candidate_id: "NON_POSITIVE_ROBUST_OBJECTIVE"
+                },
+            )
+        remaining -= take
+        if remaining <= Decimal("1e-9"):
+            break
+    return scored
+
+
 def _probability_witness_rejection_reason(
-    candidate: GlobalSingleOrderCandidate,
+    candidate: GlobalSingleOrderAnyCandidate,
     witness: JointOutcomeProbabilityWitness | None,
     current: CurrentFamilyProbabilityAuthority | None,
     *,
@@ -1661,7 +2059,7 @@ def _probability_witness_rejection_reason(
 
 
 def select_global_single_order(
-    candidates: Sequence[GlobalSingleOrderCandidate],
+    candidates: Sequence[GlobalSingleOrderAnyCandidate],
     *,
     probability_witnesses: Mapping[str, JointOutcomeProbabilityWitness],
     universe_witness: GlobalAuctionUniverseWitness,
@@ -1670,7 +2068,7 @@ def select_global_single_order(
         [str], CurrentFamilyProbabilityAuthority | None
     ],
     current_execution_resolver: Callable[
-        [GlobalSingleOrderCandidate], CurrentExecutionAuthority | None
+        [GlobalSingleOrderAnyCandidate], CurrentExecutionAuthority | None
     ],
     current_wealth_identity_resolver: Callable[[], str | None],
     wealth_witness: PortfolioWealthWitness,
@@ -1678,11 +2076,11 @@ def select_global_single_order(
     fractional_kelly_multiplier: Decimal = Decimal("1"),
     decision_at_utc: datetime,
     candidate_capital_limit_resolver: Callable[
-        [GlobalSingleOrderCandidate], Decimal
+        [GlobalSingleOrderAnyCandidate], Decimal
     ]
     | None = None,
     candidate_payoff_q_lcb_resolver: Callable[
-        [GlobalSingleOrderCandidate], float | None
+        [GlobalSingleOrderAnyCandidate], float | None
     ]
     | None = None,
 ) -> GlobalSingleOrderDecision:
@@ -1770,7 +2168,9 @@ def select_global_single_order(
         raise ValueError("fractional Kelly multiplier must be finite and in (0, 1]")
 
     rejections: dict[str, str] = {}
-    eligible: list[tuple[GlobalSingleOrderCandidate, np.ndarray, float, str]] = []
+    eligible: list[
+        tuple[GlobalSingleOrderAnyCandidate, np.ndarray, float, str]
+    ] = []
     for candidate in candidates:
         reason: str | None = candidate.eligibility_reason
         q_samples: np.ndarray | None = None
@@ -1797,6 +2197,8 @@ def select_global_single_order(
                 current_execution.token_id != candidate.token_id
                 or current_execution.side != candidate.side
                 or current_execution.book_snapshot_id != candidate.book_snapshot_id
+                or getattr(current_execution, "action", "BUY")
+                != getattr(candidate, "action", "BUY")
             ):
                 reason = "BOOK_IDENTITY_SUPERSEDED"
             elif (
@@ -1805,11 +2207,16 @@ def select_global_single_order(
             ):
                 reason = "EXECUTION_CURVE_SUPERSEDED"
         quote_age = decision_at_utc - candidate.book_captured_at_utc
+        candidate_curve = (
+            candidate.executable_sell_curve
+            if isinstance(candidate, GlobalSingleOrderSellCandidate)
+            else candidate.executable_cost_curve
+        )
         if (
             reason is None
             and (
                 quote_age.total_seconds() < 0.0
-                or quote_age > candidate.executable_cost_curve.quote_ttl
+                or quote_age > candidate_curve.quote_ttl
             )
         ):
             reason = "QUOTE_EXPIRED"
@@ -1875,6 +2282,19 @@ def select_global_single_order(
 
     scored: list[GlobalSingleOrderDecision] = []
     for candidate, q_samples, band_alpha, _band_basis in eligible:
+        if isinstance(candidate, GlobalSingleOrderSellCandidate):
+            score = _score_global_single_order_sell(
+                candidate,
+                held_payoff_q_samples=q_samples,
+                band_alpha=band_alpha,
+                wealth_floor_usd=wealth_witness.wealth_floor_usd,
+                wealth_ceiling_usd=wealth_witness.wealth_ceiling_usd,
+            )
+            if score.candidate is None:
+                rejections.update(score.rejection_reasons)
+            else:
+                scored.append(score)
+            continue
         candidate_capital_limit = capital_limit_usd
         if candidate_capital_limit_resolver is not None:
             try:
@@ -1970,6 +2390,7 @@ def select_global_single_order(
         limit_price=winner.limit_price,
         expected_fill_price_before_fee=winner.expected_fill_price_before_fee,
         max_spend_usd=winner.max_spend_usd,
+        cash_proceeds_usd=winner.cash_proceeds_usd,
         terminal_wealth=winner.terminal_wealth,
         rejection_reasons=rejections,
     )

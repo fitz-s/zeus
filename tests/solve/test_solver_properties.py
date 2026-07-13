@@ -653,6 +653,49 @@ def _global_exact_oracle(
     return best
 
 
+def _global_sell_candidate(
+    *, candidate_id, family, side, held_q, bids, shares="10", fee="0"
+):
+    probability_seed = _global_candidate(
+        candidate_id=f"{candidate_id}-q",
+        family=family,
+        side=side,
+        q=held_q,
+    )
+    witness = _global_probability_witness(probability_seed)
+    curve = S.ExecutableSellCurve(
+        token_id=probability_seed.token_id,
+        side=side,
+        snapshot_id=f"sell-book-{candidate_id}",
+        book_hash=f"sell-hash-{candidate_id}",
+        levels=tuple(
+            BookLevel(price=Decimal(price), size=Decimal(size))
+            for price, size in bids
+        ),
+        fee_model=FeeModel(fee_rate=Decimal(fee)),
+        min_tick=Decimal("0.001"),
+        min_order_size=Decimal("1"),
+        quote_ttl=timedelta(seconds=1),
+    )
+    return S.GlobalSingleOrderSellCandidate(
+        candidate_id=candidate_id,
+        family_key=family,
+        bin_id=probability_seed.bin_id,
+        condition_id=probability_seed.condition_id,
+        side=side,
+        token_id=probability_seed.token_id,
+        position_id=f"position-{candidate_id}",
+        held_shares=Decimal(shares),
+        probability_witness_identity=witness.witness_identity,
+        book_snapshot_id=curve.snapshot_id,
+        book_captured_at_utc=probability_seed.book_captured_at_utc,
+        execution_curve_identity=S.executable_curve_identity(curve),
+        ledger_snapshot_id="ledger-current",
+        executable_sell_curve=curve,
+        resolution_identity=probability_seed.resolution_identity,
+    )
+
+
 @pytest.mark.parametrize("side", ("YES", "NO"))
 @pytest.mark.parametrize(
     ("floor", "ceiling", "q_samples", "alpha"),
@@ -783,6 +826,7 @@ def _global_select(
                 side=candidate.side,
                 book_snapshot_id=candidate.book_snapshot_id,
                 execution_curve_identity=candidate.execution_curve_identity,
+                action=getattr(candidate, "action", "BUY"),
             )
             for candidate in candidates
         }
@@ -812,6 +856,161 @@ def _global_select(
         decision_at_utc=_DECISION_AT,
         candidate_capital_limit_resolver=candidate_capital_limit_resolver,
     )
+
+
+def test_global_single_order_sell_can_beat_positive_buy_and_cash():
+    sell = _global_sell_candidate(
+        candidate_id="sell-winner",
+        family="sell-family",
+        side="YES",
+        held_q=0.15,
+        bids=(("0.40", "4"), ("0.30", "6")),
+        shares="10",
+    )
+    buy = _global_candidate(
+        candidate_id="positive-buy-runner-up",
+        family="buy-family",
+        side="NO",
+        q=0.80,
+        levels=(("0.60", "20"),),
+    )
+
+    decision = _global_select(
+        (buy, sell), floor="100", ceiling="110", cash="100", cap="5"
+    )
+
+    assert decision.candidate is sell
+    assert decision.shares == Decimal("10")
+    assert decision.cash_proceeds_usd == Decimal("3.4")
+    assert decision.cost_usd == Decimal("6.6")
+    assert decision.limit_price == Decimal("0.30")
+    assert decision.expected_fill_price_before_fee == Decimal("0.34")
+    assert decision.max_spend_usd == 0
+    assert decision.robust_delta_log_wealth > 0
+    assert decision.robust_ev_usd > 0
+
+
+def test_global_single_order_sell_uses_incremental_growth_not_loss_majority():
+    sell = _global_sell_candidate(
+        candidate_id="sell-high-bid",
+        family="sell-high-bid-family",
+        side="YES",
+        held_q=0.60,
+        bids=(("0.90", "10"),),
+        shares="10",
+    )
+
+    decision = _global_select(
+        (sell,), floor="100", ceiling="110", cash="100", cap="5"
+    )
+
+    assert decision.candidate is sell
+    assert decision.terminal_wealth is not None
+    assert decision.terminal_wealth.win_probability_lcb == pytest.approx(0.40)
+    assert decision.terminal_wealth.median_payoff_usd == Decimal("-1.0")
+    assert decision.cash_proceeds_usd == Decimal("9.0")
+    assert decision.robust_delta_log_wealth > 0
+    assert decision.robust_ev_usd > 0
+
+
+def test_global_single_order_buy_can_beat_sell_and_cash():
+    sell = _global_sell_candidate(
+        candidate_id="sell-runner-up",
+        family="sell-runner-family",
+        side="NO",
+        held_q=0.40,
+        bids=(("0.05", "10"),),
+        shares="10",
+    )
+    buy = _global_candidate(
+        candidate_id="buy-winner",
+        family="buy-winner-family",
+        side="YES",
+        q=0.90,
+        levels=(("0.40", "20"),),
+    )
+
+    decision = _global_select(
+        (sell, buy), floor="100", ceiling="110", cash="100", cap="5"
+    )
+
+    assert decision.candidate is buy
+    assert decision.cash_proceeds_usd == 0
+    assert decision.robust_delta_log_wealth > 0
+
+
+def test_global_single_order_cash_beats_non_positive_buy_and_sell():
+    sell = _global_sell_candidate(
+        candidate_id="bad-sell",
+        family="bad-sell-family",
+        side="YES",
+        held_q=0.80,
+        bids=(("0.20", "10"),),
+        shares="10",
+    )
+    buy = _global_candidate(
+        candidate_id="bad-buy",
+        family="bad-buy-family",
+        side="NO",
+        q=0.55,
+        levels=(("0.90", "20"),),
+    )
+
+    decision = _global_select((sell, buy))
+
+    assert decision.candidate is None
+    assert decision.no_trade_reason == "NO_CURRENT_EXECUTABLE_POSITIVE_ORDER"
+    assert decision.robust_delta_log_wealth == 0
+    assert decision.cost_usd == 0
+
+
+def test_global_single_order_sell_yes_no_label_mirror_is_exact():
+    yes = _global_sell_candidate(
+        candidate_id="sell-mirror-yes",
+        family="sell-mirror-yes-family",
+        side="YES",
+        held_q=0.20,
+        bids=(("0.42", "3"), ("0.31", "7")),
+        shares="10",
+        fee="0.02",
+    )
+    no = _global_sell_candidate(
+        candidate_id="sell-mirror-no",
+        family="sell-mirror-no-family",
+        side="NO",
+        held_q=0.20,
+        bids=(("0.42", "3"), ("0.31", "7")),
+        shares="10",
+        fee="0.02",
+    )
+
+    yes_decision = _global_select((yes,), floor="100", ceiling="110")
+    no_decision = _global_select((no,), floor="100", ceiling="110")
+
+    assert yes_decision.candidate is yes
+    assert no_decision.candidate is no
+    assert yes_decision.shares == no_decision.shares
+    assert yes_decision.cost_usd == no_decision.cost_usd
+    assert yes_decision.cash_proceeds_usd == no_decision.cash_proceeds_usd
+    assert yes_decision.limit_price == no_decision.limit_price
+    assert yes_decision.robust_delta_log_wealth == no_decision.robust_delta_log_wealth
+    assert yes_decision.robust_ev_usd == no_decision.robust_ev_usd
+
+
+def test_global_single_order_sell_requires_full_exact_bid_depth():
+    sell = _global_sell_candidate(
+        candidate_id="sell-thin-depth",
+        family="sell-thin-depth-family",
+        side="YES",
+        held_q=0.10,
+        bids=(("0.50", "9.99"),),
+        shares="10",
+    )
+
+    decision = _global_select((sell,))
+
+    assert decision.candidate is None
+    assert decision.rejection_reasons[sell.candidate_id] == "DEPTH_INFEASIBLE"
 
 
 def test_global_single_order_yes_best_matches_full_depth_exact_oracle():

@@ -1,8 +1,8 @@
-# Lifecycle: created=2026-04-27; last_reviewed=2026-05-21; last_reused=2026-05-21
+# Lifecycle: created=2026-04-27; last_reviewed=2026-07-13; last_reused=2026-07-13
 # Purpose: Regression coverage for executor and portfolio mechanics under R3 cutover preflight opt-outs.
 # Reuse: Run when executor order submission or portfolio save/load mechanics change.
 # Created: 2026-04-27
-# Last reused/audited: 2026-05-21
+# Last reused/audited: 2026-07-13
 # Authority basis: docs/archive/2026-Q2/task_2026-05-15_live_order_e2e_verification/LIVE_ORDER_E2E_VERIFICATION_PLAN.md; R3 Z1 cutover guard audit.
 #                  + docs/operations/task_2026-05-21_live_side_effect_risk_boundaries/task.md P0-1 side-effect boundary fault injection.
 #                  + docs/operations/task_2026-05-21_live_side_effect_risk_boundaries/task.md P2-1 required live ATTACH seam.
@@ -1604,6 +1604,17 @@ class TestExecutor:
             "side": "SELL",
             "order_type": "GTC",
         }
+
+    @pytest.mark.parametrize(
+        "price,tick,expected",
+        [(0.001, "0.001", 0.001), (0.97, "0.01", 0.97), (0.999, "0.001", 0.999)],
+    )
+    def test_reduce_only_exit_alignment_preserves_venue_valid_price(
+        self, price, tick, expected
+    ):
+        from src.execution.executor import _align_sell_limit_price_to_tick
+
+        assert _align_sell_limit_price_to_tick(price, Decimal(tick)) == pytest.approx(expected)
 
     def test_execute_exit_order_coerces_fok_exit_to_fak_ioc(self, monkeypatch):
         captured = {}

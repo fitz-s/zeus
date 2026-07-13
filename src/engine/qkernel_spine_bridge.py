@@ -351,6 +351,7 @@ class PreparedGlobalFamily:
     decision_id: str
     probability_witness: Any
     candidate_seeds: tuple["PreparedGlobalCandidateSeed", ...]
+    holdings_snapshot: Optional[Any] = None
     solution_plan: Optional[Any] = None
     solution_projection: Optional[Any] = None
 
@@ -391,6 +392,7 @@ def _prepare_global_family(
     posterior_identity_hash: str,
     captured_at_utc: datetime,
     max_age: timedelta,
+    holdings_snapshot: Any | None = None,
     solution_plan: Any | None = None,
     solution_projection: Any | None = None,
 ) -> PreparedGlobalFamily:
@@ -475,6 +477,7 @@ def _prepare_global_family(
         decision_id=decision.decision_id,
         probability_witness=witness,
         candidate_seeds=tuple(seeds),
+        holdings_snapshot=holdings_snapshot,
         solution_plan=solution_plan,
         solution_projection=solution_projection,
     )
@@ -1707,6 +1710,7 @@ def decide_family_via_spine(
         shares_for_routing = _family_min_order_shares(route_proofs)
         # W3 SOLVE promotion seam (time-boxed flag, deleted at promotion): ON → the joint solver
         # selects; OFF/absent → this guard is skipped and the legacy path is byte-identical.
+        holdings_snapshot = None
         if use_w3_solve:
             if solve_wealth_witness is None and solve_ledger_input_provider is not None:
                 solve_wealth_witness, solve_positions = solve_ledger_input_provider()
@@ -1776,6 +1780,7 @@ def decide_family_via_spine(
                     ),
                     captured_at_utc=captured_at_utc,
                     max_age=global_probability_max_age,
+                    holdings_snapshot=holdings_snapshot,
                     solution_plan=solution_plan,
                     solution_projection=solution_projection,
                 )
