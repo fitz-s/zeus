@@ -9,13 +9,15 @@
 """Exits as the same solve — the C5 marginal interface.
 
 The exit decision is not a separate rule lane: a held position is an ENDOWMENT the solver
-re-evaluates every event. Selling holding h_i is menu item ``sell_holding``; the C5 marginal
-condition is the mathematical form of "does the solve want to move wealth out of outcome i":
+re-evaluates every event. Selling a claim with terminal payoff vector ``h`` is menu item
+``sell_holding``; the C5 marginal condition is the mathematical form of "does the solve want
+to exchange this claim for current cash":
 
-    sell one unit of outcome-i holding at bid b iff   b · Σ_j q_j / W_j  >  q_i / W_i
+    sell one unit at bid b iff   b · Σ_j q_j / W_j  >  Σ_j q_j h_j / W_j
 
 (marginal log-utility of the cash proceeds spread over all outcomes exceeds the marginal
-log-utility of the held claim on outcome i).
+log-utility of the surrendered claim). For YES_i, only ``h_i=1``; for NO_i, ``h_j=1`` for
+every ``j != i``. This single vector form is side-symmetric.
 
 WHAT SURVIVES vs WHAT THIS REPLACES (W3.EXIT brief; portfolio.py:946-1467):
 * REUSE: ExitContext/ExitDecision dataclasses, _build_exit_context threading,
@@ -122,11 +124,11 @@ def marginal_exit_condition(
     *,
     precheck: ExitPrecheckResult,
     bid: float,
-    held_atom_id: str,
+    held_payoff_by_atom_id: Mapping[str, float],
     q_by_atom_id: Mapping[str, float],
     wealth: WealthStateByAtom,
 ) -> bool:
-    """The C5 marginal condition for ONE marginal unit: b·Σ_a q_a/W_a > q_i/W_i.
+    """The C5 marginal condition for one unit: b·Σ_a q_a/W_a > Σ_a q_a h_a/W_a.
 
     ``precheck`` is consumed FIRST (consult REV-2): if a hard tripwire fired the economic
     predicate must not run. Pure predicate otherwise — the solver applies it implicitly through
@@ -153,27 +155,34 @@ def marginal_exit_condition(
     if not atom_ids or len(set(atom_ids)) != len(atom_ids):
         raise ValueError("wealth atom axis must be non-empty and unique")
     atom_set = set(atom_ids)
-    if set(q_by_atom_id) != atom_set or set(wealth.wealth_by_atom) != atom_set:
-        raise ValueError("q and wealth must cover the same complete atom axis")
-    if held_atom_id not in atom_set:
-        raise ValueError("held atom must belong to the wealth axis")
+    if (
+        set(q_by_atom_id) != atom_set
+        or set(held_payoff_by_atom_id) != atom_set
+        or set(wealth.wealth_by_atom) != atom_set
+    ):
+        raise ValueError("q, held payoff, and wealth must cover the same complete atom axis")
 
     q: dict[str, float] = {}
+    h: dict[str, float] = {}
     w: dict[str, float] = {}
     for atom_id in atom_ids:
         q_value = float(q_by_atom_id[atom_id])
+        payoff_value = float(held_payoff_by_atom_id[atom_id])
         wealth_value = float(wealth.wealth_by_atom[atom_id])
         if not math.isfinite(q_value) or not 0.0 <= q_value <= 1.0:
             raise ValueError("atom probabilities must be finite in [0, 1]")
+        if not math.isfinite(payoff_value) or not 0.0 <= payoff_value <= 1.0:
+            raise ValueError("held claim payoffs must be finite in [0, 1]")
         if not math.isfinite(wealth_value) or wealth_value <= 0.0:
             raise ZeroWealthOutcomeError(
                 f"non-positive endowment wealth in atom {atom_id!r}; log-utility undefined"
             )
         q[atom_id] = q_value
+        h[atom_id] = payoff_value
         w[atom_id] = wealth_value
     if not math.isclose(sum(q.values()), 1.0, rel_tol=0.0, abs_tol=1e-12):
         raise ValueError("atom probabilities must sum to one")
 
     cash_marginal = bid_value * sum(q[a] / w[a] for a in atom_ids)
-    claim_marginal = q[held_atom_id] / w[held_atom_id]
+    claim_marginal = sum(q[a] * h[a] / w[a] for a in atom_ids)
     return cash_marginal > claim_marginal

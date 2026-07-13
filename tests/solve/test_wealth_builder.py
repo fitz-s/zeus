@@ -90,14 +90,14 @@ def test_exit_precheck_force_decision_precedes_invalid_economics():
     assert marginal_exit_condition(
         precheck=ExitPrecheckResult(True, "RED", True),
         bid=float("nan"),
-        held_atom_id="missing",
+        held_payoff_by_atom_id={},
         q_by_atom_id={},
         wealth=_exit_wealth(),
     ) is True
     assert marginal_exit_condition(
         precheck=ExitPrecheckResult(True, "EVIDENCE_UNAVAILABLE", False),
         bid=float("nan"),
-        held_atom_id="missing",
+        held_payoff_by_atom_id={},
         q_by_atom_id={},
         wealth=_exit_wealth(),
     ) is False
@@ -107,7 +107,7 @@ def test_exit_marginal_sells_when_cash_utility_dominates_claim():
     assert marginal_exit_condition(
         precheck=ExitPrecheckResult(False, None, False),
         bid=0.50,
-        held_atom_id=AY,
+        held_payoff_by_atom_id={AY: 1.0, AN: 0.0},
         q_by_atom_id={AY: 0.20, AN: 0.80},
         wealth=_exit_wealth(),
     ) is True
@@ -117,7 +117,7 @@ def test_exit_marginal_holds_when_claim_utility_dominates_cash():
     assert marginal_exit_condition(
         precheck=ExitPrecheckResult(False, None, False),
         bid=0.50,
-        held_atom_id=AY,
+        held_payoff_by_atom_id={AY: 1.0, AN: 0.0},
         q_by_atom_id={AY: 0.80, AN: 0.20},
         wealth=_exit_wealth(),
     ) is False
@@ -127,7 +127,7 @@ def test_exit_marginal_day0_dead_claim_sells_at_any_positive_bid():
     assert marginal_exit_condition(
         precheck=ExitPrecheckResult(False, None, False),
         bid=0.01,
-        held_atom_id=AY,
+        held_payoff_by_atom_id={AY: 1.0, AN: 0.0},
         q_by_atom_id={AY: 0.0, AN: 1.0},
         wealth=_exit_wealth(),
     ) is True
@@ -143,7 +143,7 @@ def test_exit_marginal_is_strict_at_indifference():
     assert marginal_exit_condition(
         precheck=ExitPrecheckResult(False, None, False),
         bid=1.0,
-        held_atom_id=AY,
+        held_payoff_by_atom_id={AY: 1.0},
         q_by_atom_id={AY: 1.0},
         wealth=wealth,
     ) is False
@@ -162,7 +162,26 @@ def test_exit_marginal_rejects_invalid_economic_authority(bid, q, wealth, error)
         marginal_exit_condition(
             precheck=ExitPrecheckResult(False, None, False),
             bid=bid,
-            held_atom_id=AY,
+            held_payoff_by_atom_id={AY: 1.0, AN: 0.0},
             q_by_atom_id=q,
             wealth=wealth,
         )
+
+
+def test_exit_marginal_no_claim_uses_complement_payoff():
+    """NO_y is the claim on atom n; it must not be valued as YES_y."""
+
+    assert marginal_exit_condition(
+        precheck=ExitPrecheckResult(False, None, False),
+        bid=0.50,
+        held_payoff_by_atom_id={AY: 0.0, AN: 1.0},
+        q_by_atom_id={AY: 0.80, AN: 0.20},
+        wealth=_exit_wealth(yes=100.0, no=120.0),
+    ) is True
+    assert marginal_exit_condition(
+        precheck=ExitPrecheckResult(False, None, False),
+        bid=0.50,
+        held_payoff_by_atom_id={AY: 0.0, AN: 1.0},
+        q_by_atom_id={AY: 0.20, AN: 0.80},
+        wealth=_exit_wealth(yes=100.0, no=120.0),
+    ) is False
