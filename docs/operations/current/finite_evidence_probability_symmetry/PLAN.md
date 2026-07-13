@@ -103,6 +103,11 @@ authority surface.
   opportunity-book admission, receipt validation, and final sizing. These
   surfaces use the global target cost/shares/max-spend envelope rather than
   re-require legacy family-route optimizer fields after global selection.
+- At submit, let only the exact sealed global current-state winner bypass legacy
+  fixed price/profit/density/win-rate/ROI floors. Bind aggregate admission to
+  its `DecisionProofAccepted` audit and executor admission to the durable
+  LIVE/VERIFIED actionable certificate; a recomputable identity hash alone is
+  never authority.
 - Serialize the selected global objective from its actual expected cost,
   robust EV, and robust delta-log-wealth; the receipt must not mark the winner
   unadmitted or synthesize legacy route-optimizer metrics.
@@ -148,6 +153,9 @@ authority surface.
 - A Wellington-shaped stale `pending_exit` claim below the current venue minimum
   does not block unrelated entry families; the same stale claim in `active`
   phase, an incomplete sample, or any non-dust stale position still blocks.
+- Mirrored YES/NO submit antibodies prove the same sealed-global rule admits
+  both sides, while a legacy payload with recomputed current-state markers still
+  hits the legacy floor because it does not match durable decision authority.
 
 ## Work record
 
@@ -249,3 +257,27 @@ authority surface.
   economics, but it cannot rewrite its parent. The binder now preserves the
   existing pre-qkernel value and only synthesizes it for legacy proofs where the
   field is absent.
+- 2026-07-13: Helsinki Jul 14 25C NO became an actual 5-share FOK fill at
+  `$0.48` (`$2.40` spend), with decision-time `q_live=0.819330` and
+  `q_lcb=0.696391`. Command recovery moved the durable command from
+  `REVIEW_REQUIRED` to `FILLED` after canonical chain trade confirmation; the
+  position then entered normal active monitoring.
+- 2026-07-13: a later current global auction selected Jeddah YES (5 shares,
+  `$0.44` limit) ahead of every NO alternative, proving YES participation in the
+  same executable universe. Submit revalidation then rejected it only because
+  the legacy absolute expected-profit floor required `$1` while the sealed
+  global certificate remained positive in robust delta-log-wealth and robust
+  fee-aware EV. This was a downstream objective mismatch, not a probability or
+  side-selection failure.
+- 2026-07-13: the first floor-alignment diff was rejected by independent
+  `gpt-5.6-sol` review because a caller could add arbitrary current-state markers
+  to legacy economics and recompute the public hash. Submit bypass now requires
+  exact equality with the decision aggregate's qkernel audit and the durable
+  LIVE/VERIFIED actionable payload, plus the full global witness, terminal-payoff,
+  utility, and optimum grammar. Follow-up adversarial probes found and closed a
+  one-way current-to-legacy intent downgrade and a route-less global payload q
+  binding gap; global certificates no longer need legacy optimizer fields in
+  either aggregate or executor. Mirrored YES/NO, recomputed-marker, downgrade,
+  and route-less q-drift antibodies pass; affected modules pass 155/155; the
+  declared capital-optimality evaluator passes 258/258. The actual 82-field
+  Jeddah YES certificate validates against the final shared global grammar.

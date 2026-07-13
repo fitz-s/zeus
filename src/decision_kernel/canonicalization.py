@@ -5,6 +5,7 @@ from __future__ import annotations
 import dataclasses
 import hashlib
 import json
+import math
 from datetime import datetime, timezone
 from decimal import Decimal
 from enum import Enum
@@ -117,3 +118,204 @@ def qkernel_declares_current_state(economics: Mapping[str, Any]) -> bool:
         or str(economics.get("selection_guard_basis") or "").strip() == basis
         or bool(str(economics.get("current_state_identity_hash") or "").strip())
     )
+
+
+def qkernel_current_state_rejection_reason(economics: Any) -> str | None:
+    """Return the broken field, or ``None`` for one sealed current-state proof."""
+
+    if not isinstance(economics, Mapping):
+        return "payload_not_mapping"
+    basis = "CURRENT_POSTERIOR_BAND"
+    sample_hash = str(economics.get("sample_hash") or "").strip()
+    try:
+        n_draws = int(economics.get("selection_guard_n") or 0)
+    except (TypeError, ValueError):
+        return "selection_guard_n_invalid"
+    checks = (
+        (str(economics.get("source") or "").strip() == "qkernel_spine", "source"),
+        (bool(str(economics.get("decision_id") or "").strip()), "decision_id"),
+        (bool(str(economics.get("receipt_hash") or "").strip()), "receipt_hash"),
+        (bool(str(economics.get("q_version") or "").strip()), "q_version"),
+        (str(economics.get("q_lcb_guard_basis") or "").strip() == basis, "q_lcb_guard_basis"),
+        (
+            str(economics.get("selection_guard_basis") or "").strip() == basis,
+            "selection_guard_basis",
+        ),
+        (economics.get("q_lcb_guard_abstained") is False, "q_lcb_guard_abstained"),
+        (
+            economics.get("selection_guard_abstained") is False,
+            "selection_guard_abstained",
+        ),
+        (bool(sample_hash), "sample_hash"),
+        (
+            str(economics.get("q_lcb_guard_cell_key") or "").strip() == sample_hash,
+            "q_lcb_guard_cell_key",
+        ),
+        (
+            str(economics.get("selection_guard_cell_key") or "").strip() == sample_hash,
+            "selection_guard_cell_key",
+        ),
+        (n_draws >= 2, "selection_guard_n"),
+        (
+            str(economics.get("current_state_identity_hash") or "").strip()
+            == qkernel_current_state_identity_hash(economics),
+            "current_state_identity_hash",
+        ),
+    )
+    for passed, field in checks:
+        if not passed:
+            return field
+    return None
+
+
+def qkernel_global_current_state_rejection_reason(
+    economics: Any,
+    *,
+    direction: str | None = None,
+) -> str | None:
+    """Validate one sealed global winner independent of legacy route fields."""
+
+    current_reason = qkernel_current_state_rejection_reason(economics)
+    if current_reason is not None:
+        return f"current_state:{current_reason}"
+    assert isinstance(economics, Mapping)
+    if not str(economics.get("global_actuation_identity") or "").strip():
+        return "global_actuation_identity"
+    side = str(economics.get("side") or "").strip().upper()
+    direction_text = str(direction or "").strip().lower()
+    native_side = (
+        "YES"
+        if direction_text.endswith("_yes")
+        else "NO"
+        if direction_text.endswith("_no")
+        else None
+    )
+    if side not in {"YES", "NO"}:
+        return "side"
+    if native_side is not None and side != native_side:
+        return "side_direction_mismatch"
+    for field in (
+        "global_candidate_id",
+        "global_universe_witness_identity",
+        "global_wealth_witness_identity",
+        "global_selection_epoch_identity",
+        "global_selection_cut_at",
+        "global_selection_decision_at",
+        "global_jit_book_hash",
+        "global_jit_venue_book_hash",
+        "global_jit_book_snapshot_id",
+        "global_jit_execution_curve_identity",
+        "global_expected_value_semantics",
+        "global_terminal_payoff_semantics",
+    ):
+        if not str(economics.get(field) or "").strip():
+            return field
+    if economics.get("global_optimum_semantics") != "CUT_TIME_GLOBAL_OPTIMUM":
+        return "global_optimum_semantics"
+    numeric: dict[str, float] = {}
+    for field in (
+        "payoff_q_point",
+        "payoff_q_lcb",
+        "cost",
+        "edge_lcb",
+        "global_target_shares",
+        "global_expected_cost_usd",
+        "global_max_spend_usd",
+        "global_robust_delta_log_wealth",
+        "global_robust_ev_usd",
+        "global_cut_time_win_probability_lcb",
+        "global_cut_time_loss_probability_ucb",
+        "global_terminal_win_probability_lcb",
+        "global_terminal_loss_probability_ucb",
+        "global_terminal_loss_payoff_usd",
+        "global_terminal_win_payoff_usd",
+        "global_terminal_median_payoff_usd",
+        "global_terminal_wealth_after_loss_usd",
+        "global_terminal_wealth_after_win_usd",
+        "global_cut_time_expected_value_diagnostic_usd",
+        "global_expected_value_diagnostic_usd",
+    ):
+        try:
+            value = float(economics.get(field))
+        except (TypeError, ValueError):
+            return f"{field}_invalid"
+        if not math.isfinite(value):
+            return f"{field}_non_finite"
+        numeric[field] = value
+    point = numeric["payoff_q_point"]
+    lcb = numeric["payoff_q_lcb"]
+    cost = numeric["cost"]
+    edge = numeric["edge_lcb"]
+    shares = numeric["global_target_shares"]
+    expected_cost = numeric["global_expected_cost_usd"]
+    max_spend = numeric["global_max_spend_usd"]
+    robust_du = numeric["global_robust_delta_log_wealth"]
+    robust_ev = numeric["global_robust_ev_usd"]
+    cut_win = numeric["global_cut_time_win_probability_lcb"]
+    cut_loss = numeric["global_cut_time_loss_probability_ucb"]
+    terminal_win = numeric["global_terminal_win_probability_lcb"]
+    terminal_loss = numeric["global_terminal_loss_probability_ucb"]
+    loss_payoff = numeric["global_terminal_loss_payoff_usd"]
+    win_payoff = numeric["global_terminal_win_payoff_usd"]
+    median_payoff = numeric["global_terminal_median_payoff_usd"]
+    wealth_after_loss = numeric["global_terminal_wealth_after_loss_usd"]
+    wealth_after_win = numeric["global_terminal_wealth_after_win_usd"]
+    cut_ev = numeric["global_cut_time_expected_value_diagnostic_usd"]
+    expected_value = numeric["global_expected_value_diagnostic_usd"]
+    if not (0.0 <= lcb <= point <= 1.0):
+        return "probability_order"
+    if not (0.0 < cost < 1.0 and edge > 0.0):
+        return "execution_edge"
+    if not math.isclose(lcb, cost + edge, rel_tol=1e-9, abs_tol=1e-9):
+        return "edge_identity"
+    if not (
+        shares > 0.0
+        and expected_cost > 0.0
+        and max_spend + 1e-9 >= expected_cost
+        and robust_du > 0.0
+        and robust_ev > 0.0
+    ):
+        return "global_utility_envelope"
+    if not math.isclose(cost, expected_cost / shares, rel_tol=1e-9, abs_tol=1e-9):
+        return "global_cost_identity"
+    if not (
+        0.5 < terminal_win <= cut_win <= 1.0
+        and 0.0 <= cut_loss <= terminal_loss < 0.5
+        and math.isclose(cut_win + cut_loss, 1.0, rel_tol=0.0, abs_tol=1e-12)
+        and math.isclose(
+            terminal_win + terminal_loss,
+            1.0,
+            rel_tol=0.0,
+            abs_tol=1e-12,
+        )
+        and math.isclose(terminal_win, lcb, rel_tol=0.0, abs_tol=1e-12)
+    ):
+        return "global_terminal_probability_identity"
+    if not (
+        math.isclose(loss_payoff, -expected_cost, rel_tol=0.0, abs_tol=1e-12)
+        and math.isclose(
+            win_payoff,
+            shares - expected_cost,
+            rel_tol=0.0,
+            abs_tol=1e-12,
+        )
+        and math.isclose(median_payoff, win_payoff, rel_tol=0.0, abs_tol=1e-12)
+        and median_payoff > 0.0
+        and wealth_after_loss > 0.0
+        and wealth_after_win > 0.0
+        and math.isclose(cut_ev, robust_ev, rel_tol=0.0, abs_tol=1e-12)
+        and math.isclose(
+            expected_value,
+            terminal_win * shares - expected_cost,
+            rel_tol=0.0,
+            abs_tol=1e-12,
+        )
+    ):
+        return "global_terminal_payoff_identity"
+    if economics["global_expected_value_semantics"] != (
+        "DIAGNOSTIC_EXPECTATION_NOT_REALIZED_GAIN"
+    ):
+        return "global_expected_value_semantics"
+    if economics["global_terminal_payoff_semantics"] != "BINARY_0_1":
+        return "global_terminal_payoff_semantics"
+    return None

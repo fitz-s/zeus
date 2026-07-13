@@ -1,5 +1,5 @@
 # Created: 2026-07-01
-# Last reused/audited: 2026-07-11
+# Last reused/audited: 2026-07-13
 # Authority basis: current q-kernel final-entry economics and selected-side probability quality law.
 from __future__ import annotations
 
@@ -7,7 +7,11 @@ import pytest
 
 from src.contracts import Direction, ExecutionIntent
 from src.contracts.slippage_bps import SlippageBps
-from src.execution.executor import _entry_economics_component
+from src.decision_kernel.canonicalization import qkernel_current_state_identity_hash
+from src.execution.executor import (
+    _actionable_certificate_intent_mismatch_reason,
+    _entry_economics_component,
+)
 
 
 def _econ(**overrides) -> dict:
@@ -29,6 +33,59 @@ def _econ(**overrides) -> dict:
         "selection_guard_q_safe": 0.52,
     }
     payload.update(overrides)
+    return payload
+
+
+def _current_state_econ(**overrides) -> dict:
+    payload = _econ(
+        decision_id="decision-current-1",
+        receipt_hash="receipt-current-1",
+        q_version="q-current-1",
+        sample_hash="current-sample-1",
+        q_lcb_guard_basis="CURRENT_POSTERIOR_BAND",
+        q_lcb_guard_abstained=False,
+        q_lcb_guard_cell_key="current-sample-1",
+        selection_guard_basis="CURRENT_POSTERIOR_BAND",
+        selection_guard_abstained=False,
+        selection_guard_cell_key="current-sample-1",
+        selection_guard_n=64,
+        global_actuation_identity="global-current-1",
+        global_optimum_semantics="CUT_TIME_GLOBAL_OPTIMUM",
+        global_candidate_id="candidate-current-1",
+        global_universe_witness_identity="universe-current-1",
+        global_wealth_witness_identity="wealth-current-1",
+        global_selection_epoch_identity="epoch-current-1",
+        global_selection_cut_at="2026-07-13T02:00:00+00:00",
+        global_selection_decision_at="2026-07-13T02:00:01+00:00",
+        global_jit_book_hash="book-current-1",
+        global_jit_venue_book_hash="venue-book-current-1",
+        global_jit_book_snapshot_id="snapshot-current-1",
+        global_jit_execution_curve_identity="curve-current-1",
+        global_target_shares="1",
+        global_limit_price="0.44",
+        global_expected_fill_price_before_fee="0.44",
+        global_expected_cost_usd="0.45",
+        global_max_spend_usd="0.45",
+        global_robust_delta_log_wealth=0.001,
+        global_robust_ev_usd=0.15,
+        global_cut_time_win_probability_lcb=0.60,
+        global_cut_time_loss_probability_ucb=0.40,
+        global_terminal_win_probability_lcb=0.60,
+        global_terminal_loss_probability_ucb=0.40,
+        global_terminal_loss_payoff_usd="-0.45",
+        global_terminal_win_payoff_usd="0.55",
+        global_terminal_median_payoff_usd="0.55",
+        global_terminal_wealth_after_loss_usd="99.55",
+        global_terminal_wealth_after_win_usd="100.55",
+        global_cut_time_expected_value_diagnostic_usd=0.15,
+        global_expected_value_diagnostic_usd=0.15,
+        global_expected_value_semantics="DIAGNOSTIC_EXPECTATION_NOT_REALIZED_GAIN",
+        global_terminal_payoff_semantics="BINARY_0_1",
+        **overrides,
+    )
+    payload["current_state_identity_hash"] = qkernel_current_state_identity_hash(
+        payload
+    )
     return payload
 
 
@@ -828,6 +885,111 @@ def test_entry_economics_blocks_thin_margin_live_profile_order():
     assert verdict["reason"] == "expected_profit_below_floor"
     assert verdict["details"]["expected_profit_usd"] < 1.0
     assert verdict["details"]["submit_edge_density"] < 0.05
+
+
+@pytest.mark.parametrize(
+    ("direction", "side"),
+    ((Direction("buy_yes"), "YES"), (Direction("buy_no"), "NO")),
+)
+def test_entry_economics_current_state_winner_ignores_legacy_absolute_floors(
+    direction,
+    side,
+):
+    economics = _current_state_econ(
+        side=side,
+        payoff_q_point=0.80,
+        payoff_q_lcb=0.60,
+        cost=0.45,
+        edge_lcb=0.15,
+        optimal_stake_usd=0.01,
+        selection_guard_q_safe=0.60,
+    )
+    for legacy_field in (
+        "route_id",
+        "route_type",
+        "delta_u_at_min",
+        "optimal_stake_usd",
+        "optimal_delta_u",
+    ):
+        economics.pop(legacy_field, None)
+    economics["current_state_identity_hash"] = qkernel_current_state_identity_hash(
+        economics
+    )
+    verdict = _entry_economics_component(
+        _intent(
+            direction=direction,
+            limit_price=0.44,
+            q_live=0.80,
+            q_lcb_5pct=0.60,
+            expected_edge=0.15,
+            min_entry_price=0.95,
+            min_expected_profit_usd=1000.0,
+            min_submit_edge_density=1000.0,
+            qkernel_execution_economics=economics,
+        ),
+        shares=1.0,
+        actionable_payload={"qkernel_execution_economics": economics},
+    )
+
+    assert verdict["allowed"] is True
+
+
+def test_recomputed_current_state_marker_cannot_bypass_durable_legacy_certificate():
+    durable = _econ(
+        payoff_q_point=0.80,
+        payoff_q_lcb=0.60,
+        cost=0.45,
+        edge_lcb=0.15,
+        selection_guard_q_safe=0.60,
+    )
+    forged = _current_state_econ(
+        payoff_q_point=0.80,
+        payoff_q_lcb=0.60,
+        cost=0.45,
+        edge_lcb=0.15,
+        selection_guard_q_safe=0.60,
+    )
+    intent = _intent(
+        limit_price=0.44,
+        q_live=0.80,
+        q_lcb_5pct=0.60,
+        expected_edge=0.15,
+        min_entry_price=0.95,
+        min_expected_profit_usd=1000.0,
+        min_submit_edge_density=1000.0,
+        qkernel_execution_economics=forged,
+    )
+    actionable = {
+        "token_id": "yes-token",
+        "direction": "buy_yes",
+        "q_live": 0.80,
+        "q_lcb_5pct": 0.60,
+        "qkernel_execution_economics": durable,
+    }
+
+    assert _actionable_certificate_intent_mismatch_reason(actionable, intent) == (
+        "actionable_certificate_qkernel_current_state_missing"
+    )
+    verdict = _entry_economics_component(
+        intent,
+        shares=1.0,
+        actionable_payload=actionable,
+    )
+    assert verdict["allowed"] is False
+    assert verdict["reason"] == "limit_price_below_strategy_entry_floor"
+
+    durable_current = {**actionable, "qkernel_execution_economics": forged}
+    legacy_intent = _intent(
+        limit_price=0.44,
+        q_live=0.80,
+        q_lcb_5pct=0.60,
+        expected_edge=0.15,
+        qkernel_execution_economics=durable,
+    )
+    assert _actionable_certificate_intent_mismatch_reason(
+        durable_current,
+        legacy_intent,
+    ) == "actionable_certificate_qkernel_current_state_downgrade"
 
 
 def test_entry_economics_blocks_non_qkernel_or_self_reported_economics():

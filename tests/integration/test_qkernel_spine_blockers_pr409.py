@@ -1,4 +1,4 @@
-# Lifecycle: created=2026-06-15; last_reviewed=2026-07-11; last_reused=2026-07-11
+# Lifecycle: created=2026-06-15; last_reviewed=2026-07-13; last_reused=2026-07-13
 # Purpose: Prove the live q-kernel bridge preserves probability and execution invariants.
 # Reuse: Re-audit overlay probability authority and live blockers before q-kernel changes.
 # Authority basis: docs/rebuild/consult_review_pr409.md §5/§7 + the round-2
@@ -1481,9 +1481,10 @@ def test_global_current_winner_survives_book_and_sizes_from_its_sealed_curve():
         "payoff_q_point": 0.70,
         "payoff_q_lcb": 0.60,
         "cost": 0.04,
-        "edge_lcb": 0.56,
-        "global_actuation_identity": "global-actuation-current",
-        "global_candidate_id": "global-candidate-current",
+            "edge_lcb": 0.56,
+            "global_actuation_identity": "global-actuation-current",
+            "global_optimum_semantics": "CUT_TIME_GLOBAL_OPTIMUM",
+            "global_candidate_id": "global-candidate-current",
         "global_universe_witness_identity": "global-universe-current",
         "global_wealth_witness_identity": "global-wealth-current",
         "global_selection_epoch_identity": "global-epoch-current",

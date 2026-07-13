@@ -50,6 +50,11 @@ from src.decision.family_decision_engine import (
     entry_price_floor_decision,
     roi_frontier_useful_values,
 )
+from src.decision_kernel.canonicalization import (
+    canonical_json,
+    qkernel_declares_current_state,
+    qkernel_global_current_state_rejection_reason,
+)
 from src.state.db import (
     get_trade_connection_with_world_required,
 )
@@ -879,6 +884,22 @@ def _entry_economics_component(
         if value is None
     ]
     economics = getattr(intent, "qkernel_execution_economics", None)
+    durable_economics = (
+        actionable_payload.get("qkernel_execution_economics")
+        if isinstance(actionable_payload, Mapping)
+        else None
+    )
+    current_state_solve = (
+        str(getattr(intent, "selection_authority_applied", "") or "").strip()
+        == "qkernel_spine"
+        and qkernel_global_current_state_rejection_reason(
+            economics,
+            direction=str(getattr(intent, "direction", "") or ""),
+        )
+        is None
+        and isinstance(durable_economics, Mapping)
+        and canonical_json(economics) == canonical_json(durable_economics)
+    )
     day0_authority_errors: tuple[str, ...] | None = None
     is_day0_actionable = False
     if isinstance(actionable_payload, Mapping) and str(
@@ -958,14 +979,20 @@ def _entry_economics_component(
     )
     if min_entry_price < 0.0:
         reason = "min_entry_price_negative"
-    elif (
+    elif not current_state_solve and (
         min_entry_price + 1e-12 < live_min_entry_price
         and not qkernel_low_price_floor_authorized
     ):
         reason = "min_entry_price_below_live_floor"
-    elif min_expected_profit + 1e-9 < _LIVE_ENTRY_MIN_EXPECTED_PROFIT_USD:
+    elif (
+        not current_state_solve
+        and min_expected_profit + 1e-9 < _LIVE_ENTRY_MIN_EXPECTED_PROFIT_USD
+    ):
         reason = "min_expected_profit_below_live_floor"
-    elif min_edge_density + 1e-9 < _LIVE_ENTRY_MIN_SUBMIT_EDGE_DENSITY:
+    elif (
+        not current_state_solve
+        and min_edge_density + 1e-9 < _LIVE_ENTRY_MIN_SUBMIT_EDGE_DENSITY
+    ):
         reason = "min_submit_edge_density_below_live_floor"
     elif expected_edge <= 0.0:
         reason = "expected_edge_non_positive"
@@ -973,11 +1000,17 @@ def _entry_economics_component(
         reason = "submit_q_lcb_minus_limit_non_positive"
     elif expected_edge > submit_edge + 1e-6:
         reason = "expected_edge_exceeds_submit_edge"
-    elif limit_price + 1e-12 < effective_min_entry_price:
+    elif not current_state_solve and limit_price + 1e-12 < effective_min_entry_price:
         reason = "limit_price_below_strategy_entry_floor"
-    elif expected_profit + 1e-9 < effective_min_expected_profit:
+    elif (
+        not current_state_solve
+        and expected_profit + 1e-9 < effective_min_expected_profit
+    ):
         reason = "expected_profit_below_floor"
-    elif edge_density + 1e-9 < effective_min_edge_density:
+    elif (
+        not current_state_solve
+        and edge_density + 1e-9 < effective_min_edge_density
+    ):
         reason = "submit_edge_density_below_floor"
     else:
         reason = ""
@@ -1123,11 +1156,20 @@ def _entry_economics_component(
         reason = "qkernel_edge_lcb_exceeds_submit_edge"
     elif expected_edge > econ_edge_lcb + 1e-6:
         reason = "expected_edge_exceeds_qkernel_edge_lcb"
-    elif econ_delta_u_at_min is None or econ_delta_u_at_min <= 0.0:
+    elif (
+        not current_state_solve
+        and (econ_delta_u_at_min is None or econ_delta_u_at_min <= 0.0)
+    ):
         reason = "qkernel_delta_u_at_min_non_positive"
-    elif econ_optimal_stake_usd is None or econ_optimal_stake_usd <= 0.0:
+    elif (
+        not current_state_solve
+        and (econ_optimal_stake_usd is None or econ_optimal_stake_usd <= 0.0)
+    ):
         reason = "qkernel_optimal_stake_non_positive"
-    elif econ_optimal_delta_u is None or econ_optimal_delta_u <= 0.0:
+    elif (
+        not current_state_solve
+        and (econ_optimal_delta_u is None or econ_optimal_delta_u <= 0.0)
+    ):
         reason = "qkernel_optimal_delta_u_non_positive"
     elif econ_false_edge_rate is None or not (0.0 < econ_false_edge_rate <= max_false_edge_rate):
         reason = "qkernel_false_edge_rate_blocks"
@@ -1143,9 +1185,9 @@ def _entry_economics_component(
         reason = "qkernel_direction_law_not_ok"
     elif economics.get("coherence_allows") is not True:
         reason = "qkernel_coherence_blocks"
-    elif live_probability_quality_reason is not None:
+    elif not current_state_solve and live_probability_quality_reason is not None:
         reason = live_probability_quality_reason
-    elif not roi_frontier_useful_values(
+    elif not current_state_solve and not roi_frontier_useful_values(
         side=econ_side,
         cost=econ_cost,
         payoff_q_lcb=payoff_q_lcb,
@@ -1445,6 +1487,15 @@ def _actionable_certificate_intent_mismatch_reason(
         ):
             if payload_economics.get(key) != intent_economics.get(key):
                 return f"actionable_certificate_qkernel_{key}_mismatch"
+        intent_current = qkernel_declares_current_state(intent_economics)
+        payload_current = qkernel_declares_current_state(payload_economics)
+        if intent_current or payload_current:
+            if intent_current and not payload_current:
+                return "actionable_certificate_qkernel_current_state_missing"
+            if payload_current and not intent_current:
+                return "actionable_certificate_qkernel_current_state_downgrade"
+            if canonical_json(payload_economics) != canonical_json(intent_economics):
+                return "actionable_certificate_qkernel_current_state_mismatch"
         for key in (
             "cost",
             "edge_lcb",

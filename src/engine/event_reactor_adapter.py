@@ -184,6 +184,7 @@ from src.decision_kernel import claims
 from src.decision_kernel.canonicalization import (
     qkernel_declares_current_state,
     qkernel_current_state_identity_hash,
+    qkernel_global_current_state_rejection_reason,
     stable_hash,
 )
 from src.decision_kernel.certificate import DecisionCertificate, ParentEdge, build_certificate
@@ -2870,146 +2871,12 @@ def _global_current_state_execution_economics_rejection_reason(
     *,
     direction: str | None = None,
 ) -> str | None:
-    """Validate the sealed global winner without requiring legacy route fields."""
+    """Validate the sealed global winner without legacy route fields."""
 
-    if not isinstance(cert, Mapping):
-        return "payload_not_mapping"
-    if not str(cert.get("global_actuation_identity") or "").strip():
-        return "global_actuation_identity"
-    if str(cert.get("source") or "").strip() != "qkernel_spine":
-        return "source"
-    if not _qkernel_current_state_solve_economics(cert):
-        return "current_state_identity"
-    side = str(cert.get("side") or "").strip().upper()
-    native_side = _native_curve_side_for_direction(str(direction or ""))
-    if side not in {"YES", "NO"}:
-        return "side"
-    if native_side is not None and side != native_side:
-        return "side_direction_mismatch"
-    for field in (
-        "global_candidate_id",
-        "global_universe_witness_identity",
-        "global_wealth_witness_identity",
-        "global_selection_epoch_identity",
-        "global_selection_cut_at",
-        "global_selection_decision_at",
-        "global_jit_book_hash",
-        "global_jit_venue_book_hash",
-        "global_jit_book_snapshot_id",
-        "global_jit_execution_curve_identity",
-        "global_expected_value_semantics",
-        "global_terminal_payoff_semantics",
-    ):
-        if not str(cert.get(field) or "").strip():
-            return field
-    numeric: dict[str, float] = {}
-    for field in (
-        "payoff_q_point",
-        "payoff_q_lcb",
-        "cost",
-        "edge_lcb",
-        "global_target_shares",
-        "global_expected_cost_usd",
-        "global_max_spend_usd",
-        "global_robust_delta_log_wealth",
-        "global_robust_ev_usd",
-        "global_cut_time_win_probability_lcb",
-        "global_cut_time_loss_probability_ucb",
-        "global_terminal_win_probability_lcb",
-        "global_terminal_loss_probability_ucb",
-        "global_terminal_loss_payoff_usd",
-        "global_terminal_win_payoff_usd",
-        "global_terminal_median_payoff_usd",
-        "global_terminal_wealth_after_loss_usd",
-        "global_terminal_wealth_after_win_usd",
-        "global_cut_time_expected_value_diagnostic_usd",
-        "global_expected_value_diagnostic_usd",
-    ):
-        try:
-            value = float(cert.get(field))
-        except (TypeError, ValueError):
-            return f"{field}_invalid"
-        if not math.isfinite(value):
-            return f"{field}_non_finite"
-        numeric[field] = value
-    point = numeric["payoff_q_point"]
-    lcb = numeric["payoff_q_lcb"]
-    cost = numeric["cost"]
-    edge = numeric["edge_lcb"]
-    shares = numeric["global_target_shares"]
-    expected_cost = numeric["global_expected_cost_usd"]
-    max_spend = numeric["global_max_spend_usd"]
-    robust_du = numeric["global_robust_delta_log_wealth"]
-    robust_ev = numeric["global_robust_ev_usd"]
-    cut_win = numeric["global_cut_time_win_probability_lcb"]
-    cut_loss = numeric["global_cut_time_loss_probability_ucb"]
-    terminal_win = numeric["global_terminal_win_probability_lcb"]
-    terminal_loss = numeric["global_terminal_loss_probability_ucb"]
-    loss_payoff = numeric["global_terminal_loss_payoff_usd"]
-    win_payoff = numeric["global_terminal_win_payoff_usd"]
-    median_payoff = numeric["global_terminal_median_payoff_usd"]
-    wealth_after_loss = numeric["global_terminal_wealth_after_loss_usd"]
-    wealth_after_win = numeric["global_terminal_wealth_after_win_usd"]
-    cut_ev_diagnostic = numeric["global_cut_time_expected_value_diagnostic_usd"]
-    ev_diagnostic = numeric["global_expected_value_diagnostic_usd"]
-    if not (0.0 <= lcb <= point <= 1.0):
-        return "probability_order"
-    if not (0.0 < cost < 1.0 and edge > 0.0):
-        return "execution_edge"
-    if not math.isclose(lcb, cost + edge, rel_tol=1e-9, abs_tol=1e-9):
-        return "edge_identity"
-    if not (
-        shares > 0.0
-        and expected_cost > 0.0
-        and max_spend + 1e-9 >= expected_cost
-        and robust_du > 0.0
-        and robust_ev > 0.0
-    ):
-        return "global_utility_envelope"
-    if not math.isclose(
-        cost,
-        expected_cost / shares,
-        rel_tol=1e-9,
-        abs_tol=1e-9,
-    ):
-        return "global_cost_identity"
-    if not (
-        0.5 < terminal_win <= cut_win <= 1.0
-        and 0.0 <= cut_loss <= terminal_loss < 0.5
-        and math.isclose(cut_win + cut_loss, 1.0, rel_tol=0.0, abs_tol=1e-12)
-        and math.isclose(
-            terminal_win + terminal_loss, 1.0, rel_tol=0.0, abs_tol=1e-12
-        )
-        and math.isclose(terminal_win, lcb, rel_tol=0.0, abs_tol=1e-12)
-    ):
-        return "global_terminal_probability_identity"
-    if not (
-        math.isclose(loss_payoff, -expected_cost, rel_tol=0.0, abs_tol=1e-12)
-        and math.isclose(
-            win_payoff, shares - expected_cost, rel_tol=0.0, abs_tol=1e-12
-        )
-        and math.isclose(median_payoff, win_payoff, rel_tol=0.0, abs_tol=1e-12)
-        and median_payoff > 0.0
-        and wealth_after_loss > 0.0
-        and wealth_after_win > 0.0
-        and math.isclose(
-            cut_ev_diagnostic, robust_ev, rel_tol=0.0, abs_tol=1e-12
-        )
-        and math.isclose(
-            ev_diagnostic,
-            terminal_win * shares - expected_cost,
-            rel_tol=0.0,
-            abs_tol=1e-12,
-        )
-    ):
-        return "global_terminal_payoff_identity"
-    if cert["global_expected_value_semantics"] != (
-        "DIAGNOSTIC_EXPECTATION_NOT_REALIZED_GAIN"
-    ):
-        return "global_expected_value_semantics"
-    if cert["global_terminal_payoff_semantics"] != "BINARY_0_1":
-        return "global_terminal_payoff_semantics"
-    return None
+    return qkernel_global_current_state_rejection_reason(
+        cert,
+        direction=direction,
+    )
 
 
 _GLOBAL_CURRENT_STATE_EXECUTION_MARKERS = frozenset(

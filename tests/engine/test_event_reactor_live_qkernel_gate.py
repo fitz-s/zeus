@@ -1,5 +1,5 @@
 # Created: 2026-06-30
-# Last reused/audited: 2026-07-11
+# Last reused/audited: 2026-07-13
 # Authority basis: live-money qkernel submit authority and canonical selection-fact persistence.
 
 from __future__ import annotations
@@ -136,6 +136,7 @@ def _global_current_qkernel_cert(*, side: str = "YES") -> dict:
         cost=0.04,
         edge_lcb=0.56,
         global_actuation_identity="global-actuation-1",
+        global_optimum_semantics="CUT_TIME_GLOBAL_OPTIMUM",
         global_candidate_id="global-candidate-1",
         global_universe_witness_identity="global-universe-1",
         global_wealth_witness_identity="global-wealth-1",

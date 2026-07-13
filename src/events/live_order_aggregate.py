@@ -13,7 +13,11 @@ from src.decision.family_decision_engine import (
     native_curve_side_for_direction,
     roi_frontier_useful_values,
 )
-from src.decision_kernel.canonicalization import canonical_json, stable_hash
+from src.decision_kernel.canonicalization import (
+    canonical_json,
+    qkernel_global_current_state_rejection_reason,
+    stable_hash,
+)
 from src.events.day0_authority import (
     Day0AuthorityError,
     assert_live_day0_probability_authority,
@@ -557,7 +561,10 @@ class LiveOrderAggregateLedger:
         occurred_at: datetime,
     ) -> None:
         if event_type == "PreSubmitRevalidated":
-            _validate_pre_submit_revalidation_payload(payload)
+            _validate_pre_submit_revalidation_payload(
+                payload,
+                decision_economics=self._decision_qkernel_economics(aggregate_id),
+            )
             return
         if event_type == "ExecutionCommandCreated":
             if latest is None or latest["event_type"] not in {"PreSubmitRevalidated", "LiveCapReserved"}:
@@ -570,7 +577,10 @@ class LiveOrderAggregateLedger:
                 if revalidation_row is None:
                     raise LiveOrderAggregateError("ExecutionCommandCreated requires preceding PreSubmitRevalidated event")
             revalidation = _payload(revalidation_row)
-            _validate_pre_submit_revalidation_payload(revalidation)
+            _validate_pre_submit_revalidation_payload(
+                revalidation,
+                decision_economics=self._decision_qkernel_economics(aggregate_id),
+            )
             if payload.get("final_intent_id") != revalidation.get("final_intent_id"):
                 raise LiveOrderAggregateError("ExecutionCommandCreated final_intent_id must match pre-submit revalidation")
             if payload.get("event_id") != revalidation.get("event_id"):
@@ -588,6 +598,7 @@ class LiveOrderAggregateLedger:
             if payload.get("live_cap_reserved_event_hash") != live_cap_row["event_hash"]:
                 raise LiveOrderAggregateError("ExecutionCommandCreated live_cap_reserved_event_hash must match LiveCapReserved event")
             return
+
         if event_type == "VenueSubmitAttempted":
             command_row = self._require_latest_row_of_type(aggregate_id, "ExecutionCommandCreated", event_type)
             self._require_command_binding(event_type, payload, command_row)
@@ -689,6 +700,19 @@ class LiveOrderAggregateLedger:
             if self._latest_row_of_type(aggregate_id, "UserTradeObserved") is not None:
                 raise LiveOrderAggregateError("OrderLifecycleProjected cannot terminal-no-fill after UserTradeObserved")
             return
+
+    def _decision_qkernel_economics(
+        self,
+        aggregate_id: str,
+    ) -> Mapping[str, Any] | None:
+        row = self._latest_row_of_type(aggregate_id, "DecisionProofAccepted")
+        if row is None or str(row["source_authority"] or "") != "decision_kernel":
+            return None
+        audit = _payload(row).get("decision_audit")
+        if not isinstance(audit, Mapping):
+            return None
+        economics = audit.get("qkernel_execution_economics")
+        return economics if isinstance(economics, Mapping) else None
 
     def _latest_row_of_type(self, aggregate_id: str, event_type: str) -> sqlite3.Row | None:
         return self.conn.execute(
@@ -978,7 +1002,11 @@ def _optional_posterior_id(value: Any) -> int | None:
         return None
 
 
-def _validate_pre_submit_revalidation_payload(payload: dict[str, Any]) -> None:
+def _validate_pre_submit_revalidation_payload(
+    payload: dict[str, Any],
+    *,
+    decision_economics: Mapping[str, Any] | None = None,
+) -> None:
     missing = [field for field in PRE_SUBMIT_REQUIRED_FIELDS if field not in payload]
     if missing:
         raise LiveOrderAggregateError("PreSubmitRevalidated missing required fields: " + ",".join(missing))
@@ -1040,6 +1068,17 @@ def _validate_pre_submit_revalidation_payload(payload: dict[str, Any]) -> None:
         payload.get("min_submit_edge_density"), "min_submit_edge_density"
     )
     economics = payload.get("qkernel_execution_economics")
+    current_state_solve = (
+        str(payload.get("selection_authority_applied") or "").strip()
+        == "qkernel_spine"
+        and qkernel_global_current_state_rejection_reason(
+            economics,
+            direction=str(payload.get("direction") or ""),
+        )
+        is None
+        and isinstance(decision_economics, Mapping)
+        and canonical_json(economics) == canonical_json(decision_economics)
+    )
     floor_decision = entry_price_floor_decision(
         strategy_key=payload.get("strategy_key"),
         direction=payload.get("direction"),
@@ -1052,12 +1091,12 @@ def _validate_pre_submit_revalidation_payload(payload: dict[str, Any]) -> None:
     )
     live_min_entry_price = floor_decision.live_min_entry_price
     effective_min_entry_price = floor_decision.effective_min_entry_price
-    if (
+    if not current_state_solve and (
         min_entry_price + 1e-12 < live_min_entry_price
         and not floor_decision.qkernel_low_price_floor_authorized
     ):
         raise LiveOrderAggregateError("PreSubmitRevalidated min_entry_price below live floor")
-    if limit_price + 1e-12 < effective_min_entry_price:
+    if not current_state_solve and limit_price + 1e-12 < effective_min_entry_price:
         raise LiveOrderAggregateError("PreSubmitRevalidated entry price below strategy floor")
     if not str(payload.get("expected_edge_source_certificate_hash") or "").strip():
         raise LiveOrderAggregateError("PreSubmitRevalidated requires expected_edge_source_certificate_hash")
@@ -1079,12 +1118,23 @@ def _validate_pre_submit_revalidation_payload(payload: dict[str, Any]) -> None:
             "PreSubmitRevalidated expected_edge exceeds conservative submit edge"
         )
     submit_expected_profit_usd = submit_edge * size
-    if submit_expected_profit_usd + 1e-9 < min_expected_profit_usd:
+    if (
+        not current_state_solve
+        and submit_expected_profit_usd + 1e-9 < min_expected_profit_usd
+    ):
         raise LiveOrderAggregateError("PreSubmitRevalidated expected profit below strategy floor")
     submit_edge_density = submit_edge / submit_cost_bound
-    if submit_edge_density + 1e-9 < min_submit_edge_density:
+    if (
+        not current_state_solve
+        and submit_edge_density + 1e-9 < min_submit_edge_density
+    ):
         raise LiveOrderAggregateError("PreSubmitRevalidated submit edge density below strategy floor")
-    _validate_pre_submit_probability_authority(payload, q_live=q_live, q_lcb=q_lcb)
+    _validate_pre_submit_probability_authority(
+        payload,
+        q_live=q_live,
+        q_lcb=q_lcb,
+        current_state_solve=current_state_solve,
+    )
     # GATE#85 fix (2026-06-01): taker orders (post_only is False, FOK/FAK) are exempt
     # from the post_only=True and GTC/GTD invariants — those are maker-only constraints.
     # Explicit post_only=False signals taker intent; missing/None → fail-closed as maker.
@@ -1117,13 +1167,24 @@ def _validate_pre_submit_probability_authority(
     *,
     q_live: float,
     q_lcb: float,
+    current_state_solve: bool,
 ) -> None:
     event_type = str(payload.get("event_type") or "").strip()
     if event_type == _DAY0_EVENT_TYPE:
         _validate_day0_submit_observation_authority(payload, q_lcb=q_lcb)
-        _validate_qkernel_submit_probability(payload, q_live=q_live, q_lcb=q_lcb)
+        _validate_qkernel_submit_probability(
+            payload,
+            q_live=q_live,
+            q_lcb=q_lcb,
+            current_state_solve=current_state_solve,
+        )
         return
-    _validate_qkernel_submit_probability(payload, q_live=q_live, q_lcb=q_lcb)
+    _validate_qkernel_submit_probability(
+        payload,
+        q_live=q_live,
+        q_lcb=q_lcb,
+        current_state_solve=current_state_solve,
+    )
 
 
 def _validate_day0_submit_observation_authority(payload: dict[str, Any], *, q_lcb: float) -> None:
@@ -1149,7 +1210,13 @@ def _validate_day0_submit_observation_authority(payload: dict[str, Any], *, q_lc
         ) from None
 
 
-def _validate_qkernel_submit_probability(payload: dict[str, Any], *, q_live: float, q_lcb: float) -> None:
+def _validate_qkernel_submit_probability(
+    payload: dict[str, Any],
+    *,
+    q_live: float,
+    q_lcb: float,
+    current_state_solve: bool,
+) -> None:
     economics = payload.get("qkernel_execution_economics")
     if economics in (None, ""):
         raise LiveOrderAggregateError("PreSubmitRevalidated requires qkernel_execution_economics")
@@ -1161,7 +1228,11 @@ def _validate_qkernel_submit_probability(payload: dict[str, Any], *, q_live: flo
         raise LiveOrderAggregateError("PreSubmitRevalidated qkernel source must be qkernel_spine")
     route_id = str(economics.get("route_id") or "").upper()
     route_type = str(economics.get("route_type") or "").lower()
-    if route_type != "direct" and not route_id.startswith("DIRECT_"):
+    if (
+        not current_state_solve
+        and route_type != "direct"
+        and not route_id.startswith("DIRECT_")
+    ):
         return
     if economics.get("direction_law_ok") is not True:
         raise LiveOrderAggregateError("PreSubmitRevalidated qkernel direction_law_ok must be true")
@@ -1206,19 +1277,6 @@ def _validate_qkernel_submit_probability(payload: dict[str, Any], *, q_live: flo
         raise LiveOrderAggregateError("PreSubmitRevalidated qkernel payoff_q_lcb mismatches submit q_lcb_5pct")
     cost = _positive_number(economics.get("cost"), "qkernel_execution_economics.cost")
     edge_lcb = _positive_number(economics.get("edge_lcb"), "qkernel_execution_economics.edge_lcb")
-    delta_u_at_min = _positive_number(
-        economics.get("delta_u_at_min"),
-        "qkernel_execution_economics.delta_u_at_min",
-    )
-    optimal_stake_usd = _positive_number(
-        economics.get("optimal_stake_usd"),
-        "qkernel_execution_economics.optimal_stake_usd",
-    )
-    optimal_delta_u = _positive_number(
-        economics.get("optimal_delta_u"),
-        "qkernel_execution_economics.optimal_delta_u",
-    )
-    _ = optimal_delta_u
     false_edge_rate = _positive_number(
         economics.get("false_edge_rate"),
         "qkernel_execution_economics.false_edge_rate",
@@ -1253,6 +1311,20 @@ def _validate_qkernel_submit_probability(payload: dict[str, Any], *, q_live: flo
     expected_edge = _positive_number(payload.get("expected_edge"), "expected_edge")
     if expected_edge > edge_lcb + 1e-6:
         raise LiveOrderAggregateError("PreSubmitRevalidated expected_edge exceeds qkernel edge_lcb")
+    if current_state_solve:
+        return
+    delta_u_at_min = _positive_number(
+        economics.get("delta_u_at_min"),
+        "qkernel_execution_economics.delta_u_at_min",
+    )
+    optimal_stake_usd = _positive_number(
+        economics.get("optimal_stake_usd"),
+        "qkernel_execution_economics.optimal_stake_usd",
+    )
+    _positive_number(
+        economics.get("optimal_delta_u"),
+        "qkernel_execution_economics.optimal_delta_u",
+    )
     if not roi_frontier_useful_values(
         side=qkernel_side,
         cost=cost,
