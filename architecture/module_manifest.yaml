@@ -403,23 +403,35 @@ modules:
     scoped_agents: src/reduce/AGENTS.md
     module_book: null
     priority: p1_first_wave
-    # maturity: provisional — LX-2R-a (docs/rebuild/local_ledger_excision_2026-07-12.md
-    # packet LX-2R-a). Synthetic-fixture-only per both wave-1 dual reviews
+    # maturity: provisional — LX-2R-a+b (docs/rebuild/local_ledger_excision_2026-07-12.md
+    # packet). Synthetic-fixture-only per both wave-1 dual reviews
     # (docs/rebuild/consult_answers/local_ledger_excision_wave1_review_2026-07-13.txt
     # + local_ledger_excision_wave1_local_verifier_2026-07-13.md): reducer
     # implementation may proceed in parallel with LX-1R source-spine repair,
     # but no production read-model backfill, no cent-equivalence claim, and
-    # no live generation publication until the LX-1R gate closes. Inert by
-    # design: nothing outside tests imports src.reduce yet.
+    # no live generation publication until the LX-1R gate closes. LX-2R-b
+    # (condition_resolver.py + materialize.py) added the whole-corpus
+    # materializer and proved it read-only against a scoped export of the
+    # live trade DB (reproduces the chain-truth scoreboard oracle exactly:
+    # aggregate -$186.31, held-to-settlement -$201.61, 63 positions
+    # recovered from fabricated-zero, 954/970 materialize, 16/970 refuse --
+    # all OversoldPositionError, all missing-ENTRY-fill-coverage, an LX-1R
+    # backfill-completeness gap, not a bug here). Still inert by design:
+    # nothing outside tests imports src.reduce yet -- this proof ran against
+    # a disposable scratch copy, never against the live DB, and stamped a
+    # validation-only fill_sync_watermarks row on that copy alone.
     maturity: provisional
     zone: source
     authority_role: position_economics_reducer
     high_risk_files:
       - src/reduce/position_economics.py
+      - src/reduce/materialize.py
     public_entry_files:
       - src/reduce/position_economics.py
       - src/reduce/generation.py
       - src/reduce/schema/generation_schema.py
+      - src/reduce/condition_resolver.py
+      - src/reduce/materialize.py
     law_dependencies:
       - docs/rebuild/local_ledger_excision_2026-07-12.md
       - docs/rebuild/consult_answers/local_ledger_excision_wave1_review_2026-07-13.txt
@@ -429,6 +441,8 @@ modules:
     required_tests:
       - tests/reduce/test_position_economics.py
       - tests/reduce/test_generation.py
+      - tests/reduce/test_condition_resolver.py
+      - tests/reduce/test_materialize.py
     graph_appendix_status: LOCAL_GRAPH_QUERY_REQUIRED
     archive_extraction_status: not_started
   execution:

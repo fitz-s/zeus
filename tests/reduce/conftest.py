@@ -200,3 +200,39 @@ def insert_payout_observation(
         observed_at=observed_at,
     )
     conn.commit()
+
+
+def insert_position_current(
+    conn: sqlite3.Connection,
+    *,
+    position_id: str,
+    condition_id: str | None = None,
+    direction: str | None = "buy_yes",
+    phase: str = "active",
+    strategy_key: str = "edli",
+    temperature_metric: str = "high",
+    updated_at: str = NOW,
+    **overrides,
+) -> None:
+    """Minimal position_current row -- only the 5 NOT NULL columns
+    (position_id/phase/strategy_key/updated_at/temperature_metric) get
+    defaults; every other column (including the fabricated economics
+    columns this packet's reducer never reads) is NULL unless overridden.
+    """
+    defaults = dict(
+        phase=phase,
+        strategy_key=strategy_key,
+        temperature_metric=temperature_metric,
+        updated_at=updated_at,
+        condition_id=condition_id,
+        direction=direction,
+    )
+    defaults.update(overrides)
+    columns = ["position_id", *defaults.keys()]
+    values = [position_id, *defaults.values()]
+    placeholders = ", ".join("?" for _ in columns)
+    conn.execute(
+        f"INSERT INTO position_current ({', '.join(columns)}) VALUES ({placeholders})",
+        values,
+    )
+    conn.commit()
