@@ -1,5 +1,5 @@
 # Created: 2026-05-20
-# Last reused or audited: 2026-07-11
+# Last reused or audited: 2026-07-13
 # Authority basis: PHASE_2_ULTRAPLAN.md §8.2 + §8.3 — monitor_refresh nowcast wiring; live release proof P2-3 nowcast failure telemetry
 # Lifecycle: created=2026-05-20; last_reviewed=2026-05-21; last_reused=2026-07-11
 # Purpose: T5 GREEN antibody — _maybe_write_day0_nowcast gate conditions + write_nowcast_run call.
@@ -42,6 +42,23 @@ def _replacement_belief(*, fresh: bool = True) -> ReplacementBelief:
         bin_key="test-bin",
         direction="buy_no",
     )
+
+
+def test_probability_refresh_preserves_only_pending_robust_exit_confirmation() -> None:
+    """Fresh belief replacement must not make confirmation two unreachable."""
+
+    pending = "day0_robust_sell_value_awaits_confirmation"
+    position = SimpleNamespace(
+        applied_validations=["stale_probability_evidence", pending]
+    )
+    refreshed = SimpleNamespace(applied_validations=["current_probability_evidence"])
+
+    monitor_refresh_module._replace_probability_validations_preserving_exit_confirmation(
+        position,
+        refreshed,
+    )
+
+    assert position.applied_validations == ["current_probability_evidence", pending]
 
 
 def test_day0_start_grace_is_bounded_to_target_local_day() -> None:
