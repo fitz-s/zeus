@@ -8432,13 +8432,12 @@ def _build_event_bound_no_submit_receipt_core(
                     free_cash_usd=free_cash_usd,
                 )
             )
-        # D1/D2 SAME-FAMILY MANAGEMENT (2026-06-30 live fix): this must run for any
-        # submit-cleared family selection, not only events already labelled as
-        # ``allow_same_family_monitor_owned``. A forecast event that selects a sibling
-        # while a live old leg exists is no longer a true fresh entry; it is a position
-        # management problem. Same-token selections become residual fill-up, and
-        # sibling selections become close-before-open SHIFT_BIN. With no held family
-        # exposure both helpers no-op and the fresh-entry path is unchanged.
+        # D1/D2 SAME-FAMILY MANAGEMENT (2026-06-30 live fix): the local selector owns
+        # family-total targets, so same-token selections become residual fill-up and
+        # sibling selections become close-before-open SHIFT_BIN. A sealed global
+        # actuation already prices the current portfolio as endowment and sizes one
+        # incremental order against its joint terminal wealth; reapplying the local
+        # family-total transform would change that optimum after certification.
         #
         # For a freshly-selected winning leg that is the SAME token as an existing held
         # position, the family-total ΔU stake (_robust_stake_usd) is NOT what we submit
@@ -8450,7 +8449,7 @@ def _build_event_bound_no_submit_receipt_core(
         # bound: overriding _robust_stake_usd here keeps the portfolio reservation,
         # cost-basis hash, receipt kelly_size_usd, actionable cert and USD->shares
         # conversion ALL coherent off the one value (consult: the single chokepoint).
-        if _recapture.may_submit:
+        if _recapture.may_submit and global_actuation is None:
             _family_key = str(family.family_id or "")
             _existing_shift_lease = _shift_bin_wiring.active_shift_lease_for_family(
                 trade_conn,

@@ -1,5 +1,5 @@
 # Created: 2026-06-22
-# Last reused/audited: 2026-07-02
+# Last reused/audited: 2026-07-13
 # Authority basis: 2026-06-22 lifecycle design consult REQ-20260622-060011 (Pro
 #   Extended) — D2 shift-bin reactor wiring. Pins the ADDITIVE integration points in
 #   src/engine/event_reactor_adapter.py:
@@ -116,12 +116,19 @@ def test_old_leg_residual_ambiguous_truth_is_inf_never_enter():
 # the old leg is live. Through the wiring this is EXIT_OLD_LEG, allow_entry False.
 # ---------------------------------------------------------------------------
 def test_reactor_runs_same_family_management_for_forecast_selections_too():
-    """A forecast event with a held sibling is position management, not fresh entry."""
+    """Local forecast selection manages family totals; global actuation owns endowment."""
 
-    src = inspect.getsource(era)
+    src = inspect.getsource(era._build_event_bound_no_submit_receipt_core)
     assert "if _recapture.may_submit and allow_same_family_monitor_owned" not in src
-    assert "if _recapture.may_submit:" in src
-    assert "_shift_bin_wiring.read_held_sibling_exposure(" in src
+    local_gate = src.index(
+        "if _recapture.may_submit and global_actuation is None:"
+    )
+    sibling_read = src.index(
+        "_shift_bin_wiring.read_held_sibling_exposure(", local_gate
+    )
+    entry_build = src.index("kelly = dataclass_replace(", sibling_read)
+
+    assert local_gate < sibling_read < entry_build
 
 
 def test_existing_and_new_shift_paths_share_old_leg_live_predicate():
