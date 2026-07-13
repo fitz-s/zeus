@@ -46,6 +46,23 @@ def _normalize_condition_id(value: object) -> str | None:
     return condition_id or None
 
 
+def _forced_scope_serviced(payload: dict) -> bool:
+    request_id = str(payload.get("request_id") or "").strip()
+    if not request_id or not payload.get("force_refresh_condition_ids"):
+        return False
+    try:
+        receipt = json.loads(_priority_receipt_path().read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    summary = receipt.get("summary") if isinstance(receipt, dict) else None
+    return bool(
+        str(receipt.get("request_id") or "").strip() == request_id
+        and isinstance(summary, dict)
+        and str(summary.get("status") or "") == "refreshed"
+        and summary.get("scheduler_failed") is False
+    )
+
+
 def _priority_payload(now: datetime | None = None) -> dict | None:
     path = _priority_marker_path()
     try:
@@ -66,6 +83,9 @@ def _priority_payload(now: datetime | None = None) -> dict | None:
         current = current.replace(tzinfo=timezone.utc)
     if current.astimezone(timezone.utc) >= expires_at.astimezone(timezone.utc):
         return None
+    if _forced_scope_serviced(payload):
+        payload = dict(payload)
+        payload["force_refresh_condition_ids"] = []
     return payload
 
 
@@ -75,6 +95,7 @@ def mark_money_path_substrate_priority(
     ttl_seconds: float | None = None,
     families: Iterable[tuple[str, str, str]] | None = None,
     condition_ids: Iterable[str] | None = None,
+    force_refresh_condition_ids: Iterable[str] | None = None,
     merge_existing: bool = False,
 ) -> dict:
     """Request scoped sidecar substrate capture for current live-money work.
@@ -90,7 +111,20 @@ def mark_money_path_substrate_priority(
     seen: set[tuple[str, str, str]] = set()
     merged_condition_ids: list[str] = []
     seen_condition_ids: set[str] = set()
-    existing = _priority_payload(now) if merge_existing else None
+    merged_forced_condition_ids: list[str] = []
+    seen_forced_condition_ids: set[str] = set()
+    existing = _priority_payload(now)
+    # The marker is a single slot. An ordinary producer must not erase an
+    # unexpired FC-03 recapture before the sidecar services it.
+    existing_forced = (
+        existing.get("force_refresh_condition_ids", [])
+        if isinstance(existing, dict)
+        else []
+    )
+    incoming_forced = tuple(force_refresh_condition_ids or ())
+    merge_existing = bool(merge_existing or existing_forced)
+    if not merge_existing:
+        existing = None
     if merge_existing:
         existing_families = existing.get("families", []) if isinstance(existing, dict) else []
         for family in existing_families:
@@ -115,14 +149,45 @@ def mark_money_path_substrate_priority(
         if normalized and normalized not in seen_condition_ids:
             seen_condition_ids.add(normalized)
             merged_condition_ids.append(normalized)
+    if merge_existing:
+        existing_forced_condition_ids = (
+            existing.get("force_refresh_condition_ids", [])
+            if isinstance(existing, dict)
+            else []
+        )
+        for condition_id in existing_forced_condition_ids:
+            normalized = _normalize_condition_id(condition_id)
+            if normalized and normalized not in seen_forced_condition_ids:
+                seen_forced_condition_ids.add(normalized)
+                merged_forced_condition_ids.append(normalized)
+    for condition_id in incoming_forced:
+        normalized = _normalize_condition_id(condition_id)
+        if normalized and normalized not in seen_forced_condition_ids:
+            seen_forced_condition_ids.add(normalized)
+            merged_forced_condition_ids.append(normalized)
+    if not seen_forced_condition_ids.issubset(seen_condition_ids):
+        raise ValueError("forced refresh conditions must be inside the exact condition scope")
+    expires_at = now + timedelta(seconds=ttl)
+    if existing_forced and not incoming_forced and isinstance(existing, dict):
+        try:
+            existing_expires_at = datetime.fromisoformat(
+                str(existing.get("expires_at") or "")
+            )
+        except ValueError:
+            existing_expires_at = None
+        if existing_expires_at is not None:
+            if existing_expires_at.tzinfo is None:
+                existing_expires_at = existing_expires_at.replace(tzinfo=timezone.utc)
+            expires_at = min(expires_at, existing_expires_at.astimezone(timezone.utc))
     payload = {
         "request_id": uuid.uuid4().hex,
         "reason": str(reason or "money_path_substrate_refresh"),
         "pid": os.getpid(),
         "requested_at": now.isoformat(),
-        "expires_at": (now + timedelta(seconds=ttl)).isoformat(),
+        "expires_at": expires_at.isoformat(),
         "families": [list(family) for family in merged_families],
         "condition_ids": merged_condition_ids,
+        "force_refresh_condition_ids": merged_forced_condition_ids,
     }
     path = _priority_marker_path()
     tmp = path.with_suffix(path.suffix + ".tmp")
@@ -136,6 +201,7 @@ def mark_money_path_substrate_priority(
         "pid": payload.get("pid"),
         "families": [tuple(family) for family in merged_families],
         "condition_ids": list(merged_condition_ids),
+        "force_refresh_condition_ids": list(merged_forced_condition_ids),
     }
 
 
@@ -210,6 +276,14 @@ def money_path_substrate_priority_request(now: datetime | None = None) -> dict |
     payload = _priority_payload(now)
     if not isinstance(payload, dict):
         return None
+    condition_ids = money_path_substrate_priority_condition_ids(now)
+    forced_condition_ids: list[str] = []
+    seen_forced: set[str] = set()
+    for raw in payload.get("force_refresh_condition_ids", []):
+        condition_id = _normalize_condition_id(raw)
+        if condition_id and condition_id in condition_ids and condition_id not in seen_forced:
+            seen_forced.add(condition_id)
+            forced_condition_ids.append(condition_id)
     return {
         "request_id": str(payload.get("request_id") or "").strip(),
         "reason": str(payload.get("reason") or "").strip(),
@@ -217,7 +291,8 @@ def money_path_substrate_priority_request(now: datetime | None = None) -> dict |
         "expires_at": str(payload.get("expires_at") or "").strip(),
         "pid": payload.get("pid"),
         "families": money_path_substrate_priority_families(now),
-        "condition_ids": money_path_substrate_priority_condition_ids(now),
+        "condition_ids": condition_ids,
+        "force_refresh_condition_ids": forced_condition_ids,
     }
 
 
@@ -242,6 +317,9 @@ def record_money_path_substrate_priority_receipt(
         "serviced_at": current.astimezone(timezone.utc).isoformat(),
         "families": [list(family) for family in request.get("families", [])],
         "condition_ids": list(request.get("condition_ids", [])),
+        "force_refresh_condition_ids": list(
+            request.get("force_refresh_condition_ids", [])
+        ),
         "summary": dict(summary or {}),
     }
     path = _priority_receipt_path()

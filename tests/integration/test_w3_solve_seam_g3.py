@@ -181,6 +181,26 @@ def test_global_prepare_failure_preserves_early_spine_no_trade_reason():
     ) is None
 
 
+def test_current_global_family_survives_duplicate_local_spine_input_loss():
+    spine = SimpleNamespace(
+        decision=None,
+        no_trade_reason="SPINE_INPUTS_UNAVAILABLE:MU_SIGMA_NOT_STASHED",
+    )
+
+    assert era._global_actuation_local_spine_failure_reason(
+        spine,
+        prepared_global_family=object(),
+    ) is None
+    assert era._global_actuation_local_spine_failure_reason(
+        spine,
+        prepared_global_family=None,
+    ) == "SPINE_INPUTS_UNAVAILABLE:MU_SIGMA_NOT_STASHED"
+    assert era._global_actuation_local_spine_failure_reason(
+        SimpleNamespace(decision=None, no_trade_reason="SPINE_WIRING_FAULT:broken"),
+        prepared_global_family=object(),
+    ) == "SPINE_WIRING_FAULT:broken"
+
+
 def test_global_actuation_revalidates_content_then_preserves_selected_witness(monkeypatch):
     content = {
         field: f"current-{field}"
@@ -955,7 +975,24 @@ def test_global_probability_tightening_keeps_candidate_identity_and_bound():
         ),
         ("GLOBAL_CURRENT_STATE_ROBUST_MAJORITY_LOSS", "BATCH_BLOCKED"),
         ("GLOBAL_CURRENT_STATE_ECONOMICS_NON_POSITIVE", "BATCH_BLOCKED"),
+        ("GLOBAL_JIT_SNAPSHOT_REFRESH_FAILED", "BATCH_BLOCKED"),
+        ("GLOBAL_JIT_SNAPSHOT_REFRESH_UNAVAILABLE", "BATCH_BLOCKED"),
+        (
+            "GLOBAL_ACTUATION_PREPARE_FAILED:"
+            "SPINE_INPUTS_UNAVAILABLE:MU_SIGMA_NOT_STASHED",
+            "BATCH_BLOCKED",
+        ),
+        ("EVENT_BOUND_EXECUTABLE_SNAPSHOT_MISSING", "BATCH_BLOCKED"),
+        ("GLOBAL_ACTUATION_BOOK_SUPERSEDED", "BATCH_BLOCKED"),
+        ("UNCLASSIFIED_PREFLIGHT_FAILURE", "BATCH_BLOCKED"),
+        (
+            "GLOBAL_ACTUATION_PROOF_NO_LONGER_ELIGIBLE:"
+            "QKERNEL_EDGE_LCB_NON_POSITIVE",
+            "BLOCKED",
+        ),
+        ("FILL_UP_NO_SUBMIT:NO_RESIDUAL_AT_OR_OVER_TARGET", "BLOCKED"),
         ("SHIFT_BIN_NO_SUBMIT:OLD_LEG_STILL_STRONG", "BLOCKED"),
+        ("EVENT_BOUND_MARKET_PHASE_CLOSED:settlement_day", "BLOCKED"),
     ),
 )
 def test_global_preflight_block_scope_is_explicit(reason, status):
@@ -3790,6 +3827,15 @@ def test_global_batch_falls_through_candidate_local_preflight_block(monkeypatch)
         "GLOBAL_CURRENT_STATE_PAYOFF_Q_TIGHTENED_REAUCTION_REQUIRED",
         "GLOBAL_CURRENT_STATE_ROBUST_MAJORITY_LOSS",
         "GLOBAL_CURRENT_STATE_ECONOMICS_NON_POSITIVE",
+        "GLOBAL_JIT_SNAPSHOT_REFRESH_FAILED",
+        "GLOBAL_JIT_SNAPSHOT_REFRESH_UNAVAILABLE",
+        (
+            "GLOBAL_ACTUATION_PREPARE_FAILED:"
+            "SPINE_INPUTS_UNAVAILABLE:MU_SIGMA_NOT_STASHED"
+        ),
+        "EVENT_BOUND_EXECUTABLE_SNAPSHOT_MISSING",
+        "GLOBAL_ACTUATION_BOOK_SUPERSEDED",
+        "UNCLASSIFIED_PREFLIGHT_FAILURE",
     ),
 )
 def test_global_batch_stops_on_batch_wide_preflight_block(monkeypatch, batch_reason):

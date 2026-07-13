@@ -546,6 +546,50 @@ def test_same_epoch_winner_claim_rejects_changed_batch_generation():
     ).fetchone()[0] == actual_generation
 
 
+def test_global_winner_claim_mutex_busy_is_bounded(monkeypatch):
+    from src.engine.global_batch_runtime import _next_claim_carrier
+
+    conn, store = _store()
+    claimed = _forecast_event("winner-mutex-busy", target_date="2099-05-25")
+    target = _next_claim_carrier(
+        claimed,
+        targeted_at=_DT_VENUE_OPEN,
+        economic_identity="winner-mutex-busy-economic-identity",
+        payload=json.loads(claimed.payload_json),
+    )
+    store.insert_or_ignore(claimed)
+    actual_generation = "2026-05-25T06:10:00+00:00"
+    assert store.claim(claimed.event_id, claimed_at=actual_generation)
+    conn.commit()
+    reactor = _global_batch_probe_reactor(store, {})
+    waits: list[float] = []
+
+    class _BusyMutex:
+        def acquire(self, *, timeout):
+            waits.append(timeout)
+            return False
+
+        def release(self):
+            pytest.fail("an unacquired mutex must not be released")
+
+    monkeypatch.setattr(
+        "src.events.reactor.world_write_mutex",
+        lambda: _BusyMutex(),
+    )
+
+    result = reactor._claim_global_winner_for_actuation(
+        target,
+        current_batch_claim_generations={claimed.event_id: actual_generation},
+    )
+
+    assert result is None
+    assert waits == [pytest.approx(0.75)]
+    assert conn.execute(
+        "SELECT 1 FROM opportunity_events WHERE event_id = ?",
+        (target.event_id,),
+    ).fetchone() is None
+
+
 def test_global_batch_defers_target_when_claim_is_reclaimed_during_solve():
     from src.engine.global_batch_runtime import _next_claim_carrier
 

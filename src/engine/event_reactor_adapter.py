@@ -6341,20 +6341,21 @@ def _global_probability_tightening_from_receipt(
 
 
 def _global_preflight_block_status(reason: str) -> str:
-    """Distinguish batch-wide submit authority loss from candidate rejection."""
+    """Fall through only when current evidence proves this candidate infeasible."""
 
     if reason.startswith(
-        ("entries_paused:", "live_health_entry_authority:")
-    ) or reason in {
-        "EDLI_DURABLE_SUBMIT_OUTBOX_REQUIRED",
-        "EXECUTOR_BOUNDARY_MISSING",
-        "OPERATOR_ARM_REQUIRED",
-        "GLOBAL_CURRENT_STATE_PAYOFF_Q_TIGHTENED_REAUCTION_REQUIRED",
-        "GLOBAL_CURRENT_STATE_ROBUST_MAJORITY_LOSS",
-        "GLOBAL_CURRENT_STATE_ECONOMICS_NON_POSITIVE",
-    }:
-        return "BATCH_BLOCKED"
-    return "BLOCKED"
+        (
+            "GLOBAL_ACTUATION_PROOF_NO_LONGER_ELIGIBLE:",
+            "FILL_UP_NO_SUBMIT:",
+            "SHIFT_BIN_NO_SUBMIT:",
+            "EVENT_BOUND_MARKET_PHASE_CLOSED:",
+        )
+    ):
+        return "BLOCKED"
+    # Missing, stale, superseded, or internally inconsistent authority cannot
+    # prove the runner-up globally optimal. Unknown reasons therefore stop this
+    # cut; the next cycle rebuilds the complete universe from current truth.
+    return "BATCH_BLOCKED"
 
 
 def _global_current_state_execution_economics(
@@ -6857,6 +6858,23 @@ def _global_prepare_failure_reason(spine_result: object) -> str | None:
         or getattr(spine_result, "no_trade_reason", None)
         or ""
     ) or None
+
+
+def _global_actuation_local_spine_failure_reason(
+    spine_result: object,
+    *,
+    prepared_global_family: object | None,
+) -> str | None:
+    """Do not replace a current global witness with duplicate local input loss."""
+
+    reason = str(getattr(spine_result, "no_trade_reason", None) or "") or None
+    if (
+        prepared_global_family is not None
+        and reason is not None
+        and reason.startswith("SPINE_INPUTS_UNAVAILABLE:")
+    ):
+        return None
+    return reason
 
 
 def _current_global_actuation_prepared_family(
@@ -7441,7 +7459,10 @@ def _build_event_bound_no_submit_receipt_core(
                     and _spine_result.decision is None
                     and _spine_result.no_trade_reason is not None
                 ):
-                    _global_prepare_reason = _spine_result.no_trade_reason
+                    _global_prepare_reason = _global_actuation_local_spine_failure_reason(
+                        _spine_result,
+                        prepared_global_family=_prepared_global_family,
+                    )
                 if _spine_prepare_global and not _global_prepare_captured:
                     # The first pass contains the full eligibility-filtered
                     # native set. Legacy local-winner actionability retries must

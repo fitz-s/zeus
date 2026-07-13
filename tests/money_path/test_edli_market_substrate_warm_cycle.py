@@ -597,19 +597,21 @@ def test_priority_direct_clob_uses_selected_priority_subset():
     assert "len(priority_conditions) <= priority_direct_clob_condition_limit" not in src
 
 
-def test_active_risk_conditions_are_hot_even_with_priority_marker():
-    """A marker request must not exclude live open-rest or held-position exact conditions."""
+def test_active_risk_conditions_join_ordinary_but_not_forced_marker_tick():
+    """Risk scope joins ordinary work; an FC-03 winner gets one exclusive short tick."""
 
     src = inspect.getsource(substrate_observer._edli_money_path_substrate_priority_cycle)
+    marker_copy = src.index("marker_exact_condition_ids = list(priority_marker_condition_ids)")
+    forced_copy = src.index("marker_force_refresh_condition_ids = list(")
+    extend_marker = src.index("exact_priority_condition_ids = list(marker_exact_condition_ids)")
+    ordinary_branch = src.index("if not marker_force_refresh_condition_ids:")
     open_read = src.index("open_rest_priority_condition_ids = _open_rest_condition_ids_for_refresh")
     held_read = src.index("held_position_priority_condition_ids = _edli_current_held_position_condition_ids()")
-    marker_copy = src.index("marker_exact_condition_ids = list(priority_marker_condition_ids)")
-    extend_marker = src.index("exact_priority_condition_ids = list(marker_exact_condition_ids)")
     extend_open = src.index("exact_priority_condition_ids.extend(open_rest_priority_condition_ids)")
     extend_held = src.index("exact_priority_condition_ids.extend(held_position_priority_condition_ids)")
 
-    assert marker_copy < open_read < held_read < extend_marker < extend_open < extend_held
-    assert "if not priority_marker_active:\n                exact_priority_condition_ids.extend" not in src
+    assert marker_copy < forced_copy < extend_marker < ordinary_branch < open_read
+    assert open_read < held_read < extend_open < extend_held
 
 
 def test_warm_lane_money_risk_priority_stays_ahead_of_pending_rotation():
@@ -869,6 +871,7 @@ def test_decision_refresher_invokes_scoped_producer_and_proves_freshness(monkeyp
             "ttl_seconds": 45.0,
             "families": [("Paris", "2026-06-20", "low")],
             "condition_ids": ("cond-1",),
+            "force_refresh_condition_ids": (),
             "merge_existing": True,
         }
     ]
@@ -891,11 +894,12 @@ def test_global_winner_refresher_requests_exact_condition_recapture(monkeypatch)
     import src.data.substrate_observer as substrate_observer_module
     import src.data.substrate_priority as substrate_priority
 
+    marked: list[dict] = []
     refreshed: list[dict] = []
     monkeypatch.setattr(
         substrate_priority,
         "mark_money_path_substrate_priority",
-        lambda **_kwargs: None,
+        lambda **kwargs: marked.append(kwargs),
     )
     monkeypatch.setattr(
         substrate_observer_module,
@@ -926,6 +930,16 @@ def test_global_winner_refresher_requests_exact_condition_recapture(monkeypatch)
     ) is True
     assert refreshed[0]["condition_ids"] == ("winner-condition",)
     assert refreshed[0]["force_refresh"] is True
+    assert marked == [
+        {
+            "reason": "decision_triggered_targeted_refresh",
+            "ttl_seconds": 45.0,
+            "families": [("Wellington", "2026-07-12", "high")],
+            "condition_ids": ("winner-condition",),
+            "force_refresh_condition_ids": ("winner-condition",),
+            "merge_existing": False,
+        }
+    ]
 
 
 def test_global_winner_refresher_rejects_lock_busy_cached_fresh_row(monkeypatch):
@@ -958,6 +972,70 @@ def test_global_winner_refresher_rejects_lock_busy_cached_fresh_row(monkeypatch)
         condition_ids=("winner-condition",),
         force_refresh=True,
     ) is False
+
+
+def test_forced_priority_marker_preserves_exact_scope_and_receipt(monkeypatch, tmp_path):
+    """The sidecar contract must name the exact FC-03 scope, not infer it from counts."""
+
+    import src.data.substrate_priority as substrate_priority
+
+    marker_path = tmp_path / "priority.json"
+    receipt_path = tmp_path / "priority_receipt.json"
+    monkeypatch.setattr(substrate_priority, "_priority_marker_path", lambda: marker_path)
+    monkeypatch.setattr(substrate_priority, "_priority_receipt_path", lambda: receipt_path)
+
+    request = substrate_priority.mark_money_path_substrate_priority(
+        reason="decision_triggered_targeted_refresh",
+        ttl_seconds=5.0,
+        families=[("Hong Kong", "2026-07-13", "high")],
+        condition_ids=["winner-condition"],
+        force_refresh_condition_ids=["winner-condition"],
+    )
+    current = substrate_priority.money_path_substrate_priority_request()
+
+    assert current is not None
+    assert current["request_id"] == request["request_id"]
+    assert current["condition_ids"] == ["winner-condition"]
+    assert current["force_refresh_condition_ids"] == ["winner-condition"]
+
+    merged = substrate_priority.mark_money_path_substrate_priority(
+        reason="ordinary_followup",
+        ttl_seconds=180.0,
+        families=[("Paris", "2026-07-13", "low")],
+        condition_ids=["ordinary-condition"],
+    )
+    preserved = substrate_priority.money_path_substrate_priority_request()
+    assert preserved is not None
+    assert merged["expires_at"] == request["expires_at"]
+    assert preserved["condition_ids"] == ["winner-condition", "ordinary-condition"]
+    assert preserved["force_refresh_condition_ids"] == ["winner-condition"]
+
+    substrate_priority.record_money_path_substrate_priority_receipt(
+        request=preserved,
+        summary={
+            "status": "refreshed",
+            "scheduler_failed": False,
+            "forced_condition_count": 1,
+        },
+    )
+    receipt = substrate_priority.money_path_substrate_priority_receipt(
+        request_id=merged["request_id"]
+    )
+    assert receipt is not None
+    assert receipt["force_refresh_condition_ids"] == ["winner-condition"]
+    consumed = substrate_priority.money_path_substrate_priority_request()
+    assert consumed is not None
+    assert consumed["force_refresh_condition_ids"] == []
+
+    with pytest.raises(
+        ValueError,
+        match="forced refresh conditions must be inside the exact condition scope",
+    ):
+        substrate_priority.mark_money_path_substrate_priority(
+            reason="invalid",
+            condition_ids=["winner-condition"],
+            force_refresh_condition_ids=["other-condition"],
+        )
 
 
 @pytest.mark.parametrize(
@@ -1086,6 +1164,8 @@ def test_background_substrate_warm_leaves_lock_window_for_money_path_refresh():
     assert '"5.0"' in reserve_src
     assert "executor.shutdown(wait=False, cancel_futures=True)" in refresh_src
     assert "with ThreadPoolExecutor(" not in refresh_src
+    assert "prune_deadline_installed = _install_sqlite_deadline(" in refresh_src
+    assert "_cancel_sqlite_deadline_interrupt(prune_deadline_timer)" in refresh_src
 
 
 def test_substrate_warm_topology_exhaustion_is_scheduler_failure():
@@ -2337,14 +2417,16 @@ def test_priority_conditions_deferred_when_refresh_inserted_substrate():
     assert result["priority_marker_condition_ids"] == 1
 
 
-def test_money_path_priority_cycle_condition_marker_keeps_claim_order_priority(monkeypatch):
-    """A concrete condition marker must not expand back into full marker-family refresh."""
+def test_money_path_priority_cycle_forced_condition_excludes_broad_claim_work(monkeypatch):
+    """An FC-03 winner owns this short tick; broad claim work resumes next tick."""
 
     calls: list[dict] = []
     marker_families = [("Shanghai", "2026-06-28", "high")]
     marker_noise_families = [("Buenos Aires", "2026-07-02", "high")]
     marker_condition_ids = ["cond-shanghai-31"]
     claim_families = [("Tokyo", "2026-06-28", "low")]
+    claim_reads: list[int] = []
+    force_active = [True]
     monkeypatch.setattr(substrate_observer, "money_path_substrate_priority_active", lambda: True)
     monkeypatch.setattr(
         substrate_observer,
@@ -2353,6 +2435,7 @@ def test_money_path_priority_cycle_condition_marker_keeps_claim_order_priority(m
             "request_id": "req-1",
             "families": marker_families + marker_noise_families,
             "condition_ids": marker_condition_ids,
+            "force_refresh_condition_ids": marker_condition_ids if force_active[0] else [],
         },
     )
     monkeypatch.setattr(
@@ -2368,7 +2451,7 @@ def test_money_path_priority_cycle_condition_marker_keeps_claim_order_priority(m
     monkeypatch.setattr(
         substrate_observer,
         "_claim_order_priority_families_for_refresh",
-        lambda *a, **k: claim_families,
+        lambda *a, **k: claim_reads.append(1) or claim_families,
     )
     monkeypatch.setattr(
         substrate_observer,
@@ -2401,12 +2484,20 @@ def test_money_path_priority_cycle_condition_marker_keeps_claim_order_priority(m
     substrate_observer._edli_money_path_substrate_priority_cycle()
 
     assert calls
-    assert calls[0]["extra_priority_families"] == marker_families + claim_families
+    assert claim_reads == []
+    assert calls[0]["extra_priority_families"] == marker_families
     assert marker_noise_families[0] not in calls[0]["extra_priority_families"]
     assert calls[0]["priority_condition_ids"] == marker_condition_ids
+    assert calls[0]["force_refresh_condition_ids"] == marker_condition_ids
     assert calls[0]["include_pending_families"] is False
     assert calls[0]["include_money_risk_families"] is False
     assert receipts and receipts[0]["request"]["request_id"] == "req-1"
+
+    force_active[0] = False
+    substrate_observer._edli_money_path_substrate_priority_cycle()
+
+    assert claim_reads == [1]
+    assert calls[1]["extra_priority_families"] == marker_families + claim_families
 
 
 def test_money_path_priority_cycle_marker_family_does_not_starve_claim_order(monkeypatch):
@@ -2822,7 +2913,8 @@ def test_money_path_targeted_refresh_marks_substrate_priority():
     assert 'reason="decision_triggered_targeted_refresh"' in refresh_src
     assert "families=[family]" in refresh_src
     assert "condition_ids=condition_ids" in refresh_src
-    assert "merge_existing=True" in refresh_src
+    assert "force_refresh_condition_ids=(condition_ids if force_refresh else ())" in refresh_src
+    assert "merge_existing=not force_refresh" in refresh_src
     assert 'acquire_lock("market_substrate_refresh")' in producer_src
     assert "_refresh_pending_family_snapshots(" in producer_src
     assert "mark_money_path_substrate_priority(" in confirm_src
@@ -4140,6 +4232,30 @@ def test_prune_fresh_market_outcomes_keeps_refresh_moving_past_completed_conditi
     assert len(pruned) == 1
     assert [outcome["condition_id"] for outcome in pruned[0]["outcomes"]] == ["cond-stale"]
     assert pruned[0]["condition_ids"] == ["cond-stale"]
+
+
+def test_prune_fresh_market_outcomes_stops_after_deadline(monkeypatch):
+    market = {
+        "outcomes": [
+            {"condition_id": "cond-1", "token_id": "yes-1"},
+            {"condition_id": "cond-2", "token_id": "yes-2"},
+        ]
+    }
+    clock = iter((0.0, 0.5, 1.1))
+    monkeypatch.setattr(substrate_observer.time, "monotonic", lambda: next(clock))
+    monkeypatch.setattr(
+        substrate_observer,
+        "_condition_buy_sides_fresh",
+        lambda *_args, **_kwargs: False,
+    )
+
+    with pytest.raises(TimeoutError, match="snapshot freshness prune deadline exceeded"):
+        substrate_observer._prune_fresh_market_outcomes_for_snapshot_refresh(
+            _FakeConn(),
+            [market],
+            fresh_at_iso="2026-07-13T00:00:00+00:00",
+            deadline_monotonic=1.0,
+        )
 
 
 def test_pending_family_refresh_uses_static_topology_cache_without_gamma(monkeypatch):

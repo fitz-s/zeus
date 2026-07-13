@@ -848,6 +848,7 @@ def _prune_fresh_market_outcomes_for_snapshot_refresh(
     fresh_at_iso: str,
     restrict_to_condition_ids: Iterable[str] | None = None,
     force_refresh_condition_ids: Iterable[str] | None = None,
+    deadline_monotonic: float | None = None,
 ) -> tuple[list[dict], int, int]:
     scoped_conditions = {
         str(condition_id or "").strip()
@@ -865,6 +866,8 @@ def _prune_fresh_market_outcomes_for_snapshot_refresh(
     fresh_conditions_skipped = 0
     stale_conditions_submitted = 0
     for market in markets:
+        if deadline_monotonic is not None and time.monotonic() >= deadline_monotonic:
+            raise TimeoutError("snapshot freshness prune deadline exceeded")
         market_condition_ids = {
             str(outcome.get("condition_id") or outcome.get("market_id") or "").strip()
             for outcome in market.get("outcomes", []) or []
@@ -874,16 +877,19 @@ def _prune_fresh_market_outcomes_for_snapshot_refresh(
         restrict_this_market = bool(scoped_conditions and market_condition_ids & scoped_conditions)
         stale_outcomes: list[dict] = []
         for outcome in market.get("outcomes", []) or []:
+            if deadline_monotonic is not None and time.monotonic() >= deadline_monotonic:
+                raise TimeoutError("snapshot freshness prune deadline exceeded")
             if not isinstance(outcome, dict):
                 continue
             cid = str(outcome.get("condition_id") or outcome.get("market_id") or "").strip()
             if restrict_this_market and cid not in scoped_conditions:
                 continue
-            if (
-                cid
-                and cid not in forced_conditions
-                and _condition_buy_sides_fresh(write_conn, cid, fresh_at_iso)
-            ):
+            is_fresh = False
+            if cid and cid not in forced_conditions:
+                is_fresh = _condition_buy_sides_fresh(write_conn, cid, fresh_at_iso)
+                if deadline_monotonic is not None and time.monotonic() >= deadline_monotonic:
+                    raise TimeoutError("snapshot freshness prune deadline exceeded")
+            if is_fresh:
                 fresh_conditions_skipped += 1
                 continue
             stale_outcomes.append(outcome)
@@ -2082,17 +2088,31 @@ def _refresh_pending_family_snapshots(
             fresh_condition_skipped = 0
             stale_condition_submitted = sum(len(market.get("outcomes") or []) for market in markets)
         else:
-            markets_for_refresh, fresh_condition_skipped, stale_condition_submitted = (
-                _prune_fresh_market_outcomes_for_snapshot_refresh(
-                    snapshot_read_conn,
-                    markets,
-                    fresh_at_iso=now_iso,
-                    restrict_to_condition_ids=(
-                        explicit_priority_conditions if explicit_priority_conditions else None
-                    ),
-                    force_refresh_condition_ids=forced_conditions,
-                )
+            prune_deadline_installed = _install_sqlite_deadline(
+                snapshot_read_conn,
+                deadline_monotonic=refresh_deadline,
             )
+            prune_deadline_timer = _start_sqlite_deadline_interrupt(
+                snapshot_read_conn,
+                deadline_monotonic=refresh_deadline,
+            )
+            try:
+                markets_for_refresh, fresh_condition_skipped, stale_condition_submitted = (
+                    _prune_fresh_market_outcomes_for_snapshot_refresh(
+                        snapshot_read_conn,
+                        markets,
+                        fresh_at_iso=now_iso,
+                        restrict_to_condition_ids=(
+                            explicit_priority_conditions if explicit_priority_conditions else None
+                        ),
+                        force_refresh_condition_ids=forced_conditions,
+                        deadline_monotonic=refresh_deadline,
+                    )
+                )
+            finally:
+                _cancel_sqlite_deadline_interrupt(prune_deadline_timer)
+                if prune_deadline_installed:
+                    _clear_sqlite_deadline(snapshot_read_conn)
         if not markets_for_refresh:
             return {
                 "status": "all_fresh",
@@ -2663,45 +2683,54 @@ def _edli_money_path_substrate_priority_cycle() -> dict | None:
             deadline_monotonic=claim_deadline,
         )
         try:
+            marker_exact_condition_ids = list(priority_marker_condition_ids)
+            marker_force_refresh_condition_ids = list(
+                (priority_marker_request or {}).get("force_refresh_condition_ids") or []
+            )
             open_rest_priority_condition_ids: list[str] = []
             held_position_priority_condition_ids: list[str] = []
-            marker_exact_condition_ids = list(priority_marker_condition_ids)
-            trade_ro = None
-            try:
-                trade_ro = get_trade_connection_read_only()
-                open_rest_priority_condition_ids = _open_rest_condition_ids_for_refresh(
-                    trade_ro,
-                    forecasts_conn=forecasts_conn,
-                )
-            except Exception as exc:  # noqa: BLE001
-                logger.warning(
-                    "EDLI money-path substrate priority: open-rest condition priority read failed "
-                    "(non-fatal): %s",
-                    exc,
-                )
-            finally:
-                if trade_ro is not None:
-                    try:
-                        trade_ro.close()
-                    except Exception:  # noqa: BLE001
-                        pass
-            held_position_priority_condition_ids = _edli_current_held_position_condition_ids()
+            claim_priority_read_failed = False
+            claim_priority_families: list[tuple[str, str, str]] = []
             exact_priority_condition_ids = list(marker_exact_condition_ids)
-            exact_priority_condition_ids.extend(open_rest_priority_condition_ids)
-            exact_priority_condition_ids.extend(held_position_priority_condition_ids)
+            # A forced FC-03 winner recapture owns this one short sidecar tick.
+            # Broad held/rest/claim discovery resumes on the next tick; reading it
+            # first can spend the whole deadline and make the elected order stale.
+            if not marker_force_refresh_condition_ids:
+                trade_ro = None
+                try:
+                    trade_ro = get_trade_connection_read_only()
+                    open_rest_priority_condition_ids = _open_rest_condition_ids_for_refresh(
+                        trade_ro,
+                        forecasts_conn=forecasts_conn,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        "EDLI money-path substrate priority: open-rest condition priority read failed "
+                        "(non-fatal): %s",
+                        exc,
+                    )
+                finally:
+                    if trade_ro is not None:
+                        try:
+                            trade_ro.close()
+                        except Exception:  # noqa: BLE001
+                            pass
+                held_position_priority_condition_ids = _edli_current_held_position_condition_ids()
+                exact_priority_condition_ids.extend(open_rest_priority_condition_ids)
+                exact_priority_condition_ids.extend(held_position_priority_condition_ids)
             condition_priority_families = _condition_priority_families_for_refresh(
                 forecasts_conn,
                 exact_priority_condition_ids,
             )
-            claim_priority_read_failed = False
-            claim_priority_families = _claim_order_priority_families_for_refresh(
-                conn,
-                consumer_name="edli_reactor_v1",
-                now_utc=datetime.now(timezone.utc),
-            )
-            if claim_priority_families is None:
-                claim_priority_read_failed = True
-                claim_priority_families = []
+            if not marker_force_refresh_condition_ids:
+                claim_priority_families = _claim_order_priority_families_for_refresh(
+                    conn,
+                    consumer_name="edli_reactor_v1",
+                    now_utc=datetime.now(timezone.utc),
+                )
+                if claim_priority_families is None:
+                    claim_priority_read_failed = True
+                    claim_priority_families = []
         finally:
             _cancel_sqlite_deadline_interrupt(claim_deadline_timer)
             if claim_deadline_installed:
@@ -2755,6 +2784,7 @@ def _edli_money_path_substrate_priority_cycle() -> dict | None:
             extra_priority_families=priority_families,
             include_pending_families=False,
             priority_condition_ids=exact_priority_condition_ids,
+            force_refresh_condition_ids=marker_force_refresh_condition_ids,
             refresh_budget_seconds=priority_budget_s,
             snapshot_reserve_seconds=priority_snapshot_reserve_s,
             include_money_risk_families=not bool(marker_exact_condition_ids),

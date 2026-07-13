@@ -1254,7 +1254,8 @@ class OpportunityEventReactor:
         """Persist the auction winner's next legal claim outside submit I/O."""
 
         mutex = world_write_mutex()
-        mutex.acquire()
+        if not mutex.acquire(timeout=_reactor_claim_busy_timeout_ms() / 1000.0):
+            return False
         try:
             if self._store.conn.in_transaction:
                 raise RuntimeError("GLOBAL_WINNER_QUEUE_WORLD_TXN_OPEN")
@@ -1281,7 +1282,8 @@ class OpportunityEventReactor:
         """Atomically materialize and claim one unpaged cut-time winner."""
 
         mutex = world_write_mutex()
-        mutex.acquire()
+        if not mutex.acquire(timeout=_reactor_claim_busy_timeout_ms() / 1000.0):
+            return None
         try:
             if self._store.conn.in_transaction:
                 raise RuntimeError("GLOBAL_WINNER_CLAIM_WORLD_TXN_OPEN")
@@ -6746,7 +6748,8 @@ def _edli_decision_family_snapshot_refresher(topology_conn):
                 ttl_seconds=45.0,
                 families=[family],
                 condition_ids=condition_ids,
-                merge_existing=True,
+                force_refresh_condition_ids=(condition_ids if force_refresh else ()),
+                merge_existing=not force_refresh,
             )
         except Exception as exc:  # noqa: BLE001
             _log.debug("decision family refresh: priority marker write failed: %r", exc)
