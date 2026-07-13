@@ -278,9 +278,12 @@ def qkernel_global_current_state_rejection_reason(
         return "global_utility_envelope"
     if not math.isclose(cost, expected_cost / shares, rel_tol=1e-9, abs_tol=1e-9):
         return "global_cost_identity"
+    probability_tol = 1e-12
     if not (
-        0.5 < terminal_win <= cut_win <= 1.0
-        and 0.0 <= cut_loss <= terminal_loss < 0.5
+        0.5 < terminal_win <= cut_win + probability_tol
+        and cut_win <= 1.0
+        and 0.0 <= cut_loss <= terminal_loss + probability_tol
+        and terminal_loss < 0.5
         and math.isclose(cut_win + cut_loss, 1.0, rel_tol=0.0, abs_tol=1e-12)
         and math.isclose(
             terminal_win + terminal_loss,

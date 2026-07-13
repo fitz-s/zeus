@@ -1045,6 +1045,52 @@ def test_global_current_certificate_fails_closed_on_side_or_envelope_mismatch():
     )
 
 
+@pytest.mark.parametrize(("side", "direction"), (("YES", "buy_yes"), ("NO", "buy_no")))
+def test_global_current_certificate_accepts_live_complement_rounding(
+    side,
+    direction,
+):
+    cert = _global_current_qkernel_cert(side=side)
+    q_lcb = 0.8344915302118994
+    cost = 0.63
+    shares = 13.0
+    expected_cost = shares * cost
+    win_payoff = shares - expected_cost
+    cert.update(
+        payoff_q_point=0.979320785,
+        q_dot_payoff=0.979320785,
+        payoff_q_lcb=q_lcb,
+        cost=cost,
+        edge_lcb=q_lcb - cost,
+        global_target_shares=shares,
+        global_expected_cost_usd=expected_cost,
+        global_max_spend_usd=expected_cost,
+        global_robust_ev_usd=q_lcb * shares - expected_cost,
+        global_cut_time_win_probability_lcb=q_lcb,
+        # The solver and certificate complement paths can land on adjacent
+        # binary64 values while representing the same exact probability.
+        global_cut_time_loss_probability_ucb=0.16550846978810063,
+        global_terminal_win_probability_lcb=q_lcb,
+        global_terminal_loss_probability_ucb=0.1655084697881006,
+        global_terminal_loss_payoff_usd=-expected_cost,
+        global_terminal_win_payoff_usd=win_payoff,
+        global_terminal_median_payoff_usd=win_payoff,
+        global_terminal_wealth_after_loss_usd=100.0 - expected_cost,
+        global_terminal_wealth_after_win_usd=100.0 + win_payoff,
+        global_cut_time_expected_value_diagnostic_usd=q_lcb * shares - expected_cost,
+        global_expected_value_diagnostic_usd=q_lcb * shares - expected_cost,
+    )
+    _seal_current_qkernel_cert(cert)
+
+    assert (
+        era._global_current_state_execution_economics_rejection_reason(
+            cert,
+            direction=direction,
+        )
+        is None
+    )
+
+
 @pytest.mark.parametrize(
     ("field", "replacement"),
     (
