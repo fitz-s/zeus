@@ -5132,11 +5132,9 @@ def event_bound_live_adapter_from_trade_conn(
                 len(bound_probabilities),
                 len(gamma_metadata),
             )
-            # The first call may discover missing native token identities through
-            # Gamma and therefore receives the exact market metadata needed to price
-            # those books.  The late whole-universe fence receives already-bound q,
-            # so token binding intentionally skips Gamma; keep the first call's
-            # metadata inside this one batch rather than re-discovering topology.
+            # Every whole-universe fence refreshes current Gamma tradeability.
+            # Cached rows remain useful only as a complete batch-local overlay;
+            # the current call replaces matching keys before book construction.
             book_metadata_by_key.update(gamma_metadata)
             _capture_started = _time.monotonic()
             with PolymarketClient(public_http_timeout=timeout) as clob:

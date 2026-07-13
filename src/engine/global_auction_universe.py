@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from functools import cached_property
-from typing import Any, Callable, Mapping, Sequence
+from typing import Callable, Mapping, Sequence
 from zoneinfo import ZoneInfo
 
 from src.contracts.executable_cost_curve import BookLevel, ExecutableCostCurve, FeeModel
@@ -317,6 +317,40 @@ def _global_book_curve(
     )
 
 
+def _global_book_metadata_is_current(
+    metadata: Mapping[str, object],
+    *,
+    checked_at_utc: datetime,
+) -> bool:
+    """Require current tradeability facts for a freshly fetched book.
+
+    A public CLOB book proves price/depth, not whether stale local Gamma/CLOB
+    metadata still describes a live market.  Metadata fetched from Gamma in
+    this same global epoch is current by construction.  Persisted metadata must
+    still be inside its own executable-snapshot freshness interval.
+    """
+
+    if metadata.get("_global_current_gamma") is True:
+        return True
+    try:
+        captured_at = datetime.fromisoformat(
+            str(metadata.get("captured_at") or "").replace("Z", "+00:00")
+        )
+        freshness_deadline = datetime.fromisoformat(
+            str(metadata.get("freshness_deadline") or "").replace("Z", "+00:00")
+        )
+    except (TypeError, ValueError):
+        return False
+    if captured_at.tzinfo is None or freshness_deadline.tzinfo is None:
+        return False
+    checked = checked_at_utc.astimezone(timezone.utc)
+    return (
+        captured_at.astimezone(timezone.utc)
+        <= checked
+        <= freshness_deadline.astimezone(timezone.utc)
+    )
+
+
 def capture_current_global_book_epoch(
     trade_conn: sqlite3.Connection,
     *,
@@ -460,7 +494,11 @@ def capture_current_global_book_epoch(
             )
         except json.JSONDecodeError:
             pass
-        executable_metadata = (
+        metadata_current = _global_book_metadata_is_current(
+            metadata,
+            checked_at_utc=started_at,
+        )
+        executable_metadata = metadata_current and (
             bool(metadata.get("enable_orderbook"))
             and bool(metadata.get("active"))
             and not bool(metadata.get("closed"))
@@ -471,7 +509,11 @@ def capture_current_global_book_epoch(
             )
         )
         curve = None
-        status = "VENUE_NOT_EXECUTABLE"
+        status = (
+            "VENUE_NOT_EXECUTABLE"
+            if metadata_current
+            else "VENUE_METADATA_STALE"
+        )
         if executable_metadata:
             curve = _global_book_curve(
                 family_key=family_key,
@@ -596,7 +638,7 @@ def bind_current_global_probability_tokens(
     max_workers: int = 8,
     metadata_sink: dict[tuple[str, str], Mapping[str, object]] | None = None,
 ) -> Mapping[str, JointOutcomeProbabilityWitness]:
-    """Fill missing native token identities from exact topology, never prices."""
+    """Bind tokens and, when requested, current Gamma tradeability metadata."""
 
     missing_by_family = {
         family_key: witness
@@ -606,7 +648,11 @@ def bind_current_global_probability_tokens(
             for binding in witness.bindings
         )
     }
-    if not missing_by_family:
+    refresh_metadata = metadata_sink is not None
+    work_by_family = (
+        dict(probability_witnesses) if refresh_metadata else missing_by_family
+    )
+    if not work_by_family:
         return dict(probability_witnesses)
 
     local_tokens: dict[str, tuple[str, str]] = {}
@@ -654,12 +700,13 @@ def bind_current_global_probability_tokens(
             local_tokens[condition_id] = pair
 
     slug_by_family: dict[str, str] = {}
-    for family_key, witness in missing_by_family.items():
-        if all(
+    for family_key, witness in work_by_family.items():
+        tokens_bound = all(
             (binding.yes_token_id and binding.no_token_id)
             or binding.condition_id in local_tokens
             for binding in witness.bindings
-        ):
+        )
+        if tokens_bound and not refresh_metadata:
             continue
         condition_ids = tuple(binding.condition_id for binding in witness.bindings)
         placeholders = ",".join("?" for _ in condition_ids)
@@ -681,7 +728,7 @@ def bind_current_global_probability_tokens(
         slug_by_family[family_key] = slug
 
     from concurrent.futures import ThreadPoolExecutor
-    from src.data.market_scanner import _extract_outcomes
+    from src.data.market_scanner import _boolish_market_field, _extract_outcomes
 
     events: dict[str, Mapping[str, object] | None] = {}
     if slug_by_family:
@@ -699,10 +746,12 @@ def bind_current_global_probability_tokens(
 
     rebound: dict[str, JointOutcomeProbabilityWitness] = {}
     for family_key, witness in probability_witnesses.items():
-        if family_key not in missing_by_family:
+        if family_key not in work_by_family:
             rebound[family_key] = witness
             continue
         event = events.get(family_key)
+        if refresh_metadata and event is None:
+            raise ValueError(f"GLOBAL_CURRENT_GAMMA_EVENT_MISSING:{family_key}")
         condition_ids = {binding.condition_id for binding in witness.bindings}
         token_map = {
             condition_id: pair
@@ -710,11 +759,12 @@ def bind_current_global_probability_tokens(
             if condition_id in condition_ids
         }
         if event is not None:
+            metadata_conditions: set[str] = set()
             for outcome in _extract_outcomes(dict(event)):
                 condition_id = str(outcome.get("condition_id") or "").strip()
                 yes = str(outcome.get("token_id") or "").strip()
                 no = str(outcome.get("no_token_id") or "").strip()
-                if condition_id and yes and no:
+                if condition_id in condition_ids and yes and no:
                     pair = (yes, no)
                     previous = token_map.get(condition_id)
                     if previous is not None and previous != pair:
@@ -733,6 +783,25 @@ def bind_current_global_probability_tokens(
                             source="global_current_gamma_fee_schedule",
                             fee_type=str(raw.get("feeType") or "") or None,
                         )
+                        enable_orderbook = _boolish_market_field(
+                            raw,
+                            "enableOrderBook",
+                            "enable_orderbook",
+                            "orderbookEnabled",
+                        )
+                        active = _boolish_market_field(raw, "active", "isActive")
+                        closed = _boolish_market_field(raw, "closed", "isClosed")
+                        accepting_orders = _boolish_market_field(
+                            raw,
+                            "acceptingOrders",
+                            "accepting_orders",
+                        )
+                        executable_allowed = (
+                            enable_orderbook is True
+                            and active is True
+                            and closed is not True
+                            and accepting_orders is True
+                        )
                         base = {
                             "event_id": str(
                                 event.get("id")
@@ -743,10 +812,16 @@ def bind_current_global_probability_tokens(
                             "condition_id": condition_id,
                             "yes_token_id": yes,
                             "no_token_id": no,
-                            "enable_orderbook": bool(raw.get("enableOrderBook")),
-                            "active": bool(raw.get("active")),
-                            "closed": bool(raw.get("closed")),
-                            "accepting_orders": bool(raw.get("acceptingOrders")),
+                            "enable_orderbook": enable_orderbook is True,
+                            "active": active is True,
+                            "closed": closed is True,
+                            "accepting_orders": accepting_orders is True,
+                            "market_end_at": str(
+                                outcome.get("market_end_at")
+                                or raw.get("endDate")
+                                or raw.get("end_date")
+                                or ""
+                            ),
                             "fee_details_json": json.dumps(
                                 fee_details,
                                 sort_keys=True,
@@ -758,12 +833,7 @@ def bind_current_global_probability_tokens(
                             "min_order_size": str(raw.get("orderMinSize") or ""),
                             "tradeability_status_json": json.dumps(
                                 {
-                                    "executable_allowed": bool(
-                                        raw.get("enableOrderBook")
-                                        and raw.get("acceptingOrders")
-                                        and raw.get("active")
-                                        and not raw.get("closed")
-                                    ),
+                                    "executable_allowed": executable_allowed,
                                     "reason": "global_current_gamma_market",
                                 },
                                 sort_keys=True,
@@ -771,6 +841,7 @@ def bind_current_global_probability_tokens(
                             ),
                             "_global_current_gamma": True,
                         }
+                        metadata_conditions.add(condition_id)
                         metadata_sink[(condition_id, yes)] = {
                             **base,
                             "selected_outcome_token_id": yes,
@@ -779,6 +850,11 @@ def bind_current_global_probability_tokens(
                             **base,
                             "selected_outcome_token_id": no,
                         }
+            if metadata_sink is not None and metadata_conditions != condition_ids:
+                missing = ",".join(sorted(condition_ids - metadata_conditions))
+                raise ValueError(
+                    f"GLOBAL_CURRENT_GAMMA_METADATA_INCOMPLETE:{family_key}:{missing}"
+                )
         rebound[family_key] = _rebind_probability_witness_tokens(
             witness,
             token_map_by_condition=token_map,

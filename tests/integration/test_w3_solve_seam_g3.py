@@ -1475,7 +1475,12 @@ def test_global_family_prepare_binds_full_simplex_to_condition_token_pairs():
         assert materialized.probability_witness_identity == probability.witness_identity
 
 
-def _global_book_metadata_conn(probability):
+def _global_book_metadata_conn(
+    probability,
+    *,
+    captured_at="2026-06-13T07:59:00+00:00",
+    freshness_deadline="2026-06-13T08:00:30+00:00",
+):
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     conn.execute(
@@ -1534,8 +1539,8 @@ def _global_book_metadata_conn(probability):
                     '{"fee_rate_fraction":0}',
                     "0.01",
                     "5",
-                    "2026-07-10T07:59:00+00:00",
-                    "2026-07-10T08:00:30+00:00",
+                    captured_at,
+                    freshness_deadline,
                     '{"executable_allowed":true}',
                     '{"unused_append_payload":"must_not_be_read"}',
                 ),
@@ -1668,6 +1673,41 @@ def test_current_global_book_epoch_reads_yes_and_no_symmetrically():
             max_age=_dt.timedelta(seconds=30),
             batch_size=500,
         )
+
+
+def test_current_global_book_epoch_excludes_stale_tradeability_symmetrically():
+    probability = _current_global_book_probability()
+    conn = _global_book_metadata_conn(
+        probability,
+        captured_at="2026-06-13T07:58:00+00:00",
+        freshness_deadline="2026-06-13T07:59:00+00:00",
+    )
+    at = _dt.datetime(2026, 6, 13, 8, 0, tzinfo=_dt.timezone.utc)
+    times = iter((at, at + _dt.timedelta(seconds=1)))
+
+    epoch = capture_current_global_book_epoch(
+        conn,
+        probability_witnesses={probability.family_key: probability},
+        get_books=lambda tokens: {
+            token: {
+                "asset_id": token,
+                "hash": f"book-{token}",
+                "tick_size": "0.01",
+                "min_order_size": "5",
+                "bids": [{"price": "0.20", "size": "100"}],
+                "asks": [{"price": "0.30", "size": "100"}],
+            }
+            for token in tokens
+        },
+        clock=lambda: next(times),
+        max_age=_dt.timedelta(seconds=30),
+    )
+
+    assert epoch.assets == ()
+    assert {state[3] for state in epoch.asset_states} == {"YES", "NO"}
+    assert {state[5] for state in epoch.asset_states} == {
+        "VENUE_METADATA_STALE"
+    }
 
 
 def _current_global_book_probability():
@@ -2010,12 +2050,66 @@ def test_current_gamma_identity_fills_missing_no_without_changing_q():
         (rebound.bindings[0].condition_id, rebound.bindings[0].no_token_id)
     ]["fee_details_json"]
 
+    complete_calls = []
+    closed_metadata = {}
+    closed_event = {
+        **gamma_event,
+        "markets": [
+            {**market, "closed": True, "acceptingOrders": False}
+            for market in gamma_event["markets"]
+        ],
+    }
+    complete = bind_current_global_probability_tokens(
+        forecast,
+        probability_witnesses={original.family_key: original},
+        get_gamma_event=lambda slug: (
+            complete_calls.append(slug) or closed_event
+        ),
+        metadata_sink=closed_metadata,
+    )[original.family_key]
+    assert complete.witness_identity == original.witness_identity
+    assert complete.bindings == original.bindings
+    assert complete.sample_matrix_identity == original.sample_matrix_identity
+    assert complete_calls == ["current-family-slug"]
+    assert len(closed_metadata) == 2 * len(original.bindings)
+    assert {row["accepting_orders"] for row in closed_metadata.values()} == {False}
+
+    at = _dt.datetime(2026, 7, 10, 8, 0, tzinfo=_dt.timezone.utc)
+    times = iter((at, at + _dt.timedelta(seconds=1)))
+    closed_epoch = capture_current_global_book_epoch(
+        _global_book_metadata_conn(original),
+        probability_witnesses={original.family_key: original},
+        get_books=lambda tokens: {
+            token: {
+                "asset_id": token,
+                "hash": f"book-{token}",
+                "tick_size": "0.01",
+                "min_order_size": "5",
+                "bids": [{"price": "0.20", "size": "100"}],
+                "asks": [{"price": "0.30", "size": "100"}],
+            }
+            for token in tokens
+        },
+        clock=lambda: next(times),
+        max_age=_dt.timedelta(seconds=30),
+        metadata_overrides=closed_metadata,
+    )
+    assert closed_epoch.assets == ()
+    assert {state[3] for state in closed_epoch.asset_states} == {"YES", "NO"}
+    assert {state[5] for state in closed_epoch.asset_states} == {
+        "VENUE_NOT_EXECUTABLE"
+    }
+
     gamma_calls = []
     local = bind_current_global_probability_tokens(
         forecast,
         probability_witnesses={missing.family_key: missing},
         get_gamma_event=lambda slug: gamma_calls.append(slug),
-        trade_conn=_global_book_metadata_conn(original),
+        trade_conn=_global_book_metadata_conn(
+            original,
+            captured_at="2026-07-10T07:59:00+00:00",
+            freshness_deadline="2026-07-10T08:00:30+00:00",
+        ),
         checked_at_utc=_dt.datetime(2026, 7, 10, 8, 0, tzinfo=_dt.timezone.utc),
     )[missing.family_key]
     assert gamma_calls == []
@@ -2027,13 +2121,21 @@ def test_current_gamma_identity_fills_missing_no_without_changing_q():
         forecast,
         probability_witnesses={missing.family_key: missing},
         get_gamma_event=lambda slug: stale_calls.append(slug) or gamma_event,
-        trade_conn=_global_book_metadata_conn(original),
+        trade_conn=_global_book_metadata_conn(
+            original,
+            captured_at="2026-07-10T07:59:00+00:00",
+            freshness_deadline="2026-07-10T08:00:30+00:00",
+        ),
         checked_at_utc=_dt.datetime(2026, 7, 10, 8, 1, tzinfo=_dt.timezone.utc),
     )[missing.family_key]
     assert stale_calls == ["current-family-slug"]
     assert stale_fallback.bindings == original.bindings
 
-    partial = _global_book_metadata_conn(original)
+    partial = _global_book_metadata_conn(
+        original,
+        captured_at="2026-07-10T07:59:00+00:00",
+        freshness_deadline="2026-07-10T08:00:30+00:00",
+    )
     missing_condition = missing.bindings[0].condition_id
     partial.execute(
         "DELETE FROM executable_market_snapshot_latest WHERE condition_id = ?",
@@ -2052,7 +2154,11 @@ def test_current_gamma_identity_fills_missing_no_without_changing_q():
     assert partial_calls == ["current-family-slug"]
     assert fallback.bindings == original.bindings
 
-    ambiguous = _global_book_metadata_conn(original)
+    ambiguous = _global_book_metadata_conn(
+        original,
+        captured_at="2026-07-10T07:59:00+00:00",
+        freshness_deadline="2026-07-10T08:00:30+00:00",
+    )
     ambiguous.execute(
         """
         INSERT INTO executable_market_snapshots
