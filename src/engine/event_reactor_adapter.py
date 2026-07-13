@@ -10997,6 +10997,14 @@ def _day0_live_submit_admission_rejection_reason(
     )
 
     event_payload = _payload(event)
+    selected_economics = _valid_selected_qkernel_execution_economics_payload(
+        actionable_payload.get("qkernel_execution_economics"),
+        direction=str(actionable_payload.get("direction") or ""),
+    )
+    global_current_solve = bool(
+        selected_economics is not None
+        and _declares_global_current_state_execution_economics(selected_economics)
+    )
     quote_time = (
         _parse_utc(authority_witness.book_captured_at)
         or _parse_utc(authority_witness.checked_at)
@@ -11010,6 +11018,14 @@ def _day0_live_submit_admission_rejection_reason(
         actionable_payload=actionable_payload,
         event_payload=event_payload,
     )
+    if global_current_solve:
+        # The sealed current-state solve already integrates the exact settlement
+        # bin payoff into q_lcb and the terminal-loss branch.  Reapplying the old
+        # one-quantum and maker-only promotion heuristics would remove the global
+        # optimum from its own feasible set.  Observation/source/quote gates below
+        # remain mandatory.
+        distance_quanta = float("inf")
+        stress_survives = True
     station_id = str(event_payload.get("station_id") or "").strip()
     settlement_source_type = str(
         event_payload.get("settlement_source_type")
@@ -11039,6 +11055,7 @@ def _day0_live_submit_admission_rejection_reason(
         city_allowlist=frozenset(
             {str(actionable_payload.get("city") or event_payload.get("city") or "")}
         ),
+        maker_only_required=not global_current_solve,
     )
     return day0_live_admission_rejection_reason(ctx)
 

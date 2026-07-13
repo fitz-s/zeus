@@ -1220,7 +1220,7 @@ class OpportunityEventReactor:
                 )
                 if claim_lock_bounced:
                     logging.getLogger("zeus.events.reactor").info(
-                        "global winner nonblocking queue probe after same-cycle claim lock-bounce: "
+                        "global winner bounded durable queue retry after same-cycle claim lock-bounce: "
                         "target=%s (selection snapshot released; no venue side effect)",
                         next_claim_event.event_id,
                     )
@@ -1228,7 +1228,6 @@ class OpportunityEventReactor:
                     next_claim_event,
                     current_batch_claim_generations=claim_generations,
                     result=result,
-                    wait_ms=0 if claim_lock_bounced else None,
                 )
                 if not queued:
                     logging.getLogger("zeus.events.reactor").info(

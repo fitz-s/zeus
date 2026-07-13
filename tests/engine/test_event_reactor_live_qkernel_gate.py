@@ -483,6 +483,42 @@ def test_day0_submit_gate_blocks_point_yes_one_bin_fragility() -> None:
     assert reason == "DAY0_ONE_BIN_EDGE_FRAGILE"
 
 
+def test_day0_submit_gate_allows_sealed_global_current_point_taker() -> None:
+    payload = _day0_action_payload(
+        bin_label="Will the highest temperature in Manila be 32°C on July 2?"
+    )
+    payload["qkernel_execution_economics"] = _global_current_qkernel_cert()
+
+    reason = _day0_live_submit_admission_rejection_reason(
+        event=_day0_event_payload(),
+        actionable_payload=payload,
+        authority_witness=_day0_submit_witness(),
+        order_mode="TAKER",
+        decision_time=datetime(2026, 7, 2, 2, 17, tzinfo=timezone.utc),
+    )
+
+    assert reason is None
+
+
+def test_day0_submit_gate_malformed_global_cert_cannot_bypass_fragility() -> None:
+    cert = _global_current_qkernel_cert()
+    cert["global_bin_id"] = "mutated-bin"
+    payload = _day0_action_payload(
+        bin_label="Will the highest temperature in Manila be 32°C on July 2?"
+    )
+    payload["qkernel_execution_economics"] = cert
+
+    reason = _day0_live_submit_admission_rejection_reason(
+        event=_day0_event_payload(),
+        actionable_payload=payload,
+        authority_witness=_day0_submit_witness(),
+        order_mode="TAKER",
+        decision_time=datetime(2026, 7, 2, 2, 17, tzinfo=timezone.utc),
+    )
+
+    assert reason == "DAY0_ONE_BIN_EDGE_FRAGILE"
+
+
 def test_day0_submit_gate_blocks_taker_even_when_range_survives_stress() -> None:
     reason = _day0_live_submit_admission_rejection_reason(
         event=_day0_event_payload(),

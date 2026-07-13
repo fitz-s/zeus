@@ -685,7 +685,7 @@ def test_global_claim_lock_bounce_queues_same_winner_as_typed_transient(
     assert first.claim_lock_bounces == 1
     assert first.retried == 1
     assert queue_calls == 1
-    assert queue_waits == [0]
+    assert queue_waits == [None]
     assert observations["direct_submit_calls"] == 0
     assert "GLOBAL_REAUCTION_WINNER_AWAITS_CLAIM" in TRANSIENT_MONEY_PATH_REASONS
     assert not any("UNKNOWN money-path reason" in row.message for row in caplog.records)
