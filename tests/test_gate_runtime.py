@@ -335,6 +335,51 @@ class TestGateRuntimeAllClear:
 
         gate_runtime.check("live_venue_submit")
 
+    def test_deployment_freshness_dirty_test_topology_allows_live_submit(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
+    ) -> None:
+        """The test registry is CI metadata, not daemon-executable runtime code."""
+
+        monkeypatch.delenv("ZEUS_KILL_SWITCH", raising=False)
+        monkeypatch.delenv("ZEUS_RISK_HALT", raising=False)
+        monkeypatch.delenv("ZEUS_SETTLEMENT_FREEZE", raising=False)
+        sha = "c" * 40
+        monkeypatch.setenv("ZEUS_PROCESS_BOOT_SHA", sha)
+
+        from src.architecture import gate_runtime
+        from src.control import runtime_code_plane
+
+        monkeypatch.setattr(gate_runtime, "_RITUAL_SIGNAL_DIR", tmp_path / "ritual_signal")
+        monkeypatch.setattr(gate_runtime, "REPO_ROOT", tmp_path)
+
+        def _fake_git_status(cmd, **_kwargs):
+            if list(cmd[:2]) == ["git", "status"]:
+                return type(
+                    "Proc",
+                    (),
+                    {
+                        "returncode": 0,
+                        "stdout": " M architecture/test_topology.yaml\n",
+                    },
+                )()
+            raise AssertionError(f"unexpected command: {cmd!r}")
+
+        monkeypatch.setattr(
+            runtime_code_plane.subprocess,
+            "check_output",
+            lambda *_, **__: sha.encode(),
+        )
+        monkeypatch.setattr(runtime_code_plane.subprocess, "run", _fake_git_status)
+
+        assert runtime_code_plane.dirty_runtime_worktree_paths(tmp_path) == ()
+        assert not runtime_code_plane.is_runtime_code_path(
+            "architecture/test_topology.yaml"
+        )
+        assert not runtime_code_plane.is_reduce_only_exit_runtime_path(
+            "architecture/test_topology.yaml"
+        )
+        gate_runtime.check("live_venue_submit")
+
     def test_deployment_freshness_non_runtime_diff_allows_live_submit(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
     ) -> None:

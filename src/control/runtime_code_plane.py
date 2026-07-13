@@ -1,5 +1,5 @@
 # Created: 2026-07-02
-# Last reused or audited: 2026-07-02
+# Last reused or audited: 2026-07-14
 # Authority basis: live-money deployment freshness false-positive after test-only HEAD drift.
 """Runtime-code-plane diff helper for live deployment freshness gates."""
 
@@ -20,6 +20,11 @@ RUNTIME_CODE_PREFIXES = (
 )
 NON_RUNTIME_SCRIPT_PREFIXES = (
     "scripts/audit_",
+)
+NON_RUNTIME_CODE_FILES = frozenset(
+    {
+        "architecture/test_topology.yaml",
+    }
 )
 RUNTIME_CODE_FILES = frozenset(
     {
@@ -44,7 +49,6 @@ REDUCE_ONLY_EXIT_RUNTIME_PREFIXES = (
     "config/",
     "architecture/capabilities.yaml",
     "architecture/source_rationale.yaml",
-    "architecture/test_topology.yaml",
 )
 
 
@@ -203,6 +207,8 @@ def is_runtime_code_path(path: str) -> bool:
     text = str(path or "").strip().replace("\\", "/")
     if not text:
         return False
+    if text in NON_RUNTIME_CODE_FILES:
+        return False
     if any(text.startswith(prefix) for prefix in NON_RUNTIME_SCRIPT_PREFIXES):
         return False
     if text in RUNTIME_CODE_FILES:
@@ -225,6 +231,8 @@ def is_reduce_only_exit_runtime_path(path: str) -> bool:
 
     text = str(path or "").strip().replace("\\", "/")
     if not text:
+        return False
+    if text in NON_RUNTIME_CODE_FILES:
         return False
     if any(text.startswith(prefix) for prefix in NON_RUNTIME_SCRIPT_PREFIXES):
         return False
