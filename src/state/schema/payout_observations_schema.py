@@ -26,10 +26,10 @@ holds regardless of which Python path writes the row.
 
 ``state`` is one of UNKNOWN / UNRESOLVED / RESOLVED_ZERO / RESOLVED_NONZERO
 (LX-T1 adjudication: missing/timeout/partial/unparsable data classifies
-UNKNOWN, NEVER a fabricated zero payout). The table CHECK constraint ties
-state to payout_denominator/payout_numerator so an inconsistent row (e.g.
-state=RESOLVED_NONZERO with payout_numerator=0, or state=UNKNOWN carrying a
-non-null payout value) cannot be inserted at all.
+UNKNOWN, NEVER a fabricated zero payout). UNKNOWN also covers a partial RPC
+observation, so either numeric component may be retained when the other is
+missing; a complete payout tuple cannot still be named UNKNOWN. The table
+CHECK constraint ties this grammar to payout_denominator/payout_numerator.
 
 There is deliberately NO unique index enforcing "at most one active row per
 group" at the schema level: the natural write order is read-prior ->
@@ -46,10 +46,9 @@ selection mechanism.
 
 Wave-1.5 tightening: the ``state = 'UNKNOWN'`` CHECK branch used to impose no
 constraint on the payout columns at all, so the DB permitted an UNKNOWN row
-carrying non-null payout values even though the writer never does this
-(blast radius was nil, but the DB-level guarantee the adjudication asked for
-was incomplete). Tightened to require ``payout_numerator IS NULL AND
-payout_denominator IS NULL`` whenever ``state = 'UNKNOWN'``. Because a SQLite
+carrying a complete payout tuple. Tightened to require at least one missing
+component whenever ``state = 'UNKNOWN'`` while preserving partial chain facts.
+Because a SQLite
 CHECK cannot be ALTERed, ``ensure_table`` upgrades an existing
 pre-tightening table via ``_rebuild_stale_unknown_check``: a guarded
 SAVEPOINT rebuild that preserves rows when any exist (mirrors
@@ -67,13 +66,13 @@ import sqlite3
 TABLE_NAME = "payout_observations"
 
 # Present in CREATE_TABLE_SQL's CHECK clause iff the UNKNOWN branch has
-# already been tightened to require NULL/NULL payout columns — used by
+# already been tightened to require an incomplete payout tuple — used by
 # _rebuild_stale_unknown_check to decide whether an existing on-disk table
 # needs a rebuild. Kept as a literal substring of CREATE_TABLE_SQL below (not
 # a separate hand-maintained copy) so the two can never drift apart silently;
 # see the assertion at module import time.
 _UNKNOWN_TIGHTENED_MARKER = (
-    "(state = 'UNKNOWN' AND payout_numerator IS NULL AND payout_denominator IS NULL)"
+    "(state = 'UNKNOWN' AND (payout_numerator IS NULL OR payout_denominator IS NULL))"
 )
 
 CREATE_TABLE_SQL = """
@@ -92,7 +91,7 @@ CREATE TABLE IF NOT EXISTS payout_observations (
     source              TEXT NOT NULL DEFAULT 'chain_rpc',
     superseded_by       INTEGER REFERENCES payout_observations(id),
     CHECK (
-        (state = 'UNKNOWN' AND payout_numerator IS NULL AND payout_denominator IS NULL)
+        (state = 'UNKNOWN' AND (payout_numerator IS NULL OR payout_denominator IS NULL))
         OR (state = 'UNRESOLVED' AND payout_denominator = 0)
         OR (
             state IN ('RESOLVED_ZERO', 'RESOLVED_NONZERO')
@@ -169,10 +168,9 @@ def _rebuild_stale_unknown_check(conn: sqlite3.Connection) -> None:
     legacy row that violates the new invariant). If rows exist, rebuild via
     the repo's guarded-SAVEPOINT copy idiom (mirrors
     exit_timing_attribution_schema._rebuild_stale_category_check): a legacy
-    UNKNOWN row that already (wrongly) carries a non-null payout value will
-    make the copy's INSERT raise a CHECK violation — that is the CORRECT
-    fail-closed behavior (an operator must resolve it), not something this
-    function should paper over.
+    UNKNOWN row carrying a complete payout tuple will make the copy's INSERT
+    raise a CHECK violation. Partial rows remain truthful UNKNOWN observations
+    and survive byte-for-byte.
     """
     row = conn.execute(
         "SELECT sql FROM sqlite_master WHERE type='table' AND name='payout_observations'"

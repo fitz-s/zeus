@@ -344,34 +344,32 @@ class TestAppendObservation:
 
 
 # ---------------------------------------------------------------------------
-# CHECK constraint — UNKNOWN-never-a-value (wave-1.5 tightening)
+# CHECK constraint — UNKNOWN-requires-incomplete-tuple (wave-1.5 tightening)
 # ---------------------------------------------------------------------------
 
 
-class TestUnknownNeverCarriesAValue:
-    def test_unknown_with_numerator_rejected(self, conn):
-        with pytest.raises(sqlite3.IntegrityError):
-            conn.execute(
-                """
-                INSERT INTO payout_observations
-                    (condition_id, outcome_index, payout_numerator, payout_denominator,
-                     state, observed_at)
-                VALUES (?, 0, 1, NULL, 'UNKNOWN', 't0')
-                """,
-                (_CONDITION_A,),
-            )
+class TestUnknownRequiresIncompleteTuple:
+    def test_unknown_with_partial_numerator_accepted(self, conn):
+        conn.execute(
+            """
+            INSERT INTO payout_observations
+                (condition_id, outcome_index, payout_numerator, payout_denominator,
+                 state, observed_at)
+            VALUES (?, 0, 1, NULL, 'UNKNOWN', 't0')
+            """,
+            (_CONDITION_A,),
+        )
 
-    def test_unknown_with_denominator_rejected(self, conn):
-        with pytest.raises(sqlite3.IntegrityError):
-            conn.execute(
-                """
-                INSERT INTO payout_observations
-                    (condition_id, outcome_index, payout_numerator, payout_denominator,
-                     state, observed_at)
-                VALUES (?, 0, NULL, 100, 'UNKNOWN', 't0')
-                """,
-                (_CONDITION_A,),
-            )
+    def test_unknown_with_partial_denominator_accepted(self, conn):
+        conn.execute(
+            """
+            INSERT INTO payout_observations
+                (condition_id, outcome_index, payout_numerator, payout_denominator,
+                 state, observed_at)
+            VALUES (?, 0, NULL, 100, 'UNKNOWN', 't0')
+            """,
+            (_CONDITION_A,),
+        )
 
     def test_unknown_with_both_values_rejected(self, conn):
         with pytest.raises(sqlite3.IntegrityError):
@@ -443,13 +441,22 @@ class TestEnsureTableUpgradesStaleCheck:
         conn = sqlite3.connect(":memory:")
         self._create_legacy_table(conn)
         ensure_table(conn)
+        conn.execute(
+            """
+            INSERT INTO payout_observations
+                (condition_id, outcome_index, payout_numerator, payout_denominator,
+                 state, observed_at)
+            VALUES (?, 0, 1, NULL, 'UNKNOWN', 't0')
+            """,
+            (_CONDITION_A,),
+        )
         with pytest.raises(sqlite3.IntegrityError):
             conn.execute(
                 """
                 INSERT INTO payout_observations
                     (condition_id, outcome_index, payout_numerator, payout_denominator,
                      state, observed_at)
-                VALUES (?, 0, 1, NULL, 'UNKNOWN', 't0')
+                VALUES (?, 1, 1, 1, 'UNKNOWN', 't1')
                 """,
                 (_CONDITION_A,),
             )
@@ -469,25 +476,61 @@ class TestEnsureTableUpgradesStaleCheck:
             """,
             (_CONDITION_A,),
         )
+        conn.execute(
+            """
+            INSERT INTO payout_observations
+                (condition_id, outcome_index, payout_numerator, payout_denominator,
+                 state, block_number, block_hash, observed_at, source)
+            VALUES (?, 1, NULL, 1, 'UNKNOWN', 5, '0xaa', 't0', 'chain_rpc')
+            """,
+            (_CONDITION_A,),
+        )
         conn.commit()
         ensure_table(conn)
-        row = conn.execute(
+        rows = conn.execute(
             "SELECT condition_id, outcome_index, payout_numerator, payout_denominator, "
             "state, block_number, block_hash, observed_at, source, superseded_by "
-            "FROM payout_observations"
-        ).fetchone()
-        assert row == (_CONDITION_A, 0, 100, 100, "RESOLVED_NONZERO", 5, "0xaa", "t0", "chain_rpc", None)
-        # The tightened CHECK is now enforced going forward.
+            "FROM payout_observations ORDER BY outcome_index"
+        ).fetchall()
+        assert rows == [
+            (_CONDITION_A, 0, 100, 100, "RESOLVED_NONZERO", 5, "0xaa", "t0", "chain_rpc", None),
+            (_CONDITION_A, 1, None, 1, "UNKNOWN", 5, "0xaa", "t0", "chain_rpc", None),
+        ]
+        # The tightened CHECK rejects complete UNKNOWN tuples going forward.
         with pytest.raises(sqlite3.IntegrityError):
             conn.execute(
                 """
                 INSERT INTO payout_observations
                     (condition_id, outcome_index, payout_numerator, payout_denominator,
                      state, observed_at)
-                VALUES (?, 1, 1, NULL, 'UNKNOWN', 't1')
+                VALUES (?, 1, 1, 1, 'UNKNOWN', 't1')
                 """,
                 (_CONDITION_A,),
             )
+        conn.close()
+
+    def test_complete_unknown_aborts_rebuild_without_mutating_legacy_table(self):
+        conn = sqlite3.connect(":memory:")
+        self._create_legacy_table(conn)
+        conn.execute(
+            """
+            INSERT INTO payout_observations
+                (condition_id, outcome_index, payout_numerator, payout_denominator,
+                 state, observed_at)
+            VALUES (?, 0, 1, 1, 'UNKNOWN', 't0')
+            """,
+            (_CONDITION_A,),
+        )
+        conn.commit()
+
+        with pytest.raises(sqlite3.IntegrityError):
+            ensure_table(conn)
+
+        row = conn.execute(
+            "SELECT payout_numerator, payout_denominator, state "
+            "FROM payout_observations"
+        ).fetchone()
+        assert row == (1, 1, "UNKNOWN")
         conn.close()
 
     def test_already_tightened_table_is_a_noop(self, conn):
