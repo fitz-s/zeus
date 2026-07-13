@@ -965,7 +965,7 @@ def test_entry_economics_current_state_winner_ignores_legacy_profit_density_floo
     ("direction", "side"),
     ((Direction("buy_yes"), "YES"), (Direction("buy_no"), "NO")),
 )
-def test_entry_economics_current_state_cannot_bypass_declared_price_floor(
+def test_entry_economics_current_state_uses_terminal_certificate_not_legacy_price_floor(
     direction,
     side,
 ):
@@ -981,6 +981,19 @@ def test_entry_economics_current_state_cannot_bypass_declared_price_floor(
         global_expected_cost_usd="1.0",
         global_max_spend_usd="1.0",
         global_target_shares="1000",
+        global_robust_delta_log_wealth=0.10,
+        global_robust_ev_usd=799.0,
+        global_cut_time_win_probability_lcb=0.80,
+        global_cut_time_loss_probability_ucb=0.20,
+        global_terminal_win_probability_lcb=0.80,
+        global_terminal_loss_probability_ucb=0.20,
+        global_terminal_loss_payoff_usd="-1.0",
+        global_terminal_win_payoff_usd="999.0",
+        global_terminal_median_payoff_usd="999.0",
+        global_terminal_wealth_after_loss_usd="99.0",
+        global_terminal_wealth_after_win_usd="1099.0",
+        global_cut_time_expected_value_diagnostic_usd=799.0,
+        global_expected_value_diagnostic_usd=799.0,
     )
     verdict = _entry_economics_component(
         _intent(
@@ -996,9 +1009,8 @@ def test_entry_economics_current_state_cannot_bypass_declared_price_floor(
         actionable_payload={"qkernel_execution_economics": economics},
     )
 
-    assert verdict["allowed"] is False
-    assert verdict["reason"] == "limit_price_below_strategy_entry_floor"
-    assert verdict["details"]["effective_min_entry_price"] == pytest.approx(0.10)
+    assert verdict["allowed"] is True
+    assert verdict["reason"] == "allowed"
 
 
 def test_recomputed_current_state_marker_cannot_bypass_durable_legacy_certificate():

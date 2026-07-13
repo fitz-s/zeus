@@ -355,7 +355,7 @@ class TestLayer2VerifyPreSubmitForCommand:
         ("direction", "token_id", "side"),
         (("buy_yes", "yes-1", "YES"), ("buy_no", "no-1", "NO")),
     )
-    def test_current_state_solver_keeps_same_declared_price_floor_for_yes_and_no(
+    def test_current_state_solver_ignores_same_legacy_absolute_floors_for_yes_and_no(
         self, direction, token_id, side
     ):
         ps = _maker_pre_submit(
@@ -366,7 +366,7 @@ class TestLayer2VerifyPreSubmitForCommand:
             limit_price=0.40,
             size=1.0,
             expected_edge=0.20,
-            min_entry_price=0.10,
+            min_entry_price=0.95,
             min_expected_profit_usd=1000.0,
             min_submit_edge_density=1000.0,
         )
@@ -409,7 +409,7 @@ class TestLayer2VerifyPreSubmitForCommand:
         ("direction", "token_id", "side"),
         (("buy_yes", "yes-1", "YES"), ("buy_no", "no-1", "NO")),
     )
-    def test_current_state_solver_rejects_same_subfloor_price_for_yes_and_no(
+    def test_current_state_solver_accepts_low_price_with_positive_terminal_certificate(
         self, direction, token_id, side
     ):
         ps = _maker_pre_submit(
@@ -455,11 +455,7 @@ class TestLayer2VerifyPreSubmitForCommand:
         )
         ps["qkernel_execution_economics"] = economics
 
-        with pytest.raises(
-            CertificateVerificationError,
-            match="limit_price below strategy entry floor",
-        ):
-            self._call(ps)
+        self._call(ps)
 
     def test_current_state_solver_still_rejects_non_positive_after_cost_edge(self):
         ps = _maker_pre_submit(

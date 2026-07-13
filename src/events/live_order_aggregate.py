@@ -1102,12 +1102,12 @@ def _validate_pre_submit_revalidation_payload(
     )
     live_min_entry_price = floor_decision.live_min_entry_price
     effective_min_entry_price = floor_decision.effective_min_entry_price
-    if (
+    if not current_state_solve and (
         min_entry_price + 1e-12 < live_min_entry_price
         and not floor_decision.qkernel_low_price_floor_authorized
     ):
         raise LiveOrderAggregateError("PreSubmitRevalidated min_entry_price below live floor")
-    if limit_price + 1e-12 < effective_min_entry_price:
+    if not current_state_solve and limit_price + 1e-12 < effective_min_entry_price:
         raise LiveOrderAggregateError("PreSubmitRevalidated entry price below strategy floor")
     if not str(payload.get("expected_edge_source_certificate_hash") or "").strip():
         raise LiveOrderAggregateError("PreSubmitRevalidated requires expected_edge_source_certificate_hash")

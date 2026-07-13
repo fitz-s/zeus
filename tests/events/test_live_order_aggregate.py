@@ -1225,7 +1225,9 @@ def test_pre_submit_current_state_winner_ignores_legacy_profit_density_floors(
     ("direction", "side"),
     (("buy_yes", "YES"), ("buy_no", "NO")),
 )
-def test_pre_submit_current_state_cannot_bypass_declared_price_floor(direction, side):
+def test_pre_submit_current_state_uses_terminal_certificate_not_legacy_price_floor(
+    direction, side
+):
     ledger = LiveOrderAggregateLedger(_conn())
     payload = _pre_submit_payload(
         direction=direction,
@@ -1256,6 +1258,41 @@ def test_pre_submit_current_state_cannot_bypass_declared_price_floor(direction, 
             "selection_guard_abstained": False,
             "selection_guard_cell_key": "current-sample-floor",
             "selection_guard_n": 64,
+            "global_actuation_identity": "global-current-floor",
+            "global_optimum_semantics": "CUT_TIME_GLOBAL_OPTIMUM",
+            "global_candidate_id": "candidate-current-floor",
+            "global_bin_id": "bin-1",
+            "global_universe_witness_identity": "universe-current-floor",
+            "global_wealth_witness_identity": "wealth-current-floor",
+            "global_selection_epoch_identity": "epoch-current-floor",
+            "global_selection_cut_at": "2026-07-13T02:00:00+00:00",
+            "global_selection_decision_at": "2026-07-13T02:00:01+00:00",
+            "global_jit_book_hash": "book-current-floor",
+            "global_jit_venue_book_hash": "venue-book-current-floor",
+            "global_jit_book_snapshot_id": "snapshot-current-floor",
+            "global_jit_execution_curve_identity": "curve-current-floor",
+            "global_target_shares": "1000",
+            "global_limit_price": "0.001",
+            "global_expected_fill_price_before_fee": "0.001",
+            "global_expected_cost_usd": "1.0",
+            "global_max_spend_usd": "1.0",
+            "global_robust_delta_log_wealth": 0.10,
+            "global_robust_ev_usd": 799.0,
+            "global_cut_time_win_probability_lcb": 0.80,
+            "global_cut_time_loss_probability_ucb": 0.20,
+            "global_terminal_win_probability_lcb": 0.80,
+            "global_terminal_loss_probability_ucb": 0.20,
+            "global_terminal_loss_payoff_usd": "-1.0",
+            "global_terminal_win_payoff_usd": "999.0",
+            "global_terminal_median_payoff_usd": "999.0",
+            "global_terminal_wealth_after_loss_usd": "99.0",
+            "global_terminal_wealth_after_win_usd": "1099.0",
+            "global_cut_time_expected_value_diagnostic_usd": 799.0,
+            "global_expected_value_diagnostic_usd": 799.0,
+            "global_expected_value_semantics": (
+                "DIAGNOSTIC_EXPECTATION_NOT_REALIZED_GAIN"
+            ),
+            "global_terminal_payoff_semantics": "BINARY_0_1",
         }
     )
     for legacy_field in (
@@ -1285,18 +1322,17 @@ def test_pre_submit_current_state_cannot_bypass_declared_price_floor(direction, 
         source_authority="decision_kernel",
     )
 
-    with pytest.raises(LiveOrderAggregateError, match="entry price below strategy floor"):
-        ledger.append_event(
-            aggregate_id="event-floor:intent-floor",
-            event_type="PreSubmitRevalidated",
-            payload={
-                **payload,
-                "event_id": "event-floor",
-                "final_intent_id": "intent-floor",
-            },
-            occurred_at=NOW,
-            source_authority="engine_adapter",
-        )
+    ledger.append_event(
+        aggregate_id="event-floor:intent-floor",
+        event_type="PreSubmitRevalidated",
+        payload={
+            **payload,
+            "event_id": "event-floor",
+            "final_intent_id": "intent-floor",
+        },
+        occurred_at=NOW,
+        source_authority="engine_adapter",
+    )
 
 
 def test_pre_submit_recomputed_current_state_marker_cannot_bypass_decision_proof():
