@@ -9020,10 +9020,11 @@ def run_edli_continuous_redecision_screen_cycle(*, screen_lock) -> None:
             if not confirmed_entry_scope and not confirmed_rest_scope and not confirmed_held_scope:
                 from src.state.db import world_write_mutex as _world_write_mutex
 
-                world = get_world_connection()
                 emit_mutex = _world_write_mutex()
                 emit_mutex.acquire()
+                world = None
                 try:
+                    world = get_world_connection()
                     expired_unadmitted = _edli_expire_unadmitted_redecision_pending(
                         world,
                         set(),
@@ -9031,11 +9032,12 @@ def run_edli_continuous_redecision_screen_cycle(*, screen_lock) -> None:
                     )
                     world.commit()
                 finally:
+                    if world is not None:
+                        try:
+                            world.close()
+                        except Exception:  # noqa: BLE001
+                            pass
                     emit_mutex.release()
-                    try:
-                        world.close()
-                    except Exception:  # noqa: BLE001
-                        pass
                 _log.info(
                     "edli_redecision_screen: confirmation refresh produced no fresh "
                     "screened money-path substrate; skipping emit this tick rather "
@@ -9154,13 +9156,14 @@ def run_edli_continuous_redecision_screen_cycle(*, screen_lock) -> None:
         if not all_families:
             from src.state.db import world_write_mutex as _world_write_mutex
 
-            world = get_world_connection()
             emit_mutex = _world_write_mutex()
             emit_lock_timeout_s = _edli_emit_lock_timeout_seconds(edli_cfg)
             emit_acquired = False
+            world = None
             try:
                 emit_acquired = _edli_acquire_mutex(emit_mutex, timeout=emit_lock_timeout_s)
                 if emit_acquired:
+                    world = get_world_connection()
                     expired_unadmitted = _edli_expire_unadmitted_redecision_pending(
                         world,
                         set(),
@@ -9174,12 +9177,13 @@ def run_edli_continuous_redecision_screen_cycle(*, screen_lock) -> None:
                         emit_lock_timeout_s,
                     )
             finally:
+                if world is not None:
+                    try:
+                        world.close()
+                    except Exception:  # noqa: BLE001
+                        pass
                 if emit_acquired:
                     emit_mutex.release()
-                try:
-                    world.close()
-                except Exception:  # noqa: BLE001
-                    pass
             _log.info(
                 "edli_redecision_screen: entry_candidates=%d entry_spine_confirmed=%d "
                 "entry_families=0 rest_pulls=%d "
@@ -9205,7 +9209,6 @@ def run_edli_continuous_redecision_screen_cycle(*, screen_lock) -> None:
         forecasts_ro = get_forecasts_connection_read_only()
         world_scan_ro = None
         try:
-            world_prune = get_world_connection()
             prune_mutex = _world_write_mutex()
             prune_lock_timeout_s = _edli_emit_lock_timeout_seconds(edli_cfg)
             prune_acquired = _edli_acquire_mutex(prune_mutex, timeout=prune_lock_timeout_s)
@@ -9215,12 +9218,10 @@ def run_edli_continuous_redecision_screen_cycle(*, screen_lock) -> None:
                     "for stale-pending prune after %.3fs; no venue side effect attempted.",
                     prune_lock_timeout_s,
                 )
-                try:
-                    world_prune.close()
-                except Exception:  # noqa: BLE001
-                    pass
                 return
+            world_prune = None
             try:
+                world_prune = get_world_connection()
                 expired_stale_pending = _edli_expire_unadmitted_redecision_pending(
                     world_prune,
                     set(all_families),
@@ -9236,11 +9237,12 @@ def run_edli_continuous_redecision_screen_cycle(*, screen_lock) -> None:
                 )
                 world_prune.commit()
             finally:
+                if world_prune is not None:
+                    try:
+                        world_prune.close()
+                    except Exception:  # noqa: BLE001
+                        pass
                 prune_mutex.release()
-                try:
-                    world_prune.close()
-                except Exception:  # noqa: BLE001
-                    pass
             world_scan_ro = get_world_connection_read_only()
             pending = _edli_pending_entity_keys(world_scan_ro, event_types=(REDECISION_EVENT_TYPE,))
             pending_families = _edli_redecision_family_keys_from_entity_keys(pending)
@@ -9274,10 +9276,10 @@ def run_edli_continuous_redecision_screen_cycle(*, screen_lock) -> None:
                 except Exception:  # noqa: BLE001
                     pass
 
-        world = get_world_connection()
         emit_mutex = _world_write_mutex()
         emit_lock_timeout_s = _edli_emit_lock_timeout_seconds(edli_cfg)
         emit_acquired = False
+        world = None
         try:
             emit_acquired = _edli_acquire_mutex(emit_mutex, timeout=emit_lock_timeout_s)
             if not emit_acquired:
@@ -9287,6 +9289,7 @@ def run_edli_continuous_redecision_screen_cycle(*, screen_lock) -> None:
                     emit_lock_timeout_s,
                 )
                 return
+            world = get_world_connection()
             expired_unadmitted = _edli_expire_unadmitted_redecision_pending(
                 world,
                 set(all_families),
@@ -9321,12 +9324,13 @@ def run_edli_continuous_redecision_screen_cycle(*, screen_lock) -> None:
             emitted = EventWriter(world).write_many(fresh_events)
             world.commit()
         finally:
+            if world is not None:
+                try:
+                    world.close()
+                except Exception:  # noqa: BLE001
+                    pass
             if emit_acquired:
                 emit_mutex.release()
-            try:
-                world.close()
-            except Exception:  # noqa: BLE001
-                pass
 
         # 3) CANCEL the pulled rests via the EXISTING shared venue-cancel-journal path (no new
         #    venue call site). The next reactor cycle re-decides the re-emitted family at fresh price.

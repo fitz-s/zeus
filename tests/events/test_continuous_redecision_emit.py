@@ -2156,6 +2156,39 @@ def test_redecision_screen_write_locks_are_bounded_and_emit_uses_prefetched_pend
     assert "if event.entity_key in pending:" in emit_block
 
 
+def test_redecision_screen_opens_world_writer_only_after_mutex():
+    """Every screen writer must use mutex -> connection -> close -> release order."""
+
+    src = inspect.getsource(reactor.run_edli_continuous_redecision_screen_cycle)
+
+    no_fresh = src[
+        src.index("if not confirmed_entry_scope and not confirmed_rest_scope") :
+        src.index("confirmation refresh produced no fresh")
+    ]
+    no_family = src[
+        src.index("if not all_families:") :
+        src.index("# 2) EMIT EDLI_REDECISION_PENDING")
+    ]
+    prune = src[
+        src.index("forecasts_ro = get_forecasts_connection_read_only()") :
+        src.index("world_scan_ro = get_world_connection_read_only()")
+    ]
+    emit = src[
+        src.rindex("emit_mutex = _world_write_mutex()") :
+        src.index("# 3) CANCEL the pulled rests")
+    ]
+
+    for block, acquire in (
+        (no_fresh, "emit_mutex.acquire()"),
+        (no_family, "_edli_acquire_mutex(emit_mutex"),
+        (prune, "_edli_acquire_mutex(prune_mutex"),
+        (emit, "_edli_acquire_mutex(emit_mutex"),
+    ):
+        assert block.index(acquire) < block.index("get_world_connection()")
+        assert block.index("get_world_connection()") < block.index(".close()")
+        assert block.index(".close()") < block.index(".release()")
+
+
 def test_reactor_prune_archives_orphan_processing_rows():
     """Active rows without opportunity_events provenance must leave the working set."""
 

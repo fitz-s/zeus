@@ -21,8 +21,8 @@ import threading
 
 import pytest
 
+from src.state import db as state_db
 from src.state.db import (
-    ZEUS_WORLD_DB_PATH,
     WorldMutexIOViolation,
     assert_no_world_mutex_held_for_io,
     world_mutex_is_held,
@@ -73,7 +73,8 @@ def test_world_mutex_respects_cross_process_world_writer_flock():
     threading.Lock is insufficient once both daemons write zeus-world.db.
     """
     _reset_guard()
-    lock_path = ZEUS_WORLD_DB_PATH.with_name(ZEUS_WORLD_DB_PATH.name + ".writer-lock.live")
+    world_path = state_db.ZEUS_WORLD_DB_PATH
+    lock_path = world_path.with_name(world_path.name + ".writer-lock.live")
     script = f"""
 import fcntl, os, sys, time
 fd = os.open({str(lock_path)!r}, os.O_RDWR | os.O_CREAT, 0o644)
