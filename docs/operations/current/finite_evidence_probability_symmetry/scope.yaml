@@ -1,14 +1,18 @@
-id: finite_evidence_probability_symmetry
-status: active
-owner: agent
+packet: current/finite_evidence_probability_symmetry
+status: in_progress
 frontier:
 - source-clock probability authority
 - current-evidence ambiguity carrier
 - live posterior materialization and auction proof
-allowed_files:
+- reduce-only exit liveness
+- exit economic symmetry
+- current wealth uncertainty representation
+in_scope:
 - docs/operations/current/finite_evidence_probability_symmetry/**
 - docs/operations/current_state.md
 - docs/authority/replacement_final_form_2026_06_09.md
+- docs/reference/zeus_execution_lifecycle_reference.md
+- docs/reference/AGENTS.md
 - src/data/replacement_forecast_materializer.py
 - src/execution/venue_sync_contract.py
 - src/engine/cycle_runtime.py
@@ -19,6 +23,10 @@ allowed_files:
 - src/execution/exchange_reconcile.py
 - src/execution/executor.py
 - src/execution/exit_lifecycle.py
+- src/architecture/gate_runtime.py
+- src/state/portfolio.py
+- src/engine/global_auction_universe.py
+- architecture/capabilities.yaml
 - tests/engine/test_event_reactor_live_qkernel_gate.py
 - tests/test_finite_evidence_probability_symmetry.py
 - tests/execution/test_venue_sync_contract.py
@@ -28,11 +36,16 @@ allowed_files:
 - tests/test_exchange_reconcile.py
 - tests/test_executor_command_split.py
 - tests/test_exit_safety.py
+- tests/test_gate_runtime.py
+- tests/test_lifecycle.py
+- tests/test_day0_exit_gate.py
+- tests/test_live_safety_invariants.py
+- tests/integration/test_w3_solve_seam_g3.py
 - tests/solve/test_shim_decide.py
 - tests/integration/test_qkernel_spine_blockers_pr409.py
 - tests/AGENTS.md
 - architecture/test_topology.yaml
-forbidden_files:
+out_of_scope:
 - state/zeus-world.db
 - state/zeus-world.db-*
 live_side_effects_allowed: true

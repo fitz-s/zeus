@@ -1154,10 +1154,13 @@ def current_portfolio_wealth_witness(
 ) -> PortfolioWealthWitness:
     """Build one current terminal-wealth bound from chain collateral and positions.
 
-    The lower bound is outcome-independent cash. The upper bound adds every held
-    binary claim at its maximum $1 payoff. Unknown inventory or in-flight buys make
-    the account endowment ambiguous and fail closed; the global optimizer may not
-    invent their terminal payoff or count the same collateral twice.
+    The lower bound is current chain cash. The upper bound adds every verified
+    binary claim and every unresolved local claim at its maximum $1 payoff.
+    An unresolved claim is never spendable cash: representing only its maximum
+    terminal payoff makes new-order growth no less conservative without turning
+    one confirmed-fill dispute into a portfolio-wide veto. Unknown chain assets
+    and in-flight buys still fail closed because their size or cash effect is not
+    bounded by the canonical open-position projection.
     """
 
     if decision_at_utc.tzinfo is None or max_age <= timedelta(0):
@@ -1243,6 +1246,7 @@ def current_portfolio_wealth_witness(
 
         position_max_age = timedelta(seconds=_CHAIN_SEEN_AT_MAX_AGE_SECONDS)
         represented_micro: dict[str, int] = {}
+        uncertain_micro: dict[str, int] = {}
         position_rows = []
         for position in positions:
             token = _position_token(position)
@@ -1257,27 +1261,32 @@ def current_portfolio_wealth_witness(
             shares = Decimal(str(getattr(position, "chain_shares", 0) or 0))
             if not token or shares <= 0:
                 raise ValueError("CURRENT_WEALTH_OPEN_POSITION_INVALID")
-            if not has_current_money_risk_chain_state(chain_state):
-                raise ValueError("CURRENT_WEALTH_POSITION_CHAIN_STATE_UNVERIFIED")
             micro = int((shares * Decimal("1000000")).to_integral_value())
             if token in token_balances:
-                chain_verified_at = captured_at
+                evidence = "collateral_snapshot"
             else:
+                evidence = "uncertain_local_claim"
                 try:
                     chain_verified_at = datetime.fromisoformat(
                         str(getattr(position, "chain_verified_at", "") or "").replace(
                             "Z", "+00:00"
                         )
                     )
-                except ValueError as exc:
-                    raise ValueError("CURRENT_WEALTH_POSITION_CHAIN_TIME_INVALID") from exc
-                if chain_verified_at.tzinfo is None:
-                    raise ValueError("CURRENT_WEALTH_POSITION_CHAIN_TIME_INVALID")
-                chain_verified_at = chain_verified_at.astimezone(timezone.utc)
-                chain_age = decision_at_utc.astimezone(timezone.utc) - chain_verified_at
-                if chain_age.total_seconds() < 0.0 or chain_age > position_max_age:
-                    raise ValueError("CURRENT_WEALTH_POSITION_CHAIN_EXPIRED")
-            represented_micro[token] = represented_micro.get(token, 0) + micro
+                except ValueError:
+                    chain_verified_at = None
+                if (
+                    chain_verified_at is not None
+                    and chain_verified_at.tzinfo is not None
+                    and has_current_money_risk_chain_state(chain_state)
+                ):
+                    chain_verified_at = chain_verified_at.astimezone(timezone.utc)
+                    chain_age = (
+                        decision_at_utc.astimezone(timezone.utc) - chain_verified_at
+                    )
+                    if 0.0 <= chain_age.total_seconds() <= position_max_age.total_seconds():
+                        evidence = "position_chain_seen"
+            target = represented_micro if evidence != "uncertain_local_claim" else uncertain_micro
+            target[token] = target.get(token, 0) + micro
             position_rows.append(
                 (
                     str(getattr(position, "trade_id", "") or ""),
@@ -1285,6 +1294,7 @@ def current_portfolio_wealth_witness(
                     str(shares),
                     chain_state,
                     str(getattr(position, "state", "") or ""),
+                    evidence,
                 )
             )
         if token_balances:
@@ -1312,6 +1322,10 @@ def current_portfolio_wealth_witness(
             (Decimal(amount) / Decimal("1000000") for amount in held_balances.values()),
             Decimal("0"),
         )
+        ceiling += sum(
+            (Decimal(amount) / Decimal("1000000") for amount in uncertain_micro.values()),
+            Decimal("0"),
+        )
         spendable = Decimal(spendable_micro) / Decimal("1000000")
         reservations = Decimal(reserved_micro + unsettled_micro) / Decimal("1000000")
 
@@ -1330,9 +1344,13 @@ def current_portfolio_wealth_witness(
             ).encode("utf-8")
         ).hexdigest()
         position_set_hash = hashlib.sha256(
-            repr((tuple(sorted(position_rows)), tuple(sorted(held_balances.items())))).encode(
-                "utf-8"
-            )
+            repr(
+                (
+                    tuple(sorted(position_rows)),
+                    tuple(sorted(held_balances.items())),
+                    tuple(sorted(uncertain_micro.items())),
+                )
+            ).encode("utf-8")
         ).hexdigest()
         identity = portfolio_wealth_identity(
             ledger_snapshot_id=ledger_snapshot_id,

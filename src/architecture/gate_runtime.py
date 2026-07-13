@@ -127,66 +127,12 @@ def _deployment_freshness_mismatch() -> tuple[bool, str]:
     )
 
 
-def _reduce_only_exit_deployment_freshness_mismatch() -> tuple[bool, str]:
-    """Block stale reduce-only exits only when the exit submit plane changed."""
-
-    boot_sha = os.environ.get("ZEUS_PROCESS_BOOT_SHA", "").strip()
-    if not boot_sha:
-        return False, "ZEUS_PROCESS_BOOT_SHA='' (not a managed live daemon process)"
-    try:
-        from src.control.runtime_code_plane import (
-            dirty_runtime_worktree_paths,
-            is_reduce_only_exit_runtime_path,
-            runtime_code_plane_diff,
-        )
-
-        code_plane = runtime_code_plane_diff(
-            REPO_ROOT,
-            boot_sha=boot_sha,
-            timeout=2,
-        )
-        dirty_paths = dirty_runtime_worktree_paths(REPO_ROOT, timeout=2)
-    except Exception as exc:  # noqa: BLE001
-        return True, f"runtime_code_plane_unreadable:{type(exc).__name__}"
-    if code_plane.error:
-        return True, (
-            f"runtime_code_plane_{code_plane.status}:{code_plane.error}:"
-            f"boot_sha={boot_sha[:8]} current_sha={code_plane.current_sha[:8]}"
-        )
-    dirty_exit_paths = tuple(
-        path for path in dirty_paths if is_reduce_only_exit_runtime_path(path)
-    )
-    if dirty_exit_paths:
-        return True, (
-            f"reduce_only_exit_runtime_worktree_dirty:boot_sha={boot_sha[:8]} "
-            f"current_sha={code_plane.current_sha[:8]} paths={list(dirty_exit_paths[:5])}"
-        )
-    if not code_plane.sha_changed:
-        return False, f"boot_sha={boot_sha[:8]} current_sha={code_plane.current_sha[:8]}"
-    exit_changed_paths = tuple(
-        path for path in code_plane.changed_paths
-        if is_reduce_only_exit_runtime_path(path)
-    )
-    if not exit_changed_paths:
-        return False, (
-            f"boot_sha={boot_sha[:8]} current_sha={code_plane.current_sha[:8]} "
-            f"code_plane={code_plane.status} reduce_only_exit_paths=[]"
-        )
-    return True, (
-        f"boot_sha={boot_sha[:8]} current_sha={code_plane.current_sha[:8]} "
-        f"code_plane={code_plane.status} reduce_only_exit_paths={list(exit_changed_paths[:5])}"
-    )
-
-
 # Map from capabilities.yaml blocked_when condition name → evaluator function.
 _CONDITION_EVALUATORS: dict[str, object] = {
     "kill_switch_active": _kill_switch_active,
     "settlement_window_freeze_active": _settlement_window_freeze_active,
     "risk_level_halt": _risk_level_halt,
     "deployment_freshness_mismatch": _deployment_freshness_mismatch,
-    "reduce_only_exit_deployment_freshness_mismatch": (
-        _reduce_only_exit_deployment_freshness_mismatch
-    ),
 }
 
 # Capabilities and their blocked_when conditions (mirrors capabilities.yaml).
@@ -204,7 +150,6 @@ _CAP_BLOCKED_WHEN: dict[str, list[str]] = {
         "kill_switch_active",
         "settlement_window_freeze_active",
         "risk_level_halt",
-        "reduce_only_exit_deployment_freshness_mismatch",
     ],
     "settlement_write": ["settlement_window_freeze_active"],
     "on_chain_mutation": ["kill_switch_active"],

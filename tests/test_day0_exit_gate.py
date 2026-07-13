@@ -1,6 +1,6 @@
 # Created: 2026-04-07
-# Last reused/audited: 2026-04-23
-# Authority basis: midstream verdict v2 2026-04-23 (docs/to-do-list/zeus_midstream_fix_plan_2026-04-23.md T1.a midstream guardian panel)
+# Last reused/audited: 2026-07-13
+# Authority basis: docs/operations/current/finite_evidence_probability_symmetry/PLAN.md
 """Day0 exit authority tests.
 
 Object-meaning invariant (2026-05-05): stale model probability is not Day0
@@ -281,7 +281,7 @@ class TestDay0ExitGateStaleProbability:
         assert decision.trigger == "SETTLEMENT_IMMINENT"
         assert "near_settlement_terminal_bid_hold" not in decision.applied_validations
 
-    def test_whale_toxicity_can_exit_without_model_probability_authority(self):
+    def test_whale_toxicity_cannot_bypass_model_probability_authority(self):
         pos = _make_position(p_posterior=0.02, entry_price=0.02)
         ctx = ExitContext(
             fresh_prob=0.02,
@@ -297,10 +297,10 @@ class TestDay0ExitGateStaleProbability:
 
         decision = pos.evaluate_exit(ctx)
 
-        assert decision.should_exit
-        assert decision.trigger == "WHALE_TOXICITY"
-        assert "model_probability_authority_not_required:whale_toxicity" in decision.applied_validations
-        assert "day0_probability_authority_blocked" not in decision.applied_validations
+        assert not decision.should_exit
+        assert decision.trigger != "WHALE_TOXICITY"
+        assert "model_probability_authority_not_required:whale_toxicity" not in decision.applied_validations
+        assert "day0_probability_authority_blocked" in decision.applied_validations
 
     def test_whale_toxicity_still_requires_executable_best_bid(self):
         pos = _make_position(p_posterior=0.02, entry_price=0.02)

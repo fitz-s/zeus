@@ -303,6 +303,7 @@ def _is_runtime_submit_gate_block_error(error: str) -> bool:
         and ("live_venue_submit" in e or "reduce_only_exit_submit" in e)
         and (
             "deployment_freshness_mismatch" in e
+            # Compatibility for already-persisted pre-removal retry receipts.
             or "reduce_only_exit_deployment_freshness_mismatch" in e
             or "loaded_sha_mismatch" in e
             or "process_loaded_code_stale" in e

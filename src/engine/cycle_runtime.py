@@ -217,7 +217,7 @@ def _freeze_entries_after_shoulder_ledger_failure(error: str, *, logger) -> str 
 # entry-vs-exit statistical symmetry.
 #
 # Excluded triggers and their rationale:
-# - SETTLEMENT_IMMINENT / WHALE_TOXICITY / FLASH_CRASH_PANIC /
+# - SETTLEMENT_IMMINENT / FLASH_CRASH_PANIC /
 #   RED_FORCE_EXIT / VIG_EXTREME — force-majeure exits
 #   driven by market-mechanics or risk-layer mandates, not statistical
 #   inference. Symmetry with a statistical entry burden is not a coherent

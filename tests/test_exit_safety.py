@@ -1,7 +1,7 @@
 # Created: 2026-04-27
-# Last reused/audited: 2026-07-11
-# Lifecycle: created=2026-04-27; last_reviewed=2026-07-11; last_reused=2026-07-11
-# Authority basis: docs/operations/task_2026-04-26_ultimate_plan/r3/slice_cards/M4.yaml; task.md B1/B3 live-runtime follow-up
+# Last reused/audited: 2026-07-13
+# Lifecycle: created=2026-04-27; last_reviewed=2026-07-13; last_reused=2026-07-13
+# Authority basis: docs/operations/current/finite_evidence_probability_symmetry/PLAN.md
 # Purpose: Lock R3 M4 cancel/replace exit mutex, typed cancel outcomes, replacement gates, and CTF preflight.
 # Reuse: Run when exit_safety, executor exit submit, exit_lifecycle cancel retry, venue command transitions, or collateral sell preflight changes.
 """R3 M4 exit-safety antibodies for cancel/replace and exit mutex behavior."""
@@ -948,6 +948,15 @@ def test_pending_exit_fill_poller_releases_expired_retry_without_order_id(conn):
     assert event["venue_status"] == "ready"
     assert payload["release_reason"] == "EXIT_RETRY_COOLDOWN_EXPIRED"
     assert payload["previous_retry_count"] == 1
+
+
+def test_legacy_reduce_only_freshness_error_stays_retry_classified():
+    from src.execution.exit_lifecycle import _is_runtime_submit_gate_block_error
+
+    assert _is_runtime_submit_gate_block_error(
+        "[gate_runtime] BLOCKED cap='reduce_only_exit_submit': condition "
+        "'reduce_only_exit_deployment_freshness_mismatch' is active"
+    )
 
 
 def test_runtime_submit_gate_block_holds_retry_until_gate_recovers(conn, monkeypatch):

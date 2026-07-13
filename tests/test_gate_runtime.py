@@ -1,5 +1,5 @@
 # Created: 2026-05-06
-# Last reused or audited: 2026-07-08
+# Last reused or audited: 2026-07-13
 # Authority basis: IMPLEMENTATION_PLAN §6 days 68-70 (Gate 5);
 #                  ULTIMATE_DESIGN §5 Gate 5; ANTI_DRIFT_CHARTER §3 M1;
 #                  live-money 2026-07-08: dirty runtime worktree blocks submit.
@@ -193,7 +193,7 @@ class TestGateRuntimeAllClear:
             gate_runtime.check("live_venue_submit")
         gate_runtime.check("reduce_only_exit_submit")
 
-    def test_reduce_only_exit_blocks_exit_runtime_diff(
+    def test_reduce_only_exit_allows_exit_runtime_diff(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
     ) -> None:
         monkeypatch.delenv("ZEUS_KILL_SWITCH", raising=False)
@@ -219,13 +219,9 @@ class TestGateRuntimeAllClear:
             lambda *_args, **_kwargs: (),
         )
 
-        with pytest.raises(
-            RuntimeError,
-            match="reduce_only_exit_deployment_freshness_mismatch",
-        ):
-            gate_runtime.check("reduce_only_exit_submit")
+        gate_runtime.check("reduce_only_exit_submit")
 
-    def test_reduce_only_exit_blocks_dirty_exit_runtime_path(
+    def test_reduce_only_exit_allows_dirty_exit_runtime_path(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
     ) -> None:
         monkeypatch.delenv("ZEUS_KILL_SWITCH", raising=False)
@@ -250,11 +246,7 @@ class TestGateRuntimeAllClear:
             lambda *_args, **_kwargs: ("src/execution/exit_lifecycle.py",),
         )
 
-        with pytest.raises(
-            RuntimeError,
-            match="reduce_only_exit_deployment_freshness_mismatch",
-        ):
-            gate_runtime.check("reduce_only_exit_submit")
+        gate_runtime.check("reduce_only_exit_submit")
 
     def test_deployment_freshness_match_allows_live_submit(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path

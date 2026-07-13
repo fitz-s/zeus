@@ -309,17 +309,16 @@ capabilities:
     intent: >
       Submit a real reduce-only exit order for an already-held position. This
       is deliberately separate from live_venue_submit: new entries remain
-      blocked on any runtime-code freshness mismatch, while reduce-only exits
-      may proceed only when the stale/dirty diff is proven not to touch the
-      exit/venue/state/risk/control submit plane. It is not a general venue
-      submit lane and must never open or increase exposure.
+      blocked on runtime-code freshness mismatch, while reduce-only exits do
+      not increase exposure and therefore remain executable across a loaded
+      SHA/HEAD difference. It is not a general venue submit lane and must never
+      open or increase exposure.
     relationships:
       protects_invariants: [INV-21, INV-04, INV-01]
       blocked_when:
         - kill_switch_active
         - settlement_window_freeze_active
         - risk_level_RED
-        - reduce_only_exit_deployment_freshness_mismatch
     hard_kernel_paths:
       - src/execution/executor.py
       - src/execution/exit_lifecycle.py

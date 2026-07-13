@@ -2410,14 +2410,15 @@ def test_current_portfolio_wealth_uses_fresh_ctf_mirror_over_stale_projection_ti
 
 
 @pytest.mark.parametrize(
-    ("chain_state", "chain_verified_at", "reason"),
+    ("chain_state", "chain_verified_at"),
     [
-        ("unknown", "2026-07-10T08:00:00+00:00", "CHAIN_STATE_UNVERIFIED"),
-        ("synced", "2026-07-10T07:29:00+00:00", "CHAIN_EXPIRED"),
+        ("unknown", "2026-07-10T08:00:00+00:00"),
+        ("synced", "2026-07-10T07:29:00+00:00"),
+        ("synced", ""),
     ],
 )
-def test_current_portfolio_wealth_refuses_unverified_position_inventory(
-    chain_state, chain_verified_at, reason
+def test_current_portfolio_wealth_bounds_unverified_claim_without_spendable_credit(
+    chain_state, chain_verified_at
 ):
     decision_at = _dt.datetime(2026, 7, 10, 8, 0, tzinfo=_dt.timezone.utc)
     conn = _wealth_test_conn(captured_at=decision_at)
@@ -2438,13 +2439,16 @@ def test_current_portfolio_wealth_refuses_unverified_position_inventory(
         authority_scope="runtime_exposure",
     )
 
-    with pytest.raises(ValueError, match=reason):
-        current_portfolio_wealth_witness(
-            conn,
-            decision_at_utc=decision_at,
-            max_age=_dt.timedelta(seconds=30),
-            portfolio_state=portfolio,
-        )
+    witness = current_portfolio_wealth_witness(
+        conn,
+        decision_at_utc=decision_at,
+        max_age=_dt.timedelta(seconds=30),
+        portfolio_state=portfolio,
+    )
+
+    assert witness.spendable_cash_usd == Decimal("20")
+    assert witness.wealth_floor_usd == Decimal("22")
+    assert witness.wealth_ceiling_usd == Decimal("23")
 
 
 def test_current_portfolio_wealth_witness_refuses_inflight_or_unknown_inventory():

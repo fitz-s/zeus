@@ -7,8 +7,8 @@
 # Reuse: Referenced by regression suite; last touched 2026-05-08 for Wave28
 #        (HIGH→v2 route). Apply v2 schema in test fixtures when asserting
 #        post-harvest pair rows.
-# Last reused/audited: 2026-06-20
-# Authority basis: docs/operations/task_2026-05-08_object_invariance_wave28/PLAN.md
+# Last reused/audited: 2026-07-13
+# Authority basis: docs/operations/current/finite_evidence_probability_symmetry/PLAN.md
 """Tests for exit triggers and harvester."""
 
 import json
@@ -1495,11 +1495,72 @@ class TestExitTriggers:
         assert "near_settlement_confirmed_win_hold" in decision.applied_validations
         assert decision.trigger != "MODEL_DIVERGENCE_PANIC"
 
-    def test_whale_toxicity(self):
+    def test_whale_toxicity_is_observation_not_exit_objective(self):
         pos = _make_position()
         decision = _call_exit(pos, 0.60, 0.40, whale_toxicity=True)
-        assert decision.should_exit
-        assert decision.trigger == "WHALE_TOXICITY"
+        assert not decision.should_exit
+        assert decision.trigger != "WHALE_TOXICITY"
+        assert "whale_toxicity_observed" in decision.applied_validations
+
+    @pytest.mark.parametrize("direction", ["buy_yes", "buy_no"])
+    def test_whale_toxicity_cannot_liquidate_high_q_yes_or_no(self, direction):
+        pos = _make_position(
+            direction=direction,
+            p_posterior=0.81,
+            entry_price=0.20,
+            shares=60.0,
+            cost_basis_usd=12.0,
+        )
+        decision = _call_exit(
+            pos,
+            0.81,
+            0.16,
+            best_bid=0.16,
+            whale_toxicity=True,
+        )
+        assert not decision.should_exit
+        assert decision.trigger != "WHALE_TOXICITY"
+        assert "whale_toxicity_observed" in decision.applied_validations
+
+    def test_whale_observation_preserves_independent_exit_authority(self):
+        settlement = _call_exit(
+            _make_position(),
+            0.60,
+            0.40,
+            hours_to_settlement=0.5,
+            whale_toxicity=True,
+        )
+
+        red_position = _make_position()
+        red_position.exit_reason = "red_force_exit"
+        red = _call_exit(red_position, 0.60, 0.40, whale_toxicity=True)
+
+        ci_position = _make_position(p_posterior=0.70, entry_price=0.55)
+        ci = _call_exit(
+            ci_position,
+            0.40,
+            0.55,
+            best_bid=0.54,
+            whale_toxicity=True,
+            entry_posterior=0.70,
+            entry_ci=(0.65, 0.75),
+            current_ci=(0.30, 0.45),
+        )
+
+        value_position = _make_position(p_posterior=0.60, entry_price=0.50)
+        value_position.neg_edge_count = 1
+        value = _call_exit(
+            value_position,
+            0.10,
+            0.65,
+            best_bid=0.65,
+            whale_toxicity=True,
+        )
+
+        assert settlement.trigger == "SETTLEMENT_IMMINENT"
+        assert red.trigger == "RED_FORCE_EXIT"
+        assert ci.trigger == "CI_SEPARATED_REVERSAL"
+        assert value.trigger == "EDGE_REVERSAL"
 
     def test_soft_divergence_requires_adverse_velocity_confirmation(self):
         """Soft divergence (0.20) without adverse velocity does not panic."""

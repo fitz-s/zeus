@@ -52,6 +52,28 @@ nonterminal states until cumulative canonical trade facts cover the submitted
 shares.  Chain-only dust remains separate reconciliation evidence; it must not
 retroactively turn a partial order fact into full-fill proof.
 
+Fresh order-outcome evidence on 2026-07-13 refuted three additional assumptions
+at the decision/execution boundary:
+
+- a reduce-only exit was refused solely because the running SHA differed from
+  HEAD, even though the action could only decrease an already-held exposure;
+- `WHALE_TOXICITY` bypassed the held-side probability and executable hold-vs-sell
+  comparison, liquidating a Lucknow YES position that later paid $1;
+- one confirmed-fill/chain-absence review position with no positive
+  `chain_seen_at` made the global wealth witness throw, suppressing every
+  unrelated family even though current chain cash remained known.
+
+This slice treats those rows as falsification evidence, not as a historical
+calibration corpus.  The first-principles contract is: a reduce-only action
+must not be blocked by code-plane freshness; an order-flow observation may
+modify evidence but cannot independently decide liquidation; and an uncertain
+legacy claim contributes at most a conservative terminal-wealth upper bound,
+never spendable cash and never a portfolio-wide entry veto.  INV-01, INV-05,
+INV-06, INV-21, and INV-41 remain binding.  This harmonizes
+`architecture/capabilities.yaml`, the executable gate, the canonical portfolio
+read model, and the current global auction witness; it supersedes no separate
+authority surface.
+
 ## Deliverables
 - Keep Normal `q_json` as an immutable point estimate, never as executable certainty.
 - Widen the shared simplex carrier by the exact 51-member zero-hit limit and the
@@ -84,6 +106,15 @@ retroactively turn a partial order fact into full-fill proof.
 - Serialize the selected global objective from its actual expected cost,
   robust EV, and robust delta-log-wealth; the receipt must not mark the winner
   unadmitted or synthesize legacy route-optimizer metrics.
+- Remove deployment-SHA/worktree freshness from `reduce_only_exit_submit` only;
+  new-entry submit remains freshness-gated and the reduce-only lane remains
+  constrained by its existing kill-switch, settlement-freeze, and risk policy.
+- Make `WHALE_TOXICITY` observational evidence only.  It must not bypass fresh
+  probability, executable bid, CI reversal, or hold-vs-sell economics.
+- Preserve global redecision when a canonical confirmed-fill dispute lacks a
+  current positive chain timestamp: exclude the disputed claim from spendable
+  inventory, retain only its maximum payoff in the conservative wealth ceiling,
+  and bind that uncertainty into the wealth identity.
 
 ## Verification
 - Focused first-principles antibody and settlement-preimage regressions pass.
@@ -101,6 +132,14 @@ retroactively turn a partial order fact into full-fill proof.
 - A partial MATCHED EXIT antibody proves the command remains PARTIAL and the
   position remains pending exit; the full-size sibling still closes exactly
   once.
+- A stale/dirty HEAD antibody proves new entry is still refused while the exact
+  reduce-only capability is admitted.
+- Lucknow-shaped YES and mirrored NO tests prove whale flow alone cannot force
+  liquidation, while independent economic reversal and settlement evidence
+  still exit.
+- A Shanghai-shaped confirmed-fill dispute with missing `chain_seen_at` proves
+  current cash remains selectable, the claim is not spendable, and its maximum
+  payoff is represented only in the wealth ceiling.
 
 ## Work record
 
@@ -144,3 +183,28 @@ retroactively turn a partial order fact into full-fill proof.
   `EDLI_LIVE_OPPORTUNITY_BOOK_SELECTED_MISSING`. The book admission and sizing
   consumers still validated only legacy family-route fields even though T2/T3
   had already sealed a global current-state utility certificate.
+- 2026-07-13: Cape Town 20C NO and Guangzhou 39C NO expired worthless after
+  near-one source-clock beliefs; Lucknow 35C YES was sold by the unconditional
+  whale trigger before paying $1; Wellington 11C NO exited after current belief
+  reversal and avoided the terminal loss. These are current falsification cases
+  for the decision shape, not inputs to a fitted historical error floor.
+- 2026-07-13: Guangzhou emitted repeated EXIT intents that were refused only by
+  `reduce_only_exit_deployment_freshness_mismatch`. Current runtime inspection
+  reproduced the condition from the loaded-SHA/HEAD difference.
+- 2026-07-13: global entry retries isolated one contradictory projection:
+  Shanghai 29C NO remained `synced` with positive `chain_shares` but blank
+  `chain_seen_at` while emitting `entry_authority_chain_absence_conflict`.
+  Current chain cash was fresh; the prior witness converted this one disputed
+  claim into a portfolio-wide exception.
+- 2026-07-13: implementation now keeps deployment freshness on new-entry
+  `live_venue_submit` while removing it from reduce-only submit, demotes whale
+  flow to observation, and represents unresolved local claims only in the
+  terminal-wealth ceiling. A live canonical read-only replay produced
+  floor/spendable `$1146.300538` and ceiling `$1361.238629` across 13 open
+  positions without the prior chain-time exception.
+- 2026-07-13: independent `gpt-5.6-sol` read-only review found that deleting
+  the legacy reduce-only freshness error classifier would leave already-
+  persisted retries cooling for up to 15 minutes. The compatibility classifier
+  and antibody were restored without restoring the gate. The reviewer then
+  re-read the final diff, verified mixed current balances plus uncertain claims,
+  and returned PASS with no material finding.

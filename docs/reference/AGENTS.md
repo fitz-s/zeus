@@ -75,7 +75,7 @@ which module reference matters.
 | `rule_surface_map.md` | Where each class of rule/law lives; maps to root AGENTS.md precedence |
 | `zeus_strategy_spec.md` | Strategy math spec — probability law superseded 2026-06-09 (see header); diagnostic/provenance only |
 | `zeus_architecture_reference.md` | Durable descriptive architecture reference |
-| `zeus_execution_lifecycle_reference.md` | Lifecycle state machine (10 phases, fold table), chain reconciliation (3-state classifier, 3 rules), order execution (share quantization, mode timeouts), exit triggers (8-layer evaluation), monitor refresh (2 signal paths), settlement harvest (3-layer dedup, P&L, redemption) |
+| `zeus_execution_lifecycle_reference.md` | Lifecycle state machine, chain reconciliation, order execution, current `Position.evaluate_exit` precedence and economics, monitor refresh, settlement harvest, P&L, and redemption |
 | `zeus_risk_strategy_reference.md` | RiskLevel enum (5 levels incl DATA_DEGRADED), 6 risk inputs to tick(), trailing loss computation, strategy gate emission, Kelly sizing (dynamic_kelly_mult thresholds), RiskGuard process architecture (dual-DB, alert emission) |
 | `zeus_market_settlement_reference.md` | Market structure (event/market/bin hierarchy, token swap guard, VWMP), bin topology (3 types, width normalization), settlement semantics (rounding rules, for_city routing), sensor physics (ASOS σ, per-city overrides), Monte Carlo P_raw, probability chain (Platt, alpha, bootstrap CI) |
 | `zeus_data_and_replay_reference.md` | Database topology (3-DB split), core table schemas, data ingestion (hourly instants, coverage tracking, IngestionGuard layers), provenance/authority contracts, dual-track identity (MetricIdentity type safety), replay diagnostic status |

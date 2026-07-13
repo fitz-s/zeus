@@ -316,19 +316,29 @@ the rounding direction.
 
 ### 4.1 Actual trigger evaluation order
 
-`evaluate_exit_triggers()` checks triggers in this exact order:
+The live path is `Position.evaluate_exit()` in `src/state/portfolio.py`. Its
+decision precedence is:
 
-1. **SETTLEMENT_IMMINENT** — `hours_to_settlement < 1.0` → immediate exit
-2. **WHALE_TOXICITY** — `is_whale_sweep=True` → immediate exit
-3. **MODEL_DIVERGENCE_PANIC (hard)** — `divergence_score >= divergence_hard_threshold()`
-4. **MODEL_DIVERGENCE_PANIC (soft+velocity)** — `divergence_score >= soft_threshold AND market_velocity_1h <= velocity_confirm`
-5. **FLASH_CRASH_PANIC** — `market_velocity_1h <= -0.15`
-6. **Micro-position hold gate** — `size_usd < $1.00` → return None (never exit sub-dollar positions)
-7. **Direction-specific edge exit** — delegates to `_evaluate_buy_yes_exit()` or `_evaluate_buy_no_exit()`
-8. **VIG_EXTREME** — `market_vig > 1.08 OR market_vig < 0.92`
+1. **RED_FORCE_EXIT** — explicit non-Day0 RED sweep intent preempts ordinary
+   probability checks.
+2. **EVIDENCE_UNAVAILABLE / missing authority** — unavailable or malformed
+   current belief holds fail closed; the narrow settlement-imminent exception
+   still requires an executable bid.
+3. **Day0 physical authority** — absorbing structural facts and authorized
+   zero-probability evidence dominate the forecast posterior.
+4. **SETTLEMENT_IMMINENT** — compares executable sell value with the current
+   held-side value; a confirmed winner may hold instead of being blindly sold.
+5. **WHALE_TOXICITY observation** — records `whale_toxicity_observed` only. It
+   has no independent liquidation authority and cannot bypass probability,
+   CI, or hold-vs-sell economics.
+6. **FLASH_CRASH_PANIC / VIG_EXTREME** — independent market-mechanics evidence
+   remains actionable under its own guards.
+7. **CI separation and direction-specific economics** — a confirmed belief
+   reversal or executable sell-value dominance may exit; overlap, positive
+   held edge, or superior hold value remains a hold.
 
-Triggers 1-5 return `urgency="immediate"`. Triggers 7-8 return
-`urgency="normal"`.
+The removed `MODEL_DIVERGENCE_PANIC` and unconditional whale branches must not
+be reintroduced as price/order-flow-only liquidation rules.
 
 ### 4.2 Buy-yes exit: `_evaluate_buy_yes_exit()`
 
@@ -368,7 +378,7 @@ is `buy_no`, `p_cal_native = 1.0 - p_cal_yes`. The exit trigger code never
 flips probabilities internally. This was a historical incident: a double-
 inversion caused 7/8 buy_no positions to false-exit in 30-90 minutes.
 
-**Key file**: `src/execution/exit_triggers.py`
+**Key file**: `src/state/portfolio.py` (`Position.evaluate_exit`)
 
 ---
 

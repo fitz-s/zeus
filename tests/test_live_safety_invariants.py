@@ -9214,12 +9214,16 @@ def test_malformed_entry_ci_fails_closed_without_point_fallback():
 
 
 @pytest.mark.parametrize(
-    ("hours_to_settlement", "whale_toxicity", "expected_trigger"),
-    [(0.5, False, "SETTLEMENT_IMMINENT"), (10.0, True, "WHALE_TOXICITY")],
+    ("hours_to_settlement", "whale_toxicity", "expected_exit", "expected_trigger"),
+    [
+        (0.5, False, True, "SETTLEMENT_IMMINENT"),
+        (10.0, True, False, "EVIDENCE_UNAVAILABLE"),
+    ],
 )
 def test_malformed_current_ci_does_not_suppress_independent_exit_authority(
     hours_to_settlement,
     whale_toxicity,
+    expected_exit,
     expected_trigger,
 ):
     pos = _make_position(direction="buy_yes")
@@ -9242,7 +9246,7 @@ def test_malformed_current_ci_does_not_suppress_independent_exit_authority(
         )
     )
 
-    assert decision.should_exit is True
+    assert decision.should_exit is expected_exit
     assert decision.trigger == expected_trigger
 
 

@@ -1102,16 +1102,6 @@ class Position:
                     applied_validations=list(self.applied_validations),
                     trigger="SETTLEMENT_IMMINENT",
                 )
-            if exit_context.whale_toxicity:
-                applied.append("whale_toxicity_gate")
-                applied.append("model_probability_authority_not_required:whale_toxicity")
-                self.applied_validations = _dedupe_validations(applied)
-                return ExitDecision(
-                    True, "WHALE_TOXICITY", "immediate",
-                    selected_method=self.selected_method or self.entry_method,
-                    applied_validations=list(self.applied_validations),
-                    trigger="WHALE_TOXICITY",
-                )
         if missing:
             applied.append("exit_context_incomplete")
             if exit_context.day0_active and any(field in missing for field in ("fresh_prob", "fresh_prob_is_fresh")):
@@ -1299,16 +1289,12 @@ class Position:
                 trigger="NEAR_SETTLEMENT_HOLD_VALUE_DOMINATES",
             )
 
-        # Whale toxicity
+        # Order-flow toxicity is evidence, not a liquidation objective.  It may
+        # help form a future current belief/ambiguity carrier, but it cannot
+        # bypass the fresh held-side probability and executable hold-vs-sell
+        # comparison below.
         if exit_context.whale_toxicity:
-            applied.append("whale_toxicity_gate")
-            self.applied_validations = _dedupe_validations(applied)
-            return ExitDecision(
-                True, "WHALE_TOXICITY", "immediate",
-                selected_method=self.selected_method or self.entry_method,
-                applied_validations=list(self.applied_validations),
-                trigger="WHALE_TOXICITY",
-            )
+            applied.append("whale_toxicity_observed")
 
         # MODEL_DIVERGENCE_PANIC removed 2026-06-24 (Shanghai 25C "wrong exit"; frontier consult
         # REQ-20260624-105149 HIGH-confidence verdict). divergence_score = max(0, p_market - p_belief)
@@ -1318,7 +1304,7 @@ class Position:
         # reversal gate + HoldValue economics below (the machinery that exits only on a CONFIRMED reversal,
         # never a bare price move) — and dumped near-certain winners (Shanghai NO @0.96, belief 0.655).
         # Removed outright (gate collapse, not a conditional gate). Real deterioration still exits via
-        # day0 absorbing hard-fact, SETTLEMENT_IMMINENT, WHALE_TOXICITY, the velocity-evidenced
+        # day0 absorbing hard-fact, SETTLEMENT_IMMINENT, the velocity-evidenced
         # FLASH_CRASH_PANIC below, CI_SEPARATED_REVERSAL, and the direction-specific HoldValue economics.
 
         # BUG#127 (守護 SEV1): FLASH_CRASH_PANIC is evidence-gated, not a bare
