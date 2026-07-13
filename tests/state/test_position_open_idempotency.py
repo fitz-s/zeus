@@ -625,7 +625,15 @@ class TestConsolidator:
         assert report["voided_positions"] == []
 
     def test_chain_covers_db_same_identity_open_rows_merge(self):
-        """Same token/same identity rows are one local exposure split and must converge."""
+        """Same token/same identity rows are one local exposure split and must
+        converge onto a single keeper row.
+
+        LX-F (docs/rebuild/local_ledger_excision_2026-07-12.md Round-2 delta):
+        the consolidator no longer synthesizes merged shares/cost_basis_usd/
+        entry_price onto the keeper — it appends a POSITION_IDENTITY_SUPERSEDED
+        FACT instead. The keeper row's own economics must stay byte-identical
+        to whatever was already there before consolidation ran.
+        """
         from src.state.position_duplicate_consolidator import consolidate
         from src.state.projection import (
             CANONICAL_POSITION_CURRENT_COLUMNS,
@@ -666,22 +674,55 @@ class TestConsolidator:
         assert report["merged_tokens"] == [_LONDON_TOKEN]
         assert report["merged_positions"] == ["pos-merge-a"]
         rows = conn.execute(
-            "SELECT position_id, phase, shares, cost_basis_usd, size_usd FROM position_current "
-            "WHERE no_token_id = ? ORDER BY position_id",
+            "SELECT position_id, phase, shares, cost_basis_usd, size_usd, entry_price, "
+            "chain_shares FROM position_current WHERE no_token_id = ? ORDER BY position_id",
             (_LONDON_TOKEN,),
         ).fetchall()
         by_id = {row[0]: row for row in rows}
         assert by_id["pos-merge-a"][1] == "voided"
+        assert by_id["pos-merge-a"][2] == 0.0, "absorbed row's shares must be voided to 0"
+        assert by_id["pos-merge-a"][3] == 0.0, "absorbed row's cost_basis_usd must be voided to 0"
+
+        # No synthesized economics: the keeper row is untouched by this
+        # function — it keeps EXACTLY the values it was inserted with.
         assert by_id["pos-merge-b"][1] == "active"
-        assert by_id["pos-merge-b"][2] == pytest.approx(60.0)
-        assert by_id["pos-merge-b"][3] == pytest.approx(60.0 * 0.31)
-        assert by_id["pos-merge-b"][4] == pytest.approx(60.0 * 0.31)
+        assert by_id["pos-merge-b"][2] == pytest.approx(13.5), (
+            "keeper shares must not be rewritten to the chain-observed total"
+        )
+        assert by_id["pos-merge-b"][3] == pytest.approx(13.5 * 0.31), (
+            "keeper cost_basis_usd must not be resynthesized"
+        )
+        assert by_id["pos-merge-b"][4] == pytest.approx(1.86), (
+            "keeper size_usd must not be resynthesized"
+        )
+        assert by_id["pos-merge-b"][5] == pytest.approx(0.31), (
+            "keeper entry_price must not be resynthesized"
+        )
+        assert by_id["pos-merge-b"][6] is None, (
+            "keeper chain_shares must not be written by the merge path"
+        )
+
         event = conn.execute(
             "SELECT event_type, payload_json FROM position_events "
             "WHERE position_id='pos-merge-b' ORDER BY sequence_no DESC LIMIT 1"
         ).fetchone()
-        assert event[0] == "MANUAL_OVERRIDE_APPLIED"
-        assert "pos-merge-a" in event[1]
+        assert event[0] == "POSITION_IDENTITY_SUPERSEDED"
+        payload = json.loads(event[1])
+        assert payload["keeper_position_id"] == "pos-merge-b"
+        assert payload["absorbed_position_ids"] == ["pos-merge-a"]
+        assert payload["evidence_refs"]["token_id"] == _LONDON_TOKEN
+        assert payload["evidence_refs"]["chain_shares"] == pytest.approx(60.0)
+        assert payload["evidence_refs"]["db_total_shares_before"] == pytest.approx(28.5)
+        # No forbidden synthesized-economics keys anywhere in the payload.
+        forbidden_keys = {
+            "cost_basis_usd_after",
+            "shares_after",
+            "entry_price_after",
+            "avg_entry",
+            "db_total_cost_basis_usd",
+        }
+        assert forbidden_keys.isdisjoint(payload.keys())
+        assert forbidden_keys.isdisjoint(payload["evidence_refs"].keys())
 
     def test_chain_covers_db_different_condition_stays_divergent(self):
         """Different condition_id means different CTF market identity; never merge."""

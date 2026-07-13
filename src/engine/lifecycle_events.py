@@ -1365,3 +1365,95 @@ def build_review_required_canonical_write(
         "payload_json": payload,
     }
     return [event], projection
+
+
+def build_position_identity_superseded_canonical_write(
+    *,
+    keeper_position_id: str,
+    absorbed_position_ids: list[str],
+    evidence_refs: dict,
+    occurred_at: str,
+    sequence_no: int,
+    phase_after: str,
+    strategy_key: str,
+    source_module: str = "src.state.position_duplicate_consolidator",
+    env: str = "live",
+) -> dict:
+    """POSITION_IDENTITY_SUPERSEDED — duplicate-position identity FACT.
+
+    LX-F (docs/rebuild/local_ledger_excision_2026-07-12.md Round-2 delta,
+    duplicate_consolidator special handling): the consolidator used to VOID
+    the absorbed rows AND synthesize merged shares/cost_basis_usd/entry_price
+    onto the keeper row (a derived-economics write — exactly the disease this
+    excision removes). This builder replaces the synthesis half: it records
+    the merge RELATION as an immutable, append-only fact so a future
+    read-model reducer can dedup duplicate identities across history without
+    double-counting, while the keeper row's own economics stay untouched
+    (whatever the current writers maintain until the LX-3R cutover).
+
+    This event never mutates `position_current` — unlike every other builder
+    in this module it has no `build_position_current_projection` companion,
+    because there is no projection delta to record. `phase_after` is a no-op
+    fold (mirrors `build_chain_size_corrected_canonical_write`): the caller
+    passes the keeper's OWN current phase, never a transition.
+
+    Args:
+        keeper_position_id: the surviving position_id that owns the on-chain
+            exposure going forward (already the sole non-voided row).
+        absorbed_position_ids: position_ids folded into the keeper. Each was
+            already voided via a separate ADMIN_VOIDED event (see
+            `position_duplicate_consolidator._void_row`) — this fact records
+            the identity RELATION, not the void itself.
+        evidence_refs: the dup-detection evidence the consolidator already
+            computed (token_id, chain_shares, db_total_shares_before,
+            per-row shares_before) — raw observed facts, never a synthesized
+            merged value (no cost_basis/entry_price/avg_price key belongs
+            here).
+        occurred_at: explicit detection/merge timestamp (F2 invariant).
+    """
+    if not keeper_position_id:
+        raise ValueError(
+            "keeper_position_id is required for "
+            "build_position_identity_superseded_canonical_write"
+        )
+    if not absorbed_position_ids:
+        raise ValueError(
+            "absorbed_position_ids must be non-empty for "
+            "build_position_identity_superseded_canonical_write"
+        )
+    if not occurred_at:
+        raise ValueError(
+            "occurred_at is required for "
+            "build_position_identity_superseded_canonical_write"
+        )
+    if not phase_after:
+        raise ValueError(
+            "phase_after is required for "
+            "build_position_identity_superseded_canonical_write (no-op fold; "
+            "caller passes the keeper's current phase — this event never "
+            "transitions phase)"
+        )
+    payload = json.dumps(
+        {
+            "keeper_position_id": keeper_position_id,
+            "absorbed_position_ids": list(absorbed_position_ids),
+            "evidence_refs": evidence_refs,
+            "occurred_at": occurred_at,
+        },
+        default=str,
+        sort_keys=True,
+    )
+    return {
+        "event_id": f"{keeper_position_id}:position_identity_superseded:{sequence_no}",
+        "position_id": keeper_position_id,
+        "event_version": 1,
+        "sequence_no": sequence_no,
+        "event_type": "POSITION_IDENTITY_SUPERSEDED",
+        "occurred_at": occurred_at,
+        "phase_before": phase_after,
+        "phase_after": phase_after,
+        "strategy_key": strategy_key,
+        "source_module": source_module,
+        "env": env,
+        "payload_json": payload,
+    }

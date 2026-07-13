@@ -36,8 +36,14 @@ CREATE TABLE IF NOT EXISTS position_events (
         'ADMIN_VOIDED',
         'MANUAL_OVERRIDE_APPLIED',
         'VENUE_POSITION_OBSERVED',
-        'REVIEW_REQUIRED'
+        'REVIEW_REQUIRED',
+        'POSITION_IDENTITY_SUPERSEDED'
     )),
+    -- 2026-07-13 LX-F (docs/rebuild/local_ledger_excision_2026-07-12.md Round-2
+    -- delta, duplicate_consolidator special handling): POSITION_IDENTITY_SUPERSEDED
+    -- records the duplicate-position merge relation as an immutable fact
+    -- (keeper_position_id/absorbed_position_ids/evidence_refs) instead of the
+    -- consolidator synthesizing merged shares/cost_basis/entry_price.
     -- 2026-07-11: 'QUARANTINE' sentinel literal removed from this CHECK — a
     -- state word inside a timestamp type (docs/rebuild/quarantine_excision_2026-07-11.md
     -- §T7). Evidence: zero live position_events rows carry occurred_at='QUARANTINE'

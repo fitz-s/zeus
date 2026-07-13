@@ -351,10 +351,17 @@ state_machines:
       - SETTLED
       - ADMIN_VOIDED
       - MANUAL_OVERRIDE_APPLIED
+      # LX-F (docs/rebuild/local_ledger_excision_2026-07-12.md Round-2 delta):
+      # duplicate-position identity supersession fact — position_duplicate_
+      # consolidator emits this instead of synthesizing merged shares/
+      # cost_basis/entry_price onto the keeper row.
+      - POSITION_IDENTITY_SUPERSEDED
     invariant_tests:
       - tests/test_command_recovery.py
       - tests/test_exchange_reconcile.py
       - tests/test_lifecycle_terminal_predicate.py
+      - tests/state/test_inv_position_event_wire_grammar.py
+      - tests/state/test_position_open_idempotency.py
   fill_authority:
     # PR #347 (Finding 5, PR C3 + D2, 2026-05-27): typed fill-authority
     # enumeration. Wire-compatible with the legacy FILL_AUTHORITY_* string
