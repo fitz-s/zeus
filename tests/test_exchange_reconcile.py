@@ -874,6 +874,357 @@ def test_live_partial_ghost_sell_against_known_position_rebuilds_exit_journal(co
     ).fetchone()[0] == 0
 
 
+def test_live_partial_ghost_sell_recovery_does_not_book_pnl_from_order_price(conn):
+    """LX-G antibody (docs/rebuild/consult_answers/local_ledger_excision_delta_round2_2026-07-13.txt
+    "[BLOCKER] recovered ghost sell economics"): the recovered ghost-sell path
+    must NOT derive realized_pnl_usd/exit_price from the resting order's
+    quoted price. Matched order quantity proves size, never exact execution
+    price — the order's price (0.048) differs from the trade fact's actual
+    fill price (0.09) here specifically to prove the recovery path never
+    manufactures P&L from the order quote. cost_basis_usd stays conservative
+    (remaining shares x proven entry_price), never touching exit economics.
+    """
+    from src.execution.exchange_reconcile import run_reconcile_sweep
+
+    token = "known-no-token-pnl-antibody"
+    seed_command(
+        conn,
+        command_id="cmd-entry-known-antibody",
+        venue_order_id="ord-entry-known-antibody",
+        position_id="pos-known-antibody",
+        token_id=token,
+        side="BUY",
+        size=18.682141,
+        price=0.72,
+        state="FILLED",
+        q_version="entry-q-version-antibody",
+    )
+    append_trade_fact(
+        conn,
+        command_id="cmd-entry-known-antibody",
+        venue_order_id="ord-entry-known-antibody",
+        token_id=token,
+        trade_id="trade-entry-known-antibody",
+        size="18.682141",
+        fill_price="0.72",
+        state="CONFIRMED",
+    )
+    seed_position_baseline(conn, position_id="pos-known-antibody", order_id="ord-entry-known-antibody")
+    conn.execute(
+        """
+        UPDATE position_current
+           SET phase = 'voided',
+               token_id = 'opposite-yes-token-antibody',
+               no_token_id = ?,
+               condition_id = 'condition-m5-antibody',
+               market_id = 'condition-m5-antibody',
+               direction = 'buy_no',
+               shares = 18.682141,
+               chain_shares = 18.682141,
+               cost_basis_usd = 13.45114152,
+               entry_price = 0.72,
+               chain_state = 'synced',
+               order_status = 'partial',
+               updated_at = ?
+         WHERE position_id = 'pos-known-antibody'
+        """,
+        (token, NOW.isoformat()),
+    )
+    ghost_order_id = "ord-live-ghost-sell-antibody"
+
+    result = run_reconcile_sweep(
+        FakeM5Adapter(
+            open_orders=[
+                order(
+                    order_id=ghost_order_id,
+                    status="LIVE",
+                    asset_id=token,
+                    side="SELL",
+                    original_size="18.68",
+                    size_matched="5.06",
+                    # The resting order's quoted (limit) price -- NOT proof of
+                    # the actual matched execution price below.
+                    price="0.048",
+                    market="condition-m5-antibody",
+                )
+            ],
+            trades=[
+                trade(
+                    trade_id="trade-live-ghost-sell-antibody",
+                    order_id=ghost_order_id,
+                    size="5.06",
+                    price="0.09",
+                    # The actual confirmed trade fact fill price differs from
+                    # the order's quote -- proving matched size never proves
+                    # execution price.
+                    fill_price="0.09",
+                    status="CONFIRMED",
+                    asset_id=token,
+                    side="BUY",
+                    maker_orders=[
+                        {
+                            "order_id": ghost_order_id,
+                            "asset_id": token,
+                            "matched_amount": "5.06",
+                            "price": "0.09",
+                            "side": "SELL",
+                        }
+                    ],
+                )
+            ],
+            positions=[position(token_id=token, size="13.622141")],
+        ),
+        conn,
+        context="ws_gap",
+        observed_at=NOW,
+    )
+
+    assert not any(f.kind == "exchange_ghost_order" for f in result)
+    current = conn.execute(
+        """
+        SELECT phase, shares, chain_shares, cost_basis_usd, realized_pnl_usd,
+               exit_price, order_status
+          FROM position_current
+         WHERE position_id = 'pos-known-antibody'
+        """
+    ).fetchone()
+    assert current["phase"] == "pending_exit"
+    assert current["order_status"] == "sell_pending_confirmation"
+    assert abs(float(current["shares"]) - 13.622141) < 0.0001
+    assert abs(float(current["chain_shares"]) - 13.622141) < 0.0001
+    # Conservative exposure: remaining shares x proven entry_price only.
+    assert abs(float(current["cost_basis_usd"]) - (13.622141 * 0.72)) < 0.0001
+    # THE ANTIBODY: no economics manufactured from the order's quoted price.
+    # Pre-fix this booked realized_pnl_usd = 5.06 * (0.048 - 0.72) = -3.40032
+    # and exit_price = 0.048 -- both wrong money derived from an unproven
+    # order quote. Post-fix both stay NULL/UNKNOWN until real trade facts
+    # close the position via the existing exit_lifecycle trade-fact path.
+    assert current["realized_pnl_usd"] is None
+    assert current["exit_price"] is None
+
+
+def test_recovered_ghost_sell_position_closes_via_existing_trade_fact_path_not_stranded(conn):
+    """LX-G strand-check: a position the ghost-sell recovery leaves in
+    phase='pending_exit' with order_status='sell_pending_confirmation' (and
+    realized_pnl_usd/exit_price now NULL per the fix above) must not be
+    stranded economically-unclosed forever. The EXISTING
+    exit_lifecycle.check_pending_exits -> _exit_trade_fact_close_candidate ->
+    _close_pending_exit_from_trade_fact path already scans exactly this
+    predicate (order_status == 'sell_pending_confirmation') and, once the
+    remaining venue_trade_facts complete the recovered command's fill,
+    recomputes and books real realized_pnl_usd/exit_price from the ACTUAL
+    trade-fact prices -- never from the order's quoted price used at
+    recovery time. No new hook was needed; this proves the existing lane
+    already picks these positions up.
+    """
+    from decimal import Decimal as _Decimal
+
+    from src.execution import exit_lifecycle
+    from src.execution.exchange_reconcile import run_reconcile_sweep
+    from src.state.close_economics import compute_realized_pnl_usd
+    from src.state.portfolio import PortfolioState, Position
+    from src.state.venue_command_repo import append_trade_fact as repo_append_trade_fact
+
+    token = "known-no-token-strand"
+    position_id = "pos-known-strand"
+    entry_price = 0.72
+    seed_command(
+        conn,
+        command_id="cmd-entry-known-strand",
+        venue_order_id="ord-entry-known-strand",
+        position_id=position_id,
+        token_id=token,
+        side="BUY",
+        size=18.682141,
+        price=entry_price,
+        state="FILLED",
+        q_version="entry-q-version-strand",
+    )
+    append_trade_fact(
+        conn,
+        command_id="cmd-entry-known-strand",
+        venue_order_id="ord-entry-known-strand",
+        token_id=token,
+        trade_id="trade-entry-known-strand",
+        size="18.682141",
+        fill_price=str(entry_price),
+        state="CONFIRMED",
+    )
+    seed_position_baseline(conn, position_id=position_id, order_id="ord-entry-known-strand")
+    conn.execute(
+        """
+        UPDATE position_current
+           SET phase = 'voided',
+               token_id = 'opposite-yes-token-strand',
+               no_token_id = ?,
+               condition_id = 'condition-m5-strand',
+               market_id = 'condition-m5-strand',
+               direction = 'buy_no',
+               shares = 18.682141,
+               chain_shares = 18.682141,
+               cost_basis_usd = 13.45114152,
+               entry_price = ?,
+               chain_state = 'synced',
+               order_status = 'partial',
+               updated_at = ?
+         WHERE position_id = ?
+        """,
+        (token, entry_price, NOW.isoformat(), position_id),
+    )
+    ghost_order_id = "ord-live-ghost-sell-strand"
+
+    run_reconcile_sweep(
+        FakeM5Adapter(
+            open_orders=[
+                order(
+                    order_id=ghost_order_id,
+                    status="LIVE",
+                    asset_id=token,
+                    side="SELL",
+                    original_size="18.68",
+                    size_matched="5.06",
+                    price="0.048",
+                    market="condition-m5-strand",
+                )
+            ],
+            trades=[
+                trade(
+                    trade_id="trade-live-ghost-sell-strand",
+                    order_id=ghost_order_id,
+                    size="5.06",
+                    price="0.09",
+                    fill_price="0.09",
+                    status="CONFIRMED",
+                    asset_id=token,
+                    side="BUY",
+                    maker_orders=[
+                        {
+                            "order_id": ghost_order_id,
+                            "asset_id": token,
+                            "matched_amount": "5.06",
+                            "price": "0.09",
+                            "side": "SELL",
+                        }
+                    ],
+                )
+            ],
+            positions=[position(token_id=token, size="13.622141")],
+        ),
+        conn,
+        context="ws_gap",
+        observed_at=NOW,
+    )
+
+    recovered = conn.execute(
+        "SELECT command_id FROM venue_commands WHERE venue_order_id = ?",
+        (ghost_order_id,),
+    ).fetchone()
+    assert recovered is not None
+    command_id = recovered["command_id"]
+
+    restored = conn.execute(
+        """
+        SELECT shares, chain_shares, cost_basis_usd, entry_price, realized_pnl_usd, exit_price
+          FROM position_current
+         WHERE position_id = ?
+        """,
+        (position_id,),
+    ).fetchone()
+    assert restored["realized_pnl_usd"] is None
+    assert restored["exit_price"] is None
+    remaining_shares = float(restored["shares"])
+    remaining_cost_basis = float(restored["cost_basis_usd"])
+
+    # Complete the recovered EXIT command's fill with the REMAINING size at a
+    # THIRD distinct price -- neither the order's quote (0.048) nor the first
+    # trade fact's price (0.09) -- proving the eventual booking is derived
+    # from the blended real trade-fact economics, never the order price.
+    completing_size = "13.62"
+    completing_price = "0.20"
+    repo_append_trade_fact(
+        conn,
+        trade_id="trade-live-ghost-sell-strand-completing",
+        venue_order_id=ghost_order_id,
+        command_id=command_id,
+        state="CONFIRMED",
+        filled_size=completing_size,
+        fill_price=completing_price,
+        source="REST",
+        observed_at=NOW,
+        raw_payload_hash=hashlib.sha256(b"completing-strand-fill").hexdigest(),
+        raw_payload_json={"trade_id": "trade-live-ghost-sell-strand-completing"},
+    )
+
+    expected_blended_price = (
+        _Decimal("5.06") * _Decimal("0.09") + _Decimal(completing_size) * _Decimal(completing_price)
+    ) / (_Decimal("5.06") + _Decimal(completing_size))
+    expected_realized_pnl = compute_realized_pnl_usd(
+        shares=remaining_shares,
+        exit_price=float(expected_blended_price),
+        cost_basis_usd=remaining_cost_basis,
+        entry_price=entry_price,
+    )
+
+    position_obj = Position(
+        trade_id=position_id,
+        market_id="condition-m5-strand",
+        city="Karachi",
+        cluster="Karachi",
+        target_date="2026-05-17",
+        bin_label="test-bin",
+        direction="buy_no",
+        unit="C",
+        entry_price=entry_price,
+        shares=remaining_shares,
+        cost_basis_usd=remaining_cost_basis,
+        state="pending_exit",
+        exit_state="",
+        exit_reason="M5_LIVE_GHOST_SELL_RECOVERY",
+        token_id="opposite-yes-token-strand",
+        no_token_id=token,
+        condition_id="condition-m5-strand",
+        chain_state="synced",
+        chain_shares=remaining_shares,
+        strategy_key="opening_inertia",
+        env="live",
+        order_id=ghost_order_id,
+        order_status="sell_pending_confirmation",
+        entered_at=NOW.isoformat(),
+    )
+    portfolio = PortfolioState(positions=[position_obj])
+
+    class FakeClob:
+        def get_order_status(self, order_id):
+            raise AssertionError(f"must not poll a fully-closed order: {order_id}")
+
+        def cancel_order(self, order_id):
+            raise AssertionError(f"must not cancel a fully-closed order: {order_id}")
+
+    stats = exit_lifecycle.check_pending_exits(portfolio, FakeClob(), conn=conn)
+
+    # THE STRAND-CHECK: the existing trade-fact close lane picks this
+    # position up -- no permanent stranding, no new hook required.
+    assert stats["filled"] == 1
+    assert stats.get("filled_from_trade_fact") == 1
+
+    closed = conn.execute(
+        """
+        SELECT phase, realized_pnl_usd, exit_price
+          FROM position_current
+         WHERE position_id = ?
+        """,
+        (position_id,),
+    ).fetchone()
+    assert closed["phase"] == "economically_closed"
+    assert closed["realized_pnl_usd"] is not None
+    assert closed["exit_price"] is not None
+    assert closed["realized_pnl_usd"] == pytest.approx(expected_realized_pnl, abs=0.01)
+    assert closed["exit_price"] == pytest.approx(float(expected_blended_price), abs=1e-6)
+    # Never the order's quoted price nor the first partial fill's price alone.
+    assert closed["exit_price"] != pytest.approx(0.048, abs=1e-6)
+    assert closed["exit_price"] != pytest.approx(0.09, abs=1e-6)
+
+
 def test_live_partial_ghost_sell_stays_finding_when_position_conservation_fails(conn):
     from src.execution.exchange_reconcile import run_reconcile_sweep
 

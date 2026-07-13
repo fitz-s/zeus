@@ -1407,11 +1407,23 @@ def _restore_position_to_pending_exit_for_recovered_sell(
     observed_at: datetime,
     command_id: str,
 ) -> None:
+    # LX-G (2026-07-13, docs/rebuild/consult_answers/local_ledger_excision_delta_round2_2026-07-13.txt
+    # "[BLOCKER] recovered ghost sell economics"): ``fill_price`` here is the
+    # resting OPEN ORDER's quoted price, not a confirmed trade execution
+    # price — matched order quantity proves size, never exact fill price.
+    # Booking realized_pnl_usd/exit_price from it can record wrong money.
+    # Those two columns are therefore left untouched (stay NULL/UNKNOWN)
+    # until exact venue_trade_facts arrive and the existing trade-fact-driven
+    # close path in exit_lifecycle.py (_exit_trade_fact_close_candidate /
+    # _close_pending_exit_from_trade_fact, gated on order_status =
+    # 'sell_pending_confirmation' — set below) recomputes and books them from
+    # proven fill facts. ``cost_basis_usd`` remains conservative: shares
+    # still held (an observed exchange balance, a proven fact) times
+    # entry_price (a proven fact), never an assumption about exit economics.
     position_id = str(position["position_id"])
     phase_before = str(position.get("phase") or "")
     entry_price = _positive_decimal_or_none(position.get("entry_price")) or Decimal("0")
     remaining_cost_basis = exchange_size * entry_price
-    realized_pnl = matched_size * (fill_price - entry_price)
     observed_text = observed_at.isoformat()
     conn.execute(
         """
@@ -1420,8 +1432,6 @@ def _restore_position_to_pending_exit_for_recovered_sell(
                shares = ?,
                chain_shares = ?,
                cost_basis_usd = ?,
-               realized_pnl_usd = COALESCE(realized_pnl_usd, 0) + ?,
-               exit_price = ?,
                exit_reason = ?,
                order_id = ?,
                order_status = 'sell_pending_confirmation',
@@ -1433,8 +1443,6 @@ def _restore_position_to_pending_exit_for_recovered_sell(
             float(exchange_size),
             float(exchange_size),
             float(remaining_cost_basis),
-            float(realized_pnl),
-            float(fill_price),
             "M5_LIVE_GHOST_SELL_RECOVERY",
             venue_order_id,
             observed_text,
