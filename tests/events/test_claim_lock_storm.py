@@ -325,6 +325,45 @@ def test_global_winner_queue_lock_bounces_then_recovers(
     assert result.claim_lock_bounces == 1
 
 
+def test_global_winner_queue_nonblocking_probe_does_not_wait_twice(
+    tmp_path, monkeypatch, caplog
+):
+    """After a claim wait, the same-cycle queue probe must fail immediately."""
+
+    db_path, conn, store = _file_store(tmp_path)
+    base, target, generation = _claimed_global_target(
+        conn, store, suffix="queue-nonblocking"
+    )
+    monkeypatch.setenv("ZEUS_REACTOR_CLAIM_BUSY_TIMEOUT_MS", "1000")
+    reactor = _reactor(conn, store)
+    result = ReactorResult()
+
+    blocker = sqlite3.connect(str(db_path), timeout=30.0)
+    blocker.execute("PRAGMA busy_timeout = 30000")
+    blocker.execute("BEGIN IMMEDIATE")
+    try:
+        started = time.monotonic()
+        with caplog.at_level(logging.WARNING, logger="zeus.events.reactor"):
+            queued = reactor._queue_global_winner_for_claim(
+                target,
+                current_batch_claim_generations={base.event_id: generation},
+                result=result,
+                wait_ms=0,
+            )
+        elapsed = time.monotonic() - started
+    finally:
+        blocker.rollback()
+        blocker.close()
+
+    assert queued is False
+    assert elapsed < 0.25, f"nonblocking queue probe waited: {elapsed:.3f}s"
+    assert result.claim_lock_bounces == 1
+    assert conn.execute(
+        "SELECT 1 FROM opportunity_events WHERE event_id = ?", (target.event_id,)
+    ).fetchone() is None
+    assert not conn.in_transaction
+
+
 def test_world_mutex_contention_before_claim_is_bounded_and_keeps_event_pending(
     tmp_path, monkeypatch
 ):

@@ -1215,24 +1215,27 @@ class OpportunityEventReactor:
                 raise ValueError("global batch winner is not a claimed event")
             if batch_result.next_claim_event is not None:
                 next_claim_event = batch_result.next_claim_event
-                if next_claim_event.event_id in claim_lock_bounced_event_ids:
+                claim_lock_bounced = (
+                    next_claim_event.event_id in claim_lock_bounced_event_ids
+                )
+                if claim_lock_bounced:
                     logging.getLogger("zeus.events.reactor").info(
-                        "global winner queue skipped after same-cycle claim lock-bounce: "
-                        "target=%s (one wait per contention episode; no venue side effect)",
+                        "global winner nonblocking queue probe after same-cycle claim lock-bounce: "
+                        "target=%s (selection snapshot released; no venue side effect)",
                         next_claim_event.event_id,
                     )
-                else:
-                    queued = self._queue_global_winner_for_claim(
-                        next_claim_event,
-                        current_batch_claim_generations=claim_generations,
-                        result=result,
+                queued = self._queue_global_winner_for_claim(
+                    next_claim_event,
+                    current_batch_claim_generations=claim_generations,
+                    result=result,
+                    wait_ms=0 if claim_lock_bounced else None,
+                )
+                if not queued:
+                    logging.getLogger("zeus.events.reactor").info(
+                        "global winner claim deferred: target=%s; "
+                        "a claim lease changed or the target is not currently pending",
+                        next_claim_event.event_id,
                     )
-                    if not queued:
-                        logging.getLogger("zeus.events.reactor").info(
-                            "global winner claim deferred: target=%s; "
-                            "a claim lease changed or the target is not currently pending",
-                            next_claim_event.event_id,
-                        )
         except Exception as exc:  # noqa: BLE001 - every claimed event must close its unit
             for event in claimed:
                 self._finalize_deferred_event_unit(
@@ -1264,10 +1267,15 @@ class OpportunityEventReactor:
         *,
         current_batch_claim_generations: dict[str, str],
         result: ReactorResult,
+        wait_ms: int | None = None,
     ) -> bool:
         """Persist the auction winner's next legal claim outside submit I/O."""
 
-        wait_ms = _reactor_claim_busy_timeout_ms()
+        wait_ms = (
+            _reactor_claim_busy_timeout_ms()
+            if wait_ms is None
+            else max(0, int(wait_ms))
+        )
         mutex = world_write_mutex()
         if not mutex.acquire(timeout=wait_ms / 1000.0):
             result.claim_lock_bounces += 1

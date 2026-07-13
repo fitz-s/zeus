@@ -601,10 +601,10 @@ def test_global_winner_claim_mutex_busy_is_bounded(monkeypatch):
     ).fetchone() is None
 
 
-def test_global_claim_lock_bounce_skips_queue_and_retries_as_typed_transient(
+def test_global_claim_lock_bounce_queues_same_winner_as_typed_transient(
     tmp_path, monkeypatch, caplog
 ):
-    """Full global-batch flow waits once, skips queue, and recovers next cycle."""
+    """A bounced claim durably queues that exact winner after the read snapshot releases."""
 
     from src.engine.global_batch_runtime import _next_claim_carrier
 
@@ -628,11 +628,13 @@ def test_global_claim_lock_bounce_skips_queue_and_retries_as_typed_transient(
     reactor = _global_batch_probe_reactor(store, observations)
     monkeypatch.setenv("ZEUS_REACTOR_CLAIM_BUSY_TIMEOUT_MS", "100")
     queue_calls = 0
+    queue_waits = []
     real_queue = reactor._queue_global_winner_for_claim
 
     def _count_queue(*args, **kwargs):
         nonlocal queue_calls
         queue_calls += 1
+        queue_waits.append(kwargs.get("wait_ms"))
         return real_queue(*args, **kwargs)
 
     reactor._queue_global_winner_for_claim = _count_queue
@@ -682,7 +684,8 @@ def test_global_claim_lock_bounce_skips_queue_and_retries_as_typed_transient(
     assert elapsed < 0.5, f"composed global claim bounce waited too long: {elapsed:.3f}s"
     assert first.claim_lock_bounces == 1
     assert first.retried == 1
-    assert queue_calls == 0
+    assert queue_calls == 1
+    assert queue_waits == [0]
     assert observations["direct_submit_calls"] == 0
     assert "GLOBAL_REAUCTION_WINNER_AWAITS_CLAIM" in TRANSIENT_MONEY_PATH_REASONS
     assert not any("UNKNOWN money-path reason" in row.message for row in caplog.records)
@@ -693,17 +696,11 @@ def test_global_claim_lock_bounce_skips_queue_and_retries_as_typed_transient(
         "SELECT last_error FROM opportunity_event_processing WHERE event_id = ?",
         (base.event_id,),
     ).fetchone()[0] == "GLOBAL_REAUCTION_WINNER_AWAITS_CLAIM"
-    assert conn.execute(
-        "SELECT 1 FROM opportunity_events WHERE event_id = ?", (target.event_id,)
-    ).fetchone() is None
-
-    second = reactor.process_pending(decision_time=_DT_VENUE_OPEN, limit=1)
-
-    assert second.claim_lock_bounces == 0
-    assert second.retried == 2
-    assert queue_calls == 0
-    assert observations["direct_submit_calls"] == 0
     assert _processing_status(conn, target.event_id) == "pending"
+    assert conn.execute(
+        "SELECT last_error FROM opportunity_event_processing WHERE event_id = ?",
+        (target.event_id,),
+    ).fetchone()[0] == "GLOBAL_WINNER_TARGETED_CLAIM"
 
 
 def test_global_batch_defers_target_when_claim_is_reclaimed_during_solve():
