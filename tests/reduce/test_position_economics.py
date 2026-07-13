@@ -28,6 +28,43 @@ from tests.reduce.conftest import (
     seed_fill_sync_watermark,
 )
 
+
+def test_entry_reobserved_after_its_exits_still_folds_in_execution_order(conn):
+    """Regression: a lifecycle re-observation (e.g. a REST re-confirmation)
+    re-stamps an entry fill's ``observed_at`` LATER than its own exits. Folding
+    by ``observed_at`` pushes the entry behind the exits and fabricates a bogus
+    OversoldPositionError. The reducer must fold in EXECUTION order
+    (fill_dedup's stable ``execution_ts`` -- earliest venue_timestamp, or
+    earliest observed_at across revisions when no venue timestamp exists), so a
+    fully-closed position folds normally instead of refusing.
+
+    Live-observed root cause (Wellington 6f92d690 + ~10 peers, 2026-07-13):
+    a REST reconciliation re-CONFIRMED settled entries hours after their exits.
+    """
+    seed_fill_sync_watermark(conn)
+    insert_venue_command(conn, command_id="c-entry", position_id="pos-x", intent_kind="ENTRY")
+    insert_venue_command(conn, command_id="c-exit", position_id="pos-x", intent_kind="EXIT")
+    # Entry first observed 07:00.
+    insert_trade_fact(
+        conn, command_id="c-entry", trade_id="t-entry", filled_size="100",
+        fill_price="0.50", state="MATCHED", observed_at="2026-07-11T07:00:00+00:00",
+    )
+    # Exit observed 11:00 (after the entry, before the re-observation).
+    insert_trade_fact(
+        conn, command_id="c-exit", trade_id="t-exit", filled_size="100",
+        fill_price="0.60", state="CONFIRMED", observed_at="2026-07-11T11:00:00+00:00",
+    )
+    # The SAME entry trade re-observed 2 days later, re-stamped AFTER the exit.
+    insert_trade_fact(
+        conn, command_id="c-entry", trade_id="t-entry", filled_size="100",
+        fill_price="0.50", state="CONFIRMED", observed_at="2026-07-13T22:02:00+00:00",
+    )
+
+    result = reduce_position_economics(conn, "pos-x", fill_sync_source="polymarket_v2")
+    assert result.net_shares == 0.0
+    # Sold 100 @ 0.60 against avg cost 0.50 -> +$10.00 realized, fees 0.
+    assert result.realized_pnl_usd == pytest.approx(10.0)
+
 CONDITION = "cond-1"
 OUTCOME_INDEX = 0
 

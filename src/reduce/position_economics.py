@@ -146,6 +146,7 @@ class FillContribution:
     fill_price: float
     fee_usd: float
     observed_at: str
+    execution_ts: str | None
 
 
 @dataclass(frozen=True)
@@ -320,9 +321,24 @@ def _fill_contributions(
                     fill_price=float(fact["fill_price"]),
                     fee_usd=(fact["fee_paid_micro"] or 0) / 1_000_000.0,
                     observed_at=fact["observed_at"],
+                    execution_ts=fact.get("execution_ts"),
                 )
             )
-    contributions.sort(key=lambda c: (c.observed_at, c.trade_id))
+    # Fold in trade EXECUTION order (venue match time), NOT ingestion order.
+    # observed_at is re-stamped by lifecycle re-observations (e.g. a REST
+    # re-confirmation of an entry long after its exits), which would otherwise
+    # reorder an entry behind its own exits and fabricate OversoldPositionError.
+    # execution_ts (fill_dedup's stable min venue_timestamp per trade) is the
+    # authoritative order; fall back to observed_at only when no venue timestamp
+    # exists on any revision. Normalize the ISO separator so venue_timestamp
+    # ("...T...") and observed_at ("... ...") compare chronologically.
+    contributions.sort(
+        key=lambda c: (
+            (c.execution_ts or c.observed_at or "").replace(" ", "T"),
+            (c.observed_at or "").replace(" ", "T"),
+            c.trade_id,
+        )
+    )
     return contributions
 
 

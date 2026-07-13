@@ -84,6 +84,26 @@ def canonical_trade_fact_cte(
                            ) AS canonical_rank
                       FROM (
                             SELECT fact.*,
+                                   -- Stable execution order for the economic fold: a
+                                   -- later re-observation (e.g. a REST re-confirmation)
+                                   -- re-stamps observed_at and may carry a NULL
+                                   -- venue_timestamp, so folding by the canonical row's
+                                   -- observed_at can push an entry AFTER its own exits and
+                                   -- fabricate an oversold error. Prefer the earliest venue
+                                   -- (match) timestamp across the trade's revisions;
+                                   -- when NO revision carries one, fall back to the
+                                   -- earliest observed_at (the ORIGINAL observation, not
+                                   -- the re-stamp). MIN() ignores NULLs. Additive column;
+                                   -- canonical selection (proof_rank/local_sequence) is
+                                   -- unchanged, so exchange_reconcile is unaffected.
+                                   COALESCE(
+                                       MIN(fact.venue_timestamp) OVER (
+                                           PARTITION BY fact.command_id, fact.trade_id
+                                       ),
+                                       MIN(fact.observed_at) OVER (
+                                           PARTITION BY fact.command_id, fact.trade_id
+                                       )
+                                   ) AS execution_ts,
                                    CASE
                                        WHEN UPPER(COALESCE(fact.state, '')) = 'CONFIRMED'
                                             AND CAST(COALESCE(fact.filled_size, '0') AS REAL) > 0
