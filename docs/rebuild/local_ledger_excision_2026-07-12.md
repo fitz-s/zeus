@@ -147,8 +147,12 @@ Exit 充分真相路(激活后不依赖 Kelly/bankroll/payout ingester):`safe_ex
 - **LX-2R 增前置**:world-DB learning 迁移完成于 LX-2R(不塞进 trade-DB 原子切换 —— 三 DB 无共享事务);dual-capable fact-first 代码全网部署(LEGACY 分支保旧行为,ACTIVE_NEW 分支只 append facts —— 单权威 per epoch,不违 no-shadow);激活后立即重跑捕获的 unresolved-command 集(接住跨界 venue 副作用)。
 - **新增 KEEP 义务**:mutable learning UPSERTs(live_profit_audit insert_record、settlement_attribution persist_grade)→ append-only versioned receipts with supersession(rerun 不得覆写历史语料)。
 
-## Operator forks(裁决后仅剩的操作员决定)
+## Operator forks — RESOLVED(2026-07-13 操作员令:"直接完成任务,不留东西给以后;不重发明已有;违第一性原理直接重构/覆盖到最优;指挥家分工 sonnet 实现 + consult 审")
 
-1. **Zeus 资本配额**:共享钱包下 Zeus-specific Kelly 数学上未定义,除非 ①显式 Zeus capital-allocation policy(一个数/一条规则,操作员定)或 ②钱包隔离。Consult 判两者必居其一 —— 你选哪个?(现状 bankroll 读钱包聚合值 = 把操作员资产喂进 Zeus Kelly,是 HIGH 级错账。)
-2. **修订计划批准**:LX-0R..5R 取代原序 + §Excision targets 按逐 T 判决执行 —— 批准即开 LX-0R 契约包(纯契约/schema/epoch 定义,PREPARE 级)。
-3. **回滚窗长度**(LX-4R 旧列隔离期):建议 ≥7 个交易日再 LX-5R drop。
+1. **Zeus 资本配额** → 建显式 `zeus_capital_allocation` 机制(settings 键 + bankroll_provider 读显式策略;未设置时沿用现值但持续 DEGRADED 上浮)。配额数字仍属操作员一句话;机制不再把钱包聚合喂 Kelly。
+2. **LX-0R..5R 修订序** → 即刻执行。EXECUTION 状态见下 §Execution log。
+3. **回滚窗** → 7 个交易日(LX-4R 隔离期默认)。
+
+## Execution log(conductor 台账)
+
+- 2026-07-13 wave LX-0R+1R 并行派发(7 packet,sonnet×worktree,文件疆界互斥;consult thread 6a541c54 任集成审):A contracts/epoch · B payout observer · C fill sync · D balance head+token registry+allocation policy · E attribution+EDLI fact bridge · F identity supersession · G ghost-sell P&L 止血。
