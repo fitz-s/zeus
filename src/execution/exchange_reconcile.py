@@ -1351,10 +1351,29 @@ def _restore_position_to_pending_exit_for_recovered_sell(
     # proven fill facts. ``cost_basis_usd`` remains conservative: shares
     # still held (an observed exchange balance, a proven fact) times
     # entry_price (a proven fact), never an assumption about exit economics.
+    #
+    # Wave-1.5 repair (docs/rebuild/consult_answers/local_ledger_excision_wave1_review_2026-07-13.txt
+    # "[HIGH] UNKNOWN-to-zero cost basis"): a missing or unusable legacy
+    # entry_price used to default to Decimal("0"), so ``remaining_cost_basis``
+    # silently became a fabricated 0 rather than an honest UNKNOWN — the same
+    # disease this packet elsewhere refuses for exit economics. entry_price
+    # is now left as ``None`` (never a 0 stand-in); cost_basis_usd stays
+    # NULL/UNKNOWN in that case and the gap is logged to the review lane so
+    # it stays operator-visible instead of vanishing into a silent zero.
     position_id = str(position["position_id"])
     phase_before = str(position.get("phase") or "")
-    entry_price = _positive_decimal_or_none(position.get("entry_price")) or Decimal("0")
-    remaining_cost_basis = exchange_size * entry_price
+    entry_price = _positive_decimal_or_none(position.get("entry_price"))
+    if entry_price is None:
+        remaining_cost_basis = None
+        logger.warning(
+            "ghost_sell_recovery_missing_entry_price: position_id=%s token_id=%s "
+            "venue_order_id=%s command_id=%s — legacy entry_price missing or "
+            "unusable; cost_basis_usd left NULL/UNKNOWN rather than fabricated "
+            "zero (review lane)",
+            position_id, token_id, venue_order_id, command_id,
+        )
+    else:
+        remaining_cost_basis = exchange_size * entry_price
     observed_text = observed_at.isoformat()
     conn.execute(
         """
@@ -1373,7 +1392,7 @@ def _restore_position_to_pending_exit_for_recovered_sell(
         (
             float(exchange_size),
             float(exchange_size),
-            float(remaining_cost_basis),
+            float(remaining_cost_basis) if remaining_cost_basis is not None else None,
             "M5_LIVE_GHOST_SELL_RECOVERY",
             venue_order_id,
             observed_text,
@@ -1393,7 +1412,12 @@ def _restore_position_to_pending_exit_for_recovered_sell(
         "command_id": command_id,
         "exchange_position_size": _decimal_text(exchange_size),
         "matched_sell_size": _decimal_text(matched_size),
-        "fill_price": _decimal_text(fill_price),
+        # Wave-1.5 repair (both dual-review passes, "[HIGH] order quote
+        # mislabeled as fill evidence"): this is the resting OPEN ORDER's
+        # quoted price, NOT a confirmed execution price — a future reducer
+        # or audit consumer must never mistake it for fill evidence.
+        # Deliberately NOT named "fill_price".
+        "resting_order_price": _decimal_text(fill_price),
         "phase_before": phase_before,
         "phase_after": "pending_exit",
         "source_module": "src.execution.exchange_reconcile",

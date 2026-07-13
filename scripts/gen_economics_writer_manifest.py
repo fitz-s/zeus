@@ -5,7 +5,11 @@
 #   deliverable 3) + docs/rebuild/consult_answers/local_ledger_excision_delta_round2_2026-07-13.txt
 #   (BLOCKER "cutover authority": a generated static+runtime writer manifest is
 #   required because local per-site flags are vulnerable to an omitted writer
-#   or a stale daemon).
+#   or a stale daemon) + wave-1.5 repair
+#   (docs/rebuild/consult_answers/local_ledger_excision_wave1_local_verifier_2026-07-13.md
+#   "MAJOR DEFECT" — a full-text ``--check`` keys drift on raw ``file:line``,
+#   so any line-shifting commit elsewhere in the tree turns the gate red for
+#   no real reason, training operators to ignore it).
 """Static writer/reader manifest generator for the forbidden economics columns
 (``src/contracts/economics_ownership.py``).
 
@@ -38,7 +42,14 @@ Usage
         # (re)writes docs/rebuild/census_local_ledger/economics_writer_manifest.md
 
     python scripts/gen_economics_writer_manifest.py --check
-        # exits 1 if the committed manifest has drifted from a fresh scan
+        # exits 1 if the committed manifest has drifted from a fresh scan.
+        # Drift here means a WRITER/READER IDENTITY change — (file, function,
+        # verb, table, sorted columns) — not a raw file:line renumbering. A
+        # commit that only moves code around (shifting every subsequent
+        # writer's line number) must not trip this gate; only a writer or
+        # reader actually added, removed, or column-changed does. Line
+        # numbers are still DISPLAYED in the rendered table for humans, they
+        # just don't participate in the --check comparison.
 """
 
 from __future__ import annotations
@@ -347,11 +358,70 @@ def render_manifest(hits: list[Hit]) -> str:
     return "\n".join(lines) + "\n"
 
 
+# --------------------------------------------------------------------------- #
+# Drift identity — line-insensitive (wave-1.5 repair)                         #
+# --------------------------------------------------------------------------- #
+#
+# A row's DRIFT IDENTITY is (file, function, verb, table, sorted columns) —
+# deliberately excluding ``line``. Two scans that agree on every identity are
+# the SAME writer/reader set even if unrelated commits moved code around and
+# shifted line numbers. This is what --check compares; the rendered
+# file:line in the markdown table remains purely a human-readable pointer.
+
+_RowIdentity = tuple  # (file, function, verb, table, tuple[str, ...] columns)
+
+
+def _identity(h: Hit) -> "_RowIdentity":
+    return (h.file, h.function, h.verb, h.table, h.columns)
+
+
+_WRITER_ROW_RE = re.compile(
+    r"^\|\s*`(?P<file>[^`:]+):(?P<line>\d+)`\s*\|\s*(?P<verb>INSERT|UPDATE)\s*\|\s*"
+    r"(?P<table>[^|]+?)\s*\|\s*(?P<columns>[^|]*?)\s*\|\s*(?:yes|no)\s*\|\s*"
+    r"(?:yes|no \(assumed full set\))\s*\|\s*`(?P<function>[^`]+)`\s*\|\s*$"
+)
+_READER_ROW_RE = re.compile(
+    r"^\|\s*`(?P<file>[^`:]+):(?P<line>\d+)`\s*\|\s*(?P<table>[^|]+?)\s*\|\s*"
+    r"(?P<columns>[^|]*?)\s*\|\s*`(?P<function>[^`]+)`\s*\|\s*$"
+)
+
+
+def _parse_manifest_identities(text: str) -> tuple[frozenset, frozenset]:
+    """Parse a rendered manifest's Writer/Reader tables back into drift-identity
+    tuples, ignoring the embedded file:line. Used by --check so a pure
+    line-shift (an unrelated commit moving code around) never trips drift
+    detection — only a writer/reader actually added, removed, or with
+    changed table/columns does."""
+    writers: set[tuple] = set()
+    readers: set[tuple] = set()
+    section = None
+    for line in text.splitlines():
+        if line.startswith("## Writers"):
+            section = "writers"
+            continue
+        if line.startswith("## Readers"):
+            section = "readers"
+            continue
+        if section == "writers":
+            m = _WRITER_ROW_RE.match(line)
+            if m:
+                cols = tuple(sorted(c.strip() for c in m.group("columns").split(",") if c.strip()))
+                writers.add((m.group("file"), m.group("function"), m.group("verb"), m.group("table"), cols))
+        elif section == "readers":
+            m = _READER_ROW_RE.match(line)
+            if m:
+                cols = tuple(sorted(c.strip() for c in m.group("columns").split(",") if c.strip()))
+                readers.add((m.group("file"), m.group("function"), "SELECT", m.group("table"), cols))
+    return frozenset(writers), frozenset(readers)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0] if __doc__ else "")
     parser.add_argument(
         "--check", action="store_true",
-        help="Do not write; exit 1 if a fresh scan differs from the committed manifest.",
+        help="Do not write; exit 1 if a fresh scan's writer/reader IDENTITY set "
+             "(file, function, verb, table, columns — not line number) differs "
+             "from the committed manifest's.",
     )
     args = parser.parse_args(argv)
 
@@ -360,8 +430,22 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.check:
         existing = OUTPUT_PATH.read_text() if OUTPUT_PATH.exists() else ""
-        if content != existing:
-            print(f"DRIFT: {OUTPUT_PATH} does not match a fresh scan.", file=sys.stderr)
+        existing_writers, existing_readers = _parse_manifest_identities(existing)
+        fresh_writers = frozenset(_identity(h) for h in hits if h.kind == "WRITE")
+        fresh_readers = frozenset(_identity(h) for h in hits if h.kind == "READ")
+        added_writers = fresh_writers - existing_writers
+        removed_writers = existing_writers - fresh_writers
+        added_readers = fresh_readers - existing_readers
+        removed_readers = existing_readers - fresh_readers
+        if added_writers or removed_writers or added_readers or removed_readers:
+            print(f"DRIFT: {OUTPUT_PATH} writer/reader identity set does not match a fresh scan.",
+                  file=sys.stderr)
+            for label, rows in (
+                ("writer added", added_writers), ("writer removed", removed_writers),
+                ("reader added", added_readers), ("reader removed", removed_readers),
+            ):
+                for row in sorted(rows):
+                    print(f"  {label}: {row}", file=sys.stderr)
             print(
                 "Run `python scripts/gen_economics_writer_manifest.py` and commit the "
                 "result.",

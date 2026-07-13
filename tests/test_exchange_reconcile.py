@@ -1003,6 +1003,238 @@ def test_live_partial_ghost_sell_recovery_does_not_book_pnl_from_order_price(con
     assert current["exit_price"] is None
 
 
+def test_ghost_sell_recovery_event_payload_never_labels_order_quote_as_fill_price(conn):
+    """Wave-1.5 repair (both dual-review passes, "[HIGH] order quote
+    mislabeled as fill evidence"): the recovery event payload used to publish
+    the resting order's quoted price under the key ``fill_price`` -- an
+    apparently-exact fact a future reducer/audit consumer could mistake for
+    a confirmed execution price. It must be published as
+    ``resting_order_price`` instead, and ``fill_price`` must never appear as
+    a key in this payload.
+    """
+    import json as _json
+
+    from src.execution.exchange_reconcile import run_reconcile_sweep
+
+    token = "known-no-token-payload-key"
+    seed_command(
+        conn,
+        command_id="cmd-entry-known-payload-key",
+        venue_order_id="ord-entry-known-payload-key",
+        position_id="pos-known-payload-key",
+        token_id=token,
+        side="BUY",
+        size=18.682141,
+        price=0.72,
+        state="FILLED",
+        q_version="entry-q-version-payload-key",
+    )
+    append_trade_fact(
+        conn,
+        command_id="cmd-entry-known-payload-key",
+        venue_order_id="ord-entry-known-payload-key",
+        token_id=token,
+        trade_id="trade-entry-known-payload-key",
+        size="18.682141",
+        fill_price="0.72",
+        state="CONFIRMED",
+    )
+    seed_position_baseline(conn, position_id="pos-known-payload-key", order_id="ord-entry-known-payload-key")
+    conn.execute(
+        """
+        UPDATE position_current
+           SET phase = 'voided',
+               token_id = 'opposite-yes-token-payload-key',
+               no_token_id = ?,
+               condition_id = 'condition-m5-payload-key',
+               market_id = 'condition-m5-payload-key',
+               direction = 'buy_no',
+               shares = 18.682141,
+               chain_shares = 18.682141,
+               cost_basis_usd = 13.45114152,
+               entry_price = 0.72,
+               chain_state = 'synced',
+               order_status = 'partial',
+               updated_at = ?
+         WHERE position_id = 'pos-known-payload-key'
+        """,
+        (token, NOW.isoformat()),
+    )
+    ghost_order_id = "ord-live-ghost-sell-payload-key"
+
+    run_reconcile_sweep(
+        FakeM5Adapter(
+            open_orders=[
+                order(
+                    order_id=ghost_order_id,
+                    status="LIVE",
+                    asset_id=token,
+                    side="SELL",
+                    original_size="18.68",
+                    size_matched="5.06",
+                    price="0.048",
+                    market="condition-m5-payload-key",
+                )
+            ],
+            trades=[
+                trade(
+                    trade_id="trade-live-ghost-sell-payload-key",
+                    order_id=ghost_order_id,
+                    size="5.06",
+                    price="0.09",
+                    fill_price="0.09",
+                    status="CONFIRMED",
+                    asset_id=token,
+                    side="BUY",
+                    maker_orders=[
+                        {
+                            "order_id": ghost_order_id,
+                            "asset_id": token,
+                            "matched_amount": "5.06",
+                            "price": "0.09",
+                            "side": "SELL",
+                        }
+                    ],
+                )
+            ],
+            positions=[position(token_id=token, size="13.622141")],
+        ),
+        conn,
+        context="ws_gap",
+        observed_at=NOW,
+    )
+
+    event = conn.execute(
+        """
+        SELECT payload_json
+          FROM position_events
+         WHERE position_id = 'pos-known-payload-key'
+         ORDER BY sequence_no DESC
+         LIMIT 1
+        """
+    ).fetchone()
+    payload = _json.loads(event["payload_json"])
+    assert "fill_price" not in payload
+    assert payload["resting_order_price"] == "0.048"
+
+
+def test_ghost_sell_recovery_missing_entry_price_leaves_cost_basis_null_not_zero(conn, caplog):
+    """Wave-1.5 repair (both dual-review passes, "[HIGH]/[HIGH] UNKNOWN-to-zero
+    cost basis"): a missing/unusable legacy entry_price used to default to 0
+    and get multiplied into a stored cost_basis_usd -- a fabricated zero
+    replacing unknown economics. It must instead stay NULL/UNKNOWN, with the
+    gap logged to the review lane.
+    """
+    import logging
+
+    from src.execution.exchange_reconcile import run_reconcile_sweep
+
+    token = "known-no-token-missing-entry"
+    seed_command(
+        conn,
+        command_id="cmd-entry-known-missing-entry",
+        venue_order_id="ord-entry-known-missing-entry",
+        position_id="pos-known-missing-entry",
+        token_id=token,
+        side="BUY",
+        size=18.682141,
+        price=0.72,
+        state="FILLED",
+        q_version="entry-q-version-missing-entry",
+    )
+    append_trade_fact(
+        conn,
+        command_id="cmd-entry-known-missing-entry",
+        venue_order_id="ord-entry-known-missing-entry",
+        token_id=token,
+        trade_id="trade-entry-known-missing-entry",
+        size="18.682141",
+        fill_price="0.72",
+        state="CONFIRMED",
+    )
+    seed_position_baseline(conn, position_id="pos-known-missing-entry", order_id="ord-entry-known-missing-entry")
+    conn.execute(
+        """
+        UPDATE position_current
+           SET phase = 'voided',
+               token_id = 'opposite-yes-token-missing-entry',
+               no_token_id = ?,
+               condition_id = 'condition-m5-missing-entry',
+               market_id = 'condition-m5-missing-entry',
+               direction = 'buy_no',
+               shares = 18.682141,
+               chain_shares = 18.682141,
+               cost_basis_usd = 13.45114152,
+               entry_price = NULL,
+               chain_state = 'synced',
+               order_status = 'partial',
+               updated_at = ?
+         WHERE position_id = 'pos-known-missing-entry'
+        """,
+        (token, NOW.isoformat()),
+    )
+    ghost_order_id = "ord-live-ghost-sell-missing-entry"
+
+    with caplog.at_level(logging.WARNING, logger="src.execution.exchange_reconcile"):
+        run_reconcile_sweep(
+            FakeM5Adapter(
+                open_orders=[
+                    order(
+                        order_id=ghost_order_id,
+                        status="LIVE",
+                        asset_id=token,
+                        side="SELL",
+                        original_size="18.68",
+                        size_matched="5.06",
+                        price="0.048",
+                        market="condition-m5-missing-entry",
+                    )
+                ],
+                trades=[
+                    trade(
+                        trade_id="trade-live-ghost-sell-missing-entry",
+                        order_id=ghost_order_id,
+                        size="5.06",
+                        price="0.09",
+                        fill_price="0.09",
+                        status="CONFIRMED",
+                        asset_id=token,
+                        side="BUY",
+                        maker_orders=[
+                            {
+                                "order_id": ghost_order_id,
+                                "asset_id": token,
+                                "matched_amount": "5.06",
+                                "price": "0.09",
+                                "side": "SELL",
+                            }
+                        ],
+                    )
+                ],
+                positions=[position(token_id=token, size="13.622141")],
+            ),
+            conn,
+            context="ws_gap",
+            observed_at=NOW,
+        )
+
+    current = conn.execute(
+        """
+        SELECT phase, cost_basis_usd, order_status
+          FROM position_current
+         WHERE position_id = 'pos-known-missing-entry'
+        """
+    ).fetchone()
+    assert current["phase"] == "pending_exit"
+    assert current["order_status"] == "sell_pending_confirmation"
+    # THE ANTIBODY: no fabricated zero -- cost_basis_usd stays NULL/UNKNOWN
+    # when the legacy entry_price it would be derived from is missing.
+    assert current["cost_basis_usd"] is None
+    assert any(
+        "ghost_sell_recovery_missing_entry_price" in r.message for r in caplog.records
+    )
+
+
 def test_recovered_ghost_sell_position_closes_via_existing_trade_fact_path_not_stranded(conn):
     """LX-G strand-check: a position the ghost-sell recovery leaves in
     phase='pending_exit' with order_status='sell_pending_confirmation' (and

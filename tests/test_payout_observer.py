@@ -344,6 +344,161 @@ class TestAppendObservation:
 
 
 # ---------------------------------------------------------------------------
+# CHECK constraint — UNKNOWN-never-a-value (wave-1.5 tightening)
+# ---------------------------------------------------------------------------
+
+
+class TestUnknownNeverCarriesAValue:
+    def test_unknown_with_numerator_rejected(self, conn):
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute(
+                """
+                INSERT INTO payout_observations
+                    (condition_id, outcome_index, payout_numerator, payout_denominator,
+                     state, observed_at)
+                VALUES (?, 0, 1, NULL, 'UNKNOWN', 't0')
+                """,
+                (_CONDITION_A,),
+            )
+
+    def test_unknown_with_denominator_rejected(self, conn):
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute(
+                """
+                INSERT INTO payout_observations
+                    (condition_id, outcome_index, payout_numerator, payout_denominator,
+                     state, observed_at)
+                VALUES (?, 0, NULL, 100, 'UNKNOWN', 't0')
+                """,
+                (_CONDITION_A,),
+            )
+
+    def test_unknown_with_both_values_rejected(self, conn):
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute(
+                """
+                INSERT INTO payout_observations
+                    (condition_id, outcome_index, payout_numerator, payout_denominator,
+                     state, observed_at)
+                VALUES (?, 0, 50, 100, 'UNKNOWN', 't0')
+                """,
+                (_CONDITION_A,),
+            )
+
+    def test_unknown_with_null_null_still_accepted(self, conn):
+        conn.execute(
+            """
+            INSERT INTO payout_observations
+                (condition_id, outcome_index, payout_numerator, payout_denominator,
+                 state, observed_at)
+            VALUES (?, 0, NULL, NULL, 'UNKNOWN', 't0')
+            """,
+            (_CONDITION_A,),
+        )
+        count = conn.execute("SELECT COUNT(*) FROM payout_observations").fetchone()[0]
+        assert count == 1
+
+
+class TestEnsureTableUpgradesStaleCheck:
+    """ensure_table must safely upgrade a table created under the OLD
+    (pre-tightening) CHECK — provably-empty via DROP+CREATE, non-empty via
+    the guarded rebuild-copy idiom."""
+
+    @staticmethod
+    def _create_legacy_table(conn: sqlite3.Connection) -> None:
+        conn.execute(
+            """
+            CREATE TABLE payout_observations (
+                id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+                condition_id        TEXT NOT NULL,
+                outcome_index       INTEGER NOT NULL,
+                payout_numerator    INTEGER,
+                payout_denominator  INTEGER,
+                state               TEXT NOT NULL CHECK (state IN (
+                    'UNKNOWN', 'UNRESOLVED', 'RESOLVED_ZERO', 'RESOLVED_NONZERO'
+                )),
+                block_number        INTEGER,
+                block_hash          TEXT,
+                observed_at         TEXT NOT NULL,
+                source              TEXT NOT NULL DEFAULT 'chain_rpc',
+                superseded_by       INTEGER REFERENCES payout_observations(id),
+                CHECK (
+                    (state = 'UNKNOWN')
+                    OR (state = 'UNRESOLVED' AND payout_denominator = 0)
+                    OR (
+                        state IN ('RESOLVED_ZERO', 'RESOLVED_NONZERO')
+                        AND payout_denominator IS NOT NULL AND payout_denominator > 0
+                        AND payout_numerator IS NOT NULL
+                        AND (
+                            (state = 'RESOLVED_ZERO' AND payout_numerator = 0)
+                            OR (state = 'RESOLVED_NONZERO' AND payout_numerator > 0)
+                        )
+                    )
+                )
+            )
+            """
+        )
+
+    def test_upgrades_provably_empty_legacy_table(self):
+        conn = sqlite3.connect(":memory:")
+        self._create_legacy_table(conn)
+        ensure_table(conn)
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute(
+                """
+                INSERT INTO payout_observations
+                    (condition_id, outcome_index, payout_numerator, payout_denominator,
+                     state, observed_at)
+                VALUES (?, 0, 1, NULL, 'UNKNOWN', 't0')
+                """,
+                (_CONDITION_A,),
+            )
+        conn.close()
+
+    def test_upgrades_legacy_table_preserving_existing_rows(self):
+        conn = sqlite3.connect(":memory:")
+        self._create_legacy_table(conn)
+        # Seed a legacy row under the OLD (looser) CHECK — a valid row that
+        # must survive the rebuild untouched.
+        conn.execute(
+            """
+            INSERT INTO payout_observations
+                (condition_id, outcome_index, payout_numerator, payout_denominator,
+                 state, block_number, block_hash, observed_at, source)
+            VALUES (?, 0, 100, 100, 'RESOLVED_NONZERO', 5, '0xaa', 't0', 'chain_rpc')
+            """,
+            (_CONDITION_A,),
+        )
+        conn.commit()
+        ensure_table(conn)
+        row = conn.execute(
+            "SELECT condition_id, outcome_index, payout_numerator, payout_denominator, "
+            "state, block_number, block_hash, observed_at, source, superseded_by "
+            "FROM payout_observations"
+        ).fetchone()
+        assert row == (_CONDITION_A, 0, 100, 100, "RESOLVED_NONZERO", 5, "0xaa", "t0", "chain_rpc", None)
+        # The tightened CHECK is now enforced going forward.
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute(
+                """
+                INSERT INTO payout_observations
+                    (condition_id, outcome_index, payout_numerator, payout_denominator,
+                     state, observed_at)
+                VALUES (?, 1, 1, NULL, 'UNKNOWN', 't1')
+                """,
+                (_CONDITION_A,),
+            )
+        conn.close()
+
+    def test_already_tightened_table_is_a_noop(self, conn):
+        # `conn` fixture already ran ensure_table once (fresh, already
+        # tightened) — a second call must not raise or rebuild again.
+        ensure_table(conn)
+        count = conn.execute("SELECT COUNT(*) FROM payout_observations").fetchone()[0]
+        assert count == 0
+
+
+# ---------------------------------------------------------------------------
 # conditions_to_observe — sweep source (position_current UNION settlement_commands)
 # ---------------------------------------------------------------------------
 

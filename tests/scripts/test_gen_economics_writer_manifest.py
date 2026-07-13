@@ -140,15 +140,29 @@ def test_render_manifest_is_deterministic_across_two_scans() -> None:
 # --------------------------------------------------------------------------- #
 
 def test_check_mode_passes_against_committed_manifest() -> None:
-    """The committed manifest must match a fresh scan of the current tree —
-    this is the CI drift gate itself, exercised directly (not just via
-    subprocess) so a failure here points straight at the mismatch."""
-    fresh = render_manifest(scan_all())
+    """The committed manifest's writer/reader IDENTITY set — (file, function,
+    verb, table, sorted columns), deliberately NOT file:line — must match a
+    fresh scan of the current tree. This is the CI drift gate itself,
+    exercised directly (not just via subprocess) so a failure here points
+    straight at the mismatch. Line-number-only drift (an unrelated commit
+    moving code around) must NOT fail this test — see
+    test_check_ignores_pure_line_shift below for that antibody."""
+    from scripts.gen_economics_writer_manifest import _identity, _parse_manifest_identities
+
+    fresh_hits = scan_all()
+    fresh_writers = frozenset(_identity(h) for h in fresh_hits if h.kind == "WRITE")
+    fresh_readers = frozenset(_identity(h) for h in fresh_hits if h.kind == "READ")
     assert OUTPUT_PATH.exists(), f"{OUTPUT_PATH} must be committed"
-    committed = OUTPUT_PATH.read_text()
-    assert fresh == committed, (
-        "committed economics_writer_manifest.md has drifted from a fresh scan — "
-        "run `python scripts/gen_economics_writer_manifest.py` and commit the result"
+    committed_writers, committed_readers = _parse_manifest_identities(OUTPUT_PATH.read_text())
+    assert fresh_writers == committed_writers, (
+        "committed economics_writer_manifest.md writer set has drifted from a fresh scan — "
+        "run `python scripts/gen_economics_writer_manifest.py` and commit the result. "
+        f"added={fresh_writers - committed_writers} removed={committed_writers - fresh_writers}"
+    )
+    assert fresh_readers == committed_readers, (
+        "committed economics_writer_manifest.md reader set has drifted from a fresh scan — "
+        "run `python scripts/gen_economics_writer_manifest.py` and commit the result. "
+        f"added={fresh_readers - committed_readers} removed={committed_readers - fresh_readers}"
     )
 
 
@@ -167,6 +181,54 @@ def test_check_subprocess_exits_nonzero_on_drift(tmp_path, monkeypatch) -> None:
 
     fake_output = tmp_path / "economics_writer_manifest.md"
     fake_output.write_text("stale content that will never match a fresh scan\n")
+    monkeypatch.setattr(gen_mod, "OUTPUT_PATH", fake_output)
+
+    rc = gen_mod.main(["--check"])
+    assert rc == 1
+
+
+def test_check_ignores_pure_line_shift(tmp_path, monkeypatch) -> None:
+    """A commit that shifts every file:line in the tree (without changing any
+    writer/reader's identity) must NOT trip --check. This is the wave-1.5
+    repair antibody for the MAJOR defect: the old full-text comparison went
+    red on pure line-drift, training operators to ignore the gate."""
+    import re as _re
+
+    import scripts.gen_economics_writer_manifest as gen_mod
+
+    committed = OUTPUT_PATH.read_text()
+    shifted = _re.sub(
+        r"(`[^`:]+:)(\d+)(`)",
+        lambda m: f"{m.group(1)}{int(m.group(2)) + 37}{m.group(3)}",
+        committed,
+    )
+    assert shifted != committed  # sanity: the fixture actually changed something
+
+    fake_output = tmp_path / "economics_writer_manifest.md"
+    fake_output.write_text(shifted)
+    monkeypatch.setattr(gen_mod, "OUTPUT_PATH", fake_output)
+
+    rc = gen_mod.main(["--check"])
+    assert rc == 0
+
+
+def test_check_catches_new_writer_added(tmp_path, monkeypatch) -> None:
+    """A real writer added to the tree (not just a line renumbering) must
+    still trip --check."""
+    import scripts.gen_economics_writer_manifest as gen_mod
+
+    committed = OUTPUT_PATH.read_text()
+    fabricated_row = (
+        "| `src/fake_module_for_test.py:999` | INSERT | position_current | shares | "
+        "no | yes | `fake_write_fn` |\n"
+    )
+    marker = "\n## Readers ("
+    assert marker in committed
+    mutated = committed.replace(marker, fabricated_row + marker, 1)
+    assert mutated != committed
+
+    fake_output = tmp_path / "economics_writer_manifest.md"
+    fake_output.write_text(mutated)
     monkeypatch.setattr(gen_mod, "OUTPUT_PATH", fake_output)
 
     rc = gen_mod.main(["--check"])

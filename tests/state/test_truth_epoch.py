@@ -128,11 +128,17 @@ def test_transition_records_actor_and_timestamp() -> None:
 # Process-capability check helper                                            #
 # --------------------------------------------------------------------------- #
 
-def test_current_build_capability_supports_all_three_epochs() -> None:
+def test_current_build_capability_supports_legacy_and_prepare_only() -> None:
+    """Wave-1.5 repair (round-2 dual-review BLOCKER, both passes): this build
+    ships no ACTIVE_NEW reducer/read-model/authority path, so it must not
+    advertise ACTIVE_NEW support — a later lease/admission check must never
+    be able to mistake this binary for one capable of serving ACTIVE_NEW.
+    ACTIVE_NEW gets added to this function's return value by the LX-2R
+    activation packet once the handlers actually exist."""
     cap = current_build_capability()
     assert cap.supports(TruthEpoch.LEGACY)
     assert cap.supports(TruthEpoch.PREPARE)
-    assert cap.supports(TruthEpoch.ACTIVE_NEW)
+    assert not cap.supports(TruthEpoch.ACTIVE_NEW)
 
 
 def test_capability_admits_epoch_true_when_supported() -> None:
@@ -153,3 +159,12 @@ def test_capability_admits_epoch_refuses_stale_build_under_active_new() -> None:
     epoch)."""
     stale_build = ProcessEpochCapability(supported_epochs=frozenset({TruthEpoch.LEGACY, TruthEpoch.PREPARE}))
     assert not capability_admits_epoch(stale_build, TruthEpoch.ACTIVE_NEW)
+
+
+def test_current_build_capability_is_itself_refused_under_active_new() -> None:
+    """Today's actual build (not a synthetic stale_build fixture) must be
+    refused an ACTIVE_NEW lease — this build carries no ACTIVE_NEW handlers
+    yet, so capability_admits_epoch must say so."""
+    assert not capability_admits_epoch(current_build_capability(), TruthEpoch.ACTIVE_NEW)
+    assert capability_admits_epoch(current_build_capability(), TruthEpoch.LEGACY)
+    assert capability_admits_epoch(current_build_capability(), TruthEpoch.PREPARE)

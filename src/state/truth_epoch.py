@@ -135,14 +135,24 @@ class ProcessEpochCapability:
 
 
 def current_build_capability() -> ProcessEpochCapability:
-    """The capability of the build this module ships in. Every build that
-    imports this module understands the full LEGACY/PREPARE/ACTIVE_NEW
-    vocabulary (the enum itself is the vocabulary) — a build only fails to
-    ADVERTISE ACTIVE_NEW support once a later packet's activation-readiness
-    checklist (LX-2R: reducer built, replay proven, etc.) isn't met, at which
-    point THAT packet narrows this function's return value. Today's return is
-    the full set: no seam depends on a narrower answer yet."""
-    return ProcessEpochCapability(supported_epochs=frozenset(TruthEpoch))
+    """The capability of the build this module ships in.
+
+    LOUD FENCE (wave-1.5 repair — the round-2 dual review named this a
+    BLOCKER in both passes): a build must never ADVERTISE ACTIVE_NEW support
+    before an ACTIVE_NEW reducer / new read-model / ACTIVE_NEW authority
+    branch actually exists to serve it. This build has none of those — no
+    reducer, no new readers, no ACTIVE_NEW admission or money-read gate — so
+    returning the full LEGACY/PREPARE/ACTIVE_NEW set here would let a later
+    lease or admission check accept an incapable binary as authoritative
+    under an epoch it cannot serve.
+
+    Every build that imports this module understands the enum vocabulary —
+    that is NOT the same as being capable of SERVING ACTIVE_NEW. Advertised
+    capability is therefore narrowed to {LEGACY, PREPARE} until the LX-2R (or
+    later) activation packet lands the reducer/read-model/handlers that make
+    ACTIVE_NEW real. THAT packet — not this one — is responsible for widening
+    this return value, and only once those handlers exist."""
+    return ProcessEpochCapability(supported_epochs=frozenset({TruthEpoch.LEGACY, TruthEpoch.PREPARE}))
 
 
 def capability_admits_epoch(capability: ProcessEpochCapability, active_epoch: TruthEpoch) -> bool:

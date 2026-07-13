@@ -2,7 +2,9 @@
 # Last reused or audited: 2026-07-13
 # Authority basis: docs/rebuild/local_ledger_excision_2026-07-12.md LX-T1 (GATED
 #   verdict) + docs/rebuild/census_local_ledger/census_chain_sources.md
-#   ("Resolution payouts — NEEDS NEW INGESTER").
+#   ("Resolution payouts — NEEDS NEW INGESTER") + wave-1.5 repair
+#   (docs/rebuild/consult_answers/local_ledger_excision_wave1_local_verifier_2026-07-13.md
+#   "MINOR" — LX-T1 CHECK gap).
 
 """Schema owner for payout_observations — the append-only ConditionalTokens
 payout observation log (LX-T1).
@@ -26,7 +28,8 @@ holds regardless of which Python path writes the row.
 (LX-T1 adjudication: missing/timeout/partial/unparsable data classifies
 UNKNOWN, NEVER a fabricated zero payout). The table CHECK constraint ties
 state to payout_denominator/payout_numerator so an inconsistent row (e.g.
-state=RESOLVED_NONZERO with payout_numerator=0) cannot be inserted at all.
+state=RESOLVED_NONZERO with payout_numerator=0, or state=UNKNOWN carrying a
+non-null payout value) cannot be inserted at all.
 
 There is deliberately NO unique index enforcing "at most one active row per
 group" at the schema level: the natural write order is read-prior ->
@@ -41,6 +44,19 @@ SAME caller-supplied transaction, so a crash between them rolls back both
 is kept as a queryable audit trail (which fact replaced which), not the
 selection mechanism.
 
+Wave-1.5 tightening: the ``state = 'UNKNOWN'`` CHECK branch used to impose no
+constraint on the payout columns at all, so the DB permitted an UNKNOWN row
+carrying non-null payout values even though the writer never does this
+(blast radius was nil, but the DB-level guarantee the adjudication asked for
+was incomplete). Tightened to require ``payout_numerator IS NULL AND
+payout_denominator IS NULL`` whenever ``state = 'UNKNOWN'``. Because a SQLite
+CHECK cannot be ALTERed, ``ensure_table`` upgrades an existing
+pre-tightening table via ``_rebuild_stale_unknown_check``: a guarded
+SAVEPOINT rebuild that preserves rows when any exist (mirrors
+src/state/schema/exit_timing_attribution_schema.py's category-CHECK rebuild
+idiom), or a plain DROP+CREATE when the table is provably empty (this table
+is new this wave, so the empty case is the common one).
+
 INV-37: caller supplies conn; never auto-opens.
 """
 
@@ -49,6 +65,16 @@ from __future__ import annotations
 import sqlite3
 
 TABLE_NAME = "payout_observations"
+
+# Present in CREATE_TABLE_SQL's CHECK clause iff the UNKNOWN branch has
+# already been tightened to require NULL/NULL payout columns — used by
+# _rebuild_stale_unknown_check to decide whether an existing on-disk table
+# needs a rebuild. Kept as a literal substring of CREATE_TABLE_SQL below (not
+# a separate hand-maintained copy) so the two can never drift apart silently;
+# see the assertion at module import time.
+_UNKNOWN_TIGHTENED_MARKER = (
+    "(state = 'UNKNOWN' AND payout_numerator IS NULL AND payout_denominator IS NULL)"
+)
 
 CREATE_TABLE_SQL = """
 CREATE TABLE IF NOT EXISTS payout_observations (
@@ -66,7 +92,7 @@ CREATE TABLE IF NOT EXISTS payout_observations (
     source              TEXT NOT NULL DEFAULT 'chain_rpc',
     superseded_by       INTEGER REFERENCES payout_observations(id),
     CHECK (
-        (state = 'UNKNOWN')
+        (state = 'UNKNOWN' AND payout_numerator IS NULL AND payout_denominator IS NULL)
         OR (state = 'UNRESOLVED' AND payout_denominator = 0)
         OR (
             state IN ('RESOLVED_ZERO', 'RESOLVED_NONZERO')
@@ -80,6 +106,12 @@ CREATE TABLE IF NOT EXISTS payout_observations (
     )
 )
 """
+
+assert _UNKNOWN_TIGHTENED_MARKER in CREATE_TABLE_SQL, (
+    "_UNKNOWN_TIGHTENED_MARKER drifted from CREATE_TABLE_SQL's CHECK clause — "
+    "keep them in sync or _rebuild_stale_unknown_check will never detect "
+    "'already tightened' and will rebuild on every boot."
+)
 
 # "Current" observation for a group = ORDER BY id DESC LIMIT 1 (see module
 # docstring for why this isn't a unique-partial-index invariant instead).
@@ -127,6 +159,61 @@ END
 """
 
 
+def _rebuild_stale_unknown_check(conn: sqlite3.Connection) -> None:
+    """Upgrade a pre-tightening payout_observations table in place.
+
+    No-op when the table doesn't exist yet (CREATE_TABLE_SQL below creates it
+    fresh, already tightened) or already carries the tightened CHECK.
+    Otherwise: if the table is provably empty, DROP+CREATE is simplest and
+    equally safe (no rows to preserve, no risk of a rebuild-copy hitting a
+    legacy row that violates the new invariant). If rows exist, rebuild via
+    the repo's guarded-SAVEPOINT copy idiom (mirrors
+    exit_timing_attribution_schema._rebuild_stale_category_check): a legacy
+    UNKNOWN row that already (wrongly) carries a non-null payout value will
+    make the copy's INSERT raise a CHECK violation — that is the CORRECT
+    fail-closed behavior (an operator must resolve it), not something this
+    function should paper over.
+    """
+    row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='payout_observations'"
+    ).fetchone()
+    table_sql = str(row[0] if row else "")
+    if not table_sql:
+        return
+    if _UNKNOWN_TIGHTENED_MARKER in table_sql:
+        return
+
+    count = conn.execute("SELECT COUNT(*) FROM payout_observations").fetchone()[0]
+
+    conn.execute("SAVEPOINT payout_observations_unknown_check_rebuild")
+    try:
+        if count == 0:
+            conn.execute("DROP TABLE payout_observations")
+            conn.execute(CREATE_TABLE_SQL)
+        else:
+            conn.execute("DROP TABLE IF EXISTS payout_observations_new")
+            conn.execute(CREATE_TABLE_SQL.replace(TABLE_NAME, f"{TABLE_NAME}_new"))
+            conn.execute(
+                "INSERT INTO payout_observations_new SELECT * FROM payout_observations"
+            )
+            post_count = conn.execute(
+                "SELECT COUNT(*) FROM payout_observations_new"
+            ).fetchone()[0]
+            if post_count != count:
+                raise RuntimeError(
+                    "payout_observations rebuild dropped rows "
+                    f"({count} -> {post_count}); aborting"
+                )
+            conn.execute("DROP TABLE payout_observations")
+            conn.execute(
+                "ALTER TABLE payout_observations_new RENAME TO payout_observations"
+            )
+        conn.execute("RELEASE payout_observations_unknown_check_rebuild")
+    except Exception:
+        conn.execute("ROLLBACK TO SAVEPOINT payout_observations_unknown_check_rebuild")
+        raise
+
+
 def ensure_table(conn: sqlite3.Connection) -> None:
     """Idempotent DDL for payout_observations. Callable against any trade-DB conn.
 
@@ -134,6 +221,7 @@ def ensure_table(conn: sqlite3.Connection) -> None:
     """
 
     conn.execute(CREATE_TABLE_SQL)
+    _rebuild_stale_unknown_check(conn)
     conn.execute(CREATE_ACTIVE_LOOKUP_INDEX_SQL)
     conn.execute(CREATE_LOOKUP_INDEX_SQL)
     conn.execute(CREATE_GUARDED_UPDATE_TRIGGER_SQL)
