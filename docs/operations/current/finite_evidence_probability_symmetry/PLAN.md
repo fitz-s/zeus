@@ -115,6 +115,11 @@ authority surface.
   current positive chain timestamp: exclude the disputed claim from spendable
   inventory, retain only its maximum payoff in the conservative wealth ceiling,
   and bind that uncertainty into the wealth identity.
+- Keep stale held-position probability fail-closed for economically actionable
+  exposure, but do not convert a fully evidenced sub-minimum `pending_exit`
+  dust claim into a portfolio-wide entry veto. The health surface remains
+  degraded and visible; only entry authority scopes the failure to the dust
+  position when every stale sample is exactly covered by the sub-min surface.
 
 ## Verification
 - Focused first-principles antibody and settlement-preimage regressions pass.
@@ -140,6 +145,9 @@ authority surface.
 - A Shanghai-shaped confirmed-fill dispute with missing `chain_seen_at` proves
   current cash remains selectable, the claim is not spendable, and its maximum
   payoff is represented only in the wealth ceiling.
+- A Wellington-shaped stale `pending_exit` claim below the current venue minimum
+  does not block unrelated entry families; the same stale claim in `active`
+  phase, an incomplete sample, or any non-dust stale position still blocks.
 
 ## Work record
 
@@ -208,3 +216,27 @@ authority surface.
   and antibody were restored without restoring the gate. The reviewer then
   re-read the final diff, verified mixed current balances plus uncertain claims,
   and returned PASS with no material finding.
+- 2026-07-13: two post-deploy reactor cycles proved the wealth exception fixed:
+  `CURRENT_WEALTH_POSITION_CHAIN_TIME_INVALID` disappeared. The sole remaining
+  global entry blocker was one stale Wellington `pending_exit` dust claim with
+  `0.00818` share against a venue minimum of `5`.
+- 2026-07-13: the first dust-scoping implementation was rejected by independent
+  `gpt-5.6-sol` review: all health queries reported a display-limited sample
+  length as count, so an unseen eleventh actionable row could have been hidden;
+  zero-count categories also failed to require an explicit empty sample. The
+  producer now emits exact counts plus explicit truncation facts while retaining
+  bounded display samples. Entry scoping requires every monitor and sub-min set
+  to be complete, non-truncated, count-consistent, and ID-covered; missing or
+  truncated evidence remains fail-closed. A second independent review then
+  rejected stale venue-minimum evidence: sub-min coverage now requires the
+  snapshot deadline to remain fresh at the entry decision. A durable canonical
+  `MARKET_CLOSED_HOLD_TO_SETTLEMENT` event is the separate absorbing proof that
+  a closed market needs settlement, not a fresh probability or a sell attempt.
+  The Wellington token returned current CLOB `/book` 404, matching its latest
+  canonical closed-hold event; neither fact is relabeled as a fresh book.
+  A final non-object JSON antibody closed the last producer exception path;
+  malformed JSON now yields a degraded read-unavailable surface. Independent
+  `gpt-5.6-sol` follow-up returned PASS with no finding. Focused antibodies
+  passed 17/17, the two affected test modules passed 223/224 with one pre-existing Day0 fragile-
+  edge expectation failure, and the unchanged capital-optimality evaluator
+  passed 258/258.

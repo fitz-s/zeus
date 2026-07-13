@@ -17,6 +17,7 @@ in_scope:
 - src/execution/venue_sync_contract.py
 - src/engine/cycle_runtime.py
 - src/engine/event_reactor_adapter.py
+- src/control/live_health.py
 - src/engine/monitor_refresh.py
 - src/events/opportunity_book.py
 - src/execution/command_recovery.py
@@ -41,6 +42,8 @@ in_scope:
 - tests/test_day0_exit_gate.py
 - tests/test_live_safety_invariants.py
 - tests/integration/test_w3_solve_seam_g3.py
+- tests/money_path/test_edli_live_readiness.py
+- tests/test_run_mode_failure_surfaces.py
 - tests/solve/test_shim_decide.py
 - tests/integration/test_qkernel_spine_blockers_pr409.py
 - tests/AGENTS.md

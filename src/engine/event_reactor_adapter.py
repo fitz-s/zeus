@@ -3698,6 +3698,108 @@ def _read_entry_live_health_composite() -> Mapping[str, object]:
         return {_ENTRY_LIVE_HEALTH_PROVIDER_ERROR_KEY: f"COMPOSITE_UNREADABLE:{type(exc).__name__}"}
 
 
+def _monitor_failure_is_only_nonactionable_pending_exit(
+    surfaces: Mapping[str, object],
+    *,
+    now: datetime,
+) -> bool:
+    """True when every stale monitor row is a proven nonactionable exit claim."""
+
+    monitor = surfaces.get("monitor_probability_freshness")
+    sub_min = surfaces.get("sub_min_partial_position")
+    if not isinstance(monitor, Mapping) or not isinstance(sub_min, Mapping):
+        return False
+    semantic_key = "day0_daily_extrema_unconditioned_count"
+    semantic_raw = monitor.get(semantic_key)
+    if semantic_key not in monitor or type(semantic_raw) is not int:
+        return False
+    semantic_count = semantic_raw
+    if semantic_count != 0:
+        return False
+
+    stale_ids: set[str] = set()
+    closed_hold_ids: set[str] = set()
+    for count_key, truncated_key, sample_key in (
+        (
+            "current_stale_projection_count",
+            "current_stale_projection_truncated",
+            "current_stale_projection_sample",
+        ),
+        (
+            "latest_stale_monitor_count",
+            "latest_stale_monitor_truncated",
+            "latest_stale_monitor_sample",
+        ),
+        (
+            "latest_monitor_age_stale_count",
+            "latest_monitor_age_stale_truncated",
+            "latest_monitor_age_stale_sample",
+        ),
+    ):
+        count_raw = monitor.get(count_key)
+        if count_key not in monitor or type(count_raw) is not int:
+            return False
+        count = count_raw
+        if count < 0:
+            return False
+        sample = monitor.get(sample_key)
+        if (
+            not isinstance(sample, list)
+            or monitor.get(truncated_key) is not False
+            or len(sample) != count
+        ):
+            return False
+        for row in sample:
+            if not isinstance(row, Mapping) or str(row.get("phase") or "") != "pending_exit":
+                return False
+            position_id = str(row.get("position_id") or "").strip()
+            if not position_id:
+                return False
+            stale_ids.add(position_id)
+            if row.get("market_closed_hold_to_settlement") is True:
+                closed_hold_ids.add(position_id)
+    if not stale_ids:
+        return False
+
+    dust_sample = sub_min.get("sub_min_partial_position_sample")
+    dust_count_key = "sub_min_partial_position_count"
+    dust_count_raw = sub_min.get(dust_count_key)
+    if dust_count_key not in sub_min or type(dust_count_raw) is not int:
+        return False
+    dust_count = dust_count_raw
+    if dust_count < 0:
+        return False
+    if (
+        not isinstance(dust_sample, list)
+        or sub_min.get("sub_min_partial_position_truncated") is not False
+        or len(dust_sample) != dust_count
+    ):
+        return False
+    dust_ids: set[str] = set()
+    for row in dust_sample:
+        if not isinstance(row, Mapping) or str(row.get("phase") or "") != "pending_exit":
+            continue
+        try:
+            held = float(row.get("held_shares"))
+            minimum = float(row.get("min_order_size"))
+        except (TypeError, ValueError):
+            continue
+        freshness_deadline = _parse_iso_optional(row.get("snapshot_freshness_deadline"))
+        if freshness_deadline is None:
+            continue
+        if freshness_deadline.tzinfo is None:
+            freshness_deadline = freshness_deadline.replace(tzinfo=UTC)
+        if (
+            row.get("snapshot_freshness_expired") is False
+            and freshness_deadline.astimezone(UTC) >= now.astimezone(UTC)
+            and 0.0 < held < minimum
+        ):
+            position_id = str(row.get("position_id") or "").strip()
+            if position_id:
+                dust_ids.add(position_id)
+    return stale_ids.issubset(dust_ids | closed_hold_ids)
+
+
 def _entry_live_health_authority_block_reason(
     provider: Callable[[], Mapping[str, object] | None] | None = None,
     *,
@@ -3754,11 +3856,25 @@ def _entry_live_health_authority_block_reason(
     failing_surfaces: set[str] = set()
     if isinstance(failing_surfaces_raw, Iterable) and not isinstance(failing_surfaces_raw, (str, bytes)):
         failing_surfaces = {str(surface) for surface in failing_surfaces_raw}
-    required_failing = sorted(failing_surfaces.intersection(_ENTRY_LIVE_HEALTH_REQUIRED_SURFACES))
+    entry_scoped_failures: set[str] = set()
+    if (
+        "monitor_probability_freshness" in failing_surfaces
+        and _monitor_failure_is_only_nonactionable_pending_exit(
+            surfaces,
+            now=checked_at,
+        )
+    ):
+        entry_scoped_failures.add("monitor_probability_freshness")
+    required_failing = sorted(
+        failing_surfaces.intersection(_ENTRY_LIVE_HEALTH_REQUIRED_SURFACES)
+        - entry_scoped_failures
+    )
     if required_failing:
         return "failing_surfaces=" + ",".join(required_failing)
 
     for surface in _ENTRY_LIVE_HEALTH_REQUIRED_SURFACES:
+        if surface in entry_scoped_failures:
+            continue
         detail = surfaces.get(surface)
         if not isinstance(detail, Mapping):
             return f"surface_invalid={surface}"

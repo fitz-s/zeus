@@ -1,6 +1,6 @@
 # Created: 2026-05-25
-# Last reused/audited: 2026-07-10
-# Authority basis: docs/operations/edli_v1/EDLI_REDEMPTION_FINAL_PACKAGE_SPEC.md §14 full-live increment.
+# Last reused/audited: 2026-07-13
+# Authority basis: docs/operations/current/finite_evidence_probability_symmetry/PLAN.md
 from __future__ import annotations
 
 import ast
@@ -2981,6 +2981,330 @@ def test_entry_live_health_authority_ignores_exit_health_only_degraded():
         "issue": "PENDING_EXIT_RUNTIME_GATE_BLOCK:n=1",
     }
     payload["failing_surfaces"] = ["pending_exit_release_loop"]
+
+    reason = adapter._entry_live_health_authority_block_reason(
+        lambda: payload,
+        now=decision_time + timedelta(seconds=30),
+    )
+
+    assert reason is None
+
+
+def test_entry_live_health_scopes_stale_sub_min_pending_exit_dust():
+    from src.engine import event_reactor_adapter as adapter
+
+    decision_time = datetime(2026, 5, 24, 18, 10, tzinfo=timezone.utc)
+    payload = _healthy_entry_live_health_provider(decision_time)()
+    stale = {
+        "position_id": "dust-1",
+        "phase": "pending_exit",
+        "chain_shares": 0.00818,
+    }
+    payload["surfaces"]["monitor_probability_freshness"] = {
+        "ok": False,
+        "issue": "MONITOR_PROBABILITY_STALE_AGE:n=1",
+        "current_stale_projection_count": 0,
+        "current_stale_projection_truncated": False,
+        "current_stale_projection_sample": [],
+        "latest_stale_monitor_count": 0,
+        "latest_stale_monitor_truncated": False,
+        "latest_stale_monitor_sample": [],
+        "latest_monitor_age_stale_count": 1,
+        "latest_monitor_age_stale_truncated": False,
+        "latest_monitor_age_stale_sample": [stale],
+        "day0_daily_extrema_unconditioned_count": 0,
+    }
+    payload["surfaces"]["sub_min_partial_position"] = {
+        "ok": False,
+        "issue": "SUB_MIN_PARTIAL_POSITION_UNEXITABLE:n=1",
+        "sub_min_partial_position_count": 1,
+        "sub_min_partial_position_truncated": False,
+        "sub_min_partial_position_sample": [
+            {
+                **stale,
+                "held_shares": 0.00818,
+                "min_order_size": 5.0,
+                "snapshot_freshness_expired": False,
+                "snapshot_freshness_deadline": (
+                    decision_time + timedelta(minutes=2)
+                ).isoformat(),
+            }
+        ],
+    }
+    payload["failing_surfaces"] = [
+        "business_plane",
+        "monitor_probability_freshness",
+        "sub_min_partial_position",
+    ]
+
+    reason = adapter._entry_live_health_authority_block_reason(
+        lambda: payload,
+        now=decision_time + timedelta(seconds=30),
+    )
+
+    assert reason is None
+
+
+def test_entry_live_health_still_blocks_stale_active_or_uncovered_position():
+    from src.engine import event_reactor_adapter as adapter
+
+    decision_time = datetime(2026, 5, 24, 18, 10, tzinfo=timezone.utc)
+    payload = _healthy_entry_live_health_provider(decision_time)()
+    payload["surfaces"]["monitor_probability_freshness"] = {
+        "ok": False,
+        "issue": "MONITOR_PROBABILITY_STALE_AGE:n=1",
+        "current_stale_projection_count": 0,
+        "current_stale_projection_truncated": False,
+        "current_stale_projection_sample": [],
+        "latest_stale_monitor_count": 0,
+        "latest_stale_monitor_truncated": False,
+        "latest_stale_monitor_sample": [],
+        "latest_monitor_age_stale_count": 1,
+        "latest_monitor_age_stale_truncated": False,
+        "latest_monitor_age_stale_sample": [
+            {"position_id": "active-1", "phase": "active", "chain_shares": 1.0}
+        ],
+        "day0_daily_extrema_unconditioned_count": 0,
+    }
+    payload["surfaces"]["sub_min_partial_position"] = {
+        "ok": False,
+        "issue": "SUB_MIN_PARTIAL_POSITION_UNEXITABLE:n=1",
+        "sub_min_partial_position_count": 1,
+        "sub_min_partial_position_truncated": False,
+        "sub_min_partial_position_sample": [
+            {
+                "position_id": "active-1",
+                "phase": "active",
+                "held_shares": 1.0,
+                "min_order_size": 5.0,
+                "snapshot_freshness_expired": False,
+                "snapshot_freshness_deadline": (
+                    decision_time + timedelta(minutes=2)
+                ).isoformat(),
+            }
+        ],
+    }
+    payload["failing_surfaces"] = ["monitor_probability_freshness"]
+
+    reason = adapter._entry_live_health_authority_block_reason(
+        lambda: payload,
+        now=decision_time + timedelta(seconds=30),
+    )
+
+    assert reason == "failing_surfaces=monitor_probability_freshness"
+
+
+@pytest.mark.parametrize(
+    ("stale_count", "stale_truncated", "semantic_count"),
+    [(2, False, 0), (1, True, 0), (1, False, 1)],
+)
+def test_entry_live_health_still_blocks_truncated_or_semantic_monitor_failure(
+    stale_count,
+    stale_truncated,
+    semantic_count,
+):
+    from src.engine import event_reactor_adapter as adapter
+
+    decision_time = datetime(2026, 5, 24, 18, 10, tzinfo=timezone.utc)
+    payload = _healthy_entry_live_health_provider(decision_time)()
+    stale = {"position_id": "dust-1", "phase": "pending_exit"}
+    payload["surfaces"]["monitor_probability_freshness"] = {
+        "ok": False,
+        "issue": "MONITOR_PROBABILITY_STALE_AGE:n=1",
+        "current_stale_projection_count": 0,
+        "current_stale_projection_truncated": False,
+        "current_stale_projection_sample": [],
+        "latest_stale_monitor_count": 0,
+        "latest_stale_monitor_truncated": False,
+        "latest_stale_monitor_sample": [],
+        "latest_monitor_age_stale_count": stale_count,
+        "latest_monitor_age_stale_truncated": stale_truncated,
+        "latest_monitor_age_stale_sample": [stale],
+        "day0_daily_extrema_unconditioned_count": semantic_count,
+    }
+    payload["surfaces"]["sub_min_partial_position"] = {
+        "ok": False,
+        "issue": "SUB_MIN_PARTIAL_POSITION_UNEXITABLE:n=1",
+        "sub_min_partial_position_count": 1,
+        "sub_min_partial_position_truncated": False,
+        "sub_min_partial_position_sample": [
+            {
+                **stale,
+                "held_shares": 0.00818,
+                "min_order_size": 5.0,
+                "snapshot_freshness_expired": False,
+                "snapshot_freshness_deadline": (
+                    decision_time + timedelta(minutes=2)
+                ).isoformat(),
+            }
+        ],
+    }
+    payload["failing_surfaces"] = ["monitor_probability_freshness"]
+
+    reason = adapter._entry_live_health_authority_block_reason(
+        lambda: payload,
+        now=decision_time + timedelta(seconds=30),
+    )
+
+    assert reason == "failing_surfaces=monitor_probability_freshness"
+
+
+@pytest.mark.parametrize(
+    "missing_key",
+    (
+        "current_stale_projection_sample",
+        "current_stale_projection_count",
+        "day0_daily_extrema_unconditioned_count",
+    ),
+)
+def test_entry_live_health_still_blocks_missing_monitor_evidence(missing_key):
+    from src.engine import event_reactor_adapter as adapter
+
+    decision_time = datetime(2026, 5, 24, 18, 10, tzinfo=timezone.utc)
+    payload = _healthy_entry_live_health_provider(decision_time)()
+    stale = {"position_id": "dust-1", "phase": "pending_exit"}
+    payload["surfaces"]["monitor_probability_freshness"] = {
+        "ok": False,
+        "issue": "MONITOR_PROBABILITY_STALE_AGE:n=1",
+        "current_stale_projection_count": 0,
+        "current_stale_projection_truncated": False,
+        "current_stale_projection_sample": [],
+        "latest_stale_monitor_count": 0,
+        "latest_stale_monitor_truncated": False,
+        "latest_stale_monitor_sample": [],
+        "latest_monitor_age_stale_count": 1,
+        "latest_monitor_age_stale_truncated": False,
+        "latest_monitor_age_stale_sample": [stale],
+        "day0_daily_extrema_unconditioned_count": 0,
+    }
+    payload["surfaces"]["monitor_probability_freshness"].pop(missing_key)
+    payload["surfaces"]["sub_min_partial_position"] = {
+        "ok": False,
+        "issue": "SUB_MIN_PARTIAL_POSITION_UNEXITABLE:n=1",
+        "sub_min_partial_position_count": 1,
+        "sub_min_partial_position_truncated": False,
+        "sub_min_partial_position_sample": [
+            {
+                **stale,
+                "held_shares": 0.00818,
+                "min_order_size": 5.0,
+                "snapshot_freshness_expired": False,
+                "snapshot_freshness_deadline": (
+                    decision_time + timedelta(minutes=2)
+                ).isoformat(),
+            }
+        ],
+    }
+    payload["failing_surfaces"] = ["monitor_probability_freshness"]
+
+    reason = adapter._entry_live_health_authority_block_reason(
+        lambda: payload,
+        now=decision_time + timedelta(seconds=30),
+    )
+
+    assert reason == "failing_surfaces=monitor_probability_freshness"
+
+
+@pytest.mark.parametrize(
+    "freshness_mutation",
+    ("missing", "expired", "expires_before_decision"),
+)
+def test_entry_live_health_still_blocks_noncurrent_dust_minimum(freshness_mutation):
+    from src.engine import event_reactor_adapter as adapter
+
+    decision_time = datetime(2026, 5, 24, 18, 10, tzinfo=timezone.utc)
+    stale = {"position_id": "dust-1", "phase": "pending_exit"}
+    dust = {
+        **stale,
+        "held_shares": 0.00818,
+        "min_order_size": 5.0,
+        "snapshot_freshness_expired": False,
+        "snapshot_freshness_deadline": (
+            decision_time + timedelta(minutes=2)
+        ).isoformat(),
+    }
+    if freshness_mutation == "missing":
+        dust.pop("snapshot_freshness_deadline")
+    elif freshness_mutation == "expired":
+        dust["snapshot_freshness_expired"] = True
+    else:
+        dust["snapshot_freshness_deadline"] = (
+            decision_time + timedelta(seconds=10)
+        ).isoformat()
+    payload = _healthy_entry_live_health_provider(decision_time)()
+    payload["surfaces"]["monitor_probability_freshness"] = {
+        "ok": False,
+        "issue": "MONITOR_PROBABILITY_STALE_AGE:n=1",
+        "current_stale_projection_count": 0,
+        "current_stale_projection_truncated": False,
+        "current_stale_projection_sample": [],
+        "latest_stale_monitor_count": 0,
+        "latest_stale_monitor_truncated": False,
+        "latest_stale_monitor_sample": [],
+        "latest_monitor_age_stale_count": 1,
+        "latest_monitor_age_stale_truncated": False,
+        "latest_monitor_age_stale_sample": [stale],
+        "day0_daily_extrema_unconditioned_count": 0,
+    }
+    payload["surfaces"]["sub_min_partial_position"] = {
+        "ok": False,
+        "issue": "SUB_MIN_PARTIAL_POSITION_UNEXITABLE:n=1",
+        "sub_min_partial_position_count": 1,
+        "sub_min_partial_position_truncated": False,
+        "sub_min_partial_position_sample": [dust],
+    }
+    payload["failing_surfaces"] = ["monitor_probability_freshness"]
+
+    reason = adapter._entry_live_health_authority_block_reason(
+        lambda: payload,
+        now=decision_time + timedelta(seconds=30),
+    )
+
+    assert reason == "failing_surfaces=monitor_probability_freshness"
+
+
+def test_entry_live_health_scopes_durable_closed_market_hold_without_fresh_book():
+    from src.engine import event_reactor_adapter as adapter
+
+    decision_time = datetime(2026, 5, 24, 18, 10, tzinfo=timezone.utc)
+    stale = {
+        "position_id": "dust-1",
+        "phase": "pending_exit",
+        "market_closed_hold_to_settlement": True,
+    }
+    payload = _healthy_entry_live_health_provider(decision_time)()
+    payload["surfaces"]["monitor_probability_freshness"] = {
+        "ok": False,
+        "issue": "MONITOR_PROBABILITY_STALE_AGE:n=1",
+        "current_stale_projection_count": 0,
+        "current_stale_projection_truncated": False,
+        "current_stale_projection_sample": [],
+        "latest_stale_monitor_count": 0,
+        "latest_stale_monitor_truncated": False,
+        "latest_stale_monitor_sample": [],
+        "latest_monitor_age_stale_count": 1,
+        "latest_monitor_age_stale_truncated": False,
+        "latest_monitor_age_stale_sample": [stale],
+        "day0_daily_extrema_unconditioned_count": 0,
+    }
+    payload["surfaces"]["sub_min_partial_position"] = {
+        "ok": False,
+        "issue": "SUB_MIN_PARTIAL_POSITION_UNEXITABLE:n=1",
+        "sub_min_partial_position_count": 1,
+        "sub_min_partial_position_truncated": False,
+        "sub_min_partial_position_sample": [
+            {
+                **stale,
+                "held_shares": 0.00818,
+                "min_order_size": 5.0,
+                "snapshot_freshness_expired": True,
+                "snapshot_freshness_deadline": (
+                    decision_time - timedelta(hours=1)
+                ).isoformat(),
+            }
+        ],
+    }
+    payload["failing_surfaces"] = ["monitor_probability_freshness"]
 
     reason = adapter._entry_live_health_authority_block_reason(
         lambda: payload,

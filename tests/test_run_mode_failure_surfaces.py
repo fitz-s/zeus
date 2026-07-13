@@ -3571,6 +3571,158 @@ def test_monitor_probability_freshness_evaluates_stale_age_without_attested_daem
     assert "monitor_probability_freshness" in result["failing_surfaces"]
 
 
+def test_monitor_probability_freshness_reports_exact_count_when_sample_truncates(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sd = tmp_path / "state"
+    sd.mkdir()
+    _setup_healthy_state(sd)
+    monkeypatch.setattr(live_health, "_dirty_runtime_worktree_paths", lambda **_kwargs: ())
+    now = datetime.now(timezone.utc)
+    _write_monitor_probability_freshness_db(
+        sd,
+        now=now,
+        latest_event_fresh=True,
+        stale_event_age=timedelta(minutes=21),
+        latest_event_age=timedelta(minutes=20),
+    )
+    conn = sqlite3.connect(sd / "zeus_trades.db")
+    try:
+        for index in range(1, 11):
+            position_id = f"pos-monitor-{index}"
+            conn.execute(
+                """
+                INSERT INTO position_current
+                SELECT ?, phase, order_status, shares, chain_shares,
+                       last_monitor_prob, last_monitor_prob_is_fresh, updated_at,
+                       city, target_date, bin_label, direction
+                  FROM position_current
+                 WHERE position_id = 'pos-monitor'
+                """,
+                (position_id,),
+            )
+            conn.execute(
+                "INSERT INTO position_events VALUES (?, 1, 'MONITOR_REFRESHED', ?, ?)",
+                (
+                    position_id,
+                    (now - timedelta(minutes=20)).isoformat(),
+                    json.dumps(
+                        {"last_monitor_prob": 0.42, "last_monitor_prob_is_fresh": True}
+                    ),
+                ),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+    result = compute_composite_live_health(state_dir=sd, now=now)
+
+    surface = result["surfaces"]["monitor_probability_freshness"]
+    assert surface["latest_monitor_age_stale_count"] == 11
+    assert len(surface["latest_monitor_age_stale_sample"]) == 10
+    assert surface["latest_monitor_age_stale_truncated"] is True
+
+
+def test_monitor_probability_freshness_exposes_canonical_closed_market_hold(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sd = tmp_path / "state"
+    sd.mkdir()
+    _setup_healthy_state(sd)
+    monkeypatch.setattr(live_health, "_dirty_runtime_worktree_paths", lambda **_kwargs: ())
+    now = datetime.now(timezone.utc)
+    _write_monitor_probability_freshness_db(
+        sd,
+        now=now,
+        latest_event_fresh=True,
+        stale_event_age=timedelta(minutes=21),
+        latest_event_age=timedelta(minutes=20),
+    )
+    conn = sqlite3.connect(sd / "zeus_trades.db")
+    try:
+        conn.execute(
+            """
+            UPDATE position_events
+               SET payload_json = ?
+             WHERE position_id = 'pos-monitor'
+               AND sequence_no = 11
+            """,
+            (
+                json.dumps(
+                    {
+                        "last_monitor_prob": 0.42,
+                        "last_monitor_prob_is_fresh": True,
+                        "semantic_event": "MARKET_CLOSED_HOLD_TO_SETTLEMENT",
+                        "hold_reason": "MARKET_CLOSED_AWAITING_SETTLEMENT",
+                        "exit_order_submitted": False,
+                        "exit_failure": False,
+                        "applied_validations": [
+                            "MARKET_CLOSED_AWAITING_SETTLEMENT",
+                            "closed_market_hold_preserved_monitor_evidence",
+                        ],
+                    }
+                ),
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    result = compute_composite_live_health(state_dir=sd, now=now)
+
+    surface = result["surfaces"]["monitor_probability_freshness"]
+    sample = surface[
+        "latest_monitor_age_stale_sample"
+    ][0]
+    assert sample["market_closed_hold_to_settlement"] is True
+    assert "latest_monitor_payload_json" not in sample
+
+
+@pytest.mark.parametrize("payload_json", ("[]", "{malformed"))
+def test_monitor_probability_freshness_rejects_nonobject_closed_hold_payload(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    payload_json: str,
+) -> None:
+    sd = tmp_path / "state"
+    sd.mkdir()
+    _setup_healthy_state(sd)
+    monkeypatch.setattr(live_health, "_dirty_runtime_worktree_paths", lambda **_kwargs: ())
+    now = datetime.now(timezone.utc)
+    _write_monitor_probability_freshness_db(
+        sd,
+        now=now,
+        latest_event_fresh=True,
+        stale_event_age=timedelta(minutes=21),
+        latest_event_age=timedelta(minutes=20),
+    )
+    conn = sqlite3.connect(sd / "zeus_trades.db")
+    try:
+        conn.execute(
+            "UPDATE position_events SET payload_json = ? WHERE position_id = 'pos-monitor' AND sequence_no = 11",
+            (payload_json,),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    result = compute_composite_live_health(state_dir=sd, now=now)
+
+    surface = result["surfaces"]["monitor_probability_freshness"]
+    if payload_json == "{malformed":
+        assert surface["ok"] is False
+        assert surface["issue"].startswith(
+            "MONITOR_PROBABILITY_FRESHNESS_READ_UNAVAILABLE:"
+        )
+        return
+    sample = surface[
+        "latest_monitor_age_stale_sample"
+    ][0]
+    assert sample["market_closed_hold_to_settlement"] is False
+
+
 def test_sub_min_partial_position_degrades_when_held_shares_below_snapshot_minimum(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -3613,6 +3765,54 @@ def test_sub_min_partial_position_allows_size_at_snapshot_minimum(
     assert surface["ok"] is True
     assert surface["sub_min_partial_position_count"] == 0
     assert "sub_min_partial_position" not in result["failing_surfaces"]
+
+
+def test_sub_min_partial_position_reports_exact_count_when_sample_truncates(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sd = tmp_path / "state"
+    sd.mkdir()
+    _setup_healthy_state(sd)
+    monkeypatch.setattr(live_health, "_dirty_runtime_worktree_paths", lambda **_kwargs: ())
+    now = datetime.now(timezone.utc)
+    _write_sub_min_partial_position_db(sd, now=now, chain_shares=3.8)
+    conn = sqlite3.connect(sd / "zeus_trades.db")
+    try:
+        for index in range(1, 11):
+            position_id = f"pos-sub-min-{index}"
+            token_id = f"token-no-sub-min-{index}"
+            condition_id = f"cond-sub-min-{index}"
+            conn.execute(
+                """
+                INSERT INTO position_current
+                SELECT ?, phase, order_status, shares, chain_shares, ?, ?, city,
+                       target_date, bin_label, direction, exit_reason, updated_at
+                  FROM position_current
+                 WHERE position_id = 'pos-sub-min'
+                """,
+                (position_id, token_id, condition_id),
+            )
+            conn.execute(
+                """
+                INSERT INTO executable_market_snapshots
+                SELECT ?, ?, ?, min_order_size, orderbook_top_bid,
+                       orderbook_top_ask, captured_at, freshness_deadline
+                  FROM executable_market_snapshots
+                 WHERE snapshot_id = 'snap-sub-min'
+                """,
+                (f"snap-sub-min-{index}", condition_id, token_id),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+    result = compute_composite_live_health(state_dir=sd, now=now)
+
+    surface = result["surfaces"]["sub_min_partial_position"]
+    assert surface["sub_min_partial_position_count"] == 11
+    assert len(surface["sub_min_partial_position_sample"]) == 10
+    assert surface["sub_min_partial_position_truncated"] is True
 
 
 def test_day0_decision_trace_degrades_when_processed_day0_has_no_artifact(

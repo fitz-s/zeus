@@ -3016,9 +3016,7 @@ def _monitor_probability_freshness_surface(
         for row in scoped_review_hold_sample
         if row.get("position_id") is not None
     }
-    sample_limit = MONITOR_PROBABILITY_STALE_SAMPLE_LIMIT + len(review_hold_ids)
-
-    current_sample, current_err = _sqlite_ro_rows(
+    current_rows, current_err = _sqlite_ro_rows(
         trade_db,
         """
         SELECT position_id,
@@ -3041,9 +3039,8 @@ def _monitor_probability_freshness_surface(
            )
            AND COALESCE(CAST(pc.last_monitor_prob_is_fresh AS INTEGER), 0) != 1
          ORDER BY pc.updated_at DESC, pc.position_id
-         LIMIT ?
         """,
-        (sample_limit,),
+        (),
     )
     if current_err:
         return {
@@ -3051,15 +3048,15 @@ def _monitor_probability_freshness_surface(
             "issue": f"MONITOR_PROBABILITY_FRESHNESS_READ_UNAVAILABLE:{current_err}",
             "evaluated": True,
         }
-    current_sample = [
-        row for row in current_sample if str(row.get("position_id")) not in review_hold_ids
-    ][:MONITOR_PROBABILITY_STALE_SAMPLE_LIMIT]
+    current_rows = [
+        row for row in current_rows if str(row.get("position_id")) not in review_hold_ids
+    ]
 
-    latest_stale_sample: list[dict] = []
-    latest_monitor_age_sample: list[dict] = []
+    latest_stale_rows: list[dict] = []
+    latest_monitor_age_rows: list[dict] = []
     day0_daily_extrema_unconditioned_sample: list[dict] = []
     if has_monitor_events:
-        latest_stale_sample, latest_err = _sqlite_ro_rows(
+        latest_stale_rows, latest_err = _sqlite_ro_rows(
             trade_db,
             """
             WITH active_positions AS (
@@ -3115,9 +3112,8 @@ def _monitor_probability_freshness_surface(
              WHERE recent.rn = 1
                AND recent.last_monitor_prob_is_fresh IN (0, 'false')
              ORDER BY datetime(recent.occurred_at) DESC, pc.position_id
-             LIMIT ?
             """,
-            (cutoff, sample_limit),
+            (cutoff,),
         )
         if latest_err:
             return {
@@ -3125,13 +3121,13 @@ def _monitor_probability_freshness_surface(
                 "issue": f"MONITOR_PROBABILITY_FRESHNESS_READ_UNAVAILABLE:{latest_err}",
                 "evaluated": True,
             }
-        latest_stale_sample = [
+        latest_stale_rows = [
             row
-            for row in latest_stale_sample
+            for row in latest_stale_rows
             if str(row.get("position_id")) not in review_hold_ids
-        ][:MONITOR_PROBABILITY_STALE_SAMPLE_LIMIT]
+        ]
 
-        latest_monitor_age_sample, latest_age_err = _sqlite_ro_rows(
+        latest_monitor_age_rows, latest_age_err = _sqlite_ro_rows(
             trade_db,
             """
             WITH active_positions AS (
@@ -3147,6 +3143,7 @@ def _monitor_probability_freshness_surface(
                 SELECT e.position_id,
                        e.sequence_no,
                        e.occurred_at,
+                       e.payload_json,
                        ROW_NUMBER() OVER (
                            PARTITION BY e.position_id
                            ORDER BY e.sequence_no DESC, datetime(e.occurred_at) DESC
@@ -3165,6 +3162,7 @@ def _monitor_probability_freshness_surface(
                    pc.last_monitor_prob_is_fresh,
                    pc.updated_at,
                    latest.occurred_at AS latest_monitor_at,
+                   latest.payload_json AS latest_monitor_payload_json,
                    pc.city,
                    pc.target_date,
                    pc.bin_label,
@@ -3184,9 +3182,8 @@ def _monitor_probability_freshness_surface(
                    OR datetime(latest.occurred_at) < datetime(?)
                )
              ORDER BY datetime(latest.occurred_at) ASC, pc.position_id
-             LIMIT ?
             """,
-            (cutoff, MONITOR_PROBABILITY_STALE_SAMPLE_LIMIT),
+            (cutoff,),
         )
         if latest_age_err:
             return {
@@ -3194,13 +3191,32 @@ def _monitor_probability_freshness_surface(
                 "issue": f"MONITOR_PROBABILITY_FRESHNESS_READ_UNAVAILABLE:{latest_age_err}",
                 "evaluated": True,
             }
-        for row in latest_monitor_age_sample:
+        for row in latest_monitor_age_rows:
             age_seconds = _age_seconds(str(row.get("latest_monitor_at") or ""), now)
             row["latest_monitor_age_seconds"] = age_seconds
             row["latest_monitor_stale_overage_seconds"] = (
                 None
                 if age_seconds is None
                 else max(0.0, age_seconds - MONITOR_PROBABILITY_STALE_LOOKBACK_SECONDS)
+            )
+            try:
+                latest_payload = json.loads(
+                    str(row.pop("latest_monitor_payload_json", "") or "{}")
+                )
+            except (TypeError, json.JSONDecodeError):
+                latest_payload = {}
+            if not isinstance(latest_payload, dict):
+                latest_payload = {}
+            validations = latest_payload.get("applied_validations")
+            row["market_closed_hold_to_settlement"] = (
+                latest_payload.get("semantic_event")
+                == "MARKET_CLOSED_HOLD_TO_SETTLEMENT"
+                and latest_payload.get("hold_reason")
+                == "MARKET_CLOSED_AWAITING_SETTLEMENT"
+                and latest_payload.get("exit_order_submitted") is False
+                and latest_payload.get("exit_failure") is False
+                and isinstance(validations, list)
+                and "MARKET_CLOSED_AWAITING_SETTLEMENT" in validations
             )
 
         day0_daily_extrema_unconditioned_sample, semantic_err = _sqlite_ro_rows(
@@ -3283,10 +3299,15 @@ def _monitor_probability_freshness_surface(
                 "evaluated": True,
             }
 
-    current_count = len(current_sample)
-    latest_stale_count = len(latest_stale_sample)
-    latest_age_count = len(latest_monitor_age_sample)
+    current_count = len(current_rows)
+    latest_stale_count = len(latest_stale_rows)
+    latest_age_count = len(latest_monitor_age_rows)
     semantic_count = len(day0_daily_extrema_unconditioned_sample)
+    current_sample = current_rows[:MONITOR_PROBABILITY_STALE_SAMPLE_LIMIT]
+    latest_stale_sample = latest_stale_rows[:MONITOR_PROBABILITY_STALE_SAMPLE_LIMIT]
+    latest_monitor_age_sample = latest_monitor_age_rows[
+        :MONITOR_PROBABILITY_STALE_SAMPLE_LIMIT
+    ]
     detail = {
         "evaluated": True,
         "main_daemon_attested": main_daemon_attested,
@@ -3294,10 +3315,14 @@ def _monitor_probability_freshness_surface(
         "lookback_seconds": MONITOR_PROBABILITY_STALE_LOOKBACK_SECONDS,
         "cutoff_at": cutoff,
         "current_stale_projection_count": current_count,
+        "current_stale_projection_truncated": current_count > len(current_sample),
         "current_stale_projection_sample": current_sample,
         "latest_stale_monitor_count": latest_stale_count,
+        "latest_stale_monitor_truncated": latest_stale_count > len(latest_stale_sample),
         "latest_stale_monitor_sample": latest_stale_sample,
         "latest_monitor_age_stale_count": latest_age_count,
+        "latest_monitor_age_stale_truncated": latest_age_count
+        > len(latest_monitor_age_sample),
         "latest_monitor_age_stale_sample": latest_monitor_age_sample,
         "day0_daily_extrema_unconditioned_count": semantic_count,
         "day0_daily_extrema_unconditioned_sample": (
@@ -3447,7 +3472,7 @@ def _sub_min_partial_position_surface(state_dir: Path, now: datetime) -> dict:
         )
         for column in optional_position_columns
     )
-    sample, sample_err = _sqlite_ro_rows(
+    rows, sample_err = _sqlite_ro_rows(
         trade_db,
         f"""
         WITH active_positions AS (
@@ -3509,9 +3534,8 @@ def _sub_min_partial_position_surface(state_dir: Path, now: datetime) -> dict:
          ORDER BY ap.held_shares / COALESCE(CAST(s.min_order_size AS REAL), 1.0) ASC,
                   datetime(s.captured_at) DESC,
                   ap.position_id
-         LIMIT ?
         """,
-        (SUB_MIN_PARTIAL_POSITION_SAMPLE_LIMIT,),
+        (),
     )
     if sample_err:
         return {
@@ -3519,7 +3543,7 @@ def _sub_min_partial_position_surface(state_dir: Path, now: datetime) -> dict:
             "issue": f"SUB_MIN_PARTIAL_POSITION_READ_UNAVAILABLE:{sample_err}",
             "evaluated": True,
         }
-    for row in sample:
+    for row in rows:
         age_seconds = _age_seconds(str(row.get("snapshot_captured_at") or ""), now)
         row["snapshot_age_seconds"] = age_seconds
         row["snapshot_freshness_expired"] = (
@@ -3527,10 +3551,12 @@ def _sub_min_partial_position_surface(state_dir: Path, now: datetime) -> dict:
             < now.astimezone(timezone.utc).isoformat()
         )
 
-    count = len(sample)
+    count = len(rows)
+    sample = rows[:SUB_MIN_PARTIAL_POSITION_SAMPLE_LIMIT]
     detail = {
         "evaluated": True,
         "sub_min_partial_position_count": count,
+        "sub_min_partial_position_truncated": count > len(sample),
         "sub_min_partial_position_sample": sample,
     }
     if count > 0:
