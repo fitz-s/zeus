@@ -623,7 +623,7 @@ def test_redecision_screen_full_refresh_still_requires_scoped_freshness():
     )
     no_fresh_idx = screen_src.index("confirmation refresh produced no fresh")
     assert screen_src.rindex(
-        "_edli_expire_unadmitted_redecision_pending",
+        "_edli_apply_unadmitted_redecision_expiry",
         0,
         no_fresh_idx,
     ) > screen_src.index(
@@ -1246,6 +1246,58 @@ def test_unadmitted_stale_processing_redecision_is_expired_after_claim_lease():
     assert statuses[fresh_processing.entity_key] == "processing"
 
 
+def test_expiry_plan_cannot_terminalize_a_claim_started_after_discovery():
+    """The mutex-free discovery plan is safe when a reactor claim wins the race."""
+
+    world = sqlite3.connect(":memory:")
+    world.row_factory = sqlite3.Row
+    init_schema(world)
+    store = EventStore(world, consumer_name="edli_reactor_v1")
+    event = make_opportunity_event(
+        event_type="EDLI_REDECISION_PENDING",
+        entity_key="Munich|2026-06-19|high|run-claim-race",
+        source="cycle-claim-race",
+        observed_at="2026-06-18T09:00:00+00:00",
+        available_at="2026-06-18T09:00:00+00:00",
+        received_at="2026-06-18T09:00:00+00:00",
+        causal_snapshot_id="snap-claim-race",
+        payload=_ready_payload(
+            city="Munich",
+            target_date="2026-06-19",
+            metric="high",
+            source_run_id="run-claim-race",
+            snapshot_id="snap-claim-race",
+        ),
+        priority=50,
+        created_at="2026-06-18T09:00:00+00:00",
+    )
+    store.insert_or_ignore(event)
+    decision_time = "2026-06-18T10:15:00+00:00"
+
+    plan, stale_cutoff = reactor._edli_plan_unadmitted_redecision_expiry(
+        world,
+        set(),
+        decision_time=decision_time,
+    )
+    assert any(event.event_id in ids for ids in plan.values())
+    assert store.claim(event.event_id, claimed_at=decision_time)
+
+    expired = reactor._edli_apply_unadmitted_redecision_expiry(
+        world,
+        plan,
+        stale_cutoff,
+        decision_time=decision_time,
+    )
+
+    row = world.execute(
+        "SELECT processing_status, claimed_at FROM opportunity_event_processing "
+        "WHERE event_id = ?",
+        (event.event_id,),
+    ).fetchone()
+    assert expired == 0
+    assert tuple(row) == ("processing", decision_time)
+
+
 def test_redecision_admission_is_screen_job_only():
     """The reactor cycle may emit FSR discovery, but EDLI_REDECISION_PENDING belongs to the screen."""
 
@@ -1372,7 +1424,7 @@ def test_redecision_screen_separates_entry_from_held_reemit():
     assert "held_monitor_families=%d held_reemit_families=%d families_reemitted=%d" in screen_src
     assert "suppressed_existing_pending=%d" in screen_src
     assert "no_current_edge_or_rest_reprice_value" in inspect.getsource(
-        reactor._edli_expire_unadmitted_redecision_pending
+        reactor._edli_plan_unadmitted_redecision_expiry
     )
 
 
@@ -2178,15 +2230,41 @@ def test_redecision_screen_opens_world_writer_only_after_mutex():
         src.index("# 3) CANCEL the pulled rests")
     ]
 
-    for block, acquire in (
-        (no_fresh, "_edli_acquire_mutex(emit_mutex"),
-        (no_family, "_edli_acquire_mutex(emit_mutex"),
-        (prune, "_edli_acquire_mutex(prune_mutex"),
-        (emit, "_edli_acquire_mutex(emit_mutex"),
+    for block, acquire, writer, close, release in (
+        (
+            no_fresh,
+            "_edli_acquire_mutex(emit_mutex",
+            "world = get_world_connection()",
+            "world.close()",
+            "emit_mutex.release()",
+        ),
+        (
+            no_family,
+            "_edli_acquire_mutex(emit_mutex",
+            "world = get_world_connection()",
+            "world.close()",
+            "emit_mutex.release()",
+        ),
+        (
+            prune,
+            "_edli_acquire_mutex(prune_mutex",
+            "world_prune = get_world_connection()",
+            "world_prune.close()",
+            "prune_mutex.release()",
+        ),
+        (
+            emit,
+            "_edli_acquire_mutex(emit_mutex",
+            "world = get_world_connection()",
+            "world.close()",
+            "emit_mutex.release()",
+        ),
     ):
+        assert block.index("_edli_plan_unadmitted_redecision_expiry") < block.index(acquire)
         assert block.index(acquire) < block.index("get_world_connection()")
-        assert block.index("get_world_connection()") < block.index(".close()")
-        assert block.index(".close()") < block.index(".release()")
+        assert block.index(writer) < block.index("_edli_apply_unadmitted_redecision_expiry")
+        assert block.index("_edli_apply_unadmitted_redecision_expiry") < block.index(close)
+        assert block.index(close) < block.index(release)
 
     assert "_edli_emit_lock_timeout_seconds(edli_cfg)" in no_fresh
     assert "if emit_acquired:" in no_fresh

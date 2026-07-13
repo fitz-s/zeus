@@ -8643,15 +8643,15 @@ def _edli_supersede_pending_redecisions_for_rest_pull_families(
     return changed
 
 
-def _edli_expire_unadmitted_redecision_pending(
+def _edli_plan_unadmitted_redecision_expiry(
     world_conn,
     admitted_families: set[tuple[str, str, str]],
     *,
     decision_time: str,
     supersede_stale_admitted: bool = False,
     claim_grace_seconds: float | None = None,
-) -> int:
-    """Expire redecision rows no longer backed by entry edge or rest reprice value.
+) -> tuple[dict[str, list[str]], str]:
+    """Discover redecision rows eligible for expiry without taking a write lock.
 
     Fresh pending rows are not safe to expire immediately: the screen may emit a
     row seconds before the next reactor claim cycle. Pending rows must survive a
@@ -8744,7 +8744,7 @@ def _edli_expire_unadmitted_redecision_pending(
                 ).fetchall()
             )
     except Exception:  # noqa: BLE001
-        return 0
+        return {}, stale_processing_cutoff
     expire_by_reason: dict[str, list[str]] = {}
     for row in rows:
         try:
@@ -8772,6 +8772,18 @@ def _edli_expire_unadmitted_redecision_pending(
         elif supersede_stale_admitted:
             reason = "REDECISION_SUPERSEDED_BY_FRESH_SCREEN:stale_pending_claim_grace_elapsed"
             expire_by_reason.setdefault(reason, []).append(event_id)
+    return expire_by_reason, stale_processing_cutoff
+
+
+def _edli_apply_unadmitted_redecision_expiry(
+    world_conn,
+    expire_by_reason: dict[str, list[str]],
+    stale_processing_cutoff: str,
+    *,
+    decision_time: str,
+) -> int:
+    """Apply a precomputed expiry plan with claim-state CAS predicates."""
+
     if not expire_by_reason:
         return 0
     now = str(decision_time)
@@ -8803,6 +8815,31 @@ def _edli_expire_unadmitted_redecision_pending(
             )
             changed += int(cur.rowcount or 0)
     return changed
+
+
+def _edli_expire_unadmitted_redecision_pending(
+    world_conn,
+    admitted_families: set[tuple[str, str, str]],
+    *,
+    decision_time: str,
+    supersede_stale_admitted: bool = False,
+    claim_grace_seconds: float | None = None,
+) -> int:
+    """Discover then expire rows; callers holding a mutex must use the split API."""
+
+    plan, stale_processing_cutoff = _edli_plan_unadmitted_redecision_expiry(
+        world_conn,
+        admitted_families,
+        decision_time=decision_time,
+        supersede_stale_admitted=supersede_stale_admitted,
+        claim_grace_seconds=claim_grace_seconds,
+    )
+    return _edli_apply_unadmitted_redecision_expiry(
+        world_conn,
+        plan,
+        stale_processing_cutoff,
+        decision_time=decision_time,
+    )
 
 
 def _edli_redecision_family_keys_from_entity_keys(
@@ -9089,6 +9126,17 @@ def run_edli_continuous_redecision_screen_cycle(*, screen_lock) -> None:
             if not confirmed_entry_scope and not confirmed_rest_scope and not confirmed_held_scope:
                 from src.state.db import world_write_mutex as _world_write_mutex
 
+                expiry_ro = get_world_connection_read_only()
+                try:
+                    expiry_plan, expiry_cutoff = (
+                        _edli_plan_unadmitted_redecision_expiry(
+                            expiry_ro,
+                            set(),
+                            decision_time=received_at,
+                        )
+                    )
+                finally:
+                    expiry_ro.close()
                 emit_mutex = _world_write_mutex()
                 emit_lock_timeout_s = _edli_emit_lock_timeout_seconds(edli_cfg)
                 emit_acquired = False
@@ -9098,9 +9146,10 @@ def run_edli_continuous_redecision_screen_cycle(*, screen_lock) -> None:
                     emit_acquired = _edli_acquire_mutex(emit_mutex, timeout=emit_lock_timeout_s)
                     if emit_acquired:
                         world = get_world_connection()
-                        expired_unadmitted = _edli_expire_unadmitted_redecision_pending(
+                        expired_unadmitted = _edli_apply_unadmitted_redecision_expiry(
                             world,
-                            set(),
+                            expiry_plan,
+                            expiry_cutoff,
                             decision_time=received_at,
                         )
                         world.commit()
@@ -9236,6 +9285,15 @@ def run_edli_continuous_redecision_screen_cycle(*, screen_lock) -> None:
         if not all_families:
             from src.state.db import world_write_mutex as _world_write_mutex
 
+            expiry_ro = get_world_connection_read_only()
+            try:
+                expiry_plan, expiry_cutoff = _edli_plan_unadmitted_redecision_expiry(
+                    expiry_ro,
+                    set(),
+                    decision_time=received_at,
+                )
+            finally:
+                expiry_ro.close()
             emit_mutex = _world_write_mutex()
             emit_lock_timeout_s = _edli_emit_lock_timeout_seconds(edli_cfg)
             emit_acquired = False
@@ -9244,9 +9302,10 @@ def run_edli_continuous_redecision_screen_cycle(*, screen_lock) -> None:
                 emit_acquired = _edli_acquire_mutex(emit_mutex, timeout=emit_lock_timeout_s)
                 if emit_acquired:
                     world = get_world_connection()
-                    expired_unadmitted = _edli_expire_unadmitted_redecision_pending(
+                    expired_unadmitted = _edli_apply_unadmitted_redecision_expiry(
                         world,
-                        set(),
+                        expiry_plan,
+                        expiry_cutoff,
                         decision_time=received_at,
                     )
                     world.commit()
@@ -9289,6 +9348,16 @@ def run_edli_continuous_redecision_screen_cycle(*, screen_lock) -> None:
         forecasts_ro = get_forecasts_connection_read_only()
         world_scan_ro = None
         try:
+            expiry_ro = get_world_connection_read_only()
+            try:
+                stale_plan, stale_cutoff = _edli_plan_unadmitted_redecision_expiry(
+                    expiry_ro,
+                    set(all_families),
+                    decision_time=received_at,
+                    supersede_stale_admitted=True,
+                )
+            finally:
+                expiry_ro.close()
             prune_mutex = _world_write_mutex()
             prune_lock_timeout_s = _edli_emit_lock_timeout_seconds(edli_cfg)
             prune_acquired = _edli_acquire_mutex(prune_mutex, timeout=prune_lock_timeout_s)
@@ -9302,11 +9371,11 @@ def run_edli_continuous_redecision_screen_cycle(*, screen_lock) -> None:
             world_prune = None
             try:
                 world_prune = get_world_connection()
-                expired_stale_pending = _edli_expire_unadmitted_redecision_pending(
+                expired_stale_pending = _edli_apply_unadmitted_redecision_expiry(
                     world_prune,
-                    set(all_families),
+                    stale_plan,
+                    stale_cutoff,
                     decision_time=received_at,
-                    supersede_stale_admitted=True,
                 )
                 expired_rest_pull_blockers = (
                     _edli_supersede_pending_redecisions_for_rest_pull_families(
@@ -9360,6 +9429,15 @@ def run_edli_continuous_redecision_screen_cycle(*, screen_lock) -> None:
         emit_lock_timeout_s = _edli_emit_lock_timeout_seconds(edli_cfg)
         emit_acquired = False
         world = None
+        expiry_ro = get_world_connection_read_only()
+        try:
+            expiry_plan, expiry_cutoff = _edli_plan_unadmitted_redecision_expiry(
+                expiry_ro,
+                set(all_families),
+                decision_time=received_at,
+            )
+        finally:
+            expiry_ro.close()
         try:
             emit_acquired = _edli_acquire_mutex(emit_mutex, timeout=emit_lock_timeout_s)
             if not emit_acquired:
@@ -9370,9 +9448,10 @@ def run_edli_continuous_redecision_screen_cycle(*, screen_lock) -> None:
                 )
                 return
             world = get_world_connection()
-            expired_unadmitted = _edli_expire_unadmitted_redecision_pending(
+            expired_unadmitted = _edli_apply_unadmitted_redecision_expiry(
                 world,
-                set(all_families),
+                expiry_plan,
+                expiry_cutoff,
                 decision_time=received_at,
             )
             expired_rest_pull_blockers += (
