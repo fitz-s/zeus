@@ -351,6 +351,24 @@ def main() -> None:
         max_instances=1,
         coalesce=True,
     )
+    # PRODUCER 4: continuous fill synchronizer (LX-T4, docs/rebuild/
+    # local_ledger_excision_2026-07-12.md). Independent of WS health/findings
+    # (unlike the M5 sweep, which is event-triggered) — this is the standing
+    # poller that closes Attack A (a fill landing after a one-time replay but
+    # before a reader cutover). 90s cadence sits inside the packet's 60-120s
+    # window and off-phase from PRODUCER 3's 60s tick so the two polls don't
+    # always land on the executor together. Disabled by default
+    # (edli_v1.fill_synchronizer_enabled) — see fill_synchronizer_cycle.
+    from src.ingest.fill_synchronizer import fill_synchronizer_cycle
+
+    _scheduler.add_job(
+        _scheduler_job("fill_synchronizer")(fill_synchronizer_cycle),
+        "interval",
+        seconds=90,
+        id="fill_synchronizer",
+        max_instances=1,
+        coalesce=True,
+    )
 
     # 60s liveness heartbeat (file-only; writes no DB). The heartbeat-sensor watches mtime.
     _scheduler.add_job(

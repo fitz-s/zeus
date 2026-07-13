@@ -6191,6 +6191,11 @@ def init_schema_trade_only(conn: sqlite3.Connection) -> None:
     # §1 A2): durable WS connect/disconnect/reconnect transition log. Trade DB owner.
     from src.state.schema.market_channel_connectivity_schema import ensure_table as _ensure_market_channel_connectivity_table
     _ensure_market_channel_connectivity_table(conn)
+    # LX-T4 (docs/rebuild/local_ledger_excision_2026-07-12.md): durable coverage
+    # watermark for the continuous fill synchronizer (src.ingest.fill_synchronizer).
+    # Trade DB owner, mirrors the schema_epoch registration pattern.
+    from src.state.schema.fill_sync_watermarks_schema import ensure_table as _ensure_fill_sync_watermarks_table
+    _ensure_fill_sync_watermarks_table(conn)
     # DIQ packet (docs/rebuild/quarantine_excision_2026-07-11.md): fact_revocations
     # is owner-local — this trade-DB instance carries opportunity_fact revocations
     # (PR-E 2026-05-22 lineage). Superseded the old trade-only decision_integrity_quarantine.

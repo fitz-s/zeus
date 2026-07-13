@@ -1,5 +1,5 @@
 # Created: 2026-07-06
-# Last reused or audited: 2026-07-06
+# Last reused or audited: 2026-07-13
 # Authority basis: money-path fill-aggregation correctness fix — venue_trade_facts
 #   is an append-only WebSocket observation log; the SAME real fill appears as
 #   MULTIPLE rows sharing trade_id (state progressing MATCHED->MINED->CONFIRMED,
@@ -7,6 +7,17 @@
 #   _coerce_local_sequence, where_sql="trade_id = ?"). Correct aggregation dedups
 #   to one row per (command_id, trade_id) taking the proof-strongest/latest
 #   revision, THEN sums across distinct trade_ids.
+# Authority basis (2026-07-13, docs/rebuild/local_ledger_excision_2026-07-12.md
+#   LX-T4): consult adjudication requires venue_trade_facts' economic identity
+#   (provider trade IDs x child fills x tx_hash/log identity x order/command
+#   IDs) to have ONE home so a future derive-on-read reducer consumes
+#   exactly-once economics without re-deriving the tx-hash-aggregate-exclusion
+#   rule ad hoc. ``economic_trade_fact_cte`` was moved here VERBATIM from
+#   ``src.execution.exchange_reconcile`` (module-private ``_economic_trade_fact_cte``)
+#   — exchange_reconcile now imports both CTE builders under its existing
+#   private names (zero behavior change, proved by its own test suite staying
+#   green). ``alias_edge_cte`` is new: it exposes the trade_id <-> tx_hash <->
+#   child-id alias graph explicitly (queryable, not just a filter).
 """Shared canonical trade-fact dedup CTE for `venue_trade_facts` aggregation.
 
 A bare ``SUM(filled_size)`` over ``venue_trade_facts`` over-counts by 1x-4x
@@ -29,6 +40,14 @@ again in ``src.state.venue_command_repo``). Those three existing copies are
 left as-is (working code) — this module exists only so *new* call sites
 across package boundaries (src/state, src/riskguard, scripts/) can share one
 importable definition instead of growing a fifth copy.
+
+A SECOND identity problem sits one layer up from lifecycle-revision dedup:
+the SAME economic fill can appear as a tx-hash-keyed aggregate row (trade_id
+== tx_hash) AND as one or more exact child trade rows sharing that tx_hash.
+``economic_trade_fact_cte`` excludes the aggregate once an exact child
+exists; ``alias_edge_cte`` exposes the underlying trade_id <-> tx_hash <->
+child-id alias graph explicitly so a future reducer can walk it instead of
+re-deriving the exclusion rule ad hoc.
 """
 
 from __future__ import annotations
@@ -86,3 +105,136 @@ def canonical_trade_fact_cte(
              WHERE ranked.canonical_rank = 1
         )
     """
+
+
+def economic_trade_fact_cte(
+    *,
+    canonical_cte_name: str = "canonical_trade_fact",
+    cte_name: str = "economic_trade_fact",
+) -> str:
+    """Exclude a tx-hash alias once an exact child trade fact exists.
+
+    Moved verbatim from ``src.execution.exchange_reconcile._economic_trade_fact_cte``
+    (2026-07-13, LX-T4 alias-graph consolidation) — see module docstring.
+    """
+
+    return f"""
+        {cte_name} AS (
+            SELECT fact.*
+              FROM {canonical_cte_name} fact
+             WHERE NOT (
+                    TRIM(COALESCE(fact.tx_hash, '')) != ''
+                AND LOWER(TRIM(COALESCE(fact.trade_id, '')))
+                    = LOWER(TRIM(fact.tx_hash))
+                AND EXISTS (
+                        SELECT 1
+                          FROM {canonical_cte_name} exact
+                         WHERE exact.command_id = fact.command_id
+                           AND LOWER(TRIM(COALESCE(exact.tx_hash, '')))
+                               = LOWER(TRIM(fact.tx_hash))
+                           AND LOWER(TRIM(COALESCE(exact.trade_id, '')))
+                               != LOWER(TRIM(COALESCE(fact.trade_id, '')))
+                           AND UPPER(COALESCE(exact.state, ''))
+                               IN ('MATCHED', 'MINED', 'CONFIRMED')
+                           AND CAST(COALESCE(exact.filled_size, '0') AS REAL) > 0
+                    )
+                )
+        )
+    """
+
+
+def alias_edge_cte(
+    *,
+    canonical_cte_name: str = "canonical_trade_fact",
+    cte_name: str = "trade_fact_alias_edge",
+) -> str:
+    """Explicit trade_id <-> tx_hash <-> child-trade alias graph.
+
+    One row per canonical trade fact (see :func:`canonical_trade_fact_cte`),
+    tagged with an ``alias_role`` so a reducer can walk the graph instead of
+    re-deriving the tx-hash-aggregate-exclusion rule ad hoc (the rule
+    :func:`economic_trade_fact_cte` applies as a filter). Roles:
+
+    - ``ALIASED_AGGREGATE``: ``trade_id == tx_hash`` (a tx-hash rollup) AND a
+      distinct exact child trade_id sharing that tx_hash exists for the same
+      command — this row is a duplicate VIEW of the same economic fill and
+      must NOT be summed (excluded by ``economic_trade_fact_cte``).
+    - ``STANDALONE``: ``trade_id == tx_hash`` with no sibling child — the
+      aggregate IS the only observation of this fill, so it stays economic.
+    - ``CHILD_EXACT``: the trade_id is distinct from its tx_hash (or the row
+      has no tx_hash at all) — an economically-authoritative child row.
+
+    Every row from ``canonical_cte_name`` appears exactly once here (this is
+    a tag, not a filter) — ``economic_trade_fact_cte`` is equivalent to
+    ``SELECT * FROM {cte_name} WHERE alias_role != 'ALIASED_AGGREGATE'``.
+    """
+
+    return f"""
+        {cte_name} AS (
+            SELECT
+                fact.*,
+                CASE
+                    WHEN TRIM(COALESCE(fact.tx_hash, '')) != ''
+                     AND LOWER(TRIM(COALESCE(fact.trade_id, '')))
+                         = LOWER(TRIM(fact.tx_hash))
+                     AND EXISTS (
+                            SELECT 1
+                              FROM {canonical_cte_name} sibling
+                             WHERE sibling.command_id = fact.command_id
+                               AND LOWER(TRIM(COALESCE(sibling.tx_hash, '')))
+                                   = LOWER(TRIM(fact.tx_hash))
+                               AND LOWER(TRIM(COALESCE(sibling.trade_id, '')))
+                                   != LOWER(TRIM(COALESCE(fact.trade_id, '')))
+                               AND UPPER(COALESCE(sibling.state, ''))
+                                   IN ('MATCHED', 'MINED', 'CONFIRMED')
+                               AND CAST(COALESCE(sibling.filled_size, '0') AS REAL) > 0
+                        )
+                    THEN 'ALIASED_AGGREGATE'
+                    WHEN TRIM(COALESCE(fact.tx_hash, '')) != ''
+                     AND LOWER(TRIM(COALESCE(fact.trade_id, '')))
+                         = LOWER(TRIM(fact.tx_hash))
+                    THEN 'STANDALONE'
+                    ELSE 'CHILD_EXACT'
+                END AS alias_role
+              FROM {canonical_cte_name} fact
+        )
+    """
+
+
+def economic_trade_facts_for_command(
+    conn,
+    command_id: str,
+) -> list[dict]:
+    """Return the exactly-once economic trade facts for one command.
+
+    Queryable entry point for the alias graph (packaged for a future
+    derive-on-read reducer): dedups lifecycle revisions
+    (``canonical_trade_fact_cte``) then excludes tx-hash-aggregate aliases
+    once an exact child exists (``economic_trade_fact_cte``). Every returned
+    row contributes to that command's economics exactly once, fees included
+    (``fee_paid_micro`` is a plain preserved column, not touched by either CTE).
+    """
+
+    sql = f"""
+        WITH {canonical_trade_fact_cte(source_clause_sql="WHERE fact.command_id = ?")},
+             {economic_trade_fact_cte()}
+        SELECT * FROM economic_trade_fact ORDER BY trade_id
+    """
+    return [dict(row) for row in conn.execute(sql, (command_id,)).fetchall()]
+
+
+def alias_edges_for_command(
+    conn,
+    command_id: str,
+) -> list[dict]:
+    """Return the full alias graph (all roles) for one command, for audit/tests."""
+
+    sql = f"""
+        WITH {canonical_trade_fact_cte(source_clause_sql="WHERE fact.command_id = ?")},
+             {alias_edge_cte()}
+        SELECT command_id, trade_id, tx_hash, state, filled_size, fill_price,
+               fee_paid_micro, alias_role
+          FROM trade_fact_alias_edge
+         ORDER BY trade_id
+    """
+    return [dict(row) for row in conn.execute(sql, (command_id,)).fetchall()]

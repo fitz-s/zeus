@@ -1044,6 +1044,23 @@ tables:
       src/state/schema/market_channel_connectivity_schema.py. Measure only —
       no gate, no enforcement.
 
+  - name: fill_sync_watermarks
+    db: trade
+    schema_class: trade_class
+    schema_version_owner: null
+    created_by: "init_schema_trade_only + src.state.schema.fill_sync_watermarks_schema.ensure_table"
+    pk_col: source
+    required_columns:
+      - {name: source, type: TEXT, nullable: false}
+      - {name: updated_at, type: TEXT, nullable: false}
+    notes: >
+      LX-T4 (docs/rebuild/local_ledger_excision_2026-07-12.md, "one-time
+      replay is not enough" / Attack A): durable per-source coverage watermark
+      for src.ingest.fill_synchronizer's continuous get_trades(since) poller.
+      One row per sync source; advances only after that cycle's
+      append_trade_fact batch has committed. Sibling registration pattern to
+      market_channel_connectivity_events above.
+
   - name: execution_feasibility_evidence
     db: trade
     schema_class: trade_class

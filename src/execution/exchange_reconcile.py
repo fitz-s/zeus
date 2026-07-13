@@ -61,6 +61,10 @@ from typing import Any, Literal, Mapping, Optional
 
 from src.architecture.decorators import capability, protects
 from src.state.db import assert_no_world_mutex_held_for_io
+from src.state.fill_dedup import (
+    canonical_trade_fact_cte as _canonical_trade_fact_cte,
+    economic_trade_fact_cte as _economic_trade_fact_cte,
+)
 from src.state.portfolio import INACTIVE_RUNTIME_STATES
 from src.state.venue_command_repo import trade_fact_has_positive_fill_economics
 
@@ -169,79 +173,6 @@ CREATE UNIQUE INDEX IF NOT EXISTS ux_findings_unresolved_subject
   ON exchange_reconcile_findings (kind, subject_id, context)
   WHERE resolved_at IS NULL;
 """
-
-
-def _canonical_trade_fact_cte(
-    cte_name: str = "canonical_trade_fact",
-    *,
-    source_clause_sql: str = "",
-) -> str:
-    """Rank trade facts by proof strength before local_sequence recency."""
-
-    return f"""
-        {cte_name} AS (
-            SELECT ranked.*
-              FROM (
-                    SELECT scored.*,
-                           ROW_NUMBER() OVER (
-                               PARTITION BY command_id, trade_id
-                               ORDER BY proof_rank DESC, local_sequence DESC
-                           ) AS canonical_rank
-                      FROM (
-                            SELECT fact.*,
-                                   CASE
-                                       WHEN UPPER(COALESCE(fact.state, '')) = 'CONFIRMED'
-                                            AND CAST(COALESCE(fact.filled_size, '0') AS REAL) > 0
-                                       THEN 500
-                                       WHEN UPPER(COALESCE(fact.state, '')) = 'MINED'
-                                            AND CAST(COALESCE(fact.filled_size, '0') AS REAL) > 0
-                                       THEN 450
-                                       WHEN UPPER(COALESCE(fact.state, '')) = 'MATCHED'
-                                            AND CAST(COALESCE(fact.filled_size, '0') AS REAL) > 0
-                                       THEN 400
-                                       WHEN CAST(COALESCE(fact.filled_size, '0') AS REAL) > 0
-                                       THEN 300
-                                       ELSE 100
-                                   END AS proof_rank
-                              FROM venue_trade_facts fact
-                              {source_clause_sql}
-                           ) scored
-                   ) ranked
-             WHERE ranked.canonical_rank = 1
-        )
-    """
-
-
-def _economic_trade_fact_cte(
-    *,
-    canonical_cte_name: str = "canonical_trade_fact",
-    cte_name: str = "economic_trade_fact",
-) -> str:
-    """Exclude a tx-hash alias once an exact child trade fact exists."""
-
-    return f"""
-        {cte_name} AS (
-            SELECT fact.*
-              FROM {canonical_cte_name} fact
-             WHERE NOT (
-                    TRIM(COALESCE(fact.tx_hash, '')) != ''
-                AND LOWER(TRIM(COALESCE(fact.trade_id, '')))
-                    = LOWER(TRIM(fact.tx_hash))
-                AND EXISTS (
-                        SELECT 1
-                          FROM {canonical_cte_name} exact
-                         WHERE exact.command_id = fact.command_id
-                           AND LOWER(TRIM(COALESCE(exact.tx_hash, '')))
-                               = LOWER(TRIM(fact.tx_hash))
-                           AND LOWER(TRIM(COALESCE(exact.trade_id, '')))
-                               != LOWER(TRIM(COALESCE(fact.trade_id, '')))
-                           AND UPPER(COALESCE(exact.state, ''))
-                               IN ('MATCHED', 'MINED', 'CONFIRMED')
-                           AND CAST(COALESCE(exact.filled_size, '0') AS REAL) > 0
-                    )
-                )
-        )
-    """
 
 
 @dataclass(frozen=True)

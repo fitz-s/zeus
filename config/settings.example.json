@@ -68,6 +68,8 @@
     "market_channel_ingestor_enabled": true,
     "market_channel_quote_cache_enabled": true,
     "edli_user_channel_reconcile_enabled": true,
+    "_fill_synchronizer_note": "LX-T4 (docs/rebuild/local_ledger_excision_2026-07-12.md): continuous get_trades() poller into venue_trade_facts, independent of WS health/findings. src.ingest.fill_synchronizer.fill_synchronizer_cycle, 90s cadence.",
+    "fill_synchronizer_enabled": true,
     "edli_user_channel_message_queue_path": "",
     "edli_venue_reconcile_facts_path": "",
     "edli_user_channel_reconcile_max_messages": 50,
