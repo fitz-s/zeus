@@ -6035,6 +6035,152 @@ def test_execution_feasibility_freshness_tolerates_small_writer_clock_skew():
     assert covered["clock_skew_tolerated_seconds"] == 1.0
 
 
+def test_execution_feasibility_freshness_uses_exact_position_monitor_quote():
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    now = datetime.now(timezone.utc)
+    conn.execute(
+        """
+        CREATE TABLE execution_feasibility_evidence (
+            condition_id TEXT,
+            token_id TEXT,
+            quote_seen_at TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        )
+        """
+    )
+    _insert_monitor_events(
+        conn,
+        position_id="active-pos",
+        monitor_at=now,
+        payload={
+            "condition_id": "cond-target",
+            "direction": "buy_yes",
+            "last_monitor_market_price": 0.0,
+            "last_monitor_market_price_is_fresh": True,
+            "last_monitor_best_bid": 0.0,
+            "last_monitor_best_ask": 0.003,
+        },
+    )
+
+    result = preflight._execution_feasibility_exposure_freshness(
+        conn,
+        columns={"condition_id", "token_id", "quote_seen_at", "created_at"},
+        exposures=[
+            {
+                "position_id": "active-pos",
+                "phase": "day0_window",
+                "city": "Hong Kong",
+                "target_date": "2026-07-13",
+                "temperature_metric": "high",
+                "bin_label": "34C",
+                "direction": "buy_yes",
+                "condition_id": "cond-target",
+                "tokens": ["tok-yes-target"],
+            }
+        ],
+        now=now,
+    )
+
+    assert result["risky"] == []
+    covered = result["covered"][0]
+    assert covered["freshness_basis"] == "position_events.MONITOR_REFRESHED"
+    assert covered["last_monitor_market_price"] == 0.0
+    assert covered["last_monitor_best_bid"] == 0.0
+
+
+def test_execution_feasibility_freshness_rejects_stale_or_mismatched_monitor_quote():
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    now = datetime.now(timezone.utc)
+    conn.execute(
+        """
+        CREATE TABLE execution_feasibility_evidence (
+            condition_id TEXT,
+            token_id TEXT,
+            quote_seen_at TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        )
+        """
+    )
+    _insert_monitor_events(
+        conn,
+        position_id="wrong-pos",
+        monitor_at=now,
+        payload={
+            "condition_id": "cond-target",
+            "direction": "buy_yes",
+            "last_monitor_market_price": 0.4,
+            "last_monitor_market_price_is_fresh": True,
+            "last_monitor_best_bid": 0.4,
+        },
+    )
+    _insert_monitor_events(
+        conn,
+        position_id="active-pos",
+        monitor_at=now - timedelta(seconds=181),
+        payload={
+            "condition_id": "cond-target",
+            "direction": "buy_yes",
+            "last_monitor_market_price": 0.4,
+            "last_monitor_market_price_is_fresh": True,
+            "last_monitor_best_bid": 0.4,
+        },
+    )
+
+    result = preflight._execution_feasibility_exposure_freshness(
+        conn,
+        columns={"condition_id", "token_id", "quote_seen_at", "created_at"},
+        exposures=[
+            {
+                "position_id": "active-pos",
+                "phase": "active",
+                "city": "Hong Kong",
+                "target_date": "2026-07-13",
+                "temperature_metric": "high",
+                "bin_label": "34C",
+                "direction": "buy_yes",
+                "condition_id": "cond-target",
+                "tokens": ["tok-yes-target"],
+            }
+        ],
+        now=now,
+    )
+
+    assert result["covered"] == []
+    assert result["risky"][0]["risk"] == "missing_execution_feasibility_evidence"
+
+
+def test_monitor_quote_requires_fresh_flag_and_exact_identity():
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    now = datetime.now(timezone.utc)
+    _insert_monitor_events(
+        conn,
+        position_id="active-pos",
+        monitor_at=now,
+        payload={
+            "condition_id": "cond-other",
+            "direction": "buy_yes",
+            "last_monitor_market_price": 0.4,
+            "last_monitor_market_price_is_fresh": False,
+            "last_monitor_best_bid": 0.4,
+        },
+    )
+
+    evidence = preflight._fresh_monitor_quote_for_exposure(
+        conn,
+        exposure={
+            "position_id": "active-pos",
+            "direction": "buy_yes",
+            "condition_id": "cond-target",
+        },
+        now=now,
+    )
+
+    assert evidence is None
+
+
 def test_execution_feasibility_freshness_uses_fresh_executable_snapshot_quote():
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row

@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-# Lifecycle: created=2026-06-18; last_reviewed=2026-06-28; last_reused=2026-06-28
+# Lifecycle: created=2026-06-18; last_reviewed=2026-07-14; last_reused=2026-07-14
 # Purpose: Read-only preflight before restarting the live trading daemon.
 # Reuse: Run immediately before loading com.zeus.live-trading or python -m src.main.
 # Created: 2026-06-18
-# Last reused or audited: 2026-06-28
+# Last reused or audited: 2026-07-14
 # Authority basis: Zeus live-money restart proof gates in AGENTS.md.
 """Read-only live restart preflight.
 
@@ -3252,6 +3252,14 @@ def _execution_feasibility_exposure_freshness(
             if snapshot_evidence is not None:
                 covered.append(snapshot_evidence)
                 continue
+            monitor_evidence = _fresh_monitor_quote_for_exposure(
+                conn,
+                exposure=exposure,
+                now=now,
+            )
+            if monitor_evidence is not None:
+                covered.append(monitor_evidence)
+                continue
             risky.append({**evidence, "risk": "missing_execution_feasibility_evidence"})
             continue
         age = (now - latest_dt).total_seconds()
@@ -3272,16 +3280,104 @@ def _execution_feasibility_exposure_freshness(
                 snapshot_evidence["execution_feasibility_age_seconds"] = age
                 covered.append(snapshot_evidence)
             else:
-                covered.append(evidence)
-                risk = (
-                    "future_execution_feasibility_evidence"
-                    if age < 0
-                    else "stale_execution_feasibility_evidence"
+                monitor_evidence = _fresh_monitor_quote_for_exposure(
+                    conn,
+                    exposure=exposure,
+                    now=now,
                 )
-                risky.append({**evidence, "risk": risk})
+                if monitor_evidence is not None:
+                    monitor_evidence["execution_feasibility_latest_observed_at"] = latest_observed
+                    monitor_evidence["execution_feasibility_latest_quote_seen_at"] = latest_quote
+                    monitor_evidence["execution_feasibility_age_seconds"] = age
+                    covered.append(monitor_evidence)
+                else:
+                    covered.append(evidence)
+                    risk = (
+                        "future_execution_feasibility_evidence"
+                        if age < 0
+                        else "stale_execution_feasibility_evidence"
+                    )
+                    risky.append({**evidence, "risk": risk})
             continue
         covered.append(evidence)
     return {"scoped_exposure_count": len(exposures), "risky": risky, "covered": covered}
+
+
+def _fresh_monitor_quote_for_exposure(
+    conn: sqlite3.Connection,
+    *,
+    exposure: dict[str, Any],
+    now: datetime,
+) -> dict[str, Any] | None:
+    """Use an exact-position monitor receipt as current SELL quote evidence."""
+
+    position_id = str(exposure.get("position_id") or "").strip()
+    if not position_id or not _table_exists(conn, "main", "position_events"):
+        return None
+    columns = _table_columns(conn, "main", "position_events")
+    required = {"position_id", "event_type", "occurred_at", "payload_json"}
+    if not required.issubset(columns):
+        return None
+    order_tail = ", sequence_no DESC" if "sequence_no" in columns else ""
+    row = conn.execute(
+        f"""
+        SELECT occurred_at, payload_json
+          FROM position_events
+         WHERE position_id = ?
+           AND event_type = 'MONITOR_REFRESHED'
+         ORDER BY datetime(occurred_at) DESC{order_tail}
+         LIMIT 1
+        """,
+        (position_id,),
+    ).fetchone()
+    if row is None:
+        return None
+    occurred_at = str(row["occurred_at"] or "")
+    occurred_dt = _parse_dt(occurred_at)
+    if occurred_dt is None:
+        return None
+    age = (now - occurred_dt).total_seconds()
+    if not _execution_feasibility_age_is_fresh(age):
+        return None
+    try:
+        payload = json.loads(str(row["payload_json"] or "{}"))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return None
+    if not isinstance(payload, dict) or payload.get("last_monitor_market_price_is_fresh") is not True:
+        return None
+
+    def _prob(value: object) -> float | None:
+        parsed = _decimal_float(value)
+        return parsed if parsed is not None and 0.0 <= parsed <= 1.0 else None
+
+    market_price = _prob(payload.get("last_monitor_market_price"))
+    best_bid = _prob(payload.get("last_monitor_best_bid"))
+    if market_price is None or best_bid is None:
+        return None
+    condition_id = str(exposure.get("condition_id") or "").strip()
+    payload_condition_id = str(payload.get("condition_id") or "").strip()
+    if condition_id and payload_condition_id != condition_id:
+        return None
+    direction = str(exposure.get("direction") or "").strip().lower()
+    payload_direction = str(payload.get("direction") or "").strip().lower()
+    if direction and payload_direction != direction:
+        return None
+    evidence = {
+        **_exposure_stub(exposure),
+        "latest_observed_at": occurred_at,
+        "latest_quote_seen_at": occurred_at,
+        "freshness_basis": "position_events.MONITOR_REFRESHED",
+        "age_seconds": age,
+        "last_monitor_market_price": market_price,
+        "last_monitor_best_bid": best_bid,
+        "last_monitor_best_ask": _prob(payload.get("last_monitor_best_ask")),
+        "quote_authority": "exact_position_current_monitor_receipt",
+    }
+    if age < 0:
+        evidence["clock_skew_tolerated_seconds"] = min(
+            abs(age), EXECUTION_FEASIBILITY_CLOCK_SKEW_TOLERANCE_SECONDS
+        )
+    return evidence
 
 
 def _fresh_executable_snapshot_quote_for_exposure(
