@@ -1,0 +1,423 @@
+VERDICT: No LX-T verdict flips; the refinements materially harden LX-T3, T4, T6, T7, and T8, and make a pre-cutover mixed-transaction refactor plus database-enforced economics-write firewall mandatory. Logically excise the EDLI economics at LX-T3; physically delete the EDLI table with R7 only after its certificate and evidence links are rehomed. Confidence: 0.97.
+
+Revising the earlier “projection funnel is the writer cutover” finding: projection.py is not a sufficient control point. The activation unit must be ownership of the forbidden columns themselves, independent of which helper, recovery pass, dynamic SQL builder, or stale daemon issues the statement. The execution master at 602934f still describes a single surviving bypass in one section and “position_current 7 writers → projection.py single writer” in another; the post-pin census invalidates both assumptions. GitHub+1
+
+Confirming LX-T5: the recovery and reconcile passes are mixed modules. Their command recovery, unknown-side-effect resolution, venue observation, review, and operator-disposition halves are KEEP. Their direct writes of shares, chain economics, exit price, and realized P&L are exactly the derived-value repair disease that must die.
+
+Revising the classification of realized_edge: edli_live_profit_audit.pnl_usd is the same clobber class as position_current.realized_pnl_usd. realized_edge is not settlement P&L: the code derives it from frozen decision-q, fill price, size, and fees. It is a legitimate analytical computation in principle, but its current mutable upsert location and unversioned promotion use are wrong. It should become a rebuildable, versioned execution-quality receipt rather than disappear as a concept. GitHub+1
+
+Findings
+
+[BLOCKER] cutover authority — src/state/projection.py:658; src/state/position_duplicate_consolidator.py:186,369; src/execution/command_recovery.py:2461,6215,8282,8387,8618,8683; src/execution/exit_lifecycle.py:4680; src/execution/exchange_reconcile.py:1418,1813; src/events/edli_position_bridge.py:1003 — switching or disabling the nominal projection funnel leaves numerous live processes able to repair or clobber the supposedly dead economics after new readers activate — define the forbidden-column set centrally, convert every named path before activation, and arm BEFORE INSERT/UPDATE database guards at LX-3R so no non-reducer process can change those columns under ACTIVE_NEW — verify locally: execute the complete recovery/reconcile/exit fixture matrix under an SQLite authorizer or trace hook plus the ACTIVE_NEW guards; require zero writes to forbidden columns, all expected command/fact/event writes to survive, and no retry loop from rejected legacy SQL.
+
+[BLOCKER] mixed-transaction rollback — src/execution/command_recovery.py:2461+; src/analysis/settlement_skill_attribution.py:1124-1128; src/state/position_duplicate_consolidator.py:186,369 — merely enabling a trigger at activation can roll back the KEEP half of a pass because several modules append evidence and then perform the diseased economics update inside the same savepoint or batch — before arming any guard, refactor each pass so source observations, command events, reviews, and attribution facts commit independently of legacy projection writes; the new read model may catch up afterward from a durable cursor. Command recovery currently appends REVIEW_REQUIRED and updates chain economics in one savepoint, while settlement grading deliberately batches the grade and EDLI P&L writeback together. GitHub+1
+
+[BLOCKER] stale-reader dependency — all named recovery sites — removing the SET clauses while leaving candidate selection, predicates, or arithmetic based on position_current.shares, chain_shares, entry_price, cost_basis_usd, or phase still makes the pass depend on a frozen ledger and can recover the wrong command or position — migrate both sides of every site: its write output and every legacy-economics read used to decide whether or how to act; selectors must consume canonical command/fill facts, exact balance observations, and the published read-model generation.
+
+[BLOCKER] duplicate-position identity — src/state/position_duplicate_consolidator.py:186,369 — this is not an ordinary economics writer: it currently chooses a keeper, emits administrative events, voids duplicate rows, and synthesizes merged shares and cost basis from local projections plus a collateral snapshot; simply deleting its updates leaves duplicate identities that a new reducer can count twice — before read-model backfill, convert prior consolidations into explicit immutable identity-supersession facts such as POSITION_IDENTITY_SUPERSEDED(keeper, absorbed_ids, evidence_refs) and make the reducer deduplicate by that relation; remove all synthesized share, basis, and entry-price arithmetic from the ongoing pass. The current implementation writes both ADMIN_VOIDED/MANUAL_OVERRIDE_APPLIED events and zeroed or merged economics. GitHub+1
+
+[BLOCKER] recovered ghost sell economics — src/execution/exchange_reconcile.py:1418 — this site does more than repair a projection: it reconstructs a missing live EXIT command, which is load-bearing, but then calculates remaining basis and realized P&L using the open order’s price as fill_price; matched order quantity does not prove exact execution price, so the current write can book incorrect realized money — retain the recovered command, command events, order fact, raw order evidence, and pending-exit state; leave realized P&L unknown until exact trade facts arrive, and derive remaining exposure from attributed fills plus exact token balance. The source obtains price from the open order, passes it as fill_price, and computes matched_size * (fill_price - entry_price). GitHub
+
+[HIGH] operator external-close recovery — src/execution/exchange_reconcile.py:1813 — a direct zeroing of chain fields is not the durable fact that an operator externally closed exposure and can be especially ambiguous in the shared wallet — retain a source-scoped exact balance observation, operator disposition, and external-close event; let the reducer derive zero exposure only when the observation’s wallet/token scope and attribution predicates are sufficient.
+
+[BLOCKER] exit liveness — src/execution/exit_lifecycle.py:4680 — killing its terminal economics update without first replacing the post-fill path can leave an exit fill durable at the venue but invisible to the state consumed by the next retry cycle, inviting a second sell — preserve and canonicalize the EXIT command and trade facts, terminalize the command idempotently, and ensure the exit lane checks those facts directly even if materialization is behind; entry and portfolio readers may fail closed on read-model lag, but duplicate-exit prevention may not. The current path already has canonical/economic trade-fact CTEs but still performs a terminal position_current update after deriving the close. GitHub
+
+[BLOCKER] EDLI fill visibility — src/events/edli_position_bridge.py:1003 — disabling this writer at LX-3R without a replacement would recreate the exact failure the bridge was introduced to prevent: a confirmed EDLI fill would be invisible to chain reconciliation and exits — in LX-1R, replace the projection bridge with an EDLI-event-to-canonical-command/fill/attribution bridge that appends permanent trade-DB facts carrying the source event hash; only then disable its first-materialization and replay updates to position_current. The module explicitly exists because EDLI fills otherwise remain in a disconnected event lane, and both first materialization and replay currently write local position economics. GitHub+2GitHub+2
+
+[HIGH] settlement P&L semantics — src/analysis/settlement_skill_attribution.py:1124-1128; src/events/live_profit_audit.py:238 — generic pnl_usd is written from WU/world grading, entry fill price, size, and fees, with no chain payout and no exit-fill sequence; it is therefore a world-grade hold-to-settlement label, not necessarily actual realized wallet P&L — stop the EDLI writeback at LX-T3 and, where the analytical label is still needed, emit an explicitly named world_grade_pnl_usd in a versioned learning receipt containing the graded-receipt hash, attributed-fill-set hash, fee-set hash, and formula version; actual chain P&L remains a separate chain-realization output. GitHub+1
+
+[HIGH] walk-forward hidden reader — src/analysis/settlement_skill_attribution.py:load_settled_positions; src/events/edli_position_bridge.py — settlement skill attribution currently reads entry_price and shares from trades.position_current and reaches the frozen decision certificate through edli_live_profit_audit; dropping or freezing the ledger without migrating this reader breaks or silently changes the historical learning corpus — before LX-T3, source fill size, average entry price, and fees from the attributed fact reducer, and source the decision certificate through a stable position/command-to-certificate attribution fact. GitHub
+
+[HIGH] certificate attribution ambiguity — src/analysis/settlement_skill_attribution.py:_resolve_cert_hash_for_position — the current bridge chooses the latest certificate for (condition_id, direction), and the source documents multiple certificate hashes for 14 such pairs; present threshold invariance does not make that join historically sound — write the exact certificate hash onto a permanent attribution record at intent or command creation, backfill historical links conservatively, and mark ambiguous cases UNATTRIBUTABLE rather than selecting whichever audit row was created last. GitHub+2GitHub+2
+
+[HIGH] mutable learning receipts — src/events/live_profit_audit.py:LiveProfitAuditLedger.insert_record; src/analysis/settlement_skill_attribution.py:persist_grade — both the audit record and settlement attribution are mutable UPSERTs, so a rerun can replace an earlier analytical result and destroy the precise corpus that produced a historical model decision — move permanent learning outputs to append-only, versioned receipts with explicit supersession/canonicality rather than updating in place; retain old receipt identities even when a corrected settlement becomes canonical. GitHub+1
+
+(a) Effect on LX-T verdicts and LX-0R..LX-5R
+
+There is no verdict change, but five gates become materially stricter.
+
+LX-T1 — unchanged: GATED. The new writers do not change the payout-ingester verdict.
+
+LX-T2 — unchanged: WRONG as broad deletion. The collateral head/reservation split is unaffected.
+
+LX-T3 — still GATED, now a harder BLOCKING gate. T3 must cover all direct and indirect writers, every selector that reads frozen economics, and analytical consumers such as settlement skill attribution. “Reader migration followed by stopping the projection writer” is no longer adequate.
+
+LX-T4 — still GATED, strengthened. edli_position_bridge proves that one live fill lane is still translated into local economics rather than first becoming a permanent canonical fill fact. The canonical fact bridge must land before T3 activation.
+
+LX-T5 — unchanged: WRONG as broad module deletion. The new census directly confirms the earlier split: KEEP the resolver pass; kill its derived-value booking.
+
+LX-T6 — still GATED, but revising its gate. EDLI retirement cannot delete edli_live_profit_audit until the load-bearing position/command-to-certificate link, fill-source hashes, and any still-required historical evidence have a permanent non-EDLI home. The master plan does place EDLI shape retirement in R7, while retaining the certificate concept. GitHub+1
+
+LX-T7 — still GATED, strengthened. The EDLI P&L writeback is a concrete instance of the prohibited world-grade/chain-money collapse. It must be split and renamed.
+
+LX-T8 — unchanged: WRONG as zero-grep. The larger and dynamically generated writer set makes a semantic ownership gate, database guard, and runtime write trace even more necessary.
+
+The high-level LX-0R through LX-5R order remains correct, but the contents change as follows.
+
+LX-0R: add a column-ownership and transaction census
+
+In addition to the truth epoch, define:
+
+the exact forbidden economics columns;
+
+their permitted writer role, normally only the deterministic read-model reducer;
+
+every INSERT, direct UPDATE, dynamic SQL update, helper-mediated upsert, trigger, migration, and attached-database writer;
+
+every reader used for money, recovery selection, settlement, learning, and reporting;
+
+which KEEP facts currently share a transaction with a forbidden write.
+
+Treat the supplied locations as a named initial set, not as a count-based completeness claim.
+
+Define the permanent non-EDLI schemas now:
+
+position_decision_attribution;
+
+canonical EDLI-derived command/fill source facts;
+
+execution_quality_receipt;
+
+settlement_learning_receipt.
+
+LX-1R: establish causal fact parity and rehome EDLI links
+
+Before writing the new reducer:
+
+Replace edli_position_bridge economics output with canonical command/fill/attribution facts.
+
+Rehome the exact decision-certificate link from the EDLI audit table.
+
+Ensure every recovery writer’s causative source data is durable: exact fill identities, order observations, balances, source scope, coverage watermark, and operator disposition.
+
+Convert duplicate-position consolidation history into identity-supersession facts.
+
+Do not manufacture historical fill prices or P&L where the existing evidence contains only an order price or aggregate matched quantity.
+
+A legacy position whose derivation inputs are incomplete should be explicitly UNPROVEN_LEGACY_ECONOMICS; its old columns may be archived for forensic comparison, but not promoted into immutable source truth.
+
+LX-2R: deploy dual-capable, fact-first code before activation
+
+Every recovery/reconcile/exit process deployed into the mesh must understand both epochs but execute only one authority branch:
+
+Under LEGACY, it may retain the current projection behavior until activation.
+
+Under ACTIVE_NEW, it appends only source/protocol facts, command events, reviews, and materialization work; it never changes legacy economics.
+
+This is not a shadow mode because there is only one active reader/writer authority per epoch.
+
+Before LX-3R:
+
+migrate all selectors and predicates off frozen economics;
+
+split mixed savepoints so evidence survives projection failure;
+
+build and replay the deterministic read model;
+
+install dormant trade-DB column guards;
+
+rewire settlement learning and EDLI promotion consumers;
+
+freeze EDLI derived-value writeback in the world DB after its replacement is live.
+
+The world-DB learning migration should be completed as an LX-2R precondition rather than included in the instantaneous trade-DB money cutover. That avoids pretending the three databases can share one atomic SQL commit.
+
+LX-3R: one fenced activation plus a column write firewall
+
+During PREPARE:
+
+Pause new entries.
+
+Continue exits from command/trade facts and exact venue truth.
+
+Capture the unresolved command set and source watermarks.
+
+Run all dual-capable recovery processes through that watermark.
+
+Confirm every live daemon supports the new epoch.
+
+At activation, atomically within the trade DB:
+
+publish ACTIVE_NEW;
+
+switch all money readers;
+
+arm the position_current forbidden-column guards;
+
+revoke legacy command-admission leases.
+
+Immediately rerun the captured unresolved-command set under the new branch. This catches any command whose venue side effect straddled the activation boundary.
+
+The database guard is defense in depth, not the migration mechanism. Any expected activation that immediately begins rejecting normal recovery writes is a failed cutover and must keep entries closed.
+
+LX-4R: quarantine and observe
+
+Keep old columns physically present but:
+
+unread by runtime authority paths;
+
+unwritten;
+
+guarded;
+
+instrumented for rejected write attempts;
+
+excluded from recovery candidate selection.
+
+A blocked-write counter must identify process build, module, SQL class, and command or position subject. Do not catch and suppress the database error as success.
+
+LX-5R: destructive trade-schema drop; EDLI physical retirement may remain R7-owned
+
+Drop the position_current economics after the quarantine gate.
+
+It is acceptable for the EDLI audit table and its old columns to remain physically present until R7 only if:
+
+their derived fields are write-guarded;
+
+no live risk, sizing, settlement, promotion, or learning reader treats them as authority;
+
+the certificate and source-evidence links have been rehomed;
+
+historical access is through an explicitly archival adapter;
+
+R7 has an executable deletion gate.
+
+That is frozen legacy schema, not a shadow ledger.
+
+(b) Is “the pass survives; its economics writes die at LX-3R” sufficient?
+
+Necessary, but not sufficient.
+
+It is sufficient only when “the pass survives” means:
+
+The pass has already been rewritten as an observer/resolver that persists causative facts and local protocol state, with all decisions and selectors detached from the old economics.
+
+It is not sufficient if it means:
+
+Leave the current code intact and conditionally skip or database-reject the final UPDATE.
+
+Four conditions must hold at every named site before activation.
+
+1. Causal fact completeness
+
+Everything needed to reproduce the removed economics must already exist as immutable facts. A position event saying “projection repaired” is not enough if the exact fill set, fee set, source observation, or payout input is absent.
+
+2. Reader and selector migration
+
+A pass that no longer writes shares but still chooses candidates using stale shares remains coupled to the ledger.
+
+This is especially acute in exchange_reconcile: the recovered ghost-sell selector searches position_current open phases and local shares before reconstructing the command. That lookup must move to canonical position identity plus attributed exposure. GitHub
+
+3. Transaction separation
+
+KEEP evidence must commit even when the old projection is forbidden. This requires code refactoring before activation, because a trigger aborts the statement’s transaction or savepoint.
+
+4. Replacement publication or direct-fact liveness
+
+Readers that need immediate safety state—especially duplicate-exit prevention—must either see a synchronously published reducer generation or be able to read the source command/trade facts directly.
+
+The site-specific calls are:
+
+position_duplicate_consolidator.py:186/369: special handling required. Replace the ongoing economic merge with identity supersession. Run or backfill this before constructing the new read model, otherwise duplicate identities can be double-counted.
+
+command_recovery.py:2461/6215/8282/8387/8618/8683: special handling required as one migration packet. Preserve command terminalization, no-fill proofs, chain-absence observations, reviews, and unknown-side-effect handling. Remove direct economic repairs. Split savepoints and migrate candidate predicates. For each path, prove that the event/fact payload contains all source evidence needed by the reducer; an after-state copied from position_current is not sufficient.
+
+exit_lifecycle.py:4680: special handling required because exits must continue. The exit fill fact and command terminal state must become sufficient to suppress another sell before the materialized read model catches up.
+
+exchange_reconcile.py:1418: special handling required. Preserve reconstruction of the missing EXIT command and order evidence. Do not book P&L from the order price. Keep the position conservatively pending or partially exited until exact trade facts arrive.
+
+exchange_reconcile.py:1813: special handling required. Preserve the external-close observation/operator disposition and let exact token truth plus attribution derive the result.
+
+edli_position_bridge.py:1003: special handling required before LX-3R, not at LX-3R. It must first become a permanent fact bridge. Turning it off at the activation instant without that replacement can strand new EDLI fills.
+
+projection.py:658: ordinary authority replacement. Stop its legacy economics insertion at activation; it may create a stable identity shell only if the target design still requires one. Economics belong in the reducer-owned read model.
+
+The superior mechanism is therefore not eleven local feature flags. It is:
+
+dual-capable fact-first code;
+
+one truth epoch;
+
+process capability fencing;
+
+a database-level forbidden-column guard;
+
+a generated static and runtime writer manifest.
+
+Local flags alone are vulnerable to an omitted writer or stale daemon. A trigger alone is vulnerable to rolling back KEEP evidence. Both layers are required.
+
+(c) edli_live_profit_audit: LX-T3 or R7?
+
+Logical excision at LX-T3; physical retirement at R7. Do not leave its economics live until R7, and do not hot-drop the entire table at LX-T3.
+
+What dies logically at LX-T3
+
+Stop writing and stop treating as authority:
+
+pnl_usd;
+
+settlement_outcome when it means WU/world grade;
+
+realized_edge;
+
+edge_value_usd;
+
+promotion_eligible when derived from those mutable columns.
+
+The current ledger performs a broad ON CONFLICT DO UPDATE over the audit row, including the derived fields, so it is a mutable composite projection despite its “audit” name. GitHub
+
+Also remove writeback_settlement_pnl_to_audit from the settlement grading batch before a write guard is armed. Otherwise the forbidden update can roll back valid settlement-attribution work in the same savepoint. GitHub
+
+What must be rehomed before LX-T3
+
+Preserve as permanent facts or links:
+
+aggregate_id;
+
+execution_command_id;
+
+stable position ID;
+
+condition and token identity;
+
+exact expected_edge_source_certificate_hash;
+
+cost-model certificate hash where still required;
+
+fill source-event hash;
+
+settlement or grade receipt hash;
+
+original timestamps and schema family.
+
+The permanent link should be written at decision/command creation:
+
+position_id or command_id → exact decision_certificate_hash
+
+Do not continue the settlement-time (condition_id, direction) → latest audit row inference.
+
+Historical EDLI certificates remain frozen historical evidence even after the EDLI producer code dies in R7. R7 may replace the producer with SOLVE certificates for new decisions; it must not rewrite old certificate identity.
+
+What replaces realized_edge
+
+The current formula is an execution-quality metric:
+
+BUY: decision q minus fill price minus fee per share;
+
+SELL: fill price minus decision q minus fee per share.
+
+Retain that concept as an append-only execution_quality_receipt, for example:
+
+receipt_id;
+
+position_id;
+
+command_id;
+
+decision_certificate_hash;
+
+fill_fact_set_hash;
+
+fee_fact_set_hash;
+
+formula_version;
+
+execution_edge_per_share;
+
+edge_value_usd;
+
+computed_at;
+
+supersedes_receipt_id, where needed.
+
+It is rebuildable analytical state, never order, risk, bankroll, or settlement authority.
+
+What replaces pnl_usd
+
+For walk-forward learning, use a separately named settlement_learning_receipt containing:
+
+frozen decision-certificate hash;
+
+frozen graded-receipt hash;
+
+attributed fill-set and fee-set hashes;
+
+settlement-semantics version;
+
+formula version;
+
+world_grade_pnl_usd, where this hold-to-settlement label is desired;
+
+category or skill attribution;
+
+immutable creation and supersession metadata.
+
+Do not call it realized wallet P&L. The existing calculation uses binary world payoff, entry fill, size, and fees, and therefore does not establish what the chain paid or account for an early or partial exit. GitHub+1
+
+Actual monetary realization remains:
+
+attributed entry/exit fills + fees + chain payout observations
+
+and belongs to the chain-realization reducer.
+
+What happens to the table physically
+
+After the replacements are active:
+
+freeze the legacy EDLI derived columns;
+
+keep the table temporarily for archival comparison and migration lineage;
+
+prevent new runtime readers from depending on it;
+
+let R7 delete the whole EDLI shape.
+
+This is safer than dropping selected columns during the live-money LX-T3 cutover, while still satisfying the excision law because the frozen columns are neither written nor authoritative.
+
+Walk-forward acceptance gate
+
+Before freezing the EDLI surface, rebuild the historical learning corpus through the target receipts and require:
+
+identical certificate identity where an exact historical link exists;
+
+identical skill category and world-grade P&L under the same semantics/formula version;
+
+every previously ambiguous latest-row association explicitly resolved or marked UNATTRIBUTABLE;
+
+no dependence on current position_current economics;
+
+no in-place overwrite of an older learning receipt.
+
+verify locally: backfill the stable position/command-to-certificate attribution and target learning receipts over the complete historical corpus; compare every existing settlement category and analytical P&L, while reporting all missing or multi-certificate subjects rather than resolving them by “latest row.”
+
+Final calls for Claude Code
+
+Keep the existing LX-T verdict labels.
+
+Amend LX-T3’s gate to cover every named bypass writer, every legacy-economics selector, and all learning/report consumers.
+
+Add an LX-0R generated column-writer/reader manifest and forbidden-column ownership contract.
+
+Convert every mixed recovery transaction before installing the write firewall.
+
+Handle duplicate consolidation as identity supersession, not an economics repair.
+
+Make recovered ghost sells record commands and observations without manufacturing P&L from order price.
+
+Replace edli_position_bridge with a canonical fact bridge before LX-3R.
+
+Rehome exact decision-certificate attribution before EDLI retirement.
+
+Stop EDLI P&L and realized-edge mutable writes at LX-T3.
+
+Move execution edge and world-grade P&L into versioned, append-only, rebuildable learning receipts.
+
+Keep edli_live_profit_audit physically read-only until R7; then delete it.
+
+Make the LX-3R write guard a defense-in-depth assertion after all new-capable binaries are deployed—not the mechanism that strips writes from old code.
+
+Rerun unresolved commands immediately after the truth-epoch flip.
+
+Require the exit lane to remain correct directly from command/trade facts during materializer lag.
+
+I verified representative direct bypasses, the mixed savepoint behavior, the recovered-ghost-sell arithmetic, the EDLI projection bridge, the mutable audit upsert, the settlement writeback, and the settlement certificate join in the public 602934feb3f1b1c8619f06134784843aa23328b7 source. The complete bypass-set count and exact local line census are taken from the supplied post-pin local results; the architectural decision does not depend on whether two references are ultimately classified as one SQL writer or two.

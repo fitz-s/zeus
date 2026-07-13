@@ -135,6 +135,18 @@ Exit 充分真相路(激活后不依赖 Kelly/bankroll/payout ingester):`safe_ex
 
 钱包可花 collateral(head−承诺,管新单硬可行性)≠ **Zeus strategy equity**(显式配额策略 × attributed fills/fees/exposure/payouts,Kelly 的正确基数)≠ 钱包总 equity(含操作员资产,只做遥测/全局安全限)。/positions 的 currentValue/avgPrice/cashPnl 永不做 Zeus 权威;归属查询失败不默认全归 Zeus;入场 sizing 在 Zeus-equity 不完整时 fail closed。
 
+### Round-2 delta 裁决(2026-07-13;原文 `docs/rebuild/consult_answers/local_ledger_excision_delta_round2_2026-07-13.txt`;confidence 0.97)
+
+11 旁路写者 + edli_live_profit_audit 不翻任何 LX-T 判决,但加严五个门:
+
+- **激活单元修正(BLOCKER)**:切换单元 = **禁写列本身的所有权**,不是 projection funnel。LX-0R 增列:禁写列集中定义 + 生成式写者/读者 manifest(静态+runtime);LX-3R 加 **DB 级 BEFORE INSERT/UPDATE 列防火墙**(defense-in-depth,不是迁移机制 —— 正常恢复写被拒 = cutover 失败,保持 entries 关闭)。
+- **混合事务先拆(BLOCKER)**:多处 KEEP 证据写与病灶经济学写同 savepoint(command_recovery REVIEW_REQUIRED+chain 经济学;settlement grading+EDLI writeback)—— guard 一响会回滚 KEEP 半边。**防火墙上膛前必须拆分事务。**
+- **selector 同迁(BLOCKER)**:pass 停写还不够 —— 候选选择/谓词仍读冻结 shares/phase 就还耦合旧账本(exchange_reconcile ghost-sell selector 是实锤)。每站点读写两侧都迁。
+- **六站点特判**:duplicate_consolidator → 改 **identity-supersession facts**(POSITION_IDENTITY_SUPERSEDED),在 read-model 回填前跑,否则 reducer 双计;exchange_reconcile:1418 → 保命令重建,**禁用 order price 冒充 fill_price 记 P&L**(现行是错账),exact trade facts 到前 P&L=UNKNOWN;exit_lifecycle:4680 → exit 防重卖必须直读 command/trade facts(不等 read-model 追上);edli_position_bridge:1003 → **LX-3R 前**(非时刻)换成 canonical fact bridge,否则新 EDLI fill 搁浅;exchange_reconcile:1813 → 外部平仓留 observation+disposition,归零由 reducer 从精确 token 真相推导;command_recovery 六站 → 一个迁移包,event payload 必须含 reducer 所需全部源证据(从 position_current 抄的 after-state 不算)。
+- **edli_live_profit_audit 裁决**:**逻辑摘除在 LX-T3**(pnl_usd/realized_edge/settlement_outcome/promotion_eligible 停写停权威;writeback 从 grading batch 摘出),**物理删除留 R7**(冻结只读+归档 adapter)。先 rehome:position/command→decision_certificate_hash 永久归属记录(**在决策时写**,替换现行 settlement 时 (condition,direction)→latest-row 推断 —— 14 对多证书歧义已实锤,歧义标 UNATTRIBUTABLE 不选 latest);realized_edge 概念保留,改 append-only versioned `execution_quality_receipt`;pnl_usd 更名 `world_grade_pnl_usd` 进 `settlement_learning_receipt`(它是 hold-to-settlement world-grade 标签,不是钱包实际 P&L —— 现名撒谎)。walk-forward 验收门:target receipts 重建历史语料,证书身份/skill category/world-grade P&L 全等,歧义显式化。
+- **LX-2R 增前置**:world-DB learning 迁移完成于 LX-2R(不塞进 trade-DB 原子切换 —— 三 DB 无共享事务);dual-capable fact-first 代码全网部署(LEGACY 分支保旧行为,ACTIVE_NEW 分支只 append facts —— 单权威 per epoch,不违 no-shadow);激活后立即重跑捕获的 unresolved-command 集(接住跨界 venue 副作用)。
+- **新增 KEEP 义务**:mutable learning UPSERTs(live_profit_audit insert_record、settlement_attribution persist_grade)→ append-only versioned receipts with supersession(rerun 不得覆写历史语料)。
+
 ## Operator forks(裁决后仅剩的操作员决定)
 
 1. **Zeus 资本配额**:共享钱包下 Zeus-specific Kelly 数学上未定义,除非 ①显式 Zeus capital-allocation policy(一个数/一条规则,操作员定)或 ②钱包隔离。Consult 判两者必居其一 —— 你选哪个?(现状 bankroll 读钱包聚合值 = 把操作员资产喂进 Zeus Kelly,是 HIGH 级错账。)
