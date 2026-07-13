@@ -6737,6 +6737,14 @@ def _global_current_state_execution_economics(
     return current
 
 
+def _global_current_state_economics_seed(proof: "_CandidateProof") -> dict[str, Any]:
+    """Preserve the replacement-served bound before global tail tightening."""
+
+    cert = dict(proof.qkernel_execution_economics or {})
+    cert.setdefault("pre_qkernel_q_lcb_5pct", float(proof.q_lcb_5pct))
+    return cert
+
+
 def _bind_global_current_state_economics_to_proof(
     proof: "_CandidateProof",
     cert: Mapping[str, Any],
@@ -6915,14 +6923,13 @@ def _global_actuation_selected_proof(
     jit_venue_book_hash = str(jit_depth.get("hash") or "").strip()
     if not jit_venue_book_hash:
         raise ValueError("GLOBAL_ACTUATION_JIT_VENUE_BOOK_HASH_MISSING")
-    cert = dict(proof.qkernel_execution_economics or {})
+    cert = _global_current_state_economics_seed(proof)
     cert.update(
         {
             # The immutable served point remains the point estimate.  The global
             # sample matrix owns the robust band/selection, not a replacement
             # point estimate; its lower tail may only tighten this served proof.
             "payoff_q_point": float(proof.q_posterior),
-            "pre_qkernel_q_lcb_5pct": float(proof.q_lcb_5pct),
             "global_actuation_identity": str(
                 getattr(global_actuation, "actuation_identity", "") or ""
             ),

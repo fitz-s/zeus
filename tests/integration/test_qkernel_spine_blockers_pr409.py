@@ -1919,6 +1919,8 @@ def test_overlay_preserves_replacement_no_bound_and_allows_only_monotone_tighten
 
     assert new_proof.replacement_no_bound_certificate == bound
     assert new_proof.q_lcb_5pct == pytest.approx(0.60)
+    seed = era._global_current_state_economics_seed(new_proof)
+    assert seed["pre_qkernel_q_lcb_5pct"] == pytest.approx(0.617)
     assert era.replacement_no_bound_certificate_matches(
         new_proof.replacement_no_bound_certificate,
         expected=expected,

@@ -240,3 +240,12 @@ authority surface.
   passed 17/17, the two affected test modules passed 223/224 with one pre-existing Day0 fragile-
   edge expectation failure, and the unchanged capital-optimality evaluator
   passed 258/258.
+- 2026-07-13: the first fully healthy post-restart auction reached the NO bound
+  certificate and rejected all 21 candidates with
+  `parent_probability:side_q_lcb_served`. The global selection binder copied an
+  already tightened tail LCB back into the field named `pre_qkernel_q_lcb_5pct`,
+  overwriting the immutable replacement-served NO bound while leaving the
+  signed certificate unchanged. The current-state tail may tighten executable
+  economics, but it cannot rewrite its parent. The binder now preserves the
+  existing pre-qkernel value and only synthesizes it for legacy proofs where the
+  field is absent.
