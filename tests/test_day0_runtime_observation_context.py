@@ -112,7 +112,8 @@ def test_day0_hko_observation_reads_official_since_midnight_extrema(monkeypatch)
             authority TEXT,
             data_version TEXT,
             training_allowed INTEGER,
-            causality_status TEXT
+            causality_status TEXT,
+            provenance_json TEXT NOT NULL DEFAULT '{}'
         )
         """
     )
@@ -122,8 +123,8 @@ def test_day0_hko_observation_reads_official_since_midnight_extrema(monkeypatch)
             city, target_date, source, utc_timestamp, temp_current,
             running_max, running_min, station_id, temp_unit, imported_at,
             source_role, authority, data_version, training_allowed,
-            causality_status
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            causality_status, provenance_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         [
             (
@@ -132,13 +133,14 @@ def test_day0_hko_observation_reads_official_since_midnight_extrema(monkeypatch)
                 "HKO", "C", "2026-06-17T12:00:05+00:00",
                 "runtime_monitoring", "ICAO_STATION_NATIVE",
                 "v1.hk-extrema", 0, "OK",
+                '{"observation_basis":"hko_since_midnight_extrema_1min_mean"}',
             ),
             (
                 "Hong Kong", "2026-06-17", "hko_hourly_accumulator",
                 "2026-06-17T11:00:00+00:00", 34.0, 34.0, 34.0,
                 "HKO", "C", "2026-06-17T11:00:05+00:00",
                 "runtime_monitoring", "ICAO_STATION_NATIVE",
-                "v1.hk-legacy", 0, "REQUIRES_SOURCE_REAUDIT",
+                "v1.hk-legacy", 0, "REQUIRES_SOURCE_REAUDIT", "{}",
             ),
         ],
     )

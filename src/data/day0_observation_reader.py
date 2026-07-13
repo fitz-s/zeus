@@ -59,6 +59,9 @@ _DEFAULT_SOURCE_PRIORITY: tuple[str, ...] = (
 # Authorities the reader trusts (A4 filter).
 _TRUSTED_AUTHORITIES: frozenset[str] = frozenset({"VERIFIED", "ICAO_STATION_NATIVE"})
 
+_HKO_SOURCE = "hko_hourly_accumulator"
+_HKO_EXTREMA_BASIS = "hko_since_midnight_extrema_1min_mean"
+
 # coverage_status constants
 COVERAGE_OK = "OK"
 COVERAGE_LOW = "LOW_COVERAGE"
@@ -126,7 +129,7 @@ _EXTREMA_SQL = """
         MIN(running_min) AS agg_low,
         COUNT(*) AS n_rows,
         MAX(utc_timestamp) AS last_observation_time_utc
-    FROM observation_instants
+    FROM {table_ref}
     WHERE city = ?
       AND target_date = ?
       AND source = ?
@@ -143,11 +146,12 @@ _EXTREMA_SQL = """
                 AND COALESCE(training_allowed, 0) = 0
             )
       )
+      {source_semantics}
 """
 
 _CURRENT_TEMP_SQL = """
     SELECT temp_current
-    FROM observation_instants
+    FROM {table_ref}
     WHERE city = ?
       AND target_date = ?
       AND source = ?
@@ -165,6 +169,7 @@ _CURRENT_TEMP_SQL = """
             )
       )
       AND temp_current IS NOT NULL
+      {source_semantics}
     ORDER BY utc_timestamp DESC
     LIMIT 1
 """
@@ -182,7 +187,7 @@ _LATEST_CONTEXT_SQL = """
         data_version,
         training_allowed,
         causality_status
-    FROM observation_instants
+    FROM {table_ref}
     WHERE city = ?
       AND target_date = ?
       AND source = ?
@@ -199,6 +204,7 @@ _LATEST_CONTEXT_SQL = """
                 AND COALESCE(training_allowed, 0) = 0
             )
       )
+      {source_semantics}
     ORDER BY datetime(utc_timestamp) DESC, datetime(imported_at) DESC, id DESC
     LIMIT 1
 """
@@ -212,6 +218,23 @@ def _auth_values() -> tuple[str, ...]:
     return tuple(sorted(_TRUSTED_AUTHORITIES))
 
 
+def _source_semantics(source: str) -> tuple[str, tuple[str, ...]]:
+    """Return source-specific executable-evidence predicates and parameters."""
+
+    if source != _HKO_SOURCE:
+        return "", ()
+    return (
+        """
+        AND CASE
+                WHEN json_valid(COALESCE(provenance_json, ''))
+                THEN json_extract(provenance_json, '$.observation_basis')
+                ELSE NULL
+            END = ?
+        """,
+        (_HKO_EXTREMA_BASIS,),
+    )
+
+
 def read_day0_observed_extrema(
     conn: sqlite3.Connection,
     *,
@@ -220,6 +243,7 @@ def read_day0_observed_extrema(
     timezone_name: str,
     decision_time_utc: datetime,
     source_priority: Sequence[str] = _DEFAULT_SOURCE_PRIORITY,
+    table_ref: str = "observation_instants",
 ) -> Day0ObservedExtrema:
     """Read day-0 observed extrema using semantics-correct MAX aggregation.
 
@@ -244,6 +268,9 @@ def read_day0_observed_extrema(
     source_priority:
         Ordered sequence of source tags to try.  The first source that has
         qualifying rows is used exclusively.  Defaults to canonical tier order.
+    table_ref:
+        Canonical observation table, optionally through an attached ``world``
+        schema. Only the fixed runtime table names are accepted.
 
     Returns
     -------
@@ -261,6 +288,12 @@ def read_day0_observed_extrema(
             "decision_time_utc must be timezone-aware. "
             f"Got naive datetime: {decision_time_utc!r}"
         )
+    if table_ref not in {
+        "observation_instants",
+        "world.observation_instants",
+        "forecasts.observation_instants",
+    }:
+        raise ValueError(f"unsupported observation table_ref: {table_ref!r}")
 
     # Normalise to UTC ISO8601 string that SQLite's datetime() accepts.
     # Use +00:00 suffix (not Z) — consistent with writer format.
@@ -272,9 +305,6 @@ def read_day0_observed_extrema(
     auth_ph = _auth_placeholders()
     auth_vals = _auth_values()
 
-    extrema_sql = _EXTREMA_SQL.format(auth_placeholders=auth_ph)
-    current_temp_sql = _CURRENT_TEMP_SQL.format(auth_placeholders=auth_ph)
-
     chosen_source: Optional[str] = None
     agg_high: Optional[float] = None
     agg_low: Optional[float] = None
@@ -282,9 +312,15 @@ def read_day0_observed_extrema(
     last_observation_time_utc: Optional[str] = None
 
     for source in source_priority:
+        source_sql, source_vals = _source_semantics(source)
+        extrema_sql = _EXTREMA_SQL.format(
+            auth_placeholders=auth_ph,
+            source_semantics=source_sql,
+            table_ref=table_ref,
+        )
         row = conn.execute(
             extrema_sql,
-            (city, target_date, source, decision_str) + auth_vals,
+            (city, target_date, source, decision_str) + auth_vals + source_vals,
         ).fetchone()
         if row is None or row[2] == 0:
             continue
@@ -299,10 +335,19 @@ def read_day0_observed_extrema(
     # Fetch latest temp_current for the chosen source (diagnostic only).
     current_temp: Optional[float] = None
     if chosen_source is not None:
-        ct_row = conn.execute(
-            current_temp_sql,
-            (city, target_date, chosen_source, decision_str) + auth_vals,
-        ).fetchone()
+        source_sql, source_vals = _source_semantics(chosen_source)
+        current_temp_sql = _CURRENT_TEMP_SQL.format(
+            auth_placeholders=auth_ph,
+            source_semantics=source_sql,
+            table_ref=table_ref,
+        )
+        try:
+            ct_row = conn.execute(
+                current_temp_sql,
+                (city, target_date, chosen_source, decision_str) + auth_vals + source_vals,
+            ).fetchone()
+        except sqlite3.OperationalError:
+            ct_row = None
         if ct_row is not None:
             current_temp = ct_row[0]
 
@@ -324,6 +369,12 @@ def read_day0_observed_extrema(
         "row_count": n_rows,
         "coverage_status": coverage_status,
         "last_observation_time_utc": last_observation_time_utc,
+        "table_ref": table_ref,
+        "source_semantics": (
+            "hko_official_since_midnight_extrema_only"
+            if chosen_source == _HKO_SOURCE
+            else "source_role_and_authority"
+        ),
         "reader": "src.data.day0_observation_reader.read_day0_observed_extrema",
     }
 
@@ -405,11 +456,18 @@ def read_day0_observation_context_from_instants(
         .strftime("%Y-%m-%dT%H:%M:%S+00:00")
     )
     auth_ph = _auth_placeholders()
-    latest_sql = _LATEST_CONTEXT_SQL.format(auth_placeholders=auth_ph)
+    source_sql, source_vals = _source_semantics(result.chosen_source)
+    latest_sql = _LATEST_CONTEXT_SQL.format(
+        auth_placeholders=auth_ph,
+        source_semantics=source_sql,
+        table_ref="observation_instants",
+    )
     try:
         latest = conn.execute(
             latest_sql,
-            (city_name, str(target_date), result.chosen_source, decision_str) + _auth_values(),
+            (city_name, str(target_date), result.chosen_source, decision_str)
+            + _auth_values()
+            + source_vals,
         ).fetchone()
     except sqlite3.OperationalError:
         latest = conn.execute(
@@ -440,10 +498,16 @@ def read_day0_observation_context_from_instants(
                         AND COALESCE(training_allowed, 0) = 0
                     )
               )
+              {source_semantics}
             ORDER BY datetime(utc_timestamp) DESC
             LIMIT 1
-            """.format(auth_placeholders=auth_ph),
-            (city_name, str(target_date), result.chosen_source, decision_str) + _auth_values(),
+            """.format(
+                auth_placeholders=auth_ph,
+                source_semantics=source_sql,
+            ),
+            (city_name, str(target_date), result.chosen_source, decision_str)
+            + _auth_values()
+            + source_vals,
         ).fetchone()
     latest_current = latest_hi = latest_low = None
     station_id = ""

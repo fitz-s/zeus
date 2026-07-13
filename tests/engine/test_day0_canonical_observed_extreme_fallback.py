@@ -28,8 +28,10 @@ _NOW = datetime(2026, 6, 23, 23, 0, 0, tzinfo=UTC)
 _COLS = (
     "city", "target_date", "local_timestamp", "utc_timestamp",
     "running_max", "running_min", "authority", "causality_status", "source", "temperature_metric",
-    "training_allowed", "source_role",
+    "training_allowed", "source_role", "provenance_json",
 )
+
+_HKO_BASIS = '{"observation_basis":"hko_since_midnight_extrema_1min_mean"}'
 
 
 def _obs_conn(rows: list[tuple]) -> sqlite3.Connection:
@@ -39,7 +41,8 @@ def _obs_conn(rows: list[tuple]) -> sqlite3.Connection:
         "CREATE TABLE observation_instants ("
         "city TEXT, target_date TEXT, local_timestamp TEXT, utc_timestamp TEXT, "
         "running_max REAL, running_min REAL, authority TEXT, causality_status TEXT, "
-        "source TEXT, temperature_metric TEXT, training_allowed INTEGER, source_role TEXT)"
+        "source TEXT, temperature_metric TEXT, training_allowed INTEGER, source_role TEXT, "
+        "provenance_json TEXT NOT NULL DEFAULT '{}')"
     )
     normalized_rows = []
     for row in rows:
@@ -47,12 +50,16 @@ def _obs_conn(rows: list[tuple]) -> sqlite3.Connection:
             normalized_rows.append(row)
             continue
         source = str(row[8] if len(row) > 8 else "")
+        provenance = _HKO_BASIS if source == "hko_hourly_accumulator" else "{}"
+        if len(row) == len(_COLS) - 1:
+            normalized_rows.append((*row, provenance))
+            continue
         if source == "hko_hourly_accumulator":
-            normalized_rows.append((*row, 0, "runtime_monitoring"))
+            normalized_rows.append((*row, 0, "runtime_monitoring", provenance))
         elif source.startswith("wu") or source.startswith("ogimet_metar_"):
-            normalized_rows.append((*row, 1, "historical_hourly"))
+            normalized_rows.append((*row, 1, "historical_hourly", provenance))
         else:
-            normalized_rows.append((*row, 0, "coverage_fill_evidence"))
+            normalized_rows.append((*row, 0, "coverage_fill_evidence", provenance))
     conn.executemany(
         f"INSERT INTO observation_instants ({','.join(_COLS)}) VALUES ({','.join('?' * len(_COLS))})",
         normalized_rows,
@@ -148,6 +155,27 @@ def test_canonical_reader_rejects_hko_reaudit_rows():
         target_date="2026-06-26",
         metric_is_low=True,
         now=datetime(2026, 6, 26, 1, 0, 0, tzinfo=UTC),
+        world_conn=conn,
+    )
+
+    assert out is None
+
+
+def test_canonical_reader_rejects_hko_pseudo_extrema_without_official_basis():
+    conn = _obs_conn([
+        (
+            "Hong Kong", "2026-07-13", "2026-07-13T14:00:00+08:00",
+            "2026-07-13T06:00Z", 34.0, 34.0, "ICAO_STATION_NATIVE", "OK",
+            "hko_hourly_accumulator", "high", 0, "runtime_monitoring",
+            '{"payload_scope":"hko_current_temperature"}',
+        ),
+    ])
+
+    out = monitor_refresh._day0_observed_extreme_from_canonical_surface(
+        city_name="Hong Kong",
+        target_date="2026-07-13",
+        metric_is_low=False,
+        now=datetime(2026, 7, 13, 7, 0, 0, tzinfo=UTC),
         world_conn=conn,
     )
 

@@ -2215,9 +2215,7 @@ def _day0_observed_extreme_from_canonical_surface(
     closed (the position_belief read posture). See
     docs/evidence/same_day_exit_blindness/2026-06-23_toronto_total_loss.md.
     """
-    extreme_col = "running_min" if metric_is_low else "running_max"
-    agg = "MIN" if metric_is_low else "MAX"
-    now_iso = (now or datetime.now(timezone.utc)).astimezone(timezone.utc).isoformat()
+    decision_time = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
     owns_conn = world_conn is None
     if owns_conn:
         try:
@@ -2227,55 +2225,39 @@ def _day0_observed_extreme_from_canonical_surface(
         except Exception:  # noqa: BLE001 — read posture is best-effort; reseed continues without it
             return None
     try:
-        # Prefer an ATTACHed authoritative ``world`` schema when present (composite connections);
-        # fall back to unqualified ``observation_instants`` for the production case where the world
-        # DB itself is opened as main (consult REQ-20260623-184115 LOW: precedence must not read a
-        # stale main table over an attached authoritative world one).
+        from src.data.day0_observation_reader import (
+            COVERAGE_NONE,
+            read_day0_observed_extrema,
+            source_priority_for_city,
+        )
+
+        city = cities_by_name.get(city_name)
+        if city is None:
+            return None
+        priority = source_priority_for_city(city)
         for table_ref in ("world.observation_instants", "observation_instants"):
             try:
-                row = world_conn.execute(
-                    f"""
-                    SELECT {agg}(CAST({extreme_col} AS REAL)) AS extreme,
-                           MAX(utc_timestamp) AS obs_time,
-                           COUNT(*) AS n_rows
-                    FROM {table_ref}
-                    WHERE city = ?
-                      AND target_date = ?
-                      AND substr(local_timestamp, 1, 10) = target_date
-                      AND utc_timestamp <= ?
-                      AND COALESCE(causality_status, 'OK') = 'OK'
-                      AND (
-                            (
-                                UPPER(COALESCE(authority, '')) = 'VERIFIED'
-                                AND COALESCE(source_role, '') = 'historical_hourly'
-                                AND COALESCE(training_allowed, 0) = 1
-                                AND (
-                                    LOWER(COALESCE(source, '')) LIKE 'wu%'
-                                    OR LOWER(COALESCE(source, '')) LIKE 'ogimet_metar_%'
-                                )
-                            )
-                            OR (
-                                city = 'Hong Kong'
-                                AND LOWER(COALESCE(source, '')) = 'hko_hourly_accumulator'
-                                AND UPPER(COALESCE(authority, '')) = 'ICAO_STATION_NATIVE'
-                                AND COALESCE(source_role, '') = 'runtime_monitoring'
-                                AND COALESCE(training_allowed, 0) = 0
-                            )
-                      )
-                      AND {extreme_col} IS NOT NULL
-                    """,
-                    (city_name, target_date, now_iso),
-                ).fetchone()
-            except Exception:  # noqa: BLE001 — missing attachment/table fails soft to the next ref
+                result = read_day0_observed_extrema(
+                    world_conn,
+                    city=city_name,
+                    target_date=target_date,
+                    timezone_name=str(getattr(city, "timezone", "") or "UTC"),
+                    decision_time_utc=decision_time,
+                    source_priority=priority,
+                    table_ref=table_ref,
+                )
+            except sqlite3.DatabaseError:
                 continue
-            if row is None:
+            if result.coverage_status == COVERAGE_NONE:
                 continue
-            extreme = row["extreme"] if hasattr(row, "keys") else row[0]
-            obs_time = row["obs_time"] if hasattr(row, "keys") else row[1]
-            n_rows = int((row["n_rows"] if hasattr(row, "keys") else row[2]) or 0)
-            if extreme is None or n_rows <= 0 or not obs_time:
+            extreme = result.low_so_far if metric_is_low else result.high_so_far
+            if extreme is None or not result.last_observation_time_utc:
                 continue
-            return float(extreme), str(obs_time), n_rows
+            return (
+                float(extreme),
+                str(result.last_observation_time_utc),
+                int(result.row_count),
+            )
         return None
     finally:
         if owns_conn:

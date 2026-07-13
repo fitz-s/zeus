@@ -36,6 +36,11 @@ from src.data.day0_observation_reader import (
 )
 
 
+_HKO_OFFICIAL_PROVENANCE = (
+    '{"observation_basis":"hko_since_midnight_extrema_1min_mean"}'
+)
+
+
 # ---------------------------------------------------------------------------
 # Fixture: minimal in-memory DB with observation_instants schema
 # ---------------------------------------------------------------------------
@@ -186,6 +191,7 @@ def test_reader_accepts_hko_runtime_monitoring_rows_without_training():
         causality_status="OK",
         source_role="runtime_monitoring",
         station_id="HKO",
+        provenance_json=_HKO_OFFICIAL_PROVENANCE,
     )
 
     out = read_day0_observed_extrema(
@@ -200,6 +206,87 @@ def test_reader_accepts_hko_runtime_monitoring_rows_without_training():
     assert out.coverage_status == COVERAGE_LOW
     assert out.row_count == 1
     assert out.low_so_far == 27.0
+
+
+def test_reader_rejects_hko_current_temperature_pseudo_extrema():
+    conn = _make_conn()
+    _insert(
+        conn,
+        city="Hong Kong",
+        target_date="2026-07-13",
+        source="hko_hourly_accumulator",
+        timezone_name="Asia/Hong_Kong",
+        utc_timestamp="2026-07-13T06:00:00+00:00",
+        temp_current=34.0,
+        running_max=34.0,
+        running_min=34.0,
+        authority="ICAO_STATION_NATIVE",
+        training_allowed=0,
+        causality_status="OK",
+        source_role="runtime_monitoring",
+        station_id="HKO",
+        provenance_json='{"payload_scope":"hko_current_temperature"}',
+    )
+
+    out = read_day0_observed_extrema(
+        conn,
+        city="Hong Kong",
+        target_date="2026-07-13",
+        timezone_name="Asia/Hong_Kong",
+        decision_time_utc=datetime(2026, 7, 13, 7, 0, tzinfo=timezone.utc),
+        source_priority=("hko_hourly_accumulator",),
+    )
+
+    assert out.coverage_status == COVERAGE_NONE
+    assert out.chosen_source is None
+    assert out.high_so_far is None
+
+
+def test_reader_uses_only_official_hko_extrema_when_legacy_rows_are_mixed():
+    conn = _make_conn()
+    common = {
+        "city": "Hong Kong",
+        "target_date": "2026-07-13",
+        "source": "hko_hourly_accumulator",
+        "timezone_name": "Asia/Hong_Kong",
+        "authority": "ICAO_STATION_NATIVE",
+        "training_allowed": 0,
+        "causality_status": "OK",
+        "source_role": "runtime_monitoring",
+        "station_id": "HKO",
+    }
+    _insert(
+        conn,
+        **common,
+        utc_timestamp="2026-07-13T06:00:00+00:00",
+        temp_current=34.0,
+        running_max=34.0,
+        running_min=34.0,
+        provenance_json='{"payload_scope":"hko_current_temperature"}',
+    )
+    _insert(
+        conn,
+        **common,
+        utc_timestamp="2026-07-13T06:01:00+00:00",
+        temp_current=33.0,
+        running_max=33.0,
+        running_min=29.0,
+        provenance_json=_HKO_OFFICIAL_PROVENANCE,
+    )
+
+    out = read_day0_observed_extrema(
+        conn,
+        city="Hong Kong",
+        target_date="2026-07-13",
+        timezone_name="Asia/Hong_Kong",
+        decision_time_utc=datetime(2026, 7, 13, 7, 0, tzinfo=timezone.utc),
+        source_priority=("hko_hourly_accumulator",),
+    )
+
+    assert out.row_count == 1
+    assert out.high_so_far == 33.0
+    assert out.low_so_far == 29.0
+    assert out.current_temp == 33.0
 
 
 def test_context_reader_builds_executable_wu_context_without_temp_current():
@@ -282,7 +369,8 @@ def test_context_reader_fallback_schema_keeps_provenance_fields_aligned():
             data_version TEXT NOT NULL,
             training_allowed INTEGER DEFAULT 1,
             causality_status TEXT DEFAULT 'OK',
-            source_role TEXT
+            source_role TEXT,
+            provenance_json TEXT NOT NULL DEFAULT '{}'
         )
         """
     )
@@ -292,8 +380,9 @@ def test_context_reader_fallback_schema_keeps_provenance_fields_aligned():
             INSERT INTO observation_instants (
                 city, target_date, source, timezone_name, local_hour,
                 local_timestamp, utc_timestamp, temp_current, running_max, running_min,
-                authority, data_version, training_allowed, causality_status, source_role
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                authority, data_version, training_allowed, causality_status, source_role,
+                provenance_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 "Hong Kong",
@@ -311,6 +400,7 @@ def test_context_reader_fallback_schema_keeps_provenance_fields_aligned():
                 0,
                 "OK",
                 "runtime_monitoring",
+                _HKO_OFFICIAL_PROVENANCE,
             ),
         )
     conn.commit()
