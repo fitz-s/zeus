@@ -1049,8 +1049,19 @@ def _validate_pre_submit_revalidation_payload(
         raise LiveOrderAggregateError("PreSubmitRevalidated quote_age_ms exceeds max_quote_age_ms")
     _positive_number(payload.get("tick_size"), "tick_size")
     _positive_number(payload.get("min_order_size"), "min_order_size")
-    _non_negative_number(payload.get("current_best_bid"), "current_best_bid")
-    _non_negative_number(payload.get("current_best_ask"), "current_best_ask")
+    side = str(payload.get("side") or "").strip().upper()
+    best_bid = payload.get("current_best_bid")
+    best_ask = payload.get("current_best_ask")
+    if side == "BUY":
+        _non_negative_number(best_ask, "current_best_ask")
+        if best_bid is not None:
+            _non_negative_number(best_bid, "current_best_bid")
+    elif side == "SELL":
+        _non_negative_number(best_bid, "current_best_bid")
+        if best_ask is not None:
+            _non_negative_number(best_ask, "current_best_ask")
+    else:
+        raise LiveOrderAggregateError("PreSubmitRevalidated requires side=BUY or SELL")
     limit_price = _positive_number(payload.get("limit_price"), "limit_price")
     q_live = _probability_number(payload.get("q_live"), "q_live")
     q_lcb = _probability_number(payload.get("q_lcb_5pct"), "q_lcb_5pct")

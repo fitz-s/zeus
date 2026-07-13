@@ -840,6 +840,8 @@ def test_execution_command_requires_pre_submit_revalidation():
         ({"venue_connectivity_status": "DOWN"}, "venue_connectivity_status=OK"),
         ({"balance_allowance_status": "INSUFFICIENT"}, "balance_allowance_status=OK"),
         ({"book_authority_id": ""}, "book_authority_id"),
+        ({"current_best_bid": "invalid"}, "current_best_bid"),
+        ({"current_best_ask": None}, "current_best_ask"),
         ({"time_in_force": "FOK"}, "GTC/GTD"),
         ({"q_lcb_5pct": 0.72, "q_live": 0.70}, "q_lcb_5pct <= q_live"),
         ({"q_lcb_5pct": 0.39, "limit_price": 0.40}, "positive submit q_lcb-minus-cost-bound"),
@@ -873,6 +875,37 @@ def test_pre_submit_revalidation_failures_block_command(override, message):
             occurred_at=NOW,
             source_authority="engine_adapter",
         )
+
+
+@pytest.mark.parametrize(
+    ("direction", "payoff_side"),
+    (("buy_yes", "YES"), ("buy_no", "NO")),
+)
+def test_pre_submit_buy_accepts_ask_only_book(direction, payoff_side):
+    ledger = LiveOrderAggregateLedger(_conn())
+    ledger.append_event(
+        aggregate_id="event-1:intent-1",
+        event_type="DecisionProofAccepted",
+        payload={"event_id": "event-1", "final_intent_id": "intent-1"},
+        occurred_at=NOW,
+        source_authority="decision_kernel",
+    )
+
+    payload = _pre_submit_payload(current_best_bid=None, direction=direction)
+    payload["qkernel_execution_economics"] = {
+        **payload["qkernel_execution_economics"],
+        "side": payoff_side,
+        "route_id": f"DIRECT_{payoff_side}:b20@proof",
+    }
+    event = ledger.append_event(
+        aggregate_id="event-1:intent-1",
+        event_type="PreSubmitRevalidated",
+        payload=payload,
+        occurred_at=NOW,
+        source_authority="engine_adapter",
+    )
+
+    assert event.event_type == "PreSubmitRevalidated"
 
 
 def test_pre_submit_rejects_lucknow_negative_submit_edge():
