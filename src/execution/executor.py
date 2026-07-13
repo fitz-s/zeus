@@ -1035,7 +1035,7 @@ def _entry_economics_component(
     )
     if min_entry_price < 0.0:
         reason = "min_entry_price_negative"
-    elif not current_state_solve and (
+    elif (
         min_entry_price + 1e-12 < live_min_entry_price
         and not qkernel_low_price_floor_authorized
     ):
@@ -1056,7 +1056,7 @@ def _entry_economics_component(
         reason = "submit_q_lcb_minus_limit_non_positive"
     elif expected_edge > submit_edge + 1e-6:
         reason = "expected_edge_exceeds_submit_edge"
-    elif not current_state_solve and limit_price + 1e-12 < effective_min_entry_price:
+    elif limit_price + 1e-12 < effective_min_entry_price:
         reason = "limit_price_below_strategy_entry_floor"
     elif (
         not current_state_solve

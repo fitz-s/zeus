@@ -37,7 +37,7 @@ def _econ(**overrides) -> dict:
 
 
 def _current_state_econ(**overrides) -> dict:
-    payload = _econ(
+    current = dict(
         decision_id="decision-current-1",
         receipt_hash="receipt-current-1",
         q_version="q-current-1",
@@ -82,8 +82,9 @@ def _current_state_econ(**overrides) -> dict:
         global_expected_value_diagnostic_usd=0.15,
         global_expected_value_semantics="DIAGNOSTIC_EXPECTATION_NOT_REALIZED_GAIN",
         global_terminal_payoff_semantics="BINARY_0_1",
-        **overrides,
     )
+    current.update(overrides)
+    payload = _econ(**current)
     for legacy_field in (
         "delta_u_at_min",
         "optimal_stake_usd",
@@ -240,7 +241,7 @@ def test_entry_economics_rejects_direct_qkernel_yes_below_center_buy_floor_even_
     assert verdict["allowed"] is False
     assert verdict["reason"] == "limit_price_below_strategy_entry_floor"
     assert verdict["details"]["live_min_entry_price"] == 0.02
-    assert verdict["details"]["effective_min_entry_price"] == 0.02
+    assert verdict["details"]["effective_min_entry_price"] == 0.10
     assert verdict["details"]["qkernel_low_price_floor_authorized"] is True
 
 
@@ -917,7 +918,7 @@ def test_entry_economics_blocks_thin_margin_live_profile_order():
     ("direction", "side"),
     ((Direction("buy_yes"), "YES"), (Direction("buy_no"), "NO")),
 )
-def test_entry_economics_current_state_winner_ignores_legacy_absolute_floors(
+def test_entry_economics_current_state_winner_ignores_legacy_profit_density_floors(
     direction,
     side,
 ):
@@ -948,7 +949,7 @@ def test_entry_economics_current_state_winner_ignores_legacy_absolute_floors(
             q_live=0.80,
             q_lcb_5pct=0.60,
             expected_edge=0.15,
-            min_entry_price=0.95,
+            min_entry_price=0.10,
             min_expected_profit_usd=1000.0,
             min_submit_edge_density=1000.0,
             qkernel_execution_economics=economics,
@@ -958,6 +959,46 @@ def test_entry_economics_current_state_winner_ignores_legacy_absolute_floors(
     )
 
     assert verdict["allowed"] is True
+
+
+@pytest.mark.parametrize(
+    ("direction", "side"),
+    ((Direction("buy_yes"), "YES"), (Direction("buy_no"), "NO")),
+)
+def test_entry_economics_current_state_cannot_bypass_declared_price_floor(
+    direction,
+    side,
+):
+    economics = _current_state_econ(
+        side=side,
+        payoff_q_point=0.92,
+        payoff_q_lcb=0.80,
+        cost=0.001,
+        edge_lcb=0.799,
+        selection_guard_q_safe=0.80,
+        global_limit_price="0.001",
+        global_expected_fill_price_before_fee="0.001",
+        global_expected_cost_usd="1.0",
+        global_max_spend_usd="1.0",
+        global_target_shares="1000",
+    )
+    verdict = _entry_economics_component(
+        _intent(
+            direction=direction,
+            limit_price=0.001,
+            q_live=0.92,
+            q_lcb_5pct=0.80,
+            expected_edge=0.799,
+            min_entry_price=0.10,
+            qkernel_execution_economics=economics,
+        ),
+        shares=1000.0,
+        actionable_payload={"qkernel_execution_economics": economics},
+    )
+
+    assert verdict["allowed"] is False
+    assert verdict["reason"] == "limit_price_below_strategy_entry_floor"
+    assert verdict["details"]["effective_min_entry_price"] == pytest.approx(0.10)
 
 
 def test_recomputed_current_state_marker_cannot_bypass_durable_legacy_certificate():

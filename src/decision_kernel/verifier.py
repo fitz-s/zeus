@@ -1681,15 +1681,15 @@ def _finite_float(value: object, field_name: str) -> float:
 
 def _entry_floor_applies(payload: dict) -> bool:
     direction = str(payload.get("direction") or "").strip().lower()
-    return direction in {"buy_yes", "buy_no"} and not _current_state_solve_payload(payload)
+    return direction in {"buy_yes", "buy_no"}
 
 
 def _current_state_solve_payload(payload: dict) -> bool:
     """Whether this certificate uses only the current served posterior band.
 
-    The marker removes legacy side/win-rate/price/profit-density floors.  It does
-    not relax certificate identity, current-q, executable-price, freshness, risk,
-    size, or positive-after-cost edge checks.
+    The marker removes legacy side/win-rate/profit-density floors.  It does not
+    relax the intent's declared executable-price floor, certificate identity,
+    current-q, freshness, risk, size, or positive-after-cost edge checks.
     """
 
     economics = payload.get("qkernel_execution_economics")

@@ -322,14 +322,18 @@ class TestLayer2VerifyPreSubmitForCommand:
         with pytest.raises(CertificateVerificationError, match="submit q_lcb-minus-limit"):
             self._call(ps)
 
-    def test_below_live_win_rate_floor_raises(self):
+    def test_subfloor_low_win_rate_order_raises_price_floor_first(self):
         ps = _maker_pre_submit(
             q_live=0.24833093804728934,
             q_lcb_5pct=0.0990451308919892,
             limit_price=0.041,
             expected_edge=0.0580451308919892,
+            min_entry_price=0.01,
         )
-        with pytest.raises(CertificateVerificationError, match="ADMISSION_WIN_RATE_FLOOR"):
+        with pytest.raises(
+            CertificateVerificationError,
+            match="limit_price below strategy entry floor",
+        ):
             self._call(ps)
 
     def test_micro_edge_density_raises(self):
@@ -351,18 +355,18 @@ class TestLayer2VerifyPreSubmitForCommand:
         ("direction", "token_id", "side"),
         (("buy_yes", "yes-1", "YES"), ("buy_no", "no-1", "NO")),
     )
-    def test_current_state_solver_applies_same_after_cost_rule_to_yes_and_no(
+    def test_current_state_solver_keeps_same_declared_price_floor_for_yes_and_no(
         self, direction, token_id, side
     ):
         ps = _maker_pre_submit(
             direction=direction,
             token_id=token_id,
-            q_live=0.12,
-            q_lcb_5pct=0.10,
-            limit_price=0.04,
+            q_live=0.70,
+            q_lcb_5pct=0.60,
+            limit_price=0.40,
             size=1.0,
-            expected_edge=0.06,
-            min_entry_price=0.95,
+            expected_edge=0.20,
+            min_entry_price=0.10,
             min_expected_profit_usd=1000.0,
             min_submit_edge_density=1000.0,
         )
@@ -400,6 +404,62 @@ class TestLayer2VerifyPreSubmitForCommand:
         ps["qkernel_execution_economics"] = economics
 
         self._call(ps)
+
+    @pytest.mark.parametrize(
+        ("direction", "token_id", "side"),
+        (("buy_yes", "yes-1", "YES"), ("buy_no", "no-1", "NO")),
+    )
+    def test_current_state_solver_rejects_same_subfloor_price_for_yes_and_no(
+        self, direction, token_id, side
+    ):
+        ps = _maker_pre_submit(
+            direction=direction,
+            token_id=token_id,
+            q_live=0.92,
+            q_lcb_5pct=0.80,
+            limit_price=0.001,
+            size=1000.0,
+            expected_edge=0.799,
+            min_entry_price=0.10,
+        )
+        economics = _qkernel_economics_for(ps)
+        economics.update(
+            {
+                "side": side,
+                "decision_id": "decision-current-floor",
+                "receipt_hash": "receipt-current-floor",
+                "q_version": "q-current-floor",
+                "sample_hash": "current-sample-floor",
+                "q_lcb_guard_basis": "CURRENT_POSTERIOR_BAND",
+                "q_lcb_guard_abstained": False,
+                "q_lcb_guard_cell_key": "current-sample-floor",
+                "selection_guard_basis": "CURRENT_POSTERIOR_BAND",
+                "selection_guard_abstained": False,
+                "selection_guard_cell_key": "current-sample-floor",
+                "selection_guard_n": 64,
+            }
+        )
+        for legacy_field in (
+            "route_id",
+            "route_type",
+            "delta_u_at_min",
+            "optimal_stake_usd",
+            "optimal_delta_u",
+            "false_edge_rate",
+            "direction_law_ok",
+            "coherence_allows",
+        ):
+            economics.pop(legacy_field, None)
+        economics["current_state_identity_hash"] = qkernel_current_state_identity_hash(
+            economics
+        )
+        ps["qkernel_execution_economics"] = economics
+
+        with pytest.raises(
+            CertificateVerificationError,
+            match="limit_price below strategy entry floor",
+        ):
+            self._call(ps)
 
     def test_current_state_solver_still_rejects_non_positive_after_cost_edge(self):
         ps = _maker_pre_submit(

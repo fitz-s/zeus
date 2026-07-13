@@ -1095,7 +1095,7 @@ def test_pre_submit_rejects_weak_qkernel_without_selection_guard():
     ("direction", "side"),
     (("buy_yes", "YES"), ("buy_no", "NO")),
 )
-def test_pre_submit_current_state_winner_ignores_legacy_absolute_floors(
+def test_pre_submit_current_state_winner_ignores_legacy_profit_density_floors(
     direction,
     side,
 ):
@@ -1104,7 +1104,7 @@ def test_pre_submit_current_state_winner_ignores_legacy_absolute_floors(
         direction=direction,
         size=1.0,
         min_order_size=1.0,
-        min_entry_price=0.95,
+        min_entry_price=0.10,
         min_expected_profit_usd=1000.0,
         min_submit_edge_density=1000.0,
     )
@@ -1198,6 +1198,7 @@ def test_pre_submit_current_state_winner_ignores_legacy_absolute_floors(
 
     assert event.event_type == "PreSubmitRevalidated"
 
+
     drift_ledger = LiveOrderAggregateLedger(_conn())
     drift_ledger.append_event(
         aggregate_id="event-1:intent-1",
@@ -1215,6 +1216,84 @@ def test_pre_submit_current_state_winner_ignores_legacy_absolute_floors(
             aggregate_id="event-1:intent-1",
             event_type="PreSubmitRevalidated",
             payload={**payload, "q_lcb_5pct": 0.61},
+            occurred_at=NOW,
+            source_authority="engine_adapter",
+        )
+
+
+@pytest.mark.parametrize(
+    ("direction", "side"),
+    (("buy_yes", "YES"), ("buy_no", "NO")),
+)
+def test_pre_submit_current_state_cannot_bypass_declared_price_floor(direction, side):
+    ledger = LiveOrderAggregateLedger(_conn())
+    payload = _pre_submit_payload(
+        direction=direction,
+        limit_price=0.001,
+        size=1000.0,
+        min_order_size=5.0,
+        q_live=0.92,
+        q_lcb_5pct=0.80,
+        expected_edge=0.799,
+        min_entry_price=0.10,
+    )
+    economics = dict(payload["qkernel_execution_economics"])
+    economics.update(
+        {
+            "side": side,
+            "payoff_q_point": 0.92,
+            "payoff_q_lcb": 0.80,
+            "cost": 0.001,
+            "edge_lcb": 0.799,
+            "decision_id": "decision-current-floor",
+            "receipt_hash": "receipt-current-floor",
+            "q_version": "q-current-floor",
+            "sample_hash": "current-sample-floor",
+            "q_lcb_guard_basis": "CURRENT_POSTERIOR_BAND",
+            "q_lcb_guard_abstained": False,
+            "q_lcb_guard_cell_key": "current-sample-floor",
+            "selection_guard_basis": "CURRENT_POSTERIOR_BAND",
+            "selection_guard_abstained": False,
+            "selection_guard_cell_key": "current-sample-floor",
+            "selection_guard_n": 64,
+        }
+    )
+    for legacy_field in (
+        "route_id",
+        "route_type",
+        "delta_u_at_min",
+        "optimal_stake_usd",
+        "optimal_delta_u",
+        "false_edge_rate",
+        "direction_law_ok",
+        "coherence_allows",
+    ):
+        economics.pop(legacy_field, None)
+    economics["current_state_identity_hash"] = qkernel_current_state_identity_hash(
+        economics
+    )
+    payload["qkernel_execution_economics"] = economics
+    ledger.append_event(
+        aggregate_id="event-floor:intent-floor",
+        event_type="DecisionProofAccepted",
+        payload={
+            "event_id": "event-floor",
+            "final_intent_id": "intent-floor",
+            "decision_audit": {"qkernel_execution_economics": economics},
+        },
+        occurred_at=NOW,
+        source_authority="decision_kernel",
+    )
+
+    with pytest.raises(LiveOrderAggregateError, match="entry price below strategy floor"):
+        ledger.append_event(
+            aggregate_id="event-floor:intent-floor",
+            event_type="PreSubmitRevalidated",
+            payload={
+                **payload,
+                "event_id": "event-floor",
+                "final_intent_id": "intent-floor",
+            },
             occurred_at=NOW,
             source_authority="engine_adapter",
         )
