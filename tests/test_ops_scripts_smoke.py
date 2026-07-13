@@ -1,10 +1,10 @@
-# Lifecycle: created=2026-06-12; last_reviewed=2026-07-11; last_reused=2026-07-11
+# Lifecycle: created=2026-06-12; last_reviewed=2026-07-13; last_reused=2026-07-13
 # Purpose: light smoke coverage for the three new ops scripts (zeus_status,
 #   deploy_live, generate_schema_cheatsheet).
 # Reuse: asserts the FAIL-SOFT contract (a locked/empty/missing DB degrades one
 #   section to ERR, the rest still render) and that each script runs read-only
 #   against temp DBs. No live DB is touched.
-# Last reused/audited: 2026-07-11
+# Last reused/audited: 2026-07-13
 # Authority basis: operator big-direction 2026-06-12 ("大方向现在也只是添加几个文件现在做")
 """Smoke tests for scripts/zeus_status.py, deploy_live.py, generate_schema_cheatsheet.py."""
 from __future__ import annotations
@@ -1996,12 +1996,59 @@ def test_deploy_live_trading_restart_runs_recovery(monkeypatch, tmp_path):
     assert ok is True
     assert "restart recovery passed" in detail
     assert calls
-    assert "ensure_live_order_tables(world_conn)" in calls[0][2]
+    assert "_ensure_restart_world_schemas(world_conn)" in calls[0][2]
     assert "init_schema_trade_only" in calls[0][2]
     assert "get_trade_connection(write_class='live')" in calls[0][2]
     assert "get_world_connection_with_trades_required(write_class='live')" in calls[0][2]
     assert "get_trade_connection_with_world_required(write_class='live')" not in calls[0][2]
     assert "append_rest_filled_orphan_trade_facts_to_edli" in calls[0][2]
+
+
+def test_deploy_live_restart_world_schemas_are_atomic_and_idempotent(tmp_path):
+    dl = _load("deploy_live_restart_world_schema", "deploy_live.py")
+    db_path = tmp_path / "zeus-world.db"
+    conn = sqlite3.connect(db_path)
+
+    dl._ensure_restart_world_schemas(conn)
+    dl._ensure_restart_world_schemas(conn)
+
+    tables = {
+        str(row[0])
+        for row in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        ).fetchall()
+    }
+    conn.close()
+    assert {
+        "edli_live_order_events",
+        "edli_live_profit_audit_supersessions",
+        "settlement_attribution_supersessions",
+    } <= tables
+
+
+def test_deploy_live_restart_world_schema_failure_rolls_back(tmp_path):
+    dl = _load("deploy_live_restart_world_schema_rollback", "deploy_live.py")
+    conn = sqlite3.connect(tmp_path / "zeus-world.db")
+
+    def deny_settlement_table(action, arg1, _arg2, _db_name, _trigger):
+        if action == sqlite3.SQLITE_CREATE_TABLE and arg1 == "settlement_attribution":
+            return sqlite3.SQLITE_DENY
+        return sqlite3.SQLITE_OK
+
+    conn.set_authorizer(deny_settlement_table)
+    with pytest.raises(sqlite3.DatabaseError):
+        dl._ensure_restart_world_schemas(conn)
+    conn.set_authorizer(None)
+
+    tables = {
+        str(row[0])
+        for row in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        ).fetchall()
+    }
+    conn.close()
+    assert "edli_live_profit_audit_supersessions" not in tables
+    assert "settlement_attribution_supersessions" not in tables
 
 
 def test_deploy_live_waits_for_fresh_prerequisite_code_identity(monkeypatch, tmp_path):

@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-# Lifecycle: created=2026-06-12; last_reviewed=2026-07-11; last_reused=2026-07-11
+# Lifecycle: created=2026-06-12; last_reviewed=2026-07-13; last_reused=2026-07-13
 # Purpose: make live daemon restarts SAFE — refuse `launchctl kickstart` while the LIVE
 #   checkout's runtime surface is uncommitted/unpushed, and require live restart preflight
 #   before booting the trading daemon.
 # Reuse: read-mostly (git status/rev-parse + launchctl list + preflight checks); the only
 #   state change is kickstart after the gates pass.
-# Last reused/audited: 2026-06-12
+# Last reused/audited: 2026-07-13
 # Authority basis: operator big-direction 2026-06-12 ("大方向现在也只是添加几个文件现在做") +
 #   incident: a `launchctl kickstart` booted a concurrent agent's mid-edit working tree
 #   into live money.
@@ -871,6 +871,30 @@ def _run_restart_preflight_if_needed(labels: list[str]) -> tuple[bool, str]:
     return False, f"live restart preflight failed rc={res.returncode}:\n{tail}"
 
 
+def _ensure_restart_world_schemas(conn: sqlite3.Connection) -> None:
+    """Atomically materialize world schemas required by the deployed HEAD."""
+
+    from src.state.schema.edli_live_order_events_schema import (
+        ensure_tables as ensure_live_order_tables,
+    )
+    from src.state.schema.edli_live_profit_audit_schema import (
+        ensure_table as ensure_live_profit_audit_table,
+    )
+    from src.state.schema.settlement_attribution_schema import (
+        ensure_table as ensure_settlement_attribution_table,
+    )
+
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        ensure_live_order_tables(conn)
+        ensure_live_profit_audit_table(conn)
+        ensure_settlement_attribution_table(conn)
+    except Exception:
+        conn.rollback()
+        raise
+    conn.commit()
+
+
 def _run_restart_recovery_if_needed(labels: list[str]) -> tuple[bool, str]:
     """Run bounded restart recovery before the read-only live-trading preflight."""
 
@@ -884,21 +908,18 @@ def _run_restart_recovery_if_needed(labels: list[str]) -> tuple[bool, str]:
         """
         import json
         from scripts.migrations import apply_migrations
+        from scripts.deploy_live import _ensure_restart_world_schemas
         from src.state.db import (
             get_trade_connection,
             get_world_connection,
             get_world_connection_with_trades_required,
             init_schema_trade_only,
         )
-        from src.state.schema.edli_live_order_events_schema import (
-            ensure_tables as ensure_live_order_tables,
-        )
-
         applied = {}
 
         world_conn = get_world_connection(write_class='live')
         try:
-            ensure_live_order_tables(world_conn)
+            _ensure_restart_world_schemas(world_conn)
             applied['world'] = apply_migrations(
                 world_conn,
                 target='202607_drop_world_collateral_unsettled_ghost',
