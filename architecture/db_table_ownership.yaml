@@ -2845,6 +2845,41 @@ tables:
       packet — T2 consumes total_open_obligation_usd/has_unbounded_obligation when it
       extends exposure/heat accounting to ChainOnlyFact worst case.
 
+  - name: wallet_fill_observations
+    db: trade
+    schema_class: trade_class
+    schema_version_owner: null
+    created_by: "db.py:init_schema_trade_only + src.state.schema.wallet_fill_observations_schema.ensure_table"
+    pk_col: id
+    notes: >
+      Packet I / wave-1.5 (docs/rebuild/local_ledger_excision_2026-07-12.md
+      §KEEP-spine 完备性补遗 "归属图+歧义证据 — foreign/ambiguous 留 observation
+      不丢"; the external wave-1 review's T4 foreign-fill blocker; the local
+      wave-1 verifier's divergence note, rated MINOR because get_trades()
+      re-serves history today but provider history visibility is not
+      guaranteed forever): durable append-only wallet-level fill observation
+      log, one row per raw venue trade, written by
+      src.ingest.fill_synchronizer BEFORE the existing Zeus-attributed lane
+      (append_trade_fact -> venue_trade_facts) runs — venue_trade_facts
+      structurally requires a non-empty command_id, so a foreign/ambiguous
+      shared-wallet fill (operator co-trading) could not land there at all;
+      it landed nowhere and was silently dropped (foreign_fill_count) before
+      this table existed. disposition ∈ {ZEUS_ATTRIBUTED, FOREIGN,
+      AMBIGUOUS}: ZEUS_ATTRIBUTED when the trade's order_id resolves to a
+      local venue_commands row (also appended to venue_trade_facts); FOREIGN
+      when an order_id is present but resolves to no local command; AMBIGUOUS
+      when no order_id candidate exists on the raw trade at all (attribution
+      could not even be attempted). Written once at observation time;
+      superseded_by is a forward audit pointer set at most once per row
+      (BEFORE UPDATE trigger enforces immutability of every other column,
+      mirrors payout_observations_schema.py); rows are never deleted (BEFORE
+      DELETE trigger). Idempotent on (trade_id, raw_payload_hash) — UNIQUE
+      index is defense-in-depth over the synchronizer's check-before-insert.
+      token_id/side/size/price/fee_rate_bps/fee_paid_micro/tx_hash/
+      venue_timestamp are best-effort extractions ("as available"); a field
+      absent on the venue response is NULL, never fabricated —
+      raw_payload_json retains the full raw trade regardless.
+
   - name: payout_observations
     db: trade
     schema_class: trade_class

@@ -39,9 +39,21 @@ FOREIGN FILLS (shared wallet)
 operator's manual orders — census_chain_sources.md). A trade whose taker/maker
 order_id does not resolve to any local ``venue_commands`` row is a foreign
 fill: ``append_trade_fact`` requires a non-empty ``command_id`` (its contract
-is NOT relaxed here), so a foreign fill cannot be appended at all — it is
-counted (``foreign_fill_count``) and skipped, never fabricated onto a Zeus
-command.
+is NOT relaxed here), so a foreign fill cannot be appended to venue_trade_facts
+at all — it is counted (``foreign_fill_count``) and skipped there, never
+fabricated onto a Zeus command.
+
+DURABLE OBSERVATION LANE (packet I / wave-1.5)
+-----------------------------------------------
+docs/rebuild/local_ledger_excision_2026-07-12.md §KEEP-spine 完备性补遗
+("归属图+歧义证据 — foreign/ambiguous 留 observation 不丢") requires foreign and
+ambiguous fills to be durably retained, not merely counted and dropped —
+``get_trades()`` re-serving full history today is not a durability guarantee
+for tomorrow. Every swept trade — Zeus-attributed, foreign, or ambiguous — is
+therefore appended to ``wallet_fill_observations`` FIRST, before the
+Zeus-attributed lane below runs. See
+``src.state.schema.wallet_fill_observations_schema`` for the table contract
+(disposition enum, immutability/no-delete triggers, idempotency key).
 
 DURABLE COVERAGE WATERMARK
 ---------------------------
@@ -65,17 +77,20 @@ retries the full scan from the unchanged watermark.
 """
 from __future__ import annotations
 
+import json
 import logging
 import sqlite3
 from datetime import datetime, timezone
 from typing import Any
 
 from src.execution.exchange_reconcile import (
+    _first_present,
     _hash_payload,
     _local_command_for_trade,
     _local_commands_by_order,
     _missing_trade_fill_economics,
     _raw,
+    _stable_subject,
     _trade_fill_price,
     _trade_filled_size,
     _trade_id,
@@ -83,11 +98,16 @@ from src.execution.exchange_reconcile import (
     _trade_state,
 )
 from src.state.schema.fill_sync_watermarks_schema import ensure_table as ensure_watermark_table
+from src.state.schema.wallet_fill_observations_schema import ensure_table as ensure_wallet_fill_observations_table
 from src.state.venue_command_repo import _row_factory_as, append_trade_fact
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_SOURCE = "polymarket_v2_get_trades"
+
+_DISPOSITION_ZEUS_ATTRIBUTED = "ZEUS_ATTRIBUTED"
+_DISPOSITION_FOREIGN = "FOREIGN"
+_DISPOSITION_AMBIGUOUS = "AMBIGUOUS"
 
 
 def _coerce_dt(value: datetime | str | None) -> datetime:
@@ -165,6 +185,119 @@ def _fact_already_recorded(
     return row is not None
 
 
+def _wallet_observation_disposition(order_ids: list[str], command: dict[str, Any] | None) -> str:
+    """Classify a swept trade for the durable observation lane.
+
+    ZEUS_ATTRIBUTED: the order_id join resolved to a local venue_commands row.
+    FOREIGN: an order_id candidate exists but resolved to no local command
+      (operator co-trading on the shared wallet — census_chain_sources.md).
+    AMBIGUOUS: no order_id candidate exists on the raw trade at all, so
+      attribution could not even be attempted (neither confirmed Zeus nor
+      confirmed foreign).
+    """
+
+    if command is not None:
+        return _DISPOSITION_ZEUS_ATTRIBUTED
+    if order_ids:
+        return _DISPOSITION_FOREIGN
+    return _DISPOSITION_AMBIGUOUS
+
+
+def _observation_already_recorded(
+    conn: sqlite3.Connection, *, trade_id: str, raw_payload_hash: str
+) -> bool:
+    row = conn.execute(
+        """
+        SELECT 1 FROM wallet_fill_observations
+         WHERE trade_id = ? AND raw_payload_hash = ?
+         LIMIT 1
+        """,
+        (trade_id, raw_payload_hash),
+    ).fetchone()
+    return row is not None
+
+
+def _coerce_optional_int(value: Any) -> int | None:
+    if value is None or value == "":
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _append_wallet_fill_observation(
+    conn: sqlite3.Connection,
+    *,
+    raw: dict[str, Any],
+    raw_payload_hash: str,
+    order_id: str | None,
+    order_ids: list[str],
+    command: dict[str, Any] | None,
+    observed_at: datetime,
+) -> bool:
+    """Append ONE raw swept trade to the durable observation lane.
+
+    Returns True if a new row was appended, False if this exact
+    (trade_id, raw_payload_hash) revision was already durable (idempotent
+    re-sweep). Never raises on a missing/unparsable field — every column
+    besides the identity/disposition ones is best-effort ("as available");
+    ``raw_payload_json`` always retains the complete raw trade.
+
+    Caller must ensure ``wallet_fill_observations`` already exists BEFORE the
+    enclosing transaction opens (mirrors ``ensure_watermark_table`` in
+    ``sync_fills``) -- creating it lazily inside the transaction would mean a
+    first-ever-call rollback undoes the CREATE TABLE itself, not just the row.
+    """
+
+    trade_id = _trade_id(raw) or _stable_subject("wallet_fill", raw)
+    if _observation_already_recorded(conn, trade_id=trade_id, raw_payload_hash=raw_payload_hash):
+        return False
+
+    disposition = _wallet_observation_disposition(order_ids, command)
+    size = _trade_filled_size(raw, order_id)
+    price = _trade_fill_price(raw, order_id)
+    token_id = _first_present(raw, "asset_id", "assetId", "token_id", default=None)
+    side = _first_present(raw, "side", "taker_side", "takerSide", default=None)
+    fee_rate_bps = _coerce_optional_int(
+        _first_present(raw, "fee_rate_bps", "feeRateBps", default=None)
+    )
+    fee_paid_micro = _coerce_optional_int(
+        _first_present(raw, "fee_paid_micro", "feePaidMicro", default=None)
+    )
+    tx_hash = raw.get("transaction_hash") or raw.get("tx_hash")
+    venue_timestamp = _first_present(
+        raw, "match_time", "matchTime", "last_update", "timestamp", default=None
+    )
+
+    conn.execute(
+        """
+        INSERT INTO wallet_fill_observations (
+            trade_id, order_ids, token_id, side, size, price,
+            fee_rate_bps, fee_paid_micro, tx_hash, venue_timestamp,
+            observed_at, raw_payload_hash, raw_payload_json, disposition
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            trade_id,
+            json.dumps(order_ids),
+            str(token_id) if token_id is not None else None,
+            str(side) if side is not None else None,
+            str(size) if size is not None else None,
+            str(price) if price is not None else None,
+            fee_rate_bps,
+            fee_paid_micro,
+            str(tx_hash) if tx_hash is not None else None,
+            str(venue_timestamp) if venue_timestamp is not None else None,
+            observed_at.isoformat(),
+            raw_payload_hash,
+            json.dumps(raw, sort_keys=True, default=str),
+            disposition,
+        ),
+    )
+    return True
+
+
 def sync_fills(
     conn: sqlite3.Connection,
     adapter: Any,
@@ -180,6 +313,7 @@ def sync_fills(
     """
 
     ensure_watermark_table(conn)
+    ensure_wallet_fill_observations_table(conn)
     observed = _coerce_dt(observed_at)
     watermark = get_watermark(conn, source=source)
     since_cursor = watermark.get("watermark_ts") if watermark else None
@@ -191,6 +325,8 @@ def sync_fills(
     skipped_idempotent = 0
     foreign_fill_count = 0
     unattributable_count = 0
+    observation_appended = 0
+    observation_skipped_idempotent = 0
 
     try:
         # Explicit outer transaction: append_trade_fact's internal atomicity
@@ -210,9 +346,28 @@ def sync_fills(
         conn.execute("BEGIN")
         for trade in raw_trades:
             raw = _raw(trade)
+            raw_hash = _hash_payload(raw)
             trade_id = _trade_id(raw)
             state = _trade_state(raw)
+            order_ids = _trade_order_ids(raw)
             order_id, command = _local_command_for_trade(raw, local_by_order)
+
+            # Durable observation lane FIRST (packet I / wave-1.5): every swept
+            # trade lands here regardless of attribution outcome, BEFORE the
+            # Zeus-attributed-only lane below runs — see module docstring
+            # "DURABLE OBSERVATION LANE".
+            if _append_wallet_fill_observation(
+                conn,
+                raw=raw,
+                raw_payload_hash=raw_hash,
+                order_id=order_id,
+                order_ids=order_ids,
+                command=command,
+                observed_at=observed,
+            ):
+                observation_appended += 1
+            else:
+                observation_skipped_idempotent += 1
 
             if not trade_id or state is None:
                 unattributable_count += 1
@@ -254,7 +409,7 @@ def sync_fills(
                 fill_price=fill_price_s,
                 source="REST",
                 observed_at=observed,
-                raw_payload_hash=_hash_payload(raw),
+                raw_payload_hash=raw_hash,
                 raw_payload_json=raw,
                 tx_hash=raw.get("transaction_hash") or raw.get("tx_hash"),
             )
@@ -284,6 +439,8 @@ def sync_fills(
         "skipped_idempotent": skipped_idempotent,
         "foreign_fill_count": foreign_fill_count,
         "unattributable_count": unattributable_count,
+        "observation_appended": observation_appended,
+        "observation_skipped_idempotent": observation_skipped_idempotent,
         "watermark_ts": observed.isoformat(),
     }
 

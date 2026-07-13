@@ -110,6 +110,11 @@ EXPECTED_RUNTIME_TRADE_TABLES = frozenset({
     # ctf_token_registry_schema.py).
     "wallet_balance_head",
     "ctf_token_registry",
+    # Packet I / wave-1.5 2026-07-13 (docs/rebuild/local_ledger_excision_2026-07-12.md
+    # §KEEP-spine 完备性补遗): durable append-only wallet-level fill observation
+    # log (ensure_table wired into init_schema_trade_only via
+    # wallet_fill_observations_schema.py).
+    "wallet_fill_observations",
     "position_current",
     "position_events",
     "position_lots",

@@ -2,17 +2,23 @@
 # Authority basis: docs/rebuild/local_ledger_excision_2026-07-12.md LX-T4
 #   ("continuous fill synchronizer + alias graph") — consult adjudication
 #   §排序攻击 Attack A ("a fill lands after replay but before reader cutover" —
-#   one-time replay is not enough).
+#   one-time replay is not enough). Packet I / wave-1.5 addition (2026-07-13,
+#   §KEEP-spine 完备性补遗 "归属图+歧义证据 — foreign/ambiguous 留 observation
+#   不丢"): durable wallet_fill_observations lane tests.
 # Lifecycle: created=2026-07-13; last_reviewed=2026-07-13; last_reused=never
 # Purpose: unit tests for src.ingest.fill_synchronizer.sync_fills — watermark
-#   resume, idempotent re-append rejection, foreign-fill handling, and the
-#   advance-after-persist rollback contract.
+#   resume, idempotent re-append rejection, foreign-fill handling, the
+#   advance-after-persist rollback contract, and (packet I / wave-1.5) the
+#   durable wallet_fill_observations lane: every swept fill lands there
+#   regardless of attribution, disposition is correct, it is idempotent, and
+#   it is append-only at the DB level.
 # Reuse: run when fill_synchronizer.py changes, or when the exchange_reconcile
 #   raw-trade parsing helpers it imports (_trade_id / _trade_order_ids / etc.)
 #   change shape.
 """Tests for src.ingest.fill_synchronizer.sync_fills."""
 from __future__ import annotations
 
+import json
 import sqlite3
 from datetime import datetime, timedelta, timezone
 
@@ -107,6 +113,12 @@ def _trade_rows(conn: sqlite3.Connection) -> list[sqlite3.Row]:
     return conn.execute("SELECT * FROM venue_trade_facts ORDER BY trade_id").fetchall()
 
 
+def _observation_rows(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+    return conn.execute(
+        "SELECT * FROM wallet_fill_observations ORDER BY id"
+    ).fetchall()
+
+
 class TestBasicAttribution:
     def test_linkable_trade_is_appended_as_trade_fact(self, conn):
         _seed_command(conn, command_id="cmd-1", venue_order_id="ord-1")
@@ -121,6 +133,32 @@ class TestBasicAttribution:
         assert rows[0]["trade_id"] == "trade-1"
         assert rows[0]["command_id"] == "cmd-1"
 
+    def test_zeus_fill_lands_in_both_lanes_with_consistent_economics(self, conn):
+        """packet I / wave-1.5: a Zeus-attributed fill must land in BOTH
+        venue_trade_facts (the existing lane) AND wallet_fill_observations
+        (the new durable observation lane), with matching size/price, and
+        disposition ZEUS_ATTRIBUTED."""
+
+        _seed_command(conn, command_id="cmd-1", venue_order_id="ord-1")
+        adapter = FakeSyncAdapter(
+            [_trade(trade_id="trade-1", order_id="ord-1", size="5", price="0.50")]
+        )
+
+        result = sync_fills(conn, adapter, observed_at=NOW)
+
+        assert result["appended"] == 1
+        assert result["observation_appended"] == 1
+
+        fact_rows = _trade_rows(conn)
+        obs_rows = _observation_rows(conn)
+        assert len(fact_rows) == 1
+        assert len(obs_rows) == 1
+        assert obs_rows[0]["trade_id"] == "trade-1"
+        assert obs_rows[0]["disposition"] == "ZEUS_ATTRIBUTED"
+        assert obs_rows[0]["size"] == fact_rows[0]["filled_size"] == "5"
+        assert obs_rows[0]["price"] == fact_rows[0]["fill_price"] == "0.50"
+        assert json.loads(obs_rows[0]["order_ids"]) == ["ord-1"]
+
     def test_foreign_fill_is_skipped_and_counted_not_appended(self, conn):
         # No venue_commands row for ord-operator: this is a shared-wallet
         # operator fill, not a Zeus fill.
@@ -133,6 +171,47 @@ class TestBasicAttribution:
         assert result["appended"] == 0
         assert result["foreign_fill_count"] == 1
         assert _trade_rows(conn) == []
+
+    def test_foreign_fill_lands_in_observation_lane_as_foreign_never_in_facts(self, conn):
+        """packet I / wave-1.5: the foreign fill dropped from venue_trade_facts
+        must be durably retained in wallet_fill_observations with disposition
+        FOREIGN — it must never appear in venue_trade_facts (that table
+        structurally requires a Zeus command_id)."""
+
+        adapter = FakeSyncAdapter(
+            [_trade(trade_id="trade-foreign", order_id="ord-operator")]
+        )
+
+        result = sync_fills(conn, adapter, observed_at=NOW)
+
+        assert result["observation_appended"] == 1
+        assert _trade_rows(conn) == []
+
+        obs_rows = _observation_rows(conn)
+        assert len(obs_rows) == 1
+        assert obs_rows[0]["trade_id"] == "trade-foreign"
+        assert obs_rows[0]["disposition"] == "FOREIGN"
+        assert json.loads(obs_rows[0]["order_ids"]) == ["ord-operator"]
+
+    def test_trade_with_no_order_id_candidate_is_ambiguous_in_observation_lane(self, conn):
+        """A raw trade with no order_id candidate at all (empty order_ids list)
+        cannot even be attempted for attribution — AMBIGUOUS, distinct from a
+        confirmed-foreign fill that DID carry an order_id."""
+
+        adapter = FakeSyncAdapter([_trade(trade_id="trade-no-order", order_id="ord-unused")])
+        # Strip every order-id-shaped key the _trade() helper set, leaving none
+        # — a raw trade with no order_id candidate at all.
+        raw = adapter.trades[0]
+        for key in ("orderID", "order_id"):
+            raw.pop(key, None)
+
+        result = sync_fills(conn, adapter, observed_at=NOW)
+
+        assert result["observation_appended"] == 1
+        obs_rows = _observation_rows(conn)
+        assert len(obs_rows) == 1
+        assert obs_rows[0]["disposition"] == "AMBIGUOUS"
+        assert json.loads(obs_rows[0]["order_ids"]) == []
 
     def test_unattributable_trade_missing_state_is_counted_not_appended(self, conn):
         _seed_command(conn, command_id="cmd-1", venue_order_id="ord-1")
@@ -161,6 +240,27 @@ class TestIdempotentReappend:
         assert second["appended"] == 0
         assert second["skipped_idempotent"] == 1
         assert len(_trade_rows(conn)) == 1
+
+    def test_replay_appends_nothing_new_to_the_observation_lane(self, conn):
+        """packet I / wave-1.5: re-sweeping the identical venue response must
+        not duplicate the wallet_fill_observations row either, for BOTH a
+        Zeus-attributed and a foreign fill in the same batch."""
+
+        _seed_command(conn, command_id="cmd-1", venue_order_id="ord-1")
+        adapter = FakeSyncAdapter(
+            [
+                _trade(trade_id="trade-zeus", order_id="ord-1"),
+                _trade(trade_id="trade-foreign", order_id="ord-operator"),
+            ]
+        )
+
+        first = sync_fills(conn, adapter, observed_at=NOW)
+        second = sync_fills(conn, adapter, observed_at=NOW + timedelta(seconds=60))
+
+        assert first["observation_appended"] == 2
+        assert second["observation_appended"] == 0
+        assert second["observation_skipped_idempotent"] == 2
+        assert len(_observation_rows(conn)) == 2
 
     def test_a_genuinely_new_lifecycle_revision_is_still_appended(self, conn):
         _seed_command(conn, command_id="cmd-1", venue_order_id="ord-1")
@@ -239,3 +339,74 @@ class TestDurableCoverageWatermark:
             "trade-bad append — a sync cycle is all-or-nothing"
         )
         assert get_watermark(conn) is None
+        assert _observation_rows(conn) == [], (
+            "wallet_fill_observations inserts for the SAME failed cycle must "
+            "roll back too — the observation lane shares the cycle's explicit "
+            "transaction, it is not a separate commit"
+        )
+
+
+class TestWalletFillObservationsDbLevelInvariants:
+    """packet I / wave-1.5: wallet_fill_observations is append-only and (save
+    for the one-time superseded_by transition) immutable, enforced at the DB
+    level regardless of which Python path writes the row."""
+
+    def test_delete_is_blocked_at_the_db_level(self, conn):
+        _seed_command(conn, command_id="cmd-1", venue_order_id="ord-1")
+        adapter = FakeSyncAdapter([_trade(trade_id="trade-1", order_id="ord-1")])
+        sync_fills(conn, adapter, observed_at=NOW)
+        row_id = _observation_rows(conn)[0]["id"]
+
+        with pytest.raises(sqlite3.DatabaseError, match="append-only"):
+            conn.execute("DELETE FROM wallet_fill_observations WHERE id = ?", (row_id,))
+
+        assert len(_observation_rows(conn)) == 1
+
+    def test_arbitrary_update_is_blocked_at_the_db_level(self, conn):
+        _seed_command(conn, command_id="cmd-1", venue_order_id="ord-1")
+        adapter = FakeSyncAdapter([_trade(trade_id="trade-1", order_id="ord-1")])
+        sync_fills(conn, adapter, observed_at=NOW)
+        row_id = _observation_rows(conn)[0]["id"]
+
+        with pytest.raises(sqlite3.DatabaseError, match="immutable"):
+            conn.execute(
+                "UPDATE wallet_fill_observations SET disposition = 'FOREIGN' WHERE id = ?",
+                (row_id,),
+            )
+
+    def test_one_time_superseded_by_transition_is_allowed(self, conn):
+        _seed_command(conn, command_id="cmd-1", venue_order_id="ord-1")
+        adapter = FakeSyncAdapter([_trade(trade_id="trade-1", order_id="ord-1")])
+        sync_fills(conn, adapter, observed_at=NOW)
+        row_id = _observation_rows(conn)[0]["id"]
+
+        conn.execute(
+            """
+            INSERT INTO wallet_fill_observations (
+                trade_id, order_ids, observed_at, raw_payload_hash, disposition
+            ) VALUES ('trade-1-corrected', '[]', ?, 'deadbeef', 'FOREIGN')
+            """,
+            (NOW.isoformat(),),
+        )
+        new_id = conn.execute(
+            "SELECT id FROM wallet_fill_observations WHERE trade_id = 'trade-1-corrected'"
+        ).fetchone()["id"]
+
+        conn.execute(
+            "UPDATE wallet_fill_observations SET superseded_by = ? WHERE id = ?",
+            (new_id, row_id),
+        )
+        conn.commit()
+
+        superseded = conn.execute(
+            "SELECT superseded_by FROM wallet_fill_observations WHERE id = ?", (row_id,)
+        ).fetchone()
+        assert superseded["superseded_by"] == new_id
+
+        # A second attempt to change the ALREADY-superseded row is rejected —
+        # superseded_by only transitions once (NULL -> non-NULL).
+        with pytest.raises(sqlite3.DatabaseError, match="immutable"):
+            conn.execute(
+                "UPDATE wallet_fill_observations SET superseded_by = ? WHERE id = ?",
+                (new_id, row_id),
+            )

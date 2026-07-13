@@ -6236,6 +6236,15 @@ def init_schema_trade_only(conn: sqlite3.Connection) -> None:
     _ensure_wallet_balance_head_table(conn)
     from src.state.schema.ctf_token_registry_schema import ensure_table as _ensure_ctf_token_registry_table
     _ensure_ctf_token_registry_table(conn)
+    # Packet I / wave-1.5 (docs/rebuild/local_ledger_excision_2026-07-12.md
+    # §KEEP-spine 完备性补遗 "归属图+歧义证据 — foreign/ambiguous 留 observation 不丢"):
+    # durable append-only wallet-level fill observation log, written by
+    # src.ingest.fill_synchronizer BEFORE the existing Zeus-attributed lane
+    # (venue_trade_facts) runs. Captures foreign/ambiguous shared-wallet fills
+    # that venue_trade_facts structurally cannot hold (non-empty command_id
+    # required there).
+    from src.state.schema.wallet_fill_observations_schema import ensure_table as _ensure_wallet_fill_observations_table
+    _ensure_wallet_fill_observations_table(conn)
     try:
         conn.execute("ALTER TABLE trade_decisions ADD COLUMN env TEXT NOT NULL DEFAULT 'live';")
     except sqlite3.OperationalError:
