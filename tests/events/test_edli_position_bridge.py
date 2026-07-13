@@ -781,6 +781,172 @@ def test_green_bridge_materializes_one_correct_position(conn):
     assert [r[0] for r in ev] == ["POSITION_OPEN_INTENT", "ENTRY_ORDER_POSTED", "ENTRY_ORDER_FILLED"]
 
 
+# --------------------------------------------------------------------------- #
+# Canonical trade-fact bridge (LX-T4 / round-2-delta BLOCKER "EDLI fill
+# visibility", docs/rebuild/local_ledger_excision_2026-07-12.md Sec.C1): a
+# confirmed EDLI fill must become a permanent venue_trade_facts row -- via the
+# SAME append-only append_trade_fact path every other fill lane uses -- BEFORE
+# any future derive-on-read reducer can be trusted to see it.
+# --------------------------------------------------------------------------- #
+
+def _seed_venue_command_for_execution_command_id(
+    conn: sqlite3.Connection,
+    *,
+    command_id: str,
+    execution_command_id: str,
+    position_id: str = "unset-position",
+    token_id: str = ELECTED_NO_TOKEN,
+    venue_order_id: str = VENUE_ORDER_ID,
+    size: float = 16.75,
+    price: float = 0.42,
+    created_at: str = "2026-06-01T11:59:58+00:00",
+) -> None:
+    """Seed the venue_commands row an EDLI execution_command_id resolves to.
+
+    Mirrors production: live EDLI commands store the EDLI execution command
+    id in venue_commands.decision_id (see edli_position_bridge module
+    docstring / _venue_command_row_for_execution_command_id).
+    """
+    conn.execute(
+        """
+        INSERT INTO venue_commands (
+            command_id, snapshot_id, envelope_id, position_id, decision_id,
+            idempotency_key, intent_kind, market_id, token_id, side, size,
+            price, venue_order_id, state, last_event_id, created_at, updated_at,
+            review_required_reason
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, NULL)
+        """,
+        (
+            command_id,
+            "snap-1",
+            "env-1",
+            position_id,
+            execution_command_id,
+            f"idem-{command_id}",
+            "ENTRY",
+            CONDITION_ID,
+            token_id,
+            "BUY",
+            size,
+            price,
+            venue_order_id,
+            "FILLED",
+            created_at,
+            created_at,
+        ),
+    )
+
+
+def test_confirmed_edli_fill_appends_canonical_trade_fact(conn):
+    aggregate_id = _seed_confirmed_buy_no_aggregate(conn)
+    _seed_venue_command_for_execution_command_id(
+        conn, command_id="cmd-fact-1", execution_command_id=EXECUTION_COMMAND_ID,
+    )
+
+    result = materialize_position_current_from_edli_fill(
+        conn, aggregate_id, now=datetime(2026, 6, 1, 12, 0, tzinfo=timezone.utc),
+    )
+    assert result is not None
+
+    rows = conn.execute("SELECT * FROM venue_trade_facts").fetchall()
+    assert len(rows) == 1, "exactly one canonical trade fact for one confirmed EDLI fill"
+    fact = rows[0]
+    assert fact["trade_id"].startswith("edli:")
+    assert fact["command_id"] == "cmd-fact-1"
+    assert fact["venue_order_id"] == VENUE_ORDER_ID
+    assert fact["state"] == "CONFIRMED"
+    assert fact["source"] == "WS_USER"
+    assert float(fact["filled_size"]) == pytest.approx(16.75)
+    assert float(fact["fill_price"]) == pytest.approx(0.42)
+    assert fact["fee_paid_micro"] == 30000  # 0.03 fees * 1e6
+    assert len(fact["raw_payload_hash"]) == 64
+
+    payload = json.loads(fact["raw_payload_json"])
+    assert payload["edli_aggregate_id"] == aggregate_id
+    assert payload["source_edli_event_hash"] == fact["raw_payload_hash"]
+    assert payload["fill_authority_state"] == "FILL_CONFIRMED"
+
+
+def test_replay_of_same_edli_event_appends_no_additional_trade_fact(conn):
+    aggregate_id = _seed_confirmed_buy_no_aggregate(conn)
+    _seed_venue_command_for_execution_command_id(
+        conn, command_id="cmd-fact-2", execution_command_id=EXECUTION_COMMAND_ID,
+    )
+
+    materialize_position_current_from_edli_fill(
+        conn, aggregate_id, now=datetime(2026, 6, 1, 12, 0, tzinfo=timezone.utc),
+    )
+    first_count = conn.execute("SELECT COUNT(*) FROM venue_trade_facts").fetchone()[0]
+    assert first_count == 1
+
+    # Replay: same aggregate, later wall-clock (mirrors a real re-scan/repair pass).
+    replay_result = materialize_position_current_from_edli_fill(
+        conn, aggregate_id, now=datetime(2026, 6, 1, 12, 5, tzinfo=timezone.utc),
+    )
+    assert replay_result is not None
+    assert replay_result["created"] is False
+
+    second_count = conn.execute("SELECT COUNT(*) FROM venue_trade_facts").fetchone()[0]
+    assert second_count == 1, "replay of the same confirmed EDLI event must append nothing"
+
+
+def test_canonical_trade_fact_is_visible_to_fill_dedup_canonical_cte(conn):
+    from src.state.fill_dedup import economic_trade_facts_for_command
+
+    aggregate_id = _seed_confirmed_buy_no_aggregate(conn)
+    _seed_venue_command_for_execution_command_id(
+        conn, command_id="cmd-fact-3", execution_command_id=EXECUTION_COMMAND_ID,
+    )
+
+    materialize_position_current_from_edli_fill(
+        conn, aggregate_id, now=datetime(2026, 6, 1, 12, 0, tzinfo=timezone.utc),
+    )
+
+    economic_facts = economic_trade_facts_for_command(conn, "cmd-fact-3")
+    assert len(economic_facts) == 1
+    assert float(economic_facts[0]["filled_size"]) == pytest.approx(16.75)
+    assert float(economic_facts[0]["fill_price"]) == pytest.approx(0.42)
+
+
+def test_no_venue_commands_row_defers_canonical_trade_fact(conn):
+    """Fail-soft: position materialises even before the command row lands;
+    the canonical fact append is deferred (never wired to a nonexistent
+    venue_commands.command_id -- that would violate the FK in production)."""
+    aggregate_id = _seed_confirmed_buy_no_aggregate(conn)
+
+    result = materialize_position_current_from_edli_fill(
+        conn, aggregate_id, now=datetime(2026, 6, 1, 12, 0, tzinfo=timezone.utc),
+    )
+    assert result is not None  # position materialization is not blocked
+
+    rows = conn.execute("SELECT * FROM venue_trade_facts").fetchall()
+    assert rows == []
+
+
+def test_two_distinct_partial_fills_each_get_their_own_canonical_trade_fact(conn):
+    aggregate_id = _seed_confirmed_buy_no_aggregate(
+        conn,
+        aggregate_id="agg-edli-fact-partials-1",
+        fills=[(10.0, 0.40, 0.02), (6.75, 0.45, 0.01)],
+    )
+    _seed_venue_command_for_execution_command_id(
+        conn, command_id="cmd-fact-4", execution_command_id=EXECUTION_COMMAND_ID,
+    )
+
+    materialize_position_current_from_edli_fill(
+        conn, aggregate_id, now=datetime(2026, 6, 1, 12, 0, tzinfo=timezone.utc),
+    )
+
+    rows = conn.execute(
+        "SELECT filled_size, fill_price FROM venue_trade_facts ORDER BY fill_price"
+    ).fetchall()
+    assert len(rows) == 2, "two distinct partial fills -> two distinct canonical facts"
+    assert float(rows[0]["filled_size"]) == pytest.approx(10.0)
+    assert float(rows[0]["fill_price"]) == pytest.approx(0.40)
+    assert float(rows[1]["filled_size"]) == pytest.approx(6.75)
+    assert float(rows[1]["fill_price"]) == pytest.approx(0.45)
+
+
 def test_bridge_relinks_venue_command_decision_id_to_canonical_position(conn):
     aggregate_id = _seed_confirmed_buy_no_aggregate(conn)
     conn.execute(

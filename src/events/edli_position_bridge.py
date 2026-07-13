@@ -1550,6 +1550,182 @@ def _market_is_settled(
     return False, ""
 
 
+# Trade-fact state this bridge ever writes. Only a truly FILL_CONFIRMED EDLI
+# leg becomes a permanent venue_trade_facts row -- see
+# _append_edli_confirmed_trade_facts.
+_EDLI_TRADE_FACT_STATE = "CONFIRMED"
+
+
+def _edli_source_event_hash(aggregate_id: str, payload: Mapping[str, Any], index: int) -> str:
+    """Deterministic sha256 identity for one EDLI confirmed-fill event.
+
+    Stable across replay: derived only from the EDLI aggregate id, the fill's
+    own event/final-intent identity, and its position within the deduped fill
+    list (``_confirmed_fill_payloads`` order is deterministic, sorted by
+    ``event_sequence``) -- never from bridge wall-clock or DB row ids. This is
+    BOTH the required ``append_trade_fact`` ``raw_payload_hash`` and (when the
+    EDLI payload carries no native venue ``trade_id``) the basis for a stable
+    synthetic ``trade_id``, and it is echoed inside ``raw_payload_json`` as
+    ``source_edli_event_hash`` so the source EDLI event stays traceable
+    without decoding column semantics.
+    """
+    basis = {
+        "aggregate_id": aggregate_id,
+        "trade_id": str(payload.get("trade_id") or "").strip(),
+        "event_id": payload.get("event_id"),
+        "final_intent_id": payload.get("final_intent_id"),
+        "index": index,
+    }
+    return hashlib.sha256(
+        json.dumps(basis, sort_keys=True, default=str).encode("utf-8")
+    ).hexdigest()
+
+
+def _edli_canonical_trade_fact_already_recorded(
+    conn: sqlite3.Connection,
+    *,
+    trade_id: str,
+    command_id: str,
+    state: str,
+    filled_size: str,
+    fill_price: str,
+) -> bool:
+    """True if an identical revision of this canonical trade fact is durable.
+
+    Mirrors ``src.ingest.fill_synchronizer._fact_already_recorded`` (the
+    established idempotency check for ``append_trade_fact``, which is a plain
+    append-only insert with no upsert): scoped to the exact (trade_id,
+    command_id, state, filled_size, fill_price) tuple, so a genuinely new
+    revision would still append, but a byte-for-byte replay of the same
+    source EDLI event is a no-op.
+    """
+    row = conn.execute(
+        """
+        SELECT 1 FROM venue_trade_facts
+         WHERE trade_id = ? AND command_id = ? AND state = ?
+           AND filled_size = ? AND fill_price = ?
+         LIMIT 1
+        """,
+        (trade_id, command_id, state, filled_size, fill_price),
+    ).fetchone()
+    return row is not None
+
+
+def _append_edli_confirmed_trade_facts(
+    conn: sqlite3.Connection,
+    *,
+    aggregate_id: str,
+    fill_payloads: list[dict[str, Any]],
+    command_id: str,
+    default_venue_order_id: str,
+    observed_at: str,
+) -> list[int]:
+    """Append a permanent venue_trade_facts row per distinct confirmed EDLI fill.
+
+    LX-T4/round-2-delta BLOCKER (docs/rebuild/local_ledger_excision_2026-07-12.md
+    Sec.C1; docs/rebuild/consult_answers/local_ledger_excision_delta_round2_2026-07-13.txt
+    "[BLOCKER] EDLI fill visibility"): before any EDLI fill may be excised from
+    ``position_current`` writes (LX-3R), it must already be a durable,
+    canonical trade-DB fact via the SAME append-only observation log
+    (``venue_trade_facts``, ``src.state.venue_command_repo.append_trade_fact``)
+    every other fill lane uses -- otherwise a future derive-on-read reducer
+    would never see an EDLI-originated fill. This runs on EVERY call to
+    ``materialize_position_current_from_edli_fill`` (first materialisation
+    AND replay), appending exactly once per real confirmed fill via the
+    deterministic-identity idempotency check below; it never touches
+    ``position_current`` economics.
+
+    Fail-soft only for the ONE expected non-error condition: no venue_commands
+    row yet exists for this EDLI command (``command_id`` empty). That is not a
+    bug -- the command row is normally written at submit time, before the
+    fill this function is bridging -- so we log and defer; the next bridge
+    call (replay) picks it up once the command row lands. Any other failure
+    (malformed leg economics, missing venue_order_id) is skipped per-leg with
+    a warning so one bad leg cannot starve the rest of the aggregate's facts.
+    """
+    if not command_id:
+        logger.warning(
+            "edli position bridge: no venue_commands row for aggregate=%s; "
+            "canonical trade-fact append deferred until the command row exists",
+            aggregate_id,
+        )
+        return []
+
+    from src.state.venue_command_repo import append_trade_fact
+
+    fact_ids: list[int] = []
+    for index, payload in enumerate(fill_payloads):
+        if str(payload.get("fill_authority_state") or "") != EDLI_FILL_CONFIRMED_STATE:
+            # Only a truly confirmed leg is a permanent fact; MATCHED/MINED
+            # legs of a still-in-flight partial are not yet canonical truth.
+            continue
+        size = _float_or_none(payload.get("filled_size") or payload.get("size"))
+        price = _float_or_none(payload.get("avg_fill_price") or payload.get("fill_price"))
+        if size is None or size <= 0 or price is None or price <= 0:
+            logger.warning(
+                "edli position bridge: confirmed fill leg has invalid economics, "
+                "skipping canonical fact aggregate=%s index=%s",
+                aggregate_id,
+                index,
+            )
+            continue
+        venue_order_id = str(
+            payload.get("venue_order_id") or default_venue_order_id or ""
+        ).strip()
+        if not venue_order_id:
+            logger.warning(
+                "edli position bridge: confirmed fill leg missing venue_order_id, "
+                "skipping canonical fact aggregate=%s index=%s",
+                aggregate_id,
+                index,
+            )
+            continue
+        fees = _float_or_none(payload.get("fees")) or 0.0
+        source_event_hash = _edli_source_event_hash(aggregate_id, payload, index)
+        native_trade_id = str(payload.get("trade_id") or "").strip()
+        trade_id = f"edli:{native_trade_id}" if native_trade_id else f"edli:{source_event_hash}"
+        filled_size_s = str(size)
+        fill_price_s = str(price)
+        if _edli_canonical_trade_fact_already_recorded(
+            conn,
+            trade_id=trade_id,
+            command_id=command_id,
+            state=_EDLI_TRADE_FACT_STATE,
+            filled_size=filled_size_s,
+            fill_price=fill_price_s,
+        ):
+            continue
+        fact_id = append_trade_fact(
+            conn,
+            trade_id=trade_id,
+            venue_order_id=venue_order_id,
+            command_id=command_id,
+            state=_EDLI_TRADE_FACT_STATE,
+            filled_size=filled_size_s,
+            fill_price=fill_price_s,
+            fee_paid_micro=int(round(fees * 1_000_000)),
+            # WS_USER: EDLI fills are confirmed via the same authenticated
+            # user channel legacy WS_USER trade facts represent (see
+            # src.events.live_order_reconcile.assert_user_channel_fill_authority);
+            # there is no dedicated EDLI value in the venue_trade_facts.source
+            # CHECK constraint, and WS_USER is the existing closest analog
+            # (src.events.edli_trade_fact_bridge already treats WS_USER+CONFIRMED
+            # as the recognized user-channel-confirmed provenance).
+            source="WS_USER",
+            observed_at=observed_at,
+            raw_payload_hash=source_event_hash,
+            raw_payload_json={
+                "source_module": "src.events.edli_position_bridge",
+                "edli_aggregate_id": aggregate_id,
+                "source_edli_event_hash": source_event_hash,
+                "fill_authority_state": payload.get("fill_authority_state"),
+                "raw_fill_payload": payload,
+            },
+        )
+        fact_ids.append(fact_id)
+    return fact_ids
+
+
 def materialize_position_current_from_edli_fill(
     conn: sqlite3.Connection,
     aggregate_id: str,
@@ -1624,6 +1800,21 @@ def materialize_position_current_from_edli_fill(
     if _cmd_row is not None:
         _created_at = _row_value(_cmd_row, "created_at", 2)
         _cmd_created_at = str(_created_at) if _created_at else None
+
+    # LX-T4/round-2-delta BLOCKER: land the permanent canonical fact BEFORE
+    # any position_current write below, on every call (first materialisation
+    # AND replay share this code path) -- see _append_edli_confirmed_trade_facts.
+    # command_id is only passed when a real venue_commands row was resolved
+    # above; an unresolved EDLI execution_command_id must never be used as a
+    # trade fact's command_id (FK target in production).
+    _append_edli_confirmed_trade_facts(
+        conn,
+        aggregate_id=aggregate_id,
+        fill_payloads=fill_payloads,
+        command_id=_actual_command_id if _cmd_row is not None else "",
+        default_venue_order_id=str(identity.get("venue_order_id") or ""),
+        observed_at=filled_at,
+    )
 
     pos = _build_bridge_position(
         aggregate_id=aggregate_id,
