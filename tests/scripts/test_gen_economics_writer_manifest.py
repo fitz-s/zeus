@@ -45,9 +45,11 @@ _SEED_BYPASS_WRITERS = {
     ("src/execution/command_recovery.py", 8386),
     ("src/execution/command_recovery.py", 8617),
     ("src/execution/command_recovery.py", 8682),
-    ("src/execution/exit_lifecycle.py", 4679),
-    ("src/execution/exchange_reconcile.py", 1417),
-    ("src/execution/exchange_reconcile.py", 1812),
+    # exchange_reconcile/exit_lifecycle offsets shifted by the LX-G ghost-sell
+    # fix (19976478d) landing before this packet on the session branch.
+    ("src/execution/exit_lifecycle.py", 4680),
+    ("src/execution/exchange_reconcile.py", 1429),
+    ("src/execution/exchange_reconcile.py", 1820),
     ("src/events/edli_position_bridge.py", 1002),
 }
 
