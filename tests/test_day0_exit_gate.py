@@ -4,10 +4,9 @@
 """Day0 exit authority tests.
 
 Object-meaning invariant (2026-05-05): stale model probability is not Day0
-observation authority. Model-driven exit gates must fail closed when
-fresh_prob_is_fresh=False, unless the selected trigger explicitly does not
-consume model probability authority. Executable bid evidence must not be
-proxied from a diagnostic/current market price.
+observation authority. Every value-based exit, including near settlement,
+must fail closed when fresh_prob_is_fresh=False. Executable bid evidence must
+not be proxied from a diagnostic/current market price.
 """
 import math
 
@@ -188,7 +187,7 @@ class TestDay0ExitGateStaleProbability:
         assert decision.reason == "INCOMPLETE_EXIT_CONTEXT (missing=best_bid)"
         assert "best_bid_unavailable" in decision.applied_validations
 
-    def test_settlement_imminent_can_exit_without_model_probability_authority(self):
+    def test_settlement_imminent_cannot_exit_without_model_probability_authority(self):
         pos = _make_position(p_posterior=0.02, entry_price=0.02)
         ctx = _make_day0_exit_context(
             fresh_prob=0.02,
@@ -200,10 +199,10 @@ class TestDay0ExitGateStaleProbability:
 
         decision = pos.evaluate_exit(ctx)
 
-        assert decision.should_exit
-        assert decision.trigger == "SETTLEMENT_IMMINENT"
-        assert "model_probability_authority_not_required:settlement_imminent" in decision.applied_validations
-        assert "day0_probability_authority_blocked" not in decision.applied_validations
+        assert not decision.should_exit
+        assert decision.reason == "INCOMPLETE_EXIT_CONTEXT (missing=fresh_prob_is_fresh)"
+        assert decision.trigger != "SETTLEMENT_IMMINENT"
+        assert "day0_probability_authority_blocked" in decision.applied_validations
 
     def test_settlement_imminent_still_requires_executable_best_bid(self):
         pos = _make_position(p_posterior=0.02, entry_price=0.02)

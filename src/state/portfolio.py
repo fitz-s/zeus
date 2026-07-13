@@ -1074,34 +1074,13 @@ class Position:
             )
 
         missing = exit_context.missing_authority_fields()
-        model_probability_missing_only = (
+        if (
             exit_context.day0_active
-            and bool(missing)
-            and set(missing) <= {"fresh_prob", "fresh_prob_is_fresh"}
-        )
-        if model_probability_missing_only:
-            if not ExitContext._is_finite(exit_context.best_bid):
-                applied.append("best_bid_unavailable")
-                applied.append("exit_context_incomplete")
-                applied.append("day0_probability_authority_blocked")
-                missing_with_bid = list(missing) + ["best_bid"]
-                self.applied_validations = _dedupe_validations(applied)
-                return ExitDecision(
-                    False,
-                    f"INCOMPLETE_EXIT_CONTEXT (missing={','.join(missing_with_bid)})",
-                    selected_method=self.selected_method or self.entry_method,
-                    applied_validations=list(self.applied_validations),
-                )
-            if exit_context.hours_to_settlement is not None and exit_context.hours_to_settlement < 1.0:
-                applied.append("near_settlement_gate")
-                applied.append("model_probability_authority_not_required:settlement_imminent")
-                self.applied_validations = _dedupe_validations(applied)
-                return ExitDecision(
-                    True, "SETTLEMENT_IMMINENT", "immediate",
-                    selected_method=self.selected_method or self.entry_method,
-                    applied_validations=list(self.applied_validations),
-                    trigger="SETTLEMENT_IMMINENT",
-                )
+            and any(field in missing for field in ("fresh_prob", "fresh_prob_is_fresh"))
+            and not ExitContext._is_finite(exit_context.best_bid)
+        ):
+            missing = list(missing) + ["best_bid"]
+            applied.append("best_bid_unavailable")
         if missing:
             applied.append("exit_context_incomplete")
             if exit_context.day0_active and any(field in missing for field in ("fresh_prob", "fresh_prob_is_fresh")):
