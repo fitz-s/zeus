@@ -22111,8 +22111,9 @@ def _global_day0_probability_authority_payload(
     }
 
 
-_GLOBAL_SERVED_SIMPLEX_BAND_BASIS = "replacement_served_current_simplex_v1"
-_GLOBAL_DAY0_REMAINING_BAND_BASIS = "day0_remaining_day_joint_simplex_v1"
+_GLOBAL_CURRENT_SETTLEMENT_SIMPLEX_BAND_BASIS = (
+    "current_coherent_settlement_simplex_v1"
+)
 
 
 def _replacement_global_probability_components(
@@ -22204,7 +22205,7 @@ def _replacement_global_probability_components(
     return (
         np.ascontiguousarray(matrix, dtype=np.float64),
         np.ascontiguousarray(point_q, dtype=np.float64),
-        _GLOBAL_SERVED_SIMPLEX_BAND_BASIS,
+        _GLOBAL_CURRENT_SETTLEMENT_SIMPLEX_BAND_BASIS,
     )
 
 
@@ -22267,7 +22268,7 @@ def _day0_remaining_global_probability_components(
         or not math.isclose(float(point_q.sum()), 1.0, rel_tol=0.0, abs_tol=1e-9)
     ):
         raise ValueError("GLOBAL_DAY0_REMAINING_SIMPLEX_INVALID")
-    return samples, point_q, _GLOBAL_DAY0_REMAINING_BAND_BASIS
+    return samples, point_q, _GLOBAL_CURRENT_SETTLEMENT_SIMPLEX_BAND_BASIS
 
 
 def _prepare_current_global_probability_family(
@@ -22632,7 +22633,7 @@ def current_global_probability_authority(
         max_age = getattr(witness, "max_age", None)
         if (
             str(getattr(witness, "band_basis", ""))
-            != _GLOBAL_DAY0_REMAINING_BAND_BASIS
+            != _GLOBAL_CURRENT_SETTLEMENT_SIMPLEX_BAND_BASIS
             or str(payload.get("_edli_day0_q_mode") or "") != "remaining_day"
             or not isinstance(captured_at, datetime)
             or captured_at.tzinfo is None

@@ -659,7 +659,7 @@ def test_global_day0_joint_witness_uses_one_remaining_day_simplex(monkeypatch):
 
     assert np.array_equal(samples, matrix)
     assert point.tolist() == pytest.approx([0.55, 0.45])
-    assert basis == "day0_remaining_day_joint_simplex_v1"
+    assert basis == "current_coherent_settlement_simplex_v1"
     assert np.allclose(samples.sum(axis=1), 1.0)
 
 
@@ -812,7 +812,7 @@ def test_current_global_probability_prepare_does_not_require_price_snapshot(
     witness = prepared.probability_witness
     assert prepared.candidate_seeds == ()
     assert witness.yes_q_samples.shape == (400, 3)
-    assert witness.band_basis == "replacement_served_current_simplex_v1"
+    assert witness.band_basis == "current_coherent_settlement_simplex_v1"
     assert bundle.provenance_json["q_bootstrap_samples_basis"] == bootstrap_basis
     assert [binding.yes_token_id for binding in witness.bindings] == ["yes0", "yes1", "yes2"]
     assert all(binding.no_token_id is None for binding in witness.bindings)
