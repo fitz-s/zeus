@@ -243,6 +243,58 @@ class WealthStateByAtom:
         return np.array([float(self.wealth_by_atom[a]) for a in atom_ids], dtype=np.float64)
 
 
+NativeHoldingSide = Literal["YES", "NO"]
+
+
+@dataclass(frozen=True)
+class NativeHolding:
+    """One exact venue-native claim available to the solve as a SELL action.
+
+    Outcome wealth cannot identify whether an exposure came from YES, NO, or several
+    offsetting positions.  SELL feasibility therefore comes from the same ledger snapshot
+    as ``WealthStateByAtom`` and carries the execution identity explicitly.
+    """
+
+    position_id: str
+    family_key: str
+    bin_id: str
+    side: NativeHoldingSide
+    token_id: str
+    shares: Decimal
+
+    def __post_init__(self) -> None:
+        for name in ("position_id", "family_key", "bin_id", "token_id"):
+            if not str(getattr(self, name)).strip():
+                raise ValueError(f"NativeHolding.{name} must be non-empty")
+        if self.side not in ("YES", "NO"):
+            raise ValueError(f"NativeHolding.side must be YES or NO, got {self.side!r}")
+        if not Decimal(self.shares).is_finite() or Decimal(self.shares) <= 0:
+            raise ValueError(f"NativeHolding.shares must be finite and positive, got {self.shares}")
+
+
+@dataclass(frozen=True)
+class NativeHoldingsSnapshot:
+    """Ledger-bound native holdings for exactly one family and one solve epoch."""
+
+    family_key: str
+    ledger_snapshot_id: str
+    holdings: tuple[NativeHolding, ...] = ()
+
+    def __post_init__(self) -> None:
+        if not self.family_key.strip() or not self.ledger_snapshot_id.strip():
+            raise ValueError("NativeHoldingsSnapshot requires family and ledger identities")
+        ids: set[str] = set()
+        for holding in self.holdings:
+            if holding.family_key != self.family_key:
+                raise ValueError(
+                    "NativeHoldingsSnapshot family mismatch: "
+                    f"{holding.position_id} belongs to {holding.family_key}, not {self.family_key}"
+                )
+            if holding.position_id in ids:
+                raise ValueError(f"duplicate NativeHolding position_id: {holding.position_id}")
+            ids.add(holding.position_id)
+
+
 # --- menu --------------------------------------------------------------------
 
 MenuItemKind = Literal[
@@ -307,6 +359,7 @@ class MenuItem:
     max_units: Decimal                   # depth/holdings/reservation bound
     min_tick_size: Decimal
     min_order_size: Decimal
+    token_id: Optional[str] = None       # exact native token; mandatory for sell_holding
 
 
 @dataclass(frozen=True)

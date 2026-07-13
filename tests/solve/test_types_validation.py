@@ -18,6 +18,8 @@ from src.solve.kappa import Kappa, KappaPolicy, promotion_window_policy
 from src.solve.types import (
     JointOutcomeAtom,
     JointOutcomeScenarioSet,
+    NativeHolding,
+    NativeHoldingsSnapshot,
     PlannedOrder,
     RepairCertificate,
     ScenarioValidationError,
@@ -97,6 +99,56 @@ def test_degenerate_alpha_rejected():
 def test_bad_draw_weights_rejected():
     with pytest.raises(ScenarioValidationError, match="draw_weights"):
         _build(draw_weights=np.array([-1.0, 1.0, 1.0]))
+
+
+def test_native_holding_requires_exact_positive_execution_identity():
+    holding = NativeHolding(
+        position_id="pos1",
+        family_key="fam",
+        bin_id="b0",
+        side="NO",
+        token_id="tok_no_b0",
+        shares=Decimal("2.5"),
+    )
+    NativeHoldingsSnapshot(
+        family_key="fam", ledger_snapshot_id="ledger1", holdings=(holding,)
+    )
+    with pytest.raises(ValueError, match="shares"):
+        NativeHolding(
+            position_id="pos1",
+            family_key="fam",
+            bin_id="b0",
+            side="YES",
+            token_id="tok_yes_b0",
+            shares=Decimal("0"),
+        )
+
+
+def test_native_holdings_snapshot_rejects_family_or_position_aliasing():
+    holding = NativeHolding(
+        position_id="pos1",
+        family_key="other",
+        bin_id="b0",
+        side="YES",
+        token_id="tok_yes_b0",
+        shares=Decimal("1"),
+    )
+    with pytest.raises(ValueError, match="family mismatch"):
+        NativeHoldingsSnapshot(
+            family_key="fam", ledger_snapshot_id="ledger1", holdings=(holding,)
+        )
+    local = NativeHolding(
+        position_id="pos1",
+        family_key="fam",
+        bin_id="b0",
+        side="YES",
+        token_id="tok_yes_b0",
+        shares=Decimal("1"),
+    )
+    with pytest.raises(ValueError, match="duplicate"):
+        NativeHoldingsSnapshot(
+            family_key="fam", ledger_snapshot_id="ledger1", holdings=(local, local)
+        )
 
 
 def test_hash_covers_weights_and_provider():

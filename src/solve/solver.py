@@ -2637,9 +2637,9 @@ def solve(
     orders: list[PlannedOrder] = []
     for prefix_index, (i, size) in enumerate(chosen["ordered"]):
         it = items[i]
-        token_id = None
+        token_id = it.token_id
         route = it.route
-        if route is not None:
+        if token_id is None and route is not None:
             legs = getattr(route, "legs", ())
             if legs:
                 token_id = getattr(legs[0], "token_id", None)
@@ -2727,11 +2727,13 @@ class SolveEngineShim:
     writer grade the projection, NEVER the joint plan's ΔU (consult REV-2).
 
     INJECTED INPUTS (W3.3 ruling): ``spendable_cash_provider`` (the CAS ledger's spendable amount,
-    net of reservations — the seam-swap threads the real read; tests inject) and, optionally,
-    ``ledger_snapshot_id_provider``. The endowment wealth VECTOR is the legacy ``portfolio`` A_y
-    (like-for-like with the picker). ``engine`` may be injected for tests in place of a real
-    FamilyDecisionEngine. Wired behind the w3_solve_enabled feature flag: qkernel_spine_bridge.py
-    wraps the engine with this shim at its construction seam (:1412) when w3_solve_enabled() is True.
+    net of reservations), ``ledger_snapshot_id_provider``, and optionally a
+    ``holdings_snapshot_provider(family_key, ledger_snapshot_id)`` returning exact native YES/NO
+    holdings from that same ledger epoch. The endowment wealth VECTOR is the legacy ``portfolio``
+    A_y (like-for-like with the picker); holdings are never inferred from it. ``engine`` may be
+    injected for tests in place of a real FamilyDecisionEngine. Wired behind the
+    w3_solve_enabled feature flag: qkernel_spine_bridge.py wraps the engine with this shim at its
+    construction seam (:1412) when w3_solve_enabled() is True.
     """
 
     def __init__(
@@ -2740,12 +2742,14 @@ class SolveEngineShim:
         engine: Any = None,
         spendable_cash_provider: Any = None,
         ledger_snapshot_id_provider: Any = None,
+        holdings_snapshot_provider: Any = None,
         **engine_kwargs: Any,
     ) -> None:
         self._engine = engine
         self._engine_kwargs = engine_kwargs
         self._spendable_cash_provider = spendable_cash_provider
         self._ledger_snapshot_id_provider = ledger_snapshot_id_provider
+        self._holdings_snapshot_provider = holdings_snapshot_provider
         # Route-surface inputs: prefer explicit kwargs, else read them off the composed engine
         # (the seam wraps an already-constructed FamilyDecisionEngine as `engine=` so the bridge
         # edit stays a one-liner — no need to re-pass the builder it already holds).
@@ -2815,12 +2819,9 @@ class SolveEngineShim:
         bin_ids = [b.bin_id for b in omega.bins]
         atom_ids = tuple(JointOutcomeAtom.canonical_id({family_key: b}) for b in bin_ids)
 
-        # Same route surface the engine used, reshaped into the solver menu (phase-1 direct-native).
+        # Same route surface the engine used (phase-1 direct-native).
         route_set = self._route_set_builder(
             legacy.family_book, shares=shares_for_routing, enable_negrisk_routes=self._enable_negrisk_routes
-        )
-        menu = build_solve_menu(
-            route_set, family_key=family_key, family_book=legacy.family_book, holdings_by_bin_id={}
         )
 
         # Endowment wealth = legacy A_y (like-for-like); spendable cash for the budget is INJECTED.
@@ -2839,6 +2840,18 @@ class SolveEngineShim:
         wealth = build_wealth_by_atom(
             family_key=family_key, atom_ids=atom_ids, holdings_payout_by_atom_id=holdings_payout,
             spendable_cash_usd=spendable, ledger_snapshot_id=ledger_snapshot_id,
+        )
+        holdings = None
+        if self._holdings_snapshot_provider is not None:
+            holdings = self._holdings_snapshot_provider(family_key, ledger_snapshot_id)
+            if holdings is None:
+                raise ValueError("holdings_snapshot_provider returned no ledger snapshot")
+        menu = build_solve_menu(
+            route_set,
+            family_key=family_key,
+            family_book=legacy.family_book,
+            holdings=holdings,
+            wealth=wealth,
         )
 
         scenarios = TransitionalIndependentProduct()

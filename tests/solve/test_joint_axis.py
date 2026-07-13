@@ -109,7 +109,7 @@ def test_adapter_to_solver_end_to_end():
         pair_arbs=(), full_basket_arbs=(), conversion_routes=(),
     )
     w = F.flat_wealth_state(("y", "n"), 200.0)
-    menu = build_solve_menu(rs, family_key="fam", family_book=fb, holdings_by_bin_id={}, wealth=w)
+    menu = build_solve_menu(rs, family_key="fam", family_book=fb, wealth=w)
     sset = F.scenarios_single_family(("y", "n"), F.two_bin_q_draws([0.72] * 64), alpha=0.05)
     plan = S.solve(
         menu, scenarios=F.StubScenarioService(sset), wealth=w,

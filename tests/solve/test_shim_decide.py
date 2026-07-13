@@ -24,6 +24,7 @@ from src.contracts.native_side_candidate import NativeSideCandidate
 from src.decision.family_decision_engine import CandidateDecision, FamilyDecision
 from src.decision.payoff_vector import CandidateEconomics
 from src.solve.solver import SolveEngineShim, validate_family_decision_contract
+from src.solve.types import NativeHolding, NativeHoldingsSnapshot
 from src.strategy.utility_ranker import FamilyPayoffMatrix, PortfolioExposureVector
 from tests.solve import support as F
 
@@ -134,13 +135,20 @@ class _FakeEngine:
         return self._decision
 
 
-def _shim(legacy, route_set, *, spendable=100.0):
+_NO_HOLDINGS_PROVIDER = object()
+
+
+def _shim(legacy, route_set, *, spendable=100.0, holdings=_NO_HOLDINGS_PROVIDER):
+    kwargs = {}
+    if holdings is not _NO_HOLDINGS_PROVIDER:
+        kwargs["holdings_snapshot_provider"] = lambda family_key, ledger_id: holdings
     return SolveEngineShim(
         engine=_FakeEngine(legacy),
         route_set_builder=lambda fb, shares, enable_negrisk_routes: route_set,
         enable_negrisk_routes=False,
         spendable_cash_provider=lambda: spendable,
         ledger_snapshot_id_provider=lambda: "snap1",
+        **kwargs,
     )
 
 
@@ -148,12 +156,20 @@ def _decide(
     shim,
     bin_ids=("y", "n"),
     portfolio_wealth=100.0,
+    portfolio_extra=None,
     served_payoff_q_lcb_by_side=None,
 ):
     matrix = FamilyPayoffMatrix.over_bins(bin_ids)
-    portfolio = PortfolioExposureVector.flat(
-        matrix, baseline=Decimal(str(portfolio_wealth))
-    )
+    if portfolio_extra is None:
+        portfolio = PortfolioExposureVector.flat(
+            matrix, baseline=Decimal(str(portfolio_wealth))
+        )
+    else:
+        portfolio = PortfolioExposureVector.from_outcome_wealth(
+            matrix,
+            baseline=Decimal(str(portfolio_wealth)),
+            extra_by_outcome={k: Decimal(str(v)) for k, v in portfolio_extra.items()},
+        )
     legacy = shim._engine._decision
     sizing_candidates = {}
     if legacy.band is not None:
@@ -248,6 +264,56 @@ def test_shim_no_trade_on_zero_edge():
     assert d.selected is None
     assert d.no_trade_reason is not None
     validate_family_decision_contract(d)
+
+
+def test_shim_holding_provider_puts_exact_sell_in_same_solve_plan():
+    bin_ids = ("y", "n")
+    band = _band(bin_ids, [0.10] * 64)
+    route = _route("buy_y", "y", "YES", 0.90)
+    legacy = _legacy_decision(bin_ids, (route,), band)
+    bids = SimpleNamespace(
+        levels=(
+            SimpleNamespace(price=Decimal("0.45"), size=Decimal("20")),
+            SimpleNamespace(price=Decimal("0.40"), size=Decimal("20")),
+        ),
+        min_tick_size=Decimal("0.01"),
+        min_order_size=Decimal("1"),
+    )
+    legacy.family_book.markets["y"].yes_bids = bids
+    holdings = NativeHoldingsSnapshot(
+        family_key="fam",
+        ledger_snapshot_id="snap1",
+        holdings=(
+            NativeHolding(
+                position_id="pos_y",
+                family_key="fam",
+                bin_id="y",
+                side="YES",
+                token_id="tok_held_yes_y",
+                shares=Decimal("10"),
+            ),
+        ),
+    )
+    shim = _shim(legacy, _route_set({"y": route}), holdings=holdings)
+    decision = _decide(shim, bin_ids=bin_ids, portfolio_extra={"y": 10})
+
+    assert shim.last_plan is not None
+    sell = next(order for order in shim.last_plan.orders if order.kind == "sell_holding")
+    assert sell.token_id == "tok_held_yes_y"
+    assert sell.ledger_snapshot_id == "snap1"
+    # The current FamilyDecision projection can submit only native BUY candidates.  It must not
+    # relabel a SELL as a BUY; the plan remains available for the future plan executor seam.
+    assert decision.selected is None
+    assert decision.no_trade_reason == "PHASE1_PRIMARY_LEG_NOT_TRADEABLE"
+
+
+def test_shim_holdings_provider_must_return_a_snapshot():
+    bin_ids = ("y", "n")
+    band = _band(bin_ids, [0.70] * 64)
+    route = _route("buy_y", "y", "YES", 0.45)
+    legacy = _legacy_decision(bin_ids, (route,), band)
+    with pytest.raises(ValueError, match="returned no ledger snapshot"):
+        _decide(_shim(legacy, _route_set({"y": route}), holdings=None))
 
 
 def test_shim_yes_no_mirror_uses_one_current_state_rule():

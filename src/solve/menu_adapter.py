@@ -25,10 +25,10 @@ PER-LEG TICK/MIN (consult REV-2): tick/min-size are carried PER MenuItem from th
 market ladder (a heterogeneous multi-leg menu cannot share one tick/min); discrete repair
 rounds each order on its own grid.
 
-SELL LANE: selling one held YES unit on bin ``b`` gives up the ``e_b`` claim and receives the
-bid proceeds in cash (every atom), so its unit payoff is ``proceeds - e_b``. Proceeds are
-floored at the WORST resting bid level (a conservative bid-depth floor), pending the size-aware
-bid walk that lands with the exits/W_a sub-slice.
+SELL LANE: a ledger-bound native holding supplies exact position/side/token identity. Selling
+YES on bin ``b`` gives up ``e_b``; selling NO gives up ``1-e_b``. Both receive bid proceeds in
+cash in every atom. Proceeds use the holding side's own ladder and are floored at its WORST
+resting bid level, pending the size-aware bid walk that lands with the exits/W_a sub-slice.
 
 MAKER LANE DISABLED (consult REV-2 ruling 6): W3 is taker-only; a maker quote is a contingent
 asset (fill-state/latency/cancel-risk) the current MenuItem cannot value, so no maker item is
@@ -39,12 +39,14 @@ from __future__ import annotations
 
 import hashlib
 from decimal import Decimal
-from typing import TYPE_CHECKING, Mapping, Optional
+from typing import TYPE_CHECKING, Optional
 
 from src.solve.types import (
     AtomPayoffProjector,
     JointOutcomeAtom,
     MenuItem,
+    NativeHolding,
+    NativeHoldingsSnapshot,
     SolveMenu,
     WealthStateByAtom,
 )
@@ -111,43 +113,53 @@ def _route_menu_item(
         max_units=max_units,
         min_tick_size=tick,
         min_order_size=min_order,
+        token_id=getattr(route.legs[0], "token_id", None) if getattr(route, "legs", ()) else None,
     )
 
 
 def _sell_holding_item(
-    *, family_key: str, bin_id: str, held_shares: Decimal, bin_ids: tuple[str, ...], market
+    *, holding: NativeHolding, bin_ids: tuple[str, ...], market
 ) -> MenuItem:
-    """A held YES claim on ``bin_id`` → a sell_holding item along conservative bid depth."""
-    bids = tuple(getattr(getattr(market, "yes_bids", None), "levels", ()) or ())
+    """One exact YES/NO holding → a native SELL item on its own bid ladder."""
+    ladder_name = "yes_bids" if holding.side == "YES" else "no_bids"
+    ladder = getattr(market, ladder_name, None)
+    bids = tuple(getattr(ladder, "levels", ()) or ())
     if bids:
         proceeds = float(bids[-1].price)  # worst resting bid = conservative proceeds floor
-        depth = sum(float(lvl.size) for lvl in bids)
-        max_units = min(float(held_shares), depth)
-        executable = max_units > 0.0
+        depth = sum((Decimal(lvl.size) for lvl in bids), Decimal("0"))
+        max_units = min(Decimal(holding.shares), depth)
+        executable = max_units > 0
         reason = None if executable else "NO_BID_DEPTH"
     else:
         proceeds = 0.0
-        max_units = 0.0
+        max_units = Decimal("0")
         executable = False
         reason = "NO_BID_DEPTH"
-    held_atom = JointOutcomeAtom.canonical_id({family_key: bin_id})
-    payoff_by_atom = {
-        JointOutcomeAtom.canonical_id({family_key: b}): proceeds for b in bin_ids
-    }
-    payoff_by_atom[held_atom] = proceeds - 1.0  # the YES claim on bin_id is surrendered
-    tick, min_order = _ladder_tick_min(getattr(market, "yes_bids", None))
+    payoff_by_atom = {}
+    for bin_id in bin_ids:
+        token_wins = (
+            bin_id == holding.bin_id
+            if holding.side == "YES"
+            else bin_id != holding.bin_id
+        )
+        atom_id = JointOutcomeAtom.canonical_id({holding.family_key: bin_id})
+        payoff_by_atom[atom_id] = proceeds - (1.0 if token_wins else 0.0)
+    tick, min_order = _ladder_tick_min(ladder)
     return MenuItem(
-        item_id=f"sell_holding:{bin_id}",
+        item_id=(
+            f"sell_holding:{holding.position_id}:{holding.side}:{holding.bin_id}"
+        ),
         kind="sell_holding",
-        family_key=family_key,
-        bin_id=bin_id,
+        family_key=holding.family_key,
+        bin_id=holding.bin_id,
         route=None,
         executable=executable,
         non_executable_reason=reason,
         unit_payoff=AtomPayoffProjector(payoff_by_atom_id=payoff_by_atom, unit_cost_usd=-proceeds),
-        max_units=Decimal(str(max_units)),
+        max_units=max_units,
         min_tick_size=tick,
         min_order_size=min_order,
+        token_id=holding.token_id,
     )
 
 
@@ -161,6 +173,7 @@ def _menu_hash(family_key: str, items: tuple[MenuItem, ...]) -> str:
         digest.update(str(it.max_units).encode())
         digest.update(str(it.min_tick_size).encode())
         digest.update(str(it.min_order_size).encode())
+        digest.update(str(it.token_id or "").encode())
         proj = it.unit_payoff
         digest.update(repr(round(proj.unit_cost_usd, 12)).encode())
         for a in sorted(proj.payoff_by_atom_id):
@@ -175,7 +188,7 @@ def build_solve_menu(
     *,
     family_key: str,
     family_book: "FamilyBook",
-    holdings_by_bin_id: Mapping[str, Decimal],
+    holdings: Optional[NativeHoldingsSnapshot] = None,
     wealth: Optional[WealthStateByAtom] = None,
     include_maker_lane: bool = False,
 ) -> SolveMenu:
@@ -184,7 +197,7 @@ def build_solve_menu(
     Contract (math core / sub-slice 2 implements):
     * every RouteCost in direct_yes/direct_no/synthetic_not_i/pair_arbs/full_basket_arbs
       becomes one MenuItem with a typed atom payoff projector (payoff_vector − avg_cost);
-    * held positions add sell_holding items along BID depth, max_units = held shares;
+    * ledger-bound YES/NO holdings add sell_holding items on their native BID depth;
     * conversion_routes pass through as-is (empty today; items appear when the builder lands,
       still executable=False until W2.4 dry-run gate clears);
     * maker lane stays DISABLED (W3 taker-only, consult REV-2 ruling 6);
@@ -210,15 +223,28 @@ def build_solve_menu(
     ):
         items.append(_route_menu_item(route, family_key=family_key, bin_ids=bin_ids, omega=omega, markets=markets, phase1_executable=False))
 
-    for bin_id, shares in holdings_by_bin_id.items():
-        if Decimal(shares) > 0 and bin_id in bin_ids:
+    if holdings is not None:
+        if holdings.family_key != family_key:
+            raise ValueError(
+                f"holdings family {holdings.family_key} does not match solve family {family_key}"
+            )
+        if wealth is None or not wealth.ledger_snapshot_id:
+            raise ValueError("ledger-bound holdings require ledger-bound wealth")
+        if holdings.ledger_snapshot_id != wealth.ledger_snapshot_id:
+            raise ValueError(
+                "holdings/wealth ledger snapshot mismatch: "
+                f"{holdings.ledger_snapshot_id} != {wealth.ledger_snapshot_id}"
+            )
+        for holding in holdings.holdings:
+            if holding.bin_id not in bin_ids:
+                raise ValueError(
+                    f"holding {holding.position_id} bin {holding.bin_id} is outside current omega"
+                )
             items.append(
                 _sell_holding_item(
-                    family_key=family_key,
-                    bin_id=bin_id,
-                    held_shares=Decimal(shares),
+                    holding=holding,
                     bin_ids=bin_ids,
-                    market=markets.get(bin_id),
+                    market=markets.get(holding.bin_id),
                 )
             )
 

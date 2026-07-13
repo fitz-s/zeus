@@ -13,8 +13,10 @@ from decimal import Decimal
 from types import SimpleNamespace
 
 import numpy as np
+import pytest
 
 from src.solve.menu_adapter import build_solve_menu
+from src.solve.types import NativeHolding, NativeHoldingsSnapshot
 from tests.solve import support as F
 
 
@@ -70,13 +72,20 @@ def _ladder(levels, tick="0.01", min_order="0.01"):
     )
 
 
-def _market(bin_id, bids=(), tick="0.01", min_order="0.01", no_ask_min_order=None):
+def _market(
+    bin_id,
+    bids=(),
+    no_bids=(),
+    tick="0.01",
+    min_order="0.01",
+    no_ask_min_order=None,
+):
     return SimpleNamespace(
         bin_id=bin_id,
         yes_asks=_ladder([], tick, min_order),
         yes_bids=_ladder(bids, tick, min_order),
         no_asks=_ladder([], tick, no_ask_min_order or min_order),
-        no_bids=_ladder([]),
+        no_bids=_ladder(no_bids, tick, min_order),
     )
 
 
@@ -103,7 +112,7 @@ AN = F.atom_id("n")
 def test_direct_yes_route_becomes_atom_projector():
     fb = _family_book(("y", "n"), {"y": _market("y"), "n": _market("n")})
     rs = _route_set(direct_yes={"y": _route("r_y", "y", "YES", 0.4, 500)})
-    menu = build_solve_menu(rs, family_key="fam", family_book=fb, holdings_by_bin_id={})
+    menu = build_solve_menu(rs, family_key="fam", family_book=fb)
     item = next(it for it in menu.items if it.item_id == "r_y")
     assert item.kind == "buy_yes"
     assert item.executable is True
@@ -117,7 +126,7 @@ def test_direct_yes_route_becomes_atom_projector():
 def test_direct_no_route_payoff_shape():
     fb = _family_book(("y", "n"), {"y": _market("y"), "n": _market("n")})
     rs = _route_set(direct_no={"y": _route("r_no", "y", "NO", 0.3, 200)})
-    menu = build_solve_menu(rs, family_key="fam", family_book=fb, holdings_by_bin_id={})
+    menu = build_solve_menu(rs, family_key="fam", family_book=fb)
     item = next(it for it in menu.items if it.item_id == "r_no")
     assert item.kind == "buy_no"
     assert item.unit_payoff.payoff_by_atom_id == {AY: -0.3, AN: 0.7}
@@ -126,7 +135,7 @@ def test_direct_no_route_payoff_shape():
 def test_non_executable_route_kept_with_reason():
     fb = _family_book(("y", "n"), {"y": _market("y"), "n": _market("n")})
     rs = _route_set(direct_yes={"y": _route("dead", "y", "YES", 0.4, 0, executable=False, reason="NO_DEPTH: y")})
-    menu = build_solve_menu(rs, family_key="fam", family_book=fb, holdings_by_bin_id={})
+    menu = build_solve_menu(rs, family_key="fam", family_book=fb)
     dead = next(it for it in menu.items if it.item_id == "dead")
     assert dead.executable is False
     assert dead.non_executable_reason == "NO_DEPTH: y"
@@ -139,7 +148,7 @@ def test_per_item_tick_min_from_route_market():
         direct_yes={"y": _route("r_y", "y", "YES", 0.4, 500)},
         direct_no={"n": _route("r_n", "n", "NO", 0.4, 500)},
     )
-    menu = build_solve_menu(rs, family_key="fam", family_book=fb, holdings_by_bin_id={})
+    menu = build_solve_menu(rs, family_key="fam", family_book=fb)
     ry = next(it for it in menu.items if it.item_id == "r_y")
     rn = next(it for it in menu.items if it.item_id == "r_n")
     assert ry.min_tick_size == Decimal("0.05")
@@ -150,18 +159,77 @@ def test_per_item_tick_min_from_route_market():
 def test_sell_holding_lane_prices_conservative_bid_floor():
     market_y = _market("y", bids=[("0.60", "30"), ("0.55", "40")])
     fb = _family_book(("y", "n"), {"y": market_y, "n": _market("n")})
-    menu = build_solve_menu(_route_set(), family_key="fam", family_book=fb, holdings_by_bin_id={"y": Decimal("50")})
+    wealth = F.wealth_state({AY: 100.0, AN: 50.0}, 50.0, ledger_snapshot_id="ledger1")
+    holdings = NativeHoldingsSnapshot(
+        family_key="fam",
+        ledger_snapshot_id="ledger1",
+        holdings=(
+            NativeHolding(
+                position_id="pos_yes_y",
+                family_key="fam",
+                bin_id="y",
+                side="YES",
+                token_id="tok_yes_y",
+                shares=Decimal("50"),
+            ),
+        ),
+    )
+    menu = build_solve_menu(
+        _route_set(), family_key="fam", family_book=fb, holdings=holdings, wealth=wealth
+    )
     sell = next(it for it in menu.items if it.kind == "sell_holding")
     assert sell.executable is True
     # proceeds floored at worst bid 0.55: +0.55 every atom, minus surrendered YES claim in y
     assert sell.unit_payoff.payoff_by_atom_id == {AY: 0.55 - 1.0, AN: 0.55}
     assert sell.unit_payoff.unit_cost_usd == -0.55  # cash received, not spent
     assert sell.max_units == Decimal("50")
+    assert sell.token_id == "tok_yes_y"
+    assert sell.item_id == "sell_holding:pos_yes_y:YES:y"
+
+
+def test_sell_no_holding_uses_no_bid_and_complement_payoff():
+    market_y = _market("y", no_bids=[("0.30", "10"), ("0.25", "20")])
+    fb = _family_book(("y", "n"), {"y": market_y, "n": _market("n")})
+    wealth = F.wealth_state({AY: 50.0, AN: 65.0}, 50.0, ledger_snapshot_id="ledger1")
+    holdings = NativeHoldingsSnapshot(
+        family_key="fam",
+        ledger_snapshot_id="ledger1",
+        holdings=(
+            NativeHolding(
+                position_id="pos_no_y",
+                family_key="fam",
+                bin_id="y",
+                side="NO",
+                token_id="tok_no_y",
+                shares=Decimal("15"),
+            ),
+        ),
+    )
+    menu = build_solve_menu(
+        _route_set(), family_key="fam", family_book=fb, holdings=holdings, wealth=wealth
+    )
+    sell = next(it for it in menu.items if it.kind == "sell_holding")
+    assert sell.unit_payoff.payoff_by_atom_id == {AY: 0.25, AN: 0.25 - 1.0}
+    assert sell.unit_payoff.unit_cost_usd == -0.25
+    assert sell.max_units == Decimal("15")
+    assert sell.token_id == "tok_no_y"
+
+
+def test_holdings_and_wealth_must_share_ledger_snapshot():
+    fb = _family_book(("y", "n"), {"y": _market("y"), "n": _market("n")})
+    wealth = F.flat_wealth_state(("y", "n"), 50.0)
+    holdings = NativeHoldingsSnapshot(
+        family_key="fam", ledger_snapshot_id="other", holdings=()
+    )
+    with pytest.raises(ValueError, match="ledger snapshot mismatch"):
+        build_solve_menu(
+            _route_set(), family_key="fam", family_book=fb, holdings=holdings, wealth=wealth
+        )
 
 
 def test_conversion_routes_pass_through_empty():
     fb = _family_book(("y", "n"), {"y": _market("y"), "n": _market("n")})
-    menu = build_solve_menu(_route_set(), family_key="fam", family_book=fb, holdings_by_bin_id={})
+    menu = build_solve_menu(_route_set(), family_key="fam", family_book=fb)
     assert [it.kind for it in menu.items] == ["hold_cash"]
     assert all("convert" not in it.kind and "basket" not in it.kind for it in menu.items)
 
@@ -170,7 +238,7 @@ def test_hold_cash_is_last_and_zero_payoff():
     fb = _family_book(("y", "n"), {"y": _market("y"), "n": _market("n")})
     rs = _route_set(direct_yes={"y": _route("r_y", "y", "YES", 0.4, 500)})
     w = F.flat_wealth_state(("y", "n"), 250.0)
-    menu = build_solve_menu(rs, family_key="fam", family_book=fb, holdings_by_bin_id={}, wealth=w)
+    menu = build_solve_menu(rs, family_key="fam", family_book=fb, wealth=w)
     assert menu.items[-1].kind == "hold_cash"
     assert menu.items[-1].max_units == Decimal("250.0")
     assert set(menu.items[-1].unit_payoff.payoff_by_atom_id.values()) == {0.0}
@@ -179,7 +247,7 @@ def test_hold_cash_is_last_and_zero_payoff():
 def test_maker_lane_disabled_even_when_requested():
     fb = _family_book(("y", "n"), {"y": _market("y"), "n": _market("n")})
     rs = _route_set(direct_yes={"y": _route("r_y", "y", "YES", 0.4, 500)})
-    menu = build_solve_menu(rs, family_key="fam", family_book=fb, holdings_by_bin_id={}, include_maker_lane=True)
+    menu = build_solve_menu(rs, family_key="fam", family_book=fb, include_maker_lane=True)
     assert all(it.kind != "maker_quote" for it in menu.items)
 
 
@@ -193,7 +261,7 @@ def test_proof_native_maker_direct_route_is_non_executable_in_phase1():
             "n": _route("maker_n", "n", "NO", 0.3, 5, shares=5, price_type="bid")
         },
     )
-    menu = build_solve_menu(rs, family_key="fam", family_book=fb, holdings_by_bin_id={})
+    menu = build_solve_menu(rs, family_key="fam", family_book=fb)
     for item_id in ("maker_y", "maker_n"):
         item = next(it for it in menu.items if it.item_id == item_id)
         assert item.executable is False
@@ -206,7 +274,7 @@ def test_depth_cap_at_priced_shares():
     # priced depth (consult REV-2 follow-up blocker).
     fb = _family_book(("y", "n"), {"y": _market("y"), "n": _market("n")})
     rs = _route_set(direct_yes={"y": _route("r_y", "y", "YES", 0.4, 110, shares=10)})
-    menu = build_solve_menu(rs, family_key="fam", family_book=fb, holdings_by_bin_id={})
+    menu = build_solve_menu(rs, family_key="fam", family_book=fb)
     item = next(it for it in menu.items if it.item_id == "r_y")
     assert item.max_units == Decimal("10")
 
@@ -221,7 +289,7 @@ def test_non_direct_routes_non_executable_in_phase1():
         pair_arbs=(_route("pair", "y", "YES", 0.3, 500),),
         full_basket_arbs=(_route("basket", "y", "YES", 0.2, 500),),
     )
-    menu = build_solve_menu(rs, family_key="fam", family_book=fb, holdings_by_bin_id={})
+    menu = build_solve_menu(rs, family_key="fam", family_book=fb)
     by_id = {it.item_id: it for it in menu.items}
     assert by_id["direct"].executable is True
     for nid in ("synth", "pair", "basket"):
@@ -233,7 +301,7 @@ def test_direct_no_route_quantizes_on_no_ladder():
     # a direct NO buy must inherit tick/min-size from the NO ask ladder, not yes_asks.
     fb = _family_book(("y", "n"), {"y": _market("y", no_ask_min_order="7"), "n": _market("n")})
     rs = _route_set(direct_no={"y": _route("r_no", "y", "NO", 0.3, 200)})
-    menu = build_solve_menu(rs, family_key="fam", family_book=fb, holdings_by_bin_id={})
+    menu = build_solve_menu(rs, family_key="fam", family_book=fb)
     item = next(it for it in menu.items if it.item_id == "r_no")
     assert item.min_order_size == Decimal("7")  # from no_asks, not yes_asks (min_order 0.01)
 
@@ -242,8 +310,8 @@ def test_menu_hash_deterministic_and_sensitive():
     fb = _family_book(("y", "n"), {"y": _market("y"), "n": _market("n")})
     rs1 = _route_set(direct_yes={"y": _route("r_y", "y", "YES", 0.4, 500)})
     rs2 = _route_set(direct_yes={"y": _route("r_y", "y", "YES", 0.5, 500)})  # different cost
-    h1 = build_solve_menu(rs1, family_key="fam", family_book=fb, holdings_by_bin_id={}).menu_hash
-    h1b = build_solve_menu(rs1, family_key="fam", family_book=fb, holdings_by_bin_id={}).menu_hash
-    h2 = build_solve_menu(rs2, family_key="fam", family_book=fb, holdings_by_bin_id={}).menu_hash
+    h1 = build_solve_menu(rs1, family_key="fam", family_book=fb).menu_hash
+    h1b = build_solve_menu(rs1, family_key="fam", family_book=fb).menu_hash
+    h2 = build_solve_menu(rs2, family_key="fam", family_book=fb).menu_hash
     assert h1 == h1b
     assert h1 != h2
