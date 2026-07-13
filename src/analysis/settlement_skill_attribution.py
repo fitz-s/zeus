@@ -196,6 +196,13 @@ class SkillGrade:
     large_factor_threshold: float
     derivation_note: str
     rationale: str
+    # LX-E packet (2026-07-13): hold-to-settlement world-grade P&L label — NEVER
+    # actual chain-realized wallet P&L (the name says what it is). Replaces the
+    # removed writeback_settlement_pnl_to_audit (which used to write this same
+    # value into edli_live_profit_audit.pnl_usd, a forbidden world-grade/
+    # chain-money collapse per the adjudication). None when fee/economics inputs
+    # are unresolvable — never fabricated.
+    world_grade_pnl_usd: Optional[float] = None
 
 
 # ---------------------------------------------------------------------------
@@ -297,6 +304,8 @@ def grade_position(
     decision_q_in_bin: Optional[float] = None,
     freshness_budget_hours: float = DEFAULT_FRESHNESS_BUDGET_HOURS,
     large_factor: float = LARGE_FACTOR,
+    fees: Optional[float] = None,
+    filled_size: Optional[float] = None,
 ) -> SkillGrade:
     """Grade ONE settled position into a skill category.
 
@@ -480,6 +489,20 @@ def grade_position(
                 f"defensible under our evidence."
             )
 
+    # LX-E packet (2026-07-13): the hold-to-settlement world-grade P&L label.
+    # SAME formula the removed writeback_settlement_pnl_to_audit used — derived
+    # ONLY from settlement payoff + fill economics, never a market price or
+    # win-rate (operator settlement-only-truth law). None when avg_fill_price /
+    # filled_size are unresolvable (never fabricated); fees defaults to 0.0 when
+    # absent (matches the prior writeback's fee_total handling).
+    world_grade_pnl_usd: Optional[float] = None
+    if avg_fill_price is not None and filled_size is not None:
+        settled_payoff = 1.0 if won else 0.0
+        fee_total = float(fees) if fees is not None else 0.0
+        world_grade_pnl_usd = (
+            (settled_payoff - float(avg_fill_price)) * float(filled_size) - fee_total
+        )
+
     return SkillGrade(
         position_id=position_id,
         condition_id=condition_id,
@@ -515,6 +538,7 @@ def grade_position(
         large_factor_threshold=large_factor,
         derivation_note=note,
         rationale=rationale,
+        world_grade_pnl_usd=world_grade_pnl_usd,
     )
 
 
@@ -587,12 +611,88 @@ def _table_exists(conn: sqlite3.Connection, table: str) -> bool:
     return row is not None
 
 
+def _position_decision_attribution_row(
+    world_conn: sqlite3.Connection,
+    position_id: str,
+) -> Optional[tuple]:
+    """(resolution, decision_certificate_hash) from trades.position_decision_attribution,
+    or None when the table is absent (legacy trades DB) or has no row for this
+    position (predates both the live hook and the backfill).
+    """
+    try:
+        return world_conn.execute(
+            """
+            SELECT resolution, decision_certificate_hash
+            FROM trades.position_decision_attribution
+            WHERE position_id = ?
+            """,
+            (position_id,),
+        ).fetchone()
+    except sqlite3.OperationalError:
+        # Table absent — an older trades DB snapshot that predates the LX-E
+        # migration entirely. Treated identically to "no row" (legacy fallback).
+        return None
+
+
 def _resolve_cert_hash_for_position(
+    world_conn: sqlite3.Connection,
+    position_id: Optional[str],
+    condition_id: Optional[str],
+    direction: Optional[str],
+) -> Optional[str]:
+    """Resolve a position's decision-certificate hash — position_decision_attribution
+    FIRST, the legacy (condition_id, direction) inference only as a fallback.
+
+    LX-E packet (docs/rebuild/local_ledger_excision_2026-07-12.md Round-2 delta
+    §(c)): the permanent link is now written at command-creation time (or
+    backfilled with an EXACT command-id join — see
+    scripts/backfill_position_decision_attribution.py) into
+    ``trades.position_decision_attribution``. Three cases:
+
+      1. A row exists with resolution='ATTRIBUTED' -> return its hash (the exact
+         link, never a latest-row guess).
+      2. A row exists with resolution='UNATTRIBUTABLE' -> return None WITHOUT
+         falling back to the legacy inference (an explicit "no exact link could be
+         established" verdict must never be second-guessed by the very inference
+         it was created to replace).
+      3. No row at all -> the position predates the table (neither the live hook
+         nor the backfill has covered it yet); fall back to the legacy
+         (condition_id, direction) inference, logging the fallback.
+    """
+    pid = str(position_id or "").strip()
+    if pid:
+        row = _position_decision_attribution_row(world_conn, pid)
+        if row is not None:
+            resolution, cert_hash = row
+            if resolution == "UNATTRIBUTABLE":
+                logger.info(
+                    "cert_hash_resolution: position_id=%s explicitly UNATTRIBUTABLE "
+                    "in position_decision_attribution — skipping grading, no fallback",
+                    pid,
+                )
+                return None
+            h = str(cert_hash or "").strip()
+            return h or None
+        logger.info(
+            "cert_hash_resolution: position_id=%s has no position_decision_attribution "
+            "row (predates the LX-E migration/backfill) — using legacy "
+            "(condition_id, direction) inference",
+            pid,
+        )
+    return _legacy_resolve_cert_hash_for_position(world_conn, condition_id, direction)
+
+
+def _legacy_resolve_cert_hash_for_position(
     world_conn: sqlite3.Connection,
     condition_id: Optional[str],
     direction: Optional[str],
 ) -> Optional[str]:
     """Bridge a position_current row to its decision-q certificate hash.
+
+    LX-E packet (2026-07-13): retained ONLY as the fallback for positions with no
+    ``position_decision_attribution`` row (i.e. predating that table's existence
+    and the one-time backfill). New positions never reach this path — see
+    ``_resolve_cert_hash_for_position``.
 
     The grader iterates ``trades.position_current`` (the dollar ledger, #416),
     which carries NO certificate hash. The immutable decision-q lives on the
@@ -640,6 +740,46 @@ def _resolve_cert_hash_for_position(
         return None
     h = str(row[0] or "").strip()
     return h or None
+
+
+def _resolve_audit_fees_for_position(
+    world_conn: sqlite3.Connection,
+    condition_id: Optional[str],
+    direction: Optional[str],
+) -> Optional[float]:
+    """Fees for the world_grade_pnl_usd computation (LX-E packet, 2026-07-13).
+
+    fees is not stored on trades.position_current at all. Reuses the SAME
+    (condition_id, direction) -> latest FILLED edli_live_profit_audit row lookup
+    the removed writeback_settlement_pnl_to_audit used to source avg_fill_price/
+    filled_size/fees — an ancillary dollar figure, not a certificate-identity
+    join, so its (condition_id, direction) precision is unchanged by the LX-E
+    certificate-attribution rehome. Returns None when unresolvable (never
+    fabricated; world_grade_pnl_usd is then left None too).
+    """
+    cid = str(condition_id or "").strip()
+    dirn = str(direction or "").strip()
+    if not cid or not dirn or not _table_exists(world_conn, "edli_live_profit_audit"):
+        return None
+    row = world_conn.execute(
+        """
+        SELECT fees
+        FROM edli_live_profit_audit
+        WHERE condition_id = ?
+          AND direction = ?
+          AND filled_size > 0
+          AND avg_fill_price IS NOT NULL
+        ORDER BY created_at DESC
+        LIMIT 1
+        """,
+        (cid, dirn),
+    ).fetchone()
+    if row is None or row[0] is None:
+        return None
+    try:
+        return float(row[0])
+    except (TypeError, ValueError):
+        return None
 
 
 def _resolve_decision_q_from_certificate(
@@ -926,16 +1066,25 @@ def load_settled_positions(world_conn: sqlite3.Connection) -> list[SkillGrade]:
         filled_size = shares
         q_live = None       # not stored on position_current — cert is the authority
         q_lcb_5pct = None
-        # Decision-q PROVENANCE bridge (2026-06-21, lifecycle-alpha): position_current
-        # carries NO certificate hash. The immutable decision-q lives on the
-        # ActionableTradeCertificate reached via the matching edli_live_profit_audit
-        # row's ``expected_edge_source_certificate_hash`` (same world.db, single
-        # world_conn — INV-37). Bridge by (condition_id, direction); when no audit
-        # row / cert exists the hash is None and the position grades
-        # UNATTRIBUTABLE_Q_MISSING below (never time-reconstructed).
+        # Decision-q PROVENANCE bridge (LX-E packet, 2026-07-13): reads the
+        # permanent trades.position_decision_attribution link FIRST (written at
+        # ENTRY command creation, or backfilled via an EXACT command-id join);
+        # falls back to the legacy (condition_id, direction) inference ONLY for
+        # positions with no attribution row at all. When no hash resolves (either
+        # explicitly UNATTRIBUTABLE or genuinely absent from the legacy audit
+        # bridge) the position grades UNATTRIBUTABLE_Q_MISSING below (never
+        # time-reconstructed, never guessed).
         expected_edge_source_certificate_hash = _resolve_cert_hash_for_position(
-            world_conn, condition_id, direction
+            world_conn, position_id, condition_id, direction
         )
+        # world_grade_pnl_usd input (LX-E packet, 2026-07-13): fees are not stored
+        # on position_current at all — resolved from the SAME (condition_id,
+        # direction) edli_live_profit_audit lookup the pre-LX-E writeback used.
+        # This is an ancillary dollar figure, not a certificate-identity join, so
+        # reusing the existing ambiguous bridge here is unaffected by the
+        # certificate-attribution rehome above; ``None`` when unresolvable (the
+        # world-grade P&L is then left ``None`` too — never fabricated).
+        fees = _resolve_audit_fees_for_position(world_conn, condition_id, direction)
         # BLOCKER 2 fix (2026-06-21): the decision-time bound MUST be the IMMUTABLE
         # entry timestamp from position_events (MIN occurred_at over the entry events),
         # NOT position_current.updated_at — updated_at is mutable projection time that a
@@ -1048,91 +1197,27 @@ def load_settled_positions(world_conn: sqlite3.Connection) -> list[SkillGrade]:
                 f"forecast_posteriors:{fresh['posterior_id']}" if fresh else None
             ),
             fresher_cycle_existed_at_decision=fresher_existed,
+            fees=fees,
+            filled_size=float(filled_size) if filled_size is not None else None,
         )
         out.append(grade)
 
     return out
 
 
-def writeback_settlement_pnl_to_audit(world_conn: sqlite3.Connection) -> int:
-    """W2 (Phase 3, 2026-06-20): write settlement-derived pnl onto audit rows.
-
-    The realized-profit loop previously left ``pnl_usd`` / ``settlement_outcome``
-    NULL on every ``edli_live_profit_audit`` row (1345/1345 on the live DB): no
-    event in PROFIT_AUDIT_TRIGGER_EVENTS ever carries market-settlement pnl (the
-    only settlement-ish member, ``Reconciled``, is venue-order existence
-    reconciliation). This closes that wire from the settlement side.
-
-    For every FILLED audit row on a market with a VERIFIED ``settlement_outcomes``
-    row, the settled payoff is taken from the SAME ``grade_receipt`` truth function
-    the grader uses (``settled_payoff = 1.0 if won else 0.0``), and::
-
-        pnl_usd = (settled_payoff - avg_fill_price) * filled_size - fees
-
-    ``pnl_usd`` is therefore derived from settlement payoff ONLY — never from a
-    market price or win-rate (operator settlement-only-truth law). UNVERIFIED /
-    absent settlements are skipped (never fabricated). The audit table is in the
-    WORLD MAIN schema, so this UPDATE runs on the single ``world_conn`` (INV-37:
-    no independent connection, no cross-DB write). Returns the row count written.
-
-    Caller must have 'forecasts' ATTACHed (open_world_with_forecasts) and is
-    responsible for the enclosing SAVEPOINT/commit.
-    """
-    from src.contracts.graded_receipt import grade_receipt
-    from src.types.temperature import UnitMismatchError
-
-    market_meta = _load_market_meta(world_conn)
-    settlements, _settled_at = _load_settlements(world_conn)
-
-    written = 0
-    for (
-        audit_id, condition_id, direction, avg_fill_price, filled_size, fees,
-    ) in world_conn.execute(
-        """
-        SELECT audit_id, condition_id, direction, avg_fill_price, filled_size, fees
-        FROM edli_live_profit_audit
-        WHERE filled_size > 0
-          AND avg_fill_price IS NOT NULL
-          AND direction IS NOT NULL
-        """
-    ).fetchall():
-        meta = market_meta.get(condition_id)
-        if meta is None:
-            continue
-        key = (meta["city"], meta["target_date"], meta["metric"])
-        s = settlements.get(key)
-        if s is None:
-            continue  # no VERIFIED settlement — not gradeable, never fabricated
-
-        bin_obj = _bin_from_market_event(
-            meta["range_low"], meta["range_high"], s["settlement_unit"]
-        )
-        if bin_obj is None:
-            continue
-
-        class _S:
-            settlement_value = s["settlement_value"]
-            settlement_unit = s["settlement_unit"]
-
-        try:
-            graded = grade_receipt(bin_obj, direction, _S())
-        except (UnitMismatchError, ValueError):
-            continue
-
-        settled_payoff = 1.0 if graded.won else 0.0
-        fee_total = float(fees) if fees is not None else 0.0
-        pnl_usd = (settled_payoff - float(avg_fill_price)) * float(filled_size) - fee_total
-        settlement_outcome = "WON" if graded.won else "LOST"
-        world_conn.execute(
-            """
-            UPDATE edli_live_profit_audit
-            SET pnl_usd = ?, settlement_outcome = ?
-            WHERE audit_id = ?
-            """,
-            (pnl_usd, settlement_outcome, audit_id),
-        )
-        written += 1
-    return written
+# REMOVED (LX-E packet, 2026-07-13): writeback_settlement_pnl_to_audit used to
+# write settlement-derived pnl_usd / settlement_outcome onto edli_live_profit_audit
+# rows, in the SAME savepoint as the grading batch — a forbidden world-grade/
+# chain-money collapse (docs/rebuild/local_ledger_excision_2026-07-12.md Round-2
+# delta adjudication §(c): "stop the EDLI writeback at LX-T3"; also a
+# mixed-transaction hazard — a rejected edli_live_profit_audit write under the
+# future column-write firewall would roll back valid settlement-attribution work
+# in the same savepoint). The SAME formula now computes
+# SkillGrade.world_grade_pnl_usd (a hold-to-settlement world-grade label, named as
+# such) directly in grade_position/load_settled_positions, persisted onto
+# settlement_attribution.world_grade_pnl_usd by persist_grade instead.
+# edli_live_profit_audit.pnl_usd stops being written; the column stays physically
+# present (frozen — physical drop is R7).
 
 
 def _held_q_from_in_bin(direction: str, in_bin_yes: Optional[float]) -> Optional[float]:
@@ -1167,16 +1252,33 @@ def persist_grade(
     *,
     now_utc: Optional[datetime] = None,
 ) -> bool:
-    """Write (idempotent UPSERT) one SkillGrade row. Returns True if written.
+    """Write ONE SkillGrade row. Returns True if written.
 
-    Idempotent per position via UNIQUE(position_id): an existing row is
-    re-graded in place (ON CONFLICT DO UPDATE) so a re-run with newer settlement
-    truth refreshes the verdict without duplicating. The sole writer.
+    Idempotent-with-supersession per position via UNIQUE(position_id): a re-grade
+    of an existing position_id archives the CURRENT row's full pre-image into
+    settlement_attribution_supersessions (append-only, never updated) BEFORE the
+    ON CONFLICT DO UPDATE overwrites it (LX-E packet, 2026-07-13 — "mutable
+    learning receipts" adjudication: a rerun must never silently destroy the
+    corpus that produced a historical model decision). settlement_attribution
+    itself keeps its existing single-row-per-position read contract; the prior
+    version is never lost, only archived. The sole writer.
     """
+    from src.state.append_only_supersession import archive_row_before_overwrite
+
     if now_utc is None:
         now_utc = datetime.now(tz=timezone.utc)
     graded_at = now_utc.isoformat()
     attribution_id = str(uuid.uuid4())
+
+    archive_row_before_overwrite(
+        world_conn,
+        table="settlement_attribution",
+        key_column="position_id",
+        key_value=grade.position_id,
+        supersessions_table="settlement_attribution_supersessions",
+        new_id=attribution_id,
+        now_iso=graded_at,
+    )
 
     world_conn.execute(
         """
@@ -1189,12 +1291,13 @@ def persist_grade(
             fresh_posterior_id, fresh_posterior_computed_at,
             fresh_q_supports_position, fresh_q_in_bin, fresh_input_identity,
             fresh_input_age_hours, settled_value, settlement_unit, settled_in_bin,
-            settled_at, freshness_budget_hours, fresher_cycle_existed_at_decision,
+            settled_at, world_grade_pnl_usd, freshness_budget_hours,
+            fresher_cycle_existed_at_decision,
             large_factor_threshold, derivation_note, rationale, graded_at,
             schema_version
         ) VALUES (
             ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-            ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+            ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
         )
         ON CONFLICT(position_id) DO UPDATE SET
             category = excluded.category,
@@ -1215,6 +1318,7 @@ def persist_grade(
             settled_value = excluded.settled_value,
             settled_in_bin = excluded.settled_in_bin,
             settled_at = excluded.settled_at,
+            world_grade_pnl_usd = excluded.world_grade_pnl_usd,
             fresher_cycle_existed_at_decision = excluded.fresher_cycle_existed_at_decision,
             rationale = excluded.rationale,
             graded_at = excluded.graded_at
@@ -1231,7 +1335,8 @@ def persist_grade(
             (None if grade.fresh_q_supports_position is None else int(grade.fresh_q_supports_position)),
             grade.fresh_q_in_bin, grade.fresh_input_identity,
             grade.fresh_input_age_hours, grade.settled_value, grade.settlement_unit,
-            int(grade.settled_in_bin), grade.settled_at, grade.freshness_budget_hours,
+            int(grade.settled_in_bin), grade.settled_at, grade.world_grade_pnl_usd,
+            grade.freshness_budget_hours,
             (None if grade.fresher_cycle_existed_at_decision is None
              else int(grade.fresher_cycle_existed_at_decision)),
             grade.large_factor_threshold, grade.derivation_note, grade.rationale,
@@ -1362,7 +1467,6 @@ def _run_with_conn(
     skipped = 0
     by_category: dict[str, int] = {}
 
-    pnl_written = 0
     world_conn.execute("SAVEPOINT skill_attr_batch")
     try:
         for g in grades:
@@ -1372,10 +1476,6 @@ def _run_with_conn(
             persist_grade(world_conn, g, now_utc=now_utc)
             graded += 1
             by_category[g.category] = by_category.get(g.category, 0) + 1
-        # W2 (2026-06-20): settlement->audit pnl writeback runs in the same batch
-        # so a graded settlement and its audit-row pnl are committed atomically.
-        # Always runs (independent of only_new) so re-grades refresh pnl in place.
-        pnl_written = writeback_settlement_pnl_to_audit(world_conn)
         # Exit-timing attribution (2026-06-22, lifecycle consult): the orthogonal
         # exit-decision grade. Runs in the SAME batch so the entry-skill row and its
         # exit-timing row commit atomically. Reads this batch's freshly-written
@@ -1414,7 +1514,6 @@ def _run_with_conn(
         "skill_win_rate": rate.skill_win_rate,
         "naive_win_rate": rate.naive_win_rate,
         "skill_denominator": rate.skill_denominator,
-        "settlement_pnl_written": pnl_written,
     }
 
 

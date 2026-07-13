@@ -95,6 +95,10 @@ EXPECTED_RUNTIME_TRADE_TABLES = frozenset({
     # init_schema_trade_only via src/state/truth_epoch.py). LEGACY default,
     # trade-DB only.
     "truth_epoch",
+    # LX-E packet 2026-07-13: position/command -> decision-certificate attribution
+    # (ensure_table wired into init_schema_trade_only via
+    # position_decision_attribution_schema.py).
+    "position_decision_attribution",
     "position_current",
     "position_events",
     "position_lots",

@@ -955,3 +955,97 @@ def _conn() -> sqlite3.Connection:
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     return conn
+
+
+# ---------------------------------------------------------------------------
+# LX-E (2026-07-13): append-only supersession for insert_record's UPSERT
+# ---------------------------------------------------------------------------
+#
+# docs/rebuild/local_ledger_excision_2026-07-12.md Round-2 delta adjudication
+# ("mutable learning receipts"): insert_record's ON CONFLICT(audit_id) DO UPDATE
+# can silently replace an earlier analytical result. Before any such overwrite the
+# CURRENT row's full pre-image is archived into
+# edli_live_profit_audit_supersessions (append-only, never updated).
+
+def _base_insert_record_kwargs(**overrides) -> dict:
+    kwargs = dict(
+        event_id="event-1",
+        aggregate_id="agg-supersede-1",
+        final_intent_id="intent-1",
+        execution_command_id="command-1",
+        condition_id="condition-1",
+        token_id="token-1",
+        order_lifecycle_state="CONFIRMED",
+    )
+    kwargs.update(overrides)
+    return kwargs
+
+
+def test_rerun_with_same_natural_key_archives_prior_row_before_overwrite():
+    """A second insert_record call for the SAME (aggregate_id, execution_command_id,
+    order_lifecycle_state) triple overwrites the current row (unchanged read
+    contract) but archives the PRIOR row's full content first — never silently lost."""
+    conn = _conn()
+    ledger = LiveProfitAuditLedger(conn)
+
+    audit_id_1 = ledger.insert_record(
+        **_base_insert_record_kwargs(realized_edge=0.01, pnl_usd=None)
+    )
+    audit_id_2 = ledger.insert_record(
+        **_base_insert_record_kwargs(realized_edge=0.02, pnl_usd=5.0)
+    )
+    assert audit_id_1 == audit_id_2, "same natural key -> same stable audit_id"
+
+    # Current table: single row, holding the LATEST values (unchanged read contract).
+    current = conn.execute(
+        "SELECT realized_edge, pnl_usd FROM edli_live_profit_audit WHERE audit_id = ?",
+        (audit_id_1,),
+    ).fetchone()
+    assert current["realized_edge"] == pytest.approx(0.02)
+    assert current["pnl_usd"] == pytest.approx(5.0)
+
+    # Supersession archive: exactly ONE row, carrying the FIRST version's content.
+    rows = conn.execute(
+        "SELECT audit_id, prior_row_json, superseded_by FROM "
+        "edli_live_profit_audit_supersessions WHERE audit_id = ?",
+        (audit_id_1,),
+    ).fetchall()
+    assert len(rows) == 1
+    prior = json.loads(rows[0]["prior_row_json"])
+    assert prior["realized_edge"] == pytest.approx(0.01)
+    assert prior["pnl_usd"] is None
+    assert rows[0]["superseded_by"] == audit_id_1
+
+
+def test_first_insert_never_archived():
+    """A first-time insert_record call (no existing row) is not a supersession —
+    the archive table stays empty."""
+    conn = _conn()
+    ledger = LiveProfitAuditLedger(conn)
+    ledger.insert_record(**_base_insert_record_kwargs())
+    n = conn.execute(
+        "SELECT COUNT(*) FROM edli_live_profit_audit_supersessions"
+    ).fetchone()[0]
+    assert n == 0
+
+
+def test_three_reruns_produce_two_supersession_rows_never_overwritten():
+    """N reruns of the same natural key produce N-1 immutable supersession rows
+    (each superseded version permanently retained, never overwritten in place)."""
+    conn = _conn()
+    ledger = LiveProfitAuditLedger(conn)
+    for i, edge in enumerate((0.01, 0.02, 0.03)):
+        ledger.insert_record(
+            **_base_insert_record_kwargs(
+                realized_edge=edge,
+                created_at=f"2026-07-13T00:00:0{i}Z",
+            )
+        )
+
+    rows = conn.execute(
+        "SELECT prior_row_json FROM edli_live_profit_audit_supersessions "
+        "ORDER BY superseded_at"
+    ).fetchall()
+    assert len(rows) == 2
+    archived_edges = [json.loads(r["prior_row_json"])["realized_edge"] for r in rows]
+    assert archived_edges == [pytest.approx(0.01), pytest.approx(0.02)]

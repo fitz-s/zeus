@@ -221,6 +221,12 @@ _BASELINE_PER_FILE: dict[str, int] = {
     # 2026-06-03: no_trade_regret_events_schema adds 1 site (ALTER TABLE
     # column/DDL from closed internal constants).
     "src/state/schema/no_trade_regret_events_schema.py": 1,
+    # LX-E packet (2026-07-13): the category-CHECK rebuild's copy step now uses
+    # an explicit common-column list (never SELECT *, to survive a column added
+    # since the table was created landing at a different physical position on
+    # an ALTER-upgraded old table) — 1 f-string INSERT/SELECT over a column list
+    # built from PRAGMA table_info(), no user input.
+    "src/state/schema/settlement_attribution_schema.py": 1,
     # 2 PRAGMA table_info() interpolations (with optional attached-DB name).
     # Both `table` and `attached` are internal identifiers passed by callers
     # in src/calibration/store.py — no user input. Sites were extracted out
@@ -237,6 +243,13 @@ _BASELINE_PER_FILE: dict[str, int] = {
     # internal table names `venue_order_facts` and `venue_trade_facts`.
     "src/state/venue_command_repo.py": 6,
     "src/state/ws_poll_reaction.py": 1,
+    # LX-E packet (2026-07-13): shared archive-before-overwrite helper for
+    # append-only learning receipts (edli_live_profit_audit_supersessions /
+    # settlement_attribution_supersessions). 2 f-string sites: the SELECT * FROM
+    # <table> WHERE <key_column> and the INSERT INTO <supersessions_table>
+    # (<key_column>, ...) — table/key_column are fixed code-controlled constants
+    # passed by the two internal callers, never user input.
+    "src/state/append_only_supersession.py": 2,
     # Observability modules added pre-P2 — all interpolate internal column/table
     # names from closed module-level constants; no user-controlled input.
     "src/observability/calibration_serving_status.py": 4,

@@ -71,6 +71,33 @@ CREATE INDEX IF NOT EXISTS idx_edli_live_profit_audit_promotion
     ON edli_live_profit_audit(promotion_eligible, order_lifecycle_state, created_at)
 """
 
+# LX-E packet (2026-07-13, docs/rebuild/local_ledger_excision_2026-07-12.md Round-2
+# delta adjudication "mutable learning receipts"): insert_record's
+# ON CONFLICT(audit_id) DO UPDATE can silently replace an earlier analytical result,
+# destroying the precise corpus that produced a historical model decision. Before
+# any such overwrite, the CURRENT row's full pre-image is archived here as a JSON
+# snapshot (a whole-row copy, not a mirrored column set — the smaller schema
+# change: one generic table instead of duplicating every column definition).
+# edli_live_profit_audit itself stays the single-row-per-natural-key "current" view
+# (its read contract is unchanged — no downstream reader needs updating); this
+# table is the permanent, append-only, never-updated history of every version that
+# preceded it.
+CREATE_SUPERSESSIONS_SQL = """
+CREATE TABLE IF NOT EXISTS edli_live_profit_audit_supersessions (
+    supersession_id TEXT NOT NULL PRIMARY KEY,
+    audit_id TEXT NOT NULL,
+    prior_row_json TEXT NOT NULL,
+    superseded_by TEXT,
+    superseded_at TEXT NOT NULL,
+    schema_version INTEGER NOT NULL CHECK (schema_version >= 1)
+)
+"""
+
+CREATE_SUPERSESSIONS_AUDIT_INDEX_SQL = """
+CREATE INDEX IF NOT EXISTS idx_edli_live_profit_audit_supersessions_audit
+    ON edli_live_profit_audit_supersessions(audit_id, superseded_at)
+"""
+
 
 _COLUMN_MIGRATIONS = {
     "expected_fee": "ALTER TABLE edli_live_profit_audit ADD COLUMN expected_fee REAL",
@@ -99,3 +126,5 @@ def ensure_table(conn: sqlite3.Connection) -> None:
     conn.execute(CREATE_AGGREGATE_INDEX_SQL)
     conn.execute(CREATE_STATE_INDEX_SQL)
     conn.execute(CREATE_PROMOTION_INDEX_SQL)
+    conn.execute(CREATE_SUPERSESSIONS_SQL)
+    conn.execute(CREATE_SUPERSESSIONS_AUDIT_INDEX_SQL)

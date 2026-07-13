@@ -233,6 +233,23 @@ class LiveProfitAuditLedger:
                 normalized["order_lifecycle_state"],
             )
         )
+        # LX-E packet (2026-07-13, docs/rebuild/local_ledger_excision_2026-07-12.md
+        # Round-2 delta adjudication "mutable learning receipts"): archive the
+        # CURRENT row's full pre-image before the ON CONFLICT DO UPDATE below can
+        # overwrite it — a rerun must never silently destroy the corpus that
+        # produced a historical model decision. edli_live_profit_audit itself
+        # keeps its existing single-row-per-natural-key read contract.
+        from src.state.append_only_supersession import archive_row_before_overwrite
+
+        archive_row_before_overwrite(
+            self.conn,
+            table="edli_live_profit_audit",
+            key_column="audit_id",
+            key_value=audit_id,
+            supersessions_table="edli_live_profit_audit_supersessions",
+            new_id=audit_id,
+            now_iso=created_at,
+        )
         self.conn.execute(
             """
             INSERT INTO edli_live_profit_audit (

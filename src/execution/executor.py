@@ -6455,6 +6455,15 @@ def _live_order(
                 expected_min_tick_size=intent.executable_snapshot_min_tick_size,
                 expected_min_order_size=intent.executable_snapshot_min_order_size,
                 expected_neg_risk=intent.executable_snapshot_neg_risk,
+                # LX-E packet (2026-07-13): the actionable certificate gate above
+                # (_entry_actionable_certificate_payload_and_component) already
+                # required this hash to be non-empty and VERIFIED before this point
+                # is reachable — the permanent attribution fact is recorded in the
+                # SAME transaction as the command insert.
+                decision_certificate_hash=(
+                    str(getattr(intent, "actionable_certificate_hash", None) or "").strip()
+                    or None
+                ),
             )
             append_event(
                 conn,

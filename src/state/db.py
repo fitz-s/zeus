@@ -3518,6 +3518,17 @@ def init_schema(
     from src.state.schema.settlement_attribution_schema import ensure_table as _ensure_settlement_attribution_table
     _ensure_settlement_attribution_table(conn)
 
+    # NOTE: position_decision_attribution (LX-E packet, trade_class) is
+    # intentionally NOT created here. init_schema() doubles as zeus-world.db's
+    # production initializer (init_schema_world_only is a plain alias) — unlike
+    # venue_commands/position_current (pre-existing legacy ghost shells declared
+    # legacy_archived on world in the registry), this is a brand-new table with no
+    # legitimate reason to exist on world.db. It is created eagerly by
+    # init_schema_trade_only (the real trade-DB initializer) and lazily/idempotently
+    # by src.state.venue_command_repo.record_position_decision_attribution on first
+    # write, which covers test fixtures that reuse init_schema() as a combined
+    # single-file trade-ish DB.
+
     # Exit-timing grade ledger (2026-06-22, lifecycle consult): the orthogonal
     # exit-decision attribution axis (exit_alpha vs counterfactual hold). Sole
     # writer = src/analysis/exit_timing_attribution.py.
@@ -5210,6 +5221,8 @@ _TRADE_CLASS_TABLES: frozenset[str] = frozenset({
     # owner-local ReviewWorkItem table + its sibling exposure-fact table.
     "review_work_items",
     "entry_exposure_obligations",
+    # LX-E packet (2026-07-13): position/command -> decision-certificate attribution.
+    "position_decision_attribution",
     "execution_fact",
     "execution_feasibility_evidence",
     "executable_market_snapshots",
@@ -6199,6 +6212,11 @@ def init_schema_trade_only(conn: sqlite3.Connection) -> None:
     # stay independent per the adjudication).
     from src.state.schema.payout_observations_schema import ensure_table as _ensure_payout_observations_table
     _ensure_payout_observations_table(conn)
+    # LX-E packet (2026-07-13): position/command -> decision-certificate attribution,
+    # written at ENTRY command creation (src/state/venue_command_repo.py
+    # insert_command). See init_schema's sibling call for the full authority note.
+    from src.state.schema.position_decision_attribution_schema import ensure_table as _ensure_position_decision_attribution_table
+    _ensure_position_decision_attribution_table(conn)
     try:
         conn.execute("ALTER TABLE trade_decisions ADD COLUMN env TEXT NOT NULL DEFAULT 'live';")
     except sqlite3.OperationalError:

@@ -1424,6 +1424,23 @@ tables:
       Event-bound EDLI live realized-edge audit projection. Used by promotion
       gates to block scaleout when canary lifecycle or economics are not proven.
 
+  - name: edli_live_profit_audit_supersessions
+    db: world
+    schema_class: world_class
+    schema_version_owner: null
+    created_by: "src/state/schema/edli_live_profit_audit_schema.py (LX-E packet, 2026-07-13)"
+    pk_col: supersession_id
+    notes: >
+      Append-only, never-updated archive of every edli_live_profit_audit row
+      version superseded by a later insert_record ON CONFLICT DO UPDATE
+      (docs/rebuild/local_ledger_excision_2026-07-12.md Round-2 delta §"mutable
+      learning receipts"). One row per superseded version, storing the FULL
+      pre-image as prior_row_json (a whole-row JSON snapshot, not a mirrored
+      column set — the smaller schema change). edli_live_profit_audit itself
+      keeps its existing single-row-per-natural-key read contract; this table is
+      the permanent proof that a rerun never silently destroyed the corpus that
+      produced a historical model decision.
+
   - name: settlement_attribution
     db: world
     schema_class: world_class
@@ -1461,6 +1478,28 @@ tables:
       as settlement_guard_report). Append/upsert-only audit
       evidence; never a venue command, order truth, settlement truth, or
       calibration training input.
+      LX-E packet (2026-07-13): gained world_grade_pnl_usd — a hold-to-settlement
+      world-grade P&L label derived from settlement payoff + fill economics
+      (NEVER actual chain-realized wallet P&L; the name says what it is). Replaces
+      the removed writeback_settlement_pnl_to_audit, which used to write this
+      value into edli_live_profit_audit.pnl_usd inside the SAME savepoint as
+      grading — a forbidden world-grade/chain-money collapse per the adjudication.
+      persist_grade now archives the prior row into
+      settlement_attribution_supersessions (append-only) before any re-grade
+      UPDATE — see that table's entry.
+
+  - name: settlement_attribution_supersessions
+    db: world
+    schema_class: world_class
+    schema_version_owner: null
+    created_by: "src/state/schema/settlement_attribution_schema.py (LX-E packet, 2026-07-13)"
+    pk_col: supersession_id
+    notes: >
+      Append-only, never-updated archive of every settlement_attribution row
+      version superseded by a later persist_grade ON CONFLICT DO UPDATE
+      (docs/rebuild/local_ledger_excision_2026-07-12.md Round-2 delta §"mutable
+      learning receipts"). Same shape/rationale as
+      edli_live_profit_audit_supersessions — see that table's notes.
 
   - name: exit_timing_attribution
     db: world
@@ -1577,6 +1616,27 @@ tables:
     cutover_note: >
       Re-owned trade per 2026-05-17 audit. Writer:
       src/state/projection.py:103.
+
+  - name: position_decision_attribution
+    db: trade
+    schema_class: trade_class
+    schema_version_owner: null
+    created_by: "src/state/schema/position_decision_attribution_schema.py (LX-E packet, 2026-07-13)"
+    pk_col: "[attribution_id]"
+    notes: >
+      Permanent position/command -> decision_certificate_hash link, written at ENTRY
+      command creation (src/state/venue_command_repo.py insert_command). Rehomes the
+      certificate attribution OFF the settlement-time (condition_id, direction) ->
+      latest edli_live_profit_audit row inference (docs/rebuild/local_ledger_excision_
+      2026-07-12.md Round-2 delta §(c) — 14 (condition,direction) pairs map to >1
+      distinct certificate hash there; "latest row" was a guess). Append-only:
+      UNIQUE(position_id) + ON CONFLICT DO NOTHING, never overwritten. Backfilled by
+      scripts/backfill_position_decision_attribution.py for pre-packet positions using
+      an EXACT command_id -> edli_live_profit_audit.execution_command_id join only;
+      ambiguous/absent exact links are marked resolution='UNATTRIBUTABLE' explicitly,
+      never latest-row guessed. src/analysis/settlement_skill_attribution.py reads this
+      table FIRST, falling back to the legacy inference only for positions with no row
+      at all (predating both the live hook and the backfill).
 
   - name: position_events
     db: trade

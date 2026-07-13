@@ -804,6 +804,46 @@ def insert_submission_envelope(
     return envelope_id_value
 
 
+def record_position_decision_attribution(
+    conn: sqlite3.Connection,
+    *,
+    position_id: str,
+    command_id: str,
+    decision_certificate_hash: str,
+    intent_kind: str,
+    created_at: str,
+) -> None:
+    """Append the permanent position -> decision-certificate-hash fact.
+
+    LX-E packet (docs/rebuild/local_ledger_excision_2026-07-12.md Round-2 delta
+    §(c)): the certificate link that used to be INFERRED at settlement time from
+    the (condition_id, direction) -> latest edli_live_profit_audit row (14 such
+    pairs are ambiguous) is instead recorded HERE, at command creation, when the
+    real decision certificate hash is known with certainty.
+
+    Append-only: UNIQUE(position_id) + ON CONFLICT DO NOTHING — a position's first
+    attribution fact is never overwritten by a later call. Idempotent no-op on a
+    retried/duplicate call for the same position. ``ensure_table`` is called here
+    (not only at DB init) so this self-heals on any trade-shaped connection that
+    predates the LX-E migration (e.g. test fixtures built via ``init_schema()``
+    rather than ``init_schema_trade_only``).
+    """
+    from src.state.schema.position_decision_attribution_schema import ensure_table
+
+    ensure_table(conn)
+    conn.execute(
+        """
+        INSERT INTO position_decision_attribution (
+            attribution_id, position_id, command_id, decision_certificate_hash,
+            resolution, resolution_reason, source, intent_kind, created_at,
+            schema_version
+        ) VALUES (?, ?, ?, ?, 'ATTRIBUTED', NULL, 'LIVE_DECISION', ?, ?, 1)
+        ON CONFLICT(position_id) DO NOTHING
+        """,
+        (_new_id(), position_id, command_id, decision_certificate_hash, intent_kind, created_at),
+    )
+
+
 @capability("venue_command_write", lease=False)
 @protects("INV-21", "INV-04")
 def insert_command(
@@ -829,6 +869,7 @@ def insert_command(
     expected_neg_risk: bool | None = None,
     venue_order_id: str | None = None,
     reason: str | None = None,
+    decision_certificate_hash: str | None = None,
 ) -> None:
     """INSERT a new venue_commands row in INTENT_CREATED state.
 
@@ -846,6 +887,14 @@ def insert_command(
     Required for live-mode ENTRY commands at this repo boundary; nullable only for
     non-entry commands, offline fixtures/replay, and direct recovery/backfill
     writes that intentionally bypass this function. Never re-stamped after insert.
+
+    decision_certificate_hash (LX-E packet, 2026-07-13): when given, appends the
+    permanent position -> decision_certificate_hash fact to
+    position_decision_attribution in the SAME transaction as this command insert
+    (record_position_decision_attribution). Only ENTRY commands carry a resolvable
+    ActionableTradeCertificate hash at this repo boundary; EXIT/other commands pass
+    None (no row is written for those — attribution is a property of the
+    position's entry decision, not every command against it).
     """
     # MAJOR-1: enum-grammar validation at the repo seam. Imported lazily so
     # this module stays import-light and the type module doesn't have to
@@ -965,6 +1014,15 @@ def insert_command(
                 "reason": reason,
             },
         )
+        if decision_certificate_hash:
+            record_position_decision_attribution(
+                conn,
+                position_id=position_id,
+                command_id=command_id,
+                decision_certificate_hash=decision_certificate_hash,
+                intent_kind=intent_kind,
+                created_at=created_at,
+            )
 
 
 def _assert_envelope_gate(

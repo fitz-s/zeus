@@ -82,6 +82,13 @@ CREATE TABLE IF NOT EXISTS settlement_attribution (
     settlement_unit TEXT,
     settled_in_bin INTEGER CHECK (settled_in_bin IN (0, 1)),
     settled_at TEXT,
+    -- LX-E packet (2026-07-13): a hold-to-settlement world-grade P&L label, NEVER
+    -- actual chain-realized wallet P&L (the name says what it is). Replaces the
+    -- removed writeback_settlement_pnl_to_audit, which used to write this same
+    -- value into edli_live_profit_audit.pnl_usd — a forbidden world-grade/
+    -- chain-money collapse. NULL when the fee/economics inputs needed to compute
+    -- it are unresolvable (never fabricated).
+    world_grade_pnl_usd REAL,
     -- Staleness provenance.
     freshness_budget_hours REAL,
     fresher_cycle_existed_at_decision INTEGER CHECK (fresher_cycle_existed_at_decision IN (0, 1)),
@@ -110,11 +117,35 @@ CREATE INDEX IF NOT EXISTS idx_settlement_attribution_settled
     ON settlement_attribution(settled_at)
 """
 
+# LX-E packet (2026-07-13, docs/rebuild/local_ledger_excision_2026-07-12.md Round-2
+# delta adjudication "mutable learning receipts"): persist_grade's
+# ON CONFLICT(position_id) DO UPDATE can silently replace an earlier analytical
+# result. Before any such overwrite, the CURRENT row's full pre-image is archived
+# here as a JSON snapshot (whole-row copy — the smaller schema change, matching
+# edli_live_profit_audit_supersessions). settlement_attribution itself stays the
+# single-row-per-position "current" table (unchanged read contract for every
+# downstream script); this table is the permanent, append-only history.
+CREATE_SUPERSESSIONS_SQL = """
+CREATE TABLE IF NOT EXISTS settlement_attribution_supersessions (
+    supersession_id TEXT NOT NULL PRIMARY KEY,
+    position_id TEXT NOT NULL,
+    prior_row_json TEXT NOT NULL,
+    superseded_by TEXT,
+    superseded_at TEXT NOT NULL,
+    schema_version INTEGER NOT NULL CHECK (schema_version >= 1)
+)
+"""
+
+CREATE_SUPERSESSIONS_POSITION_INDEX_SQL = """
+CREATE INDEX IF NOT EXISTS idx_settlement_attribution_supersessions_position
+    ON settlement_attribution_supersessions(position_id, superseded_at)
+"""
+
 
 # Forward-only column migrations (mirrors edli_live_profit_audit_schema pattern).
-# Empty today (the table is new); future column additions land here, never as a
-# table rebuild, so a live DB whose migration lagged a deploy is upgraded in place.
-_COLUMN_MIGRATIONS: dict[str, str] = {}
+_COLUMN_MIGRATIONS: dict[str, str] = {
+    "world_grade_pnl_usd": "ALTER TABLE settlement_attribution ADD COLUMN world_grade_pnl_usd REAL",
+}
 
 
 # Every category the current grader can emit. The DB-layer CHECK must accept all
@@ -135,8 +166,13 @@ def _rebuild_stale_category_check(conn: sqlite3.Connection) -> None:
 
     Idempotent: if every current category already appears in the live table SQL,
     returns immediately without touching the table (the hot path stays a no-op).
-    The rebuild copies all existing rows via a SELECT * so no column is dropped
-    and runs under a SAVEPOINT for atomicity.
+    The rebuild copies all existing rows by an EXPLICIT common column list (never
+    ``SELECT *``): a column added since this table was created (e.g.
+    ``world_grade_pnl_usd``, LX-E packet) may land at a different physical
+    position on an ALTER-upgraded old table than in the freshly-created ``_new``
+    table's CREATE-declared order, and a positional ``SELECT *`` copy would then
+    silently shift values into the wrong columns. Runs under a SAVEPOINT for
+    atomicity.
     """
     row = conn.execute(
         "SELECT sql FROM sqlite_master WHERE type='table' "
@@ -156,12 +192,24 @@ def _rebuild_stale_category_check(conn: sqlite3.Connection) -> None:
                 "settlement_attribution", "settlement_attribution_new", 1
             )
         )
+        old_cols = {
+            str(r[1]) for r in conn.execute(
+                "PRAGMA table_info(settlement_attribution)"
+            ).fetchall()
+        }
+        new_cols = [
+            str(r[1]) for r in conn.execute(
+                "PRAGMA table_info(settlement_attribution_new)"
+            ).fetchall()
+        ]
+        common_cols = [c for c in new_cols if c in old_cols]
+        col_list = ", ".join(common_cols)
         pre_count = conn.execute(
             "SELECT COUNT(*) FROM settlement_attribution"
         ).fetchone()[0]
         conn.execute(
-            "INSERT INTO settlement_attribution_new "
-            "SELECT * FROM settlement_attribution"
+            f"INSERT INTO settlement_attribution_new ({col_list}) "
+            f"SELECT {col_list} FROM settlement_attribution"
         )
         post_count = conn.execute(
             "SELECT COUNT(*) FROM settlement_attribution_new"
@@ -189,7 +237,11 @@ def ensure_table(conn: sqlite3.Connection) -> None:
     a guarded rebuild that upgrades a stale category CHECK in place.
     """
     conn.execute(CREATE_SETTLEMENT_ATTRIBUTION_SQL)
-    _rebuild_stale_category_check(conn)
+    # Column ALTERs run BEFORE the category-CHECK rebuild: the rebuild's
+    # `INSERT INTO new SELECT * FROM old` copies positionally, so an old table
+    # missing a column added since (e.g. world_grade_pnl_usd) must be upgraded to
+    # the CURRENT column set first, or the copy's column count would mismatch the
+    # freshly-created `_new` table (which always has every current column).
     existing = {
         str(row[1])
         for row in conn.execute(
@@ -199,6 +251,9 @@ def ensure_table(conn: sqlite3.Connection) -> None:
     for column, ddl in _COLUMN_MIGRATIONS.items():
         if column not in existing:
             conn.execute(ddl)
+    _rebuild_stale_category_check(conn)
     conn.execute(CREATE_CATEGORY_INDEX_SQL)
     conn.execute(CREATE_CITY_INDEX_SQL)
     conn.execute(CREATE_SETTLED_INDEX_SQL)
+    conn.execute(CREATE_SUPERSESSIONS_SQL)
+    conn.execute(CREATE_SUPERSESSIONS_POSITION_INDEX_SQL)

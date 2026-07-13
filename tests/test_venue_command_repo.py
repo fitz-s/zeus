@@ -47,7 +47,8 @@ def _insert(c, *, command_id="cmd-001", position_id="pos-001",
             decision_id="dec-001", idempotency_key="idem-001",
             intent_kind="ENTRY", market_id="mkt-001", token_id="tok-001",
             side="BUY", size=10.0, price=0.5,
-            created_at="2026-04-26T00:00:00Z", q_version=None):
+            created_at="2026-04-26T00:00:00Z", q_version=None,
+            decision_certificate_hash=None):
     from src.state.venue_command_repo import insert_command
     snapshot_id = _ensure_snapshot(c, token_id=token_id)
     insert_command(
@@ -72,7 +73,24 @@ def _insert(c, *, command_id="cmd-001", position_id="pos-001",
         price=price,
         created_at=created_at,
         q_version=q_version,
+        decision_certificate_hash=decision_certificate_hash,
     )
+
+
+def _attribution_row(c, position_id: str):
+    """position_decision_attribution row for position_id, or None.
+
+    The table is created lazily (record_position_decision_attribution calls
+    ensure_table on first write) — a fresh conn that never wrote an attribution
+    fact legitimately has no such table yet, which reads identically to "no row".
+    """
+    try:
+        return c.execute(
+            "SELECT * FROM position_decision_attribution WHERE position_id = ?",
+            (position_id,),
+        ).fetchone()
+    except sqlite3.OperationalError:
+        return None
 
 
 def _valid_execution_capability_payload() -> dict:
@@ -461,6 +479,102 @@ class TestInsertCommandAtomicWithIntentCreatedEvent:
             "SELECT command_id FROM venue_commands WHERE command_id = 'cmd-fail'"
         ).fetchone()
         assert row is None, "command row should have been rolled back"
+
+
+class TestPositionDecisionAttributionAppendHook:
+    """LX-E packet (2026-07-13): insert_command appends the permanent
+    position -> decision_certificate_hash fact atomically with the command."""
+
+    def test_hash_given_writes_attribution_row(self, conn):
+        _insert(
+            conn,
+            command_id="cmd-attr-1",
+            position_id="pos-attr-1",
+            idempotency_key="idem-attr-1",
+            decision_certificate_hash="cert-hash-1",
+        )
+        row = conn.execute(
+            """SELECT position_id, command_id, decision_certificate_hash, resolution,
+                      source, intent_kind
+               FROM position_decision_attribution WHERE position_id = 'pos-attr-1'"""
+        ).fetchone()
+        assert row is not None
+        assert row[0] == "pos-attr-1"
+        assert row[1] == "cmd-attr-1"
+        assert row[2] == "cert-hash-1"
+        assert row[3] == "ATTRIBUTED"
+        assert row[4] == "LIVE_DECISION"
+        assert row[5] == "ENTRY"
+
+    def test_hash_omitted_writes_no_row(self, conn):
+        """EXIT (and any command without a resolvable cert) writes no attribution
+        row — attribution is a property of the position's entry decision."""
+        _insert(
+            conn,
+            command_id="cmd-attr-2",
+            position_id="pos-attr-2",
+            idempotency_key="idem-attr-2",
+            intent_kind="EXIT",
+            decision_certificate_hash=None,
+        )
+        assert _attribution_row(conn, "pos-attr-2") is None
+
+    def test_second_command_never_overwrites_existing_attribution(self, conn):
+        """Append-only law: UNIQUE(position_id) + ON CONFLICT DO NOTHING — a second
+        insert_command call for the SAME position (e.g. a re-decision) never
+        overwrites the first-written certificate hash."""
+        _insert(
+            conn,
+            command_id="cmd-attr-3a",
+            position_id="pos-attr-3",
+            idempotency_key="idem-attr-3a",
+            decision_certificate_hash="cert-first",
+        )
+        _insert(
+            conn,
+            command_id="cmd-attr-3b",
+            position_id="pos-attr-3",
+            idempotency_key="idem-attr-3b",
+            decision_certificate_hash="cert-second",
+        )
+        rows = conn.execute(
+            "SELECT decision_certificate_hash FROM position_decision_attribution "
+            "WHERE position_id = 'pos-attr-3'"
+        ).fetchall()
+        assert len(rows) == 1
+        assert rows[0][0] == "cert-first"
+
+    def test_rollback_on_mid_transaction_failure_also_rolls_back_attribution(self, conn):
+        """The attribution write shares the command's SAVEPOINT — if the command
+        insert's transaction rolls back, the attribution row must not survive."""
+        from src.state.venue_command_repo import insert_command
+
+        conn.execute("DROP TABLE venue_command_events")
+        conn.commit()
+
+        with pytest.raises(Exception):
+            snapshot_id = _ensure_snapshot(conn, token_id="tok-attr-4")
+            insert_command(
+                conn,
+                command_id="cmd-attr-4",
+                snapshot_id=snapshot_id,
+                envelope_id=_ensure_envelope(conn, token_id="tok-attr-4", price=0.5, size=10.0),
+                position_id="pos-attr-4",
+                decision_id="dec-001",
+                idempotency_key="idem-attr-4",
+                intent_kind="ENTRY",
+                market_id="mkt-001",
+                token_id="tok-attr-4",
+                side="BUY",
+                size=10.0,
+                price=0.5,
+                created_at="2026-04-26T00:00:00Z",
+                decision_certificate_hash="cert-should-not-survive",
+            )
+
+        assert _attribution_row(conn, "pos-attr-4") is None, (
+            "attribution row should have been rolled back with the command"
+        )
 
 
 class TestInsertCommandQVersionStamp:

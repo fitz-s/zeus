@@ -291,6 +291,75 @@ def test_F1_idempotent_regrade() -> None:
     assert n == 1
 
 
+def test_F1b_regrade_archives_prior_row_byte_frozen() -> None:
+    """LX-E packet (2026-07-13): a re-grade with a DIFFERENT verdict for the SAME
+    position_id (e.g. newer settlement truth) still shows ONE current row (the
+    read contract is unchanged), but the CURRENT table's read is now the LATEST
+    canonical version — and the OLD version is archived byte-for-byte into
+    settlement_attribution_supersessions, never silently destroyed."""
+    conn = sqlite3.connect(":memory:")
+    init_schema(conn)
+    g1 = grade_position(
+        position_id="regrade-1",
+        direction="buy_no",
+        traded_bin_label="50-51°F",
+        won=True,
+        settled_in_bin=False,
+        settled_value=47.0,
+        settlement_unit="F",
+        settled_at="2026-06-12T20:00:00Z",
+        avg_fill_price=0.35,
+        q_live=0.72,
+        fresh_q_held=0.70,
+        fresher_cycle_existed_at_decision=False,
+    )
+    persist_grade(conn, g1, now_utc=datetime(2026, 6, 12, 21, 0, tzinfo=timezone.utc))
+
+    first_row = conn.execute(
+        "SELECT category, q_live FROM settlement_attribution WHERE position_id='regrade-1'"
+    ).fetchone()
+    assert first_row[0] == "SKILL_WIN"
+    assert first_row[1] == pytest.approx(0.72)
+
+    # A re-grade with a DIFFERENT fresh signal flips the category.
+    g2 = grade_position(
+        position_id="regrade-1",
+        direction="buy_no",
+        traded_bin_label="50-51°F",
+        won=True,
+        settled_in_bin=False,
+        settled_value=47.0,
+        settlement_unit="F",
+        settled_at="2026-06-12T20:00:00Z",
+        avg_fill_price=0.35,
+        q_live=0.72,
+        fresh_q_held=0.10,  # disagrees now -> LUCKY_WIN
+        fresher_cycle_existed_at_decision=False,
+    )
+    persist_grade(conn, g2, now_utc=datetime(2026, 6, 13, 9, 0, tzinfo=timezone.utc))
+
+    # Current table: exactly one row, holding the NEW (latest-canonical) verdict.
+    n = conn.execute(
+        "SELECT COUNT(*) FROM settlement_attribution WHERE position_id='regrade-1'"
+    ).fetchone()[0]
+    assert n == 1
+    current = conn.execute(
+        "SELECT category FROM settlement_attribution WHERE position_id='regrade-1'"
+    ).fetchone()
+    assert current[0] == "LUCKY_WIN"
+
+    # Supersession archive: exactly ONE row, byte-frozen with the OLD verdict.
+    archived = conn.execute(
+        "SELECT prior_row_json, superseded_at FROM settlement_attribution_supersessions "
+        "WHERE position_id='regrade-1'"
+    ).fetchall()
+    assert len(archived) == 1
+    prior = json.loads(archived[0][0])
+    assert prior["category"] == "SKILL_WIN"
+    assert prior["q_live"] == pytest.approx(0.72)
+    assert archived[0][1] == "2026-06-13T09:00:00+00:00"
+
+
 # ---------------------------------------------------------------------------
 # F2 — schema + registry green
 # ---------------------------------------------------------------------------
@@ -334,15 +403,16 @@ def _attach_forecasts(world_conn: sqlite3.Connection) -> sqlite3.Connection:
 
 
 def test_F3_end_to_end_db_grade(tmp_path) -> None:
-    """W3: grades trades.position_current (the real ledger) + W2: writes
-    settlement-derived pnl onto the audit row, through the real load path.
+    """W3: grades trades.position_current (the real ledger).
 
-    Phase 3 (2026-06-20): the grader now reads ``trades.position_current`` instead
-    of the ``edli_live_profit_audit`` filled-fill subset, and the same tick writes
-    ``pnl_usd``/``settlement_outcome`` back onto the audit row from the SAME
-    grade_receipt payoff. RED on revert: against the audit-subset grader the
-    settlement_attribution row is keyed ``aud-1`` (audit grain); against this fix it
-    is keyed ``pos-1`` (position_current grain), and pnl_usd is NULL on revert.
+    Phase 3 (2026-06-20): the grader reads ``trades.position_current`` instead of
+    the ``edli_live_profit_audit`` filled-fill subset. LX-E packet (2026-07-13):
+    the settlement-derived P&L label now lands on
+    ``settlement_attribution.world_grade_pnl_usd`` — NEVER written back onto
+    ``edli_live_profit_audit.pnl_usd`` (the removed writeback_settlement_pnl_to_audit
+    was a forbidden world-grade/chain-money collapse). RED on revert: against the
+    audit-subset grader the settlement_attribution row is keyed ``aud-1`` (audit
+    grain); against this fix it is keyed ``pos-1`` (position_current grain).
     """
     world_path = str(tmp_path / "world.db")
     fcst_path = str(tmp_path / "fcst.db")
@@ -396,7 +466,9 @@ def test_F3_end_to_end_db_grade(tmp_path) -> None:
         wconn, certificate_hash=f3_cert_hash, condition_id="cond-1",
         token_id="tok-1", q_live=0.72, q_lcb_5pct=0.60,
     )
-    # W2: an audit fill on the same market — pnl_usd starts NULL, gets written back.
+    # An audit fill on the same market — fees/avg_fill_price/filled_size feed
+    # world_grade_pnl_usd (LX-E: an ancillary dollar figure, not the certificate
+    # identity join). pnl_usd stays NULL forever — never written back.
     wconn.execute(
         """INSERT INTO edli_live_profit_audit
            (audit_id, event_id, aggregate_id, condition_id, token_id, direction,
@@ -418,83 +490,44 @@ def test_F3_end_to_end_db_grade(tmp_path) -> None:
     stats = run_settlement_skill_attribution(world_conn=wconn, only_new=True)
     assert stats["total_settled_positions"] == 1
     assert stats["graded"] == 1
+    assert "settlement_pnl_written" not in stats, (
+        "writeback_settlement_pnl_to_audit is removed — no such stat any more"
+    )
     # W3: the graded row is keyed by the position_current grain (pos-1), NOT the
     # audit fill (aud-1). On revert to the audit-subset grader this would be aud-1.
     row = wconn.execute(
-        "SELECT position_id, direction, won, category FROM settlement_attribution"
+        "SELECT position_id, direction, won, category, world_grade_pnl_usd "
+        "FROM settlement_attribution"
     ).fetchone()
     assert row[0] == "pos-1"
     assert row[1] == "buy_no"
     assert row[2] == 1  # won
     assert row[3] in ("SKILL_WIN", "LUCKY_WIN")
+    # world_grade_pnl_usd: buy_no WON -> payoff=1.0; (1.0 - 0.35) * 10.0 - 0.0 = 6.5.
+    # SAME formula the removed writeback used, now landing on the grade receipt.
+    assert row[4] == pytest.approx(6.5)
 
-    # W2: pnl_usd written from settlement payoff. buy_no WON → payoff=1.0;
-    # pnl = (1.0 - 0.35) * 10.0 - 0.0 = 6.5. Derived from settlement, not price.
-    assert stats["settlement_pnl_written"] == 1
+    # LX-T3 law: edli_live_profit_audit.pnl_usd/settlement_outcome are NEVER
+    # written by the grading batch any more.
     audit = wconn.execute(
         "SELECT pnl_usd, settlement_outcome FROM edli_live_profit_audit WHERE audit_id='aud-1'"
     ).fetchone()
-    assert audit[0] == pytest.approx(6.5)
-    assert audit[1] == "WON"
+    assert audit[0] is None
+    assert audit[1] is None
 
-    # Idempotent: re-run grades nothing new (pnl writeback re-runs harmlessly).
+    # Idempotent: re-run grades nothing new.
     stats2 = run_settlement_skill_attribution(world_conn=wconn, only_new=True)
     assert stats2["graded"] == 0
     assert stats2["skipped_existing"] == 1
     wconn.close()
 
 
-def test_W2_unverified_settlement_yields_null_pnl(tmp_path) -> None:
-    """W2 negative: an audit fill on a market whose settlement is NOT VERIFIED
-    must leave pnl_usd NULL — settlement truth is never fabricated."""
-    from src.analysis.settlement_skill_attribution import writeback_settlement_pnl_to_audit
+def test_LXE_writeback_function_removed() -> None:
+    """writeback_settlement_pnl_to_audit no longer exists — the grading batch
+    never writes into edli_live_profit_audit at all (LX-T3 logical excision)."""
+    import src.analysis.settlement_skill_attribution as mod
 
-    world_path = str(tmp_path / "world.db")
-    fcst_path = str(tmp_path / "fcst.db")
-    wconn = sqlite3.connect(world_path)
-    init_schema(wconn)
-    fconn = sqlite3.connect(fcst_path)
-    init_schema_forecasts(fconn)
-    fconn.execute(
-        """INSERT INTO market_events
-           (market_slug, condition_id, city, target_date, temperature_metric,
-            range_low, range_high, recorded_at)
-           VALUES (?,?,?,?,?,?,?,?)""",
-        ("denver-high-50-51-06-12", "cond-1", "Denver", "2026-06-12", "high",
-         50.0, 51.0, "2026-06-11T00:00:00Z"),
-    )
-    # Settlement present but UNVERIFIED (authority != 'VERIFIED').
-    fconn.execute(
-        """INSERT INTO settlement_outcomes
-           (city, target_date, temperature_metric, settlement_value,
-            settlement_unit, settled_at, authority, provenance_json, recorded_at)
-           VALUES (?,?,?,?,?,?,?,?,?)""",
-        ("Denver", "2026-06-12", "high", 47.0, "F", "2026-06-12T20:00:00Z",
-         "UNVERIFIED", "{}", "2026-06-12T20:00:00Z"),
-    )
-    fconn.commit()
-    fconn.close()
-
-    wconn.execute(
-        """INSERT INTO edli_live_profit_audit
-           (audit_id, event_id, aggregate_id, condition_id, token_id, direction,
-            avg_fill_price, filled_size, fees, order_lifecycle_state,
-            created_at, schema_version)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
-        ("aud-1", "evt-1", "agg-1", "cond-1", "tok-1", "buy_no",
-         0.35, 10.0, 0.0, "FILLED", "2026-06-11T12:00:00Z", 1),
-    )
-    wconn.commit()
-    wconn.execute("ATTACH DATABASE ? AS forecasts", (fcst_path,))
-
-    written = writeback_settlement_pnl_to_audit(wconn)
-    assert written == 0
-    pnl = wconn.execute(
-        "SELECT pnl_usd, settlement_outcome FROM edli_live_profit_audit WHERE audit_id='aud-1'"
-    ).fetchone()
-    assert pnl[0] is None
-    assert pnl[1] is None
-    wconn.close()
+    assert not hasattr(mod, "writeback_settlement_pnl_to_audit")
 
 
 def _seed_position_with_events(
@@ -903,3 +936,187 @@ def test_Q3_no_audit_bridge_grades_unattributable(tmp_path) -> None:
     assert grades[0].category == "UNATTRIBUTABLE_Q_MISSING", grades[0].rationale
     assert grades[0].counts_as_skill_win is False
     wconn.close()
+
+
+# ---------------------------------------------------------------------------
+# LX-E (2026-07-13): position_decision_attribution reader precedence
+# ---------------------------------------------------------------------------
+#
+# docs/rebuild/local_ledger_excision_2026-07-12.md Round-2 delta §(c): the reader
+# reads trades.position_decision_attribution FIRST; the legacy (condition_id,
+# direction) inference is a fallback ONLY for positions with no attribution row at
+# all (predating the table). An explicit UNATTRIBUTABLE row is never second-guessed
+# via the legacy path.
+
+def _seed_attribution_row(
+    tconn: sqlite3.Connection,
+    *,
+    position_id: str,
+    resolution: str,
+    decision_certificate_hash: Optional[str],
+    command_id: str = "cmd-1",
+) -> None:
+    from src.state.schema.position_decision_attribution_schema import ensure_table
+
+    ensure_table(tconn)
+    tconn.execute(
+        """INSERT INTO position_decision_attribution
+           (attribution_id, position_id, command_id, decision_certificate_hash,
+            resolution, resolution_reason, source, intent_kind, created_at,
+            schema_version)
+           VALUES (?,?,?,?,?,?,?,?,?,?)""",
+        (
+            f"attr-{position_id}", position_id, command_id, decision_certificate_hash,
+            resolution,
+            None if resolution == "ATTRIBUTED" else "no_audit_row_for_command",
+            "BACKFILL", "ENTRY", "2026-06-20T00:00:00Z", 1,
+        ),
+    )
+
+
+def test_LXE_attribution_table_row_takes_precedence_over_legacy_bridge(tmp_path) -> None:
+    """A position with an ATTRIBUTED position_decision_attribution row resolves its
+    certificate hash from THAT row, even when the legacy (condition_id, direction)
+    bridge would resolve a DIFFERENT hash — the new table wins, no fallback."""
+    world_path = str(tmp_path / "world.db")
+    fcst_path = str(tmp_path / "fcst.db")
+    trades_path = str(tmp_path / "trades.db")
+    wconn = sqlite3.connect(world_path); init_schema(wconn)
+    fconn = sqlite3.connect(fcst_path); init_schema_forecasts(fconn)
+    tconn = sqlite3.connect(trades_path); init_schema(tconn)
+    _seed_q_market_and_settlement(
+        fconn, condition_id="condLXE1", city="Miami", target_date="2026-06-20",
+        range_low=90.0, range_high=91.0, settlement_value=87.0,  # OUT -> NO wins
+    )
+    fconn.commit(); fconn.close()
+
+    # Legacy bridge would resolve "cert-legacy" via (condition_id, direction).
+    legacy_hash = "b" * 64
+    _seed_belief_certificate(
+        wconn, certificate_hash=legacy_hash, condition_id="condLXE1", token_id="tokLXE1",
+        q_live=0.20, q_lcb_5pct=0.10,  # supports LOSING the NO (q<0.5) if used
+    )
+    _seed_audit_bridge_row(
+        wconn, audit_id="audLXE1", condition_id="condLXE1", direction="buy_no",
+        token_id="tokLXE1", expected_edge_source_certificate_hash=legacy_hash,
+    )
+    wconn.commit()
+
+    # position_decision_attribution resolves a DIFFERENT cert (the real, exact link).
+    exact_hash = "c" * 64
+    _seed_belief_certificate(
+        wconn, certificate_hash=exact_hash, condition_id="condLXE1", token_id="tokLXE1",
+        q_live=0.80, q_lcb_5pct=0.70,  # supports WINNING the NO (q>0.5)
+    )
+    wconn.commit()
+
+    _seed_q_position(
+        tconn, position_id="posLXE1", condition_id="condLXE1", direction="buy_no",
+        city="Miami", target_date="2026-06-20",
+    )
+    _seed_attribution_row(
+        tconn, position_id="posLXE1", resolution="ATTRIBUTED",
+        decision_certificate_hash=exact_hash,
+    )
+    tconn.commit(); tconn.close()
+    wconn.execute("ATTACH DATABASE ? AS forecasts", (fcst_path,))
+    wconn.execute("ATTACH DATABASE ? AS trades", (trades_path,))
+
+    grades = load_settled_positions(wconn)
+    assert len(grades) == 1
+    g = grades[0]
+    assert g.q_live == pytest.approx(0.80, abs=1e-9), (
+        "must resolve the EXACT attribution-table hash, not the legacy-bridge hash"
+    )
+    assert g.category == "SKILL_WIN", g.rationale
+    wconn.close()
+
+
+def test_LXE_explicit_unattributable_row_skips_grading_without_legacy_fallback(tmp_path) -> None:
+    """A position marked UNATTRIBUTABLE in position_decision_attribution grades
+    UNATTRIBUTABLE_Q_MISSING even though the legacy (condition_id, direction)
+    bridge WOULD resolve a certificate — the explicit verdict is never
+    second-guessed."""
+    world_path = str(tmp_path / "world.db")
+    fcst_path = str(tmp_path / "fcst.db")
+    trades_path = str(tmp_path / "trades.db")
+    wconn = sqlite3.connect(world_path); init_schema(wconn)
+    fconn = sqlite3.connect(fcst_path); init_schema_forecasts(fconn)
+    tconn = sqlite3.connect(trades_path); init_schema(tconn)
+    _seed_q_market_and_settlement(
+        fconn, condition_id="condLXE2", city="Tampa", target_date="2026-06-20",
+        range_low=90.0, range_high=91.0, settlement_value=87.0,
+    )
+    fconn.commit(); fconn.close()
+
+    # Legacy bridge WOULD resolve this hash — must be ignored.
+    legacy_hash = "d" * 64
+    _seed_belief_certificate(
+        wconn, certificate_hash=legacy_hash, condition_id="condLXE2", token_id="tokLXE2",
+        q_live=0.80, q_lcb_5pct=0.70,
+    )
+    _seed_audit_bridge_row(
+        wconn, audit_id="audLXE2", condition_id="condLXE2", direction="buy_no",
+        token_id="tokLXE2", expected_edge_source_certificate_hash=legacy_hash,
+    )
+    wconn.commit()
+
+    _seed_q_position(
+        tconn, position_id="posLXE2", condition_id="condLXE2", direction="buy_no",
+        city="Tampa", target_date="2026-06-20",
+    )
+    _seed_attribution_row(
+        tconn, position_id="posLXE2", resolution="UNATTRIBUTABLE",
+        decision_certificate_hash=None,
+    )
+    tconn.commit(); tconn.close()
+    wconn.execute("ATTACH DATABASE ? AS forecasts", (fcst_path,))
+    wconn.execute("ATTACH DATABASE ? AS trades", (trades_path,))
+
+    grades = load_settled_positions(wconn)
+    assert len(grades) == 1
+    assert grades[0].category == "UNATTRIBUTABLE_Q_MISSING", grades[0].rationale
+    assert grades[0].q_live is None
+    wconn.close()
+
+
+def test_LXE_no_attribution_row_falls_back_to_legacy_bridge(tmp_path) -> None:
+    """A position with NO position_decision_attribution row at all (predates the
+    table + backfill) falls back to the legacy (condition_id, direction) bridge —
+    identical behavior to pre-LX-E."""
+    world_path = str(tmp_path / "world.db")
+    fcst_path = str(tmp_path / "fcst.db")
+    trades_path = str(tmp_path / "trades.db")
+    wconn = sqlite3.connect(world_path); init_schema(wconn)
+    fconn = sqlite3.connect(fcst_path); init_schema_forecasts(fconn)
+    tconn = sqlite3.connect(trades_path); init_schema(tconn)
+    _seed_q_market_and_settlement(
+        fconn, condition_id="condLXE3", city="Orlando", target_date="2026-06-20",
+        range_low=90.0, range_high=91.0, settlement_value=87.0,
+    )
+    fconn.commit(); fconn.close()
+
+    legacy_hash = "e" * 64
+    _seed_belief_certificate(
+        wconn, certificate_hash=legacy_hash, condition_id="condLXE3", token_id="tokLXE3",
+        q_live=0.80, q_lcb_5pct=0.70,
+    )
+    _seed_audit_bridge_row(
+        wconn, audit_id="audLXE3", condition_id="condLXE3", direction="buy_no",
+        token_id="tokLXE3", expected_edge_source_certificate_hash=legacy_hash,
+    )
+    wconn.commit()
+
+    _seed_q_position(
+        tconn, position_id="posLXE3", condition_id="condLXE3", direction="buy_no",
+        city="Orlando", target_date="2026-06-20",
+    )
+    # No attribution row written for posLXE3 at all.
+    tconn.commit(); tconn.close()
+    wconn.execute("ATTACH DATABASE ? AS forecasts", (fcst_path,))
+    wconn.execute("ATTACH DATABASE ? AS trades", (trades_path,))
+
+    grades = load_settled_positions(wconn)
+    assert len(grades) == 1
+    assert grades[0].q_live == pytest.approx(0.80, abs=1e-9)
+    assert grades[0].category == "SKILL_WIN", grades[0].rationale
