@@ -104,6 +104,12 @@ EXPECTED_RUNTIME_TRADE_TABLES = frozenset({
     # (ensure_table wired into init_schema_trade_only via
     # position_decision_attribution_schema.py).
     "position_decision_attribution",
+    # Local-ledger excision LX-T2-a 2026-07-13: sync-owned collateral head +
+    # durable CTF token discovery registry (ensure_table wired into
+    # init_schema_trade_only via wallet_balance_head_schema.py /
+    # ctf_token_registry_schema.py).
+    "wallet_balance_head",
+    "ctf_token_registry",
     "position_current",
     "position_events",
     "position_lots",

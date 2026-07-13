@@ -2869,6 +2869,45 @@ tables:
       "payout_observer"). Not consumed by settlement grading in this packet —
       WU grade / chain realization stay independent lanes per the LX-T1
       adjudication; DISPUTED-lane wiring on disagreement is a later packet.
+  - name: wallet_balance_head
+    db: trade
+    schema_class: trade_class
+    schema_version_owner: null
+    created_by: "db.py:init_schema_trade_only + src.state.schema.wallet_balance_head_schema.ensure_table"
+    pk_col: "[wallet, asset]"
+    notes: >
+      Local-ledger excision LX-T2-a (2026-07-13, docs/rebuild/local_ledger_excision_2026-07-12.md
+      LX-T2 verdict): sync-owned single row per (wallet, asset) — the
+      replacement latest-state role of collateral_ledger_snapshots (101k-row
+      append-only history dies at LX-5R; this table does not replace that
+      history, it stands up the head role the consult adjudication requires
+      BEFORE any writer/reader cutover). Written ONLY by
+      src.execution.post_trade_capital.collateral_snapshot_refresh_cycle
+      (dual-write alongside the existing snapshot insert, 30s cadence) via
+      src/state/wallet_balance_head.py::upsert_wallet_balance_head. Not
+      consumed by bankroll_provider/riskguard/Kelly by this packet — LX-3R's
+      single fenced activation cuts readers over.
+
+  - name: ctf_token_registry
+    db: trade
+    schema_class: trade_class
+    schema_version_owner: null
+    created_by: "db.py:init_schema_trade_only + src.state.schema.ctf_token_registry_schema.ensure_table"
+    pk_col: token_id
+    notes: >
+      Local-ledger excision LX-T2-a (2026-07-13): durable CTF outcome-token
+      discovery log (排序攻击 Attack F — /positions is wallet-aggregate and can
+      silently omit a token Zeus still holds; absence from a later read is
+      NEVER grounds to delete a row here). Populated from the four durable
+      sources scripts/backfill_ctf_token_registry.py backfills (venue_commands
+      token_id -> zeus_command, position_current token/no_token_id ->
+      attributed_fill, executable_market_snapshot topology ->
+      market_topology) plus a live discovery hook in
+      src.state.chain_mirror_reconciler.run_cycle (data-api /positions read ->
+      positions_api_discovery). transfer_observation is reserved for a future
+      ERC-1155 transfer-log ingester (LX-1R territory), not populated today.
+      Writer/reader src/state/ctf_token_registry.py; rows are never deleted
+      (BEFORE DELETE trigger enforces it).
 
   - name: exit_mutex_holdings
     db: trade

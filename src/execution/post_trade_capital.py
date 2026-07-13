@@ -94,6 +94,16 @@ class _PusdOnlyCollateralAdapter:
                 return dict(pusd_payload() or {})
         return dict(self._adapter.get_collateral_payload() or {})
 
+    @property
+    def wallet_address(self) -> str:
+        """Funder address identifying this Zeus wallet (wallet_balance_head key).
+
+        LX-T2-a: the head row is keyed by (wallet, asset); the underlying
+        v2 adapter already carries funder_address for submission provenance,
+        so this is a read-only passthrough, not a new identity source.
+        """
+        return str(getattr(self._adapter, "funder_address", "") or "")
+
 
 def _post_trade_collateral_timeout_seconds() -> float:
     raw = os.environ.get("ZEUS_POST_TRADE_COLLATERAL_TIMEOUT_SECONDS")
@@ -127,6 +137,46 @@ def _post_trade_collateral_deadline_seconds() -> float:
     return value
 
 
+def _upsert_pusd_wallet_balance_head(snapshot, wallet_address: str) -> None:
+    """Dual-write the sync-owned wallet_balance_head row for pUSD.
+
+    LX-T2-a (docs/rebuild/local_ledger_excision_2026-07-12.md LX-T2 verdict):
+    the head row is written from the SAME CollateralSnapshot instance
+    ``ledger.refresh()`` just persisted to ``collateral_ledger_snapshots`` —
+    this is a second WRITE of already-fetched facts, not a second read.
+    Short-lived, separately-committed connection (mirrors CollateralLedger's
+    own path-backed connection lifecycle) so this never holds the trade DB
+    WAL lock across network I/O — the network read already completed above.
+    """
+    from src.state.db import get_trade_connection
+    from src.state.schema.wallet_balance_head_schema import ensure_table
+    from src.state.wallet_balance_head import upsert_wallet_balance_head
+
+    # get_trade_connection is the canonical connection shim (src/state/db.py) —
+    # NOT a new raw sqlite3.connect() site (Track A.3 writer-lock antibody).
+    conn = get_trade_connection(write_class="bulk")
+    try:
+        ensure_table(conn)
+        upsert_wallet_balance_head(
+            conn,
+            wallet=wallet_address,
+            asset="PUSD",
+            balance_micro=snapshot.pusd_balance_micro,
+            allowance_micro=snapshot.pusd_allowance_micro,
+            # This refresh lane reads pUSD balance/allowance only via the
+            # authenticated CLOB balance-allowance endpoint (a chain ERC20
+            # read only ever covers the allowance-fallback leg inside that
+            # same call, never the balance) -- CHAIN is reserved for a future
+            # direct on-chain balance read (e.g. CTF winner balanceOf).
+            source="CLOB",
+            authority_tier=snapshot.authority_tier,
+            block_or_source_ts=snapshot.captured_at.isoformat(),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
 def collateral_snapshot_refresh_cycle() -> None:
     """Refresh pUSD collateral truth for live trading consumers.
 
@@ -139,6 +189,12 @@ def collateral_snapshot_refresh_cycle() -> None:
     slow token read can keep this scheduler job running past its next cadence,
     aging out bankroll proof and blocking all entries. Sell/exit submission
     still proves the target CTF token on its own submit path.
+
+    LX-T2-a (docs/rebuild/local_ledger_excision_2026-07-12.md): this cycle now
+    ALSO upserts the sync-owned ``wallet_balance_head`` row alongside the
+    existing ``collateral_ledger_snapshots`` insert (dual-write until LX-3R
+    cuts readers over; the snapshot history table is untouched and keeps
+    writing exactly as before).
     """
 
     from src.data.polymarket_client import PolymarketClient
@@ -151,10 +207,11 @@ def collateral_snapshot_refresh_cycle() -> None:
 
     def _refresh():
         with PolymarketClient(public_http_timeout=_post_trade_collateral_timeout_seconds()) as clob:
-            return ledger.refresh(_PusdOnlyCollateralAdapter(clob._ensure_v2_adapter()))
+            adapter = _PusdOnlyCollateralAdapter(clob._ensure_v2_adapter())
+            return ledger.refresh(adapter), adapter.wallet_address
 
     try:
-        snapshot = run_with_timeout(
+        snapshot, wallet_address = run_with_timeout(
             _refresh,
             seconds=deadline_seconds,
             label="post_trade_collateral_pusd_refresh",
@@ -174,6 +231,21 @@ def collateral_snapshot_refresh_cycle() -> None:
         snapshot.available_pusd_micro,
         len(snapshot.ctf_token_balances),
     )
+    if wallet_address:
+        try:
+            _upsert_pusd_wallet_balance_head(snapshot, wallet_address)
+        except Exception as exc:  # noqa: BLE001 -- head write must never break the sidecar heartbeat
+            logger.error(
+                "collateral_snapshot_refresh: wallet_balance_head upsert failed (non-fatal, "
+                "collateral_ledger_snapshots history already durable): %s",
+                exc,
+                exc_info=True,
+            )
+    else:
+        logger.warning(
+            "collateral_snapshot_refresh: funder_address unavailable this cycle — skipping "
+            "wallet_balance_head upsert (collateral_ledger_snapshots history still written)."
+        )
     if snapshot.authority_tier == "DEGRADED":
         # CollateralLedger persists DEGRADED so consumers get typed fail-closed context, but a
         # scheduler cycle that obtained no balance authority is a BUSINESS failure. Raising here

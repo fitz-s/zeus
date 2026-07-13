@@ -1273,6 +1273,7 @@ def run_cycle() -> None:
     """
     from src.config import get_mode
     from src.data.polymarket_client import PolymarketClient
+    from src.state.ctf_token_registry import record_token_seen
     from src.state.db import get_forecasts_connection_read_only, get_trade_connection
 
     if get_mode() != "live":
@@ -1288,6 +1289,29 @@ def run_cycle() -> None:
     conn_trades.row_factory = sqlite3.Row
     conn_forecasts = None
     try:
+        # LX-T2-a discovery hook (docs/rebuild/local_ledger_excision_2026-07-12.md
+        # Attack F): every token this data-api /positions read reports is
+        # durably registered so a LATER read that omits it (venue lag,
+        # redemption, illiquidity) can never be read as the token having
+        # vanished -- registry rows are never deleted on absence. Best-effort:
+        # a registry write failure must never abort the reconcile pass that
+        # already has fresh chain facts in hand.
+        for asset, chain_fact in chain_by_asset.items():
+            if not chain_fact.condition_id:
+                continue
+            try:
+                record_token_seen(
+                    conn_trades,
+                    token_id=asset,
+                    condition_id=chain_fact.condition_id,
+                    source="positions_api_discovery",
+                )
+            except Exception as exc:
+                logger.warning(
+                    "chain_mirror_reconcile: ctf_token_registry record failed for token %s: %s",
+                    asset,
+                    exc,
+                )
         try:
             # Genuinely read-only (mode=ro) — grading never writes to
             # zeus-forecasts.db (INV-37: single-DB writes, zeus_trades.db only).

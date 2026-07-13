@@ -452,6 +452,97 @@ def _split_positions_by_domain(
     return zeus_positions, foreign_positions, foreign_value_usd
 
 
+_ZEUS_CAPITAL_ALLOCATION_MODES = frozenset({"fraction", "absolute", "wallet_total"})
+
+
+def _load_zeus_capital_allocation_setting() -> dict:
+    """Read the `zeus_capital_allocation` settings key, defaulting to wallet_total.
+
+    Defensive `.get()` (not strict `Settings.__getitem__`) — this key is
+    additive/optional so test fixtures and pre-existing operator settings.json
+    files without it keep today's behavior instead of a startup KeyError.
+    """
+    from src.config import settings
+
+    source = settings._data if hasattr(settings, "_data") else settings
+    if not isinstance(source, dict):
+        return {"mode": "wallet_total"}
+    allocation = source.get("zeus_capital_allocation")
+    if not isinstance(allocation, dict) or "mode" not in allocation:
+        return {"mode": "wallet_total"}
+    return allocation
+
+
+def resolve_zeus_equity_base(
+    wallet_equity_usd: float,
+    *,
+    allocation: Optional[dict] = None,
+) -> float:
+    """Resolve the explicit Zeus strategy-equity base from wallet-aggregate equity.
+
+    docs/rebuild/local_ledger_excision_2026-07-12.md "Bankroll/Kelly 三量分立"
+    (2026-07-13 operator fork resolution): the wallet's spendable collateral,
+    Zeus's OWN strategy equity, and the wallet's full aggregate equity (which
+    may include a co-tenant operator's manual holdings on the shared wallet)
+    are three distinct quantities. This function computes the middle one —
+    Kelly's correct sizing base — from an explicit `zeus_capital_allocation`
+    settings key (schema: {"mode": "fraction"|"absolute"|"wallet_total", "value": float}).
+
+    Reads the setting from config/settings.json when `allocation` is not
+    supplied (production call path); tests pass `allocation` directly to
+    exercise fraction/absolute math without a settings.json fixture.
+
+    Modes:
+    - "wallet_total" (default, BEHAVIOR-PRESERVING): returns
+      `wallet_equity_usd` unchanged — byte-identical to pre-LX-T2-a Kelly
+      sizing. Logs a DEGRADED-attribution warning on every resolve because
+      full wallet-aggregate equity is not proven to be Zeus's own capital.
+    - "fraction": Zeus equity = `value` (in [0, 1]) * wallet_equity_usd.
+    - "absolute": Zeus equity = min(`value`, wallet_equity_usd) — an explicit
+      dollar allocation, capped to what the wallet actually holds so this
+      function never INVENTS equity beyond observed on-chain reality.
+
+    The allocation NUMBER remains an operator decision (2026-07-13 operator
+    fork: "配额数字仍属操作员一句话"); this function only makes the mechanism
+    explicit instead of silently equating Zeus equity with wallet aggregate.
+    """
+    resolved_allocation = allocation if allocation is not None else _load_zeus_capital_allocation_setting()
+    mode = str(resolved_allocation.get("mode") or "wallet_total")
+    if mode not in _ZEUS_CAPITAL_ALLOCATION_MODES:
+        raise ValueError(
+            f"zeus_capital_allocation.mode must be one of {sorted(_ZEUS_CAPITAL_ALLOCATION_MODES)}; "
+            f"got {mode!r}"
+        )
+
+    wallet_equity_usd = float(wallet_equity_usd)
+
+    if mode == "wallet_total":
+        logger.warning(
+            "ZEUS_EQUITY_DEGRADED_ATTRIBUTION: zeus_capital_allocation mode=wallet_total — "
+            "Kelly sizing base is the FULL wallet-aggregate equity (%.2f USD), which may "
+            "include co-tenant/operator capital on the shared wallet, not proven Zeus-only "
+            "capital. Set config/settings.json zeus_capital_allocation to mode=fraction or "
+            "mode=absolute with an explicit value to resolve this DEGRADED attribution.",
+            wallet_equity_usd,
+        )
+        return wallet_equity_usd
+
+    value = resolved_allocation.get("value")
+    if value is None:
+        raise ValueError(f"zeus_capital_allocation mode={mode!r} requires a numeric 'value'")
+    value = float(value)
+
+    if mode == "fraction":
+        if not (0.0 <= value <= 1.0):
+            raise ValueError(f"zeus_capital_allocation fraction value must be in [0, 1]; got {value!r}")
+        return max(0.0, wallet_equity_usd) * value
+
+    # mode == "absolute"
+    if value < 0.0:
+        raise ValueError(f"zeus_capital_allocation absolute value must be >= 0; got {value!r}")
+    return min(value, max(0.0, wallet_equity_usd))
+
+
 def _fetch_balance() -> tuple[float, float, float]:
     """Single underlying call site for Polymarket account equity.
 
@@ -492,10 +583,19 @@ def _fetch_balance() -> tuple[float, float, float]:
     loss_threshold_position_value, sizing_position_value = _resolve_position_value(
         free_pusd, raw_position_value, len(positions)
     )
+    # LX-T2-a (docs/rebuild/local_ledger_excision_2026-07-12.md "Bankroll/Kelly
+    # 三量分立"): the loss-threshold equity stays wallet-aggregate on purpose —
+    # it is the global-safety/telemetry quantity (drawdown vs the WHOLE
+    # wallet), not a Kelly sizing base. Only the NEW-ENTRY sizing equity
+    # (Kelly's correct basis) routes through the explicit capital-allocation
+    # resolver. Default mode="wallet_total" makes this call a no-op passthrough
+    # (byte-identical to pre-LX-T2-a behavior).
+    wallet_sizing_equity = free_pusd + sizing_position_value
+    zeus_sizing_equity = resolve_zeus_equity_base(wallet_sizing_equity)
     return (
         free_pusd + loss_threshold_position_value,
         free_pusd,
-        free_pusd + sizing_position_value,
+        zeus_sizing_equity,
     )
 
 

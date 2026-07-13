@@ -5223,6 +5223,10 @@ _TRADE_CLASS_TABLES: frozenset[str] = frozenset({
     "entry_exposure_obligations",
     # LX-E packet (2026-07-13): position/command -> decision-certificate attribution.
     "position_decision_attribution",
+    # Local-ledger excision LX-T2-a (docs/rebuild/local_ledger_excision_2026-07-12.md):
+    # sync-owned collateral head + durable CTF token discovery registry.
+    "wallet_balance_head",
+    "ctf_token_registry",
     "execution_fact",
     "execution_feasibility_evidence",
     "executable_market_snapshots",
@@ -6222,6 +6226,16 @@ def init_schema_trade_only(conn: sqlite3.Connection) -> None:
     # insert_command). See init_schema's sibling call for the full authority note.
     from src.state.schema.position_decision_attribution_schema import ensure_table as _ensure_position_decision_attribution_table
     _ensure_position_decision_attribution_table(conn)
+    # Local-ledger excision LX-T2-a (docs/rebuild/local_ledger_excision_2026-07-12.md
+    # LX-T2 verdict + Attack F): wallet_balance_head is the sync-owned current
+    # collateral head dual-written by post_trade_capital.collateral_snapshot_refresh_cycle
+    # alongside collateral_ledger_snapshots; ctf_token_registry is the durable
+    # CTF token discovery log (absence never proves zero). Neither is consumed
+    # by any runtime seam yet — LX-3R wires readers over.
+    from src.state.schema.wallet_balance_head_schema import ensure_table as _ensure_wallet_balance_head_table
+    _ensure_wallet_balance_head_table(conn)
+    from src.state.schema.ctf_token_registry_schema import ensure_table as _ensure_ctf_token_registry_table
+    _ensure_ctf_token_registry_table(conn)
     try:
         conn.execute("ALTER TABLE trade_decisions ADD COLUMN env TEXT NOT NULL DEFAULT 'live';")
     except sqlite3.OperationalError:

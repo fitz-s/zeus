@@ -53,6 +53,8 @@ CANONICAL_OWNER: dict[str, Domain] = {
     # settlement_commands/settlement_command_events (its journaling precedent).
     'ctf_conversion_command_events': Domain.TRADE,
     'ctf_conversion_commands': Domain.TRADE,
+    # Local-ledger excision LX-T2-a (2026-07-13): durable CTF token discovery log.
+    'ctf_token_registry': Domain.TRADE,
     'cycle_advance_enqueues': Domain.FORECASTS,
     'daily_observation_revisions': Domain.WORLD,
     'data_coverage': Domain.WORLD,
@@ -168,6 +170,8 @@ CANONICAL_OWNER: dict[str, Domain] = {
     'venue_order_facts': Domain.TRADE,
     'venue_submission_envelopes': Domain.TRADE,
     'venue_trade_facts': Domain.TRADE,
+    # Local-ledger excision LX-T2-a (2026-07-13): sync-owned collateral head.
+    'wallet_balance_head': Domain.TRADE,
     'wrap_unwrap_commands': Domain.WORLD,
     'wrap_unwrap_events': Domain.WORLD,
     'zeus_meta': Domain.WORLD,
