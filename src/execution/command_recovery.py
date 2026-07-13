@@ -1,4 +1,4 @@
-# Lifecycle: created=2026-04-26; last_reviewed=2026-05-21; last_reused=2026-07-09
+# Lifecycle: created=2026-04-26; last_reviewed=2026-05-21; last_reused=2026-07-13
 # Purpose: Command recovery loop for unresolved venue command side effects.
 # Reuse: Run when command recovery, venue order payload normalization, or unknown side-effect resolution changes.
 # Authority basis: docs/operations/task_2026-04-26_execution_state_truth_p1_command_bus/implementation_plan.md §P1.S4
@@ -8730,8 +8730,32 @@ def _partial_remainder_candidates(
     *,
     updated_before: str | None = None,
     live_tick_scope: bool = False,
+    terminal_exit_only: bool = False,
 ) -> list[dict]:
     state_placeholders = ",".join("?" for _ in _PARTIAL_REMAINDER_STATES)
+    if terminal_exit_only:
+        phase_placeholders = ",".join("?" for _ in _HARD_TERMINAL_REPAIR_PHASES)
+        rows = conn.execute(
+            f"""
+            SELECT cmd.*
+              FROM venue_commands cmd
+              JOIN position_current pc
+                ON pc.position_id = cmd.position_id
+             WHERE cmd.intent_kind = 'EXIT'
+               AND cmd.state = ?
+               AND COALESCE(cmd.venue_order_id, '') != ''
+               AND pc.phase IN ({phase_placeholders})
+               AND (? IS NULL OR cmd.updated_at < ?)
+             ORDER BY cmd.updated_at, cmd.command_id
+            """,
+            (
+                CommandState.PARTIAL.value,
+                *_HARD_TERMINAL_REPAIR_PHASES,
+                updated_before,
+                updated_before,
+            ),
+        ).fetchall()
+        return [_dict_row(row) for row in rows]
     if not live_tick_scope:
         sql = f"""
         SELECT *
@@ -9581,13 +9605,22 @@ def _append_partial_remainder_terminal_order_fact(
     matched_size: str,
     point_order_status: str,
     point_order: dict | None,
+    authenticated_trade_count: int | None = None,
 ) -> int:
     command_id = str(command.get("command_id") or "")
     venue_order_id = str(command.get("venue_order_id") or "")
     payload = {
         "reason": "partial_remainder_absent_from_exchange_open_orders",
-        "proof_class": "confirmed_fill_plus_point_order_terminal_remainder",
-        "source_surface": "client.get_open_orders+client.get_order",
+        "proof_class": (
+            "authenticated_confirmed_trades_plus_point_order_terminal_remainder"
+            if authenticated_trade_count is not None
+            else "confirmed_fill_plus_point_order_terminal_remainder"
+        ),
+        "source_surface": (
+            "client.get_open_orders+client.get_order+client.get_trades"
+            if authenticated_trade_count is not None
+            else "client.get_open_orders+client.get_order"
+        ),
         "venue_order_id": venue_order_id,
         "command_id": command_id,
         "open_order_absent": True,
@@ -9596,6 +9629,8 @@ def _append_partial_remainder_terminal_order_fact(
         "remaining_size": "0",
         "matched_size": matched_size,
     }
+    if authenticated_trade_count is not None:
+        payload["authenticated_trade_count"] = authenticated_trade_count
     return append_order_fact(
         conn,
         venue_order_id=venue_order_id,
@@ -9608,6 +9643,210 @@ def _append_partial_remainder_terminal_order_fact(
         raw_payload_hash=_payload_hash(payload),
         raw_payload_json=payload,
     )
+
+
+def _terminal_exit_confirmed_trade_legs(client, command: dict) -> dict:
+    """Return the complete authenticated fill set for one stale terminal EXIT.
+
+    A terminal lifecycle phase proves the position must not be reopened; it does
+    not prove the command's fill economics. Only exact, CONFIRMED account-trade
+    legs for the bound order may repair those append-only facts.
+    """
+
+    command_id = str(command.get("command_id") or "")
+    venue_order_id = str(command.get("venue_order_id") or "")
+    token_id = str(command.get("token_id") or "")
+    market_id = str(command.get("market_id") or "")
+    side = str(command.get("side") or "").upper()
+    command_price = _positive_decimal_or_none(command.get("price"))
+    command_size = _positive_decimal_or_none(command.get("size"))
+    if not all((command_id, venue_order_id, token_id, market_id, side)):
+        raise RuntimeError("terminal EXIT trade recovery lacks command identity")
+    if command_price is None or command_size is None:
+        raise RuntimeError("terminal EXIT trade recovery lacks positive command economics")
+
+    by_trade_id: dict[str, dict] = {}
+    for trade in _client_trade_payloads(client):
+        makers = [
+            maker
+            for maker in _maker_order_payloads(trade)
+            if str(
+                maker.get("order_id")
+                or maker.get("orderID")
+                or maker.get("orderId")
+                or maker.get("id")
+                or ""
+            ).lower()
+            == venue_order_id.lower()
+        ]
+        taker_order_id = str(
+            trade.get("taker_order_id")
+            or trade.get("takerOrderId")
+            or trade.get("order_id")
+            or ""
+        )
+        if not makers and taker_order_id.lower() != venue_order_id.lower():
+            continue
+        status = str(trade.get("status") or trade.get("state") or "").upper()
+        if status != "CONFIRMED":
+            raise RuntimeError(
+                f"terminal EXIT order {venue_order_id} has non-CONFIRMED account trade"
+            )
+        trade_id = str(trade.get("id") or trade.get("trade_id") or "").strip()
+        tx_hash = str(
+            trade.get("transaction_hash")
+            or trade.get("transactionHash")
+            or trade.get("tx_hash")
+            or ""
+        ).strip()
+        if not trade_id or not tx_hash:
+            raise RuntimeError(
+                f"terminal EXIT order {venue_order_id} has incomplete confirmed trade identity"
+            )
+
+        raw_legs = makers or [trade]
+        filled_size = Decimal("0")
+        weighted_price = Decimal("0")
+        for leg in raw_legs:
+            leg_token = str(leg.get("asset_id") or leg.get("token_id") or "")
+            leg_side = str(leg.get("side") or "").upper()
+            leg_price = _positive_decimal_or_none(leg.get("price") or trade.get("price"))
+            leg_size = _positive_decimal_or_none(
+                leg.get("matched_amount")
+                or leg.get("matchedAmount")
+                or leg.get("filled_size")
+                or leg.get("size")
+            )
+            if leg_token != token_id or leg_side != side:
+                raise RuntimeError(
+                    f"terminal EXIT trade {trade_id} does not match token/side identity"
+                )
+            if leg_price is None or leg_price != command_price or leg_size is None:
+                raise RuntimeError(
+                    f"terminal EXIT trade {trade_id} does not match price/fill economics"
+                )
+            filled_size += leg_size
+            weighted_price += leg_size * leg_price
+        raw_market = str(trade.get("market") or trade.get("market_id") or "").strip()
+        if not raw_market or raw_market != market_id:
+            raise RuntimeError(f"terminal EXIT trade {trade_id} does not match market identity")
+        fill_price = weighted_price / filled_size
+        leg = {
+            "trade_id": trade_id,
+            "filled_size": _decimal_text(filled_size),
+            "fill_price": _decimal_text(fill_price),
+            "tx_hash": tx_hash,
+            "trade": trade,
+            "maker_orders": makers,
+        }
+        previous = by_trade_id.get(trade_id)
+        if previous is not None and (
+            previous["filled_size"] != leg["filled_size"]
+            or previous["fill_price"] != leg["fill_price"]
+            or previous["tx_hash"].lower() != tx_hash.lower()
+        ):
+            raise RuntimeError(f"terminal EXIT trade {trade_id} has conflicting account payloads")
+        by_trade_id[trade_id] = leg
+
+    if not by_trade_id:
+        raise RuntimeError(
+            f"terminal EXIT order {venue_order_id} has no authenticated confirmed account trades"
+        )
+    total = sum(
+        (Decimal(str(leg["filled_size"])) for leg in by_trade_id.values()),
+        Decimal("0"),
+    )
+    if total >= command_size:
+        raise RuntimeError(
+            f"terminal EXIT order {venue_order_id} authenticated fill is not a partial remainder"
+        )
+    return {
+        "count": len(by_trade_id),
+        "filled_size": _decimal_text(total),
+        "legs": list(by_trade_id.values()),
+    }
+
+
+def _backfill_terminal_exit_trade_facts(
+    conn: sqlite3.Connection,
+    *,
+    command: dict,
+    authenticated: dict,
+    observed_at: str,
+) -> int:
+    """Append only missing exact CONFIRMED legs; reject any local conflict."""
+
+    command_id = str(command.get("command_id") or "")
+    venue_order_id = str(command.get("venue_order_id") or "")
+    appended = 0
+    for leg in authenticated["legs"]:
+        trade_id = str(leg["trade_id"])
+        rows = conn.execute(
+            """
+            SELECT command_id, venue_order_id, state, filled_size, fill_price, tx_hash
+              FROM venue_trade_facts
+             WHERE trade_id = ?
+             ORDER BY local_sequence
+            """,
+            (trade_id,),
+        ).fetchall()
+        exact_confirmed = False
+        for row in rows:
+            fact = _dict_row(row)
+            if (
+                str(fact.get("command_id") or "") != command_id
+                or str(fact.get("venue_order_id") or "").lower() != venue_order_id.lower()
+            ):
+                raise RuntimeError(f"trade {trade_id} is already bound to another command/order")
+            if str(fact.get("state") or "").upper() != "CONFIRMED":
+                continue
+            if (
+                not _decimal_matches(fact.get("filled_size"), leg["filled_size"])
+                or not _decimal_matches(fact.get("fill_price"), leg["fill_price"])
+                or str(fact.get("tx_hash") or "").lower() != str(leg["tx_hash"]).lower()
+            ):
+                raise RuntimeError(f"confirmed trade {trade_id} conflicts with account truth")
+            exact_confirmed = True
+        if exact_confirmed:
+            continue
+        trade = dict(leg["trade"])
+        payload = {
+            "schema_version": 1,
+            "reason": "terminal_exit_partial_account_trade_backfill",
+            "proof_class": "authenticated_confirmed_account_trade_exact_order_leg",
+            "source_surface": "client.get_trades",
+            "command_id": command_id,
+            "venue_order_id": venue_order_id,
+            "trade_id": trade_id,
+            "filled_size": leg["filled_size"],
+            "fill_price": leg["fill_price"],
+            "trade": trade,
+            "maker_orders": leg["maker_orders"],
+            "position_lifecycle_unchanged": True,
+        }
+        venue_epoch = _epoch_seconds(trade.get("match_time") or trade.get("last_update"))
+        venue_timestamp = (
+            datetime.fromtimestamp(venue_epoch, tz=timezone.utc).isoformat()
+            if venue_epoch is not None
+            else observed_at
+        )
+        append_trade_fact(
+            conn,
+            trade_id=trade_id,
+            venue_order_id=venue_order_id,
+            command_id=command_id,
+            state="CONFIRMED",
+            filled_size=str(leg["filled_size"]),
+            fill_price=str(leg["fill_price"]),
+            source="REST",
+            observed_at=observed_at,
+            venue_timestamp=venue_timestamp,
+            tx_hash=str(leg["tx_hash"]),
+            raw_payload_hash=_payload_hash(payload),
+            raw_payload_json=payload,
+        )
+        appended += 1
+    return appended
 
 
 def _point_order_terminal_for_partial_remainder(client, venue_order_id: str) -> tuple[bool, str, dict | None]:
@@ -9644,6 +9883,7 @@ def reconcile_partial_remainders(
     *,
     updated_before: str | None = None,
     live_tick_scope: bool = False,
+    terminal_exit_only: bool = False,
 ) -> dict:
     """Terminalize filled command remainders when the venue open-order surface is empty.
 
@@ -9651,7 +9891,10 @@ def reconcile_partial_remainders(
     fresh open-order enumeration no longer contains the order, only the
     unfilled remainder has disappeared. The command may become ``EXPIRED``,
     but the filled position exposure must remain intact and must continue to
-    flow through venue_trade_facts/position projections.
+    flow through venue_trade_facts/position projections. ``terminal_exit_only``
+    is the restart-safe subset: it admits only EXIT remainders whose position is
+    already in a hard-terminal lifecycle phase, so recovery closes stale order
+    state without reopening or otherwise changing the position.
     """
 
     summary = {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
@@ -9659,6 +9902,7 @@ def reconcile_partial_remainders(
         conn,
         updated_before=updated_before,
         live_tick_scope=live_tick_scope,
+        terminal_exit_only=terminal_exit_only,
     )
     if not candidates:
         return summary
@@ -9687,7 +9931,7 @@ def reconcile_partial_remainders(
                 conn,
                 command_id=command_id,
             )
-            if existing_terminal_remainder is not None:
+            if existing_terminal_remainder is not None and not terminal_exit_only:
                 if command_state == CommandState.PARTIAL.value:
                     append_event(
                         conn,
@@ -9803,7 +10047,10 @@ def reconcile_partial_remainders(
                     )
                     summary["stayed"] += 1
                 continue
-            if fill_summary["count"] <= 0:
+            authenticated = None
+            if terminal_exit_only:
+                authenticated = _terminal_exit_confirmed_trade_legs(client, command)
+            if fill_summary["count"] <= 0 and authenticated is None:
                 append_event(
                     conn,
                     command_id=command_id,
@@ -9824,14 +10071,56 @@ def reconcile_partial_remainders(
                 continue
             conn.execute("SAVEPOINT sp_partial_remainder_repair")
             try:
-                order_fact_id = _append_partial_remainder_terminal_order_fact(
-                    conn,
-                    command=command,
-                    observed_at=now,
-                    matched_size=fill_summary["filled_size"],
-                    point_order_status=point_status,
-                    point_order=point_order,
-                )
+                backfilled_trade_count = 0
+                if authenticated is not None:
+                    backfilled_trade_count = _backfill_terminal_exit_trade_facts(
+                        conn,
+                        command=command,
+                        authenticated=authenticated,
+                        observed_at=now,
+                    )
+                    fill_summary = _positive_fill_trade_fact_summary(conn, command_id)
+                    if not _decimal_matches(
+                        fill_summary["filled_size"],
+                        authenticated["filled_size"],
+                    ):
+                        raise RuntimeError(
+                            "canonical trade facts do not equal authenticated account trades "
+                            f"for terminal EXIT command {command_id}"
+                        )
+                if fill_summary["count"] <= 0:
+                    raise RuntimeError(
+                        f"partial remainder command {command_id} has no positive fill authority"
+                    )
+                if existing_terminal_remainder is not None:
+                    if (
+                        not _decimal_matches(
+                            existing_terminal_remainder.get("matched_size"),
+                            fill_summary["filled_size"],
+                        )
+                        or not _decimal_matches(
+                            existing_terminal_remainder.get("remaining_size"),
+                            "0",
+                        )
+                    ):
+                        raise RuntimeError(
+                            f"terminal remainder fact conflicts with authenticated fills for {command_id}"
+                        )
+                    order_fact_id = int(existing_terminal_remainder["fact_id"])
+                else:
+                    order_fact_id = _append_partial_remainder_terminal_order_fact(
+                        conn,
+                        command=command,
+                        observed_at=now,
+                        matched_size=fill_summary["filled_size"],
+                        point_order_status=point_status,
+                        point_order=point_order,
+                        authenticated_trade_count=(
+                            int(authenticated["count"])
+                            if authenticated is not None
+                            else None
+                        ),
+                    )
                 resolved_findings = _resolve_m5_local_orphan_findings(
                     conn,
                     venue_order_id=venue_order_id,
@@ -9848,10 +10137,18 @@ def reconcile_partial_remainders(
                             "reason": "partial_remainder_absent_from_exchange_open_orders",
                             "venue_order_id": venue_order_id,
                             "venue_order_fact_id": order_fact_id,
-                            "proof_class": "confirmed_fill_plus_point_order_terminal_remainder",
+                            "proof_class": (
+                                "authenticated_confirmed_trades_plus_point_order_terminal_remainder"
+                                if authenticated is not None
+                                else "confirmed_fill_plus_point_order_terminal_remainder"
+                            ),
                             "point_order_status": point_status,
                             "positive_fill_trade_fact_count": fill_summary["count"],
                             "positive_fill_size": fill_summary["filled_size"],
+                            "authenticated_trade_count": (
+                                authenticated["count"] if authenticated is not None else None
+                            ),
+                            "backfilled_trade_count": backfilled_trade_count,
                             "resolved_m5_local_orphan_findings": resolved_findings,
                         },
                     )
@@ -15519,6 +15816,18 @@ def _collect_recovery_priming_keys(conn: sqlite3.Connection, *, scope: str = "fu
     except Exception:  # noqa: BLE001 — a missing table just means no candidates
         logger.debug("recovery: priming scan find_unresolved_commands failed", exc_info=True)
     if scope == "restart_preflight":
+        try:
+            _harvest(
+                _partial_remainder_candidates(
+                    conn,
+                    terminal_exit_only=True,
+                )
+            )
+        except Exception:  # noqa: BLE001
+            logger.debug(
+                "recovery: priming terminal EXIT partial remainders failed",
+                exc_info=True,
+            )
         return {
             "order_ids": order_ids,
             "idempotency_keys": idem_keys,
@@ -16182,6 +16491,16 @@ def _reconcile_passes_short_conn(client, summary: dict, started_at: str, *, scop
         # These passes consume facts that are already durable in zeus_trades.
         # Run them before the venue snapshot so one slow CLOB point-order read
         # cannot keep zero-exposure pending entries or duplicate locks alive.
+        from src.execution.exchange_reconcile import reconcile_recorded_exit_fill_projections
+
+        _db_pass(
+            "recorded_exit_fill_projection",
+            reconcile_recorded_exit_fill_projections,
+            "recorded_exit_fill_projection",
+            advanced_key="projected",
+            fold_stayed=False,
+            observed_at=started_at,
+        )
         _db_pass(
             "cancel_ack_terminal_no_fill_facts",
             reconcile_cancel_ack_terminal_no_fill_facts,
@@ -16284,6 +16603,12 @@ def _reconcile_passes_short_conn(client, summary: dict, started_at: str, *, scop
     )
 
     if scope == "restart_preflight":
+        _client_pass(
+            "terminal_exit_partial_remainders",
+            reconcile_partial_remainders,
+            "terminal_exit_partial_remainders",
+            terminal_exit_only=True,
+        )
         _db_pass(
             "live_entry_projection_repair",
             reconcile_live_entry_projection_repairs,

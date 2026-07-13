@@ -6,7 +6,7 @@
 #   byte-identical reconciliation events vs the legacy long-connection path.
 # Reuse: Run when command_recovery orchestration, venue_sync_contract, or the
 #   scheduled _edli_command_recovery_cycle connection topology changes.
-# Last reused/audited: 2026-07-11
+# Last reused/audited: 2026-07-13
 # Authority basis: operator directive 2026-06-11 ("cleanest STRUCTURAL fix") +
 #   the dependency_db_locked live incident (riskguard DATA_DEGRADED since ~03:36Z).
 """Relationship tests for the three-phase venue/DB sync contract.
@@ -34,6 +34,7 @@ import json
 import sqlite3
 import threading
 import time
+from decimal import Decimal
 from pathlib import Path
 
 import pytest
@@ -70,6 +71,7 @@ class _Recorder:
 
 def _make_conn_factory(db_path: Path, recorder: _Recorder, *, attach_world_path: Path | None = None):
     from src.state.db import init_schema
+    from src.state.collateral_ledger import init_collateral_schema
 
     class _RecordingConnection(sqlite3.Connection):
         def close(self):
@@ -80,6 +82,7 @@ def _make_conn_factory(db_path: Path, recorder: _Recorder, *, attach_world_path:
         c = sqlite3.connect(str(db_path), factory=_RecordingConnection)
         c.row_factory = sqlite3.Row
         init_schema(c)
+        init_collateral_schema(c)
         if attach_world_path is not None:
             c.execute("ATTACH DATABASE ? AS world", (str(attach_world_path),))
         recorder.on_open(c, "factory")
@@ -148,6 +151,44 @@ def test_capture_snapshot_reads_account_surfaces_from_v2_adapter_when_outer_clie
     assert snapshot.get_trades() == [{"id": "adapter-trade"}]
 
 
+def test_capture_snapshot_preserves_point_order_timeout_as_unknown():
+    from src.execution import venue_sync_contract as vsc
+
+    class Client:
+        def get_open_orders(self):
+            return []
+
+        def get_trades(self):
+            return []
+
+        def get_order(self, _order_id):
+            raise TimeoutError("transient timeout")
+
+    snapshot = vsc.capture_venue_read_snapshot(Client(), order_ids=["order-1"])
+
+    with pytest.raises(vsc.SnapshotMissError, match="transient timeout"):
+        snapshot.get_order("order-1")
+
+
+def test_capture_snapshot_normalizes_exact_empty_point_order_shape_to_not_found():
+    from src.execution import venue_sync_contract as vsc
+    from src.venue.response_contracts import VenueResponseShapeError
+
+    class Client:
+        def get_open_orders(self):
+            return []
+
+        def get_trades(self):
+            return []
+
+        def get_order(self, _order_id):
+            raise VenueResponseShapeError("get_order", {}, "missing status")
+
+    snapshot = vsc.capture_venue_read_snapshot(Client(), order_ids=["order-1"])
+
+    assert snapshot.get_order("order-1") is None
+
+
 # ---------------------------------------------------------------------------
 # R1 + R2: runtime interleaving
 # ---------------------------------------------------------------------------
@@ -167,7 +208,9 @@ def test_no_client_call_while_any_connection_open(monkeypatch, tmp_path):
     seed_conn = sqlite3.connect(str(db_path))
     seed_conn.row_factory = sqlite3.Row
     from src.state.db import init_schema
+    from src.state.collateral_ledger import init_collateral_schema
     init_schema(seed_conn)
+    init_collateral_schema(seed_conn)
     h._insert(seed_conn, command_id="cmd-iface")
     h._advance_to_submitting(seed_conn, command_id="cmd-iface", venue_order_id="vord-iface")
     seed_conn.commit()
@@ -201,7 +244,9 @@ def test_live_tick_scope_runs_light_partial_remainder_recovery(monkeypatch, tmp_
     seed_conn = sqlite3.connect(str(db_path))
     seed_conn.row_factory = sqlite3.Row
     from src.state.db import init_schema
+    from src.state.collateral_ledger import init_collateral_schema
     init_schema(seed_conn)
+    init_collateral_schema(seed_conn)
     h._insert(seed_conn, command_id="cmd-live-tick")
     h._advance_to_submitting(seed_conn, command_id="cmd-live-tick", venue_order_id="vord-live-tick")
     seed_conn.commit()
@@ -325,8 +370,10 @@ def test_live_tick_scope_projects_filled_entry_order_before_full_sweep(monkeypat
     db_path = tmp_path / "recovery-live-filled-entry-projection.db"
     seed_conn = sqlite3.connect(str(db_path))
     seed_conn.row_factory = sqlite3.Row
+    from src.state.collateral_ledger import init_collateral_schema
     from src.state.db import init_schema
     init_schema(seed_conn)
+    init_collateral_schema(seed_conn)
     event_id = "edli_evt_live_tick_filled_entry"
     final_intent_id = f"edli_intent:{event_id}:tok-yes"
     decision_id = (
@@ -486,7 +533,7 @@ def test_live_tick_scope_projects_filled_entry_order_before_full_sweep(monkeypat
             "entry_price": pytest.approx(0.44),
             "order_id": "vord-live-filled",
             "order_status": "filled",
-            "entry_method": "qkernel_spine",
+                "entry_method": "venue_fact_recovery",
             "strategy_key": "day0_nowcast_entry",
         }
     finally:
@@ -771,8 +818,10 @@ def test_boot_fast_scope_projects_confirmed_exit_fill_without_full_maker_scan(mo
     db_path = tmp_path / "recovery-boot-fast-exit-fill.db"
     seed_conn = sqlite3.connect(str(db_path))
     seed_conn.row_factory = sqlite3.Row
+    from src.state.collateral_ledger import init_collateral_schema
     from src.state.db import init_schema
     init_schema(seed_conn)
+    init_collateral_schema(seed_conn)
     token = "boot-fast-exit-fill-token"
     h.seed_position_baseline(
         seed_conn,
@@ -1021,8 +1070,10 @@ def test_live_tick_scope_projects_confirmed_exit_fills(monkeypatch, tmp_path):
     db_path = tmp_path / "recovery-live-tick-exit-fill.db"
     seed_conn = sqlite3.connect(str(db_path))
     seed_conn.row_factory = sqlite3.Row
+    from src.state.collateral_ledger import init_collateral_schema
     from src.state.db import init_schema
     init_schema(seed_conn)
+    init_collateral_schema(seed_conn)
     token = "live-tick-exit-fill-token"
     h.seed_position_baseline(
         seed_conn,
@@ -1032,8 +1083,8 @@ def test_live_tick_scope_projects_confirmed_exit_fills(monkeypatch, tmp_path):
     seed_conn.execute(
         """
         UPDATE position_current
-           SET phase = 'quarantined',
-               chain_state = 'size_mismatch_unresolved',
+               SET phase = 'active',
+                   chain_state = 'synced',
                token_id = ?,
                shares = 11.09,
                chain_shares = 11.09,
@@ -1095,7 +1146,7 @@ def test_live_tick_scope_projects_confirmed_exit_fills(monkeypatch, tmp_path):
         scope="live_tick",
     )
 
-    assert summary["recorded_maker_fill_economics"]["exit_projected"] == 1
+    assert summary["recorded_exit_fill_projection"]["projected"] == 1
     assert summary["closed_shift_bin_exit_leases"] == {
         "scanned": 1,
         "advanced": 1,
@@ -1138,7 +1189,9 @@ def test_restart_preflight_scope_projects_confirmed_exit_fills_before_preflight(
     seed_conn = sqlite3.connect(str(db_path))
     seed_conn.row_factory = sqlite3.Row
     from src.state.db import init_schema
+    from src.state.collateral_ledger import init_collateral_schema
     init_schema(seed_conn)
+    init_collateral_schema(seed_conn)
     token = "restart-exit-fill-token"
     h.seed_position_baseline(
         seed_conn,
@@ -1222,6 +1275,304 @@ def test_restart_preflight_scope_projects_confirmed_exit_fills_before_preflight(
     }
 
 
+def _confirmed_maker_trade(*, trade_id: str, order_id: str, token: str, size: str) -> dict:
+    return {
+        "id": trade_id,
+        "status": "CONFIRMED",
+        "market": token,
+        "match_time": "1783770674",
+        "transaction_hash": f"tx-{trade_id}",
+        "maker_orders": [
+            {
+                "order_id": order_id,
+                "asset_id": token,
+                "side": "SELL",
+                "price": "0.29",
+                "matched_amount": size,
+            }
+        ],
+    }
+
+
+def test_restart_preflight_backfills_all_settled_exit_fills_before_terminalizing(
+    monkeypatch,
+    tmp_path,
+):
+    """A stale terminal EXIT closes only after local facts equal authenticated fills."""
+    import tests.test_exchange_reconcile as h
+    from src.execution import command_recovery, venue_sync_contract
+
+    db_path = tmp_path / "recovery-restart-settled-exit-partial.db"
+    seed_conn = sqlite3.connect(str(db_path))
+    seed_conn.row_factory = sqlite3.Row
+    from src.state.db import init_schema
+    from src.state.collateral_ledger import init_collateral_schema
+
+    init_schema(seed_conn)
+    init_collateral_schema(seed_conn)
+    token = "restart-settled-exit-partial-token"
+    h.seed_position_baseline(
+        seed_conn,
+        position_id="pos-restart-settled-exit-partial",
+        order_id="ord-restart-entry",
+    )
+    seed_conn.execute(
+        """
+        UPDATE position_current
+           SET phase = 'settled',
+               chain_state = 'synced',
+               token_id = ?,
+               shares = 12.86818,
+               chain_shares = 0.00818,
+               cost_basis_usd = 7.72,
+               chain_cost_basis_usd = 0.00237,
+               entry_price = 0.60,
+               order_status = 'settled',
+               updated_at = ?
+         WHERE position_id = 'pos-restart-settled-exit-partial'
+        """,
+        (token, h.NOW.isoformat()),
+    )
+    h.seed_command(
+        seed_conn,
+        command_id="cmd-restart-settled-exit-partial",
+        venue_order_id="ord-restart-settled-exit-partial",
+        position_id="pos-restart-settled-exit-partial",
+        token_id=token,
+        side="SELL",
+        size=383.6,
+        price=0.29,
+        state="PARTIAL",
+    )
+    order_id = "ord-restart-settled-exit-partial"
+    local_trades = (("trade-1", "10"), ("trade-2", "12.86"))
+    for trade_id, size in local_trades:
+        h.append_trade_fact(
+            seed_conn,
+            command_id="cmd-restart-settled-exit-partial",
+            venue_order_id=order_id,
+            token_id=token,
+            trade_id=trade_id,
+            size=size,
+            fill_price="0.29",
+            state="CONFIRMED",
+            tx_hash=f"tx-{trade_id}",
+        )
+    seed_conn.commit()
+    seed_conn.close()
+
+    recorder = _Recorder()
+    factory = _make_conn_factory(db_path, recorder)
+    venue_trades = [
+        _confirmed_maker_trade(trade_id="trade-3", order_id=order_id, token=token, size="8.43"),
+        _confirmed_maker_trade(trade_id="trade-1", order_id=order_id, token=token, size="10"),
+        _confirmed_maker_trade(trade_id="trade-2", order_id=order_id, token=token, size="12.86"),
+        _confirmed_maker_trade(trade_id="trade-4", order_id=order_id, token=token, size="5"),
+    ]
+    client = _RecordingClient(recorder, orders={}, open_orders=[], trades=venue_trades)
+    monkeypatch.setattr(venue_sync_contract, "default_trade_conn_factory", factory)
+
+    summary = command_recovery.reconcile_unresolved_commands(
+        conn=None,
+        client=client,
+        scope="restart_preflight",
+    )
+
+    assert summary["terminal_exit_partial_remainders"] == {
+        "scanned": 1,
+        "advanced": 1,
+        "stayed": 0,
+        "errors": 0,
+    }
+    second = command_recovery.reconcile_unresolved_commands(
+        conn=None,
+        client=client,
+        scope="restart_preflight",
+    )
+    assert second["terminal_exit_partial_remainders"] == {
+        "scanned": 0,
+        "advanced": 0,
+        "stayed": 0,
+        "errors": 0,
+    }
+    verify = sqlite3.connect(str(db_path))
+    verify.row_factory = sqlite3.Row
+    try:
+        command = verify.execute(
+            "SELECT state FROM venue_commands WHERE command_id = ?",
+            ("cmd-restart-settled-exit-partial",),
+        ).fetchone()
+        position = verify.execute(
+            "SELECT phase, chain_shares FROM position_current WHERE position_id = ?",
+            ("pos-restart-settled-exit-partial",),
+        ).fetchone()
+        fact = verify.execute(
+            """
+            SELECT state, matched_size, remaining_size
+              FROM venue_order_facts
+             WHERE command_id = ?
+             ORDER BY local_sequence DESC
+             LIMIT 1
+            """,
+            ("cmd-restart-settled-exit-partial",),
+        ).fetchone()
+        trade_facts = verify.execute(
+            """
+            SELECT trade_id, state, filled_size
+              FROM venue_trade_facts
+             WHERE command_id = ?
+             ORDER BY trade_id
+            """,
+            ("cmd-restart-settled-exit-partial",),
+        ).fetchall()
+        terminal_fact_count = verify.execute(
+            """
+            SELECT COUNT(*)
+              FROM venue_order_facts
+             WHERE command_id = ? AND state = 'EXPIRED'
+            """,
+            ("cmd-restart-settled-exit-partial",),
+        ).fetchone()[0]
+    finally:
+        verify.close()
+    assert command["state"] == "EXPIRED"
+    assert dict(position) == {"phase": "settled", "chain_shares": 0.00818}
+    assert dict(fact) == {
+        "state": "EXPIRED",
+        "matched_size": "36.29",
+        "remaining_size": "0",
+    }
+    assert {row["trade_id"] for row in trade_facts} == {
+        "trade-1",
+        "trade-2",
+        "trade-3",
+        "trade-4",
+    }
+    assert all(row["state"] == "CONFIRMED" for row in trade_facts)
+    assert sum((Decimal(row["filled_size"]) for row in trade_facts), Decimal("0")) == Decimal("36.29")
+    assert terminal_fact_count == 1
+    for method, open_ids, open_labels in recorder.client_calls:
+        assert not open_ids, (
+            f"venue call {method} occurred while DB connections were open: {open_labels}"
+        )
+
+
+@pytest.mark.parametrize(
+    "failure_mode",
+    ("local_conflict", "missing_market", "mismatched_market", "point_timeout"),
+)
+def test_restart_preflight_keeps_settled_exit_partial_when_proof_is_incomplete(
+    monkeypatch,
+    tmp_path,
+    failure_mode,
+):
+    """Any identity, economics, or point-read gap fails closed with zero writes."""
+    import tests.test_exchange_reconcile as h
+    from src.execution import command_recovery, venue_sync_contract
+    from src.state.collateral_ledger import init_collateral_schema
+    from src.state.db import init_schema
+
+    db_path = tmp_path / f"recovery-restart-settled-exit-{failure_mode}.db"
+    seed_conn = sqlite3.connect(str(db_path))
+    seed_conn.row_factory = sqlite3.Row
+    init_schema(seed_conn)
+    init_collateral_schema(seed_conn)
+    token = "restart-settled-exit-conflict-token"
+    command_id = "cmd-restart-settled-exit-conflict"
+    order_id = "ord-restart-settled-exit-conflict"
+    position_id = "pos-restart-settled-exit-conflict"
+    h.seed_position_baseline(seed_conn, position_id=position_id, order_id="ord-entry")
+    seed_conn.execute(
+        """
+        UPDATE position_current
+           SET phase = 'settled', chain_state = 'synced', token_id = ?,
+               shares = 12.86818, chain_shares = 0.00818,
+               order_status = 'settled', updated_at = ?
+         WHERE position_id = ?
+        """,
+        (token, h.NOW.isoformat(), position_id),
+    )
+    h.seed_command(
+        seed_conn,
+        command_id=command_id,
+        venue_order_id=order_id,
+        position_id=position_id,
+        token_id=token,
+        side="SELL",
+        size=383.6,
+        price=0.29,
+        state="PARTIAL",
+    )
+    local_first_size = "9" if failure_mode == "local_conflict" else "10"
+    for trade_id, size in (("trade-1", local_first_size), ("trade-2", "12.86")):
+        h.append_trade_fact(
+            seed_conn,
+            command_id=command_id,
+            venue_order_id=order_id,
+            token_id=token,
+            trade_id=trade_id,
+            size=size,
+            fill_price="0.29",
+            state="CONFIRMED",
+            tx_hash=f"tx-{trade_id}",
+        )
+    seed_conn.commit()
+    seed_conn.close()
+
+    venue_trades = [
+        _confirmed_maker_trade(trade_id="trade-3", order_id=order_id, token=token, size="8.43"),
+        _confirmed_maker_trade(trade_id="trade-1", order_id=order_id, token=token, size="10"),
+        _confirmed_maker_trade(trade_id="trade-2", order_id=order_id, token=token, size="12.86"),
+        _confirmed_maker_trade(trade_id="trade-4", order_id=order_id, token=token, size="5"),
+    ]
+    if failure_mode == "missing_market":
+        venue_trades[0].pop("market")
+    elif failure_mode == "mismatched_market":
+        venue_trades[0]["market"] = "other-market"
+    recorder = _Recorder()
+    monkeypatch.setattr(
+        venue_sync_contract,
+        "default_trade_conn_factory",
+        _make_conn_factory(db_path, recorder),
+    )
+    client = _RecordingClient(recorder, orders={}, open_orders=[], trades=venue_trades)
+    if failure_mode == "point_timeout":
+        def _timeout_get_order(_order_id):
+            recorder.on_client_call("get_order")
+            raise TimeoutError("transient timeout")
+
+        client.get_order = _timeout_get_order
+    summary = command_recovery.reconcile_unresolved_commands(
+        conn=None,
+        client=client,
+        scope="restart_preflight",
+    )
+
+    assert summary["terminal_exit_partial_remainders"] == {
+        "scanned": 1,
+        "advanced": 0,
+        "stayed": 0,
+        "errors": 1,
+    }
+    verify = sqlite3.connect(str(db_path))
+    try:
+        assert verify.execute(
+            "SELECT state FROM venue_commands WHERE command_id = ?", (command_id,)
+        ).fetchone()[0] == "PARTIAL"
+        assert verify.execute(
+            "SELECT COUNT(*) FROM venue_trade_facts WHERE command_id = ?", (command_id,)
+        ).fetchone()[0] == 2
+        assert verify.execute(
+            "SELECT COUNT(*) FROM venue_order_facts WHERE command_id = ? AND state = 'EXPIRED'",
+            (command_id,),
+        ).fetchone()[0] == 0
+        assert verify.execute(
+            "SELECT phase FROM position_current WHERE position_id = ?", (position_id,)
+        ).fetchone()[0] == "settled"
+    finally:
+        verify.close()
+
+
 def test_restart_preflight_projects_matched_exit_fills_before_preflight(monkeypatch, tmp_path):
     """Matched full exit fills are terminal enough to clear stale local exposure."""
     import tests.test_exchange_reconcile as h
@@ -1231,8 +1582,10 @@ def test_restart_preflight_projects_matched_exit_fills_before_preflight(monkeypa
     seed_conn = sqlite3.connect(str(db_path))
     seed_conn.row_factory = sqlite3.Row
     from src.state.db import init_schema
+    from src.state.collateral_ledger import init_collateral_schema
 
     init_schema(seed_conn)
+    init_collateral_schema(seed_conn)
     token = "restart-matched-exit-fill-token"
     h.seed_position_baseline(
         seed_conn,
@@ -1498,6 +1851,7 @@ def test_stale_rebalance_entry_release_reads_attached_world_table(tmp_path):
 def test_live_tick_releases_stale_rebalance_before_broad_venue_snapshot(monkeypatch):
     """Family redecision locks must clear before the slow venue snapshot phase."""
     from src.execution import command_recovery
+    from src.execution import exchange_reconcile
     from src.execution import venue_sync_contract
 
     events: list[str] = []
@@ -1508,7 +1862,13 @@ def test_live_tick_releases_stale_rebalance_before_broad_venue_snapshot(monkeypa
     def empty_summary(label: str):
         def _inner(*_args, **_kwargs):
             events.append(label)
-            return {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
+            return {
+                "scanned": 0,
+                "advanced": 0,
+                "projected": 0,
+                "stayed": 0,
+                "errors": 0,
+            }
 
         return _inner
 
@@ -1567,6 +1927,11 @@ def test_live_tick_releases_stale_rebalance_before_broad_venue_snapshot(monkeypa
         empty_summary("review_required_exit_mutex_release"),
     )
     monkeypatch.setattr(
+        exchange_reconcile,
+        "reconcile_recorded_exit_fill_projections",
+        empty_summary("recorded_exit_fill_projection"),
+    )
+    monkeypatch.setattr(
         command_recovery,
         "reconcile_cancel_ack_terminal_no_fill_facts",
         empty_summary("cancel_ack_terminal_no_fill_facts"),
@@ -1605,7 +1970,9 @@ def test_live_tick_scope_still_clears_cancel_acked_zero_fill_pending_entry(monke
     seed_conn = sqlite3.connect(str(db_path))
     seed_conn.row_factory = sqlite3.Row
     from src.state.db import init_schema
+    from src.state.collateral_ledger import init_collateral_schema
     init_schema(seed_conn)
+    init_collateral_schema(seed_conn)
     h._insert(seed_conn, command_id="cmd-cancelled", size=10.35, price=0.60)
     h._advance_to_acked(
         seed_conn,

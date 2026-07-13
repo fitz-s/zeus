@@ -1,5 +1,5 @@
 # Created: 2026-06-11
-# Last reused or audited: 2026-07-11
+# Last reused or audited: 2026-07-13
 # Authority basis: operator directive 2026-06-11 ("cleanest STRUCTURAL fix, no patches")
 #   + the dependency_db_locked live incident (riskguard DATA_DEGRADED since ~03:36Z,
 #   all submissions RISK_GUARD_BLOCKED). Lock holder was the EDLI command-recovery
@@ -66,6 +66,8 @@ import logging
 import sqlite3
 import threading
 from typing import Callable, Optional, TypeVar
+
+from src.venue.response_contracts import VenueResponseShapeError
 
 logger = logging.getLogger(__name__)
 
@@ -347,6 +349,13 @@ class SnapshotMissError(RuntimeError):
     """
 
 
+class _CapturedVenueReadFailure:
+    """Preserve a point-read exception so APPLY cannot misread it as NOT_FOUND."""
+
+    def __init__(self, error: Exception) -> None:
+        self.error = error
+
+
 class VenueReadSnapshot:
     """Immutable replay of venue reads captured during the NETWORK phase.
 
@@ -398,7 +407,12 @@ class VenueReadSnapshot:
         key = str(order_id)
         if key not in self._orders:
             raise SnapshotMissError(f"get_order({key!r}) not primed in venue snapshot")
-        return self._orders[key]
+        value = self._orders[key]
+        if isinstance(value, _CapturedVenueReadFailure):
+            raise SnapshotMissError(
+                f"get_order({key!r}) failed during venue snapshot: {value.error}"
+            ) from value.error
+        return value
 
     def find_order_by_idempotency_key(self, key):
         k = str(key)
@@ -486,9 +500,20 @@ def capture_venue_read_snapshot(
         for oid in {str(o) for o in order_ids if str(o).strip()}:
             try:
                 orders[oid] = get_order_source(oid)
-            except Exception:  # noqa: BLE001 — record the miss as None (== venue not found)
+            except VenueResponseShapeError as exc:
                 logger.warning("venue_sync_contract: get_order(%s) failed during snapshot", oid, exc_info=True)
-                orders[oid] = None
+                # The pinned CLOB SDK returns an exact empty object when a
+                # previously known order has been purged. Preserve every other
+                # shape failure as unknown; only this observed get_order shape
+                # is normalized to the wrapper's documented NOT_FOUND value.
+                orders[oid] = (
+                    None
+                    if exc.endpoint == "get_order" and exc.raw == {}
+                    else _CapturedVenueReadFailure(exc)
+                )
+            except Exception as exc:  # noqa: BLE001 — preserve timeout/auth/read failure.
+                logger.warning("venue_sync_contract: get_order(%s) failed during snapshot", oid, exc_info=True)
+                orders[oid] = _CapturedVenueReadFailure(exc)
 
     idempotency: dict = {}
     finder = next(
