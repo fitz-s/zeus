@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import sqlite3
 import tempfile
+import inspect
 from pathlib import Path
 from unittest import mock
 
@@ -87,6 +88,13 @@ def _make_dbs(tmp_path: Path):
 
 class _SimulatedCrash(Exception):
     """Sentinel exception injected between the two pre-fix commits."""
+
+
+def test_settle_positions_never_commits_inside_outer_inv37_transaction():
+    from src.execution.harvester import _settle_positions
+
+    source = inspect.getsource(_settle_positions)
+    assert ".commit(" not in source
 
 
 def test_prefix_partial_state_on_crash(tmp_path):

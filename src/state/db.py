@@ -874,6 +874,13 @@ def forecasts_connection_with_trades_flocked(
                         "ATTACH DATABASE ? AS trades",
                         (str(_zeus_trade_db_path()),),
                     )
+                # Acquire both WAL writer snapshots before the harvester reads either
+                # side. A deferred SAVEPOINT can otherwise read trades first, let a
+                # concurrent writer advance its WAL, then fail immediately with
+                # SQLITE_BUSY_SNAPSHOT when settlement later upgrades to a trade
+                # write. The outer db_writer_lock coordinates compliant writers;
+                # BEGIN IMMEDIATE is the SQLite-level backstop for every writer.
+                conn.execute("BEGIN IMMEDIATE")
                 yield conn
             finally:
                 try:
@@ -1749,9 +1756,8 @@ def _migrate_authority_tier_disputed(conn: "sqlite3.Connection", table: str) -> 
     are carried over exactly — no separate drift risk between this migration and
     the live ALTER history.
 
-    Called for both `settlements` (world.db) and `observations` (world.db AND,
-    via `_create_observations`, forecasts.db) — both carry the same
-    VERIFIED/UNVERIFIED/QUARANTINED tri-state CHECK on `authority`.
+    Called for `settlements`, `observations`, and forecast-owned
+    `settlement_outcomes`; all carry the same authority tri-state CHECK.
     """
     try:
         row = conn.execute(
@@ -1764,6 +1770,20 @@ def _migrate_authority_tier_disputed(conn: "sqlite3.Connection", table: str) -> 
         if "authority" not in cols:
             return  # not an authority-tier table
         migrated_name = f"{table}_disputed_migrated"
+        residual = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+            (migrated_name,),
+        ).fetchone()
+        if residual is not None:
+            residual_count = conn.execute(
+                f"SELECT COUNT(*) FROM {migrated_name}"
+            ).fetchone()[0]
+            if residual_count:
+                raise RuntimeError(
+                    f"T2b authority-disputed migration found non-empty residual "
+                    f"{migrated_name}: rows={residual_count}; refusing ambiguous recovery"
+                )
+            conn.execute(f"DROP TABLE {migrated_name}")
         new_sql = table_sql.replace("'QUARANTINED'", "'DISPUTED'")
         # sqlite_master normalizes CREATE TABLE text: leading comments, "IF NOT
         # EXISTS", and surrounding whitespace are all stripped by SQLite itself
@@ -1801,14 +1821,21 @@ def _migrate_authority_tier_disputed(conn: "sqlite3.Connection", table: str) -> 
             "AND sql IS NOT NULL",
             (table,),
         ).fetchall()
-        conn.execute(f"DROP TABLE {table}")
-        conn.execute(f"ALTER TABLE {migrated_name} RENAME TO {table}")
-        for (index_sql,) in index_rows:
-            conn.execute(index_sql)
-    except sqlite3.OperationalError:
-        # Table doesn't exist yet on a fresh DB — CREATE TABLE IF NOT EXISTS below
-        # (which now declares the DISPUTED CHECK) handles it. No action needed.
-        pass
+        legacy_alter = bool(conn.execute("PRAGMA legacy_alter_table").fetchone()[0])
+        conn.execute("PRAGMA legacy_alter_table = ON")
+        try:
+            conn.execute(f"DROP TABLE {table}")
+            conn.execute(f"ALTER TABLE {migrated_name} RENAME TO {table}")
+            for (index_sql,) in index_rows:
+                conn.execute(index_sql)
+        finally:
+            conn.execute(
+                f"PRAGMA legacy_alter_table = {'ON' if legacy_alter else 'OFF'}"
+            )
+    except sqlite3.OperationalError as exc:
+        raise RuntimeError(
+            f"T2b authority-disputed migration failed for {table}: {exc}"
+        ) from exc
 
 
 def init_schema(
@@ -11838,7 +11865,27 @@ def record_token_suppression(
     """
     if conn is None:
         return {"status": "skipped_no_connection", "table": "token_suppression"}
-    if not _table_exists(conn, "token_suppression_history"):
+
+    from src.state.owner_routed_write import owner_write_target
+
+    history_table = owner_write_target(conn, "token_suppression_history")
+    legacy_table = owner_write_target(conn, "token_suppression")
+    if history_table is None:
+        return {"status": "skipped_wrong_db", "table": "token_suppression"}
+
+    def _target_exists(target: str | None, object_type: str) -> bool:
+        if not target:
+            return False
+        if "." in target:
+            schema, name = target.split(".", 1)
+        else:
+            schema, name = "main", target
+        return conn.execute(
+            f"SELECT 1 FROM {schema}.sqlite_master WHERE type=? AND name=?",
+            (object_type, name),
+        ).fetchone() is not None
+
+    if not _target_exists(history_table, "table"):
         return {"status": "skipped_missing_table", "table": "token_suppression"}
     normalized_token = str(token_id or "").strip()
     if not normalized_token:
@@ -11859,21 +11906,21 @@ def record_token_suppression(
         existing = conn.execute(
             """
             SELECT suppression_reason, created_at, evidence_json
-            FROM token_suppression_history
+            FROM {history_table}
             WHERE token_id = ?
               AND history_id = (
                   SELECT MAX(h2.history_id)
-                  FROM token_suppression_history h2
+                  FROM {history_table} h2
                   WHERE h2.token_id = ?
               )
-            """,
+            """.format(history_table=history_table),
             (normalized_token, normalized_token),
         ).fetchone()
-        if existing is None and _table_exists(conn, "token_suppression"):
+        if existing is None and _target_exists(legacy_table, "table"):
             existing = conn.execute(
-                """
+                f"""
                 SELECT suppression_reason, created_at, evidence_json
-                FROM token_suppression
+                FROM {legacy_table}
                 WHERE token_id = ?
                 """,
                 (normalized_token,),
@@ -11891,17 +11938,18 @@ def record_token_suppression(
             if first_seen_at:
                 evidence_payload["first_seen_at"] = first_seen_at
     evidence_json = json.dumps(evidence_payload, sort_keys=True)
-    # B071 cycle-2 critic MINOR #1: wrap dual-write in a single transaction.
-    # Without this, a failure between the history INSERT and the legacy UPSERT
-    # leaves the two tables inconsistent — history says "suppressed" while
-    # legacy still shows the prior state (or nothing). `with conn:` uses the
-    # connection as a context manager that commits on success, rolls back on
-    # exception. Dual-write becomes atomic at the write-side seam.
-    with conn:
+    # B071 dual-write is one nested SAVEPOINT. Unlike ``with conn:``, this
+    # composes with the harvester's outer INV-37 transaction instead of
+    # committing and destroying its rollback boundary.
+    import secrets
+
+    savepoint = f"sp_token_suppression_{secrets.token_hex(6)}"
+    conn.execute(f"SAVEPOINT {savepoint}")
+    try:
         # Append to history (B071 — append-only, audit trail).
         conn.execute(
-            """
-            INSERT INTO token_suppression_history (
+            f"""
+            INSERT INTO {history_table} (
                 token_id, condition_id, suppression_reason, source_module,
                 created_at, updated_at, evidence_json, operation, recorded_at
             ) VALUES (?, ?, ?, ?, ?, ?, ?, 'record', ?)
@@ -11920,10 +11968,10 @@ def record_token_suppression(
         # Dual-write: keep legacy token_suppression table in sync for backward
         # compat with callers that query it directly (pre-migration). Removed
         # after migrate_b071 --drop-legacy creates the VIEW alias.
-        if _table_exists(conn, "token_suppression"):
+        if _target_exists(legacy_table, "table"):
             conn.execute(
-                """
-                INSERT INTO token_suppression (
+                f"""
+                INSERT INTO {legacy_table} (
                     token_id, condition_id, suppression_reason, source_module,
                     created_at, updated_at, evidence_json
                 ) VALUES (?, ?, ?, ?, ?, ?, ?)
@@ -11948,6 +11996,11 @@ def record_token_suppression(
                     evidence_json,
                 ),
             )
+        conn.execute(f"RELEASE SAVEPOINT {savepoint}")
+    except Exception:
+        conn.execute(f"ROLLBACK TO SAVEPOINT {savepoint}")
+        conn.execute(f"RELEASE SAVEPOINT {savepoint}")
+        raise
     return {
         "status": "written",
         "table": "token_suppression",

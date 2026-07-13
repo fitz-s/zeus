@@ -96,3 +96,129 @@ def test_require_owner_main_raises_on_wrong_canonical_db() -> None:
         with pytest.raises(WrongDomainWrite):
             require_owner_main(wc, "execution_fact")
         wc.close()
+
+
+def test_append_many_and_project_routes_to_attached_trade_owner() -> None:
+    from src.state.db import apply_architecture_kernel_schema, append_many_and_project
+    from src.state.ledger import CANONICAL_POSITION_EVENT_COLUMNS
+    from src.state.projection import CANONICAL_POSITION_CURRENT_COLUMNS
+
+    with tempfile.TemporaryDirectory() as d:
+        trade_path = Path(d) / "zeus_trades.db"
+        tc = sqlite3.connect(str(trade_path))
+        tc.row_factory = sqlite3.Row
+        apply_architecture_kernel_schema(tc)
+        tc.close()
+
+        fc = _conn_named(d, "zeus-forecasts.db")
+        fc.execute("ATTACH DATABASE ? AS trades", (str(trade_path),))
+        event = {column: None for column in CANONICAL_POSITION_EVENT_COLUMNS}
+        event.update(
+            {
+                "event_id": "event-attached-1",
+                "position_id": "position-attached-1",
+                "event_version": 1,
+                "sequence_no": 1,
+                "event_type": "ENTRY_ORDER_FILLED",
+                "occurred_at": "2026-07-13T18:00:00+00:00",
+                "phase_before": "pending_entry",
+                "phase_after": "active",
+                "strategy_key": "center_bin_buy",
+                "source_module": "tests.test_owner_routed_write",
+                "env": "test",
+                "payload_json": "{}",
+            }
+        )
+        projection = {
+            column: None for column in CANONICAL_POSITION_CURRENT_COLUMNS
+        }
+        projection.update(
+            {
+                "position_id": "position-attached-1",
+                "phase": "active",
+                "trade_id": "trade-attached-1",
+                "direction": "buy_yes",
+                "strategy_key": "center_bin_buy",
+                "condition_id": "0xattached",
+                "temperature_metric": "high",
+                "updated_at": "2026-07-13T18:00:00+00:00",
+            }
+        )
+
+        append_many_and_project(fc, [event], projection)
+
+        assert fc.execute(
+            "SELECT event_type FROM trades.position_events WHERE position_id = ?",
+            ("position-attached-1",),
+        ).fetchone()[0] == "ENTRY_ORDER_FILLED"
+        assert fc.execute(
+            "SELECT phase FROM trades.position_current WHERE position_id = ?",
+            ("position-attached-1",),
+        ).fetchone()[0] == "active"
+        assert fc.execute(
+            "SELECT 1 FROM main.sqlite_master WHERE name IN ('position_events','position_current')"
+        ).fetchone() is None
+        fc.close()
+
+
+def test_token_suppression_routes_to_attached_owner_without_committing_outer_tx() -> None:
+    from src.state.db import record_token_suppression
+
+    with tempfile.TemporaryDirectory() as d:
+        trade_path = Path(d) / "zeus_trades.db"
+        tc = sqlite3.connect(str(trade_path))
+        tc.executescript(
+            """
+            CREATE TABLE token_suppression_history (
+                history_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                token_id TEXT NOT NULL,
+                condition_id TEXT,
+                suppression_reason TEXT NOT NULL,
+                source_module TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                evidence_json TEXT NOT NULL,
+                operation TEXT NOT NULL,
+                recorded_at TEXT NOT NULL
+            );
+            CREATE TABLE token_suppression (
+                token_id TEXT PRIMARY KEY,
+                condition_id TEXT,
+                suppression_reason TEXT NOT NULL,
+                source_module TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                evidence_json TEXT NOT NULL
+            );
+            """
+        )
+        tc.commit()
+        tc.close()
+
+        fc = _conn_named(d, "zeus-forecasts.db")
+        fc.execute("ATTACH DATABASE ? AS trades", (str(trade_path),))
+        fc.execute("SAVEPOINT outer_settlement")
+        result = record_token_suppression(
+            fc,
+            token_id="token-settled",
+            condition_id="condition-settled",
+            suppression_reason="settled_position",
+            source_module="tests.test_owner_routed_write",
+        )
+        assert result["status"] == "written"
+        assert fc.execute(
+            "SELECT COUNT(*) FROM trades.token_suppression_history"
+        ).fetchone()[0] == 1
+        assert fc.execute(
+            "SELECT COUNT(*) FROM trades.token_suppression"
+        ).fetchone()[0] == 1
+
+        fc.execute("ROLLBACK TO SAVEPOINT outer_settlement")
+        fc.execute("RELEASE SAVEPOINT outer_settlement")
+        assert fc.execute(
+            "SELECT COUNT(*) FROM trades.token_suppression_history"
+        ).fetchone()[0] == 0
+        assert fc.execute(
+            "SELECT COUNT(*) FROM trades.token_suppression"
+        ).fetchone()[0] == 0
+        fc.close()

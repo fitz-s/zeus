@@ -96,7 +96,11 @@ def ordered_values(payload: dict, columns: tuple[str, ...]) -> tuple:
 
 
 def table_columns(conn: sqlite3.Connection, table: str) -> set[str]:
-    rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
+    if "." in table:
+        schema, name = table.split(".", 1)
+        rows = conn.execute(f"PRAGMA {schema}.table_info({name})").fetchall()
+    else:
+        rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
     return {row[1] for row in rows}
 
 
@@ -167,7 +171,11 @@ class DuplicatePositionOpenError(RuntimeError):
 
 
 def _find_existing_open_row(
-    conn: sqlite3.Connection, *, token_id: str, exclude_position_id: str
+    conn: sqlite3.Connection,
+    *,
+    token_id: str,
+    exclude_position_id: str,
+    table_name: str = "position_current",
 ) -> str | None:
     """Return position_id of any existing open-phase row for the same token.
 
@@ -175,8 +183,8 @@ def _find_existing_open_row(
     itself so that pure UPSERT-on-same-position_id paths are unaffected.
     """
     row = conn.execute(
-        """
-        SELECT position_id FROM position_current
+        f"""
+        SELECT position_id FROM {table_name}
          WHERE (token_id = ? OR no_token_id = ?)
            AND position_id != ?
            AND phase IN (?, ?, ?, ?, ?)
@@ -332,7 +340,10 @@ _MONITOR_REFRESH_PROTECTED_PENDING_EXIT_COLUMNS = frozenset(
 
 
 def _preserve_existing_pending_exit_authority(
-    conn: sqlite3.Connection, projection: dict
+    conn: sqlite3.Connection,
+    projection: dict,
+    *,
+    table_name: str = "position_current",
 ) -> dict:
     if (
         projection.get("_canonical_event_type")
@@ -342,7 +353,7 @@ def _preserve_existing_pending_exit_authority(
     position_id = str(projection.get("position_id") or "")
     if not position_id:
         return projection
-    current_columns = table_columns(conn, "position_current")
+    current_columns = table_columns(conn, table_name)
     selected = tuple(
         column
         for column in CANONICAL_POSITION_CURRENT_COLUMNS
@@ -352,7 +363,7 @@ def _preserve_existing_pending_exit_authority(
     if not selected:
         return projection
     row = conn.execute(
-        f"SELECT {', '.join(selected)} FROM position_current WHERE position_id = ?",
+        f"SELECT {', '.join(selected)} FROM {table_name} WHERE position_id = ?",
         (position_id,),
     ).fetchone()
     if row is None:
@@ -372,14 +383,17 @@ def _preserve_existing_pending_exit_authority(
 
 
 def _preserve_existing_monitor_refresh_authority(
-    conn: sqlite3.Connection, projection: dict
+    conn: sqlite3.Connection,
+    projection: dict,
+    *,
+    table_name: str = "position_current",
 ) -> dict:
     if projection.get("_canonical_event_type") != "MONITOR_REFRESHED":
         return projection
     position_id = str(projection.get("position_id") or "")
     if not position_id:
         return projection
-    current_columns = table_columns(conn, "position_current")
+    current_columns = table_columns(conn, table_name)
     preserved = tuple(
         column
         for column in CANONICAL_POSITION_CURRENT_COLUMNS
@@ -395,7 +409,7 @@ def _preserve_existing_monitor_refresh_authority(
     if not selected:
         return projection
     row = conn.execute(
-        f"SELECT {', '.join(selected)} FROM position_current WHERE position_id = ?",
+        f"SELECT {', '.join(selected)} FROM {table_name} WHERE position_id = ?",
         (position_id,),
     ).fetchone()
     if row is None:
@@ -420,7 +434,10 @@ def _preserve_existing_monitor_refresh_authority(
 
 
 def _preserve_existing_chain_authority_without_new_observation(
-    conn: sqlite3.Connection, projection: dict
+    conn: sqlite3.Connection,
+    projection: dict,
+    *,
+    table_name: str = "position_current",
 ) -> dict:
     """Keep newer positive chain truth across stale open-position replays.
 
@@ -442,14 +459,14 @@ def _preserve_existing_chain_authority_without_new_observation(
     position_id = str(projection.get("position_id") or "")
     if not position_id:
         return projection
-    current_columns = table_columns(conn, "position_current")
+    current_columns = table_columns(conn, table_name)
     selected = tuple(
         column for column in _CHAIN_OBSERVATION_COLUMNS if column in current_columns
     )
     if "chain_seen_at" not in selected or "chain_shares" not in selected:
         return projection
     row = conn.execute(
-        f"SELECT {', '.join(selected)} FROM position_current WHERE position_id = ?",
+        f"SELECT {', '.join(selected)} FROM {table_name} WHERE position_id = ?",
         (position_id,),
     ).fetchone()
     if row is None:
@@ -464,7 +481,10 @@ def _preserve_existing_chain_authority_without_new_observation(
 
 
 def _preserve_existing_monitor_snapshot_for_chain_projection(
-    conn: sqlite3.Connection, projection: dict
+    conn: sqlite3.Connection,
+    projection: dict,
+    *,
+    table_name: str = "position_current",
 ) -> dict:
     """Keep fresh monitor truth across chain-only projection writes.
 
@@ -478,7 +498,7 @@ def _preserve_existing_monitor_snapshot_for_chain_projection(
     position_id = str(projection.get("position_id") or "")
     if not position_id:
         return projection
-    current_columns = table_columns(conn, "position_current")
+    current_columns = table_columns(conn, table_name)
     preserved = tuple(
         column
         for column in CANONICAL_POSITION_CURRENT_COLUMNS
@@ -487,7 +507,7 @@ def _preserve_existing_monitor_snapshot_for_chain_projection(
     if not preserved:
         return projection
     row = conn.execute(
-        f"SELECT {', '.join(preserved)} FROM position_current WHERE position_id = ?",
+        f"SELECT {', '.join(preserved)} FROM {table_name} WHERE position_id = ?",
         (position_id,),
     ).fetchone()
     if row is None:
@@ -559,13 +579,24 @@ def _projection_allows_terminal_restore_exposure(projection: dict) -> bool:
 
 
 @capability("canonical_position_write", lease=True)
-def upsert_position_current(conn: sqlite3.Connection, projection: dict) -> None:
-    projection = _preserve_existing_monitor_refresh_authority(conn, projection)
-    projection = _preserve_existing_chain_authority_without_new_observation(
-        conn, projection
+def upsert_position_current(
+    conn: sqlite3.Connection,
+    projection: dict,
+    *,
+    table_name: str = "position_current",
+) -> None:
+    projection = _preserve_existing_monitor_refresh_authority(
+        conn, projection, table_name=table_name
     )
-    projection = _preserve_existing_pending_exit_authority(conn, projection)
-    projection = _preserve_existing_monitor_snapshot_for_chain_projection(conn, projection)
+    projection = _preserve_existing_chain_authority_without_new_observation(
+        conn, projection, table_name=table_name
+    )
+    projection = _preserve_existing_pending_exit_authority(
+        conn, projection, table_name=table_name
+    )
+    projection = _preserve_existing_monitor_snapshot_for_chain_projection(
+        conn, projection, table_name=table_name
+    )
     # F109 writer-side idempotency check (2026-05-17).
     # Runs before INSERT so the race window with the partial UNIQUE INDEX is
     # tight. If a same-token open-phase row exists with a *different*
@@ -579,7 +610,7 @@ def upsert_position_current(conn: sqlite3.Connection, projection: dict) -> None:
     candidate_position_id = str(projection.get("position_id") or "")
     if candidate_position_id and candidate_phase not in _ABSORBING_POSITION_PHASES:
         existing_phase_row = conn.execute(
-            "SELECT phase FROM position_current WHERE position_id = ?",
+            f"SELECT phase FROM {table_name} WHERE position_id = ?",
             (candidate_position_id,),
         ).fetchone()
         existing_phase = str(existing_phase_row[0] if existing_phase_row else "")
@@ -618,7 +649,7 @@ def upsert_position_current(conn: sqlite3.Connection, projection: dict) -> None:
         and candidate_position_id
     ):
         prior_phase_row = conn.execute(
-            "SELECT phase FROM position_current WHERE position_id = ?",
+            f"SELECT phase FROM {table_name} WHERE position_id = ?",
             (candidate_position_id,),
         ).fetchone()
         prior_phase = str(prior_phase_row[0] if prior_phase_row else "")
@@ -637,6 +668,7 @@ def upsert_position_current(conn: sqlite3.Connection, projection: dict) -> None:
             conn,
             token_id=str(candidate_token),
             exclude_position_id=candidate_position_id,
+            table_name=table_name,
         )
         if existing is not None:
             raise DuplicatePositionOpenError(
@@ -657,7 +689,7 @@ def upsert_position_current(conn: sqlite3.Connection, projection: dict) -> None:
     _update_set = ",\n            ".join(f"{c}=excluded.{c}" for c in _update_cols)
     conn.execute(
         f"""
-        INSERT INTO position_current ({", ".join(CANONICAL_POSITION_CURRENT_COLUMNS)})
+        INSERT INTO {table_name} ({", ".join(CANONICAL_POSITION_CURRENT_COLUMNS)})
         VALUES ({", ".join(["?"] * len(CANONICAL_POSITION_CURRENT_COLUMNS))})
         ON CONFLICT(position_id) DO UPDATE SET
             {_update_set}

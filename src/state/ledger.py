@@ -67,9 +67,14 @@ def _legacy_alter_table_enabled(conn: sqlite3.Connection) -> bool:
     return bool(row and int(row[0] or 0))
 
 
-def assert_canonical_transaction_schema(conn: sqlite3.Connection) -> None:
-    event_columns = table_columns(conn, "position_events")
-    current_columns = table_columns(conn, "position_current")
+def assert_canonical_transaction_schema(
+    conn: sqlite3.Connection,
+    *,
+    event_table: str = "position_events",
+    current_table: str = "position_current",
+) -> None:
+    event_columns = table_columns(conn, event_table)
+    current_columns = table_columns(conn, current_table)
     if not event_columns or not current_columns:
         raise RuntimeError(
             "canonical transaction boundary requires migrated position_events and position_current tables"
@@ -609,13 +614,15 @@ def append_many_and_project(
     """
     import secrets
 
-    from src.state.owner_routed_write import require_owner_main
+    from src.state.owner_routed_write import owner_qualified_name
 
-    # bare-write helper (position_events + upsert_position_current, both trade-owned):
-    # fail-closed unless the caller's conn is trade-rooted, instead of silently writing a ghost.
-    require_owner_main(conn, "position_events")
-
-    assert_canonical_transaction_schema(conn)
+    event_table = owner_qualified_name(conn, "position_events")
+    current_table = owner_qualified_name(conn, "position_current")
+    assert_canonical_transaction_schema(
+        conn,
+        event_table=event_table,
+        current_table=current_table,
+    )
     require_payload_fields(
         projection, CANONICAL_POSITION_CURRENT_COLUMNS, label="projection"
     )
@@ -636,14 +643,18 @@ def append_many_and_project(
         for event in prepared_events:
             conn.execute(
                 f"""
-                INSERT INTO position_events ({", ".join(CANONICAL_POSITION_EVENT_COLUMNS)})
+                INSERT INTO {event_table} ({", ".join(CANONICAL_POSITION_EVENT_COLUMNS)})
                 VALUES ({", ".join(["?"] * len(CANONICAL_POSITION_EVENT_COLUMNS))})
                 """,
                 ordered_values(event, CANONICAL_POSITION_EVENT_COLUMNS),
             )
         projection_with_event_type = dict(projection)
         projection_with_event_type["_canonical_event_type"] = prepared_events[-1].get("event_type")
-        upsert_position_current(conn, projection_with_event_type)
+        upsert_position_current(
+            conn,
+            projection_with_event_type,
+            table_name=current_table,
+        )
         conn.execute(f"RELEASE SAVEPOINT {sp_name}")
     except Exception:
         conn.execute(f"ROLLBACK TO SAVEPOINT {sp_name}")

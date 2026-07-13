@@ -80,6 +80,8 @@ logger = logging.getLogger(__name__)
 _CLOSED_EVENTS_CUTOFF_DAYS = 30          # live scope: only events closed ≤30d ago
 _CLOSED_EVENTS_MAX_WALL_SECONDS = 120    # mandatory wall-cap antibody (Fitz §3)
 _CLOSED_EVENTS_PAGE_LIMIT = 200          # trading twin page size (existing)
+_GAMMA_EVENTS_PAGE_CAP = 100             # current Gamma /events response ceiling
+_SETTLEMENT_EVENT_TAG_SLUG = "weather"  # server-side settlement-family scope
 
 _NON_FILL_ENTRY_ECONOMICS_AUTHORITIES = frozenset({
     ENTRY_ECONOMICS_CORRECTED_COST_BASIS,
@@ -92,6 +94,15 @@ _NON_FILL_ENTRY_ECONOMICS_AUTHORITIES = frozenset({
 def _settlement_economics_for_position(pos) -> tuple[float, float]:
     if getattr(pos, "has_fill_economics_authority", False):
         return float(pos.effective_shares), float(pos.effective_cost_basis_usd)
+    if getattr(pos, "has_chain_observed_authority", False):
+        shares = float(pos.effective_shares)
+        cost_basis = float(pos.effective_cost_basis_usd)
+        if shares > 0.0 and cost_basis > 0.0:
+            return shares, cost_basis
+        raise ValueError(
+            "settlement P&L chain-observed economics are incomplete; "
+            f"shares={shares!r} cost_basis={cost_basis!r}"
+        )
     authority = str(getattr(pos, "entry_economics_authority", "") or "")
     corrected_marked = (
         bool(getattr(pos, "corrected_executable_economics_eligible", False))
@@ -290,12 +301,18 @@ class ResolvedMarketOutcome:
         }
 
 
-def _missing_tables(conn, table_names: tuple[str, ...]) -> list[str]:
+def _missing_tables(
+    conn,
+    table_names: tuple[str, ...],
+    *,
+    schema: str = "main",
+) -> list[str]:
     missing: list[str] = []
     for table_name in table_names:
         try:
             row = conn.execute(
-                "SELECT 1 FROM sqlite_master WHERE type='table' AND name = ? LIMIT 1",
+                f"SELECT 1 FROM {schema}.sqlite_master "
+                "WHERE type='table' AND name = ? LIMIT 1",
                 (table_name,),
             ).fetchone()
         except sqlite3.Error:
@@ -308,7 +325,16 @@ def _missing_tables(conn, table_names: tuple[str, ...]) -> list[str]:
 
 def _preflight_harvester_stage2_db_shape(trade_conn, shared_conn) -> dict:
     """Check whether Stage-2 calibration learning dependencies are installed."""
-    missing_trade = _missing_tables(trade_conn, _HARVESTER_STAGE2_TRADE_TABLES)
+    attached = {
+        str(row[1] if not hasattr(row, "keys") else row["name"])
+        for row in trade_conn.execute("PRAGMA database_list").fetchall()
+    }
+    trade_schema = "trades" if trade_conn is shared_conn and "trades" in attached else "main"
+    missing_trade = _missing_tables(
+        trade_conn,
+        _HARVESTER_STAGE2_TRADE_TABLES,
+        schema=trade_schema,
+    )
     missing_shared = _missing_tables(shared_conn, _HARVESTER_STAGE2_SHARED_TABLES)
     if missing_trade or missing_shared:
         return {
@@ -898,6 +924,10 @@ def run_harvester() -> dict:
     portfolio = load_portfolio()
 
     settled_events = _fetch_settled_events()
+    settled_events = _supplement_held_position_settlement_events(
+        portfolio,
+        settled_events,
+    )
     logger.info("Harvester: found %d settled events", len(settled_events))
 
     with forecasts_connection_with_trades_flocked(write_class="live") as conn:
@@ -1244,10 +1274,11 @@ def _fetch_settled_events() -> list[dict]:
         try:
             resp = httpx.get(f"{GAMMA_BASE}/events", params={
                 "closed": "true",
-                "limit": _CLOSED_EVENTS_PAGE_LIMIT,
+                "limit": min(_CLOSED_EVENTS_PAGE_LIMIT, _GAMMA_EVENTS_PAGE_CAP),
                 "offset": offset,
                 "order": "endDate",
                 "ascending": "false",
+                "tag_slug": _SETTLEMENT_EVENT_TAG_SLUG,
             }, timeout=15.0)
             resp.raise_for_status()
             batch = resp.json()
@@ -1272,9 +1303,12 @@ def _fetch_settled_events() -> list[dict]:
         )
         if oldest_end and oldest_end < cutoff_iso:
             break  # absorb this page; dedup downstream
-        if len(batch) < _CLOSED_EVENTS_PAGE_LIMIT:
+        if len(batch) < _GAMMA_EVENTS_PAGE_CAP:
             break
-        offset += _CLOSED_EVENTS_PAGE_LIMIT
+        # Gamma currently caps /events at 100 rows even when a larger limit is
+        # requested. Advance by facts actually received; advancing by the local
+        # 200-row budget skips every other server page.
+        offset += len(batch)
 
     # Dedup at event grain by (conditionId or id) — HTTP-cost optimisation only.
     seen: set[str] = set()
@@ -1295,6 +1329,90 @@ def _fetch_settled_events() -> list[dict]:
             events.append(event)
 
     return events
+
+
+def _supplement_held_position_settlement_events(
+    portfolio: PortfolioState,
+    events: list[dict],
+) -> list[dict]:
+    """Fetch exact current Gamma events for held positions missed by offset paging.
+
+    Gamma orders many daily weather events on the same ``endDate``. Offset pages
+    have no stable secondary cursor, so a held event can move across a page boundary
+    during the scan even when every page is fetched. The executable snapshot already
+    records the exact event slug used for each held condition; query those slugs
+    directly and merge only venue-closed events into this cycle.
+    """
+    condition_ids = sorted({
+        str(getattr(pos, "condition_id", "") or "")
+        for pos in portfolio.positions
+        if str(getattr(pos, "condition_id", "") or "")
+    })
+    if not condition_ids:
+        return events
+
+    from src.state.db import get_trade_connection_read_only
+
+    conn = get_trade_connection_read_only()
+    try:
+        slugs: list[str] = []
+        for condition_id in condition_ids:
+            row = conn.execute(
+                """
+                SELECT event_slug
+                FROM executable_market_snapshots
+                WHERE condition_id = ?
+                  AND event_slug IS NOT NULL
+                  AND event_slug != ''
+                ORDER BY captured_at DESC
+                LIMIT 1
+                """,
+                (condition_id,),
+            ).fetchone()
+            if row is not None:
+                slug = str(row[0] or "")
+                if slug:
+                    slugs.append(slug)
+    except sqlite3.Error as exc:
+        logger.warning(
+            "held-position settlement slug lookup failed; global paginator remains authoritative: %s",
+            exc,
+        )
+        return events
+    finally:
+        conn.close()
+
+    existing_slugs = {str(event.get("slug") or "") for event in events}
+    merged = list(events)
+    for slug in dict.fromkeys(slugs):
+        if slug in existing_slugs:
+            continue
+        try:
+            resp = httpx.get(
+                f"{GAMMA_BASE}/events",
+                params={"slug": slug},
+                timeout=15.0,
+            )
+            resp.raise_for_status()
+            matches = resp.json()
+        except (httpx.HTTPError, ValueError, TypeError) as exc:
+            logger.warning(
+                "held-position settlement fetch failed for slug=%s: %s",
+                slug,
+                exc,
+            )
+            continue
+        if not isinstance(matches, list):
+            continue
+        for event in matches:
+            if not isinstance(event, dict):
+                continue
+            if str(event.get("slug") or "") != slug or event.get("closed") is not True:
+                continue
+            merged.append(event)
+            existing_slugs.add(slug)
+            break
+    return merged
 
 
 def _json_list(value) -> Optional[list]:
@@ -2734,7 +2852,6 @@ def _settle_positions(
                          AND status NOT IN ('exited', 'unresolved_ghost', 'settled')""",
                     (round(pnl, 4), rtid),
                 )
-                conn.commit()
         except Exception as exc:
             logger.warning('SD-1: failed to update trade_decisions for %s: %s', pos.trade_id, exc)
 

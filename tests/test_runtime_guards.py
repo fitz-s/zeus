@@ -1,7 +1,7 @@
 """Runtime guard and live-cycle wiring tests."""
-# Lifecycle: created=2026-04-28; last_reviewed=2026-07-10; last_reused=2026-07-11
+# Lifecycle: created=2026-04-28; last_reviewed=2026-07-10; last_reused=2026-07-13
 # Created: 2026-04-28
-# Last reused/audited: 2026-07-11
+# Last reused/audited: 2026-07-13
 # Authority basis: docs/archive/2026-Q2/task_2026-05-15_live_order_e2e_verification/LIVE_ORDER_E2E_VERIFICATION_PLAN.md; task_2026-04-28_contamination_remediation Batch G; Phase 1B ENS snapshot persistence; Phase 1D forecast source policy; PR #56 MarketPhaseEvidence sidecar propagation; Wave26 explicit position env authority; task.md B3 exit executable snapshot identity; docs/operations/task_2026-05-21_live_side_effect_risk_boundaries/task.md P1-2 cluster projection; docs/archive/2026-Q2/task_2026-05-22_crosscheck_valid_window/CROSSCHECK_VALID_WINDOW_PLAN.md.
 # Purpose: Lock runtime guard and live-cycle wiring contracts.
 # Reuse: Run for runtime guard, live-only cleanup, and cycle wiring changes.
@@ -62,10 +62,12 @@ from src.state.portfolio import (
     CORRECTED_EXECUTABLE_PRICING_SEMANTICS_VERSION,
     DeprecatedStateFileError,
     ENTRY_ECONOMICS_AVG_FILL_PRICE,
+    ENTRY_ECONOMICS_CORRECTED_COST_BASIS,
     ENTRY_ECONOMICS_SUBMITTED_LIMIT,
     ExitContext,
     ExitDecision,
     FILL_AUTHORITY_NONE,
+    FILL_AUTHORITY_VENUE_POSITION_OBSERVED,
     FILL_AUTHORITY_VENUE_CONFIRMED_FULL,
     FILL_AUTHORITY_VENUE_CONFIRMED_PARTIAL,
     PortfolioState,
@@ -13284,6 +13286,26 @@ def test_settlement_economics_rejects_corrected_marker_without_fill_authority():
 
     with pytest.raises(ValueError, match="fill-derived economics"):
         _settlement_economics_for_position(corrected_without_fill)
+
+
+def test_settlement_economics_accepts_chain_observed_position_economics():
+    from src.execution.harvester import _settlement_economics_for_position
+
+    chain_observed = _position(
+        entry_price=0.64,
+        shares=9.577776,
+        size_usd=6.1297,
+        cost_basis_usd=6.1297,
+        chain_shares=9.577776,
+        chain_avg_price=0.64,
+        chain_cost_basis_usd=6.1297,
+        entry_economics_authority=ENTRY_ECONOMICS_CORRECTED_COST_BASIS,
+        fill_authority=FILL_AUTHORITY_VENUE_POSITION_OBSERVED,
+    )
+
+    assert _settlement_economics_for_position(chain_observed) == pytest.approx(
+        (9.577776, 6.1297)
+    )
 
 
 def test_lifecycle_kernel_maps_entry_runtime_states_for_order_status():

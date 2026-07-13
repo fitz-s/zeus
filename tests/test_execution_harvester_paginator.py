@@ -1,6 +1,6 @@
 # Created: 2026-05-11
-# Last reused or audited: 2026-05-11
-# Authority basis: PLAN.md §D.1, critic v4 ACCEPT 2026-05-11
+# Last reused or audited: 2026-07-13
+# Authority basis: current Gamma weather scope and 100-row server cap, verified 2026-07-13
 """Relationship tests — trading-side harvester paginator bound (D.1).
 
 Mirrors test_harvester_truth_writer_paginator.py for src/execution/harvester.py.
@@ -9,7 +9,9 @@ Additional assertion: temperature-keyword filter is preserved.
 from __future__ import annotations
 
 import time
+import sqlite3
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -39,8 +41,12 @@ class FakeResponse:
 # Test 1: HTTP params include order=endDate&ascending=false
 # ---------------------------------------------------------------------------
 def test_execution_http_params_include_descending_order():
-    """Trading-side paginator must pass order=endDate&ascending=false."""
-    from src.execution.harvester import _fetch_settled_events
+    """Trading-side paginator must request the current weather-scoped server page."""
+    from src.execution.harvester import (
+        _fetch_settled_events,
+        _GAMMA_EVENTS_PAGE_CAP,
+        _SETTLEMENT_EVENT_TAG_SLUG,
+    )
 
     recent_event = _make_event("cid-001", _iso(1), "temperature high/low")
     calls = []
@@ -58,6 +64,34 @@ def test_execution_http_params_include_descending_order():
     for p in calls:
         assert p.get("order") == "endDate", f"Missing order param in {p}"
         assert str(p.get("ascending")).lower() == "false", f"Expected ascending=false in {p}"
+        assert p.get("limit") == _GAMMA_EVENTS_PAGE_CAP
+        assert p.get("tag_slug") == _SETTLEMENT_EVENT_TAG_SLUG == "weather"
+
+
+def test_execution_paginator_advances_by_server_capped_page_length():
+    """A full 100-row Gamma page must not be mistaken for the final page."""
+    from src.execution.harvester import (
+        _fetch_settled_events,
+        _GAMMA_EVENTS_PAGE_CAP,
+    )
+
+    page0 = [
+        _make_event(f"future-{i}", _iso(-1), "temperature future")
+        for i in range(_GAMMA_EVENTS_PAGE_CAP)
+    ]
+    target = _make_event("current-weather", _iso(1), "temperature current")
+    pages = [page0, [target]]
+    offsets = []
+
+    def fake_get(url, *, params, timeout):
+        offsets.append(params["offset"])
+        return FakeResponse(pages[len(offsets) - 1])
+
+    with patch("httpx.get", side_effect=fake_get):
+        results = _fetch_settled_events()
+
+    assert offsets == [0, _GAMMA_EVENTS_PAGE_CAP]
+    assert any(event.get("conditionId") == "current-weather" for event in results)
 
 
 # ---------------------------------------------------------------------------
@@ -189,3 +223,41 @@ def test_execution_dedup_by_condition_id():
 
     matching = [r for r in results if r.get("conditionId") == shared_id]
     assert len(matching) == 1, f"Expected 1 deduped event with conditionId={shared_id}, got {len(matching)}"
+
+
+def test_held_position_event_is_fetched_by_exact_snapshot_slug():
+    from src.execution.harvester import _supplement_held_position_settlement_events
+
+    conn = sqlite3.connect(":memory:")
+    conn.execute(
+        "CREATE TABLE executable_market_snapshots "
+        "(condition_id TEXT, event_slug TEXT, captured_at TEXT)"
+    )
+    conn.execute(
+        "INSERT INTO executable_market_snapshots VALUES (?, ?, ?)",
+        ("condition-held", "held-weather-event", "2026-07-13T18:00:00Z"),
+    )
+    portfolio = SimpleNamespace(
+        positions=[SimpleNamespace(condition_id="condition-held")]
+    )
+    held_event = {
+        "id": "event-held",
+        "slug": "held-weather-event",
+        "closed": True,
+        "title": "Highest temperature in Held City?",
+        "markets": [],
+    }
+    calls = []
+
+    def fake_get(url, *, params, timeout):
+        calls.append(params)
+        return FakeResponse([held_event])
+
+    with patch(
+        "src.state.db.get_trade_connection_read_only",
+        return_value=conn,
+    ), patch("httpx.get", side_effect=fake_get):
+        result = _supplement_held_position_settlement_events(portfolio, [])
+
+    assert calls == [{"slug": "held-weather-event"}]
+    assert result == [held_event]

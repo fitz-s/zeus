@@ -256,3 +256,32 @@ def test_settlement_outcomes_migrates_via_apply_canonical_schema():
 
     row = conn.execute("SELECT authority FROM settlement_outcomes").fetchone()
     assert row[0] == "DISPUTED"
+
+
+def test_migration_survives_unrelated_broken_view() -> None:
+    conn = _legacy_settlements_conn(n_verified=1, n_quarantined=1)
+    conn.execute(
+        "CREATE VIEW unrelated_broken_view AS SELECT * FROM missing_owner_table"
+    )
+
+    _migrate_authority_tier_disputed(conn, "settlements")
+
+    sql = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='settlements'"
+    ).fetchone()[0]
+    assert "'DISPUTED'" in sql
+    assert "'QUARANTINED'" not in sql
+    assert conn.execute(
+        "SELECT COUNT(*) FROM settlements WHERE authority='DISPUTED'"
+    ).fetchone()[0] == 1
+
+
+def test_migration_removes_empty_residual_from_prior_failed_attempt() -> None:
+    conn = _legacy_settlements_conn(n_verified=1, n_quarantined=1)
+    conn.execute("CREATE TABLE settlements_disputed_migrated (placeholder TEXT)")
+
+    _migrate_authority_tier_disputed(conn, "settlements")
+
+    assert conn.execute(
+        "SELECT COUNT(*) FROM settlements WHERE authority='DISPUTED'"
+    ).fetchone()[0] == 1
