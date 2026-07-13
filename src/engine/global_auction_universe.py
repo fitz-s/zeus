@@ -781,8 +781,12 @@ def bind_current_global_probability_tokens(
             if not isinstance(market, Mapping):
                 raise ValueError("GLOBAL_CURRENT_GAMMA_MARKET_INVALID")
             condition_id = str(market.get("conditionId") or "").strip()
-            if not condition_id or condition_id not in requested_conditions:
-                continue
+            if not condition_id:
+                raise ValueError("GLOBAL_CURRENT_GAMMA_MARKET_INVALID")
+            if condition_id not in requested_conditions:
+                raise ValueError(
+                    f"GLOBAL_CURRENT_GAMMA_MARKET_UNEXPECTED:{condition_id}"
+                )
             if condition_id in market_by_condition:
                 raise ValueError(
                     f"GLOBAL_CURRENT_GAMMA_MARKET_AMBIGUOUS:{condition_id}"
@@ -802,23 +806,27 @@ def bind_current_global_probability_tokens(
             event_by_id: dict[str, Mapping[str, object]] = {}
             for market in family_markets:
                 nested_events = market.get("events")
-                if not isinstance(nested_events, list):
-                    continue
-                for nested_event in nested_events:
-                    if not isinstance(nested_event, Mapping):
-                        raise ValueError(
-                            f"GLOBAL_CURRENT_GAMMA_EVENT_INVALID:{family_key}"
-                        )
-                    event_id = str(nested_event.get("id") or "").strip()
-                    if not event_id:
-                        continue
-                    previous = event_by_id.get(event_id)
-                    if previous is not None and dict(previous) != dict(nested_event):
-                        raise ValueError(
-                            "GLOBAL_CURRENT_GAMMA_EVENT_METADATA_AMBIGUOUS:"
-                            f"{family_key}"
-                        )
-                    event_by_id[event_id] = nested_event
+                if not isinstance(nested_events, list) or len(nested_events) != 1:
+                    raise ValueError(
+                        f"GLOBAL_CURRENT_GAMMA_EVENT_INVALID:{family_key}"
+                    )
+                nested_event = nested_events[0]
+                if not isinstance(nested_event, Mapping):
+                    raise ValueError(
+                        f"GLOBAL_CURRENT_GAMMA_EVENT_INVALID:{family_key}"
+                    )
+                event_id = str(nested_event.get("id") or "").strip()
+                if not event_id:
+                    raise ValueError(
+                        f"GLOBAL_CURRENT_GAMMA_EVENT_INVALID:{family_key}"
+                    )
+                previous = event_by_id.get(event_id)
+                if previous is not None and dict(previous) != dict(nested_event):
+                    raise ValueError(
+                        "GLOBAL_CURRENT_GAMMA_EVENT_METADATA_AMBIGUOUS:"
+                        f"{family_key}"
+                    )
+                event_by_id[event_id] = nested_event
             if len(event_by_id) != 1:
                 raise ValueError(
                     f"GLOBAL_CURRENT_GAMMA_EVENT_IDENTITY_AMBIGUOUS:{family_key}"

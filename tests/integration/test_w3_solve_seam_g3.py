@@ -2284,6 +2284,32 @@ def test_current_gamma_identity_fills_missing_no_without_changing_q():
             get_gamma_markets=lambda _condition_ids: (*batch_markets, None),
             metadata_sink={},
         )
+    malformed_batches = (
+        ((*batch_markets, {}), "GLOBAL_CURRENT_GAMMA_MARKET_INVALID"),
+        (
+            ({key: value for key, value in batch_markets[0].items() if key != "events"},
+             *batch_markets[1:]),
+            "GLOBAL_CURRENT_GAMMA_EVENT_INVALID",
+        ),
+        (
+            ({**batch_markets[0], "events": batch_event}, *batch_markets[1:]),
+            "GLOBAL_CURRENT_GAMMA_EVENT_INVALID",
+        ),
+        (
+            ({**batch_markets[0], "events": [{**batch_event, "id": ""}]},
+             *batch_markets[1:]),
+            "GLOBAL_CURRENT_GAMMA_EVENT_INVALID",
+        ),
+    )
+    for malformed_batch, rejection in malformed_batches:
+        with pytest.raises(ValueError, match=rejection):
+            bind_current_global_probability_tokens(
+                forecast,
+                probability_witnesses={original.family_key: original},
+                get_gamma_event=lambda _slug: pytest.fail("per-event Gamma fallback used"),
+                get_gamma_markets=lambda _condition_ids, rows=malformed_batch: rows,
+                metadata_sink={},
+            )
     conflicting_events = (
         {**batch_markets[0], "events": [{"id": "different-event"}]},
         *batch_markets[1:],
