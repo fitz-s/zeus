@@ -805,6 +805,7 @@ def _global_select(
     current_executions=None, current_wealth_identity=None, universe=None,
     current_universe_identity=None,
     candidate_capital_limit_resolver=None,
+    candidate_policy_rejection_resolver=None,
     fractional_kelly_multiplier="1",
 ):
     candidates = tuple(candidates)
@@ -855,6 +856,7 @@ def _global_select(
         fractional_kelly_multiplier=Decimal(fractional_kelly_multiplier),
         decision_at_utc=_DECISION_AT,
         candidate_capital_limit_resolver=candidate_capital_limit_resolver,
+        candidate_policy_rejection_resolver=candidate_policy_rejection_resolver,
     )
 
 
@@ -937,6 +939,74 @@ def test_global_single_order_buy_can_beat_sell_and_cash():
     assert decision.candidate is buy
     assert decision.cash_proceeds_usd == 0
     assert decision.robust_delta_log_wealth > 0
+
+
+def test_global_single_order_entry_pause_blocks_buy_but_preserves_sell_and_cash():
+    sell = _global_sell_candidate(
+        candidate_id="sell-under-entry-pause",
+        family="sell-under-entry-pause-family",
+        side="YES",
+        held_q=0.15,
+        bids=(("0.40", "4"), ("0.30", "6")),
+        shares="10",
+    )
+    buy = _global_candidate(
+        candidate_id="buy-blocked-by-entry-pause",
+        family="buy-blocked-by-entry-pause-family",
+        side="YES",
+        q=0.99,
+        levels=(("0.10", "20"),),
+    )
+
+    decision = _global_select(
+        (sell, buy),
+        floor="100",
+        ceiling="110",
+        cash="100",
+        cap="5",
+        candidate_policy_rejection_resolver=lambda candidate: (
+            "ENTRY_ACTION_PAUSED:external:operator"
+            if getattr(candidate, "action", "BUY") == "BUY"
+            else None
+        ),
+    )
+
+    assert decision.candidate is sell
+    assert decision.cash_proceeds_usd == Decimal("3.4")
+    assert decision.robust_delta_log_wealth > 0
+    assert decision.rejection_reasons[buy.candidate_id] == (
+        "ENTRY_ACTION_PAUSED:external:operator"
+    )
+
+
+@pytest.mark.parametrize(
+    ("resolver", "reason"),
+    (
+        (lambda _candidate: "", "CANDIDATE_POLICY_AUTHORITY_INVALID"),
+        (
+            lambda _candidate: (_ for _ in ()).throw(RuntimeError("policy unavailable")),
+            "CANDIDATE_POLICY_AUTHORITY_MISSING",
+        ),
+    ),
+)
+def test_global_single_order_policy_authority_fault_invalidates_epoch(
+    resolver, reason
+):
+    buy = _global_candidate(
+        candidate_id="buy-policy-authority-fault",
+        family="buy-policy-authority-fault-family",
+        side="YES",
+        q=0.99,
+        levels=(("0.10", "20"),),
+    )
+
+    decision = _global_select(
+        (buy,), candidate_policy_rejection_resolver=resolver
+    )
+
+    assert decision.candidate is None
+    assert decision.no_trade_reason == "GLOBAL_EPOCH_SUPERSEDED"
+    assert decision.rejection_reasons == {buy.candidate_id: reason}
 
 
 def test_global_single_order_cash_beats_non_positive_buy_and_sell():

@@ -286,6 +286,10 @@ def select_prepared_global_auction(
         [GlobalSingleOrderAnyCandidate, str, str], Decimal
     ]
     | None = None,
+    candidate_policy_rejection_resolver: Callable[
+        [GlobalSingleOrderAnyCandidate], str | None
+    ]
+    | None = None,
     preflight_excluded_by_family: Mapping[str, str] | None = None,
     payoff_q_lcb_by_candidate: Mapping[tuple[str, str, str, str], float]
     | None = None,
@@ -501,6 +505,7 @@ def select_prepared_global_auction(
         decision_at_utc=decision_at_utc,
         candidate_capital_limit_resolver=_candidate_capital_limit,
         candidate_payoff_q_lcb_resolver=_candidate_payoff_q_lcb,
+        candidate_policy_rejection_resolver=candidate_policy_rejection_resolver,
     )
     if decision.candidate is None:
         return PreparedGlobalAuctionResult(decision=decision, winner_event_id=None)

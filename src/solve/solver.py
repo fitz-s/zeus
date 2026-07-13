@@ -2083,6 +2083,10 @@ def select_global_single_order(
         [GlobalSingleOrderAnyCandidate], float | None
     ]
     | None = None,
+    candidate_policy_rejection_resolver: Callable[
+        [GlobalSingleOrderAnyCandidate], str | None
+    ]
+    | None = None,
 ) -> GlobalSingleOrderDecision:
     """Select one current executable order across every family and native side.
 
@@ -2175,6 +2179,13 @@ def select_global_single_order(
         reason: str | None = candidate.eligibility_reason
         q_samples: np.ndarray | None = None
         probability_witness = probability_witnesses.get(candidate.family_key)
+        if reason is None and candidate_policy_rejection_resolver is not None:
+            try:
+                policy_reason = candidate_policy_rejection_resolver(candidate)
+            except Exception:  # noqa: BLE001 - lost policy authority invalidates the epoch
+                policy_reason = "CANDIDATE_POLICY_AUTHORITY_MISSING"
+            if policy_reason is not None:
+                reason = str(policy_reason).strip() or "CANDIDATE_POLICY_AUTHORITY_INVALID"
         if reason is None:
             try:
                 current_probability = current_probability_resolver(candidate.family_key)
@@ -2251,6 +2262,8 @@ def select_global_single_order(
         "EXECUTION_CURVE_SUPERSEDED",
         "QUOTE_EXPIRED",
         "CAPITAL_IDENTITY_SUPERSEDED",
+        "CANDIDATE_POLICY_AUTHORITY_MISSING",
+        "CANDIDATE_POLICY_AUTHORITY_INVALID",
     }
     if any(reason in epoch_invalidating_reasons for reason in rejections.values()):
         return GlobalSingleOrderDecision(

@@ -517,6 +517,8 @@ def process_current_global_batch(
     selection_snapshot_connections: Sequence[sqlite3.Connection] = (),
     current_capital_limit_resolver: Callable[[object, str, str], object]
     | None = None,
+    candidate_policy_rejection_resolver: Callable[[object], str | None]
+    | None = None,
     fractional_kelly_multiplier: Decimal = Decimal("1"),
     claim_unpaged_winner: Callable[[OpportunityEvent], bool] | None = None,
 ) -> GlobalBatchSubmitResult:
@@ -973,6 +975,9 @@ def process_current_global_batch(
                 decision_at_utc=selection_at,
                 book_epoch=attempt_book_epoch,
                 current_capital_limit_resolver=current_capital_limit_resolver,
+                candidate_policy_rejection_resolver=(
+                    candidate_policy_rejection_resolver
+                ),
                 preflight_excluded_by_family=preflight_excluded_by_family,
                 payoff_q_lcb_by_candidate=payoff_q_lcb_by_candidate,
             )

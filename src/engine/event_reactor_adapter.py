@@ -5213,6 +5213,20 @@ def event_bound_live_adapter_from_trade_conn(
                 ),
             )
 
+        global_entry_pause_reason = (
+            _entry_pause_blocks_live_submit(live_cap_conn or trade_conn)
+            if real_order_submit_enabled
+            else None
+        )
+
+        def _current_candidate_policy_rejection(candidate) -> str | None:
+            if (
+                global_entry_pause_reason is not None
+                and str(getattr(candidate, "action", "BUY") or "BUY") == "BUY"
+            ):
+                return f"ENTRY_ACTION_PAUSED:{global_entry_pause_reason}"
+            return None
+
         try:
             return process_current_global_batch(
                 events,
@@ -5254,6 +5268,9 @@ def event_bound_live_adapter_from_trade_conn(
                 portfolio_state_provider=None,
                 current_book_epoch_provider=_current_book_epoch,
                 current_capital_limit_resolver=_current_entry_capital_limit,
+                candidate_policy_rejection_resolver=(
+                    _current_candidate_policy_rejection
+                ),
                 fractional_kelly_multiplier=Decimal(
                     str(_runtime_kelly_multiplier())
                 ),
