@@ -1,5 +1,5 @@
 # Created: 2026-06-09
-# Last reused or audited: 2026-06-09
+# Last reused or audited: 2026-07-13
 # Authority basis: 2026-06-09 anchor-lag root cause (/tmp/anchor_lag_report.md, verified against
 #   src/data/replacement_forecast_production.py + replacement_forecast_current_target_plan.py):
 #   the ALREADY_COVERED / HAVE_RAW_MANIFESTS short-circuits contained NO cycle comparison, so once
