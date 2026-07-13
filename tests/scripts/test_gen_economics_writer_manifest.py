@@ -41,9 +41,11 @@ from scripts.gen_economics_writer_manifest import (  # noqa: E402
 # LX-E moved live_profit_audit). The site's identity is the function.
 # settlement_skill_attribution.writeback_settlement_pnl_to_audit is absent by
 # DESIGN: LX-E excised it (world_grade_pnl_usd lives in the grade receipt now).
+# position_duplicate_consolidator._merge_equivalent_rows is absent by DESIGN:
+# F2 (2794f8bb0) excised its synthesized-economics writes — it now appends only
+# the POSITION_IDENTITY_SUPERSEDED fact.
 _SEED_BYPASS_WRITERS = {
     ("src/state/position_duplicate_consolidator.py", "_void_row"),
-    ("src/state/position_duplicate_consolidator.py", "_merge_equivalent_rows"),
     ("src/execution/command_recovery.py", "_append_exit_order_fill_projection"),
     ("src/execution/command_recovery.py", "_append_exit_filled_projection"),
     ("src/execution/command_recovery.py", "repair_confirmed_phantom_voids"),
@@ -104,16 +106,16 @@ def test_funnel_writer_unresolved_assumes_full_forbidden_set(hits) -> None:
 
 
 def test_dict_driven_dynamic_writer_resolves_to_its_actual_columns(hits) -> None:
-    """position_duplicate_consolidator.py's UPDATE builds its SET clause from
-    a local dict (`updates = {...}`) inside the SAME function — the scanner
-    must resolve the real column names from that dict, not fall back to the
-    full forbidden set."""
+    """_void_row's UPDATE names its columns inside the SAME function — the
+    scanner must resolve the real column names, not fall back to the full
+    forbidden set. (_merge_equivalent_rows, the original dict-driven exemplar,
+    was excised by F2 — _void_row keeps this scanner behavior covered.)"""
     hit = next(
         h for h in hits
-        if h.kind == "WRITE" and (h.file, h.function) == ("src/state/position_duplicate_consolidator.py", "_merge_equivalent_rows")
+        if h.kind == "WRITE" and (h.file, h.function) == ("src/state/position_duplicate_consolidator.py", "_void_row")
     )
     assert hit.resolved is True
-    assert set(hit.columns) == {"shares", "cost_basis_usd", "size_usd", "chain_shares", "entry_price"}
+    assert set(hit.columns) == {"shares", "cost_basis_usd"}
 
 
 def test_no_duplicate_hits_for_the_same_site() -> None:
