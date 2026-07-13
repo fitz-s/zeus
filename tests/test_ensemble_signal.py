@@ -449,14 +449,16 @@ def test_vectorized_mc_is_bit_identical_to_scalar_oracle(
     if (total := expected.sum()) > 0:
         expected /= total
 
+    actual_rng = np.random.default_rng(20260713)
     actual = p_raw_vector_from_maxes(
         members,
         NYC,
         semantics,
         bins,
         n_mc=n_mc,
-        rng=np.random.default_rng(20260713),
+        rng=actual_rng,
         extra_member_sigma=extra_member_sigma,
     )
 
     np.testing.assert_array_equal(actual, expected)
+    assert actual_rng.bit_generator.state == scalar_rng.bit_generator.state
