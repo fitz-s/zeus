@@ -36,28 +36,28 @@ from scripts.gen_economics_writer_manifest import (  # noqa: E402
 # the CURRENT repo's line numbers (drift from the original census's line
 # numbers is expected as the surrounding code moves; the site itself must
 # still be found).
+# Seed sites are pinned by (file, enclosing function) — NOT line number —
+# because sibling packets keep shifting offsets (LX-G moved exchange_reconcile,
+# LX-E moved live_profit_audit). The site's identity is the function.
+# settlement_skill_attribution.writeback_settlement_pnl_to_audit is absent by
+# DESIGN: LX-E excised it (world_grade_pnl_usd lives in the grade receipt now).
 _SEED_BYPASS_WRITERS = {
-    ("src/state/position_duplicate_consolidator.py", 185),
-    ("src/state/position_duplicate_consolidator.py", 370),
-    ("src/execution/command_recovery.py", 2460),
-    ("src/execution/command_recovery.py", 6214),
-    ("src/execution/command_recovery.py", 8281),
-    ("src/execution/command_recovery.py", 8386),
-    ("src/execution/command_recovery.py", 8617),
-    ("src/execution/command_recovery.py", 8682),
-    # exchange_reconcile/exit_lifecycle offsets shifted by the LX-G ghost-sell
-    # fix (19976478d) landing before this packet on the session branch.
-    ("src/execution/exit_lifecycle.py", 4680),
-    ("src/execution/exchange_reconcile.py", 1429),
-    ("src/execution/exchange_reconcile.py", 1820),
-    ("src/events/edli_position_bridge.py", 1002),
+    ("src/state/position_duplicate_consolidator.py", "_void_row"),
+    ("src/state/position_duplicate_consolidator.py", "_merge_equivalent_rows"),
+    ("src/execution/command_recovery.py", "_append_exit_order_fill_projection"),
+    ("src/execution/command_recovery.py", "_append_exit_filled_projection"),
+    ("src/execution/command_recovery.py", "repair_confirmed_phantom_voids"),
+    ("src/execution/command_recovery.py", "repair_confirmed_chain_absence_positive_projections"),
+    ("src/execution/exit_lifecycle.py", "_close_pending_exit_from_trade_fact"),
+    ("src/execution/exchange_reconcile.py", "_restore_position_to_pending_exit_for_recovered_sell"),
+    ("src/execution/exchange_reconcile.py", "_tag_external_operator_closed_position_holdings"),
+    ("src/events/edli_position_bridge.py", "_absorb_same_order_duplicate_bridge_fill"),
 }
 
-_SEED_FUNNEL_WRITER = ("src/state/projection.py", 659)
+_SEED_FUNNEL_WRITER = ("src/state/projection.py", "upsert_position_current")
 
 _SEED_EDLI_AUDIT_WRITERS = {
-    ("src/events/live_profit_audit.py", 237),
-    ("src/analysis/settlement_skill_attribution.py", 1127),
+    ("src/events/live_profit_audit.py", "LiveProfitAuditLedger.insert_record"),
 }
 
 
@@ -67,8 +67,8 @@ def hits():
 
 
 @pytest.fixture(scope="module")
-def writer_locations(hits) -> set[tuple[str, int]]:
-    return {(h.file, h.line) for h in hits if h.kind == "WRITE"}
+def writer_locations(hits) -> set[tuple[str, str]]:
+    return {(h.file, h.function) for h in hits if h.kind == "WRITE"}
 
 
 def test_seed_bypass_writers_all_present(writer_locations: set[tuple[str, int]]) -> None:
@@ -95,7 +95,7 @@ def test_funnel_writer_unresolved_assumes_full_forbidden_set(hits) -> None:
 
     funnel = [
         h for h in hits
-        if h.kind == "WRITE" and (h.file, h.line) == _SEED_FUNNEL_WRITER
+        if h.kind == "WRITE" and (h.file, h.function) == _SEED_FUNNEL_WRITER
     ]
     assert len(funnel) == 1
     hit = funnel[0]
@@ -110,7 +110,7 @@ def test_dict_driven_dynamic_writer_resolves_to_its_actual_columns(hits) -> None
     full forbidden set."""
     hit = next(
         h for h in hits
-        if h.kind == "WRITE" and (h.file, h.line) == ("src/state/position_duplicate_consolidator.py", 370)
+        if h.kind == "WRITE" and (h.file, h.function) == ("src/state/position_duplicate_consolidator.py", "_merge_equivalent_rows")
     )
     assert hit.resolved is True
     assert set(hit.columns) == {"shares", "cost_basis_usd", "size_usd", "chain_shares", "entry_price"}
