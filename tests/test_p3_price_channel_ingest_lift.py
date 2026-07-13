@@ -32,9 +32,12 @@ from __future__ import annotations
 import ast
 import inspect
 import sqlite3
+import time
 import types
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+
+import pytest
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 _MAIN_PY = _REPO_ROOT / "src" / "main.py"
@@ -960,6 +963,29 @@ def test_held_quote_refresh_orders_missing_and_oldest_feasibility_first():
     )
 
     assert ordered == ["missing-token", "stale-token", "newer-token"]
+
+
+def test_price_channel_sqlite_wait_is_bounded_by_writer_hold_budget(monkeypatch, tmp_path):
+    from src.ingest import price_channel_ingest as lane
+
+    db_path = tmp_path / "contended.db"
+    owner = sqlite3.connect(db_path)
+    waiter = sqlite3.connect(db_path)
+    owner.execute("CREATE TABLE facts (id INTEGER PRIMARY KEY)")
+    owner.commit()
+    owner.execute("BEGIN IMMEDIATE")
+    monkeypatch.setattr(lane, "PRICE_CHANNEL_DB_WRITE_MAX_HOLD_MS", 25)
+    lane._bound_price_channel_sqlite_wait(waiter)
+    started = time.monotonic()
+    try:
+        with pytest.raises(sqlite3.OperationalError, match="database is locked"):
+            waiter.execute("INSERT INTO facts DEFAULT VALUES")
+        assert time.monotonic() - started < 0.5
+        assert waiter.execute("PRAGMA busy_timeout").fetchone()[0] == 25
+    finally:
+        owner.rollback()
+        waiter.close()
+        owner.close()
 
 
 def test_feasibility_age_reads_latest_state_without_append_scan():

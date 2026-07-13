@@ -154,6 +154,20 @@ PRICE_CHANNEL_CLOB_REQUEST_MAX_TIMEOUT_SECONDS = 2.5
 PRICE_CHANNEL_CLOB_REQUEST_DEADLINE_RESERVE_SECONDS = 0.25
 
 
+def _bound_price_channel_sqlite_wait(conn) -> None:
+    """Keep SQLite contention inside the price-channel writer hold budget.
+
+    The composed world+trade gate serializes every live writer behind this
+    process. A connection retaining the repo-wide 30s SQLite busy timeout can
+    therefore hold all three gates while waiting for a legacy writer, turning
+    ordinary backpressure into a cross-process deadlock. The gate's declared
+    1s maximum hold is only telemetry; make it executable for each attached
+    price-channel writer connection.
+    """
+
+    conn.execute(f"PRAGMA busy_timeout = {PRICE_CHANNEL_DB_WRITE_MAX_HOLD_MS}")
+
+
 def _price_channel_clob_timeout(deadline_monotonic: float):
     """Return a per-request CLOB timeout bounded by the refresh wall-clock budget."""
 
@@ -2107,6 +2121,7 @@ def _edli_refresh_held_position_quote_evidence(
     conn = None
     try:
         conn = get_world_connection_with_trades_required(write_class="live")
+        _bound_price_channel_sqlite_wait(conn)
 
         def _commit_atomic_cross_db() -> None:
             conn.commit()
@@ -2298,6 +2313,7 @@ def _edli_refresh_candidate_priority_quote_evidence(
     conn = None
     try:
         conn = get_world_connection_with_trades_required(write_class="live")
+        _bound_price_channel_sqlite_wait(conn)
 
         def _commit_atomic_cross_db() -> None:
             conn.commit()
@@ -2546,6 +2562,7 @@ def _edli_market_channel_ingestor_cycle() -> dict | None:
         # starve every other writer. Feasibility writes are schema-qualified 'trades'
         # so they reach the runtime-read trades table, never the world ghost copy.
         conn = get_world_connection_with_trades_required(write_class="live")
+        _bound_price_channel_sqlite_wait(conn)
         world_conn = conn  # EventWriter target = world MAIN (unqualified opportunity_events)
         feasibility_conn = conn
 

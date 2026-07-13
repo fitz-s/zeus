@@ -127,6 +127,10 @@ def test_refresh_uses_non_flocked_world_connection_with_trades(func_name):
         f"chunk, and holding writer flocks across that network window starves "
         f"live redecision snapshot refresh."
     )
+    assert "_bound_price_channel_sqlite_wait" in called, (
+        f"{func_name} must cap SQLite busy wait before entering the composed "
+        "world+trade writer gate."
+    )
 
 
 @pytest.mark.parametrize("func_name", _REFRESH_FUNCS)
@@ -222,6 +226,10 @@ def test_forever_ingestor_uses_single_attached_connection():
     assert "get_world_connection_with_trades_required" in called, (
         "_edli_market_channel_ingestor_cycle must use the single-connection ATTACH "
         "helper get_world_connection_with_trades_required (INV-37)."
+    )
+    assert "_bound_price_channel_sqlite_wait" in called, (
+        "the forever price-channel connection must not hold all writer gates "
+        "for the repo-wide SQLite busy timeout"
     )
 
 
