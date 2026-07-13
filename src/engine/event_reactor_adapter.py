@@ -4176,22 +4176,17 @@ def event_bound_live_adapter_from_trade_conn(
     def _prepare_global_event(
         event: OpportunityEvent,
         decision_time: datetime,
-        *,
-        selection_conn: sqlite3.Connection | None = None,
     ) -> EventSubmissionReceipt:
         """Prepare current family q without reading or writing executable prices."""
 
         from src.contracts.executable_market_snapshot import FRESHNESS_WINDOW_DEFAULT
 
         try:
-            probability_conn = selection_conn or forecast_conn
-            probability_topology_conn = selection_conn or topology_conn
-            probability_observation_conn = selection_conn or calibration_conn
             prepared = _prepare_current_global_probability_family(
                 event,
-                forecast_conn=probability_conn,
-                topology_conn=probability_topology_conn,
-                observation_conn=probability_observation_conn,
+                forecast_conn=forecast_conn,
+                topology_conn=topology_conn,
+                observation_conn=calibration_conn,
                 decision_time=decision_time,
                 max_age=FRESHNESS_WINDOW_DEFAULT,
             )
@@ -5167,11 +5162,7 @@ def event_bound_live_adapter_from_trade_conn(
                 forecast_conn=forecast_conn,
                 trade_conn=trade_conn,
                 payload_reader=_payload,
-                prepare_event=lambda event, at: _prepare_global_event(
-                    event,
-                    at,
-                    selection_conn=forecast_conn,
-                ),
+                prepare_event=_prepare_global_event,
                 actuate_winner=_actuate,
                 preflight_winner=_preflight,
                 actuate_preflighted_winner=GlobalOneShotActuator(

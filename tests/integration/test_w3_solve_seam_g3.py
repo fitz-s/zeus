@@ -1,6 +1,6 @@
 # Created: 2026-07-03
-# Last reused/audited: 2026-07-11
-# Authority basis: W3 SOLVE design packet and 2026-07-11 global fractional-Kelly repair
+# Last reused/audited: 2026-07-13
+# Authority basis: W3 SOLVE design packet, global fractional-Kelly repair, and current Day0 global-cut routing
 """G3 harness for the W3 SOLVE promotion seam (qkernel_spine_bridge.py w3_solve_enabled flag).
 
 Proves the promotion flag is a SAFE, reversible, single-point cutover before any live enablement:
@@ -763,7 +763,7 @@ def test_current_global_probability_prepare_does_not_require_price_snapshot(
     )
 
 
-def test_live_adapter_routes_global_scope_through_world_connection(monkeypatch):
+def test_live_adapter_routes_each_global_truth_to_its_owner(monkeypatch):
     import src.data.polymarket_client as polymarket_client
     import src.engine.global_auction_universe as universe
 
@@ -771,7 +771,32 @@ def test_live_adapter_routes_global_scope_through_world_connection(monkeypatch):
     forecast = sqlite3.connect(":memory:")
     topology = sqlite3.connect(":memory:")
     world = sqlite3.connect(":memory:")
+    forecast.execute("CREATE TABLE readiness_state (marker TEXT NOT NULL)")
+    forecast.execute("INSERT INTO readiness_state VALUES ('fresh-forecast')")
+    topology.execute("CREATE TABLE market_events (marker TEXT NOT NULL)")
+    topology.execute("INSERT INTO market_events VALUES ('current-topology')")
+    world.execute("CREATE TABLE readiness_state (marker TEXT NOT NULL)")
+    world.execute("INSERT INTO readiness_state VALUES ('stale-world-shadow')")
+    world.execute("CREATE TABLE opportunity_events (marker TEXT NOT NULL)")
+    world.execute("INSERT INTO opportunity_events VALUES ('authorized-day0')")
     captured = {}
+    prepared_with = {}
+
+    def fake_prepare(_event, **kwargs):
+        prepared_with.update(kwargs)
+        assert kwargs["forecast_conn"].execute(
+            "SELECT marker FROM readiness_state"
+        ).fetchone()[0] == "fresh-forecast"
+        assert kwargs["topology_conn"].execute(
+            "SELECT marker FROM market_events"
+        ).fetchone()[0] == "current-topology"
+        assert kwargs["observation_conn"].execute(
+            "SELECT marker FROM opportunity_events"
+        ).fetchone()[0] == "authorized-day0"
+        return SimpleNamespace(
+            probability_witness=SimpleNamespace(family_key="family-dallas"),
+            candidate_seeds=(),
+        )
 
     def fake_process(events, **kwargs):
         captured.update(kwargs)
@@ -781,6 +806,11 @@ def test_live_adapter_routes_global_scope_through_world_connection(monkeypatch):
         global_batch_runtime,
         "process_current_global_batch",
         fake_process,
+    )
+    monkeypatch.setattr(
+        era,
+        "_prepare_current_global_probability_family",
+        fake_prepare,
     )
     adapter = era.event_bound_live_adapter_from_trade_conn(
         trade,
@@ -804,6 +834,14 @@ def test_live_adapter_routes_global_scope_through_world_connection(monkeypatch):
     assert captured["forecast_conn"] is forecast
     assert captured["world_conn"] is not topology
     assert captured["portfolio_state_provider"] is None
+    prepared_receipt = captured["prepare_event"](
+        event,
+        _dt.datetime(2026, 7, 10, 8, 10, tzinfo=_dt.timezone.utc),
+    )
+    assert prepared_receipt.prepared_global_family is not None
+    assert prepared_with["forecast_conn"] is forecast
+    assert prepared_with["topology_conn"] is topology
+    assert prepared_with["observation_conn"] is world
     metadata_calls = []
     bind_calls = []
     metadata_key = ("condition", "yes-token")
