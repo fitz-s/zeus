@@ -203,9 +203,18 @@ def _rebuild_stale_unknown_check(conn: sqlite3.Connection) -> None:
                     f"({count} -> {post_count}); aborting"
                 )
             conn.execute("DROP TABLE payout_observations")
-            conn.execute(
-                "ALTER TABLE payout_observations_new RENAME TO payout_observations"
+            legacy_alter = bool(
+                conn.execute("PRAGMA legacy_alter_table").fetchone()[0]
             )
+            conn.execute("PRAGMA legacy_alter_table = ON")
+            try:
+                conn.execute(
+                    "ALTER TABLE payout_observations_new RENAME TO payout_observations"
+                )
+            finally:
+                conn.execute(
+                    f"PRAGMA legacy_alter_table = {'ON' if legacy_alter else 'OFF'}"
+                )
         conn.execute("RELEASE payout_observations_unknown_check_rebuild")
     except Exception:
         conn.execute("ROLLBACK TO SAVEPOINT payout_observations_unknown_check_rebuild")

@@ -533,6 +533,41 @@ class TestEnsureTableUpgradesStaleCheck:
         assert row == (1, 1, "UNKNOWN")
         conn.close()
 
+    @pytest.mark.parametrize("legacy_alter", [False, True])
+    def test_registered_invalid_ghost_view_does_not_block_rebuild(self, legacy_alter):
+        conn = sqlite3.connect(":memory:")
+        self._create_legacy_table(conn)
+        conn.execute(
+            """
+            INSERT INTO payout_observations
+                (condition_id, outcome_index, payout_numerator, payout_denominator,
+                 state, observed_at)
+            VALUES (?, 1, NULL, 1, 'UNKNOWN', 't0')
+            """,
+            (_CONDITION_A,),
+        )
+        conn.execute(
+            "CREATE VIEW observation_instants_current AS "
+            "SELECT * FROM observation_instants"
+        )
+        conn.execute(
+            f"PRAGMA legacy_alter_table = {'ON' if legacy_alter else 'OFF'}"
+        )
+
+        ensure_table(conn)
+
+        row = conn.execute(
+            "SELECT payout_numerator, payout_denominator, state "
+            "FROM payout_observations"
+        ).fetchone()
+        assert row == (None, 1, "UNKNOWN")
+        assert bool(conn.execute("PRAGMA legacy_alter_table").fetchone()[0]) is legacy_alter
+        assert conn.execute(
+            "SELECT 1 FROM sqlite_master "
+            "WHERE type='view' AND name='observation_instants_current'"
+        ).fetchone() == (1,)
+        conn.close()
+
     def test_already_tightened_table_is_a_noop(self, conn):
         # `conn` fixture already ran ensure_table once (fresh, already
         # tightened) — a second call must not raise or rebuild again.
