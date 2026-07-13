@@ -1380,6 +1380,37 @@ def test_global_actuation_reauctions_sample_band_above_served_point(side):
 
 
 @pytest.mark.parametrize("side", ("YES", "NO"))
+def test_global_actuation_reauctions_prior_band_above_served_point(side):
+    """An improved qkernel band is capped by the frozen served certificate."""
+
+    served = 0.9187643552930886
+    current = 0.9375885546392851
+    cert = _current_qkernel_cert(side=side)
+    cert.update(
+        payoff_q_point=served,
+        payoff_q_lcb=current,
+        pre_qkernel_q_lcb_5pct=served,
+        cost=0.001,
+        edge_lcb=current - 0.001,
+    )
+    decision = _global_decision(shares="1000", cost="1", q=str(current))
+    witness = SimpleNamespace(
+        sample_matrix_identity=f"global-current-prior-cap-{side.lower()}",
+        yes_q_samples=SimpleNamespace(shape=(400, 11)),
+        band_alpha=0.05,
+    )
+
+    with pytest.raises(era._GlobalProbabilityTightened) as raised:
+        era._global_current_state_execution_economics(
+            cert,
+            decision=decision,
+            witness=witness,
+        )
+
+    assert raised.value.payoff_q_lcb == pytest.approx(served)
+
+
+@pytest.mark.parametrize("side", ("YES", "NO"))
 def test_global_actuation_reauctions_jit_bound_that_falls_below_majority(side):
     cert = _current_qkernel_cert(side=side)
     cert.update(

@@ -6497,8 +6497,9 @@ def _global_current_state_execution_economics(
     edge_lcb = payoff_q_lcb - unit_cost
     if not (
         Decimal("0") <= served_lcb <= point_q <= Decimal("1")
-        and Decimal("0") <= prior_payoff_lcb <= point_q
+        and Decimal("0") <= prior_payoff_lcb <= Decimal("1")
         and Decimal("0") <= current_band_payoff_q_lcb <= Decimal("1")
+        and payoff_q_lcb <= point_q
     ):
         raise ValueError("GLOBAL_CURRENT_STATE_PROBABILITY_ORDER_INVALID")
     if payoff_q_lcb < current_band_payoff_q_lcb:
