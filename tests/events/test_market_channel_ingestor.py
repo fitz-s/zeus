@@ -485,6 +485,68 @@ def test_rest_seed_chunks_commit_progressively_before_full_universe_finishes():
     assert commit_counts == [4, 8, 10]
 
 
+def test_rest_seed_commits_deferred_sink_inside_world_writer_gate():
+    conn, writer = _conn_writer()
+    conn.execute("CREATE TABLE derived_sink_writes (event_id TEXT PRIMARY KEY)")
+    order: list[str] = []
+    held = False
+
+    class RecordingWorldMutex:
+        def __enter__(self):
+            nonlocal held
+            held = True
+            order.append("enter")
+            return self
+
+        def __exit__(self, exc_type, exc, tb):  # noqa: ANN001
+            nonlocal held
+            order.append("exit")
+            held = False
+            return False
+
+    def sink(events) -> None:  # noqa: ANN001
+        assert held is True
+        order.append("sink")
+        conn.executemany(
+            "INSERT INTO derived_sink_writes(event_id) VALUES (?)",
+            [(event.event_id,) for event in events],
+        )
+
+    def commit() -> None:
+        conn.commit()
+        order.append("commit")
+
+    ingestor = MarketChannelIngestor(
+        writer,
+        active_token_ids={"token-1"},
+        token_metadata=_metadata(),
+        market_event_sink=sink,
+    )
+    service = MarketChannelOnlineService(
+        ingestor,
+        fetch_orderbook=lambda token_id: {
+            "asset_id": token_id,
+            "market": "0xcondition",
+            "bids": [{"price": "0.48", "size": "10"}],
+            "asks": [{"price": "0.52", "size": "10"}],
+            "hash": f"hash-{token_id}",
+        },
+    )
+
+    written = service.seed_rest_books_in_chunks(
+        token_ids=["token-1"],
+        received_at="2026-07-13T12:00:00+00:00",
+        world_mutex=RecordingWorldMutex(),
+        commit=commit,
+        chunk_size=1,
+    )
+
+    assert written == 1
+    assert order == ["enter", "sink", "commit", "exit"]
+    assert conn.in_transaction is False
+    assert conn.execute("SELECT COUNT(*) FROM derived_sink_writes").fetchone()[0] == 1
+
+
 def test_rest_seed_write_backpressure_keeps_committed_chunks_and_stops():
     conn, writer = _conn_writer()
     cache = QuoteCache()

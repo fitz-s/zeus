@@ -9090,23 +9090,34 @@ def run_edli_continuous_redecision_screen_cycle(*, screen_lock) -> None:
                 from src.state.db import world_write_mutex as _world_write_mutex
 
                 emit_mutex = _world_write_mutex()
-                emit_mutex.acquire()
+                emit_lock_timeout_s = _edli_emit_lock_timeout_seconds(edli_cfg)
+                emit_acquired = False
                 world = None
+                expired_unadmitted = 0
                 try:
-                    world = get_world_connection()
-                    expired_unadmitted = _edli_expire_unadmitted_redecision_pending(
-                        world,
-                        set(),
-                        decision_time=received_at,
-                    )
-                    world.commit()
+                    emit_acquired = _edli_acquire_mutex(emit_mutex, timeout=emit_lock_timeout_s)
+                    if emit_acquired:
+                        world = get_world_connection()
+                        expired_unadmitted = _edli_expire_unadmitted_redecision_pending(
+                            world,
+                            set(),
+                            decision_time=received_at,
+                        )
+                        world.commit()
+                    else:
+                        _log.warning(
+                            "edli_redecision_screen: no-fresh stale-pending expiry "
+                            "skipped because world write mutex was unavailable after %.3fs",
+                            emit_lock_timeout_s,
+                        )
                 finally:
                     if world is not None:
                         try:
                             world.close()
                         except Exception:  # noqa: BLE001
                             pass
-                    emit_mutex.release()
+                    if emit_acquired:
+                        emit_mutex.release()
                 _log.info(
                     "edli_redecision_screen: confirmation refresh produced no fresh "
                     "screened money-path substrate; skipping emit this tick rather "

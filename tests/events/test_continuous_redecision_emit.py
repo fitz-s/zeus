@@ -2179,7 +2179,7 @@ def test_redecision_screen_opens_world_writer_only_after_mutex():
     ]
 
     for block, acquire in (
-        (no_fresh, "emit_mutex.acquire()"),
+        (no_fresh, "_edli_acquire_mutex(emit_mutex"),
         (no_family, "_edli_acquire_mutex(emit_mutex"),
         (prune, "_edli_acquire_mutex(prune_mutex"),
         (emit, "_edli_acquire_mutex(emit_mutex"),
@@ -2187,6 +2187,10 @@ def test_redecision_screen_opens_world_writer_only_after_mutex():
         assert block.index(acquire) < block.index("get_world_connection()")
         assert block.index("get_world_connection()") < block.index(".close()")
         assert block.index(".close()") < block.index(".release()")
+
+    assert "_edli_emit_lock_timeout_seconds(edli_cfg)" in no_fresh
+    assert "if emit_acquired:" in no_fresh
+    assert "no-fresh stale-pending expiry" in no_fresh
 
 
 def test_reactor_prune_archives_orphan_processing_rows():

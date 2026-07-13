@@ -540,9 +540,9 @@ class MarketChannelIngestor:
         self._deferred_market_event_sink_events.clear()
         try:
             self._market_event_sink(events)
-        except Exception as exc:  # noqa: BLE001 - post-commit derived sink failure.
+        except Exception as exc:  # noqa: BLE001 - derived sink must not poison ingest.
             _logger.warning(
-                "market-channel post-commit sink failed: %s: %s",
+                "market-channel deferred sink failed: %s: %s",
                 type(exc).__name__,
                 exc,
                 exc_info=True,
@@ -1039,6 +1039,7 @@ class MarketChannelOnlineService:
                             pre_cached=pre_captured_books,
                             token_ids=pre_captured_books.keys(),
                         )
+                        self.ingestor.flush_deferred_market_event_sink()
                         if commit is not None:
                             commit()
                 except TimeoutError as exc:
@@ -1053,7 +1054,6 @@ class MarketChannelOnlineService:
                             exc,
                         )
                     break
-                self.ingestor.flush_deferred_market_event_sink()
             written += len(results)
             if logger is not None:
                 logger.debug(
@@ -1248,9 +1248,9 @@ class MarketChannelOnlineService:
                         token_ids=pre_captured_books.keys(),
                         gap_start=gap_start_captured,
                     )
+                    self.ingestor.flush_deferred_market_event_sink()
                     if commit is not None:
                         commit()
-                self.ingestor.flush_deferred_market_event_sink()
             written += len(results)
             if logger is not None:
                 logger.debug(
@@ -1352,9 +1352,9 @@ class MarketChannelOnlineService:
                                     if isinstance(action_or_result, MarketChannelAction):
                                         pending_actions.append(action_or_result)
                                 self.ingestor.flush_coalesced(market_budget=100)
+                                self.ingestor.flush_deferred_market_event_sink()
                                 if commit is not None:
                                     commit()
-                            self.ingestor.flush_deferred_market_event_sink()
                         for _action in pending_actions:
                             self._handle_action(_action)
             except Exception as exc:  # noqa: BLE001 - network loop must retry

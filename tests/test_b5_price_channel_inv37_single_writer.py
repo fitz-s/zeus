@@ -28,6 +28,7 @@ import pytest
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 _PRICE_CHANNEL_MODULE = _REPO_ROOT / "src" / "ingest" / "price_channel_ingest.py"
+_MARKET_CHANNEL_MODULE = _REPO_ROOT / "src" / "events" / "triggers" / "market_channel_ingestor.py"
 
 _REFRESH_FUNCS = (
     "_edli_refresh_held_position_quote_evidence",
@@ -258,6 +259,65 @@ def test_forever_ingestor_passes_unified_world_trade_gate():
                 ):
                     world_mutex_calls.append(kw.value.func.id)
     assert world_mutex_calls == ["_edli_price_channel_world_trade_write_gate"]
+
+
+@pytest.mark.parametrize(
+    ("func_name", "mutex_name"),
+    (
+        ("seed_rest_books_in_chunks", "world_mutex"),
+        ("reconnect_rest_books_in_chunks", "world_mutex"),
+        ("run_websocket_forever", "_world_mutex"),
+    ),
+)
+def test_deferred_redecision_sink_commits_inside_world_writer_gate(
+    func_name: str,
+    mutex_name: str,
+):
+    """Quote evidence and its derived redecision event are one writer unit.
+
+    Flushing after commit/gate release starts a new implicit SQLite transaction on
+    the long-lived price-channel connection and can hold the world WAL writer lock
+    across the next websocket receive.
+    """
+
+    tree = ast.parse(_MARKET_CHANNEL_MODULE.read_text(encoding="utf-8"))
+    fn = next(
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and node.name == func_name
+    )
+    all_flushes = [
+        node
+        for node in ast.walk(fn)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "flush_deferred_market_event_sink"
+    ]
+    gates = [
+        node
+        for node in ast.walk(fn)
+        if isinstance(node, ast.With)
+        and any(
+            isinstance(item.context_expr, ast.Name)
+            and item.context_expr.id == mutex_name
+            for item in node.items
+        )
+    ]
+
+    assert len(all_flushes) == 1
+    assert len(gates) == 1
+    flushes_in_gate = [node for node in ast.walk(gates[0]) if node in all_flushes]
+    commits_in_gate = [
+        node
+        for node in ast.walk(gates[0])
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "commit"
+    ]
+    assert len(flushes_in_gate) == 1
+    assert len(commits_in_gate) == 1
+    assert flushes_in_gate[0].lineno < commits_in_gate[0].lineno
 
 
 def test_world_connection_with_trades_flocked_attaches_trades_world_main():
