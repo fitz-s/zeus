@@ -183,6 +183,10 @@ _PRE_SDK_REVIEW_REQUIRED_REASONS = frozenset({
     # SUBMITTING, and then be moved to REVIEW_REQUIRED by recovery.
     "recovery_no_venue_order_id",
 })
+_NO_VENUE_EXPOSURE_REVIEW_REASONS = frozenset({
+    "recovery_no_venue_order_id",
+    "recovery_no_venue_order_id_lookup_unavailable",
+})
 _PRE_SDK_COLLATERAL_REASON_MARKERS = (
     "pusd_allowance_insufficient",
     "pusd_insufficient",
@@ -1600,8 +1604,8 @@ def _validate_review_no_exposure_payload(
     if actual_failures:
         raise ValueError(f"review no-exposure DB predicates failed: {actual_failures}")
     actual_reason = _actual_review_required_reason(conn, command_id)
-    if actual_reason != "recovery_no_venue_order_id":
-        raise ValueError("review no-exposure clearance only supports recovery_no_venue_order_id")
+    if actual_reason not in _NO_VENUE_EXPOSURE_REVIEW_REASONS:
+        raise ValueError("review no-exposure clearance only supports no-venue-order-id recovery")
     venue_proof = payload.get("venue_absence_proof")
     if not isinstance(venue_proof, dict):
         raise ValueError("review no-exposure clearance requires venue_absence_proof")

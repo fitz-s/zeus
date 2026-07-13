@@ -634,6 +634,38 @@ class TestSweepAndRecord:
         assert result2["appended"] == 0
         assert result2["unchanged"] == 4
 
+    def test_finishes_all_rpc_reads_before_opening_append_transaction(self, conn):
+        conn.execute(
+            "CREATE TABLE position_current (position_id TEXT PRIMARY KEY, condition_id TEXT)"
+        )
+        conn.execute(
+            "CREATE TABLE settlement_commands (command_id TEXT PRIMARY KEY, condition_id TEXT)"
+        )
+        conn.execute("INSERT INTO position_current VALUES ('p1', ?)", (_CONDITION_A,))
+        conn.execute("INSERT INTO settlement_commands VALUES ('c1', ?)", (_CONDITION_B,))
+        conn.commit()
+
+        base_rpc, _ = _build_stub_rpc(denominator=100, numerators={0: 100, 1: 0})
+        rpc_calls = 0
+
+        def rpc(url, method, params):
+            nonlocal rpc_calls
+            rpc_calls += 1
+            assert not conn.in_transaction, (
+                "payout RPC ran while the append transaction held the trades-DB writer lock"
+            )
+            return base_rpc(url, method, params)
+
+        result = sweep_and_record(
+            conn,
+            rpc_url="https://rpc.example",
+            rpc_call=rpc,
+            now="t0",
+        )
+
+        assert rpc_calls == 8
+        assert result == {"conditions": 2, "appended": 4, "unchanged": 0}
+
 
 # ---------------------------------------------------------------------------
 # No-signing-capability antibody

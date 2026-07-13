@@ -4,7 +4,7 @@
 #   (GATED verdict, §Consult 裁决 2026-07-13) + docs/rebuild/census_local_ledger/
 #   census_chain_sources.md ("Resolution payouts — NEEDS NEW INGESTER, RPC
 #   plumbing exists").
-"""Read-only ConditionalTokens payout observer (LX-T1).
+"""Read-only-on-chain ConditionalTokens payout observer (LX-T1).
 
 Reads on-chain ``payoutDenominator(conditionId)`` / ``payoutNumerators(conditionId,
 outcomeIndex)`` for conditions Zeus holds/held, via the SAME urllib JSON-RPC seam
@@ -348,32 +348,46 @@ def sweep_and_record(
 ) -> dict[str, int]:
     """Sweep every condition Zeus holds/held and append fresh observations.
 
-    Caller owns the transaction (commit/rollback) — this function only reads
-    and executes statements on ``conn``, per INV-37.
+    All RPC reads finish before the first DML statement.  This ordering is
+    load-bearing: one sweep can take many minutes, while the append phase is a
+    short local transaction.  Reversing the order holds the trades-DB WAL
+    writer lock across hundreds of network calls and prevents order receipts,
+    collateral releases, and command recovery from committing.
+
+    Caller owns the append transaction (commit/rollback), per INV-37.
     """
     observed_at = now or datetime.now(timezone.utc).isoformat()
     condition_ids = conditions_to_observe(conn)
+    observations: list[tuple[str, dict[str, Any]]] = []
+    for condition_id in condition_ids:
+        observations.extend(
+            (condition_id, result)
+            for result in read_condition_payout(
+                condition_id,
+                rpc_url=rpc_url,
+                rpc_call=rpc_call,
+                outcome_indices=outcome_indices,
+            )
+        )
+
     appended = 0
     unchanged = 0
-    for condition_id in condition_ids:
-        for result in read_condition_payout(
-            condition_id, rpc_url=rpc_url, rpc_call=rpc_call, outcome_indices=outcome_indices
-        ):
-            new_id = append_observation(
-                conn,
-                condition_id=condition_id,
-                outcome_index=result["outcome_index"],
-                payout_numerator=result["payout_numerator"],
-                payout_denominator=result["payout_denominator"],
-                state=result["state"],
-                block_number=result["block_number"],
-                block_hash=result["block_hash"],
-                observed_at=observed_at,
-            )
-            if new_id is None:
-                unchanged += 1
-            else:
-                appended += 1
+    for condition_id, result in observations:
+        new_id = append_observation(
+            conn,
+            condition_id=condition_id,
+            outcome_index=result["outcome_index"],
+            payout_numerator=result["payout_numerator"],
+            payout_denominator=result["payout_denominator"],
+            state=result["state"],
+            block_number=result["block_number"],
+            block_hash=result["block_hash"],
+            observed_at=observed_at,
+        )
+        if new_id is None:
+            unchanged += 1
+        else:
+            appended += 1
     return {
         "conditions": len(condition_ids),
         "appended": appended,
@@ -389,10 +403,11 @@ def payout_observer_cycle(
 ) -> dict[str, int]:
     """Scheduler entry point (post_trade_capital_daemon, ~10-min cadence).
 
-    Read-only: opens its own trades-DB connection (unless one is injected for
-    testing), sweeps conditions, appends observations, commits. Never opens a
-    world-DB or forecasts-DB connection — payout_observations is trade-DB-only
-    and this packet does not wire settlement-grading consumption.
+    Read-only on chain: it has no signing or transaction-broadcast capability.
+    Locally it opens trades-DB (unless injected for testing), completes every
+    RPC read before beginning the append transaction, then commits. It never
+    opens world-DB or forecasts-DB — payout_observations is trade-DB-only and
+    this packet does not wire settlement-grading consumption.
     """
     from src.state.db import get_trade_connection
 

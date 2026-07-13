@@ -225,6 +225,13 @@ _CONFIRMED_TRADE_REVIEW_REASONS = frozenset({
     "recovery_no_venue_order_id",
     "matched_submit_missing_trade_id",
 })
+_NO_VENUE_EXPOSURE_REVIEW_REASONS = frozenset({
+    "recovery_no_venue_order_id",
+    # Older recovery moved an unresolved submit here when its authenticated
+    # read surface was unavailable. A later fresh zero-exposure proof is the
+    # only legal clearance; future attempts now stay SUBMITTING instead.
+    "recovery_no_venue_order_id_lookup_unavailable",
+})
 
 
 def _canonical_order_truth_cte(
@@ -13713,8 +13720,8 @@ def build_review_required_no_venue_exposure_proof(
     command = _review_required_command(conn, command_id)
     events = _command_events(conn, command_id)
     review_reason = _latest_review_required_payload(events).get("reason")
-    if review_reason != "recovery_no_venue_order_id":
-        raise ValueError("no-exposure proof only supports recovery_no_venue_order_id")
+    if review_reason not in _NO_VENUE_EXPOSURE_REVIEW_REASONS:
+        raise ValueError("no-exposure proof only supports no-venue-order-id recovery")
     token_id = str(command.get("token_id") or "")
     created_epoch = _epoch_seconds(command.get("created_at")) or 0.0
     now = observed_at or _now_iso()
@@ -13848,7 +13855,7 @@ def _review_no_exposure_predicates(
         _command_events(conn, str(command["command_id"]))
     ).get("reason")
     predicates["review_required_reason_recovery_no_venue_order_id"] = (
-        latest_reason == "recovery_no_venue_order_id"
+        latest_reason in _NO_VENUE_EXPOSURE_REVIEW_REASONS
     )
     failures = [name for name, ok in predicates.items() if not ok]
     return predicates, failures
@@ -13873,8 +13880,8 @@ def clear_review_required_no_venue_exposure(
             "review no-exposure predicates failed: " + ", ".join(sorted(predicate_failures))
         )
     latest_reason = _latest_review_required_payload(_command_events(conn, command_id)).get("reason")
-    if latest_reason != "recovery_no_venue_order_id":
-        raise ValueError("review no-exposure clearance only supports recovery_no_venue_order_id")
+    if latest_reason not in _NO_VENUE_EXPOSURE_REVIEW_REASONS:
+        raise ValueError("review no-exposure clearance only supports no-venue-order-id recovery")
     if int(venue_absence_proof.get("matching_open_order_count", -1)) != 0:
         raise ValueError("review no-exposure clearance found matching open orders")
     if int(venue_absence_proof.get("matching_trade_count", -1)) != 0:
@@ -13902,7 +13909,7 @@ def clear_review_required_no_venue_exposure(
         },
         "review_required_proof": {
             "reason": latest_reason,
-            "allowed_reasons": ["recovery_no_venue_order_id"],
+            "allowed_reasons": sorted(_NO_VENUE_EXPOSURE_REVIEW_REASONS),
         },
         "reviewed_by": reviewed_by,
         "cleared_at": now,
@@ -13924,7 +13931,7 @@ def _review_required_no_venue_live_order_recovery(
 ) -> str:
     events = _command_events(conn, cmd.command_id)
     latest_reason = _latest_review_required_payload(events).get("reason")
-    if latest_reason != "recovery_no_venue_order_id":
+    if latest_reason not in _NO_VENUE_EXPOSURE_REVIEW_REASONS:
         return "stayed"
     if str(cmd.venue_order_id or "").strip():
         return "stayed"
@@ -14336,7 +14343,7 @@ def _review_required_no_venue_exposure_recovery(
 ) -> str:
     events = _command_events(conn, cmd.command_id)
     latest_reason = _latest_review_required_payload(events).get("reason")
-    if latest_reason != "recovery_no_venue_order_id":
+    if latest_reason not in _NO_VENUE_EXPOSURE_REVIEW_REASONS:
         return "stayed"
     try:
         now = _now_iso()
@@ -14686,22 +14693,13 @@ def _recover_no_venue_order_id_submit(
         _lookup_unknown_side_effect_order(cmd, client)
     )
     if lookup_status == "unavailable":
-        append_event(
-            conn,
-            command_id=cmd.command_id,
-            event_type=CommandEventType.REVIEW_REQUIRED.value,
-            occurred_at=now,
-            payload={
-                "reason": "recovery_no_venue_order_id_lookup_unavailable",
-                "lookup_method": lookup_method,
-            },
-        )
         logger.warning(
-            "recovery: command %s SUBMITTING without venue_order_id -> REVIEW_REQUIRED "
-            "(lookup unavailable)",
+            "recovery: command %s SUBMITTING without venue_order_id stayed "
+            "(lookup unavailable via %s)",
             cmd.command_id,
+            lookup_method,
         )
-        return "advanced"
+        return "stayed"
 
     venue_order_id = _extract_order_id(venue_resp, cmd.venue_order_id)
     if venue_resp is not None:

@@ -1989,6 +1989,61 @@ class TestRecoveryResolutionTable:
         assert summary["stayed"] >= 1
         assert "SUBMIT_REJECTED" not in [e["event_type"] for e in _get_events(conn, "cmd-001")]
 
+    def test_submitting_without_order_id_stays_when_authenticated_lookup_is_unavailable(
+        self, conn
+    ):
+        _insert(conn)
+        _advance_to_submitting(conn, venue_order_id=None)
+
+        class UnavailableClient:
+            def get_open_orders(self):
+                raise RuntimeError("authenticated read unavailable")
+
+            def get_trades(self):
+                raise RuntimeError("authenticated read unavailable")
+
+        from src.execution.command_recovery import reconcile_unresolved_commands
+
+        summary = reconcile_unresolved_commands(conn, UnavailableClient())
+
+        assert _get_state(conn, "cmd-001") == "SUBMITTING"
+        assert summary["advanced"] == 0
+        assert summary["stayed"] == 1
+        assert "REVIEW_REQUIRED" not in [
+            event["event_type"] for event in _get_events(conn, "cmd-001")
+        ]
+
+    def test_lookup_unavailable_review_clears_only_after_fresh_zero_exposure_proof(
+        self, conn, mock_client
+    ):
+        from src.state.venue_command_repo import append_event
+
+        _insert(conn)
+        _advance_to_submitting(conn, venue_order_id=None)
+        append_event(
+            conn,
+            command_id="cmd-001",
+            event_type="REVIEW_REQUIRED",
+            occurred_at="2026-04-26T00:02:00Z",
+            payload={"reason": "recovery_no_venue_order_id_lookup_unavailable"},
+        )
+        mock_client.get_open_orders.return_value = []
+        mock_client.get_trades.return_value = []
+
+        from src.execution.command_recovery import _reconcile_row
+        from src.execution.command_bus import VenueCommand
+
+        row = conn.execute(
+            "SELECT * FROM venue_commands WHERE command_id = 'cmd-001'"
+        ).fetchone()
+        outcome = _reconcile_row(conn, VenueCommand.from_row(dict(row)), mock_client)
+
+        assert outcome == "advanced"
+        assert _get_state(conn, "cmd-001") == "EXPIRED"
+        assert _get_events(conn, "cmd-001")[-1]["event_type"] == (
+            "REVIEW_CLEARED_NO_VENUE_EXPOSURE"
+        )
+
     def test_restart_preflight_recovers_no_venue_exit_into_retry_projection(
         self,
         tmp_path,
