@@ -35,13 +35,14 @@ PLUS spendable cash net of pending reservations, resting orders, and unsettled p
 per-family bins. ``build_wealth_by_atom`` derives it per evaluation (derive-don't-store); a
 zero/negative-wealth atom is a typed ``ZeroWealthOutcomeError`` (log undefined), never a clamp.
 
-BODIES ARE A LATER SUB-SLICE: this module is interface-only at W3.2 (the marginal predicate
-and the ledger-aligned wealth builder land once the ledger snapshot state exists). Only the
-typed error and the precheck contract are provided now.
+The pure wealth builder and C5 marginal predicate are implemented here. Runtime integration
+still requires the monitor to provide a current complete q and the exact reconciled ledger
+snapshot; the pure core never reaches into either authority itself.
 """
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import Mapping, Optional
 
@@ -133,7 +134,46 @@ def marginal_exit_condition(
     exists for the monitor lane's cheap screen and for property tests (the two must agree on
     marginal direction at the current holdings point).
     """
-    raise NotImplementedError(
-        "W3 exits sub-slice: consume precheck precedence, then transcribe the C5 inequality "
-        "over the joint atom axis with validated inputs"
-    )
+    if not isinstance(precheck, ExitPrecheckResult):
+        raise TypeError("precheck must be ExitPrecheckResult")
+    if precheck.hard_tripwire_fired:
+        if not str(precheck.tripwire_reason or "").strip():
+            raise ValueError("active exit precheck requires a tripwire reason")
+        return bool(precheck.force_exit)
+    if precheck.force_exit or precheck.tripwire_reason is not None:
+        raise ValueError("inactive exit precheck cannot carry a tripwire decision")
+
+    bid_value = float(bid)
+    if not math.isfinite(bid_value) or not 0.0 <= bid_value <= 1.0:
+        raise ValueError("bid must be finite in [0, 1]")
+
+    if not isinstance(wealth, WealthStateByAtom):
+        raise TypeError("wealth must be WealthStateByAtom")
+    atom_ids = tuple(wealth.atom_ids)
+    if not atom_ids or len(set(atom_ids)) != len(atom_ids):
+        raise ValueError("wealth atom axis must be non-empty and unique")
+    atom_set = set(atom_ids)
+    if set(q_by_atom_id) != atom_set or set(wealth.wealth_by_atom) != atom_set:
+        raise ValueError("q and wealth must cover the same complete atom axis")
+    if held_atom_id not in atom_set:
+        raise ValueError("held atom must belong to the wealth axis")
+
+    q: dict[str, float] = {}
+    w: dict[str, float] = {}
+    for atom_id in atom_ids:
+        q_value = float(q_by_atom_id[atom_id])
+        wealth_value = float(wealth.wealth_by_atom[atom_id])
+        if not math.isfinite(q_value) or not 0.0 <= q_value <= 1.0:
+            raise ValueError("atom probabilities must be finite in [0, 1]")
+        if not math.isfinite(wealth_value) or wealth_value <= 0.0:
+            raise ZeroWealthOutcomeError(
+                f"non-positive endowment wealth in atom {atom_id!r}; log-utility undefined"
+            )
+        q[atom_id] = q_value
+        w[atom_id] = wealth_value
+    if not math.isclose(sum(q.values()), 1.0, rel_tol=0.0, abs_tol=1e-12):
+        raise ValueError("atom probabilities must sum to one")
+
+    cash_marginal = bid_value * sum(q[a] / w[a] for a in atom_ids)
+    claim_marginal = q[held_atom_id] / w[held_atom_id]
+    return cash_marginal > claim_marginal
