@@ -1,5 +1,5 @@
 # Created: 2026-06-11
-# Last reused/audited: 2026-07-10
+# Last reused/audited: 2026-07-13
 # Authority basis: operator URGENT 2026-06-11 17:51-17:56Z claim-storm incident.
 #   Cycles alternated `processed=0 retried=250 reasons=[]` (whole cycle bounced) and
 #   `processed=22 ... retried=209` (one mid-cycle bounce poisoned the rest). TWO
@@ -27,6 +27,8 @@ resets the conn (rollback), never silently folded into retried alone.
 """
 from __future__ import annotations
 
+import json
+import logging
 import sqlite3
 import threading
 import time
@@ -115,6 +117,23 @@ def _status(conn, event_id: str) -> str:
     ).fetchone()[0]
 
 
+def _claimed_global_target(conn, store, *, suffix: str):
+    from src.engine.global_batch_runtime import _next_claim_carrier
+
+    base = _event(f"global-base-{suffix}")
+    target = _next_claim_carrier(
+        base,
+        targeted_at=_DT,
+        economic_identity=f"global-economic-{suffix}",
+        payload=json.loads(base.payload_json),
+    )
+    store.insert_or_ignore(base)
+    generation = _DT.isoformat()
+    assert store.claim(base.event_id, claimed_at=generation)
+    conn.commit()
+    return base, target, generation
+
+
 def test_claim_waits_for_concurrent_write_txn_and_lands(tmp_path):
     """ANTIBODY (a): a concurrent writer holding the WAL write lock does NOT bounce
     claim() — the busy handler engages (full configured timeout) and the claim
@@ -199,6 +218,111 @@ def test_claim_lock_contention_is_bounded_and_keeps_event_pending(tmp_path, monk
     assert _status(conn, event.event_id) == "pending"
     assert conn.execute("PRAGMA busy_timeout").fetchone()[0] == 30000
     assert not conn.in_transaction
+
+
+def test_global_unpaged_winner_claim_lock_bounces_then_recovers(
+    tmp_path, monkeypatch, caplog
+):
+    """An unpaged winner uses the same bounded WAL-lock contract as normal claims.
+
+    The contended attempt must leave no partial target row or venue-side effect
+    carrier; after the writer releases, the same cut-time winner remains legally
+    materializable and claimable.
+    """
+
+    db_path, conn, store = _file_store(tmp_path)
+    base, target, generation = _claimed_global_target(
+        conn, store, suffix="claim-lock"
+    )
+    monkeypatch.setenv("ZEUS_REACTOR_CLAIM_BUSY_TIMEOUT_MS", "100")
+    reactor = _reactor(conn, store)
+    result = ReactorResult()
+
+    blocker = sqlite3.connect(str(db_path), timeout=30.0)
+    blocker.execute("PRAGMA busy_timeout = 30000")
+    blocker.execute("BEGIN IMMEDIATE")
+    try:
+        started = time.monotonic()
+        with caplog.at_level(logging.WARNING, logger="zeus.events.reactor"):
+            claimed_at, lock_bounced = reactor._claim_global_winner_for_actuation(
+                target,
+                current_batch_claim_generations={base.event_id: generation},
+                result=result,
+            )
+        elapsed = time.monotonic() - started
+    finally:
+        blocker.rollback()
+        blocker.close()
+
+    assert claimed_at is None
+    assert lock_bounced is True
+    assert elapsed < 1.0, f"global winner claim waited too long: {elapsed:.3f}s"
+    assert result.claim_lock_bounces == 1
+    assert any("global winner claim lock-bounce" in row.message for row in caplog.records)
+    assert conn.execute("PRAGMA busy_timeout").fetchone()[0] == 30000
+    assert not conn.in_transaction
+    assert conn.execute(
+        "SELECT 1 FROM opportunity_events WHERE event_id = ?", (target.event_id,)
+    ).fetchone() is None
+
+    recovered_at, recovered_bounced = reactor._claim_global_winner_for_actuation(
+        target,
+        current_batch_claim_generations={base.event_id: generation},
+        result=result,
+    )
+
+    assert recovered_at is not None
+    assert recovered_bounced is False
+    assert _status(conn, target.event_id) == "processing"
+    assert result.claim_lock_bounces == 1
+
+
+def test_global_winner_queue_lock_bounces_then_recovers(
+    tmp_path, monkeypatch, caplog
+):
+    """The next-claim queue path is bounded, rollback-safe, and retryable."""
+
+    db_path, conn, store = _file_store(tmp_path)
+    base, target, generation = _claimed_global_target(
+        conn, store, suffix="queue-lock"
+    )
+    monkeypatch.setenv("ZEUS_REACTOR_CLAIM_BUSY_TIMEOUT_MS", "100")
+    reactor = _reactor(conn, store)
+    result = ReactorResult()
+
+    blocker = sqlite3.connect(str(db_path), timeout=30.0)
+    blocker.execute("PRAGMA busy_timeout = 30000")
+    blocker.execute("BEGIN IMMEDIATE")
+    try:
+        started = time.monotonic()
+        with caplog.at_level(logging.WARNING, logger="zeus.events.reactor"):
+            queued = reactor._queue_global_winner_for_claim(
+                target,
+                current_batch_claim_generations={base.event_id: generation},
+                result=result,
+            )
+        elapsed = time.monotonic() - started
+    finally:
+        blocker.rollback()
+        blocker.close()
+
+    assert queued is False
+    assert elapsed < 1.0, f"global winner queue waited too long: {elapsed:.3f}s"
+    assert result.claim_lock_bounces == 1
+    assert any("global winner queue lock-bounce" in row.message for row in caplog.records)
+    assert conn.execute("PRAGMA busy_timeout").fetchone()[0] == 30000
+    assert not conn.in_transaction
+    assert conn.execute(
+        "SELECT 1 FROM opportunity_events WHERE event_id = ?", (target.event_id,)
+    ).fetchone() is None
+
+    assert reactor._queue_global_winner_for_claim(
+        target,
+        current_batch_claim_generations={base.event_id: generation},
+        result=result,
+    )
+    assert _status(conn, target.event_id) == "pending"
+    assert result.claim_lock_bounces == 1
 
 
 def test_world_mutex_contention_before_claim_is_bounded_and_keeps_event_pending(

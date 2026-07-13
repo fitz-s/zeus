@@ -1149,6 +1149,7 @@ class OpportunityEventReactor:
 
         claimed: list[OpportunityEvent] = []
         claim_generations: dict[str, str] = {}
+        claim_lock_bounced_event_ids: set[str] = set()
         attempted = 0
         for event in events:
             if remaining is not None and attempted >= remaining:
@@ -1171,10 +1172,13 @@ class OpportunityEventReactor:
         process_batch = getattr(self._submit, "process_global_batch")
 
         def _claim_unpaged_winner(event: OpportunityEvent) -> bool:
-            generation = self._claim_global_winner_for_actuation(
+            generation, lock_bounced = self._claim_global_winner_for_actuation(
                 event,
                 current_batch_claim_generations=dict(claim_generations),
+                result=result,
             )
+            if lock_bounced:
+                claim_lock_bounced_event_ids.add(event.event_id)
             if generation is None:
                 return False
             claimed.append(event)
@@ -1210,16 +1214,25 @@ class OpportunityEventReactor:
             ):
                 raise ValueError("global batch winner is not a claimed event")
             if batch_result.next_claim_event is not None:
-                queued = self._queue_global_winner_for_claim(
-                    batch_result.next_claim_event,
-                    current_batch_claim_generations=claim_generations,
-                )
-                if not queued:
+                next_claim_event = batch_result.next_claim_event
+                if next_claim_event.event_id in claim_lock_bounced_event_ids:
                     logging.getLogger("zeus.events.reactor").info(
-                        "global winner claim deferred: target=%s; "
-                        "a claim lease changed or the target is not currently pending",
-                        batch_result.next_claim_event.event_id,
+                        "global winner queue skipped after same-cycle claim lock-bounce: "
+                        "target=%s (one wait per contention episode; no venue side effect)",
+                        next_claim_event.event_id,
                     )
+                else:
+                    queued = self._queue_global_winner_for_claim(
+                        next_claim_event,
+                        current_batch_claim_generations=claim_generations,
+                        result=result,
+                    )
+                    if not queued:
+                        logging.getLogger("zeus.events.reactor").info(
+                            "global winner claim deferred: target=%s; "
+                            "a claim lease changed or the target is not currently pending",
+                            next_claim_event.event_id,
+                        )
         except Exception as exc:  # noqa: BLE001 - every claimed event must close its unit
             for event in claimed:
                 self._finalize_deferred_event_unit(
@@ -1250,25 +1263,47 @@ class OpportunityEventReactor:
         event: OpportunityEvent,
         *,
         current_batch_claim_generations: dict[str, str],
+        result: ReactorResult,
     ) -> bool:
         """Persist the auction winner's next legal claim outside submit I/O."""
 
+        wait_ms = _reactor_claim_busy_timeout_ms()
         mutex = world_write_mutex()
-        if not mutex.acquire(timeout=_reactor_claim_busy_timeout_ms() / 1000.0):
+        if not mutex.acquire(timeout=wait_ms / 1000.0):
+            result.claim_lock_bounces += 1
+            logging.getLogger("zeus.events.reactor").warning(
+                "global winner queue mutex-bounce event_id=%s "
+                "claim_mutex_timeout_ms=%s (target stays unqueued; no venue side effect)",
+                event.event_id,
+                wait_ms,
+            )
             return False
         try:
             if self._store.conn.in_transaction:
                 raise RuntimeError("GLOBAL_WINNER_QUEUE_WORLD_TXN_OPEN")
-            self._store.conn.execute("BEGIN IMMEDIATE")
             try:
-                queued = self._store.prioritize_global_winner(
-                    event,
-                    current_batch_claim_generations=current_batch_claim_generations,
-                )
-                self._store.conn.commit()
-                return queued
-            except Exception:
-                self._store.conn.rollback()
+                with _scoped_sqlite_busy_timeout(self._store.conn, wait_ms):
+                    self._store.conn.execute("BEGIN IMMEDIATE")
+                    queued = self._store.prioritize_global_winner(
+                        event,
+                        current_batch_claim_generations=current_batch_claim_generations,
+                    )
+                    self._store.conn.commit()
+                    return queued
+            except Exception as exc:
+                with contextlib.suppress(Exception):
+                    self._store.conn.rollback()
+                if _is_sqlite_lock_error(exc):
+                    result.claim_lock_bounces += 1
+                    logging.getLogger("zeus.events.reactor").warning(
+                        "global winner queue lock-bounce event_id=%s "
+                        "claim_busy_timeout_ms=%s exc=%s "
+                        "(rolled back; target stays unqueued; no venue side effect)",
+                        event.event_id,
+                        wait_ms,
+                        exc,
+                    )
+                    return False
                 raise
         finally:
             mutex.release()
@@ -1278,31 +1313,53 @@ class OpportunityEventReactor:
         event: OpportunityEvent,
         *,
         current_batch_claim_generations: dict[str, str],
-    ) -> str | None:
+        result: ReactorResult,
+    ) -> tuple[str | None, bool]:
         """Atomically materialize and claim one unpaged cut-time winner."""
 
+        wait_ms = _reactor_claim_busy_timeout_ms()
         mutex = world_write_mutex()
-        if not mutex.acquire(timeout=_reactor_claim_busy_timeout_ms() / 1000.0):
-            return None
+        if not mutex.acquire(timeout=wait_ms / 1000.0):
+            result.claim_lock_bounces += 1
+            logging.getLogger("zeus.events.reactor").warning(
+                "global winner claim mutex-bounce event_id=%s "
+                "claim_mutex_timeout_ms=%s (target stays unclaimed; no venue side effect)",
+                event.event_id,
+                wait_ms,
+            )
+            return None, True
         try:
             if self._store.conn.in_transaction:
                 raise RuntimeError("GLOBAL_WINNER_CLAIM_WORLD_TXN_OPEN")
-            self._store.conn.execute("BEGIN IMMEDIATE")
             try:
-                if not self._store.prioritize_global_winner(
-                    event,
-                    current_batch_claim_generations=current_batch_claim_generations,
-                ):
+                with _scoped_sqlite_busy_timeout(self._store.conn, wait_ms):
+                    self._store.conn.execute("BEGIN IMMEDIATE")
+                    if not self._store.prioritize_global_winner(
+                        event,
+                        current_batch_claim_generations=current_batch_claim_generations,
+                    ):
+                        self._store.conn.rollback()
+                        return None, False
+                    claimed_at = datetime.now(UTC).isoformat()
+                    if not self._store.claim(event.event_id, claimed_at=claimed_at):
+                        self._store.conn.rollback()
+                        return None, False
+                    self._store.conn.commit()
+                    return claimed_at, False
+            except Exception as exc:
+                with contextlib.suppress(Exception):
                     self._store.conn.rollback()
-                    return None
-                claimed_at = datetime.now(UTC).isoformat()
-                if not self._store.claim(event.event_id, claimed_at=claimed_at):
-                    self._store.conn.rollback()
-                    return None
-                self._store.conn.commit()
-                return claimed_at
-            except Exception:
-                self._store.conn.rollback()
+                if _is_sqlite_lock_error(exc):
+                    result.claim_lock_bounces += 1
+                    logging.getLogger("zeus.events.reactor").warning(
+                        "global winner claim lock-bounce event_id=%s "
+                        "claim_busy_timeout_ms=%s exc=%s "
+                        "(rolled back; target stays unclaimed; no venue side effect)",
+                        event.event_id,
+                        wait_ms,
+                        exc,
+                    )
+                    return None, True
                 raise
         finally:
             mutex.release()
@@ -3646,6 +3703,7 @@ TRANSIENT_MONEY_PATH_REASONS: frozenset[str] = frozenset({
     # bounded claimed page. The reactor materializes that family as the next legal
     # claim; the current claimed page must remain pending until that claim runs.
     "GLOBAL_WINNER_AWAITS_CLAIM",
+    "GLOBAL_REAUCTION_WINNER_AWAITS_CLAIM",
 })
 
 # A reason whose BASE is in this set is TERMINAL (a genuine, non-race rejection)

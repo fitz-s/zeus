@@ -1,12 +1,14 @@
 # Created: 2026-05-24
-# Last reused/audited: 2026-07-11
+# Last reused/audited: 2026-07-13
 # Authority basis: EDLI v1 implementation prompt §13 event reactor no-bypass contract.
 from __future__ import annotations
 
 import sqlite3
 import json
 import hashlib
+import logging
 import threading
+import time
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
@@ -29,6 +31,7 @@ from src.events.reactor import (
     OpportunityEventReactor,
     ReactorConfig,
     ReactorResult,
+    TRANSIENT_MONEY_PATH_REASONS,
 )
 from src.state.db import init_schema, world_write_mutex
 from src.strategy.live_inference.no_trade_regret import NoTradeRegretLedger
@@ -528,14 +531,18 @@ def test_same_epoch_winner_claim_rejects_changed_batch_generation():
     conn.commit()
     reactor = _global_batch_probe_reactor(store, {})
 
-    result = reactor._claim_global_winner_for_actuation(
+    reactor_result = ReactorResult()
+    result, lock_bounced = reactor._claim_global_winner_for_actuation(
         target,
         current_batch_claim_generations={
             claimed.event_id: "2026-05-25T06:10:00+00:00"
         },
+        result=reactor_result,
     )
 
     assert result is None
+    assert lock_bounced is False
+    assert reactor_result.claim_lock_bounces == 0
     assert conn.execute(
         "SELECT 1 FROM opportunity_events WHERE event_id = ?",
         (target.event_id,),
@@ -577,17 +584,126 @@ def test_global_winner_claim_mutex_busy_is_bounded(monkeypatch):
         lambda: _BusyMutex(),
     )
 
-    result = reactor._claim_global_winner_for_actuation(
+    reactor_result = ReactorResult()
+    result, lock_bounced = reactor._claim_global_winner_for_actuation(
         target,
         current_batch_claim_generations={claimed.event_id: actual_generation},
+        result=reactor_result,
     )
 
     assert result is None
+    assert lock_bounced is True
     assert waits == [pytest.approx(0.75)]
+    assert reactor_result.claim_lock_bounces == 1
     assert conn.execute(
         "SELECT 1 FROM opportunity_events WHERE event_id = ?",
         (target.event_id,),
     ).fetchone() is None
+
+
+def test_global_claim_lock_bounce_skips_queue_and_retries_as_typed_transient(
+    tmp_path, monkeypatch, caplog
+):
+    """Full global-batch flow waits once, skips queue, and recovers next cycle."""
+
+    from src.engine.global_batch_runtime import _next_claim_carrier
+
+    db_path = tmp_path / "world.db"
+    conn = sqlite3.connect(str(db_path), timeout=30.0)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA busy_timeout = 30000")
+    init_schema(conn)
+    store = EventStore(conn)
+    base = _forecast_event("global-composed-lock", target_date="2099-05-25")
+    target = _next_claim_carrier(
+        base,
+        targeted_at=_DT_VENUE_OPEN,
+        economic_identity="global-composed-lock-economic-identity",
+        payload=json.loads(base.payload_json),
+    )
+    store.insert_or_ignore(base)
+    conn.commit()
+    observations = {}
+    reactor = _global_batch_probe_reactor(store, observations)
+    monkeypatch.setenv("ZEUS_REACTOR_CLAIM_BUSY_TIMEOUT_MS", "100")
+    queue_calls = 0
+    real_queue = reactor._queue_global_winner_for_claim
+
+    def _count_queue(*args, **kwargs):
+        nonlocal queue_calls
+        queue_calls += 1
+        return real_queue(*args, **kwargs)
+
+    reactor._queue_global_winner_for_claim = _count_queue
+    batch_attempt = 0
+
+    def _locked_then_recovered_batch(
+        events, _decision_time, *, claim_unpaged_winner
+    ):
+        nonlocal batch_attempt
+        batch_attempt += 1
+        if batch_attempt == 1:
+            blocker = sqlite3.connect(str(db_path), timeout=30.0)
+            blocker.execute("PRAGMA busy_timeout = 30000")
+            blocker.execute("BEGIN IMMEDIATE")
+            try:
+                claimed = claim_unpaged_winner(target)
+            finally:
+                blocker.rollback()
+                blocker.close()
+        else:
+            claimed = claim_unpaged_winner(target)
+        receipt_events = (*events, target) if claimed else events
+        reason = "GLOBAL_REAUCTION_WINNER_AWAITS_CLAIM"
+        return GlobalBatchSubmitResult(
+            receipts={
+                event.event_id: EventSubmissionReceipt(
+                    False,
+                    event.event_id,
+                    event.causal_snapshot_id,
+                    reason=reason,
+                    proof_accepted=False,
+                )
+                for event in receipt_events
+            },
+            winner_event_id=target.event_id if claimed else None,
+            venue_submit_count=0,
+            next_claim_event=None if claimed else target,
+        )
+
+    reactor._submit.process_global_batch = _locked_then_recovered_batch
+
+    started = time.monotonic()
+    with caplog.at_level(logging.WARNING, logger="zeus.events.reactor"):
+        first = reactor.process_pending(decision_time=_DT_VENUE_OPEN, limit=1)
+    elapsed = time.monotonic() - started
+
+    assert elapsed < 0.5, f"composed global claim bounce waited too long: {elapsed:.3f}s"
+    assert first.claim_lock_bounces == 1
+    assert first.retried == 1
+    assert queue_calls == 0
+    assert observations["direct_submit_calls"] == 0
+    assert "GLOBAL_REAUCTION_WINNER_AWAITS_CLAIM" in TRANSIENT_MONEY_PATH_REASONS
+    assert not any("UNKNOWN money-path reason" in row.message for row in caplog.records)
+    assert conn.execute("PRAGMA busy_timeout").fetchone()[0] == 30000
+    assert not conn.in_transaction
+    assert _processing_status(conn, base.event_id) == "pending"
+    assert conn.execute(
+        "SELECT last_error FROM opportunity_event_processing WHERE event_id = ?",
+        (base.event_id,),
+    ).fetchone()[0] == "GLOBAL_REAUCTION_WINNER_AWAITS_CLAIM"
+    assert conn.execute(
+        "SELECT 1 FROM opportunity_events WHERE event_id = ?", (target.event_id,)
+    ).fetchone() is None
+
+    second = reactor.process_pending(decision_time=_DT_VENUE_OPEN, limit=1)
+
+    assert second.claim_lock_bounces == 0
+    assert second.retried == 2
+    assert queue_calls == 0
+    assert observations["direct_submit_calls"] == 0
+    assert _processing_status(conn, target.event_id) == "pending"
 
 
 def test_global_batch_defers_target_when_claim_is_reclaimed_during_solve():
