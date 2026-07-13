@@ -2716,6 +2716,24 @@ tables:
     notes: >
       Sibling of the trade-DB schema_epoch entry above — see it for the law.
 
+  - name: truth_epoch
+    db: trade
+    schema_class: trade_class
+    schema_version_owner: null
+    created_by: "db.py:init_schema_trade_only via src.state.truth_epoch.ensure_truth_epoch_table"
+    pk_col: "[id]"
+    notes: >
+      LX-0R (docs/rebuild/local_ledger_excision_2026-07-12.md "契约+激活控制"):
+      single-row trade-DB truth-epoch marker, LEGACY default. Extends the
+      schema_epoch pattern above (same singleton-row idiom) but tracks a
+      DIFFERENT axis: schema_epoch answers "did the T5 migration run"; this
+      answers "who is the current economics authority"
+      (LEGACY/PREPARE/ACTIVE_NEW). Monotonic transition guard + read API in
+      src/state/truth_epoch.py; forbidden-column contract in
+      src/contracts/economics_ownership.py. Trade-DB only (unlike schema_epoch,
+      not stamped on world/forecasts — the economics authority question is
+      trade-DB-scoped). Inert this packet: stays LEGACY, no seam gates on it.
+
   - name: review_work_items
     db: trade
     schema_class: trade_class

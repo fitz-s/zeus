@@ -90,6 +90,11 @@ EXPECTED_RUNTIME_TRADE_TABLES = frozenset({
     # append-only ConditionalTokens payout observation log (ensure_table wired
     # into init_schema_trade_only via payout_observations_schema.py).
     "payout_observations",
+    # LX-0R 2026-07-13 (docs/rebuild/local_ledger_excision_2026-07-12.md):
+    # trade-DB truth-epoch marker (ensure_truth_epoch_table in
+    # init_schema_trade_only via src/state/truth_epoch.py). LEGACY default,
+    # trade-DB only.
+    "truth_epoch",
     "position_current",
     "position_events",
     "position_lots",

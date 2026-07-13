@@ -6137,6 +6137,13 @@ def init_schema_trade_only(conn: sqlite3.Connection) -> None:
     # T5 migration epoch marker (see init_schema) — table presence only.
     conn.execute(SCHEMA_EPOCH_TABLE_DDL)
 
+    # LX-0R (docs/rebuild/local_ledger_excision_2026-07-12.md): trade-DB truth
+    # epoch, LEGACY default. Extends the schema_epoch pattern above (same
+    # singleton-row idiom, a DIFFERENT axis — see src/state/truth_epoch.py
+    # module docstring). Inert: no seam reads/gates on this yet.
+    from src.state.truth_epoch import ensure_truth_epoch_table
+    ensure_truth_epoch_table(conn)
+
     # Create the per-DB migration ledger from the migration framework's single
     # authority. The boot registry assertion treats it as a real trade DB table,
     # so fresh trade DBs must have it before assert_db_matches_registry(TRADE).
