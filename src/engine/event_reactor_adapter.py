@@ -14906,13 +14906,31 @@ def _forecast_authority_payload_from_posterior(
         )
     except (TypeError, ValueError):
         return None
-    # The decorrelated multi-model member set for this family/cycle (the SAME set the spine used).
-    members = _spine_multimodel_members_for_event(
-        conn, event=event, family=family, decision_time=decision_time
+    fusion = p_provenance.get("bayes_precision_fusion")
+    bound_serving = (
+        fusion.get("current_value_serving")
+        if isinstance(fusion, Mapping)
+        else None
     )
-    if members is None:
+    if isinstance(bound_serving, Mapping) and bound_serving:
+        members_native = _posterior_bound_multimodel_members(
+            conn,
+            family=family,
+            source_cycle_time=p_source_cycle_time,
+            provenance=p_provenance,
+        )
+    elif event.event_type in _FORECAST_DECISION_EVENT_TYPES:
+        legacy_members = _spine_multimodel_members_for_event(
+            conn,
+            event=event,
+            family=family,
+            decision_time=decision_time,
+        )
+        members_native = None if legacy_members is None else tuple(legacy_members[0])
+    else:
+        members_native = None
+    if members_native is None:
         return None
-    members_native, _causal_sct, _spine_precision = members
     if len(members_native) < 3:
         return None
     member_count = len(members_native)
@@ -15041,6 +15059,77 @@ def _forecast_authority_payload_from_posterior(
     if source_time is None or agent_time is None or persisted_time is None:
         return None
     return payload_out, EvidenceClock(source_time, agent_time, persisted_time)
+
+
+def _posterior_bound_multimodel_members(
+    conn: sqlite3.Connection,
+    *,
+    family,
+    source_cycle_time: object,
+    provenance: Mapping[str, object],
+) -> tuple[float, ...] | None:
+    """Read the exact current inputs recorded by one replacement posterior."""
+
+    fusion = provenance.get("bayes_precision_fusion")
+    if not isinstance(fusion, Mapping):
+        return None
+    raw_models = fusion.get("used_models")
+    serving = fusion.get("current_value_serving")
+    if (
+        not str(source_cycle_time or "").strip()
+        or not isinstance(raw_models, (list, tuple))
+        or not isinstance(serving, Mapping)
+    ):
+        return None
+    models = tuple(str(model or "").strip() for model in raw_models)
+    if (
+        len(models) < 3
+        or any(not model for model in models)
+        or len(set(models)) != len(models)
+    ):
+        return None
+    if set(models) != {str(model) for model in serving}:
+        return None
+
+    from src.data.replacement_current_value_serving import (
+        read_current_instrument_values,
+    )
+
+    current = read_current_instrument_values(
+        conn,
+        city=family.city,
+        metric=family.metric,
+        target_date=family.target_date,
+        source_cycle_time_iso=str(source_cycle_time),
+        include_station_sources=True,
+    )
+    unit = str(
+        getattr(runtime_cities_by_name().get(str(family.city)), "settlement_unit", "")
+        or ""
+    ).upper()
+    if unit not in {"C", "F"}:
+        return None
+
+    members: list[float] = []
+    for model in models:
+        recorded = serving.get(model)
+        served = current.get(model)
+        if not isinstance(recorded, Mapping) or served is None:
+            return None
+        try:
+            recorded_id = int(recorded.get("raw_model_forecast_id"))
+            value_c = float(served.value_c)
+        except (TypeError, ValueError):
+            return None
+        if (
+            recorded_id != served.raw_model_forecast_id
+            or str(recorded.get("served_via") or "") != served.served_via
+            or str(recorded.get("served_cycle") or "") != served.served_cycle
+            or not math.isfinite(value_c)
+        ):
+            return None
+        members.append(value_c if unit == "C" else value_c * 9.0 / 5.0 + 32.0)
+    return tuple(members)
 
 
 def _posterior_horizon_profile(source_cycle_time: str) -> str:

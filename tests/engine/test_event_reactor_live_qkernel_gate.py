@@ -2942,6 +2942,17 @@ def test_replacement_forecast_authority_binds_selected_proof_posterior_id(
             "q_ucb_json_role": "fused_center_bootstrap_ucb",
             "q_lcb_bootstrap_draws": 200,
             "q_bootstrap_samples_hash": "b" * 64,
+            "bayes_precision_fusion": {
+                "used_models": ["a", "b", "c"],
+                "current_value_serving": {
+                    model: {
+                        "raw_model_forecast_id": index,
+                        "served_via": "single_runs",
+                        "served_cycle": "2026-07-08T06:00:00+00:00",
+                    }
+                    for index, model in enumerate(("a", "b", "c"), start=1)
+                },
+            },
         },
         sort_keys=True,
     )
@@ -3029,10 +3040,16 @@ def test_replacement_forecast_authority_binds_selected_proof_posterior_id(
         "runtime_cities_by_name",
         lambda: {"Seoul": SimpleNamespace(timezone="Asia/Seoul", settlement_unit="C")},
     )
+    member_provenance = []
+
+    def members_for_bound_posterior(*_args, **kwargs):
+        member_provenance.append(kwargs.get("provenance"))
+        return (25.0, 26.0, 27.0)
+
     monkeypatch.setattr(
         era,
-        "_spine_multimodel_members_for_event",
-        lambda *_args, **_kwargs: ((25.0, 26.0, 27.0), None, None),
+        "_posterior_bound_multimodel_members",
+        members_for_bound_posterior,
     )
     monkeypatch.setattr(era, "_replacement_live_input_lag_reason", lambda *_args, **_kwargs: None)
 
@@ -3052,3 +3069,170 @@ def test_replacement_forecast_authority_binds_selected_proof_posterior_id(
     assert payload["raw_payload_hash"] == "a" * 64
     assert payload["captured_at"] == "2026-07-08T12:38:00+00:00"
     assert payload["replacement_bin_topology"] == topology
+    assert member_provenance == [json.loads(provenance_json)]
+
+    monkeypatch.setattr(
+        era,
+        "_posterior_bound_multimodel_members",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        era,
+        "_spine_multimodel_members_for_event",
+        lambda *_args, **_kwargs: pytest.fail(
+            "declared posterior member binding must not fall back to carrier inference"
+        ),
+    )
+    with pytest.raises(
+        ValueError,
+        match="FORECAST_AUTHORITY_EVIDENCE_MISSING:replacement_posterior",
+    ):
+        era._forecast_authority_payload_and_clock(
+            conn,
+            event=SimpleNamespace(
+                event_type=event_type,
+                causal_snapshot_id="rmf-Seoul|2026-07-10|high|2026-07-08",
+            ),
+            family=SimpleNamespace(
+                city="Seoul",
+                target_date="2026-07-10",
+                metric="high",
+            ),
+            payload={},
+            decision_time=datetime(
+                2026,
+                7,
+                8,
+                17,
+                7,
+                14,
+                tzinfo=timezone.utc,
+            ),
+            bound_posterior_id=42,
+        )
+
+
+def test_posterior_cycle_members_do_not_depend_on_forecast_carrier(monkeypatch):
+    """Posterior members come from its recorded current inputs, not carrier shape."""
+
+    conn = sqlite3.connect(":memory:")
+    conn.execute(
+        """
+        CREATE TABLE raw_model_forecasts (
+            raw_model_forecast_id INTEGER PRIMARY KEY,
+            model TEXT,
+            city TEXT,
+            target_date TEXT,
+            metric TEXT,
+            source_cycle_time TEXT,
+            source_available_at TEXT,
+            captured_at TEXT,
+            lead_days INTEGER,
+            endpoint TEXT,
+            forecast_value_c REAL
+        )
+        """
+    )
+    conn.executemany(
+        """
+        INSERT INTO raw_model_forecasts VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        [
+            (
+                index,
+                model,
+                "Hong Kong",
+                "2026-07-13",
+                "high",
+                cycle,
+                available,
+                captured,
+                0,
+                "single_runs",
+                value,
+            )
+            for index, model, cycle, available, captured, value in (
+                (
+                    1,
+                    "a",
+                    "2026-07-12T18:00:00+00:00",
+                    "2026-07-13T00:04:00+00:00",
+                    "2026-07-13T00:49:00+00:00",
+                    33.0,
+                ),
+                (
+                    2,
+                    "b",
+                    "2026-07-12T18:00:00+00:00",
+                    "2026-07-12T21:35:00+00:00",
+                    "2026-07-13T00:49:00+00:00",
+                    34.0,
+                ),
+                (
+                    3,
+                    "c",
+                    "2026-07-13T01:50:00+00:00",
+                    "2026-07-13T01:50:00+00:00",
+                    "2026-07-13T02:23:00+00:00",
+                    35.0,
+                ),
+            )
+        ],
+    )
+    monkeypatch.setattr(
+        era,
+        "runtime_cities_by_name",
+        lambda: {
+            "Hong Kong": SimpleNamespace(
+                timezone="Asia/Hong_Kong",
+                settlement_unit="C",
+            )
+        },
+    )
+    family = SimpleNamespace(
+        city="Hong Kong",
+        target_date="2026-07-13",
+        metric="high",
+    )
+    provenance = {
+        "bayes_precision_fusion": {
+            "used_models": ["a", "b", "c"],
+            "current_value_serving": {
+                "a": {
+                    "raw_model_forecast_id": 1,
+                    "served_via": "single_runs",
+                    "served_cycle": "2026-07-12T18:00:00+00:00",
+                },
+                "b": {
+                    "raw_model_forecast_id": 2,
+                    "served_via": "single_runs",
+                    "served_cycle": "2026-07-12T18:00:00+00:00",
+                },
+                "c": {
+                    "raw_model_forecast_id": 3,
+                    "served_via": "single_runs",
+                    "served_cycle": "2026-07-13T01:50:00+00:00",
+                },
+            },
+        }
+    }
+    members = era._posterior_bound_multimodel_members(
+        conn,
+        family=family,
+        source_cycle_time="2026-07-13T06:00:00+00:00",
+        provenance=provenance,
+    )
+
+    assert members == (33.0, 34.0, 35.0)
+    provenance["bayes_precision_fusion"]["current_value_serving"]["c"][
+        "raw_model_forecast_id"
+    ] = 99
+    assert (
+        era._posterior_bound_multimodel_members(
+            conn,
+            family=family,
+            source_cycle_time="2026-07-13T06:00:00+00:00",
+            provenance=provenance,
+        )
+        is None
+    )
