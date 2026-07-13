@@ -5282,6 +5282,24 @@ CREATE TABLE IF NOT EXISTS position_events (
     position_id TEXT NOT NULL,
     event_version INTEGER NOT NULL DEFAULT 1 CHECK (event_version >= 1),
     sequence_no INTEGER NOT NULL CHECK (sequence_no >= 1),
+    -- 2026-07-12 T5 MIGRATION (docs/rebuild/quarantine_excision_2026-07-11.md,
+    -- scripts/migrations/2026_07_quarantine_phase_retirement.py): the retired
+    -- chain-quarantine event type is dropped from this CHECK; a historical
+    -- row still carrying it is rewritten to REVIEW_REQUIRED by that migration
+    -- (already a valid member below). Comment kept OUTSIDE the parenthesized
+    -- IN(...) list (fixed 2026-07-13, F2) — tests/state/
+    -- test_inv_position_event_wire_grammar.py naively comma-splits the CHECK
+    -- list text on the raw source, and a `)` inside an embedded comment
+    -- (as in "retirement.py):") prematurely truncated the regex capture.
+    -- F2 (docs/rebuild/local_ledger_excision_2026-07-12.md Round-2 delta,
+    -- rework of the reverted LX-F): POSITION_IDENTITY_SUPERSEDED is the
+    -- duplicate-position identity supersession FACT, emitted by
+    -- position_duplicate_consolidator instead of synthesized merge
+    -- economics. An already-created live DB's CHECK text is frozen at
+    -- CREATE-TABLE time (IF NOT EXISTS never rewrites it) — a live DB must
+    -- run scripts/migrations/2026_07_position_identity_supersession_check.py
+    -- before this literal is admitted; the consolidator probes and falls
+    -- back to a review item until then (see position_duplicate_consolidator).
     event_type TEXT NOT NULL CHECK (event_type IN (
         'POSITION_OPEN_INTENT',
         'ENTRY_ORDER_POSTED',
@@ -5291,11 +5309,6 @@ CREATE TABLE IF NOT EXISTS position_events (
         'DAY0_WINDOW_ENTERED',
         'CHAIN_SYNCED',
         'CHAIN_SIZE_CORRECTED',
-        -- 2026-07-12 T5 MIGRATION (docs/rebuild/quarantine_excision_2026-07-11.md,
-        -- scripts/migrations/2026_07_quarantine_phase_retirement.py): the
-        -- retired chain-quarantine event type is dropped here; a historical
-        -- row still carrying it is rewritten to REVIEW_REQUIRED by that
-        -- migration (already a valid member below).
         'MONITOR_REFRESHED',
         'EXIT_INTENT',
         'EXIT_ORDER_POSTED',
@@ -5307,7 +5320,8 @@ CREATE TABLE IF NOT EXISTS position_events (
         'ADMIN_VOIDED',
         'MANUAL_OVERRIDE_APPLIED',
         'VENUE_POSITION_OBSERVED',
-        'REVIEW_REQUIRED'
+        'REVIEW_REQUIRED',
+        'POSITION_IDENTITY_SUPERSEDED'
     )),
     -- 2026-07-11: 'QUARANTINE' sentinel literal removed (dead — see
     -- architecture/2026_04_02_architecture_kernel.sql occurred_at CHECK comment).

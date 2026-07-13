@@ -33,6 +33,21 @@
 #
 # No exception is silently swallowed. All exits are explicit, logged, and
 # leave a position_events VOIDED row for audit.
+#
+# F2 (docs/rebuild/local_ledger_excision_2026-07-12.md Round-2 delta,
+# rework of the reverted LX-F, f2c50ebd5 / af902a8e4): when db_sum <= chain_shares
+# and all duplicate rows share one CTF identity, this module used to VOID the
+# absorbed rows AND synthesize merged shares/cost_basis_usd/entry_price onto
+# the keeper row. The synthesis half is REMOVED — it was a local
+# derived-economics write, the exact disease this excision targets. The
+# module now only appends a POSITION_IDENTITY_SUPERSEDED fact
+# (keeper_position_id/absorbed_position_ids/evidence_refs) alongside the
+# existing ADMIN_VOIDED void events; the keeper row's economics are left
+# untouched by this module (whatever the current writers maintain until the
+# LX-3R read-model cutover). A live DB created before scripts/migrations/
+# 2026_07_position_identity_supersession_check.py runs may not yet admit this
+# event in its own CHECK — see _merge_equivalent_rows for the probe + review-
+# item fallback (fail-safe, not fail-broken).
 from __future__ import annotations
 
 import json
@@ -194,10 +209,6 @@ def _void_row(
     )
 
 
-def _table_columns(conn: sqlite3.Connection, table: str) -> set[str]:
-    return {str(row[1]) for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
-
-
 def _row_dicts_for_token(conn: sqlite3.Connection, token_id: str) -> list[dict]:
     cur = conn.execute(
         """
@@ -246,24 +257,47 @@ def _float_or_none(value) -> float | None:
         return None
 
 
-def _row_cost_basis(row: dict) -> float:
-    shares = _float_or_none(row.get("shares")) or 0.0
-    entry_price = _float_or_none(row.get("entry_price"))
-    if entry_price is not None and 0.0 < entry_price < 1.0:
-        return shares * entry_price
-    return _float_or_none(row.get("cost_basis_usd")) or 0.0
+def _mint_identity_superseded_review_item(
+    conn: sqlite3.Connection,
+    *,
+    keeper_id: str,
+    absorbed_ids: list[str],
+    evidence_refs: dict,
+    keeper_cost_basis_usd: float | None,
+) -> None:
+    """Fallback when the live position_events.event_type CHECK does not yet
+    admit POSITION_IDENTITY_SUPERSEDED (pre-migration DB). Never crashes,
+    never loses the merge decision — the ADMIN_VOIDED events for the
+    absorbed rows are already committed by this point; this only records that
+    the identity-supersession FACT itself could not be persisted yet."""
+    from src.contracts.review_work_item import ReviewReasonCode
+    from src.state.review_work_items import open_work_item
 
-
-def _chain_observed_cost_basis(rows: list[dict], chain_shares: float) -> float | None:
-    best_cost: float | None = None
-    for row in rows:
-        row_chain_shares = _float_or_none(row.get("chain_shares")) or 0.0
-        if row_chain_shares + 1e-9 < chain_shares:
-            continue
-        row_chain_cost = _float_or_none(row.get("chain_cost_basis_usd"))
-        if row_chain_cost is not None and row_chain_cost > 0.0:
-            best_cost = max(best_cost or 0.0, row_chain_cost)
-    return best_cost
+    unbounded = keeper_cost_basis_usd is None or keeper_cost_basis_usd < 0
+    open_work_item(
+        conn,
+        owner_domain="trade",
+        owner_table="position_events",
+        subject_id=keeper_id,
+        reason_code=ReviewReasonCode.LOCAL_WRITE_FAILURE,
+        evidence_refs=(
+            "docs/rebuild/local_ledger_excision_2026-07-12.md#Round-2-delta",
+            f"absorbed_position_ids={sorted(absorbed_ids)}",
+        ),
+        exposure_bound_usd=None if unbounded else keeper_cost_basis_usd,
+        unbounded=unbounded,
+        priority=100,
+        last_error_class="POSITION_EVENTS_CHECK_NOT_MIGRATED",
+        last_error_detail=(
+            "position_duplicate_consolidator could not record a "
+            "POSITION_IDENTITY_SUPERSEDED fact for this duplicate-identity "
+            "merge — the live position_events.event_type CHECK does not yet "
+            "admit this literal. Run scripts/migrations/"
+            "2026_07_position_identity_supersession_check.py, then re-run the "
+            "backfill (scripts/backfill_identity_supersession_facts.py) to "
+            f"convert this merge into a fact. evidence_refs={evidence_refs!r}"
+        ),
+    )
 
 
 def _merge_equivalent_rows(
@@ -273,6 +307,28 @@ def _merge_equivalent_rows(
     rows: list[dict],
     chain_shares: float,
 ) -> tuple[str, list[str]] | None:
+    """Void the absorbed duplicate rows and record the identity relation.
+
+    F2 (docs/rebuild/local_ledger_excision_2026-07-12.md Round-2 delta;
+    rework of the reverted LX-F): this function used to also synthesize
+    merged shares/cost_basis_usd/entry_price onto the keeper row — a
+    derived-economics write. That synthesis is REMOVED. The keeper row's
+    economics are left exactly as the current writers maintain them; only a
+    POSITION_IDENTITY_SUPERSEDED fact is appended (see
+    src.engine.lifecycle_events for the builder), so a future read-model
+    reducer can dedup duplicate identities from the fact log without a
+    future double-count.
+
+    The fact write is probed before attempting it (``position_events_
+    admits_event_type``) because an already-created live DB's CHECK is
+    frozen at CREATE-TABLE time and may predate scripts/migrations/
+    2026_07_position_identity_supersession_check.py. If the CHECK does not
+    (or unexpectedly cannot) admit the write, this falls back to a
+    LOCAL_WRITE_FAILURE ReviewWorkItem rather than raising — the absorbed
+    rows' ADMIN_VOIDED events, already appended above, are never rolled back
+    just because the newer fact type isn't admitted yet (fail-safe, not
+    fail-broken).
+    """
     if len(rows) <= 1:
         return None
     identity_keys = {_merge_identity_key(row) for row in rows}
@@ -290,16 +346,6 @@ def _merge_equivalent_rows(
     db_total_shares = sum((_float_or_none(row.get("shares")) or 0.0) for row in rows)
     if db_total_shares <= 0.0 or db_total_shares > float(chain_shares) + 1e-9:
         return None
-    target_shares = float(chain_shares)
-    db_total_cost = sum(_row_cost_basis(row) for row in rows)
-    chain_cost = _chain_observed_cost_basis(rows, target_shares)
-    if chain_cost is not None:
-        target_cost = chain_cost
-    elif db_total_shares > 0.0:
-        target_cost = (db_total_cost / db_total_shares) * target_shares
-    else:
-        target_cost = db_total_cost
-    avg_entry = target_cost / target_shares if target_shares > 0 else None
 
     for position_id in absorbed_ids:
         _void_row(conn, position_id=position_id, reason=_MERGED_REASON)
@@ -312,71 +358,93 @@ def _merge_equivalent_rows(
 
     from datetime import datetime, timezone
 
-    iso_now = datetime.now(timezone.utc).isoformat()
-    payload = json.dumps(
-        {
-            "reason": _MERGED_REASON,
-            "absorbed_position_ids": absorbed_ids,
-            "token_id": token_id,
-            "shares_before": [(_norm_identity(r.get("position_id")), _float_or_none(r.get("shares")) or 0.0) for r in rows],
-            "db_total_shares": db_total_shares,
-            "chain_shares": target_shares,
-            "shares_after": target_shares,
-            "db_total_cost_basis_usd": db_total_cost,
-            "cost_basis_usd_after": target_cost,
-        },
-        sort_keys=True,
-    )
-    conn.execute(
-        """
-        INSERT INTO position_events (
-            event_id, position_id, event_version, sequence_no, event_type,
-            occurred_at, phase_before, phase_after, strategy_key,
-            source_module, payload_json, env
-        ) VALUES (?, ?, 1, ?, 'MANUAL_OVERRIDE_APPLIED', ?, ?, ?, ?,
-                  'src.state.position_duplicate_consolidator', ?, 'live')
-        """,
-        (
-            str(uuid.uuid4()),
-            keeper_id,
-            next_seq,
-            iso_now,
-            _norm_identity(keeper.get("phase")),
-            _norm_identity(keeper.get("phase")),
-            _norm_identity(keeper.get("strategy_key")),
-            payload,
-        ),
+    from src.engine.lifecycle_events import (
+        build_position_identity_superseded_canonical_write,
+        position_events_admits_event_type,
     )
 
-    columns = _table_columns(conn, "position_current")
-    updates: dict[str, object] = {
-        "shares": target_shares,
-        "cost_basis_usd": target_cost,
-        "size_usd": target_cost,
-        "chain_shares": target_shares,
-        "updated_at": iso_now,
+    iso_now = datetime.now(timezone.utc).isoformat()
+    evidence_refs = {
+        "token_id": token_id,
+        "chain_shares": float(chain_shares),
+        "db_total_shares_before": db_total_shares,
+        "shares_before": [
+            (_norm_identity(r.get("position_id")), _float_or_none(r.get("shares")) or 0.0)
+            for r in rows
+        ],
     }
-    if avg_entry is not None:
-        updates["entry_price"] = avg_entry
-    assignments = []
-    values: list[object] = []
-    for col, value in updates.items():
-        if col in columns:
-            assignments.append(f"{col} = ?")
-            values.append(value)
-    if assignments:
-        values.append(keeper_id)
-        conn.execute(
-            f"UPDATE position_current SET {', '.join(assignments)} WHERE position_id = ?",
-            values,
+    event = build_position_identity_superseded_canonical_write(
+        keeper_position_id=keeper_id,
+        absorbed_position_ids=absorbed_ids,
+        evidence_refs=evidence_refs,
+        occurred_at=iso_now,
+        sequence_no=next_seq,
+        phase_after=_norm_identity(keeper.get("phase")),
+        strategy_key=_norm_identity(keeper.get("strategy_key")),
+    )
+
+    identity_superseded_recorded = False
+    if position_events_admits_event_type(conn, event["event_type"]):
+        try:
+            conn.execute(
+                """
+                INSERT INTO position_events (
+                    event_id, position_id, event_version, sequence_no, event_type,
+                    occurred_at, phase_before, phase_after, strategy_key,
+                    source_module, payload_json, env
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    event["event_id"],
+                    event["position_id"],
+                    event["event_version"],
+                    event["sequence_no"],
+                    event["event_type"],
+                    event["occurred_at"],
+                    event["phase_before"],
+                    event["phase_after"],
+                    event["strategy_key"],
+                    event["source_module"],
+                    event["payload_json"],
+                    event["env"],
+                ),
+            )
+            identity_superseded_recorded = True
+        except sqlite3.IntegrityError:
+            logger.error(
+                "[CONSOLIDATOR_IDENTITY_SUPERSEDED_CHECK_REJECTED] token=%s keeper=%s "
+                "absorbed=%s — position_events CHECK rejected the write despite the "
+                "probe; falling back to a review item (fail-safe, not fail-broken)",
+                token_id, keeper_id, absorbed_ids,
+            )
+    else:
+        logger.warning(
+            "[CONSOLIDATOR_IDENTITY_SUPERSEDED_CHECK_NOT_MIGRATED] token=%s keeper=%s "
+            "absorbed=%s — live position_events.event_type CHECK does not yet admit "
+            "POSITION_IDENTITY_SUPERSEDED; run scripts/migrations/"
+            "2026_07_position_identity_supersession_check.py. Opening a review item "
+            "instead of crashing or losing the merge.",
+            token_id, keeper_id, absorbed_ids,
         )
+
+    if not identity_superseded_recorded:
+        _mint_identity_superseded_review_item(
+            conn,
+            keeper_id=keeper_id,
+            absorbed_ids=absorbed_ids,
+            evidence_refs=evidence_refs,
+            keeper_cost_basis_usd=_float_or_none(keeper.get("cost_basis_usd")),
+        )
+
     logger.warning(
-        "[CONSOLIDATOR_MERGED_EQUIVALENT] token=%s keeper=%s absorbed=%s shares=%.6f chain=%.6f",
+        "[CONSOLIDATOR_IDENTITY_SUPERSEDED] token=%s keeper=%s absorbed=%s "
+        "db_total_shares=%.6f chain=%.6f fact_recorded=%s",
         token_id,
         keeper_id,
         absorbed_ids,
-        target_shares,
+        db_total_shares,
         chain_shares,
+        identity_superseded_recorded,
     )
     return keeper_id, absorbed_ids
 

@@ -19,6 +19,7 @@ is called.
 from __future__ import annotations
 
 import json
+import re
 from datetime import datetime, timezone
 from typing import Any
 
@@ -1365,3 +1366,143 @@ def build_review_required_canonical_write(
         "payload_json": payload,
     }
     return [event], projection
+
+
+def build_position_identity_superseded_canonical_write(
+    *,
+    keeper_position_id: str,
+    absorbed_position_ids: list[str],
+    evidence_refs: dict,
+    occurred_at: str,
+    sequence_no: int,
+    phase_after: str,
+    strategy_key: str,
+    source_module: str = "src.state.position_duplicate_consolidator",
+    env: str = "live",
+) -> dict:
+    """POSITION_IDENTITY_SUPERSEDED — duplicate-position identity FACT.
+
+    F2 (docs/rebuild/local_ledger_excision_2026-07-12.md Round-2 delta,
+    duplicate_consolidator special handling; rework of the reverted LX-F,
+    f2c50ebd5 / af902a8e4): the consolidator used to VOID the absorbed rows
+    AND synthesize merged shares/cost_basis_usd/entry_price onto the keeper
+    row (a derived-economics write — exactly the disease this excision
+    removes). This builder replaces the synthesis half: it records the merge
+    RELATION as an immutable, append-only fact so a future read-model reducer
+    can dedup duplicate identities across history without double-counting,
+    while the keeper row's own economics stay untouched (whatever the
+    current writers maintain until the LX-3R cutover).
+
+    This event never mutates `position_current` — unlike every other builder
+    in this module it has no `build_position_current_projection` companion,
+    because there is no projection delta to record. `phase_after` is a no-op
+    fold (mirrors `build_chain_size_corrected_canonical_write`): the caller
+    passes the keeper's OWN current phase, never a transition.
+
+    A live DB created before scripts/migrations/
+    2026_07_position_identity_supersession_check.py runs may not yet admit
+    this event's `event_type` in its own `position_events.event_type` CHECK
+    (CREATE TABLE IF NOT EXISTS never rewrites an existing table's CHECK) —
+    the caller (position_duplicate_consolidator) probes via
+    `position_events_admits_event_type` before writing and falls back to a
+    review item rather than crashing.
+
+    Args:
+        keeper_position_id: the surviving position_id that owns the on-chain
+            exposure going forward (already the sole non-voided row).
+        absorbed_position_ids: position_ids folded into the keeper. Each was
+            already voided via a separate ADMIN_VOIDED event (see
+            `position_duplicate_consolidator._void_row`) — this fact records
+            the identity RELATION, not the void itself.
+        evidence_refs: the dup-detection evidence the consolidator already
+            computed (token_id, chain_shares, db_total_shares_before,
+            per-row shares_before) — raw observed facts, never a synthesized
+            merged value (no cost_basis/entry_price/avg_price key belongs
+            here).
+        occurred_at: explicit detection/merge timestamp (F2 invariant).
+    """
+    if not keeper_position_id:
+        raise ValueError(
+            "keeper_position_id is required for "
+            "build_position_identity_superseded_canonical_write"
+        )
+    if not absorbed_position_ids:
+        raise ValueError(
+            "absorbed_position_ids must be non-empty for "
+            "build_position_identity_superseded_canonical_write"
+        )
+    if not occurred_at:
+        raise ValueError(
+            "occurred_at is required for "
+            "build_position_identity_superseded_canonical_write"
+        )
+    if not phase_after:
+        raise ValueError(
+            "phase_after is required for "
+            "build_position_identity_superseded_canonical_write (no-op fold; "
+            "caller passes the keeper's current phase — this event never "
+            "transitions phase)"
+        )
+    payload = json.dumps(
+        {
+            "keeper_position_id": keeper_position_id,
+            "absorbed_position_ids": list(absorbed_position_ids),
+            "evidence_refs": evidence_refs,
+            "occurred_at": occurred_at,
+        },
+        default=str,
+        sort_keys=True,
+    )
+    return {
+        "event_id": f"{keeper_position_id}:position_identity_superseded:{sequence_no}",
+        "position_id": keeper_position_id,
+        "event_version": 1,
+        "sequence_no": sequence_no,
+        "event_type": "POSITION_IDENTITY_SUPERSEDED",
+        "occurred_at": occurred_at,
+        "phase_before": phase_after,
+        "phase_after": phase_after,
+        "strategy_key": strategy_key,
+        "source_module": source_module,
+        "env": env,
+        "payload_json": payload,
+    }
+
+
+_EVENT_TYPE_CHECK_RE = re.compile(
+    r"event_type\s+TEXT\s+NOT NULL\s+CHECK\s*\(\s*event_type\s+IN\s*\("
+)
+
+
+def position_events_admits_event_type(conn: Any, event_type: str) -> bool:
+    """True iff the LIVE `position_events.event_type` CHECK constraint, as
+    actually installed on ``conn`` right now, admits ``event_type``.
+
+    F2 rework of LX-F (docs/rebuild/local_ledger_excision_2026-07-12.md
+    Round-2 delta): `CREATE TABLE IF NOT EXISTS` never rewrites an existing
+    table's CHECK text, so a DB created before a vocabulary addition ships in
+    `src/state/db.py` keeps its OLD, narrower CHECK until
+    `scripts/migrations/2026_07_position_identity_supersession_check.py`
+    rebuilds the table. This is a cheap per-call probe (one `sqlite_master`
+    lookup, not cached) rather than a startup-only check, so a migration that
+    runs mid-session takes effect on the very next write attempt with no
+    process restart required.
+
+    A minimal test fixture's `position_events` table with NO CHECK on
+    `event_type` at all is treated as admitting every literal (an
+    unconstrained column truly does) — only a table that HAS the CHECK and
+    lacks this specific literal is "not yet migrated".
+
+    Returns False (never raises) if the table doesn't exist yet — a caller
+    inserting into a table that doesn't exist has a bigger problem than this
+    probe, and the subsequent INSERT will fail loudly with its own error.
+    """
+    row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='position_events'"
+    ).fetchone()
+    if row is None or not row[0]:
+        return False
+    sql = str(row[0])
+    if f"'{event_type}'" in sql:
+        return True
+    return not _EVENT_TYPE_CHECK_RE.search(sql)

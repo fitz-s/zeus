@@ -446,7 +446,12 @@ class CanonicalPositionEventKind(str, Enum):
     DAY0_WINDOW_ENTERED = "DAY0_WINDOW_ENTERED"
     CHAIN_SYNCED = "CHAIN_SYNCED"
     CHAIN_SIZE_CORRECTED = "CHAIN_SIZE_CORRECTED"
-    CHAIN_QUARANTINED = "CHAIN_QUARANTINED"
+    # CHAIN_QUARANTINED retired here 2026-07-13 (T5 residual found while fixing
+    # tests/state/test_inv_position_event_wire_grammar.py's CHECK parser — see
+    # src/state/db.py's event_type CHECK comment): the T5 quarantine-phase-
+    # retirement migration (docs/rebuild/quarantine_excision_2026-07-11.md)
+    # already dropped the literal from position_events.event_type CHECK and
+    # rewrites legacy rows to REVIEW_REQUIRED; this enum member was stale.
     MONITOR_REFRESHED = "MONITOR_REFRESHED"
     EXIT_INTENT = "EXIT_INTENT"
     EXIT_ORDER_POSTED = "EXIT_ORDER_POSTED"
@@ -459,6 +464,16 @@ class CanonicalPositionEventKind(str, Enum):
     MANUAL_OVERRIDE_APPLIED = "MANUAL_OVERRIDE_APPLIED"
     VENUE_POSITION_OBSERVED = "VENUE_POSITION_OBSERVED"  # PR B — degraded recovery
     REVIEW_REQUIRED = "REVIEW_REQUIRED"  # PR #352 F4 — durable size-mismatch / chain-only review
+    # F2 rework of LX-F (docs/rebuild/local_ledger_excision_2026-07-12.md Round-2
+    # delta, duplicate_consolidator special handling): duplicate-position identity
+    # supersession FACT (keeper_position_id/absorbed_position_ids/evidence_refs).
+    # Emitted by position_duplicate_consolidator._merge_equivalent_rows instead of
+    # synthesizing merged shares/cost_basis/entry_price onto the keeper row. A
+    # live DB created before scripts/migrations/
+    # 2026_07_position_identity_supersession_check.py runs may not yet admit this
+    # literal in its own position_events.event_type CHECK — the consolidator
+    # probes and falls back to a review item rather than crashing.
+    POSITION_IDENTITY_SUPERSEDED = "POSITION_IDENTITY_SUPERSEDED"
 
 
 __all__ = [

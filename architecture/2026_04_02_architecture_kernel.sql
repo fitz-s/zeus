@@ -16,6 +16,13 @@ CREATE TABLE IF NOT EXISTS position_events (
     -- comment — see tests/test_architecture_contracts.py's INV-07 SQL/Python
     -- consistency antibody, which naively comma-splits the CHECK list text
     -- and would otherwise misparse a mid-list comment as a phantom member.
+    -- F2 (docs/rebuild/local_ledger_excision_2026-07-12.md Round-2 delta,
+    -- rework of the reverted LX-F): POSITION_IDENTITY_SUPERSEDED records the
+    -- duplicate-position merge relation as an immutable fact (keeper_
+    -- position_id/absorbed_position_ids/evidence_refs) instead of the
+    -- consolidator synthesizing merged shares/cost_basis/entry_price. An
+    -- already-created live DB's CHECK is frozen at CREATE-TABLE time — see
+    -- scripts/migrations/2026_07_position_identity_supersession_check.py.
     event_type TEXT NOT NULL CHECK (event_type IN (
         'POSITION_OPEN_INTENT',
         'ENTRY_ORDER_POSTED',
@@ -36,7 +43,8 @@ CREATE TABLE IF NOT EXISTS position_events (
         'ADMIN_VOIDED',
         'MANUAL_OVERRIDE_APPLIED',
         'VENUE_POSITION_OBSERVED',
-        'REVIEW_REQUIRED'
+        'REVIEW_REQUIRED',
+        'POSITION_IDENTITY_SUPERSEDED'
     )),
     -- 2026-07-11: 'QUARANTINE' sentinel literal removed from this CHECK — a
     -- state word inside a timestamp type (docs/rebuild/quarantine_excision_2026-07-11.md

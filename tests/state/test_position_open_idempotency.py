@@ -46,6 +46,7 @@ CREATE TABLE position_current (
     next_exit_retry_at TEXT, last_monitor_prob REAL,
     last_monitor_prob_is_fresh INTEGER, last_monitor_edge REAL,
     last_monitor_market_price REAL, last_monitor_market_price_is_fresh INTEGER,
+    last_monitor_best_bid REAL, last_monitor_best_ask REAL, last_monitor_market_vig REAL,
     decision_snapshot_id TEXT,
     entry_method TEXT, strategy_key TEXT NOT NULL, edge_source TEXT,
     discovery_mode TEXT, chain_state TEXT, token_id TEXT, no_token_id TEXT,
@@ -625,7 +626,16 @@ class TestConsolidator:
         assert report["voided_positions"] == []
 
     def test_chain_covers_db_same_identity_open_rows_merge(self):
-        """Same token/same identity rows are one local exposure split and must converge."""
+        """Same token/same identity rows are one local exposure split and must
+        converge onto a single keeper row.
+
+        F2 (docs/rebuild/local_ledger_excision_2026-07-12.md Round-2 delta;
+        rework of the reverted LX-F): the consolidator no longer synthesizes
+        merged shares/cost_basis_usd/entry_price onto the keeper — it appends
+        a POSITION_IDENTITY_SUPERSEDED FACT instead. The keeper row's own
+        economics must stay byte-identical to whatever was already there
+        before consolidation ran.
+        """
         from src.state.position_duplicate_consolidator import consolidate
         from src.state.projection import (
             CANONICAL_POSITION_CURRENT_COLUMNS,
@@ -666,22 +676,149 @@ class TestConsolidator:
         assert report["merged_tokens"] == [_LONDON_TOKEN]
         assert report["merged_positions"] == ["pos-merge-a"]
         rows = conn.execute(
-            "SELECT position_id, phase, shares, cost_basis_usd, size_usd FROM position_current "
-            "WHERE no_token_id = ? ORDER BY position_id",
+            "SELECT position_id, phase, shares, cost_basis_usd, size_usd, entry_price, "
+            "chain_shares FROM position_current WHERE no_token_id = ? ORDER BY position_id",
             (_LONDON_TOKEN,),
         ).fetchall()
         by_id = {row[0]: row for row in rows}
         assert by_id["pos-merge-a"][1] == "voided"
+        assert by_id["pos-merge-a"][2] == 0.0, "absorbed row's shares must be voided to 0"
+        assert by_id["pos-merge-a"][3] == 0.0, "absorbed row's cost_basis_usd must be voided to 0"
+
+        # No synthesized economics: the keeper row is untouched by this
+        # function — it keeps EXACTLY the values it was inserted with.
         assert by_id["pos-merge-b"][1] == "active"
-        assert by_id["pos-merge-b"][2] == pytest.approx(60.0)
-        assert by_id["pos-merge-b"][3] == pytest.approx(60.0 * 0.31)
-        assert by_id["pos-merge-b"][4] == pytest.approx(60.0 * 0.31)
+        assert by_id["pos-merge-b"][2] == pytest.approx(13.5), (
+            "keeper shares must not be rewritten to the chain-observed total"
+        )
+        assert by_id["pos-merge-b"][3] == pytest.approx(13.5 * 0.31), (
+            "keeper cost_basis_usd must not be resynthesized"
+        )
+        assert by_id["pos-merge-b"][4] == pytest.approx(1.86), (
+            "keeper size_usd must not be resynthesized"
+        )
+        assert by_id["pos-merge-b"][5] == pytest.approx(0.31), (
+            "keeper entry_price must not be resynthesized"
+        )
+        assert by_id["pos-merge-b"][6] is None, (
+            "keeper chain_shares must not be written by the merge path"
+        )
+
         event = conn.execute(
             "SELECT event_type, payload_json FROM position_events "
             "WHERE position_id='pos-merge-b' ORDER BY sequence_no DESC LIMIT 1"
         ).fetchone()
-        assert event[0] == "MANUAL_OVERRIDE_APPLIED"
-        assert "pos-merge-a" in event[1]
+        assert event[0] == "POSITION_IDENTITY_SUPERSEDED"
+        payload = json.loads(event[1])
+        assert payload["keeper_position_id"] == "pos-merge-b"
+        assert payload["absorbed_position_ids"] == ["pos-merge-a"]
+        assert payload["evidence_refs"]["token_id"] == _LONDON_TOKEN
+        assert payload["evidence_refs"]["chain_shares"] == pytest.approx(60.0)
+        assert payload["evidence_refs"]["db_total_shares_before"] == pytest.approx(28.5)
+        # No forbidden synthesized-economics keys anywhere in the payload.
+        forbidden_keys = {
+            "cost_basis_usd_after",
+            "shares_after",
+            "entry_price_after",
+            "avg_entry",
+            "db_total_cost_basis_usd",
+        }
+        assert forbidden_keys.isdisjoint(payload.keys())
+        assert forbidden_keys.isdisjoint(payload["evidence_refs"].keys())
+
+    def test_chain_covers_db_same_identity_merge_falls_back_to_review_item_when_check_not_migrated(self):
+        """F2 fail-safe path: if the live position_events.event_type CHECK
+        does not yet admit POSITION_IDENTITY_SUPERSEDED (pre-migration DB),
+        the consolidator must NOT crash and must NOT lose the already-voided
+        absorbed row — it opens a LOCAL_WRITE_FAILURE ReviewWorkItem instead."""
+        from src.state.position_duplicate_consolidator import consolidate
+        from src.state.projection import (
+            CANONICAL_POSITION_CURRENT_COLUMNS,
+            ordered_values,
+        )
+        from src.state.schema.review_work_items_schema import ensure_table as _ensure_review_work_items_table
+
+        conn = _fresh_conn()
+        _ensure_review_work_items_table(conn)
+        # Rebuild position_events with a CHECK that does NOT admit the new
+        # literal — reproduces a live pre-migration DB inside this module's
+        # otherwise-unconstrained fixture schema.
+        conn.execute("DROP TABLE position_events")
+        conn.executescript(
+            """
+            CREATE TABLE position_events (
+                event_id TEXT PRIMARY KEY,
+                position_id TEXT NOT NULL,
+                event_version INTEGER NOT NULL DEFAULT 1,
+                sequence_no INTEGER NOT NULL,
+                event_type TEXT NOT NULL CHECK (event_type IN (
+                    'POSITION_OPEN_INTENT', 'ADMIN_VOIDED', 'MANUAL_OVERRIDE_APPLIED'
+                )),
+                occurred_at TEXT NOT NULL,
+                phase_before TEXT, phase_after TEXT,
+                strategy_key TEXT NOT NULL,
+                decision_id TEXT, snapshot_id TEXT, order_id TEXT,
+                command_id TEXT, caused_by TEXT, idempotency_key TEXT UNIQUE,
+                venue_status TEXT, source_module TEXT NOT NULL,
+                payload_json TEXT NOT NULL, env TEXT NOT NULL DEFAULT 'live',
+                UNIQUE(position_id, sequence_no)
+            )
+            """
+        )
+
+        p1 = _make_projection(
+            position_id="pos-merge-legacy-a",
+            phase="active",
+            token_id="",
+            no_token_id=_LONDON_TOKEN,
+            shares=15.0,
+        )
+        p2 = _make_projection(
+            position_id="pos-merge-legacy-b",
+            phase="active",
+            token_id="",
+            no_token_id=_LONDON_TOKEN,
+            shares=13.5,
+        )
+        for proj in (p1, p2):
+            conn.execute(
+                f"INSERT INTO position_current ({', '.join(CANONICAL_POSITION_CURRENT_COLUMNS)}) "
+                f"VALUES ({', '.join(['?'] * len(CANONICAL_POSITION_CURRENT_COLUMNS))})",
+                ordered_values(proj, CANONICAL_POSITION_CURRENT_COLUMNS),
+            )
+        _insert_event(conn, position_id="pos-merge-legacy-a", seq=1, occurred_at="2026-05-17T10:00:00+00:00")
+        _insert_event(conn, position_id="pos-merge-legacy-b", seq=1, occurred_at="2026-05-17T11:00:00+00:00")
+        conn.execute(
+            "INSERT INTO collateral_ledger_snapshots (captured_at, authority_tier, ctf_token_balances_json) "
+            "VALUES (?, 'CHAIN', ?)",
+            ("2026-05-18T00:01:00+00:00", json.dumps({_LONDON_TOKEN: 60_000_000})),
+        )
+
+        report = consolidate(conn)  # must not raise
+
+        assert report["merged_tokens"] == [_LONDON_TOKEN]
+        assert report["merged_positions"] == ["pos-merge-legacy-a"]
+
+        # The absorbed row's ADMIN_VOIDED event is preserved — never rolled
+        # back just because the newer fact type isn't admitted yet.
+        voided_row = conn.execute(
+            "SELECT phase FROM position_current WHERE position_id = 'pos-merge-legacy-a'"
+        ).fetchone()
+        assert voided_row[0] == "voided"
+
+        # No POSITION_IDENTITY_SUPERSEDED row was written (CHECK doesn't admit it).
+        fact_count = conn.execute(
+            "SELECT COUNT(*) FROM position_events WHERE event_type = 'POSITION_IDENTITY_SUPERSEDED'"
+        ).fetchone()[0]
+        assert fact_count == 0
+
+        # A review item records the deferred fact instead.
+        rwi = conn.execute(
+            "SELECT subject_id, reason_code, status FROM review_work_items "
+            "WHERE subject_id = 'pos-merge-legacy-b' AND reason_code = 'LOCAL_WRITE_FAILURE'"
+        ).fetchone()
+        assert rwi is not None
+        assert rwi[2] == "OPEN"
 
     def test_chain_covers_db_different_condition_stays_divergent(self):
         """Different condition_id means different CTF market identity; never merge."""
