@@ -398,6 +398,39 @@ modules:
       - tests/reconcile/test_replay_harness.py
     graph_appendix_status: LOCAL_GRAPH_QUERY_REQUIRED
     archive_extraction_status: not_started
+  reduce:
+    path: src/reduce
+    scoped_agents: src/reduce/AGENTS.md
+    module_book: null
+    priority: p1_first_wave
+    # maturity: provisional — LX-2R-a (docs/rebuild/local_ledger_excision_2026-07-12.md
+    # packet LX-2R-a). Synthetic-fixture-only per both wave-1 dual reviews
+    # (docs/rebuild/consult_answers/local_ledger_excision_wave1_review_2026-07-13.txt
+    # + local_ledger_excision_wave1_local_verifier_2026-07-13.md): reducer
+    # implementation may proceed in parallel with LX-1R source-spine repair,
+    # but no production read-model backfill, no cent-equivalence claim, and
+    # no live generation publication until the LX-1R gate closes. Inert by
+    # design: nothing outside tests imports src.reduce yet.
+    maturity: provisional
+    zone: source
+    authority_role: position_economics_reducer
+    high_risk_files:
+      - src/reduce/position_economics.py
+    public_entry_files:
+      - src/reduce/position_economics.py
+      - src/reduce/generation.py
+      - src/reduce/schema/generation_schema.py
+    law_dependencies:
+      - docs/rebuild/local_ledger_excision_2026-07-12.md
+      - docs/rebuild/consult_answers/local_ledger_excision_wave1_review_2026-07-13.txt
+      - docs/rebuild/consult_answers/local_ledger_excision_wave1_local_verifier_2026-07-13.md
+      - docs/rebuild/consult_answers/local_ledger_excision_delta_round2_2026-07-13.txt
+    current_fact_dependencies: []
+    required_tests:
+      - tests/reduce/test_position_economics.py
+      - tests/reduce/test_generation.py
+    graph_appendix_status: LOCAL_GRAPH_QUERY_REQUIRED
+    archive_extraction_status: not_started
   execution:
     path: src/execution
     scoped_agents: src/execution/AGENTS.md
