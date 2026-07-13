@@ -6844,12 +6844,23 @@ def _submit_current_global_sell(
             )
     except Exception as exc:  # noqa: BLE001 - exit safety remains fail closed
         if exit_evidence is not None and exit_evidence.venue_call_started:
+            unknown_side_effect = (
+                exit_evidence.result_status == "unknown_side_effect"
+            )
+            submitted = bool(
+                exit_evidence.venue_ack_received or unknown_side_effect
+            )
+            reason_prefix = (
+                "GLOBAL_SELL_EXIT_UNKNOWN"
+                if submitted
+                else "GLOBAL_SELL_EXIT_REJECTED"
+            )
             return _global_sell_receipt(
                 event,
                 global_actuation=global_actuation,
-                reason=f"GLOBAL_SELL_EXIT_UNKNOWN:{type(exc).__name__}:{exc}",
-                proof_accepted=True,
-                submitted=True,
+                reason=f"{reason_prefix}:{type(exc).__name__}:{exc}",
+                proof_accepted=submitted,
+                submitted=submitted,
                 venue_call_started=True,
                 venue_ack_received=exit_evidence.venue_ack_received,
                 venue_command_id=exit_evidence.command_id,

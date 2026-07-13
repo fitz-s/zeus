@@ -191,7 +191,8 @@ def _resolve_exit_order_type(
         return _exit_order_type(selected_order_type)
     if intended not in {"FOK", "FAK", "GTC", "GTD"}:
         raise ValueError(f"unsupported_exit_submit_order_type:{intended}")
-    if not _risk_allocator_order_type_allows_intent(
+    exit_selected = _exit_order_type(selected_order_type)
+    if intended != exit_selected and not _risk_allocator_order_type_allows_intent(
         selected_order_type=selected_order_type,
         intent_order_type=intended,
     ):

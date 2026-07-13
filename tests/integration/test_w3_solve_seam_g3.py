@@ -5141,6 +5141,43 @@ def test_global_sell_adapter_bypasses_entry_lane_and_uses_reduce_only_exit(
     assert unknown.reason.startswith("GLOBAL_SELL_EXIT_UNKNOWN:TimeoutError:")
     assert _is_global_reduce_only_exit_receipt(unknown) is True
 
+    def fail_after_deterministic_reject(*_args, **kwargs):
+        evidence = kwargs["execution_evidence"]
+        evidence.venue_call_started = True
+        evidence.venue_ack_received = False
+        evidence.command_id = "command-rejected"
+        evidence.command_state = "REJECTED"
+        evidence.order_type = "FAK"
+        evidence.result_status = "rejected"
+        evidence.result_reason = "venue rejected"
+        raise RuntimeError("lifecycle persistence failed after rejection")
+
+    monkeypatch.setattr(
+        "src.execution.exit_lifecycle.execute_exit",
+        fail_after_deterministic_reject,
+    )
+    deterministic_reject = era._submit_current_global_sell(
+        event,
+        decision_time=at,
+        global_actuation=actuation,
+        trade_conn=conn,
+        forecast_conn=object(),
+        topology_conn=object(),
+        calibration_conn=object(),
+        real_order_submit_enabled=True,
+        preflight_only=False,
+        preflight_receipt=preflight,
+    )
+    assert deterministic_reject.submitted is False
+    assert deterministic_reject.proof_accepted is False
+    assert deterministic_reject.venue_call_started is True
+    assert deterministic_reject.venue_ack_received is False
+    assert deterministic_reject.venue_command_state == "REJECTED"
+    assert deterministic_reject.reason.startswith(
+        "GLOBAL_SELL_EXIT_REJECTED:RuntimeError:"
+    )
+    assert _is_global_reduce_only_exit_receipt(deterministic_reject) is False
+
     source = inspect.getsource(era.event_bound_live_adapter_from_trade_conn)
     assert source.index("if _global_sell_candidate(global_actuation) is not None") < source.index(
         "if real_order_submit_enabled and not durable_submit_outbox_enabled"
@@ -5235,6 +5272,7 @@ def test_exact_sell_limit_is_audited_and_off_tick_is_rejected_before_submit(
         0.50
     )
     assert _resolve_exit_order_type("GTC", "FAK") == "FAK"
+    assert _resolve_exit_order_type("FOK", "FAK") == "FAK"
     assert _exit_base_limit_price(0.001, Decimal("0.001")) == pytest.approx(
         0.001
     )
