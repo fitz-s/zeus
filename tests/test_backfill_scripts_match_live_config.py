@@ -368,21 +368,95 @@ def test_obs_v2_backfill_rerun_reports_zero_rows_written(
 
 
 def test_hko_ingest_row_stamps_provenance_identity(hko_ingest_tick_module):
-    row = hko_ingest_tick_module._build_v2_row(
+    snapshot = hko_ingest_tick_module.HkoExtremaSnapshot(
         target_date="2026-04-23",
-        hour_utc="2026-04-23T13:00Z",
+        observed_at_utc="2026-04-23T13:05:00+00:00",
+        high_c=33.8,
+        low_c=24.1,
+        fetched_at_utc="2026-04-23T13:05:10+00:00",
+    )
+    row = hko_ingest_tick_module._build_hko_extrema_row(
+        snapshot,
         temperature_c=24.5,
-        fetched_at="2026-04-23T13:05:00Z",
+        accumulator_fetched_at="2026-04-23T13:00:05+00:00",
         data_version="v1.hk-accumulator.forward",
         imported_at="2026-04-25T12:00:00+00:00",
     )
 
     provenance = json.loads(row.provenance_json)
     assert provenance["payload_hash"].startswith("sha256:")
-    assert provenance["payload_scope"] == "hko_accumulator_row_source_identity"
-    assert provenance["parser_version"] == "hko_hourly_accumulator_projection_v2"
-    assert provenance["source_file"] == "hko_hourly_accumulator"
+    assert provenance["payload_scope"] == "hko_current_and_since_midnight_extrema"
+    assert provenance["parser_version"] == "hko_since_midnight_extrema"
+    assert provenance["observation_basis"] == "hko_since_midnight_extrema_1min_mean"
+    assert provenance["source_file"].endswith("latest_since_midnight_maxmin.csv")
     assert provenance["station_id"] == "HKO"
+    assert row.temp_current == 24.5
+    assert row.running_max == 33.8
+    assert row.running_min == 24.1
+
+
+def test_hko_ingest_parses_official_since_midnight_extrema(hko_ingest_tick_module):
+    payload = """Date time,Automatic Weather Station,Maximum Air Temperature Since Midnight(degree Celsius),Minimum Air Temperature Since Midnight(degree Celsius)
+202607132350,Chek Lap Kok,34.3,29.1
+202607132350,HK Observatory,33.8,29.0
+"""
+
+    snapshot = hko_ingest_tick_module._parse_hko_extrema_csv(
+        payload,
+        fetched_at_utc="2026-07-13T15:50:10+00:00",
+    )
+
+    assert snapshot.target_date == "2026-07-13"
+    assert snapshot.observed_at_utc == "2026-07-13T15:50:00+00:00"
+    assert snapshot.high_c == 33.8
+    assert snapshot.low_c == 29.0
+
+
+def test_hko_ingest_repeated_provider_snapshot_is_idempotent(hko_ingest_tick_module):
+    conn = sqlite3.connect(":memory:")
+    conn.execute(
+        """
+        CREATE TABLE observation_instants (
+            id INTEGER PRIMARY KEY,
+            city TEXT,
+            source TEXT,
+            utc_timestamp TEXT,
+            running_max REAL,
+            running_min REAL,
+            causality_status TEXT,
+            provenance_json TEXT
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO observation_instants VALUES (
+            1, 'Hong Kong', 'hko_hourly_accumulator',
+            '2026-07-13T15:50:00+00:00', 33.8, 29.0, 'OK',
+            '{"observation_basis":"hko_since_midnight_extrema_1min_mean"}'
+        )
+        """
+    )
+    snapshot = hko_ingest_tick_module.HkoExtremaSnapshot(
+        target_date="2026-07-13",
+        observed_at_utc="2026-07-13T15:50:00+00:00",
+        high_c=33.8,
+        low_c=29.0,
+        fetched_at_utc="2026-07-13T15:51:00+00:00",
+    )
+
+    assert hko_ingest_tick_module._same_extrema_already_materialized(conn, snapshot)
+    assert not hko_ingest_tick_module._same_extrema_already_materialized(
+        conn,
+        hko_ingest_tick_module.HkoExtremaSnapshot(
+            target_date=snapshot.target_date,
+            observed_at_utc=snapshot.observed_at_utc,
+            high_c=34.0,
+            low_c=snapshot.low_c,
+            fetched_at_utc=snapshot.fetched_at_utc,
+        ),
+    )
+    conn.close()
 
 
 def test_dst_gap_fill_row_stamps_provenance_identity(

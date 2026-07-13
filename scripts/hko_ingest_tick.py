@@ -10,7 +10,7 @@
 #                  'ICAO_STATION_NATIVE'"); operator directive 2026-04-23
 #                  ("daemon-live和polymarket数据/天气数据采集本不应该混为一谈")
 #                  separating data-collection from trading daemon.
-"""HKO hourly accumulator tick + v2 projection (standalone, cron-safe).
+"""HKO current-temperature tick + official running-extrema projection.
 
 This closes two gaps:
 
@@ -19,12 +19,10 @@ This closes two gaps:
    accumulation stops. Data-collection should not depend on trading.
    This script runs one accumulator tick *without* importing or
    triggering any trading path.
-2. **Projection gap**: accumulator rows live in ``hko_hourly_accumulator``
-   but are never written to ``observation_instants``. Plan v3 L95
-   specified accumulator-forward-only for HK via ``source=
-   'hko_hourly_accumulator'`` + ``authority='ICAO_STATION_NATIVE'`` +
-   ``data_version='v1.wu-native'`` + provenance ``hourly_history_gap_
-   pre_deploy``, but no script does the projection. This one does.
+2. **Semantic gap**: ``rhrread`` is a rounded current temperature, not a
+   running daily maximum/minimum.  The executable observation row combines
+   that diagnostic current temperature with HKO's official since-midnight
+   extrema dataset; legacy rows that equated all three are retired.
 
 Usage
 -----
@@ -36,26 +34,30 @@ Usage
     # Tick only (no v2 projection)
     python scripts/hko_ingest_tick.py --tick-only
 
-    # Project-only catch-up (no fetch) — for backfilling existing
-    # accumulator rows into v2 without hitting HKO endpoint
+    # Project the current official extrema without refreshing rhrread
     python scripts/hko_ingest_tick.py --project-only
 
 Designed for hourly cron invocation. Idempotent: accumulator uses
-``ON CONFLICT … DO UPDATE``, v2 projection uses ``UNIQUE(city, source,
-utc_timestamp)`` via INSERT OR REPLACE in the writer.
+``ON CONFLICT … DO UPDATE`` and the typed writer replaces the same provider
+timestamp without inventing historical extrema.
 """
 from __future__ import annotations
 
 import argparse
+import csv
 import hashlib
+import io
 import json
 import logging
 import sqlite3
 import sys
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 from zoneinfo import ZoneInfo
+
+import httpx
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(_REPO_ROOT) not in sys.path:
@@ -76,11 +78,25 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_DB_PATH = STATE_DIR / "zeus-world.db"
 DEFAULT_LOG_PATH = STATE_DIR / "hko_ingest_log.jsonl"
-HKO_ACCUMULATOR_PARSER_VERSION = "hko_hourly_accumulator_projection_v2"
+HKO_EXTREMA_URL = (
+    "https://data.weather.gov.hk/weatherAPI/hko_data/regional-weather/"
+    "latest_since_midnight_maxmin.csv"
+)
+HKO_EXTREMA_BASIS = "hko_since_midnight_extrema_1min_mean"
+HKO_EXTREMA_PARSER = "hko_since_midnight_extrema"
 
 HK_CITY_NAME = "Hong Kong"
 HK_TIMEZONE = "Asia/Hong_Kong"
 HK_UTC_OFFSET_MINUTES = 480  # UTC+8, no DST
+
+
+@dataclass(frozen=True)
+class HkoExtremaSnapshot:
+    target_date: str
+    observed_at_utc: str
+    high_c: float
+    low_c: float
+    fetched_at_utc: str
 
 
 def _append_log(log_path: Path, entry: dict) -> None:
@@ -89,105 +105,163 @@ def _append_log(log_path: Path, entry: dict) -> None:
         fh.write(json.dumps(entry, separators=(",", ":")) + "\n")
 
 
-def _accumulator_rows_missing_from_v2(
-    conn: sqlite3.Connection, data_version: str
-) -> list[tuple[str, str, float, str]]:
-    """Return accumulator rows not already projected into v2.
+def _parse_hko_extrema_csv(
+    payload: str,
+    *,
+    fetched_at_utc: str,
+) -> HkoExtremaSnapshot:
+    """Parse the official HKO since-midnight extrema for Observatory HQ."""
 
-    Returns list of (target_date, hour_utc, temperature, fetched_at) for
-    rows where no matching (city='Hong Kong', source='hko_hourly_
-    accumulator', utc_timestamp=<hour_utc>) row exists in v2 for the
-    given data_version.
-    """
-    rows = conn.execute(
-        """
-        SELECT a.target_date, a.hour_utc, a.temperature, a.fetched_at
-        FROM hko_hourly_accumulator a
-        WHERE NOT EXISTS (
-            SELECT 1 FROM observation_instants v
-            WHERE v.city = ?
-              AND v.source = 'hko_hourly_accumulator'
-              AND v.data_version = ?
-              AND v.utc_timestamp = a.hour_utc
+    reader = csv.DictReader(io.StringIO(payload.lstrip("\ufeff")))
+    for row in reader:
+        station = str(row.get("Automatic Weather Station") or "").strip()
+        if station != "HK Observatory":
+            continue
+        raw_time = str(row.get("Date time") or "").strip()
+        high_raw = row.get(
+            "Maximum Air Temperature Since Midnight(degree Celsius)"
         )
-        ORDER BY a.hour_utc
-        """,
-        (HK_CITY_NAME, data_version),
-    ).fetchall()
-    return [(str(r[0]), str(r[1]), float(r[2]), str(r[3])) for r in rows]
+        low_raw = row.get(
+            "Minimum Air Temperature Since Midnight(degree Celsius)"
+        )
+        local = datetime.strptime(raw_time, "%Y%m%d%H%M").replace(
+            tzinfo=ZoneInfo(HK_TIMEZONE)
+        )
+        high_c = float(high_raw)
+        low_c = float(low_raw)
+        if high_c < low_c:
+            raise ValueError("HKO since-midnight maximum is below minimum")
+        return HkoExtremaSnapshot(
+            target_date=local.date().isoformat(),
+            observed_at_utc=local.astimezone(timezone.utc).isoformat(),
+            high_c=high_c,
+            low_c=low_c,
+            fetched_at_utc=fetched_at_utc,
+        )
+    raise ValueError("HKO extrema CSV missing HK Observatory row")
 
 
-def _build_v2_row(
+def _fetch_hko_extrema() -> HkoExtremaSnapshot:
+    fetched_at = datetime.now(timezone.utc).isoformat()
+    response = httpx.get(HKO_EXTREMA_URL, timeout=30.0)
+    response.raise_for_status()
+    return _parse_hko_extrema_csv(response.text, fetched_at_utc=fetched_at)
+
+
+def _latest_accumulator_temperature(
+    conn: sqlite3.Connection,
+    *,
     target_date: str,
-    hour_utc: str,
+) -> tuple[float, str] | None:
+    row = conn.execute(
+        """
+        SELECT temperature, fetched_at
+          FROM hko_hourly_accumulator
+         WHERE target_date = ?
+         ORDER BY datetime(REPLACE(hour_utc, 'Z', '+00:00')) DESC
+         LIMIT 1
+        """,
+        (target_date,),
+    ).fetchone()
+    if row is None:
+        return None
+    return float(row[0]), str(row[1])
+
+
+def _same_extrema_already_materialized(
+    conn: sqlite3.Connection,
+    snapshot: HkoExtremaSnapshot,
+) -> bool:
+    row = conn.execute(
+        """
+        SELECT running_max, running_min
+          FROM observation_instants
+         WHERE city = ?
+           AND source = 'hko_hourly_accumulator'
+           AND utc_timestamp = ?
+           AND COALESCE(causality_status, 'OK') = 'OK'
+           AND json_extract(provenance_json, '$.observation_basis') = ?
+         ORDER BY id DESC
+         LIMIT 1
+        """,
+        (HK_CITY_NAME, snapshot.observed_at_utc, HKO_EXTREMA_BASIS),
+    ).fetchone()
+    if row is None:
+        return False
+    return (
+        abs(float(row[0]) - snapshot.high_c) <= 1e-9
+        and abs(float(row[1]) - snapshot.low_c) <= 1e-9
+    )
+
+
+def _build_hko_extrema_row(
+    snapshot: HkoExtremaSnapshot,
+    *,
     temperature_c: float,
-    fetched_at: str,
+    accumulator_fetched_at: str,
     data_version: str,
     imported_at: str,
 ) -> ObsV2Row:
-    """Build an ObsV2Row for an HKO accumulator reading.
+    """Build one HKO row whose extrema are official since-midnight facts.
 
     Schema semantics:
     - source='hko_hourly_accumulator' (A6 pinned for HK)
     - authority='ICAO_STATION_NATIVE' per plan v3 L95
     - data_version='v1.wu-native' to match the corpus family
-    - time_basis='hourly_accumulator' (already in _ALLOWED_TIME_BASIS)
-    - running_max = running_min = temp_current = temperature (single
-      hourly reading; no intra-hour extremum available from rhrread)
+    - temp_current comes from rhrread only as a diagnostic
+    - running_max/running_min come from HKO's official cumulative extrema
+      dataset based on one-minute means
     - observation_count=1, station_id='HKO' (Observatory HQ)
-    - provenance_json records the accumulator fetch time and the
-      hourly_history_gap_pre_deploy note mandated by plan v3 L95.
+    - provenance_json makes the two source roles explicit.
     """
-    # Parse the hour_utc stamp into a UTC datetime for local_timestamp math.
-    # hour_utc is formatted as '%Y-%m-%dT%H:00Z'
-    if hour_utc.endswith("Z"):
-        utc_dt = datetime.fromisoformat(hour_utc.replace("Z", "+00:00"))
-    else:
-        utc_dt = datetime.fromisoformat(hour_utc)
+    utc_dt = datetime.fromisoformat(snapshot.observed_at_utc.replace("Z", "+00:00"))
     if utc_dt.tzinfo is None:
         utc_dt = utc_dt.replace(tzinfo=timezone.utc)
     hk_dt = utc_dt.astimezone(ZoneInfo(HK_TIMEZONE))
     local_timestamp = hk_dt.isoformat()
-    local_hour = float(hk_dt.hour)
+    local_hour = float(hk_dt.hour) + float(hk_dt.minute) / 60.0
 
     provenance = json.dumps(
         {
             "tier": "HKO_NATIVE",
             "station_id": "HKO",
             "source_table": "hko_hourly_accumulator",
-            "accumulator_fetched_at": fetched_at,
-            "note": "hourly_history_gap_pre_deploy",
+            "source_url": HKO_EXTREMA_URL,
+            "observation_basis": HKO_EXTREMA_BASIS,
+            "accumulator_fetched_at": accumulator_fetched_at,
+            "extrema_fetched_at": snapshot.fetched_at_utc,
             "payload_hash": _sha256_json(
                 {
-                    "target_date": target_date,
-                    "hour_utc": hour_utc,
+                    "target_date": snapshot.target_date,
+                    "observed_at_utc": snapshot.observed_at_utc,
                     "temperature_c": temperature_c,
-                    "fetched_at": fetched_at,
-                    "source_table": "hko_hourly_accumulator",
+                    "running_max_c": snapshot.high_c,
+                    "running_min_c": snapshot.low_c,
+                    "observation_basis": HKO_EXTREMA_BASIS,
                 }
             ),
-            "payload_scope": "hko_accumulator_row_source_identity",
-            "source_file": "hko_hourly_accumulator",
-            "parser_version": HKO_ACCUMULATOR_PARSER_VERSION,
+            "payload_scope": "hko_current_and_since_midnight_extrema",
+            "source_file": HKO_EXTREMA_URL,
+            "parser_version": HKO_EXTREMA_PARSER,
         },
         separators=(",", ":"),
     )
     return ObsV2Row(
         city=HK_CITY_NAME,
-        target_date=target_date,
+        target_date=snapshot.target_date,
         source="hko_hourly_accumulator",
         timezone_name=HK_TIMEZONE,
         local_hour=local_hour,
         local_timestamp=local_timestamp,
-        utc_timestamp=hour_utc,
+        utc_timestamp=snapshot.observed_at_utc,
         utc_offset_minutes=HK_UTC_OFFSET_MINUTES,
         dst_active=0,  # HK does not observe DST
         is_ambiguous_local_hour=0,
         is_missing_local_hour=0,
-        time_basis="hourly_accumulator",
+        time_basis="station_local",
         temp_current=temperature_c,
-        running_max=temperature_c,
-        running_min=temperature_c,
+        running_max=snapshot.high_c,
+        running_min=snapshot.low_c,
         temp_unit="C",
         station_id="HKO",
         observation_count=1,
@@ -204,58 +278,80 @@ def project_accumulator_to_v2(
     log_path: Path,
     dry_run: bool = False,
 ) -> dict:
-    """Project all accumulator rows missing from v2 into v2.
-
-    Returns dict with counts: {candidates, written, build_errors}.
-    Idempotent via UNIQUE(city, source, utc_timestamp) in v2.
-    """
+    """Write one current HKO extrema fact and retire legacy pseudo-extrema."""
     ts_now = datetime.now(timezone.utc).isoformat()
-    candidates = _accumulator_rows_missing_from_v2(conn, data_version)
-    if not candidates:
+    try:
+        snapshot = _fetch_hko_extrema()
+        current = _latest_accumulator_temperature(
+            conn,
+            target_date=snapshot.target_date,
+        )
+        if current is None:
+            raise ValueError("HKO current-temperature accumulator row missing")
+        temp_c, accumulator_fetched_at = current
+        row = _build_hko_extrema_row(
+            snapshot,
+            temperature_c=temp_c,
+            accumulator_fetched_at=accumulator_fetched_at,
+            data_version=data_version,
+            imported_at=ts_now,
+        )
+    except (httpx.HTTPError, InvalidObsV2RowError, ValueError) as exc:
+        logger.warning("HKO extrema build failed: %s", exc)
         _append_log(log_path, {
             "ts": ts_now, "phase": "project", "candidates": 0,
-            "written": 0, "dry_run": dry_run,
+            "written": 0, "build_errors": 1, "dry_run": dry_run,
+            "error": f"{type(exc).__name__}:{exc}",
         })
-        return {"candidates": 0, "written": 0, "build_errors": 0}
-
-    rows: list[ObsV2Row] = []
-    build_errors = 0
-    for target_date, hour_utc, temp_c, fetched_at in candidates:
-        try:
-            rows.append(_build_v2_row(
-                target_date=target_date,
-                hour_utc=hour_utc,
-                temperature_c=temp_c,
-                fetched_at=fetched_at,
-                data_version=data_version,
-                imported_at=ts_now,
-            ))
-        except (InvalidObsV2RowError, ValueError) as exc:
-            build_errors += 1
-            logger.warning("HKO row build failed %s %s: %s", target_date, hour_utc, exc)
+        return {"candidates": 0, "written": 0, "build_errors": 1, "retired": 0}
 
     log_entry = {
         "ts": ts_now,
         "phase": "project",
-        "candidates": len(candidates),
-        "build_errors": build_errors,
+        "candidates": 1,
+        "build_errors": 0,
         "dry_run": dry_run,
     }
-    if dry_run or not rows:
+    if dry_run:
         log_entry["written"] = 0
+        log_entry["retired"] = 0
         _append_log(log_path, log_entry)
-        return {"candidates": len(candidates), "written": 0, "build_errors": build_errors}
+        return {"candidates": 1, "written": 0, "build_errors": 0, "retired": 0}
 
     conn.execute("BEGIN")
     try:
-        written = insert_rows(conn, rows)
+        retired = conn.execute(
+            """
+            UPDATE observation_instants
+               SET causality_status = 'REQUIRES_SOURCE_REAUDIT'
+             WHERE city = ?
+               AND target_date = ?
+               AND source = 'hko_hourly_accumulator'
+               AND COALESCE(causality_status, 'OK') = 'OK'
+               AND COALESCE(
+                    json_extract(provenance_json, '$.observation_basis'), ''
+               ) <> ?
+            """,
+            (HK_CITY_NAME, snapshot.target_date, HKO_EXTREMA_BASIS),
+        ).rowcount
+        written = (
+            0
+            if _same_extrema_already_materialized(conn, snapshot)
+            else insert_rows(conn, [row])
+        )
         conn.execute("COMMIT")
     except Exception:
         conn.execute("ROLLBACK")
         raise
     log_entry["written"] = written
+    log_entry["retired"] = int(retired)
     _append_log(log_path, log_entry)
-    return {"candidates": len(candidates), "written": written, "build_errors": build_errors}
+    return {
+        "candidates": 1,
+        "written": written,
+        "build_errors": 0,
+        "retired": int(retired),
+    }
 
 
 def _sha256_json(payload: dict) -> str:
@@ -333,6 +429,7 @@ def main(argv: Optional[list[str]] = None) -> int:
                 print(f"project: candidates={project_result['candidates']} "
                       f"written={project_result['written']} "
                       f"build_errors={project_result['build_errors']} "
+                      f"retired={project_result.get('retired', 0)} "
                       f"dry_run={args.dry_run}")
             if tick_result is not None and not tick_result.get("tick_ok"):
                 return 1

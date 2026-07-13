@@ -67,6 +67,20 @@ def test_forecast_samples_are_market_independent():
     assert np.all(samples >= 0.0) and np.all(samples <= 1.0)
 
 
+def test_forecast_sample_matrix_is_one_coherent_zero_sum_draw_per_row():
+    analysis = _analysis_with_nonexecutable_far_bin()
+    matrix = analysis.forecast_yes_probability_sample_matrix(2000)
+
+    assert matrix.shape == (2000, 2)
+    assert np.allclose(matrix.sum(axis=1), 1.0, atol=1e-12)
+    assert np.array_equal(
+        analysis.forecast_yes_probability_samples(0, 2000), matrix[:, 0]
+    )
+    assert np.allclose(
+        1.0 - analysis.forecast_yes_probability_samples(0, 2000), matrix[:, 1]
+    )
+
+
 def test_nonexecutable_yes_far_bin_has_positive_no_lower_bound():
     """THE de-hack invariant: a far bin with no executable YES market must carry a
     POSITIVE native-NO lower bound (q_lcb_no = 1 - q_ucb_yes), NOT the old

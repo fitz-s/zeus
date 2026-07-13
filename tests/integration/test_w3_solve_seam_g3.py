@@ -31,6 +31,7 @@ from dataclasses import dataclass, replace
 from decimal import Decimal
 from types import SimpleNamespace
 
+import numpy as np
 import pytest
 
 import src.engine.qkernel_spine_bridge as bridge
@@ -588,8 +589,8 @@ def test_global_day0_observation_unknown_source_type_fails_closed(monkeypatch):
     conn.close()
 
 
-def test_global_day0_uses_replacement_joint_probability_builder(monkeypatch):
-    expected = ({"condition": 0.5}, {}, {}, {}, {"probability_authority": "replacement_0_1"})
+def test_global_day0_uses_remaining_day_probability_builder(monkeypatch):
+    expected = ({"condition": 0.5}, {}, {}, {}, {"probability_authority": "day0_remaining_day"})
     monkeypatch.setattr(
         "src.data.day0_oracle_anomaly.is_day0_family_paused",
         lambda *_args, **_kwargs: False,
@@ -597,25 +598,69 @@ def test_global_day0_uses_replacement_joint_probability_builder(monkeypatch):
     monkeypatch.setattr(
         era,
         "_replacement_authority_probability_and_fdr_proof",
-        lambda **_kwargs: expected,
+        lambda **_kwargs: pytest.fail("global Day0 must not use full-day replacement q"),
     )
     monkeypatch.setattr(
         era,
         "_canonical_probability_and_fdr_proof",
-        lambda **_kwargs: pytest.fail("global Day0 must not use canonical probability"),
+        lambda **_kwargs: expected,
+    )
+    monkeypatch.setattr(
+        era,
+        "_apply_day0_mask_to_generated_probabilities",
+        lambda **kwargs: (kwargs["q_by_condition"], kwargs["lcb_by_condition"]),
     )
     conn = sqlite3.connect(":memory:")
     result = era._live_yes_probabilities(
         event=SimpleNamespace(event_type="DAY0_EXTREME_UPDATED"),
         payload={"_edli_global_auction_prepare": True},
-        family=SimpleNamespace(city="Moscow", target_date="2026-07-10", metric="high"),
+        family=SimpleNamespace(
+            city="Moscow", target_date="2026-07-10", metric="high", candidates=()
+        ),
         conn=conn,
         calibration_conn=conn,
         native_costs={},
         decision_time=_dt.datetime(2026, 7, 10, 20, 0, tzinfo=_dt.timezone.utc),
     )
     conn.close()
-    assert result is expected
+    assert result[0] == expected[0]
+    assert result[1] == expected[1]
+    assert result[2] == {}
+    assert result[3] == {}
+    assert result[4]["probability_authority"] == "day0_absorbing_hard_fact"
+
+
+def test_global_day0_joint_witness_uses_one_remaining_day_simplex(monkeypatch):
+    matrix = np.asarray([[0.8, 0.2], [0.3, 0.7], [0.6, 0.4]], dtype=float)
+    analysis = SimpleNamespace(
+        p_posterior=np.asarray([0.55, 0.45], dtype=float),
+        forecast_yes_probability_sample_matrix=lambda _n: matrix,
+    )
+    monkeypatch.setattr(
+        era,
+        "_forecast_snapshot_row_for_event",
+        lambda *_args, **_kwargs: {"members_json": "[20,21,22]"},
+    )
+    monkeypatch.setattr(era, "_day0_seed_members_multimodel", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        era,
+        "_market_analysis_from_event_snapshot",
+        lambda **_kwargs: analysis,
+    )
+
+    samples, point, basis = era._day0_remaining_global_probability_components(
+        SimpleNamespace(),
+        forecast_conn=sqlite3.connect(":memory:"),
+        calibration_conn=sqlite3.connect(":memory:"),
+        family=SimpleNamespace(candidates=(object(), object())),
+        payload={},
+        decision_time=_dt.datetime(2026, 7, 10, 20, 0, tzinfo=_dt.timezone.utc),
+    )
+
+    assert np.array_equal(samples, matrix)
+    assert point.tolist() == pytest.approx([0.55, 0.45])
+    assert basis == "day0_remaining_day_joint_simplex_v1"
+    assert np.allclose(samples.sum(axis=1), 1.0)
 
 
 def _global_scope_event(*, city: str, source_run_id: str):

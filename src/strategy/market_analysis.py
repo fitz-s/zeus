@@ -300,6 +300,7 @@ class MarketAnalysis:
         # by bin_yes_probability_samples and shared by the FDR edge CI (_bootstrap_bin)
         # and the q_lcb probability authority — keyed (("yes_samples", bin_idx, n)).
         self._yes_sample_cache: dict[tuple, np.ndarray] = {}
+        self._yes_matrix_cache: dict[int, np.ndarray] = {}
         self._rng = np.random.default_rng(rng_seed)
         self._transfer_logit_sigma = float(transfer_logit_sigma)
         self._bootstrap_probability_sampler = bootstrap_probability_sampler
@@ -894,6 +895,22 @@ class MarketAnalysis:
         cached = self._yes_sample_cache.get(cache_key)
         if cached is not None:
             return cached
+        matrix = self.forecast_yes_probability_sample_matrix(n)
+        samples = np.ascontiguousarray(matrix[:, bin_idx], dtype=float)
+        self._yes_sample_cache[cache_key] = samples
+        return samples
+
+    def forecast_yes_probability_sample_matrix(self, n: int) -> np.ndarray:
+        """Coherent forecast YES draws for the complete MECE outcome family.
+
+        Every row is produced by one bootstrap draw and therefore sums to one.
+        Per-bin YES/NO bounds and the global zero-sum optimizer must project
+        columns from this matrix; independently sampling each bin destroys the
+        mutually-exclusive/exhaustive settlement identity.
+        """
+        cached = self._yes_matrix_cache.get(n)
+        if cached is not None:
+            return cached
         members = self._member_maxes
         n_members = len(members)
         has_platt = (
@@ -914,7 +931,7 @@ class MarketAnalysis:
         map_A = float(self._calibrator.A) if has_platt else 0.0
         map_B = float(self._calibrator.B) if has_platt else 0.0
         map_C = float(self._calibrator.C) if has_platt else 0.0
-        samples = np.zeros(n)
+        samples = np.zeros((n, len(self.bins)))
         for i in range(n):
             # Layer 1: sample the configured signal probability object for all
             # bins. Generic ENS uses member resampling; Day0 injects the
@@ -940,12 +957,12 @@ class MarketAnalysis:
                 p_cal_boot_all = p_raw_all
 
             p_post = self._compute_posterior(p_cal_boot_all)
-            samples[i] = float(p_post[bin_idx])
+            samples[i, :] = np.asarray(p_post, dtype=float)
         # q_yes^(b) is a probability — clamp to [0,1] so the lower/upper quantiles at the
         # q_lcb seam are valid probability bounds (compute_posterior already yields
         # normalised mass; the clamp is a cheap defence against float drift).
         samples = np.clip(samples, 0.0, 1.0)
-        self._yes_sample_cache[cache_key] = samples
+        self._yes_matrix_cache[n] = samples
         return samples
 
     def _bootstrap_bin(

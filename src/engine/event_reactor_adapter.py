@@ -21201,21 +21201,6 @@ def _live_yes_probabilities(
             raise ValueError(
                 f"DAY0_ORACLE_ANOMALY_PAUSED:{family.city}:{family.target_date}"
             )
-        if payload.get("_edli_global_auction_prepare") is True:
-            replacement = _replacement_authority_probability_and_fdr_proof(
-                event=event,
-                payload=payload,
-                family=family,
-                conn=conn,
-                native_costs=native_costs,
-                decision_time=decision_time,
-                promotion_evidence=promotion_evidence,
-                capital_objective_evidence=capital_objective_evidence,
-                provenance_capture=provenance_capture,
-            )
-            if replacement is None:
-                raise ValueError("GLOBAL_DAY0_REPLACEMENT_AUTHORITY_UNAVAILABLE")
-            return replacement
         generated = _canonical_probability_and_fdr_proof(
             event=event,
             payload=payload,
@@ -22110,7 +22095,7 @@ def _global_day0_execution_payload(
 def _global_day0_probability_authority_payload(
     current_observation_payload: Mapping[str, object],
 ) -> dict[str, object]:
-    """Name the replacement Day0 probability type and bind it to one posterior."""
+    """Name the remaining-day Day0 probability type and bind its base posterior."""
 
     binding = current_observation_payload.get("_edli_global_day0_binding")
     if not isinstance(binding, Mapping):
@@ -22119,14 +22104,15 @@ def _global_day0_probability_authority_payload(
     if posterior_id in (None, ""):
         raise ValueError("GLOBAL_DAY0_POSTERIOR_ID_MISSING")
     return {
-        "probability_authority": "replacement_current_global_probability_v1",
-        "q_source": "replacement_0_1",
+        "probability_authority": "day0_remaining_day_global_probability_v1",
+        "q_source": "day0_remaining_day",
         "posterior_id": posterior_id,
         "global_current_observation_payload": dict(current_observation_payload),
     }
 
 
 _GLOBAL_SERVED_SIMPLEX_BAND_BASIS = "replacement_served_current_simplex_v1"
+_GLOBAL_DAY0_REMAINING_BAND_BASIS = "day0_remaining_day_joint_simplex_v1"
 
 
 def _replacement_global_probability_components(
@@ -22222,6 +22208,68 @@ def _replacement_global_probability_components(
     )
 
 
+def _day0_remaining_global_probability_components(
+    event: OpportunityEvent,
+    *,
+    forecast_conn: sqlite3.Connection,
+    calibration_conn: sqlite3.Connection,
+    family: object,
+    payload: dict[str, object],
+    decision_time: datetime,
+) -> tuple[np.ndarray, np.ndarray, str]:
+    """Build the global Day0 simplex from the live remaining-day q object.
+
+    The local Day0 proof and the global optimizer must price the same random
+    variable: the final daily extreme conditional on the observed extreme and
+    forecast hours that remain.  A replacement posterior built from full-day
+    scalar extrema is not an ``X_remaining`` distribution and cannot authorize
+    a same-day order.
+    """
+
+    snapshot = _forecast_snapshot_row_for_event(
+        forecast_conn,
+        event=event,
+        family=family,
+        allow_latest=True,
+        decision_time=decision_time,
+    )
+    if snapshot is None:
+        raise ValueError("Day0 base forecast snapshot missing for global inference")
+    seed_members = _day0_seed_members_multimodel(
+        forecast_conn,
+        family=family,
+        decision_time=decision_time,
+    )
+    analysis = _market_analysis_from_event_snapshot(
+        calibration_conn=calibration_conn,
+        snapshot=snapshot,
+        family=family,
+        native_costs={},
+        payload=payload,
+        decision_time=decision_time,
+        day0_seed_members=seed_members,
+    )
+    from src.config import edge_n_bootstrap
+
+    samples = np.ascontiguousarray(
+        analysis.forecast_yes_probability_sample_matrix(edge_n_bootstrap()),
+        dtype=np.float64,
+    )
+    point_q = np.ascontiguousarray(analysis.p_posterior, dtype=np.float64)
+    if (
+        samples.ndim != 2
+        or samples.shape[0] < 2
+        or samples.shape[1] != len(family.candidates)
+        or point_q.shape != (len(family.candidates),)
+        or not np.isfinite(samples).all()
+        or not np.isfinite(point_q).all()
+        or not np.allclose(samples.sum(axis=1), 1.0, atol=1e-9)
+        or not math.isclose(float(point_q.sum()), 1.0, rel_tol=0.0, abs_tol=1e-9)
+    ):
+        raise ValueError("GLOBAL_DAY0_REMAINING_SIMPLEX_INVALID")
+    return samples, point_q, _GLOBAL_DAY0_REMAINING_BAND_BASIS
+
+
 def _prepare_current_global_probability_family(
     event: OpportunityEvent,
     *,
@@ -22312,6 +22360,7 @@ def _prepare_current_global_probability_family(
         )
     bundle = result.bundle
     day0_conditioning: Mapping[str, object] | None = None
+    current_day0_payload: dict[str, object] | None = None
     day0_observation_conn = observation_conn or forecast_conn
     if event.event_type == "DAY0_EXTREME_UPDATED":
         conditioning = (
@@ -22386,6 +22435,7 @@ def _prepare_current_global_probability_family(
             decision_time=decision_time,
             posterior_id=bundle.posterior_id,
         )
+        payload.update(current_day0_payload)
         if day0_payload_out is not None:
             day0_payload_out.update(current_day0_payload)
     bindings = tuple(
@@ -22401,27 +22451,58 @@ def _prepare_current_global_probability_family(
         )
         for outcome in omega.bins
     )
-    components = _replacement_global_probability_components(
-        bundle,
-        candidates=family.candidates,
-        bindings=bindings,
-    )
+    probability_authority = "replacement_current_global_probability_v1"
+    components = None
+    if current_day0_payload is not None:
+        components = _day0_remaining_global_probability_components(
+            event,
+            forecast_conn=forecast_conn,
+            calibration_conn=day0_observation_conn,
+            family=family,
+            payload=payload,
+            decision_time=decision_time,
+        )
+        probability_authority = "day0_remaining_day_global_probability_v1"
+    else:
+        components = _replacement_global_probability_components(
+            bundle,
+            candidates=family.candidates,
+            bindings=bindings,
+        )
     if components is None:
         raise ValueError("GLOBAL_CURRENT_POSTERIOR_SIMPLEX_INVALID")
     samples, point_q, band_basis = components
     sample_identity = probability_sample_matrix_identity(samples)
+    if current_day0_payload is not None:
+        posterior_identity_hash = stable_hash(
+            {
+                "base_posterior_identity_hash": posterior_identity_hash,
+                "probability_authority": probability_authority,
+                "sample_matrix_identity": sample_identity,
+            }
+        )
     resolution_identity = _event_resolution_identity(omega.resolution)
-    source_truth_identity = stable_hash(
-        {
-            "dependency_hash": dependency_hash,
-            "posterior_config_hash": posterior_config_hash,
-            "source_cycle_time": bundle.source_cycle_time,
-            "source_available_at": bundle.source_available_at,
-        }
-    )
+    source_truth = {
+        "dependency_hash": dependency_hash,
+        "posterior_config_hash": posterior_config_hash,
+        "source_cycle_time": bundle.source_cycle_time,
+        "source_available_at": bundle.source_available_at,
+    }
+    if current_day0_payload is not None:
+        source_truth.update(
+            {
+                "day0_binding": current_day0_payload.get("_edli_global_day0_binding"),
+                "day0_q_mode": payload.get("_edli_day0_q_mode"),
+                "remaining_models": payload.get("_edli_day0_remaining_model_names"),
+                "remaining_capture_times": payload.get(
+                    "_edli_day0_remaining_capture_times_utc"
+                ),
+            }
+        )
+    source_truth_identity = stable_hash(source_truth)
     q_version = stable_hash(
         {
-            "authority": "replacement_current_global_probability_v1",
+            "authority": probability_authority,
             "posterior_identity_hash": posterior_identity_hash,
             "topology_identity": omega.topology_hash,
             "sample_matrix_identity": sample_identity,
@@ -22541,6 +22622,31 @@ def current_global_probability_authority(
         != weather_family_id(city=city, target_date=target_date, metric=metric)
     ):
         return None
+    if event.event_type == "DAY0_EXTREME_UPDATED":
+        # The actuation path has already rebuilt this complete Day0 witness from
+        # current observation truth + current remaining-hour vectors in
+        # _current_global_actuation_prepared_family and compared every content
+        # identity.  Do not re-resolve it from the full-day replacement posterior
+        # here: that would validate a different random variable.
+        captured_at = getattr(witness, "captured_at_utc", None)
+        max_age = getattr(witness, "max_age", None)
+        if (
+            str(getattr(witness, "band_basis", ""))
+            != _GLOBAL_DAY0_REMAINING_BAND_BASIS
+            or str(payload.get("_edli_day0_q_mode") or "") != "remaining_day"
+            or not isinstance(captured_at, datetime)
+            or captured_at.tzinfo is None
+            or not isinstance(max_age, timedelta)
+            or max_age <= timedelta(0)
+            or decision_time < captured_at
+            or decision_time - captured_at > max_age
+        ):
+            return None
+        try:
+            probability_sample_matrix_identity(witness.yes_q_samples)
+        except (AttributeError, ValueError):
+            return None
+        return CurrentFamilyProbabilityAuthority.from_witness(witness)
     readiness = _latest_replacement_readiness(
         forecast_conn,
         city=city,
@@ -24568,6 +24674,7 @@ def _market_analysis_from_event_snapshot(
     # into the wrong bins (wrong-SIDE on a KNOWN market — Paris-class).
     unit = _assert_settlement_unit_identity(snapshot=snapshot, payload=payload, city=city, bins=bins)
     is_day0 = _is_day0_extreme_event_context(family=family, payload=payload)
+    day0_probability_time = _day0_probability_clock(decision_time) if is_day0 else decision_time
     # === ONE-CALIBRATOR SEAM (#110 / ELEVATION S2) ===========================================
     # When EMOS serves this (city, season) cell and the flag is ON, the traded distribution IS
     # the EMOS predictive N(mu, sigma): point p_cal = analytic q_vec; the q_lcb bootstrap draws
@@ -24770,7 +24877,7 @@ def _market_analysis_from_event_snapshot(
                 payload=payload,
                 family=family,
                 unit=unit,
-                decision_time=decision_time,
+                decision_time=day0_probability_time,
             )
             if day0_extra_member_sigma > 0.0:
                 payload["_edli_day0_extra_member_sigma_native"] = float(day0_extra_member_sigma)
@@ -24828,7 +24935,7 @@ def _market_analysis_from_event_snapshot(
             payload=payload,
             family=family,
             unit=unit,
-            decision_time=decision_time,
+            decision_time=day0_probability_time,
         )
         if _day0_sampler is not None:
             sampler = _day0_sampler
@@ -24929,7 +25036,7 @@ def _market_analysis_from_event_snapshot(
                 payload=payload,
                 family=family,
                 unit=unit,
-                decision_time=decision_time,
+                decision_time=day0_probability_time,
             )
             if _process_sigma is not None:
                 _spine_sigma = float(
@@ -24997,6 +25104,22 @@ def _market_analysis_from_event_snapshot(
             )
         except Exception:  # noqa: BLE001
             pass
+    analysis_rng_seed = None
+    if is_day0:
+        analysis_rng_seed = int(
+            stable_hash(
+                {
+                    "family_id": str(getattr(family, "family_id", "") or ""),
+                    "observed_extreme": payload.get("rounded_value"),
+                    "observation_time": payload.get("observation_time"),
+                    "remaining_models": payload.get("_edli_day0_remaining_model_names"),
+                    "remaining_capture_times": payload.get(
+                        "_edli_day0_remaining_capture_times_utc"
+                    ),
+                }
+            )[:16],
+            16,
+        )
     return MarketAnalysis(
         p_raw=np.asarray(p_raw, dtype=float),
         p_cal=np.asarray(p_cal, dtype=float),
@@ -25018,6 +25141,7 @@ def _market_analysis_from_event_snapshot(
         posterior_mode=MODEL_ONLY_POSTERIOR_MODE,
         bootstrap_probability_sampler=sampler,
         bootstrap_signal_type="edli_event_bound_day0" if is_day0 else "edli_event_bound_forecast",
+        rng_seed=analysis_rng_seed,
         representativeness_sigma=representativeness_sigma,  # iron rule 6: honest q_lcb widening on corrected domain
         forecast_sharpness=forecast_sharpness,  # Wave-1: inert provenance carrier (gate deleted)
     )
@@ -26640,6 +26764,14 @@ def _apply_day0_mask_to_probability_vector(*, payload: dict[str, object], family
     if total <= 0.0:
         return arr
     return masked / total
+
+
+def _day0_probability_clock(decision_time: "datetime | None") -> "datetime | None":
+    """Stable minute cut for time-dependent Day0 uncertainty, not source selection."""
+
+    if decision_time is None or decision_time.tzinfo is None:
+        return None
+    return decision_time.astimezone(timezone.utc).replace(second=0, microsecond=0)
 
 
 def _day0_observation_age_minutes(

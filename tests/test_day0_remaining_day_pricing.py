@@ -900,6 +900,40 @@ class TestRemainingDayMembers:
                 decision_time=datetime(2026, 6, 10, 13, 5, tzinfo=UTC),
             )
 
+    def test_day0_probability_clock_is_stable_inside_one_current_truth_cut(self):
+        import src.engine.event_reactor_adapter as era
+
+        first = datetime(2026, 6, 10, 12, 0, 1, tzinfo=UTC)
+        later = datetime(2026, 6, 10, 12, 0, 59, 999999, tzinfo=UTC)
+        next_cut = datetime(2026, 6, 10, 12, 1, 0, tzinfo=UTC)
+
+        assert era._day0_probability_clock(first) == era._day0_probability_clock(later)
+        assert era._day0_probability_clock(next_cut) > era._day0_probability_clock(later)
+
+        payload = {"metric": "high", "observation_time": "2026-06-10T10:00:00+00:00"}
+        family = SimpleNamespace(city="unknown-test-city")
+        first_sigma = era._day0_process_sigma_native(
+            payload=dict(payload),
+            family=family,
+            unit="C",
+            decision_time=era._day0_probability_clock(first),
+        )
+        later_sigma = era._day0_process_sigma_native(
+            payload=dict(payload),
+            family=family,
+            unit="C",
+            decision_time=era._day0_probability_clock(later),
+        )
+        next_sigma = era._day0_process_sigma_native(
+            payload=dict(payload),
+            family=family,
+            unit="C",
+            decision_time=era._day0_probability_clock(next_cut),
+        )
+
+        assert first_sigma == later_sigma
+        assert next_sigma > later_sigma
+
 
 # ===========================================================================
 # R22 — replayable provenance identity on persisted vectors (PR#404 P1)
