@@ -883,8 +883,8 @@ def test_fresh_screen_supersedes_admitted_redecision_after_short_grace():
     )
 
 
-def test_fresh_screen_supersedes_stale_processing_redecision_after_short_grace():
-    """A stale reactor claim must not block a fresh family screen indefinitely."""
+def test_fresh_screen_preserves_processing_until_full_claim_lease_expires():
+    """The short pending refresh grace cannot shorten an in-flight claim lease."""
 
     world = sqlite3.connect(":memory:")
     world.row_factory = sqlite3.Row
@@ -915,6 +915,30 @@ def test_fresh_screen_supersedes_stale_processing_redecision_after_short_grace()
         claimed_at=(decision_time - timedelta(seconds=76)).isoformat(),
     )
 
+    preserved = reactor._edli_expire_unadmitted_redecision_pending(
+        world,
+        {("Istanbul", "2026-06-29", "high")},
+        decision_time=decision_time.isoformat(),
+        supersede_stale_admitted=True,
+    )
+
+    row = world.execute(
+        "SELECT processing_status, last_error FROM opportunity_event_processing "
+        "WHERE event_id = ?",
+        (processing.event_id,),
+    ).fetchone()
+    assert preserved == 0
+    assert tuple(row) == ("processing", None)
+
+    world.execute(
+        "UPDATE opportunity_event_processing SET claimed_at = ?, updated_at = ? "
+        "WHERE event_id = ?",
+        (
+            (decision_time - timedelta(seconds=301)).isoformat(),
+            (decision_time - timedelta(seconds=301)).isoformat(),
+            processing.event_id,
+        ),
+    )
     expired = reactor._edli_expire_unadmitted_redecision_pending(
         world,
         {("Istanbul", "2026-06-29", "high")},
@@ -1246,8 +1270,8 @@ def test_unadmitted_stale_processing_redecision_is_expired_after_claim_lease():
     assert statuses[fresh_processing.entity_key] == "processing"
 
 
-def test_expiry_plan_cannot_terminalize_a_claim_started_after_discovery():
-    """The mutex-free discovery plan is safe when a reactor claim wins the race."""
+def test_expiry_plan_cannot_terminalize_work_requeued_after_discovery():
+    """A stale discovery plan cannot consume a newer claim/retry generation."""
 
     world = sqlite3.connect(":memory:")
     world.row_factory = sqlite3.Row
@@ -1274,18 +1298,27 @@ def test_expiry_plan_cannot_terminalize_a_claim_started_after_discovery():
     store.insert_or_ignore(event)
     decision_time = "2026-06-18T10:15:00+00:00"
 
-    plan, stale_cutoff = reactor._edli_plan_unadmitted_redecision_expiry(
+    plan = reactor._edli_plan_unadmitted_redecision_expiry(
         world,
         set(),
         decision_time=decision_time,
     )
-    assert any(event.event_id in ids for ids in plan.values())
+    assert any(
+        generation[0] == event.event_id
+        for generations in plan.values()
+        for generation in generations
+    )
     assert store.claim(event.event_id, claimed_at=decision_time)
+    retry_at = "2026-06-18T10:16:00+00:00"
+    store.requeue_pending(
+        event.event_id,
+        not_before=retry_at,
+        last_error="EXECUTABLE_SNAPSHOT_STALE",
+    )
 
     expired = reactor._edli_apply_unadmitted_redecision_expiry(
         world,
         plan,
-        stale_cutoff,
         decision_time=decision_time,
     )
 
@@ -1295,7 +1328,7 @@ def test_expiry_plan_cannot_terminalize_a_claim_started_after_discovery():
         (event.event_id,),
     ).fetchone()
     assert expired == 0
-    assert tuple(row) == ("processing", decision_time)
+    assert tuple(row) == ("pending", retry_at)
 
 
 def test_redecision_admission_is_screen_job_only():

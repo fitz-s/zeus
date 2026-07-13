@@ -8650,7 +8650,7 @@ def _edli_plan_unadmitted_redecision_expiry(
     decision_time: str,
     supersede_stale_admitted: bool = False,
     claim_grace_seconds: float | None = None,
-) -> tuple[dict[str, list[str]], str]:
+) -> dict[str, list[tuple[str, str, int, str | None, str]]]:
     """Discover redecision rows eligible for expiry without taking a write lock.
 
     Fresh pending rows are not safe to expire immediately: the screen may emit a
@@ -8668,17 +8668,22 @@ def _edli_plan_unadmitted_redecision_expiry(
             decision_dt = decision_dt.replace(tzinfo=timezone.utc)
         decision_dt = decision_dt.astimezone(timezone.utc)
         if claim_grace_seconds is None:
-            claim_grace_seconds = (
+            pending_grace_seconds = (
                 _REDECISION_FRESH_SCREEN_SUPERSEDE_GRACE_SECONDS
                 if supersede_stale_admitted
                 else _REDECISION_PENDING_EXPIRY_GRACE_SECONDS
             )
-        claim_grace_seconds = max(0.0, float(claim_grace_seconds))
+            processing_grace_seconds = _REDECISION_PENDING_EXPIRY_GRACE_SECONDS
+        else:
+            pending_grace_seconds = claim_grace_seconds
+            processing_grace_seconds = claim_grace_seconds
+        pending_grace_seconds = max(0.0, float(pending_grace_seconds))
+        processing_grace_seconds = max(0.0, float(processing_grace_seconds))
         stale_processing_cutoff = (
-            decision_dt - timedelta(seconds=claim_grace_seconds)
+            decision_dt - timedelta(seconds=processing_grace_seconds)
         ).isoformat()
         pending_admission_cutoff = (
-            decision_dt - timedelta(seconds=claim_grace_seconds)
+            decision_dt - timedelta(seconds=pending_grace_seconds)
         ).isoformat()
     except Exception:  # noqa: BLE001
         decision_dt = datetime.now(timezone.utc)
@@ -8686,28 +8691,34 @@ def _edli_plan_unadmitted_redecision_expiry(
         pending_admission_cutoff = ""
 
     try:
-        candidate_ids: list[str] = []
+        candidate_generations: dict[str, tuple[str, str, int, str | None, str]] = {}
         if pending_admission_cutoff:
-            candidate_ids.extend(
-                str(row[0])
-                for row in world_conn.execute(
-                    """
-                    SELECT p.event_id
+            for row in world_conn.execute(
+                """
+                    SELECT p.event_id, p.processing_status, p.attempt_count,
+                           p.claimed_at, p.updated_at
                      FROM opportunity_event_processing p
                            INDEXED BY idx_opportunity_event_processing_status
                      WHERE p.consumer_name = 'edli_reactor_v1'
                        AND p.processing_status = 'pending'
                      ORDER BY p.updated_at ASC
                      LIMIT 5000
-                    """,
-                ).fetchall()
-            )
+                """,
+            ).fetchall():
+                event_id = str(row[0] or "")
+                if event_id:
+                    candidate_generations[event_id] = (
+                        event_id,
+                        str(row[1] or ""),
+                        int(row[2] or 0),
+                        None if row[3] is None else str(row[3]),
+                        str(row[4] or ""),
+                    )
         if stale_processing_cutoff:
-            candidate_ids.extend(
-                str(row[0])
-                for row in world_conn.execute(
-                    """
-                    SELECT p.event_id
+            for row in world_conn.execute(
+                """
+                    SELECT p.event_id, p.processing_status, p.attempt_count,
+                           p.claimed_at, p.updated_at
                       FROM opportunity_event_processing p
                            INDEXED BY idx_opportunity_event_processing_pending_retry_floor
                      WHERE p.consumer_name = 'edli_reactor_v1'
@@ -8716,11 +8727,19 @@ def _edli_plan_unadmitted_redecision_expiry(
                        AND p.claimed_at <= ?
                      ORDER BY p.claimed_at ASC
                      LIMIT 5000
-                    """,
-                    (stale_processing_cutoff,),
-                ).fetchall()
-            )
-        candidate_ids = list(dict.fromkeys(event_id for event_id in candidate_ids if event_id))
+                """,
+                (stale_processing_cutoff,),
+            ).fetchall():
+                event_id = str(row[0] or "")
+                if event_id:
+                    candidate_generations[event_id] = (
+                        event_id,
+                        str(row[1] or ""),
+                        int(row[2] or 0),
+                        None if row[3] is None else str(row[3]),
+                        str(row[4] or ""),
+                    )
+        candidate_ids = list(candidate_generations)
         rows = []
         for start in range(0, len(candidate_ids), 250):
             chunk = candidate_ids[start : start + 250]
@@ -8744,8 +8763,8 @@ def _edli_plan_unadmitted_redecision_expiry(
                 ).fetchall()
             )
     except Exception:  # noqa: BLE001
-        return {}, stale_processing_cutoff
-    expire_by_reason: dict[str, list[str]] = {}
+        return {}
+    expire_by_reason: dict[str, list[tuple[str, str, int, str | None, str]]] = {}
     for row in rows:
         try:
             event_id = str(row[0] or "")
@@ -8758,7 +8777,8 @@ def _edli_plan_unadmitted_redecision_expiry(
             )
         except Exception:  # noqa: BLE001
             continue
-        if not event_id or not all(family):
+        generation = candidate_generations.get(event_id)
+        if generation is None or not all(family):
             continue
         if family not in admitted_families:
             if _preserve_recent_rest_pull_redecision(
@@ -8768,17 +8788,16 @@ def _edli_plan_unadmitted_redecision_expiry(
             ):
                 continue
             reason = "REDECISION_ADMISSION_EXPIRED:no_current_edge_or_rest_reprice_value"
-            expire_by_reason.setdefault(reason, []).append(event_id)
+            expire_by_reason.setdefault(reason, []).append(generation)
         elif supersede_stale_admitted:
             reason = "REDECISION_SUPERSEDED_BY_FRESH_SCREEN:stale_pending_claim_grace_elapsed"
-            expire_by_reason.setdefault(reason, []).append(event_id)
-    return expire_by_reason, stale_processing_cutoff
+            expire_by_reason.setdefault(reason, []).append(generation)
+    return expire_by_reason
 
 
 def _edli_apply_unadmitted_redecision_expiry(
     world_conn,
-    expire_by_reason: dict[str, list[str]],
-    stale_processing_cutoff: str,
+    expire_by_reason: dict[str, list[tuple[str, str, int, str | None, str]]],
     *,
     decision_time: str,
 ) -> int:
@@ -8788,10 +8807,17 @@ def _edli_apply_unadmitted_redecision_expiry(
         return 0
     now = str(decision_time)
     changed = 0
-    for reason, expire_ids in expire_by_reason.items():
-        for start in range(0, len(expire_ids), 250):
-            chunk = expire_ids[start : start + 250]
-            placeholders = ",".join("?" for _ in chunk)
+    for reason, generations in expire_by_reason.items():
+        for start in range(0, len(generations), 250):
+            chunk = generations[start : start + 250]
+            generation_predicates = " OR ".join(
+                "(event_id = ? AND processing_status = ? AND attempt_count = ? "
+                "AND claimed_at IS ? AND updated_at = ?)"
+                for _ in chunk
+            )
+            generation_params = tuple(
+                value for generation in chunk for value in generation
+            )
             cur = world_conn.execute(
                 f"""
                 UPDATE opportunity_event_processing
@@ -8800,18 +8826,9 @@ def _edli_apply_unadmitted_redecision_expiry(
                        updated_at = ?,
                        last_error = ?
                  WHERE consumer_name = 'edli_reactor_v1'
-                   AND (
-                        processing_status = 'pending'
-                     OR (
-                        processing_status = 'processing'
-                        AND claimed_at IS NOT NULL
-                        AND ? != ''
-                        AND claimed_at <= ?
-                     )
-                   )
-                   AND event_id IN ({placeholders})
+                   AND ({generation_predicates})
                 """,
-                (now, now, reason, stale_processing_cutoff, stale_processing_cutoff, *chunk),
+                (now, now, reason, *generation_params),
             )
             changed += int(cur.rowcount or 0)
     return changed
@@ -8827,7 +8844,7 @@ def _edli_expire_unadmitted_redecision_pending(
 ) -> int:
     """Discover then expire rows; callers holding a mutex must use the split API."""
 
-    plan, stale_processing_cutoff = _edli_plan_unadmitted_redecision_expiry(
+    plan = _edli_plan_unadmitted_redecision_expiry(
         world_conn,
         admitted_families,
         decision_time=decision_time,
@@ -8837,7 +8854,6 @@ def _edli_expire_unadmitted_redecision_pending(
     return _edli_apply_unadmitted_redecision_expiry(
         world_conn,
         plan,
-        stale_processing_cutoff,
         decision_time=decision_time,
     )
 
@@ -9128,12 +9144,10 @@ def run_edli_continuous_redecision_screen_cycle(*, screen_lock) -> None:
 
                 expiry_ro = get_world_connection_read_only()
                 try:
-                    expiry_plan, expiry_cutoff = (
-                        _edli_plan_unadmitted_redecision_expiry(
-                            expiry_ro,
-                            set(),
-                            decision_time=received_at,
-                        )
+                    expiry_plan = _edli_plan_unadmitted_redecision_expiry(
+                        expiry_ro,
+                        set(),
+                        decision_time=received_at,
                     )
                 finally:
                     expiry_ro.close()
@@ -9149,7 +9163,6 @@ def run_edli_continuous_redecision_screen_cycle(*, screen_lock) -> None:
                         expired_unadmitted = _edli_apply_unadmitted_redecision_expiry(
                             world,
                             expiry_plan,
-                            expiry_cutoff,
                             decision_time=received_at,
                         )
                         world.commit()
@@ -9287,7 +9300,7 @@ def run_edli_continuous_redecision_screen_cycle(*, screen_lock) -> None:
 
             expiry_ro = get_world_connection_read_only()
             try:
-                expiry_plan, expiry_cutoff = _edli_plan_unadmitted_redecision_expiry(
+                expiry_plan = _edli_plan_unadmitted_redecision_expiry(
                     expiry_ro,
                     set(),
                     decision_time=received_at,
@@ -9305,7 +9318,6 @@ def run_edli_continuous_redecision_screen_cycle(*, screen_lock) -> None:
                     expired_unadmitted = _edli_apply_unadmitted_redecision_expiry(
                         world,
                         expiry_plan,
-                        expiry_cutoff,
                         decision_time=received_at,
                     )
                     world.commit()
@@ -9350,7 +9362,7 @@ def run_edli_continuous_redecision_screen_cycle(*, screen_lock) -> None:
         try:
             expiry_ro = get_world_connection_read_only()
             try:
-                stale_plan, stale_cutoff = _edli_plan_unadmitted_redecision_expiry(
+                stale_plan = _edli_plan_unadmitted_redecision_expiry(
                     expiry_ro,
                     set(all_families),
                     decision_time=received_at,
@@ -9374,7 +9386,6 @@ def run_edli_continuous_redecision_screen_cycle(*, screen_lock) -> None:
                 expired_stale_pending = _edli_apply_unadmitted_redecision_expiry(
                     world_prune,
                     stale_plan,
-                    stale_cutoff,
                     decision_time=received_at,
                 )
                 expired_rest_pull_blockers = (
@@ -9431,7 +9442,7 @@ def run_edli_continuous_redecision_screen_cycle(*, screen_lock) -> None:
         world = None
         expiry_ro = get_world_connection_read_only()
         try:
-            expiry_plan, expiry_cutoff = _edli_plan_unadmitted_redecision_expiry(
+            expiry_plan = _edli_plan_unadmitted_redecision_expiry(
                 expiry_ro,
                 set(all_families),
                 decision_time=received_at,
@@ -9451,7 +9462,6 @@ def run_edli_continuous_redecision_screen_cycle(*, screen_lock) -> None:
             expired_unadmitted = _edli_apply_unadmitted_redecision_expiry(
                 world,
                 expiry_plan,
-                expiry_cutoff,
                 decision_time=received_at,
             )
             expired_rest_pull_blockers += (
