@@ -601,10 +601,10 @@ def test_global_winner_claim_mutex_busy_is_bounded(monkeypatch):
     ).fetchone() is None
 
 
-def test_global_claim_lock_bounce_queues_same_winner_as_typed_transient(
+def test_global_claim_lock_bounce_retries_same_winner_before_reauction(
     tmp_path, monkeypatch, caplog
 ):
-    """A bounced claim durably queues that exact winner after the read snapshot releases."""
+    """A bounced claim is queued, then the exact target is evaluated next cycle."""
 
     from src.engine.global_batch_runtime import _next_claim_carrier
 
@@ -655,7 +655,20 @@ def test_global_claim_lock_bounce_queues_same_winner_as_typed_transient(
                 blocker.rollback()
                 blocker.close()
         else:
-            claimed = claim_unpaged_winner(target)
+            assert tuple(event.event_id for event in events) == (target.event_id,)
+            return GlobalBatchSubmitResult(
+                receipts={
+                    target.event_id: EventSubmissionReceipt(
+                        False,
+                        target.event_id,
+                        target.causal_snapshot_id,
+                        reason="TRADE_SCORE_NON_POSITIVE",
+                        proof_accepted=False,
+                    )
+                },
+                winner_event_id=None,
+                venue_submit_count=0,
+            )
         receipt_events = (*events, target) if claimed else events
         reason = "GLOBAL_REAUCTION_WINNER_AWAITS_CLAIM"
         return GlobalBatchSubmitResult(
@@ -701,6 +714,18 @@ def test_global_claim_lock_bounce_queues_same_winner_as_typed_transient(
         "SELECT last_error FROM opportunity_event_processing WHERE event_id = ?",
         (target.event_id,),
     ).fetchone()[0] == "GLOBAL_WINNER_TARGETED_CLAIM"
+
+    second = reactor.process_pending(
+        decision_time=_DT_VENUE_OPEN + timedelta(minutes=1),
+        limit=1,
+    )
+
+    assert batch_attempt == 2
+    assert second.processed == 1
+    assert second.rejected == 1
+    assert second.proof_accepted == 0
+    assert second.retried == 0
+    assert _processing_status(conn, target.event_id) == "processed"
 
 
 def test_global_batch_defers_target_when_claim_is_reclaimed_during_solve():

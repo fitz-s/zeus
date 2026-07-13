@@ -15067,14 +15067,20 @@ def _forecast_authority_payload_and_clock(
 ) -> tuple[dict[str, Any], EvidenceClock]:
     # mx2t3 carrier-decouple (GATE-1 C): under the replacement lane the no-submit cert's forecast
     # authority is built from forecast_posteriors + raw_model_forecasts (mx2t3-independent) instead
-    # of the cold ensemble_snapshots row + read_executable_forecast(members_json). This runs for the
-    # FORECAST decision lanes ONLY (NOT day0 — day0 keeps its ensemble base, carrier_decouple_plan
-    # §4). Forked on the SAME _replacement_authority_enabled() flag the live q is gated by; the
-    # legacy ensemble path below is untouched for flag-OFF and for day0.
+    # of the cold ensemble_snapshots row + read_executable_forecast(members_json). A Day0 proof
+    # carrying a bound replacement posterior must use that same posterior as its forecast parent;
+    # the current observation is layered on top later. Otherwise the NO-bound certificate and its
+    # forecast parent name different bin topologies and no canonical selected bin can exist.
+    # Unbound Day0 evidence keeps the observation-seed path below.
     if (
         _replacement_authority_enabled()
-        and event.event_type in _FORECAST_DECISION_EVENT_TYPES
-        and event.event_type not in _DAY0_LANE_EVENT_TYPES
+        and (
+            event.event_type in _FORECAST_DECISION_EVENT_TYPES
+            or (
+                event.event_type in _DAY0_LANE_EVENT_TYPES
+                and bound_posterior_id is not None
+            )
+        )
     ):
         posterior = _forecast_authority_payload_from_posterior(
             conn,

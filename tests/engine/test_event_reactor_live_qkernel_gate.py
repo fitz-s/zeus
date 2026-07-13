@@ -2920,8 +2920,15 @@ def test_day0_final_intent_source_context_binds_observation_and_base_forecast():
     assert ctx.integrity_errors() == ()
 
 
-def test_replacement_forecast_authority_binds_selected_proof_posterior_id(monkeypatch):
-    """Replacement forecast authority must match the proof's served posterior row."""
+@pytest.mark.parametrize(
+    "event_type",
+    ("FORECAST_SNAPSHOT_READY", "DAY0_EXTREME_UPDATED"),
+)
+def test_replacement_forecast_authority_binds_selected_proof_posterior_id(
+    monkeypatch,
+    event_type,
+):
+    """Forecast and Day0 certificates share the selected proof's posterior parent."""
 
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
@@ -3032,7 +3039,7 @@ def test_replacement_forecast_authority_binds_selected_proof_posterior_id(monkey
     payload, _clock = era._forecast_authority_payload_and_clock(
         conn,
         event=SimpleNamespace(
-            event_type="FORECAST_SNAPSHOT_READY",
+            event_type=event_type,
             causal_snapshot_id="rmf-Seoul|2026-07-10|high|2026-07-08",
         ),
         family=SimpleNamespace(city="Seoul", target_date="2026-07-10", metric="high"),
@@ -3044,3 +3051,4 @@ def test_replacement_forecast_authority_binds_selected_proof_posterior_id(monkey
     assert payload["posterior_identity_hash"] == "a" * 64
     assert payload["raw_payload_hash"] == "a" * 64
     assert payload["captured_at"] == "2026-07-08T12:38:00+00:00"
+    assert payload["replacement_bin_topology"] == topology
