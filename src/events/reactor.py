@@ -5917,6 +5917,27 @@ def _edli_active_rmf_forecast_snapshot_pending_count(world_conn, *, limit: int) 
     return int(row[0] or 0) if row is not None else 0
 
 _EDLI_LAST_PRUNE_MONOTONIC: float | None = None
+_EDLI_MISSING_PROCESSING_REPAIR_CONVERGED = False
+
+
+def _edli_repair_missing_processing_rows_until_converged(
+    store,
+    *,
+    decision_time: str,
+    batch_limit: int,
+) -> int:
+    """Run legacy orphan repair until one scan proves the process-local window clean."""
+
+    global _EDLI_MISSING_PROCESSING_REPAIR_CONVERGED
+    if _EDLI_MISSING_PROCESSING_REPAIR_CONVERGED:
+        return 0
+    repaired = store.repair_missing_processing_rows(
+        decision_time=decision_time,
+        batch_limit=batch_limit,
+    )
+    if repaired == 0:
+        _EDLI_MISSING_PROCESSING_REPAIR_CONVERGED = True
+    return repaired
 
 def _edli_prune_pending_working_set(
     store,
@@ -6082,7 +6103,8 @@ def _edli_prune_pending_working_set(
         if _budget_exhausted("repair_missing_processing_rows"):
             return
         _step_started = time.monotonic()
-        _processing_repaired = store.repair_missing_processing_rows(
+        _processing_repaired = _edli_repair_missing_processing_rows_until_converged(
+            store,
             decision_time=decision_time.isoformat(),
             batch_limit=min(batch_limit, 1000),
         )

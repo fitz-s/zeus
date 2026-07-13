@@ -1874,6 +1874,62 @@ def test_unready_replacement_sweep_is_gated_by_active_rmf_queue():
     )
 
 
+def test_missing_processing_repair_runs_until_zero_then_converges(monkeypatch):
+    class Store:
+        def __init__(self):
+            self.results = iter((2, 0, 7))
+            self.calls = []
+
+        def repair_missing_processing_rows(self, *, decision_time, batch_limit):
+            self.calls.append((decision_time, batch_limit))
+            return next(self.results)
+
+    store = Store()
+    monkeypatch.setattr(reactor, "_EDLI_MISSING_PROCESSING_REPAIR_CONVERGED", False)
+
+    assert reactor._edli_repair_missing_processing_rows_until_converged(
+        store,
+        decision_time="2026-07-13T20:00:00+00:00",
+        batch_limit=1000,
+    ) == 2
+    assert reactor._edli_repair_missing_processing_rows_until_converged(
+        store,
+        decision_time="2026-07-13T20:01:00+00:00",
+        batch_limit=1000,
+    ) == 0
+    assert reactor._edli_repair_missing_processing_rows_until_converged(
+        store,
+        decision_time="2026-07-13T20:02:00+00:00",
+        batch_limit=1000,
+    ) == 0
+    assert store.calls == [
+        ("2026-07-13T20:00:00+00:00", 1000),
+        ("2026-07-13T20:01:00+00:00", 1000),
+    ]
+
+    monkeypatch.setattr(reactor, "_EDLI_MISSING_PROCESSING_REPAIR_CONVERGED", False)
+    assert reactor._edli_repair_missing_processing_rows_until_converged(
+        store,
+        decision_time="2026-07-13T20:03:00+00:00",
+        batch_limit=1000,
+    ) == 7
+
+
+def test_missing_processing_repair_exception_does_not_converge(monkeypatch):
+    class Store:
+        def repair_missing_processing_rows(self, **_kwargs):
+            raise RuntimeError("repair unavailable")
+
+    monkeypatch.setattr(reactor, "_EDLI_MISSING_PROCESSING_REPAIR_CONVERGED", False)
+    with pytest.raises(RuntimeError, match="repair unavailable"):
+        reactor._edli_repair_missing_processing_rows_until_converged(
+            Store(),
+            decision_time="2026-07-13T20:00:00+00:00",
+            batch_limit=1000,
+        )
+    assert reactor._EDLI_MISSING_PROCESSING_REPAIR_CONVERGED is False
+
+
 def test_held_position_family_provider_excludes_closed_phases():
     conn = sqlite3.connect(":memory:")
     conn.execute(
