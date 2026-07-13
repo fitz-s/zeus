@@ -22,14 +22,14 @@ import yaml
 from src.state import domains
 
 _REG = Path(__file__).resolve().parent.parent / "architecture" / "db_table_ownership.yaml"
-_LEGACY = {"legacy_archived", "archive"}
+_NON_OWNING = {"legacy_archived", "inert_experimental", "archive"}
 
 
 def _registry_canonical_owners() -> dict[str, str]:
     reg = yaml.safe_load(_REG.read_text())
     owners: dict[str, str] = {}
     for t in reg["tables"]:
-        if t.get("schema_class") not in _LEGACY:
+        if t.get("schema_class") not in _NON_OWNING:
             owners[t["name"]] = t["db"]
     return owners
 
@@ -47,6 +47,14 @@ def test_domains_equals_registry_except_documented_corrections() -> None:
     # (b) domains.py must not invent tables the registry has never heard of (outside corrections).
     extra = set(domains.live_tables()) - set(registry) - corrected
     assert not extra, f"domains.py declares tables absent from the registry: {sorted(extra)}"
+
+
+def test_inert_experimental_tables_are_not_domain_owners() -> None:
+    registry = _registry_canonical_owners()
+
+    for table in ("reduce_generations", "reduce_position_economics"):
+        assert table not in registry
+        assert domains.owner_domain(table) is None
 
 
 def test_every_correction_is_a_real_open_divergence() -> None:

@@ -36,7 +36,7 @@ import yaml
 VALID_DB_VALUES = frozenset({"world", "forecasts", "trade", "risk_state", "backtest"})
 VALID_SCHEMA_CLASS_VALUES = frozenset({
     "forecast_class", "world_class", "trade_class", "risk_class",
-    "backtest_class", "legacy_archived", "archive",
+    "backtest_class", "legacy_archived", "inert_experimental", "archive",
 })
 
 
@@ -55,7 +55,14 @@ class SchemaClass(str, Enum):
     RISK_CLASS = "risk_class"
     BACKTEST_CLASS = "backtest_class"
     LEGACY_ARCHIVED = "legacy_archived"
+    INERT_EXPERIMENTAL = "inert_experimental"
     ARCHIVE = "archive"  # F5: audit-only export; table exists but no live writes
+
+
+_NON_OWNING_SCHEMA_CLASSES = frozenset({
+    SchemaClass.LEGACY_ARCHIVED,
+    SchemaClass.INERT_EXPERIMENTAL,
+})
 
 
 # ---------------------------------------------------------------------------
@@ -248,38 +255,38 @@ def owner(table_name: str) -> DBIdentity:
     """Return the authoritative DBIdentity for a table.
 
     Raises KeyError if the table is not in the registry.
-    Raises ValueError if the table appears on multiple DBs with non-legacy_archived
-    entries (ambiguous ownership). Legacy-archived entries are skipped.
+    Raises ValueError if the table appears on multiple DBs with owning
+    entries (ambiguous ownership). All non-owning entries are skipped.
     """
     canonical = [
         entry for (name, _), entry in _REGISTRY.items()
-        if name == table_name and entry.schema_class != SchemaClass.LEGACY_ARCHIVED
+        if name == table_name and entry.schema_class not in _NON_OWNING_SCHEMA_CLASSES
     ]
     if not canonical:
         raise KeyError(
             f"table_registry.owner: '{table_name}' not found in registry "
-            "(or only has legacy_archived entries). "
+            "(or only has non-owning entries). "
             "Add a non-archived entry to architecture/db_table_ownership.yaml."
         )
     if len(canonical) > 1:
         dbs = [e.db.value for e in canonical]
         raise ValueError(
             f"table_registry.owner: '{table_name}' has ambiguous ownership: {dbs}. "
-            "Each table must have at most one non-legacy_archived entry."
+            "Each table must have at most one owning entry."
         )
     return canonical[0].db
 
 
 def tables_for(db: DBIdentity) -> frozenset[str]:
-    """Return all non-legacy_archived table names owned by db.
+    """Return all owning table names for db.
 
-    Legacy-archived entries are excluded (they are ghost copies on the wrong DB,
-    not owned by that DB for purposes of set-equality checks).
+    Legacy ghosts and inert experimental materializations are excluded because
+    neither may become a runtime authority merely by existing on disk.
     """
     return frozenset(
         name
         for (name, db_id), entry in _REGISTRY.items()
-        if db_id == db and entry.schema_class != SchemaClass.LEGACY_ARCHIVED
+        if db_id == db and entry.schema_class not in _NON_OWNING_SCHEMA_CLASSES
     )
 
 
@@ -305,13 +312,13 @@ def is_forecast_class(table_name: str) -> bool:
 
 
 def required_columns_for(table_name: str) -> list[ColumnSpec] | None:
-    """Return the required_columns list for table_name (non-legacy_archived entry).
+    """Return the required_columns list for an owning table entry.
 
     Returns None if table_name has no entry or has no required_columns declared.
     Used internally by assert_db_matches_registry and by callers needing column introspection.
     """
     for (name, _), entry in _REGISTRY.items():
-        if name == table_name and entry.schema_class != SchemaClass.LEGACY_ARCHIVED:
+        if name == table_name and entry.schema_class not in _NON_OWNING_SCHEMA_CLASSES:
             return entry.required_columns if entry.required_columns else None
     return None
 
@@ -323,7 +330,7 @@ def assert_db_matches_registry(conn: sqlite3.Connection, db_identity: DBIdentity
     1. TABLE-SET EQUALITY: sqlite_master tables == tables_for(db_identity).
        Both missing-from-disk (registry declared but not created) AND
        extra-on-disk (ghost table not in registry) are hard failures.
-       legacy_archived entries are excluded from both sides.
+       non-owning entries are excluded from both sides.
     2. COLUMN-SHAPE SUBSET: for every table with required_columns declared,
        every (name, type, nullable) tuple must be present in PRAGMA table_info.
        Extra columns on disk are permitted (subset semantics per PLAN §1.1 #2).
@@ -343,23 +350,23 @@ def assert_db_matches_registry(conn: sqlite3.Connection, db_identity: DBIdentity
     )
     live_tables = _drop_known_empty_migration_residue(conn, db_identity, live_tables)
 
-    # Registry-declared tables for this DB (non-legacy_archived only).
+    # Registry-declared owning tables for this DB.
     registry_tables = tables_for(db_identity)
 
-    # Legacy-archived table names on this DB are ghost copies of authoritative tables
-    # on another DB. They exist on disk but are excluded from set-equality both sides
-    # (per PLAN §1.5 + ARCHITECT D2 — drop after retention expiry).
-    legacy_archived_on_this_db: frozenset[str] = frozenset(
+    # Non-owning tables remain visible in the registry without joining runtime
+    # authority. This covers legacy ghosts and explicitly quarantined experimental
+    # materializations retained for audit until a separately authorized cleanup.
+    non_owning_on_this_db: frozenset[str] = frozenset(
         name
         for (name, db_id), entry in _REGISTRY.items()
-        if db_id == db_identity and entry.schema_class == SchemaClass.LEGACY_ARCHIVED
+        if db_id == db_identity and entry.schema_class in _NON_OWNING_SCHEMA_CLASSES
     )
 
-    # Check 1: set equality (excluding legacy_archived on both sides).
-    live_tables_non_ghost = live_tables - legacy_archived_on_this_db
-    missing_from_disk = registry_tables - live_tables_non_ghost
+    # Check 1: set equality over runtime-owned tables only.
+    live_tables_owned = live_tables - non_owning_on_this_db
+    missing_from_disk = registry_tables - live_tables_owned
     extra_on_disk = (
-        live_tables_non_ghost
+        live_tables_owned
         - registry_tables
         - _INTERNAL_TABLES_ALLOWED_ON_ANY_DB
     )

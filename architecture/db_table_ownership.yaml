@@ -8,8 +8,9 @@
 #   name               — table name
 #   db                 — physical DB: world | forecasts | trade | risk_state | backtest
 #   schema_class       — forecast_class | world_class | trade_class | risk_class |
-#                        backtest_class | legacy_archived | archive
+#                        backtest_class | legacy_archived | inert_experimental | archive
 #                        (archive: table exists for audit/export only, no live writes)
+#                        (inert_experimental: retained contamination, never runtime authority)
 #   schema_version_owner — SCHEMA_VERSION | SCHEMA_FORECASTS_VERSION | none
 #   created_by         — init_schema | init_schema_forecasts | apply_canonical_schema |
 #                        scripts.migrations._ensure_ledger |
@@ -33,7 +34,7 @@
 schema_version: 2
 metadata:
   created: "2026-05-14"
-  updated: "2026-05-17"
+  updated: "2026-07-14"
   owner_packet: "K1 DB split followup — task_2026-05-14_k1_followups"
   plan_ref: "docs/archive/2026-Q2/task_2026-05-14_k1_followups/PLAN.md §1.1 (REV 4)"
   k1_split_commit: "eba80d2b9d"
@@ -100,6 +101,30 @@ tables:
       framework and by init_schema_trade_only before boot-time
       assert_db_matches_registry(TRADE), so both fresh and already-migrated
       trade DBs carry the same registry-declared table.
+
+  - name: reduce_generations
+    db: trade
+    schema_class: inert_experimental
+    schema_version_owner: none
+    created_by: manual_materialize_generation_2026_07_13
+    pk_col: generation_id
+    notes: >
+      Non-owning LX-2R experimental materialization found on the live trade DB.
+      The active src/reduce contract is synthetic-fixture-only and no money-path
+      reader may consume this table. Retained for audit without blessing it as
+      trade_class; removal requires a separate explicit cleanup decision.
+
+  - name: reduce_position_economics
+    db: trade
+    schema_class: inert_experimental
+    schema_version_owner: none
+    created_by: manual_materialize_generation_2026_07_13
+    pk_col: generation_id,position_id
+    notes: >
+      Child rows of the inert LX-2R experimental generation. Non-owning and
+      unavailable through table_registry.owner(); retained only so boot can name
+      and quarantine the observed schema contamination without deleting evidence
+      or promoting it to canonical economics truth.
 
   # ---------------------------------------------------------------------------
   # FORECAST-CLASS tables (db: forecasts, authoritative in zeus-forecasts.db)

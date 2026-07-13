@@ -368,6 +368,34 @@ class TestA4AssertDbMatchesRegistry:
             assert_db_matches_registry(conn, DBIdentity.WORLD)
         conn.close()
 
+    def test_a4_names_inert_experimental_tables_without_granting_ownership(self):
+        """Known experimental contamination stays visible but never authoritative."""
+
+        from src.reduce.schema.generation_schema import ensure_tables
+        from src.state.db import init_schema_trade_only
+        from src.state.table_registry import (
+            DBIdentity,
+            SchemaClass,
+            _REGISTRY,
+            assert_db_matches_registry,
+            owner,
+            tables_for,
+        )
+
+        conn = sqlite3.connect(":memory:")
+        init_schema_trade_only(conn)
+        ensure_tables(conn)
+
+        for table in ("reduce_generations", "reduce_position_economics"):
+            entry = _REGISTRY[(table, DBIdentity.TRADE)]
+            assert entry.schema_class == SchemaClass.INERT_EXPERIMENTAL
+            assert table not in tables_for(DBIdentity.TRADE)
+            with pytest.raises(KeyError, match="only has non-owning entries"):
+                owner(table)
+
+        assert_db_matches_registry(conn, DBIdentity.TRADE)
+        conn.close()
+
     def test_a4_passes_on_correct_world_schema(self):
         """assert_db_matches_registry passes (no exception) on correct world schema.
 
