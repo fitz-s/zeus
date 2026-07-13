@@ -181,7 +181,7 @@ test_trust_policy:
     tests/events/test_event_bound_decision_engine_no_runtime.py: {created: "2026-05-24", last_used: "2026-05-24"}
     tests/events/test_event_store_idempotency.py: {created: "2026-05-24", last_used: "2026-05-24"}
     tests/events/test_event_store_lock_not_schema_error.py: {created: "2026-05-31", last_used: "2026-05-31"}
-    tests/events/test_edli_position_bridge.py: {created: "2026-06-01", last_used: "2026-07-09"}
+    tests/events/test_edli_position_bridge.py: {created: "2026-06-01", last_used: "2026-07-13"}
     tests/events/test_event_writer_single_writer.py: {created: "2026-05-24", last_used: "2026-05-24"}
     tests/events/test_market_event_coalescer.py: {created: "2026-05-24", last_used: "2026-05-24"}
     tests/events/test_forecast_snapshot_ready.py: {created: "2026-05-24", last_used: "2026-07-11", note: "ForecastSnapshotReady replacement-carrier contracts, including bounded family restriction and batched posterior raw-member coverage without per-family history scans."}
@@ -194,6 +194,7 @@ test_trust_policy:
     tests/events/test_claim_lock_storm.py: {created: "2026-06-11", last_used: "2026-07-13", note: "World-writer claim contention, including unpaged global-winner claim and queue paths, remains bounded, visible, rollback-safe, pending on miss, and waits at most once per contention episode before same-cycle nonblocking probes."}
     tests/calibration/test_scaled_normal_uniform_q_builder.py: {created: "2026-06-29", last_used: "2026-07-10", note: "Capital-gated city rho mixture math, including row-wise simplex bootstrap-draw mixing so served q, bounds, empirical edge confidence, and CVaR share one probability world."}
     tests/engine/test_replacement_0_1_live_authority_probability.py: {created: "2026-06-07", last_used: "2026-07-10", note: "Replacement live probability authority and city-mixed bootstrap sample-basis gate."}
+    tests/engine/test_cert_calibration_bridge.py: {created: "2026-06-10", last_used: "2026-07-13", note: "Replacement calibration credential relationship matrix; Day0 observation hard facts alone fail closed while current replacement bounds use their own typed calibration authority."}
     tests/events/test_continuous_redecision.py: {created: "2026-05-31", last_used: "2026-06-17"}
     tests/events/test_continuous_redecision_resurrection.py: {created: "2026-06-12", last_used: "2026-06-26", note: "Continuous redecision resurrection/deadlock antibodies; extended 2026-06-26 to prove open-maker token->condition resolution reads executable_market_snapshot_latest without append scans when latest rows exist."}
     tests/events/test_continuous_redecision_emit.py: {created: "2026-05-31", last_used: "2026-05-31"}
@@ -217,7 +218,7 @@ test_trust_policy:
     tests/decision_kernel/test_no_submit_theorems.py: {created: "2026-05-25", last_used: "2026-05-25"}
     tests/decision_kernel/test_no_bypass.py: {created: "2026-05-25", last_used: "2026-05-25"}
     tests/decision_kernel/test_certificate_ledger.py: {created: "2026-05-25", last_used: "2026-05-25"}
-    tests/decision_kernel/test_actionable_trade_certificate.py: {created: "2026-05-25", last_used: "2026-05-25"}
+    tests/decision_kernel/test_actionable_trade_certificate.py: {created: "2026-05-25", last_used: "2026-07-13", note: "Actionable certificate closure, including symmetric YES/NO admission for a current Day0 replacement posterior bound to the exact posterior and current canonical observation, plus fail-closed posterior mismatch and replacement-calibration routing."}
     tests/decision_kernel/test_execution_command_certificate.py: {created: "2026-05-25", last_used: "2026-05-25"}
     tests/decision_kernel/test_taker_execution_law.py: {created: "2026-05-31", last_used: "2026-05-31"}
     tests/decision_kernel/test_canary_force_taker_gate.py: {created: "2026-05-31", last_used: "2026-05-31"}
@@ -500,7 +501,7 @@ test_trust_policy:
     tests/test_command_grammar_amendment.py: {created: "2026-04-27", last_used: "2026-04-27"}
     tests/test_riskguard_red_durable_cmd.py: {created: "2026-04-27", last_used: "2026-04-27"}
     tests/test_command_bus_types.py: {created: "2026-04-26", last_used: "2026-04-27"}
-    tests/test_command_recovery.py: {created: "2026-04-26", last_used: "2026-07-09"}
+    tests/test_command_recovery.py: {created: "2026-04-26", last_used: "2026-07-13"}
     tests/test_venue_command_repo.py: {created: "2026-04-26", last_used: "2026-07-09", note: "SCH-W1.2-ORDER-STATE: extended with TestInsertCommandQVersionStamp — q_version write-once stamp, NULL default, whitespace normalization, survives state transitions, and live-mode ENTRY q_version fail-closed."}
     tests/test_migration_venue_commands_q_version.py: {created: "2026-07-04", last_used: "2026-07-04", note: "SCH-W1.2-ORDER-STATE live trade-DB migration coverage: adds nullable venue_commands.q_version, idempotent when already present, no-op when venue_commands is absent."}
     tests/test_unknown_side_effect.py: {created: "2026-04-27", last_used: "2026-04-30"}

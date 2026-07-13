@@ -22,6 +22,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from src.decision_kernel.canonicalization import qkernel_current_state_identity_hash
+
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -154,6 +156,227 @@ def test_day0_presubmit_revalidation_uses_observation_authority_with_qkernel():
     from src.events.live_order_aggregate import _validate_pre_submit_revalidation_payload
 
     _validate_pre_submit_revalidation_payload(_valid_day0_pre_submit_payload())
+
+
+def _replacement_day0_recovery_payload(direction: str) -> dict:
+    q_live, q_lcb = ((0.65, 0.58) if direction == "buy_yes" else (0.72, 0.64))
+    posterior_id = 36169
+    condition_id = f"condition-recovery-{direction}"
+    observation = {
+        "source_match_status": "MATCH",
+        "local_date_status": "MATCH",
+        "station_match_status": "MATCH",
+        "dst_status": "UNAMBIGUOUS",
+        "metric_match_status": "MATCH",
+        "rounding_status": "MATCH",
+        "source_authorized_status": "AUTHORIZED",
+        "live_authority_status": "live",
+        "observation_time": "2026-07-13T09:00:00+00:00",
+        "observation_available_at": "2026-07-13T09:02:00+00:00",
+        "raw_value": 16.0,
+        "rounded_value": 16,
+        "sample_count": 11,
+        "station_id": "EGLC",
+        "settlement_source": "wu_icao_history",
+        "settlement_unit": "C",
+        "_edli_global_day0_binding": {
+            "posterior_id": posterior_id,
+            "city": "London",
+            "target_date": "2026-07-13",
+            "metric": "low",
+            "observation_time": "2026-07-13T09:00:00+00:00",
+            "observation_available_at": "2026-07-13T09:02:00+00:00",
+            "observed_extreme_native": 16.0,
+            "rounded_value": 16,
+            "sample_count": 11,
+            "station_id": "EGLC",
+            "settlement_source": "wu_icao_history",
+            "settlement_unit": "C",
+        },
+    }
+    economics = {
+        "source": "qkernel_spine",
+        "decision_id": f"decision-{direction}",
+        "receipt_hash": f"receipt-{direction}",
+        "q_version": f"q-version-{direction}",
+        "sample_hash": f"sample-{direction}",
+        "candidate_id": f"candidate-{direction}",
+        "route_id": f"DIRECT_{'YES' if direction == 'buy_yes' else 'NO'}:bin",
+        "bin_id": "bin",
+        "side": "YES" if direction == "buy_yes" else "NO",
+        "payoff_q_point": q_live,
+        "payoff_q_lcb": q_lcb,
+        "edge_lcb": q_lcb - 0.40,
+        "q_lcb_guard_basis": "CURRENT_POSTERIOR_BAND",
+        "selection_guard_basis": "CURRENT_POSTERIOR_BAND",
+        "q_lcb_guard_abstained": False,
+        "selection_guard_abstained": False,
+        "q_lcb_guard_cell_key": f"sample-{direction}",
+        "selection_guard_cell_key": f"sample-{direction}",
+        "selection_guard_n": 400,
+        "selection_guard_q_safe": q_lcb,
+    }
+    economics["current_state_identity_hash"] = qkernel_current_state_identity_hash(
+        economics
+    )
+    return {
+        "event_type": "DAY0_EXTREME_UPDATED",
+        "direction": direction,
+        "condition_id": condition_id,
+        "city": "London",
+        "target_date": "2026-07-13",
+        "metric": "low",
+        "posterior_id": posterior_id,
+        "q_live": q_live,
+        "q_lcb_5pct": q_lcb,
+        "q_source": "replacement_0_1",
+        "_edli_q_source": "replacement_0_1",
+        "day0_probability_authority": {
+            "probability_authority": "replacement_current_global_probability_v1",
+            "q_source": "replacement_0_1",
+            "posterior_id": posterior_id,
+            "global_current_observation_payload": observation,
+        },
+        "qkernel_execution_economics": economics,
+    }
+
+
+@pytest.mark.parametrize("direction", ["buy_yes", "buy_no"])
+def test_recovery_preserves_current_replacement_day0_qkernel_authority(direction):
+    from src.execution.command_recovery import _event_context_qkernel_authority
+
+    payload = _replacement_day0_recovery_payload(direction)
+    economics = payload["qkernel_execution_economics"]
+
+    recovered, q_live, q_lcb, authority = _event_context_qkernel_authority(
+        economics,
+        event_type=payload["event_type"],
+        probability_payload=payload,
+        q_live=0.01,
+        q_lcb=0.0,
+    )
+
+    assert recovered == economics
+    assert q_live == pytest.approx(payload["q_live"])
+    assert q_lcb == pytest.approx(payload["q_lcb_5pct"])
+    assert authority == "qkernel_spine"
+
+
+def test_recovery_nested_audit_threads_owning_replacement_probability_payload():
+    from src.execution.command_recovery import (
+        _event_context_qkernel_authority,
+        _selected_qkernel_execution_economics_with_authority,
+    )
+
+    audit = _replacement_day0_recovery_payload("buy_no")
+    economics = audit.pop("qkernel_execution_economics")
+    audit["opportunity_book"] = {
+        "cache_summary": {"selected_qkernel_execution_economics": economics}
+    }
+    wrapper = {"decision_audit": audit}
+
+    selected, probability_payload = (
+        _selected_qkernel_execution_economics_with_authority(wrapper)
+    )
+    recovered, _q_live, _q_lcb, authority = _event_context_qkernel_authority(
+        selected,
+        event_type=audit["event_type"],
+        probability_payload=probability_payload,
+        q_live=audit["q_live"],
+        q_lcb=audit["q_lcb_5pct"],
+    )
+
+    assert probability_payload is audit
+    assert recovered == economics
+    assert authority == "qkernel_spine"
+
+
+def test_recovery_downgrades_tampered_replacement_probability_binding():
+    from src.execution.command_recovery import _event_context_qkernel_authority
+
+    payload = _replacement_day0_recovery_payload("buy_yes")
+    payload["day0_probability_authority"]["posterior_id"] += 1
+
+    recovered, q_live, q_lcb, authority = _event_context_qkernel_authority(
+        payload["qkernel_execution_economics"],
+        event_type=payload["event_type"],
+        probability_payload=payload,
+        q_live=payload["q_live"],
+        q_lcb=payload["q_lcb_5pct"],
+    )
+
+    assert recovered == {}
+    assert q_live is None
+    assert q_lcb is None
+    assert authority == "venue_fact_recovery"
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (("side", "NO"), ("payoff_q_point", 0.99), ("payoff_q_lcb", 0.98)),
+)
+def test_recovery_downgrades_replacement_selected_leg_tamper(field, value):
+    from src.execution.command_recovery import _event_context_qkernel_authority
+
+    payload = _replacement_day0_recovery_payload("buy_yes")
+    economics = payload["qkernel_execution_economics"]
+    economics[field] = value
+    economics["current_state_identity_hash"] = qkernel_current_state_identity_hash(
+        economics
+    )
+
+    recovered, q_live, q_lcb, authority = _event_context_qkernel_authority(
+        economics,
+        event_type=payload["event_type"],
+        probability_payload=payload,
+        q_live=payload["q_live"],
+        q_lcb=payload["q_lcb_5pct"],
+    )
+
+    assert recovered == {}
+    assert q_live is None
+    assert q_lcb is None
+    assert authority == "venue_fact_recovery"
+
+
+def test_recovery_downgrades_unsealed_replacement_current_state_identity():
+    from src.execution.command_recovery import _event_context_qkernel_authority
+
+    payload = _replacement_day0_recovery_payload("buy_no")
+    economics = payload["qkernel_execution_economics"]
+    economics.pop("sample_hash")
+
+    recovered, q_live, q_lcb, authority = _event_context_qkernel_authority(
+        economics,
+        event_type=payload["event_type"],
+        probability_payload=payload,
+        q_live=payload["q_live"],
+        q_lcb=payload["q_lcb_5pct"],
+    )
+
+    assert recovered == {}
+    assert q_live is None
+    assert q_lcb is None
+    assert authority == "venue_fact_recovery"
+
+
+def test_recovery_downgrades_mixed_container_event_type_bypass():
+    from src.execution.command_recovery import _event_context_qkernel_authority
+
+    payload = _replacement_day0_recovery_payload("buy_no")
+
+    recovered, q_live, q_lcb, authority = _event_context_qkernel_authority(
+        payload["qkernel_execution_economics"],
+        event_type="FORECAST_SNAPSHOT_READY",
+        probability_payload=payload,
+        q_live=payload["q_live"],
+        q_lcb=payload["q_lcb_5pct"],
+    )
+
+    assert recovered == {}
+    assert q_live is None
+    assert q_lcb is None
+    assert authority == "venue_fact_recovery"
 
 
 def test_forecast_presubmit_revalidation_still_requires_qkernel_economics():

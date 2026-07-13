@@ -1,5 +1,5 @@
 # Created: 2026-06-01
-# Last reused or audited: 2026-07-09
+# Last reused or audited: 2026-07-13
 # Authority basis: DEFECT-1 capital-recoverability bridge. An EDLI FILL_CONFIRMED
 #   must materialise a canonical position_current row (the seam audited as
 #   missing), idempotently, chain-reconcilable by token, summing partial fills.
@@ -28,8 +28,12 @@ from datetime import datetime, timezone
 import pytest
 
 from src.contracts.semantic_types import EntryMethod
+from src.decision_kernel.canonicalization import qkernel_current_state_identity_hash
 from src.events.edli_position_bridge import (
     EdliPositionBridgeError,
+    _entry_authority_from_certificates,
+    _entry_authority_from_decision_audit,
+    _pre_submit_posterior,
     edli_bridge_position_id,
     materialize_position_current_from_edli_fill,
 )
@@ -256,6 +260,182 @@ def _position_current_rows(conn: sqlite3.Connection) -> list[sqlite3.Row]:
     return conn.execute("SELECT * FROM position_current").fetchall()
 
 
+def _replacement_day0_probability_payload(direction: str) -> dict:
+    q_live, q_lcb = ((0.65, 0.58) if direction == "buy_yes" else (0.72, 0.64))
+    posterior_id = 36169
+    condition_id = f"condition-replacement-{direction}"
+    observation = {
+        "source_match_status": "MATCH",
+        "local_date_status": "MATCH",
+        "station_match_status": "MATCH",
+        "dst_status": "UNAMBIGUOUS",
+        "metric_match_status": "MATCH",
+        "rounding_status": "MATCH",
+        "source_authorized_status": "AUTHORIZED",
+        "live_authority_status": "live",
+        "observation_time": "2026-07-13T09:00:00+00:00",
+        "observation_available_at": "2026-07-13T09:02:00+00:00",
+        "raw_value": 16.0,
+        "rounded_value": 16,
+        "sample_count": 11,
+        "station_id": "EGLC",
+        "settlement_source": "wu_icao_history",
+        "settlement_unit": "C",
+        "_edli_global_day0_binding": {
+            "posterior_id": posterior_id,
+            "city": "London",
+            "target_date": "2026-07-13",
+            "metric": "low",
+            "observation_time": "2026-07-13T09:00:00+00:00",
+            "observation_available_at": "2026-07-13T09:02:00+00:00",
+            "observed_extreme_native": 16.0,
+            "rounded_value": 16,
+            "sample_count": 11,
+            "station_id": "EGLC",
+            "settlement_source": "wu_icao_history",
+            "settlement_unit": "C",
+        },
+    }
+    economics = {
+        "source": "qkernel_spine",
+        "decision_id": f"decision-{direction}",
+        "receipt_hash": f"receipt-{direction}",
+        "q_version": f"q-version-{direction}",
+        "sample_hash": f"sample-{direction}",
+        "candidate_id": f"candidate-{direction}",
+        "route_id": f"DIRECT_{'YES' if direction == 'buy_yes' else 'NO'}:bin",
+        "bin_id": "bin",
+        "side": "YES" if direction == "buy_yes" else "NO",
+        "payoff_q_point": q_live,
+        "payoff_q_lcb": q_lcb,
+        "edge_lcb": q_lcb - 0.40,
+        "q_lcb_guard_basis": "CURRENT_POSTERIOR_BAND",
+        "selection_guard_basis": "CURRENT_POSTERIOR_BAND",
+        "q_lcb_guard_abstained": False,
+        "selection_guard_abstained": False,
+        "q_lcb_guard_cell_key": f"sample-{direction}",
+        "selection_guard_cell_key": f"sample-{direction}",
+        "selection_guard_n": 400,
+        "selection_guard_q_safe": q_lcb,
+    }
+    economics["current_state_identity_hash"] = qkernel_current_state_identity_hash(
+        economics
+    )
+    return {
+        "event_type": "DAY0_EXTREME_UPDATED",
+        "direction": direction,
+        "condition_id": condition_id,
+        "city": "London",
+        "target_date": "2026-07-13",
+        "metric": "low",
+        "posterior_id": posterior_id,
+        "q_live": q_live,
+        "q_lcb_5pct": q_lcb,
+        "q_source": "replacement_0_1",
+        "_edli_q_source": "replacement_0_1",
+        "day0_probability_authority": {
+            "probability_authority": "replacement_current_global_probability_v1",
+            "q_source": "replacement_0_1",
+            "posterior_id": posterior_id,
+            "global_current_observation_payload": observation,
+        },
+        "qkernel_execution_economics": economics,
+    }
+
+
+@pytest.mark.parametrize("direction", ["buy_yes", "buy_no"])
+def test_replacement_day0_certificate_preserves_symmetric_post_fill_q(conn, direction):
+    payload = _replacement_day0_probability_payload(direction)
+    certificate_hash = f"replacement-day0-{direction}"
+    _insert_decision_certificate(
+        conn,
+        certificate_id=f"cert-{direction}",
+        certificate_type="ActionableTradeCertificate",
+        certificate_hash=certificate_hash,
+        payload=payload,
+    )
+
+    _evidence, q_live, ci_width, entry_method = _entry_authority_from_certificates(
+        conn,
+        actionable_certificate_hash=certificate_hash,
+    )
+
+    economics = payload["qkernel_execution_economics"]
+    assert q_live == pytest.approx(economics["payoff_q_point"])
+    assert ci_width == pytest.approx(
+        2.0 * (economics["payoff_q_point"] - economics["payoff_q_lcb"])
+    )
+    assert entry_method == EntryMethod.QKERNEL_SPINE.value
+
+
+@pytest.mark.parametrize("direction", ["buy_yes", "buy_no"])
+def test_replacement_day0_audit_and_presubmit_preserve_symmetric_post_fill_q(direction):
+    payload = _replacement_day0_probability_payload(direction)
+
+    audit_q, ci_width, entry_method = _entry_authority_from_decision_audit(
+        [("DecisionProofAccepted", {"decision_audit": payload})]
+    )
+
+    economics = payload["qkernel_execution_economics"]
+    assert audit_q == pytest.approx(economics["payoff_q_point"])
+    assert ci_width == pytest.approx(
+        2.0 * (economics["payoff_q_point"] - economics["payoff_q_lcb"])
+    )
+    assert entry_method == EntryMethod.QKERNEL_SPINE.value
+    assert _pre_submit_posterior(payload) == pytest.approx(
+        economics["payoff_q_point"]
+    )
+
+
+def test_replacement_day0_post_fill_rejects_tampered_posterior_binding():
+    payload = _replacement_day0_probability_payload("buy_yes")
+    payload["day0_probability_authority"]["posterior_id"] += 1
+
+    audit_q, ci_width, entry_method = _entry_authority_from_decision_audit(
+        [("DecisionProofAccepted", {"decision_audit": payload})]
+    )
+
+    assert audit_q is None
+    assert ci_width == 0.0
+    assert entry_method is None
+    assert _pre_submit_posterior(payload) == 0.0
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (("side", "NO"), ("payoff_q_point", 0.99), ("payoff_q_lcb", 0.98)),
+)
+def test_replacement_day0_post_fill_rejects_selected_leg_tamper(field, value):
+    payload = _replacement_day0_probability_payload("buy_yes")
+    payload["qkernel_execution_economics"][field] = value
+    payload["qkernel_execution_economics"]["current_state_identity_hash"] = (
+        qkernel_current_state_identity_hash(payload["qkernel_execution_economics"])
+    )
+
+    audit_q, ci_width, entry_method = _entry_authority_from_decision_audit(
+        [("DecisionProofAccepted", {"decision_audit": payload})]
+    )
+
+    assert audit_q is None
+    assert ci_width == 0.0
+    assert entry_method is None
+    assert _pre_submit_posterior(payload) == 0.0
+
+
+def test_replacement_day0_post_fill_rejects_unsealed_current_state_identity():
+    payload = _replacement_day0_probability_payload("buy_no")
+    payload["qkernel_execution_economics"].pop("receipt_hash")
+
+    audit_q, ci_width, entry_method = _entry_authority_from_decision_audit(
+        [("DecisionProofAccepted", {"decision_audit": payload})]
+    )
+
+    assert audit_q is None
+    assert ci_width == 0.0
+    assert entry_method is None
+    assert _pre_submit_posterior(payload) == 0.0
+
+
 def test_bridge_downgrades_retired_day0_observed_boundary_qkernel_when_certificates_unavailable(conn):
     aggregate_id = "agg-edli-day0-retired-boundary-qkernel"
     event_id = "evt-edli-day0-retired-boundary-qkernel"
@@ -429,6 +609,20 @@ def test_bridge_keeps_legitimate_day0_remaining_window_qkernel_when_certificates
                 "target_date": "2026-07-02",
                 "metric": "high",
                 "strategy_key": "day0_nowcast_entry",
+                "q_live": 0.61,
+                "q_lcb_5pct": 0.57,
+                "_edli_q_source": "day0_remaining_day",
+                "day0_probability_authority": {
+                    "q_source": "day0_remaining_day",
+                    "q_mode": "remaining_day",
+                    "remaining_models": 37,
+                    "rounded_value": 32,
+                    "observation_time": "2026-07-02T02:15:00+00:00",
+                    "lcb_transform": {
+                        "yes_lcb_by_condition": {CONDITION_ID: 0.57},
+                        "no_lcb_by_condition": {CONDITION_ID: 0.43},
+                    },
+                },
                 "qkernel_execution_economics": qkernel,
             },
         },
@@ -457,6 +651,18 @@ def test_bridge_keeps_legitimate_day0_remaining_window_qkernel_when_certificates
             "market_id": CONDITION_ID,
             "q_live": 0.61,
             "q_lcb_5pct": 0.57,
+            "_edli_q_source": "day0_remaining_day",
+            "day0_probability_authority": {
+                "q_source": "day0_remaining_day",
+                "q_mode": "remaining_day",
+                "remaining_models": 37,
+                "rounded_value": 32,
+                "observation_time": "2026-07-02T02:15:00+00:00",
+                "lcb_transform": {
+                    "yes_lcb_by_condition": {CONDITION_ID: 0.57},
+                    "no_lcb_by_condition": {CONDITION_ID: 0.43},
+                },
+            },
             "qkernel_execution_economics": qkernel,
         },
     )

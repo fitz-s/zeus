@@ -52,7 +52,7 @@ import json
 import logging
 import sqlite3
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Mapping
 
 from src.contracts.semantic_types import EntryMethod
 
@@ -288,6 +288,7 @@ def _entry_authority_from_certificates(
         if _qkernel_payload_has_live_entry_authority(
             qkernel_payload,
             event_type=actionable_payload.get("event_type"),
+            probability_payload=actionable_payload,
             source="certificate",
         ):
             qkernel_point = _float_or_none(qkernel_payload.get("payoff_q_point"))
@@ -365,6 +366,7 @@ def _entry_authority_from_decision_audit(
         if _qkernel_payload_has_live_entry_authority(
             qkernel_payload,
             event_type=audit.get("event_type"),
+            probability_payload=audit,
             source="decision_audit",
         ):
             qkernel_point = _float_or_none(qkernel_payload.get("payoff_q_point"))
@@ -418,6 +420,7 @@ def _qkernel_payload_has_live_entry_authority(
     economics: dict[str, Any],
     *,
     event_type: Any,
+    probability_payload: Mapping[str, Any],
     source: str,
 ) -> bool:
     if any(
@@ -434,10 +437,23 @@ def _qkernel_payload_has_live_entry_authority(
     try:
         from src.events.day0_authority import (
             Day0AuthorityError,
+            assert_live_day0_probability_authority,
             assert_live_day0_qkernel_guard_authority,
         )
 
-        assert_live_day0_qkernel_guard_authority(economics)
+        assert_live_day0_probability_authority(
+            probability_payload,
+            direction=probability_payload.get("direction")
+            or probability_payload.get("actual_direction"),
+            condition_id=probability_payload.get("condition_id")
+            or probability_payload.get("actual_condition_id"),
+            q_live=economics.get("payoff_q_point"),
+            q_lcb=economics.get("payoff_q_lcb"),
+        )
+        assert_live_day0_qkernel_guard_authority(
+            economics,
+            probability_payload=probability_payload,
+        )
     except Day0AuthorityError as exc:
         logger.warning(
             "edli position bridge: %s Day0 qkernel payload is not live entry authority: %s",
@@ -457,6 +473,7 @@ def _pre_submit_posterior(pre_submit: dict[str, Any]) -> float:
     if not _qkernel_payload_has_live_entry_authority(
         economics,
         event_type=pre_submit.get("event_type"),
+        probability_payload=pre_submit,
         source="pre_submit",
     ):
         return 0.0

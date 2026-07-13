@@ -1,5 +1,5 @@
 # Created: 2026-06-10
-# Last reused or audited: 2026-06-26
+# Last reused or audited: 2026-07-13
 # Authority basis: Operator-gated funnel #1 unlock (2026-06-10) — first-class calibration
 #   authority for replacement-chain candidates (FUSED_BOOTSTRAP_SETTLEMENT_COVERAGE). Tears
 #   down the Platt-cohort wall: replacement candidates' q never passes through Platt, so the
@@ -39,10 +39,7 @@ from types import SimpleNamespace
 import pytest
 
 from src.config import runtime_cities_by_name, settings
-from src.decision_kernel.verifier import (
-    APPROVED_CALIBRATION_AUTHORITIES,
-    DAY0_OBSERVATION_CALIBRATION_AUTHORITY,
-)
+from src.decision_kernel.verifier import APPROVED_CALIBRATION_AUTHORITIES
 from src.engine import event_reactor_adapter as adapter
 from src.engine.event_reactor_adapter import (
     FUSED_BOOTSTRAP_CALIBRATION_AUTHORITY,
@@ -190,13 +187,8 @@ def test_insufficient_data_coverage_uses_conservative_bootstrap_authority():
     assert FUSED_BOOTSTRAP_CONSERVATIVE_QLCB_AUTHORITY in APPROVED_CALIBRATION_AUTHORITIES
 
 
-def test_day0_live_observation_hard_fact_calibration_authority_admits():
-    """Day0 hard facts do not need a legacy Platt bucket.
-
-    A DAY0_EXTREME_UPDATED payload has already passed live source/station/date/rounding
-    authority. The certificate must carry that Day0 observation authority directly instead
-    of falling through to IDENTITY_FALLBACK_NO_PLATT_BUCKET.
-    """
+def test_day0_live_observation_hard_fact_cannot_authorize_entry_probability():
+    """Observation truth alone is not an exact-bin probability model."""
 
     payload = {
         "city": _CITY,
@@ -218,29 +210,18 @@ def test_day0_live_observation_hard_fact_calibration_authority_admits():
         "settlement_source": "wu_icao_history",
         "horizon_profile": "full",
     }
-    cal_payload, _clock = _calibration_authority_payload_and_clock(
-        sqlite3.connect(":memory:"),
-        event=SimpleNamespace(event_type="DAY0_EXTREME_UPDATED"),
-        family=SimpleNamespace(city=_CITY, metric=_METRIC, target_date=_TARGET_DATE),
-        payload=payload,
-        forecast_payload={"horizon_profile": "full"},
-        decision_time=DECISION_TIME,
-    )
-
-    assert cal_payload["authority"] == DAY0_OBSERVATION_CALIBRATION_AUTHORITY
-    assert cal_payload["input_space"] == "day0_live_observation_hard_fact"
-    assert cal_payload["n_samples"] == 0
-    _assert_event_bound_calibration_live_admitted(SimpleNamespace(payload=cal_payload))
-    assert DAY0_OBSERVATION_CALIBRATION_AUTHORITY in APPROVED_CALIBRATION_AUTHORITIES
-
-    from src.decision_kernel.compiler import _validate_calibration_payload  # type: ignore[attr-defined]
-
-    _validate_calibration_payload(
-        cal_payload,
-        {"calibration_input_space": "day0_live_observation_hard_fact"},
-        {"horizon_profile": "full"},
-        decision_time=DECISION_TIME,
-    )
+    with pytest.raises(
+        ValueError,
+        match="DAY0_CALIBRATION_AUTHORITY_BLOCKED:day0_probability_q_source required:missing",
+    ):
+        _calibration_authority_payload_and_clock(
+            sqlite3.connect(":memory:"),
+            event=SimpleNamespace(event_type="DAY0_EXTREME_UPDATED"),
+            family=SimpleNamespace(city=_CITY, metric=_METRIC, target_date=_TARGET_DATE),
+            payload=payload,
+            forecast_payload={"horizon_profile": "full"},
+            decision_time=DECISION_TIME,
+        )
 
 
 def test_q1_unlicensed_unshrunk_is_blocked(monkeypatch):

@@ -26,6 +26,9 @@ DAY0_LIVE_AUTHORITY_MATCHES = {
 
 DAY0_REMAINING_DAY_Q_SOURCE = "day0_remaining_day"
 DAY0_REMAINING_DAY_Q_MODE = "remaining_day"
+DAY0_REPLACEMENT_Q_SOURCE = "replacement_0_1"
+DAY0_REPLACEMENT_GLOBAL_AUTHORITY = "replacement_current_global_probability_v1"
+DAY0_REPLACEMENT_GLOBAL_GUARD_BASIS = "CURRENT_POSTERIOR_BAND"
 DAY0_OBSERVATION_HARD_FACT_AUTHORITY = "DAY0_LIVE_OBSERVATION_HARD_FACT"
 DAY0_REMAINING_DAY_Q_LCB_GUARD_BASIS = "DAY0_REMAINING_DAY_Q_LCB"
 DAY0_OBSERVED_BOUNDARY_GUARD_BASIS = "DAY0_OBSERVED_BOUNDARY"
@@ -207,6 +210,143 @@ def _assert_remaining_day_lcb_is_supported_by_transform(
         raise Day0AuthorityError("remaining_day q_lcb is degenerate with q_live")
 
 
+def _assert_replacement_global_day0_probability_authority(
+    payload: Mapping[str, object],
+    block: Mapping[str, object],
+    *,
+    direction: object | None,
+    condition_id: object | None,
+    q_live: float | None,
+    q_lcb: float | None,
+) -> None:
+    """Validate one current replacement posterior conditioned on current Day0 truth."""
+
+    authority = str(block.get("probability_authority") or "").strip()
+    if authority != DAY0_REPLACEMENT_GLOBAL_AUTHORITY:
+        raise Day0AuthorityError(
+            "replacement_day0_probability_authority required:"
+            f"{authority or 'missing'}"
+        )
+    q_sources = {
+        str(value).strip()
+        for value in (
+            payload.get("_edli_q_source"),
+            payload.get("q_source"),
+            block.get("q_source"),
+        )
+        if value not in (None, "")
+    }
+    if q_sources != {DAY0_REPLACEMENT_Q_SOURCE}:
+        raise Day0AuthorityError(
+            "replacement_day0_q_source mismatch:"
+            f"{sorted(q_sources) if q_sources else 'missing'}"
+        )
+    observation = block.get("global_current_observation_payload")
+    if not isinstance(observation, Mapping):
+        raise Day0AuthorityError("replacement_day0_current_observation missing")
+    assert_live_day0_payload_authority(observation)
+    binding = observation.get("_edli_global_day0_binding")
+    if not isinstance(binding, Mapping):
+        raise Day0AuthorityError("replacement_day0_binding missing")
+
+    posterior_id = str(payload.get("posterior_id") or "").strip()
+    block_posterior_id = str(block.get("posterior_id") or "").strip()
+    bound_posterior_id = str(binding.get("posterior_id") or "").strip()
+    if (
+        not posterior_id
+        or posterior_id != block_posterior_id
+        or posterior_id != bound_posterior_id
+    ):
+        raise Day0AuthorityError(
+            "replacement_day0_posterior_id mismatch:"
+            f"selected={posterior_id or 'missing'}:"
+            f"authority={block_posterior_id or 'missing'}:"
+            f"bound={bound_posterior_id or 'missing'}"
+        )
+
+    for field_name in ("city", "target_date"):
+        selected = _first_text(payload, block, field_name)
+        bound = str(binding.get(field_name) or "").strip()
+        if not selected or selected != bound:
+            raise Day0AuthorityError(
+                f"replacement_day0_{field_name} mismatch:"
+                f"selected={selected or 'missing'}:bound={bound or 'missing'}"
+            )
+
+    metric = _first_text(payload, block, "metric", "temperature_metric").lower()
+    bound_metric = str(binding.get("metric") or "").strip().lower()
+    if metric not in {"high", "low"} or metric != bound_metric:
+        raise Day0AuthorityError(
+            "replacement_day0_metric mismatch:"
+            f"selected={metric or 'missing'}:bound={bound_metric or 'missing'}"
+        )
+
+    for field_name in (
+        "observation_time",
+        "observation_available_at",
+        "station_id",
+        "settlement_source",
+        "settlement_unit",
+    ):
+        observed = str(observation.get(field_name) or "").strip()
+        bound = str(binding.get(field_name) or "").strip()
+        if not observed or observed != bound:
+            raise Day0AuthorityError(
+                f"replacement_day0_{field_name} mismatch:"
+                f"observed={observed or 'missing'}:bound={bound or 'missing'}"
+            )
+
+    observed_extreme = _first_float(
+        observation,
+        {},
+        "raw_value",
+        "observed_extreme_native",
+    )
+    bound_extreme = _first_float(binding, {}, "observed_extreme_native")
+    if (
+        observed_extreme is None
+        or bound_extreme is None
+        or not math.isclose(observed_extreme, bound_extreme, rel_tol=0.0, abs_tol=1e-9)
+    ):
+        raise Day0AuthorityError("replacement_day0_observed_extreme mismatch")
+    observed_samples = _first_int(observation, {}, "sample_count", "samples_count")
+    bound_samples = _first_int(binding, {}, "sample_count")
+    if (
+        observed_samples is None
+        or observed_samples <= 0
+        or observed_samples != bound_samples
+    ):
+        raise Day0AuthorityError("replacement_day0_sample_count mismatch")
+    observed_rounded = _first_float(observation, {}, "rounded_value")
+    bound_rounded = _first_float(binding, {}, "rounded_value")
+    if (
+        observed_rounded is None
+        or bound_rounded is None
+        or not math.isclose(observed_rounded, bound_rounded, rel_tol=0.0, abs_tol=1e-9)
+    ):
+        raise Day0AuthorityError("replacement_day0_rounded_value mismatch")
+
+    if q_lcb is None:
+        return
+    try:
+        q_lcb_value = float(q_lcb)
+        q_live_value = float(q_live)
+    except (TypeError, ValueError):
+        raise Day0AuthorityError("replacement_day0 q_live/q_lcb nonnumeric") from None
+    if not (math.isfinite(q_live_value) and math.isfinite(q_lcb_value)):
+        raise Day0AuthorityError("replacement_day0 q_live/q_lcb nonfinite")
+    if not (0.0 <= q_lcb_value <= q_live_value <= 1.0):
+        raise Day0AuthorityError("replacement_day0 q_live/q_lcb out of order")
+    selected_condition = str(condition_id or payload.get("condition_id") or "").strip()
+    if not selected_condition:
+        raise Day0AuthorityError("selected_condition_id missing")
+    direction_text = str(direction or payload.get("direction") or "").strip().lower()
+    if not direction_text.endswith(("_yes", "_no")):
+        raise Day0AuthorityError(
+            f"selected_direction unsupported:{direction_text or 'missing'}"
+        )
+
+
 def assert_live_day0_probability_authority(
     payload: Mapping[str, object],
     *,
@@ -215,12 +355,13 @@ def assert_live_day0_probability_authority(
     q_live: float | None = None,
     q_lcb: float | None = None,
 ) -> None:
-    """Fail closed unless Day0 entry probability is remaining-window qkernel evidence.
+    """Fail closed unless Day0 entry probability has one current typed authority.
 
     A live Day0 observation can authoritatively mask already-impossible bins, but it is
-    not itself an exact-bin probability model. Live entry submit therefore needs proof
-    that q/q_lcb came from the remaining-day probability surface and that the selected
-    side's q_lcb equals the Day0 LCB transform for the selected condition.
+    not itself an exact-bin probability model. Live entry submit therefore needs either
+    the legacy remaining-window surface or a current replacement posterior that was
+    conditioned on the exact current observation bound. Both sides then use the same
+    selected-side q/q_lcb contract.
     """
 
     block = _day0_probability_block(payload)
@@ -232,8 +373,21 @@ def assert_live_day0_probability_authority(
         raise Day0AuthorityError("day0 hard-fact calibration cannot authorize entry probability")
 
     q_source = _first_text(payload, block, "_edli_q_source", "day0_q_source", "q_source")
+    if q_source == DAY0_REPLACEMENT_Q_SOURCE:
+        _assert_replacement_global_day0_probability_authority(
+            payload,
+            block,
+            direction=direction,
+            condition_id=condition_id,
+            q_live=q_live,
+            q_lcb=q_lcb,
+        )
+        return
     if q_source != DAY0_REMAINING_DAY_Q_SOURCE:
-        raise Day0AuthorityError(f"remaining_day_q_source required:{q_source or 'missing'}")
+        raise Day0AuthorityError(
+            "day0_probability_q_source required:"
+            f"{q_source or 'missing'}"
+        )
     q_mode = _first_text(payload, block, "_edli_day0_q_mode", "day0_q_mode", "q_mode")
     if q_mode != DAY0_REMAINING_DAY_Q_MODE:
         raise Day0AuthorityError(f"remaining_day_q_mode required:{q_mode or 'missing'}")
@@ -348,15 +502,47 @@ def assert_live_day0_qkernel_guard_authority(
     finite bin that merely contains the current running extreme.
     """
 
+    block = (
+        _day0_probability_block(probability_payload)
+        if probability_payload is not None
+        else {}
+    )
+    q_source = (
+        _first_text(
+            probability_payload,
+            block,
+            "_edli_q_source",
+            "day0_q_source",
+            "q_source",
+        )
+        if probability_payload is not None
+        else ""
+    )
+    replacement_global = q_source == DAY0_REPLACEMENT_Q_SOURCE
+    if replacement_global:
+        from src.decision_kernel.canonicalization import (
+            qkernel_current_state_rejection_reason,
+        )
+
+        current_state_reason = qkernel_current_state_rejection_reason(economics)
+        if current_state_reason is not None:
+            raise Day0AuthorityError(
+                f"replacement_day0_current_state invalid:{current_state_reason}"
+            )
+    accepted_bases = (
+        frozenset({DAY0_REPLACEMENT_GLOBAL_GUARD_BASIS})
+        if replacement_global
+        else _DAY0_GUARDED_QLCB_BASES
+    )
     for field_name in ("q_lcb_guard_basis", "selection_guard_basis"):
         basis = str(economics.get(field_name) or "").strip()
         if not basis:
             raise Day0AuthorityError(f"{field_name} missing")
         if basis == DAY0_OBSERVED_BOUNDARY_GUARD_BASIS:
             raise Day0AuthorityError(f"{field_name} cannot be DAY0_OBSERVED_BOUNDARY")
-        if basis not in _DAY0_GUARDED_QLCB_BASES:
+        if basis not in accepted_bases:
             raise Day0AuthorityError(
-                f"{field_name} must be one of {sorted(_DAY0_GUARDED_QLCB_BASES)}"
+                f"{field_name} must be one of {sorted(accepted_bases)}"
             )
     for field_name in ("q_lcb_guard_abstained", "selection_guard_abstained"):
         if economics.get(field_name) is not False:
@@ -368,7 +554,53 @@ def assert_live_day0_qkernel_guard_authority(
     if not math.isfinite(selection_guard_q_safe) or selection_guard_q_safe <= 0.0:
         raise Day0AuthorityError("selection_guard_q_safe must be positive")
     if probability_payload is not None:
-        block = _day0_probability_block(probability_payload)
+        direction = _first_text(
+            probability_payload,
+            block,
+            "direction",
+            "actual_direction",
+        ).lower()
+        expected_side = {"buy_yes": "YES", "buy_no": "NO"}.get(direction)
+        observed_side = str(economics.get("side") or "").strip().upper()
+        if expected_side is None or observed_side != expected_side:
+            raise Day0AuthorityError(
+                "day0_qkernel_side mismatch:"
+                f"direction={direction or 'missing'}:side={observed_side or 'missing'}"
+            )
+        owner_q_live = _first_float(probability_payload, block, "q_live")
+        owner_q_lcb = _first_float(probability_payload, block, "q_lcb_5pct")
+        payoff_q_point = _first_float(economics, {}, "payoff_q_point")
+        payoff_q_lcb = _first_float(economics, {}, "payoff_q_lcb")
+        if None in (owner_q_live, owner_q_lcb, payoff_q_point, payoff_q_lcb):
+            raise Day0AuthorityError("day0_qkernel_probability_binding missing")
+        assert owner_q_live is not None
+        assert owner_q_lcb is not None
+        assert payoff_q_point is not None
+        assert payoff_q_lcb is not None
+        if not math.isclose(
+            owner_q_live,
+            payoff_q_point,
+            rel_tol=1e-9,
+            abs_tol=1e-6,
+        ):
+            raise Day0AuthorityError("day0_qkernel payoff_q_point mismatches q_live")
+        if not math.isclose(
+            owner_q_lcb,
+            payoff_q_lcb,
+            rel_tol=1e-9,
+            abs_tol=1e-6,
+        ):
+            raise Day0AuthorityError("day0_qkernel payoff_q_lcb mismatches q_lcb_5pct")
+        if not math.isclose(
+            selection_guard_q_safe,
+            payoff_q_lcb,
+            rel_tol=1e-9,
+            abs_tol=1e-6,
+        ):
+            raise Day0AuthorityError(
+                "day0_qkernel selection_guard_q_safe mismatches payoff_q_lcb"
+            )
+    if probability_payload is not None and not replacement_global:
         remaining_models = _first_int(
             probability_payload,
             block,

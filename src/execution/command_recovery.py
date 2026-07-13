@@ -3224,30 +3224,39 @@ def _edli_payload_matches_token(payload: dict, *, semantic_key: str = "", token_
     return token_id in str(semantic_key or "") or token_id in final_intent_id
 
 
-def _selected_qkernel_execution_economics(payload: dict) -> dict:
-    """Extract the selected qkernel economics from live EDLI receipt shapes."""
+def _selected_qkernel_execution_economics_with_authority(
+    payload: dict,
+) -> tuple[dict, dict]:
+    """Extract qkernel economics and its owning probability-authority payload."""
 
     direct = _json_mapping(payload.get("qkernel_execution_economics"))
     if direct:
-        return direct
+        return direct, payload
     for container in (payload, _json_mapping(payload.get("decision_audit"))):
         if not container:
             continue
         selected = _json_mapping(container.get("selected_qkernel_execution_economics"))
         if selected:
-            return selected
+            return selected, container
         opportunity_book = _json_mapping(container.get("opportunity_book"))
         cache_summary = _json_mapping(opportunity_book.get("cache_summary"))
         selected = _json_mapping(cache_summary.get("selected_qkernel_execution_economics"))
         if selected:
-            return selected
-    return {}
+            return selected, container
+    return {}, {}
+
+
+def _selected_qkernel_execution_economics(payload: dict) -> dict:
+    """Extract the selected qkernel economics from live EDLI receipt shapes."""
+
+    return _selected_qkernel_execution_economics_with_authority(payload)[0]
 
 
 def _event_context_qkernel_authority(
-    payload: dict,
+    economics: dict,
     *,
     event_type: object,
+    probability_payload: Mapping[str, Any],
     q_live: object,
     q_lcb: object,
 ) -> tuple[dict, object, object, str]:
@@ -3260,18 +3269,41 @@ def _event_context_qkernel_authority(
     qkernel_spine method and no inherited posterior.
     """
 
-    if not payload:
+    if not economics:
         return {}, None, None, "missing"
     event_type_text = str(event_type or "").strip()
+    owner_event_type = str(probability_payload.get("event_type") or "").strip()
+    if owner_event_type and event_type_text and owner_event_type != event_type_text:
+        logger.warning(
+            "recovery: qkernel probability owner event type mismatches selected context; "
+            "projecting venue fact owner=%s selected=%s",
+            owner_event_type,
+            event_type_text,
+        )
+        return {}, None, None, "venue_fact_recovery"
+    event_type_text = owner_event_type or event_type_text
     if event_type_text != "DAY0_EXTREME_UPDATED":
-        return payload, q_live, q_lcb, "qkernel_spine"
+        return economics, q_live, q_lcb, "qkernel_spine"
     try:
         from src.events.day0_authority import (
             Day0AuthorityError,
+            assert_live_day0_probability_authority,
             assert_live_day0_qkernel_guard_authority,
         )
 
-        assert_live_day0_qkernel_guard_authority(payload)
+        assert_live_day0_probability_authority(
+            probability_payload,
+            direction=probability_payload.get("direction")
+            or probability_payload.get("actual_direction"),
+            condition_id=probability_payload.get("condition_id")
+            or probability_payload.get("actual_condition_id"),
+            q_live=economics.get("payoff_q_point"),
+            q_lcb=economics.get("payoff_q_lcb"),
+        )
+        assert_live_day0_qkernel_guard_authority(
+            economics,
+            probability_payload=probability_payload,
+        )
     except Day0AuthorityError as exc:
         logger.warning(
             "recovery: EDLI event-only Day0 qkernel evidence is not current "
@@ -3279,7 +3311,12 @@ def _event_context_qkernel_authority(
             exc,
         )
         return {}, None, None, "venue_fact_recovery"
-    return payload, q_live, q_lcb, "qkernel_spine"
+    return (
+        economics,
+        economics.get("payoff_q_point"),
+        economics.get("payoff_q_lcb"),
+        "qkernel_spine",
+    )
 
 
 def _unit_from_bin_label(bin_label: str) -> str:
@@ -3367,8 +3404,12 @@ def _edli_live_order_event_context(
     metric = str(first("metric", "temperature_metric") or "").strip().lower()
     event_type = str(first("event_type") or "").strip()
     qkernel_payload: dict = {}
+    qkernel_probability_payload: dict = {}
     for payload in payloads:
-        qkernel_payload = _selected_qkernel_execution_economics(payload)
+        (
+            qkernel_payload,
+            qkernel_probability_payload,
+        ) = _selected_qkernel_execution_economics_with_authority(payload)
         if qkernel_payload:
             break
     q_live = first("q_live", "q_lcb_5pct")
@@ -3387,6 +3428,7 @@ def _edli_live_order_event_context(
     qkernel_payload, q_live, q_lcb, selection_authority = _event_context_qkernel_authority(
         qkernel_payload,
         event_type=event_type,
+        probability_payload=qkernel_probability_payload,
         q_live=q_live,
         q_lcb=q_lcb,
     )

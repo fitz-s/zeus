@@ -7018,12 +7018,11 @@ def _build_event_bound_no_submit_receipt_core(
             provenance_capture["global_day0_binding"] = dict(
                 current_actuation_day0_payload.get("_edli_global_day0_binding") or {}
             )
-            provenance_capture["day0_probability_authority"] = {
-                "probability_authority": "replacement_current_global_probability_v1",
-                "global_current_observation_payload": dict(
+            provenance_capture["day0_probability_authority"] = (
+                _global_day0_probability_authority_payload(
                     current_actuation_day0_payload
-                ),
-            }
+                )
+            )
     source_conn = forecast_conn
     topology_authority_conn = topology_conn
     family_topology_rows = _event_family_market_topology_rows(topology_authority_conn, payload)
@@ -15306,22 +15305,14 @@ def _calibration_authority_payload_and_clock(
     city = runtime_cities_by_name().get(family.city)
     if city is None:
         raise ValueError("CALIBRATION_AUTHORITY_EVIDENCE_MISSING:city")
-    if getattr(event, "event_type", None) == "DAY0_EXTREME_UPDATED":
-        return _day0_calibration_authority_payload_and_clock(
-            city=city,
-            family=family,
-            payload=payload,
-            forecast_payload=forecast_payload,
-            decision_time=decision_time,
-        )
     # CERT BRIDGE (2026-06-10, funnel #1 unlock) — replacement-chain candidates carry their
     # OWN calibration credential (fused-center bootstrap bounds + settlement-backward
-    # coverage), stamped onto `payload` by the live replacement builder. When present, mint
-    # the first-class FUSED_BOOTSTRAP_SETTLEMENT_COVERAGE authority and SHORT-CIRCUIT the
-    # legacy Platt-bucket lookup entirely — their q never passed through Platt, so demanding
-    # its credential is a category mismatch. Absent the credential (legacy path, OR a
-    # replacement candidate without certified bounds) we fall through to the Platt path
-    # below unchanged → IDENTITY_FALLBACK reject exactly as today (strictness (a) and (b)).
+    # coverage), stamped onto `payload` by the live replacement builder. Probability source
+    # decides calibration authority before the event label: a Day0 global winner still uses
+    # the replacement q/bounds, while its observation hard fact is certified separately by
+    # DAY0_AUTHORITY and ABSORBING_BOUNDARY parents. Routing it through the legacy Day0
+    # remaining-window calibrator is a category mismatch. Absent the credential, Day0 keeps
+    # its remaining-window contract and other events keep the legacy Platt path.
     _replacement_credential = payload.get(_REPLACEMENT_CALIBRATION_CREDENTIAL_KEY)
     if isinstance(_replacement_credential, Mapping):
         # horizon_profile MUST equal forecast.horizon_profile (verifier round-trip
@@ -15338,6 +15329,14 @@ def _calibration_authority_payload_and_clock(
             decision_time=decision_time,
         )
         return payload_out, EvidenceClock(decision_time, decision_time, decision_time)
+    if getattr(event, "event_type", None) == "DAY0_EXTREME_UPDATED":
+        return _day0_calibration_authority_payload_and_clock(
+            city=city,
+            family=family,
+            payload=payload,
+            forecast_payload=forecast_payload,
+            decision_time=decision_time,
+        )
     source_id = _nonnull(payload.get("source_id") or forecast_payload.get("forecast_source_id"))
     issue_time = _nonnull(
         payload.get("issue_time")
@@ -21850,12 +21849,15 @@ def _global_day0_execution_payload(
     metric = str(getattr(family, "metric", "") or "").strip().lower()
     binding = {
         "posterior_id": int(posterior_id),
+        "city": str(getattr(family, "city", "") or ""),
+        "target_date": str(getattr(family, "target_date", "") or ""),
         "metric": metric,
         "observation_time": observed_at.isoformat(),
         "observation_available_at": str(
             fact.get("observation_available_at") or observed_at.isoformat()
         ),
         "observed_extreme_native": observed_native,
+        "rounded_value": rounded,
         "sample_count": observed_samples,
         "station_id": station_id,
         "settlement_source": observation_source,
@@ -21883,6 +21885,25 @@ def _global_day0_execution_payload(
         "live_authority_status": "live",
         "observation_context_id": "global_current_day0:" + stable_hash(binding),
         "_edli_global_day0_binding": binding,
+    }
+
+
+def _global_day0_probability_authority_payload(
+    current_observation_payload: Mapping[str, object],
+) -> dict[str, object]:
+    """Name the replacement Day0 probability type and bind it to one posterior."""
+
+    binding = current_observation_payload.get("_edli_global_day0_binding")
+    if not isinstance(binding, Mapping):
+        raise ValueError("GLOBAL_DAY0_BINDING_MISSING")
+    posterior_id = binding.get("posterior_id")
+    if posterior_id in (None, ""):
+        raise ValueError("GLOBAL_DAY0_POSTERIOR_ID_MISSING")
+    return {
+        "probability_authority": "replacement_current_global_probability_v1",
+        "q_source": "replacement_0_1",
+        "posterior_id": posterior_id,
+        "global_current_observation_payload": dict(current_observation_payload),
     }
 
 

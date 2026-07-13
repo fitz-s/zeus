@@ -1,11 +1,13 @@
-# Lifecycle: created=2026-05-25; last_reviewed=2026-07-11; last_reused=2026-07-11
+# Lifecycle: created=2026-05-25; last_reviewed=2026-07-13; last_reused=2026-07-13
 # Purpose: Prove actionable trade certificates bind every live probability and execution parent.
 # Reuse: Re-audit canonical parent identity and selected-leg probability closure before live use.
 # Authority basis: docs/operations/edli_v1/EDLI_REDEMPTION_FINAL_PACKAGE_SPEC.md §14 full-live increment.
 from __future__ import annotations
 
+import copy
 import sqlite3
 from datetime import datetime, timezone
+from types import SimpleNamespace
 
 import pytest
 
@@ -18,6 +20,7 @@ from src.decision_kernel.certificate import ParentEdge, build_certificate
 from src.decision_kernel.errors import CertificateVerificationError
 from src.decision_kernel.ledger import DecisionCertificateLedger
 from src.decision_kernel.verifier import verify_actionable_trade
+from src.engine import event_reactor_adapter as adapter
 from src.strategy.live_inference.live_admission import (
     replacement_probability_bundle_hash,
 )
@@ -401,6 +404,272 @@ def _day0_qkernel_economics() -> dict:
         }
     )
     return economics
+
+
+def _replacement_global_day0_probability_authority(
+    *, posterior_id: int = 29872
+) -> dict:
+    observation_payload = {
+        "source_match_status": "MATCH",
+        "station_match_status": "MATCH",
+        "local_date_status": "MATCH",
+        "dst_status": "UNAMBIGUOUS",
+        "metric_match_status": "MATCH",
+        "rounding_status": "MATCH",
+        "source_authorized_status": "AUTHORIZED",
+        "live_authority_status": "live",
+        "observation_time": "2026-05-25T11:30:00+00:00",
+        "observation_available_at": "2026-05-25T11:35:00+00:00",
+        "raw_value": 72.0,
+        "rounded_value": 72,
+        "sample_count": 11,
+        "samples_count": 11,
+        "station_id": "KORD",
+        "settlement_source": "wu_icao_history",
+        "settlement_unit": "F",
+        "_edli_global_day0_binding": {
+            "posterior_id": posterior_id,
+            "city": "Chicago",
+            "target_date": "2026-05-25",
+            "metric": "high",
+            "observation_time": "2026-05-25T11:30:00+00:00",
+            "observation_available_at": "2026-05-25T11:35:00+00:00",
+            "observed_extreme_native": 72.0,
+            "rounded_value": 72,
+            "sample_count": 11,
+            "station_id": "KORD",
+            "settlement_source": "wu_icao_history",
+            "settlement_unit": "F",
+        },
+    }
+    return adapter._global_day0_probability_authority_payload(
+        observation_payload
+    )
+
+
+def _replacement_day0_actionable_fixture(direction: str):
+    action, parent_overrides = _replacement_actionable_overrides()
+    if direction == "buy_yes":
+        action.pop("replacement_no_bound_certificate", None)
+        action.update(
+            {
+                "token_id": "yes-1",
+                "direction": "buy_yes",
+                "q_live": 0.348,
+                "q_lcb_5pct": 0.30,
+                "c_fee_adjusted": 0.20,
+                "c_cost_95pct": 0.20,
+                "trade_score": 0.10,
+                "action_score": 0.10,
+                "same_bin_yes_posterior": 0.348,
+            }
+        )
+        parent_overrides[claims.EXECUTABLE_SNAPSHOT] = {"token_id": "yes-1"}
+        parent_overrides[claims.QUOTE_FEASIBILITY] = {
+            "token_id": "yes-1",
+            "direction": "buy_yes",
+        }
+        parent_overrides[claims.COST_MODEL] = {
+            "token_id": "yes-1",
+            "direction": "buy_yes",
+        }
+        parent_overrides[claims.CANDIDATE_EVIDENCE] = {
+            "selected_token_id": "yes-1",
+            "direction": "buy_yes",
+            "hypothesis_id": "family-1:yes-1",
+        }
+        parent_overrides[claims.FDR] = {
+            "selected_hypotheses": ("family-1:yes-1",)
+        }
+    q_live = float(action["q_live"])
+    q_lcb = float(action["q_lcb_5pct"])
+    cost = float(action["c_fee_adjusted"])
+    sample_hash = f"current-day0-{direction}-samples"
+    economics = {
+        **action["qkernel_execution_economics"],
+        "side": "YES" if direction == "buy_yes" else "NO",
+        "payoff_q_point": q_live,
+        "payoff_q_lcb": q_lcb,
+        "cost": cost,
+        "edge_lcb": q_lcb - cost,
+        "selection_guard_q_safe": q_lcb,
+        "decision_id": f"current-day0-{direction}",
+        "receipt_hash": f"current-day0-{direction}-receipt",
+        "q_version": "current-day0-q-version",
+        "sample_hash": sample_hash,
+        "q_lcb_guard_basis": "CURRENT_POSTERIOR_BAND",
+        "q_lcb_guard_abstained": False,
+        "q_lcb_guard_cell_key": sample_hash,
+        "selection_guard_basis": "CURRENT_POSTERIOR_BAND",
+        "selection_guard_abstained": False,
+        "selection_guard_cell_key": sample_hash,
+        "selection_guard_n": 400,
+    }
+    economics["current_state_identity_hash"] = qkernel_current_state_identity_hash(
+        economics
+    )
+    probability_authority = _replacement_global_day0_probability_authority()
+    action.update(
+        {
+            "event_type": "DAY0_EXTREME_UPDATED",
+            "city": "Chicago",
+            "target_date": "2026-05-25",
+            "metric": "high",
+            "source_match_status": "MATCH",
+            "station_match_status": "MATCH",
+            "local_date_status": "MATCH",
+            "dst_status": "UNAMBIGUOUS",
+            "metric_match_status": "MATCH",
+            "rounding_status": "MATCH",
+            "source_authorized_status": "AUTHORIZED",
+            "live_authority_status": "live",
+            "raw_value": 72.0,
+            "rounded_value": 72,
+            "observation_time": "2026-05-25T11:30:00+00:00",
+            "observation_available_at": "2026-05-25T11:35:00+00:00",
+            "q_source": "replacement_0_1",
+            "_edli_q_source": "replacement_0_1",
+            "day0_probability_authority": probability_authority,
+            "qkernel_execution_economics": economics,
+        }
+    )
+    parent_overrides[claims.BELIEF] = {
+        "qkernel_decision_id": economics["decision_id"],
+        "qkernel_receipt_hash": economics["receipt_hash"],
+        "qkernel_q_version": economics["q_version"],
+        "qkernel_sample_hash": economics["sample_hash"],
+        "qkernel_current_state_identity_hash": economics[
+            "current_state_identity_hash"
+        ],
+    }
+    extra_parents = {
+        claims.DAY0_AUTHORITY: {
+            "event_id": "event-1",
+            "authority": "DAY0_LIVE_OBSERVATION_HARD_FACT",
+        },
+        claims.ABSORBING_BOUNDARY: {
+            "event_id": "event-1",
+            "boundary": "day0_absorbing_hard_fact",
+        },
+    }
+    return action, parent_overrides, extra_parents
+
+
+@pytest.mark.parametrize("direction", ["buy_yes", "buy_no"])
+def test_actionable_accepts_current_replacement_day0_symmetrically(direction):
+    action_payload, parent_overrides, extra_parents = (
+        _replacement_day0_actionable_fixture(direction)
+    )
+    parents, action = actionable_graph(
+        action_payload=action_payload,
+        parent_overrides=parent_overrides,
+        extra_parent_payloads=extra_parents,
+    )
+
+    verify_actionable_trade(action, parents)
+
+
+def test_actionable_rejects_replacement_day0_posterior_binding_mismatch():
+    action_payload, parent_overrides, extra_parents = (
+        _replacement_day0_actionable_fixture("buy_yes")
+    )
+    authority = dict(action_payload["day0_probability_authority"])
+    observation = dict(authority["global_current_observation_payload"])
+    binding = dict(observation["_edli_global_day0_binding"])
+    binding["posterior_id"] = 29873
+    observation["_edli_global_day0_binding"] = binding
+    authority["global_current_observation_payload"] = observation
+    action_payload["day0_probability_authority"] = authority
+    parents, action = actionable_graph(
+        action_payload=action_payload,
+        parent_overrides=parent_overrides,
+        extra_parent_payloads=extra_parents,
+    )
+
+    with pytest.raises(CertificateVerificationError, match="posterior_id mismatch"):
+        verify_actionable_trade(action, parents)
+
+
+@pytest.mark.parametrize(
+    ("surface", "field", "value"),
+    (
+        ("selected", "city", "Paris"),
+        ("selected", "target_date", "2026-05-26"),
+        ("selected", "metric", "low"),
+        ("observation", "observation_time", "2026-05-25T11:31:00+00:00"),
+        (
+            "observation",
+            "observation_available_at",
+            "2026-05-25T11:36:00+00:00",
+        ),
+        ("observation", "raw_value", 71.0),
+        ("observation", "rounded_value", 71),
+        ("observation", "sample_count", 10),
+        ("observation", "station_id", "EGLL"),
+        ("observation", "settlement_source", "wrong_source"),
+        ("observation", "settlement_unit", "C"),
+    ),
+)
+def test_actionable_rejects_any_replacement_day0_binding_tamper(
+    surface,
+    field,
+    value,
+):
+    action_payload, parent_overrides, extra_parents = (
+        _replacement_day0_actionable_fixture("buy_yes")
+    )
+    action_payload = copy.deepcopy(action_payload)
+    if surface == "selected":
+        action_payload[field] = value
+    else:
+        action_payload["day0_probability_authority"][
+            "global_current_observation_payload"
+        ][field] = value
+    parents, action = actionable_graph(
+        action_payload=action_payload,
+        parent_overrides=parent_overrides,
+        extra_parent_payloads=extra_parents,
+    )
+
+    with pytest.raises(CertificateVerificationError):
+        verify_actionable_trade(action, parents)
+
+
+def test_day0_replacement_credential_precedes_legacy_remaining_window_calibrator():
+    payload = {
+        "horizon_profile": "full",
+        adapter._REPLACEMENT_CALIBRATION_CREDENTIAL_KEY: {
+            "q_mode": "FUSED_NORMAL_FULL",
+            "q_lcb_basis": "fused_center_bootstrap_p05",
+            "bootstrap_draws": 400,
+            "posterior_id": 29872,
+            "season": "spring",
+            "cohort": "Chicago:high:spring",
+            "coverage": {
+                "status": "INSUFFICIENT_DATA",
+                "coverage_ratio": None,
+                "realized_win_rate": None,
+                "n": 0,
+                "shrink": None,
+                "shrink_applied": False,
+            },
+        },
+    }
+    calibration, _clock = adapter._calibration_authority_payload_and_clock(
+        sqlite3.connect(":memory:"),
+        event=SimpleNamespace(event_type="DAY0_EXTREME_UPDATED"),
+        family=SimpleNamespace(
+            city="Chicago",
+            metric="high",
+            target_date="2026-05-25",
+        ),
+        payload=payload,
+        forecast_payload={"horizon_profile": "full"},
+        decision_time=NOW,
+    )
+
+    assert calibration["authority"] == "FUSED_BOOTSTRAP_CONSERVATIVE_Q_LCB"
+    assert calibration["posterior_id"] == 29872
 
 
 def test_actionable_requires_positive_action_score():

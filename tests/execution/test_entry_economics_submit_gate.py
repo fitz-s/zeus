@@ -103,11 +103,18 @@ def _day0_econ(**overrides) -> dict:
     return payload
 
 
-def _day0_actionable_payload(*, q_lcb: float = 0.91, remaining_models: int | None = 100) -> dict:
+def _day0_actionable_payload(
+    *,
+    q_live: float = 0.96,
+    q_lcb: float = 0.91,
+    remaining_models: int | None = 100,
+) -> dict:
     payload = {
         "event_type": "DAY0_EXTREME_UPDATED",
         "condition_id": "condition-1",
         "direction": "buy_yes",
+        "q_live": q_live,
+        "q_lcb_5pct": q_lcb,
         "source_match_status": "MATCH",
         "local_date_status": "MATCH",
         "station_match_status": "MATCH",
@@ -589,7 +596,7 @@ def test_entry_economics_blocks_day0_observed_boundary_entry_guard():
             ),
         ),
         shares=40.25,
-        actionable_payload=_day0_actionable_payload(q_lcb=0.80),
+        actionable_payload=_day0_actionable_payload(q_live=0.90, q_lcb=0.80),
     )
 
     assert verdict["allowed"] is False
@@ -617,6 +624,7 @@ def test_entry_economics_blocks_day0_degenerate_remaining_window_lcb():
         ),
         shares=10.0,
         actionable_payload=_day0_actionable_payload(
+            q_live=0.960232579405669,
             q_lcb=0.960232573644274,
             remaining_models=3,
         ),
@@ -647,7 +655,11 @@ def test_entry_economics_accepts_day0_selection_guard_without_oof_sample_count()
             ),
         ),
         shares=10.0,
-        actionable_payload=_day0_actionable_payload(q_lcb=0.60, remaining_models=80),
+        actionable_payload=_day0_actionable_payload(
+            q_live=0.70,
+            q_lcb=0.60,
+            remaining_models=80,
+        ),
     )
 
     assert verdict["allowed"] is True
@@ -675,7 +687,11 @@ def test_entry_economics_blocks_day0_without_remaining_window_authority_support(
             ),
         ),
         shares=10.0,
-        actionable_payload=_day0_actionable_payload(q_lcb=0.60, remaining_models=None),
+        actionable_payload=_day0_actionable_payload(
+            q_live=0.70,
+            q_lcb=0.60,
+            remaining_models=None,
+        ),
     )
 
     assert verdict["allowed"] is False
