@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+import base64
+from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 import hashlib
+import json
 import logging
 import sqlite3
 import time
+import zlib
 from types import SimpleNamespace
 from typing import Callable, Mapping, Sequence
 
@@ -175,6 +178,126 @@ def _probability_manifest(probabilities: Mapping[str, object]) -> tuple[tuple[st
             for family_key, witness in probabilities.items()
         )
     )
+
+
+def _store_global_auction_receipt(
+    conn,
+    *,
+    selected: object,
+    selection_epoch_identity: str,
+    selection_cut_at_utc: datetime,
+    decision_at_utc: datetime,
+    probability_manifest: tuple[tuple[str, str], ...],
+    book_epoch_identity: str,
+    book_candidate_count: int | None,
+    wealth_witness: object,
+    fractional_kelly_multiplier: Decimal,
+    excluded_by_family: Mapping[str, str] | None = None,
+) -> int | None:
+    """Persist one complete auction comparison before any venue side effect."""
+
+    if not isinstance(conn, sqlite3.Connection):
+        return None
+    from src.state.decision_chain import CycleArtifact, store_artifact
+
+    decision = getattr(selected, "decision", None)
+    if decision is None:
+        raise ValueError("GLOBAL_AUCTION_RECEIPT_DECISION_MISSING")
+    evaluations = tuple(getattr(decision, "candidate_evaluations", ()) or ())
+    evaluation_rows = tuple(asdict(evaluation) for evaluation in evaluations)
+    evaluation_json = json.dumps(
+        evaluation_rows,
+        default=str,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    evaluation_zlib = zlib.compress(evaluation_json, level=9)
+    candidate_ids = tuple(
+        str(row.get("candidate_id") or "") for row in evaluation_rows
+    )
+    selected_rows = tuple(
+        row for row in evaluation_rows if row.get("status") == "SELECTED"
+    )
+    winner = getattr(decision, "candidate", None)
+    winner_id = str(getattr(winner, "candidate_id", "") or "")
+    coverage_complete = (
+        bool(evaluation_rows)
+        and len(candidate_ids) == len(set(candidate_ids))
+        and all(candidate_ids)
+        and len(selected_rows) == (1 if winner is not None else 0)
+        and (
+            winner is None
+            or str(selected_rows[0].get("candidate_id") or "") == winner_id
+        )
+        and (
+            book_candidate_count is None
+            or len(evaluation_rows) == book_candidate_count
+        )
+    )
+    receipt = {
+        "schema_version": 1,
+        "selection_epoch_identity": selection_epoch_identity,
+        "selection_cut_at_utc": selection_cut_at_utc.isoformat(),
+        "decision_at_utc": decision_at_utc.isoformat(),
+        "probability_manifest": probability_manifest,
+        "book_epoch_identity": book_epoch_identity,
+        "book_candidate_count": book_candidate_count,
+        "excluded_by_family": dict(sorted((excluded_by_family or {}).items())),
+        "wealth_witness_identity": str(
+            getattr(wealth_witness, "witness_identity", "") or ""
+        ),
+        "wealth_economic_identity": str(
+            getattr(wealth_witness, "economic_identity", "") or ""
+        ),
+        "fractional_kelly_multiplier": str(fractional_kelly_multiplier),
+        "hold_cash": {
+            "robust_delta_log_wealth": "0",
+            "robust_ev_usd": "0",
+            "selected": winner is None,
+        },
+        "winner_candidate_id": winner_id or None,
+        "no_trade_reason": getattr(decision, "no_trade_reason", None),
+        "candidate_evaluation_count": len(evaluation_rows),
+        "candidate_coverage_complete": coverage_complete,
+        "candidate_evaluation_encoding": "zlib+base64+canonical-json-v1",
+        "candidate_evaluations_sha256": hashlib.sha256(
+            evaluation_json
+        ).hexdigest(),
+        "candidate_evaluations_zlib_b64": base64.b64encode(
+            evaluation_zlib
+        ).decode("ascii"),
+    }
+    encoded = json.dumps(
+        receipt,
+        default=str,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    receipt["receipt_hash"] = hashlib.sha256(encoded).hexdigest()
+    row_id = store_artifact(
+        conn,
+        CycleArtifact(
+            mode="global_single_order_auction",
+            started_at=selection_cut_at_utc.isoformat(),
+            completed_at=decision_at_utc.isoformat(),
+            skipped_reason=str(getattr(decision, "no_trade_reason", "") or ""),
+            summary=receipt,
+        ),
+    )
+    if row_id is None:
+        raise RuntimeError("GLOBAL_AUCTION_RECEIPT_ID_MISSING")
+    _LOG.info(
+        "global auction receipt persisted: row_id=%s epoch=%s candidates=%d "
+        "coverage_complete=%s bytes=%d compressed_bytes=%d receipt_hash=%s",
+        row_id,
+        selection_epoch_identity,
+        len(evaluation_rows),
+        coverage_complete,
+        len(evaluation_json),
+        len(evaluation_zlib),
+        receipt["receipt_hash"],
+    )
+    return row_id
 
 
 def _book_economics_manifest(
@@ -953,7 +1076,7 @@ def process_current_global_batch(
                     )
                 return current_execution(candidate, selection_at)
 
-            return select_prepared_global_auction(
+            selected = select_prepared_global_auction(
                 prepared_for_selection,
                 selection_epoch_identity=attempt_selection_epoch_identity,
                 selection_cut_at_utc=scope_at,
@@ -981,6 +1104,41 @@ def process_current_global_batch(
                 preflight_excluded_by_family=preflight_excluded_by_family,
                 payoff_q_lcb_by_candidate=payoff_q_lcb_by_candidate,
             )
+            _store_global_auction_receipt(
+                trade_conn,
+                selected=selected,
+                selection_epoch_identity=attempt_selection_epoch_identity,
+                selection_cut_at_utc=scope_at,
+                decision_at_utc=selection_at,
+                probability_manifest=_probability_manifest(
+                    attempt_probabilities
+                ),
+                book_epoch_identity=venue_identity,
+                book_candidate_count=(
+                    sum(
+                        1
+                        for asset in tuple(
+                            getattr(attempt_book_epoch, "assets", ()) or ()
+                        )
+                        if str(getattr(asset, "family_key", "") or "")
+                        not in (preflight_excluded_by_family or {})
+                    )
+                    + sum(
+                        1
+                        for asset in tuple(
+                            getattr(attempt_book_epoch, "sell_assets", ()) or ()
+                        )
+                        if str(getattr(asset, "family_key", "") or "")
+                        not in (preflight_excluded_by_family or {})
+                    )
+                    if attempt_book_epoch is not None
+                    else None
+                ),
+                wealth_witness=wealth,
+                fractional_kelly_multiplier=fractional_kelly_multiplier,
+                excluded_by_family=preflight_excluded_by_family,
+            )
+            return selected
 
         selected = select_once(probabilities, book_epoch, prepared_by_event)
         initial_select_stage = (

@@ -1,6 +1,6 @@
 # Created: 2026-07-03
-# Last reused/audited: 2026-07-11
-# Authority basis: W3 SOLVE design packet and 2026-07-11 global fractional-Kelly repair
+# Last reused/audited: 2026-07-14
+# Authority basis: W3 SOLVE design packet, global fractional-Kelly repair, and complete auction receipts
 """W3 SOLVE math-core acceptance — the property anchors (design packet §4, consult REV-2).
 
 (a) solver ≥ top-1 picker in the SAME feasible set (post-repair) on EVERY fixture;
@@ -890,6 +890,18 @@ def test_global_single_order_sell_can_beat_positive_buy_and_cash():
     assert decision.max_spend_usd == 0
     assert decision.robust_delta_log_wealth > 0
     assert decision.robust_ev_usd > 0
+    evaluations = {
+        evaluation.candidate_id: evaluation
+        for evaluation in decision.candidate_evaluations
+    }
+    assert set(evaluations) == {buy.candidate_id, sell.candidate_id}
+    assert evaluations[sell.candidate_id].status == "SELECTED"
+    assert evaluations[buy.candidate_id].status == "SCORED"
+    assert (
+        evaluations[sell.candidate_id].robust_delta_log_wealth
+        > evaluations[buy.candidate_id].robust_delta_log_wealth
+        > 0
+    )
 
 
 def test_global_single_order_sell_uses_incremental_growth_not_loss_majority():
@@ -977,6 +989,15 @@ def test_global_single_order_entry_pause_blocks_buy_but_preserves_sell_and_cash(
     assert decision.rejection_reasons[buy.candidate_id] == (
         "ENTRY_ACTION_PAUSED:external:operator"
     )
+    evaluations = {
+        evaluation.candidate_id: evaluation
+        for evaluation in decision.candidate_evaluations
+    }
+    assert evaluations[sell.candidate_id].status == "SELECTED"
+    assert evaluations[buy.candidate_id].status == "REJECTED"
+    assert evaluations[buy.candidate_id].rejection_reason == (
+        "ENTRY_ACTION_PAUSED:external:operator"
+    )
 
 
 @pytest.mark.parametrize(
@@ -1032,6 +1053,16 @@ def test_global_single_order_cash_beats_non_positive_buy_and_sell():
     assert decision.no_trade_reason == "NO_CURRENT_EXECUTABLE_POSITIVE_ORDER"
     assert decision.robust_delta_log_wealth == 0
     assert decision.cost_usd == 0
+    assert {
+        evaluation.candidate_id: (
+            evaluation.status,
+            evaluation.rejection_reason,
+        )
+        for evaluation in decision.candidate_evaluations
+    } == {
+        sell.candidate_id: ("REJECTED", "NON_POSITIVE_ROBUST_OBJECTIVE"),
+        buy.candidate_id: ("REJECTED", "NON_POSITIVE_ROBUST_OBJECTIVE"),
+    }
 
 
 def test_global_single_order_sell_yes_no_label_mirror_is_exact():

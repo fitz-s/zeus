@@ -1014,6 +1014,77 @@ class BinaryTerminalWealthCertificate:
 
 
 @dataclass(frozen=True)
+class GlobalSingleOrderCandidateEvaluation:
+    """One candidate's complete result inside the current global auction."""
+
+    candidate_id: str
+    family_key: str
+    bin_id: str
+    condition_id: str
+    side: Literal["YES", "NO"]
+    token_id: str
+    action: Literal["BUY", "SELL"]
+    status: Literal["REJECTED", "SCORED", "SELECTED"]
+    rejection_reason: str | None = None
+    shares: Decimal = Decimal("0")
+    cost_usd: Decimal = Decimal("0")
+    cash_proceeds_usd: Decimal = Decimal("0")
+    robust_delta_log_wealth: float = 0.0
+    robust_ev_usd: float = 0.0
+    capital_efficiency: float = 0.0
+    limit_price: Decimal = Decimal("0")
+    expected_fill_price_before_fee: Decimal = Decimal("0")
+    max_spend_usd: Decimal = Decimal("0")
+    terminal_wealth: BinaryTerminalWealthCertificate | None = None
+
+    def __post_init__(self) -> None:
+        if (
+            not all(
+                str(value).strip()
+                for value in (
+                    self.candidate_id,
+                    self.family_key,
+                    self.bin_id,
+                    self.condition_id,
+                    self.token_id,
+                )
+            )
+            or self.side not in {"YES", "NO"}
+            or self.action not in {"BUY", "SELL"}
+        ):
+            raise ValueError("global candidate evaluation identity is incomplete")
+        if self.status == "REJECTED":
+            if (
+                not str(self.rejection_reason or "").strip()
+                or self.shares != 0
+                or self.cost_usd != 0
+                or self.cash_proceeds_usd != 0
+                or self.robust_delta_log_wealth != 0.0
+                or self.robust_ev_usd != 0.0
+                or self.capital_efficiency != 0.0
+                or self.limit_price != 0
+                or self.expected_fill_price_before_fee != 0
+                or self.max_spend_usd != 0
+                or self.terminal_wealth is not None
+            ):
+                raise ValueError("rejected candidate evaluation cannot carry economics")
+            return
+        if (
+            self.status not in {"SCORED", "SELECTED"}
+            or self.rejection_reason is not None
+            or self.shares <= 0
+            or self.cost_usd <= 0
+            or self.robust_delta_log_wealth <= 0.0
+            or self.robust_ev_usd <= 0.0
+            or self.capital_efficiency <= 0.0
+            or self.limit_price <= 0
+            or self.expected_fill_price_before_fee <= 0
+            or self.terminal_wealth is None
+        ):
+            raise ValueError("scored candidate evaluation lacks positive economics")
+
+
+@dataclass(frozen=True)
 class GlobalSingleOrderDecision:
     """The one order that wins the current cross-family feasible-set auction."""
 
@@ -1030,8 +1101,35 @@ class GlobalSingleOrderDecision:
     cash_proceeds_usd: Decimal = Decimal("0")
     terminal_wealth: BinaryTerminalWealthCertificate | None = None
     rejection_reasons: Mapping[str, str] = field(default_factory=dict)
+    candidate_evaluations: tuple[GlobalSingleOrderCandidateEvaluation, ...] = ()
 
     def __post_init__(self) -> None:
+        if self.candidate_evaluations:
+            candidate_ids = tuple(
+                evaluation.candidate_id for evaluation in self.candidate_evaluations
+            )
+            selected = tuple(
+                evaluation
+                for evaluation in self.candidate_evaluations
+                if evaluation.status == "SELECTED"
+            )
+            if len(candidate_ids) != len(set(candidate_ids)) or len(selected) != (
+                1 if self.candidate is not None else 0
+            ):
+                raise ValueError("global candidate evaluations are not one-to-one")
+            if self.candidate is not None:
+                winner = selected[0]
+                if (
+                    winner.candidate_id != self.candidate.candidate_id
+                    or winner.shares != self.shares
+                    or winner.cost_usd != self.cost_usd
+                    or winner.cash_proceeds_usd != self.cash_proceeds_usd
+                    or winner.robust_delta_log_wealth
+                    != self.robust_delta_log_wealth
+                    or winner.robust_ev_usd != self.robust_ev_usd
+                    or winner.capital_efficiency != self.capital_efficiency
+                ):
+                    raise ValueError("selected candidate evaluation disagrees with decision")
         if self.candidate is None:
             if self.no_trade_reason is None:
                 raise ValueError("global no-trade decision requires a reason")
@@ -1090,6 +1188,78 @@ class GlobalSingleOrderDecision:
             raise ValueError(
                 "global trade decision requires positive shares/cost/limit and sufficient max spend"
             )
+
+
+def _global_candidate_evaluations(
+    candidates: Sequence[GlobalSingleOrderAnyCandidate],
+    *,
+    rejections: Mapping[str, str],
+    scores: Sequence[GlobalSingleOrderDecision] = (),
+    winner_id: str | None = None,
+    default_rejection: str | None = None,
+) -> tuple[GlobalSingleOrderCandidateEvaluation, ...]:
+    """Retain every candidate's eligibility/economic result for one epoch."""
+
+    scored_by_id = {
+        score.candidate.candidate_id: score
+        for score in scores
+        if score.candidate is not None
+    }
+    evaluations: list[GlobalSingleOrderCandidateEvaluation] = []
+    for candidate in candidates:
+        action: Literal["BUY", "SELL"] = (
+            "SELL" if isinstance(candidate, GlobalSingleOrderSellCandidate) else "BUY"
+        )
+        score = scored_by_id.get(candidate.candidate_id)
+        if score is None:
+            reason = rejections.get(candidate.candidate_id) or default_rejection
+            if reason is None:
+                raise ValueError(
+                    f"global candidate result missing: {candidate.candidate_id}"
+                )
+            evaluations.append(
+                GlobalSingleOrderCandidateEvaluation(
+                    candidate_id=candidate.candidate_id,
+                    family_key=candidate.family_key,
+                    bin_id=candidate.bin_id,
+                    condition_id=candidate.condition_id,
+                    side=candidate.side,
+                    token_id=candidate.token_id,
+                    action=action,
+                    status="REJECTED",
+                    rejection_reason=reason,
+                )
+            )
+            continue
+        evaluations.append(
+            GlobalSingleOrderCandidateEvaluation(
+                candidate_id=candidate.candidate_id,
+                family_key=candidate.family_key,
+                bin_id=candidate.bin_id,
+                condition_id=candidate.condition_id,
+                side=candidate.side,
+                token_id=candidate.token_id,
+                action=action,
+                status=(
+                    "SELECTED"
+                    if candidate.candidate_id == winner_id
+                    else "SCORED"
+                ),
+                shares=score.shares,
+                cost_usd=score.cost_usd,
+                cash_proceeds_usd=score.cash_proceeds_usd,
+                robust_delta_log_wealth=score.robust_delta_log_wealth,
+                robust_ev_usd=score.robust_ev_usd,
+                capital_efficiency=score.capital_efficiency,
+                limit_price=score.limit_price,
+                expected_fill_price_before_fee=(
+                    score.expected_fill_price_before_fee
+                ),
+                max_spend_usd=score.max_spend_usd,
+                terminal_wealth=score.terminal_wealth,
+            )
+        )
+    return tuple(evaluations)
 
 
 def validate_family_decision_contract(decision: "FamilyDecision") -> "FamilyDecision":
@@ -2118,6 +2288,7 @@ def select_global_single_order(
         or supplied_bindings != universe_witness.binding_by_family
         or not candidate_families.issubset(expected_families)
     ):
+        reason = "GLOBAL_FEASIBLE_SET_INCOMPLETE"
         return GlobalSingleOrderDecision(
             candidate=None,
             shares=Decimal("0"),
@@ -2125,13 +2296,19 @@ def select_global_single_order(
             robust_delta_log_wealth=0.0,
             robust_ev_usd=0.0,
             capital_efficiency=0.0,
-            no_trade_reason="GLOBAL_FEASIBLE_SET_INCOMPLETE",
+            no_trade_reason=reason,
             rejection_reasons={
-                candidate.candidate_id: "GLOBAL_FEASIBLE_SET_INCOMPLETE"
+                candidate.candidate_id: reason
                 for candidate in candidates
             },
+            candidate_evaluations=_global_candidate_evaluations(
+                candidates,
+                rejections={},
+                default_rejection=reason,
+            ),
         )
     if wealth_witness.collateral_authority not in {"CHAIN", "VENUE"}:
+        reason = "COLLATERAL_UNKNOWN"
         return GlobalSingleOrderDecision(
             candidate=None,
             shares=Decimal("0"),
@@ -2139,8 +2316,13 @@ def select_global_single_order(
             robust_delta_log_wealth=0.0,
             robust_ev_usd=0.0,
             capital_efficiency=0.0,
-            no_trade_reason="COLLATERAL_UNKNOWN",
-            rejection_reasons={c.candidate_id: "COLLATERAL_UNKNOWN" for c in candidates},
+            no_trade_reason=reason,
+            rejection_reasons={c.candidate_id: reason for c in candidates},
+            candidate_evaluations=_global_candidate_evaluations(
+                candidates,
+                rejections={},
+                default_rejection=reason,
+            ),
         )
     witness_age = decision_at_utc - wealth_witness.captured_at_utc
     try:
@@ -2153,6 +2335,7 @@ def select_global_single_order(
         and witness_age <= wealth_witness.max_age
     )
     if not witness_current:
+        reason = "CAPITAL_IDENTITY_SUPERSEDED"
         return GlobalSingleOrderDecision(
             candidate=None,
             shares=Decimal("0"),
@@ -2160,10 +2343,15 @@ def select_global_single_order(
             robust_delta_log_wealth=0.0,
             robust_ev_usd=0.0,
             capital_efficiency=0.0,
-            no_trade_reason="CAPITAL_IDENTITY_SUPERSEDED",
+            no_trade_reason=reason,
             rejection_reasons={
-                c.candidate_id: "CAPITAL_IDENTITY_SUPERSEDED" for c in candidates
+                c.candidate_id: reason for c in candidates
             },
+            candidate_evaluations=_global_candidate_evaluations(
+                candidates,
+                rejections={},
+                default_rejection=reason,
+            ),
         )
     if capital_limit_usd <= 0:
         raise ValueError("capital limit must be positive")
@@ -2266,6 +2454,7 @@ def select_global_single_order(
         "CANDIDATE_POLICY_AUTHORITY_INVALID",
     }
     if any(reason in epoch_invalidating_reasons for reason in rejections.values()):
+        no_trade_reason = "GLOBAL_EPOCH_SUPERSEDED"
         return GlobalSingleOrderDecision(
             candidate=None,
             shares=Decimal("0"),
@@ -2273,8 +2462,13 @@ def select_global_single_order(
             robust_delta_log_wealth=0.0,
             robust_ev_usd=0.0,
             capital_efficiency=0.0,
-            no_trade_reason="GLOBAL_EPOCH_SUPERSEDED",
+            no_trade_reason=no_trade_reason,
             rejection_reasons=rejections,
+            candidate_evaluations=_global_candidate_evaluations(
+                candidates,
+                rejections=rejections,
+                default_rejection=no_trade_reason,
+            ),
         )
 
     band_contracts = {(alpha, basis) for _, _, alpha, basis in eligible}
@@ -2291,6 +2485,11 @@ def select_global_single_order(
             capital_efficiency=0.0,
             no_trade_reason="BAND_ALPHA_MISMATCH",
             rejection_reasons=rejections,
+            candidate_evaluations=_global_candidate_evaluations(
+                candidates,
+                rejections=rejections,
+                default_rejection="BAND_ALPHA_MISMATCH",
+            ),
         )
 
     scored: list[GlobalSingleOrderDecision] = []
@@ -2316,6 +2515,7 @@ def select_global_single_order(
                     Decimal(candidate_capital_limit_resolver(candidate)),
                 )
             except Exception:  # noqa: BLE001 - lost allocator authority invalidates the epoch
+                reason = "CAPITAL_CONSTRAINT_UNAVAILABLE"
                 return GlobalSingleOrderDecision(
                     candidate=None,
                     shares=Decimal("0"),
@@ -2325,8 +2525,14 @@ def select_global_single_order(
                     capital_efficiency=0.0,
                     no_trade_reason="GLOBAL_EPOCH_SUPERSEDED",
                     rejection_reasons={
-                        candidate.candidate_id: "CAPITAL_CONSTRAINT_UNAVAILABLE"
+                        candidate.candidate_id: reason
                     },
+                    candidate_evaluations=_global_candidate_evaluations(
+                        candidates,
+                        rejections={candidate.candidate_id: reason},
+                        scores=scored,
+                        default_rejection="GLOBAL_EPOCH_SUPERSEDED",
+                    ),
                 )
         if candidate_capital_limit <= 0:
             rejections[candidate.candidate_id] = "CAPITAL_CAPACITY_EXHAUSTED"
@@ -2376,6 +2582,10 @@ def select_global_single_order(
             capital_efficiency=0.0,
             no_trade_reason=no_trade_reason,
             rejection_reasons=rejections,
+            candidate_evaluations=_global_candidate_evaluations(
+                candidates,
+                rejections=rejections,
+            ),
         )
 
     # Current-epoch capital growth is the only objective identified by current truth.
@@ -2392,6 +2602,7 @@ def select_global_single_order(
             score.candidate.candidate_id if score.candidate is not None else "",
         ),
     )
+    winner_id = winner.candidate.candidate_id if winner.candidate is not None else None
     return GlobalSingleOrderDecision(
         candidate=winner.candidate,
         shares=winner.shares,
@@ -2406,6 +2617,12 @@ def select_global_single_order(
         cash_proceeds_usd=winner.cash_proceeds_usd,
         terminal_wealth=winner.terminal_wealth,
         rejection_reasons=rejections,
+        candidate_evaluations=_global_candidate_evaluations(
+            candidates,
+            rejections=rejections,
+            scores=scored,
+            winner_id=winner_id,
+        ),
     )
 
 

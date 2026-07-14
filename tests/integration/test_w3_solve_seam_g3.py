@@ -1,5 +1,5 @@
 # Created: 2026-07-03
-# Last reused/audited: 2026-07-13
+# Last reused/audited: 2026-07-14
 # Authority basis: W3 SOLVE design packet, global fractional-Kelly repair, and current Day0 global-cut routing
 """G3 harness for the W3 SOLVE promotion seam (qkernel_spine_bridge.py w3_solve_enabled flag).
 
@@ -18,6 +18,7 @@ proofs the legacy spine path is tested against).
 from __future__ import annotations
 
 import ast
+import base64
 import datetime as _dt
 import hashlib
 import inspect
@@ -27,6 +28,7 @@ import subprocess
 import sys
 import textwrap
 import threading
+import zlib
 from dataclasses import dataclass, replace
 from decimal import Decimal
 from types import SimpleNamespace
@@ -65,6 +67,7 @@ from src.solve.solver import (
     CurrentExecutionAuthority,
     CurrentFamilyProbabilityAuthority,
     ExecutableSellCurve,
+    GlobalSingleOrderCandidateEvaluation,
     GlobalSingleOrderDecision,
     GlobalSingleOrderSellCandidate,
     JointOutcomeProbabilityWitness,
@@ -87,6 +90,113 @@ from src.state.schema.opportunity_events_schema import (
 from tests.integration import test_qkernel_spine_routing as R
 
 _BRIDGE_PATH = bridge.__file__
+
+
+def test_global_auction_receipt_persists_complete_buy_sell_hold_cash_comparison():
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        """
+        CREATE TABLE decision_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            mode TEXT NOT NULL,
+            started_at TEXT NOT NULL,
+            completed_at TEXT NOT NULL,
+            artifact_json TEXT NOT NULL,
+            timestamp TEXT NOT NULL,
+            env TEXT NOT NULL
+        )
+        """
+    )
+    evaluations = (
+        GlobalSingleOrderCandidateEvaluation(
+            candidate_id="buy-paused",
+            family_key="family-buy",
+            bin_id="20C",
+            condition_id="condition-buy",
+            side="YES",
+            token_id="token-buy",
+            action="BUY",
+            status="REJECTED",
+            rejection_reason="ENTRY_ACTION_PAUSED:external:operator",
+        ),
+        GlobalSingleOrderCandidateEvaluation(
+            candidate_id="sell-negative",
+            family_key="family-sell",
+            bin_id="21C",
+            condition_id="condition-sell",
+            side="NO",
+            token_id="token-sell",
+            action="SELL",
+            status="REJECTED",
+            rejection_reason="NON_POSITIVE_ROBUST_OBJECTIVE",
+        ),
+    )
+    decision = GlobalSingleOrderDecision(
+        candidate=None,
+        shares=Decimal("0"),
+        cost_usd=Decimal("0"),
+        robust_delta_log_wealth=0.0,
+        robust_ev_usd=0.0,
+        capital_efficiency=0.0,
+        no_trade_reason="NO_CURRENT_EXECUTABLE_POSITIVE_ORDER",
+        rejection_reasons={
+            evaluation.candidate_id: str(evaluation.rejection_reason)
+            for evaluation in evaluations
+        },
+        candidate_evaluations=evaluations,
+    )
+    selected = SimpleNamespace(decision=decision)
+    at = _dt.datetime(2026, 7, 14, 1, 0, tzinfo=_dt.timezone.utc)
+
+    row_id = global_batch_runtime._store_global_auction_receipt(
+        conn,
+        selected=selected,
+        selection_epoch_identity="epoch-current",
+        selection_cut_at_utc=at,
+        decision_at_utc=at + _dt.timedelta(seconds=1),
+        probability_manifest=(("family-buy", "q-buy"), ("family-sell", "q-sell")),
+        book_epoch_identity="book-current",
+        book_candidate_count=2,
+        wealth_witness=SimpleNamespace(
+            witness_identity="wealth-current",
+            economic_identity="wealth-economics-current",
+        ),
+        fractional_kelly_multiplier=Decimal("0.25"),
+    )
+
+    row = conn.execute(
+        "SELECT mode, artifact_json FROM decision_log WHERE id = ?", (row_id,)
+    ).fetchone()
+    artifact = json.loads(row["artifact_json"])
+    summary = artifact["summary"]
+    assert row["mode"] == "global_single_order_auction"
+    assert summary["candidate_coverage_complete"] is True
+    assert summary["candidate_evaluation_count"] == 2
+    assert summary["hold_cash"] == {
+        "robust_delta_log_wealth": "0",
+        "robust_ev_usd": "0",
+        "selected": True,
+    }
+    evaluation_json = zlib.decompress(
+        base64.b64decode(summary["candidate_evaluations_zlib_b64"])
+    )
+    assert hashlib.sha256(evaluation_json).hexdigest() == (
+        summary["candidate_evaluations_sha256"]
+    )
+    candidate_evaluations = json.loads(evaluation_json)
+    assert {
+        evaluation["action"]: (
+            evaluation["status"],
+            evaluation["rejection_reason"],
+        )
+        for evaluation in candidate_evaluations
+    } == {
+        "BUY": ("REJECTED", "ENTRY_ACTION_PAUSED:external:operator"),
+        "SELL": ("REJECTED", "NON_POSITIVE_ROBUST_OBJECTIVE"),
+    }
+    assert len(summary["receipt_hash"]) == 64
+    conn.close()
 
 
 def test_global_selection_binds_holdings_to_exact_wealth_ledger_generation():
