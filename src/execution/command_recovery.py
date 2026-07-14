@@ -5852,6 +5852,148 @@ def _append_filled_entry_position_lot_repair(
     return True
 
 
+def _entry_submission_envelope_fill_economics(
+    conn: sqlite3.Connection,
+    *,
+    candidate: Mapping[str, object],
+) -> tuple[str, str] | None:
+    """Return exact fully matched taker shares and price from its final envelope."""
+
+    if not (
+        _table_exists(conn, "venue_submission_envelopes")
+        and _table_exists(conn, "venue_command_events")
+    ):
+        return None
+    command_id = str(candidate.get("command_id") or "").strip()
+    venue_order_id = str(candidate.get("venue_order_id") or "").strip()
+    filled_size = _positive_decimal_or_none(candidate.get("filled_size"))
+    matched_size = _positive_decimal_or_none(
+        candidate.get("order_fact_matched_size")
+    )
+    tolerance = Decimal("0.000001")
+    if (
+        not command_id
+        or not venue_order_id
+        or filled_size is None
+        or matched_size is None
+        or abs(filled_size - matched_size) > tolerance
+    ):
+        return None
+
+    envelope_ids: list[str] = []
+    for row in conn.execute(
+        """
+        SELECT payload_json
+          FROM venue_command_events
+         WHERE command_id = ?
+         ORDER BY sequence_no DESC
+        """,
+        (command_id,),
+    ).fetchall():
+        payload = _json_dict(_dict_row(row).get("payload_json"))
+        envelope_id = str(payload.get("final_submission_envelope_id") or "").strip()
+        if not envelope_id:
+            continue
+        payload_command_id = str(
+            payload.get("final_submission_envelope_command_id") or command_id
+        ).strip()
+        payload_order_id = str(payload.get("venue_order_id") or venue_order_id).strip()
+        if payload_command_id == command_id and payload_order_id == venue_order_id:
+            envelope_ids.append(envelope_id)
+
+    if envelope_ids:
+        unique_ids = tuple(dict.fromkeys(envelope_ids))
+        placeholders = ", ".join("?" for _ in unique_ids)
+        rows = conn.execute(
+            f"""
+            SELECT envelope_id, side, order_type, order_id, raw_response_json,
+                   captured_at
+              FROM venue_submission_envelopes
+             WHERE envelope_id IN ({placeholders})
+             ORDER BY captured_at DESC, envelope_id DESC
+            """,
+            unique_ids,
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            """
+            SELECT envelope_id, side, order_type, order_id, raw_response_json,
+                   captured_at
+              FROM venue_submission_envelopes
+             WHERE order_id = ?
+             ORDER BY captured_at DESC, envelope_id DESC
+            """,
+            (venue_order_id,),
+        ).fetchall()
+
+    economics: set[tuple[Decimal, Decimal]] = set()
+    for row in rows:
+        envelope = _dict_row(row)
+        payload = _json_dict(envelope.get("raw_response_json"))
+        response_order_id = str(
+            _first_present(payload, "orderID", "order_id", "id") or ""
+        ).strip()
+        status = str(_first_present(payload, "status", "state") or "").upper()
+        making = _positive_decimal_or_none(
+            _first_present(payload, "makingAmount", "making_amount")
+        )
+        taking = _positive_decimal_or_none(
+            _first_present(payload, "takingAmount", "taking_amount")
+        )
+        if (
+            str(envelope.get("side") or "").upper() != "BUY"
+            or str(envelope.get("order_type") or "").upper() not in {"FOK", "FAK"}
+            or str(envelope.get("order_id") or "").strip() != venue_order_id
+            or response_order_id != venue_order_id
+            or status not in {"MATCHED", "FILLED"}
+            or payload.get("success") is False
+            or making is None
+            or taking is None
+            or making > taking
+            or abs(taking - filled_size) > tolerance
+            or abs(taking - matched_size) > tolerance
+        ):
+            continue
+        economics.add((taking, making / taking))
+    if len(economics) != 1:
+        return None
+    shares, price = economics.pop()
+    return _decimal_text(shares), _decimal_text(price)
+
+
+def _filled_entry_execution_fact_needs_repair(
+    candidate: Mapping[str, object],
+) -> bool:
+    if not candidate.get("ef_command_id"):
+        return True
+    expected_filled_at = str(
+        candidate.get("execution_filled_at")
+        or candidate.get("venue_timestamp")
+        or candidate.get("observed_at")
+        or ""
+    )
+    tolerance = Decimal("0.000001")
+    expected_shares = _decimal_or_none(candidate.get("filled_size"))
+    current_shares = _decimal_or_none(candidate.get("ef_shares"))
+    expected_price = _decimal_or_none(candidate.get("fill_price"))
+    current_price = _decimal_or_none(candidate.get("ef_fill_price"))
+    return (
+        str(candidate.get("ef_command_id") or "")
+        != str(candidate.get("command_id") or "")
+        or str(candidate.get("ef_posted_at") or "")
+        != str(candidate.get("cmd_created_at") or "")
+        or str(candidate.get("ef_filled_at") or "") != expected_filled_at
+        or expected_shares is None
+        or current_shares is None
+        or abs(current_shares - expected_shares) > tolerance
+        or expected_price is None
+        or current_price is None
+        or abs(current_price - expected_price) > tolerance
+        or str(candidate.get("ef_terminal_exec_status") or "")
+        != _entry_execution_fact_terminal_status(candidate)
+    )
+
+
 def _filled_entry_execution_fact_repair_candidates(conn: sqlite3.Connection) -> list[dict]:
     required = {
         "venue_commands",
@@ -5954,6 +6096,7 @@ def _filled_entry_execution_fact_repair_candidates(conn: sqlite3.Connection) -> 
                cmd.size AS cmd_size,
                cmd.price AS cmd_price,
                cmd.created_at AS cmd_created_at,
+               latest_order.venue_order_id AS venue_order_id,
                latest_order.matched_size AS order_fact_matched_size,
                latest_order.remaining_size AS order_fact_remaining_size,
                latest_order.state AS order_fact_state,
@@ -5995,26 +6138,22 @@ def _filled_entry_execution_fact_repair_candidates(conn: sqlite3.Connection) -> 
            AND cmd.side = 'BUY'
            AND cmd.state IN ('FILLED', 'PARTIAL', 'EXPIRED')
            AND ABS(CAST(entry_fill.filled_size AS REAL) - CAST(latest_order.matched_size AS REAL)) <= 0.000001
-           AND (
-               ef.intent_id IS NULL
-               OR COALESCE(ef.command_id, '') != cmd.command_id
-               OR COALESCE(ef.posted_at, '') != COALESCE(cmd.created_at, '')
-               OR COALESCE(ef.filled_at, '') != COALESCE(NULLIF(entry_fill.venue_timestamp, ''), entry_fill.observed_at, '')
-               OR ABS(COALESCE(CAST(ef.shares AS REAL), 0.0) - CAST(entry_fill.filled_size AS REAL)) > 0.000001
-               OR ABS(COALESCE(CAST(ef.fill_price AS REAL), 0.0) - CAST(entry_fill.fill_price AS REAL)) > 0.000001
-               OR COALESCE(ef.terminal_exec_status, '') != CASE
-                   WHEN cmd.state = 'FILLED'
-                    AND CAST(COALESCE(latest_order.remaining_size, '0') AS REAL) = 0
-                    AND latest_order.state IN ('MATCHED', 'FILLED')
-                   THEN 'filled'
-                   ELSE 'partial'
-               END
-           )
          ORDER BY entry_fill.observed_at, entry_fill.trade_fact_id
         """
     )
     rows = conn.execute(sql).fetchall()
-    return [_dict_row(row) for row in rows]
+    candidates: list[dict] = []
+    for row in rows:
+        candidate = _dict_row(row)
+        envelope_economics = _entry_submission_envelope_fill_economics(
+            conn,
+            candidate=candidate,
+        )
+        if envelope_economics is not None:
+            candidate["filled_size"], candidate["fill_price"] = envelope_economics
+        if _filled_entry_execution_fact_needs_repair(candidate):
+            candidates.append(candidate)
+    return candidates
 
 
 def _log_filled_entry_trade_candidate_execution_fact(

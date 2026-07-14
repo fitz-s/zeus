@@ -925,6 +925,7 @@ def _ensure_envelope(
     outcome_label: str = "YES",
     envelope_id: str | None = None,
     side: str = "BUY",
+    order_type: str = "GTC",
     price: float | Decimal = 0.5,
     size: float | Decimal = 10.0,
     raw_response_json: str | None = None,
@@ -961,7 +962,7 @@ def _ensure_envelope(
             side=side,
             price=price_dec,
             size=size_dec,
-            order_type="GTC",
+            order_type=order_type,
             post_only=False,
             tick_size=Decimal("0.01"),
             min_order_size=Decimal("0.01"),
@@ -10553,6 +10554,168 @@ class TestRecoveryResolutionTable:
             "stayed": 0,
             "errors": 0,
         }
+
+    def test_filled_entry_execution_fact_uses_exact_fok_envelope_economics(
+        self,
+        conn,
+    ):
+        from src.execution.command_recovery import (
+            reconcile_filled_entry_execution_fact_repairs,
+        )
+        from src.state.db import query_entry_execution_fill_aggregate
+        from src.state.venue_command_repo import append_event
+
+        _insert(conn, size=35.05, price=0.75)
+        _advance_to_acked(conn, venue_order_id="ord-fok")
+        envelope_id = _ensure_envelope(
+            conn,
+            token_id="tok-001",
+            envelope_id="env-fok-final",
+            order_type="FOK",
+            price=0.75,
+            size=35.05,
+            order_id="ord-fok",
+            raw_response_json=json.dumps(
+                {
+                    "success": True,
+                    "status": "matched",
+                    "orderID": "ord-fok",
+                    "makingAmount": "26.279998",
+                    "takingAmount": "35.306664",
+                }
+            ),
+        )
+        append_event(
+            conn,
+            command_id="cmd-001",
+            event_type="FILL_CONFIRMED",
+            occurred_at="2026-04-26T00:06:00Z",
+            payload={
+                "venue_order_id": "ord-fok",
+                "final_submission_envelope_id": envelope_id,
+                "final_submission_envelope_command_id": "cmd-001",
+            },
+        )
+        exact_price = Decimal("26.279998") / Decimal("35.306664")
+        _append_trade_fact(
+            conn,
+            order_id="ord-fok",
+            trade_id="trade-fok",
+            state="MATCHED",
+            filled_size="35.306664",
+            fill_price=str(exact_price),
+        )
+        _append_trade_fact(
+            conn,
+            order_id="ord-fok",
+            trade_id="trade-fok",
+            state="CONFIRMED",
+            filled_size="35.306664",
+            fill_price="0.74",
+        )
+        _append_order_fact(
+            conn,
+            order_id="ord-fok",
+            state="MATCHED",
+            matched_size="35.306664",
+            remaining_size="0",
+        )
+
+        summary = reconcile_filled_entry_execution_fact_repairs(conn)
+
+        assert summary == {"scanned": 1, "advanced": 1, "stayed": 0, "errors": 0}
+        execution = conn.execute(
+            """
+            SELECT shares, fill_price, terminal_exec_status
+              FROM execution_fact
+             WHERE intent_id = 'pos-001:entry'
+            """
+        ).fetchone()
+        assert dict(execution) == {
+            "shares": 35.306664,
+            "fill_price": pytest.approx(float(exact_price)),
+            "terminal_exec_status": "filled",
+        }
+        aggregate = query_entry_execution_fill_aggregate(conn, "pos-001", strict=True)
+        assert aggregate is not None
+        assert aggregate["shares_filled"] == pytest.approx(35.306664)
+        assert aggregate["filled_cost_basis_usd"] == pytest.approx(26.279998)
+        assert reconcile_filled_entry_execution_fact_repairs(conn) == {
+            "scanned": 0,
+            "advanced": 0,
+            "stayed": 0,
+            "errors": 0,
+        }
+
+    @pytest.mark.parametrize(
+        ("response_order_id", "taking_amount"),
+        (("ord-other", "5"), ("ord-001", "5.1")),
+    )
+    def test_filled_entry_execution_fact_rejects_unbound_envelope_economics(
+        self,
+        conn,
+        response_order_id,
+        taking_amount,
+    ):
+        from src.execution.command_recovery import (
+            reconcile_filled_entry_execution_fact_repairs,
+        )
+        from src.state.venue_command_repo import append_event
+
+        _insert(conn, size=5.0, price=0.32)
+        _advance_to_acked(conn, venue_order_id="ord-001")
+        envelope_id = _ensure_envelope(
+            conn,
+            token_id="tok-001",
+            envelope_id="env-fok-unbound",
+            order_type="FOK",
+            price=0.32,
+            size=5.0,
+            order_id="ord-001",
+            raw_response_json=json.dumps(
+                {
+                    "success": True,
+                    "status": "matched",
+                    "orderID": response_order_id,
+                    "makingAmount": "1.55",
+                    "takingAmount": taking_amount,
+                }
+            ),
+        )
+        append_event(
+            conn,
+            command_id="cmd-001",
+            event_type="FILL_CONFIRMED",
+            occurred_at="2026-04-26T00:06:00Z",
+            payload={
+                "venue_order_id": "ord-001",
+                "final_submission_envelope_id": envelope_id,
+                "final_submission_envelope_command_id": "cmd-001",
+            },
+        )
+        _append_trade_fact(
+            conn,
+            filled_size="5",
+            fill_price="0.32",
+        )
+        _append_order_fact(
+            conn,
+            state="MATCHED",
+            matched_size="5",
+            remaining_size="0",
+        )
+
+        summary = reconcile_filled_entry_execution_fact_repairs(conn)
+
+        assert summary == {"scanned": 1, "advanced": 1, "stayed": 0, "errors": 0}
+        execution = conn.execute(
+            """
+            SELECT shares, fill_price
+              FROM execution_fact
+             WHERE intent_id = 'pos-001:entry'
+            """
+        ).fetchone()
+        assert dict(execution) == {"shares": 5.0, "fill_price": 0.32}
 
     def test_existing_entry_lot_execution_fact_repair_aggregates_split_fills(
         self,
