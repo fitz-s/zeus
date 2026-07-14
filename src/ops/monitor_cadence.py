@@ -341,12 +341,24 @@ def _monitor_event_closed_market_pending_settlement(
     validations_raw = payload.get("applied_validations")
     validations = {str(item) for item in validations_raw} if isinstance(validations_raw, list) else set()
     matched = sorted(validations & CLOSED_MARKET_PENDING_SETTLEMENT_VALIDATIONS)
-    if not matched:
+    canonical_closed_hold = (
+        payload.get("semantic_event") == "MARKET_CLOSED_HOLD_TO_SETTLEMENT"
+        and payload.get("hold_reason") == "MARKET_CLOSED_AWAITING_SETTLEMENT"
+        and payload.get("exit_order_submitted") is False
+        and payload.get("exit_failure") is False
+        and "MARKET_CLOSED_AWAITING_SETTLEMENT" in validations
+    )
+    if not canonical_closed_hold and not matched:
         return False
+    closed_market_validation = (
+        "MARKET_CLOSED_AWAITING_SETTLEMENT"
+        if canonical_closed_hold
+        else matched[0]
+    )
     position_evidence.update(
         {
             "cadence_source": "MONITOR_REFRESHED_CLOSED_MARKET_PENDING_SETTLEMENT",
-            "closed_market_validation": matched[0],
+            "closed_market_validation": closed_market_validation,
             "restart_resolution": "settlement_harvester_or_market_reopen_recovery",
         }
     )

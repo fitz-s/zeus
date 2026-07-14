@@ -6859,7 +6859,13 @@ def test_monitor_cadence_restart_evidence_accepts_closed_market_settlement_recov
     _insert_monitor_events(
         conn,
         monitor_at=now - timedelta(minutes=20),
-        payload={"applied_validations": ["day0_hard_fact_bin_dead_closed_market"]},
+        payload={
+            "semantic_event": "MARKET_CLOSED_HOLD_TO_SETTLEMENT",
+            "hold_reason": "MARKET_CLOSED_AWAITING_SETTLEMENT",
+            "exit_order_submitted": False,
+            "exit_failure": False,
+            "applied_validations": ["MARKET_CLOSED_AWAITING_SETTLEMENT"],
+        },
     )
     conn.close()
     monkeypatch.setattr(preflight, "TRADE_DB", trade_db)
@@ -6874,6 +6880,9 @@ def test_monitor_cadence_restart_evidence_accepts_closed_market_settlement_recov
     assert result.evidence["stale_or_missing_position_count"] == 0
     assert result.evidence["settlement_recoverable_position_count"] == 1
     assert result.evidence["settlement_recoverable_positions"][0]["position_id"] == "pos-1"
+    assert result.evidence["settlement_recoverable_positions"][0][
+        "closed_market_validation"
+    ] == "MARKET_CLOSED_AWAITING_SETTLEMENT"
 
 
 def test_monitor_cadence_restart_evidence_reports_voided_chain_risk_as_reconciliation_risk(
