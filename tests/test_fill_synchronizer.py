@@ -5,7 +5,7 @@
 #   one-time replay is not enough). Packet I / wave-1.5 addition (2026-07-13,
 #   §KEEP-spine 完备性补遗 "归属图+歧义证据 — foreign/ambiguous 留 observation
 #   不丢"): durable wallet_fill_observations lane tests.
-# Lifecycle: created=2026-07-13; last_reviewed=2026-07-13; last_reused=never
+# Lifecycle: created=2026-07-13; last_reviewed=2026-07-14; last_reused=2026-07-14
 # Purpose: unit tests for src.ingest.fill_synchronizer.sync_fills — watermark
 #   resume, idempotent re-append rejection, foreign-fill handling, the
 #   advance-after-persist rollback contract, and (packet I / wave-1.5) the
