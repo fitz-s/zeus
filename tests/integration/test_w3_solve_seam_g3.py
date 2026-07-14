@@ -2400,6 +2400,28 @@ def test_current_gamma_identity_fills_missing_no_without_changing_q():
         },
         *batch_markets[1:],
     )
+    metadata_calls = []
+
+    def _metadata_skew_then_current(condition_ids):
+        metadata_calls.append(tuple(condition_ids))
+        return conflicting_event_metadata if len(metadata_calls) == 1 else batch_markets
+
+    recaptured_metadata = {}
+    recovered = bind_current_global_probability_tokens(
+        forecast,
+        probability_witnesses={original.family_key: original},
+        get_gamma_event=lambda _slug: pytest.fail("per-event Gamma fallback used"),
+        get_gamma_markets=_metadata_skew_then_current,
+        metadata_sink=recaptured_metadata,
+    )[original.family_key]
+    assert metadata_calls == [
+        tuple(binding.condition_id for binding in original.bindings),
+        tuple(binding.condition_id for binding in original.bindings),
+    ]
+    assert recovered.witness_identity == original.witness_identity
+    assert recovered.bindings == original.bindings
+    assert recovered.sample_matrix_identity == original.sample_matrix_identity
+    assert recaptured_metadata == batch_metadata
     with pytest.raises(
         ValueError, match="GLOBAL_CURRENT_GAMMA_EVENT_METADATA_AMBIGUOUS"
     ):

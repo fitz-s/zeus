@@ -931,35 +931,44 @@ def bind_current_global_probability_tokens(
             )
         )
         requested_conditions = frozenset(condition_ids)
-        markets = get_gamma_markets(condition_ids)
-        market_by_condition: dict[str, Mapping[str, object]] = {}
-        for market in markets:
-            if not isinstance(market, Mapping):
-                raise ValueError("GLOBAL_CURRENT_GAMMA_MARKET_INVALID")
-            condition_id = str(market.get("conditionId") or "").strip()
-            if not condition_id:
-                raise ValueError("GLOBAL_CURRENT_GAMMA_MARKET_INVALID")
-            if condition_id not in requested_conditions:
+        def _market_map(
+            rows: Sequence[Mapping[str, object]],
+            expected: frozenset[str],
+        ) -> dict[str, Mapping[str, object]]:
+            out: dict[str, Mapping[str, object]] = {}
+            for market in rows:
+                if not isinstance(market, Mapping):
+                    raise ValueError("GLOBAL_CURRENT_GAMMA_MARKET_INVALID")
+                condition_id = str(market.get("conditionId") or "").strip()
+                if not condition_id:
+                    raise ValueError("GLOBAL_CURRENT_GAMMA_MARKET_INVALID")
+                if condition_id not in expected:
+                    raise ValueError(
+                        f"GLOBAL_CURRENT_GAMMA_MARKET_UNEXPECTED:{condition_id}"
+                    )
+                if condition_id in out:
+                    raise ValueError(
+                        f"GLOBAL_CURRENT_GAMMA_MARKET_AMBIGUOUS:{condition_id}"
+                    )
+                out[condition_id] = market
+            missing = expected.difference(out)
+            if missing:
                 raise ValueError(
-                    f"GLOBAL_CURRENT_GAMMA_MARKET_UNEXPECTED:{condition_id}"
+                    "GLOBAL_CURRENT_GAMMA_MARKETS_INCOMPLETE:"
+                    + ",".join(sorted(missing))
                 )
-            if condition_id in market_by_condition:
-                raise ValueError(
-                    f"GLOBAL_CURRENT_GAMMA_MARKET_AMBIGUOUS:{condition_id}"
-                )
-            market_by_condition[condition_id] = market
-        missing_conditions = requested_conditions.difference(market_by_condition)
-        if missing_conditions:
-            raise ValueError(
-                "GLOBAL_CURRENT_GAMMA_MARKETS_INCOMPLETE:"
-                + ",".join(sorted(missing_conditions))
-            )
-        for family_key, witness in work_by_family.items():
-            family_markets = tuple(
-                market_by_condition[binding.condition_id]
-                for binding in witness.bindings
-            )
+            return out
+
+        market_by_condition = _market_map(
+            get_gamma_markets(condition_ids), requested_conditions
+        )
+
+        def _family_event_map(
+            family_key: str,
+            family_markets: Sequence[Mapping[str, object]],
+        ) -> tuple[dict[str, Mapping[str, object]], bool]:
             event_by_id: dict[str, Mapping[str, object]] = {}
+            metadata_ambiguous = False
             for market in family_markets:
                 nested_events = market.get("events")
                 if not isinstance(nested_events, list) or len(nested_events) != 1:
@@ -978,11 +987,43 @@ def bind_current_global_probability_tokens(
                     )
                 previous = event_by_id.get(event_id)
                 if previous is not None and dict(previous) != dict(nested_event):
+                    metadata_ambiguous = True
+                event_by_id[event_id] = nested_event
+            return event_by_id, metadata_ambiguous
+
+        for family_key, witness in work_by_family.items():
+            family_condition_ids = tuple(
+                binding.condition_id for binding in witness.bindings
+            )
+            family_markets = tuple(
+                market_by_condition[binding.condition_id]
+                for binding in witness.bindings
+            )
+            event_by_id, metadata_ambiguous = _family_event_map(
+                family_key, family_markets
+            )
+            if metadata_ambiguous:
+                # A family can straddle the public Gamma batch boundary.  Its
+                # embedded event decoration may then come from two adjacent API
+                # snapshots even though every market binds to one event ID.
+                # Recapture that exact family once in one request; never accept
+                # the mixed snapshot and never fall back to cached metadata.
+                family_expected = frozenset(family_condition_ids)
+                refreshed = _market_map(
+                    get_gamma_markets(family_condition_ids), family_expected
+                )
+                family_markets = tuple(
+                    refreshed[condition_id]
+                    for condition_id in family_condition_ids
+                )
+                event_by_id, metadata_ambiguous = _family_event_map(
+                    family_key, family_markets
+                )
+                if metadata_ambiguous:
                     raise ValueError(
                         "GLOBAL_CURRENT_GAMMA_EVENT_METADATA_AMBIGUOUS:"
                         f"{family_key}"
                     )
-                event_by_id[event_id] = nested_event
             if len(event_by_id) != 1:
                 raise ValueError(
                     f"GLOBAL_CURRENT_GAMMA_EVENT_IDENTITY_AMBIGUOUS:{family_key}"

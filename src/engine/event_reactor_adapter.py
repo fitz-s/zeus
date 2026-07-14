@@ -5143,11 +5143,12 @@ def event_bound_live_adapter_from_trade_conn(
 
             def _gamma_markets(condition_ids):
                 nonlocal gamma_batch_requests
-                markets, gamma_batch_requests = fetch_current_gamma_markets(
+                markets, batch_requests = fetch_current_gamma_markets(
                     condition_ids,
                     gamma_get=_gamma_get,
                     timeout=gamma_timeout,
                 )
+                gamma_batch_requests += batch_requests
                 return markets
 
             gamma_metadata = {}
