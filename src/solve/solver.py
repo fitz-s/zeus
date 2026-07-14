@@ -3616,6 +3616,9 @@ class SolveEngineShim:
         lower bound from ``legacy.band.samples`` inside ``compute_candidate_economics`` so the
         local certificate and the global auction consume the same decision-time simplex.
         """
+        from src.decision.family_decision_engine import (
+            DAY0_REMAINING_DAY_GUARD_BASIS,
+        )
         from src.decision.payoff_vector import compute_candidate_economics
 
         sample_hash = str(getattr(legacy.band, "sample_hash", "") or "")
@@ -3641,18 +3644,38 @@ class SolveEngineShim:
                 )
             except Exception:  # noqa: BLE001 - missing current economics is a fail-closed leg.
                 continue
+            hard_fact = (
+                str(getattr(decision, "q_lcb_guard_basis", "") or "")
+                == DAY0_REMAINING_DAY_GUARD_BASIS
+                and str(getattr(decision, "selection_guard_basis", "") or "")
+                == DAY0_REMAINING_DAY_GUARD_BASIS
+                and str(getattr(decision, "q_lcb_guard_cell_key", "") or "")
+                == "day0_monotone_hard_fact_q_lcb"
+                and str(getattr(decision, "selection_guard_cell_key", "") or "")
+                == "day0_monotone_hard_fact_q_lcb"
+                and getattr(decision, "q_lcb_guard_abstained", None) is False
+                and getattr(decision, "selection_guard_abstained", None) is False
+            )
+            guard_basis = (
+                DAY0_REMAINING_DAY_GUARD_BASIS
+                if hard_fact
+                else CURRENT_POSTERIOR_BAND_BASIS
+            )
+            guard_cell = (
+                "day0_monotone_hard_fact_q_lcb" if hard_fact else sample_hash
+            )
             current.append(
                 replace(
                     decision,
                     economics=economics,
                     direction_law_ok=True,
                     coherence_allows=True,
-                    q_lcb_guard_basis=CURRENT_POSTERIOR_BAND_BASIS,
+                    q_lcb_guard_basis=guard_basis,
                     q_lcb_guard_abstained=False,
-                    q_lcb_guard_cell_key=sample_hash,
-                    selection_guard_basis=CURRENT_POSTERIOR_BAND_BASIS,
+                    q_lcb_guard_cell_key=guard_cell,
+                    selection_guard_basis=guard_basis,
                     selection_guard_abstained=False,
-                    selection_guard_cell_key=sample_hash,
+                    selection_guard_cell_key=guard_cell,
                     selection_guard_n=n_draws,
                     selection_guard_q_safe=economics.payoff_q_lcb,
                 )

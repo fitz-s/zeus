@@ -14,6 +14,7 @@ from src.data.replacement_forecast_materializer import (
     _current_evidence_tail_ucb_floors,
     _finite_evidence_binomial_ucb,
     _finite_evidence_zero_hit_ucb_floor,
+    _stress_coherent_samples_to_marginal_ucb_floors,
 )
 
 
@@ -106,6 +107,21 @@ def test_source_clock_band_is_symmetric_coherent_and_has_no_historical_floor() -
     no_samples = sorted(1.0 - value for value in samples["low"])
     no_lower_cvar = sum(no_samples[:20]) / 20
     assert no_lower_cvar <= 1.0 - floors["low"] + 1e-12
+
+
+def test_zero_hit_floor_is_encoded_in_one_coherent_simplex() -> None:
+    raw = [[0.0, 1.0] for _ in range(100)]
+    zero_hit_ucb = _finite_evidence_zero_hit_ucb_floor(2)
+
+    stressed = _stress_coherent_samples_to_marginal_ucb_floors(
+        raw,
+        [zero_hit_ucb, 1.0],
+    )
+
+    assert all(math.isclose(float(row.sum()), 1.0, abs_tol=1e-12) for row in stressed)
+    assert float(sorted(stressed[:, 0])[94]) >= zero_hit_ucb
+    no_samples = sorted(1.0 - float(value) for value in stressed[:, 0])
+    assert sum(no_samples[:5]) / 5.0 <= 1.0 - zero_hit_ucb + 1e-12
 
 
 def test_day0_absorbing_fact_dominates_forecast_ambiguity() -> None:

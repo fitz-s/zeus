@@ -316,6 +316,80 @@ def test_actionable_rejects_degenerate_day0_inert_pass_through_q():
         verify_actionable_trade(action, parents)
 
 
+def test_day0_authority_accepts_non_degenerate_current_band_tightening():
+    from src.events.day0_authority import assert_live_day0_probability_authority
+
+    payload = {
+        "_edli_q_source": "day0_remaining_day",
+        "_edli_day0_q_mode": "remaining_day",
+        "_edli_day0_remaining_models": 2,
+        "rounded_value": 25,
+        "observation_time": "2026-07-14T15:00:00+00:00",
+        "_edli_day0_lcb_transform": {
+            "yes_lcb_by_condition": {"condition-1": 0.0},
+            "no_lcb_by_condition": {"condition-1": 1.0},
+        },
+        "qkernel_execution_economics": {
+            "payoff_q_point": 1.0,
+            "payoff_q_lcb": 0.20,
+            "q_lcb_guard_basis": "CURRENT_POSTERIOR_BAND",
+            "q_lcb_guard_abstained": False,
+            "selection_guard_basis": "CURRENT_POSTERIOR_BAND",
+            "selection_guard_abstained": False,
+            "selection_guard_q_safe": 0.20,
+            "selection_guard_n": 100,
+            "current_state_identity_hash": "current-band-identity",
+        },
+    }
+
+    assert_live_day0_probability_authority(
+        payload,
+        direction="buy_no",
+        condition_id="condition-1",
+        q_live=1.0,
+        q_lcb=0.20,
+    )
+
+
+def test_day0_authority_rejects_degenerate_current_band_claim():
+    from src.events.day0_authority import (
+        Day0AuthorityError,
+        assert_live_day0_probability_authority,
+    )
+
+    payload = {
+        "_edli_q_source": "day0_remaining_day",
+        "_edli_day0_q_mode": "remaining_day",
+        "_edli_day0_remaining_models": 2,
+        "rounded_value": 25,
+        "observation_time": "2026-07-14T15:00:00+00:00",
+        "_edli_day0_lcb_transform": {
+            "yes_lcb_by_condition": {"condition-1": 0.0},
+            "no_lcb_by_condition": {"condition-1": 1.0},
+        },
+        "qkernel_execution_economics": {
+            "payoff_q_point": 1.0,
+            "payoff_q_lcb": 1.0,
+            "q_lcb_guard_basis": "CURRENT_POSTERIOR_BAND",
+            "q_lcb_guard_abstained": False,
+            "selection_guard_basis": "CURRENT_POSTERIOR_BAND",
+            "selection_guard_abstained": False,
+            "selection_guard_q_safe": 1.0,
+            "selection_guard_n": 100,
+            "current_state_identity_hash": "current-band-identity",
+        },
+    }
+
+    with pytest.raises(Day0AuthorityError, match="degenerate with q_live"):
+        assert_live_day0_probability_authority(
+            payload,
+            direction="buy_no",
+            condition_id="condition-1",
+            q_live=1.0,
+            q_lcb=1.0,
+        )
+
+
 def test_actionable_rejects_day0_observed_boundary_as_entry_qkernel_guard():
     parents, action = actionable_graph(
         action_payload={
@@ -442,9 +516,12 @@ def _replacement_global_day0_probability_authority(
             "settlement_unit": "F",
         },
     }
-    return adapter._global_day0_probability_authority_payload(
-        observation_payload
-    )
+    return {
+        "probability_authority": "replacement_current_global_probability_v1",
+        "q_source": "replacement_0_1",
+        "posterior_id": posterior_id,
+        "global_current_observation_payload": observation_payload,
+    }
 
 
 def _replacement_day0_actionable_fixture(direction: str):

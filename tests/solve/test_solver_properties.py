@@ -2508,3 +2508,53 @@ def test_repair_certificate_fields_populated():
     assert "it" in cert.tick_size_deltas
     assert cert.continuous_objective > 0.0
     assert cert.budget_after_repair_usd < 200.0  # cash was spent buying
+
+
+def test_current_solver_preserves_day0_monotone_hard_fact_guard(monkeypatch):
+    from src.decision import payoff_vector
+
+    economics = SimpleNamespace(payoff_q_lcb=1.0)
+    route = SimpleNamespace(bin_id="bin-hard", side="NO")
+    original = SimpleNamespace(
+        route=route,
+        economics=SimpleNamespace(),
+        q_lcb_guard_basis="DAY0_REMAINING_DAY_Q_LCB",
+        q_lcb_guard_abstained=False,
+        q_lcb_guard_cell_key="day0_monotone_hard_fact_q_lcb",
+        selection_guard_basis="DAY0_REMAINING_DAY_Q_LCB",
+        selection_guard_abstained=False,
+        selection_guard_cell_key="day0_monotone_hard_fact_q_lcb",
+    )
+    legacy = SimpleNamespace(
+        candidate_decisions=(original,),
+        joint_q=object(),
+        band=SimpleNamespace(
+            samples=np.ones((100, 1)),
+            sample_hash="current-day0-samples",
+            alpha=0.05,
+        ),
+    )
+    monkeypatch.setattr(
+        payoff_vector,
+        "compute_candidate_economics",
+        lambda *_args, **_kwargs: economics,
+    )
+
+    (current,) = S.SolveEngineShim._current_candidate_decisions(
+        legacy=legacy,
+        matrix=object(),
+        portfolio=object(),
+        sizing_candidates={
+            ("bin-hard", "NO"): SimpleNamespace(is_tradeable=True)
+        },
+        max_stake_usd=Decimal("10"),
+        served_payoff_q_lcb_by_side={},
+        replace=lambda obj, **changes: SimpleNamespace(
+            **{**vars(obj), **changes}
+        ),
+    )
+
+    assert current.q_lcb_guard_basis == "DAY0_REMAINING_DAY_Q_LCB"
+    assert current.selection_guard_basis == "DAY0_REMAINING_DAY_Q_LCB"
+    assert current.q_lcb_guard_cell_key == "day0_monotone_hard_fact_q_lcb"
+    assert current.selection_guard_q_safe == 1.0

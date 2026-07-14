@@ -2510,6 +2510,59 @@ def _finite_evidence_zero_hit_ucb_floor(
     return _finite_evidence_binomial_ucb(0, member_count, alpha=alpha)
 
 
+def _stress_coherent_samples_to_marginal_ucb_floors(
+    samples: object,
+    required_ucb: Sequence[float],
+    *,
+    alpha: float = _FINITE_EVIDENCE_BAND_ALPHA,
+):
+    """Encode finite-evidence marginal UCB floors in one coherent simplex."""
+
+    import numpy as np  # noqa: PLC0415
+
+    probs = np.asarray(samples, dtype=float).copy()
+    floors = np.asarray(tuple(required_ucb), dtype=float)
+    if (
+        probs.ndim != 2
+        or probs.shape[0] < 2
+        or floors.shape != (probs.shape[1],)
+        or not np.isfinite(probs).all()
+        or not np.isfinite(floors).all()
+        or (probs < 0.0).any()
+        or (probs > 1.0).any()
+        or (floors < 0.0).any()
+        or (floors > 1.0).any()
+        or not np.allclose(probs.sum(axis=1), 1.0, atol=1e-12)
+        or not math.isfinite(float(alpha))
+        or not 0.0 < float(alpha) < 0.5
+    ):
+        raise ValueError("finite-evidence stress requires a coherent simplex and valid UCB floors")
+    raw_ucb = np.percentile(probs, 100.0 * (1.0 - float(alpha)), axis=0)
+    targets = np.flatnonzero(raw_ucb < floors)
+    stress_rows = int(math.floor(float(alpha) * probs.shape[0])) + 1
+    if int(targets.size) * stress_rows > probs.shape[0]:
+        raise ValueError("finite-evidence tail stress exceeds coherent bootstrap carrier")
+    available = np.ones(probs.shape[0], dtype=bool)
+    for target in targets.tolist():
+        target_floor = float(floors[target])
+        ranked = np.argsort(-probs[:, target], kind="stable")
+        rows = ranked[available[ranked]][:stress_rows]
+        if int(rows.size) != stress_rows:
+            raise ValueError("finite-evidence tail stress rows unavailable")
+        old = probs[rows, target]
+        if np.any(old >= 1.0):
+            raise ValueError("finite-evidence tail stress cannot widen a certain bin")
+        scale = (1.0 - target_floor) / (1.0 - old)
+        probs[rows, :] = probs[rows, :] * scale[:, None]
+        probs[rows, target] = target_floor
+        available[rows] = False
+    if not np.isfinite(probs).all() or not np.allclose(
+        probs.sum(axis=1), 1.0, atol=1e-12
+    ):
+        raise ValueError("finite-evidence tail stress broke simplex coherence")
+    return np.ascontiguousarray(probs, dtype=np.float64)
+
+
 def _current_evidence_tail_ucb_floors(
     *,
     mu_star: float,
@@ -3107,31 +3160,10 @@ def _build_fused_q_bounds(
             members_c=evidence_members_c,
         )
         required_ucb = np.array([finite_floors[bin_id] for bin_id in bin_ids])
-        raw_ucb = np.percentile(probs, 95.0, axis=0)
-        targets = np.flatnonzero(raw_ucb < required_ucb)
-        stress_rows = int(math.floor(_FINITE_EVIDENCE_BAND_ALPHA * int(n_draws))) + 1
-        if int(targets.size) * stress_rows > int(n_draws):
-            raise ValueError(
-                "finite-evidence tail stress exceeds coherent bootstrap carrier"
-            )
-        available = np.ones(int(n_draws), dtype=bool)
-        for target in targets.tolist():
-            target_floor = float(required_ucb[target])
-            ranked = np.argsort(-probs[:, target], kind="stable")
-            rows = ranked[available[ranked]][:stress_rows]
-            if int(rows.size) != stress_rows:
-                raise ValueError("finite-evidence tail stress rows unavailable")
-            old = probs[rows, target]
-            if np.any(old >= 1.0):
-                raise ValueError("finite-evidence tail stress cannot widen a certain bin")
-            scale = (1.0 - target_floor) / (1.0 - old)
-            probs[rows, :] = probs[rows, :] * scale[:, None]
-            probs[rows, target] = target_floor
-            available[rows] = False
-        if not np.isfinite(probs).all() or not np.allclose(
-            probs.sum(axis=1), 1.0, atol=1e-12
-        ):
-            raise ValueError("finite-evidence tail stress broke simplex coherence")
+        probs = _stress_coherent_samples_to_marginal_ucb_floors(
+            probs,
+            required_ucb,
+        )
 
     q_lcb_vec = np.percentile(probs, 5.0, axis=0)  # (M,) marginal quantile of coherent rows
     q_ucb_vec = np.percentile(probs, 95.0, axis=0)  # (M,)

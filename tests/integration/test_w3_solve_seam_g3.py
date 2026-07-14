@@ -90,6 +90,7 @@ from src.state.portfolio import PortfolioState
 from src.state.schema.opportunity_events_schema import (
     ensure_table as ensure_opportunity_events_table,
 )
+from src.types.market import Bin
 from tests.integration import test_qkernel_spine_routing as R
 
 _BRIDGE_PATH = bridge.__file__
@@ -581,7 +582,7 @@ def test_day0_current_probability_does_not_require_derived_carrier_q_mode():
         source_truth_identity="day0-source-truth-with-remaining-day-mode",
         authority_certificate_hash="day0-certificate",
         band_alpha=0.05,
-        band_basis=era._GLOBAL_CURRENT_SETTLEMENT_SIMPLEX_BAND_BASIS,
+        band_basis=era._GLOBAL_DAY0_CURRENT_SETTLEMENT_SIMPLEX_BAND_BASIS,
         yes_q_samples=np.asarray(((0.25, 0.75), (0.30, 0.70))),
         captured_at_utc=captured_at,
         max_age=_dt.timedelta(minutes=3),
@@ -997,10 +998,17 @@ def test_global_day0_uses_remaining_day_probability_builder(monkeypatch):
 
 
 def test_global_day0_joint_witness_uses_one_remaining_day_simplex(monkeypatch):
-    matrix = np.asarray([[0.8, 0.2], [0.3, 0.7], [0.6, 0.4]], dtype=float)
+    matrix = np.asarray([[0.0, 1.0] for _ in range(100)], dtype=float)
+    bins = (
+        Bin(low=22.0, high=22.0, unit="C", label="22C"),
+        Bin(low=23.0, high=None, unit="C", label="23C or above"),
+    )
     analysis = SimpleNamespace(
-        p_posterior=np.asarray([0.55, 0.45], dtype=float),
+        p_posterior=np.asarray([0.0, 1.0], dtype=float),
         forecast_yes_probability_sample_matrix=lambda _n: matrix,
+        _member_maxes=np.asarray([25.0, 25.0], dtype=float),
+        _settle=lambda values: values,
+        bins=bins,
     )
     monkeypatch.setattr(
         era,
@@ -1014,19 +1022,50 @@ def test_global_day0_joint_witness_uses_one_remaining_day_simplex(monkeypatch):
         lambda **_kwargs: analysis,
     )
 
+    payload = {
+        "_edli_day0_lcb_transform": {
+            "absorbing_no_conditions": [],
+        }
+    }
     samples, point, basis = era._day0_remaining_global_probability_components(
         SimpleNamespace(),
         forecast_conn=sqlite3.connect(":memory:"),
         calibration_conn=sqlite3.connect(":memory:"),
-        family=SimpleNamespace(candidates=(object(), object())),
-        payload={},
+        family=SimpleNamespace(
+            candidates=(
+                SimpleNamespace(condition_id="condition-22"),
+                SimpleNamespace(condition_id="condition-23-plus"),
+            )
+        ),
+        payload=payload,
         decision_time=_dt.datetime(2026, 7, 10, 20, 0, tzinfo=_dt.timezone.utc),
     )
 
-    assert np.array_equal(samples, matrix)
-    assert point.tolist() == pytest.approx([0.55, 0.45])
-    assert basis == "current_coherent_settlement_simplex_v1"
+    zero_hit_ucb = 1.0 - 0.05 ** (1.0 / 2.0)
+    assert np.percentile(samples[:, 0], 95.0) >= zero_hit_ucb - 1e-15
+    assert point.tolist() == pytest.approx([0.0, 1.0])
+    assert basis == "current_coherent_day0_remaining_finite_evidence_v2"
     assert np.allclose(samples.sum(axis=1), 1.0)
+    assert payload["_edli_day0_finite_evidence_member_count"] == 2
+    assert payload["_edli_day0_finite_evidence_hits_by_condition"] == {
+        "condition-22": 0,
+        "condition-23-plus": 2,
+    }
+    hard_fact_floors = era._day0_current_evidence_yes_ucb_floors(
+        analysis=analysis,
+        family=SimpleNamespace(
+            candidates=(
+                SimpleNamespace(condition_id="condition-22"),
+                SimpleNamespace(condition_id="condition-23-plus"),
+            )
+        ),
+        payload={
+            "_edli_day0_lcb_transform": {
+                "absorbing_no_conditions": ["condition-22"],
+            }
+        },
+    )
+    assert hard_fact_floors[0] == 0.0
 
 
 def _global_scope_event(*, city: str, source_run_id: str):

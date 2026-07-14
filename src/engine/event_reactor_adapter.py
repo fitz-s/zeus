@@ -22846,6 +22846,9 @@ def _global_day0_probability_authority_payload(
 _GLOBAL_CURRENT_SETTLEMENT_SIMPLEX_BAND_BASIS = (
     "current_coherent_settlement_simplex_v1"
 )
+_GLOBAL_DAY0_CURRENT_SETTLEMENT_SIMPLEX_BAND_BASIS = (
+    "current_coherent_day0_remaining_finite_evidence_v2"
+)
 
 
 def _replacement_global_probability_components(
@@ -22941,6 +22944,55 @@ def _replacement_global_probability_components(
     )
 
 
+def _day0_current_evidence_yes_ucb_floors(
+    *,
+    analysis: object,
+    family: object,
+    payload: dict[str, object],
+) -> np.ndarray:
+    """Return current-member UCB floors without widening observed impossibilities."""
+
+    from src.data.replacement_forecast_materializer import (
+        _finite_evidence_binomial_ucb,
+    )
+
+    members = np.asarray(getattr(analysis, "_member_maxes", ()), dtype=float).ravel()
+    members = members[np.isfinite(members)]
+    bins = list(getattr(analysis, "bins", ()) or ())
+    candidates = list(getattr(family, "candidates", ()) or ())
+    if members.size < 1 or len(bins) != len(candidates):
+        raise ValueError("GLOBAL_DAY0_FINITE_EVIDENCE_MEMBERS_INVALID")
+    measured = np.asarray(analysis._settle(members), dtype=float)
+    hits = bin_counts_from_array(measured, bins).astype(int)
+    transform = payload.get("_edli_day0_lcb_transform")
+    if not isinstance(transform, Mapping):
+        raise ValueError("GLOBAL_DAY0_FINITE_EVIDENCE_LCB_TRANSFORM_MISSING")
+    absorbing_no = {
+        str(value)
+        for value in transform.get("absorbing_no_conditions", ())
+    }
+    conditions = [str(getattr(candidate, "condition_id", "") or "") for candidate in candidates]
+    if any(not condition for condition in conditions):
+        raise ValueError("GLOBAL_DAY0_FINITE_EVIDENCE_CONDITION_ID_MISSING")
+    floors = np.asarray(
+        [
+            0.0
+            if condition in absorbing_no
+            else _finite_evidence_binomial_ucb(int(hit), int(members.size))
+            for condition, hit in zip(conditions, hits, strict=True)
+        ],
+        dtype=float,
+    )
+    payload["_edli_day0_finite_evidence_member_count"] = int(members.size)
+    payload["_edli_day0_finite_evidence_hits_by_condition"] = dict(
+        zip(conditions, (int(hit) for hit in hits), strict=True)
+    )
+    payload["_edli_day0_finite_evidence_yes_ucb_by_condition"] = dict(
+        zip(conditions, (float(value) for value in floors), strict=True)
+    )
+    return floors
+
+
 def _day0_remaining_global_probability_components(
     event: OpportunityEvent,
     *,
@@ -23000,7 +23052,20 @@ def _day0_remaining_global_probability_components(
         or not math.isclose(float(point_q.sum()), 1.0, rel_tol=0.0, abs_tol=1e-9)
     ):
         raise ValueError("GLOBAL_DAY0_REMAINING_SIMPLEX_INVALID")
-    return samples, point_q, _GLOBAL_CURRENT_SETTLEMENT_SIMPLEX_BAND_BASIS
+    required_ucb = _day0_current_evidence_yes_ucb_floors(
+        analysis=analysis,
+        family=family,
+        payload=payload,
+    )
+    from src.data.replacement_forecast_materializer import (
+        _stress_coherent_samples_to_marginal_ucb_floors,
+    )
+
+    samples = _stress_coherent_samples_to_marginal_ucb_floors(
+        samples,
+        required_ucb,
+    )
+    return samples, point_q, _GLOBAL_DAY0_CURRENT_SETTLEMENT_SIMPLEX_BAND_BASIS
 
 
 def _prepare_current_global_probability_family(
@@ -23205,6 +23270,14 @@ def _prepare_current_global_probability_family(
     if components is None:
         raise ValueError("GLOBAL_CURRENT_POSTERIOR_SIMPLEX_INVALID")
     samples, point_q, band_basis = components
+    if current_day0_payload is not None and day0_payload_out is not None:
+        for key in (
+            "_edli_day0_finite_evidence_member_count",
+            "_edli_day0_finite_evidence_hits_by_condition",
+            "_edli_day0_finite_evidence_yes_ucb_by_condition",
+        ):
+            if key in payload:
+                day0_payload_out[key] = payload[key]
     sample_identity = probability_sample_matrix_identity(samples)
     if current_day0_payload is not None:
         posterior_identity_hash = stable_hash(
@@ -23229,6 +23302,15 @@ def _prepare_current_global_probability_family(
                 "remaining_models": payload.get("_edli_day0_remaining_model_names"),
                 "remaining_capture_times": payload.get(
                     "_edli_day0_remaining_capture_times_utc"
+                ),
+                "finite_evidence_member_count": payload.get(
+                    "_edli_day0_finite_evidence_member_count"
+                ),
+                "finite_evidence_hits_by_condition": payload.get(
+                    "_edli_day0_finite_evidence_hits_by_condition"
+                ),
+                "finite_evidence_yes_ucb_by_condition": payload.get(
+                    "_edli_day0_finite_evidence_yes_ucb_by_condition"
                 ),
             }
         )
@@ -23365,7 +23447,7 @@ def current_global_probability_authority(
         max_age = getattr(witness, "max_age", None)
         if (
             str(getattr(witness, "band_basis", ""))
-            != _GLOBAL_CURRENT_SETTLEMENT_SIMPLEX_BAND_BASIS
+            != _GLOBAL_DAY0_CURRENT_SETTLEMENT_SIMPLEX_BAND_BASIS
             or not isinstance(captured_at, datetime)
             or captured_at.tzinfo is None
             or not isinstance(max_age, timedelta)

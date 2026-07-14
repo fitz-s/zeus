@@ -183,6 +183,42 @@ def _remaining_day_lcb_has_guarded_qkernel_lcb(
     )
 
 
+def _remaining_day_lcb_has_current_band_tightening(
+    payload: Mapping[str, object],
+    *,
+    q_live: float,
+    q_lcb: float,
+) -> bool:
+    """License only a non-degenerate, identity-bound tightening of the local transform."""
+
+    economics = payload.get("qkernel_execution_economics")
+    if not isinstance(economics, Mapping):
+        return False
+    if (
+        str(economics.get("q_lcb_guard_basis") or "") != "CURRENT_POSTERIOR_BAND"
+        or str(economics.get("selection_guard_basis") or "")
+        != "CURRENT_POSTERIOR_BAND"
+        or not str(economics.get("current_state_identity_hash") or "").strip()
+        or not _truthy_false(economics.get("q_lcb_guard_abstained"))
+        or not _truthy_false(economics.get("selection_guard_abstained"))
+    ):
+        return False
+    try:
+        payoff_q_point = float(economics.get("payoff_q_point"))
+        payoff_q_lcb = float(economics.get("payoff_q_lcb"))
+        selection_guard_q_safe = float(economics.get("selection_guard_q_safe"))
+        selection_guard_n = int(economics.get("selection_guard_n"))
+    except (TypeError, ValueError):
+        return False
+    return (
+        selection_guard_n >= 2
+        and selection_guard_q_safe > 0.0
+        and q_lcb < q_live - DAY0_REMAINING_DAY_LCB_TOLERANCE
+        and math.isclose(payoff_q_point, q_live, rel_tol=1e-9, abs_tol=1e-6)
+        and math.isclose(payoff_q_lcb, q_lcb, rel_tol=1e-9, abs_tol=1e-6)
+    )
+
+
 def _assert_remaining_day_lcb_is_supported_by_transform(
     *,
     payload: Mapping[str, object],
@@ -446,7 +482,14 @@ def assert_live_day0_probability_authority(
         raise Day0AuthorityError(f"selected_condition_lcb nonnumeric:{selected_condition}") from None
     if not math.isfinite(transform_lcb):
         raise Day0AuthorityError(f"selected_condition_lcb nonfinite:{selected_condition}")
-    if not math.isclose(float(q_lcb), transform_lcb, rel_tol=1e-9, abs_tol=1e-6):
+    if not math.isclose(float(q_lcb), transform_lcb, rel_tol=1e-9, abs_tol=1e-6) and not (
+        float(q_lcb) < transform_lcb
+        and _remaining_day_lcb_has_current_band_tightening(
+            payload,
+            q_live=float(q_live),
+            q_lcb=float(q_lcb),
+        )
+    ):
         raise Day0AuthorityError(
             "selected q_lcb does not match remaining-day transform:"
             f"condition_id={selected_condition}:q_lcb={float(q_lcb):.12g}:"
