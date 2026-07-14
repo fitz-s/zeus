@@ -135,6 +135,25 @@ def test_qkernel_band_alpha_invalid_config_falls_back(monkeypatch):
     assert bridge._qkernel_spine_band_alpha() == pytest.approx(0.05)
 
 
+@pytest.mark.parametrize(
+    ("missing_reason", "blocked"),
+    (
+        (None, False),
+        ("ADMISSION_CAPITAL_EFFICIENCY_LCB_EV:legacy", False),
+        ("CENTER_BUY_ULTRA_LOW_PRICE:legacy", False),
+        ("ADMISSION_NEAR_SETTLED_PRICE:price=0.999000:ceiling=0.990000", True),
+        ("SETTLEMENT_TRUTH_UNAVAILABLE", True),
+    ),
+)
+def test_global_seed_keeps_only_qkernel_recoverable_proof_rejections(
+    missing_reason,
+    blocked,
+):
+    proof = SimpleNamespace(missing_reason=missing_reason)
+
+    assert bridge._global_seed_blocked_by_proof(proof) is blocked
+
+
 # ---------------------------------------------------------------------------
 # Fixtures — the SAME snapshot-row + _CandidateProof shape the reactor materializes.
 # ---------------------------------------------------------------------------

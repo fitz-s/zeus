@@ -362,6 +362,13 @@ class PreparedGlobalCandidateSeed:
     book_captured_at_utc: datetime
 
 
+def _global_seed_blocked_by_proof(proof: Any) -> bool:
+    """Exclude proof rejections that qkernel cannot lawfully rescore."""
+
+    missing_reason = str(getattr(proof, "missing_reason", "") or "").strip()
+    return not _qkernel_may_clear_legacy_missing_reason(missing_reason)
+
+
 def _event_resolution_identity(resolution: Any) -> str:
     """Hash every settlement field without relying on datetime.time JSON support."""
 
@@ -459,6 +466,8 @@ def _prepare_global_family(
         ):
             continue
         proof = proofs_by_bin_side.get(key)
+        if proof is None or _global_seed_blocked_by_proof(proof):
+            continue
         row = getattr(proof, "row", None) if proof is not None else None
         captured_raw = row.get("captured_at") if isinstance(row, Mapping) else None
         try:
