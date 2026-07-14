@@ -2888,13 +2888,8 @@ def test_live_adapter_no_canary_gate_proceeds_past_deleted_canary_block(monkeypa
     assert receipt.reason == "EDLI_DURABLE_SUBMIT_OUTBOX_REQUIRED"
 
 
-def test_live_adapter_blocks_entry_when_live_health_surface_missing(monkeypatch, tmp_path):
-    """Live-health entry authority must fail closed before command build.
-
-    A missing q/provenance/lifecycle/monitor surface is not an operator pause
-    and not a no-edge decision; it is degraded entry authority. ENTRY must stop
-    before the no-submit receipt builder can reserve live cap or reach executor.
-    """
+def test_live_adapter_does_not_gate_on_derived_live_health_surface(monkeypatch, tmp_path):
+    """Derived composite health cannot preempt current order-bound evidence."""
 
     from src.engine import event_reactor_adapter as adapter
     from src.riskguard.risk_level import RiskLevel
@@ -2907,9 +2902,17 @@ def test_live_adapter_blocks_entry_when_live_health_surface_missing(monkeypatch,
     build_called = {"count": 0}
     executor_called = {"count": 0}
 
-    def _build_should_not_run(*_args, **_kwargs):
+    def _build_current_order_rejection(*_args, **_kwargs):
         build_called["count"] += 1
-        raise AssertionError("no-submit receipt builder must not run when live health blocks entry")
+        from src.events.reactor import EventSubmissionReceipt
+
+        return EventSubmissionReceipt(
+            submitted=False,
+            proof_accepted=False,
+            event_id=event.event_id,
+            causal_snapshot_id=event.causal_snapshot_id,
+            reason="CURRENT_ORDER_EVIDENCE_REJECTED",
+        )
 
     def _executor_should_not_run(_final_intent, _command):
         executor_called["count"] += 1
@@ -2920,7 +2923,11 @@ def test_live_adapter_blocks_entry_when_live_health_surface_missing(monkeypatch,
         payload["surfaces"].pop("entry_q_version")
         return payload
 
-    monkeypatch.setattr(adapter, "build_event_bound_no_submit_receipt", _build_should_not_run)
+    monkeypatch.setattr(
+        adapter,
+        "build_event_bound_no_submit_receipt",
+        _build_current_order_rejection,
+    )
 
     submit = adapter.event_bound_live_adapter_from_trade_conn(
         conn,
@@ -2937,8 +2944,8 @@ def test_live_adapter_blocks_entry_when_live_health_surface_missing(monkeypatch,
 
     assert receipt.submitted is False
     assert receipt.proof_accepted is False
-    assert receipt.reason == "live_health_entry_authority:missing_surfaces=entry_q_version"
-    assert build_called["count"] == 0
+    assert receipt.reason == "CURRENT_ORDER_EVIDENCE_REJECTED"
+    assert build_called["count"] == 1
     assert executor_called["count"] == 0
 
 

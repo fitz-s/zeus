@@ -3685,17 +3685,17 @@ def _entry_live_health_authority_block_reason(
     *,
     now: datetime | None = None,
 ) -> str | None:
-    """Return why live ENTRY authority is degraded, or None when entry may proceed.
+    """Describe composite health drift for operators; never authorize an order.
 
-    This gate deliberately ignores the live-health ``business_plane`` surface:
+    This diagnostic ignores the live-health ``business_plane`` surface:
     no candidates/no capital flow is an observability signal, not an input that
     may self-lock future entries. ``runtime_code``, ``process_code``, and
     ``forecast_event_bridge`` are also observability. The bridge measures global
     posterior-to-event carrier progress; it cannot refute the selected family's
     current probability witness, which is rebound and tightened in preflight.
-    Required forecast, lifecycle, monitor, and execution-capability surfaces must
-    still be present, fresh, and individually OK before a new ENTRY can reach
-    command build.
+    Order authorization is rebuilt from current posterior, book, wealth,
+    collateral, execution capability, and venue facts on the money path. This
+    derived composite remains available for diagnostics only.
     """
 
     try:
@@ -4348,18 +4348,6 @@ def event_bound_live_adapter_from_trade_conn(
                     reason=f"entries_paused:{entries_pause_reason}",
                     proof_accepted=False,
                 )
-            live_health_block_reason = _entry_live_health_authority_block_reason(
-                entry_live_health_authority_provider,
-                now=decision_time,
-            )
-            if live_health_block_reason is not None:
-                return EventSubmissionReceipt(
-                    False,
-                    event.event_id,
-                    event.causal_snapshot_id,
-                    reason=f"live_health_entry_authority:{live_health_block_reason}",
-                    proof_accepted=False,
-                )
         if preflight_receipt is not None:
             receipt_actuation = preflight_receipt.global_actuation
             if (
@@ -4516,25 +4504,6 @@ def event_bound_live_adapter_from_trade_conn(
                         submitted=False,
                         side_effect_status="NO_SUBMIT",
                         reason=f"entries_paused:{entries_pause_reason}",
-                        proof_accepted=False,
-                    )
-                live_health_block_reason = _entry_live_health_authority_block_reason(
-                    entry_live_health_authority_provider,
-                    now=decision_time,
-                )
-                if live_health_block_reason is not None:
-                    _abort_family_rebalance_entry_payloads_after_no_submit(
-                        trade_conn,
-                        fill_up_lease_payload=no_submit_receipt.fill_up_lease_payload,
-                        shift_bin_lease_payload=no_submit_receipt.shift_bin_lease_payload,
-                        now_iso=decision_time.astimezone(UTC).isoformat(),
-                        reason=f"live_health_entry_authority:{live_health_block_reason}",
-                    )
-                    return dataclass_replace(
-                        no_submit_receipt,
-                        submitted=False,
-                        side_effect_status="NO_SUBMIT",
-                        reason=f"live_health_entry_authority:{live_health_block_reason}",
                         proof_accepted=False,
                     )
                 _shift_entry_lease = no_submit_receipt.shift_bin_lease_payload
