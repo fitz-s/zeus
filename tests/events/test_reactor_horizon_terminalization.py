@@ -555,6 +555,18 @@ def test_known_transient_reason_classifies_without_log(caplog):
         assert _is_transient_money_path_reason("SHIFT_BIN_EXIT_OLD_LEG_PENDING") is True
         assert (
             _is_transient_money_path_reason(
+                "GLOBAL_AUCTION_NO_TRADE:NO_CURRENT_EXECUTABLE_POSITIVE_ORDER"
+            )
+            is True
+        )
+        assert (
+            _is_transient_money_path_reason(
+                "GLOBAL_AUCTION_FAILED:ValueError:GLOBAL_CURRENT_GAMMA_EVENT_METADATA_AMBIGUOUS"
+            )
+            is True
+        )
+        assert (
+            _is_transient_money_path_reason(
                 "venue_auth_invalid_signature_400: PolyApiException[status_code=400, "
                 "error_message={'error': 'invalid POLY_GNOSIS_SAFE signature'}]"
             )

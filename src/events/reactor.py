@@ -3778,6 +3778,12 @@ TRANSIENT_MONEY_PATH_REASONS: frozenset[str] = frozenset({
     # claim; the current claimed page must remain pending until that claim runs.
     "GLOBAL_WINNER_AWAITS_CLAIM",
     "GLOBAL_REAUCTION_WINNER_AWAITS_CLAIM",
+    # The complete current-epoch auction either found no positive BUY/SELL action
+    # (CASH/HOLD wins) or could not finish because a refreshable current-input
+    # authority changed underneath it.  Both require a fresh full-auction pass;
+    # neither may fall through the UNKNOWN fail-open classifier.
+    "GLOBAL_AUCTION_NO_TRADE",
+    "GLOBAL_AUCTION_FAILED",
 })
 
 # A reason whose BASE is in this set is TERMINAL (a genuine, non-race rejection)
