@@ -32,6 +32,7 @@ from src.execution.executor import (
     _certified_global_increment_authorized,
     _current_global_increment_wealth_component,
     _entry_duplicate_same_token_component,
+    _entry_increment_fact_backing_component,
     _entry_same_token_cooldown_component,
 )
 
@@ -724,23 +725,35 @@ def test_executor_certified_global_increment_reuses_reconciled_position_but_not_
     )
 
     mem_db.execute(
-        "UPDATE position_current SET cost_basis_usd=16.0798 "
+        "UPDATE position_current SET cost_basis_usd=15.9905 "
         "WHERE position_id='active-position'"
     )
-    cost_drifted = _entry_duplicate_same_token_component(
+    chain_summary_cost = _entry_duplicate_same_token_component(
         mem_db,
         token_id=TOKEN_X,
         candidate_position_id="fresh-candidate",
         allow_reconciled_position_increment=True,
     )
-    assert cost_drifted["allowed"] is False
-    assert cost_drifted["fact_backing"]["details"] == {
-        "projected_shares": "24.0",
-        "projected_cost_basis_usd": "16.0798",
-        "aggregate_shares": "24.0",
-        "aggregate_cost_basis_usd": "16.08",
+    assert chain_summary_cost["allowed"] is True
+    assert chain_summary_cost["reason"] == "allowed_reconciled_position_increment"
+    assert chain_summary_cost["increment_position_generation"] == allowed[
+        "increment_position_generation"
+    ]
+    fact_backing = _entry_increment_fact_backing_component(
+        mem_db,
+        position_id="active-position",
+        shares=24.0,
+        cost_basis_usd=15.9905,
+    )
+    assert fact_backing["allowed"] is True
+    assert fact_backing["details"] == {
+        "position_id": "active-position",
+        "shares": "24.0",
+        "cost_basis_usd": "16.08",
+        "projection_cost_basis_usd": "15.9905",
+        "projection_cost_delta_usd": "-0.0895",
+        "cost_basis_authority": "command_deduped_terminal_execution_fact",
         "execution_fact_count": 1,
-        "cost_abs_tolerance_usd": "0.0001",
     }
     mem_db.execute(
         "UPDATE position_current SET cost_basis_usd=16.08 "
@@ -792,7 +805,7 @@ def test_executor_certified_global_increment_reuses_reconciled_position_but_not_
     assert orphan_fill["existing_command_id"] == "cmd-orphan-fill"
 
 
-def test_certified_increment_allows_bounded_per_fill_cost_quantization(mem_db):
+def test_certified_increment_uses_fills_when_projection_cost_differs(mem_db):
     fills = (
         ("cmd-1", 16.2, 0.75),
         ("cmd-2", 21.0, 0.77),
@@ -860,9 +873,8 @@ def test_certified_increment_allows_bounded_per_fill_cost_quantization(mem_db):
         allow_reconciled_position_increment=True,
     )
 
-    assert blocked["allowed"] is False
-    assert blocked["fact_backing"]["details"]["execution_fact_count"] == 4
-    assert blocked["fact_backing"]["details"]["cost_abs_tolerance_usd"] == "0.0004"
+    assert blocked["allowed"] is True
+    assert blocked["reason"] == "allowed_reconciled_position_increment"
 
 
 def test_certified_global_increment_requires_materialized_existing_economics(mem_db):
