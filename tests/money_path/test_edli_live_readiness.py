@@ -1,5 +1,5 @@
 # Created: 2026-05-25
-# Last reused/audited: 2026-07-13
+# Last reused/audited: 2026-07-14
 # Authority basis: docs/operations/current/finite_evidence_probability_symmetry/PLAN.md
 from __future__ import annotations
 
@@ -3263,14 +3263,24 @@ def test_entry_live_health_still_blocks_noncurrent_dust_minimum(freshness_mutati
     assert reason == "failing_surfaces=monitor_probability_freshness"
 
 
-def test_entry_live_health_scopes_durable_closed_market_hold_without_fresh_book():
+@pytest.mark.parametrize(
+    ("closed_hold_marker", "expected_reason"),
+    (
+        (True, None),
+        (False, "failing_surfaces=monitor_probability_freshness"),
+    ),
+)
+def test_entry_live_health_scopes_only_proven_day0_closed_market_hold(
+    closed_hold_marker,
+    expected_reason,
+):
     from src.engine import event_reactor_adapter as adapter
 
     decision_time = datetime(2026, 5, 24, 18, 10, tzinfo=timezone.utc)
     stale = {
         "position_id": "dust-1",
-        "phase": "pending_exit",
-        "market_closed_hold_to_settlement": True,
+        "phase": "day0_window",
+        "market_closed_hold_to_settlement": closed_hold_marker,
     }
     payload = _healthy_entry_live_health_provider(decision_time)()
     payload["surfaces"]["monitor_probability_freshness"] = {
@@ -3311,7 +3321,7 @@ def test_entry_live_health_scopes_durable_closed_market_hold_without_fresh_book(
         now=decision_time + timedelta(seconds=30),
     )
 
-    assert reason is None
+    assert reason == expected_reason
 
 
 def test_entry_live_health_authority_still_blocks_global_runtime_failure():

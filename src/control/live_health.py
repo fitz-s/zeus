@@ -3019,22 +3019,41 @@ def _monitor_probability_freshness_surface(
         for row in scoped_review_hold_sample
         if row.get("position_id") is not None
     }
+    current_latest_join = ""
+    current_latest_payload = ""
+    if has_monitor_events:
+        current_latest_payload = (
+            ", latest.payload_json AS latest_monitor_payload_json"
+        )
+        current_latest_join = """
+          LEFT JOIN position_events latest
+            ON latest.rowid = (
+                SELECT e.rowid
+                  FROM position_events e
+                 WHERE e.position_id = pc.position_id
+                   AND e.event_type = 'MONITOR_REFRESHED'
+                 ORDER BY e.sequence_no DESC, datetime(e.occurred_at) DESC
+                 LIMIT 1
+            )
+        """
     current_rows, current_err = _sqlite_ro_rows(
         trade_db,
-        """
-        SELECT position_id,
-               phase,
-               order_status,
-               shares,
-               chain_shares,
-               last_monitor_prob,
-               last_monitor_prob_is_fresh,
-               updated_at,
-               city,
-               target_date,
-               bin_label,
-               direction
+        f"""
+        SELECT pc.position_id,
+               pc.phase,
+               pc.order_status,
+               pc.shares,
+               pc.chain_shares,
+               pc.last_monitor_prob,
+               pc.last_monitor_prob_is_fresh,
+               pc.updated_at,
+               pc.city,
+               pc.target_date,
+               pc.bin_label,
+               pc.direction
+               {current_latest_payload}
           FROM position_current pc
+          {current_latest_join}
          WHERE pc.phase IN ('active', 'day0_window', 'pending_exit')
            AND (
                COALESCE(CAST(pc.chain_shares AS REAL), 0.0) > 0.0
@@ -3075,6 +3094,7 @@ def _monitor_probability_freshness_surface(
                 SELECT e.position_id,
                        e.sequence_no,
                        e.occurred_at,
+                       e.payload_json,
                        json_extract(e.payload_json, '$.last_monitor_prob')
                            AS last_monitor_prob,
                        json_extract(e.payload_json, '$.last_monitor_prob_is_fresh')
@@ -3105,6 +3125,7 @@ def _monitor_probability_freshness_surface(
                    recent.last_monitor_prob,
                    recent.last_monitor_prob_is_fresh,
                    recent.stale_count,
+                   recent.payload_json AS latest_monitor_payload_json,
                    pc.city,
                    pc.target_date,
                    pc.bin_label,
@@ -3202,6 +3223,7 @@ def _monitor_probability_freshness_surface(
                 if age_seconds is None
                 else max(0.0, age_seconds - MONITOR_PROBABILITY_STALE_LOOKBACK_SECONDS)
             )
+        for row in (*current_rows, *latest_stale_rows, *latest_monitor_age_rows):
             try:
                 latest_payload = json.loads(
                     str(row.pop("latest_monitor_payload_json", "") or "{}")

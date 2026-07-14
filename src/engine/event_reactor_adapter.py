@@ -3578,12 +3578,12 @@ def _read_entry_live_health_composite() -> Mapping[str, object]:
         return {_ENTRY_LIVE_HEALTH_PROVIDER_ERROR_KEY: f"COMPOSITE_UNREADABLE:{type(exc).__name__}"}
 
 
-def _monitor_failure_is_only_nonactionable_pending_exit(
+def _monitor_failure_is_only_nonactionable_exposure(
     surfaces: Mapping[str, object],
     *,
     now: datetime,
 ) -> bool:
-    """True when every stale monitor row is a proven nonactionable exit claim."""
+    """True when every stale monitor row is proven nonactionable exposure."""
 
     monitor = surfaces.get("monitor_probability_freshness")
     sub_min = surfaces.get("sub_min_partial_position")
@@ -3630,7 +3630,7 @@ def _monitor_failure_is_only_nonactionable_pending_exit(
         ):
             return False
         for row in sample:
-            if not isinstance(row, Mapping) or str(row.get("phase") or "") != "pending_exit":
+            if not isinstance(row, Mapping):
                 return False
             position_id = str(row.get("position_id") or "").strip()
             if not position_id:
@@ -3638,6 +3638,8 @@ def _monitor_failure_is_only_nonactionable_pending_exit(
             stale_ids.add(position_id)
             if row.get("market_closed_hold_to_settlement") is True:
                 closed_hold_ids.add(position_id)
+            elif str(row.get("phase") or "") != "pending_exit":
+                return False
     if not stale_ids:
         return False
 
@@ -3739,7 +3741,7 @@ def _entry_live_health_authority_block_reason(
     entry_scoped_failures: set[str] = set()
     if (
         "monitor_probability_freshness" in failing_surfaces
-        and _monitor_failure_is_only_nonactionable_pending_exit(
+        and _monitor_failure_is_only_nonactionable_exposure(
             surfaces,
             now=checked_at,
         )

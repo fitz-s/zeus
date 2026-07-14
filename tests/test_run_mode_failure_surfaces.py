@@ -1,8 +1,8 @@
 # Created: 2026-05-19
-# Last reused or audited: 2026-07-10
+# Last reused or audited: 2026-07-14
 # Authority basis: codereview-may19-2.md relationship F
 #                  + docs/operations/task_2026-05-21_live_side_effect_risk_boundaries/task.md P1-1
-# Lifecycle: created=2026-05-19; last_reviewed=2026-07-10; last_reused=2026-07-10
+# Lifecycle: created=2026-05-19; last_reviewed=2026-07-14; last_reused=2026-07-14
 # Purpose: Relationship-F antibody — assert that compute_composite_live_health()
 #   surfaces DEGRADED when run_mode has failed or status_summary is stale, even
 #   when the heartbeat is OK (closing the "scheduler alive but not trading" gap).
@@ -3743,6 +3743,59 @@ def test_monitor_probability_freshness_exposes_canonical_closed_market_hold(
     ][0]
     assert sample["market_closed_hold_to_settlement"] is True
     assert "latest_monitor_payload_json" not in sample
+
+
+def test_monitor_probability_freshness_exposes_closed_hold_on_stale_projection(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sd = tmp_path / "state"
+    sd.mkdir()
+    _setup_healthy_state(sd)
+    monkeypatch.setattr(live_health, "_dirty_runtime_worktree_paths", lambda **_kwargs: ())
+    now = datetime.now(timezone.utc)
+    _write_monitor_probability_freshness_db(
+        sd,
+        now=now,
+        latest_event_fresh=False,
+        projection_fresh=False,
+    )
+    conn = sqlite3.connect(sd / "zeus_trades.db")
+    try:
+        conn.execute(
+            "UPDATE position_events SET payload_json = ? WHERE position_id = 'pos-monitor' AND sequence_no = 11",
+            (
+                json.dumps(
+                    {
+                        "last_monitor_prob": None,
+                        "last_monitor_prob_is_fresh": False,
+                        "semantic_event": "MARKET_CLOSED_HOLD_TO_SETTLEMENT",
+                        "hold_reason": "MARKET_CLOSED_AWAITING_SETTLEMENT",
+                        "exit_order_submitted": False,
+                        "exit_failure": False,
+                        "applied_validations": [
+                            "MARKET_CLOSED_AWAITING_SETTLEMENT"
+                        ],
+                    }
+                ),
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    result = compute_composite_live_health(state_dir=sd, now=now)
+
+    surface = result["surfaces"]["monitor_probability_freshness"]
+    assert surface["current_stale_projection_sample"][0][
+        "market_closed_hold_to_settlement"
+    ] is True
+    assert surface["latest_stale_monitor_sample"][0][
+        "market_closed_hold_to_settlement"
+    ] is True
+    assert "latest_monitor_payload_json" not in surface[
+        "current_stale_projection_sample"
+    ][0]
 
 
 @pytest.mark.parametrize("payload_json", ("[]", "{malformed"))
