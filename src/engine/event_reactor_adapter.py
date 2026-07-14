@@ -5023,8 +5023,15 @@ def event_bound_live_adapter_from_trade_conn(
                     probability_tightening=probability_tightening,
                     reason=reason,
                 )
+            status = _global_preflight_block_status(reason)
+            logging.getLogger(__name__).info(
+                "global winner preflight rejected: event=%s status=%s reason=%s",
+                event.event_id,
+                status,
+                reason or "GLOBAL_WINNER_PREFLIGHT_REJECTED",
+            )
             return GlobalWinnerPreflight(
-                status=_global_preflight_block_status(reason),
+                status=status,
                 reason=reason or "GLOBAL_WINNER_PREFLIGHT_REJECTED",
             )
 
