@@ -75,6 +75,25 @@ def test_global_not_selected_is_terminal_for_completed_epoch(caplog):
     assert not any("UNKNOWN money-path reason" in row.message for row in caplog.records)
 
 
+def test_global_preflight_cash_is_terminal_only_for_complete_action_set(caplog):
+    complete_cash = (
+        "GLOBAL_PREFLIGHT_HOLD_CASH_OPTIMAL:"
+        "NO_CURRENT_EXECUTABLE_POSITIVE_ORDER:families=0:candidates=0"
+    )
+    candidate_missing = (
+        "GLOBAL_PREFLIGHT_ACTION_SET_EXHAUSTED:"
+        "NO_CURRENT_EXECUTABLE_POSITIVE_ORDER:families=0:candidates=1"
+    )
+
+    with caplog.at_level(logging.ERROR, logger="zeus.events.reactor"):
+        assert "GLOBAL_PREFLIGHT_HOLD_CASH_OPTIMAL" in TERMINAL_MONEY_PATH_REASONS
+        assert "GLOBAL_PREFLIGHT_ACTION_SET_EXHAUSTED" in TRANSIENT_MONEY_PATH_REASONS
+        assert _is_transient_money_path_reason(complete_cash) is False
+        assert _is_transient_money_path_reason(candidate_missing) is True
+
+    assert not any("UNKNOWN money-path reason" in row.message for row in caplog.records)
+
+
 # A transient-REQUEUE test must price its decision at a VENUE-OPEN instant so the
 # family is genuinely still tradeable (a fresh book is still capturable) and the
 # venue-close horizon (reactor._venue_market_closed_horizon, 2026-06-13 zero-order

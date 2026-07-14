@@ -3784,6 +3784,10 @@ TRANSIENT_MONEY_PATH_REASONS: frozenset[str] = frozenset({
     # neither may fall through the UNKNOWN fail-open classifier.
     "GLOBAL_AUCTION_NO_TRADE",
     "GLOBAL_AUCTION_FAILED",
+    # Preflight exhausted without proving the exact complete-auction CASH/HOLD
+    # terminal below.  Preserve the event until the missing/changed authority is
+    # rebuilt and a complete decision exists.
+    "GLOBAL_PREFLIGHT_ACTION_SET_EXHAUSTED",
     # A family excluded from the current complete auction because its current
     # probability/source bundle is not yet admissible must be reconsidered
     # after that substrate advances.  The wrapper is itself the stable reactor
@@ -3891,6 +3895,11 @@ _RUNTIME_TERMINAL_MONEY_PATH_REASONS: frozenset[str] = frozenset({
     # cannot add evidence or enlarge the feasible set; fresh evidence/price
     # movement arrives through a fresh event and a new auction epoch.
     "GLOBAL_NOT_SELECTED",
+    # A complete q/book/wealth auction retained every BUY/SELL action and proved
+    # the whole executable set non-positive. CASH/HOLD is the decision for this
+    # epoch; recurring producers create the next event, so requeueing this one
+    # only duplicates a completed comparison.
+    "GLOBAL_PREFLIGHT_HOLD_CASH_OPTIMAL",
 })
 
 
@@ -7175,8 +7184,8 @@ def _edli_pre_submit_book_from_jit_fetch(
     Returns ``(best_bid, best_ask, book_hash, observed_at)`` on a usable executable
     book, or ``None`` only when the fetch itself fails. The caller treats that as a
     hard no-submit: cached feasibility rows cannot prove submit-time truth. For a
-    taker intent, the same JIT response must also cover the full intended size at
-    prices within the limit.
+    taker limit intent, ``size`` is ConditionalToken shares, so the same JIT
+    response must cover that share count at prices within the limit.
     """
     import logging as _logging
     _log = _logging.getLogger("zeus.events.reactor")
@@ -7247,20 +7256,12 @@ def _edli_pre_submit_book_from_jit_fetch(
             limit_price=float(limit_price),
         )
         required_size = float(size)
-        required_notional = required_size * float(limit_price)
-        if normalized_side == "BUY" and executable_notional + 1e-9 < required_notional:
-            raise ValueError(
-                "PRE_SUBMIT_BOOK_AUTHORITY_JIT_BUY_NOTIONAL_INSUFFICIENT:"
-                f"token_id={token_id}:limit_price={float(limit_price):.6f}:"
-                f"required_notional={required_notional:.6f}:"
-                f"executable_notional={executable_notional:.6f}:"
-                f"executable_size={executable_size:.6f}:book_hash={book_hash}"
-            )
-        if normalized_side == "SELL" and executable_size + 1e-9 < required_size:
+        if executable_size + 1e-9 < required_size:
             raise ValueError(
                 "PRE_SUBMIT_BOOK_AUTHORITY_JIT_DEPTH_INSUFFICIENT:"
                 f"token_id={token_id}:side={normalized_side}:limit_price={float(limit_price):.6f}:"
                 f"required_size={required_size:.6f}:executable_size={executable_size:.6f}:"
+                f"executable_notional={executable_notional:.6f}:"
                 f"book_hash={book_hash}"
             )
     return best_bid, best_ask, book_hash, datetime.now(timezone.utc)

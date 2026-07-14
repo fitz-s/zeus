@@ -5368,12 +5368,12 @@ def test_gate84_jit_book_requires_full_intended_size_within_limit(monkeypatch):
 
     with pytest.raises(
         ValueError,
-        match="PRE_SUBMIT_BOOK_AUTHORITY_JIT_BUY_NOTIONAL_INSUFFICIENT",
+        match="PRE_SUBMIT_BOOK_AUTHORITY_JIT_DEPTH_INSUFFICIENT",
     ):
         provider(_gate84_final_intent(side="BUY"), object(), decision_time)
 
 
-def test_gate84_jit_buy_requires_maker_notional_not_requested_share_count(monkeypatch):
+def test_gate84_jit_buy_requires_requested_share_count_not_limit_notional(monkeypatch):
     from src.events import reactor
 
     decision_time = datetime(2026, 7, 14, 20, 5, 0, tzinfo=timezone.utc)
@@ -5406,16 +5406,15 @@ def test_gate84_jit_buy_requires_maker_notional_not_requested_share_count(monkey
     with pytest.raises(
         ValueError,
         match=(
-            "PRE_SUBMIT_BOOK_AUTHORITY_JIT_BUY_NOTIONAL_INSUFFICIENT:.*"
-            "required_notional=1.050000:executable_notional=0.400000:"
-            "executable_size=200.000000"
+            "PRE_SUBMIT_BOOK_AUTHORITY_JIT_DEPTH_INSUFFICIENT:.*"
+            "required_size=150.000000:executable_size=149.000000"
         ),
     ):
-        _provider("200")(intent, object(), decision_time)
+        _provider("149")(intent, object(), decision_time)
 
-    witness = _provider("600")(intent, object(), decision_time)
+    witness = _provider("150")(intent, object(), decision_time)
 
-    assert witness.book_hash == "buy-notional-600"
+    assert witness.book_hash == "buy-notional-150"
 
 
 def test_gate84_jit_sell_keeps_share_depth_semantics():

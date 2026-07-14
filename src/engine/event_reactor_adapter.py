@@ -6314,6 +6314,91 @@ def _global_selected_order_economics_preserved(
     )
 
 
+def _global_buy_candidate_from_raw_book(
+    candidate: object,
+    raw_book: Mapping[str, object],
+    *,
+    captured_at_utc: datetime,
+) -> object:
+    """Replace one BUY candidate with the exact full JIT ask curve."""
+
+    if captured_at_utc.tzinfo is None:
+        raise ValueError("GLOBAL_BUY_JIT_CLOCK_INVALID")
+    selected_curve = getattr(candidate, "executable_cost_curve", None)
+    token_id = str(getattr(candidate, "token_id", "") or "")
+    raw_token = str(
+        raw_book.get("asset_id")
+        or raw_book.get("assetId")
+        or raw_book.get("token_id")
+        or ""
+    ).strip()
+    if selected_curve is None or not token_id:
+        raise ValueError("GLOBAL_BUY_SELECTED_CURVE_MISSING")
+    if raw_token != token_id:
+        raise ValueError("GLOBAL_BUY_JIT_TOKEN_MISMATCH")
+    raw_asks = raw_book.get("asks")
+    if not isinstance(raw_asks, list) or not raw_asks:
+        raise ValueError("GLOBAL_BUY_JIT_ASKS_MISSING")
+    try:
+        levels = tuple(
+            BookLevel(
+                price=Decimal(str(raw["price"])),
+                size=Decimal(str(raw["size"])),
+            )
+            for raw in raw_asks
+            if isinstance(raw, Mapping)
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError("GLOBAL_BUY_JIT_ASK_LEVEL_INVALID") from exc
+    if len(levels) != len(raw_asks):
+        raise ValueError("GLOBAL_BUY_JIT_ASK_LEVEL_INVALID")
+    try:
+        min_tick = Decimal(
+            str(raw_book.get("tick_size") or selected_curve.min_tick)
+        )
+        min_order_size = Decimal(
+            str(raw_book.get("min_order_size") or selected_curve.min_order_size)
+        )
+    except (ArithmeticError, TypeError, ValueError) as exc:
+        raise ValueError("GLOBAL_BUY_JIT_MARKET_RULE_INVALID") from exc
+    book_hash = str(raw_book.get("hash") or "").strip() or stable_hash(
+        dict(raw_book)
+    )
+    snapshot_id = stable_hash(
+        (
+            "global-buy-jit",
+            getattr(candidate, "family_key", ""),
+            getattr(candidate, "bin_id", ""),
+            getattr(candidate, "condition_id", ""),
+            getattr(candidate, "side", ""),
+            token_id,
+            book_hash,
+            captured_at_utc.isoformat(),
+        )
+    )
+    curve = ExecutableCostCurve(
+        token_id=token_id,
+        side=getattr(candidate, "side"),
+        snapshot_id=snapshot_id,
+        book_hash=book_hash,
+        levels=levels,
+        fee_model=selected_curve.fee_model,
+        min_tick=min_tick,
+        min_order_size=min_order_size,
+        quote_ttl=selected_curve.quote_ttl,
+    )
+    from src.solve.solver import executable_curve_identity
+
+    return dataclass_replace(
+        candidate,
+        book_snapshot_id=snapshot_id,
+        book_captured_at_utc=captured_at_utc,
+        execution_curve_identity=executable_curve_identity(curve),
+        executable_cost_curve=curve,
+        eligibility_reason=None,
+    )
+
+
 def _global_actuation_sweep_cost_worsened(
     *,
     selected: object,
@@ -6938,14 +7023,8 @@ def _global_preflight_block_status(reason: str) -> str:
     """Fall through only when current evidence proves this candidate infeasible."""
 
     if reason.startswith(
-        "EDLI_LIVE_CERTIFICATE_BUILD_FAILED:"
-        "PRE_SUBMIT_BOOK_AUTHORITY_JIT_BUY_NOTIONAL_INSUFFICIENT:"
-    ):
-        return "CANDIDATE_BLOCKED"
-    if reason.startswith(
         (
             "GLOBAL_ACTUATION_PROOF_NO_LONGER_ELIGIBLE:",
-            "GLOBAL_JIT_SNAPSHOT_REFRESH_FAILED",
             "FILL_UP_NO_SUBMIT:",
             "SHIFT_BIN_NO_SUBMIT:",
             "EVENT_BOUND_MARKET_PHASE_CLOSED:",
@@ -7009,7 +7088,7 @@ def _global_preflight_entry_jit_receipt(
     global_actuation: object,
     book_quote_provider: Callable[[str], Mapping[str, object]] | None,
 ) -> EventSubmissionReceipt:
-    """Prove selected BUY depth before command or obligation persistence."""
+    """Bind selected BUY to the full JIT curve before any persistence."""
 
     if (
         receipt.proof_accepted is not True
@@ -7037,16 +7116,63 @@ def _global_preflight_entry_jit_receipt(
     try:
         from src.events.reactor import _edli_pre_submit_book_from_jit_fetch
 
+        raw_book: dict[str, object] = {}
+
+        def capture_book(token_id: str) -> Mapping[str, object]:
+            if book_quote_provider is None:
+                raise ValueError("PRE_SUBMIT_BOOK_AUTHORITY_JIT_REQUIRED")
+            current = dict(book_quote_provider(token_id))
+            raw_book.clear()
+            raw_book.update(current)
+            return current
+
         jit = _edli_pre_submit_book_from_jit_fetch(
-            book_quote_provider,
+            capture_book,
             token_id=str(getattr(candidate, "token_id", "") or ""),
             side="BUY",
-            limit_price=float(getattr(decision, "limit_price")),
-            size=float(getattr(decision, "shares")),
             post_only=False,
         )
         if jit is None:
             raise ValueError("PRE_SUBMIT_BOOK_AUTHORITY_JIT_REQUIRED")
+        current_candidate = _global_buy_candidate_from_raw_book(
+            candidate,
+            raw_book,
+            captured_at_utc=jit[3],
+        )
+        drift = _global_selected_order_economics_drift(
+            decision=decision,
+            current_candidate=current_candidate,
+        )
+        if drift is not None:
+            return dataclass_replace(
+                receipt,
+                submitted=False,
+                side_effect_status="NO_SUBMIT",
+                reason=(
+                    "GLOBAL_ACTUATION_EXECUTION_BINDING_SUPERSEDED:"
+                    f"curve_economics:jit_detail={drift}:"
+                    f"selected={candidate.execution_curve_identity}:"
+                    f"current={current_candidate.execution_curve_identity}"
+                ),
+                proof_accepted=False,
+                global_jit_candidate=current_candidate,
+            )
+        shares = Decimal(str(getattr(decision, "shares", "0") or "0"))
+        limit = Decimal(str(getattr(decision, "limit_price", "0") or "0"))
+        executable_shares = sum(
+            (
+                level.size
+                for level in current_candidate.executable_cost_curve.levels
+                if level.price <= limit
+            ),
+            Decimal("0"),
+        )
+        if shares <= 0 or executable_shares + Decimal("1e-9") < shares:
+            raise ValueError(
+                "GLOBAL_BUY_JIT_SELECTED_SIZE_INFEASIBLE:"
+                f"token_id={candidate.token_id}:limit_price={limit}:"
+                f"required_shares={shares}:executable_shares={executable_shares}"
+            )
     except Exception as exc:  # noqa: BLE001 - typed fail-closed preflight receipt
         return dataclass_replace(
             receipt,

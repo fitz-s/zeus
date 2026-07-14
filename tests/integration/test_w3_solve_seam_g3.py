@@ -75,6 +75,7 @@ from src.solve.solver import (
     CurrentExecutionAuthority,
     CurrentFamilyProbabilityAuthority,
     ExecutableSellCurve,
+    GlobalSingleOrderCandidate,
     GlobalSingleOrderCandidateEvaluation,
     GlobalSingleOrderDecision,
     GlobalSingleOrderSellCandidate,
@@ -88,7 +89,7 @@ from src.solve.solver import (
     portfolio_wealth_identity,
     validate_family_decision_contract,
 )
-from src.contracts.executable_cost_curve import BookLevel, FeeModel
+from src.contracts.executable_cost_curve import BookLevel, ExecutableCostCurve, FeeModel
 from src.contracts.semantic_types import Direction
 from src.strategy import utility_ranker
 from src.state.collateral_ledger import init_collateral_schema
@@ -296,6 +297,44 @@ def test_global_auction_receipt_persists_complete_buy_sell_hold_cash_comparison(
             fractional_kelly_multiplier=Decimal("0.25"),
         )
     conn.close()
+
+
+def test_global_preflight_exhaustion_distinguishes_cash_from_authority_failure():
+    thin_buy = "GLOBAL_CANDIDATE_ALL_SIZES_INFEASIBLE:candidate=candidate-a"
+    assert global_batch_runtime._global_preflight_exhaustion_reason(
+        "NO_CURRENT_EXECUTABLE_POSITIVE_ORDER",
+        excluded_by_family={},
+        excluded_by_candidate={
+            ("BUY", "family-a", "bin-a", "NO", "token-a"): thin_buy
+        },
+    ) == (
+        "GLOBAL_PREFLIGHT_ACTION_SET_EXHAUSTED:"
+        "NO_CURRENT_EXECUTABLE_POSITIVE_ORDER:families=0:candidates=1"
+    )
+    assert global_batch_runtime._global_preflight_exhaustion_reason(
+        "ROBUST_MAJORITY_LOSS",
+        excluded_by_family={},
+        excluded_by_candidate={},
+    ) == (
+        "GLOBAL_PREFLIGHT_HOLD_CASH_OPTIMAL:"
+        "ROBUST_MAJORITY_LOSS:families=0:candidates=0"
+    )
+    assert global_batch_runtime._global_preflight_exhaustion_reason(
+        "NO_CURRENT_EXECUTABLE_POSITIVE_ORDER",
+        excluded_by_family={"family-a": "GLOBAL_JIT_SNAPSHOT_REFRESH_FAILED"},
+        excluded_by_candidate={},
+    ) == (
+        "GLOBAL_PREFLIGHT_ACTION_SET_EXHAUSTED:"
+        "NO_CURRENT_EXECUTABLE_POSITIVE_ORDER:families=1:candidates=0"
+    )
+    assert global_batch_runtime._global_preflight_exhaustion_reason(
+        "GLOBAL_EPOCH_SUPERSEDED",
+        excluded_by_family={},
+        excluded_by_candidate={},
+    ) == (
+        "GLOBAL_PREFLIGHT_ACTION_SET_EXHAUSTED:"
+        "GLOBAL_EPOCH_SUPERSEDED:families=0:candidates=0"
+    )
 
 
 def test_global_selection_binds_holdings_to_exact_wealth_ledger_generation():
@@ -2186,15 +2225,7 @@ def test_global_winner_binding_does_not_reapply_legacy_price_floor(monkeypatch):
         ),
         ("GLOBAL_CURRENT_STATE_ROBUST_MAJORITY_LOSS", "BATCH_BLOCKED"),
         ("GLOBAL_CURRENT_STATE_ECONOMICS_NON_POSITIVE", "BATCH_BLOCKED"),
-        ("GLOBAL_JIT_SNAPSHOT_REFRESH_FAILED", "BLOCKED"),
-        (
-            "EDLI_LIVE_CERTIFICATE_BUILD_FAILED:"
-            "PRE_SUBMIT_BOOK_AUTHORITY_JIT_BUY_NOTIONAL_INSUFFICIENT:"
-            "token_id=token-a:limit_price=0.012000:required_notional=2.280000:"
-            "executable_notional=1.080720:executable_size=217.680000:"
-            "book_hash=book-a",
-            "CANDIDATE_BLOCKED",
-        ),
+        ("GLOBAL_JIT_SNAPSHOT_REFRESH_FAILED", "BATCH_BLOCKED"),
         ("GLOBAL_JIT_SNAPSHOT_REFRESH_UNAVAILABLE", "BATCH_BLOCKED"),
         (
             "GLOBAL_ACTUATION_PREPARE_FAILED:"
@@ -2275,8 +2306,35 @@ def test_global_preflight_runs_final_entry_authority_before_stable(monkeypatch):
     assert era._global_preflight_block_status(rejected.reason) == "BLOCKED"
 
 
-def test_global_preflight_jit_depth_is_candidate_local_and_side_effect_free():
+def test_global_preflight_jit_curve_replaces_selected_size_and_reauctions():
     event = _global_scope_event(city="Alpha", source_run_id="run-a")
+    at = _dt.datetime(2026, 7, 14, 20, 5, tzinfo=_dt.timezone.utc)
+    selected_curve = ExecutableCostCurve(
+        token_id="token-a",
+        side="NO",
+        snapshot_id="selected-book",
+        book_hash="selected-hash",
+        levels=(BookLevel(price=Decimal("0.012"), size=Decimal("190")),),
+        fee_model=FeeModel(fee_rate=Decimal("0")),
+        min_tick=Decimal("0.001"),
+        min_order_size=Decimal("5"),
+        quote_ttl=_dt.timedelta(seconds=30),
+    )
+    candidate = GlobalSingleOrderCandidate(
+        candidate_id="candidate-a",
+        family_key="family-a",
+        bin_id="bin-a",
+        condition_id="condition-a",
+        side="NO",
+        token_id="token-a",
+        probability_witness_identity="probability-a",
+        book_snapshot_id=selected_curve.snapshot_id,
+        book_captured_at_utc=at,
+        execution_curve_identity=executable_curve_identity(selected_curve),
+        ledger_snapshot_id="ledger-a",
+        executable_cost_curve=selected_curve,
+        resolution_identity="resolution-a",
+    )
     receipt = EventSubmissionReceipt(
         False,
         event.event_id,
@@ -2287,7 +2345,7 @@ def test_global_preflight_jit_depth_is_candidate_local_and_side_effect_free():
     actuation = SimpleNamespace(
         winner_event_id=event.event_id,
         decision=SimpleNamespace(
-            candidate=SimpleNamespace(token_id="token-a"),
+            candidate=candidate,
             limit_price=Decimal("0.012"),
             shares=Decimal("190"),
         ),
@@ -2303,7 +2361,7 @@ def test_global_preflight_jit_depth_is_candidate_local_and_side_effect_free():
             "asks": [{"price": "0.004", "size": "217.68"}],
         }
 
-    rejected = era._global_preflight_entry_jit_receipt(
+    superseded = era._global_preflight_entry_jit_receipt(
         event,
         receipt,
         global_actuation=actuation,
@@ -2311,17 +2369,34 @@ def test_global_preflight_jit_depth_is_candidate_local_and_side_effect_free():
     )
 
     assert calls == ["token-a"]
-    assert rejected.proof_accepted is False
-    assert rejected.reason == (
-        "EDLI_LIVE_CERTIFICATE_BUILD_FAILED:"
-        "PRE_SUBMIT_BOOK_AUTHORITY_JIT_BUY_NOTIONAL_INSUFFICIENT:"
-        "token_id=token-a:limit_price=0.012000:required_notional=2.280000:"
-        "executable_notional=0.870720:executable_size=217.680000:"
-        "book_hash=book-a"
+    assert superseded.proof_accepted is False
+    assert superseded.reason.startswith(
+        "GLOBAL_ACTUATION_EXECUTION_BINDING_SUPERSEDED:"
+        "curve_economics:jit_detail=fields=levels:"
     )
-    assert era._global_preflight_block_status(rejected.reason) == (
-        "CANDIDATE_BLOCKED"
+    assert superseded.global_jit_candidate is not None
+    assert superseded.global_jit_candidate.executable_cost_curve.levels == (
+        BookLevel(price=Decimal("0.004"), size=Decimal("217.68")),
     )
+    status, replacement, reason = era._global_curve_supersession_from_receipt(
+        superseded
+    )
+    assert status == "CURVE_SUPERSEDED"
+    assert replacement is superseded.global_jit_candidate
+    assert reason == superseded.reason
+
+    stable = era._global_preflight_entry_jit_receipt(
+        event,
+        receipt,
+        global_actuation=actuation,
+        book_quote_provider=lambda token_id: {
+            "asset_id": token_id,
+            "hash": "evidence-only-hash-change",
+            "bids": [{"price": "0.003", "size": "100"}],
+            "asks": [{"price": "0.012", "size": "190"}],
+        },
+    )
+    assert stable is receipt
 
 
 def test_global_preflight_token_lifetime_starts_after_proof_completion():
@@ -5503,16 +5578,8 @@ def test_global_batch_reauctions_with_tightened_candidate_q(monkeypatch):
     assert result.receipts[event.event_id].submitted is True
 
 
-@pytest.mark.parametrize(
-    "blocked_reason",
-    (
-        "SHIFT_BIN_NO_SUBMIT:SHIFT_OLD_LEG_BELIEF_NOT_WEAKENED",
-        "GLOBAL_JIT_SNAPSHOT_REFRESH_FAILED",
-    ),
-)
-def test_global_batch_falls_through_candidate_local_preflight_block(
-    monkeypatch, blocked_reason
-):
+def test_global_batch_falls_through_candidate_local_preflight_block(monkeypatch):
+    blocked_reason = "SHIFT_BIN_NO_SUBMIT:SHIFT_OLD_LEG_BELIEF_NOT_WEAKENED"
     decision_at = _dt.datetime(2026, 7, 10, 8, 0, tzinfo=_dt.timezone.utc)
     event_a = _global_scope_event(city="Alpha", source_run_id="run-a")
     event_b = _global_scope_event(city="Beta", source_run_id="run-b")
@@ -5740,13 +5807,7 @@ def test_global_batch_candidate_block_keeps_sibling_and_reproves_after_book_refr
     )
     books = iter((book, refreshed_book))
     calls = {"select": 0, "wealth": 0, "preflight": [], "books": 0, "venue": 0}
-    reason = (
-        "EDLI_LIVE_CERTIFICATE_BUILD_FAILED:"
-        "PRE_SUBMIT_BOOK_AUTHORITY_JIT_BUY_NOTIONAL_INSUFFICIENT:"
-        "token_id=token-a:limit_price=0.012000:required_notional=2.280000:"
-        "executable_notional=1.080720:executable_size=217.680000:"
-        "book_hash=book-jit"
-    )
+    reason = "GLOBAL_CANDIDATE_ALL_SIZES_INFEASIBLE:candidate=candidate-a"
 
     monkeypatch.setattr(
         global_batch_runtime, "scan_current_global_auction_scope", lambda **_: scope
@@ -5868,6 +5929,7 @@ def test_global_batch_candidate_block_keeps_sibling_and_reproves_after_book_refr
         "GLOBAL_CURRENT_STATE_PAYOFF_Q_TIGHTENED_REAUCTION_REQUIRED",
         "GLOBAL_CURRENT_STATE_ROBUST_MAJORITY_LOSS",
         "GLOBAL_CURRENT_STATE_ECONOMICS_NON_POSITIVE",
+        "GLOBAL_JIT_SNAPSHOT_REFRESH_FAILED",
         "GLOBAL_JIT_SNAPSHOT_REFRESH_UNAVAILABLE",
         (
             "GLOBAL_ACTUATION_PREPARE_FAILED:"

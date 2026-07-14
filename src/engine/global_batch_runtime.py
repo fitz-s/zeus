@@ -104,6 +104,37 @@ class GlobalCandidateProbabilityTightening:
         return self.family_key, self.bin_id, self.side, self.token_id
 
 
+def _global_preflight_exhaustion_reason(
+    no_trade_reason: str | None,
+    *,
+    excluded_by_family: Mapping[str, str],
+    excluded_by_candidate: Mapping[
+        tuple[str, str, str, str, str], str
+    ],
+) -> str:
+    """Separate a proved CASH/HOLD optimum from an unfinished auction."""
+
+    reason = str(no_trade_reason or "unknown")
+    # A selected-size failure is not a proof that every smaller executable size
+    # has non-positive utility.  CASH/HOLD is terminal only when the same cut
+    # retained the entire action set; any exclusion leaves the auction unfinished.
+    complete = not excluded_by_family and not excluded_by_candidate
+    base = (
+        "GLOBAL_PREFLIGHT_HOLD_CASH_OPTIMAL"
+        if complete
+        and reason
+        in {
+            "NO_CURRENT_EXECUTABLE_POSITIVE_ORDER",
+            "ROBUST_MAJORITY_LOSS",
+        }
+        else "GLOBAL_PREFLIGHT_ACTION_SET_EXHAUSTED"
+    )
+    return (
+        f"{base}:{reason}:families={len(excluded_by_family)}:"
+        f"candidates={len(excluded_by_candidate)}"
+    )
+
+
 @dataclass(frozen=True)
 class GlobalPreflightAuthority:
     """Frozen whole-universe authority carried by one one-shot preflight."""
@@ -1463,10 +1494,11 @@ def process_current_global_batch(
                 if selected.decision.candidate is None:
                     log_no_trade("select_preflight_fallthrough", selected.decision)
                     return reject(
-                        "GLOBAL_PREFLIGHT_ACTION_SET_EXHAUSTED:"
-                        f"{selected.decision.no_trade_reason or 'unknown'}:"
-                        f"families={len(excluded_by_family)}:"
-                        f"candidates={len(excluded_by_candidate)}"
+                        _global_preflight_exhaustion_reason(
+                            selected.decision.no_trade_reason,
+                            excluded_by_family=excluded_by_family,
+                            excluded_by_candidate=excluded_by_candidate,
+                        )
                     )
                 log_winner(
                     "select_preflight_fallthrough",
