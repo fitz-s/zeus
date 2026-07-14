@@ -5258,7 +5258,7 @@ def test_gate84_jit_buy_accepts_ask_only_book(monkeypatch):
             "market": "cond-1",
             "hash": "fresh-ask-only-book-hash",
             "bids": [],
-            "asks": [{"price": "0.006", "size": "50"}],
+            "asks": [{"price": "0.006", "size": "1000"}],
         },
     )
 
@@ -5366,8 +5366,124 @@ def test_gate84_jit_book_requires_full_intended_size_within_limit(monkeypatch):
         },
     )
 
-    with pytest.raises(ValueError, match="PRE_SUBMIT_BOOK_AUTHORITY_JIT_DEPTH_INSUFFICIENT"):
+    with pytest.raises(
+        ValueError,
+        match="PRE_SUBMIT_BOOK_AUTHORITY_JIT_BUY_NOTIONAL_INSUFFICIENT",
+    ):
         provider(_gate84_final_intent(side="BUY"), object(), decision_time)
+
+
+def test_gate84_jit_buy_requires_maker_notional_not_requested_share_count(monkeypatch):
+    from src.events import reactor
+
+    decision_time = datetime(2026, 7, 14, 20, 5, 0, tzinfo=timezone.utc)
+    conn = _gate84_world_conn_with_stale_row(quote_seen_at=decision_time.isoformat())
+    _gate84_patch_authority_guards(monkeypatch)
+
+    def _provider(ask_size: str):
+        return reactor._edli_pre_submit_authority_provider_from_book_evidence_conn(
+            conn,
+            {
+                "pre_submit_max_quote_age_ms": 1000,
+                "pre_submit_balance_allowance_check_enabled": True,
+            },
+            book_quote_provider=lambda token_id: {
+                "asset_id": token_id,
+                "hash": f"buy-notional-{ask_size}",
+                "bids": [{"price": "0.001", "size": "1000"}],
+                "asks": [{"price": "0.002", "size": ask_size}],
+            },
+        )
+
+    intent = SimpleNamespace(
+        payload={
+            **_gate84_final_intent(side="BUY").payload,
+            "limit_price": 0.007,
+            "size": 150.0,
+            "notional_usd": 1.05,
+        }
+    )
+    with pytest.raises(
+        ValueError,
+        match=(
+            "PRE_SUBMIT_BOOK_AUTHORITY_JIT_BUY_NOTIONAL_INSUFFICIENT:.*"
+            "required_notional=1.050000:executable_notional=0.400000:"
+            "executable_size=200.000000"
+        ),
+    ):
+        _provider("200")(intent, object(), decision_time)
+
+    witness = _provider("600")(intent, object(), decision_time)
+
+    assert witness.book_hash == "buy-notional-600"
+
+
+def test_gate84_jit_sell_keeps_share_depth_semantics():
+    from src.events import reactor
+
+    def _book(size: str):
+        return lambda token_id: {
+            "asset_id": token_id,
+            "hash": f"sell-shares-{size}",
+            "bids": [{"price": "0.40", "size": size}],
+            "asks": [{"price": "0.50", "size": "1000"}],
+        }
+
+    with pytest.raises(
+        ValueError,
+        match="PRE_SUBMIT_BOOK_AUTHORITY_JIT_DEPTH_INSUFFICIENT",
+    ):
+        reactor._edli_pre_submit_book_from_jit_fetch(
+            _book("149"),
+            token_id="yes-1",
+            side="SELL",
+            limit_price=0.30,
+            size=150.0,
+        )
+
+    _bid, _ask, book_hash, _observed_at = (
+        reactor._edli_pre_submit_book_from_jit_fetch(
+            _book("150"),
+            token_id="yes-1",
+            side="SELL",
+            limit_price=0.30,
+            size=150.0,
+        )
+    )
+    assert book_hash == "sell-shares-150"
+
+
+@pytest.mark.parametrize(
+    "side,limit_price,size,error",
+    [
+        ("HOLD", 0.50, 10.0, "SIDE_INVALID"),
+        ("BUY", float("nan"), 10.0, "LIMIT_INVALID"),
+        ("BUY", -0.01, 10.0, "LIMIT_INVALID"),
+        ("BUY", 1.01, 10.0, "LIMIT_INVALID"),
+        ("BUY", 0.50, float("nan"), "SIZE_INVALID"),
+        ("BUY", 0.50, -1.0, "SIZE_INVALID"),
+        ("SELL", 0.50, 0.0, "SIZE_INVALID"),
+    ],
+)
+def test_gate84_jit_rejects_invalid_order_domain(side, limit_price, size, error):
+    from src.events import reactor
+
+    with pytest.raises(
+        ValueError,
+        match=f"PRE_SUBMIT_BOOK_AUTHORITY_JIT_{error}",
+    ):
+        reactor._edli_pre_submit_book_from_jit_fetch(
+            lambda token_id: {
+                "asset_id": token_id,
+                "hash": "invalid-domain",
+                "bids": [{"price": "0.40", "size": "1000"}],
+                "asks": [{"price": "0.50", "size": "1000"}],
+            },
+            token_id="yes-1",
+            side=side,
+            limit_price=limit_price,
+            size=size,
+        )
 
 
 def test_gate84_provisional_intent_fetches_top_without_final_limit_or_size(monkeypatch):

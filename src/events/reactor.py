@@ -7194,6 +7194,26 @@ def _edli_pre_submit_book_from_jit_fetch(
     best_ask = _edli_book_best_price(message.get("asks"), best="ask")
     book_hash = str(message.get("hash") or "")
     normalized_side = str(side or "").upper()
+    if normalized_side not in {"BUY", "SELL"}:
+        raise ValueError(
+            "PRE_SUBMIT_BOOK_AUTHORITY_JIT_SIDE_INVALID:"
+            f"token_id={token_id}:side={normalized_side or 'missing'}"
+        )
+    if limit_price is not None and (
+        not math.isfinite(float(limit_price))
+        or not 0.0 < float(limit_price) <= 1.0
+    ):
+        raise ValueError(
+            "PRE_SUBMIT_BOOK_AUTHORITY_JIT_LIMIT_INVALID:"
+            f"token_id={token_id}:limit_price={limit_price}"
+        )
+    if size is not None and (
+        not math.isfinite(float(size)) or float(size) <= 0.0
+    ):
+        raise ValueError(
+            "PRE_SUBMIT_BOOK_AUTHORITY_JIT_SIZE_INVALID:"
+            f"token_id={token_id}:size={size}"
+        )
     if normalized_side == "BUY" and best_ask is None:
         raise ValueError(
             "PRE_SUBMIT_BOOK_AUTHORITY_JIT_BUY_ASK_MISSING:"
@@ -7203,12 +7223,6 @@ def _edli_pre_submit_book_from_jit_fetch(
         raise ValueError(
             "PRE_SUBMIT_BOOK_AUTHORITY_JIT_SELL_BID_MISSING:"
             f"token_id={token_id}:book_hash={book_hash or 'missing'}:best_ask={best_ask}"
-        )
-    if normalized_side not in {"BUY", "SELL"} and (best_bid is None or best_ask is None):
-        raise ValueError(
-            "PRE_SUBMIT_BOOK_AUTHORITY_JIT_SIDE_MISSING:"
-            f"token_id={token_id}:book_hash={book_hash or 'missing'}:"
-            f"best_bid={best_bid}:best_ask={best_ask}"
         )
     if not book_hash:
         raise ValueError(
@@ -7223,16 +7237,26 @@ def _edli_pre_submit_book_from_jit_fetch(
         )
     if not post_only and limit_price is not None and size is not None:
         levels = message.get("asks") if normalized_side == "BUY" else message.get("bids")
-        executable_size = _edli_book_executable_size(
+        executable_size, executable_notional = _edli_book_executable_depth(
             levels,
             side=normalized_side,
             limit_price=float(limit_price),
         )
-        if executable_size + 1e-9 < float(size):
+        required_size = float(size)
+        required_notional = required_size * float(limit_price)
+        if normalized_side == "BUY" and executable_notional + 1e-9 < required_notional:
+            raise ValueError(
+                "PRE_SUBMIT_BOOK_AUTHORITY_JIT_BUY_NOTIONAL_INSUFFICIENT:"
+                f"token_id={token_id}:limit_price={float(limit_price):.6f}:"
+                f"required_notional={required_notional:.6f}:"
+                f"executable_notional={executable_notional:.6f}:"
+                f"executable_size={executable_size:.6f}:book_hash={book_hash}"
+            )
+        if normalized_side == "SELL" and executable_size + 1e-9 < required_size:
             raise ValueError(
                 "PRE_SUBMIT_BOOK_AUTHORITY_JIT_DEPTH_INSUFFICIENT:"
                 f"token_id={token_id}:side={normalized_side}:limit_price={float(limit_price):.6f}:"
-                f"required_size={float(size):.6f}:executable_size={executable_size:.6f}:"
+                f"required_size={required_size:.6f}:executable_size={executable_size:.6f}:"
                 f"book_hash={book_hash}"
             )
     return best_bid, best_ask, book_hash, datetime.now(timezone.utc)
@@ -7246,18 +7270,26 @@ def _edli_book_best_price(levels, *, best: str):
         if raw in (None, ""):
             continue
         try:
-            parsed.append(float(raw))
+            price = float(raw)
         except (TypeError, ValueError):
             continue
+        if math.isfinite(price) and 0.0 < price <= 1.0:
+            parsed.append(price)
     if not parsed:
         return None
     return max(parsed) if best == "bid" else min(parsed)
 
 
-def _edli_book_executable_size(levels, *, side: str, limit_price: float) -> float:
-    """Shares executable now within a BUY/SELL limit in one JIT book response."""
+def _edli_book_executable_depth(
+    levels,
+    *,
+    side: str,
+    limit_price: float,
+) -> tuple[float, float]:
+    """Return executable shares and maker notional within one limit."""
 
-    total = 0.0
+    shares = 0.0
+    notional = 0.0
     for level in levels or ():
         if isinstance(level, dict):
             raw_price = level.get("price")
@@ -7270,13 +7302,20 @@ def _edli_book_executable_size(levels, *, side: str, limit_price: float) -> floa
             level_size = float(raw_size)
         except (TypeError, ValueError):
             continue
-        if not (math.isfinite(price) and math.isfinite(level_size) and level_size > 0.0):
+        if not (
+            math.isfinite(price)
+            and 0.0 < price <= 1.0
+            and math.isfinite(level_size)
+            and level_size > 0.0
+        ):
             continue
         if side == "BUY" and price <= limit_price + 1e-12:
-            total += level_size
+            shares += level_size
+            notional += price * level_size
         elif side == "SELL" and price + 1e-12 >= limit_price:
-            total += level_size
-    return total
+            shares += level_size
+            notional += price * level_size
+    return shares, notional
 
 def _edli_pre_submit_authority_provider_from_book_evidence_conn(
     book_evidence_conn, edli_cfg, *, book_quote_provider=None
