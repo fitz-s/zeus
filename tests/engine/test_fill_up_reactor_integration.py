@@ -358,12 +358,13 @@ def test_fill_up_unknown_entry_keeps_family_lease_active():
     assert fr.active_lease_for_family(conn, "live|Tokyo|2026-06-23|high") == lease
 
 
-def test_entries_pause_gate_runs_before_fill_up_lease_planning():
+def test_entries_pause_gate_is_bound_into_global_candidate_selection():
     src = inspect.getsource(era.event_bound_live_adapter_from_trade_conn)
     pause_gate = src.index("_entry_pause_blocks_live_submit(live_cap_conn or trade_conn)")
-    receipt_build = src.index("no_submit_receipt = build_event_bound_no_submit_receipt(")
+    resolver = src.index("candidate_policy_rejection_resolver=(")
+    sizing = src.index("fractional_kelly_multiplier=Decimal(")
 
-    assert pause_gate < receipt_build
+    assert pause_gate < resolver < sizing
 
 
 def test_post_plan_no_submit_aborts_fill_up_lease():

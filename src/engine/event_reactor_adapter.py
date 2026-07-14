@@ -5200,13 +5200,16 @@ def event_bound_live_adapter_from_trade_conn(
                 ),
             )
 
-        global_entry_pause_reason = (
-            _entry_pause_blocks_live_submit(live_cap_conn or trade_conn)
-            if real_order_submit_enabled
-            else None
-        )
+        global_entry_pause_checked = False
+        global_entry_pause_reason = None
 
         def _current_candidate_policy_rejection(candidate) -> str | None:
+            nonlocal global_entry_pause_checked, global_entry_pause_reason
+            if real_order_submit_enabled and not global_entry_pause_checked:
+                global_entry_pause_reason = _entry_pause_blocks_live_submit(
+                    live_cap_conn or trade_conn
+                )
+                global_entry_pause_checked = True
             if (
                 global_entry_pause_reason is not None
                 and str(getattr(candidate, "action", "BUY") or "BUY") == "BUY"
