@@ -1,8 +1,8 @@
 # Created: 2026-04-26
-# Lifecycle: created=2026-04-26; last_reviewed=2026-07-13; last_reused=2026-07-13
+# Lifecycle: created=2026-04-26; last_reviewed=2026-07-14; last_reused=2026-07-14
 # Purpose: Lock INV-31 command recovery behavior plus snapshot-gated command inserts.
 # Reuse: Run when command recovery, command journal schema, or executable snapshot gating changes.
-# Last reused/audited: 2026-07-13
+# Last reused/audited: 2026-07-14
 # Authority basis: docs/operations/task_2026-04-26_execution_state_truth_p1_command_bus/implementation_plan.md u00a7P1.S4
 """INV-31 anchor tests: command recovery loop.
 
@@ -10426,6 +10426,91 @@ class TestRecoveryResolutionTable:
             "fill_price": 0.32,
             "venue_status": "FILLED",
             "terminal_exec_status": "filled",
+        }
+
+    def test_filled_entry_execution_fact_repair_preserves_position_increments(
+        self,
+        conn,
+    ):
+        for index, price in ((1, 0.69), (2, 0.68)):
+            command_id = f"cmd-increment-{index}"
+            order_id = f"ord-increment-{index}"
+            _insert(
+                conn,
+                command_id=command_id,
+                position_id="pos-increment",
+                decision_id=f"dec-increment-{index}",
+                size=5.0,
+                price=price,
+                created_at=f"2026-04-26T00:0{index}:00Z",
+            )
+            _advance_to_acked(conn, command_id=command_id, venue_order_id=order_id)
+            conn.execute(
+                "UPDATE venue_commands SET state = 'FILLED' WHERE command_id = ?",
+                (command_id,),
+            )
+            _append_trade_fact(
+                conn,
+                command_id=command_id,
+                order_id=order_id,
+                trade_id=f"trade-increment-{index}",
+                filled_size="5",
+                fill_price=str(price),
+            )
+            _append_order_fact(
+                conn,
+                command_id=command_id,
+                order_id=order_id,
+                state="MATCHED",
+                matched_size="5",
+                remaining_size="0",
+            )
+
+        from src.execution.command_recovery import (
+            reconcile_filled_entry_execution_fact_repairs,
+        )
+        from src.state.db import query_entry_execution_fill_aggregate
+
+        summary = reconcile_filled_entry_execution_fact_repairs(conn)
+
+        assert summary == {"scanned": 2, "advanced": 2, "stayed": 0, "errors": 0}
+        rows = conn.execute(
+            """
+            SELECT intent_id, command_id, shares, fill_price
+              FROM execution_fact
+             WHERE position_id = 'pos-increment'
+               AND order_role = 'entry'
+             ORDER BY command_id
+            """
+        ).fetchall()
+        assert [dict(row) for row in rows] == [
+            {
+                "intent_id": "pos-increment:entry",
+                "command_id": "cmd-increment-1",
+                "shares": 5.0,
+                "fill_price": 0.69,
+            },
+            {
+                "intent_id": "pos-increment:entry:cmd-increment-2",
+                "command_id": "cmd-increment-2",
+                "shares": 5.0,
+                "fill_price": 0.68,
+            },
+        ]
+        aggregate = query_entry_execution_fill_aggregate(
+            conn,
+            "pos-increment",
+            strict=True,
+        )
+        assert aggregate is not None
+        assert aggregate["shares_filled"] == pytest.approx(10.0)
+        assert aggregate["filled_cost_basis_usd"] == pytest.approx(6.85)
+        assert aggregate["entry_price_avg_fill"] == pytest.approx(0.685)
+        assert reconcile_filled_entry_execution_fact_repairs(conn) == {
+            "scanned": 0,
+            "advanced": 0,
+            "stayed": 0,
+            "errors": 0,
         }
 
     def test_existing_entry_lot_execution_fact_repair_aggregates_split_fills(

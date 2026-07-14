@@ -24,6 +24,7 @@ from typing import Any, Iterator, Literal, Mapping, Sequence
 
 from src.control.heartbeat_supervisor import HeartbeatHealth, HeartbeatStatus
 from src.contracts.execution_intent import ExecutionIntent
+from src.contracts.position_truth import FillAuthority
 from src.riskguard.risk_level import RiskLevel
 from src.state.canonical_projections import (
     counts_as_active_exposure,
@@ -213,12 +214,7 @@ class RiskAllocator:
 
     @classmethod
     def from_position_lots(cls, conn: Any, cap_policy: CapPolicy | None = None) -> "RiskAllocator":
-        """Build allocator capacity from canonical ``position_lots`` truth.
-
-        The table is append-only, so only the latest lot row per position_id is
-        active for capacity.  This is read-only: the allocator never repairs,
-        inserts, or mutates the lot ledger.
-        """
+        """Build capacity from current positions and unprojected lot truth."""
 
         return cls(cap_policy, load_position_lots(conn))
 
@@ -655,49 +651,22 @@ def load_cap_policy(path: str | Path = "config/risk_caps.yaml") -> CapPolicy:
 
 
 def load_position_lots(conn: Any) -> tuple[ExposureLot, ...]:
-    """Read active exposure lots from ``position_lots`` without mutation."""
+    """Read current confirmed exposure plus still-unprojected active lots."""
 
     with _named_sqlite_rows(conn) as read_conn:
-        rows = read_conn.execute(
-            """
-            SELECT
-              lot.position_id,
-              lot.state,
-              lot.shares,
-              lot.entry_price_avg,
-              lot.source,
-              lot.raw_payload_json,
-              (
-                SELECT event.payload_json
-                FROM venue_command_events event
-                WHERE event.command_id = cmd.command_id
-                  AND event.event_type = 'SUBMIT_REQUESTED'
-                ORDER BY event.sequence_no DESC
-                LIMIT 1
-              ) AS submit_payload_json,
-              COALESCE(cmd.market_id, CAST(lot.position_id AS TEXT)) AS market_id,
-              COALESCE(cmd.token_id, CAST(lot.position_id AS TEXT)) AS token_id,
-              COALESCE(cmd.decision_id, cmd.market_id, CAST(lot.position_id AS TEXT)) AS event_id
-            FROM position_lots lot
-            JOIN (
-              SELECT position_id, MAX(local_sequence) AS max_sequence
-              FROM position_lots
-              GROUP BY position_id
-            ) latest
-              ON latest.position_id = lot.position_id
-             AND latest.max_sequence = lot.local_sequence
-            LEFT JOIN venue_commands cmd ON cmd.command_id = lot.source_command_id
-            WHERE lot.state IN (
-              'OPTIMISTIC_EXPOSURE',
-              'CONFIRMED_EXPOSURE',
-              'EXIT_PENDING'
-            )
-            ORDER BY lot.position_id, lot.lot_id
-            """
-        ).fetchall()
+        current_rows = _load_current_position_exposure_rows(read_conn)
+        current_position_ids = {
+            str(_row_mapping(row).get("position_id") or "") for row in current_rows
+        }
+        covered_position_ids = (
+            current_position_ids | _load_closed_position_ids(read_conn)
+        )
+        rows = _load_legacy_position_lot_rows(read_conn)
     lots: list[ExposureLot] = []
     for row in rows:
         row_map = _row_mapping(row)
+        if str(row_map.get("runtime_position_id") or "") in covered_position_ids:
+            continue
         payload = _coerce_payload(row_map.get("raw_payload_json"))
         submit_payload = _coerce_payload(row_map.get("submit_payload_json"))
         allocation_payload_raw = submit_payload.get("allocation", {}) if isinstance(submit_payload, Mapping) else {}
@@ -720,7 +689,288 @@ def load_position_lots(conn: Any) -> tuple[ExposureLot, ...]:
                 source=str(row_map.get("source") or "VENUE"),
             )
         )
+    lots.extend(_current_position_exposure_lot(row) for row in current_rows)
     return tuple(lots)
+
+
+def _load_closed_position_ids(conn: Any) -> set[str]:
+    if not _has_table(conn, "position_current"):
+        return set()
+    if not _has_column(conn, "position_current", "position_id"):
+        return set()
+    if not _has_column(conn, "position_current", "phase"):
+        return set()
+    return {
+        str(_row_mapping(row).get("position_id") or "")
+        for row in conn.execute(
+            """
+            SELECT position_id
+              FROM position_current
+             WHERE phase IN (
+                 'economically_closed',
+                 'settled',
+                 'voided',
+                 'admin_closed'
+             )
+            """
+        ).fetchall()
+    }
+
+
+def _load_legacy_position_lot_rows(conn: Any) -> list[Mapping[str, Any]]:
+    if not _has_table(conn, "position_lots"):
+        return []
+    has_commands = _has_table(conn, "venue_commands")
+    has_events = _has_table(conn, "venue_command_events")
+    runtime_position_expr = (
+        "cmd.position_id AS runtime_position_id"
+        if has_commands and _has_column(conn, "venue_commands", "position_id")
+        else "NULL AS runtime_position_id"
+    )
+    submit_payload_expr = (
+        """
+        (
+          SELECT event.payload_json
+            FROM venue_command_events event
+           WHERE event.command_id = cmd.command_id
+             AND event.event_type = 'SUBMIT_REQUESTED'
+           ORDER BY event.sequence_no DESC
+           LIMIT 1
+        )
+        """
+        if has_events and has_commands
+        else "NULL"
+    )
+    command_join = (
+        "LEFT JOIN venue_commands cmd ON cmd.command_id = lot.source_command_id"
+        if has_commands
+        else "LEFT JOIN (SELECT NULL AS command_id, NULL AS market_id, NULL AS token_id, NULL AS decision_id) cmd ON 0"
+    )
+    command_provenance_predicate = "AND cmd.command_id IS NOT NULL" if has_commands else ""
+    return list(
+        conn.execute(
+            f"""
+            SELECT
+              lot.position_id,
+              lot.state,
+              lot.shares,
+              lot.entry_price_avg,
+              lot.source,
+              lot.raw_payload_json,
+              {submit_payload_expr} AS submit_payload_json,
+              COALESCE(cmd.market_id, CAST(lot.position_id AS TEXT)) AS market_id,
+              COALESCE(cmd.token_id, CAST(lot.position_id AS TEXT)) AS token_id,
+              COALESCE(cmd.decision_id, cmd.market_id, CAST(lot.position_id AS TEXT)) AS event_id,
+              {runtime_position_expr}
+            FROM position_lots lot
+            JOIN (
+              SELECT position_id, MAX(local_sequence) AS max_sequence
+              FROM position_lots
+              GROUP BY position_id
+            ) latest
+              ON latest.position_id = lot.position_id
+             AND latest.max_sequence = lot.local_sequence
+            {command_join}
+            WHERE lot.state IN (
+              'OPTIMISTIC_EXPOSURE',
+              'CONFIRMED_EXPOSURE',
+              'EXIT_PENDING'
+            )
+              {command_provenance_predicate}
+            ORDER BY lot.position_id, lot.lot_id
+            """
+        ).fetchall()
+    )
+
+
+def _load_current_position_exposure_rows(conn: Any) -> list[Mapping[str, Any]]:
+    required_current = {
+        "position_id",
+        "phase",
+        "market_id",
+        "direction",
+        "shares",
+        "cost_basis_usd",
+        "entry_price",
+        "token_id",
+        "no_token_id",
+        "chain_shares",
+        "chain_cost_basis_usd",
+    }
+    required_command = {
+        "command_id",
+        "position_id",
+        "intent_kind",
+        "side",
+        "market_id",
+        "token_id",
+        "decision_id",
+        "created_at",
+    }
+    if not _has_table(conn, "position_current"):
+        return []
+    if any(not _has_column(conn, "position_current", col) for col in required_current):
+        return []
+    if any(not _has_column(conn, "venue_commands", col) for col in required_command):
+        return []
+    if not _has_table(conn, "venue_command_events"):
+        return []
+    fill_authority_expr = (
+        "pc.fill_authority" if _has_column(conn, "position_current", "fill_authority") else "NULL"
+    )
+    rows = conn.execute(
+            f"""
+            SELECT pc.position_id,
+                   pc.phase,
+                   pc.market_id AS projection_market_id,
+                   pc.direction,
+                   pc.shares,
+                   pc.cost_basis_usd,
+                   pc.entry_price,
+                   pc.token_id AS yes_token_id,
+                   pc.no_token_id,
+                   pc.chain_shares,
+                   pc.chain_cost_basis_usd,
+                   {fill_authority_expr} AS fill_authority,
+                   cmd.command_id,
+                   cmd.market_id,
+                   cmd.token_id,
+                   cmd.decision_id AS event_id,
+                   (
+                       SELECT event.payload_json
+                         FROM venue_command_events event
+                        WHERE event.command_id = cmd.command_id
+                          AND event.event_type = 'SUBMIT_REQUESTED'
+                        ORDER BY event.sequence_no DESC
+                        LIMIT 1
+                   ) AS submit_payload_json
+              FROM position_current pc
+              LEFT JOIN venue_commands cmd
+                ON cmd.command_id = (
+                   SELECT latest.command_id
+                     FROM venue_commands latest
+                    WHERE latest.position_id = pc.position_id
+                      AND latest.intent_kind = 'ENTRY'
+                      AND latest.side = 'BUY'
+                    ORDER BY latest.created_at DESC, latest.command_id DESC
+                    LIMIT 1
+                )
+             WHERE pc.phase IN ('active', 'day0_window', 'pending_exit')
+               AND CASE
+                   WHEN COALESCE(pc.chain_shares, 0) > 0 THEN pc.chain_shares
+                   ELSE COALESCE(pc.shares, 0)
+               END > 0
+            ORDER BY pc.position_id
+            """
+        ).fetchall()
+    lot_states = _load_latest_command_lot_states(conn)
+    return [
+        {
+            **dict(_row_mapping(row)),
+            "latest_lot_state": lot_states.get(
+                str(_row_mapping(row).get("position_id") or "")
+            ),
+        }
+        for row in rows
+    ]
+
+
+def _load_latest_command_lot_states(conn: Any) -> dict[str, str]:
+    if not _has_table(conn, "position_lots"):
+        return {}
+    if not _has_table(conn, "venue_commands"):
+        return {}
+    lot_order = (
+        "COALESCE(lot.captured_at, ''), lot.lot_id"
+        if _has_column(conn, "position_lots", "captured_at")
+        else "lot.lot_id"
+    )
+    rows = conn.execute(
+        f"""
+        SELECT cmd.position_id AS runtime_position_id, lot.state
+          FROM position_lots lot
+          JOIN (
+                SELECT position_id, MAX(local_sequence) AS max_sequence
+                  FROM position_lots
+                 GROUP BY position_id
+          ) latest
+            ON latest.position_id = lot.position_id
+           AND latest.max_sequence = lot.local_sequence
+          JOIN venue_commands cmd
+            ON cmd.command_id = lot.source_command_id
+         WHERE lot.state IN (
+             'OPTIMISTIC_EXPOSURE',
+             'CONFIRMED_EXPOSURE',
+             'EXIT_PENDING'
+         )
+         ORDER BY {lot_order}
+        """
+    ).fetchall()
+    return {
+        str(_row_mapping(row).get("runtime_position_id") or ""): str(
+            _row_mapping(row).get("state") or ""
+        )
+        for row in rows
+    }
+
+
+def _current_position_exposure_lot(row: Any) -> ExposureLot:
+    row_map = _row_mapping(row)
+    submit_payload = _coerce_payload(row_map.get("submit_payload_json"))
+    allocation_raw = submit_payload.get("allocation", {})
+    allocation = allocation_raw if isinstance(allocation_raw, Mapping) else {}
+    market_id = str(
+        row_map.get("market_id")
+        or row_map.get("projection_market_id")
+        or row_map.get("position_id")
+    )
+    event_id = str(allocation.get("event_id") or row_map.get("event_id") or market_id)
+    resolution_window = str(allocation.get("resolution_window") or "default")
+    correlation_key = str(allocation.get("correlation_key") or event_id)
+    direction = str(row_map.get("direction") or "")
+    token_id = str(
+        row_map.get("token_id")
+        or (
+            row_map.get("no_token_id")
+            if direction == "buy_no"
+            else row_map.get("yes_token_id")
+        )
+        or row_map.get("position_id")
+    )
+    shares = Decimal(str(row_map.get("shares") or 0))
+    chain_shares = Decimal(str(row_map.get("chain_shares") or 0))
+    entry_price = Decimal(str(row_map.get("entry_price") or 0))
+    projection_cost = Decimal(str(row_map.get("cost_basis_usd") or 0))
+    chain_cost = Decimal(str(row_map.get("chain_cost_basis_usd") or 0))
+    exposure = max(projection_cost, chain_cost, max(shares, chain_shares) * entry_price)
+    phase = str(row_map.get("phase") or "")
+    fill_authority = str(row_map.get("fill_authority") or "")
+    latest_lot_state = str(row_map.get("latest_lot_state") or "")
+    confirmed_authorities = {
+        FillAuthority.VENUE_POSITION_OBSERVED.value,
+        FillAuthority.VENUE_CONFIRMED_PARTIAL.value,
+        FillAuthority.VENUE_CONFIRMED_FULL.value,
+        FillAuthority.CANCELLED_REMAINDER.value,
+        FillAuthority.SETTLED.value,
+    }
+    if phase == "pending_exit":
+        state: ExposureState = "EXIT_PENDING"
+    elif chain_shares > 0 or fill_authority in confirmed_authorities:
+        state = "CONFIRMED_EXPOSURE"
+    elif latest_lot_state in {"OPTIMISTIC_EXPOSURE", "CONFIRMED_EXPOSURE"}:
+        state = latest_lot_state
+    else:
+        state = "OPTIMISTIC_EXPOSURE"
+    return ExposureLot(
+        market_id=market_id,
+        event_id=event_id,
+        resolution_window=resolution_window,
+        token_id=token_id,
+        exposure_micro=_usd_exposure_micro(exposure),
+        state=state,
+        correlation_key=correlation_key,
+        source="CHAIN" if chain_shares > 0 else "VENUE",
+    )
 
 
 def _has_table(conn: Any, table: str) -> bool:
@@ -1170,4 +1420,10 @@ def _lot_exposure_micro(shares: Any, entry_price_avg: Any) -> int:
             * Decimal(str(entry_price_avg or 0))
             * Decimal("1000000")
         ).to_integral_value(rounding=ROUND_CEILING)
+    )
+
+
+def _usd_exposure_micro(value: Decimal) -> int:
+    return int(
+        (value * Decimal("1000000")).to_integral_value(rounding=ROUND_CEILING)
     )

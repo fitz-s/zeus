@@ -1,6 +1,6 @@
 # Created: 2026-04-27
-# Last reused/audited: 2026-05-08
-# Lifecycle: created=2026-04-27; last_reviewed=2026-05-01; last_reused=2026-05-08
+# Last reused/audited: 2026-07-14
+# Lifecycle: created=2026-04-27; last_reviewed=2026-07-14; last_reused=2026-07-14
 # Authority basis: docs/operations/task_2026-05-08_object_invariance_remaining_mainline/PLAN.md
 # Purpose: Lock INV-NEW-R RiskAllocator / PortfolioGovernor cap and kill-switch behavior.
 # Reuse: Run for A2 allocator/governor, executor pre-submit, and live-readiness gate changes.
@@ -709,6 +709,9 @@ def test_position_lots_reader_uses_latest_append_only_state_and_counts_guards():
         """
         CREATE TABLE venue_commands (
           command_id TEXT PRIMARY KEY,
+          position_id TEXT,
+          intent_kind TEXT,
+          side TEXT,
           market_id TEXT,
           token_id TEXT,
           decision_id TEXT,
@@ -741,16 +744,16 @@ def test_position_lots_reader_uses_latest_append_only_state_and_counts_guards():
         """
     )
     conn.execute(
-        "INSERT INTO venue_commands VALUES ('cmd-1','m1','t1','event-1','FILLED','2026-04-27T00:00:00Z')"
+        "INSERT INTO venue_commands VALUES ('cmd-1','position-1','ENTRY','BUY','m1','t1','event-1','FILLED','2026-04-27T00:00:00Z')"
     )
     conn.execute(
-        "INSERT INTO venue_commands VALUES ('cmd-2','m2','t2','event-2','SUBMIT_UNKNOWN_SIDE_EFFECT','2026-04-27T00:01:00Z')"
+        "INSERT INTO venue_commands VALUES ('cmd-2','position-2','ENTRY','BUY','m2','t2','event-2','SUBMIT_UNKNOWN_SIDE_EFFECT','2026-04-27T00:01:00Z')"
     )
     conn.execute(
-        "INSERT INTO venue_commands VALUES ('cmd-3','m3','t3','event-3','REVIEW_REQUIRED','2026-04-27T00:02:00Z')"
+        "INSERT INTO venue_commands VALUES ('cmd-3','position-3','ENTRY','BUY','m3','t3','event-3','REVIEW_REQUIRED','2026-04-27T00:02:00Z')"
     )
     conn.execute(
-        "INSERT INTO venue_commands VALUES ('cmd-4','m4','t4','event-4','UNKNOWN','2026-04-27T00:03:00Z')"
+        "INSERT INTO venue_commands VALUES ('cmd-4','position-4','ENTRY','BUY','m4','t4','event-4','UNKNOWN','2026-04-27T00:03:00Z')"
     )
     conn.execute(
         """
@@ -792,6 +795,165 @@ def test_position_lots_reader_uses_latest_append_only_state_and_counts_guards():
     assert unknown_count == 3
     assert unknown_markets == ("m2", "m3", "m4")
     assert count_open_reconcile_findings(conn) == 1
+
+
+def test_allocator_uses_current_uuid_position_without_double_counting_legacy_lot():
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(
+        """
+        CREATE TABLE venue_commands (
+          command_id TEXT PRIMARY KEY,
+          position_id TEXT,
+          intent_kind TEXT,
+          side TEXT,
+          market_id TEXT,
+          token_id TEXT,
+          decision_id TEXT,
+          created_at TEXT
+        );
+        CREATE TABLE venue_command_events (
+          command_id TEXT,
+          sequence_no INTEGER,
+          event_type TEXT,
+          payload_json TEXT
+        );
+        CREATE TABLE position_lots (
+          lot_id INTEGER PRIMARY KEY AUTOINCREMENT,
+          position_id INTEGER,
+          state TEXT,
+          shares INTEGER,
+          entry_price_avg TEXT,
+          source_command_id TEXT,
+          source TEXT,
+          raw_payload_json TEXT,
+          local_sequence INTEGER
+        );
+        CREATE TABLE position_current (
+          position_id TEXT PRIMARY KEY,
+          phase TEXT,
+          market_id TEXT,
+          direction TEXT,
+          shares REAL,
+          cost_basis_usd REAL,
+          entry_price REAL,
+          token_id TEXT,
+          no_token_id TEXT,
+          chain_shares REAL,
+          chain_cost_basis_usd REAL
+        );
+        INSERT INTO venue_commands VALUES (
+          'cmd-current', 'uuid-current', 'ENTRY', 'BUY', '2902043', 'no-token',
+          'decision-current', '2026-07-14T07:12:16+00:00'
+        );
+        INSERT INTO venue_commands VALUES (
+          'cmd-closed', 'uuid-closed', 'ENTRY', 'BUY', 'old-market', 'old-token',
+          'decision-closed', '2026-07-01T07:12:16+00:00'
+        );
+        INSERT INTO venue_commands VALUES (
+          'cmd-pending', 'uuid-pending', 'ENTRY', 'BUY', 'pending-market',
+          'pending-token', 'decision-pending', '2026-07-14T07:13:16+00:00'
+        );
+        INSERT INTO venue_command_events VALUES (
+          'cmd-current', 2, 'SUBMIT_REQUESTED',
+          '{"allocation":{"event_id":"seoul-july-15","resolution_window":"default","correlation_key":"seoul-high"}}'
+        );
+        INSERT INTO venue_command_events VALUES (
+          'cmd-pending', 2, 'SUBMIT_REQUESTED',
+          '{"allocation":{"event_id":"pending-event","resolution_window":"default","correlation_key":"pending-correlation"}}'
+        );
+        INSERT INTO position_lots (
+          position_id, state, shares, entry_price_avg, source_command_id,
+          source, raw_payload_json, local_sequence
+        ) VALUES (
+          4645, 'CONFIRMED_EXPOSURE', 10, '0.69', 'cmd-current', 'CHAIN', '{}', 1
+        );
+        INSERT INTO position_lots (
+          position_id, state, shares, entry_price_avg, source_command_id,
+          source, raw_payload_json, local_sequence
+        ) VALUES (
+          4000, 'CONFIRMED_EXPOSURE', 20, '0.50', 'cmd-closed', 'CHAIN', '{}', 1
+        );
+        INSERT INTO position_lots (
+          position_id, state, shares, entry_price_avg, source_command_id,
+          source, raw_payload_json, local_sequence
+        ) VALUES (
+          3999, 'CONFIRMED_EXPOSURE', 100, '0.99', 'missing-command', 'CHAIN', '{}', 1
+        );
+        INSERT INTO position_lots (
+          position_id, state, shares, entry_price_avg, source_command_id,
+          source, raw_payload_json, local_sequence
+        ) VALUES (
+          5000, 'CONFIRMED_EXPOSURE', 5, '0.20', 'cmd-pending', 'REST', '{}', 1
+        );
+        INSERT INTO position_current VALUES (
+          'uuid-current', 'active', 'condition-current', 'buy_no', 15, 10.275,
+          0.685, 'yes-token', 'no-token', 15, 10.275
+        );
+        INSERT INTO position_current VALUES (
+          'uuid-closed', 'settled', 'condition-closed', 'buy_yes', 0, 0,
+          0.50, 'old-token', 'old-no-token', 0, 0
+        );
+        INSERT INTO position_current VALUES (
+          'uuid-pending', 'pending_entry', 'condition-pending', 'buy_yes', 0, 0,
+          0.20, 'pending-token', 'pending-no-token', 0, 0
+        );
+        INSERT INTO position_current VALUES (
+          'uuid-optimistic', 'active', 'condition-optimistic', 'buy_yes', 5, 2.5,
+          0.50, 'optimistic-token', 'optimistic-no-token', 0, 0
+        );
+        INSERT INTO venue_commands VALUES (
+          'cmd-optimistic', 'uuid-optimistic', 'ENTRY', 'BUY', 'optimistic-market',
+          'optimistic-token', 'decision-optimistic', '2026-07-14T07:14:16+00:00'
+        );
+        INSERT INTO venue_command_events VALUES (
+          'cmd-optimistic', 2, 'SUBMIT_REQUESTED',
+          '{"allocation":{"event_id":"optimistic-event","resolution_window":"default","correlation_key":"optimistic-correlation"}}'
+        );
+        INSERT INTO position_lots (
+          position_id, state, shares, entry_price_avg, source_command_id,
+          source, raw_payload_json, local_sequence
+        ) VALUES (
+          5001, 'OPTIMISTIC_EXPOSURE', 5, '0.50', 'cmd-optimistic', 'REST', '{}', 1
+        );
+        """
+    )
+
+    lots = load_position_lots(conn)
+
+    assert len(lots) == 3
+    assert lots[0] == ExposureLot(
+        market_id="pending-market",
+        event_id="pending-event",
+        resolution_window="default",
+        token_id="pending-token",
+        exposure_micro=1_000_000,
+        state="CONFIRMED_EXPOSURE",
+        correlation_key="pending-correlation",
+        source="REST",
+    )
+    assert lots[1] == ExposureLot(
+        market_id="2902043",
+        event_id="seoul-july-15",
+        resolution_window="default",
+        token_id="no-token",
+        exposure_micro=10_275_000,
+        state="CONFIRMED_EXPOSURE",
+        correlation_key="seoul-high",
+        source="CHAIN",
+    )
+    assert lots[2] == ExposureLot(
+        market_id="optimistic-market",
+        event_id="optimistic-event",
+        resolution_window="default",
+        token_id="optimistic-token",
+        exposure_micro=2_500_000,
+        state="OPTIMISTIC_EXPOSURE",
+        correlation_key="optimistic-correlation",
+        source="VENUE",
+    )
+    conn.execute("DROP TABLE position_lots")
+    assert load_position_lots(conn) == (lots[1], lots[2])
 
 
 def test_pre_sdk_review_required_no_order_id_does_not_latch_unknown_side_effect_count():

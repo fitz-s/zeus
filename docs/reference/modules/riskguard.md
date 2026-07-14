@@ -58,16 +58,23 @@ K1 governance layer. It may evolve, but only inside K0 semantic boundaries. The 
 | `risk_level.py` | Level taxonomy and ordering. |
 | `metrics.py` | Source metrics and decision-support calculations. |
 | `discord_alerts.py` | Human-visible symptom layer; must stay downstream. |
-| `../risk_allocator/governor.py` | R3 A2 blocking capital allocator/governor: reads current `position_lots`, unresolved submit-unknown side effects, open exchange reconcile findings, and heartbeat/WS health to deny new risk or force reduce-only/no-trade modes before executor submission. |
+| `../risk_allocator/governor.py` | R3 A2 blocking capital allocator/governor: reads canonical current positions plus unprojected active lots, unresolved submit-unknown side effects, open exchange reconcile findings, and heartbeat/WS health to deny new risk or force reduce-only/no-trade modes before executor submission. |
 
 ### R3 A2 risk allocator / portfolio governor
 
 `src/risk_allocator/` is a K1 governance adjunct to RiskGuard. It is intentionally
 blocking and read-only:
 
-- `position_lots` is the exposure truth input. Latest append-only lot state per
-  position is read; the allocator never repairs, inserts, updates, or deletes
-  lots.
+- `position_current` and chain-confirmed shares/cost are the current confirmed
+  exposure truth. Latest append-only `position_lots` state contributes only
+  command-backed active exposure not yet represented by the same runtime
+  position, preventing UUID-era blindness, legacy double counting, and orphan
+  lot resurrection. The allocator never repairs, inserts, updates, or deletes
+  either surface.
+- Projection transitions remain gap-free: a `pending_entry` or zero-exposure
+  projection does not suppress its command-backed lot. Once current exposure
+  is authoritative, its OPTIMISTIC/CONFIRMED state comes from chain truth,
+  typed fill authority, or the latest linked lot rather than lifecycle phase.
 - OPTIMISTIC and CONFIRMED exposure remain separate. CONFIRMED exposure counts
   at full capacity weight; OPTIMISTIC exposure counts at
   `CapPolicy.optimistic_exposure_weight`.
@@ -130,8 +137,9 @@ blocking and read-only:
 ## 17. Planning-lock triggers
 - Any change to risk levels, policy grammar, or how risk affects runtime behavior.
 - Any work that changes strategy-aware gating or auto-pause semantics.
-- Any change that makes `RiskAllocator` advisory-only, changes the
-  `position_lots` read contract, or bypasses executor pre-submit gating.
+- Any change that makes `RiskAllocator` advisory-only, changes its canonical
+  current-position/unprojected-lot read contract, or bypasses executor
+  pre-submit gating.
 
 ## 18. Common false assumptions
 - Riskguard can be evaluated from alerts alone.

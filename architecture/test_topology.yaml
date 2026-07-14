@@ -502,7 +502,7 @@ test_trust_policy:
     tests/test_command_grammar_amendment.py: {created: "2026-04-27", last_used: "2026-04-27"}
     tests/test_riskguard_red_durable_cmd.py: {created: "2026-04-27", last_used: "2026-04-27"}
     tests/test_command_bus_types.py: {created: "2026-04-26", last_used: "2026-04-27"}
-    tests/test_command_recovery.py: {created: "2026-04-26", last_used: "2026-07-13"}
+    tests/test_command_recovery.py: {created: "2026-04-26", last_used: "2026-07-14"}
     tests/test_venue_command_repo.py: {created: "2026-04-26", last_used: "2026-07-09", note: "SCH-W1.2-ORDER-STATE: extended with TestInsertCommandQVersionStamp — q_version write-once stamp, NULL default, whitespace normalization, survives state transitions, and live-mode ENTRY q_version fail-closed."}
     tests/test_migration_venue_commands_q_version.py: {created: "2026-07-04", last_used: "2026-07-04", note: "SCH-W1.2-ORDER-STATE live trade-DB migration coverage: adds nullable venue_commands.q_version, idempotent when already present, no-op when venue_commands is absent."}
     tests/test_unknown_side_effect.py: {created: "2026-04-27", last_used: "2026-04-30"}
@@ -519,7 +519,7 @@ test_trust_policy:
     tests/test_settlement_day_observation_authority.py: {created: "2026-05-23", last_used: "2026-05-23"}
     tests/test_fake_polymarket_venue.py: {created: "2026-04-27", last_used: "2026-04-27"}
     tests/test_strategy_benchmark.py: {created: "2026-04-27", last_used: "2026-04-27"}
-    tests/test_risk_allocator.py: {created: "2026-04-27", last_used: "2026-04-27"}
+    tests/test_risk_allocator.py: {created: "2026-04-27", last_used: "2026-07-14"}
     tests/test_live_readiness_gates.py: {created: "2026-04-27", last_used: "2026-04-27"}
     tests/test_entry_forecast_config.py: {created: "2026-05-03", last_used: "2026-05-03"}
     tests/test_executable_forecast_reader.py: {created: "2026-05-03", last_used: "2026-05-24"}

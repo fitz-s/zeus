@@ -5903,6 +5903,28 @@ def _filled_entry_execution_fact_repair_candidates(conn: sqlite3.Connection) -> 
                AND CAST(COALESCE(fact.filled_size, '0') AS REAL) > 0
                AND CAST(COALESCE(fact.fill_price, '0') AS REAL) > 0
              GROUP BY fact.command_id
+        ),
+        first_entry_command AS (
+            SELECT ranked.position_id, ranked.command_id
+              FROM (
+                    SELECT position_id,
+                           command_id,
+                           ROW_NUMBER() OVER (
+                               PARTITION BY position_id
+                               ORDER BY created_at, command_id
+                           ) AS entry_rank
+                      FROM venue_commands
+                     WHERE intent_kind = 'ENTRY'
+                       AND side = 'BUY'
+                   ) ranked
+             WHERE ranked.entry_rank = 1
+        ),
+        command_execution_fact AS (
+            SELECT command_id, MIN(intent_id) AS intent_id
+              FROM execution_fact
+             WHERE order_role = 'entry'
+               AND COALESCE(command_id, '') != ''
+             GROUP BY command_id
         )
         SELECT cmd.command_id,
                cmd.position_id,
@@ -5939,8 +5961,18 @@ def _filled_entry_execution_fact_repair_candidates(conn: sqlite3.Connection) -> 
            AND latest_order.venue_order_id = cmd.venue_order_id
           JOIN entry_fill
             ON entry_fill.command_id = cmd.command_id
+          LEFT JOIN first_entry_command first_cmd
+            ON first_cmd.position_id = cmd.position_id
+          LEFT JOIN command_execution_fact command_ef
+            ON command_ef.command_id = cmd.command_id
           LEFT JOIN execution_fact ef
-            ON ef.intent_id = cmd.position_id || ':entry'
+            ON ef.intent_id = COALESCE(
+               command_ef.intent_id,
+               CASE
+                   WHEN first_cmd.command_id = cmd.command_id
+                   THEN cmd.position_id || ':entry'
+               END
+           )
            AND ef.order_role = 'entry'
          WHERE cmd.intent_kind = 'ENTRY'
            AND cmd.side = 'BUY'
@@ -5972,7 +6004,7 @@ def _log_filled_entry_trade_candidate_execution_fact(
     conn: sqlite3.Connection,
     *,
     candidate: dict,
-) -> None:
+) -> str:
     from src.state.db import log_execution_fact
 
     terminal_status = _entry_execution_fact_terminal_status(candidate)
@@ -5983,9 +6015,14 @@ def _log_filled_entry_trade_candidate_execution_fact(
         or candidate.get("observed_at")
         or _now_iso()
     )
+    intent_id = _entry_execution_fact_intent_id(
+        conn,
+        position_id=position_id,
+        command_id=str(candidate.get("command_id") or ""),
+    )
     log_execution_fact(
         conn,
-        intent_id=f"{position_id}:entry",
+        intent_id=intent_id,
         position_id=position_id,
         decision_id=str(candidate.get("decision_id") or "") or None,
         command_id=str(candidate.get("command_id") or "") or None,
@@ -5999,6 +6036,59 @@ def _log_filled_entry_trade_candidate_execution_fact(
         venue_status="FILLED" if terminal_status == "filled" else "PARTIAL",
         terminal_exec_status=terminal_status,
     )
+    return intent_id
+
+
+def _entry_execution_fact_intent_id(
+    conn: sqlite3.Connection,
+    *,
+    position_id: str,
+    command_id: str,
+) -> str:
+    """Keep one durable entry fact per venue command for position increments."""
+
+    exact = conn.execute(
+        """
+        SELECT intent_id
+          FROM execution_fact
+         WHERE position_id = ?
+           AND order_role = 'entry'
+           AND command_id = ?
+         ORDER BY intent_id
+         LIMIT 1
+        """,
+        (position_id, command_id),
+    ).fetchone()
+    if exact is not None:
+        return str(exact["intent_id"])
+
+    baseline_id = f"{position_id}:entry"
+    baseline = conn.execute(
+        """
+        SELECT command_id
+          FROM execution_fact
+         WHERE intent_id = ?
+           AND order_role = 'entry'
+         LIMIT 1
+        """,
+        (baseline_id,),
+    ).fetchone()
+    if baseline is None:
+        any_entry = conn.execute(
+            """
+            SELECT 1
+              FROM execution_fact
+             WHERE position_id = ?
+               AND order_role = 'entry'
+             LIMIT 1
+            """,
+            (position_id,),
+        ).fetchone()
+        if any_entry is None:
+            return baseline_id
+    elif not str(baseline["command_id"] or "") or str(baseline["command_id"]) == command_id:
+        return baseline_id
+    return f"{baseline_id}:{command_id}"
 
 
 def _entry_execution_fact_terminal_status(candidate: Mapping[str, object]) -> str:
@@ -6024,7 +6114,10 @@ def reconcile_filled_entry_execution_fact_repairs(conn: sqlite3.Connection) -> d
         fact_id = str(candidate.get("trade_fact_id") or "")
         conn.execute("SAVEPOINT filled_entry_execfact_repair")
         try:
-            _log_filled_entry_trade_candidate_execution_fact(conn, candidate=candidate)
+            intent_id = _log_filled_entry_trade_candidate_execution_fact(
+                conn,
+                candidate=candidate,
+            )
             verified = conn.execute(
                 """
                 SELECT terminal_exec_status, venue_status, command_id
@@ -6033,7 +6126,7 @@ def reconcile_filled_entry_execution_fact_repairs(conn: sqlite3.Connection) -> d
                    AND order_role = 'entry'
                  LIMIT 1
                 """,
-                (f"{candidate.get('position_id')}:entry",),
+                (intent_id,),
             ).fetchone()
             expected_status = _entry_execution_fact_terminal_status(candidate)
             expected_venue_status = "FILLED" if expected_status == "filled" else "PARTIAL"
