@@ -2,16 +2,20 @@
 # Last reused or audited: 2026-07-13
 # Authority basis: docs/rebuild/local_ledger_excision_2026-07-12.md (LX-0R
 #   deliverable 3) + docs/rebuild/consult_answers/local_ledger_excision_delta_round2_2026-07-13.txt
-#   census §精化 #1/#2 (the named bypass-writer seed set).
+#   census §精化 #1/#2 (the named bypass-writer seed set) + a read-only LX-3R
+#   firewall-scoping pass (2026-07-13) that found the reader scan blind to a
+#   bare ``SELECT *`` against either forbidden table (the reader-side seed
+#   set below).
 
 """Tests for scripts/gen_economics_writer_manifest.py.
 
 Covers: determinism (two scans of the same tree produce byte-identical
 output), the ``--check`` drift gate, and the seed-completeness expectation —
-every bypass writer named in the local-ledger-excision census must appear in
-a fresh scan of THIS repo's actual src/ tree (not a synthetic fixture: the
-whole point of the manifest is to prove the real codebase, not a stand-in,
-carries no un-catalogued forbidden-column writer).
+every bypass writer named in the local-ledger-excision census, and every
+``SELECT *`` reader named in the LX-3R residue-inventory gap-close, must
+appear in a fresh scan of THIS repo's actual src/ tree (not a synthetic
+fixture: the whole point of the manifest is to prove the real codebase, not
+a stand-in, carries no un-catalogued forbidden-column writer or reader).
 """
 
 from __future__ import annotations
@@ -62,6 +66,36 @@ _SEED_EDLI_AUDIT_WRITERS = {
     ("src/events/live_profit_audit.py", "LiveProfitAuditLedger.insert_record"),
 }
 
+# LX-3R residue-inventory gap (read-only firewall-scoping pass, 2026-07-13):
+# the reader scan was "literal SELECT column lists only" — a bare `SELECT *`
+# against a forbidden table names none of its columns literally, so it read
+# every forbidden column while showing up as zero reader rows. Pinned by
+# (file, function), not line, same reasoning as the writer seed set above.
+# `_ensure_entry_fill_position_event` / `_ensure_exit_fill_position_event`
+# are the two core fill-materialization primitives that command_recovery.py
+# imports by name — Tier-0, and previously absent from BOTH the writer and
+# reader census. `_apply_settlement_finding` (chain_mirror_reconciler.py) is
+# the plan's own KEEP-spine "target kernel" — a KEEP module still reading the
+# full forbidden row today, not exempt from the firewall.
+_SEED_SELECT_STAR_READERS = {
+    ("src/execution/exchange_reconcile.py", "_ensure_entry_fill_position_event"),
+    ("src/execution/exchange_reconcile.py", "_ensure_exit_fill_position_event"),
+    ("src/state/chain_mirror_reconciler.py", "_apply_settlement_finding"),
+}
+
+# edli_live_profit_audit (census §精化 #2) had ZERO censused readers before
+# this fix despite `promotion_eligible` gating EDLI live-capital promotion.
+# Its only read of a forbidden column is a bare `SELECT *` inside
+# `_canonical_promotion_rows`. The two Python-level consumers the LX-3R scope
+# doc names (`_verify_promotion_eligible_confirmed_rows` ~line 412,
+# `_promotion_summary_from_rows` ~line 740) both only call
+# `row.get("promotion_eligible")` on an already-fetched dict — there is no
+# SQL string at either site, so a source-text scanner cannot attribute a hit
+# to them directly (that would need interprocedural dataflow analysis, a
+# rewrite, not an extension). `_canonical_promotion_rows` is the one real SQL
+# read both of them sit downstream of; that is what this manifest catches.
+_SEED_EDLI_AUDIT_READER = ("src/events/live_profit_audit.py", "_canonical_promotion_rows")
+
 
 @pytest.fixture(scope="module")
 def hits():
@@ -71,6 +105,11 @@ def hits():
 @pytest.fixture(scope="module")
 def writer_locations(hits) -> set[tuple[str, str]]:
     return {(h.file, h.function) for h in hits if h.kind == "WRITE"}
+
+
+@pytest.fixture(scope="module")
+def reader_locations(hits) -> set[tuple[str, str]]:
+    return {(h.file, h.function) for h in hits if h.kind == "READ"}
 
 
 def test_seed_bypass_writers_all_present(writer_locations: set[tuple[str, int]]) -> None:
@@ -85,6 +124,111 @@ def test_seed_funnel_writer_present(writer_locations: set[tuple[str, int]]) -> N
 def test_seed_edli_audit_writers_present(writer_locations: set[tuple[str, int]]) -> None:
     missing = _SEED_EDLI_AUDIT_WRITERS - writer_locations
     assert not missing, f"scanner missed EDLI audit writer(s): {sorted(missing)}"
+
+
+def test_seed_select_star_readers_all_present(reader_locations: set[tuple[str, str]]) -> None:
+    missing = _SEED_SELECT_STAR_READERS - reader_locations
+    assert not missing, f"scanner missed named SELECT * reader(s): {sorted(missing)}"
+
+
+def test_seed_edli_audit_reader_present(reader_locations: set[tuple[str, str]]) -> None:
+    assert _SEED_EDLI_AUDIT_READER in reader_locations
+
+
+def test_select_star_reader_unresolved_assumes_full_forbidden_set(hits) -> None:
+    """A bare SELECT * cannot name its own column list, so — mirroring the
+    writer-side fallback for an externally-sourced dynamic column list — the
+    scanner must attribute it to the FULL forbidden set for that table, not
+    just whatever forbidden column names happen to also appear elsewhere in
+    the same SQL string (e.g. a WHERE/COALESCE clause guard)."""
+    from src.contracts.economics_ownership import FORBIDDEN_COLUMNS_BY_TABLE
+
+    entry_fill = [
+        h for h in hits
+        if h.kind == "READ"
+        and (h.file, h.function) == ("src/execution/exchange_reconcile.py", "_ensure_entry_fill_position_event")
+    ]
+    assert len(entry_fill) == 1
+    hit = entry_fill[0]
+    assert hit.resolved is False
+    assert set(hit.columns) == FORBIDDEN_COLUMNS_BY_TABLE["position_current"]
+
+
+def test_cte_wrapped_select_star_reader_still_resolves(hits) -> None:
+    """command_recovery.py's _invalid_open_entry_authority_candidates is a
+    genuinely different shape from every other SELECT * seed above: a `WITH
+    latest_entry AS (SELECT pc.* FROM position_current pc ...) SELECT * FROM
+    latest_entry` — the forbidden table's own FROM feeds a CTE that is then
+    re-wildcarded by a SECOND, later `SELECT * FROM <cte-name>` clause. Both
+    clauses independently justify "this reads the full position_current row"
+    even though neither one alone names the same identifier the other does.
+    Locks in the deliberate (not accidental) non-anchored SELECT_STAR_RE
+    match documented next to its definition."""
+    from src.contracts.economics_ownership import FORBIDDEN_COLUMNS_BY_TABLE
+
+    candidates = [
+        h for h in hits
+        if h.kind == "READ"
+        and (h.file, h.function) == ("src/execution/command_recovery.py", "_invalid_open_entry_authority_candidates")
+    ]
+    assert len(candidates) == 1
+    hit = candidates[0]
+    assert hit.table == "position_current"
+    assert hit.resolved is False
+    assert set(hit.columns) == FORBIDDEN_COLUMNS_BY_TABLE["position_current"]
+
+
+def test_funnel_writer_survives_dynamic_table_name_parameter(hits) -> None:
+    """upsert_position_current's INSERT now targets an f-string-interpolated
+    ``{table_name}`` (default ``"position_current"``) rather than a literal
+    table name, so it can also write a shadow/reduce table under the same
+    funnel — a change independent of this packet, made concurrently by
+    another in-flight packet. _WRITE_RE's literal-identifier capture finds
+    NOTHING for this shape (not just an unresolved column list — the whole
+    write briefly went invisible, an even worse gap than what this packet
+    was scoped to close), and can also spuriously re-match later in the same
+    string once the real table name is stripped (`ON CONFLICT(...) DO UPDATE
+    SET` degenerates into a bogus `UPDATE SET` "table" match). Both are
+    resolved via _dynamic_write_table: the interpolated name is traced back
+    to its literal default-parameter value in the enclosing function's own
+    signature. Regression-locks the fix documented next to
+    _dynamic_write_table's definition."""
+    from src.contracts.economics_ownership import FORBIDDEN_COLUMNS_BY_TABLE
+
+    funnel = [
+        h for h in hits
+        if h.kind == "WRITE" and (h.file, h.function) == _SEED_FUNNEL_WRITER
+    ]
+    assert len(funnel) == 1
+    hit = funnel[0]
+    assert hit.verb == "INSERT"
+    assert hit.table == "position_current"
+    assert hit.resolved is False
+    assert set(hit.columns) == FORBIDDEN_COLUMNS_BY_TABLE["position_current"]
+
+
+def test_edli_audit_reader_full_set_includes_promotion_eligible(hits) -> None:
+    from src.contracts.economics_ownership import FORBIDDEN_COLUMNS_BY_TABLE
+
+    audit_reader = [
+        h for h in hits
+        if h.kind == "READ" and (h.file, h.function) == _SEED_EDLI_AUDIT_READER
+    ]
+    assert len(audit_reader) == 1
+    hit = audit_reader[0]
+    assert hit.table == "edli_live_profit_audit"
+    assert hit.resolved is False
+    assert "promotion_eligible" in hit.columns
+    assert set(hit.columns) == FORBIDDEN_COLUMNS_BY_TABLE["edli_live_profit_audit"]
+
+
+def test_reader_count_exceeds_prior_census_baseline(hits) -> None:
+    """Prior census (pre-LX-3R-gap-close) had exactly 40 readers, all against
+    position_current, zero against edli_live_profit_audit (LX-3R scope
+    §0.3/§0.4 — SELECT * blindness). Closing that blind spot must strictly
+    grow this count."""
+    readers = [h for h in hits if h.kind == "READ"]
+    assert len(readers) > 40
 
 
 def test_funnel_writer_unresolved_assumes_full_forbidden_set(hits) -> None:

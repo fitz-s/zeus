@@ -10,61 +10,75 @@ Forbidden column set: 15 columns across 2 tables (edli_live_profit_audit, positi
 |---|---|---|---|---|---|---|
 | `src/events/edli_position_bridge.py:1019` | UPDATE | position_current | cost_basis_usd, entry_price, shares, size_usd | no | yes | `_absorb_same_order_duplicate_bridge_fill` |
 | `src/events/live_profit_audit.py:254` | INSERT | edli_live_profit_audit | edge_value_usd, pnl_usd, promotion_eligible, realized_edge, settlement_outcome | no | yes | `LiveProfitAuditLedger.insert_record` |
-| `src/execution/command_recovery.py:2460` | UPDATE | position_current | exit_price | no | yes | `_append_exit_order_fill_projection` |
-| `src/execution/command_recovery.py:5515` | UPDATE | position_current | exit_price, realized_pnl_usd | no | yes | `reconcile_hard_terminal_position_projection_repairs` |
-| `src/execution/command_recovery.py:6256` | UPDATE | position_current | exit_price | no | yes | `_append_exit_filled_projection` |
-| `src/execution/command_recovery.py:8323` | UPDATE | position_current | chain_avg_price, chain_cost_basis_usd, chain_shares | no | yes | `repair_confirmed_phantom_voids` |
-| `src/execution/command_recovery.py:8428` | UPDATE | position_current | chain_avg_price, chain_cost_basis_usd, chain_shares, cost_basis_usd, entry_price, shares | no | yes | `repair_confirmed_phantom_voids` |
-| `src/execution/command_recovery.py:8659` | UPDATE | position_current | chain_avg_price, chain_cost_basis_usd, chain_shares, cost_basis_usd, entry_price, shares | no | yes | `repair_confirmed_chain_absence_positive_projections` |
-| `src/execution/command_recovery.py:8724` | UPDATE | position_current | chain_avg_price, chain_cost_basis_usd, chain_shares | no | yes | `repair_confirmed_chain_absence_positive_projections` |
+| `src/execution/command_recovery.py:2525` | UPDATE | position_current | exit_price | no | yes | `_append_exit_order_fill_projection` |
+| `src/execution/command_recovery.py:5580` | UPDATE | position_current | exit_price, realized_pnl_usd | no | yes | `reconcile_hard_terminal_position_projection_repairs` |
+| `src/execution/command_recovery.py:6321` | UPDATE | position_current | exit_price | no | yes | `_append_exit_filled_projection` |
+| `src/execution/command_recovery.py:8390` | UPDATE | position_current | chain_avg_price, chain_cost_basis_usd, chain_shares | no | yes | `repair_confirmed_phantom_voids` |
+| `src/execution/command_recovery.py:8495` | UPDATE | position_current | chain_avg_price, chain_cost_basis_usd, chain_shares, cost_basis_usd, entry_price, shares | no | yes | `repair_confirmed_phantom_voids` |
+| `src/execution/command_recovery.py:8726` | UPDATE | position_current | chain_avg_price, chain_cost_basis_usd, chain_shares, cost_basis_usd, entry_price, shares | no | yes | `repair_confirmed_chain_absence_positive_projections` |
+| `src/execution/command_recovery.py:8791` | UPDATE | position_current | chain_avg_price, chain_cost_basis_usd, chain_shares | no | yes | `repair_confirmed_chain_absence_positive_projections` |
 | `src/execution/exchange_reconcile.py:1379` | UPDATE | position_current | chain_shares, cost_basis_usd, shares | no | yes | `_restore_position_to_pending_exit_for_recovered_sell` |
 | `src/execution/exchange_reconcile.py:1775` | UPDATE | position_current | chain_shares | yes | yes | `_tag_external_operator_closed_position_holdings` |
-| `src/execution/exit_lifecycle.py:4680` | UPDATE | position_current | chain_avg_price, chain_cost_basis_usd, chain_shares, exit_price | no | yes | `_close_pending_exit_from_trade_fact` |
+| `src/execution/exit_lifecycle.py:4758` | UPDATE | position_current | chain_avg_price, chain_cost_basis_usd, chain_shares, exit_price | no | yes | `_close_pending_exit_from_trade_fact` |
 | `src/state/position_duplicate_consolidator.py:200` | UPDATE | position_current | cost_basis_usd, shares | no | yes | `_void_row` |
-| `src/state/projection.py:659` | INSERT | position_current | chain_avg_price, chain_cost_basis_usd, chain_shares, cost_basis_usd, entry_price, exit_price, realized_pnl_usd, settlement_price, shares, size_usd | yes | no (assumed full set) | `upsert_position_current` |
+| `src/state/projection.py:691` | INSERT | position_current | chain_avg_price, chain_cost_basis_usd, chain_shares, cost_basis_usd, entry_price, exit_price, realized_pnl_usd, settlement_price, shares, size_usd | yes | no (assumed full set) | `upsert_position_current` |
 
-## Readers (40, best-effort — literal SELECT column lists only)
+## Readers (54, best-effort — literal SELECT column lists plus bare SELECT * / SELECT <alias>.* against a forbidden table)
 
 | file:line | table | columns | function |
 |---|---|---|---|
-| `src/control/live_health.py:1906` | position_current | chain_shares, shares | `_entry_q_version_surface` |
-| `src/control/live_health.py:1950` | position_current | chain_shares, shares | `_entry_q_version_surface` |
-| `src/control/live_health.py:2235` | position_current | chain_shares, shares | `_pending_exit_release_loop_surface` |
-| `src/control/live_health.py:2659` | position_current | chain_shares, shares | `_pending_exit_release_loop_surface` |
-| `src/control/live_health.py:2959` | position_current | chain_shares, shares | `_monitor_probability_freshness_surface` |
-| `src/control/live_health.py:3021` | position_current | chain_shares, shares | `_monitor_probability_freshness_surface` |
-| `src/control/live_health.py:3061` | position_current | chain_shares, shares | `_monitor_probability_freshness_surface` |
-| `src/control/live_health.py:3132` | position_current | chain_shares, shares | `_monitor_probability_freshness_surface` |
-| `src/control/live_health.py:3224` | position_current | chain_shares, shares | `_monitor_probability_freshness_surface` |
-| `src/control/live_health.py:3477` | position_current | chain_shares, shares | `_sub_min_partial_position_surface` |
+| `src/control/live_health.py:1909` | position_current | chain_shares, shares | `_entry_q_version_surface` |
+| `src/control/live_health.py:1953` | position_current | chain_shares, shares | `_entry_q_version_surface` |
+| `src/control/live_health.py:2238` | position_current | chain_shares, shares | `_pending_exit_release_loop_surface` |
+| `src/control/live_health.py:2662` | position_current | chain_shares, shares | `_pending_exit_release_loop_surface` |
+| `src/control/live_health.py:2962` | position_current | chain_shares, shares | `_monitor_probability_freshness_surface` |
+| `src/control/live_health.py:3041` | position_current | chain_shares, shares | `_monitor_probability_freshness_surface` |
+| `src/control/live_health.py:3083` | position_current | chain_shares, shares | `_monitor_probability_freshness_surface` |
+| `src/control/live_health.py:3156` | position_current | chain_shares, shares | `_monitor_probability_freshness_surface` |
+| `src/control/live_health.py:3249` | position_current | chain_shares, shares | `_monitor_probability_freshness_surface` |
+| `src/control/live_health.py:3502` | position_current | chain_shares, shares | `_sub_min_partial_position_surface` |
 | `src/data/replacement_cycle_advance_trigger.py:245` | position_current | chain_cost_basis_usd, chain_shares | `_held_position_families` |
 | `src/data/substrate_observer.py:775` | position_current | chain_shares | `_edli_current_held_position_scope_rows` |
 | `src/engine/cycle_runtime.py:5921` | position_current | shares | `_rotation_held_positions` |
 | `src/engine/evaluator.py:3290` | position_current | cost_basis_usd, shares | `_has_same_token_blocking_open_db` |
-| `src/events/reactor.py:7966` | position_current | chain_shares | `_edli_current_held_position_condition_scope` |
-| `src/execution/command_recovery.py:2593` | position_current | chain_shares, shares | `_active_projection_matches_confirmed_fill` |
-| `src/execution/command_recovery.py:5002` | position_current | chain_shares, cost_basis_usd, shares | `_invalid_pending_entry_authority_rows` |
-| `src/execution/command_recovery.py:11241` | position_current | cost_basis_usd, shares | `_no_positive_position_projection` |
+| `src/events/edli_position_bridge.py:932` | position_current | chain_avg_price, chain_cost_basis_usd, chain_shares, cost_basis_usd, entry_price, exit_price, realized_pnl_usd, settlement_price, shares, size_usd | `_absorb_same_order_duplicate_bridge_fill` |
+| `src/events/live_profit_audit.py:812` | edli_live_profit_audit | edge_value_usd, pnl_usd, promotion_eligible, realized_edge, settlement_outcome | `_canonical_promotion_rows` |
+| `src/events/reactor.py:8062` | position_current | chain_shares | `_edli_current_held_position_condition_scope` |
+| `src/execution/command_recovery.py:2658` | position_current | chain_shares, shares | `_active_projection_matches_confirmed_fill` |
+| `src/execution/command_recovery.py:5067` | position_current | chain_shares, cost_basis_usd, shares | `_invalid_pending_entry_authority_rows` |
+| `src/execution/command_recovery.py:5259` | position_current | chain_avg_price, chain_cost_basis_usd, chain_shares, cost_basis_usd, entry_price, exit_price, realized_pnl_usd, settlement_price, shares, size_usd | `_invalid_open_entry_authority_candidates` |
+| `src/execution/command_recovery.py:5618` | position_current | chain_avg_price, chain_cost_basis_usd, chain_shares, cost_basis_usd, entry_price, exit_price, realized_pnl_usd, settlement_price, shares, size_usd | `reconcile_hard_terminal_position_projection_repairs` |
+| `src/execution/command_recovery.py:6546` | position_current | chain_avg_price, chain_cost_basis_usd, chain_shares, cost_basis_usd, entry_price, exit_price, realized_pnl_usd, settlement_price, shares, size_usd | `_position_current_for_terminal_order` |
+| `src/execution/command_recovery.py:6551` | position_current | chain_avg_price, chain_cost_basis_usd, chain_shares, cost_basis_usd, entry_price, exit_price, realized_pnl_usd, settlement_price, shares, size_usd | `_position_current_for_terminal_order` |
+| `src/execution/command_recovery.py:6556` | position_current | chain_avg_price, chain_cost_basis_usd, chain_shares, cost_basis_usd, entry_price, exit_price, realized_pnl_usd, settlement_price, shares, size_usd | `_position_current_for_terminal_order` |
+| `src/execution/command_recovery.py:11478` | position_current | cost_basis_usd, shares | `_no_positive_position_projection` |
 | `src/execution/edli_resting_absorbed_resolver.py:231` | position_current | entry_price, shares | `_existing_absorbed_position` |
-| `src/execution/exchange_reconcile.py:1274` | position_current | shares | `_known_position_for_reducing_ghost_sell` |
+| `src/execution/exchange_reconcile.py:1274` | position_current | chain_avg_price, chain_cost_basis_usd, chain_shares, cost_basis_usd, entry_price, exit_price, realized_pnl_usd, settlement_price, shares, size_usd | `_known_position_for_reducing_ghost_sell` |
 | `src/execution/exchange_reconcile.py:3754` | position_current | shares | `_ghost_proof_d_no_token_exposure` |
+| `src/execution/exchange_reconcile.py:4349` | position_current | chain_avg_price, chain_cost_basis_usd, chain_shares, cost_basis_usd, entry_price, exit_price, realized_pnl_usd, settlement_price, shares, size_usd | `_same_token_position_metadata_for_entry_fill` |
+| `src/execution/exchange_reconcile.py:4505` | position_current | chain_avg_price, chain_cost_basis_usd, chain_shares, cost_basis_usd, entry_price, exit_price, realized_pnl_usd, settlement_price, shares, size_usd | `_ensure_entry_fill_position_event` |
+| `src/execution/exchange_reconcile.py:4724` | position_current | chain_avg_price, chain_cost_basis_usd, chain_shares, cost_basis_usd, entry_price, exit_price, realized_pnl_usd, settlement_price, shares, size_usd | `_ensure_exit_fill_position_event` |
 | `src/execution/exchange_reconcile.py:5656` | position_current | shares | `_closed_position_token_holdings_by_token` |
 | `src/execution/exchange_reconcile.py:5728` | position_current | chain_shares | `_chain_confirmed_active_holdings_by_token` |
-| `src/execution/executor.py:1873` | position_current | cost_basis_usd, shares | `_entry_duplicate_same_token_component` |
-| `src/execution/exit_lifecycle.py:1549` | position_current | chain_shares, shares | `_canonical_non_executable_dust_hold` |
-| `src/execution/exit_lifecycle.py:5782` | position_current | chain_shares, shares | `_release_ws_gap_blocked_exit_retries_after_m5_clear` |
-| `src/execution/exit_lifecycle.py:5954` | position_current | chain_shares, shares | `_release_allocator_config_blocked_exit_retries_after_refresh` |
+| `src/execution/executor.py:1975` | position_current | cost_basis_usd, shares | `_entry_duplicate_same_token_component` |
+| `src/execution/exit_lifecycle.py:1578` | position_current | chain_shares, shares | `_canonical_non_executable_dust_hold` |
+| `src/execution/exit_lifecycle.py:5860` | position_current | chain_shares, shares | `_release_ws_gap_blocked_exit_retries_after_m5_clear` |
+| `src/execution/exit_lifecycle.py:6032` | position_current | chain_shares, shares | `_release_allocator_config_blocked_exit_retries_after_refresh` |
 | `src/reconcile/local_truth.py:148` | position_current | chain_shares, cost_basis_usd, entry_price, exit_price, realized_pnl_usd, shares | `<module>` |
 | `src/risk_allocator/governor.py:851` | position_current | chain_shares, shares | `_review_required_has_materialized_entry_exposure` |
+| `src/state/chain_mirror_reconciler.py:782` | position_current | chain_avg_price, chain_cost_basis_usd, chain_shares, cost_basis_usd, entry_price, exit_price, realized_pnl_usd, settlement_price, shares, size_usd | `_apply_settlement_finding` |
+| `src/state/chain_mirror_reconciler.py:926` | position_current | chain_avg_price, chain_cost_basis_usd, chain_shares, cost_basis_usd, entry_price, exit_price, realized_pnl_usd, settlement_price, shares, size_usd | `apply_size_correction_finding` |
+| `src/state/chain_mirror_reconciler.py:993` | position_current | chain_avg_price, chain_cost_basis_usd, chain_shares, cost_basis_usd, entry_price, exit_price, realized_pnl_usd, settlement_price, shares, size_usd | `_apply_review_marker_finding` |
+| `src/state/chain_mirror_reconciler.py:1057` | position_current | chain_avg_price, chain_cost_basis_usd, chain_shares, cost_basis_usd, entry_price, exit_price, realized_pnl_usd, settlement_price, shares, size_usd | `_apply_closed_exited_finding` |
 | `src/state/chain_reconciliation.py:374` | position_current | shares | `reconcile._canonical_current_shares` |
 | `src/state/chain_reconciliation.py:734` | position_current | chain_shares | `reconcile._canonical_current_chain_shares` |
 | `src/state/chain_reconciliation.py:1389` | position_current | chain_shares | `reconcile._recent_positive_chain_observation` |
 | `src/state/collateral_ledger.py:877` | position_current | chain_shares, shares | `_has_active_ctf_exposure` |
-| `src/state/db.py:11164` | position_current | chain_avg_price, chain_cost_basis_usd, chain_shares, cost_basis_usd, entry_price, shares, size_usd | `query_position_current_status_view` |
-| `src/state/db.py:11612` | position_current | cost_basis_usd, entry_price, shares, size_usd | `query_portfolio_loader_view` |
-| `src/state/ledger.py:506` | position_current | shares | `backfill_fill_authority` |
+| `src/state/db.py:11191` | position_current | chain_avg_price, chain_cost_basis_usd, chain_shares, cost_basis_usd, entry_price, shares, size_usd | `query_position_current_status_view` |
+| `src/state/db.py:11639` | position_current | cost_basis_usd, entry_price, shares, size_usd | `query_portfolio_loader_view` |
+| `src/state/ledger.py:511` | position_current | shares | `backfill_fill_authority` |
 | `src/state/trade_decisions_synthesizer.py:52` | position_current | entry_price, size_usd | `synthesize_missing_bridge` |
-| `src/state/venue_command_repo.py:1756` | position_current | cost_basis_usd, shares | `_validate_review_cancel_unknown_no_fill_payload` |
-| `src/state/venue_command_repo.py:1954` | position_current | cost_basis_usd, shares | `_validate_review_acked_submit_terminal_no_fill_payload` |
-| `src/state/venue_command_repo.py:2530` | position_current | chain_shares, shares | `_actual_review_confirmed_fill_predicates` |
+| `src/state/venue_command_repo.py:1760` | position_current | cost_basis_usd, shares | `_validate_review_cancel_unknown_no_fill_payload` |
+| `src/state/venue_command_repo.py:1958` | position_current | cost_basis_usd, shares | `_validate_review_acked_submit_terminal_no_fill_payload` |
+| `src/state/venue_command_repo.py:2534` | position_current | chain_shares, shares | `_actual_review_confirmed_fill_predicates` |
 
