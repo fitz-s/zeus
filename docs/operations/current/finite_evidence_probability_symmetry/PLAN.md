@@ -52,6 +52,16 @@ nonterminal states until cumulative canonical trade facts cover the submitted
 shares.  Chain-only dust remains separate reconciliation evidence; it must not
 retroactively turn a partial order fact into full-fill proof.
 
+Fresh 2026-07-14 auction evidence exposed a probability-variable mismatch in
+the global preparation seam.  A Day0 family was made conditional on a current
+full-day replacement posterior before the Day0 branch rebuilt the probability
+of the final daily extreme from the current observed extreme and the forecast
+hours that remain.  Those are different random variables.  The repair must let
+the Day0 remaining-day authority bind directly to the current canonical
+observation, current causal base snapshot, and current remaining-hour vectors;
+it must not fabricate missing full-day ENS extrema or weaken replacement
+readiness for any non-Day0 family.
+
 Fresh order-outcome evidence on 2026-07-13 refuted three additional assumptions
 at the decision/execution boundary:
 
@@ -130,6 +140,10 @@ authority surface.
   acknowledgement rows as the ledger, clamp only the EDLI ledger timestamp to
   that causal boundary, preserve the raw venue observation time in payload,
   and collapse MATCHED/MINED/CONFIRMED revisions by `trade_id`.
+- Remove full-day replacement readiness from the Day0 remaining-day probability
+  branch only.  Bind its witness identity to the current observation, current
+  causal base snapshot, remaining-model capture identities, finite-evidence
+  carrier, and exact sample matrix; preserve all non-Day0 replacement gates.
 
 ## Verification
 - Focused first-principles antibody and settlement-preimage regressions pass.
@@ -165,8 +179,20 @@ authority surface.
   trade-status rows become one `UserTradeObserved`; a WS confirmed re-report
   antibody proves the same logical-fill identity, and non-fill states remain
   ineligible for recovery.
+- A Day0 global-preparation antibody proves that missing full-day replacement
+  readiness cannot block a complete current observation + remaining-day
+  witness, while the same missing readiness still blocks a forecast event and
+  missing Day0 current inputs still fail closed.
 
 ## Work record
+
+- 2026-07-14: canonical global-auction receipts retained complete scope scanning
+  but excluded Hong Kong Jul 15 LOW and Miami Jul 14 LOW because their full-day
+  ENS extrema were temporally boundary-ambiguous.  Both were Day0 families with
+  current observations and remaining-hour forecast inputs.  The exclusion was
+  therefore traced to an incorrect full-day-posterior dependency, not to an
+  absent current Day0 probability variable.  No historical fit or synthesized
+  member value is admitted by the repair.
 
 - 2026-07-11: live rows isolated the source-clock YES historical-floor / NO
   near-one asymmetry.

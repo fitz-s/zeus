@@ -22700,12 +22700,13 @@ def _global_day0_execution_payload(
     *,
     family: object,
     resolution: object,
-    conditioning: Mapping[str, object],
+    conditioning: Mapping[str, object] | None,
     observation_conn: sqlite3.Connection,
     decision_time: datetime,
-    posterior_id: object,
+    posterior_id: object | None,
+    probability_base_identity: object | None = None,
 ) -> dict[str, object]:
-    """Bind q's Day0 conditioning to one current canonical observation state."""
+    """Bind Day0 q to one current canonical observation state."""
 
     from src.data.replacement_forecast_current_target_plan import (
         _latest_authorized_day0_fact,
@@ -22733,40 +22734,46 @@ def _global_day0_execution_payload(
             raise ValueError(reason)
         return parsed.astimezone(UTC)
 
-    conditioned_at = utc(
-        conditioning.get("observation_time"),
-        reason="GLOBAL_DAY0_CONDITIONING_TIME_INVALID",
-    )
     observed_at = utc(
         fact.get("observation_time"),
         reason="GLOBAL_DAY0_CURRENT_OBSERVATION_TIME_INVALID",
     )
-    if conditioned_at != observed_at:
-        raise ValueError("GLOBAL_DAY0_CONDITIONING_OBSERVATION_TIME_MISMATCH")
 
     try:
         observed_native = float(fact["observed_extreme_native"])
-        conditioned_c = float(conditioning["observed_extreme_c"])
         observed_samples = int(fact["sample_count"])
     except (KeyError, TypeError, ValueError) as exc:
-        raise ValueError("GLOBAL_DAY0_CONDITIONING_OBSERVATION_INVALID") from exc
+        raise ValueError("GLOBAL_DAY0_CURRENT_OBSERVATION_INVALID") from exc
     unit = str(getattr(resolution, "measurement_unit", "") or "").strip().upper()
     fact_unit = str(fact.get("unit") or "").strip().upper()
     if unit not in {"C", "F"} or fact_unit != unit:
         raise ValueError("GLOBAL_DAY0_CONDITIONING_UNIT_MISMATCH")
-    observed_c = (
-        observed_native
-        if unit == "C"
-        else (observed_native - 32.0) * 5.0 / 9.0
-    )
-    # Carrier source and row count are provenance, not state variables.  The
-    # posterior and current fact may bind the same station-time extreme through
-    # different durable surfaces or with different cumulative row counts.
-    if (
-        not math.isclose(observed_c, conditioned_c, rel_tol=0.0, abs_tol=1e-9)
-        or str(conditioning.get("unit") or "").strip().upper() != unit
-    ):
-        raise ValueError("GLOBAL_DAY0_CONDITIONING_OBSERVATION_MISMATCH")
+    if conditioning is not None:
+        conditioned_at = utc(
+            conditioning.get("observation_time"),
+            reason="GLOBAL_DAY0_CONDITIONING_TIME_INVALID",
+        )
+        if conditioned_at != observed_at:
+            raise ValueError("GLOBAL_DAY0_CONDITIONING_OBSERVATION_TIME_MISMATCH")
+        try:
+            conditioned_c = float(conditioning["observed_extreme_c"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError("GLOBAL_DAY0_CONDITIONING_OBSERVATION_INVALID") from exc
+        observed_c = (
+            observed_native
+            if unit == "C"
+            else (observed_native - 32.0) * 5.0 / 9.0
+        )
+        # Carrier source and row count are provenance, not state variables.  A
+        # supplied posterior may bind the same station-time extreme through a
+        # different durable surface or cumulative row count.
+        if (
+            not math.isclose(
+                observed_c, conditioned_c, rel_tol=0.0, abs_tol=1e-9
+            )
+            or str(conditioning.get("unit") or "").strip().upper() != unit
+        ):
+            raise ValueError("GLOBAL_DAY0_CONDITIONING_OBSERVATION_MISMATCH")
 
     station_id = str(fact.get("station_id") or "").strip().upper()
     observation_source = str(fact.get("observation_source") or "").strip()
@@ -22789,8 +22796,7 @@ def _global_day0_execution_payload(
 
     rounded = int(SettlementSemantics.for_city(city).round_single(observed_native))
     metric = str(getattr(family, "metric", "") or "").strip().lower()
-    binding = {
-        "posterior_id": int(posterior_id),
+    binding: dict[str, object] = {
         "city": str(getattr(family, "city", "") or ""),
         "target_date": str(getattr(family, "target_date", "") or ""),
         "metric": metric,
@@ -22805,6 +22811,16 @@ def _global_day0_execution_payload(
         "settlement_source": observation_source,
         "settlement_unit": unit,
     }
+    if posterior_id not in (None, ""):
+        try:
+            binding["posterior_id"] = int(posterior_id)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("GLOBAL_DAY0_POSTERIOR_ID_INVALID") from exc
+    base_identity = str(probability_base_identity or "").strip()
+    if base_identity:
+        binding["probability_base_identity"] = base_identity
+    if "posterior_id" not in binding and not base_identity:
+        raise ValueError("GLOBAL_DAY0_PROBABILITY_BASE_IDENTITY_MISSING")
     return {
         "observation_time": binding["observation_time"],
         "observation_available_at": binding["observation_available_at"],
@@ -22833,20 +22849,25 @@ def _global_day0_execution_payload(
 def _global_day0_probability_authority_payload(
     current_observation_payload: Mapping[str, object],
 ) -> dict[str, object]:
-    """Name the remaining-day Day0 probability type and bind its base posterior."""
+    """Name the remaining-day Day0 probability type and bind its current base."""
 
     binding = current_observation_payload.get("_edli_global_day0_binding")
     if not isinstance(binding, Mapping):
         raise ValueError("GLOBAL_DAY0_BINDING_MISSING")
     posterior_id = binding.get("posterior_id")
-    if posterior_id in (None, ""):
-        raise ValueError("GLOBAL_DAY0_POSTERIOR_ID_MISSING")
-    return {
+    base_identity = str(binding.get("probability_base_identity") or "").strip()
+    if posterior_id in (None, "") and not base_identity:
+        raise ValueError("GLOBAL_DAY0_PROBABILITY_BASE_IDENTITY_MISSING")
+    payload = {
         "probability_authority": "day0_remaining_day_global_probability_v1",
         "q_source": "day0_remaining_day",
-        "posterior_id": posterior_id,
         "global_current_observation_payload": dict(current_observation_payload),
     }
+    if posterior_id not in (None, ""):
+        payload["posterior_id"] = posterior_id
+    if base_identity:
+        payload["probability_base_identity"] = base_identity
+    return payload
 
 
 _GLOBAL_CURRENT_SETTLEMENT_SIMPLEX_BAND_BASIS = (
@@ -23022,6 +23043,7 @@ def _day0_remaining_global_probability_components(
     family: object,
     payload: dict[str, object],
     decision_time: datetime,
+    snapshot: Mapping[str, object] | None = None,
 ) -> tuple[np.ndarray, np.ndarray, str]:
     """Build the global Day0 simplex from the live remaining-day q object.
 
@@ -23032,13 +23054,14 @@ def _day0_remaining_global_probability_components(
     a same-day order.
     """
 
-    snapshot = _forecast_snapshot_row_for_event(
-        forecast_conn,
-        event=event,
-        family=family,
-        allow_latest=True,
-        decision_time=decision_time,
-    )
+    if snapshot is None:
+        snapshot = _forecast_snapshot_row_for_event(
+            forecast_conn,
+            event=event,
+            family=family,
+            allow_latest=True,
+            decision_time=decision_time,
+        )
     if snapshot is None:
         raise ValueError("Day0 base forecast snapshot missing for global inference")
     seed_members = _day0_seed_members_multimodel(
@@ -23151,108 +23174,128 @@ def _prepare_current_global_probability_family(
             bound.rejection_reason or "EVENT_BOUND_CANDIDATE_BINDING_FAILED"
         )
     family = bound.candidate_family
-    readiness = _latest_replacement_readiness(
-        forecast_conn,
-        city=family.city,
-        target_date=family.target_date,
-        temperature_metric=family.metric,
-        decision_time=decision_time,
-    )
-    if readiness is None:
-        raise ValueError("GLOBAL_CURRENT_REPLACEMENT_READINESS_MISSING")
-    result = read_replacement_forecast_bundle(
-        forecast_conn,
-        baseline_bundle=None,
-        readiness=readiness,
-        city=family.city,
-        target_date=family.target_date,
-        temperature_metric=family.metric,
-        decision_time=decision_time,
-        require_baseline_bundle=False,
-        current_bin_topology_hash=current_topology_hash,
-        enforce_raw_input_hwm=True,
-    )
-    if not result.ok or result.bundle is None:
-        raise ValueError(
-            "GLOBAL_CURRENT_REPLACEMENT_BUNDLE_BLOCKED:"
-            f"{result.reason_code}"
-        )
-    bundle = result.bundle
-    day0_conditioning: Mapping[str, object] | None = None
+    is_day0 = event.event_type == "DAY0_EXTREME_UPDATED"
     current_day0_payload: dict[str, object] | None = None
     day0_observation_conn = observation_conn or forecast_conn
-    if event.event_type == "DAY0_EXTREME_UPDATED":
-        conditioning = (
-            bundle.provenance_json.get("day0_conditioning")
-            if isinstance(bundle.provenance_json, Mapping)
-            else None
-        )
-        try:
-            observed_extreme_c = float(
-                conditioning.get("observed_extreme_c")
-                if isinstance(conditioning, Mapping)
-                else None
-            )
-        except (TypeError, ValueError):
-            observed_extreme_c = math.nan
-        if (
-            not isinstance(conditioning, Mapping)
-            or conditioning.get("active") is not True
-            or str(conditioning.get("metric") or "") != family.metric
-            or not str(conditioning.get("observation_time") or "").strip()
-            or not math.isfinite(observed_extreme_c)
-        ):
-            raise ValueError("GLOBAL_DAY0_CONDITIONING_AUTHORITY_MISSING")
-        day0_conditioning = conditioning
+    day0_snapshot: Mapping[str, object] | None = None
+    day0_base_identity = ""
+    source_available_at = ""
+    bundle = None
+    if is_day0:
         observation_table = day0_observation_conn.execute(
             "SELECT 1 FROM sqlite_master "
             "WHERE type='table' AND name='observation_instants'"
         ).fetchone()
         if observation_table is None:
             raise ValueError("GLOBAL_DAY0_OBSERVATION_HWM_UNAVAILABLE")
-        from src.data.replacement_forecast_current_target_plan import (
-            _day0_observation_lag_reason,
+        day0_snapshot = _forecast_snapshot_row_for_event(
+            forecast_conn,
+            event=event,
+            family=family,
+            allow_latest=True,
+            decision_time=decision_time,
         )
-
-        lag_reason = _day0_observation_lag_reason(
-            day0_observation_conn,
+        if day0_snapshot is None:
+            raise ValueError("GLOBAL_DAY0_BASE_FORECAST_SNAPSHOT_MISSING")
+        day0_snapshot_id = str(day0_snapshot.get("snapshot_id") or "").strip()
+        if not day0_snapshot_id:
+            raise ValueError("GLOBAL_DAY0_BASE_FORECAST_SNAPSHOT_ID_MISSING")
+        source_cycle_raw = (
+            day0_snapshot.get("source_cycle_time")
+            or day0_snapshot.get("issue_time")
+        )
+        source_available_at = str(
+            day0_snapshot.get("source_available_at")
+            or day0_snapshot.get("available_at")
+            or ""
+        ).strip()
+        day0_base_identity = stable_hash(
+            {
+                "snapshot_id": day0_snapshot_id,
+                "source_cycle_time": source_cycle_raw,
+                "source_available_at": source_available_at,
+                "city": family.city,
+                "target_date": str(family.target_date),
+                "metric": family.metric,
+            }
+        )
+    else:
+        readiness = _latest_replacement_readiness(
+            forecast_conn,
             city=family.city,
             target_date=family.target_date,
             temperature_metric=family.metric,
             decision_time=decision_time,
-            posterior_provenance_json=json.dumps(bundle.provenance_json),
         )
-        if lag_reason is not None:
-            raise ValueError(f"GLOBAL_DAY0_OBSERVATION_LAG:{lag_reason}")
-
-    posterior_identity_hash = str(bundle.posterior_identity_hash or "").strip()
-    dependency_hash = str(bundle.dependency_hash or "").strip()
-    posterior_config_hash = str(bundle.posterior_config_hash or "").strip()
-    if not all((posterior_identity_hash, dependency_hash, posterior_config_hash)):
-        raise ValueError("GLOBAL_CURRENT_POSTERIOR_IDENTITY_INCOMPLETE")
+        if readiness is None:
+            raise ValueError("GLOBAL_CURRENT_REPLACEMENT_READINESS_MISSING")
+        result = read_replacement_forecast_bundle(
+            forecast_conn,
+            baseline_bundle=None,
+            readiness=readiness,
+            city=family.city,
+            target_date=family.target_date,
+            temperature_metric=family.metric,
+            decision_time=decision_time,
+            require_baseline_bundle=False,
+            current_bin_topology_hash=current_topology_hash,
+            enforce_raw_input_hwm=True,
+        )
+        if not result.ok or result.bundle is None:
+            raise ValueError(
+                "GLOBAL_CURRENT_REPLACEMENT_BUNDLE_BLOCKED:"
+                f"{result.reason_code}"
+            )
+        bundle = result.bundle
+        posterior_identity_hash = str(
+            bundle.posterior_identity_hash or ""
+        ).strip()
+        dependency_hash = str(bundle.dependency_hash or "").strip()
+        posterior_config_hash = str(bundle.posterior_config_hash or "").strip()
+        if not all(
+            (posterior_identity_hash, dependency_hash, posterior_config_hash)
+        ):
+            raise ValueError("GLOBAL_CURRENT_POSTERIOR_IDENTITY_INCOMPLETE")
+        source_cycle_raw = bundle.source_cycle_time
+        source_available_at = str(bundle.source_available_at or "").strip()
 
     try:
         source_cycle = datetime.fromisoformat(
-            str(bundle.source_cycle_time).replace("Z", "+00:00")
+            str(source_cycle_raw or "").replace("Z", "+00:00")
         )
     except ValueError as exc:
-        raise ValueError("GLOBAL_CURRENT_SOURCE_CYCLE_INVALID") from exc
+        reason = (
+            "GLOBAL_DAY0_SOURCE_CYCLE_INVALID"
+            if is_day0
+            else "GLOBAL_CURRENT_SOURCE_CYCLE_INVALID"
+        )
+        raise ValueError(reason) from exc
     if source_cycle.tzinfo is None:
         source_cycle = source_cycle.replace(tzinfo=UTC)
+    if is_day0:
+        try:
+            available_at = datetime.fromisoformat(
+                source_available_at.replace("Z", "+00:00")
+            )
+        except ValueError as exc:
+            raise ValueError("GLOBAL_DAY0_SOURCE_AVAILABLE_AT_INVALID") from exc
+        if available_at.tzinfo is None or available_at.astimezone(UTC) > decision_time:
+            raise ValueError("GLOBAL_DAY0_SOURCE_AVAILABLE_AT_INVALID")
     case = build_forecast_case(
         family,
         source_cycle_time_utc=source_cycle.astimezone(UTC),
     )
     omega = build_outcome_space(family, case)
-    if day0_conditioning is not None:
+    if is_day0:
         current_day0_payload = _global_day0_execution_payload(
             event,
             family=family,
             resolution=omega.resolution,
-            conditioning=day0_conditioning,
+            conditioning=None,
             observation_conn=day0_observation_conn,
             decision_time=decision_time,
-            posterior_id=bundle.posterior_id,
+            posterior_id=None,
+            probability_base_identity=day0_base_identity,
         )
         payload.update(current_day0_payload)
         if day0_payload_out is not None:
@@ -23280,9 +23323,12 @@ def _prepare_current_global_probability_family(
             family=family,
             payload=payload,
             decision_time=decision_time,
+            snapshot=day0_snapshot,
         )
         probability_authority = "day0_remaining_day_global_probability_v1"
     else:
+        if bundle is None:
+            raise ValueError("GLOBAL_CURRENT_REPLACEMENT_BUNDLE_MISSING")
         components = _replacement_global_probability_components(
             bundle,
             candidates=family.candidates,
@@ -23301,45 +23347,50 @@ def _prepare_current_global_probability_family(
             if key in payload:
                 day0_payload_out[key] = payload[key]
     sample_identity = probability_sample_matrix_identity(samples)
+    resolution_identity = _event_resolution_identity(omega.resolution)
     if current_day0_payload is not None:
+        source_truth = {
+            "probability_base_identity": day0_base_identity,
+            "source_cycle_time": source_cycle.astimezone(UTC).isoformat(),
+            "source_available_at": source_available_at,
+            "day0_binding": current_day0_payload.get(
+                "_edli_global_day0_binding"
+            ),
+            "day0_q_mode": payload.get("_edli_day0_q_mode"),
+            "remaining_models": payload.get("_edli_day0_remaining_model_names"),
+            "remaining_capture_times": payload.get(
+                "_edli_day0_remaining_capture_times_utc"
+            ),
+            "finite_evidence_member_count": payload.get(
+                "_edli_day0_finite_evidence_member_count"
+            ),
+            "finite_evidence_hits_by_condition": payload.get(
+                "_edli_day0_finite_evidence_hits_by_condition"
+            ),
+            "finite_evidence_yes_ucb_by_condition": payload.get(
+                "_edli_day0_finite_evidence_yes_ucb_by_condition"
+            ),
+            "finite_evidence_absorbing_no_conditions": payload.get(
+                "_edli_day0_finite_evidence_absorbing_no_conditions"
+            ),
+        }
+        source_truth_identity = stable_hash(source_truth)
         posterior_identity_hash = stable_hash(
             {
-                "base_posterior_identity_hash": posterior_identity_hash,
                 "probability_authority": probability_authority,
+                "source_truth_identity": source_truth_identity,
                 "sample_matrix_identity": sample_identity,
+                "point_q": [float(value) for value in point_q],
             }
         )
-    resolution_identity = _event_resolution_identity(omega.resolution)
-    source_truth = {
-        "dependency_hash": dependency_hash,
-        "posterior_config_hash": posterior_config_hash,
-        "source_cycle_time": bundle.source_cycle_time,
-        "source_available_at": bundle.source_available_at,
-    }
-    if current_day0_payload is not None:
-        source_truth.update(
-            {
-                "day0_binding": current_day0_payload.get("_edli_global_day0_binding"),
-                "day0_q_mode": payload.get("_edli_day0_q_mode"),
-                "remaining_models": payload.get("_edli_day0_remaining_model_names"),
-                "remaining_capture_times": payload.get(
-                    "_edli_day0_remaining_capture_times_utc"
-                ),
-                "finite_evidence_member_count": payload.get(
-                    "_edli_day0_finite_evidence_member_count"
-                ),
-                "finite_evidence_hits_by_condition": payload.get(
-                    "_edli_day0_finite_evidence_hits_by_condition"
-                ),
-                "finite_evidence_yes_ucb_by_condition": payload.get(
-                    "_edli_day0_finite_evidence_yes_ucb_by_condition"
-                ),
-                "finite_evidence_absorbing_no_conditions": payload.get(
-                    "_edli_day0_finite_evidence_absorbing_no_conditions"
-                ),
-            }
-        )
-    source_truth_identity = stable_hash(source_truth)
+    else:
+        source_truth = {
+            "dependency_hash": dependency_hash,
+            "posterior_config_hash": posterior_config_hash,
+            "source_cycle_time": bundle.source_cycle_time,
+            "source_available_at": bundle.source_available_at,
+        }
+        source_truth_identity = stable_hash(source_truth)
     q_version = stable_hash(
         {
             "authority": probability_authority,
@@ -25475,13 +25526,15 @@ def _market_analysis_from_event_snapshot(
     from src.config import settings
 
     bins = list(family.bins)
-    # GATE-2 (mx2t3 carrier-decouple): the day0 lane seeds its FORECAST BASE pool from the
-    # multi-model ``raw_model_forecasts`` fusion (threaded as ``day0_seed_members``) instead of the
-    # cold ``ensemble_snapshots.members_json``. None → keep the legacy ensemble seed (non-day0
-    # lanes, or a day0 cycle with <3 multimodel members). The unit identity gate below still runs.
+    is_day0 = _is_day0_extreme_event_context(family=family, payload=payload)
+    # The Day0 random variable is the final extreme conditioned on current
+    # remaining-hour vectors.  Its full-day snapshot supplies only causal/unit
+    # metadata and must never be parsed as a fallback member distribution.
     if day0_seed_members is not None and np.asarray(day0_seed_members, dtype=float).size >= 3:
         raw_members = np.asarray(day0_seed_members, dtype=float)
         payload["_edli_day0_seed_source"] = "raw_model_forecasts.multimodel"
+    elif is_day0:
+        raw_members = np.asarray([], dtype=float)
     else:
         raw_members = _snapshot_members(snapshot)
     # === Q-KERNEL REBUILD STAGE 0 — receipt-spine producer (2026-06-14) =====================
@@ -25510,7 +25563,6 @@ def _market_analysis_from_event_snapshot(
     # unit-swap (Kelvin leak / source swap / new city) cannot silently invert q
     # into the wrong bins (wrong-SIDE on a KNOWN market — Paris-class).
     unit = _assert_settlement_unit_identity(snapshot=snapshot, payload=payload, city=city, bins=bins)
-    is_day0 = _is_day0_extreme_event_context(family=family, payload=payload)
     day0_probability_time = _day0_probability_clock(decision_time) if is_day0 else decision_time
     # === ONE-CALIBRATOR SEAM (#110 / ELEVATION S2) ===========================================
     # When EMOS serves this (city, season) cell and the flag is ON, the traded distribution IS

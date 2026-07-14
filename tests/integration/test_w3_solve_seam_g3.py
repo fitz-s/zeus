@@ -808,6 +808,29 @@ def test_global_day0_actuation_rebinds_stale_carrier_to_current_conditioning():
     assert rebound["_edli_global_day0_binding"]["posterior_id"] == 29914
 
 
+def test_global_day0_actuation_can_bind_current_remaining_day_base_directly():
+    conn, carrier = _stale_day0_carrier_and_current_observations()
+    rebound = era._global_day0_execution_payload(
+        carrier,
+        family=SimpleNamespace(city="Moscow", target_date="2026-07-10", metric="high"),
+        resolution=SimpleNamespace(measurement_unit="C", station_id="UUWW"),
+        conditioning=None,
+        observation_conn=conn,
+        decision_time=_dt.datetime(2026, 7, 10, 20, 0, tzinfo=_dt.timezone.utc),
+        posterior_id=None,
+        probability_base_identity="current-base-snapshot-1",
+    )
+    conn.close()
+
+    binding = rebound["_edli_global_day0_binding"]
+    assert binding["probability_base_identity"] == "current-base-snapshot-1"
+    assert "posterior_id" not in binding
+    authority = era._global_day0_probability_authority_payload(rebound)
+    assert authority["probability_base_identity"] == "current-base-snapshot-1"
+    assert "posterior_id" not in authority
+    assert authority["q_source"] == "day0_remaining_day"
+
+
 def test_global_day0_actuation_compares_physical_state_not_carrier_provenance():
     conn, carrier = _stale_day0_carrier_and_current_observations()
     rebound = era._global_day0_execution_payload(
@@ -1181,6 +1204,107 @@ def test_global_day0_joint_witness_uses_one_remaining_day_simplex(monkeypatch):
         )
 
 
+def test_global_day0_components_never_parse_full_day_members_when_remaining_vectors_exist(
+    monkeypatch,
+):
+    bins = (
+        Bin(low=22.0, high=22.0, unit="C", label="22C"),
+        Bin(low=23.0, high=None, unit="C", label="23C or above"),
+    )
+    family = SimpleNamespace(
+        family_id="Moscow|2026-07-10|high",
+        city="Moscow",
+        target_date="2026-07-10",
+        metric="high",
+        bins=bins,
+        candidates=(
+            SimpleNamespace(condition_id="condition-22", bin=bins[0]),
+            SimpleNamespace(condition_id="condition-23-plus", bin=bins[1]),
+        ),
+    )
+    invalid_full_day_snapshot = {
+        "snapshot_id": "full-day-boundary-ambiguous",
+        "source_cycle_time": "2026-07-10T12:00:00+00:00",
+        "available_at": "2026-07-10T12:30:00+00:00",
+        "settlement_unit": "C",
+        "temperature_metric": "high",
+        "members_json": "[null, null, null]",
+        "members_precision": 1.0,
+    }
+    monkeypatch.setattr(
+        era,
+        "_forecast_snapshot_row_for_event",
+        lambda *_args, **_kwargs: invalid_full_day_snapshot,
+    )
+    monkeypatch.setattr(
+        era,
+        "_day0_seed_members_multimodel",
+        lambda *_args, **_kwargs: None,
+    )
+
+    def remaining_members(*, payload, **_kwargs):
+        payload["_edli_day0_remaining_models"] = 3
+        payload["_edli_day0_remaining_model_names"] = ["ecmwf", "gfs", "ukmo"]
+        payload["_edli_day0_remaining_capture_times_utc"] = [
+            "2026-07-10T19:30:00+00:00"
+        ]
+        return np.asarray([24.0, 25.0, 26.0], dtype=float)
+
+    monkeypatch.setattr(era, "_day0_remaining_day_members", remaining_members)
+    payload = {
+        "event_type": "DAY0_EXTREME_UPDATED",
+        "city": "Moscow",
+        "target_date": "2026-07-10",
+        "metric": "high",
+        "rounded_value": 23,
+        "high_so_far": 23.0,
+        "observation_time": "2026-07-10T19:00:00+00:00",
+        "observation_available_at": "2026-07-10T19:05:00+00:00",
+        "source_authorized_status": "AUTHORIZED",
+        "live_authority_status": "live",
+    }
+    forecast = sqlite3.connect(":memory:")
+    calibration = sqlite3.connect(":memory:")
+    samples, point, basis = era._day0_remaining_global_probability_components(
+        SimpleNamespace(event_type="DAY0_EXTREME_UPDATED"),
+        forecast_conn=forecast,
+        calibration_conn=calibration,
+        family=family,
+        payload=payload,
+        decision_time=_dt.datetime(2026, 7, 10, 20, 0, tzinfo=_dt.timezone.utc),
+    )
+
+    assert samples.shape[1] == 2
+    assert np.allclose(samples.sum(axis=1), 1.0)
+    assert point.tolist() == pytest.approx([0.0, 1.0])
+    assert basis == "current_coherent_day0_remaining_finite_evidence_v2"
+    assert payload["_edli_q_source"] == "day0_remaining_day"
+    assert payload["_edli_day0_finite_evidence_member_count"] == 3
+
+    monkeypatch.setattr(
+        era,
+        "_day0_remaining_day_members",
+        lambda **_kwargs: None,
+    )
+    with pytest.raises(ValueError, match="DAY0_REMAINING_DAY_MEMBERS_UNAVAILABLE"):
+        era._day0_remaining_global_probability_components(
+            SimpleNamespace(event_type="DAY0_EXTREME_UPDATED"),
+            forecast_conn=forecast,
+            calibration_conn=calibration,
+            family=family,
+            payload={
+                key: value
+                for key, value in payload.items()
+                if not key.startswith("_edli_")
+            },
+            decision_time=_dt.datetime(
+                2026, 7, 10, 20, 0, tzinfo=_dt.timezone.utc
+            ),
+        )
+    forecast.close()
+    calibration.close()
+
+
 def test_global_day0_current_band_accepts_only_bound_absorbing_certainty():
     sample_hash = "day0-current-simplex"
     economics = {
@@ -1285,6 +1409,41 @@ def _global_scope_event(*, city: str, source_run_id: str):
         received_at=captured_at,
         payload=payload,
         causal_snapshot_id=payload.snapshot_id,
+    )
+
+
+def _global_day0_scope_event(*, city: str, source_run_id: str):
+    forecast = _global_scope_event(city=city, source_run_id=source_run_id)
+    payload = json.loads(forecast.payload_json)
+    payload.update(
+        {
+            "station_id": "KDFW",
+            "settlement_source": "wu_icao_history",
+            "settlement_unit": "F",
+            "observation_time": "2026-07-11T17:00:00+00:00",
+            "observation_available_at": "2026-07-11T17:05:00+00:00",
+            "raw_value": 72.0,
+            "rounded_value": 72,
+            "high_so_far": 72.0,
+            "source_match_status": "MATCH",
+            "local_date_status": "MATCH",
+            "station_match_status": "MATCH",
+            "dst_status": "UNAMBIGUOUS",
+            "metric_match_status": "MATCH",
+            "rounding_status": "MATCH",
+            "source_authorized_status": "AUTHORIZED",
+            "live_authority_status": "live",
+        }
+    )
+    return make_opportunity_event(
+        event_type="DAY0_EXTREME_UPDATED",
+        entity_key=f"{city}|2026-07-11|high|KDFW",
+        source="global-auction-current-day0-scope",
+        observed_at="2026-07-11T17:00:00+00:00",
+        available_at="2026-07-11T17:05:00+00:00",
+        received_at="2026-07-11T17:05:00+00:00",
+        payload=payload,
+        causal_snapshot_id=str(payload["snapshot_id"]),
     )
 
 
@@ -1412,6 +1571,247 @@ def test_current_global_probability_prepare_does_not_require_price_snapshot(
         in statement.upper()
         for statement in traced
     )
+
+
+def test_current_day0_global_probability_uses_current_remaining_day_not_full_day_bundle(
+    monkeypatch,
+):
+    import src.data.replacement_forecast_bundle_reader as bundle_reader
+    import src.engine.replacement_forecast_hook_factory as hook_factory
+
+    forecast = sqlite3.connect(":memory:")
+    forecast.row_factory = sqlite3.Row
+    forecast.execute(
+        """
+        CREATE TABLE market_events (
+            city TEXT NOT NULL,
+            target_date TEXT NOT NULL,
+            temperature_metric TEXT NOT NULL,
+            condition_id TEXT NOT NULL,
+            token_id TEXT NOT NULL,
+            market_slug TEXT,
+            range_label TEXT,
+            range_low REAL,
+            range_high REAL
+        )
+        """
+    )
+    forecast.executemany(
+        "INSERT INTO market_events VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            (
+                "Dallas",
+                "2026-07-11",
+                "high",
+                "c0",
+                "yes0",
+                "dallas-69-or-below",
+                "69F or below",
+                None,
+                69.0,
+            ),
+            (
+                "Dallas",
+                "2026-07-11",
+                "high",
+                "c1",
+                "yes1",
+                "dallas-70-71",
+                "70-71F",
+                70.0,
+                71.0,
+            ),
+            (
+                "Dallas",
+                "2026-07-11",
+                "high",
+                "c2",
+                "yes2",
+                "dallas-72-or-above",
+                "72F or above",
+                72.0,
+                None,
+            ),
+        ),
+    )
+    observations = sqlite3.connect(":memory:")
+    observations.execute("CREATE TABLE observation_instants (marker INTEGER)")
+
+    def replacement_readiness_must_not_run(*_args, **_kwargs):
+        raise AssertionError("Day0 must not read full-day replacement readiness")
+
+    def replacement_bundle_must_not_run(*_args, **_kwargs):
+        raise AssertionError("Day0 must not read a full-day replacement bundle")
+
+    monkeypatch.setattr(
+        hook_factory,
+        "_latest_replacement_readiness",
+        replacement_readiness_must_not_run,
+    )
+    monkeypatch.setattr(
+        bundle_reader,
+        "read_replacement_forecast_bundle",
+        replacement_bundle_must_not_run,
+    )
+    monkeypatch.setattr(
+        era,
+        "_forecast_snapshot_row_for_event",
+        lambda *_args, **_kwargs: {
+            "snapshot_id": "day0-current-base-1",
+            "source_cycle_time": "2026-07-11T12:00:00+00:00",
+            "available_at": "2026-07-11T12:30:00+00:00",
+        },
+    )
+
+    def current_observation_payload(*_args, **kwargs):
+        base_identity = kwargs["probability_base_identity"]
+        return {
+            "observation_time": "2026-07-11T17:00:00+00:00",
+            "observation_available_at": "2026-07-11T17:05:00+00:00",
+            "raw_value": 72.0,
+            "rounded_value": 72,
+            "high_so_far": 72.0,
+            "sample_count": 5,
+            "station_id": "KDFW",
+            "settlement_source": "wu_icao_history",
+            "settlement_unit": "F",
+            "source_match_status": "MATCH",
+            "local_date_status": "MATCH",
+            "station_match_status": "MATCH",
+            "dst_status": "UNAMBIGUOUS",
+            "metric_match_status": "MATCH",
+            "rounding_status": "MATCH",
+            "source_authorized_status": "AUTHORIZED",
+            "live_authority_status": "live",
+            "_edli_global_day0_binding": {
+                "city": "Dallas",
+                "target_date": "2026-07-11",
+                "metric": "high",
+                "probability_base_identity": base_identity,
+            },
+        }
+
+    monkeypatch.setattr(
+        era,
+        "_global_day0_execution_payload",
+        current_observation_payload,
+    )
+
+    def remaining_day_components(*_args, **kwargs):
+        payload = kwargs["payload"]
+        payload.update(
+            {
+                "_edli_day0_q_mode": "remaining_day",
+                "_edli_day0_remaining_model_names": ["ecmwf", "gfs", "ukmo"],
+                "_edli_day0_remaining_capture_times_utc": [
+                    "2026-07-11T17:30:00+00:00"
+                ],
+                "_edli_day0_finite_evidence_member_count": 3,
+                "_edli_day0_finite_evidence_hits_by_condition": {
+                    "c0": 0,
+                    "c1": 0,
+                    "c2": 3,
+                },
+                "_edli_day0_finite_evidence_yes_ucb_by_condition": {
+                    "c0": 0.1,
+                    "c1": 0.1,
+                    "c2": 1.0,
+                },
+                "_edli_day0_finite_evidence_absorbing_no_conditions": [
+                    "c0",
+                    "c1",
+                ],
+            }
+        )
+        matrix = np.asarray([[0.0, 0.0, 1.0]] * 400, dtype=float)
+        return (
+            matrix,
+            np.asarray([0.0, 0.0, 1.0], dtype=float),
+            "current_coherent_day0_remaining_finite_evidence_v2",
+        )
+
+    monkeypatch.setattr(
+        era,
+        "_day0_remaining_global_probability_components",
+        remaining_day_components,
+    )
+    day0_payload: dict[str, object] = {}
+    prepared = era._prepare_current_global_probability_family(
+        _global_day0_scope_event(city="Dallas", source_run_id="run-dallas"),
+        forecast_conn=forecast,
+        topology_conn=forecast,
+        observation_conn=observations,
+        decision_time=_dt.datetime(2026, 7, 11, 18, 0, tzinfo=_dt.timezone.utc),
+        max_age=_dt.timedelta(seconds=30),
+        day0_payload_out=day0_payload,
+    )
+
+    witness = prepared.probability_witness
+    binding = day0_payload["_edli_global_day0_binding"]
+    assert witness.band_basis == "current_coherent_day0_remaining_finite_evidence_v2"
+    assert witness.yes_q_samples.shape == (400, 3)
+    assert witness.posterior_identity_hash
+    assert binding["probability_base_identity"]
+    assert "posterior_id" not in binding
+
+    missing_observations = sqlite3.connect(":memory:")
+    with pytest.raises(ValueError, match="GLOBAL_DAY0_OBSERVATION_HWM_UNAVAILABLE"):
+        era._prepare_current_global_probability_family(
+            _global_day0_scope_event(city="Dallas", source_run_id="run-dallas"),
+            forecast_conn=forecast,
+            topology_conn=forecast,
+            observation_conn=missing_observations,
+            decision_time=_dt.datetime(
+                2026, 7, 11, 18, 0, tzinfo=_dt.timezone.utc
+            ),
+            max_age=_dt.timedelta(seconds=30),
+        )
+    missing_observations.close()
+    observations.close()
+    forecast.close()
+
+
+def test_current_forecast_global_probability_still_requires_replacement_readiness(
+    monkeypatch,
+):
+    import src.engine.replacement_forecast_hook_factory as hook_factory
+
+    forecast = sqlite3.connect(":memory:")
+    forecast.row_factory = sqlite3.Row
+    forecast.execute(
+        """
+        CREATE TABLE market_events (
+            city TEXT, target_date TEXT, temperature_metric TEXT,
+            condition_id TEXT, token_id TEXT, market_slug TEXT,
+            range_label TEXT, range_low REAL, range_high REAL
+        )
+        """
+    )
+    forecast.executemany(
+        "INSERT INTO market_events VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            ("Dallas", "2026-07-11", "high", "c0", "yes0", "a", "69F or below", None, 69.0),
+            ("Dallas", "2026-07-11", "high", "c1", "yes1", "b", "70-71F", 70.0, 71.0),
+            ("Dallas", "2026-07-11", "high", "c2", "yes2", "c", "72F or above", 72.0, None),
+        ),
+    )
+    monkeypatch.setattr(
+        hook_factory,
+        "_latest_replacement_readiness",
+        lambda *_args, **_kwargs: None,
+    )
+
+    with pytest.raises(ValueError, match="GLOBAL_CURRENT_REPLACEMENT_READINESS_MISSING"):
+        era._prepare_current_global_probability_family(
+            _global_scope_event(city="Dallas", source_run_id="run-dallas"),
+            forecast_conn=forecast,
+            topology_conn=forecast,
+            decision_time=_dt.datetime(
+                2026, 7, 10, 8, 10, tzinfo=_dt.timezone.utc
+            ),
+            max_age=_dt.timedelta(seconds=30),
+        )
+    forecast.close()
 
 
 def test_live_adapter_routes_each_global_truth_to_its_owner(monkeypatch):
