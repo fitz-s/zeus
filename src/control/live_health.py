@@ -3946,7 +3946,7 @@ def _evaluate_high_yes_edge_missed_surface_python(
     now_iso: str,
     main_daemon_surface: dict,
 ) -> dict:
-    from src.state.db import _connect_read_only
+    from src.state.db import _connect_read_only, query_control_override_state
 
     edges = _load_high_yes_edges_python(
         forecast_db=forecast_db,
@@ -3963,6 +3963,7 @@ def _evaluate_high_yes_edge_missed_surface_python(
             world_conn,
             cutoff=cutoff,
         )
+        control_state = query_control_override_state(world_conn, now=now_iso)
         yes_no_submit_times = _directional_condition_times(
             world_conn,
             table="edli_no_submit_receipts",
@@ -4074,8 +4075,17 @@ def _evaluate_high_yes_edge_missed_surface_python(
         "missing_fsr_high_yes_edge_count": len(missing_fsr),
         "processed_without_action_high_yes_edge_count": len(processed_without_action),
         "recent_buy_yes_entry_command_count": recent_buy_yes_entry_command_count,
+        "entries_paused": bool(control_state.get("entries_paused")),
+        "entries_pause_source": control_state.get("entries_pause_source"),
+        "entries_pause_reason": control_state.get("entries_pause_reason"),
+        "entries_pause_issued_at": control_state.get("entries_pause_issued_at"),
+        "entries_pause_effective_until": control_state.get(
+            "entries_pause_effective_until"
+        ),
         **buy_yes_suppression,
     }
+    if detail["entries_paused"]:
+        return {"ok": True, "issue": None, **detail}
     if missing_fsr:
         return {
             "ok": False,
