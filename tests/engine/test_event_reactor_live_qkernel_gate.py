@@ -1536,6 +1536,36 @@ def test_global_actuation_reauctions_sample_band_above_served_point(side):
 
 
 @pytest.mark.parametrize("side", ("YES", "NO"))
+def test_global_actuation_reauctions_boundary_lcb_above_immutable_point(side):
+    """A rounded boundary LCB is projected onto its point before re-auction."""
+
+    point = 1.0 - 1e-12
+    cert = _current_qkernel_cert(side=side)
+    cert.update(
+        payoff_q_point=point,
+        payoff_q_lcb=1.0,
+        pre_qkernel_q_lcb_5pct=1.0,
+        cost=0.40,
+        edge_lcb=0.60,
+    )
+    decision = _global_decision(shares="10", cost="4", q="1")
+    witness = SimpleNamespace(
+        sample_matrix_identity=f"global-current-boundary-{side.lower()}",
+        yes_q_samples=SimpleNamespace(shape=(500, 11)),
+        band_alpha=0.05,
+    )
+
+    with pytest.raises(era._GlobalProbabilityTightened) as raised:
+        era._global_current_state_execution_economics(
+            cert,
+            decision=decision,
+            witness=witness,
+        )
+
+    assert raised.value.payoff_q_lcb == pytest.approx(point)
+
+
+@pytest.mark.parametrize("side", ("YES", "NO"))
 def test_global_actuation_reauctions_prior_band_above_served_point(side):
     """An improved qkernel band is capped by the frozen served certificate."""
 
