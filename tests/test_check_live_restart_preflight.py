@@ -6059,6 +6059,13 @@ def test_preflight_blocks_open_position_when_only_irrelevant_sidecar_rows_are_fr
     feasibility = next(c for c in result["checks"] if c["name"] == "execution_feasibility_evidence_freshness")
     assert substrate["ok"] is False
     assert feasibility["ok"] is False
+    assert feasibility["restart_blocking"] is False
+    assert "execution_feasibility_evidence_freshness" not in {
+        check["name"] for check in result["blockers"]
+    }
+    assert "execution_feasibility_evidence_freshness" in {
+        check["name"] for check in result["entry_blockers"]
+    }
     assert substrate["evidence"]["risky"][0]["risk"] == "missing_executable_substrate"
     assert feasibility["evidence"]["risky"][0]["risk"] == "missing_execution_feasibility_evidence"
     assert substrate["evidence"]["risky"][0]["condition_id"] == "cond-target"

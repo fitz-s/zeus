@@ -3182,6 +3182,7 @@ def _execution_feasibility_evidence_check(rows: list[sqlite3.Row]) -> CheckResul
             False,
             "execution feasibility evidence is absent or timestamp-invalid",
             evidence,
+            restart_blocking=False,
         )
     age = (now - latest_dt).total_seconds()
     evidence["age_seconds"] = age
@@ -3199,6 +3200,7 @@ def _execution_feasibility_evidence_check(rows: list[sqlite3.Row]) -> CheckResul
             else "execution feasibility evidence is stale/missing for open exposures"
         ),
         evidence,
+        restart_blocking=False,
     )
 
 
