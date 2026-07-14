@@ -41,6 +41,7 @@ import src.engine.event_reactor_adapter as era
 import src.engine.global_batch_runtime as global_batch_runtime
 import src.engine.global_auction_universe as universe
 from src.decision_kernel import claims
+from src.decision_kernel.canonicalization import qkernel_current_state_identity_hash
 from src.decision_kernel.certificate import build_certificate
 from src.engine.global_single_order_auction import (
     global_single_order_actuation_identity,
@@ -63,6 +64,10 @@ from src.events.opportunity_event import (
     ForecastSnapshotReadyPayload,
     make_day0_extreme_updated_event,
     make_opportunity_event,
+)
+from src.events.day0_authority import (
+    assert_live_day0_probability_authority,
+    assert_live_day0_qkernel_guard_authority,
 )
 from src.events.reactor import EventSubmissionReceipt
 from src.solve.solver import (
@@ -1173,6 +1178,74 @@ def test_global_day0_joint_witness_uses_one_remaining_day_simplex(monkeypatch):
                     "absorbing_no_conditions": [],
                 },
             },
+        )
+
+
+def test_global_day0_current_band_accepts_only_bound_absorbing_certainty():
+    sample_hash = "day0-current-simplex"
+    economics = {
+        "source": "qkernel_spine",
+        "decision_id": "decision-1",
+        "receipt_hash": "receipt-1",
+        "q_version": "q-version-1",
+        "sample_hash": sample_hash,
+        "side": "NO",
+        "payoff_q_point": 1.0,
+        "payoff_q_lcb": 1.0,
+        "q_lcb_guard_basis": "CURRENT_POSTERIOR_BAND",
+        "q_lcb_guard_abstained": False,
+        "q_lcb_guard_cell_key": sample_hash,
+        "selection_guard_basis": "CURRENT_POSTERIOR_BAND",
+        "selection_guard_abstained": False,
+        "selection_guard_cell_key": sample_hash,
+        "selection_guard_n": 100,
+        "selection_guard_q_safe": 1.0,
+    }
+    economics["current_state_identity_hash"] = qkernel_current_state_identity_hash(
+        economics
+    )
+    payload = {
+        "condition_id": "condition-dead",
+        "direction": "buy_no",
+        "_edli_q_source": "day0_remaining_day",
+        "_edli_day0_q_mode": "remaining_day",
+        "_edli_day0_remaining_models": 2,
+        "rounded_value": 28,
+        "observation_time": "2026-07-14T16:00:00+00:00",
+        "_edli_day0_lcb_transform": {
+            "yes_lcb_by_condition": {"condition-dead": 0.0},
+            "no_lcb_by_condition": {"condition-dead": 1.0},
+            "absorbing_yes_conditions": [],
+            "absorbing_no_conditions": ["condition-dead"],
+        },
+        "_edli_day0_finite_evidence_absorbing_no_conditions": [
+            "condition-dead"
+        ],
+        "q_live": 1.0,
+        "q_lcb_5pct": 1.0,
+        "qkernel_execution_economics": economics,
+    }
+
+    assert_live_day0_probability_authority(
+        payload,
+        direction="buy_no",
+        condition_id="condition-dead",
+        q_live=1.0,
+        q_lcb=1.0,
+    )
+    assert_live_day0_qkernel_guard_authority(
+        economics,
+        probability_payload=payload,
+    )
+
+    payload["_edli_day0_finite_evidence_absorbing_no_conditions"] = []
+    with pytest.raises(ValueError, match="degenerate with q_live"):
+        assert_live_day0_probability_authority(
+            payload,
+            direction="buy_no",
+            condition_id="condition-dead",
+            q_live=1.0,
+            q_lcb=1.0,
         )
 
 

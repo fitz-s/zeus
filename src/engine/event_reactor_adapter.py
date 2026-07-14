@@ -12770,6 +12770,9 @@ def _actionable_payload_from_receipt(
         "_edli_day0_exit_authority_reason": _day0_probability_value("exit_authority_reason"),
         "_edli_day0_bound_classification": _day0_probability_value("bound_classification"),
         "_edli_day0_lcb_transform": _day0_probability_value("lcb_transform"),
+        "_edli_day0_finite_evidence_absorbing_no_conditions": (
+            _day0_probability_value("finite_evidence_absorbing_no_conditions")
+        ),
         "opportunity_book": _json_finite(receipt.opportunity_book),
         "q_live": receipt.q_live,
         "q_lcb_5pct": receipt.q_lcb_5pct,
@@ -13493,6 +13496,9 @@ def _pre_submit_revalidation_payload_from_final_intent(
         "_edli_day0_exit_authority_reason": payload.get("_edli_day0_exit_authority_reason"),
         "_edli_day0_bound_classification": payload.get("_edli_day0_bound_classification"),
         "_edli_day0_lcb_transform": payload.get("_edli_day0_lcb_transform"),
+        "_edli_day0_finite_evidence_absorbing_no_conditions": payload.get(
+            "_edli_day0_finite_evidence_absorbing_no_conditions"
+        ),
         "source_match_status": payload.get("source_match_status"),
         "local_date_status": payload.get("local_date_status"),
         "station_match_status": payload.get("station_match_status"),
@@ -21977,6 +21983,9 @@ def _live_yes_probabilities(
                     "observation_time": payload.get("observation_time"),
                     "observation_available_at": payload.get("observation_available_at"),
                     "lcb_transform": payload.get("_edli_day0_lcb_transform"),
+                    "finite_evidence_absorbing_no_conditions": payload.get(
+                        "_edli_day0_finite_evidence_absorbing_no_conditions"
+                    ),
                 }
             )
         p_values, prefilter = _day0_hard_fact_fdr_maps(

@@ -219,9 +219,74 @@ def _remaining_day_lcb_has_current_band_tightening(
     )
 
 
+def _remaining_day_lcb_has_current_absorbing_certainty(
+    payload: Mapping[str, object],
+    *,
+    direction: object | None,
+    condition_id: object | None,
+    q_live: float,
+    q_lcb: float,
+) -> bool:
+    """License exact certainty only when current physical truth absorbs the leg."""
+
+    if q_live != 1.0 or q_lcb != 1.0:
+        return False
+    selected_condition = str(
+        condition_id or payload.get("condition_id") or ""
+    ).strip()
+    direction_text = str(direction or payload.get("direction") or "").strip().lower()
+    transform = payload.get("_edli_day0_lcb_transform")
+    if not isinstance(transform, Mapping) or not selected_condition:
+        return False
+    if direction_text.endswith("_no"):
+        absorbing_key = "absorbing_no_conditions"
+        finite_absorbing = payload.get(
+            "_edli_day0_finite_evidence_absorbing_no_conditions"
+        )
+        if not isinstance(finite_absorbing, (list, tuple, set)) or (
+            selected_condition not in {str(value) for value in finite_absorbing}
+        ):
+            return False
+        expected_side = "NO"
+    elif direction_text.endswith("_yes"):
+        absorbing_key = "absorbing_yes_conditions"
+        expected_side = "YES"
+    else:
+        return False
+    declared = transform.get(absorbing_key)
+    if not isinstance(declared, (list, tuple, set)) or (
+        selected_condition not in {str(value) for value in declared}
+    ):
+        return False
+
+    economics = payload.get("qkernel_execution_economics")
+    if not isinstance(economics, Mapping):
+        return False
+    from src.decision_kernel.canonicalization import (
+        qkernel_current_state_rejection_reason,
+    )
+
+    if qkernel_current_state_rejection_reason(economics) is not None:
+        return False
+    try:
+        payoff_q_point = float(economics.get("payoff_q_point"))
+        payoff_q_lcb = float(economics.get("payoff_q_lcb"))
+        selection_guard_q_safe = float(economics.get("selection_guard_q_safe"))
+    except (TypeError, ValueError):
+        return False
+    return (
+        str(economics.get("side") or "").strip().upper() == expected_side
+        and payoff_q_point == q_live
+        and payoff_q_lcb == q_lcb
+        and selection_guard_q_safe == q_lcb
+    )
+
+
 def _assert_remaining_day_lcb_is_supported_by_transform(
     *,
     payload: Mapping[str, object],
+    direction: object | None,
+    condition_id: object | None,
     q_live: float,
     q_lcb: float,
 ) -> None:
@@ -239,6 +304,13 @@ def _assert_remaining_day_lcb_is_supported_by_transform(
         q_lcb >= q_live - DAY0_REMAINING_DAY_LCB_TOLERANCE
         and not _remaining_day_lcb_has_guarded_qkernel_lcb(
             payload,
+            q_live=q_live,
+            q_lcb=q_lcb,
+        )
+        and not _remaining_day_lcb_has_current_absorbing_certainty(
+            payload,
+            direction=direction,
+            condition_id=condition_id,
             q_live=q_live,
             q_lcb=q_lcb,
         )
@@ -458,6 +530,8 @@ def assert_live_day0_probability_authority(
             raise Day0AuthorityError("remaining_day q_live/q_lcb out of range")
         _assert_remaining_day_lcb_is_supported_by_transform(
             payload=payload,
+            direction=direction,
+            condition_id=condition_id,
             q_live=q_live_value,
             q_lcb=q_lcb_value,
         )
@@ -562,7 +636,12 @@ def assert_live_day0_qkernel_guard_authority(
         else ""
     )
     replacement_global = q_source == DAY0_REPLACEMENT_Q_SOURCE
-    if replacement_global:
+    current_band = any(
+        str(economics.get(field_name) or "").strip()
+        == DAY0_REPLACEMENT_GLOBAL_GUARD_BASIS
+        for field_name in ("q_lcb_guard_basis", "selection_guard_basis")
+    ) or bool(str(economics.get("current_state_identity_hash") or "").strip())
+    if replacement_global or current_band:
         from src.decision_kernel.canonicalization import (
             qkernel_current_state_rejection_reason,
         )
@@ -574,7 +653,7 @@ def assert_live_day0_qkernel_guard_authority(
             )
     accepted_bases = (
         frozenset({DAY0_REPLACEMENT_GLOBAL_GUARD_BASIS})
-        if replacement_global
+        if replacement_global or current_band
         else _DAY0_GUARDED_QLCB_BASES
     )
     for field_name in ("q_lcb_guard_basis", "selection_guard_basis"):
