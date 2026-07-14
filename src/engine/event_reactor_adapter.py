@@ -7066,13 +7066,12 @@ def _global_current_state_execution_economics(
         prior_payoff_lcb = current_band_payoff_q_lcb
     if not served_lcb.is_finite():
         raise ValueError("GLOBAL_CURRENT_STATE_SERVED_LCB_INVALID")
-    # ``served_lcb`` is pre-W3 provenance and may include historical coverage
-    # shrinkage.  Keep it in the certificate for diagnosis, but source-clock
-    # execution is governed by the current joint witness, current qkernel bound,
-    # and immutable point probability only.
+    # ``served_lcb`` and ``prior_payoff_lcb`` are pre-W3 provenance and may
+    # include historical coverage shrinkage.  Keep them in the certificate for
+    # diagnosis, but source-clock execution is governed by the current joint
+    # witness and immutable point probability only.
     payoff_q_lcb = min(
         current_band_payoff_q_lcb,
-        prior_payoff_lcb,
         point_q,
     )
     edge_lcb = payoff_q_lcb - unit_cost

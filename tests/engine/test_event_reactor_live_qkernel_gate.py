@@ -1512,10 +1512,10 @@ def test_global_actuation_legacy_served_bound_is_diagnostic_only(side):
     cert = _current_qkernel_cert(side=side)
     cert.update(
         payoff_q_point=0.80,
-        payoff_q_lcb=0.75,
-        pre_qkernel_q_lcb_5pct=0.40,
+        payoff_q_lcb=0.40,
+        pre_qkernel_q_lcb_5pct=0.45,
         cost=0.40,
-        edge_lcb=0.35,
+        edge_lcb=0.0,
     )
     decision = _global_decision(shares="10", cost="4", q="0.70")
     witness = SimpleNamespace(
@@ -1530,7 +1530,8 @@ def test_global_actuation_legacy_served_bound_is_diagnostic_only(side):
         witness=witness,
     )
 
-    assert current["global_current_served_payoff_q_lcb"] == pytest.approx(0.40)
+    assert current["global_current_served_payoff_q_lcb"] == pytest.approx(0.45)
+    assert current["global_current_prior_payoff_q_lcb"] == pytest.approx(0.40)
     assert current["payoff_q_lcb"] == pytest.approx(0.70)
     assert current["global_current_effective_payoff_q_lcb"] == pytest.approx(0.70)
     assert era._qkernel_current_state_solve_economics(current) is True
@@ -1628,7 +1629,7 @@ def test_global_actuation_reauctions_prior_band_above_served_point(side):
 
 
 @pytest.mark.parametrize("side", ("YES", "NO"))
-def test_global_actuation_reauctions_jit_bound_that_falls_below_majority(side):
+def test_global_actuation_legacy_prior_below_majority_is_diagnostic_only(side):
     cert = _current_qkernel_cert(side=side)
     cert.update(
         payoff_q_point=0.80,
@@ -1644,13 +1645,14 @@ def test_global_actuation_reauctions_jit_bound_that_falls_below_majority(side):
         band_alpha=0.05,
     )
 
-    with pytest.raises(era._GlobalProbabilityTightened) as raised:
-        era._global_current_state_execution_economics(
-            cert,
-            decision=decision,
-            witness=witness,
-        )
-    assert raised.value.payoff_q_lcb == 0.49
+    current = era._global_current_state_execution_economics(
+        cert,
+        decision=decision,
+        witness=witness,
+    )
+
+    assert current["global_current_prior_payoff_q_lcb"] == pytest.approx(0.49)
+    assert current["payoff_q_lcb"] == pytest.approx(0.60)
 
 
 @pytest.mark.parametrize("side", ("YES", "NO"))
@@ -1682,7 +1684,7 @@ def test_global_actuation_legacy_bound_absence_cannot_rescue_majority_loss(side)
 
 
 @pytest.mark.parametrize("side", ("YES", "NO"))
-def test_global_actuation_probability_tightening_requires_reauction(side):
+def test_global_actuation_legacy_prior_cannot_tighten_frozen_witness(side):
     cert = _current_qkernel_cert(side=side)
     cert.update(
         payoff_q_point=0.80,
@@ -1698,19 +1700,18 @@ def test_global_actuation_probability_tightening_requires_reauction(side):
         band_alpha=0.05,
     )
 
-    with pytest.raises(
-        ValueError,
-        match="GLOBAL_CURRENT_STATE_PAYOFF_Q_TIGHTENED_REAUCTION_REQUIRED",
-    ):
-        era._global_current_state_execution_economics(
-            cert,
-            decision=decision,
-            witness=witness,
-        )
+    current = era._global_current_state_execution_economics(
+        cert,
+        decision=decision,
+        witness=witness,
+    )
+
+    assert current["global_current_prior_payoff_q_lcb"] == pytest.approx(0.55)
+    assert current["payoff_q_lcb"] == pytest.approx(0.60)
 
 
 @pytest.mark.parametrize("side", ("YES", "NO"))
-def test_global_actuation_rejects_negative_log_stale_size_after_q_tightening(side):
+def test_global_actuation_legacy_prior_cannot_reprice_current_selected_size(side):
     wealth = 100.0
     shares = 80.0
     cost = 40.0
@@ -1741,15 +1742,14 @@ def test_global_actuation_rejects_negative_log_stale_size_after_q_tightening(sid
         band_alpha=0.05,
     )
 
-    with pytest.raises(
-        ValueError,
-        match="GLOBAL_CURRENT_STATE_PAYOFF_Q_TIGHTENED_REAUCTION_REQUIRED",
-    ):
-        era._global_current_state_execution_economics(
-            cert,
-            decision=decision,
-            witness=witness,
-        )
+    current = era._global_current_state_execution_economics(
+        cert,
+        decision=decision,
+        witness=witness,
+    )
+
+    assert current["global_current_prior_payoff_q_lcb"] == pytest.approx(tightened_q)
+    assert current["payoff_q_lcb"] == pytest.approx(0.70)
 
 
 @pytest.mark.parametrize("side", ("YES", "NO"))
