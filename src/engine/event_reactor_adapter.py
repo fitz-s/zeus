@@ -7234,29 +7234,65 @@ def _bind_global_current_state_economics_to_proof(
 ) -> "_CandidateProof":
     """Atomically carry the JIT-tightened bound on the selected proof."""
 
+    missing_reason = str(getattr(proof, "missing_reason", "") or "").strip()
+    if not _global_current_state_may_rebind_scalar_rejection(missing_reason):
+        raise ValueError(
+            "GLOBAL_CURRENT_STATE_PROOF_REJECTION_NOT_REBINDABLE:"
+            f"{missing_reason}"
+        )
+
     try:
         q_point = float(cert["payoff_q_point"])
         q_lcb = float(cert["payoff_q_lcb"])
         edge_lcb = float(cert["edge_lcb"])
+        false_edge_rate = float(cert["false_edge_rate"])
         served_q_point = float(proof.q_posterior)
     except (KeyError, TypeError, ValueError) as exc:
         raise ValueError("GLOBAL_CURRENT_STATE_PROOF_ECONOMICS_INVALID") from exc
     if not all(
         math.isfinite(value)
-        for value in (q_point, q_lcb, edge_lcb, served_q_point)
+        for value in (
+            q_point,
+            q_lcb,
+            edge_lcb,
+            false_edge_rate,
+            served_q_point,
+        )
     ):
         raise ValueError("GLOBAL_CURRENT_STATE_PROOF_ECONOMICS_INVALID")
     if not math.isclose(q_point, served_q_point, rel_tol=0.0, abs_tol=1e-12):
         raise ValueError("GLOBAL_CURRENT_STATE_PROOF_POINT_MISMATCH")
-    if not (0.0 <= q_lcb <= q_point <= 1.0) or edge_lcb <= 0.0:
+    if (
+        not (0.0 <= q_lcb <= q_point <= 1.0)
+        or edge_lcb <= 0.0
+        or not (0.0 <= false_edge_rate <= 1.0)
+    ):
         raise ValueError("GLOBAL_CURRENT_STATE_PROOF_ECONOMICS_NON_POSITIVE")
     return dataclass_replace(
         proof,
         q_lcb_5pct=q_lcb,
         trade_score=edge_lcb,
+        p_value=false_edge_rate,
+        passed_prefilter=True,
+        missing_reason=None,
         qkernel_execution_economics=dict(cert),
         selection_authority_applied="qkernel_spine",
         execution_mode_intent="TAKER",
+    )
+
+
+def _global_current_state_may_rebind_scalar_rejection(reason: str | None) -> bool:
+    """Let the sealed global objective replace only obsolete scalar admission."""
+
+    text = str(reason or "").strip()
+    if not text:
+        return True
+    from src.engine.qkernel_spine_bridge import (
+        _qkernel_may_clear_legacy_missing_reason,
+    )
+
+    return _qkernel_may_clear_legacy_missing_reason(text) or text.startswith(
+        "ADMISSION_NEAR_SETTLED_PRICE"
     )
 
 
@@ -7266,12 +7302,13 @@ def _global_actuation_selected_proof(
     prepared_global_family: object,
     family: object,
     event: OpportunityEvent,
+    all_proofs: tuple["_CandidateProof", ...],
     eligible_proofs: tuple["_CandidateProof", ...],
     forecast_conn: sqlite3.Connection,
     trade_conn: sqlite3.Connection,
     decision_time: datetime,
 ) -> "_CandidateProof":
-    """Bind the exact global winner back to one currently eligible proof."""
+    """Bind the exact global winner to its current proof and sealed economics."""
 
     from src.solve.solver import global_candidate_from_native
 
@@ -7309,16 +7346,39 @@ def _global_actuation_selected_proof(
     # and executable books.  Bind the global certificate before any legacy local
     # price heuristic can reinterpret the winner.
     direction = "buy_yes" if candidate.side == "YES" else "buy_no"
-    matches = tuple(
-        proof
-        for proof in eligible_proofs
-        if str(getattr(getattr(proof, "candidate", None), "condition_id", "") or "")
-        == candidate.condition_id
-        and str(getattr(proof, "token_id", "") or "") == candidate.token_id
-        and str(getattr(proof, "direction", "") or "") == direction
+
+    def matches_candidate(candidate_proof: "_CandidateProof") -> bool:
+        return (
+            str(
+                getattr(
+                    getattr(candidate_proof, "candidate", None),
+                    "condition_id",
+                    "",
+                )
+                or ""
+            )
+            == candidate.condition_id
+            and str(getattr(candidate_proof, "token_id", "") or "")
+            == candidate.token_id
+            and str(getattr(candidate_proof, "direction", "") or "") == direction
+        )
+
+    current_matches = tuple(
+        proof for proof in all_proofs if matches_candidate(proof)
     )
-    if len(matches) != 1:
+    matches = tuple(proof for proof in eligible_proofs if matches_candidate(proof))
+    if len(current_matches) != 1 or len(matches) > 1:
         raise ValueError("GLOBAL_ACTUATION_PROOF_BINDING_MISSING")
+    current_proof = current_matches[0]
+    if not matches:
+        current_reason = str(
+            getattr(current_proof, "missing_reason", None)
+            or "CURRENT_SELECTION_SCOPE"
+        )
+        raise ValueError(
+            "GLOBAL_ACTUATION_PROOF_NO_LONGER_ELIGIBLE:"
+            f"candidate={candidate.candidate_id}:reason={current_reason}"
+        )
     proof = matches[0]
     native = _full_depth_native_side_candidate_from_proof(
         family_key=candidate.family_key,
@@ -8110,6 +8170,7 @@ def _build_event_bound_no_submit_receipt_core(
             decision_time=decision_time,
             allow_same_family_monitor_owned=_selection_scope_allows_same_family_monitor_owned,
             honor_admission_rejections=False,
+            allow_global_near_settled_rebind=global_actuation is not None,
             enforce_win_rate_floor=False,
             diagnostic_out=_selection_scope_diagnostic,
         )
@@ -8326,6 +8387,7 @@ def _build_event_bound_no_submit_receipt_core(
                 prepared_global_family=_prepared_global_family,
                 family=family,
                 event=event,
+                all_proofs=proofs,
                 eligible_proofs=_spine_entry_proofs,
                 forecast_conn=source_conn,
                 trade_conn=trade_conn,
@@ -17640,6 +17702,7 @@ def _selection_scoped_proofs(
     decision_time: datetime | None = None,
     allow_same_family_monitor_owned: bool = False,
     honor_admission_rejections: bool = True,
+    allow_global_near_settled_rebind: bool = False,
     enforce_win_rate_floor: bool = True,
     diagnostic_out: dict[str, object] | None = None,
 ) -> tuple[_CandidateProof, ...]:
@@ -17704,6 +17767,10 @@ def _selection_scoped_proofs(
         """
         text = str(missing_reason or "").strip()
         if not text:
+            return True
+        if allow_global_near_settled_rebind and text.startswith(
+            "ADMISSION_NEAR_SETTLED_PRICE:"
+        ):
             return True
         return text.startswith(
             (

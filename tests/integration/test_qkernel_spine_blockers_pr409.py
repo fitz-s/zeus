@@ -2066,6 +2066,76 @@ def test_global_current_state_proof_replaces_legacy_bound_with_current_witness()
     assert current.qkernel_execution_economics["payoff_q_lcb"] == pytest.approx(0.61)
 
 
+def test_global_current_state_proof_atomically_replaces_legacy_admission_reject(
+    monkeypatch,
+):
+    """A sealed global winner cannot retain the scalar pre-spine rejection."""
+
+    from dataclasses import replace
+
+    economics = _selected_economics(
+        edge_lcb=0.55,
+        cost=0.02,
+        q_dot_payoff=0.95,
+        point_ev=0.93,
+    )
+    proof = _overlay_proof(
+        q_posterior=0.95,
+        q_lcb_5pct=0.575,
+        economics=economics,
+    )
+    proof = replace(
+        proof,
+        q_lcb_5pct=0.0,
+        missing_reason=(
+            "ADMISSION_CAPITAL_EFFICIENCY_LCB_EV:"
+            "ev_per_dollar=-1.000000:q_lcb=0.000000:price=0.020000"
+        ),
+        passed_prefilter=False,
+        p_value=1.0,
+        trade_score=-0.02,
+        probability_authority="day0_absorbing_hard_fact",
+    )
+    cert = {
+        **proof.qkernel_execution_economics,
+        "payoff_q_point": 0.95,
+        "payoff_q_lcb": 0.575,
+        "edge_lcb": 0.555,
+        "false_edge_rate": 0.05,
+    }
+
+    current = era._bind_global_current_state_economics_to_proof(proof, cert)
+    monkeypatch.setattr(
+        era,
+        "_day0_route_false_edge_rate",
+        lambda _proof, _q_lcb: (0.05, "global_current_state_certificate"),
+    )
+    fdr = era._day0_selected_route_fdr_proof(
+        event_type="DAY0_EXTREME_UPDATED",
+        family_id="family-current",
+        all_hypothesis_ids=tuple(f"family-current:token-{i}" for i in range(22)),
+        selected_hypothesis_id="family-current:token-0",
+        selected_proof=current,
+    )
+
+    assert current.q_lcb_5pct == pytest.approx(0.575)
+    assert current.trade_score == pytest.approx(0.555)
+    assert current.p_value == pytest.approx(0.05)
+    assert current.passed_prefilter is True
+    assert current.missing_reason is None
+    assert fdr is not None and fdr.passed is True
+
+    unsafe = replace(
+        proof,
+        missing_reason="BUY_NO_CONSERVATIVE_EVIDENCE_MISSING",
+    )
+    with pytest.raises(
+        ValueError,
+        match="GLOBAL_CURRENT_STATE_PROOF_REJECTION_NOT_REBINDABLE",
+    ):
+        era._bind_global_current_state_economics_to_proof(unsafe, cert)
+
+
 def test_global_current_state_seed_seals_probability_parent_without_local_overlay():
     proof = SimpleNamespace(
         q_posterior=0.652,
@@ -2079,6 +2149,68 @@ def test_global_current_state_seed_seals_probability_parent_without_local_overla
         "q_lcb_authority": "qkernel_payoff_bound",
         "probability_authority": "qkernel_payoff_direct_route",
     }
+
+
+def test_global_near_settled_rebind_preserves_dynamic_selection_gates(monkeypatch):
+    """Global price-floor replacement still consumes the full current scope."""
+
+    from dataclasses import replace
+
+    bin_obj = Bin(low=20.0, high=20.0, unit="C", label="20C")
+    row = _row(
+        condition_id="condition-near-settled",
+        yes_token="yes-near-settled",
+        no_token="no-near-settled",
+        yes_ask=0.01,
+        no_ask=0.99,
+        snapshot_id="snapshot-near-settled",
+    )
+    proof = _proof(
+        direction="buy_no",
+        row=row,
+        token_id="no-near-settled",
+        q_posterior=1.0,
+        q_lcb_5pct=1.0,
+        bin_obj=bin_obj,
+    )
+    proof = replace(
+        proof,
+        missing_reason=(
+            "ADMISSION_NEAR_SETTLED_PRICE:price=0.999000:ceiling=0.990000"
+        ),
+        passed_prefilter=False,
+    )
+
+    ordinary = era._selection_scoped_proofs(
+        proofs=(proof,),
+        honor_admission_rejections=False,
+        enforce_win_rate_floor=False,
+    )
+    diagnostic = {}
+    global_rebind = era._selection_scoped_proofs(
+        proofs=(proof,),
+        honor_admission_rejections=False,
+        allow_global_near_settled_rebind=True,
+        enforce_win_rate_floor=False,
+        diagnostic_out=diagnostic,
+    )
+
+    assert ordinary == ()
+    assert global_rebind == (proof,), diagnostic
+
+    monkeypatch.setattr(
+        era,
+        "_live_selection_rejection_reason",
+        lambda *_args, **_kwargs: "QKERNEL_REST_THEN_CROSS_NOT_ACTIONABLE",
+    )
+    dynamically_blocked = era._selection_scoped_proofs(
+        proofs=(proof,),
+        honor_admission_rejections=False,
+        allow_global_near_settled_rebind=True,
+        enforce_win_rate_floor=False,
+    )
+
+    assert dynamically_blocked == ()
 
 
 def test_overlay_rejects_qkernel_point_probability_that_is_not_served_belief():

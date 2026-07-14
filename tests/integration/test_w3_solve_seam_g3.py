@@ -2015,6 +2015,9 @@ def test_global_winner_binding_does_not_reapply_legacy_price_floor(monkeypatch):
         candidate=SimpleNamespace(condition_id="condition-35c"),
         token_id="no-35c",
         direction="buy_no",
+        missing_reason=(
+            "ADMISSION_NEAR_SETTLED_PRICE:price=0.999000:ceiling=0.990000"
+        ),
         row={"orderbook_depth_json": json.dumps({"hash": "venue-book-current"})},
         q_posterior=0.6419587,
         q_lcb_5pct=0.5066667,
@@ -2107,6 +2110,7 @@ def test_global_winner_binding_does_not_reapply_legacy_price_floor(monkeypatch):
         prepared_global_family=SimpleNamespace(probability_witness=witness),
         family=SimpleNamespace(family_id=family_key),
         event=SimpleNamespace(event_type="DAY0_EXTREME_UPDATED"),
+        all_proofs=(proof,),
         eligible_proofs=(proof,),
         forecast_conn=object(),
         trade_conn=object(),
@@ -2116,6 +2120,37 @@ def test_global_winner_binding_does_not_reapply_legacy_price_floor(monkeypatch):
     assert selected is proof
     assert cert["global_actuation_identity"] == "actuation-current"
     assert captured["cost"] == 0.027666
+
+    proof.missing_reason = None
+    with pytest.raises(
+        ValueError,
+        match="GLOBAL_ACTUATION_PROOF_NO_LONGER_ELIGIBLE:.*CURRENT_SELECTION_SCOPE",
+    ):
+        era._global_actuation_selected_proof(
+            global_actuation=actuation,
+            prepared_global_family=SimpleNamespace(probability_witness=witness),
+            family=SimpleNamespace(family_id=family_key),
+            event=SimpleNamespace(event_type="DAY0_EXTREME_UPDATED"),
+            all_proofs=(proof,),
+            eligible_proofs=(),
+            forecast_conn=object(),
+            trade_conn=object(),
+            decision_time=at,
+        )
+
+    duplicate = SimpleNamespace(**vars(proof))
+    with pytest.raises(ValueError, match="GLOBAL_ACTUATION_PROOF_BINDING_MISSING"):
+        era._global_actuation_selected_proof(
+            global_actuation=actuation,
+            prepared_global_family=SimpleNamespace(probability_witness=witness),
+            family=SimpleNamespace(family_id=family_key),
+            event=SimpleNamespace(event_type="DAY0_EXTREME_UPDATED"),
+            all_proofs=(proof, duplicate),
+            eligible_proofs=(proof,),
+            forecast_conn=object(),
+            trade_conn=object(),
+            decision_time=at,
+        )
 
 
 @pytest.mark.parametrize(

@@ -144,6 +144,10 @@ authority surface.
   branch only.  Bind its witness identity to the current observation, current
   causal base snapshot, remaining-model capture identities, finite-evidence
   carrier, and exact sample matrix; preserve all non-Day0 replacement gates.
+- Rebind the sealed global winner's current-state economics atomically at JIT:
+  `q_lcb`, edge, false-edge rate, prefilter verdict, and admission reason must
+  come from one certificate.  A superseded scalar admission reject must not
+  survive beside a positive globally certified edge.
 
 ## Verification
 - Focused first-principles antibody and settlement-preimage regressions pass.
@@ -183,9 +187,27 @@ authority surface.
   readiness cannot block a complete current observation + remaining-day
   witness, while the same missing readiness still blocks a forecast event and
   missing Day0 current inputs still fail closed.
+- A production-shaped Day0 global-winner antibody starts with the legacy
+  `q_lcb=0` capital-efficiency reject and proves that current-state rebinding
+  updates its FDR inputs as one unit before submit preflight.
 
 ## Work record
 
+- 2026-07-14: post-deploy global auctions covered all 128 current families and
+  repeatedly selected Sao Paulo Jul 14 HIGH NO with positive robust delta-log
+  wealth, but preflight inherited `passed_prefilter=false` and the old
+  `ADMISSION_CAPITAL_EFFICIENCY_LCB_EV:q_lcb=0` reason after rebinding the
+  candidate to `q_lcb=0.575`.  No venue command was created.  The repair makes
+  the current-state proof overlay atomic; book, probability, cash, wealth, and
+  venue safety revalidation remain fail-closed.
+- 2026-07-14: later 129/129 epochs selected the same Sao Paulo family at a
+  full-depth NO cost of `0.999`, with Day0 win-probability LCB `1.0`, positive
+  robust EV, and positive delta-log wealth.  Targeted refresh then switched the
+  legacy local proof to its fixed near-settled-price rejection, so exact
+  condition/token/direction binding failed before the current-state certificate
+  could be evaluated.  The JIT seam now recovers only scalar gates that the
+  sealed global certificate can replace; evidence/structure rejections remain
+  non-rebindable.
 - 2026-07-14: canonical global-auction receipts retained complete scope scanning
   but excluded Hong Kong Jul 15 LOW and Miami Jul 14 LOW because their full-day
   ENS extrema were temporally boundary-ambiguous.  Both were Day0 families with
