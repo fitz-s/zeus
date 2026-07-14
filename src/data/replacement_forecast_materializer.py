@@ -1865,6 +1865,8 @@ def _replacement_bayes_precision_fusion_override(
         _source_clock_center_sigma_c: float | None = None
         _source_clock_predictive_sigma_c: float | None = None
         _source_clock_current_shape: _CurrentEvidenceShape | None = None
+        _source_clock_shape_required = False
+        _station_live_omitted = False
         _source_clock_current_value_serving: dict[str, Mapping[str, object]] = {}
         _source_clock_dep_ids: set[int] = set()
         try:
@@ -1875,6 +1877,7 @@ def _replacement_bayes_precision_fusion_override(
             )
 
             _scheme = scheme_for_city(request.city)
+            _source_clock_shape_required = _scheme is not None
             # ADD-DATA (operator directive 2026-06-28 "加数据不禁数据"): a station-calibrated
             # source (cwa_*/hko_* family) that is LIVE in the precision fusion but absent from the
             # frozen grid_aware scheme must be ADDED, never banned by the frozen snapshot. When such
@@ -2103,6 +2106,47 @@ def _replacement_bayes_precision_fusion_override(
                             ),
                         }
                     )
+            elif _station_live_omitted:
+                # The station-augmented center intentionally leaves the frozen
+                # one-scheme weights, but it remains a source-clock live route.
+                # Build its width from the same current ENS + simultaneous
+                # provider values; never let the older residual width become a
+                # tradeable surrogate merely because a new station source was
+                # added to the center.
+                _source_clock_used_models = tuple(str(model) for model in _weights)
+                _source_clock_current_shape = _read_current_evidence_shape(
+                    conn,
+                    request,
+                    metric=metric,
+                    provider_values_c={
+                        str(model): float(_z_by_model[model])
+                        for model in _weights
+                        if model in _z_by_model
+                    },
+                    provider_weights={
+                        str(model): float(weight)
+                        for model, weight in _weights.items()
+                    },
+                    center_c=float(_mu_diagonal),
+                )
+                if _source_clock_current_shape is not None:
+                    _source_clock_center_sigma_c = (
+                        _source_clock_current_shape.center_sigma_c
+                    )
+                    _source_clock_predictive_sigma_c = (
+                        _source_clock_current_shape.predictive_sigma_c
+                    )
+                for _m in _source_clock_used_models:
+                    if _m in served_current:
+                        _source_clock_current_value_serving[_m] = (
+                            served_current[_m].as_provenance()  # type: ignore[union-attr]
+                        )
+                        try:
+                            _source_clock_dep_ids.add(
+                                int(served_current[_m].raw_model_forecast_id)  # type: ignore[union-attr]
+                            )
+                        except Exception:
+                            pass
         except Exception as _source_clock_exc:
             try:
                 import logging  # noqa: PLC0415
@@ -2252,7 +2296,7 @@ def _replacement_bayes_precision_fusion_override(
         predictive_sigma_c: float | None = served_predictive_sigma_c(
             _sigma_resid, floor_c=1.0
         )
-        if _source_clock_payload is not None:
+        if _source_clock_shape_required:
             predictive_sigma_c = (
                 None
                 if _source_clock_predictive_sigma_c is None

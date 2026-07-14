@@ -855,7 +855,7 @@ test_trust_policy:
     tests/test_bayes_precision_fusion_posterior_records_raw_model_forecast_dependency_ids.py: {created: "2026-06-08", last_used: "2026-06-08", note: "PR#400 BLOCKER 5 RT: fused posterior records raw_model_forecast_ids for full q reconstructability"}
     tests/test_bayes_precision_fusion_lead_days_uses_city_local_date_not_utc.py: {created: "2026-06-08", last_used: "2026-06-08", note: "PR#400 BLOCKER 6 RT: lead_days computed against city-local date, not UTC (off-by-one in cross-timezone cases)"}
     tests/test_bayes_precision_fusion_history_provider_materializer_wiring.py: {created: "2026-06-08", last_used: "2026-06-08", note: "PR#400 end-to-end RT: real BayesPrecisionFusionHistoryProvider at materializer seam; persisted previous_runs + VERIFIED settlement yields T2_BAYES"}
-    tests/test_replacement_0_1_bayes_precision_fusion_materializer_wiring.py: {created: "2026-06-08", last_used: "2026-07-11", note: "Source-clock current-shape wiring: current causal ENS carrier is required and any source-clock exception fails closed instead of falling back to historical q; legacy flag/wiring coverage retained."}
+    tests/test_replacement_0_1_bayes_precision_fusion_materializer_wiring.py: {created: "2026-06-08", last_used: "2026-07-14", note: "Source-clock current-shape wiring: current causal ENS carrier is required for fixed-scheme and station-augmented centers; any missing shape or source-clock exception fails closed instead of falling back to historical q; legacy flag/wiring coverage retained."}
     tests/test_replacement_sigma_floor_steps_wiring.py: {created: "2026-06-13", last_used: "2026-06-13", note: "σ-refit task #69 RT: q-construction consumer honors absolute σ-floor (σ_core=max(σ_impl·k, floor_steps·step)) when the FITTED artifact carries floor_steps; artifact WITHOUT floor_steps (current live) is byte-identical (q + identity hash); floor binds an over-sharp σ (flattens mode) and is inert when σ already wide. RED-on-revert: removing max() ⇒ floor never binds ⇒ widens-test flips"}
     tests/test_bayes_precision_fusion_model_selection_gate.py: {created: "2026-06-08", last_used: "2026-06-08", note: "PR#400 F4 RT: regional polygon gate + alias dedup; icon_d2 in-polygon enters; out-of-polygon absent; icon_seamless deduped"}
     tests/test_switch_decision_live_policy_requires_capital_evidence_object.py: {created: "2026-06-08", last_used: "2026-06-08", note: "PR#400 BLOCKER 8 RT: evaluate_replacement_forecast_switch_decision must not trust upstream LIVE_AUTHORITY without capital evidence object"}
@@ -3809,7 +3809,7 @@ test_metadata:
       ENS shape and source-clock exceptions cannot fall back to historical q;
       (d) dropped global/regional routing coverage remains.
     created: 2026-06-08
-    last_reused_or_audited: 2026-07-11
+    last_reused_or_audited: 2026-07-14
 
   tests/test_replacement_fused_q_shape.py:
     cohort: law_antibody
