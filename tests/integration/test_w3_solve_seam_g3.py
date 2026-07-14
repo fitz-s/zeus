@@ -3099,7 +3099,12 @@ def test_two_prepared_families_choose_one_globally_unique_order():
     )
 
 
-def _wealth_test_conn(*, captured_at: _dt.datetime, ctf: dict[str, int] | None = None):
+def _wealth_test_conn(
+    *,
+    captured_at: _dt.datetime,
+    ctf: dict[str, int] | None = None,
+    allowance_micro: int = 20_000_000,
+):
     conn = sqlite3.connect(":memory:")
     init_collateral_schema(conn)
     conn.execute(
@@ -3111,7 +3116,7 @@ def _wealth_test_conn(*, captured_at: _dt.datetime, ctf: dict[str, int] | None =
         ") VALUES (?,?,?,?,?,?,?,?,?,?)",
         (
             25_000_000,
-            20_000_000,
+            allowance_micro,
             2_000_000,
             json.dumps(ctf or {}),
             "{}",
@@ -3147,9 +3152,29 @@ def test_current_portfolio_wealth_witness_uses_one_chain_generation():
     )
 
     assert witness.spendable_cash_usd == Decimal("20")
-    assert witness.wealth_floor_usd == Decimal("22")
-    assert witness.wealth_ceiling_usd == Decimal("22")
+    assert witness.wealth_floor_usd == Decimal("27")
+    assert witness.wealth_ceiling_usd == Decimal("27")
     assert repeated.witness_identity == witness.witness_identity
+
+
+def test_current_portfolio_wealth_keeps_owned_cash_when_allowance_is_zero():
+    decision_at = _dt.datetime(2026, 7, 10, 8, 0, tzinfo=_dt.timezone.utc)
+    conn = _wealth_test_conn(captured_at=decision_at, allowance_micro=0)
+    portfolio = PortfolioState(
+        authority="canonical_db",
+        authority_scope="runtime_exposure",
+    )
+
+    witness = current_portfolio_wealth_witness(
+        conn,
+        decision_at_utc=decision_at,
+        max_age=_dt.timedelta(seconds=30),
+        portfolio_state=portfolio,
+    )
+
+    assert witness.spendable_cash_usd == Decimal("0")
+    assert witness.wealth_floor_usd == Decimal("27")
+    assert witness.wealth_ceiling_usd == Decimal("27")
 
 
 def test_current_solve_ledger_inputs_bind_positions_and_cash_in_one_read_snapshot(
@@ -3302,8 +3327,8 @@ def test_current_portfolio_wealth_uses_fresh_synced_positions_when_ctf_mirror_em
         portfolio_state=portfolio,
     )
 
-    assert witness.wealth_floor_usd == Decimal("22")
-    assert witness.wealth_ceiling_usd == Decimal("25.25")
+    assert witness.wealth_floor_usd == Decimal("27")
+    assert witness.wealth_ceiling_usd == Decimal("30.25")
 
 
 def test_current_portfolio_wealth_uses_fresh_ctf_mirror_over_stale_projection_time():
@@ -3336,7 +3361,7 @@ def test_current_portfolio_wealth_uses_fresh_ctf_mirror_over_stale_projection_ti
         portfolio_state=portfolio,
     )
 
-    assert witness.wealth_ceiling_usd == Decimal("25.25")
+    assert witness.wealth_ceiling_usd == Decimal("30.25")
 
 
 @pytest.mark.parametrize(
@@ -3377,8 +3402,8 @@ def test_current_portfolio_wealth_bounds_unverified_claim_without_spendable_cred
     )
 
     assert witness.spendable_cash_usd == Decimal("20")
-    assert witness.wealth_floor_usd == Decimal("22")
-    assert witness.wealth_ceiling_usd == Decimal("23")
+    assert witness.wealth_floor_usd == Decimal("27")
+    assert witness.wealth_ceiling_usd == Decimal("28")
 
 
 def test_current_portfolio_wealth_witness_refuses_inflight_or_unknown_inventory():

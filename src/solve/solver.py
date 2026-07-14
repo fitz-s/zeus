@@ -720,7 +720,7 @@ class PortfolioWealthWitness:
         if (
             self.wealth_floor_usd <= 0
             or self.wealth_ceiling_usd < self.wealth_floor_usd
-            or self.spendable_cash_usd <= 0
+            or self.spendable_cash_usd < 0
             or self.reservations_usd < 0
         ):
             raise ValueError("portfolio wealth, cash, and reservations must be valid")
@@ -2367,8 +2367,8 @@ def select_global_single_order(
             ),
             candidate_input_count=len(candidates),
         )
-    if capital_limit_usd <= 0:
-        raise ValueError("capital limit must be positive")
+    if capital_limit_usd < 0:
+        raise ValueError("capital limit must be non-negative")
     multiplier = Decimal(fractional_kelly_multiplier)
     if not multiplier.is_finite() or not Decimal("0") < multiplier <= Decimal("1"):
         raise ValueError("fractional Kelly multiplier must be finite and in (0, 1]")

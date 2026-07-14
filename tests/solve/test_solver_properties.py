@@ -1003,6 +1003,39 @@ def test_global_single_order_entry_pause_blocks_buy_but_preserves_sell_and_cash(
     assert decision.candidate_input_count == len(evaluations) == 2
 
 
+def test_global_single_order_zero_buy_capacity_preserves_sell_and_cash():
+    sell = _global_sell_candidate(
+        candidate_id="sell-with-zero-buy-capacity",
+        family="sell-with-zero-buy-capacity-family",
+        side="YES",
+        held_q=0.15,
+        bids=(("0.40", "4"), ("0.30", "6")),
+        shares="10",
+    )
+    buy = _global_candidate(
+        candidate_id="buy-with-zero-capacity",
+        family="buy-with-zero-capacity-family",
+        side="YES",
+        q=0.99,
+        levels=(("0.10", "20"),),
+    )
+
+    decision = _global_select(
+        (sell, buy),
+        floor="100",
+        ceiling="110",
+        cash="0",
+        cap="0",
+    )
+
+    assert decision.candidate is sell
+    assert decision.cash_proceeds_usd == Decimal("3.4")
+    assert decision.robust_delta_log_wealth > 0
+    assert decision.rejection_reasons[buy.candidate_id] == (
+        "CAPITAL_CAPACITY_EXHAUSTED"
+    )
+
+
 @pytest.mark.parametrize(
     ("resolver", "reason"),
     (

@@ -1741,9 +1741,12 @@ def current_portfolio_wealth_witness(
         allowance_micro = int(row.get("pusd_allowance_micro") or 0)
         legacy_micro = int(row.get("usdc_e_legacy_balance_micro") or 0)
         spendable_micro = min(pusd_micro, allowance_micro)
-        if spendable_micro <= 0:
-            raise ValueError("CURRENT_WEALTH_NO_SPENDABLE_CASH")
-        floor = (Decimal(spendable_micro) + Decimal(legacy_micro)) / Decimal(
+        if spendable_micro < 0:
+            raise ValueError("CURRENT_WEALTH_SPENDABLE_CASH_INVALID")
+        # Allowance limits a new BUY; it does not erase cash the wallet owns.
+        # Keep terminal wealth and executable BUY capacity as separate facts so
+        # zero allowance still permits HOLD/CASH and reduce-only SELL ranking.
+        floor = (Decimal(pusd_micro) + Decimal(legacy_micro)) / Decimal(
             "1000000"
         )
         ceiling = floor + sum(
