@@ -264,7 +264,7 @@ test_trust_policy:
     tests/test_backtest_training_eligibility.py: {created: "2026-04-28", last_used: "2026-04-28"}
     tests/test_dissemination_schedules.py: {created: "2026-04-28", last_used: "2026-04-28"}
     tests/test_ddd_wiring.py: {created: "2026-05-03", last_used: "2026-05-15"}
-    tests/test_dedup_gate_token.py: {created: "2026-05-17", last_used: "2026-05-18"}
+    tests/test_dedup_gate_token.py: {created: "2026-05-17", last_used: "2026-07-14"}
     tests/test_solar_append_future_window.py: {created: "2026-05-19", last_used: "2026-05-19"}
     tests/test_data_density_discount_v2.py: {created: "2026-05-03", last_used: "2026-05-15"}
     tests/test_ensemble_client.py: {created: "2026-04-01", last_used: "2026-04-29"}
@@ -508,7 +508,7 @@ test_trust_policy:
     tests/test_unknown_side_effect.py: {created: "2026-04-27", last_used: "2026-04-30"}
     tests/test_user_channel_ingest.py: {created: "2026-04-27", last_used: "2026-04-27"}
     tests/test_exit_safety.py: {created: "2026-04-27", last_used: "2026-07-11", note: "Runtime submit gate retry semantics, pending-exit freshness guards, and confirmed EXIT tx-alias dedup before durable full-close projection."}
-    tests/test_exchange_reconcile.py: {created: "2026-04-27", last_used: "2026-07-11", note: "SCH-W1.2-ORDER-STATE plus partial EXIT fill terminalization defense: economic close requires fill coverage of the command and current position after excluding tx-hash aggregate aliases while preserving distinct child fills."}
+    tests/test_exchange_reconcile.py: {created: "2026-04-27", last_used: "2026-07-14", note: "SCH-W1.2-ORDER-STATE plus same-position FOK increment aggregation and partial EXIT fill terminalization defense."}
     tests/test_order_truth_reducer.py: {created: "2026-05-21", last_used: "2026-05-21"}
     tests/test_order_state_predicates.py: {created: "2026-07-02", last_used: "2026-07-03", note: "SCH-W1.2-ORDER-STATE: full truth table for is_stale_pending_cancel (incl. both INDETERMINATE branches, fail-closed), is_delayed, rest_deadline_exceeded (incl. NULL-q leak-closure case). First wired to the cancel path by W4.2 (tests/execution/test_staleness_cancel.py)."}
     tests/test_ddl_copies_normalized_identical.py: {created: "2026-07-02", last_used: "2026-07-02", note: "SCH-W1.2-ORDER-STATE critic ruling 1: normalized (not byte-equal) DDL lockstep guard over venue_order_facts and collateral pairs, closing the _TRADE_CLASS_DDL fingerprint blind spot."}

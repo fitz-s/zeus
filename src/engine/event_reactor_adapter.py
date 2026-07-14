@@ -7432,6 +7432,9 @@ def _global_actuation_selected_proof(
             "global_wealth_witness_identity": str(
                 getattr(global_actuation, "wealth_witness_identity", "") or ""
             ),
+            "global_wealth_economic_identity": str(
+                getattr(global_actuation, "wealth_economic_identity", "") or ""
+            ),
             "global_selection_epoch_identity": str(
                 getattr(global_actuation, "selection_epoch_identity", "") or ""
             ),
@@ -7472,6 +7475,7 @@ def _global_actuation_selected_proof(
             "global_actuation_identity",
             "global_universe_witness_identity",
             "global_wealth_witness_identity",
+            "global_wealth_economic_identity",
             "global_selection_epoch_identity",
             "global_selection_cut_at",
             "global_selection_decision_at",

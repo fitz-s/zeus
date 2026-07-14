@@ -785,6 +785,63 @@ def build_entry_fill_only_canonical_write(
     return events, projection
 
 
+def build_entry_increment_canonical_write(
+    position: Any,
+    *,
+    sequence_no: int,
+    phase_after: str,
+    order_id: str,
+    command_id: str,
+    decision_id: str | None = None,
+    source_module: str = "src.execution.exchange_reconcile",
+) -> tuple[list[dict], dict]:
+    """Fold one fully reconciled same-position entry increment.
+
+    A global marginal BUY adds a new command/fill lot to the existing economic
+    position; it does not open a parallel lifecycle.  Reuse the admitted
+    ``ENTRY_ORDER_FILLED`` event type, but give every command its own durable
+    event/idempotency identity and self-fold the current open phase.
+    """
+
+    if phase_after not in {ACTIVE, DAY0_WINDOW}:
+        raise ValueError(
+            "entry increment requires an active/day0 position, "
+            f"got phase_after={phase_after!r}"
+        )
+    order_id = str(order_id or "").strip()
+    command_id = str(command_id or "").strip()
+    if not order_id or not command_id:
+        raise ValueError("entry increment requires order_id and command_id")
+    projection = build_position_current_projection(position)
+    projection["phase"] = phase_after
+    occurred_at = _non_empty(
+        getattr(position, "increment_filled_at", ""),
+        getattr(position, "entered_at", ""),
+        getattr(position, "order_posted_at", ""),
+    )
+    event = _entry_event(
+        position=position,
+        event_type="ENTRY_ORDER_FILLED",
+        sequence_no=sequence_no,
+        occurred_at=occurred_at,
+        phase_before=phase_after,
+        phase_after=fold_lifecycle_phase(phase_after, phase_after).value,
+        decision_id=decision_id,
+        source_module=source_module,
+        order_id=order_id,
+    )
+    identity = f"{position.trade_id}:entry_order_filled:{command_id}"
+    event.update(
+        {
+            "event_id": identity,
+            "idempotency_key": identity,
+            "command_id": command_id,
+            "caused_by": "certified_global_increment",
+        }
+    )
+    return [event], projection
+
+
 def build_settlement_canonical_write(
     position: Any,
     *,

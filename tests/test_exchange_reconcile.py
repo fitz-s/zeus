@@ -1,7 +1,7 @@
 # Created: 2026-04-27
-# Last reused/audited: 2026-07-11
-# Lifecycle: created=2026-04-27; last_reviewed=2026-07-11; last_reused=2026-07-11
-# Authority basis: docs/operations/task_2026-05-08_object_invariance_remaining_mainline/PLAN.md
+# Last reused/audited: 2026-07-14
+# Lifecycle: created=2026-04-27; last_reviewed=2026-07-14; last_reused=2026-07-14
+# Authority basis: first-principles same-position incremental fill aggregation
 # Purpose: R3 M5 exchange reconciliation sweep antibodies.
 # Reuse: Run when exchange_reconcile, venue facts, findings, heartbeat/cutover reconciliation, or operator finding resolution changes.
 """R3 M5 exchange-reconciliation findings and trade-fact tests."""
@@ -229,6 +229,7 @@ def _ensure_envelope(
     side: str = "BUY",
     price: float | Decimal = 0.50,
     size: float | Decimal = 10.0,
+    order_type: str = "GTC",
 ) -> str:
     from src.contracts.venue_submission_envelope import VenueSubmissionEnvelope
     from src.state.venue_command_repo import insert_submission_envelope
@@ -238,7 +239,7 @@ def _ensure_envelope(
     yes_token_id = yes_token_id or token_id
     no_token_id = no_token_id or f"{yes_token_id}-no"
     envelope_id = envelope_id or hashlib.sha256(
-        f"{token_id}:{side}:{price_dec}:{size_dec}".encode()
+        f"{token_id}:{side}:{price_dec}:{size_dec}:{order_type}".encode()
     ).hexdigest()
     if c.execute(
         "SELECT 1 FROM venue_submission_envelopes WHERE envelope_id = ?",
@@ -262,7 +263,7 @@ def _ensure_envelope(
             side=side,
             price=price_dec,
             size=size_dec,
-            order_type="GTC",
+            order_type=order_type,
             post_only=False,
             tick_size=Decimal("0.01"),
             min_order_size=Decimal("0.01"),
@@ -304,6 +305,7 @@ def seed_command(
     envelope_yes_token_id: str | None = None,
     envelope_no_token_id: str | None = None,
     q_version: str | None = None,
+    order_type: str = "GTC",
 ) -> None:
     from src.state.venue_command_repo import append_event, insert_command
 
@@ -326,6 +328,7 @@ def seed_command(
             side=side,
             price=price,
             size=size,
+            order_type=order_type,
         ),
         position_id=position_id,
         decision_id=f"dec-{command_id}",
@@ -338,7 +341,7 @@ def seed_command(
         price=price,
         created_at=created_at.isoformat(),
         venue_order_id=venue_order_id,
-        q_version=q_version,
+        q_version=q_version or ("q-test" if side == "BUY" else None),
     )
     if state in {"ACKED", "PARTIAL", "FILLED", "CANCEL_PENDING"}:
         append_event(
@@ -1731,6 +1734,156 @@ def test_maker_order_trade_links_to_local_command_and_uses_maker_fill_economics(
     assert findings(conn) == []
 
 
+def test_fok_increment_aggregates_into_one_canonical_position(conn):
+    """One position owns many fills; a top-up never opens or overwrites a lot."""
+
+    from src.execution.exchange_reconcile import run_reconcile_sweep
+
+    seed_command(conn, size=24, price=0.67)
+    seed_position_baseline(conn)
+    seed_trade_decision_runtime_alias(conn)
+    first = trade(
+        trade_id="trade-initial",
+        order_id="ord-m5",
+        size="24",
+        price="0.67",
+        status="CONFIRMED",
+    )
+    run_reconcile_sweep(
+        FakeM5Adapter(trades=[first]),
+        conn,
+        context="periodic",
+        observed_at=NOW,
+    )
+
+    seed_command(
+        conn,
+        command_id="cmd-top-up",
+        venue_order_id="ord-top-up",
+        position_id="pos-m5",
+        size=19.25,
+        price=0.64,
+        created_at=NOW + timedelta(minutes=1),
+        order_type="FOK",
+    )
+    # Simulate the real Chain > Chronicler writer shape: chain mirror publishes
+    # the new token quantity before the local command/event fold but retains the
+    # old cost basis because chain inventory does not carry acquisition cost.
+    # Reconciliation must derive $28.40 from command fills, not reuse $16.08.
+    conn.execute(
+        """
+        UPDATE position_current
+           SET chain_shares = 43.25,
+               chain_cost_basis_usd = 16.08,
+               chain_avg_price = 0.67,
+               chain_state = 'synced'
+         WHERE position_id = 'pos-m5'
+        """
+    )
+    increment = trade(
+        trade_id="trade-top-up",
+        order_id="ord-top-up",
+        size="19.25",
+        price="0.64",
+        status="CONFIRMED",
+    )
+    run_reconcile_sweep(
+        FakeM5Adapter(trades=[increment]),
+        conn,
+        context="periodic",
+        observed_at=NOW + timedelta(minutes=1),
+    )
+
+    projection = conn.execute(
+        """
+        SELECT position_id, phase, order_id, shares, cost_basis_usd, entry_price,
+               chain_shares, chain_cost_basis_usd
+          FROM position_current
+         WHERE position_id = 'pos-m5'
+        """
+    ).fetchone()
+    assert projection["phase"] == "active"
+    assert projection["order_id"] == "ord-m5"
+    assert Decimal(str(projection["shares"])) == Decimal("43.25")
+    assert Decimal(str(projection["cost_basis_usd"])) == Decimal("28.40")
+    assert Decimal(str(projection["chain_shares"])) == Decimal("43.25")
+    assert Decimal(str(projection["chain_cost_basis_usd"])) == Decimal("16.08")
+    assert float(projection["entry_price"]) == pytest.approx(
+        float(Decimal("28.40") / Decimal("43.25")), abs=1e-15
+    )
+
+    entry_events = conn.execute(
+        """
+        SELECT event_id, order_id, command_id, phase_before, phase_after
+          FROM position_events
+         WHERE position_id = 'pos-m5'
+           AND event_type = 'ENTRY_ORDER_FILLED'
+         ORDER BY sequence_no
+        """
+    ).fetchall()
+    assert [(row["order_id"], row["command_id"]) for row in entry_events] == [
+        ("ord-m5", None),
+        ("ord-top-up", "cmd-top-up"),
+    ]
+    assert entry_events[-1]["phase_before"] == "active"
+    assert entry_events[-1]["phase_after"] == "active"
+
+    execution_rows = conn.execute(
+        """
+        SELECT intent_id, command_id, shares, fill_price
+          FROM execution_fact
+         WHERE position_id = 'pos-m5'
+         ORDER BY intent_id
+        """
+    ).fetchall()
+    assert [(row["intent_id"], row["command_id"]) for row in execution_rows] == [
+        ("pos-m5:entry", "cmd-m5"),
+        ("pos-m5:entry:cmd-top-up", "cmd-top-up"),
+    ]
+
+    run_reconcile_sweep(
+        FakeM5Adapter(trades=[increment]),
+        conn,
+        context="periodic",
+        observed_at=NOW + timedelta(minutes=2),
+    )
+    unchanged = conn.execute(
+        "SELECT shares, cost_basis_usd FROM position_current WHERE position_id='pos-m5'"
+    ).fetchone()
+    assert Decimal(str(unchanged["shares"])) == Decimal("43.25")
+    assert Decimal(str(unchanged["cost_basis_usd"])) == Decimal("28.40")
+    assert conn.execute(
+        "SELECT COUNT(*) FROM position_events WHERE position_id='pos-m5' "
+        "AND event_type='ENTRY_ORDER_FILLED'"
+    ).fetchone()[0] == 2
+
+    from src.state.db import query_portfolio_loader_view
+
+    conn.execute(
+        """
+        INSERT INTO execution_fact (
+            intent_id, position_id, command_id, order_role, posted_at,
+            fill_price, shares, venue_status, terminal_exec_status
+        ) VALUES (
+            'legacy-duplicate-cmd-m5', 'pos-m5', 'cmd-m5', 'entry', ?,
+            0.67, 24.0, 'CONFIRMED', 'filled'
+        )
+        """,
+        (NOW.isoformat(),),
+    )
+    conn.execute(
+        "UPDATE position_current SET fill_authority='venue_confirmed_full' "
+        "WHERE position_id='pos-m5'"
+    )
+    runtime = query_portfolio_loader_view(conn, runtime_exposure_only=True)
+    assert runtime["status"] == "ok"
+    assert len(runtime["positions"]) == 1
+    loaded = runtime["positions"][0]
+    assert Decimal(str(loaded["shares"])) == Decimal("43.25")
+    assert Decimal(str(loaded["cost_basis_usd"])) == Decimal("28.40")
+    assert loaded["entry_economics_source"] == "execution_fact"
+
+
 def test_maker_fill_materializes_missing_position_projection_after_cancel(conn):
     """A cancel terminalizes the remainder, not the already-filled shares."""
 
@@ -2871,7 +3024,7 @@ def test_failed_trade_fact_rolls_back_existing_optimistic_lot(conn):
     ]
     assert [(r["state"], r["shares"]) for r in lot_rows] == [
         ("OPTIMISTIC_EXPOSURE", "7.5"),
-        ("QUARANTINED", "7.5"),
+        ("ECONOMICALLY_CLOSED_OPTIMISTIC", "7.5"),
     ]
     assert lot_rows[-1]["source_trade_fact_id"] == trade_rows[-1]["trade_fact_id"]
     assert "FILL_CONFIRMED" not in event_types(conn)

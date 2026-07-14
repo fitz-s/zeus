@@ -19,7 +19,7 @@ import sqlite3
 import time
 import uuid
 from dataclasses import dataclass, replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation, ROUND_CEILING, ROUND_FLOOR
 from typing import Any, Mapping, Optional
 
@@ -232,6 +232,9 @@ _ENTRY_DUPLICATE_TERMINAL_NO_EXPOSURE_COMMAND_STATES = frozenset(
 )
 _ENTRY_DUPLICATE_TERMINAL_NO_FILL_ORDER_STATES = frozenset(
     {"CANCEL_CONFIRMED", "EXPIRED", "VENUE_WIPED"}
+)
+_ENTRY_INCREMENTABLE_POSITION_PHASES = frozenset(
+    {LifecyclePhase.ACTIVE.value, LifecyclePhase.DAY0_WINDOW.value}
 )
 _ENTRY_SAME_TOKEN_COOLDOWN_SECONDS = 30 * 60
 _ENTRY_TERMINAL_NO_FILL_REPRICE_COOLDOWN_SECONDS = 2 * 60
@@ -923,6 +926,160 @@ def _global_limit_edge_bound_authorized(
         worst_unit_cost + 1e-6 >= limit_price
         and worst_edge > 0.0
         and expected_edge <= worst_edge + 1e-6
+    )
+
+
+def _certified_global_increment_authorized(
+    actionable_payload: Mapping[str, Any] | None,
+    economics_component: Mapping[str, Any],
+    *,
+    order_type: str,
+) -> bool:
+    """Recognize one current-wealth-bound incremental global BUY.
+
+    This is not a general same-token bypass.  The verified actionable payload
+    must carry the complete global-auction identity, and the executor economics
+    check must already have proved that the exact FOK shares/limit/max-spend
+    tuple retains positive conservative edge.  A resting or partially fillable
+    order cannot use this authority because its projection would need a
+    multi-observation increment fold rather than one atomic fill.
+    """
+
+    if str(order_type or "").upper() != "FOK":
+        return False
+    if not isinstance(actionable_payload, Mapping):
+        return False
+    economics = actionable_payload.get("qkernel_execution_economics")
+    details = economics_component.get("details")
+    if not isinstance(economics, Mapping) or not isinstance(details, Mapping):
+        return False
+    if economics_component.get("allowed") is not True:
+        return False
+    if details.get("global_limit_bound_authorized") is not True:
+        return False
+    if str(economics.get("global_optimum_semantics") or "") != "CUT_TIME_GLOBAL_OPTIMUM":
+        return False
+    return all(
+        str(economics.get(field) or "").strip()
+        for field in (
+            "global_actuation_identity",
+            "global_economic_identity",
+            "global_universe_witness_identity",
+            "global_wealth_witness_identity",
+            "global_wealth_economic_identity",
+            "global_selection_epoch_identity",
+            "global_candidate_id",
+            "global_target_shares",
+            "global_max_spend_usd",
+        )
+    )
+
+
+def _current_global_increment_wealth_component(
+    conn: sqlite3.Connection,
+    economics: Mapping[str, Any],
+) -> dict:
+    """Rebuild the exact economic endowment while holding the submit write lock."""
+
+    expected = str(economics.get("global_wealth_economic_identity") or "").strip()
+    if not expected:
+        return _capability_component(
+            "global_increment_wealth_binding",
+            allowed=False,
+            reason="wealth_economic_identity_missing",
+        )
+    try:
+        from src.engine.global_auction_universe import current_portfolio_wealth_witness
+        from src.state.collateral_ledger import COLLATERAL_SNAPSHOT_MAX_AGE_SECONDS
+
+        current = current_portfolio_wealth_witness(
+            conn,
+            decision_at_utc=datetime.now(timezone.utc),
+            max_age=timedelta(seconds=float(COLLATERAL_SNAPSHOT_MAX_AGE_SECONDS)),
+        )
+    except Exception as exc:  # noqa: BLE001 - capital ambiguity blocks new risk.
+        return _capability_component(
+            "global_increment_wealth_binding",
+            allowed=False,
+            reason="current_wealth_unavailable",
+            error=f"{type(exc).__name__}:{exc}",
+        )
+    if current.economic_identity != expected:
+        return _capability_component(
+            "global_increment_wealth_binding",
+            allowed=False,
+            reason="wealth_economic_identity_superseded",
+            expected=expected,
+            current=current.economic_identity,
+        )
+    return _capability_component(
+        "global_increment_wealth_binding",
+        expected=expected,
+        current=current.economic_identity,
+    )
+
+
+def _abort_global_increment_admission(conn: sqlite3.Connection) -> None:
+    """End the executor-owned pre-submit transaction without a venue effect."""
+
+    if conn.in_transaction:
+        conn.rollback()
+
+
+def _entry_increment_fact_backing_component(
+    conn: sqlite3.Connection,
+    *,
+    position_id: str,
+    shares: object,
+    cost_basis_usd: object,
+) -> dict:
+    """Prove the mutable position projection equals command-deduped fill facts."""
+
+    try:
+        from src.state.db import query_entry_execution_fill_aggregate
+
+        aggregate = query_entry_execution_fill_aggregate(
+            conn,
+            position_id,
+            strict=True,
+        )
+    except Exception as exc:  # noqa: BLE001 - ambiguous exposure cannot be incremented.
+        return _capability_component(
+            "entry_increment_fact_backing",
+            allowed=False,
+            reason="execution_fact_aggregate_unavailable",
+            error=f"{type(exc).__name__}:{exc}",
+        )
+    projected_shares = _positive_decimal_or_none(shares)
+    projected_cost = _positive_decimal_or_none(cost_basis_usd)
+    aggregate_shares = _positive_decimal_or_none(
+        (aggregate or {}).get("shares_filled")
+    )
+    aggregate_cost = _positive_decimal_or_none(
+        (aggregate or {}).get("filled_cost_basis_usd")
+    )
+    if (
+        projected_shares is None
+        or projected_cost is None
+        or aggregate_shares is None
+        or aggregate_cost is None
+        or abs(projected_shares - aggregate_shares) > Decimal("0.000000001")
+        or abs(projected_cost - aggregate_cost) > Decimal("0.000000001")
+    ):
+        return _capability_component(
+            "entry_increment_fact_backing",
+            allowed=False,
+            reason="position_projection_differs_from_fill_aggregate",
+            projected_shares=str(projected_shares or ""),
+            projected_cost_basis_usd=str(projected_cost or ""),
+            aggregate_shares=str(aggregate_shares or ""),
+            aggregate_cost_basis_usd=str(aggregate_cost or ""),
+        )
+    return _capability_component(
+        "entry_increment_fact_backing",
+        position_id=position_id,
+        shares=str(aggregate_shares),
+        cost_basis_usd=str(aggregate_cost),
     )
 
 
@@ -1952,13 +2109,16 @@ def _entry_duplicate_same_token_component(
     *,
     token_id: str,
     candidate_position_id: str,
+    allow_reconciled_position_increment: bool = False,
 ) -> dict:
-    """Final pre-submit duplicate-exposure gate for live entry orders.
+    """Reject unresolved same-token exposure before a live entry submit.
 
     Evaluator-level dedup can be bypassed by retries, stale projections, or
     distinct decision/size idempotency keys. The executor is the last boundary
-    before command persistence and SDK submission, so it must independently
-    reject same-token open exposure.
+    before command persistence and SDK submission.  A certified global FOK
+    increment may reuse exactly one reconciled active/day0 position because its
+    current wealth witness already priced that holding as endowment.  Open,
+    unknown, partial, pending-entry, and pending-exit exposure still blocks.
     """
 
     token = str(token_id or "").strip()
@@ -1969,6 +2129,8 @@ def _entry_duplicate_same_token_component(
             "reason": "missing_token_id",
         }
 
+    increment_position_id = ""
+    increment_position_generation = ""
     if _table_exists(conn, "position_current"):
         phase_placeholders = ",".join("?" for _ in _ENTRY_DUPLICATE_NON_OPEN_PHASES)
         rows = conn.execute(
@@ -1989,12 +2151,63 @@ def _entry_duplicate_same_token_component(
         for row in rows:
             if _pending_entry_terminal_no_fill_allows_entry(conn, row):
                 continue
+            position_id = str(
+                row["position_id"] if isinstance(row, sqlite3.Row) else row[0]
+            )
+            phase = str(row["phase"] if isinstance(row, sqlite3.Row) else row[1])
+            position_shares = row["shares"] if isinstance(row, sqlite3.Row) else row[3]
+            position_cost = (
+                row["cost_basis_usd"] if isinstance(row, sqlite3.Row) else row[4]
+            )
+            position_order_id = str(
+                row["order_id"] if isinstance(row, sqlite3.Row) else row[2]
+            )
+            if (
+                allow_reconciled_position_increment
+                and phase in _ENTRY_INCREMENTABLE_POSITION_PHASES
+                and _positive_decimal_or_none(position_shares) is not None
+                and _positive_decimal_or_none(position_cost) is not None
+            ):
+                fact_backing = _entry_increment_fact_backing_component(
+                    conn,
+                    position_id=position_id,
+                    shares=position_shares,
+                    cost_basis_usd=position_cost,
+                )
+                if not fact_backing.get("allowed"):
+                    return {
+                        "component": "entry_duplicate_same_token",
+                        "allowed": False,
+                        "reason": "position_economics_not_reconciled_for_increment",
+                        "existing_position_id": position_id,
+                        "existing_phase": phase,
+                        "fact_backing": fact_backing,
+                    }
+                if increment_position_id and increment_position_id != position_id:
+                    return {
+                        "component": "entry_duplicate_same_token",
+                        "allowed": False,
+                        "reason": "ambiguous_reconciled_positions_same_token",
+                    }
+                increment_position_id = position_id
+                increment_position_generation = hashlib.sha256(
+                    "\x1f".join(
+                        (
+                            position_id,
+                            phase,
+                            position_order_id,
+                            str(position_shares),
+                            str(position_cost),
+                        )
+                    ).encode("utf-8")
+                ).hexdigest()
+                continue
             return {
                 "component": "entry_duplicate_same_token",
                 "allowed": False,
                 "reason": "open_position_same_token",
-                "existing_position_id": str(row["position_id"] if isinstance(row, sqlite3.Row) else row[0]),
-                "existing_phase": str(row["phase"] if isinstance(row, sqlite3.Row) else row[1]),
+                "existing_position_id": position_id,
+                "existing_phase": phase,
             }
 
     if _table_exists(conn, "venue_commands"):
@@ -2057,6 +2270,17 @@ def _entry_duplicate_same_token_component(
                 )
             ):
                 continue
+            if (
+                increment_position_id
+                and allow_reconciled_position_increment
+                and state.upper() == "FILLED"
+                and position_id == increment_position_id
+            ):
+                # The current wealth witness cannot be constructed while an
+                # in-flight BUY is ambiguous.  A terminal FILLED command whose
+                # token is already represented by the one incrementable
+                # position is historical endowment, not a competing order.
+                continue
             return {
                 "component": "entry_duplicate_same_token",
                 "allowed": False,
@@ -2070,8 +2294,16 @@ def _entry_duplicate_same_token_component(
     return {
         "component": "entry_duplicate_same_token",
         "allowed": True,
-        "reason": "allowed",
+        "reason": (
+            "allowed_reconciled_position_increment"
+            if increment_position_id
+            else "allowed"
+        ),
         "token_id": token,
+        "increment_position_id": increment_position_id,
+        "increment_position_generation": (
+            increment_position_generation if increment_position_id else ""
+        ),
     }
 
 
@@ -6300,6 +6532,11 @@ def _live_order(
                 command_id=command_id,
                 command_state="REJECTED",
             )
+        certified_global_increment = _certified_global_increment_authorized(
+            actionable_payload,
+            entry_economics_component,
+            order_type=effective_order_type,
+        )
         amount_precision_error = _venue_submit_amount_precision_rejection_reason(
             intent,
             shares=shares,
@@ -6437,6 +6674,7 @@ def _live_order(
             conn,
             token_id=intent.token_id,
             candidate_position_id=trade_id,
+            allow_reconciled_position_increment=certified_global_increment,
         )
         if not duplicate_same_token_component.get("allowed"):
             reason = str(
@@ -6463,13 +6701,23 @@ def _live_order(
                 command_state="REJECTED",
             )
 
-        cooldown_component = _entry_same_token_cooldown_component(
-            conn,
-            token_id=intent.token_id,
-            candidate_position_id=trade_id,
-            limit_price=intent.limit_price,
-            shares=shares,
-        )
+        increment_position_id = str(
+            duplicate_same_token_component.get("increment_position_id") or ""
+        ).strip()
+        if increment_position_id:
+            cooldown_component = _capability_component(
+                "entry_same_token_cooldown",
+                reason="certified_global_increment_not_throttled",
+                increment_position_id=increment_position_id,
+            )
+        else:
+            cooldown_component = _entry_same_token_cooldown_component(
+                conn,
+                token_id=intent.token_id,
+                candidate_position_id=trade_id,
+                limit_price=intent.limit_price,
+                shares=shares,
+            )
         if not cooldown_component.get("allowed"):
             reason = str(
                 cooldown_component.get("reason") or "same_token_entry_cooldown"
@@ -6597,6 +6845,10 @@ def _live_order(
                 spend_micro=required_pusd_micro,
                 conn=conn,
             )
+            increment_binding_component = _capability_component(
+                "global_increment_binding",
+                reason="not_applicable",
+            )
             pre_submit_envelope = _build_pre_submit_envelope(
                 conn,
                 command_id=command_id,
@@ -6609,17 +6861,101 @@ def _live_order(
                 post_only=submit_post_only,
                 captured_at=now_str,
             )
-            envelope_id = _persist_prebuilt_submit_envelope(
-                conn,
-                pre_submit_envelope,
-                command_id=command_id,
-            )
+            try:
+                # The envelope insert acquires SQLite's single-writer lock.  The
+                # exact position generation and wealth endowment are re-read
+                # after that boundary and remain stable through command insert.
+                envelope_id = _persist_prebuilt_submit_envelope(
+                    conn,
+                    pre_submit_envelope,
+                    command_id=command_id,
+                )
+                if increment_position_id:
+                    locked_duplicate = _entry_duplicate_same_token_component(
+                        conn,
+                        token_id=intent.token_id,
+                        candidate_position_id=trade_id,
+                        allow_reconciled_position_increment=True,
+                    )
+                    locked_position_id = str(
+                        locked_duplicate.get("increment_position_id") or ""
+                    ).strip()
+                    locked_generation = str(
+                        locked_duplicate.get("increment_position_generation") or ""
+                    ).strip()
+                    expected_generation = str(
+                        duplicate_same_token_component.get(
+                            "increment_position_generation"
+                        )
+                        or ""
+                    ).strip()
+                    if (
+                        locked_duplicate.get("allowed") is not True
+                        or locked_position_id != increment_position_id
+                        or not expected_generation
+                        or locked_generation != expected_generation
+                    ):
+                        increment_binding_component = _capability_component(
+                            "global_increment_binding",
+                            allowed=False,
+                            reason="position_generation_superseded",
+                            expected_position_id=increment_position_id,
+                            current_position_id=locked_position_id,
+                            expected_generation=expected_generation,
+                            current_generation=locked_generation,
+                        )
+                    else:
+                        economics = (
+                            actionable_payload.get("qkernel_execution_economics")
+                            if isinstance(actionable_payload, Mapping)
+                            else None
+                        )
+                        if not isinstance(economics, Mapping):
+                            increment_binding_component = _capability_component(
+                                "global_increment_binding",
+                                allowed=False,
+                                reason="economics_missing",
+                            )
+                        else:
+                            increment_binding_component = (
+                                _current_global_increment_wealth_component(
+                                    conn,
+                                    economics,
+                                )
+                            )
+            except Exception:
+                if increment_position_id:
+                    _abort_global_increment_admission(conn)
+                raise
+
+            if increment_position_id and not increment_binding_component.get("allowed"):
+                # _live_order owns the admission transaction even when the
+                # reactor supplies its long-lived connection: this path commits
+                # command+reservation before network submit.  A collateral
+                # refresh may have opened that transaction before the envelope
+                # write, so a savepoint rollback would strand the writer lock.
+                _abort_global_increment_admission(conn)
+                reason = str(
+                    increment_binding_component.get("reason")
+                    or "global_increment_binding_failed"
+                )
+                return OrderResult(
+                    trade_id=trade_id,
+                    status="rejected",
+                    reason=f"global_increment_binding:{reason}",
+                    submitted_price=intent.limit_price,
+                    shares=shares,
+                    order_role="entry",
+                    idempotency_key=idem.value,
+                    command_id=command_id,
+                    command_state="REJECTED",
+                )
             insert_command(
                 conn,
                 command_id=command_id,
                 snapshot_id=intent.executable_snapshot_id,
                 envelope_id=envelope_id,
-                position_id=trade_id,
+                position_id=increment_position_id or trade_id,
                 decision_id=effective_decision_id,
                 idempotency_key=idem.value,
                 intent_kind=IntentKind.ENTRY.value,
@@ -6684,6 +7020,7 @@ def _live_order(
                             entries_pause_component,
                             cooldown_component,
                             duplicate_same_token_component,
+                            increment_binding_component,
                             decision_source_component,
                             replacement_input_hwm_component,
                             corrected_identity_component,

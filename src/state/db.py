@@ -12593,9 +12593,10 @@ def _query_entry_execution_fill_hints(
           AND COALESCE(fill_price, 0.0) > 0.0
           AND COALESCE(shares, 0.0) > 0.0
     """
+    command_id_expr = "command_id" if "command_id" in columns else "NULL AS command_id"
     rows = conn.execute(
         f"""
-        SELECT position_id, intent_id, filled_at, posted_at, fill_price, shares,
+        SELECT position_id, intent_id, {command_id_expr}, filled_at, posted_at, fill_price, shares,
                terminal_exec_status, venue_status
         FROM execution_fact
         WHERE position_id IN ({placeholders})
@@ -12603,16 +12604,30 @@ def _query_entry_execution_fill_hints(
           AND lower(COALESCE(terminal_exec_status, '')) = 'filled'
           {strict_filter}
         ORDER BY position_id,
+                 CASE
+                   WHEN filled_at IS NOT NULL
+                    AND COALESCE(fill_price, 0.0) > 0.0
+                    AND COALESCE(shares, 0.0) > 0.0
+                   THEN 0 ELSE 1
+                 END,
                  COALESCE(filled_at, posted_at, '') DESC,
                  intent_id DESC
         """,
         normalized_trade_ids,
     ).fetchall()
     hints: dict[str, dict] = {}
+    seen_commands: dict[str, set[str]] = {}
     for row in rows:
         trade_id = str(row["position_id"] or "")
-        if not trade_id or trade_id in hints:
+        if not trade_id:
             continue
+        intent_id = str(row["intent_id"] or "")
+        command_id = str(row["command_id"] or "")
+        command_key = command_id or f"intent:{intent_id}"
+        seen = seen_commands.setdefault(trade_id, set())
+        if command_key in seen:
+            continue
+        seen.add(command_key)
         if strict:
             filled_at = str(row["filled_at"] or "")
             if _parse_iso_timestamp(filled_at) is None:
@@ -12633,30 +12648,77 @@ def _query_entry_execution_fill_hints(
                 field="execution_fact.shares",
                 allow_none=False,
             )
-        fill_price = _finite_float_or_zero(row["fill_price"])
-        shares = _finite_float_or_zero(row["shares"])
+        fill_price = Decimal(str(_finite_float_or_zero(row["fill_price"])))
+        shares = Decimal(str(_finite_float_or_zero(row["shares"])))
         filled_cost_basis_usd = fill_price * shares
-        if fill_price <= 0.0 or shares <= 0.0 or filled_cost_basis_usd <= 0.0:
+        if fill_price <= 0 or shares <= 0 or filled_cost_basis_usd <= 0:
             if strict:
                 raise RuntimeError(
                     "runtime exposure fill authority is not positive: "
-                    f"position_id={trade_id} intent_id={row['intent_id']} "
+                    f"position_id={trade_id} intent_id={intent_id} "
                     f"fill_price={fill_price!r} shares={shares!r}"
                 )
             continue
+        hint = hints.setdefault(
+            trade_id,
+            {
+                "_shares": Decimal("0"),
+                "_cost": Decimal("0"),
+                "_latest_at": "",
+                "_latest_intent_id": "",
+                "_latest_venue_status": "",
+                "_command_ids": [],
+            },
+        )
+        hint["_shares"] += shares
+        hint["_cost"] += filled_cost_basis_usd
+        if command_id:
+            hint["_command_ids"].append(command_id)
+        filled_at = str(row["filled_at"] or "")
+        if filled_at >= hint["_latest_at"]:
+            hint["_latest_at"] = filled_at
+            hint["_latest_intent_id"] = intent_id
+            hint["_latest_venue_status"] = str(row["venue_status"] or "")
+
+    for trade_id, hint in hints.items():
+        total_shares = hint.pop("_shares")
+        total_cost = hint.pop("_cost")
+        latest_at = hint.pop("_latest_at")
+        latest_intent_id = hint.pop("_latest_intent_id")
+        latest_venue_status = hint.pop("_latest_venue_status")
+        command_ids = tuple(sorted(set(hint.pop("_command_ids"))))
         hints[trade_id] = {
-            "entry_price_avg_fill": fill_price,
-            "shares_filled": shares,
-            "filled_cost_basis_usd": filled_cost_basis_usd,
+            "entry_price_avg_fill": float(total_cost / total_shares),
+            "shares_filled": float(total_shares),
+            "filled_cost_basis_usd": float(total_cost),
             "entry_economics_authority": ENTRY_ECONOMICS_AVG_FILL_PRICE,
             "fill_authority": FILL_AUTHORITY_VENUE_CONFIRMED_FULL,
             "entry_fill_verified": True,
             "entry_economics_source": "execution_fact",
-            "execution_fact_intent_id": str(row["intent_id"] or ""),
-            "execution_fact_filled_at": str(row["filled_at"] or ""),
-            "execution_fact_venue_status": str(row["venue_status"] or ""),
+            "execution_fact_intent_id": latest_intent_id,
+            "execution_fact_filled_at": latest_at,
+            "execution_fact_venue_status": latest_venue_status,
+            "execution_fact_command_ids": command_ids,
         }
     return hints
+
+
+def query_entry_execution_fill_aggregate(
+    conn: sqlite3.Connection,
+    position_id: str,
+    *,
+    strict: bool = False,
+) -> dict | None:
+    """Return one command-deduped aggregate of terminal entry execution facts."""
+
+    position_id = str(position_id or "").strip()
+    if not position_id:
+        return None
+    return _query_entry_execution_fill_hints(
+        conn,
+        [position_id],
+        strict=strict,
+    ).get(position_id)
 
 
 def _position_current_effective_entry_economics(

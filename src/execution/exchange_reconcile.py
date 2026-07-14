@@ -4552,6 +4552,36 @@ def _ensure_entry_fill_position_event(
     order_status = "filled" if _entry_fill_covers_command(conn, command, shares_dec) else "partial"
     if command_event == "PARTIAL_FILL_OBSERVED":
         order_status = "partial"
+    existing = conn.execute(
+        """
+        SELECT 1
+          FROM position_events
+         WHERE position_id = ?
+           AND event_type = 'ENTRY_ORDER_FILLED'
+           AND order_id = ?
+         LIMIT 1
+        """,
+        (position_id, venue_order_id),
+    ).fetchone()
+    current_shares = _positive_decimal_or_none(current.get("shares"))
+    current_cost = _positive_decimal_or_none(current.get("cost_basis_usd"))
+    incremental_fill = bool(
+        not missing_projection
+        and phase in {"active", "day0_window"}
+        and current_shares is not None
+        and current_cost is not None
+        and str(current.get("order_id") or "").strip() != venue_order_id
+    )
+    if incremental_fill and order_status != "filled":
+        logger.error(
+            "exchange_reconcile: refuse non-atomic same-position entry increment "
+            "position_id=%s command_id=%s order_id=%s status=%s",
+            position_id,
+            command.get("command_id"),
+            venue_order_id,
+            order_status,
+        )
+        return
     chain_state_before = str(current.get("chain_state") or "").strip()
     order_fact_source_name = str(order_fact_source or "").upper()
     chain_state_after = current.get("chain_state") or "synced"
@@ -4572,6 +4602,92 @@ def _ensure_entry_fill_position_event(
         source=order_fact_source,
     )
     occurred_at = observed_at.isoformat()
+    projection_shares = shares_dec
+    projection_cost = cost_basis_dec
+    projection_entry_price = entry_price_dec
+    projection_order_id = venue_order_id
+    projection_order_status = order_status
+    projection_size_usd: object = current.get("size_usd") or cost_basis
+    if incremental_fill:
+        if existing is None:
+            from src.state.db import query_entry_execution_fill_aggregate
+
+            historical = query_entry_execution_fill_aggregate(
+                conn,
+                position_id,
+                strict=True,
+            )
+            if historical is None:
+                logger.error(
+                    "exchange_reconcile: refuse entry increment without prior "
+                    "command-level fill aggregate position_id=%s command_id=%s",
+                    position_id,
+                    command.get("command_id"),
+                )
+                return
+            historical_shares = _positive_decimal_or_none(
+                historical.get("shares_filled")
+            )
+            historical_cost = _positive_decimal_or_none(
+                historical.get("filled_cost_basis_usd")
+            )
+            if historical_shares is None or historical_cost is None:
+                logger.error(
+                    "exchange_reconcile: invalid prior entry aggregate "
+                    "position_id=%s command_id=%s",
+                    position_id,
+                    command.get("command_id"),
+                )
+                return
+            historical_commands = {
+                str(value)
+                for value in historical.get("execution_fact_command_ids", ())
+                if str(value)
+            }
+            current_command_id = str(command.get("command_id") or "")
+            projection_shares = historical_shares
+            projection_cost = historical_cost
+            if current_command_id not in historical_commands:
+                projection_shares += shares_dec
+                projection_cost += cost_basis_dec
+
+            # Chain truth can land before the command/event fold.  Consume it
+            # only when it covers the entire command-derived aggregate; never
+            # add a command fill to a mutable projection that may already
+            # include that same fill.
+            chain_shares = _positive_decimal_or_none(current.get("chain_shares"))
+            if chain_shares is not None:
+                chain_delta = chain_shares - projection_shares
+                if abs(chain_delta) <= Decimal("0.000000001"):
+                    # Chain inventory binds quantity, not acquisition cost.  The
+                    # mirror can publish the new token balance before this fill
+                    # fold while retaining the prior chain_cost_basis_usd.  Keep
+                    # cost command-derived even when chain quantity confirms the
+                    # complete aggregate.
+                    projection_shares = chain_shares
+                elif chain_delta > 0:
+                    logger.error(
+                        "exchange_reconcile: refuse entry increment with "
+                        "unattributed excess chain inventory position_id=%s "
+                        "command_id=%s command_aggregate=%s chain_shares=%s",
+                        position_id,
+                        command.get("command_id"),
+                        projection_shares,
+                        chain_shares,
+                    )
+                    return
+            projection_entry_price = projection_cost / projection_shares
+        else:
+            # This atomic FOK increment was already folded. Re-observation only
+            # refreshes its command-level execution fact/lot; it must not add the
+            # same fill to the position a second time.
+            projection_shares = current_shares or shares_dec
+            projection_cost = current_cost or cost_basis_dec
+            projection_entry_price = projection_cost / projection_shares
+        projection_order_id = str(current.get("order_id") or venue_order_id)
+        projection_order_status = str(current.get("order_status") or "filled")
+        projection_size_usd = _decimal_text(projection_cost)
+        chain_state_after = current.get("chain_state") or "synced"
     position = SimpleNamespace(
         **{
             **current,
@@ -4580,34 +4696,26 @@ def _ensure_entry_fill_position_event(
             "exit_state": current.get("exit_state") or "",
             "chain_state": chain_state_after,
             "env": current.get("env") or "live",
-            "order_id": venue_order_id,
+            "order_id": projection_order_id,
             "entry_order_id": venue_order_id,
-            "order_status": order_status,
+            "order_status": projection_order_status,
             "entered_at": current.get("entered_at") or occurred_at,
             "order_posted_at": current.get("order_posted_at") or occurred_at,
-            "shares": shares,
-            "entry_price": entry_price,
-            "cost_basis_usd": cost_basis,
-            "size_usd": current.get("size_usd") or cost_basis,
+            "increment_filled_at": occurred_at if incremental_fill else "",
+            "shares": _decimal_text(projection_shares),
+            "entry_price": _decimal_text(projection_entry_price),
+            "cost_basis_usd": _decimal_text(projection_cost),
+            "size_usd": projection_size_usd,
             "strategy_key": current.get("strategy_key") or current.get("strategy") or "unknown_strategy",
             "unit": current.get("unit") or "F",
         }
     )
-    existing = conn.execute(
-        """
-        SELECT 1
-          FROM position_events
-         WHERE position_id = ?
-           AND event_type = 'ENTRY_ORDER_FILLED'
-           AND order_id = ?
-         LIMIT 1
-        """,
-        (position_id, venue_order_id),
-    ).fetchone()
     if existing is not None:
         from src.engine.lifecycle_events import build_position_current_projection
 
         projection = build_position_current_projection(position)
+        if incremental_fill:
+            projection["updated_at"] = occurred_at
         _apply_entry_fill_projection_and_execution_fact(
             conn,
             events=[],
@@ -4619,6 +4727,7 @@ def _ensure_entry_fill_position_event(
             shares=shares_dec,
             entry_price=entry_price_dec,
             upsert_only=True,
+            incremental=incremental_fill,
         )
         return
     seq_row = conn.execute(
@@ -4627,7 +4736,20 @@ def _ensure_entry_fill_position_event(
     ).fetchone()
     sequence_no = int((seq_row[0] if seq_row else 0) or 0) + 1
 
-    if missing_projection and sequence_no == 1:
+    if incremental_fill:
+        from src.engine.lifecycle_events import build_entry_increment_canonical_write
+
+        events, projection = build_entry_increment_canonical_write(
+            position,
+            sequence_no=sequence_no,
+            phase_after=phase,
+            order_id=venue_order_id,
+            command_id=str(command.get("command_id") or ""),
+            decision_id=str(command.get("decision_id") or "") or None,
+            source_module="src.execution.exchange_reconcile",
+        )
+        projection["updated_at"] = occurred_at
+    elif missing_projection and sequence_no == 1:
         from src.engine.lifecycle_events import build_entry_canonical_write
 
         events, projection = build_entry_canonical_write(
@@ -4656,6 +4778,7 @@ def _ensure_entry_fill_position_event(
         shares=shares_dec,
         entry_price=entry_price_dec,
         upsert_only=False,
+        incremental=incremental_fill,
     )
 
 
@@ -4968,6 +5091,7 @@ def _apply_entry_fill_projection_and_execution_fact(
     shares: Decimal,
     entry_price: Decimal,
     upsert_only: bool,
+    incremental: bool,
 ) -> None:
     from src.state.db import append_many_and_project, log_execution_fact
     from src.state.projection import upsert_position_current
@@ -4980,6 +5104,7 @@ def _apply_entry_fill_projection_and_execution_fact(
         else:
             append_many_and_project(conn, events, projection)
         position_id = str(getattr(position, "trade_id", "") or "")
+        command_id = str(command.get("command_id") or "")
         submitted_price = _float_or_none(command.get("price"))
         fill_price = _float_or_none(entry_price)
         filled_shares = _float_or_none(shares)
@@ -4987,10 +5112,14 @@ def _apply_entry_fill_projection_and_execution_fact(
         venue_status = "FILLED" if terminal_status == "filled" else "PARTIAL"
         log_execution_fact(
             conn,
-            intent_id=f"{position_id}:entry",
+            intent_id=(
+                f"{position_id}:entry:{command_id}"
+                if incremental
+                else f"{position_id}:entry"
+            ),
             position_id=position_id,
             decision_id=str(command.get("decision_id") or "") or None,
-            command_id=str(command.get("command_id") or "") or None,
+            command_id=command_id or None,
             order_role="entry",
             strategy_key=str(getattr(position, "strategy_key", "") or "") or None,
             posted_at=(

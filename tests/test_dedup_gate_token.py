@@ -1,6 +1,6 @@
 # Created: 2026-05-17
-# Last reused/audited: 2026-06-29
-# Authority basis: STRUCTURAL_PLAN.md v3 §2 PR-S3 + B_patch_plan.md
+# Last reused/audited: 2026-07-14
+# Authority basis: first-principles global marginal-increment execution repair
 #
 # Relationship test: when Module A (position_current DB state) shows a non-terminal
 # position for token X, Module B (evaluator anti-churn gate) must reject a new
@@ -14,6 +14,7 @@
 
 import sqlite3
 from datetime import datetime
+from types import SimpleNamespace
 
 import pytest
 from src.state.portfolio import (
@@ -27,6 +28,9 @@ from src.engine.evaluator import _layer7_dedup_fires
 from src.execution.executor import (
     _ENTRY_SAME_TOKEN_COOLDOWN_SECONDS,
     _ENTRY_TERMINAL_NO_FILL_REPRICE_COOLDOWN_SECONDS,
+    _abort_global_increment_admission,
+    _certified_global_increment_authorized,
+    _current_global_increment_wealth_component,
     _entry_duplicate_same_token_component,
     _entry_same_token_cooldown_component,
 )
@@ -42,6 +46,7 @@ def mem_db():
     Schema matches live NOT NULL constraints (direction, local_sequence, intent_kind).
     """
     conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
     conn.execute("""
         CREATE TABLE position_current (
             position_id TEXT PRIMARY KEY,
@@ -111,6 +116,20 @@ def mem_db():
             local_sequence INTEGER NOT NULL DEFAULT 1
         )
     """)
+    conn.execute("""
+        CREATE TABLE execution_fact (
+            intent_id TEXT PRIMARY KEY,
+            position_id TEXT NOT NULL,
+            command_id TEXT,
+            order_role TEXT NOT NULL,
+            filled_at TEXT,
+            posted_at TEXT,
+            fill_price REAL,
+            shares REAL,
+            terminal_exec_status TEXT,
+            venue_status TEXT
+        )
+    """)
     conn.commit()
     return conn
 
@@ -125,6 +144,7 @@ def _insert_position(
     *,
     shares=0.0,
     chain_shares=0.0,
+    cost_basis_usd=0.0,
 ):
     conn.execute(
         """INSERT INTO position_current
@@ -133,7 +153,7 @@ def _insert_position(
            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (
             position_id, phase, "trade-" + position_id, "mkt-1",
-            "London", "18°C", direction, shares, chain_shares, 0.0, token_id,
+            "London", "18°C", direction, shares, chain_shares, cost_basis_usd, token_id,
             no_token_id or TOKEN_X_NO, "order-" + position_id, "2026-05-17T22:13:38",
         ),
     )
@@ -613,6 +633,212 @@ def test_executor_duplicate_gate_does_not_let_stale_pending_hide_active_position
 
     assert result["allowed"] is False
     assert result["existing_position_id"] == "active-position"
+
+
+def test_executor_certified_global_increment_reuses_reconciled_position_but_not_open_command(
+    mem_db,
+):
+    _insert_position(
+        mem_db,
+        "active-position",
+        "active",
+        token_id=TOKEN_X_NO,
+        direction="buy_no",
+        no_token_id=TOKEN_X,
+        shares=24.0,
+        cost_basis_usd=16.08,
+    )
+    mem_db.execute(
+        """INSERT INTO venue_commands
+           (command_id, position_id, token_id, intent_kind, side, venue_order_id,
+            state, created_at, updated_at)
+           VALUES ('cmd-filled', 'active-position', ?, 'ENTRY', 'BUY',
+                   'order-filled', 'FILLED',
+                   '2026-07-14T05:00:00+00:00', '2026-07-14T05:01:00+00:00')""",
+        (TOKEN_X,),
+    )
+    mem_db.execute(
+        """INSERT INTO execution_fact
+           (intent_id, position_id, command_id, order_role, filled_at, posted_at,
+            fill_price, shares, terminal_exec_status, venue_status)
+           VALUES ('active-position:entry', 'active-position', 'cmd-filled',
+                   'entry', '2026-07-14T05:01:00+00:00',
+                   '2026-07-14T05:00:00+00:00', 0.67, 24.0, 'filled', 'FILLED')"""
+    )
+    mem_db.commit()
+
+    allowed = _entry_duplicate_same_token_component(
+        mem_db,
+        token_id=TOKEN_X,
+        candidate_position_id="fresh-candidate",
+        allow_reconciled_position_increment=True,
+    )
+
+    assert allowed["allowed"] is True
+    assert allowed["reason"] == "allowed_reconciled_position_increment"
+    assert allowed["increment_position_id"] == "active-position"
+
+    mem_db.execute(
+        "UPDATE position_current SET shares=25.0 WHERE position_id='active-position'"
+    )
+    drifted = _entry_duplicate_same_token_component(
+        mem_db,
+        token_id=TOKEN_X,
+        candidate_position_id="fresh-candidate",
+        allow_reconciled_position_increment=True,
+    )
+    assert drifted["allowed"] is False
+    assert drifted["reason"] == "position_economics_not_reconciled_for_increment"
+    mem_db.execute(
+        "UPDATE position_current SET shares=24.0 WHERE position_id='active-position'"
+    )
+
+    mem_db.execute(
+        """INSERT INTO venue_commands
+           (command_id, position_id, token_id, intent_kind, side, venue_order_id,
+            state, created_at, updated_at)
+           VALUES ('cmd-open', 'another-attempt', ?, 'ENTRY', 'BUY',
+                   'order-open', 'ACKED',
+                   '2026-07-14T05:02:00+00:00', '2026-07-14T05:02:01+00:00')""",
+        (TOKEN_X,),
+    )
+    mem_db.commit()
+
+    blocked = _entry_duplicate_same_token_component(
+        mem_db,
+        token_id=TOKEN_X,
+        candidate_position_id="fresh-candidate",
+        allow_reconciled_position_increment=True,
+    )
+
+    assert blocked["allowed"] is False
+    assert blocked["reason"] == "open_or_filled_entry_command_same_token"
+    assert blocked["existing_command_id"] == "cmd-open"
+
+    mem_db.execute("DELETE FROM venue_commands WHERE command_id = 'cmd-open'")
+    mem_db.execute(
+        """INSERT INTO venue_commands
+           (command_id, position_id, token_id, intent_kind, side, venue_order_id,
+            state, created_at, updated_at)
+           VALUES ('cmd-orphan-fill', 'missing-position', ?, 'ENTRY', 'BUY',
+                   'order-orphan-fill', 'FILLED',
+                   '2026-07-14T05:03:00+00:00', '2026-07-14T05:03:01+00:00')""",
+        (TOKEN_X,),
+    )
+    mem_db.commit()
+
+    orphan_fill = _entry_duplicate_same_token_component(
+        mem_db,
+        token_id=TOKEN_X,
+        candidate_position_id="fresh-candidate",
+        allow_reconciled_position_increment=True,
+    )
+
+    assert orphan_fill["allowed"] is False
+    assert orphan_fill["existing_command_id"] == "cmd-orphan-fill"
+
+
+def test_certified_global_increment_requires_materialized_existing_economics(mem_db):
+    _insert_position(
+        mem_db,
+        "zero-position",
+        "active",
+        token_id=TOKEN_X_NO,
+        direction="buy_no",
+        no_token_id=TOKEN_X,
+    )
+
+    blocked = _entry_duplicate_same_token_component(
+        mem_db,
+        token_id=TOKEN_X,
+        candidate_position_id="fresh-candidate",
+        allow_reconciled_position_increment=True,
+    )
+
+    assert blocked["allowed"] is False
+    assert blocked["reason"] == "open_position_same_token"
+    assert blocked["existing_position_id"] == "zero-position"
+
+
+def test_global_increment_authority_requires_exact_fok_wealth_bound():
+    economics = {
+        "global_optimum_semantics": "CUT_TIME_GLOBAL_OPTIMUM",
+        "global_actuation_identity": "actuation",
+        "global_economic_identity": "economics",
+        "global_universe_witness_identity": "universe",
+        "global_wealth_witness_identity": "wealth",
+        "global_wealth_economic_identity": "wealth-economics",
+        "global_selection_epoch_identity": "epoch",
+        "global_candidate_id": "candidate",
+        "global_target_shares": "19.25",
+        "global_max_spend_usd": "12.54",
+    }
+    component = {
+        "allowed": True,
+        "details": {"global_limit_bound_authorized": True},
+    }
+
+    assert _certified_global_increment_authorized(
+        {"qkernel_execution_economics": economics},
+        component,
+        order_type="FOK",
+    )
+    assert not _certified_global_increment_authorized(
+        {"qkernel_execution_economics": economics},
+        component,
+        order_type="GTC",
+    )
+    assert not _certified_global_increment_authorized(
+        {"qkernel_execution_economics": {**economics, "global_wealth_witness_identity": ""}},
+        component,
+        order_type="FOK",
+    )
+
+
+def test_global_increment_locked_wealth_recheck_matches_exact_economic_identity(
+    mem_db,
+    monkeypatch,
+):
+    import src.engine.global_auction_universe as universe
+
+    monkeypatch.setattr(
+        universe,
+        "current_portfolio_wealth_witness",
+        lambda *_args, **_kwargs: SimpleNamespace(economic_identity="wealth-economics"),
+    )
+    matched = _current_global_increment_wealth_component(
+        mem_db,
+        {"global_wealth_economic_identity": "wealth-economics"},
+    )
+    superseded = _current_global_increment_wealth_component(
+        mem_db,
+        {"global_wealth_economic_identity": "older-wealth"},
+    )
+
+    assert matched["allowed"] is True
+    assert superseded["allowed"] is False
+    assert superseded["reason"] == "wealth_economic_identity_superseded"
+
+
+def test_global_increment_binding_rejection_ends_writer_transaction(tmp_path):
+    db_path = tmp_path / "increment-binding.db"
+    first = sqlite3.connect(db_path, timeout=0.1)
+    second = sqlite3.connect(db_path, timeout=0.1)
+    try:
+        first.execute("CREATE TABLE admission_fact (value TEXT)")
+        first.commit()
+        first.execute("INSERT INTO admission_fact VALUES ('envelope')")
+        assert first.in_transaction is True
+
+        _abort_global_increment_admission(first)
+
+        assert first.in_transaction is False
+        assert first.execute("SELECT COUNT(*) FROM admission_fact").fetchone()[0] == 0
+        second.execute("INSERT INTO admission_fact VALUES ('second-writer')")
+        second.commit()
+    finally:
+        first.close()
+        second.close()
 
 
 def test_terminal_no_fill_no_exposure_still_obeys_same_token_cooldown(mem_db):

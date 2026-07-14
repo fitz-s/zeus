@@ -92,6 +92,7 @@ _QKERNEL_CURRENT_STATE_IDENTITY_FIELDS: tuple[str, ...] = (
     "global_economic_identity",
     "global_universe_witness_identity",
     "global_wealth_witness_identity",
+    "global_wealth_economic_identity",
     "global_selection_epoch_identity",
     "global_selection_cut_at",
     "global_selection_decision_at",

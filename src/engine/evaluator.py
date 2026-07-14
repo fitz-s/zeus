@@ -3286,11 +3286,12 @@ def _pending_entry_terminal_no_fill_cleared(conn, row) -> bool:
 
 
 def _has_same_token_blocking_open_db(conn, token_id: str) -> bool:
+    phase_placeholders = ",".join("?" for _ in _ENTRY_DEDUP_NON_OPEN_PHASES)
     rows = conn.execute(
-        """SELECT position_id, phase, order_id, shares, cost_basis_usd
+        f"""SELECT position_id, phase, order_id, shares, cost_basis_usd
             FROM position_current
             WHERE (token_id = ? OR no_token_id = ?)
-            AND phase NOT IN (?,?,?,?,?)""",
+            AND phase NOT IN ({phase_placeholders})""",
         (token_id, token_id, *_ENTRY_DEDUP_NON_OPEN_PHASES),
     ).fetchall()
     for row in rows:
