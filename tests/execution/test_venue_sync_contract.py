@@ -151,6 +151,29 @@ def test_capture_snapshot_reads_account_surfaces_from_v2_adapter_when_outer_clie
     assert snapshot.get_trades() == [{"id": "adapter-trade"}]
 
 
+def test_capture_snapshot_retries_transient_account_read_once():
+    from src.execution import venue_sync_contract as vsc
+
+    class Client:
+        def __init__(self):
+            self.trade_reads = 0
+
+        def get_open_orders(self):
+            return []
+
+        def get_trades(self):
+            self.trade_reads += 1
+            if self.trade_reads == 1:
+                raise ConnectionError("incomplete response body")
+            return [{"id": "confirmed-trade"}]
+
+    client = Client()
+    snapshot = vsc.capture_venue_read_snapshot(client, order_ids=[])
+
+    assert snapshot.get_trades() == [{"id": "confirmed-trade"}]
+    assert client.trade_reads == 2
+
+
 def test_capture_snapshot_preserves_point_order_timeout_as_unknown():
     from src.execution import venue_sync_contract as vsc
 

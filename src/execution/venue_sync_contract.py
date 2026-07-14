@@ -483,10 +483,16 @@ def capture_venue_read_snapshot(
             if not callable(fn):
                 continue
             saw_callable = True
-            try:
-                return list(fn() or [])
-            except Exception:  # noqa: BLE001 — try the next venue source if available.
-                logger.warning("venue_sync_contract: account read %s unavailable", method, exc_info=True)
+            for attempt in range(2):
+                try:
+                    return list(fn() or [])
+                except Exception:  # noqa: BLE001 — retry once, then try the next source.
+                    logger.warning(
+                        "venue_sync_contract: account read %s unavailable attempt=%d/2",
+                        method,
+                        attempt + 1,
+                        exc_info=True,
+                    )
         if saw_callable:
             return None
         return None
