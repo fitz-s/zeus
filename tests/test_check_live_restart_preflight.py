@@ -12,6 +12,8 @@ import subprocess
 import sys
 from datetime import datetime, timedelta, timezone
 
+import pytest
+
 from scripts import check_live_restart_preflight as preflight
 from src.decision import qlcb_reliability_guard as guard_mod
 from src.state.fact_revocation import (
@@ -1260,6 +1262,211 @@ def test_live_actionable_certificate_semantics_blocks_restart_relevant_qkernel_p
     assert result.evidence["risky_count"] == 1
     assert result.evidence["historical_risky_count"] == 0
     assert "exceeds forecast parent posterior" in result.evidence["risky"][0]["reason"]
+
+
+def _day0_current_state_binding_payloads():
+    identity = {
+        "decision_id": "decision-1",
+        "receipt_hash": "receipt-1",
+        "q_version": "q-version-1",
+        "sample_hash": "sample-1",
+        "current_state_identity_hash": "current-state-1",
+    }
+    payload = {
+        "event_type": "DAY0_EXTREME_UPDATED",
+        "_edli_q_source": "day0_remaining_day",
+        "selection_authority_applied": "qkernel_spine",
+        "q_live": 0.9,
+        "q_lcb_5pct": 0.8,
+        "qkernel_execution_economics": {
+            **identity,
+            "payoff_q_point": 0.9,
+            "payoff_q_lcb": 0.8,
+        },
+    }
+    belief = {
+        "qkernel_decision_id": identity["decision_id"],
+        "qkernel_receipt_hash": identity["receipt_hash"],
+        "qkernel_q_version": identity["q_version"],
+        "qkernel_sample_hash": identity["sample_hash"],
+        "qkernel_current_state_identity_hash": identity[
+            "current_state_identity_hash"
+        ],
+        "q_live": 0.9,
+        "q_lcb_5pct": 0.8,
+    }
+    return payload, belief
+
+
+def test_day0_remaining_day_parent_audit_uses_current_belief_not_seed_forecast():
+    payload, belief = _day0_current_state_binding_payloads()
+
+    reason = preflight._qkernel_parent_posterior_violation_reason(
+        forecast_conn=sqlite3.connect(":memory:"),
+        payload=payload,
+        forecast_parent_payload={},
+        belief_parent_payload=belief,
+    )
+
+    assert reason is None
+
+
+def test_day0_remaining_day_parent_audit_blocks_current_state_identity_drift():
+    payload, belief = _day0_current_state_binding_payloads()
+    belief["qkernel_sample_hash"] = "different-sample"
+
+    reason = preflight._qkernel_parent_posterior_violation_reason(
+        forecast_conn=None,
+        payload=payload,
+        forecast_parent_payload=None,
+        belief_parent_payload=belief,
+    )
+
+    assert reason == "day0 remaining-day sample_hash belief mismatch"
+
+
+@pytest.mark.parametrize(
+    "economics_value,belief_value,reason",
+    [
+        (1, "1", "day0 remaining-day decision_id binding missing"),
+        ("decision-1", "decision-2", "day0 remaining-day decision_id belief mismatch"),
+        ("", "", "day0 remaining-day decision_id binding missing"),
+    ],
+)
+def test_day0_remaining_day_parent_audit_requires_exact_string_identity(
+    economics_value,
+    belief_value,
+    reason,
+):
+    payload, belief = _day0_current_state_binding_payloads()
+    payload["qkernel_execution_economics"]["decision_id"] = economics_value
+    belief["qkernel_decision_id"] = belief_value
+
+    assert preflight._qkernel_parent_posterior_violation_reason(
+        forecast_conn=None,
+        payload=payload,
+        forecast_parent_payload=None,
+        belief_parent_payload=belief,
+    ) == reason
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+def test_qkernel_parent_index_rejects_duplicate_required_roles_order_independently(
+    reverse,
+):
+    rows = [
+        {
+            "child_certificate_id": "child-1",
+            "parent_role": "belief",
+            "parent_certificate_hash": "belief-1",
+            "edge_parent_certificate_type": "BeliefCertificate",
+            "required": 1,
+            "actual_parent_certificate_type": "BeliefCertificate",
+            "payload_json": json.dumps({"qkernel_decision_id": "decision-1"}),
+        },
+        {
+            "child_certificate_id": "child-1",
+            "parent_role": "belief",
+            "parent_certificate_hash": "belief-2",
+            "edge_parent_certificate_type": "BeliefCertificate",
+            "required": 1,
+            "actual_parent_certificate_type": "BeliefCertificate",
+            "payload_json": json.dumps({"qkernel_decision_id": "decision-2"}),
+        },
+        {
+            "child_certificate_id": "child-1",
+            "parent_role": "forecast_authority",
+            "parent_certificate_hash": "forecast-1",
+            "edge_parent_certificate_type": "ForecastAuthorityCertificate",
+            "required": 1,
+            "actual_parent_certificate_type": "ForecastAuthorityCertificate",
+            "payload_json": json.dumps({"posterior_identity_hash": "posterior-1"}),
+        },
+        {
+            "child_certificate_id": "child-1",
+            "parent_role": "forecast_authority",
+            "parent_certificate_hash": "forecast-2",
+            "edge_parent_certificate_type": "ForecastAuthorityCertificate",
+            "required": 1,
+            "actual_parent_certificate_type": "ForecastAuthorityCertificate",
+            "payload_json": json.dumps({"posterior_identity_hash": "posterior-2"}),
+        },
+    ]
+    if reverse:
+        rows.reverse()
+
+    forecast, belief, violations = preflight._index_qkernel_parent_payloads(rows)
+
+    assert forecast == {}
+    assert belief == {}
+    assert violations == {
+        "child-1": (
+            "duplicate required parent role: belief; "
+            "duplicate required parent role: forecast_authority"
+        )
+    }
+
+
+@pytest.mark.parametrize(
+    "corrupt_row",
+    [
+        {
+            "parent_certificate_hash": "dangling",
+            "edge_parent_certificate_type": "BeliefCertificate",
+            "required": 1,
+            "actual_parent_certificate_type": None,
+            "payload_json": None,
+        },
+        {
+            "parent_certificate_hash": "wrong-type",
+            "edge_parent_certificate_type": "ForecastAuthorityCertificate",
+            "required": 1,
+            "actual_parent_certificate_type": "ForecastAuthorityCertificate",
+            "payload_json": json.dumps({"qkernel_decision_id": "decision-1"}),
+        },
+    ],
+)
+@pytest.mark.parametrize("reverse", [False, True])
+def test_qkernel_parent_index_counts_dangling_and_wrong_type_duplicate_edges(
+    corrupt_row,
+    reverse,
+):
+    valid = {
+        "child_certificate_id": "child-1",
+        "parent_role": "belief",
+        "parent_certificate_hash": "belief-1",
+        "edge_parent_certificate_type": "BeliefCertificate",
+        "required": 1,
+        "actual_parent_certificate_type": "BeliefCertificate",
+        "payload_json": json.dumps({"qkernel_decision_id": "decision-1"}),
+    }
+    corrupt = {
+        "child_certificate_id": "child-1",
+        "parent_role": "belief",
+        **corrupt_row,
+    }
+    rows = [valid, corrupt]
+    if reverse:
+        rows.reverse()
+
+    forecast, belief, violations = preflight._index_qkernel_parent_payloads(rows)
+
+    assert forecast == {}
+    assert belief == {}
+    assert violations == {"child-1": "duplicate required parent role: belief"}
+
+
+def test_day0_replacement_parent_audit_still_requires_forecast_posterior_identity():
+    payload, _belief = _day0_current_state_binding_payloads()
+    payload["_edli_q_source"] = "replacement_0_1"
+
+    reason = preflight._qkernel_parent_posterior_violation_reason(
+        forecast_conn=sqlite3.connect(":memory:"),
+        payload=payload,
+        forecast_parent_payload={},
+    )
+
+    assert reason == "qkernel forecast_authority posterior_identity_hash missing"
 
 
 def test_live_actionable_certificate_semantics_allows_boot_auto_cancelable_invalid_pending_entry(

@@ -1110,6 +1110,8 @@ def _live_actionable_certificate_semantics_check() -> CheckResult:
         for item in items[:LIVE_ACTIONABLE_CERTIFICATE_SAMPLE_LIMIT]
     ][:LIVE_ACTIONABLE_CERTIFICATE_SAMPLE_LIMIT]
     forecast_parent_payload_by_child: dict[str, dict[str, Any]] = {}
+    belief_parent_payload_by_child: dict[str, dict[str, Any]] = {}
+    parent_edge_violation_by_child: dict[str, str] = {}
     try:
         conn = sqlite3.connect(f"file:{WORLD_DB}?mode=ro", uri=True)
         conn.row_factory = sqlite3.Row
@@ -1143,25 +1145,25 @@ def _live_actionable_certificate_semantics_check() -> CheckResult:
                 f"""
                 SELECT
                     edge.child_certificate_id,
+                    edge.parent_role,
+                    edge.parent_certificate_hash,
+                    edge.parent_certificate_type AS edge_parent_certificate_type,
+                    edge.required,
+                    parent.certificate_type AS actual_parent_certificate_type,
                     parent.payload_json
                   FROM decision_certificate_edges edge
-                  JOIN decision_certificates parent
+                  LEFT JOIN decision_certificates parent
                     ON parent.certificate_hash = edge.parent_certificate_hash
                  WHERE edge.child_certificate_id IN ({placeholders})
-                   AND edge.parent_role = 'forecast_authority'
-                   AND edge.parent_certificate_type = 'ForecastAuthorityCertificate'
+                   AND edge.parent_role IN ('forecast_authority', 'belief')
                 """,
                 tuple(certificate_ids),
             ).fetchall()
-            for parent_row in parent_rows:
-                try:
-                    parent_payload = json.loads(str(parent_row["payload_json"] or "{}"))
-                    if isinstance(parent_payload, dict):
-                        forecast_parent_payload_by_child[
-                            str(parent_row["child_certificate_id"] or "")
-                        ] = parent_payload
-                except json.JSONDecodeError:
-                    continue
+            (
+                forecast_parent_payload_by_child,
+                belief_parent_payload_by_child,
+                parent_edge_violation_by_child,
+            ) = _index_qkernel_parent_payloads(parent_rows)
     except sqlite3.Error as exc:
         evidence["error"] = str(exc)
         return CheckResult(
@@ -1205,10 +1207,18 @@ def _live_actionable_certificate_semantics_check() -> CheckResult:
             if not isinstance(payload, dict):
                 raise CertificateVerificationError("actionable payload must be object")
             _verify_actionable_payload(type("_PayloadCarrier", (), {"payload": payload})())
+            parent_edge_violation = parent_edge_violation_by_child.get(
+                str(row["certificate_id"] or "")
+            )
+            if parent_edge_violation is not None:
+                raise CertificateVerificationError(parent_edge_violation)
             posterior_reason = _qkernel_parent_posterior_violation_reason(
                 forecast_conn=forecast_conn,
                 payload=payload,
                 forecast_parent_payload=forecast_parent_payload_by_child.get(
+                    str(row["certificate_id"] or "")
+                ),
+                belief_parent_payload=belief_parent_payload_by_child.get(
                     str(row["certificate_id"] or "")
                 ),
             )
@@ -1355,11 +1365,82 @@ def _live_actionable_certificate_semantics_check() -> CheckResult:
     )
 
 
+def _index_qkernel_parent_payloads(
+    parent_rows: list[Any],
+) -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]], dict[str, str]]:
+    """Index the unique required qkernel parents without row-order authority."""
+
+    grouped: dict[tuple[str, str], list[Any]] = {}
+    for row in parent_rows:
+        child_id = str(row["child_certificate_id"] or "")
+        role = str(row["parent_role"] or "")
+        grouped.setdefault((child_id, role), []).append(row)
+
+    forecast: dict[str, dict[str, Any]] = {}
+    belief: dict[str, dict[str, Any]] = {}
+    violations: dict[str, list[str]] = {}
+    expected_type_by_role = {
+        "belief": "BeliefCertificate",
+        "forecast_authority": "ForecastAuthorityCertificate",
+    }
+    for (child_id, role), rows in sorted(grouped.items()):
+        if len(rows) != 1:
+            violations.setdefault(child_id, []).append(
+                f"duplicate required parent role: {role}"
+            )
+            continue
+        row = rows[0]
+        expected_type = expected_type_by_role[role]
+        if int(row["required"] or 0) != 1:
+            violations.setdefault(child_id, []).append(
+                f"required parent edge not required: {role}"
+            )
+            continue
+        if not str(row["parent_certificate_hash"] or "").strip() or not str(
+            row["actual_parent_certificate_type"] or ""
+        ).strip():
+            violations.setdefault(child_id, []).append(
+                f"missing required parent: {role}"
+            )
+            continue
+        if str(row["edge_parent_certificate_type"] or "") != expected_type:
+            violations.setdefault(child_id, []).append(
+                f"parent edge type mismatch: {role}"
+            )
+            continue
+        if str(row["actual_parent_certificate_type"] or "") != expected_type:
+            violations.setdefault(child_id, []).append(
+                f"parent certificate type mismatch: {role}"
+            )
+            continue
+        try:
+            payload = json.loads(str(row["payload_json"] or ""))
+        except (json.JSONDecodeError, TypeError):
+            payload = None
+        if not isinstance(payload, dict):
+            payload = None
+        if payload is None:
+            violations.setdefault(child_id, []).append(
+                f"malformed required parent payload: {role}"
+            )
+            continue
+        if role == "belief":
+            belief[child_id] = payload
+        else:
+            forecast[child_id] = payload
+    return (
+        forecast,
+        belief,
+        {child_id: "; ".join(reasons) for child_id, reasons in violations.items()},
+    )
+
+
 def _qkernel_parent_posterior_violation_reason(
     *,
     forecast_conn: sqlite3.Connection | None,
     payload: dict[str, Any],
     forecast_parent_payload: dict[str, Any] | None,
+    belief_parent_payload: dict[str, Any] | None = None,
 ) -> str | None:
     """Return a reason if a qkernel actionable exceeds its forecast parent.
 
@@ -1368,9 +1449,18 @@ def _qkernel_parent_posterior_violation_reason(
     For NO, the conservative bound is ``1 - YES_UCB``; never ``1 - YES_LCB``.
     """
 
-    economics = payload.get("qkernel_execution_economics")
     if str(payload.get("selection_authority_applied") or "") != "qkernel_spine":
         return None
+    economics = payload.get("qkernel_execution_economics")
+    if (
+        str(payload.get("event_type") or "") == "DAY0_EXTREME_UPDATED"
+        and str(payload.get("_edli_q_source") or "") == "day0_remaining_day"
+    ):
+        return _day0_current_state_parent_violation_reason(
+            payload=payload,
+            economics=economics,
+            belief_parent_payload=belief_parent_payload,
+        )
     if not isinstance(economics, dict):
         return None
     if forecast_conn is None or forecast_parent_payload is None:
@@ -1452,6 +1542,56 @@ def _qkernel_parent_posterior_violation_reason(
                 "qkernel selected probability exceeds forecast parent posterior:"
                 f"{field}={value:.9f}:bound={bound:.9f}:basis={bound_name}"
             )
+    return None
+
+
+def _day0_current_state_parent_violation_reason(
+    *,
+    payload: dict[str, Any],
+    economics: object,
+    belief_parent_payload: dict[str, Any] | None,
+) -> str | None:
+    """Bind remaining-day q to its current-state Belief parent, not a seed forecast."""
+
+    if not isinstance(economics, dict):
+        return "day0 remaining-day qkernel economics missing"
+    if not isinstance(belief_parent_payload, dict):
+        return "day0 remaining-day belief parent missing"
+    for economics_field, belief_field in (
+        ("decision_id", "qkernel_decision_id"),
+        ("receipt_hash", "qkernel_receipt_hash"),
+        ("q_version", "qkernel_q_version"),
+        ("sample_hash", "qkernel_sample_hash"),
+        ("current_state_identity_hash", "qkernel_current_state_identity_hash"),
+    ):
+        observed = economics.get(economics_field)
+        expected = belief_parent_payload.get(belief_field)
+        if (
+            not isinstance(observed, str)
+            or not observed.strip()
+            or not isinstance(expected, str)
+            or not expected.strip()
+        ):
+            return f"day0 remaining-day {economics_field} binding missing"
+        if observed != expected:
+            return f"day0 remaining-day {economics_field} belief mismatch"
+
+    for payload_field, economics_field, belief_field in (
+        ("q_live", "payoff_q_point", "q_live"),
+        ("q_lcb_5pct", "payoff_q_lcb", "q_lcb_5pct"),
+    ):
+        try:
+            values = (
+                float(payload[payload_field]),
+                float(economics[economics_field]),
+                float(belief_parent_payload[belief_field]),
+            )
+        except (KeyError, TypeError, ValueError):
+            return f"day0 remaining-day {payload_field} binding missing"
+        if any(not 0.0 <= value <= 1.0 for value in values):
+            return f"day0 remaining-day {payload_field} binding invalid"
+        if max(values) - min(values) > 1e-12:
+            return f"day0 remaining-day {payload_field} belief mismatch"
     return None
 
 
