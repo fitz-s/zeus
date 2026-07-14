@@ -26,7 +26,7 @@ ordinal mapping: `GREEN=0, DATA_DEGRADED=1, YELLOW=2, ORANGE=3, RED=4`.
 
 ### 1.2 Risk inputs to `tick()`
 
-RiskGuard's `tick()` computes 6 independent risk levels, then takes the max:
+RiskGuard's `tick()` computes current-state risk levels, then takes the max:
 
 | Input level | How computed |
 |-------------|-------------|
@@ -34,28 +34,26 @@ RiskGuard's `tick()` computes 6 independent risk levels, then takes the max:
 | `settlement_quality_level` | RED if settlement rows exist but none are metric-ready; YELLOW if any degraded rows |
 | `execution_quality_level` | YELLOW if fill rate < 0.3 with ≥10 observed entries |
 | `strategy_signal_level` | YELLOW if edge compression alerts or strategy tracker errors |
-| `daily_loss_level` | From `_trailing_loss_snapshot()` with 24h lookback |
-| `weekly_loss_level` | From `_trailing_loss_snapshot()` with 7-day lookback |
+| `collateral_identity_level` | RED for unresolved current collateral-identity mismatch |
+| `portfolio_consistency_level` | DATA_DEGRADED when the current canonical portfolio is not loadable consistently |
+| `unresolved_exposure_level` | DATA_DEGRADED for a current unbounded exposure obligation or unmapped blocking ChainOnlyFact |
 
-### 1.3 Trailing loss computation
+### 1.3 Trailing loss diagnostics
 
-`_trailing_loss_snapshot()` is the most complex risk input:
+`_realized_window_loss_diagnostic()` reports 24h and 7-day settled PnL for
+observability only. It does not return a `RiskLevel` and is not an input to
+`overall_level()`.
 
-1. Query `risk_state` table for reference row within `[now - lookback, now]`
-2. Validate reference row: `initial_bankroll` and `effective_bankroll` denote
-   the same wallet-equity object (within `$0.01` tolerance). `total_pnl` is
-   analytics/reporting evidence only and is not folded into bankroll truth.
-3. If no valid reference → `DATA_DEGRADED` (not GREEN, not RED)
-4. If valid reference found:
-   - `loss = max(0, reference_equity - current_equity)`
-   - `RED` if `loss > initial_bankroll × threshold_pct`
-   - `GREEN` otherwise
-5. If reference timestamp is stale (> 2h past the lookback cutoff):
-   - RED losses stay RED
-   - GREEN degrades to DATA_DEGRADED (unknown loss regime)
+1. Select authoritative settled outcomes within `[now - lookback, now]`.
+2. Exclude balance-only chain recovery rows from strategy attribution.
+3. Report `loss = max(0, -sum(realized_pnl))`, counts, window, and provenance.
+4. If settlement history is unavailable, mark the diagnostic degraded without
+   blocking a current-evidence action.
 
-Status values: `{"ok", "stale_reference", "insufficient_history",
-"inconsistent_history", "no_reference_row"}`.
+The first-principles boundary is current state: settled outcomes are already
+embedded in current wallet cash and positions. A trailing-window veto would
+count the same capital loss twice and reject a positive current incremental
+growth action because of a sunk outcome.
 
 ### 1.4 `get_current_level()` — fail-closed read
 
@@ -72,9 +70,9 @@ DATA_DEGRADED is a 5th level between GREEN and YELLOW in the ordinal.
 It means: "we cannot compute a reliable loss boundary, so act with
 YELLOW-equivalent safety without declaring an actual loss breach."
 
-Concrete trigger: trailing loss reference row is missing, stale, or
-inconsistent. This is distinct from YELLOW (which indicates an actual
-measured concern).
+Concrete triggers are missing current truth such as an unloadable canonical
+portfolio or unbounded current exposure. Missing retrospective PnL history is
+diagnostic degradation, not `DATA_DEGRADED` actuation.
 
 In `tick_with_portfolio()` (degraded entry point), if
 `portfolio.portfolio_loader_degraded=True`, the brier input level is
@@ -82,9 +80,10 @@ set to DATA_DEGRADED instead of GREEN.
 
 ### 1.6 Force exit review
 
-When `daily_loss_level == RED`, `force_exit_review = 1` is written to the
-`risk_state` row. Cycle runner reads this via `get_force_exit_review()` to
-block new entries. Fail-closed: `True` on any error.
+`force_exit_review` remains a compatibility column/read seam for rolling
+deployments, but new full RiskGuard ticks write `0`. Historical PnL does not
+create exit intent. Current `RiskLevel.RED` conditions still actuate the normal
+RED behavior through the single risk-level authority.
 
 **Key files**: `src/riskguard/risk_level.py`, `src/riskguard/riskguard.py`
 
@@ -271,7 +270,7 @@ After computing risk level, RiskGuard emits Discord alerts:
 | Any → RED | `alert_halt(failed_rules)` with per-input detail |
 | RED → GREEN | `alert_resume("rules cleared")` |
 | Any → YELLOW | Per-input `alert_warning()` for each YELLOW contributor |
-| Any → DATA_DEGRADED | `alert_warning()` with "DATA_DEGRADED: Missing trailing loss baseline" |
+| Any → DATA_DEGRADED | `alert_warning()` with the current-truth component that degraded |
 
 Alert failures are caught and logged — they do not affect risk level
 computation or persistence.

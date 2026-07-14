@@ -3,8 +3,8 @@
 # Authority basis: operator anti-silent-verdict directive 2026-06-09 — the
 #   RiskGuard daemon sat at "Tick complete: RED" for >24h (operator zero-trade)
 #   with NO per-component reason in the log. Diagnosis required a manual
-#   risk_state.db dive to learn the RED was a genuine realized-loss breach
-#   (daily_loss=10.44 > 7.53), NOT the suspected Brier corpse (Brier=0.2186=GREEN).
+#   risk_state.db dive. Historical-loss actuation is now retired, but every
+#   current-state component must still be explicit.
 #   Antibody: every tick must self-explain which component drove the overall level.
 """Relationship antibody: the per-tick component breakdown log must enumerate
 EVERY component fed to `overall_level` and name the load-bearing one(s).
@@ -37,16 +37,13 @@ def _details() -> dict[str, str]:
     return {name: f"detail-{name}" for name in RISK_COMPONENT_ORDER}
 
 
-def test_red_driven_by_daily_loss_names_only_that_component():
-    """The live 2026-06-09 scenario: RED from realized daily loss, Brier GREEN."""
-    levels = _levels(daily_loss=RiskLevel.RED)
+def test_red_driven_by_collateral_identity_names_only_that_component():
+    levels = _levels(collateral_identity=RiskLevel.RED)
     driven_by, breakdown = _component_breakdown(RiskLevel.RED, levels, _details())
 
-    assert driven_by == "daily_loss"
-    # Brier must show GREEN in the breakdown — proving the log would have
-    # exonerated the Brier corpse hypothesis at a glance.
+    assert driven_by == "collateral_identity"
     assert "brier=GREEN" in breakdown
-    assert "daily_loss=RED[detail-daily_loss]" in breakdown
+    assert "collateral_identity=RED[detail-collateral_identity]" in breakdown
     # Non-GREEN component carries its detail; GREEN ones do not.
     assert "brier=GREEN[" not in breakdown
 
@@ -74,13 +71,13 @@ def test_breakdown_enumerates_every_overall_level_component():
         "settlement_quality",
         "execution_quality",
         "strategy_signal",
-        "daily_loss",
-        "weekly_loss",
         "collateral_identity",
+        "portfolio_consistency",
+        "unresolved_exposure",
     }
 
 
 def test_multiple_components_at_overall_level_all_named():
-    levels = _levels(daily_loss=RiskLevel.RED, settlement_quality=RiskLevel.RED)
+    levels = _levels(collateral_identity=RiskLevel.RED, settlement_quality=RiskLevel.RED)
     driven_by, _ = _component_breakdown(RiskLevel.RED, levels, _details())
-    assert driven_by == "daily_loss,settlement_quality"  # sorted, comma-joined
+    assert driven_by == "collateral_identity,settlement_quality"  # sorted, comma-joined

@@ -84,9 +84,10 @@ blocking and read-only:
   deny allocation with structured reasons.
 - Kill switch reasons include manual operator halt, heartbeat lost, WS-gap
   threshold breach, unresolved submit-unknown count, and unresolved exchange
-  reconciliation finding count. Drawdown/realized-loss circuit breaking is
-  owned solely by `src/riskguard/riskguard.py`'s realized-settled-loss breaker
-  (governor.py's parallel drawdown breaker was retired R0-e 2026-07-08).
+  reconciliation finding count. Historical drawdown/realized-loss circuit
+  breakers are retired: settled outcomes are already embedded in current cash
+  and positions. `src/riskguard/riskguard.py` retains trailing settled-PnL
+  diagnostics, but they do not emit a RiskLevel or alter admission.
 - Maker/taker selection is behavior-changing: shallow books, near-resolution
   windows, or heartbeat states that only allow non-resting orders select `FOK`
   for executor submission; healthy/deep/far-from-close paths may rest as `GTC`.

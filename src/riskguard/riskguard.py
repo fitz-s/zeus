@@ -937,43 +937,34 @@ def _trailing_loss_snapshot(
     }
 
 
-def _realized_window_loss_snapshot(
+def _realized_window_loss_diagnostic(
     realized_exits: list[dict] | None,
     *,
     now: str,
     lookback: timedelta,
-    initial_bankroll: float,
-    threshold_pct: float,
     degraded: bool,
     source: str,
 ) -> dict:
-    """Daily/weekly loss breaker on REALIZED SETTLED PnL within the window.
+    """Describe trailing realized PnL without granting it actuation authority.
 
-    Operator directive 2026-06-08 ("settlement = only truth", iron rule #3):
-    the loss circuit-breaker must fire on realized settled losses, NOT on a
-    mark-to-market `effective_bankroll` delta. The retired delta breaker
-    conflated three economically-distinct moves into "loss":
+    Current cash, current positions, current executable prices, and unresolved
+    side effects fully describe the capital available to the next decision.
+    A settled loss is already embedded in that state. Applying a second
+    trailing-window veto double-counts sunk outcomes and can reject a positive
+    current delta-log-wealth action solely because of when an earlier outcome
+    settled.
+
+    The diagnostic remains settlement-based, not mark-to-market. The retired
+    delta calculation conflated three economically-distinct moves into "loss":
       (a) capital deployment            wallet cash -> open-position equity,
       (b) projection-pipeline reshuffle unprojected entry fill -> projected,
       (c) mark-to-market swings         of open prediction-market positions.
-    None of those is a realized loss; on 2026-06-08 (b) alone (the transient
-    `unprojected_entry_fill_equity` bucket reconciling 61->37) produced a
-    phantom -19.25 "daily loss" that held the daemon RED while realized PnL was
-    flat and total PnL had IMPROVED — halting 100% of trading (iron rule #1).
-
-    STRUCTURAL antibody (Fitz: make the wrong code unwritable): this function
-    accepts NO equity / effective_bankroll argument, so mark-to-market is
-    *unconstructable* as an input. The loss is `max(0, -sum(pnl))` over exits
-    whose settlement timestamp lies inside [now - lookback, now].
-
-    Fail-conservative: when realized settlement truth is `degraded`, return
-    DATA_DEGRADED (block new entries, preserve held positions) — never a silent
-    GREEN over an unmeasurable loss, never RED without an attested breach.
+    This function therefore returns no RiskLevel. Missing history degrades the
+    diagnostic only; it cannot block a current-evidence decision.
     """
     if degraded:
         return {
             "loss": None,
-            "level": RiskLevel.DATA_DEGRADED,
             "degraded": True,
             "status": "degraded:realized_settlement_unavailable",
             "source": source,
@@ -1003,9 +994,8 @@ def _realized_window_loss_snapshot(
         if exit_dt.tzinfo is None:
             exit_dt = exit_dt.replace(tzinfo=timezone.utc)
         if cutoff_dt <= exit_dt <= now_dt:
-            # Balance-only chain recovery proves that inventory existed, not
-            # that Zeus authorized its entry. Its settlement belongs in account
-            # PnL, but cannot convict the current strategy loss breaker.
+            # Balance-only chain recovery proves inventory, not a Zeus-authored
+            # strategy outcome, so exclude it from the strategy diagnostic.
             if exit_row.get("loss_eligible") is False:
                 pnl = _coerce_finite_float(exit_row.get("pnl"))
                 if pnl is not None:
@@ -1020,14 +1010,8 @@ def _realized_window_loss_snapshot(
             counted += 1
 
     loss = round(max(0.0, -windowed_pnl), 2)
-    level = (
-        RiskLevel.RED
-        if loss > float(initial_bankroll) * float(threshold_pct)
-        else RiskLevel.GREEN
-    )
     return {
         "loss": loss,
-        "level": level,
         "degraded": False,
         "status": "ok" if counted else "no_settlements_in_window",
         "source": source,
@@ -1061,9 +1045,9 @@ RISK_COMPONENT_ORDER: tuple[str, ...] = (
     "settlement_quality",
     "execution_quality",
     "strategy_signal",
-    "daily_loss",
-    "weekly_loss",
     "collateral_identity",
+    "portfolio_consistency",
+    "unresolved_exposure",
 )
 
 
@@ -2675,36 +2659,29 @@ def _tick_once() -> RiskLevel:
             portfolio=portfolio,
         )
         current_total_value = account_equity["effective_equity_usd"]
-        # Loss breaker fires on REALIZED settled PnL in the window, NOT on a
-        # mark-to-market effective_bankroll delta (operator directive
-        # 2026-06-08, "settlement = only truth"). `current_total_value` /
-        # effective_bankroll are still recorded below for observability, but the
-        # LOSS LEVEL decision must not read them — see
-        # `_realized_window_loss_snapshot` for the full rationale and the
-        # 2026-06-08 phantom-RED root cause.
+        # Trailing realized loss is observability only. Settled outcomes are
+        # already embedded in current cash and positions; using the same loss a
+        # second time as an admission veto would reject current positive-growth
+        # actions based on sunk outcomes.
         loss_source = f"realized_settlement_window:{realized_truth_source}"
-        daily_loss_snapshot = _realized_window_loss_snapshot(
+        daily_loss_snapshot = _realized_window_loss_diagnostic(
             realized_exits,
             now=now,
             lookback=timedelta(hours=24),
-            initial_bankroll=current_bankroll_usd,
-            threshold_pct=float(thresholds["max_daily_loss_pct"]),
             degraded=realized_degraded,
             source=loss_source,
         )
-        weekly_loss_snapshot = _realized_window_loss_snapshot(
+        weekly_loss_snapshot = _realized_window_loss_diagnostic(
             realized_exits,
             now=now,
             lookback=timedelta(days=7),
-            initial_bankroll=current_bankroll_usd,
-            threshold_pct=float(thresholds["max_weekly_loss_pct"]),
             degraded=realized_degraded,
             source=loss_source,
         )
         daily_loss = daily_loss_snapshot["loss"]
         weekly_loss = weekly_loss_snapshot["loss"]
-        daily_loss_level = daily_loss_snapshot["level"]
-        weekly_loss_level = weekly_loss_snapshot["level"]
+        daily_loss_level = RiskLevel.GREEN
+        weekly_loss_level = RiskLevel.GREEN
         collateral_identity_level = _collateral_identity_level(zeus_conn)
         portfolio_consistency_level = _portfolio_consistency_level(
             portfolio_truth.get("consistency_lock", "pass")
@@ -2726,15 +2703,14 @@ def _tick_once() -> RiskLevel:
             settlement_quality_level,
             execution_quality_level,
             strategy_signal_level,
-            daily_loss_level,
-            weekly_loss_level,
             collateral_identity_level,
             portfolio_consistency_level,
             unresolved_exposure_level,
         )
 
-        # B5: force_exit_review when daily loss reaches RED
-        force_exit_review = 1 if daily_loss_level == RiskLevel.RED else 0
+        # Legacy column retained for schema compatibility. Historical outcomes
+        # no longer create exit intent or block current positive-growth entries.
+        force_exit_review = 0
 
         risk_conn.execute("""
             INSERT INTO risk_state (level, brier, accuracy, win_rate, details_json, checked_at, force_exit_review)
@@ -2766,6 +2742,7 @@ def _tick_once() -> RiskLevel:
                 "unresolved_exposure_level": unresolved_exposure_level.value,
                 "daily_loss_level": daily_loss_level.value,
                 "weekly_loss_level": weekly_loss_level.value,
+                "trailing_loss_decision_role": "diagnostic_only",
                 "daily_loss": None if daily_loss is None else round(float(daily_loss), 2),
                 "weekly_loss": None if weekly_loss is None else round(float(weekly_loss), 2),
                 "daily_loss_status": daily_loss_snapshot["status"],
@@ -2775,12 +2752,8 @@ def _tick_once() -> RiskLevel:
                 "daily_loss_reference": daily_loss_snapshot["reference"],
                 "weekly_loss_reference": weekly_loss_snapshot["reference"],
                 "initial_bankroll": round(current_bankroll_usd, 2),
-                # Cutover-day guard (followup_design.md §6.2, §7 hazard #3):
-                # this provenance marker tells `_trailing_loss_reference` to skip
-                # pre-cutover rows whose `effective_bankroll` came from retired
-                # config-literal capital.
-                # New rows carry the concrete live truth source; old rows have
-                # no `bankroll_truth_source` field at all → filtered out.
+                # Preserve concrete live bankroll provenance for current-state
+                # sizing and for compatibility with older risk rows.
                 "bankroll_truth_source": bankroll_of_record.source,
                 "bankroll_truth": {
                     "value_usd": round(current_bankroll_usd, 2),
@@ -2795,11 +2768,8 @@ def _tick_once() -> RiskLevel:
                     "positions_read_verdict": str(
                         getattr(bankroll_of_record, "positions_read_verdict", "unknown")
                     ),
-                    # Dual-bankroll (2026-06-09 P1): value_usd above is the
-                    # LOSS-THRESHOLD base (holds the blip_held phantom). This is
-                    # the conservative NEW-ENTRY sizing base the event_reactor /
-                    # replay consumers use; under blip_held it excludes the
-                    # phantom so Kelly cannot size off possibly-vanished equity.
+                    # Conservative NEW-ENTRY sizing base. Under blip_held it
+                    # excludes phantom equity so Kelly cannot size from it.
                     "equity_for_new_entry_sizing_usd": (
                         None
                         if getattr(bankroll_of_record, "equity_for_new_entry_sizing_usd", None) is None
@@ -2902,32 +2872,6 @@ def _tick_once() -> RiskLevel:
                         "threshold": 1,
                         "detail": f"storage_source={settlement_storage_source}",
                     })
-                if daily_loss_level == RiskLevel.RED:
-                    _dref = daily_loss_snapshot.get("reference") or {}
-                    failed_rules.append({
-                        "name": "daily_loss_pct",
-                        "value": round(float(daily_loss or 0.0), 4),
-                        "threshold": thresholds["max_daily_loss_pct"],
-                        "detail": (
-                            "realized_settled_loss_24h="
-                            f"{float(daily_loss or 0.0):.2f} "
-                            f"(n={_dref.get('settlement_count', 0)}, "
-                            f"window_pnl={_dref.get('realized_pnl_window', 0.0)})"
-                        ),
-                    })
-                if weekly_loss_level == RiskLevel.RED:
-                    _wref = weekly_loss_snapshot.get("reference") or {}
-                    failed_rules.append({
-                        "name": "weekly_loss_pct",
-                        "value": round(float(weekly_loss or 0.0), 4),
-                        "threshold": thresholds["max_weekly_loss_pct"],
-                        "detail": (
-                            "realized_settled_loss_7d="
-                            f"{float(weekly_loss or 0.0):.2f} "
-                            f"(n={_wref.get('settlement_count', 0)}, "
-                            f"window_pnl={_wref.get('realized_pnl_window', 0.0)})"
-                        ),
-                    })
                 if collateral_identity_level == RiskLevel.RED:
                     failed_rules.append({
                         "name": "collateral_identity",
@@ -2958,10 +2902,6 @@ def _tick_once() -> RiskLevel:
                 if strategy_signal_level == RiskLevel.YELLOW:
                     alert_warning("Strategy signal", float(len(edge_compression_alerts)), 1.0, detail=strategy_tracker_error or "edge_compression_alerts_present")
             elif level == RiskLevel.DATA_DEGRADED:
-                if daily_loss_level == RiskLevel.DATA_DEGRADED:
-                    alert_warning("Daily Loss Monitoring", 0.0, 0.0, detail="DATA_DEGRADED: Missing trailing loss baseline")
-                if weekly_loss_level == RiskLevel.DATA_DEGRADED:
-                    alert_warning("Weekly Loss Monitoring", 0.0, 0.0, detail="DATA_DEGRADED: Missing trailing loss baseline")
                 if portfolio_consistency_level == RiskLevel.DATA_DEGRADED:
                     alert_warning(
                         "Portfolio Consistency",
@@ -2989,10 +2929,9 @@ def _tick_once() -> RiskLevel:
             "settlement_quality": settlement_quality_level,
             "execution_quality": execution_quality_level,
             "strategy_signal": strategy_signal_level,
-            "daily_loss": daily_loss_level,
-            "weekly_loss": weekly_loss_level,
             "collateral_identity": collateral_identity_level,
             "portfolio_consistency": portfolio_consistency_level,
+            "unresolved_exposure": unresolved_exposure_level,
         }
         component_detail = {
             "brier": f"score={b_score:.4f} (n={len(p_forecasts)}, red>={thresholds['brier_red']})",
@@ -3009,26 +2948,13 @@ def _tick_once() -> RiskLevel:
                 f"edge_compression_alerts={len(edge_compression_alerts)} "
                 f"tracker_error={'yes' if strategy_tracker_error else 'no'}"
             ),
-            "daily_loss": (
-                f"realized_24h_loss={float(daily_loss or 0.0):.2f} "
-                f"threshold={round(current_bankroll_usd * float(thresholds['max_daily_loss_pct']), 2)} "
-                f"({round(float(thresholds['max_daily_loss_pct']) * 100, 1)}%x"
-                f"${round(current_bankroll_usd, 2)} "
-                f"base_verdict={getattr(bankroll_of_record, 'positions_read_verdict', 'unknown')}) "
-                f"status={daily_loss_snapshot['status']} "
-                f"n={(daily_loss_snapshot.get('reference') or {}).get('settlement_count', 0)}"
-            ),
-            "weekly_loss": (
-                f"realized_7d_loss={float(weekly_loss or 0.0):.2f} "
-                f"threshold={round(current_bankroll_usd * float(thresholds['max_weekly_loss_pct']), 2)} "
-                f"status={weekly_loss_snapshot['status']}"
-            ),
             "collateral_identity": "unresolved_collateral_identity_mismatch_finding",
             "portfolio_consistency": (
                 f"consistency_lock={portfolio_truth.get('consistency_lock', 'pass')} "
                 f"unloadable={portfolio_truth.get('unloadable_count', 0)} "
                 f"excluded_duplicate={portfolio_truth.get('excluded_duplicate_count', 0)}"
             ),
+            "unresolved_exposure": "unbounded current exposure truth",
         }
         driving, breakdown = _component_breakdown(level, component_levels, component_detail)
         log_fn = logger.warning if level != RiskLevel.GREEN else logger.info
@@ -3131,23 +3057,14 @@ def tick_with_portfolio(portfolio: PortfolioState) -> RiskLevel:
     try:
         init_risk_db(risk_conn)
 
-        now = datetime.now(timezone.utc).isoformat()
-
         if portfolio.authority != "canonical_db":
             logger.warning(
                 "tick_with_portfolio: portfolio authority=%r (degraded) — new-entry paths suppressed",
                 portfolio.authority,
             )
 
-        thresholds = settings["riskguard"]
-        settlement_rows = query_authoritative_settlement_rows(zeus_conn, limit=50)
-
-        # P0-A second callsite (followup_design.md §2.4, §7 hazard #2):
-        # tick_with_portfolio is the graceful-degradation entry used by callers
-        # that have already loaded a portfolio. Trailing-loss math here was
-        # reading `portfolio.bankroll` (= config-constant fiction). Same DEF A
-        # rewire as tick(): live bankroll truth for both equity AND threshold base,
-        # no PnL math added. Fail-closed at DATA_DEGRADED if bankroll truth is unreachable.
+        # Current wallet truth remains required. Historical loss windows do not:
+        # a settled loss is already reflected in this balance.
         bankroll_of_record = _bankroll_of_record_for_riskguard()
         if bankroll_of_record is None:
             logger.error(
@@ -3155,44 +3072,6 @@ def tick_with_portfolio(portfolio: PortfolioState) -> RiskLevel:
             )
             return RiskLevel.DATA_DEGRADED
 
-        current_bankroll_usd = float(bankroll_of_record.value_usd)
-        current_equity = _riskguard_account_equity(
-            zeus_conn,
-            wallet_cash_usd=current_bankroll_usd,
-            portfolio=portfolio,
-        )["effective_equity_usd"]
-        initial_bankroll = current_bankroll_usd
-
-        # Realized-settled-PnL loss breaker (operator directive 2026-06-08) —
-        # same basis as tick(). Mark-to-market `current_equity` is computed above
-        # for the degraded-path equity attestation but must NOT decide the loss
-        # level (see `_realized_window_loss_snapshot`).
-        realized_exits, realized_truth_source, realized_degraded = _current_mode_realized_exits(
-            zeus_conn,
-            settlement_rows=settlement_rows,
-        )
-        loss_source = f"realized_settlement_window:{realized_truth_source}"
-        daily_loss_snapshot = _realized_window_loss_snapshot(
-            realized_exits,
-            now=now,
-            lookback=timedelta(hours=24),
-            initial_bankroll=initial_bankroll,
-            threshold_pct=float(thresholds["max_daily_loss_pct"]),
-            degraded=realized_degraded,
-            source=loss_source,
-        )
-        weekly_loss_snapshot = _realized_window_loss_snapshot(
-            realized_exits,
-            now=now,
-            lookback=timedelta(days=7),
-            initial_bankroll=initial_bankroll,
-            threshold_pct=float(thresholds["max_weekly_loss_pct"]),
-            degraded=realized_degraded,
-            source=loss_source,
-        )
-
-        daily_loss_level = daily_loss_snapshot["level"]
-        weekly_loss_level = weekly_loss_snapshot["level"]
         collateral_identity_level = _collateral_identity_level(zeus_conn)
 
         level = overall_level(
@@ -3200,8 +3079,6 @@ def tick_with_portfolio(portfolio: PortfolioState) -> RiskLevel:
             RiskLevel.GREEN,
             RiskLevel.GREEN,
             RiskLevel.GREEN,
-            daily_loss_level,
-            weekly_loss_level,
             collateral_identity_level,
         )
 
@@ -3288,12 +3165,11 @@ def get_current_level() -> RiskLevel:
 
 
 def get_force_exit_review() -> bool:
-    """Read force_exit_review flag from most recent risk_state row.
+    """Read the legacy force_exit_review compatibility field.
 
-    B5: When daily_loss_level reaches RED, this returns True so that
-    cycle_runner can block new entries. (Phase 1 scope: entry-blocking;
-    forced exit sweep for active positions is a Phase 2 item.)
-    Fail-closed: returns True on any error (conservative).
+    New full ticks write zero because trailing realized loss is diagnostic-only.
+    Reading remains fail-closed so an unreadable control surface cannot silently
+    weaken a row written by an older loaded process during deployment.
     """
     conn = None
     try:

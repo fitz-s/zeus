@@ -324,7 +324,7 @@ def test_riskguard_recent_exits_skip_settlement_rows_without_metric_authority():
 
 def test_loss_breaker_excludes_balance_only_chain_recovery_but_keeps_system_loss():
     now = "2026-07-10T15:00:00+00:00"
-    snapshot = riskguard_module._realized_window_loss_snapshot(
+    snapshot = riskguard_module._realized_window_loss_diagnostic(
         [
             {
                 "exited_at": "2026-07-10T14:00:00+00:00",
@@ -339,21 +339,19 @@ def test_loss_breaker_excludes_balance_only_chain_recovery_but_keeps_system_loss
         ],
         now=now,
         lookback=timedelta(hours=24),
-        initial_bankroll=1230.43,
-        threshold_pct=0.08,
         degraded=False,
         source="test",
     )
 
-    assert snapshot["level"] == RiskLevel.GREEN
+    assert "level" not in snapshot
     assert snapshot["loss"] == pytest.approx(8.56)
     assert snapshot["reference"]["settlement_count"] == 1
     assert snapshot["reference"]["excluded_unowned_settlement_count"] == 1
     assert snapshot["reference"]["excluded_unowned_realized_pnl"] == pytest.approx(-186.72)
 
 
-def test_loss_breaker_still_red_for_system_authorized_loss():
-    snapshot = riskguard_module._realized_window_loss_snapshot(
+def test_system_authorized_loss_remains_diagnostic_only():
+    snapshot = riskguard_module._realized_window_loss_diagnostic(
         [
             {
                 "exited_at": "2026-07-10T14:30:00+00:00",
@@ -363,13 +361,11 @@ def test_loss_breaker_still_red_for_system_authorized_loss():
         ],
         now="2026-07-10T15:00:00+00:00",
         lookback=timedelta(hours=24),
-        initial_bankroll=1000.0,
-        threshold_pct=0.08,
         degraded=False,
         source="test",
     )
 
-    assert snapshot["level"] == RiskLevel.RED
+    assert "level" not in snapshot
     assert snapshot["loss"] == pytest.approx(100.0)
 
 
