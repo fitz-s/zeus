@@ -303,6 +303,45 @@ def test_live_submit_pause_gates_ignore_trade_legacy_archived_control_override()
         trade_conn.close()
 
 
+def test_live_submit_pause_gate_refreshes_a_stale_inline_pause(monkeypatch):
+    """An expired pause in a pinned transaction cannot veto current entry truth."""
+
+    import src.state.db as state_db
+    from src.engine.event_reactor_adapter import _entry_pause_blocks_live_submit
+
+    inline = object()
+
+    class FreshWorld:
+        def close(self):
+            pass
+
+    fresh = FreshWorld()
+    seen = []
+
+    def _state(conn):
+        seen.append(conn)
+        if conn is inline:
+            return {
+                "status": "ok",
+                "entries_paused": True,
+                "entries_pause_reason": "deploy_live_restart_guard",
+                "entries_pause_issued_by": "control_plane",
+            }
+        assert conn is fresh
+        return {
+            "status": "ok",
+            "entries_paused": False,
+            "entries_pause_reason": None,
+            "entries_pause_issued_by": None,
+        }
+
+    monkeypatch.setattr(state_db, "get_world_connection", lambda: fresh)
+    monkeypatch.setattr(state_db, "query_control_override_state", _state)
+
+    assert _entry_pause_blocks_live_submit(inline) is None
+    assert seen == [inline, fresh]
+
+
 # ---------------------------------------------------------------------------
 # Test 5: operator can override a system_auto_pause row
 # ---------------------------------------------------------------------------

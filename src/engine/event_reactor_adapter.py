@@ -3519,11 +3519,15 @@ def _entry_pause_blocks_live_submit(conn: sqlite3.Connection | None) -> str | No
     try:
         from src.state.db import get_world_connection, query_control_override_state
 
+        inline_reason = None
         if conn is not None:
             inline_state = query_control_override_state(conn)
-            inline_reason = _pause_reason_from_state(inline_state)
-            if inline_reason is not None and _trusted_inline_control_pause_state(inline_state):
-                return inline_reason
+            candidate_inline_reason = _pause_reason_from_state(inline_state)
+            if (
+                candidate_inline_reason is not None
+                and _trusted_inline_control_pause_state(inline_state)
+            ):
+                inline_reason = candidate_inline_reason
 
         world_conn = get_world_connection()
         try:
@@ -3531,9 +3535,11 @@ def _entry_pause_blocks_live_submit(conn: sqlite3.Connection | None) -> str | No
         finally:
             world_conn.close()
     except Exception as exc:  # noqa: BLE001
-        return f"entries_pause_control_unreadable:{type(exc).__name__}"
+        return inline_reason or f"entries_pause_control_unreadable:{type(exc).__name__}"
     if state.get("status") != "ok":
-        return f"entries_pause_control_unreadable:{state.get('status', 'unknown')}"
+        return inline_reason or (
+            f"entries_pause_control_unreadable:{state.get('status', 'unknown')}"
+        )
     return _pause_reason_from_state(state)
 
 
