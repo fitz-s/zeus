@@ -5262,7 +5262,9 @@ def test_preflight_blocks_pending_exit_with_real_exit_command(monkeypatch, tmp_p
     assert pending["evidence"]["risky"][0]["position_id"] == "real-exit-pos"
 
 
-def test_preflight_blocks_active_position_with_stale_live_belief(monkeypatch, tmp_path):
+def test_preflight_reports_stale_live_belief_without_blocking_restart(
+    monkeypatch, tmp_path
+):
     trade_db, forecast_db, _state_dir = _patch_paths(monkeypatch, tmp_path)
     trade = _init_trade_db(trade_db)
     forecasts = _init_forecast_db(forecast_db)
@@ -5299,10 +5301,16 @@ def test_preflight_blocks_active_position_with_stale_live_belief(monkeypatch, tm
 
     result = preflight.evaluate()
 
-    assert result["ok"] is False
     belief = next(c for c in result["checks"] if c["name"] == "held_position_belief_coverage")
     assert belief["ok"] is False
+    assert belief["restart_blocking"] is False
     assert belief["evidence"]["risky"][0]["risk"] == "stale_live_belief"
+    assert "held_position_belief_coverage" not in {
+        check["name"] for check in result["blockers"]
+    }
+    assert "held_position_belief_coverage" in {
+        check["name"] for check in result["entry_blockers"]
+    }
 
 
 def test_non_day0_monitor_projection_does_not_cover_stale_live_belief(monkeypatch, tmp_path):
@@ -5884,7 +5892,9 @@ def test_preflight_treats_settled_active_position_as_harvester_recovery(monkeypa
     )
 
 
-def test_preflight_blocks_settled_active_position_when_harvester_disabled(monkeypatch, tmp_path):
+def test_preflight_reports_disabled_harvester_without_blocking_restart(
+    monkeypatch, tmp_path
+):
     trade_db, forecast_db, state_dir = _patch_paths(monkeypatch, tmp_path)
     _write_live_plist_with_env(
         preflight.LIVE_TRADING_PLIST_PATH,
@@ -5952,10 +5962,16 @@ def test_preflight_blocks_settled_active_position_when_harvester_disabled(monkey
 
     result = preflight.evaluate()
 
-    assert result["ok"] is False
     belief = next(c for c in result["checks"] if c["name"] == "held_position_belief_coverage")
     assert belief["ok"] is False
+    assert belief["restart_blocking"] is False
     assert belief["evidence"]["risky"][0]["risk"] == "settled_position_harvester_disabled"
+    assert "held_position_belief_coverage" not in {
+        check["name"] for check in result["blockers"]
+    }
+    assert "held_position_belief_coverage" in {
+        check["name"] for check in result["entry_blockers"]
+    }
 
 
 def test_preflight_blocks_open_position_when_only_irrelevant_sidecar_rows_are_fresh(monkeypatch, tmp_path):

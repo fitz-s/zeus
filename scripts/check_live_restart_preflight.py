@@ -5700,6 +5700,7 @@ def _belief_check(rows: list[sqlite3.Row]) -> CheckResult:
             "harvester_live_enabled": harvester_enabled,
             "harvester_evidence": harvester_evidence,
         },
+        restart_blocking=False,
     )
 
 
