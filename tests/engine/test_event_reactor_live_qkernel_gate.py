@@ -1506,6 +1506,37 @@ def test_global_actuation_current_band_can_tighten_served_bound(side):
 
 
 @pytest.mark.parametrize("side", ("YES", "NO"))
+def test_global_actuation_legacy_served_bound_is_diagnostic_only(side):
+    """A historical served shrink cannot veto the current source-clock band."""
+
+    cert = _current_qkernel_cert(side=side)
+    cert.update(
+        payoff_q_point=0.80,
+        payoff_q_lcb=0.75,
+        pre_qkernel_q_lcb_5pct=0.40,
+        cost=0.40,
+        edge_lcb=0.35,
+    )
+    decision = _global_decision(shares="10", cost="4", q="0.70")
+    witness = SimpleNamespace(
+        sample_matrix_identity=f"global-current-no-legacy-veto-{side.lower()}",
+        yes_q_samples=SimpleNamespace(shape=(400, 2)),
+        band_alpha=0.05,
+    )
+
+    current = era._global_current_state_execution_economics(
+        cert,
+        decision=decision,
+        witness=witness,
+    )
+
+    assert current["global_current_served_payoff_q_lcb"] == pytest.approx(0.40)
+    assert current["payoff_q_lcb"] == pytest.approx(0.70)
+    assert current["global_current_effective_payoff_q_lcb"] == pytest.approx(0.70)
+    assert era._qkernel_current_state_solve_economics(current) is True
+
+
+@pytest.mark.parametrize("side", ("YES", "NO"))
 def test_global_actuation_reauctions_sample_band_above_served_point(side):
     """A coherent sample tail cannot loosen the separately served point bound."""
 

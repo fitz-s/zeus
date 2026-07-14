@@ -6941,7 +6941,7 @@ def _global_current_state_execution_economics(
     decision: object,
     witness: object,
 ) -> dict[str, Any]:
-    """Bind actuation to the current global band without loosening served belief."""
+    """Bind actuation to the current source-clock band and order certificate."""
 
     try:
         shares = Decimal(str(getattr(decision, "shares", "0") or "0"))
@@ -7066,9 +7066,12 @@ def _global_current_state_execution_economics(
         prior_payoff_lcb = current_band_payoff_q_lcb
     if not served_lcb.is_finite():
         raise ValueError("GLOBAL_CURRENT_STATE_SERVED_LCB_INVALID")
+    # ``served_lcb`` is pre-W3 provenance and may include historical coverage
+    # shrinkage.  Keep it in the certificate for diagnosis, but source-clock
+    # execution is governed by the current joint witness, current qkernel bound,
+    # and immutable point probability only.
     payoff_q_lcb = min(
         current_band_payoff_q_lcb,
-        served_lcb,
         prior_payoff_lcb,
         point_q,
     )
