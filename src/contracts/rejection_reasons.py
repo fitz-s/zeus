@@ -112,6 +112,13 @@ class RejectionReason(str, Enum):
         RejectionCategory.HONEST_MARKET,
         "Market family topology unparseable/invalid as listed by the venue.",
     )
+    GLOBAL_NOT_SELECTED = (
+        "GLOBAL_NOT_SELECTED",
+        RejectionCategory.HONEST_MARKET,
+        "A complete same-epoch capital auction selected a strictly better action. "
+        "The losing carrier is consumed; fresh belief or price evidence creates a "
+        "new event and a new comparison.",
+    )
 
     # ----- HONEST_DATA ---------------------------------------------------
     LIVE_INFERENCE_INPUTS_MISSING = (
@@ -201,6 +208,12 @@ class RejectionReason(str, Enum):
         RejectionCategory.HONEST_DATA,
         "Replacement-forecast hook reported blocking reason codes (e.g. switch "
         "readiness missing).",
+    )
+    GLOBAL_FAMILY_INELIGIBLE = (
+        "GLOBAL_FAMILY_INELIGIBLE",
+        RejectionCategory.HONEST_DATA,
+        "The family's current probability or source bundle is not yet admissible. "
+        "The same event remains retryable until that current substrate advances.",
     )
 
     # ----- DESIGNED_GATE -------------------------------------------------
@@ -297,6 +310,12 @@ class RejectionReason(str, Enum):
         "MARKET_CHANNEL_EVENT_NO_DIRECT_STALE_TRADE",
         RejectionCategory.DESIGNED_GATE,
         "Stale market-channel trade events never trigger direct trading.",
+    )
+    GLOBAL_DUPLICATE_FAMILY_CARRIER = (
+        "GLOBAL_DUPLICATE_FAMILY_CARRIER",
+        RejectionCategory.DESIGNED_GATE,
+        "A same-epoch carrier already owns this family. Consuming the duplicate "
+        "preserves one family decision without suppressing future fresh events.",
     )
     NO_SUBMIT_PROOF_FALSE = (
         "NO_SUBMIT_PROOF_FALSE",
