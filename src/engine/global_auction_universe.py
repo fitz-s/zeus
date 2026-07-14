@@ -1564,12 +1564,14 @@ def _row_dict(cur: sqlite3.Cursor, row: object) -> dict[str, object]:
 
 
 def _position_token(position: object) -> str:
-    direction = str(getattr(position, "direction", "") or "").lower()
-    token = (
-        getattr(position, "no_token_id", "")
-        if direction == "buy_no"
-        else getattr(position, "token_id", "")
-    )
+    raw_direction = getattr(position, "direction", "")
+    direction = str(getattr(raw_direction, "value", raw_direction) or "").lower()
+    if direction == "buy_no":
+        token = getattr(position, "no_token_id", "")
+    elif direction == "buy_yes":
+        token = getattr(position, "token_id", "")
+    else:
+        return ""
     return str(token or "").strip()
 
 

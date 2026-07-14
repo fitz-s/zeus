@@ -84,6 +84,7 @@ from src.solve.solver import (
     validate_family_decision_contract,
 )
 from src.contracts.executable_cost_curve import BookLevel, FeeModel
+from src.contracts.semantic_types import Direction
 from src.strategy import utility_ranker
 from src.state.collateral_ledger import init_collateral_schema
 from src.state.portfolio import PortfolioState
@@ -3210,6 +3211,25 @@ def test_current_portfolio_wealth_witness_uses_one_chain_generation():
     assert witness.wealth_floor_usd == Decimal("27")
     assert witness.wealth_ceiling_usd == Decimal("27")
     assert repeated.witness_identity == witness.witness_identity
+
+
+def test_position_token_uses_typed_direction_value():
+    no_position = SimpleNamespace(
+        direction=Direction.NO,
+        token_id="yes-token",
+        no_token_id="no-token",
+    )
+    yes_position = SimpleNamespace(
+        direction=Direction.YES,
+        token_id="yes-token",
+        no_token_id="no-token",
+    )
+
+    assert universe._position_token(no_position) == "no-token"
+    assert universe._position_token(yes_position) == "yes-token"
+    assert universe._position_token(
+        SimpleNamespace(direction=Direction.UNKNOWN, token_id="yes-token")
+    ) == ""
 
 
 def test_current_portfolio_wealth_keeps_owned_cash_when_allowance_is_zero():
