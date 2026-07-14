@@ -7266,13 +7266,12 @@ def _global_actuation_selected_proof(
     prepared_global_family: object,
     family: object,
     event: OpportunityEvent,
-    proofs: tuple["_CandidateProof", ...],
-    economics_by_bin_side: Mapping[tuple[str, str], Mapping[str, Any]],
+    eligible_proofs: tuple["_CandidateProof", ...],
     forecast_conn: sqlite3.Connection,
     trade_conn: sqlite3.Connection,
     decision_time: datetime,
 ) -> "_CandidateProof":
-    """Bind the exact global winner back to one current family proof."""
+    """Bind the exact global winner back to one currently eligible proof."""
 
     from src.solve.solver import global_candidate_from_native
 
@@ -7306,15 +7305,13 @@ def _global_actuation_selected_proof(
     ):
         raise ValueError("GLOBAL_ACTUATION_FAMILY_PROBABILITY_MISMATCH")
 
-    annotated = _proofs_with_qkernel_candidate_economics(
-        proofs=proofs,
-        qkernel_economics_by_bin_side=economics_by_bin_side,
-        strategy_policy_event_type=event.event_type,
-    )
+    # The caller already rebuilt this scope from current locks, holdings, policy,
+    # and executable books.  Bind the global certificate before any legacy local
+    # price heuristic can reinterpret the winner.
     direction = "buy_yes" if candidate.side == "YES" else "buy_no"
     matches = tuple(
         proof
-        for proof in annotated
+        for proof in eligible_proofs
         if str(getattr(getattr(proof, "candidate", None), "condition_id", "") or "")
         == candidate.condition_id
         and str(getattr(proof, "token_id", "") or "") == candidate.token_id
@@ -7323,11 +7320,6 @@ def _global_actuation_selected_proof(
     if len(matches) != 1:
         raise ValueError("GLOBAL_ACTUATION_PROOF_BINDING_MISSING")
     proof = matches[0]
-    if not proof.passed_prefilter or proof.missing_reason is not None:
-        raise ValueError(
-            "GLOBAL_ACTUATION_PROOF_NO_LONGER_ELIGIBLE:"
-            f"{proof.missing_reason or 'prefilter_failed'}"
-        )
     native = _full_depth_native_side_candidate_from_proof(
         family_key=candidate.family_key,
         proof=proof,
@@ -8084,6 +8076,7 @@ def _build_event_bound_no_submit_receipt_core(
         _FORECAST_DECISION_EVENT_TYPES | _DAY0_LANE_EVENT_TYPES
     )
     _spine_candidate_economics_by_key: dict[tuple[str, str], dict[str, Any]] = {}
+    _spine_entry_proofs: tuple[_CandidateProof, ...] = ()
     _prepared_global_family = current_actuation_family
     _global_prepare_reason = None
     _spine_prepare_global = prepare_global_auction and global_actuation is None
@@ -8333,8 +8326,7 @@ def _build_event_bound_no_submit_receipt_core(
                 prepared_global_family=_prepared_global_family,
                 family=family,
                 event=event,
-                proofs=proofs,
-                economics_by_bin_side=_spine_candidate_economics_by_key,
+                eligible_proofs=_spine_entry_proofs,
                 forecast_conn=source_conn,
                 trade_conn=trade_conn,
                 decision_time=decision_time,

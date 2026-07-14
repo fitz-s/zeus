@@ -1469,6 +1469,132 @@ def test_global_probability_tightening_keeps_candidate_identity_and_bound():
     assert tightening.payoff_q_lcb == 0.71
 
 
+def test_global_winner_binding_does_not_reapply_legacy_price_floor(monkeypatch):
+    at = _dt.datetime(2026, 7, 14, 16, 24, tzinfo=_dt.timezone.utc)
+    family_key = "Paris|2026-07-14|high"
+    curve = SimpleNamespace(book_hash="book-current")
+    candidate = SimpleNamespace(
+        candidate_id="global-no-35c",
+        family_key=family_key,
+        bin_id="35C",
+        condition_id="condition-35c",
+        side="NO",
+        token_id="no-35c",
+        probability_witness_identity="probability-current",
+        resolution_identity="resolution-current",
+        ledger_snapshot_id="ledger-current",
+        book_captured_at_utc=at,
+        book_snapshot_id="snapshot-current",
+        execution_curve_identity="curve-current",
+        executable_cost_curve=curve,
+    )
+    proof = SimpleNamespace(
+        candidate=SimpleNamespace(condition_id="condition-35c"),
+        token_id="no-35c",
+        direction="buy_no",
+        row={"orderbook_depth_json": json.dumps({"hash": "venue-book-current"})},
+        q_posterior=0.6419587,
+        q_lcb_5pct=0.5066667,
+        qkernel_execution_economics={
+            "source": "qkernel_spine",
+            "cost": 0.027666,
+            "payoff_q_point": 0.6419587,
+            "payoff_q_lcb": 0.5066667,
+            "edge_lcb": 0.4790007,
+        },
+    )
+    witness = SimpleNamespace(
+        family_key=family_key,
+        q_version="q-current",
+        resolution_identity="resolution-current",
+        topology_identity="topology-current",
+        posterior_identity_hash="posterior-current",
+        source_truth_identity="source-current",
+        authority_certificate_hash="authority-current",
+        band_alpha=0.05,
+        band_basis="CURRENT_EVIDENCE",
+        sample_matrix_identity="samples-current",
+        witness_identity="probability-current",
+    )
+    decision = SimpleNamespace(
+        candidate=candidate,
+        shares=Decimal("100"),
+        cost_usd=Decimal("0.9889383435"),
+        limit_price=Decimal("0.01"),
+        expected_fill_price_before_fee=Decimal("0.0094227"),
+        max_spend_usd=Decimal("1.0495"),
+        robust_delta_log_wealth=0.01906524,
+        robust_ev_usd=49.6777,
+        capital_efficiency=0.0192785,
+    )
+    actuation = SimpleNamespace(
+        decision=decision,
+        probability_witness=witness,
+        actuation_identity="actuation-current",
+        economic_identity="economics-current",
+        universe_witness_identity="universe-current",
+        wealth_witness_identity="wealth-current",
+        wealth_economic_identity="wealth-economics-current",
+        selection_epoch_identity="epoch-current",
+        selection_cut_at_utc=at,
+        decision_at_utc=at,
+    )
+    monkeypatch.setattr(
+        era,
+        "_full_depth_native_side_candidate_from_proof",
+        lambda **_kwargs: object(),
+    )
+    monkeypatch.setattr(
+        "src.solve.solver.global_candidate_from_native",
+        lambda *_args, **_kwargs: candidate,
+    )
+    monkeypatch.setattr(
+        era,
+        "_global_selected_order_economics_drift",
+        lambda **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        era,
+        "current_global_probability_authority",
+        lambda *_args, **_kwargs: object(),
+    )
+    monkeypatch.setattr(
+        era,
+        "current_global_execution_authority",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            book_snapshot_id=candidate.book_snapshot_id,
+            execution_curve_identity=candidate.execution_curve_identity,
+        ),
+    )
+    captured = {}
+
+    def bind_current(cert, **_kwargs):
+        captured.update(cert)
+        return dict(cert)
+
+    monkeypatch.setattr(era, "_global_current_state_execution_economics", bind_current)
+    monkeypatch.setattr(
+        era,
+        "_bind_global_current_state_economics_to_proof",
+        lambda selected, cert: (selected, cert),
+    )
+
+    selected, cert = era._global_actuation_selected_proof(
+        global_actuation=actuation,
+        prepared_global_family=SimpleNamespace(probability_witness=witness),
+        family=SimpleNamespace(family_id=family_key),
+        event=SimpleNamespace(event_type="DAY0_EXTREME_UPDATED"),
+        eligible_proofs=(proof,),
+        forecast_conn=object(),
+        trade_conn=object(),
+        decision_time=at,
+    )
+
+    assert selected is proof
+    assert cert["global_actuation_identity"] == "actuation-current"
+    assert captured["cost"] == 0.027666
+
+
 @pytest.mark.parametrize(
     ("reason", "status"),
     (
