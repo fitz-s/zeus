@@ -2248,6 +2248,33 @@ def test_global_preflight_runs_final_entry_authority_before_stable(monkeypatch):
     assert era._global_preflight_block_status(rejected.reason) == "BLOCKED"
 
 
+def test_global_preflight_token_lifetime_starts_after_proof_completion():
+    started = _dt.datetime(2026, 7, 14, 8, 0, tzinfo=_dt.timezone.utc)
+    completed = started + _dt.timedelta(seconds=10.6)
+
+    issued_at, expires_at = era._global_preflight_token_window(
+        started + _dt.timedelta(seconds=30),
+        issued_at=completed,
+    )
+
+    assert issued_at == completed
+    assert expires_at == completed + _dt.timedelta(seconds=10)
+    assert completed < expires_at
+
+
+def test_global_preflight_token_lifetime_never_crosses_actuation_deadline():
+    deadline = _dt.datetime(2026, 7, 14, 8, 0, 30, tzinfo=_dt.timezone.utc)
+    completed = deadline - _dt.timedelta(milliseconds=100)
+
+    issued_at, expires_at = era._global_preflight_token_window(
+        deadline,
+        issued_at=completed,
+    )
+
+    assert issued_at == completed
+    assert expires_at == deadline
+
+
 def test_current_global_scope_uses_latest_day0_carrier_per_family():
     forecast_alpha = _global_scope_event(city="Alpha", source_run_id="run-a")
     forecast_beta = _global_scope_event(city="Beta", source_run_id="run-b")

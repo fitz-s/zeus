@@ -316,6 +316,25 @@ class _GlobalWinnerBindingToken:
     expires_at: datetime
     receipt: EventSubmissionReceipt
 
+
+def _global_preflight_token_window(
+    actuation_deadline: datetime,
+    *,
+    issued_at: datetime | None = None,
+) -> tuple[datetime, datetime]:
+    """Start the one-shot token lifetime after its proof has been built."""
+
+    if actuation_deadline.tzinfo is None:
+        raise ValueError("GLOBAL_PREFLIGHT_ACTUATION_DEADLINE_NAIVE")
+    issued = issued_at or datetime.now(UTC)
+    if issued.tzinfo is None:
+        raise ValueError("GLOBAL_PREFLIGHT_TOKEN_ISSUED_AT_NAIVE")
+    issued = issued.astimezone(UTC)
+    return issued, min(
+        issued + timedelta(seconds=10),
+        actuation_deadline.astimezone(UTC),
+    )
+
 # Continuous re-decision resurrection (2026-06-12): EDLI_REDECISION_PENDING is a PRICE-DRIVEN
 # re-decision of a FORECAST family — it routes through the SAME forecast decision path (same
 # snapshot binding, same q/FDR/Kelly cert), differing only in trigger (a P2 cheap-screen edge,
@@ -4977,7 +4996,9 @@ def event_bound_live_adapter_from_trade_conn(
                 receipt.decision_proof_bundle is not None
                 or reason == "GLOBAL_SELL_PREFLIGHT_STABLE"
             ):
-                issued_at = at.astimezone(UTC)
+                issued_at, expires_at = _global_preflight_token_window(
+                    authority.actuation_deadline
+                )
                 token_id = stable_hash(
                     (
                         event.event_id,
@@ -5004,10 +5025,7 @@ def event_bound_live_adapter_from_trade_conn(
                         wealth_witness_identity=authority.wealth_witness_identity,
                         actuation_deadline=authority.actuation_deadline,
                         issued_at=issued_at,
-                        expires_at=min(
-                            issued_at + timedelta(seconds=10),
-                            authority.actuation_deadline,
-                        ),
+                        expires_at=expires_at,
                         receipt=receipt,
                     ),
                 )
