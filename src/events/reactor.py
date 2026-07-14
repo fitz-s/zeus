@@ -3784,6 +3784,11 @@ TRANSIENT_MONEY_PATH_REASONS: frozenset[str] = frozenset({
     # neither may fall through the UNKNOWN fail-open classifier.
     "GLOBAL_AUCTION_NO_TRADE",
     "GLOBAL_AUCTION_FAILED",
+    # A family excluded from the current complete auction because its current
+    # probability/source bundle is not yet admissible must be reconsidered
+    # after that substrate advances.  The wrapper is itself the stable reactor
+    # reason; inner diagnostics are intentionally more specific and variable.
+    "GLOBAL_FAMILY_INELIGIBLE",
 })
 
 # A reason whose BASE is in this set is TERMINAL (a genuine, non-race rejection)
@@ -3881,6 +3886,11 @@ _RUNTIME_TERMINAL_MONEY_PATH_REASONS: frozenset[str] = frozenset({
     # claimed carrier owns the family in this epoch, a duplicate carrier is
     # terminal for this event and must not requeue into an ambiguity loop.
     "GLOBAL_DUPLICATE_FAMILY_CARRIER",
+    # The complete current-epoch auction compared this event's action against
+    # the winning action and chose the latter.  Requeueing the same carrier
+    # cannot add evidence or enlarge the feasible set; fresh evidence/price
+    # movement arrives through a fresh event and a new auction epoch.
+    "GLOBAL_NOT_SELECTED",
 })
 
 

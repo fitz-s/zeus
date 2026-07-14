@@ -31,7 +31,9 @@ from src.events.reactor import (
     OpportunityEventReactor,
     ReactorConfig,
     ReactorResult,
+    TERMINAL_MONEY_PATH_REASONS,
     TRANSIENT_MONEY_PATH_REASONS,
+    _is_transient_money_path_reason,
 )
 from src.state.db import init_schema, world_write_mutex
 from src.strategy.live_inference.no_trade_regret import NoTradeRegretLedger
@@ -48,6 +50,29 @@ def _processing_status(conn: sqlite3.Connection, event_id: str) -> str:
         "SELECT processing_status FROM opportunity_event_processing WHERE event_id = ?",
         (event_id,),
     ).fetchone()[0]
+
+
+def test_global_family_ineligible_is_explicitly_transient(caplog):
+    reason = (
+        "GLOBAL_FAMILY_INELIGIBLE:GLOBAL_CURRENT_PROBABILITY_PREPARE_FAILED:"
+        "REPLACEMENT_RAW_INPUT_HWM"
+    )
+
+    with caplog.at_level(logging.ERROR, logger="zeus.events.reactor"):
+        assert "GLOBAL_FAMILY_INELIGIBLE" in TRANSIENT_MONEY_PATH_REASONS
+        assert _is_transient_money_path_reason(reason) is True
+
+    assert not any("UNKNOWN money-path reason" in row.message for row in caplog.records)
+
+
+def test_global_not_selected_is_terminal_for_completed_epoch(caplog):
+    reason = "GLOBAL_NOT_SELECTED:winning-actuation-identity"
+
+    with caplog.at_level(logging.ERROR, logger="zeus.events.reactor"):
+        assert "GLOBAL_NOT_SELECTED" in TERMINAL_MONEY_PATH_REASONS
+        assert _is_transient_money_path_reason(reason) is False
+
+    assert not any("UNKNOWN money-path reason" in row.message for row in caplog.records)
 
 
 # A transient-REQUEUE test must price its decision at a VENUE-OPEN instant so the
