@@ -205,8 +205,27 @@ def _store_global_auction_receipt(
         raise ValueError("GLOBAL_AUCTION_RECEIPT_DECISION_MISSING")
     evaluations = tuple(getattr(decision, "candidate_evaluations", ()) or ())
     evaluation_rows = tuple(asdict(evaluation) for evaluation in evaluations)
+    rejection_groups: dict[tuple[str, str], list[str]] = {}
+    detailed_rows: list[dict] = []
+    for row in evaluation_rows:
+        if row.get("status") == "REJECTED" and row.get("action") == "BUY":
+            key = (str(row["action"]), str(row["rejection_reason"]))
+            rejection_groups.setdefault(key, []).append(str(row["candidate_id"]))
+        else:
+            detailed_rows.append(row)
+    compact_evaluations = {
+        "rejected_groups": [
+            {
+                "action": action,
+                "reason": reason,
+                "candidate_ids": candidate_ids,
+            }
+            for (action, reason), candidate_ids in sorted(rejection_groups.items())
+        ],
+        "detailed": detailed_rows,
+    }
     evaluation_json = json.dumps(
-        evaluation_rows,
+        compact_evaluations,
         default=str,
         sort_keys=True,
         separators=(",", ":"),
@@ -233,7 +252,7 @@ def _store_global_auction_receipt(
         )
     )
     receipt = {
-        "schema_version": 2,
+        "schema_version": 3,
         "selection_epoch_identity": selection_epoch_identity,
         "selection_cut_at_utc": selection_cut_at_utc.isoformat(),
         "decision_at_utc": decision_at_utc.isoformat(),
@@ -257,8 +276,10 @@ def _store_global_auction_receipt(
         "no_trade_reason": getattr(decision, "no_trade_reason", None),
         "candidate_evaluation_count": len(evaluation_rows),
         "candidate_input_count": candidate_input_count,
+        "candidate_detailed_count": len(detailed_rows),
+        "candidate_rejection_group_count": len(rejection_groups),
         "candidate_coverage_complete": coverage_complete,
-        "candidate_evaluation_encoding": "zlib+base64+canonical-json-v1",
+        "candidate_evaluation_encoding": "zlib+base64+canonical-json-v2",
         "candidate_evaluations_sha256": hashlib.sha256(
             evaluation_json
         ).hexdigest(),

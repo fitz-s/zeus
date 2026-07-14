@@ -175,6 +175,8 @@ def test_global_auction_receipt_persists_complete_buy_sell_hold_cash_comparison(
     assert summary["candidate_coverage_complete"] is True
     assert summary["candidate_evaluation_count"] == 2
     assert summary["candidate_input_count"] == 2
+    assert summary["candidate_detailed_count"] == 1
+    assert summary["candidate_rejection_group_count"] == 1
     assert summary["hold_cash"] == {
         "robust_delta_log_wealth": "0",
         "robust_ev_usd": "0",
@@ -187,16 +189,23 @@ def test_global_auction_receipt_persists_complete_buy_sell_hold_cash_comparison(
         summary["candidate_evaluations_sha256"]
     )
     candidate_evaluations = json.loads(evaluation_json)
-    assert {
-        evaluation["action"]: (
+    assert candidate_evaluations["rejected_groups"] == [
+        {
+            "action": "BUY",
+            "reason": "ENTRY_ACTION_PAUSED:external:operator",
+            "candidate_ids": ["buy-paused"],
+        }
+    ]
+    assert [
+        (
+            evaluation["action"],
             evaluation["status"],
             evaluation["rejection_reason"],
         )
-        for evaluation in candidate_evaluations
-    } == {
-        "BUY": ("REJECTED", "ENTRY_ACTION_PAUSED:external:operator"),
-        "SELL": ("REJECTED", "NON_POSITIVE_ROBUST_OBJECTIVE"),
-    }
+        for evaluation in candidate_evaluations["detailed"]
+    ] == [
+        ("SELL", "REJECTED", "NON_POSITIVE_ROBUST_OBJECTIVE")
+    ]
     assert len(summary["receipt_hash"]) == 64
     conn.close()
 
