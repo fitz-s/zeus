@@ -3543,7 +3543,6 @@ _ENTRY_LIVE_HEALTH_REQUIRED_SURFACES = (
     "main_daemon",
     "run_mode",
     "forecast_pipeline",
-    "forecast_event_bridge",
     "entry_q_version",
     "monitor_probability_freshness",
     "day0_decision_trace",
@@ -3690,11 +3689,13 @@ def _entry_live_health_authority_block_reason(
 
     This gate deliberately ignores the live-health ``business_plane`` surface:
     no candidates/no capital flow is an observability signal, not an input that
-    may self-lock future entries. ``runtime_code`` and ``process_code`` are also
-    observability: the immutable process boot SHA identifies decision code, while
-    a newer worktree does not invalidate current market truth. Required forecast,
-    lifecycle, monitor, and execution-capability surfaces must still be present,
-    fresh, and individually OK before a new ENTRY can reach command build.
+    may self-lock future entries. ``runtime_code``, ``process_code``, and
+    ``forecast_event_bridge`` are also observability. The bridge measures global
+    posterior-to-event carrier progress; it cannot refute the selected family's
+    current probability witness, which is rebound and tightened in preflight.
+    Required forecast, lifecycle, monitor, and execution-capability surfaces must
+    still be present, fresh, and individually OK before a new ENTRY can reach
+    command build.
     """
 
     try:

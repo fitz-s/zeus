@@ -3347,6 +3347,44 @@ def test_entry_live_health_authority_ignores_deployment_observability_failures()
     assert reason is None
 
 
+def test_entry_live_health_authority_ignores_forecast_carrier_observability_failure():
+    from src.engine import event_reactor_adapter as adapter
+
+    decision_time = datetime(2026, 5, 24, 18, 10, tzinfo=timezone.utc)
+    payload = _healthy_entry_live_health_provider(decision_time)()
+    payload["surfaces"]["forecast_event_bridge"] = {
+        "ok": False,
+        "issue": "FORECAST_EVENT_POSTERIOR_IDENTITY_SUPERSEDED:latest_newer_by=2834s",
+    }
+    payload["failing_surfaces"] = ["forecast_event_bridge"]
+
+    reason = adapter._entry_live_health_authority_block_reason(
+        lambda: payload,
+        now=decision_time + timedelta(seconds=30),
+    )
+
+    assert reason is None
+
+
+def test_entry_live_health_authority_still_blocks_forecast_probability_failure():
+    from src.engine import event_reactor_adapter as adapter
+
+    decision_time = datetime(2026, 5, 24, 18, 10, tzinfo=timezone.utc)
+    payload = _healthy_entry_live_health_provider(decision_time)()
+    payload["surfaces"]["forecast_pipeline"] = {
+        "ok": False,
+        "issue": "REPLACEMENT_FORECAST_LIVE_MATERIALIZE_FAILED",
+    }
+    payload["failing_surfaces"] = ["forecast_pipeline"]
+
+    reason = adapter._entry_live_health_authority_block_reason(
+        lambda: payload,
+        now=decision_time + timedelta(seconds=30),
+    )
+
+    assert reason == "failing_surfaces=forecast_pipeline"
+
+
 def test_live_adapter_submit_enabled_canary_enabled_calls_executor_mock(monkeypatch, tmp_path):
     from src.engine import event_reactor_adapter as adapter
     from src.engine.event_bound_final_intent import EventBoundExecutorSubmitResult
