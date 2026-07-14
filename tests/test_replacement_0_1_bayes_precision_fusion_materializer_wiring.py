@@ -187,11 +187,16 @@ def _seed_current_single_runs(conn, *, live_values: dict[str, float], request=No
         )
 
 
-def _seed_current_ens(conn, *, request=None) -> None:
+def _seed_current_ens(conn, *, request=None, members_unit: str = "degC") -> None:
     """Seed the current target-specific shape carrier required by source-clock q."""
 
     req = request if request is not None else _request()
-    members = [24.0 + (index - 25) * 0.02 for index in range(51)]
+    members_c = [24.0 + (index - 25) * 0.02 for index in range(51)]
+    members = (
+        [value * 9.0 / 5.0 + 32.0 for value in members_c]
+        if members_unit == "degF"
+        else members_c
+    )
     conn.execute(
         """
         INSERT INTO ensemble_snapshots (
@@ -203,7 +208,7 @@ def _seed_current_ens(conn, *, request=None) -> None:
             causality_status, boundary_ambiguous, authority, members_unit
         ) VALUES (?, ?, 'high', 'temperature', 'high_temp', ?, ?, ?, ?, 24.0,
                   ?, 'ecmwf_ens', 'test-current-ens', 'ecmwf_open_data', ?, ?,
-                  'FULLY_INSIDE_TARGET_LOCAL_DAY', 1, 'OK', 0, 'VERIFIED', 'degC')
+                  'FULLY_INSIDE_TARGET_LOCAL_DAY', 1, 'OK', 0, 'VERIFIED', ?)
         """,
         (
             req.city,
@@ -215,8 +220,28 @@ def _seed_current_ens(conn, *, request=None) -> None:
             json.dumps(members),
             mod._to_utc(req.source_cycle_time, field_name="source_cycle_time").isoformat(),
             _dt(3).isoformat(),
+            members_unit,
         ),
     )
+
+
+def test_current_evidence_shape_converts_native_fahrenheit_members() -> None:
+    conn = _conn()
+    req = _request()
+    _seed_current_ens(conn, request=req, members_unit="degF")
+
+    shape = mod._read_current_evidence_shape(
+        conn,
+        req,
+        metric="high",
+        provider_values_c={"ecmwf_ifs": 24.0, "icon_global": 25.0},
+        provider_weights={"ecmwf_ifs": 0.5, "icon_global": 0.5},
+        center_c=24.5,
+    )
+
+    assert shape is not None
+    assert shape.members_c[0] == pytest.approx(23.5)
+    assert shape.members_c[-1] == pytest.approx(24.5)
 
 
 def _enable_flag(monkeypatch):

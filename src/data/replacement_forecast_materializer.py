@@ -1353,8 +1353,11 @@ def _read_current_evidence_shape(
         ).fetchone()
         if row is None:
             return None
-        values = tuple(json.loads(row[1]))
-        if str(row[4] or "").strip().lower() not in {"degc", "c", "°c"}:
+        values = tuple(float(value) for value in json.loads(row[1]))
+        members_unit = str(row[4] or "").strip().lower()
+        if members_unit in {"degf", "f", "°f"}:
+            values = tuple((value - 32.0) * 5.0 / 9.0 for value in values)
+        elif members_unit not in {"degc", "c", "°c"}:
             return None
         return _current_evidence_shape_from_values(
             snapshot_id=int(row[0]),
