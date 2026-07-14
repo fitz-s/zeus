@@ -6915,6 +6915,7 @@ def _global_preflight_block_status(reason: str) -> str:
     if reason.startswith(
         (
             "GLOBAL_ACTUATION_PROOF_NO_LONGER_ELIGIBLE:",
+            "GLOBAL_JIT_SNAPSHOT_REFRESH_FAILED",
             "FILL_UP_NO_SUBMIT:",
             "SHIFT_BIN_NO_SUBMIT:",
             "EVENT_BOUND_MARKET_PHASE_CLOSED:",

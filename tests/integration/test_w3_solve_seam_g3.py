@@ -1386,7 +1386,7 @@ def test_global_probability_tightening_keeps_candidate_identity_and_bound():
         ),
         ("GLOBAL_CURRENT_STATE_ROBUST_MAJORITY_LOSS", "BATCH_BLOCKED"),
         ("GLOBAL_CURRENT_STATE_ECONOMICS_NON_POSITIVE", "BATCH_BLOCKED"),
-        ("GLOBAL_JIT_SNAPSHOT_REFRESH_FAILED", "BATCH_BLOCKED"),
+        ("GLOBAL_JIT_SNAPSHOT_REFRESH_FAILED", "BLOCKED"),
         ("GLOBAL_JIT_SNAPSHOT_REFRESH_UNAVAILABLE", "BATCH_BLOCKED"),
         (
             "GLOBAL_ACTUATION_PREPARE_FAILED:"
@@ -4505,7 +4505,16 @@ def test_global_batch_reauctions_with_tightened_candidate_q(monkeypatch):
     assert result.receipts[event.event_id].submitted is True
 
 
-def test_global_batch_falls_through_candidate_local_preflight_block(monkeypatch):
+@pytest.mark.parametrize(
+    "blocked_reason",
+    (
+        "SHIFT_BIN_NO_SUBMIT:SHIFT_OLD_LEG_BELIEF_NOT_WEAKENED",
+        "GLOBAL_JIT_SNAPSHOT_REFRESH_FAILED",
+    ),
+)
+def test_global_batch_falls_through_candidate_local_preflight_block(
+    monkeypatch, blocked_reason
+):
     decision_at = _dt.datetime(2026, 7, 10, 8, 0, tzinfo=_dt.timezone.utc)
     event_a = _global_scope_event(city="Alpha", source_run_id="run-a")
     event_b = _global_scope_event(city="Beta", source_run_id="run-b")
@@ -4548,7 +4557,6 @@ def test_global_batch_falls_through_candidate_local_preflight_block(monkeypatch)
         )
     )
     books = iter((_global_test_book("book-1", price="0.41"),))
-    blocked_reason = "SHIFT_BIN_NO_SUBMIT:SHIFT_OLD_LEG_BELIEF_NOT_WEAKENED"
     calls = {
         "prepare": 0,
         "books": 0,
@@ -4668,7 +4676,6 @@ def test_global_batch_falls_through_candidate_local_preflight_block(monkeypatch)
         "GLOBAL_CURRENT_STATE_PAYOFF_Q_TIGHTENED_REAUCTION_REQUIRED",
         "GLOBAL_CURRENT_STATE_ROBUST_MAJORITY_LOSS",
         "GLOBAL_CURRENT_STATE_ECONOMICS_NON_POSITIVE",
-        "GLOBAL_JIT_SNAPSHOT_REFRESH_FAILED",
         "GLOBAL_JIT_SNAPSHOT_REFRESH_UNAVAILABLE",
         (
             "GLOBAL_ACTUATION_PREPARE_FAILED:"
