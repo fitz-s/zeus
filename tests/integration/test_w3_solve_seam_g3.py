@@ -1417,6 +1417,56 @@ def test_global_preflight_block_scope_is_explicit(reason, status):
     assert era._global_preflight_block_status(reason) == status
 
 
+def test_global_preflight_runs_final_entry_authority_before_stable(monkeypatch):
+    event = _global_scope_event(city="Alpha", source_run_id="run-a")
+    receipt = EventSubmissionReceipt(
+        False,
+        event.event_id,
+        event.causal_snapshot_id,
+        proof_accepted=True,
+        decision_proof_bundle=(object(),),
+    )
+    monkeypatch.setattr(
+        era,
+        "_build_live_cap_certificate_from_ledger",
+        lambda **_kwargs: object(),
+    )
+    monkeypatch.setattr(
+        era,
+        "_actionable_payload_from_receipt",
+        lambda *_args, **_kwargs: {},
+    )
+    def reject(_payload):
+        raise ValueError(
+            "LIVE_ENTRY_DAY0_PROBABILITY_AUTHORITY_REQUIRED:"
+            "selected q_lcb does not match remaining-day transform:"
+            "condition_id=condition-a:q_lcb=0.72:transform_lcb=0.96"
+        )
+
+    monkeypatch.setattr(
+        era,
+        "_assert_live_entry_submit_authority",
+        reject,
+    )
+
+    rejected = era._global_preflight_entry_authority_receipt(
+        event,
+        receipt,
+        decision_time=_dt.datetime(2026, 7, 14, tzinfo=_dt.timezone.utc),
+        live_cap_conn=object(),
+    )
+
+    assert rejected.proof_accepted is False
+    assert rejected.side_effect_status == "NO_SUBMIT"
+    assert rejected.reason == (
+        "EDLI_LIVE_CERTIFICATE_BUILD_FAILED:"
+        "LIVE_ENTRY_DAY0_PROBABILITY_AUTHORITY_REQUIRED:"
+        "selected q_lcb does not match remaining-day transform:"
+        "condition_id=condition-a:q_lcb=0.72:transform_lcb=0.96"
+    )
+    assert era._global_preflight_block_status(rejected.reason) == "BLOCKED"
+
+
 def test_current_global_scope_uses_latest_day0_carrier_per_family():
     forecast_alpha = _global_scope_event(city="Alpha", source_run_id="run-a")
     forecast_beta = _global_scope_event(city="Beta", source_run_id="run-b")

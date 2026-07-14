@@ -4966,6 +4966,12 @@ def event_bound_live_adapter_from_trade_conn(
                 global_actuation=actuation,
                 preflight_only=True,
             )
+            receipt = _global_preflight_entry_authority_receipt(
+                event,
+                receipt,
+                decision_time=at,
+                live_cap_conn=live_cap_conn or trade_conn,
+            )
             reason = str(receipt.reason or "")
             if receipt.proof_accepted is True and (
                 receipt.decision_proof_bundle is not None
@@ -6924,6 +6930,45 @@ def _global_preflight_block_status(reason: str) -> str:
     # prove the runner-up globally optimal. Unknown reasons therefore stop this
     # cut; the next cycle rebuilds the complete universe from current truth.
     return "BATCH_BLOCKED"
+
+
+def _global_preflight_entry_authority_receipt(
+    event: OpportunityEvent,
+    receipt: EventSubmissionReceipt,
+    *,
+    decision_time: datetime,
+    live_cap_conn: sqlite3.Connection | None,
+) -> EventSubmissionReceipt:
+    """Run the pure final-entry authority check while the auction can fall through."""
+
+    if (
+        receipt.proof_accepted is not True
+        or receipt.decision_proof_bundle is None
+    ):
+        return receipt
+    try:
+        live_cap = _build_live_cap_certificate_from_ledger(
+            event=event,
+            receipt=receipt,
+            decision_time=decision_time.astimezone(UTC),
+            live_cap_conn=live_cap_conn,
+            persist=False,
+        )
+        actionable_payload = _actionable_payload_from_receipt(
+            receipt,
+            live_cap,
+            event=event,
+        )
+        _assert_live_entry_submit_authority(actionable_payload)
+    except Exception as exc:  # noqa: BLE001 - typed fail-closed preflight receipt
+        return dataclass_replace(
+            receipt,
+            submitted=False,
+            side_effect_status="NO_SUBMIT",
+            reason=f"EDLI_LIVE_CERTIFICATE_BUILD_FAILED:{exc}",
+            proof_accepted=False,
+        )
+    return receipt
 
 
 def _global_current_state_execution_economics(
