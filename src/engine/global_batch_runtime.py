@@ -205,7 +205,7 @@ def _store_global_auction_receipt(
         raise ValueError("GLOBAL_AUCTION_RECEIPT_DECISION_MISSING")
     evaluations = tuple(getattr(decision, "candidate_evaluations", ()) or ())
     evaluation_rows = tuple(asdict(evaluation) for evaluation in evaluations)
-    rejection_groups: dict[tuple[str, str, str], list[str]] = {}
+    rejection_groups: dict[tuple[str, str, str], list[tuple[str, str]]] = {}
     detailed_rows: list[dict] = []
     for row in evaluation_rows:
         if row.get("status") == "REJECTED" and row.get("action") == "BUY":
@@ -214,7 +214,9 @@ def _store_global_auction_receipt(
                 str(row["side"]),
                 str(row["rejection_reason"]),
             )
-            rejection_groups.setdefault(key, []).append(str(row["candidate_id"]))
+            rejection_groups.setdefault(key, []).append(
+                (str(row["candidate_id"]), str(row["condition_id"]))
+            )
         else:
             detailed_rows.append(row)
     compact_evaluations = {
@@ -223,9 +225,10 @@ def _store_global_auction_receipt(
                 "action": action,
                 "side": side,
                 "reason": reason,
-                "candidate_ids": candidate_ids,
+                "candidate_ids": [candidate_id for candidate_id, _ in candidates],
+                "condition_ids": [condition_id for _, condition_id in candidates],
             }
-            for (action, side, reason), candidate_ids in sorted(
+            for (action, side, reason), candidates in sorted(
                 rejection_groups.items()
             )
         ],
@@ -241,6 +244,9 @@ def _store_global_auction_receipt(
     candidate_ids = tuple(
         str(row.get("candidate_id") or "") for row in evaluation_rows
     )
+    condition_ids = tuple(
+        str(row.get("condition_id") or "") for row in evaluation_rows
+    )
     selected_rows = tuple(
         row for row in evaluation_rows if row.get("status") == "SELECTED"
     )
@@ -252,6 +258,7 @@ def _store_global_auction_receipt(
         and len(evaluation_rows) == candidate_input_count
         and len(candidate_ids) == len(set(candidate_ids))
         and all(candidate_ids)
+        and all(condition_ids)
         and len(selected_rows) == (1 if winner is not None else 0)
         and (
             winner is None
@@ -259,7 +266,7 @@ def _store_global_auction_receipt(
         )
     )
     receipt = {
-        "schema_version": 3,
+        "schema_version": 4,
         "selection_epoch_identity": selection_epoch_identity,
         "selection_cut_at_utc": selection_cut_at_utc.isoformat(),
         "decision_at_utc": decision_at_utc.isoformat(),
@@ -286,7 +293,8 @@ def _store_global_auction_receipt(
         "candidate_detailed_count": len(detailed_rows),
         "candidate_rejection_group_count": len(rejection_groups),
         "candidate_coverage_complete": coverage_complete,
-        "candidate_evaluation_encoding": "zlib+base64+canonical-json-v2",
+        "candidate_condition_index_complete": coverage_complete,
+        "candidate_evaluation_encoding": "zlib+base64+canonical-json-v3",
         "candidate_evaluations_sha256": hashlib.sha256(
             evaluation_json
         ).hexdigest(),

@@ -12,12 +12,15 @@
 
 from __future__ import annotations
 
+import base64
+import hashlib
 import json
 import logging
 import os
 import subprocess
 import tempfile
 import time
+import zlib
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
@@ -3957,8 +3960,6 @@ def _evaluate_high_yes_edge_missed_surface_python(
     condition_ids = sorted({str(row["condition_id"]) for row in edges})
     world_conn = _connect_read_only(world_db)
     try:
-        yes_candidates: dict[str, int] = {}
-        no_candidates: dict[str, int] = {}
         buy_yes_suppression = _recent_buy_yes_suppression_summary(
             world_conn,
             cutoff=cutoff,
@@ -3990,6 +3991,9 @@ def _evaluate_high_yes_edge_missed_surface_python(
 
     trade_conn = _connect_read_only(trade_db)
     try:
+        yes_candidates, no_candidates, auction_candidate_evidence = (
+            _latest_global_auction_candidate_counts(trade_conn, cutoff=cutoff)
+        )
         yes_entries = _yes_entry_command_counts(
             trade_conn,
             condition_ids=condition_ids,
@@ -4005,13 +4009,20 @@ def _evaluate_high_yes_edge_missed_surface_python(
     for edge in edges:
         condition_id = str(edge.get("condition_id") or "")
         edge_computed_at = str(edge.get("computed_at") or cutoff)
+        auction_decision_at = str(
+            auction_candidate_evidence.get("decision_at_utc") or ""
+        )
         fsr_key = (
             str(edge.get("city") or ""),
             str(edge.get("target_date") or ""),
             str(edge.get("temperature_metric") or ""),
             edge_computed_at,
         )
-        edge["yes_candidate_evidence_count"] = yes_candidates.get(condition_id, 0)
+        edge["yes_candidate_evidence_count"] = (
+            yes_candidates.get(condition_id, 0)
+            if auction_decision_at >= edge_computed_at
+            else 0
+        )
         edge["yes_entry_command_count"] = yes_entries.get(condition_id, 0)
         edge["yes_no_submit_count"] = _count_times_at_or_after(
             yes_no_submit_times.get(condition_id, ()),
@@ -4021,7 +4032,11 @@ def _evaluate_high_yes_edge_missed_surface_python(
             yes_no_trade_times.get(condition_id, ()),
             edge_computed_at,
         )
-        edge["no_candidate_evidence_count"] = no_candidates.get(condition_id, 0)
+        edge["no_candidate_evidence_count"] = (
+            no_candidates.get(condition_id, 0)
+            if auction_decision_at >= edge_computed_at
+            else 0
+        )
         status_counts = fsr_counts.get(fsr_key, {})
         edge["processed_fsr_count"] = status_counts.get("processed", 0)
         edge["pending_fsr_count"] = (
@@ -4074,6 +4089,7 @@ def _evaluate_high_yes_edge_missed_surface_python(
         "pending_fsr_high_yes_edge_sample": pending_fsr[:HIGH_YES_EDGE_SAMPLE_LIMIT],
         "missing_fsr_high_yes_edge_count": len(missing_fsr),
         "processed_without_action_high_yes_edge_count": len(processed_without_action),
+        "global_auction_candidate_evidence": auction_candidate_evidence,
         "recent_buy_yes_entry_command_count": recent_buy_yes_entry_command_count,
         "entries_paused": bool(control_state.get("entries_paused")),
         "entries_pause_source": control_state.get("entries_pause_source"),
@@ -4772,6 +4788,127 @@ def _directional_condition_times(
 
 def _count_times_at_or_after(times: tuple[str, ...], cutoff: str) -> int:
     return sum(1 for observed_at in times if str(observed_at or "") >= cutoff)
+
+
+def _latest_global_auction_candidate_counts(
+    conn: object,
+    *,
+    cutoff: str,
+) -> tuple[dict[str, int], dict[str, int], dict[str, object]]:
+    """Read condition-level BUY evidence from the latest complete auction receipt."""
+
+    columns = _connection_table_columns(conn, "decision_log")
+    required = {"id", "mode", "artifact_json", "timestamp"}
+    if not required.issubset(columns):
+        return {}, {}, {
+            "evaluated": False,
+            "issue": None,
+            "skip_reason": "GLOBAL_AUCTION_DECISION_LOG_UNAVAILABLE",
+        }
+    row = conn.execute(
+        """
+        SELECT id, artifact_json, timestamp
+          FROM decision_log
+         WHERE mode = 'global_single_order_auction'
+           AND timestamp >= ?
+         ORDER BY id DESC
+         LIMIT 1
+        """,
+        (cutoff,),
+    ).fetchone()
+    if row is None:
+        return {}, {}, {
+            "evaluated": True,
+            "issue": None,
+            "skip_reason": "GLOBAL_AUCTION_RECEIPT_MISSING",
+        }
+
+    receipt_id = row["id"]
+
+    def invalid(reason: str) -> tuple[dict[str, int], dict[str, int], dict[str, object]]:
+        return {}, {}, {
+            "evaluated": True,
+            "issue": f"GLOBAL_AUCTION_CANDIDATE_EVIDENCE_INVALID:{reason}",
+            "receipt_id": receipt_id,
+        }
+
+    try:
+        artifact = json.loads(str(row["artifact_json"] or ""))
+        summary = artifact["summary"]
+        if int(summary.get("schema_version") or 0) < 4:
+            return invalid("SCHEMA_VERSION")
+        if summary.get("candidate_coverage_complete") is not True:
+            return invalid("COVERAGE_INCOMPLETE")
+        if summary.get("candidate_condition_index_complete") is not True:
+            return invalid("CONDITION_INDEX_INCOMPLETE")
+        if summary.get("candidate_evaluation_encoding") != (
+            "zlib+base64+canonical-json-v3"
+        ):
+            return invalid("ENCODING")
+        compressed = base64.b64decode(
+            str(summary["candidate_evaluations_zlib_b64"]),
+            validate=True,
+        )
+        if len(compressed) > 2_000_000:
+            return invalid("COMPRESSED_PAYLOAD_TOO_LARGE")
+        raw = zlib.decompress(compressed)
+        if len(raw) > 10_000_000:
+            return invalid("PAYLOAD_TOO_LARGE")
+        if hashlib.sha256(raw).hexdigest() != str(
+            summary["candidate_evaluations_sha256"]
+        ):
+            return invalid("HASH_MISMATCH")
+        payload = json.loads(raw)
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError, zlib.error) as exc:
+        return invalid(type(exc).__name__)
+
+    yes: dict[str, int] = {}
+    no: dict[str, int] = {}
+    covered = 0
+    try:
+        for group in payload["rejected_groups"]:
+            candidate_ids = group["candidate_ids"]
+            condition_ids = group["condition_ids"]
+            if len(candidate_ids) != len(condition_ids):
+                return invalid("GROUP_IDENTITY_LENGTH_MISMATCH")
+            covered += len(candidate_ids)
+            if str(group.get("action") or "") != "BUY":
+                continue
+            side = str(group.get("side") or "").upper()
+            counts = yes if side == "YES" else no if side == "NO" else None
+            if counts is None:
+                return invalid("BUY_SIDE_INVALID")
+            for condition_id in condition_ids:
+                condition_id = str(condition_id or "")
+                if not condition_id:
+                    return invalid("CONDITION_ID_MISSING")
+                counts[condition_id] = counts.get(condition_id, 0) + 1
+        for evaluation in payload["detailed"]:
+            covered += 1
+            if str(evaluation.get("action") or "") != "BUY":
+                continue
+            side = str(evaluation.get("side") or "").upper()
+            counts = yes if side == "YES" else no if side == "NO" else None
+            condition_id = str(evaluation.get("condition_id") or "")
+            if counts is None or not condition_id:
+                return invalid("DETAILED_BUY_IDENTITY_INVALID")
+            counts[condition_id] = counts.get(condition_id, 0) + 1
+        expected = int(summary["candidate_evaluation_count"])
+    except (KeyError, TypeError, ValueError):
+        return invalid("PAYLOAD_SHAPE")
+    if covered != expected:
+        return invalid("EVALUATION_COUNT_MISMATCH")
+    return yes, no, {
+        "evaluated": True,
+        "issue": None,
+        "receipt_id": receipt_id,
+        "decision_at_utc": str(
+            summary.get("decision_at_utc") or row["timestamp"] or ""
+        ),
+        "candidate_evaluation_count": expected,
+        "yes_condition_count": len(yes),
+        "no_condition_count": len(no),
+    }
 
 
 

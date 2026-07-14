@@ -172,7 +172,9 @@ def test_global_auction_receipt_persists_complete_buy_sell_hold_cash_comparison(
     artifact = json.loads(row["artifact_json"])
     summary = artifact["summary"]
     assert row["mode"] == "global_single_order_auction"
+    assert summary["schema_version"] == 4
     assert summary["candidate_coverage_complete"] is True
+    assert summary["candidate_condition_index_complete"] is True
     assert summary["candidate_evaluation_count"] == 2
     assert summary["candidate_input_count"] == 2
     assert summary["candidate_detailed_count"] == 1
@@ -188,6 +190,9 @@ def test_global_auction_receipt_persists_complete_buy_sell_hold_cash_comparison(
     assert hashlib.sha256(evaluation_json).hexdigest() == (
         summary["candidate_evaluations_sha256"]
     )
+    assert summary["candidate_evaluation_encoding"] == (
+        "zlib+base64+canonical-json-v3"
+    )
     candidate_evaluations = json.loads(evaluation_json)
     assert candidate_evaluations["rejected_groups"] == [
         {
@@ -195,6 +200,7 @@ def test_global_auction_receipt_persists_complete_buy_sell_hold_cash_comparison(
             "side": "YES",
             "reason": "ENTRY_ACTION_PAUSED:external:operator",
             "candidate_ids": ["buy-paused"],
+            "condition_ids": ["condition-buy"],
         }
     ]
     assert [

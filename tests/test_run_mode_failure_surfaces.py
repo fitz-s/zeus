@@ -31,9 +31,12 @@ Probes:
 
 from __future__ import annotations
 
+import base64
+import hashlib
 import json
 import logging
 import sqlite3
+import zlib
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -258,6 +261,7 @@ def _write_high_yes_edge_dbs(
     with_degenerate_day0_lcb_no_trade: bool = False,
     stale_quote: bool = False,
     entries_paused: bool = False,
+    with_global_auction_candidate: bool = False,
 ) -> None:
     now = datetime.now(timezone.utc)
     condition_id = "cond-high-yes-1"
@@ -314,6 +318,52 @@ def _write_high_yes_edge_dbs(
             "CREATE TABLE venue_submission_envelopes ("
             "envelope_id TEXT, condition_id TEXT, outcome_label TEXT)"
         )
+        trade_conn.execute(
+            "CREATE TABLE decision_log ("
+            "id INTEGER PRIMARY KEY, mode TEXT, artifact_json TEXT, timestamp TEXT)"
+        )
+        if with_global_auction_candidate:
+            evaluation_payload = {
+                "rejected_groups": [
+                    {
+                        "action": "BUY",
+                        "side": "YES",
+                        "reason": "ENTRY_ACTION_PAUSED:external:operator",
+                        "candidate_ids": ["candidate-high-yes-1"],
+                        "condition_ids": [condition_id],
+                    }
+                ],
+                "detailed": [],
+            }
+            evaluation_json = json.dumps(
+                evaluation_payload,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode()
+            decision_at = (now - timedelta(minutes=1)).isoformat()
+            artifact = {
+                "summary": {
+                    "schema_version": 4,
+                    "decision_at_utc": decision_at,
+                    "candidate_coverage_complete": True,
+                    "candidate_condition_index_complete": True,
+                    "candidate_evaluation_count": 1,
+                    "candidate_evaluation_encoding": (
+                        "zlib+base64+canonical-json-v3"
+                    ),
+                    "candidate_evaluations_sha256": hashlib.sha256(
+                        evaluation_json
+                    ).hexdigest(),
+                    "candidate_evaluations_zlib_b64": base64.b64encode(
+                        zlib.compress(evaluation_json)
+                    ).decode(),
+                }
+            }
+            trade_conn.execute(
+                "INSERT INTO decision_log VALUES "
+                "(1, 'global_single_order_auction', ?, ?)",
+                (json.dumps(artifact), decision_at),
+            )
         if with_yes_entry_command:
             trade_conn.execute(
                 "INSERT INTO venue_submission_envelopes VALUES (?, ?, 'YES')",
@@ -3972,6 +4022,30 @@ def test_high_yes_edge_accepts_canonical_global_entry_pause(
     assert surface["entries_pause_reason"] == "external:operator"
     assert surface["high_yes_edge_count"] == 1
     assert surface["missing_fsr_high_yes_edge_count"] == 1
+
+
+def test_high_yes_edge_accepts_current_global_auction_candidate(
+    tmp_path: Path,
+) -> None:
+    sd = tmp_path / "state"
+    sd.mkdir()
+    _write_high_yes_edge_dbs(sd, with_global_auction_candidate=True)
+
+    surface = live_health._high_yes_edge_missed_surface(
+        sd,
+        datetime.now(timezone.utc),
+        main_daemon_surface={"attested": True},
+    )
+
+    assert surface["ok"] is True
+    assert surface["issue"] is None
+    assert surface["missed_high_yes_edge_count"] == 0
+    edge = surface["missed_high_yes_edge_sample"]
+    assert edge == []
+    evidence = surface["global_auction_candidate_evidence"]
+    assert evidence["receipt_id"] == 1
+    assert evidence["candidate_evaluation_count"] == 1
+    assert evidence["yes_condition_count"] == 1
 
 
 def test_high_yes_edge_ignores_stale_executable_quote(
