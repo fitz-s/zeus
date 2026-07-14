@@ -264,6 +264,33 @@ def _edli_price_channel_world_trade_write_gate(*, owner: str) -> _PriceChannelWo
     return _PriceChannelWorldTradeWriteGate(owner=owner)
 
 
+@contextlib.contextmanager
+def _edli_price_channel_world_write_connection(*, owner: str):
+    """Yield one WORLD writer after all decision reads have completed."""
+
+    from src.events.triggers.market_channel_ingestor import _world_write_mutex
+    from src.state.db import get_world_connection
+    from src.state.write_coordinator import (
+        DBIdentity,
+        default_runtime_write_coordinator,
+    )
+
+    with _world_write_mutex():
+        with default_runtime_write_coordinator().lease(
+            (DBIdentity.WORLD,),
+            owner=owner,
+            write_class="live",
+            deadline_ms=PRICE_CHANNEL_DB_WRITE_LEASE_DEADLINE_MS,
+            max_hold_ms=PRICE_CHANNEL_DB_WRITE_MAX_HOLD_MS,
+        ):
+            conn = get_world_connection(write_class=None)
+            _bound_price_channel_sqlite_wait(conn)
+            try:
+                yield conn
+            finally:
+                conn.close()
+
+
 def _edli_price_channel_trade_write_context_factory(*, owner: str):
     def _factory():
         from src.state.write_coordinator import DBIdentity, default_runtime_write_coordinator
@@ -2144,6 +2171,7 @@ def _edli_refresh_held_position_quote_evidence(
                     feasibility_schema="trades",
                     coalescer=EventCoalescer(max_market_keys=1000),
                     market_event_sink=_edli_price_channel_redecision_sink(conn),
+                    market_event_sink_independently_coordinated=True,
                 ),
                 fetch_orderbook=fetch_orderbook,
                 fetch_orderbooks=fetch_orderbooks,
@@ -2336,6 +2364,7 @@ def _edli_refresh_candidate_priority_quote_evidence(
                     feasibility_schema="trades",
                     coalescer=EventCoalescer(max_market_keys=1000),
                     market_event_sink=_edli_price_channel_redecision_sink(conn),
+                    market_event_sink_independently_coordinated=True,
                 ),
                 fetch_orderbook=fetch_orderbook,
                 fetch_orderbooks=fetch_orderbooks,
@@ -2554,9 +2583,10 @@ def _edli_market_channel_ingestor_cycle() -> dict | None:
         )
         from src.state.db import get_world_connection_with_trades_required
 
-        # The long-lived market-channel ingestor writes quote evidence to trades and
-        # derived redecision events to world on one attached connection. It does not
-        # persist raw BOOK_SNAPSHOT/BEST_BID_ASK_CHANGED rows to opportunity_events.
+        # The long-lived market-channel ingestor commits quote evidence through one
+        # attached WORLD+TRADE connection. Derived redecision screening runs only after
+        # that commit on read-only connections, then emits through a short WORLD-only
+        # writer lease. It does not persist raw BOOK_SNAPSHOT/BEST_BID_ASK_CHANGED rows.
         # The NON-flocked helper is used here because this connection lives for the
         # whole forever-loop; holding cross-DB writer flocks for that lifetime would
         # starve every other writer. Feasibility writes are schema-qualified 'trades'
@@ -2691,6 +2721,7 @@ def _edli_market_channel_ingestor_cycle() -> dict | None:
                         feasibility_schema="trades",
                         coalescer=EventCoalescer(max_market_keys=1000),
                         market_event_sink=_edli_price_channel_redecision_sink(conn),
+                        market_event_sink_independently_coordinated=True,
                     ),
                     fetch_orderbook=clob.get_orderbook_snapshot,
                     fetch_orderbooks=getattr(clob, "get_orderbook_snapshots", None),

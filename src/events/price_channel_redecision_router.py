@@ -39,6 +39,7 @@ src.execution / src.strategy / src.signal) at load time.
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 from datetime import datetime, timezone
@@ -434,7 +435,7 @@ def _edli_redecision_event_with_origin(event, origin: str):
         return event
 
 
-def _edli_emit_price_channel_redecisions_for_events(
+def _edli_price_channel_redecision_events_for_events(
     world_conn,
     trade_conn,
     forecasts_conn,
@@ -442,8 +443,8 @@ def _edli_emit_price_channel_redecisions_for_events(
     *,
     received_at: str,
     trade_schema: str = "",
-) -> int:
-    """Emit EDLI_REDECISION_PENDING for money-path quote changes.
+) -> list:
+    """Build EDLI_REDECISION_PENDING events from durable quote changes.
 
     The raw market-channel events stay cache-only/ignored. This function derives
     the family-level decision trigger from successfully persisted quote evidence,
@@ -500,16 +501,15 @@ def _edli_emit_price_channel_redecisions_for_events(
         len(families),
     )
     if not families:
-        return 0
-    from src.events.event_writer import EventWriter
+        return []
     from src.events.triggers.forecast_snapshot_ready import (
         ForecastSnapshotReadyTrigger,
         executable_forecast_live_eligible_reader,
     )
+    from src.events.event_writer import EventWriter
 
-    writer = EventWriter(world_conn)
     trigger = ForecastSnapshotReadyTrigger(
-        writer,
+        EventWriter(world_conn),
         live_eligibility_reader=executable_forecast_live_eligible_reader(forecasts_conn),
     )
     events_to_emit = trigger.build_committed_snapshot_events(
@@ -522,14 +522,50 @@ def _edli_emit_price_channel_redecisions_for_events(
         event_type="EDLI_REDECISION_PENDING",
         restrict_to_families=families,
     )
-    emitted = writer.write_many(
-        [_edli_redecision_event_with_origin(event, "market_price") for event in events_to_emit]
+    return [_edli_redecision_event_with_origin(event, "market_price") for event in events_to_emit]
+
+
+def _edli_emit_price_channel_redecisions_for_events(
+    world_conn,
+    trade_conn,
+    forecasts_conn,
+    events,
+    *,
+    received_at: str,
+    trade_schema: str = "",
+) -> int:
+    """Emit redecision events on a caller-coordinated WORLD writer."""
+
+    events_to_emit = _edli_price_channel_redecision_events_for_events(
+        world_conn,
+        trade_conn,
+        forecasts_conn,
+        events,
+        received_at=received_at,
+        trade_schema=trade_schema,
     )
+    return _edli_write_price_channel_redecision_events(world_conn, events_to_emit)
+
+
+def _edli_write_price_channel_redecision_events(world_conn, events) -> int:
+    """Atomically debounce and write one pending redecision per family."""
+
+    from src.events.event_writer import EventWriter
+
+    claimed = _edli_pending_redecision_entity_keys(world_conn)
+    admitted = []
+    for event in events:
+        entity_key = str(getattr(event, "entity_key", "") or "").strip()
+        if not entity_key or entity_key in claimed:
+            continue
+        claimed.add(entity_key)
+        admitted.append(event)
+    emitted = EventWriter(world_conn).write_many(admitted)
     return sum(1 for result in emitted if result.inserted)
 
 
-def _edli_price_channel_redecision_sink(world_with_trades_conn, *, trade_schema: str = "trades"):
-    """Build a market-event sink bound to the attached world+trades connection.
+def _edli_price_channel_redecision_sink(_world_with_trades_conn=None, *, trade_schema: str = "trades"):
+    """Build an independently coordinated market-event sink.
 
     This is the ONE seam the venue-fact boundary (``price_channel_ingest``) reaches into
     the decision layer through: it hands this sink to ``MarketChannelIngestor`` as its
@@ -537,20 +573,45 @@ def _edli_price_channel_redecision_sink(world_with_trades_conn, *, trade_schema:
     """
 
     def _sink(events) -> None:
-        from src.state.db import get_forecasts_connection_read_only
+        from src.state.db import (
+            get_forecasts_connection_read_only,
+            get_trade_connection_read_only,
+            get_world_connection_read_only,
+        )
 
-        forecasts_conn = get_forecasts_connection_read_only()
-        try:
-            emitted = _edli_emit_price_channel_redecisions_for_events(
-                world_with_trades_conn,
-                world_with_trades_conn,
-                forecasts_conn,
+        with contextlib.ExitStack() as stack:
+            world_read = stack.enter_context(
+                contextlib.closing(get_world_connection_read_only())
+            )
+            trade_read = stack.enter_context(
+                contextlib.closing(get_trade_connection_read_only())
+            )
+            forecasts_read = stack.enter_context(
+                contextlib.closing(get_forecasts_connection_read_only())
+            )
+            events_to_emit = _edli_price_channel_redecision_events_for_events(
+                world_read,
+                trade_read,
+                forecasts_read,
                 events,
                 received_at=datetime.now(timezone.utc).isoformat(),
-                trade_schema=trade_schema,
+                trade_schema="",
             )
-        finally:
-            forecasts_conn.close()
+        if not events_to_emit:
+            return
+
+        from src.ingest.price_channel_ingest import (
+            _edli_price_channel_world_write_connection,
+        )
+
+        with _edli_price_channel_world_write_connection(
+            owner="price_channel_redecision_emit"
+        ) as world_write:
+            emitted = _edli_write_price_channel_redecision_events(
+                world_write,
+                events_to_emit,
+            )
+            world_write.commit()
         if emitted:
             logger.info(
                 "EDLI market-channel price trigger emitted redecision events=%d quote_events=%d",

@@ -117,6 +117,7 @@ class MarketChannelIngestor:
         quote_cache: QuoteCache | None = None,
         coalescer: EventCoalescer | None = None,
         market_event_sink: Callable[[list[OpportunityEvent]], None] | None = None,
+        market_event_sink_independently_coordinated: bool = False,
     ) -> None:
         self._writer = writer
         self._feasibility_conn = feasibility_conn or writer.conn
@@ -132,8 +133,20 @@ class MarketChannelIngestor:
         self.quote_cache = quote_cache or QuoteCache()
         self._coalescer = coalescer
         self._market_event_sink = market_event_sink
+        self._market_event_sink_independently_coordinated = bool(
+            market_event_sink_independently_coordinated
+        )
         self._deferred_market_event_sink_depth = 0
         self._deferred_market_event_sink_events: list[OpportunityEvent] = []
+        self._deferred_market_event_sink_indexes: dict[tuple[str, ...], int] = {}
+        self._deferred_market_event_sink_limit = max(
+            128,
+            len(self._active_token_ids | set(self._token_metadata)) + 32,
+        )
+        self.deferred_market_event_sink_retry_count = 0
+        self.deferred_market_event_sink_coalesced_count = 0
+        self.deferred_market_event_sink_overflow_count = 0
+        self._deferred_market_event_sink_retry_not_before = 0.0
         self._seen_quote_event_ids: set[str] = set()
         self._seen_quote_event_order: deque[str] = deque()
         self._seen_quote_event_limit = 20_000
@@ -508,7 +521,10 @@ class MarketChannelIngestor:
         if self._market_event_sink is None or not events:
             return
         if self._deferred_market_event_sink_depth > 0:
-            self._deferred_market_event_sink_events.extend(events)
+            if self._market_event_sink_independently_coordinated:
+                self._coalesce_deferred_market_event_sink_events(events)
+            else:
+                self._deferred_market_event_sink_events.extend(events)
             return
         try:
             self._market_event_sink(events)
@@ -520,6 +536,68 @@ class MarketChannelIngestor:
                 exc_info=True,
             )
 
+    @staticmethod
+    def _deferred_market_event_sink_key(event: OpportunityEvent) -> tuple[str, ...]:
+        event_type = str(getattr(event, "event_type", "") or "")
+        if event_type in {"BOOK_SNAPSHOT", "BEST_BID_ASK_CHANGED"}:
+            try:
+                payload = json.loads(str(getattr(event, "payload_json", "") or "{}"))
+            except Exception:
+                payload = {}
+            token_id = str(payload.get("token_id") or "").strip()
+            if token_id:
+                return ("token", token_id)
+        entity_key = str(getattr(event, "entity_key", "") or "").strip()
+        if entity_key:
+            return ("entity", event_type, entity_key)
+        return ("event", str(getattr(event, "event_id", "") or ""))
+
+    def _coalesce_deferred_market_event_sink_events(
+        self,
+        events: list[OpportunityEvent],
+    ) -> None:
+        for event in events:
+            key = self._deferred_market_event_sink_key(event)
+            index = self._deferred_market_event_sink_indexes.get(key)
+            if index is None:
+                self._deferred_market_event_sink_indexes[key] = len(
+                    self._deferred_market_event_sink_events
+                )
+                self._deferred_market_event_sink_events.append(event)
+            else:
+                self._deferred_market_event_sink_events[index] = event
+                self.deferred_market_event_sink_coalesced_count += 1
+
+        limit = self._deferred_market_event_sink_limit
+        if len(self._deferred_market_event_sink_events) <= limit:
+            return
+        active_keys = {("token", str(token_id)) for token_id in self._active_token_ids}
+        keyed = [
+            (self._deferred_market_event_sink_key(event), event)
+            for event in self._deferred_market_event_sink_events
+        ]
+        active = [(key, event) for key, event in keyed if key in active_keys]
+        other = [(key, event) for key, event in keyed if key not in active_keys]
+        available = max(0, limit - len(active))
+        kept = active + other[-available:] if available else active
+        overflow = max(0, len(keyed) - len(kept))
+        if overflow:
+            self.deferred_market_event_sink_overflow_count += overflow
+            _logger.warning(
+                "market-channel deferred sink coalescing overflow: dropped_nonactive=%d "
+                "backlog=%d limit=%d active=%d total_overflow=%d",
+                overflow,
+                len(kept),
+                limit,
+                len(active),
+                self.deferred_market_event_sink_overflow_count,
+            )
+        if overflow:
+            self._deferred_market_event_sink_events = [event for _key, event in kept]
+            self._deferred_market_event_sink_indexes = {
+                key: index for index, (key, _event) in enumerate(kept)
+            }
+
     @contextlib.contextmanager
     def defer_market_event_sink(self) -> Iterator[None]:
         self._deferred_market_event_sink_depth += 1
@@ -528,25 +606,54 @@ class MarketChannelIngestor:
         except BaseException:
             if self._deferred_market_event_sink_depth == 1:
                 self._deferred_market_event_sink_events.clear()
+                self._deferred_market_event_sink_indexes.clear()
             raise
         finally:
             self._deferred_market_event_sink_depth -= 1
 
     def flush_deferred_market_event_sink(self) -> None:
+        """Flush retryable derived work without discarding a failed batch.
+
+        A reconnect always REST-seeds the active universe, so process loss reconstructs
+        current quote triggers; within one process a failed sink stays buffered until the
+        next seed chunk or websocket message retries it.
+        """
         if self._market_event_sink is None or not self._deferred_market_event_sink_events:
             self._deferred_market_event_sink_events.clear()
+            self._deferred_market_event_sink_indexes.clear()
+            return
+        if time.monotonic() < self._deferred_market_event_sink_retry_not_before:
             return
         events = list(self._deferred_market_event_sink_events)
-        self._deferred_market_event_sink_events.clear()
         try:
             self._market_event_sink(events)
         except Exception as exc:  # noqa: BLE001 - derived sink must not poison ingest.
+            self.deferred_market_event_sink_retry_count += 1
+            delay = min(
+                30.0,
+                float(2 ** min(self.deferred_market_event_sink_retry_count - 1, 5)),
+            )
+            self._deferred_market_event_sink_retry_not_before = time.monotonic() + delay
             _logger.warning(
-                "market-channel deferred sink failed: %s: %s",
+                "market-channel deferred sink failed; backlog=%d retry_count=%d "
+                "retry_after_seconds=%.1f coalesced=%d overflow=%d: %s: %s",
+                len(events),
+                self.deferred_market_event_sink_retry_count,
+                delay,
+                self.deferred_market_event_sink_coalesced_count,
+                self.deferred_market_event_sink_overflow_count,
                 type(exc).__name__,
                 exc,
                 exc_info=True,
             )
+            return
+        del self._deferred_market_event_sink_events[: len(events)]
+        self._deferred_market_event_sink_indexes = {
+            self._deferred_market_event_sink_key(event): index
+            for index, event in enumerate(self._deferred_market_event_sink_events)
+        }
+        self.deferred_market_event_sink_retry_count = 0
+        self._deferred_market_event_sink_retry_not_before = 0.0
 
 
 def active_weather_token_ids_from_snapshots(
@@ -1039,9 +1146,12 @@ class MarketChannelOnlineService:
                             pre_cached=pre_captured_books,
                             token_ids=pre_captured_books.keys(),
                         )
-                        self.ingestor.flush_deferred_market_event_sink()
+                        if not self.ingestor._market_event_sink_independently_coordinated:
+                            self.ingestor.flush_deferred_market_event_sink()
                         if commit is not None:
                             commit()
+                    if self.ingestor._market_event_sink_independently_coordinated:
+                        self.ingestor.flush_deferred_market_event_sink()
                 except TimeoutError as exc:
                     self.rest_seed_backpressure_count += 1
                     self.rest_seed_backpressure_reason = str(exc)
@@ -1248,9 +1358,12 @@ class MarketChannelOnlineService:
                         token_ids=pre_captured_books.keys(),
                         gap_start=gap_start_captured,
                     )
-                    self.ingestor.flush_deferred_market_event_sink()
+                    if not self.ingestor._market_event_sink_independently_coordinated:
+                        self.ingestor.flush_deferred_market_event_sink()
                     if commit is not None:
                         commit()
+                if self.ingestor._market_event_sink_independently_coordinated:
+                    self.ingestor.flush_deferred_market_event_sink()
             written += len(results)
             if logger is not None:
                 logger.debug(
@@ -1352,9 +1465,12 @@ class MarketChannelOnlineService:
                                     if isinstance(action_or_result, MarketChannelAction):
                                         pending_actions.append(action_or_result)
                                 self.ingestor.flush_coalesced(market_budget=100)
-                                self.ingestor.flush_deferred_market_event_sink()
+                                if not self.ingestor._market_event_sink_independently_coordinated:
+                                    self.ingestor.flush_deferred_market_event_sink()
                                 if commit is not None:
                                     commit()
+                            if self.ingestor._market_event_sink_independently_coordinated:
+                                self.ingestor.flush_deferred_market_event_sink()
                         for _action in pending_actions:
                             self._handle_action(_action)
             except Exception as exc:  # noqa: BLE001 - network loop must retry

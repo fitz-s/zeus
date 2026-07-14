@@ -3,11 +3,11 @@
 # Last reused/audited: 2026-07-11
 # Authority basis: PR415 ChatGPT deep-review blocker B5 (INV-37). The held- and
 #   candidate-priority quote-evidence ingest (and the forever market-channel loop)
-#   must write the world event (opportunity_events) AND the trade-owned book witness
-#   (execution_feasibility_evidence) through ONE attached connection + a single commit
-#   (world.db MAIN + zeus_trades.db ATTACHed as 'trades', schema-qualified feasibility
-#   write), NEVER two independent connections committed separately.
-"""B5 antibody: price-channel quote-evidence ingest is a single-writer cross-DB path.
+#   must commit quote evidence through ONE attached connection (world.db MAIN +
+#   zeus_trades.db ATTACHed as 'trades', schema-qualified feasibility write), NEVER two
+#   independent connections. Derived redecision screening is retryable work and must not
+#   extend that atomic quote-evidence writer unit.
+"""B5 antibody: price-channel quote evidence is a single-writer cross-DB path.
 
 RED-on-revert: the prior shape opened
     world_conn = get_world_connection(write_class="live")
@@ -277,16 +277,11 @@ def test_forever_ingestor_passes_unified_world_trade_gate():
         ("run_websocket_forever", "_world_mutex"),
     ),
 )
-def test_deferred_redecision_sink_commits_inside_world_writer_gate(
+def test_deferred_redecision_sink_supports_atomic_and_independent_flush(
     func_name: str,
     mutex_name: str,
 ):
-    """Quote evidence and its derived redecision event are one writer unit.
-
-    Flushing after commit/gate release starts a new implicit SQLite transaction on
-    the long-lived price-channel connection and can hold the world WAL writer lock
-    across the next websocket receive.
-    """
+    """Default sinks stay atomic; independently coordinated sinks run post-commit."""
 
     tree = ast.parse(_MARKET_CHANNEL_MODULE.read_text(encoding="utf-8"))
     fn = next(
@@ -313,7 +308,7 @@ def test_deferred_redecision_sink_commits_inside_world_writer_gate(
         )
     ]
 
-    assert len(all_flushes) == 1
+    assert len(all_flushes) == 2
     assert len(gates) == 1
     flushes_in_gate = [node for node in ast.walk(gates[0]) if node in all_flushes]
     commits_in_gate = [
@@ -326,6 +321,32 @@ def test_deferred_redecision_sink_commits_inside_world_writer_gate(
     assert len(flushes_in_gate) == 1
     assert len(commits_in_gate) == 1
     assert flushes_in_gate[0].lineno < commits_in_gate[0].lineno
+    flushes_after_gate = [node for node in all_flushes if node not in flushes_in_gate]
+    assert len(flushes_after_gate) == 1
+    assert flushes_after_gate[0].lineno > gates[0].end_lineno
+
+
+@pytest.mark.parametrize(
+    "func_name",
+    (
+        "_edli_refresh_held_position_quote_evidence",
+        "_edli_refresh_candidate_priority_quote_evidence",
+        "_edli_market_channel_ingestor_cycle",
+    ),
+)
+def test_live_price_redecision_sink_is_independently_coordinated(func_name: str):
+    node = _func_node(func_name)
+    values = [
+        kw.value.value
+        for call in ast.walk(node)
+        if isinstance(call, ast.Call)
+        and isinstance(call.func, ast.Name)
+        and call.func.id == "MarketChannelIngestor"
+        for kw in call.keywords
+        if kw.arg == "market_event_sink_independently_coordinated"
+        and isinstance(kw.value, ast.Constant)
+    ]
+    assert values == [True]
 
 
 def test_world_connection_with_trades_flocked_attaches_trades_world_main():

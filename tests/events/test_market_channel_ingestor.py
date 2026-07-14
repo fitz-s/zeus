@@ -547,6 +547,190 @@ def test_rest_seed_commits_deferred_sink_inside_world_writer_gate():
     assert conn.execute("SELECT COUNT(*) FROM derived_sink_writes").fetchone()[0] == 1
 
 
+def test_rest_seed_independent_sink_flushes_after_world_writer_gate():
+    conn, writer = _conn_writer()
+    order: list[str] = []
+    held = False
+
+    class RecordingWorldMutex:
+        def __enter__(self):
+            nonlocal held
+            held = True
+            order.append("enter")
+            return self
+
+        def __exit__(self, exc_type, exc, tb):  # noqa: ANN001
+            nonlocal held
+            order.append("exit")
+            held = False
+            return False
+
+    def sink(events) -> None:  # noqa: ANN001
+        assert events
+        assert held is False
+        assert conn.in_transaction is False
+        order.append("sink")
+
+    def commit() -> None:
+        conn.commit()
+        order.append("commit")
+
+    ingestor = MarketChannelIngestor(
+        writer,
+        active_token_ids={"token-1"},
+        token_metadata=_metadata(),
+        market_event_sink=sink,
+        market_event_sink_independently_coordinated=True,
+    )
+    service = MarketChannelOnlineService(
+        ingestor,
+        fetch_orderbook=lambda token_id: {
+            "asset_id": token_id,
+            "market": "0xcondition",
+            "bids": [{"price": "0.48", "size": "10"}],
+            "asks": [{"price": "0.52", "size": "10"}],
+            "hash": f"hash-{token_id}",
+        },
+    )
+
+    written = service.seed_rest_books_in_chunks(
+        token_ids=["token-1"],
+        received_at="2026-07-14T09:00:00+00:00",
+        world_mutex=RecordingWorldMutex(),
+        commit=commit,
+        chunk_size=1,
+    )
+
+    assert written == 1
+    assert order == ["enter", "commit", "exit", "sink"]
+    assert conn.in_transaction is False
+
+
+def test_independent_sink_failure_retains_events_for_retry():
+    conn, writer = _conn_writer()
+    calls: list[list[str]] = []
+
+    def sink(events) -> None:  # noqa: ANN001
+        calls.append([event.event_id for event in events])
+        if len(calls) == 1:
+            raise TimeoutError("world writer busy")
+
+    ingestor = MarketChannelIngestor(
+        writer,
+        active_token_ids={"token-1"},
+        token_metadata=_metadata(),
+        market_event_sink=sink,
+        market_event_sink_independently_coordinated=True,
+    )
+    service = MarketChannelOnlineService(
+        ingestor,
+        fetch_orderbook=lambda token_id: {
+            "asset_id": token_id,
+            "market": "0xcondition",
+            "bids": [{"price": "0.48", "size": "10"}],
+            "asks": [{"price": "0.52", "size": "10"}],
+            "hash": f"hash-{token_id}",
+        },
+    )
+
+    assert service.seed_rest_books_in_chunks(
+        token_ids=["token-1"],
+        received_at="2026-07-14T09:00:00+00:00",
+        world_mutex=nullcontext(),
+        commit=conn.commit,
+        chunk_size=1,
+    ) == 1
+    assert len(ingestor._deferred_market_event_sink_events) == 1
+
+    ingestor._deferred_market_event_sink_retry_not_before = 0.0
+    ingestor.flush_deferred_market_event_sink()
+
+    assert calls[0] == calls[1]
+    assert ingestor._deferred_market_event_sink_events == []
+
+
+def test_independent_sink_sustained_failure_is_bounded_and_backed_off():
+    import types
+
+    conn, writer = _conn_writer()
+    attempts = 0
+
+    def sink(_events) -> None:  # noqa: ANN001
+        nonlocal attempts
+        attempts += 1
+        raise TimeoutError("world writer busy")
+
+    tokens = {"token-1", "token-2", "token-3"}
+    ingestor = MarketChannelIngestor(
+        writer,
+        active_token_ids=tokens,
+        token_metadata={token: _metadata(token)[token] for token in tokens},
+        market_event_sink=sink,
+        market_event_sink_independently_coordinated=True,
+    )
+
+    def event(token: str, serial: int):
+        return types.SimpleNamespace(
+            event_id=f"event-{token}-{serial}",
+            event_type="BOOK_SNAPSHOT",
+            entity_key=f"book:{token}",
+            payload_json=f'{{"token_id":"{token}"}}',
+        )
+
+    for serial in range(12):
+        token = f"token-{serial % 3 + 1}"
+        with ingestor.defer_market_event_sink():
+            ingestor._notify_market_event_sink([event(token, serial)])
+            ingestor._deferred_market_event_sink_retry_not_before = 0.0
+            ingestor.flush_deferred_market_event_sink()
+
+    assert attempts == 12
+    assert len(ingestor._deferred_market_event_sink_events) == len(tokens)
+    assert ingestor.deferred_market_event_sink_coalesced_count == 9
+    assert ingestor.deferred_market_event_sink_overflow_count == 0
+    assert ingestor.deferred_market_event_sink_retry_count == 12
+    assert ingestor._deferred_market_event_sink_retry_not_before > 0.0
+    ingestor.flush_deferred_market_event_sink()
+    assert attempts == 12
+
+
+def test_independent_sink_overflow_preserves_every_active_token():
+    import json
+    import types
+
+    conn, writer = _conn_writer()
+    active_tokens = {f"active-{index}" for index in range(130)}
+    ingestor = MarketChannelIngestor(
+        writer,
+        active_token_ids=active_tokens,
+        token_metadata={},
+        market_event_sink=lambda _events: None,
+        market_event_sink_independently_coordinated=True,
+    )
+
+    def event(token: str):
+        return types.SimpleNamespace(
+            event_id=f"event-{token}",
+            event_type="BOOK_SNAPSHOT",
+            entity_key=f"book:{token}",
+            payload_json=json.dumps({"token_id": token}),
+        )
+
+    with ingestor.defer_market_event_sink():
+        for token in sorted(active_tokens):
+            ingestor._notify_market_event_sink([event(token)])
+        for index in range(100):
+            ingestor._notify_market_event_sink([event(f"nonactive-{index}")])
+
+    retained = {
+        json.loads(item.payload_json)["token_id"]
+        for item in ingestor._deferred_market_event_sink_events
+    }
+    assert active_tokens <= retained
+    assert len(retained) == ingestor._deferred_market_event_sink_limit
+    assert ingestor.deferred_market_event_sink_overflow_count == 68
+
+
 def test_rest_seed_write_backpressure_keeps_committed_chunks_and_stops():
     conn, writer = _conn_writer()
     cache = QuoteCache()

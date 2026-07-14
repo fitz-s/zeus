@@ -30,6 +30,7 @@
 from __future__ import annotations
 
 import ast
+import contextlib
 import inspect
 import sqlite3
 import time
@@ -746,9 +747,9 @@ def test_price_channel_resting_order_tokens_resolve_bypassing_screen():
 
 
 def test_price_channel_redecision_emit_routes_nonheld_entries_through_screen():
-    import src.ingest.price_channel_ingest as pci
+    from src.events import price_channel_redecision_router as router
 
-    src = inspect.getsource(pci._edli_emit_price_channel_redecisions_for_events)
+    src = inspect.getsource(router._edli_price_channel_redecision_events_for_events)
 
     assert "held_families = _edli_held_family_keys_for_tokens" in src
     assert "entry_families = _edli_screened_entry_family_keys_for_price_channel" in src
@@ -766,6 +767,137 @@ def test_price_channel_redecision_emit_routes_nonheld_entries_through_screen():
     assert src.index("entry_families = _edli_screened_entry_family_keys_for_price_channel") < src.index(
         "resting_families = _edli_resting_family_keys_for_tokens"
     )
+
+
+def test_price_channel_redecision_sink_closes_reads_before_world_writer(monkeypatch):
+    from src.events import price_channel_redecision_router as router
+    from src.ingest import price_channel_ingest
+    from src.state import db
+
+    order: list[str] = []
+
+    class ReadConnection:
+        def __init__(self, name: str) -> None:
+            self.name = name
+            order.append(f"open:{name}")
+
+        def close(self) -> None:
+            order.append(f"close:{self.name}")
+
+    class WriteConnection:
+        def commit(self) -> None:
+            order.append("commit:world")
+
+    monkeypatch.setattr(db, "get_world_connection_read_only", lambda: ReadConnection("world"))
+    monkeypatch.setattr(db, "get_trade_connection_read_only", lambda: ReadConnection("trade"))
+    monkeypatch.setattr(
+        db,
+        "get_forecasts_connection_read_only",
+        lambda: ReadConnection("forecasts"),
+    )
+
+    def build(world, trade, forecasts, events, **_kwargs):  # noqa: ANN001
+        assert [world.name, trade.name, forecasts.name] == ["world", "trade", "forecasts"]
+        assert events == ["quote"]
+        order.append("build")
+        return ["redecision"]
+
+    monkeypatch.setattr(router, "_edli_price_channel_redecision_events_for_events", build)
+
+    @contextlib.contextmanager
+    def world_writer(*, owner: str):
+        assert owner == "price_channel_redecision_emit"
+        order.append("enter:world-writer")
+        try:
+            yield WriteConnection()
+        finally:
+            order.append("exit:world-writer")
+
+    monkeypatch.setattr(
+        price_channel_ingest,
+        "_edli_price_channel_world_write_connection",
+        world_writer,
+    )
+
+    def write(_conn, events):  # noqa: ANN001
+        assert events == ["redecision"]
+        order.append("write:redecision")
+        return 1
+
+    monkeypatch.setattr(router, "_edli_write_price_channel_redecision_events", write)
+
+    router._edli_price_channel_redecision_sink()(["quote"])
+
+    assert order == [
+        "open:world",
+        "open:trade",
+        "open:forecasts",
+        "build",
+        "close:forecasts",
+        "close:trade",
+        "close:world",
+        "enter:world-writer",
+        "write:redecision",
+        "commit:world",
+        "exit:world-writer",
+    ]
+
+
+def test_price_channel_redecision_sink_closes_partial_read_open(monkeypatch):
+    from src.events import price_channel_redecision_router as router
+    from src.state import db
+
+    closed = False
+
+    class WorldRead:
+        def close(self) -> None:
+            nonlocal closed
+            closed = True
+
+    monkeypatch.setattr(db, "get_world_connection_read_only", WorldRead)
+    monkeypatch.setattr(
+        db,
+        "get_trade_connection_read_only",
+        lambda: (_ for _ in ()).throw(RuntimeError("trade open failed")),
+    )
+
+    with pytest.raises(RuntimeError, match="trade open failed"):
+        router._edli_price_channel_redecision_sink()(["quote"])
+
+    assert closed is True
+
+
+def test_price_channel_redecision_writer_claims_one_pending_event_per_family():
+    from src.events.opportunity_event import make_opportunity_event
+    from src.events.price_channel_redecision_router import (
+        _edli_write_price_channel_redecision_events,
+    )
+    from src.state.db import init_schema
+
+    world = sqlite3.connect(":memory:")
+    init_schema(world)
+
+    def event(source: str, at: str):
+        return make_opportunity_event(
+            event_type="EDLI_REDECISION_PENDING",
+            entity_key="Munich|2026-07-15|high",
+            source=source,
+            observed_at=at,
+            available_at=at,
+            received_at=at,
+            payload={"source": source},
+        )
+
+    first = event("price:a", "2026-07-14T09:00:00+00:00")
+    raced = event("price:b", "2026-07-14T09:00:01+00:00")
+    later = event("price:c", "2026-07-14T09:00:02+00:00")
+
+    assert _edli_write_price_channel_redecision_events(world, [first, raced]) == 1
+    assert _edli_write_price_channel_redecision_events(world, [later]) == 0
+    assert world.execute(
+        "SELECT COUNT(*) FROM opportunity_events WHERE entity_key = ?",
+        (first.entity_key,),
+    ).fetchone()[0] == 1
 
 
 def _seed_committed_denver_2026_06_20(forecasts_conn) -> None:
