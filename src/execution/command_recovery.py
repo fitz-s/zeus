@@ -9152,6 +9152,15 @@ def _partial_remainder_candidates(
     live_tick_scope: bool = False,
     terminal_exit_only: bool = False,
 ) -> list[dict]:
+    def _needs_remainder_reconcile(command: dict) -> bool:
+        if str(command.get("state") or "") != CommandState.FILLED.value:
+            return True
+        fill_summary = _positive_fill_trade_fact_summary(
+            conn,
+            str(command.get("command_id") or ""),
+        )
+        return _command_fill_coverage_state(command, fill_summary) == "partial"
+
     state_placeholders = ",".join("?" for _ in _PARTIAL_REMAINDER_STATES)
     if terminal_exit_only:
         phase_placeholders = ",".join("?" for _ in _HARD_TERMINAL_REPAIR_PHASES)
@@ -9190,7 +9199,11 @@ def _partial_remainder_candidates(
             sql,
             (*tuple(_PARTIAL_REMAINDER_STATES), updated_before, updated_before),
         ).fetchall()
-        return [_dict_row(row) for row in rows]
+        return [
+            command
+            for row in rows
+            if _needs_remainder_reconcile(command := _dict_row(row))
+        ]
 
     open_phase_placeholders = ",".join("?" for _ in _RUNTIME_OPEN_REPAIR_PHASES)
     proof_rank = _order_fact_proof_rank_sql("latest")
@@ -9233,7 +9246,11 @@ def _partial_remainder_candidates(
             *tuple(_RUNTIME_OPEN_REPAIR_PHASES),
         ),
     ).fetchall()
-    return [_dict_row(row) for row in rows]
+    return [
+        command
+        for row in rows
+        if _needs_remainder_reconcile(command := _dict_row(row))
+    ]
 
 
 def _open_order_id(order: object) -> str | None:

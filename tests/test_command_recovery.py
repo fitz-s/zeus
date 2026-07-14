@@ -4465,16 +4465,17 @@ class TestRecoveryResolutionTable:
         assert "ord-late-candidate" in priming["order_ids"]
 
     @pytest.mark.parametrize(
-        ("remaining_size", "position_phase", "live_tick_expected"),
+        ("filled_size", "remaining_size", "position_phase", "live_tick_expected"),
         [
-            ("0", "economically_closed", False),
-            ("2", "economically_closed", True),
-            ("0", "active", True),
+            ("10", "0", "economically_closed", False),
+            ("8", "2", "economically_closed", True),
+            ("10", "0", "active", False),
         ],
     )
-    def test_live_tick_primes_filled_order_only_for_remainder_or_runtime_open_position(
+    def test_live_tick_primes_filled_order_only_for_canonical_partial_coverage(
         self,
         conn,
+        filled_size,
         remaining_size,
         position_phase,
         live_tick_expected,
@@ -4512,8 +4513,14 @@ class TestRecoveryResolutionTable:
             conn,
             order_id="ord-filled-scope",
             state="PARTIALLY_MATCHED" if remaining_size != "0" else "MATCHED",
-            matched_size="8" if remaining_size != "0" else "10",
+            matched_size=filled_size,
             remaining_size=remaining_size,
+        )
+        _append_confirmed_trade_fact(
+            conn,
+            order_id="ord-filled-scope",
+            filled_size=filled_size,
+            fill_price="0.50",
         )
 
         live_tick = _collect_recovery_priming_keys(conn, scope="live_tick")
@@ -12449,6 +12456,75 @@ class TestRecoveryResolutionTable:
             "cost_basis_usd": 0.625,
             "order_status": "partial",
         }
+
+    def test_complete_filled_entry_is_not_a_partial_remainder_candidate(self, conn):
+        _insert(conn, size=5.0)
+        _advance_to_acked(conn, venue_order_id="ord-filled")
+        _seed_pending_entry_projection(conn, order_id="ord-filled")
+        conn.execute(
+            """
+            UPDATE venue_commands
+               SET state = 'FILLED',
+                   updated_at = '2026-04-26T00:06:00Z'
+             WHERE command_id = 'cmd-001'
+            """
+        )
+        conn.execute(
+            """
+            UPDATE position_current
+               SET phase = 'active',
+                   shares = 5.0,
+                   cost_basis_usd = 2.5,
+                   entry_price = 0.5,
+                   order_status = 'filled'
+             WHERE position_id = 'pos-001'
+            """
+        )
+        _append_confirmed_trade_fact(
+            conn,
+            order_id="ord-filled",
+            filled_size="5",
+            fill_price="0.50",
+        )
+
+        from src.execution.command_recovery import _partial_remainder_candidates
+
+        assert _partial_remainder_candidates(conn, live_tick_scope=True) == []
+
+    def test_incomplete_filled_entry_remains_a_partial_remainder_candidate(self, conn):
+        _insert(conn, size=5.0)
+        _advance_to_acked(conn, venue_order_id="ord-filled-partial")
+        _seed_pending_entry_projection(conn, order_id="ord-filled-partial")
+        conn.execute(
+            """
+            UPDATE venue_commands
+               SET state = 'FILLED',
+                   updated_at = '2026-04-26T00:06:00Z'
+             WHERE command_id = 'cmd-001'
+            """
+        )
+        conn.execute(
+            """
+            UPDATE position_current
+               SET phase = 'active',
+                   shares = 1.25,
+                   cost_basis_usd = 0.625,
+                   entry_price = 0.5,
+                   order_status = 'partial'
+             WHERE position_id = 'pos-001'
+            """
+        )
+        _append_confirmed_trade_fact(
+            conn,
+            order_id="ord-filled-partial",
+            filled_size="1.25",
+            fill_price="0.50",
+        )
+
+        from src.execution.command_recovery import _partial_remainder_candidates
+
+        candidates = _partial_remainder_candidates(conn, live_tick_scope=True)
+        assert [candidate["command_id"] for candidate in candidates] == ["cmd-001"]
 
     def test_partial_exit_matched_trade_fact_projects_pending_exit_without_economic_close(
         self,
