@@ -739,6 +739,7 @@ def test_executor_certified_global_increment_reuses_reconciled_position_but_not_
         "projected_cost_basis_usd": "16.0798",
         "aggregate_shares": "24.0",
         "aggregate_cost_basis_usd": "16.08",
+        "execution_fact_count": 1,
         "cost_abs_tolerance_usd": "0.0001",
     }
     mem_db.execute(
@@ -789,6 +790,79 @@ def test_executor_certified_global_increment_reuses_reconciled_position_but_not_
 
     assert orphan_fill["allowed"] is False
     assert orphan_fill["existing_command_id"] == "cmd-orphan-fill"
+
+
+def test_certified_increment_allows_bounded_per_fill_cost_quantization(mem_db):
+    fills = (
+        ("cmd-1", 16.2, 0.75),
+        ("cmd-2", 21.0, 0.77),
+        ("cmd-3", 35.306664, 0.7443353470041803),
+        ("cmd-4", 34.0, 0.74),
+    )
+    _insert_position(
+        mem_db,
+        "active-position",
+        "active",
+        token_id=TOKEN_X_NO,
+        direction="buy_no",
+        no_token_id=TOKEN_X,
+        shares=106.506664,
+        cost_basis_usd=79.7598,
+    )
+    for index, (command_id, shares, price) in enumerate(fills, start=1):
+        mem_db.execute(
+            """INSERT INTO venue_commands
+               (command_id, position_id, token_id, intent_kind, side,
+                venue_order_id, state, created_at, updated_at)
+               VALUES (?, 'active-position', ?, 'ENTRY', 'BUY', ?, 'FILLED', ?, ?)""",
+            (
+                command_id,
+                TOKEN_X,
+                f"order-{index}",
+                f"2026-07-14T05:0{index}:00+00:00",
+                f"2026-07-14T05:0{index}:01+00:00",
+            ),
+        )
+        mem_db.execute(
+            """INSERT INTO execution_fact
+               (intent_id, position_id, command_id, order_role, filled_at,
+                posted_at, fill_price, shares, terminal_exec_status, venue_status)
+               VALUES (?, 'active-position', ?, 'entry', ?, ?, ?, ?, 'filled', 'FILLED')""",
+            (
+                f"active-position:entry:{command_id}",
+                command_id,
+                f"2026-07-14T05:0{index}:01+00:00",
+                f"2026-07-14T05:0{index}:00+00:00",
+                price,
+                shares,
+            ),
+        )
+    mem_db.commit()
+
+    allowed = _entry_duplicate_same_token_component(
+        mem_db,
+        token_id=TOKEN_X,
+        candidate_position_id="fresh-candidate",
+        allow_reconciled_position_increment=True,
+    )
+
+    assert allowed["allowed"] is True
+    assert allowed["reason"] == "allowed_reconciled_position_increment"
+
+    mem_db.execute(
+        "UPDATE position_current SET cost_basis_usd=79.7594 "
+        "WHERE position_id='active-position'"
+    )
+    blocked = _entry_duplicate_same_token_component(
+        mem_db,
+        token_id=TOKEN_X,
+        candidate_position_id="fresh-candidate",
+        allow_reconciled_position_increment=True,
+    )
+
+    assert blocked["allowed"] is False
+    assert blocked["fact_backing"]["details"]["execution_fact_count"] == 4
+    assert blocked["fact_backing"]["details"]["cost_abs_tolerance_usd"] == "0.0004"
 
 
 def test_certified_global_increment_requires_materialized_existing_economics(mem_db):
