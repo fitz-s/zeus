@@ -6905,6 +6905,11 @@ def _global_preflight_block_status(reason: str) -> str:
             "FILL_UP_NO_SUBMIT:",
             "SHIFT_BIN_NO_SUBMIT:",
             "EVENT_BOUND_MARKET_PHASE_CLOSED:",
+            (
+                "EDLI_LIVE_CERTIFICATE_BUILD_FAILED:"
+                "LIVE_ENTRY_DAY0_PROBABILITY_AUTHORITY_REQUIRED:"
+                "selected q_lcb does not match remaining-day transform:"
+            ),
         )
     ):
         return "BLOCKED"

@@ -1404,6 +1404,13 @@ def test_global_probability_tightening_keeps_candidate_identity_and_bound():
         ("FILL_UP_NO_SUBMIT:NO_RESIDUAL_AT_OR_OVER_TARGET", "BLOCKED"),
         ("SHIFT_BIN_NO_SUBMIT:OLD_LEG_STILL_STRONG", "BLOCKED"),
         ("EVENT_BOUND_MARKET_PHASE_CLOSED:settlement_day", "BLOCKED"),
+        (
+            "EDLI_LIVE_CERTIFICATE_BUILD_FAILED:"
+            "LIVE_ENTRY_DAY0_PROBABILITY_AUTHORITY_REQUIRED:"
+            "selected q_lcb does not match remaining-day transform:"
+            "condition_id=condition-a:q_lcb=0.72:transform_lcb=0.965560157285",
+            "BLOCKED",
+        ),
     ),
 )
 def test_global_preflight_block_scope_is_explicit(reason, status):
