@@ -694,6 +694,42 @@ def test_executor_certified_global_increment_reuses_reconciled_position_but_not_
     )
 
     mem_db.execute(
+        "UPDATE position_current SET cost_basis_usd=16.0799 "
+        "WHERE position_id='active-position'"
+    )
+    rounded_cost = _entry_duplicate_same_token_component(
+        mem_db,
+        token_id=TOKEN_X,
+        candidate_position_id="fresh-candidate",
+        allow_reconciled_position_increment=True,
+    )
+    assert rounded_cost["allowed"] is True
+    assert rounded_cost["reason"] == "allowed_reconciled_position_increment"
+
+    mem_db.execute(
+        "UPDATE position_current SET cost_basis_usd=16.0798 "
+        "WHERE position_id='active-position'"
+    )
+    cost_drifted = _entry_duplicate_same_token_component(
+        mem_db,
+        token_id=TOKEN_X,
+        candidate_position_id="fresh-candidate",
+        allow_reconciled_position_increment=True,
+    )
+    assert cost_drifted["allowed"] is False
+    assert cost_drifted["fact_backing"]["details"] == {
+        "projected_shares": "24.0",
+        "projected_cost_basis_usd": "16.0798",
+        "aggregate_shares": "24.0",
+        "aggregate_cost_basis_usd": "16.08",
+        "cost_abs_tolerance_usd": "0.0001",
+    }
+    mem_db.execute(
+        "UPDATE position_current SET cost_basis_usd=16.08 "
+        "WHERE position_id='active-position'"
+    )
+
+    mem_db.execute(
         """INSERT INTO venue_commands
            (command_id, position_id, token_id, intent_kind, side, venue_order_id,
             state, created_at, updated_at)
