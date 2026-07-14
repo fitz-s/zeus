@@ -5920,11 +5920,28 @@ def _filled_entry_execution_fact_repair_candidates(conn: sqlite3.Connection) -> 
              WHERE ranked.entry_rank = 1
         ),
         command_execution_fact AS (
-            SELECT command_id, MIN(intent_id) AS intent_id
-              FROM execution_fact
-             WHERE order_role = 'entry'
-               AND COALESCE(command_id, '') != ''
-             GROUP BY command_id
+            SELECT ranked.command_id, ranked.intent_id
+              FROM (
+                    SELECT ef.command_id,
+                           ef.intent_id,
+                           ROW_NUMBER() OVER (
+                               PARTITION BY ef.command_id
+                               ORDER BY CASE
+                                   WHEN ef.intent_id = cmd.position_id || ':entry'
+                                     OR ef.intent_id = cmd.position_id || ':entry:' || cmd.command_id
+                                   THEN 0
+                                   ELSE 1
+                               END,
+                               ef.intent_id
+                           ) AS fact_rank
+                      FROM execution_fact ef
+                      JOIN venue_commands cmd
+                        ON cmd.command_id = ef.command_id
+                       AND cmd.position_id = ef.position_id
+                     WHERE ef.order_role = 'entry'
+                       AND COALESCE(ef.command_id, '') != ''
+                   ) ranked
+             WHERE ranked.fact_rank = 1
         )
         SELECT cmd.command_id,
                cmd.position_id,
@@ -6047,6 +6064,8 @@ def _entry_execution_fact_intent_id(
 ) -> str:
     """Keep one durable entry fact per venue command for position increments."""
 
+    baseline_id = f"{position_id}:entry"
+    increment_id = f"{baseline_id}:{command_id}"
     exact = conn.execute(
         """
         SELECT intent_id
@@ -6054,15 +6073,15 @@ def _entry_execution_fact_intent_id(
          WHERE position_id = ?
            AND order_role = 'entry'
            AND command_id = ?
-         ORDER BY intent_id
+           AND intent_id IN (?, ?)
+         ORDER BY CASE WHEN intent_id = ? THEN 0 ELSE 1 END
          LIMIT 1
         """,
-        (position_id, command_id),
+        (position_id, command_id, baseline_id, increment_id, baseline_id),
     ).fetchone()
     if exact is not None:
         return str(exact["intent_id"])
 
-    baseline_id = f"{position_id}:entry"
     baseline = conn.execute(
         """
         SELECT command_id
@@ -6088,7 +6107,7 @@ def _entry_execution_fact_intent_id(
             return baseline_id
     elif not str(baseline["command_id"] or "") or str(baseline["command_id"]) == command_id:
         return baseline_id
-    return f"{baseline_id}:{command_id}"
+    return increment_id
 
 
 def _entry_execution_fact_terminal_status(candidate: Mapping[str, object]) -> str:

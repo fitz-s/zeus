@@ -12615,6 +12615,20 @@ def _query_entry_execution_fill_hints(
         """,
         normalized_trade_ids,
     ).fetchall()
+    canonical_intents: dict[tuple[str, str], str] = {}
+    for row in rows:
+        position_id = str(row["position_id"] or "")
+        command_id = str(row["command_id"] or "")
+        intent_id = str(row["intent_id"] or "")
+        if not command_id:
+            continue
+        key = (position_id, command_id)
+        baseline_id = f"{position_id}:entry"
+        increment_id = f"{baseline_id}:{command_id}"
+        if intent_id == baseline_id:
+            canonical_intents[key] = baseline_id
+        elif intent_id == increment_id and key not in canonical_intents:
+            canonical_intents[key] = increment_id
     hints: dict[str, dict] = {}
     seen_commands: dict[str, set[str]] = {}
     for row in rows:
@@ -12623,6 +12637,9 @@ def _query_entry_execution_fill_hints(
             continue
         intent_id = str(row["intent_id"] or "")
         command_id = str(row["command_id"] or "")
+        canonical_intent = canonical_intents.get((trade_id, command_id))
+        if canonical_intent is not None and intent_id != canonical_intent:
+            continue
         command_key = command_id or f"intent:{intent_id}"
         seen = seen_commands.setdefault(trade_id, set())
         if command_key in seen:

@@ -10469,7 +10469,39 @@ class TestRecoveryResolutionTable:
         from src.execution.command_recovery import (
             reconcile_filled_entry_execution_fact_repairs,
         )
-        from src.state.db import query_entry_execution_fill_aggregate
+        from src.state.db import (
+            log_execution_fact,
+            query_entry_execution_fill_aggregate,
+        )
+
+        log_execution_fact(
+            conn,
+            intent_id="000-legacy-entry",
+            position_id="legacy-position",
+            decision_id="legacy-decision",
+            command_id="cmd-increment-2",
+            order_role="entry",
+            posted_at="2026-04-26T00:00:00Z",
+            filled_at="2099-04-26T00:00:01Z",
+            fill_price=0.01,
+            shares=1.0,
+            venue_status="FILLED",
+            terminal_exec_status="filled",
+        )
+        log_execution_fact(
+            conn,
+            intent_id="000-current-misaligned-entry",
+            position_id="pos-increment",
+            decision_id="misaligned-decision",
+            command_id="cmd-increment-2",
+            order_role="entry",
+            posted_at="2026-04-26T00:00:00Z",
+            filled_at="2099-04-26T00:00:01Z",
+            fill_price=0.01,
+            shares=1.0,
+            venue_status="FILLED",
+            terminal_exec_status="filled",
+        )
 
         summary = reconcile_filled_entry_execution_fact_repairs(conn)
 
@@ -10480,12 +10512,13 @@ class TestRecoveryResolutionTable:
               FROM execution_fact
              WHERE position_id = 'pos-increment'
                AND order_role = 'entry'
+               AND intent_id LIKE 'pos-increment:entry%'
              ORDER BY command_id
             """
         ).fetchall()
         assert [dict(row) for row in rows] == [
             {
-                "intent_id": "pos-increment:entry",
+                "intent_id": "pos-increment:entry:cmd-increment-1",
                 "command_id": "cmd-increment-1",
                 "shares": 5.0,
                 "fill_price": 0.69,
@@ -10506,6 +10539,14 @@ class TestRecoveryResolutionTable:
         assert aggregate["shares_filled"] == pytest.approx(10.0)
         assert aggregate["filled_cost_basis_usd"] == pytest.approx(6.85)
         assert aggregate["entry_price_avg_fill"] == pytest.approx(0.685)
+        legacy = query_entry_execution_fill_aggregate(
+            conn,
+            "legacy-position",
+            strict=True,
+        )
+        assert legacy is not None
+        assert legacy["shares_filled"] == pytest.approx(1.0)
+        assert legacy["filled_cost_basis_usd"] == pytest.approx(0.01)
         assert reconcile_filled_entry_execution_fact_repairs(conn) == {
             "scanned": 0,
             "advanced": 0,
