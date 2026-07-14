@@ -558,7 +558,7 @@ scripts:
     reason: "Classifies existing venue_commands, venue_command_events, submission envelopes, order facts, and trade facts. It fails closed unless an accepted/resting or filled command has daemon-to-command correlation fields, venue order identity, live venue facts, and matching record-chain proof."
   check_live_restart_preflight.py:
     # Created: 2026-06-18
-    # Last reused or audited: 2026-07-09
+    # Last reused or audited: 2026-07-14
     # Authority basis: AGENTS.md live-money restart proof gates
     class: diagnostic
     lifecycle: long_lived

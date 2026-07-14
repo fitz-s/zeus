@@ -4700,9 +4700,76 @@ def _requires_executable_quote(row: sqlite3.Row, *, now_utc: datetime) -> bool:
     return True
 
 
+def _canonical_closed_market_hold_ids(rows: list[sqlite3.Row]) -> set[str]:
+    """Return exposures whose latest monitor event proves the CLOB is closed."""
+
+    position_ids = {
+        str(row["position_id"] or "").strip()
+        for row in rows
+        if str(row["position_id"] or "").strip()
+    }
+    if not position_ids:
+        return set()
+    try:
+        with _connect_live_ro() as conn:
+            if not _table_exists(conn, "main", "position_events"):
+                return set()
+            columns = _table_columns(conn, "main", "position_events")
+            if not {
+                "position_id",
+                "sequence_no",
+                "event_type",
+                "occurred_at",
+                "payload_json",
+            }.issubset(columns):
+                return set()
+            closed: set[str] = set()
+            for position_id in position_ids:
+                latest = conn.execute(
+                    """
+                    SELECT payload_json
+                      FROM position_events
+                     WHERE position_id = ?
+                       AND event_type = 'MONITOR_REFRESHED'
+                     ORDER BY sequence_no DESC, datetime(occurred_at) DESC
+                     LIMIT 1
+                    """,
+                    (position_id,),
+                ).fetchone()
+                if latest is None:
+                    continue
+                try:
+                    payload = json.loads(str(latest["payload_json"] or "{}"))
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    continue
+                if not isinstance(payload, dict):
+                    continue
+                validations = payload.get("applied_validations")
+                if (
+                    payload.get("semantic_event")
+                    == "MARKET_CLOSED_HOLD_TO_SETTLEMENT"
+                    and payload.get("hold_reason")
+                    == "MARKET_CLOSED_AWAITING_SETTLEMENT"
+                    and payload.get("exit_order_submitted") is False
+                    and payload.get("exit_failure") is False
+                    and isinstance(validations, list)
+                    and "MARKET_CLOSED_AWAITING_SETTLEMENT" in validations
+                ):
+                    closed.add(position_id)
+            return closed
+    except sqlite3.Error:
+        return set()
+
+
 def _open_positions_requiring_executable_quote(rows: list[sqlite3.Row]) -> list[sqlite3.Row]:
     now = datetime.now(timezone.utc)
-    return [row for row in rows if _requires_executable_quote(row, now_utc=now)]
+    closed_hold_ids = _canonical_closed_market_hold_ids(rows)
+    return [
+        row
+        for row in rows
+        if str(row["position_id"] or "") not in closed_hold_ids
+        and _requires_executable_quote(row, now_utc=now)
+    ]
 
 
 def _verified_settlement_truth_for(rows: list[sqlite3.Row]) -> dict[tuple[str, str, str], dict[str, Any]]:

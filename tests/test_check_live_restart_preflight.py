@@ -1,4 +1,4 @@
-# Lifecycle: created=2026-06-18; last_reviewed=2026-06-28; last_reused=2026-07-02
+# Lifecycle: created=2026-06-18; last_reviewed=2026-07-14; last_reused=2026-07-14
 # Purpose: Regression tests for read-only live restart preflight risk classification.
 # Reuse: pytest tests/test_check_live_restart_preflight.py
 # Authority basis: AGENTS.md live-money restart proof gates.
@@ -202,6 +202,63 @@ def _init_forecast_db(path):
     )
     conn.commit()
     return conn
+
+
+def test_closed_market_hold_does_not_require_impossible_executable_quote(
+    monkeypatch,
+    tmp_path,
+):
+    trade_db, forecast_db, _ = _patch_paths(monkeypatch, tmp_path)
+    sqlite3.connect(forecast_db).close()
+    trade = _init_trade_db(trade_db)
+    now = datetime.now(timezone.utc)
+    target_date = (now + timedelta(days=3)).date().isoformat()
+    trade.execute(
+        """
+        INSERT INTO position_current (
+            position_id, phase, city, target_date, temperature_metric,
+            bin_label, direction, shares, chain_shares, order_status,
+            exit_reason, exit_retry_count, next_exit_retry_at,
+            last_monitor_prob, last_monitor_prob_is_fresh,
+            last_monitor_market_price, last_monitor_market_price_is_fresh,
+            updated_at
+        ) VALUES (
+            'closed-hold', 'day0_window', 'Hong Kong', ?, 'high',
+            'Will the highest temperature in Hong Kong be 34°C?',
+            'buy_yes', 1000.0, 1000.0, 'filled', 'SETTLEMENT_IMMINENT',
+            0, NULL, NULL, 0, NULL, 0, ?
+        )
+        """,
+        (target_date, now.isoformat()),
+    )
+    _insert_monitor_events(
+        trade,
+        position_id="closed-hold",
+        monitor_at=now,
+        payload={
+            "semantic_event": "MARKET_CLOSED_HOLD_TO_SETTLEMENT",
+            "hold_reason": "MARKET_CLOSED_AWAITING_SETTLEMENT",
+            "exit_order_submitted": False,
+            "exit_failure": False,
+            "applied_validations": ["MARKET_CLOSED_AWAITING_SETTLEMENT"],
+        },
+    )
+    trade.row_factory = sqlite3.Row
+    rows = trade.execute("SELECT * FROM position_current").fetchall()
+
+    assert preflight._open_positions_requiring_executable_quote(rows) == []
+
+    trade.execute(
+        """
+        UPDATE position_events
+           SET payload_json = json_remove(payload_json, '$.exit_failure')
+         WHERE position_id = 'closed-hold'
+           AND event_type = 'MONITOR_REFRESHED'
+        """
+    )
+    trade.commit()
+    assert len(preflight._open_positions_requiring_executable_quote(rows)) == 1
+    trade.close()
 
 
 def _live_entry_submit_payload() -> dict[str, object]:
