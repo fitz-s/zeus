@@ -125,6 +125,11 @@ authority surface.
   dust claim into a portfolio-wide entry veto. The health surface remains
   degraded and visible; only entry authority scopes the failure to the dust
   position when every stale sample is exactly covered by the sub-min surface.
+- Recover a confirmed logical venue fill exactly once when command redecision
+  writes a later `ExecutionCommandCreated`: select the same latest command and
+  acknowledgement rows as the ledger, clamp only the EDLI ledger timestamp to
+  that causal boundary, preserve the raw venue observation time in payload,
+  and collapse MATCHED/MINED/CONFIRMED revisions by `trade_id`.
 
 ## Verification
 - Focused first-principles antibody and settlement-preimage regressions pass.
@@ -156,6 +161,10 @@ authority surface.
 - Mirrored YES/NO submit antibodies prove the same sealed-global rule admits
   both sides, while a legacy payload with recomputed current-state markers still
   hits the legacy floor because it does not match durable decision authority.
+- A production-shaped REST fill antibody proves two command rows times two
+  trade-status rows become one `UserTradeObserved`; a WS confirmed re-report
+  antibody proves the same logical-fill identity, and non-fill states remain
+  ineligible for recovery.
 
 ## Work record
 

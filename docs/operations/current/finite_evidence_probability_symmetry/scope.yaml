@@ -20,6 +20,7 @@ in_scope:
 - src/control/live_health.py
 - src/engine/monitor_refresh.py
 - src/events/opportunity_book.py
+- src/events/edli_trade_fact_bridge.py
 - src/execution/command_recovery.py
 - src/execution/exchange_reconcile.py
 - src/execution/executor.py
@@ -30,6 +31,7 @@ in_scope:
 - architecture/capabilities.yaml
 - tests/engine/test_event_reactor_live_qkernel_gate.py
 - tests/test_finite_evidence_probability_symmetry.py
+- tests/events/test_edli_trade_fact_bridge.py
 - tests/execution/test_venue_sync_contract.py
 - tests/test_monitor_refresh_nowcast_wiring.py
 - tests/test_runtime_guards.py

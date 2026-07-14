@@ -44,23 +44,43 @@ def append_confirmed_trade_facts_to_edli(
     rows = conn.execute(
         f"""
         WITH execution_commands AS (
-            SELECT DISTINCT aggregate_id,
-                   json_extract(payload_json, '$.event_id') AS event_id,
-                   json_extract(payload_json, '$.final_intent_id') AS final_intent_id,
-                   json_extract(payload_json, '$.execution_command_id') AS execution_command_id
-              FROM edli_live_order_events
-             WHERE event_type = 'ExecutionCommandCreated'
+            SELECT aggregate_id, event_id, final_intent_id,
+                   execution_command_id, command_occurred_at
+              FROM (
+                    SELECT aggregate_id,
+                           json_extract(payload_json, '$.event_id') AS event_id,
+                           json_extract(payload_json, '$.final_intent_id') AS final_intent_id,
+                           json_extract(payload_json, '$.execution_command_id') AS execution_command_id,
+                           occurred_at AS command_occurred_at,
+                           ROW_NUMBER() OVER (
+                               PARTITION BY aggregate_id
+                               ORDER BY event_sequence DESC
+                           ) AS command_rank
+                      FROM edli_live_order_events
+                     WHERE event_type = 'ExecutionCommandCreated'
+                   )
+             WHERE command_rank = 1
         ),
         submit_acks AS (
-            SELECT DISTINCT aggregate_id,
-                   json_extract(payload_json, '$.venue_order_id') AS venue_order_id
-              FROM edli_live_order_events
-             WHERE event_type = 'VenueSubmitAcknowledged'
-        )
+            SELECT aggregate_id, venue_order_id
+              FROM (
+                    SELECT aggregate_id,
+                           json_extract(payload_json, '$.venue_order_id') AS venue_order_id,
+                           ROW_NUMBER() OVER (
+                               PARTITION BY aggregate_id
+                               ORDER BY event_sequence DESC
+                           ) AS ack_rank
+                      FROM edli_live_order_events
+                     WHERE event_type = 'VenueSubmitAcknowledged'
+                   )
+             WHERE ack_rank = 1
+        ),
+        ranked_confirmed AS (
         SELECT exec.aggregate_id,
                exec.event_id,
                exec.final_intent_id,
                exec.execution_command_id,
+               exec.command_occurred_at,
                ack.venue_order_id AS acknowledged_venue_order_id,
                cmd.command_id,
                trade.trade_fact_id,
@@ -72,7 +92,12 @@ def append_confirmed_trade_facts_to_edli(
                trade.tx_hash,
                trade.observed_at,
                trade.raw_payload_hash,
-               trade.raw_payload_json
+               trade.raw_payload_json,
+               ROW_NUMBER() OVER (
+                   PARTITION BY exec.aggregate_id, trade.trade_id
+                   ORDER BY datetime(trade.observed_at) DESC,
+                            trade.trade_fact_id DESC
+               ) AS logical_fill_rank
           FROM execution_commands exec
           JOIN submit_acks ack
             ON ack.aggregate_id = exec.aggregate_id
@@ -93,7 +118,11 @@ def append_confirmed_trade_facts_to_edli(
                     AND json_extract(existing.payload_json, '$.trade_id') = trade.trade_id
                     AND json_extract(existing.payload_json, '$.fill_authority_state') = 'FILL_CONFIRMED'
                )
-         ORDER BY trade.observed_at ASC, trade.trade_fact_id ASC
+        )
+        SELECT *
+          FROM ranked_confirmed
+         WHERE logical_fill_rank = 1
+         ORDER BY observed_at ASC, trade_fact_id ASC
          LIMIT ?
         """,
         (max(0, limit),),
@@ -104,6 +133,9 @@ def append_confirmed_trade_facts_to_edli(
     default_now = now or datetime.now(timezone.utc)
     for row in rows:
         observed_at = _parse_dt(_row_get(row, "observed_at"), default=default_now)
+        command_occurred_at = _parse_dt(
+            _row_get(row, "command_occurred_at"), default=default_now
+        )
         message_hash = _message_hash(row)
         append_user_trade_observed(
             ledger,
@@ -113,7 +145,7 @@ def append_confirmed_trade_facts_to_edli(
             source="polymarket_user_channel",
             trade_status="CONFIRMED",
             venue_order_id=str(_row_get(row, "venue_order_id")),
-            occurred_at=observed_at,
+            occurred_at=max(observed_at, command_occurred_at),
             payload={
                 "raw_user_channel_message_hash": message_hash,
                 "trade_id": str(_row_get(row, "trade_id")),
@@ -121,6 +153,7 @@ def append_confirmed_trade_facts_to_edli(
                 "fill_price": str(_row_get(row, "fill_price")),
                 "avg_fill_price": str(_row_get(row, "fill_price")),
                 "transaction_hash": _row_get(row, "tx_hash"),
+                "source_trade_observed_at": str(_row_get(row, "observed_at")),
                 "source_trade_fact_id": int(_row_get(row, "trade_fact_id")),
                 "source_trade_fact_authority": "venue_trade_facts:WS_USER:CONFIRMED",
             },
@@ -169,23 +202,43 @@ def append_rest_filled_orphan_trade_facts_to_edli(
     rows = conn.execute(
         f"""
         WITH execution_commands AS (
-            SELECT DISTINCT aggregate_id,
-                   json_extract(payload_json, '$.event_id') AS event_id,
-                   json_extract(payload_json, '$.final_intent_id') AS final_intent_id,
-                   json_extract(payload_json, '$.execution_command_id') AS execution_command_id
-              FROM edli_live_order_events
-             WHERE event_type = 'ExecutionCommandCreated'
+            SELECT aggregate_id, event_id, final_intent_id,
+                   execution_command_id, command_occurred_at
+              FROM (
+                    SELECT aggregate_id,
+                           json_extract(payload_json, '$.event_id') AS event_id,
+                           json_extract(payload_json, '$.final_intent_id') AS final_intent_id,
+                           json_extract(payload_json, '$.execution_command_id') AS execution_command_id,
+                           occurred_at AS command_occurred_at,
+                           ROW_NUMBER() OVER (
+                               PARTITION BY aggregate_id
+                               ORDER BY event_sequence DESC
+                           ) AS command_rank
+                      FROM edli_live_order_events
+                     WHERE event_type = 'ExecutionCommandCreated'
+                   )
+             WHERE command_rank = 1
         ),
         submit_acks AS (
-            SELECT DISTINCT aggregate_id,
-                   json_extract(payload_json, '$.venue_order_id') AS venue_order_id
-              FROM edli_live_order_events
-             WHERE event_type = 'VenueSubmitAcknowledged'
-        )
+            SELECT aggregate_id, venue_order_id
+              FROM (
+                    SELECT aggregate_id,
+                           json_extract(payload_json, '$.venue_order_id') AS venue_order_id,
+                           ROW_NUMBER() OVER (
+                               PARTITION BY aggregate_id
+                               ORDER BY event_sequence DESC
+                           ) AS ack_rank
+                      FROM edli_live_order_events
+                     WHERE event_type = 'VenueSubmitAcknowledged'
+                   )
+             WHERE ack_rank = 1
+        ),
+        ranked_orphans AS (
         SELECT exec.aggregate_id,
                exec.event_id,
                exec.final_intent_id,
                exec.execution_command_id,
+               exec.command_occurred_at,
                cmd.command_id,
                cmd.state AS command_state,
                trade.trade_fact_id,
@@ -198,7 +251,18 @@ def append_rest_filled_orphan_trade_facts_to_edli(
                trade.tx_hash,
                trade.observed_at,
                trade.raw_payload_hash,
-               trade.raw_payload_json
+               trade.raw_payload_json,
+               ROW_NUMBER() OVER (
+                   PARTITION BY exec.aggregate_id, trade.trade_id
+                   ORDER BY CASE UPPER(COALESCE(trade.state, ''))
+                                WHEN 'CONFIRMED' THEN 3
+                                WHEN 'MINED' THEN 2
+                                WHEN 'MATCHED' THEN 1
+                                ELSE 0
+                            END DESC,
+                            datetime(trade.observed_at) DESC,
+                            trade.trade_fact_id DESC
+               ) AS logical_fill_rank
           FROM execution_commands exec
           JOIN submit_acks ack
             ON ack.aggregate_id = exec.aggregate_id
@@ -208,6 +272,7 @@ def append_rest_filled_orphan_trade_facts_to_edli(
             ON trade.command_id = cmd.command_id
            AND trade.venue_order_id = ack.venue_order_id
          WHERE UPPER(COALESCE(cmd.state, '')) IN ('FILLED', 'PARTIAL')
+           AND UPPER(COALESCE(trade.state, '')) IN ('MATCHED', 'MINED', 'CONFIRMED')
            AND CAST(COALESCE(trade.filled_size, '0') AS REAL) > 0
            AND CAST(COALESCE(trade.fill_price, '0') AS REAL) > 0
            AND NOT EXISTS (
@@ -235,7 +300,11 @@ def append_rest_filled_orphan_trade_facts_to_edli(
                     AND proj.current_state = 'RECONCILED'
                     AND COALESCE(proj.pending_reconcile, 0) = 0
                )
-         ORDER BY trade.observed_at ASC, trade.trade_fact_id ASC
+        )
+        SELECT *
+          FROM ranked_orphans
+         WHERE logical_fill_rank = 1
+         ORDER BY observed_at ASC, trade_fact_id ASC
          LIMIT ?
         """,
         (max(0, limit),),
@@ -248,9 +317,18 @@ def append_rest_filled_orphan_trade_facts_to_edli(
         observed_at = _parse_dt(_row_get(row, "observed_at"), default=default_now)
         if observed_at.timestamp() > grace_cutoff:
             continue  # still inside the user-channel grace window
+        command_occurred_at = _parse_dt(
+            _row_get(row, "command_occurred_at"), default=default_now
+        )
         message_hash = _message_hash(row)
         try:
-            _append_one_recovered_fill(ledger, row, observed_at, message_hash, grace_minutes)
+            _append_one_recovered_fill(
+                ledger,
+                row,
+                max(observed_at, command_occurred_at),
+                message_hash,
+                grace_minutes,
+            )
         except LiveOrderAggregateError as exc:
             # Poison-pill immunity (task #13 shape): one ledger-rejected row must
             # never abort the batch — the remaining recoverable orphans would
@@ -285,6 +363,7 @@ def _append_one_recovered_fill(ledger, row, observed_at, message_hash, grace_min
             "fill_price": str(_row_get(row, "fill_price")),
             "avg_fill_price": str(_row_get(row, "fill_price")),
             "transaction_hash": _row_get(row, "tx_hash"),
+            "source_trade_observed_at": str(_row_get(row, "observed_at")),
             "source_trade_fact_id": int(_row_get(row, "trade_fact_id")),
             "source_trade_fact_authority": (
                 f"venue_trade_facts:{_row_get(row, 'trade_source')}:"

@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from src.events.edli_trade_fact_bridge import append_confirmed_trade_facts_to_edli
 from src.events.live_order_aggregate import LiveOrderAggregateLedger
@@ -132,7 +132,7 @@ def test_bridge_prefers_attached_trades_over_ghost_world_tables(tmp_path):
     ).fetchone()[0] == 1
 
 
-def test_bridge_deduplicates_redecision_execution_command_events():
+def test_bridge_deduplicates_redecision_commands_and_uses_latest_command_time():
     conn = _conn()
     ledger = LiveOrderAggregateLedger(conn)
     _seed_edli_chain(ledger)
@@ -145,12 +145,16 @@ def test_bridge_deduplicates_redecision_execution_command_events():
         )
         SELECT 'duplicate-execution-command', aggregate_id, 50, event_type,
                parent_event_hash, 'duplicate-execution-command-hash', payload_json,
-               payload_hash, source_authority, occurred_at, created_at, schema_version
+               payload_hash, source_authority, ?, ?, schema_version
           FROM edli_live_order_events
          WHERE aggregate_id = 'event-1:intent-1'
            AND event_type = 'ExecutionCommandCreated'
          LIMIT 1
-        """
+        """,
+        (
+            (NOW + timedelta(minutes=30)).isoformat(),
+            (NOW + timedelta(minutes=30)).isoformat(),
+        ),
     )
     _insert_command(conn)
     append_trade_fact(
@@ -167,11 +171,34 @@ def test_bridge_deduplicates_redecision_execution_command_events():
         raw_payload_hash="e" * 64,
         raw_payload_json="{}",
     )
+    append_trade_fact(
+        conn,
+        trade_id="trade-redecision",
+        venue_order_id="venue-1",
+        command_id="cmd-1",
+        state="CONFIRMED",
+        filled_size="7",
+        fill_price="0.72",
+        source="WS_USER",
+        observed_at=NOW + timedelta(minutes=1),
+        venue_timestamp=NOW + timedelta(minutes=1),
+        raw_payload_hash="f" * 64,
+        raw_payload_json="{}",
+    )
 
     assert append_confirmed_trade_facts_to_edli(conn, now=NOW) == 1
-    assert conn.execute(
-        "SELECT COUNT(*) FROM edli_live_order_events WHERE event_type='UserTradeObserved'"
-    ).fetchone()[0] == 1
+    row = conn.execute(
+        """
+        SELECT occurred_at, payload_json
+          FROM edli_live_order_events
+         WHERE event_type='UserTradeObserved'
+        """
+    ).fetchone()
+    payload = json.loads(row["payload_json"])
+    assert row["occurred_at"] == (NOW + timedelta(minutes=30)).isoformat()
+    assert payload["source_trade_observed_at"] == (
+        NOW + timedelta(minutes=1)
+    ).isoformat()
 
 
 def _conn() -> sqlite3.Connection:
@@ -326,18 +353,18 @@ def _pre_submit_payload() -> dict:
 # RECONCILE_SOURCE provenance — and must NEVER fire inside the grace window
 # or when the WS truth already exists.
 # ---------------------------------------------------------------------------
-from datetime import timedelta
-
 from src.events.edli_trade_fact_bridge import append_rest_filled_orphan_trade_facts_to_edli
 
 
-def _insert_rest_only_fill(conn, *, observed_at, trade_id="trade-orphan"):
+def _insert_rest_only_fill(
+    conn, *, observed_at, trade_id="trade-orphan", state="MATCHED"
+):
     append_trade_fact(
         conn,
         trade_id=trade_id,
         venue_order_id="venue-1",
         command_id="cmd-1",
-        state="MATCHED",
+        state=state,
         filled_size="5",
         fill_price="0.72",
         source="REST",
@@ -420,3 +447,80 @@ def test_rest_orphan_under_non_terminal_command_is_not_recovered():
     _insert_rest_only_fill(conn, observed_at=NOW + timedelta(minutes=1))
 
     assert append_rest_filled_orphan_trade_facts_to_edli(conn, now=NOW + timedelta(hours=3)) == 0
+
+
+def test_rest_orphan_nonfill_state_is_not_recovered():
+    conn = _conn()
+    ledger = LiveOrderAggregateLedger(conn)
+    _seed_edli_chain(ledger)
+    _insert_command(conn)
+    _insert_rest_only_fill(
+        conn,
+        observed_at=NOW + timedelta(minutes=1),
+        state="FAILED",
+    )
+
+    assert append_rest_filled_orphan_trade_facts_to_edli(
+        conn, now=NOW + timedelta(hours=3)
+    ) == 0
+
+
+def test_rest_orphan_uses_latest_command_time_and_one_logical_trade_fact():
+    conn = _conn()
+    ledger = LiveOrderAggregateLedger(conn)
+    _seed_edli_chain(ledger)
+    conn.execute(
+        """
+        INSERT INTO edli_live_order_events (
+            aggregate_event_id, aggregate_id, event_sequence, event_type,
+            parent_event_hash, event_hash, payload_json, payload_hash,
+            source_authority, occurred_at, created_at, schema_version
+        )
+        SELECT 'redecision-execution-command', aggregate_id, 50, event_type,
+               parent_event_hash, 'redecision-execution-command-hash', payload_json,
+               payload_hash, source_authority, ?, ?, schema_version
+          FROM edli_live_order_events
+         WHERE aggregate_id = 'event-1:intent-1'
+           AND event_type = 'ExecutionCommandCreated'
+         LIMIT 1
+        """,
+        (
+            (NOW + timedelta(minutes=30)).isoformat(),
+            (NOW + timedelta(minutes=30)).isoformat(),
+        ),
+    )
+    _insert_command(conn)
+    _insert_rest_only_fill(
+        conn,
+        observed_at=NOW + timedelta(minutes=1),
+        trade_id="trade-multistatus",
+        state="MATCHED",
+    )
+    _insert_rest_only_fill(
+        conn,
+        observed_at=NOW + timedelta(minutes=7),
+        trade_id="trade-multistatus",
+        state="CONFIRMED",
+    )
+
+    assert append_rest_filled_orphan_trade_facts_to_edli(
+        conn, now=NOW + timedelta(hours=3)
+    ) == 1
+    row = conn.execute(
+        """
+        SELECT occurred_at, payload_json
+          FROM edli_live_order_events
+         WHERE event_type = 'UserTradeObserved'
+        """
+    ).fetchone()
+    payload = json.loads(row["payload_json"])
+    assert row["occurred_at"] == (NOW + timedelta(minutes=30)).isoformat()
+    assert payload["source_trade_observed_at"] == (
+        NOW + timedelta(minutes=7)
+    ).isoformat()
+    assert payload["source_trade_fact_authority"] == (
+        "venue_trade_facts:REST:CONFIRMED"
+    )
+    assert conn.execute(
+        "SELECT COUNT(*) FROM edli_live_order_events WHERE event_type='UserTradeObserved'"
+    ).fetchone()[0] == 1
