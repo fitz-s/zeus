@@ -8012,40 +8012,6 @@ def _live_order(
                             **final_envelope_payload,
                         },
                     )
-                from src.execution.command_recovery import ensure_live_entry_projection_for_command
-
-                try:
-                    ensure_live_entry_projection_for_command(
-                        conn,
-                        command_id=command_id,
-                        client=client,
-                    )
-                except Exception as projection_exc:
-                    logger.error(
-                        "_live_order: immediate matched entry projection skipped "
-                        "(command_id=%s order_id=%s fill_event_type=%s): %s",
-                        command_id,
-                        order_id,
-                        fill_event_type,
-                        projection_exc,
-                    )
-            if not fill_event_type:
-                from src.execution.command_recovery import ensure_live_entry_projection_for_command
-
-                try:
-                    ensure_live_entry_projection_for_command(
-                        conn,
-                        command_id=command_id,
-                        client=client,
-                    )
-                except Exception as projection_exc:
-                    logger.error(
-                        "_live_order: immediate live entry projection skipped "
-                        "(command_id=%s order_id=%s): %s",
-                        command_id,
-                        order_id,
-                        projection_exc,
-                    )
             # P1-1: durable commit independent of _own_conn — codereview-may19-2
             # ACK/order/trade facts must persist immediately regardless of whether
             # the caller provided an external connection. A crash after SDK ACK
@@ -8086,6 +8052,34 @@ def _live_order(
                 command_id=command_id,
                 zeus_submit_intent_time=zeus_submit_intent_time,
                 venue_ack_time=ack_time,
+            )
+
+        # Projection is a second durable transaction.  Venue ACK/fill facts are
+        # the side-effect boundary and must release the write lock before the
+        # richer lifecycle materialization performs certificate lookups.  The
+        # recovery loop is an idempotent concurrent owner of the same projection;
+        # a race may lose here without rolling back the already-durable venue fact.
+        from src.execution.command_recovery import ensure_live_entry_projection_for_command
+
+        try:
+            ensure_live_entry_projection_for_command(
+                conn,
+                command_id=command_id,
+                client=client,
+            )
+            conn.commit()
+        except Exception as projection_exc:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            logger.error(
+                "_live_order: immediate %s entry projection skipped "
+                "(command_id=%s order_id=%s): %s",
+                "matched" if fill_event_type else "live",
+                command_id,
+                order_id,
+                projection_exc,
             )
 
         result_obj = OrderResult(

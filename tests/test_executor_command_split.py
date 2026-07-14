@@ -2770,6 +2770,7 @@ class TestLiveOrderCommandSplit:
         projection_calls: list[str] = []
 
         def _project_now(_conn, *, command_id: str, client=None):
+            assert _conn.in_transaction is False
             projection_calls.append(command_id)
             assert client is mock_inst
             return {"scanned": 1, "advanced": 1, "stayed": 0, "errors": 0}
