@@ -232,6 +232,18 @@ _NO_VENUE_EXPOSURE_REVIEW_REASONS = frozenset({
     # only legal clearance; future attempts now stay SUBMITTING instead.
     "recovery_no_venue_order_id_lookup_unavailable",
 })
+_TERMINAL_ENTRY_NO_FILL_COMMAND_STATES = frozenset({
+    CommandState.CANCELLED.value,
+    CommandState.EXPIRED.value,
+    CommandState.SUBMIT_REJECTED.value,
+    CommandState.REJECTED.value,
+})
+_TERMINAL_ENTRY_NO_FILL_EVENT_TYPES = frozenset({
+    "CANCEL_ACKED",
+    "EXPIRED",
+    "REVIEW_CLEARED_NO_VENUE_EXPOSURE",
+    "SUBMIT_REJECTED",
+})
 
 
 def _order_fact_proof_rank_sql(alias: str) -> str:
@@ -6370,6 +6382,159 @@ def reconcile_filled_entry_execution_fact_repairs(conn: sqlite3.Connection) -> d
                 "recovery: filled entry execution fact repair failed for command %s trade_fact %s: %s",
                 command_id,
                 fact_id,
+                exc,
+            )
+            summary["errors"] += 1
+    return summary
+
+
+def reconcile_terminal_entry_exposure_obligations(
+    conn: sqlite3.Connection,
+) -> dict:
+    """Release entry obligations only after terminal exposure truth exists."""
+
+    summary = {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
+    required = {
+        "entry_exposure_obligations",
+        "execution_fact",
+        "venue_command_events",
+        "venue_commands",
+        "venue_order_facts",
+        "venue_trade_facts",
+    }
+    if not all(_table_exists(conn, table) for table in required):
+        return summary
+    no_fill_states = tuple(sorted(_TERMINAL_ENTRY_NO_FILL_COMMAND_STATES))
+    no_fill_events = tuple(sorted(_TERMINAL_ENTRY_NO_FILL_EVENT_TYPES))
+    rows = conn.execute(
+        f"""
+        SELECT obligation.command_id,
+               command.state AS command_state,
+               EXISTS (
+                   SELECT 1
+                     FROM venue_command_events event
+                    WHERE event.command_id = obligation.command_id
+                      AND event.event_type = 'FILL_CONFIRMED'
+               ) AS fill_confirmed,
+               EXISTS (
+                   SELECT 1
+                     FROM venue_command_events event
+                    WHERE event.command_id = obligation.command_id
+                      AND event.event_type IN ({','.join('?' for _ in no_fill_events)})
+               ) AS no_fill_confirmed,
+               EXISTS (
+                   SELECT 1
+                     FROM venue_trade_facts fact
+                    WHERE fact.command_id = obligation.command_id
+                      AND fact.state IN ('MATCHED', 'MINED', 'CONFIRMED')
+               ) AS trade_exposure_or_unknown,
+               EXISTS (
+                   SELECT 1
+                     FROM venue_trade_facts fact
+                    WHERE fact.command_id = obligation.command_id
+                      AND fact.state IN ('MATCHED', 'MINED', 'CONFIRMED')
+                      AND CAST(COALESCE(fact.filled_size, '0') AS REAL) > 0
+                      AND CAST(COALESCE(fact.fill_price, '0') AS REAL) > 0
+               ) AS positive_trade_economics,
+               EXISTS (
+                   SELECT 1
+                     FROM execution_fact fact
+                    WHERE fact.command_id = obligation.command_id
+                      AND fact.order_role = 'entry'
+                      AND fact.voided_at IS NULL
+                      AND COALESCE(fact.shares, 0) > 0
+                      AND (
+                           fact.filled_at IS NOT NULL
+                           OR LOWER(COALESCE(fact.terminal_exec_status, ''))
+                              IN ('filled', 'partial')
+                           OR UPPER(COALESCE(fact.venue_status, ''))
+                              IN ('FILLED', 'PARTIAL')
+                      )
+               ) AS execution_fill_or_unknown,
+               EXISTS (
+                   SELECT 1
+                     FROM execution_fact fact
+                    WHERE fact.command_id = obligation.command_id
+                      AND fact.order_role = 'entry'
+                      AND fact.voided_at IS NULL
+                      AND COALESCE(fact.shares, 0) > 0
+                      AND COALESCE(fact.fill_price, 0) > 0
+               ) AS positive_execution_economics
+          FROM entry_exposure_obligations obligation
+          JOIN venue_commands command
+            ON command.command_id = obligation.command_id
+         WHERE obligation.status = 'OPEN'
+           AND command.intent_kind = 'ENTRY'
+         ORDER BY obligation.created_at, obligation.command_id
+        """,
+        no_fill_events,
+    ).fetchall()
+    canonical_orders_by_command: dict[str, list[dict]] = {}
+    canonical_order_rows = conn.execute(
+        "WITH "
+        + _canonical_order_truth_cte(partition_by_venue_order=True)
+        + """
+        SELECT fact.command_id,
+               fact.state,
+               fact.matched_size,
+               fact.remaining_size
+          FROM canonical_order_truth fact
+          JOIN entry_exposure_obligations obligation
+            ON obligation.command_id = fact.command_id
+           AND obligation.status = 'OPEN'
+         ORDER BY fact.command_id, fact.venue_order_id
+        """
+    ).fetchall()
+    for raw in canonical_order_rows:
+        order = _dict_row(raw)
+        canonical_orders_by_command.setdefault(
+            str(order.get("command_id") or ""), []
+        ).append(order)
+    from src.state.entry_exposure_obligation import (
+        resolve_entry_exposure_obligation,
+    )
+
+    for raw in rows:
+        row = _dict_row(raw)
+        summary["scanned"] += 1
+        command_id = str(row.get("command_id") or "")
+        state = str(row.get("command_state") or "")
+        positive_economics = bool(
+            row.get("positive_trade_economics")
+            or row.get("positive_execution_economics")
+        )
+        terminal_fill = (
+            state == CommandState.FILLED.value
+            and bool(row.get("fill_confirmed"))
+            and positive_economics
+        )
+        canonical_orders = canonical_orders_by_command.get(command_id, [])
+        terminal_zero_orders = all(
+            str(order.get("state") or "").upper()
+            in _TERMINAL_NO_FILL_ORDER_FACT_STATES
+            and _decimal_or_none(order.get("matched_size")) == 0
+            and _decimal_or_none(order.get("remaining_size")) == 0
+            for order in canonical_orders
+        )
+        terminal_no_fill = (
+            state in no_fill_states
+            and bool(row.get("no_fill_confirmed"))
+            and not bool(row.get("trade_exposure_or_unknown"))
+            and not bool(row.get("execution_fill_or_unknown"))
+            and terminal_zero_orders
+        )
+        if not (terminal_fill or terminal_no_fill):
+            summary["stayed"] += 1
+            continue
+        try:
+            if resolve_entry_exposure_obligation(conn, command_id=command_id):
+                summary["advanced"] += 1
+            else:
+                summary["stayed"] += 1
+        except Exception as exc:
+            logger.error(
+                "recovery: terminal entry obligation release failed for command %s: %s",
+                command_id,
                 exc,
             )
             summary["errors"] += 1
@@ -16325,6 +16490,12 @@ def _reconcile_passes_inline(
         summary["stayed"] += filled_entry_execution_fact_summary["stayed"]
         summary["errors"] += filled_entry_execution_fact_summary["errors"]
 
+        entry_obligation_summary = reconcile_terminal_entry_exposure_obligations(conn)
+        summary["terminal_entry_exposure_obligations"] = entry_obligation_summary
+        summary["advanced"] += entry_obligation_summary["advanced"]
+        summary["stayed"] += entry_obligation_summary["stayed"]
+        summary["errors"] += entry_obligation_summary["errors"]
+
         exit_pending_summary = reconcile_exit_pending_projections(conn)
         summary["exit_pending_projections"] = exit_pending_summary
         summary["advanced"] += exit_pending_summary["advanced"]
@@ -17154,6 +17325,11 @@ def _reconcile_passes_short_conn(client, summary: dict, started_at: str, *, scop
             "filled_entry_execution_fact_repair",
         )
         _boot_db_pass(
+            "terminal_entry_exposure_obligations",
+            reconcile_terminal_entry_exposure_obligations,
+            "terminal_entry_exposure_obligations",
+        )
+        _boot_db_pass(
             "hard_terminal_position_projection_repair",
             reconcile_hard_terminal_position_projection_repairs,
             "hard_terminal_position_projection_repair",
@@ -17258,6 +17434,11 @@ def _reconcile_passes_short_conn(client, summary: dict, started_at: str, *, scop
             reconcile_terminal_order_facts,
             "terminal_order_facts",
             collect_continuations=True,
+        )
+        _db_pass(
+            "terminal_entry_exposure_obligations",
+            reconcile_terminal_entry_exposure_obligations,
+            "terminal_entry_exposure_obligations",
         )
         _db_pass(
             "closed_shift_bin_exit_leases",
@@ -17371,6 +17552,11 @@ def _reconcile_passes_short_conn(client, summary: dict, started_at: str, *, scop
             "filled_entry_execution_fact_repair",
             reconcile_filled_entry_execution_fact_repairs,
             "filled_entry_execution_fact_repair",
+        )
+        _db_pass(
+            "terminal_entry_exposure_obligations",
+            reconcile_terminal_entry_exposure_obligations,
+            "terminal_entry_exposure_obligations",
         )
         _db_pass(
             "restart_no_venue_exit_retry_projection",
@@ -17609,6 +17795,9 @@ def _reconcile_passes_short_conn(client, summary: dict, started_at: str, *, scop
              reconcile_filled_entry_position_lot_repairs, "filled_entry_position_lot_repair")
     _db_pass("filled_entry_execution_fact_repair",
              reconcile_filled_entry_execution_fact_repairs, "filled_entry_execution_fact_repair")
+    _db_pass("terminal_entry_exposure_obligations",
+             reconcile_terminal_entry_exposure_obligations,
+             "terminal_entry_exposure_obligations")
     _db_pass("exit_pending_projections",
              reconcile_exit_pending_projections, "exit_pending_projections")
     _db_pass("exit_lifecycle_alignment_repair",

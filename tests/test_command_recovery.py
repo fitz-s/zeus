@@ -857,6 +857,371 @@ def _insert(conn, *, command_id="cmd-001", position_id="pos-001",
     return command_id
 
 
+def _open_test_entry_obligation(conn, command_id: str) -> None:
+    from src.state.entry_exposure_obligation import open_entry_exposure_obligation
+    from src.state.schema.entry_exposure_obligations_schema import ensure_table
+
+    ensure_table(conn)
+    open_entry_exposure_obligation(
+        conn,
+        command_id=command_id,
+        owner_domain="trade",
+        token_id=f"token-{command_id}",
+        condition_id=f"condition-{command_id}",
+        shares=10.0,
+        cost_basis_usd=5.0,
+        now="2026-07-14T08:00:00+00:00",
+    )
+
+
+def _append_test_entry_fill(conn, command_id: str, *, with_trade: bool) -> None:
+    from src.state.venue_command_repo import append_event, append_trade_fact
+
+    at = "2026-07-14T08:00:01+00:00"
+    order_id = f"order-{command_id}"
+    append_event(
+        conn,
+        command_id=command_id,
+        event_type="SUBMIT_REQUESTED",
+        occurred_at=at,
+        payload=_entry_submit_payload(),
+    )
+    append_event(
+        conn,
+        command_id=command_id,
+        event_type="SUBMIT_ACKED",
+        occurred_at=at,
+        payload={"venue_order_id": order_id},
+    )
+    if with_trade:
+        append_trade_fact(
+            conn,
+            trade_id=f"trade-{command_id}",
+            venue_order_id=order_id,
+            command_id=command_id,
+            state="MATCHED",
+            filled_size="10",
+            fill_price="0.5",
+            source="REST",
+            observed_at=at,
+            raw_payload_hash="f" * 64,
+            raw_payload_json={"test": "terminal entry obligation"},
+        )
+    append_event(
+        conn,
+        command_id=command_id,
+        event_type="FILL_CONFIRMED",
+        occurred_at=at,
+        payload={
+            "venue_order_id": order_id,
+            "trade_id": f"trade-{command_id}",
+            "filled_size": "10",
+            "fill_price": "0.5",
+        },
+    )
+
+
+def test_terminal_entry_obligation_releases_only_on_authoritative_fill(conn):
+    from src.execution.command_recovery import (
+        reconcile_terminal_entry_exposure_obligations,
+    )
+
+    proven = _insert(conn, command_id="cmd-obligation-proven")
+    _open_test_entry_obligation(conn, proven)
+    _append_test_entry_fill(conn, proven, with_trade=True)
+    unproven = _insert(conn, command_id="cmd-obligation-unproven")
+    _open_test_entry_obligation(conn, unproven)
+    _append_test_entry_fill(conn, unproven, with_trade=False)
+
+    summary = reconcile_terminal_entry_exposure_obligations(conn)
+
+    assert summary == {"scanned": 2, "advanced": 1, "stayed": 1, "errors": 0}
+    statuses = dict(
+        conn.execute(
+            "SELECT command_id, status FROM entry_exposure_obligations"
+        ).fetchall()
+    )
+    assert statuses[proven] == "RESOLVED"
+    assert statuses[unproven] == "OPEN"
+    assert reconcile_terminal_entry_exposure_obligations(conn) == {
+        "scanned": 1,
+        "advanced": 0,
+        "stayed": 1,
+        "errors": 0,
+    }
+
+
+def test_terminal_entry_obligation_releases_proven_no_fill_but_not_conflict(conn):
+    from src.execution.command_recovery import (
+        reconcile_terminal_entry_exposure_obligations,
+    )
+    from src.state.venue_command_repo import (
+        append_event,
+        append_order_fact,
+        append_trade_fact,
+    )
+
+    no_fill = _insert(conn, command_id="cmd-obligation-no-fill")
+    _open_test_entry_obligation(conn, no_fill)
+    append_event(
+        conn,
+        command_id=no_fill,
+        event_type="SUBMIT_REQUESTED",
+        occurred_at="2026-07-14T08:00:01+00:00",
+        payload=_entry_submit_payload(),
+    )
+    append_event(
+        conn,
+        command_id=no_fill,
+        event_type="SUBMIT_REJECTED",
+        occurred_at="2026-07-14T08:00:02+00:00",
+        payload={"reason": "venue_rejected_400"},
+    )
+    conflict = _insert(conn, command_id="cmd-obligation-conflict")
+    _open_test_entry_obligation(conn, conflict)
+    append_event(
+        conn,
+        command_id=conflict,
+        event_type="SUBMIT_REQUESTED",
+        occurred_at="2026-07-14T08:00:01+00:00",
+        payload=_entry_submit_payload(),
+    )
+    append_event(
+        conn,
+        command_id=conflict,
+        event_type="SUBMIT_REJECTED",
+        occurred_at="2026-07-14T08:00:02+00:00",
+        payload={"reason": "venue_rejected_400"},
+    )
+    append_trade_fact(
+        conn,
+        trade_id="trade-obligation-conflict",
+        venue_order_id="order-obligation-conflict",
+        command_id=conflict,
+        state="MATCHED",
+        filled_size="1",
+        fill_price="0.5",
+        source="REST",
+        observed_at="2026-07-14T08:00:03+00:00",
+        raw_payload_hash="e" * 64,
+        raw_payload_json={"test": "contradictory exposure"},
+    )
+    exec_conflict = _insert(conn, command_id="cmd-obligation-exec-conflict")
+    _open_test_entry_obligation(conn, exec_conflict)
+    append_event(
+        conn,
+        command_id=exec_conflict,
+        event_type="SUBMIT_REQUESTED",
+        occurred_at="2026-07-14T08:00:01+00:00",
+        payload=_entry_submit_payload(),
+    )
+    append_event(
+        conn,
+        command_id=exec_conflict,
+        event_type="SUBMIT_REJECTED",
+        occurred_at="2026-07-14T08:00:02+00:00",
+        payload={"reason": "venue_rejected_400"},
+    )
+    conn.execute(
+        "INSERT INTO execution_fact "
+        "(intent_id, order_role, shares, filled_at, venue_status, "
+        "terminal_exec_status, command_id) "
+        "VALUES (?, 'entry', 1, ?, 'FILLED', 'filled', ?)",
+        (
+            "intent-obligation-exec-conflict",
+            "2026-07-14T08:00:03+00:00",
+            exec_conflict,
+        ),
+    )
+    order_conflict = _insert(conn, command_id="cmd-obligation-order-conflict")
+    _open_test_entry_obligation(conn, order_conflict)
+    append_event(
+        conn,
+        command_id=order_conflict,
+        event_type="SUBMIT_REQUESTED",
+        occurred_at="2026-07-14T08:00:01+00:00",
+        payload=_entry_submit_payload(),
+    )
+    append_event(
+        conn,
+        command_id=order_conflict,
+        event_type="SUBMIT_REJECTED",
+        occurred_at="2026-07-14T08:00:02+00:00",
+        payload={"reason": "venue_rejected_400"},
+    )
+    append_order_fact(
+        conn,
+        venue_order_id="order-obligation-live-conflict",
+        command_id=order_conflict,
+        state="LIVE",
+        remaining_size="10",
+        matched_size="0",
+        source="REST",
+        observed_at="2026-07-14T08:00:03+00:00",
+        raw_payload_hash="d" * 64,
+        raw_payload_json={"test": "contradictory live order"},
+    )
+    cancel_conflicts = []
+    for fact_state in ("CANCEL_REQUESTED", "CANCEL_UNKNOWN", "CANCEL_FAILED"):
+        cancel_conflict = _insert(
+            conn,
+            command_id=f"cmd-obligation-{fact_state.lower()}",
+        )
+        cancel_conflicts.append(cancel_conflict)
+        _open_test_entry_obligation(conn, cancel_conflict)
+        append_event(
+            conn,
+            command_id=cancel_conflict,
+            event_type="SUBMIT_REQUESTED",
+            occurred_at="2026-07-14T08:00:01+00:00",
+            payload=_entry_submit_payload(),
+        )
+        append_event(
+            conn,
+            command_id=cancel_conflict,
+            event_type="SUBMIT_REJECTED",
+            occurred_at="2026-07-14T08:00:02+00:00",
+            payload={"reason": "venue_rejected_400"},
+        )
+        append_order_fact(
+            conn,
+            venue_order_id=f"order-obligation-{fact_state.lower()}",
+            command_id=cancel_conflict,
+            state=fact_state,
+            remaining_size="10",
+            matched_size="0",
+            source="REST",
+            observed_at="2026-07-14T08:00:03+00:00",
+            raw_payload_hash=hashlib.sha256(fact_state.encode()).hexdigest(),
+            raw_payload_json={"test": "cancel not terminal"},
+        )
+    terminal_order = _insert(conn, command_id="cmd-obligation-terminal-order")
+    _open_test_entry_obligation(conn, terminal_order)
+    append_event(
+        conn,
+        command_id=terminal_order,
+        event_type="SUBMIT_REQUESTED",
+        occurred_at="2026-07-14T08:00:01+00:00",
+        payload=_entry_submit_payload(),
+    )
+    append_event(
+        conn,
+        command_id=terminal_order,
+        event_type="SUBMIT_REJECTED",
+        occurred_at="2026-07-14T08:00:02+00:00",
+        payload={"reason": "venue_rejected_400"},
+    )
+    append_order_fact(
+        conn,
+        venue_order_id="order-obligation-terminal-order",
+        command_id=terminal_order,
+        state="LIVE",
+        remaining_size="10",
+        matched_size="0",
+        source="REST",
+        observed_at="2026-07-14T08:00:03+00:00",
+        raw_payload_hash="c" * 64,
+        raw_payload_json={"test": "stale live order"},
+    )
+    append_order_fact(
+        conn,
+        venue_order_id="order-obligation-terminal-order",
+        command_id=terminal_order,
+        state="CANCEL_CONFIRMED",
+        remaining_size="0",
+        matched_size="0",
+        source="REST",
+        observed_at="2026-07-14T08:00:04+00:00",
+        raw_payload_hash="b" * 64,
+        raw_payload_json={"test": "terminal zero-fill order"},
+    )
+    multi_order = _insert(conn, command_id="cmd-obligation-multi-order")
+    _open_test_entry_obligation(conn, multi_order)
+    append_event(
+        conn,
+        command_id=multi_order,
+        event_type="SUBMIT_REQUESTED",
+        occurred_at="2026-07-14T08:00:01+00:00",
+        payload=_entry_submit_payload(),
+    )
+    append_event(
+        conn,
+        command_id=multi_order,
+        event_type="SUBMIT_REJECTED",
+        occurred_at="2026-07-14T08:00:02+00:00",
+        payload={"reason": "venue_rejected_400"},
+    )
+    append_order_fact(
+        conn,
+        venue_order_id="order-obligation-multi-live",
+        command_id=multi_order,
+        state="LIVE",
+        remaining_size="10",
+        matched_size="0",
+        source="REST",
+        observed_at="2026-07-14T08:00:03+00:00",
+        raw_payload_hash="a" * 64,
+        raw_payload_json={"test": "first venue order remains live"},
+    )
+    append_order_fact(
+        conn,
+        venue_order_id="order-obligation-multi-terminal",
+        command_id=multi_order,
+        state="CANCEL_CONFIRMED",
+        remaining_size="0",
+        matched_size="0",
+        source="REST",
+        observed_at="2026-07-14T08:00:04+00:00",
+        raw_payload_hash="9" * 64,
+        raw_payload_json={"test": "second venue order is terminal"},
+    )
+    unknown_live = _insert(conn, command_id="cmd-obligation-live-unknown-size")
+    _open_test_entry_obligation(conn, unknown_live)
+    append_event(
+        conn,
+        command_id=unknown_live,
+        event_type="SUBMIT_REQUESTED",
+        occurred_at="2026-07-14T08:00:01+00:00",
+        payload=_entry_submit_payload(),
+    )
+    append_event(
+        conn,
+        command_id=unknown_live,
+        event_type="SUBMIT_REJECTED",
+        occurred_at="2026-07-14T08:00:02+00:00",
+        payload={"reason": "venue_rejected_400"},
+    )
+    append_order_fact(
+        conn,
+        venue_order_id="order-obligation-live-unknown-size",
+        command_id=unknown_live,
+        state="LIVE",
+        remaining_size=None,
+        matched_size=None,
+        source="REST",
+        observed_at="2026-07-14T08:00:03+00:00",
+        raw_payload_hash="8" * 64,
+        raw_payload_json={"test": "live order with unknown size"},
+    )
+
+    summary = reconcile_terminal_entry_exposure_obligations(conn)
+
+    assert summary == {"scanned": 10, "advanced": 2, "stayed": 8, "errors": 0}
+    statuses = dict(
+        conn.execute(
+            "SELECT command_id, status FROM entry_exposure_obligations"
+        ).fetchall()
+    )
+    assert statuses[no_fill] == "RESOLVED"
+    assert statuses[conflict] == "OPEN"
+    assert statuses[exec_conflict] == "OPEN"
+    assert statuses[order_conflict] == "OPEN"
+    assert all(statuses[command_id] == "OPEN" for command_id in cancel_conflicts)
+    assert statuses[terminal_order] == "RESOLVED"
+    assert statuses[multi_order] == "OPEN"
+    assert statuses[unknown_live] == "OPEN"
+
+
 def _ensure_snapshot(
     conn,
     *,
