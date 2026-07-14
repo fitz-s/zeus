@@ -2486,8 +2486,8 @@ def select_global_single_order(
             candidate_input_count=len(candidates),
         )
 
-    band_contracts = {(alpha, basis) for _, _, alpha, basis in eligible}
-    if len(band_contracts) > 1:
+    band_alphas = {alpha for _, _, alpha, _basis in eligible}
+    if len(band_alphas) > 1:
         rejections.update(
             {c.candidate_id: "BAND_ALPHA_MISMATCH" for c, _, _, _ in eligible}
         )

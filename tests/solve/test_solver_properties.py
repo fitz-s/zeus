@@ -573,6 +573,27 @@ def _replace_global_band_alpha(candidate, alpha):
     return replace(candidate, probability_witness_identity=identity)
 
 
+def _replace_global_band_basis(candidate, basis):
+    prior = _GLOBAL_PROBABILITY_WITNESSES[candidate.probability_witness_identity]
+    identity = S.joint_probability_witness_identity(
+        family_key=prior.family_key,
+        bindings=prior.bindings,
+        q_version=prior.q_version,
+        resolution_identity=prior.resolution_identity,
+        topology_identity=prior.topology_identity,
+        posterior_identity_hash=prior.posterior_identity_hash,
+        source_truth_identity=prior.source_truth_identity,
+        authority_certificate_hash=prior.authority_certificate_hash,
+        band_alpha=prior.band_alpha,
+        band_basis=basis,
+        yes_q_samples=prior.yes_q_samples,
+        captured_at_utc=prior.captured_at_utc,
+    )
+    witness = replace(prior, band_basis=basis, witness_identity=identity)
+    _GLOBAL_PROBABILITY_WITNESSES[identity] = witness
+    return replace(candidate, probability_witness_identity=identity)
+
+
 def _global_probability_projection(candidate):
     probability = _GLOBAL_PROBABILITY_WITNESSES[
         candidate.probability_witness_identity
@@ -2308,6 +2329,23 @@ def test_global_single_order_eligible_candidates_with_different_band_alpha_fail_
     assert decision.candidate is None
     assert decision.no_trade_reason == "BAND_ALPHA_MISMATCH"
     assert set(decision.rejection_reasons.values()) == {"BAND_ALPHA_MISMATCH"}
+
+
+def test_global_single_order_same_alpha_compares_distinct_current_probability_bases():
+    forecast = _replace_global_band_basis(
+        _global_candidate(candidate_id="forecast", family="a", side="YES", q=0.70),
+        "current_coherent_settlement_simplex_v1",
+    )
+    day0 = _replace_global_band_basis(
+        _global_candidate(candidate_id="day0", family="b", side="NO", q=0.65),
+        "current_coherent_day0_remaining_finite_evidence_v2",
+    )
+
+    decision = _global_select((forecast, day0))
+
+    assert decision.candidate is not None
+    assert decision.no_trade_reason is None
+    assert "BAND_ALPHA_MISMATCH" not in decision.rejection_reasons.values()
 
 
 def test_global_single_order_matches_exhaustive_grid_on_random_full_depth_books():
