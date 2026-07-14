@@ -215,6 +215,15 @@ authority surface.
   therefore traced to an incorrect full-day-posterior dependency, not to an
   absent current Day0 probability variable.  No historical fit or synthesized
   member value is admitted by the repair.
+- 2026-07-14: Paris Jul 14 HIGH 35C NO produced a real FOK match: the command
+  requested 90 shares at a `0.012` limit, while the venue confirmed
+  `99.726666` shares at `0.011` with a Polygon transaction hash.  Wallet and
+  chain projections synchronized the exposure, but command recovery kept the
+  row in `REVIEW_REQUIRED` because it required fill price equality.  A limit is
+  a one-sided economic bound, not an equality: BUY fills may improve below it
+  and SELL fills may improve above it.  Recovery and restart priming now share
+  that side-aware rule while retaining exact token, side, time, unique trade,
+  bound order ID, open-order absence, confirmed status, and residual proofs.
 
 - 2026-07-11: live rows isolated the source-clock YES historical-floor / NO
   near-one asymmetry.

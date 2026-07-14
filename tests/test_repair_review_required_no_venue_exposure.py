@@ -1,4 +1,4 @@
-# Lifecycle: created=2026-07-04; last_reviewed=2026-07-04; last_reused=never
+# Lifecycle: created=2026-07-04; last_reviewed=2026-07-14; last_reused=2026-07-14
 # Purpose: Regression tests for REVIEW_REQUIRED no-venue-exposure repair triage.
 # Reuse: Run when command recovery REVIEW_REQUIRED clearance or operator repair scripts change.
 # Authority basis: AGENTS.md position/execution proof gates; scripts/AGENTS.md repair contract.
@@ -213,6 +213,7 @@ def test_run_with_matching_trade_keeps_candidate_unclear(monkeypatch) -> None:
                 {
                     "id": "trade-safe",
                     "status": "CONFIRMED",
+                    "trader_side": "TAKER",
                     "asset_id": "tok-safe",
                     "side": "BUY",
                     "price": "0.56",
@@ -304,6 +305,7 @@ def test_apply_confirmed_trade_targets_one_command(monkeypatch) -> None:
                 {
                     "id": "trade-safe",
                     "status": "CONFIRMED",
+                    "trader_side": "TAKER",
                     "asset_id": "tok-safe",
                     "side": "BUY",
                     "price": "0.56",
@@ -367,6 +369,148 @@ def test_review_required_confirmed_trade_match_accepts_top_level_taker_fill() ->
             "source": "top_level_taker_trade",
         },
     }
+
+
+def test_review_required_confirmed_trade_match_accepts_buy_price_improvement() -> None:
+    from src.execution.command_recovery import _review_required_trade_maker_match
+
+    match = _review_required_trade_maker_match(
+        {
+            "token_id": "no-token",
+            "side": "BUY",
+            "price": "0.012",
+            "size": "90",
+        },
+        {
+            "trader_side": "TAKER",
+            "asset_id": "no-token",
+            "side": "BUY",
+            "price": "0.011",
+            "size": "99.726666",
+            "taker_order_id": "0xtaker",
+        },
+    )
+
+    assert match == {
+        "order_id": "0xtaker",
+        "matched_size": "99.726666",
+        "fill_price": "0.011",
+        "maker_order": {
+            "asset_id": "no-token",
+            "side": "BUY",
+            "price": "0.011",
+            "matched_amount": "99.726666",
+            "order_id": "0xtaker",
+            "source": "top_level_taker_trade",
+        },
+    }
+
+
+def test_review_required_confirmed_trade_match_rejects_worse_buy_price() -> None:
+    from src.execution.command_recovery import _review_required_trade_maker_match
+
+    match = _review_required_trade_maker_match(
+        {
+            "token_id": "no-token",
+            "side": "BUY",
+            "price": "0.012",
+            "size": "90",
+        },
+        {
+            "asset_id": "no-token",
+            "side": "BUY",
+            "price": "0.013",
+            "size": "90",
+            "taker_order_id": "0xtaker",
+        },
+    )
+
+    assert match is None
+
+
+def test_review_required_confirmed_trade_match_rejects_unbound_counterparty_maker() -> None:
+    from src.execution.command_recovery import _review_required_trade_maker_match
+
+    match = _review_required_trade_maker_match(
+        {
+            "token_id": "yes-token",
+            "side": "BUY",
+            "price": "0.995",
+            "size": "28",
+        },
+        {
+            "trader_side": "TAKER",
+            "asset_id": "no-token",
+            "side": "BUY",
+            "price": "0.005",
+            "size": "28",
+            "taker_order_id": "0xours",
+            "maker_orders": [
+                {
+                    "asset_id": "yes-token",
+                    "side": "BUY",
+                    "price": "0.99",
+                    "matched_amount": "28.36",
+                    "order_id": "0xcounterparty",
+                }
+            ],
+        },
+    )
+
+    assert match is None
+
+
+@pytest.mark.parametrize(
+    ("side", "limit_price", "fill_price", "expected"),
+    [
+        ("BUY", "0.012", "0.011", True),
+        ("BUY", "0.012", "0.013", False),
+        ("SELL", "0.400", "0.410", True),
+        ("SELL", "0.400", "0.390", False),
+        ("SELL", "0.400", "1.100", False),
+        ("SELL", "1.100", "0.900", False),
+        ("BUY", "0.012", "0", False),
+        ("BUY", "0.012", "NaN", False),
+    ],
+)
+def test_fill_price_respects_side_specific_limit(
+    side: str,
+    limit_price: str,
+    fill_price: str,
+    expected: bool,
+) -> None:
+    from src.execution.command_recovery import _fill_price_respects_limit
+
+    assert (
+        _fill_price_respects_limit(fill_price, limit_price, side=side)
+        is expected
+    )
+
+
+@pytest.mark.parametrize(
+    ("side", "command_size", "filled_size", "expected"),
+    [
+        ("BUY", "90", "99.726666", True),
+        ("BUY", "90", "89.98", False),
+        ("SELL", "90", "90", True),
+        ("SELL", "90", "89.995", True),
+        ("SELL", "90", "90.000001", True),
+        ("SELL", "90", "90.01", False),
+        ("SELL", "90", "99.726666", False),
+    ],
+)
+def test_fill_size_completion_is_side_specific(
+    side: str,
+    command_size: str,
+    filled_size: str,
+    expected: bool,
+) -> None:
+    from src.execution.command_recovery import _fill_size_completes_limit_order
+
+    assert (
+        _fill_size_completes_limit_order(filled_size, command_size, side=side)
+        is expected
+    )
 
 
 def test_point_order_from_trade_payloads_accepts_top_level_taker_order() -> None:

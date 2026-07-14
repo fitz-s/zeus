@@ -2392,7 +2392,7 @@ class TestRecoveryResolutionTable:
         assert after_count == 0
         assert after_markets == ()
 
-    def test_review_required_recovery_no_venue_order_id_confirmed_maker_trade_fills(
+    def test_review_required_recovery_no_venue_order_id_confirmed_taker_trade_fills(
         self, conn, mock_client
     ):
         from src.risk_allocator.governor import count_unknown_side_effects
@@ -2419,17 +2419,14 @@ class TestRecoveryResolutionTable:
             {
                 "id": "trade-confirmed-maker",
                 "status": "CONFIRMED",
+                "trader_side": "TAKER",
                 "match_time": "2026-04-26T00:02:00Z",
                 "transaction_hash": "0xtx-confirmed-maker",
-                "maker_orders": [
-                    {
-                        "asset_id": "tok-confirmed-maker",
-                        "order_id": "ord-confirmed-maker",
-                        "side": "BUY",
-                        "price": "0.67",
-                        "matched_amount": "10.86",
-                    }
-                ],
+                "asset_id": "tok-confirmed-maker",
+                "taker_order_id": "ord-confirmed-maker",
+                "side": "BUY",
+                "price": "0.67",
+                "size": "10.86",
             }
         ]
 
@@ -2505,8 +2502,8 @@ class TestRecoveryResolutionTable:
                         "asset_id": "tok-matched-missing-trade-id",
                         "order_id": "ord-matched-missing-trade-id",
                         "side": "BUY",
-                        "price": "0.74",
-                        "matched_amount": "31.5",
+                        "price": "0.73",
+                        "matched_amount": "31.9",
                     }
                 ],
             }
@@ -2527,6 +2524,17 @@ class TestRecoveryResolutionTable:
         assert payload["required_predicates"][
             "bound_venue_order_id_matches_trade"
         ] is True
+        trade_fact = conn.execute(
+            """
+            SELECT filled_size, fill_price
+              FROM venue_trade_facts
+             WHERE command_id = 'cmd-matched-missing-trade-id'
+            """
+        ).fetchone()
+        assert dict(trade_fact) == {
+            "filled_size": "31.9",
+            "fill_price": "0.73",
+        }
 
     def test_matched_submit_missing_trade_id_reads_v2_adapter_trades(
         self, conn
@@ -2656,8 +2664,8 @@ class TestRecoveryResolutionTable:
             command_id=command_id,
             order_id=order_id,
             trade_id="trade-restart-matched-submit",
-            filled_size="31.5",
-            fill_price="0.74",
+            filled_size="31.9",
+            fill_price="0.73",
         )
 
         rows = _restart_preflight_unresolved_commands(conn)
@@ -2721,21 +2729,26 @@ class TestRecoveryResolutionTable:
             occurred_at="2026-04-26T00:01:00Z",
             payload={"reason": "recovery_no_venue_order_id"},
         )
-        mock_client.get_open_orders.return_value = [{"id": "ord-confirmed-open"}]
+        mock_client.get_open_orders.return_value = [
+            {
+                "id": "ord-confirmed-open",
+                "asset_id": "tok-confirmed-open",
+                "side": "BUY",
+                "price": "0.67",
+                "size": "10.865300810243",
+            }
+        ]
         mock_client.get_trades.return_value = [
             {
                 "id": "trade-confirmed-open",
                 "status": "CONFIRMED",
+                "trader_side": "TAKER",
                 "match_time": "2026-04-26T00:02:00Z",
-                "maker_orders": [
-                    {
-                        "asset_id": "tok-confirmed-open",
-                        "order_id": "ord-confirmed-open",
-                        "side": "BUY",
-                        "price": "0.67",
-                        "matched_amount": "10.86",
-                    }
-                ],
+                "asset_id": "tok-confirmed-open",
+                "taker_order_id": "ord-confirmed-open",
+                "side": "BUY",
+                "price": "0.67",
+                "size": "10.86",
             }
         ]
 

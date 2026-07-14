@@ -14292,6 +14292,37 @@ def _decimal_matches(left, right) -> bool:
         return False
 
 
+def _fill_price_respects_limit(fill_price, limit_price, *, side: object) -> bool:
+    """Return whether a realized fill is no worse than the submitted limit."""
+
+    fill = _positive_decimal_or_none(fill_price)
+    limit = _positive_decimal_or_none(limit_price)
+    if fill is None or limit is None or fill > 1 or limit > 1:
+        return False
+    normalized_side = str(side or "").upper()
+    if normalized_side == "BUY":
+        return fill <= limit
+    if normalized_side == "SELL":
+        return fill >= limit
+    return False
+
+
+def _fill_size_completes_limit_order(filled_size, command_size, *, side: object) -> bool:
+    """Require a full fill while respecting BUY/SELL quantity semantics."""
+
+    filled = _positive_decimal_or_none(filled_size)
+    requested = _positive_decimal_or_none(command_size)
+    if filled is None or requested is None:
+        return False
+    residual = requested - filled
+    normalized_side = str(side or "").upper()
+    if normalized_side == "BUY":
+        return residual < Decimal("0.01")
+    if normalized_side == "SELL":
+        return -Decimal("0.000001") <= residual < Decimal("0.01")
+    return False
+
+
 def _raw_matches_command_exposure(raw: dict, command: dict) -> bool:
     token_id = str(command.get("token_id") or "")
     if _raw_mentions_token(raw, token_id):
@@ -15033,23 +15064,39 @@ def _review_required_trade_maker_match(command: dict, trade: dict) -> dict | Non
     side = str(command.get("side") or "").upper()
     command_price = command.get("price")
     command_size = _decimal_or_none(command.get("size"))
+    bound_order_id = str(command.get("venue_order_id") or "").strip().lower()
     if not token_id or command_size is None:
         return None
-    if str(trade.get("asset_id") or trade.get("token_id") or "") == token_id:
+    top_order_id = str(
+        trade.get("taker_order_id")
+        or trade.get("order_id")
+        or trade.get("id")
+        or ""
+    ).strip()
+    top_level_owned = (
+        str(trade.get("trader_side") or "").upper() == "TAKER"
+        or (
+            bool(bound_order_id)
+            and top_order_id.lower() == bound_order_id
+        )
+    )
+    if top_level_owned and str(
+        trade.get("asset_id") or trade.get("token_id") or ""
+    ) == token_id:
         if side and str(trade.get("side") or "").upper() == side:
-            if _decimal_matches(trade.get("price"), command_price):
+            if _fill_price_respects_limit(
+                trade.get("price"),
+                command_price,
+                side=side,
+            ):
                 matched = _positive_decimal_or_none(trade.get("size") or trade.get("matched_amount"))
-                if matched is not None:
-                    residual = command_size - matched
-                    if residual < 0:
-                        residual = Decimal("0")
-                    order_id = str(
-                        trade.get("taker_order_id")
-                        or trade.get("order_id")
-                        or trade.get("id")
-                        or ""
-                    ).strip()
-                    if residual < Decimal("0.01") and order_id:
+                if _fill_size_completes_limit_order(
+                    matched,
+                    command_size,
+                    side=side,
+                ):
+                    order_id = top_order_id
+                    if order_id:
                         return {
                             "order_id": order_id,
                             "matched_size": _decimal_text(matched),
@@ -15066,21 +15113,26 @@ def _review_required_trade_maker_match(command: dict, trade: dict) -> dict | Non
     for maker in trade.get("maker_orders") or []:
         if not isinstance(maker, dict):
             continue
+        order_id = str(maker.get("order_id") or maker.get("id") or "").strip()
+        if not bound_order_id or order_id.lower() != bound_order_id:
+            continue
         if str(maker.get("asset_id") or maker.get("token_id") or "") != token_id:
             continue
         if side and str(maker.get("side") or "").upper() != side:
             continue
-        if not _decimal_matches(maker.get("price"), command_price):
+        if not _fill_price_respects_limit(
+            maker.get("price"),
+            command_price,
+            side=side,
+        ):
             continue
         matched = _positive_decimal_or_none(maker.get("matched_amount") or maker.get("size"))
-        if matched is None:
+        if not _fill_size_completes_limit_order(
+            matched,
+            command_size,
+            side=side,
+        ):
             continue
-        residual = command_size - matched
-        if residual < 0:
-            residual = Decimal("0")
-        if residual >= Decimal("0.01"):
-            continue
-        order_id = str(maker.get("order_id") or maker.get("id") or "").strip()
         if not order_id:
             continue
         return {
@@ -16445,13 +16497,21 @@ def _restart_preflight_unresolved_commands(conn: sqlite3.Connection) -> list[dic
         if len(trade_facts) != 1:
             continue
         trade_fact = _dict_row(trade_facts[0])
-        if not _decimal_matches(trade_fact.get("fill_price"), row.get("price")):
+        if not _fill_price_respects_limit(
+            trade_fact.get("fill_price"),
+            row.get("price"),
+            side=row.get("side"),
+        ):
             continue
         command_size = _decimal_or_none(row.get("size"))
         filled_size = _positive_decimal_or_none(trade_fact.get("filled_size"))
         if command_size is None or filled_size is None:
             continue
-        if abs(command_size - filled_size) >= Decimal("0.01"):
+        if not _fill_size_completes_limit_order(
+            filled_size,
+            command_size,
+            side=row.get("side"),
+        ):
             continue
         rows.append(row)
     return rows
