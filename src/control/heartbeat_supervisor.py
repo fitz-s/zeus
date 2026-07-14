@@ -485,11 +485,12 @@ def _git_head_matches(expected: str, observed: str) -> bool:
 
 def _live_trading_sidecars_ready(
     *,
-    expected_sha: str,
+    expected_sha: str | None,
     state_root: Path,
     now: datetime,
-) -> tuple[bool, list[str]]:
+) -> tuple[bool, list[str], list[str]]:
     failures: list[str] = []
+    identity_observations: list[str] = []
     for name, filename, max_age_seconds in _LIVE_TRADING_REQUIRED_SIDECAR_HEARTBEATS:
         path = state_root / filename
         try:
@@ -501,12 +502,11 @@ def _live_trading_sidecars_ready(
             failures.append(f"{name}:unreadable:{type(exc).__name__}")
             continue
         heartbeat_sha = str(payload.get("git_head") or "").strip()
-        if not _git_head_matches(expected_sha, heartbeat_sha):
-            failures.append(
+        if expected_sha and not _git_head_matches(expected_sha, heartbeat_sha):
+            identity_observations.append(
                 f"{name}:git_head_mismatch heartbeat={heartbeat_sha or '<missing>'} "
                 f"expected={expected_sha[:8]}"
             )
-            continue
         heartbeat_at = _parse_utc(
             payload.get("alive_at") or payload.get("written_at") or payload.get("timestamp")
         )
@@ -518,7 +518,7 @@ def _live_trading_sidecars_ready(
             failures.append(
                 f"{name}:stale age_seconds={age_seconds:.1f} max={max_age_seconds:.1f}"
             )
-    return not failures, failures
+    return not failures, failures, identity_observations
 
 
 def recover_missing_live_trading_launchd_if_needed(
@@ -530,7 +530,7 @@ def recover_missing_live_trading_launchd_if_needed(
     plist_path: Path | None = None,
     status_path: Path | None = None,
 ) -> dict[str, Any]:
-    """Bootstrap missing live-trading only when the live prerequisites are proven.
+    """Bootstrap missing live-trading only when its liveness prerequisites are proven.
 
     This is intentionally narrower than ``scripts/deploy_live.py restart`` so it
     can run inside the venue-heartbeat sidecar without restarting that sidecar
@@ -601,18 +601,7 @@ def recover_missing_live_trading_launchd_if_needed(
 
     root = repo_root or _repo_root_from_config()
     expected_sha, git_error = _current_git_head(root, run_cmd=run_cmd)
-    if not expected_sha:
-        return _live_trading_watchdog_write_status(
-            {
-                "ok": False,
-                "action": "blocked",
-                "reason": "git_head_unproven",
-                "detail": git_error,
-            },
-            status_path=status_path,
-        )
-
-    sidecars_ok, sidecar_failures = _live_trading_sidecars_ready(
+    sidecars_ok, sidecar_failures, identity_observations = _live_trading_sidecars_ready(
         expected_sha=expected_sha,
         state_root=state_root or _state_root_from_config(),
         now=checked_at,
@@ -625,6 +614,7 @@ def recover_missing_live_trading_launchd_if_needed(
                 "reason": "sidecars_not_ready",
                 "expected_sha": expected_sha,
                 "failures": sidecar_failures,
+                "identity_observations": identity_observations,
             },
             status_path=status_path,
         )
@@ -647,6 +637,8 @@ def recover_missing_live_trading_launchd_if_needed(
                 "action": "bootstrapped",
                 "reason": "service_missing",
                 "expected_sha": expected_sha,
+                "identity_observations": identity_observations,
+                "git_identity_error": git_error,
                 "plist": str(active_plist),
             },
             status_path=status_path,
@@ -658,6 +650,8 @@ def recover_missing_live_trading_launchd_if_needed(
                 "action": "none",
                 "reason": "already_loaded_race",
                 "expected_sha": expected_sha,
+                "identity_observations": identity_observations,
+                "git_identity_error": git_error,
             },
             status_path=status_path,
         )
@@ -667,6 +661,8 @@ def recover_missing_live_trading_launchd_if_needed(
             "action": "bootstrap_failed",
             "reason": "launchctl_bootstrap_failed",
             "expected_sha": expected_sha,
+            "identity_observations": identity_observations,
+            "git_identity_error": git_error,
             "returncode": getattr(res, "returncode", None),
             "detail": output,
         },

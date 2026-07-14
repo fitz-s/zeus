@@ -228,13 +228,7 @@ def _is_runtime_code_path(path: str) -> bool:
 
 
 def is_reduce_only_exit_runtime_path(path: str) -> bool:
-    """Return whether a path can affect reduce-only exit venue submission.
-
-    This narrower classifier is deliberately conservative. It is used only to
-    decide whether a stale managed runtime may continue reducing already-held
-    exposure while new entry submission remains blocked by the broader
-    ``live_venue_submit`` freshness gate.
-    """
+    """Return whether a path can affect reduce-only exit deployment evidence."""
 
     text = str(path or "").strip().replace("\\", "/")
     if not text:

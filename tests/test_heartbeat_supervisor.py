@@ -1,8 +1,8 @@
-# Lifecycle: created=2026-04-27; last_reviewed=2026-07-11; last_reused=2026-07-11
+# Lifecycle: created=2026-04-27; last_reviewed=2026-07-14; last_reused=2026-07-14
 # Purpose: Lock R3 Z3 HeartbeatSupervisor fail-closed resting-order gate behavior.
 # Reuse: Run when heartbeat supervision, executor submit gating, or R3 live-money readiness changes.
 # Created: 2026-04-27
-# Last reused/audited: 2026-07-11
+# Last reused/audited: 2026-07-14
 # Authority basis: docs/operations/task_2026-04-26_ultimate_plan/r3/slice_cards/Z3.yaml
 #                  + docs/archive/2026-Q2/task_2026-05-15_live_order_e2e_verification/LIVE_ORDER_E2E_VERIFICATION_PLAN.md
 #                  + 2026-05-17 CLOB venue-heartbeat critical-path split
@@ -96,15 +96,15 @@ def _write_sidecar_heartbeats(state_root: Path, *, sha: str, at: datetime) -> No
         (state_root / name).write_text(json.dumps(payload))
 
 
-def test_live_trading_launchd_watchdog_bootstraps_only_when_sidecars_match(
+def test_live_trading_launchd_watchdog_bootstraps_when_sidecars_are_fresh(
     tmp_path,
     monkeypatch,
 ) -> None:
     """A missing src.main service is a liveness fault, not a passive alert.
 
     The venue-heartbeat sidecar may bootstrap live-trading only after it proves
-    active launchd config, not-disabled state, current git HEAD, and fresh
-    same-HEAD sidecar heartbeats. It must not restart sidecars or touch DB truth.
+    active launchd config, not-disabled state, and fresh sidecar heartbeats. Code
+    identity remains evidence; it is not market or process-liveness authority.
     """
 
     monkeypatch.setenv("ZEUS_MODE", "live")
@@ -148,6 +148,82 @@ def test_live_trading_launchd_watchdog_bootstraps_only_when_sidecars_match(
     assert result["action"] == "bootstrapped"
     assert calls[-1] == ["launchctl", "bootstrap", "gui/501", str(plist)]
     assert json.loads(status_path.read_text())["action"] == "bootstrapped"
+
+
+def test_live_trading_launchd_watchdog_observes_identity_drift_without_blocking(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("ZEUS_MODE", "live")
+    monkeypatch.setenv("ZEUS_GUI_DOMAIN", "gui/501")
+    now = datetime(2026, 7, 14, 4, 0, tzinfo=timezone.utc)
+    state_root = tmp_path / "state"
+    state_root.mkdir()
+    _write_sidecar_heartbeats(state_root, sha="b" * 40, at=now)
+    plist = tmp_path / "com.zeus.live-trading.plist"
+    plist.write_text("<plist/>")
+
+    def fake_run(cmd, **kwargs):
+        if cmd[:2] == ["launchctl", "print"]:
+            return SimpleNamespace(returncode=3, stdout="", stderr="not found")
+        if cmd[:2] == ["launchctl", "print-disabled"]:
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        if cmd[:3] == ["git", "rev-parse", "HEAD"]:
+            return SimpleNamespace(returncode=0, stdout=f"{'a' * 40}\n", stderr="")
+        if cmd[:2] == ["launchctl", "bootstrap"]:
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        raise AssertionError(f"unexpected command: {cmd}")
+
+    result = recover_missing_live_trading_launchd_if_needed(
+        now=now,
+        run_cmd=fake_run,
+        repo_root=tmp_path,
+        state_root=state_root,
+        plist_path=plist,
+        status_path=tmp_path / "watchdog.json",
+    )
+
+    assert result["ok"] is True
+    assert result["action"] == "bootstrapped"
+    assert len(result["identity_observations"]) == 4
+
+
+def test_live_trading_launchd_watchdog_git_unavailable_does_not_block_recovery(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("ZEUS_MODE", "live")
+    monkeypatch.setenv("ZEUS_GUI_DOMAIN", "gui/501")
+    now = datetime(2026, 7, 14, 4, 0, tzinfo=timezone.utc)
+    state_root = tmp_path / "state"
+    state_root.mkdir()
+    _write_sidecar_heartbeats(state_root, sha="b" * 40, at=now)
+    plist = tmp_path / "com.zeus.live-trading.plist"
+    plist.write_text("<plist/>")
+
+    def fake_run(cmd, **kwargs):
+        if cmd[:2] == ["launchctl", "print"]:
+            return SimpleNamespace(returncode=3, stdout="", stderr="not found")
+        if cmd[:2] == ["launchctl", "print-disabled"]:
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        if cmd[:3] == ["git", "rev-parse", "HEAD"]:
+            raise FileNotFoundError("git unavailable")
+        if cmd[:2] == ["launchctl", "bootstrap"]:
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        raise AssertionError(f"unexpected command: {cmd}")
+
+    result = recover_missing_live_trading_launchd_if_needed(
+        now=now,
+        run_cmd=fake_run,
+        repo_root=tmp_path,
+        state_root=state_root,
+        plist_path=plist,
+        status_path=tmp_path / "watchdog.json",
+    )
+
+    assert result["ok"] is True
+    assert result["action"] == "bootstrapped"
+    assert result["git_identity_error"].startswith("git rev-parse unavailable")
 
 
 def test_live_trading_launchd_watchdog_reports_loaded_but_failed_service(

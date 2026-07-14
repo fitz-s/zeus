@@ -281,7 +281,7 @@ capabilities:
       blocked_when:
         - kill_switch_active
         - settlement_window_freeze_active
-        - risk_level_RED
+        - risk_level_halt
     hard_kernel_paths:
       - src/execution/executor.py
       - src/execution/live_executor.py
@@ -315,7 +315,7 @@ capabilities:
       blocked_when:
         - kill_switch_active
         - settlement_window_freeze_active
-        - risk_level_RED
+        - risk_level_halt
     hard_kernel_paths:
       - src/execution/executor.py
       - src/execution/exit_lifecycle.py
@@ -350,7 +350,6 @@ capabilities:
       protects_invariants: [INV-21, INV-04]
       blocked_when:
         - kill_switch_active
-        - risk_level_RED
     hard_kernel_paths:
       - src/execution/executor.py
       - src/execution/exchange_reconcile.py

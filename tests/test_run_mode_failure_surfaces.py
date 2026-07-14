@@ -5176,10 +5176,10 @@ def test_live_trading_watchdog_loaded_false_ok_yields_degraded(
     assert "live_trading_watchdog" in result["failing_surfaces"]
 
 
-def test_live_boot_prerequisites_degrade_on_sidecar_sha_mismatch(
+def test_live_boot_prerequisites_observe_sidecar_sha_mismatch_without_degrade(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A loaded launchd label is not enough when required sidecars run old code."""
+    """Code identity drift alone does not invalidate fresh sidecar evidence."""
 
     sd = tmp_path / "state"
     sd.mkdir()
@@ -5192,12 +5192,35 @@ def test_live_boot_prerequisites_degrade_on_sidecar_sha_mismatch(
     result = compute_composite_live_health(state_dir=sd)
 
     surface = result["surfaces"]["live_boot_prerequisites"]
-    assert surface["ok"] is False
-    assert surface["issue"] == "LIVE_BOOT_SIDECARS_NOT_READY:n=1"
-    assert surface["failures"] == [
+    assert surface["ok"] is True
+    assert surface["issue"] is None
+    assert surface["failures"] == []
+    assert surface["identity_observations"] == [
         f"forecast-live:git_head_mismatch heartbeat=2b436160d "
         f"expected={live_health._current_git_head()[:8]}"
     ]
+    assert "live_boot_prerequisites" not in result["failing_surfaces"]
+
+
+def test_live_boot_prerequisites_stale_sidecar_still_degrades(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A stale sidecar cannot authorize live production regardless of code identity."""
+
+    sd = tmp_path / "state"
+    sd.mkdir()
+    _setup_healthy_state(sd)
+    monkeypatch.setattr(live_health, "_dirty_runtime_worktree_paths", lambda **_kwargs: ())
+    heartbeat = json.loads((sd / "forecast-live-heartbeat.json").read_text())
+    heartbeat["written_at"] = _now_iso(-600)
+    _write(sd / "forecast-live-heartbeat.json", heartbeat)
+
+    result = compute_composite_live_health(state_dir=sd)
+
+    surface = result["surfaces"]["live_boot_prerequisites"]
+    assert surface["ok"] is False
+    assert surface["issue"] == "LIVE_BOOT_SIDECARS_NOT_READY:n=1"
+    assert surface["failures"][0].startswith("forecast-live:stale age_seconds=")
     assert "live_boot_prerequisites" in result["failing_surfaces"]
 
 

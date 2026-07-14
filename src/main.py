@@ -24,6 +24,7 @@ Advisory file lock infrastructure (src.data.dual_run_lock) is retained in code
 #                  + 2026-06-04 mainstream made display-only/unconstructable-as-decision (arm direction-gate boot guard + submit enforce branch DELETED)
 
 import functools
+import hashlib
 import json
 import logging
 import math
@@ -171,16 +172,14 @@ _EDLI_LIVE_BOOT_DEFERRED_REASON_PREFIXES = (
 )
 REQUIRED_STAGE_FILES_BY_MODE = {
     "edli_live": (
-        "edli_stage_loaded_sha_file",
         "edli_stage_source_health_json",
         "edli_stage_status_json",
-        "edli_live_promotion_artifact_path",
     ),
 }
 
-# PR-S6 deployment freshness gate — mutable container populated in main() at boot.
-# Tests monkeypatch this dict directly; scheduler job reads it each tick.
-_BOOT_STATE: dict = {"sha": None, "ts": None}
+# Immutable process identity populated in main() at boot for receipts and operators.
+# Tests monkeypatch this dict directly; the observer reads it each tick.
+_BOOT_STATE: dict = {"sha": None, "ts": None, "identity_source": "unavailable"}
 
 
 def _is_full_git_sha(value: object) -> bool:
@@ -727,7 +726,12 @@ def evaluate_edli_stage_readiness(
     reasons: list[str] = []
     now = datetime.now(timezone.utc)
     if loaded_sha_file:
-        reasons.extend(_edli_stage_loaded_sha_reasons(loaded_sha_file))
+        identity_observations = _edli_stage_loaded_sha_observations(loaded_sha_file)
+        if identity_observations:
+            logger.warning(
+                "EDLI stage code identity observed: %s",
+                ",".join(identity_observations),
+            )
     conn = _edli_stage_world_connection(world_db_path)
     try:
         try:
@@ -900,7 +904,7 @@ def _edli_stage_world_connection(world_db_path: str | None):
     return get_world_connection_read_only()
 
 
-def _edli_stage_loaded_sha_reasons(path: str) -> list[str]:
+def _edli_stage_loaded_sha_observations(path: str) -> list[str]:
     file_path = Path(path)
     if not file_path.exists():
         return [f"EDLI_STAGE_LOADED_SHA_MISSING:{path}"]
@@ -2181,15 +2185,46 @@ def _gamma_lookup_deadline_for_snapshot_refresh(
 
 
 
+def _runtime_source_fingerprint(repo_root: Path) -> str | None:
+    """Return a stable 40-hex identity when Git metadata is unavailable."""
+
+    from src.control.runtime_code_plane import RUNTIME_SCRIPT_FILES
+
+    paths = [
+        path
+        for root in (repo_root / "src", repo_root / "config")
+        if root.exists()
+        for path in root.rglob("*")
+        if path.is_file() and "__pycache__" not in path.parts and path.suffix != ".pyc"
+    ]
+    paths.extend(
+        repo_root / relative
+        for relative in (
+            *sorted(RUNTIME_SCRIPT_FILES),
+            "architecture/db_table_ownership.yaml",
+            "architecture/runtime_posture.yaml",
+            "architecture/strategy_profile_registry.yaml",
+        )
+        if (repo_root / relative).is_file()
+    )
+    if not paths:
+        return None
+    digest = hashlib.sha256()
+    for path in sorted(set(paths)):
+        try:
+            relative = path.relative_to(repo_root).as_posix()
+            content = path.read_bytes()
+        except OSError:
+            return None
+        digest.update(relative.encode())
+        digest.update(b"\0")
+        digest.update(content)
+        digest.update(b"\0")
+    return digest.hexdigest()[:40]
+
+
 def _capture_boot_state() -> dict:
-    """PR-S6: capture git HEAD SHA + timestamp at daemon start.
-
-    Returns {"sha": sha, "ts": datetime} on success.
-    Returns {"sha": None, "ts": None} if ZEUS_ACCEPT_STALE_DEPLOY=1 and git fails.
-    Raises SystemExit if git fails and ZEUS_ACCEPT_STALE_DEPLOY != "1" (fail-loud).
-
-    Extracted as a named function so tests can call it directly (not an inlined copy).
-    """
+    """Capture a code identity without making Git availability a boot gate."""
     import subprocess
 
     from src.config import PROJECT_ROOT
@@ -2201,46 +2236,35 @@ def _capture_boot_state() -> dict:
             timeout=5,
             stderr=subprocess.DEVNULL,
         ).strip().decode()
-        return {"sha": sha, "ts": datetime.now(timezone.utc)}
+        return {
+            "sha": sha,
+            "ts": datetime.now(timezone.utc),
+            "identity_source": "git_head",
+        }
     except Exception as exc:
-        if os.environ.get("ZEUS_ACCEPT_STALE_DEPLOY") == "1":
-            logger.warning(
-                "deployment_freshness: boot SHA capture failed (%s); "
-                "ZEUS_ACCEPT_STALE_DEPLOY=1 — skipping gate", exc,
-            )
-            return {"sha": None, "ts": None}
-        raise SystemExit(
-            f"deployment_freshness: boot SHA capture failed ({exc}) and "
-            "ZEUS_ACCEPT_STALE_DEPLOY != 1. Cannot initialize freshness gate. "
-            "Set ZEUS_ACCEPT_STALE_DEPLOY=1 to skip."
+        fingerprint = _runtime_source_fingerprint(PROJECT_ROOT)
+        logger.warning(
+            "runtime_identity: git HEAD unavailable (%s); source_fingerprint=%s",
+            exc,
+            fingerprint[:8] if fingerprint else "unavailable",
         )
+        return {
+            "sha": fingerprint,
+            "ts": datetime.now(timezone.utc),
+            "identity_source": "runtime_source_fingerprint" if fingerprint else "unavailable",
+        }
 
 
 def _write_loaded_sha_state(boot_sha: str | None) -> None:
-    """Write the running daemon's git HEAD SHA to state/loaded_sha.json at boot.
-
-    EDLI-mode release-gate surface. The live-release gate's loaded_sha check and
-    main.evaluate_edli_stage_readiness compare the *loaded* SHA (what this process
-    actually booted on) against the expected HEAD. In legacy_cron mode run_cycle
-    produced no such file; in EDLI modes nothing wrote it -> gate FAIL
-    (missing_loaded_sha). This writes the GENUINE booted SHA (reuses the value
-    _capture_boot_state already captured via git rev-parse HEAD), once at boot.
-
-    A divergence between loaded_sha and current HEAD (filesystem updated without
-    restart) is exactly what the gate is meant to catch — so this file is written
-    ONCE at boot and intentionally NOT refreshed, encoding the truly-loaded SHA.
-
-    Authority: fix/edli-stage-readiness-2026-05-31 (loaded_sha surface).
-    """
+    """Persist the process code identity once at boot for receipts and operators."""
     if not boot_sha:
         logger.warning(
-            "loaded_sha: boot SHA unavailable (ZEUS_ACCEPT_STALE_DEPLOY override?); "
-            "skipping state/loaded_sha.json write — release gate will read missing_loaded_sha"
+            "loaded_sha: process identity unavailable; skipping loaded_sha.json write"
         )
         return
     if not _is_full_git_sha(boot_sha):
         logger.error(
-            "loaded_sha: refusing to write invalid boot SHA %r — release gate will fail closed",
+            "loaded_sha: refusing to write invalid process identity %r",
             boot_sha,
         )
         return
@@ -2250,6 +2274,7 @@ def _write_loaded_sha_state(boot_sha: str | None) -> None:
     payload = {
         "loaded_sha": boot_sha,
         "generated_at": datetime.now(timezone.utc).isoformat(),
+        "identity_source": str(_BOOT_STATE.get("identity_source") or "git_head"),
     }
     try:
         tmp = out_path.with_suffix(out_path.suffix + ".tmp")
@@ -2329,7 +2354,7 @@ def _check_deployment_freshness(
         dirty_runtime_paths = ()
         logger.warning(
             "deployment_freshness: runtime code-plane classification failed (%s); "
-            "treating SHA drift as executable",
+            "recording SHA drift as unclassified observation",
             exc,
         )
 
@@ -2374,7 +2399,7 @@ def _check_deployment_freshness(
         )
         logger.info(
             "deployment_freshness: HEAD drift is non-runtime-only; "
-            "not pausing entries (boot_sha=%s current_sha=%s paths=%s)",
+            "observed only (boot_sha=%s current_sha=%s paths=%s)",
             _boot_sha[:8],
             current_sha[:8],
             list(code_plane.changed_paths[:5]),
@@ -2428,178 +2453,35 @@ _LIVE_SIDECAR_BOOT_CLOCK_SKEW_SECONDS = 5.0
 
 
 def _boot_deployment_freshness_auto_resume() -> None:
-    """Boot-time auto-resume: clear a deployment freshness pause when
-    the operator has restarted the daemon with the current git HEAD SHA.
+    """Retire only obsolete deployment-freshness pauses, then refresh evidence.
 
-    Called AFTER _assert_live_safe_strategies_or_exit() (which hydrates _control_state
-    via refresh_control_state) so is_entries_paused() / get_entries_pause_reason()
-    reflect durable DB state, not stale in-memory defaults.
-
-    Logic:
-    - Always refresh state/deployment_freshness.json to fresh when boot SHA
-      matches filesystem HEAD; this is the deploy script's post-start proof.
-    - If entries are NOT paused → no DB resume action.
-    - If entries are paused for a non-deployment-freshness reason → no-op;
-      do not clear operator-issued or other system pauses.
-    - If entries are paused with deployment-freshness reason AND the current
-      git HEAD matches _BOOT_STATE['sha'] → call resume_entries() to clear the DB override
-      + tombstone + refresh in-memory state. Logs at INFO with both SHAs.
-    - If SHA is still mismatched → do NOT auto-resume; operator must investigate.
-    - Any exception is caught and logged at WARNING so boot proceeds safely.
+    Deployment/worktree identity is observability, so an old pause with one of
+    the exact retired reasons must not survive a boot. Operator, risk, source,
+    and any other pause reason remain untouched.
     """
-    import subprocess
-
-    from src.config import PROJECT_ROOT, state_path
     from src.control.control_plane import (
-        get_entries_pause_reason,
-        is_entries_paused,
-        resume_entries,
+        retire_entries_pause_for_reasons,
     )
 
     try:
-        boot_sha: str | None = _BOOT_STATE.get("sha")
-        if not boot_sha:
-            logger.warning(
-                "deployment_freshness_auto_resume: boot SHA not captured; cannot verify SHA match"
-            )
-            return
-        try:
-            current_sha = subprocess.check_output(
-                ["git", "rev-parse", "HEAD"],
-                cwd=str(PROJECT_ROOT),
-                timeout=5,
-                stderr=subprocess.DEVNULL,
-            ).strip().decode()
-        except Exception as exc:
-            logger.warning(
-                "deployment_freshness_auto_resume: git rev-parse failed (%s); cannot verify SHA match",
-                exc,
-            )
-            return
-        try:
-            from src.control.runtime_code_plane import (
-                dirty_runtime_worktree_paths,
-                runtime_code_plane_diff,
-            )
-
-            code_plane = runtime_code_plane_diff(
-                PROJECT_ROOT,
-                boot_sha=boot_sha,
-                current_sha=current_sha,
-                timeout=5,
-            )
-            dirty_runtime_paths = dirty_runtime_worktree_paths(PROJECT_ROOT, timeout=5)
-        except Exception as exc:  # noqa: BLE001
-            logger.warning(
-                "deployment_freshness_auto_resume: runtime code-plane classification failed "
-                "(%s); cannot verify SHA match",
-                exc,
-            )
-            return
-        if dirty_runtime_paths:
-            logger.warning(
-                "deployment_freshness_auto_resume: runtime worktree is dirty at boot "
-                "(boot=%s current=%s paths=%s) — NOT auto-resuming",
-                boot_sha[:8],
-                current_sha[:8],
-                list(dirty_runtime_paths[:5]),
-            )
-            try:
-                df_path = state_path("deployment_freshness.json")
-                detected_at = datetime.now(timezone.utc)
-                boot_ts = _BOOT_STATE.get("ts")
-                uptime_hours = 0.0
-                if isinstance(boot_ts, datetime):
-                    uptime_hours = max(
-                        0.0,
-                        (detected_at - boot_ts.astimezone(timezone.utc)).total_seconds() / 3600.0,
-                    )
-                payload = {
-                    "boot_sha": boot_sha,
-                    "current_sha": current_sha,
-                    "uptime_hours": round(uptime_hours, 2),
-                    "detected_at": detected_at.isoformat(),
-                    "pause_reason": _DEPLOYMENT_FRESHNESS_PAUSE_REASON,
-                    "status": "dirty_runtime_worktree",
-                    "code_plane_status": code_plane.status,
-                    "runtime_code_changed": True,
-                    "changed_paths_sample": list(code_plane.changed_paths[:20]),
-                    "worktree_runtime_dirty": True,
-                    "dirty_runtime_paths_sample": list(dirty_runtime_paths[:20]),
-                }
-                tmp_path = str(df_path) + ".tmp"
-                with open(tmp_path, "w") as f:
-                    json.dump(payload, f, indent=2)
-                os.replace(tmp_path, str(df_path))
-            except Exception as exc:
-                logger.warning(
-                    "deployment_freshness_auto_resume: failed to write dirty worktree "
-                    "deployment_freshness.json (%s)",
-                    exc,
-                )
-            return
-        if current_sha != boot_sha and code_plane.runtime_code_changed:
-            logger.warning(
-                "deployment_freshness_auto_resume: SHA still mismatched at boot "
-                "(boot=%s current=%s code_plane=%s) — NOT auto-resuming; operator must investigate",
-                boot_sha[:8], current_sha[:8],
-                code_plane.status,
-            )
-            return
-        try:
-            df_path = state_path("deployment_freshness.json")
-            detected_at = datetime.now(timezone.utc)
-            boot_ts = _BOOT_STATE.get("ts")
-            uptime_hours = 0.0
-            if isinstance(boot_ts, datetime):
-                uptime_hours = max(
-                    0.0,
-                    (detected_at - boot_ts.astimezone(timezone.utc)).total_seconds() / 3600.0,
-                )
-            payload = {
-                "boot_sha": boot_sha,
-                "current_sha": current_sha,
-                "uptime_hours": round(uptime_hours, 2),
-                "detected_at": detected_at.isoformat(),
-                "pause_reason": None,
-                "status": "fresh",
-                "code_plane_status": code_plane.status,
-                "runtime_code_changed": False,
-                "changed_paths_sample": list(code_plane.changed_paths[:20]),
-            }
-            tmp_path = str(df_path) + ".tmp"
-            with open(tmp_path, "w") as f:
-                json.dump(payload, f, indent=2)
-            os.replace(tmp_path, str(df_path))
-        except Exception as exc:
-            logger.warning(
-                "deployment_freshness_auto_resume: failed to refresh deployment_freshness.json (%s)",
-                exc,
-            )
-        if not is_entries_paused():
-            return
-        pause_reason = get_entries_pause_reason()
-        if pause_reason not in (
-            {_DEPLOYMENT_FRESHNESS_PAUSE_REASON}
-            | set(_DEPLOYMENT_FRESHNESS_LEGACY_PAUSE_REASONS)
+        retired = {
+            _DEPLOYMENT_FRESHNESS_PAUSE_REASON,
+            *_DEPLOYMENT_FRESHNESS_LEGACY_PAUSE_REASONS,
+        }
+        if retire_entries_pause_for_reasons(
+            retired,
+            retirement_reason="deployment_freshness_pause_retired",
         ):
-            return
-        # SHA matches: operator restarted with current code — safe to auto-resume.
-        resume_entries(
-            "deployment_freshness_resumed_on_sha_match",
-            issued_by="control_plane",
-        )
-        logger.info(
-            "deployment_freshness_auto_resume: cleared deployment freshness pause "
-            "— boot_sha=%s matches filesystem HEAD=%s; entries unblocked",
-            boot_sha[:8], current_sha[:8],
-        )
+            logger.info(
+                "deployment_freshness_auto_resume: retired obsolete deployment pause"
+            )
     except Exception as exc:
         logger.warning(
-            "deployment_freshness_auto_resume: unexpected error (%s); boot continues without auto-resume",
+            "deployment_freshness_auto_resume: pause retirement failed (%s)",
             exc,
             exc_info=True,
         )
+    _check_deployment_freshness()
 
 
 def _parse_sidecar_heartbeat_time(value: object) -> datetime | None:
@@ -2761,22 +2643,19 @@ def _startup_required_sidecar_head_check(
     state_dir: Path | str | None = None,
     now: datetime | None = None,
 ) -> None:
-    """Fail live boot if required sidecars are stale, missing, or old-code.
+    """Fail live boot only when required sidecar liveness is unavailable.
 
     The operator preflight already checks this, but launchd can still be loaded
     directly. The live order daemon consumes substrate, price-channel, forecast,
     and capital surfaces produced by these sidecars, so startup must prove they
-    are fresh and running the same code before any entry path can arm.
+    are present and fresh before any entry path can arm. Their reported code
+    identities remain observable but do not prove market data invalidity.
     """
 
     if get_mode() != "live":
         return
 
     expected_sha = str(boot_sha or _BOOT_STATE.get("sha") or "").strip()
-    if not expected_sha:
-        raise SystemExit(
-            "LIVE_SIDECAR_BOOT_BLOCKED: missing boot SHA; cannot prove sidecar code identity"
-        )
 
     from src.config import STATE_DIR
 
@@ -2787,6 +2666,7 @@ def _startup_required_sidecar_head_check(
     )
     checked_at = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
     failures: list[str] = []
+    identity_observations: list[str] = []
     ok: list[str] = []
     for daemon, filename, max_age_seconds in _LIVE_SIDECAR_BOOT_HEARTBEATS:
         path = state_root / filename
@@ -2799,12 +2679,11 @@ def _startup_required_sidecar_head_check(
             failures.append(f"{daemon}:unreadable:{exc.__class__.__name__}")
             continue
         heartbeat_sha = str(payload.get("git_head") or "").strip()
-        if not _git_head_matches_boot(expected_sha, heartbeat_sha):
-            failures.append(
+        if expected_sha and not _git_head_matches_boot(expected_sha, heartbeat_sha):
+            identity_observations.append(
                 f"{daemon}:git_head_mismatch heartbeat={heartbeat_sha or '<missing>'} "
                 f"boot={expected_sha[:8]}"
             )
-            continue
         heartbeat_at = _parse_sidecar_heartbeat_time(
             payload.get("alive_at") or payload.get("written_at") or payload.get("timestamp")
         )
@@ -2820,7 +2699,7 @@ def _startup_required_sidecar_head_check(
                 f"{daemon}:stale age_seconds={age_seconds:.1f} max={max_age_seconds:.1f}"
             )
             continue
-        ok.append(f"{daemon}@{heartbeat_sha[:8]} age={age_seconds:.1f}s")
+        ok.append(f"{daemon}@{heartbeat_sha[:8] or 'unknown'} age={age_seconds:.1f}s")
 
     if failures:
         detail = "; ".join(failures)
@@ -2833,7 +2712,12 @@ def _startup_required_sidecar_head_check(
         logger.critical("LIVE_SIDECAR_BOOT_BLOCKED: %s", detail)
         raise SystemExit(f"LIVE_SIDECAR_BOOT_BLOCKED: {detail}")
 
-    logger.info("live sidecar boot identity/freshness: OK (%s)", ", ".join(ok))
+    if identity_observations:
+        logger.warning(
+            "live sidecar code identity observed: %s",
+            "; ".join(identity_observations),
+        )
+    logger.info("live sidecar boot freshness: OK (%s)", ", ".join(ok))
 
 
 def _startup_freshness_check() -> None:
@@ -5488,18 +5372,15 @@ def main():
 
     logger.info("Zeus starting in %s mode", mode)
 
-    # PR-S6: capture deployment snapshot for freshness gate.
-    # Must run early (before any blocking I/O) so uptime accounting is accurate.
-    # Fail-loud if git unavailable and ZEUS_ACCEPT_STALE_DEPLOY != "1".
+    # Capture immutable process identity early. Git is preferred; a source
+    # fingerprint keeps identity observable when repository metadata is absent.
     _boot = _capture_boot_state()
     _BOOT_STATE.update(_boot)
     if _boot.get("sha"):
         logger.info("deployment_freshness: boot_sha=%s", _boot["sha"][:8])
         os.environ["ZEUS_PROCESS_BOOT_SHA"] = str(_boot["sha"])
-    # EDLI-mode release-gate surface: persist the genuinely-booted HEAD SHA so the
-    # live-release gate's loaded_sha check can compare loaded vs expected. Reuses
-    # the boot SHA captured above; written once (not refreshed) so a post-boot
-    # filesystem divergence is still caught by the gate.
+    # Persist the identity once so receipts and deployment observability can name
+    # the exact running process without treating later worktree drift as authority.
     _write_loaded_sha_state(_boot.get("sha"))
 
     _startup_required_sidecar_head_check(boot_sha=_boot.get("sha"))
@@ -5658,10 +5539,8 @@ def main():
     # visible. See _assert_live_safe_strategies_or_exit() docstring above.
     _assert_live_safe_strategies_or_exit()
 
-    # PR-S8 boot-time auto-resume: if entries were paused at 4h SHA divergence
-    # (PR #149 deployment_freshness gate) and the daemon is now restarted with
-    # the current git HEAD, clear the pause automatically. Must run AFTER
-    # _assert_live_safe_strategies_or_exit() (which hydrates _control_state).
+    # Retire only obsolete deployment-freshness pauses. Must run after control
+    # state hydration so operator/risk/source pauses remain untouched.
     _boot_deployment_freshness_auto_resume()
 
     # Do not block scheduler startup on wallet warm. A missing warm record keeps
@@ -5954,7 +5833,7 @@ def main():
         coalesce=True,
     )
 
-    # PR-S6: deployment freshness gate — runs every 60s, fail-closed at 24h uptime.
+    # Loaded-code/worktree observability; never a submit or process-liveness gate.
     scheduler.add_job(
         _check_deployment_freshness, "interval", seconds=60,
         id="deployment_freshness", max_instances=1, coalesce=True,

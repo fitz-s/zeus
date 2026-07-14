@@ -807,7 +807,7 @@ files:
   src/control/heartbeat_supervisor.py:
     zone: K1_governance
     authority_role: heartbeat_runtime_guard
-    why: R3 Z3 venue heartbeat supervisor that blocks resting live orders when heartbeat health is not HEALTHY and reuses the fail-closed auto-pause tombstone.
+    why: R3 Z3 venue heartbeat supervisor that blocks resting live orders when venue heartbeat health is not HEALTHY and may restore a missing live-trading launchd process from fresh sidecar liveness; code identity is deployment evidence, not market authority.
     hazards:
     - VENUS_CONTROL_ONLY
     write_routes:

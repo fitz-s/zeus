@@ -458,33 +458,30 @@ class TestGitFailures:
 
 
 # ---------------------------------------------------------------------------
-# Tests: boot-capture fail-loud (M2)
+# Tests: boot identity fallback
 # ---------------------------------------------------------------------------
 
 class TestBootCapture:
-    def test_boot_fails_loud_when_git_unavailable_without_override(self):
-        """_capture_boot_state() raises SystemExit when git fails and no override.
-
-        Real antibody: calls src.main._capture_boot_state() directly so that
-        sed-breaking its raise SystemExit makes this test FAIL.
-        Patches subprocess.check_output on the real module object so the local
-        import inside _capture_boot_state picks it up.
-        """
+    def test_git_unavailable_uses_source_fingerprint(self):
+        fingerprint = "f" * 40
         with patch.dict(os.environ, {"ZEUS_ACCEPT_STALE_DEPLOY": ""}, clear=False):
             with patch("subprocess.check_output", side_effect=FileNotFoundError("git not found")):
-                with pytest.raises(SystemExit) as exc_info:
-                    _capture_boot_state()
-        assert "Cannot initialize freshness gate" in str(exc_info.value)
+                with patch(
+                    "src.main._runtime_source_fingerprint",
+                    return_value=fingerprint,
+                ):
+                    result = _capture_boot_state()
+        assert result["sha"] == fingerprint
+        assert result["identity_source"] == "runtime_source_fingerprint"
+        assert isinstance(result["ts"], datetime)
 
-    def test_boot_silent_with_override(self):
-        """_capture_boot_state() returns null state when git fails with override.
-
-        Real antibody: calls src.main._capture_boot_state() directly.
-        """
-        with patch.dict(os.environ, {"ZEUS_ACCEPT_STALE_DEPLOY": "1"}, clear=False):
-            with patch("subprocess.check_output", side_effect=FileNotFoundError("git not found")):
+    def test_git_and_fingerprint_unavailable_do_not_block_boot(self):
+        with patch("subprocess.check_output", side_effect=FileNotFoundError("git not found")):
+            with patch("src.main._runtime_source_fingerprint", return_value=None):
                 result = _capture_boot_state()
-        assert result == {"sha": None, "ts": None}
+        assert result["sha"] is None
+        assert result["identity_source"] == "unavailable"
+        assert isinstance(result["ts"], datetime)
 
 
 # ---------------------------------------------------------------------------

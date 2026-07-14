@@ -1,28 +1,20 @@
 # Created: 2026-05-19
-# Last reused or audited: 2026-07-08
-# Authority basis: PIPELINE_REVIEW.md §8, SYNTHESIS.md §8.7
-#   5/18 incident: PR #149 deployment_freshness_4h_divergence pause persisted
-#   across daemon restart because boot sequence had no auto-resume logic.
-# Lifecycle: created=2026-05-19; last_reviewed=2026-07-08; last_reused=2026-07-08
-# Purpose: antibody — deployment_freshness boot-time SHA-match auto-resume (PR #149 fix)
+# Last reused or audited: 2026-07-14
+# Authority basis: retired deployment freshness pauses are not market authority.
+# Lifecycle: created=2026-05-19; last_reviewed=2026-07-14; last_reused=2026-07-14
+# Purpose: antibody — exact obsolete deployment pauses retire without touching other pauses.
 # Reuse: Run when modifying boot_check logic, deployment_freshness pause/resume, or control_plane boot sequence.
 """Antibody tests for boot-time deployment_freshness auto-resume.
 
-When an operator restarts the daemon after deploying new code (i.e. git HEAD
-now matches boot SHA), any lingering deployment_freshness_4h_divergence pause
-must be automatically cleared so entries are not perpetually blocked.
+Any lingering deployment_freshness pause is retired regardless of worktree or
+Git state. Other operator, risk, and source pauses remain untouched.
 
 Coverage:
-  R1: SHA match → pause cleared (control_overrides expired, log emitted)
-  R2: SHA mismatch → pause NOT cleared (operator must investigate)
-  R3: entries not paused → no-op (resume_entries not called)
+  R1: exact deployment pause → cleared
+  R2: SHA/worktree/Git differences → still cleared
+  R3: entries not paused → no override expires
   R4: entries paused for different reason → not touched by auto-resume
-  R5: boot SHA not captured → warning logged, no-op
-  R6: git fails → warning logged, no-op (fail-open for boot safety)
-
-Meta-verify (sed-flip):
-  Invert the SHA-match condition (force always-mismatch) → R1 fails RED.
-  Restore → R1 GREEN.
+  R5/R6: boot identity or Git unavailable → still cleared
 """
 
 import sqlite3
@@ -33,7 +25,7 @@ import subprocess
 import tempfile
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 
 import pytest
 
@@ -77,6 +69,26 @@ def _seed_deployment_freshness_pause(conn: sqlite3.Connection) -> None:
         issued_at=now,
         reason="deployment_freshness_4h_divergence",
         effective_until=None,  # indefinite (operator restart must clear it)
+        precedence=DEFAULT_CONTROL_OVERRIDE_PRECEDENCE,
+    )
+    conn.commit()
+
+
+def _seed_edge_tightening(conn: sqlite3.Connection) -> None:
+    from src.state.db import upsert_control_override, DEFAULT_CONTROL_OVERRIDE_PRECEDENCE
+
+    now = datetime.now(_UTC).isoformat()
+    upsert_control_override(
+        conn,
+        override_id="control_plane:global:edge_threshold_multiplier",
+        target_type="global",
+        target_key="entries",
+        action_type="threshold_multiplier",
+        value="2.0",
+        issued_by="control_plane",
+        issued_at=now,
+        reason="independent_risk_tightening",
+        effective_until=None,
         precedence=DEFAULT_CONTROL_OVERRIDE_PRECEDENCE,
     )
     conn.commit()
@@ -164,7 +176,7 @@ class TestAutoResumeOnShaMatch:
         )
 
     def test_r1_sha_match_emits_info_log(self, tmp_path, caplog):
-        """SHA match: INFO log emitted with both SHAs."""
+        """Retirement emits an explicit reason without using SHA as authority."""
         _, conn = _setup_world_db(tmp_path)
         _seed_deployment_freshness_pause(conn)
         conn.close()
@@ -177,7 +189,7 @@ class TestAutoResumeOnShaMatch:
                     _run_auto_resume(boot_sha=BOOT_SHA, current_sha=BOOT_SHA, state_dir=tmp_path)
 
         assert "deployment_freshness_auto_resume" in caplog.text
-        assert BOOT_SHA[:8] in caplog.text
+        assert "retired obsolete deployment pause" in caplog.text
 
     def test_r1_in_memory_state_cleared(self, tmp_path):
         """SHA match: in-memory _control_state is refreshed (entries_paused=False)."""
@@ -191,10 +203,31 @@ class TestAutoResumeOnShaMatch:
                 cp.refresh_control_state()
                 assert cp.is_entries_paused(), "pre-condition: in-memory must show paused"
                 _run_auto_resume(boot_sha=BOOT_SHA, current_sha=BOOT_SHA, state_dir=tmp_path)
-                # resume_entries calls refresh_control_state() at the end
+                # Narrow retirement refreshes the in-memory projection at the end.
                 assert not cp.is_entries_paused(), (
                     "in-memory entries_paused must be False after auto-resume"
                 )
+
+    def test_r1_retirement_preserves_independent_edge_tightening(self, tmp_path):
+        _, conn = _setup_world_db(tmp_path)
+        _seed_deployment_freshness_pause(conn)
+        _seed_edge_tightening(conn)
+        conn.close()
+
+        factory = _make_conn_factory(tmp_path / "world.db")
+        with patch("src.state.db.get_world_connection", side_effect=factory):
+            with patch("src.control.control_plane.get_world_connection", side_effect=factory):
+                cp.refresh_control_state()
+                _run_auto_resume(boot_sha=BOOT_SHA, current_sha=BOOT_SHA, state_dir=tmp_path)
+
+        fresh_conn = sqlite3.connect(str(tmp_path / "world.db"))
+        fresh_conn.row_factory = sqlite3.Row
+        from src.state.db import query_control_override_state
+
+        state = query_control_override_state(fresh_conn)
+        fresh_conn.close()
+        assert state["entries_paused"] is False
+        assert state["edge_threshold_multiplier"] == 2.0
 
     def test_r1_sha_match_updates_freshness_state_file(self, tmp_path):
         """SHA match: stale mismatch file is replaced with a fresh state proof."""
@@ -227,8 +260,7 @@ class TestAutoResumeOnShaMatch:
         assert payload["boot_sha"] == BOOT_SHA
         assert payload["current_sha"] == BOOT_SHA
 
-    def test_r1_sha_match_dirty_runtime_worktree_does_not_clear_pause(self, tmp_path):
-        """Boot auto-resume requires a clean runtime worktree, not just matching SHA."""
+    def test_r1_dirty_runtime_worktree_still_clears_deployment_pause(self, tmp_path):
         _, conn = _setup_world_db(tmp_path)
         _seed_deployment_freshness_pause(conn)
         conn.close()
@@ -249,21 +281,20 @@ class TestAutoResumeOnShaMatch:
         from src.state.db import query_control_override_state
         state = query_control_override_state(fresh_conn)
         fresh_conn.close()
-        assert state["entries_paused"] is True
+        assert state["entries_paused"] is False
         payload = json.loads((tmp_path / "deployment_freshness.json").read_text())
         assert payload["status"] == "dirty_runtime_worktree"
-        assert payload["pause_reason"] == "deployment_freshness_mismatch"
+        assert payload["pause_reason"] is None
         assert payload["worktree_runtime_dirty"] is True
         assert payload["dirty_runtime_paths_sample"] == ["src/control/live_health.py"]
 
 
 # ---------------------------------------------------------------------------
-# R2: SHA mismatch → pause NOT cleared
+# R2: SHA mismatch is observability, not pause authority
 # ---------------------------------------------------------------------------
 
-class TestAutoResumeBlockedOnShaMMismatch:
-    def test_r2_sha_mismatch_does_not_clear(self, tmp_path, caplog):
-        """SHA still mismatched: pause remains active, WARNING logged."""
+class TestAutoResumeAcrossShaMismatch:
+    def test_r2_sha_mismatch_still_clears(self, tmp_path, caplog):
         _, conn = _setup_world_db(tmp_path)
         _seed_deployment_freshness_pause(conn)
         conn.close()
@@ -280,8 +311,8 @@ class TestAutoResumeBlockedOnShaMMismatch:
         from src.state.db import query_control_override_state
         state = query_control_override_state(fresh_conn)
         fresh_conn.close()
-        assert state["entries_paused"] is True, "pause must remain when SHA still mismatched"
-        assert "NOT auto-resuming" in caplog.text
+        assert state["entries_paused"] is False
+        assert "deployment_freshness_observed" in caplog.text
 
     def test_r2_non_runtime_sha_mismatch_clears_deployment_pause(self, tmp_path):
         """Tests/docs-only drift is not a deployment freshness blocker."""
@@ -317,20 +348,23 @@ class TestAutoResumeBlockedOnShaMMismatch:
 
 class TestAutoResumeNoop:
     def test_r3_no_pause_is_noop(self, tmp_path):
-        """If entries are not paused, auto-resume is a no-op (no resume_entries call)."""
+        """If entries are not paused, retirement does not create an override event."""
         _, conn = _setup_world_db(tmp_path)
         conn.close()
         # Do NOT seed any pause
 
-        resume_mock = MagicMock()
         factory = _make_conn_factory(tmp_path / "world.db")
         with patch("src.state.db.get_world_connection", side_effect=factory):
             with patch("src.control.control_plane.get_world_connection", side_effect=factory):
                 cp.refresh_control_state()
-                with patch("src.control.control_plane.resume_entries", resume_mock):
-                    _run_auto_resume(boot_sha=BOOT_SHA, current_sha=BOOT_SHA)
+                _run_auto_resume(boot_sha=BOOT_SHA, current_sha=BOOT_SHA)
 
-        resume_mock.assert_not_called()
+        fresh_conn = sqlite3.connect(str(tmp_path / "world.db"))
+        count = fresh_conn.execute(
+            "SELECT COUNT(*) FROM control_overrides_history"
+        ).fetchone()[0]
+        fresh_conn.close()
+        assert count == 0
 
     def test_r3_no_pause_still_refreshes_freshness_state_file(self, tmp_path):
         """If DB pause was already cleared, boot still replaces stale freshness state."""
@@ -384,26 +418,30 @@ class TestAutoResumeNoop:
         conn.commit()
         conn.close()
 
-        resume_mock = MagicMock()
         factory = _make_conn_factory(tmp_path / "world.db")
         with patch("src.state.db.get_world_connection", side_effect=factory):
             with patch("src.control.control_plane.get_world_connection", side_effect=factory):
                 cp.refresh_control_state()
                 # Still paused at this point
                 assert cp.is_entries_paused()
-                with patch("src.control.control_plane.resume_entries", resume_mock):
-                    _run_auto_resume(boot_sha=BOOT_SHA, current_sha=BOOT_SHA)
+                _run_auto_resume(boot_sha=BOOT_SHA, current_sha=BOOT_SHA)
 
-        resume_mock.assert_not_called()
+        fresh_conn = sqlite3.connect(str(tmp_path / "world.db"))
+        fresh_conn.row_factory = sqlite3.Row
+        from src.state.db import query_control_override_state
+
+        state = query_control_override_state(fresh_conn)
+        fresh_conn.close()
+        assert state["entries_paused"] is True
+        assert state["entries_pause_reason"] == "manual_operator_override"
 
 
 # ---------------------------------------------------------------------------
-# R5/R6: failure modes — fail-open for boot safety
+# R5/R6: identity observation failures do not preserve obsolete pauses
 # ---------------------------------------------------------------------------
 
 class TestAutoResumeFailOpen:
-    def test_r5_no_boot_sha_warns_and_returns(self, tmp_path, caplog):
-        """Boot SHA not captured → WARNING logged, no crash."""
+    def test_r5_no_boot_sha_still_clears(self, tmp_path):
         _, conn = _setup_world_db(tmp_path)
         _seed_deployment_freshness_pause(conn)
         conn.close()
@@ -413,12 +451,16 @@ class TestAutoResumeFailOpen:
             with patch("src.control.control_plane.get_world_connection", side_effect=factory):
                 cp.refresh_control_state()
                 with patch.object(main_module, "_BOOT_STATE", {"sha": None, "ts": None}):
-                    with caplog.at_level(logging.WARNING, logger="zeus"):
-                        _boot_deployment_freshness_auto_resume()
-        assert "boot SHA not captured" in caplog.text
+                    _boot_deployment_freshness_auto_resume()
+        fresh_conn = sqlite3.connect(str(tmp_path / "world.db"))
+        fresh_conn.row_factory = sqlite3.Row
+        from src.state.db import query_control_override_state
+        state = query_control_override_state(fresh_conn)
+        fresh_conn.close()
+        assert state["entries_paused"] is False
 
     def test_r6_git_failure_warns_and_returns(self, tmp_path, caplog):
-        """Git subprocess failure → WARNING logged, pause not cleared, no crash."""
+        """Git subprocess failure is observed after obsolete pause retirement."""
         _, conn = _setup_world_db(tmp_path)
         _seed_deployment_freshness_pause(conn)
         conn.close()
@@ -435,10 +477,9 @@ class TestAutoResumeFailOpen:
                     )
 
         assert "git rev-parse failed" in caplog.text
-        # Pause should still be active
         fresh_conn = sqlite3.connect(str(tmp_path / "world.db"))
         fresh_conn.row_factory = sqlite3.Row
         from src.state.db import query_control_override_state
         state = query_control_override_state(fresh_conn)
         fresh_conn.close()
-        assert state["entries_paused"] is True
+        assert state["entries_paused"] is False

@@ -426,6 +426,51 @@ def resume_entries(reason: str, *, issued_by: str = "control_plane") -> None:
     refresh_control_state()
 
 
+def retire_entries_pause_for_reasons(
+    reasons: Iterable[str],
+    *,
+    retirement_reason: str,
+) -> bool:
+    """Expire only the active entry pause when its reason is explicitly retired.
+
+    This is narrower than the operator ``resume`` command: it never clears an
+    independent edge-threshold or strategy override. The read and expiry share
+    one immediate transaction so a newer pause cannot be cleared by a stale
+    boot-time observation.
+    """
+
+    retired = {str(reason).strip() for reason in reasons if str(reason).strip()}
+    if not retired:
+        return False
+    now_iso = datetime.now(timezone.utc).isoformat()
+    conn = get_world_connection()
+    expired = False
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        state = query_control_override_state(conn, now=now_iso)
+        if not state.get("entries_paused") or state.get("entries_pause_reason") not in retired:
+            conn.rollback()
+            return False
+        result = expire_control_override(
+            conn,
+            override_id=AUTO_PAUSE_OVERRIDE_ID,
+            expired_at=now_iso,
+        )
+        expired = int(result.get("expired_count") or 0) == 1
+        conn.commit()
+    except Exception:
+        if conn.in_transaction:
+            conn.rollback()
+        _control_state["control_db_fault"] = True
+        raise
+    finally:
+        conn.close()
+    refresh_control_state()
+    if expired:
+        logger.warning("ENTRIES_PAUSE_RETIRED reason=%s", retirement_reason)
+    return expired
+
+
 def get_edge_threshold_multiplier() -> float:
     return _control_state.get("edge_threshold_multiplier", DEFAULT_EDGE_THRESHOLD_MULTIPLIER)
 

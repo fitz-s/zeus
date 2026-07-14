@@ -1,9 +1,9 @@
 # Created: 2026-05-31
-# Last reused or audited: 2026-05-31
-# Authority basis: live-only EDLI stage readiness. Relative stage surfaces are
-#   runtime-state artifacts, not deploy-worktree artifacts.
+# Last reused or audited: 2026-07-14
+# Authority basis: live-only EDLI stage readiness; code identity is deployment
+#   observability while source/status freshness remains runtime authority.
 #
-# Lifecycle: created=2026-05-31; last_reviewed=2026-05-31; last_reused=never
+# Lifecycle: created=2026-05-31; last_reviewed=2026-07-14; last_reused=2026-07-14
 # Purpose: Prove live mode fails closed on absent stage surfaces and resolves
 #   relative state/* paths through ZEUS_PRIMARY_ROOT/state.
 # Reuse: Verify _assert_edli_stage_readiness and the world-connection helper names
@@ -67,13 +67,36 @@ def test_live_boot_blocks_on_absent_stage_surfaces(tmp_path):
         _assert_edli_stage_readiness(live_cfg)
 
 
-def test_live_stage_loaded_sha_rejects_test_shape(tmp_path):
+def test_live_stage_loaded_sha_invalid_shape_is_observed(tmp_path):
     loaded = tmp_path / "loaded_sha.json"
     loaded.write_text(json.dumps({"loaded_sha": "abc123"}))
 
-    reasons = zeus_main._edli_stage_loaded_sha_reasons(str(loaded))
+    reasons = zeus_main._edli_stage_loaded_sha_observations(str(loaded))
 
     assert reasons == ["EDLI_STAGE_LOADED_SHA_INVALID_VALUE:abc123"]
+
+
+def test_live_stage_loaded_sha_is_not_a_readiness_gate(tmp_path, caplog):
+    now = datetime.now(timezone.utc).isoformat()
+    source = tmp_path / "source_health.json"
+    status = tmp_path / "status_summary.json"
+    source.write_text(json.dumps({"generated_at": now, "sources": {}}))
+    status.write_text(json.dumps({"generated_at": now}))
+
+    with caplog.at_level("WARNING", logger="zeus"):
+        result = _assert_edli_stage_readiness(
+            {
+                "live_execution_mode": "edli_live",
+                "edli_stage_loaded_sha_file": str(tmp_path / "missing_loaded_sha.json"),
+                "edli_stage_source_health_json": str(source),
+                "edli_stage_status_json": str(status),
+                "edli_live_promotion_artifact_path": str(tmp_path / "promotion.json"),
+            }
+        )
+
+    assert result.status == zeus_main.EDLI_STAGE_PASS
+    assert result.submit_allowed is True
+    assert "EDLI_STAGE_LOADED_SHA_MISSING" in caplog.text
 
 
 def test_live_stage_relative_state_paths_resolve_against_runtime_root(tmp_path, monkeypatch):

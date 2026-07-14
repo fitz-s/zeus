@@ -323,17 +323,13 @@ def _short_sha_matches(expected_sha: str, heartbeat_sha: str) -> bool:
 
 
 def _live_boot_prerequisites_surface(state_dir: Path, now: datetime) -> dict:
-    """Expose the sidecar identity/freshness prerequisites that block live boot."""
+    """Expose sidecar liveness prerequisites and code-identity observations."""
 
-    current_sha = _current_git_head()
-    if not current_sha:
-        return {
-            "ok": False,
-            "issue": "LIVE_BOOT_CURRENT_SHA_UNAVAILABLE",
-            "evaluated": True,
-        }
-
+    current_sha = _current_git_head() or ""
     failures: list[str] = []
+    identity_observations: list[str] = []
+    if not current_sha:
+        identity_observations.append("current_git_head_unavailable")
     ok_sidecars: list[dict[str, object]] = []
     for daemon, filename, max_age_seconds in LIVE_BOOT_SIDECAR_HEARTBEATS:
         path = state_dir / filename
@@ -345,12 +341,11 @@ def _live_boot_prerequisites_surface(state_dir: Path, now: datetime) -> dict:
             failures.append(f"{daemon}:unreadable:{filename}")
             continue
         heartbeat_sha = str(payload.get("git_head") or "").strip()
-        if not _short_sha_matches(current_sha, heartbeat_sha):
-            failures.append(
+        if current_sha and not _short_sha_matches(current_sha, heartbeat_sha):
+            identity_observations.append(
                 f"{daemon}:git_head_mismatch heartbeat={heartbeat_sha or '<missing>'} "
                 f"expected={current_sha[:8]}"
             )
-            continue
         ts_str = (
             payload.get("alive_at")
             or payload.get("written_at")
@@ -382,6 +377,7 @@ def _live_boot_prerequisites_surface(state_dir: Path, now: datetime) -> dict:
         "expected_sha": current_sha,
         "ok_sidecars": ok_sidecars,
         "failures": failures,
+        "identity_observations": identity_observations,
     }
     if failures:
         return {
@@ -5109,7 +5105,7 @@ def compute_composite_live_health(
       3. runtime_code — loaded_sha.json vs current git HEAD
       4. main_daemon — status/heartbeat PID still points at src.main
       5. live_trading_watchdog — watchdog status does not falsely certify loaded-only launchd
-      6. live_boot_prerequisites — required sidecars match current HEAD and are fresh
+      6. live_boot_prerequisites — required sidecars are fresh; code identity is observable
       7. process_code — src.main PID start time vs live-money source mtimes
       8. run_mode  — scheduler_jobs_health.json entry for "_run_mode" job
       9. forecast_pipeline — current replacement/BPF scheduler health

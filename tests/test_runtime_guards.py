@@ -1,7 +1,7 @@
 """Runtime guard and live-cycle wiring tests."""
-# Lifecycle: created=2026-04-28; last_reviewed=2026-07-10; last_reused=2026-07-13
+# Lifecycle: created=2026-04-28; last_reviewed=2026-07-14; last_reused=2026-07-14
 # Created: 2026-04-28
-# Last reused/audited: 2026-07-13
+# Last reused/audited: 2026-07-14
 # Authority basis: docs/archive/2026-Q2/task_2026-05-15_live_order_e2e_verification/LIVE_ORDER_E2E_VERIFICATION_PLAN.md; task_2026-04-28_contamination_remediation Batch G; Phase 1B ENS snapshot persistence; Phase 1D forecast source policy; PR #56 MarketPhaseEvidence sidecar propagation; Wave26 explicit position env authority; task.md B3 exit executable snapshot identity; docs/operations/task_2026-05-21_live_side_effect_risk_boundaries/task.md P1-2 cluster projection; docs/archive/2026-Q2/task_2026-05-22_crosscheck_valid_window/CROSSCHECK_VALID_WINDOW_PLAN.md.
 # Purpose: Lock runtime guard and live-cycle wiring contracts.
 # Reuse: Run for runtime guard, live-only cleanup, and cycle wiring changes.
@@ -11124,7 +11124,7 @@ def test_live_boot_sidecar_head_check_accepts_fresh_same_head(monkeypatch, tmp_p
     )
 
 
-def test_live_boot_sidecar_head_check_blocks_stale_code_sidecar(monkeypatch, tmp_path):
+def test_live_boot_sidecar_head_check_observes_code_mismatch(monkeypatch, tmp_path, caplog):
     import importlib
 
     main_module = importlib.import_module("src.main")
@@ -11138,38 +11138,36 @@ def test_live_boot_sidecar_head_check_blocks_stale_code_sidecar(monkeypatch, tmp
     }))
     monkeypatch.setattr(main_module, "get_mode", lambda: "live")
 
-    with pytest.raises(
-        SystemExit,
-        match="LIVE_SIDECAR_BOOT_BLOCKED: .*price-channel-ingest:git_head_mismatch",
-    ):
+    with caplog.at_level("WARNING", logger="zeus"):
         main_module._startup_required_sidecar_head_check(
             boot_sha=boot_sha,
             state_dir=tmp_path,
             now=now + timedelta(seconds=30),
         )
-    heartbeat = json.loads((tmp_path / "daemon-heartbeat.json").read_text())
-    status = json.loads((tmp_path / "status_summary.json").read_text())
-    assert heartbeat["alive"] is False
-    assert heartbeat["daemon_health"] == "BOOT_BLOCKED"
-    assert heartbeat["loaded_sha"] == boot_sha
-    assert "price-channel-ingest:git_head_mismatch" in heartbeat["failure_reason"]
-    assert status["status"] == "BOOT_BLOCKED"
-    assert status["live_action_authorized"] is False
-    assert status["risk"]["infrastructure_level"] == "RED"
-    assert status["live_boot"]["issue"] == "LIVE_SIDECAR_BOOT_BLOCKED"
-    assert "price-channel-ingest:git_head_mismatch" in status["live_boot"]["detail"]
-    assert status["cycle"]["entries_blocked_reason"].startswith("LIVE_SIDECAR_BOOT_BLOCKED:")
-    capability = status["execution_capability"]
-    assert capability["entry"]["capability"] == "live_venue_submit"
-    assert capability["exit"]["capability"] == "reduce_only_exit_submit"
-    assert capability["entry"]["global_allow_submit"] is False
-    assert capability["exit"]["global_allow_submit"] is False
-    assert capability["entry"]["unavailable_components"] == [
-        "live_venue_submit:live_boot_prerequisite"
-    ]
-    assert capability["exit"]["unavailable_components"] == [
-        "reduce_only_exit_submit:live_boot_prerequisite"
-    ]
+    assert "price-channel-ingest:git_head_mismatch" in caplog.text
+    assert not (tmp_path / "daemon-heartbeat.json").exists()
+    assert not (tmp_path / "status_summary.json").exists()
+
+
+def test_live_boot_sidecar_head_check_still_blocks_stale_heartbeat(monkeypatch, tmp_path):
+    import importlib
+
+    main_module = importlib.import_module("src.main")
+    boot_sha = "abcdef1234567890abcdef1234567890abcdef12"
+    now = datetime(2026, 7, 2, 6, 45, tzinfo=timezone.utc)
+    _write_live_sidecar_heartbeats(
+        tmp_path,
+        sha=boot_sha[:8],
+        at=now - timedelta(minutes=10),
+    )
+    monkeypatch.setattr(main_module, "get_mode", lambda: "live")
+
+    with pytest.raises(SystemExit, match="LIVE_SIDECAR_BOOT_BLOCKED: .*stale"):
+        main_module._startup_required_sidecar_head_check(
+            boot_sha=boot_sha,
+            state_dir=tmp_path,
+            now=now,
+        )
 
 
 def test_openmeteo_quota_warns_blocks_and_resets(caplog):
