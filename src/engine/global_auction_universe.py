@@ -89,6 +89,7 @@ class CurrentGlobalBookAsset:
     family_key: str
     bin_id: str
     condition_id: str
+    gamma_market_id: str
     market_event_id: str
     side: str
     token_id: str
@@ -104,6 +105,7 @@ class CurrentGlobalBookAsset:
                     self.family_key,
                     self.bin_id,
                     self.condition_id,
+                    self.gamma_market_id,
                     self.market_event_id,
                     self.token_id,
                 )
@@ -122,6 +124,7 @@ class CurrentGlobalSellAsset:
     family_key: str
     bin_id: str
     condition_id: str
+    gamma_market_id: str
     market_event_id: str
     side: str
     token_id: str
@@ -137,6 +140,7 @@ class CurrentGlobalSellAsset:
                     self.family_key,
                     self.bin_id,
                     self.condition_id,
+                    self.gamma_market_id,
                     self.market_event_id,
                     self.token_id,
                 )
@@ -270,6 +274,7 @@ def _global_book_snapshot_rows(
         cur = trade_conn.execute(
             f"""
             SELECT s.snapshot_id,
+                   s.gamma_market_id,
                    s.event_id,
                    s.condition_id,
                    s.selected_outcome_token_id,
@@ -610,6 +615,11 @@ def capture_current_global_book_epoch(
         if raw_asset_id != token_id:
             raise ValueError(f"GLOBAL_BOOK_TOKEN_MISMATCH:{token_id}")
         market_event_id = str(metadata.get("event_id") or "").strip()
+        gamma_market_id = str(metadata.get("gamma_market_id") or "").strip()
+        if not gamma_market_id:
+            raise ValueError(
+                f"GLOBAL_BOOK_GAMMA_MARKET_ID_MISSING:{condition_id}:{token_id}"
+            )
         if not market_event_id:
             raise ValueError(
                 f"GLOBAL_BOOK_MARKET_EVENT_ID_MISSING:{condition_id}:{token_id}"
@@ -679,6 +689,7 @@ def capture_current_global_book_epoch(
                 status,
                 book_hash,
                 market_event_id,
+                gamma_market_id,
             )
         )
         if curve is not None:
@@ -687,6 +698,7 @@ def capture_current_global_book_epoch(
                     family_key=family_key,
                     bin_id=bin_id,
                     condition_id=condition_id,
+                    gamma_market_id=gamma_market_id,
                     market_event_id=market_event_id,
                     side=side,
                     token_id=token_id,
@@ -700,6 +712,7 @@ def capture_current_global_book_epoch(
                     family_key=family_key,
                     bin_id=bin_id,
                     condition_id=condition_id,
+                    gamma_market_id=gamma_market_id,
                     market_event_id=market_event_id,
                     side=side,
                     token_id=token_id,
@@ -1135,10 +1148,17 @@ def bind_current_global_probability_tokens(
                             and accepting_orders is True
                         )
                         base = {
+                            "gamma_market_id": str(
+                                raw.get("id")
+                                or raw.get("market_id")
+                                or raw.get("marketId")
+                                or ""
+                            ),
                             "event_id": str(
-                                event.get("id")
+                                event.get("slug")
+                                or event.get("event_slug")
                                 or event.get("event_id")
-                                or event.get("slug")
+                                or event.get("id")
                                 or ""
                             ),
                             "condition_id": condition_id,

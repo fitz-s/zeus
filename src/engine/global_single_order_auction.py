@@ -283,7 +283,7 @@ def select_prepared_global_auction(
     decision_at_utc: datetime,
     book_epoch: CurrentGlobalBookEpoch | None = None,
     current_capital_limit_resolver: Callable[
-        [GlobalSingleOrderAnyCandidate, str, str], Decimal
+        [GlobalSingleOrderAnyCandidate, str, str, str], Decimal
     ]
     | None = None,
     candidate_policy_rejection_resolver: Callable[
@@ -471,6 +471,7 @@ def select_prepared_global_auction(
             raise ValueError("GLOBAL_CAPITAL_LIMIT_SCOPE_MISSING")
         return current_capital_limit_resolver(
             candidate,
+            asset.gamma_market_id,
             asset.market_event_id,
             owner_event_id,
         )

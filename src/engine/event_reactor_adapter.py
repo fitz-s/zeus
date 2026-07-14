@@ -5186,13 +5186,14 @@ def event_bound_live_adapter_from_trade_conn(
 
         def _current_entry_capital_limit(
             candidate,
+            gamma_market_id,
             market_event_id,
             owner_event_id,
         ):
             from src.risk_allocator import current_global_entry_capacity_usd
 
             return current_global_entry_capacity_usd(
-                market_id=str(candidate.condition_id),
+                market_id=str(gamma_market_id),
                 event_id=str(market_event_id),
                 resolution_window="default",
                 correlation_key=(

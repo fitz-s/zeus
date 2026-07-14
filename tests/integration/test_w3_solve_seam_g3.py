@@ -48,12 +48,15 @@ from src.engine.global_single_order_auction import (
     select_prepared_global_auction,
 )
 from src.engine.global_auction_universe import (
+    CurrentGlobalBookAsset,
+    CurrentGlobalBookEpoch,
     _current_day0_events,
     _day0_event_is_current_for_entry,
     capture_current_global_book_epoch,
     current_global_scope_events_with_day0,
     current_portfolio_wealth_witness,
     current_global_auction_scope_from_events,
+    current_global_book_epoch_identity,
 )
 from src.events.opportunity_event import (
     Day0ExtremeUpdatedPayload,
@@ -1895,6 +1898,7 @@ def _global_book_metadata_conn(
         """
         CREATE TABLE executable_market_snapshots (
             snapshot_id TEXT PRIMARY KEY,
+            gamma_market_id TEXT NOT NULL,
             event_id TEXT NOT NULL,
             condition_id TEXT NOT NULL,
             selected_outcome_token_id TEXT NOT NULL,
@@ -1932,9 +1936,10 @@ def _global_book_metadata_conn(
             snapshot_id = f"metadata-{binding.condition_id}-{side}"
             conn.execute(
                 "INSERT INTO executable_market_snapshots VALUES "
-                "(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     snapshot_id,
+                    f"gamma-market-{binding.condition_id}",
                     f"market-event-{probability.family_key}",
                     binding.condition_id,
                     token,
@@ -2427,6 +2432,7 @@ def test_current_gamma_identity_fills_missing_no_without_changing_q():
     )
     gamma_event = {
         "id": "gamma-event-current",
+        "slug": "current-family-slug",
         "endDate": "2026-07-14T12:00:00Z",
         "markets": [
             {
@@ -2479,6 +2485,12 @@ def test_current_gamma_identity_fills_missing_no_without_changing_q():
     assert gamma_metadata[
         (rebound.bindings[0].condition_id, rebound.bindings[0].no_token_id)
     ]["fee_details_json"]
+    assert {
+        row["event_id"] for row in gamma_metadata.values()
+    } == {"current-family-slug"}
+    assert {
+        row["gamma_market_id"] for row in gamma_metadata.values()
+    } == {f"market-{index}" for index in range(len(original.bindings))}
 
     complete_calls = []
     closed_metadata = {}
@@ -2722,7 +2734,7 @@ def test_current_gamma_identity_fills_missing_no_without_changing_q():
     ambiguous.execute(
         """
         INSERT INTO executable_market_snapshots
-            SELECT 'conflicting-topology', event_id, condition_id,
+            SELECT 'conflicting-topology', gamma_market_id, event_id, condition_id,
                    'conflicting-selected', 'conflicting-yes', 'conflicting-no',
                    enable_orderbook, active,
                closed, accepting_orders, fee_details_json, min_tick_size,
@@ -2836,7 +2848,69 @@ def test_two_prepared_families_choose_one_globally_unique_order():
     finally:
         restore()
 
-    venue_identity = "current-venue-universe"
+    prepared_by_event = global_batch_runtime._bind_selection_holdings(
+        prepared_by_event,
+        portfolio_state=SimpleNamespace(positions=()),
+        ledger_snapshot_id="ledger-current",
+    )
+    assets = tuple(
+        CurrentGlobalBookAsset(
+            family_key=prepared.probability_witness.family_key,
+            bin_id=seed.native_candidate.bin_id,
+            condition_id=seed.native_candidate.condition_id,
+            gamma_market_id=f"gamma-{seed.native_candidate.condition_id}",
+            market_event_id=f"market-event-{prepared.probability_witness.family_key}",
+            side=seed.native_candidate.side,
+            token_id=seed.native_candidate.token_id,
+            curve=seed.native_candidate.executable_cost_curve,
+            captured_at_utc=decision_at,
+        )
+        for prepared in prepared_by_event.values()
+        for seed in prepared.candidate_seeds
+    )
+    asset_states = tuple(
+        (
+            asset.family_key,
+            asset.bin_id,
+            asset.condition_id,
+            asset.side,
+            asset.token_id,
+            "EXECUTABLE",
+            asset.curve.book_hash,
+            asset.market_event_id,
+            asset.gamma_market_id,
+        )
+        for asset in assets
+    )
+    book_venue_identity = current_global_book_epoch_identity(
+        asset_states=asset_states,
+        captured_at_utc=decision_at,
+    )
+    book_epoch = CurrentGlobalBookEpoch(
+        assets=assets,
+        asset_states=asset_states,
+        captured_at_utc=decision_at,
+        max_age=_dt.timedelta(seconds=1),
+        witness_identity=book_venue_identity,
+    )
+    capital_scopes = []
+
+    def current_capital_limit(
+        candidate,
+        gamma_market_id,
+        market_event_id,
+        owner_event_id,
+    ):
+        capital_scopes.append(
+            (
+                candidate.condition_id,
+                gamma_market_id,
+                market_event_id,
+                owner_event_id,
+            )
+        )
+        return Decimal("100")
+
     wealth_identity = portfolio_wealth_identity(
         ledger_snapshot_id="ledger-current",
         position_set_hash="positions-current",
@@ -2863,6 +2937,7 @@ def test_two_prepared_families_choose_one_globally_unique_order():
         prepared.probability_witness.family_key: prepared.probability_witness
         for prepared in prepared_by_event.values()
     }
+    venue_identity = "current-venue-universe"
 
     auction_kwargs = dict(
         selection_epoch_identity="selection-epoch-current",
@@ -2890,6 +2965,7 @@ def test_two_prepared_families_choose_one_globally_unique_order():
         prepared_by_event,
         **auction_kwargs,
     )
+    assert selected.decision.candidate is not None, selected.decision.no_trade_reason
     fallthrough = select_prepared_global_auction(
         prepared_by_event,
         preflight_excluded_by_family={
@@ -2902,7 +2978,6 @@ def test_two_prepared_families_choose_one_globally_unique_order():
         **auction_kwargs,
     )
 
-    assert selected.decision.candidate is not None
     assert selected.winner_event_id in prepared_by_event
     assert selected.actuation is not None
     assert selected.actuation.decision == selected.decision
@@ -2935,6 +3010,23 @@ def test_two_prepared_families_choose_one_globally_unique_order():
     assert partial.decision.candidate is None
     assert partial.actuation is None
     assert partial.decision.no_trade_reason == "GLOBAL_FEASIBLE_SET_INCOMPLETE"
+
+    book_selected = select_prepared_global_auction(
+        prepared_by_event,
+        **{
+            **auction_kwargs,
+            "venue_universe_identity": book_venue_identity,
+            "current_venue_universe_identity_resolver": lambda: book_venue_identity,
+            "book_epoch": book_epoch,
+            "current_capital_limit_resolver": current_capital_limit,
+        },
+    )
+    assert book_selected.decision.candidate is not None
+    assert capital_scopes
+    assert all(
+        gamma_market_id == f"gamma-{condition_id}"
+        for condition_id, gamma_market_id, _, _ in capital_scopes
+    )
     all_ids = {
         global_candidate_from_native(
             seed.native_candidate,
