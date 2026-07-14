@@ -1240,8 +1240,9 @@ class TestRequestHashProvenance:
         monkeypatch.delenv("ZEUS_DAY0_HOURLY_REFRESH_BUDGET_SECONDS", raising=False)
         monkeypatch.delenv("ZEUS_DAY0_HOURLY_FETCH_TIMEOUT_SECONDS", raising=False)
 
-        assert reactor._day0_hourly_refresh_max_cities(priority_city_count=31) == 1
-        assert reactor._day0_hourly_refresh_budget_seconds() == 3.0
+        assert reactor._day0_hourly_refresh_max_cities(priority_city_count=31) == 3
+        assert reactor._day0_hourly_refresh_max_cities(priority_city_count=0) == 1
+        assert reactor._day0_hourly_refresh_budget_seconds() == 6.0
         assert reactor._day0_hourly_fetch_timeout_seconds() == 1.5
         assert reactor._reactor_day0_hourly_refresh_interval_seconds() == 300.0
 

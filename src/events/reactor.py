@@ -4297,7 +4297,7 @@ def _day0_hourly_refresh_max_cities(*, priority_city_count: int) -> int:
     except (TypeError, ValueError):
         configured = 1
     try:
-        priority_cap = int(os.environ.get("ZEUS_DAY0_HOURLY_REFRESH_PRIORITY_CITY_CAP", "1"))
+        priority_cap = int(os.environ.get("ZEUS_DAY0_HOURLY_REFRESH_PRIORITY_CITY_CAP", "3"))
     except (TypeError, ValueError):
         priority_cap = 1
     if priority_city_count <= 0:
@@ -4307,9 +4307,9 @@ def _day0_hourly_refresh_max_cities(*, priority_city_count: int) -> int:
 
 def _day0_hourly_refresh_budget_seconds() -> float:
     try:
-        return max(0.25, float(os.environ.get("ZEUS_DAY0_HOURLY_REFRESH_BUDGET_SECONDS", "3.0")))
+        return max(0.25, float(os.environ.get("ZEUS_DAY0_HOURLY_REFRESH_BUDGET_SECONDS", "6.0")))
     except (TypeError, ValueError):
-        return 3.0
+        return 6.0
 
 
 def _day0_hourly_fetch_timeout_seconds() -> float:
