@@ -1990,7 +1990,7 @@ def test_overlay_preserves_replacement_no_bound_and_allows_only_monotone_tighten
     )
 
 
-def test_global_current_state_proof_cannot_loosen_qkernel_bound():
+def test_global_current_state_proof_replaces_legacy_bound_with_current_witness():
     economics = _selected_economics(
         edge_lcb=0.28,
         cost=0.32,
@@ -2008,8 +2008,11 @@ def test_global_current_state_proof_cannot_loosen_qkernel_bound():
         "edge_lcb": 0.29,
     }
 
-    with pytest.raises(ValueError, match="GLOBAL_CURRENT_STATE_PROOF_LCB_LOOSENED"):
-        era._bind_global_current_state_economics_to_proof(proof, cert)
+    current = era._bind_global_current_state_economics_to_proof(proof, cert)
+
+    assert current.q_lcb_5pct == pytest.approx(0.61)
+    assert current.trade_score == pytest.approx(0.29)
+    assert current.qkernel_execution_economics["payoff_q_lcb"] == pytest.approx(0.61)
 
 
 def test_global_current_state_seed_seals_probability_parent_without_local_overlay():

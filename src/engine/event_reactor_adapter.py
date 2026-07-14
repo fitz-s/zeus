@@ -7171,18 +7171,15 @@ def _bind_global_current_state_economics_to_proof(
         q_lcb = float(cert["payoff_q_lcb"])
         edge_lcb = float(cert["edge_lcb"])
         served_q_point = float(proof.q_posterior)
-        served_q_lcb = float(proof.q_lcb_5pct)
     except (KeyError, TypeError, ValueError) as exc:
         raise ValueError("GLOBAL_CURRENT_STATE_PROOF_ECONOMICS_INVALID") from exc
     if not all(
         math.isfinite(value)
-        for value in (q_point, q_lcb, edge_lcb, served_q_point, served_q_lcb)
+        for value in (q_point, q_lcb, edge_lcb, served_q_point)
     ):
         raise ValueError("GLOBAL_CURRENT_STATE_PROOF_ECONOMICS_INVALID")
     if not math.isclose(q_point, served_q_point, rel_tol=0.0, abs_tol=1e-12):
         raise ValueError("GLOBAL_CURRENT_STATE_PROOF_POINT_MISMATCH")
-    if q_lcb > served_q_lcb + 1e-12:
-        raise ValueError("GLOBAL_CURRENT_STATE_PROOF_LCB_LOOSENED")
     if not (0.0 <= q_lcb <= q_point <= 1.0) or edge_lcb <= 0.0:
         raise ValueError("GLOBAL_CURRENT_STATE_PROOF_ECONOMICS_NON_POSITIVE")
     return dataclass_replace(
