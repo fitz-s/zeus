@@ -1728,16 +1728,14 @@ def current_portfolio_wealth_witness(
                 )
             )
         if token_balances:
-            if set(represented_micro) != set(token_balances):
+            if set(token_balances) - set(represented_micro):
                 raise ValueError("CURRENT_WEALTH_CHAIN_POSITION_SET_MISMATCH")
             if any(
                 abs(represented_micro[token] - token_balances[token]) > 1
-                for token in represented_micro
+                for token in token_balances
             ):
                 raise ValueError("CURRENT_WEALTH_CHAIN_POSITION_SIZE_MISMATCH")
-            held_balances = token_balances
-        else:
-            held_balances = represented_micro
+        held_balances = represented_micro
 
         pusd_micro = int(row.get("pusd_balance_micro") or 0)
         allowance_micro = int(row.get("pusd_allowance_micro") or 0)

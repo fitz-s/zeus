@@ -3439,6 +3439,49 @@ def test_current_portfolio_wealth_uses_fresh_ctf_mirror_over_stale_projection_ti
     assert witness.wealth_ceiling_usd == Decimal("30.25")
 
 
+def test_current_portfolio_wealth_accepts_targeted_ctf_subset():
+    decision_at = _dt.datetime(2026, 7, 10, 8, 0, tzinfo=_dt.timezone.utc)
+    conn = _wealth_test_conn(
+        captured_at=decision_at,
+        ctf={"no-token-1": 3_250_000},
+    )
+    portfolio = PortfolioState(
+        positions=[
+            SimpleNamespace(
+                trade_id="trade-1",
+                direction=Direction.NO,
+                token_id="yes-token-1",
+                no_token_id="no-token-1",
+                chain_state="synced",
+                chain_shares=3.25,
+                chain_verified_at=decision_at.isoformat(),
+                state="entered",
+            ),
+            SimpleNamespace(
+                trade_id="trade-2",
+                direction=Direction.YES,
+                token_id="yes-token-2",
+                no_token_id="no-token-2",
+                chain_state="synced",
+                chain_shares=2.0,
+                chain_verified_at=decision_at.isoformat(),
+                state="entered",
+            ),
+        ],
+        authority="canonical_db",
+        authority_scope="runtime_exposure",
+    )
+
+    witness = current_portfolio_wealth_witness(
+        conn,
+        decision_at_utc=decision_at,
+        max_age=_dt.timedelta(seconds=30),
+        portfolio_state=portfolio,
+    )
+
+    assert witness.wealth_ceiling_usd == Decimal("32.25")
+
+
 @pytest.mark.parametrize(
     ("chain_state", "chain_verified_at"),
     [
