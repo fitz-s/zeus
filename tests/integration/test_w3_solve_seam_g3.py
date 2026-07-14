@@ -162,6 +162,18 @@ def test_global_auction_receipt_persists_complete_buy_sell_hold_cash_comparison(
         selection_cut_at_utc=at,
         decision_at_utc=at + _dt.timedelta(seconds=1),
         probability_manifest=(("family-buy", "q-buy"), ("family-sell", "q-sell")),
+        full_scope_identity="full-scope-current",
+        full_scope_family_keys=(
+            "family-buy",
+            "family-sell",
+            "family-q-missing",
+        ),
+        probability_ineligible_by_family={
+            "family-q-missing": (
+                "GLOBAL_CURRENT_PROBABILITY_PREPARE_FAILED:ValueError:"
+                "GLOBAL_CURRENT_REPLACEMENT_BUNDLE_BLOCKED"
+            )
+        },
         book_epoch_identity="book-current",
         book_asset_count=2,
         wealth_witness=SimpleNamespace(
@@ -177,7 +189,18 @@ def test_global_auction_receipt_persists_complete_buy_sell_hold_cash_comparison(
     artifact = json.loads(row["artifact_json"])
     summary = artifact["summary"]
     assert row["mode"] == "global_single_order_auction"
-    assert summary["schema_version"] == 5
+    assert summary["schema_version"] == 6
+    assert summary["full_scope_identity"] == "full-scope-current"
+    assert summary["full_scope_family_count"] == 3
+    assert summary["eligible_probability_family_count"] == 2
+    assert summary["probability_ineligible_family_count"] == 1
+    assert summary["scope_family_coverage_complete"] is True
+    assert summary["probability_ineligible_by_family"] == {
+        "family-q-missing": (
+            "GLOBAL_CURRENT_PROBABILITY_PREPARE_FAILED:ValueError:"
+            "GLOBAL_CURRENT_REPLACEMENT_BUNDLE_BLOCKED"
+        )
+    }
     assert summary["candidate_coverage_complete"] is True
     assert summary["candidate_condition_index_complete"] is True
     assert summary["candidate_evaluation_count"] == 2
@@ -222,6 +245,32 @@ def test_global_auction_receipt_persists_complete_buy_sell_hold_cash_comparison(
         ("SELL", "REJECTED", "NON_POSITIVE_ROBUST_OBJECTIVE")
     ]
     assert len(summary["receipt_hash"]) == 64
+    with pytest.raises(ValueError, match="GLOBAL_AUCTION_RECEIPT_SCOPE_INCOMPLETE"):
+        global_batch_runtime._store_global_auction_receipt(
+            conn,
+            selected=selected,
+            selection_epoch_identity="epoch-incomplete",
+            selection_cut_at_utc=at,
+            decision_at_utc=at + _dt.timedelta(seconds=1),
+            probability_manifest=(
+                ("family-buy", "q-buy"),
+                ("family-sell", "q-sell"),
+            ),
+            full_scope_identity="full-scope-incomplete",
+            full_scope_family_keys=(
+                "family-buy",
+                "family-sell",
+                "family-unaccounted",
+            ),
+            probability_ineligible_by_family={},
+            book_epoch_identity="book-current",
+            book_asset_count=2,
+            wealth_witness=SimpleNamespace(
+                witness_identity="wealth-current",
+                economic_identity="wealth-economics-current",
+            ),
+            fractional_kelly_multiplier=Decimal("0.25"),
+        )
     conn.close()
 
 
@@ -4001,6 +4050,7 @@ def test_global_batch_excludes_typed_current_q_ineligible_family(monkeypatch):
         actuation=actuation,
     )
     calls = {"venue": 0, "ineligible_prepare": 0}
+    persisted = {}
     ineligible_reason = (
         "GLOBAL_CURRENT_PROBABILITY_PREPARE_FAILED:ValueError:"
         "GLOBAL_CURRENT_REPLACEMENT_BUNDLE_BLOCKED:REPLACEMENT_RAW_INPUT_HWM"
@@ -4030,6 +4080,11 @@ def test_global_batch_excludes_typed_current_q_ineligible_family(monkeypatch):
         return selected
 
     monkeypatch.setattr(global_batch_runtime, "select_prepared_global_auction", select)
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "_store_global_auction_receipt",
+        lambda *_, **kwargs: persisted.update(kwargs) or 1,
+    )
     monkeypatch.setattr(
         global_batch_runtime.CurrentFamilyProbabilityAuthority,
         "from_witness",
@@ -4086,6 +4141,11 @@ def test_global_batch_excludes_typed_current_q_ineligible_family(monkeypatch):
     assert result.receipts[event_a.event_id].reason == (
         f"GLOBAL_FAMILY_INELIGIBLE:{ineligible_reason}"
     )
+    assert persisted["full_scope_identity"] == scope.scope_identity
+    assert persisted["full_scope_family_keys"] == scope.family_keys
+    assert persisted["probability_ineligible_by_family"] == {
+        family_a: ineligible_reason
+    }
 
 
 def test_global_batch_rejects_unexpected_probability_prepare_failure(monkeypatch):

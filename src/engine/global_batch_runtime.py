@@ -188,6 +188,9 @@ def _store_global_auction_receipt(
     selection_cut_at_utc: datetime,
     decision_at_utc: datetime,
     probability_manifest: tuple[tuple[str, str], ...],
+    full_scope_identity: str,
+    full_scope_family_keys: Sequence[str],
+    probability_ineligible_by_family: Mapping[str, str],
     book_epoch_identity: str,
     book_asset_count: int | None,
     wealth_witness: object,
@@ -199,6 +202,28 @@ def _store_global_auction_receipt(
     if not isinstance(conn, sqlite3.Connection):
         return None
     from src.state.decision_chain import CycleArtifact, store_artifact
+
+    scope_keys = tuple(str(key) for key in full_scope_family_keys)
+    probability_keys = tuple(str(key) for key, _ in probability_manifest)
+    ineligible = dict(
+        sorted(
+            (str(key), str(reason))
+            for key, reason in probability_ineligible_by_family.items()
+        )
+    )
+    scope_key_set = set(scope_keys)
+    probability_key_set = set(probability_keys)
+    ineligible_key_set = set(ineligible)
+    scope_coverage_complete = (
+        bool(str(full_scope_identity or "").strip())
+        and len(scope_keys) == len(scope_key_set)
+        and len(probability_keys) == len(probability_key_set)
+        and not probability_key_set.intersection(ineligible_key_set)
+        and scope_key_set == probability_key_set.union(ineligible_key_set)
+        and all(reason.strip() for reason in ineligible.values())
+    )
+    if not scope_coverage_complete:
+        raise ValueError("GLOBAL_AUCTION_RECEIPT_SCOPE_INCOMPLETE")
 
     decision = getattr(selected, "decision", None)
     if decision is None:
@@ -277,11 +302,17 @@ def _store_global_auction_receipt(
         )
     )
     receipt = {
-        "schema_version": 5,
+        "schema_version": 6,
         "selection_epoch_identity": selection_epoch_identity,
         "selection_cut_at_utc": selection_cut_at_utc.isoformat(),
         "decision_at_utc": decision_at_utc.isoformat(),
         "probability_manifest": probability_manifest,
+        "full_scope_identity": full_scope_identity,
+        "full_scope_family_count": len(scope_keys),
+        "eligible_probability_family_count": len(probability_keys),
+        "probability_ineligible_family_count": len(ineligible),
+        "probability_ineligible_by_family": ineligible,
+        "scope_family_coverage_complete": scope_coverage_complete,
         "book_epoch_identity": book_epoch_identity,
         "book_asset_count": book_asset_count,
         "excluded_by_family": dict(sorted((excluded_by_family or {}).items())),
@@ -1094,6 +1125,9 @@ def process_current_global_batch(
                 probability_manifest=_probability_manifest(
                     attempt_probabilities
                 ),
+                full_scope_identity=full_scope.scope_identity,
+                full_scope_family_keys=full_scope.family_keys,
+                probability_ineligible_by_family=ineligible_by_family,
                 book_epoch_identity=venue_identity,
                 book_asset_count=(
                     sum(
