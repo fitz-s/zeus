@@ -330,10 +330,10 @@ def _write_high_yes_edge_dbs(
                         "side": "YES",
                         "reason": "ENTRY_ACTION_PAUSED:external:operator",
                         "candidate_ids": ["candidate-high-yes-1"],
-                        "condition_ids": [condition_id],
                     }
                 ],
                 "detailed": [],
+                "buy_condition_side_masks": [[condition_id, 1]],
             }
             evaluation_json = json.dumps(
                 evaluation_payload,
@@ -343,13 +343,14 @@ def _write_high_yes_edge_dbs(
             decision_at = (now - timedelta(minutes=1)).isoformat()
             artifact = {
                 "summary": {
-                    "schema_version": 4,
+                    "schema_version": 5,
                     "decision_at_utc": decision_at,
                     "candidate_coverage_complete": True,
                     "candidate_condition_index_complete": True,
                     "candidate_evaluation_count": 1,
+                    "buy_condition_membership_count": 1,
                     "candidate_evaluation_encoding": (
-                        "zlib+base64+canonical-json-v3"
+                        "zlib+base64+canonical-json-v4"
                     ),
                     "candidate_evaluations_sha256": hashlib.sha256(
                         evaluation_json

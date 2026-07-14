@@ -205,7 +205,7 @@ def _store_global_auction_receipt(
         raise ValueError("GLOBAL_AUCTION_RECEIPT_DECISION_MISSING")
     evaluations = tuple(getattr(decision, "candidate_evaluations", ()) or ())
     evaluation_rows = tuple(asdict(evaluation) for evaluation in evaluations)
-    rejection_groups: dict[tuple[str, str, str], list[tuple[str, str]]] = {}
+    rejection_groups: dict[tuple[str, str, str], list[str]] = {}
     detailed_rows: list[dict] = []
     for row in evaluation_rows:
         if row.get("status") == "REJECTED" and row.get("action") == "BUY":
@@ -214,25 +214,32 @@ def _store_global_auction_receipt(
                 str(row["side"]),
                 str(row["rejection_reason"]),
             )
-            rejection_groups.setdefault(key, []).append(
-                (str(row["candidate_id"]), str(row["condition_id"]))
-            )
+            rejection_groups.setdefault(key, []).append(str(row["candidate_id"]))
         else:
             detailed_rows.append(row)
+    buy_condition_masks: dict[str, int] = {}
+    for row in evaluation_rows:
+        if row.get("action") != "BUY":
+            continue
+        side_mask = 1 if row.get("side") == "YES" else 2
+        condition_id = str(row["condition_id"])
+        buy_condition_masks[condition_id] = (
+            buy_condition_masks.get(condition_id, 0) | side_mask
+        )
     compact_evaluations = {
         "rejected_groups": [
             {
                 "action": action,
                 "side": side,
                 "reason": reason,
-                "candidate_ids": [candidate_id for candidate_id, _ in candidates],
-                "condition_ids": [condition_id for _, condition_id in candidates],
+                "candidate_ids": candidate_ids,
             }
-            for (action, side, reason), candidates in sorted(
+            for (action, side, reason), candidate_ids in sorted(
                 rejection_groups.items()
             )
         ],
         "detailed": detailed_rows,
+        "buy_condition_side_masks": sorted(buy_condition_masks.items()),
     }
     evaluation_json = json.dumps(
         compact_evaluations,
@@ -253,12 +260,16 @@ def _store_global_auction_receipt(
     winner = getattr(decision, "candidate", None)
     winner_id = str(getattr(winner, "candidate_id", "") or "")
     candidate_input_count = getattr(decision, "candidate_input_count", None)
+    condition_index_complete = all(condition_ids) and all(
+        row.get("action") != "BUY" or row.get("side") in {"YES", "NO"}
+        for row in evaluation_rows
+    )
     coverage_complete = (
         candidate_input_count is not None
         and len(evaluation_rows) == candidate_input_count
         and len(candidate_ids) == len(set(candidate_ids))
         and all(candidate_ids)
-        and all(condition_ids)
+        and condition_index_complete
         and len(selected_rows) == (1 if winner is not None else 0)
         and (
             winner is None
@@ -266,7 +277,7 @@ def _store_global_auction_receipt(
         )
     )
     receipt = {
-        "schema_version": 4,
+        "schema_version": 5,
         "selection_epoch_identity": selection_epoch_identity,
         "selection_cut_at_utc": selection_cut_at_utc.isoformat(),
         "decision_at_utc": decision_at_utc.isoformat(),
@@ -293,8 +304,11 @@ def _store_global_auction_receipt(
         "candidate_detailed_count": len(detailed_rows),
         "candidate_rejection_group_count": len(rejection_groups),
         "candidate_coverage_complete": coverage_complete,
-        "candidate_condition_index_complete": coverage_complete,
-        "candidate_evaluation_encoding": "zlib+base64+canonical-json-v3",
+        "candidate_condition_index_complete": condition_index_complete,
+        "buy_condition_membership_count": sum(
+            1 + (mask == 3) for mask in buy_condition_masks.values()
+        ),
+        "candidate_evaluation_encoding": "zlib+base64+canonical-json-v4",
         "candidate_evaluations_sha256": hashlib.sha256(
             evaluation_json
         ).hexdigest(),

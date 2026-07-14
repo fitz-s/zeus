@@ -4835,14 +4835,14 @@ def _latest_global_auction_candidate_counts(
     try:
         artifact = json.loads(str(row["artifact_json"] or ""))
         summary = artifact["summary"]
-        if int(summary.get("schema_version") or 0) < 4:
+        if int(summary.get("schema_version") or 0) < 5:
             return invalid("SCHEMA_VERSION")
         if summary.get("candidate_coverage_complete") is not True:
             return invalid("COVERAGE_INCOMPLETE")
         if summary.get("candidate_condition_index_complete") is not True:
             return invalid("CONDITION_INDEX_INCOMPLETE")
         if summary.get("candidate_evaluation_encoding") != (
-            "zlib+base64+canonical-json-v3"
+            "zlib+base64+canonical-json-v4"
         ):
             return invalid("ENCODING")
         compressed = base64.b64decode(
@@ -4868,36 +4868,28 @@ def _latest_global_auction_candidate_counts(
     try:
         for group in payload["rejected_groups"]:
             candidate_ids = group["candidate_ids"]
-            condition_ids = group["condition_ids"]
-            if len(candidate_ids) != len(condition_ids):
-                return invalid("GROUP_IDENTITY_LENGTH_MISMATCH")
             covered += len(candidate_ids)
-            if str(group.get("action") or "") != "BUY":
-                continue
-            side = str(group.get("side") or "").upper()
-            counts = yes if side == "YES" else no if side == "NO" else None
-            if counts is None:
-                return invalid("BUY_SIDE_INVALID")
-            for condition_id in condition_ids:
-                condition_id = str(condition_id or "")
-                if not condition_id:
-                    return invalid("CONDITION_ID_MISSING")
-                counts[condition_id] = counts.get(condition_id, 0) + 1
         for evaluation in payload["detailed"]:
             covered += 1
-            if str(evaluation.get("action") or "") != "BUY":
-                continue
-            side = str(evaluation.get("side") or "").upper()
-            counts = yes if side == "YES" else no if side == "NO" else None
-            condition_id = str(evaluation.get("condition_id") or "")
-            if counts is None or not condition_id:
-                return invalid("DETAILED_BUY_IDENTITY_INVALID")
-            counts[condition_id] = counts.get(condition_id, 0) + 1
+        seen_conditions: set[str] = set()
+        for condition_id, raw_mask in payload["buy_condition_side_masks"]:
+            condition_id = str(condition_id or "")
+            mask = int(raw_mask)
+            if not condition_id or condition_id in seen_conditions or mask not in {1, 2, 3}:
+                return invalid("CONDITION_SIDE_MASK_INVALID")
+            seen_conditions.add(condition_id)
+            if mask & 1:
+                yes[condition_id] = 1
+            if mask & 2:
+                no[condition_id] = 1
         expected = int(summary["candidate_evaluation_count"])
+        expected_memberships = int(summary["buy_condition_membership_count"])
     except (KeyError, TypeError, ValueError):
         return invalid("PAYLOAD_SHAPE")
     if covered != expected:
         return invalid("EVALUATION_COUNT_MISMATCH")
+    if len(yes) + len(no) != expected_memberships:
+        return invalid("CONDITION_MEMBERSHIP_COUNT_MISMATCH")
     return yes, no, {
         "evaluated": True,
         "issue": None,
