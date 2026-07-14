@@ -4082,6 +4082,78 @@ def test_global_batch_actuates_exactly_one_claimed_global_winner(monkeypatch):
     )
 
 
+def test_global_batch_keeps_current_q_on_its_scope_carrier(monkeypatch):
+    decision_at = _dt.datetime(2026, 7, 14, 14, 50, tzinfo=_dt.timezone.utc)
+    stale_claim = _global_scope_event(city="Alpha", source_run_id="run-old")
+    current = _global_scope_event(city="Alpha", source_run_id="run-current")
+    scope = current_global_auction_scope_from_events(
+        (current,), captured_at_utc=decision_at
+    )
+    prepared = SimpleNamespace(
+        probability_witness=SimpleNamespace(
+            family_key=scope.family_keys[0],
+            captured_at_utc=decision_at,
+            posterior_identity_hash="run-current",
+        )
+    )
+    seen_event_ids = []
+
+    monkeypatch.setattr(
+        global_batch_runtime, "scan_current_global_auction_scope", lambda **_: scope
+    )
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "current_portfolio_wealth_witness",
+        lambda *_, **__: SimpleNamespace(
+            spendable_cash_usd=Decimal("10"),
+            witness_identity="wealth-certificate",
+            economic_identity="wealth-economics",
+        ),
+    )
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "current_venue_auction_identity",
+        lambda *_, **__: "venue",
+    )
+
+    def select(prepared_by_event, **_kwargs):
+        seen_event_ids.extend(prepared_by_event)
+        return SimpleNamespace(
+            decision=SimpleNamespace(candidate=None, no_trade_reason="test-no-trade"),
+            winner_event_id=None,
+            actuation=None,
+        )
+
+    monkeypatch.setattr(
+        global_batch_runtime, "select_prepared_global_auction", select
+    )
+
+    result = global_batch_runtime.process_current_global_batch(
+        (stale_claim,),
+        decision_time=decision_at,
+        world_conn=object(),
+        forecast_conn=object(),
+        trade_conn=object(),
+        payload_reader=lambda event: json.loads(event.payload_json),
+        prepare_event=lambda event, _at: EventSubmissionReceipt(
+            False,
+            event.event_id,
+            event.causal_snapshot_id,
+            prepared_global_family=prepared,
+        ),
+        actuate_winner=lambda *_: pytest.fail("no-trade must not actuate"),
+        stamp_receipt=lambda receipt: receipt,
+        venue_submit_count=lambda: 0,
+        current_execution=lambda *_: object(),
+        current_time_provider=lambda: decision_at,
+    )
+
+    assert seen_event_ids == [current.event_id]
+    assert result.receipts[stale_claim.event_id].reason == (
+        "GLOBAL_AUCTION_NO_TRADE:test-no-trade"
+    )
+
+
 def test_global_one_shot_actuator_refuses_second_consumption():
     calls = []
     receipt = EventSubmissionReceipt(False, "event")

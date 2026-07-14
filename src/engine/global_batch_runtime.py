@@ -937,7 +937,11 @@ def process_current_global_batch(
                 return reject(
                     f"GLOBAL_PROBABILITY_EPOCH_CARRIER_MISMATCH:{family_key}"
                 )
-            prepared_by_event[owner.event_id] = prepared
+            # Queue ownership cannot rename the current probability carrier.  The
+            # winner is rebound to a claimed target below; keeping the scope event
+            # here makes JIT probability revalidation rebuild the same random
+            # variable instead of the stale queue owner's carrier.
+            prepared_by_event[scope_event.event_id] = prepared
         log_stage("prepare_families", families=len(prepared_by_event))
         if not prepared_by_event:
             return reject("GLOBAL_AUCTION_NO_CURRENT_PROBABILITY_FAMILY")
