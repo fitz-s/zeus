@@ -350,7 +350,39 @@ def test_opportunity_book_projects_exact_global_selected_proof():
     ("side", "token_id", "touch"),
     (("YES", "yes-1", "0.40"), ("NO", "no-1", "0.55")),
 )
-def test_global_jit_curve_allows_evidence_and_irrelevant_tail_churn(
+def test_global_jit_curve_allows_evidence_carrier_churn_only(
+    side: str,
+    token_id: str,
+    touch: str,
+):
+    selected = _jit_curve(
+        side=side,
+        token_id=token_id,
+        snapshot_id="selected",
+        book_hash="selected-book",
+        levels=((touch, "5"), ("0.70", "100")),
+        fee_rate="0.02",
+    )
+    current = _jit_curve(
+        side=side,
+        token_id=token_id,
+        snapshot_id="jit",
+        book_hash="jit-book",
+        levels=((touch, "5"), ("0.70", "100")),
+        fee_rate="0.02",
+    )
+
+    assert era._global_selected_order_economics_preserved(
+        decision=_jit_decision(selected, "5"),
+        current_candidate=SimpleNamespace(executable_cost_curve=current),
+    )
+
+
+@pytest.mark.parametrize(
+    ("side", "token_id", "touch"),
+    (("YES", "yes-1", "0.40"), ("NO", "no-1", "0.55")),
+)
+def test_global_jit_curve_rejects_unconsumed_tail_drift(
     side: str,
     token_id: str,
     touch: str,
@@ -372,10 +404,12 @@ def test_global_jit_curve_allows_evidence_and_irrelevant_tail_churn(
         fee_rate="0.02",
     )
 
-    assert era._global_selected_order_economics_preserved(
+    drift = era._global_selected_order_economics_drift(
         decision=_jit_decision(selected, "5"),
         current_candidate=SimpleNamespace(executable_cost_curve=current),
     )
+
+    assert drift == "fields=levels"
 
 
 @pytest.mark.parametrize(
@@ -445,7 +479,7 @@ def test_global_jit_curve_rejects_selected_order_economic_drift(
     )
 
 
-def test_global_jit_curve_accepts_cheaper_selected_prefix():
+def test_global_jit_curve_rejects_cheaper_selected_prefix_for_reoptimization():
     selected = _jit_curve(
         side="YES",
         token_id="yes-1",
@@ -461,7 +495,7 @@ def test_global_jit_curve_accepts_cheaper_selected_prefix():
         levels=(("0.39", "5"), ("0.40", "5"), ("0.99", "100")),
     )
 
-    assert era._global_selected_order_economics_preserved(
+    assert not era._global_selected_order_economics_preserved(
         decision=_jit_decision(selected, "10"),
         current_candidate=SimpleNamespace(executable_cost_curve=current),
     )

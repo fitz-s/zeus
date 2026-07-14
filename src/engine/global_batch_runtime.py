@@ -18,9 +18,7 @@ from typing import Callable, Mapping, Sequence
 from src.contracts.executable_market_snapshot import FRESHNESS_WINDOW_DEFAULT
 from src.data.market_topology_rows import prime_frozen_schema_reads
 from src.engine.global_auction_universe import (
-    CurrentGlobalBookAsset,
     CurrentGlobalBookEpoch,
-    current_global_book_epoch_identity,
     current_global_auction_scope_from_events,
     current_portfolio_wealth_witness,
     current_venue_auction_identity,
@@ -33,7 +31,7 @@ from src.engine.global_single_order_auction import (
 from src.events.candidate_binding import weather_family_id
 from src.events.opportunity_event import OpportunityEvent, make_opportunity_event
 from src.events.reactor import EventSubmissionReceipt, GlobalBatchSubmitResult
-from src.solve.solver import CurrentFamilyProbabilityAuthority, executable_curve_identity
+from src.solve.solver import CurrentFamilyProbabilityAuthority
 from src.state.collateral_ledger import COLLATERAL_SNAPSHOT_MAX_AGE_SECONDS
 
 UTC = timezone.utc
@@ -113,6 +111,7 @@ class GlobalPreflightAuthority:
     book_epoch_identity: str
     book_economics_manifest: tuple[tuple[object, ...], ...]
     wealth_witness_identity: str
+    actuation_deadline: datetime
 
     def __post_init__(self) -> None:
         if (
@@ -120,6 +119,7 @@ class GlobalPreflightAuthority:
             or not self.book_epoch_identity
             or not self.book_economics_manifest
             or not self.wealth_witness_identity
+            or self.actuation_deadline.tzinfo is None
         ):
             raise ValueError("GLOBAL_PREFLIGHT_AUTHORITY_INCOMPLETE")
 
@@ -392,114 +392,6 @@ def _book_economics_manifest(
     if not manifest:
         raise ValueError("GLOBAL_BOOK_ECONOMICS_MISSING")
     return manifest
-
-
-def _overlay_current_global_book_epoch(
-    book_epoch: CurrentGlobalBookEpoch,
-    selected_candidate: object,
-    replacement_candidate: object,
-) -> CurrentGlobalBookEpoch:
-    """Replace only the JIT winner curve in one frozen complete book epoch."""
-
-    identity_fields = (
-        "family_key",
-        "bin_id",
-        "condition_id",
-        "side",
-        "token_id",
-        "probability_witness_identity",
-        "resolution_identity",
-        "ledger_snapshot_id",
-    )
-    selected_identity = tuple(
-        str(getattr(selected_candidate, field, "") or "")
-        for field in identity_fields
-    )
-    replacement_identity = tuple(
-        str(getattr(replacement_candidate, field, "") or "")
-        for field in identity_fields
-    )
-    if not all(selected_identity) or replacement_identity != selected_identity:
-        raise ValueError("GLOBAL_JIT_OVERLAY_IDENTITY_MISMATCH")
-    selected_key = selected_identity[:5]
-    replacement_curve = getattr(replacement_candidate, "executable_cost_curve", None)
-    replacement_at = getattr(replacement_candidate, "book_captured_at_utc", None)
-    selected_at = getattr(selected_candidate, "book_captured_at_utc", None)
-    if (
-        replacement_curve is None
-        or replacement_curve.side != selected_key[3]
-        or replacement_curve.token_id != selected_key[4]
-        or executable_curve_identity(replacement_curve)
-        != str(
-            getattr(replacement_candidate, "execution_curve_identity", "") or ""
-        )
-        or replacement_at is None
-        or replacement_at.tzinfo is None
-        or selected_at is None
-        or selected_at.tzinfo is None
-        or replacement_at < selected_at
-    ):
-        raise ValueError("GLOBAL_JIT_OVERLAY_CURVE_INVALID")
-
-    assets: list[CurrentGlobalBookAsset] = []
-    matched_asset = 0
-    selected_book_hash = ""
-    for asset in book_epoch.assets:
-        asset_key = (
-            asset.family_key,
-            asset.bin_id,
-            asset.condition_id,
-            asset.side,
-            asset.token_id,
-        )
-        if asset_key != selected_key:
-            assets.append(asset)
-            continue
-        if executable_curve_identity(asset.curve) != str(
-            getattr(selected_candidate, "execution_curve_identity", "") or ""
-        ):
-            raise ValueError("GLOBAL_JIT_OVERLAY_SELECTED_CURVE_MISMATCH")
-        matched_asset += 1
-        selected_book_hash = str(asset.curve.book_hash)
-        assets.append(
-            replace(
-                asset,
-                curve=replacement_curve,
-                captured_at_utc=replacement_at,
-            )
-        )
-    if matched_asset != 1:
-        raise ValueError(f"GLOBAL_JIT_OVERLAY_ASSET_CARDINALITY:{matched_asset}")
-
-    states: list[tuple[str, ...]] = []
-    matched_state = 0
-    for state in book_epoch.asset_states:
-        if tuple(state[:5]) != selected_key:
-            states.append(state)
-            continue
-        if (
-            len(state) != 8
-            or state[5] != "EXECUTABLE"
-            or state[6] != selected_book_hash
-        ):
-            raise ValueError("GLOBAL_JIT_OVERLAY_STATE_INVALID")
-        matched_state += 1
-        states.append((*state[:6], str(replacement_curve.book_hash), state[7]))
-    if matched_state != 1:
-        raise ValueError(f"GLOBAL_JIT_OVERLAY_STATE_CARDINALITY:{matched_state}")
-
-    witness_identity = current_global_book_epoch_identity(
-        asset_states=states,
-        captured_at_utc=book_epoch.captured_at_utc,
-    )
-    return CurrentGlobalBookEpoch(
-        assets=tuple(assets),
-        asset_states=tuple(states),
-        captured_at_utc=book_epoch.captured_at_utc,
-        max_age=book_epoch.max_age,
-        witness_identity=witness_identity,
-        sell_assets=tuple(getattr(book_epoch, "sell_assets", ())),
-    )
 
 
 def _begin_selection_read_snapshot(
@@ -1239,12 +1131,17 @@ def process_current_global_batch(
                 )
             winner_id = winner.event_id
             attempt_book_epoch = book_epoch_fence
+            auction_deadline = (
+                attempt_book_epoch.captured_at_utc + attempt_book_epoch.max_age
+            )
             excluded_by_family: dict[str, str] = {}
             payoff_q_lcb_by_candidate: dict[
                 tuple[str, str, str, str], float
             ] = {}
-            curve_reauction_used = False
             while True:
+                preflight_at = current_time()
+                if preflight_at > auction_deadline:
+                    return reject("GLOBAL_REAUCTION_EPOCH_EXPIRED")
                 preflight_authority = GlobalPreflightAuthority(
                     probability_manifest=probability_manifest,
                     book_epoch_identity=attempt_book_epoch.witness_identity,
@@ -1252,12 +1149,13 @@ def process_current_global_batch(
                         attempt_book_epoch
                     ),
                     wealth_witness_identity=selected.actuation.wealth_witness_identity,
+                    actuation_deadline=auction_deadline,
                 )
                 before_preflight = venue_submit_count()
                 preflight = preflight_winner(
                     winner,
                     selected.actuation,
-                    current_time(),
+                    preflight_at,
                     preflight_authority,
                 )
                 log_stage("winner_preflight", families=len(prepared_by_event))
@@ -1271,20 +1169,42 @@ def process_current_global_batch(
                         f"{preflight.reason or preflight.status}"
                     )
                 if preflight.status == "CURVE_SUPERSEDED":
-                    if curve_reauction_used:
+                    try:
+                        next_probabilities, next_book_epoch = (
+                            current_book_epoch_provider(
+                                probabilities_fence,
+                                current_time(),
+                            )
+                        )
+                    except Exception as exc:  # noqa: BLE001 - full cut is atomic
                         return reject(
-                            "GLOBAL_REAUCTION_EXHAUSTED:"
+                            "GLOBAL_REAUCTION_BOOK_REFRESH_FAILED:"
+                            f"{type(exc).__name__}:{exc}"
+                        )
+                    if (
+                        _probability_manifest(next_probabilities)
+                        != probability_manifest
+                    ):
+                        return reject("GLOBAL_REAUCTION_PROBABILITY_MANIFEST_CHANGED")
+                    if (
+                        next_book_epoch.witness_identity
+                        == attempt_book_epoch.witness_identity
+                    ):
+                        return reject(
+                            "GLOBAL_REAUCTION_CURVE_NO_PROGRESS:"
                             f"{preflight.reason or preflight.status}"
                         )
-                    try:
-                        attempt_book_epoch = _overlay_current_global_book_epoch(
-                            attempt_book_epoch,
-                            selected.decision.candidate,
-                            preflight.replacement_candidate,
+                    prepared_fence = {
+                        event_id: replace(
+                            prepared,
+                            probability_witness=next_probabilities[
+                                prepared.probability_witness.family_key
+                            ],
                         )
-                    except ValueError as exc:
-                        return reject(f"GLOBAL_REAUCTION_OVERLAY_FAILED:{exc}")
-                    curve_reauction_used = True
+                        for event_id, prepared in prepared_fence.items()
+                    }
+                    probabilities_fence = next_probabilities
+                    attempt_book_epoch = next_book_epoch
                 elif preflight.status == "PROBABILITY_TIGHTENED":
                     tightening = preflight.probability_tightening
                     candidate = selected.decision.candidate
@@ -1374,18 +1294,21 @@ def process_current_global_batch(
                 winner_id = winner.event_id
             binding_token = preflight.binding_token
 
+        actuation_at = current_time()
+        if preflight_winner is not None and actuation_at > auction_deadline:
+            return reject("GLOBAL_REAUCTION_EPOCH_EXPIRED")
         before_calls = venue_submit_count()
         release_selection_snapshot()
         winner_receipt = (
             actuate_preflighted_winner.consume(
                 winner,
                 selected.actuation,
-                current_time(),
+                actuation_at,
                 binding_token,
                 preflight_authority,
             )
             if preflight_winner is not None
-            else actuate_winner(winner, selected.actuation, current_time())
+            else actuate_winner(winner, selected.actuation, actuation_at)
         )
         venue_delta = venue_submit_count() - before_calls
         if venue_delta not in {0, 1}:

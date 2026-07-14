@@ -311,6 +311,7 @@ class _GlobalWinnerBindingToken:
     book_epoch_identity: str
     book_economics_manifest: tuple[tuple[object, ...], ...]
     wealth_witness_identity: str
+    actuation_deadline: datetime
     issued_at: datetime
     expires_at: datetime
     receipt: EventSubmissionReceipt
@@ -5003,6 +5004,7 @@ def event_bound_live_adapter_from_trade_conn(
                         authority.book_epoch_identity,
                         authority.book_economics_manifest,
                         authority.wealth_witness_identity,
+                        authority.actuation_deadline.isoformat(),
                         issued_at.isoformat(),
                     )
                 )
@@ -5018,8 +5020,12 @@ def event_bound_live_adapter_from_trade_conn(
                         book_epoch_identity=authority.book_epoch_identity,
                         book_economics_manifest=authority.book_economics_manifest,
                         wealth_witness_identity=authority.wealth_witness_identity,
+                        actuation_deadline=authority.actuation_deadline,
                         issued_at=issued_at,
-                        expires_at=issued_at + timedelta(seconds=10),
+                        expires_at=min(
+                            issued_at + timedelta(seconds=10),
+                            authority.actuation_deadline,
+                        ),
                         receipt=receipt,
                     ),
                 )
@@ -5064,10 +5070,12 @@ def event_bound_live_adapter_from_trade_conn(
                 != authority.book_economics_manifest
                 or token.wealth_witness_identity
                 != authority.wealth_witness_identity
+                or token.actuation_deadline != authority.actuation_deadline
                 or token.wealth_witness_identity
                 != str(getattr(actuation, "wealth_witness_identity", "") or "")
                 or now < token.issued_at
                 or now > token.expires_at
+                or now > token.actuation_deadline
                 or token.token_id in _consumed_global_preflight_tokens
             ):
                 return _stamp_live_adapter_lane(
@@ -6240,11 +6248,11 @@ def _global_selected_order_economics_drift(
     decision: object,
     current_candidate: object,
 ) -> str | None:
-    """Describe why the fixed winning order lost its executable boundary.
+    """Name any current curve change that can alter the global argmax.
 
-    T2 already optimized shares over the complete current curve. T3 cannot
-    atomically freeze the CLOB, so it proves that exact order's consumed prefix
-    is no worse; tail changes belong to the next re-decision cycle.
+    Snapshot and book hashes are evidence carriers.  Every economic field is
+    exact: even a cheaper prefix or an unconsumed tail change can move the
+    Fractional-Kelly optimum and therefore requires a new complete auction.
     """
 
     selected_candidate = getattr(decision, "candidate", None)
@@ -6252,83 +6260,24 @@ def _global_selected_order_economics_drift(
     current = getattr(current_candidate, "executable_cost_curve", None)
     if selected is None or current is None:
         return "curve_missing"
-    contract_fields = (
+    economic_fields = (
         ("token", selected.token_id, current.token_id),
         ("side", selected.side, current.side),
         ("fee", selected.fee_model.fee_rate, current.fee_model.fee_rate),
         ("tick", selected.min_tick, current.min_tick),
         ("min_order", selected.min_order_size, current.min_order_size),
+        (
+            "levels",
+            tuple((level.price, level.size) for level in selected.levels),
+            tuple((level.price, level.size) for level in current.levels),
+        ),
     )
-    contract_drift = tuple(
-        f"{name}={left}->{right}"
-        for name, left, right in contract_fields
-        if left != right
-    )
-    if contract_drift:
-        return "contract:" + ",".join(contract_drift)
-    try:
-        shares = Decimal(str(getattr(decision, "shares")))
-        selected_cost = Decimal(str(getattr(decision, "cost_usd")))
-        selected_limit = Decimal(str(getattr(decision, "limit_price")))
-        selected_raw_vwap = Decimal(
-            str(getattr(decision, "expected_fill_price_before_fee"))
-        )
-        selected_max_spend = Decimal(str(getattr(decision, "max_spend_usd")))
-    except (ArithmeticError, TypeError, ValueError):
-        return "decision_invalid"
-    if not all(
-        value.is_finite()
-        for value in (
-            shares,
-            selected_cost,
-            selected_limit,
-            selected_raw_vwap,
-            selected_max_spend,
-        )
-    ) or shares <= 0 or shares < current.min_order_size:
-        return (
-            "shares_invalid:"
-            f"shares={shares}:current_min_order={current.min_order_size}"
-        )
-
-    remaining = shares
-    raw_cost = Decimal("0")
-    all_in_cost = Decimal("0")
-    current_limit: Decimal | None = None
-    for level in current.levels:
-        take = min(level.size, remaining)
-        if take > 0:
-            current_limit = level.price
-            raw_cost += take * level.price
-            all_in_cost += take * current.fee_model.all_in_price(level.price)
-            remaining -= take
-        if remaining <= Decimal("1e-18"):
-            break
-    if remaining > Decimal("1e-18") or current_limit is None:
-        return f"depth:shares={shares}:remaining={remaining}"
-
-    tolerance = Decimal("1e-12")
-    current_raw_vwap = raw_cost / shares
-    current_max_spend = shares * current.fee_model.all_in_price(current_limit)
-    breaches = tuple(
+    drift = tuple(
         name
-        for name, breached in (
-            ("limit", current_limit > selected_limit),
-            ("raw_vwap", current_raw_vwap > selected_raw_vwap + tolerance),
-            ("all_in_cost", all_in_cost > selected_cost + tolerance),
-            ("max_spend", current_max_spend > selected_max_spend + tolerance),
-        )
-        if breached
+        for name, selected_value, current_value in economic_fields
+        if selected_value != current_value
     )
-    if not breaches:
-        return None
-    return (
-        f"prefix={','.join(breaches)}:shares={shares}:"
-        f"limit={selected_limit}->{current_limit}:"
-        f"raw_vwap={selected_raw_vwap}->{current_raw_vwap}:"
-        f"all_in_cost={selected_cost}->{all_in_cost}:"
-        f"max_spend={selected_max_spend}->{current_max_spend}"
-    )
+    return f"fields={','.join(drift)}" if drift else None
 
 
 def _global_selected_order_economics_preserved(
@@ -7371,9 +7320,9 @@ def _global_actuation_selected_proof(
             "GLOBAL_ACTUATION_EXECUTION_BINDING_SUPERSEDED:identity:"
             + ",".join(execution_identity_drift)
         )
-    # The complete-curve T2 chose the exact shares. At T3 require that order's
-    # consumed prefix to remain no worse; otherwise hand the new curve back for
-    # one global re-auction. Unconsumed tail churn cannot invalidate this order.
+    # T2 chose an argmax over the complete curve.  Any economic curve change can
+    # move that argmax, so T3 hands the current curve back for a complete global
+    # re-auction; evidence-carrier-only churn is ignored above.
     execution_drift = _global_selected_order_economics_drift(
         decision=decision,
         current_candidate=rebound,
