@@ -1072,21 +1072,18 @@ def test_global_day0_joint_witness_uses_one_remaining_day_simplex(monkeypatch):
         lambda **_kwargs: analysis,
     )
 
-    payload = {
-        "_edli_day0_lcb_transform": {
-            "absorbing_no_conditions": [],
-        }
-    }
+    family = SimpleNamespace(
+        candidates=(
+            SimpleNamespace(condition_id="condition-22", bin=bins[0]),
+            SimpleNamespace(condition_id="condition-23-plus", bin=bins[1]),
+        )
+    )
+    payload = {"metric": "high", "rounded_value": 21.0}
     samples, point, basis = era._day0_remaining_global_probability_components(
         SimpleNamespace(),
         forecast_conn=sqlite3.connect(":memory:"),
         calibration_conn=sqlite3.connect(":memory:"),
-        family=SimpleNamespace(
-            candidates=(
-                SimpleNamespace(condition_id="condition-22"),
-                SimpleNamespace(condition_id="condition-23-plus"),
-            )
-        ),
+        family=family,
         payload=payload,
         decision_time=_dt.datetime(2026, 7, 10, 20, 0, tzinfo=_dt.timezone.utc),
     )
@@ -1101,21 +1098,32 @@ def test_global_day0_joint_witness_uses_one_remaining_day_simplex(monkeypatch):
         "condition-22": 0,
         "condition-23-plus": 2,
     }
+    assert payload["_edli_day0_finite_evidence_absorbing_no_conditions"] == []
+    hard_fact_payload = {"metric": "high", "rounded_value": 23.0}
     hard_fact_floors = era._day0_current_evidence_yes_ucb_floors(
         analysis=analysis,
-        family=SimpleNamespace(
-            candidates=(
-                SimpleNamespace(condition_id="condition-22"),
-                SimpleNamespace(condition_id="condition-23-plus"),
-            )
-        ),
-        payload={
-            "_edli_day0_lcb_transform": {
-                "absorbing_no_conditions": ["condition-22"],
-            }
-        },
+        family=family,
+        payload=hard_fact_payload,
     )
     assert hard_fact_floors[0] == 0.0
+    assert hard_fact_payload[
+        "_edli_day0_finite_evidence_absorbing_no_conditions"
+    ] == ["condition-22"]
+    with pytest.raises(
+        ValueError,
+        match="GLOBAL_DAY0_FINITE_EVIDENCE_ABSORBING_MASK_MISMATCH",
+    ):
+        era._day0_current_evidence_yes_ucb_floors(
+            analysis=analysis,
+            family=family,
+            payload={
+                "metric": "high",
+                "rounded_value": 23.0,
+                "_edli_day0_lcb_transform": {
+                    "absorbing_no_conditions": [],
+                },
+            },
+        )
 
 
 def _global_scope_event(*, city: str, source_run_id: str):

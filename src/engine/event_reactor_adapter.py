@@ -22964,16 +22964,28 @@ def _day0_current_evidence_yes_ucb_floors(
         raise ValueError("GLOBAL_DAY0_FINITE_EVIDENCE_MEMBERS_INVALID")
     measured = np.asarray(analysis._settle(members), dtype=float)
     hits = bin_counts_from_array(measured, bins).astype(int)
-    transform = payload.get("_edli_day0_lcb_transform")
-    if not isinstance(transform, Mapping):
-        raise ValueError("GLOBAL_DAY0_FINITE_EVIDENCE_LCB_TRANSFORM_MISSING")
-    absorbing_no = {
-        str(value)
-        for value in transform.get("absorbing_no_conditions", ())
-    }
-    conditions = [str(getattr(candidate, "condition_id", "") or "") for candidate in candidates]
+    conditions = [
+        str(getattr(candidate, "condition_id", "") or "")
+        for candidate in candidates
+    ]
     if any(not condition for condition in conditions):
         raise ValueError("GLOBAL_DAY0_FINITE_EVIDENCE_CONDITION_ID_MISSING")
+    absorbing_mask = _day0_absorbing_mask(payload=payload, family=family)
+    if absorbing_mask.shape != (len(conditions),):
+        raise ValueError("GLOBAL_DAY0_FINITE_EVIDENCE_ABSORBING_MASK_INVALID")
+    absorbing_no = {
+        condition
+        for condition, alive in zip(conditions, absorbing_mask, strict=True)
+        if float(alive) <= 0.0
+    }
+    transform = payload.get("_edli_day0_lcb_transform")
+    if isinstance(transform, Mapping):
+        declared_absorbing_no = {
+            str(value)
+            for value in transform.get("absorbing_no_conditions", ())
+        }
+        if declared_absorbing_no != absorbing_no:
+            raise ValueError("GLOBAL_DAY0_FINITE_EVIDENCE_ABSORBING_MASK_MISMATCH")
     floors = np.asarray(
         [
             0.0
@@ -22989,6 +23001,9 @@ def _day0_current_evidence_yes_ucb_floors(
     )
     payload["_edli_day0_finite_evidence_yes_ucb_by_condition"] = dict(
         zip(conditions, (float(value) for value in floors), strict=True)
+    )
+    payload["_edli_day0_finite_evidence_absorbing_no_conditions"] = sorted(
+        absorbing_no
     )
     return floors
 
@@ -23275,6 +23290,7 @@ def _prepare_current_global_probability_family(
             "_edli_day0_finite_evidence_member_count",
             "_edli_day0_finite_evidence_hits_by_condition",
             "_edli_day0_finite_evidence_yes_ucb_by_condition",
+            "_edli_day0_finite_evidence_absorbing_no_conditions",
         ):
             if key in payload:
                 day0_payload_out[key] = payload[key]
@@ -23311,6 +23327,9 @@ def _prepare_current_global_probability_family(
                 ),
                 "finite_evidence_yes_ucb_by_condition": payload.get(
                     "_edli_day0_finite_evidence_yes_ucb_by_condition"
+                ),
+                "finite_evidence_absorbing_no_conditions": payload.get(
+                    "_edli_day0_finite_evidence_absorbing_no_conditions"
                 ),
             }
         )
