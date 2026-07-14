@@ -2609,6 +2609,93 @@ def test_priority_full_family_refresh_defers_when_batch_books_fail(monkeypatch):
     assert summary["direct_clob_prefetch_priority_enabled"] == 1
 
 
+def test_exact_forced_condition_uses_bounded_direct_books_after_batch_reset(monkeypatch):
+    """FC-03 retries only the selected binary condition, never the broad lane."""
+
+    conn = _make_in_memory_trade_db()
+    market = _make_market("Tokyo", 1, metric="highest", target_date="2026-05-25")
+    outcome = market["outcomes"][0]
+    condition_id = outcome["condition_id"]
+    expected_tokens = [outcome["token_id"], outcome["no_token_id"]]
+    direct_calls: list[str] = []
+    captured_books: list[str] = []
+
+    class _Clob:
+        def get_orderbook_snapshots(self, _token_ids):
+            raise ConnectionResetError("batch reset")
+
+        def get_orderbook_snapshot(self, token_id):
+            direct_calls.append(str(token_id))
+            return {
+                "asset_id": token_id,
+                "market": token_id,
+                "bids": [{"price": "0.70", "size": "10"}],
+                "asks": [{"price": "0.73", "size": "10"}],
+            }
+
+    def _capture(conn, *, prefetched_orderbook, **_kwargs):
+        captured_books.append(str(prefetched_orderbook["asset_id"]))
+
+    with patch(
+        "src.data.market_scanner.capture_executable_market_snapshot",
+        side_effect=_capture,
+    ):
+        summary = refresh_executable_market_substrate_snapshots(
+            conn,
+            markets=[market],
+            clob=_Clob(),
+            captured_at=_NOW,
+            scan_authority="VERIFIED",
+            max_outcomes=0,
+            budget_seconds=15.0,
+            priority_condition_ids={condition_id},
+            force_refresh_condition_ids={condition_id},
+        )
+
+    assert direct_calls == expected_tokens
+    assert captured_books == expected_tokens
+    assert summary["attempted"] == 2
+    assert summary["inserted"] == 2
+    assert summary["prefetched_orderbook_count"] == 2
+    assert summary["forced_direct_orderbook_prefetch_count"] == 2
+    assert summary["forced_direct_orderbook_prefetch_failed_count"] == 0
+    assert summary["prefetch_missing_skipped"] == 0
+
+
+def test_exact_forced_condition_direct_book_failure_still_fails_closed(monkeypatch):
+    conn = _make_in_memory_trade_db()
+    market = _make_market("Tokyo", 1, metric="highest", target_date="2026-05-25")
+    outcome = market["outcomes"][0]
+    condition_id = outcome["condition_id"]
+
+    class _Clob:
+        def get_orderbook_snapshots(self, _token_ids):
+            raise ConnectionResetError("batch reset")
+
+        def get_orderbook_snapshot(self, _token_id):
+            raise TimeoutError("direct timeout")
+
+    with patch("src.data.market_scanner.capture_executable_market_snapshot") as capture:
+        summary = refresh_executable_market_substrate_snapshots(
+            conn,
+            markets=[market],
+            clob=_Clob(),
+            captured_at=_NOW,
+            scan_authority="VERIFIED",
+            max_outcomes=0,
+            budget_seconds=15.0,
+            priority_condition_ids={condition_id},
+            force_refresh_condition_ids={condition_id},
+        )
+
+    capture.assert_not_called()
+    assert summary["attempted"] == 0
+    assert summary["inserted"] == 0
+    assert summary["forced_direct_orderbook_prefetch_count"] == 0
+    assert summary["forced_direct_orderbook_prefetch_failed_count"] == 2
+    assert summary["prefetch_missing_skipped"] == 2
+
+
 def test_small_priority_refresh_defers_without_per_token_book_reads(monkeypatch):
     """Money-path priority conditions wait for batch price evidence."""
 

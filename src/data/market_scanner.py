@@ -5166,6 +5166,8 @@ def refresh_executable_market_substrate_snapshots(
     )
     network_book_candidates = candidates_needing_network_books
     failed_prefetch_tokens: set[str] = set()
+    forced_direct_prefetch_count = 0
+    forced_direct_prefetch_failed_count = 0
     if (
         priority_full_family_direct_clob_prefetch
         and not full_family_direct_clob_prefetch_forced
@@ -5200,6 +5202,47 @@ def refresh_executable_market_substrate_snapshots(
                 failed_token_sink=failed_prefetch_tokens,
             )
         )
+    # FC-03 winner recapture is an exact binary condition, not a background
+    # universe sweep.  If its single POST /books call is reset or partial, at
+    # most the two bound YES/NO tokens may use direct GET /book fallback.  The
+    # structural two-token bound preserves the anti-storm rule for every broad
+    # warm lane while preventing one batch transport failure from vetoing an
+    # otherwise executable selected order.
+    if len(forced_conditions) == 1:
+        forced_tokens: list[str] = []
+        for candidate in selected_candidates:
+            outcome = candidate[4]
+            condition_id = str(candidate[5] or "").strip()
+            token_id = _selected_token_for_direction(outcome, candidate[6])
+            if (
+                condition_id in forced_conditions
+                and token_id
+                and token_id not in forced_tokens
+            ):
+                forced_tokens.append(token_id)
+        missing_forced_tokens = [
+            token_id for token_id in forced_tokens if token_id not in prefetched_books
+        ]
+        direct_getter = getattr(clob, "get_orderbook_snapshot", None)
+        if len(forced_tokens) <= 2 and callable(direct_getter):
+            for token_id in missing_forced_tokens:
+                if time.monotonic() >= prefetch_deadline:
+                    forced_direct_prefetch_failed_count += 1
+                    continue
+                try:
+                    prefetched_books[token_id] = _normalize_prefetched_orderbook(
+                        direct_getter(token_id),
+                        token_id,
+                    )
+                    failed_prefetch_tokens.discard(token_id)
+                    forced_direct_prefetch_count += 1
+                except Exception as exc:
+                    forced_direct_prefetch_failed_count += 1
+                    logger.warning(
+                        "Exact forced-condition orderbook fallback failed for %s: %s",
+                        token_id,
+                        exc,
+                    )
     market_info_candidates = []
     for candidate in selected_candidates:
         _recency, _priority, _ordinal, _market, outcome, condition_id, direction = candidate
@@ -5397,6 +5440,10 @@ def refresh_executable_market_substrate_snapshots(
         "snapshot_budget_seconds": snapshot_budget_seconds,
         "snapshot_capture_reserve_seconds": capture_reserve_seconds,
         "prefetched_orderbook_count": len(prefetched_books),
+        "forced_direct_orderbook_prefetch_count": forced_direct_prefetch_count,
+        "forced_direct_orderbook_prefetch_failed_count": (
+            forced_direct_prefetch_failed_count
+        ),
         "prefetched_clob_market_count": len(clob_market_info_cache),
         "prefetch_clob_market_deferred_count": len(deferred_clob_market_conditions),
         "prefetch_missing_skipped": prefetch_missing_skipped,
