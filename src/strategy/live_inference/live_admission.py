@@ -669,8 +669,8 @@ def replacement_no_bound_certificate_mismatch_reason(
         no_lcb_served < no_lcb_raw - 1e-12
     ):
         return "coverage_shrink_flag"
-    if q_lcb > no_lcb_served + 1e-12:
-        return "served_no_lcb_loosened"
+    if not math.isfinite(q_lcb) or q_lcb < 0.0 or q_lcb > no_q + 1e-12:
+        return "served_no_lcb_order"
     if same(q_lcb, no_lcb_served):
         return None
     economics = qkernel_execution_economics

@@ -125,6 +125,42 @@ def test_replacement_no_bound_mismatch_names_exact_parent_field() -> None:
     assert reason == "parent_field:posterior_identity_hash"
 
 
+def test_current_qkernel_bound_supersedes_legacy_served_lcb() -> None:
+    economics = {
+        "q_lcb_authority": "qkernel_payoff_bound",
+        "probability_authority": "qkernel_payoff_direct_route",
+        "pre_qkernel_q_posterior": 0.65,
+        "pre_qkernel_q_lcb_5pct": 0.62,
+        "payoff_q_point": 0.65,
+        "payoff_q_lcb": 0.64,
+    }
+
+    reason = replacement_no_bound_certificate_mismatch_reason(
+        _REPLACEMENT_NO_CERT,
+        expected=_REPLACEMENT_NO_EXPECTED,
+        q_direction=0.65,
+        q_lcb=0.64,
+        same_bin_yes_posterior=0.35,
+        qkernel_execution_economics=economics,
+        probability_authority="replacement_0_1",
+        posterior_id=271828,
+        condition_id="cond-wellington-high-24c",
+    )
+
+    assert reason is None
+    assert replacement_no_bound_certificate_mismatch_reason(
+        _REPLACEMENT_NO_CERT,
+        expected=_REPLACEMENT_NO_EXPECTED,
+        q_direction=0.65,
+        q_lcb=0.64,
+        same_bin_yes_posterior=0.35,
+        qkernel_execution_economics={**economics, "payoff_q_lcb": 0.63},
+        probability_authority="replacement_0_1",
+        posterior_id=271828,
+        condition_id="cond-wellington-high-24c",
+    ) == "qkernel_payoff_lcb"
+
+
 def test_material_yes_buy_no_without_allowed_source_is_rejected_even_with_positive_edge() -> None:
     """The deleted waiver would have admitted this (conservative_edge > confidence_gap);
     FIX-4 requires an allowed native NO source unconditionally, so it is rejected."""

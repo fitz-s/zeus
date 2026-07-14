@@ -365,46 +365,38 @@ def test_twin_sites_admit_only_the_same_exact_replacement_bound_certificate() ->
     assert reason == direct
 
 
-def test_receipt_accepts_qkernel_monotone_tightening_below_coverage_bound() -> None:
-    economics = {
-        "q_lcb_authority": "qkernel_payoff_bound",
-        "probability_authority": "qkernel_payoff_direct_route",
-        "pre_qkernel_q_posterior": 0.78,
-        "pre_qkernel_q_lcb_5pct": 0.75,
-        "payoff_q_point": 0.78,
-        "payoff_q_lcb": 0.70,
-    }
-    direct = live_buy_no_conservative_evidence_rejection_reason(
-        **{
-            **_CERTIFIED_REPLACEMENT,
-            "q_lcb": 0.70,
-            "qkernel_execution_economics": economics,
+def test_receipt_accepts_current_qkernel_bound_on_either_side_of_served_diagnostic() -> None:
+    for current_lcb in (0.70, 0.76):
+        economics = {
+            "q_lcb_authority": "qkernel_payoff_bound",
+            "probability_authority": "qkernel_payoff_direct_route",
+            "pre_qkernel_q_posterior": 0.78,
+            "pre_qkernel_q_lcb_5pct": 0.75,
+            "payoff_q_point": 0.78,
+            "payoff_q_lcb": current_lcb,
         }
-    )
-    receipt = _money_path_clean_buy_no_receipt(
-        q_live=0.78,
-        q_lcb_5pct=0.70,
-        trade_score=0.0979,
-        same_bin_yes_posterior=0.22,
-        settlement_coverage_status="INSUFFICIENT_DATA",
-        posterior_id=314159,
-        probability_authority="replacement_0_1",
-        condition_id="cond-atlanta-high",
-        replacement_no_bound_certificate=_CERTIFIED_REPLACEMENT_CERT,
-        qkernel_execution_economics=economics,
-        decision_proof_bundle=_replacement_proof_bundle(),
-    )
-    stage, reason = _receipt_money_path_blocker(receipt, ReactorConfig())
-    assert direct is None and stage is None, (direct, stage, reason)
-
-    loosened = {**economics, "payoff_q_lcb": 0.76}
-    assert live_buy_no_conservative_evidence_rejection_reason(
-        **{
-            **_CERTIFIED_REPLACEMENT,
-            "q_lcb": 0.76,
-            "qkernel_execution_economics": loosened,
-        }
-    ) is not None
+        direct = live_buy_no_conservative_evidence_rejection_reason(
+            **{
+                **_CERTIFIED_REPLACEMENT,
+                "q_lcb": current_lcb,
+                "qkernel_execution_economics": economics,
+            }
+        )
+        receipt = _money_path_clean_buy_no_receipt(
+            q_live=0.78,
+            q_lcb_5pct=current_lcb,
+            trade_score=current_lcb - 0.6021,
+            same_bin_yes_posterior=0.22,
+            settlement_coverage_status="INSUFFICIENT_DATA",
+            posterior_id=314159,
+            probability_authority="replacement_0_1",
+            condition_id="cond-atlanta-high",
+            replacement_no_bound_certificate=_CERTIFIED_REPLACEMENT_CERT,
+            qkernel_execution_economics=economics,
+            decision_proof_bundle=_replacement_proof_bundle(),
+        )
+        stage, reason = _receipt_money_path_blocker(receipt, ReactorConfig())
+        assert direct is None and stage is None, (current_lcb, direct, stage, reason)
 
 
 # --- receipt-hash stability: status omitted-when-None, present when set ------------------------
