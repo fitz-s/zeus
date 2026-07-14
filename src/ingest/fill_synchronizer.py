@@ -298,6 +298,27 @@ def _append_wallet_fill_observation(
     return True
 
 
+def _venue_timestamp_iso(raw: dict) -> str | None:
+    """The venue's match/execution time as ISO-8601 (UTC) -- comparable to
+    observed_at for the reducer's execution-ordered fold. Polymarket
+    get_trades reports ``match_time`` as unix epoch seconds; a pre-formatted
+    string is accepted as-is. None when absent (the reducer then falls back to
+    the earliest observed_at across the trade's revisions). Same field
+    extraction the observation lane uses in _append_wallet_fill_observation --
+    but written to venue_trade_facts too, so a synchronizer-appended fill
+    carries an execution time and never sorts after its own exits."""
+    val = _first_present(
+        raw, "match_time", "matchTime", "last_update", "timestamp", default=None
+    )
+    if val is None:
+        return None
+    try:
+        return datetime.fromtimestamp(int(float(val)), tz=timezone.utc).isoformat()
+    except (ValueError, TypeError, OSError):
+        s = str(val).strip()
+        return s or None
+
+
 def sync_fills(
     conn: sqlite3.Connection,
     adapter: Any,
@@ -408,6 +429,7 @@ def sync_fills(
                 filled_size=filled_size_s,
                 fill_price=fill_price_s,
                 source="REST",
+                venue_timestamp=_venue_timestamp_iso(raw),
                 observed_at=observed,
                 raw_payload_hash=raw_hash,
                 raw_payload_json=raw,

@@ -159,6 +159,27 @@ class TestBasicAttribution:
         assert obs_rows[0]["price"] == fact_rows[0]["fill_price"] == "0.50"
         assert json.loads(obs_rows[0]["order_ids"]) == ["ord-1"]
 
+    def test_synchronizer_captures_venue_timestamp_as_iso_for_fold_ordering(self, conn):
+        """Regression: a synchronizer-appended fill must carry venue_timestamp
+        (venue match time, epoch -> ISO) in venue_trade_facts, so the economics
+        reducer folds it in EXECUTION order. Without it, every synchronizer
+        fill had a NULL execution time, sorted by ingestion time, and
+        fabricated OversoldPositionError for settled positions whose entry the
+        synchronizer re-swept (live-observed 2026-07-13)."""
+        from datetime import datetime, timezone
+
+        _seed_command(conn, command_id="cmd-1", venue_order_id="ord-1")
+        tr = _trade(trade_id="trade-1", order_id="ord-1")
+        tr["match_time"] = 1783979998  # unix epoch seconds
+        adapter = FakeSyncAdapter([tr])
+
+        sync_fills(conn, adapter, observed_at=NOW)
+
+        rows = _trade_rows(conn)
+        assert len(rows) == 1
+        expected = datetime.fromtimestamp(1783979998, tz=timezone.utc).isoformat()
+        assert rows[0]["venue_timestamp"] == expected
+
     def test_foreign_fill_is_skipped_and_counted_not_appended(self, conn):
         # No venue_commands row for ord-operator: this is a shared-wallet
         # operator fill, not a Zeus fill.
