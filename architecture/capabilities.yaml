@@ -282,7 +282,6 @@ capabilities:
         - kill_switch_active
         - settlement_window_freeze_active
         - risk_level_RED
-        - deployment_freshness_mismatch
     hard_kernel_paths:
       - src/execution/executor.py
       - src/execution/live_executor.py
@@ -308,11 +307,9 @@ capabilities:
     owner_module: src/execution/executor.py
     intent: >
       Submit a real reduce-only exit order for an already-held position. This
-      is deliberately separate from live_venue_submit: new entries remain
-      blocked on runtime-code freshness mismatch, while reduce-only exits do
-      not increase exposure and therefore remain executable across a loaded
-      SHA/HEAD difference. It is not a general venue submit lane and must never
-      open or increase exposure.
+      is deliberately separate from live_venue_submit because it must never
+      open or increase exposure. A loaded SHA/HEAD difference is deployment
+      observability for both capabilities, not market or position authority.
     relationships:
       protects_invariants: [INV-21, INV-04, INV-01]
       blocked_when:

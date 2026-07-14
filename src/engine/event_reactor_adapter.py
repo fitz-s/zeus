@@ -3539,9 +3539,7 @@ def _entry_pause_blocks_live_submit(conn: sqlite3.Connection | None) -> str | No
 _ENTRY_LIVE_HEALTH_REQUIRED_SURFACES = (
     "heartbeat",
     "venue_heartbeat",
-    "runtime_code",
     "main_daemon",
-    "process_code",
     "run_mode",
     "forecast_pipeline",
     "forecast_event_bridge",
@@ -3691,8 +3689,10 @@ def _entry_live_health_authority_block_reason(
 
     This gate deliberately ignores the live-health ``business_plane`` surface:
     no candidates/no capital flow is an observability signal, not an input that
-    may self-lock future entries. All required provenance, code, forecast,
-    lifecycle, monitor, and execution-capability surfaces must be present,
+    may self-lock future entries. ``runtime_code`` and ``process_code`` are also
+    observability: the immutable process boot SHA identifies decision code, while
+    a newer worktree does not invalidate current market truth. Required forecast,
+    lifecycle, monitor, and execution-capability surfaces must still be present,
     fresh, and individually OK before a new ENTRY can reach command build.
     """
 

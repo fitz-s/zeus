@@ -750,7 +750,7 @@ files:
   src/architecture/gate_runtime.py:
     zone: K1_governance
     authority_role: live_side_effect_runtime_gate
-    why: Gate 5 runtime capability checker for live venue submit, reduce-only exit submit, settlement write, and related live side-effect capabilities; emits blocking ritual_signal evidence and fails closed on active kill/freeze/risk/runtime-freshness conditions.
+    why: Gate 5 runtime capability checker for live venue submit, reduce-only exit submit, settlement write, and related live side-effect capabilities; emits blocking ritual_signal evidence and fails closed on active kill, settlement-freeze, and risk-halt conditions. Deployment SHA drift is observability, not submit authority.
     hazards:
     - VENUS_CONTROL_ONLY
     downstream:
@@ -797,7 +797,7 @@ files:
   src/control/runtime_code_plane.py:
     zone: K1_governance
     authority_role: deployment_runtime_code_guard
-    why: Shared runtime-code-plane diff classifier for deployment freshness, submit gate, and live-health surfaces so test/docs-only commits do not auto-pause live money while executable runtime changes still fail closed.
+    why: Shared runtime-code-plane diff classifier for deployment and live-health observability so offline scripts, tests, and docs do not masquerade as daemon execution changes. It does not authorize or veto a market action.
     hazards:
     - VENUS_CONTROL_ONLY
     downstream:

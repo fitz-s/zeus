@@ -1,8 +1,7 @@
 # Created: 2026-05-06
-# Last reused or audited: 2026-07-13
-# Authority basis: IMPLEMENTATION_PLAN §6 days 68-70 (Gate 5);
-#                  ULTIMATE_DESIGN §5 Gate 5; ANTI_DRIFT_CHARTER §3 M1;
-#                  live-money 2026-07-08: dirty runtime worktree blocks submit.
+# Last reused or audited: 2026-07-14
+# Authority basis: live side effects are blocked by kill/freeze/risk authority;
+#                  deployment worktree drift remains observability only.
 
 """Tests for Gate 5: runtime kill-switch and settlement-window-freeze enforcement.
 
@@ -136,7 +135,7 @@ class TestGateRuntimeAllClear:
         decisions = {r["decision"] for r in records}
         assert "allow" in decisions, f"Expected at least one 'allow' decision; got {decisions}"
 
-    def test_deployment_freshness_mismatch_blocks_live_submit(
+    def test_deployment_freshness_mismatch_is_not_submit_authority(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
     ) -> None:
         monkeypatch.delenv("ZEUS_KILL_SWITCH", raising=False)
@@ -160,10 +159,9 @@ class TestGateRuntimeAllClear:
             _fake_git,
         )
 
-        with pytest.raises(RuntimeError, match="deployment_freshness_mismatch"):
-            gate_runtime.check("live_venue_submit")
+        gate_runtime.check("live_venue_submit")
 
-    def test_reduce_only_exit_allows_non_exit_runtime_diff_while_entry_blocks(
+    def test_runtime_diff_does_not_block_entry_or_reduce_only_exit(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
     ) -> None:
         monkeypatch.delenv("ZEUS_KILL_SWITCH", raising=False)
@@ -189,8 +187,7 @@ class TestGateRuntimeAllClear:
             lambda *_args, **_kwargs: (),
         )
 
-        with pytest.raises(RuntimeError, match="deployment_freshness_mismatch"):
-            gate_runtime.check("live_venue_submit")
+        gate_runtime.check("live_venue_submit")
         gate_runtime.check("reduce_only_exit_submit")
 
     def test_reduce_only_exit_allows_exit_runtime_diff(
@@ -270,7 +267,7 @@ class TestGateRuntimeAllClear:
 
         gate_runtime.check("live_venue_submit")
 
-    def test_deployment_freshness_dirty_runtime_worktree_blocks_live_submit(
+    def test_dirty_runtime_worktree_is_not_submit_authority(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
     ) -> None:
         monkeypatch.delenv("ZEUS_KILL_SWITCH", raising=False)
@@ -295,8 +292,7 @@ class TestGateRuntimeAllClear:
             lambda *_args, **_kwargs: ("src/control/live_health.py",),
         )
 
-        with pytest.raises(RuntimeError, match="deployment_freshness_mismatch"):
-            gate_runtime.check("live_venue_submit")
+        gate_runtime.check("live_venue_submit")
 
     def test_deployment_freshness_dirty_readonly_audit_scripts_allow_live_submit(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
@@ -334,6 +330,49 @@ class TestGateRuntimeAllClear:
         monkeypatch.setattr(runtime_code_plane.subprocess, "run", _fake_git_status)
 
         gate_runtime.check("live_venue_submit")
+
+    def test_deployment_freshness_offline_generator_diff_allows_live_submit(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
+    ) -> None:
+        monkeypatch.delenv("ZEUS_KILL_SWITCH", raising=False)
+        monkeypatch.delenv("ZEUS_RISK_HALT", raising=False)
+        monkeypatch.delenv("ZEUS_SETTLEMENT_FREEZE", raising=False)
+        monkeypatch.setenv("ZEUS_PROCESS_BOOT_SHA", "a" * 40)
+
+        from src.architecture import gate_runtime
+        from src.control import runtime_code_plane
+
+        monkeypatch.setattr(gate_runtime, "_RITUAL_SIGNAL_DIR", tmp_path / "ritual_signal")
+        monkeypatch.setattr(gate_runtime, "REPO_ROOT", tmp_path)
+
+        def _fake_git(cmd, **_kwargs):
+            if list(cmd[:3]) == ["git", "diff", "--name-only"]:
+                return b"scripts/gen_economics_writer_manifest.py\n"
+            return ("b" * 40).encode()
+
+        monkeypatch.setattr(runtime_code_plane.subprocess, "check_output", _fake_git)
+
+        gate_runtime.check("live_venue_submit")
+
+    @pytest.mark.parametrize(
+        "path",
+        sorted(
+            {
+                "scripts/download_replacement_forecast_current_targets.py",
+                "scripts/drain_settlement_disputes.py",
+                "scripts/hko_ingest_tick.py",
+                "scripts/migrations/__init__.py",
+                "scripts/obs_live_tick.py",
+                "scripts/validate_assumptions.py",
+            }
+        ),
+    )
+    def test_deployment_freshness_keeps_daemon_imported_scripts_in_runtime_plane(
+        self, path: str
+    ) -> None:
+        from src.control.runtime_code_plane import is_runtime_code_path
+
+        assert is_runtime_code_path(path)
 
     def test_deployment_freshness_dirty_test_topology_allows_live_submit(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path

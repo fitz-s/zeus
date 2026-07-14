@@ -3324,7 +3324,7 @@ def test_entry_live_health_scopes_only_proven_day0_closed_market_hold(
     assert reason == expected_reason
 
 
-def test_entry_live_health_authority_still_blocks_global_runtime_failure():
+def test_entry_live_health_authority_ignores_deployment_observability_failures():
     from src.engine import event_reactor_adapter as adapter
 
     decision_time = datetime(2026, 5, 24, 18, 10, tzinfo=timezone.utc)
@@ -3333,14 +3333,18 @@ def test_entry_live_health_authority_still_blocks_global_runtime_failure():
         "ok": False,
         "issue": "LOADED_SHA_MISMATCH",
     }
-    payload["failing_surfaces"] = ["runtime_code"]
+    payload["surfaces"]["process_code"] = {
+        "ok": False,
+        "issue": "PROCESS_STARTED_BEFORE_RUNTIME_SOURCE",
+    }
+    payload["failing_surfaces"] = ["runtime_code", "process_code"]
 
     reason = adapter._entry_live_health_authority_block_reason(
         lambda: payload,
         now=decision_time + timedelta(seconds=30),
     )
 
-    assert reason == "failing_surfaces=runtime_code"
+    assert reason is None
 
 
 def test_live_adapter_submit_enabled_canary_enabled_calls_executor_mock(monkeypatch, tmp_path):

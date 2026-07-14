@@ -1,7 +1,7 @@
 # Created: 2026-07-02
 # Last reused or audited: 2026-07-14
 # Authority basis: live-money deployment freshness false-positive after test-only HEAD drift.
-"""Runtime-code-plane diff helper for live deployment freshness gates."""
+"""Classify worktree drift for deployment and live-health observability."""
 
 from __future__ import annotations
 
@@ -12,14 +12,21 @@ import subprocess
 
 RUNTIME_CODE_PREFIXES = (
     "src/",
-    "scripts/",
     "config/",
     "architecture/",
     ".github/workflows/",
     "launchd/",
 )
-NON_RUNTIME_SCRIPT_PREFIXES = (
-    "scripts/audit_",
+# Only scripts imported by a live daemon share its executable code plane.
+RUNTIME_SCRIPT_FILES = frozenset(
+    {
+        "scripts/download_replacement_forecast_current_targets.py",
+        "scripts/drain_settlement_disputes.py",
+        "scripts/hko_ingest_tick.py",
+        "scripts/migrations/__init__.py",
+        "scripts/obs_live_tick.py",
+        "scripts/validate_assumptions.py",
+    }
 )
 NON_RUNTIME_CODE_FILES = frozenset(
     {
@@ -209,8 +216,8 @@ def is_runtime_code_path(path: str) -> bool:
         return False
     if text in NON_RUNTIME_CODE_FILES:
         return False
-    if any(text.startswith(prefix) for prefix in NON_RUNTIME_SCRIPT_PREFIXES):
-        return False
+    if text in RUNTIME_SCRIPT_FILES:
+        return True
     if text in RUNTIME_CODE_FILES:
         return True
     return any(text.startswith(prefix) for prefix in RUNTIME_CODE_PREFIXES)
@@ -233,8 +240,6 @@ def is_reduce_only_exit_runtime_path(path: str) -> bool:
     if not text:
         return False
     if text in NON_RUNTIME_CODE_FILES:
-        return False
-    if any(text.startswith(prefix) for prefix in NON_RUNTIME_SCRIPT_PREFIXES):
         return False
     if text in RUNTIME_CODE_FILES:
         return True

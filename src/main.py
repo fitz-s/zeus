@@ -2268,19 +2268,16 @@ def _check_deployment_freshness(
     repo_root: "Path | None" = None,
     now: datetime | None = None,
 ) -> None:
-    """PR-S6: deployment freshness gate — detects stale daemon (merged code never reloaded).
+    """Report loaded-code/worktree drift without converting it into trading authority.
 
     Compares the git HEAD SHA at daemon boot vs the current working-tree HEAD.
-    Divergence means a merge/deploy happened after the daemon started.
+    Divergence means the worktree changed after boot; it does not prove that a
+    probability, quote, position, or settlement fact is invalid. The process
+    boot SHA remains the decision-code identity, while this job emits operator
+    evidence for an intentional restart.
 
-    Live-money enforcement:
-      < 24h  : ERROR log + state/deployment_freshness.json flag + pause_entries
-               (reason='deployment_freshness_mismatch'). Trading paused immediately
-               to prevent stale entry decisions while operator restarts.
-      >= 24h : SystemExit fail-closed unless ZEUS_ACCEPT_STALE_DEPLOY=1.
-
-    Advisory state written to state/deployment_freshness.json (NOT control_plane.json
-    which is overwritten every cycle by _write_control_payload).
+    State is written to state/deployment_freshness.json, never to the control
+    plane. This observer never pauses entries or terminates the daemon.
 
     All git failures and non-git-repo environments are silent (no crash).
     """
@@ -2297,14 +2294,6 @@ def _check_deployment_freshness(
     if not _boot_sha or not _boot_ts:
         # Boot capture failed — skip silently.
         logger.debug("_check_deployment_freshness: boot state not captured, skipping")
-        return
-
-    # Check ZEUS_ACCEPT_STALE_DEPLOY override first.
-    if os.environ.get("ZEUS_ACCEPT_STALE_DEPLOY") == "1":
-        logger.warning(
-            "deployment_freshness: ZEUS_ACCEPT_STALE_DEPLOY=1 override active; "
-            "skipping staleness check (boot_sha=%s)", _boot_sha[:8]
-        )
         return
 
     try:
@@ -2397,79 +2386,32 @@ def _check_deployment_freshness(
         list(code_plane.changed_paths[:20]) if code_plane is not None else []
     )
     dirty_paths_sample = list(dirty_runtime_paths[:20])
-    if uptime_hours >= 24.0:
-        import signal as _signal
-        logger.critical(
-            "DEPLOYMENT_STALE — loaded SHA %s but filesystem has executable %s for >%.1fh "
-            "(status=%s dirty_runtime_paths=%s). "
-            "Signaling SIGTERM to escape APScheduler exception boundary.",
-            _boot_sha[:8],
-            current_sha[:8],
-            uptime_hours,
-            stale_status,
-            dirty_paths_sample[:5],
-        )
-        # os.kill(SIGTERM) propagates to the process's signal handler OUTSIDE
-        # APScheduler's BaseException catch in run_job(), ensuring the daemon
-        # actually stops. The trailing raise keeps direct callers (test suite)
-        # correctly fail-closed.
-        os.kill(os.getpid(), _signal.SIGTERM)
-        raise SystemExit(
-            f"DEPLOYMENT_STALE — daemon loaded SHA {_boot_sha[:8]} but filesystem "
-            f"has {current_sha[:8]} for >{uptime_hours:.1f}h "
-            f"(status={stale_status}). "
-            f"Set ZEUS_ACCEPT_STALE_DEPLOY=1 to override."
-        )
-    else:
-        logger.error(
-            "deployment_freshness_diverged_total: boot_sha=%s current_sha=%s "
-            "uptime_hours=%.1f status=%s dirty_runtime_paths=%s — runtime code not cleanly "
-            "loaded; pausing entries immediately",
-            _boot_sha[:8],
-            current_sha[:8],
-            uptime_hours,
-            stale_status,
-            dirty_paths_sample[:5],
-        )
-        # Write advisory flag to dedicated state/deployment_freshness.json.
-        # NOT control_plane.json — that file is overwritten on every cycle by
-        # _write_control_payload (control_plane.py:119) which writes only
-        # {commands, acks}. A dedicated file survives all control_plane writes.
-        _write_deployment_freshness_state(
-            {
-                "boot_sha": _boot_sha,
-                "current_sha": current_sha,
-                "uptime_hours": round(uptime_hours, 2),
-                "detected_at": _now.isoformat(),
-                "pause_reason": _DEPLOYMENT_FRESHNESS_PAUSE_REASON,
-                "status": stale_status,
-                "code_plane_status": (
-                    code_plane.status if code_plane is not None else "classification_failed"
-                ),
-                "runtime_code_changed": True,
-                "changed_paths_sample": changed_paths_sample,
-                "worktree_runtime_dirty": bool(dirty_runtime_paths),
-                "dirty_runtime_paths_sample": dirty_paths_sample,
-            }
-        )
-        # Pause new entries immediately. Exit submits are also protected at the
-        # live_venue_submit capability boundary, so stale code cannot keep trading
-        # while the operator restarts.
-        try:
-            from src.control.control_plane import pause_entries
-            # issued_by="system_auto_pause" activates the idempotency guard in
-            # control_plane._has_active_auto_pause_override — prevents duplicate
-            # control_overrides rows and alert spam on every 60s tick.
-            pause_entries(
-                _DEPLOYMENT_FRESHNESS_PAUSE_REASON,
-                issued_by="system_auto_pause",
-                effective_until=None,
-            )
-        except Exception as _exc:
-            logger.error(
-                "deployment_freshness: pause_entries failed (%s); "
-                "entries NOT paused despite SHA mismatch", _exc,
-            )
+    logger.warning(
+        "deployment_freshness_observed: boot_sha=%s current_sha=%s "
+        "uptime_hours=%.1f status=%s dirty_runtime_paths=%s",
+        _boot_sha[:8],
+        current_sha[:8],
+        uptime_hours,
+        stale_status,
+        dirty_paths_sample[:5],
+    )
+    _write_deployment_freshness_state(
+        {
+            "boot_sha": _boot_sha,
+            "current_sha": current_sha,
+            "uptime_hours": round(uptime_hours, 2),
+            "detected_at": _now.isoformat(),
+            "pause_reason": None,
+            "status": stale_status,
+            "code_plane_status": (
+                code_plane.status if code_plane is not None else "classification_failed"
+            ),
+            "runtime_code_changed": True,
+            "changed_paths_sample": changed_paths_sample,
+            "worktree_runtime_dirty": bool(dirty_runtime_paths),
+            "dirty_runtime_paths_sample": dirty_paths_sample,
+        }
+    )
 
 
 _DEPLOYMENT_FRESHNESS_PAUSE_REASON = "deployment_freshness_mismatch"

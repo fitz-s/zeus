@@ -1,17 +1,10 @@
 # Created: 2026-05-17
-# Last reused or audited: 2026-07-08
-# Authority basis: 2026-05-17 cascade incident (daemon ran 5h+ on pre-PR-#139 abs() code after merge)
-#                  + PR-S6 critic R1 (C1 dedicated flag file, auto-pause at 4h, scheduler integration,
-#                    boot-capture fail-loud)
-#                  + live-money 2026-06-30: stale runtime SHA mismatch pauses immediately
-#                  + live-money 2026-07-08: dirty same-SHA runtime worktree is stale live code
-"""Antibody tests for PR-S6 deployment freshness gate (_check_deployment_freshness).
+# Last reused or audited: 2026-07-14
+# Authority basis: first-principles separation of loaded-code identity from market authority.
+"""Antibodies for deployment-freshness observability.
 
-R1 revisions (critic APPROVE_WITH_REVISION):
-- C1: flag written to state/deployment_freshness.json (not control_plane.json)
-- Stakeholder gap: any runtime SHA mismatch below the hard-stop window calls pause_entries
-- M1: APScheduler job registration verified
-- M2: boot-capture failure is fail-loud (SystemExit unless ZEUS_ACCEPT_STALE_DEPLOY=1)
+The boot SHA identifies the code that made a decision. Worktree drift is useful
+operator evidence, but it cannot pause entries or terminate a healthy daemon.
 """
 
 import json
@@ -77,11 +70,7 @@ def _run(
             return ("\n".join(git_diff_paths) + "\n").encode()
         return current_sha.encode()
 
-    # Build context manager stack.
-    # Always mock os.kill: the >=24h branch calls os.kill(SIGTERM) before
-    # raise SystemExit. Without this mock, test-runner pytest is killed (exit 143).
-    # The dedicated TestApschedulerSignal test verifies os.kill IS called; here
-    # we suppress it so other tests stay alive.
+    # Mock os.kill so every test also proves the observer never signals itself.
     ctx = [
         patch.dict(os.environ, env_patch, clear=False),
         patch("subprocess.check_output", side_effect=fake_check_output),
@@ -156,8 +145,7 @@ class TestNoAction:
         assert flag["pause_reason"] is None
         assert flag["status"] == "fresh"
 
-    def test_same_sha_dirty_runtime_worktree_pauses_entries(self, tmp_path):
-        """Same HEAD is not fresh when runtime source edits are uncommitted/unloaded."""
+    def test_same_sha_dirty_runtime_worktree_is_observed_without_pause(self, tmp_path):
         pause_mock = MagicMock()
         df_path = tmp_path / "deployment_freshness.json"
 
@@ -170,11 +158,10 @@ class TestNoAction:
             dirty_runtime_paths=("src/control/live_health.py", "src/execution/exit_lifecycle.py"),
         )
 
-        pause_mock.assert_called_once()
-        assert pause_mock.call_args[0][0] == "deployment_freshness_mismatch"
+        pause_mock.assert_not_called()
         flag = json.loads(df_path.read_text())
         assert flag["status"] == "dirty_runtime_worktree"
-        assert flag["pause_reason"] == "deployment_freshness_mismatch"
+        assert flag["pause_reason"] is None
         assert flag["code_plane_status"] == "same_sha"
         assert flag["runtime_code_changed"] is True
         assert flag["worktree_runtime_dirty"] is True
@@ -194,16 +181,15 @@ class TestNoAction:
 
 
 # ---------------------------------------------------------------------------
-# Tests: immediate stale-runtime pause (<24h)
+# Tests: immediate drift observation
 # ---------------------------------------------------------------------------
 
-class TestImmediatePause:
-    def test_recent_divergence_pauses_entries(self, caplog, tmp_path):
-        """Divergence within 4h pauses entries immediately."""
+class TestImmediateObservation:
+    def test_recent_divergence_is_observed_without_pause(self, caplog, tmp_path):
         import logging
         pause_mock = MagicMock()
         df_path = tmp_path / "deployment_freshness.json"
-        with caplog.at_level(logging.ERROR, logger="zeus"):
+        with caplog.at_level(logging.WARNING, logger="zeus"):
             _run(
                 boot_sha=BOOT_SHA,
                 current_sha=DIFF_SHA,
@@ -212,9 +198,8 @@ class TestImmediatePause:
                 pause_entries_mock=pause_mock,
                 state_path_return=df_path,
             )
-        assert "deployment_freshness_diverged_total" in caplog.text
-        pause_mock.assert_called_once()
-        assert pause_mock.call_args[0][0] == "deployment_freshness_mismatch"
+        assert "deployment_freshness_observed" in caplog.text
+        pause_mock.assert_not_called()
         assert df_path.exists()
 
     def test_recent_non_runtime_divergence_does_not_pause_entries(self, caplog, tmp_path):
@@ -241,7 +226,7 @@ class TestImmediatePause:
         assert flag["changed_paths_sample"] == ["tests/test_only.py", "docs/readme.md"]
 
     def test_recent_divergence_no_exit(self):
-        """No SystemExit within the operator-restart window."""
+        """A recent worktree change remains observational."""
         _run(
             boot_sha=BOOT_SHA,
             current_sha=DIFF_SHA,
@@ -251,18 +236,18 @@ class TestImmediatePause:
 
 
 # ---------------------------------------------------------------------------
-# Tests: <24h stale alert — auto-pause + dedicated flag file
+# Tests: drift alert and dedicated flag file
 # ---------------------------------------------------------------------------
 
 class TestStaleAlert:
-    def test_stale_divergence_4h_logs_error(self, caplog, tmp_path):
-        """Divergence <24h logs ERROR."""
+    def test_stale_divergence_logs_warning(self, caplog, tmp_path):
+        """Divergence logs an operator warning."""
         import logging
 
         df_path = tmp_path / "deployment_freshness.json"
         with patch("src.config.state_path", return_value=df_path):
             with patch("src.control.control_plane.pause_entries"):
-                with caplog.at_level(logging.ERROR, logger="zeus"):
+                with caplog.at_level(logging.WARNING, logger="zeus"):
                     _run(
                         boot_sha=BOOT_SHA,
                         current_sha=DIFF_SHA,
@@ -271,7 +256,7 @@ class TestStaleAlert:
                         state_path_return=df_path,
                     )
 
-        assert "deployment_freshness_diverged_total" in caplog.text
+        assert "deployment_freshness_observed" in caplog.text
 
     def test_stale_divergence_4h_writes_dedicated_flag_file(self, tmp_path):
         """Runtime SHA mismatch writes to state/deployment_freshness.json, NOT control_plane.json."""
@@ -324,8 +309,7 @@ class TestStaleAlert:
         flag = json.loads(df_path.read_text())
         assert flag["boot_sha"] == BOOT_SHA
 
-    def test_runtime_sha_mismatch_auto_pauses_entries(self, tmp_path):
-        """Runtime SHA mismatch calls pause_entries with correct reason code."""
+    def test_runtime_sha_mismatch_does_not_pause_entries(self, tmp_path):
         df_path = tmp_path / "deployment_freshness.json"
         pause_mock = MagicMock()
 
@@ -339,16 +323,10 @@ class TestStaleAlert:
                     state_path_return=df_path,
                 )
 
-        pause_mock.assert_called_once()
-        call_args = pause_mock.call_args
-        assert call_args[0][0] == "deployment_freshness_mismatch"
-        # issued_by must be "system_auto_pause" to activate idempotency guard
-        # in control_plane._has_active_auto_pause_override (prevents duplicate
-        # control_overrides rows on every 60s tick).
-        assert call_args[1].get("issued_by") == "system_auto_pause"
+        pause_mock.assert_not_called()
 
     def test_stale_divergence_4h_continues(self, tmp_path):
-        """<24h divergence does NOT raise SystemExit — trading paused but daemon stays up."""
+        """Drift does not terminate the daemon."""
         df_path = tmp_path / "deployment_freshness.json"
         with patch("src.config.state_path", return_value=df_path):
             with patch("src.control.control_plane.pause_entries"):
@@ -360,109 +338,57 @@ class TestStaleAlert:
                     state_path_return=df_path,
                 )
 
-    def test_pause_entries_idempotent_not_spam(self, tmp_path):
-        """5 consecutive stale-runtime fires call pause_entries 5 times BUT
-        the system_auto_pause idempotency guard in control_plane ensures
-        only 1 control_overrides row is inserted.
-
-        Idempotency guard: _has_active_auto_pause_override checks DB for an
-        active override with (reason_code, issued_by=system_auto_pause).
-        On subsequent fires the DB row already exists → idempotent skip logged.
-        This test verifies the guard fires by inspecting call+DB together.
-        """
-        import sqlite3
-        from src.state.db import init_schema
-
-        # Use a real in-memory DB wired into the control plane.
-        db_path = tmp_path / "world.db"
+    def test_repeated_observation_never_calls_pause_entries(self, tmp_path):
         df_path = tmp_path / "deployment_freshness.json"
+        pause_mock = MagicMock()
 
-        with patch("src.state.db.get_world_connection",
-                   return_value=sqlite3.connect(str(db_path))):
-            conn = sqlite3.connect(str(db_path))
-            init_schema(conn)
-            conn.close()
-
-            call_count = 0
-            real_pause = None
-
-            # Import the real pause_entries and count calls through it.
-            from src.control import control_plane as _cp_mod
-            original_pause = _cp_mod.pause_entries
-
-            def counting_pause(reason_code, **kwargs):
-                nonlocal call_count
-                call_count += 1
-                return original_pause(reason_code, **kwargs)
-
-            with patch("src.config.state_path", return_value=df_path):
-                with patch("src.control.control_plane.pause_entries", side_effect=counting_pause):
-                    for _ in range(5):
-                        _run(
-                            boot_sha=BOOT_SHA,
-                            current_sha=DIFF_SHA,
-                            now_hours_after_boot=8.0,
-                            boot_ts_hours_ago=0.0,
-                        )
-
-        # pause_entries was called 5 times (once per tick)...
-        assert call_count == 5
-        # ...but the idempotency check (issued_by=system_auto_pause) means
-        # the underlying DB upsert path handles deduplication. The test
-        # verifies the issued_by is correct so the guard CAN fire.
-        # (Full DB idempotency tested in test_auto_pause_entries.py which
-        # owns the DB fixture; here we verify the call contract is correct.)
-
-
-# ---------------------------------------------------------------------------
-# Tests: fail-closed (>=24h)
-# ---------------------------------------------------------------------------
-
-class TestFailClosed:
-    def test_stale_divergence_24h_raises(self):
-        """Divergence >=24h raises SystemExit."""
-        with pytest.raises(SystemExit) as exc_info:
+        for _ in range(5):
             _run(
                 boot_sha=BOOT_SHA,
                 current_sha=DIFF_SHA,
-                now_hours_after_boot=24.1,
+                now_hours_after_boot=8.0,
                 boot_ts_hours_ago=0.0,
+                pause_entries_mock=pause_mock,
+                state_path_return=df_path,
             )
-        assert "DEPLOYMENT_STALE" in str(exc_info.value)
-        assert BOOT_SHA[:8] in str(exc_info.value)
-        assert DIFF_SHA[:8] in str(exc_info.value)
 
-    def test_stale_divergence_exact_24h_raises(self):
-        """Boundary: exactly 24.0h raises."""
-        with pytest.raises(SystemExit):
-            _run(
-                boot_sha=BOOT_SHA,
-                current_sha=DIFF_SHA,
-                now_hours_after_boot=24.0,
-                boot_ts_hours_ago=0.0,
-            )
+        pause_mock.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
-# Tests: ZEUS_ACCEPT_STALE_DEPLOY override
+# Tests: long-lived drift remains observational
+# ---------------------------------------------------------------------------
+
+class TestLongLivedObservation:
+    @pytest.mark.parametrize("hours", [24.0, 24.1, 100.0])
+    def test_stale_divergence_never_terminates(self, hours):
+        _run(
+            boot_sha=BOOT_SHA,
+            current_sha=DIFF_SHA,
+            now_hours_after_boot=hours,
+            boot_ts_hours_ago=0.0,
+        )
+
+
+# ---------------------------------------------------------------------------
+# Tests: legacy override cannot hide observability
 # ---------------------------------------------------------------------------
 
 class TestOverride:
-    def test_override_env_bypasses_fail_closed(self, caplog):
-        """ZEUS_ACCEPT_STALE_DEPLOY=1 skips the fail-closed path entirely."""
-        import logging
-        with caplog.at_level(logging.WARNING, logger="zeus"):
-            _run(
-                boot_sha=BOOT_SHA,
-                current_sha=DIFF_SHA,
-                now_hours_after_boot=48.0,
-                boot_ts_hours_ago=0.0,
-                accept_stale_env=True,
-            )
-        assert "ZEUS_ACCEPT_STALE_DEPLOY" in caplog.text
+    def test_legacy_override_does_not_hide_observation(self, tmp_path):
+        df_path = tmp_path / "deployment_freshness.json"
+        _run(
+            boot_sha=BOOT_SHA,
+            current_sha=DIFF_SHA,
+            now_hours_after_boot=48.0,
+            boot_ts_hours_ago=0.0,
+            accept_stale_env=True,
+            state_path_return=df_path,
+        )
+        assert json.loads(df_path.read_text())["status"] == "mismatch"
 
     def test_override_env_no_exit(self):
-        """No SystemExit with override even at 100h divergence."""
+        """Legacy override is harmless because drift no longer terminates."""
         _run(
             boot_sha=BOOT_SHA,
             current_sha=DIFF_SHA,
@@ -472,7 +398,7 @@ class TestOverride:
         )
 
     def test_override_env_also_bypasses_4h_band(self, tmp_path):
-        """ZEUS_ACCEPT_STALE_DEPLOY=1 skips 4h band (no auto-pause)."""
+        """Legacy override cannot reintroduce an auto-pause."""
         pause_mock = MagicMock()
         _run(
             boot_sha=BOOT_SHA,
@@ -601,27 +527,11 @@ class TestSchedulerIntegration:
 
 
 # ---------------------------------------------------------------------------
-# Tests: SIGTERM delivery via APScheduler (bot R3)
+# Tests: scheduler observation never delivers SIGTERM
 # ---------------------------------------------------------------------------
 
 class TestApschedulerSignal:
-    def test_24h_fail_closed_via_apscheduler_signals_sigterm(self):
-        """>=24h fail-closed calls os.kill(SIGTERM) even when APScheduler swallows SystemExit.
-
-        APScheduler's run_job() catches BaseException (incl. SystemExit) and logs
-        EVENT_JOB_ERROR — the daemon would keep running stale code silently.
-        os.kill(SIGTERM) escapes that boundary by calling the OS signal path
-        directly, triggering process shutdown.
-
-        Real antibody: verified by mocking os.kill and asserting it is called with
-        SIGTERM. sed-replacing `os.kill(os.getpid(), _signal.SIGTERM)` with `pass`
-        in _check_deployment_freshness must make this test FAIL.
-
-        Note: we mock os.kill rather than delivering a real signal — firing real
-        SIGTERM into the test-runner process kills pytest (exit 143). The antibody
-        tests the CODE PATH (os.kill is called), not the OS-level delivery.
-        """
-        import signal
+    def test_24h_observation_does_not_signal_process(self):
         import threading
         from datetime import datetime, timezone, timedelta
         from apscheduler.schedulers.background import BackgroundScheduler
@@ -652,15 +562,12 @@ class TestApschedulerSignal:
                                 "src.config.state_path",
                                 side_effect=lambda name: Path(tmp_state) / name,
                             ):
-                                try:
-                                    _check_deployment_freshness(
-                                        boot_sha=stale_sha,
-                                        boot_ts=boot_ts,
-                                        repo_root=Path("/fake"),
-                                        now=datetime.now(timezone.utc),
-                                    )
-                                except SystemExit:
-                                    pass  # trailing raise; expected in direct-call path
+                                _check_deployment_freshness(
+                                    boot_sha=stale_sha,
+                                    boot_ts=boot_ts,
+                                    repo_root=Path("/fake"),
+                                    now=datetime.now(timezone.utc),
+                                )
             job_done.set()
 
         scheduler = BackgroundScheduler(timezone=ZoneInfo("UTC"))
@@ -672,11 +579,4 @@ class TestApschedulerSignal:
         finally:
             scheduler.shutdown(wait=False)
 
-        assert kill_calls, (
-            "os.kill was NOT called — SIGTERM path is broken. "
-            "APScheduler would silently swallow SystemExit and the daemon would "
-            "keep running on stale code. This means >=24h fail-closed is broken."
-        )
-        pid, sig = kill_calls[0]
-        assert pid == os.getpid(), f"Expected kill to own pid {os.getpid()}, got {pid}"
-        assert sig == signal.SIGTERM, f"Expected SIGTERM ({signal.SIGTERM}), got {sig}"
+        assert kill_calls == []
