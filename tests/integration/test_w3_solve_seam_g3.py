@@ -3547,6 +3547,30 @@ def test_global_batch_claims_unpaged_cut_time_winner_and_continues_actuation(
     actuated.clear()
     venue_calls[0] = 0
     selection_calls[0] = 0
+    resumed_wealth_economic_identity = "wealth-economic-resumed"
+    resumed_economic_identity = global_single_order_economic_identity(
+        decision=decision,
+        probability_witness=witness_b,
+        wealth_economic_identity=resumed_wealth_economic_identity,
+    )
+    resumed_selected = replace(
+        selected,
+        actuation=replace(
+            selected.actuation,
+            wealth_economic_identity=resumed_wealth_economic_identity,
+            economic_identity=resumed_economic_identity,
+        ),
+    )
+
+    def _select_resumed(*_args, **_kwargs):
+        selection_calls[0] += 1
+        return resumed_selected
+
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "select_prepared_global_auction",
+        _select_resumed,
+    )
     resumed = global_batch_runtime.process_current_global_batch(
         (target,),
         decision_time=decision_at,
@@ -3576,6 +3600,7 @@ def test_global_batch_claims_unpaged_cut_time_winner_and_continues_actuation(
     assert selection_calls[0] == 1
     assert set(resumed.receipts) == {target.event_id}
     assert actuated[0][0] == target
+    assert actuated[0][1].economic_identity == resumed_economic_identity
 
     fence_wealth_economic_identity = "wealth-economic-fence"
     fence_economic_identity = global_single_order_economic_identity(

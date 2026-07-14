@@ -708,6 +708,31 @@ def process_current_global_batch(
         actuation = getattr(selected, "actuation", None)
         if actuation is None:
             raise ValueError("GLOBAL_WINNER_ACTUATION_MISSING")
+
+        def rebound(target):
+            rebound_actuation = replace(
+                actuation,
+                winner_event_id=target.event_id,
+                actuation_identity=global_single_order_actuation_identity(
+                    decision=actuation.decision,
+                    winner_event_id=target.event_id,
+                    universe_witness_identity=actuation.universe_witness_identity,
+                    wealth_witness_identity=actuation.wealth_witness_identity,
+                    selection_epoch_identity=actuation.selection_epoch_identity,
+                    selection_cut_at_utc=actuation.selection_cut_at_utc,
+                    decision_at_utc=actuation.decision_at_utc,
+                ),
+            )
+            return (
+                replace(
+                    selected,
+                    winner_event_id=target.event_id,
+                    actuation=rebound_actuation,
+                ),
+                target,
+                None,
+            )
+
         target_key = (scope_winner_id, str(actuation.economic_identity or ""))
         target = claimed_target_by_scope_and_economics.get(target_key)
         if target is None:
@@ -721,6 +746,39 @@ def process_current_global_batch(
             )
             if scope_event is None:
                 return selected, None, None
+            carrier_prefix = f"global_auction_winner_target:{scope_event.event_id}:"
+            carrier_fields = (
+                "event_type",
+                "entity_key",
+                "observed_at",
+                "available_at",
+                "causal_snapshot_id",
+                "payload_hash",
+                "priority",
+                "expires_at",
+                "payload_json",
+                "schema_version",
+            )
+            target = next(
+                (
+                    event
+                    for event in event_tuple
+                    if str(event.source or "").startswith(carrier_prefix)
+                    and all(
+                        getattr(event, field) == getattr(scope_event, field)
+                        for field in carrier_fields
+                    )
+                ),
+                None,
+            )
+            # The event claim owns the selected source fact; the actuation below owns
+            # this epoch's q/book/wealth economics.  Reuse an already-claimed carrier
+            # for the exact same causal fact even when those economics have changed.
+            # Encoding economic identity into a new carrier on every re-decision made
+            # a valid current winner chase an unclaimed event forever.
+            if target is not None:
+                claimed_target_by_scope_and_economics[target_key] = target
+                return rebound(target)
             target = _next_claim_carrier(
                 scope_event,
                 targeted_at=current_time(),
@@ -757,29 +815,7 @@ def process_current_global_batch(
                     return selected, None, target
                 event_tuple = (*event_tuple, target)
             claimed_target_by_scope_and_economics[target_key] = target
-        actuation = selected.actuation
-        rebound_actuation = replace(
-            actuation,
-            winner_event_id=target.event_id,
-            actuation_identity=global_single_order_actuation_identity(
-                decision=actuation.decision,
-                winner_event_id=target.event_id,
-                universe_witness_identity=actuation.universe_witness_identity,
-                wealth_witness_identity=actuation.wealth_witness_identity,
-                selection_epoch_identity=actuation.selection_epoch_identity,
-                selection_cut_at_utc=actuation.selection_cut_at_utc,
-                decision_at_utc=actuation.decision_at_utc,
-            ),
-        )
-        return (
-            replace(
-                selected,
-                winner_event_id=target.event_id,
-                actuation=rebound_actuation,
-            ),
-            target,
-            None,
-        )
+        return rebound(target)
 
     def reject(
         reason: str,
