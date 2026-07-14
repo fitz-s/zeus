@@ -1105,7 +1105,7 @@ def _replacement_forecast_publish_cron_hours() -> tuple[int, ...]:
 
 
 def _replacement_forecast_materialize_interval_minutes() -> int:
-    return int(_replacement_forecast_live_cfg().get("materialization_interval_min") or 5)
+    return int(_replacement_forecast_live_cfg().get("materialization_interval_min") or 1)
 
 
 def _register_replacement_forecast_production_jobs(

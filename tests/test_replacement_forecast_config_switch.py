@@ -117,6 +117,7 @@ def test_config_switch_plan_targets_live_flags() -> None:
     plan = build_replacement_forecast_config_switch_plan(_settings())
 
     assert plan.ok is True
+    assert TARGET_LIVE_MATERIALIZATION_CONFIG["materialization_interval_min"] == 1
     assert plan.status == "READY"
     assert plan.policy_status_after == LIVE_STATUS
     assert dict(plan.target_flags) == TARGET_LIVE_FLAGS

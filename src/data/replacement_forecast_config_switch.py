@@ -34,7 +34,7 @@ TARGET_LIVE_MATERIALIZATION_CONFIG = {
     "seed_failed_dir": "state/replacement_forecast_live/seeds_failed",
     "refit_handoff_path": "state/replacement_forecast_live/refit_handoff.json",
     "promotion_evidence_path": "state/replacement_forecast_live/promotion_evidence.json",
-    "materialization_interval_min": 5,
+    "materialization_interval_min": 1,
     "seed_discovery_limit_per_cycle": 10,
     "seed_limit_per_cycle": 10,
     "materialization_limit_per_cycle": 10,

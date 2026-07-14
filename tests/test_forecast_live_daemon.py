@@ -192,6 +192,14 @@ def test_replacement_materialize_job_calls_undecorated_production_inner(monkeypa
     assert calls == ["inner"]
 
 
+def test_replacement_materialize_defaults_to_next_reactor_minute(monkeypatch) -> None:
+    import src.ingest.forecast_live_daemon as forecast_live_daemon
+
+    monkeypatch.setattr(forecast_live_daemon, "_replacement_forecast_live_cfg", lambda: {})
+
+    assert forecast_live_daemon._replacement_forecast_materialize_interval_minutes() == 1
+
+
 def test_forecast_live_heartbeat_write_shape(tmp_path) -> None:
     from src.ingest.forecast_live_daemon import (
         FORECAST_LIVE_HEARTBEAT_JOB_ID,
