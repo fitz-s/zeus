@@ -842,6 +842,17 @@ def test_allocator_uses_current_uuid_position_without_double_counting_legacy_lot
           chain_shares REAL,
           chain_cost_basis_usd REAL
         );
+        CREATE TABLE venue_trade_facts (
+          command_id TEXT,
+          trade_id TEXT,
+          state TEXT,
+          filled_size TEXT,
+          fill_price TEXT,
+          local_sequence INTEGER,
+          venue_timestamp TEXT,
+          observed_at TEXT,
+          tx_hash TEXT
+        );
         INSERT INTO venue_commands VALUES (
           'cmd-current', 'uuid-current', 'ENTRY', 'BUY', '2902043', 'no-token',
           'decision-current', '2026-07-14T07:12:16+00:00'
@@ -899,12 +910,20 @@ def test_allocator_uses_current_uuid_position_without_double_counting_legacy_lot
           0.20, 'pending-token', 'pending-no-token', 0, 0
         );
         INSERT INTO position_current VALUES (
-          'uuid-optimistic', 'active', 'condition-optimistic', 'buy_yes', 5, 2.5,
-          0.50, 'optimistic-token', 'optimistic-no-token', 0, 0
+          'uuid-optimistic', 'active', 'condition-optimistic', 'buy_yes', 15, 10.3,
+          0.68, 'optimistic-token', 'optimistic-no-token', 0, 0
+        );
+        INSERT INTO venue_commands VALUES (
+          'cmd-confirmed', 'uuid-optimistic', 'ENTRY', 'BUY', 'optimistic-market',
+          'optimistic-token', 'decision-confirmed', '2026-07-14T07:13:46+00:00'
         );
         INSERT INTO venue_commands VALUES (
           'cmd-optimistic', 'uuid-optimistic', 'ENTRY', 'BUY', 'optimistic-market',
           'optimistic-token', 'decision-optimistic', '2026-07-14T07:14:16+00:00'
+        );
+        INSERT INTO venue_command_events VALUES (
+          'cmd-confirmed', 2, 'SUBMIT_REQUESTED',
+          '{"allocation":{"event_id":"optimistic-event","resolution_window":"default","correlation_key":"optimistic-correlation"}}'
         );
         INSERT INTO venue_command_events VALUES (
           'cmd-optimistic', 2, 'SUBMIT_REQUESTED',
@@ -914,14 +933,28 @@ def test_allocator_uses_current_uuid_position_without_double_counting_legacy_lot
           position_id, state, shares, entry_price_avg, source_command_id,
           source, raw_payload_json, local_sequence
         ) VALUES (
-          5001, 'OPTIMISTIC_EXPOSURE', 5, '0.50', 'cmd-optimistic', 'REST', '{}', 1
+          5001, 'CONFIRMED_EXPOSURE', 10, '0.69', 'cmd-confirmed', 'REST', '{}', 1
+        );
+        INSERT INTO position_lots (
+          position_id, state, shares, entry_price_avg, source_command_id,
+          source, raw_payload_json, local_sequence
+        ) VALUES (
+          5001, 'OPTIMISTIC_EXPOSURE', 5, '0.68', 'cmd-optimistic', 'REST', '{}', 2
+        );
+        INSERT INTO venue_trade_facts VALUES (
+          'cmd-confirmed', 'trade-confirmed', 'CONFIRMED', '10', '0.69', 1,
+          '2026-07-14T07:13:50+00:00', '2026-07-14T07:13:50+00:00', 'tx-confirmed'
+        );
+        INSERT INTO venue_trade_facts VALUES (
+          'cmd-optimistic', 'trade-optimistic', 'MATCHED', '5', '0.68', 1,
+          '2026-07-14T07:14:20+00:00', '2026-07-14T07:14:20+00:00', 'tx-optimistic'
         );
         """
     )
 
     lots = load_position_lots(conn)
 
-    assert len(lots) == 3
+    assert len(lots) == 4
     assert lots[0] == ExposureLot(
         market_id="pending-market",
         event_id="pending-event",
@@ -947,13 +980,30 @@ def test_allocator_uses_current_uuid_position_without_double_counting_legacy_lot
         event_id="optimistic-event",
         resolution_window="default",
         token_id="optimistic-token",
-        exposure_micro=2_500_000,
+        exposure_micro=6_900_000,
+        state="CONFIRMED_EXPOSURE",
+        correlation_key="optimistic-correlation",
+        source="VENUE",
+    )
+    assert lots[3] == ExposureLot(
+        market_id="optimistic-market",
+        event_id="optimistic-event",
+        resolution_window="default",
+        token_id="optimistic-token",
+        exposure_micro=3_400_000,
         state="OPTIMISTIC_EXPOSURE",
         correlation_key="optimistic-correlation",
         source="VENUE",
     )
     conn.execute("DROP TABLE position_lots")
-    assert load_position_lots(conn) == (lots[1], lots[2])
+    assert load_position_lots(conn) == (lots[1], lots[2], lots[3])
+
+    allocator = RiskAllocator(CapPolicy(optimistic_exposure_weight=0.5), lots)
+    assert allocator._market_exposure("optimistic-market") == (
+        6_900_000,
+        3_400_000,
+        8_600_000,
+    )
 
 
 def test_pre_sdk_review_required_no_order_id_does_not_latch_unknown_side_effect_count():

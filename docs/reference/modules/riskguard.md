@@ -73,8 +73,10 @@ blocking and read-only:
   either surface.
 - Projection transitions remain gap-free: a `pending_entry` or zero-exposure
   projection does not suppress its command-backed lot. Once current exposure
-  is authoritative, its OPTIMISTIC/CONFIRMED state comes from chain truth,
-  typed fill authority, or the latest linked lot rather than lifecycle phase.
+  is authoritative, mixed multi-command exposure is decomposed by canonical
+  trade-fact authority into confirmed principal and optimistic delta; chain or
+  typed position fill authority may confirm the whole aggregate. Lifecycle
+  phase never fabricates confirmation.
 - OPTIMISTIC and CONFIRMED exposure remain separate. CONFIRMED exposure counts
   at full capacity weight; OPTIMISTIC exposure counts at
   `CapPolicy.optimistic_exposure_weight`.

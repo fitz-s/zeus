@@ -15662,8 +15662,10 @@ def reconcile_unresolved_commands(
     critical in-flight command surface, terminal/no-fill locks, and current
     partial/fill maintenance without holding one long-lived DB connection.
     ``scope="boot_fast"`` is narrower: it clears submit/cap/family locks before
-    scheduler start, but deliberately skips historical maker-fill economics and
-    partial-remainder maintenance so boot cannot be delayed by old filled rows.
+    scheduler start and repairs command-backed execution facts needed by the
+    capital allocator, but deliberately skips historical maker-fill economics
+    and partial-remainder maintenance so boot cannot be delayed by old filled
+    rows.
     ``scope="restart_preflight"`` is the deploy-time recovery seam: it runs only
     the venue-backed in-flight command scan, DB-local ACKED/live-entry and
     matched-cancel entry projection repair, and the no-venue EXIT retry
@@ -16753,6 +16755,11 @@ def _reconcile_passes_short_conn(client, summary: dict, started_at: str, *, scop
             "filled_entry_projection_repair",
         )
         _boot_db_pass(
+            "filled_entry_execution_fact_repair",
+            reconcile_filled_entry_execution_fact_repairs,
+            "filled_entry_execution_fact_repair",
+        )
+        _boot_db_pass(
             "hard_terminal_position_projection_repair",
             reconcile_hard_terminal_position_projection_repairs,
             "hard_terminal_position_projection_repair",
@@ -16967,6 +16974,11 @@ def _reconcile_passes_short_conn(client, summary: dict, started_at: str, *, scop
             client_kw=True,
         )
         _db_pass(
+            "filled_entry_execution_fact_repair",
+            reconcile_filled_entry_execution_fact_repairs,
+            "filled_entry_execution_fact_repair",
+        )
+        _db_pass(
             "restart_no_venue_exit_retry_projection",
             reconcile_restart_no_venue_exit_retry_projections,
             "restart_no_venue_exit_retry_projection",
@@ -17101,6 +17113,11 @@ def _reconcile_passes_short_conn(client, summary: dict, started_at: str, *, scop
                 "filled_entry_projection_repair",
                 client_kw=True,
             )
+        _db_pass(
+            "filled_entry_execution_fact_repair",
+            reconcile_filled_entry_execution_fact_repairs,
+            "filled_entry_execution_fact_repair",
+        )
         _db_pass(
             "confirmed_chain_absence_projection_repair",
             repair_confirmed_chain_absence_positive_projections,

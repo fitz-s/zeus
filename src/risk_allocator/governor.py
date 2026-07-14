@@ -18,7 +18,7 @@ import sqlite3
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
-from decimal import Decimal, ROUND_CEILING
+from decimal import Decimal, InvalidOperation, ROUND_CEILING
 from pathlib import Path
 from typing import Any, Iterator, Literal, Mapping, Sequence
 
@@ -26,6 +26,7 @@ from src.control.heartbeat_supervisor import HeartbeatHealth, HeartbeatStatus
 from src.contracts.execution_intent import ExecutionIntent
 from src.contracts.position_truth import FillAuthority
 from src.riskguard.risk_level import RiskLevel
+from src.state.fill_dedup import canonical_trade_fact_cte, economic_trade_fact_cte
 from src.state.canonical_projections import (
     counts_as_active_exposure,
     is_closed_exposure,
@@ -689,7 +690,8 @@ def load_position_lots(conn: Any) -> tuple[ExposureLot, ...]:
                 source=str(row_map.get("source") or "VENUE"),
             )
         )
-    lots.extend(_current_position_exposure_lot(row) for row in current_rows)
+    for row in current_rows:
+        lots.extend(_current_position_exposure_lots(row))
     return tuple(lots)
 
 
@@ -864,11 +866,16 @@ def _load_current_position_exposure_rows(conn: Any) -> list[Mapping[str, Any]]:
             """
         ).fetchall()
     lot_states = _load_latest_command_lot_states(conn)
+    authority_costs = _load_current_position_authority_costs(conn)
     return [
         {
             **dict(_row_mapping(row)),
             "latest_lot_state": lot_states.get(
                 str(_row_mapping(row).get("position_id") or "")
+            ),
+            **authority_costs.get(
+                str(_row_mapping(row).get("position_id") or ""),
+                {"confirmed_cost": Decimal("0"), "optimistic_cost": Decimal("0")},
             ),
         }
         for row in rows
@@ -914,7 +921,55 @@ def _load_latest_command_lot_states(conn: Any) -> dict[str, str]:
     }
 
 
-def _current_position_exposure_lot(row: Any) -> ExposureLot:
+def _load_current_position_authority_costs(
+    conn: Any,
+) -> dict[str, dict[str, Decimal]]:
+    if not _has_table(conn, "venue_trade_facts"):
+        return {}
+    if not _has_table(conn, "venue_commands"):
+        return {}
+    sql = (
+        "WITH "
+        + canonical_trade_fact_cte()
+        + ",\n"
+        + economic_trade_fact_cte()
+        + """
+        SELECT cmd.position_id AS runtime_position_id,
+               fact.state,
+               fact.filled_size,
+               fact.fill_price
+          FROM economic_trade_fact fact
+          JOIN venue_commands cmd ON cmd.command_id = fact.command_id
+         WHERE cmd.intent_kind = 'ENTRY'
+           AND cmd.side = 'BUY'
+           AND CAST(COALESCE(fact.filled_size, '0') AS REAL) > 0
+           AND CAST(COALESCE(fact.fill_price, '0') AS REAL) > 0
+        """
+    )
+    costs: dict[str, dict[str, Decimal]] = {}
+    for row in conn.execute(sql).fetchall():
+        row_map = _row_mapping(row)
+        try:
+            cost = Decimal(str(row_map.get("filled_size"))) * Decimal(
+                str(row_map.get("fill_price"))
+            )
+        except (InvalidOperation, TypeError, ValueError):
+            continue
+        position_id = str(row_map.get("runtime_position_id") or "")
+        totals = costs.setdefault(
+            position_id,
+            {"confirmed_cost": Decimal("0"), "optimistic_cost": Decimal("0")},
+        )
+        key = (
+            "confirmed_cost"
+            if str(row_map.get("state") or "") == "CONFIRMED"
+            else "optimistic_cost"
+        )
+        totals[key] += cost
+    return costs
+
+
+def _current_position_exposure_lots(row: Any) -> tuple[ExposureLot, ...]:
     row_map = _row_mapping(row)
     submit_payload = _coerce_payload(row_map.get("submit_payload_json"))
     allocation_raw = submit_payload.get("allocation", {})
@@ -953,24 +1008,45 @@ def _current_position_exposure_lot(row: Any) -> ExposureLot:
         FillAuthority.CANCELLED_REMAINDER.value,
         FillAuthority.SETTLED.value,
     }
+
+    def lot(amount: Decimal, state: ExposureState, source: str) -> ExposureLot:
+        return ExposureLot(
+            market_id=market_id,
+            event_id=event_id,
+            resolution_window=resolution_window,
+            token_id=token_id,
+            exposure_micro=_usd_exposure_micro(amount),
+            state=state,
+            correlation_key=correlation_key,
+            source=source,
+        )
+
     if phase == "pending_exit":
-        state: ExposureState = "EXIT_PENDING"
-    elif chain_shares > 0 or fill_authority in confirmed_authorities:
-        state = "CONFIRMED_EXPOSURE"
-    elif latest_lot_state in {"OPTIMISTIC_EXPOSURE", "CONFIRMED_EXPOSURE"}:
-        state = latest_lot_state
-    else:
-        state = "OPTIMISTIC_EXPOSURE"
-    return ExposureLot(
-        market_id=market_id,
-        event_id=event_id,
-        resolution_window=resolution_window,
-        token_id=token_id,
-        exposure_micro=_usd_exposure_micro(exposure),
-        state=state,
-        correlation_key=correlation_key,
-        source="CHAIN" if chain_shares > 0 else "VENUE",
+        return (lot(exposure, "EXIT_PENDING", "CHAIN" if chain_shares > 0 else "VENUE"),)
+    if chain_shares > 0 or fill_authority in confirmed_authorities:
+        return (lot(exposure, "CONFIRMED_EXPOSURE", "CHAIN" if chain_shares > 0 else "VENUE"),)
+
+    confirmed = min(
+        max(Decimal(str(row_map.get("confirmed_cost") or 0)), Decimal("0")),
+        exposure,
     )
+    optimistic = min(
+        max(Decimal(str(row_map.get("optimistic_cost") or 0)), Decimal("0")),
+        exposure - confirmed,
+    )
+    residual = exposure - confirmed - optimistic
+    if residual > 0:
+        if latest_lot_state == "OPTIMISTIC_EXPOSURE":
+            optimistic += residual
+        else:
+            confirmed += residual
+
+    components: list[ExposureLot] = []
+    if confirmed > 0:
+        components.append(lot(confirmed, "CONFIRMED_EXPOSURE", "VENUE"))
+    if optimistic > 0:
+        components.append(lot(optimistic, "OPTIMISTIC_EXPOSURE", "VENUE"))
+    return tuple(components)
 
 
 def _has_table(conn: Any, table: str) -> bool:

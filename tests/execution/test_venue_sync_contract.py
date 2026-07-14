@@ -6,7 +6,7 @@
 #   byte-identical reconciliation events vs the legacy long-connection path.
 # Reuse: Run when command_recovery orchestration, venue_sync_contract, or the
 #   scheduled _edli_command_recovery_cycle connection topology changes.
-# Last reused/audited: 2026-07-13
+# Last reused/audited: 2026-07-14
 # Authority basis: operator directive 2026-06-11 ("cleanest STRUCTURAL fix") +
 #   the dependency_db_locked live incident (riskguard DATA_DEGRADED since ~03:36Z).
 """Relationship tests for the three-phase venue/DB sync contract.
@@ -808,6 +808,54 @@ def test_boot_fast_scope_skips_historical_fill_maintenance(monkeypatch, tmp_path
     assert recorder.client_calls == []
     assert "partial_remainders" not in summary
     assert "recorded_maker_fill_economics" not in summary
+
+
+@pytest.mark.parametrize("scope", ["boot_fast", "restart_preflight", "live_tick"])
+def test_scoped_recovery_persists_execution_fact_repair(monkeypatch, tmp_path, scope):
+    """Every production recovery scope must persist allocator-critical fill facts."""
+    from src.execution import command_recovery, venue_sync_contract
+    from src.state.db import init_schema
+
+    db_path = tmp_path / f"recovery-execution-fact-{scope}.db"
+    seed_conn = sqlite3.connect(str(db_path))
+    seed_conn.row_factory = sqlite3.Row
+    init_schema(seed_conn)
+    seed_conn.execute("CREATE TABLE recovery_probe (scope TEXT PRIMARY KEY)")
+    seed_conn.commit()
+    seed_conn.close()
+
+    recorder = _Recorder()
+    factory = _make_conn_factory(db_path, recorder)
+    monkeypatch.setattr(venue_sync_contract, "default_trade_conn_factory", factory)
+
+    def _persist_probe(conn):
+        conn.execute("INSERT INTO recovery_probe (scope) VALUES (?)", (scope,))
+        return {"scanned": 1, "advanced": 1, "stayed": 0, "errors": 0}
+
+    monkeypatch.setattr(
+        command_recovery,
+        "reconcile_filled_entry_execution_fact_repairs",
+        _persist_probe,
+    )
+
+    summary = command_recovery.reconcile_unresolved_commands(
+        conn=None,
+        client=_RecordingClient(recorder),
+        scope=scope,
+    )
+
+    assert summary["filled_entry_execution_fact_repair"] == {
+        "scanned": 1,
+        "advanced": 1,
+        "stayed": 0,
+        "errors": 0,
+    }
+    verify = sqlite3.connect(str(db_path))
+    try:
+        persisted = verify.execute("SELECT scope FROM recovery_probe").fetchone()
+    finally:
+        verify.close()
+    assert persisted == (scope,)
 
 
 def test_boot_fast_scope_projects_confirmed_exit_fill_without_full_maker_scan(monkeypatch, tmp_path):
