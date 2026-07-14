@@ -186,6 +186,15 @@ def test_global_auction_receipt_persists_complete_buy_sell_hold_cash_comparison(
             economic_identity="wealth-economics-current",
         ),
         fractional_kelly_multiplier=Decimal("0.25"),
+        excluded_by_candidate={
+            (
+                "BUY",
+                "family-buy",
+                "20C",
+                "YES",
+                "token-buy",
+            ): "jit depth insufficient"
+        },
     )
 
     row = conn.execute(
@@ -194,7 +203,17 @@ def test_global_auction_receipt_persists_complete_buy_sell_hold_cash_comparison(
     artifact = json.loads(row["artifact_json"])
     summary = artifact["summary"]
     assert row["mode"] == "global_single_order_auction"
-    assert summary["schema_version"] == 6
+    assert summary["schema_version"] == 7
+    assert summary["excluded_by_candidate"] == [
+        {
+            "action": "BUY",
+            "family_key": "family-buy",
+            "bin_id": "20C",
+            "side": "YES",
+            "token_id": "token-buy",
+            "reason": "jit depth insufficient",
+        }
+    ]
     assert summary["full_scope_identity"] == "full-scope-current"
     assert summary["full_scope_family_count"] == 3
     assert summary["eligible_probability_family_count"] == 2
@@ -2168,6 +2187,14 @@ def test_global_winner_binding_does_not_reapply_legacy_price_floor(monkeypatch):
         ("GLOBAL_CURRENT_STATE_ROBUST_MAJORITY_LOSS", "BATCH_BLOCKED"),
         ("GLOBAL_CURRENT_STATE_ECONOMICS_NON_POSITIVE", "BATCH_BLOCKED"),
         ("GLOBAL_JIT_SNAPSHOT_REFRESH_FAILED", "BLOCKED"),
+        (
+            "EDLI_LIVE_CERTIFICATE_BUILD_FAILED:"
+            "PRE_SUBMIT_BOOK_AUTHORITY_JIT_BUY_NOTIONAL_INSUFFICIENT:"
+            "token_id=token-a:limit_price=0.012000:required_notional=2.280000:"
+            "executable_notional=1.080720:executable_size=217.680000:"
+            "book_hash=book-a",
+            "CANDIDATE_BLOCKED",
+        ),
         ("GLOBAL_JIT_SNAPSHOT_REFRESH_UNAVAILABLE", "BATCH_BLOCKED"),
         (
             "GLOBAL_ACTUATION_PREPARE_FAILED:"
@@ -2246,6 +2273,55 @@ def test_global_preflight_runs_final_entry_authority_before_stable(monkeypatch):
         "condition_id=condition-a:q_lcb=0.72:transform_lcb=0.96"
     )
     assert era._global_preflight_block_status(rejected.reason) == "BLOCKED"
+
+
+def test_global_preflight_jit_depth_is_candidate_local_and_side_effect_free():
+    event = _global_scope_event(city="Alpha", source_run_id="run-a")
+    receipt = EventSubmissionReceipt(
+        False,
+        event.event_id,
+        event.causal_snapshot_id,
+        proof_accepted=True,
+        decision_proof_bundle=(object(),),
+    )
+    actuation = SimpleNamespace(
+        winner_event_id=event.event_id,
+        decision=SimpleNamespace(
+            candidate=SimpleNamespace(token_id="token-a"),
+            limit_price=Decimal("0.012"),
+            shares=Decimal("190"),
+        ),
+    )
+    calls = []
+
+    def book(token_id):
+        calls.append(token_id)
+        return {
+            "asset_id": token_id,
+            "hash": "book-a",
+            "bids": [{"price": "0.003", "size": "100"}],
+            "asks": [{"price": "0.004", "size": "217.68"}],
+        }
+
+    rejected = era._global_preflight_entry_jit_receipt(
+        event,
+        receipt,
+        global_actuation=actuation,
+        book_quote_provider=book,
+    )
+
+    assert calls == ["token-a"]
+    assert rejected.proof_accepted is False
+    assert rejected.reason == (
+        "EDLI_LIVE_CERTIFICATE_BUILD_FAILED:"
+        "PRE_SUBMIT_BOOK_AUTHORITY_JIT_BUY_NOTIONAL_INSUFFICIENT:"
+        "token_id=token-a:limit_price=0.012000:required_notional=2.280000:"
+        "executable_notional=0.870720:executable_size=217.680000:"
+        "book_hash=book-a"
+    )
+    assert era._global_preflight_block_status(rejected.reason) == (
+        "CANDIDATE_BLOCKED"
+    )
 
 
 def test_global_preflight_token_lifetime_starts_after_proof_completion():
@@ -5146,7 +5222,7 @@ def test_global_batch_reauctions_once_on_full_universe_curve_drift(monkeypatch):
         actuation_identity="actuation-b-fence", wealth_witness_identity="wealth-1"
     )
     actuation_b_final = SimpleNamespace(
-        actuation_identity="actuation-b-final", wealth_witness_identity="wealth-2"
+        actuation_identity="actuation-b-final", wealth_witness_identity="wealth-1"
     )
     selections = iter(
         SimpleNamespace(
@@ -5258,7 +5334,7 @@ def test_global_batch_reauctions_once_on_full_universe_curve_drift(monkeypatch):
     assert calls == {
         "prepare": 2,
         "books": 2,
-        "wealth": 2,
+        "wealth": 1,
         "preflight": [event_b.event_id, event_b.event_id],
         "venue": 1,
     }
@@ -5311,7 +5387,7 @@ def test_global_batch_reauctions_with_tightened_candidate_q(monkeypatch):
                 winner_event_id=event.event_id,
                 actuation=SimpleNamespace(
                     actuation_identity="actuation-tight",
-                    wealth_witness_identity="wealth-2",
+                    wealth_witness_identity="wealth-1",
                 ),
             ),
         )
@@ -5421,7 +5497,7 @@ def test_global_batch_reauctions_with_tightened_candidate_q(monkeypatch):
     assert calls["selection_epoch"][1] != calls["selection_epoch"][0]
     assert calls["preflight"] == 2
     assert calls["venue"] == 1
-    assert calls["wealth"] == 2
+    assert calls["wealth"] == 1
     assert result.winner_event_id == event.event_id
     assert result.venue_submit_count == 1
     assert result.receipts[event.event_id].submitted is True
@@ -5475,7 +5551,7 @@ def test_global_batch_falls_through_candidate_local_preflight_block(
         )
         for event, actuation_id, wealth_id in (
             (event_a, "actuation-a-fence", "wealth-1"),
-            (event_b, "actuation-b-fallthrough", "wealth-2"),
+            (event_b, "actuation-b-fallthrough", "wealth-1"),
         )
     )
     books = iter((_global_test_book("book-1", price="0.41"),))
@@ -5575,7 +5651,7 @@ def test_global_batch_falls_through_candidate_local_preflight_block(
 
     assert calls["prepare"] == 2
     assert calls["books"] == 1
-    assert calls["wealth"] == 2
+    assert calls["wealth"] == 1
     assert calls["preflight"] == [event_a.event_id, event_b.event_id]
     assert calls["excluded"] == [
         None,
@@ -5589,6 +5665,200 @@ def test_global_batch_falls_through_candidate_local_preflight_block(
     assert result.receipts[event_a.event_id].reason == (
         f"GLOBAL_PREFLIGHT_FAMILY_INELIGIBLE:{blocked_reason}"
     )
+
+
+def test_global_batch_candidate_block_keeps_sibling_and_reproves_after_book_refresh(
+    monkeypatch,
+):
+    decision_at = _dt.datetime(2026, 7, 10, 8, 0, tzinfo=_dt.timezone.utc)
+    event = _global_scope_event(city="Alpha", source_run_id="run-a")
+    scope = current_global_auction_scope_from_events(
+        (event,), captured_at_utc=decision_at
+    )
+    family_key = scope.family_keys[0]
+    prepared = SimpleNamespace(
+        probability_witness=SimpleNamespace(
+            family_key=family_key,
+            captured_at_utc=decision_at,
+            posterior_identity_hash="run-a",
+            witness_identity="q-run-a",
+        )
+    )
+    candidate_a = SimpleNamespace(
+        candidate_id="candidate-a",
+        action="BUY",
+        family_key=family_key,
+        bin_id="bin-a",
+        side="NO",
+        token_id="token-a",
+    )
+    candidate_b = SimpleNamespace(
+        candidate_id="candidate-b",
+        action="SELL",
+        family_key=family_key,
+        bin_id="bin-a",
+        side="NO",
+        token_id="token-a",
+    )
+    selections = iter(
+        SimpleNamespace(
+            decision=SimpleNamespace(candidate=candidate, no_trade_reason=None),
+            winner_event_id=event.event_id,
+            actuation=SimpleNamespace(
+                decision=SimpleNamespace(candidate=candidate),
+                actuation_identity=identity,
+                wealth_witness_identity="wealth-1",
+            ),
+        )
+        for candidate, identity in (
+            (candidate_a, "actuation-a"),
+            (candidate_b, "actuation-b"),
+            (candidate_a, "actuation-a-refresh"),
+        )
+    )
+    base_asset = _global_test_book("book-candidate", price="0.40").assets[0]
+    asset = SimpleNamespace(
+        **(
+            vars(base_asset)
+            | {
+                "family_key": family_key,
+                "bin_id": candidate_a.bin_id,
+                "token_id": candidate_a.token_id,
+                "side": candidate_a.side,
+            }
+        )
+    )
+    book = SimpleNamespace(
+        witness_identity="book-candidate",
+        captured_at_utc=decision_at,
+        max_age=_dt.timedelta(seconds=30),
+        assets=(asset,),
+        sell_assets=(asset,),
+    )
+    refreshed_book = SimpleNamespace(
+        **(vars(book) | {"witness_identity": "book-candidate-refresh"})
+    )
+    books = iter((book, refreshed_book))
+    calls = {"select": 0, "wealth": 0, "preflight": [], "books": 0, "venue": 0}
+    reason = (
+        "EDLI_LIVE_CERTIFICATE_BUILD_FAILED:"
+        "PRE_SUBMIT_BOOK_AUTHORITY_JIT_BUY_NOTIONAL_INSUFFICIENT:"
+        "token_id=token-a:limit_price=0.012000:required_notional=2.280000:"
+        "executable_notional=1.080720:executable_size=217.680000:"
+        "book_hash=book-jit"
+    )
+
+    monkeypatch.setattr(
+        global_batch_runtime, "scan_current_global_auction_scope", lambda **_: scope
+    )
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "replace",
+        lambda value, **changes: SimpleNamespace(**(vars(value) | changes)),
+    )
+
+    def wealth(*_, **__):
+        calls["wealth"] += 1
+        return SimpleNamespace(
+            spendable_cash_usd=Decimal("10"),
+            witness_identity="wealth-1",
+            economic_identity="wealth-economics-1",
+        )
+
+    monkeypatch.setattr(
+        global_batch_runtime, "current_portfolio_wealth_witness", wealth
+    )
+
+    def select(_prepared, **kwargs):
+        policy = kwargs["candidate_policy_rejection_resolver"]
+        if calls["select"] == 0:
+            assert policy(candidate_a) is None
+            assert policy(candidate_b) is None
+        else:
+            expected_a = (
+                f"GLOBAL_PREFLIGHT_CANDIDATE_INELIGIBLE:{reason}"
+                if calls["select"] == 1
+                else None
+            )
+            assert policy(candidate_a) == expected_a
+            assert policy(candidate_b) is None
+            assert kwargs["preflight_excluded_by_family"] == {}
+        calls["select"] += 1
+        return next(selections)
+
+    monkeypatch.setattr(
+        global_batch_runtime, "select_prepared_global_auction", select
+    )
+
+    def preflight(_event, actuation, _at, _authority):
+        candidate = actuation.decision.candidate
+        calls["preflight"].append(candidate.candidate_id)
+        if candidate is candidate_a:
+            if calls["preflight"].count("candidate-a") > 1:
+                return global_batch_runtime.GlobalWinnerPreflight(
+                    status="STABLE", binding_token="binding-a-refresh"
+                )
+            return global_batch_runtime.GlobalWinnerPreflight(
+                status="CANDIDATE_BLOCKED",
+                reason=reason,
+            )
+        return global_batch_runtime.GlobalWinnerPreflight(
+            status="CURVE_SUPERSEDED",
+            replacement_candidate=candidate_b,
+            reason="curve refreshed",
+        )
+
+    def actuate(_event, actuation, _at, token, _authority):
+        assert actuation.decision.candidate is candidate_a
+        assert token == "binding-a-refresh"
+        calls["venue"] += 1
+        return EventSubmissionReceipt(
+            True,
+            event.event_id,
+            event.causal_snapshot_id,
+            proof_accepted=True,
+            side_effect_status="SUBMITTED",
+        )
+
+    def next_book(probabilities, _at):
+        calls["books"] += 1
+        return probabilities, next(books)
+
+    result = global_batch_runtime.process_current_global_batch(
+        (event,),
+        decision_time=decision_at,
+        world_conn=object(),
+        forecast_conn=object(),
+        trade_conn=object(),
+        payload_reader=lambda current: json.loads(current.payload_json),
+        prepare_event=lambda current, _at: EventSubmissionReceipt(
+            False,
+            current.event_id,
+            current.causal_snapshot_id,
+            prepared_global_family=prepared,
+        ),
+        actuate_winner=lambda *_: pytest.fail("preflighted lane owns actuation"),
+        preflight_winner=preflight,
+        actuate_preflighted_winner=global_batch_runtime.GlobalOneShotActuator(
+            actuate
+        ),
+        stamp_receipt=lambda receipt: receipt,
+        venue_submit_count=lambda: calls["venue"],
+        current_execution=lambda *_: object(),
+        current_time_provider=lambda: decision_at,
+        current_book_epoch_provider=next_book,
+    )
+
+    assert calls == {
+        "select": 3,
+        "wealth": 1,
+        "preflight": ["candidate-a", "candidate-b", "candidate-a"],
+        "books": 2,
+        "venue": 1,
+    }
+    assert result.winner_event_id == event.event_id
+    assert result.venue_submit_count == 1
+    assert result.receipts[event.event_id].submitted is True
 
 
 @pytest.mark.parametrize(

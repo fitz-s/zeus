@@ -5476,6 +5476,11 @@ def run_edli_event_reactor_cycle(*, active_lock) -> None:
         _reactor_family_market_absence_provider = (
             _edli_reactor_family_market_absence_provider()
         )
+        _live_jit_book_quote_provider = (
+            _edli_pre_submit_jit_book_quote_provider()
+            if live_submit_effective
+            else None
+        )
         submit_adapter = (
             event_bound_live_adapter_from_trade_conn(
                 trade_conn,
@@ -5503,10 +5508,9 @@ def run_edli_event_reactor_cycle(*, active_lock) -> None:
                     # just-in-time live book for the selected candidate so quote_age
                     # reflects observation-to-submit latency, not the venue's coarse
                     # book-change stamp on the shared feasibility feed.
-                    book_quote_provider=(
-                        _edli_pre_submit_jit_book_quote_provider() if live_submit_effective else None
-                    ),
+                    book_quote_provider=_live_jit_book_quote_provider,
                 ),
+                pre_submit_book_quote_provider=_live_jit_book_quote_provider,
                 executor_submit=lambda final_intent_cert, execution_command_cert: submit_event_bound_final_intent_via_existing_executor(
                     final_intent_cert=final_intent_cert,
                     execution_command_cert=execution_command_cert,

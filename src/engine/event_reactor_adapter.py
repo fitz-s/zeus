@@ -4158,6 +4158,7 @@ def event_bound_live_adapter_from_trade_conn(
     real_order_submit_enabled: bool = False,
     executor_submit: Callable[[DecisionCertificate, DecisionCertificate], EventBoundExecutorSubmitResult] | None = None,
     pre_submit_authority_provider: Callable[[DecisionCertificate, DecisionCertificate, datetime], PreSubmitAuthorityWitness] | None = None,
+    pre_submit_book_quote_provider: Callable[[str], Mapping[str, object]] | None = None,
     durable_submit_outbox_enabled: bool = False,
     operator_arm: "OperatorArm | None" = None,
     edli_live_scope: str = "forecast_plus_day0",
@@ -4990,6 +4991,12 @@ def event_bound_live_adapter_from_trade_conn(
                 receipt,
                 decision_time=at,
                 live_cap_conn=live_cap_conn or trade_conn,
+            )
+            receipt = _global_preflight_entry_jit_receipt(
+                event,
+                receipt,
+                global_actuation=actuation,
+                book_quote_provider=pre_submit_book_quote_provider,
             )
             reason = str(receipt.reason or "")
             if receipt.proof_accepted is True and (
@@ -6931,6 +6938,11 @@ def _global_preflight_block_status(reason: str) -> str:
     """Fall through only when current evidence proves this candidate infeasible."""
 
     if reason.startswith(
+        "EDLI_LIVE_CERTIFICATE_BUILD_FAILED:"
+        "PRE_SUBMIT_BOOK_AUTHORITY_JIT_BUY_NOTIONAL_INSUFFICIENT:"
+    ):
+        return "CANDIDATE_BLOCKED"
+    if reason.startswith(
         (
             "GLOBAL_ACTUATION_PROOF_NO_LONGER_ELIGIBLE:",
             "GLOBAL_JIT_SNAPSHOT_REFRESH_FAILED",
@@ -6979,6 +6991,62 @@ def _global_preflight_entry_authority_receipt(
             event=event,
         )
         _assert_live_entry_submit_authority(actionable_payload)
+    except Exception as exc:  # noqa: BLE001 - typed fail-closed preflight receipt
+        return dataclass_replace(
+            receipt,
+            submitted=False,
+            side_effect_status="NO_SUBMIT",
+            reason=f"EDLI_LIVE_CERTIFICATE_BUILD_FAILED:{exc}",
+            proof_accepted=False,
+        )
+    return receipt
+
+
+def _global_preflight_entry_jit_receipt(
+    event: OpportunityEvent,
+    receipt: EventSubmissionReceipt,
+    *,
+    global_actuation: object,
+    book_quote_provider: Callable[[str], Mapping[str, object]] | None,
+) -> EventSubmissionReceipt:
+    """Prove selected BUY depth before command or obligation persistence."""
+
+    if (
+        receipt.proof_accepted is not True
+        or receipt.decision_proof_bundle is None
+    ):
+        return receipt
+    decision = getattr(global_actuation, "decision", None)
+    candidate = getattr(decision, "candidate", None)
+    if (
+        decision is None
+        or candidate is None
+        or str(getattr(global_actuation, "winner_event_id", "") or "")
+        != event.event_id
+    ):
+        return dataclass_replace(
+            receipt,
+            submitted=False,
+            side_effect_status="NO_SUBMIT",
+            reason=(
+                "EDLI_LIVE_CERTIFICATE_BUILD_FAILED:"
+                "GLOBAL_PREFLIGHT_JIT_CANDIDATE_MISSING"
+            ),
+            proof_accepted=False,
+        )
+    try:
+        from src.events.reactor import _edli_pre_submit_book_from_jit_fetch
+
+        jit = _edli_pre_submit_book_from_jit_fetch(
+            book_quote_provider,
+            token_id=str(getattr(candidate, "token_id", "") or ""),
+            side="BUY",
+            limit_price=float(getattr(decision, "limit_price")),
+            size=float(getattr(decision, "shares")),
+            post_only=False,
+        )
+        if jit is None:
+            raise ValueError("PRE_SUBMIT_BOOK_AUTHORITY_JIT_REQUIRED")
     except Exception as exc:  # noqa: BLE001 - typed fail-closed preflight receipt
         return dataclass_replace(
             receipt,

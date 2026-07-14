@@ -53,6 +53,7 @@ class GlobalWinnerPreflight:
             "STABLE",
             "CURVE_SUPERSEDED",
             "PROBABILITY_TIGHTENED",
+            "CANDIDATE_BLOCKED",
             "BLOCKED",
             "BATCH_BLOCKED",
         }:
@@ -196,6 +197,9 @@ def _store_global_auction_receipt(
     wealth_witness: object,
     fractional_kelly_multiplier: Decimal,
     excluded_by_family: Mapping[str, str] | None = None,
+    excluded_by_candidate: Mapping[
+        tuple[str, str, str, str, str], str
+    ] | None = None,
 ) -> int | None:
     """Persist one complete auction comparison before any venue side effect."""
 
@@ -302,7 +306,7 @@ def _store_global_auction_receipt(
         )
     )
     receipt = {
-        "schema_version": 6,
+        "schema_version": 7,
         "selection_epoch_identity": selection_epoch_identity,
         "selection_cut_at_utc": selection_cut_at_utc.isoformat(),
         "decision_at_utc": decision_at_utc.isoformat(),
@@ -316,6 +320,17 @@ def _store_global_auction_receipt(
         "book_epoch_identity": book_epoch_identity,
         "book_asset_count": book_asset_count,
         "excluded_by_family": dict(sorted((excluded_by_family or {}).items())),
+        "excluded_by_candidate": [
+            {
+                "action": key[0],
+                "family_key": key[1],
+                "bin_id": key[2],
+                "side": key[3],
+                "token_id": key[4],
+                "reason": reason,
+            }
+            for key, reason in sorted((excluded_by_candidate or {}).items())
+        ],
         "wealth_witness_identity": str(
             getattr(wealth_witness, "witness_identity", "") or ""
         ),
@@ -538,6 +553,9 @@ def _selection_epoch_identity(
 def _selection_epoch_identity_with_preflight_exclusions(
     selection_epoch_identity: str,
     excluded_by_family: Mapping[str, str],
+    excluded_by_candidate: Mapping[
+        tuple[str, str, str, str, str], str
+    ] | None = None,
     payoff_q_lcb_by_candidate: Mapping[tuple[str, str, str, str], float]
     | None = None,
 ) -> str:
@@ -548,6 +566,9 @@ def _selection_epoch_identity_with_preflight_exclusions(
     digest.update(b"\x1f")
     for family_key, reason in sorted(excluded_by_family.items()):
         digest.update(repr((family_key, reason)).encode("utf-8"))
+        digest.update(b"\x1f")
+    for candidate_key, reason in sorted((excluded_by_candidate or {}).items()):
+        digest.update(repr((*candidate_key, reason)).encode("utf-8"))
         digest.update(b"\x1f")
     for candidate_key, q_lcb in sorted((payoff_q_lcb_by_candidate or {}).items()):
         digest.update(repr((*candidate_key, float(q_lcb))).encode("utf-8"))
@@ -1031,6 +1052,21 @@ def process_current_global_batch(
         # epoch.  Only the selected winner is allowed to cross into the side-effect
         # path, where probability, exact book/curve, and free cash are rebuilt JIT.
         wealth_age = timedelta(seconds=float(COLLATERAL_SNAPSHOT_MAX_AGE_SECONDS))
+        selection_state = portfolio_state_provider() if portfolio_state_provider else None
+        if selection_state is None and hasattr(trade_conn, "execute"):
+            from src.state.portfolio import load_runtime_open_portfolio
+
+            selection_state = load_runtime_open_portfolio(trade_conn)
+        selection_wealth = current_portfolio_wealth_witness(
+            trade_conn,
+            decision_at_utc=(
+                book_epoch.captured_at_utc
+                if book_epoch is not None
+                else scope_at
+            ),
+            max_age=wealth_age,
+            portfolio_state=selection_state,
+        )
 
         def select_once(
             attempt_probabilities: Mapping[str, object],
@@ -1039,30 +1075,65 @@ def process_current_global_batch(
             *,
             attempt_selection_epoch_identity: str = selection_epoch_identity,
             preflight_excluded_by_family: Mapping[str, str] | None = None,
+            preflight_excluded_by_candidate: Mapping[
+                tuple[str, str, str, str, str], str
+            ]
+            | None = None,
             payoff_q_lcb_by_candidate: Mapping[
                 tuple[str, str, str, str], float
             ]
             | None = None,
         ):
             selection_at = current_time()
-            state = portfolio_state_provider() if portfolio_state_provider else None
-            if state is None and hasattr(trade_conn, "execute"):
-                from src.state.portfolio import load_runtime_open_portfolio
-
-                state = load_runtime_open_portfolio(trade_conn)
-            wealth = current_portfolio_wealth_witness(
-                trade_conn,
-                decision_at_utc=selection_at,
-                max_age=wealth_age,
-                portfolio_state=state,
-            )
             prepared_for_selection = attempt_prepared
-            if attempt_book_epoch is not None and state is not None:
+            if attempt_book_epoch is not None and selection_state is not None:
                 prepared_for_selection = _bind_selection_holdings(
                     attempt_prepared,
-                    portfolio_state=state,
-                    ledger_snapshot_id=wealth.ledger_snapshot_id,
+                    portfolio_state=selection_state,
+                    ledger_snapshot_id=selection_wealth.ledger_snapshot_id,
                 )
+            excluded_candidates = dict(preflight_excluded_by_candidate or {})
+            if attempt_book_epoch is not None and excluded_candidates:
+                known_candidate_keys = {
+                    (
+                        "BUY",
+                        str(asset.family_key),
+                        str(asset.bin_id),
+                        str(asset.side),
+                        str(asset.token_id),
+                    )
+                    for asset in tuple(
+                        getattr(attempt_book_epoch, "assets", ()) or ()
+                    )
+                } | {
+                    (
+                        "SELL",
+                        str(asset.family_key),
+                        str(asset.bin_id),
+                        str(asset.side),
+                        str(asset.token_id),
+                    )
+                    for asset in tuple(
+                        getattr(attempt_book_epoch, "sell_assets", ()) or ()
+                    )
+                }
+                if not set(excluded_candidates).issubset(known_candidate_keys):
+                    raise ValueError("GLOBAL_EXCLUDED_CANDIDATE_UNKNOWN")
+
+            def candidate_policy(candidate):
+                key = (
+                    str(getattr(candidate, "action", "BUY") or "BUY").upper(),
+                    str(getattr(candidate, "family_key", "") or ""),
+                    str(getattr(candidate, "bin_id", "") or ""),
+                    str(getattr(candidate, "side", "") or ""),
+                    str(getattr(candidate, "token_id", "") or ""),
+                )
+                reason = excluded_candidates.get(key)
+                if reason is not None:
+                    return f"GLOBAL_PREFLIGHT_CANDIDATE_INELIGIBLE:{reason}"
+                if candidate_policy_rejection_resolver is None:
+                    return None
+                return candidate_policy_rejection_resolver(candidate)
             venue_identity = (
                 attempt_book_epoch.witness_identity
                 if attempt_book_epoch is not None
@@ -1103,16 +1174,14 @@ def process_current_global_batch(
                 ),
                 current_probability_resolver=probability_resolver,
                 current_execution_resolver=execution_resolver,
-                current_wealth_identity_resolver=lambda: wealth.economic_identity,
-                wealth_witness=wealth,
-                capital_limit_usd=wealth.spendable_cash_usd,
+                current_wealth_identity_resolver=lambda: selection_wealth.economic_identity,
+                wealth_witness=selection_wealth,
+                capital_limit_usd=selection_wealth.spendable_cash_usd,
                 fractional_kelly_multiplier=fractional_kelly_multiplier,
                 decision_at_utc=selection_at,
                 book_epoch=attempt_book_epoch,
                 current_capital_limit_resolver=current_capital_limit_resolver,
-                candidate_policy_rejection_resolver=(
-                    candidate_policy_rejection_resolver
-                ),
+                candidate_policy_rejection_resolver=candidate_policy,
                 preflight_excluded_by_family=preflight_excluded_by_family,
                 payoff_q_lcb_by_candidate=payoff_q_lcb_by_candidate,
             )
@@ -1149,9 +1218,10 @@ def process_current_global_batch(
                     if attempt_book_epoch is not None
                     else None
                 ),
-                wealth_witness=wealth,
+                wealth_witness=selection_wealth,
                 fractional_kelly_multiplier=fractional_kelly_multiplier,
                 excluded_by_family=preflight_excluded_by_family,
+                excluded_by_candidate=preflight_excluded_by_candidate,
             )
             return selected
 
@@ -1187,6 +1257,7 @@ def process_current_global_batch(
 
         binding_token = None
         preflight_ineligible_by_event: dict[str, str] = {}
+        preflight_candidate_ineligible_by_event: dict[str, str] = {}
         if preflight_winner is not None:
             if actuate_preflighted_winner is None:
                 return reject("GLOBAL_PREFLIGHT_ACTUATOR_MISSING")
@@ -1209,6 +1280,9 @@ def process_current_global_batch(
                 attempt_book_epoch.captured_at_utc + attempt_book_epoch.max_age
             )
             excluded_by_family: dict[str, str] = {}
+            excluded_by_candidate: dict[
+                tuple[str, str, str, str, str], str
+            ] = {}
             payoff_q_lcb_by_candidate: dict[
                 tuple[str, str, str, str], float
             ] = {}
@@ -1242,7 +1316,37 @@ def process_current_global_batch(
                         "GLOBAL_PREFLIGHT_BATCH_BLOCKED:"
                         f"{preflight.reason or preflight.status}"
                     )
-                if preflight.status == "CURVE_SUPERSEDED":
+                if preflight.status == "CANDIDATE_BLOCKED":
+                    candidate = selected.decision.candidate
+                    if candidate is None or winner_id is None:
+                        return reject("GLOBAL_PREFLIGHT_BLOCKED_CANDIDATE_MISSING")
+                    candidate_key = (
+                        str(getattr(candidate, "action", "BUY") or "BUY").upper(),
+                        str(getattr(candidate, "family_key", "") or ""),
+                        str(getattr(candidate, "bin_id", "") or ""),
+                        str(getattr(candidate, "side", "") or ""),
+                        str(getattr(candidate, "token_id", "") or ""),
+                    )
+                    if (
+                        not all(candidate_key)
+                        or candidate_key[0] not in {"BUY", "SELL"}
+                        or candidate_key[3] not in {"YES", "NO"}
+                    ):
+                        return reject("GLOBAL_PREFLIGHT_BLOCKED_CANDIDATE_INVALID")
+                    reason = preflight.reason or "GLOBAL_WINNER_PREFLIGHT_REJECTED"
+                    excluded_by_candidate[candidate_key] = reason
+                    preflight_candidate_ineligible_by_event[winner_id] = (
+                        f"{getattr(candidate, 'candidate_id', '')}:{reason}"
+                    )
+                    _LOG.info(
+                        "global batch preflight candidate excluded: candidate=%s "
+                        "event=%s reason=%s excluded=%d",
+                        getattr(candidate, "candidate_id", ""),
+                        winner_id,
+                        reason,
+                        len(excluded_by_candidate),
+                    )
+                elif preflight.status == "CURVE_SUPERSEDED":
                     try:
                         next_probabilities, next_book_epoch = (
                             current_book_epoch_provider(
@@ -1279,6 +1383,13 @@ def process_current_global_batch(
                     }
                     probabilities_fence = next_probabilities
                     attempt_book_epoch = next_book_epoch
+                    # Candidate exclusions are observations of one selected-token
+                    # JIT book.  A newer complete book epoch invalidates that local
+                    # evidence, so every candidate must be eligible for a fresh JIT
+                    # proof again.  Family and probability exclusions bind different
+                    # authorities and remain valid.
+                    excluded_by_candidate.clear()
+                    preflight_candidate_ineligible_by_event.clear()
                 elif preflight.status == "PROBABILITY_TIGHTENED":
                     tightening = preflight.probability_tightening
                     candidate = selected.decision.candidate
@@ -1326,9 +1437,14 @@ def process_current_global_batch(
                     _selection_epoch_identity_with_preflight_exclusions(
                         selection_epoch_identity,
                         excluded_by_family,
+                        excluded_by_candidate,
                         payoff_q_lcb_by_candidate,
                     )
-                    if excluded_by_family or payoff_q_lcb_by_candidate
+                    if (
+                        excluded_by_family
+                        or excluded_by_candidate
+                        or payoff_q_lcb_by_candidate
+                    )
                     else selection_epoch_identity
                 )
                 selected = select_once(
@@ -1337,6 +1453,7 @@ def process_current_global_batch(
                     prepared_fence,
                     attempt_selection_epoch_identity=fallthrough_epoch_identity,
                     preflight_excluded_by_family=excluded_by_family,
+                    preflight_excluded_by_candidate=excluded_by_candidate,
                     payoff_q_lcb_by_candidate=payoff_q_lcb_by_candidate,
                 )
                 log_stage(
@@ -1348,7 +1465,8 @@ def process_current_global_batch(
                     return reject(
                         "GLOBAL_PREFLIGHT_ACTION_SET_EXHAUSTED:"
                         f"{selected.decision.no_trade_reason or 'unknown'}:"
-                        f"excluded={len(excluded_by_family)}"
+                        f"families={len(excluded_by_family)}:"
+                        f"candidates={len(excluded_by_candidate)}"
                     )
                 log_winner(
                     "select_preflight_fallthrough",
@@ -1430,6 +1548,19 @@ def process_current_global_batch(
                     )
                 )
                 if event.event_id in preflight_ineligible_by_event
+                else stamp_receipt(
+                    EventSubmissionReceipt(
+                        False,
+                        event.event_id,
+                        event.causal_snapshot_id,
+                        reason=(
+                            "GLOBAL_PREFLIGHT_CANDIDATE_INELIGIBLE:"
+                            f"{preflight_candidate_ineligible_by_event[event.event_id]}"
+                        ),
+                        proof_accepted=False,
+                    )
+                )
+                if event.event_id in preflight_candidate_ineligible_by_event
                 else stamp_receipt(
                     EventSubmissionReceipt(
                         False,
