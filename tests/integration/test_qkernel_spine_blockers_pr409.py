@@ -1549,6 +1549,7 @@ def test_global_current_winner_survives_book_and_sizes_from_its_sealed_curve():
         "global_max_spend_usd": "1",
         "global_robust_delta_log_wealth": 0.01,
         "global_robust_ev_usd": 14.0,
+        "false_edge_rate": 0.10,
         "global_cut_time_win_probability_lcb": 0.60,
         "global_cut_time_loss_probability_ucb": 0.40,
         "global_terminal_win_probability_lcb": 0.60,
@@ -1573,6 +1574,37 @@ def test_global_current_winner_survives_book_and_sizes_from_its_sealed_curve():
         selection_authority_applied="qkernel_spine",
         qkernel_execution_economics=cert,
     )
+
+    selected_day0 = replace(
+        selected,
+        probability_authority="day0_absorbing_hard_fact",
+        passed_prefilter=True,
+        missing_reason=None,
+    )
+    selected_hypothesis_id = f"family-global-current:{selected.token_id}"
+    all_hypothesis_ids = (selected_hypothesis_id,) + tuple(
+        f"family-global-current:sibling-{idx}" for idx in range(21)
+    )
+    fdr_cert = era._qkernel_fdr_execution_economics(selected_day0)
+    day0_fdr = era._day0_selected_route_fdr_proof(
+        event_type="DAY0_EXTREME_UPDATED",
+        family_id="family-global-current",
+        all_hypothesis_ids=all_hypothesis_ids,
+        selected_hypothesis_id=selected_hypothesis_id,
+        selected_proof=selected_day0,
+    )
+
+    assert fdr_cert is cert
+    assert day0_fdr is not None
+    assert day0_fdr.passed is True
+    assert day0_fdr.selected_post_fdr == (selected_hypothesis_id,)
+
+    invalid_fdr_cert = dict(cert, current_state_identity_hash="tampered")
+    invalid_day0 = replace(
+        selected_day0,
+        qkernel_execution_economics=invalid_fdr_cert,
+    )
+    assert era._qkernel_fdr_execution_economics(invalid_day0) is None
 
     book = era._opportunity_book_from_proofs(
         event_id="event-global-current",

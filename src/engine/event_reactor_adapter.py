@@ -16884,6 +16884,12 @@ def _qkernel_fdr_execution_economics(proof: "_CandidateProof") -> Mapping[str, A
     emit an explicit failed qkernel proof.  It must still prove the cert belongs
     to the selected route before bypassing the legacy family-BH path.
     """
+    cert = getattr(proof, "qkernel_execution_economics", None)
+    if _declares_global_current_state_execution_economics(cert):
+        return _valid_selected_qkernel_execution_economics_payload(
+            cert,
+            direction=str(getattr(proof, "direction", "") or ""),
+        )
     return _qkernel_bound_execution_economics(proof, enforce_false_edge_alpha=False)
 
 
