@@ -135,6 +135,16 @@ class FakePostOrderFailureClient(FakeTwoStepClient):
         raise TimeoutError("post timed out")
 
 
+class FakeFokKilledClient(FakeTwoStepClient):
+    def post_order(self, order, order_type=None, post_only=False, defer_exec=False):
+        self.calls.append(("post_order", order, order_type, post_only, defer_exec))
+        raise RuntimeError(
+            "PolyApiException[status_code=400, error_message={'error': \"order couldn't "
+            "be fully filled. FOK orders are fully filled or killed.\", "
+            "'orderID': '0xexpected-order-id'}]"
+        )
+
+
 class FakeInvalidSafeSignatureTwoStepClient(FakeTwoStepClient):
     def post_order(self, order, order_type=None, post_only=False, defer_exec=False):
         self.calls.append(("post_order", order, order_type, post_only, defer_exec))
@@ -1340,6 +1350,26 @@ def test_post_order_exception_carries_deterministic_order_identity(tmp_path, mon
     assert caught.value.envelope.signed_order == fake.signed_order
     assert caught.value.envelope.error_code == "V2_POST_SUBMIT_AMBIGUOUS"
     assert any(call[0] == "post_order" for call in fake.calls)
+
+
+def test_fok_killed_400_is_definitive_rejection(tmp_path, monkeypatch):
+    import src.venue.polymarket_v2_adapter as adapter_mod
+
+    fake = FakeFokKilledClient()
+    adapter, _ = _adapter(tmp_path, fake)
+    envelope = adapter.create_submission_envelope(_intent(), FakeSnapshot(), order_type="FOK")
+    monkeypatch.setattr(
+        adapter_mod,
+        "_deterministic_v2_order_id",
+        lambda *args, **kwargs: "0xexpected-order-id",
+    )
+
+    result = adapter.submit(envelope)
+
+    assert result.status == "rejected"
+    assert result.error_code == "venue_fok_not_fully_filled_400"
+    assert result.envelope.order_id == "0xexpected-order-id"
+    assert result.envelope.signed_order == fake.signed_order
 
 
 def test_response_order_id_mismatch_is_ambiguous(tmp_path, monkeypatch):

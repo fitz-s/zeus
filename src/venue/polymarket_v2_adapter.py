@@ -789,6 +789,24 @@ class PolymarketV2Adapter:
                     signed_order=signed_order,
                     signed_order_hash=signed_hash,
                 )
+            if (
+                post_started
+                and envelope.order_type == "FOK"
+                and _is_polymarket_fok_killed_error(exc)
+            ):
+                rejected = envelope.with_updates(
+                    signed_order=signed_order,
+                    signed_order_hash=signed_hash,
+                    order_id=expected_order_id,
+                    error_code="venue_fok_not_fully_filled_400",
+                    error_message=str(exc),
+                )
+                return SubmitResult(
+                    status="rejected",
+                    envelope=rejected,
+                    error_code=rejected.error_code,
+                    error_message=rejected.error_message,
+                )
             if not post_started:
                 return _rejected_submit_result(
                     envelope,
@@ -2792,6 +2810,15 @@ def _is_l2_auth_error(exc: BaseException) -> bool:
 def _is_polymarket_invalid_safe_signature_error(exc: BaseException) -> bool:
     text = " ".join(f"{type(exc).__name__}:{exc}".split())
     return "status_code=400" in text and "invalid POLY_GNOSIS_SAFE signature" in text
+
+
+def _is_polymarket_fok_killed_error(exc: BaseException) -> bool:
+    text = " ".join(f"{type(exc).__name__}:{exc}".split()).lower()
+    return (
+        "status_code=400" in text
+        and "order couldn't be fully filled" in text
+        and "fok orders are fully filled or killed" in text
+    )
 
 
 def _api_creds_from_runtime() -> Any | None:

@@ -4457,7 +4457,10 @@ def ensure_live_entry_projection_for_command(
         raise ValueError("live entry projection requires venue_commands")
     current = conn.execute(
         """
-        SELECT cmd.state, cmd.intent_kind, cmd.side, pc.position_id AS projected_position_id
+        SELECT cmd.*,
+               pc.position_id AS projected_position_id,
+               pc.phase AS projected_phase,
+               pc.order_id AS projected_order_id
           FROM venue_commands cmd
           LEFT JOIN position_current pc
             ON pc.position_id = cmd.position_id
@@ -4475,6 +4478,63 @@ def ensure_live_entry_projection_for_command(
         and str(current_map.get("side") or "").upper() == "BUY"
         and current_state in {"FILLED", "PARTIAL"}
     ):
+        projected_phase = str(current_map.get("projected_phase") or "")
+        venue_order_id = str(current_map.get("venue_order_id") or "").strip()
+        if (
+            current_state == "FILLED"
+            and current_map.get("projected_position_id")
+            and projected_phase in {"active", "day0_window"}
+            and venue_order_id
+        ):
+            existing_fill = conn.execute(
+                """
+                SELECT 1
+                  FROM position_events
+                 WHERE position_id = ?
+                   AND event_type = 'ENTRY_ORDER_FILLED'
+                   AND (command_id = ? OR lower(COALESCE(order_id, '')) = lower(?))
+                 LIMIT 1
+                """,
+                (
+                    str(current_map.get("position_id") or ""),
+                    command_id,
+                    venue_order_id,
+                ),
+            ).fetchone()
+            _append_matched_order_fill_projection(
+                conn,
+                command=current_map,
+                venue_order_id=venue_order_id,
+                matched_size=str(current_map.get("size") or ""),
+                fill_price=str(current_map.get("price") or ""),
+                observed_at=str(current_map.get("updated_at") or _now_iso()),
+            )
+            projected_fill = conn.execute(
+                """
+                SELECT 1
+                  FROM position_events
+                 WHERE position_id = ?
+                   AND event_type = 'ENTRY_ORDER_FILLED'
+                   AND (command_id = ? OR lower(COALESCE(order_id, '')) = lower(?))
+                 LIMIT 1
+                """,
+                (
+                    str(current_map.get("position_id") or ""),
+                    command_id,
+                    venue_order_id,
+                ),
+            ).fetchone()
+            if projected_fill is None:
+                raise RuntimeError(
+                    "filled entry increment did not produce a command-bound "
+                    f"projection event: command_id={command_id}"
+                )
+            return {
+                "scanned": 1,
+                "advanced": int(existing_fill is None),
+                "stayed": int(existing_fill is not None),
+                "errors": 0,
+            }
         candidates = [
             candidate
             for candidate in _latest_unprojected_filled_entry_candidates(conn)

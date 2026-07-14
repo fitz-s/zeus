@@ -7073,6 +7073,118 @@ class TestRecoveryResolutionTable:
         }
         assert _get_state(conn, "cmd-001") == "PARTIAL"
 
+    def test_immediate_filled_increment_folds_cumulative_position_economics(
+        self,
+        conn,
+        mock_client,
+    ):
+        from src.execution.command_recovery import ensure_live_entry_projection_for_command
+        from src.state.venue_command_repo import append_event
+
+        _insert(conn, size=5.0, price=0.34)
+        _advance_to_acked(conn, venue_order_id="ord-first")
+        append_event(
+            conn,
+            command_id="cmd-001",
+            event_type="FILL_CONFIRMED",
+            occurred_at="2026-04-26T00:06:00Z",
+            payload={"venue_order_id": "ord-first", "venue_status": "MATCHED"},
+        )
+        _append_trade_fact(
+            conn,
+            order_id="ord-first",
+            trade_id="trade-first",
+            state="MATCHED",
+            filled_size="5",
+            fill_price="0.34",
+        )
+        _insert_decision_log_trade_case_for_recovery(conn)
+        assert ensure_live_entry_projection_for_command(
+            conn,
+            command_id="cmd-001",
+            client=mock_client,
+        )["advanced"] == 1
+
+        _insert(
+            conn,
+            command_id="cmd-002",
+            position_id="pos-001",
+            decision_id="dec-002",
+            size=3.0,
+            price=0.40,
+            created_at="2026-04-26T00:07:00Z",
+        )
+        _advance_to_acked(conn, command_id="cmd-002", venue_order_id="ord-second")
+        append_event(
+            conn,
+            command_id="cmd-002",
+            event_type="FILL_CONFIRMED",
+            occurred_at="2026-04-26T00:08:00Z",
+            payload={"venue_order_id": "ord-second", "venue_status": "MATCHED"},
+        )
+        _append_trade_fact(
+            conn,
+            command_id="cmd-002",
+            order_id="ord-second",
+            trade_id="trade-second",
+            state="MATCHED",
+            filled_size="3",
+            fill_price="0.40",
+        )
+
+        summary = ensure_live_entry_projection_for_command(
+            conn,
+            command_id="cmd-002",
+            client=mock_client,
+        )
+
+        assert summary == {"scanned": 1, "advanced": 1, "stayed": 0, "errors": 0}
+        current = conn.execute(
+            """
+            SELECT shares, cost_basis_usd, entry_price, order_id, order_status
+              FROM position_current
+             WHERE position_id = 'pos-001'
+            """
+        ).fetchone()
+        assert dict(current) == {
+            "shares": 8.0,
+            "cost_basis_usd": pytest.approx(2.9),
+            "entry_price": pytest.approx(0.3625),
+            "order_id": "ord-first",
+            "order_status": "filled",
+        }
+        fills = conn.execute(
+            """
+            SELECT command_id, order_id
+              FROM position_events
+             WHERE position_id = 'pos-001'
+               AND event_type = 'ENTRY_ORDER_FILLED'
+             ORDER BY sequence_no
+            """
+        ).fetchall()
+        assert [dict(row) for row in fills] == [
+            {"command_id": "cmd-001", "order_id": "ord-first"},
+            {"command_id": "cmd-002", "order_id": "ord-second"},
+        ]
+        facts = conn.execute(
+            """
+            SELECT command_id, shares, fill_price
+              FROM execution_fact
+             WHERE position_id = 'pos-001'
+               AND order_role = 'entry'
+             ORDER BY command_id
+            """
+        ).fetchall()
+        assert [dict(row) for row in facts] == [
+            {"command_id": "cmd-001", "shares": 5.0, "fill_price": 0.34},
+            {"command_id": "cmd-002", "shares": 3.0, "fill_price": 0.4},
+        ]
+        assert ensure_live_entry_projection_for_command(
+            conn,
+            command_id="cmd-002",
+            client=mock_client,
+        ) == {"scanned": 1, "advanced": 0, "stayed": 1, "errors": 0}
+
     def test_partial_entry_repair_promotes_zero_share_pending_projection(
         self,
         conn,
