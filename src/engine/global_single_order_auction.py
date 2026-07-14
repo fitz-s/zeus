@@ -418,15 +418,15 @@ def select_prepared_global_auction(
                 if asset is None:
                     continue
                 try:
-                    candidates.append(
-                        global_sell_candidate_from_holding(
-                            holding,
-                            probability_witness=probability,
-                            ledger_snapshot_id=holdings.ledger_snapshot_id,
-                            executable_sell_curve=asset.curve,
-                            book_captured_at_utc=asset.captured_at_utc,
-                        )
+                    candidate = global_sell_candidate_from_holding(
+                        holding,
+                        probability_witness=probability,
+                        ledger_snapshot_id=holdings.ledger_snapshot_id,
+                        executable_sell_curve=asset.curve,
+                        book_captured_at_utc=asset.captured_at_utc,
                     )
+                    if candidate is not None:
+                        candidates.append(candidate)
                 except Exception as exc:  # noqa: BLE001 - malformed holding invalidates globality
                     return _no_trade(
                         "GLOBAL_SELL_CANDIDATE_MATERIALIZATION_FAILED:"

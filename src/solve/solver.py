@@ -853,7 +853,7 @@ def global_candidate_from_native(
 
 @dataclass(frozen=True)
 class GlobalSingleOrderSellCandidate:
-    """One exact ledger holding offered against its own current native BID depth."""
+    """The venue-legal reducible part of one exact ledger holding."""
 
     candidate_id: str
     family_key: str
@@ -916,8 +916,8 @@ def global_sell_candidate_from_holding(
     ledger_snapshot_id: str,
     executable_sell_curve: ExecutableSellCurve,
     book_captured_at_utc: datetime,
-) -> GlobalSingleOrderSellCandidate:
-    """Materialize a SELL only from exact ledger identity and current token topology."""
+) -> GlobalSingleOrderSellCandidate | None:
+    """Materialize the venue-legal reducible part of an exact ledger holding."""
 
     try:
         column = probability_witness.bin_ids.index(str(holding.bin_id))
@@ -935,6 +935,10 @@ def global_sell_candidate_from_holding(
         or executable_sell_curve.side != side
     ):
         raise ValueError("holding condition/token does not own the selected q column")
+    ledger_shares = Decimal(holding.shares)
+    sellable_shares = ledger_shares.quantize(Decimal("0.01"), rounding=ROUND_FLOOR)
+    if sellable_shares <= 0:
+        return None
     return GlobalSingleOrderSellCandidate(
         candidate_id=_hash(
             "SELL",
@@ -944,7 +948,8 @@ def global_sell_candidate_from_holding(
             binding.condition_id,
             side,
             str(expected_token),
-            str(holding.shares),
+            str(ledger_shares),
+            str(sellable_shares),
         ),
         family_key=probability_witness.family_key,
         bin_id=binding.bin_id,
@@ -952,7 +957,7 @@ def global_sell_candidate_from_holding(
         side=side,  # type: ignore[arg-type]
         token_id=str(expected_token),
         position_id=str(holding.position_id),
-        held_shares=Decimal(holding.shares),
+        held_shares=sellable_shares,
         probability_witness_identity=probability_witness.witness_identity,
         book_snapshot_id=executable_sell_curve.snapshot_id,
         book_captured_at_utc=book_captured_at_utc,

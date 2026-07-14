@@ -20,6 +20,7 @@ from __future__ import annotations
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -1115,6 +1116,84 @@ def test_global_single_order_sell_requires_full_exact_bid_depth():
 
     assert decision.candidate is None
     assert decision.rejection_reasons[sell.candidate_id] == "DEPTH_INFEASIBLE"
+
+
+def test_global_sell_materializer_floors_chain_fill_dust_to_venue_grid():
+    seed = _global_candidate(
+        candidate_id="sell-chain-dust",
+        family="sell-chain-dust-family",
+        side="NO",
+        q=0.20,
+    )
+    probability = _global_probability_witness(seed)
+    sell_curve = S.ExecutableSellCurve(
+        token_id=seed.token_id,
+        side=seed.side,
+        snapshot_id="sell-chain-dust-book",
+        book_hash="sell-chain-dust-hash",
+        levels=(BookLevel(price=Decimal("0.80"), size=Decimal("100")),),
+        fee_model=FeeModel(fee_rate=Decimal("0")),
+        min_tick=Decimal("0.001"),
+        min_order_size=Decimal("1"),
+        quote_ttl=timedelta(seconds=1),
+    )
+    holding = SimpleNamespace(
+        family_key=seed.family_key,
+        bin_id=seed.bin_id,
+        side=seed.side,
+        token_id=seed.token_id,
+        position_id="position-chain-dust",
+        shares=Decimal("72.506664"),
+    )
+
+    candidate = S.global_sell_candidate_from_holding(
+        holding,
+        probability_witness=probability,
+        ledger_snapshot_id="ledger-chain-dust",
+        executable_sell_curve=sell_curve,
+        book_captured_at_utc=_DECISION_AT,
+    )
+
+    assert candidate is not None
+    assert candidate.held_shares == Decimal("72.50")
+
+
+def test_global_sell_materializer_omits_venue_illegal_dust_only_holding():
+    seed = _global_candidate(
+        candidate_id="sell-dust-only",
+        family="sell-dust-only-family",
+        side="YES",
+        q=0.20,
+    )
+    sell_curve = S.ExecutableSellCurve(
+        token_id=seed.token_id,
+        side=seed.side,
+        snapshot_id="sell-dust-only-book",
+        book_hash="sell-dust-only-hash",
+        levels=(BookLevel(price=Decimal("0.80"), size=Decimal("100")),),
+        fee_model=FeeModel(fee_rate=Decimal("0")),
+        min_tick=Decimal("0.001"),
+        min_order_size=Decimal("1"),
+        quote_ttl=timedelta(seconds=1),
+    )
+    holding = SimpleNamespace(
+        family_key=seed.family_key,
+        bin_id=seed.bin_id,
+        side=seed.side,
+        token_id=seed.token_id,
+        position_id="position-dust-only",
+        shares=Decimal("0.006664"),
+    )
+
+    candidate = S.global_sell_candidate_from_holding(
+        holding,
+        probability_witness=_global_probability_witness(seed),
+        ledger_snapshot_id="ledger-dust-only",
+        executable_sell_curve=sell_curve,
+        book_captured_at_utc=_DECISION_AT,
+    )
+
+    assert candidate is None
 
 
 def test_global_single_order_yes_best_matches_full_depth_exact_oracle():
