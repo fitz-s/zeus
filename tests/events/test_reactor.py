@@ -1000,6 +1000,45 @@ def test_global_target_processing_lease_blocks_new_target_materialization():
     ).fetchone() is None
 
 
+def test_boot_generation_requeues_only_prior_runtime_claims():
+    conn, store = _store()
+    old = _forecast_event("prior-runtime", target_date="2026-05-25")
+    current = _forecast_event("current-runtime", target_date="2026-05-26")
+    target = _forecast_event("prior-target", target_date="2026-05-27")
+    for event in (old, current, target):
+        store.insert_or_ignore(event)
+    assert store.claim(old.event_id, claimed_at="2026-05-24T18:00:00+00:00")
+    assert store.claim(current.event_id, claimed_at="2026-05-24T18:10:00+00:00")
+    store.requeue_pending(target.event_id, last_error="GLOBAL_WINNER_TARGETED_CLAIM")
+    assert store.claim(target.event_id, claimed_at="2026-05-24T18:01:00+00:00")
+
+    assert (
+        store.requeue_processing_before_boot(
+            boot_at="2026-05-24T18:05:00+00:00"
+        )
+        == 2
+    )
+
+    states = {
+        event_id: (status, claimed_at, reason)
+        for event_id, status, claimed_at, reason in conn.execute(
+            "SELECT event_id, processing_status, claimed_at, last_error "
+            "FROM opportunity_event_processing"
+        )
+    }
+    assert states[old.event_id] == ("pending", None, "PROCESS_OWNER_RESTARTED")
+    assert states[target.event_id] == (
+        "pending",
+        None,
+        "GLOBAL_WINNER_TARGETED_CLAIM",
+    )
+    assert states[current.event_id] == (
+        "processing",
+        "2026-05-24T18:10:00+00:00",
+        None,
+    )
+
+
 def test_global_target_allows_only_current_batch_processing_lease():
     conn, store = _store()
     inflight = _forecast_event("inflight-current-batch", target_date="2026-05-25")

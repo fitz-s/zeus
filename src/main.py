@@ -3699,7 +3699,31 @@ def _chain_mirror_reconcile_cycle() -> None:
     run_cycle()
 
 
-def _edli_boot_command_recovery_once() -> None:
+def _edli_boot_event_claim_recovery(*, boot_at: datetime) -> int:
+    """Return dead prior-runtime claims to the exactly-once queue before scheduling."""
+
+    if boot_at.tzinfo is None:
+        raise ValueError("EDLI_BOOT_AT_NAIVE")
+    from src.events.event_store import EventStore
+    from src.state.db import world_write_lock
+
+    world = get_world_connection()
+    try:
+        with world_write_lock(world):
+            recovered = EventStore(world).requeue_processing_before_boot(
+                boot_at=boot_at.astimezone(timezone.utc).isoformat()
+            )
+    finally:
+        world.close()
+    if recovered:
+        logger.warning(
+            "edli_boot_event_claim_recovery: requeued prior-runtime processing claims=%d",
+            recovered,
+        )
+    return recovered
+
+
+def _edli_boot_command_recovery_once(*, boot_at: datetime | None = None) -> None:
     """Run one bounded EDLI recovery pass before the first live reactor tick.
 
     The periodic ``edli_command_recovery`` job starts about a minute after boot.
@@ -3720,6 +3744,9 @@ def _edli_boot_command_recovery_once() -> None:
     from src.state.db import get_trade_connection_with_world_required
 
     summary = reconcile_unresolved_commands(scope="boot_fast")
+    _edli_boot_event_claim_recovery(
+        boot_at=boot_at or datetime.now(timezone.utc)
+    )
     try:
         from src.execution.edli_absence_resolver import take_boot_auto_resolution_continuations
 
@@ -5313,6 +5340,7 @@ def _exit_monitor_cycle() -> None:
 
 def main():
     _start = time.monotonic()  # F86: process start time for SIGTERM elapsed log
+    boot_at = datetime.now(timezone.utc)
     global BlockingScheduler
     if BlockingScheduler is None:
         from apscheduler.schedulers.blocking import BlockingScheduler as _BlockingScheduler
@@ -5617,7 +5645,7 @@ def main():
     edli_cfg = _settings_section("edli", {})
     live_execution_mode = _assert_live_execution_mode_contract(edli_cfg)
     _assert_edli_stage_readiness(edli_cfg)
-    _edli_boot_command_recovery_once()
+    _edli_boot_command_recovery_once(boot_at=boot_at)
     _edli_boot_invalid_pending_entry_authority_cancel_once()
     # SINGLE TRUTH (bias-maze strip 2026-06-17): the EMOS-CI license boot guard is REMOVED
     # (the override it guarded is gone). The legacy bias/Platt calibration-coverage contract

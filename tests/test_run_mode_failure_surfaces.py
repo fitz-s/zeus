@@ -5334,6 +5334,7 @@ def test_edli_boot_command_recovery_runs_before_scheduler_tick(monkeypatch) -> N
     fake_conn = FakeConn()
     calls: list[str] = []
     refresh_calls: list[FakeConn] = []
+    claim_recovery_calls = []
 
     monkeypatch.setattr(main_module, "_settings_section", lambda name, default=None: {"enabled": True})
     monkeypatch.setattr(main_module, "get_mode", lambda: "live")
@@ -5352,10 +5353,16 @@ def test_edli_boot_command_recovery_runs_before_scheduler_tick(monkeypatch) -> N
         "_edli_refresh_global_allocator_for_live_bridge",
         lambda conn: refresh_calls.append(conn) or {"configured": True},
     )
+    monkeypatch.setattr(
+        main_module,
+        "_edli_boot_event_claim_recovery",
+        lambda *, boot_at: claim_recovery_calls.append(boot_at) or 1,
+    )
 
     main_module._edli_boot_command_recovery_once()
 
     assert calls == ["boot_fast"]
+    assert len(claim_recovery_calls) == 1
     assert refresh_calls == [fake_conn]
     assert fake_conn.closed is True
 
@@ -5367,7 +5374,7 @@ def test_main_orders_boot_command_recovery_before_reactor_registration() -> None
 
     source = inspect.getsource(main_module.main)
 
-    boot_idx = source.index("_edli_boot_command_recovery_once()")
+    boot_idx = source.index("_edli_boot_command_recovery_once(")
     reactor_idx = source.index("id=\"edli_event_reactor\"")
     start_idx = source.index("scheduler.start()")
     assert boot_idx < reactor_idx < start_idx
@@ -5522,6 +5529,11 @@ def test_boot_auto_resolution_continuation_is_emitted_before_first_tick(monkeypa
         command_recovery,
         "reconcile_unresolved_commands",
         lambda **kwargs: {"scanned": 0, "advanced": 0},
+    )
+    monkeypatch.setattr(
+        main_module,
+        "_edli_boot_event_claim_recovery",
+        lambda *, boot_at: 0,
     )
     monkeypatch.setattr(
         resolver_mod,

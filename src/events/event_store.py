@@ -2105,6 +2105,36 @@ class EventStore:
             (not_before, last_error, _utc_now(), self.consumer_name, event_id),
         )
 
+    def requeue_processing_before_boot(self, *, boot_at: str) -> int:
+        """Recover claims whose process owner predates this runtime generation."""
+
+        boundary = _parse_utc(boot_at).isoformat()
+        now = _utc_now()
+        cur = self.conn.execute(
+            """
+            UPDATE opportunity_event_processing
+               SET processing_status = 'pending',
+                   claimed_at = NULL,
+                   processed_at = NULL,
+                   last_error = CASE
+                       WHEN last_error = ? THEN last_error
+                       ELSE 'PROCESS_OWNER_RESTARTED'
+                   END,
+                   updated_at = ?
+             WHERE consumer_name = ?
+               AND processing_status = 'processing'
+               AND claimed_at IS NOT NULL
+               AND claimed_at < ?
+            """,
+            (
+                GLOBAL_WINNER_TARGETED_CLAIM,
+                now,
+                self.consumer_name,
+                boundary,
+            ),
+        )
+        return int(cur.rowcount)
+
     def prioritize_global_winner(
         self,
         event: OpportunityEvent,
