@@ -1080,6 +1080,34 @@ def test_live_actionable_certificate_semantics_audits_unreferenced_qkernel_misma
     assert "payoff_q_point mismatches" in result.evidence["historical_risky"][0]["reason"]
 
 
+def test_live_actionable_certificate_semantics_ignores_submit_rejected_command(
+    monkeypatch, tmp_path
+):
+    world_db = tmp_path / "zeus-world.db"
+    trade_db = tmp_path / "zeus_trades.db"
+    payload = _valid_actionable_payload()
+    payload["event_id"] = "event-rejected"
+    payload["qkernel_execution_economics"] = {
+        **payload["qkernel_execution_economics"],
+        "payoff_q_point": 0.9,
+    }
+    _init_actionable_world_db(world_db, payload)
+    _init_entry_command_trade_db(
+        trade_db,
+        event_id="event-rejected",
+        state="SUBMIT_REJECTED",
+    )
+    monkeypatch.setattr(preflight, "WORLD_DB", world_db)
+    monkeypatch.setattr(preflight, "TRADE_DB", trade_db)
+
+    result = preflight._live_actionable_certificate_semantics_check()
+
+    assert result.ok is True
+    assert result.evidence["restart_relevant_entry_command_count"] == 0
+    assert result.evidence["risky_count"] == 0
+    assert result.evidence["historical_risky_count"] == 1
+
+
 def test_live_actionable_certificate_semantics_blocks_referenced_qkernel_mismatch(
     monkeypatch, tmp_path
 ):
@@ -3348,6 +3376,31 @@ def test_venue_point_order_truth_alignment_uses_local_terminal_no_fill_fact_with
     assert result.evidence["boot_recoverable"][0]["restart_resolution"] == (
         "command_recovery.terminal_order_fact_no_fill"
     )
+
+
+def test_venue_point_order_truth_alignment_ignores_submit_rejected_command(
+    monkeypatch,
+    tmp_path,
+):
+    trade_db = tmp_path / "zeus_trades.db"
+    _init_entry_venue_audit_db(
+        trade_db,
+        command_state="SUBMIT_REJECTED",
+        fact_state="LIVE",
+        matched_size="0",
+    )
+    monkeypatch.setattr(preflight, "TRADE_DB", trade_db)
+
+    def _unexpected_venue_reader():
+        raise AssertionError("terminal rejected command must not require venue read")
+
+    monkeypatch.setattr(preflight, "_preflight_venue_adapter", _unexpected_venue_reader)
+
+    result = preflight._venue_point_order_truth_alignment_check()
+
+    assert result.ok is True
+    assert result.evidence["command_count"] == 0
+    assert "no restart-relevant" in result.detail
 
 
 def test_venue_point_order_truth_alignment_marks_live_positive_match_boot_recoverable(

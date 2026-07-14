@@ -41,6 +41,7 @@ from src.config import STATE_DIR as DEFAULT_RUNTIME_STATE_DIR
 from src.contracts.position_truth import (
     CURRENT_MONEY_RISK_CHAIN_STATES,
 )
+from src.execution.command_bus import TERMINAL_STATES as COMMAND_TERMINAL_STATES
 
 from src.ops.monitor_cadence import collect_monitor_cadence_evidence
 from src.state.fill_dedup import canonical_trade_fact_cte
@@ -164,7 +165,7 @@ PRE_SUBMIT_ECONOMIC_FIELDS = (
     "qkernel_execution_economics",
 )
 TERMINAL_VENUE_COMMAND_STATES = frozenset(
-    {"EXPIRED", "CANCELLED", "CANCELED", "REJECTED", "FAILED", "FILLED"}
+    {state.value for state in COMMAND_TERMINAL_STATES} | {"CANCELED", "FAILED"}
 )
 TERMINAL_VENUE_FACT_STATES = frozenset(
     {
