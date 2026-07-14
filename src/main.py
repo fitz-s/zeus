@@ -85,6 +85,7 @@ _HELD_POSITION_MONITOR_DEFER_JOBS = frozenset(
 )
 _market_discovery_last_completed_monotonic: float | None = None
 OPENING_HUNT_FIRST_DELAY_SECONDS = 30.0
+_EDLI_COMMAND_RECOVERY_INTERVAL_SECONDS = 60.0
 HELD_POSITION_MONITOR_FIRST_DELAY_SECONDS = 5.0
 # Fitz #5 scheduler-liveness (2026-06-08): the EDLI market-substrate warm cycle's
 # APScheduler interval. The refresh wall-clock budget
@@ -3659,7 +3660,9 @@ def _edli_command_recovery_cycle() -> None:
     invisible exposure. reconcile_unresolved_commands (INV-31) previously ran
     ONLY inside the legacy cycle_runner loop; the EDLI event-driven lane had NO
     scheduled owner for unresolved side-effect states. This job gives the sweep
-    a 3-minute cadence independent of which lane is live. The sweep itself is
+    one cadence ahead of the next entry auction. This lets already-persisted
+    WS/REST fill facts clear capital ambiguity before the next decision without
+    polling faster than the 60-second decision clock. The sweep itself is
     unchanged (venue lookup per in-flight command; REVIEW_REQUIRED handoff for
     ack-lost rows without an order id).
     """
@@ -5761,7 +5764,7 @@ def main():
         scheduler.add_job(
             _edli_command_recovery_cycle,
             "interval",
-            minutes=3,
+            seconds=_EDLI_COMMAND_RECOVERY_INTERVAL_SECONDS,
             id="edli_command_recovery",
             next_run_time=_utc_run_time_after(OPENING_HUNT_FIRST_DELAY_SECONDS + 60.0),
             max_instances=1,

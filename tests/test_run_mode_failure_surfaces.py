@@ -5380,6 +5380,17 @@ def test_main_orders_boot_command_recovery_before_reactor_registration() -> None
     assert boot_idx < reactor_idx < start_idx
 
 
+def test_command_recovery_runs_once_per_entry_decision_clock() -> None:
+    """Persisted fill facts must clear ambiguity before the next auction."""
+    import inspect
+    import src.main as main_module
+
+    source = inspect.getsource(main_module.main)
+
+    assert main_module._EDLI_COMMAND_RECOVERY_INTERVAL_SECONDS == 60.0
+    assert "seconds=_EDLI_COMMAND_RECOVERY_INTERVAL_SECONDS" in source
+
+
 def test_boot_fast_command_recovery_includes_filled_entry_projection_repair() -> None:
     """Boot recovery must heal matched ENTRY fills before chain-sync sees them as chain-only."""
     import inspect
