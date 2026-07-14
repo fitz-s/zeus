@@ -3897,6 +3897,40 @@ def _persist_final_submission_envelope_payload(
         raise FinalSubmissionEnvelopePersistenceError(str(exc)) from exc
 
 
+def _ambiguous_submit_exception_payload(
+    conn: sqlite3.Connection,
+    exc: Exception,
+    *,
+    command_id: str,
+) -> dict[str, str]:
+    """Persist post-sign identity carried out of an ambiguous venue submit."""
+
+    from src.venue.polymarket_v2_adapter import AmbiguousSubmitError
+
+    if not isinstance(exc, AmbiguousSubmitError):
+        return {}
+    from src.state.venue_command_repo import insert_submission_envelope
+
+    envelope = exc.envelope
+    envelope_id = hashlib.sha256(envelope.to_json().encode("utf-8")).hexdigest()
+    try:
+        envelope_id = insert_submission_envelope(conn, envelope)
+    except sqlite3.IntegrityError:
+        if conn.execute(
+            "SELECT 1 FROM venue_submission_envelopes WHERE envelope_id = ?",
+            (envelope_id,),
+        ).fetchone() is None:
+            raise
+    payload = {
+        "final_submission_envelope_stage": "post_sign_pre_ack_exception",
+        "final_submission_envelope_id": envelope_id,
+        "final_submission_envelope_command_id": command_id,
+    }
+    if envelope.order_id:
+        payload["venue_order_id"] = str(envelope.order_id)
+    return payload
+
+
 def _submit_result_order_id(result) -> str | None:
     if not isinstance(result, dict):
         return None
@@ -5797,6 +5831,21 @@ def execute_exit_order(
                 exc,
                 idempotency_key=idem.value,
             )
+            ambiguous_payload: dict[str, str] = {}
+            if deterministic_rejection_payload is None:
+                try:
+                    ambiguous_payload = _ambiguous_submit_exception_payload(
+                        conn,
+                        exc,
+                        command_id=command_id,
+                    )
+                except Exception as inner:
+                    logger.error(
+                        "execute_exit_order: ambiguous submission envelope persistence failed "
+                        "(command_id=%s): %s",
+                        command_id,
+                        inner,
+                    )
             try:
                 if deterministic_rejection_payload is not None:
                     append_event(
@@ -5817,6 +5866,7 @@ def execute_exit_order(
                             "exception_type": type(exc).__name__,
                             "exception_message": str(exc),
                             "idempotency_key": idem.value,
+                            **ambiguous_payload,
                         },
                     )
                 conn.commit()
@@ -7391,6 +7441,21 @@ def _live_order(
                 exc,
                 idempotency_key=idem.value,
             )
+            ambiguous_payload: dict[str, str] = {}
+            if deterministic_rejection_payload is None:
+                try:
+                    ambiguous_payload = _ambiguous_submit_exception_payload(
+                        conn,
+                        exc,
+                        command_id=command_id,
+                    )
+                except Exception as inner:
+                    logger.error(
+                        "_live_order: ambiguous submission envelope persistence failed "
+                        "(command_id=%s): %s",
+                        command_id,
+                        inner,
+                    )
             try:
                 terminal_event_type = (
                     "SUBMIT_REJECTED"
@@ -7405,6 +7470,7 @@ def _live_order(
                         "exception_type": type(exc).__name__,
                         "exception_message": str(exc),
                         "idempotency_key": idem.value,
+                        **ambiguous_payload,
                     }
                 )
                 last_inner: Exception | None = None

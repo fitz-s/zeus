@@ -1321,15 +1321,45 @@ def test_two_step_signing_failure_is_typed_pre_submit_rejection(tmp_path):
     assert not any(call[0] == "post_order" for call in fake.calls)
 
 
-def test_post_order_exception_still_bubbles_as_possible_unknown_side_effect(tmp_path):
+def test_post_order_exception_carries_deterministic_order_identity(tmp_path, monkeypatch):
+    import src.venue.polymarket_v2_adapter as adapter_mod
+
     fake = FakePostOrderFailureClient()
     adapter, _ = _adapter(tmp_path, fake)
     envelope = adapter.create_submission_envelope(_intent(), FakeSnapshot(), order_type="GTC")
+    monkeypatch.setattr(
+        adapter_mod,
+        "_deterministic_v2_order_id",
+        lambda *args, **kwargs: "0xexpected-order-id",
+    )
 
-    with pytest.raises(TimeoutError, match="post timed out"):
+    with pytest.raises(adapter_mod.AmbiguousSubmitError, match="post timed out") as caught:
         adapter.submit(envelope)
 
+    assert caught.value.envelope.order_id == "0xexpected-order-id"
+    assert caught.value.envelope.signed_order == fake.signed_order
+    assert caught.value.envelope.error_code == "V2_POST_SUBMIT_AMBIGUOUS"
     assert any(call[0] == "post_order" for call in fake.calls)
+
+
+def test_response_order_id_mismatch_is_ambiguous(tmp_path, monkeypatch):
+    import src.venue.polymarket_v2_adapter as adapter_mod
+
+    fake = FakeTwoStepClient(post_response={"orderID": "0xwrong", "status": "LIVE"})
+    adapter, _ = _adapter(tmp_path, fake)
+    envelope = adapter.create_submission_envelope(_intent(), FakeSnapshot(), order_type="GTC")
+    monkeypatch.setattr(
+        adapter_mod,
+        "_deterministic_v2_order_id",
+        lambda *args, **kwargs: "0xexpected-order-id",
+    )
+
+    with pytest.raises(adapter_mod.AmbiguousSubmitError) as caught:
+        adapter.submit(envelope)
+
+    assert caught.value.envelope.order_id == "0xexpected-order-id"
+    assert caught.value.envelope.error_code == "V2_ORDER_ID_ACK_MISMATCH"
+    assert '"orderID":"0xwrong"' in (caught.value.envelope.raw_response_json or "")
 
 
 def test_invalid_safe_signature_is_deterministic_rejection_not_l2_credential_retry(tmp_path):

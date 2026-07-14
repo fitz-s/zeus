@@ -674,6 +674,59 @@ def test_network_timeout_after_POST_creates_unknown_not_rejected(conn):
     assert "SUBMIT_REJECTED" not in _events(conn, cmd["command_id"])
 
 
+def test_ambiguous_submit_persists_deterministic_order_identity(conn):
+    from src.execution.executor import _live_order
+    from src.venue.polymarket_v2_adapter import AmbiguousSubmitError
+
+    intent = _make_entry_intent(conn)
+    mock_client = MagicMock()
+    mock_client.v2_preflight.return_value = None
+    bound = _capture_bound_submission_envelope(mock_client)
+
+    def _raise_ambiguous(**kwargs):
+        envelope = bound["envelope"].with_updates(
+            signed_order=b"signed-order",
+            signed_order_hash=hashlib.sha256(b"signed-order").hexdigest(),
+            order_id="0xdeterministic-order-id",
+            error_code="V2_POST_SUBMIT_AMBIGUOUS",
+            error_message="post timed out",
+        )
+        raise AmbiguousSubmitError("post timed out", envelope=envelope)
+
+    mock_client.place_limit_order.side_effect = _raise_ambiguous
+
+    with patch("src.data.polymarket_client.PolymarketClient", return_value=mock_client):
+        result = _live_order(
+            "trade-m2-deterministic-id",
+            intent,
+            shares=18.0,
+            conn=conn,
+            decision_id="dec-m2-deterministic-id",
+        )
+
+    cmd = _command(conn)
+    assert result.status == "unknown_side_effect"
+    assert cmd["state"] == "SUBMIT_UNKNOWN_SIDE_EFFECT"
+    assert cmd["venue_order_id"] == "0xdeterministic-order-id"
+    event = conn.execute(
+        """
+        SELECT payload_json
+          FROM venue_command_events
+         WHERE command_id = ? AND event_type = 'SUBMIT_TIMEOUT_UNKNOWN'
+         ORDER BY sequence_no DESC LIMIT 1
+        """,
+        (cmd["command_id"],),
+    ).fetchone()
+    payload = json.loads(event["payload_json"])
+    assert payload["venue_order_id"] == "0xdeterministic-order-id"
+    envelope = conn.execute(
+        "SELECT order_id, signed_order_hash FROM venue_submission_envelopes WHERE envelope_id = ?",
+        (payload["final_submission_envelope_id"],),
+    ).fetchone()
+    assert envelope["order_id"] == "0xdeterministic-order-id"
+    assert envelope["signed_order_hash"] == hashlib.sha256(b"signed-order").hexdigest()
+
+
 def test_typed_venue_rejection_creates_SUBMIT_REJECTED(conn):
     from src.execution.executor import _live_order
 

@@ -221,6 +221,14 @@ class SubmitResult:
     error_message: Optional[str] = None
 
 
+class AmbiguousSubmitError(RuntimeError):
+    """POST crossed the venue boundary without a trustworthy acknowledgement."""
+
+    def __init__(self, message: str, *, envelope: VenueSubmissionEnvelope) -> None:
+        super().__init__(message)
+        self.envelope = envelope
+
+
 @dataclass(frozen=True)
 class CancelResult:
     status: str
@@ -713,11 +721,15 @@ class PolymarketV2Adapter:
             )
         signed_order = None
         signed_hash = None
+        expected_order_id = None
+        post_started = False
 
         def _submit_once(active_client: Any) -> Any:
-            nonlocal signed_order, signed_hash
+            nonlocal signed_order, signed_hash, expected_order_id, post_started
             signed_order = None
             signed_hash = None
+            expected_order_id = None
+            post_started = False
             create_order = getattr(active_client, "create_order", None)
             post_order = getattr(active_client, "post_order", None)
             if callable(create_order) and callable(post_order):
@@ -725,6 +737,13 @@ class PolymarketV2Adapter:
                 signed_bytes = _signed_order_bytes(local_signed_order)
                 signed_hash = hashlib.sha256(signed_bytes).hexdigest()
                 signed_order = signed_bytes
+                expected_order_id = _deterministic_v2_order_id(
+                    active_client,
+                    local_signed_order,
+                    chain_id=self.chain_id,
+                    neg_risk=envelope.neg_risk,
+                )
+                post_started = True
                 return post_order(
                     local_signed_order,
                     order_type=envelope.order_type,
@@ -733,6 +752,7 @@ class PolymarketV2Adapter:
                 )
             create_and_post = getattr(active_client, "create_and_post_order", None)
             if callable(create_and_post):
+                post_started = True
                 return create_and_post(
                     order_args,
                     options=options,
@@ -757,7 +777,7 @@ class PolymarketV2Adapter:
         try:
             raw_response = _submit_once(client)
         except Exception as exc:
-            if _is_polymarket_invalid_safe_signature_error(exc):
+            if post_started and _is_polymarket_invalid_safe_signature_error(exc):
                 logger.error(
                     "VENUE_ORDER_SIGNATURE_REJECTED: deterministic invalid Safe "
                     "order signature; not retrying through L2 credential refresh"
@@ -769,13 +789,39 @@ class PolymarketV2Adapter:
                     signed_order=signed_order,
                     signed_order_hash=signed_hash,
                 )
-            if signed_order is None:
+            if not post_started:
                 return _rejected_submit_result(
                     envelope,
                     error_code="V2_PRE_SUBMIT_EXCEPTION",
                     error_message=str(exc),
                 )
-            raise
+            ambiguous = envelope.with_updates(
+                signed_order=signed_order,
+                signed_order_hash=signed_hash,
+                order_id=expected_order_id,
+                error_code="V2_POST_SUBMIT_AMBIGUOUS",
+                error_message=str(exc),
+            )
+            raise AmbiguousSubmitError(str(exc), envelope=ambiguous) from exc
+
+        response_order_id = _extract_order_id(raw_response)
+        explicit_rejection = isinstance(raw_response, dict) and raw_response.get("success") is False
+        if expected_order_id and not explicit_rejection:
+            if not response_order_id or str(response_order_id).lower() != expected_order_id.lower():
+                detail = (
+                    "submit response missing deterministic order id"
+                    if not response_order_id
+                    else "submit response order id does not match locally signed order"
+                )
+                ambiguous = envelope.with_updates(
+                    signed_order=signed_order,
+                    signed_order_hash=signed_hash,
+                    raw_response_json=_canonical_json(raw_response or {}),
+                    order_id=expected_order_id,
+                    error_code="V2_ORDER_ID_ACK_MISMATCH",
+                    error_message=detail,
+                )
+                raise AmbiguousSubmitError(detail, envelope=ambiguous)
         return _submit_result_from_response(
             envelope,
             raw_response,
@@ -3410,6 +3456,31 @@ def _extract_string_sequence(raw: Any, *keys: str) -> tuple[str, ...]:
         if values:
             return values
     return ()
+
+
+def _deterministic_v2_order_id(
+    client: Any,
+    signed_order: Any,
+    *,
+    chain_id: int,
+    neg_risk: bool,
+) -> str | None:
+    """Return the EIP-712 order hash when the SDK exposes a real V2 order."""
+
+    from py_clob_client_v2.config import get_contract_config
+    from py_clob_client_v2.order_utils import ExchangeOrderBuilderV2
+    from py_clob_client_v2.order_utils.model.order_data_v2 import SignedOrderV2
+
+    if not isinstance(signed_order, SignedOrderV2):
+        return None
+    signer = getattr(client, "signer", None)
+    if signer is None:
+        raise ValueError("V2 signed order identity requires SDK signer")
+    config = get_contract_config(chain_id)
+    contract = config.neg_risk_exchange_v2 if neg_risk else config.exchange_v2
+    builder = ExchangeOrderBuilderV2(contract, chain_id, signer)
+    typed_data = builder.build_order_typed_data(signed_order)
+    return str(builder.build_order_hash(typed_data))
 
 
 def _unmapped_submit_result(
