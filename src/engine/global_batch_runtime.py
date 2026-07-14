@@ -205,11 +205,15 @@ def _store_global_auction_receipt(
         raise ValueError("GLOBAL_AUCTION_RECEIPT_DECISION_MISSING")
     evaluations = tuple(getattr(decision, "candidate_evaluations", ()) or ())
     evaluation_rows = tuple(asdict(evaluation) for evaluation in evaluations)
-    rejection_groups: dict[tuple[str, str], list[str]] = {}
+    rejection_groups: dict[tuple[str, str, str], list[str]] = {}
     detailed_rows: list[dict] = []
     for row in evaluation_rows:
         if row.get("status") == "REJECTED" and row.get("action") == "BUY":
-            key = (str(row["action"]), str(row["rejection_reason"]))
+            key = (
+                str(row["action"]),
+                str(row["side"]),
+                str(row["rejection_reason"]),
+            )
             rejection_groups.setdefault(key, []).append(str(row["candidate_id"]))
         else:
             detailed_rows.append(row)
@@ -217,10 +221,13 @@ def _store_global_auction_receipt(
         "rejected_groups": [
             {
                 "action": action,
+                "side": side,
                 "reason": reason,
                 "candidate_ids": candidate_ids,
             }
-            for (action, reason), candidate_ids in sorted(rejection_groups.items())
+            for (action, side, reason), candidate_ids in sorted(
+                rejection_groups.items()
+            )
         ],
         "detailed": detailed_rows,
     }

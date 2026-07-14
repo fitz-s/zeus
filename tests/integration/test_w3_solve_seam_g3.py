@@ -192,6 +192,7 @@ def test_global_auction_receipt_persists_complete_buy_sell_hold_cash_comparison(
     assert candidate_evaluations["rejected_groups"] == [
         {
             "action": "BUY",
+            "side": "YES",
             "reason": "ENTRY_ACTION_PAUSED:external:operator",
             "candidate_ids": ["buy-paused"],
         }
