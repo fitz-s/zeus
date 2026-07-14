@@ -2550,11 +2550,13 @@ def _stress_coherent_samples_to_marginal_ucb_floors(
         if int(rows.size) != stress_rows:
             raise ValueError("finite-evidence tail stress rows unavailable")
         old = probs[rows, target]
-        if np.any(old >= 1.0):
-            raise ValueError("finite-evidence tail stress cannot widen a certain bin")
-        scale = (1.0 - target_floor) / (1.0 - old)
-        probs[rows, :] = probs[rows, :] * scale[:, None]
-        probs[rows, target] = target_floor
+        raise_mask = old < target_floor
+        raise_rows = rows[raise_mask]
+        if int(raise_rows.size):
+            old_raise = old[raise_mask]
+            scale = (1.0 - target_floor) / (1.0 - old_raise)
+            probs[raise_rows, :] = probs[raise_rows, :] * scale[:, None]
+            probs[raise_rows, target] = target_floor
         available[rows] = False
     if not np.isfinite(probs).all() or not np.allclose(
         probs.sum(axis=1), 1.0, atol=1e-12

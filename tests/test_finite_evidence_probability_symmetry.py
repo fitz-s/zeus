@@ -1,5 +1,5 @@
 # Created: 2026-07-11
-# Last reused/audited: 2026-07-11
+# Last reused/audited: 2026-07-14
 # Authority basis: docs/authority/replacement_final_form_2026_06_09.md §1f;
 # current-evidence finite-sample and moment-ambiguity algebra.
 """First-principles symmetry tests for source-clock executable probability."""
@@ -122,6 +122,20 @@ def test_zero_hit_floor_is_encoded_in_one_coherent_simplex() -> None:
     assert float(sorted(stressed[:, 0])[94]) >= zero_hit_ucb
     no_samples = sorted(1.0 - float(value) for value in stressed[:, 0])
     assert sum(no_samples[:5]) / 5.0 <= 1.0 - zero_hit_ucb + 1e-12
+
+
+def test_tail_stress_preserves_existing_certain_rows_and_raises_only_deficit() -> None:
+    raw = [[1.0, 0.0] for _ in range(4)] + [[0.0, 1.0] for _ in range(96)]
+    zero_hit_ucb = _finite_evidence_zero_hit_ucb_floor(2)
+
+    stressed = _stress_coherent_samples_to_marginal_ucb_floors(
+        raw,
+        [zero_hit_ucb, 1.0],
+    )
+
+    assert all(math.isclose(float(row.sum()), 1.0, abs_tol=1e-12) for row in stressed)
+    assert all(stressed[index, 0] == 1.0 for index in range(4))
+    assert float(sorted(stressed[:, 0])[94]) >= zero_hit_ucb
 
 
 def test_day0_absorbing_fact_dominates_forecast_ambiguity() -> None:
