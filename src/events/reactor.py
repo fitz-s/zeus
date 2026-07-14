@@ -6878,10 +6878,11 @@ def _edli_decision_family_snapshot_refresher(topology_conn):
 
     Broad warming remains sidecar-owned. When the selected row is already stale
     inside the money path, the decision needs a current executable book, not just
-    an asynchronous marker. The refresher first leaves the priority marker as a
-    sidecar fallback, then asks the substrate producer for an exact scoped refresh
-    under the shared cross-process lock. It returns True only after a fresh
-    condition read proves the selected scope is current.
+    an asynchronous marker. The refresher first asks the substrate producer for
+    an exact scoped refresh under the shared cross-process lock. Only a failed
+    inline refresh leaves a priority marker for sidecar retry, so the fallback
+    cannot take the lock from the selected winner. It returns True only after a
+    fresh condition read proves the selected scope is current.
     """
     import logging as _logging
     _log = _logging.getLogger("zeus.events.reactor")
@@ -6902,19 +6903,6 @@ def _edli_decision_family_snapshot_refresher(topology_conn):
         )
         if not family[0] or not family[1] or family[2] not in {"high", "low"}:
             return False
-        try:
-            from src.data.substrate_priority import mark_money_path_substrate_priority
-
-            mark_money_path_substrate_priority(
-                reason="decision_triggered_targeted_refresh",
-                ttl_seconds=45.0,
-                families=[family],
-                condition_ids=condition_ids,
-                force_refresh_condition_ids=(condition_ids if force_refresh else ()),
-                merge_existing=not force_refresh,
-            )
-        except Exception as exc:  # noqa: BLE001
-            _log.debug("decision family refresh: priority marker write failed: %r", exc)
         clean_condition_ids = tuple(
             str(condition_id or "").strip()
             for condition_id in (condition_ids or ())
@@ -6991,6 +6979,25 @@ def _edli_decision_family_snapshot_refresher(topology_conn):
         else:
             status = str((summary or {}).get("status") or "")
             proved_fresh = status in {"refreshed", "all_fresh"}
+        if not proved_fresh:
+            try:
+                from src.data.substrate_priority import (
+                    mark_money_path_substrate_priority,
+                )
+
+                mark_money_path_substrate_priority(
+                    reason="decision_triggered_targeted_refresh",
+                    ttl_seconds=45.0,
+                    families=[family],
+                    condition_ids=condition_ids,
+                    force_refresh_condition_ids=(condition_ids if force_refresh else ()),
+                    merge_existing=not force_refresh,
+                )
+            except Exception as exc:  # noqa: BLE001
+                _log.debug(
+                    "decision family refresh: priority marker write failed: %r",
+                    exc,
+                )
         _log.info(
             "decision family refresh completed: %s/%s/%s condition_ids=%d "
             "proved_fresh=%s summary=%r",

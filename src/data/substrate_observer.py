@@ -236,14 +236,18 @@ def _priority_refresh_lock_wait_seconds() -> float:
 
 
 def _inline_refresh_lock_wait_seconds() -> float:
-    """Bounded wait for the exact selected-winner refresh behind sidecar work."""
+    """Bounded wait long enough for existing background work to release the lock."""
 
-    raw = os.environ.get("ZEUS_MONEY_PATH_INLINE_SUBSTRATE_LOCK_WAIT_SECONDS", "4.0")
+    default_wait_s = min(20.0, _background_warm_refresh_budget_seconds() + 1.0)
+    raw = os.environ.get(
+        "ZEUS_MONEY_PATH_INLINE_SUBSTRATE_LOCK_WAIT_SECONDS",
+        str(default_wait_s),
+    )
     try:
         value = float(raw)
     except (TypeError, ValueError):
-        value = 4.0
-    return max(0.0, min(value, 10.0))
+        value = default_wait_s
+    return max(0.0, min(value, 20.0))
 
 
 def _priority_snapshot_reserve_seconds(refresh_budget_s: float) -> float:

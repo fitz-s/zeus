@@ -1,5 +1,5 @@
 # Created: 2026-06-01
-# Last reused/audited: 2026-07-11
+# Last reused/audited: 2026-07-14
 # Authority basis (2026-06-13 add): docs/archive/2026-Q2/operations_historical/live_inventory_warm_skip_2026-06-13.md —
 #   venue-close warm-skip relationship tests (live-inventory focus; market_phase.family_venue_closed).
 # Authority basis: src/main.py:_edli_event_reactor_cycle (historical inline substrate refresh
@@ -865,16 +865,7 @@ def test_decision_refresher_invokes_scoped_producer_and_proves_freshness(monkeyp
         metric="low",
         condition_ids=("cond-1",),
     ) is True
-    assert marked == [
-        {
-            "reason": "decision_triggered_targeted_refresh",
-            "ttl_seconds": 45.0,
-            "families": [("Paris", "2026-06-20", "low")],
-            "condition_ids": ("cond-1",),
-            "force_refresh_condition_ids": (),
-            "merge_existing": True,
-        }
-    ]
+    assert marked == []
     assert refreshed == [
         {
             "families": [("Paris", "2026-06-20", "low")],
@@ -930,16 +921,7 @@ def test_global_winner_refresher_requests_exact_condition_recapture(monkeypatch)
     ) is True
     assert refreshed[0]["condition_ids"] == ("winner-condition",)
     assert refreshed[0]["force_refresh"] is True
-    assert marked == [
-        {
-            "reason": "decision_triggered_targeted_refresh",
-            "ttl_seconds": 45.0,
-            "families": [("Wellington", "2026-07-12", "high")],
-            "condition_ids": ("winner-condition",),
-            "force_refresh_condition_ids": ("winner-condition",),
-            "merge_existing": False,
-        }
-    ]
+    assert marked == []
 
 
 def test_global_winner_refresher_rejects_lock_busy_cached_fresh_row(monkeypatch):
@@ -948,10 +930,11 @@ def test_global_winner_refresher_rejects_lock_busy_cached_fresh_row(monkeypatch)
     import src.data.substrate_observer as substrate_observer_module
     import src.data.substrate_priority as substrate_priority
 
+    marked: list[dict] = []
     monkeypatch.setattr(
         substrate_priority,
         "mark_money_path_substrate_priority",
-        lambda **_kwargs: None,
+        lambda **kwargs: marked.append(kwargs),
     )
     monkeypatch.setattr(
         substrate_observer_module,
@@ -972,6 +955,16 @@ def test_global_winner_refresher_rejects_lock_busy_cached_fresh_row(monkeypatch)
         condition_ids=("winner-condition",),
         force_refresh=True,
     ) is False
+    assert marked == [
+        {
+            "reason": "decision_triggered_targeted_refresh",
+            "ttl_seconds": 45.0,
+            "families": [("Wellington", "2026-07-12", "high")],
+            "condition_ids": ("winner-condition",),
+            "force_refresh_condition_ids": ("winner-condition",),
+            "merge_existing": False,
+        }
+    ]
 
 
 def test_forced_priority_marker_preserves_exact_scope_and_receipt(monkeypatch, tmp_path):
@@ -1244,7 +1237,9 @@ def test_inline_winner_refresh_waits_through_sidecar_lock_collision(monkeypatch)
     import src.state.db as state_db
 
     monkeypatch.delenv("ZEUS_MONEY_PATH_INLINE_SUBSTRATE_LOCK_WAIT_SECONDS", raising=False)
-    assert substrate_observer._inline_refresh_lock_wait_seconds() == pytest.approx(4.0)
+    lock_wait_s = substrate_observer._inline_refresh_lock_wait_seconds()
+    assert lock_wait_s == pytest.approx(15.0)
+    assert lock_wait_s > substrate_observer._background_warm_refresh_budget_seconds()
 
     lock_attempts: list[bool] = []
     lock_exits: list[bool] = []
@@ -1297,7 +1292,7 @@ def test_inline_winner_refresh_waits_through_sidecar_lock_collision(monkeypatch)
 
     assert summary["status"] == "refreshed"
     assert summary["inserted"] == 2
-    assert summary["lock_wait_seconds"] == pytest.approx(4.0)
+    assert summary["lock_wait_seconds"] == pytest.approx(lock_wait_s)
     assert lock_attempts == [False, True]
     assert lock_exits == [False, True]
     assert sleep_calls and sleep_calls[0] <= 0.05

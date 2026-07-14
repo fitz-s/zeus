@@ -545,6 +545,76 @@ def test_global_actuation_revalidates_content_then_preserves_selected_witness(mo
     conn.close()
 
 
+def test_day0_current_probability_does_not_require_derived_carrier_q_mode():
+    from src.events.candidate_binding import weather_family_id
+
+    captured_at = _dt.datetime(2026, 7, 14, 4, 58, tzinfo=_dt.timezone.utc)
+    family_key = weather_family_id(
+        city="Shenzhen",
+        target_date="2026-07-14",
+        metric="high",
+    )
+    event = make_opportunity_event(
+        event_type="DAY0_EXTREME_UPDATED",
+        entity_key="Shenzhen|2026-07-14|high|ZGSZ",
+        source="global_auction_winner_target:test",
+        observed_at="2026-07-14T04:00:00+00:00",
+        available_at="2026-07-14T04:01:00+00:00",
+        received_at="2026-07-14T04:01:00+00:00",
+        causal_snapshot_id="day0-current-probability-test",
+        payload={
+            "city": "Shenzhen",
+            "target_date": "2026-07-14",
+            "metric": "high",
+        },
+    )
+    witness = SimpleNamespace(
+        family_key=family_key,
+        witness_identity="day0-witness",
+        q_version="day0-q",
+        resolution_identity="day0-resolution",
+        topology_identity="day0-topology",
+        posterior_identity_hash="day0-posterior",
+        source_truth_identity="day0-source-truth-with-remaining-day-mode",
+        authority_certificate_hash="day0-certificate",
+        band_alpha=0.05,
+        band_basis=era._GLOBAL_CURRENT_SETTLEMENT_SIMPLEX_BAND_BASIS,
+        yes_q_samples=np.asarray(((0.25, 0.75), (0.30, 0.70))),
+        captured_at_utc=captured_at,
+        max_age=_dt.timedelta(minutes=3),
+    )
+
+    conn = sqlite3.connect(":memory:")
+    try:
+        authority = era.current_global_probability_authority(
+            conn,
+            event,
+            witness,
+            decision_time=captured_at + _dt.timedelta(seconds=30),
+        )
+
+        assert authority is not None
+        assert authority.family_key == family_key
+        assert "_edli_day0_q_mode" not in json.loads(event.payload_json)
+        wrong_basis = SimpleNamespace(
+            **{**vars(witness), "band_basis": "wrong-basis"}
+        )
+        assert era.current_global_probability_authority(
+            conn,
+            event,
+            wrong_basis,
+            decision_time=captured_at + _dt.timedelta(seconds=30),
+        ) is None
+        assert era.current_global_probability_authority(
+            conn,
+            event,
+            witness,
+            decision_time=captured_at + _dt.timedelta(minutes=4),
+        ) is None
+    finally:
+        conn.close()
+
+
 def _stale_day0_carrier_and_current_observations():
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row

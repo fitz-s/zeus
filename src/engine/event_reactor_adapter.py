@@ -23372,7 +23372,6 @@ def current_global_probability_authority(
         if (
             str(getattr(witness, "band_basis", ""))
             != _GLOBAL_CURRENT_SETTLEMENT_SIMPLEX_BAND_BASIS
-            or str(payload.get("_edli_day0_q_mode") or "") != "remaining_day"
             or not isinstance(captured_at, datetime)
             or captured_at.tzinfo is None
             or not isinstance(max_age, timedelta)
