@@ -931,6 +931,10 @@ def _ensure_envelope(
     raw_response_json: str | None = None,
     order_id: str | None = None,
     transaction_hashes: tuple[str, ...] = (),
+    signed_order: bytes | None = None,
+    signed_order_hash: str | None = None,
+    error_code: str | None = None,
+    error_message: str | None = None,
 ) -> str:
     from src.contracts.venue_submission_envelope import VenueSubmissionEnvelope
     from src.state.venue_command_repo import insert_submission_envelope
@@ -969,15 +973,15 @@ def _ensure_envelope(
             neg_risk=False,
             fee_details={},
             canonical_pre_sign_payload_hash="d" * 64,
-            signed_order=None,
-            signed_order_hash=None,
+            signed_order=signed_order,
+            signed_order_hash=signed_order_hash,
             raw_request_hash="e" * 64,
             raw_response_json=raw_response_json,
             order_id=order_id,
             trade_ids=(),
             transaction_hashes=transaction_hashes,
-            error_code=None,
-            error_message=None,
+            error_code=error_code,
+            error_message=error_message,
             captured_at=_NOW.isoformat(),
         ),
         envelope_id=envelope_id,
@@ -11876,6 +11880,68 @@ class TestRecoveryResolutionTable:
         assert payload["reason"] == "venue_rejected_invalid_amount_400"
         assert payload["proof_class"] == "deterministic_venue_invalid_amount_400"
         assert payload["venue_order_created"] is False
+
+    def test_unknown_side_effect_fok_killed_400_terminalizes_without_lookup(
+        self,
+        conn,
+        mock_client,
+    ):
+        from src.state.venue_command_repo import append_event
+
+        error = (
+            "PolyApiException[status_code=400, error_message={'error': \"order "
+            "couldn't be fully filled. FOK orders are fully filled or killed.\", "
+            "'orderID': 'ord-fok-killed'}]"
+        )
+        _insert(conn, price=0.72, size=16.5)
+        _advance_to_submitting(conn, venue_order_id="ord-fok-killed")
+        envelope_id = _ensure_envelope(
+            conn,
+            token_id="tok-001",
+            envelope_id="env-fok-killed",
+            order_type="FOK",
+            price=0.72,
+            size=16.5,
+            order_id="ord-fok-killed",
+            signed_order=b"signed-fok-killed",
+            signed_order_hash="a" * 64,
+            error_code="V2_POST_SUBMIT_AMBIGUOUS",
+            error_message=error,
+        )
+        append_event(
+            conn,
+            command_id="cmd-001",
+            event_type="SUBMIT_TIMEOUT_UNKNOWN",
+            occurred_at="2026-04-26T00:02:00Z",
+            payload={
+                "reason": "post_submit_exception_possible_side_effect",
+                "exception_type": "AmbiguousSubmitError",
+                "exception_message": error,
+                "final_submission_envelope_id": envelope_id,
+                "final_submission_envelope_command_id": "cmd-001",
+                "venue_order_id": "ord-fok-killed",
+                "idempotency_key": _DEFAULT_IDEM_KEY,
+            },
+        )
+
+        from src.execution.command_recovery import reconcile_unresolved_commands
+
+        summary = reconcile_unresolved_commands(conn, mock_client)
+
+        assert summary["advanced"] == 1
+        assert summary["errors"] == 0
+        assert _get_state(conn, "cmd-001") == "SUBMIT_REJECTED"
+        mock_client.get_order.assert_not_called()
+        rejected = [
+            event
+            for event in _get_events(conn, "cmd-001")
+            if event["event_type"] == "SUBMIT_REJECTED"
+        ][-1]
+        payload = json.loads(rejected["payload_json"])
+        assert payload["reason"] == "venue_rejected_fok_killed_400"
+        assert payload["proof_class"] == "deterministic_venue_fok_killed_400"
+        assert payload["terminal_no_fill"] is True
+        assert payload["exposure_created"] is False
 
     def test_unknown_side_effect_marketable_buy_min_size_400_terminalizes_without_lookup(
         self,
