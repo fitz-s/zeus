@@ -1059,13 +1059,24 @@ def _entry_increment_fact_backing_component(
     aggregate_cost = _positive_decimal_or_none(
         (aggregate or {}).get("filled_cost_basis_usd")
     )
+    projected_cost_key = (
+        projected_cost.quantize(_ENTRY_INCREMENT_COST_ABS_TOLERANCE)
+        if projected_cost is not None
+        else None
+    )
+    aggregate_cost_key = (
+        aggregate_cost.quantize(_ENTRY_INCREMENT_COST_ABS_TOLERANCE)
+        if aggregate_cost is not None
+        else None
+    )
     if (
         projected_shares is None
         or projected_cost is None
         or aggregate_shares is None
         or aggregate_cost is None
         or abs(projected_shares - aggregate_shares) > Decimal("0.000000001")
-        or abs(projected_cost - aggregate_cost) > _ENTRY_INCREMENT_COST_ABS_TOLERANCE
+        or abs(projected_cost_key - aggregate_cost_key)
+        > _ENTRY_INCREMENT_COST_ABS_TOLERANCE
     ):
         return _capability_component(
             "entry_increment_fact_backing",
