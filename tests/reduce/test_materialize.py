@@ -12,8 +12,9 @@ from __future__ import annotations
 import pytest
 
 from src.reduce.generation import GenerationStore
-from src.reduce.materialize import materialize_generation
+from src.reduce.materialize import materialize_and_publish_cycle, materialize_generation
 from src.reduce.position_economics import ConditionAttributionMissingError
+from src.reduce.read_model import latest_generation_id
 from tests.reduce.conftest import (
     NOW,
     insert_identity_superseded,
@@ -235,3 +236,68 @@ class TestDeterminism:
         assert econ1.realized_pnl_usd == econ2.realized_pnl_usd
         assert econ1.payout_pnl_usd == econ2.payout_pnl_usd == pytest.approx(-5.0)
         assert econ1.total_realized_pnl_usd == econ2.total_realized_pnl_usd
+
+
+class TestMaterializeAndPublishCycle:
+    """src.reduce.materialize.materialize_and_publish_cycle -- the daemon-
+    facing summary wrapper. NOT wired into any daemon by this packet (see its
+    own docstring); these tests only prove it is callable end-to-end on a
+    fixture and returns the documented four-key summary shape."""
+
+    def test_callable_on_a_fixture_and_returns_the_documented_summary_shape(self, conn):
+        seed_fill_sync_watermark(conn, source="polymarket_v2_get_trades")
+        insert_position_current(conn, position_id="p1", condition_id=None, direction=None)
+        insert_venue_command(conn, command_id="c1", position_id="p1", intent_kind="ENTRY")
+        insert_trade_fact(
+            conn, command_id="c1", filled_size="10", fill_price="0.5",
+            observed_at="2026-07-14T12:00:00+00:00",
+        )
+        insert_venue_command(conn, command_id="c2", position_id="p1", intent_kind="EXIT")
+        insert_trade_fact(
+            conn, command_id="c2", filled_size="10", fill_price="0.6",
+            observed_at="2026-07-14T12:05:00+00:00",
+        )
+
+        summary = materialize_and_publish_cycle(conn, computed_at=NOW)
+
+        assert set(summary.keys()) == {"generation_id", "materialized", "refused_by_type", "coverage"}
+        assert isinstance(summary["generation_id"], str) and summary["generation_id"]
+        assert summary["materialized"] == 1
+        assert summary["refused_by_type"] == {}
+        assert summary["coverage"]["fill_sync_watermarks"] == {"polymarket_v2_get_trades": NOW}
+
+    def test_default_fill_sync_source_matches_the_real_synchronizer_default(self, conn):
+        """The default MUST be the real production source name
+        (src.ingest.fill_synchronizer.DEFAULT_SOURCE), not
+        materialize_generation's own synthetic-fixture "polymarket_v2"
+        default -- a daemon calling this with no override must resolve
+        watermark coverage against the source it actually syncs from."""
+        from src.ingest.fill_synchronizer import DEFAULT_SOURCE
+
+        seed_fill_sync_watermark(conn, source=DEFAULT_SOURCE, watermark_ts="2026-07-14T09:00:00+00:00")
+        insert_position_current(conn, position_id="p1", condition_id=None, direction=None)
+
+        summary = materialize_and_publish_cycle(conn, computed_at=NOW)
+
+        assert summary["coverage"]["fill_sync_watermarks"] == {DEFAULT_SOURCE: "2026-07-14T09:00:00+00:00"}
+
+    def test_refusals_are_counted_by_type_not_silently_dropped(self, conn):
+        seed_fill_sync_watermark(conn, source="polymarket_v2_get_trades")
+        insert_position_current(conn, position_id="p-open", condition_id=None, direction=None)
+        insert_venue_command(conn, command_id="c1", position_id="p-open", intent_kind="ENTRY")
+        insert_trade_fact(conn, command_id="c1", filled_size="10", fill_price="0.5")
+
+        summary = materialize_and_publish_cycle(conn, computed_at=NOW)
+
+        assert summary["materialized"] == 0
+        assert summary["refused_by_type"] == {"ConditionAttributionMissingError": 1}
+
+    def test_published_generation_is_visible_to_the_read_model(self, conn):
+        """Integration proof: the cycle's own publish is the SAME publish
+        latest_generation_id/latest_position_economics read back."""
+        seed_fill_sync_watermark(conn, source="polymarket_v2_get_trades")
+        insert_position_current(conn, position_id="p1", condition_id=None, direction=None)
+
+        summary = materialize_and_publish_cycle(conn, computed_at=NOW)
+
+        assert latest_generation_id(conn) == summary["generation_id"]

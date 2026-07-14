@@ -152,6 +152,55 @@ def _dedupe_by_keeper(
     return kept, absorbed_duplicates
 
 
+def materialize_and_publish_cycle(
+    conn,
+    *,
+    computed_at: str,
+    fill_sync_source: str = "polymarket_v2_get_trades",
+) -> dict:
+    """One materialize-and-publish cycle, summarized for a daemon job's log.
+
+    Thin wrapper around ``materialize_generation`` -- reimplements nothing
+    (see module docstring: "This module reimplements NEITHER ... This is
+    pure orchestration"). ``fill_sync_source`` defaults to
+    ``"polymarket_v2_get_trades"`` -- the real production sync source name
+    (``src.ingest.fill_synchronizer.DEFAULT_SOURCE``), NOT
+    ``materialize_generation``'s own ``"polymarket_v2"`` synthetic-fixture
+    default -- this is the entry point a real daemon job would call.
+
+    NOT WIRED INTO ANY DAEMON BY THIS PACKET. No scheduler, no cron entry,
+    no cycle_runner hook imports this function yet -- adding one is a future,
+    separate, coordinated deploy step (LX-3R activation), not a foundation-
+    building concern. Callers wanting only the raw result (e.g. to inspect
+    ``result.refusals`` in detail) should call ``materialize_generation``
+    directly; this wrapper exists purely to give a daemon a small,
+    log-friendly, JSON-serializable summary rather than the full dataclass
+    graph.
+
+    Returns
+    -------
+    dict with exactly four keys:
+        generation_id: str -- the published generation's id.
+        materialized: int -- count of positions successfully folded and
+            published (``len(result.economics)``).
+        refused_by_type: dict[str, int] -- refusal counts by
+            ``ReducerRefusal`` subclass name
+            (``MaterializationResult.refusal_counts_by_type``).
+        coverage: dict -- the published generation's coverage vector
+            (``CoverageVector.as_dict()``), the same shape already stored in
+            ``reduce_generations.coverage_json``.
+    """
+    result = materialize_generation(
+        conn, computed_at=computed_at, fill_sync_source=fill_sync_source
+    )
+    return {
+        "generation_id": result.generation.generation_id,
+        "materialized": len(result.economics),
+        "refused_by_type": result.refusal_counts_by_type,
+        "coverage": result.generation.coverage.as_dict(),
+    }
+
+
 def materialize_generation(
     conn,
     *,
@@ -250,4 +299,5 @@ __all__ = [
     "PositionRefusal",
     "MaterializationResult",
     "materialize_generation",
+    "materialize_and_publish_cycle",
 ]
