@@ -22732,7 +22732,6 @@ def _global_day0_execution_payload(
     try:
         observed_native = float(fact["observed_extreme_native"])
         conditioned_c = float(conditioning["observed_extreme_c"])
-        conditioned_samples = int(conditioning["sample_count"])
         observed_samples = int(fact["sample_count"])
     except (KeyError, TypeError, ValueError) as exc:
         raise ValueError("GLOBAL_DAY0_CONDITIONING_OBSERVATION_INVALID") from exc
@@ -22745,12 +22744,12 @@ def _global_day0_execution_payload(
         if unit == "C"
         else (observed_native - 32.0) * 5.0 / 9.0
     )
+    # Carrier source and row count are provenance, not state variables.  The
+    # posterior and current fact may bind the same station-time extreme through
+    # different durable surfaces or with different cumulative row counts.
     if (
         not math.isclose(observed_c, conditioned_c, rel_tol=0.0, abs_tol=1e-9)
-        or conditioned_samples != observed_samples
         or str(conditioning.get("unit") or "").strip().upper() != unit
-        or str(conditioning.get("source") or "").strip()
-        != str(fact.get("source") or "").strip()
     ):
         raise ValueError("GLOBAL_DAY0_CONDITIONING_OBSERVATION_MISMATCH")
 

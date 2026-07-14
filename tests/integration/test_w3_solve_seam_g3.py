@@ -769,6 +769,29 @@ def test_global_day0_actuation_rebinds_stale_carrier_to_current_conditioning():
         decision_time=_dt.datetime(2026, 7, 10, 20, 0, tzinfo=_dt.timezone.utc),
         posterior_id=29914,
     )
+    with pytest.raises(
+        ValueError,
+        match="GLOBAL_DAY0_CONDITIONING_OBSERVATION_MISMATCH",
+    ):
+        era._global_day0_execution_payload(
+            carrier,
+            family=SimpleNamespace(
+                city="Moscow", target_date="2026-07-10", metric="high"
+            ),
+            resolution=SimpleNamespace(measurement_unit="C", station_id="UUWW"),
+            conditioning={
+                "active": True,
+                "metric": "high",
+                "observation_time": "2026-07-10T19:00:00+00:00",
+                "observed_extreme_c": 26.0,
+                "sample_count": 1,
+                "source": "durable_day0_event:ogimet_metar_uuww",
+                "unit": "C",
+            },
+            observation_conn=conn,
+            decision_time=_dt.datetime(2026, 7, 10, 20, 0, tzinfo=_dt.timezone.utc),
+            posterior_id=29914,
+        )
     conn.close()
 
     assert json.loads(carrier.payload_json)["observation_time"] == "2026-07-10T13:00:00+00:00"
@@ -778,6 +801,33 @@ def test_global_day0_actuation_rebinds_stale_carrier_to_current_conditioning():
     assert rebound["station_id"] == "UUWW"
     assert rebound["settlement_source"] == "ogimet_metar_uuww"
     assert rebound["_edli_global_day0_binding"]["posterior_id"] == 29914
+
+
+def test_global_day0_actuation_compares_physical_state_not_carrier_provenance():
+    conn, carrier = _stale_day0_carrier_and_current_observations()
+    rebound = era._global_day0_execution_payload(
+        carrier,
+        family=SimpleNamespace(city="Moscow", target_date="2026-07-10", metric="high"),
+        resolution=SimpleNamespace(measurement_unit="C", station_id="UUWW"),
+        conditioning={
+            "active": True,
+            "metric": "high",
+            "observation_time": "2026-07-10T19:00:00+00:00",
+            "observed_extreme_c": 27.0,
+            "sample_count": 1,
+            "source": "durable_day0_event:ogimet_metar_uuww",
+            "unit": "C",
+        },
+        observation_conn=conn,
+        decision_time=_dt.datetime(2026, 7, 10, 20, 0, tzinfo=_dt.timezone.utc),
+        posterior_id=29914,
+    )
+    conn.close()
+
+    assert rebound["observation_time"] == "2026-07-10T19:00:00+00:00"
+    assert rebound["high_so_far"] == 27.0
+    assert rebound["sample_count"] == 2
+    assert rebound["settlement_source"] == "ogimet_metar_uuww"
 
 
 def test_global_day0_authority_uses_current_possession_clock_not_stale_carrier_clock():
