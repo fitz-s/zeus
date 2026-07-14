@@ -145,6 +145,7 @@ def test_global_auction_receipt_persists_complete_buy_sell_hold_cash_comparison(
             for evaluation in evaluations
         },
         candidate_evaluations=evaluations,
+        candidate_input_count=2,
     )
     selected = SimpleNamespace(decision=decision)
     at = _dt.datetime(2026, 7, 14, 1, 0, tzinfo=_dt.timezone.utc)
@@ -157,7 +158,7 @@ def test_global_auction_receipt_persists_complete_buy_sell_hold_cash_comparison(
         decision_at_utc=at + _dt.timedelta(seconds=1),
         probability_manifest=(("family-buy", "q-buy"), ("family-sell", "q-sell")),
         book_epoch_identity="book-current",
-        book_candidate_count=2,
+        book_asset_count=2,
         wealth_witness=SimpleNamespace(
             witness_identity="wealth-current",
             economic_identity="wealth-economics-current",
@@ -173,6 +174,7 @@ def test_global_auction_receipt_persists_complete_buy_sell_hold_cash_comparison(
     assert row["mode"] == "global_single_order_auction"
     assert summary["candidate_coverage_complete"] is True
     assert summary["candidate_evaluation_count"] == 2
+    assert summary["candidate_input_count"] == 2
     assert summary["hold_cash"] == {
         "robust_delta_log_wealth": "0",
         "robust_ev_usd": "0",

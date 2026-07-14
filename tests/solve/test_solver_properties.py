@@ -895,6 +895,7 @@ def test_global_single_order_sell_can_beat_positive_buy_and_cash():
         for evaluation in decision.candidate_evaluations
     }
     assert set(evaluations) == {buy.candidate_id, sell.candidate_id}
+    assert decision.candidate_input_count == len(evaluations) == 2
     assert evaluations[sell.candidate_id].status == "SELECTED"
     assert evaluations[buy.candidate_id].status == "SCORED"
     assert (
@@ -998,6 +999,7 @@ def test_global_single_order_entry_pause_blocks_buy_but_preserves_sell_and_cash(
     assert evaluations[buy.candidate_id].rejection_reason == (
         "ENTRY_ACTION_PAUSED:external:operator"
     )
+    assert decision.candidate_input_count == len(evaluations) == 2
 
 
 @pytest.mark.parametrize(
@@ -1053,6 +1055,7 @@ def test_global_single_order_cash_beats_non_positive_buy_and_sell():
     assert decision.no_trade_reason == "NO_CURRENT_EXECUTABLE_POSITIVE_ORDER"
     assert decision.robust_delta_log_wealth == 0
     assert decision.cost_usd == 0
+    assert decision.candidate_input_count == 2
     assert {
         evaluation.candidate_id: (
             evaluation.status,

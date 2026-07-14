@@ -1102,8 +1102,14 @@ class GlobalSingleOrderDecision:
     terminal_wealth: BinaryTerminalWealthCertificate | None = None
     rejection_reasons: Mapping[str, str] = field(default_factory=dict)
     candidate_evaluations: tuple[GlobalSingleOrderCandidateEvaluation, ...] = ()
+    candidate_input_count: int | None = None
 
     def __post_init__(self) -> None:
+        if self.candidate_input_count is not None and (
+            self.candidate_input_count < 0
+            or self.candidate_input_count != len(self.candidate_evaluations)
+        ):
+            raise ValueError("global candidate input/evaluation coverage disagrees")
         if self.candidate_evaluations:
             candidate_ids = tuple(
                 evaluation.candidate_id for evaluation in self.candidate_evaluations
@@ -2306,6 +2312,7 @@ def select_global_single_order(
                 rejections={},
                 default_rejection=reason,
             ),
+            candidate_input_count=len(candidates),
         )
     if wealth_witness.collateral_authority not in {"CHAIN", "VENUE"}:
         reason = "COLLATERAL_UNKNOWN"
@@ -2323,6 +2330,7 @@ def select_global_single_order(
                 rejections={},
                 default_rejection=reason,
             ),
+            candidate_input_count=len(candidates),
         )
     witness_age = decision_at_utc - wealth_witness.captured_at_utc
     try:
@@ -2352,6 +2360,7 @@ def select_global_single_order(
                 rejections={},
                 default_rejection=reason,
             ),
+            candidate_input_count=len(candidates),
         )
     if capital_limit_usd <= 0:
         raise ValueError("capital limit must be positive")
@@ -2469,6 +2478,7 @@ def select_global_single_order(
                 rejections=rejections,
                 default_rejection=no_trade_reason,
             ),
+            candidate_input_count=len(candidates),
         )
 
     band_contracts = {(alpha, basis) for _, _, alpha, basis in eligible}
@@ -2490,6 +2500,7 @@ def select_global_single_order(
                 rejections=rejections,
                 default_rejection="BAND_ALPHA_MISMATCH",
             ),
+            candidate_input_count=len(candidates),
         )
 
     scored: list[GlobalSingleOrderDecision] = []
@@ -2533,6 +2544,7 @@ def select_global_single_order(
                         scores=scored,
                         default_rejection="GLOBAL_EPOCH_SUPERSEDED",
                     ),
+                    candidate_input_count=len(candidates),
                 )
         if candidate_capital_limit <= 0:
             rejections[candidate.candidate_id] = "CAPITAL_CAPACITY_EXHAUSTED"
@@ -2586,6 +2598,7 @@ def select_global_single_order(
                 candidates,
                 rejections=rejections,
             ),
+            candidate_input_count=len(candidates),
         )
 
     # Current-epoch capital growth is the only objective identified by current truth.
@@ -2623,6 +2636,7 @@ def select_global_single_order(
             scores=scored,
             winner_id=winner_id,
         ),
+        candidate_input_count=len(candidates),
     )
 
 

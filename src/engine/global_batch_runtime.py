@@ -189,7 +189,7 @@ def _store_global_auction_receipt(
     decision_at_utc: datetime,
     probability_manifest: tuple[tuple[str, str], ...],
     book_epoch_identity: str,
-    book_candidate_count: int | None,
+    book_asset_count: int | None,
     wealth_witness: object,
     fractional_kelly_multiplier: Decimal,
     excluded_by_family: Mapping[str, str] | None = None,
@@ -220,8 +220,10 @@ def _store_global_auction_receipt(
     )
     winner = getattr(decision, "candidate", None)
     winner_id = str(getattr(winner, "candidate_id", "") or "")
+    candidate_input_count = getattr(decision, "candidate_input_count", None)
     coverage_complete = (
-        bool(evaluation_rows)
+        candidate_input_count is not None
+        and len(evaluation_rows) == candidate_input_count
         and len(candidate_ids) == len(set(candidate_ids))
         and all(candidate_ids)
         and len(selected_rows) == (1 if winner is not None else 0)
@@ -229,19 +231,15 @@ def _store_global_auction_receipt(
             winner is None
             or str(selected_rows[0].get("candidate_id") or "") == winner_id
         )
-        and (
-            book_candidate_count is None
-            or len(evaluation_rows) == book_candidate_count
-        )
     )
     receipt = {
-        "schema_version": 1,
+        "schema_version": 2,
         "selection_epoch_identity": selection_epoch_identity,
         "selection_cut_at_utc": selection_cut_at_utc.isoformat(),
         "decision_at_utc": decision_at_utc.isoformat(),
         "probability_manifest": probability_manifest,
         "book_epoch_identity": book_epoch_identity,
-        "book_candidate_count": book_candidate_count,
+        "book_asset_count": book_asset_count,
         "excluded_by_family": dict(sorted((excluded_by_family or {}).items())),
         "wealth_witness_identity": str(
             getattr(wealth_witness, "witness_identity", "") or ""
@@ -258,6 +256,7 @@ def _store_global_auction_receipt(
         "winner_candidate_id": winner_id or None,
         "no_trade_reason": getattr(decision, "no_trade_reason", None),
         "candidate_evaluation_count": len(evaluation_rows),
+        "candidate_input_count": candidate_input_count,
         "candidate_coverage_complete": coverage_complete,
         "candidate_evaluation_encoding": "zlib+base64+canonical-json-v1",
         "candidate_evaluations_sha256": hashlib.sha256(
@@ -1114,7 +1113,7 @@ def process_current_global_batch(
                     attempt_probabilities
                 ),
                 book_epoch_identity=venue_identity,
-                book_candidate_count=(
+                book_asset_count=(
                     sum(
                         1
                         for asset in tuple(
