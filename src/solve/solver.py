@@ -186,6 +186,8 @@ GlobalEligibilityReason = Literal[
     "COLLATERAL_UNKNOWN",
     "DEPTH_INFEASIBLE",
     "ROBUST_MAJORITY_LOSS",
+    "FRACTIONAL_KELLY_TARGET_REACHED",
+    "FRACTIONAL_KELLY_INCREMENT_BELOW_MINIMUM",
     "NON_POSITIVE_ROBUST_OBJECTIVE",
 ]
 
@@ -739,6 +741,35 @@ class PortfolioWealthWitness:
 
 
 @dataclass(frozen=True)
+class CandidatePortfolioEndowment:
+    """Ledger-aligned branch wealth before one additional native BUY.
+
+    The loss branch is a lower bound and the win branch is an upper bound, so
+    their use in incremental log utility remains conservative.  Current shares
+    name the already-owned exposure to this exact native token; Fractional Kelly
+    uses them to constrain the final holding across repeated auction epochs.
+    """
+
+    loss_wealth_floor_usd: Decimal
+    win_wealth_ceiling_usd: Decimal
+    current_token_shares: Decimal
+    ledger_snapshot_id: str
+
+    def __post_init__(self) -> None:
+        loss = Decimal(self.loss_wealth_floor_usd)
+        win = Decimal(self.win_wealth_ceiling_usd)
+        shares = Decimal(self.current_token_shares)
+        if (
+            not self.ledger_snapshot_id.strip()
+            or not all(value.is_finite() for value in (loss, win, shares))
+            or loss <= 0
+            or win <= 0
+            or shares < 0
+        ):
+            raise ValueError("candidate portfolio endowment is invalid")
+
+
+@dataclass(frozen=True)
 class GlobalSingleOrderCandidate:
     """One current, native-side order hypothesis in the cross-family auction.
 
@@ -1040,6 +1071,9 @@ class GlobalSingleOrderCandidateEvaluation:
     limit_price: Decimal = Decimal("0")
     expected_fill_price_before_fee: Decimal = Decimal("0")
     max_spend_usd: Decimal = Decimal("0")
+    current_token_shares: Decimal = Decimal("0")
+    full_kelly_target_shares: Decimal = Decimal("0")
+    fractional_kelly_target_shares: Decimal = Decimal("0")
     terminal_wealth: BinaryTerminalWealthCertificate | None = None
 
     def __post_init__(self) -> None:
@@ -1070,6 +1104,9 @@ class GlobalSingleOrderCandidateEvaluation:
                 or self.limit_price != 0
                 or self.expected_fill_price_before_fee != 0
                 or self.max_spend_usd != 0
+                or self.current_token_shares != 0
+                or self.full_kelly_target_shares != 0
+                or self.fractional_kelly_target_shares != 0
                 or self.terminal_wealth is not None
             ):
                 raise ValueError("rejected candidate evaluation cannot carry economics")
@@ -1087,6 +1124,22 @@ class GlobalSingleOrderCandidateEvaluation:
             or self.terminal_wealth is None
         ):
             raise ValueError("scored candidate evaluation lacks positive economics")
+        if self.action == "BUY" and (
+            self.current_token_shares < 0
+            or self.full_kelly_target_shares <= 0
+            or self.fractional_kelly_target_shares <= self.current_token_shares
+            or self.fractional_kelly_target_shares
+            > self.full_kelly_target_shares
+            or self.shares
+            > self.fractional_kelly_target_shares - self.current_token_shares
+        ):
+            raise ValueError("BUY evaluation is not cumulative fractional-Kelly coherent")
+        if self.action == "SELL" and (
+            self.current_token_shares != 0
+            or self.full_kelly_target_shares != 0
+            or self.fractional_kelly_target_shares != 0
+        ):
+            raise ValueError("SELL evaluation cannot carry a BUY target")
 
 
 @dataclass(frozen=True)
@@ -1104,6 +1157,9 @@ class GlobalSingleOrderDecision:
     expected_fill_price_before_fee: Decimal = Decimal("0")
     max_spend_usd: Decimal = Decimal("0")
     cash_proceeds_usd: Decimal = Decimal("0")
+    current_token_shares: Decimal = Decimal("0")
+    full_kelly_target_shares: Decimal = Decimal("0")
+    fractional_kelly_target_shares: Decimal = Decimal("0")
     terminal_wealth: BinaryTerminalWealthCertificate | None = None
     rejection_reasons: Mapping[str, str] = field(default_factory=dict)
     candidate_evaluations: tuple[GlobalSingleOrderCandidateEvaluation, ...] = ()
@@ -1139,6 +1195,12 @@ class GlobalSingleOrderDecision:
                     != self.robust_delta_log_wealth
                     or winner.robust_ev_usd != self.robust_ev_usd
                     or winner.capital_efficiency != self.capital_efficiency
+                    or winner.current_token_shares
+                    != self.current_token_shares
+                    or winner.full_kelly_target_shares
+                    != self.full_kelly_target_shares
+                    or winner.fractional_kelly_target_shares
+                    != self.fractional_kelly_target_shares
                 ):
                     raise ValueError("selected candidate evaluation disagrees with decision")
         if self.candidate is None:
@@ -1151,6 +1213,9 @@ class GlobalSingleOrderDecision:
                 or self.expected_fill_price_before_fee != 0
                 or self.max_spend_usd != 0
                 or self.cash_proceeds_usd != 0
+                or self.current_token_shares != 0
+                or self.full_kelly_target_shares != 0
+                or self.fractional_kelly_target_shares != 0
                 or self.terminal_wealth is not None
             ):
                 raise ValueError("global no-trade decision cannot carry an execution boundary")
@@ -1165,6 +1230,9 @@ class GlobalSingleOrderDecision:
                 or self.limit_price <= 0
                 or self.expected_fill_price_before_fee < self.limit_price
                 or self.max_spend_usd != 0
+                or self.current_token_shares != 0
+                or self.full_kelly_target_shares != 0
+                or self.fractional_kelly_target_shares != 0
                 or self.terminal_wealth is None
                 or self.terminal_wealth.loss_payoff_usd != -self.cost_usd
                 or self.terminal_wealth.win_payoff_usd != self.cash_proceeds_usd
@@ -1186,6 +1254,13 @@ class GlobalSingleOrderDecision:
             or self.expected_fill_price_before_fee > self.limit_price
             or self.max_spend_usd < self.cost_usd
             or self.cash_proceeds_usd != 0
+            or self.current_token_shares < 0
+            or self.full_kelly_target_shares <= 0
+            or self.fractional_kelly_target_shares <= self.current_token_shares
+            or self.fractional_kelly_target_shares
+            > self.full_kelly_target_shares
+            or self.shares
+            > self.fractional_kelly_target_shares - self.current_token_shares
             or self.terminal_wealth is None
             or self.terminal_wealth.loss_payoff_usd != -self.cost_usd
             or self.terminal_wealth.win_payoff_usd != self.shares - self.cost_usd
@@ -1267,6 +1342,11 @@ def _global_candidate_evaluations(
                     score.expected_fill_price_before_fee
                 ),
                 max_spend_usd=score.max_spend_usd,
+                current_token_shares=score.current_token_shares,
+                full_kelly_target_shares=score.full_kelly_target_shares,
+                fractional_kelly_target_shares=(
+                    score.fractional_kelly_target_shares
+                ),
                 terminal_wealth=score.terminal_wealth,
             )
         )
@@ -1755,20 +1835,24 @@ def _score_global_single_order(
     capital_limit_usd: Decimal,
     fractional_kelly_multiplier: Decimal = Decimal("1"),
     payoff_q_lcb: float | None = None,
+    current_token_shares: Decimal = Decimal("0"),
 ) -> GlobalSingleOrderDecision:
     """Find the executable fractional-Kelly optimum for one candidate.
 
-    The current book and terminal-wealth objective first identify the full-Kelly
-    optimum. The operator-owned multiplier scales its depth-walked capital loss
-    once; the solver then re-optimizes robust terminal log wealth inside that
-    fractional loss budget on the current non-linear ladder. Scaling raw shares
-    is not equivalent when price changes by level. Cash and allocator capacity
-    remain independent hard outer bounds on the executable request.
+    The current book and terminal-wealth objective identify the additional shares
+    that reach the full-Kelly final holding from the reconciled current holding.
+    The operator-owned multiplier applies to that FINAL holding, not independently
+    to every auction epoch.  Only the remaining shares below the cumulative target
+    are executable; a venue minimum may not promote a smaller target into a trade.
+    Cash and allocator capacity remain independent hard outer bounds.
     """
 
     multiplier = Decimal(fractional_kelly_multiplier)
+    held_shares = Decimal(current_token_shares)
     if not multiplier.is_finite() or not Decimal("0") < multiplier <= Decimal("1"):
         raise ValueError("fractional Kelly multiplier must be finite and in (0, 1]")
+    if not held_shares.is_finite() or held_shares < 0:
+        raise ValueError("current token shares must be finite and non-negative")
     affordability_limit = min(
         Decimal(spendable_cash_usd),
         Decimal(wealth_floor_usd) * (Decimal("1") - Decimal(str(_WEALTH_MARGIN))),
@@ -1902,19 +1986,41 @@ def _score_global_single_order(
     )
     if legal_min_shares is None:
         legal_min_shares = raw_min_shares
-    try:
-        min_order_cost = _single_order_cost(
-            candidate.executable_cost_curve, legal_min_shares
+    full_kelly_target_shares = held_shares + full_best[4]
+    fractional_kelly_target_shares = full_kelly_target_shares * multiplier
+    remaining_target_shares = fractional_kelly_target_shares - held_shares
+    if remaining_target_shares <= 0:
+        reason = "FRACTIONAL_KELLY_TARGET_REACHED"
+        return GlobalSingleOrderDecision(
+            candidate=None,
+            shares=Decimal("0"),
+            cost_usd=Decimal("0"),
+            robust_delta_log_wealth=0.0,
+            robust_ev_usd=0.0,
+            capital_efficiency=0.0,
+            no_trade_reason=reason,
+            rejection_reasons={candidate.candidate_id: reason},
         )
-    except ValueError:
-        min_order_cost = Decimal("0")
-    fractional_cost_budget = max(full_best[3] * multiplier, min_order_cost)
+    fractional_legal_max = _single_order_venue_legal_neighbor(
+        candidate,
+        remaining_target_shares,
+        at_most=True,
+    )
+    if fractional_legal_max is None or fractional_legal_max < legal_min_shares:
+        reason = "FRACTIONAL_KELLY_INCREMENT_BELOW_MINIMUM"
+        return GlobalSingleOrderDecision(
+            candidate=None,
+            shares=Decimal("0"),
+            cost_usd=Decimal("0"),
+            robust_delta_log_wealth=0.0,
+            robust_ev_usd=0.0,
+            capital_efficiency=0.0,
+            no_trade_reason=reason,
+            rejection_reasons={candidate.candidate_id: reason},
+        )
     fractional_max_shares = min(
         capacity_max_shares,
-        _single_order_max_shares_by_cost(
-            candidate.executable_cost_curve,
-            cost_limit_usd=fractional_cost_budget,
-        ),
+        fractional_legal_max,
     )
     if fractional_max_shares < legal_min_shares:
         projected_probes: set[Decimal] = set()
@@ -1955,7 +2061,7 @@ def _score_global_single_order(
             )
         except ValueError:
             continue
-        if cost > fractional_cost_budget or max_spend > spend_limit:
+        if max_spend > spend_limit:
             continue
         if best is None or robust_du > best[0] + 1e-15 or (
             math.isclose(robust_du, best[0], rel_tol=0.0, abs_tol=1e-15)
@@ -2005,6 +2111,9 @@ def _score_global_single_order(
         limit_price=limit_price,
         expected_fill_price_before_fee=expected_fill_price,
         max_spend_usd=max_spend,
+        current_token_shares=held_shares,
+        full_kelly_target_shares=full_kelly_target_shares,
+        fractional_kelly_target_shares=fractional_kelly_target_shares,
         terminal_wealth=_binary_terminal_wealth_certificate(
             robust_q=robust_q,
             shares=shares,
@@ -2050,6 +2159,99 @@ def global_sell_fill_prefix_objective(
         shares - proceeds
     )
     return robust_du, robust_ev
+
+
+def global_buy_fak_prefix_certificate(
+    decision: GlobalSingleOrderDecision,
+    *,
+    execution_curve_identity: str | None = None,
+) -> dict[str, object]:
+    """Prove every non-zero FAK fill up to the selected BUY size is beneficial.
+
+    Every admitted fill has price no worse than the limit.  A positive rounded
+    five-decimal fee is at most twice its unrounded value; this bound is
+    independent of maker-fragment count and share quantum.  Bounding p(1-p)
+    over every executable price through the limit therefore yields a linear
+    cost bound.  Binary expected log wealth is concave in filled shares and is
+    zero at no fill, so a positive full-size endpoint proves every interior
+    prefix positive as well.  EV is linear and uses the same endpoint proof.
+    """
+
+    candidate = decision.candidate
+    terminal = getattr(decision, "terminal_wealth", None)
+    if (
+        candidate is None
+        or getattr(candidate, "action", "BUY") != "BUY"
+        or terminal is None
+        or decision.shares <= 0
+        or not (Decimal("0") < decision.limit_price < Decimal("1"))
+    ):
+        raise ValueError("buy FAK prefix decision is not certificate-coherent")
+    curve = getattr(candidate, "executable_cost_curve", None)
+    if curve is None or getattr(curve, "fee_model", None) is None:
+        raise ValueError("buy FAK prefix curve is missing")
+
+    fee_rate = Decimal(curve.fee_model.fee_rate)
+    limit = Decimal(decision.limit_price)
+    shares = Decimal(decision.shares)
+    max_fee_shape = (
+        Decimal("0.25")
+        if limit >= Decimal("0.5")
+        else limit * (Decimal("1") - limit)
+    )
+    worst_fee_per_share = Decimal("2") * fee_rate * max_fee_shape
+    unit_cost = limit + worst_fee_per_share
+    full_cost = unit_cost * shares
+    win_q = Decimal(str(terminal.win_probability_lcb))
+    loss_q = Decimal(str(terminal.loss_probability_ucb))
+    loss_baseline = terminal.wealth_after_loss_usd - terminal.loss_payoff_usd
+    win_baseline = terminal.wealth_after_win_usd - terminal.win_payoff_usd
+    loss_after = loss_baseline - full_cost
+    win_after = win_baseline - full_cost + shares
+    if (
+        not all(
+            value.is_finite()
+            for value in (
+                fee_rate,
+                unit_cost,
+                full_cost,
+                win_q,
+                loss_q,
+                loss_baseline,
+                win_baseline,
+                loss_after,
+                win_after,
+            )
+        )
+        or not math.isclose(float(win_q + loss_q), 1.0, rel_tol=0.0, abs_tol=1e-12)
+        or min(loss_baseline, win_baseline, loss_after, win_after) <= 0
+    ):
+        raise ValueError("buy FAK prefix wealth bound is invalid")
+    robust_du = float(loss_q) * math.log(float(loss_after / loss_baseline)) + float(
+        win_q
+    ) * math.log(float(win_after / win_baseline))
+    robust_ev = float(win_q * shares - full_cost)
+    if not math.isfinite(robust_du) or robust_du <= 0 or robust_ev <= 0:
+        raise ValueError("buy FAK full-size worst-limit prefix is non-positive")
+    return {
+        "global_buy_fak_prefix_semantics": (
+            "CONCAVE_WORST_LIMIT_ALL_NONZERO_PREFIXES_POSITIVE"
+        ),
+        "global_buy_fak_fee_rate_source": "CURRENT_EXECUTABLE_CURVE",
+        "global_buy_fak_execution_curve_identity": str(
+            execution_curve_identity or candidate.execution_curve_identity
+        ),
+        "global_buy_fak_fee_rate": str(fee_rate),
+        "global_buy_fak_fee_rounding_bound": (
+            "ROUNDED_FEE_AT_MOST_TWO_X_UNROUNDED"
+        ),
+        "global_buy_fak_worst_fee_shape": str(max_fee_shape),
+        "global_buy_fak_worst_fee_per_share": str(worst_fee_per_share),
+        "global_buy_fak_worst_unit_cost": str(unit_cost),
+        "global_buy_fak_full_worst_cost_usd": str(full_cost),
+        "global_buy_fak_full_robust_delta_log_wealth": robust_du,
+        "global_buy_fak_full_robust_ev_usd": robust_ev,
+    }
 
 
 def _score_global_single_order_sell(
@@ -2258,6 +2460,10 @@ def select_global_single_order(
     decision_at_utc: datetime,
     candidate_capital_limit_resolver: Callable[
         [GlobalSingleOrderAnyCandidate], Decimal
+    ]
+    | None = None,
+    candidate_portfolio_endowment_resolver: Callable[
+        [GlobalSingleOrderAnyCandidate], CandidatePortfolioEndowment
     ]
     | None = None,
     candidate_payoff_q_lcb_resolver: Callable[
@@ -2554,6 +2760,42 @@ def select_global_single_order(
         if candidate_capital_limit <= 0:
             rejections[candidate.candidate_id] = "CAPITAL_CAPACITY_EXHAUSTED"
             continue
+        candidate_endowment = CandidatePortfolioEndowment(
+            loss_wealth_floor_usd=wealth_witness.wealth_floor_usd,
+            win_wealth_ceiling_usd=wealth_witness.wealth_ceiling_usd,
+            current_token_shares=Decimal("0"),
+            ledger_snapshot_id=wealth_witness.ledger_snapshot_id,
+        )
+        if candidate_portfolio_endowment_resolver is not None:
+            try:
+                candidate_endowment = candidate_portfolio_endowment_resolver(
+                    candidate
+                )
+                if (
+                    not isinstance(candidate_endowment, CandidatePortfolioEndowment)
+                    or candidate_endowment.ledger_snapshot_id
+                    != wealth_witness.ledger_snapshot_id
+                ):
+                    raise ValueError("candidate endowment ledger mismatch")
+            except Exception:  # noqa: BLE001 - lost portfolio authority invalidates the epoch
+                reason = "PORTFOLIO_ENDOWMENT_UNAVAILABLE"
+                return GlobalSingleOrderDecision(
+                    candidate=None,
+                    shares=Decimal("0"),
+                    cost_usd=Decimal("0"),
+                    robust_delta_log_wealth=0.0,
+                    robust_ev_usd=0.0,
+                    capital_efficiency=0.0,
+                    no_trade_reason="GLOBAL_EPOCH_SUPERSEDED",
+                    rejection_reasons={candidate.candidate_id: reason},
+                    candidate_evaluations=_global_candidate_evaluations(
+                        candidates,
+                        rejections={candidate.candidate_id: reason},
+                        scores=scored,
+                        default_rejection="GLOBAL_EPOCH_SUPERSEDED",
+                    ),
+                    candidate_input_count=len(candidates),
+                )
         candidate_payoff_q_lcb = None
         if candidate_payoff_q_lcb_resolver is not None:
             try:
@@ -2571,12 +2813,13 @@ def select_global_single_order(
             candidate,
             q_samples=q_samples,
             band_alpha=band_alpha,
-            wealth_floor_usd=wealth_witness.wealth_floor_usd,
-            wealth_ceiling_usd=wealth_witness.wealth_ceiling_usd,
+            wealth_floor_usd=candidate_endowment.loss_wealth_floor_usd,
+            wealth_ceiling_usd=candidate_endowment.win_wealth_ceiling_usd,
             spendable_cash_usd=wealth_witness.spendable_cash_usd,
             capital_limit_usd=candidate_capital_limit,
             fractional_kelly_multiplier=multiplier,
             payoff_q_lcb=candidate_payoff_q_lcb,
+            current_token_shares=candidate_endowment.current_token_shares,
         )
         if score.candidate is None:
             rejections.update(score.rejection_reasons)
@@ -2633,6 +2876,11 @@ def select_global_single_order(
         expected_fill_price_before_fee=winner.expected_fill_price_before_fee,
         max_spend_usd=winner.max_spend_usd,
         cash_proceeds_usd=winner.cash_proceeds_usd,
+        current_token_shares=winner.current_token_shares,
+        full_kelly_target_shares=winner.full_kelly_target_shares,
+        fractional_kelly_target_shares=(
+            winner.fractional_kelly_target_shares
+        ),
         terminal_wealth=winner.terminal_wealth,
         rejection_reasons=rejections,
         candidate_evaluations=_global_candidate_evaluations(

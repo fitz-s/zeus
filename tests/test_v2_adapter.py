@@ -1,8 +1,8 @@
-# Lifecycle: created=2026-04-27; last_reviewed=2026-05-15; last_reused=2026-05-17
+# Lifecycle: created=2026-04-27; last_reviewed=2026-07-14; last_reused=2026-07-14
 # Purpose: R3 Z2 Polymarket V2 adapter and submission envelope antibodies.
 # Reuse: Run when V2 SDK adapter, envelope provenance, or Q1 preflight behavior changes.
 # Created: 2026-04-27
-# Last reused/audited: 2026-05-17
+# Last reused/audited: 2026-07-14
 # Authority basis: docs/operations/task_2026-04-26_ultimate_plan/r3/slice_cards/Z2.yaml
 #                  + docs/archive/2026-Q2/task_2026-05-15_live_order_e2e_verification/LIVE_ORDER_E2E_VERIFICATION_PLAN.md
 #                  + docs/archive/2026-Q2/task_2026-05-15_live_order_e2e_goal/LIVE_ORDER_E2E_GOAL_PLAN.md
@@ -95,6 +95,14 @@ class FakeTwoStepClient:
     def create_order(self, order_args, options=None):
         self.calls.append(("create_order", order_args, options))
         return self.signed_order
+
+    def get_order_book(self, token_id):
+        self.calls.append(("get_order_book", token_id))
+        return {
+            "asset_id": token_id,
+            "bids": [{"price": "0.49", "size": "100"}],
+            "asks": [{"price": "0.50", "size": "100"}],
+        }
 
     def post_order(self, order, order_type=None, post_only=False, defer_exec=False):
         self.calls.append(("post_order", order, order_type, post_only, defer_exec))
@@ -223,7 +231,12 @@ class FakeOpenOrdersClient:
 
     def get_open_orders(self, **kwargs):
         self.calls.append(("get_open_orders", kwargs))
-        return [{"orderID": "ord-open", "status": "LIVE"}]
+        return [{
+            "orderID": "ord-open",
+            "status": "LIVE",
+            "original_size": "10000000",
+            "size_matched": "0",
+        }]
 
 
 class FakeLegacyGetOrdersClient:
@@ -232,7 +245,12 @@ class FakeLegacyGetOrdersClient:
 
     def get_orders(self, **kwargs):
         self.calls.append(("get_orders", kwargs))
-        return {"data": [{"id": "ord-legacy", "state": "LIVE"}]}
+        return {"data": [{
+            "id": "ord-legacy",
+            "state": "LIVE",
+            "original_size": "10000000",
+            "size_matched": "0",
+        }]}
 
 
 class FakeTradesClient:
@@ -1372,6 +1390,93 @@ def test_fok_killed_400_is_definitive_rejection(tmp_path, monkeypatch):
     assert result.envelope.signed_order == fake.signed_order
 
 
+def test_fok_rechecks_full_depth_after_signing_immediately_before_post(tmp_path, monkeypatch):
+    import src.venue.polymarket_v2_adapter as adapter_mod
+
+    fake = FakeTwoStepClient(post_response={"orderID": "0xexpected", "status": "LIVE"})
+    adapter, _ = _adapter(tmp_path, fake)
+    envelope = adapter.create_submission_envelope(_intent(), FakeSnapshot(), order_type="FOK")
+    monkeypatch.setattr(adapter_mod, "_deterministic_v2_order_id", lambda *a, **k: "0xexpected")
+
+    result = adapter.submit(envelope)
+
+    names = [call[0] for call in fake.calls]
+    assert result.status == "accepted"
+    assert names.index("create_order") < names.index("get_order_book") < names.index("post_order")
+
+
+def test_fok_depth_loss_after_signing_rejects_without_post(tmp_path, monkeypatch):
+    import src.venue.polymarket_v2_adapter as adapter_mod
+
+    class ThinFinalBookClient(FakeTwoStepClient):
+        def get_order_book(self, token_id):
+            self.calls.append(("get_order_book", token_id))
+            return {
+                "asset_id": token_id,
+                "bids": [{"price": "0.49", "size": "100"}],
+                "asks": [{"price": "0.50", "size": "19.99"}],
+            }
+
+    fake = ThinFinalBookClient()
+    adapter, _ = _adapter(tmp_path, fake)
+    envelope = adapter.create_submission_envelope(_intent(), FakeSnapshot(), order_type="FOK")
+    monkeypatch.setattr(adapter_mod, "_deterministic_v2_order_id", lambda *a, **k: "0xexpected")
+
+    result = adapter.submit(envelope)
+
+    assert result.status == "rejected"
+    assert result.error_code == "SUBMIT_ABORTED_PRICE_MOVED"
+    assert "FOK_FINAL_DEPTH_INSUFFICIENT" in (result.error_message or "")
+    assert result.envelope.signed_order == fake.signed_order
+    assert not any(call[0] == "post_order" for call in fake.calls)
+
+
+def test_fok_one_step_only_client_fails_closed_before_submit(tmp_path):
+    fake = FakeOneStepClient()
+    adapter, _ = _adapter(tmp_path, fake)
+    envelope = adapter.create_submission_envelope(_intent(), FakeSnapshot(), order_type="FOK")
+
+    result = adapter.submit(envelope)
+
+    assert result.status == "rejected"
+    assert result.error_code == "SUBMIT_ABORTED_PRICE_MOVED"
+    assert "FOK_FINAL_DEPTH_TWO_STEP_SUBMIT_REQUIRED" in (result.error_message or "")
+    assert not any(call[0] == "create_and_post_order" for call in fake.calls)
+
+
+@pytest.mark.parametrize(
+    ("side", "bad_level_side", "bad_level"),
+    [
+        ("BUY", "asks", {"price": "1", "size": "20"}),
+        ("SELL", "bids", {"price": "1.01", "size": "20"}),
+        ("BUY", "asks", {"price": "0.50", "size": "0"}),
+    ],
+)
+def test_fok_final_depth_rejects_levels_outside_probability_domain(
+    tmp_path, side, bad_level_side, bad_level
+):
+    import src.venue.polymarket_v2_adapter as adapter_mod
+
+    class MalformedFinalBookClient(FakeTwoStepClient):
+        def get_order_book(self, token_id):
+            self.calls.append(("get_order_book", token_id))
+            return {
+                "asset_id": token_id,
+                "bids": [{"price": "0.99", "size": "100"}],
+                "asks": [{"price": "0.50", "size": "100"}],
+                bad_level_side: [bad_level],
+            }
+
+    fake = MalformedFinalBookClient()
+    adapter, _ = _adapter(tmp_path, fake)
+    envelope = adapter.create_submission_envelope(
+        _intent(), FakeSnapshot(), order_type="FOK"
+    ).with_updates(side=side)
+
+    with pytest.raises(ValueError, match="FOK_FINAL_DEPTH_MALFORMED"):
+        adapter_mod._assert_final_fok_depth_bound(fake, envelope)
+
+
 def test_response_order_id_mismatch_is_ambiguous(tmp_path, monkeypatch):
     import src.venue.polymarket_v2_adapter as adapter_mod
 
@@ -1478,7 +1583,7 @@ def test_one_step_sdk_path_still_produces_envelope_with_provenance(tmp_path):
         response={
             "orderID": "ord-one",
             "status": "matched",
-            "makingAmount": "1.70",
+            "makingAmount": "1.7",
             "takingAmount": "5",
             "transactionsHashes": ["0xhash-one"],
         }
@@ -1504,7 +1609,7 @@ def test_legacy_order_result_preserves_matched_submit_truth(tmp_path):
         response={
             "orderID": "ord-one",
             "status": "matched",
-            "makingAmount": "1.70",
+            "makingAmount": "1.7",
             "takingAmount": "5",
             "transactionsHashes": ["0xhash-one"],
         }
@@ -1520,9 +1625,84 @@ def test_legacy_order_result_preserves_matched_submit_truth(tmp_path):
     assert payload["success"] is True
     assert payload["status"] == "matched"
     assert payload["orderID"] == "ord-one"
-    assert payload["makingAmount"] == "1.70"
+    assert payload["makingAmount"] == "1.7"
     assert payload["takingAmount"] == "5"
+    assert payload["_venue_response_contract"] == "POLYMARKET_CLOB_V2_HUMAN_SUBMIT_AMOUNTS"
+    assert payload["_v2_making_amount"] == "1.7"
+    assert payload["_v2_taking_amount"] == "5"
+    assert payload["_v2_matched_size"] == "5"
+    assert payload["_v2_fill_price"] == "0.34"
     assert payload["transactionsHashes"] == ["0xhash-one"]
+
+
+def test_point_order_fixed_6_sizes_are_typed_as_human_shares(tmp_path):
+    class PointOrderClient(FakeOneStepClient):
+        def get_order(self, order_id):
+            return {
+                "id": order_id,
+                "status": "ORDER_STATUS_MATCHED",
+                "side": "BUY",
+                "original_size": "10000000",
+                "size_matched": "3250000",
+                "price": "0.34",
+            }
+
+    adapter, _ = _adapter(tmp_path, PointOrderClient())
+
+    order = adapter.get_order("ord-fixed-6")
+    payload = order.raw
+
+    assert order.status == "MATCHED"
+    assert payload["original_size"] == "10"
+    assert payload["size_matched"] == "3.25"
+    assert payload["status"] == "MATCHED"
+    assert payload["_venue_response_contract"] == "POLYMARKET_CLOB_V2_FIXED_6_POINT_ORDER"
+    assert payload["_v2_original_size"] == "10"
+    assert payload["_v2_matched_size"] == "3.25"
+    assert payload["_v2_wire_original_size"] == "10000000"
+    assert payload["_v2_wire_size_matched"] == "3250000"
+    assert payload["_v2_wire_status"] == "ORDER_STATUS_MATCHED"
+    assert payload["_venue_order_status"] == "MATCHED"
+
+
+def test_point_order_ingress_provides_one_human_contract_to_live_consumers(tmp_path):
+    class PointOrderClient(FakeOneStepClient):
+        def get_order(self, order_id):
+            return {
+                "id": order_id,
+                "status": "ORDER_STATUS_LIVE",
+                "side": "BUY",
+                "asset_id": "tok-1",
+                "maker_address": "0xfunder",
+                "originalSize": "10000000",
+                "sizeMatched": "3250000",
+                "price": "0.34",
+            }
+
+    adapter, _ = _adapter(tmp_path, PointOrderClient())
+    payload = adapter.get_order("ord-live-fixed-6").raw
+
+    from src.execution.edli_resting_absorbed_resolver import _our_live_resting_order
+    from src.execution.exchange_reconcile import _order_matched_size
+    from src.execution.exit_lifecycle import _venue_open_order_remaining_size
+    from src.execution.fill_tracker import _extract_filled_shares, _normalize_status
+
+    assert _normalize_status(payload) == "PARTIALLY_MATCHED"
+    assert payload["originalSize"] == "10"
+    assert payload["sizeMatched"] == "3.25"
+    assert _extract_filled_shares(
+        payload,
+        allow_order_size_fallback=False,
+    ) == pytest.approx(3.25)
+    assert _venue_open_order_remaining_size(payload) == Decimal("6.75")
+    assert _order_matched_size(payload) == Decimal("3.25")
+    assert _our_live_resting_order(
+        [payload],
+        token_id="tok-1",
+        funder_address="0xfunder",
+        limit_price=0.34,
+        order_size=10.0,
+    ) is payload
 
 
 def test_two_step_sdk_path_produces_envelope_with_signed_order_hash(tmp_path):
@@ -2054,6 +2234,34 @@ class TestOrderStatusResponseContract:
         with pytest.raises(VenueResponseShapeError, match="get_open_orders"):
             adapter.get_open_orders()
 
+    @pytest.mark.parametrize(
+        "amounts",
+        (
+            {"size_matched": "3250000"},
+            {"original_size": "10000000"},
+            {"original_size": "10.5", "size_matched": "0"},
+        ),
+    )
+    def test_get_order_malformed_fixed_6_amounts_fail_closed(
+        self,
+        tmp_path,
+        amounts,
+    ):
+        from src.venue.response_contracts import VenueResponseShapeError
+
+        class MalformedPointOrderClient:
+            def get_order(self, order_id):
+                return {
+                    "id": order_id,
+                    "status": "ORDER_STATUS_MATCHED",
+                    **amounts,
+                }
+
+        adapter, _ = _adapter(tmp_path, MalformedPointOrderClient())
+
+        with pytest.raises(VenueResponseShapeError, match="fixed-6"):
+            adapter.get_order("ord-malformed-fixed-6")
+
 
 def test_polymarket_client_cancel_payload_is_exit_safety_parseable(monkeypatch):
     from src.control.cutover_guard import CutoverDecision, CutoverState
@@ -2148,6 +2356,14 @@ class FakeBatchTwoStepClient:
     def create_order(self, order_args, options=None):
         self.calls.append(("create_order", order_args, options))
         return f"signed:{order_args.token_id}:{order_args.price}".encode()
+
+    def get_order_book(self, token_id):
+        self.calls.append(("get_order_book", token_id))
+        return {
+            "asset_id": token_id,
+            "bids": [{"price": "0.49", "size": "100"}],
+            "asks": [{"price": "0.50", "size": "100"}],
+        }
 
     def post_orders(self, args, post_only=False, defer_exec=False):
         self.calls.append(("post_orders", args, post_only, defer_exec))
@@ -2294,6 +2510,44 @@ class TestSubmitBatch:
 
         assert all(r.status == "rejected" and r.error_code == "V2_PRE_SUBMIT_EXCEPTION" for r in results)
         assert not any(c[0] == "post_orders" for c in fake.calls)
+
+    def test_fok_batch_checks_depth_after_all_signing_before_post(self, tmp_path):
+        fake = FakeBatchTwoStepClient(
+            post_orders_response=[{"orderID": "ord-0", "status": "LIVE"}]
+        )
+        adapter, _ = _adapter(tmp_path, fake)
+        envelope = adapter.create_submission_envelope(
+            _priced_intent(0.50), FakeSnapshot(), order_type="FOK"
+        )
+
+        results = adapter.submit_batch([envelope])
+
+        names = [call[0] for call in fake.calls]
+        assert results[0].status == "accepted"
+        assert names.index("create_order") < names.index("get_order_book") < names.index("post_orders")
+
+    def test_fok_batch_depth_loss_rejects_whole_batch_without_post(self, tmp_path):
+        class ThinBatchClient(FakeBatchTwoStepClient):
+            def get_order_book(self, token_id):
+                self.calls.append(("get_order_book", token_id))
+                return {
+                    "asset_id": token_id,
+                    "bids": [{"price": "0.49", "size": "100"}],
+                    "asks": [{"price": "0.50", "size": "1"}],
+                }
+
+        fake = ThinBatchClient()
+        adapter, _ = _adapter(tmp_path, fake)
+        envelope = adapter.create_submission_envelope(
+            _priced_intent(0.50), FakeSnapshot(), order_type="FOK"
+        )
+
+        results = adapter.submit_batch([envelope])
+
+        assert results[0].status == "rejected"
+        assert results[0].error_code == "SUBMIT_ABORTED_PRICE_MOVED"
+        assert "FOK_FINAL_DEPTH_INSUFFICIENT" in (results[0].error_message or "")
+        assert not any(call[0] == "post_orders" for call in fake.calls)
 
     def test_post_orders_exception_propagates_as_ambiguous_side_effect(self, tmp_path):
         fake = FakePostOrdersExceptionClient()

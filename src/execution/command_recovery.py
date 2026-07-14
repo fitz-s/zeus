@@ -442,10 +442,26 @@ def _extract_order_id(venue_resp: dict | None, fallback: str | None = None) -> s
 
 
 def _order_status(raw: dict) -> str:
-    return str(raw.get("status") or raw.get("state") or "").upper()
+    status = str(
+        raw.get("_venue_order_status")
+        or raw.get("status")
+        or raw.get("state")
+        or ""
+    ).strip().upper()
+    if status.startswith("ORDER_STATUS_"):
+        status = status.removeprefix("ORDER_STATUS_")
+    return {
+        "CANCELED_MARKET_RESOLVED": "CANCELED",
+        "INVALID": "REJECTED",
+    }.get(status, status)
 
 
 def _order_matched_size(raw: dict) -> str:
+    if (
+        raw.get("_venue_response_contract")
+        == "POLYMARKET_CLOB_V2_FIXED_6_POINT_ORDER"
+    ):
+        return str(raw.get("_v2_matched_size") or "0")
     value = (
         raw.get("matched_size")
         or raw.get("size_matched")
@@ -457,6 +473,15 @@ def _order_matched_size(raw: dict) -> str:
     return str(value)
 
 
+def _order_original_size(raw: dict) -> object:
+    if (
+        raw.get("_venue_response_contract")
+        == "POLYMARKET_CLOB_V2_FIXED_6_POINT_ORDER"
+    ):
+        return raw.get("_v2_original_size")
+    return raw.get("size") or raw.get("original_size") or raw.get("matched_amount")
+
+
 def _explicit_point_order_matched_size(point_order: dict | None) -> str | None:
     """Matched/filled size only when the venue point-order payload says it explicitly.
 
@@ -465,6 +490,12 @@ def _explicit_point_order_matched_size(point_order: dict | None) -> str | None:
     no-fill release needs a positive zero-fill proof, not a default.
     """
 
+    if (
+        _first_present(point_order, "_venue_response_contract")
+        == "POLYMARKET_CLOB_V2_FIXED_6_POINT_ORDER"
+    ):
+        value = _first_present(point_order, "_v2_matched_size")
+        return str(value) if value not in (None, "") else None
     value = _first_present(
         point_order,
         "matched_size",
@@ -610,7 +641,7 @@ def _raw_matches_command_order_identity(raw: dict, command: dict) -> bool:
         return False
     if not _decimal_matches(raw.get("price"), command.get("price")):
         return False
-    raw_size = raw.get("size") or raw.get("original_size") or raw.get("matched_amount")
+    raw_size = _order_original_size(raw)
     return _decimal_matches(raw_size, command.get("size"))
 
 
@@ -2026,7 +2057,7 @@ def _point_order_has_live_order_data(point_order: dict | None) -> bool:
 def _point_order_no_live_record(point_order: dict | None, *, expected_order_id: str) -> bool:
     if not isinstance(point_order, dict):
         return False
-    status = str(point_order.get("status") or point_order.get("state") or "").upper()
+    status = _order_status(point_order)
     order_id = str(_extract_order_id(point_order) or "")
     return (
         status in {"UNKNOWN", "NOT_FOUND", ""}
@@ -2313,6 +2344,12 @@ def _point_order_matched_size(
     fallback: object = None,
     side: str | None = None,
 ) -> str:
+    if (
+        _first_present(point_order, "_venue_response_contract")
+        == "POLYMARKET_CLOB_V2_FIXED_6_POINT_ORDER"
+    ):
+        value = _first_present(point_order, "_v2_matched_size")
+        return str(value) if value not in (None, "") else str(fallback or "0")
     value = _first_present(
         point_order,
         "matched_size",
@@ -2386,27 +2423,20 @@ def _is_terminal_positive_match_candidate(candidate: Mapping[str, object]) -> bo
 def _matched_remaining_size(command: dict, matched_size: str, *, venue_status: str = "") -> str:
     matched = _decimal_or_none(matched_size)
     command_size = _decimal_or_none(command.get("size"))
-    if str(command.get("intent_kind") or "").upper() != "EXIT":
-        if _venue_status_is_fully_matched(venue_status) and matched is not None and matched > 0:
-            return "0"
     if command_size is None or matched is None or matched >= command_size:
         return "0"
     return _decimal_text(command_size - matched)
 
 
 def _matched_event_type(command: dict, matched_size: str, *, venue_status: str = "") -> str:
-    if str(command.get("intent_kind") or "").upper() == "EXIT":
-        matched = _decimal_or_none(matched_size)
-        command_size = _decimal_or_none(command.get("size"))
-        if command_size is not None and matched is not None and matched >= command_size:
-            return CommandEventType.FILL_CONFIRMED.value
-        return CommandEventType.PARTIAL_FILL_OBSERVED.value
     command_size = _decimal_or_none(command.get("size"))
     matched = _decimal_or_none(matched_size)
+    if command_size is not None and matched is not None:
+        if matched < command_size:
+            return CommandEventType.PARTIAL_FILL_OBSERVED.value
+        return CommandEventType.FILL_CONFIRMED.value
     if _venue_status_is_fully_matched(venue_status) and matched is not None and matched > 0:
         return CommandEventType.FILL_CONFIRMED.value
-    if command_size is not None and matched is not None and matched < command_size:
-        return CommandEventType.PARTIAL_FILL_OBSERVED.value
     return CommandEventType.FILL_CONFIRMED.value
 
 
@@ -7774,7 +7804,7 @@ def reconcile_matched_order_facts(
             elif not terminal_positive_fact:
                 summary["stayed"] += 1
                 continue
-            point_status = str(_first_present(point_order, "status", "state") or "").upper()
+            point_status = _order_status(point_order or {})
             point_matched_size = _point_order_matched_size(
                 point_order,
                 fallback=row.get("order_fact_matched_size") or row.get("size") or "0",
@@ -7807,7 +7837,7 @@ def reconcile_matched_order_facts(
             if not _positive_decimal_or_none(matched_size):
                 summary["stayed"] += 1
                 continue
-            venue_status = str(_first_present(point_order, "status", "state") or "").upper()
+            venue_status = _order_status(point_order or {})
             if (
                 not _venue_status_can_carry_positive_match(venue_status)
                 and not terminal_positive_fact
@@ -10485,7 +10515,7 @@ def _point_order_terminal_for_partial_remainder(client, venue_order_id: str) -> 
     raw = _venue_order_payload(get_order(venue_order_id))
     if raw is None:
         return True, "NOT_FOUND", None
-    status = str(raw.get("status") or raw.get("state") or "").upper()
+    status = _order_status(raw)
     if status in _TERMINAL_NO_FILL_VENUE_STATUSES:
         return True, status, raw
     # GONE-ORDER TERMINAL PROOF (2026-06-16): a PARTIAL whose remainder is already
@@ -14502,7 +14532,7 @@ def _raw_matches_command_exposure(raw: dict, command: dict) -> bool:
         return False
     if not _decimal_matches(raw.get("price"), command.get("price")):
         return False
-    raw_size = raw.get("size") or raw.get("original_size") or raw.get("matched_amount")
+    raw_size = _order_original_size(raw)
     return _decimal_matches(raw_size, command.get("size"))
 
 
@@ -14515,7 +14545,7 @@ def _raw_matches_command_submit_identity(raw: dict, command: dict) -> bool:
         return False
     if not _decimal_matches(raw.get("price"), command.get("price")):
         return False
-    raw_size = raw.get("original_size") or raw.get("size") or raw.get("matched_amount")
+    raw_size = _order_original_size(raw)
     if not _decimal_matches(raw_size, command.get("size")):
         return False
     status = _order_status(raw)
@@ -14533,17 +14563,17 @@ def _raw_matches_command_submit_trade_identity(raw: dict, command: dict) -> bool
         return False
     if not _decimal_matches(raw.get("price"), command.get("price")):
         return False
-    raw_size = raw.get("original_size") or raw.get("size") or raw.get("matched_amount")
+    raw_size = _order_original_size(raw)
     return _decimal_matches(raw_size, command.get("size"))
 
 
 def _summarize_venue_match(raw: dict) -> dict:
     return {
         "id": raw.get("id") or raw.get("order_id") or raw.get("taker_order_id"),
-        "status": raw.get("status") or raw.get("state"),
+        "status": _order_status(raw),
         "asset_id": raw.get("asset_id") or raw.get("token_id"),
         "price": raw.get("price"),
-        "size": raw.get("size") or raw.get("original_size") or raw.get("matched_amount"),
+        "size": _order_original_size(raw),
         "match_time": raw.get("match_time"),
         "last_update": raw.get("last_update"),
     }

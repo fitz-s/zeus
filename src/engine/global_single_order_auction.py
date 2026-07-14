@@ -21,6 +21,7 @@ from src.engine.global_auction_universe import (
     global_universe_witness_from_scope,
 )
 from src.solve.solver import (
+    CandidatePortfolioEndowment,
     CurrentExecutionAuthority,
     CurrentFamilyProbabilityAuthority,
     GlobalSingleOrderAnyCandidate,
@@ -101,6 +102,9 @@ def global_single_order_actuation_identity(
         decision.limit_price,
         decision.expected_fill_price_before_fee,
         decision.max_spend_usd,
+        decision.current_token_shares,
+        decision.full_kelly_target_shares,
+        decision.fractional_kelly_target_shares,
         repr(decision.robust_delta_log_wealth),
         repr(decision.robust_ev_usd),
         repr(decision.capital_efficiency),
@@ -172,6 +176,9 @@ def global_single_order_economic_identity(
         decision.limit_price,
         decision.expected_fill_price_before_fee,
         decision.max_spend_usd,
+        decision.current_token_shares,
+        decision.full_kelly_target_shares,
+        decision.fractional_kelly_target_shares,
         repr(decision.robust_delta_log_wealth),
         repr(decision.robust_ev_usd),
         repr(decision.capital_efficiency),
@@ -257,6 +264,86 @@ def _no_trade(reason: str) -> PreparedGlobalAuctionResult:
         ),
         winner_event_id=None,
         actuation=None,
+    )
+
+
+def _candidate_portfolio_endowment(
+    candidate: GlobalSingleOrderAnyCandidate,
+    *,
+    probability_witness: Any,
+    holdings_snapshot: Any,
+    wealth_witness: PortfolioWealthWitness,
+) -> CandidatePortfolioEndowment:
+    """Project exact same-family holdings onto one BUY's payoff branches."""
+
+    if isinstance(candidate, GlobalSingleOrderSellCandidate):
+        raise ValueError("SELL does not use a BUY portfolio endowment")
+    outcomes = tuple(str(bin_id) for bin_id in probability_witness.bin_ids)
+    if (
+        len(outcomes) < 2
+        or len(set(outcomes)) != len(outcomes)
+        or candidate.bin_id not in outcomes
+        or str(getattr(holdings_snapshot, "family_key", "") or "")
+        != candidate.family_key
+        or str(getattr(holdings_snapshot, "ledger_snapshot_id", "") or "")
+        != wealth_witness.ledger_snapshot_id
+    ):
+        raise ValueError("candidate holdings topology is not ledger aligned")
+
+    payout_by_outcome = {outcome: Decimal("0") for outcome in outcomes}
+    family_gross_shares = Decimal("0")
+    current_token_shares = Decimal("0")
+    for holding in tuple(getattr(holdings_snapshot, "holdings", ()) or ()):
+        shares = Decimal(holding.shares)
+        holding_bin = str(holding.bin_id)
+        holding_side = str(holding.side)
+        holding_token = str(holding.token_id)
+        if (
+            not shares.is_finite()
+            or shares <= 0
+            or holding_bin not in payout_by_outcome
+            or holding_side not in {"YES", "NO"}
+        ):
+            raise ValueError("candidate family holding is invalid")
+        family_gross_shares += shares
+        if holding_side == "YES":
+            payout_by_outcome[holding_bin] += shares
+        else:
+            for outcome in outcomes:
+                if outcome != holding_bin:
+                    payout_by_outcome[outcome] += shares
+        if holding_token == candidate.token_id:
+            if holding_bin != candidate.bin_id or holding_side != candidate.side:
+                raise ValueError("native token maps to conflicting family claim")
+            current_token_shares += shares
+
+    def candidate_wins(outcome: str) -> bool:
+        is_own_bin = outcome == candidate.bin_id
+        return is_own_bin if candidate.side == "YES" else not is_own_bin
+
+    loss_payouts = tuple(
+        payout
+        for outcome, payout in payout_by_outcome.items()
+        if not candidate_wins(outcome)
+    )
+    win_payouts = tuple(
+        payout
+        for outcome, payout in payout_by_outcome.items()
+        if candidate_wins(outcome)
+    )
+    if not loss_payouts or not win_payouts:
+        raise ValueError("candidate payoff branches are incomplete")
+    return CandidatePortfolioEndowment(
+        loss_wealth_floor_usd=(
+            wealth_witness.wealth_floor_usd + min(loss_payouts)
+        ),
+        win_wealth_ceiling_usd=(
+            wealth_witness.wealth_ceiling_usd
+            - family_gross_shares
+            + max(win_payouts)
+        ),
+        current_token_shares=current_token_shares,
+        ledger_snapshot_id=wealth_witness.ledger_snapshot_id,
     )
 
 
@@ -492,6 +579,20 @@ def select_prepared_global_auction(
             )
         )
 
+    def _candidate_endowment(
+        candidate: GlobalSingleOrderAnyCandidate,
+    ) -> CandidatePortfolioEndowment:
+        holdings = holdings_by_family.get(candidate.family_key)
+        probability = probability_witnesses.get(candidate.family_key)
+        if holdings is None or probability is None:
+            raise ValueError("GLOBAL_CANDIDATE_ENDOWMENT_SCOPE_MISSING")
+        return _candidate_portfolio_endowment(
+            candidate,
+            probability_witness=probability,
+            holdings_snapshot=holdings,
+            wealth_witness=wealth_witness,
+        )
+
     decision = select_global_single_order(
         tuple(candidates),
         probability_witnesses=probability_witnesses,
@@ -505,6 +606,9 @@ def select_prepared_global_auction(
         fractional_kelly_multiplier=fractional_kelly_multiplier,
         decision_at_utc=decision_at_utc,
         candidate_capital_limit_resolver=_candidate_capital_limit,
+        candidate_portfolio_endowment_resolver=(
+            _candidate_endowment if book_epoch is not None else None
+        ),
         candidate_payoff_q_lcb_resolver=_candidate_payoff_q_lcb,
         candidate_policy_rejection_resolver=candidate_policy_rejection_resolver,
     )

@@ -44,6 +44,7 @@ from src.decision_kernel import claims
 from src.decision_kernel.canonicalization import qkernel_current_state_identity_hash
 from src.decision_kernel.certificate import build_certificate
 from src.engine.global_single_order_auction import (
+    _candidate_portfolio_endowment,
     global_single_order_actuation_identity,
     global_single_order_economic_identity,
     select_prepared_global_auction,
@@ -2162,6 +2163,14 @@ def test_global_winner_binding_does_not_reapply_legacy_price_floor(monkeypatch):
         "_bind_global_current_state_economics_to_proof",
         lambda selected, cert: (selected, cert),
     )
+    monkeypatch.setattr(
+        "src.solve.solver.global_buy_fak_prefix_certificate",
+        lambda *_args, **_kwargs: {
+            "global_buy_fak_prefix_semantics": (
+                "CONCAVE_WORST_LIMIT_ALL_NONZERO_PREFIXES_POSITIVE"
+            )
+        },
+    )
 
     selected, cert = era._global_actuation_selected_proof(
         global_actuation=actuation,
@@ -3827,6 +3836,75 @@ def test_global_scope_is_independent_of_the_reactor_page_and_current_q_identity(
     assert updated.scope_identity != scope.scope_identity
 
 
+def test_global_candidate_endowment_projects_correlated_family_holdings_exactly():
+    at = _dt.datetime(2026, 7, 14, 8, 0, tzinfo=_dt.timezone.utc)
+    identity = portfolio_wealth_identity(
+        ledger_snapshot_id="ledger-current",
+        position_set_hash="positions-current",
+        wealth_floor_usd=Decimal("100"),
+        wealth_ceiling_usd=Decimal("135"),
+        spendable_cash_usd=Decimal("100"),
+        reservations_usd=Decimal("0"),
+        collateral_authority="CHAIN",
+        captured_at_utc=at,
+    )
+    wealth = PortfolioWealthWitness(
+        ledger_snapshot_id="ledger-current",
+        position_set_hash="positions-current",
+        wealth_floor_usd=Decimal("100"),
+        wealth_ceiling_usd=Decimal("135"),
+        spendable_cash_usd=Decimal("100"),
+        reservations_usd=Decimal("0"),
+        collateral_authority="CHAIN",
+        captured_at_utc=at,
+        max_age=_dt.timedelta(seconds=1),
+        witness_identity=identity,
+    )
+    holdings = SimpleNamespace(
+        family_key="family",
+        ledger_snapshot_id="ledger-current",
+        holdings=(
+            SimpleNamespace(bin_id="a", side="YES", token_id="yes-a", shares=Decimal("10")),
+            SimpleNamespace(bin_id="b", side="NO", token_id="no-b", shares=Decimal("20")),
+            SimpleNamespace(bin_id="c", side="NO", token_id="no-c", shares=Decimal("5")),
+        ),
+    )
+    endowment = _candidate_portfolio_endowment(
+        SimpleNamespace(
+            family_key="family",
+            bin_id="c",
+            side="NO",
+            token_id="no-c",
+        ),
+        probability_witness=SimpleNamespace(bin_ids=("a", "b", "c")),
+        holdings_snapshot=holdings,
+        wealth_witness=wealth,
+    )
+
+    # If NO-c loses, outcome c still pays the existing NO-b holding ($20).
+    # If NO-c wins, outcome a is the family maximum ($35), while impossible
+    # simultaneous family payouts are removed from the global ceiling first.
+    assert endowment.loss_wealth_floor_usd == Decimal("120")
+    assert endowment.win_wealth_ceiling_usd == Decimal("135")
+    assert endowment.current_token_shares == Decimal("5")
+    assert endowment.ledger_snapshot_id == "ledger-current"
+
+    yes_endowment = _candidate_portfolio_endowment(
+        SimpleNamespace(
+            family_key="family",
+            bin_id="a",
+            side="YES",
+            token_id="yes-a",
+        ),
+        probability_witness=SimpleNamespace(bin_ids=("a", "b", "c")),
+        holdings_snapshot=holdings,
+        wealth_witness=wealth,
+    )
+    assert yes_endowment.loss_wealth_floor_usd == Decimal("105")
+    assert yes_endowment.win_wealth_ceiling_usd == Decimal("135")
+    assert yes_endowment.current_token_shares == Decimal("10")
+
+
 def test_two_prepared_families_choose_one_globally_unique_order():
     family, proofs, payload = _corpus()[0]
     decision_at = _dt.datetime(2026, 6, 13, 12, 0, tzinfo=_dt.timezone.utc)
@@ -4616,6 +4694,9 @@ def test_global_batch_claims_unpaged_cut_time_winner_and_continues_actuation(
         limit_price=Decimal("0.40"),
         expected_fill_price_before_fee=Decimal("0.40"),
         max_spend_usd=Decimal("4"),
+        current_token_shares=Decimal("0"),
+        full_kelly_target_shares=Decimal("40"),
+        fractional_kelly_target_shares=Decimal("10"),
         robust_delta_log_wealth=0.01,
         robust_ev_usd=2.0,
         capital_efficiency=0.25,

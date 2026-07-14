@@ -3472,8 +3472,12 @@ class TestRecoveryResolutionTable:
         _advance_to_cancel_unknown_review_required(conn, venue_order_id="ord-exit")
         mock_client.get_order.return_value = {
             "orderID": "ord-exit",
-            "status": "MATCHED",
-            "size_matched": "5",
+            "status": "ORDER_STATUS_MATCHED",
+            "original_size": "5000000",
+            "size_matched": "5000000",
+            "_venue_response_contract": "POLYMARKET_CLOB_V2_FIXED_6_POINT_ORDER",
+            "_v2_original_size": "5",
+            "_v2_matched_size": "5",
             "price": "0.55",
         }
         mock_client.get_trades.return_value = [
@@ -6312,12 +6316,12 @@ class TestRecoveryResolutionTable:
             "exit_price": 0.04,
         }
 
-    def test_matched_order_recovery_finalizes_when_venue_normalizes_size_below_command(
+    def test_matched_order_recovery_preserves_partial_size_below_command(
         self,
         conn,
         mock_client,
     ):
-        """Relationship: venue MATCHED status outranks submitted-size rounding residue."""
+        """Venue MATCHED cannot overwrite the observed filled-share quantity."""
         _insert(conn, size=5.0, price=0.34)
         _advance_to_acked(conn, venue_order_id="ord-001")
         _seed_pending_entry_projection(conn)
@@ -6336,9 +6340,9 @@ class TestRecoveryResolutionTable:
         summary = reconcile_unresolved_commands(conn, mock_client)
 
         assert summary["matched_order_facts"]["advanced"] == 1
-        assert _get_state(conn, "cmd-001") == "FILLED"
+        assert _get_state(conn, "cmd-001") == "PARTIAL"
         events = _get_events(conn, "cmd-001")
-        assert events[-1]["event_type"] == "FILL_CONFIRMED"
+        assert events[-1]["event_type"] == "PARTIAL_FILL_OBSERVED"
         latest_order_fact = conn.execute(
             """
             SELECT state, remaining_size, matched_size, source
@@ -6349,11 +6353,72 @@ class TestRecoveryResolutionTable:
             """
         ).fetchone()
         assert dict(latest_order_fact) == {
-            "state": "MATCHED",
-            "remaining_size": "0",
+            "state": "PARTIALLY_MATCHED",
+            "remaining_size": "0.01",
             "matched_size": "4.99",
             "source": "REST",
         }
+        position = conn.execute(
+            "SELECT shares FROM position_current WHERE position_id = 'pos-001'"
+        ).fetchone()
+        assert position is not None
+        assert Decimal(str(position["shares"])) == Decimal("4.99")
+
+    def test_matched_order_recovery_consumes_typed_v2_fixed_6_size(
+        self,
+        conn,
+        mock_client,
+    ):
+        """Recovery consumes adapter-typed shares, never raw fixed-6 units."""
+        _insert(conn, size=10.0, price=0.34)
+        _advance_to_acked(conn, venue_order_id="ord-v2-fixed-6")
+        _seed_pending_entry_projection(conn, order_id="ord-v2-fixed-6")
+        _append_order_fact(
+            conn,
+            order_id="ord-v2-fixed-6",
+            state="LIVE",
+            matched_size="0",
+            remaining_size="10",
+        )
+        mock_client.get_order.return_value = {
+            "id": "ord-v2-fixed-6",
+            "status": "ORDER_STATUS_MATCHED",
+            "side": "BUY",
+            "original_size": "10000000",
+            "size_matched": "3250000",
+            "_venue_response_contract": "POLYMARKET_CLOB_V2_FIXED_6_POINT_ORDER",
+            "_v2_original_size": "10",
+            "_v2_matched_size": "3.25",
+            "price": "0.34",
+            "associate_trades": ["trade-v2-fixed-6"],
+            "transactionsHashes": ["0xhash-v2-fixed-6"],
+        }
+
+        from src.execution.command_recovery import reconcile_unresolved_commands
+
+        summary = reconcile_unresolved_commands(conn, mock_client)
+
+        assert summary["matched_order_facts"]["advanced"] == 1
+        assert _get_state(conn, "cmd-001") == "PARTIAL"
+        latest_order_fact = conn.execute(
+            """
+            SELECT state, remaining_size, matched_size
+              FROM venue_order_facts
+             WHERE command_id = 'cmd-001'
+             ORDER BY local_sequence DESC
+             LIMIT 1
+            """
+        ).fetchone()
+        assert dict(latest_order_fact) == {
+            "state": "PARTIALLY_MATCHED",
+            "remaining_size": "6.75",
+            "matched_size": "3.25",
+        }
+        position = conn.execute(
+            "SELECT shares FROM position_current WHERE position_id = 'pos-001'"
+        ).fetchone()
+        assert position is not None
+        assert Decimal(str(position["shares"])) == Decimal("3.25")
 
     def test_live_point_order_with_positive_size_matched_projects_partial_entry(
         self,

@@ -20,6 +20,7 @@ from __future__ import annotations
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+import math
 from types import SimpleNamespace
 
 import numpy as np
@@ -448,11 +449,18 @@ def _global_candidate(
     q,
     levels=(("0.40", "100"),),
     fee="0",
+    min_order="1",
     reason=None,
 ):
     token = f"token-{candidate_id}"
     condition = f"condition-{candidate_id}"
-    curve = _global_curve(side=side, token=token, levels=levels, fee=fee)
+    curve = _global_curve(
+        side=side,
+        token=token,
+        levels=levels,
+        fee=fee,
+        min_order=min_order,
+    )
     curve_identity = S.executable_curve_identity(curve)
     resolution_identity = f"resolution-{family}"
     payoff_q_samples = np.full(400, q, dtype=np.float64)
@@ -607,7 +615,14 @@ def _global_probability_projection(candidate):
 
 
 def _global_score(
-    candidate, *, floor="100", ceiling="100", cash="100", cap="5", multiplier="1"
+    candidate,
+    *,
+    floor="100",
+    ceiling="100",
+    cash="100",
+    cap="5",
+    multiplier="1",
+    current_token_shares="0",
 ):
     q_samples, alpha = _global_probability_projection(candidate)
     return S._score_global_single_order(
@@ -619,6 +634,7 @@ def _global_score(
         spendable_cash_usd=Decimal(cash),
         capital_limit_usd=Decimal(cap),
         fractional_kelly_multiplier=Decimal(multiplier),
+        current_token_shares=Decimal(current_token_shares),
     )
 
 
@@ -763,6 +779,113 @@ def test_global_single_order_closed_form_matches_exact_venue_grid_oracle(
     assert abs(score.robust_delta_log_wealth - oracle[0]) < 1e-12
 
 
+def test_fractional_kelly_targets_final_holding_instead_of_reallocating_each_epoch():
+    candidate = _global_candidate(
+        candidate_id="cumulative-fractional-kelly",
+        family="cumulative-fractional-kelly",
+        side="YES",
+        q=0.65,
+        levels=(("0.40", "1000"),),
+    )
+
+    first = _global_score(
+        candidate,
+        cap="100",
+        multiplier="0.25",
+    )
+    assert first.candidate is candidate
+    assert first.current_token_shares == 0
+    assert first.full_kelly_target_shares > first.fractional_kelly_target_shares
+    assert first.shares <= first.fractional_kelly_target_shares
+
+    cash_after = Decimal("100") - first.cost_usd
+    second = _global_score(
+        candidate,
+        floor=str(cash_after),
+        ceiling=str(cash_after + first.shares),
+        cash=str(cash_after),
+        cap="100",
+        multiplier="0.25",
+        current_token_shares=str(first.shares),
+    )
+
+    assert second.candidate is None
+    assert second.rejection_reasons[candidate.candidate_id] == (
+        "FRACTIONAL_KELLY_INCREMENT_BELOW_MINIMUM"
+    )
+
+
+def test_fractional_kelly_does_not_promote_a_subminimum_target_to_an_order():
+    candidate = _global_candidate(
+        candidate_id="fractional-below-minimum",
+        family="fractional-below-minimum",
+        side="YES",
+        q=0.51,
+        levels=(("0.49", "1000"),),
+        min_order="1",
+    )
+
+    decision = _global_score(
+        candidate,
+        cap="100",
+        multiplier="0.03125",
+    )
+
+    assert decision.candidate is None
+    assert decision.rejection_reasons[candidate.candidate_id] == (
+        "FRACTIONAL_KELLY_INCREMENT_BELOW_MINIMUM"
+    )
+
+
+def test_global_selector_consumes_ledger_bound_cumulative_buy_endowment():
+    candidate = _global_candidate(
+        candidate_id="selector-cumulative-endowment",
+        family="selector-cumulative-endowment",
+        side="NO",
+        q=0.65,
+        levels=(("0.40", "1000"),),
+    )
+    initial_endowment = S.CandidatePortfolioEndowment(
+        loss_wealth_floor_usd=Decimal("100"),
+        win_wealth_ceiling_usd=Decimal("100"),
+        current_token_shares=Decimal("0"),
+        ledger_snapshot_id="ledger-current",
+    )
+    first = _global_select(
+        (candidate,),
+        cap="100",
+        fractional_kelly_multiplier="0.25",
+        candidate_portfolio_endowment_resolver=lambda _: initial_endowment,
+    )
+    assert first.candidate is candidate
+
+    cash_after = Decimal("100") - first.cost_usd
+    held_endowment = S.CandidatePortfolioEndowment(
+        loss_wealth_floor_usd=cash_after,
+        win_wealth_ceiling_usd=cash_after + first.shares,
+        current_token_shares=first.shares,
+        ledger_snapshot_id="ledger-current",
+    )
+    updated_wealth = _global_witness(
+        floor=str(cash_after),
+        ceiling=str(cash_after + first.shares),
+        cash=str(cash_after),
+        position_hash="positions-after-first-fill",
+    )
+    second = _global_select(
+        (candidate,),
+        cap="100",
+        witness=updated_wealth,
+        fractional_kelly_multiplier="0.25",
+        candidate_portfolio_endowment_resolver=lambda _: held_endowment,
+    )
+
+    assert second.candidate is None
+    assert second.rejection_reasons[candidate.candidate_id] == (
+        "FRACTIONAL_KELLY_INCREMENT_BELOW_MINIMUM"
+    )
+
+
 def _global_witness(
     *,
     floor="100",
@@ -827,6 +950,7 @@ def _global_select(
     current_executions=None, current_wealth_identity=None, universe=None,
     current_universe_identity=None,
     candidate_capital_limit_resolver=None,
+    candidate_portfolio_endowment_resolver=None,
     candidate_policy_rejection_resolver=None,
     fractional_kelly_multiplier="1",
 ):
@@ -878,6 +1002,9 @@ def _global_select(
         fractional_kelly_multiplier=Decimal(fractional_kelly_multiplier),
         decision_at_utc=_DECISION_AT,
         candidate_capital_limit_resolver=candidate_capital_limit_resolver,
+        candidate_portfolio_endowment_resolver=(
+            candidate_portfolio_endowment_resolver
+        ),
         candidate_policy_rejection_resolver=candidate_policy_rejection_resolver,
     )
 
@@ -1362,6 +1489,109 @@ def test_global_single_order_binds_exact_shares_to_fundable_deepest_limit():
     assert decision.max_spend_usd == Decimal("6.0000")
 
 
+def test_global_buy_fak_certificate_proves_every_nonzero_fill_prefix():
+    candidate = _global_candidate(
+        candidate_id="fak-prefix-positive",
+        family="fak-prefix-positive",
+        side="NO",
+        q=0.90,
+        levels=(("0.10", "100"),),
+        fee="0.05",
+    )
+    decision = _global_select((candidate,), cap="5")
+
+    cert = S.global_buy_fak_prefix_certificate(decision)
+    unit_cost = Decimal(str(cert["global_buy_fak_worst_unit_cost"]))
+    assert cert["global_buy_fak_fee_rounding_bound"] == (
+        "ROUNDED_FEE_AT_MOST_TWO_X_UNROUNDED"
+    )
+    assert Decimal(str(cert["global_buy_fak_worst_fee_shape"])) == Decimal("0.09")
+    assert Decimal(str(cert["global_buy_fak_worst_fee_per_share"])) == Decimal("0.0090")
+    assert "global_buy_fak_min_fill_quantum" not in cert
+    terminal = decision.terminal_wealth
+    assert terminal is not None
+    floor = terminal.wealth_after_loss_usd - terminal.loss_payoff_usd
+    ceiling = terminal.wealth_after_win_usd - terminal.win_payoff_usd
+    for shares in (Decimal("0.01"), decision.shares / 2, decision.shares):
+        cost = unit_cost * shares
+        du = terminal.loss_probability_ucb * math.log(float((floor - cost) / floor))
+        du += terminal.win_probability_lcb * math.log(
+            float((ceiling - cost + shares) / ceiling)
+        )
+        ev = terminal.win_probability_lcb * float(shares) - float(cost)
+        assert du > 0
+        assert ev > 0
+
+    high_limit = S.global_buy_fak_prefix_certificate(
+        replace(decision, limit_price=Decimal("0.70"))
+    )
+    assert Decimal(str(high_limit["global_buy_fak_worst_fee_shape"])) == Decimal("0.25")
+    assert Decimal(str(high_limit["global_buy_fak_worst_fee_per_share"])) == Decimal("0.0250")
+
+
+def test_global_buy_fak_certificate_rejects_negative_worst_limit_endpoint():
+    candidate = _global_candidate(
+        candidate_id="fak-prefix-negative",
+        family="fak-prefix-negative",
+        side="YES",
+        q=0.70,
+        levels=(("0.10", "100"),),
+        fee="0.05",
+    )
+    decision = _global_select((candidate,), cap="5")
+    worse_limit = replace(decision, limit_price=Decimal("0.90"))
+
+    with pytest.raises(ValueError, match="non-positive"):
+        S.global_buy_fak_prefix_certificate(worse_limit)
+
+
+def test_global_buy_fak_certificate_binds_fee_curve_and_recomputes_independently():
+    from src.decision_kernel.canonicalization import (
+        qkernel_global_buy_fak_prefix_rejection_reason,
+    )
+
+    candidate = _global_candidate(
+        candidate_id="fak-prefix-binding",
+        family="fak-prefix-binding",
+        side="YES",
+        q=0.90,
+        levels=(("0.10", "100"),),
+        fee="0.05",
+    )
+    decision = _global_select((candidate,), cap="5")
+    terminal = decision.terminal_wealth
+    assert terminal is not None
+    economics = {
+        **S.global_buy_fak_prefix_certificate(decision),
+        "side": candidate.side,
+        "global_jit_execution_curve_identity": candidate.execution_curve_identity,
+        "global_target_shares": str(decision.shares),
+        "global_limit_price": str(decision.limit_price),
+        "global_terminal_win_probability_lcb": terminal.win_probability_lcb,
+        "global_terminal_loss_probability_ucb": terminal.loss_probability_ucb,
+        "global_terminal_loss_payoff_usd": str(terminal.loss_payoff_usd),
+        "global_terminal_win_payoff_usd": str(terminal.win_payoff_usd),
+        "global_terminal_wealth_after_loss_usd": str(terminal.wealth_after_loss_usd),
+        "global_terminal_wealth_after_win_usd": str(terminal.wealth_after_win_usd),
+    }
+
+    assert qkernel_global_buy_fak_prefix_rejection_reason(
+        economics, direction="buy_yes"
+    ) is None
+    assert qkernel_global_buy_fak_prefix_rejection_reason(
+        {**economics, "global_buy_fak_fee_rate": "0.10"},
+        direction="buy_yes",
+    ) == "global_buy_fak_worst_fee_per_share"
+    assert qkernel_global_buy_fak_prefix_rejection_reason(
+        {**economics, "global_buy_fak_fee_rounding_bound": "PER_CENTISHARE"},
+        direction="buy_yes",
+    ) == "fee_rounding_bound"
+    assert qkernel_global_buy_fak_prefix_rejection_reason(
+        {**economics, "global_buy_fak_execution_curve_identity": "tampered"},
+        direction="buy_yes",
+    ) == "execution_curve_identity"
+
+
 @pytest.mark.parametrize("side", ("YES", "NO"))
 def test_global_single_order_optimizes_on_price_dependent_venue_grid(side):
     candidate = _global_candidate(
@@ -1471,7 +1701,7 @@ def test_global_single_order_label_mirror_preserves_size_cost_and_objective():
     assert yes_score.robust_delta_log_wealth == no_score.robust_delta_log_wealth
 
 
-def test_global_single_order_fractional_kelly_reoptimizes_loss_budget_once_for_both_sides():
+def test_global_single_order_fractional_kelly_bounds_final_holding_for_both_sides():
     yes = _global_candidate(
         candidate_id="fractional-yes",
         family="fractional-yes",
@@ -1525,19 +1755,21 @@ def test_global_single_order_fractional_kelly_reoptimizes_loss_budget_once_for_b
     assert share_scaled is not None
     loss_budget = full_yes.cost_usd * Decimal("0.03125")
     assert fractional_yes.cost_usd <= loss_budget
-    share_scaled_du = S._single_order_metrics(
-        yes,
-        q_samples=_global_probability_projection(yes)[0],
-        shares=share_scaled,
-        wealth_floor_usd=Decimal("1253.44"),
-        wealth_ceiling_usd=Decimal("1253.44"),
-        alpha=_global_probability_projection(yes)[1],
-    )[0]
-    assert fractional_yes.shares > share_scaled
-    assert fractional_yes.robust_delta_log_wealth > share_scaled_du
+    assert fractional_yes.shares < share_scaled
+    assert (
+        fractional_yes.shares
+        <= fractional_yes.fractional_kelly_target_shares
+    )
+    assert fractional_yes.fractional_kelly_target_shares == (
+        fractional_yes.full_kelly_target_shares * Decimal("0.03125")
+    )
     assert fractional_yes.shares == fractional_no.shares
     assert fractional_yes.cost_usd == fractional_no.cost_usd
     assert fractional_yes.max_spend_usd == fractional_no.max_spend_usd
+    assert (
+        fractional_yes.fractional_kelly_target_shares
+        == fractional_no.fractional_kelly_target_shares
+    )
     assert (
         fractional_yes.robust_delta_log_wealth
         == fractional_no.robust_delta_log_wealth
@@ -1548,7 +1780,7 @@ def test_global_single_order_fractional_kelly_reoptimizes_loss_budget_once_for_b
     assert capacity_bounded.shares < fractional_yes.shares
 
 
-def test_global_single_order_fractional_loss_budget_uses_cheap_depth_before_stopping():
+def test_global_single_order_does_not_promote_cheap_depth_above_kelly_target():
     candidate = _global_candidate(
         candidate_id="cheap-depth",
         family="cheap-depth",
@@ -1575,18 +1807,10 @@ def test_global_single_order_fractional_loss_budget_uses_cheap_depth_before_stop
         multiplier="0.03125",
     )
 
-    assert decision.candidate is not None
-    assert decision.shares > Decimal("1000")
-    assert decision.max_spend_usd <= Decimal("107.58")
-    old_du = S._single_order_metrics(
-        candidate,
-        q_samples=_global_probability_projection(candidate)[0],
-        shares=Decimal("1000"),
-        wealth_floor_usd=Decimal("1189.71"),
-        wealth_ceiling_usd=Decimal("1189.71"),
-        alpha=_global_probability_projection(candidate)[1],
-    )[0]
-    assert decision.robust_delta_log_wealth > old_du
+    assert decision.candidate is None
+    assert decision.rejection_reasons[candidate.candidate_id] == (
+        "FRACTIONAL_KELLY_INCREMENT_BELOW_MINIMUM"
+    )
 
 
 def test_global_single_order_capacity_frontier_never_shrinks_on_a_deeper_price_jump():
@@ -1606,7 +1830,7 @@ def test_global_single_order_capacity_frontier_never_shrinks_on_a_deeper_price_j
 
 
 @pytest.mark.parametrize("side", ("YES", "NO"))
-def test_global_single_order_promotes_cheap_claim_to_marketable_notional(side):
+def test_global_single_order_never_promotes_subminimum_kelly_target(side):
     candidate = _global_candidate(
         candidate_id=f"marketable-min-{side.lower()}",
         family=f"marketable-min-{side.lower()}",
@@ -1624,11 +1848,10 @@ def test_global_single_order_promotes_cheap_claim_to_marketable_notional(side):
         fractional_kelly_multiplier="0.03125",
     )
 
-    assert decision.candidate is not None
-    assert decision.shares == Decimal("17.00")
-    assert decision.shares * decision.limit_price >= Decimal("1")
-    assert decision.robust_delta_log_wealth > 0.0
-    assert decision.robust_ev_usd > 0.0
+    assert decision.candidate is None
+    assert decision.rejection_reasons[candidate.candidate_id] == (
+        "FRACTIONAL_KELLY_INCREMENT_BELOW_MINIMUM"
+    )
 
 
 @pytest.mark.parametrize("multiplier", ("0", "-0.1", "NaN", "1.01"))

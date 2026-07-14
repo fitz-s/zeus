@@ -11,6 +11,7 @@ from src.decision_kernel import claims
 from src.decision_kernel.canonicalization import (
     qkernel_declares_current_state,
     qkernel_current_state_identity_hash,
+    qkernel_global_buy_fak_prefix_rejection_reason,
     qkernel_global_current_state_rejection_reason,
     stable_hash,
 )
@@ -1118,6 +1119,33 @@ def _verify_final_intent_payload(
         if not math.isclose(limit_price, target_limit, rel_tol=0.0, abs_tol=1e-12):
             raise CertificateVerificationError("global exact order limit binding mismatch")
     _assert_order_type_tuple_coherent(payload, surface="final intent")
+    if (
+        payload.get("time_in_force") == "FAK"
+        and payload.get("global_exact_order") is True
+    ):
+        prefix_reason = qkernel_global_buy_fak_prefix_rejection_reason(
+            actionable.get("qkernel_execution_economics"),
+            direction=str(payload.get("direction") or ""),
+        )
+        if prefix_reason is not None:
+            raise CertificateVerificationError(
+                f"final intent FAK prefix certificate invalid: {prefix_reason}"
+            )
+        expected_fee_rate = _finite_float(
+            actionable["qkernel_execution_economics"].get(
+                "global_buy_fak_fee_rate"
+            ),
+            "actionable global_buy_fak_fee_rate",
+        )
+        actual_fee_rate = _finite_float(
+            payload.get("fee_rate"), "final intent fee_rate"
+        )
+        if not math.isclose(
+            actual_fee_rate, expected_fee_rate, rel_tol=0.0, abs_tol=1e-12
+        ):
+            raise CertificateVerificationError(
+                "final intent FAK fee-rate binding mismatch"
+            )
     if payload.get("source") != "existing_final_intent_builder":
         raise CertificateVerificationError("final intent source must be existing_final_intent_builder")
     # WALL #1 (2026-06-01): passive_maker_context is a MAKER-ONLY executor-native field.
@@ -1172,6 +1200,7 @@ def _verify_executor_expressibility_payload(
         "side",
         "limit_price",
         "size",
+        "fee_rate",
         "post_only",
         "maker_intent",
     ):

@@ -1,5 +1,5 @@
 # Created: 2026-05-31
-# Last reused or audited: 2026-05-31
+# Last reused or audited: 2026-07-14
 # Authority basis: EDLI_EXECUTION_STRATEGY_DESIGN_2026_05_31.md §4 items 1,2,3,7 +
 #   §6.1 test-first relationship test (governor-TAKER -> 3-layer FOK acceptance + submittable).
 """Relationship tests for the EDLI taker execution spine.
@@ -23,6 +23,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from decimal import Decimal
+import math
 
 import pytest
 
@@ -88,6 +89,9 @@ def _taker_chain(*, order_mode: str = "TAKER", actionable_overrides: dict | None
                  sweep_expected_fill_price: str | None = None,
                  exact_taker_shares: str | None = None,
                  exact_taker_limit_price: str | None = None,
+                 order_type: str | None = None,
+                 time_in_force: str | None = None,
+                 fee_rate: float = 0.0,
                  taker_quality_proof: dict | None = None):
     """Build a final-intent + expressibility chain through the (parameterized) builder.
 
@@ -228,8 +232,11 @@ def _taker_chain(*, order_mode: str = "TAKER", actionable_overrides: dict | None
         passive_maker_context=passive_maker_context,
         decision_time=NOW,
         order_mode=order_mode,
+        order_type=order_type,
+        time_in_force=time_in_force,
         tick_size=0.01,
         min_order_size=1.0,
+        fee_rate=fee_rate,
         best_bid=float(quote_payload["best_bid"]),
         best_ask=float(quote_payload["best_ask"]),
         available_crossable_shares=available_crossable_shares,
@@ -243,6 +250,49 @@ def _taker_chain(*, order_mode: str = "TAKER", actionable_overrides: dict | None
         final_intent_parents = (actionable, executable, quote, cost, forecast)
         return actionable, executable, final_intent, final_intent_parents
     return actionable, executable, final_intent
+
+
+def _buy_fak_prefix_economics(*, shares: float = 5.0, limit: float = 0.45) -> dict:
+    fee_rate = 0.05
+    win_q = 0.60
+    loss_q = 0.40
+    floor = 100.0
+    ceiling = 100.0
+    max_fee_shape = 0.25 if limit >= 0.5 else limit * (1.0 - limit)
+    worst_fee_per_share = 2.0 * fee_rate * max_fee_shape
+    unit_cost = limit + worst_fee_per_share
+    full_cost = unit_cost * shares
+    robust_du = loss_q * math.log((floor - full_cost) / floor) + win_q * math.log(
+        (ceiling - full_cost + shares) / ceiling
+    )
+    curve = "curve-current"
+    return {
+        "side": "YES",
+        "global_jit_execution_curve_identity": curve,
+        "global_target_shares": str(shares),
+        "global_limit_price": str(limit),
+        "global_terminal_win_probability_lcb": win_q,
+        "global_terminal_loss_probability_ucb": loss_q,
+        "global_terminal_loss_payoff_usd": "-2.25",
+        "global_terminal_win_payoff_usd": "2.75",
+        "global_terminal_wealth_after_loss_usd": "97.75",
+        "global_terminal_wealth_after_win_usd": "102.75",
+        "global_buy_fak_prefix_semantics": (
+            "CONCAVE_WORST_LIMIT_ALL_NONZERO_PREFIXES_POSITIVE"
+        ),
+        "global_buy_fak_fee_rate_source": "CURRENT_EXECUTABLE_CURVE",
+        "global_buy_fak_execution_curve_identity": curve,
+        "global_buy_fak_fee_rate": str(fee_rate),
+        "global_buy_fak_fee_rounding_bound": (
+            "ROUNDED_FEE_AT_MOST_TWO_X_UNROUNDED"
+        ),
+        "global_buy_fak_worst_fee_shape": str(max_fee_shape),
+        "global_buy_fak_worst_fee_per_share": str(worst_fee_per_share),
+        "global_buy_fak_worst_unit_cost": str(unit_cost),
+        "global_buy_fak_full_worst_cost_usd": str(full_cost),
+        "global_buy_fak_full_robust_delta_log_wealth": robust_du,
+        "global_buy_fak_full_robust_ev_usd": win_q * shares - full_cost,
+    }
 
 
 # --------------------------------------------------------------------------
@@ -285,6 +335,124 @@ def test_governor_taker_accepted_by_all_three_layers_and_submittable():
         executor_native_intent_hash=native_hash,
     )
     verify_executor_expressibility(expressibility, (final_intent, executable, live_cap))
+
+
+def test_global_buy_fak_requires_positive_prefix_certificate_and_exact_fee_binding():
+    economics = _buy_fak_prefix_economics()
+    _, _, final_intent, parents = _taker_chain(
+        order_mode="TAKER",
+        order_type="FAK_LIMIT",
+        time_in_force="FAK",
+        fee_rate=0.05,
+        actionable_overrides={"qkernel_execution_economics": economics},
+        available_crossable_shares=5.0,
+        sweep_expected_fill_price="0.45",
+        exact_taker_shares="5.00",
+        exact_taker_limit_price="0.45",
+        return_parents=True,
+    )
+
+    verify_final_intent(final_intent, parents)
+    assert final_intent.payload["time_in_force"] == "FAK"
+    assert final_intent.payload["fee_rate"] == pytest.approx(0.05)
+
+    from src.engine.event_bound_final_intent import (
+        _final_execution_intent_from_payload,
+    )
+
+    native = _final_execution_intent_from_payload(final_intent.payload)
+    assert native.fee_rate == Decimal("0.05")
+    expected_fill = native.expected_fill_price_before_fee
+    assert native.fee_adjusted_execution_price == (
+        expected_fill + Decimal("0.05") * expected_fill * (1 - expected_fill)
+    )
+
+
+def test_absorbing_day0_certainty_survives_actionable_to_pre_submit_projection():
+    from src.engine.event_reactor_adapter import (
+        PreSubmitAuthorityWitness,
+        _pre_submit_revalidation_payload_from_final_intent,
+    )
+
+    finite_no = ["condition-1"]
+    _, executable, final_intent = _taker_chain(
+        actionable_overrides={
+            "_edli_day0_finite_evidence_absorbing_no_conditions": finite_no,
+        }
+    )
+    assert final_intent.payload[
+        "_edli_day0_finite_evidence_absorbing_no_conditions"
+    ] == finite_no
+
+    witness = PreSubmitAuthorityWitness(
+        quote_seen_at=NOW.isoformat(),
+        book_hash="book-current",
+        current_best_bid=0.40,
+        current_best_ask=0.45,
+        tick_size=0.01,
+        min_order_size=1.0,
+        neg_risk=False,
+        heartbeat_status="OK",
+        user_ws_status="OK",
+        venue_connectivity_status="OK",
+        balance_allowance_status="OK",
+        book_authority_id="clob_jit_book",
+        book_captured_at=NOW.isoformat(),
+        heartbeat_authority_id="heartbeat_supervisor",
+        heartbeat_checked_at=NOW.isoformat(),
+        user_ws_authority_id="ws_gap_guard",
+        user_ws_checked_at=NOW.isoformat(),
+        venue_connectivity_authority_id="polymarket_public_orderbook",
+        venue_connectivity_checked_at=NOW.isoformat(),
+        balance_allowance_authority_id="polymarket_wallet_readonly",
+        balance_allowance_checked_at=NOW.isoformat(),
+        checked_at=NOW.isoformat(),
+    )
+    pre_submit = _pre_submit_revalidation_payload_from_final_intent(
+        final_intent=final_intent,
+        executable_snapshot=executable,
+        decision_time=NOW,
+        authority_witness=witness,
+    )
+
+    assert pre_submit[
+        "_edli_day0_finite_evidence_absorbing_no_conditions"
+    ] == finite_no
+
+
+def test_global_buy_fak_rejects_missing_prefix_certificate():
+    _, _, final_intent, parents = _taker_chain(
+        order_mode="TAKER",
+        order_type="FAK_LIMIT",
+        time_in_force="FAK",
+        fee_rate=0.05,
+        available_crossable_shares=5.0,
+        exact_taker_shares="5.00",
+        exact_taker_limit_price="0.45",
+        return_parents=True,
+    )
+
+    with pytest.raises(CertificateVerificationError, match="prefix certificate invalid"):
+        verify_final_intent(final_intent, parents)
+
+
+def test_global_buy_fak_rejects_final_fee_rate_drift():
+    _, _, final_intent, parents = _taker_chain(
+        order_mode="TAKER",
+        order_type="FAK_LIMIT",
+        time_in_force="FAK",
+        fee_rate=0.10,
+        actionable_overrides={
+            "qkernel_execution_economics": _buy_fak_prefix_economics()
+        },
+        available_crossable_shares=5.0,
+        exact_taker_shares="5.00",
+        exact_taker_limit_price="0.45",
+        return_parents=True,
+    )
+
+    with pytest.raises(CertificateVerificationError, match="fee-rate binding mismatch"):
+        verify_final_intent(final_intent, parents)
 
 
 def test_global_exact_taker_preserves_deep_limit_and_exact_share_count():

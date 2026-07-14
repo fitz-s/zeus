@@ -1,8 +1,8 @@
-# Lifecycle: created=2026-04-26; last_reviewed=2026-07-11; last_reused=2026-07-11
+# Lifecycle: created=2026-04-26; last_reviewed=2026-07-14; last_reused=2026-07-14
 # Purpose: Lock executor command split phase ordering and ACK invariants.
 # Reuse: Run when venue command persistence, live order submission, or ACK handling changes.
 # Created: 2026-04-26
-# Last reused/audited: 2026-07-11
+# Last reused/audited: 2026-07-14
 # Authority basis: docs/operations/task_2026-04-26_execution_state_truth_p1_command_bus/implementation_plan.md §P1.S3
 #                  + docs/archive/2026-Q2/task_2026-05-15_live_order_e2e_goal/LIVE_ORDER_E2E_GOAL_PLAN.md
 #                  + docs/operations/task_2026-05-21_live_side_effect_risk_boundaries/task.md P1-4 side-effect boundary.
@@ -2863,6 +2863,198 @@ class TestLiveOrderCommandSplit:
             "tx_hash": "0xhash-matched",
         }
 
+    def test_buy_fak_v2_human_submit_amounts_persist_exact_fill_truth(
+        self, mem_conn, monkeypatch
+    ):
+        import src.execution.executor as executor_module
+        from src.execution.executor import _live_order
+        from src.state.venue_command_repo import get_command, list_events
+
+        monkeypatch.setattr(
+            executor_module,
+            "_entry_control_pause_component",
+            lambda *args, **kwargs: {
+                "component": "entries_pause_control_override",
+                "allowed": True,
+                "reason": "not_paused",
+            },
+        )
+        monkeypatch.setattr(
+            executor_module,
+            "_assert_risk_allocator_allows_submit",
+            lambda *args, **kwargs: None,
+        )
+        monkeypatch.setattr(
+            executor_module,
+            "_select_risk_allocator_order_type",
+            lambda *args, **kwargs: "FAK",
+        )
+        monkeypatch.setattr(
+            executor_module,
+            "_assert_ws_gap_allows_submit",
+            lambda *args, **kwargs: {
+                "component": "ws_gap_guard",
+                "allowed": True,
+                "reason": "allowed",
+            },
+        )
+        certificate_hash = "9" * 64
+        intent = _make_entry_intent(
+            mem_conn,
+            limit_price=0.34,
+            submit_order_type="FAK",
+            post_only=False,
+            actionable_certificate_hash=certificate_hash,
+        )
+        object.__setattr__(
+            intent,
+            "taker_quality_proof",
+            {
+                "passed": True,
+                "taker_fee_adjusted_edge": "0.08",
+                "taker_expected_profit_usd": "0.50",
+                "maker_expected_profit_usd": "0.20",
+                "incremental_expected_profit_usd": "0.30",
+                "model_confidence": "0.72",
+            },
+        )
+        _insert_actionable_certificate_for_intent(
+            mem_conn,
+            intent,
+            certificate_hash=certificate_hash,
+        )
+        mem_conn.execute(
+            """
+            INSERT INTO decision_log (
+                mode, started_at, completed_at, artifact_json, timestamp, env
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "live",
+                _NOW.isoformat(),
+                _NOW.isoformat(),
+                json.dumps(
+                    {
+                        "trade_cases": [
+                            {
+                                "decision_id": "dec-fak-partial-v2",
+                                "token_id": intent.token_id,
+                                "no_token_id": f"{intent.token_id}-no",
+                                "city": "Test City",
+                                "target_date": "2026-07-14",
+                                "bin_label": "Will the high be 20C?",
+                                "direction": "buy_yes",
+                                "strategy_key": "center_buy",
+                                "p_posterior": 0.95,
+                                "temperature_metric": "high",
+                                "unit": "C",
+                                "size_usd": 3.4,
+                            }
+                        ]
+                    },
+                    sort_keys=True,
+                ),
+                _NOW.isoformat(),
+                "live",
+            ),
+        )
+        mem_conn.commit()
+        command_ids_seen: list[str] = []
+
+        import src.state.venue_command_repo as _repo
+        _real_insert = _repo.insert_command
+
+        def capturing_insert(*args, **kwargs):
+            command_ids_seen.append(kwargs["command_id"])
+            return _real_insert(*args, **kwargs)
+
+        with patch(
+            "src.state.venue_command_repo.insert_command", side_effect=capturing_insert
+        ), patch("src.data.polymarket_client.PolymarketClient") as MockClient:
+            mock_inst = MagicMock()
+            MockClient.return_value = mock_inst
+            mock_inst.v2_preflight.return_value = None
+            bound = _capture_bound_submission_envelope(mock_inst)
+            mock_inst.place_limit_order.side_effect = (
+                lambda **kwargs: _final_submit_result(
+                    bound,
+                    order_id="ord-fak-partial-v2",
+                    status="matched",
+                    success=True,
+                    raw_extra={
+                        "makingAmount": "1.105",
+                        "takingAmount": "3.25",
+                        "_venue_response_contract": (
+                            "POLYMARKET_CLOB_V2_HUMAN_SUBMIT_AMOUNTS"
+                        ),
+                        "_v2_making_amount": "1.105",
+                        "_v2_taking_amount": "3.25",
+                        "_v2_matched_size": "3.25",
+                        "_v2_fill_price": "0.34",
+                        "tradeIds": ["trade-fak-partial-v2"],
+                    },
+                )
+            )
+
+            result = _live_order(
+                trade_id="trd-fak-partial-v2",
+                intent=intent,
+                shares=10.0,
+                conn=mem_conn,
+                decision_id="dec-fak-partial-v2",
+            )
+
+        command_id = command_ids_seen[0]
+        assert result.status == "partial"
+        assert result.command_state == "PARTIAL"
+        assert get_command(mem_conn, command_id)["state"] == "PARTIAL"
+        assert [event["event_type"] for event in list_events(mem_conn, command_id)][
+            -2:
+        ] == ["SUBMIT_ACKED", "PARTIAL_FILL_OBSERVED"]
+        order_fact = mem_conn.execute(
+            """
+            SELECT state, remaining_size, matched_size
+              FROM venue_order_facts
+             WHERE command_id = ?
+             ORDER BY local_sequence DESC
+             LIMIT 1
+            """,
+            (command_id,),
+        ).fetchone()
+        assert dict(order_fact) == {
+            "state": "PARTIALLY_MATCHED",
+            "remaining_size": "6.75",
+            "matched_size": "3.25",
+        }
+        trade_fact = mem_conn.execute(
+            """
+            SELECT filled_size, fill_price
+              FROM venue_trade_facts
+             WHERE command_id = ?
+             ORDER BY local_sequence DESC
+             LIMIT 1
+            """,
+            (command_id,),
+        ).fetchone()
+        assert dict(trade_fact) == {
+            "filled_size": "3.25",
+            "fill_price": "0.34",
+        }
+
+        position = mem_conn.execute(
+            """
+            SELECT pc.shares
+              FROM position_current pc
+              JOIN venue_commands vc
+                ON vc.position_id = pc.position_id
+             WHERE vc.command_id = ?
+             LIMIT 1
+            """,
+            (command_id,),
+        ).fetchone()
+        assert position is not None
+        assert Decimal(str(position["shares"])) == Decimal("3.25")
+
     def test_matched_submit_without_fill_evidence_requires_review(self, mem_conn, monkeypatch):
         """Matched venue status without fill size/price/trade proof is unresolved."""
         import src.execution.executor as executor_module
@@ -4415,8 +4607,8 @@ class TestExitOrderCommandSplit:
         mock_inst.place_limit_order.assert_not_called()
 
 
-def test_entry_matched_status_preserves_terminal_rounding_semantics():
-    """ENTRY keeps venue MATCHED authority for its known rounding residue."""
+def test_entry_matched_status_preserves_partial_quantity_truth():
+    """Venue MATCHED cannot terminalize fewer BUY shares than were submitted."""
     from src.execution.executor import (
         _venue_submit_order_fact_state,
         _venue_submit_remaining_size,
@@ -4429,13 +4621,30 @@ def test_entry_matched_status_preserves_terminal_rounding_semantics():
         matched_size="4.99",
         submitted_size=5,
         side="BUY",
-    ) == "MATCHED"
+    ) == "PARTIALLY_MATCHED"
     assert _venue_submit_remaining_size(
         result,
         5,
         matched_size="4.99",
         side="BUY",
-    ) == "0"
+    ) == "0.01"
+
+    from src.execution.command_recovery import (
+        _matched_event_type,
+        _matched_remaining_size,
+    )
+
+    command = {"intent_kind": "ENTRY", "size": "5"}
+    assert _matched_event_type(
+        command,
+        "4.99",
+        venue_status="MATCHED",
+    ) == "PARTIAL_FILL_OBSERVED"
+    assert _matched_remaining_size(
+        command,
+        "4.99",
+        venue_status="MATCHED",
+    ) == "0.01"
 
 
 # ---------------------------------------------------------------------------

@@ -292,6 +292,9 @@ def build_final_intent_certificate_from_actionable(
         "_edli_day0_exit_authority_reason": action.get("_edli_day0_exit_authority_reason"),
         "_edli_day0_bound_classification": action.get("_edli_day0_bound_classification"),
         "_edli_day0_lcb_transform": action.get("_edli_day0_lcb_transform"),
+        "_edli_day0_finite_evidence_absorbing_no_conditions": action.get(
+            "_edli_day0_finite_evidence_absorbing_no_conditions"
+        ),
         "source_match_status": action.get("source_match_status"),
         "local_date_status": action.get("local_date_status"),
         "station_match_status": action.get("station_match_status"),

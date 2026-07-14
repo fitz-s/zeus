@@ -124,12 +124,29 @@ _QKERNEL_CURRENT_STATE_IDENTITY_FIELDS: tuple[str, ...] = (
     "global_terminal_payoff_semantics",
 )
 
+_QKERNEL_BUY_FAK_PREFIX_IDENTITY_FIELDS: tuple[str, ...] = (
+    "global_buy_fak_prefix_semantics",
+    "global_buy_fak_fee_rate_source",
+    "global_buy_fak_execution_curve_identity",
+    "global_buy_fak_fee_rate",
+    "global_buy_fak_fee_rounding_bound",
+    "global_buy_fak_worst_fee_shape",
+    "global_buy_fak_worst_fee_per_share",
+    "global_buy_fak_worst_unit_cost",
+    "global_buy_fak_full_worst_cost_usd",
+    "global_buy_fak_full_robust_delta_log_wealth",
+    "global_buy_fak_full_robust_ev_usd",
+)
+
 
 def qkernel_current_state_identity_hash(economics: Mapping[str, Any]) -> str:
     """Recomputable identity for the current-posterior execution certificate."""
 
+    fields = _QKERNEL_CURRENT_STATE_IDENTITY_FIELDS
+    if "global_buy_fak_prefix_semantics" in economics:
+        fields += _QKERNEL_BUY_FAK_PREFIX_IDENTITY_FIELDS
     return stable_hash(
-        {field: economics.get(field) for field in _QKERNEL_CURRENT_STATE_IDENTITY_FIELDS}
+        {field: economics.get(field) for field in fields}
     )
 
 
@@ -346,4 +363,122 @@ def qkernel_global_current_state_rejection_reason(
         return "global_expected_value_semantics"
     if economics["global_terminal_payoff_semantics"] != "BINARY_0_1":
         return "global_terminal_payoff_semantics"
+    if "global_buy_fak_prefix_semantics" in economics:
+        prefix_reason = qkernel_global_buy_fak_prefix_rejection_reason(
+            economics,
+            direction=direction,
+        )
+        if prefix_reason is not None:
+            return f"global_buy_fak:{prefix_reason}"
+    return None
+
+
+def qkernel_global_buy_fak_prefix_rejection_reason(
+    economics: Any,
+    *,
+    direction: str | None = None,
+) -> str | None:
+    """Independently recompute the worst-limit proof required for BUY FAK."""
+
+    if not isinstance(economics, Mapping):
+        return "payload_not_mapping"
+    if economics.get("global_buy_fak_prefix_semantics") != (
+        "CONCAVE_WORST_LIMIT_ALL_NONZERO_PREFIXES_POSITIVE"
+    ):
+        return "semantics"
+    if economics.get("global_buy_fak_fee_rate_source") != "CURRENT_EXECUTABLE_CURVE":
+        return "fee_rate_source"
+    if economics.get("global_buy_fak_fee_rounding_bound") != (
+        "ROUNDED_FEE_AT_MOST_TWO_X_UNROUNDED"
+    ):
+        return "fee_rounding_bound"
+    if str(economics.get("global_buy_fak_execution_curve_identity") or "") != str(
+        economics.get("global_jit_execution_curve_identity") or ""
+    ):
+        return "execution_curve_identity"
+    direction_text = str(direction or "").strip().lower()
+    side = str(economics.get("side") or "").strip().upper()
+    native_side = (
+        "YES"
+        if direction_text.endswith("_yes")
+        else "NO"
+        if direction_text.endswith("_no")
+        else None
+    )
+    if side not in {"YES", "NO"} or (
+        native_side is not None and native_side != side
+    ):
+        return "side"
+    fields = (
+        "global_target_shares",
+        "global_limit_price",
+        "global_terminal_win_probability_lcb",
+        "global_terminal_loss_probability_ucb",
+        "global_terminal_loss_payoff_usd",
+        "global_terminal_win_payoff_usd",
+        "global_terminal_wealth_after_loss_usd",
+        "global_terminal_wealth_after_win_usd",
+        "global_buy_fak_fee_rate",
+        "global_buy_fak_worst_fee_shape",
+        "global_buy_fak_worst_fee_per_share",
+        "global_buy_fak_worst_unit_cost",
+        "global_buy_fak_full_worst_cost_usd",
+        "global_buy_fak_full_robust_delta_log_wealth",
+        "global_buy_fak_full_robust_ev_usd",
+    )
+    try:
+        values = {field: float(economics.get(field)) for field in fields}
+    except (TypeError, ValueError):
+        return "numeric_field_invalid"
+    if not all(math.isfinite(value) for value in values.values()):
+        return "numeric_field_non_finite"
+    shares = values["global_target_shares"]
+    limit = values["global_limit_price"]
+    win_q = values["global_terminal_win_probability_lcb"]
+    loss_q = values["global_terminal_loss_probability_ucb"]
+    fee_rate = values["global_buy_fak_fee_rate"]
+    if not (
+        shares > 0
+        and 0 < limit < 1
+        and 0 <= fee_rate < 1
+        and 0 < win_q <= 1
+        and 0 <= loss_q < 1
+        and math.isclose(win_q + loss_q, 1.0, rel_tol=0.0, abs_tol=1e-12)
+    ):
+        return "domain"
+    loss_baseline = (
+        values["global_terminal_wealth_after_loss_usd"]
+        - values["global_terminal_loss_payoff_usd"]
+    )
+    win_baseline = (
+        values["global_terminal_wealth_after_win_usd"]
+        - values["global_terminal_win_payoff_usd"]
+    )
+    max_fee_shape = 0.25 if limit >= 0.5 else limit * (1.0 - limit)
+    worst_fee_per_share = 2.0 * fee_rate * max_fee_shape
+    unit_cost = limit + worst_fee_per_share
+    full_cost = unit_cost * shares
+    loss_after = loss_baseline - full_cost
+    win_after = win_baseline - full_cost + shares
+    if min(loss_baseline, win_baseline, loss_after, win_after) <= 0:
+        return "wealth"
+    robust_du = loss_q * math.log(loss_after / loss_baseline) + win_q * math.log(
+        win_after / win_baseline
+    )
+    robust_ev = win_q * shares - full_cost
+    expected = {
+        "global_buy_fak_worst_fee_shape": max_fee_shape,
+        "global_buy_fak_worst_fee_per_share": worst_fee_per_share,
+        "global_buy_fak_worst_unit_cost": unit_cost,
+        "global_buy_fak_full_worst_cost_usd": full_cost,
+        "global_buy_fak_full_robust_delta_log_wealth": robust_du,
+        "global_buy_fak_full_robust_ev_usd": robust_ev,
+    }
+    for field, expected_value in expected.items():
+        if not math.isclose(
+            values[field], expected_value, rel_tol=1e-12, abs_tol=1e-12
+        ):
+            return field
+    if robust_du <= 0 or robust_ev <= 0:
+        return "non_positive"
     return None

@@ -184,6 +184,7 @@ from src.decision_kernel import claims
 from src.decision_kernel.canonicalization import (
     qkernel_declares_current_state,
     qkernel_current_state_identity_hash,
+    qkernel_global_buy_fak_prefix_rejection_reason,
     qkernel_global_current_state_rejection_reason,
     stable_hash,
 )
@@ -7522,7 +7523,10 @@ def _global_actuation_selected_proof(
 ) -> "_CandidateProof":
     """Bind the exact global winner to its current proof and sealed economics."""
 
-    from src.solve.solver import global_candidate_from_native
+    from src.solve.solver import (
+        global_buy_fak_prefix_certificate,
+        global_candidate_from_native,
+    )
 
     decision = getattr(global_actuation, "decision", None)
     candidate = getattr(decision, "candidate", None)
@@ -7718,6 +7722,19 @@ def _global_actuation_selected_proof(
             "global_optimum_semantics": "CUT_TIME_GLOBAL_OPTIMUM",
         }
     )
+    try:
+        prefix = global_buy_fak_prefix_certificate(
+            decision,
+            execution_curve_identity=rebound.execution_curve_identity,
+        )
+    except ValueError as exc:
+        # FOK guarantees quantity, not a single counterparty match. Fee rounding
+        # can accumulate across fragmented fills in either FOK or FAK, so failure
+        # of the worst-fragmentation full endpoint invalidates both order types.
+        raise ValueError(
+            f"GLOBAL_BUY_WORST_FRAGMENTATION_NON_POSITIVE:{exc}"
+        ) from exc
+    cert.update(prefix)
     cert = _global_current_state_execution_economics(
         cert,
         decision=decision,
@@ -12452,6 +12469,15 @@ def _build_live_execution_command_certificates(
                 f"incremental_profit={None if not isinstance(taker_quality_proof, dict) else taker_quality_proof.get('incremental_expected_profit_usd')}:"
                 f"confidence={None if not isinstance(taker_quality_proof, dict) else taker_quality_proof.get('model_confidence')}"
             )
+        global_fak_authorized = bool(
+            global_decision is not None
+            and str(order_mode).strip().upper() == "TAKER"
+            and qkernel_global_buy_fak_prefix_rejection_reason(
+                actionable.payload.get("qkernel_execution_economics") or {},
+                direction=str(actionable.payload.get("direction") or ""),
+            )
+            is None
+        )
         final_intent = build_final_intent_certificate_from_actionable(
             actionable_cert=actionable,
             executable_snapshot_cert=executable_snapshot,
@@ -12466,6 +12492,8 @@ def _build_live_execution_command_certificates(
             passive_maker_context=passive_maker_context,
             decision_time=decision_time,
             order_mode=order_mode,
+            order_type="FAK_LIMIT" if global_fak_authorized else None,
+            time_in_force="FAK" if global_fak_authorized else None,
             # BUG #92 structural fix (2026-06-02): the intent's tick_size MUST be the
             # min_tick_size of the SAME snapshot the executor re-hydrates at submit
             # time (intent.snapshot_id == proof.executable_snapshot_id ==
@@ -12483,6 +12511,14 @@ def _build_live_execution_command_certificates(
             # provenance fault, not a 0.01 market.
             tick_size=str(_snap_for_depth.min_tick_size) if _snap_for_depth is not None else _required_bound_tick_size(_snap_for_depth, executable_snapshot.payload),
             min_order_size=_float_or_default(executable_snapshot.payload.get("min_order_size"), 1.0),
+            fee_rate=(
+                float(
+                    global_decision.candidate.executable_cost_curve.fee_model.fee_rate
+                )
+                if global_decision is not None
+                and str(order_mode).strip().upper() == "TAKER"
+                else 0.0
+            ),
             best_bid=fresh_best_bid if str(order_mode).strip().upper() == "TAKER" else best_bid,
             best_ask=fresh_best_ask if str(order_mode).strip().upper() == "TAKER" else best_ask,
             available_crossable_shares=available_crossable_shares,

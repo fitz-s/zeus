@@ -250,6 +250,7 @@ def _final_execution_intent_from_payload(final_payload: dict):
         DecisionSourceContext,
         FinalExecutionIntent,
         PassiveMakerExecutionContext,
+        _fee_adjusted_price,
         quantize_submit_shares_for_venue_at_most,
     )
 
@@ -328,6 +329,12 @@ def _final_execution_intent_from_payload(final_payload: dict):
         final_payload.get("expected_fill_price_before_fee", final_payload.get("limit_price")),
         "expected_fill_price_before_fee",
     )
+    fee_rate = _decimal(final_payload.get("fee_rate", 0), "fee_rate")
+    fee_adjusted = _fee_adjusted_price(
+        expected_fill_price_before_fee=expected_fill,
+        fee_rate=fee_rate,
+        direction=str(final_payload["direction"]),
+    )
     return FinalExecutionIntent(
         hypothesis_id=str(final_payload.get("candidate_id") or final_payload["final_intent_id"]),
         selected_token_id=str(final_payload["token_id"]),
@@ -337,7 +344,7 @@ def _final_execution_intent_from_payload(final_payload: dict):
         submitted_shares=size,
         final_limit_price=limit_price,
         expected_fill_price_before_fee=expected_fill,
-        fee_adjusted_execution_price=expected_fill,
+        fee_adjusted_execution_price=fee_adjusted,
         order_policy=order_policy,
         order_type=executor_order_type,
         post_only=post_only,
@@ -349,7 +356,7 @@ def _final_execution_intent_from_payload(final_payload: dict):
         max_slippage_bps=_decimal(final_payload.get("max_slippage_bps", "0"), "max_slippage_bps"),
         tick_size=_decimal(final_payload.get("tick_size"), "tick_size"),
         min_order_size=_decimal(final_payload.get("min_order_size"), "min_order_size"),
-        fee_rate=Decimal("0"),
+        fee_rate=fee_rate,
         neg_risk=bool(final_payload.get("neg_risk", False)),
         event_id=str(final_payload.get("market_event_id") or final_payload["event_id"]),
         resolution_window=str(final_payload.get("resolution_window") or "default"),
@@ -384,7 +391,7 @@ def _executor_order_result_to_submit_result(result, *, started_at: str) -> Event
         "order_id": getattr(result, "order_id", None),
         "external_order_id": getattr(result, "external_order_id", None),
     }
-    if status in {"pending", "filled"}:
+    if status in {"pending", "partial", "filled"}:
         receipt_status = "SUBMITTED"
         reason = "OK"
         reconcile = False
@@ -445,6 +452,7 @@ def _executor_rejection_is_pre_submit(reason: str) -> bool:
             "entry_economics:",
             "invalid_submit_amount_precision:",
             "decision_source_integrity:",
+            "SUBMIT_ABORTED_PRICE_MOVED",
         )
     )
 

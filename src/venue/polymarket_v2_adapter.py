@@ -43,6 +43,7 @@ from src.contracts.executable_market_snapshot import (
 from src.contracts.venue_submission_envelope import VenueSubmissionEnvelope
 from src.contracts.freshness_registry import FreshnessLevel, registry as _freshness_registry
 from src.venue.response_contracts import (
+    VenueResponseShapeError,
     extract_order_id as _extract_order_id,
     extract_response_error as _response_error,
     parse_cancel_outcome,
@@ -743,6 +744,7 @@ class PolymarketV2Adapter:
                     chain_id=self.chain_id,
                     neg_risk=envelope.neg_risk,
                 )
+                _assert_final_fok_depth_bound(active_client, envelope)
                 post_started = True
                 return post_order(
                     local_signed_order,
@@ -752,6 +754,11 @@ class PolymarketV2Adapter:
                 )
             create_and_post = getattr(active_client, "create_and_post_order", None)
             if callable(create_and_post):
+                if str(envelope.order_type).upper() == "FOK":
+                    raise ValueError(
+                        "SUBMIT_ABORTED_PRICE_MOVED:"
+                        "FOK_FINAL_DEPTH_TWO_STEP_SUBMIT_REQUIRED"
+                    )
                 post_started = True
                 return create_and_post(
                     order_args,
@@ -808,10 +815,17 @@ class PolymarketV2Adapter:
                     error_message=rejected.error_message,
                 )
             if not post_started:
+                error_code = (
+                    "SUBMIT_ABORTED_PRICE_MOVED"
+                    if str(exc).startswith("SUBMIT_ABORTED_PRICE_MOVED:")
+                    else "V2_PRE_SUBMIT_EXCEPTION"
+                )
                 return _rejected_submit_result(
                     envelope,
-                    error_code="V2_PRE_SUBMIT_EXCEPTION",
+                    error_code=error_code,
                     error_message=str(exc),
+                    signed_order=signed_order,
+                    signed_order_hash=signed_hash,
                 )
             ambiguous = envelope.with_updates(
                 signed_order=signed_order,
@@ -985,6 +999,26 @@ class PolymarketV2Adapter:
                 for i, e in enumerate(envelopes)
             ]
 
+        try:
+            for envelope in bound:
+                _assert_final_fok_depth_bound(client, envelope)
+        except Exception as exc:
+            error_code = (
+                "SUBMIT_ABORTED_PRICE_MOVED"
+                if str(exc).startswith("SUBMIT_ABORTED_PRICE_MOVED:")
+                else "V2_PRE_SUBMIT_EXCEPTION"
+            )
+            return [
+                _rejected_submit_result(
+                    e,
+                    error_code=error_code,
+                    error_message=str(exc),
+                    signed_order=signed_orders[i],
+                    signed_order_hash=signed_hashes[i],
+                )
+                for i, e in enumerate(envelopes)
+            ]
+
         # Deliberately NOT wrapped in try/except: a post-signing exception
         # here is an AMBIGUOUS side effect (venue may have received the
         # request). Propagate so the caller records SUBMIT_TIMEOUT_UNKNOWN
@@ -1068,8 +1102,16 @@ class PolymarketV2Adapter:
     def get_order(self, order_id: str) -> OrderState:
         _assert_no_world_mutex_held_for_io("venue.get_order")
         raw = self._sdk_client().get_order(order_id)
-        raw_dict = dict(raw or {})
+        raw_dict = _normalize_v2_amount_response(
+            dict(raw or {}),
+            endpoint="get_order",
+        )
         outcome = parse_order_status(raw_dict, fallback_order_id=order_id, endpoint="get_order")
+        raw_dict["_v2_wire_status"] = str(
+            raw_dict.get("status") or raw_dict.get("state") or ""
+        )
+        raw_dict["status"] = outcome.status
+        raw_dict["_venue_order_status"] = outcome.status
         return OrderState(order_id=outcome.order_id, status=outcome.status, raw=raw_dict)
 
     def get_open_orders(self, filter: OpenOrdersFilter | None = None) -> list[OrderState]:
@@ -1091,8 +1133,16 @@ class PolymarketV2Adapter:
             raw = raw.get("data", []) or []
         states: list[OrderState] = []
         for item in raw:
-            item_dict = dict(item)
+            item_dict = _normalize_v2_amount_response(
+                dict(item),
+                endpoint="get_open_orders",
+            )
             outcome = parse_order_status(item_dict, fallback_order_id="", endpoint="get_open_orders")
+            item_dict["_v2_wire_status"] = str(
+                item_dict.get("status") or item_dict.get("state") or ""
+            )
+            item_dict["status"] = outcome.status
+            item_dict["_venue_order_status"] = outcome.status
             states.append(OrderState(order_id=outcome.order_id, status=outcome.status, raw=item_dict))
         return states
 
@@ -2821,6 +2871,72 @@ def _is_polymarket_fok_killed_error(exc: BaseException) -> bool:
     )
 
 
+def _assert_final_fok_depth_bound(client: Any, envelope: VenueSubmissionEnvelope) -> None:
+    """Bind an FOK to executable depth after SDK preparation, immediately pre-POST."""
+
+    if str(envelope.order_type).upper() != "FOK":
+        return
+    get_order_book = getattr(client, "get_order_book", None)
+    if not callable(get_order_book):
+        raise ValueError(
+            "SUBMIT_ABORTED_PRICE_MOVED:FOK_FINAL_DEPTH_UNAVAILABLE:get_order_book_missing"
+        )
+    book = get_order_book(envelope.selected_outcome_token_id)
+    asset_id = _level_value(book, "asset_id")
+    if asset_id not in {None, ""} and str(asset_id) != envelope.selected_outcome_token_id:
+        raise ValueError(
+            "SUBMIT_ABORTED_PRICE_MOVED:FOK_FINAL_DEPTH_IDENTITY_MISMATCH"
+        )
+
+    side = str(envelope.side).upper()
+    if side == "BUY":
+        level_side = "asks"
+        crosses = lambda price: price <= envelope.price
+    elif side == "SELL":
+        level_side = "bids"
+        crosses = lambda price: price >= envelope.price
+    else:
+        raise ValueError(f"unsupported FOK side {envelope.side!r}")
+
+    levels = _level_value(book, level_side)
+    if not isinstance(levels, (list, tuple)):
+        raise ValueError(
+            f"SUBMIT_ABORTED_PRICE_MOVED:FOK_FINAL_DEPTH_UNAVAILABLE:{level_side}_missing"
+        )
+    available = Decimal("0")
+    for level in levels:
+        try:
+            price = Decimal(str(_level_value(level, "price")))
+            size = Decimal(str(_level_value(level, "size")))
+        except (ArithmeticError, TypeError, ValueError) as exc:
+            raise ValueError(
+                "SUBMIT_ABORTED_PRICE_MOVED:FOK_FINAL_DEPTH_MALFORMED"
+            ) from exc
+        if (
+            not price.is_finite()
+            or not size.is_finite()
+            or price <= 0
+            or price >= 1
+            or size <= 0
+        ):
+            raise ValueError(
+                "SUBMIT_ABORTED_PRICE_MOVED:FOK_FINAL_DEPTH_MALFORMED"
+            )
+        if crosses(price):
+            available += size
+    if available < envelope.size:
+        raise ValueError(
+            "SUBMIT_ABORTED_PRICE_MOVED:FOK_FINAL_DEPTH_INSUFFICIENT:"
+            f"required={envelope.size}:available={available}:limit={envelope.price}"
+        )
+
+
+def _level_value(value: Any, name: str) -> Any:
+    if isinstance(value, dict):
+        return value.get(name)
+    return getattr(value, name, None)
+
+
 def _api_creds_from_runtime() -> Any | None:
     return _api_creds_from_keychain() or _api_creds_from_env()
 
@@ -3584,6 +3700,11 @@ def _submit_result_from_response(
     signed_order: bytes | None,
     signed_order_hash: str | None,
 ) -> SubmitResult:
+    raw_response = _normalize_v2_amount_response(
+        raw_response,
+        side=envelope.side,
+        endpoint="submit",
+    )
     raw_json = _canonical_json(raw_response or {})
     if isinstance(raw_response, dict) and raw_response.get("success") is False:
         code, message = _response_error(raw_response)
@@ -3634,6 +3755,122 @@ def _submit_result_from_response(
         ),
     )
     return SubmitResult(status="accepted", envelope=updated)
+
+
+_V2_AMOUNT_SCALE = Decimal("1000000")
+_V2_POINT_ORDER_CONTRACT = "POLYMARKET_CLOB_V2_FIXED_6_POINT_ORDER"
+_V2_SUBMIT_CONTRACT = "POLYMARKET_CLOB_V2_HUMAN_SUBMIT_AMOUNTS"
+
+
+def _v2_decimal_text(value: Decimal) -> str:
+    return format(value, "f")
+
+
+def _normalize_v2_amount_response(
+    raw_response: Any,
+    *,
+    side: str | None = None,
+    endpoint: str = "unknown",
+) -> Any:
+    """Add typed human-unit fields for the two distinct V2 response shapes."""
+
+    if not isinstance(raw_response, dict):
+        return raw_response
+    normalized = dict(raw_response)
+    original_raw = _level_value(normalized, "original_size")
+    if original_raw in (None, ""):
+        original_raw = _level_value(normalized, "originalSize")
+    matched_raw = _level_value(normalized, "size_matched")
+    if matched_raw in (None, ""):
+        matched_raw = _level_value(normalized, "sizeMatched")
+    point_order_endpoint = endpoint in {"get_order", "get_open_orders"}
+    if point_order_endpoint and (
+        original_raw in (None, "") or matched_raw in (None, "")
+    ):
+        raise VenueResponseShapeError(
+            endpoint,
+            raw_response,
+            "point-order response requires original_size and size_matched fixed-6 fields",
+        )
+    if original_raw not in (None, "") or matched_raw not in (None, ""):
+        normalized["_venue_response_contract"] = _V2_POINT_ORDER_CONTRACT
+        try:
+            original_units = Decimal(str(original_raw))
+            matched_units = Decimal(str(matched_raw))
+        except (ArithmeticError, TypeError, ValueError):
+            if point_order_endpoint:
+                raise VenueResponseShapeError(
+                    endpoint,
+                    raw_response,
+                    "point-order fixed-6 amount is non-numeric",
+                )
+            normalized["_v2_amount_normalization_error"] = "NON_NUMERIC_FIXED_6"
+            return normalized
+        if (
+            not original_units.is_finite()
+            or not matched_units.is_finite()
+            or original_units < 0
+            or matched_units < 0
+            or original_units != original_units.to_integral_value()
+            or matched_units != matched_units.to_integral_value()
+        ):
+            if point_order_endpoint:
+                raise VenueResponseShapeError(
+                    endpoint,
+                    raw_response,
+                    "point-order fixed-6 amount is outside the unsigned integer domain",
+                )
+            normalized["_v2_amount_normalization_error"] = "INVALID_FIXED_6"
+            return normalized
+        normalized["_v2_original_size"] = _v2_decimal_text(
+            original_units / _V2_AMOUNT_SCALE
+        )
+        normalized["_v2_matched_size"] = _v2_decimal_text(
+            matched_units / _V2_AMOUNT_SCALE
+        )
+        normalized["_v2_wire_original_size"] = str(original_raw)
+        normalized["_v2_wire_size_matched"] = str(matched_raw)
+        normalized["original_size"] = normalized["_v2_original_size"]
+        normalized["size_matched"] = normalized["_v2_matched_size"]
+        normalized["originalSize"] = normalized["_v2_original_size"]
+        normalized["sizeMatched"] = normalized["_v2_matched_size"]
+        return normalized
+
+    making_raw = _level_value(normalized, "makingAmount")
+    if making_raw in (None, ""):
+        making_raw = _level_value(normalized, "making_amount")
+    taking_raw = _level_value(normalized, "takingAmount")
+    if taking_raw in (None, ""):
+        taking_raw = _level_value(normalized, "taking_amount")
+    if making_raw in (None, "") and taking_raw in (None, ""):
+        return normalized
+    normalized["_venue_response_contract"] = _V2_SUBMIT_CONTRACT
+    try:
+        making = Decimal(str(making_raw))
+        taking = Decimal(str(taking_raw))
+    except (ArithmeticError, TypeError, ValueError):
+        normalized["_v2_amount_normalization_error"] = "NON_NUMERIC"
+        return normalized
+    if (
+        not making.is_finite()
+        or not taking.is_finite()
+        or making < 0
+        or taking < 0
+    ):
+        normalized["_v2_amount_normalization_error"] = "INVALID_HUMAN_AMOUNTS"
+        return normalized
+    side_value = str(side or normalized.get("side") or "").strip().upper()
+    if side_value not in {"BUY", "SELL"}:
+        normalized["_v2_amount_normalization_error"] = "SIDE_MISSING"
+        return normalized
+    shares = taking if side_value == "BUY" else making
+    usd = making if side_value == "BUY" else taking
+    normalized["_v2_making_amount"] = _v2_decimal_text(making)
+    normalized["_v2_taking_amount"] = _v2_decimal_text(taking)
+    normalized["_v2_matched_size"] = _v2_decimal_text(shares)
+    if shares > 0:
+        normalized["_v2_fill_price"] = _v2_decimal_text(usd / shares)
+    return normalized
 
 
 def _ctf_balance_units(value: Any) -> int:

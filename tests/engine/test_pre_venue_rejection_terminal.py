@@ -1,5 +1,5 @@
 # Created: 2026-06-01
-# Last reused or audited: 2026-07-02
+# Last reused or audited: 2026-07-14
 # Authority basis: EDLI live-order aggregate event-sourcing law
 #   (src/events/live_order_aggregate.py), executor pre-venue depth validation
 #   (src/execution/executor.py:1773), live-cap ledger (src/events/live_cap.py),
@@ -168,6 +168,7 @@ def test_post_venue_unknown_still_blocks_as_post_submit_unknown():
         "entry_economics:non_positive_edge",
         "invalid_submit_amount_precision:rounded_to_zero",
         "decision_source_integrity:source_run_after_decision_time",
+        "SUBMIT_ABORTED_PRICE_MOVED",
     ],
 )
 def test_executor_designed_pre_submit_rejections_do_not_count_as_venue_rejects(reason):
@@ -196,3 +197,32 @@ def test_executor_designed_pre_submit_rejections_do_not_count_as_venue_rejects(r
     assert result.venue_ack_received is False
     assert result.side_effect_known is True
     assert result.reconciliation_followup_required is False
+
+
+def test_executor_partial_fill_is_submitted_side_effect_with_ack():
+    """A canonical partial fill must never be released as a pre-submit failure."""
+
+    def _executor_submit(intent, conn=None, decision_id="", snapshot_conn=None):
+        return SimpleNamespace(
+            status="partial",
+            reason="Order partially filled on submit",
+            command_state="PARTIAL",
+            order_id="ord-partial",
+            external_order_id="ord-partial",
+        )
+
+    result = submit_event_bound_final_intent_via_existing_executor(
+        final_intent_cert=_FINAL,
+        execution_command_cert=_COMMAND,
+        conn=None,  # type: ignore[arg-type]
+        decision_time=_now(),
+        executor_submit=_executor_submit,
+    )
+
+    assert result.status == "SUBMITTED"
+    assert result.reason_code == "OK"
+    assert result.venue_order_id == "ord-partial"
+    assert result.venue_call_started is True
+    assert result.venue_ack_received is True
+    assert result.side_effect_known is True
+    assert result.raw_response["command_state"] == "PARTIAL"

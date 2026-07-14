@@ -279,5 +279,11 @@ def parse_order_status(
             "order-status response item has neither 'status' nor 'state'",
         )
     order_id = extract_order_id(raw) or fallback_order_id
-    status = str(raw.get("status") or raw.get("state") or "UNKNOWN")
+    status = str(raw.get("status") or raw.get("state") or "UNKNOWN").strip().upper()
+    if status.startswith("ORDER_STATUS_"):
+        status = status.removeprefix("ORDER_STATUS_")
+    status = {
+        "CANCELED_MARKET_RESOLVED": "CANCELED",
+        "INVALID": "REJECTED",
+    }.get(status, status)
     return OrderStatusOutcome(order_id=order_id, status=status)

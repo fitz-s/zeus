@@ -53,6 +53,7 @@ from src.decision.family_decision_engine import (
 from src.decision_kernel.canonicalization import (
     canonical_json,
     qkernel_declares_current_state,
+    qkernel_global_buy_fak_prefix_rejection_reason,
     qkernel_global_current_state_rejection_reason,
 )
 from src.state.db import (
@@ -2630,8 +2631,7 @@ def _venue_submit_order_fact_state(
         )
         submitted = _decimal_or_none(submitted_size)
         if (
-            side_value == "SELL"
-            and matched is not None
+            matched is not None
             and submitted is not None
             and Decimal("0") < matched < submitted
         ):
@@ -2647,6 +2647,13 @@ def _venue_submit_matched_size(
     *,
     side: str | None = None,
 ) -> str:
+    response_contract = _first_submit_value(result, "_venue_response_contract")
+    if response_contract in {
+        "POLYMARKET_CLOB_V2_HUMAN_SUBMIT_AMOUNTS",
+        "POLYMARKET_CLOB_V2_FIXED_6_POINT_ORDER",
+    }:
+        value = _first_submit_value(result, "_v2_matched_size")
+        return str(value) if value not in (None, "") else "0"
     for key in (
         "matched_size",
         "matchedSize",
@@ -2687,11 +2694,7 @@ def _venue_submit_remaining_size(
     )
     fallback = _decimal_or_none(fallback_size)
     if status in {"MATCHED", "FILLED"} and matched is not None:
-        if (
-            _venue_submit_side(result, side=side) == "SELL"
-            and fallback is not None
-            and fallback > matched
-        ):
+        if fallback is not None and fallback > matched:
             return _decimal_text(fallback - matched)
         return "0"
     for key in ("size", "original_size", "originalSize"):
@@ -2706,6 +2709,10 @@ def _venue_submit_fill_price(
     *,
     side: str | None = None,
 ) -> str | None:
+    response_contract = _first_submit_value(result, "_venue_response_contract")
+    if response_contract == "POLYMARKET_CLOB_V2_HUMAN_SUBMIT_AMOUNTS":
+        value = _first_submit_value(result, "_v2_fill_price")
+        return str(value) if _positive_decimal_or_none(value) is not None else None
     making = _positive_decimal_or_none(_first_submit_value(result, "makingAmount", "making_amount"))
     taking = _positive_decimal_or_none(_first_submit_value(result, "takingAmount", "taking_amount"))
     if making is not None and taking is not None:
@@ -4950,6 +4957,35 @@ def _recapture_fresh_entry_snapshot_if_needed(
                 f"post_only limit {fresh_limit_price} would cross fresh ask {fresh_ask}"
             )
     else:
+        fak_prefix_authorized = bool(
+            str(getattr(final_intent, "order_type", "") or "").upper() == "FAK"
+            and qkernel_global_buy_fak_prefix_rejection_reason(
+                getattr(final_intent, "qkernel_execution_economics", None),
+                direction=str(getattr(final_intent, "direction", "") or ""),
+            )
+            is None
+        )
+        if fak_prefix_authorized:
+            certified_limit = Decimal(
+                str(
+                    final_intent.qkernel_execution_economics[
+                        "global_limit_price"
+                    ]
+                )
+            )
+            intent_limit = Decimal(str(final_intent.final_limit_price))
+            recaptured_limit = Decimal(str(fresh_limit_price))
+            if intent_limit > certified_limit:
+                raise ValueError(
+                    "recaptured FAK final limit exceeds prefix certificate: "
+                    f"intent={intent_limit} certified={certified_limit}"
+                )
+            if recaptured_limit > certified_limit:
+                raise ValueError(
+                    "recaptured FAK fresh tick cannot express prefix-certified limit: "
+                    f"fresh={recaptured_limit} certified={certified_limit} "
+                    f"tick={fresh.min_tick_size}"
+                )
         sweep = simulate_clob_sweep(
             snapshot=fresh,
             direction=final_intent.direction,
@@ -4958,14 +4994,48 @@ def _recapture_fresh_entry_snapshot_if_needed(
             limit_price=fresh_limit_price,
         )
         expected_price = Decimal(str(final_intent.expected_fill_price_before_fee))
-        if (
-            sweep.depth_status != "PASS"
-            or sweep.average_price is None
-            or Decimal(str(sweep.average_price)) > expected_price
-        ):
+        if fak_prefix_authorized:
+            from src.contracts.executable_market_snapshot import (
+                fee_rate_fraction_from_details,
+            )
+            from src.contracts.fee_authority import resolve_taker_fee_fraction
+
+            certified_fee = Decimal(
+                str(
+                    final_intent.qkernel_execution_economics[
+                        "global_buy_fak_fee_rate"
+                    ]
+                )
+            )
+            if final_intent.fee_rate != certified_fee:
+                raise ValueError(
+                    "recaptured FAK fee binding differs from prefix certificate: "
+                    f"intent={final_intent.fee_rate} certified={certified_fee}"
+                )
+            fresh_fee, _fresh_fee_source = resolve_taker_fee_fraction(
+                fee_rate_fraction_from_details(fresh.fee_details)
+            )
+            if Decimal(str(fresh_fee)) > certified_fee:
+                raise ValueError(
+                    "recaptured FAK fee exceeds prefix certificate: "
+                    f"fresh={fresh_fee} certified={certified_fee}"
+                )
+            economics_changed = bool(
+                sweep.average_price is None
+                or Decimal(str(getattr(sweep, "filled_shares", "0") or "0")) <= 0
+                or Decimal(str(sweep.average_price)) > Decimal(str(fresh_limit_price))
+            )
+        else:
+            economics_changed = bool(
+                sweep.depth_status != "PASS"
+                or sweep.average_price is None
+                or Decimal(str(sweep.average_price)) > expected_price
+            )
+        if economics_changed:
             raise ValueError(
                 "recaptured executable snapshot changed final-intent economics: "
-                f"depth_status={sweep.depth_status} average_price={sweep.average_price}"
+                f"depth_status={sweep.depth_status} average_price={sweep.average_price} "
+                f"filled_shares={getattr(sweep, 'filled_shares', None)}"
             )
     return replace(
         legacy_intent,
@@ -8084,13 +8154,25 @@ def _live_order(
 
         result_obj = OrderResult(
             trade_id=trade_id,
-            status="filled" if fill_event_type == "FILL_CONFIRMED" else "pending",
+            status=(
+                "filled"
+                if fill_event_type == "FILL_CONFIRMED"
+                else (
+                    "partial"
+                    if fill_event_type == "PARTIAL_FILL_OBSERVED"
+                    else "pending"
+                )
+            ),
             fill_price=float(fill_price) if fill_event_type == "FILL_CONFIRMED" else None,
             filled_at=ack_time if fill_event_type == "FILL_CONFIRMED" else None,
             reason=(
                 "Order filled on submit"
                 if fill_event_type == "FILL_CONFIRMED"
-                else f"Order posted, timeout={timeout}s"
+                else (
+                    "Order partially filled on submit"
+                    if fill_event_type == "PARTIAL_FILL_OBSERVED"
+                    else f"Order posted, timeout={timeout}s"
+                )
             ),
             order_id=order_id,
             timeout_seconds=timeout,
