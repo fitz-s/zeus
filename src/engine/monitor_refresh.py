@@ -7,14 +7,13 @@
 
 Blueprint v2 §7 Layer 1: recompute the held-side probability.
 
-PRIMARY AUTHORITY (corrected 2026-06-17): Day0 absorbing hard facts dominate
-model belief when qualified; otherwise ``monitor_probability_refresh`` reads the
-multi-model fused posterior ``forecast_posteriors`` (via
-``position_belief.load_replacement_belief``, sourced from ``raw_model_forecasts``)
-as the SAME source family as the entry decision. The legacy ENS member-counting
-path is retained as diagnostic telemetry only and must not substitute for a
-stale/missing replacement belief on non-day0 positions. The day0 observation
-lane remains a separate settlement-day authority.
+PRIMARY AUTHORITY (corrected 2026-07-14): Day0 absorbing hard facts dominate
+model belief when qualified; otherwise held positions use the exact current
+global probability builder used by entry and global SELL/HOLD/CASH comparison.
+Non-Day0 positions read the multi-model fused posterior ``forecast_posteriors``.
+The legacy ENS/Day0 member-counting path is retained only for positions that
+lack a canonical Polymarket condition identity; it cannot substitute for a
+failed current authority on a live identified position.
 Uses full p_raw_vector with MC instrument noise (not simplified _estimate_bin_p_raw).
 """
 
@@ -89,6 +88,8 @@ from src.calibration.ens_bias_repo import read_bias_model
 logger = logging.getLogger(__name__)
 _MONITOR_PROBABILITY_FRESH_ATTR = "_monitor_probability_is_fresh"
 _DAY0_ZERO_PROBABILITY_EXIT_AUTHORITY_ATTR = "_day0_zero_probability_exit_authority"
+_GLOBAL_MONITOR_SAMPLES_ATTR = "_current_global_held_probability_samples"
+_GLOBAL_MONITOR_ALPHA_ATTR = "_current_global_probability_band_alpha"
 _WHALE_TOXICITY_PRICE_MARGIN = 0.05
 _WHALE_TOXICITY_SEVERE_PRICE_MARGIN = 0.15
 _WHALE_TOXICITY_LOOKBACK_HOURS = 1.0
@@ -3848,6 +3849,272 @@ def _within_day0_observation_start_grace(
     )
 
 
+def _canonical_condition_id(position: Position) -> str | None:
+    """Return a real 32-byte Polymarket condition id, never a local surrogate."""
+
+    condition_id = str(getattr(position, "condition_id", "") or "").strip()
+    if len(condition_id) != 66 or not condition_id.startswith("0x"):
+        return None
+    try:
+        int(condition_id[2:], 16)
+    except ValueError:
+        return None
+    return condition_id
+
+
+def _current_global_held_samples(
+    position: Position,
+    witness: object,
+    *,
+    current_token_pair: tuple[str, str],
+) -> np.ndarray:
+    """Select the held token from a joint witness with exact side identity."""
+
+    condition_id = _canonical_condition_id(position)
+    if condition_id is None:
+        raise ValueError("monitor canonical condition identity is missing")
+    bindings = tuple(getattr(witness, "bindings", ()) or ())
+    indexes = [
+        index
+        for index, binding in enumerate(bindings)
+        if str(getattr(binding, "condition_id", "") or "") == condition_id
+    ]
+    if len(indexes) != 1:
+        raise ValueError("monitor condition is not unique in current global witness")
+    binding = bindings[indexes[0]]
+    current_yes, current_no = (str(token or "").strip() for token in current_token_pair)
+    position_yes = str(getattr(position, "token_id", "") or "").strip()
+    position_no = str(getattr(position, "no_token_id", "") or "").strip()
+    binding_yes = str(getattr(binding, "yes_token_id", "") or "").strip()
+    binding_no = str(getattr(binding, "no_token_id", "") or "").strip()
+    if (
+        not current_yes
+        or not current_no
+        or position_yes != current_yes
+        or position_no != current_no
+        or binding_yes != current_yes
+        or binding_no != current_no
+    ):
+        raise ValueError("monitor position token pair does not match current global witness")
+    direction = _normalize_monitor_direction(position.direction)
+    expected_token = current_no if direction == "buy_no" else current_yes
+    held_token = position_no if direction == "buy_no" else position_yes
+    if held_token != expected_token:
+        raise ValueError("monitor held token does not match current global witness side")
+
+    samples = np.asarray(witness.yes_q_samples[:, indexes[0]], dtype=float)
+    if (
+        samples.ndim != 1
+        or samples.size < 2
+        or not np.isfinite(samples).all()
+        or (samples < 0.0).any()
+        or (samples > 1.0).any()
+    ):
+        raise ValueError("monitor current-global held samples are invalid")
+    return 1.0 - samples if direction == "buy_no" else samples
+
+
+def _refresh_current_global_day0_probability(
+    position: Position,
+    *,
+    trade_conn,
+    decision_time: datetime | None = None,
+) -> tuple[float, Position, bool] | None:
+    """Read the held side from the same current joint-q witness as live entry.
+
+    The event is only a causal family carrier.  The shared builder rebinds it to
+    current forecast, topology, observation, and finite-evidence truth before
+    returning a witness.  Both DB handles are read-only and short-lived.
+    """
+
+    condition_id = _canonical_condition_id(position)
+    if condition_id is None:
+        return None
+    if trade_conn is None:
+        raise ValueError("monitor current-global trade authority is missing")
+    metric = resolve_position_metric(position)[0]
+    now = decision_time or datetime.now(timezone.utc)
+    if now.tzinfo is None:
+        raise ValueError("monitor current-global decision_time must be timezone-aware")
+    now = now.astimezone(timezone.utc)
+
+    from src.contracts.executable_market_snapshot import FRESHNESS_WINDOW_DEFAULT
+    from src.events.opportunity_event import OpportunityEvent
+    from src.state.db import (
+        get_forecasts_connection_read_only,
+        get_world_connection_read_only,
+    )
+
+    world = get_world_connection_read_only()
+    forecasts = None
+    try:
+        forecasts = get_forecasts_connection_read_only()
+        row = world.execute(
+            """
+            SELECT event_id, event_type, entity_key, source, observed_at,
+                   available_at, received_at, causal_snapshot_id, payload_hash,
+                   idempotency_key, priority, expires_at, payload_json,
+                   schema_version, created_at
+              FROM opportunity_events
+             WHERE event_type = 'DAY0_EXTREME_UPDATED'
+               AND json_extract(payload_json, '$.city') = ?
+               AND json_extract(payload_json, '$.target_date') = ?
+               AND lower(json_extract(payload_json, '$.metric')) = ?
+             ORDER BY available_at DESC
+             LIMIT 1
+            """,
+            (str(position.city), str(position.target_date), metric),
+        ).fetchone()
+        if row is None:
+            raise ObservationUnavailableError(
+                "current global Day0 family event unavailable"
+            )
+        event = OpportunityEvent(**dict(row))
+        from src.engine.event_reactor_adapter import (
+            _prepare_current_global_probability_family,
+        )
+
+        day0_payload: dict[str, object] = {}
+        prepared = _prepare_current_global_probability_family(
+            event,
+            forecast_conn=forecasts,
+            topology_conn=forecasts,
+            observation_conn=world,
+            decision_time=now,
+            max_age=FRESHNESS_WINDOW_DEFAULT,
+            day0_payload_out=day0_payload,
+        )
+    finally:
+        if forecasts is not None:
+            forecasts.close()
+        world.close()
+
+    witness = prepared.probability_witness
+    condition_ids = tuple(binding.condition_id for binding in witness.bindings)
+    placeholders = ",".join("?" for _ in condition_ids)
+    token_rows = trade_conn.execute(
+        f"""
+        SELECT condition_id, yes_token_id, no_token_id
+          FROM executable_market_snapshots
+         WHERE condition_id IN ({placeholders})
+           AND yes_token_id IS NOT NULL
+           AND no_token_id IS NOT NULL
+         ORDER BY captured_at DESC, snapshot_id DESC
+        """,
+        condition_ids,
+    ).fetchall()
+    token_map: dict[str, tuple[str, str]] = {}
+    for token_row in token_rows:
+        try:
+            row_condition = token_row["condition_id"]
+            pair = (token_row["yes_token_id"], token_row["no_token_id"])
+        except (TypeError, KeyError, IndexError):
+            row_condition = token_row[0]
+            pair = (token_row[1], token_row[2])
+        key = str(row_condition or "").strip()
+        normalized = tuple(str(token or "").strip() for token in pair)
+        if not key or not all(normalized):
+            continue
+        existing = token_map.get(key)
+        if existing is not None and existing != normalized:
+            raise ValueError("monitor current family token identity is ambiguous")
+        token_map[key] = normalized
+    if set(token_map) != set(condition_ids):
+        raise ValueError("monitor current family token identity is incomplete")
+    from src.engine.global_auction_universe import (
+        _rebind_probability_witness_tokens,
+    )
+
+    witness = _rebind_probability_witness_tokens(
+        witness,
+        token_map_by_condition=token_map,
+    )
+    held_samples = _current_global_held_samples(
+        position,
+        witness,
+        current_token_pair=token_map[condition_id],
+    )
+    direction = _normalize_monitor_direction(position.direction)
+    held_probability = float(held_samples.mean())
+
+    refreshed = replace(position)
+    refreshed.selected_method = SELECTED_METHOD_DAY0_OBSERVATION_REMAINING_WINDOW
+    _append_monitor_validation(
+        refreshed,
+        "probability_authority=day0_remaining_day_global_probability_v1",
+    )
+    _append_monitor_validation(
+        refreshed,
+        f"probability_witness_identity:{witness.witness_identity}",
+    )
+    _stamp_day0_remaining_window_belief(refreshed, metric=metric)
+    _set_monitor_probability_fresh(refreshed, True)
+    _set_day0_zero_probability_exit_authority(refreshed, False)
+    setattr(refreshed, _GLOBAL_MONITOR_SAMPLES_ATTR, held_samples)
+    setattr(refreshed, _GLOBAL_MONITOR_ALPHA_ATTR, float(witness.band_alpha))
+
+    observation = day0_payload.get("_edli_global_day0_binding")
+    setattr(
+        refreshed,
+        "_day0_monitor_probability_receipt",
+        {
+            "schema_version": 1,
+            "selected_method": SELECTED_METHOD_DAY0_OBSERVATION_REMAINING_WINDOW,
+            "probability_authority": "day0_remaining_day_global_probability_v1",
+            "metric": metric,
+            "held_direction": direction,
+            "held_side_probability": held_probability,
+            "probability_witness_identity": witness.witness_identity,
+            "q_version": witness.q_version,
+            "source_truth_identity": witness.source_truth_identity,
+            "band": {
+                "basis": witness.band_basis,
+                "alpha": float(witness.band_alpha),
+                "sample_count": int(held_samples.size),
+                "held_side_summary": _monitor_receipt_quantiles(held_samples),
+            },
+            "observation": dict(observation) if isinstance(observation, dict) else {},
+            "remaining_window": {
+                "source": "current_global_probability_builder",
+                "finite_evidence_member_count": day0_payload.get(
+                    "_edli_day0_finite_evidence_member_count"
+                ),
+                "finite_evidence_hits_by_condition": day0_payload.get(
+                    "_edli_day0_finite_evidence_hits_by_condition"
+                ),
+            },
+        },
+    )
+    return held_probability, refreshed, True
+
+
+def _current_global_monitor_edge_band(
+    held_samples,
+    *,
+    alpha: float,
+    current_p_market: float,
+) -> tuple[float, float]:
+    """Map the global solver's lower/upper CVaR q band into held-edge space."""
+
+    from src.solve.solver import _lower_cvar
+
+    samples = np.asarray(held_samples, dtype=float)
+    if (
+        samples.ndim != 1
+        or samples.size < 2
+        or not np.isfinite(samples).all()
+        or (samples < 0.0).any()
+        or (samples > 1.0).any()
+        or not 0.0 < float(alpha) < 0.5
+        or not np.isfinite(float(current_p_market))
+    ):
+        raise ValueError("current global monitor probability band is invalid")
+    weights = np.ones(samples.size, dtype=float)
+    q_lcb = _lower_cvar(samples, weights, float(alpha))
+    q_ucb = 1.0 - _lower_cvar(1.0 - samples, weights, float(alpha))
+    return float(q_lcb - current_p_market), float(q_ucb - current_p_market)
+
+
 def _refresh_day0_monitor_probability(
     pos: Position,
     *,
@@ -4013,6 +4280,35 @@ def monitor_probability_refresh(
         return hard_fact_overlay
 
     if _would_use_day0_monitor_lane(pos, city, target_d):
+        if _canonical_condition_id(pos) is not None:
+            try:
+                current = _refresh_current_global_day0_probability(
+                    pos,
+                    trade_conn=conn,
+                )
+            except Exception as exc:  # noqa: BLE001 - current authority fails closed
+                stale = replace(pos)
+                _set_monitor_probability_fresh(stale, False)
+                _append_monitor_validation(
+                    stale,
+                    "day0_current_global_probability_unavailable:"
+                    f"{type(exc).__name__}:{exc}",
+                )
+                _enqueue_single_family_belief_reseed_failsoft(
+                    city=str(pos.city),
+                    target_date=str(pos.target_date),
+                    metric=resolve_position_metric(pos)[0],
+                )
+                logger.warning(
+                    "monitor_probability_refresh: current global Day0 probability "
+                    "unavailable for %s: %s",
+                    pos.trade_id,
+                    exc,
+                )
+                return pos.p_posterior, stale, False
+            if current is None:
+                raise AssertionError("canonical condition must resolve current global q")
+            return current
         return _refresh_day0_monitor_probability(
             pos,
             conn=conn,
@@ -4161,6 +4457,11 @@ def refresh_position(conn, clob: PolymarketClient, pos: Position) -> EdgeContext
         delattr(pos, "_day0_monitor_probability_receipt")
     except AttributeError:
         pass
+    for attr in (_GLOBAL_MONITOR_SAMPLES_ATTR, _GLOBAL_MONITOR_ALPHA_ATTR):
+        try:
+            delattr(pos, attr)
+        except AttributeError:
+            pass
 
     # 1. Refresh held-token quote
     market_refreshed = False
@@ -4195,6 +4496,14 @@ def refresh_position(conn, clob: PolymarketClient, pos: Position) -> EdgeContext
         _day0_receipt = getattr(refresh_pos, "_day0_monitor_probability_receipt", None)
         if _day0_receipt is not None:
             setattr(pos, "_day0_monitor_probability_receipt", _day0_receipt)
+        _global_samples = getattr(refresh_pos, _GLOBAL_MONITOR_SAMPLES_ATTR, None)
+        if _global_samples is not None:
+            setattr(pos, _GLOBAL_MONITOR_SAMPLES_ATTR, _global_samples)
+            setattr(
+                pos,
+                _GLOBAL_MONITOR_ALPHA_ATTR,
+                getattr(refresh_pos, _GLOBAL_MONITOR_ALPHA_ATTR),
+            )
         _set_day0_zero_probability_exit_authority(
             pos,
             bool(
@@ -4308,6 +4617,8 @@ def refresh_position(conn, clob: PolymarketClient, pos: Position) -> EdgeContext
     ci_lower = current_forward_edge - _entry_ci_half
     ci_upper = current_forward_edge + _entry_ci_half
     bootstrap_ctx = getattr(pos, "_bootstrap_context", None)
+    global_samples = getattr(pos, _GLOBAL_MONITOR_SAMPLES_ATTR, None)
+    global_alpha = getattr(pos, _GLOBAL_MONITOR_ALPHA_ATTR, None)
     if not probability_authority_available:
         ci_lower = float("nan")
         ci_upper = float("nan")
@@ -4320,6 +4631,12 @@ def refresh_position(conn, clob: PolymarketClient, pos: Position) -> EdgeContext
         )
     if not probability_authority_available:
         pass
+    elif global_samples is not None:
+        ci_lower, ci_upper = _current_global_monitor_edge_band(
+            global_samples,
+            alpha=float(global_alpha),
+            current_p_market=current_p_market,
+        )
     elif bootstrap_ctx is not None and len(bootstrap_ctx["bins"]) > 1:
         try:
             from src.strategy.market_analysis import MarketAnalysis
@@ -4390,7 +4707,11 @@ def refresh_position(conn, clob: PolymarketClient, pos: Position) -> EdgeContext
         p_market=np.array([current_p_market]),
         p_posterior=current_p_posterior,
         forward_edge=current_forward_edge,
-        alpha=bootstrap_ctx["alpha"] if bootstrap_ctx else 0.0,
+        alpha=(
+            float(global_alpha)
+            if global_samples is not None and global_alpha is not None
+            else (bootstrap_ctx["alpha"] if bootstrap_ctx else 0.0)
+        ),
         confidence_band_upper=ci_upper,
         confidence_band_lower=ci_lower,
         entry_provenance=EntryMethod(pos.entry_method),

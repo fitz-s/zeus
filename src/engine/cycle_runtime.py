@@ -4833,7 +4833,10 @@ def execute_monitoring_phase(
     run_exit_preflight: bool = True,
     held_position_monitor_budget_seconds: float | None = None,
 ):
-    from src.engine.monitor_refresh import refresh_position
+    from src.engine.monitor_refresh import (
+        _GLOBAL_MONITOR_SAMPLES_ATTR,
+        refresh_position,
+    )
     from src.execution.exit_lifecycle import (
         ExitContext,
         build_exit_intent,
@@ -5532,6 +5535,35 @@ def execute_monitoring_phase(
                     should_exit=should_exit,
                     exit_reason=exit_reason,
                     summary=summary,
+                )
+
+            # The current global q is shared with the full BUY/SELL/HOLD/CASH
+            # auction.  That auction already owns reduce-only SELL actuation
+            # through _submit_current_global_sell; allowing this legacy
+            # per-position monitor to submit the same capital decision would
+            # create a second optimizer with a different wealth/depth scope.
+            # Keep the local verdict as diagnostic evidence, but only the
+            # global auction may turn it into a normal SELL.  Absorbing hard
+            # facts return before global samples are attached and retain their
+            # settlement-authority exit lane.
+            local_exit_trigger = _effective_exit_trigger(exit_decision, exit_reason)
+            if (
+                should_exit
+                and local_exit_trigger != "RED_FORCE_EXIT"
+                and getattr(pos, _GLOBAL_MONITOR_SAMPLES_ATTR, None) is not None
+            ):
+                should_exit = False
+                exit_reason = "GLOBAL_AUCTION_OWNS_REDUCE_ONLY_SELL"
+                pos.applied_validations = list(
+                    dict.fromkeys(
+                        [
+                            *(pos.applied_validations or []),
+                            "local_monitor_sell_delegated_to_global_auction",
+                        ]
+                    )
+                )
+                summary["monitor_sells_delegated_to_global_auction"] = (
+                    summary.get("monitor_sells_delegated_to_global_auction", 0) + 1
                 )
 
             exit_trigger = _effective_exit_trigger(exit_decision, exit_reason)

@@ -2,8 +2,8 @@
 # Lifecycle: created=2026-03-31; last_reviewed=2026-05-05; last_reused=2026-05-05
 # Purpose: Lock live-money safety invariants across fill, exit, chain, and P&L flows.
 # Reuse: Run for execution finality, live exit, chain reconciliation, and safety invariant changes.
-# Last reused/audited: 2026-07-12
-# Authority basis: midstream verdict v2; live_entry_health_repair B26 robust-exit precedence
+# Last reused/audited: 2026-07-14
+# Authority basis: midstream verdict v2; finite-evidence single-q global SELL ownership
 """Live safety invariant tests: relationship tests, not function tests.
 
 These verify cross-module relationships that prevent ghost positions,
@@ -3145,6 +3145,174 @@ def test_pending_exit_backoff_exhausted_reenters_redecision_when_still_held(monk
     assert len(monitor_results) == 1
     assert monitor_results[0].should_exit is False
     assert monitor_results[0].exit_reason == "CI_OVERLAP_HOLD"
+
+
+@pytest.mark.parametrize(
+    ("trigger", "delegated"),
+    (("EDGE_REVERSAL", True), ("RED_FORCE_EXIT", False)),
+)
+def test_current_global_monitor_sell_has_one_normal_actuator_and_preserves_red(
+    tmp_path,
+    monkeypatch,
+    trigger,
+    delegated,
+):
+    """A local SELL verdict cannot bypass the global BUY/SELL/HOLD/CASH winner."""
+    from src.contracts import EdgeContext, EntryMethod
+    from src.engine import cycle_runtime, monitor_refresh
+    from src.engine.lifecycle_events import build_entry_canonical_write
+    from src.state.db import append_many_and_project, get_connection, init_schema
+    from src.state.lifecycle_manager import LifecyclePhase
+
+    conn = get_connection(tmp_path / "global-auction-owns-monitor-sell.db")
+    init_schema(conn)
+    pos = _make_position(
+        trade_id="global-auction-owned-sell",
+        state="holding",
+        city="Paris",
+        target_date="2026-07-14",
+        direction="buy_no",
+        strategy_key="center_buy",
+        order_status="filled",
+        entered_at="2026-07-14T17:00:00+00:00",
+        order_posted_at="2026-07-14T16:59:00+00:00",
+        fill_authority=FILL_AUTHORITY_VENUE_CONFIRMED_FULL,
+        shares=500.0,
+        shares_filled=500.0,
+        chain_state="synced",
+        chain_shares=500.0,
+        token_id="paris-yes",
+        no_token_id="paris-no",
+        condition_id="0x" + "5a" * 32,
+    )
+    events, projection = build_entry_canonical_write(
+        pos,
+        phase_after=LifecyclePhase.ACTIVE.value,
+        decision_id="decision-global-auction-owned-sell",
+        source_module="tests/test_current_global_monitor_sell_is_diagnostic",
+    )
+    append_many_and_project(conn, events, projection)
+    portfolio = _make_portfolio(pos)
+
+    def fake_refresh(_conn, _clob, position):
+        position.last_monitor_prob = 0.10
+        position.last_monitor_prob_is_fresh = True
+        position.last_monitor_edge = -0.40
+        position.last_monitor_market_price = 0.50
+        position.last_monitor_market_price_is_fresh = True
+        position.last_monitor_best_bid = 0.49
+        position.last_monitor_best_ask = 0.50
+        position.last_monitor_at = "2026-07-14T18:00:00+00:00"
+        setattr(
+            position,
+            monitor_refresh._GLOBAL_MONITOR_SAMPLES_ATTR,
+            np.array([0.05, 0.15]),
+        )
+        return EdgeContext(
+            p_raw=np.array([]),
+            p_cal=np.array([]),
+            p_market=np.array([0.50]),
+            p_posterior=0.10,
+            forward_edge=-0.40,
+            alpha=0.1,
+            confidence_band_upper=-0.35,
+            confidence_band_lower=-0.45,
+            entry_provenance=EntryMethod.QKERNEL_SPINE,
+            decision_snapshot_id="global-monitor-sell-snapshot",
+            n_edges_found=1,
+            n_edges_after_fdr=1,
+        )
+
+    monkeypatch.setattr(monitor_refresh, "refresh_position", fake_refresh)
+    monkeypatch.setattr(
+        Position,
+        "evaluate_exit",
+        lambda self, context: ExitDecision(
+            True,
+            trigger,
+            trigger=trigger,
+            selected_method=self.selected_method or self.entry_method,
+            applied_validations=["local_monitor_sell_signal"],
+        ),
+    )
+    monkeypatch.setattr(
+        cycle_runtime,
+        "_closed_non_accepting_market_info",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(
+        cycle_runtime,
+        "_entry_selection_guard_exit_decision",
+        lambda **kwargs: None,
+    )
+    monkeypatch.setattr(
+        cycle_runtime,
+        "_apply_family_monitor_overlay",
+        lambda **kwargs: (kwargs["should_exit"], kwargs["exit_reason"]),
+    )
+    execute_calls = []
+
+    def fake_execute_exit(*args, **kwargs):
+        execute_calls.append(kwargs.get("position") or args[1])
+        return "exit_failed:test_stub"
+
+    monkeypatch.setattr(
+        "src.execution.exit_lifecycle.execute_exit",
+        fake_execute_exit,
+    )
+
+    results = []
+    artifact = type(
+        "Artifact",
+        (),
+        {"add_monitor_result": lambda self, result: results.append(result)},
+    )()
+    deps = type(
+        "Deps",
+        (),
+        {
+            "MonitorResult": type(
+                "MonitorResult",
+                (),
+                {"__init__": lambda self, **kwargs: self.__dict__.update(kwargs)},
+            ),
+            "logger": logging.getLogger("test_global_auction_owned_monitor_sell"),
+            "cities_by_name": {},
+            "_utcnow": staticmethod(
+                lambda: datetime(2026, 7, 14, 18, 0, tzinfo=timezone.utc)
+            ),
+        },
+    )
+    summary = {"monitors": 0, "exits": 0}
+
+    cycle_runtime.execute_monitoring_phase(
+        conn,
+        object(),
+        portfolio,
+        artifact,
+        type("Tracker", (), {"record_exit": lambda self, position: None})(),
+        summary,
+        deps=deps,
+        run_exit_preflight=False,
+    )
+
+    if delegated:
+        assert summary["monitor_sells_delegated_to_global_auction"] == 1
+        assert summary["exits"] == 0
+        assert results[0].should_exit is False
+        assert results[0].exit_reason == "GLOBAL_AUCTION_OWNS_REDUCE_ONLY_SELL"
+        assert "local_monitor_sell_delegated_to_global_auction" in pos.applied_validations
+        assert execute_calls == []
+        assert conn.execute(
+            "SELECT COUNT(*) FROM venue_commands WHERE intent_kind = 'EXIT'"
+        ).fetchone()[0] == 0
+    else:
+        assert summary.get("monitor_sells_delegated_to_global_auction", 0) == 0
+        assert summary["exits"] == 1
+        assert results[0].should_exit is True
+        assert results[0].exit_reason == "RED_FORCE_EXIT"
+        assert execute_calls == [pos]
+    conn.close()
 
 
 def test_pending_exit_backoff_exhausted_dust_hold_does_not_emit_exit_intent(monkeypatch):

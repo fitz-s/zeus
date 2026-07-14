@@ -1,6 +1,6 @@
 # Created: 2026-05-20
-# Last reused or audited: 2026-07-13
-# Authority basis: PHASE_2_ULTRAPLAN.md §8.2 + §8.3 — monitor_refresh nowcast wiring; live release proof P2-3 nowcast failure telemetry
+# Last reused or audited: 2026-07-14
+# Authority basis: PHASE_2_ULTRAPLAN.md §8.2 + §8.3; finite-evidence probability symmetry packet held/entry single-q law
 # Lifecycle: created=2026-05-20; last_reviewed=2026-05-21; last_reused=2026-07-11
 # Purpose: T5 GREEN antibody — _maybe_write_day0_nowcast gate conditions + write_nowcast_run call.
 # Reuse: Run when _maybe_write_day0_nowcast, write_nowcast_run wiring, or day0 gate logic changes.
@@ -176,6 +176,296 @@ def test_day0_observation_absence_stays_stale_without_both_authorities(
     assert fresh is False
     assert prob == pytest.approx(pos.p_posterior)
     assert refresh_pos.selected_method != "replacement_posterior"
+
+
+def test_day0_monitor_reads_exact_current_global_probability_witness(
+    monkeypatch,
+) -> None:
+    """A live identified holding uses the entry/SELL/HOLD/CASH joint-q witness."""
+    import numpy as np
+    from src.engine import event_reactor_adapter, global_auction_universe
+    from src.state import db as state_db
+
+    condition_id = "0x" + "1c" * 32
+    event_row = {
+        "event_id": "event-paris-day0",
+        "event_type": "DAY0_EXTREME_UPDATED",
+        "entity_key": "Paris|2026-07-14|high",
+        "source": "test",
+        "observed_at": "2026-07-14T14:00:00+00:00",
+        "available_at": "2026-07-14T14:00:01+00:00",
+        "received_at": "2026-07-14T14:00:01+00:00",
+        "causal_snapshot_id": "snapshot-1",
+        "payload_hash": "payload-hash",
+        "idempotency_key": "idempotency-key",
+        "priority": 1,
+        "expires_at": None,
+        "payload_json": "{}",
+        "schema_version": 1,
+        "created_at": "2026-07-14T14:00:01+00:00",
+    }
+
+    class FakeConnection:
+        def __init__(self, row=None):
+            self.row = row
+            self.closed = False
+
+        def execute(self, *_args, **_kwargs):
+            return self
+
+        def fetchone(self):
+            return self.row
+
+        def fetchall(self):
+            return [self.row] if self.row is not None else []
+
+        def close(self):
+            self.closed = True
+
+    world = FakeConnection(event_row)
+    forecasts = FakeConnection()
+    trade = FakeConnection(
+        {
+            "condition_id": condition_id,
+            "yes_token_id": "paris-yes-token",
+            "no_token_id": "paris-no-token",
+        }
+    )
+    monkeypatch.setattr(state_db, "get_world_connection_read_only", lambda: world)
+    monkeypatch.setattr(
+        state_db,
+        "get_forecasts_connection_read_only",
+        lambda: forecasts,
+    )
+
+    witness = SimpleNamespace(
+        bindings=(
+            SimpleNamespace(
+                condition_id=condition_id,
+                yes_token_id="paris-yes-token",
+                no_token_id="paris-no-token",
+            ),
+        ),
+        yes_q_samples=np.array([[0.1], [0.2], [0.3], [0.4]]),
+        witness_identity="witness-current-global",
+        q_version="q-version-current-global",
+        source_truth_identity="source-truth-current-global",
+        band_basis="current_coherent_day0_remaining_finite_evidence_v2",
+        band_alpha=0.25,
+    )
+
+    def prepare(event, **kwargs):
+        assert event.event_id == "event-paris-day0"
+        assert kwargs["forecast_conn"] is forecasts
+        assert kwargs["topology_conn"] is forecasts
+        assert kwargs["observation_conn"] is world
+        kwargs["day0_payload_out"].update(
+            {
+                "_edli_global_day0_binding": {
+                    "observation_time": "2026-07-14T14:00:00+00:00",
+                    "observed_extreme_native": 34.0,
+                },
+                "_edli_day0_finite_evidence_member_count": 4,
+            }
+        )
+        return SimpleNamespace(probability_witness=witness)
+
+    monkeypatch.setattr(
+        event_reactor_adapter,
+        "_prepare_current_global_probability_family",
+        prepare,
+    )
+    monkeypatch.setattr(
+        global_auction_universe,
+        "_rebind_probability_witness_tokens",
+        lambda candidate_witness, **kwargs: candidate_witness,
+    )
+    pos = _make_position()
+    pos.city = "Paris"
+    pos.target_date = "2026-07-14"
+    pos.direction = "buy_no"
+    pos.condition_id = condition_id
+    pos.token_id = "paris-yes-token"
+    pos.no_token_id = "paris-no-token"
+
+    probability, refreshed, fresh = (
+        monitor_refresh_module._refresh_current_global_day0_probability(
+            pos,
+            trade_conn=trade,
+            decision_time=datetime(2026, 7, 14, 17, 0, tzinfo=timezone.utc),
+        )
+    )
+
+    assert fresh is True
+    assert probability == pytest.approx(0.75)
+    assert getattr(
+        refreshed,
+        monitor_refresh_module._GLOBAL_MONITOR_SAMPLES_ATTR,
+    ) == pytest.approx([0.9, 0.8, 0.7, 0.6])
+    assert refreshed._day0_monitor_probability_receipt["probability_witness_identity"] == (
+        "witness-current-global"
+    )
+    assert world.closed is True
+    assert forecasts.closed is True
+
+
+@pytest.mark.parametrize(
+    ("direction", "expected"),
+    (("buy_yes", [0.1, 0.3]), ("buy_no", [0.9, 0.7])),
+)
+def test_current_global_monitor_samples_bind_exact_held_token(
+    direction,
+    expected,
+) -> None:
+    import numpy as np
+
+    condition_id = "0x" + "3e" * 32
+    pos = _make_position()
+    pos.direction = direction
+    pos.condition_id = condition_id
+    pos.token_id = "exact-yes-token"
+    pos.no_token_id = "exact-no-token"
+    witness = SimpleNamespace(
+        bindings=(
+            SimpleNamespace(
+                condition_id=condition_id,
+                yes_token_id="exact-yes-token",
+                no_token_id="exact-no-token",
+            ),
+        ),
+        yes_q_samples=np.array([[0.1], [0.3]]),
+    )
+
+    assert monitor_refresh_module._current_global_held_samples(
+        pos,
+        witness,
+        current_token_pair=("exact-yes-token", "exact-no-token"),
+    ) == pytest.approx(expected)
+
+
+def test_current_global_monitor_token_mismatch_fails_closed() -> None:
+    import numpy as np
+
+    condition_id = "0x" + "4f" * 32
+    pos = _make_position()
+    pos.direction = "buy_no"
+    pos.condition_id = condition_id
+    pos.no_token_id = "wrong-no-token"
+    witness = SimpleNamespace(
+        bindings=(
+            SimpleNamespace(
+                condition_id=condition_id,
+                yes_token_id="exact-yes-token",
+                no_token_id="exact-no-token",
+            ),
+        ),
+        yes_q_samples=np.array([[0.1], [0.3]]),
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="position token pair does not match current global witness",
+    ):
+        monitor_refresh_module._current_global_held_samples(
+            pos,
+            witness,
+            current_token_pair=("exact-yes-token", "exact-no-token"),
+        )
+
+
+def test_current_global_monitor_missing_witness_no_token_fails_closed() -> None:
+    import numpy as np
+
+    condition_id = "0x" + "6b" * 32
+    pos = _make_position()
+    pos.direction = "buy_no"
+    pos.condition_id = condition_id
+    pos.token_id = "exact-yes-token"
+    pos.no_token_id = "exact-no-token"
+    witness = SimpleNamespace(
+        bindings=(
+            SimpleNamespace(
+                condition_id=condition_id,
+                yes_token_id="exact-yes-token",
+                no_token_id=None,
+            ),
+        ),
+        yes_q_samples=np.array([[0.1], [0.3]]),
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="position token pair does not match current global witness",
+    ):
+        monitor_refresh_module._current_global_held_samples(
+            pos,
+            witness,
+            current_token_pair=("exact-yes-token", "exact-no-token"),
+        )
+
+
+def test_current_global_monitor_edge_band_uses_solver_cvar() -> None:
+    lower, upper = monitor_refresh_module._current_global_monitor_edge_band(
+        [0.2, 0.4, 0.6, 0.8],
+        alpha=0.25,
+        current_p_market=0.1,
+    )
+
+    assert lower == pytest.approx(0.1)
+    assert upper == pytest.approx(0.7)
+
+
+def test_identified_day0_monitor_fails_closed_without_global_probability(
+    monkeypatch,
+) -> None:
+    """A current-q failure cannot borrow freshness from the legacy Day0 path."""
+    pos = _make_position()
+    pos.city = "Paris"
+    pos.target_date = "2026-07-14"
+    pos.entry_method = "day0_observation"
+    pos.p_posterior = 0.62
+    pos.condition_id = "0x" + "2d" * 32
+    monkeypatch.setattr(
+        monitor_refresh_module,
+        "_day0_absorbing_hard_fact_overlay",
+        lambda **kwargs: None,
+    )
+    monkeypatch.setattr(
+        monitor_refresh_module,
+        "_refresh_current_global_day0_probability",
+        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("no current q")),
+    )
+    monkeypatch.setattr(
+        monitor_refresh_module,
+        "_refresh_day0_monitor_probability",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("legacy Day0 probability must not become authority")
+        ),
+    )
+    reseeds = []
+    monkeypatch.setattr(
+        monitor_refresh_module,
+        "_enqueue_single_family_belief_reseed_failsoft",
+        lambda **kwargs: reseeds.append(kwargs),
+    )
+
+    probability, refreshed, fresh = monitor_refresh_module.monitor_probability_refresh(
+        pos,
+        conn=None,
+        city=SimpleNamespace(name="Paris", timezone="Europe/Paris"),
+        target_d=date(2026, 7, 14),
+    )
+
+    assert probability == pytest.approx(0.62)
+    assert fresh is False
+    assert getattr(refreshed, monitor_refresh_module._MONITOR_PROBABILITY_FRESH_ATTR) is False
+    assert any(
+        validation.startswith("day0_current_global_probability_unavailable:")
+        for validation in refreshed.applied_validations
+    )
+    assert reseeds == [
+        {"city": "Paris", "target_date": "2026-07-14", "metric": "high"}
+    ]
 
 
 def test_held_monitor_releases_trade_transaction_before_probability_refresh(
