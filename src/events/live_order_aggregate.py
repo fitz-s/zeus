@@ -1065,7 +1065,11 @@ def _validate_pre_submit_revalidation_payload(
         raise LiveOrderAggregateError("PreSubmitRevalidated requires side=BUY or SELL")
     limit_price = _positive_number(payload.get("limit_price"), "limit_price")
     try:
-        assert_live_order_unit_price(limit_price)
+        assert_live_order_unit_price(
+            limit_price,
+            side=side,
+            tick_size=payload.get("tick_size"),
+        )
     except ValueError as exc:
         raise LiveOrderAggregateError(
             f"PreSubmitRevalidated live order unit price out of bounds: {exc}"
