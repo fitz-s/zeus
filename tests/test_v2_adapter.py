@@ -1,8 +1,8 @@
-# Lifecycle: created=2026-04-27; last_reviewed=2026-07-14; last_reused=2026-07-14
+# Lifecycle: created=2026-04-27; last_reviewed=2026-07-15; last_reused=2026-07-15
 # Purpose: R3 Z2 Polymarket V2 adapter and submission envelope antibodies.
 # Reuse: Run when V2 SDK adapter, envelope provenance, or Q1 preflight behavior changes.
 # Created: 2026-04-27
-# Last reused/audited: 2026-07-14
+# Last reused/audited: 2026-07-15
 # Authority basis: docs/operations/task_2026-04-26_ultimate_plan/r3/slice_cards/Z2.yaml
 #                  + docs/archive/2026-Q2/task_2026-05-15_live_order_e2e_verification/LIVE_ORDER_E2E_VERIFICATION_PLAN.md
 #                  + docs/archive/2026-Q2/task_2026-05-15_live_order_e2e_goal/LIVE_ORDER_E2E_GOAL_PLAN.md
@@ -743,6 +743,42 @@ def test_pusd_collateral_payload_skips_chain_allowance_fallback_for_heartbeat(tm
     assert payload["authority_tier"] == "CHAIN"
     assert payload["pusd_allowance_source"] == "missing"
     assert rpc_calls == []
+
+
+def test_pusd_collateral_payload_can_skip_clob_update_and_use_chain_allowance(tmp_path):
+    """Current balance + direct chain allowance must fit the sidecar fast path."""
+    from src.venue.polymarket_v2_adapter import PolymarketV2Adapter
+
+    fake = FakeBalanceAllowanceClient(response={"balance": "100000000"})
+    rpc_calls = []
+
+    def rpc_call(_url, method, params):
+        rpc_calls.append((method, params))
+        return hex((2**256) - 1)
+
+    adapter = PolymarketV2Adapter(
+        host="https://clob.polymarket.com",
+        funder_address="0x1111111111111111111111111111111111111111",
+        signer_key="test-key",
+        chain_id=137,
+        signature_type=2,
+        polygon_rpc_url="https://rpc.test",
+        rpc_call=rpc_call,
+        q1_egress_evidence_path=tmp_path / "unused.txt",
+        client_factory=lambda **kwargs: fake,
+    )
+
+    payload = adapter.get_pusd_collateral_payload(
+        refresh_allowance=False,
+        allow_chain_allowance_fallback=True,
+    )
+
+    assert payload["pusd_balance_micro"] == "100000000"
+    assert payload["pusd_allowance_micro"] == (2**256) - 1
+    assert payload["authority_tier"] == "CHAIN"
+    assert payload["pusd_allowance_source"] == "chain_erc20_allowance"
+    assert [call[0] for call in fake.calls] == ["get_balance_allowance"]
+    assert len(rpc_calls) == 2
 
 
 def test_collateral_payload_rederives_once_when_runtime_l2_creds_are_stale(tmp_path):

@@ -1,11 +1,11 @@
 # Created: 2026-06-08
-# Last reused or audited: 2026-07-10
+# Last reused or audited: 2026-07-15
 # Reuse: Run when post-trade-capital process recovery, poller ownership, or launchd liveness changes.
 # Authority basis: docs/architecture/system_decomposition_plan.md
 #   §4.3 (Post-Trade Capital Lifecycle), §6 (P4 row + co-location decision),
 #   §7 (I3 P4->riskguard/P1 no-back-coupling + commit-before-HTTP; I4 ingest->P4),
 #   §8 Step 2 (split chain-sync READ from exit-SUBMIT), §9 (regression-unconstructable).
-# Lifecycle: created=2026-06-08; last_reviewed=2026-07-10; last_reused=2026-07-10
+# Lifecycle: created=2026-06-08; last_reviewed=2026-07-15; last_reused=2026-07-15
 # Purpose: RELATIONSHIP TESTS for process-topology refactor STEP P4 — lift the
 #   post-trade capital lifecycle (settlement P&L resolve -> redeem -> wrap +
 #   chain-sync READ phase) OUT of the order daemon into its own process.
@@ -550,8 +550,14 @@ def test_collateral_degraded_snapshot_is_scheduler_failure(monkeypatch, tmp_path
     from src.execution import post_trade_capital
 
     class _Adapter:
-        def get_pusd_collateral_payload(self, *, refresh_allowance=True):
-            assert refresh_allowance is True
+        def get_pusd_collateral_payload(
+            self,
+            *,
+            refresh_allowance=True,
+            allow_chain_allowance_fallback=None,
+        ):
+            assert refresh_allowance is False
+            assert allow_chain_allowance_fallback is True
             return {"authority_tier": "DEGRADED", "error": "simulated TLS failure"}
 
     class _Client:

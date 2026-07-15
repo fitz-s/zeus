@@ -1233,13 +1233,25 @@ class PolymarketV2Adapter:
             "pusd_allowance_source": allowance_source,
         }
 
-    def get_pusd_collateral_payload(self, *, refresh_allowance: bool = True) -> dict[str, Any]:
-        """Return pUSD balance/allowance facts without CTF position enumeration."""
+    def get_pusd_collateral_payload(
+        self,
+        *,
+        refresh_allowance: bool = True,
+        allow_chain_allowance_fallback: bool | None = None,
+    ) -> dict[str, Any]:
+        """Return pUSD balance/allowance facts without CTF position enumeration.
+
+        ``refresh_allowance`` controls the optional CLOB cache-update request.
+        Chain allowance is independent current truth, so callers may skip that
+        request while retaining the direct ERC20 allowance fallback.
+        """
 
         raw = self._collateral_balance_allowance_raw(refresh_allowance=refresh_allowance)
+        if allow_chain_allowance_fallback is None:
+            allow_chain_allowance_fallback = refresh_allowance
         return self._pusd_collateral_payload_from_raw(
             raw,
-            allow_chain_allowance_fallback=refresh_allowance,
+            allow_chain_allowance_fallback=allow_chain_allowance_fallback,
         )
 
     def get_collateral_payload(self) -> dict[str, Any]:

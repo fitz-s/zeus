@@ -88,10 +88,18 @@ class _PusdOnlyCollateralAdapter:
     def get_collateral_payload(self) -> dict:
         pusd_payload = getattr(self._adapter, "get_pusd_collateral_payload", None)
         if callable(pusd_payload):
-            try:
-                return dict(pusd_payload(refresh_allowance=True) or {})
-            except TypeError:
-                return dict(pusd_payload() or {})
+            # The CLOB ``balance-allowance/update`` endpoint is a cache-refresh
+            # hint, not balance authority.  Calling it every 30 seconds can
+            # consume the sidecar's whole deadline before the authoritative
+            # reads happen.  Read the current CLOB balance directly and prove
+            # allowance from chain when CLOB omits/zeros it.
+            return dict(
+                pusd_payload(
+                    refresh_allowance=False,
+                    allow_chain_allowance_fallback=True,
+                )
+                or {}
+            )
         return dict(self._adapter.get_collateral_payload() or {})
 
     @property
