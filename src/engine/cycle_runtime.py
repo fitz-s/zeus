@@ -4446,19 +4446,13 @@ def _finite_float_or_none(value):
     return value_f if math.isfinite(value_f) else None
 
 
-def _current_monitor_result_probability_and_edge(pos, edge_ctx=None) -> tuple[float | None, float | None]:
+def _current_monitor_result_probability_and_edge(pos) -> tuple[float | None, float | None]:
     """Return current-cycle monitor probability/edge only when authority is fresh."""
 
     if not bool(getattr(pos, "last_monitor_prob_is_fresh", False)):
         return None, None
     fresh_prob = _finite_float_or_none(getattr(pos, "last_monitor_prob", None))
-    fresh_edge = (
-        _finite_float_or_none(getattr(edge_ctx, "forward_edge", None))
-        if edge_ctx is not None
-        else None
-    )
-    if fresh_edge is None:
-        fresh_edge = _finite_float_or_none(getattr(pos, "last_monitor_edge", None))
+    fresh_edge = _finite_float_or_none(getattr(pos, "last_monitor_edge", None))
     if fresh_prob is None:
         return None, None
     return fresh_prob, fresh_edge
@@ -5642,7 +5636,7 @@ def execute_monitoring_phase(
                     summary.get("monitor_canonical_write_failed", 0) + 1
                 )
                 if exit_trigger != "RED_FORCE_EXIT":
-                    monitor_fresh_prob, monitor_fresh_edge = _current_monitor_result_probability_and_edge(pos, edge_ctx)
+                    monitor_fresh_prob, monitor_fresh_edge = _current_monitor_result_probability_and_edge(pos)
                     artifact.add_monitor_result(
                         deps.MonitorResult(
                             position_id=pos.trade_id,
@@ -5657,7 +5651,7 @@ def execute_monitoring_phase(
                     summary["monitors"] += 1
                     continue
 
-            monitor_fresh_prob, monitor_fresh_edge = _current_monitor_result_probability_and_edge(pos, edge_ctx)
+            monitor_fresh_prob, monitor_fresh_edge = _current_monitor_result_probability_and_edge(pos)
             artifact.add_monitor_result(
                 deps.MonitorResult(
                     position_id=pos.trade_id,

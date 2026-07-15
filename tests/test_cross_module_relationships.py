@@ -472,7 +472,7 @@ def test_monitor_zero_probability_overrides_stale_edge_context_at_exit_boundary(
     assert exit_ctx.fresh_prob == 0.0
     assert exit_ctx.current_market_price == 0.002
 
-    monitor_prob, monitor_edge = _current_monitor_result_probability_and_edge(pos, stale_edge_ctx)
+    monitor_prob, monitor_edge = _current_monitor_result_probability_and_edge(pos)
     assert monitor_prob == 0.0
     assert monitor_edge == -0.002
 
