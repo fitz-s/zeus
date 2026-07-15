@@ -3352,6 +3352,24 @@ def _family_direct_sell_advantage_threshold_usd(sell_value: float) -> float:
     )
 
 
+def _entry_aggregate_id(decision_id: str) -> str | None:
+    parts = str(decision_id or "").strip().split(":")
+    if len(parts) < 5 or parts[0] != "edli_exec_cmd":
+        return None
+    event_id = parts[1].strip()
+    final_intent_id = ":".join(parts[2:-2]).strip()
+    token_id = parts[-2].strip()
+    direction = parts[-1].strip()
+    if (
+        not event_id
+        or not final_intent_id
+        or not token_id
+        or direction not in {"buy_yes", "buy_no"}
+    ):
+        return None
+    return f"{event_id}:{final_intent_id}"
+
+
 def _entry_qkernel_selection_guard_verdict(conn, pos) -> dict[str, object] | None:
     """Return the entry-time qkernel selection guard for a live position.
 
@@ -3389,17 +3407,20 @@ def _entry_qkernel_selection_guard_verdict(conn, pos) -> dict[str, object] | Non
     ).strip()
     if not decision_id:
         return None
+    aggregate_id = _entry_aggregate_id(decision_id)
+    if aggregate_id is None:
+        return None
     try:
         event_row = conn.execute(
             """
             SELECT payload_json
               FROM edli_live_order_events
-             WHERE event_type = 'PreSubmitRevalidated'
-               AND ? LIKE '%' || aggregate_id || '%'
-             ORDER BY occurred_at DESC, event_sequence DESC
+             WHERE aggregate_id = ?
+               AND event_type = 'PreSubmitRevalidated'
+             ORDER BY event_sequence DESC
              LIMIT 1
             """,
-            (decision_id,),
+            (aggregate_id,),
         ).fetchone()
     except Exception:
         return None

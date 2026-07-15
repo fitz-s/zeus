@@ -4141,7 +4141,7 @@ def test_monitor_entry_selection_guard_invalidity_requires_independent_exit():
         ) VALUES (?, 3, 'PreSubmitRevalidated', ?, ?)
         """,
         (
-            "agg-unarmed",
+            "agg-unarmed:edli_intent:agg-unarmed:tok",
             "2026-06-29T12:00:00+00:00",
             json.dumps(
                 {
@@ -4238,7 +4238,7 @@ def test_monitor_entry_selection_guard_does_not_force_exit_over_fresh_positive_e
         ) VALUES (?, 3, 'PreSubmitRevalidated', ?, ?)
         """,
         (
-            "agg-unarmed",
+            "agg-unarmed:edli_intent:agg-unarmed:tok",
             "2026-06-29T12:00:00+00:00",
             json.dumps(
                 {
@@ -4334,7 +4334,7 @@ def test_monitor_entry_selection_guard_does_not_force_exit_on_immature_day0():
         ) VALUES (?, 3, 'PreSubmitRevalidated', ?, ?)
         """,
         (
-            "agg-unarmed-day0",
+            "agg-unarmed-day0:edli_intent:agg-unarmed-day0:tok",
             "2026-06-29T12:00:00+00:00",
             json.dumps(
                 {
@@ -4441,7 +4441,7 @@ def test_monitor_entry_selection_guard_preserves_existing_day0_exit_decision():
         ) VALUES (?, 3, 'PreSubmitRevalidated', ?, ?)
         """,
         (
-            "agg-unarmed-day0-exit",
+            "agg-unarmed-day0-exit:edli_intent:agg-unarmed-day0-exit:tok",
             "2026-06-29T12:00:00+00:00",
             json.dumps(
                 {
@@ -4491,6 +4491,71 @@ def test_monitor_entry_selection_guard_preserves_existing_day0_exit_decision():
     assert decision is None
     assert summary["entry_selection_guard_invalid_positions"] == 1
     assert summary["entry_selection_guard_invalid_existing_exit_preserved"] == 1
+
+
+def test_monitor_entry_selection_guard_requires_exact_entry_aggregate_identity():
+    """A decision-id substring is not authority for an unrelated EDLI aggregate."""
+    from src.engine import cycle_runtime
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(
+        """
+        CREATE TABLE venue_commands (
+            command_id TEXT,
+            position_id TEXT,
+            decision_id TEXT,
+            intent_kind TEXT,
+            created_at TEXT,
+            updated_at TEXT
+        );
+        CREATE TABLE edli_live_order_events (
+            aggregate_id TEXT,
+            event_sequence INTEGER,
+            event_type TEXT,
+            occurred_at TEXT,
+            payload_json TEXT
+        );
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO venue_commands (
+            command_id, position_id, decision_id, intent_kind, created_at, updated_at
+        ) VALUES (?, ?, ?, 'ENTRY', ?, ?)
+        """,
+        (
+            "cmd-exact-identity",
+            "pos-exact-identity",
+            "edli_exec_cmd:agg-exact:edli_intent:agg-exact:tok:tok:buy_yes",
+            "2026-07-15T00:00:00+00:00",
+            "2026-07-15T00:00:00+00:00",
+        ),
+    )
+    conn.execute(
+        """
+        INSERT INTO edli_live_order_events (
+            aggregate_id, event_sequence, event_type, occurred_at, payload_json
+        ) VALUES (?, 1, 'PreSubmitRevalidated', ?, ?)
+        """,
+        (
+            "agg-exact",
+            "2026-07-15T00:00:00+00:00",
+            json.dumps(
+                {
+                    "qkernel_execution_economics": {
+                        "source": "qkernel_spine",
+                        "selection_guard_basis": "SIDE_NOT_ARMED",
+                        "selection_guard_abstained": False,
+                        "selection_guard_q_safe": 0.0,
+                    }
+                }
+            ),
+        ),
+    )
+    pos = _make_position(trade_id="pos-exact-identity")
+
+    assert cycle_runtime._entry_qkernel_selection_guard_verdict(conn, pos) is None
 
 
 def test_entry_replacement_blocks_when_materializable_raw_cycle_newer_than_posterior():
