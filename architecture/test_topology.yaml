@@ -28,7 +28,7 @@ test_trust_policy:
   # Machine-readable registry: tests with valid lifecycle headers.
   # Tests not in this list require audit before running.
   trusted_tests:
-    tests/execution/test_venue_sync_contract.py: {created: "2026-06-11", last_used: "2026-07-11", note: "Three-phase command-recovery DB/venue synchronization antibodies: no network while a connection is open, one short connection per pass, scheduled-vs-legacy event parity, and canonical WORLD+TRADE live flocks held for the full recovery connection lifetime so inverse TRADE-main/WORLD-main SQLite layouts cannot deadlock."}
+    tests/execution/test_venue_sync_contract.py: {created: "2026-06-11", last_used: "2026-07-15", note: "Three-phase command-recovery DB/venue synchronization antibodies, including default canonical WORLD+TRADE blocking flocks and live-tick opt-in nonblocking flock plus zero SQLite busy timeout."}
     tests/test_finite_evidence_probability_symmetry.py: {created: "2026-07-11", last_used: "2026-07-11", note: "INV-06/INV-41 current-evidence probability antibody: source-clock YES/NO share one coherent simplex carrier widened by exact settlement-preimage member-hit Clopper-Pearson and distribution-free current-moment tail ambiguity limits; historical far-tail floors are unreachable; Day0 absorbing truth dominates."}
     tests/test_replacement_fused_q_shape.py: {created: "2026-06-09", last_used: "2026-07-11", note: "Probability authority antibody: current target-specific ensemble within-spread plus simultaneous provider between-spread reproduces Wellington no-edge at the order-time book; YES/NO remain exact complements; source-clock current q cannot consult historical k/w/floor/city transforms."}
     tests/test_replacement_seed_coverage_gate.py: {created: "2026-06-10", last_used: "2026-07-11", note: "Replacement input-HWM and seed coverage contracts, including one batched raw-artifact HWM query per frozen target transaction rather than one query per city."}
@@ -191,7 +191,7 @@ test_trust_policy:
     tests/strategy/live_inference/test_executable_cost.py: {created: "2026-05-24", last_used: "2026-05-24"}
     tests/strategy/live_inference/test_trade_score.py: {created: "2026-05-24", last_used: "2026-05-24"}
     tests/events/test_market_channel_ingestor.py: {created: "2026-05-24", last_used: "2026-07-09", note: "Market-channel ingestor and feasibility evidence tests, including execution_feasibility_latest schema/upsert coverage, compact executable-snapshot latest reads, and append-history fallback isolation."}
-    tests/events/test_reactor.py: {created: "2026-05-24", last_used: "2026-07-13", note: "EDLI event reactor contracts, including one lock-free global batch seam per epoch, exact receipt coverage, fail-closed multi-submit/result identity guards, and targeted global-winner visibility beyond the 20k old-pending active scan window."}
+    tests/events/test_reactor.py: {created: "2026-05-24", last_used: "2026-07-15", note: "EDLI event reactor contracts, including one lock-free global batch seam per epoch, exact receipt coverage, venue-side-effect winner-first finalization, and bounded loser retry after SQLite contention."}
     tests/events/test_claim_lock_storm.py: {created: "2026-06-11", last_used: "2026-07-13", note: "World-writer claim contention, including unpaged global-winner claim and queue paths, remains bounded, visible, rollback-safe, pending on miss, and waits at most once per contention episode before same-cycle nonblocking probes."}
     tests/calibration/test_scaled_normal_uniform_q_builder.py: {created: "2026-06-29", last_used: "2026-07-10", note: "Capital-gated city rho mixture math, including row-wise simplex bootstrap-draw mixing so served q, bounds, empirical edge confidence, and CVaR share one probability world."}
     tests/engine/test_replacement_0_1_live_authority_probability.py: {created: "2026-06-07", last_used: "2026-07-10", note: "Replacement live probability authority and city-mixed bootstrap sample-basis gate."}
@@ -503,7 +503,7 @@ test_trust_policy:
     tests/test_command_grammar_amendment.py: {created: "2026-04-27", last_used: "2026-04-27"}
     tests/test_riskguard_red_durable_cmd.py: {created: "2026-04-27", last_used: "2026-04-27"}
     tests/test_command_bus_types.py: {created: "2026-04-26", last_used: "2026-04-27"}
-    tests/test_command_recovery.py: {created: "2026-04-26", last_used: "2026-07-14"}
+    tests/test_command_recovery.py: {created: "2026-04-26", last_used: "2026-07-15", note: "Command recovery law, including live-tick nonblocking DB contention defer without in-cycle sleep while full/boot recovery preserves bounded retries."}
     tests/test_venue_command_repo.py: {created: "2026-04-26", last_used: "2026-07-09", note: "SCH-W1.2-ORDER-STATE: extended with TestInsertCommandQVersionStamp — q_version write-once stamp, NULL default, whitespace normalization, survives state transitions, and live-mode ENTRY q_version fail-closed."}
     tests/test_migration_venue_commands_q_version.py: {created: "2026-07-04", last_used: "2026-07-04", note: "SCH-W1.2-ORDER-STATE live trade-DB migration coverage: adds nullable venue_commands.q_version, idempotent when already present, no-op when venue_commands is absent."}
     tests/test_unknown_side_effect.py: {created: "2026-04-27", last_used: "2026-04-30"}
@@ -602,7 +602,7 @@ test_trust_policy:
     tests/test_cycle_runner_db_lock_degrade.py: {created: "2026-05-05", last_used: "2026-05-05"}
     tests/test_daemon_ingest_acquires_bulk_lock.py: {created: "2026-05-08", last_used: "2026-05-08"}
     tests/test_db_writer_lock_k3_live_yield.py: {created: "2026-05-12", last_used: "2026-05-12"}
-    tests/test_db_writer_lock.py: {created: "2026-05-07", last_used: "2026-05-07"}
+    tests/test_db_writer_lock.py: {created: "2026-05-07", last_used: "2026-07-15", note: "Canonical writer-lock law, including forwarding nonblocking acquisition to both WORLD and TRADE flocks."}
     tests/test_dispatch_session_start.py: {created: "2026-05-07", last_used: "2026-05-07"}
     tests/test_doc_citation_lint.py: {created: "2026-05-17", last_used: "2026-05-17"}
     tests/test_ecmwf_open_data_collect_cycle.py: {created: "2026-05-11", last_used: "2026-05-11"}
@@ -2936,7 +2936,7 @@ test_metadata:
       is emitted with the failing surface name. Call site in _write_heartbeat() in
       src/main.py surfaces composite to state/live_health_composite.json each cycle.
     created: 2026-05-19
-    last_reused_or_audited: 2026-07-10
+    last_reused_or_audited: 2026-07-15
 
   tests/test_repair_active_entry_q_versions.py:
     modules: [scripts, control, state]

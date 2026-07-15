@@ -8,6 +8,7 @@ in_scope:
 - src/engine/event_reactor_adapter.py
 - src/engine/global_batch_runtime.py
 - src/engine/global_auction_universe.py
+- src/signal/ensemble_signal.py
 - src/risk_allocator/governor.py
 - src/riskguard/riskguard.py
 - src/engine/global_single_order_auction.py
@@ -16,6 +17,10 @@ in_scope:
 - src/solve/AGENTS.md
 - src/state/portfolio.py
 - src/execution/exit_lifecycle.py
+- src/execution/executor.py
+- src/execution/command_recovery.py
+- src/execution/venue_sync_contract.py
+- src/state/db.py
 - tests/test_p4_post_trade_capital_lift.py
 - tests/test_run_mode_failure_surfaces.py
 - tests/events/test_claim_lock_storm.py
@@ -29,6 +34,10 @@ in_scope:
 - tests/solve/test_solver_properties.py
 - tests/test_phase2_exit_emitter_revival.py
 - tests/test_live_safety_invariants.py
+- tests/test_ensemble_signal.py
+- tests/test_command_recovery.py
+- tests/execution/test_venue_sync_contract.py
+- tests/test_db_writer_lock.py
 allow_companions:
 - architecture/test_topology.yaml
 - docs/operations/current_state.md
@@ -36,8 +45,8 @@ allow_companions:
 - docs/rebuild/schema_packets/w3_solve_design_packet_2026-07-03.md
 out_of_scope:
 - state/**
-- src/execution/** except src/execution/exit_lifecycle.py
-- src/state/** except src/state/portfolio.py
+- src/execution/** except src/execution/exit_lifecycle.py, src/execution/executor.py, src/execution/command_recovery.py, and src/execution/venue_sync_contract.py
+- src/state/** except src/state/portfolio.py and src/state/db.py
 - scripts/**
 - architecture/2026_04_02_architecture_kernel.sql
 - architecture/kernel_manifest.yaml

@@ -28,6 +28,9 @@ in_scope:
 - src/architecture/gate_runtime.py
 - src/state/portfolio.py
 - src/engine/global_auction_universe.py
+- src/engine/qkernel_spine_bridge.py
+- src/solve/solver.py
+- src/solve/menu_adapter.py
 - architecture/capabilities.yaml
 - tests/engine/test_event_reactor_live_qkernel_gate.py
 - tests/test_finite_evidence_probability_symmetry.py
@@ -47,9 +50,25 @@ in_scope:
 - tests/money_path/test_edli_live_readiness.py
 - tests/test_run_mode_failure_surfaces.py
 - tests/solve/test_shim_decide.py
+- tests/solve/test_menu_adapter.py
 - tests/integration/test_qkernel_spine_blockers_pr409.py
 - tests/AGENTS.md
 - architecture/test_topology.yaml
+- src/contracts/venue_submission_envelope.py
+- src/decision/family_decision_engine.py
+- src/engine/evaluator.py
+- architecture/invariants.yaml
+- docs/authority/zeus_current_architecture.md
+- tests/test_v2_adapter.py
+- tests/engine/test_q_exec_lcb_event_seam.py
+- architecture/strategy_profile_registry.yaml
+- tests/test_strategy_profile_registry.py
+- tests/execution/test_entry_economics_submit_gate.py
+- tests/decision_kernel/test_execution_command_certificate.py
+- tests/events/test_live_order_aggregate.py
+- src/strategy/strategy_profile.py
+- src/data/polymarket_client.py
+- src/events/live_order_aggregate.py
 out_of_scope:
 - state/zeus-world.db
 - state/zeus-world.db-*
@@ -58,7 +77,8 @@ supersedes: null
 tests:
 - tests/test_finite_evidence_probability_symmetry.py
 - tests/test_replacement_fused_q_shape.py::current-evidence subset
-- tests/test_replacement_0_1_bayes_precision_fusion_materializer_wiring.py::source-clock subset
+- tests/test_replacement_0_1_bayes_precision_fusion_materializer_wiring.py::source-clock
+  subset
 - tests/solve/test_solver_properties.py
 - tests/solve/test_shim_decide.py
 - tests/integration/test_w3_solve_seam_g3.py
