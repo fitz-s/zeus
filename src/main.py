@@ -43,6 +43,16 @@ from pathlib import Path
 from typing import Any, Iterable
 from zoneinfo import ZoneInfo
 
+
+def _bind_canonical_main_module(module_name: str, module: object) -> None:
+    """Keep ``python -m src.main`` process state under one module identity."""
+
+    if module_name == "__main__":
+        sys.modules["src.main"] = module
+
+
+_bind_canonical_main_module(__name__, sys.modules[__name__])
+
 # Live-hang diagnostics (2026-05-31): SIGUSR1 dumps ALL thread stacks to stderr
 # (logs/zeus-live.err) so a frozen reactor cycle (indefinite _PyMutex/lock
 # deadlock — same class as the 5h market-channel hang) can be pinned WITHOUT

@@ -1,5 +1,5 @@
 # Created: 2026-04-30
-# Last reused/audited: 2026-04-30
+# Last reused/audited: 2026-07-15
 # Authority basis: docs/operations/task_2026-04-30_two_system_independence/design.md §6 antibody #8
 """Antibody #8: Phase 3 module-scope enforcement for src.main.
 
@@ -18,6 +18,8 @@ Allowed (trading-only):
 import ast
 import sys
 from pathlib import Path
+
+from src.main import _bind_canonical_main_module
 
 REPO_ROOT = Path(__file__).parent.parent
 
@@ -111,3 +113,13 @@ def test_harvester_pnl_resolver_allowed():
         "src/main.py should reference harvester_pnl_resolver "
         "(trading-side P&L resolver per Phase 1.5 design)"
     )
+
+
+def test_module_entrypoint_binds_one_canonical_main_module(monkeypatch):
+    sentinel = object()
+    previous = sys.modules.get("src.main")
+    monkeypatch.setitem(sys.modules, "src.main", previous)
+
+    _bind_canonical_main_module("__main__", sentinel)
+
+    assert sys.modules["src.main"] is sentinel
