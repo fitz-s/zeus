@@ -1,5 +1,5 @@
 # Created: 2026-05-19
-# Last reused or audited: 2026-07-09
+# Last reused or audited: 2026-07-15
 # Authority basis: codereview-may19-2.md relationship F
 #                  + docs/operations/task_2026-05-21_live_side_effect_risk_boundaries/task.md P1-1
 #
@@ -4862,6 +4862,7 @@ def _latest_global_auction_candidate_counts(
         if summary.get("candidate_evaluation_encoding") not in {
             "zlib+base64+canonical-json-v4",
             "zlib+base64+canonical-json-v5",
+            "zlib+base64+canonical-json-v6",
         }:
             return invalid("ENCODING")
         compressed = base64.b64decode(

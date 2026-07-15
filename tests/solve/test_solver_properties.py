@@ -1256,8 +1256,58 @@ def test_global_single_order_cash_beats_non_positive_buy_and_sell():
     }
     assert evaluations[sell.candidate_id].position_id == "position-bad-sell"
     assert evaluations[sell.candidate_id].held_shares == Decimal("10")
+    assert evaluations[sell.candidate_id].shares == Decimal("10")
+    assert evaluations[sell.candidate_id].cash_proceeds_usd == Decimal("2")
+    assert evaluations[sell.candidate_id].limit_price == Decimal("0.20")
+    assert evaluations[sell.candidate_id].expected_fill_price_before_fee == Decimal(
+        "0.20"
+    )
+    assert evaluations[sell.candidate_id].robust_delta_log_wealth < 0
+    assert evaluations[sell.candidate_id].robust_ev_usd == pytest.approx(-6.0)
+    assert evaluations[sell.candidate_id].terminal_wealth is not None
     assert evaluations[buy.candidate_id].position_id is None
     assert evaluations[buy.candidate_id].held_shares == 0
+
+
+def test_global_single_order_epoch_failure_retains_prior_sell_economics():
+    sell = _global_sell_candidate(
+        candidate_id="bad-sell-before-cap-failure",
+        family="bad-sell-before-cap-failure-family",
+        side="YES",
+        held_q=0.80,
+        bids=(("0.20", "10"),),
+        shares="10",
+    )
+    buy = _global_candidate(
+        candidate_id="cap-failure-buy",
+        family="cap-failure-buy-family",
+        side="YES",
+        q=0.80,
+    )
+
+    def unavailable(candidate):
+        if candidate is buy:
+            raise RuntimeError("allocator unavailable")
+        return Decimal("5")
+
+    decision = _global_select(
+        (sell, buy),
+        candidate_capital_limit_resolver=unavailable,
+    )
+
+    assert decision.candidate is None
+    assert decision.no_trade_reason == "GLOBAL_EPOCH_SUPERSEDED"
+    evaluations = {
+        evaluation.candidate_id: evaluation
+        for evaluation in decision.candidate_evaluations
+    }
+    assert evaluations[sell.candidate_id].rejection_reason == (
+        "NON_POSITIVE_ROBUST_OBJECTIVE"
+    )
+    assert evaluations[sell.candidate_id].cash_proceeds_usd == Decimal("2")
+    assert evaluations[buy.candidate_id].rejection_reason == (
+        "CAPITAL_CONSTRAINT_UNAVAILABLE"
+    )
 
 
 def test_global_single_order_sell_yes_no_label_mirror_is_exact():

@@ -337,7 +337,7 @@ def _store_global_auction_receipt(
         )
     )
     receipt = {
-        "schema_version": 8,
+        "schema_version": 9,
         "selection_epoch_identity": selection_epoch_identity,
         "selection_cut_at_utc": selection_cut_at_utc.isoformat(),
         "decision_at_utc": decision_at_utc.isoformat(),
@@ -385,7 +385,7 @@ def _store_global_auction_receipt(
         "buy_condition_membership_count": sum(
             1 + (mask == 3) for mask in buy_condition_masks.values()
         ),
-        "candidate_evaluation_encoding": "zlib+base64+canonical-json-v5",
+        "candidate_evaluation_encoding": "zlib+base64+canonical-json-v6",
         "candidate_evaluations_sha256": hashlib.sha256(
             evaluation_json
         ).hexdigest(),

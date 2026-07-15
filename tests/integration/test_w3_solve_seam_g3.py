@@ -145,6 +145,24 @@ def test_global_auction_receipt_persists_complete_buy_sell_hold_cash_comparison(
             position_id="position-sell",
             held_shares=Decimal("12.34"),
             rejection_reason="NON_POSITIVE_ROBUST_OBJECTIVE",
+            shares=Decimal("12.34"),
+            cost_usd=Decimal("2.34"),
+            cash_proceeds_usd=Decimal("10"),
+            robust_delta_log_wealth=-0.01,
+            robust_ev_usd=-1.106,
+            capital_efficiency=-0.004273504273504274,
+            limit_price=Decimal("0.80"),
+            expected_fill_price_before_fee=Decimal("0.81"),
+            terminal_wealth=BinaryTerminalWealthCertificate(
+                win_probability_lcb=0.1,
+                loss_probability_ucb=0.9,
+                loss_payoff_usd=Decimal("-2.34"),
+                win_payoff_usd=Decimal("10"),
+                median_payoff_usd=Decimal("-2.34"),
+                wealth_after_loss_usd=Decimal("97.66"),
+                wealth_after_win_usd=Decimal("110"),
+                expected_value_diagnostic_usd=-1.106,
+            ),
         ),
     )
     decision = GlobalSingleOrderDecision(
@@ -208,7 +226,7 @@ def test_global_auction_receipt_persists_complete_buy_sell_hold_cash_comparison(
     artifact = json.loads(row["artifact_json"])
     summary = artifact["summary"]
     assert row["mode"] == "global_single_order_auction"
-    assert summary["schema_version"] == 8
+    assert summary["schema_version"] == 9
     assert summary["excluded_by_candidate"] == [
         {
             "action": "BUY",
@@ -248,7 +266,7 @@ def test_global_auction_receipt_persists_complete_buy_sell_hold_cash_comparison(
         summary["candidate_evaluations_sha256"]
     )
     assert summary["candidate_evaluation_encoding"] == (
-        "zlib+base64+canonical-json-v5"
+        "zlib+base64+canonical-json-v6"
     )
     candidate_evaluations = json.loads(evaluation_json)
     assert candidate_evaluations["rejected_groups"] == [
@@ -281,6 +299,13 @@ def test_global_auction_receipt_persists_complete_buy_sell_hold_cash_comparison(
             "12.34",
         )
     ]
+    sell_evaluation = candidate_evaluations["detailed"][0]
+    assert sell_evaluation["shares"] == "12.34"
+    assert sell_evaluation["cash_proceeds_usd"] == "10"
+    assert sell_evaluation["limit_price"] == "0.80"
+    assert sell_evaluation["expected_fill_price_before_fee"] == "0.81"
+    assert sell_evaluation["robust_delta_log_wealth"] == -0.01
+    assert sell_evaluation["robust_ev_usd"] == -1.106
     assert len(summary["receipt_hash"]) == 64
     with pytest.raises(ValueError, match="GLOBAL_AUCTION_RECEIPT_SCOPE_INCOMPLETE"):
         global_batch_runtime._store_global_auction_receipt(

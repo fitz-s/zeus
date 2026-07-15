@@ -1,5 +1,5 @@
 # Created: 2026-07-03
-# Last reused or audited: 2026-07-09
+# Last reused or audited: 2026-07-15
 # Authority basis: design doc §3.3 (objective: expected log terminal wealth over joint
 #   scenarios, full menu, scale by κ, discrete repair, safe prefixes); seam contract verbatim
 #   from qkernel_spine_bridge.py:1332-1400 + family_decision_engine.py:583-635 (FamilyDecision);
@@ -53,7 +53,7 @@ from __future__ import annotations
 
 import hashlib
 import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 from decimal import ROUND_CEILING, ROUND_FLOOR, ROUND_HALF_EVEN, Decimal
 from typing import TYPE_CHECKING, Any, Callable, Literal, Mapping, Optional, Sequence
@@ -1106,23 +1106,79 @@ class GlobalSingleOrderCandidateEvaluation:
         ):
             raise ValueError("SELL evaluation requires an exact held-position binding")
         if self.status == "REJECTED":
+            reason = str(self.rejection_reason or "").strip()
+            carries_economics = any(
+                (
+                    self.shares != 0,
+                    self.cost_usd != 0,
+                    self.cash_proceeds_usd != 0,
+                    self.limit_price != 0,
+                    self.expected_fill_price_before_fee != 0,
+                    self.terminal_wealth is not None,
+                )
+            )
+            if not reason:
+                raise ValueError("rejected candidate evaluation cannot carry economics")
+            if not carries_economics:
+                if (
+                    self.robust_delta_log_wealth != 0.0
+                    or self.robust_ev_usd != 0.0
+                    or self.capital_efficiency != 0.0
+                    or self.max_spend_usd != 0
+                    or self.current_token_shares != 0
+                    or self.full_kelly_target_shares != 0
+                    or self.fractional_kelly_target_shares != 0
+                ):
+                    raise ValueError(
+                        "rejected candidate evaluation cannot carry partial economics"
+                    )
+                return
+            terminal = self.terminal_wealth
             if (
-                not str(self.rejection_reason or "").strip()
-                or self.shares != 0
-                or self.cost_usd != 0
-                or self.cash_proceeds_usd != 0
-                or self.robust_delta_log_wealth != 0.0
-                or self.robust_ev_usd != 0.0
-                or self.capital_efficiency != 0.0
-                or self.limit_price != 0
-                or self.expected_fill_price_before_fee != 0
+                self.action != "SELL"
+                or reason
+                not in {
+                    "NON_POSITIVE_ROBUST_OBJECTIVE",
+                    "NON_POSITIVE_ROBUST_FILL_PREFIX",
+                }
+                or self.shares != self.held_shares
+                or self.cost_usd <= 0
+                or self.cash_proceeds_usd <= 0
+                or self.cash_proceeds_usd != self.shares - self.cost_usd
+                or not math.isfinite(self.robust_delta_log_wealth)
+                or not math.isfinite(self.robust_ev_usd)
+                or not math.isfinite(self.capital_efficiency)
+                or self.limit_price <= 0
+                or self.expected_fill_price_before_fee < self.limit_price
                 or self.max_spend_usd != 0
                 or self.current_token_shares != 0
                 or self.full_kelly_target_shares != 0
                 or self.fractional_kelly_target_shares != 0
-                or self.terminal_wealth is not None
+                or terminal is None
+                or terminal.loss_payoff_usd != -self.cost_usd
+                or terminal.win_payoff_usd != self.cash_proceeds_usd
+                or not math.isclose(
+                    terminal.expected_value_diagnostic_usd,
+                    self.robust_ev_usd,
+                    rel_tol=0.0,
+                    abs_tol=1e-12,
+                )
+                or (
+                    reason == "NON_POSITIVE_ROBUST_OBJECTIVE"
+                    and self.robust_delta_log_wealth > 0.0
+                    and self.robust_ev_usd > 0.0
+                )
+                or (
+                    reason == "NON_POSITIVE_ROBUST_FILL_PREFIX"
+                    and not (
+                        self.robust_delta_log_wealth > 0.0
+                        and self.robust_ev_usd > 0.0
+                    )
+                )
             ):
-                raise ValueError("rejected candidate evaluation cannot carry economics")
+                raise ValueError(
+                    "rejected SELL evaluation lacks coherent counterfactual economics"
+                )
             return
         if (
             self.status not in {"SCORED", "SELECTED"}
@@ -1336,6 +1392,7 @@ def _global_candidate_evaluations(
                 )
             )
             continue
+        rejection_reason = rejections.get(candidate.candidate_id)
         evaluations.append(
             GlobalSingleOrderCandidateEvaluation(
                 candidate_id=candidate.candidate_id,
@@ -1348,10 +1405,13 @@ def _global_candidate_evaluations(
                 status=(
                     "SELECTED"
                     if candidate.candidate_id == winner_id
+                    else "REJECTED"
+                    if rejection_reason is not None
                     else "SCORED"
                 ),
                 position_id=position_id,
                 held_shares=held_shares,
+                rejection_reason=rejection_reason,
                 shares=score.shares,
                 cost_usd=score.cost_usd,
                 cash_proceeds_usd=score.cash_proceeds_usd,
@@ -2341,19 +2401,6 @@ def _score_global_single_order_sell(
         robust_du = loss_du + robust_q * (win_du - loss_du)
     robust_ev = robust_q * float(shares) - float(loss_at_risk)
     efficiency = robust_du / float(loss_at_risk)
-    if not (robust_du > 0.0 and robust_ev > 0.0):
-        return GlobalSingleOrderDecision(
-            candidate=None,
-            shares=Decimal("0"),
-            cost_usd=Decimal("0"),
-            robust_delta_log_wealth=0.0,
-            robust_ev_usd=0.0,
-            capital_efficiency=0.0,
-            no_trade_reason="NON_POSITIVE_ROBUST_OBJECTIVE",
-            rejection_reasons={
-                candidate.candidate_id: "NON_POSITIVE_ROBUST_OBJECTIVE"
-            },
-        )
     terminal = BinaryTerminalWealthCertificate(
         win_probability_lcb=float(robust_q),
         loss_probability_ucb=float(1.0 - robust_q),
@@ -2380,6 +2427,13 @@ def _score_global_single_order_sell(
         cash_proceeds_usd=proceeds,
         terminal_wealth=terminal,
     )
+    if not (robust_du > 0.0 and robust_ev > 0.0):
+        return replace(
+            scored,
+            rejection_reasons={
+                candidate.candidate_id: "NON_POSITIVE_ROBUST_OBJECTIVE"
+            },
+        )
     # FAK may stop at any point on the consumed BID prefix.  Within a level the
     # robust log objective is concave; positive values at every level boundary
     # (including the exact full size) prove every intermediate prefix remains
@@ -2399,16 +2453,10 @@ def _score_global_single_order_sell(
             net_proceeds_usd=prefix_proceeds,
         )
         if not (prefix_du > 0.0 and prefix_ev > 0.0):
-            return GlobalSingleOrderDecision(
-                candidate=None,
-                shares=Decimal("0"),
-                cost_usd=Decimal("0"),
-                robust_delta_log_wealth=0.0,
-                robust_ev_usd=0.0,
-                capital_efficiency=0.0,
-                no_trade_reason="NON_POSITIVE_ROBUST_OBJECTIVE",
+            return replace(
+                scored,
                 rejection_reasons={
-                    candidate.candidate_id: "NON_POSITIVE_ROBUST_OBJECTIVE"
+                    candidate.candidate_id: "NON_POSITIVE_ROBUST_FILL_PREFIX"
                 },
             )
         remaining -= take
@@ -2753,6 +2801,7 @@ def select_global_single_order(
                 rejections.update(score.rejection_reasons)
             else:
                 scored.append(score)
+                rejections.update(score.rejection_reasons)
             continue
         candidate_capital_limit = capital_limit_usd
         if candidate_capital_limit_resolver is not None:
@@ -2763,6 +2812,10 @@ def select_global_single_order(
                 )
             except Exception:  # noqa: BLE001 - lost allocator authority invalidates the epoch
                 reason = "CAPITAL_CONSTRAINT_UNAVAILABLE"
+                failure_rejections = {
+                    **rejections,
+                    candidate.candidate_id: reason,
+                }
                 return GlobalSingleOrderDecision(
                     candidate=None,
                     shares=Decimal("0"),
@@ -2771,12 +2824,10 @@ def select_global_single_order(
                     robust_ev_usd=0.0,
                     capital_efficiency=0.0,
                     no_trade_reason="GLOBAL_EPOCH_SUPERSEDED",
-                    rejection_reasons={
-                        candidate.candidate_id: reason
-                    },
+                    rejection_reasons=failure_rejections,
                     candidate_evaluations=_global_candidate_evaluations(
                         candidates,
-                        rejections={candidate.candidate_id: reason},
+                        rejections=failure_rejections,
                         scores=scored,
                         default_rejection="GLOBAL_EPOCH_SUPERSEDED",
                     ),
@@ -2804,6 +2855,10 @@ def select_global_single_order(
                     raise ValueError("candidate endowment ledger mismatch")
             except Exception:  # noqa: BLE001 - lost portfolio authority invalidates the epoch
                 reason = "PORTFOLIO_ENDOWMENT_UNAVAILABLE"
+                failure_rejections = {
+                    **rejections,
+                    candidate.candidate_id: reason,
+                }
                 return GlobalSingleOrderDecision(
                     candidate=None,
                     shares=Decimal("0"),
@@ -2812,10 +2867,10 @@ def select_global_single_order(
                     robust_ev_usd=0.0,
                     capital_efficiency=0.0,
                     no_trade_reason="GLOBAL_EPOCH_SUPERSEDED",
-                    rejection_reasons={candidate.candidate_id: reason},
+                    rejection_reasons=failure_rejections,
                     candidate_evaluations=_global_candidate_evaluations(
                         candidates,
-                        rejections={candidate.candidate_id: reason},
+                        rejections=failure_rejections,
                         scores=scored,
                         default_rejection="GLOBAL_EPOCH_SUPERSEDED",
                     ),
@@ -2851,7 +2906,15 @@ def select_global_single_order(
         else:
             scored.append(score)
 
-    if not scored:
+    positive_scored = tuple(
+        score
+        for score in scored
+        if score.candidate is not None
+        and score.candidate.candidate_id not in rejections
+        and score.robust_delta_log_wealth > 0.0
+        and score.robust_ev_usd > 0.0
+    )
+    if not positive_scored:
         no_trade_reason = (
             "ROBUST_MAJORITY_LOSS"
             if rejections
@@ -2870,6 +2933,7 @@ def select_global_single_order(
             candidate_evaluations=_global_candidate_evaluations(
                 candidates,
                 rejections=rejections,
+                scores=scored,
             ),
             candidate_input_count=len(candidates),
         )
@@ -2880,7 +2944,7 @@ def select_global_single_order(
     # from a target date.  Maximize robust Δlog now; at a numerical tie, prefer higher
     # robust terminal-wealth growth per dollar and then less cash.
     winner = min(
-        scored,
+        positive_scored,
         key=lambda score: (
             -round(score.robust_delta_log_wealth, 15),
             -round(score.capital_efficiency, 15),
