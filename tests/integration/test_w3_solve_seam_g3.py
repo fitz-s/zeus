@@ -1980,9 +1980,9 @@ def test_post_day_final_daily_observation_builds_exact_complete_global_simplex(
     forecast.executemany(
         "INSERT INTO market_events VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (
-            ("Dallas", "2026-07-11", "high", "c0", "yes0", "a", "69F or below", None, 69.0),
-            ("Dallas", "2026-07-11", "high", "c1", "yes1", "b", "70-71F", 70.0, 71.0),
-            ("Dallas", "2026-07-11", "high", "c2", "yes2", "c", "72F or above", 72.0, None),
+            ("Hong Kong", "2026-07-11", "high", "c0", "yes0", "a", "28C or below", None, 28.0),
+            ("Hong Kong", "2026-07-11", "high", "c1", "yes1", "b", "29C", 29.0, 29.0),
+            ("Hong Kong", "2026-07-11", "high", "c2", "yes2", "c", "30C or above", 30.0, None),
         ),
     )
     forecast.execute(
@@ -2003,14 +2003,14 @@ def test_post_day_final_daily_observation_builds_exact_complete_global_simplex(
     forecast.execute(
         "INSERT INTO observations VALUES (?,?,?,?,?,?,?,?,?)",
         (
-            "Dallas",
+            "Hong Kong",
             "2026-07-11",
-            "wu_icao_history",
-            "KDAL",
+            "hko_daily_api",
+            "HKO",
             "VERIFIED",
-            "F",
-            70.0,
-            60.0,
+            "C",
+            29.8,
+            26.0,
             "2026-07-12T06:00:00+00:00",
         ),
     )
@@ -2030,7 +2030,9 @@ def test_post_day_final_daily_observation_builds_exact_complete_global_simplex(
     )
 
     day0_payload: dict[str, object] = {}
-    event = _global_day0_scope_event(city="Dallas", source_run_id="run-dallas")
+    event = _global_day0_scope_event(
+        city="Hong Kong", source_run_id="run-hong-kong"
+    )
     decision_time = _dt.datetime(2026, 7, 12, 12, 0, tzinfo=_dt.timezone.utc)
     prepared = era._prepare_current_global_probability_family(
         event,
