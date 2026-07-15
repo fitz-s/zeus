@@ -5,13 +5,20 @@
 
 ## 现状(forward)
 
+### 2026-07-15 23:00Z tick — Codex pause 归因纠正；Seoul Day0 单模型退化根因与当前多模型可用性证明
+- **pause 归因:** active canonical `entries_paused=true` 是 Codex 在错误下单后的 live-money containment，不是用户/operator 指令；当前 reason=`codex_live_money_containment_after_bad_orders`。本 slice 保持暂停，不解除、不强制下单。
+- **当前根因:** Seoul Jul-16 held-position redecision 的 `finite_evidence_member_count=1`；canonical `day0_hourly_vectors` 只有 `ecmwf_ifs`，使 Day0 q/SELL robust band 退化为单模型证据。
+- **当前能力证明:** 对同一 Seoul/Jul-16 endpoint 的只读 live fetch 同时返回 `ecmwf_ifs`、`icon_global`、`jma_msm`、`ukmo_global_deterministic_10km` 四条 48-hour 曲线；remaining highs 分别为 26.4/28.6/25.2/25.8°C。单 member 是模型选择缺陷，不是当前数据不可得。
+- **本 slice scope:** `src/data/day0_hourly_vectors.py` + `tests/test_day0_remaining_day_pricing.py` + owning registry `architecture/source_rationale.yaml`。把 global Day0 hourly fallback 从 ECMWF 单模型改为当前多模型 bundle；仍要求完整同 epoch bundle，缺任一 expected model 就不授权 Day0 q。source role 仍是 forecast-only，不触碰 settlement source，不复制 canonical DB。
+- **验收:** antibody 先证明旧实现失败；修后 targeted tests + capital evaluator；在 entries paused 下标准 deploy，等新 bundle 被 canonical writer 持久化后，要求新 monitor/auction receipt 的 `finite_evidence_member_count>=4`，再比较 Seoul BUY/SELL/HOLD/CASH。没有新 receipt 就不声称资本最优。
+
 ### 2026-07-15 18:19Z tick — BUY NO 真实结算 +$19.26；修复 A8/A9 语义冲突和 chain-mirror 结算吞吐
 - **实际资本证明:** Wuhan Jul-15 38°C `buy_no` 持仓 `fbeac91f-e9d` 已被 Gamma 确认为市场 NO 结算；canonical `position_current` 为 `settled`，100.00621 shares，cost basis ≈$80.75，realized P&L **+$19.26**。redeem command 已有 100006210 micro-pUSD intent；当前还没有 confirmed redeem transaction，不把 intent 冒充 chain cash realization。
 - **新根因:** `position_settled.v1.won` 在 harvester 表示“该 binary market 的 YES bin 是否结算”，在 chain-mirror 却表示“持仓是否赢”。BUY NO 恰好取反，使 raw audit 可以把真实赢单评成输单。P&L 和主学习路径用 `outcome/pnl` 未被翻转，但审计证据被污染。
 - **修复:** 所有新 canonical settlement 显式区分 A8 `market_bin_won` 和 A9 `position_won`；`direction + outcome` 作为可派生持仓语义；显式字段冲突的 row fail-closed，不进 metric/learning。不改写 canonical DB。
 - **throughput 修复:** chain-mirror 把 canonical DB phase `active` 错传给 runtime-state adapter，导致合法结算变成 `unknown` 并被 per-row isolation 静默跳过。现在直接通过 canonical lifecycle fold 验证 `active/day0/pending_exit/economically_closed -> settled`。
 - **验证:** capital evaluator **568 passed**；settlement/chain-mirror 扩展集 **161 passed**；chain-mirror 全文件 **41 passed**；A8/A9 定向 **7 passed**；audit 定向 **2 passed**；close-economics **4 passed**。仓库旧全量集仍有与本 diff 无关的 stale-fixture/linter 失败，未伪装为 clean pass。
-- **交易姿态:** operator `entries_paused` 保留；本 tick 未强制下单、未复制 DB。最新完整 auction 中 YES 路径存在但当前候选的 robust-majority economics 为负；三个正候选均为 BUY NO，三个已有仓位 SELL 均为负 robust EV/ΔlogW，故 HOLD。
+- **交易姿态:** Codex live-money containment `entries_paused` 保留；本 tick 未强制下单、未复制 DB。最新完整 auction 中 YES 路径存在但当前候选的 robust-majority economics 为负；三个正候选均为 BUY NO，三个已有仓位 SELL 均为负 robust EV/ΔlogW，故 HOLD。
 
 ### 2026-07-08 08:36Z tick — **真指标浮现:系统在亏钱,且亏损隐形。** 给真实结算成交打分(非回测):近期净负;根=多平仓路只两路入账
 - **地面真相:** 预报健康(08:31Z,近30min 170 条),venue_cmd 仍冻 19:00Z,POISON 0。在手 3 仓:Paris(07-08 到期,信念 1.0)、Ankara/Wuhan(07-09,0.83/0.85)—— 看着会赢。

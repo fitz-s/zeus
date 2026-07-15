@@ -21,9 +21,9 @@ Bounded by design
 -----------------
 - Day0-relevant cities use in-domain regional hourly models when available
   (polygon gate reused from src/forecast/model_selection.regional_eligible,
-  lead 0). Cities outside those regional domains use the live replacement-chain
-  global fallback, ECMWF IFS 9km, so Day0 pricing has a real hourly source
-  instead of permanently blocking on regional model absence.
+  lead 0). Every city also uses the current global deterministic provider
+  bundle so Day0 probability does not collapse to one model outside regional
+  domains.
 - Only ~2 forecast days of hours per row; retention prunes rows older than
   DAY0_VECTOR_RETENTION_DAYS (default 3) on every write pass.
 - Refresh throttled to once per DEFAULT_REFRESH_INTERVAL_S per process.
@@ -61,7 +61,12 @@ DAY0_HOURLY_MODELS: tuple[str, ...] = (
     "ukmo_uk_deterministic_2km",
     "ncep_nbm_conus",
 )
-GLOBAL_DAY0_HOURLY_FALLBACK_MODELS: tuple[str, ...] = ("ecmwf_ifs",)
+GLOBAL_DAY0_HOURLY_MODELS: tuple[str, ...] = (
+    "ecmwf_ifs",
+    "icon_global",
+    "jma_msm",
+    "ukmo_global_deterministic_10km",
+)
 
 DAY0_VECTOR_RETENTION_DAYS = 3.0
 DEFAULT_REFRESH_INTERVAL_S = 1800.0  # 30 min — high-res runs update hourly-ish
@@ -158,16 +163,16 @@ def day0_hourly_models_for_city(city: Any) -> list[str]:
     """Live Day0 remaining-day hourly model set for a city.
 
     Regional high-resolution models are experts, not a replacement for the live
-    probability chain's global anchor. When a regional model is available, keep
-    it in the bundle and also include the ECMWF IFS 9km anchor. Cities outside
-    the regional polygons use the anchor alone. Without this anchor floor, a
-    same-day monitor can silently collapse to one regional model and make live
-    exits on a different probability authority than the entry chain.
+    probability chain's global evidence. Keep every available regional expert
+    and the same four global deterministic models used by the current forecast
+    provider set. A single global anchor is not a probability distribution: it
+    erases current between-model disagreement and makes Day0 entry/exit bands
+    depend on one provider path.
     """
 
     regional = in_domain_models_for_city(city)
     out: list[str] = []
-    for model in (*regional, *GLOBAL_DAY0_HOURLY_FALLBACK_MODELS):
+    for model in (*regional, *GLOBAL_DAY0_HOURLY_MODELS):
         normalized = str(model or "").strip()
         if normalized and normalized not in out:
             out.append(normalized)

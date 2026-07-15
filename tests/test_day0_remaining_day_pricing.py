@@ -1139,14 +1139,20 @@ class TestRequestHashProvenance:
         assert attempts == {"fetch": 2, "persist": 0}
 
     def test_partial_expected_bundle_does_not_throttle_next_attempt(self, monkeypatch):
-        """A partial regional+ECMWF bundle is useful data, but not a complete live authority."""
+        """A partial regional+global bundle persists, but cannot authorize Day0 q."""
         import src.data.day0_hourly_vectors as hv
 
         attempts = {"fetch": 0, "persist": 0}
 
         def fake_fetch(city, *, models=None, now=None, timeout_s=None):
             attempts["fetch"] += 1
-            assert list(models or []) == ["icon_d2", "ecmwf_ifs"]
+            assert list(models or []) == [
+                "icon_d2",
+                "ecmwf_ifs",
+                "icon_global",
+                "jma_msm",
+                "ukmo_global_deterministic_10km",
+            ]
             return [_vector(model="icon_d2")], "sha256:partial"
 
         def fake_persist(vectors, *, target_date, request_hash, **kw):
@@ -1173,28 +1179,44 @@ class TestRequestHashProvenance:
         assert (n1, n2) == (2, 2)
         assert attempts == {"fetch": 2, "persist": 4}
 
-    def test_no_regional_model_uses_global_ecmwf_fallback(self, monkeypatch):
+    def test_no_regional_model_uses_global_multimodel_bundle(self, monkeypatch):
         import src.data.day0_hourly_vectors as hv
 
         monkeypatch.setattr(hv, "in_domain_models_for_city", lambda c, **kw: [])
 
-        assert hv.day0_hourly_models_for_city(_paris()) == ["ecmwf_ifs"]
+        assert hv.day0_hourly_models_for_city(_paris()) == [
+            "ecmwf_ifs",
+            "icon_global",
+            "jma_msm",
+            "ukmo_global_deterministic_10km",
+        ]
 
-    def test_regional_model_keeps_global_ecmwf_anchor(self, monkeypatch):
+    def test_regional_model_keeps_global_multimodel_bundle(self, monkeypatch):
         import src.data.day0_hourly_vectors as hv
 
         monkeypatch.setattr(hv, "in_domain_models_for_city", lambda c, **kw: ["icon_d2"])
 
-        assert hv.day0_hourly_models_for_city(_paris()) == ["icon_d2", "ecmwf_ifs"]
+        assert hv.day0_hourly_models_for_city(_paris()) == [
+            "icon_d2",
+            "ecmwf_ifs",
+            "icon_global",
+            "jma_msm",
+            "ukmo_global_deterministic_10km",
+        ]
 
-    def test_refresh_uses_global_ecmwf_fallback_when_no_regional_model(self, monkeypatch):
+    def test_refresh_uses_global_multimodel_bundle_when_no_regional_model(self, monkeypatch):
         import src.data.day0_hourly_vectors as hv
 
         captured = {"target_dates": []}
 
         def fake_fetch(city, *, models=None, now=None):
             captured["models"] = list(models or [])
-            return [_vector(model="ecmwf_ifs")], "sha256:globalhash"
+            return [
+                _vector(model="ecmwf_ifs"),
+                _vector(model="icon_global"),
+                _vector(model="jma_msm"),
+                _vector(model="ukmo_global_deterministic_10km"),
+            ], "sha256:globalhash"
 
         def fake_persist(vectors, *, target_date, request_hash, **kw):
             captured["request_hash"] = request_hash
@@ -1211,10 +1233,20 @@ class TestRequestHashProvenance:
             [_paris()], decision_time=datetime(2026, 6, 10, 9, 0, tzinfo=UTC)
         )
 
-        assert n == 2
-        assert captured["models"] == ["ecmwf_ifs"]
+        assert n == 8
+        assert captured["models"] == [
+            "ecmwf_ifs",
+            "icon_global",
+            "jma_msm",
+            "ukmo_global_deterministic_10km",
+        ]
         assert captured["request_hash"] == "sha256:globalhash"
-        assert captured["vector_models"] == ["ecmwf_ifs"]
+        assert captured["vector_models"] == [
+            "ecmwf_ifs",
+            "icon_global",
+            "jma_msm",
+            "ukmo_global_deterministic_10km",
+        ]
         assert captured["target_dates"] == ["2026-06-10", "2026-06-11"]
 
     def test_refresh_throttle_is_target_date_scoped_at_local_midnight(self, monkeypatch):
