@@ -2700,6 +2700,73 @@ def test_deploy_live_post_start_edli_queue_wait_accepts_reclaimed_claim(
     assert "post-start EDLI queue progress verified" in detail
 
 
+def test_deploy_live_post_start_edli_queue_wait_accepts_complete_auction_receipt(
+    monkeypatch, tmp_path
+):
+    dl = _load("deploy_live_edli_queue_wait_auction", "deploy_live.py")
+    state = tmp_path / "state"
+    state.mkdir()
+    launched = datetime.now(timezone.utc) - timedelta(seconds=1)
+    world = _init_edli_queue_db(state / "zeus-world.db")
+    world.execute(
+        """
+        INSERT INTO opportunity_event_processing (
+            consumer_name, event_id, processing_status, attempt_count,
+            claimed_at, processed_at, last_error, updated_at
+        ) VALUES ('edli_reactor_v1', 'evt-paused', 'pending', 1, NULL, NULL, NULL, ?)
+        """,
+        (launched.isoformat(),),
+    )
+    world.commit()
+    world.close()
+    trade = sqlite3.connect(state / "zeus_trades.db")
+    trade.execute(
+        """
+        CREATE TABLE decision_log (
+            id INTEGER PRIMARY KEY,
+            mode TEXT,
+            started_at TEXT,
+            completed_at TEXT,
+            artifact_json TEXT
+        )
+        """
+    )
+    completed = datetime.now(timezone.utc)
+    artifact = {
+        "mode": "global_single_order_auction",
+        "started_at": launched.isoformat(),
+        "completed_at": completed.isoformat(),
+        "summary": {
+            "candidate_coverage_complete": True,
+            "scope_family_coverage_complete": True,
+            "candidate_evaluation_count": 42,
+            "full_scope_family_count": 4,
+        },
+    }
+    trade.execute(
+        "INSERT INTO decision_log VALUES (7, ?, ?, ?, ?)",
+        (
+            "global_single_order_auction",
+            launched.isoformat(),
+            completed.isoformat(),
+            json.dumps(artifact),
+        ),
+    )
+    trade.commit()
+    trade.close()
+    monkeypatch.setattr(dl, "LIVE_REPO", str(tmp_path))
+
+    ok, detail = dl._wait_for_post_start_edli_queue_progress(
+        launched_after=launched,
+        timeout_seconds=0,
+    )
+
+    assert ok is True
+    assert "auction_receipt=7" in detail
+    assert "candidates=42" in detail
+    assert "scope_families=4" in detail
+
+
 def test_deploy_live_post_start_edli_queue_wait_skips_future_retry_floor(
     monkeypatch, tmp_path
 ):

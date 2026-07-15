@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Lifecycle: created=2026-06-12; last_reviewed=2026-07-15; last_reused=2026-07-15
+# Lifecycle: created=2026-06-12; last_reviewed=2026-07-16; last_reused=2026-07-16
 # Purpose: make live daemon restarts SAFE — refuse `launchctl kickstart` while the LIVE
 #   checkout's runtime surface is uncommitted/unpushed, and require live restart preflight
 #   before booting the trading daemon.
@@ -599,7 +599,9 @@ def _wait_for_post_start_edli_queue_progress(
 ) -> tuple[bool, str]:
     """Wait until the EDLI reactor proves it can move claimable queue work."""
 
-    world_db = Path(_require_live_repo()) / "state" / "zeus-world.db"
+    state_dir = Path(_require_live_repo()) / "state"
+    world_db = state_dir / "zeus-world.db"
+    trade_db = state_dir / "zeus_trades.db"
     launched_floor = launched_after.astimezone(timezone.utc) - timedelta(
         seconds=max(0.0, LIVE_RUNTIME_FRESH_VERIFY_CLOCK_TOLERANCE_SECONDS)
     )
@@ -635,6 +637,19 @@ def _wait_for_post_start_edli_queue_progress(
                 progressed_count = int(queue["claim_or_terminal_after_launch_count"])
                 claimable_work_count = int(queue["claimable_work_count"])
                 oldest_stale_claimed_at = str(queue["oldest_stale_claimed_at"] or "")
+                auction_receipt = _latest_complete_global_auction_receipt(
+                    trade_db,
+                    launched_floor=launched_floor,
+                )
+                if stale_processing_count == 0 and auction_receipt is not None:
+                    receipt_id, candidate_count, scope_count = auction_receipt
+                    return (
+                        True,
+                        "post-start EDLI queue progress verified: "
+                        f"auction_receipt={receipt_id} candidates={candidate_count} "
+                        f"scope_families={scope_count} "
+                        f"claimable_pending={claimable_pending_count}",
+                    )
                 if claimable_work_count == 0:
                     if progressed_count > 0:
                         return (
@@ -671,6 +686,53 @@ def _wait_for_post_start_edli_queue_progress(
                 + last_detail,
             )
         time.sleep(LIVE_RUNTIME_FRESH_VERIFY_POLL_SECONDS)
+
+
+def _latest_complete_global_auction_receipt(
+    trade_db: Path,
+    *,
+    launched_floor: datetime,
+) -> tuple[int, int, int] | None:
+    """Return a post-launch complete auction as direct reactor progress proof."""
+
+    if not trade_db.exists():
+        return None
+    try:
+        conn = sqlite3.connect(f"file:{trade_db}?mode=ro", uri=True, timeout=2.0)
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            """
+            SELECT id, started_at, completed_at, artifact_json
+              FROM decision_log
+             WHERE mode = 'global_single_order_auction'
+             ORDER BY id DESC
+             LIMIT 8
+            """
+        ).fetchall()
+        conn.close()
+    except Exception:
+        return None
+    for row in rows:
+        try:
+            artifact = json.loads(row["artifact_json"] or "{}")
+            summary = artifact.get("summary") or {}
+            completed_at = _parse_iso_utc(
+                artifact.get("completed_at") or row["completed_at"] or row["started_at"]
+            )
+            candidate_count = int(summary.get("candidate_evaluation_count") or 0)
+            scope_count = int(summary.get("full_scope_family_count") or 0)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            continue
+        if (
+            completed_at is not None
+            and completed_at >= launched_floor
+            and summary.get("candidate_coverage_complete") is True
+            and summary.get("scope_family_coverage_complete") is True
+            and candidate_count > 0
+            and scope_count > 0
+        ):
+            return int(row["id"]), candidate_count, scope_count
+    return None
 
 
 def _stop_label(label: str) -> tuple[bool, str]:
