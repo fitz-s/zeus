@@ -3208,7 +3208,19 @@ def capture_executable_market_snapshot(
         )
     else:
         if tolerate_missing_book:
-            fee_details = _default_substrate_fee_details(selected_token)
+            # The global auction prices every sibling against these substrate
+            # rows, so their fee must be current venue truth rather than a
+            # static weather default that is only corrected after selection.
+            # One /fee-rate read per family is sufficient: Polymarket applies
+            # one fee schedule to the sibling outcome tokens, while the cache
+            # rebinds the same canonical rate to each selected token identity.
+            cache = fee_details_cache if fee_details_cache is not None else {}
+            fee_details = _fetch_family_cached_fee_details(
+                clob,
+                selected_token,
+                cache_key=_substrate_fee_cache_key(market, condition_id),
+                fee_details_cache=cache,
+            )
         else:
             fee_details = _fee_details_gamma_first(
                 clob, selected_token, gamma_market_raw, outcome, raw_clob_market
@@ -5631,46 +5643,6 @@ def _fee_details_gamma_first(
 
     # Gamma feeSchedule absent/unparseable: fail closed to the /fee-rate value.
     return _fetch_fee_details(clob, token_id)
-
-
-def _default_substrate_fee_details(token_id: str) -> dict[str, Any]:
-    """Use the local weather fee contract for background substrate identity.
-
-    The pending-family substrate refresh is a cache producer, not the submit
-    boundary. Real order/JIT capture still queries the venue fee endpoint before
-    submitting. Using the conservative weather contract here removes hundreds of
-    duplicate /fee-rate calls from every global refresh without underpricing the
-    live entry gate.
-    """
-
-    from src.config import CONFIG_DIR
-    from src.contracts.exceptions import FeeRateUnavailableError
-    from src.contracts.reality_contract import load_contracts_from_yaml
-
-    try:
-        contracts = load_contracts_from_yaml(
-            CONFIG_DIR / "reality_contracts" / "economic.yaml"
-        )
-        fee_contract = next(
-            (contract for contract in contracts if contract.contract_id == "FEE_RATE_WEATHER"),
-            None,
-        )
-        if fee_contract is None:
-            raise FeeRateUnavailableError("FEE_RATE_WEATHER contract not found in economic.yaml")
-        rate = float(fee_contract.current_value)
-    except FeeRateUnavailableError:
-        raise
-    except Exception as exc:
-        raise FeeRateUnavailableError(f"FEE_RATE_WEATHER contract unavailable: {exc}") from exc
-    return canonicalize_fee_details(
-        {
-            "fee_rate_fraction": rate,
-            "authority": "local_weather_fee_contract",
-            "submit_boundary_revalidates_fee": True,
-        },
-        source="weather_fee_contract_substrate_identity",
-        token_id=token_id,
-    )
 
 
 def _substrate_fee_cache_key(market: dict[str, Any], condition_id: str) -> str:

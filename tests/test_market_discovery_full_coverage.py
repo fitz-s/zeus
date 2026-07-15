@@ -3399,8 +3399,8 @@ def test_substrate_identity_capture_requires_real_clob_market_info(monkeypatch):
                 "asks": [{"price": "0.42", "size": "10"}],
             }
 
-        def get_fee_rate_details(self, _token_id: str) -> dict:
-            raise AssertionError("substrate identity capture must not fetch /fee-rate")
+        def get_fee_rate_details(self, token_id: str) -> dict:
+            return {"base_fee": 1000, "token_id": token_id}
 
     captured = []
     clob = LiquidSubstrateClob()
@@ -3421,14 +3421,12 @@ def test_substrate_identity_capture_requires_real_clob_market_info(monkeypatch):
     assert clob.market_info_calls == [condition_id]
     assert len(captured) == 1
     assert captured[0].tradeability_status.executable_allowed is True
-    assert captured[0].fee_details["source"] == "weather_fee_contract_substrate_identity"
-    assert captured[0].fee_details["authority"] == "local_weather_fee_contract"
-    assert captured[0].fee_details["submit_boundary_revalidates_fee"] is True
-    assert captured[0].fee_details["fee_rate_fraction"] == pytest.approx(0.05)
+    assert captured[0].fee_details["source"] == "clob_fee_rate"
+    assert captured[0].fee_details["fee_rate_fraction"] == pytest.approx(0.10)
 
 
-def test_substrate_identity_capture_uses_contract_fee_without_fee_rate_http(monkeypatch):
-    """Background substrate refresh should not fetch fee rate for every token."""
+def test_substrate_identity_capture_fetches_current_fee_once_per_family(monkeypatch):
+    """Background substrate refresh shares one current venue fee within a family."""
 
     condition_id = "0x" + "7" * 64
     yes_token = "0x" + "8" * 64
@@ -3497,7 +3495,7 @@ def test_substrate_identity_capture_uses_contract_fee_without_fee_rate_http(monk
 
         def get_fee_rate_details(self, token_id: str) -> dict:
             self.fee_tokens.append(token_id)
-            raise AssertionError("substrate identity capture must not fetch /fee-rate")
+            return {"base_fee": 1000, "token_id": token_id}
 
     captured = []
     clob = FamilyFeeClob()
@@ -3523,13 +3521,13 @@ def test_substrate_identity_capture_uses_contract_fee_without_fee_rate_http(monk
                 tolerate_missing_book=True,
             )
 
-    assert clob.fee_tokens == []
+    assert clob.fee_tokens == [yes_token]
     assert clob.market_info_calls == [condition_id]
     assert len(captured) == 2
-    assert captured[0].fee_details["source"] == "weather_fee_contract_substrate_identity"
-    assert captured[1].fee_details["source"] == "weather_fee_contract_substrate_identity"
+    assert captured[0].fee_details["source"] == "clob_fee_rate"
+    assert captured[1].fee_details["source"] == "clob_fee_rate_family_cache"
     assert captured[1].fee_details["token_id"] == no_token
-    assert captured[1].fee_details["fee_rate_fraction"] == pytest.approx(0.05)
+    assert captured[1].fee_details["fee_rate_fraction"] == pytest.approx(0.10)
 
 
 def test_unlimited_pending_refresh_completes_family_before_next_city():
