@@ -878,10 +878,11 @@ def process_current_global_batch(
     | None = None,
     candidate_policy_rejection_resolver: Callable[[object], str | None]
     | None = None,
+    entry_candidates_enabled: bool = True,
     fractional_kelly_multiplier: Decimal = Decimal("1"),
     claim_unpaged_winner: Callable[[OpportunityEvent], bool] | None = None,
 ) -> GlobalBatchSubmitResult:
-    """Select once from every family holding a current q certificate."""
+    """Select once from every feasible family holding a current q certificate."""
 
     if decision_time.tzinfo is None:
         raise ValueError("GLOBAL_AUCTION_DECISION_TIME_NAIVE")
@@ -1163,6 +1164,7 @@ def process_current_global_batch(
             forecasts_conn=forecast_conn,
             decision_at_utc=scope_at,
             held_families=held_families,
+            include_entry_families=entry_candidates_enabled,
         )
         log_stage("scope_scan", families=len(full_scope.events_by_family))
         from src.data.replacement_input_hwm import (

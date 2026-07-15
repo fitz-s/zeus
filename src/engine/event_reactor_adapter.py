@@ -4980,6 +4980,19 @@ def event_bound_live_adapter_from_trade_conn(
                 venue_submit_count=0,
             )
 
+        # Freeze the feasible action set at the same cycle cut as probability and
+        # book truth. A later allocator recovery belongs to the next auction epoch.
+        entry_suppression_reason = _entry_global_submit_suppression_reason()
+
+        def _candidate_policy(candidate):
+            if (
+                entry_suppression_reason is not None
+                and str(getattr(candidate, "action", "BUY") or "BUY").upper()
+                == "BUY"
+            ):
+                return entry_suppression_reason
+            return None
+
         def _actuate(event, actuation, at):
             return _stamp_live_adapter_lane(
                 _submit_inner(event, at, global_actuation=actuation),
@@ -5313,13 +5326,12 @@ def event_bound_live_adapter_from_trade_conn(
                 portfolio_state_provider=None,
                 current_book_epoch_provider=_current_book_epoch,
                 current_capital_limit_resolver=_current_entry_capital_limit,
-                # Operator pause governs actuation, not economic measurement.
-                # _preflight -> _submit_inner re-reads the durable pause before
-                # any live-cap reservation or command persistence, and the
-                # executor repeats the same check.  Keeping it out of candidate
-                # eligibility lets the paused engine still compare YES/NO/SELL
-                # against HOLD/CASH with current executable economics.
-                candidate_policy_rejection_resolver=None,
+                candidate_policy_rejection_resolver=(
+                    _candidate_policy
+                    if entry_suppression_reason is not None
+                    else None
+                ),
+                entry_candidates_enabled=entry_suppression_reason is None,
                 fractional_kelly_multiplier=Decimal(
                     str(_runtime_kelly_multiplier())
                 ),
