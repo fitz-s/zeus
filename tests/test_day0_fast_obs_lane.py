@@ -1,5 +1,5 @@
 # Created: 2026-06-10
-# Last reused or audited: 2026-06-17
+# Last reused/audited: 2026-07-15
 # Authority basis: operator green-light 2026-06-10 items A/C/E (free METAR fast
 #   lane, live-obs hook wiring, WU-vs-METAR oracle anomaly guard); day0
 #   first-principles review /tmp/day0_first_principles_review.md §6.2;
@@ -885,6 +885,38 @@ class TestMutexNoHttpSplit:
         hourly_src = inspect.getsource(reactor_module.run_edli_day0_hourly_refresh_cycle)
         assert "maybe_refresh_day0_hourly_vectors" in hourly_src
         assert 'id="edli_day0_hourly_refresh"' in source
+
+    def test_hourly_refresh_yields_before_priority_db_reads(self, monkeypatch):
+        import src.config as config_module
+        from src.events import reactor as reactor_module
+
+        monkeypatch.setattr(
+            config_module,
+            "settings",
+            SimpleNamespace(_data={"edli": {"enabled": True}}),
+        )
+        monkeypatch.setattr(
+            reactor_module,
+            "_edli_day0_hourly_priority_families",
+            lambda: pytest.fail("active trading lane must defer before DB priority reads"),
+        )
+
+        reactor_module.run_edli_day0_hourly_refresh_cycle(
+            trading_lane_active=True,
+        )
+
+    def test_hourly_refresh_admission_excludes_monitor_and_reactor(self):
+        source = open("src/main.py", encoding="utf-8").read()
+        hook_start = source.index('@_scheduler_job("edli_day0_hourly_refresh")')
+        hook_end = source.index("def _edli_is_sqlite_lock_error", hook_start)
+        hook = source[hook_start:hook_end]
+        assert "_held_position_monitor_active.is_set()" in hook
+        assert "_edli_reactor_active_lock.acquire(blocking=False)" in hook
+        assert "_edli_reactor_active_lock.release()" in hook
+
+        schedule_at = source.index('id="edli_day0_hourly_refresh"')
+        schedule = source[schedule_at - 500 : schedule_at + 500]
+        assert "OPENING_HUNT_FIRST_DELAY_SECONDS + 36.0" in schedule
 
     def test_publication_clock_missing_denies_live_authority(self):
         """PR#404 P2: receiptTime absent -> available_at falls back to the obs

@@ -4988,16 +4988,30 @@ def _edli_day0_hourly_refresh_cycle() -> None:
     refresh cluster extraction, 2026-07-08) as ``run_edli_day0_hourly_refresh_cycle``.
     See that function's docstring for the vector-refresh lane it runs.
 
-    ``_edli_reactor_active()``/``_edli_redecision_screen_lock`` are cross-job
-    scheduling-coordination primitives (main.py — the dispatcher — owns them;
-    other EDLI jobs also read them), so they are evaluated here and injected
-    into the extracted function rather than reached back into.
+    The reactor lock, redecision lock, and held-monitor Event are dispatcher-owned
+    scheduling primitives. This hook atomically admits the background refresh on
+    the shared reactor lane and injects only the resulting active/inactive state.
     """
     from src.events.reactor import run_edli_day0_hourly_refresh_cycle
 
-    run_edli_day0_hourly_refresh_cycle(
-        trading_lane_active=_edli_reactor_active() or _edli_redecision_screen_lock.locked(),
+    trading_lane_active = (
+        _held_position_monitor_active.is_set()
+        or _edli_redecision_screen_lock.locked()
     )
+    if trading_lane_active or not _edli_reactor_active_lock.acquire(blocking=False):
+        run_edli_day0_hourly_refresh_cycle(trading_lane_active=True)
+        return
+    try:
+        # Recheck after admission so an exit-monitor priority claim cannot race
+        # the first check while this background job acquires the shared lane.
+        run_edli_day0_hourly_refresh_cycle(
+            trading_lane_active=(
+                _held_position_monitor_active.is_set()
+                or _edli_redecision_screen_lock.locked()
+            ),
+        )
+    finally:
+        _edli_reactor_active_lock.release()
 
 
 
@@ -5774,7 +5788,9 @@ def main():
             "interval",
             seconds=int(os.environ.get("ZEUS_DAY0_HOURLY_REFRESH_JOB_SECONDS", "45")),
             id="edli_day0_hourly_refresh",
-            next_run_time=_utc_run_time_after(OPENING_HUNT_FIRST_DELAY_SECONDS + 35.0),
+            # Keep the 45s producer off the exit monitor's 120s phase. Their
+            # periods share gcd=15s; the former +35s offset collided every 6m.
+            next_run_time=_utc_run_time_after(OPENING_HUNT_FIRST_DELAY_SECONDS + 36.0),
             max_instances=1,
             coalesce=True,
         )

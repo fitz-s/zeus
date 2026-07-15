@@ -4458,10 +4458,8 @@ def run_edli_day0_hourly_refresh_cycle(*, trading_lane_active: bool) -> None:
     refreshes the carrier and yields whenever the trading reactor/redecision
     lane is active.
 
-    ``trading_lane_active`` is injected from src.main: it folds together two
-    cross-job scheduling-coordination primitives (the reactor-active lock and
-    the redecision-screen lock) that main.py — the dispatcher — retains
-    ownership of, since several other EDLI jobs also read them.
+    ``trading_lane_active`` is injected from src.main after atomic admission
+    against the reactor, redecision, and held-monitor scheduling primitives.
     """
     global _DAY0_HOURLY_REFRESH_CURSOR
 
@@ -4473,6 +4471,9 @@ def run_edli_day0_hourly_refresh_cycle(*, trading_lane_active: bool) -> None:
     _settings_source = settings._data if hasattr(settings, "_data") else settings
     edli_cfg = _settings_source.get("edli", {}) if isinstance(_settings_source, dict) else {}
     if not edli_cfg.get("enabled"):
+        return
+    if trading_lane_active:
+        _log.info("edli_day0_hourly_refresh deferred: trading lane active")
         return
     try:
         from src.config import runtime_cities as _rc
@@ -4490,15 +4491,6 @@ def run_edli_day0_hourly_refresh_cycle(*, trading_lane_active: bool) -> None:
             priority_city_count=priority_city_count,
             cursor=_DAY0_HOURLY_REFRESH_CURSOR,
         )
-        if trading_lane_active and priority_city_count <= 0:
-            _log.info("edli_day0_hourly_refresh deferred: trading reactor/redecision lane active")
-            return
-        if trading_lane_active:
-            _log.info(
-                "edli_day0_hourly_refresh: priority refresh proceeding while trading lane active "
-                "priority_cities=%d",
-                priority_city_count,
-            )
         max_cities = _day0_hourly_refresh_max_cities(
             priority_city_count=priority_city_count,
         )
