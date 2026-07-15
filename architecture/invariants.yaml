@@ -862,7 +862,7 @@ invariants:
       tests:
         - tests/decision_kernel/test_actionable_trade_certificate.py::test_actionable_rejects_below_live_win_rate_floor
         - tests/decision_kernel/test_presubmit_would_cross_taker.py::TestLayer2VerifyPreSubmitForCommand::test_below_live_win_rate_floor_raises
-        - tests/execution/test_entry_economics_submit_gate.py::test_entry_economics_blocks_buenos_aires_tail_yes_live_incident
+        - tests/execution/test_entry_economics_submit_gate.py::test_entry_economics_rejects_buenos_aires_shape_below_absolute_price_floor
         - tests/engine/test_s6_submit_recapture_gate.py::test_qkernel_selection_default_scopes_out_low_win_rate_tail_yes
         - tests/integration/test_qkernel_spine_blockers_pr409.py::test_sparse_pooled_oof_does_not_crush_strong_modal_yes_qkernel_edge
       negative_constraints: []
@@ -941,3 +941,34 @@ invariants:
       - tests/test_exchange_reconcile.py::test_check_collateral_identity_orphan_sweep_records_finding
     basis: SCH-W1.1-CAS-LEDGER schema packet (docs/rebuild/schema_packets/w1_1_cas_reservation_ledger_schema_packet_2026-07-02.md), critic ruling 5
     added: 2026-07-02
+
+  - id: INV-43
+    zones: [K0_frozen_kernel, K2_runtime, live_venue_submit]
+    statement: >
+      Every live BUY or SELL venue submission, including entry, reduce-only
+      exit, single-order, and batch paths, must have an inclusive unit price
+      in [0.05, 0.95]. Any price below 0.05 or above 0.95 is rejected before
+      SDK contact. No strategy, q-kernel, tail, risk, lifecycle, current-state,
+      or order-role exception may waive the venue submission contract.
+    why: >
+      Upstream price floors previously conflicted: ordinary entry used 0.10,
+      strategy profiles used 0.05, q-kernel center-buy YES admitted 0.02,
+      current-state solving waived legacy floors, and exits clamped to the
+      venue tick range near 0.01/0.99. The Paris 35C incident proved an
+      uncommitted upper-layer fix is not a live safety boundary; the envelope
+      contract must reject every current and future submit route.
+    enforced_by:
+      tests:
+        - tests/test_v2_adapter.py::test_live_submit_unit_price_band_is_inclusive
+        - tests/test_v2_adapter.py::test_live_submit_rejects_out_of_band_price_before_sdk_contact
+        - tests/test_v2_adapter.py::TestSubmitBatch::test_out_of_band_price_rejects_entire_batch_before_sdk_contact
+        - tests/test_executor.py::TestExecutor::test_execute_exit_order_rejects_out_of_band_price_before_persistence
+        - tests/engine/test_q_exec_lcb_event_seam.py::test_qkernel_center_buy_taker_cannot_waive_absolute_price_floor
+      negative_constraints: []
+    capability_tags: [live_venue_submit, venue_adapter, execution_price]
+    relationship_tests:
+      - tests/test_v2_adapter.py
+      - tests/test_executor.py
+      - tests/engine/test_q_exec_lcb_event_seam.py
+    basis: operator absolute unit-price directive 2026-07-13; Paris 35C incident 2026-07-15
+    added: 2026-07-15

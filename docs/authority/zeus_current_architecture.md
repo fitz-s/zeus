@@ -302,7 +302,16 @@ Risk levels must change behavior:
 Overall risk is fail-closed: the max active level wins, and computation error
 or broken truth input must not silently downgrade risk.
 
-### 10.2 Live / Backtest / Shadow Boundary
+### 10.2 Absolute Live Order Price Band
+
+Every live BUY or SELL order, including entry, reduce-only exit, single-order,
+and batch submission, must carry a unit price in the inclusive range
+`[0.05, 0.95]`. Prices below `0.05` or above `0.95` fail closed before SDK
+contact. Strategy profiles, q-kernel selection, tail topology, current-state
+solving, risk level, order role, and reduce-only status cannot waive this
+boundary.
+
+### 10.3 Live / Backtest / Shadow Boundary
 
 - Live may act.
 - Backtest may evaluate.
@@ -326,7 +335,7 @@ Shadow/backtest promotion protocol:
 5. document rollback in a governance packet
 6. keep live cutover reversible for at least 7 days
 
-### 10.3 Authority-Loss Degradation
+### 10.4 Authority-Loss Degradation
 
 When DB truth is unavailable or degraded, new-entry paths must fail closed, but
 monitor/exit/reconciliation lanes should keep operating in read-only or

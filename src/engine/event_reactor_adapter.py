@@ -163,6 +163,7 @@ import numpy as np
 from src.contracts.day0_observation_context import BoundClassification, classify_bound
 from src.contracts.execution_intent import ExecutableCostBasis
 from src.contracts.execution_price import ExecutionPrice, ExecutionPriceContractError
+from src.contracts.venue_submission_envelope import assert_live_order_unit_price
 from src.contracts.executable_cost_curve import (
     BookLevel,
     ExecutableCostCurve,
@@ -12887,6 +12888,10 @@ def _assert_forecast_entry_uses_qkernel_authority(actionable_payload: Mapping[st
             if win_rate_reason is not None:
                 raise ValueError(win_rate_reason)
         raise ValueError("LIVE_ENTRY_QKERNEL_EXECUTION_ECONOMICS_INVALID")
+    try:
+        assert_live_order_unit_price(cert.get("cost"))
+    except ValueError as exc:
+        raise ValueError(f"LIVE_ENTRY_UNIT_PRICE_OUT_OF_BOUNDS:{exc}") from None
     near_day0_reason = _qkernel_near_day0_cert_rejection_reason(cert)
     if near_day0_reason is not None:
         raise ValueError(near_day0_reason)
@@ -18313,6 +18318,10 @@ def _qkernel_final_submit_floor_rejection_reason(
         for value in (cost, edge_lcb, payoff_q_point, payoff_q_lcb, optimal_stake_usd)
     ):
         return "QKERNEL_FINAL_SUBMIT_FLOOR:non_finite_economics"
+    try:
+        assert_live_order_unit_price(cost)
+    except ValueError as exc:
+        return f"QKERNEL_FINAL_SUBMIT_FLOOR:unit_price_out_of_bounds:{exc}"
 
     current_state_solve = _qkernel_current_state_solve_economics(cert)
     if not current_state_solve:
@@ -18456,6 +18465,14 @@ def _qkernel_actual_submit_quality_rejection_reason(
                 "QKERNEL_ACTUAL_SUBMIT_QUALITY_FLOOR:"
                 "global_current_submit_economics_non_finite"
             )
+        try:
+            assert_live_order_unit_price(cost)
+            assert_live_order_unit_price(certified_cost)
+        except ValueError as exc:
+            return (
+                "QKERNEL_ACTUAL_SUBMIT_QUALITY_FLOOR:"
+                f"unit_price_out_of_bounds:{exc}"
+            )
         native_side = _native_curve_side_for_direction(
             str(getattr(proof, "direction", "") or "")
         )
@@ -18513,6 +18530,10 @@ def _qkernel_actual_submit_quality_rejection_reason(
         return "QKERNEL_ACTUAL_SUBMIT_QUALITY_FLOOR:invalid_actual_submit_economics"
     if not all(math.isfinite(value) for value in (stake, cost, payoff_q_point, payoff_q_lcb)):
         return "QKERNEL_ACTUAL_SUBMIT_QUALITY_FLOOR:non_finite_actual_submit_economics"
+    try:
+        assert_live_order_unit_price(cost)
+    except ValueError as exc:
+        return f"QKERNEL_ACTUAL_SUBMIT_QUALITY_FLOOR:unit_price_out_of_bounds:{exc}"
     if stake <= 0.0 or not (0.0 < cost < 1.0):
         return (
             "QKERNEL_ACTUAL_SUBMIT_QUALITY_FLOOR:non_positive_actual_submit:"

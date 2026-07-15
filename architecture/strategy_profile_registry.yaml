@@ -73,7 +73,7 @@
 #   promotion_evidence_ref: null | "<doc path>"
 #       Path to the operator-blessed evidence packet that justified live status.
 #       null until the strategy is promoted out of blocked.
-#   min_entry_price: 0.0 to <1.0
+#   min_entry_price: 0.05 to <1.0 (INV-43 absolute live submit band)
 #       Strategy economic floor for entry/final limit prices. Venue tick/min
 #       order authority may be lower; that does not make a trade live-quality.
 #   min_strategy_notional_usd: 0.0+
@@ -201,7 +201,7 @@ center_buy:
     resolved: 0.0
   min_settled_decisions: 0
   promotion_evidence_ref: docs/reference/zeus_domain_model.md
-  min_entry_price: 0.02
+  min_entry_price: 0.05
   min_strategy_notional_usd: 1.00
   min_expected_profit_usd: 0.25
   min_submit_edge_density: 0.05
@@ -347,7 +347,7 @@ shoulder_impossible_tail_capture:
     resolved: 0.0
   min_settled_decisions: 0
   promotion_evidence_ref: null
-  min_entry_price: 0.01
+  min_entry_price: 0.05
   min_strategy_notional_usd: 1.00
   min_expected_profit_usd: 0.01
   allow_ultra_low_tail: false

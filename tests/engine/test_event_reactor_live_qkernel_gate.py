@@ -1,5 +1,5 @@
 # Created: 2026-06-30
-# Last reused/audited: 2026-07-13
+# Last reused/audited: 2026-07-15
 # Authority basis: live-money qkernel submit authority and canonical selection-fact persistence.
 
 from __future__ import annotations
@@ -135,8 +135,8 @@ def _global_current_qkernel_cert(*, side: str = "YES") -> dict:
     cert.update(
         payoff_q_point=0.70,
         payoff_q_lcb=0.60,
-        cost=0.04,
-        edge_lcb=0.56,
+        cost=0.05,
+        edge_lcb=0.55,
         global_actuation_identity="global-actuation-1",
         global_optimum_semantics="CUT_TIME_GLOBAL_OPTIMUM",
         global_candidate_id="global-candidate-1",
@@ -150,22 +150,22 @@ def _global_current_qkernel_cert(*, side: str = "YES") -> dict:
         global_jit_venue_book_hash="jit-venue-book-1",
         global_jit_book_snapshot_id="jit-snapshot-1",
         global_jit_execution_curve_identity="jit-curve-1",
-        global_target_shares="25",
+        global_target_shares="20",
         global_expected_cost_usd="1",
         global_max_spend_usd="1",
         global_robust_delta_log_wealth=0.01,
-        global_robust_ev_usd=14.0,
+        global_robust_ev_usd=11.0,
         global_cut_time_win_probability_lcb=0.60,
         global_cut_time_loss_probability_ucb=0.40,
         global_terminal_win_probability_lcb=0.60,
         global_terminal_loss_probability_ucb=0.40,
         global_terminal_loss_payoff_usd="-1",
-        global_terminal_win_payoff_usd="24",
-        global_terminal_median_payoff_usd="24",
+        global_terminal_win_payoff_usd="19",
+        global_terminal_median_payoff_usd="19",
         global_terminal_wealth_after_loss_usd="99",
-        global_terminal_wealth_after_win_usd="124",
-        global_cut_time_expected_value_diagnostic_usd=14.0,
-        global_expected_value_diagnostic_usd=14.0,
+        global_terminal_wealth_after_win_usd="119",
+        global_cut_time_expected_value_diagnostic_usd=11.0,
+        global_expected_value_diagnostic_usd=11.0,
         global_expected_value_semantics="DIAGNOSTIC_EXPECTATION_NOT_REALIZED_GAIN",
         global_terminal_payoff_semantics="BINARY_0_1",
     )
@@ -853,7 +853,7 @@ def test_live_entry_qkernel_gate_accepts_underpriced_buenos_aires_yes():
 
 
 @pytest.mark.parametrize(("side", "direction"), (("YES", "buy_yes"), ("NO", "buy_no")))
-def test_current_state_live_entry_uses_same_after_cost_rule_for_yes_and_no(side, direction):
+def test_current_state_live_entry_cannot_waive_absolute_price_floor(side, direction):
     cert = _current_qkernel_cert(side=side)
     cert.update(
         cost=0.04,
@@ -864,19 +864,20 @@ def test_current_state_live_entry_uses_same_after_cost_rule_for_yes_and_no(side,
     )
     _seal_current_qkernel_cert(cert)
 
-    _assert_live_entry_submit_authority(
-        {
-            "event_type": "FORECAST_SNAPSHOT_READY",
-            "selection_authority_applied": "qkernel_spine",
-            "direction": direction,
-            "strategy_key": "forecast_qkernel_entry",
-            "candidate_bin_id": "bin-1",
-            "q_live": 0.12,
-            "q_lcb_5pct": 0.10,
-            "min_entry_price": 0.95,
-            "qkernel_execution_economics": cert,
-        }
-    )
+    with pytest.raises(ValueError, match="LIVE_ENTRY_UNIT_PRICE_OUT_OF_BOUNDS"):
+        _assert_live_entry_submit_authority(
+            {
+                "event_type": "FORECAST_SNAPSHOT_READY",
+                "selection_authority_applied": "qkernel_spine",
+                "direction": direction,
+                "strategy_key": "forecast_qkernel_entry",
+                "candidate_bin_id": "bin-1",
+                "q_live": 0.12,
+                "q_lcb_5pct": 0.10,
+                "min_entry_price": 0.95,
+                "qkernel_execution_economics": cert,
+            }
+        )
 
 
 @pytest.mark.parametrize("missing_field", ("decision_id", "receipt_hash", "q_version", "sample_hash"))
@@ -1019,14 +1020,14 @@ def test_global_current_submit_does_not_require_legacy_route_optimizer_fields(
         proof=proof,
         strategy_policy_event_type="FORECAST_SNAPSHOT_READY",
         actual_stake_usd=1.0,
-        actual_cost=0.04,
+        actual_cost=0.05,
     ) is None
     assert (
         era._qkernel_actual_submit_quality_rejection_reason(
             proof=proof,
             strategy_policy_event_type="FORECAST_SNAPSHOT_READY",
             actual_stake_usd=1.0,
-            actual_cost=0.05,
+            actual_cost=0.06,
         )
         == "GLOBAL_ACTUATION_EXPECTED_COST_EXCEEDED"
     )
@@ -1191,7 +1192,7 @@ def test_broken_global_certificate_cannot_fall_back_to_legacy_route_fields():
     assert era._qkernel_actual_submit_quality_rejection_reason(
         proof=proof,
         actual_stake_usd=1.0,
-        actual_cost=0.04,
+        actual_cost=0.05,
     ).startswith(
         "QKERNEL_ACTUAL_SUBMIT_QUALITY_FLOOR:"
         "GLOBAL_CURRENT_STATE_EXECUTION_ECONOMICS_INVALID:"
@@ -1240,8 +1241,8 @@ def test_actionable_payload_preserves_sealed_global_execution_economics(
     taker = era._build_event_bound_taker_quality_proof(
         actionable_payload=payload,
         order_mode="TAKER",
-        fresh_best_bid=0.03,
-        fresh_best_ask=0.04,
+        fresh_best_bid=0.04,
+        fresh_best_ask=0.05,
     )
     assert taker is not None and taker["passed"] is True
 
@@ -1767,10 +1768,10 @@ def test_current_state_path_has_no_yes_only_near_day0_veto(side):
 def test_current_state_actual_submit_has_no_side_or_fixed_profit_floor(side, direction):
     cert = _current_qkernel_cert(side=side)
     cert.update(
-        cost=0.04,
+        cost=0.05,
         payoff_q_lcb=0.10,
         payoff_q_point=0.12,
-        edge_lcb=0.06,
+        edge_lcb=0.05,
         optimal_stake_usd=0.01,
         selection_guard_q_safe=0.10,
     )
@@ -1785,7 +1786,7 @@ def test_current_state_actual_submit_has_no_side_or_fixed_profit_floor(side, dir
         proof=proof,
         strategy_policy_event_type="FORECAST_SNAPSHOT_READY",
         actual_stake_usd=0.01,
-        actual_cost=0.04,
+        actual_cost=0.05,
     ) is None
 
 
@@ -2105,7 +2106,7 @@ def test_live_entry_qkernel_gate_rejects_failed_near_day0_consistency_verdict():
         )
 
 
-def test_live_entry_qkernel_gate_accepts_underpriced_low_probability_yes():
+def test_live_entry_qkernel_gate_rejects_underpriced_low_probability_yes():
     cert = _qkernel_cert()
     cert.update(
         route_id="DIRECT_YES:b34@proof",
@@ -2121,19 +2122,20 @@ def test_live_entry_qkernel_gate_accepts_underpriced_low_probability_yes():
         selection_guard_q_safe=0.06052567908958011,
     )
 
-    _assert_live_entry_submit_authority(
-        {
-            "event_type": "FORECAST_SNAPSHOT_READY",
-            "selection_authority_applied": "qkernel_spine",
-            "direction": "buy_yes",
-            "strategy_key": "forecast_qkernel_entry",
-            "candidate_bin_id": "b34",
-            "q_live": 0.12180248510788458,
-            "q_lcb_5pct": 0.06052567908958011,
-            "min_entry_price": 0.02,
-            "qkernel_execution_economics": cert,
-        }
-    )
+    with pytest.raises(ValueError, match="LIVE_ENTRY_UNIT_PRICE_OUT_OF_BOUNDS"):
+        _assert_live_entry_submit_authority(
+            {
+                "event_type": "FORECAST_SNAPSHOT_READY",
+                "selection_authority_applied": "qkernel_spine",
+                "direction": "buy_yes",
+                "strategy_key": "forecast_qkernel_entry",
+                "candidate_bin_id": "b34",
+                "q_live": 0.12180248510788458,
+                "q_lcb_5pct": 0.06052567908958011,
+                "min_entry_price": 0.05,
+                "qkernel_execution_economics": cert,
+            }
+        )
 
 
 def test_live_entry_qkernel_gate_accepts_six_to_eight_cent_positive_yes():

@@ -79,8 +79,9 @@ test_trust_policy:
     tests/data/test_openmeteo_model_updates.py: {created: "2026-06-25", last_used: "2026-06-25", note: "Open-Meteo model update metadata parser/probe: supports list and mapping payloads, enforces availability+10m public clock, and does not advance the update cursor before a changed run is publicly usable."}
     tests/data/test_source_run_arrived_event.py: {created: "2026-07-02", last_used: "2026-07-02", note: "Order-engine rebuild W0.3 antibody: probe_openmeteo_source_clock_updates emits exactly one SOURCE_RUN_ARRIVED opportunity event per newly-usable run when passed an EventWriter; replaying the probe over the SAME undelivered run (the real advance_cursor=False live shape) is idempotent (zero additional rows); omitting event_writer preserves prior no-emission behavior."}
     tests/execution/test_ctf_conversion_commands.py: {created: "2026-07-02", last_used: "2026-07-02", note: "Order-engine rebuild W2.4 antibody: ctf_conversion_commands persist-before-side-effect (INV-28), ack/reject/unknown mapping, fail-closed UNKNOWN on ambiguous adapter outcomes (non-terminal, never guessed success), the SPLIT/MERGE-vs-CONVERT identifier-space CHECK constraint, and receipt-driven reconciliation to CONFIRMED/FAILED."}
+    tests/execution/test_entry_economics_submit_gate.py: {created: "2026-07-01", last_used: "2026-07-15", note: "Entry economics submit antibody, including INV-43 absolute unit-price rejection before strategy, qkernel, tail, or current-state exceptions."}
     tests/test_polymarket_v2_adapter_ctf_conversion.py: {created: "2026-07-02", last_used: "2026-07-02", note: "Order-engine rebuild W2.4 antibody: PolymarketV2Adapter.split_positions/merge_positions/convert_positions kill-switch-off-by-default, dry-run no-raw-tx-leak, standard-CTF-vs-NegRiskAdapter routing by neg_risk flag (selector + target contract), and preflight rejects (Safe version/owner mismatch) firing before any broadcast attempt."}
-    tests/engine/test_q_exec_lcb_event_seam.py: {created: "2026-06-23", last_used: "2026-06-23", note: "Money-path antibody: _build_event_bound_taker_quality_proof gates its after-cost edge on the price-conditioned selection-curse bound. A mid-price buy_no taker that passes on raw q_lcb is REFUSED once the bound is armed (realized NO rate ~0.66 at price 0.70); favorites + buy_yes untouched; absent/unarmed->identity. Reverting re-admits the refused buy_no cross."}
+    tests/engine/test_q_exec_lcb_event_seam.py: {created: "2026-06-23", last_used: "2026-07-15", note: "Money-path antibody: price-conditioned selection-curse admission plus INV-43 absolute live-submit price floor; qkernel/current-state authority cannot waive the 0.05 lower bound."}
     tests/test_replacement_member_vote_smoothing_not_live_wired.py: {created: "2026-06-18", last_used: "2026-06-18", note: "Live/experiment separation antibody: AIFS member-vote smoothing remains experiment-layer math and must not reappear as an edli live settings switch or materializer reader."}
     tests/test_raw_forecast_artifact_manifest.py: {created: "2026-06-18", last_used: "2026-06-18", note: "Manifest compatibility antibody: retired trade_authority_status top-level field is dropped during raw artifact manifest load while unknown authority aliases still fail closed."}
     tests/test_forecast_manifest_repin.py: {created: "2026-07-08", last_used: "2026-07-08", note: "Forecast posterior blackout antibody: a present artifact rewritten by benign trailing-newline serialization drift no longer leaves stale byte_size/sha manifest truth that aborts materialization; repin preserves metadata, missing artifacts still fail closed."}
@@ -194,7 +195,7 @@ test_trust_policy:
     tests/events/test_claim_lock_storm.py: {created: "2026-06-11", last_used: "2026-07-13", note: "World-writer claim contention, including unpaged global-winner claim and queue paths, remains bounded, visible, rollback-safe, pending on miss, and waits at most once per contention episode before same-cycle nonblocking probes."}
     tests/calibration/test_scaled_normal_uniform_q_builder.py: {created: "2026-06-29", last_used: "2026-07-10", note: "Capital-gated city rho mixture math, including row-wise simplex bootstrap-draw mixing so served q, bounds, empirical edge confidence, and CVaR share one probability world."}
     tests/engine/test_replacement_0_1_live_authority_probability.py: {created: "2026-06-07", last_used: "2026-07-10", note: "Replacement live probability authority and city-mixed bootstrap sample-basis gate."}
-    tests/engine/test_event_reactor_live_qkernel_gate.py: {created: "2026-06-30", last_used: "2026-07-13", note: "Live qkernel submit authority, including symmetric sealed global YES/NO execution, Day0 replacement-posterior parent binding, current observation admission, current-book and wealth revalidation, and malformed-seal rejection."}
+    tests/engine/test_event_reactor_live_qkernel_gate.py: {created: "2026-06-30", last_used: "2026-07-15", note: "Live qkernel submit authority, including symmetric sealed global YES/NO execution, Day0 replacement-posterior parent binding, current observation admission, current-book and wealth revalidation, malformed-seal rejection, and INV-43 absolute unit-price rejection."}
     tests/engine/test_cert_calibration_bridge.py: {created: "2026-06-10", last_used: "2026-07-13", note: "Replacement calibration credential relationship matrix; Day0 observation hard facts alone fail closed while current replacement bounds use their own typed calibration authority."}
     tests/events/test_continuous_redecision.py: {created: "2026-05-31", last_used: "2026-06-17"}
     tests/events/test_continuous_redecision_resurrection.py: {created: "2026-06-12", last_used: "2026-06-26", note: "Continuous redecision resurrection/deadlock antibodies; extended 2026-06-26 to prove open-maker token->condition resolution reads executable_market_snapshot_latest without append scans when latest rows exist."}
@@ -210,7 +211,7 @@ test_trust_policy:
     tests/engine/test_topology_clock_from_persisted_market_events.py: {created: "2026-05-30", last_used: "2026-05-30"}
     tests/test_opendata_observed_members_aggregation.py: {created: "2026-05-30", last_used: "2026-05-30"}
     tests/events/test_live_cap.py: {created: "2026-05-25", last_used: "2026-05-25"}
-    tests/events/test_live_order_aggregate.py: {created: "2026-05-25", last_used: "2026-05-25"}
+    tests/events/test_live_order_aggregate.py: {created: "2026-05-25", last_used: "2026-07-15", note: "EDLI live-order aggregate law, including INV-43 current-state-independent absolute unit-price rejection."}
     tests/events/test_live_order_reconcile.py: {created: "2026-05-26", last_used: "2026-05-26"}
     tests/events/test_live_profit_audit.py: {created: "2026-05-26", last_used: "2026-05-26"}
     tests/events/test_arm_gate_artifact_boot_binding.py: {created: "2026-06-03", last_used: "2026-06-03", note: "PR-2 (A) D2 ARM-artifact boot binding: armed boot (canary/live) fails-closed without HEAD-bound positive-EV coverage-licensed ARM evidence artifact"}
@@ -244,7 +245,7 @@ test_trust_policy:
     tests/test_attribution_cohort_boundary.py: {created: "2026-05-04", last_used: "2026-05-04"}
     tests/test_state_paths.py: {created: "2026-05-04", last_used: "2026-05-04"}
     tests/test_oracle_evidence_status.py: {created: "2026-05-04", last_used: "2026-05-04"}
-    tests/test_strategy_profile_registry.py: {created: "2026-05-04", last_used: "2026-05-04"}
+    tests/test_strategy_profile_registry.py: {created: "2026-05-04", last_used: "2026-07-15", note: "Strategy registry law, including INV-43 minimum live entry price schema floor."}
     tests/test_market_phase_evidence.py: {created: "2026-05-04", last_used: "2026-05-04"}
     tests/test_phase_aware_kelly_live.py: {created: "2026-05-04", last_used: "2026-05-04"}
     tests/test_authority_rebuild_invariants.py: {created: "2026-05-04", last_used: "2026-05-04"}
@@ -392,7 +393,7 @@ test_trust_policy:
     tests/test_entry_exit_symmetry.py: {created: "2026-04-07", last_used: "2026-04-23"}
 
     tests/test_execution_price.py: {created: "2026-04-13", last_used: "2026-04-29"}
-    tests/test_executor.py: {created: "2026-04-27", last_used: "2026-04-27"}
+    tests/test_executor.py: {created: "2026-04-27", last_used: "2026-07-15", note: "Executor live-order safety, including INV-43 exit rejection before command persistence."}
     tests/test_executor_command_split.py: {created: "2026-04-26", last_used: "2026-07-11"}
     tests/test_executor_db_target.py: {created: "2026-04-26", last_used: "2026-04-27"}
     tests/test_executor_typed_boundary.py: {created: "2026-04-23", last_used: "2026-04-27"}
@@ -495,7 +496,7 @@ test_trust_policy:
     tests/test_z0_plan_lock.py: {created: "2026-04-27", last_used: "2026-04-27"}
     tests/test_cutover_guard.py: {created: "2026-04-27", last_used: "2026-04-27"}
     tests/test_heartbeat_supervisor.py: {created: "2026-04-27", last_used: "2026-07-11", note: "Heartbeat supervisor fail-closed and market-discovery scheduler antibodies. Extended 2026-07-11 to prove the external keeper runs the dead-proxy bypass before constructing its CLOB client, matching src.main startup semantics."}
-    tests/test_v2_adapter.py: {created: "2026-04-27", last_used: "2026-04-29"}
+    tests/test_v2_adapter.py: {created: "2026-04-27", last_used: "2026-07-15", note: "Polymarket V2 adapter provenance and INV-43 inclusive single/batch unit-price boundary before SDK contact."}
     tests/test_collateral_ledger.py: {created: "2026-04-27", last_used: "2026-04-27"}
     tests/test_executable_market_snapshot.py: {created: "2026-04-27", last_used: "2026-06-26", note: "Executable snapshot persistence/freshness/command antibodies. Extended 2026-06-26 to prove executable_market_snapshot_latest upsert semantics and refresh-priority latest reads without append scans."}
     tests/test_provenance_5_projections.py: {created: "2026-04-27", last_used: "2026-04-27"}

@@ -85,6 +85,11 @@ read model, and the current global auction witness; it supersedes no separate
 authority surface.
 
 ## Deliverables
+- Enforce INV-43 at the real venue envelope boundary: every live BUY/SELL,
+  entry/exit, single/batch unit price must be inside inclusive `[0.05, 0.95]`.
+  No q-kernel, current-state, strategy-tail, risk, or order-role exception may
+  waive it; rejection occurs before command persistence where possible and
+  always before SDK contact.
 - Keep Normal `q_json` as an immutable point estimate, never as executable certainty.
 - Widen the shared simplex carrier by the exact 51-member zero-hit limit and the
   distribution-free Cantelli limit from current mean/variance.
@@ -149,7 +154,25 @@ authority surface.
   come from one certificate.  A superseded scalar admission reject must not
   survive beside a positive globally certified edge.
 
+## Work record — INV-43 recovery (2026-07-15)
+
+- Git forensic found no reset/rebase/drop and no commit on any ref containing
+  `LIVE_ORDER_UNIT_PRICE_MIN`: the 2026-07-13 implementation remained an
+  uncommitted worktree slice and was overwritten before deployment.
+- Paris 35C canonical evidence proved the consequence: market `2888967`
+  accumulated `5106.247161` NO shares at chain average `$0.0039`; every loaded
+  SHA during the submit window lacked INV-43.
+- Recovery owns the envelope contract, executor/aggregate/qkernel seams,
+  strategy registry, invariant/authority/reference surfaces, and direct
+  single/batch/entry/exit antibodies. Canonical DB content is read-only.
+
 ## Verification
+- INV-43 focused venue/entry/exit/current-state antibodies: `22 passed`;
+  architecture contracts: `97 passed`; invariant citations, planning evidence,
+  `py_compile`, and `git diff --check`: passed. The broader three-file
+  qkernel/aggregate/economics slice produced `249 passed, 1 failed`; the lone
+  failure is an existing 0.10 strategy-floor expectation for an in-band 0.0538
+  order, not an absolute-band bypass.
 - Focused first-principles antibody and settlement-preimage regressions pass.
 - All carrier rows sum to one; NO lower-CVaR is the pointwise complement and does
   not exceed `1 - q_ucb_required`.

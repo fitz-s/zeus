@@ -784,7 +784,7 @@ class PolymarketClient:
 
         Args:
             token_id: YES or NO token ID
-            price: limit price [0.01, 0.99]
+            price: live limit price [0.05, 0.95] (INV-43)
             size: number of shares
             side: "BUY" or "SELL"
             order_type: concrete CLOB limit-order type ("GTC", "FOK", "FAK", ...)

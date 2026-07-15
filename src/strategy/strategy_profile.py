@@ -50,6 +50,7 @@ from typing import Optional
 import yaml
 
 from src.contracts.evidence_tier import EvidenceTier
+from src.contracts.venue_submission_envelope import LIVE_ORDER_UNIT_PRICE_MIN
 from src.state.paths import REPO_ROOT
 
 logger = logging.getLogger(__name__)
@@ -349,6 +350,11 @@ def _build_profile(key: str, raw: dict) -> StrategyProfile:
         field_name="min_entry_price",
         upper_bound=1.0,
     )
+    if min_entry_price < float(LIVE_ORDER_UNIT_PRICE_MIN):
+        raise RegistrySchemaError(
+            f"{key}.min_entry_price={min_entry_price!r}: must be at least "
+            f"{LIVE_ORDER_UNIT_PRICE_MIN} under INV-43"
+        )
     min_strategy_notional_usd = _coerce_nonnegative_float(
         raw.get("min_strategy_notional_usd", 1.0),
         key=key,

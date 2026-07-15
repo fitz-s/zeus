@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Mapping
 
+from src.contracts.venue_submission_envelope import assert_live_order_unit_price
 from src.decision.family_decision_engine import (
     entry_price_floor_decision,
     native_curve_side_for_direction,
@@ -1063,6 +1064,12 @@ def _validate_pre_submit_revalidation_payload(
     else:
         raise LiveOrderAggregateError("PreSubmitRevalidated requires side=BUY or SELL")
     limit_price = _positive_number(payload.get("limit_price"), "limit_price")
+    try:
+        assert_live_order_unit_price(limit_price)
+    except ValueError as exc:
+        raise LiveOrderAggregateError(
+            f"PreSubmitRevalidated live order unit price out of bounds: {exc}"
+        ) from None
     q_live = _probability_number(payload.get("q_live"), "q_live")
     q_lcb = _probability_number(payload.get("q_lcb_5pct"), "q_lcb_5pct")
     if q_lcb > q_live:

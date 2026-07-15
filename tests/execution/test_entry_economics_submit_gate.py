@@ -1,5 +1,5 @@
 # Created: 2026-07-01
-# Last reused/audited: 2026-07-13
+# Last reused/audited: 2026-07-15
 # Authority basis: current q-kernel final-entry economics and selected-side probability quality law.
 from __future__ import annotations
 
@@ -214,10 +214,10 @@ def test_entry_economics_blocks_lucknow_style_negative_submit_edge():
 def test_entry_economics_rejects_direct_qkernel_yes_below_center_buy_floor_even_when_roi_clear():
     verdict = _entry_economics_component(
         _intent(
-            limit_price=0.006,
+            limit_price=0.05,
             q_live=0.82,
             q_lcb_5pct=0.72,
-            expected_edge=0.714,
+            expected_edge=0.67,
             min_entry_price=0.10,
             min_expected_profit_usd=1.0,
             min_submit_edge_density=0.05,
@@ -226,8 +226,8 @@ def test_entry_economics_rejects_direct_qkernel_yes_below_center_buy_floor_even_
                 route_type="direct",
                 payoff_q_point=0.82,
                 payoff_q_lcb=0.72,
-                cost=0.006,
-                edge_lcb=0.714,
+                cost=0.05,
+                edge_lcb=0.67,
                 selection_guard_q_safe=0.72,
             ),
         ),
@@ -240,7 +240,7 @@ def test_entry_economics_rejects_direct_qkernel_yes_below_center_buy_floor_even_
 
     assert verdict["allowed"] is False
     assert verdict["reason"] == "limit_price_below_strategy_entry_floor"
-    assert verdict["details"]["live_min_entry_price"] == 0.02
+    assert verdict["details"]["live_min_entry_price"] == 0.05
     assert verdict["details"]["effective_min_entry_price"] == 0.10
     assert verdict["details"]["qkernel_low_price_floor_authorized"] is True
 
@@ -248,10 +248,10 @@ def test_entry_economics_rejects_direct_qkernel_yes_below_center_buy_floor_even_
 def test_entry_economics_blocks_low_price_without_qkernel_selection_authority():
     verdict = _entry_economics_component(
         _intent(
-            limit_price=0.006,
+            limit_price=0.05,
             q_live=0.82,
             q_lcb_5pct=0.72,
-            expected_edge=0.714,
+            expected_edge=0.67,
             min_entry_price=0.10,
             min_expected_profit_usd=1.0,
             min_submit_edge_density=0.05,
@@ -259,8 +259,8 @@ def test_entry_economics_blocks_low_price_without_qkernel_selection_authority():
             qkernel_execution_economics=_econ(
                 payoff_q_point=0.82,
                 payoff_q_lcb=0.72,
-                cost=0.006,
-                edge_lcb=0.714,
+                cost=0.05,
+                edge_lcb=0.67,
                 selection_guard_q_safe=0.72,
             ),
         ),
@@ -308,10 +308,10 @@ def test_entry_economics_rejects_day0_without_qkernel_at_strategy_floor():
 def test_entry_economics_blocks_low_price_even_when_strategy_floor_allows_it():
     verdict = _entry_economics_component(
         _intent(
-            limit_price=0.006,
+            limit_price=0.05,
             q_live=0.82,
             q_lcb_5pct=0.72,
-            expected_edge=0.714,
+            expected_edge=0.67,
             min_entry_price=0.005,
             min_expected_profit_usd=1.0,
             min_submit_edge_density=0.05,
@@ -319,8 +319,8 @@ def test_entry_economics_blocks_low_price_even_when_strategy_floor_allows_it():
             qkernel_execution_economics=_econ(
                 payoff_q_point=0.82,
                 payoff_q_lcb=0.72,
-                cost=0.006,
-                edge_lcb=0.714,
+                cost=0.05,
+                edge_lcb=0.67,
                 selection_guard_q_safe=0.72,
             ),
         ),
@@ -332,7 +332,7 @@ def test_entry_economics_blocks_low_price_even_when_strategy_floor_allows_it():
     assert verdict["details"]["live_min_entry_price"] == 0.10
 
 
-def test_entry_economics_allows_micro_tail_yes_when_robust_edge_pays_hurdles():
+def test_entry_economics_rejects_micro_tail_yes_below_absolute_price_floor():
     verdict = _entry_economics_component(
         _intent(
             limit_price=0.024,
@@ -359,12 +359,11 @@ def test_entry_economics_allows_micro_tail_yes_when_robust_edge_pays_hurdles():
         },
     )
 
-    assert verdict["allowed"] is True
-    assert verdict["reason"] == "allowed"
-    assert verdict["details"]["q_lcb_5pct"] == pytest.approx(0.074)
+    assert verdict["allowed"] is False
+    assert verdict["reason"] == "live_order_unit_price_out_of_bounds"
 
 
-def test_entry_economics_allows_buenos_aires_shape_on_executable_economics():
+def test_entry_economics_rejects_buenos_aires_shape_below_absolute_price_floor():
     verdict = _entry_economics_component(
         _intent(
             limit_price=0.041,
@@ -394,9 +393,8 @@ def test_entry_economics_allows_buenos_aires_shape_on_executable_economics():
         },
     )
 
-    assert verdict["allowed"] is True
-    assert verdict["reason"] == "allowed"
-    assert verdict["details"]["q_lcb_5pct"] == pytest.approx(0.0990451308919892)
+    assert verdict["allowed"] is False
+    assert verdict["reason"] == "live_order_unit_price_out_of_bounds"
 
 
 def test_entry_economics_allows_high_confidence_center_buy_yes():
@@ -467,7 +465,7 @@ def test_entry_economics_allows_center_buy_yes_when_symmetric_quality_floor_clea
     assert verdict["details"]["q_lcb_5pct"] == pytest.approx(0.52)
 
 
-def test_entry_economics_allows_low_price_yes_with_positive_robust_edge():
+def test_entry_economics_rejects_low_price_yes_despite_positive_robust_edge():
     verdict = _entry_economics_component(
         _intent(
             limit_price=0.031,
@@ -496,9 +494,8 @@ def test_entry_economics_allows_low_price_yes_with_positive_robust_edge():
         },
     )
 
-    assert verdict["allowed"] is True
-    assert verdict["reason"] == "allowed"
-    assert verdict["details"]["q_lcb_5pct"] == pytest.approx(0.06052567908958011)
+    assert verdict["allowed"] is False
+    assert verdict["reason"] == "live_order_unit_price_out_of_bounds"
 
 
 def test_entry_economics_blocks_unarmed_selection_guard_even_with_large_raw_edge():
@@ -865,15 +862,15 @@ def test_entry_economics_blocks_weak_jeddah_style_expensive_no_density():
     verdict = _entry_economics_component(
         _intent(
             direction=Direction("buy_no"),
-            limit_price=0.98,
-            q_live=0.99,
-            q_lcb_5pct=0.986,
+            limit_price=0.95,
+            q_live=0.96,
+            q_lcb_5pct=0.956,
             expected_edge=0.006,
             qkernel_execution_economics=_econ(
                 side="NO",
-                payoff_q_point=0.99,
-                payoff_q_lcb=0.986,
-                cost=0.98,
+                payoff_q_point=0.96,
+                payoff_q_lcb=0.956,
+                cost=0.95,
                 edge_lcb=0.006,
                 selection_guard_q_safe=0.986,
             ),
@@ -965,7 +962,7 @@ def test_entry_economics_current_state_winner_ignores_legacy_profit_density_floo
     ("direction", "side"),
     ((Direction("buy_yes"), "YES"), (Direction("buy_no"), "NO")),
 )
-def test_entry_economics_current_state_uses_terminal_certificate_not_legacy_price_floor(
+def test_entry_economics_current_state_cannot_waive_absolute_price_floor(
     direction,
     side,
 ):
@@ -1009,8 +1006,8 @@ def test_entry_economics_current_state_uses_terminal_certificate_not_legacy_pric
         actionable_payload={"qkernel_execution_economics": economics},
     )
 
-    assert verdict["allowed"] is True
-    assert verdict["reason"] == "allowed"
+    assert verdict["allowed"] is False
+    assert verdict["reason"] == "live_order_unit_price_out_of_bounds"
 
 
 def test_recomputed_current_state_marker_cannot_bypass_durable_legacy_certificate():

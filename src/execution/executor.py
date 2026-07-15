@@ -44,6 +44,7 @@ from src.contracts.execution_price import (
 from src.contracts.execution_intent import (
     POLYMARKET_MARKETABLE_BUY_MIN_NOTIONAL_USD,
 )
+from src.contracts.venue_submission_envelope import assert_live_order_unit_price
 from src.types import BinEdge
 from src.architecture.decorators import capability, protects
 from src.decision.family_decision_engine import (
@@ -1191,6 +1192,16 @@ def _entry_economics_component(
             reason="invalid_price_or_size",
             limit_price=limit_price,
             shares=submitted_shares,
+        )
+    try:
+        assert_live_order_unit_price(limit_price)
+    except ValueError as exc:
+        return _capability_component(
+            "entry_economics",
+            allowed=False,
+            reason="live_order_unit_price_out_of_bounds",
+            detail=str(exc),
+            limit_price=limit_price,
         )
     submit_edge = q_lcb - limit_price
     expected_profit = submit_edge * submitted_shares
@@ -3825,6 +3836,7 @@ def _build_pre_submit_envelope(
         error_message=None,
         captured_at=captured_at,
     )
+    envelope.assert_live_submit_bound()
     return envelope
 
 
@@ -4605,14 +4617,9 @@ def _align_buy_limit_price_to_tick(limit_price: float, min_tick_size: Decimal | 
     tick = Decimal(str(min_tick_size))
     if tick <= 0:
         raise ValueError("executable_snapshot_min_tick_size must be positive")
-    price = Decimal(str(limit_price))
+    price = assert_live_order_unit_price(limit_price)
     aligned = (price / tick).to_integral_value(rounding=ROUND_FLOOR) * tick
-    if aligned <= 0:
-        aligned = tick
-    upper = Decimal("1") - tick
-    if aligned >= Decimal("1"):
-        aligned = upper
-    return float(aligned)
+    return float(assert_live_order_unit_price(aligned))
 
 
 def _submit_tick_size_or_raise(min_tick_size: Decimal | str | float) -> Decimal:
@@ -4631,19 +4638,9 @@ def _align_sell_limit_price_to_tick(limit_price: float, min_tick_size: Decimal |
     """Round a SELL limit down to the executable snapshot tick."""
 
     tick = _submit_tick_size_or_raise(min_tick_size)
-    price = Decimal(str(limit_price))
-    min_price = tick
-    max_price = Decimal("1") - tick
-    if price < min_price:
-        price = min_price
-    elif price > max_price:
-        price = max_price
+    price = assert_live_order_unit_price(limit_price)
     aligned = (price / tick).to_integral_value(rounding=ROUND_FLOOR) * tick
-    if aligned < min_price:
-        aligned = min_price
-    elif aligned > max_price:
-        aligned = max_price
-    return float(aligned)
+    return float(assert_live_order_unit_price(aligned))
 
 
 def _exit_base_limit_price(
@@ -5305,10 +5302,20 @@ def execute_exit_order(
             intent_id=intent.intent_id,
             idempotency_key=intent.idempotency_key,
         )
-    aligned_limit_price = _align_sell_limit_price_to_tick(
-        limit_price,
-        effective_min_tick_size,
-    )
+    try:
+        aligned_limit_price = _align_sell_limit_price_to_tick(
+            limit_price,
+            effective_min_tick_size,
+        )
+    except ValueError as exc:
+        return OrderResult(
+            trade_id=intent.trade_id,
+            status="rejected",
+            reason=f"live_order_unit_price_out_of_bounds: {exc}",
+            order_role="exit",
+            intent_id=intent.intent_id,
+            idempotency_key=intent.idempotency_key,
+        )
     if intent.exact_limit_price is not None and not math.isclose(
         aligned_limit_price,
         float(intent.exact_limit_price),

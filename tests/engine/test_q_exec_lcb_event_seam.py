@@ -1,5 +1,6 @@
 # Created: 2026-06-23
-# Last audited: 2026-06-23
+# Last audited: 2026-07-15
+# Last reused/audited: 2026-07-15
 # Authority basis: docs/evidence/live_order_pathology/2026-06-23_selection_curse_*.md (counterfactual
 #   admission winner's-curse: admitted mid-price buy_no claims ~0.83 / realizes ~0.69; monotone in
 #   price; favorites >=0.95 calibrated; buy_yes benign). MONEY-PATH antibody: reverting the
@@ -143,7 +144,7 @@ def test_taker_quality_allows_touch_equal_effective_entry_floor(monkeypatch):
     assert float(proof["effective_min_entry_price"]) == pytest.approx(0.10)
 
 
-def test_legacy_qkernel_center_buy_keeps_its_declared_price_floor(monkeypatch):
+def test_qkernel_center_buy_taker_cannot_waive_absolute_price_floor(monkeypatch):
     _patch(monkeypatch, _bound())
     payload = dict(
         _BUY_NO,

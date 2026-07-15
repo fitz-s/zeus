@@ -293,7 +293,8 @@ This never freezes unrelated entries; the function always returns `0`
 
 1. Compute exit limit: `current_price - 0.01` (1 cent below current)
 2. If `best_bid < base_price` and slippage ≤ 3% → use best_bid instead
-3. Clamp to `[0.01, 0.99]`
+3. Reject outside the absolute live-submit band `[0.05, 0.95]`, then align to
+   the market tick without widening the band
 4. SELL quantization: `math.floor(shares * 100 + 1e-9) / 100.0` (round DOWN)
 5. Reject if shares round to zero or no token_id
 6. Place via `PolymarketClient.place_limit_order(side="SELL")`
@@ -536,6 +537,12 @@ These are separate truth surfaces that should not be conflated.
 - `price_type: Literal["vwmp", "ask", "bid", "implied_probability", "fee_adjusted"]`
 - `fee_deducted: bool` — whether taker fee has been applied
 - `currency: Literal["usd", "probability_units"]`
+
+Live venue submission adds a stricter order-price contract: every BUY/SELL,
+single/batch order must have unit price in inclusive `[0.05, 0.95]`. This is
+enforced by `VenueSubmissionEnvelope.assert_live_submit_bound()` immediately
+before the adapter SDK boundary; sizing-safe prices outside this band are not
+submit-safe prices.
 
 ### 7.2 Kelly safety gate
 

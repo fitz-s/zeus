@@ -1640,6 +1640,39 @@ def test_one_step_sdk_path_still_produces_envelope_with_provenance(tmp_path):
     assert any(call[0] == "create_and_post_order" for call in fake.calls)
 
 
+@pytest.mark.parametrize("price", [0.05, 0.95])
+@pytest.mark.parametrize("side", ["BUY", "SELL"])
+def test_live_submit_unit_price_band_is_inclusive(tmp_path, price, side):
+    fake = FakeOneStepClient(response={"orderID": "ord-boundary", "status": "live"})
+    adapter, _ = _adapter(tmp_path, fake)
+    envelope = adapter.create_submission_envelope(
+        _priced_intent(price), FakeSnapshot(), order_type="GTC"
+    ).with_updates(side=side)
+
+    result = adapter.submit(envelope)
+
+    assert result.status == "accepted"
+    assert any(call[0] == "create_and_post_order" for call in fake.calls)
+
+
+@pytest.mark.parametrize("price", [0.0499, 0.9501])
+@pytest.mark.parametrize("side", ["BUY", "SELL"])
+def test_live_submit_rejects_out_of_band_price_before_sdk_contact(
+    tmp_path, price, side
+):
+    fake = FakeOneStepClient(response={"orderID": "must-not-submit", "status": "live"})
+    adapter, _ = _adapter(tmp_path, fake)
+    envelope = adapter.create_submission_envelope(
+        _priced_intent(0.50), FakeSnapshot(), order_type="GTC"
+    ).with_updates(price=Decimal(str(price)), side=side)
+
+    result = adapter.submit(envelope)
+
+    assert result.status == "rejected"
+    assert "outside absolute [0.05, 0.95]" in str(result.error_message)
+    assert not fake.calls
+
+
 def test_legacy_order_result_preserves_matched_submit_truth(tmp_path):
     fake = FakeOneStepClient(
         response={
@@ -2467,6 +2500,21 @@ class TestSubmitBatch:
         envelopes = _batch_envelopes(adapter, MAX_ORDERS_PER_BATCH + 1)
         with pytest.raises(ValueError, match="exceeds MAX_ORDERS_PER_BATCH"):
             adapter.submit_batch(envelopes)
+
+    def test_out_of_band_price_rejects_entire_batch_before_sdk_contact(self, tmp_path):
+        fake = FakeBatchTwoStepClient()
+        adapter, _ = _adapter(tmp_path, fake)
+        envelopes = _batch_envelopes(adapter, 3)
+        envelopes[1] = envelopes[1].with_updates(price=Decimal("0.951"))
+
+        results = adapter.submit_batch(envelopes)
+
+        assert [result.status for result in results] == ["rejected"] * 3
+        assert all(
+            "outside absolute [0.05, 0.95]" in str(result.error_message)
+            for result in results
+        )
+        assert not fake.calls
 
     def test_index_fallback_maps_results_in_order(self, tmp_path):
         fake = FakeBatchTwoStepClient(

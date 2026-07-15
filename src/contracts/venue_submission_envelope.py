@@ -19,6 +19,25 @@ from typing import Any, ClassVar, Optional
 
 _DECIMAL_FIELDS = {"tick_size", "min_order_size", "price", "size"}
 _BYTES_FIELDS = {"signed_order"}
+LIVE_ORDER_UNIT_PRICE_MIN = Decimal("0.05")
+LIVE_ORDER_UNIT_PRICE_MAX = Decimal("0.95")
+
+
+def assert_live_order_unit_price(price: Decimal | str | float) -> Decimal:
+    """Return a live-submit price or fail closed outside the absolute band."""
+
+    try:
+        value = price if isinstance(price, Decimal) else Decimal(str(price))
+    except Exception as exc:
+        raise ValueError(f"live order unit price must be decimal, got {price!r}") from exc
+    if not value.is_finite():
+        raise ValueError(f"live order unit price must be finite, got {price!r}")
+    if value < LIVE_ORDER_UNIT_PRICE_MIN or value > LIVE_ORDER_UNIT_PRICE_MAX:
+        raise ValueError(
+            "live order unit price outside absolute [0.05, 0.95] submit band: "
+            f"price={value}"
+        )
+    return value
 
 
 def _json_default(value: Any) -> Any:
@@ -107,6 +126,7 @@ class VenueSubmissionEnvelope:
     def assert_live_submit_bound(self) -> None:
         """Fail closed unless the envelope is bound to real market identity."""
 
+        assert_live_order_unit_price(self.price)
         reason = self.compatibility_placeholder_reason
         if reason:
             raise ValueError(

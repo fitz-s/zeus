@@ -1,5 +1,5 @@
 # Created: 2026-05-04
-# Last reused/audited: 2026-05-21
+# Last reused/audited: 2026-07-15
 # Authority basis: docs/operations/task_2026-05-04_oracle_kelly_evidence_rebuild/PLAN.md §A4 (StrategyProfile registry + 4-site cutover invariants).
 """StrategyProfile registry regression antibodies.
 
@@ -37,6 +37,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+import yaml
 
 from src.strategy import strategy_profile as sp
 from src.strategy.strategy_profile import (
@@ -299,7 +300,7 @@ def test_live_entry_quality_floors_cover_fast_alpha_paths() -> None:
     expected_min_entry_prices = {
         "settlement_capture": 0.10,
         "day0_nowcast_entry": 0.10,
-        "center_buy": 0.02,
+        "center_buy": 0.05,
         "opening_inertia": 0.10,
         "imminent_open_capture": 0.10,
     }
@@ -319,7 +320,7 @@ def test_center_buy_profit_floor_aligns_with_qkernel_roi_frontier() -> None:
 
     profile = sp.get("center_buy")
     assert profile.min_expected_profit_usd == pytest.approx(0.25)
-    assert profile.min_entry_price == pytest.approx(0.02)
+    assert profile.min_entry_price == pytest.approx(0.05)
     assert profile.min_submit_edge_density == pytest.approx(0.05)
 
 
@@ -327,7 +328,7 @@ def test_center_buy_live_floor_blocks_tail_lottery_prices() -> None:
     """Center-buy is a forecast-accuracy strategy, not an ultra-low tail strategy."""
 
     profile = sp.get("center_buy")
-    assert profile.min_entry_price == pytest.approx(0.02)
+    assert profile.min_entry_price == pytest.approx(0.05)
     assert profile.allow_ultra_low_tail is False
 
 
@@ -347,6 +348,16 @@ def test_regime_throttle_uses_reviewed_city_cluster_not_city_name() -> None:
 
 
 # ── schema enforcement ─────────────────────────────────────────────── #
+
+
+def test_schema_load_rejects_entry_price_below_absolute_band(tmp_path: Path):
+    data = yaml.safe_load(sp.REGISTRY_PATH.read_text())
+    data["center_buy"]["min_entry_price"] = 0.04
+    bad = tmp_path / "bad_registry.yaml"
+    bad.write_text(yaml.safe_dump(data, sort_keys=False))
+
+    with pytest.raises(RegistrySchemaError, match="must be at least 0.05 under INV-43"):
+        sp._reload_for_test(bad)
 
 
 def test_schema_load_rejects_unknown_field(tmp_path: Path):

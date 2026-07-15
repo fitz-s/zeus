@@ -1,5 +1,5 @@
 # Created: 2026-05-25
-# Last reused/audited: 2026-07-13
+# Last reused/audited: 2026-07-15
 # Authority basis: PR332 full-live split verdict; live-order aggregate substrate PR A.
 from __future__ import annotations
 
@@ -1225,7 +1225,7 @@ def test_pre_submit_current_state_winner_ignores_legacy_profit_density_floors(
     ("direction", "side"),
     (("buy_yes", "YES"), ("buy_no", "NO")),
 )
-def test_pre_submit_current_state_uses_terminal_certificate_not_legacy_price_floor(
+def test_pre_submit_current_state_cannot_waive_absolute_price_floor(
     direction, side
 ):
     ledger = LiveOrderAggregateLedger(_conn())
@@ -1322,17 +1322,18 @@ def test_pre_submit_current_state_uses_terminal_certificate_not_legacy_price_flo
         source_authority="decision_kernel",
     )
 
-    ledger.append_event(
-        aggregate_id="event-floor:intent-floor",
-        event_type="PreSubmitRevalidated",
-        payload={
-            **payload,
-            "event_id": "event-floor",
-            "final_intent_id": "intent-floor",
-        },
-        occurred_at=NOW,
-        source_authority="engine_adapter",
-    )
+    with pytest.raises(LiveOrderAggregateError, match="unit price out of bounds"):
+        ledger.append_event(
+            aggregate_id="event-floor:intent-floor",
+            event_type="PreSubmitRevalidated",
+            payload={
+                **payload,
+                "event_id": "event-floor",
+                "final_intent_id": "intent-floor",
+            },
+            occurred_at=NOW,
+            source_authority="engine_adapter",
+        )
 
 
 def test_pre_submit_recomputed_current_state_marker_cannot_bypass_decision_proof():
@@ -1468,7 +1469,7 @@ def test_pre_submit_rejects_low_price_yes_below_live_floor():
         )
 
 
-def test_pre_submit_rejects_qkernel_low_price_yes_below_roi_frontier_floor():
+def test_pre_submit_rejects_qkernel_price_below_absolute_floor():
     ledger = LiveOrderAggregateLedger(_conn())
     ledger.append_event(
         aggregate_id="event-1:intent-1",
@@ -1478,7 +1479,7 @@ def test_pre_submit_rejects_qkernel_low_price_yes_below_roi_frontier_floor():
         source_authority="decision_kernel",
     )
 
-    with pytest.raises(LiveOrderAggregateError, match="qkernel roi frontier not useful"):
+    with pytest.raises(LiveOrderAggregateError, match="unit price out of bounds"):
         ledger.append_event(
             aggregate_id="event-1:intent-1",
             event_type="PreSubmitRevalidated",
@@ -1564,7 +1565,7 @@ def test_pre_submit_rejects_nonpositive_qkernel_delta_u_at_min():
         )
 
 
-def test_pre_submit_accepts_center_buy_yes_above_micro_tail_floor():
+def test_pre_submit_accepts_center_buy_yes_at_absolute_floor():
     ledger = LiveOrderAggregateLedger(_conn())
     ledger.append_event(
         aggregate_id="event-1:intent-1",
@@ -1581,14 +1582,14 @@ def test_pre_submit_accepts_center_buy_yes_above_micro_tail_floor():
                 strategy_key="center_buy",
                 q_live=0.35,
                 q_lcb_5pct=0.25,
-                limit_price=0.024,
-                expected_edge=0.226,
+                limit_price=0.05,
+                expected_edge=0.20,
                 size=30.0,
-            min_entry_price=0.02,
+            min_entry_price=0.05,
             min_expected_profit_usd=1.0,
             min_submit_edge_density=0.05,
-            current_best_bid=0.014,
-            current_best_ask=0.034,
+            current_best_bid=0.04,
+            current_best_ask=0.05,
             qkernel_execution_economics={
                 "source": "qkernel_spine",
                     "route_id": "DIRECT_YES:b24@proof",
@@ -1596,8 +1597,8 @@ def test_pre_submit_accepts_center_buy_yes_above_micro_tail_floor():
                     "side": "YES",
                     "payoff_q_point": 0.35,
                     "payoff_q_lcb": 0.25,
-                    "cost": 0.024,
-                    "edge_lcb": 0.226,
+                    "cost": 0.05,
+                    "edge_lcb": 0.20,
                 "delta_u_at_min": 0.01,
                 "optimal_stake_usd": 30.0,
                 "optimal_delta_u": 0.01,
@@ -1614,7 +1615,7 @@ def test_pre_submit_accepts_center_buy_yes_above_micro_tail_floor():
     )
 
 
-def test_pre_submit_rejects_direct_qkernel_yes_below_strategy_floor_even_when_roi_clear():
+def test_pre_submit_rejects_direct_qkernel_yes_below_absolute_floor():
     ledger = LiveOrderAggregateLedger(_conn())
     ledger.append_event(
         aggregate_id="event-1:intent-1",
@@ -1624,7 +1625,7 @@ def test_pre_submit_rejects_direct_qkernel_yes_below_strategy_floor_even_when_ro
         source_authority="decision_kernel",
     )
 
-    with pytest.raises(LiveOrderAggregateError, match="entry price below strategy floor"):
+    with pytest.raises(LiveOrderAggregateError, match="unit price out of bounds"):
         ledger.append_event(
             aggregate_id="event-1:intent-1",
             event_type="PreSubmitRevalidated",
@@ -2035,7 +2036,7 @@ def test_pre_submit_rejects_jeddah_qkernel_payoff_mismatched_submit_lcb():
                 token_id="token-no",
                 q_live=0.986261171798223,
                 q_lcb_5pct=0.986261171798223,
-                limit_price=0.98,
+                limit_price=0.95,
                 expected_edge=0.005,
                 size=200.0,
                 min_submit_edge_density=0.0,
@@ -2045,8 +2046,8 @@ def test_pre_submit_rejects_jeddah_qkernel_payoff_mismatched_submit_lcb():
                     "side": "NO",
                     "payoff_q_point": 0.986261171798223,
                     "payoff_q_lcb": 0.998678563135879,
-                    "cost": 0.98,
-                    "edge_lcb": 0.018678563135879,
+                    "cost": 0.95,
+                    "edge_lcb": 0.048678563135879,
                     "delta_u_at_min": 0.001,
                     "optimal_stake_usd": 200.0,
                     "optimal_delta_u": 0.001,
@@ -2081,9 +2082,9 @@ def test_pre_submit_rejects_jeddah_micro_edge_density_even_when_positive_edge():
                 side="BUY",
                 direction="buy_no",
                 token_id="token-no",
-                q_live=0.986261171798223,
-                q_lcb_5pct=0.986261171798223,
-                limit_price=0.98,
+                q_live=0.96,
+                q_lcb_5pct=0.956,
+                limit_price=0.95,
                 size=21.99,
                 expected_edge=0.005,
                 min_expected_profit_usd=0.05,
