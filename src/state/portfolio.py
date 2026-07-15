@@ -2767,8 +2767,12 @@ def load_runtime_open_portfolio(conn: sqlite3.Connection) -> PortfolioState:
     return state
 
 
-def load_portfolio(path: Optional[Path] = None) -> PortfolioState:
-    """Load portfolio DB-first, with explicit JSON fallback only when projection is unavailable."""
+def load_portfolio(
+    path: Optional[Path] = None,
+    *,
+    open_positions_only: bool = False,
+) -> PortfolioState:
+    """Load canonical portfolio truth, optionally limited to runtime-open rows."""
     path = path or POSITIONS_PATH
 
     current_mode = get_mode()
@@ -2828,7 +2832,7 @@ def load_portfolio(path: Optional[Path] = None) -> PortfolioState:
     entry_proof_review_reasons: dict[str, str] = {}
     try:
         attached = _attached_schema_names(conn)
-        if "world" not in attached and ZEUS_WORLD_DB_PATH.exists():
+        if not open_positions_only and "world" not in attached and ZEUS_WORLD_DB_PATH.exists():
             try:
                 conn.execute("ATTACH DATABASE ? AS world", (str(ZEUS_WORLD_DB_PATH),))
             except sqlite3.OperationalError:
@@ -2836,14 +2840,18 @@ def load_portfolio(path: Optional[Path] = None) -> PortfolioState:
                     "load_portfolio could not attach world DB for EDLI entry-proof audit",
                     exc_info=True,
                 )
-        snapshot = query_portfolio_loader_view(conn)
-        entry_proof_review_reasons = _query_edli_entry_proof_review_reasons(
+        snapshot = query_portfolio_loader_view(
             conn,
-            list(snapshot.get("positions", [])),
+            open_positions_only=open_positions_only,
         )
-        ignored_tokens = query_token_suppression_tokens(conn)
-        chain_only_quarantines = query_chain_only_quarantine_rows(conn)
-        if snapshot.get("status") in ("ok", "partial_stale", "empty"):
+        if not open_positions_only:
+            entry_proof_review_reasons = _query_edli_entry_proof_review_reasons(
+                conn,
+                list(snapshot.get("positions", [])),
+            )
+            ignored_tokens = query_token_suppression_tokens(conn)
+            chain_only_quarantines = query_chain_only_quarantine_rows(conn)
+        if not open_positions_only and snapshot.get("status") in ("ok", "partial_stale", "empty"):
             try:
                 settlement_rows = query_authoritative_settlement_rows(
                     conn,

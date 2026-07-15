@@ -1,5 +1,5 @@
 # Created: prior to 2026-04-26
-# Last reused or audited: 2026-06-08
+# Last reused or audited: 2026-07-15
 # Authority basis: Zeus DB schema + world_write_mutex CATEGORY ANTIBODY.
 #   2026-06-08 thepath/audit-realign Fitz #5 lock-CATEGORY kill: _apply_busy_timeout
 #   helper + SQL-level PRAGMA busy_timeout in _connect()/get_connection() so a
@@ -11537,6 +11537,7 @@ def query_portfolio_loader_view(
     *,
     temperature_metric: str | None = None,
     runtime_exposure_only: bool = False,
+    open_positions_only: bool = False,
 ) -> dict:
     if conn is None:
         return {
@@ -11545,6 +11546,7 @@ def query_portfolio_loader_view(
             "positions": [],
             "temperature_metric": temperature_metric,
             "runtime_exposure_only": runtime_exposure_only,
+            "open_positions_only": open_positions_only,
         }
     if not _table_exists(conn, "position_current"):
         return {
@@ -11553,6 +11555,7 @@ def query_portfolio_loader_view(
             "positions": [],
             "temperature_metric": temperature_metric,
             "runtime_exposure_only": runtime_exposure_only,
+            "open_positions_only": open_positions_only,
         }
 
     actual_cols = {row[1] for row in conn.execute("PRAGMA table_info(position_current)").fetchall()}
@@ -11561,7 +11564,7 @@ def query_portfolio_loader_view(
             "position_current.temperature_metric column missing; "
             "init_schema ALTER must have failed. Re-run init or check DB integrity."
         )
-    if runtime_exposure_only:
+    if runtime_exposure_only or open_positions_only:
         missing = sorted(_RUNTIME_EXPOSURE_REQUIRED_COLUMNS - actual_cols)
         if missing:
             raise RuntimeError(
@@ -11573,13 +11576,14 @@ def query_portfolio_loader_view(
     if temperature_metric is not None:
         predicates.append("temperature_metric = ?")
         params.append(temperature_metric)
-    if runtime_exposure_only:
+    if runtime_exposure_only or open_positions_only:
         # T5 (docs/rebuild/quarantine_excision_2026-07-11.md): this used to
         # also OR in every phase='quarantined' row (unless chain truth had
         # already proved the asset exited/redeemed/worthless). The T5 schema
         # migration has run and the DB CHECK no longer admits the literal, so
         # that extra leg is retired — OPEN_EXPOSURE_PHASES alone is
-        # authoritative again.
+        # authoritative again. The monitor's open-only view retains lifecycle
+        # transition hints; the sizing view below intentionally does not.
         placeholders = ", ".join("?" for _ in OPEN_EXPOSURE_PHASES)
         runtime_open_predicate = f"phase IN ({placeholders})"
         params.extend(OPEN_EXPOSURE_PHASES)
@@ -11659,6 +11663,7 @@ def query_portfolio_loader_view(
             "positions": [],
             "temperature_metric": temperature_metric,
             "runtime_exposure_only": runtime_exposure_only,
+            "open_positions_only": open_positions_only,
         }
     if runtime_exposure_only:
         _assert_runtime_exposure_rows(rows)
@@ -11795,6 +11800,7 @@ def query_portfolio_loader_view(
         "positions": positions,
         "temperature_metric": temperature_metric,
         "runtime_exposure_only": runtime_exposure_only,
+        "open_positions_only": open_positions_only,
     }
 
 

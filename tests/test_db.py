@@ -1,6 +1,6 @@
 # Created: 2026-03-30
-# Last reused/audited: 2026-07-09
-# Lifecycle: created=2026-03-30; last_reviewed=2026-07-09; last_reused=2026-07-09
+# Last reused/audited: 2026-07-15
+# Lifecycle: created=2026-03-30; last_reviewed=2026-07-15; last_reused=2026-07-15
 # Purpose: Protect DB schema bootstrap contracts, daily revision-history DDL, and fact-smoke authority labels.
 # Reuse: Audit touched schema assertions and high-sensitivity skip metadata before closeout.
 # Authority basis: P2 4.4.A2 daily observation revision-history schema packet; Wave16 object-meaning fact-smoke authority repair; PR90 latest-event env authority review fix; 2026-05-16 live-continuous Phase B event-status boundary; 2026-07-09 portfolio-loader event-spine read indexes.
@@ -1721,6 +1721,38 @@ def test_portfolio_loader_ignores_exit_backoff_hint_for_day0_held_position(tmp_p
     assert position["exit_state"] == ""
     assert status_view["positions"][0]["exit_state"] == "none"
     assert status_view["exit_state_counts"] == {"none": 1}
+
+
+def test_portfolio_loader_open_only_retains_transition_hints(tmp_path):
+    from src.state.db import query_portfolio_loader_view
+
+    conn = get_connection(tmp_path / "open-only-portfolio.db")
+    init_schema(conn)
+    _insert_current_position_for_fill_authority_view_test(
+        conn,
+        position_id="pending-exit-position",
+        phase="pending_exit",
+    )
+    _insert_status_position_event_for_view_test(
+        conn,
+        position_id="pending-exit-position",
+        event_type="EXIT_ORDER_REJECTED",
+        status="retry_pending",
+        occurred_at="2026-04-01T00:05:00+00:00",
+    )
+    _insert_current_position_for_fill_authority_view_test(
+        conn,
+        position_id="settled-position",
+        phase="settled",
+    )
+    conn.commit()
+
+    view = query_portfolio_loader_view(conn, open_positions_only=True)
+    conn.close()
+
+    assert view["open_positions_only"] is True
+    assert [row["position_id"] for row in view["positions"]] == ["pending-exit-position"]
+    assert view["positions"][0]["exit_state"] == "retry_pending"
 
 
 def test_position_current_views_use_fill_authority_current_open_economics(tmp_path):

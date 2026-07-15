@@ -6268,7 +6268,7 @@ def run_exit_monitor_cycle(
     except Exception as _wd_exc:  # noqa: BLE001 — watchdog must never break the cycle
         logger.warning("exit_monitor: cadence watchdog failed (non-fatal): %s", _wd_exc)
     try:
-        portfolio = load_portfolio()
+        portfolio = load_portfolio(open_positions_only=True)
         held_monitor_allocator_refresh = _refresh_global_allocator_for_held_position_monitor(
             conn,
             portfolio,
