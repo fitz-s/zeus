@@ -5166,6 +5166,7 @@ def event_bound_live_adapter_from_trade_conn(
             )
 
             gamma_batch_requests = 0
+            gamma_event_requests = 0
 
             def _gamma_markets(condition_ids):
                 nonlocal gamma_batch_requests
@@ -5177,10 +5178,33 @@ def event_bound_live_adapter_from_trade_conn(
                 gamma_batch_requests += batch_requests
                 return markets
 
+            def _gamma_event(slug):
+                nonlocal gamma_event_requests
+                gamma_event_requests += 1
+                response = _gamma_get(
+                    "/events",
+                    params={"slug": str(slug)},
+                    timeout=gamma_timeout,
+                )
+                if getattr(response, "status_code", None) != 200:
+                    raise ValueError(
+                        "GLOBAL_CURRENT_GAMMA_EVENT_HTTP:"
+                        f"{getattr(response, 'status_code', None)}"
+                    )
+                payload = response.json()
+                if (
+                    not isinstance(payload, list)
+                    or len(payload) != 1
+                    or not isinstance(payload[0], Mapping)
+                ):
+                    raise ValueError("GLOBAL_CURRENT_GAMMA_EVENT_RESPONSE_INVALID")
+                return payload[0]
+
             gamma_metadata = {}
             bound_probabilities = bind_current_global_probability_tokens(
                 forecast_conn,
                 probability_witnesses=probabilities,
+                get_gamma_event=_gamma_event,
                 get_gamma_markets=_gamma_markets,
                 trade_conn=trade_conn,
                 checked_at_utc=_at,
@@ -5189,11 +5213,13 @@ def event_bound_live_adapter_from_trade_conn(
             )
             logging.getLogger(__name__).info(
                 "global book epoch stage completed: token_bind elapsed_s=%.3f "
-                "families=%d metadata=%d gamma_requests=%d",
+                "families=%d metadata=%d gamma_batch_requests=%d "
+                "gamma_event_requests=%d",
                 _time.monotonic() - _book_started,
                 len(bound_probabilities),
                 len(gamma_metadata),
                 gamma_batch_requests,
+                gamma_event_requests,
             )
             # Every whole-universe fence refreshes current Gamma tradeability.
             # Cached rows remain useful only as a complete batch-local overlay;

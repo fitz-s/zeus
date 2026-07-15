@@ -485,6 +485,34 @@ def _global_book_metadata_is_current(
     )
 
 
+def _global_book_metadata_is_executable(
+    metadata: Mapping[str, object],
+    *,
+    checked_at_utc: datetime,
+) -> bool:
+    if not _global_book_metadata_is_current(
+        metadata,
+        checked_at_utc=checked_at_utc,
+    ):
+        return False
+    try:
+        tradeability = json.loads(
+            str(metadata.get("tradeability_status_json") or "{}")
+        )
+    except json.JSONDecodeError:
+        tradeability = {}
+    return (
+        bool(metadata.get("enable_orderbook"))
+        and bool(metadata.get("active"))
+        and not bool(metadata.get("closed"))
+        and bool(metadata.get("accepting_orders"))
+        and not (
+            isinstance(tradeability, Mapping)
+            and tradeability.get("executable_allowed") is False
+        )
+    )
+
+
 def capture_current_global_book_epoch(
     trade_conn: sqlite3.Connection,
     *,
@@ -535,7 +563,44 @@ def capture_current_global_book_epoch(
     if started_at.tzinfo is None:
         raise ValueError("GLOBAL_BOOK_CLOCK_INVALID")
     started_at = started_at.astimezone(timezone.utc)
-    tokens = [row[4] for row in bindings]
+    metadata_rows = _global_book_snapshot_rows(
+        trade_conn,
+        condition_ids=[row[2] for row in bindings],
+    )
+    metadata_by_key: dict[tuple[str, str], dict[str, object]] = {}
+    for row in metadata_rows:
+        condition_id = str(row.get("condition_id") or "")
+        for token_id in (
+            row.get("selected_outcome_token_id"),
+            row.get("yes_token_id"),
+            row.get("no_token_id"),
+        ):
+            clean_token = str(token_id or "").strip()
+            if condition_id and clean_token:
+                metadata_by_key.setdefault((condition_id, clean_token), row)
+    for key, row in (metadata_overrides or {}).items():
+        metadata_by_key[(str(key[0]), str(key[1]))] = dict(row)
+
+    tokens = []
+    for _, _, condition_id, _, token_id in bindings:
+        metadata = metadata_by_key.get((condition_id, token_id))
+        if metadata is None:
+            raise ValueError(
+                f"GLOBAL_BOOK_METADATA_MISSING:{condition_id}:{token_id}"
+            )
+        if not metadata.get("_global_current_gamma") and snapshot_row_is_invalidated(
+            trade_conn,
+            metadata,
+            checked_at=started_at,
+        ):
+            raise ValueError(
+                f"GLOBAL_BOOK_METADATA_INVALIDATED:{condition_id}:{token_id}"
+            )
+        if _global_book_metadata_is_executable(
+            metadata,
+            checked_at_utc=started_at,
+        ):
+            tokens.append(token_id)
     chunks = [
         tokens[offset : offset + batch_size]
         for offset in range(0, len(tokens), batch_size)
@@ -553,7 +618,9 @@ def capture_current_global_book_epoch(
             }
         )
 
-    if len(chunks) == 1 or book_fetch_workers == 1:
+    if not chunks:
+        pass
+    elif len(chunks) == 1 or book_fetch_workers == 1:
         for chunk in chunks:
             _merge_batch(get_books(chunk))
     else:
@@ -575,23 +642,6 @@ def capture_current_global_book_epoch(
     if missing_books:
         raise ValueError(f"GLOBAL_BOOK_RESPONSE_INCOMPLETE:{len(missing_books)}")
 
-    metadata_rows = _global_book_snapshot_rows(
-        trade_conn,
-        condition_ids=[row[2] for row in bindings],
-    )
-    metadata_by_key: dict[tuple[str, str], dict[str, object]] = {}
-    for row in metadata_rows:
-        condition_id = str(row.get("condition_id") or "")
-        for token_id in (
-            row.get("selected_outcome_token_id"),
-            row.get("yes_token_id"),
-            row.get("no_token_id"),
-        ):
-            clean_token = str(token_id or "").strip()
-            if condition_id and clean_token:
-                metadata_by_key.setdefault((condition_id, clean_token), row)
-    for key, row in (metadata_overrides or {}).items():
-        metadata_by_key[(str(key[0]), str(key[1]))] = dict(row)
     assets: list[CurrentGlobalBookAsset] = []
     sell_assets: list[CurrentGlobalSellAsset] = []
     states: list[tuple[str, ...]] = []
@@ -605,15 +655,6 @@ def capture_current_global_book_epoch(
             checked_at=started_at,
         ):
             raise ValueError(f"GLOBAL_BOOK_METADATA_INVALIDATED:{condition_id}:{token_id}")
-        raw_book = books[token_id]
-        raw_asset_id = str(
-            raw_book.get("asset_id")
-            or raw_book.get("assetId")
-            or raw_book.get("token_id")
-            or ""
-        ).strip()
-        if raw_asset_id != token_id:
-            raise ValueError(f"GLOBAL_BOOK_TOKEN_MISMATCH:{token_id}")
         market_event_id = str(metadata.get("event_id") or "").strip()
         gamma_market_id = str(metadata.get("gamma_market_id") or "").strip()
         if not gamma_market_id:
@@ -624,29 +665,13 @@ def capture_current_global_book_epoch(
             raise ValueError(
                 f"GLOBAL_BOOK_MARKET_EVENT_ID_MISSING:{condition_id}:{token_id}"
             )
-        book_hash = str(raw_book.get("hash") or "").strip() or hashlib.sha256(
-            json.dumps(raw_book, sort_keys=True, separators=(",", ":")).encode("utf-8")
-        ).hexdigest()
-        tradeability = {}
-        try:
-            tradeability = json.loads(
-                str(metadata.get("tradeability_status_json") or "{}")
-            )
-        except json.JSONDecodeError:
-            pass
         metadata_current = _global_book_metadata_is_current(
             metadata,
             checked_at_utc=started_at,
         )
-        executable_metadata = metadata_current and (
-            bool(metadata.get("enable_orderbook"))
-            and bool(metadata.get("active"))
-            and not bool(metadata.get("closed"))
-            and bool(metadata.get("accepting_orders"))
-            and not (
-                isinstance(tradeability, Mapping)
-                and tradeability.get("executable_allowed") is False
-            )
+        executable_metadata = _global_book_metadata_is_executable(
+            metadata,
+            checked_at_utc=started_at,
         )
         curve = None
         sell_curve = None
@@ -656,6 +681,22 @@ def capture_current_global_book_epoch(
             else "VENUE_METADATA_STALE"
         )
         if executable_metadata:
+            raw_book = books[token_id]
+            raw_asset_id = str(
+                raw_book.get("asset_id")
+                or raw_book.get("assetId")
+                or raw_book.get("token_id")
+                or ""
+            ).strip()
+            if raw_asset_id != token_id:
+                raise ValueError(f"GLOBAL_BOOK_TOKEN_MISMATCH:{token_id}")
+            book_hash = str(raw_book.get("hash") or "").strip() or hashlib.sha256(
+                json.dumps(
+                    raw_book,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            ).hexdigest()
             curve = _global_book_curve(
                 family_key=family_key,
                 bin_id=bin_id,
@@ -679,6 +720,15 @@ def capture_current_global_book_epoch(
                 max_age=max_age,
             )
             status = "EXECUTABLE" if curve is not None else "NO_ASK"
+        else:
+            book_hash = "metadata:" + hashlib.sha256(
+                json.dumps(
+                    dict(metadata),
+                    default=str,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            ).hexdigest()
         states.append(
             (
                 family_key,
@@ -934,6 +984,26 @@ def bind_current_global_probability_tokens(
     from concurrent.futures import ThreadPoolExecutor
     from src.data.market_scanner import _boolish_market_field, _extract_outcomes
 
+    def _family_slug(witness: JointOutcomeProbabilityWitness) -> str:
+        condition_ids = tuple(binding.condition_id for binding in witness.bindings)
+        placeholders = ",".join("?" for _ in condition_ids)
+        row = forecasts_conn.execute(
+            f"""
+            SELECT market_slug
+              FROM market_events
+             WHERE condition_id IN ({placeholders})
+               AND market_slug IS NOT NULL
+               AND TRIM(market_slug) != ''
+             ORDER BY created_at DESC
+             LIMIT 1
+            """,
+            condition_ids,
+        ).fetchone()
+        slug = str((row or ("",))[0] or "").strip()
+        if not slug:
+            raise ValueError(f"GLOBAL_GAMMA_SLUG_MISSING:{witness.family_key}")
+        return slug
+
     events: dict[str, Mapping[str, object] | None] = {}
     if refresh_metadata and get_gamma_markets is not None:
         condition_ids = tuple(
@@ -947,6 +1017,8 @@ def bind_current_global_probability_tokens(
         def _market_map(
             rows: Sequence[Mapping[str, object]],
             expected: frozenset[str],
+            *,
+            require_complete: bool = True,
         ) -> dict[str, Mapping[str, object]]:
             out: dict[str, Mapping[str, object]] = {}
             for market in rows:
@@ -965,7 +1037,7 @@ def bind_current_global_probability_tokens(
                     )
                 out[condition_id] = market
             missing = expected.difference(out)
-            if missing:
+            if missing and require_complete:
                 raise ValueError(
                     "GLOBAL_CURRENT_GAMMA_MARKETS_INCOMPLETE:"
                     + ",".join(sorted(missing))
@@ -973,8 +1045,16 @@ def bind_current_global_probability_tokens(
             return out
 
         market_by_condition = _market_map(
-            get_gamma_markets(condition_ids), requested_conditions
+            get_gamma_markets(condition_ids),
+            requested_conditions,
+            require_complete=False,
         )
+        batch_missing = requested_conditions.difference(market_by_condition)
+        if batch_missing and get_gamma_event is None:
+            raise ValueError(
+                "GLOBAL_CURRENT_GAMMA_MARKETS_INCOMPLETE:"
+                + ",".join(sorted(batch_missing))
+            )
 
         def _family_event_map(
             family_key: str,
@@ -1008,6 +1088,17 @@ def bind_current_global_probability_tokens(
             family_condition_ids = tuple(
                 binding.condition_id for binding in witness.bindings
             )
+            missing_family_conditions = set(family_condition_ids).difference(
+                market_by_condition
+            )
+            if missing_family_conditions:
+                event = get_gamma_event(_family_slug(witness))
+                if not isinstance(event, Mapping):
+                    raise ValueError(
+                        f"GLOBAL_CURRENT_GAMMA_EVENT_MISSING:{family_key}"
+                    )
+                events[family_key] = event
+                continue
             family_markets = tuple(
                 market_by_condition[binding.condition_id]
                 for binding in witness.bindings
@@ -1056,24 +1147,7 @@ def bind_current_global_probability_tokens(
             )
             if tokens_bound and not refresh_metadata:
                 continue
-            condition_ids = tuple(binding.condition_id for binding in witness.bindings)
-            placeholders = ",".join("?" for _ in condition_ids)
-            row = forecasts_conn.execute(
-                f"""
-                SELECT market_slug
-                  FROM market_events
-                 WHERE condition_id IN ({placeholders})
-                   AND market_slug IS NOT NULL
-                   AND TRIM(market_slug) != ''
-                 ORDER BY created_at DESC
-                 LIMIT 1
-                """,
-                condition_ids,
-            ).fetchone()
-            slug = str((row or ("",))[0] or "").strip()
-            if not slug:
-                raise ValueError(f"GLOBAL_GAMMA_SLUG_MISSING:{family_key}")
-            slug_by_family[family_key] = slug
+            slug_by_family[family_key] = _family_slug(witness)
         if slug_by_family:
             if get_gamma_event is None:
                 raise ValueError("GLOBAL_GAMMA_EVENT_READER_MISSING")

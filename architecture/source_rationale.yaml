@@ -1776,7 +1776,7 @@ files:
   src/engine/global_auction_universe.py:
     zone: K2_K3_coordination
     authority_role: current_global_auction_scope_reader
-    why: Read-only independent enumeration of every current posterior-ready family plus every canonical runtime-open held-family probability obligation; binds the complete scope to full condition/native-token probability witnesses so neither a reactor queue page nor a local-date rollover can silently erase a feasible reduce-only SELL.
+    why: Read-only independent enumeration of every current posterior-ready family plus every canonical runtime-open held-family probability obligation; binds full condition/native-token probability witnesses to current Gamma tradeability and requests CLOB books only for currently executable legs, so neither a reactor queue page, local-date rollover, nor a closed sibling can silently erase or block a feasible reduce-only SELL.
     hazards:
     - NO_WRITE_PATH
     downstream:

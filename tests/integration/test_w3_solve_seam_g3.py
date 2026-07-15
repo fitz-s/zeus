@@ -3795,11 +3795,29 @@ def test_current_gamma_identity_fills_missing_no_without_changing_q():
     assert {
         row["market_end_at"] for row in batch_metadata.values()
     } == {"2026-07-14T12:00:00Z"}
+    partial_batch_calls = []
+    partial_batch_metadata = {}
+    partial_batch = bind_current_global_probability_tokens(
+        forecast,
+        probability_witnesses={original.family_key: original},
+        get_gamma_event=lambda slug: (
+            partial_batch_calls.append(slug) or closed_event
+        ),
+        get_gamma_markets=lambda _condition_ids: batch_markets[:-1],
+        metadata_sink=partial_batch_metadata,
+    )[original.family_key]
+    assert partial_batch_calls == ["current-family-slug"]
+    assert partial_batch.witness_identity == original.witness_identity
+    assert partial_batch.bindings == original.bindings
+    assert len(partial_batch_metadata) == 2 * len(original.bindings)
+    assert {row["accepting_orders"] for row in partial_batch_metadata.values()} == {
+        False
+    }
+
     with pytest.raises(ValueError, match="GLOBAL_CURRENT_GAMMA_MARKETS_INCOMPLETE"):
         bind_current_global_probability_tokens(
             forecast,
             probability_witnesses={original.family_key: original},
-            get_gamma_event=lambda _slug: pytest.fail("per-event Gamma fallback used"),
             get_gamma_markets=lambda _condition_ids: batch_markets[:-1],
             metadata_sink={},
         )
@@ -3904,17 +3922,9 @@ def test_current_gamma_identity_fills_missing_no_without_changing_q():
     closed_epoch = capture_current_global_book_epoch(
         _global_book_metadata_conn(original),
         probability_witnesses={original.family_key: original},
-        get_books=lambda tokens: {
-            token: {
-                "asset_id": token,
-                "hash": f"book-{token}",
-                "tick_size": "0.01",
-                "min_order_size": "5",
-                "bids": [{"price": "0.20", "size": "100"}],
-                "asks": [{"price": "0.30", "size": "100"}],
-            }
-            for token in tokens
-        },
+        get_books=lambda _tokens: pytest.fail(
+            "closed current Gamma legs must not require a CLOB book"
+        ),
         clock=lambda: next(times),
         max_age=_dt.timedelta(seconds=30),
         metadata_overrides=closed_metadata,
