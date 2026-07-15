@@ -48,6 +48,7 @@ from __future__ import annotations
 
 import ast
 import subprocess
+import sys
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -83,6 +84,29 @@ _LIFTED_CYCLE_FUNCS = (
     "_wrap_reconciler_cycle",
     "chain_sync_read_cycle",
 )
+
+
+def test_collateral_child_import_path_excludes_scipy():
+    """A bounded collateral child must not spend its deadline loading statistics."""
+
+    probe = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import sys; "
+                "from src.state.collateral_ledger import CollateralLedger; "
+                "from src.venue.polymarket_v2_adapter import PolymarketV2Adapter; "
+                "assert not any(n == 'scipy' or n.startswith('scipy.') "
+                "for n in sys.modules)"
+            ),
+        ],
+        cwd=_REPO_ROOT,
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+    assert probe.returncode == 0, probe.stderr
 
 
 # ---------------------------------------------------------------------------

@@ -1,5 +1,8 @@
 """Semantic boundary contracts for cross-module invariants."""
 
+from importlib import import_module
+from typing import Any
+
 from src.contracts.semantic_types import (
     Direction,
     DecisionSnapshotRef,
@@ -21,16 +24,49 @@ from src.contracts.execution_intent import (
     FinalExecutionIntent,
     simulate_clob_sweep,
 )
-from src.contracts.expiring_assumption import ExpiringAssumption
-from src.contracts.edge_context import EdgeContext
-from src.contracts.epistemic_context import EpistemicContext
-from src.contracts.fx_classification import FXClassification, FXClassificationPending
-from src.contracts.settlement_semantics import SettlementSemantics
-from src.contracts.executable_market_snapshot import (
-    ExecutableMarketSnapshot,
-    MarketSnapshotError,
-    StaleMarketSnapshotError,
-)
+
+_LAZY_EXPORTS = {
+    "ExpiringAssumption": ("src.contracts.expiring_assumption", "ExpiringAssumption"),
+    "EdgeContext": ("src.contracts.edge_context", "EdgeContext"),
+    "EpistemicContext": ("src.contracts.epistemic_context", "EpistemicContext"),
+    "FXClassification": ("src.contracts.fx_classification", "FXClassification"),
+    "FXClassificationPending": (
+        "src.contracts.fx_classification",
+        "FXClassificationPending",
+    ),
+    "SettlementSemantics": (
+        "src.contracts.settlement_semantics",
+        "SettlementSemantics",
+    ),
+    "ExecutableMarketSnapshot": (
+        "src.contracts.executable_market_snapshot",
+        "ExecutableMarketSnapshot",
+    ),
+    "MarketSnapshotError": (
+        "src.contracts.executable_market_snapshot",
+        "MarketSnapshotError",
+    ),
+    "StaleMarketSnapshotError": (
+        "src.contracts.executable_market_snapshot",
+        "StaleMarketSnapshotError",
+    ),
+}
+
+
+def __getattr__(name: str) -> Any:
+    """Preserve package exports without importing unrelated contract stacks."""
+
+    try:
+        module_name, attribute_name = _LAZY_EXPORTS[name]
+    except KeyError as exc:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}") from exc
+    value = getattr(import_module(module_name), attribute_name)
+    globals()[name] = value
+    return value
+
+
+def __dir__() -> list[str]:
+    return sorted(set(globals()) | set(_LAZY_EXPORTS))
 
 __all__ = [
     "Direction",

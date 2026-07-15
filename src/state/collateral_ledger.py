@@ -25,7 +25,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Literal, Optional
 
-from src.contracts import ExecutionIntent
+from src.contracts.execution_intent import ExecutionIntent
 from src.contracts.freshness_registry import FreshnessLevel, registry as _freshness_registry
 from src.contracts.fx_classification import (
     FXClassification,
@@ -1228,7 +1228,7 @@ def _hash_payload(raw: dict[str, Any]) -> str:
 
 
 def _dummy_intent() -> ExecutionIntent:
-    from src.contracts import Direction
+    from src.contracts.semantic_types import Direction
     from src.contracts.slippage_bps import SlippageBps
 
     return ExecutionIntent(

@@ -35,7 +35,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Callable, Optional, Protocol, runtime_checkable
 
-from src.contracts import Direction, ExecutionIntent
+from src.contracts.execution_intent import ExecutionIntent
+from src.contracts.semantic_types import Direction
 from src.contracts.executable_market_snapshot import (
     MarketSnapshotMismatchError,
     canonicalize_fee_details,
