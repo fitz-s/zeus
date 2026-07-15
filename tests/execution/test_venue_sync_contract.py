@@ -2240,6 +2240,11 @@ def test_live_tick_releases_stale_rebalance_before_broad_venue_snapshot(monkeypa
     )
     monkeypatch.setattr(
         command_recovery,
+        "reconcile_terminal_entry_exposure_obligations",
+        empty_summary("terminal_entry_exposure_obligations"),
+    )
+    monkeypatch.setattr(
+        command_recovery,
         "release_closed_shift_bin_exit_leases",
         empty_summary("closed_shift_bin_exit_leases"),
     )
