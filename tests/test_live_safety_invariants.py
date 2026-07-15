@@ -2,7 +2,7 @@
 # Lifecycle: created=2026-03-31; last_reviewed=2026-05-05; last_reused=2026-05-05
 # Purpose: Lock live-money safety invariants across fill, exit, chain, and P&L flows.
 # Reuse: Run for execution finality, live exit, chain reconciliation, and safety invariant changes.
-# Last reused/audited: 2026-07-14
+# Last reused/audited: 2026-07-15
 # Authority basis: midstream verdict v2; finite-evidence single-q global SELL ownership
 """Live safety invariant tests: relationship tests, not function tests.
 
@@ -8286,6 +8286,51 @@ def test_exit_context_stamps_side_correct_current_probability_ci_for_receipt(dir
     )
     assert no_ci_context.current_ci is None
     assert pos._monitor_current_held_ci is None
+
+
+def test_exit_context_projects_boundary_probability_intervals_onto_unit_support():
+    """A near-one held belief must not become unavailable because its CI exceeds 1."""
+    from types import SimpleNamespace
+
+    from src.engine.cycle_runtime import _build_exit_context
+
+    pos = _make_position(
+        direction="buy_no",
+        size_usd=249.0,
+        entry_price=0.70,
+        entry_ci_width=0.0926822339563262,
+        p_posterior=0.999363280592826,
+    )
+    pos.last_monitor_prob = 0.9999998397352373
+    pos.last_monitor_prob_is_fresh = True
+    pos.last_monitor_market_price = 0.6309887949300398
+    pos.last_monitor_market_price_is_fresh = True
+    pos.last_monitor_best_bid = 0.63
+    pos.chain_state = "synced"
+    current_edge = pos.last_monitor_prob - pos.last_monitor_market_price
+    half_width = pos.entry_ci_width / 2.0
+    edge_ctx = SimpleNamespace(
+        p_posterior=pos.last_monitor_prob,
+        p_market=[pos.last_monitor_market_price],
+        confidence_band_lower=current_edge - half_width,
+        confidence_band_upper=current_edge + half_width,
+        divergence_score=0.0,
+        market_velocity_1h=0.0,
+    )
+
+    context = _build_exit_context(
+        pos,
+        edge_ctx,
+        hours_to_settlement=12.0,
+        ExitContext=ExitContext,
+    )
+    decision = pos.evaluate_exit(context)
+
+    assert context.entry_ci == pytest.approx((0.9530221636146629, 1.0))
+    assert context.current_ci == pytest.approx((0.9536587227570742, 1.0))
+    assert decision.trigger != "EVIDENCE_UNAVAILABLE"
+    assert "current_held_ci_invalid" not in decision.applied_validations
+    assert "entry_held_ci_invalid" not in decision.applied_validations
 
 
 def test_day0_stale_probability_bypass_tokens_are_not_produced_by_source():

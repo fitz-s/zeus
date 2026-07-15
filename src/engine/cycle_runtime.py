@@ -4576,9 +4576,15 @@ def _build_exit_context(
         # Both entry and a finite CURRENT belief CI are available → arm the CI-separation gate.
         _entry_posterior = _pos_entry_posterior
         _ci_half = max(0.0, float(getattr(pos, "entry_ci_width", 0.0) or 0.0)) / 2.0
-        _entry_ci = (_entry_posterior - _ci_half, _entry_posterior + _ci_half)
+        _entry_ci = (
+            max(0.0, _entry_posterior - _ci_half),
+            min(1.0, _entry_posterior + _ci_half),
+        )
         # Shift edge-space band → belief space by adding the held-side price back.
-        _current_ci = (float(_cb_lo) + float(_held_price), float(_cb_hi) + float(_held_price))
+        _current_ci = (
+            max(0.0, float(_cb_lo) + float(_held_price)),
+            min(1.0, float(_cb_hi) + float(_held_price)),
+        )
 
     # Receipt-only evidence for the later family diagnostic. Always overwrite
     # so a missing current CI cannot reuse a prior monitor cycle's bound.
