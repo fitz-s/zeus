@@ -4603,6 +4603,7 @@ def _edli_day0_live_family_admission(
     """
     import logging as _logging
     from src.config import cities_by_name
+    from src.main import _substrate_refresh_family_text_key
     _log = _logging.getLogger("zeus.events.reactor")
 
     decision_time_utc = (
@@ -4633,16 +4634,28 @@ def _edli_day0_live_family_admission(
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name='market_events' LIMIT 1"
         ).fetchone()
         if table_row is not None:
+            market_city_scope = sorted(
+                {
+                    str(surface).strip()
+                    for city_cfg in cities_by_name.values()
+                    for surface in (
+                        getattr(city_cfg, "name", ""),
+                        *(getattr(city_cfg, "aliases", ()) or ()),
+                        *(getattr(city_cfg, "slug_names", ()) or ()),
+                    )
+                    if str(surface).strip()
+                }
+            )
+            placeholders = ",".join("?" for _ in market_city_scope)
             rows = forecasts_conn.execute(
-                """
-                SELECT city, target_date, temperature_metric
+                f"""
+                SELECT DISTINCT city, target_date, temperature_metric
                   FROM market_events
-                 WHERE city IS NOT NULL
-                   AND target_date IS NOT NULL
+                 WHERE city IN ({placeholders})
                    AND temperature_metric IN ('high', 'low')
                    AND target_date BETWEEN ? AND ?
                 """,
-                (target_floor, target_ceiling),
+                (*market_city_scope, target_floor, target_ceiling),
             ).fetchall()
             market_surface_read_ok = True
             for city, target_date, metric in rows:

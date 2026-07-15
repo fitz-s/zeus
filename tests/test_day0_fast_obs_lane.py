@@ -1,5 +1,5 @@
 # Created: 2026-06-10
-# Last reused/audited: 2026-07-15
+# Last reused/audited: 2026-07-16
 # Authority basis: operator green-light 2026-06-10 items A/C/E (free METAR fast
 #   lane, live-obs hook wiring, WU-vs-METAR oracle anomaly guard); day0
 #   first-principles review /tmp/day0_first_principles_review.md §6.2;
@@ -917,6 +917,51 @@ class TestMutexNoHttpSplit:
         schedule_at = source.index('id="edli_day0_hourly_refresh"')
         schedule = source[schedule_at - 500 : schedule_at + 500]
         assert "OPENING_HUNT_FIRST_DELAY_SECONDS + 36.0" in schedule
+
+    def test_live_family_admission_scopes_market_seek_to_runtime_cities(self, monkeypatch):
+        from src.events import reactor as reactor_module
+
+        forecasts = sqlite3.connect(":memory:")
+        forecasts.execute(
+            """
+            CREATE TABLE market_events (
+                city TEXT NOT NULL,
+                target_date TEXT NOT NULL,
+                temperature_metric TEXT NOT NULL
+            )
+            """
+        )
+        forecasts.execute(
+            "CREATE INDEX idx_market_events_city_date_metric "
+            "ON market_events(city, target_date, temperature_metric)"
+        )
+        forecasts.executemany(
+            "INSERT INTO market_events VALUES (?, ?, ?)",
+            (
+                ("Paris", "2026-07-16", "high"),
+                ("Paris", "2026-07-16", "high"),
+                ("Unconfigured City", "2026-07-16", "high"),
+            ),
+        )
+        trade = sqlite3.connect(":memory:")
+        monkeypatch.setattr(reactor_module, "_open_rest_family_rows_for_refresh", lambda _: ())
+        monkeypatch.setattr(
+            "src.data.replacement_cycle_advance_trigger._held_position_families",
+            lambda _: (),
+        )
+        traced: list[str] = []
+        forecasts.set_trace_callback(traced.append)
+
+        admission = reactor_module._edli_day0_live_family_admission(
+            forecasts,
+            trade,
+            decision_time=datetime(2026, 7, 16, 12, 0, tzinfo=UTC),
+        )
+
+        assert ("paris", "2026-07-16", "high") in admission.admitted_families
+        assert admission.scan_cities == frozenset({"Paris"})
+        assert all(family[0] != "unconfigured city" for family in admission.admitted_families)
+        assert any("city IN (" in statement for statement in traced)
 
     def test_publication_clock_missing_denies_live_authority(self):
         """PR#404 P2: receiptTime absent -> available_at falls back to the obs
