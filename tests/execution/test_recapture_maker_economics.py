@@ -64,11 +64,7 @@ def _final_intent(
 
 def _buy_fak_economics(*, shares=Decimal("10"), limit=Decimal("0.14")):
     fee_rate = Decimal("0.05")
-    max_fee_shape = (
-        Decimal("0.25")
-        if limit >= Decimal("0.5")
-        else limit * (Decimal("1") - limit)
-    )
+    max_fee_shape = limit * (Decimal("1") - limit)
     worst_fee_per_share = Decimal("2") * fee_rate * max_fee_shape
     unit_cost = limit + worst_fee_per_share
     full_cost = unit_cost * shares

@@ -2170,11 +2170,13 @@ def global_buy_fak_prefix_certificate(
 
     Every admitted fill has price no worse than the limit.  A positive rounded
     five-decimal fee is at most twice its unrounded value; this bound is
-    independent of maker-fragment count and share quantum.  Bounding p(1-p)
-    over every executable price through the limit therefore yields a linear
-    cost bound.  Binary expected log wealth is concave in filled shares and is
-    zero at no fill, so a positive full-size endpoint proves every interior
-    prefix positive as well.  EV is linear and uses the same endpoint proof.
+    independent of maker-fragment count and share quantum.  Price and fee shape
+    are evaluated jointly: for an admitted fee rate at most 50%,
+    ``p + 2*f*p*(1-p)`` is monotone through the binary price domain, so the
+    executable limit is the coherent worst unit cost.  Binary expected log
+    wealth is concave in filled shares and is zero at no fill, so a positive
+    full-size endpoint proves every interior prefix positive as well.  EV is
+    linear and uses the same endpoint proof.
     """
 
     candidate = decision.candidate
@@ -2194,11 +2196,13 @@ def global_buy_fak_prefix_certificate(
     fee_rate = Decimal(curve.fee_model.fee_rate)
     limit = Decimal(decision.limit_price)
     shares = Decimal(decision.shares)
-    max_fee_shape = (
-        Decimal("0.25")
-        if limit >= Decimal("0.5")
-        else limit * (Decimal("1") - limit)
-    )
+    if (
+        not fee_rate.is_finite()
+        or fee_rate < Decimal("0")
+        or fee_rate > Decimal("0.5")
+    ):
+        raise ValueError("buy FAK prefix fee rate is outside the monotone joint bound")
+    max_fee_shape = limit * (Decimal("1") - limit)
     worst_fee_per_share = Decimal("2") * fee_rate * max_fee_shape
     unit_cost = limit + worst_fee_per_share
     full_cost = unit_cost * shares

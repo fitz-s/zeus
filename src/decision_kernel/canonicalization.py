@@ -440,7 +440,7 @@ def qkernel_global_buy_fak_prefix_rejection_reason(
     if not (
         shares > 0
         and 0 < limit < 1
-        and 0 <= fee_rate < 1
+        and 0 <= fee_rate <= 0.5
         and 0 < win_q <= 1
         and 0 <= loss_q < 1
         and math.isclose(win_q + loss_q, 1.0, rel_tol=0.0, abs_tol=1e-12)
@@ -454,7 +454,7 @@ def qkernel_global_buy_fak_prefix_rejection_reason(
         values["global_terminal_wealth_after_win_usd"]
         - values["global_terminal_win_payoff_usd"]
     )
-    max_fee_shape = 0.25 if limit >= 0.5 else limit * (1.0 - limit)
+    max_fee_shape = limit * (1.0 - limit)
     worst_fee_per_share = 2.0 * fee_rate * max_fee_shape
     unit_cost = limit + worst_fee_per_share
     full_cost = unit_cost * shares

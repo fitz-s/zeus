@@ -258,7 +258,7 @@ def _buy_fak_prefix_economics(*, shares: float = 5.0, limit: float = 0.45) -> di
     loss_q = 0.40
     floor = 100.0
     ceiling = 100.0
-    max_fee_shape = 0.25 if limit >= 0.5 else limit * (1.0 - limit)
+    max_fee_shape = limit * (1.0 - limit)
     worst_fee_per_share = 2.0 * fee_rate * max_fee_shape
     unit_cost = limit + worst_fee_per_share
     full_cost = unit_cost * shares
