@@ -81,6 +81,7 @@ _HELD_POSITION_MONITOR_DEFER_JOBS = frozenset(
     {
         "market_discovery",
         "EDLI mainstream warm",
+        "edli_event_reactor",
     }
 )
 _market_discovery_last_completed_monotonic: float | None = None
@@ -208,10 +209,9 @@ def _defer_for_held_position_monitor(job_name: str) -> bool:
     """Return True when the held-position monitor should pre-empt discretionary jobs.
 
     The monitor itself is non-reentrant, but it must not globally stop the live
-    money path. Targeted EDLI jobs (event reactor, continuous redecision, maker
-    rest escalation, command recovery, targeted market-substrate warm, and
-    market-channel refresh) are the continuous decision line and must keep
-    running while held positions are monitored. Only broad/discretionary scans
+    money path. The entry reactor yields because both jobs traverse the same
+    large SQLite state and the monitor has already claimed priority; the other
+    targeted EDLI jobs remain on the continuous decision line. Broad scans also
     yield to the monitor bootstrap.
     """
 
@@ -1335,6 +1335,7 @@ _venue_heartbeat_supervisor = None
 _venue_heartbeat_adapter = None
 _venue_heartbeat_thread = None
 _edli_reactor_active_lock = threading.Lock()
+_EXIT_MONITOR_REACTOR_HANDOFF_SECONDS = 30.0
 _venue_background_maintenance_lock = threading.Lock()
 _last_venue_background_maintenance_attempt_at = None
 VENUE_BACKGROUND_MAINTENANCE_SECONDS = 30.0
@@ -1362,6 +1363,15 @@ def _external_venue_heartbeat_enabled() -> bool:
 
 def _edli_reactor_active() -> bool:
     return _edli_reactor_active_lock.locked()
+
+
+def _defer_for_active_entry_reactor(job_name: str) -> bool:
+    """Keep lower-priority DB scans off the active entry-reactor read path."""
+
+    if not _edli_reactor_active():
+        return False
+    logger.info("%s deferred: EDLI reactor active", job_name)
+    return True
 
 
 def _edli_reactor_pending_backlog_exists(*, conn_factory=None) -> bool:
@@ -3697,6 +3707,15 @@ def _chain_mirror_reconcile_cycle() -> None:
     """Scheduler hook — body owned by src.state.chain_mirror_reconciler (R4-b
     extraction, 2026-07-08). See that module's ``run_cycle`` docstring for the
     chain-mirror invariant (operator directive 2026-07-04)."""
+    if _defer_for_active_entry_reactor("chain_mirror_reconcile"):
+        return
+    if _edli_redecision_screen_lock.locked():
+        logger.info("chain_mirror_reconcile deferred: redecision screen active")
+        return
+    if _held_position_monitor_active.is_set():
+        logger.info("chain_mirror_reconcile deferred: held-position monitor active")
+        return
+
     from src.state.chain_mirror_reconciler import run_cycle
 
     run_cycle()
@@ -4377,6 +4396,9 @@ def _edli_continuous_redecision_screen_cycle() -> None:
     function itself: it is a plain mutable dict (no lock lifecycle), still
     mutated directly by the command-recovery cluster here in main.py.
     """
+    if _defer_for_active_entry_reactor("edli_redecision_screen"):
+        return
+
     from src.events.reactor import run_edli_continuous_redecision_screen_cycle
 
     run_edli_continuous_redecision_screen_cycle(screen_lock=_edli_redecision_screen_lock)
@@ -5335,10 +5357,33 @@ def _exit_monitor_cycle() -> None:
     """
     from src.execution.exit_lifecycle import run_exit_monitor_cycle
 
-    run_exit_monitor_cycle(
-        held_position_monitor_active=_held_position_monitor_active,
-        mark_held_position_monitor_complete=_mark_held_position_monitor_complete,
+    if _held_position_monitor_active.is_set():
+        logger.warning("exit_monitor skipped: previous monitor cycle is still running")
+        return
+
+    # Claim exit priority before waiting. New reactor ticks defer on this Event;
+    # the current reactor finishes without a competing SQLite traversal.
+    _held_position_monitor_active.set()
+    reactor_idle = _edli_reactor_active_lock.acquire(
+        timeout=_EXIT_MONITOR_REACTOR_HANDOFF_SECONDS
     )
+    if not reactor_idle:
+        logger.warning(
+            "exit_monitor deferred: active EDLI reactor did not finish within %.1fs",
+            _EXIT_MONITOR_REACTOR_HANDOFF_SECONDS,
+        )
+        _held_position_monitor_active.clear()
+        return
+    _edli_reactor_active_lock.release()
+    try:
+        run_exit_monitor_cycle(
+            held_position_monitor_active=_held_position_monitor_active,
+            mark_held_position_monitor_complete=_mark_held_position_monitor_complete,
+            monitor_claimed=True,
+        )
+    finally:
+        if _held_position_monitor_active.is_set():
+            _mark_held_position_monitor_complete()
 
 
 def main():

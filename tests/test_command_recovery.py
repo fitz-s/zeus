@@ -1,8 +1,8 @@
 # Created: 2026-04-26
-# Lifecycle: created=2026-04-26; last_reviewed=2026-07-14; last_reused=2026-07-14
+# Lifecycle: created=2026-04-26; last_reviewed=2026-07-15; last_reused=2026-07-15
 # Purpose: Lock INV-31 command recovery behavior plus snapshot-gated command inserts.
 # Reuse: Run when command recovery, command journal schema, or executable snapshot gating changes.
-# Last reused/audited: 2026-07-14
+# Last reused/audited: 2026-07-15
 # Authority basis: docs/operations/task_2026-04-26_execution_state_truth_p1_command_bus/implementation_plan.md u00a7P1.S4
 """INV-31 anchor tests: command recovery loop.
 
@@ -758,6 +758,179 @@ def test_boot_fast_budget_interrupts_slow_db_pass_before_scheduler(
     client.get_order.assert_not_called()
     client.get_open_orders.assert_not_called()
     client.get_trades.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "lock_error",
+    [
+        BlockingIOError(
+            "db_writer_lock(write_class=live) contended on test.writer-lock.live"
+        ),
+        sqlite3.OperationalError("database is locked"),
+    ],
+)
+def test_live_tick_lock_contention_defers_once_without_sleep(monkeypatch, lock_error):
+    from src.execution import command_recovery
+
+    calls = []
+    summary = {}
+
+    def _contended():
+        calls.append("attempt")
+        raise lock_error
+
+    monkeypatch.setattr(
+        command_recovery.time,
+        "sleep",
+        lambda _delay: pytest.fail("live_tick DB contention must not sleep"),
+    )
+
+    assert command_recovery._run_recovery_pass_with_lock_policy(
+        "first_pass",
+        _contended,
+        scope="live_tick",
+        summary=summary,
+    ) is None
+    assert command_recovery._run_recovery_pass_with_lock_policy(
+        "later_pass",
+        _contended,
+        scope="live_tick",
+        summary=summary,
+    ) is None
+
+    assert calls == ["attempt"]
+    assert summary == {
+        "db_lock_deferred": True,
+        "db_lock_deferred_at": "first_pass",
+        "db_lock_deferred_count": 1,
+    }
+
+
+def test_full_recovery_preserves_lock_retry_schedule(monkeypatch):
+    from src.execution import command_recovery
+
+    attempts = 0
+    sleeps = []
+
+    def _eventually_available():
+        nonlocal attempts
+        attempts += 1
+        if attempts < 3:
+            raise sqlite3.OperationalError("database is locked")
+        return "done"
+
+    monkeypatch.setattr(command_recovery.time, "sleep", sleeps.append)
+
+    result = command_recovery._run_recovery_pass_with_lock_policy(
+        "required_pass",
+        _eventually_available,
+        scope="full",
+        summary={},
+    )
+
+    assert result == "done"
+    assert attempts == 3
+    assert sleeps == [2.0, 5.0]
+
+
+def test_live_tick_does_not_swallow_unrelated_blocking_io():
+    from src.execution import command_recovery
+
+    def _unrelated_block():
+        raise BlockingIOError("unrelated file operation would block")
+
+    with pytest.raises(BlockingIOError, match="unrelated file operation"):
+        command_recovery._run_recovery_pass_with_lock_policy(
+            "pass_body",
+            _unrelated_block,
+            scope="live_tick",
+            summary={},
+        )
+
+
+def test_live_tick_apply_factory_requests_two_layer_nowait():
+    from src.execution import command_recovery
+
+    calls = []
+
+    def _factory(**kwargs):
+        calls.append(kwargs)
+        conn = sqlite3.connect(":memory:")
+        conn.execute(f"PRAGMA busy_timeout = {kwargs['busy_timeout_ms']}")
+        return conn
+
+    _factory.supports_nonblocking_flocks = True
+    live_tick_factory = command_recovery._recovery_apply_conn_factory(
+        _factory,
+        scope="live_tick",
+    )
+
+    conn = live_tick_factory()
+    try:
+        assert conn.execute("PRAGMA busy_timeout").fetchone()[0] == 0
+    finally:
+        conn.close()
+
+    assert calls == [{"blocking": False, "busy_timeout_ms": 0}]
+
+
+def test_live_tick_first_apply_contention_skips_remaining_sweep(monkeypatch):
+    from src.execution import command_recovery
+    from src.execution import venue_sync_contract
+
+    apply_attempts = []
+
+    def _contended_factory(**kwargs):
+        apply_attempts.append(kwargs)
+        raise BlockingIOError(
+            "db_writer_lock(write_class=live) contended on test.writer-lock.live"
+        )
+
+    _contended_factory.requires_writer_flocks = True
+    _contended_factory.supports_nonblocking_flocks = True
+
+    def _read_factory():
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        return conn
+
+    monkeypatch.setattr(
+        venue_sync_contract,
+        "default_trade_conn_factory",
+        _contended_factory,
+    )
+    monkeypatch.setattr(
+        venue_sync_contract,
+        "default_trade_read_conn_factory",
+        _read_factory,
+    )
+    monkeypatch.setattr(
+        command_recovery,
+        "_edli_post_submit_unknown_absence_candidates",
+        lambda _conn: [],
+    )
+    monkeypatch.setattr(
+        venue_sync_contract,
+        "capture_venue_read_snapshot",
+        lambda *_args, **_kwargs: pytest.fail(
+            "known writer contention must skip the broad venue snapshot"
+        ),
+    )
+
+    summary = {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
+    command_recovery._reconcile_passes_short_conn(
+        MagicMock(),
+        summary,
+        "2026-07-14T05:00:00+00:00",
+        scope="live_tick",
+    )
+
+    assert apply_attempts == [{"blocking": False, "busy_timeout_ms": 0}]
+    assert summary["db_lock_deferred"] is True
+    assert summary["db_lock_deferred_at"] == "edli_post_submit_unknown_absence_fast"
+    assert summary["db_lock_deferred_count"] == 1
+    assert summary["deferred_full_sweep"] is True
+    assert summary["scope"] == "live_tick"
 
 
 # ---------------------------------------------------------------------------

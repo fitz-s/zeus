@@ -1121,6 +1121,7 @@ def get_trade_connection_with_world(
 def trade_connection_with_world_flocked(
     *,
     write_class: WriteClass | str = "live",
+    blocking: bool = True,
 ):
     """Context manager: cross-DB write with canonical-order flocks.
 
@@ -1129,10 +1130,12 @@ def trade_connection_with_world_flocked(
     alphabetical order, ATTACHes ``world`` onto a trade connection, yields
     that connection, and releases the flocks (and connection) on exit.
 
-    Default ``write_class="live"`` matches the dominant call-site shape
+    Default ``write_class="live"`` and blocking acquisition match the dominant call-site shape
     (riskguard + harvester + settlement commands). Phase 1+ callers
     retrofit by replacing ``conn = get_trade_connection_with_world()``
     blocks with ``with trade_connection_with_world_flocked(...) as conn:``.
+    Recurring best-effort maintenance may pass ``blocking=False`` to yield
+    immediately when either canonical writer flock is occupied.
     """
     from src.state.db_writer_lock import (
         canonical_lock_order,
@@ -1147,8 +1150,8 @@ def trade_connection_with_world_flocked(
         [_zeus_trade_db_path(), ZEUS_WORLD_DB_PATH]
     )
     # Stack two flock context managers (canonical order) before opening conn.
-    with db_writer_lock(ordered_paths[0], resolved):
-        with db_writer_lock(ordered_paths[1], resolved):
+    with db_writer_lock(ordered_paths[0], resolved, blocking=blocking):
+        with db_writer_lock(ordered_paths[1], resolved, blocking=blocking):
             conn = get_trade_connection(write_class=resolved)
             try:
                 attached = {

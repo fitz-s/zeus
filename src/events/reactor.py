@@ -1285,13 +1285,47 @@ class OpportunityEventReactor:
                 )
             return attempted
 
-        for event in claimed:
-            self._finalize_deferred_event_unit(
+        # A real venue call creates a must-settle result. Persist that winner
+        # before side-effect-free losers, regardless of the claim/page order.
+        # The losers are retryable projections; they must not delay durable
+        # ownership of an external side effect.
+        finalization_events = list(claimed)
+        if batch_result.venue_submit_count == 1:
+            finalization_events.sort(
+                key=lambda event: event.event_id != batch_result.winner_event_id
+            )
+
+        finalization_lock_busy = False
+        for event in finalization_events:
+            receipt = batch_result.receipts[event.event_id]
+            side_effect_possible = bool(
+                receipt.submitted
+                or receipt.venue_call_started
+                or receipt.side_effect_status != "NO_SUBMIT"
+                or (
+                    batch_result.venue_submit_count == 1
+                    and event.event_id == batch_result.winner_event_id
+                )
+            )
+            if finalization_lock_busy and not side_effect_possible:
+                # The same external writer is still expected to own SQLite's
+                # single WAL writer slot. Do not make every NO_SUBMIT loser pay
+                # the same busy timeout; its processing lease is the durable
+                # retry path once the writer clears.
+                with contextlib.suppress(Exception):
+                    self._finalize_reservation(event, emitted=False)
+                result.rejection_reasons.append(_POST_SUBMIT_WORLD_WRITE_LOCK_RETRY)
+                result.retried += 1
+                continue
+            finalized = self._finalize_deferred_event_unit(
                 event,
-                batch_result.receipts[event.event_id],
+                receipt,
                 decision_time=_finalization_time(event),
                 result=result,
+                wait_ms=None if side_effect_possible else _reactor_claim_busy_timeout_ms(),
             )
+            if not finalized:
+                finalization_lock_busy = True
         return attempted
 
     def _queue_global_winner_for_claim(
@@ -1651,9 +1685,13 @@ class OpportunityEventReactor:
                         if getattr(self._store.conn, "in_transaction", False):
                             self._store.conn.rollback()
                     try:
-                        with _scoped_sqlite_busy_timeout(
-                            self._store.conn, _reactor_claim_busy_timeout_ms()
-                        ):
+                        # The writer just remained busy for the full Window-B
+                        # wait. Requeue is an optional fast path; retrying the
+                        # same wait immediately only doubles tail latency. A
+                        # zero-wait probe preserves immediate recovery when the
+                        # lock cleared at the boundary, otherwise the existing
+                        # stale processing lease remains the durable fallback.
+                        with _scoped_sqlite_busy_timeout(self._store.conn, 0):
                             self._store.requeue_pending(
                                 event.event_id,
                                 last_error=_POST_SUBMIT_WORLD_WRITE_LOCK_RETRY,
@@ -1684,15 +1722,29 @@ class OpportunityEventReactor:
         *,
         decision_time: datetime,
         result: ReactorResult,
-    ) -> None:
+        wait_ms: int | None = None,
+    ) -> bool:
         """Window B for an event whose Window A joined a global auction epoch."""
 
         mutex = world_write_mutex()
-        mutex.acquire()
+        lock_wait_ms = (
+            _reactor_claim_busy_timeout_ms() if wait_ms is None else max(0, wait_ms)
+        )
+        acquired = (
+            mutex.acquire()
+            if wait_ms is None
+            else mutex.acquire(timeout=lock_wait_ms / 1000.0)
+        )
+        if not acquired:
+            with contextlib.suppress(Exception):
+                self._finalize_reservation(event, emitted=False)
+            result.rejection_reasons.append(_POST_SUBMIT_WORLD_WRITE_LOCK_RETRY)
+            result.retried += 1
+            return False
         try:
             try:
                 with _scoped_sqlite_busy_timeout(
-                    self._store.conn, _reactor_claim_busy_timeout_ms()
+                    self._store.conn, lock_wait_ms
                 ):
                     if not self._store.conn.in_transaction:
                         self._store.conn.execute("BEGIN IMMEDIATE")
@@ -1726,9 +1778,7 @@ class OpportunityEventReactor:
                         if getattr(self._store.conn, "in_transaction", False):
                             self._store.conn.rollback()
                     try:
-                        with _scoped_sqlite_busy_timeout(
-                            self._store.conn, _reactor_claim_busy_timeout_ms()
-                        ):
+                        with _scoped_sqlite_busy_timeout(self._store.conn, 0):
                             self._store.requeue_pending(
                                 event.event_id,
                                 last_error=_POST_SUBMIT_WORLD_WRITE_LOCK_RETRY,
@@ -1741,7 +1791,7 @@ class OpportunityEventReactor:
                             self._store.conn.rollback()
                     result.rejection_reasons.append(_POST_SUBMIT_WORLD_WRITE_LOCK_RETRY)
                     result.retried += 1
-                    return
+                    return False
                 with contextlib.suppress(Exception):
                     self._store.conn.execute("ROLLBACK TO SAVEPOINT edli_reactor_event")
                     self._store.conn.execute("RELEASE SAVEPOINT edli_reactor_event")
@@ -1753,6 +1803,7 @@ class OpportunityEventReactor:
                     decision_time=decision_time,
                     result=result,
                 )
+            return True
         finally:
             mutex.release()
 
@@ -5071,6 +5122,9 @@ def run_edli_event_reactor_cycle(*, active_lock) -> None:
 
     if not active_lock.acquire(blocking=False):
         _log.warning("EDLI reactor skipped: previous EDLI reactor cycle is still running")
+        return
+    if _defer_for_held_position_monitor("edli_event_reactor"):
+        active_lock.release()
         return
     try:
         conn = get_world_connection()

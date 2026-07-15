@@ -314,7 +314,11 @@ class _NetworkAssertingClient:
         return _wrapped
 
 
-def default_trade_conn_factory() -> sqlite3.Connection:
+def default_trade_conn_factory(
+    *,
+    blocking: bool = True,
+    busy_timeout_ms: int | None = None,
+) -> sqlite3.Connection:
     """The sanctioned live trade connection factory for the recovery sweep.
 
     Each short connection holds the canonical WORLD+TRADE live flocks until
@@ -323,12 +327,22 @@ def default_trade_conn_factory() -> sqlite3.Connection:
     """
     from src.state.db import trade_connection_with_world_flocked
 
-    context = trade_connection_with_world_flocked(write_class="live")
+    context = trade_connection_with_world_flocked(
+        write_class="live",
+        blocking=blocking,
+    )
     conn = context.__enter__()
+    try:
+        if busy_timeout_ms is not None:
+            conn.execute(f"PRAGMA busy_timeout = {int(busy_timeout_ms)}")
+    except BaseException as exc:
+        context.__exit__(type(exc), exc, exc.__traceback__)
+        raise
     return _CanonicalFlockedConnection(conn, context)  # type: ignore[return-value]
 
 
 default_trade_conn_factory.requires_writer_flocks = True  # type: ignore[attr-defined]
+default_trade_conn_factory.supports_nonblocking_flocks = True  # type: ignore[attr-defined]
 
 
 def default_trade_read_conn_factory() -> sqlite3.Connection:

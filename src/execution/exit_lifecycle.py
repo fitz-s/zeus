@@ -6208,6 +6208,7 @@ def run_exit_monitor_cycle(
     *,
     held_position_monitor_active: threading.Event,
     mark_held_position_monitor_complete: Callable[[], None],
+    monitor_claimed: bool = False,
 ) -> None:
     """Scheduler entrypoint (R4-b extraction from src/main.py::_exit_monitor_cycle).
 
@@ -6222,7 +6223,9 @@ def run_exit_monitor_cycle(
     are injected from src.main: they are cross-job scheduling-coordination
     primitives (other EDLI jobs defer while this one runs), so main.py — the
     dispatcher — retains ownership of the Event/callback; this module only
-    consumes them for its own run/complete signalling.
+    consumes them for its own run/complete signalling. ``monitor_claimed`` means
+    the dispatcher already set the Event while waiting for an active reactor to
+    finish; direct callers retain the original local claim behavior.
 
     Called from the main daemon's ``exit_monitor`` scheduler job (2-minute
     cadence). Behavior-preserving relocation — was inline in src/main.py.
@@ -6245,7 +6248,7 @@ def run_exit_monitor_cycle(
     _settings_source = settings._data if hasattr(settings, "_data") else settings
     edli_cfg = _settings_source.get("edli", {}) if isinstance(_settings_source, dict) else {}
     real_order_submit_enabled = bool(edli_cfg.get("real_order_submit_enabled", False))
-    if held_position_monitor_active.is_set():
+    if held_position_monitor_active.is_set() and not monitor_claimed:
         logger.warning("exit_monitor skipped: previous monitor cycle is still running")
         return
     held_position_monitor_active.set()

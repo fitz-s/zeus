@@ -1,5 +1,5 @@
 # Created: 2026-05-07
-# Last reused/audited: 2026-05-07
+# Last reused/audited: 2026-07-15
 # Authority basis: .omc/plans/sqlite_contention_structural_design_v4_2026_05_07.md
 #                  Phase 0 §11 — helpers + tests; production callers untouched.
 """Phase 0 tests for src/state/db_writer_lock.py.
@@ -23,6 +23,7 @@ intervals so they finish in < 30 s total.
 
 from __future__ import annotations
 
+import contextlib
 import multiprocessing as mp
 import statistics
 import sys
@@ -42,6 +43,44 @@ from src.state.db_writer_lock import (
     subprocess_run_with_write_class,
     subprocess_with_write_class,
 )
+
+
+def test_trade_world_flocked_forwards_nonblocking_to_both_locks(monkeypatch):
+    from src.state import db
+    from src.state import db_writer_lock as lock_module
+
+    acquisitions = []
+
+    @contextlib.contextmanager
+    def _lock(path, write_class, *, blocking=True):
+        acquisitions.append((path, write_class, blocking))
+        yield
+
+    class _DatabaseList:
+        @staticmethod
+        def fetchall():
+            return [(0, "main", ""), (2, "world", "")]
+
+    class _Connection:
+        closed = False
+
+        def execute(self, sql, _params=()):
+            assert sql == "PRAGMA database_list"
+            return _DatabaseList()
+
+        def close(self):
+            self.closed = True
+
+    conn = _Connection()
+    monkeypatch.setattr(lock_module, "db_writer_lock", _lock)
+    monkeypatch.setattr(db, "get_trade_connection", lambda **_kwargs: conn)
+
+    with db.trade_connection_with_world_flocked(blocking=False) as yielded:
+        assert yielded is conn
+
+    assert len(acquisitions) == 2
+    assert all(blocking is False for _, _, blocking in acquisitions)
+    assert conn.closed is True
 
 
 # --------------------------------------------------------------------------

@@ -70,6 +70,8 @@ from src.state.venue_command_repo import (
 
 logger = logging.getLogger(__name__)
 
+_RECOVERY_LOCK_RETRY_DELAYS = (2.0, 5.0, 10.0)
+
 # Venue status strings that indicate an order is no longer active
 # (cancelled / expired at the venue).
 _INACTIVE_STATUSES = frozenset({
@@ -16635,6 +16637,72 @@ def _accumulate(
     summary["errors"] += pass_summary["errors"]
 
 
+def _recovery_apply_conn_factory(conn_factory, *, scope: str):
+    if scope != "live_tick":
+        return conn_factory
+
+    def _nowait_conn():
+        if getattr(conn_factory, "supports_nonblocking_flocks", False):
+            return conn_factory(blocking=False, busy_timeout_ms=0)
+        conn = conn_factory()
+        try:
+            conn.execute("PRAGMA busy_timeout = 0")
+        except BaseException:
+            conn.close()
+            raise
+        return conn
+
+    return _nowait_conn
+
+
+def _run_recovery_pass_with_lock_policy(
+    label: str,
+    fn,
+    *,
+    scope: str,
+    summary: dict,
+):
+    if scope == "live_tick" and summary.get("db_lock_deferred"):
+        return None
+
+    for attempt in range(len(_RECOVERY_LOCK_RETRY_DELAYS) + 1):
+        try:
+            return fn()
+        except (BlockingIOError, sqlite3.OperationalError) as exc:
+            message = str(exc)
+            is_lock = (
+                isinstance(exc, BlockingIOError)
+                and "db_writer_lock(" in message
+                and "contended on" in message
+            ) or (
+                isinstance(exc, sqlite3.OperationalError)
+                and message.startswith("database is locked")
+            )
+            if not is_lock:
+                raise
+            if scope == "live_tick":
+                summary["db_lock_deferred"] = True
+                summary["db_lock_deferred_at"] = label
+                summary["db_lock_deferred_count"] = 1
+                logger.info(
+                    "recovery: live_tick pass %s deferred on DB contention; "
+                    "remaining apply work will retry next tick",
+                    label,
+                )
+                return None
+            if attempt >= len(_RECOVERY_LOCK_RETRY_DELAYS):
+                raise
+            delay = _RECOVERY_LOCK_RETRY_DELAYS[attempt]
+            logger.warning(
+                "recovery: pass %s hit database lock; retrying in %.1fs (attempt %d/%d)",
+                label,
+                delay,
+                attempt + 1,
+                len(_RECOVERY_LOCK_RETRY_DELAYS) + 1,
+            )
+            time.sleep(delay)
+
+
 def _active_venue_command_priming_rows(
     conn: sqlite3.Connection,
     *,
@@ -17064,24 +17132,15 @@ def _reconcile_passes_short_conn(client, summary: dict, started_at: str, *, scop
         if getattr(conn_factory, "requires_writer_flocks", False)
         else conn_factory
     )
-    lock_retry_delays = (2.0, 5.0, 10.0)
+    apply_conn_factory = _recovery_apply_conn_factory(conn_factory, scope=scope)
 
     def _run_pass_with_lock_retry(label: str, fn):
-        for attempt in range(len(lock_retry_delays) + 1):
-            try:
-                return fn()
-            except sqlite3.OperationalError as exc:
-                if not str(exc).startswith("database is locked") or attempt >= len(lock_retry_delays):
-                    raise
-                delay = lock_retry_delays[attempt]
-                logger.warning(
-                    "recovery: pass %s hit database lock; retrying in %.1fs (attempt %d/%d)",
-                    label,
-                    delay,
-                    attempt + 1,
-                    len(lock_retry_delays) + 1,
-                )
-                time.sleep(delay)
+        return _run_recovery_pass_with_lock_policy(
+            label,
+            fn,
+            scope=scope,
+            summary=summary,
+        )
 
     def _client_pass(
         label, pass_fn, summary_key, *,
@@ -17114,7 +17173,7 @@ def _reconcile_passes_short_conn(client, summary: dict, started_at: str, *, scop
             label,
             lambda: run_three_phase(
                 _snapshot, _network, _apply,
-                conn_factory=conn_factory,
+                conn_factory=apply_conn_factory,
                 snapshot_conn_factory=read_conn_factory,
                 label=f"recovery.{label}",
             ),
@@ -17128,7 +17187,11 @@ def _reconcile_passes_short_conn(client, summary: dict, started_at: str, *, scop
 
         return _run_pass_with_lock_retry(
             label,
-            lambda: run_db_only_pass(_apply, conn_factory=conn_factory, label=f"recovery.{label}"),
+            lambda: run_db_only_pass(
+                _apply,
+                conn_factory=apply_conn_factory,
+                label=f"recovery.{label}",
+            ),
         )
 
     def _post_submit_unknown_absence_fast_pass():
@@ -17172,7 +17235,7 @@ def _reconcile_passes_short_conn(client, summary: dict, started_at: str, *, scop
                 _snapshot,
                 _network,
                 _apply,
-                conn_factory=conn_factory,
+                conn_factory=apply_conn_factory,
                 snapshot_conn_factory=read_conn_factory,
                 label="recovery.edli_post_submit_unknown_absence_fast",
             ),
@@ -17483,6 +17546,11 @@ def _reconcile_passes_short_conn(client, summary: dict, started_at: str, *, scop
             observed_at=started_at,
         )
 
+        if summary.get("db_lock_deferred"):
+            summary["scope"] = scope
+            summary["deferred_full_sweep"] = True
+            return
+
     # -- PHASE 1: SNAPSHOT (collect priming keys on a short read connection) ----
     with open_tracked(read_conn_factory, label="recovery.priming:snapshot") as conn:
         priming = _collect_recovery_priming_keys(conn, scope=scope)
@@ -17554,7 +17622,7 @@ def _reconcile_passes_short_conn(client, summary: dict, started_at: str, *, scop
             lambda conn: None,
             lambda _snap: venue_snapshot,
             _apply_inflight,
-            conn_factory=conn_factory,
+            conn_factory=apply_conn_factory,
             snapshot_conn_factory=read_conn_factory,
             label="recovery.inflight_scan",
         ),

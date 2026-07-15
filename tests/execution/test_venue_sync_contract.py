@@ -6,7 +6,7 @@
 #   byte-identical reconciliation events vs the legacy long-connection path.
 # Reuse: Run when command_recovery orchestration, venue_sync_contract, or the
 #   scheduled _edli_command_recovery_cycle connection topology changes.
-# Last reused/audited: 2026-07-14
+# Last reused/audited: 2026-07-15
 # Authority basis: operator directive 2026-06-11 ("cleanest STRUCTURAL fix") +
 #   the dependency_db_locked live incident (riskguard DATA_DEGRADED since ~03:36Z).
 """Relationship tests for the three-phase venue/DB sync contract.
@@ -2842,24 +2842,51 @@ def test_default_factory_holds_canonical_cross_db_flocks_until_close(monkeypatch
     events = []
 
     @contextlib.contextmanager
-    def _flocked(*, write_class):
-        events.append(("enter", write_class))
+    def _flocked(*, write_class, blocking=True):
+        events.append(("enter", write_class, blocking))
         conn = sqlite3.connect(":memory:")
         try:
             yield conn
         finally:
             conn.close()
-            events.append(("exit", write_class))
+            events.append(("exit", write_class, blocking))
 
     monkeypatch.setattr(db, "trade_connection_with_world_flocked", _flocked)
 
     conn = vsc.default_trade_conn_factory()
-    assert events == [("enter", "live")]
+    assert events == [("enter", "live", True)]
     assert conn.execute("SELECT 1").fetchone()[0] == 1
 
     conn.close()
     conn.close()
-    assert events == [("enter", "live"), ("exit", "live")]
+    assert events == [("enter", "live", True), ("exit", "live", True)]
+
+
+def test_default_factory_can_yield_without_flock_or_sqlite_wait(monkeypatch):
+    from src.execution import venue_sync_contract as vsc
+    from src.state import db
+
+    calls = []
+
+    @contextlib.contextmanager
+    def _flocked(*, write_class, blocking=True):
+        calls.append((write_class, blocking))
+        conn = sqlite3.connect(":memory:")
+        try:
+            yield conn
+        finally:
+            conn.close()
+
+    monkeypatch.setattr(db, "trade_connection_with_world_flocked", _flocked)
+
+    conn = vsc.default_trade_conn_factory(blocking=False, busy_timeout_ms=0)
+    try:
+        busy_timeout_ms = conn.execute("PRAGMA busy_timeout").fetchone()[0]
+    finally:
+        conn.close()
+
+    assert calls == [("live", False)]
+    assert busy_timeout_ms == 0
 
 
 def test_default_read_factory_does_not_take_writer_flocks(monkeypatch):

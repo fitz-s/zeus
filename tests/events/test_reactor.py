@@ -1,5 +1,5 @@
 # Created: 2026-05-24
-# Last reused/audited: 2026-07-13
+# Last reused/audited: 2026-07-15
 # Authority basis: EDLI v1 implementation prompt §13 event reactor no-bypass contract.
 from __future__ import annotations
 
@@ -9,6 +9,7 @@ import hashlib
 import logging
 import threading
 import time
+from contextlib import contextmanager
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
@@ -428,6 +429,74 @@ def test_global_batch_claims_epoch_then_calls_one_lock_free_batch_seam():
             tuple(event.event_id for event in events),
         )
     } == {"SUBMIT_ABORTED_PRICE_MOVED:GLOBAL_TEST_NO_CURRENT_WINNER"}
+
+
+@pytest.mark.parametrize("winner_finalized", (True, False))
+def test_global_batch_prioritizes_venue_side_effect_and_stops_repeated_waits(
+    monkeypatch, winner_finalized
+):
+    conn, store = _store()
+    events = tuple(
+        _forecast_event(f"lock-priority-{index}", target_date="2026-05-25")
+        for index in range(3)
+    )
+    for event in events:
+        store.insert_or_ignore(event)
+    reactor = _global_batch_probe_reactor(store, {})
+    winner = events[-1]
+
+    def _batch(events, _decision_time, *, claim_unpaged_winner=None):
+        receipts = {
+            event.event_id: EventSubmissionReceipt(
+                submitted=event.event_id == winner.event_id,
+                event_id=event.event_id,
+                causal_snapshot_id=event.causal_snapshot_id,
+                side_effect_status=(
+                    "VENUE_SUBMIT_ACKED"
+                    if event.event_id == winner.event_id
+                    else "NO_SUBMIT"
+                ),
+                venue_call_started=event.event_id == winner.event_id,
+                venue_ack_received=event.event_id == winner.event_id,
+                reason="TEST_RECEIPT",
+            )
+            for event in events
+        }
+        return GlobalBatchSubmitResult(
+            receipts=receipts,
+            winner_event_id=winner.event_id,
+            venue_submit_count=1,
+        )
+
+    reactor._submit.process_global_batch = _batch
+    monkeypatch.setenv("ZEUS_REACTOR_CLAIM_BUSY_TIMEOUT_MS", "123")
+    calls = []
+
+    def _finalize(event, receipt, *, decision_time, result, wait_ms=None):
+        calls.append((event.event_id, receipt.side_effect_status, wait_ms))
+        if event.event_id == winner.event_id and winner_finalized:
+            return True
+        result.rejection_reasons.append("WORLD_WRITE_LOCK_BUSY_POST_SUBMIT")
+        result.retried += 1
+        return False
+
+    reactor._finalize_deferred_event_unit = _finalize
+
+    result = reactor.process_pending(decision_time=_DT_VENUE_OPEN, limit=3)
+
+    assert calls == (
+        [
+            (winner.event_id, "VENUE_SUBMIT_ACKED", None),
+            (events[0].event_id, "NO_SUBMIT", 123),
+        ]
+        if winner_finalized
+        else [(winner.event_id, "VENUE_SUBMIT_ACKED", None)]
+    )
+    assert result.retried == (2 if winner_finalized else 3)
+    assert result.rejection_reasons == [
+        "WORLD_WRITE_LOCK_BUSY_POST_SUBMIT"
+    ] * result.retried
+    assert _processing_status(conn, events[1].event_id) == "processing"
 
 
 def test_global_batch_incomplete_receipt_coverage_fails_closed_for_whole_epoch():
@@ -1596,7 +1665,9 @@ def test_live_book_authority_gap_requeues_with_selected_leg_identity():
     assert _processing_status(conn, event.event_id) == "pending"
 
 
-def test_sqlite_lock_during_post_submit_begin_is_retryable_not_dead_lettered(tmp_path):
+def test_sqlite_lock_during_post_submit_begin_is_retryable_not_dead_lettered(
+    tmp_path, monkeypatch
+):
     """A Window-B BEGIN IMMEDIATE lock is transient and cannot write evidence.
 
     The event is already claimed/committed as ``processing`` after Window A.
@@ -1613,6 +1684,19 @@ def test_sqlite_lock_during_post_submit_begin_is_retryable_not_dead_lettered(tmp
     store.insert_or_ignore(event)
     locker_holder: dict[str, sqlite3.Connection] = {}
     payload = json.loads(event.payload_json)
+    monkeypatch.setenv("ZEUS_REACTOR_CLAIM_BUSY_TIMEOUT_MS", "100")
+    from src.events import reactor as reactor_module
+
+    real_scoped_timeout = reactor_module._scoped_sqlite_busy_timeout
+    observed_timeouts = []
+
+    @contextmanager
+    def _tracked_timeout(conn, timeout_ms):
+        observed_timeouts.append(timeout_ms)
+        with real_scoped_timeout(conn, timeout_ms):
+            yield
+
+    monkeypatch.setattr(reactor_module, "_scoped_sqlite_busy_timeout", _tracked_timeout)
 
     def _submit(_event, decision_time):
         locker = sqlite3.connect(db_path, timeout=0)
@@ -1670,6 +1754,7 @@ def test_sqlite_lock_during_post_submit_begin_is_retryable_not_dead_lettered(tmp
     assert result.dead_lettered == 0
     assert result.retried == 1
     assert result.rejection_reasons == ["WORLD_WRITE_LOCK_BUSY_POST_SUBMIT"]
+    assert observed_timeouts[-2:] == [100, 0]
     assert _terminal_surfaces(conn, event.event_id) == {
         "verified_no_submit": 0,
         "execution_receipt": 0,

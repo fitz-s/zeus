@@ -1,8 +1,8 @@
 # Created: 2026-05-19
-# Last reused or audited: 2026-07-14
+# Last reused or audited: 2026-07-15
 # Authority basis: codereview-may19-2.md relationship F
 #                  + docs/operations/task_2026-05-21_live_side_effect_risk_boundaries/task.md P1-1
-# Lifecycle: created=2026-05-19; last_reviewed=2026-07-14; last_reused=2026-07-14
+# Lifecycle: created=2026-05-19; last_reviewed=2026-07-15; last_reused=2026-07-15
 # Purpose: Relationship-F antibody — assert that compute_composite_live_health()
 #   surfaces DEGRADED when run_mode has failed or status_summary is stale, even
 #   when the heartbeat is OK (closing the "scheduler alive but not trading" gap).
@@ -5317,6 +5317,161 @@ def test_edli_command_recovery_runs_live_tick_during_active_redecision(monkeypat
     main_module._edli_command_recovery_cycle()
 
     assert calls == ["live_tick"]
+
+
+def test_redecision_screen_defers_while_entry_reactor_is_active(monkeypatch) -> None:
+    import src.events.reactor as reactor_module
+    import src.main as main_module
+
+    calls: list[str] = []
+    monkeypatch.setattr(main_module, "_edli_reactor_active", lambda: True)
+    monkeypatch.setattr(
+        reactor_module,
+        "run_edli_continuous_redecision_screen_cycle",
+        lambda **kwargs: calls.append("screen"),
+    )
+
+    main_module._edli_continuous_redecision_screen_cycle()
+
+    assert calls == []
+
+
+@pytest.mark.parametrize(
+    ("reactor_active", "redecision_active", "monitor_active"),
+    [
+        (True, False, False),
+        (False, True, False),
+        (False, False, True),
+    ],
+)
+def test_chain_mirror_defers_behind_active_money_path_db_work(
+    monkeypatch,
+    reactor_active: bool,
+    redecision_active: bool,
+    monitor_active: bool,
+) -> None:
+    import src.main as main_module
+    import src.state.chain_mirror_reconciler as mirror_module
+
+    calls: list[str] = []
+    monkeypatch.setattr(main_module, "_edli_reactor_active", lambda: reactor_active)
+    monkeypatch.setattr(
+        main_module,
+        "_edli_redecision_screen_lock",
+        type("ScreenLock", (), {"locked": lambda self: redecision_active})(),
+    )
+    if monitor_active:
+        main_module._held_position_monitor_active.set()
+    else:
+        main_module._held_position_monitor_active.clear()
+    monkeypatch.setattr(mirror_module, "run_cycle", lambda: calls.append("mirror"))
+
+    try:
+        main_module._chain_mirror_reconcile_cycle()
+    finally:
+        main_module._held_position_monitor_active.clear()
+
+    assert calls == []
+
+
+def test_chain_mirror_runs_when_money_path_db_work_is_idle(monkeypatch) -> None:
+    import src.main as main_module
+    import src.state.chain_mirror_reconciler as mirror_module
+
+    calls: list[str] = []
+    monkeypatch.setattr(main_module, "_edli_reactor_active", lambda: False)
+    monkeypatch.setattr(
+        main_module,
+        "_edli_redecision_screen_lock",
+        type("ScreenLock", (), {"locked": lambda self: False})(),
+    )
+    main_module._held_position_monitor_active.clear()
+    monkeypatch.setattr(mirror_module, "run_cycle", lambda: calls.append("mirror"))
+
+    main_module._chain_mirror_reconcile_cycle()
+
+    assert calls == ["mirror"]
+
+
+def test_exit_monitor_claims_priority_and_waits_for_reactor_handoff(monkeypatch) -> None:
+    import src.execution.exit_lifecycle as exit_module
+    import src.main as main_module
+
+    calls: list[object] = []
+
+    class ReactorGate:
+        def acquire(self, *, timeout: float) -> bool:
+            calls.append(("wait", timeout, main_module._held_position_monitor_active.is_set()))
+            return True
+
+        def release(self) -> None:
+            calls.append("release")
+
+    def _run(**kwargs) -> None:
+        calls.append(("run", kwargs["monitor_claimed"]))
+        kwargs["mark_held_position_monitor_complete"]()
+
+    main_module._held_position_monitor_active.clear()
+    monkeypatch.setattr(main_module, "_edli_reactor_active_lock", ReactorGate())
+    monkeypatch.setattr(exit_module, "run_exit_monitor_cycle", _run)
+
+    main_module._exit_monitor_cycle()
+
+    assert calls == [
+        ("wait", main_module._EXIT_MONITOR_REACTOR_HANDOFF_SECONDS, True),
+        "release",
+        ("run", True),
+    ]
+    assert not main_module._held_position_monitor_active.is_set()
+
+
+def test_exit_monitor_handoff_timeout_releases_priority_claim(monkeypatch) -> None:
+    import src.execution.exit_lifecycle as exit_module
+    import src.main as main_module
+
+    calls: list[str] = []
+
+    class BusyReactorGate:
+        def acquire(self, *, timeout: float) -> bool:
+            return False
+
+    main_module._held_position_monitor_active.clear()
+    monkeypatch.setattr(main_module, "_edli_reactor_active_lock", BusyReactorGate())
+    monkeypatch.setattr(
+        exit_module,
+        "run_exit_monitor_cycle",
+        lambda **kwargs: calls.append("run"),
+    )
+
+    main_module._exit_monitor_cycle()
+
+    assert calls == []
+    assert not main_module._held_position_monitor_active.is_set()
+
+
+def test_reactor_rechecks_monitor_priority_after_active_lock_claim() -> None:
+    import inspect
+    import src.events.reactor as reactor_module
+
+    source = inspect.getsource(reactor_module.run_edli_event_reactor_cycle)
+    defer_call = '_defer_for_held_position_monitor("edli_event_reactor")'
+    first_check = source.index(defer_call)
+    lock_claim = source.index("active_lock.acquire(blocking=False)")
+    second_check = source.index(defer_call, first_check + len(defer_call))
+
+    assert first_check < lock_claim < second_check
+
+
+def test_entry_reactor_monitor_defer_contract_is_effective(monkeypatch) -> None:
+    import threading
+
+    import src.main as main_module
+
+    monitor_active = threading.Event()
+    monitor_active.set()
+    monkeypatch.setattr(main_module, "_held_position_monitor_active", monitor_active)
+
+    assert main_module._defer_for_held_position_monitor("edli_event_reactor") is True
 
 
 def test_edli_boot_command_recovery_runs_before_scheduler_tick(monkeypatch) -> None:
