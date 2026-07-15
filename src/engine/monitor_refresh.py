@@ -2503,13 +2503,21 @@ def _is_position_day0_quote_eligible(pos: Position) -> bool:
     return _is_position_target_local_day(pos, city, target_d)
 
 
-def _day0_one_sided_monitor_quote(conn, clob: PolymarketClient, pos: Position, token_id: str) -> HeldTokenMonitorQuote | None:
+def _day0_one_sided_monitor_quote(
+    conn,
+    clob: PolymarketClient,
+    pos: Position,
+    token_id: str,
+    *,
+    book: dict | None = None,
+) -> HeldTokenMonitorQuote | None:
     if not _is_position_day0_quote_eligible(pos) or not hasattr(clob, "get_orderbook"):
         return None
     try:
         from src.data.market_scanner import _top_book_level_decimal
 
-        book = clob.get_orderbook(token_id)
+        if book is None:
+            book = clob.get_orderbook(token_id)
         best_bid = bid_size = None
         best_ask = ask_size = None
         try:
@@ -2556,8 +2564,30 @@ def monitor_quote_refresh(conn, clob: PolymarketClient, pos: Position) -> HeldTo
     if not tid:
         return None
 
+    get_orderbook = getattr(clob, "get_orderbook", None)
     try:
-        bid, ask, bid_sz, ask_sz = clob.get_best_bid_ask(tid)
+        book = get_orderbook(tid) if callable(get_orderbook) else None
+        if book is not None:
+            from src.data.market_scanner import _top_book_level_decimal
+
+            try:
+                bid, bid_sz = _top_book_level_decimal(book, "bids")
+                ask, ask_sz = _top_book_level_decimal(book, "asks")
+            except Exception:
+                one_sided_quote = _day0_one_sided_monitor_quote(
+                    conn,
+                    clob,
+                    pos,
+                    tid,
+                    book=book,
+                )
+                if one_sided_quote is not None:
+                    return one_sided_quote
+                return None
+            if bid >= ask:
+                return None
+        else:
+            bid, ask, bid_sz, ask_sz = clob.get_best_bid_ask(tid)
         bid_f = float(bid)
         ask_f = float(ask)
         bid_sz_f = float(bid_sz)

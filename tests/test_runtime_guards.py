@@ -1,7 +1,7 @@
 """Runtime guard and live-cycle wiring tests."""
-# Lifecycle: created=2026-04-28; last_reviewed=2026-07-14; last_reused=2026-07-14
+# Lifecycle: created=2026-04-28; last_reviewed=2026-07-15; last_reused=2026-07-15
 # Created: 2026-04-28
-# Last reused/audited: 2026-07-14
+# Last reused/audited: 2026-07-15
 # Authority basis: docs/archive/2026-Q2/task_2026-05-15_live_order_e2e_verification/LIVE_ORDER_E2E_VERIFICATION_PLAN.md; task_2026-04-28_contamination_remediation Batch G; Phase 1B ENS snapshot persistence; Phase 1D forecast source policy; PR #56 MarketPhaseEvidence sidecar propagation; Wave26 explicit position env authority; task.md B3 exit executable snapshot identity; docs/operations/task_2026-05-21_live_side_effect_risk_boundaries/task.md P1-2 cluster projection; docs/archive/2026-Q2/task_2026-05-22_crosscheck_valid_window/CROSSCHECK_VALID_WINDOW_PLAN.md.
 # Purpose: Lock runtime guard and live-cycle wiring contracts.
 # Reuse: Run for runtime guard, live-only cleanup, and cycle wiring changes.
@@ -450,27 +450,75 @@ class _MonitorQuoteSplitClob:
 
 
 class _BidOnlyDay0Clob:
+    def __init__(self):
+        self.best_bid_ask_calls = 0
+        self.orderbook_calls = 0
+
     def get_best_bid_ask(self, token_id):
         from src.contracts.exceptions import EmptyOrderbookError
 
+        self.best_bid_ask_calls += 1
         assert token_id == "yes123"
         raise EmptyOrderbookError("No executable top book for yes123: missing asks")
 
     def get_orderbook(self, token_id):
+        self.orderbook_calls += 1
         assert token_id == "yes123"
         return {"bids": [{"price": 0.998, "size": 12.5}], "asks": []}
 
 
 class _AskOnlyDay0Clob:
+    def __init__(self):
+        self.best_bid_ask_calls = 0
+        self.orderbook_calls = 0
+
     def get_best_bid_ask(self, token_id):
         from src.contracts.exceptions import EmptyOrderbookError
 
+        self.best_bid_ask_calls += 1
         assert token_id == "yes123"
         raise EmptyOrderbookError("No executable top book for yes123: missing bids")
 
     def get_orderbook(self, token_id):
+        self.orderbook_calls += 1
         assert token_id == "yes123"
         return {"bids": [], "asks": [{"price": 0.001, "size": 100.0}]}
+
+
+class _TwoSidedMonitorBookClob:
+    def __init__(self):
+        self.best_bid_ask_calls = 0
+        self.orderbook_calls = 0
+
+    def get_best_bid_ask(self, token_id):
+        self.best_bid_ask_calls += 1
+        raise AssertionError("book-backed monitor refresh must not refetch top-of-book")
+
+    def get_orderbook(self, token_id):
+        self.orderbook_calls += 1
+        assert token_id == "yes123"
+        return {
+            "bids": [{"price": "0.40", "size": "30"}],
+            "asks": [{"price": "0.44", "size": "10"}],
+        }
+
+
+def test_monitor_quote_refresh_parses_two_sided_book_once(monkeypatch):
+    from src.engine import monitor_refresh
+
+    monkeypatch.setattr("src.state.db.log_microstructure", lambda *args, **kwargs: None)
+
+    clob = _TwoSidedMonitorBookClob()
+    quote = monitor_refresh.monitor_quote_refresh(None, clob, _position())
+
+    assert quote is not None
+    assert quote.best_bid == pytest.approx(0.40)
+    assert quote.best_ask == pytest.approx(0.44)
+    assert quote.bid_size == pytest.approx(30.0)
+    assert quote.ask_size == pytest.approx(10.0)
+    assert quote.diagnostic_market_price == pytest.approx(0.43)
+    assert clob.orderbook_calls == 1
+    assert clob.best_bid_ask_calls == 0
 
 
 def test_day0_monitor_quote_refresh_uses_executable_bid_when_asks_absent(monkeypatch):
@@ -480,13 +528,16 @@ def test_day0_monitor_quote_refresh_uses_executable_bid_when_asks_absent(monkeyp
 
     pos = _position(state="day0_window")
 
-    quote = monitor_refresh.monitor_quote_refresh(None, _BidOnlyDay0Clob(), pos)
+    clob = _BidOnlyDay0Clob()
+    quote = monitor_refresh.monitor_quote_refresh(None, clob, pos)
 
     assert quote is not None
     assert quote.best_bid == pytest.approx(0.998)
     assert quote.best_ask is None
     assert quote.ask_size == pytest.approx(0.0)
     assert quote.diagnostic_market_price == pytest.approx(0.998)
+    assert clob.orderbook_calls == 1
+    assert clob.best_bid_ask_calls == 0
 
 
 def test_day0_monitor_quote_refresh_uses_zero_sell_value_when_bids_absent(monkeypatch):
@@ -496,7 +547,8 @@ def test_day0_monitor_quote_refresh_uses_zero_sell_value_when_bids_absent(monkey
 
     pos = _position(state="day0_window")
 
-    quote = monitor_refresh.monitor_quote_refresh(None, _AskOnlyDay0Clob(), pos)
+    clob = _AskOnlyDay0Clob()
+    quote = monitor_refresh.monitor_quote_refresh(None, clob, pos)
 
     assert quote is not None
     assert quote.best_bid == pytest.approx(0.0)
@@ -504,6 +556,8 @@ def test_day0_monitor_quote_refresh_uses_zero_sell_value_when_bids_absent(monkey
     assert quote.bid_size == pytest.approx(0.0)
     assert quote.ask_size == pytest.approx(100.0)
     assert quote.diagnostic_market_price == pytest.approx(0.0)
+    assert clob.orderbook_calls == 1
+    assert clob.best_bid_ask_calls == 0
 
 
 def test_target_local_day_active_position_uses_bid_only_quote_when_asks_absent(monkeypatch):
