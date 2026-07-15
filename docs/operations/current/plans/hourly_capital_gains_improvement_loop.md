@@ -5,6 +5,14 @@
 
 ## 现状(forward)
 
+### 2026-07-15 18:19Z tick — BUY NO 真实结算 +$19.26；修复 A8/A9 语义冲突和 chain-mirror 结算吞吐
+- **实际资本证明:** Wuhan Jul-15 38°C `buy_no` 持仓 `fbeac91f-e9d` 已被 Gamma 确认为市场 NO 结算；canonical `position_current` 为 `settled`，100.00621 shares，cost basis ≈$80.75，realized P&L **+$19.26**。redeem command 已有 100006210 micro-pUSD intent；当前还没有 confirmed redeem transaction，不把 intent 冒充 chain cash realization。
+- **新根因:** `position_settled.v1.won` 在 harvester 表示“该 binary market 的 YES bin 是否结算”，在 chain-mirror 却表示“持仓是否赢”。BUY NO 恰好取反，使 raw audit 可以把真实赢单评成输单。P&L 和主学习路径用 `outcome/pnl` 未被翻转，但审计证据被污染。
+- **修复:** 所有新 canonical settlement 显式区分 A8 `market_bin_won` 和 A9 `position_won`；`direction + outcome` 作为可派生持仓语义；显式字段冲突的 row fail-closed，不进 metric/learning。不改写 canonical DB。
+- **throughput 修复:** chain-mirror 把 canonical DB phase `active` 错传给 runtime-state adapter，导致合法结算变成 `unknown` 并被 per-row isolation 静默跳过。现在直接通过 canonical lifecycle fold 验证 `active/day0/pending_exit/economically_closed -> settled`。
+- **验证:** capital evaluator **568 passed**；settlement/chain-mirror 扩展集 **161 passed**；chain-mirror 全文件 **41 passed**；A8/A9 定向 **7 passed**；audit 定向 **2 passed**；close-economics **4 passed**。仓库旧全量集仍有与本 diff 无关的 stale-fixture/linter 失败，未伪装为 clean pass。
+- **交易姿态:** operator `entries_paused` 保留；本 tick 未强制下单、未复制 DB。最新完整 auction 中 YES 路径存在但当前候选的 robust-majority economics 为负；三个正候选均为 BUY NO，三个已有仓位 SELL 均为负 robust EV/ΔlogW，故 HOLD。
+
 ### 2026-07-08 08:36Z tick — **真指标浮现:系统在亏钱,且亏损隐形。** 给真实结算成交打分(非回测):近期净负;根=多平仓路只两路入账
 - **地面真相:** 预报健康(08:31Z,近30min 170 条),venue_cmd 仍冻 19:00Z,POISON 0。在手 3 仓:Paris(07-08 到期,信念 1.0)、Ankara/Wuhan(07-09,0.83/0.85)—— 看着会赢。
 - **核心发现(给真成交打分 = 循环该做的 SURVEY,forward,非回测):**

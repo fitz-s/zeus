@@ -867,6 +867,21 @@ def build_settlement_canonical_write(
             f"settlement canonical builder requires phase_after=SETTLED, "
             f"got {phase_after!r}"
         )
+    raw_direction = getattr(position, "direction", "")
+    direction = str(getattr(raw_direction, "value", raw_direction) or "").strip().lower()
+    market_bin_won = bool(won)
+    if direction == "buy_yes":
+        position_won = market_bin_won
+    elif direction == "buy_no":
+        position_won = not market_bin_won
+    else:
+        raise ValueError(
+            "settlement canonical builder requires direction=buy_yes or buy_no"
+        )
+    if outcome not in {0, 1} or bool(outcome) != position_won:
+        raise ValueError(
+            "settlement outcome conflicts with direction and market-bin result"
+        )
     projection = build_position_current_projection(position)
     projection["phase"] = phase_after
 
@@ -879,7 +894,13 @@ def build_settlement_canonical_write(
             "contract_version": CANONICAL_POSITION_SETTLED_CONTRACT_VERSION,
             "winning_bin": winning_bin,
             "position_bin": getattr(position, "bin_label", ""),
-            "won": bool(won),
+            # `won` is the legacy market-bin result: did this binary market's
+            # YES claim resolve to 1?  It is not the held-position result for
+            # BUY NO.  Keep it for v1 readers, but name both meanings so new
+            # attribution cannot confuse a NO win with a position loss.
+            "won": market_bin_won,
+            "market_bin_won": market_bin_won,
+            "position_won": position_won,
             "outcome": int(outcome),
             "p_posterior": getattr(position, "p_posterior", None),
             "exit_price": getattr(position, "exit_price", None),

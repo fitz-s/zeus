@@ -809,6 +809,25 @@ def test_audit_yes_no_selection_skew_does_not_flag_score_only_yes(tmp_path):
     assert summary["selected_no_top_yes_score_better_only"] == 1
 
 
+def test_audit_settlement_payload_grades_buy_no_win_from_held_side_outcome():
+    audit = _load("audit_yes_no_settlement_side", "audit_yes_no_selection_skew.py")
+
+    assert audit._position_won_from_settlement_payload(
+        {"won": False, "outcome": 1, "pnl": 19.26}
+    ) is True
+    assert audit._position_won_from_settlement_payload(
+        {"won": True, "outcome": 0, "pnl": -80.74}
+    ) is False
+
+
+def test_audit_settlement_payload_fails_closed_on_position_outcome_conflict():
+    audit = _load("audit_yes_no_settlement_conflict", "audit_yes_no_selection_skew.py")
+
+    assert audit._position_won_from_settlement_payload(
+        {"position_won": False, "outcome": 1, "won": False}
+    ) is None
+
+
 def test_audit_yes_no_selection_skew_flags_objective_metric_false_positive_when_roi_not_useful(tmp_path):
     audit = _load("audit_yes_no_selection_objective", "audit_yes_no_selection_skew.py")
     trade_db = tmp_path / "zeus_trades.db"

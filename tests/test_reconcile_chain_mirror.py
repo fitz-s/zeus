@@ -1,13 +1,13 @@
 # Lifecycle: created=2026-07-04; last_reviewed=2026-07-15; last_reused=2026-07-15
-# Purpose: Regression tests for the chain-mirror reconciler (design doc
-#   docs/rebuild/chain_mirror_state_model_2026-07-04.md).
+# Purpose: Regression tests for the chain-mirror reconciler.
 # Reuse: Run when position_current chain-mirror classification, the
 #   scripts/reconcile_chain_mirror.py CLI, or the market-rule state model
-#   for quarantined/settled positions change.
+#   for active/settled positions change.
 # Authority basis: operator directive 2026-07-04 (root AGENTS.md §2
 #   reconciliation order Chain > Chronicler > Portfolio).
 from __future__ import annotations
 
+import json
 import sqlite3
 
 import pytest
@@ -78,8 +78,8 @@ def test_grade_bin_ungradeable_returns_none():
 def _row(**overrides) -> LocalPositionRow:
     base = dict(
         position_id="pos-1",
-        phase="quarantined",
-        chain_state="entry_authority_quarantined",
+        phase="active",
+        chain_state="synced",
         city="manila",
         target_date="2026-07-04",
         temperature_metric="high",
@@ -311,8 +311,8 @@ def _insert_position_current(
     conn: sqlite3.Connection,
     *,
     position_id: str,
-    phase: str = "quarantined",
-    chain_state: str = "entry_authority_quarantined",
+    phase: str = "active",
+    chain_state: str = "synced",
     city: str = "manila",
     target_date: str = "2026-07-04",
     temperature_metric: str = "high",
@@ -368,7 +368,7 @@ def _insert_settlement(conn: sqlite3.Connection, **overrides) -> None:
 
 def test_apply_closes_absent_winner_to_settled_closed_redeemed(trades_conn, forecasts_conn):
     _insert_position_current(
-        trades_conn, position_id="pos-win", phase="quarantined",
+        trades_conn, position_id="pos-win", phase="active",
         city="milan", target_date="2026-06-23", bin_label="40°C",
         direction="buy_yes", token_id="tok-milan-yes",
     )
@@ -392,7 +392,7 @@ def test_apply_closes_absent_winner_to_settled_closed_redeemed(trades_conn, fore
 
 def test_apply_closes_absent_loser_to_settled_closed_worthless(trades_conn, forecasts_conn):
     _insert_position_current(
-        trades_conn, position_id="pos-lose", phase="quarantined",
+        trades_conn, position_id="pos-lose", phase="active",
         city="seoul", target_date="2026-06-21", bin_label="24°C",
         direction="buy_yes", token_id="tok-seoul-yes",
     )
@@ -408,6 +408,32 @@ def test_apply_closes_absent_loser_to_settled_closed_worthless(trades_conn, fore
     assert row["chain_state"] == CLOSED_WORTHLESS
 
 
+def test_apply_buy_no_win_emits_distinct_market_and_position_results(
+    trades_conn, forecasts_conn
+):
+    _insert_position_current(
+        trades_conn, position_id="pos-no-win", phase="active",
+        city="milan", target_date="2026-06-23", bin_label="40°C",
+        direction="buy_no", no_token_id="tok-milan-no", chain_state="synced",
+    )
+    _insert_settlement(
+        forecasts_conn, city="milan", target_date="2026-06-23",
+        winning_bin="39°C",
+    )
+
+    report = reconcile(trades_conn, forecasts_conn, chain_by_asset={}, apply=True)
+
+    assert report.applied == 1
+    row = trades_conn.execute(
+        "SELECT payload_json FROM position_events WHERE position_id='pos-no-win'"
+    ).fetchone()
+    payload = json.loads(row["payload_json"])
+    assert payload["won"] is True
+    assert payload["market_bin_won"] is False
+    assert payload["position_won"] is True
+    assert payload["outcome"] == 1
+
+
 # -----------------------------------------------------------------------------
 # Bug B antibody (2026-07-07): _apply_settlement_finding computes _pnl for the
 # position_settled.v1 audit payload but never overwrites realized_pnl_usd /
@@ -420,7 +446,7 @@ def test_apply_closes_absent_loser_to_settled_closed_worthless(trades_conn, fore
 
 def test_apply_closes_absent_winner_projects_realized_pnl(trades_conn, forecasts_conn):
     _insert_position_current(
-        trades_conn, position_id="pos-win-pnl", phase="quarantined",
+        trades_conn, position_id="pos-win-pnl", phase="active",
         city="milan", target_date="2026-06-23", bin_label="40°C",
         direction="buy_yes", token_id="tok-milan-yes-pnl",
         chain_shares=10.0, shares=10.0, cost_basis_usd=4.0,
@@ -447,7 +473,7 @@ def test_apply_closes_absent_winner_projects_realized_pnl(trades_conn, forecasts
 
 def test_apply_closes_absent_loser_projects_negative_realized_pnl(trades_conn, forecasts_conn):
     _insert_position_current(
-        trades_conn, position_id="pos-lose-pnl", phase="quarantined",
+        trades_conn, position_id="pos-lose-pnl", phase="active",
         city="seoul", target_date="2026-06-21", bin_label="24°C",
         direction="buy_yes", token_id="tok-seoul-yes-pnl",
         chain_shares=8.0, shares=8.0, cost_basis_usd=3.2,
@@ -474,7 +500,7 @@ def test_apply_closes_absent_loser_projects_negative_realized_pnl(trades_conn, f
 
 def test_apply_corrects_size_mismatch(trades_conn, forecasts_conn):
     _insert_position_current(
-        trades_conn, position_id="pos-dallas", phase="quarantined",
+        trades_conn, position_id="pos-dallas", phase="active",
         city="dallas", target_date="2026-06-20", bin_label="100-101°F",
         direction="buy_yes", token_id="tok-dallas-yes",
         chain_shares=1184.57, shares=1184.57,
@@ -993,7 +1019,7 @@ def test_foreign_and_missing_local_row_findings_never_create_a_local_row(trades_
 
 def test_dry_run_writes_nothing(trades_conn, forecasts_conn):
     _insert_position_current(
-        trades_conn, position_id="pos-dry", phase="quarantined",
+        trades_conn, position_id="pos-dry", phase="active",
         city="milan", target_date="2026-06-23", bin_label="40°C",
         direction="buy_yes", token_id="tok-milan-yes-dry",
     )
@@ -1006,7 +1032,7 @@ def test_dry_run_writes_nothing(trades_conn, forecasts_conn):
     row = trades_conn.execute(
         "SELECT phase FROM position_current WHERE position_id='pos-dry'"
     ).fetchone()
-    assert row["phase"] == "quarantined"
+    assert row["phase"] == "active"
     events = trades_conn.execute(
         "SELECT COUNT(*) AS n FROM position_events WHERE position_id='pos-dry'"
     ).fetchone()
@@ -1017,7 +1043,7 @@ def test_dry_run_writes_nothing(trades_conn, forecasts_conn):
 
 def test_second_run_is_idempotent_no_duplicate_events(trades_conn, forecasts_conn):
     _insert_position_current(
-        trades_conn, position_id="pos-idem", phase="quarantined",
+        trades_conn, position_id="pos-idem", phase="active",
         city="milan", target_date="2026-06-23", bin_label="40°C",
         direction="buy_yes", token_id="tok-milan-yes-idem",
     )
@@ -1043,7 +1069,7 @@ def test_position_events_table_is_append_only_trigger_enforced(trades_conn, fore
     append-only: even a direct UPDATE/DELETE against a reconciler-written row
     must be rejected by the schema's own trigger, independent of application code."""
     _insert_position_current(
-        trades_conn, position_id="pos-append-only", phase="quarantined",
+        trades_conn, position_id="pos-append-only", phase="active",
         city="milan", target_date="2026-06-23", bin_label="40°C",
         direction="buy_yes", token_id="tok-milan-yes-append-only",
     )
@@ -1071,12 +1097,12 @@ def test_reconcile_isolates_a_raising_position_and_continues(
     trades_conn, forecasts_conn, monkeypatch
 ):
     _insert_position_current(
-        trades_conn, position_id="pos-raises", phase="quarantined",
+        trades_conn, position_id="pos-raises", phase="active",
         city="milan", target_date="2026-06-23", bin_label="40°C",
         direction="buy_yes", token_id="tok-milan-yes-raises",
     )
     _insert_position_current(
-        trades_conn, position_id="pos-ok", phase="quarantined",
+        trades_conn, position_id="pos-ok", phase="active",
         city="milan", target_date="2026-06-23", bin_label="40°C",
         direction="buy_yes", token_id="tok-milan-yes-ok",
     )
@@ -1104,7 +1130,7 @@ def test_reconcile_isolates_a_raising_position_and_continues(
     raises_row = trades_conn.execute(
         "SELECT phase FROM position_current WHERE position_id='pos-raises'"
     ).fetchone()
-    assert raises_row["phase"] == "quarantined"
+    assert raises_row["phase"] == "active"
     ok_row = trades_conn.execute(
         "SELECT phase FROM position_current WHERE position_id='pos-ok'"
     ).fetchone()

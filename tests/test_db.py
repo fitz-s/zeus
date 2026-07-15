@@ -1298,6 +1298,191 @@ def test_query_p4_fact_smoke_summary_separates_verified_settlement_authority(tmp
     assert summary["settlement_authority"]["learning_eligible_rows"] == 1
 
 
+@pytest.mark.parametrize(
+    ("direction", "market_bin_won", "outcome", "position_won"),
+    [
+        ("buy_yes", True, 1, True),
+        ("buy_yes", False, 0, False),
+        ("buy_no", False, 1, True),
+        ("buy_no", True, 0, False),
+    ],
+)
+def test_settlement_payload_distinguishes_market_bin_from_position_result(
+    direction, market_bin_won, outcome, position_won
+):
+    from src.engine.lifecycle_events import build_settlement_canonical_write
+    from src.state.portfolio import Position
+
+    pos = Position(
+        trade_id="buy-no-settlement-win",
+        market_id="m-buy-no",
+        city="Wuhan",
+        cluster="east-asia",
+        target_date="2026-07-15",
+        bin_label="38°C",
+        direction=direction,
+        env="live",
+        unit="C",
+        size_usd=80.74,
+        entry_price=0.8074,
+        shares=100.0,
+        cost_basis_usd=80.74,
+        p_posterior=0.95,
+        decision_snapshot_id="snap-buy-no",
+        strategy_key="center_buy",
+        strategy="center_buy",
+        edge_source="center_buy",
+        exit_price=1.0,
+        pnl=19.26,
+        exit_reason="SETTLEMENT",
+        last_exit_at="2026-07-15T17:48:15Z",
+        state="settled",
+    )
+
+    events, _projection = build_settlement_canonical_write(
+        pos,
+        winning_bin="37°C",
+        won=market_bin_won,
+        outcome=outcome,
+        sequence_no=1,
+        phase_before="day0_window",
+    )
+    payload = json.loads(events[0]["payload_json"])
+
+    assert payload["won"] is market_bin_won
+    assert payload["market_bin_won"] is market_bin_won
+    assert payload["position_won"] is position_won
+    assert payload["outcome"] == outcome
+
+
+def test_settlement_payload_rejects_direction_outcome_conflict():
+    from src.engine.lifecycle_events import build_settlement_canonical_write
+    from src.state.portfolio import Position
+
+    pos = Position(
+        trade_id="conflicting-buy-no-settlement",
+        market_id="m-conflict",
+        city="Wuhan",
+        cluster="east-asia",
+        target_date="2026-07-15",
+        bin_label="38°C",
+        direction="buy_no",
+        env="live",
+        unit="C",
+        size_usd=80.74,
+        entry_price=0.8074,
+        shares=100.0,
+        cost_basis_usd=80.74,
+        p_posterior=0.95,
+        decision_snapshot_id="snap-conflict",
+        strategy_key="center_buy",
+        strategy="center_buy",
+        edge_source="center_buy",
+        exit_price=1.0,
+        pnl=19.26,
+        exit_reason="SETTLEMENT",
+        last_exit_at="2026-07-15T17:48:15Z",
+        state="settled",
+    )
+
+    with pytest.raises(ValueError, match="settlement outcome conflicts"):
+        build_settlement_canonical_write(
+            pos,
+            winning_bin="37°C",
+            won=False,
+            outcome=0,
+            sequence_no=1,
+            phase_before="day0_window",
+        )
+
+
+def test_settlement_normalizer_derives_buy_no_axes_from_legacy_payload():
+    from src.state.db import _normalize_position_settlement_event
+
+    normalized = _normalize_position_settlement_event(
+        {
+            "runtime_trade_id": "legacy-buy-no-win",
+            "city": "Wuhan",
+            "target_date": "2026-07-15",
+            "bin_label": "38°C",
+            "direction": "buy_no",
+            "decision_snapshot_id": "snap-no-win",
+            "edge_source": "center_buy",
+            "strategy": "center_buy",
+            "timestamp": "2026-07-15T17:48:15Z",
+            "env": "live",
+            "details": {
+                "contract_version": "position_settled.v1",
+                "winning_bin": "37°C",
+                "position_bin": "38°C",
+                "won": False,
+                "outcome": 1,
+                "p_posterior": 0.95,
+                "exit_price": 1.0,
+                "pnl": 19.26,
+                "exit_reason": "SETTLEMENT",
+                "settlement_authority": "VENUE_RESOLVED",
+                "settlement_truth_source": "gamma_exact_held_event",
+                "settlement_market_slug": "wuhan-high-2026-07-15",
+                "settlement_temperature_metric": "high",
+                "settlement_source": "gamma",
+                "settlement_value": None,
+            },
+        }
+    )
+
+    assert normalized is not None
+    assert normalized["market_bin_won"] is False
+    assert normalized["position_won"] is True
+    assert "settlement_side_semantics_conflict" not in normalized["degraded_reason"]
+
+
+def test_settlement_normalizer_degrades_explicit_side_conflict():
+    from src.state.db import _normalize_position_settlement_event
+
+    normalized = _normalize_position_settlement_event(
+        {
+            "runtime_trade_id": "explicit-conflict",
+            "city": "Wuhan",
+            "target_date": "2026-07-15",
+            "bin_label": "38°C",
+            "direction": "buy_no",
+            "decision_snapshot_id": "snap-conflict",
+            "edge_source": "center_buy",
+            "strategy": "center_buy",
+            "timestamp": "2026-07-15T17:48:15Z",
+            "env": "live",
+            "details": {
+                "contract_version": "position_settled.v1",
+                "winning_bin": "37°C",
+                "position_bin": "38°C",
+                "won": False,
+                "market_bin_won": True,
+                "position_won": False,
+                "outcome": 1,
+                "p_posterior": 0.95,
+                "exit_price": 1.0,
+                "pnl": 19.26,
+                "exit_reason": "SETTLEMENT",
+                "settlement_authority": "VERIFIED",
+                "settlement_truth_source": "forecasts.settlement_outcomes",
+                "settlement_market_slug": "wuhan-high-2026-07-15",
+                "settlement_temperature_metric": "high",
+                "settlement_source": "weather_underground",
+                "settlement_value": 37,
+            },
+        }
+    )
+
+    assert normalized is not None
+    assert normalized["is_degraded"] is True
+    assert normalized["metric_ready"] is False
+    assert (
+        "settlement_side_semantics_conflict:position_won,market_bin_won"
+        in normalized["degraded_reason"]
+    )
+
+
 def test_query_p4_fact_smoke_summary_reports_missing_tables_explicitly(tmp_path):
     from src.state.db import query_p4_fact_smoke_summary
 

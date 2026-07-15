@@ -10605,6 +10605,30 @@ def _settlement_truth_ready(normalized: dict) -> bool:
 
 def _normalize_position_settlement_event(event: dict) -> Optional[dict]:
     details = dict(event.get("details") or {})
+    direction = str(event.get("direction") or "").strip().lower()
+    outcome = _coerce_settlement_int(details.get("outcome"))
+    position_won = bool(outcome) if outcome in {0, 1} else None
+    if position_won is None or direction not in {"buy_yes", "buy_no"}:
+        market_bin_won = None
+    else:
+        market_bin_won = (
+            position_won if direction == "buy_yes" else not position_won
+        )
+    side_semantics_conflicts: list[str] = []
+    explicit_position_won = details.get("position_won")
+    if explicit_position_won is not None and (
+        not isinstance(explicit_position_won, bool)
+        or position_won is None
+        or explicit_position_won != position_won
+    ):
+        side_semantics_conflicts.append("position_won")
+    explicit_market_bin_won = details.get("market_bin_won")
+    if explicit_market_bin_won is not None and (
+        not isinstance(explicit_market_bin_won, bool)
+        or market_bin_won is None
+        or explicit_market_bin_won != market_bin_won
+    ):
+        side_semantics_conflicts.append("market_bin_won")
     contract_missing_fields = [
         field
         for field in CANONICAL_POSITION_SETTLED_DETAIL_FIELDS
@@ -10615,9 +10639,9 @@ def _normalize_position_settlement_event(event: dict) -> Optional[dict]:
         "city": str(event.get("city") or ""),
         "target_date": str(event.get("target_date") or ""),
         "range_label": str(event.get("bin_label") or ""),
-        "direction": str(event.get("direction") or ""),
+        "direction": direction,
         "p_posterior": _coerce_settlement_float(details.get("p_posterior")),
-        "outcome": _coerce_settlement_int(details.get("outcome")),
+        "outcome": outcome,
         "pnl": _coerce_settlement_float(details.get("pnl")),
         "decision_snapshot_id": str(event.get("decision_snapshot_id") or ""),
         "edge_source": str(event.get("edge_source") or ""),
@@ -10626,6 +10650,8 @@ def _normalize_position_settlement_event(event: dict) -> Optional[dict]:
         "winning_bin": details.get("winning_bin"),
         "position_bin": details.get("position_bin") or event.get("bin_label"),
         "won": details.get("won"),
+        "market_bin_won": market_bin_won,
+        "position_won": position_won,
         "exit_price": _coerce_settlement_float(details.get("exit_price")),
         "exit_reason": str(details.get("exit_reason") or ""),
         "settlement_authority": str(details.get("settlement_authority") or "UNKNOWN").upper(),
@@ -10647,9 +10673,17 @@ def _normalize_position_settlement_event(event: dict) -> Optional[dict]:
         if _is_missing_settlement_value(normalized.get(field))
     ]
     if missing_required:
+        degraded_reasons = [
+            f"missing_required_fields:{','.join(missing_required)}"
+        ]
+        if side_semantics_conflicts:
+            degraded_reasons.append(
+                "settlement_side_semantics_conflict:"
+                + ",".join(side_semantics_conflicts)
+            )
         normalized.update({
             "is_degraded": True,
-            "degraded_reason": f"missing_required_fields:{','.join(missing_required)}",
+            "degraded_reason": "; ".join(degraded_reasons),
             "contract_missing_fields": contract_missing_fields,
             "canonical_payload_complete": not contract_missing_fields,
             "learning_snapshot_ready": False,
@@ -10664,18 +10698,28 @@ def _normalize_position_settlement_event(event: dict) -> Optional[dict]:
         degraded_reasons.append(
             f"missing_payload_fields:{','.join(contract_missing_fields)}"
         )
+    if side_semantics_conflicts:
+        degraded_reasons.append(
+            "settlement_side_semantics_conflict:"
+            + ",".join(side_semantics_conflicts)
+        )
     if not normalized["decision_snapshot_id"]:
         degraded_reasons.append("missing_decision_snapshot_id")
     truth_ready = _settlement_truth_ready(normalized)
     if not truth_ready:
         degraded_reasons.append("missing_verified_settlement_truth")
+    side_semantics_ready = not side_semantics_conflicts
     normalized.update({
         "is_degraded": bool(degraded_reasons),
         "degraded_reason": "; ".join(degraded_reasons),
         "contract_missing_fields": contract_missing_fields,
         "canonical_payload_complete": not contract_missing_fields,
-        "learning_snapshot_ready": bool(normalized["decision_snapshot_id"]) and truth_ready,
-        "metric_ready": truth_ready,
+        "learning_snapshot_ready": (
+            bool(normalized["decision_snapshot_id"])
+            and truth_ready
+            and side_semantics_ready
+        ),
+        "metric_ready": truth_ready and side_semantics_ready,
         "required_missing_fields": [],
     })
     return normalized

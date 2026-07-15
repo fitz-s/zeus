@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Lifecycle: created=2026-07-09; last_reviewed=2026-07-09; last_reused=2026-07-09
+# Lifecycle: created=2026-07-09; last_reviewed=2026-07-15; last_reused=2026-07-15
 # Purpose: read-only diagnostic for EDLI YES/NO selection skew from canonical order events.
 # Authority basis: AGENTS.md live-money proof gates; operator focus on absent high-quality YES fills.
 """Audit recent EDLI YES/NO candidate selection skew from canonical event payloads.
@@ -512,6 +512,21 @@ def _open_readonly(path: Path) -> sqlite3.Connection:
     return conn
 
 
+def _position_won_from_settlement_payload(payload: dict[str, Any]) -> bool | None:
+    """Read held-side settlement truth without treating a NO win as a loss."""
+    explicit = payload.get("position_won")
+    outcome = payload.get("outcome")
+    if outcome in {0, 1, "0", "1"}:
+        held_won = bool(int(outcome))
+        if isinstance(explicit, bool) and explicit != held_won:
+            return None
+        return held_won
+    if isinstance(explicit, bool):
+        return explicit
+    legacy = payload.get("won")
+    return legacy if isinstance(legacy, bool) else None
+
+
 def _venue_fill_evidence(
     conn: sqlite3.Connection,
     *,
@@ -627,7 +642,9 @@ def _venue_fill_evidence(
             except (TypeError, ValueError, KeyError, IndexError):
                 payload = {}
             if isinstance(payload, dict):
-                evidence["settled_won"] = payload.get("won")
+                evidence["settled_won"] = _position_won_from_settlement_payload(
+                    payload
+                )
                 evidence["settled_pnl"] = _float(payload.get("pnl"))
     evidence["position_ids"] = sorted(position_ids)
     return evidence

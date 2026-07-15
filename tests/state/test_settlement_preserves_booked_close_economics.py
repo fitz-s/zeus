@@ -189,7 +189,9 @@ class TestBookedCloseEconomicsSurviveSettlementReload:
             closed,
             winning_bin=closed.bin_label,
             won=False,
-            outcome=0,
+            # BUY NO would win this binary settlement even though this
+            # position had already exited at a booked loss.
+            outcome=1,
             sequence_no=2,
             phase_before="economically_closed",
             settlement_value=1.0,

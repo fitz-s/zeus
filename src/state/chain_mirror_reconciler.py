@@ -831,7 +831,7 @@ def _apply_settlement_finding(
     transition_phase() / harvester Position-object builder.
     """
     from src.state.db import append_many_and_project
-    from src.state.lifecycle_manager import enter_settled_runtime_state
+    from src.state.lifecycle_manager import LifecyclePhase, fold_lifecycle_phase
     from src.state.projection import CANONICAL_POSITION_CURRENT_COLUMNS
 
     position_id = finding.position_id
@@ -847,7 +847,15 @@ def _apply_settlement_finding(
 
     occurred_at = now.isoformat()
     phase_before = str(current["phase"] or "")
-    won = bool(finding.details.get("won"))
+    direction = str(current["direction"] or "").strip().lower()
+    if direction not in {"buy_yes", "buy_no"}:
+        raise ValueError(
+            "chain-mirror settlement requires direction=buy_yes or buy_no"
+        )
+    position_won = bool(finding.details.get("won"))
+    market_bin_won = (
+        position_won if direction == "buy_yes" else not position_won
+    )
     if finding.classification == REDEEMABLE:
         # Market resolved + Zeus won + tokens still physically present on
         # chain (not yet swept by the third-party auto-redeemer). Local
@@ -855,17 +863,14 @@ def _apply_settlement_finding(
         # left untouched — it already correctly says the tokens are there.
         chain_state_after = str(current["chain_state"] or "")
     else:
-        chain_state_after = CLOSED_REDEEMED if won else CLOSED_WORTHLESS
-    # P0c (2026-07-04): the direct `projection["phase"] = "settled"` bypass
-    # documented in docs/rebuild/chain_mirror_state_model_2026-07-04.md §5 is
-    # retired now that LEGAL_LIFECYCLE_FOLDS[QUARANTINED] legally folds to
-    # SETTLED — this now goes through the same guard every other settlement
-    # writer uses, which also fails loudly if `phase_before` is somehow not a
-    # legal starting phase (active/day0/economically_closed/pending_exit/
-    # quarantined) instead of silently minting an illegal transition.
-    projection["phase"] = enter_settled_runtime_state(
-        phase_before, chain_state=str(current["chain_state"] or "")
-    )
+        chain_state_after = CLOSED_REDEEMED if position_won else CLOSED_WORTHLESS
+    # `phase_before` is already the canonical DB phase, so validate it through
+    # the canonical fold directly. Runtime-state adapters accept values such
+    # as `entered`; using one here would misclassify canonical `active` as
+    # unknown and silently skip the settlement under per-row isolation.
+    projection["phase"] = fold_lifecycle_phase(
+        phase_before, LifecyclePhase.SETTLED
+    ).value
     projection["chain_state"] = chain_state_after
     projection["updated_at"] = occurred_at
     projection["settled_at"] = projection.get("settled_at") or occurred_at
@@ -894,7 +899,7 @@ def _apply_settlement_finding(
 
     _shares = float(current["chain_shares"] or current["shares"] or 0.0)
     _cost = float(current["cost_basis_usd"] or 0.0)
-    _exit_price = 1.0 if won else 0.0
+    _exit_price = 1.0 if position_won else 0.0
     _pnl = compute_realized_pnl_usd(
         shares=_shares, exit_price=_exit_price, cost_basis_usd=_cost
     )
@@ -914,9 +919,16 @@ def _apply_settlement_finding(
             **finding.details,
             "contract_version": "position_settled.v1",
             "position_bin": str(current["bin_label"] or ""),
-            "outcome": 1 if won else 0,
+            # `finding.details.won` predates the A8/A9 split and means the
+            # held position won on this writer. Preserve that v1 field, but
+            # emit both governed axes so downstream code never has to infer
+            # BUY NO economics from it.
+            "won": position_won,
+            "market_bin_won": market_bin_won,
+            "position_won": position_won,
+            "outcome": 1 if position_won else 0,
             "p_posterior": current["p_posterior"],
-            "exit_price": 1.0 if won else 0.0,
+            "exit_price": 1.0 if position_won else 0.0,
             "pnl": _pnl,
             "exit_reason": "chain_mirror_settlement",
             "settlement_authority": "VERIFIED",
