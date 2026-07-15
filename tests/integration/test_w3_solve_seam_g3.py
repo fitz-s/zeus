@@ -1980,6 +1980,7 @@ def test_live_adapter_routes_each_global_truth_to_its_owner(monkeypatch):
     assert captured["forecast_conn"] is forecast
     assert captured["world_conn"] is not topology
     assert captured["portfolio_state_provider"] is None
+    assert captured["candidate_policy_rejection_resolver"] is None
     prepared_receipt = captured["prepare_event"](
         event,
         _dt.datetime(2026, 7, 10, 8, 10, tzinfo=_dt.timezone.utc),

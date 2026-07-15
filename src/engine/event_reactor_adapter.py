@@ -5241,23 +5241,6 @@ def event_bound_live_adapter_from_trade_conn(
                 ),
             )
 
-        global_entry_pause_checked = False
-        global_entry_pause_reason = None
-
-        def _current_candidate_policy_rejection(candidate) -> str | None:
-            nonlocal global_entry_pause_checked, global_entry_pause_reason
-            if real_order_submit_enabled and not global_entry_pause_checked:
-                global_entry_pause_reason = _entry_pause_blocks_live_submit(
-                    live_cap_conn or trade_conn
-                )
-                global_entry_pause_checked = True
-            if (
-                global_entry_pause_reason is not None
-                and str(getattr(candidate, "action", "BUY") or "BUY") == "BUY"
-            ):
-                return f"ENTRY_ACTION_PAUSED:{global_entry_pause_reason}"
-            return None
-
         try:
             return process_current_global_batch(
                 events,
@@ -5299,9 +5282,13 @@ def event_bound_live_adapter_from_trade_conn(
                 portfolio_state_provider=None,
                 current_book_epoch_provider=_current_book_epoch,
                 current_capital_limit_resolver=_current_entry_capital_limit,
-                candidate_policy_rejection_resolver=(
-                    _current_candidate_policy_rejection
-                ),
+                # Operator pause governs actuation, not economic measurement.
+                # _preflight -> _submit_inner re-reads the durable pause before
+                # any live-cap reservation or command persistence, and the
+                # executor repeats the same check.  Keeping it out of candidate
+                # eligibility lets the paused engine still compare YES/NO/SELL
+                # against HOLD/CASH with current executable economics.
+                candidate_policy_rejection_resolver=None,
                 fractional_kelly_multiplier=Decimal(
                     str(_runtime_kelly_multiplier())
                 ),
