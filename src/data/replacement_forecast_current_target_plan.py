@@ -528,8 +528,15 @@ def _latest_authorized_day0_fact(
     target_date: str,
     temperature_metric: str,
     decision_time: datetime,
+    require_settlement_channel: bool = False,
     ) -> dict[str, object] | None:
-    """Latest hard fact accepted by either durable Day0 authority surface."""
+    """Latest Day0 fact, optionally restricted to the settlement channel.
+
+    Same-station fast observations are current physical evidence, but the
+    prediction-market payoff is defined by the declared settlement channel.
+    They may advance refresh/redecision; they cannot alone create exact
+    absorbing certainty when ``require_settlement_channel`` is true.
+    """
 
     metric = str(temperature_metric or "").strip().lower()
     if metric not in {"high", "low"}:
@@ -727,6 +734,23 @@ def _latest_authorized_day0_fact(
                 event_source = str(
                     payload.get("settlement_source") or ""
                 ).strip().lower()
+                settlement_channel_source = (
+                    (
+                        source_type == "wu_icao"
+                        and event_source in {"wu_icao_history", "wu_api"}
+                    )
+                    or (
+                        source_type == "noaa"
+                        and event_source
+                        == f"ogimet_metar_{expected_station.lower()}"
+                    )
+                    or (
+                        source_type == "hko"
+                        and event_source == "hko_hourly_accumulator"
+                    )
+                )
+                if require_settlement_channel and not settlement_channel_source:
+                    continue
                 event_source_allowed = (
                     (
                         source_type in {"wu_icao", "noaa"}
@@ -875,6 +899,7 @@ def _day0_observation_lag_reason(
         target_date=target_date,
         temperature_metric=temperature_metric,
         decision_time=decision_time,
+        require_settlement_channel=True,
     )
     if fact is None:
         return None

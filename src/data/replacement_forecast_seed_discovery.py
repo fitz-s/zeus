@@ -138,6 +138,7 @@ def _day0_observed_extreme_seed_payload(
             target_date=target_date,
             temperature_metric=metric_norm,
             decision_time=computed_at,
+            require_settlement_channel=True,
         )
         if fact is None:
             return None

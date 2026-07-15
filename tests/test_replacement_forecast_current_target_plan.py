@@ -203,6 +203,85 @@ def test_day0_hwm_accepts_authorized_durable_fast_observation_event() -> None:
     assert reason.startswith("basis=day0_observation_hwm_lag")
 
 
+def test_day0_settlement_certainty_excludes_unconfirmed_fast_channel() -> None:
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        """
+        CREATE TABLE opportunity_events (
+            event_id TEXT,
+            event_type TEXT,
+            available_at TEXT,
+            received_at TEXT,
+            created_at TEXT,
+            payload_json TEXT
+        )
+        """
+    )
+    authority = {
+        "city": "Karachi",
+        "target_date": "2026-07-15",
+        "metric": "high",
+        "station_id": "OPKC",
+        "source_match_status": "MATCH",
+        "local_date_status": "MATCH",
+        "station_match_status": "MATCH",
+        "dst_status": "UNAMBIGUOUS",
+        "metric_match_status": "MATCH",
+        "rounding_status": "MATCH",
+        "source_authorized_status": "AUTHORIZED",
+        "live_authority_status": "live",
+    }
+    for event_id, source, observed_at, value in (
+        ("wu", "wu_api", "2026-07-15T03:00:00+00:00", 29.0),
+        ("fast", "aviationweather_metar", "2026-07-15T03:30:00+00:00", 30.0),
+    ):
+        payload = {
+            **authority,
+            "settlement_source": source,
+            "observation_time": observed_at,
+            "observation_available_at": observed_at,
+            "raw_value": value,
+            "rounded_value": int(value),
+            "high_so_far": value,
+            "settlement_unit": "C",
+        }
+        conn.execute(
+            "INSERT INTO opportunity_events VALUES (?, ?, ?, ?, ?, ?)",
+            (
+                event_id,
+                "DAY0_EXTREME_UPDATED",
+                observed_at,
+                observed_at,
+                observed_at,
+                json.dumps(payload),
+            ),
+        )
+
+    physical = _latest_authorized_day0_fact(
+        conn,
+        city="Karachi",
+        target_date="2026-07-15",
+        temperature_metric="high",
+        decision_time=datetime(2026, 7, 15, 3, 35, tzinfo=timezone.utc),
+    )
+    settlement = _latest_authorized_day0_fact(
+        conn,
+        city="Karachi",
+        target_date="2026-07-15",
+        temperature_metric="high",
+        decision_time=datetime(2026, 7, 15, 3, 35, tzinfo=timezone.utc),
+        require_settlement_channel=True,
+    )
+
+    assert physical is not None
+    assert physical["observed_extreme_native"] == 30.0
+    assert settlement is not None
+    assert settlement["observed_extreme_native"] == 29.0
+    assert settlement["observation_source"] == "wu_api"
+    conn.close()
+
+
 def _create_db(path) -> None:
     conn = sqlite3.connect(path)
     try:

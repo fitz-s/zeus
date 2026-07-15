@@ -23044,6 +23044,7 @@ def _global_day0_execution_payload(
         target_date=str(getattr(family, "target_date", "") or ""),
         temperature_metric=str(getattr(family, "metric", "") or ""),
         decision_time=decision_time,
+        require_settlement_channel=True,
     )
     if fact is None:
         raise ValueError("GLOBAL_DAY0_CURRENT_OBSERVATION_MISSING")
