@@ -2952,6 +2952,8 @@ def _monitor_probability_freshness_surface(
     ).isoformat()
 
     scoped_review_hold_sample: list[dict] = []
+    closed_market_hold_sample: list[dict] = []
+    closed_market_hold_revoked_exit_submit_sample: list[dict] = []
     if has_monitor_events:
         scoped_review_hold_sample, review_hold_err = _sqlite_ro_rows(
             trade_db,
@@ -3010,9 +3012,200 @@ def _monitor_probability_freshness_surface(
                 "issue": f"MONITOR_PROBABILITY_FRESHNESS_READ_UNAVAILABLE:{review_hold_err}",
                 "evaluated": True,
             }
+        closed_market_hold_sample, closed_hold_err = _sqlite_ro_rows(
+            trade_db,
+            """
+            SELECT pc.position_id,
+                   pc.phase,
+                   pc.order_status,
+                   pc.shares,
+                   pc.chain_shares,
+                   closed.occurred_at AS market_closed_at,
+                   pc.city,
+                   pc.target_date,
+                   pc.bin_label,
+                   pc.direction
+              FROM position_current pc
+              JOIN position_events closed
+                ON closed.rowid = (
+                    SELECT e.rowid
+                      FROM position_events e
+                     WHERE e.position_id = pc.position_id
+                       AND e.event_type = 'MONITOR_REFRESHED'
+                       AND json_valid(e.payload_json)
+                       AND json_extract(e.payload_json, '$.semantic_event')
+                           = 'MARKET_CLOSED_HOLD_TO_SETTLEMENT'
+                       AND json_extract(e.payload_json, '$.hold_reason')
+                           = 'MARKET_CLOSED_AWAITING_SETTLEMENT'
+                       AND json_extract(e.payload_json, '$.exit_order_submitted')
+                           IN (0, 'false')
+                       AND json_extract(e.payload_json, '$.exit_failure')
+                           IN (0, 'false')
+                       AND EXISTS (
+                           SELECT 1
+                             FROM json_each(
+                                 json_extract(
+                                     e.payload_json,
+                                     '$.applied_validations'
+                                 )
+                             )
+                            WHERE json_each.value
+                                = 'MARKET_CLOSED_AWAITING_SETTLEMENT'
+                       )
+                       AND EXISTS (
+                           SELECT 1
+                             FROM json_each(
+                                 json_extract(
+                                     e.payload_json,
+                                     '$.applied_validations'
+                                 )
+                             )
+                            WHERE json_each.value
+                                = 'closed_market_hold_preserved_monitor_evidence'
+                       )
+                     ORDER BY e.sequence_no DESC, datetime(e.occurred_at) DESC
+                     LIMIT 1
+                )
+             WHERE pc.phase IN ('active', 'day0_window', 'pending_exit')
+               AND (
+                   COALESCE(CAST(pc.chain_shares AS REAL), 0.0) > 0.0
+                   OR COALESCE(CAST(pc.shares AS REAL), 0.0) > 0.0
+               )
+               AND NOT EXISTS (
+                   SELECT 1
+                     FROM position_events later
+                    WHERE later.position_id = pc.position_id
+                      AND later.event_type = 'MONITOR_REFRESHED'
+                      AND later.sequence_no > closed.sequence_no
+                      AND json_valid(later.payload_json)
+                      AND (
+                          json_extract(
+                              later.payload_json,
+                              '$.exit_order_submitted'
+                          ) IN (1, 'true')
+                          OR (
+                              json_extract(
+                                  later.payload_json,
+                                  '$.last_monitor_market_price_is_fresh'
+                              ) IN (1, 'true')
+                              AND json_extract(
+                                  later.payload_json,
+                                  '$.last_monitor_best_bid'
+                              ) IS NOT NULL
+                          )
+                      )
+               )
+             ORDER BY datetime(closed.occurred_at) DESC, pc.position_id
+            """,
+        )
+        if closed_hold_err:
+            return {
+                "ok": False,
+                "issue": (
+                    "MONITOR_PROBABILITY_FRESHNESS_READ_UNAVAILABLE:"
+                    f"{closed_hold_err}"
+                ),
+                "evaluated": True,
+            }
+        command_columns, command_column_err = _sqlite_ro_table_columns(
+            trade_db,
+            "venue_commands",
+        )
+        event_command_columns, event_command_column_err = _sqlite_ro_table_columns(
+            trade_db,
+            "venue_command_events",
+        )
+        if command_column_err or event_command_column_err:
+            return {
+                "ok": False,
+                "issue": (
+                    "MONITOR_PROBABILITY_FRESHNESS_READ_UNAVAILABLE:"
+                    f"{command_column_err or event_command_column_err}"
+                ),
+                "evaluated": True,
+            }
+        has_exit_submit_events = {
+            "command_id",
+            "position_id",
+            "intent_kind",
+            "state",
+        }.issubset(command_columns) and {
+            "command_id",
+            "event_type",
+            "occurred_at",
+        }.issubset(event_command_columns)
+        if closed_market_hold_sample and has_exit_submit_events:
+            exit_submit_rows, exit_submit_err = _sqlite_ro_rows(
+                trade_db,
+                """
+                SELECT vc.position_id,
+                       vc.command_id,
+                       vc.state AS command_state,
+                       submitted.occurred_at AS submit_requested_at
+                  FROM venue_commands vc
+                  JOIN venue_command_events submitted
+                    ON submitted.command_id = vc.command_id
+                   AND submitted.event_type = 'SUBMIT_REQUESTED'
+                 WHERE vc.intent_kind = 'EXIT'
+                 ORDER BY datetime(submitted.occurred_at) DESC, vc.command_id
+                """,
+            )
+            if exit_submit_err:
+                return {
+                    "ok": False,
+                    "issue": (
+                        "MONITOR_PROBABILITY_FRESHNESS_READ_UNAVAILABLE:"
+                        f"{exit_submit_err}"
+                    ),
+                    "evaluated": True,
+                }
+            closed_at_by_position = {
+                str(row["position_id"]): str(row.get("market_closed_at") or "")
+                for row in closed_market_hold_sample
+                if row.get("position_id") is not None
+            }
+            revoked_position_ids: set[str] = set()
+            for row in exit_submit_rows:
+                position_id = str(row.get("position_id") or "")
+                closed_at_text = closed_at_by_position.get(position_id)
+                if closed_at_text is None:
+                    continue
+                closed_at = _parse_iso_utc(closed_at_text)
+                submitted_at = _parse_iso_utc(str(row.get("submit_requested_at") or ""))
+                if (
+                    closed_at is not None
+                    and submitted_at is not None
+                    and submitted_at < closed_at
+                ):
+                    continue
+                if position_id in revoked_position_ids:
+                    continue
+                row["market_closed_at"] = closed_at_text
+                row["revocation_reason"] = (
+                    "exit_submit_requested_after_market_closed"
+                    if closed_at is not None and submitted_at is not None
+                    else "exit_submit_time_unparseable_fail_closed"
+                )
+                closed_market_hold_revoked_exit_submit_sample.append(row)
+                revoked_position_ids.add(position_id)
+            if revoked_position_ids:
+                closed_market_hold_sample = [
+                    row
+                    for row in closed_market_hold_sample
+                    if str(row.get("position_id")) not in revoked_position_ids
+                ]
+        elif closed_market_hold_sample:
+            # Without canonical submit-request events, absence of a later EXIT
+            # side effect is unprovable. Preserve the ordinary stale failure.
+            closed_market_hold_sample = []
     review_hold_ids = {
         str(row["position_id"])
         for row in scoped_review_hold_sample
+        if row.get("position_id") is not None
+    }
+    closed_market_hold_ids = {
+        str(row["position_id"])
+        for row in closed_market_hold_sample
         if row.get("position_id") is not None
     }
     current_latest_join = ""
@@ -3067,7 +3260,10 @@ def _monitor_probability_freshness_surface(
             "evaluated": True,
         }
     current_rows = [
-        row for row in current_rows if str(row.get("position_id")) not in review_hold_ids
+        row
+        for row in current_rows
+        if str(row.get("position_id"))
+        not in review_hold_ids | closed_market_hold_ids
     ]
 
     latest_stale_rows: list[dict] = []
@@ -3144,7 +3340,8 @@ def _monitor_probability_freshness_surface(
         latest_stale_rows = [
             row
             for row in latest_stale_rows
-            if str(row.get("position_id")) not in review_hold_ids
+            if str(row.get("position_id"))
+            not in review_hold_ids | closed_market_hold_ids
         ]
 
         latest_monitor_age_rows, latest_age_err = _sqlite_ro_rows(
@@ -3219,6 +3416,12 @@ def _monitor_probability_freshness_surface(
                 if age_seconds is None
                 else max(0.0, age_seconds - MONITOR_PROBABILITY_STALE_LOOKBACK_SECONDS)
             )
+        latest_monitor_age_rows = [
+            row
+            for row in latest_monitor_age_rows
+            if str(row.get("position_id"))
+            not in review_hold_ids | closed_market_hold_ids
+        ]
         for row in (*current_rows, *latest_stale_rows, *latest_monitor_age_rows):
             try:
                 latest_payload = json.loads(
@@ -3238,6 +3441,7 @@ def _monitor_probability_freshness_surface(
                 and latest_payload.get("exit_failure") is False
                 and isinstance(validations, list)
                 and "MARKET_CLOSED_AWAITING_SETTLEMENT" in validations
+                and "closed_market_hold_preserved_monitor_evidence" in validations
             )
 
         day0_daily_extrema_unconditioned_sample, semantic_err = _sqlite_ro_rows(
@@ -3351,6 +3555,14 @@ def _monitor_probability_freshness_surface(
         ),
         "scoped_review_hold_count": len(scoped_review_hold_sample),
         "scoped_review_hold_sample": scoped_review_hold_sample,
+        "closed_market_hold_to_settlement_count": len(closed_market_hold_sample),
+        "closed_market_hold_to_settlement_sample": closed_market_hold_sample,
+        "closed_market_hold_revoked_exit_submit_count": len(
+            closed_market_hold_revoked_exit_submit_sample
+        ),
+        "closed_market_hold_revoked_exit_submit_sample": (
+            closed_market_hold_revoked_exit_submit_sample
+        ),
         "position_events_evaluated": has_monitor_events,
     }
     active_failure_parts = []

@@ -1463,6 +1463,10 @@ def _write_monitor_probability_freshness_db(
             "created_at TEXT, q_version TEXT)"
         )
         trade_conn.execute(
+            "CREATE TABLE venue_command_events ("
+            "command_id TEXT, event_type TEXT, occurred_at TEXT)"
+        )
+        trade_conn.execute(
             "INSERT INTO venue_commands VALUES "
             "('cmd-with-q', 'pos-monitor', 'ENTRY', 'FILLED', ?, 'q-id-1')",
             ((now - timedelta(minutes=4)).isoformat(),),
@@ -2846,7 +2850,9 @@ def test_pending_exit_without_exit_command_yields_degraded(
     sd = tmp_path / "state"
     sd.mkdir()
     _setup_healthy_state(sd)
-    monkeypatch.setattr(live_health, "_dirty_runtime_worktree_paths", lambda **_kwargs: ())
+    monkeypatch.setattr(
+        live_health, "_dirty_runtime_worktree_paths", lambda **_kwargs: ()
+    )
     monkeypatch.setattr(
         live_health,
         "_main_daemon_surface",
@@ -3737,11 +3743,11 @@ def test_monitor_probability_freshness_exposes_canonical_closed_market_hold(
     result = compute_composite_live_health(state_dir=sd, now=now)
 
     surface = result["surfaces"]["monitor_probability_freshness"]
-    sample = surface[
-        "latest_monitor_age_stale_sample"
-    ][0]
-    assert sample["market_closed_hold_to_settlement"] is True
-    assert "latest_monitor_payload_json" not in sample
+    assert surface["ok"] is True
+    assert surface["latest_monitor_age_stale_count"] == 0
+    assert surface["closed_market_hold_to_settlement_count"] == 1
+    sample = surface["closed_market_hold_to_settlement_sample"][0]
+    assert sample["position_id"] == "pos-monitor"
 
 
 def test_monitor_probability_freshness_exposes_closed_hold_on_stale_projection(
@@ -3773,7 +3779,8 @@ def test_monitor_probability_freshness_exposes_closed_hold_on_stale_projection(
                         "exit_order_submitted": False,
                         "exit_failure": False,
                         "applied_validations": [
-                            "MARKET_CLOSED_AWAITING_SETTLEMENT"
+                            "MARKET_CLOSED_AWAITING_SETTLEMENT",
+                            "closed_market_hold_preserved_monitor_evidence",
                         ],
                     }
                 ),
@@ -3786,15 +3793,261 @@ def test_monitor_probability_freshness_exposes_closed_hold_on_stale_projection(
     result = compute_composite_live_health(state_dir=sd, now=now)
 
     surface = result["surfaces"]["monitor_probability_freshness"]
-    assert surface["current_stale_projection_sample"][0][
-        "market_closed_hold_to_settlement"
-    ] is True
-    assert surface["latest_stale_monitor_sample"][0][
-        "market_closed_hold_to_settlement"
-    ] is True
-    assert "latest_monitor_payload_json" not in surface[
-        "current_stale_projection_sample"
-    ][0]
+    assert surface["ok"] is True
+    assert surface["current_stale_projection_count"] == 0
+    assert surface["latest_stale_monitor_count"] == 0
+    assert surface["closed_market_hold_to_settlement_count"] == 1
+
+
+def test_monitor_probability_freshness_fresh_bid_revokes_closed_hold(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sd = tmp_path / "state"
+    sd.mkdir()
+    _setup_healthy_state(sd)
+    monkeypatch.setattr(
+        live_health, "_dirty_runtime_worktree_paths", lambda **_kwargs: ()
+    )
+    now = datetime.now(timezone.utc)
+    _write_monitor_probability_freshness_db(
+        sd,
+        now=now,
+        latest_event_fresh=True,
+        projection_fresh=False,
+    )
+    conn = sqlite3.connect(sd / "zeus_trades.db")
+    try:
+        conn.execute(
+            "UPDATE position_events SET payload_json = ? "
+            "WHERE position_id = 'pos-monitor' AND sequence_no = 10",
+            (
+                json.dumps(
+                    {
+                        "last_monitor_prob": None,
+                        "last_monitor_prob_is_fresh": False,
+                        "semantic_event": "MARKET_CLOSED_HOLD_TO_SETTLEMENT",
+                        "hold_reason": "MARKET_CLOSED_AWAITING_SETTLEMENT",
+                        "exit_order_submitted": False,
+                        "exit_failure": False,
+                        "applied_validations": [
+                            "MARKET_CLOSED_AWAITING_SETTLEMENT",
+                            "closed_market_hold_preserved_monitor_evidence",
+                        ],
+                    }
+                ),
+            ),
+        )
+        conn.execute(
+            "UPDATE position_events SET payload_json = ? "
+            "WHERE position_id = 'pos-monitor' AND sequence_no = 11",
+            (
+                json.dumps(
+                    {
+                        "last_monitor_prob": 0.42,
+                        "last_monitor_prob_is_fresh": True,
+                        "last_monitor_market_price_is_fresh": True,
+                        "last_monitor_best_bid": 0.4,
+                    }
+                ),
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    result = compute_composite_live_health(state_dir=sd, now=now)
+
+    surface = result["surfaces"]["monitor_probability_freshness"]
+    assert surface["ok"] is False
+    assert surface["current_stale_projection_count"] == 1
+    assert surface["closed_market_hold_to_settlement_count"] == 0
+
+
+def test_monitor_probability_freshness_closed_hold_survives_later_stale_event(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sd = tmp_path / "state"
+    sd.mkdir()
+    _setup_healthy_state(sd)
+    monkeypatch.setattr(
+        live_health, "_dirty_runtime_worktree_paths", lambda **_kwargs: ()
+    )
+    now = datetime.now(timezone.utc)
+    _write_monitor_probability_freshness_db(
+        sd,
+        now=now,
+        latest_event_fresh=False,
+        projection_fresh=False,
+    )
+    conn = sqlite3.connect(sd / "zeus_trades.db")
+    try:
+        conn.execute(
+            "UPDATE position_events SET payload_json = ? "
+            "WHERE position_id = 'pos-monitor' AND sequence_no = 10",
+            (
+                json.dumps(
+                    {
+                        "last_monitor_prob": None,
+                        "last_monitor_prob_is_fresh": False,
+                        "semantic_event": "MARKET_CLOSED_HOLD_TO_SETTLEMENT",
+                        "hold_reason": "MARKET_CLOSED_AWAITING_SETTLEMENT",
+                        "exit_order_submitted": False,
+                        "exit_failure": False,
+                        "applied_validations": [
+                            "MARKET_CLOSED_AWAITING_SETTLEMENT",
+                            "closed_market_hold_preserved_monitor_evidence",
+                        ],
+                    }
+                ),
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    result = compute_composite_live_health(state_dir=sd, now=now)
+
+    surface = result["surfaces"]["monitor_probability_freshness"]
+    assert surface["ok"] is True
+    assert surface["current_stale_projection_count"] == 0
+    assert surface["latest_stale_monitor_count"] == 0
+    assert surface["closed_market_hold_to_settlement_count"] == 1
+
+
+def test_monitor_probability_freshness_exit_submit_revokes_closed_hold(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sd = tmp_path / "state"
+    sd.mkdir()
+    _setup_healthy_state(sd)
+    monkeypatch.setattr(
+        live_health, "_dirty_runtime_worktree_paths", lambda **_kwargs: ()
+    )
+    now = datetime.now(timezone.utc)
+    _write_monitor_probability_freshness_db(
+        sd,
+        now=now,
+        latest_event_fresh=False,
+        projection_fresh=False,
+    )
+    conn = sqlite3.connect(sd / "zeus_trades.db")
+    try:
+        conn.execute(
+            "UPDATE position_events SET payload_json = ? "
+            "WHERE position_id = 'pos-monitor' AND sequence_no = 10",
+            (
+                json.dumps(
+                    {
+                        "last_monitor_prob": None,
+                        "last_monitor_prob_is_fresh": False,
+                        "semantic_event": "MARKET_CLOSED_HOLD_TO_SETTLEMENT",
+                        "hold_reason": "MARKET_CLOSED_AWAITING_SETTLEMENT",
+                        "exit_order_submitted": False,
+                        "exit_failure": False,
+                        "applied_validations": [
+                            "MARKET_CLOSED_AWAITING_SETTLEMENT",
+                            "closed_market_hold_preserved_monitor_evidence",
+                        ],
+                    }
+                ),
+            ),
+        )
+        conn.execute(
+            "INSERT INTO venue_commands VALUES (?, ?, 'EXIT', ?, ?, ?)",
+            (
+                "cmd-exit-after-close",
+                "pos-monitor",
+                "SUBMITTING",
+                (now - timedelta(seconds=45)).isoformat(),
+                "q-exit",
+            ),
+        )
+        conn.execute(
+            "INSERT INTO venue_command_events VALUES (?, 'SUBMIT_REQUESTED', ?)",
+            (
+                "cmd-exit-after-close",
+                (now - timedelta(seconds=45)).isoformat(),
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    result = compute_composite_live_health(state_dir=sd, now=now)
+
+    surface = result["surfaces"]["monitor_probability_freshness"]
+    assert surface["ok"] is False
+    assert surface["current_stale_projection_count"] == 1
+    assert surface["latest_stale_monitor_count"] == 1
+    assert surface["closed_market_hold_to_settlement_count"] == 0
+    assert surface["closed_market_hold_revoked_exit_submit_count"] == 1
+    revoked = surface["closed_market_hold_revoked_exit_submit_sample"][0]
+    assert revoked["command_id"] == "cmd-exit-after-close"
+    assert revoked["revocation_reason"] == "exit_submit_requested_after_market_closed"
+
+
+def test_monitor_probability_freshness_presubmit_exit_rejection_keeps_closed_hold(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sd = tmp_path / "state"
+    sd.mkdir()
+    _setup_healthy_state(sd)
+    monkeypatch.setattr(
+        live_health, "_dirty_runtime_worktree_paths", lambda **_kwargs: ()
+    )
+    now = datetime.now(timezone.utc)
+    _write_monitor_probability_freshness_db(
+        sd,
+        now=now,
+        latest_event_fresh=False,
+        projection_fresh=False,
+    )
+    conn = sqlite3.connect(sd / "zeus_trades.db")
+    try:
+        conn.execute(
+            "UPDATE position_events SET payload_json = ? "
+            "WHERE position_id = 'pos-monitor' AND sequence_no = 10",
+            (
+                json.dumps(
+                    {
+                        "last_monitor_prob": None,
+                        "last_monitor_prob_is_fresh": False,
+                        "semantic_event": "MARKET_CLOSED_HOLD_TO_SETTLEMENT",
+                        "hold_reason": "MARKET_CLOSED_AWAITING_SETTLEMENT",
+                        "exit_order_submitted": False,
+                        "exit_failure": False,
+                        "applied_validations": [
+                            "MARKET_CLOSED_AWAITING_SETTLEMENT",
+                            "closed_market_hold_preserved_monitor_evidence",
+                        ],
+                    }
+                ),
+            ),
+        )
+        conn.execute(
+            "INSERT INTO venue_commands VALUES (?, ?, 'EXIT', ?, ?, ?)",
+            (
+                "cmd-exit-rejected-before-submit",
+                "pos-monitor",
+                "REJECTED",
+                (now - timedelta(seconds=45)).isoformat(),
+                "q-exit",
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    result = compute_composite_live_health(state_dir=sd, now=now)
+
+    surface = result["surfaces"]["monitor_probability_freshness"]
+    assert surface["ok"] is True
+    assert surface["closed_market_hold_to_settlement_count"] == 1
+    assert surface["closed_market_hold_revoked_exit_submit_count"] == 0
 
 
 @pytest.mark.parametrize("payload_json", ("[]", "{malformed"))
