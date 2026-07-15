@@ -1776,7 +1776,7 @@ files:
   src/engine/global_auction_universe.py:
     zone: K2_K3_coordination
     authority_role: current_global_auction_scope_reader
-    why: Read-only independent enumeration of every current posterior-ready and phase-admissible weather family; binds the complete scope to full condition/native-token probability witnesses so a reactor queue page can never masquerade as the global feasible set.
+    why: Read-only independent enumeration of every current posterior-ready family plus every canonical runtime-open held-family probability obligation; binds the complete scope to full condition/native-token probability witnesses so neither a reactor queue page nor a local-date rollover can silently erase a feasible reduce-only SELL.
     hazards:
     - NO_WRITE_PATH
     downstream:
@@ -1785,7 +1785,7 @@ files:
   src/engine/global_batch_runtime.py:
     zone: K2_K3_coordination
     authority_role: current_global_single_order_runtime
-    why: Owns one complete current auction epoch from independent family scan through exact one-winner actuation; queue pages provide only an eventual claimed event owner and never define the feasible set.
+    why: Owns one complete current auction epoch from canonical runtime-open held-family enumeration and independent current-family scan through exact one-winner actuation; queue pages provide only an eventual claimed event owner and never define the feasible set.
     downstream:
     - src/engine/global_auction_universe.py
     - src/engine/global_single_order_auction.py

@@ -2594,6 +2594,11 @@ def test_current_global_scope_uses_latest_day0_carrier_per_family():
         payload=day0_payload,
         causal_snapshot_id="day0-alpha-0810",
     )
+    forecast_alpha = replace(
+        forecast_alpha,
+        available_at="2026-07-10T08:11:00+00:00",
+        created_at="2026-07-10T08:11:00+00:00",
+    )
 
     forecast_only = current_global_auction_scope_from_events(
         (forecast_alpha, forecast_beta),
@@ -2733,6 +2738,85 @@ def test_current_day0_query_uses_utc_window_and_target_date_index(monkeypatch):
     )
     assert "SCAN OPPORTUNITY_EVENTS" not in plan
     assert "USE TEMP B-TREE" not in plan
+
+
+def test_current_day0_scope_keeps_completed_family_only_when_still_held(
+    monkeypatch,
+):
+    import src.config as config
+
+    decision_at = _dt.datetime(2026, 7, 10, 12, 0, tzinfo=_dt.timezone.utc)
+    monkeypatch.setattr(
+        config,
+        "runtime_cities_by_name",
+        lambda: {
+            "Held": SimpleNamespace(timezone="UTC"),
+            "Unheld": SimpleNamespace(timezone="UTC"),
+        },
+    )
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    ensure_opportunity_events_table(conn)
+    for city in ("Held", "Unheld"):
+        _insert_event(
+            conn,
+            _current_day0_scope_event(
+                city=city,
+                target_date="2026-07-08",
+                available_at="2026-07-08T23:30:00+00:00",
+            ),
+        )
+
+    executed_sql = []
+    conn.set_trace_callback(executed_sql.append)
+    events = _current_day0_events(
+        conn,
+        decision_at_utc=decision_at,
+        held_families=(("Held", "2026-07-08", "high"),),
+    )
+
+    assert [json.loads(event.payload_json)["city"] for event in events] == [
+        "Held"
+    ]
+    assert any(
+        "json_extract(payload_json, '$.target_date')='2026-07-08'" in sql
+        for sql in executed_sql
+    )
+
+
+def test_global_scope_refuses_a_held_family_without_probability_carrier(
+    monkeypatch,
+):
+    class EmptyTrigger:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def build_committed_snapshot_events(self, **_kwargs):
+            return ()
+
+    monkeypatch.setattr(universe, "ForecastSnapshotReadyTrigger", EmptyTrigger)
+    monkeypatch.setattr(
+        universe,
+        "executable_forecast_live_eligible_reader",
+        lambda _conn: lambda *_args, **_kwargs: False,
+    )
+    monkeypatch.setattr(universe, "_current_day0_events", lambda *_args, **_kwargs: ())
+
+    with pytest.raises(
+        ValueError,
+        match=(
+            "GLOBAL_HELD_FAMILY_PROBABILITY_CARRIER_MISSING:"
+            r"Held\|2026-07-08\|high"
+        ),
+    ):
+        universe.scan_current_global_auction_scope(
+            world_conn=object(),
+            forecasts_conn=object(),
+            decision_at_utc=_dt.datetime(
+                2026, 7, 10, 12, 0, tzinfo=_dt.timezone.utc
+            ),
+            held_families=(("Held", "2026-07-08", "high"),),
+        )
 
 
 @pytest.fixture(autouse=True)
@@ -6702,9 +6786,11 @@ def test_global_batch_freezes_cut_then_releases_before_winner_jit(
     selection = sqlite3.connect(path)
     writer = sqlite3.connect(path)
     scope_reads = []
+    held_families = (("Held", "2026-07-09", "high"),)
 
-    def scan(**_kwargs):
+    def scan(**kwargs):
         scope_reads.append(1)
+        assert kwargs["held_families"] == held_families
         assert selection.execute("SELECT value FROM readiness_state").fetchone()[0] == "cut"
         writer.execute("UPDATE readiness_state SET value='after-cut'")
         writer.commit()
@@ -6732,6 +6818,11 @@ def test_global_batch_freezes_cut_then_releases_before_winner_jit(
         )
 
     monkeypatch.setattr(global_batch_runtime, "scan_current_global_auction_scope", scan)
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "_current_held_weather_families",
+        lambda _conn: held_families,
+    )
     monkeypatch.setattr(
         global_batch_runtime,
         "current_portfolio_wealth_witness",

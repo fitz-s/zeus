@@ -1289,16 +1289,17 @@ def current_global_scope_events_with_day0(
     forecast_events: Sequence[OpportunityEvent],
     day0_events: Sequence[OpportunityEvent],
 ) -> tuple[OpportunityEvent, ...]:
-    """Let the latest current Day0 fact replace the forecast carrier per family."""
+    """Let current Day0 truth replace its forecast-only carrier per family."""
 
     by_family = {_event_family_key(event): event for event in forecast_events}
     for event in day0_events:
         family_key = _event_family_key(event)
         previous = by_family.get(family_key)
-        if previous is None or (event.available_at, event.created_at, event.event_id) > (
-            previous.available_at,
-            previous.created_at,
-            previous.event_id,
+        if (
+            previous is None
+            or previous.event_type != "DAY0_EXTREME_UPDATED"
+            or (event.available_at, event.created_at, event.event_id)
+            > (previous.available_at, previous.created_at, previous.event_id)
         ):
             by_family[family_key] = event
     return tuple(by_family[key] for key in sorted(by_family))
@@ -1337,11 +1338,25 @@ def _current_day0_events(
     world_conn: sqlite3.Connection,
     *,
     decision_at_utc: datetime,
+    held_families: Sequence[tuple[str, str, str]] = (),
 ) -> tuple[OpportunityEvent, ...]:
     if not _table_exists(world_conn, "opportunity_events"):
         return ()
     from src.events.day0_authority import normalize_day0_live_authority_status
 
+    held = frozenset(
+        (
+            str(city or "").strip(),
+            str(target_date or "").strip(),
+            str(metric or "").strip().lower(),
+        )
+        for city, target_date, metric in held_families
+    )
+    if any(
+        not city or not target_date or metric not in {"high", "low"}
+        for city, target_date, metric in held
+    ):
+        raise ValueError("GLOBAL_HELD_FAMILY_IDENTITY_INVALID")
     utc_date = decision_at_utc.astimezone(timezone.utc).date()
     target_floor = (utc_date - timedelta(days=1)).isoformat()
     target_ceiling = (utc_date + timedelta(days=1)).isoformat()
@@ -1358,8 +1373,29 @@ def _current_day0_events(
             decision_at_utc.isoformat(),
         ),
     )
+    rows = list(cur.fetchall())
+    for target_date in sorted(
+        {
+            target_date
+            for _, target_date, _ in held
+            if not target_floor <= target_date <= target_ceiling
+        }
+    ):
+        held_cur = world_conn.execute(
+            "SELECT * FROM opportunity_events "
+            "INDEXED BY idx_opportunity_events_fsr_target_date "
+            "WHERE event_type='DAY0_EXTREME_UPDATED' "
+            "AND json_extract(payload_json, '$.target_date')=? "
+            "AND available_at<=? AND received_at<=?",
+            (
+                target_date,
+                decision_at_utc.isoformat(),
+                decision_at_utc.isoformat(),
+            ),
+        )
+        rows.extend(held_cur.fetchall())
     out = {}
-    for raw in cur.fetchall():
+    for raw in rows:
         row = _row_dict(cur, raw)
         try:
             event = OpportunityEvent(
@@ -1373,9 +1409,17 @@ def _current_day0_events(
             continue
         if not isinstance(payload, dict):
             continue
-        if not _day0_event_is_current_for_entry(
-            payload,
-            decision_at_utc=decision_at_utc,
+        family = (
+            str(payload.get("city") or "").strip(),
+            str(payload.get("target_date") or "").strip(),
+            str(payload.get("metric") or "").strip().lower(),
+        )
+        if (
+            family not in held
+            and not _day0_event_is_current_for_entry(
+                payload,
+                decision_at_utc=decision_at_utc,
+            )
         ):
             continue
         if not (
@@ -1420,11 +1464,24 @@ def scan_current_global_auction_scope(
     world_conn: sqlite3.Connection,
     forecasts_conn: sqlite3.Connection,
     decision_at_utc: datetime,
+    held_families: Sequence[tuple[str, str, str]] = (),
 ) -> CurrentGlobalAuctionScope:
-    """Read every current family independently of queue pagination or fairness caps."""
+    """Read every current family and every held-family probability obligation."""
 
     if decision_at_utc.tzinfo is None:
         raise ValueError("decision_at_utc must be timezone-aware")
+    held = tuple(
+        sorted(
+            {
+                (
+                    str(city or "").strip(),
+                    str(target_date or "").strip(),
+                    str(metric or "").strip().lower(),
+                )
+                for city, target_date, metric in held_families
+            }
+        )
+    )
     trigger = ForecastSnapshotReadyTrigger(
         EventWriter(world_conn),
         live_eligibility_reader=executable_forecast_live_eligible_reader(
@@ -1440,8 +1497,19 @@ def scan_current_global_auction_scope(
     )
     events = current_global_scope_events_with_day0(
         forecast_events,
-        _current_day0_events(world_conn, decision_at_utc=decision_at_utc),
+        _current_day0_events(
+            world_conn,
+            decision_at_utc=decision_at_utc,
+            held_families=held,
+        ),
     )
+    covered = {_event_family(event) for event in events}
+    missing = sorted(set(held) - covered)
+    if missing:
+        detail = ",".join("|".join(family) for family in missing)
+        raise ValueError(
+            f"GLOBAL_HELD_FAMILY_PROBABILITY_CARRIER_MISSING:{detail}"
+        )
     return current_global_auction_scope_from_events(
         events,
         captured_at_utc=decision_at_utc,

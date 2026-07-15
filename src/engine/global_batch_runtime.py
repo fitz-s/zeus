@@ -781,6 +781,40 @@ def _next_claim_carrier(
     )
 
 
+def _current_held_weather_families(
+    trade_conn: object,
+) -> tuple[tuple[str, str, str], ...]:
+    """Read every canonical runtime-open family that the auction must manage."""
+
+    execute = getattr(trade_conn, "execute", None)
+    if execute is None:
+        return ()
+    table = execute(
+        "SELECT 1 FROM sqlite_master "
+        "WHERE type='table' AND name='position_current'"
+    ).fetchone()
+    if table is None:
+        return ()
+
+    from src.state.portfolio import load_runtime_open_portfolio
+
+    state = load_runtime_open_portfolio(trade_conn)
+    families = set()
+    for position in tuple(getattr(state, "positions", ()) or ()):
+        metric = str(
+            getattr(position, "temperature_metric", "") or ""
+        ).strip().lower()
+        family = (
+            str(getattr(position, "city", "") or "").strip(),
+            str(getattr(position, "target_date", "") or "").strip(),
+            metric,
+        )
+        if not family[0] or not family[1] or family[2] not in {"high", "low"}:
+            raise ValueError("GLOBAL_HELD_FAMILY_IDENTITY_INVALID")
+        families.add(family)
+    return tuple(sorted(families))
+
+
 def process_current_global_batch(
     events: Sequence[OpportunityEvent],
     *,
@@ -1091,10 +1125,12 @@ def process_current_global_batch(
         release_selection_snapshot = release_schema_snapshot
         log_stage("selection_snapshot")
         scope_at = current_time()
+        held_families = _current_held_weather_families(trade_conn)
         full_scope = scan_current_global_auction_scope(
             world_conn=world_conn,
             forecasts_conn=forecast_conn,
             decision_at_utc=scope_at,
+            held_families=held_families,
         )
         log_stage("scope_scan", families=len(full_scope.events_by_family))
         from src.data.replacement_input_hwm import (
