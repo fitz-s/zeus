@@ -8,9 +8,12 @@ frontier:
 - exit economic symmetry
 - current wealth uncertainty representation
 in_scope:
+- AGENTS.md
 - docs/operations/current/finite_evidence_probability_symmetry/**
 - docs/operations/current_state.md
 - docs/authority/replacement_final_form_2026_06_09.md
+- docs/authority/regime_unification_2026-06-12.md
+- docs/reference/zeus_math_spec.md
 - docs/reference/zeus_execution_lifecycle_reference.md
 - docs/reference/AGENTS.md
 - src/data/replacement_forecast_materializer.py
@@ -34,6 +37,7 @@ in_scope:
 - architecture/capabilities.yaml
 - tests/engine/test_event_reactor_live_qkernel_gate.py
 - tests/test_finite_evidence_probability_symmetry.py
+- tests/test_replacement_fused_q_shape.py
 - tests/events/test_edli_trade_fact_bridge.py
 - tests/execution/test_venue_sync_contract.py
 - tests/test_monitor_refresh_nowcast_wiring.py

@@ -55,8 +55,8 @@ def _materialize(conn):
     return mod._insert_posterior(conn, _request(), metric="high", anchor_id=1)
 
 
-def test_wellington_current_evidence_shape_has_no_yes_or_no_edge_at_order_book() -> None:
-    """Current-only Wellington counterfactual: consensus with the book means no order."""
+def test_current_ensemble_center_disagreement_stays_in_predictive_shape() -> None:
+    """Absolute ENS levels cannot be recentered away from the served center."""
 
     raw = tuple(range(-25, 26))
     scale = 0.32530930629305355 / statistics.pstdev(raw)
@@ -81,7 +81,10 @@ def test_wellington_current_evidence_shape_has_no_yes_or_no_edge_at_order_book()
 
     assert shape.ensemble_within_sigma_c == pytest.approx(0.32530930629305355)
     assert shape.provider_between_sigma_c == pytest.approx(0.24711098721020064)
-    assert shape.predictive_sigma_c == pytest.approx(0.4085217065969294)
+    assert shape.ensemble_member_mean_c == pytest.approx(9.49229000315949)
+    assert shape.ensemble_center_delta_c == pytest.approx(-1.5281099968405112)
+    assert shape.predictive_sigma_c == pytest.approx(1.5817743667175717)
+    assert shape.center_sigma_c >= abs(shape.ensemble_center_delta_c)
 
     cdf = lambda value: 0.5 * (
         1.0
@@ -93,10 +96,36 @@ def test_wellington_current_evidence_shape_has_no_yes_or_no_edge_at_order_book()
     q_yes_11 = cdf(11.5) - cdf(10.5)
     q_no_11 = 1.0 - q_yes_11
 
-    assert q_yes_11 == pytest.approx(0.77844, abs=1e-4)
-    assert q_no_11 == pytest.approx(0.22156, abs=1e-4)
+    assert q_yes_11 == pytest.approx(0.24805, abs=1e-4)
+    assert q_no_11 == pytest.approx(0.75195, abs=1e-4)
     assert q_yes_11 - 0.78 <= 0.0
-    assert q_no_11 - 0.27 <= 0.0
+    assert q_no_11 - 0.27 > 0.0
+
+
+def test_aligned_ensemble_center_preserves_within_between_decomposition() -> None:
+    raw = tuple(range(-25, 26))
+    scale = 0.32530930629305355 / statistics.pstdev(raw)
+    members = tuple(11.0204 + value * scale for value in raw)
+    shape = mod._current_evidence_shape_from_values(
+        snapshot_id=1202928,
+        source_cycle_time="2026-07-10T12:00:00+00:00",
+        source_available_at="2026-07-10T20:25:16.964968+00:00",
+        members_c=members,
+        provider_values_c={
+            "ecmwf_ifs": 10.0,
+            "icon_global": 10.9,
+            "ukmo_global": 11.1,
+        },
+        provider_weights={
+            "ecmwf_ifs": 0.052,
+            "icon_global": 0.112,
+            "ukmo_global": 0.836,
+        },
+        center_c=11.0204,
+    )
+
+    assert shape.ensemble_center_delta_c == pytest.approx(0.0, abs=1e-12)
+    assert shape.predictive_sigma_c == pytest.approx(0.4085217065969294)
 
 
 def test_current_evidence_probability_is_yes_no_complement_symmetric() -> None:

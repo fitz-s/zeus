@@ -1199,6 +1199,8 @@ class _CurrentEvidenceShape:
     member_count: int
     provider_count: int
     effective_provider_count: float
+    ensemble_member_mean_c: float
+    ensemble_center_delta_c: float
     ensemble_within_sigma_c: float
     provider_between_sigma_c: float
     predictive_sigma_c: float
@@ -1224,9 +1226,11 @@ def _current_evidence_shape_from_values(
     """Compose current ensemble and provider disagreement without a fitted floor.
 
     The only distributional assumption is maximum-entropy Normal integration
-    downstream from the two observable second moments.  The ensemble members
-    measure within-model state uncertainty; simultaneous provider centers
-    measure between-model uncertainty.  Independent components add in variance.
+    downstream from current observable second moments. The ensemble members
+    measure within-model state uncertainty, their absolute mean displacement
+    measures ENS/provider-center disagreement, and simultaneous provider
+    centers measure between-model uncertainty. Independent components add in
+    variance.
     """
 
     members = tuple(float(value) for value in members_c)
@@ -1252,17 +1256,22 @@ def _current_evidence_shape_from_values(
     )
 
     member_mean = sum(members) / len(members)
+    ensemble_center_delta = member_mean - center
     within = math.sqrt(
         sum((value - member_mean) ** 2 for value in members) / len(members)
     )
     between = math.sqrt(
         sum(weight * (value - center) ** 2 for _, value, weight in normalized)
     )
-    sigma = math.hypot(within, between)
+    # These members remain absolute settlement-bin evidence downstream.  Their
+    # displacement from the served center is therefore current disagreement,
+    # not a location term that can be silently recentered out of the width.
+    sigma = math.hypot(within, between, ensemble_center_delta)
     effective_providers = 1.0 / sum(weight * weight for _, _, weight in normalized)
     center_sigma = math.hypot(
         within / math.sqrt(len(members)),
         between / math.sqrt(effective_providers),
+        ensemble_center_delta,
     )
     if not math.isfinite(sigma) or sigma <= 0.0:
         raise ValueError("current evidence predictive sigma must be positive")
@@ -1280,6 +1289,8 @@ def _current_evidence_shape_from_values(
             for model, value, weight in normalized
         ],
         "center_c": center,
+        "ensemble_member_mean_c": member_mean,
+        "ensemble_center_delta_c": ensemble_center_delta,
         "ensemble_within_sigma_c": within,
         "provider_between_sigma_c": between,
         "predictive_sigma_c": sigma,
@@ -1295,6 +1306,8 @@ def _current_evidence_shape_from_values(
         member_count=len(members),
         provider_count=len(normalized),
         effective_provider_count=effective_providers,
+        ensemble_member_mean_c=member_mean,
+        ensemble_center_delta_c=ensemble_center_delta,
         ensemble_within_sigma_c=within,
         provider_between_sigma_c=between,
         predictive_sigma_c=sigma,

@@ -4,6 +4,22 @@ Date: 2026-07-11
 Branch: `p2-pending-exit-restart-redecision`
 Status: active
 
+## 2026-07-15 current-evidence coherence correction
+
+A current 150-family source-clock census found 72 families where the absolute
+ECMWF ENS member mean differed from the served provider center by more than the
+entire persisted predictive sigma; 60 differed by at least 1°C. The live Los
+Angeles July 16 HIGH carrier had `μ*=29.401°C`, ENS mean `24.965°C`, and claimed
+`σ_pred=0.925°C`. The same raw ENS values were treated as absolute forecasts
+for settlement-bin hit counts but only their centered population spread entered
+`σ_pred`, silently deleting the 4.436°C current-model disagreement.
+
+The first-principles correction retains the provider center, keeps the ENS
+within-spread, and adds the absolute current ENS/provider-center displacement
+as a third variance component in both predictive and center uncertainty. It
+does not add a gate or historical calibration term; aligned evidence preserves
+the original within-plus-between numeric decomposition.
+
 ## Background
 
 Current live source-clock posteriors display Normal point complements near

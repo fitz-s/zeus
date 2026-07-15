@@ -62,13 +62,21 @@ var = V* + extra_var          (extra_var = σ²_disagree + bias/bridge buffers; 
 - **Fail-soft:** no surviving likelihood instruments (`p = 0`) ⇒ posterior IS the anchor prior `N(μ0, τ0² + extra_var)`.
 - **Thin-anchor retention:** `n < 25` keeps the source as an EQUAL_WEIGHT member (not deleted) — `fuse_bayes_precision_posterior` (commit 49492f1528).
 
-### 0.1c Predictive σ floor — `replacement_forecast_materializer._replacement_bayes_precision_fusion_override`
+### 0.1c Source-clock current predictive shape — `replacement_forecast_materializer._current_evidence_shape_from_values`
 
 ```
-σ_pred = max(1.0°C, √(fused.sd² + σ_resid²))
+μ_ens = mean(current target-specific ECMWF ENS members)
+δ_ens = μ_ens − μ*
+σ_pred = √(σ_within² + σ_between² + δ_ens²)
+σ_center = √(σ_within²/n_members + σ_between²/n_eff_provider + δ_ens²)
 ```
 
-The 1.0°C floor only WIDENS the predictive distribution (flatter q ⇒ fewer overconfident trades). `σ_resid²` is the grid→station residual variance.
+The source-clock route uses only decision-time current evidence. The absolute
+ENS/provider-center displacement is systematic disagreement and is not divided
+by member count. The same ENS values remain absolute settlement-preimage hit
+evidence, so recentering that displacement out of `σ_pred` would make the width
+and tail certificate describe different probability worlds. Historical
+residual widths and fitted floors remain diagnostic/non-source-clock only.
 
 ### 0.1d Settlement-preimage bin integration — `emos.bin_probability_settlement`
 

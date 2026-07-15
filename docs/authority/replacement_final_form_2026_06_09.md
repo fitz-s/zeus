@@ -3,7 +3,7 @@
 **Status:** Live replacement probability law. Runtime rows use `forecast_posteriors.runtime_layer='live'`; `LIVE_AUTHORITY`, `trade_authority_status`, and shadow/diagnostic labels are not live execution authority.
 **Supersedes:** `BAYES_PRECISION_FUSION_SPEC.md` (deleted).  
 **Created:** 2026-06-09  
-**Last audited:** 2026-07-11 (source-clock live q uses decision-time current evidence; its executable band now combines finite-member and distribution-free moment ambiguity symmetrically for YES/NO)
+**Last audited:** 2026-07-15 (source-clock live q retains absolute ENS/provider-center disagreement and its executable band combines finite-member and distribution-free moment ambiguity symmetrically for YES/NO)
 **Authority basis:** Commits 140d75ff6d · 6860f00a21 · edc598b440 · 94b584cc3f · 49492f1528 · 2b6936d3b5 · 9c594c9fc3 · df8199ef8e · e80c101c4c · 8541bc93cd · 8f20d39863 · a70436d478 · a1c2163e46 plus June 18 live-runtime cleanup. Historical experiment reports remain evidence only; they do not define the live execution layer.
 
 ---
@@ -60,8 +60,10 @@ When anchor history `n < MIN_TRAIN`, the anchor has no trusted τ₀. Prior to t
 
 ```
 σ_within  = population_std(latest causal target-specific ECMWF ENS members)
+μ_ens     = mean(latest causal target-specific ECMWF ENS members)
+δ_ens     = μ_ens - μ*
 σ_between = sqrt(Σ_s w_s · (x_s(current) − μ*)²)
-σ_pred    = sqrt(σ_within² + σ_between²)
+σ_pred    = sqrt(σ_within² + σ_between² + δ_ens²)
 ```
 
 For the live source-clock route, both components are facts available at the same
@@ -73,12 +75,21 @@ providers are the minimum. Missing or invalid current shape blocks the live
 posterior; it never falls back to a historical residual, constant width, fitted
 floor, or uniform mixture.
 
-The center bootstrap uses only the current sampling terms:
+The center bootstrap uses only current evidence. The ENS/provider center
+displacement is systematic current disagreement and is not divided by member
+count:
 
 ```
 n_eff_provider = 1 / Σ_s w_s²
-σ_center = sqrt(σ_within²/n_members + σ_between²/n_eff_provider)
+σ_center = sqrt(σ_within²/n_members + σ_between²/n_eff_provider + δ_ens²)
 ```
+
+The same absolute ENS members are consumed later for settlement-preimage hit
+counts. Therefore their displacement from `μ*` cannot be discarded here as if
+the members were a recentered shape-only sample. When `μ_ens = μ*`, this term
+is exactly inert and the original within-plus-between decomposition is
+preserved. This is current-evidence uncertainty, not a historical residual,
+fitted floor, or side-specific probability transform.
 
 The older walk-forward residual width remains diagnostic for non-source-clock
 carriers; it is not a fallback into the live source-clock probability regime.
