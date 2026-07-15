@@ -864,8 +864,8 @@ class TestRCPV2RowCountSensor:
         assert status["risk"]["infrastructure_issues"] == []
         assert status["risk"]["consistency_check"]["ok"] is True
 
-    def test_cycle_pulse_refreshes_risk_details_and_preserves_business_process_kind(self, tmp_path, monkeypatch):
-        """A heartbeat pulse must not preserve stale risk details or hide the active business cycle."""
+    def test_cycle_pulse_preserves_risk_projection_without_blocking_riskguard_read(self, tmp_path, monkeypatch):
+        """A derived pulse must not synchronously read RiskGuard or hide the business cycle."""
         from src.observability import status_summary as status_summary_module
 
         status_path = tmp_path / "status_summary.json"
@@ -913,8 +913,20 @@ class TestRCPV2RowCountSensor:
             "_query_current_open_entry_orders",
             lambda conn: {"status": "ok", "orders": []},
         )
-        monkeypatch.setattr(status_summary_module, "_get_risk_level", lambda: "GREEN")
-        monkeypatch.setattr(status_summary_module, "_get_risk_details", lambda: {"status": "ok_full_metrics"})
+        monkeypatch.setattr(
+            status_summary_module,
+            "_get_risk_level",
+            lambda: (_ for _ in ()).throw(
+                AssertionError("cycle pulse must not synchronously read RiskGuard level")
+            ),
+        )
+        monkeypatch.setattr(
+            status_summary_module,
+            "_get_risk_details",
+            lambda: (_ for _ in ()).throw(
+                AssertionError("cycle pulse must not synchronously read RiskGuard details")
+            ),
+        )
 
         def _annotate_truth_payload(payload, path, generated_at, authority):
             payload["truth"] = {
@@ -933,7 +945,78 @@ class TestRCPV2RowCountSensor:
         assert status["cycle"]["last_auxiliary_pulse"] == {"mode": "heartbeat_pulse", "heartbeat": True}
         assert status["process"]["pulse_only"] is False
         assert status["process"]["last_pulse_kind"] == "business_cycle"
-        assert status["risk"]["details"] == {"status": "ok_full_metrics"}
+        assert status["risk"]["level"] == "GREEN"
+        assert status["risk"]["riskguard_level"] == "GREEN"
+        assert status["risk"]["level_source"] == "previous_full_status"
+        assert status["risk"]["level_refreshed_by_cycle_pulse"] is False
+        assert status["risk"]["details"] == {
+            "status": "not_refreshed_by_cycle_pulse",
+            "authority": "derived_operator_visibility",
+            "pulse_only": True,
+            "surface": "riskguard",
+            "level_source": "previous_full_status",
+            "previous_status": "dependency_db_locked_previous_risk_level_preserved",
+            "previous_full_risk_checked_at": "2026-06-13T01:53:09+00:00",
+        }
+
+    def test_cycle_pulse_uses_current_cycle_risk_without_riskguard_read(self, tmp_path, monkeypatch):
+        """A cycle-carried risk level supersedes the prior derived projection without DB I/O."""
+        from src.observability import status_summary as status_summary_module
+
+        status_path = tmp_path / "status_summary.json"
+        status_path.write_text(json.dumps({"risk": {"level": "GREEN", "riskguard_level": "GREEN"}}))
+
+        class DummyConn:
+            def close(self):
+                return None
+
+        monkeypatch.setattr(status_summary_module, "STATUS_PATH", status_path)
+        monkeypatch.setattr(status_summary_module, "get_trade_connection_with_world", lambda: DummyConn())
+        monkeypatch.setattr(
+            status_summary_module,
+            "query_position_current_status_view",
+            lambda conn: {
+                "status": "ok",
+                "positions": [],
+                "open_positions": 0,
+                "total_exposure_usd": 0.0,
+                "unrealized_pnl": 0.0,
+                "strategy_open_counts": {},
+                "chain_state_counts": {},
+                "exit_state_counts": {},
+                "unverified_entries": 0,
+                "day0_positions": 0,
+            },
+        )
+        monkeypatch.setattr(status_summary_module, "_get_execution_capability_status", lambda: {})
+        monkeypatch.setattr(
+            status_summary_module,
+            "_query_current_open_entry_orders",
+            lambda conn: {"status": "ok", "orders": []},
+        )
+        monkeypatch.setattr(
+            status_summary_module,
+            "_get_risk_level",
+            lambda: (_ for _ in ()).throw(AssertionError("unexpected RiskGuard level read")),
+        )
+        monkeypatch.setattr(
+            status_summary_module,
+            "_get_risk_details",
+            lambda: (_ for _ in ()).throw(AssertionError("unexpected RiskGuard details read")),
+        )
+        monkeypatch.setattr(
+            status_summary_module,
+            "annotate_truth_payload",
+            lambda payload, path, generated_at, authority: payload,
+        )
+
+        status_summary_module.write_cycle_pulse({"mode": "opening_hunt", "risk_level": "YELLOW"})
+        status = json.loads(status_path.read_text())
+
+        assert status["risk"]["level"] == "YELLOW"
+        assert status["risk"]["riskguard_level"] == "YELLOW"
+        assert status["risk"]["level_source"] == "cycle_summary"
+        assert status["risk"]["level_refreshed_by_cycle_pulse"] is True
 
     def test_cycle_pulse_refresh_failure_does_not_advance_status_freshness(self, tmp_path, monkeypatch):
         """Relationship: failed DB truth refresh cannot mint a fresh status timestamp."""

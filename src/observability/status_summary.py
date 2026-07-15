@@ -441,29 +441,34 @@ def _refresh_pulse_infrastructure_status(status: dict, cycle_summary: dict | Non
     if not isinstance(risk, dict):
         risk = {}
         status["risk"] = risk
-    try:
-        risk["level"] = _get_risk_level()
-        risk["riskguard_level"] = risk["level"]
-        risk["details"] = _get_risk_details()
-    except Exception as exc:  # noqa: BLE001 - status pulse must remain non-fatal
-        risk["details"] = {
-            "status": "riskguard_status_refresh_failed",
-            "error_type": type(exc).__name__,
-            "error": str(exc),
-        }
-    observed_risk_level = str(
-        cycle.get("risk_level")
-        or risk.get("level")
-        or risk.get("riskguard_level")
-        or ""
+    prior_risk_details = risk.get("details") if isinstance(risk.get("details"), dict) else {}
+    cycle_risk_level = str(cycle.get("risk_level") or "").strip().upper()
+    prior_risk_level = str(risk.get("level") or risk.get("riskguard_level") or "").strip().upper()
+    observed_risk_level = cycle_risk_level or prior_risk_level or "UNKNOWN"
+    risk_level_source = (
+        "cycle_summary"
+        if cycle_risk_level
+        else "previous_full_status"
+        if prior_risk_level
+        else "unavailable"
     )
-    if observed_risk_level:
-        risk.setdefault("level", observed_risk_level)
-        risk.setdefault("riskguard_level", risk.get("level", observed_risk_level))
+    risk["level"] = observed_risk_level
+    risk["riskguard_level"] = observed_risk_level
+    risk["level_source"] = risk_level_source
+    risk["level_refreshed_by_cycle_pulse"] = bool(cycle_risk_level)
+    risk_details = _pulse_only_summary("riskguard")
+    risk_details["level_source"] = risk_level_source
+    if prior_risk_details.get("status"):
+        risk_details["previous_status"] = prior_risk_details["status"]
+    if prior_risk_details.get("previous_full_risk_checked_at"):
+        risk_details["previous_full_risk_checked_at"] = prior_risk_details[
+            "previous_full_risk_checked_at"
+        ]
+    risk["details"] = risk_details
     risk["consistency_check"] = {
         "ok": not consistency_issues,
         "issues": consistency_issues,
-        "cycle_risk_level": str(cycle.get("risk_level") or "") or None,
+        "cycle_risk_level": cycle_risk_level or None,
         "scope": "cycle_pulse",
     }
     risk["infrastructure_level"] = "RED" if consistency_issues else "GREEN"
