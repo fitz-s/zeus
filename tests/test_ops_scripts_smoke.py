@@ -1,10 +1,10 @@
-# Lifecycle: created=2026-06-12; last_reviewed=2026-07-13; last_reused=2026-07-13
+# Lifecycle: created=2026-06-12; last_reviewed=2026-07-15; last_reused=2026-07-15
 # Purpose: light smoke coverage for the three new ops scripts (zeus_status,
 #   deploy_live, generate_schema_cheatsheet).
 # Reuse: asserts the FAIL-SOFT contract (a locked/empty/missing DB degrades one
 #   section to ERR, the rest still render) and that each script runs read-only
 #   against temp DBs. No live DB is touched.
-# Last reused/audited: 2026-07-13
+# Last reused/audited: 2026-07-15
 # Authority basis: operator big-direction 2026-06-12 ("大方向现在也只是添加几个文件现在做")
 """Smoke tests for scripts/zeus_status.py, deploy_live.py, generate_schema_cheatsheet.py."""
 from __future__ import annotations
@@ -2797,10 +2797,10 @@ def test_deploy_live_live_restart_runs_recovery_before_preflight(monkeypatch, ca
         ("prerequisite", preflight_prerequisites),
         ("preflight", tuple(expanded_labels)),
         ("launch", dl.LIVE_TRADING_LABEL),
-        ("launch", heartbeat_supervisor),
         ("verify", "cccccccc"),
         ("queue", "post-start"),
         ("monitor", "post-start"),
+        ("launch", heartbeat_supervisor),
         ("resume_entries", tuple(expanded_labels)),
     ]
     assert "live restart preflight passed" in capsys.readouterr().out
@@ -3053,7 +3053,7 @@ def test_deploy_live_all_restarts_sidecars_before_live_preflight(monkeypatch):
     live_launch_index = calls.index(("launch", dl.LIVE_TRADING_LABEL))
     assert live_launch_index > preflight_index
     heartbeat_launch_index = calls.index(("launch", dl.DAEMONS["venue-heartbeat"]))
-    assert heartbeat_launch_index > live_launch_index
+    assert heartbeat_launch_index > calls.index(("monitor", "post-start"))
     assert calls.index(("verify", "dddddddd")) > live_launch_index
     assert calls.index(("queue", "post-start")) > calls.index(("verify", "dddddddd"))
     assert calls.index(("monitor", "post-start")) > calls.index(("verify", "dddddddd"))

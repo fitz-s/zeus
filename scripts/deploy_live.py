@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-# Lifecycle: created=2026-06-12; last_reviewed=2026-07-13; last_reused=2026-07-13
+# Lifecycle: created=2026-06-12; last_reviewed=2026-07-15; last_reused=2026-07-15
 # Purpose: make live daemon restarts SAFE — refuse `launchctl kickstart` while the LIVE
 #   checkout's runtime surface is uncommitted/unpushed, and require live restart preflight
 #   before booting the trading daemon.
 # Reuse: read-mostly (git status/rev-parse + launchctl list + preflight checks); the only
 #   state change is kickstart after the gates pass.
-# Last reused/audited: 2026-07-13
+# Last reused/audited: 2026-07-15
 # Authority basis: operator big-direction 2026-06-12 ("大方向现在也只是添加几个文件现在做") +
 #   incident: a `launchctl kickstart` booted a concurrent agent's mid-edit working tree
 #   into live money.
@@ -1294,18 +1294,13 @@ def cmd_restart(args: argparse.Namespace) -> int:
         ok, detail = _launch_or_restart_label(LIVE_TRADING_LABEL)
         if ok:
             print(detail)
-            for label in post_live_labels:
-                deferred_ok, deferred_detail = _launch_or_restart_label(label)
-                if deferred_ok:
-                    print(deferred_detail)
-                else:
-                    rc_all = 1
-                    print(deferred_detail, file=sys.stderr)
             runtime_ok, runtime_detail = _wait_for_live_runtime_fresh(
                 expected_sha=expected_live_sha,
                 launched_after=launched_after,
             )
             print(runtime_detail)
+            queue_ok = False
+            monitor_ok = False
             if not runtime_ok:
                 rc_all = 1
             else:
@@ -1321,13 +1316,26 @@ def cmd_restart(args: argparse.Namespace) -> int:
                 print(monitor_detail)
                 if not monitor_ok:
                     rc_all = 1
-                if queue_ok and monitor_ok:
-                    resume_ok, resume_detail = (
-                        _resume_entries_after_verified_live_restart_if_needed(labels)
-                    )
-                    print(resume_detail)
-                    if not resume_ok:
-                        rc_all = 1
+            # The supervisor must not observe the new daemon until its first
+            # queue and monitor writes have replaced stale PID-bearing status.
+            # Otherwise it correctly repairs the stale PID by restarting the
+            # process that deploy_live is still trying to verify.
+            post_live_ok = True
+            for label in post_live_labels:
+                deferred_ok, deferred_detail = _launch_or_restart_label(label)
+                if deferred_ok:
+                    print(deferred_detail)
+                else:
+                    post_live_ok = False
+                    rc_all = 1
+                    print(deferred_detail, file=sys.stderr)
+            if runtime_ok and queue_ok and monitor_ok and post_live_ok:
+                resume_ok, resume_detail = (
+                    _resume_entries_after_verified_live_restart_if_needed(labels)
+                )
+                print(resume_detail)
+                if not resume_ok:
+                    rc_all = 1
         else:
             rc_all = 1
             print(detail, file=sys.stderr)
