@@ -91,6 +91,13 @@ is exactly inert and the original within-plus-between decomposition is
 preserved. This is current-evidence uncertainty, not a historical residual,
 fitted floor, or side-specific probability transform.
 
+The current-evidence semantics revision is serialized inside this shape and
+therefore inside its shape/dependency/posterior identity. When this probability
+law changes, existing active families are no longer covered: the normal
+seed/materialization loop replays them, and entry/monitor readers refuse an
+older shaped certificate during convergence. This is semantic identity, not a
+deployment-SHA freshness rule.
+
 The older walk-forward residual width remains diagnostic for non-source-clock
 carriers; it is not a fallback into the live source-clock probability regime.
 

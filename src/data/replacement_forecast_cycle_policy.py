@@ -27,7 +27,9 @@ encode the invariant in shared structure, not in N parallel checks):
 
 from __future__ import annotations
 
+import json
 import os
+from collections.abc import Mapping
 from datetime import datetime, timezone
 
 
@@ -88,6 +90,39 @@ _INTERMEDIATE_CYCLE_HOURS = frozenset()
 #   (event_reactor_adapter._FUSED_BOOTSTRAP_QLCB_BASIS). Defining it ONCE here (the module both the
 #   materializer and the readers already import, no cycle) makes all four sites share one definition.
 TRADEABLE_GRADE_QLCB_BASIS = "fused_center_bootstrap_p05"
+CURRENT_EVIDENCE_SEMANTICS_REVISION = "ensemble_center_disagreement_v1"
+
+
+def _current_evidence_shape(provenance: object) -> Mapping[str, object] | None:
+    """Return the persisted source-clock shape when one is present."""
+
+    payload = provenance
+    if isinstance(payload, str):
+        try:
+            payload = json.loads(payload)
+        except json.JSONDecodeError:
+            return None
+    if not isinstance(payload, Mapping):
+        return None
+    fusion = payload.get("bayes_precision_fusion")
+    if not isinstance(fusion, Mapping):
+        return None
+    shape = fusion.get("current_evidence_shape")
+    return shape if isinstance(shape, Mapping) else None
+
+
+def current_evidence_shape_semantics_mismatch(provenance: object) -> bool:
+    """Whether a shaped certificate was built under different probability law.
+
+    Shape-less legacy fixtures and explicitly non-source-clock carriers remain
+    outside this comparison. Once a current-evidence shape exists, its semantic
+    revision is part of probability identity and must match exactly.
+    """
+
+    shape = _current_evidence_shape(provenance)
+    if shape is None:
+        return False
+    return str(shape.get("semantics_revision") or "") != CURRENT_EVIDENCE_SEMANTICS_REVISION
 
 
 def tradeable_grade_coverage_sql(*, posterior_columns, alias: str = "") -> str:
@@ -112,6 +147,11 @@ def tradeable_grade_coverage_sql(*, posterior_columns, alias: str = "") -> str:
     fragments.append(
         f"AND json_extract({alias}provenance_json, '$.q_lcb_basis') = "
         f"'{TRADEABLE_GRADE_QLCB_BASIS}'"
+    )
+    fragments.append(
+        f"AND json_extract({alias}provenance_json, "
+        "'$.bayes_precision_fusion.current_evidence_shape.semantics_revision') = "
+        f"'{CURRENT_EVIDENCE_SEMANTICS_REVISION}'"
     )
     return "\n              ".join(fragments)
 

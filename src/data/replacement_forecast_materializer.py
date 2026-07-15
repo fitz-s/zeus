@@ -31,6 +31,7 @@ from zoneinfo import ZoneInfo
 from src.data.forecast_target_contract import compute_target_local_day_window_utc
 from src.data.latency_metrics import emit_materialization_latency
 from src.data.replacement_forecast_cycle_policy import (
+    CURRENT_EVIDENCE_SEMANTICS_REVISION,
     TRADEABLE_GRADE_QLCB_BASIS,
     classify_cycle_phase,
     cycle_age_exceeds_bound,
@@ -1192,6 +1193,7 @@ class _CurrentEvidenceShape:
     """Current target-specific predictive shape with no historical residual input."""
 
     snapshot_id: int
+    semantics_revision: str
     source_cycle_time: str
     source_available_at: str
     members_c: tuple[float, ...]
@@ -1279,6 +1281,7 @@ def _current_evidence_shape_from_values(
         raise ValueError("current evidence center sigma must be positive")
 
     identity = {
+        "semantics_revision": CURRENT_EVIDENCE_SEMANTICS_REVISION,
         "snapshot_id": int(snapshot_id),
         "source_cycle_time": str(source_cycle_time),
         "source_available_at": str(source_available_at),
@@ -1299,6 +1302,7 @@ def _current_evidence_shape_from_values(
     member_values_hash = str(identity["member_values_hash"])
     return _CurrentEvidenceShape(
         snapshot_id=int(snapshot_id),
+        semantics_revision=CURRENT_EVIDENCE_SEMANTICS_REVISION,
         source_cycle_time=str(source_cycle_time),
         source_available_at=str(source_available_at),
         members_c=members,

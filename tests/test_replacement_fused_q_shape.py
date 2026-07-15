@@ -1,5 +1,5 @@
 # Created: 2026-06-09
-# Last reused or audited: 2026-07-11
+# Last reused or audited: 2026-07-15
 # Authority basis: AIFS-replacement experiment 2026-06-09 (/tmp/aifs_replacement_experiment.md,
 #   n=39 settled cells): the AIFS member-vote shape assigned EXACTLY ZERO probability to the
 #   winning bin on 11/39 cells (vote-support truncation; the soft-anchor can only shift that
@@ -27,6 +27,9 @@ from datetime import date
 import pytest
 
 import src.data.replacement_forecast_materializer as mod
+from src.data.replacement_forecast_cycle_policy import (
+    CURRENT_EVIDENCE_SEMANTICS_REVISION,
+)
 from tests.test_bayes_precision_fusion_history_provider_materializer_wiring import (  # reuse the proven harness
     _conn,
     _disable_other_layers,
@@ -85,6 +88,8 @@ def test_current_ensemble_center_disagreement_stays_in_predictive_shape() -> Non
     assert shape.ensemble_center_delta_c == pytest.approx(-1.5281099968405112)
     assert shape.predictive_sigma_c == pytest.approx(1.5817743667175717)
     assert shape.center_sigma_c >= abs(shape.ensemble_center_delta_c)
+    assert shape.semantics_revision == CURRENT_EVIDENCE_SEMANTICS_REVISION
+    assert shape.as_payload()["semantics_revision"] == CURRENT_EVIDENCE_SEMANTICS_REVISION
 
     cdf = lambda value: 0.5 * (
         1.0

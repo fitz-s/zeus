@@ -1,5 +1,5 @@
 # Created: 2026-06-10
-# Last reused or audited: 2026-06-10
+# Last reused or audited: 2026-07-15
 # Authority basis: operator staleness/cycle-physics directive 2026-06-10 (bounded re-materialization
 #   staleness gate at materialization, fail-closed; cycle-phase provenance treats all standard
 #   00Z/06Z/12Z/18Z cycles as live-eligible synoptic).
@@ -32,8 +32,11 @@ from src.data.openmeteo_ecmwf_ifs9_precision_guard import (
     evaluate_openmeteo_ecmwf_ifs9_precision_guard,
 )
 from src.data.replacement_forecast_cycle_policy import (
+    CURRENT_EVIDENCE_SEMANTICS_REVISION,
     REPLACEMENT_SOURCE_CYCLE_MAX_AGE_HOURS_DEFAULT,
     classify_cycle_phase,
+    current_evidence_shape_semantics_mismatch,
+    tradeable_grade_coverage_sql,
 )
 from src.data.replacement_forecast_materializer import (
     ReplacementForecastMaterializeRequest,
@@ -46,6 +49,32 @@ from src.state.schema.v2_schema import apply_canonical_schema
 
 UTC = timezone.utc
 _STALE_REASON = "REPLACEMENT_MATERIALIZATION_SOURCE_CYCLE_TOO_STALE"
+
+
+def test_current_evidence_semantics_is_probability_identity_and_coverage() -> None:
+    current = {
+        "bayes_precision_fusion": {
+            "current_evidence_shape": {
+                "semantics_revision": CURRENT_EVIDENCE_SEMANTICS_REVISION,
+            }
+        }
+    }
+    stale = {
+        "bayes_precision_fusion": {
+            "current_evidence_shape": {"semantics_revision": "older-law"}
+        }
+    }
+
+    assert current_evidence_shape_semantics_mismatch(current) is False
+    assert current_evidence_shape_semantics_mismatch(stale) is True
+    assert current_evidence_shape_semantics_mismatch({}) is False
+
+    clause = tradeable_grade_coverage_sql(
+        posterior_columns={"q_lcb_json", "q_ucb_json", "provenance_json"},
+        alias="p.",
+    )
+    assert "current_evidence_shape.semantics_revision" in clause
+    assert CURRENT_EVIDENCE_SEMANTICS_REVISION in clause
 
 
 @dataclass(frozen=True)

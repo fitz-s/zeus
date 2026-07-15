@@ -359,12 +359,24 @@ files:
   src/data/replacement_forecast_materializer.py:
     zone: K2_runtime
     authority_role: replacement_forecast_posterior_writer
-    why: Writes forecast_posteriors rows with content-addressed identity (posterior_identity_hash/dependency_hash/posterior_config_hash over dependency_hash, q, q_lcb, q_ucb, source_cycle_time) so a later read can prove which raw inputs a served posterior was built from. The source-clock live route binds the latest causal target-specific VERIFIED ECMWF ENS snapshot plus simultaneous provider values into a decision-time current-evidence shape; absolute ENS-member displacement from the served provider center remains an explicit uncertainty component because those same members remain absolute settlement-bin evidence. Its snapshot id and shape hash enter dependency/config identity, and missing current shape fails closed instead of falling back to historical residual/floor/mixture probability. On a UNIQUE(posterior_identity_hash) conflict, re-selects the existing row instead of duplicating it.
+    why: Writes forecast_posteriors rows with content-addressed identity (posterior_identity_hash/dependency_hash/posterior_config_hash over dependency_hash, q, q_lcb, q_ucb, source_cycle_time) so a later read can prove which raw inputs a served posterior was built from. The source-clock live route binds the latest causal target-specific VERIFIED ECMWF ENS snapshot plus simultaneous provider values into a decision-time current-evidence shape; absolute ENS-member displacement from the served provider center remains an explicit uncertainty component because those same members remain absolute settlement-bin evidence. Its semantics revision, snapshot id, and shape hash enter dependency/config identity, and missing or revision-mismatched current shape fails closed instead of falling back to historical residual/floor/mixture probability. On a UNIQUE(posterior_identity_hash) conflict, re-selects the existing row instead of duplicating it.
     hazards:
     - SOURCE_TRUTH_PLANE_COLLAPSE
     downstream:
     - src/data/replacement_forecast_bundle_reader.py
     - src/data/replacement_input_hwm.py
+  src/data/replacement_forecast_cycle_policy.py:
+    zone: K2_runtime
+    authority_role: replacement_forecast_cycle_and_semantics_policy
+    why: Single authority for source-cycle age, tradeable-grade posterior coverage, and the current-evidence probability-semantics revision. Coverage requires the revision persisted by the materializer, so a probability-law change re-enters the existing seed queue instead of leaving active families on mixed certificates.
+    hazards:
+    - SOURCE_TRUTH_PLANE_COLLAPSE
+    downstream:
+    - src/data/replacement_forecast_current_target_plan.py
+    - src/data/replacement_forecast_live_materialization_queue.py
+    - src/data/replacement_forecast_materializer.py
+    - src/engine/event_reactor_adapter.py
+    - src/engine/position_belief.py
   src/data/replacement_forecast_bundle_reader.py:
     zone: K2_runtime
     authority_role: replacement_forecast_posterior_reader
@@ -1762,7 +1774,7 @@ files:
   src/engine/event_reactor_adapter.py:
     zone: K2_runtime
     authority_role: edli_event_reactor_adapter
-    why: Connects EDLI opportunity events to the event-bound no-submit proof kernel; builds AuthorityEvidence certs (EXECUTABLE_SNAPSHOT, FORECAST, etc.) and drives the decision compiler without crossing the executor/venue boundary.
+    why: Connects EDLI opportunity events to the event-bound no-submit proof kernel; builds AuthorityEvidence certs (EXECUTABLE_SNAPSHOT, FORECAST, etc.) and drives the decision compiler without crossing the executor/venue boundary. A persisted current-evidence shape must carry the shared current probability-semantics revision before it can become forecast authority.
     downstream:
     - src/events/reactor.py
     - src/engine/event_bound_final_intent.py
@@ -1803,7 +1815,7 @@ files:
   src/engine/position_belief.py:
     zone: K2_runtime
     authority_role: replacement_forecast_monitor_exit_belief
-    why: Read-only freshness annotation for held positions during monitor/exit; independently re-derives the latest raw-input cycle (_latest_live_input_cycle, separate implementation from src/data/replacement_input_hwm.py) and sets a fresh=False flag when the served posterior is behind newer raw input. Deliberately never raises (unlike the entry-side tripwire) — held positions must keep being monitored even on stale-flagged data. Not touched by W0.1; consolidating its duplicate raw-HWM query onto src/data/replacement_input_hwm.py is deferred to a later wave.
+    why: Read-only freshness annotation for held positions during monitor/exit; independently re-derives the latest raw-input cycle (_latest_live_input_cycle, separate implementation from src/data/replacement_input_hwm.py) and sets a fresh=False flag when the served posterior is behind newer raw input. A shaped posterior with a different current-evidence semantics revision is absent authority, not a stale numeric belief. Deliberately never raises (unlike the entry-side tripwire) — held positions must keep being monitored even on stale-flagged data. Not touched by W0.1; consolidating its duplicate raw-HWM query onto src/data/replacement_input_hwm.py is deferred to a later wave.
     downstream:
     - src/engine/monitor_refresh.py
   src/engine/time_context.py:

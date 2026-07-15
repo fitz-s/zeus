@@ -59,6 +59,10 @@ from src.data.replacement_forecast_readiness import (
     LIVE_RUNTIME_LAYER,
     SOURCE_ID as LIVE_REPLACEMENT_POSTERIOR_SOURCE_ID,
 )
+from src.data.replacement_forecast_cycle_policy import (
+    CURRENT_EVIDENCE_SEMANTICS_REVISION,
+    current_evidence_shape_semantics_mismatch,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -635,6 +639,11 @@ def load_replacement_belief(
             if "posterior_method" in columns
             else "NULL AS posterior_method"
         )
+        provenance_expr = (
+            "provenance_json"
+            if "provenance_json" in columns
+            else "NULL AS provenance_json"
+        )
         authority_predicates: list[str] = []
         authority_params: list[object] = [city, target_date, temperature_metric]
         if "source_id" in columns:
@@ -646,7 +655,7 @@ def load_replacement_belief(
         row = conn.execute(
             f"""
             SELECT posterior_id, computed_at, q_json, {source_cycle_expr}, runtime_layer,
-                   {source_id_expr}, {posterior_method_expr}
+                   {source_id_expr}, {posterior_method_expr}, {provenance_expr}
             FROM forecast_posteriors
             WHERE city = ? AND target_date = ? AND temperature_metric = ?
               AND runtime_layer = ?
@@ -691,6 +700,20 @@ def load_replacement_belief(
         conn.close()
     if row is None:
         return None
+    if row["provenance_json"] is not None:
+        try:
+            provenance = json.loads(str(row["provenance_json"]))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return None
+        if current_evidence_shape_semantics_mismatch(provenance):
+            logger.warning(
+                "position_belief: current-evidence semantics mismatch for %s/%s/%s; required=%s",
+                city,
+                target_date,
+                temperature_metric,
+                CURRENT_EVIDENCE_SEMANTICS_REVISION,
+            )
+            return None
     try:
         q = json.loads(row["q_json"] or "null")
     except (TypeError, ValueError):

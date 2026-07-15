@@ -1,5 +1,5 @@
 # Created: 2026-06-06
-# Last reused/audited: 2026-07-01
+# Last reused/audited: 2026-07-15
 # Lifecycle: created=2026-06-06; last_reviewed=2026-06-07; last_reused=2026-07-01
 # Purpose: Protect current-market replacement forecast download and materialization planning.
 # Reuse: Run before changing current replacement target coverage or source-run matching.
@@ -18,6 +18,9 @@ from src.data.replacement_forecast_current_target_plan import (
     _latest_authorized_day0_fact,
     build_replacement_forecast_current_target_plan,
     replacement_forecast_download_plan_from_current_targets,
+)
+from src.data.replacement_forecast_cycle_policy import (
+    CURRENT_EVIDENCE_SEMANTICS_REVISION,
 )
 
 
@@ -560,6 +563,80 @@ def test_current_target_plan_classifies_covered_seedable_and_missing_manifest_ta
     assert download_plan["fusion_current_value_missing_targets"] == []
 
 
+def test_current_target_plan_reseeds_old_probability_semantics(tmp_path) -> None:
+    db = tmp_path / "forecasts.db"
+    _create_db(db)
+    conn = sqlite3.connect(db)
+    try:
+        for ddl in (
+            "ALTER TABLE forecast_posteriors ADD COLUMN q_lcb_json TEXT",
+            "ALTER TABLE forecast_posteriors ADD COLUMN q_ucb_json TEXT",
+            "ALTER TABLE forecast_posteriors ADD COLUMN provenance_json TEXT",
+            "ALTER TABLE forecast_posteriors ADD COLUMN source_cycle_time TEXT",
+            "ALTER TABLE forecast_posteriors ADD COLUMN computed_at TEXT",
+        ):
+            conn.execute(ddl)
+        conn.execute(
+            """
+            UPDATE forecast_posteriors
+               SET q_lcb_json='{}', q_ucb_json='{}',
+                   source_cycle_time='2026-06-07T06:00:00+00:00',
+                   computed_at='2026-06-07T10:00:00+00:00',
+                   provenance_json=?
+             WHERE city='Paris'
+            """,
+            (
+                json.dumps(
+                    {
+                        "q_lcb_basis": "fused_center_bootstrap_p05",
+                        "bayes_precision_fusion": {
+                            "current_evidence_shape": {
+                                "semantics_revision": "older-law"
+                            }
+                        },
+                    }
+                ),
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    stale_plan = build_replacement_forecast_current_target_plan(
+        db,
+        now_utc=datetime(2026, 6, 7, 12, 0, tzinfo=timezone.utc),
+    )
+    stale = next(row for row in stale_plan.rows if row.city == "Paris")
+    assert stale.covered is False
+    assert stale.can_seed is True
+
+    conn = sqlite3.connect(db)
+    try:
+        provenance = json.loads(
+            conn.execute(
+                "SELECT provenance_json FROM forecast_posteriors WHERE city='Paris'"
+            ).fetchone()[0]
+        )
+        provenance["bayes_precision_fusion"]["current_evidence_shape"][
+            "semantics_revision"
+        ] = CURRENT_EVIDENCE_SEMANTICS_REVISION
+        conn.execute(
+            "UPDATE forecast_posteriors SET provenance_json=? WHERE city='Paris'",
+            (json.dumps(provenance),),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    current_plan = build_replacement_forecast_current_target_plan(
+        db,
+        now_utc=datetime(2026, 6, 7, 12, 0, tzinfo=timezone.utc),
+    )
+    current = next(row for row in current_plan.rows if row.city == "Paris")
+    assert current.covered is True
+    assert current.can_seed is False
+
+
 def test_current_target_plan_reseeds_same_cycle_late_used_model_input(tmp_path) -> None:
     db = tmp_path / "forecasts.db"
     _create_db(db)
@@ -575,10 +652,15 @@ def test_current_target_plan_reseeds_same_cycle_late_used_model_input(tmp_path) 
                 "2026-06-07T06:00:00+00:00",
                 "2026-06-07T08:30:00+00:00",
                 json.dumps(
-                    {
-                        "used_models": ["gfs_global"],
-                        "q_lcb_basis": "fused_center_bootstrap_p05",
-                    }
+                        {
+                            "used_models": ["gfs_global"],
+                            "q_lcb_basis": "fused_center_bootstrap_p05",
+                            "bayes_precision_fusion": {
+                                "current_evidence_shape": {
+                                    "semantics_revision": CURRENT_EVIDENCE_SEMANTICS_REVISION
+                                }
+                            },
+                        }
                 ),
             ),
         )

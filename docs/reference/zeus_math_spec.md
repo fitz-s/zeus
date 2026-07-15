@@ -78,6 +78,10 @@ evidence, so recentering that displacement out of `σ_pred` would make the width
 and tail certificate describe different probability worlds. Historical
 residual widths and fitted floors remain diagnostic/non-source-clock only.
 
+`semantics_revision` is included in the shape hash. It changes whenever these
+current-evidence equations change, so posterior identity and coverage cannot
+silently treat two different probability laws as the same certificate.
+
 ### 0.1d Settlement-preimage bin integration — `emos.bin_probability_settlement`
 
 The **single** live settlement integrator. q over each bin is the N(μ*, σ_pred) mass on the bin's WMO round-half-up settlement preimage (q_shape `fused_normal_direct`), identical preimage logic to §1.2 / `analytic_p_raw_vector_from_maxes`:

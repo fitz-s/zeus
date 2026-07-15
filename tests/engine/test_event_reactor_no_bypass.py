@@ -1,5 +1,5 @@
 # Created: 2026-05-24
-# Last reused/audited: 2026-07-08
+# Last reused/audited: 2026-07-15
 # Authority basis: Operator GOAL 2026-06-04 — full-family q/FDR + executable-mask for illiquid bins; never trade an assumed/renormalized subset
 #   2026-06-08 audit (no-bypass 4-test slice): re-authored test_runtime_receipt_uses_selected_no_snapshot_not_yes_side_ask
 #   to the complement-immunity ban (014408394f/cbc454e17e); updated two selector tests to the buy_no independent-YES-posterior
@@ -53,6 +53,9 @@ from src.data.replacement_forecast_readiness import (
     PRODUCT_ID as REPLACEMENT_PRODUCT_ID,
     SOURCE_ID as REPLACEMENT_SOURCE_ID,
     STRATEGY_KEY as REPLACEMENT_STRATEGY_KEY,
+)
+from src.data.replacement_forecast_cycle_policy import (
+    CURRENT_EVIDENCE_SEMANTICS_REVISION,
 )
 from src.types.market import Bin
 
@@ -1141,6 +1144,9 @@ def _insert_replacement_forecast_fixture(conn: sqlite3.Connection) -> None:
             "decorrelated_providers_complete": True,
             "decorrelated_providers_served": 3,
             "decorrelated_providers_expected": 3,
+            "current_evidence_shape": {
+                "semantics_revision": CURRENT_EVIDENCE_SEMANTICS_REVISION,
+            },
         },
     }
     provenance_json = _json.dumps(provenance, separators=(",", ":"))
@@ -1869,6 +1875,39 @@ def test_replacement_posterior_forecast_authority_payload_satisfies_pre_submit_s
     assert "missing_authority_tier" not in errors
     assert "missing_first_member_observed_time" not in errors
     assert "missing_run_complete_time" not in errors
+
+
+def test_replacement_posterior_refuses_old_current_evidence_semantics():
+    event = _replacement_forecast_event()
+    conn = _trade_conn_with_snapshot()
+    _insert_replacement_forecast_fixture(conn)
+    row = conn.execute(
+        "SELECT posterior_id, provenance_json FROM forecast_posteriors ORDER BY posterior_id DESC LIMIT 1"
+    ).fetchone()
+    provenance = json.loads(str(row["provenance_json"]))
+    provenance["bayes_precision_fusion"]["current_evidence_shape"][
+        "semantics_revision"
+    ] = "older-law"
+    conn.execute(
+        "UPDATE forecast_posteriors SET provenance_json=? WHERE posterior_id=?",
+        (json.dumps(provenance), row["posterior_id"]),
+    )
+    family = SimpleNamespace(city="Chicago", target_date="2026-05-25", metric="high")
+
+    with pytest.raises(
+        ValueError,
+        match="REPLACEMENT_CURRENT_EVIDENCE_SEMANTICS_MISMATCH",
+    ):
+        _forecast_authority_payload_from_posterior(
+            conn,
+            event=event,
+            family=family,
+            payload={
+                "source_id": REPLACEMENT_SOURCE_ID,
+                "source_run_id": "run-1",
+            },
+            decision_time=DECISION_TIME,
+        )
 
 
 def test_decision_source_context_preserves_posterior_identity_hash_for_capability_details():

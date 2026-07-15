@@ -20,6 +20,16 @@ as a third variance component in both predictive and center uncertainty. It
 does not add a gate or historical calibration term; aligned evidence preserves
 the original within-plus-between numeric decomposition.
 
+Post-deploy proof then exposed an identity/redecision defect: only newly drained
+seeds materialized the corrected formula, while otherwise-current active
+families remained covered by pre-change posterior certificates. A complete
+global auction therefore mixed probability semantics and selected a São Paulo
+candidate from an old carrier. The repair must bind a shared current-evidence
+semantics revision into the shape and posterior identity, make the existing
+coverage/seed loop naturally re-materialize mismatched active families, and
+refuse only a shaped certificate whose revision is not current. This is
+probability identity, not deployment freshness and not a new runtime gate.
+
 ## Background
 
 Current live source-clock posteriors display Normal point complements near
@@ -114,6 +124,9 @@ authority surface.
 - Preserve Day0 absorbing physical facts as dominant.
 - Commit, deploy through the official restart path, then prove the result from a
   newly materialized canonical posterior and live auction/order receipts.
+- Re-materialize every current active family when the current-evidence
+  semantics revision changes; entry and monitor readers must not consume an
+  older shaped certificate during that convergence window.
 - Remove the WORLD/TRADE writer-order inversion that prevents the corrected
   probability carrier from reaching live redecision.
 - Make held-position probability refresh order explicit: release TRADE, write

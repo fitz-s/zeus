@@ -73,6 +73,11 @@ city mixtures, or a fitted affine center shift. Older fusion/calibration machine
 may remain as diagnostics or for explicitly non-source-clock carriers, never as a
 silent alternate live probability regime.
 
+The current-evidence semantics revision is part of the persisted shape and
+posterior identity. A shaped certificate from another revision is not current
+probability authority; the existing seed/materialization loop must recompute it
+before entry or held-position belief can consume it.
+
 Do not reintroduce market-anchor caps, submit-disabled state, shadow-only gates, version snapshots, bankrolls, or current Kelly multipliers into root law. Present behavior must be proven from executable source, active config, process state, canonical DB rows, and decision receipts at task time. If that proof changes durable strategy law, update the owning authority doc or manifest instead of encoding a runtime snapshot here.
 
 Settlement-graded facts backing the chain: prior-label is algebraically irrelevant under diagonal Sigma; precision weights beat equal weights by 12x SE; legacy AIFS member-vote shape put zero probability on the winning bin in 28% of settled cells; fitted sigma-shape mixture values live in `state/sigma_scale_fit.json` and must be verified live before quoting numeric k/w.

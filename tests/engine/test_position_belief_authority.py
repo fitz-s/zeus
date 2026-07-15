@@ -1,5 +1,5 @@
 # Created: 2026-06-12
-# Last reused or audited: 2026-06-29
+# Last reused or audited: 2026-07-15
 # Authority basis: settlement-losses incident 2026-06-12 (Karachi position:
 #   719/719 monitor refreshes with last_monitor_prob_is_fresh=False while the
 #   entry authority forecast_posteriors was live and had re-ranked the held bin
@@ -42,6 +42,9 @@ from src.engine.position_belief import (
     ReplacementBelief,
     load_replacement_belief,
 )
+from src.data.replacement_forecast_cycle_policy import (
+    CURRENT_EVIDENCE_SEMANTICS_REVISION,
+)
 from src.types.metric_identity import MetricIdentity
 
 NOW = datetime(2026, 6, 12, 12, 0, 0, tzinfo=timezone.utc)
@@ -61,7 +64,8 @@ def forecasts_db(tmp_path):
             source_cycle_time TEXT,
             runtime_layer TEXT,
             source_id TEXT,
-            posterior_method TEXT
+            posterior_method TEXT,
+            provenance_json TEXT
         )
         """
     )
@@ -98,10 +102,11 @@ def forecasts_db(tmp_path):
 def _insert(db_path, *, posterior_id, computed_at, q, city="Karachi",
             target_date="2026-06-12", metric="high", source_cycle_time=None,
             runtime_layer="live", source_id=LIVE_REPLACEMENT_POSTERIOR_SOURCE_ID,
-            posterior_method="openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor"):
+            posterior_method="openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor",
+            semantics_revision=CURRENT_EVIDENCE_SEMANTICS_REVISION):
     conn = sqlite3.connect(db_path)
     conn.execute(
-        "INSERT INTO forecast_posteriors VALUES (?,?,?,?,?,?,?,?,?,?)",
+        "INSERT INTO forecast_posteriors VALUES (?,?,?,?,?,?,?,?,?,?,?)",
         (
             posterior_id,
             city,
@@ -113,6 +118,15 @@ def _insert(db_path, *, posterior_id, computed_at, q, city="Karachi",
             runtime_layer,
             source_id,
             posterior_method,
+            json.dumps(
+                {
+                    "bayes_precision_fusion": {
+                        "current_evidence_shape": {
+                            "semantics_revision": semantics_revision,
+                        }
+                    }
+                }
+            ),
         ),
     )
     conn.commit()
@@ -179,10 +193,21 @@ def _load(db_path, *, direction="buy_no", bin_label=BIN, now=NOW, **kw):
 
 
 class TestLoadReplacementBelief:
+    def test_old_current_evidence_semantics_is_not_belief_authority(self, forecasts_db):
+        _insert(
+            forecasts_db,
+            posterior_id="old-law",
+            computed_at=(NOW - timedelta(hours=1)).isoformat(),
+            q={BIN: 0.01},
+            semantics_revision="older-law",
+        )
+        assert _load(forecasts_db) is None
+
     def test_fresh_row_buy_no_is_held_side_converted(self, forecasts_db):
         _insert(forecasts_db, posterior_id="p1",
                 computed_at=(NOW - timedelta(hours=2)).isoformat(),
-                q={BIN: 0.242, OTHER_BIN: 0.29})
+                q={BIN: 0.242, OTHER_BIN: 0.29},
+                source_cycle_time=(NOW - timedelta(hours=6)).isoformat())
         belief = _load(forecasts_db, direction="buy_no")
         assert belief is not None
         assert belief.fresh is True
@@ -418,7 +443,6 @@ class TestLoadReplacementBelief:
             q={BIN: 0.242},
         )
         conn = sqlite3.connect(forecasts_db)
-        conn.execute("ALTER TABLE forecast_posteriors ADD COLUMN provenance_json TEXT")
         conn.execute("ALTER TABLE raw_model_forecasts ADD COLUMN model TEXT")
         conn.execute(
             "UPDATE forecast_posteriors SET provenance_json = ? WHERE posterior_id = 'p1'",
@@ -427,6 +451,9 @@ class TestLoadReplacementBelief:
                     {
                         "bayes_precision_fusion": {
                             "used_models": ["icon_global"],
+                            "current_evidence_shape": {
+                                "semantics_revision": CURRENT_EVIDENCE_SEMANTICS_REVISION,
+                            },
                         }
                     }
                 ),

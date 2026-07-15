@@ -28,6 +28,9 @@ test_trust_policy:
   # Machine-readable registry: tests with valid lifecycle headers.
   # Tests not in this list require audit before running.
   trusted_tests:
+    tests/test_replacement_forecast_current_target_plan.py: {created: "2026-06-06", last_used: "2026-07-15", note: "Current active-family coverage and seedability, including automatic reseed when a shaped posterior carries an older probability-semantics revision."}
+    tests/test_replacement_forecast_materializer_cycle_policy.py: {created: "2026-06-10", last_used: "2026-07-15", note: "Shared replacement cycle and probability-semantics policy; the current revision is part of tradeable-grade coverage and materialization identity."}
+    tests/engine/test_position_belief_authority.py: {created: "2026-06-12", last_used: "2026-07-15", note: "Held-position belief reads the same replacement authority as entry and refuses old current-evidence probability semantics."}
     tests/execution/test_venue_sync_contract.py: {created: "2026-06-11", last_used: "2026-07-15", note: "Three-phase command-recovery DB/venue synchronization antibodies, including default canonical WORLD+TRADE blocking flocks and live-tick opt-in nonblocking flock plus zero SQLite busy timeout."}
     tests/test_finite_evidence_probability_symmetry.py: {created: "2026-07-11", last_used: "2026-07-11", note: "INV-06/INV-41 current-evidence probability antibody: source-clock YES/NO share one coherent simplex carrier widened by exact settlement-preimage member-hit Clopper-Pearson and distribution-free current-moment tail ambiguity limits; historical far-tail floors are unreachable; Day0 absorbing truth dominates."}
     tests/test_replacement_fused_q_shape.py: {created: "2026-06-09", last_used: "2026-07-15", note: "Probability authority antibody: absolute current ENS member-center disagreement cannot be recentered out while the same members remain absolute settlement-bin evidence; aligned evidence preserves the within-plus-between decomposition; YES/NO remain exact complements; source-clock current q cannot consult historical k/w/floor/city transforms."}
@@ -225,7 +228,7 @@ test_trust_policy:
     tests/decision_kernel/test_taker_execution_law.py: {created: "2026-05-31", last_used: "2026-05-31"}
     tests/decision_kernel/test_canary_force_taker_gate.py: {created: "2026-05-31", last_used: "2026-05-31"}
     tests/decision_kernel/test_no_submit_compiler.py: {created: "2026-05-25", last_used: "2026-05-25"}
-    tests/engine/test_event_reactor_no_bypass.py: {created: "2026-05-24", last_used: "2026-05-24"}
+    tests/engine/test_event_reactor_no_bypass.py: {created: "2026-05-24", last_used: "2026-07-15", note: "Event-bound no-bypass authority and execution contracts, including refusal of a shaped replacement posterior from an older probability-semantics revision."}
     tests/strategy/live_inference/test_no_trade_regret.py: {created: "2026-05-24", last_used: "2026-05-24"}
     tests/analysis/test_event_opportunity_report.py: {created: "2026-05-24", last_used: "2026-05-24"}
     tests/money_path/test_edli_online_invariants.py: {created: "2026-05-24", last_used: "2026-07-10", note: "EDLI arm/no-submit relationship antibodies, including portfolio snapshot fail-closed helper-to-adapter selection."}
@@ -878,6 +881,9 @@ test_trust_policy:
 categories:
   core_law_antibody:
     - tests/test_finite_evidence_probability_symmetry.py
+    - tests/test_replacement_forecast_current_target_plan.py
+    - tests/test_replacement_forecast_materializer_cycle_policy.py
+    - tests/test_replacement_fused_q_shape.py
     # T0-1 conn-across-IO ordering invariant (2026-06-13): riskguard._tick_once
     # must fetch the bankroll (wallet NETWORK fetch) BEFORE opening any
     # write-class DB conn. RED-on-revert relationship test.
@@ -3825,6 +3831,39 @@ test_metadata:
       original decomposition, complement symmetry permits either YES or NO when
       executable edge exists, and historical shape transforms are unreachable.
     created: 2026-06-09
+    last_reused_or_audited: 2026-07-15
+
+  tests/test_replacement_forecast_current_target_plan.py:
+    cohort: law_antibody
+    trust: trusted
+    authority_docs:
+      - docs/authority/replacement_final_form_2026_06_09.md
+    notes: >
+      Current active-family coverage re-enters the existing seed loop when a
+      shaped posterior carries an older probability-semantics revision.
+    created: 2026-06-06
+    last_reused_or_audited: 2026-07-15
+
+  tests/test_replacement_forecast_materializer_cycle_policy.py:
+    cohort: law_antibody
+    trust: trusted
+    authority_docs:
+      - docs/authority/replacement_final_form_2026_06_09.md
+    notes: >
+      Shared replacement cycle and probability-semantics identity; tradeable
+      coverage requires the revision persisted in the current-evidence shape.
+    created: 2026-06-10
+    last_reused_or_audited: 2026-07-15
+
+  tests/engine/test_position_belief_authority.py:
+    cohort: law_antibody
+    trust: trusted
+    authority_docs:
+      - docs/authority/regime_unification_2026-06-12.md
+    notes: >
+      Held-position belief uses the current replacement probability semantics
+      and refuses a shaped certificate from an older revision.
+    created: 2026-06-12
     last_reused_or_audited: 2026-07-15
 
   tests/test_finite_evidence_probability_symmetry.py:

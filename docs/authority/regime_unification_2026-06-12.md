@@ -28,6 +28,11 @@ evidence, not permission to substitute the older residual/floor regime. The sour
 posterior is non-live until that current carrier exists and passes causality/provenance
 checks.
 
+The source-clock carrier also names its probability-semantics revision. A
+shaped certificate from another revision cannot be mixed into the current
+family auction or held-position monitor; it is re-materialized through the same
+seed queue, without a legacy fallback or a parallel regime.
+
 ## U2 — Degraded-mode law (the only legal "fallback")
 
 A degraded mode is the SAME authority with explicit staleness/absence branding

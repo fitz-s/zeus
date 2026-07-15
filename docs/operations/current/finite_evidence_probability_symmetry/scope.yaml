@@ -17,6 +17,8 @@ in_scope:
 - docs/reference/zeus_execution_lifecycle_reference.md
 - docs/reference/AGENTS.md
 - src/data/replacement_forecast_materializer.py
+- src/data/replacement_forecast_cycle_policy.py
+- src/engine/position_belief.py
 - src/execution/venue_sync_contract.py
 - src/engine/cycle_runtime.py
 - src/engine/event_reactor_adapter.py
@@ -38,6 +40,10 @@ in_scope:
 - tests/engine/test_event_reactor_live_qkernel_gate.py
 - tests/test_finite_evidence_probability_symmetry.py
 - tests/test_replacement_fused_q_shape.py
+- tests/test_replacement_forecast_current_target_plan.py
+- tests/test_replacement_forecast_materializer_cycle_policy.py
+- tests/engine/test_event_reactor_no_bypass.py
+- tests/engine/test_position_belief_authority.py
 - tests/events/test_edli_trade_fact_bridge.py
 - tests/execution/test_venue_sync_contract.py
 - tests/test_monitor_refresh_nowcast_wiring.py
@@ -58,6 +64,7 @@ in_scope:
 - tests/integration/test_qkernel_spine_blockers_pr409.py
 - tests/AGENTS.md
 - architecture/test_topology.yaml
+- architecture/source_rationale.yaml
 - src/contracts/venue_submission_envelope.py
 - src/decision/family_decision_engine.py
 - src/engine/evaluator.py

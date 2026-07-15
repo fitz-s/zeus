@@ -229,6 +229,10 @@ from src.data.replacement_forecast_refit_gate import ReplacementForecastRefitDec
 from src.data.replacement_forecast_runtime_policy import ReplacementForecastPromotionEvidence
 from src.data.replacement_forecast_runtime_policy import ReplacementForecastCapitalObjectiveEvidence
 from src.data import replacement_input_hwm as _replacement_input_hwm
+from src.data.replacement_forecast_cycle_policy import (
+    CURRENT_EVIDENCE_SEMANTICS_REVISION,
+    current_evidence_shape_semantics_mismatch,
+)
 from src.state.snapshot_repo import (
     executable_snapshot_from_row,
     get_snapshot,
@@ -15836,6 +15840,11 @@ def _forecast_authority_payload_from_posterior(
         return None
     if not all(isinstance(value, Mapping) and value for value in (p_q, p_q_lcb, p_q_ucb, p_provenance)):
         return None
+    if current_evidence_shape_semantics_mismatch(p_provenance):
+        raise ValueError(
+            "REPLACEMENT_CURRENT_EVIDENCE_SEMANTICS_MISMATCH:"
+            f"required={CURRENT_EVIDENCE_SEMANTICS_REVISION}"
+        )
     try:
         p_bootstrap_draws = int(p_provenance.get("q_lcb_bootstrap_draws"))
         p_posterior_id = int(p_posterior_id)
