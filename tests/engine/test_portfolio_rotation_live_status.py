@@ -1,7 +1,6 @@
 # Created: 2026-06-18
-# Last reused/audited: 2026-06-18
+# Last reused/audited: 2026-07-15
 # Authority basis: live redecision repair; non-actuating rotation output must not appear as live action.
-import json
 import sqlite3
 from datetime import datetime, timezone
 from types import SimpleNamespace
@@ -45,24 +44,13 @@ def _create_main_schema(conn: sqlite3.Connection) -> None:
             last_monitor_prob_is_fresh INTEGER,
             last_monitor_market_price REAL,
             last_monitor_market_price_is_fresh INTEGER,
+            last_monitor_best_bid REAL,
             token_id TEXT,
             no_token_id TEXT,
             condition_id TEXT
         )
         """
     )
-    conn.execute(
-        """
-        CREATE TABLE position_events (
-            position_id TEXT,
-            event_type TEXT,
-            occurred_at TEXT,
-            payload_json TEXT
-        )
-        """
-    )
-
-
 def _create_world_schema(conn: sqlite3.Connection) -> None:
     conn.execute(
         """
@@ -99,17 +87,10 @@ def test_portfolio_rotation_evaluation_status_reports_positive_value_without_act
         INSERT INTO position_current VALUES (
             'pos-1', 'trade-1', 'active', 'Seoul', '2026-06-08', 'high',
             'Will the highest temperature in Seoul be 25°C on June 8?',
-            'buy_no', 10.0, 0.80, 1, 0.79, 1, 'held-yes-token', 'held-no-token', 'held-condition'
+            'buy_no', 10.0, 0.80, 1, 0.79, 1, 0.79,
+            'held-yes-token', 'held-no-token', 'held-condition'
         )
         """
-    )
-    conn.execute(
-        """
-        INSERT INTO position_events VALUES (
-            'pos-1', 'MONITOR_REFRESHED', '2026-06-07T06:20:00+00:00', ?
-        )
-        """,
-        (json.dumps({"last_monitor_best_bid": 0.79}),),
     )
     conn.execute(
         """
@@ -149,17 +130,10 @@ def test_portfolio_rotation_counts_monitor_owned_positive_candidate(tmp_path) ->
         INSERT INTO position_current VALUES (
             'pos-1', 'trade-1', 'active', 'Shanghai', '2026-06-25', 'high',
             'Will the highest temperature in Shanghai be 31°C on June 25?',
-            'buy_no', 5.6, 0.20, 1, 0.22, 1, 'held-yes-token', 'held-no-token', 'held-condition'
+            'buy_no', 5.6, 0.20, 1, 0.22, 1, 0.22,
+            'held-yes-token', 'held-no-token', 'held-condition'
         )
         """
-    )
-    conn.execute(
-        """
-        INSERT INTO position_events VALUES (
-            'pos-1', 'MONITOR_REFRESHED', '2026-06-07T06:20:00+00:00', ?
-        )
-        """,
-        (json.dumps({"last_monitor_best_bid": 0.22}),),
     )
     conn.execute(
         """
@@ -200,17 +174,10 @@ def test_portfolio_rotation_evaluation_status_holds_without_positive_candidate(t
         INSERT INTO position_current VALUES (
             'pos-1', 'trade-1', 'active', 'Seoul', '2026-06-08', 'high',
             'Will the highest temperature in Seoul be 25°C on June 8?',
-            'buy_no', 10.0, 0.80, 1, 0.79, 1, 'held-yes-token', 'held-no-token', 'held-condition'
+            'buy_no', 10.0, 0.80, 1, 0.79, 1, 0.79,
+            'held-yes-token', 'held-no-token', 'held-condition'
         )
         """
-    )
-    conn.execute(
-        """
-        INSERT INTO position_events VALUES (
-            'pos-1', 'MONITOR_REFRESHED', '2026-06-07T06:20:00+00:00', ?
-        )
-        """,
-        (json.dumps({"last_monitor_best_bid": 0.79}),),
     )
     summary: dict = {}
 

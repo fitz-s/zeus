@@ -1,5 +1,5 @@
 # Created: 2026-05-04
-# Last reused/audited: 2026-06-13
+# Last reused/audited: 2026-07-15
 # Authority basis: IOC forward-port (Fix C: allowed_discovery_modes_inverse) — 2026-05-23
 """Heavy runtime helpers extracted from cycle_runner.
 
@@ -5885,36 +5885,7 @@ def _parse_utc_or_none(value) -> datetime | None:
     return parsed.astimezone(timezone.utc)
 
 
-def _latest_monitor_best_bid_by_position(conn) -> dict[str, float]:
-    if conn is None or not _table_exists_in_schema(conn, "main", "position_events"):
-        return {}
-    out: dict[str, float] = {}
-    try:
-        rows = conn.execute(
-            """
-            SELECT position_id, payload_json
-              FROM position_events
-             WHERE event_type = 'MONITOR_REFRESHED'
-             ORDER BY occurred_at DESC, rowid DESC
-            """
-        ).fetchall()
-    except Exception:
-        return {}
-    for row in rows:
-        position_id = str(_row_get(row, "position_id", "") or "").strip()
-        if not position_id or position_id in out:
-            continue
-        try:
-            payload = json.loads(str(_row_get(row, "payload_json", "") or "{}"))
-        except (TypeError, ValueError):
-            continue
-        bid = _finite_probability_or_none(payload.get("last_monitor_best_bid"))
-        if bid is not None:
-            out[position_id] = bid
-    return out
-
-
-def _rotation_held_positions(conn, *, best_bids: dict[str, float]) -> tuple[list, list[str]]:
+def _rotation_held_positions(conn) -> tuple[list, list[str]]:
     from src.strategy.portfolio_rotation import RotationHold
 
     if conn is None or not _table_exists_in_schema(conn, "main", "position_current"):
@@ -5931,6 +5902,7 @@ def _rotation_held_positions(conn, *, best_bids: dict[str, float]) -> tuple[list
         "last_monitor_prob",
         "last_monitor_prob_is_fresh",
         "last_monitor_market_price_is_fresh",
+        "last_monitor_best_bid",
     }
     missing_required = sorted(required - columns)
     if missing_required:
@@ -5949,6 +5921,7 @@ def _rotation_held_positions(conn, *, best_bids: dict[str, float]) -> tuple[list
             "last_monitor_prob",
             "last_monitor_prob_is_fresh",
             "last_monitor_market_price_is_fresh",
+            "last_monitor_best_bid",
             _select_expr(columns, "token_id", "token_id"),
             _select_expr(columns, "no_token_id", "no_token_id"),
             _select_expr(columns, "condition_id", "condition_id"),
@@ -5980,7 +5953,7 @@ def _rotation_held_positions(conn, *, best_bids: dict[str, float]) -> tuple[list
         if int(_row_get(row, "last_monitor_market_price_is_fresh", 0) or 0) != 1:
             missing.append(f"{position_id}:held_market_price_not_fresh")
             continue
-        best_bid = best_bids.get(position_id)
+        best_bid = _finite_probability_or_none(_row_get(row, "last_monitor_best_bid"))
         if shares is None or held_prob is None or best_bid is None:
             missing.append(f"{position_id}:held_rotation_value_inputs_incomplete")
             continue
@@ -6143,8 +6116,7 @@ def _emit_portfolio_rotation_evaluation_status(conn, summary: dict, *, deps) -> 
         decision_time = decision_time.replace(tzinfo=timezone.utc)
     decision_time = decision_time.astimezone(timezone.utc)
 
-    best_bids = _latest_monitor_best_bid_by_position(conn)
-    holds, hold_missing = _rotation_held_positions(conn, best_bids=best_bids)
+    holds, hold_missing = _rotation_held_positions(conn)
     candidates, candidate_missing = _rotation_candidates(conn, decision_time=decision_time)
     summary["portfolio_rotation_held_positions_evaluated"] = len(holds)
     summary["portfolio_rotation_candidates_evaluated"] = len(candidates)
