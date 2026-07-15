@@ -381,11 +381,13 @@ class TestSourceDiscipline:
         assert effective == pytest.approx(23.0)
         assert source == "durable_observation_instants"
 
-    def test_final_day_durable_exact_bin_marks_buy_no_structural_loss(self, monkeypatch):
-        """Manila regression: after local day completion, final high=32 means
-        32C YES won and a held 32C NO is structurally dead. Intraday containment
-        remains estimator territory; this only fires with durable end-of-day
-        WU coverage."""
+    def test_hourly_rows_never_finalize_a_finite_bin(self, monkeypatch):
+        """Paris regression: an hourly WU series can miss the settlement high.
+
+        Reaching local hour 23 proves coverage cadence, not the all-times daily
+        maximum. A finite bin containing the sampled extreme therefore remains
+        non-absorbing until the venue/source publishes the actual resolution.
+        """
         _set_metar_memo(monkeypatch, None)
         conn = self._observation_instants_conn()
         for local_ts, utc_ts, high, low in [
@@ -422,14 +424,7 @@ class TestSourceDiscipline:
             now=datetime(2026, 6, 30, 3, 40, tzinfo=UTC),
             world_conn=conn,
         )
-        assert verdict is not None
-        assert verdict.action == "EXIT_DEAD_BIN"
-        assert verdict.rounded_extreme == pytest.approx(32.0)
-        assert verdict.source == "durable_observation_instants"
-        belief = hard_fact_monitor_belief(verdict=verdict, direction="buy_no")
-        assert belief is not None
-        assert belief.yes_prob == pytest.approx(1.0)
-        assert belief.held_side_prob == pytest.approx(0.0)
+        assert verdict is None
 
     def test_final_day_exact_bin_does_not_fire_before_local_day_complete(self, monkeypatch):
         _set_metar_memo(monkeypatch, None)

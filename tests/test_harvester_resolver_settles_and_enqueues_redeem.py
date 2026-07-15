@@ -206,3 +206,60 @@ def test_resolver_settles_position_and_enqueues_redeem_intent(
         f"expected a REDEEM_INTENT_CREATED row; got states "
         f"{[r['state'] for r in rows]!r}"
     )
+
+
+def test_exact_venue_resolution_is_economic_truth_when_hourly_obs_disagrees(monkeypatch):
+    """Paris Jul-14 regression: Gamma resolved 35C YES while hourly WU peaked at 34C.
+
+    The observation disagreement must remain excluded from calibration, but it
+    cannot keep an economically lost NO position open or mark it as a win.
+    """
+    from src.execution import harvester_pnl_resolver as resolver
+
+    position = MagicMock()
+    position.city = "Paris"
+    position.target_date = "2026-07-14"
+    position.temperature_metric = "high"
+    position.condition_id = (
+        "0x1c62cc01e6c524b2d16efe080c8c3153a9fb0b13ee0e0133d4e4f5d42dc6bcad"
+    )
+    portfolio = MagicMock(positions=[position])
+
+    conn = MagicMock()
+    conn.execute.return_value.fetchall.return_value = [(
+        position.condition_id,
+        "highest-temperature-in-paris-on-july-14-2026",
+    )]
+    response = MagicMock()
+    response.raise_for_status.return_value = None
+    response.json.return_value = [{
+        "slug": "highest-temperature-in-paris-on-july-14-2026",
+        "title": "Highest temperature in Paris on July 14?",
+        "closed": True,
+        "markets": [{
+            "conditionId": position.condition_id,
+            "question": "Will the highest temperature in Paris be 35°C on July 14?",
+            "outcomes": '["Yes", "No"]',
+            "outcomePrices": '["1", "0"]',
+            "clobTokenIds": '["yes-token", "no-token"]',
+            "umaResolutionStatus": "resolved",
+        }],
+    }]
+    monkeypatch.setattr("httpx.get", lambda *args, **kwargs: response)
+
+    rows = resolver._read_venue_resolved_settlement_rows(
+        conn,
+        portfolio,
+        {("Paris", "2026-07-14", "high")},
+    )
+
+    assert rows == [{
+        "city": "Paris",
+        "target_date": "2026-07-14",
+        "market_slug": "highest-temperature-in-paris-on-july-14-2026",
+        "winning_bin": "35°C",
+        "temperature_metric": "high",
+        "authority": "VENUE_RESOLVED",
+        "settlement_source": "polymarket_gamma",
+        "settlement_value": None,
+    }]

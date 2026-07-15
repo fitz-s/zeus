@@ -1345,7 +1345,7 @@ def _supplement_held_position_settlement_events(
     """
     condition_ids = sorted({
         str(getattr(pos, "condition_id", "") or "")
-        for pos in portfolio.positions
+        for pos in getattr(portfolio, "positions", []) or []
         if str(getattr(pos, "condition_id", "") or "")
     })
     if not condition_ids:

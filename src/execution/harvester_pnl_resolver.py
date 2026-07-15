@@ -3,13 +3,15 @@
 # W2 (2026-06-03): repointed from forecasts.settlements → forecasts.settlement_outcomes.
 """Trading-side P&L resolver (Phase 1.5 harvester split).
 
-Reads forecasts.settlement_outcomes via get_forecasts_connection() (read-only).
+Reads forecasts.settlement_outcomes and exact Gamma resolutions for held events.
 Writes trade.decision_log via store_settlement_records() and settles positions
-via _settle_positions() — both are trading-side operations.
+via _settle_positions() — both are trading-side operations. Gamma resolution is
+economic payout truth only; it never writes or grades forecast observations.
 
 Design invariants:
 - Does NOT write to settlements, settlement_outcomes, market_events, or any forecast table.
-- If forecasts.settlement_outcomes has no new rows, returns awaiting_truth_writer status.
+- If neither forecast truth nor an exact held-event payout is resolved, returns
+  awaiting_truth_writer status.
 - Feature-flagged: ZEUS_HARVESTER_LIVE_ENABLED must equal "1" or function is a no-op.
 - May import from src.execution.harvester (trading side, no circular reference).
 - Does NOT import from src.ingest_main or scripts.ingest.*.
@@ -107,6 +109,140 @@ def _read_verified_settlement_rows(forecasts_conn, keys: set[tuple[str, str, str
     return rows
 
 
+def _read_venue_resolved_settlement_rows(trade_conn, portfolio, keys):
+    """Resolve exact held events for economic P&L without grading observations.
+
+    Venue payout and physical-observation quality are separate facts. A missing
+    or disputed hourly observation must stay out of calibration, but it cannot
+    keep a position open after Gamma publishes an unambiguous binary payout.
+    """
+    if not keys:
+        return []
+
+    positions = [
+        pos
+        for pos in getattr(portfolio, "positions", []) or []
+        if (
+            str(getattr(pos, "city", "") or "").strip(),
+            str(getattr(pos, "target_date", "") or "").strip(),
+            str(getattr(pos, "temperature_metric", "") or "high").strip().lower(),
+        ) in keys
+        and str(getattr(pos, "condition_id", "") or "").strip()
+    ]
+    condition_ids = {
+        str(getattr(pos, "condition_id", "") or "").strip() for pos in positions
+    }
+    if not condition_ids:
+        return []
+
+    placeholders = ",".join("?" for _ in condition_ids)
+    try:
+        snapshot_rows = trade_conn.execute(
+            f"""
+            SELECT condition_id, event_slug
+            FROM executable_market_snapshots
+            WHERE condition_id IN ({placeholders})
+              AND event_slug IS NOT NULL
+              AND event_slug != ''
+            ORDER BY captured_at DESC
+            """,
+            sorted(condition_ids),
+        ).fetchall()
+    except Exception as exc:
+        logger.warning("venue settlement slug lookup failed: %s", exc)
+        return []
+
+    slugs_by_condition: dict[str, str] = {}
+    for row in snapshot_rows:
+        condition_id = str(_row_value(row, "condition_id", 0, "") or "")
+        slug = str(_row_value(row, "event_slug", 1, "") or "")
+        if condition_id and slug and condition_id not in slugs_by_condition:
+            slugs_by_condition[condition_id] = slug
+
+    from src.data.market_scanner import GAMMA_BASE, _match_city, infer_temperature_metric
+    from src.execution.harvester import (
+        _canonical_bin_label,
+        _extract_resolved_market_outcomes,
+        _extract_target_date,
+    )
+    import httpx
+
+    rows = []
+    seen_keys: set[tuple[str, str, str]] = set()
+    for slug in dict.fromkeys(slugs_by_condition.values()):
+        try:
+            response = httpx.get(
+                f"{GAMMA_BASE}/events",
+                params={"slug": slug},
+                timeout=15.0,
+            )
+            response.raise_for_status()
+            events = response.json()
+        except (httpx.HTTPError, ValueError, TypeError) as exc:
+            logger.warning("exact venue settlement fetch failed slug=%s: %s", slug, exc)
+            continue
+        if not isinstance(events, list):
+            continue
+        for event in events:
+            if (
+                not isinstance(event, dict)
+                or str(event.get("slug") or "") != slug
+                or event.get("closed") is not True
+            ):
+                continue
+            outcomes = _extract_resolved_market_outcomes(event)
+            winners = [outcome for outcome in outcomes if outcome.yes_won]
+            if len(winners) != 1:
+                continue
+            event_condition_ids = {outcome.condition_id for outcome in outcomes}
+            held_event_ids = {
+                condition_id
+                for condition_id, event_slug in slugs_by_condition.items()
+                if event_slug == slug
+            }
+            if not held_event_ids.issubset(event_condition_ids):
+                continue
+
+            city = _match_city(
+                str(event.get("title") or "").lower(),
+                slug,
+            )
+            target_date = _extract_target_date(event)
+            if city is None or target_date is None:
+                continue
+            metric = infer_temperature_metric(
+                event.get("title", ""),
+                slug,
+                *[
+                    str(market.get("question") or market.get("groupItemTitle") or "")
+                    for market in event.get("markets", []) or []
+                ],
+            )
+            key = (city.name, target_date, metric)
+            if key not in keys or key in seen_keys:
+                continue
+            winner = winners[0]
+            winning_bin = _canonical_bin_label(
+                winner.range_low,
+                winner.range_high,
+                city.settlement_unit,
+            )
+            if winning_bin is None:
+                continue
+            rows.append({
+                "city": city.name,
+                "target_date": target_date,
+                "market_slug": slug,
+                "winning_bin": winning_bin,
+                "temperature_metric": metric,
+                "authority": "VENUE_RESOLVED",
+                "settlement_source": "polymarket_gamma",
+                "settlement_value": None,
+            })
+            seen_keys.add(key)
+    return rows
+
+
 def resolve_pnl_for_settled_markets(trade_conn, forecasts_conn) -> dict:
     """Resolve P&L for markets that have been settled in forecasts.settlements.
 
@@ -154,7 +290,7 @@ def resolve_pnl_for_settled_markets(trade_conn, forecasts_conn) -> dict:
     # Read settled rows from forecasts.settlement_outcomes (VERIFIED authority only).
     # W2 (2026-06-03): repointed from legacy settlements table to canonical settlement_outcomes.
     try:
-        rows = _read_verified_settlement_rows(forecasts_conn, settlement_keys)
+        verified_rows = _read_verified_settlement_rows(forecasts_conn, settlement_keys)
     except Exception as exc:
         logger.warning("harvester_pnl_resolver: settlement_outcomes read failed: %s", exc)
         return {
@@ -164,6 +300,21 @@ def resolve_pnl_for_settled_markets(trade_conn, forecasts_conn) -> dict:
             "decision_log_rows_written": 0,
             "errors": 1,
         }
+
+    verified_keys = {
+        (
+            str(_row_value(row, "city", 0, "") or ""),
+            str(_row_value(row, "target_date", 1, "") or ""),
+            str(_row_value(row, "temperature_metric", 4, "") or ""),
+        )
+        for row in verified_rows
+    }
+    venue_rows = _read_venue_resolved_settlement_rows(
+        trade_conn,
+        portfolio,
+        settlement_keys - verified_keys,
+    )
+    rows = [*verified_rows, *venue_rows]
 
     if not rows:
         logger.debug(
@@ -197,7 +348,7 @@ def resolve_pnl_for_settled_markets(trade_conn, forecasts_conn) -> dict:
 
         if not city_name or not target_date or not winning_bin:
             continue
-        if authority != "VERIFIED":
+        if authority not in {"VERIFIED", "VENUE_RESOLVED"}:
             logger.warning(
                 "harvester_pnl_resolver: skipping non-VERIFIED settlement row for %s %s: %s",
                 city_name, target_date, authority,
@@ -214,7 +365,11 @@ def resolve_pnl_for_settled_markets(trade_conn, forecasts_conn) -> dict:
                 settlement_records=settlement_records,
                 strategy_tracker=tracker,
                 settlement_authority=authority,
-                settlement_truth_source="forecasts.settlement_outcomes",
+                settlement_truth_source=(
+                    "forecasts.settlement_outcomes"
+                    if authority == "VERIFIED"
+                    else "gamma_exact_held_event"
+                ),
                 settlement_market_slug=str(market_slug or ""),
                 settlement_temperature_metric=str(temperature_metric or ""),
                 settlement_source=str(settlement_source or ""),
@@ -271,5 +426,6 @@ def resolve_pnl_for_settled_markets(trade_conn, forecasts_conn) -> dict:
         "decision_log_rows_written": decision_log_rows_written,
         "errors": errors,
         "settlements_checked": len(rows),
+        "venue_resolutions_checked": len(venue_rows),
         "open_position_keys_checked": len(settlement_keys),
     }

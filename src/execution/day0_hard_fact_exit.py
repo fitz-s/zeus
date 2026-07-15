@@ -52,9 +52,8 @@ import logging
 import threading
 import time
 from dataclasses import dataclass
-from datetime import date, datetime, timezone
+from datetime import datetime, timezone
 from typing import Any, Optional
-from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 logger = logging.getLogger(__name__)
 
@@ -94,8 +93,6 @@ class DurableObservationExtremes:
     low: Optional[float]
     source: str
     row_count: int
-    max_local_hour: Optional[int]
-    max_local_timestamp: str
 
 
 def _normalize_direction(direction: Any) -> str:
@@ -365,9 +362,7 @@ def _durable_observation_instants_summary(
                 SELECT
                     MAX(CASE WHEN running_max IS NOT NULL THEN CAST(running_max AS REAL) END) AS high,
                     MIN(CASE WHEN running_min IS NOT NULL THEN CAST(running_min AS REAL) END) AS low,
-                    COUNT(*) AS n_rows,
-                    MAX(CAST(substr(local_timestamp, 12, 2) AS INTEGER)) AS max_local_hour,
-                    MAX(local_timestamp) AS max_local_timestamp
+                    COUNT(*) AS n_rows
                 FROM {table_ref}
                 WHERE city = ?
                   AND target_date = ?
@@ -388,29 +383,17 @@ def _durable_observation_instants_summary(
             n_rows = int(row["n_rows"] if hasattr(row, "keys") else row[2] or 0)
             high_raw = row["high"] if hasattr(row, "keys") else row[0]
             low_raw = row["low"] if hasattr(row, "keys") else row[1]
-            max_local_hour_raw = row["max_local_hour"] if hasattr(row, "keys") else row[3]
-            max_local_timestamp = str(
-                (row["max_local_timestamp"] if hasattr(row, "keys") else row[4]) or ""
-            )
         except (TypeError, KeyError, IndexError, ValueError):
             continue
         if n_rows <= 0 or (high_raw is None and low_raw is None):
             continue
         high = float(high_raw) if high_raw is not None else None
         low = float(low_raw) if low_raw is not None else None
-        try:
-            max_local_hour = (
-                int(max_local_hour_raw) if max_local_hour_raw is not None else None
-            )
-        except (TypeError, ValueError):
-            max_local_hour = None
         return DurableObservationExtremes(
             high=high,
             low=low,
             source="durable_observation_instants",
             row_count=n_rows,
-            max_local_hour=max_local_hour,
-            max_local_timestamp=max_local_timestamp,
         )
     return None
 
@@ -431,85 +414,6 @@ def _durable_observation_instants_extremes(
     if summary is None:
         return None, None, ""
     return summary.high, summary.low, summary.source
-
-
-def _parse_target_date(value: str) -> date | None:
-    try:
-        return date.fromisoformat(str(value))
-    except (TypeError, ValueError):
-        return None
-
-
-def _city_zoneinfo(city: Any) -> ZoneInfo | None:
-    timezone_name = str(getattr(city, "timezone", "") or "").strip()
-    if not timezone_name:
-        return None
-    try:
-        return ZoneInfo(timezone_name)
-    except ZoneInfoNotFoundError:
-        return None
-
-
-def _target_local_day_complete(*, city: Any, target_date: str, now: datetime) -> bool:
-    target = _parse_target_date(target_date)
-    tz = _city_zoneinfo(city)
-    if target is None or tz is None:
-        return False
-    moment = now
-    if moment.tzinfo is None:
-        moment = moment.replace(tzinfo=UTC)
-    local_now = moment.astimezone(tz)
-    return local_now.date() > target
-
-
-def _durable_summary_reaches_local_day_end(summary: DurableObservationExtremes) -> bool:
-    if summary.max_local_hour is not None:
-        return summary.max_local_hour >= 23
-    if not summary.max_local_timestamp:
-        return False
-    try:
-        parsed = datetime.fromisoformat(summary.max_local_timestamp)
-    except (TypeError, ValueError):
-        return False
-    return parsed.hour >= 23
-
-
-def _final_day_durable_verdict(
-    *,
-    metric: str,
-    direction: str,
-    bin_low: Optional[float],
-    bin_high: Optional[float],
-    durable_summary: DurableObservationExtremes | None,
-    city: Any,
-    target_date: str,
-    now: datetime,
-) -> Optional[HardFactVerdict]:
-    if durable_summary is None:
-        return None
-    if not _target_local_day_complete(city=city, target_date=target_date, now=now):
-        return None
-    if not _durable_summary_reaches_local_day_end(durable_summary):
-        return None
-    final_extreme = durable_summary.high if metric == "high" else durable_summary.low
-    if final_extreme is None:
-        return None
-    verdict = final_observed_bin_verdict(
-        metric=metric,
-        direction=direction,
-        bin_low=bin_low,
-        bin_high=bin_high,
-        final_extreme=float(final_extreme),
-    )
-    if verdict is None:
-        return None
-    return HardFactVerdict(
-        action=verdict.action,
-        reason=verdict.reason,
-        metric=verdict.metric,
-        rounded_extreme=verdict.rounded_extreme,
-        source=durable_summary.source,
-    )
 
 
 def settlement_grade_effective_extreme(
@@ -628,33 +532,6 @@ def evaluate_hard_fact_exit(
             now=moment,
             world_conn=world_conn,
         )
-        final_verdict = _final_day_durable_verdict(
-            metric=metric,
-            direction=direction,
-            bin_low=bin_low,
-            bin_high=bin_high,
-            durable_summary=durable_summary,
-            city=city,
-            target_date=target_date,
-            now=moment,
-        )
-        if final_verdict is not None:
-            log = logger.warning if final_verdict.action == "EXIT_DEAD_BIN" else logger.info
-            log(
-                "DAY0_HARD_FACT_%s trade=%s city=%s date=%s dir=%s bin=[%s,%s] "
-                "final_extreme=%s source=%s: %s",
-                final_verdict.action,
-                getattr(position, "trade_id", "?"),
-                city_name,
-                target_date,
-                direction,
-                bin_low,
-                bin_high,
-                final_verdict.rounded_extreme,
-                final_verdict.source,
-                final_verdict.reason,
-            )
-            return final_verdict
         durable_high = durable_summary.high if durable_summary is not None else None
         durable_low = durable_summary.low if durable_summary is not None else None
         durable_source = durable_summary.source if durable_summary is not None else ""
