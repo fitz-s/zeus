@@ -2191,7 +2191,7 @@ def test_live_adapter_routes_each_global_truth_to_its_owner(monkeypatch):
     monkeypatch.setattr(
         era,
         "_entry_global_submit_suppression_reason",
-        lambda: None,
+        lambda: "entries_paused:test_containment",
     )
     adapter = era.event_bound_live_adapter_from_trade_conn(
         trade,
@@ -2216,7 +2216,7 @@ def test_live_adapter_routes_each_global_truth_to_its_owner(monkeypatch):
     assert captured["world_conn"] is not topology
     assert captured["portfolio_state_provider"] is None
     assert captured["candidate_policy_rejection_resolver"] is None
-    assert captured["entry_candidates_enabled"] is True
+    assert "entry_candidates_enabled" not in captured
     prepared_receipt = captured["prepare_event"](
         event,
         _dt.datetime(2026, 7, 10, 8, 10, tzinfo=_dt.timezone.utc),
@@ -2265,58 +2265,6 @@ def test_live_adapter_routes_each_global_truth_to_its_owner(monkeypatch):
         {metadata_key: metadata},
         {metadata_key: metadata},
     ]
-
-
-def test_live_adapter_restricts_global_auction_when_entries_are_unavailable(
-    monkeypatch,
-):
-    trade = sqlite3.connect(":memory:")
-    forecast = sqlite3.connect(":memory:")
-    topology = sqlite3.connect(":memory:")
-    world = sqlite3.connect(":memory:")
-    captured = {}
-    denial = (
-        "RISK_ALLOCATOR_GLOBAL_ENTRY_UNAVAILABLE:"
-        "reason=reduce_only_mode_active:reduce_only=True:kill_switch_reason=None"
-    )
-
-    def fake_process(events, **kwargs):
-        captured.update(kwargs)
-        return SimpleNamespace(events=tuple(events))
-
-    monkeypatch.setattr(
-        global_batch_runtime,
-        "process_current_global_batch",
-        fake_process,
-    )
-    monkeypatch.setattr(
-        era,
-        "_entry_global_submit_suppression_reason",
-        lambda: denial,
-    )
-    adapter = era.event_bound_live_adapter_from_trade_conn(
-        trade,
-        get_current_level=lambda: era.RiskLevel.GREEN,
-        forecast_conn=forecast,
-        topology_conn=topology,
-        calibration_conn=world,
-    )
-    event = _global_scope_event(city="Dallas", source_run_id="run-dallas")
-
-    result = adapter.process_global_batch(
-        (event,),
-        _dt.datetime(2026, 7, 10, 8, 10, tzinfo=_dt.timezone.utc),
-    )
-
-    policy = captured["candidate_policy_rejection_resolver"]
-    assert result.events == (event,)
-    assert captured["entry_candidates_enabled"] is False
-    assert policy(SimpleNamespace(action="BUY")) == denial
-    assert policy(SimpleNamespace(action="SELL")) is None
-    trade.close()
-    forecast.close()
-    topology.close()
-    world.close()
 
 
 def test_global_curve_supersession_keeps_typed_current_candidate():
@@ -3014,46 +2962,6 @@ def test_global_scope_refuses_a_held_family_without_probability_carrier(
             ),
             held_families=(("Held", "2026-07-08", "high"),),
         )
-
-
-def test_global_scope_without_entry_capacity_reads_only_held_families(
-    monkeypatch,
-):
-    held_event = _global_scope_event(city="Held", source_run_id="run-held")
-    unheld_event = _global_scope_event(city="Unheld", source_run_id="run-unheld")
-
-    class CurrentTrigger:
-        def __init__(self, *_args, **_kwargs):
-            pass
-
-        def build_committed_snapshot_events(self, **_kwargs):
-            return held_event, unheld_event
-
-    monkeypatch.setattr(universe, "ForecastSnapshotReadyTrigger", CurrentTrigger)
-    monkeypatch.setattr(universe, "EventWriter", lambda _conn: object())
-    monkeypatch.setattr(
-        universe,
-        "executable_forecast_live_eligible_reader",
-        lambda _conn: lambda *_args, **_kwargs: True,
-    )
-    monkeypatch.setattr(
-        universe,
-        "_current_day0_events",
-        lambda *_args, **_kwargs: (),
-    )
-
-    scope = universe.scan_current_global_auction_scope(
-        world_conn=object(),
-        forecasts_conn=object(),
-        decision_at_utc=_dt.datetime(
-            2026, 7, 10, 12, 0, tzinfo=_dt.timezone.utc
-        ),
-        held_families=(("Held", "2026-07-11", "high"),),
-        include_entry_families=False,
-    )
-
-    assert len(scope.events_by_family) == 1
-    assert json.loads(scope.events_by_family[0][1].payload_json)["city"] == "Held"
 
 
 @pytest.fixture(autouse=True)

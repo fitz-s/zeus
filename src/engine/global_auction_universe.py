@@ -1413,7 +1413,6 @@ def _current_day0_events(
     *,
     decision_at_utc: datetime,
     held_families: Sequence[tuple[str, str, str]] = (),
-    include_entry_families: bool = True,
 ) -> tuple[OpportunityEvent, ...]:
     if not _table_exists(world_conn, "opportunity_events"):
         return ()
@@ -1491,12 +1490,9 @@ def _current_day0_events(
         )
         if (
             family not in held
-            and (
-                not include_entry_families
-                or not _day0_event_is_current_for_entry(
-                    payload,
-                    decision_at_utc=decision_at_utc,
-                )
+            and not _day0_event_is_current_for_entry(
+                payload,
+                decision_at_utc=decision_at_utc,
             )
         ):
             continue
@@ -1543,9 +1539,8 @@ def scan_current_global_auction_scope(
     forecasts_conn: sqlite3.Connection,
     decision_at_utc: datetime,
     held_families: Sequence[tuple[str, str, str]] = (),
-    include_entry_families: bool = True,
 ) -> CurrentGlobalAuctionScope:
-    """Read feasible entry families plus every held-family probability obligation."""
+    """Read every current family and every held-family probability obligation."""
 
     if decision_at_utc.tzinfo is None:
         raise ValueError("decision_at_utc must be timezone-aware")
@@ -1574,18 +1569,12 @@ def scan_current_global_auction_scope(
         limit=None,
         source="global-auction-current-scope",
     )
-    if not include_entry_families:
-        held_set = frozenset(held)
-        forecast_events = tuple(
-            event for event in forecast_events if _event_family(event) in held_set
-        )
     events = current_global_scope_events_with_day0(
         forecast_events,
         _current_day0_events(
             world_conn,
             decision_at_utc=decision_at_utc,
             held_families=held,
-            include_entry_families=include_entry_families,
         ),
     )
     covered = {_event_family(event) for event in events}
