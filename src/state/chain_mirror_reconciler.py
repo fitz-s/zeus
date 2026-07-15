@@ -31,12 +31,12 @@ No network I/O and no venue mutation happens in this module. The CLI wrapper
 consumes already-fetched chain facts.
 
 P0b (2026-07-04, docs/rebuild/chain_mirror_state_model_2026-07-04.md §5
-follow-up): the REVIEW_OPEN_ABSENT class (open-phase/quarantined row, held
-token absent, market unresolved) now escalates to a new CLOSED_EXITED
-classification (folds to VOIDED, chain_state="closed_exited") once the SAME
-absence has been observed on two consecutive mirror runs with zero open
-orders in flight — a single absent read stays a REVIEW finding (data-api lag
-is real; the Manila ce105753-e91 case must never auto-close on one read).
+follow-up): the REVIEW_OPEN_ABSENT class (open-phase row, held token absent,
+market unresolved) escalates to CLOSED_EXITED only for a fill-unproven local
+projection after the SAME absence appears on two consecutive mirror runs with
+zero open orders. A confirmed fill remains open for review until exit,
+redemption, transfer, or settlement evidence explains the disappearance;
+Data API omission alone cannot erase real economic exposure.
 The "has this been seen before" signal is a lightweight, append-only
 REVIEW_REQUIRED marker event (phase_after == phase_before, no lifecycle
 mutation) — see _has_prior_review_open_absent_marker.
@@ -60,10 +60,10 @@ SIZE_CORRECTED = "size_corrected"
 REDEEMABLE = "redeemable"
 REVIEW_OPEN_ABSENT = "review_open_absent"
 # P0b (2026-07-04): force-resolve classification for an _OPEN_LIKE_PHASES row
-# whose held token has been absent across two consecutive mirror runs (market
-# still unresolved, zero open orders in flight). Folds to VOIDED — the only
-# lifecycle target legal from every _OPEN_LIKE_PHASES origin, including
-# QUARANTINED post-P0c — with chain_state="closed_exited" recording why.
+# whose fill-unproven held token has been absent across two consecutive mirror
+# runs (market still unresolved, zero open orders in flight). Folds to VOIDED
+# with chain_state="closed_exited" recording why. A confirmed entry fill is a
+# separate economic fact and never enters this administrative phantom path.
 # Registered in architecture/money_path_objects.yaml::chain_mirror_reconciliation_classification.
 CLOSED_EXITED = "closed_exited"
 MISSING_LOCAL_ROW = "missing_local_row"
@@ -248,6 +248,7 @@ def classify_local_position(
     *,
     prior_review_open_absent: bool = False,
     has_open_orders: bool = False,
+    has_confirmed_entry_fill: bool = False,
 ) -> MirrorFinding:
     """Classify a single local position_current row against chain truth. Pure.
 
@@ -267,13 +268,18 @@ def classify_local_position(
         # Held token absent from the chain snapshot.
         if not market_resolved:
             if row.phase in _OPEN_LIKE_PHASES:
-                # P0b: escalate to a force-close ONLY once the SAME absence has
-                # been seen on a prior mirror run with nothing open in flight.
+                # P0b: escalate a fill-unproven projection ONLY once the SAME
+                # absence has been seen on a prior mirror run with nothing open
+                # in flight. A confirmed fill needs economic-close evidence.
                 # A single absent read stays a REVIEW finding — the operator's
-                # explicit instruction for the Manila ce105753-e91 case: a
-                # single read is ambiguous (data-api lag), two independent
-                # reads ~10min apart are not.
-                if prior_review_open_absent and not has_open_orders:
+                # explicit instruction for the Manila ce105753-e91 case: one
+                # read is ambiguous; two reads only prove projection absence,
+                # never what happened to a confirmed economic holding.
+                if (
+                    prior_review_open_absent
+                    and not has_open_orders
+                    and not has_confirmed_entry_fill
+                ):
                     return MirrorFinding(
                         classification=CLOSED_EXITED,
                         position_id=row.position_id,
@@ -304,7 +310,11 @@ def classify_local_position(
                     # a "repair", so it is dispatched independently of `writes`.
                     writes=False,
                     details={
-                        "reason": "held_token_absent_market_not_resolved",
+                        "reason": (
+                            "confirmed_entry_fill_token_absent_market_not_resolved"
+                            if has_confirmed_entry_fill
+                            else "held_token_absent_market_not_resolved"
+                        ),
                         "phase": row.phase,
                         "chain_state": row.chain_state,
                         "city": row.city,
@@ -655,6 +665,54 @@ def has_confirmed_exit_fill_for_position(conn: sqlite3.Connection, position_id: 
                            AND CAST(COALESCE(ofact.matched_size, '0') AS REAL) > 0
                          LIMIT 1
                     )
+               )
+             LIMIT 1
+            """,
+            (position_id,),
+        ).fetchone()
+    except sqlite3.OperationalError:
+        return False
+    return row is not None
+
+
+def has_confirmed_entry_fill_for_position(conn: sqlite3.Connection, position_id: str) -> bool:
+    """True iff canonical or venue facts prove this position was actually bought.
+
+    Data API absence cannot turn a confirmed economic holding into a local
+    hallucination. It may mean an external sale, redemption, transfer, or venue
+    enumeration lag; those outcomes require their own evidence before lifecycle
+    closure.
+    """
+
+    if not position_id:
+        return False
+    try:
+        row = conn.execute(
+            """
+            SELECT 1
+              FROM position_events pe
+             WHERE pe.position_id = ?
+               AND pe.event_type = 'ENTRY_ORDER_FILLED'
+             LIMIT 1
+            """,
+            (position_id,),
+        ).fetchone()
+        if row is not None:
+            return True
+        row = conn.execute(
+            """
+            SELECT 1
+              FROM venue_commands cmd
+             WHERE cmd.position_id = ?
+               AND UPPER(COALESCE(cmd.intent_kind, '')) = 'ENTRY'
+               AND UPPER(COALESCE(cmd.side, '')) = 'BUY'
+               AND EXISTS (
+                    SELECT 1
+                      FROM venue_trade_facts tf
+                     WHERE tf.command_id = cmd.command_id
+                       AND tf.state IN ('MATCHED', 'MINED', 'CONFIRMED')
+                       AND CAST(COALESCE(tf.filled_size, '0') AS REAL) > 0
+                     LIMIT 1
                )
              LIMIT 1
             """,
@@ -1147,11 +1205,15 @@ def reconcile(
             # checks first; avoids a wasted query on the common matched/closed path.
             prior_review_open_absent = False
             has_open_orders = False
+            has_confirmed_entry_fill = False
             if row.phase in _OPEN_LIKE_PHASES:
                 prior_review_open_absent = _has_prior_review_open_absent_marker(
                     conn_trades, row.position_id
                 )
                 if not held or held not in chain_by_asset:
+                    has_confirmed_entry_fill = has_confirmed_entry_fill_for_position(
+                        conn_trades, row.position_id
+                    )
                     if row.phase == "pending_entry" and has_open_entry_order_without_fill(
                         conn_trades, row.position_id
                     ):
@@ -1194,6 +1256,7 @@ def reconcile(
                 settlement_by_key,
                 prior_review_open_absent=prior_review_open_absent,
                 has_open_orders=has_open_orders,
+                has_confirmed_entry_fill=has_confirmed_entry_fill,
             )
             report.findings.append(finding)
             if apply:

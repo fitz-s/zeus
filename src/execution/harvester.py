@@ -1341,7 +1341,10 @@ def _supplement_held_position_settlement_events(
     have no stable secondary cursor, so a held event can move across a page boundary
     during the scan even when every page is fetched. The executable snapshot already
     records the exact event slug used for each held condition; query those slugs
-    directly and merge only venue-closed events into this cycle.
+    directly. Gamma can leave the parent event open after its child markets have
+    resolved, so admit either a closed parent or an event with exactly one typed,
+    resolved YES-winning child. The normal settlement truth gate still validates the
+    complete child vector and source-correct observation before any write.
     """
     condition_ids = sorted({
         str(getattr(pos, "condition_id", "") or "")
@@ -1407,7 +1410,13 @@ def _supplement_held_position_settlement_events(
         for event in matches:
             if not isinstance(event, dict):
                 continue
-            if str(event.get("slug") or "") != slug or event.get("closed") is not True:
+            resolved_winners = [
+                outcome
+                for outcome in _extract_resolved_market_outcomes(event)
+                if outcome.yes_won
+            ]
+            settlement_ready = event.get("closed") is True or len(resolved_winners) == 1
+            if str(event.get("slug") or "") != slug or not settlement_ready:
                 continue
             merged.append(event)
             existing_slugs.add(slug)

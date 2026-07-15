@@ -1,6 +1,6 @@
 # Created: 2026-05-11
-# Last reused or audited: 2026-07-13
-# Authority basis: current Gamma weather scope and 100-row server cap, verified 2026-07-13
+# Last reused or audited: 2026-07-15
+# Authority basis: current Gamma weather scope, child resolution, and 100-row server cap
 """Relationship tests — trading-side harvester paginator bound (D.1).
 
 Mirrors test_harvester_truth_writer_paginator.py for src/execution/harvester.py.
@@ -260,4 +260,57 @@ def test_held_position_event_is_fetched_by_exact_snapshot_slug():
         result = _supplement_held_position_settlement_events(portfolio, [])
 
     assert calls == [{"slug": "held-weather-event"}]
+    assert result == [held_event]
+
+
+def test_held_position_event_accepts_unique_resolved_child_when_parent_remains_open():
+    """A resolved held child is settlement truth even if Gamma lags parent closure."""
+    from src.execution.harvester import _supplement_held_position_settlement_events
+
+    conn = sqlite3.connect(":memory:")
+    conn.execute(
+        "CREATE TABLE executable_market_snapshots "
+        "(condition_id TEXT, event_slug TEXT, captured_at TEXT)"
+    )
+    conn.execute(
+        "INSERT INTO executable_market_snapshots VALUES (?, ?, ?)",
+        ("condition-held", "held-weather-event", "2026-07-15T15:00:00Z"),
+    )
+    portfolio = SimpleNamespace(
+        positions=[SimpleNamespace(condition_id="condition-held")]
+    )
+    held_event = {
+        "id": "event-held",
+        "slug": "held-weather-event",
+        "closed": False,
+        "title": "Highest temperature in Held City?",
+        "markets": [
+            {
+                "conditionId": "condition-held",
+                "question": "Will the highest temperature in Held City be 29°C?",
+                "umaResolutionStatus": "resolved",
+                "outcomes": '["Yes", "No"]',
+                "outcomePrices": '["0", "1"]',
+                "clobTokenIds": '["yes-token", "no-token"]',
+            },
+            {
+                "conditionId": "condition-winner",
+                "question": "Will the highest temperature in Held City be 30°C?",
+                "umaResolutionStatus": "resolved",
+                "outcomes": '["Yes", "No"]',
+                "outcomePrices": '["1", "0"]',
+                "clobTokenIds": '["winner-token", "winner-no-token"]',
+            },
+        ],
+    }
+
+    def fake_get(url, *, params, timeout):
+        return FakeResponse([held_event])
+
+    with patch(
+        "src.state.db.get_trade_connection_read_only",
+        return_value=conn,
+    ), patch("httpx.get", side_effect=fake_get):
+        result = _supplement_held_position_settlement_events(portfolio, [])
+
     assert result == [held_event]

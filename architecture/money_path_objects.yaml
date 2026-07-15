@@ -196,18 +196,17 @@ state_machines:
       — no position_events.event_type CHECK widening was needed for any of
       them). REVIEW_OPEN_ABSENT persists a phase-preserving REVIEW_REQUIRED
       marker event (P0b) as the bookkeeping half of the two-consecutive-
-      mirror-runs force-resolve threshold, but never itself changes
-      phase/chain_state. MISSING_LOCAL_ROW/FOREIGN/UNGRADEABLE/CONSISTENT
-      remain report-only findings and never appear in a persisted row.
-      CLOSED_EXITED (P0b) force-resolves an _OPEN_LIKE_PHASES row whose held
-      token has been absent across two consecutive mirror runs with market
-      unresolved and zero open orders — folds to VOIDED with
-      chain_state="closed_exited". QUARANTINED is retired from
+      mirror-runs threshold, but never itself changes phase/chain_state.
+      MISSING_LOCAL_ROW/FOREIGN/UNGRADEABLE/CONSISTENT remain report-only
+      findings and never appear in a persisted row. CLOSED_EXITED (P0b)
+      force-resolves only a fill-unproven _OPEN_LIKE_PHASES projection whose
+      held token has been absent across two consecutive mirror runs with the
+      market unresolved and zero open orders. A confirmed entry fill remains
+      in its true phase until exit, redemption, transfer, or settlement
+      evidence explains the absence; Data API omission alone cannot erase
+      economic exposure. QUARANTINED is retired from
       LifecyclePhase/LEGAL_LIFECYCLE_FOLDS entirely (T5, quarantine excision
-      2026-07-11) — no writer mints it and no fold-table key references it;
-      _OPEN_LIKE_PHASES still recognizes the legacy raw string "quarantined"
-      for pre-T5-schema-migration rows only
-      (docs/rebuild/quarantine_excision_2026-07-11.md item 5).
+      2026-07-11).
     states:
       - CLOSED_REDEEMED
       - CLOSED_WORTHLESS

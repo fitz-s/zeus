@@ -1,4 +1,4 @@
-# Lifecycle: created=2026-07-04; last_reviewed=2026-07-10; last_reused=2026-07-10
+# Lifecycle: created=2026-07-04; last_reviewed=2026-07-15; last_reused=2026-07-15
 # Purpose: Regression tests for the chain-mirror reconciler (design doc
 #   docs/rebuild/chain_mirror_state_model_2026-07-04.md).
 # Reuse: Run when position_current chain-mirror classification, the
@@ -536,9 +536,7 @@ def test_open_phase_absent_token_unresolved_market_first_run_marks_review_no_clo
 
 
 def test_open_phase_absent_token_second_consecutive_run_force_closes(trades_conn, forecasts_conn):
-    """Two independent absent reads ~10min apart (nothing in between) rule out
-    data-api lag — the second run force-resolves to CLOSED_EXITED (VOIDED,
-    chain_state='closed_exited') with dual-read provenance."""
+    """A projection with no fill proof may be voided after two absent reads."""
     _insert_position_current(
         trades_conn, position_id="pos-manila-2", phase="day0_window",
         city="manila", target_date="2026-07-04", bin_label="33°C",
@@ -571,6 +569,54 @@ def test_open_phase_absent_token_second_consecutive_run_force_closes(trades_conn
     assert events[1]["event_type"] == "ADMIN_VOIDED"
     assert events[1]["phase_before"] == "day0_window"
     assert events[1]["phase_after"] == "voided"
+
+
+def test_confirmed_fill_absence_never_force_voids_without_economic_close_proof(
+    trades_conn, forecasts_conn
+):
+    """A real fill stays open for review until exit, redeem, or settlement evidence."""
+    position_id = "pos-confirmed-fill-absent"
+    _insert_position_current(
+        trades_conn, position_id=position_id, phase="day0_window",
+        city="seoul", target_date="2026-07-15", bin_label="29°C",
+        direction="buy_no", no_token_id="tok-confirmed-no", chain_state="synced",
+        chain_shares=15.0, shares=15.0,
+    )
+    trades_conn.execute(
+        """
+        INSERT INTO position_events (
+            event_id, position_id, event_version, sequence_no, event_type,
+            occurred_at, phase_before, phase_after, strategy_key, source_module,
+            env, payload_json
+        ) VALUES (?, ?, 1, 1, 'ENTRY_ORDER_FILLED', ?, 'pending_entry',
+                  'day0_window', 'edli', 'test', 'live', '{}')
+        """,
+        (
+            f"{position_id}:entry-filled",
+            position_id,
+            "2026-07-15T06:02:00+00:00",
+        ),
+    )
+
+    first = reconcile(trades_conn, forecasts_conn, chain_by_asset={}, apply=True)
+    second = reconcile(trades_conn, forecasts_conn, chain_by_asset={}, apply=True)
+
+    assert any(f.classification == REVIEW_OPEN_ABSENT for f in first.findings)
+    assert any(f.classification == REVIEW_OPEN_ABSENT for f in second.findings)
+    assert not any(f.classification == CLOSED_EXITED for f in second.findings)
+    row = trades_conn.execute(
+        "SELECT phase, chain_state FROM position_current WHERE position_id = ?",
+        (position_id,),
+    ).fetchone()
+    assert (row["phase"], row["chain_state"]) == ("day0_window", "synced")
+    events = trades_conn.execute(
+        "SELECT event_type FROM position_events WHERE position_id = ? ORDER BY sequence_no",
+        (position_id,),
+    ).fetchall()
+    assert [event["event_type"] for event in events] == [
+        "ENTRY_ORDER_FILLED",
+        "REVIEW_REQUIRED",
+    ]
 
 
 def test_monitor_refresh_between_absent_reads_does_not_reset_chain_evidence(
