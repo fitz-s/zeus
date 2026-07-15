@@ -1,5 +1,5 @@
 # Created: 2026-03-30
-# Last reused/audited: 2026-07-08
+# Last reused/audited: 2026-07-15
 # Authority basis: docs/operations/task_2026-04-28_contamination_remediation/plan.md Batch D RiskGuard test-law remediation; Wave26 verification-noise helper alignment; PR90 current-env fallback review fix.
 #                  2026-05-17 live lock remediation: RiskGuard trade/world DB lock degrades to fresh DATA_DEGRADED rather than stale RED.
 # Lifecycle: created=2026-03-30; last_reviewed=2026-05-08; last_reused=2026-05-08
@@ -3882,8 +3882,62 @@ class TestStrategyPolicyResolver:
         assert details["settlement_canonical_payload_complete_count"] == 1
         assert details["settlement_metric_ready_count"] == 1
         assert details["settlement_quality_level"] == "YELLOW"
+        assert details["settlement_economic_ready_count"] == 1
         assert details["settlement_authority_levels"]["durable_event"] == 1
         assert details["settlement_authority_levels"]["durable_event_malformed"] == 1
+
+    def test_venue_payout_without_physical_value_does_not_freeze_entries(
+        self, monkeypatch, tmp_path
+    ):
+        zeus_db = tmp_path / "zeus.db"
+        risk_db = tmp_path / "risk_state.db"
+
+        def _fake_get_connection(path=None, **_kwargs):
+            if path == riskguard_module.RISK_DB_PATH:
+                return get_connection(risk_db)
+            return get_connection(zeus_db)
+
+        _init_empty_canonical_portfolio_schema(zeus_db)
+        monkeypatch.setattr(riskguard_module, "get_connection", _fake_get_connection)
+        monkeypatch.setattr(
+            riskguard_module,
+            "load_portfolio",
+            lambda: PortfolioState(bankroll=211.37),
+        )
+        monkeypatch.setattr(
+            riskguard_module,
+            "query_authoritative_settlement_rows",
+            lambda conn, limit=50, **kwargs: [
+                {
+                    "p_posterior": 0.99,
+                    "outcome": 1,
+                    "pnl": 0.01,
+                    "source": "position_events",
+                    "authority_level": "durable_event",
+                    "is_degraded": True,
+                    "degraded_reason": "missing_payload_fields:settlement_value",
+                    "required_missing_fields": [],
+                    "learning_snapshot_ready": False,
+                    "canonical_payload_complete": False,
+                    "metric_ready": False,
+                    "probability_identity_ready": False,
+                }
+            ],
+        )
+
+        level = riskguard_module.tick()
+        row = get_connection(risk_db).execute(
+            "SELECT level, details_json FROM risk_state ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        details = json.loads(row["details_json"])
+
+        assert level == RiskLevel.GREEN
+        assert row["level"] == RiskLevel.GREEN.value
+        assert details["settlement_quality_level"] == "GREEN"
+        assert details["settlement_economic_ready_count"] == 1
+        assert details["settlement_contract_incomplete_count"] == 1
+        assert details["settlement_degraded_row_count"] == 0
+        assert details["settlement_metric_ready_count"] == 0
 
     def test_tick_fails_closed_when_only_malformed_settlement_rows_exist(self, monkeypatch, tmp_path):
         zeus_db = tmp_path / "zeus.db"
@@ -3923,6 +3977,7 @@ class TestStrategyPolicyResolver:
         assert level == RiskLevel.RED
         assert row["level"] == RiskLevel.RED.value
         assert details["settlement_quality_level"] == "RED"
+        assert details["settlement_economic_ready_count"] == 0
         assert details["settlement_metric_ready_count"] == 0
 
     # B050 relationship tests — policy resolver must survive duplicate rows.

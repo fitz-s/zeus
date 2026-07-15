@@ -2276,24 +2276,30 @@ def _tick_once() -> RiskLevel:
         )
         settlement_authority_levels: dict[str, int] = {}
         degraded_rows = 0
+        settlement_economic_ready_rows = []
+        settlement_contract_incomplete_count = 0
         learning_snapshot_ready_count = 0
         canonical_payload_complete_count = 0
         settlement_metric_ready_rows = []
         for row in settlement_rows:
             authority_level = str(row.get("authority_level", "unknown"))
             settlement_authority_levels[authority_level] = settlement_authority_levels.get(authority_level, 0) + 1
-            # Settlement QUALITY gates on settlement TRUTH, not learning-lineage
-            # completeness. A row whose canonical settlement payload is complete
-            # (outcome + value recorded) is truth-sound even if it carries a
-            # learning-attribution gap such as missing_decision_snapshot_id — that
-            # gap correctly excludes it from LEARNING (learning_snapshot_ready=False)
-            # but must NOT flip settlement_quality_level to YELLOW and block ALL new
-            # entries on the GREEN-only reactor gate. Operator directive 2026-06-08:
-            # only genuine settlement-TRUTH degradation (incomplete canonical payload)
-            # may gate trading; a single learning-lineage gap on one settled position
-            # (e.g. Warsaw 2026-06-07) is not a trade-blocking settlement defect.
-            if row.get("is_degraded", False) and not row.get("canonical_payload_complete", False):
+            # Economic payout truth and physical settlement truth are distinct.
+            # Gamma can prove which token paid without proving the exact observed
+            # temperature. That row is complete for P&L/risk, but remains excluded
+            # from physical calibration through metric_ready=False. Only a malformed
+            # economic row may actuate settlement_quality and freeze new entries.
+            required_missing = tuple(row.get("required_missing_fields") or ())
+            economic_ready = (
+                authority_level != "durable_event_malformed"
+                and not required_missing
+            )
+            if economic_ready:
+                settlement_economic_ready_rows.append(row)
+            else:
                 degraded_rows += 1
+            if not row.get("canonical_payload_complete", False):
+                settlement_contract_incomplete_count += 1
             if row.get("learning_snapshot_ready", False):
                 learning_snapshot_ready_count += 1
             if row.get("canonical_payload_complete", False):
@@ -2378,7 +2384,7 @@ def _tick_once() -> RiskLevel:
             ),
         }
         settlement_quality_level = RiskLevel.GREEN
-        if settlement_rows and not settlement_metric_ready_rows:
+        if settlement_rows and not settlement_economic_ready_rows:
             settlement_quality_level = RiskLevel.RED
         elif degraded_rows > 0:
             settlement_quality_level = RiskLevel.YELLOW
@@ -2804,6 +2810,8 @@ def _tick_once() -> RiskLevel:
                 "settlement_row_storage_sources": settlement_row_storage_sources,
                 "settlement_authority_levels": settlement_authority_levels,
                 "settlement_degraded_row_count": degraded_rows,
+                "settlement_economic_ready_count": len(settlement_economic_ready_rows),
+                "settlement_contract_incomplete_count": settlement_contract_incomplete_count,
                 "settlement_learning_snapshot_ready_count": learning_snapshot_ready_count,
                 "settlement_canonical_payload_complete_count": canonical_payload_complete_count,
                 "settlement_metric_ready_count": len(settlement_metric_ready_rows),
@@ -2936,6 +2944,7 @@ def _tick_once() -> RiskLevel:
         component_detail = {
             "brier": f"score={b_score:.4f} (n={len(p_forecasts)}, red>={thresholds['brier_red']})",
             "settlement_quality": (
+                f"economic_ready={len(settlement_economic_ready_rows)}/{len(settlement_rows)} "
                 f"metric_ready={len(settlement_metric_ready_rows)}/{len(settlement_rows)} "
                 f"brier_learning_ready={len(brier_metric_rows)}/{len(brier_candidate_rows)} "
                 f"q_identity_ready={probability_identity_ready_count}/{len(brier_candidate_rows)} "

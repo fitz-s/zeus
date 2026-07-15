@@ -31,7 +31,7 @@ RiskGuard's `tick()` computes current-state risk levels, then takes the max:
 | Input level | How computed |
 |-------------|-------------|
 | `brier_level` | `evaluate_brier(brier_score, thresholds)` on settlement rows |
-| `settlement_quality_level` | RED if settlement rows exist but none are metric-ready; YELLOW if any degraded rows |
+| `settlement_quality_level` | RED if settlement rows exist but none carry complete economic payout truth; YELLOW if any row is economically malformed. Venue-resolved payout rows without a physical settlement value remain excluded from calibration but do not block entries. |
 | `execution_quality_level` | YELLOW if fill rate < 0.3 with ≥10 observed entries |
 | `strategy_signal_level` | YELLOW if edge compression alerts or strategy tracker errors |
 | `collateral_identity_level` | RED for unresolved current collateral-identity mismatch |
