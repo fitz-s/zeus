@@ -1061,6 +1061,8 @@ class GlobalSingleOrderCandidateEvaluation:
     token_id: str
     action: Literal["BUY", "SELL"]
     status: Literal["REJECTED", "SCORED", "SELECTED"]
+    position_id: str | None = None
+    held_shares: Decimal = Decimal("0")
     rejection_reason: str | None = None
     shares: Decimal = Decimal("0")
     cost_usd: Decimal = Decimal("0")
@@ -1092,6 +1094,17 @@ class GlobalSingleOrderCandidateEvaluation:
             or self.action not in {"BUY", "SELL"}
         ):
             raise ValueError("global candidate evaluation identity is incomplete")
+        if self.action == "BUY" and (
+            self.position_id is not None or self.held_shares != 0
+        ):
+            raise ValueError("BUY evaluation cannot carry a held-position binding")
+        if self.action == "SELL" and (
+            not str(self.position_id or "").strip()
+            or not Decimal(self.held_shares).is_finite()
+            or Decimal(self.held_shares) <= 0
+            or Decimal(self.held_shares) % Decimal("0.01") != 0
+        ):
+            raise ValueError("SELL evaluation requires an exact held-position binding")
         if self.status == "REJECTED":
             if (
                 not str(self.rejection_reason or "").strip()
@@ -1138,8 +1151,11 @@ class GlobalSingleOrderCandidateEvaluation:
             self.current_token_shares != 0
             or self.full_kelly_target_shares != 0
             or self.fractional_kelly_target_shares != 0
+            or self.shares != self.held_shares
         ):
-            raise ValueError("SELL evaluation cannot carry a BUY target")
+            raise ValueError(
+                "SELL evaluation must close its bound holding without a BUY target"
+            )
 
 
 @dataclass(frozen=True)
@@ -1293,9 +1309,10 @@ def _global_candidate_evaluations(
     }
     evaluations: list[GlobalSingleOrderCandidateEvaluation] = []
     for candidate in candidates:
-        action: Literal["BUY", "SELL"] = (
-            "SELL" if isinstance(candidate, GlobalSingleOrderSellCandidate) else "BUY"
-        )
+        is_sell = isinstance(candidate, GlobalSingleOrderSellCandidate)
+        action: Literal["BUY", "SELL"] = "SELL" if is_sell else "BUY"
+        position_id = candidate.position_id if is_sell else None
+        held_shares = candidate.held_shares if is_sell else Decimal("0")
         score = scored_by_id.get(candidate.candidate_id)
         if score is None:
             reason = rejections.get(candidate.candidate_id) or default_rejection
@@ -1313,6 +1330,8 @@ def _global_candidate_evaluations(
                     token_id=candidate.token_id,
                     action=action,
                     status="REJECTED",
+                    position_id=position_id,
+                    held_shares=held_shares,
                     rejection_reason=reason,
                 )
             )
@@ -1331,6 +1350,8 @@ def _global_candidate_evaluations(
                     if candidate.candidate_id == winner_id
                     else "SCORED"
                 ),
+                position_id=position_id,
+                held_shares=held_shares,
                 shares=score.shares,
                 cost_usd=score.cost_usd,
                 cash_proceeds_usd=score.cash_proceeds_usd,

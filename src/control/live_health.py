@@ -4859,9 +4859,10 @@ def _latest_global_auction_candidate_counts(
             return invalid("COVERAGE_INCOMPLETE")
         if summary.get("candidate_condition_index_complete") is not True:
             return invalid("CONDITION_INDEX_INCOMPLETE")
-        if summary.get("candidate_evaluation_encoding") != (
-            "zlib+base64+canonical-json-v4"
-        ):
+        if summary.get("candidate_evaluation_encoding") not in {
+            "zlib+base64+canonical-json-v4",
+            "zlib+base64+canonical-json-v5",
+        }:
             return invalid("ENCODING")
         compressed = base64.b64decode(
             str(summary["candidate_evaluations_zlib_b64"]),

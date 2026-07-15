@@ -262,6 +262,7 @@ def _write_high_yes_edge_dbs(
     stale_quote: bool = False,
     entries_paused: bool = False,
     with_global_auction_candidate: bool = False,
+    global_auction_encoding: str = "zlib+base64+canonical-json-v4",
 ) -> None:
     now = datetime.now(timezone.utc)
     condition_id = "cond-high-yes-1"
@@ -349,9 +350,7 @@ def _write_high_yes_edge_dbs(
                     "candidate_condition_index_complete": True,
                     "candidate_evaluation_count": 1,
                     "buy_condition_membership_count": 1,
-                    "candidate_evaluation_encoding": (
-                        "zlib+base64+canonical-json-v4"
-                    ),
+                    "candidate_evaluation_encoding": global_auction_encoding,
                     "candidate_evaluations_sha256": hashlib.sha256(
                         evaluation_json
                     ).hexdigest(),
@@ -4078,12 +4077,24 @@ def test_high_yes_edge_accepts_canonical_global_entry_pause(
     assert surface["missing_fsr_high_yes_edge_count"] == 1
 
 
+@pytest.mark.parametrize(
+    "encoding",
+    (
+        "zlib+base64+canonical-json-v4",
+        "zlib+base64+canonical-json-v5",
+    ),
+)
 def test_high_yes_edge_accepts_current_global_auction_candidate(
     tmp_path: Path,
+    encoding: str,
 ) -> None:
     sd = tmp_path / "state"
     sd.mkdir()
-    _write_high_yes_edge_dbs(sd, with_global_auction_candidate=True)
+    _write_high_yes_edge_dbs(
+        sd,
+        with_global_auction_candidate=True,
+        global_auction_encoding=encoding,
+    )
 
     surface = live_health._high_yes_edge_missed_surface(
         sd,

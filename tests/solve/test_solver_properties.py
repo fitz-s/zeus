@@ -1,5 +1,5 @@
 # Created: 2026-07-03
-# Last reused/audited: 2026-07-14
+# Last reused/audited: 2026-07-15
 # Authority basis: W3 SOLVE design packet, global fractional-Kelly repair, and complete auction receipts
 """W3 SOLVE math-core acceptance — the property anchors (design packet §4, consult REV-2).
 
@@ -1046,6 +1046,8 @@ def test_global_single_order_sell_can_beat_positive_buy_and_cash():
     assert set(evaluations) == {buy.candidate_id, sell.candidate_id}
     assert decision.candidate_input_count == len(evaluations) == 2
     assert evaluations[sell.candidate_id].status == "SELECTED"
+    assert evaluations[sell.candidate_id].position_id == "position-sell-winner"
+    assert evaluations[sell.candidate_id].held_shares == Decimal("10")
     assert evaluations[buy.candidate_id].status == "SCORED"
     assert (
         evaluations[sell.candidate_id].robust_delta_log_wealth
@@ -1248,6 +1250,14 @@ def test_global_single_order_cash_beats_non_positive_buy_and_sell():
         sell.candidate_id: ("REJECTED", "NON_POSITIVE_ROBUST_OBJECTIVE"),
         buy.candidate_id: ("REJECTED", "NON_POSITIVE_ROBUST_OBJECTIVE"),
     }
+    evaluations = {
+        evaluation.candidate_id: evaluation
+        for evaluation in decision.candidate_evaluations
+    }
+    assert evaluations[sell.candidate_id].position_id == "position-bad-sell"
+    assert evaluations[sell.candidate_id].held_shares == Decimal("10")
+    assert evaluations[buy.candidate_id].position_id is None
+    assert evaluations[buy.candidate_id].held_shares == 0
 
 
 def test_global_single_order_sell_yes_no_label_mirror_is_exact():

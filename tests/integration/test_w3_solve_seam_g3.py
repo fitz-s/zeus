@@ -1,6 +1,7 @@
 # Created: 2026-07-03
-# Last reused/audited: 2026-07-14
-# Authority basis: W3 SOLVE design packet, global fractional-Kelly repair, and current Day0 global-cut routing
+# Last reused/audited: 2026-07-15
+# Authority basis: W3 SOLVE design packet, global fractional-Kelly repair,
+#                  current Day0 global-cut routing, and auditable SELL holding bindings
 """G3 harness for the W3 SOLVE promotion seam (qkernel_spine_bridge.py w3_solve_enabled flag).
 
 Proves the promotion flag is a SAFE, reversible, single-point cutover before any live enablement:
@@ -141,6 +142,8 @@ def test_global_auction_receipt_persists_complete_buy_sell_hold_cash_comparison(
             token_id="token-sell",
             action="SELL",
             status="REJECTED",
+            position_id="position-sell",
+            held_shares=Decimal("12.34"),
             rejection_reason="NON_POSITIVE_ROBUST_OBJECTIVE",
         ),
     )
@@ -205,7 +208,7 @@ def test_global_auction_receipt_persists_complete_buy_sell_hold_cash_comparison(
     artifact = json.loads(row["artifact_json"])
     summary = artifact["summary"]
     assert row["mode"] == "global_single_order_auction"
-    assert summary["schema_version"] == 7
+    assert summary["schema_version"] == 8
     assert summary["excluded_by_candidate"] == [
         {
             "action": "BUY",
@@ -245,7 +248,7 @@ def test_global_auction_receipt_persists_complete_buy_sell_hold_cash_comparison(
         summary["candidate_evaluations_sha256"]
     )
     assert summary["candidate_evaluation_encoding"] == (
-        "zlib+base64+canonical-json-v4"
+        "zlib+base64+canonical-json-v5"
     )
     candidate_evaluations = json.loads(evaluation_json)
     assert candidate_evaluations["rejected_groups"] == [
@@ -265,10 +268,18 @@ def test_global_auction_receipt_persists_complete_buy_sell_hold_cash_comparison(
             evaluation["action"],
             evaluation["status"],
             evaluation["rejection_reason"],
+            evaluation["position_id"],
+            evaluation["held_shares"],
         )
         for evaluation in candidate_evaluations["detailed"]
     ] == [
-        ("SELL", "REJECTED", "NON_POSITIVE_ROBUST_OBJECTIVE")
+        (
+            "SELL",
+            "REJECTED",
+            "NON_POSITIVE_ROBUST_OBJECTIVE",
+            "position-sell",
+            "12.34",
+        )
     ]
     assert len(summary["receipt_hash"]) == 64
     with pytest.raises(ValueError, match="GLOBAL_AUCTION_RECEIPT_SCOPE_INCOMPLETE"):
