@@ -1756,7 +1756,7 @@ files:
   src/engine/monitor_refresh.py:
     zone: K2_runtime
     authority_role: position_monitoring
-    why: Refreshes held position probabilities and exit signals using entry-parity math.
+    why: Refreshes held position probabilities and exit signals using entry-parity math; current token identity reads use the compact latest-snapshot mirror rather than scanning the high-frequency append log.
     downstream:
     - src/engine/cycle_runtime.py
   src/engine/process_lock.py:

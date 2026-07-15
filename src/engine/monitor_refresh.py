@@ -4050,7 +4050,7 @@ def _refresh_current_global_day0_probability(
     token_rows = trade_conn.execute(
         f"""
         SELECT condition_id, yes_token_id, no_token_id
-          FROM executable_market_snapshots
+          FROM executable_market_snapshot_latest
          WHERE condition_id IN ({placeholders})
            AND yes_token_id IS NOT NULL
            AND no_token_id IS NOT NULL

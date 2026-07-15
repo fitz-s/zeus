@@ -209,8 +209,10 @@ def test_day0_monitor_reads_exact_current_global_probability_witness(
         def __init__(self, row=None):
             self.row = row
             self.closed = False
+            self.queries = []
 
-        def execute(self, *_args, **_kwargs):
+        def execute(self, sql, *_args, **_kwargs):
+            self.queries.append(str(sql))
             return self
 
         def fetchone(self):
@@ -305,6 +307,8 @@ def test_day0_monitor_reads_exact_current_global_probability_witness(
     assert refreshed._day0_monitor_probability_receipt["probability_witness_identity"] == (
         "witness-current-global"
     )
+    assert any("FROM executable_market_snapshot_latest" in sql for sql in trade.queries)
+    assert all("FROM executable_market_snapshots" not in sql for sql in trade.queries)
     assert world.closed is True
     assert forecasts.closed is True
 
