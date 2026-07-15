@@ -1,5 +1,5 @@
 # Created: 2026-06-10
-# Last reused or audited: 2026-07-02
+# Last reused or audited: 2026-07-15
 # Authority basis: operator green-light 2026-06-10 item B (remaining-day
 #   pricing + persist-the-hourly-vector); day0 first-principles review §2.4
 #   (full-day-masked q DEVIATES: overprices excursion bins post-peak) and
@@ -12,10 +12,10 @@ Contracts:
        on (model, city, date, captured_at), retention prunes old rows, stale
        vectors (> max_age) are NOT served to the q path. When remaining-day
        mode is required by live Day0, unavailable vectors block the q seam.
-  R10. REMAINING-DAY SELECTION: hours of the open local target-day window
-       contribute; the just-elapsed hourly point may anchor its terminal
-       sub-hour for at most one hour. Wider gaps and ended days contribute
-       nothing.
+  R10. REMAINING-DAY SELECTION: target-day hours not yet covered by the latest
+       causal observation contribute; the just-elapsed hourly point may anchor
+       its terminal sub-hour for at most one hour. A decision after local
+       midnight keeps only an observation-uncovered tail, never the whole day.
   R11. POST-PEAK REPRICING: with all remaining-hours temps at/below the
        running max, the pooled members clamp to the floor — the floor bin
       gets ~all q mass and bins above get ~none (the exact category the
@@ -424,6 +424,27 @@ class TestRemainingDaySelection:
         now = datetime(2026, 6, 11, 1, 0, tzinfo=UTC)  # past the local day
         assert remaining_day_extremes_c([v], target_date="2026-06-10", now=now, metric="high") == []
 
+    def test_post_midnight_decision_keeps_observation_uncovered_terminal_tail(self):
+        v = Day0HourlyVector(
+            model="ecmwf_ifs",
+            city="Paris",
+            target_date="2026-06-10",
+            timezone_name="Europe/Paris",
+            captured_at="2026-06-10T21:41:00+00:00",
+            times=("2026-06-10T22:00", "2026-06-10T23:00"),
+            temps_c=(22.4, 22.1),
+        )
+        observation_time = datetime(2026, 6, 10, 21, 20, tzinfo=UTC)  # 23:20 local
+        decision_time = datetime(2026, 6, 10, 23, 15, tzinfo=UTC)  # 01:15 next day
+
+        assert remaining_day_extremes_c(
+            [v],
+            target_date="2026-06-10",
+            now=decision_time,
+            metric="high",
+            window_start=observation_time,
+        ) == [22.1]
+
     @pytest.mark.parametrize("metric", ["high", "low"])
     def test_terminal_subhour_uses_same_hour_grid_anchor(self, metric):
         v = Day0HourlyVector(
@@ -518,6 +539,42 @@ class TestRemainingDayMembers:
         # every member clamped UP to the running max (absorbing physical law)
         assert np.all(members == 25.0)
         assert payload["_edli_day0_remaining_models"] == 2
+
+    def test_members_use_observation_time_after_local_midnight(self, monkeypatch):
+        import src.engine.event_reactor_adapter as era
+
+        vector = Day0HourlyVector(
+            model="ecmwf_ifs",
+            city="Paris",
+            target_date="2026-06-10",
+            timezone_name="Europe/Paris",
+            captured_at="2026-06-10T21:41:00+00:00",
+            times=("2026-06-10T22:00", "2026-06-10T23:00"),
+            temps_c=(22.4, 22.1),
+        )
+        monkeypatch.setattr(era, "runtime_cities_by_name", lambda: {"Paris": _paris()})
+        monkeypatch.setattr(
+            "src.data.day0_hourly_vectors.read_freshest_day0_hourly_vectors",
+            lambda **kw: [vector],
+        )
+        payload = {
+            "metric": "high",
+            "rounded_value": 25.0,
+            "observation_time": "2026-06-10T21:20:00+00:00",
+        }
+
+        members = era._day0_remaining_day_members(
+            payload=payload,
+            family=self._family(),
+            unit="C",
+            decision_time=datetime(2026, 6, 10, 23, 15, tzinfo=UTC),
+        )
+
+        assert members is not None
+        assert members.tolist() == [25.0]
+        assert payload["_edli_day0_remaining_window_start_utc"] == (
+            "2026-06-10T21:20:00+00:00"
+        )
 
     def test_entry_point_q_keeps_unseen_peak_tail_for_nonfinal_post_peak(self, monkeypatch):
         import src.engine.event_reactor_adapter as era

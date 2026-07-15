@@ -28305,8 +28305,38 @@ def _day0_remaining_day_members(
                 payload["_edli_day0_remaining_expected_models"] = list(expected_models)
                 payload["_edli_day0_remaining_unavailable_reason"] = "incomplete_hourly_model_bundle"
             return None
+        window_start = decision_time
+        raw_observation_time = payload.get("observation_time")
+        if raw_observation_time:
+            try:
+                observed_at = datetime.fromisoformat(
+                    str(raw_observation_time).replace("Z", "+00:00")
+                )
+            except (TypeError, ValueError):
+                payload["_edli_day0_remaining_unavailable_reason"] = (
+                    "observation_time_invalid"
+                )
+                return None
+            if observed_at.tzinfo is None:
+                payload["_edli_day0_remaining_unavailable_reason"] = (
+                    "observation_time_naive"
+                )
+                return None
+            window_start = observed_at.astimezone(timezone.utc)
+            if window_start > decision_time.astimezone(timezone.utc):
+                payload["_edli_day0_remaining_unavailable_reason"] = (
+                    "observation_time_after_decision"
+                )
+                return None
+        payload["_edli_day0_remaining_window_start_utc"] = (
+            window_start.astimezone(timezone.utc).isoformat()
+        )
         extremes_c = remaining_day_extremes_c(
-            vectors, target_date=str(family.target_date), now=decision_time, metric=metric
+            vectors,
+            target_date=str(family.target_date),
+            now=decision_time,
+            metric=metric,
+            window_start=window_start,
         )
         if not extremes_c:
             return None

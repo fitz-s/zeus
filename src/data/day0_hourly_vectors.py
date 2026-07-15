@@ -524,16 +524,26 @@ def remaining_day_extremes_c(
     target_date: str,
     now: datetime,
     metric: str,
+    window_start: datetime | None = None,
 ) -> list[float]:
-    """Per-model remaining-day extreme in degC over the open local-day window.
+    """Per-model extreme over the target-day interval not yet observed.
 
-    Grid points at/after ``now`` are the ordinary support. During the terminal
-    sub-hour, when the local day is still open but the final hourly grid point
-    has just elapsed, that point remains the current interval anchor for at most
-    one hour. Wider gaps and an already-ended local day contribute nothing.
+    ``now`` is the decision/freshness cut. ``window_start`` is the latest causal
+    observation time and defaults to ``now``. Grid points at/after that boundary
+    are ordinary support. During the terminal sub-hour, the final elapsed hourly
+    point remains the interval anchor for at most one hour. This preserves an
+    unobserved target-day tail after local midnight without reopening hours that
+    canonical observations already cover.
     """
     if metric not in {"high", "low"}:
         raise ValueError(f"unsupported metric: {metric}")
+    if now.tzinfo is None:
+        raise ValueError("now must be timezone-aware")
+    start = window_start or now
+    if start.tzinfo is None:
+        raise ValueError("window_start must be timezone-aware")
+    if start.astimezone(UTC) > now.astimezone(UTC):
+        raise ValueError("window_start cannot be after now")
     target = date.fromisoformat(str(target_date)[:10])
     out: list[float] = []
     for vector in vectors:
@@ -541,7 +551,9 @@ def remaining_day_extremes_c(
             tz = ZoneInfo(vector.timezone_name)
         except Exception:
             continue
-        now_local = now.astimezone(tz)
+        start_local = start.astimezone(tz)
+        if start_local.date() != target:
+            continue
         values: list[float] = []
         elapsed_target_points: list[tuple[datetime, float]] = []
         for raw_time, temp in zip(vector.times, vector.temps_c):
@@ -555,13 +567,12 @@ def remaining_day_extremes_c(
                 continue
             if local.date() != target:
                 continue
-            if local < now_local:
+            if local < start_local:
                 elapsed_target_points.append((local, float(temp)))
                 continue
             values.append(float(temp))
         if (
             not values
-            and now_local.date() == target
             and elapsed_target_points
         ):
             local_day_end = datetime.combine(
@@ -573,8 +584,8 @@ def remaining_day_extremes_c(
                 elapsed_target_points,
                 key=lambda item: item[0],
             )
-            anchor_age = now_local - anchor_time
-            time_to_day_end = local_day_end - now_local
+            anchor_age = start_local - anchor_time
+            time_to_day_end = local_day_end - start_local
             if (
                 timedelta(0) < time_to_day_end <= timedelta(hours=1)
                 and timedelta(0) <= anchor_age <= timedelta(hours=1)

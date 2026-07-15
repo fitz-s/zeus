@@ -346,6 +346,16 @@ files:
     - src/data/replacement_forecast_production.py
     - scripts/materialize_replacement_forecast_live.py
     - tests/data/test_replacement_cycle_availability.py
+  src/data/day0_hourly_vectors.py:
+    zone: K2_runtime
+    authority_role: day0_remaining_window_forecast_vectors
+    why: Persists fresh target-day hourly forecast vectors in zeus-forecasts.db and derives only the interval not yet covered by the latest causal settlement-channel observation. Vector freshness stays bound to decision time; the observation clock only defines the remaining stochastic window, including a terminal tail after local midnight.
+    hazards:
+    - SOURCE_TRUTH_PLANE_COLLAPSE
+    downstream:
+    - src/events/reactor.py
+    - src/engine/event_reactor_adapter.py
+    - src/engine/monitor_refresh.py
   src/data/replacement_forecast_materializer.py:
     zone: K2_runtime
     authority_role: replacement_forecast_posterior_writer
