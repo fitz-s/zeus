@@ -1656,21 +1656,32 @@ def test_live_submit_unit_price_band_is_inclusive(tmp_path, price, side):
 
 
 @pytest.mark.parametrize("price", [0.0499, 0.9501])
-@pytest.mark.parametrize("side", ["BUY", "SELL"])
-def test_live_submit_rejects_out_of_band_price_before_sdk_contact(
-    tmp_path, price, side
-):
+def test_live_buy_submit_rejects_out_of_band_price_before_sdk_contact(tmp_path, price):
     fake = FakeOneStepClient(response={"orderID": "must-not-submit", "status": "live"})
     adapter, _ = _adapter(tmp_path, fake)
     envelope = adapter.create_submission_envelope(
         _priced_intent(0.50), FakeSnapshot(), order_type="GTC"
-    ).with_updates(price=Decimal(str(price)), side=side)
+    ).with_updates(price=Decimal(str(price)), side="BUY")
 
     result = adapter.submit(envelope)
 
     assert result.status == "rejected"
     assert "outside absolute [0.05, 0.95]" in str(result.error_message)
     assert not fake.calls
+
+
+@pytest.mark.parametrize("price", [0.01, 0.04, 0.96, 0.99])
+def test_live_sell_submit_uses_venue_tick_band_not_entry_band(tmp_path, price):
+    fake = FakeOneStepClient(response={"orderID": "sell-boundary", "status": "live"})
+    adapter, _ = _adapter(tmp_path, fake)
+    envelope = adapter.create_submission_envelope(
+        _priced_intent(0.50), FakeSnapshot(), order_type="GTC"
+    ).with_updates(price=Decimal(str(price)), side="SELL")
+
+    result = adapter.submit(envelope)
+
+    assert result.status == "accepted"
+    assert any(call[0] == "create_and_post_order" for call in fake.calls)
 
 
 def test_legacy_order_result_preserves_matched_submit_truth(tmp_path):

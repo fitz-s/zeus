@@ -23,8 +23,13 @@ LIVE_ORDER_UNIT_PRICE_MIN = Decimal("0.05")
 LIVE_ORDER_UNIT_PRICE_MAX = Decimal("0.95")
 
 
-def assert_live_order_unit_price(price: Decimal | str | float) -> Decimal:
-    """Return a live-submit price or fail closed outside the absolute band."""
+def assert_live_order_unit_price(
+    price: Decimal | str | float,
+    *,
+    side: str = "BUY",
+    tick_size: Decimal | str | float | None = None,
+) -> Decimal:
+    """Return a live-submit price inside its action-specific legal band."""
 
     try:
         value = price if isinstance(price, Decimal) else Decimal(str(price))
@@ -32,9 +37,28 @@ def assert_live_order_unit_price(price: Decimal | str | float) -> Decimal:
         raise ValueError(f"live order unit price must be decimal, got {price!r}") from exc
     if not value.is_finite():
         raise ValueError(f"live order unit price must be finite, got {price!r}")
+    normalized_side = str(side or "").strip().upper()
+    if normalized_side == "SELL":
+        try:
+            tick = Decimal(str(tick_size))
+        except Exception as exc:
+            raise ValueError(
+                f"live SELL tick size must be decimal, got {tick_size!r}"
+            ) from exc
+        if not tick.is_finite() or tick <= 0 or tick >= 1:
+            raise ValueError(f"live SELL tick size must be inside (0, 1), got {tick}")
+        upper = Decimal("1") - tick
+        if value < tick or value > upper:
+            raise ValueError(
+                f"live SELL unit price outside venue [{tick}, {upper}] band: "
+                f"price={value}"
+            )
+        return value
+    if normalized_side != "BUY":
+        raise ValueError(f"live order side must be BUY or SELL, got {side!r}")
     if value < LIVE_ORDER_UNIT_PRICE_MIN or value > LIVE_ORDER_UNIT_PRICE_MAX:
         raise ValueError(
-            "live order unit price outside absolute [0.05, 0.95] submit band: "
+            "live BUY unit price outside absolute [0.05, 0.95] submit band: "
             f"price={value}"
         )
     return value
@@ -126,7 +150,11 @@ class VenueSubmissionEnvelope:
     def assert_live_submit_bound(self) -> None:
         """Fail closed unless the envelope is bound to real market identity."""
 
-        assert_live_order_unit_price(self.price)
+        assert_live_order_unit_price(
+            self.price,
+            side=self.side,
+            tick_size=self.tick_size,
+        )
         reason = self.compatibility_placeholder_reason
         if reason:
             raise ValueError(
