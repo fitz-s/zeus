@@ -6,7 +6,7 @@ import json
 import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Any, Callable
+from typing import Any, Callable, Iterable
 from zoneinfo import ZoneInfo
 
 from src.config import runtime_cities_by_name
@@ -104,6 +104,7 @@ class Day0ExtremeUpdatedTrigger:
         day0_is_tradeable: bool = True,
         suppress_recent_no_value_refutations: bool = False,
         family_admission: Day0FamilyAdmission | None = None,
+        scan_cities: Iterable[str] | None = None,
     ) -> None:
         self._writer = writer
         # Stamp the scope-aware emission priority (2026-06-11 anti-starvation).
@@ -111,6 +112,13 @@ class Day0ExtremeUpdatedTrigger:
         self._day0_is_tradeable = day0_is_tradeable
         self._suppress_recent_no_value_refutations = suppress_recent_no_value_refutations
         self._family_admission = family_admission
+        self._scan_cities = (
+            None
+            if scan_cities is None
+            else tuple(
+                sorted({str(city).strip() for city in scan_cities if str(city).strip()})
+            )
+        )
 
     def emit_from_observation(
         self,
@@ -257,8 +265,17 @@ class Day0ExtremeUpdatedTrigger:
         }
         if not required_columns.issubset(columns):
             return []
+        if self._scan_cities == ():
+            return []
         decision_iso = decision_time.astimezone(UTC).isoformat()
         target_floor = _local_target_date_scan_floor(decision_time)
+        city_clause = ""
+        params: list[Any] = []
+        if self._scan_cities is not None:
+            placeholders = ",".join("?" for _ in self._scan_cities)
+            city_clause = f"AND city IN ({placeholders})"
+            params.extend(self._scan_cities)
+        params.extend((target_floor, decision_iso, decision_iso, max(1, int(limit))))
         rows = _dict_rows(
             observation_conn,
             f"""
@@ -281,6 +298,7 @@ class Day0ExtremeUpdatedTrigger:
                     MIN(source_role) AS source_role
                 FROM {table}
                 WHERE target_date IS NOT NULL
+                  {city_clause}
                   AND target_date >= ?
                   AND utc_timestamp <= ?
                   AND imported_at <= ?
@@ -308,7 +326,7 @@ class Day0ExtremeUpdatedTrigger:
             ORDER BY observation_available_at DESC, observation_time DESC
             LIMIT ?
             """,
-            (target_floor, decision_iso, decision_iso, max(1, int(limit))),
+            tuple(params),
         )
         results: list[EventWriteResult] = []
         # CHANGE-GATE (2026-06-15 firehose fix). The GROUP BY recomputes

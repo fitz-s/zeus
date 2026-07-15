@@ -1,5 +1,5 @@
 # Created: 2026-05-24
-# Last reused/audited: 2026-06-17
+# Last reused/audited: 2026-07-16
 # Authority basis: EDLI v1 implementation prompt §9 Day0 trigger availability and hard-fact gates.
 from __future__ import annotations
 
@@ -544,6 +544,91 @@ def test_scan_observation_instants_rows_emits_live_authority_day0_event():
     assert all('"event_type":"DAY0_EXTREME_UPDATED"' not in payload for payload in payloads)
     assert all('"live_authority_status":"live"' in payload for payload in payloads)
     assert all('"source_authorized_status":"AUTHORIZED"' in payload for payload in payloads)
+
+
+def test_scan_observation_instants_rows_scopes_index_seek_to_admitted_cities():
+    conn = sqlite3.connect(":memory:")
+    init_schema(conn)
+    insert_sql = """
+        INSERT INTO observation_instants (
+            city, target_date, source, timezone_name, local_hour, local_timestamp,
+            utc_timestamp, utc_offset_minutes, dst_active, is_ambiguous_local_hour,
+            is_missing_local_hour, time_basis, temp_current, running_max, running_min,
+            temp_unit, station_id, observation_count, imported_at, authority,
+            data_version, provenance_json, training_allowed, causality_status, source_role
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """
+    for city, station in (("Paris", "LFPB"), ("London", "EGLC")):
+        conn.execute(
+            insert_sql,
+            (
+                city,
+                "2026-06-06",
+                "wu_icao_history",
+                "Europe/Paris" if city == "Paris" else "Europe/London",
+                7.0,
+                "2026-06-06T07:00:00+02:00",
+                "2026-06-06T05:00:00+00:00",
+                120,
+                1,
+                0,
+                0,
+                "observed",
+                14.0,
+                14.0,
+                11.0,
+                "C",
+                station,
+                1,
+                "2026-06-06T05:15:00+00:00",
+                "VERIFIED",
+                "v1.wu-native",
+                '{"source_url":"redacted","station_id":"%s"}' % station,
+                1,
+                "OK",
+                "historical_hourly",
+            ),
+        )
+
+    traced: list[str] = []
+    conn.set_trace_callback(traced.append)
+    results = Day0ExtremeUpdatedTrigger(
+        EventWriter(conn),
+        scan_cities=("Paris",),
+    ).scan_observation_instants_rows(
+        observation_conn=conn,
+        settlement_semantics=FakeSettlementSemantics(14),
+        decision_time=datetime(2026, 6, 6, 5, 20, tzinfo=timezone.utc),
+        received_at="2026-06-06T05:20:00+00:00",
+    )
+
+    assert len(results) == 2
+    payloads = [
+        json.loads(row[0])
+        for row in conn.execute("SELECT payload_json FROM opportunity_events").fetchall()
+    ]
+    assert {payload["city"] for payload in payloads} == {"Paris"}
+    assert any("city IN ('Paris')" in statement for statement in traced)
+
+
+def test_scan_observation_instants_rows_empty_city_scope_skips_table_scan():
+    conn = sqlite3.connect(":memory:")
+    init_schema(conn)
+    traced: list[str] = []
+    conn.set_trace_callback(traced.append)
+
+    results = Day0ExtremeUpdatedTrigger(
+        EventWriter(conn),
+        scan_cities=(),
+    ).scan_observation_instants_rows(
+        observation_conn=conn,
+        settlement_semantics=FakeSettlementSemantics(14),
+        decision_time=datetime(2026, 6, 6, 5, 20, tzinfo=timezone.utc),
+        received_at="2026-06-06T05:20:00+00:00",
+    )
+
+    assert results == []
+    assert not any("WITH eligible AS" in statement for statement in traced)
 
 
 def test_scan_observation_instants_rows_accepts_hko_runtime_monitoring_day0_event():

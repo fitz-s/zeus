@@ -4579,6 +4579,7 @@ def _substrate_refresh_family_key(
 class _Day0LiveFamilyAdmission:
     admitted_families: frozenset[tuple[str, str, str]]
     expiry_safe: bool
+    scan_cities: frozenset[str] = frozenset()
 
     def __call__(self, observation: dict[str, Any]) -> bool:
         family = _substrate_refresh_family_key(
@@ -4692,9 +4693,15 @@ def _edli_day0_live_family_admission(
         _log.warning("EDLI day0 live family admission: held-position family read failed: %r", exc)
 
     admitted = frozenset(market_families | exposure_families)
+    admitted_city_keys = {family[0] for family in admitted}
     return _Day0LiveFamilyAdmission(
         admitted_families=admitted,
         expiry_safe=market_surface_read_ok and exposure_surface_read_ok,
+        scan_cities=frozenset(
+            city_name
+            for city_name in cities_by_name
+            if _substrate_refresh_family_text_key(city_name) in admitted_city_keys
+        ),
     )
 
 
@@ -6727,6 +6734,11 @@ def _edli_emit_day0_extreme_events(
             day0_is_tradeable=day0_is_tradeable,
             suppress_recent_no_value_refutations=True,
             family_admission=family_admission,
+            scan_cities=(
+                family_admission.scan_cities
+                if family_admission is not None
+                else None
+            ),
         )
         authority_results, observation_results = _edli_scan_day0_with_lock_retry(
             trigger=trigger,
