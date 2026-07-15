@@ -209,6 +209,8 @@ def test_global_auction_receipt_persists_complete_buy_sell_hold_cash_comparison(
             economic_identity="wealth-economics-current",
         ),
         fractional_kelly_multiplier=Decimal("0.25"),
+        book_captured_at_utc=at + _dt.timedelta(milliseconds=250),
+        book_max_age=_dt.timedelta(seconds=30),
         excluded_by_candidate={
             (
                 "BUY",
@@ -226,7 +228,11 @@ def test_global_auction_receipt_persists_complete_buy_sell_hold_cash_comparison(
     artifact = json.loads(row["artifact_json"])
     summary = artifact["summary"]
     assert row["mode"] == "global_single_order_auction"
-    assert summary["schema_version"] == 9
+    assert summary["schema_version"] == 10
+    assert summary["book_capture_freshness_complete"] is True
+    assert summary["book_captured_at_utc"] == "2026-07-14T01:00:00.250000+00:00"
+    assert summary["book_deadline_at_utc"] == "2026-07-14T01:00:30.250000+00:00"
+    assert summary["book_max_age_seconds"] == 30.0
     assert summary["excluded_by_candidate"] == [
         {
             "action": "BUY",
@@ -333,6 +339,89 @@ def test_global_auction_receipt_persists_complete_buy_sell_hold_cash_comparison(
             ),
             fractional_kelly_multiplier=Decimal("0.25"),
         )
+    conn.close()
+
+
+def test_global_preflight_receipt_persists_pause_and_zero_venue_side_effects():
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        """
+        CREATE TABLE decision_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            mode TEXT NOT NULL,
+            started_at TEXT NOT NULL,
+            completed_at TEXT NOT NULL,
+            artifact_json TEXT NOT NULL,
+            timestamp TEXT NOT NULL,
+            env TEXT NOT NULL
+        )
+        """
+    )
+    at = _dt.datetime(2026, 7, 15, 14, 29, tzinfo=_dt.timezone.utc)
+    candidate = SimpleNamespace(
+        candidate_id="candidate-best",
+        action="BUY",
+        family_key="family-shenzhen",
+        bin_id="31C",
+        condition_id="condition-shenzhen-31c",
+        side="NO",
+        token_id="token-shenzhen-31c-no",
+    )
+    selected = SimpleNamespace(
+        decision=SimpleNamespace(candidate=candidate),
+        actuation=SimpleNamespace(
+            selection_epoch_identity="epoch-current",
+            selection_cut_at_utc=at,
+            decision_at_utc=at + _dt.timedelta(seconds=10),
+            actuation_identity="actuation-current",
+        ),
+    )
+    preflight = global_batch_runtime.GlobalWinnerPreflight(
+        status="BATCH_BLOCKED",
+        reason="entries_paused:external:operator",
+    )
+    authority = global_batch_runtime.GlobalPreflightAuthority(
+        probability_manifest=(("family-shenzhen", "q-current"),),
+        book_epoch_identity="book-current",
+        book_economics_manifest=(("BUY", "token-shenzhen-31c-no"),),
+        wealth_witness_identity="wealth-current",
+        actuation_deadline=at + _dt.timedelta(seconds=30),
+    )
+
+    row_id = global_batch_runtime._store_global_preflight_receipt(
+        conn,
+        selected=selected,
+        preflight=preflight,
+        authority=authority,
+        checked_at_utc=at + _dt.timedelta(seconds=11),
+        winner_event_id="winner-event",
+        venue_submit_count_before=0,
+        venue_submit_count_after=0,
+    )
+
+    row = conn.execute(
+        "SELECT mode, artifact_json FROM decision_log WHERE id = ?", (row_id,)
+    ).fetchone()
+    artifact = json.loads(row["artifact_json"])
+    summary = artifact["summary"]
+    assert row["mode"] == "global_single_order_auction_preflight"
+    assert summary["selection_epoch_identity"] == "epoch-current"
+    assert summary["winner_candidate_id"] == "candidate-best"
+    assert summary["preflight_status"] == "BATCH_BLOCKED"
+    assert summary["preflight_reason"] == "entries_paused:external:operator"
+    assert summary["book_epoch_identity"] == "book-current"
+    assert summary["venue_submit_count_before"] == 0
+    assert summary["venue_submit_count_after"] == 0
+    assert summary["venue_side_effect_free"] is True
+    receipt_hash = summary.pop("receipt_hash")
+    encoded = json.dumps(
+        summary,
+        default=str,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    assert hashlib.sha256(encoded).hexdigest() == receipt_hash
     conn.close()
 
 
@@ -6093,7 +6182,13 @@ def test_global_batch_stops_on_batch_wide_preflight_block(monkeypatch, batch_rea
             wealth_witness_identity="wealth-1",
         ),
     )
-    calls = {"books": 0, "select": 0, "preflight": 0, "venue": 0}
+    calls = {
+        "books": 0,
+        "select": 0,
+        "preflight": 0,
+        "preflight_receipt": 0,
+        "venue": 0,
+    }
     monkeypatch.setattr(
         global_batch_runtime, "scan_current_global_auction_scope", lambda **_: scope
     )
@@ -6127,8 +6222,20 @@ def test_global_batch_stops_on_batch_wide_preflight_block(monkeypatch, batch_rea
             reason=batch_reason,
         )
 
+    def store_preflight(*_args, **kwargs):
+        calls["preflight_receipt"] += 1
+        assert kwargs["preflight"].reason == batch_reason
+        assert kwargs["venue_submit_count_before"] == 0
+        assert kwargs["venue_submit_count_after"] == 0
+        return 1
+
     monkeypatch.setattr(
         global_batch_runtime, "select_prepared_global_auction", select
+    )
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "_store_global_preflight_receipt",
+        store_preflight,
     )
     result = global_batch_runtime.process_current_global_batch(
         (event, runner_up),
@@ -6157,7 +6264,13 @@ def test_global_batch_stops_on_batch_wide_preflight_block(monkeypatch, batch_rea
         current_book_epoch_provider=books,
     )
 
-    assert calls == {"books": 1, "select": 1, "preflight": 1, "venue": 0}
+    assert calls == {
+        "books": 1,
+        "select": 1,
+        "preflight": 1,
+        "preflight_receipt": 1,
+        "venue": 0,
+    }
     assert result.winner_event_id is None
     assert result.venue_submit_count == 0
     assert result.receipts[event.event_id].reason == (

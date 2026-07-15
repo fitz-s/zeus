@@ -231,6 +231,8 @@ def _store_global_auction_receipt(
     excluded_by_candidate: Mapping[
         tuple[str, str, str, str, str], str
     ] | None = None,
+    book_captured_at_utc: datetime | None = None,
+    book_max_age: timedelta | None = None,
 ) -> int | None:
     """Persist one complete auction comparison before any venue side effect."""
 
@@ -259,6 +261,23 @@ def _store_global_auction_receipt(
     )
     if not scope_coverage_complete:
         raise ValueError("GLOBAL_AUCTION_RECEIPT_SCOPE_INCOMPLETE")
+
+    book_capture_complete = (
+        book_captured_at_utc is not None and book_max_age is not None
+    )
+    if (book_captured_at_utc is None) != (book_max_age is None):
+        raise ValueError("GLOBAL_AUCTION_RECEIPT_BOOK_FRESHNESS_INCOMPLETE")
+    if book_capture_complete:
+        assert book_captured_at_utc is not None
+        assert book_max_age is not None
+        if book_captured_at_utc.tzinfo is None or book_max_age <= timedelta(0):
+            raise ValueError("GLOBAL_AUCTION_RECEIPT_BOOK_FRESHNESS_INVALID")
+        book_captured_at_utc = book_captured_at_utc.astimezone(UTC)
+        book_deadline_at_utc = book_captured_at_utc + book_max_age
+        book_max_age_seconds = book_max_age.total_seconds()
+    else:
+        book_deadline_at_utc = None
+        book_max_age_seconds = None
 
     decision = getattr(selected, "decision", None)
     if decision is None:
@@ -337,7 +356,7 @@ def _store_global_auction_receipt(
         )
     )
     receipt = {
-        "schema_version": 9,
+        "schema_version": 10,
         "selection_epoch_identity": selection_epoch_identity,
         "selection_cut_at_utc": selection_cut_at_utc.isoformat(),
         "decision_at_utc": decision_at_utc.isoformat(),
@@ -350,6 +369,18 @@ def _store_global_auction_receipt(
         "scope_family_coverage_complete": scope_coverage_complete,
         "book_epoch_identity": book_epoch_identity,
         "book_asset_count": book_asset_count,
+        "book_capture_freshness_complete": book_capture_complete,
+        "book_captured_at_utc": (
+            book_captured_at_utc.isoformat()
+            if book_captured_at_utc is not None
+            else None
+        ),
+        "book_deadline_at_utc": (
+            book_deadline_at_utc.isoformat()
+            if book_deadline_at_utc is not None
+            else None
+        ),
+        "book_max_age_seconds": book_max_age_seconds,
         "excluded_by_family": dict(sorted((excluded_by_family or {}).items())),
         "excluded_by_candidate": [
             {
@@ -423,6 +454,121 @@ def _store_global_auction_receipt(
         len(evaluation_zlib),
         receipt["receipt_hash"],
     )
+    return row_id
+
+
+def _store_global_preflight_receipt(
+    conn,
+    *,
+    selected: object,
+    preflight: GlobalWinnerPreflight,
+    authority: GlobalPreflightAuthority,
+    checked_at_utc: datetime,
+    winner_event_id: str,
+    venue_submit_count_before: int,
+    venue_submit_count_after: int,
+) -> int | None:
+    """Persist the immutable outcome of one side-effect-free winner preflight."""
+
+    if not isinstance(conn, sqlite3.Connection):
+        return None
+    if checked_at_utc.tzinfo is None:
+        raise ValueError("GLOBAL_PREFLIGHT_RECEIPT_TIME_NAIVE")
+    checked_at_utc = checked_at_utc.astimezone(UTC)
+    decision = getattr(selected, "decision", None)
+    candidate = getattr(decision, "candidate", None)
+    actuation = getattr(selected, "actuation", None)
+    if candidate is None or actuation is None:
+        raise ValueError("GLOBAL_PREFLIGHT_RECEIPT_WINNER_MISSING")
+    candidate_id = str(getattr(candidate, "candidate_id", "") or "")
+    selection_epoch_identity = str(
+        getattr(actuation, "selection_epoch_identity", "") or ""
+    )
+    actuation_identity = str(getattr(actuation, "actuation_identity", "") or "")
+    selection_cut_at_utc = getattr(actuation, "selection_cut_at_utc", None)
+    auction_decision_at_utc = getattr(actuation, "decision_at_utc", None)
+    if not all(
+        (
+            candidate_id,
+            selection_epoch_identity,
+            actuation_identity,
+            str(winner_event_id or ""),
+        )
+    ):
+        raise ValueError("GLOBAL_PREFLIGHT_RECEIPT_IDENTITY_INCOMPLETE")
+    if (
+        not isinstance(selection_cut_at_utc, datetime)
+        or selection_cut_at_utc.tzinfo is None
+        or not isinstance(auction_decision_at_utc, datetime)
+        or auction_decision_at_utc.tzinfo is None
+    ):
+        raise ValueError("GLOBAL_PREFLIGHT_RECEIPT_AUCTION_TIME_INVALID")
+    action = str(getattr(candidate, "action", "BUY") or "BUY")
+    family_key = str(getattr(candidate, "family_key", "") or "")
+    bin_id = str(getattr(candidate, "bin_id", "") or "")
+    condition_id = str(getattr(candidate, "condition_id", "") or "")
+    side = str(getattr(candidate, "side", "") or "")
+    token_id = str(getattr(candidate, "token_id", "") or "")
+    if (
+        action not in {"BUY", "SELL"}
+        or side not in {"YES", "NO"}
+        or not all((family_key, bin_id, condition_id, token_id))
+    ):
+        raise ValueError("GLOBAL_PREFLIGHT_RECEIPT_CANDIDATE_INVALID")
+    if venue_submit_count_after != venue_submit_count_before:
+        raise ValueError("GLOBAL_PREFLIGHT_RECEIPT_VENUE_SIDE_EFFECT")
+
+    receipt = {
+        "schema_version": 1,
+        "selection_epoch_identity": selection_epoch_identity,
+        "selection_cut_at_utc": selection_cut_at_utc.astimezone(UTC).isoformat(),
+        "auction_decision_at_utc": auction_decision_at_utc.astimezone(
+            UTC
+        ).isoformat(),
+        "preflight_checked_at_utc": checked_at_utc.isoformat(),
+        "preflight_status": preflight.status,
+        "preflight_reason": str(preflight.reason or ""),
+        "winner_event_id": str(winner_event_id),
+        "winner_candidate_id": candidate_id,
+        "action": action,
+        "family_key": family_key,
+        "bin_id": bin_id,
+        "condition_id": condition_id,
+        "side": side,
+        "token_id": token_id,
+        "actuation_identity": actuation_identity,
+        "probability_manifest": authority.probability_manifest,
+        "book_epoch_identity": authority.book_epoch_identity,
+        "wealth_witness_identity": authority.wealth_witness_identity,
+        "actuation_deadline": authority.actuation_deadline.astimezone(
+            UTC
+        ).isoformat(),
+        "venue_submit_count_before": venue_submit_count_before,
+        "venue_submit_count_after": venue_submit_count_after,
+        "venue_side_effect_free": True,
+    }
+    encoded = json.dumps(
+        receipt,
+        default=str,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    receipt["receipt_hash"] = hashlib.sha256(encoded).hexdigest()
+
+    from src.state.decision_chain import CycleArtifact, store_artifact
+
+    row_id = store_artifact(
+        conn,
+        CycleArtifact(
+            mode="global_single_order_auction_preflight",
+            started_at=checked_at_utc.isoformat(),
+            completed_at=checked_at_utc.isoformat(),
+            skipped_reason=str(preflight.reason or ""),
+            summary=receipt,
+        ),
+    )
+    if row_id is None:
+        raise RuntimeError("GLOBAL_PREFLIGHT_RECEIPT_ID_MISSING")
     return row_id
 
 
@@ -1253,6 +1399,16 @@ def process_current_global_batch(
                 fractional_kelly_multiplier=fractional_kelly_multiplier,
                 excluded_by_family=preflight_excluded_by_family,
                 excluded_by_candidate=preflight_excluded_by_candidate,
+                book_captured_at_utc=(
+                    attempt_book_epoch.captured_at_utc
+                    if attempt_book_epoch is not None
+                    else None
+                ),
+                book_max_age=(
+                    attempt_book_epoch.max_age
+                    if attempt_book_epoch is not None
+                    else None
+                ),
             )
             return selected
 
@@ -1338,8 +1494,19 @@ def process_current_global_batch(
                     preflight_authority,
                 )
                 log_stage("winner_preflight", families=len(prepared_by_event))
-                if venue_submit_count() != before_preflight:
+                after_preflight = venue_submit_count()
+                if after_preflight != before_preflight:
                     return reject("GLOBAL_PREFLIGHT_VENUE_SIDE_EFFECT")
+                _store_global_preflight_receipt(
+                    trade_conn,
+                    selected=selected,
+                    preflight=preflight,
+                    authority=preflight_authority,
+                    checked_at_utc=preflight_at,
+                    winner_event_id=winner_id,
+                    venue_submit_count_before=before_preflight,
+                    venue_submit_count_after=after_preflight,
+                )
                 if preflight.status == "STABLE":
                     break
                 if preflight.status == "BATCH_BLOCKED":
