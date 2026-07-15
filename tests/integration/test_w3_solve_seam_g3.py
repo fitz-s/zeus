@@ -1652,6 +1652,7 @@ def test_current_global_probability_prepare_does_not_require_price_snapshot(
     witness = prepared.probability_witness
     assert prepared.candidate_seeds == ()
     assert witness.yes_q_samples.shape == (400, 3)
+    assert witness.band_alpha == pytest.approx(0.05)
     assert witness.band_basis == "current_coherent_settlement_simplex_v1"
     assert bundle.provenance_json["q_bootstrap_samples_basis"] == bootstrap_basis
     assert [binding.yes_token_id for binding in witness.bindings] == ["yes0", "yes1", "yes2"]
@@ -1843,6 +1844,7 @@ def test_current_day0_global_probability_uses_current_remaining_day_not_full_day
 
     witness = prepared.probability_witness
     binding = day0_payload["_edli_global_day0_binding"]
+    assert witness.band_alpha == pytest.approx(0.05)
     assert witness.band_basis == "current_coherent_day0_remaining_finite_evidence_v2"
     assert witness.yes_q_samples.shape == (400, 3)
     assert witness.posterior_identity_hash

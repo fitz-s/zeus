@@ -23199,6 +23199,7 @@ _GLOBAL_CURRENT_SETTLEMENT_SIMPLEX_BAND_BASIS = (
 _GLOBAL_DAY0_CURRENT_SETTLEMENT_SIMPLEX_BAND_BASIS = (
     "current_coherent_day0_remaining_finite_evidence_v2"
 )
+_GLOBAL_CURRENT_EVIDENCE_TAIL_ALPHA = 0.05
 
 
 def _replacement_global_probability_components(
@@ -23454,7 +23455,6 @@ def _prepare_current_global_probability_family(
     from src.engine.qkernel_spine_bridge import (
         PreparedGlobalFamily,
         _event_resolution_identity,
-        _qkernel_spine_band_alpha,
         build_forecast_case,
         build_outcome_space,
     )
@@ -23733,7 +23733,11 @@ def _prepare_current_global_probability_family(
             "captured_at_utc": decision_time.isoformat(),
         }
     )
-    alpha = _qkernel_spine_band_alpha()
+    # The source-clock carrier's finite-current-evidence authority is the
+    # one-sided 95% tail bound (alpha=0.05).  FDR alpha governs multiple-testing
+    # admission later; reusing it here changes the probability world and can
+    # make a NO loss bound narrower than canonical q_ucb(YES).
+    alpha = _GLOBAL_CURRENT_EVIDENCE_TAIL_ALPHA
     witness_identity = joint_probability_witness_identity(
         family_key=family.family_id,
         bindings=bindings,
