@@ -79,7 +79,6 @@ from src.contracts import (
     SettlementSemantics,
 )
 from src.contracts.probability_arithmetic import one_minus
-from src.contracts.venue_submission_envelope import LIVE_ORDER_UNIT_PRICE_MIN
 from src.data.ensemble_client import fetch_ensemble, validate_ensemble
 from src.data.polymarket_client import PolymarketClient
 from src.engine.discovery_mode import DiscoveryMode
@@ -178,13 +177,16 @@ from src.strategy.market_fusion import (
     vwmp,
 )
 from src.strategy.risk_limits import RiskLimits, check_position_allowed
-from src.strategy.strategy_profile import try_get as _try_get_strategy_profile
+from src.strategy.strategy_profile import (
+    DEFAULT_STRATEGY_MIN_ENTRY_PRICE,
+    try_get as _try_get_strategy_profile,
+)
 from src.types import Bin, BinEdge
 from src.types.market import BinTopologyError, validate_bin_topology
 from src.types.temperature import TemperatureDelta
 
 logger = logging.getLogger(__name__)
-CENTER_BUY_ULTRA_LOW_PRICE_MAX_ENTRY = float(LIVE_ORDER_UNIT_PRICE_MIN)
+CENTER_BUY_ULTRA_LOW_PRICE_MAX_ENTRY = DEFAULT_STRATEGY_MIN_ENTRY_PRICE
 DAY0_EXECUTABLE_OBSERVATION_SOURCES_BY_SETTLEMENT_TYPE = {
     # Same physical settlement station as WU (ICAO identity enforced by
     # fast_obs_source_for_city + faithfulness gate in day0_fast_obs.py). This is
@@ -1389,20 +1391,6 @@ def _strategy_entry_price_floor_block_reason(strategy_key: str, edge: BinEdge) -
         entry_price = float(edge.entry_price)
     except (TypeError, ValueError):
         return None
-    hard_floor = float(LIVE_ORDER_UNIT_PRICE_MIN)
-    if entry_price < hard_floor:
-        return (
-            LowPriceRejection(
-                strategy_key=strategy_key,
-                direction=str(getattr(edge, "direction", "")),
-                entry_price=entry_price,
-                floor=hard_floor,
-                reason_code="ABSOLUTE_LIVE_ORDER_PRICE_FLOOR",
-                is_tail_topology=bool(
-                    getattr(getattr(edge, "bin", None), "is_shoulder", False)
-                ),
-            ).detail()
-        )
     if entry_price > policy.min_entry_price:
         return None
     is_tail_topology = bool(getattr(getattr(edge, "bin", None), "is_shoulder", False))
@@ -1504,11 +1492,6 @@ def _live_entry_economic_floor_rejection(
         effective_expected_profit_usd = (
             effective_expected_profit_usd * fill_probability
             - adverse_selection_cost_usd
-        )
-    if final_limit_price < float(LIVE_ORDER_UNIT_PRICE_MIN):
-        return (
-            "ABSOLUTE_LIVE_ORDER_PRICE_FLOOR("
-            f"{final_limit_price:.4f}<0.05; strategy={strategy_key})"
         )
     if not policy.allow_ultra_low_tail and final_limit_price <= policy.min_entry_price:
         return (

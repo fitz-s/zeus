@@ -1194,7 +1194,11 @@ def _entry_economics_component(
             shares=submitted_shares,
         )
     try:
-        assert_live_order_unit_price(limit_price)
+        assert_live_order_unit_price(
+            limit_price,
+            side="BUY",
+            tick_size=getattr(intent, "executable_snapshot_min_tick_size", None),
+        )
     except ValueError as exc:
         return _capability_component(
             "entry_economics",
@@ -4614,12 +4618,15 @@ def create_execution_intent(
 def _align_buy_limit_price_to_tick(limit_price: float, min_tick_size: Decimal | str) -> float:
     """Round a BUY limit down to the executable snapshot tick."""
 
-    tick = Decimal(str(min_tick_size))
-    if tick <= 0:
-        raise ValueError("executable_snapshot_min_tick_size must be positive")
-    price = assert_live_order_unit_price(limit_price)
+    tick = _submit_tick_size_or_raise(min_tick_size)
+    price = assert_live_order_unit_price(
+        limit_price,
+        side="BUY",
+    )
     aligned = (price / tick).to_integral_value(rounding=ROUND_FLOOR) * tick
-    return float(assert_live_order_unit_price(aligned))
+    return float(
+        assert_live_order_unit_price(aligned, side="BUY", tick_size=tick)
+    )
 
 
 def _submit_tick_size_or_raise(min_tick_size: Decimal | str | float) -> Decimal:

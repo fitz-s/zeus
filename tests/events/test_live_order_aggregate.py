@@ -1225,7 +1225,7 @@ def test_pre_submit_current_state_winner_ignores_legacy_profit_density_floors(
     ("direction", "side"),
     (("buy_yes", "YES"), ("buy_no", "NO")),
 )
-def test_pre_submit_current_state_cannot_waive_absolute_price_floor(
+def test_pre_submit_current_state_cannot_waive_venue_tick_boundary(
     direction, side
 ):
     ledger = LiveOrderAggregateLedger(_conn())
@@ -1469,7 +1469,7 @@ def test_pre_submit_rejects_low_price_yes_below_live_floor():
         )
 
 
-def test_pre_submit_rejects_qkernel_price_below_absolute_floor():
+def test_pre_submit_rejects_legacy_qkernel_price_below_strategy_floor():
     ledger = LiveOrderAggregateLedger(_conn())
     ledger.append_event(
         aggregate_id="event-1:intent-1",
@@ -1479,7 +1479,7 @@ def test_pre_submit_rejects_qkernel_price_below_absolute_floor():
         source_authority="decision_kernel",
     )
 
-    with pytest.raises(LiveOrderAggregateError, match="unit price out of bounds"):
+    with pytest.raises(LiveOrderAggregateError, match="entry price below strategy floor"):
         ledger.append_event(
             aggregate_id="event-1:intent-1",
             event_type="PreSubmitRevalidated",

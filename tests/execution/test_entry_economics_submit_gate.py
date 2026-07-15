@@ -332,7 +332,7 @@ def test_entry_economics_blocks_low_price_even_when_strategy_floor_allows_it():
     assert verdict["details"]["live_min_entry_price"] == 0.10
 
 
-def test_entry_economics_rejects_micro_tail_yes_below_absolute_price_floor():
+def test_entry_economics_rejects_micro_tail_yes_below_strategy_price_floor():
     verdict = _entry_economics_component(
         _intent(
             limit_price=0.024,
@@ -360,10 +360,10 @@ def test_entry_economics_rejects_micro_tail_yes_below_absolute_price_floor():
     )
 
     assert verdict["allowed"] is False
-    assert verdict["reason"] == "live_order_unit_price_out_of_bounds"
+    assert verdict["reason"] == "limit_price_below_strategy_entry_floor"
 
 
-def test_entry_economics_rejects_buenos_aires_shape_below_absolute_price_floor():
+def test_entry_economics_rejects_buenos_aires_shape_below_strategy_price_floor():
     verdict = _entry_economics_component(
         _intent(
             limit_price=0.041,
@@ -394,7 +394,7 @@ def test_entry_economics_rejects_buenos_aires_shape_below_absolute_price_floor()
     )
 
     assert verdict["allowed"] is False
-    assert verdict["reason"] == "live_order_unit_price_out_of_bounds"
+    assert verdict["reason"] == "limit_price_below_strategy_entry_floor"
 
 
 def test_entry_economics_allows_high_confidence_center_buy_yes():
@@ -465,7 +465,7 @@ def test_entry_economics_allows_center_buy_yes_when_symmetric_quality_floor_clea
     assert verdict["details"]["q_lcb_5pct"] == pytest.approx(0.52)
 
 
-def test_entry_economics_rejects_low_price_yes_despite_positive_robust_edge():
+def test_entry_economics_rejects_legacy_low_price_yes_below_strategy_floor():
     verdict = _entry_economics_component(
         _intent(
             limit_price=0.031,
@@ -495,7 +495,7 @@ def test_entry_economics_rejects_low_price_yes_despite_positive_robust_edge():
     )
 
     assert verdict["allowed"] is False
-    assert verdict["reason"] == "live_order_unit_price_out_of_bounds"
+    assert verdict["reason"] == "limit_price_below_strategy_entry_floor"
 
 
 def test_entry_economics_blocks_unarmed_selection_guard_even_with_large_raw_edge():
@@ -962,7 +962,7 @@ def test_entry_economics_current_state_winner_ignores_legacy_profit_density_floo
     ("direction", "side"),
     ((Direction("buy_yes"), "YES"), (Direction("buy_no"), "NO")),
 )
-def test_entry_economics_current_state_cannot_waive_absolute_price_floor(
+def test_entry_economics_current_state_accepts_venue_tick_boundary(
     direction,
     side,
 ):
@@ -1000,6 +1000,53 @@ def test_entry_economics_current_state_cannot_waive_absolute_price_floor(
             q_lcb_5pct=0.80,
             expected_edge=0.799,
             min_entry_price=0.10,
+            executable_snapshot_min_tick_size="0.001",
+            qkernel_execution_economics=economics,
+        ),
+        shares=1000.0,
+        actionable_payload={"qkernel_execution_economics": economics},
+    )
+
+    assert verdict["allowed"] is True
+
+
+@pytest.mark.parametrize("direction", (Direction("buy_yes"), Direction("buy_no")))
+def test_entry_economics_current_state_cannot_waive_venue_tick_boundary(direction):
+    economics = _current_state_econ(
+        side="YES" if direction == Direction("buy_yes") else "NO",
+        payoff_q_point=0.92,
+        payoff_q_lcb=0.80,
+        cost=0.0009,
+        edge_lcb=0.7991,
+        selection_guard_q_safe=0.80,
+        global_limit_price="0.0009",
+        global_expected_fill_price_before_fee="0.0009",
+        global_expected_cost_usd="0.9",
+        global_max_spend_usd="0.9",
+        global_target_shares="1000",
+        global_robust_delta_log_wealth=0.10,
+        global_robust_ev_usd=799.1,
+        global_cut_time_win_probability_lcb=0.80,
+        global_cut_time_loss_probability_ucb=0.20,
+        global_terminal_win_probability_lcb=0.80,
+        global_terminal_loss_probability_ucb=0.20,
+        global_terminal_loss_payoff_usd="-0.9",
+        global_terminal_win_payoff_usd="999.1",
+        global_terminal_median_payoff_usd="999.1",
+        global_terminal_wealth_after_loss_usd="99.1",
+        global_terminal_wealth_after_win_usd="1099.1",
+        global_cut_time_expected_value_diagnostic_usd=799.1,
+        global_expected_value_diagnostic_usd=799.1,
+    )
+    verdict = _entry_economics_component(
+        _intent(
+            direction=direction,
+            limit_price=0.0009,
+            q_live=0.92,
+            q_lcb_5pct=0.80,
+            expected_edge=0.7991,
+            min_entry_price=0.0,
+            executable_snapshot_min_tick_size="0.001",
             qkernel_execution_economics=economics,
         ),
         shares=1000.0,

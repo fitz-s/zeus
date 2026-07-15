@@ -19,8 +19,6 @@ from typing import Any, ClassVar, Optional
 
 _DECIMAL_FIELDS = {"tick_size", "min_order_size", "price", "size"}
 _BYTES_FIELDS = {"signed_order"}
-LIVE_ORDER_UNIT_PRICE_MIN = Decimal("0.05")
-LIVE_ORDER_UNIT_PRICE_MAX = Decimal("0.95")
 
 
 def assert_live_order_unit_price(
@@ -29,7 +27,13 @@ def assert_live_order_unit_price(
     side: str = "BUY",
     tick_size: Decimal | str | float | None = None,
 ) -> Decimal:
-    """Return a live-submit price inside its action-specific legal band."""
+    """Return a probability-domain price inside the current venue tick band.
+
+    Before a current executable snapshot supplies ``tick_size``, the only
+    truthful invariant is the strict probability domain ``(0, 1)``.  At the
+    venue boundary both BUY and SELL use the same snapshot-native inclusive
+    band ``[tick, 1 - tick]``.
+    """
 
     try:
         value = price if isinstance(price, Decimal) else Decimal(str(price))
@@ -38,27 +42,29 @@ def assert_live_order_unit_price(
     if not value.is_finite():
         raise ValueError(f"live order unit price must be finite, got {price!r}")
     normalized_side = str(side or "").strip().upper()
-    if normalized_side == "SELL":
-        try:
-            tick = Decimal(str(tick_size))
-        except Exception as exc:
+    if normalized_side not in {"BUY", "SELL"}:
+        raise ValueError(f"live order side must be BUY or SELL, got {side!r}")
+    if tick_size is None:
+        if value <= 0 or value >= 1:
             raise ValueError(
-                f"live SELL tick size must be decimal, got {tick_size!r}"
-            ) from exc
-        if not tick.is_finite() or tick <= 0 or tick >= 1:
-            raise ValueError(f"live SELL tick size must be inside (0, 1), got {tick}")
-        upper = Decimal("1") - tick
-        if value < tick or value > upper:
-            raise ValueError(
-                f"live SELL unit price outside venue [{tick}, {upper}] band: "
+                f"live {normalized_side} unit price outside probability (0, 1) domain: "
                 f"price={value}"
             )
         return value
-    if normalized_side != "BUY":
-        raise ValueError(f"live order side must be BUY or SELL, got {side!r}")
-    if value < LIVE_ORDER_UNIT_PRICE_MIN or value > LIVE_ORDER_UNIT_PRICE_MAX:
+    try:
+        tick = Decimal(str(tick_size))
+    except Exception as exc:
         raise ValueError(
-            "live BUY unit price outside absolute [0.05, 0.95] submit band: "
+            f"live {normalized_side} tick size must be decimal, got {tick_size!r}"
+        ) from exc
+    if not tick.is_finite() or tick <= 0 or tick >= 1:
+        raise ValueError(
+            f"live {normalized_side} tick size must be inside (0, 1), got {tick}"
+        )
+    upper = Decimal("1") - tick
+    if value < tick or value > upper:
+        raise ValueError(
+            f"live {normalized_side} unit price outside venue [{tick}, {upper}] band: "
             f"price={value}"
         )
     return value

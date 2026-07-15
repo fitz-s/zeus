@@ -350,14 +350,14 @@ def test_regime_throttle_uses_reviewed_city_cluster_not_city_name() -> None:
 # ── schema enforcement ─────────────────────────────────────────────── #
 
 
-def test_schema_load_rejects_entry_price_below_absolute_band(tmp_path: Path):
+def test_schema_load_accepts_strategy_price_floor_below_five_cents(tmp_path: Path):
     data = yaml.safe_load(sp.REGISTRY_PATH.read_text())
     data["center_buy"]["min_entry_price"] = 0.04
-    bad = tmp_path / "bad_registry.yaml"
-    bad.write_text(yaml.safe_dump(data, sort_keys=False))
+    policy = tmp_path / "policy_registry.yaml"
+    policy.write_text(yaml.safe_dump(data, sort_keys=False))
 
-    with pytest.raises(RegistrySchemaError, match="must be at least 0.05 under INV-43"):
-        sp._reload_for_test(bad)
+    sp._reload_for_test(policy)
+    assert sp.get("center_buy").min_entry_price == pytest.approx(0.04)
 
 
 def test_schema_load_rejects_unknown_field(tmp_path: Path):
