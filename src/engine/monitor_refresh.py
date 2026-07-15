@@ -99,6 +99,7 @@ _NOWCAST_PERSISTENT_FAILURE_THRESHOLD = 3
 _DAY0_LOW_EXTREME_AUTHORITY_HOURS = 6.0
 SELECTED_METHOD_DAY0_ABSORBING_HARD_FACT = "day0_absorbing_hard_fact"
 SELECTED_METHOD_DAY0_OBSERVATION_REMAINING_WINDOW = "day0_observation_remaining_window"
+SELECTED_METHOD_FINAL_DAILY_OBSERVATION_EXACT = "final_daily_observation_exact"
 SELECTED_METHOD_DAY0_OBS_CONDITIONED_DAILY_EXTREMA = (
     "day0_observation_conditioned_daily_extrema"
 )
@@ -599,6 +600,29 @@ def _is_position_target_local_day(pos: Position, city, target_d) -> bool:
     except Exception:
         local_today = datetime.now(timezone.utc).date()
     return target_date_value == local_today
+
+
+def _is_position_after_target_local_day(
+    pos: Position,
+    city,
+    target_d,
+    *,
+    now: datetime | None = None,
+) -> bool:
+    """Whether no forecast hours can remain in the contract-local target day."""
+
+    if target_d is None:
+        return False
+    try:
+        target_date_value = (
+            target_d if isinstance(target_d, date) else date.fromisoformat(str(target_d))
+        )
+        local_today = (now or datetime.now(timezone.utc)).astimezone(
+            ZoneInfo(str(getattr(city, "timezone", "") or ""))
+        ).date()
+    except Exception:
+        return False
+    return target_date_value < local_today
 
 
 def _enqueue_single_family_belief_reseed_failsoft(
@@ -3971,6 +3995,7 @@ def _refresh_current_global_day0_probability(
             )
         event = OpportunityEvent(**dict(row))
         from src.engine.event_reactor_adapter import (
+            _GLOBAL_FINAL_DAILY_EXACT_SETTLEMENT_SIMPLEX_BAND_BASIS,
             _prepare_current_global_probability_family,
         )
 
@@ -4038,16 +4063,38 @@ def _refresh_current_global_day0_probability(
     held_probability = float(held_samples.mean())
 
     refreshed = replace(position)
-    refreshed.selected_method = SELECTED_METHOD_DAY0_OBSERVATION_REMAINING_WINDOW
+    is_final_daily = (
+        witness.band_basis
+        == _GLOBAL_FINAL_DAILY_EXACT_SETTLEMENT_SIMPLEX_BAND_BASIS
+    )
+    selected_method = (
+        SELECTED_METHOD_FINAL_DAILY_OBSERVATION_EXACT
+        if is_final_daily
+        else SELECTED_METHOD_DAY0_OBSERVATION_REMAINING_WINDOW
+    )
+    probability_authority = (
+        "final_daily_observation_exact_global_probability_v1"
+        if is_final_daily
+        else "day0_remaining_day_global_probability_v1"
+    )
+    refreshed.selected_method = selected_method
     _append_monitor_validation(
         refreshed,
-        "probability_authority=day0_remaining_day_global_probability_v1",
+        f"probability_authority={probability_authority}",
     )
     _append_monitor_validation(
         refreshed,
         f"probability_witness_identity:{witness.witness_identity}",
     )
-    _stamp_day0_remaining_window_belief(refreshed, metric=metric)
+    if is_final_daily:
+        _stamp_day0_monitor_belief(
+            refreshed,
+            selected_method=selected_method,
+            kind="exact_final_daily_observation",
+            metric=metric,
+        )
+    else:
+        _stamp_day0_remaining_window_belief(refreshed, metric=metric)
     _set_monitor_probability_fresh(refreshed, True)
     _set_day0_zero_probability_exit_authority(refreshed, False)
     setattr(refreshed, _GLOBAL_MONITOR_SAMPLES_ATTR, held_samples)
@@ -4059,8 +4106,8 @@ def _refresh_current_global_day0_probability(
         "_day0_monitor_probability_receipt",
         {
             "schema_version": 1,
-            "selected_method": SELECTED_METHOD_DAY0_OBSERVATION_REMAINING_WINDOW,
-            "probability_authority": "day0_remaining_day_global_probability_v1",
+            "selected_method": selected_method,
+            "probability_authority": probability_authority,
             "metric": metric,
             "held_direction": direction,
             "held_side_probability": held_probability,
@@ -4074,7 +4121,9 @@ def _refresh_current_global_day0_probability(
                 "held_side_summary": _monitor_receipt_quantiles(held_samples),
             },
             "observation": dict(observation) if isinstance(observation, dict) else {},
-            "remaining_window": {
+            "remaining_window": None
+            if is_final_daily
+            else {
                 "source": "current_global_probability_builder",
                 "finite_evidence_member_count": day0_payload.get(
                     "_edli_day0_finite_evidence_member_count"
@@ -4261,8 +4310,10 @@ def monitor_probability_refresh(
 ) -> tuple[float, Position, bool | None]:
     """Refresh held-side posterior without consuming the held-token quote.
 
-    PRIMARY AUTHORITY: a qualified Day0 absorbing hard fact is exact and
-    dominates model belief. When no absorbing hard fact exists, the K1 single
+    PRIMARY AUTHORITY: a same-day absorbing hard fact is exact and dominates
+    model belief. A post-day final observation enters through the complete
+    global simplex so SELL remains owned by the BUY/SELL/HOLD/CASH auction.
+    When no absorbing hard fact exists, the K1 single
     belief authority is the replacement-chain posterior
     (``forecast_posteriors``), the SAME authority the entry decision used. The
     legacy ens/day0 refreshers below remain as explicit fallback telemetry only;
@@ -4289,16 +4340,22 @@ def monitor_probability_refresh(
             except Exception as exc:  # noqa: BLE001 - current authority fails closed
                 stale = replace(pos)
                 _set_monitor_probability_fresh(stale, False)
+                post_day_final_missing = (
+                    "POST_LOCAL_DAY_FINAL_OBSERVATION_UNAVAILABLE" in str(exc)
+                )
                 _append_monitor_validation(
                     stale,
-                    "day0_current_global_probability_unavailable:"
+                    "POST_LOCAL_DAY_FINAL_OBSERVATION_UNAVAILABLE"
+                    if post_day_final_missing
+                    else "day0_current_global_probability_unavailable:"
                     f"{type(exc).__name__}:{exc}",
                 )
-                _enqueue_single_family_belief_reseed_failsoft(
-                    city=str(pos.city),
-                    target_date=str(pos.target_date),
-                    metric=resolve_position_metric(pos)[0],
-                )
+                if not post_day_final_missing:
+                    _enqueue_single_family_belief_reseed_failsoft(
+                        city=str(pos.city),
+                        target_date=str(pos.target_date),
+                        metric=resolve_position_metric(pos)[0],
+                    )
                 logger.warning(
                     "monitor_probability_refresh: current global Day0 probability "
                     "unavailable for %s: %s",

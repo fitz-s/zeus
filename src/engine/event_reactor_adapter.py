@@ -154,6 +154,7 @@ import sqlite3
 import time as _time
 from dataclasses import dataclass, replace as dataclass_replace
 from datetime import date, datetime, time, timedelta, timezone
+from zoneinfo import ZoneInfo
 from decimal import Decimal
 from collections.abc import Iterable, Mapping
 from typing import Any, Callable, get_args
@@ -23226,7 +23227,83 @@ _GLOBAL_CURRENT_SETTLEMENT_SIMPLEX_BAND_BASIS = (
 _GLOBAL_DAY0_CURRENT_SETTLEMENT_SIMPLEX_BAND_BASIS = (
     "current_coherent_day0_remaining_finite_evidence_v2"
 )
+_GLOBAL_FINAL_DAILY_EXACT_SETTLEMENT_SIMPLEX_BAND_BASIS = (
+    "final_daily_observation_exact_settlement_simplex_v1"
+)
 _GLOBAL_CURRENT_EVIDENCE_TAIL_ALPHA = 0.05
+
+
+def _final_daily_exact_probability_components(
+    *,
+    omega: object,
+    settled_extreme: float,
+) -> tuple[np.ndarray, np.ndarray, str]:
+    """Collapse a complete MECE family to the one source-final settlement atom."""
+
+    winning = [
+        index
+        for index, outcome in enumerate(getattr(omega, "bins", ()) or ())
+        if (
+            (outcome.lower_native is None or settled_extreme >= outcome.lower_native)
+            and (outcome.upper_native is None or settled_extreme <= outcome.upper_native)
+        )
+    ]
+    if len(winning) != 1:
+        raise ValueError("GLOBAL_FINAL_DAILY_SETTLEMENT_BIN_AMBIGUOUS")
+    point_q = np.zeros(len(omega.bins), dtype=np.float64)
+    point_q[winning[0]] = 1.0
+    samples = np.repeat(
+        point_q.reshape(1, -1),
+        max(2, int(edge_n_bootstrap())),
+        axis=0,
+    )
+    return (
+        np.ascontiguousarray(samples, dtype=np.float64),
+        np.ascontiguousarray(point_q, dtype=np.float64),
+        _GLOBAL_FINAL_DAILY_EXACT_SETTLEMENT_SIMPLEX_BAND_BASIS,
+    )
+
+
+def _global_final_daily_probability_payload(
+    *,
+    family: object,
+    final_observation: object,
+    probability_base_identity: str,
+) -> dict[str, object]:
+    binding = {
+        "city": str(getattr(family, "city", "") or ""),
+        "target_date": str(getattr(family, "target_date", "") or ""),
+        "metric": str(getattr(family, "metric", "") or "").strip().lower(),
+        "raw_value": float(final_observation.raw_extreme),
+        "rounded_value": float(final_observation.settled_extreme),
+        "station_id": str(final_observation.station_id),
+        "settlement_source": str(final_observation.source),
+        "settlement_unit": str(final_observation.unit),
+        "source_available_at": final_observation.fetched_at.isoformat(),
+        "probability_base_identity": probability_base_identity,
+        "final_daily": True,
+    }
+    return {
+        "probability_authority": "final_daily_observation_exact_global_probability_v1",
+        "q_source": "final_daily_observation_exact",
+        "observation_time": binding["source_available_at"],
+        "observation_available_at": binding["source_available_at"],
+        "raw_value": binding["raw_value"],
+        "rounded_value": binding["rounded_value"],
+        "station_id": binding["station_id"],
+        "settlement_source": binding["settlement_source"],
+        "settlement_unit": binding["settlement_unit"],
+        "source_match_status": "MATCH",
+        "local_date_status": "COMPLETE",
+        "station_match_status": "MATCH",
+        "metric_match_status": "MATCH",
+        "rounding_status": "MATCH",
+        "source_authorized_status": "AUTHORIZED",
+        "live_authority_status": "live",
+        "observation_context_id": "global_final_daily:" + stable_hash(binding),
+        "_edli_day0_q_mode": "final_daily_observation_exact",
+        "_edli_global_day0_binding": binding,
+    }
 
 
 def _replacement_global_probability_components(
@@ -23529,46 +23606,82 @@ def _prepare_current_global_probability_family(
     day0_observation_conn = observation_conn or forecast_conn
     day0_snapshot: Mapping[str, object] | None = None
     day0_base_identity = ""
+    final_daily_observation = None
     source_available_at = ""
     bundle = None
     if is_day0:
-        observation_table = day0_observation_conn.execute(
-            "SELECT 1 FROM sqlite_master "
-            "WHERE type='table' AND name='observation_instants'"
-        ).fetchone()
-        if observation_table is None:
-            raise ValueError("GLOBAL_DAY0_OBSERVATION_HWM_UNAVAILABLE")
-        day0_snapshot = _forecast_snapshot_row_for_event(
-            forecast_conn,
-            event=event,
-            family=family,
-            allow_latest=True,
-            decision_time=decision_time,
+        city = runtime_cities_by_name().get(str(family.city))
+        if city is None:
+            raise ValueError("GLOBAL_DAY0_CITY_CONFIG_MISSING")
+        from src.execution.day0_hard_fact_exit import (
+            _final_daily_observation_extreme,
         )
-        if day0_snapshot is None:
-            raise ValueError("GLOBAL_DAY0_BASE_FORECAST_SNAPSHOT_MISSING")
-        day0_snapshot_id = str(day0_snapshot.get("snapshot_id") or "").strip()
-        if not day0_snapshot_id:
-            raise ValueError("GLOBAL_DAY0_BASE_FORECAST_SNAPSHOT_ID_MISSING")
-        source_cycle_raw = (
-            day0_snapshot.get("source_cycle_time")
-            or day0_snapshot.get("issue_time")
+
+        final_daily_observation = _final_daily_observation_extreme(
+            city=city,
+            target_date=str(family.target_date),
+            metric=str(family.metric),
+            now=decision_time,
+            conn=forecast_conn,
         )
-        source_available_at = str(
-            day0_snapshot.get("source_available_at")
-            or day0_snapshot.get("available_at")
-            or ""
-        ).strip()
-        day0_base_identity = stable_hash(
-            {
-                "snapshot_id": day0_snapshot_id,
-                "source_cycle_time": source_cycle_raw,
-                "source_available_at": source_available_at,
-                "city": family.city,
-                "target_date": str(family.target_date),
-                "metric": family.metric,
-            }
-        )
+        local_target = date.fromisoformat(str(family.target_date))
+        local_today = decision_time.astimezone(ZoneInfo(str(city.timezone))).date()
+        if final_daily_observation is not None:
+            source_cycle_raw = final_daily_observation.fetched_at.isoformat()
+            source_available_at = source_cycle_raw
+            day0_base_identity = stable_hash(
+                {
+                    "city": family.city,
+                    "target_date": str(family.target_date),
+                    "metric": family.metric,
+                    "raw_extreme": final_daily_observation.raw_extreme,
+                    "settled_extreme": final_daily_observation.settled_extreme,
+                    "source": final_daily_observation.source,
+                    "station_id": final_daily_observation.station_id,
+                    "unit": final_daily_observation.unit,
+                    "fetched_at": source_available_at,
+                }
+            )
+        else:
+            if local_target < local_today:
+                raise ValueError("POST_LOCAL_DAY_FINAL_OBSERVATION_UNAVAILABLE")
+            observation_table = day0_observation_conn.execute(
+                "SELECT 1 FROM sqlite_master "
+                "WHERE type='table' AND name='observation_instants'"
+            ).fetchone()
+            if observation_table is None:
+                raise ValueError("GLOBAL_DAY0_OBSERVATION_HWM_UNAVAILABLE")
+            day0_snapshot = _forecast_snapshot_row_for_event(
+                forecast_conn,
+                event=event,
+                family=family,
+                allow_latest=True,
+                decision_time=decision_time,
+            )
+            if day0_snapshot is None:
+                raise ValueError("GLOBAL_DAY0_BASE_FORECAST_SNAPSHOT_MISSING")
+            day0_snapshot_id = str(day0_snapshot.get("snapshot_id") or "").strip()
+            if not day0_snapshot_id:
+                raise ValueError("GLOBAL_DAY0_BASE_FORECAST_SNAPSHOT_ID_MISSING")
+            source_cycle_raw = (
+                day0_snapshot.get("source_cycle_time")
+                or day0_snapshot.get("issue_time")
+            )
+            source_available_at = str(
+                day0_snapshot.get("source_available_at")
+                or day0_snapshot.get("available_at")
+                or ""
+            ).strip()
+            day0_base_identity = stable_hash(
+                {
+                    "snapshot_id": day0_snapshot_id,
+                    "source_cycle_time": source_cycle_raw,
+                    "source_available_at": source_available_at,
+                    "city": family.city,
+                    "target_date": str(family.target_date),
+                    "metric": family.metric,
+                }
+            )
     else:
         readiness = _latest_replacement_readiness(
             forecast_conn,
@@ -23637,16 +23750,23 @@ def _prepare_current_global_probability_family(
     )
     omega = build_outcome_space(family, case)
     if is_day0:
-        current_day0_payload = _global_day0_execution_payload(
-            event,
-            family=family,
-            resolution=omega.resolution,
-            conditioning=None,
-            observation_conn=day0_observation_conn,
-            decision_time=decision_time,
-            posterior_id=None,
-            probability_base_identity=day0_base_identity,
-        )
+        if final_daily_observation is not None:
+            current_day0_payload = _global_final_daily_probability_payload(
+                family=family,
+                final_observation=final_daily_observation,
+                probability_base_identity=day0_base_identity,
+            )
+        else:
+            current_day0_payload = _global_day0_execution_payload(
+                event,
+                family=family,
+                resolution=omega.resolution,
+                conditioning=None,
+                observation_conn=day0_observation_conn,
+                decision_time=decision_time,
+                posterior_id=None,
+                probability_base_identity=day0_base_identity,
+            )
         payload.update(current_day0_payload)
         if day0_payload_out is not None:
             day0_payload_out.update(current_day0_payload)
@@ -23665,7 +23785,15 @@ def _prepare_current_global_probability_family(
     )
     probability_authority = "replacement_current_global_probability_v1"
     components = None
-    if current_day0_payload is not None:
+    if final_daily_observation is not None:
+        components = _final_daily_exact_probability_components(
+            omega=omega,
+            settled_extreme=final_daily_observation.settled_extreme,
+        )
+        probability_authority = (
+            "final_daily_observation_exact_global_probability_v1"
+        )
+    elif current_day0_payload is not None:
         components = _day0_remaining_global_probability_components(
             event,
             forecast_conn=forecast_conn,
@@ -23687,7 +23815,11 @@ def _prepare_current_global_probability_family(
     if components is None:
         raise ValueError("GLOBAL_CURRENT_POSTERIOR_SIMPLEX_INVALID")
     samples, point_q, band_basis = components
-    if current_day0_payload is not None and day0_payload_out is not None:
+    if (
+        current_day0_payload is not None
+        and final_daily_observation is None
+        and day0_payload_out is not None
+    ):
         for key in (
             "_edli_day0_finite_evidence_member_count",
             "_edli_day0_finite_evidence_hits_by_condition",
@@ -23877,7 +24009,10 @@ def current_global_probability_authority(
         max_age = getattr(witness, "max_age", None)
         if (
             str(getattr(witness, "band_basis", ""))
-            != _GLOBAL_DAY0_CURRENT_SETTLEMENT_SIMPLEX_BAND_BASIS
+            not in {
+                _GLOBAL_DAY0_CURRENT_SETTLEMENT_SIMPLEX_BAND_BASIS,
+                _GLOBAL_FINAL_DAILY_EXACT_SETTLEMENT_SIMPLEX_BAND_BASIS,
+            }
             or not isinstance(captured_at, datetime)
             or captured_at.tzinfo is None
             or not isinstance(max_age, timedelta)

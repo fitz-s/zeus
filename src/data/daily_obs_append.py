@@ -280,6 +280,9 @@ def _fetch_wu_icao_daily_highs_lows(
 
 HKO_API_URL = "https://data.weather.gov.hk/weatherAPI/opendata/opendata.php"
 HKO_REALTIME_URL = "https://data.weather.gov.hk/weatherAPI/opendata/weather.php"
+HKO_DAILY_EXTRACT_URL = (
+    "https://www.hko.gov.hk/cis/dailyExtract/dailyExtract_{year:04d}{month:02d}.xml"
+)
 HKO_STATION = "HKO"
 HKO_CITY_NAME = "Hong Kong"
 HKO_SOURCE = "hko_daily_api"
@@ -287,6 +290,159 @@ HKO_REALTIME_SOURCE = "hko_realtime_api"
 HKO_FETCH_RETRY_COUNT = 2
 HKO_FETCH_RETRY_BACKOFF_SEC = 3.0
 HKO_REALTIME_MIN_READINGS = 18
+
+
+def _fetch_hko_daily_extract_month(
+    year: int,
+    month: int,
+) -> tuple[dict[tuple[int, int, int], tuple[float, float]], str, str]:
+    """Fetch current-month official HKO Daily Extract high/low rows."""
+
+    import hashlib
+
+    url = HKO_DAILY_EXTRACT_URL.format(year=year, month=month)
+    response = httpx.get(url, timeout=30.0)
+    response.raise_for_status()
+    payload_hash = "sha256:" + hashlib.sha256(response.content).hexdigest()
+    body = response.json()
+    rows: dict[tuple[int, int, int], tuple[float, float]] = {}
+    for block in (body.get("stn") or {}).get("data") or []:
+        try:
+            if int(block.get("month")) != month:
+                continue
+        except (TypeError, ValueError):
+            continue
+        for row in block.get("dayData") or []:
+            if len(row) < 5 or not str(row[0]).strip().isdigit():
+                continue
+            try:
+                day = int(str(row[0]).strip())
+                rows[(year, month, day)] = (float(row[2]), float(row[4]))
+            except (IndexError, TypeError, ValueError):
+                continue
+    return rows, url, payload_hash
+
+
+def append_hko_daily_extract_yesterday(
+    conn,
+    *,
+    now_utc: datetime,
+    rebuild_run_id: str,
+) -> dict[str, int]:
+    """Poll the finalized HKO Daily Extract until yesterday is published.
+
+    The hourly daemon retries only while the source-correct VERIFIED row is
+    absent. This makes publication latency, rather than an arbitrary clock
+    hour, determine when post-day probability can become exact.
+    """
+
+    stats = {"inserted": 0, "already_present": 0, "not_published": 0,
+             "guard_rejected": 0, "fetch_errors": 0}
+    hkt = ZoneInfo("Asia/Hong_Kong")
+    target_d = now_utc.astimezone(hkt).date() - timedelta(days=1)
+    existing = conn.execute(
+        """
+        SELECT 1
+          FROM observations
+         WHERE city = ? AND target_date = ? AND source = ?
+           AND UPPER(COALESCE(authority, '')) = 'VERIFIED'
+         LIMIT 1
+        """,
+        (HKO_CITY_NAME, target_d.isoformat(), HKO_SOURCE),
+    ).fetchone()
+    if existing is not None:
+        stats["already_present"] = 1
+        return stats
+
+    try:
+        rows, url, payload_hash = _fetch_hko_daily_extract_month(
+            target_d.year,
+            target_d.month,
+        )
+    except Exception as exc:  # noqa: BLE001 - source failure is durable telemetry
+        stats["fetch_errors"] = 1
+        logger.warning("HKO Daily Extract fetch failed for %s: %s", target_d, exc)
+        record_failed(
+            conn,
+            data_table=DataTable.OBSERVATIONS,
+            city=HKO_CITY_NAME,
+            data_source=HKO_SOURCE,
+            target_date=target_d,
+            reason=CoverageReason.NETWORK_ERROR,
+            retry_after=_retry_embargo(hours=1),
+        )
+        conn.commit()
+        return stats
+
+    values = rows.get((target_d.year, target_d.month, target_d.day))
+    if values is None:
+        stats["not_published"] = 1
+        record_failed(
+            conn,
+            data_table=DataTable.OBSERVATIONS,
+            city=HKO_CITY_NAME,
+            data_source=HKO_SOURCE,
+            target_date=target_d,
+            reason=CoverageReason.SOURCE_NOT_PUBLISHED_YET,
+            retry_after=_retry_embargo(hours=1),
+        )
+        conn.commit()
+        return stats
+
+    high_val, low_val = values
+    try:
+        atom_high, atom_low = _build_atom_pair(
+            city_name=HKO_CITY_NAME,
+            target_d=target_d,
+            high_val=high_val,
+            low_val=low_val,
+            raw_unit="C",
+            target_unit="C",
+            station_id=HKO_STATION,
+            source=HKO_SOURCE,
+            rebuild_run_id=rebuild_run_id,
+            data_source_version="hko_dailyextract_live_v1",
+            api_endpoint=url,
+            provenance={
+                "source": HKO_SOURCE,
+                "endpoint_family": "hko_dailyextract",
+                "station": HKO_STATION,
+                "target_date": target_d.isoformat(),
+                "payload_hash": payload_hash,
+            },
+            fetch_utc=now_utc,
+        )
+    except IngestionRejected as exc:
+        stats["guard_rejected"] = 1
+        logger.warning("HKO Daily Extract guard dropped %s: %s", target_d, exc)
+        record_legitimate_gap(
+            conn,
+            data_table=DataTable.OBSERVATIONS,
+            city=HKO_CITY_NAME,
+            data_source=HKO_SOURCE,
+            target_date=target_d,
+            reason=CoverageReason.GUARD_REJECTED,
+        )
+        conn.commit()
+        return stats
+
+    try:
+        _write_atom_with_coverage(conn, atom_high, atom_low, data_source=HKO_SOURCE)
+        stats["inserted"] = 1
+    except Exception as exc:  # noqa: BLE001 - preserve retryable writer evidence
+        stats["fetch_errors"] = 1
+        logger.error("HKO Daily Extract insert failed %s: %s", target_d, exc)
+        record_failed(
+            conn,
+            data_table=DataTable.OBSERVATIONS,
+            city=HKO_CITY_NAME,
+            data_source=HKO_SOURCE,
+            target_date=target_d,
+            reason=CoverageReason.NETWORK_ERROR,
+            retry_after=_retry_embargo(hours=1),
+        )
+    conn.commit()
+    return stats
 
 
 def _fetch_hko_month(
@@ -1341,6 +1497,15 @@ def daily_tick(
     # archives aren't yet available (they lag by weeks/months).
     _accumulate_hko_reading(conn)
 
+    # HKO's current-month Daily Extract is the market-named final source. Poll
+    # only while yesterday lacks a source-correct VERIFIED row; once published,
+    # later hourly ticks are a local no-op.
+    hko_daily_extract_stats = append_hko_daily_extract_yesterday(
+        conn,
+        now_utc=now_utc,
+        rebuild_run_id=rebuild_run_id,
+    )
+
     # HKO refresh: gate to once per day at UTC hour 2 (=10:00 HKT). Running
     # every hourly tick produced ~720 fetches/month with near-zero marginal
     # benefit since HKO publishes monthly with multi-day #→C flips.
@@ -1378,7 +1543,13 @@ def daily_tick(
             for k in ogimet_stats:
                 ogimet_stats[k] += stats.get(k, 0)
 
-    return {"wu": wu_totals, "hko": hko_stats, "hko_realtime": hko_rt_stats, "ogimet": ogimet_stats}
+    return {
+        "wu": wu_totals,
+        "hko": hko_stats,
+        "hko_daily_extract": hko_daily_extract_stats,
+        "hko_realtime": hko_rt_stats,
+        "ogimet": ogimet_stats,
+    }
 
 
 def catch_up_missing(

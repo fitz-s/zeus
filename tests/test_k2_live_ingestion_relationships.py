@@ -765,6 +765,57 @@ def test_R8_hko_backfill_persists_provenance_identity(monkeypatch) -> None:
     assert low_provenance["component_payload_hashes"]["CLMMINT"].startswith("sha256:")
 
 
+def test_hko_daily_extract_poll_materializes_final_source_once(monkeypatch) -> None:
+    conn = _memdb()
+    calls = []
+
+    def fake_fetch(year, month):
+        calls.append((year, month))
+        return (
+            {(2026, 7, 15): (28.8, 25.7)},
+            "https://www.hko.gov.hk/cis/dailyExtract/dailyExtract_202607.xml",
+            "sha256:" + "a" * 64,
+        )
+
+    monkeypatch.setattr(
+        daily_obs_append,
+        "_fetch_hko_daily_extract_month",
+        fake_fetch,
+    )
+    now = datetime(2026, 7, 15, 22, 0, tzinfo=timezone.utc)
+
+    first = daily_obs_append.append_hko_daily_extract_yesterday(
+        conn,
+        now_utc=now,
+        rebuild_run_id="daily-extract-first",
+    )
+    second = daily_obs_append.append_hko_daily_extract_yesterday(
+        conn,
+        now_utc=now,
+        rebuild_run_id="daily-extract-second",
+    )
+    row = conn.execute(
+        """
+        SELECT high_temp, low_temp, source, authority, data_source_version,
+               high_provenance_metadata
+          FROM observations
+         WHERE city='Hong Kong' AND target_date='2026-07-15'
+           AND source='hko_daily_api'
+        """
+    ).fetchone()
+
+    assert first["inserted"] == 1
+    assert second["already_present"] == 1
+    assert calls == [(2026, 7)]
+    assert row["high_temp"] == pytest.approx(28.8)
+    assert row["low_temp"] == pytest.approx(25.7)
+    assert row["authority"] == "VERIFIED"
+    assert row["data_source_version"] == "hko_dailyextract_live_v1"
+    assert json.loads(row["high_provenance_metadata"])["payload_hash"] == (
+        "sha256:" + "a" * 64
+    )
+
+
 # ---------------------------------------------------------------------------
 # R9 — State-machine upsert rules: no demotions of terminal states
 # ---------------------------------------------------------------------------

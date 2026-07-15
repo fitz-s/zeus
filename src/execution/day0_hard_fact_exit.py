@@ -52,8 +52,9 @@ import logging
 import threading
 import time
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from typing import Any, Optional
+from zoneinfo import ZoneInfo
 
 logger = logging.getLogger(__name__)
 
@@ -93,6 +94,138 @@ class DurableObservationExtremes:
     low: Optional[float]
     source: str
     row_count: int
+
+
+@dataclass(frozen=True)
+class FinalDailyObservation:
+    """Source-correct, decision-time-causal final daily settlement evidence."""
+
+    raw_extreme: float
+    settled_extreme: float
+    source: str
+    station_id: str
+    unit: str
+    fetched_at: datetime
+
+
+def _target_local_day_complete(
+    city: Any,
+    target_date: str,
+    *,
+    now: datetime,
+) -> bool:
+    """Whether the complete contract-local target day is in the past."""
+
+    try:
+        target = date.fromisoformat(str(target_date))
+        local_day = now.astimezone(ZoneInfo(str(getattr(city, "timezone", "")))).date()
+    except (TypeError, ValueError):
+        return False
+    return target < local_day
+
+
+def _final_daily_source_matches(city: Any, source: str) -> bool:
+    source = str(source or "").strip().lower()
+    source_type = str(getattr(city, "settlement_source_type", "") or "").strip().lower()
+    if source_type == "hko":
+        # The live market contract names finalized HKO Daily Extract data.
+        # hko_realtime_api is sampled current-temperature accumulation, not
+        # the final daily maximum/minimum product.
+        return source == "hko_daily_api" or source.startswith("hko_daily_api_")
+    # WU rows require a separate proof that the first following-day datapoint
+    # has published; NOAA/Ogimet rows require their own resolver-finality
+    # credential. A daily value alone is not sufficient to call either final.
+    return False
+
+
+def _final_daily_observation_extreme(
+    *,
+    city: Any,
+    target_date: str,
+    metric: str,
+    now: datetime,
+    conn: Any,
+) -> FinalDailyObservation | None:
+    """Read source-correct final daily settlement evidence after local day end.
+
+    Daily observations are a separate truth plane from Day0 hourly/current
+    observations. Only VERIFIED rows from the configured settlement family may
+    collapse the held-side probability to an exact outcome.
+    """
+
+    if conn is None or not _target_local_day_complete(city, target_date, now=now):
+        return None
+    metric = str(metric or "").strip().lower()
+    field = "high_temp" if metric == "high" else "low_temp" if metric == "low" else ""
+    if not field:
+        return None
+    expected_unit = str(getattr(city, "settlement_unit", "") or "").strip().upper()
+    expected_station = (
+        "HKO"
+        if str(getattr(city, "settlement_source_type", "") or "").strip().lower() == "hko"
+        else str(getattr(city, "wu_station", "") or "").strip().upper()
+    )
+    for table_ref in ("forecasts.observations", "observations"):
+        try:
+            rows = conn.execute(
+                f"""
+                SELECT source, station_id, authority, unit, {field} AS extreme,
+                       fetched_at
+                  FROM {table_ref}
+                 WHERE city = ?
+                   AND target_date = ?
+                   AND {field} IS NOT NULL
+                 ORDER BY fetched_at DESC
+                """,
+                (str(getattr(city, "name", "") or ""), str(target_date)),
+            ).fetchall()
+        except Exception:  # noqa: BLE001 - absent attachment/schema fails closed
+            continue
+        for row in rows:
+            try:
+                source = row["source"] if hasattr(row, "keys") else row[0]
+                station = row["station_id"] if hasattr(row, "keys") else row[1]
+                authority = row["authority"] if hasattr(row, "keys") else row[2]
+                unit = row["unit"] if hasattr(row, "keys") else row[3]
+                extreme = row["extreme"] if hasattr(row, "keys") else row[4]
+                fetched_at_raw = row["fetched_at"] if hasattr(row, "keys") else row[5]
+            except (KeyError, IndexError, TypeError):
+                continue
+            if not _final_daily_source_matches(city, source):
+                continue
+            if str(authority or "").strip().upper() != "VERIFIED":
+                continue
+            if expected_unit and str(unit or "").strip().upper() != expected_unit:
+                continue
+            station_norm = str(station or "").strip().upper()
+            if expected_station and station_norm not in {
+                expected_station,
+            } and not station_norm.startswith(f"{expected_station}:"):
+                continue
+            try:
+                fetched_at = datetime.fromisoformat(
+                    str(fetched_at_raw or "").replace("Z", "+00:00")
+                )
+                if fetched_at.tzinfo is None:
+                    continue
+                fetched_at = fetched_at.astimezone(UTC)
+                if fetched_at > now.astimezone(UTC):
+                    continue
+                from src.contracts.settlement_semantics import SettlementSemantics
+
+                raw_extreme = float(extreme)
+                settled_grid = SettlementSemantics.for_city(city).round_single(raw_extreme)
+            except Exception:  # noqa: BLE001 - invalid semantics/value cannot authorize q
+                continue
+            return FinalDailyObservation(
+                raw_extreme=raw_extreme,
+                settled_extreme=float(settled_grid),
+                source=str(source),
+                station_id=station_norm,
+                unit=str(unit).strip().upper(),
+                fetched_at=fetched_at,
+            )
+    return None
 
 
 def _normalize_direction(direction: Any) -> str:

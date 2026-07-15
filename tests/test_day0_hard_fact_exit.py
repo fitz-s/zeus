@@ -38,6 +38,7 @@ import pytest
 
 from src.execution.day0_hard_fact_exit import (
     HardFactVerdict,
+    _final_daily_observation_extreme,
     _reset_wu_memo_for_tests,
     cancel_day0_dead_bin_resting_entries,
     evaluate_hard_fact_exit,
@@ -138,6 +139,140 @@ def _set_metar_memo(monkeypatch, value):
         "src.execution.day0_hard_fact_exit._metar_rounded_extreme",
         lambda city_name, target_date, metric, **kwargs: value,
     )
+
+
+def _final_daily_observation_conn(
+    *,
+    source: str = "hko_daily_api",
+    authority: str = "VERIFIED",
+    station_id: str = "HKO",
+    high_temp: float = 28.8,
+    fetched_at: str = "2026-07-15T22:00:00+00:00",
+) -> sqlite3.Connection:
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        """
+        CREATE TABLE observations (
+            city TEXT NOT NULL,
+            target_date TEXT NOT NULL,
+            source TEXT NOT NULL,
+            station_id TEXT,
+            authority TEXT,
+            unit TEXT,
+            high_temp REAL,
+            low_temp REAL,
+            fetched_at TEXT
+        )
+        """
+    )
+    conn.execute(
+        "INSERT INTO observations VALUES (?,?,?,?,?,?,?,?,?)",
+        (
+            "Hong Kong",
+            "2026-07-15",
+            source,
+            station_id,
+            authority,
+            "C",
+            high_temp,
+            26.1,
+            fetched_at,
+        ),
+    )
+    return conn
+
+
+def test_post_local_day_hko_daily_extract_authorizes_exact_no_win(monkeypatch):
+    conn = _final_daily_observation_conn(high_temp=28.8)
+    final = _final_daily_observation_extreme(
+        city=_hong_kong(),
+        target_date="2026-07-15",
+        metric="high",
+        now=datetime(2026, 7, 15, 22, 0, tzinfo=UTC),
+        conn=conn,
+    )
+    assert final is not None
+    verdict = final_observed_bin_verdict(
+        metric="high",
+        direction="buy_no",
+        bin_low=30.0,
+        bin_high=30.0,
+        final_extreme=final.settled_extreme,
+    )
+
+    assert verdict is not None
+    assert verdict.action == "HOLD_STRUCTURAL_WIN"
+    assert verdict.rounded_extreme == 28.0
+    assert final.source == "hko_daily_api"
+
+
+def test_post_local_day_hko_daily_extract_authorizes_exact_no_loss(monkeypatch):
+    conn = _final_daily_observation_conn(high_temp=30.8)
+    final = _final_daily_observation_extreme(
+        city=_hong_kong(),
+        target_date="2026-07-15",
+        metric="high",
+        now=datetime(2026, 7, 15, 22, 0, tzinfo=UTC),
+        conn=conn,
+    )
+    assert final is not None
+    verdict = final_observed_bin_verdict(
+        metric="high",
+        direction="buy_no",
+        bin_low=30.0,
+        bin_high=30.0,
+        final_extreme=final.settled_extreme,
+    )
+
+    assert verdict is not None
+    assert verdict.action == "EXIT_DEAD_BIN"
+    assert verdict.rounded_extreme == 30.0
+
+
+@pytest.mark.parametrize(
+    ("source", "authority", "station_id"),
+    [
+        ("hko_realtime_api", "VERIFIED", "HKO"),
+        ("hko_daily_api", "UNVERIFIED", "HKO"),
+        ("hko_daily_api", "VERIFIED", "VHHH"),
+    ],
+)
+def test_post_local_day_nonfinal_hko_rows_cannot_authorize_probability(
+    monkeypatch,
+    source,
+    authority,
+    station_id,
+):
+    conn = _final_daily_observation_conn(
+        source=source,
+        authority=authority,
+        station_id=station_id,
+    )
+    final = _final_daily_observation_extreme(
+        city=_hong_kong(),
+        target_date="2026-07-15",
+        metric="high",
+        now=datetime(2026, 7, 15, 22, 0, tzinfo=UTC),
+        conn=conn,
+    )
+
+    assert final is None
+
+
+def test_post_local_day_future_final_row_is_not_decision_time_authority():
+    conn = _final_daily_observation_conn(
+        fetched_at="2026-07-15T22:00:01+00:00"
+    )
+    final = _final_daily_observation_extreme(
+        city=_hong_kong(),
+        target_date="2026-07-15",
+        metric="high",
+        now=datetime(2026, 7, 15, 22, 0, tzinfo=UTC),
+        conn=conn,
+    )
+
+    assert final is None
 
 
 # ===========================================================================
@@ -933,20 +1068,22 @@ class TestHardFactExitDespiteCanonicalWriteFailure:
         )
         return results, summary
 
-    def test_dead_bin_exits_even_when_canonical_write_fails(self, monkeypatch):
+    def test_dead_bin_sell_stays_global_when_canonical_write_fails(self, monkeypatch):
         verdict = HardFactVerdict(
             action="EXIT_DEAD_BIN",
             reason="running high extreme 26.0 beyond bin [25.0,25.0] — YES structurally dead",
             metric="high", rounded_extreme=26.0, source="same_station_fast_tail",
         )
         results, summary = self._run_phase(monkeypatch, hard_fact_verdict=verdict)
-        assert summary.get("day0_hard_fact_exits") == 1
-        assert summary.get("day0_hard_fact_exit_despite_canonical_write_failure") == 1
+        assert summary.get("day0_hard_fact_sells_delegated_to_global_auction") == 1
         assert summary.get("monitor_canonical_write_failed") == 1
         exits = [r for r in results if getattr(r, "should_exit", False)]
-        assert exits, "the dead-bin exit decision must be recorded despite the write failure"
-        assert any("DAY0_HARD_FACT_BIN_DEAD" in str(getattr(r, "exit_reason", "")) for r in exits)
-        assert summary.get("exits_suppressed_no_submit", 0) >= 1  # submit-disabled fixture: decision made, no order
+        assert not exits
+        assert any(
+            "MONITOR_CANONICAL_WRITE_FAILED" in str(getattr(r, "exit_reason", ""))
+            for r in results
+        )
+        assert summary.get("exits_suppressed_no_submit", 0) == 0
 
     def test_no_hard_fact_keeps_the_existing_failure_continue(self, monkeypatch):
         results, summary = self._run_phase(monkeypatch, hard_fact_verdict=None)
@@ -1114,9 +1251,7 @@ class TestStructuralWinTerminalHold:
             "ORANGE favorable_exits counter must be 0 for a structural-win hold"
         )
 
-    def test_kill_switch_via_exit_dead_bin_overrides_structural_win(self, monkeypatch):
-        """Separately named: EXIT_DEAD_BIN (kill-switch / manual reduce-only) CAN
-        override the structural hold — it is a stronger verdict on the same axis."""
+    def test_hard_fact_sell_signal_cannot_bypass_global_auction(self, monkeypatch):
         import logging as _logging
         import numpy as np
         from src.contracts import EdgeContext, EntryMethod
@@ -1196,9 +1331,14 @@ class TestStructuralWinTerminalHold:
             None, LiveClob(), portfolio, Artifact(), Tracker(), summary,
             deps=deps, exit_order_submit_enabled=False,
         )
-        assert summary.get("day0_hard_fact_exits") == 1
+        assert summary.get("day0_hard_fact_sells_delegated_to_global_auction") == 1
         exits = [r for r in results if getattr(r, "should_exit", False)]
-        assert exits, "EXIT_DEAD_BIN verdict must override and produce should_exit=True"
+        assert not exits
+        assert any(
+            "GLOBAL_AUCTION_OWNS_HARD_FACT_SELL"
+            in str(getattr(r, "exit_reason", ""))
+            for r in results
+        )
 
 
 def test_pending_exit_position_is_still_re_evaluated_without_duplicate_submit(monkeypatch):

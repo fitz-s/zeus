@@ -1957,6 +1957,123 @@ def test_current_day0_global_probability_uses_current_remaining_day_not_full_day
     forecast.close()
 
 
+def test_post_day_final_daily_observation_builds_exact_complete_global_simplex(
+    monkeypatch,
+):
+    forecast = sqlite3.connect(":memory:")
+    forecast.row_factory = sqlite3.Row
+    forecast.execute(
+        """
+        CREATE TABLE market_events (
+            city TEXT NOT NULL,
+            target_date TEXT NOT NULL,
+            temperature_metric TEXT NOT NULL,
+            condition_id TEXT NOT NULL,
+            token_id TEXT NOT NULL,
+            market_slug TEXT,
+            range_label TEXT,
+            range_low REAL,
+            range_high REAL
+        )
+        """
+    )
+    forecast.executemany(
+        "INSERT INTO market_events VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            ("Dallas", "2026-07-11", "high", "c0", "yes0", "a", "69F or below", None, 69.0),
+            ("Dallas", "2026-07-11", "high", "c1", "yes1", "b", "70-71F", 70.0, 71.0),
+            ("Dallas", "2026-07-11", "high", "c2", "yes2", "c", "72F or above", 72.0, None),
+        ),
+    )
+    forecast.execute(
+        """
+        CREATE TABLE observations (
+            city TEXT NOT NULL,
+            target_date TEXT NOT NULL,
+            source TEXT NOT NULL,
+            station_id TEXT,
+            authority TEXT,
+            unit TEXT,
+            high_temp REAL,
+            low_temp REAL,
+            fetched_at TEXT
+        )
+        """
+    )
+    forecast.execute(
+        "INSERT INTO observations VALUES (?,?,?,?,?,?,?,?,?)",
+        (
+            "Dallas",
+            "2026-07-11",
+            "wu_icao_history",
+            "KDAL",
+            "VERIFIED",
+            "F",
+            70.0,
+            60.0,
+            "2026-07-12T06:00:00+00:00",
+        ),
+    )
+    monkeypatch.setattr(
+        era,
+        "_forecast_snapshot_row_for_event",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("final observation must not require a forecast snapshot")
+        ),
+    )
+    monkeypatch.setattr(
+        era,
+        "_day0_remaining_global_probability_components",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("final observation must not request remaining hours")
+        ),
+    )
+
+    day0_payload: dict[str, object] = {}
+    event = _global_day0_scope_event(city="Dallas", source_run_id="run-dallas")
+    decision_time = _dt.datetime(2026, 7, 12, 12, 0, tzinfo=_dt.timezone.utc)
+    prepared = era._prepare_current_global_probability_family(
+        event,
+        forecast_conn=forecast,
+        topology_conn=forecast,
+        observation_conn=sqlite3.connect(":memory:"),
+        decision_time=decision_time,
+        max_age=_dt.timedelta(seconds=30),
+        day0_payload_out=day0_payload,
+    )
+
+    witness = prepared.probability_witness
+    assert witness.band_basis == (
+        "final_daily_observation_exact_settlement_simplex_v1"
+    )
+    assert witness.yes_q_samples.shape[1] == 3
+    assert np.all(witness.yes_q_samples == np.asarray([0.0, 1.0, 0.0]))
+    assert day0_payload["probability_authority"] == (
+        "final_daily_observation_exact_global_probability_v1"
+    )
+    assert day0_payload["_edli_global_day0_binding"]["final_daily"] is True
+    assert era.current_global_probability_authority(
+        forecast,
+        event,
+        witness,
+        decision_time=decision_time,
+    ) is not None
+    forecast.execute("DELETE FROM observations")
+    with pytest.raises(
+        ValueError,
+        match="POST_LOCAL_DAY_FINAL_OBSERVATION_UNAVAILABLE",
+    ):
+        era._prepare_current_global_probability_family(
+            event,
+            forecast_conn=forecast,
+            topology_conn=forecast,
+            observation_conn=sqlite3.connect(":memory:"),
+            decision_time=decision_time,
+            max_age=_dt.timedelta(seconds=30),
+        )
+    forecast.close()
+
+
 def test_current_forecast_global_probability_still_requires_replacement_readiness(
     monkeypatch,
 ):

@@ -432,6 +432,11 @@ def test_identified_day0_monitor_fails_closed_without_global_probability(
     )
     monkeypatch.setattr(
         monitor_refresh_module,
+        "_is_position_after_target_local_day",
+        lambda *args, **kwargs: False,
+    )
+    monkeypatch.setattr(
+        monitor_refresh_module,
         "_refresh_current_global_day0_probability",
         lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("no current q")),
     )
@@ -466,6 +471,56 @@ def test_identified_day0_monitor_fails_closed_without_global_probability(
     assert reseeds == [
         {"city": "Paris", "target_date": "2026-07-14", "metric": "high"}
     ]
+
+
+def test_post_local_day_waits_for_final_observation_without_reseed(
+    monkeypatch,
+) -> None:
+    pos = _make_position()
+    pos.city = "Hong Kong"
+    pos.target_date = "2026-07-15"
+    pos.entry_method = "day0_observation"
+    pos.p_posterior = 0.9056
+    pos.condition_id = "0x" + "55" * 32
+    monkeypatch.setattr(
+        monitor_refresh_module,
+        "_day0_absorbing_hard_fact_overlay",
+        lambda **kwargs: None,
+    )
+    monkeypatch.setattr(
+        monitor_refresh_module,
+        "_is_position_after_target_local_day",
+        lambda *args, **kwargs: True,
+    )
+    monkeypatch.setattr(
+        monitor_refresh_module,
+        "_refresh_current_global_day0_probability",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            ValueError("POST_LOCAL_DAY_FINAL_OBSERVATION_UNAVAILABLE")
+        ),
+    )
+    monkeypatch.setattr(
+        monitor_refresh_module,
+        "_enqueue_single_family_belief_reseed_failsoft",
+        lambda **kwargs: (_ for _ in ()).throw(
+            AssertionError("a completed local day cannot be repaired by forecast reseed")
+        ),
+    )
+
+    probability, refreshed, fresh = monitor_refresh_module.monitor_probability_refresh(
+        pos,
+        conn=None,
+        city=SimpleNamespace(
+            name="Hong Kong",
+            timezone="Asia/Hong_Kong",
+            settlement_source_type="hko",
+        ),
+        target_d=date(2026, 7, 15),
+    )
+
+    assert probability == pytest.approx(0.9056)
+    assert fresh is False
+    assert "POST_LOCAL_DAY_FINAL_OBSERVATION_UNAVAILABLE" in refreshed.applied_validations
 
 
 def test_held_monitor_releases_trade_transaction_before_probability_refresh(
