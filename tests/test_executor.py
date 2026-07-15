@@ -1607,20 +1607,37 @@ class TestExecutor:
 
     @pytest.mark.parametrize(
         "price,tick,expected",
-        [
-            (0.001, "0.001", 0.001),
-            (0.04, "0.01", 0.04),
-            (0.50, "0.01", 0.50),
-            (0.96, "0.01", 0.96),
-            (0.999, "0.001", 0.999),
-        ],
+        [(0.05, "0.01", 0.05), (0.50, "0.01", 0.50), (0.95, "0.01", 0.95)],
     )
-    def test_reduce_only_exit_alignment_preserves_venue_legal_price(
+    def test_reduce_only_exit_alignment_preserves_absolute_band_price(
         self, price, tick, expected
     ):
         from src.execution.executor import _align_sell_limit_price_to_tick
 
         assert _align_sell_limit_price_to_tick(price, Decimal(tick)) == pytest.approx(expected)
+
+    @pytest.mark.parametrize("price", [0.049, 0.951])
+    def test_execute_exit_order_rejects_out_of_band_price_before_persistence(
+        self, price
+    ):
+        before = _TEST_CONN.execute("SELECT COUNT(*) FROM venue_commands").fetchone()[0]
+
+        result = execute_exit_order(
+            create_exit_order_intent(
+                trade_id=f"trade-out-of-band-{price}",
+                token_id="yes-token",
+                shares=12.0,
+                current_price=price,
+                exact_limit_price=price,
+                **_snapshot_kwargs("yes-token"),
+            ),
+            conn=_TEST_CONN,
+        )
+
+        after = _TEST_CONN.execute("SELECT COUNT(*) FROM venue_commands").fetchone()[0]
+        assert result.status == "rejected"
+        assert "live_order_unit_price_out_of_bounds" in str(result.reason)
+        assert after == before
 
     def test_execute_exit_order_coerces_fok_exit_to_fak_ioc(self, monkeypatch):
         captured = {}
