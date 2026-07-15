@@ -228,7 +228,7 @@ def test_global_auction_receipt_persists_complete_buy_sell_hold_cash_comparison(
     artifact = json.loads(row["artifact_json"])
     summary = artifact["summary"]
     assert row["mode"] == "global_single_order_auction"
-    assert summary["schema_version"] == 10
+    assert summary["schema_version"] == 11
     assert summary["book_capture_freshness_complete"] is True
     assert summary["book_captured_at_utc"] == "2026-07-14T01:00:00.250000+00:00"
     assert summary["book_deadline_at_utc"] == "2026-07-14T01:00:30.250000+00:00"
@@ -256,6 +256,8 @@ def test_global_auction_receipt_persists_complete_buy_sell_hold_cash_comparison(
     }
     assert summary["candidate_coverage_complete"] is True
     assert summary["candidate_condition_index_complete"] is True
+    assert summary["buy_candidate_index_complete"] is True
+    assert summary["buy_candidate_index_count"] == 1
     assert summary["candidate_evaluation_count"] == 2
     assert summary["candidate_input_count"] == 2
     assert summary["candidate_detailed_count"] == 1
@@ -272,7 +274,7 @@ def test_global_auction_receipt_persists_complete_buy_sell_hold_cash_comparison(
         summary["candidate_evaluations_sha256"]
     )
     assert summary["candidate_evaluation_encoding"] == (
-        "zlib+base64+canonical-json-v6"
+        "zlib+base64+canonical-json-v7"
     )
     candidate_evaluations = json.loads(evaluation_json)
     assert candidate_evaluations["rejected_groups"] == [
@@ -285,6 +287,24 @@ def test_global_auction_receipt_persists_complete_buy_sell_hold_cash_comparison(
     ]
     assert candidate_evaluations["buy_condition_side_masks"] == [
         ["condition-buy", 1]
+    ]
+    assert candidate_evaluations["buy_candidate_index_fields"] == [
+        "candidate_id",
+        "family_key",
+        "bin_id",
+        "condition_id",
+        "side",
+        "token_id",
+    ]
+    assert candidate_evaluations["buy_candidate_index"] == [
+        [
+            "buy-paused",
+            "family-buy",
+            "20C",
+            "condition-buy",
+            "YES",
+            "token-buy",
+        ]
     ]
     assert summary["buy_condition_membership_count"] == 1
     assert [

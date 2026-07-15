@@ -305,6 +305,26 @@ def _store_global_auction_receipt(
         buy_condition_masks[condition_id] = (
             buy_condition_masks.get(condition_id, 0) | side_mask
         )
+    buy_rows = tuple(row for row in evaluation_rows if row.get("action") == "BUY")
+    buy_candidate_index = sorted(
+        [
+            str(row.get("candidate_id") or ""),
+            str(row.get("family_key") or ""),
+            str(row.get("bin_id") or ""),
+            str(row.get("condition_id") or ""),
+            str(row.get("side") or ""),
+            str(row.get("token_id") or ""),
+        ]
+        for row in buy_rows
+    )
+    buy_candidate_index_complete = (
+        len(buy_candidate_index) == len(buy_rows)
+        and len({row[0] for row in buy_candidate_index}) == len(buy_rows)
+        and all(
+            all(value for value in row) and row[4] in {"YES", "NO"}
+            for row in buy_candidate_index
+        )
+    )
     compact_evaluations = {
         "rejected_groups": [
             {
@@ -319,6 +339,15 @@ def _store_global_auction_receipt(
         ],
         "detailed": detailed_rows,
         "buy_condition_side_masks": sorted(buy_condition_masks.items()),
+        "buy_candidate_index_fields": [
+            "candidate_id",
+            "family_key",
+            "bin_id",
+            "condition_id",
+            "side",
+            "token_id",
+        ],
+        "buy_candidate_index": buy_candidate_index,
     }
     evaluation_json = json.dumps(
         compact_evaluations,
@@ -349,6 +378,7 @@ def _store_global_auction_receipt(
         and len(candidate_ids) == len(set(candidate_ids))
         and all(candidate_ids)
         and condition_index_complete
+        and buy_candidate_index_complete
         and len(selected_rows) == (1 if winner is not None else 0)
         and (
             winner is None
@@ -356,7 +386,7 @@ def _store_global_auction_receipt(
         )
     )
     receipt = {
-        "schema_version": 10,
+        "schema_version": 11,
         "selection_epoch_identity": selection_epoch_identity,
         "selection_cut_at_utc": selection_cut_at_utc.isoformat(),
         "decision_at_utc": decision_at_utc.isoformat(),
@@ -413,10 +443,12 @@ def _store_global_auction_receipt(
         "candidate_rejection_group_count": len(rejection_groups),
         "candidate_coverage_complete": coverage_complete,
         "candidate_condition_index_complete": condition_index_complete,
+        "buy_candidate_index_complete": buy_candidate_index_complete,
+        "buy_candidate_index_count": len(buy_candidate_index),
         "buy_condition_membership_count": sum(
             1 + (mask == 3) for mask in buy_condition_masks.values()
         ),
-        "candidate_evaluation_encoding": "zlib+base64+canonical-json-v6",
+        "candidate_evaluation_encoding": "zlib+base64+canonical-json-v7",
         "candidate_evaluations_sha256": hashlib.sha256(
             evaluation_json
         ).hexdigest(),
