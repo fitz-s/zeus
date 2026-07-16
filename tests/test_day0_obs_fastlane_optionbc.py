@@ -666,6 +666,21 @@ class TestObsFastTickSchedulerRegistration:
         )
         assert kwargs["seconds"] == 1.0
 
+    def test_day0_metar_source_clock_has_one_cadence_authority(self, monkeypatch):
+        import src.ingest_main as im
+
+        constructed = []
+
+        class _Emitter:
+            def __init__(self, *, min_fetch_interval_s):
+                constructed.append(min_fetch_interval_s)
+
+        monkeypatch.setattr(im, "_DAY0_METAR_EMITTER", None)
+        monkeypatch.setattr("src.data.day0_fast_obs.Day0FastObsEmitter", _Emitter)
+
+        assert isinstance(im._day0_metar_emitter(), _Emitter)
+        assert constructed == [0.0]
+
 
 class TestDay0MetarSourceClockTick:
     @staticmethod

@@ -114,9 +114,10 @@ def _day0_metar_emitter():
     if _DAY0_METAR_EMITTER is None:
         from src.data.day0_fast_obs import Day0FastObsEmitter
 
-        _DAY0_METAR_EMITTER = Day0FastObsEmitter(
-            min_fetch_interval_s=_day0_metar_poll_seconds()
-        )
+        # APScheduler owns this lane's cadence and max_instances=1 prevents
+        # overlap. A matching start-to-start throttle turns scheduler jitter
+        # into skipped polls, stretching the effective source clock to 10s.
+        _DAY0_METAR_EMITTER = Day0FastObsEmitter(min_fetch_interval_s=0.0)
     return _DAY0_METAR_EMITTER
 
 
