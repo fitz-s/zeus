@@ -1848,7 +1848,7 @@ def _binary_terminal_wealth_certificate(
         loss_probability_ucb=float(1.0 - robust_q),
         loss_payoff_usd=loss_payoff,
         win_payoff_usd=win_payoff,
-        median_payoff_usd=win_payoff,
+        median_payoff_usd=(win_payoff if robust_q > 0.5 else loss_payoff),
         wealth_after_loss_usd=Decimal(wealth_floor_usd) + loss_payoff,
         wealth_after_win_usd=Decimal(wealth_ceiling_usd) + win_payoff,
         expected_value_diagnostic_usd=(
@@ -1977,17 +1977,6 @@ def _score_global_single_order(
         if not math.isfinite(payoff_q_lcb) or not 0.0 <= payoff_q_lcb <= 1.0:
             raise ValueError("candidate payoff q lower bound must be finite in [0, 1]")
         robust_q = min(robust_q, payoff_q_lcb)
-    if not robust_q > 0.5:
-        return GlobalSingleOrderDecision(
-            candidate=None,
-            shares=Decimal("0"),
-            cost_usd=Decimal("0"),
-            robust_delta_log_wealth=0.0,
-            robust_ev_usd=0.0,
-            capital_efficiency=0.0,
-            no_trade_reason="ROBUST_MAJORITY_LOSS",
-            rejection_reasons={candidate.candidate_id: "ROBUST_MAJORITY_LOSS"},
-        )
     raw_probes = _single_order_stationary_probes(
         candidate.executable_cost_curve,
         robust_q=Decimal(str(robust_q)),
