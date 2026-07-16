@@ -20,6 +20,7 @@ from src.data.source_clock_update_probe import (
     advance_source_clock_cursor,
     probe_openmeteo_source_clock_updates,
     source_clock_scoped_download_allows_cursor_advance,
+    source_clock_scoped_download_cursor_sources,
 )
 from src.strategy.live_inference.source_clock_vnext import source_publicly_usable_at
 
@@ -143,6 +144,25 @@ def test_source_clock_probe_can_defer_cursor_until_download_success(tmp_path) ->
     assert source_clock_scoped_download_allows_cursor_advance(
         {"status": "SOURCE_CLOCK_SCOPED_BAYES_PRECISION_FUSION_EXTRA_RAW_INPUTS_DOWNLOADED"}
     )
+    assert source_clock_scoped_download_cursor_sources(
+        {
+            "status": "SOURCE_CLOCK_SCOPED_BAYES_PRECISION_FUSION_EXTRA_TRANSPORT_RETRYABLE",
+            "source_results": {
+                "ecmwf_ifs": {
+                    "status": "SOURCE_CLOCK_SOURCE_RAW_INPUTS_DOWNLOADED"
+                },
+                "icon_global": {
+                    "status": "SOURCE_CLOCK_SOURCE_TRANSPORT_RETRYABLE"
+                },
+            },
+        }
+    ) == ("ecmwf_ifs",)
+    assert source_clock_scoped_download_cursor_sources(
+        {
+            "status": "SOURCE_CLOCK_SCOPED_BAYES_PRECISION_FUSION_EXTRA_RAW_INPUTS_DOWNLOADED",
+            "updated_sources": ["icon_global", "ecmwf_ifs"],
+        }
+    ) == ("ecmwf_ifs", "icon_global")
     assert advance_source_clock_cursor(report) == ("ecmwf_ifs",)
     assert cursor_path.exists()
 

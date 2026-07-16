@@ -312,6 +312,7 @@ def _download_replacement_forecast_current_targets_if_needed(
         # must repair only uncovered rows; replaying every covered target each poll rewrites
         # the same manifests and repeatedly drives global seed discovery.
         include_covered=cycle_advanced,
+        missing_manifests_only=not cycle_advanced,
         precomputed_plan=plan,
         max_wall_clock_seconds=remaining,
     )
@@ -448,6 +449,9 @@ def _download_bayes_precision_fusion_source_clock_raw_inputs_if_needed(
             held_position_family_priorities,
         )
         from src.data.source_clock_update_probe import DEFAULT_MODEL_UPDATES_JSONL  # noqa: PLC0415
+        from src.strategy.live_inference.source_clock_city_weights import (  # noqa: PLC0415
+            affected_cities_for_source_updates,
+        )
         from src.strategy.live_inference.source_clock_vnext import source_publicly_usable_at  # noqa: PLC0415
 
         payload = source_clock_report.as_dict()
@@ -479,7 +483,7 @@ def _download_bayes_precision_fusion_source_clock_raw_inputs_if_needed(
             }
 
         now = datetime.now(timezone.utc)
-        run_candidates: list[datetime] = []
+        source_cycles: dict[str, datetime] = {}
         try:
             updates_path = Path(str(payload.get("model_updates_path") or DEFAULT_MODEL_UPDATES_JSONL))
             for update in read_model_updates_jsonl(updates_path):
@@ -487,149 +491,258 @@ def _download_bayes_precision_fusion_source_clock_raw_inputs_if_needed(
                     continue
                 run_clock = update.to_source_run_clock()
                 if now >= source_publicly_usable_at(run_clock):
-                    run_candidates.append(update.last_run_initialisation_time.astimezone(timezone.utc))
+                    source_cycles[str(update.model)] = (
+                        update.last_run_initialisation_time.astimezone(timezone.utc)
+                    )
         except Exception:
-            run_candidates = []
-        cycle = max(run_candidates) if run_candidates else _probe_resolved_bayes_precision_fusion_extras_cycle()
-        if cycle is None:
+            source_cycles = {}
+        unresolved_sources = tuple(
+            source for source in updated_sources if source not in source_cycles
+        )
+        resolved_sources = tuple(
+            source for source in updated_sources if source in source_cycles
+        )
+        if not resolved_sources:
             return {
                 "status": "SOURCE_CLOCK_BPF_SCOPED_CYCLE_UNRESOLVED_SKIP",
                 "updated_sources": updated_sources,
                 "affected_cities": affected_cities,
+                "unresolved_sources": unresolved_sources,
             }
 
-        affected = set(affected_cities)
         held_priority = held_position_family_priorities()
-        target_keys = sorted(
-            (
-                row
-                for row in replacement_forecast_current_target_keys(Path(str(forecast_db)))
-                if row.city in affected
-            ),
-            key=lambda row: (
-                held_priority.get(
-                    (row.city, row.target_date, row.temperature_metric),
-                    2,
-                ),
-                row.target_date,
-                row.city,
-                row.temperature_metric,
-            ),
+        all_target_keys = tuple(
+            replacement_forecast_current_target_keys(Path(str(forecast_db)))
         )
-        targets: list[BayesPrecisionFusionDownloadTarget] = []
-        for row in target_keys:
-            city_cfg = cities_by_name.get(row.city)
-            if city_cfg is None:
-                continue
-            try:
-                lead_days = max(0, (date.fromisoformat(row.target_date) - cycle.date()).days)
-            except Exception:
-                lead_days = 0
-            targets.append(BayesPrecisionFusionDownloadTarget(
-                city=row.city,
-                metric=row.temperature_metric,
-                target_date=row.target_date,
-                lead_days=lead_days,
-                latitude=float(city_cfg.lat),
-                longitude=float(city_cfg.lon),
-                timezone_name=str(city_cfg.timezone),
-            ))
-        if not targets:
+        reported_affected = set(affected_cities)
+        target_keys_by_source: dict[str, list[object]] = {}
+        for source in resolved_sources:
+            source_affected = set(affected_cities_for_source_updates((source,)))
+            if source_affected:
+                source_affected &= reported_affected
+            else:
+                source_affected = set(reported_affected)
+            target_keys_by_source[source] = sorted(
+                (row for row in all_target_keys if row.city in source_affected),
+                key=lambda row: (
+                    held_priority.get(
+                        (row.city, row.target_date, row.temperature_metric),
+                        2,
+                    ),
+                    row.target_date,
+                    row.city,
+                    row.temperature_metric,
+                ),
+            )
+
+        targets_by_source: dict[str, list[BayesPrecisionFusionDownloadTarget]] = {}
+        for source, target_keys in target_keys_by_source.items():
+            cycle = source_cycles[source]
+            targets: list[BayesPrecisionFusionDownloadTarget] = []
+            for row in target_keys:
+                city_cfg = cities_by_name.get(row.city)
+                if city_cfg is None:
+                    continue
+                try:
+                    lead_days = max(
+                        0,
+                        (date.fromisoformat(row.target_date) - cycle.date()).days,
+                    )
+                except Exception:
+                    lead_days = 0
+                targets.append(
+                    BayesPrecisionFusionDownloadTarget(
+                        city=row.city,
+                        metric=row.temperature_metric,
+                        target_date=row.target_date,
+                        lead_days=lead_days,
+                        latitude=float(city_cfg.lat),
+                        longitude=float(city_cfg.lon),
+                        timezone_name=str(city_cfg.timezone),
+                    )
+                )
+            targets_by_source[source] = targets
+
+        if not any(targets_by_source.values()):
             return {
                 "status": "SOURCE_CLOCK_BPF_SCOPED_NO_TARGETS",
-                "cycle": cycle.isoformat(),
+                "source_cycles": {
+                    source: cycle.isoformat()
+                    for source, cycle in source_cycles.items()
+                },
                 "updated_sources": updated_sources,
                 "affected_cities": affected_cities,
             }
 
-        grouped_targets: list[list[BayesPrecisionFusionDownloadTarget]] = []
-        group_index: dict[tuple[str, str], int] = {}
-        for target in targets:
-            key = (target.city, target.target_date)
-            index = group_index.get(key)
-            if index is None:
-                group_index[key] = len(grouped_targets)
-                grouped_targets.append([target])
-            else:
-                grouped_targets[index].append(target)
-
-        worker_count = min(
+        max_workers = min(
             max(1, int(cfg.get("source_clock_fanout_workers") or 4)),
             8,
-            len(grouped_targets),
         )
-        chunks = [
-            [
-                target
-                for group in grouped_targets[offset::worker_count]
-                for target in group
+        tasks: list[
+            tuple[
+                str,
+                datetime,
+                list[BayesPrecisionFusionDownloadTarget],
             ]
-            for offset in range(worker_count)
-        ]
+        ] = []
+        for source, targets in targets_by_source.items():
+            if not targets:
+                continue
+            grouped_targets: list[list[BayesPrecisionFusionDownloadTarget]] = []
+            group_index: dict[tuple[str, str], int] = {}
+            for target in targets:
+                key = (target.city, target.target_date)
+                index = group_index.get(key)
+                if index is None:
+                    group_index[key] = len(grouped_targets)
+                    grouped_targets.append([target])
+                else:
+                    grouped_targets[index].append(target)
+            source_workers = min(max_workers, len(grouped_targets))
+            for offset in range(source_workers):
+                chunk = [
+                    target
+                    for group in grouped_targets[offset::source_workers]
+                    for target in group
+                ]
+                tasks.append((source, source_cycles[source], chunk))
+
+        worker_count = min(max_workers, len(tasks))
         deadline = (
             time.monotonic() + max(0.0, float(max_wall_clock_seconds))
             if max_wall_clock_seconds is not None
             else None
         )
 
-        def _download_chunk(chunk: list[BayesPrecisionFusionDownloadTarget]) -> dict[str, object]:
+        def _download_task(
+            source: str,
+            cycle: datetime,
+            chunk: list[BayesPrecisionFusionDownloadTarget],
+        ) -> tuple[str, dict[str, object]]:
             remaining = (
                 max(0.0, deadline - time.monotonic())
                 if deadline is not None
                 else None
             )
-            return download_bayes_precision_fusion_extra_raw_inputs(
+            report = download_bayes_precision_fusion_extra_raw_inputs(
                 forecast_db=Path(str(forecast_db)),
                 cycle=cycle,
                 targets=chunk,
-                models=updated_sources,
+                models=(source,),
                 include_previous_runs=False,
                 prune_after=False,
                 allow_single_runs_fallback=False,
-                release_lag_hours=float(cfg.get("download_release_lag_hours") or 14.0),
+                release_lag_hours=float(
+                    cfg.get("download_release_lag_hours") or 14.0
+                ),
                 max_wall_clock_seconds=remaining,
             )
+            return source, report
 
-        reports: list[dict[str, object]] = []
+        reports_by_source: dict[str, list[dict[str, object]]] = {
+            source: [] for source in updated_sources
+        }
         fanout_errors: list[str] = []
-        if worker_count == 1:
-            reports.append(_download_chunk(chunks[0]))
+        if len(tasks) == 1:
+            source, task_report = _download_task(*tasks[0])
+            reports_by_source[source].append(task_report)
         else:
             with ThreadPoolExecutor(
                 max_workers=worker_count,
                 thread_name_prefix="source-clock-bpf",
             ) as executor:
-                futures = [executor.submit(_download_chunk, chunk) for chunk in chunks]
+                futures = {
+                    executor.submit(_download_task, *task): task[0]
+                    for task in tasks
+                }
                 for future in as_completed(futures):
+                    source = futures[future]
                     try:
-                        reports.append(future.result())
-                    except Exception as exc:  # noqa: BLE001 - preserve successful chunks
-                        fanout_errors.append(f"{type(exc).__name__}: {str(exc)[:220]}")
+                        result_source, task_report = future.result()
+                        reports_by_source[result_source].append(task_report)
+                    except Exception as exc:  # noqa: BLE001 - preserve successful sources
+                        fanout_errors.append(
+                            f"{source}:{type(exc).__name__}: {str(exc)[:220]}"
+                        )
 
-        statuses = {str(report.get("status") or "") for report in reports}
-        if fanout_errors:
+        source_results: dict[str, dict[str, object]] = {}
+        for source in updated_sources:
+            if source in unresolved_sources:
+                source_results[source] = {
+                    "status": "SOURCE_CLOCK_SOURCE_CYCLE_UNRESOLVED",
+                    "target_count": 0,
+                    "written_row_count": 0,
+                    "transport_errors": (),
+                    "fanout_errors": (),
+                }
+                continue
+            source_reports = reports_by_source[source]
+            source_errors = tuple(
+                error for error in fanout_errors if error.startswith(f"{source}:")
+            )
+            statuses = {
+                str(item.get("status") or "") for item in source_reports
+            }
+            if not targets_by_source[source]:
+                status = "SOURCE_CLOCK_SOURCE_NO_TARGETS"
+            elif source_errors:
+                status = "SOURCE_CLOCK_SOURCE_CAPTURE_FAILSOFT_SKIPPED"
+            elif "BAYES_PRECISION_FUSION_EXTRA_TIMEBOXED_INCOMPLETE" in statuses:
+                status = "SOURCE_CLOCK_SOURCE_TIMEBOXED_INCOMPLETE"
+            elif "BAYES_PRECISION_FUSION_EXTRA_TRANSPORT_RETRYABLE" in statuses:
+                status = "SOURCE_CLOCK_SOURCE_TRANSPORT_RETRYABLE"
+            else:
+                status = "SOURCE_CLOCK_SOURCE_RAW_INPUTS_DOWNLOADED"
+            source_results[source] = {
+                "status": status,
+                "cycle": source_cycles[source].isoformat(),
+                "target_count": sum(
+                    int(item.get("target_count") or 0)
+                    for item in source_reports
+                ),
+                "written_row_count": sum(
+                    int(item.get("written_row_count") or 0)
+                    for item in source_reports
+                ),
+                "transport_errors": tuple(
+                    value
+                    for item in source_reports
+                    for value in (item.get("transport_errors") or ())
+                ),
+                "fanout_errors": source_errors,
+            }
+
+        source_statuses = {
+            str(item.get("status") or "") for item in source_results.values()
+        }
+        if "SOURCE_CLOCK_SOURCE_CYCLE_UNRESOLVED" in source_statuses:
+            status = "SOURCE_CLOCK_BPF_SCOPED_CYCLE_UNRESOLVED_PARTIAL"
+        elif "SOURCE_CLOCK_SOURCE_CAPTURE_FAILSOFT_SKIPPED" in source_statuses:
             status = "SOURCE_CLOCK_BPF_SCOPED_CAPTURE_FAILSOFT_SKIPPED"
-        elif "BAYES_PRECISION_FUSION_EXTRA_TIMEBOXED_INCOMPLETE" in statuses:
+        elif "SOURCE_CLOCK_SOURCE_TIMEBOXED_INCOMPLETE" in source_statuses:
             status = "SOURCE_CLOCK_SCOPED_BAYES_PRECISION_FUSION_EXTRA_TIMEBOXED_INCOMPLETE"
-        elif "BAYES_PRECISION_FUSION_EXTRA_TRANSPORT_RETRYABLE" in statuses:
+        elif "SOURCE_CLOCK_SOURCE_TRANSPORT_RETRYABLE" in source_statuses:
             status = "SOURCE_CLOCK_SCOPED_BAYES_PRECISION_FUSION_EXTRA_TRANSPORT_RETRYABLE"
         else:
             status = "SOURCE_CLOCK_SCOPED_BAYES_PRECISION_FUSION_EXTRA_RAW_INPUTS_DOWNLOADED"
 
-        unavailable_sets = [
-            set(report.get("global_models_unavailable") or ())
-            for report in reports
+        reports = [
+            item
+            for source_reports in reports_by_source.values()
+            for item in source_reports
         ]
-        global_models_unavailable = (
-            sorted(set.intersection(*unavailable_sets))
-            if unavailable_sets
-            else []
-        )
         report = {
             "status": status,
-            "cycle": cycle.isoformat(),
+            "cycle": max(source_cycles.values()).isoformat(),
+            "source_cycles": {
+                source: source_cycles[source].isoformat()
+                for source in resolved_sources
+            },
+            "source_results": source_results,
             "forecast_db": str(forecast_db),
-            "target_count": sum(int(item.get("target_count") or 0) for item in reports),
+            "target_count": sum(
+                int(item.get("target_count") or 0) for item in reports
+            ),
             "candidate_row_count": sum(
                 int(item.get("candidate_row_count") or 0) for item in reports
             ),
@@ -644,11 +757,15 @@ def _download_bayes_precision_fusion_source_clock_raw_inputs_if_needed(
                 for item in reports
                 for value in (item.get("dropped") or ())
             ),
-            "domain_excluded": tuple(sorted({
-                value
-                for item in reports
-                for value in (item.get("domain_excluded") or ())
-            })),
+            "domain_excluded": tuple(
+                sorted(
+                    {
+                        value
+                        for item in reports
+                        for value in (item.get("domain_excluded") or ())
+                    }
+                )
+            ),
             "transport_errors": tuple(
                 value
                 for item in reports
@@ -671,25 +788,32 @@ def _download_bayes_precision_fusion_source_clock_raw_inputs_if_needed(
                 for item in reports
             ),
             "prune_skipped_timebox": any(
-                bool(item.get("prune_skipped_timebox"))
-                for item in reports
+                bool(item.get("prune_skipped_timebox")) for item in reports
             ),
             "max_wall_clock_seconds": max_wall_clock_seconds,
-            "global_models_expected": max(
-                (int(item.get("global_models_expected") or 0) for item in reports),
-                default=0,
-            ),
-            "global_models_dropped_scoped": sorted({
-                value
+            "global_models_expected": sum(
+                int(item.get("global_models_expected") or 0)
                 for item in reports
-                for value in (item.get("global_models_dropped_scoped") or ())
-            }),
-            "global_models_unavailable": global_models_unavailable,
+            ),
+            "global_models_dropped_scoped": sorted(
+                {
+                    value
+                    for item in reports
+                    for value in (item.get("global_models_dropped_scoped") or ())
+                }
+            ),
+            "global_models_unavailable": sorted(
+                {
+                    value
+                    for item in reports
+                    for value in (item.get("global_models_unavailable") or ())
+                }
+            ),
             "fanout_workers": worker_count,
             "fanout_errors": tuple(fanout_errors),
+            "updated_sources": updated_sources,
+            "affected_cities": affected_cities,
         }
-        report["updated_sources"] = updated_sources
-        report["affected_cities"] = affected_cities
         return report
     except Exception as exc:  # noqa: BLE001 - source-clock fast capture must fail soft
         logger.warning("source-clock scoped BPF capture skipped (fail-soft): %s", exc)

@@ -227,6 +227,7 @@ def test_replacement_availability_fast_poll_passes_changed_source_clock_report(m
         assert max_wall_clock_seconds == 45.0
         return {
             "status": "SOURCE_CLOCK_SCOPED_BAYES_PRECISION_FUSION_EXTRA_RAW_INPUTS_DOWNLOADED",
+            "updated_sources": ["icon_global"],
             "source_clock_status": "SOURCE_CLOCK_UPDATES_CHANGED",
             "source_clock_updated_sources": ["icon_global"],
         }
@@ -247,7 +248,8 @@ def test_replacement_availability_fast_poll_passes_changed_source_clock_report(m
     monkeypatch.setattr(
         source_clock_probe,
         "advance_source_clock_cursor",
-        lambda report: call_order.append("cursor") or (),
+        lambda report, *, sources=None: call_order.append("cursor")
+        or tuple(sources or ()),
     )
     monkeypatch.setattr(prod, "_download_bayes_precision_fusion_source_clock_raw_inputs_if_needed", _scoped_path)
     monkeypatch.setattr(
@@ -295,7 +297,8 @@ def test_replacement_availability_fast_poll_passes_changed_source_clock_report(m
     assert result["fusion_upgrade_seeds_enqueued"] == 1
     assert result["cycle_advance_seeds_enqueued"] == 2
     assert result["cycle_advance_detail"]["held_advances_detected"] == 1
-    assert result["source_clock_cursor_advanced_sources"] == ()
+    assert result["source_clock_cursor_advanced_sources"] == ("icon_global",)
+    assert result["source_clock_cursor_deferred_sources"] == ()
     assert probe_kwargs == [{"advance_cursor": False}]
     assert call_order == [
         "probe",

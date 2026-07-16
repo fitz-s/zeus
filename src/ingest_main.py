@@ -1354,7 +1354,7 @@ def _replacement_availability_poll_tick():
     from src.data.source_clock_update_probe import (  # noqa: PLC0415
         advance_source_clock_cursor,
         probe_openmeteo_source_clock_updates,
-        source_clock_scoped_download_allows_cursor_advance,
+        source_clock_scoped_download_cursor_sources,
     )
 
     cfg = _replacement_forecast_live_materialization_queue_config()
@@ -1495,10 +1495,16 @@ def _replacement_availability_poll_tick():
     # Publish the changed-source work before generic current-target maintenance.
     # The forecast materializer can consume these idempotent seeds immediately.
     report = _attach_reseed_reports(report)
-    if source_clock_scoped_download_allows_cursor_advance(report):
-        report["source_clock_cursor_advanced_sources"] = advance_source_clock_cursor(source_clock_report)
-    else:
-        report["source_clock_cursor_advanced_sources"] = ()
+    cursor_sources = source_clock_scoped_download_cursor_sources(report)
+    advanced_sources = (
+        advance_source_clock_cursor(source_clock_report, sources=cursor_sources)
+        if cursor_sources
+        else ()
+    )
+    report["source_clock_cursor_advanced_sources"] = advanced_sources
+    report["source_clock_cursor_deferred_sources"] = tuple(
+        sorted(set(source_clock_report.updated_sources) - set(advanced_sources))
+    )
 
     current_target_download_report = _download_current_targets()
     current_target_download_compact = _compact_current_target_report(

@@ -459,6 +459,7 @@ def download_current_target_raw_inputs(
     release_lag_hours: float,
     anchor_sigma_c: float,
     include_covered: bool = False,
+    missing_manifests_only: bool = False,
     precomputed_plan: ReplacementForecastCurrentTargetPlan | None = None,
     max_wall_clock_seconds: float | None = None,
 ) -> dict[str, object]:
@@ -481,7 +482,12 @@ def download_current_target_raw_inputs(
         forecast_db,
         required_openmeteo_source_cycle_time=cycle,
     )
-    _rows = list(plan.rows) if include_covered else [row for row in plan.rows if not row.covered]
+    if include_covered:
+        _rows = list(plan.rows)
+    elif missing_manifests_only:
+        _rows = [row for row in plan.rows if row.missing_openmeteo_manifest]
+    else:
+        _rows = [row for row in plan.rows if not row.covered]
     _rows.sort(
         key=lambda row: (
             0 if getattr(row, "missing_openmeteo_manifest", False) else 1,
@@ -725,6 +731,7 @@ def download_current_target_openmeteo_inputs(
     release_lag_hours: float,
     anchor_sigma_c: float,
     include_covered: bool = False,
+    missing_manifests_only: bool = False,
     precomputed_plan: ReplacementForecastCurrentTargetPlan | None = None,
     max_wall_clock_seconds: float | None = None,
 ) -> dict[str, object]:
@@ -739,6 +746,7 @@ def download_current_target_openmeteo_inputs(
         release_lag_hours=release_lag_hours,
         anchor_sigma_c=anchor_sigma_c,
         include_covered=include_covered,
+        missing_manifests_only=missing_manifests_only,
         precomputed_plan=precomputed_plan,
         max_wall_clock_seconds=max_wall_clock_seconds,
     )

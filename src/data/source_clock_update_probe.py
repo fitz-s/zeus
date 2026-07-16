@@ -36,6 +36,12 @@ _DOWNLOAD_CURSOR_COMMIT_STATUSES = frozenset(
         "SOURCE_CLOCK_BPF_SCOPED_NO_TARGETS",
     }
 )
+_SOURCE_CURSOR_COMMIT_STATUSES = frozenset(
+    {
+        "SOURCE_CLOCK_SOURCE_RAW_INPUTS_DOWNLOADED",
+        "SOURCE_CLOCK_SOURCE_NO_TARGETS",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -203,6 +209,36 @@ def source_clock_scoped_download_allows_cursor_advance(report: Mapping[str, obje
     if not isinstance(report, Mapping):
         return False
     return str(report.get("status") or "") in _DOWNLOAD_CURSOR_COMMIT_STATUSES
+
+
+def source_clock_scoped_download_cursor_sources(
+    report: Mapping[str, object] | None,
+) -> tuple[str, ...]:
+    if not isinstance(report, Mapping):
+        return ()
+    source_results = report.get("source_results")
+    if isinstance(source_results, Mapping):
+        return tuple(
+            sorted(
+                str(source)
+                for source, result in source_results.items()
+                if isinstance(result, Mapping)
+                and str(result.get("status") or "") in _SOURCE_CURSOR_COMMIT_STATUSES
+            )
+        )
+    if not source_clock_scoped_download_allows_cursor_advance(report):
+        return ()
+    return tuple(
+        sorted(
+            str(source)
+            for source in (
+                report.get("updated_sources")
+                or report.get("source_clock_updated_sources")
+                or ()
+            )
+            if str(source)
+        )
+    )
 
 
 def advance_source_clock_cursor(

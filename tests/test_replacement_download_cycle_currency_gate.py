@@ -315,6 +315,7 @@ def test_partial_current_cycle_manifests_do_not_skip_download(tmp_path, monkeypa
     assert report["status"] == "CURRENT_TARGET_RAW_INPUTS_DOWNLOADED"
     assert len(calls) == 1
     assert calls[0].get("include_covered") is False
+    assert calls[0].get("missing_manifests_only") is True
 
 
 def test_direct_current_target_downloader_scopes_plan_to_requested_cycle(tmp_path, monkeypatch) -> None:
@@ -388,6 +389,55 @@ def test_direct_current_target_downloader_prioritizes_missing_cycle_manifest_bef
         release_lag_hours=14.0,
         anchor_sigma_c=3.0,
         include_covered=True,
+    )
+
+    assert report["target_count"] == 1
+    assert report["manifest_count"] == 1
+    assert "London" in report["written_manifests"][0]
+
+
+def test_same_cycle_repair_excludes_uncovered_rows_with_manifest(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    import scripts.download_replacement_forecast_current_targets as dl
+
+    rows = (
+        _TargetRow(
+            city="Paris",
+            target_date="2026-06-10",
+            temperature_metric="high",
+            covered=False,
+            missing_openmeteo_manifest=False,
+        ),
+        _TargetRow(
+            city="London",
+            target_date="2026-06-10",
+            temperature_metric="high",
+            covered=False,
+            missing_openmeteo_manifest=True,
+        ),
+    )
+    plan = _PlanStub(ready=False, rows=rows)
+    monkeypatch.setattr(
+        dl,
+        "_resolve_anchor_payload",
+        lambda **_kwargs: (
+            {"hourly": {"time": [], "temperature_2m": []}},
+            {"openmeteo_endpoint": "single_runs_api", "run_authority": "test"},
+        ),
+    )
+
+    report = dl.download_current_target_raw_inputs(
+        forecast_db=tmp_path / "forecasts.db",
+        output_dir=tmp_path / "raw",
+        cycle=AVAILABLE_CYCLE,
+        limit=None,
+        write_db=False,
+        release_lag_hours=14.0,
+        anchor_sigma_c=3.0,
+        missing_manifests_only=True,
+        precomputed_plan=plan,
     )
 
     assert report["target_count"] == 1
