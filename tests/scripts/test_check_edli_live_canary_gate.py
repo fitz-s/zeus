@@ -483,13 +483,19 @@ def _seed_canary_db(
 
 
 def _pre_submit_payload(**overrides):
+    # Mirrors tests/events/test_live_order_aggregate.py::_pre_submit_payload —
+    # the aggregate's own canonical passing fixture. The validator has grown
+    # several economics layers since this file's original fixture was written
+    # (61f9d4c33 submit-economics required fields, qkernel_execution_economics
+    # requirement); tracking the aggregate's fixture keeps this test pinned to
+    # "a payload the production ledger accepts" rather than a stale snapshot.
     payload = {
         "event_id": "event-1",
         "final_intent_id": "intent-1",
         "condition_id": "condition-1",
         "token_id": "token-1",
         "side": "BUY",
-        "direction": "YES",
+        "direction": "buy_yes",
         "order_type": "LIMIT",
         "time_in_force": "GTC",
         "post_only": True,
@@ -498,10 +504,17 @@ def _pre_submit_payload(**overrides):
         "quote_age_ms": 100,
         "max_quote_age_ms": 1000,
         "book_hash": "book-hash-1",
-        "current_best_bid": 0.42,
+        "current_best_bid": 0.41,
         "current_best_ask": 0.43,
-        "limit_price": 0.42,
-        "q_live": 0.45,
+        "limit_price": 0.40,
+        "size": 10.0,
+        "q_live": 0.70,
+        "q_lcb_5pct": 0.60,
+        "expected_edge": 0.10,
+        "selection_authority_applied": "qkernel_spine",
+        "min_entry_price": 0.10,
+        "min_expected_profit_usd": 1.0,
+        "min_submit_edge_density": 0.05,
         "expected_cost_basis": 0.421,
         "expected_fee": 0.001,
         "expected_spread_cost": 0.0005,
@@ -530,6 +543,25 @@ def _pre_submit_payload(**overrides):
         "balance_allowance_checked_at": "2026-05-26T12:00:00+00:00",
         "expected_edge_source_certificate_hash": "actionable-hash-1",
         "cost_basis_source_certificate_hash": "cost-hash-1",
+        "qkernel_execution_economics": {
+            "source": "qkernel_spine",
+            "route_id": "DIRECT_YES:b20@proof",
+            "route_type": "direct",
+            "side": "YES",
+            "payoff_q_point": 0.70,
+            "payoff_q_lcb": 0.60,
+            "cost": 0.40,
+            "edge_lcb": 0.20,
+            "delta_u_at_min": 0.01,
+            "optimal_stake_usd": 10.0,
+            "optimal_delta_u": 0.01,
+            "false_edge_rate": 0.02,
+            "direction_law_ok": True,
+            "coherence_allows": True,
+            "selection_guard_basis": "SELECTION_BETA_95",
+            "selection_guard_abstained": False,
+            "selection_guard_q_safe": 0.60,
+        },
     }
     payload.update(overrides)
     return payload
