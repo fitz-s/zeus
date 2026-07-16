@@ -215,6 +215,33 @@ def test_entries_pause_read_is_db_authoritative_when_memory_is_stale_false():
     assert evidence["effective_until"] is None
 
 
+def test_codex_containment_is_not_reported_as_operator_command():
+    """A Codex-imposed pause must remain attributable to Codex, not the user."""
+    conn = get_world_connection()
+    upsert_control_override(
+        conn,
+        override_id=AUTO_PAUSE_OVERRIDE_ID,
+        target_type="global",
+        target_key="entries",
+        action_type="gate",
+        value="true",
+        issued_by="control_plane",
+        issued_at=datetime.now(timezone.utc).isoformat(),
+        reason="codex_live_money_containment_after_bad_orders",
+        effective_until=None,
+        precedence=DEFAULT_CONTROL_OVERRIDE_PRECEDENCE,
+    )
+    conn.commit()
+
+    state = query_control_override_state(conn)
+    conn.close()
+
+    assert state["entries_paused"] is True
+    assert state["entries_pause_source"] == "codex_containment"
+    assert state["entries_pause_reason"] == "codex_live_money_containment_after_bad_orders"
+    assert state["entries_pause_issued_by"] == "control_plane"
+
+
 def test_entries_pause_read_clears_stale_memory_when_db_unpaused():
     """A stale in-memory pause must not outlive the durable DB view."""
     now = datetime.now(timezone.utc)

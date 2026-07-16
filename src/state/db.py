@@ -12434,7 +12434,10 @@ def query_control_override_state(
                 entries_pause_issued_at = str(row["issued_at"] or "")
                 entries_pause_effective_until = row["effective_until"]
                 entries_pause_issued_by = issued_by
-                if issued_by == "system_auto_pause" or issued_by.startswith("auto:"):
+                if reason.startswith("codex_"):
+                    entries_pause_source = "codex_containment"
+                    entries_pause_reason = reason
+                elif issued_by == "system_auto_pause" or issued_by.startswith("auto:"):
                     entries_pause_source = "auto_exception"
                     entries_pause_reason = reason if issued_by == "system_auto_pause" else issued_by.replace("auto:", "", 1)
                 elif issued_by == "control_plane":
