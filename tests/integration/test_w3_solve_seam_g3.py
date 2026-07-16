@@ -5264,6 +5264,68 @@ def test_current_global_book_epoch_reads_yes_and_no_symmetrically():
         )
 
 
+def test_current_global_book_epoch_batches_snapshot_invalidation_truth():
+    probability = _current_global_book_probability()
+    conn = _global_book_metadata_conn(probability)
+    conn.executescript(
+        """
+        CREATE TABLE executable_market_snapshot_invalidations (
+            invalidation_id TEXT PRIMARY KEY,
+            condition_id TEXT,
+            token_id TEXT,
+            reason TEXT NOT NULL,
+            invalidated_at TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        );
+        CREATE INDEX idx_snapshot_invalidations_condition_time
+            ON executable_market_snapshot_invalidations (
+                condition_id, invalidated_at DESC
+            );
+        CREATE INDEX idx_snapshot_invalidations_token_time
+            ON executable_market_snapshot_invalidations (
+                token_id, invalidated_at DESC
+            );
+        """
+    )
+    invalidated = probability.bindings[0]
+    conn.execute(
+        """
+        INSERT INTO executable_market_snapshot_invalidations VALUES (
+            'invalidate-one', ?, NULL, 'market_closed', ?, ?
+        )
+        """,
+        (
+            invalidated.condition_id,
+            "2026-06-13T07:59:30+00:00",
+            "2026-06-13T07:59:30+00:00",
+        ),
+    )
+    invalidation_reads = []
+    conn.set_trace_callback(
+        lambda sql: (
+            invalidation_reads.append(sql)
+            if "FROM executable_market_snapshot_invalidations" in sql
+            else None
+        )
+    )
+    at = _dt.datetime(2026, 6, 13, 8, 0, tzinfo=_dt.timezone.utc)
+    with pytest.raises(
+        ValueError,
+        match=f"GLOBAL_BOOK_METADATA_INVALIDATED:{invalidated.condition_id}",
+    ):
+        capture_current_global_book_epoch(
+            conn,
+            probability_witnesses={probability.family_key: probability},
+            get_books=lambda _tokens: pytest.fail(
+                "invalidated metadata must block before CLOB fetch"
+            ),
+            clock=lambda: at,
+            max_age=_dt.timedelta(seconds=30),
+        )
+
+    assert len(invalidation_reads) == 1
+
+
 def test_current_global_book_epoch_consumes_prefetched_books_at_original_cut():
     probability = _current_global_book_probability()
     conn = _global_book_metadata_conn(probability)

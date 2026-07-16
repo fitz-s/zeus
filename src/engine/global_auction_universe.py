@@ -43,9 +43,6 @@ from src.solve.solver import (
     joint_probability_witness_identity,
     portfolio_wealth_identity,
 )
-from src.state.snapshot_repo import snapshot_row_is_invalidated
-
-
 @dataclass(frozen=True, init=False)
 class CurrentGlobalAuctionScope:
     """Complete probability-ready family set at one decision instant."""
@@ -265,10 +262,64 @@ def _global_book_snapshot_rows(
     trade_conn: sqlite3.Connection,
     *,
     condition_ids: Sequence[str],
+    checked_at_utc: datetime | None = None,
 ) -> list[dict[str, object]]:
     rows: list[dict[str, object]] = []
     clean = tuple(dict.fromkeys(str(value or "").strip() for value in condition_ids))
     clean = tuple(value for value in clean if value)
+    if checked_at_utc is not None and checked_at_utc.tzinfo is None:
+        raise ValueError("GLOBAL_BOOK_INVALIDATION_CHECK_TIME_NAIVE")
+    condition_invalidated_at: dict[str, datetime] = {}
+    token_invalidated_at: dict[str, datetime] = {}
+    if checked_at_utc is not None and _table_exists(
+        trade_conn,
+        "executable_market_snapshot_invalidations",
+    ):
+        invalidation_rows = trade_conn.execute(
+            """
+            SELECT condition_id, token_id, MAX(invalidated_at) AS invalidated_at
+              FROM executable_market_snapshot_invalidations
+             WHERE invalidated_at <= ?
+             GROUP BY condition_id, token_id
+            """,
+            (checked_at_utc.astimezone(timezone.utc).isoformat(),),
+        ).fetchall()
+        for raw_condition, raw_token, raw_invalidated_at in invalidation_rows:
+            try:
+                invalidated_at = datetime.fromisoformat(
+                    str(raw_invalidated_at).replace("Z", "+00:00")
+                ).astimezone(timezone.utc)
+            except (TypeError, ValueError):
+                continue
+            condition_id = str(raw_condition or "").strip()
+            token_id = str(raw_token or "").strip()
+            if condition_id:
+                condition_invalidated_at[condition_id] = invalidated_at
+            if token_id:
+                token_invalidated_at[token_id] = invalidated_at
+
+    def snapshot_invalidated(row: Mapping[str, object]) -> bool:
+        if not condition_invalidated_at and not token_invalidated_at:
+            return False
+        try:
+            captured_at = datetime.fromisoformat(
+                str(row.get("captured_at") or "").replace("Z", "+00:00")
+            ).astimezone(timezone.utc)
+        except (TypeError, ValueError):
+            return False
+        identities = (
+            condition_invalidated_at.get(str(row.get("condition_id") or "")),
+            token_invalidated_at.get(
+                str(row.get("selected_outcome_token_id") or "")
+            ),
+            token_invalidated_at.get(str(row.get("yes_token_id") or "")),
+            token_invalidated_at.get(str(row.get("no_token_id") or "")),
+        )
+        return any(
+            invalidated_at is not None and invalidated_at >= captured_at
+            for invalidated_at in identities
+        )
+
     for offset in range(0, len(clean), 400):
         chunk = clean[offset : offset + 400]
         placeholders = ",".join("?" for _ in chunk)
@@ -302,7 +353,10 @@ def _global_book_snapshot_rows(
             """,
             chunk,
         )
-        rows.extend(_row_dict(cur, row) for row in cur.fetchall())
+        for row in cur.fetchall():
+            item = _row_dict(cur, row)
+            item["snapshot_invalidated"] = snapshot_invalidated(item)
+            rows.append(item)
     return rows
 
 
@@ -607,6 +661,7 @@ def capture_current_global_book_epoch(
     metadata_rows = _global_book_snapshot_rows(
         trade_conn,
         condition_ids=[row[2] for row in bindings],
+        checked_at_utc=started_at,
     )
     metadata_by_key: dict[tuple[str, str], dict[str, object]] = {}
     for row in metadata_rows:
@@ -629,10 +684,8 @@ def capture_current_global_book_epoch(
             raise ValueError(
                 f"GLOBAL_BOOK_METADATA_MISSING:{condition_id}:{token_id}"
             )
-        if not metadata.get("_global_current_gamma") and snapshot_row_is_invalidated(
-            trade_conn,
-            metadata,
-            checked_at=started_at,
+        if not metadata.get("_global_current_gamma") and bool(
+            metadata.get("snapshot_invalidated")
         ):
             raise ValueError(
                 f"GLOBAL_BOOK_METADATA_INVALIDATED:{condition_id}:{token_id}"
@@ -669,10 +722,8 @@ def capture_current_global_book_epoch(
         metadata = metadata_by_key.get((condition_id, token_id))
         if metadata is None:
             raise ValueError(f"GLOBAL_BOOK_METADATA_MISSING:{condition_id}:{token_id}")
-        if not metadata.get("_global_current_gamma") and snapshot_row_is_invalidated(
-            trade_conn,
-            metadata,
-            checked_at=started_at,
+        if not metadata.get("_global_current_gamma") and bool(
+            metadata.get("snapshot_invalidated")
         ):
             raise ValueError(f"GLOBAL_BOOK_METADATA_INVALIDATED:{condition_id}:{token_id}")
         market_event_id = str(metadata.get("event_id") or "").strip()
@@ -1027,7 +1078,10 @@ def bind_current_global_probability_tokens(
         for row in _global_book_snapshot_rows(
             trade_conn,
             condition_ids=condition_ids,
+            checked_at_utc=checked_at_utc,
         ):
+            if bool(row.get("snapshot_invalidated")):
+                continue
             condition_id = str(row.get("condition_id") or "").strip()
             yes = str(row.get("yes_token_id") or "").strip()
             no = str(row.get("no_token_id") or "").strip()
