@@ -124,6 +124,13 @@ class ReplacementForecastCurrentTargetPlan:
 
 
 @dataclass(frozen=True)
+class ReplacementForecastTargetKey:
+    city: str
+    target_date: str
+    temperature_metric: str
+
+
+@dataclass(frozen=True)
 class _OpenMeteoManifest:
     artifact_path: str
     metadata: Mapping[str, object]
@@ -1404,6 +1411,112 @@ def _day0_observed_extreme_required(
         return has_city_local_day_started(target_date, timezone_name, now_utc)
     except (ValueError, ZoneInfoNotFoundError):
         return False
+
+
+def replacement_forecast_current_target_keys(
+    forecast_db: Path | str,
+    *,
+    min_target_date: date | str | None = None,
+) -> tuple[ReplacementForecastTargetKey, ...]:
+    """Return only current market scope identities needed by raw capture.
+
+    Source-clock capture must not pay for manifest, posterior, readiness, and
+    input-HWM validation before it can start fetching a newly published run.
+    This keeps the target universe identical to the full plan while leaving
+    all coverage proof with ``build_replacement_forecast_current_target_plan``.
+    """
+
+    db_path = Path(forecast_db)
+    if not db_path.exists():
+        return ()
+    minimum_target_date = (
+        min_target_date.isoformat()
+        if isinstance(min_target_date, date)
+        else str(min_target_date or datetime.now(tz=timezone.utc).date().isoformat())
+    )
+    conn = _connect(db_path, write_class="live")
+    conn.row_factory = sqlite3.Row
+    try:
+        conn.execute("PRAGMA query_only=ON")
+        tables = _table_names(conn)
+        if "market_events" not in tables:
+            return ()
+        required_market_columns = {
+            "city",
+            "target_date",
+            "temperature_metric",
+            "token_id",
+            "range_label",
+        }
+        if not required_market_columns.issubset(_columns(conn, "market_events")):
+            return ()
+        source_run_targets = _supports_source_run_targets(conn)
+        if "source_run_coverage" in tables and not source_run_targets:
+            return ()
+        if source_run_targets:
+            expected_high = expected_replacement_dependency_identity_by_role("high")[
+                "baseline_b0"
+            ]
+            expected_low = expected_replacement_dependency_identity_by_role("low")[
+                "baseline_b0"
+            ]
+            rows = conn.execute(
+                """
+                SELECT DISTINCT
+                    c.city,
+                    c.target_local_date AS target_date,
+                    c.temperature_metric
+                FROM source_run_coverage c
+                WHERE c.source_id = ?
+                  AND c.target_local_date >= ?
+                  AND (
+                      (c.temperature_metric = 'high' AND c.data_version = ?)
+                      OR (c.temperature_metric = 'low' AND c.data_version = ?)
+                  )
+                  AND EXISTS (
+                      SELECT 1
+                      FROM market_events m
+                      WHERE m.city = c.city
+                        AND m.target_date = c.target_local_date
+                        AND m.temperature_metric = c.temperature_metric
+                        AND m.token_id IS NOT NULL
+                        AND m.token_id != ''
+                        AND m.range_label IS NOT NULL
+                        AND m.range_label != ''
+                  )
+                ORDER BY target_date, c.city, c.temperature_metric
+                """,
+                (
+                    expected_high.source_id,
+                    minimum_target_date,
+                    expected_high.data_version,
+                    expected_low.data_version,
+                ),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """
+                SELECT DISTINCT city, target_date, temperature_metric
+                FROM market_events
+                WHERE token_id IS NOT NULL
+                  AND token_id != ''
+                  AND range_label IS NOT NULL
+                  AND range_label != ''
+                  AND target_date >= ?
+                ORDER BY target_date, city, temperature_metric
+                """,
+                (minimum_target_date,),
+            ).fetchall()
+        return tuple(
+            ReplacementForecastTargetKey(
+                city=str(row["city"]),
+                target_date=str(row["target_date"]),
+                temperature_metric=str(row["temperature_metric"]),
+            )
+            for row in rows
+        )
+    finally:
+        conn.close()
 
 
 def build_replacement_forecast_current_target_plan(

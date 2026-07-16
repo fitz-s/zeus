@@ -409,7 +409,7 @@ def _download_bayes_precision_fusion_source_clock_raw_inputs_if_needed(
         )
         from src.data.openmeteo_model_updates import read_model_updates_jsonl  # noqa: PLC0415
         from src.data.replacement_forecast_current_target_plan import (  # noqa: PLC0415
-            build_replacement_forecast_current_target_plan,
+            replacement_forecast_current_target_keys,
         )
         from src.data.source_clock_update_probe import DEFAULT_MODEL_UPDATES_JSONL  # noqa: PLC0415
         from src.strategy.live_inference.source_clock_vnext import source_publicly_usable_at  # noqa: PLC0415
@@ -463,9 +463,8 @@ def _download_bayes_precision_fusion_source_clock_raw_inputs_if_needed(
             }
 
         affected = set(affected_cities)
-        plan = build_replacement_forecast_current_target_plan(Path(str(forecast_db)))
         targets: list[BayesPrecisionFusionDownloadTarget] = []
-        for row in plan.rows:
+        for row in replacement_forecast_current_target_keys(Path(str(forecast_db))):
             if row.city not in affected:
                 continue
             city_cfg = cities_by_name.get(row.city)

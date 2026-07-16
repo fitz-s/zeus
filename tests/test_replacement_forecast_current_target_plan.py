@@ -17,6 +17,7 @@ from src.data.replacement_forecast_current_target_plan import (
     _day0_observation_lag_reason,
     _latest_authorized_day0_fact,
     build_replacement_forecast_current_target_plan,
+    replacement_forecast_current_target_keys,
     replacement_forecast_download_plan_from_current_targets,
 )
 from src.data.replacement_forecast_cycle_policy import (
@@ -840,6 +841,29 @@ def test_current_target_plan_orders_nearest_market_date_first(tmp_path) -> None:
         "2026-06-09",
         "2026-06-09",
         "2026-06-10",
+    ]
+
+
+def test_current_target_keys_match_full_plan_scope_without_coverage_work(tmp_path) -> None:
+    db = tmp_path / "forecasts.db"
+    _create_db(db)
+
+    keys = replacement_forecast_current_target_keys(
+        db,
+        min_target_date="2026-06-07",
+    )
+    plan = build_replacement_forecast_current_target_plan(
+        db,
+        min_target_date="2026-06-07",
+        now_utc=datetime(2026, 6, 7, 12, 0, tzinfo=timezone.utc),
+    )
+
+    assert [
+        (key.city, key.target_date, key.temperature_metric)
+        for key in keys
+    ] == [
+        (row.city, row.target_date, row.temperature_metric)
+        for row in plan.rows
     ]
 
 
