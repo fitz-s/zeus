@@ -859,7 +859,22 @@ def _latest_authorized_day0_fact(
             parsed = parsed.replace(tzinfo=timezone.utc)
         return parsed.astimezone(timezone.utc)
 
-    return max(facts, key=fact_time) if facts else None
+    if not facts:
+        return None
+    # ABSORBING-DIRECTION REDUCTION, not "most recent wins" (2026-07-14 Paris
+    # regression): the day-so-far extreme is the max (high) / min (low) across
+    # every authorized source seen so far. Picking the temporally freshest
+    # candidate let a newly-eligible source whose OWN history never covered
+    # the earlier peak (e.g. a fast lane's first observation after
+    # wu_icao_history had already recorded 34.0) report a lower value as if it
+    # were current — a running max cannot decrease. Time only breaks ties
+    # between facts that agree on the extreme value.
+    def fact_extreme(fact: Mapping[str, object]) -> float:
+        return float(fact["observed_extreme_native"])
+
+    best_extreme = (min if metric == "low" else max)(fact_extreme(fact) for fact in facts)
+    candidates = [fact for fact in facts if fact_extreme(fact) == best_extreme]
+    return max(candidates, key=fact_time)
 
 
 def _day0_observation_lag_reason(

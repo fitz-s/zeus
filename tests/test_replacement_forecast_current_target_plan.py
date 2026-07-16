@@ -285,6 +285,255 @@ def test_day0_settlement_certainty_excludes_unconfirmed_fast_channel() -> None:
     conn.close()
 
 
+def _day0_source_switch_conn() -> sqlite3.Connection:
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        """
+        CREATE TABLE observation_instants (
+            city TEXT, target_date TEXT, source TEXT, station_id TEXT,
+            temp_unit TEXT, imported_at TEXT, local_timestamp TEXT, utc_timestamp TEXT,
+            running_max REAL, running_min REAL, authority TEXT,
+            training_allowed INTEGER, causality_status TEXT, source_role TEXT
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE opportunity_events (
+            event_id TEXT, event_type TEXT, available_at TEXT,
+            received_at TEXT, created_at TEXT, payload_json TEXT
+        )
+        """
+    )
+    return conn
+
+
+def _insert_paris_observation_instant(
+    conn: sqlite3.Connection,
+    *,
+    utc_timestamp: str,
+    imported_at: str,
+    running_max: float,
+    running_min: float,
+) -> None:
+    conn.execute(
+        "INSERT INTO observation_instants VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (
+            "Paris", "2026-07-14", "wu_icao_history", "LFPB", "C", imported_at,
+            "2026-07-14T00:00:00+02:00", utc_timestamp, running_max, running_min,
+            "VERIFIED", 1, "OK", "historical_hourly",
+        ),
+    )
+
+
+def _insert_paris_day0_event(
+    conn: sqlite3.Connection,
+    *,
+    event_id: str,
+    settlement_source: str,
+    metric: str,
+    observation_time: str,
+    available_at: str,
+    raw_value: float,
+) -> None:
+    payload = {
+        "city": "Paris",
+        "target_date": "2026-07-14",
+        "metric": metric,
+        "settlement_source": settlement_source,
+        "station_id": "LFPB",
+        "observation_time": observation_time,
+        "observation_available_at": available_at,
+        "raw_value": raw_value,
+        "rounded_value": int(raw_value),
+        "high_so_far": raw_value if metric == "high" else None,
+        "low_so_far": raw_value if metric == "low" else None,
+        "source_match_status": "MATCH",
+        "local_date_status": "MATCH",
+        "station_match_status": "MATCH",
+        "dst_status": "UNAMBIGUOUS",
+        "metric_match_status": "MATCH",
+        "rounding_status": "MATCH",
+        "source_authorized_status": "AUTHORIZED",
+        "live_authority_status": "live",
+        "settlement_unit": "C",
+    }
+    conn.execute(
+        "INSERT INTO opportunity_events VALUES (?, ?, ?, ?, ?, ?)",
+        (event_id, "DAY0_EXTREME_UPDATED", available_at, available_at, available_at, json.dumps(payload)),
+    )
+
+
+def test_day0_running_high_does_not_regress_when_fresher_source_saw_less() -> None:
+    """2026-07-14 Paris type specimen: wu_icao_history already saw 34.0C at
+    14:00-17:00 UTC; a newly-eligible aviationweather_metar (fast lane) event
+    at 19:30 UTC reports only 31.0C (its own in-process cache never saw the
+    earlier peak). The day-so-far high is a physical lower bound that can
+    only advance — the fresher-but-lower source must NOT win."""
+    conn = _day0_source_switch_conn()
+    _insert_paris_observation_instant(
+        conn,
+        utc_timestamp="2026-07-14T14:00:00+00:00",
+        imported_at="2026-07-14T14:15:00+00:00",
+        running_max=34.0,
+        running_min=34.0,
+    )
+    _insert_paris_day0_event(
+        conn,
+        event_id="metar-fast-31",
+        settlement_source="aviationweather_metar",
+        metric="high",
+        observation_time="2026-07-14T19:30:00+00:00",
+        available_at="2026-07-14T19:32:20+00:00",
+        raw_value=31.0,
+    )
+    fact = _latest_authorized_day0_fact(
+        conn,
+        city="Paris",
+        target_date="2026-07-14",
+        temperature_metric="high",
+        decision_time=datetime(2026, 7, 14, 19, 52, tzinfo=timezone.utc),
+    )
+    assert fact is not None
+    assert fact["observed_extreme_native"] == 34.0
+    conn.close()
+
+
+def test_day0_running_high_does_not_regress_with_sources_reversed() -> None:
+    """Same law, roles swapped: the fresher fact now lives in
+    observation_instants (a cooling wu_icao_history row) while the higher
+    value was seen earlier by a settlement-channel event (wu_api). The
+    absorbing-direction reduction must not depend on which branch is
+    temporally fresher."""
+    conn = _day0_source_switch_conn()
+    _insert_paris_observation_instant(
+        conn,
+        utc_timestamp="2026-07-14T20:00:00+00:00",
+        imported_at="2026-07-14T20:15:00+00:00",
+        running_max=31.0,
+        running_min=31.0,
+    )
+    _insert_paris_day0_event(
+        conn,
+        event_id="wu-api-34",
+        settlement_source="wu_api",
+        metric="high",
+        observation_time="2026-07-14T14:00:00+00:00",
+        available_at="2026-07-14T14:15:00+00:00",
+        raw_value=34.0,
+    )
+    fact = _latest_authorized_day0_fact(
+        conn,
+        city="Paris",
+        target_date="2026-07-14",
+        temperature_metric="high",
+        decision_time=datetime(2026, 7, 14, 21, 0, tzinfo=timezone.utc),
+    )
+    assert fact is not None
+    assert fact["observed_extreme_native"] == 34.0
+    conn.close()
+
+
+def test_day0_running_high_advances_when_fresher_source_saw_more() -> None:
+    """Legitimate case: the fresher source genuinely observed a NEW peak. The
+    running high must advance to it (this is the one direction 'most recent
+    wins' happens to get right, and the fix must not break it)."""
+    conn = _day0_source_switch_conn()
+    _insert_paris_observation_instant(
+        conn,
+        utc_timestamp="2026-07-14T14:00:00+00:00",
+        imported_at="2026-07-14T14:15:00+00:00",
+        running_max=31.0,
+        running_min=31.0,
+    )
+    _insert_paris_day0_event(
+        conn,
+        event_id="metar-fast-36",
+        settlement_source="aviationweather_metar",
+        metric="high",
+        observation_time="2026-07-14T19:30:00+00:00",
+        available_at="2026-07-14T19:32:20+00:00",
+        raw_value=36.0,
+    )
+    fact = _latest_authorized_day0_fact(
+        conn,
+        city="Paris",
+        target_date="2026-07-14",
+        temperature_metric="high",
+        decision_time=datetime(2026, 7, 14, 19, 52, tzinfo=timezone.utc),
+    )
+    assert fact is not None
+    assert fact["observed_extreme_native"] == 36.0
+    conn.close()
+
+
+def test_day0_running_low_does_not_regress_upward_when_fresher_source_saw_more() -> None:
+    """LOW-metric mirror of the type specimen: the running low is a MINIMUM.
+    An early-morning wu_icao_history row already saw 15.0C; a fresher fast-lane
+    event at 19:30 only saw 18.0C (never observed the early cold snap). The
+    day-so-far low must stay 15.0C, not rise to 18.0C."""
+    conn = _day0_source_switch_conn()
+    _insert_paris_observation_instant(
+        conn,
+        utc_timestamp="2026-07-14T05:00:00+00:00",
+        imported_at="2026-07-14T05:15:00+00:00",
+        running_max=15.0,
+        running_min=15.0,
+    )
+    _insert_paris_day0_event(
+        conn,
+        event_id="metar-fast-18",
+        settlement_source="aviationweather_metar",
+        metric="low",
+        observation_time="2026-07-14T19:30:00+00:00",
+        available_at="2026-07-14T19:32:20+00:00",
+        raw_value=18.0,
+    )
+    fact = _latest_authorized_day0_fact(
+        conn,
+        city="Paris",
+        target_date="2026-07-14",
+        temperature_metric="low",
+        decision_time=datetime(2026, 7, 14, 19, 52, tzinfo=timezone.utc),
+    )
+    assert fact is not None
+    assert fact["observed_extreme_native"] == 15.0
+    conn.close()
+
+
+def test_day0_running_low_advances_when_fresher_source_saw_less() -> None:
+    """Legitimate LOW-metric case: the fresher source genuinely observed a new
+    colder trough. The running low must advance (fall) to it."""
+    conn = _day0_source_switch_conn()
+    _insert_paris_observation_instant(
+        conn,
+        utc_timestamp="2026-07-14T05:00:00+00:00",
+        imported_at="2026-07-14T05:15:00+00:00",
+        running_max=15.0,
+        running_min=15.0,
+    )
+    _insert_paris_day0_event(
+        conn,
+        event_id="metar-fast-10",
+        settlement_source="aviationweather_metar",
+        metric="low",
+        observation_time="2026-07-14T19:30:00+00:00",
+        available_at="2026-07-14T19:32:20+00:00",
+        raw_value=10.0,
+    )
+    fact = _latest_authorized_day0_fact(
+        conn,
+        city="Paris",
+        target_date="2026-07-14",
+        temperature_metric="low",
+        decision_time=datetime(2026, 7, 14, 19, 52, tzinfo=timezone.utc),
+    )
+    assert fact is not None
+    assert fact["observed_extreme_native"] == 10.0
+    conn.close()
+
+
 def _create_db(path) -> None:
     conn = sqlite3.connect(path)
     try:
