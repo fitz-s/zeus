@@ -283,7 +283,7 @@ def test_global_auction_receipt_persists_complete_buy_sell_hold_cash_comparison(
     artifact = json.loads(row["artifact_json"])
     summary = artifact["summary"]
     assert row["mode"] == "global_single_order_auction"
-    assert summary["schema_version"] == 12
+    assert summary["schema_version"] == 13
     assert summary["book_capture_freshness_complete"] is True
     assert summary["book_captured_at_utc"] == "2026-07-14T01:00:00.250000+00:00"
     assert summary["book_deadline_at_utc"] == "2026-07-14T01:00:30.250000+00:00"
@@ -380,7 +380,10 @@ def test_global_auction_receipt_persists_complete_buy_sell_hold_cash_comparison(
     assert summary["buy_sizing_rejection_count"] == 1
     assert summary["buy_sizing_rejection_complete"] is True
     assert summary["buy_sizing_rejection_encoding"] == (
-        "zlib+base64+canonical-json-v1"
+        "zlib+base64+indexed-canonical-json-v2"
+    )
+    assert summary["buy_sizing_rejection_index_source"] == (
+        "candidate_evaluations.buy_candidate_index"
     )
     sizing_rejection_json = zlib.decompress(
         base64.b64decode(summary["buy_sizing_rejections_zlib_b64"])
@@ -388,21 +391,18 @@ def test_global_auction_receipt_persists_complete_buy_sell_hold_cash_comparison(
     assert hashlib.sha256(sizing_rejection_json).hexdigest() == (
         summary["buy_sizing_rejections_sha256"]
     )
-    assert json.loads(sizing_rejection_json) == [
-        {
-            "candidate_id": "buy-paused",
-            "family_key": "family-buy",
-            "bin_id": "20C",
-            "condition_id": "condition-buy",
-            "side": "YES",
-            "token_id": "token-buy",
-            "current_token_shares": "0",
-            "full_kelly_target_shares": "40",
-            "fractional_kelly_target_shares": "10",
-            "minimum_marketable_increment_shares": "12",
-            "minimum_fractional_kelly_multiplier": "0.3",
-        }
-    ]
+    sizing_rejections = json.loads(sizing_rejection_json)
+    assert sizing_rejections == {
+        "fields": [
+            "buy_candidate_index",
+            "current_token_shares",
+            "full_kelly_target_shares",
+            "fractional_kelly_target_shares",
+            "minimum_marketable_increment_shares",
+            "minimum_fractional_kelly_multiplier",
+        ],
+        "rows": [[0, "0", "40", "10", "12", "0.3"]],
+    }
     assert summary["hold_cash"] == {
         "robust_delta_log_wealth": "0",
         "robust_ev_usd": "0",
@@ -418,6 +418,24 @@ def test_global_auction_receipt_persists_complete_buy_sell_hold_cash_comparison(
         "zlib+base64+canonical-json-v7"
     )
     candidate_evaluations = json.loads(evaluation_json)
+    sizing_row = dict(
+        zip(
+            sizing_rejections["fields"],
+            sizing_rejections["rows"][0],
+            strict=True,
+        )
+    )
+    sizing_identity = candidate_evaluations["buy_candidate_index"][
+        sizing_row["buy_candidate_index"]
+    ]
+    assert sizing_identity == [
+        "buy-paused",
+        "family-buy",
+        "20C",
+        "condition-buy",
+        "YES",
+        "token-buy",
+    ]
     assert candidate_evaluations["rejected_groups"] == [
         {
             "action": "BUY",
@@ -3078,7 +3096,7 @@ def test_speculative_topology_fills_snapshot_gap_from_complete_receipt():
         separators=(",", ":"),
     ).encode()
     summary = {
-        "schema_version": 12,
+        "schema_version": 13,
         "book_native_side_candidate_coverage_status": "COMPLETE",
         "book_native_side_candidate_coverage_complete": True,
         "book_native_side_encoding": "zlib+base64+canonical-json-v1",

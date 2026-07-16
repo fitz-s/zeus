@@ -418,19 +418,11 @@ def _store_global_auction_receipt(
     if decision is None:
         raise ValueError("GLOBAL_AUCTION_RECEIPT_DECISION_MISSING")
     evaluations = tuple(getattr(decision, "candidate_evaluations", ()) or ())
-    buy_sizing_rejection_rows = tuple(
-        {
-            "candidate_id": str(evaluation.candidate_id),
-            "family_key": str(evaluation.family_key),
-            "bin_id": str(evaluation.bin_id),
-            "condition_id": str(evaluation.condition_id),
-            "side": str(evaluation.side),
-            "token_id": str(evaluation.token_id),
-            **asdict(evaluation.buy_sizing_rejection),
-        }
+    buy_sizing_rejections = {
+        str(evaluation.candidate_id): evaluation.buy_sizing_rejection
         for evaluation in evaluations
         if evaluation.buy_sizing_rejection is not None
-    )
+    }
     evaluation_rows = tuple(
         {
             key: value
@@ -447,24 +439,6 @@ def _store_global_auction_receipt(
         and row.get("rejection_reason")
         == "FRACTIONAL_KELLY_INCREMENT_BELOW_MINIMUM"
     }
-    sizing_rejection_ids = tuple(
-        str(row["candidate_id"]) for row in buy_sizing_rejection_rows
-    )
-    buy_sizing_rejection_complete = (
-        len(sizing_rejection_ids) == len(set(sizing_rejection_ids))
-        and set(sizing_rejection_ids) == below_minimum_ids
-    )
-    if not buy_sizing_rejection_complete:
-        raise ValueError(
-            "GLOBAL_AUCTION_RECEIPT_BUY_SIZING_REJECTION_INCOMPLETE"
-        )
-    sizing_rejection_json = json.dumps(
-        buy_sizing_rejection_rows,
-        default=str,
-        sort_keys=True,
-        separators=(",", ":"),
-    ).encode("utf-8")
-    sizing_rejection_zlib = zlib.compress(sizing_rejection_json, level=9)
     rejection_groups: dict[tuple[str, str, str], list[str]] = {}
     detailed_rows: list[dict] = []
     for row in evaluation_rows:
@@ -506,6 +480,51 @@ def _store_global_auction_receipt(
             for row in buy_candidate_index
         )
     )
+    buy_candidate_positions = {
+        row[0]: index for index, row in enumerate(buy_candidate_index)
+    }
+    sizing_rejection_fields = (
+        "buy_candidate_index",
+        "current_token_shares",
+        "full_kelly_target_shares",
+        "fractional_kelly_target_shares",
+        "minimum_marketable_increment_shares",
+        "minimum_fractional_kelly_multiplier",
+    )
+    buy_sizing_rejection_complete = (
+        set(buy_sizing_rejections) == below_minimum_ids
+        and all(
+            candidate_id in buy_candidate_positions
+            for candidate_id in buy_sizing_rejections
+        )
+    )
+    if not buy_sizing_rejection_complete:
+        raise ValueError(
+            "GLOBAL_AUCTION_RECEIPT_BUY_SIZING_REJECTION_INCOMPLETE"
+        )
+    buy_sizing_rejection_rows = tuple(
+        [
+            buy_candidate_positions[candidate_id],
+            str(certificate.current_token_shares),
+            str(certificate.full_kelly_target_shares),
+            str(certificate.fractional_kelly_target_shares),
+            str(certificate.minimum_marketable_increment_shares),
+            str(certificate.minimum_fractional_kelly_multiplier),
+        ]
+        for candidate_id, certificate in sorted(
+            buy_sizing_rejections.items(),
+            key=lambda item: buy_candidate_positions[item[0]],
+        )
+    )
+    sizing_rejection_json = json.dumps(
+        {
+            "fields": sizing_rejection_fields,
+            "rows": buy_sizing_rejection_rows,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    sizing_rejection_zlib = zlib.compress(sizing_rejection_json, level=9)
     book_native_side_receipt = _book_native_side_receipt(
         asset_states=book_asset_states,
         probability_keys=probability_keys,
@@ -574,7 +593,7 @@ def _store_global_auction_receipt(
         )
     )
     receipt = {
-        "schema_version": 12,
+        "schema_version": 13,
         "selection_epoch_identity": selection_epoch_identity,
         "selection_cut_at_utc": selection_cut_at_utc.isoformat(),
         "decision_at_utc": decision_at_utc.isoformat(),
@@ -646,7 +665,10 @@ def _store_global_auction_receipt(
         ).decode("ascii"),
         "buy_sizing_rejection_count": len(buy_sizing_rejection_rows),
         "buy_sizing_rejection_complete": buy_sizing_rejection_complete,
-        "buy_sizing_rejection_encoding": "zlib+base64+canonical-json-v1",
+        "buy_sizing_rejection_encoding": "zlib+base64+indexed-canonical-json-v2",
+        "buy_sizing_rejection_index_source": (
+            "candidate_evaluations.buy_candidate_index"
+        ),
         "buy_sizing_rejections_sha256": hashlib.sha256(
             sizing_rejection_json
         ).hexdigest(),

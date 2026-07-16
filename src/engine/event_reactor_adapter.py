@@ -633,7 +633,7 @@ def _global_book_receipt_token_pairs(
             compressed_b64,
         ) = receipt_row
         if (
-            schema_version != 12
+            schema_version not in {12, 13}
             or coverage_status != "COMPLETE"
             or coverage_complete != 1
             or encoding != "zlib+base64+canonical-json-v1"
