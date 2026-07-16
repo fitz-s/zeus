@@ -960,7 +960,14 @@ class MarketAnalysis:
         map_A = float(self._calibrator.A) if has_platt else 0.0
         map_B = float(self._calibrator.B) if has_platt else 0.0
         map_C = float(self._calibrator.C) if has_platt else 0.0
-        p_raw_matrix = self._bootstrap_p_raw_matrix(n, n_members)
+        # Transfer uncertainty consumes RNG inside this loop. Keep scalar
+        # sampler draws interleaved with it so each stochastic layer receives
+        # the same draws as the authority path.
+        p_raw_matrix = (
+            None
+            if has_platt and self._transfer_logit_sigma > 0.0
+            else self._bootstrap_p_raw_matrix(n, n_members)
+        )
         samples = np.zeros((n, len(self.bins)))
         for i in range(n):
             # Layer 1: sample the configured signal probability object for all

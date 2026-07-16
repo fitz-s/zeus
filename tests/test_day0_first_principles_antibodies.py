@@ -1233,6 +1233,71 @@ class TestDay0BootstrapLcb:
         np.testing.assert_array_equal(actual, expected)
         assert batch._rng.random() == scalar._rng.random()
 
+    def test_batch_path_keeps_transfer_uncertainty_rng_interleaved(self):
+        import numpy as np
+        from types import SimpleNamespace
+
+        from src.calibration.platt import ExtendedPlattCalibrator
+        from src.engine.event_reactor_adapter import _make_day0_bootstrap_sampler
+        from src.strategy.market_analysis import MarketAnalysis
+        from src.types import Bin
+
+        bins = [
+            Bin(None, 23.0, "C"),
+            Bin(24.0, 24.0, "C"),
+            Bin(25.0, 25.0, "C"),
+            Bin(26.0, 26.0, "C"),
+            Bin(27.0, None, "C"),
+        ]
+        family = SimpleNamespace(
+            city="Seoul",
+            metric="high",
+            candidates=[
+                SimpleNamespace(bin=b, condition_id=f"cond{i}")
+                for i, b in enumerate(bins)
+            ],
+        )
+        members = np.asarray([24.5, 25.2, 25.8, 26.4, 27.1])
+        sampler = _make_day0_bootstrap_sampler(
+            members_native=members,
+            payload=_payload("high", 25.0, obs_age_minutes=10.0),
+            family=family,
+            unit="C",
+            decision_time=NOW,
+        )
+        assert sampler is not None
+
+        calibrator = ExtendedPlattCalibrator()
+        calibrator.fitted = True
+        calibrator.A = 1.0
+        calibrator.B = 0.0
+        calibrator.C = 0.0
+        calibrator.bootstrap_params = [(1.0, 0.0, 0.0)]
+
+        def _analysis(configured_sampler):
+            return MarketAnalysis(
+                p_raw=np.full(5, 0.2),
+                p_cal=np.full(5, 0.2),
+                p_market=None,
+                alpha=1.0,
+                bins=bins,
+                member_maxes=members,
+                calibrator=calibrator,
+                unit="C",
+                rng_seed=91,
+                transfer_logit_sigma=0.2,
+                bootstrap_probability_sampler=configured_sampler,
+                bootstrap_signal_type="test_day0",
+            )
+
+        scalar = _analysis(lambda analysis, n: sampler(analysis, n))
+        batch = _analysis(sampler)
+        expected = scalar.forecast_yes_probability_sample_matrix(500)
+        actual = batch.forecast_yes_probability_sample_matrix(500)
+
+        np.testing.assert_array_equal(actual, expected)
+        assert batch._rng.random() == scalar._rng.random()
+
     def test_qlcb_percentile_sits_strictly_below_point_q(self):
         """The category defect was q_lcb == q (zero-variance static sampler).
         A real bootstrap must produce strictly positive dispersion across
