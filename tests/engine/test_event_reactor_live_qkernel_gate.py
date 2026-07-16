@@ -1960,19 +1960,23 @@ def test_qkernel_actual_submit_floor_uses_actual_stake_not_cert_optimal_size():
 
 
 def test_qkernel_actual_submit_floor_accepts_price_relative_positive_economics():
+    # forecast_qkernel_entry declares min_entry_price: 0.10 in the strategy
+    # registry (architecture/strategy_profile_registry.yaml) — a cost below
+    # that strategy floor is rejected by entry_price_floor_decision regardless
+    # of edge, so the price-relative-acceptance fixture must clear 0.10.
     cert = _qkernel_cert()
     cert.update(
         route_id="DIRECT_YES:bin-1@proof",
         candidate_id="YES:bin-1:DIRECT_YES:bin-1@proof",
         side="YES",
-        payoff_q_point=0.24833093804728934,
-        payoff_q_lcb=0.0990451308919892,
-        cost=0.053828064525010946,
-        edge_lcb=0.04521706636697825,
+        payoff_q_point=0.30,
+        payoff_q_lcb=0.20,
+        cost=0.15,
+        edge_lcb=0.05,
         optimal_stake_usd=23.69,
         optimal_delta_u=0.01,
         delta_u_at_min=0.0002,
-        selection_guard_q_safe=0.0990451308919892,
+        selection_guard_q_safe=0.20,
     )
     proof = SimpleNamespace(
         direction="buy_yes",
@@ -1984,7 +1988,7 @@ def test_qkernel_actual_submit_floor_accepts_price_relative_positive_economics()
         proof=proof,
         strategy_policy_event_type="FORECAST_SNAPSHOT_READY",
         actual_stake_usd=5.46,
-        actual_cost=0.053828064525010946,
+        actual_cost=0.15,
     )
 
     assert reason is None
