@@ -1,5 +1,5 @@
 # Created: 2026-06-12
-# Last reused or audited: 2026-06-12
+# Last reused/audited: 2026-07-16
 # Authority basis: day0_obs_fastlane_plan.md §4.2 (Option B) and §4.3 (Option C);
 #   operator task brief /tmp/day0_obs_fastlane_plan.md.
 """Antibody tests for Day0 observation fast-lane Options B and C.
@@ -758,16 +758,16 @@ class TestDay0MetarSourceClockTick:
 
             def emit_prefetched(self, **_kw):
                 order.append("emit")
+                _kw["inserted_event_ids"].extend(("event-b", "event-a"))
                 return 2
 
         class _Conn:
             def execute(self, sql, _params=()):
+                if "opportunity_events" in sql:
+                    raise AssertionError("inserted event IDs must not be recovered by history scan")
                 if sql == "BEGIN IMMEDIATE":
                     order.append("begin")
                 return self
-
-            def fetchall(self):
-                return (("event-b",), ("event-a",))
 
             def commit(self):
                 order.append("commit")
@@ -825,14 +825,12 @@ class TestDay0MetarSourceClockTick:
                 return prefetch
 
             def emit_prefetched(self, **_kw):
+                _kw["inserted_event_ids"].extend(("event-b", "event-a"))
                 return 2
 
         class _Conn:
             def execute(self, _sql, _params=()):
                 return self
-
-            def fetchall(self):
-                return (("event-b",), ("event-a",))
 
             def commit(self):
                 return None

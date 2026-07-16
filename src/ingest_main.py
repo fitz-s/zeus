@@ -850,7 +850,7 @@ def _day0_metar_source_clock_tick():
         }
 
     emitted = 0
-    emitted_event_ids: tuple[str, ...] = ()
+    inserted_event_ids: list[str] = []
     try:
         conn.execute("BEGIN IMMEDIATE")
         emitted = emitter.emit_prefetched(
@@ -861,30 +861,8 @@ def _day0_metar_source_clock_tick():
             day0_is_tradeable=day0_is_tradeable_for_scope(
                 str(edli_cfg.get("edli_live_scope") or "forecast_plus_day0")
             ),
+            inserted_event_ids=inserted_event_ids,
         )
-        if emitted:
-            try:
-                emitted_event_ids = tuple(
-                    str(row[0])
-                    for row in conn.execute(
-                        """
-                        SELECT event_id
-                          FROM opportunity_events
-                         WHERE event_type = 'DAY0_EXTREME_UPDATED'
-                           AND received_at = ?
-                         ORDER BY event_id
-                         LIMIT 100
-                        """,
-                        (decision_time.isoformat(),),
-                    ).fetchall()
-                )
-            except Exception:
-                logger.warning(
-                    "DAY0_METAR_COMMITTED_EVENT_IDS_UNAVAILABLE emitted=%d; "
-                    "wake will fall back to normal pending-queue order",
-                    emitted,
-                    exc_info=True,
-                )
         conn.commit()
     except sqlite3.OperationalError as exc:
         conn.rollback()
@@ -912,7 +890,7 @@ def _day0_metar_source_clock_tick():
             publish_reactor_wake(
                 source="day0_metar_source_clock",
                 reason="day0_extreme_event_committed",
-                event_ids=emitted_event_ids,
+                event_ids=tuple(inserted_event_ids),
             )
         except Exception:
             logger.warning(

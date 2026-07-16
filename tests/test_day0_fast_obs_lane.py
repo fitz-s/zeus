@@ -784,11 +784,15 @@ class TestLedgerPublicationDelta:
             decision_time=t0 + timedelta(minutes=5),
         )
         assert pf1.ledger_reports == (first,)
+        inserted_event_ids: list[str] = []
         assert emitter.emit_prefetched(
             world_conn=conn,
             prefetch=pf1,
             received_at=(t0 + timedelta(minutes=5)).isoformat(),
+            inserted_event_ids=inserted_event_ids,
         ) == 2
+        assert len(inserted_event_ids) == 2
+        assert len(set(inserted_event_ids)) == 2
 
         pf2 = emitter.prefetch(
             cities=[_tokyo()],
