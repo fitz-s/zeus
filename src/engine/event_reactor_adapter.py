@@ -12947,6 +12947,13 @@ def _assert_live_entry_submit_authority(actionable_payload: Mapping[str, object]
     raise ValueError(f"LIVE_ENTRY_AUTHORITY_UNSUPPORTED_EVENT_TYPE:{event_type or 'missing'}")
 
 
+# Absolute live-entry submit band, independent of venue tick truth. Restores
+# the pre-bcf7f949d [0.05, 0.95] hard band that assert_live_order_unit_price
+# enforced before it became tick-relative (tick unknown at the authority gate).
+LIVE_ENTRY_ABSOLUTE_PRICE_MIN = 0.05
+LIVE_ENTRY_ABSOLUTE_PRICE_MAX = 0.95
+
+
 def _assert_forecast_entry_uses_qkernel_authority(actionable_payload: Mapping[str, object]) -> None:
     """Forecast live ENTRY submit is licensed only by qkernel spine economics."""
 
@@ -12982,6 +12989,23 @@ def _assert_forecast_entry_uses_qkernel_authority(actionable_payload: Mapping[st
         assert_live_order_unit_price(cert.get("cost"))
     except ValueError as exc:
         raise ValueError(f"LIVE_ENTRY_UNIT_PRICE_OUT_OF_BOUNDS:{exc}") from None
+    # bcf7f949d moved assert_live_order_unit_price to the venue tick band
+    # (tick unknown at this gate), which silently removed the old absolute
+    # [0.05, 0.95] submit band here. Re-assert it: no cert — sealed
+    # current-state included — may license an entry priced outside it.
+    # The side-aware strategy floor (0.10/0.05) still applies downstream at
+    # the final-submit boundary for non-current-state certs.
+    cert_cost = _optional_float(cert.get("cost"))
+    if cert_cost is None or not (
+        LIVE_ENTRY_ABSOLUTE_PRICE_MIN - 1e-12
+        <= cert_cost
+        <= LIVE_ENTRY_ABSOLUTE_PRICE_MAX + 1e-12
+    ):
+        raise ValueError(
+            "LIVE_ENTRY_UNIT_PRICE_OUT_OF_BOUNDS:"
+            f"cost={cert_cost}:absolute_band=[{LIVE_ENTRY_ABSOLUTE_PRICE_MIN},"
+            f" {LIVE_ENTRY_ABSOLUTE_PRICE_MAX}]"
+        )
     near_day0_reason = _qkernel_near_day0_cert_rejection_reason(cert)
     if near_day0_reason is not None:
         raise ValueError(near_day0_reason)
