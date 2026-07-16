@@ -6098,34 +6098,56 @@ def event_bound_live_adapter_from_trade_conn(
                     cached_before_bind
                 )
                 if cached_probabilities is not None:
-                    retained_slice = {
-                        family_key: probability
-                        for family_key, probability in probabilities.items()
-                        if family_key not in eligible_refresh_family_keys
-                    }
                     try:
-                        retained_cached = {
-                            family_key: cached_probabilities[family_key]
-                            for family_key in retained_slice
-                        }
                         retained_bound_probabilities = (
                             _reuse_global_book_token_bindings(
-                                retained_slice,
-                                retained_cached,
+                                probabilities,
+                                cached_probabilities,
                             )
                         )
-                        bind_slice = {
-                            family_key: probabilities[family_key]
-                            for family_key in eligible_refresh_family_keys
-                        }
+                        bind_slice = {}
                     except (KeyError, TypeError, ValueError) as exc:
                         logging.getLogger(__name__).warning(
-                            "global book token delta rejected; rebinding full "
-                            "universe: reason=%s",
+                            "global book full token reuse rejected; rebinding "
+                            "changed families: reason=%s",
                             exc,
                         )
+                        retained_slice = {
+                            family_key: probability
+                            for family_key, probability in probabilities.items()
+                            if family_key not in eligible_refresh_family_keys
+                        }
+                        try:
+                            retained_cached = {
+                                family_key: cached_probabilities[family_key]
+                                for family_key in retained_slice
+                            }
+                            retained_bound_probabilities = (
+                                _reuse_global_book_token_bindings(
+                                    retained_slice,
+                                    retained_cached,
+                                )
+                            )
+                            bind_slice = {
+                                family_key: probabilities[family_key]
+                                for family_key in eligible_refresh_family_keys
+                            }
+                        except (KeyError, TypeError, ValueError) as delta_exc:
+                            logging.getLogger(__name__).warning(
+                                "global book token delta rejected; rebinding full "
+                                "universe: reason=%s",
+                                delta_exc,
+                            )
             prefetched = None
-            if prefetch_slice is None:
+            if not bind_slice:
+                rebound_probabilities = {}
+                if prefetch_slice is not None:
+                    prefetched = _prefetch_books(
+                        prefetch_slice,
+                        mode=prefetch_mode,
+                        token_hint=prefetch_token_hint,
+                    )
+            elif prefetch_slice is None:
                 rebound_probabilities = _bind(
                     bind_slice,
                     mode="current_metadata",
