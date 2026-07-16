@@ -7051,6 +7051,24 @@ def test_live_trading_process_absent_blocks_running_main_without_deploy_restart(
     assert result.evidence["restart_in_progress"] is False
 
 
+def test_live_main_processes_ignores_shell_commands_that_only_mention_main(monkeypatch):
+    monkeypatch.setattr(
+        preflight.subprocess,
+        "check_output",
+        lambda *_, **__: "\n".join(
+            (
+                "123 /opt/homebrew/bin/python3 -m src.main",
+                "456 /bin/zsh -c pgrep -f 'Python.*-m src.main'",
+                '789 python3 -c "print(\'-m src.main\')"',
+            )
+        ),
+    )
+
+    assert preflight._live_main_processes() == [
+        "123 /opt/homebrew/bin/python3 -m src.main"
+    ]
+
+
 def test_live_trading_process_absent_blocks_running_main_during_deploy_restart(
     monkeypatch,
 ):

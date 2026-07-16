@@ -19,6 +19,7 @@ import argparse
 import json
 import os
 import plistlib
+import shlex
 import sqlite3
 import subprocess
 import sys
@@ -254,9 +255,20 @@ def _live_main_processes() -> list[str]:
         return []
     rows: list[str] = []
     for line in out.splitlines():
-        if "python" in line and ("-m src.main" in line or "src.main" in line):
-            if "check_live_restart_preflight" not in line:
-                rows.append(line.strip())
+        parts = line.strip().split(maxsplit=1)
+        if len(parts) != 2 or not parts[0].isdigit():
+            continue
+        try:
+            argv = shlex.split(parts[1])
+        except ValueError:
+            continue
+        if not argv or not Path(argv[0]).name.lower().startswith("python"):
+            continue
+        if any(
+            arg == "-m" and index + 1 < len(argv) and argv[index + 1] == "src.main"
+            for index, arg in enumerate(argv)
+        ):
+            rows.append(line.strip())
     return rows
 
 
