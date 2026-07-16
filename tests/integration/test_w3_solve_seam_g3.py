@@ -4401,11 +4401,22 @@ def test_current_day0_query_uses_utc_window_and_target_date_index(monkeypatch):
 
     executed_sql = []
     conn.set_trace_callback(executed_sql.append)
+    real_loads = json.loads
+    decoded = 0
+
+    def _counting_loads(value):
+        nonlocal decoded
+        decoded += 1
+        return real_loads(value)
+
+    monkeypatch.setattr(universe.json, "loads", _counting_loads)
     events = _current_day0_events(conn, decision_at_utc=decision_at)
+    monkeypatch.setattr(universe.json, "loads", real_loads)
 
     events_by_city = {
         json.loads(event.payload_json)["city"]: event for event in events
     }
+    assert decoded == 0
     assert set(events_by_city) == {"West", "Center", "East"}
     assert events_by_city["Center"].available_at == "2026-07-10T11:00:00+00:00"
     sql = next(

@@ -1555,6 +1555,7 @@ def _day0_event_is_current_for_entry(
     payload: Mapping[str, object],
     *,
     decision_at_utc: datetime,
+    city_configs: Mapping[str, object] | None = None,
 ) -> bool:
     """Admit a Day0 fact only on its target city's current local day."""
 
@@ -1564,9 +1565,11 @@ def _day0_event_is_current_for_entry(
     target_date = str(payload.get("target_date") or "").strip()
     if not city or not target_date:
         return False
-    from src.config import runtime_cities_by_name
+    if city_configs is None:
+        from src.config import runtime_cities_by_name
 
-    city_config = runtime_cities_by_name().get(city)
+        city_configs = runtime_cities_by_name()
+    city_config = city_configs.get(city)
     timezone_name = str(getattr(city_config, "timezone", "") or "").strip()
     if not timezone_name:
         return False
@@ -1589,7 +1592,9 @@ def _current_day0_events(
     if not _table_exists(world_conn, "opportunity_events"):
         return ()
     from src.events.day0_authority import normalize_day0_live_authority_status
+    from src.config import runtime_cities_by_name
 
+    city_configs = runtime_cities_by_name()
     held = frozenset(
         (
             str(city or "").strip(),
@@ -1606,12 +1611,27 @@ def _current_day0_events(
     utc_date = decision_at_utc.astimezone(timezone.utc).date()
     target_floor = (utc_date - timedelta(days=1)).isoformat()
     target_ceiling = (utc_date + timedelta(days=1)).isoformat()
+    select = """
+        SELECT opportunity_events.*,
+               json_extract(payload_json, '$.city') AS _day0_city,
+               json_extract(payload_json, '$.target_date') AS _day0_target_date,
+               json_extract(payload_json, '$.metric') AS _day0_metric,
+               json_extract(payload_json, '$.source_match_status') AS _day0_source_match,
+               json_extract(payload_json, '$.local_date_status') AS _day0_local_date,
+               json_extract(payload_json, '$.station_match_status') AS _day0_station_match,
+               json_extract(payload_json, '$.dst_status') AS _day0_dst,
+               json_extract(payload_json, '$.metric_match_status') AS _day0_metric_match,
+               json_extract(payload_json, '$.rounding_status') AS _day0_rounding,
+               json_extract(payload_json, '$.source_authorized_status') AS _day0_source_authorized,
+               json_extract(payload_json, '$.live_authority_status') AS _day0_live_authority
+          FROM opportunity_events
+          INDEXED BY idx_opportunity_events_fsr_target_date
+         WHERE event_type='DAY0_EXTREME_UPDATED'
+    """
     cur = world_conn.execute(
-        "SELECT * FROM opportunity_events "
-        "INDEXED BY idx_opportunity_events_fsr_target_date "
-        "WHERE event_type='DAY0_EXTREME_UPDATED' "
-        "AND json_extract(payload_json, '$.target_date') BETWEEN ? AND ? "
-        "AND available_at<=? AND received_at<=?",
+        select
+        + " AND json_extract(payload_json, '$.target_date') BETWEEN ? AND ? "
+        + "AND available_at<=? AND received_at<=?",
         (
             target_floor,
             target_ceiling,
@@ -1628,11 +1648,9 @@ def _current_day0_events(
         }
     ):
         held_cur = world_conn.execute(
-            "SELECT * FROM opportunity_events "
-            "INDEXED BY idx_opportunity_events_fsr_target_date "
-            "WHERE event_type='DAY0_EXTREME_UPDATED' "
-            "AND json_extract(payload_json, '$.target_date')=? "
-            "AND available_at<=? AND received_at<=?",
+            select
+            + " AND json_extract(payload_json, '$.target_date')=? "
+            + "AND available_at<=? AND received_at<=?",
             (
                 target_date,
                 decision_at_utc.isoformat(),
@@ -1640,69 +1658,90 @@ def _current_day0_events(
             ),
         )
         rows.extend(held_cur.fetchall())
-    out = {}
+    names = tuple(description[0] for description in cur.description or ())
+    indexes = {name: index for index, name in enumerate(names)}
+
+    def _value(raw: object, name: str) -> object:
+        if isinstance(raw, sqlite3.Row):
+            return raw[name]
+        return raw[indexes[name]]  # type: ignore[index]
+
+    latest: dict[str, tuple[tuple[str, str, str], object]] = {}
     for raw in rows:
-        row = _row_dict(cur, raw)
-        try:
-            event = OpportunityEvent(
-                **{
-                    field: row[field]
-                    for field in OpportunityEvent.__dataclass_fields__
-                }
-            )
-            payload = json.loads(event.payload_json)
-        except (KeyError, TypeError, json.JSONDecodeError):
-            continue
-        if not isinstance(payload, dict):
-            continue
         family = (
-            str(payload.get("city") or "").strip(),
-            str(payload.get("target_date") or "").strip(),
-            str(payload.get("metric") or "").strip().lower(),
+            str(_value(raw, "_day0_city") or "").strip(),
+            str(_value(raw, "_day0_target_date") or "").strip(),
+            str(_value(raw, "_day0_metric") or "").strip().lower(),
         )
-        if (
-            family not in held
-            and not _day0_event_is_current_for_entry(
-                payload,
-                decision_at_utc=decision_at_utc,
-            )
-        ):
+        if not family[0] or not family[1] or family[2] not in {"high", "low"}:
             continue
         if not (
-            payload.get("source_match_status") == "MATCH"
-            and payload.get("local_date_status") == "MATCH"
-            and payload.get("station_match_status") == "MATCH"
-            and payload.get("dst_status") == "UNAMBIGUOUS"
-            and payload.get("metric_match_status") == "MATCH"
-            and payload.get("rounding_status") == "MATCH"
-            and payload.get("source_authorized_status", "AUTHORIZED") == "AUTHORIZED"
+            _value(raw, "_day0_source_match") == "MATCH"
+            and _value(raw, "_day0_local_date") == "MATCH"
+            and _value(raw, "_day0_station_match") == "MATCH"
+            and _value(raw, "_day0_dst") == "UNAMBIGUOUS"
+            and _value(raw, "_day0_metric_match") == "MATCH"
+            and _value(raw, "_day0_rounding") == "MATCH"
+            and (_value(raw, "_day0_source_authorized") or "AUTHORIZED")
+            == "AUTHORIZED"
             and normalize_day0_live_authority_status(
-                payload.get("live_authority_status")
+                _value(raw, "_day0_live_authority")
             )
             == "live"
         ):
             continue
-        expires_at = event.expires_at
+        expires_at = _value(raw, "expires_at")
         if expires_at:
             try:
-                expires = datetime.fromisoformat(expires_at.replace("Z", "+00:00"))
-            except ValueError:
+                expires = datetime.fromisoformat(
+                    str(expires_at).replace("Z", "+00:00")
+                )
+            except (TypeError, ValueError):
                 continue
             if expires.tzinfo is None or expires.astimezone(timezone.utc) < decision_at_utc:
                 continue
-        family_key = _event_family_key(event)
-        previous = out.get(family_key)
+        family_key = weather_family_id(
+            city=family[0],
+            target_date=family[1],
+            metric=family[2],
+        )
+        previous = latest.get(family_key)
         if previous is None or (
-            event.available_at,
-            event.created_at,
-            event.event_id,
+            _value(raw, "available_at"),
+            _value(raw, "created_at"),
+            _value(raw, "event_id"),
         ) > (
-            previous.available_at,
-            previous.created_at,
-            previous.event_id,
+            _value(previous[1], "available_at"),
+            _value(previous[1], "created_at"),
+            _value(previous[1], "event_id"),
         ):
-            out[family_key] = event
-    return tuple(out[key] for key in sorted(out))
+            latest[family_key] = family, raw
+
+    out = []
+    for family_key in sorted(latest):
+        family, raw = latest[family_key]
+        if (
+            family not in held
+            and not _day0_event_is_current_for_entry(
+                {"city": family[0], "target_date": family[1]},
+                decision_at_utc=decision_at_utc,
+                city_configs=city_configs,
+            )
+        ):
+            continue
+        row = _row_dict(cur, raw)
+        try:
+            out.append(
+                OpportunityEvent(
+                    **{
+                        field: row[field]
+                        for field in OpportunityEvent.__dataclass_fields__
+                    }
+                )
+            )
+        except (KeyError, TypeError):
+            continue
+    return tuple(out)
 
 
 def scan_current_global_auction_scope(
