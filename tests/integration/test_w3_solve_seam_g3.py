@@ -2267,6 +2267,107 @@ def test_live_adapter_routes_each_global_truth_to_its_owner(monkeypatch):
     ]
 
 
+def test_live_adapter_overlaps_gamma_bind_with_clob_book_fetch(monkeypatch):
+    trade = sqlite3.connect(":memory:")
+    forecast = sqlite3.connect(":memory:")
+    topology = sqlite3.connect(":memory:")
+    world = sqlite3.connect(":memory:")
+    captured = {}
+
+    def fake_process(events, **kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(events=tuple(events))
+
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "process_current_global_batch",
+        fake_process,
+    )
+    adapter = era.event_bound_live_adapter_from_trade_conn(
+        trade,
+        get_current_level=lambda: era.RiskLevel.GREEN,
+        forecast_conn=forecast,
+        topology_conn=topology,
+        calibration_conn=world,
+    )
+    event = _global_scope_event(city="Dallas", source_run_id="run-dallas")
+    adapter.process_global_batch(
+        (event,),
+        _dt.datetime(2026, 7, 10, 8, 10, tzinfo=_dt.timezone.utc),
+    )
+
+    bind_started = threading.Event()
+    books_started = threading.Event()
+    metadata = {
+        ("condition", "yes-token"): {"condition_id": "condition"},
+        ("condition", "no-token"): {"condition_id": "condition"},
+    }
+
+    def fake_bind(_forecast_conn, *, probability_witnesses, metadata_sink, **_):
+        bind_started.set()
+        assert books_started.wait(1.0), "CLOB fetch did not overlap Gamma bind"
+        metadata_sink.update(metadata)
+        return probability_witnesses
+
+    capture_calls = []
+
+    def fake_capture(_trade_conn, **kwargs):
+        capture_calls.append(kwargs)
+        assert kwargs["metadata_overrides"] == metadata
+        assert kwargs["prefetched_at_utc"].tzinfo is not None
+        assert set(kwargs["prefetched_books"]) == {"yes-token", "no-token"}
+        return SimpleNamespace(witness_identity="book-overlapped", assets=())
+
+    class FakeClient:
+        def __init__(self, **_):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return False
+
+        def get_orderbook_snapshots(self, tokens, **_):
+            books_started.set()
+            assert bind_started.wait(1.0), "Gamma bind did not overlap CLOB fetch"
+            return {
+                token: {"asset_id": token, "hash": f"hash-{token}"}
+                for token in tokens
+            }
+
+    monkeypatch.setattr(universe, "bind_current_global_probability_tokens", fake_bind)
+    monkeypatch.setattr(universe, "capture_current_global_book_epoch", fake_capture)
+    monkeypatch.setattr(
+        "src.data.polymarket_client.PolymarketClient",
+        FakeClient,
+    )
+    provider = captured["current_book_epoch_provider"]
+    probabilities = {
+        "family": SimpleNamespace(
+            bindings=(
+                SimpleNamespace(
+                    yes_token_id="yes-token",
+                    no_token_id="no-token",
+                ),
+            )
+        )
+    }
+
+    bound, epoch = provider(
+        probabilities,
+        _dt.datetime.now(_dt.timezone.utc),
+    )
+
+    assert bound == probabilities
+    assert epoch.witness_identity == "book-overlapped"
+    assert len(capture_calls) == 1
+    trade.close()
+    forecast.close()
+    topology.close()
+    world.close()
+
+
 def test_global_curve_supersession_keeps_typed_current_candidate():
     candidate = object()
     reason = (
@@ -3489,6 +3590,44 @@ def test_current_global_book_epoch_reads_yes_and_no_symmetrically():
             max_age=_dt.timedelta(seconds=30),
             batch_size=500,
         )
+
+
+def test_current_global_book_epoch_consumes_prefetched_books_at_original_cut():
+    probability = _current_global_book_probability()
+    conn = _global_book_metadata_conn(probability)
+    captured_at = _dt.datetime(2026, 6, 13, 8, 0, tzinfo=_dt.timezone.utc)
+    finished_at = captured_at + _dt.timedelta(seconds=2)
+    tokens = tuple(
+        token
+        for binding in probability.bindings
+        for token in (binding.yes_token_id, binding.no_token_id)
+    )
+    books = {
+        token: {
+            "asset_id": token,
+            "hash": f"book-{token}",
+            "tick_size": "0.01",
+            "min_order_size": "5",
+            "bids": [{"price": "0.20", "size": "100"}],
+            "asks": [{"price": "0.30", "size": "100"}],
+        }
+        for token in tokens
+    }
+
+    epoch = capture_current_global_book_epoch(
+        conn,
+        probability_witnesses={probability.family_key: probability},
+        get_books=lambda _tokens: pytest.fail("prefetched epoch must not refetch"),
+        clock=lambda: finished_at,
+        max_age=_dt.timedelta(seconds=30),
+        metadata_overrides={},
+        prefetched_books=books,
+        prefetched_at_utc=captured_at,
+    )
+
+    assert epoch.captured_at_utc == captured_at
+    assert len(epoch.assets) == len(tokens)
+    assert {asset.token_id for asset in epoch.assets} == set(tokens)
 
 
 def test_current_global_book_epoch_excludes_stale_tradeability_symmetrically():

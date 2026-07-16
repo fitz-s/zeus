@@ -5148,6 +5148,7 @@ def event_bound_live_adapter_from_trade_conn(
             from src.engine.global_auction_universe import (
                 bind_current_global_probability_tokens,
                 capture_current_global_book_epoch,
+                fetch_current_global_books,
                 fetch_current_gamma_markets,
             )
             from src.data.market_scanner import _gamma_get
@@ -5206,21 +5207,72 @@ def event_bound_live_adapter_from_trade_conn(
                 return payload[0]
 
             gamma_metadata = {}
-            bound_probabilities = bind_current_global_probability_tokens(
-                forecast_conn,
-                probability_witnesses=probabilities,
-                get_gamma_event=_gamma_event,
-                get_gamma_markets=_gamma_markets,
-                trade_conn=trade_conn,
-                checked_at_utc=_at,
-                max_workers=16,
-                metadata_sink=gamma_metadata,
+
+            def _bind_tokens():
+                started = _time.monotonic()
+                bound = bind_current_global_probability_tokens(
+                    forecast_conn,
+                    probability_witnesses=probabilities,
+                    get_gamma_event=_gamma_event,
+                    get_gamma_markets=_gamma_markets,
+                    trade_conn=trade_conn,
+                    checked_at_utc=_at,
+                    max_workers=16,
+                    metadata_sink=gamma_metadata,
+                )
+                return bound, _time.monotonic() - started
+
+            bound_tokens = tuple(
+                str(token or "").strip()
+                for witness in probabilities.values()
+                for binding in tuple(getattr(witness, "bindings", ()) or ())
+                for token in (
+                    getattr(binding, "yes_token_id", None),
+                    getattr(binding, "no_token_id", None),
+                )
             )
+            can_prefetch = bool(bound_tokens) and all(bound_tokens) and len(
+                set(bound_tokens)
+            ) == len(bound_tokens)
+            prefetched_books = None
+            prefetched_at = None
+            book_fetch_started = None
+            if can_prefetch:
+                from concurrent.futures import ThreadPoolExecutor
+
+                def _prefetch_books():
+                    started = _time.monotonic()
+                    captured_at = datetime.now(UTC)
+                    with PolymarketClient(public_http_timeout=timeout) as clob:
+                        books = fetch_current_global_books(
+                            bound_tokens,
+                            get_books=lambda tokens: clob.get_orderbook_snapshots(
+                                tokens,
+                                timeout=timeout,
+                            ),
+                            batch_size=batch_size,
+                            book_fetch_workers=4,
+                        )
+                    return books, captured_at, started
+
+                with ThreadPoolExecutor(
+                    max_workers=1,
+                    thread_name_prefix="global-book-authority",
+                ) as executor:
+                    books_future = executor.submit(_prefetch_books)
+                    bound_probabilities, token_bind_elapsed = _bind_tokens()
+                    (
+                        prefetched_books,
+                        prefetched_at,
+                        book_fetch_started,
+                    ) = books_future.result()
+            else:
+                bound_probabilities, token_bind_elapsed = _bind_tokens()
             logging.getLogger(__name__).info(
                 "global book epoch stage completed: token_bind elapsed_s=%.3f "
                 "families=%d metadata=%d gamma_batch_requests=%d "
                 "gamma_event_requests=%d",
-                _time.monotonic() - _book_started,
+                token_bind_elapsed,
                 len(bound_probabilities),
                 len(gamma_metadata),
                 gamma_batch_requests,
@@ -5230,25 +5282,42 @@ def event_bound_live_adapter_from_trade_conn(
             # Cached rows remain useful only as a complete batch-local overlay;
             # the current call replaces matching keys before book construction.
             book_metadata_by_key.update(gamma_metadata)
-            _capture_started = _time.monotonic()
-            with PolymarketClient(public_http_timeout=timeout) as clob:
+            if prefetched_books is not None:
                 epoch = capture_current_global_book_epoch(
                     trade_conn,
                     probability_witnesses=bound_probabilities,
-                    get_books=lambda tokens: clob.get_orderbook_snapshots(
-                        tokens,
-                        timeout=timeout,
-                    ),
+                    get_books=lambda _tokens: {},
                     clock=lambda: datetime.now(UTC),
                     max_age=FRESHNESS_WINDOW_DEFAULT,
                     batch_size=batch_size,
                     book_fetch_workers=4,
                     metadata_overrides=book_metadata_by_key,
+                    prefetched_books=prefetched_books,
+                    prefetched_at_utc=prefetched_at,
                 )
+                assert book_fetch_started is not None
+                book_capture_elapsed = _time.monotonic() - book_fetch_started
+            else:
+                capture_started = _time.monotonic()
+                with PolymarketClient(public_http_timeout=timeout) as clob:
+                    epoch = capture_current_global_book_epoch(
+                        trade_conn,
+                        probability_witnesses=bound_probabilities,
+                        get_books=lambda tokens: clob.get_orderbook_snapshots(
+                            tokens,
+                            timeout=timeout,
+                        ),
+                        clock=lambda: datetime.now(UTC),
+                        max_age=FRESHNESS_WINDOW_DEFAULT,
+                        batch_size=batch_size,
+                        book_fetch_workers=4,
+                        metadata_overrides=book_metadata_by_key,
+                    )
+                book_capture_elapsed = _time.monotonic() - capture_started
             logging.getLogger(__name__).info(
                 "global book epoch stage completed: book_capture elapsed_s=%.3f "
                 "total_s=%.3f families=%d assets=%d",
-                _time.monotonic() - _capture_started,
+                book_capture_elapsed,
                 _time.monotonic() - _book_started,
                 len(bound_probabilities),
                 len(getattr(epoch, "assets", ())),

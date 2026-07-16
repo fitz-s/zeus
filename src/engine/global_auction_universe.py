@@ -523,6 +523,8 @@ def capture_current_global_book_epoch(
     batch_size: int = 500,
     book_fetch_workers: int = 1,
     metadata_overrides: Mapping[tuple[str, str], Mapping[str, object]] | None = None,
+    prefetched_books: Mapping[str, Mapping[str, object]] | None = None,
+    prefetched_at_utc: datetime | None = None,
 ) -> CurrentGlobalBookEpoch:
     """Fetch every bound native book; no missing token may shrink the feasible set."""
 
@@ -559,8 +561,8 @@ def capture_current_global_book_epoch(
     if not bindings or len({row[4] for row in bindings}) != len(bindings):
         raise ValueError("GLOBAL_TOKEN_UNIVERSE_AMBIGUOUS")
 
-    started_at = clock()
-    if started_at.tzinfo is None:
+    started_at = prefetched_at_utc if prefetched_books is not None else clock()
+    if started_at is None or started_at.tzinfo is None:
         raise ValueError("GLOBAL_BOOK_CLOCK_INVALID")
     started_at = started_at.astimezone(timezone.utc)
     metadata_rows = _global_book_snapshot_rows(
@@ -601,37 +603,16 @@ def capture_current_global_book_epoch(
             checked_at_utc=started_at,
         ):
             tokens.append(token_id)
-    chunks = [
-        tokens[offset : offset + batch_size]
-        for offset in range(0, len(tokens), batch_size)
-    ]
-    books: dict[str, Mapping[str, object]] = {}
-
-    def _merge_batch(batch: Mapping[str, Mapping[str, object]]) -> None:
-        if not isinstance(batch, Mapping):
-            raise ValueError("GLOBAL_BOOK_BATCH_RESPONSE_INVALID")
-        books.update(
-            {
-                str(token): raw
-                for token, raw in batch.items()
-                if isinstance(raw, Mapping)
-            }
+    books = (
+        fetch_current_global_books(
+            tokens,
+            get_books=get_books,
+            batch_size=batch_size,
+            book_fetch_workers=book_fetch_workers,
         )
-
-    if not chunks:
-        pass
-    elif len(chunks) == 1 or book_fetch_workers == 1:
-        for chunk in chunks:
-            _merge_batch(get_books(chunk))
-    else:
-        from concurrent.futures import ThreadPoolExecutor
-
-        with ThreadPoolExecutor(
-            max_workers=min(book_fetch_workers, len(chunks))
-        ) as executor:
-            futures = [executor.submit(get_books, chunk) for chunk in chunks]
-            for future in futures:
-                _merge_batch(future.result())
+        if prefetched_books is None
+        else _validated_global_book_batch(prefetched_books)
+    )
     finished_at = clock()
     if finished_at.tzinfo is None:
         raise ValueError("GLOBAL_BOOK_CLOCK_INVALID")
@@ -782,6 +763,63 @@ def capture_current_global_book_epoch(
         witness_identity=identity,
         sell_assets=tuple(sell_assets),
     )
+
+
+def _validated_global_book_batch(
+    batch: Mapping[str, Mapping[str, object]],
+) -> dict[str, Mapping[str, object]]:
+    if not isinstance(batch, Mapping):
+        raise ValueError("GLOBAL_BOOK_BATCH_RESPONSE_INVALID")
+    return {
+        str(token): raw
+        for token, raw in batch.items()
+        if isinstance(raw, Mapping)
+    }
+
+
+def fetch_current_global_books(
+    tokens: Sequence[str],
+    *,
+    get_books: Callable[[list[str]], Mapping[str, Mapping[str, object]]],
+    batch_size: int = 500,
+    book_fetch_workers: int = 1,
+) -> dict[str, Mapping[str, object]]:
+    """Fetch one bounded CLOB book universe without interpreting market metadata."""
+
+    if not 1 <= batch_size <= 500 or not 1 <= book_fetch_workers <= 4:
+        raise ValueError("GLOBAL_BOOK_FETCH_CONTRACT_INVALID")
+    clean_tokens = tuple(str(token or "").strip() for token in tokens)
+    if any(not token for token in clean_tokens) or len(set(clean_tokens)) != len(
+        clean_tokens
+    ):
+        raise ValueError("GLOBAL_TOKEN_UNIVERSE_AMBIGUOUS")
+    chunks = tuple(
+        list(clean_tokens[offset : offset + batch_size])
+        for offset in range(0, len(clean_tokens), batch_size)
+    )
+    if not chunks:
+        return {}
+
+    books: dict[str, Mapping[str, object]] = {}
+
+    def merge(batch: Mapping[str, Mapping[str, object]]) -> None:
+        books.update(_validated_global_book_batch(batch))
+
+    if len(chunks) == 1 or book_fetch_workers == 1:
+        for chunk in chunks:
+            merge(get_books(chunk))
+        return books
+
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    with ThreadPoolExecutor(
+        max_workers=min(book_fetch_workers, len(chunks)),
+        thread_name_prefix="global-clob-books",
+    ) as executor:
+        futures = tuple(executor.submit(get_books, chunk) for chunk in chunks)
+        for future in as_completed(futures):
+            merge(future.result())
+    return books
 
 
 def _rebind_probability_witness_tokens(
