@@ -321,11 +321,90 @@ UTC = timezone.utc
 class _GlobalBookEpochCacheEntry:
     namespace: str
     topology: tuple[tuple[str, str, str, str, str], ...]
+    bound_probabilities: tuple[tuple[str, object], ...]
     epoch: object
 
 
 _GLOBAL_BOOK_EPOCH_CACHE_LOCK = threading.Lock()
 _GLOBAL_BOOK_EPOCH_CACHE: _GlobalBookEpochCacheEntry | None = None
+
+
+def _cached_global_book_probabilities(epoch: object) -> dict[str, object] | None:
+    with _GLOBAL_BOOK_EPOCH_CACHE_LOCK:
+        entry = _GLOBAL_BOOK_EPOCH_CACHE
+    if entry is None or entry.epoch is not epoch:
+        return None
+    return dict(entry.bound_probabilities)
+
+
+def _reuse_global_book_token_bindings(
+    probabilities: Mapping[str, object],
+    cached_probabilities: Mapping[str, object],
+) -> dict[str, object]:
+    """Apply cached token identity to fresh q witnesses without network I/O."""
+
+    from src.engine.global_auction_universe import (
+        _rebind_probability_witness_tokens,
+    )
+
+    if set(probabilities) != set(cached_probabilities):
+        raise ValueError("GLOBAL_BOOK_CACHED_FAMILY_SET_CHANGED")
+    rebound: dict[str, object] = {}
+    for family_key, witness in probabilities.items():
+        cached = cached_probabilities[family_key]
+        bindings = tuple(getattr(witness, "bindings", ()) or ())
+        cached_bindings = tuple(getattr(cached, "bindings", ()) or ())
+        shape = tuple(
+            (
+                str(getattr(binding, "bin_id", "") or ""),
+                str(getattr(binding, "condition_id", "") or ""),
+            )
+            for binding in bindings
+        )
+        cached_shape = tuple(
+            (
+                str(getattr(binding, "bin_id", "") or ""),
+                str(getattr(binding, "condition_id", "") or ""),
+            )
+            for binding in cached_bindings
+        )
+        if not shape or shape != cached_shape:
+            raise ValueError("GLOBAL_BOOK_CACHED_PROBABILITY_TOPOLOGY_CHANGED")
+        token_map: dict[str, tuple[str, str]] = {}
+        current_complete = True
+        for binding, cached_binding in zip(bindings, cached_bindings, strict=True):
+            condition_id = str(
+                getattr(cached_binding, "condition_id", "") or ""
+            ).strip()
+            yes = str(
+                getattr(cached_binding, "yes_token_id", "") or ""
+            ).strip()
+            no = str(
+                getattr(cached_binding, "no_token_id", "") or ""
+            ).strip()
+            if not condition_id or not yes or not no:
+                raise ValueError("GLOBAL_BOOK_CACHED_TOKEN_IDENTITY_INCOMPLETE")
+            token_map[condition_id] = (yes, no)
+            current_yes = str(
+                getattr(binding, "yes_token_id", "") or ""
+            ).strip()
+            current_no = str(
+                getattr(binding, "no_token_id", "") or ""
+            ).strip()
+            current_complete = current_complete and bool(current_yes and current_no)
+            if (current_yes and current_yes != yes) or (
+                current_no and current_no != no
+            ):
+                raise ValueError("GLOBAL_BOOK_CACHED_TOKEN_IDENTITY_CHANGED")
+        rebound[family_key] = (
+            witness
+            if current_complete
+            else _rebind_probability_witness_tokens(
+                witness,
+                token_map_by_condition=token_map,
+            )
+        )
+    return rebound
 
 
 def _global_book_topology_signature(
@@ -838,6 +917,7 @@ def _store_global_book_epoch(
         _GLOBAL_BOOK_EPOCH_CACHE = _GlobalBookEpochCacheEntry(
             namespace=namespace,
             topology=topology,
+            bound_probabilities=tuple(sorted(bound_probabilities.items())),
             epoch=epoch,
         )
     return "stored"
@@ -5875,10 +5955,9 @@ def event_bound_live_adapter_from_trade_conn(
                 )
                 return epoch
 
-            # q and current Gamma tradeability are decision-time truth. Bind them
-            # once before considering the q-independent book cache. When a fresh
-            # book capture is already known to be necessary, start that independent
-            # CLOB I/O concurrently and join the two authorities before validation.
+            # Current Gamma tradeability is refreshed only for the family delta
+            # that can change this decision. Untouched families keep fresh q while
+            # reusing the token identity already validated by the current epoch.
             cache_checked_at = datetime.now(UTC)
             speculative_topology = _global_book_speculative_topology(
                 trade_conn,
@@ -5937,10 +6016,47 @@ def event_bound_live_adapter_from_trade_conn(
             full_metadata: dict[
                 tuple[str, str], Mapping[str, object]
             ] = {}
+            bind_slice = probabilities
+            retained_bound_probabilities: dict[str, object] = {}
+            if (
+                cached_before_bind is not None
+                and not force_full_refresh
+                and eligible_refresh_family_keys
+            ):
+                cached_probabilities = _cached_global_book_probabilities(
+                    cached_before_bind
+                )
+                if cached_probabilities is not None:
+                    retained_slice = {
+                        family_key: probability
+                        for family_key, probability in probabilities.items()
+                        if family_key not in eligible_refresh_family_keys
+                    }
+                    try:
+                        retained_cached = {
+                            family_key: cached_probabilities[family_key]
+                            for family_key in retained_slice
+                        }
+                        retained_bound_probabilities = (
+                            _reuse_global_book_token_bindings(
+                                retained_slice,
+                                retained_cached,
+                            )
+                        )
+                        bind_slice = {
+                            family_key: probabilities[family_key]
+                            for family_key in eligible_refresh_family_keys
+                        }
+                    except (KeyError, TypeError, ValueError) as exc:
+                        logging.getLogger(__name__).warning(
+                            "global book token delta rejected; rebinding full "
+                            "universe: reason=%s",
+                            exc,
+                        )
             prefetched = None
             if prefetch_slice is None:
-                bound_probabilities = _bind(
-                    probabilities,
+                rebound_probabilities = _bind(
+                    bind_slice,
                     mode="current_metadata",
                     metadata_sink=full_metadata,
                 )
@@ -5957,12 +6073,14 @@ def event_bound_live_adapter_from_trade_conn(
                         mode=prefetch_mode,
                         token_hint=prefetch_token_hint,
                     )
-                    bound_probabilities = _bind(
-                        probabilities,
+                    rebound_probabilities = _bind(
+                        bind_slice,
                         mode="current_metadata",
                         metadata_sink=full_metadata,
                     )
                     prefetched = future.result()
+            bound_probabilities = dict(retained_bound_probabilities)
+            bound_probabilities.update(rebound_probabilities)
             cache_checked_at = datetime.now(UTC)
             cached, cache_after_reason = _probe_global_book_epoch_cache(
                 trade_conn,
@@ -5975,6 +6093,14 @@ def event_bound_live_adapter_from_trade_conn(
                     "global book epoch cache miss: phase=after_bind reason=%s",
                     cache_after_reason,
                 )
+                if bind_slice is not probabilities:
+                    full_metadata = {}
+                    bound_probabilities = _bind(
+                        probabilities,
+                        mode="current_metadata_fallback",
+                        metadata_sink=full_metadata,
+                    )
+                    prefetched = None
             # A second call with the exact mapping returned by this provider is
             # the same-batch CURVE_SUPERSEDED re-auction. It must recapture the
             # complete curve universe because the changed winner is not supplied

@@ -3549,8 +3549,8 @@ def test_live_adapter_refreshes_only_eligible_triggered_probability_family(
     assert bound_after_unrelated_drift == unrelated_drift
     assert bind_calls == [
         ("metadata", (dallas, miami)),
-        ("metadata", (dallas, miami)),
-        ("metadata", (dallas, miami)),
+        ("metadata", (dallas,)),
+        ("metadata", (dallas,)),
     ]
     assert capture_calls == [
         (dallas, miami),
@@ -3699,6 +3699,80 @@ def test_global_book_epoch_cache_requires_stable_topology(monkeypatch):
     assert cached is epoch
     assert reason == "hit"
     conn.close()
+
+
+def test_global_book_cache_rebinds_fresh_q_without_refreshing_untouched_tokens():
+    captured_at = _dt.datetime.now(_dt.timezone.utc)
+    cached_bindings = (
+        OutcomeTokenBinding(
+            bin_id="bin-low",
+            condition_id="condition-low",
+            yes_token_id="yes-low",
+            no_token_id="no-low",
+        ),
+        OutcomeTokenBinding(
+            bin_id="bin-high",
+            condition_id="condition-high",
+            yes_token_id="yes-high",
+            no_token_id="no-high",
+        ),
+    )
+    fresh_bindings = tuple(
+        replace(binding, yes_token_id=None, no_token_id=None)
+        for binding in cached_bindings
+    )
+
+    def witness(bindings, samples, version):
+        identity = joint_probability_witness_identity(
+            family_key="family",
+            bindings=bindings,
+            q_version=version,
+            resolution_identity="resolution",
+            topology_identity="topology",
+            posterior_identity_hash=f"posterior-{version}",
+            source_truth_identity=f"source-{version}",
+            authority_certificate_hash=f"certificate-{version}",
+            band_alpha=0.05,
+            band_basis="test-band",
+            yes_q_samples=samples,
+            captured_at_utc=captured_at,
+        )
+        return JointOutcomeProbabilityWitness(
+            family_key="family",
+            bindings=bindings,
+            yes_q_samples=samples,
+            q_version=version,
+            resolution_identity="resolution",
+            topology_identity="topology",
+            posterior_identity_hash=f"posterior-{version}",
+            source_truth_identity=f"source-{version}",
+            authority_certificate_hash=f"certificate-{version}",
+            band_alpha=0.05,
+            band_basis="test-band",
+            captured_at_utc=captured_at,
+            max_age=_dt.timedelta(minutes=3),
+            witness_identity=identity,
+        )
+
+    cached = witness(
+        cached_bindings,
+        np.tile(np.asarray(((0.35, 0.65),)), (400, 1)),
+        "cached",
+    )
+    fresh = witness(
+        fresh_bindings,
+        np.tile(np.asarray(((0.60, 0.40),)), (400, 1)),
+        "fresh",
+    )
+
+    rebound = era._reuse_global_book_token_bindings(
+        {"family": fresh},
+        {"family": cached},
+    )["family"]
+
+    assert rebound.witness_identity != cached.witness_identity
+    assert np.array_equal(rebound.yes_q_samples, fresh.yes_q_samples)
+    assert rebound.bindings == cached.bindings
 
 
 def test_global_curve_supersession_keeps_typed_current_candidate():
