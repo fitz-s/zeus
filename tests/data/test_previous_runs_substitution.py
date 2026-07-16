@@ -604,6 +604,138 @@ def test_materialization_queue_coalesces_duplicate_requests_before_limit(tmp_pat
     assert superseded[0]["superseded_by"] == newer_path.name
 
 
+def test_materialization_queue_batches_default_runner_once_per_cycle(
+    tmp_path, monkeypatch
+) -> None:
+    import src.data.replacement_forecast_live_materialization_queue as queue_mod
+
+    request_dir = tmp_path / "requests"
+    processed_dir = tmp_path / "processed"
+    failed_dir = tmp_path / "failed"
+    request_dir.mkdir()
+    base_request = {
+        "target_date": "2026-07-02",
+        "temperature_metric": "high",
+        "source_cycle_time": "2026-07-02T00:00:00+00:00",
+        "computed_at": "2026-07-02T08:31:11+00:00",
+        "baseline_source_run_id": "ecmwf_open_data:mx2t6_high:2026-07-02T00Z",
+        "openmeteo_source_run_id": "openmeteo-current-targets-20260702T000000Z",
+        "openmeteo_payload_json": "payload.json",
+        "precision_metadata_json": "precision.json",
+        "bins": [{"bin_id": "30C"}],
+    }
+    paths = []
+    for city in ("Shanghai", "Paris"):
+        path = request_dir / f"{city}.2026-07-02.high.json"
+        path.write_text(json.dumps({**base_request, "city": city}), encoding="utf-8")
+        paths.append(path)
+    calls: list[list[str]] = []
+
+    def _batch_runner(argv):
+        command = list(argv)
+        calls.append(command)
+        start = command.index("--batch-input-json") + 1
+        end = command.index("--commit")
+        input_paths = command[start:end]
+        stdout = "\n".join(
+            json.dumps(
+                {
+                    "input_json": input_path,
+                    "returncode": 0,
+                    "stdout": '{"status":"READY","reason_codes":[]}\n',
+                    "stderr": "",
+                }
+            )
+            for input_path in input_paths
+        )
+        return subprocess.CompletedProcess(command, 0, stdout=stdout + "\n", stderr="")
+
+    monkeypatch.setattr(queue_mod, "_run_command", _batch_runner)
+    report = queue_mod.process_replacement_forecast_live_materialization_queue(
+        request_dir=request_dir,
+        processed_dir=processed_dir,
+        failed_dir=failed_dir,
+        forecast_db=tmp_path / "forecasts.db",
+        raw_manifest_dir=None,
+        limit=2,
+    )
+
+    assert report.status == "PROCESSED"
+    assert report.processed_count == 2
+    assert report.failed_count == 0
+    assert len(calls) == 1
+    assert "--batch-input-json" in calls[0]
+    assert "--init-schema" not in calls[0]
+    assert set(calls[0][calls[0].index("--batch-input-json") + 1 : -1]) == {
+        str(path) for path in paths
+    }
+
+
+def test_materialization_batch_timeout_keeps_completed_request_committed(
+    tmp_path, monkeypatch
+) -> None:
+    import src.data.replacement_forecast_live_materialization_queue as queue_mod
+
+    request_dir = tmp_path / "requests"
+    processed_dir = tmp_path / "processed"
+    failed_dir = tmp_path / "failed"
+    request_dir.mkdir()
+    request = {
+        "target_date": "2026-07-02",
+        "temperature_metric": "high",
+        "source_cycle_time": "2026-07-02T00:00:00+00:00",
+        "computed_at": "2026-07-02T08:31:11+00:00",
+        "baseline_source_run_id": "ecmwf_open_data:mx2t6_high:2026-07-02T00Z",
+        "openmeteo_source_run_id": "openmeteo-current-targets-20260702T000000Z",
+        "openmeteo_payload_json": "payload.json",
+        "precision_metadata_json": "precision.json",
+        "bins": [{"bin_id": "30C"}],
+    }
+    for city in ("A", "B"):
+        (request_dir / f"{city}.json").write_text(
+            json.dumps({**request, "city": city}),
+            encoding="utf-8",
+        )
+
+    def _timeout_after_first(argv):
+        command = list(argv)
+        first = command[command.index("--batch-input-json") + 1]
+        completed = json.dumps(
+            {
+                "input_json": first,
+                "returncode": 0,
+                "stdout": '{"status":"READY","reason_codes":[]}\n',
+                "stderr": "",
+            }
+        )
+        raise subprocess.TimeoutExpired(
+            cmd=command,
+            timeout=1.5,
+            output=completed + "\n",
+            stderr="",
+        )
+
+    monkeypatch.setattr(queue_mod, "_run_command", _timeout_after_first)
+    report = queue_mod.process_replacement_forecast_live_materialization_queue(
+        request_dir=request_dir,
+        processed_dir=processed_dir,
+        failed_dir=failed_dir,
+        forecast_db=tmp_path / "forecasts.db",
+        raw_manifest_dir=None,
+        limit=2,
+    )
+
+    assert report.status == "FAILED"
+    assert report.processed_count == 1
+    assert report.failed_count == 1
+    failed_request = Path(report.failed_files[0])
+    sidecar = json.loads(
+        failed_request.with_suffix(failed_request.suffix + ".receipt.json").read_text()
+    )
+    assert sidecar["returncode"] == 124
+    assert sidecar["timeout_seconds"] == 1.5
+
+
 def test_materialization_queue_retries_blocked_request_only_after_input_change(
     tmp_path, monkeypatch
 ) -> None:

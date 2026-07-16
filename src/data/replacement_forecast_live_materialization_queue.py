@@ -78,6 +78,15 @@ class ReplacementForecastLiveMaterializationQueueReport:
         }
 
 
+@dataclass(frozen=True)
+class _PendingMaterialization:
+    input_json: Path
+    command: tuple[str, ...]
+    request_payload: Mapping[str, object] | None
+    marker_path: Path | None
+    attempt_fingerprint: str | None
+
+
 def _materialization_subprocess_timeout_seconds() -> float:
     raw = os.environ.get("ZEUS_REPLACEMENT_MATERIALIZATION_TIMEOUT_SECONDS")
     if raw is None or str(raw).strip() == "":
@@ -104,6 +113,122 @@ def _run_command(argv: Sequence[str]) -> subprocess.CompletedProcess[str]:
         text=True,
         timeout=_materialization_subprocess_timeout_seconds(),
     )
+
+
+def _materialization_command(input_json: Path) -> tuple[str, ...]:
+    return (
+        sys.executable,
+        str(PROJECT_ROOT / "scripts" / "materialize_replacement_forecast_live.py"),
+        "--input-json",
+        str(input_json),
+        "--commit",
+    )
+
+
+def _timeout_result(
+    command: Sequence[str],
+    exc: subprocess.TimeoutExpired,
+) -> subprocess.CompletedProcess[str]:
+    try:
+        timeout_seconds = float(exc.timeout) if exc.timeout is not None else None
+    except (TypeError, ValueError):
+        timeout_seconds = None
+    effective_timeout = (
+        timeout_seconds
+        if timeout_seconds is not None
+        else DEFAULT_MATERIALIZATION_SUBPROCESS_TIMEOUT_SECONDS
+    )
+    return subprocess.CompletedProcess(
+        args=list(command),
+        returncode=124,
+        stdout="",
+        stderr=json.dumps(
+            {
+                "status": "ERROR",
+                "error_type": "TimeoutExpired",
+                "error": (
+                    "replacement materialization subprocess exceeded "
+                    f"{effective_timeout:.1f}s"
+                ),
+                "reason_codes": [
+                    "REPLACEMENT_LIVE_MATERIALIZATION_REQUEST_TIMEOUT"
+                ],
+                "timeout_seconds": timeout_seconds,
+            }
+        )
+        + "\n",
+    )
+
+
+def _parse_batch_results(
+    stdout: str | bytes | None,
+) -> tuple[dict[Path, subprocess.CompletedProcess[str]], list[str]]:
+    if isinstance(stdout, bytes):
+        stdout = stdout.decode(errors="replace")
+    parsed: dict[Path, subprocess.CompletedProcess[str]] = {}
+    protocol_errors: list[str] = []
+    for line in (stdout or "").splitlines():
+        try:
+            payload = json.loads(line)
+            input_json = Path(str(payload["input_json"]))
+            parsed[input_json] = subprocess.CompletedProcess(
+                args=list(_materialization_command(input_json)),
+                returncode=int(payload["returncode"]),
+                stdout=str(payload.get("stdout") or ""),
+                stderr=str(payload.get("stderr") or ""),
+            )
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+            protocol_errors.append(f"{exc.__class__.__name__}: {exc}")
+    return parsed, protocol_errors
+
+
+def _run_materialization_batch(
+    pending: Sequence[_PendingMaterialization],
+) -> dict[Path, subprocess.CompletedProcess[str]]:
+    if not pending:
+        return {}
+    command = (
+        sys.executable,
+        str(PROJECT_ROOT / "scripts" / "materialize_replacement_forecast_live.py"),
+        "--batch-input-json",
+        *(str(item.input_json) for item in pending),
+        "--commit",
+    )
+    try:
+        batch = _run_command(command)
+    except subprocess.TimeoutExpired as exc:
+        parsed, _ = _parse_batch_results(exc.stdout)
+        for item in pending:
+            parsed.setdefault(
+                item.input_json,
+                _timeout_result(item.command, exc),
+            )
+        return parsed
+    parsed, protocol_errors = _parse_batch_results(batch.stdout)
+    for item in pending:
+        if item.input_json not in parsed:
+            error_type = (
+                "MaterializationBatchProcessError"
+                if batch.returncode != 0
+                else "MaterializationBatchProtocolError"
+            )
+            parsed[item.input_json] = subprocess.CompletedProcess(
+                args=list(item.command),
+                returncode=int(batch.returncode) if batch.returncode != 0 else 2,
+                stdout="",
+                stderr=json.dumps(
+                    {
+                        "status": "ERROR",
+                        "error_type": error_type,
+                        "error": "batch result missing for request",
+                        "details": protocol_errors,
+                        "batch_stderr": batch.stderr,
+                    },
+                    sort_keys=True,
+                )
+                + "\n",
+            )
+    return parsed
 
 
 _LOG = logging.getLogger("zeus.replacement_live_materialization_queue")
@@ -1102,7 +1227,7 @@ def process_replacement_forecast_live_materialization_queue(
     seed_discovery_limit: int | None = None,
     seed_limit: int | None = None,
     limit: int = 10,
-    runner: Runner = _run_command,
+    runner: Runner | None = None,
 ) -> ReplacementForecastLiveMaterializationQueueReport:
     """Process local materialization request JSON files.
 
@@ -1159,7 +1284,7 @@ def _process_replacement_forecast_live_materialization_queue_locked(
     seed_discovery_limit: int | None = None,
     seed_limit: int | None = None,
     limit: int = 10,
-    runner: Runner = _run_command,
+    runner: Runner | None = None,
 ) -> ReplacementForecastLiveMaterializationQueueReport:
     discovery_report: ReplacementForecastSeedDiscoveryReport | None = None
     if raw_manifest_dir is not None:
@@ -1233,6 +1358,7 @@ def _process_replacement_forecast_live_materialization_queue_locked(
     processed: list[str] = list(superseded)
     failed: list[str] = []
     unchanged_blocked: list[str] = []
+    pending: list[_PendingMaterialization] = []
     marker_dir = request_path.parent / "blocked_attempts"
     for input_json in requests[:limit]:
         # POISON-PILL GATE: validate the request schema before spawning the materializer
@@ -1287,63 +1413,50 @@ def _process_replacement_forecast_live_materialization_queue_locked(
             processed.append(str(moved))
             unchanged_blocked.append(str(moved))
             continue
-        command = (
-            sys.executable,
-            str(PROJECT_ROOT / "scripts" / "materialize_replacement_forecast_live.py"),
-            "--input-json",
-            str(input_json),
-            "--commit",
+        pending.append(
+            _PendingMaterialization(
+                input_json=input_json,
+                command=_materialization_command(input_json),
+                request_payload=request_payload,
+                marker_path=marker_path,
+                attempt_fingerprint=attempt_fingerprint,
+            )
         )
-        timed_out = False
-        timeout_seconds: float | None = None
-        try:
-            completed = runner(command)
-        except subprocess.TimeoutExpired as exc:
-            timed_out = True
+    if runner is None:
+        completed_by_path = _run_materialization_batch(pending)
+    else:
+        completed_by_path = {}
+        for item in pending:
             try:
-                timeout_seconds = float(exc.timeout) if exc.timeout is not None else None
-            except (TypeError, ValueError):
-                timeout_seconds = None
-            effective_timeout = (
-                timeout_seconds
-                if timeout_seconds is not None
-                else DEFAULT_MATERIALIZATION_SUBPROCESS_TIMEOUT_SECONDS
-            )
-            completed = subprocess.CompletedProcess(
-                args=list(command),
-                returncode=124,
-                stdout=(exc.stdout.decode() if isinstance(exc.stdout, bytes) else exc.stdout) or "",
-                stderr=json.dumps(
-                    {
-                        "status": "ERROR",
-                        "error_type": "TimeoutExpired",
-                        "error": (
-                            "replacement materialization subprocess exceeded "
-                            f"{effective_timeout:.1f}s"
-                        ),
-                        "reason_codes": [
-                            "REPLACEMENT_LIVE_MATERIALIZATION_REQUEST_TIMEOUT"
-                        ],
-                    }
-                )
-                + "\n",
-            )
+                completed_by_path[item.input_json] = runner(item.command)
+            except subprocess.TimeoutExpired as exc:
+                completed_by_path[item.input_json] = _timeout_result(item.command, exc)
+
+    for item in pending:
+        input_json = item.input_json
+        completed = completed_by_path[input_json]
+        timed_out = completed.returncode == 124
         _surface_subprocess_warnings(input_json.name, completed)
         payload = {
-            "command": list(command),
+            "command": list(item.command),
             "returncode": int(completed.returncode),
             "stdout": completed.stdout,
             "stderr": completed.stderr,
         }
         if timed_out:
-            payload["timeout_seconds"] = timeout_seconds
+            try:
+                payload["timeout_seconds"] = json.loads(completed.stderr).get(
+                    "timeout_seconds"
+                )
+            except (TypeError, json.JSONDecodeError):
+                payload["timeout_seconds"] = None
             payload["reason_codes"] = [
                 "REPLACEMENT_LIVE_MATERIALIZATION_REQUEST_TIMEOUT"
             ]
         if completed.returncode == 0:
-            if marker_path is not None:
+            if item.marker_path is not None:
                 try:
-                    marker_path.unlink()
+                    item.marker_path.unlink()
                 except FileNotFoundError:
                     pass
             moved = _move_request(input_json, processed_path)
@@ -1351,15 +1464,15 @@ def _process_replacement_forecast_live_materialization_queue_locked(
             processed.append(str(moved))
         else:
             if (
-                request_payload is not None
+                item.request_payload is not None
                 and _UNCHANGED_BLOCKED_REASON
                 in _subprocess_result_reason_codes(completed)
             ):
                 try:
                     _write_blocked_attempt_marker(
-                        marker_path=marker_path,
-                        payload=request_payload,
-                        fingerprint=attempt_fingerprint,
+                        marker_path=item.marker_path,
+                        payload=item.request_payload,
+                        fingerprint=item.attempt_fingerprint,
                     )
                 except OSError:
                     pass

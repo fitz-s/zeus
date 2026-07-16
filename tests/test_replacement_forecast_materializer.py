@@ -912,6 +912,50 @@ def test_materialize_script_template_requires_precision_metadata() -> None:
     assert template["precision_metadata_json"] == "openmeteo_precision_metadata.json"
 
 
+def test_materialize_script_batch_reuses_connection_and_reports_each_request(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    import scripts.materialize_replacement_forecast_live as cli
+    import src.state.db as state_db
+
+    inputs = [tmp_path / "a.json", tmp_path / "b.json"]
+    calls = []
+
+    class _Connection:
+        closed = False
+
+        def close(self):
+            self.closed = True
+
+    conn = _Connection()
+    monkeypatch.setattr(state_db, "get_forecasts_connection", lambda **_: conn)
+
+    def _run_one(input_json, **kwargs):
+        calls.append((input_json, kwargs))
+        return 0, json.dumps({"status": "READY"}) + "\n", ""
+
+    monkeypatch.setattr(cli, "_run_one", _run_one)
+    rc = cli.main(
+        [
+            "--batch-input-json",
+            *(str(path) for path in inputs),
+            "--commit",
+        ]
+    )
+
+    assert rc == 0
+    assert conn.closed is True
+    assert [call[0] for call in calls] == inputs
+    assert all(call[1]["conn"] is conn for call in calls)
+    assert all(call[1]["commit"] is True for call in calls)
+    envelopes = [
+        json.loads(line)
+        for line in capsys.readouterr().out.splitlines()
+    ]
+    assert [Path(envelope["input_json"]) for envelope in envelopes] == inputs
+    assert [envelope["returncode"] for envelope in envelopes] == [0, 0]
+
+
 def test_materialize_script_fails_closed_without_precision_metadata(tmp_path) -> None:
     (tmp_path / "openmeteo_payload.json").write_text(
         json.dumps(

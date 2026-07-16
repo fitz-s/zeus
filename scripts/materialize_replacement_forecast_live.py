@@ -5,9 +5,11 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import sys
 from dataclasses import dataclass, replace
 from datetime import date, datetime, timezone
+from io import StringIO
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -122,166 +124,279 @@ def _template() -> dict[str, object]:
     }
 
 
+def _materialize(
+    input_json: Path,
+    *,
+    commit: bool,
+    init_schema: bool,
+    conn=None,
+) -> tuple[int, dict[str, object]]:
+    payload = _load_json(input_json)
+    if not isinstance(payload, Mapping):
+        raise ValueError("input JSON must decode to an object")
+    base_dir = input_json.parent
+    metric = str(payload["temperature_metric"])
+    target_date = date.fromisoformat(str(payload["target_date"]))
+    source_cycle_time = _dt(str(payload["source_cycle_time"]), field_name="source_cycle_time")
+    anchor_artifact_id = (
+        None
+        if payload.get("openmeteo_anchor_artifact_id") in (None, "")
+        else int(payload["openmeteo_anchor_artifact_id"])
+    )
+    if "openmeteo_payload_json" in payload:
+        openmeteo_payload = _load_json(
+            _resolve_input_path(payload["openmeteo_payload_json"], base_dir=base_dir)
+        )
+        if not isinstance(openmeteo_payload, Mapping):
+            raise ValueError("Open-Meteo payload JSON must decode to an object")
+    else:
+        if "latitude" not in payload or "longitude" not in payload:
+            raise ValueError("Open-Meteo direct fetch requires latitude and longitude")
+        openmeteo_payload = fetch_openmeteo_ecmwf_ifs9_anchor_payload(
+            build_anchor_request(
+                latitude=float(payload["latitude"]),
+                longitude=float(payload["longitude"]),
+                run=source_cycle_time,
+                timezone_name=str(payload["city_timezone"]),
+            )
+        )
+    openmeteo_anchor = extract_openmeteo_ecmwf_ifs9_localday_anchor(
+        openmeteo_payload,
+        city_timezone=str(payload["city_timezone"]),
+        target_local_date=target_date,
+        source_cycle_time=source_cycle_time,
+    )
+    if "precision_metadata_json" not in payload:
+        raise ValueError(
+            "input JSON requires precision_metadata_json for Open-Meteo ECMWF IFS 9km anchor"
+        )
+    precision_payload = _load_json(
+        _resolve_input_path(payload["precision_metadata_json"], base_dir=base_dir)
+    )
+    if not isinstance(precision_payload, Mapping):
+        raise ValueError("precision_metadata_json must decode to an object")
+    precision_guard = evaluate_openmeteo_ecmwf_ifs9_precision_guard(
+        OpenMeteoIfs9PrecisionMetadata(**dict(precision_payload))
+    )
+    request = ReplacementForecastMaterializeRequest(
+        city=str(payload["city"]),
+        city_id=str(payload.get("city_id") or payload["city"]),
+        city_timezone=str(payload["city_timezone"]),
+        target_date=target_date,
+        temperature_metric=metric,
+        baseline_source_run_id=str(payload["baseline_source_run_id"]),
+        baseline_data_version=str(payload["baseline_data_version"]),
+        baseline_source_available_at=_dt(
+            str(payload["baseline_source_available_at"]),
+            field_name="baseline_source_available_at",
+        ),
+        openmeteo_anchor=openmeteo_anchor,
+        openmeteo_source_run_id=str(payload.get("openmeteo_source_run_id") or ""),
+        openmeteo_source_available_at=_dt(
+            str(payload["openmeteo_source_available_at"]),
+            field_name="openmeteo_source_available_at",
+        ),
+        bins=_bins(payload),
+        source_cycle_time=source_cycle_time,
+        computed_at=_dt(str(payload["computed_at"]), field_name="computed_at"),
+        expires_at=(
+            None
+            if payload.get("expires_at") is None
+            else _dt(str(payload["expires_at"]), field_name="expires_at")
+        ),
+        openmeteo_precision_guard=precision_guard,
+        anchor_weight=float(payload.get("anchor_weight", 0.80)),
+        anchor_sigma_c=float(payload.get("anchor_sigma_c", 3.00)),
+        settlement_step_c=float(payload.get("settlement_step_c", 1.0)),
+        day0_observed_extreme_c=(
+            None
+            if payload.get("day0_observed_extreme_c") in (None, "")
+            else float(payload["day0_observed_extreme_c"])
+        ),
+        day0_observed_extreme_source=(
+            None
+            if payload.get("day0_observed_extreme_source") in (None, "")
+            else str(payload["day0_observed_extreme_source"])
+        ),
+        day0_observed_extreme_observation_time=(
+            None
+            if payload.get("day0_observed_extreme_observation_time") in (None, "")
+            else str(payload["day0_observed_extreme_observation_time"])
+        ),
+        day0_observed_extreme_sample_count=(
+            None
+            if payload.get("day0_observed_extreme_sample_count") in (None, "")
+            else int(payload["day0_observed_extreme_sample_count"])
+        ),
+        day0_observed_extreme_unit=(
+            None
+            if payload.get("day0_observed_extreme_unit") in (None, "")
+            else str(payload["day0_observed_extreme_unit"])
+        ),
+        upgrade_trigger=(
+            str(payload["upgrade_trigger"]) if payload.get("upgrade_trigger") else None
+        ),
+    )
+    own_conn = conn is None
+    if own_conn:
+        from src.state.db import get_forecasts_connection
+
+        conn = get_forecasts_connection(write_class="live")
+    try:
+        # BEGIN IMMEDIATE (not deferred): this is a WRITE transaction (manifests +
+        # posteriors). zeus-forecasts.db runs in rollback-journal (delete) mode, so a
+        # deferred BEGIN takes a SHARED lock on the first SELECT and then tries to
+        # upgrade to EXCLUSIVE on the first INSERT. Taking the write lock up front
+        # makes busy_timeout effective while readers remain unaffected.
+        conn.execute("BEGIN IMMEDIATE")
+        if init_schema:
+            from src.state.db import _create_readiness_state
+            from src.state.schema.v2_schema import (
+                ensure_replacement_forecast_live_schema,
+            )
+
+            ensure_replacement_forecast_live_schema(conn)
+            _create_readiness_state(conn)
+        if "openmeteo_manifest_json" in payload:
+            anchor_artifact_id = write_manifest_to_db(
+                conn,
+                read_manifest(
+                    _resolve_input_path(
+                        payload["openmeteo_manifest_json"],
+                        base_dir=base_dir,
+                    )
+                ),
+                root=ROOT,
+            )
+        if anchor_artifact_id is not None:
+            request = replace(request, anchor_artifact_id=anchor_artifact_id)
+        result = materialize_replacement_forecast_live(conn, request)
+        if commit:
+            conn.commit()
+        else:
+            conn.rollback()
+    except Exception:
+        if conn.in_transaction:
+            conn.rollback()
+        raise
+    finally:
+        if own_conn:
+            conn.close()
+    response = {
+        "status": result.status,
+        "reason_codes": list(result.reason_codes),
+        "posterior_id": result.posterior_id,
+        "anchor_id": result.anchor_id,
+        "readiness_id": result.readiness_id,
+        "openmeteo_anchor_artifact_id": anchor_artifact_id,
+        "committed": commit,
+    }
+    return (0 if result.ok else 1), response
+
+
+def _run_one(
+    input_json: Path,
+    *,
+    commit: bool,
+    init_schema: bool,
+    conn=None,
+    capture_logs: bool = False,
+) -> tuple[int, str, str]:
+    log_output = StringIO()
+    handler: logging.Handler | None = None
+    if capture_logs:
+        handler = logging.StreamHandler(log_output)
+        handler.setLevel(logging.WARNING)
+        logging.getLogger().addHandler(handler)
+    try:
+        returncode, response = _materialize(
+            input_json,
+            commit=commit,
+            init_schema=init_schema,
+            conn=conn,
+        )
+        return returncode, json.dumps(response, sort_keys=True) + "\n", log_output.getvalue()
+    except Exception as exc:
+        error = {
+            "status": "ERROR",
+            "error_type": exc.__class__.__name__,
+            "error": str(exc),
+        }
+        return 2, "", log_output.getvalue() + json.dumps(error, sort_keys=True) + "\n"
+    finally:
+        if handler is not None:
+            logging.getLogger().removeHandler(handler)
+
+
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Materialize replacement forecast live posterior")
-    parser.add_argument("--input-json", type=Path, help="Materialization request JSON")
-    parser.add_argument("--commit", action="store_true", help="Commit DB writes; default is dry-run rollback")
-    parser.add_argument("--init-schema", action="store_true", help="Idempotently initialize forecast/readiness tables before materializing")
+    parser = argparse.ArgumentParser(
+        description="Materialize replacement forecast live posterior"
+    )
+    inputs = parser.add_mutually_exclusive_group()
+    inputs.add_argument("--input-json", type=Path, help="Materialization request JSON")
+    inputs.add_argument(
+        "--batch-input-json",
+        type=Path,
+        nargs="+",
+        help="Materialization requests processed in one process with per-request transactions",
+    )
+    parser.add_argument(
+        "--commit",
+        action="store_true",
+        help="Commit DB writes; default is dry-run rollback",
+    )
+    parser.add_argument(
+        "--init-schema",
+        action="store_true",
+        help="Idempotently initialize forecast/readiness tables before materializing",
+    )
     parser.add_argument("--print-template", action="store_true")
     args = parser.parse_args(argv)
     if args.print_template:
         print(json.dumps(_template(), sort_keys=True, indent=2))
         return 0
-    if args.input_json is None:
-        parser.error("--input-json is required unless --print-template is set")
-    try:
-        payload = _load_json(args.input_json)
-        if not isinstance(payload, Mapping):
-            raise ValueError("input JSON must decode to an object")
-        base_dir = args.input_json.parent
-        metric = str(payload["temperature_metric"])
-        target_date = date.fromisoformat(str(payload["target_date"]))
-        source_cycle_time = _dt(str(payload["source_cycle_time"]), field_name="source_cycle_time")
-        anchor_artifact_id = (
-            None
-            if payload.get("openmeteo_anchor_artifact_id") in (None, "")
-            else int(payload["openmeteo_anchor_artifact_id"])
+    if args.input_json is None and not args.batch_input_json:
+        parser.error(
+            "--input-json or --batch-input-json is required unless --print-template is set"
         )
-        if "openmeteo_payload_json" in payload:
-            openmeteo_payload = _load_json(_resolve_input_path(payload["openmeteo_payload_json"], base_dir=base_dir))
-            if not isinstance(openmeteo_payload, Mapping):
-                raise ValueError("Open-Meteo payload JSON must decode to an object")
-        else:
-            if "latitude" not in payload or "longitude" not in payload:
-                raise ValueError("Open-Meteo direct fetch requires latitude and longitude")
-            openmeteo_payload = fetch_openmeteo_ecmwf_ifs9_anchor_payload(
-                build_anchor_request(
-                    latitude=float(payload["latitude"]),
-                    longitude=float(payload["longitude"]),
-                    run=source_cycle_time,
-                    timezone_name=str(payload["city_timezone"]),
-                )
-            )
-        openmeteo_anchor = extract_openmeteo_ecmwf_ifs9_localday_anchor(
-            openmeteo_payload,
-            city_timezone=str(payload["city_timezone"]),
-            target_local_date=target_date,
-            source_cycle_time=source_cycle_time,
-        )
-        if "precision_metadata_json" not in payload:
-            raise ValueError("input JSON requires precision_metadata_json for Open-Meteo ECMWF IFS 9km anchor")
-        precision_payload = _load_json(_resolve_input_path(payload["precision_metadata_json"], base_dir=base_dir))
-        if not isinstance(precision_payload, Mapping):
-            raise ValueError("precision_metadata_json must decode to an object")
-        precision_guard = evaluate_openmeteo_ecmwf_ifs9_precision_guard(
-            OpenMeteoIfs9PrecisionMetadata(**dict(precision_payload))
-        )
-        request = ReplacementForecastMaterializeRequest(
-            city=str(payload["city"]),
-            city_id=str(payload.get("city_id") or payload["city"]),
-            city_timezone=str(payload["city_timezone"]),
-            target_date=target_date,
-            temperature_metric=metric,
-            baseline_source_run_id=str(payload["baseline_source_run_id"]),
-            baseline_data_version=str(payload["baseline_data_version"]),
-            baseline_source_available_at=_dt(str(payload["baseline_source_available_at"]), field_name="baseline_source_available_at"),
-            openmeteo_anchor=openmeteo_anchor,
-            openmeteo_source_run_id=str(payload.get("openmeteo_source_run_id") or ""),
-            openmeteo_source_available_at=_dt(str(payload["openmeteo_source_available_at"]), field_name="openmeteo_source_available_at"),
-            bins=_bins(payload),
-            source_cycle_time=source_cycle_time,
-            computed_at=_dt(str(payload["computed_at"]), field_name="computed_at"),
-            expires_at=None if payload.get("expires_at") is None else _dt(str(payload["expires_at"]), field_name="expires_at"),
-            openmeteo_precision_guard=precision_guard,
-            anchor_weight=float(payload.get("anchor_weight", 0.80)),
-            anchor_sigma_c=float(payload.get("anchor_sigma_c", 3.00)),
-            settlement_step_c=float(payload.get("settlement_step_c", 1.0)),
-            day0_observed_extreme_c=(
-                None
-                if payload.get("day0_observed_extreme_c") in (None, "")
-                else float(payload["day0_observed_extreme_c"])
-            ),
-            day0_observed_extreme_source=(
-                None
-                if payload.get("day0_observed_extreme_source") in (None, "")
-                else str(payload["day0_observed_extreme_source"])
-            ),
-            day0_observed_extreme_observation_time=(
-                None
-                if payload.get("day0_observed_extreme_observation_time") in (None, "")
-                else str(payload["day0_observed_extreme_observation_time"])
-            ),
-            day0_observed_extreme_sample_count=(
-                None
-                if payload.get("day0_observed_extreme_sample_count") in (None, "")
-                else int(payload["day0_observed_extreme_sample_count"])
-            ),
-            day0_observed_extreme_unit=(
-                None
-                if payload.get("day0_observed_extreme_unit") in (None, "")
-                else str(payload["day0_observed_extreme_unit"])
-            ),
-            # Task #32: honest re-materialization provenance carried by a fusion-upgrade-trigger
-            # request. None for a normal first materialization (default), so behaviour is unchanged.
-            upgrade_trigger=(str(payload["upgrade_trigger"]) if payload.get("upgrade_trigger") else None),
-        )
+    if args.batch_input_json:
         from src.state.db import get_forecasts_connection
 
         conn = get_forecasts_connection(write_class="live")
         try:
-            # BEGIN IMMEDIATE (not deferred): this is a WRITE transaction (manifests +
-            # posteriors). zeus-forecasts.db runs in rollback-journal (delete) mode, so a
-            # deferred BEGIN takes a SHARED lock on the first SELECT and then tries to
-            # upgrade to EXCLUSIVE on the first INSERT — if any other process wrote in
-            # between, SQLite raises SQLITE_BUSY ("database is locked") IMMEDIATELY and the
-            # 300s busy_timeout cannot retry a deferred-upgrade conflict. Taking the write
-            # lock up front makes busy_timeout effective (it WAITS for the lock at BEGIN),
-            # which was the root of the materialize "database is locked" storm that starved
-            # the precision-fusion captures -> BAYES_PRECISION_FUSION_CAPTURE_MISSING ->
-            # unpriceable live candidates -> no crosses. Readers are unaffected; writers
-            # already serialize via the live writer-flock.
-            conn.execute("BEGIN IMMEDIATE")
-            if args.init_schema:
-                from src.state.db import _create_readiness_state
-                from src.state.schema.v2_schema import (
-                    ensure_replacement_forecast_live_schema,
+            for index, input_json in enumerate(args.batch_input_json):
+                returncode, stdout, stderr = _run_one(
+                    input_json,
+                    commit=args.commit,
+                    init_schema=args.init_schema and index == 0,
+                    conn=conn,
+                    capture_logs=True,
                 )
-
-                ensure_replacement_forecast_live_schema(conn)
-                _create_readiness_state(conn)
-            if "openmeteo_manifest_json" in payload:
-                anchor_artifact_id = write_manifest_to_db(
-                    conn,
-                    read_manifest(_resolve_input_path(payload["openmeteo_manifest_json"], base_dir=base_dir)),
-                    root=ROOT,
+                print(
+                    json.dumps(
+                        {
+                            "input_json": str(input_json),
+                            "returncode": returncode,
+                            "stdout": stdout,
+                            "stderr": stderr,
+                        },
+                        sort_keys=True,
+                    ),
+                    flush=True,
                 )
-            if anchor_artifact_id is not None:
-                request = replace(request, anchor_artifact_id=anchor_artifact_id)
-            result = materialize_replacement_forecast_live(conn, request)
-            if args.commit:
-                conn.commit()
-            else:
-                conn.rollback()
         finally:
             conn.close()
-    except Exception as exc:
-        print(json.dumps({"status": "ERROR", "error_type": exc.__class__.__name__, "error": str(exc)}, sort_keys=True), file=sys.stderr)
-        return 2
-    print(
-        json.dumps(
-            {
-                "status": result.status,
-                "reason_codes": list(result.reason_codes),
-                "posterior_id": result.posterior_id,
-                "anchor_id": result.anchor_id,
-                "readiness_id": result.readiness_id,
-                "openmeteo_anchor_artifact_id": anchor_artifact_id,
-                "committed": bool(args.commit),
-            },
-            sort_keys=True,
-        )
+        return 0
+    returncode, stdout, stderr = _run_one(
+        args.input_json,
+        commit=args.commit,
+        init_schema=args.init_schema,
     )
-    return 0 if result.ok else 1
+    if stdout:
+        sys.stdout.write(stdout)
+    if stderr:
+        sys.stderr.write(stderr)
+    return returncode
 
 
 if __name__ == "__main__":
