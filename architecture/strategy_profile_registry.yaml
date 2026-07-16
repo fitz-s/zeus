@@ -74,9 +74,10 @@
 #       Path to the operator-blessed evidence packet that justified live status.
 #       null until the strategy is promoted out of blocked.
 #   min_entry_price: 0.0 to <1.0
-#       Legacy strategy economic policy floor for entry/final limit prices.
-#       It is not venue legality and is superseded when a complete current-state
-#       global auction certificate owns robust admission.
+#       Strategy economic policy floor for the native entry-price feasible set.
+#       It is not venue legality. The complete current-state global auction must
+#       apply it before ranking so an inadmissible longshot cannot starve a valid
+#       sibling and then fail only at submit.
 #   min_strategy_notional_usd: 0.0+
 #       Strategy economic minimum notional, separate from venue min_order_size.
 #   min_expected_profit_usd: 0.0+

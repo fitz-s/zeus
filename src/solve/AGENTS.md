@@ -55,9 +55,11 @@ current scope, book, wealth, probability, RiskGuard, and venue receipt evidence 
   identities before scoring. A current venue-universe witness must prove every active family is
   represented; a partial reactor page is not global and fails closed. One `PortfolioWealthWitness` binds ledger generation, positions,
   reservations, spendable cash, and wealth bounds. Stale, mismatched, maker-contingent, or
-  non-positive candidates are unrankable. Before sizing a new BUY, payoff-side lower-CVaR win
-  probability must be strictly above one half; this makes its exact binary payoff vector's median
-  positive and excludes lottery entries. A reduce-only SELL is scored against HOLD instead: its
+  non-positive candidates are unrankable. Before sizing a new BUY, the current owner strategy's
+  native entry-price floor removes unlicensed longshots from the feasible set. Inside that set,
+  admission is `q_lcb > fee-inclusive executable cost` plus positive robust delta-log wealth and
+  EV, never a price-independent `q > 0.5` wall; the terminal median follows the probability branch.
+  A reduce-only SELL is scored against HOLD instead: its
   robust incremental log-growth and EV must both be positive for the full order and every possible
   FAK fill prefix, even when the favorable SELL branch itself is below one half.
   A full-size and every-FAK-prefix positive reduce-only SELL is lexically prior to a new BUY:

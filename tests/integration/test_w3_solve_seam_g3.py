@@ -2454,7 +2454,7 @@ def test_live_adapter_routes_each_global_truth_to_its_owner(monkeypatch):
     assert captured["forecast_conn"] is forecast
     assert captured["world_conn"] is not topology
     assert captured["portfolio_state_provider"] is None
-    assert captured["candidate_policy_rejection_resolver"] is None
+    assert callable(captured["candidate_policy_rejection_resolver"])
     assert "entry_candidates_enabled" not in captured
     candidate = SimpleNamespace(family_key="family-dallas")
     assert captured["current_capital_limit_resolver"](
@@ -2479,6 +2479,34 @@ def test_live_adapter_routes_each_global_truth_to_its_owner(monkeypatch):
     assert prepared_with["forecast_conn"] is forecast
     assert prepared_with["topology_conn"] is topology
     assert prepared_with["observation_conn"] is world
+    policy = captured["candidate_policy_rejection_resolver"]
+    low_price = SimpleNamespace(
+        action="BUY",
+        family_key="family-dallas",
+        side="YES",
+        executable_cost_curve=SimpleNamespace(
+            levels=(SimpleNamespace(price=Decimal("0.004")),)
+        ),
+    )
+    live_floor = SimpleNamespace(
+        action="BUY",
+        family_key="family-dallas",
+        side="NO",
+        executable_cost_curve=SimpleNamespace(
+            levels=(SimpleNamespace(price=Decimal("0.10")),)
+        ),
+    )
+    reduce_only = SimpleNamespace(
+        action="SELL",
+        family_key="family-dallas",
+        side="YES",
+    )
+    assert policy(low_price) == (
+        "GLOBAL_ENTRY_PRICE_BELOW_STRATEGY_FLOOR:"
+        "strategy=forecast_qkernel_entry:side=YES:best_ask=0.004:floor=0.1"
+    )
+    assert policy(live_floor) is None
+    assert policy(reduce_only) is None
     metadata_calls = []
     bind_calls = []
     metadata_key = ("condition", "yes-token")

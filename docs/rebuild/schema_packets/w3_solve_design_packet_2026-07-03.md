@@ -254,9 +254,11 @@ the probability certificate and exact native book/curve. A current venue-univers
 that every active family is present; a bounded reactor page is never renamed "global". The wealth witness binds ledger
 generation, reconciled positions, reservations, spendable cash, and wealth bounds. Unknown
 coupling is lower-bounded by evaluating wins against the portfolio ceiling and losses against
-the floor. Before that score is admitted, lower-tail-CVaR payoff-side win probability must be
-strictly above one half, so the exact binary payoff vector has positive median payoff; otherwise
-the typed result is `ROBUST_MAJORITY_LOSS`. A full-size and every-FAK-prefix positive
+the floor. Before scoring, the current owner strategy's native entry-price floor removes
+unlicensed longshots. Inside that feasible set, a BUY must have payoff-side lower-tail-CVaR
+probability above fee-inclusive executable cost plus positive robust delta-log wealth and EV;
+there is no price-independent `q > 0.5` wall, and the exact binary median follows the probability
+branch. A full-size and every-FAK-prefix positive
 reduce-only SELL is a current-endowment dominance action: it consumes no new capital and releases
 cash immediately, so it is selected before adding new BUY risk; multiple such SELLs rank by
 lower-CVaR Δlog-wealth. When no positive SELL exists, BUYs rank by lower-CVaR Δlog-wealth per

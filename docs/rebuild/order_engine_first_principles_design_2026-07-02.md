@@ -115,11 +115,13 @@ collateral — each with its own cost/latency/failure mode) · post-only maker q
 assets valued with reservation cost and C2 shadow values) · cash (with release-time shadow value).
 Scale by κ.
 
-For the live cross-family one-order entry projection, expected log growth sizes only candidates
-whose conservative payoff-side win probability is strictly above one half. This lexically prior
-constraint makes the median binary payoff positive: lose `-cost`, win `shares-cost`. Expected value
-remains a diagnostic expectation, never a realized capital-gain claim. YES and NO use the identical
-payoff-side rule; a label does not create symmetry where the current probability simplex does not.
+For the live cross-family one-order entry projection, the current owner strategy's native
+entry-price floor first removes unlicensed longshots from the feasible set. Inside that set,
+expected log growth admits a BUY only when conservative payoff-side probability exceeds the
+fee-inclusive executable cost and the exact terminal-wealth certificate has positive robust
+delta-log wealth and EV. There is no price-independent `q > 0.5` wall; the binary median follows
+the loss branch below one half and the win branch above it. Expected value remains a diagnostic
+expectation, never a realized capital-gain claim. YES and NO use the identical native rule.
 
 **Discrete repair pass:** solve continuous, then repair onto venue quantization (tick rounding,
 minimum order size, ≤15-orders-per-batch); submit only if the rounded plan still improves expected

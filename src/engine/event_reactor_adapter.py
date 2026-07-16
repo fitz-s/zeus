@@ -3251,6 +3251,56 @@ def _event_bound_effective_live_quality_floors(
     }
 
 
+def _global_current_entry_price_policy_rejection_reason(
+    candidate: object,
+    *,
+    strategy_key: str,
+) -> str | None:
+    """Apply the current owner strategy's tail-price policy before ranking.
+
+    The robust objective remains probability/price symmetric: no q=0.5 wall is
+    introduced.  This policy instead keeps a BUY whose current native best ask
+    is below the strategy's live floor out of the feasible set, so an
+    unsubmittable longshot cannot win the auction and starve a valid sibling.
+    SELL compares against HOLD and never consumes entry-price authority.
+    """
+
+    action = str(getattr(candidate, "action", "BUY") or "BUY").strip().upper()
+    if action == "SELL":
+        return None
+    if action != "BUY":
+        return "GLOBAL_ENTRY_PRICE_POLICY_ACTION_INVALID"
+    side = str(getattr(candidate, "side", "") or "").strip().upper()
+    curve = getattr(candidate, "executable_cost_curve", None)
+    levels = tuple(getattr(curve, "levels", ()) or ())
+    if side not in {"YES", "NO"} or not levels:
+        return "GLOBAL_ENTRY_PRICE_POLICY_AUTHORITY_MISSING"
+    try:
+        best_ask = Decimal(levels[0].price)
+        floor = Decimal(
+            str(
+                _event_bound_strategy_live_quality_floors(strategy_key)[
+                    "min_entry_price"
+                ]
+            )
+        )
+    except (ArithmeticError, AttributeError, TypeError, ValueError):
+        return "GLOBAL_ENTRY_PRICE_POLICY_AUTHORITY_INVALID"
+    if (
+        not best_ask.is_finite()
+        or not floor.is_finite()
+        or not Decimal("0") < best_ask < Decimal("1")
+        or not Decimal("0") <= floor < Decimal("1")
+    ):
+        return "GLOBAL_ENTRY_PRICE_POLICY_AUTHORITY_INVALID"
+    if best_ask + Decimal("1e-12") < floor:
+        return (
+            "GLOBAL_ENTRY_PRICE_BELOW_STRATEGY_FLOOR:"
+            f"strategy={strategy_key}:side={side}:best_ask={best_ask}:floor={floor}"
+        )
+    return None
+
+
 def _assert_event_bound_calibration_live_admitted(calibration: DecisionCertificate) -> None:
     """Require executable calibration evidence before real live entry commands."""
 
@@ -4819,6 +4869,7 @@ def event_bound_live_adapter_from_trade_conn(
     # True on the submit result.  Exposed on the adapter callable for main.py.
     _live_ack_count: list[int] = [0]
     _consumed_global_preflight_tokens: dict[str, datetime] = {}
+    _global_entry_policy_by_family: dict[str, tuple[str, str]] = {}
 
     # INV-K7 reservation ledger: closure-held, fresh per reactor cycle. FIX B
     # (2026-06-05): rollback-aware so a candidate rejected downstream of Kelly is
@@ -4898,6 +4949,19 @@ def event_bound_live_adapter_from_trade_conn(
                 proof_accepted=False,
             )
         payload = _payload(event)
+        family_key = str(prepared.probability_witness.family_key)
+        _global_entry_policy_by_family[family_key] = (
+            str(
+                payload.get("event_type")
+                or getattr(event, "event_type", "")
+                or ""
+            ).strip(),
+            str(
+                payload.get("metric")
+                or payload.get("temperature_metric")
+                or ""
+            ).strip(),
+        )
         return EventSubmissionReceipt(
             False,
             event.event_id,
@@ -6207,6 +6271,36 @@ def event_bound_live_adapter_from_trade_conn(
                 correlation_key=_global_candidate_correlation_key(candidate),
             )
 
+        def _current_entry_candidate_policy(candidate):
+            action = str(
+                getattr(candidate, "action", "BUY") or "BUY"
+            ).strip().upper()
+            if action == "SELL":
+                return None
+            family_key = str(getattr(candidate, "family_key", "") or "").strip()
+            owner = _global_entry_policy_by_family.get(family_key)
+            side = str(getattr(candidate, "side", "") or "").strip().upper()
+            if owner is None or side not in {"YES", "NO"}:
+                return "GLOBAL_ENTRY_PRICE_POLICY_OWNER_MISSING"
+            event_type, metric = owner
+            direction = "buy_yes" if side == "YES" else "buy_no"
+            try:
+                strategy_key = _event_bound_strategy_key(
+                    event_type=event_type,
+                    direction=direction,
+                    metric=metric,
+                    require_metric_live=False,
+                )
+            except Exception as exc:  # noqa: BLE001 - typed candidate exclusion
+                return (
+                    "GLOBAL_ENTRY_PRICE_POLICY_STRATEGY_UNAVAILABLE:"
+                    f"{type(exc).__name__}:{exc}"
+                )
+            return _global_current_entry_price_policy_rejection_reason(
+                candidate,
+                strategy_key=strategy_key,
+            )
+
         try:
             return process_current_global_batch(
                 events,
@@ -6251,7 +6345,9 @@ def event_bound_live_adapter_from_trade_conn(
                 # Operator pause and transient submit authority govern actuation,
                 # not economics. Keep the complete BUY/SELL/HOLD/CASH comparison
                 # observable while preflight and executor independently block BUY.
-                candidate_policy_rejection_resolver=None,
+                candidate_policy_rejection_resolver=(
+                    _current_entry_candidate_policy
+                ),
                 fractional_kelly_multiplier=Decimal(
                     str(_runtime_kelly_multiplier())
                 ),
@@ -8237,8 +8333,6 @@ def _global_current_state_execution_economics(
         )
         or loss_payoff != -cost
         or win_payoff != shares - cost
-        or median_payoff != win_payoff
-        or median_payoff <= 0
         or wealth_after_loss <= 0
         or wealth_after_win <= 0
         or not math.isclose(
@@ -8249,11 +8343,16 @@ def _global_current_state_execution_economics(
         )
     ):
         raise ValueError("GLOBAL_CURRENT_STATE_DECISION_ECONOMICS_INVALID")
-    if (
-        cut_win_probability <= Decimal("0.5")
-        or cut_loss_probability >= Decimal("0.5")
-    ):
-        raise ValueError("GLOBAL_CURRENT_STATE_ROBUST_MAJORITY_LOSS")
+    median_branch_coherent = (
+        (cut_win_probability > Decimal("0.5") and median_payoff == win_payoff)
+        or (cut_win_probability < Decimal("0.5") and median_payoff == loss_payoff)
+        or (
+            cut_win_probability == Decimal("0.5")
+            and loss_payoff <= median_payoff <= win_payoff
+        )
+    )
+    if not median_branch_coherent:
+        raise ValueError("GLOBAL_CURRENT_STATE_TERMINAL_CERTIFICATE_INCOHERENT")
     if not point_q.is_finite():
         raise ValueError("GLOBAL_CURRENT_STATE_POINT_Q_INVALID")
     if prior_payoff_lcb is not None and not prior_payoff_lcb.is_finite():
@@ -8294,8 +8393,6 @@ def _global_current_state_execution_economics(
         raise ValueError("GLOBAL_CURRENT_STATE_PROBABILITY_ORDER_INVALID")
     if payoff_q_lcb < current_band_payoff_q_lcb:
         raise _GlobalProbabilityTightened(float(payoff_q_lcb))
-    if payoff_q_lcb <= Decimal("0.5"):
-        raise ValueError("GLOBAL_CURRENT_STATE_ROBUST_MAJORITY_LOSS")
     if edge_lcb <= 0:
         raise ValueError("GLOBAL_CURRENT_STATE_ECONOMICS_NON_POSITIVE")
     sample_hash = str(getattr(witness, "sample_matrix_identity", "") or "").strip()

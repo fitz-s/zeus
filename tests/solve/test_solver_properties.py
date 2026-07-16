@@ -2141,29 +2141,33 @@ def test_unverified_13pct_tail_is_lottery_not_an_executable_edge():
     assert decision.no_trade_reason == "GLOBAL_FEASIBLE_SET_INCOMPLETE"
 
 
-def test_current_13pct_at_one_cent_is_rejected_as_majority_loss():
+def test_current_13pct_at_live_floor_is_accepted_positive_growth():
     tail = _global_candidate(
-        candidate_id="current-13pct-one-cent",
+        candidate_id="current-13pct-live-floor",
         family="tail",
         side="YES",
         q=0.13,
-        levels=(("0.01", "1000"),),
+        levels=(("0.10", "1000"),),
     )
 
     decision = _global_select((tail,))
 
-    assert decision.candidate is None
-    assert decision.no_trade_reason == "ROBUST_MAJORITY_LOSS"
-    assert decision.rejection_reasons[tail.candidate_id] == "ROBUST_MAJORITY_LOSS"
+    assert decision.candidate is not None
+    assert decision.robust_delta_log_wealth > 0
+    assert decision.robust_ev_usd > 0
+    assert (
+        decision.terminal_wealth.median_payoff_usd
+        == decision.terminal_wealth.loss_payoff_usd
+    )
 
 
-def test_current_13pct_cannot_outrank_a_majority_win_order():
+def test_global_selection_ranks_by_robust_growth_not_majority():
     tail = _global_candidate(
-        candidate_id="current-13pct-one-cent",
+        candidate_id="current-13pct-live-floor",
         family="tail",
         side="YES",
         q=0.13,
-        levels=(("0.01", "1000"),),
+        levels=(("0.10", "1000"),),
     )
     majority_no = _global_candidate(
         candidate_id="current-majority-no",
@@ -2173,27 +2177,53 @@ def test_current_13pct_cannot_outrank_a_majority_win_order():
         levels=(("0.60", "100"),),
     )
 
+    tail_solo = _global_select((tail,))
+    majority_solo = _global_select((majority_no,))
+    assert tail_solo.candidate is not None
+    assert majority_solo.candidate is not None
+
     decision = _global_select((tail, majority_no))
 
-    assert decision.candidate is majority_no
-    assert decision.rejection_reasons[tail.candidate_id] == "ROBUST_MAJORITY_LOSS"
-
-
-@pytest.mark.parametrize(("q", "eligible"), ((0.5, False), (0.500001, True)))
-def test_global_single_order_majority_boundary_is_strict(q, eligible):
-    candidate = _global_candidate(
-        candidate_id=f"majority-boundary-{q}",
-        family=f"majority-boundary-{q}",
-        side="YES",
-        q=q,
-        levels=(("0.10", "100"),),
+    winner = (
+        tail
+        if tail_solo.robust_delta_log_wealth > majority_solo.robust_delta_log_wealth
+        else majority_no
     )
+    assert decision.candidate is winner
 
-    decision = _global_select((candidate,))
 
-    assert (decision.candidate is not None) is eligible
-    if not eligible:
-        assert decision.no_trade_reason == "ROBUST_MAJORITY_LOSS"
+def test_global_single_order_positivity_boundary_is_strict():
+    """The economic boundary is positive robust growth, not q=0.5."""
+
+    def decision_at(q):
+        candidate = _global_candidate(
+            candidate_id=f"positivity-boundary-{q}",
+            family=f"positivity-boundary-{q}",
+            side="YES",
+            q=q,
+            levels=(("0.10", "100"),),
+        )
+        return candidate, _global_select((candidate,))
+
+    lo, hi = 0.05, 0.20
+    for _ in range(40):
+        mid = (lo + hi) / 2
+        if decision_at(mid)[1].candidate is None:
+            lo = mid
+        else:
+            hi = mid
+
+    below_candidate, below = decision_at(lo - 1e-6)
+    _above_candidate, above = decision_at(hi + 1e-6)
+
+    assert below.candidate is None
+    assert (
+        below.rejection_reasons[below_candidate.candidate_id]
+        == "NON_POSITIVE_ROBUST_OBJECTIVE"
+    )
+    assert above.candidate is not None
+    assert above.robust_delta_log_wealth > 0
+    assert above.robust_ev_usd > 0
 
 
 @pytest.mark.parametrize("side", ("YES", "NO"))
@@ -2902,16 +2932,7 @@ def test_global_single_order_matches_exhaustive_grid_on_random_full_depth_books(
         candidate = _replace_global_q_samples(candidate, q_samples)
         oracle = _global_exact_oracle(candidate, cap="3")
         score = _global_score(candidate, cap="3")
-        robust_q = S._lower_cvar(
-            q_samples,
-            np.ones(q_samples.size, dtype=np.float64),
-            ALPHA,
-        )
-
-        if robust_q <= 0.5:
-            assert score.candidate is None
-            assert score.no_trade_reason == "ROBUST_MAJORITY_LOSS"
-        elif oracle is None or oracle[0] <= 0.0 or oracle[1] <= 0.0:
+        if oracle is None or oracle[0] <= 0.0 or oracle[1] <= 0.0:
             assert score.candidate is None
         else:
             assert score.shares == oracle[4]
