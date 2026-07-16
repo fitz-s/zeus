@@ -123,6 +123,16 @@ class ReplacementForecastCurrentTargetPlan:
         }
 
 
+@dataclass(frozen=True)
+class _OpenMeteoManifest:
+    artifact_path: str
+    metadata: Mapping[str, object]
+    column_source_cycle_time: str
+    source_cycle_time: str
+    source_available_at: str
+    captured_at: str
+
+
 def _table_names(conn: sqlite3.Connection) -> set[str]:
     return {
         str(row[0])
@@ -217,6 +227,7 @@ def _openmeteo_payload_covers_target_local_day(
     artifact_path: str,
     city_timezone: str | None,
     target_date: str,
+    cache: dict[tuple[str, str, str], bool] | None = None,
 ) -> bool:
     """Return whether an explicit Open-Meteo payload has target-local-day samples.
 
@@ -237,7 +248,12 @@ def _openmeteo_payload_covers_target_local_day(
     )
     if payload_path is None:
         return True
+    cache_key = (str(payload_path), str(city_timezone), str(target_date))
+    if cache is not None and cache_key in cache:
+        return cache[cache_key]
     if not payload_path.exists():
+        if cache is not None:
+            cache[cache_key] = False
         return False
     try:
         from src.data.openmeteo_ecmwf_ifs9_anchor import (  # noqa: PLC0415
@@ -247,6 +263,8 @@ def _openmeteo_payload_covers_target_local_day(
         wanted = date.fromisoformat(str(target_date).strip())
         payload = json.loads(payload_path.read_text(encoding="utf-8"))
     except Exception:
+        if cache is not None:
+            cache[cache_key] = False
         return False
     try:
         extract_openmeteo_ecmwf_ifs9_localday_anchor(
@@ -257,7 +275,11 @@ def _openmeteo_payload_covers_target_local_day(
             require_full_localday=False,
         )
     except Exception:
+        if cache is not None:
+            cache[cache_key] = False
         return False
+    if cache is not None:
+        cache[cache_key] = True
     return True
 
 
@@ -306,104 +328,136 @@ def _openmeteo_manifest_horizon_allows_target_date(
     return start <= wanted <= start + timedelta(days=max_extra_days)
 
 
-def _openmeteo_manifest_coverage(
+def _load_openmeteo_manifest_index(
     conn: sqlite3.Connection,
     *,
     raw_artifact_columns: set[str],
     metadata_column: str | None,
-    source_id: str,
-    data_version: str,
-    city: str,
-    target_date: str,
-    city_timezone: str | None = None,
-    required_source_cycle_time: str | None = None,
-    minimum_source_cycle_time: str | None = None,
-) -> tuple[int, str | None, str | None]:
-    if metadata_column is None:
-        return 0, None, None
+    identities: set[tuple[str, str]],
+    cities: set[str],
+) -> dict[tuple[str, str, str], tuple[_OpenMeteoManifest, ...]]:
+    if metadata_column is None or not identities or not cities:
+        return {}
     optional_columns = [
         col
         for col in ("source_cycle_time", "source_available_at", "captured_at", "recorded_at")
         if col in raw_artifact_columns
     ]
     select_optional = "".join(f", {col}" for col in optional_columns)
-    cycle_predicates: list[str] = []
-    cycle_params: list[str] = []
-    if required_source_cycle_time:
-        if "source_cycle_time" in raw_artifact_columns:
-            cycle_predicates.append("source_cycle_time = ?")
-            cycle_params.append(required_source_cycle_time)
-        cycle_predicates.append(f"json_extract({metadata_column}, '$.source_cycle_time') = ?")
-        cycle_params.append(required_source_cycle_time)
-    cycle_clause = ""
-    if cycle_predicates:
-        cycle_clause = f" AND ({' OR '.join(cycle_predicates)})"
+    identity_clause = " OR ".join("(source_id = ? AND data_version = ?)" for _ in identities)
+    identity_params = tuple(value for identity in sorted(identities) for value in identity)
+    city_placeholders = ",".join("?" for _ in cities)
+    city_params = tuple(sorted(cities))
     rows = conn.execute(
         f"""
-        SELECT artifact_path, {metadata_column} AS metadata_json{select_optional}
+        SELECT source_id, data_version, artifact_path,
+               {metadata_column} AS metadata_json{select_optional}
         FROM raw_forecast_artifacts
-        WHERE source_id = ?
-          AND data_version = ?
+        WHERE ({identity_clause})
           AND artifact_path IS NOT NULL
           AND artifact_path != ''
           AND (
-            json_extract({metadata_column}, '$.city') = ?
+            json_extract({metadata_column}, '$.city') IN ({city_placeholders})
             OR EXISTS (
                 SELECT 1
                 FROM json_each({metadata_column}, '$.cities')
-                WHERE value = ?
+                WHERE value IN ({city_placeholders})
             )
           )
-          {cycle_clause}
         """,
-        (
-            source_id,
-            data_version,
-            city,
-            city,
-            *cycle_params,
-        ),
+        (*identity_params, *city_params, *city_params),
     ).fetchall()
-    candidates: list[tuple[tuple[str, str, str, str], str | None]] = []
-    for manifest in rows:
-        artifact_path = str(manifest["artifact_path"] or "")
+    index: dict[tuple[str, str, str], list[_OpenMeteoManifest]] = {}
+    for row in rows:
+        artifact_path = str(row["artifact_path"] or "")
         if not artifact_path or not os.path.exists(artifact_path):
             continue
-        metadata = _json_object(manifest["metadata_json"])
-        if not _openmeteo_manifest_metadata_allows_target_date(
-            metadata, target_date=target_date
-        ):
-            continue
-        if not _openmeteo_payload_covers_target_local_day(
-            metadata,
-            artifact_path=artifact_path,
-            city_timezone=city_timezone,
-            target_date=target_date,
-        ):
-            continue
-        source_run_id = _openmeteo_source_run_id(metadata)
+        metadata = _json_object(row["metadata_json"])
+        manifest_cities = {str(metadata.get("city") or "").strip()}
+        raw_cities = metadata.get("cities")
+        if isinstance(raw_cities, list):
+            manifest_cities.update(
+                str(value).strip()
+                for value in raw_cities
+                if str(value).strip()
+            )
+        manifest_cities.discard("")
+        column_source_cycle_time = str(
+            _row_value(row, "source_cycle_time") or ""
+        )
         source_cycle_time = str(
-            _row_value(manifest, "source_cycle_time")
+            column_source_cycle_time
             or metadata.get("source_cycle_time")
             or ""
         )
-        if not _cycle_at_or_after(source_cycle_time, minimum_source_cycle_time):
-            continue
         source_available_at = str(
-            _row_value(manifest, "source_available_at")
+            _row_value(row, "source_available_at")
             or metadata.get("source_available_at")
             or metadata.get("requested_source_available_at")
             or ""
         )
         captured_at = str(
-            _row_value(manifest, "captured_at")
+            _row_value(row, "captured_at")
             or metadata.get("captured_at")
-            or _row_value(manifest, "recorded_at")
+            or _row_value(row, "recorded_at")
             or ""
         )
+        manifest = _OpenMeteoManifest(
+            artifact_path=artifact_path,
+            metadata=metadata,
+            column_source_cycle_time=column_source_cycle_time,
+            source_cycle_time=source_cycle_time,
+            source_available_at=source_available_at,
+            captured_at=captured_at,
+        )
+        source_id = str(row["source_id"])
+        data_version = str(row["data_version"])
+        for city in manifest_cities & cities:
+            index.setdefault((source_id, data_version, city), []).append(manifest)
+    return {key: tuple(value) for key, value in index.items()}
+
+
+def _openmeteo_manifest_coverage(
+    manifests: tuple[_OpenMeteoManifest, ...],
+    *,
+    target_date: str,
+    city_timezone: str | None = None,
+    required_source_cycle_time: str | None = None,
+    minimum_source_cycle_time: str | None = None,
+    payload_coverage_cache: dict[tuple[str, str, str], bool] | None = None,
+) -> tuple[int, str | None, str | None]:
+    candidates: list[tuple[tuple[str, str, str, str], str | None]] = []
+    for manifest in manifests:
+        if required_source_cycle_time and required_source_cycle_time not in {
+            manifest.column_source_cycle_time,
+            str(manifest.metadata.get("source_cycle_time") or ""),
+        }:
+            continue
+        if not _openmeteo_manifest_metadata_allows_target_date(
+            manifest.metadata, target_date=target_date
+        ):
+            continue
+        if not _openmeteo_payload_covers_target_local_day(
+            manifest.metadata,
+            artifact_path=manifest.artifact_path,
+            city_timezone=city_timezone,
+            target_date=target_date,
+            cache=payload_coverage_cache,
+        ):
+            continue
+        source_run_id = _openmeteo_source_run_id(manifest.metadata)
+        if not _cycle_at_or_after(
+            manifest.source_cycle_time, minimum_source_cycle_time
+        ):
+            continue
         candidates.append(
             (
-                (source_cycle_time, source_available_at, captured_at, artifact_path),
+                (
+                    manifest.source_cycle_time,
+                    manifest.source_available_at,
+                    manifest.captured_at,
+                    manifest.artifact_path,
+                ),
                 source_run_id,
             )
         )
@@ -1654,10 +1708,28 @@ def build_replacement_forecast_current_target_plan(
             **_city_timezone_by_name(),
             **_city_timezone_by_name_from_source_run_coverage(conn),
         }
+        expected_by_metric = {
+            metric: expected_replacement_dependency_identity_by_role(metric)
+            for metric in {str(row["temperature_metric"]) for row in rows}
+        }
+        openmeteo_manifest_index = _load_openmeteo_manifest_index(
+            conn,
+            raw_artifact_columns=raw_artifact_columns,
+            metadata_column=metadata_column,
+            identities={
+                (
+                    expected["openmeteo_ifs9_anchor"].source_id,
+                    expected["openmeteo_ifs9_anchor"].data_version,
+                )
+                for expected in expected_by_metric.values()
+            },
+            cities={str(row["city"]) for row in rows},
+        )
+        payload_coverage_cache: dict[tuple[str, str, str], bool] = {}
         evaluation_now_utc = (now_utc or datetime.now(tz=timezone.utc)).astimezone(timezone.utc)
         for row in rows:
             metric = str(row["temperature_metric"])
-            expected = expected_replacement_dependency_identity_by_role(metric)
+            expected = expected_by_metric[metric]
             openmeteo_expected = expected["openmeteo_ifs9_anchor"]
             city = str(row["city"])
             target_date = str(row["target_date"])
@@ -1676,18 +1748,21 @@ def build_replacement_forecast_current_target_plan(
             fusion_current_count = 0
             if metadata_column is not None:
                 openmeteo_count, openmeteo_source_run_id, openmeteo_resolved_cycle = _openmeteo_manifest_coverage(
-                    conn,
-                    raw_artifact_columns=raw_artifact_columns,
-                    metadata_column=metadata_column,
-                    source_id=openmeteo_expected.source_id,
-                    data_version=openmeteo_expected.data_version,
-                    city=city,
+                    openmeteo_manifest_index.get(
+                        (
+                            openmeteo_expected.source_id,
+                            openmeteo_expected.data_version,
+                            city,
+                        ),
+                        (),
+                    ),
                     target_date=target_date,
                     city_timezone=timezone_by_city.get(city),
                     required_source_cycle_time=required_openmeteo_cycle_for_row,
                     minimum_source_cycle_time=(
                         None if required_openmeteo_cycle_for_row else baseline_source_cycle_time
                     ),
+                    payload_coverage_cache=payload_coverage_cache,
                 )
             elif not require_raw_artifacts:
                 openmeteo_count = 1
