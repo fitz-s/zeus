@@ -4240,6 +4240,12 @@ def test_global_winner_binding_does_not_reapply_legacy_price_floor(monkeypatch):
         ("SHIFT_BIN_NO_SUBMIT:OLD_LEG_STILL_STRONG", "BLOCKED"),
         ("EVENT_BOUND_MARKET_PHASE_CLOSED:settlement_day", "BLOCKED"),
         (
+            "GLOBAL_FAMILY_INELIGIBLE:"
+            "GLOBAL_CURRENT_PROBABILITY_PREPARE_FAILED:"
+            "ValueError:GLOBAL_DAY0_CURRENT_OBSERVATION_MISSING",
+            "BLOCKED",
+        ),
+        (
             "EDLI_LIVE_CERTIFICATE_BUILD_FAILED:"
             "LIVE_ENTRY_DAY0_PROBABILITY_AUTHORITY_REQUIRED:"
             "selected q_lcb does not match remaining-day transform:"

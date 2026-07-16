@@ -8153,6 +8153,11 @@ def _global_preflight_block_status(reason: str) -> str:
             "SHIFT_BIN_NO_SUBMIT:",
             "EVENT_BOUND_MARKET_PHASE_CLOSED:",
             (
+                "GLOBAL_FAMILY_INELIGIBLE:"
+                "GLOBAL_CURRENT_PROBABILITY_PREPARE_FAILED:"
+                "ValueError:GLOBAL_DAY0_CURRENT_OBSERVATION_MISSING"
+            ),
+            (
                 "EDLI_LIVE_CERTIFICATE_BUILD_FAILED:"
                 "LIVE_ENTRY_DAY0_PROBABILITY_AUTHORITY_REQUIRED:"
                 "selected q_lcb does not match remaining-day transform:"
