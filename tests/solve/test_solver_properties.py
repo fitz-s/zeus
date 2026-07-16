@@ -854,6 +854,51 @@ def test_fractional_kelly_does_not_promote_a_subminimum_target_to_an_order():
         )
         / sizing.full_kelly_target_shares
     )
+    assert sizing.continuous_full_kelly_target_shares > 0
+    assert sizing.continuous_fractional_kelly_target_shares == (
+        sizing.continuous_full_kelly_target_shares * Decimal("0.03125")
+    )
+    assert sizing.continuous_full_robust_delta_log_wealth > 0
+    assert sizing.continuous_full_robust_ev_usd > 0
+    assert sizing.minimum_marketable_cost_usd > 0
+    assert sizing.minimum_marketable_robust_delta_log_wealth > 0
+    assert sizing.minimum_marketable_robust_ev_usd > 0
+    assert sizing.minimum_marketable_capital_efficiency > 0
+    assert sizing.minimum_marketable_positive is True
+
+
+def test_sizing_receipt_exposes_when_venue_minimum_destroys_continuous_edge():
+    candidate = _global_candidate(
+        candidate_id="venue-minimum-destroys-edge",
+        family="venue-minimum-destroys-edge",
+        side="YES",
+        q=0.4901,
+        levels=(("0.49", "1000"),),
+        min_order="1",
+    )
+
+    decision = _global_score(
+        candidate,
+        cap="100",
+        multiplier="0.03125",
+    )
+
+    assert decision.candidate is None
+    assert decision.no_trade_reason == "FRACTIONAL_KELLY_INCREMENT_BELOW_MINIMUM"
+    sizing = decision.buy_sizing_rejection
+    assert sizing is not None
+    assert (
+        Decimal("0")
+        < sizing.continuous_full_kelly_target_shares
+        < sizing.minimum_marketable_increment_shares
+    )
+    assert sizing.continuous_full_robust_delta_log_wealth > 0
+    assert sizing.continuous_full_robust_ev_usd > 0
+    assert sizing.minimum_marketable_increment_shares >= Decimal("1")
+    assert sizing.minimum_marketable_robust_delta_log_wealth < 0
+    assert sizing.minimum_marketable_robust_ev_usd > 0
+    assert sizing.minimum_marketable_capital_efficiency < 0
+    assert sizing.minimum_marketable_positive is False
 
 
 def test_global_selector_consumes_ledger_bound_cumulative_buy_endowment():

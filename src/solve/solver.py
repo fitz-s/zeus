@@ -1087,13 +1087,22 @@ class BinaryTerminalWealthCertificate:
 
 @dataclass(frozen=True)
 class GlobalBuySizingRejection:
-    """Counterfactual sizing proof for a positive BUY below the venue minimum."""
+    """Continuous optimum and venue-minimum proof for a subminimum BUY."""
 
     current_token_shares: Decimal
     full_kelly_target_shares: Decimal
     fractional_kelly_target_shares: Decimal
     minimum_marketable_increment_shares: Decimal
     minimum_fractional_kelly_multiplier: Decimal
+    continuous_full_kelly_target_shares: Decimal
+    continuous_fractional_kelly_target_shares: Decimal
+    continuous_full_robust_delta_log_wealth: float
+    continuous_full_robust_ev_usd: float
+    minimum_marketable_cost_usd: Decimal
+    minimum_marketable_robust_delta_log_wealth: float
+    minimum_marketable_robust_ev_usd: float
+    minimum_marketable_capital_efficiency: float
+    minimum_marketable_positive: bool
 
     def __post_init__(self) -> None:
         current = Decimal(self.current_token_shares)
@@ -1101,11 +1110,40 @@ class GlobalBuySizingRejection:
         fractional = Decimal(self.fractional_kelly_target_shares)
         minimum = Decimal(self.minimum_marketable_increment_shares)
         required = Decimal(self.minimum_fractional_kelly_multiplier)
+        continuous_full = Decimal(self.continuous_full_kelly_target_shares)
+        continuous_fractional = Decimal(
+            self.continuous_fractional_kelly_target_shares
+        )
+        minimum_cost = Decimal(self.minimum_marketable_cost_usd)
         expected_required = (current + minimum) / full
+        multiplier = fractional / full
+        minimum_positive = (
+            self.minimum_marketable_robust_delta_log_wealth > 0.0
+            and self.minimum_marketable_robust_ev_usd > 0.0
+        )
         if (
             not all(
                 value.is_finite()
-                for value in (current, full, fractional, minimum, required)
+                for value in (
+                    current,
+                    full,
+                    fractional,
+                    minimum,
+                    required,
+                    continuous_full,
+                    continuous_fractional,
+                    minimum_cost,
+                )
+            )
+            or not all(
+                math.isfinite(value)
+                for value in (
+                    self.continuous_full_robust_delta_log_wealth,
+                    self.continuous_full_robust_ev_usd,
+                    self.minimum_marketable_robust_delta_log_wealth,
+                    self.minimum_marketable_robust_ev_usd,
+                    self.minimum_marketable_capital_efficiency,
+                )
             )
             or current < 0
             or full <= current
@@ -1115,7 +1153,11 @@ class GlobalBuySizingRejection:
             or required <= 0
             or required > 1
             or required != expected_required
-            or required <= fractional / full
+            or required <= multiplier
+            or continuous_full < current
+            or continuous_fractional != continuous_full * multiplier
+            or minimum_cost <= 0
+            or self.minimum_marketable_positive != minimum_positive
         ):
             raise ValueError("global BUY sizing rejection is incoherent")
 
@@ -1786,11 +1828,18 @@ def _objective(
     return _lower_cvar(du, weights, alpha)
 
 
-def _single_order_cost(curve: ExecutableCostCurve, shares: Decimal) -> Decimal:
+def _single_order_cost(
+    curve: ExecutableCostCurve,
+    shares: Decimal,
+    *,
+    enforce_venue_minimum: bool = True,
+) -> Decimal:
     """Exact all-in spend for ``shares`` on the side-native ask ladder."""
 
     remaining = Decimal(shares)
-    if remaining <= 0 or remaining < curve.min_order_size:
+    if remaining <= 0 or (
+        enforce_venue_minimum and remaining < curve.min_order_size
+    ):
         raise ValueError("share size is below the executable minimum")
     cost = Decimal("0")
     for level in curve.levels:
@@ -1832,13 +1881,15 @@ def _single_order_max_shares(
     curve: ExecutableCostCurve,
     *,
     spend_limit_usd: Decimal,
+    quantize: bool = True,
 ) -> Decimal:
-    """Largest venue-grid size whose worst admitted limit fill fits cash.
+    """Largest size whose worst admitted limit fill fits cash.
 
     The current-book VWAP is the expected spend, but the executable request is a
     limit order. Collateral must therefore cover every requested share at the
     deepest admitted level. This makes the mathematical optimum fundable by the
-    exact command that will represent it.
+    exact command that will represent it. Executable callers use the default
+    share grid; continuous counterfactuals explicitly skip that final projection.
     """
 
     spend_limit = Decimal(spend_limit_usd)
@@ -1854,7 +1905,11 @@ def _single_order_max_shares(
         shares = min(cumulative, affordable_at_limit)
         if shares < cumulative:
             break
-    return (shares / _SIZE_QUANTUM).to_integral_value(rounding=ROUND_FLOOR) * _SIZE_QUANTUM
+    if not quantize:
+        return shares
+    return (
+        shares / _SIZE_QUANTUM
+    ).to_integral_value(rounding=ROUND_FLOOR) * _SIZE_QUANTUM
 
 
 def _single_order_min_marketable_shares(
@@ -2010,6 +2065,7 @@ def _single_order_metrics(
     wealth_ceiling_usd: Decimal,
     alpha: float,
     robust_q: float | None = None,
+    enforce_venue_minimum: bool = True,
 ) -> tuple[float, float, float, Decimal]:
     """Return robust Δlog, robust EV, Δlog/cost, and exact cost.
 
@@ -2018,7 +2074,11 @@ def _single_order_metrics(
     purchased per dollar of current capital.
     """
 
-    cost = _single_order_cost(candidate.executable_cost_curve, shares)
+    cost = _single_order_cost(
+        candidate.executable_cost_curve,
+        shares,
+        enforce_venue_minimum=enforce_venue_minimum,
+    )
     floor = float(wealth_floor_usd)
     ceiling = float(wealth_ceiling_usd)
     lose_wealth = floor - float(cost)
@@ -2114,6 +2174,48 @@ def _single_order_stationary_probes(
         cost_start += level.size * price
         level_start = level_end
     return probes
+
+
+def _single_order_continuous_optimum(
+    candidate: GlobalSingleOrderCandidate,
+    *,
+    q_samples: np.ndarray,
+    robust_q: float,
+    wealth_floor_usd: Decimal,
+    wealth_ceiling_usd: Decimal,
+    alpha: float,
+    max_shares: Decimal,
+) -> tuple[float, float, float, Decimal, Decimal]:
+    """Return the exact piecewise-ladder optimum before venue min/grid repair."""
+
+    best = (0.0, 0.0, 0.0, Decimal("0"), Decimal("0"))
+    probes = _single_order_stationary_probes(
+        candidate.executable_cost_curve,
+        robust_q=Decimal(str(robust_q)),
+        wealth_floor_usd=wealth_floor_usd,
+        wealth_ceiling_usd=wealth_ceiling_usd,
+        min_shares=Decimal("0"),
+        max_shares=max_shares,
+    )
+    for shares in sorted(probes):
+        if shares <= 0 or shares > max_shares:
+            continue
+        robust_du, robust_ev, efficiency, cost = _single_order_metrics(
+            candidate,
+            q_samples=q_samples,
+            shares=shares,
+            wealth_floor_usd=wealth_floor_usd,
+            wealth_ceiling_usd=wealth_ceiling_usd,
+            alpha=alpha,
+            robust_q=robust_q,
+            enforce_venue_minimum=False,
+        )
+        if robust_du > best[0] + 1e-15 or (
+            math.isclose(robust_du, best[0], rel_tol=0.0, abs_tol=1e-15)
+            and (cost, -efficiency) < (best[3], -best[2])
+        ):
+            best = (robust_du, robust_ev, efficiency, cost, shares)
+    return best
 
 
 def _score_global_single_order(
@@ -2295,6 +2397,34 @@ def _score_global_single_order(
     )
     if fractional_legal_max is None or fractional_legal_max < legal_min_shares:
         reason = "FRACTIONAL_KELLY_INCREMENT_BELOW_MINIMUM"
+        continuous_best = _single_order_continuous_optimum(
+            candidate,
+            q_samples=q_samples,
+            robust_q=robust_q,
+            wealth_floor_usd=wealth_floor_usd,
+            wealth_ceiling_usd=wealth_ceiling_usd,
+            alpha=band_alpha,
+            max_shares=_single_order_max_shares(
+                candidate.executable_cost_curve,
+                spend_limit_usd=optimization_limit,
+                quantize=False,
+            ),
+        )
+        (
+            minimum_robust_du,
+            minimum_robust_ev,
+            minimum_efficiency,
+            minimum_cost,
+        ) = _single_order_metrics(
+            candidate,
+            q_samples=q_samples,
+            shares=legal_min_shares,
+            wealth_floor_usd=wealth_floor_usd,
+            wealth_ceiling_usd=wealth_ceiling_usd,
+            alpha=band_alpha,
+            robust_q=robust_q,
+        )
+        continuous_full_target = held_shares + continuous_best[4]
         sizing_rejection = GlobalBuySizingRejection(
             current_token_shares=held_shares,
             full_kelly_target_shares=full_kelly_target_shares,
@@ -2302,6 +2432,19 @@ def _score_global_single_order(
             minimum_marketable_increment_shares=legal_min_shares,
             minimum_fractional_kelly_multiplier=(
                 (held_shares + legal_min_shares) / full_kelly_target_shares
+            ),
+            continuous_full_kelly_target_shares=continuous_full_target,
+            continuous_fractional_kelly_target_shares=(
+                continuous_full_target * multiplier
+            ),
+            continuous_full_robust_delta_log_wealth=continuous_best[0],
+            continuous_full_robust_ev_usd=continuous_best[1],
+            minimum_marketable_cost_usd=minimum_cost,
+            minimum_marketable_robust_delta_log_wealth=minimum_robust_du,
+            minimum_marketable_robust_ev_usd=minimum_robust_ev,
+            minimum_marketable_capital_efficiency=minimum_efficiency,
+            minimum_marketable_positive=(
+                minimum_robust_du > 0.0 and minimum_robust_ev > 0.0
             ),
         )
         return GlobalSingleOrderDecision(

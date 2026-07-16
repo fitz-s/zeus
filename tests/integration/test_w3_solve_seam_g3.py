@@ -138,6 +138,15 @@ def test_global_auction_receipt_persists_complete_buy_sell_hold_cash_comparison(
                 fractional_kelly_target_shares=Decimal("10"),
                 minimum_marketable_increment_shares=Decimal("12"),
                 minimum_fractional_kelly_multiplier=Decimal("0.3"),
+                continuous_full_kelly_target_shares=Decimal("32"),
+                continuous_fractional_kelly_target_shares=Decimal("8"),
+                continuous_full_robust_delta_log_wealth=0.001,
+                continuous_full_robust_ev_usd=0.1,
+                minimum_marketable_cost_usd=Decimal("5.88"),
+                minimum_marketable_robust_delta_log_wealth=-0.001,
+                minimum_marketable_robust_ev_usd=-0.2,
+                minimum_marketable_capital_efficiency=-0.00017,
+                minimum_marketable_positive=False,
             ),
         ),
         GlobalSingleOrderCandidateEvaluation(
@@ -283,7 +292,7 @@ def test_global_auction_receipt_persists_complete_buy_sell_hold_cash_comparison(
     artifact = json.loads(row["artifact_json"])
     summary = artifact["summary"]
     assert row["mode"] == "global_single_order_auction"
-    assert summary["schema_version"] == 13
+    assert summary["schema_version"] == 14
     assert summary["book_capture_freshness_complete"] is True
     assert summary["book_captured_at_utc"] == "2026-07-14T01:00:00.250000+00:00"
     assert summary["book_deadline_at_utc"] == "2026-07-14T01:00:30.250000+00:00"
@@ -380,7 +389,7 @@ def test_global_auction_receipt_persists_complete_buy_sell_hold_cash_comparison(
     assert summary["buy_sizing_rejection_count"] == 1
     assert summary["buy_sizing_rejection_complete"] is True
     assert summary["buy_sizing_rejection_encoding"] == (
-        "zlib+base64+indexed-canonical-json-v2"
+        "zlib+base64+indexed-canonical-json-v3"
     )
     assert summary["buy_sizing_rejection_index_source"] == (
         "candidate_evaluations.buy_candidate_index"
@@ -400,8 +409,35 @@ def test_global_auction_receipt_persists_complete_buy_sell_hold_cash_comparison(
             "fractional_kelly_target_shares",
             "minimum_marketable_increment_shares",
             "minimum_fractional_kelly_multiplier",
+            "continuous_full_kelly_target_shares",
+            "continuous_fractional_kelly_target_shares",
+            "continuous_full_robust_delta_log_wealth",
+            "continuous_full_robust_ev_usd",
+            "minimum_marketable_cost_usd",
+            "minimum_marketable_robust_delta_log_wealth",
+            "minimum_marketable_robust_ev_usd",
+            "minimum_marketable_capital_efficiency",
+            "minimum_marketable_positive",
         ],
-        "rows": [[0, "0", "40", "10", "12", "0.3"]],
+        "rows": [
+            [
+                0,
+                "0",
+                "40",
+                "10",
+                "12",
+                "0.3",
+                "32",
+                "8",
+                0.001,
+                0.1,
+                "5.88",
+                -0.001,
+                -0.2,
+                -0.00017,
+                False,
+            ]
+        ],
     }
     assert summary["hold_cash"] == {
         "robust_delta_log_wealth": "0",
@@ -3113,7 +3149,7 @@ def test_speculative_topology_fills_snapshot_gap_from_complete_receipt():
         separators=(",", ":"),
     ).encode()
     summary = {
-        "schema_version": 13,
+        "schema_version": 14,
         "book_native_side_candidate_coverage_status": "COMPLETE",
         "book_native_side_candidate_coverage_complete": True,
         "book_native_side_encoding": "zlib+base64+canonical-json-v1",

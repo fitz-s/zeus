@@ -504,6 +504,15 @@ def _store_global_auction_receipt(
         "fractional_kelly_target_shares",
         "minimum_marketable_increment_shares",
         "minimum_fractional_kelly_multiplier",
+        "continuous_full_kelly_target_shares",
+        "continuous_fractional_kelly_target_shares",
+        "continuous_full_robust_delta_log_wealth",
+        "continuous_full_robust_ev_usd",
+        "minimum_marketable_cost_usd",
+        "minimum_marketable_robust_delta_log_wealth",
+        "minimum_marketable_robust_ev_usd",
+        "minimum_marketable_capital_efficiency",
+        "minimum_marketable_positive",
     )
     buy_sizing_rejection_complete = (
         set(buy_sizing_rejections) == below_minimum_ids
@@ -524,6 +533,15 @@ def _store_global_auction_receipt(
             str(certificate.fractional_kelly_target_shares),
             str(certificate.minimum_marketable_increment_shares),
             str(certificate.minimum_fractional_kelly_multiplier),
+            str(certificate.continuous_full_kelly_target_shares),
+            str(certificate.continuous_fractional_kelly_target_shares),
+            certificate.continuous_full_robust_delta_log_wealth,
+            certificate.continuous_full_robust_ev_usd,
+            str(certificate.minimum_marketable_cost_usd),
+            certificate.minimum_marketable_robust_delta_log_wealth,
+            certificate.minimum_marketable_robust_ev_usd,
+            certificate.minimum_marketable_capital_efficiency,
+            certificate.minimum_marketable_positive,
         ]
         for candidate_id, certificate in sorted(
             buy_sizing_rejections.items(),
@@ -607,7 +625,7 @@ def _store_global_auction_receipt(
         )
     )
     receipt = {
-        "schema_version": 13,
+        "schema_version": 14,
         "selection_epoch_identity": selection_epoch_identity,
         "selection_cut_at_utc": selection_cut_at_utc.isoformat(),
         "decision_at_utc": decision_at_utc.isoformat(),
@@ -679,7 +697,7 @@ def _store_global_auction_receipt(
         ).decode("ascii"),
         "buy_sizing_rejection_count": len(buy_sizing_rejection_rows),
         "buy_sizing_rejection_complete": buy_sizing_rejection_complete,
-        "buy_sizing_rejection_encoding": "zlib+base64+indexed-canonical-json-v2",
+        "buy_sizing_rejection_encoding": "zlib+base64+indexed-canonical-json-v3",
         "buy_sizing_rejection_index_source": (
             "candidate_evaluations.buy_candidate_index"
         ),
