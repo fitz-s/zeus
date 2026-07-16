@@ -439,8 +439,23 @@ _REVISION_INSERT_SQL = """
         ?
     )
 """
+_UPDATE_WIDENED_SQL = """
+    UPDATE observation_instants
+    SET running_max = ?, running_min = ?, observation_count = ?,
+        provenance_json = ?, imported_at = ?
+    WHERE id = ?
+"""
 _REVISION_WRITER = "src.data.observation_instants_writer.insert_rows"
 _MATERIAL_COMPARISON_EXEMPT_COLUMNS: frozenset[str] = frozenset({"imported_at"})
+# Columns a later fetch of the SAME (city, source, utc_timestamp) hour bucket
+# is allowed to change WITHOUT tripping quarantine, provided the change is a
+# monotone extremum widening (see ``_monotone_widening`` below). Everything
+# else in _INSERT_COLUMNS must stay byte-identical — a change there means the
+# incoming row is a DIFFERENT identity/context, not a backfill completion of
+# the same bucket, and must fall back to revision-quarantine.
+_WIDENING_VARIABLE_COLUMNS: frozenset[str] = frozenset(
+    {"running_max", "running_min", "observation_count", "provenance_json"}
+) | _MATERIAL_COMPARISON_EXEMPT_COLUMNS
 
 
 def _derive_insert_source_fields(row: ObsV2Row) -> tuple[int, str, str]:
@@ -558,6 +573,60 @@ def _json_dumps(payload: dict[str, Any]) -> str:
     return json.dumps(payload, sort_keys=True, separators=(",", ":"))
 
 
+def _monotone_widening(existing: dict[str, Any], incoming: dict[str, Any]) -> bool:
+    """True when ``incoming`` is the SAME hour bucket with MORE raw obs folded
+    in — a legitimate WU/Ogimet backfill completion, not a different reading.
+
+    The 2026-07-14 Paris regression: the live tick polls an hour bucket once,
+    shortly after the hour opens, and freezes whatever WU's history endpoint
+    has processed so far (often a single report). WU backfills additional
+    reports into the SAME bucket over the following hours/days — the bucket's
+    true max/min can only be REVEALED to be more extreme as more raw obs
+    accumulate, never less (it is a max/min over an accumulating set). A later
+    fetch of the identical bucket that only ADVANCES running_max upward and/or
+    running_min downward (never regresses either) is that reveal, not a
+    disagreement — everything else about the bucket's identity must still
+    match exactly, or this is a different reading and must NOT be trusted here.
+    """
+    for column in set(_INSERT_COLUMNS) - _WIDENING_VARIABLE_COLUMNS:
+        if _normalize_material_value(column, existing.get(column)) != _normalize_material_value(
+            column, incoming.get(column)
+        ):
+            return False
+    existing_max, incoming_max = existing.get("running_max"), incoming.get("running_max")
+    existing_min, incoming_min = existing.get("running_min"), incoming.get("running_min")
+    if existing_max is not None and (incoming_max is None or incoming_max < existing_max):
+        return False
+    if existing_min is not None and (incoming_min is None or incoming_min > existing_min):
+        return False
+    return True
+
+
+def _widened_provenance_json(existing: dict[str, Any], incoming: dict[str, Any]) -> str:
+    """Incoming provenance plus a ``widened_from`` receipt of what it replaced.
+
+    Preserves time-of-knowledge reconstruction: a reader can always recover
+    what this cell looked like before the backfill and when that view was
+    captured (``imported_at``), even though the current row now shows the
+    completed extremum.
+    """
+    try:
+        merged = json.loads(incoming.get("provenance_json") or "{}")
+    except (TypeError, ValueError):
+        merged = {}
+    if not isinstance(merged, dict):
+        merged = {}
+    merged = dict(merged)
+    merged["widened_from"] = {
+        "running_max": existing.get("running_max"),
+        "running_min": existing.get("running_min"),
+        "observation_count": existing.get("observation_count"),
+        "imported_at": existing.get("imported_at"),
+        "payload_hash": _payload_hash_from_provenance(existing.get("provenance_json")),
+    }
+    return _json_dumps(merged)
+
+
 def _fetch_existing(
     conn: sqlite3.Connection,
     row_dict: dict[str, Any],
@@ -580,6 +649,7 @@ def _insert_revision(
     incoming: dict[str, Any],
     existing_payload_hash: str | None,
     incoming_payload_hash: str,
+    reason: str = "payload_hash_mismatch",
 ) -> None:
     natural_key = {
         "city": incoming["city"],
@@ -598,7 +668,7 @@ def _insert_revision(
             existing.get("id"),
             existing_payload_hash,
             incoming_payload_hash,
-            "payload_hash_mismatch",
+            reason,
             _REVISION_WRITER,
             _json_dumps(existing),
             _json_dumps(incoming),
@@ -617,14 +687,30 @@ def insert_rows(conn: sqlite3.Connection, rows: Iterable[ObsV2Row]) -> int:
     If the natural key already exists with the same payload hash, the write is
     treated as an idempotent rerun and the current row is preserved. Reusing
     the same payload hash with different material fields is rejected as a
-    provenance violation. If the payload hash differs, the incoming row is
-    recorded in ``observation_revisions`` and the current row is not overwritten.
+    provenance violation. If the payload hash differs there are two cases:
+
+    - MONOTONE WIDENING (2026-07-14 Paris regression fix): identical identity
+      (station/unit/timezone/etc, everything except running_max/running_min/
+      observation_count/provenance_json) and the incoming running_max/
+      running_min are equal-or-more-extreme than what is stored — this is WU
+      backfilling MORE raw obs into the SAME hour bucket, not a disagreement
+      (the bucket's true max/min over an accumulating set can only be revealed
+      to be more extreme, never less). The current row IS updated in place
+      (running_max/running_min/observation_count/provenance_json/imported_at),
+      with the prior values folded into the new provenance_json under
+      ``widened_from`` so time-of-knowledge stays reconstructable. The event
+      is ALSO recorded in ``observation_revisions`` (audit trail intact) with
+      reason ``payload_hash_mismatch_monotone_widening_applied``.
+    - Anything else (a value that would make the bucket LESS extreme, or an
+      identity mismatch) keeps the original fail-closed behavior: recorded in
+      ``observation_revisions``, current row NOT overwritten.
 
     Returns
     -------
     int
         Number of new rows inserted into the current obs_v2 surface.
-        Same-hash reruns and divergent-payload revision records do not count.
+        Same-hash reruns, widening updates, and quarantined revision records
+        do not count (widening updates an EXISTING row, it does not insert).
 
     Raises
     ------
@@ -672,6 +758,28 @@ def insert_rows(conn: sqlite3.Connection, rows: Iterable[ObsV2Row]) -> int:
                         f"utc_timestamp={row_dict['utc_timestamp']!r}: "
                         f"{', '.join(differences)}"
                     )
+                continue
+
+            if _monotone_widening(existing, row_dict):
+                conn.execute(
+                    _UPDATE_WIDENED_SQL,
+                    (
+                        row_dict["running_max"],
+                        row_dict["running_min"],
+                        row_dict["observation_count"],
+                        _widened_provenance_json(existing, row_dict),
+                        row_dict["imported_at"],
+                        existing["id"],
+                    ),
+                )
+                _insert_revision(
+                    conn,
+                    existing=existing,
+                    incoming=row_dict,
+                    existing_payload_hash=existing_payload_hash,
+                    incoming_payload_hash=incoming_payload_hash,
+                    reason="payload_hash_mismatch_monotone_widening_applied",
+                )
                 continue
 
             _insert_revision(

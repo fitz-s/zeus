@@ -454,6 +454,186 @@ def test_insert_rows_changed_payload_hash_records_revision_without_overwrite(mem
     assert json.loads(revision[3])["temp_current"] == 35.0
 
 
+# ----------------------------------------------------------------------
+# Monotone extremum widening (2026-07-14 Paris regression fix): a later
+# fetch of the SAME hour bucket that only reveals a MORE extreme running_max/
+# running_min (WU backfilling more raw obs into the bucket) updates the
+# current row in place instead of being silently quarantined to
+# observation_revisions. Anything that would make the bucket LESS extreme,
+# or that changes the bucket's identity, keeps the original quarantine.
+# ----------------------------------------------------------------------
+
+
+def test_insert_rows_widens_running_max_when_incoming_is_higher(mem_db):
+    """A later fetch that folds in one more raw obs and reveals a higher max
+    updates the current row AND still records the event in observation_revisions
+    (audit trail intact, per review condition 1)."""
+    r1 = _make_row(
+        running_max=34.0, running_min=34.0, observation_count=1,
+        provenance_json=_valid_provenance(payload_hash="sha256:" + "a" * 64, raw_obs_count=1),
+        imported_at="2026-04-21T15:15:00+00:00",
+    )
+    r2 = _make_row(
+        running_max=35.0, running_min=34.0, observation_count=2,
+        provenance_json=_valid_provenance(payload_hash="sha256:" + "b" * 64, raw_obs_count=2),
+        imported_at="2026-04-22T03:00:00+00:00",
+    )
+    assert insert_rows(mem_db, [r1]) == 1
+    assert insert_rows(mem_db, [r2]) == 0  # widening updates the existing row, does not insert
+
+    (count,) = mem_db.execute("SELECT COUNT(*) FROM observation_instants").fetchone()
+    assert count == 1
+    running_max, running_min, observation_count, imported_at, provenance_json = mem_db.execute(
+        "SELECT running_max, running_min, observation_count, imported_at, provenance_json "
+        "FROM observation_instants"
+    ).fetchone()
+    assert (running_max, running_min, observation_count) == (35.0, 34.0, 2)
+    assert imported_at == "2026-04-22T03:00:00+00:00"
+
+    # Condition 2: provenance_json on the updated row records the widening
+    # event (prior value, prior fetch ts, new fetch ts stay reconstructable).
+    provenance = json.loads(provenance_json)
+    assert provenance["payload_hash"] == "sha256:" + "b" * 64
+    assert provenance["widened_from"] == {
+        "running_max": 34.0,
+        "running_min": 34.0,
+        "observation_count": 1,
+        "imported_at": "2026-04-21T15:15:00+00:00",
+        "payload_hash": "sha256:" + "a" * 64,
+    }
+
+    # Condition 1: audit trail intact — the revision row still gets written.
+    revision = mem_db.execute(
+        "SELECT reason, existing_payload_hash, incoming_payload_hash "
+        "FROM observation_revisions WHERE table_name='observation_instants'"
+    ).fetchone()
+    assert revision is not None
+    assert revision[0] == "payload_hash_mismatch_monotone_widening_applied"
+    assert revision[1:] == ("sha256:" + "a" * 64, "sha256:" + "b" * 64)
+
+
+def test_insert_rows_widens_running_min_when_incoming_is_lower(mem_db):
+    """LOW-metric mirror: a later fetch revealing a colder trough must widen
+    running_min downward, not freeze at the first-seen value."""
+    r1 = _make_row(
+        running_max=20.0, running_min=18.0, observation_count=1,
+        provenance_json=_valid_provenance(payload_hash="sha256:" + "c" * 64, raw_obs_count=1),
+    )
+    r2 = _make_row(
+        running_max=20.0, running_min=15.0, observation_count=2,
+        provenance_json=_valid_provenance(payload_hash="sha256:" + "d" * 64, raw_obs_count=2),
+    )
+    assert insert_rows(mem_db, [r1]) == 1
+    assert insert_rows(mem_db, [r2]) == 0
+
+    running_max, running_min = mem_db.execute(
+        "SELECT running_max, running_min FROM observation_instants"
+    ).fetchone()
+    assert (running_max, running_min) == (20.0, 15.0)
+    revision = mem_db.execute(
+        "SELECT reason FROM observation_revisions WHERE table_name='observation_instants'"
+    ).fetchone()
+    assert revision == ("payload_hash_mismatch_monotone_widening_applied",)
+
+
+def test_insert_rows_quarantines_less_extreme_incoming_running_max(mem_db):
+    """A later fetch reporting a LOWER max than what's stored is not a
+    legitimate backfill completion (a bucket max cannot decrease as more raw
+    obs accumulate) — must fall back to today's quarantine, current row
+    untouched."""
+    r1 = _make_row(
+        running_max=35.0, running_min=34.0, observation_count=2,
+        provenance_json=_valid_provenance(payload_hash="sha256:" + "e" * 64, raw_obs_count=2),
+    )
+    r2 = _make_row(
+        running_max=34.0, running_min=34.0, observation_count=1,
+        provenance_json=_valid_provenance(payload_hash="sha256:" + "f" * 64, raw_obs_count=1),
+    )
+    assert insert_rows(mem_db, [r1]) == 1
+    assert insert_rows(mem_db, [r2]) == 0
+
+    running_max, running_min = mem_db.execute(
+        "SELECT running_max, running_min FROM observation_instants"
+    ).fetchone()
+    assert (running_max, running_min) == (35.0, 34.0)  # unchanged
+    revision = mem_db.execute(
+        "SELECT reason FROM observation_revisions WHERE table_name='observation_instants'"
+    ).fetchone()
+    assert revision == ("payload_hash_mismatch",)  # quarantined, not widened
+
+
+def test_insert_rows_quarantines_station_identity_mismatch_despite_wider_extreme(mem_db):
+    """A numerically 'wider' incoming value is NOT trusted if the row's own
+    identity (station_id here) disagrees with what's stored — that is a
+    different reading under the same natural key, not the same bucket
+    gaining more raw obs, and must stay fail-closed."""
+    r1 = _make_row(
+        station_id="KORD", running_max=34.0, running_min=34.0, observation_count=1,
+        provenance_json=_valid_provenance(payload_hash="sha256:" + "1" * 64, station_id="KORD"),
+    )
+    r2 = _make_row(
+        station_id="KMDW", running_max=40.0, running_min=34.0, observation_count=1,
+        provenance_json=_valid_provenance(payload_hash="sha256:" + "2" * 64, station_id="KMDW"),
+    )
+    assert insert_rows(mem_db, [r1]) == 1
+    assert insert_rows(mem_db, [r2]) == 0
+
+    station_id, running_max = mem_db.execute(
+        "SELECT station_id, running_max FROM observation_instants"
+    ).fetchone()
+    assert (station_id, running_max) == ("KORD", 34.0)  # unchanged
+    revision = mem_db.execute(
+        "SELECT reason FROM observation_revisions WHERE table_name='observation_instants'"
+    ).fetchone()
+    assert revision == ("payload_hash_mismatch",)
+
+
+def test_insert_rows_widens_paris_lfpb_2026_07_14_type_specimen(mem_db):
+    """Type-specimen replay: the live tick polls the Paris/LFPB 14:00 UTC
+    bucket shortly after 14:00, sees only the top-of-hour METAR (34.0C, 1
+    raw obs). WU later backfills the 14:30 SPECI (35.0C) into the SAME
+    bucket. The stored day-so-far high must widen to 35.0 -- this is the
+    exact mechanism behind the 2026-07-14 Paris day0 regression."""
+    common = dict(
+        city="Paris", target_date="2026-07-14", source="wu_icao_history",
+        timezone_name="Europe/Paris", local_hour=16.0,
+        local_timestamp="2026-07-14T16:00:00+02:00",
+        utc_timestamp="2026-07-14T14:00:00+00:00", utc_offset_minutes=120,
+        dst_active=1, time_basis="utc_hour_bucket_extremum", temp_unit="C",
+        authority="VERIFIED", data_version="v1.wu-native", station_id="LFPB",
+    )
+    first_seen = ObsV2Row(
+        **common,
+        running_max=34.0, running_min=34.0, observation_count=1,
+        imported_at="2026-07-14T15:05:06+00:00",
+        provenance_json=_valid_provenance(
+            payload_hash="sha256:" + "3" * 64, station_id="LFPB",
+            hour_max_raw_ts="2026-07-14T14:00:00+00:00",
+            hour_min_raw_ts="2026-07-14T14:00:00+00:00",
+            raw_obs_count=1,
+        ),
+    )
+    backfilled = ObsV2Row(
+        **common,
+        running_max=35.0, running_min=34.0, observation_count=2,
+        imported_at="2026-07-16T02:00:00+00:00",
+        provenance_json=_valid_provenance(
+            payload_hash="sha256:" + "4" * 64, station_id="LFPB",
+            hour_max_raw_ts="2026-07-14T14:30:00+00:00",
+            hour_min_raw_ts="2026-07-14T14:00:00+00:00",
+            raw_obs_count=2,
+        ),
+    )
+    assert insert_rows(mem_db, [first_seen]) == 1
+    assert insert_rows(mem_db, [backfilled]) == 0
+
+    running_max, running_min, observation_count = mem_db.execute(
+        "SELECT running_max, running_min, observation_count FROM observation_instants "
+        "WHERE city='Paris' AND utc_timestamp='2026-07-14T14:00:00+00:00'"
+    ).fetchone()
+    assert (running_max, running_min, observation_count) == (35.0, 34.0, 2)
+
+
 def test_insert_rows_rejects_reused_payload_hash_with_changed_material_fields(mem_db):
     payload_hash = "sha256:" + "a" * 64
     r1 = _make_row_with_payload_hash(payload_hash, temp_current=30.0)
