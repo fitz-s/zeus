@@ -179,6 +179,24 @@ def test_persist_lock_obeys_source_clock_deadline(tmp_path) -> None:
     assert time.monotonic() - started < 1.0
 
 
+def test_persist_declares_live_writer_intent_before_schema_work(tmp_path, monkeypatch) -> None:
+    import src.state.schema.v2_schema as schema
+    from src.data.bayes_precision_fusion_download import _persist_chunk_with_lock_retry
+    from src.state.db_writer_lock import WriteClass, db_writer_lock
+
+    db = _forecast_db(tmp_path)
+    original = schema.ensure_replacement_forecast_live_schema
+
+    def _ensure(conn):
+        with pytest.raises(BlockingIOError):
+            with db_writer_lock(db, WriteClass.LIVE, blocking=False):
+                pass
+        original(conn)
+
+    monkeypatch.setattr(schema, "ensure_replacement_forecast_live_schema", _ensure)
+    assert _persist_chunk_with_lock_retry(db, ()) == (0, 0)
+
+
 def test_download_initializes_persist_schema_once_per_fanout(tmp_path, monkeypatch) -> None:
     import src.data.bayes_precision_fusion_download as dl
 

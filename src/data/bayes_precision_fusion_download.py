@@ -1046,6 +1046,39 @@ def _deadline_busy_timeout_ms(deadline_monotonic: float) -> int:
     return max(1, int(remaining * 1000.0))
 
 
+@contextlib.contextmanager
+def _live_writer_lock(
+    forecast_db: Path,
+    *,
+    deadline_monotonic: float | None,
+):
+    from src.state.db_writer_lock import WriteClass, db_writer_lock  # noqa: PLC0415
+
+    while True:
+        lock = db_writer_lock(
+            forecast_db,
+            WriteClass.LIVE,
+            blocking=deadline_monotonic is None,
+        )
+        try:
+            lock.__enter__()
+        except BlockingIOError:
+            if deadline_monotonic is None:
+                raise
+            remaining = deadline_monotonic - time.monotonic()
+            if remaining <= 0.0:
+                raise _PersistDeadlineExceeded(
+                    "forecast persistence could not acquire the live writer lane"
+                )
+            time.sleep(min(0.01, remaining))
+            continue
+        try:
+            yield
+        finally:
+            lock.__exit__(None, None, None)
+        return
+
+
 def _persist_chunk_with_lock_retry(
     forecast_db: Path | str,
     rows: Sequence[dict],
@@ -1077,36 +1110,40 @@ def _persist_chunk_with_lock_retry(
     for _attempt in range(attempts):
         if deadline_monotonic is not None:
             _deadline_busy_timeout_ms(deadline_monotonic)
-        conn = _connect(Path(forecast_db), write_class="live")
+        db_path = Path(forecast_db)
+        conn = None
         try:
-            if deadline_monotonic is not None:
-                conn.execute(
-                    f"PRAGMA busy_timeout = {_deadline_busy_timeout_ms(deadline_monotonic)}"
-                )
-            if ensure_schema:
-                ensure_replacement_forecast_live_schema(conn)
-            if deadline_monotonic is not None:
-                conn.execute(
-                    f"PRAGMA busy_timeout = {_deadline_busy_timeout_ms(deadline_monotonic)}"
-                )
-            if rows:
-                _scan_and_audit_request_conflicts(conn, rows)
-            # BEGIN IMMEDIATE: take the write lock up front so busy_timeout WAITS for it,
-            # instead of a deferred BEGIN failing on the SELECT->INSERT upgrade under
-            # rollback-journal (delete) mode contention with the other forecast-DB writers
-            # (the "database is locked" storm that starved precision-fusion captures).
-            conn.execute("BEGIN IMMEDIATE")
-            try:
+            with _live_writer_lock(
+                db_path,
+                deadline_monotonic=deadline_monotonic,
+            ):
+                conn = _connect(db_path, write_class="live")
+                if deadline_monotonic is not None:
+                    conn.execute(
+                        f"PRAGMA busy_timeout = {_deadline_busy_timeout_ms(deadline_monotonic)}"
+                    )
+                if ensure_schema:
+                    ensure_replacement_forecast_live_schema(conn)
+                if deadline_monotonic is not None:
+                    conn.execute(
+                        f"PRAGMA busy_timeout = {_deadline_busy_timeout_ms(deadline_monotonic)}"
+                    )
                 if rows:
-                    written = _persist_rows(conn, rows)
-                if cutoff_iso is not None:
-                    pruned = _prune_old(conn, cutoff_iso=cutoff_iso)
-                conn.execute("COMMIT")
-            except Exception:
-                with contextlib.suppress(Exception):
-                    conn.execute("ROLLBACK")
-                raise
-            return written, pruned
+                    _scan_and_audit_request_conflicts(conn, rows)
+                # BEGIN IMMEDIATE: take the SQLite write lock only after the
+                # cooperative LIVE intent is visible to BULK chunkers.
+                conn.execute("BEGIN IMMEDIATE")
+                try:
+                    if rows:
+                        written = _persist_rows(conn, rows)
+                    if cutoff_iso is not None:
+                        pruned = _prune_old(conn, cutoff_iso=cutoff_iso)
+                    conn.execute("COMMIT")
+                except Exception:
+                    with contextlib.suppress(Exception):
+                        conn.execute("ROLLBACK")
+                    raise
+                return written, pruned
         except sqlite3.OperationalError as lock_exc:
             if "locked" not in str(lock_exc).lower() or _attempt + 1 >= attempts:
                 raise
@@ -1127,7 +1164,8 @@ def _persist_chunk_with_lock_retry(
             )
             time.sleep(20)
         finally:
-            conn.close()
+            if conn is not None:
+                conn.close()
     return written, pruned
 
 
