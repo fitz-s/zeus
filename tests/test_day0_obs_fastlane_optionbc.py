@@ -706,6 +706,40 @@ class TestDay0MetarSourceClockTick:
 
         assert result["status"] == "SOURCE_CURRENT"
 
+    def test_strict_settings_shape_enables_source_clock(self, monkeypatch):
+        import src.ingest_main as im
+
+        class StrictSettings:
+            def __getitem__(self, key):
+                assert key == "edli"
+                return {
+                    "enabled": True,
+                    "event_writer_enabled": True,
+                    "day0_extreme_trigger_enabled": True,
+                    "day0_fast_obs_lane_enabled": True,
+                    "edli_live_scope": "forecast_plus_day0",
+                }
+
+        prefetch = SimpleNamespace(
+            ledger_reports=(),
+            freshness_status="fresh_fetch",
+            reports=(object(),),
+        )
+        emitter = SimpleNamespace(prefetch=lambda **_kw: prefetch)
+        monkeypatch.setattr("src.config.settings", StrictSettings())
+        monkeypatch.setattr("src.config.runtime_cities", lambda: [_wu_icao_city()])
+        monkeypatch.setattr(im, "_day0_metar_emitter", lambda: emitter)
+        monkeypatch.setattr(
+            "src.state.db.get_world_connection",
+            lambda **_kw: (_ for _ in ()).throw(
+                AssertionError("DB opened for unchanged payload")
+            ),
+        )
+
+        result = im._day0_metar_source_clock_tick.__wrapped__()
+
+        assert result["status"] == "SOURCE_CURRENT"
+
     def test_commits_before_publishing_reactor_wake(self, monkeypatch):
         import src.ingest_main as im
 

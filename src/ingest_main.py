@@ -823,7 +823,7 @@ def _day0_metar_source_clock_tick():
     from src.runtime.reactor_wake import publish_reactor_wake
     from src.state.db import get_world_connection, world_write_mutex
 
-    edli_cfg = settings.get("edli", {}) if hasattr(settings, "get") else {}
+    edli_cfg = settings["edli"]
     if not (
         edli_cfg.get("enabled")
         and edli_cfg.get("event_writer_enabled")
