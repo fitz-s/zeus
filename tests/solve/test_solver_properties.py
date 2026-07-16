@@ -1,5 +1,5 @@
 # Created: 2026-07-03
-# Last reused/audited: 2026-07-15
+# Last reused/audited: 2026-07-16
 # Authority basis: W3 SOLVE design packet, global fractional-Kelly repair, and complete auction receipts
 """W3 SOLVE math-core acceptance — the property anchors (design packet §4, consult REV-2).
 
@@ -19,7 +19,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
-from decimal import Decimal
+from decimal import ROUND_FLOOR, Decimal
 import math
 from types import SimpleNamespace
 
@@ -1256,14 +1256,14 @@ def test_global_single_order_cash_beats_non_positive_buy_and_sell():
     }
     assert evaluations[sell.candidate_id].position_id == "position-bad-sell"
     assert evaluations[sell.candidate_id].held_shares == Decimal("10")
-    assert evaluations[sell.candidate_id].shares == Decimal("10")
-    assert evaluations[sell.candidate_id].cash_proceeds_usd == Decimal("2")
+    assert evaluations[sell.candidate_id].shares == Decimal("1")
+    assert evaluations[sell.candidate_id].cash_proceeds_usd == Decimal("0.2000")
     assert evaluations[sell.candidate_id].limit_price == Decimal("0.20")
     assert evaluations[sell.candidate_id].expected_fill_price_before_fee == Decimal(
         "0.20"
     )
     assert evaluations[sell.candidate_id].robust_delta_log_wealth < 0
-    assert evaluations[sell.candidate_id].robust_ev_usd == pytest.approx(-6.0)
+    assert evaluations[sell.candidate_id].robust_ev_usd == pytest.approx(-0.6)
     assert evaluations[sell.candidate_id].terminal_wealth is not None
     assert evaluations[buy.candidate_id].position_id is None
     assert evaluations[buy.candidate_id].held_shares == 0
@@ -1304,7 +1304,7 @@ def test_global_single_order_epoch_failure_retains_prior_sell_economics():
     assert evaluations[sell.candidate_id].rejection_reason == (
         "NON_POSITIVE_ROBUST_OBJECTIVE"
     )
-    assert evaluations[sell.candidate_id].cash_proceeds_usd == Decimal("2")
+    assert evaluations[sell.candidate_id].cash_proceeds_usd == Decimal("0.2000")
     assert evaluations[buy.candidate_id].rejection_reason == (
         "CAPITAL_CONSTRAINT_UNAVAILABLE"
     )
@@ -1343,7 +1343,7 @@ def test_global_single_order_sell_yes_no_label_mirror_is_exact():
     assert yes_decision.robust_ev_usd == no_decision.robust_ev_usd
 
 
-def test_global_single_order_sell_requires_full_exact_bid_depth():
+def test_global_single_order_sell_uses_best_partial_depth_when_full_depth_is_absent():
     sell = _global_sell_candidate(
         candidate_id="sell-thin-depth",
         family="sell-thin-depth-family",
@@ -1355,8 +1355,99 @@ def test_global_single_order_sell_requires_full_exact_bid_depth():
 
     decision = _global_select((sell,))
 
-    assert decision.candidate is None
-    assert decision.rejection_reasons[sell.candidate_id] == "DEPTH_INFEASIBLE"
+    assert decision.candidate is sell
+    assert decision.shares == Decimal("9.99")
+    assert decision.cash_proceeds_usd == Decimal("4.995")
+    assert decision.robust_delta_log_wealth > 0.0
+    assert decision.robust_ev_usd > 0.0
+
+
+def test_global_single_order_sell_selects_interior_capital_optimal_reduction():
+    sell = _global_sell_candidate(
+        candidate_id="sell-interior-optimum",
+        family="sell-interior-optimum-family",
+        side="YES",
+        held_q=0.49,
+        bids=(("0.50", "10"),),
+        shares="10",
+    )
+
+    decision = _global_select((sell,), floor="100", ceiling="109.40")
+
+    assert decision.candidate is sell
+    assert Decimal("4.98") <= decision.shares <= Decimal("5.00")
+    assert decision.shares < sell.held_shares
+    assert decision.robust_delta_log_wealth > 0.0
+    assert decision.robust_ev_usd > 0.0
+
+
+@pytest.mark.parametrize(
+    ("held_q", "bids", "shares", "fee", "floor", "ceiling"),
+    (
+        (0.25, (("0.55", "2.37"), ("0.40", "4.11")), "6.48", "0.01", "83", "120"),
+        (0.49, (("0.50", "10"),), "10", "0", "100", "109.40"),
+        (0.10, (("0.62", "2.13"), ("0.51", "3.22")), "8", "0.02", "91", "130"),
+    ),
+)
+def test_global_single_order_sell_matches_every_cent_grid_oracle(
+    held_q, bids, shares, fee, floor, ceiling
+):
+    sell = _global_sell_candidate(
+        candidate_id=f"sell-grid-{held_q}",
+        family=f"sell-grid-{held_q}-family",
+        side="NO",
+        held_q=held_q,
+        bids=bids,
+        shares=shares,
+        fee=fee,
+    )
+    held_samples = np.full(80, held_q, dtype=np.float64)
+    score = S._score_global_single_order_sell(
+        sell,
+        held_payoff_q_samples=held_samples,
+        band_alpha=0.10,
+        wealth_floor_usd=Decimal(floor),
+        wealth_ceiling_usd=Decimal(ceiling),
+    )
+
+    curve = sell.executable_sell_curve
+    max_shares = min(
+        sell.held_shares,
+        sum((level.size for level in curve.levels), Decimal("0")),
+    ).quantize(Decimal("0.01"), rounding=ROUND_FLOOR)
+    robust_q = 1.0 - held_q
+    loss_baseline = Decimal(floor) + sell.held_shares
+    win_baseline = Decimal(ceiling)
+    oracle = None
+    size = Decimal("1")
+    while size <= max_shares:
+        proceeds, expected_fill_price, limit_price = curve.proceeds_for_shares(size)
+        loss_at_risk = size - proceeds
+        loss_after = loss_baseline - size + proceeds
+        win_after = win_baseline + proceeds
+        robust_du = (1.0 - robust_q) * math.log(
+            float(loss_after / loss_baseline)
+        ) + robust_q * math.log(float(win_after / win_baseline))
+        efficiency = robust_du / float(loss_at_risk)
+        point = (
+            robust_du,
+            efficiency,
+            -loss_at_risk,
+            size,
+            proceeds,
+            expected_fill_price,
+            limit_price,
+        )
+        if oracle is None or point[:3] > oracle[:3]:
+            oracle = point
+        size += Decimal("0.01")
+
+    assert oracle is not None
+    assert score.shares == oracle[3]
+    assert score.cash_proceeds_usd == oracle[4]
+    assert score.expected_fill_price_before_fee == oracle[5]
+    assert score.limit_price == oracle[6]
+    assert score.robust_delta_log_wealth == pytest.approx(oracle[0], abs=1e-12)
 
 
 def test_global_sell_materializer_floors_chain_fill_dust_to_venue_grid():

@@ -1,4 +1,4 @@
-# Lifecycle: created=2026-05-17; last_reviewed=2026-05-18; last_reused=2026-05-18
+# Lifecycle: created=2026-05-17; last_reviewed=2026-07-16; last_reused=2026-07-16
 # Purpose: Tests for promote_pending_trades exit-fill promotion relationships.
 # Reuse: Run when exit lifecycle promotion, REST fill finality, or lock handling changes.
 # Authority basis: STRUCTURAL_PLAN.md v3 §2 PR-S2
@@ -90,6 +90,7 @@ def _seed_matched_fact(
     command_id: str,
     venue_order_id: str,
     observed_at: datetime,
+    filled_size: str = "6",
 ) -> int:
     return append_trade_fact(
         conn,
@@ -97,7 +98,7 @@ def _seed_matched_fact(
         venue_order_id=venue_order_id,
         command_id=command_id,
         state="MATCHED",
-        filled_size="6",
+        filled_size=filled_size,
         fill_price="0.50",
         source="WS_USER",
         observed_at=observed_at,
@@ -193,6 +194,38 @@ def test_matched_row_promotes_from_order_state_payload():
         "filled_size": "6",
         "fill_price": "0.50",
     }
+
+
+def test_partial_fak_promotion_uses_matched_size_not_original_order_size():
+    conn = _conn()
+    _seed_command(conn, "cmd-partial-fak", "ord-partial-fak")
+    _seed_matched_fact(
+        conn,
+        trade_id="trade-partial-fak",
+        command_id="cmd-partial-fak",
+        venue_order_id="ord-partial-fak",
+        observed_at=_old(),
+        filled_size="2.5",
+    )
+    clob = MagicMock()
+    clob.get_order.return_value = {
+        "orderID": "ord-partial-fak",
+        "status": "CONFIRMED",
+        "transaction_hash": "0xpartialfak",
+        "last_update": _now().isoformat(),
+        "size": "6",
+        "size_matched": "2.5",
+        "price": "0.50",
+    }
+
+    stats = promote_pending_trades(conn, clob, max_age_seconds=60)
+
+    assert stats["promoted"] == 1
+    row = conn.execute(
+        "SELECT filled_size, fill_price FROM venue_trade_facts "
+        "WHERE trade_id='trade-partial-fak' AND state='CONFIRMED'"
+    ).fetchone()
+    assert dict(row) == {"filled_size": "2.5", "fill_price": "0.50"}
 
 
 # ---------------------------------------------------------------------------

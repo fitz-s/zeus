@@ -1141,7 +1141,8 @@ class GlobalSingleOrderCandidateEvaluation:
                     "NON_POSITIVE_ROBUST_OBJECTIVE",
                     "NON_POSITIVE_ROBUST_FILL_PREFIX",
                 }
-                or self.shares != self.held_shares
+                or self.shares <= 0
+                or self.shares > self.held_shares
                 or self.cost_usd <= 0
                 or self.cash_proceeds_usd <= 0
                 or self.cash_proceeds_usd != self.shares - self.cost_usd
@@ -1207,10 +1208,10 @@ class GlobalSingleOrderCandidateEvaluation:
             self.current_token_shares != 0
             or self.full_kelly_target_shares != 0
             or self.fractional_kelly_target_shares != 0
-            or self.shares != self.held_shares
+            or self.shares > self.held_shares
         ):
             raise ValueError(
-                "SELL evaluation must close its bound holding without a BUY target"
+                "SELL evaluation must reduce no more than its bound holding"
             )
 
 
@@ -1295,7 +1296,8 @@ class GlobalSingleOrderDecision:
         if getattr(self.candidate, "action", "BUY") == "SELL":
             if (
                 self.no_trade_reason is not None
-                or self.shares != self.candidate.held_shares
+                or self.shares <= 0
+                or self.shares > self.candidate.held_shares
                 or self.cost_usd <= 0
                 or self.cash_proceeds_usd <= 0
                 or self.cash_proceeds_usd != self.shares - self.cost_usd
@@ -1315,7 +1317,7 @@ class GlobalSingleOrderDecision:
                     abs_tol=1e-12,
                 )
             ):
-                raise ValueError("global sell decision is not exact-holding coherent")
+                raise ValueError("global sell decision is not held-position coherent")
             return
         if (
             self.no_trade_reason is not None
@@ -2347,11 +2349,22 @@ def _score_global_single_order_sell(
     wealth_floor_usd: Decimal,
     wealth_ceiling_usd: Decimal,
 ) -> GlobalSingleOrderDecision:
-    """Score one full-position SELL relative to continuing to hold the claim."""
+    """Select the venue-legal SELL size maximizing hold-relative log wealth."""
 
-    shares = Decimal(candidate.held_shares)
+    held_shares = Decimal(candidate.held_shares)
     curve = candidate.executable_sell_curve
-    if shares < curve.min_order_size:
+    quantum = Decimal("0.01")
+    min_shares = (
+        Decimal(curve.min_order_size) / quantum
+    ).to_integral_value(rounding=ROUND_CEILING) * quantum
+    max_shares = min(
+        held_shares,
+        sum((Decimal(level.size) for level in curve.levels), Decimal("0")),
+    )
+    max_shares = (
+        max_shares / quantum
+    ).to_integral_value(rounding=ROUND_FLOOR) * quantum
+    if max_shares < min_shares:
         return GlobalSingleOrderDecision(
             candidate=None,
             shares=Decimal("0"),
@@ -2362,23 +2375,6 @@ def _score_global_single_order_sell(
             no_trade_reason="DEPTH_INFEASIBLE",
             rejection_reasons={candidate.candidate_id: "DEPTH_INFEASIBLE"},
         )
-    try:
-        proceeds, expected_fill_price, limit_price = curve.proceeds_for_shares(shares)
-    except ValueError:
-        return GlobalSingleOrderDecision(
-            candidate=None,
-            shares=Decimal("0"),
-            cost_usd=Decimal("0"),
-            robust_delta_log_wealth=0.0,
-            robust_ev_usd=0.0,
-            capital_efficiency=0.0,
-            no_trade_reason="DEPTH_INFEASIBLE",
-            rejection_reasons={candidate.candidate_id: "DEPTH_INFEASIBLE"},
-        )
-    loss_at_risk = shares - proceeds
-    if proceeds <= 0 or loss_at_risk <= 0:
-        raise ValueError("sell proceeds must define a positive bounded hold-relative loss")
-
     held_q = np.asarray(held_payoff_q_samples, dtype=np.float64)
     favorable_q_samples = 1.0 - held_q
     robust_q = _lower_cvar(
@@ -2389,18 +2385,116 @@ def _score_global_single_order_sell(
 
     floor = Decimal(wealth_floor_usd)
     ceiling = Decimal(wealth_ceiling_usd)
-    loss_baseline = floor + shares
-    loss_after = floor + proceeds
+    loss_baseline = floor + held_shares
     win_baseline = ceiling
-    win_after = ceiling + proceeds
-    if min(loss_baseline, loss_after, win_baseline, win_after) <= 0:
-        robust_du = float("-inf")
-    else:
-        loss_du = math.log(float(loss_after / loss_baseline))
-        win_du = math.log(float(win_after / win_baseline))
-        robust_du = loss_du + robust_q * (win_du - loss_du)
-    robust_ev = robust_q * float(shares) - float(loss_at_risk)
-    efficiency = robust_du / float(loss_at_risk)
+
+    # Net proceeds are piecewise linear.  On each bid level the log objective
+    # is concave, so its only possible maximum is a level boundary or the one
+    # stationary point.  Probe the adjacent venue-cent sizes around each exact
+    # point; this is the complete discrete feasible set, not a size heuristic.
+    probes = {min_shares, max_shares}
+    prefix_shares = Decimal("0")
+    prefix_proceeds = Decimal("0")
+    robust_q_decimal = Decimal(str(robust_q))
+    for level in curve.levels:
+        level_end = min(max_shares, prefix_shares + Decimal(level.size))
+        if level_end < min_shares:
+            prefix_proceeds += Decimal(level.size) * curve.net_price(level.price)
+            prefix_shares += Decimal(level.size)
+            continue
+        net_price = curve.net_price(level.price)
+        intercept = prefix_proceeds - net_price * prefix_shares
+        denominator = net_price * (Decimal("1") - net_price)
+        if denominator > 0:
+            numerator = (
+                robust_q_decimal * net_price * (loss_baseline + intercept)
+                + (Decimal("1") - robust_q_decimal)
+                * (net_price - Decimal("1"))
+                * (win_baseline + intercept)
+            )
+            stationary = numerator / denominator
+            if prefix_shares <= stationary <= level_end:
+                probes.add(stationary)
+        probes.add(prefix_shares)
+        probes.add(level_end)
+        take = max(Decimal("0"), level_end - prefix_shares)
+        prefix_proceeds += take * net_price
+        prefix_shares = level_end
+        if prefix_shares >= max_shares:
+            break
+
+    venue_probes: set[Decimal] = set()
+    for probe in probes:
+        floor_probe = (
+            probe / quantum
+        ).to_integral_value(rounding=ROUND_FLOOR) * quantum
+        ceil_probe = (
+            probe / quantum
+        ).to_integral_value(rounding=ROUND_CEILING) * quantum
+        for sized in (
+            floor_probe - quantum,
+            floor_probe,
+            ceil_probe,
+            ceil_probe + quantum,
+        ):
+            if min_shares <= sized <= max_shares:
+                venue_probes.add(sized)
+
+    best: tuple[
+        float,
+        float,
+        Decimal,
+        Decimal,
+        Decimal,
+        Decimal,
+        Decimal,
+        Decimal,
+    ] | None = None
+    for shares in sorted(venue_probes):
+        proceeds, expected_fill_price, limit_price = curve.proceeds_for_shares(shares)
+        loss_at_risk = shares - proceeds
+        if proceeds <= 0 or loss_at_risk <= 0:
+            raise ValueError(
+                "sell proceeds must define a positive bounded hold-relative loss"
+            )
+        loss_after = loss_baseline - shares + proceeds
+        win_after = win_baseline + proceeds
+        if min(loss_baseline, loss_after, win_baseline, win_after) <= 0:
+            robust_du = float("-inf")
+        else:
+            loss_du = math.log(float(loss_after / loss_baseline))
+            win_du = math.log(float(win_after / win_baseline))
+            robust_du = loss_du + robust_q * (win_du - loss_du)
+        robust_ev = float(proceeds) - (1.0 - robust_q) * float(shares)
+        efficiency = robust_du / float(loss_at_risk)
+        scored_point = (
+            robust_du,
+            efficiency,
+            -loss_at_risk,
+            shares,
+            proceeds,
+            expected_fill_price,
+            limit_price,
+            loss_at_risk,
+        )
+        if best is None or scored_point[:3] > best[:3]:
+            best = scored_point
+
+    if best is None:
+        raise ValueError("sell optimizer produced no venue-legal size")
+    (
+        robust_du,
+        efficiency,
+        _negative_loss_at_risk,
+        shares,
+        proceeds,
+        expected_fill_price,
+        limit_price,
+        loss_at_risk,
+    ) = best
+    loss_after = loss_baseline - shares + proceeds
+    win_after = win_baseline + proceeds
+    robust_ev = float(proceeds) - (1.0 - robust_q) * float(shares)
     terminal = BinaryTerminalWealthCertificate(
         win_probability_lcb=float(robust_q),
         loss_probability_ucb=float(1.0 - robust_q),

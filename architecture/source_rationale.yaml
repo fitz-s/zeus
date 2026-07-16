@@ -1589,6 +1589,8 @@ files:
       its post-haircut size (LegacyDecisionProjection stamped into selected so evidence grades the
       projection, not the joint plan), emits coherence_allows=True. Swaps in at
       qkernel_spine_bridge.py:1332 behind w3_solve_enabled (seam swap = next packet); nothing imports it yet.
+      The current global one-order path scores held-token SELL as a venue-cent partial-reduction
+      optimization against HOLD, including every FAK fill prefix, rather than requiring full-position depth.
     downstream:
     - src/engine/qkernel_spine_bridge.py
   src/solve/kappa.py:
@@ -1774,7 +1776,7 @@ files:
   src/engine/event_reactor_adapter.py:
     zone: K2_runtime
     authority_role: edli_event_reactor_adapter
-    why: Connects EDLI opportunity events to the event-bound no-submit proof kernel; builds AuthorityEvidence certs (EXECUTABLE_SNAPSHOT, FORECAST, etc.) and drives the decision compiler without crossing the executor/venue boundary. A persisted current-evidence shape must carry the shared current probability-semantics revision before it can become forecast authority.
+    why: Connects EDLI opportunity events to the event-bound no-submit proof kernel; builds AuthorityEvidence certs (EXECUTABLE_SNAPSHOT, FORECAST, etc.) and drives the decision compiler without crossing the executor/venue boundary. A persisted current-evidence shape must carry the shared current probability-semantics revision before it can become forecast authority. The global SELL actuation binds the solver-selected reduction size and close-vs-reduce intent into the exit boundary.
     downstream:
     - src/events/reactor.py
     - src/engine/event_bound_final_intent.py
@@ -1949,7 +1951,7 @@ files:
   src/execution/exit_lifecycle.py:
     zone: K2_runtime
     authority_role: exit_lifecycle_runtime
-    why: Manages exit order lifecycle while preserving exit vs settlement split.
+    why: Manages exit order lifecycle while preserving exit vs settlement split. Intentional partial-position reductions use exact order-bound venue fill quantities, reduce canonical exposure without manufacturing economic closure, and return the remaining claim to normal redecision.
     downstream:
     - src/engine/cycle_runtime.py
     - src/execution/harvester.py

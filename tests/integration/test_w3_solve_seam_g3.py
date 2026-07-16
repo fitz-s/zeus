@@ -1,5 +1,5 @@
 # Created: 2026-07-03
-# Last reused/audited: 2026-07-15
+# Last reused/audited: 2026-07-16
 # Authority basis: W3 SOLVE design packet, global fractional-Kelly repair,
 #                  current Day0 global-cut routing, and auditable SELL holding bindings
 """G3 harness for the W3 SOLVE promotion seam (qkernel_spine_bridge.py w3_solve_enabled flag).
@@ -7179,7 +7179,7 @@ def test_g3_off_path_does_not_import_src_solve():
     assert "ISOLATION_OK" in proc.stdout, f"stdout={proc.stdout}\nstderr={proc.stderr[-2000:]}"
 
 
-def _adapter_sell_actuation(event):
+def _adapter_sell_actuation(event, *, selected_shares="10"):
     at = _dt.datetime(2026, 7, 13, 12, 0, tzinfo=_dt.timezone.utc)
     curve = ExecutableSellCurve(
         token_id="yes-token",
@@ -7212,23 +7212,26 @@ def _adapter_sell_actuation(event):
         executable_sell_curve=curve,
         resolution_identity="resolution-1",
     )
-    proceeds = Decimal("5.4")
-    loss_at_risk = Decimal("4.6")
+    selected = Decimal(selected_shares)
+    proceeds, expected_fill_price, limit_price = curve.proceeds_for_shares(selected)
+    loss_at_risk = selected - proceeds
     robust_q = 0.70
-    robust_du = (1.0 - robust_q) * np.log(105.4 / 110.0) + robust_q * np.log(
-        105.4 / 100.0
+    loss_after = Decimal("110") - selected + proceeds
+    win_after = Decimal("100") + proceeds
+    robust_du = (1.0 - robust_q) * np.log(float(loss_after / Decimal("110"))) + robust_q * np.log(
+        float(win_after / Decimal("100"))
     )
-    robust_ev = robust_q * 10.0 - float(loss_at_risk)
+    robust_ev = float(proceeds) - (1.0 - robust_q) * float(selected)
     decision = GlobalSingleOrderDecision(
         candidate=candidate,
-        shares=Decimal("10"),
+        shares=selected,
         cost_usd=loss_at_risk,
         robust_delta_log_wealth=float(robust_du),
         robust_ev_usd=robust_ev,
         capital_efficiency=float(robust_du) / float(loss_at_risk),
         no_trade_reason=None,
-        limit_price=Decimal("0.50"),
-        expected_fill_price_before_fee=Decimal("0.54"),
+        limit_price=limit_price,
+        expected_fill_price_before_fee=expected_fill_price,
         cash_proceeds_usd=proceeds,
         terminal_wealth=BinaryTerminalWealthCertificate(
             win_probability_lcb=robust_q,
@@ -7236,8 +7239,8 @@ def _adapter_sell_actuation(event):
             loss_payoff_usd=-loss_at_risk,
             win_payoff_usd=proceeds,
             median_payoff_usd=proceeds,
-            wealth_after_loss_usd=Decimal("105.4"),
-            wealth_after_win_usd=Decimal("105.4"),
+            wealth_after_loss_usd=loss_after,
+            wealth_after_win_usd=win_after,
             expected_value_diagnostic_usd=robust_ev,
         ),
     )
@@ -7258,7 +7261,7 @@ def test_global_sell_adapter_bypasses_entry_lane_and_uses_reduce_only_exit(
     monkeypatch,
 ):
     event = _global_scope_event(city="Alpha", source_run_id="run-sell")
-    actuation = _adapter_sell_actuation(event)
+    actuation = _adapter_sell_actuation(event, selected_shares="6")
     position = SimpleNamespace(
         trade_id="position-1",
         direction="buy_yes",
@@ -7324,7 +7327,8 @@ def test_global_sell_adapter_bypasses_entry_lane_and_uses_reduce_only_exit(
     def execute_exit(portfolio_arg, position_arg, context, **kwargs):
         exits.append((portfolio_arg, position_arg, context, kwargs))
         assert kwargs["exit_intent"].exact_limit_price == pytest.approx(0.50)
-        assert kwargs["exit_intent"].shares == pytest.approx(10.0)
+        assert kwargs["exit_intent"].shares == pytest.approx(6.0)
+        assert kwargs["exit_intent"].close_position is False
         assert kwargs["exit_intent"].submit_order_type == "FAK"
         evidence = kwargs["execution_evidence"]
         evidence.venue_call_started = True

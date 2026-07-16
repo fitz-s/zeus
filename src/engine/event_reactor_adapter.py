@@ -6883,13 +6883,18 @@ def _submit_current_global_sell(
                 trade_id=str(getattr(position, "trade_id", "") or ""),
                 reason="GLOBAL_CAPITAL_OPTIMAL_SELL",
                 token_id=str(getattr(candidate, "token_id", "") or ""),
-                shares=float(Decimal(str(getattr(candidate, "held_shares", "0")))),
+                shares=float(Decimal(str(getattr(decision, "shares", "0")))),
                 current_market_price=float(current_vwap),
                 best_bid=best_bid,
                 exact_limit_price=float(
                     Decimal(str(getattr(decision, "limit_price", "0") or "0"))
                 ),
                 submit_order_type="FAK",
+                close_position=(
+                    Decimal(str(getattr(decision, "shares", "0") or "0"))
+                    >= Decimal(str(getattr(position, "effective_shares", "0") or "0"))
+                    - Decimal("1e-9")
+                ),
                 fresh_prob=held_q,
                 fresh_prob_is_fresh=True,
                 position_state=position_state,
@@ -6914,6 +6919,7 @@ def _submit_current_global_sell(
                     ),
                     "robust_ev_usd": float(getattr(decision, "robust_ev_usd")),
                     "held_shares": str(getattr(candidate, "held_shares", "")),
+                    "selected_shares": str(getattr(decision, "shares", "")),
                     "selected_cash_proceeds_usd": str(
                         getattr(decision, "cash_proceeds_usd", "")
                     ),

@@ -667,6 +667,7 @@ class ExitIntent:
     best_bid: float | None
     exact_limit_price: float | None = None
     submit_order_type: str | None = None
+    close_position: bool = True
     capital_certificate: Mapping[str, object] | None = None
     fresh_prob: float | None = None
     fresh_prob_is_fresh: bool | None = None
@@ -982,7 +983,17 @@ def promote_pending_trades(
 
         tx_hash = raw.get("transaction_hash") or raw.get("transactionHash") or raw.get("tx_hash")
         last_update = raw.get("last_update") or _utcnow().isoformat()
-        rest_size = raw.get("size") or raw.get("filled_size") or filled_size or "0"
+        rest_size = (
+            raw.get("_v2_matched_size")
+            or raw.get("size_matched")
+            or raw.get("sizeMatched")
+            or raw.get("matched_size")
+            or raw.get("matchedSize")
+            or raw.get("filled_size")
+            or raw.get("filledSize")
+            or filled_size
+            or "0"
+        )
         rest_price = raw.get("price") or raw.get("fill_price") or fill_price or "0"
 
         promoted = False
@@ -1886,8 +1897,18 @@ def _validate_exit_intent(position: Position, exit_context: ExitContext, exit_in
     expected_token = position.token_id if position.direction == "buy_yes" else position.no_token_id
     if exit_intent.token_id != expected_token:
         raise ValueError("exit_intent token_id mismatch")
-    if abs(exit_intent.shares - position.effective_shares) > 1e-9:
-        raise ValueError("exit_intent shares mismatch")
+    open_shares = float(position.effective_shares)
+    if (
+        not math.isfinite(float(exit_intent.shares))
+        or float(exit_intent.shares) <= 0.0
+        or float(exit_intent.shares) > open_shares + 1e-9
+    ):
+        raise ValueError("exit_intent shares exceed the open position")
+    if exit_intent.close_position:
+        if abs(float(exit_intent.shares) - open_shares) > 1e-9:
+            raise ValueError("closing exit_intent must cover the open position")
+    elif float(exit_intent.shares) >= open_shares - 1e-9:
+        raise ValueError("reduction exit_intent must leave positive open shares")
     if exit_context.current_market_price is not None and abs(exit_intent.current_market_price - float(exit_context.current_market_price)) > 1e-9:
         raise ValueError("exit_intent current_market_price mismatch")
     if exit_context.fresh_prob is not None and exit_intent.fresh_prob is not None and abs(exit_intent.fresh_prob - float(exit_context.fresh_prob)) > 1e-9:
@@ -2782,12 +2803,19 @@ def _snapshot_min_order_dust_audit_payload(
     }
 
 
-def _below_snapshot_min_order_error(position: Position, snapshot_context: dict[str, object]) -> str:
+def _below_snapshot_min_order_error(
+    position: Position,
+    snapshot_context: dict[str, object],
+    *,
+    shares: object | None = None,
+) -> str:
     min_order = _positive_decimal(snapshot_context.get("executable_snapshot_min_order_size"))
-    shares = _positive_decimal(getattr(position, "effective_shares", None))
-    if min_order is None or shares is None or shares >= min_order:
+    selected = _positive_decimal(
+        shares if shares is not None else getattr(position, "effective_shares", None)
+    )
+    if min_order is None or selected is None or selected >= min_order:
         return ""
-    return f"executable_snapshot_gate: size {shares} is below snapshot min_order_size {min_order}"
+    return f"executable_snapshot_gate: size {selected} is below snapshot min_order_size {min_order}"
 
 
 def _latest_snapshot_min_order_dust_error(
@@ -2856,6 +2884,7 @@ def _exit_intent_audit_payload(exit_intent: ExitIntent) -> dict[str, object]:
         "exit_intent_best_bid": exit_intent.best_bid,
         "exit_intent_exact_limit_price": exit_intent.exact_limit_price,
         "exit_intent_submit_order_type": exit_intent.submit_order_type,
+        "exit_intent_close_position": exit_intent.close_position,
         "exit_intent_capital_certificate": (
             dict(exit_intent.capital_certificate)
             if exit_intent.capital_certificate is not None
@@ -3146,7 +3175,11 @@ def _execute_live_exit(
                 error=snapshot_error,
             )
         return "exit_blocked: executable_snapshot_error"
-    dust_error = _below_snapshot_min_order_error(position, snapshot_context)
+    dust_error = _below_snapshot_min_order_error(
+        position,
+        snapshot_context,
+        shares=exit_intent.shares,
+    )
     if dust_error:
         dust_reason = f"{exit_context.exit_reason} [DUST: {dust_error}]"
         _mark_exit_dust_hold(
@@ -3220,7 +3253,7 @@ def _execute_live_exit(
             _refresh_exit_collateral_snapshot_for_submit(
                 conn,
                 token_id=token_id,
-                shares=position.effective_shares,
+                shares=exit_intent.shares,
             )
         except CollateralInsufficient as exc:
             collateral_reason = str(exc)
@@ -3260,7 +3293,7 @@ def _execute_live_exit(
     # Pre-sell collateral check (fail-closed)
     can_sell, collateral_reason = check_sell_collateral(
         position.entry_price,
-        position.effective_shares,
+        exit_intent.shares,
         clob,
         token_id=token_id,
         conn=conn,
@@ -3432,7 +3465,7 @@ def _execute_live_exit(
         raw_sell_result = place_sell_order(
             trade_id=position.trade_id,
             token_id=token_id,
-            shares=position.effective_shares,
+            shares=exit_intent.shares,
             current_price=current_market_price,
             best_bid=best_bid,
             exact_limit_price=exit_intent.exact_limit_price,
@@ -3554,6 +3587,35 @@ def _execute_live_exit(
                         conn=conn,
                     )
                     return f"sell_pending: order={order_id}, status={status}, missing_fill_price"
+                if not exit_intent.close_position:
+                    intended_shares = Decimal(str(exit_intent.shares))
+                    confirmed_shares = _confirmed_reduction_fill_shares(
+                        status_payload,
+                        intended_shares=intended_shares,
+                    )
+                    if confirmed_shares is None:
+                        logger.error(
+                            "Confirmed reduction lacks exact fill size for %s order=%s",
+                            position.trade_id,
+                            order_id,
+                        )
+                        return (
+                            "sell_pending: "
+                            f"order={order_id}, status={status}, missing_fill_size"
+                        )
+                    reduced = _complete_intentional_position_reduction(
+                        position,
+                        intended_shares=intended_shares,
+                        confirmed_filled_shares=confirmed_shares,
+                        fill_price=actual_price,
+                        order_id=order_id,
+                        status=status,
+                        conn=conn,
+                    )
+                    return (
+                        "position_reduced: "
+                        f"{reduced} shares; {exit_context.exit_reason}"
+                    )
                 phase_before = _canonical_phase_before_for_economic_close(position)
                 closed = compute_economic_close(portfolio, position.trade_id, actual_price, exit_context.exit_reason)
                 if closed is not None:
@@ -4093,6 +4155,57 @@ def _payload_has_invalid_decimal(payload: object, *keys: str) -> bool:
     return False
 
 
+def _confirmed_reduction_fill_shares(
+    payload: object,
+    *,
+    intended_shares: Decimal,
+) -> Decimal | None:
+    """Read exact cumulative fill size from a terminal reduction receipt."""
+
+    if not isinstance(payload, dict) or intended_shares <= 0:
+        return None
+    cumulative_keys = (
+        "_v2_matched_size",
+        "size_matched",
+        "sizeMatched",
+        "matched_size",
+        "matchedSize",
+        "filled_size",
+        "filledSize",
+        "filled",
+        "matched",
+    )
+    remaining_keys = (
+        "remaining_size",
+        "remainingSize",
+        "remaining",
+        "open_size",
+        "openSize",
+    )
+    original_keys = (
+        "_v2_original_size",
+        "original_size",
+        "originalSize",
+    )
+    if _payload_has_invalid_decimal(
+        payload,
+        *cumulative_keys,
+        *remaining_keys,
+        *original_keys,
+    ):
+        return None
+    filled = _payload_decimal(payload, *cumulative_keys)
+    if filled is None:
+        remaining = _payload_decimal(payload, *remaining_keys)
+        if remaining is not None:
+            original = _payload_decimal(payload, *original_keys) or intended_shares
+            filled = original - remaining
+    tolerance = Decimal("0.000000001")
+    if filled is None or filled <= 0 or filled > intended_shares + tolerance:
+        return None
+    return min(filled, intended_shares)
+
+
 def _partial_exit_delta(
     *,
     status: str,
@@ -4236,6 +4349,7 @@ def _dual_write_partial_exit_projection_if_available(
     fill_price: float,
     order_id: str,
     status: str,
+    semantic_event: str = "PARTIAL_FILL_OBSERVED",
 ) -> bool:
     """Persist the reduced open exposure after a partial exit fill."""
 
@@ -4269,7 +4383,7 @@ def _dual_write_partial_exit_projection_if_available(
         payload = _json.loads(str(event.get("payload_json") or "{}"))
         payload.update(
             {
-                "semantic_event": "PARTIAL_FILL_OBSERVED",
+                "semantic_event": semantic_event,
                 "order_id": order_id,
                 "venue_status": status or "PARTIAL",
                 "filled_shares": filled_shares,
@@ -4293,6 +4407,192 @@ def _dual_write_partial_exit_projection_if_available(
             order_id,
         )
         return False
+
+
+def _canonical_reduction_intent_shares(
+    conn: sqlite3.Connection | None,
+    position: Position,
+    *,
+    order_id: str = "",
+) -> Decimal | None:
+    """Return the latest partial-reduction size, optionally bound to its order."""
+
+    if conn is None:
+        return None
+    trade_id = str(getattr(position, "trade_id", "") or "")
+    if not trade_id:
+        return None
+    try:
+        row = conn.execute(
+            """
+            SELECT sequence_no, payload_json
+              FROM position_events
+             WHERE position_id = ?
+               AND event_type = 'EXIT_INTENT'
+             ORDER BY sequence_no DESC
+             LIMIT 1
+            """,
+            (trade_id,),
+        ).fetchone()
+    except sqlite3.Error:
+        return None
+    if row is None:
+        return None
+    try:
+        sequence_no = int(row[0])
+        payload = json.loads(str(row[1] or "{}"))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return None
+    if payload.get("exit_intent_close_position") is not False:
+        return None
+    if order_id:
+        try:
+            posted = conn.execute(
+                """
+                SELECT 1
+                  FROM position_events
+                 WHERE position_id = ?
+                   AND event_type = 'EXIT_ORDER_POSTED'
+                   AND order_id = ?
+                   AND sequence_no > ?
+                 LIMIT 1
+                """,
+                (trade_id, order_id, sequence_no),
+            ).fetchone()
+        except sqlite3.Error:
+            return None
+        if posted is None:
+            return None
+    return _positive_decimal(payload.get("exit_intent_shares"))
+
+
+def _recorded_reduction_fill_shares(
+    conn: sqlite3.Connection | None,
+    *,
+    position_id: str,
+    order_id: str,
+) -> Decimal:
+    if conn is None or not position_id or not order_id:
+        return Decimal("0")
+    try:
+        row = conn.execute(
+            """
+            SELECT COALESCE(
+                       SUM(CAST(json_extract(payload_json, '$.filled_shares') AS REAL)),
+                       0
+                   )
+              FROM position_events
+             WHERE position_id = ?
+               AND caused_by = 'partial_exit_fill'
+               AND order_id = ?
+            """,
+            (position_id, order_id),
+        ).fetchone()
+    except sqlite3.Error:
+        return Decimal("0")
+    return Decimal(str(row[0] or "0"))
+
+
+def _complete_intentional_position_reduction(
+    position: Position,
+    *,
+    intended_shares: Decimal,
+    confirmed_filled_shares: Decimal,
+    fill_price: float,
+    order_id: str,
+    status: str,
+    conn: sqlite3.Connection | None,
+) -> Decimal:
+    """Apply a confirmed partial-position SELL without manufacturing closure."""
+
+    trade_id = str(getattr(position, "trade_id", "") or "")
+    already_applied = _recorded_reduction_fill_shares(
+        conn,
+        position_id=trade_id,
+        order_id=order_id,
+    )
+    intended_shares = Decimal(intended_shares)
+    total_filled = Decimal(confirmed_filled_shares)
+    if (
+        total_filled <= Decimal("1e-9")
+        or total_filled > intended_shares + Decimal("1e-9")
+    ):
+        raise RuntimeError("reduction finality has an invalid confirmed fill size")
+    total_filled = min(intended_shares, total_filled)
+    newly_filled = total_filled - already_applied
+    if newly_filled > Decimal("1e-9"):
+        open_shares = Decimal(str(position.effective_shares))
+        if newly_filled >= open_shares:
+            raise RuntimeError("intentional reduction would manufacture a full close")
+        remaining_shares = open_shares - newly_filled
+        if not _apply_partial_exit_fill(
+            position,
+            filled_shares=float(newly_filled),
+            remaining_shares=float(remaining_shares),
+            fill_price=fill_price,
+            order_id=order_id,
+            status=status,
+        ):
+            raise RuntimeError("confirmed reduction could not update open exposure")
+        persisted = _dual_write_partial_exit_projection_if_available(
+            conn,
+            position,
+            filled_shares=float(newly_filled),
+            remaining_shares=float(remaining_shares),
+            fill_price=fill_price,
+            order_id=order_id,
+            status=status,
+            semantic_event="CAPITAL_REDUCTION_FILLED",
+        )
+        if conn is not None and not persisted:
+            raise RuntimeError("confirmed reduction canonical projection failed")
+
+    previous_next_retry_at = str(
+        getattr(position, "next_exit_retry_at", "") or ""
+    )
+    previous_retry_count = int(getattr(position, "exit_retry_count", 0) or 0)
+    previous_error = str(getattr(position, "last_exit_error", "") or "")
+    position.exit_state = ""
+    position.next_exit_retry_at = ""
+    position.exit_retry_count = 0
+    position.exit_reason = ""
+    position.last_exit_error = ""
+    position.last_exit_order_id = ""
+    position.order_status = "filled"
+    _release_pending_exit(position)
+    released = _dual_write_exit_retry_released_if_available(
+        conn,
+        position,
+        previous_next_retry_at=previous_next_retry_at,
+        previous_retry_count=previous_retry_count,
+        previous_error=previous_error,
+        release_reason="CAPITAL_REDUCTION_FILLED",
+        caused_by="capital_reduction_filled",
+    )
+    if conn is not None and not released:
+        raise RuntimeError("confirmed reduction canonical release failed")
+    if conn is not None and newly_filled > Decimal("1e-9"):
+        _log_partial_exit_execution_fact(
+            conn,
+            position,
+            status=status,
+            fill_price=fill_price,
+            filled_shares=float(newly_filled),
+            order_id=order_id,
+        )
+    if newly_filled > Decimal("1e-9"):
+        _emit_typed_realized_fill(
+            actual_price=fill_price,
+            expected_price=float(
+                getattr(position, "last_monitor_market_price", 0.0)
+                or getattr(position, "entry_price", 0.0)
+            ),
+            side="sell",
+            shares=float(newly_filled),
+            trade_id=trade_id,
+        )
+        return newly_filled
+    return Decimal("0")
 
 
 def _exit_command_id_for_order(
@@ -4616,10 +4916,33 @@ def _exit_trade_fact_close_candidate(
 
     filled_size = _positive_decimal(row["filled_size"])
     fill_notional = _positive_decimal(row["fill_notional"])
-    target_size = _exit_close_target_size(position, row["command_size"])
+    latest_reduction_target = _canonical_reduction_intent_shares(conn, position)
+    reduction_target = (
+        _canonical_reduction_intent_shares(
+            conn,
+            position,
+            order_id=str(row["venue_order_id"] or ""),
+        )
+        if latest_reduction_target is not None
+        else None
+    )
+    if latest_reduction_target is not None and reduction_target is None:
+        return None
+    target_size = (
+        reduction_target
+        if reduction_target is not None
+        else _exit_close_target_size(position, row["command_size"])
+    )
     if filled_size is None or fill_notional is None or target_size is None:
         return None
-    if filled_size + EXIT_FULL_CLOSE_DUST_TOLERANCE < target_size:
+    if reduction_target is not None and (
+        filled_size > reduction_target + Decimal("1e-9")
+    ):
+        return None
+    if (
+        reduction_target is None
+        and filled_size + EXIT_FULL_CLOSE_DUST_TOLERANCE < target_size
+    ):
         return None
     fill_price = fill_notional / filled_size
     if fill_price <= 0 or fill_price > 1:
@@ -4632,6 +4955,8 @@ def _exit_trade_fact_close_candidate(
         "observed_at": str(row["observed_at"] or ""),
         "fill_states": str(row["fill_states"] or ""),
         "command_state": str(row["command_state"] or ""),
+        "closes_position": reduction_target is None,
+        "intended_reduction_shares": reduction_target,
     }
 
 
@@ -4831,6 +5156,21 @@ def check_pending_exits(
         exit_state = str(getattr(raw_exit_state, "value", raw_exit_state) or "")
         fill = _exit_trade_fact_close_candidate(conn, pos)
         if fill is not None:
+            if fill.get("closes_position") is False:
+                reduced = _complete_intentional_position_reduction(
+                    pos,
+                    intended_shares=Decimal(fill["intended_reduction_shares"]),
+                    confirmed_filled_shares=Decimal(fill["filled_size"]),
+                    fill_price=float(fill["fill_price"]),
+                    order_id=str(fill["venue_order_id"]),
+                    status=str(fill.get("fill_states") or "CONFIRMED"),
+                    conn=conn,
+                )
+                stats["reduced"] = stats.get("reduced", 0) + int(reduced > 0)
+                stats["reduced_from_trade_fact"] = (
+                    stats.get("reduced_from_trade_fact", 0) + int(reduced > 0)
+                )
+                continue
             closed = _close_pending_exit_from_trade_fact(portfolio, pos, fill, conn=conn)
             if closed is not None:
                 stats["filled_positions"].append(closed)
@@ -4939,6 +5279,21 @@ def check_pending_exits(
 
         fill = _exit_trade_fact_close_candidate(conn, pos, exit_order_id=exit_order_id)
         if fill is not None:
+            if fill.get("closes_position") is False:
+                reduced = _complete_intentional_position_reduction(
+                    pos,
+                    intended_shares=Decimal(fill["intended_reduction_shares"]),
+                    confirmed_filled_shares=Decimal(fill["filled_size"]),
+                    fill_price=float(fill["fill_price"]),
+                    order_id=exit_order_id,
+                    status=str(fill.get("fill_states") or "CONFIRMED"),
+                    conn=conn,
+                )
+                stats["reduced"] = stats.get("reduced", 0) + int(reduced > 0)
+                stats["reduced_from_trade_fact"] = (
+                    stats.get("reduced_from_trade_fact", 0) + int(reduced > 0)
+                )
+                continue
             closed = _close_pending_exit_from_trade_fact(portfolio, pos, fill, conn=conn)
             if closed is not None:
                 stats["filled_positions"].append(closed)
@@ -4982,7 +5337,8 @@ def check_pending_exits(
                 log_exit_fill_check_error_event(conn, pos, order_id=exit_order_id)
 
         if status in FILL_STATUSES:
-            # Filled! Close the position.
+            # A filled reduction order changes exposure but does not close the
+            # remaining claim. Full-close intents retain the economic-close path.
             actual_price = _extract_fill_price(status_payload)
             if actual_price is None:
                 _mark_exit_fill_economics_missing(
@@ -4992,6 +5348,38 @@ def check_pending_exits(
                     conn=conn,
                 )
                 stats["unchanged"] += 1
+                continue
+            reduction_target = _canonical_reduction_intent_shares(
+                conn,
+                pos,
+                order_id=exit_order_id,
+            )
+            if reduction_target is not None:
+                confirmed_shares = _confirmed_reduction_fill_shares(
+                    status_payload,
+                    intended_shares=reduction_target,
+                )
+                if confirmed_shares is None:
+                    logger.error(
+                        "Confirmed reduction lacks exact fill size for %s order=%s",
+                        pos.trade_id,
+                        exit_order_id,
+                    )
+                    stats["reduction_fill_size_missing"] = (
+                        stats.get("reduction_fill_size_missing", 0) + 1
+                    )
+                    stats["unchanged"] += 1
+                    continue
+                reduced = _complete_intentional_position_reduction(
+                    pos,
+                    intended_shares=reduction_target,
+                    confirmed_filled_shares=confirmed_shares,
+                    fill_price=actual_price,
+                    order_id=exit_order_id,
+                    status=status,
+                    conn=conn,
+                )
+                stats["reduced"] = stats.get("reduced", 0) + int(reduced > 0)
                 continue
             exit_reason = pos.exit_reason or "DEFERRED_SELL_FILL"
             phase_before = _canonical_phase_before_for_economic_close(pos)
