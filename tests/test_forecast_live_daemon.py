@@ -269,6 +269,39 @@ def test_materialization_queue_does_not_wake_without_new_posterior(
     )
 
 
+def test_materialization_queue_wake_failure_does_not_fail_committed_materialization(
+    monkeypatch, tmp_path, caplog
+) -> None:
+    import src.data.replacement_forecast_live_materialization_queue as queue
+    import src.data.replacement_forecast_production as production
+    from src.runtime import reactor_wake
+
+    report = object()
+    monkeypatch.setattr(
+        queue,
+        "process_replacement_forecast_live_materialization_queue",
+        lambda **kwargs: report,
+    )
+    revisions = iter((41, 42))
+    monkeypatch.setattr(
+        production,
+        "_forecast_posterior_revision",
+        lambda cfg: next(revisions),
+    )
+    monkeypatch.setattr(
+        reactor_wake,
+        "publish_reactor_wake",
+        lambda **kwargs: (_ for _ in ()).throw(OSError("sidecar unavailable")),
+    )
+
+    result = production._run_replacement_forecast_live_materialization_queue_once(
+        _materialization_queue_cfg(tmp_path)
+    )
+
+    assert result is report
+    assert "periodic reactor scan remains authoritative" in caplog.text
+
+
 def test_reactor_wake_sidecar_round_trip(tmp_path) -> None:
     from src.runtime.reactor_wake import publish_reactor_wake, read_reactor_wake
 

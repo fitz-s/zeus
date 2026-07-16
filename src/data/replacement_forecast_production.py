@@ -1324,16 +1324,26 @@ def _run_replacement_forecast_live_materialization_queue_once(cfg: dict[str, obj
     ):
         from src.runtime.reactor_wake import publish_reactor_wake
 
-        wake = publish_reactor_wake(
-            source="replacement_forecast_production",
-            reason="forecast_posterior_advanced",
-        )
-        logger.info(
-            "forecast posterior advanced rowid=%d->%d; reactor wake published id=%s",
-            revision_before,
-            revision_after,
-            wake.wake_id,
-        )
+        try:
+            wake = publish_reactor_wake(
+                source="replacement_forecast_production",
+                reason="forecast_posterior_advanced",
+            )
+        except Exception:
+            logger.warning(
+                "forecast posterior advanced rowid=%d->%d but reactor wake publish "
+                "failed; periodic reactor scan remains authoritative",
+                revision_before,
+                revision_after,
+                exc_info=True,
+            )
+        else:
+            logger.info(
+                "forecast posterior advanced rowid=%d->%d; reactor wake published id=%s",
+                revision_before,
+                revision_after,
+                wake.wake_id,
+            )
     return report
 
 
