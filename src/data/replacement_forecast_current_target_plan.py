@@ -558,12 +558,15 @@ def _fusion_current_value_count(
     target_date: str,
     temperature_metric: str,
     source_cycle_time: str | None,
+    raw_model_forecasts_available: bool | None = None,
 ) -> int:
     """Count current values the materializer q path can actually serve for a scope."""
 
     if not source_cycle_time or not str(source_cycle_time).strip():
         return 0
-    if "raw_model_forecasts" not in _table_names(conn):
+    if raw_model_forecasts_available is None:
+        raw_model_forecasts_available = "raw_model_forecasts" in _table_names(conn)
+    if not raw_model_forecasts_available:
         # Legacy/fixture DBs without fusion capture storage cannot prove absence here.
         return 1
     try:
@@ -1142,6 +1145,8 @@ def _latest_readiness_bound_posterior_id(
     city: str,
     target_date: str,
     temperature_metric: str,
+    columns: set[str] | None = None,
+    binding_supported: bool | None = None,
 ) -> int | None:
     """Return the posterior bound by the exact readiness the live reader serves.
 
@@ -1150,19 +1155,20 @@ def _latest_readiness_bound_posterior_id(
     current scope cannot prove one, so coverage must fail closed.
     """
 
-    columns = _columns(conn, "readiness_state")
+    columns = columns if columns is not None else _columns(conn, "readiness_state")
     if "dependency_json" not in columns:
         return None
-    supported = conn.execute(
-        """
-        SELECT 1
-          FROM readiness_state r,
-               json_each(r.dependency_json, '$.dependencies')
-         WHERE json_extract(value, '$.role') = 'soft_anchor_posterior'
-         LIMIT 1
-        """
-    ).fetchone()
-    if supported is None:
+    if binding_supported is None:
+        binding_supported = conn.execute(
+            """
+            SELECT 1
+              FROM readiness_state r,
+                   json_each(r.dependency_json, '$.dependencies')
+             WHERE json_extract(value, '$.role') = 'soft_anchor_posterior'
+             LIMIT 1
+            """
+        ).fetchone() is not None
+    if not binding_supported:
         return None
     predicates = [
         "strategy_key = ?",
@@ -1219,10 +1225,17 @@ def _covering_posterior_input_lag_reason(
     posterior_tradeable_grade_clause: str,
     check_day0_observation: bool = False,
     observation_conn: sqlite3.Connection | None = None,
+    posterior_columns: set[str] | None = None,
+    readiness_columns: set[str] | None = None,
+    readiness_binding_supported: bool | None = None,
 ) -> str | None:
     """Use the live read gate's HWM rule to invalidate stale plan coverage."""
 
-    columns = _columns(conn, "forecast_posteriors")
+    columns = (
+        posterior_columns
+        if posterior_columns is not None
+        else _columns(conn, "forecast_posteriors")
+    )
     required = {
         "city",
         "target_date",
@@ -1248,6 +1261,8 @@ def _covering_posterior_input_lag_reason(
         city=city,
         target_date=target_date,
         temperature_metric=temperature_metric,
+        columns=readiness_columns,
+        binding_supported=readiness_binding_supported,
     )
     if readiness_posterior_id == -1:
         return "basis=readiness_posterior_identity_missing"
@@ -1611,6 +1626,20 @@ def build_replacement_forecast_current_target_plan(
         if not {"city", "target_date", "temperature_metric", "source_id", "data_version"}.issubset(posterior_columns):
             return _blocked_plan("REPLACEMENT_CURRENT_TARGET_PLAN_POSTERIOR_SCHEMA_MISSING")
         readiness_columns = _columns(conn, "readiness_state")
+        readiness_binding_supported = (
+            conn.execute(
+                """
+                SELECT 1
+                  FROM readiness_state r,
+                       json_each(r.dependency_json, '$.dependencies')
+                 WHERE json_extract(value, '$.role') = 'soft_anchor_posterior'
+                 LIMIT 1
+                """
+            ).fetchone()
+            is not None
+            if "dependency_json" in readiness_columns
+            else False
+        )
         raw_artifact_columns: set[str] = set()
         metadata_column = None
         if "raw_forecast_artifacts" in tables:
@@ -1925,6 +1954,7 @@ def build_replacement_forecast_current_target_plan(
                     source_cycle_time=required_openmeteo_cycle_for_row
                     or openmeteo_resolved_cycle
                     or baseline_source_cycle_time,
+                    raw_model_forecasts_available="raw_model_forecasts" in tables,
                 )
             input_lag_reason = None
             if posterior_count > 0 and readiness_count > 0:
@@ -1943,6 +1973,9 @@ def build_replacement_forecast_current_target_plan(
                     posterior_tradeable_grade_clause=posterior_tradeable_grade_clause,
                     check_day0_observation=day0_observed_extreme_required,
                     observation_conn=observation_conn,
+                    posterior_columns=posterior_columns,
+                    readiness_columns=readiness_columns,
+                    readiness_binding_supported=readiness_binding_supported,
                 )
             out.append(
                 ReplacementForecastCurrentTargetPlanRow(
