@@ -1,4 +1,4 @@
-# Lifecycle: created=2026-04-30; last_reviewed=2026-06-08; last_reused=2026-06-08
+# Lifecycle: created=2026-04-30; last_reviewed=2026-07-16; last_reused=2026-07-16
 # Authority basis: docs/archive/2026-Q2/task_2026-05-14_data_daemon_live_efficiency/DATA_DAEMON_LIVE_EFFICIENCY_REFACTOR_PLAN.md
 #   Phase 2 legacy OpenData mutual exclusion with forecast-live-daemon; 2026-05-20
 #   live stability hotfix keeps SIGTERM scheduler shutdown exit code clean.
@@ -1182,18 +1182,33 @@ def _run_opendata_track(
     _collector=None,
 ) -> dict:
     """Legacy ingest-main OpenData wrapper kept mutually exclusive with forecast-live-daemon."""
-    from src.data.dual_run_lock import OPENDATA_DAEMON_LOCK_KEY, acquire_lock
+    from src.data.dual_run_lock import (
+        OPENDATA_DAEMON_LOCK_KEY,
+        acquire_lock,
+        opendata_track_lock_key,
+    )
     from src.data.ecmwf_open_data import SOURCE_ID, collect_open_ens_cycle
 
     if _is_source_paused(SOURCE_ID):
         logger.info("_run_opendata_track(%s): paused_by_control_plane", track)
         return {"status": "paused_by_control_plane", "source": SOURCE_ID, "track": track}
-    with acquire_lock(OPENDATA_DAEMON_LOCK_KEY, _locks_dir_override=_locks_dir_override) as acquired:
-        if not acquired:
-            logger.info("_run_opendata_track(%s): skipped_lock_held", track)
+    with acquire_lock(
+        OPENDATA_DAEMON_LOCK_KEY,
+        shared=True,
+        _locks_dir_override=_locks_dir_override,
+    ) as compatible:
+        if not compatible:
+            logger.info("_run_opendata_track(%s): skipped_legacy_lock_held", track)
             return {"status": "skipped_lock_held", "source": SOURCE_ID, "track": track}
-        collector = _collector or collect_open_ens_cycle
-        return collector(track=track)
+        with acquire_lock(
+            opendata_track_lock_key(track),
+            _locks_dir_override=_locks_dir_override,
+        ) as acquired:
+            if not acquired:
+                logger.info("_run_opendata_track(%s): skipped_lock_held", track)
+                return {"status": "skipped_lock_held", "source": SOURCE_ID, "track": track}
+            collector = _collector or collect_open_ens_cycle
+            return collector(track=track)
 
 
 @_scheduler_job("ingest_opendata_startup_catch_up")

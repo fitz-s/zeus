@@ -1,6 +1,6 @@
 # Created: 2026-05-14
-# Last reused/audited: 2026-06-18
-# Lifecycle: created=2026-05-14; last_reviewed=2026-06-18; last_reused=2026-06-18
+# Last reused/audited: 2026-07-16
+# Lifecycle: created=2026-05-14; last_reviewed=2026-07-16; last_reused=2026-07-16
 # Authority basis: docs/archive/2026-Q2/task_2026-05-08_deep_alignment_audit/DATA_DAEMON_LIVE_EFFICIENCY_REFACTOR_PLAN.md section 6.1, section 6.2, section 8 Phase 4, and Phase 6 durable work journaling; docs/archive/2026-Q2/task_2026-05-16_live_continuous_run_package/LIVE_CONTINUOUS_RUN_PACKAGE_PLAN.md source-health gate; fix/forecast-live-partial-retry 2026-05-19 (ECMWF incremental dissemination correction); a0d51d480b507f324 root-cause (ECMWF 00z ingest schedule fix — add 12z triggers, update FORECAST_LIVE_JOB_IDS).
 # Purpose: Relationship tests for the forecast-live daemon boundary — job registry, lock semantics, journaling, and source-health probe.
 # Reuse: Run when forecast_live_daemon.py job specs, run_opendata_track, or job journaling logic changes.
@@ -18,7 +18,11 @@ from pathlib import Path
 
 import pytest
 
-from src.data.dual_run_lock import OPENDATA_DAEMON_LOCK_KEY, acquire_lock
+from src.data.dual_run_lock import (
+    OPENDATA_DAEMON_LOCK_KEY,
+    acquire_lock,
+    opendata_track_lock_key,
+)
 from src.state.db import init_schema_forecasts
 
 
@@ -1070,6 +1074,79 @@ def test_forecast_live_track_runner_uses_shared_opendata_lock(tmp_path) -> None:
         "status": "skipped_lock_held",
         "source": "ecmwf_open_data",
         "track": "mx2t6_high",
+    }
+
+
+def test_forecast_live_track_runner_does_not_serialize_independent_tracks(tmp_path) -> None:
+    from src.ingest.forecast_live_daemon import run_opendata_track
+
+    high_lock = opendata_track_lock_key("mx2t6_high")
+    calls: list[str] = []
+
+    def collector(*, track: str, **_kwargs) -> dict:
+        calls.append(track)
+        return {"status": "ok", "track": track}
+
+    with acquire_lock(high_lock, _locks_dir_override=tmp_path) as acquired:
+        assert acquired
+        result = run_opendata_track(
+            "mn2t6_low",
+            _locks_dir_override=tmp_path,
+            _collector=collector,
+            _source_paused=lambda source_id: False,
+        )
+
+    assert result == {"status": "ok", "track": "mn2t6_low"}
+    assert calls == ["mn2t6_low"]
+
+
+def test_forecast_live_track_runner_serializes_duplicate_track(tmp_path) -> None:
+    from src.ingest.forecast_live_daemon import run_opendata_track
+
+    high_lock = opendata_track_lock_key("mx2t6_high")
+
+    def collector(*, track: str, **_kwargs) -> dict:
+        raise AssertionError(f"duplicate collector must not run for {track}")
+
+    with acquire_lock(high_lock, _locks_dir_override=tmp_path) as acquired:
+        assert acquired
+        result = run_opendata_track(
+            "mx2t6_high",
+            _locks_dir_override=tmp_path,
+            _collector=collector,
+            _source_paused=lambda source_id: False,
+        )
+
+    assert result == {
+        "status": "skipped_lock_held",
+        "source": "ecmwf_open_data",
+        "track": "mx2t6_high",
+    }
+
+
+def test_forecast_live_due_tracks_run_concurrently() -> None:
+    from threading import Event, Lock
+
+    from src.ingest.forecast_live_daemon import _run_due_opendata_tracks
+
+    both_started = Event()
+    started: list[str] = []
+    started_lock = Lock()
+
+    def runner(track: str) -> dict:
+        with started_lock:
+            started.append(track)
+            if len(started) == 2:
+                both_started.set()
+        assert both_started.wait(timeout=1.0)
+        return {"status": "ok", "track": track}
+
+    results = _run_due_opendata_tracks(_runner=runner)
+
+    assert set(started) == {"mx2t6_high", "mn2t6_low"}
+    assert results == {
+        "mx2t6_high": {"status": "ok", "track": "mx2t6_high"},
+        "mn2t6_low": {"status": "ok", "track": "mn2t6_low"},
     }
 
 

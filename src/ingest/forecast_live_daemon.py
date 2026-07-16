@@ -1,5 +1,5 @@
 # Created: 2026-05-14
-# Last reused/audited: 2026-06-18
+# Last reused/audited: 2026-07-16
 # Authority basis: docs/archive/2026-Q2/task_2026-05-08_deep_alignment_audit/DATA_DAEMON_LIVE_EFFICIENCY_REFACTOR_PLAN.md section 6.1, section 6.2, and section 8 Phase 4; Phase 6 durable work journaling; docs/archive/2026-Q2/task_2026-05-16_live_continuous_run_package/LIVE_CONTINUOUS_RUN_PACKAGE_PLAN.md source-health gate; a0d51d480b507f324 root-cause + docs/operations/live_review_may23.md (ECMWF 00z ingest schedule fix).
 """Dedicated OpenData live forecast producer daemon.
 
@@ -20,6 +20,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
@@ -641,7 +642,11 @@ def run_opendata_track(
     _job_conn=None,
     _now_utc: datetime | None = None,
 ) -> dict:
-    from src.data.dual_run_lock import OPENDATA_DAEMON_LOCK_KEY, acquire_lock
+    from src.data.dual_run_lock import (
+        OPENDATA_DAEMON_LOCK_KEY,
+        acquire_lock,
+        opendata_track_lock_key,
+    )
     from src.data.ecmwf_open_data import SOURCE_ID, collect_open_ens_cycle
 
     source_paused = _source_paused or _is_source_paused
@@ -653,6 +658,7 @@ def run_opendata_track(
 
     now = (_now_utc or _utcnow()).astimezone(timezone.utc)
     identity = _forecast_work_identity(track, now_utc=now)
+    track_lock_key = opendata_track_lock_key(track)
     decision = identity["decision"]
     if _job_conn is not None and decision is not FetchDecision.FETCH_ALLOWED:
         status = "SKIPPED_NOT_RELEASED" if decision is FetchDecision.SKIPPED_NOT_RELEASED else "FAILED"
@@ -664,7 +670,7 @@ def run_opendata_track(
             now_utc=now,
             result=result,
             reason_code=getattr(decision, "value", str(decision)),
-            lock_key=OPENDATA_DAEMON_LOCK_KEY,
+            lock_key=track_lock_key,
         )
         return {
             "status": decision.value.lower(),
@@ -673,9 +679,13 @@ def run_opendata_track(
             "selection": identity.get("metadata"),
         }
 
-    with acquire_lock(OPENDATA_DAEMON_LOCK_KEY, _locks_dir_override=_locks_dir_override) as acquired:
-        if not acquired:
-            logger.info("forecast-live OpenData %s skipped_lock_held", track)
+    with acquire_lock(
+        OPENDATA_DAEMON_LOCK_KEY,
+        shared=True,
+        _locks_dir_override=_locks_dir_override,
+    ) as compatible:
+        if not compatible:
+            logger.info("forecast-live OpenData %s skipped_legacy_lock_held", track)
             result = {"status": "skipped_lock_held", "source": SOURCE_ID, "track": track}
             if _job_conn is not None:
                 _write_job_run(
@@ -688,75 +698,90 @@ def run_opendata_track(
                     lock_key=OPENDATA_DAEMON_LOCK_KEY,
                 )
             return result
-        collector = _collector or collect_open_ens_cycle
-        lock_acquired_at = _utcnow()
-        if _job_conn is not None:
-            _write_job_run(
-                _job_conn,
-                identity=identity,
-                status="RUNNING",
-                now_utc=now,
-                started_at=now,
-                lock_acquired_at=lock_acquired_at,
-                lock_key=OPENDATA_DAEMON_LOCK_KEY,
-            )
-            _job_conn.commit()
-        collector_kwargs = _collector_cycle_kwargs(identity, now_utc=now)
-        try:
-            result = collector(track=track, **collector_kwargs)
-        except Exception as exc:
+        with acquire_lock(track_lock_key, _locks_dir_override=_locks_dir_override) as acquired:
+            if not acquired:
+                logger.info("forecast-live OpenData %s skipped_lock_held", track)
+                result = {"status": "skipped_lock_held", "source": SOURCE_ID, "track": track}
+                if _job_conn is not None:
+                    _write_job_run(
+                        _job_conn,
+                        identity=identity,
+                        status="SKIPPED_LOCK_HELD",
+                        now_utc=now,
+                        result=result,
+                        reason_code="SKIPPED_LOCK_HELD",
+                        lock_key=track_lock_key,
+                    )
+                return result
+            collector = _collector or collect_open_ens_cycle
+            lock_acquired_at = _utcnow()
             if _job_conn is not None:
                 _write_job_run(
                     _job_conn,
                     identity=identity,
-                    status="FAILED",
-                    now_utc=_utcnow(),
-                    result={"status": "exception"},
-                    reason_code=f"EXCEPTION:{type(exc).__name__}:{exc}",
+                    status="RUNNING",
+                    now_utc=now,
                     started_at=now,
                     lock_acquired_at=lock_acquired_at,
-                    lock_key=OPENDATA_DAEMON_LOCK_KEY,
+                    lock_key=track_lock_key,
                 )
-            raise
-        identity_mismatch = _collector_identity_mismatch(identity, result)
-        if identity_mismatch is not None:
-            failed_result = {
-                **(result if isinstance(result, dict) else {}),
-                "status": "identity_mismatch",
-                "rows_failed": 1,
-            }
+                _job_conn.commit()
+            collector_kwargs = _collector_cycle_kwargs(identity, now_utc=now)
+            try:
+                result = collector(track=track, **collector_kwargs)
+            except Exception as exc:
+                if _job_conn is not None:
+                    _write_job_run(
+                        _job_conn,
+                        identity=identity,
+                        status="FAILED",
+                        now_utc=_utcnow(),
+                        result={"status": "exception"},
+                        reason_code=f"EXCEPTION:{type(exc).__name__}:{exc}",
+                        started_at=now,
+                        lock_acquired_at=lock_acquired_at,
+                        lock_key=track_lock_key,
+                    )
+                raise
+            identity_mismatch = _collector_identity_mismatch(identity, result)
+            if identity_mismatch is not None:
+                failed_result = {
+                    **(result if isinstance(result, dict) else {}),
+                    "status": "identity_mismatch",
+                    "rows_failed": 1,
+                }
+                if _job_conn is not None:
+                    _write_job_run(
+                        _job_conn,
+                        identity=identity,
+                        status="FAILED",
+                        now_utc=_utcnow(),
+                        result=failed_result,
+                        reason_code=identity_mismatch,
+                        started_at=now,
+                        lock_acquired_at=lock_acquired_at,
+                        lock_key=track_lock_key,
+                    )
+                raise RuntimeError(identity_mismatch)
             if _job_conn is not None:
+                status, reason_code, rows_written, rows_failed = _job_status_from_result(result)
+                enriched = {
+                    **result,
+                    "snapshots_inserted": result.get("snapshots_inserted", rows_written),
+                    "rows_failed": rows_failed,
+                }
                 _write_job_run(
                     _job_conn,
                     identity=identity,
-                    status="FAILED",
+                    status=status,
                     now_utc=_utcnow(),
-                    result=failed_result,
-                    reason_code=identity_mismatch,
+                    result=enriched,
+                    reason_code=reason_code,
                     started_at=now,
                     lock_acquired_at=lock_acquired_at,
-                    lock_key=OPENDATA_DAEMON_LOCK_KEY,
+                    lock_key=track_lock_key,
                 )
-            raise RuntimeError(identity_mismatch)
-        if _job_conn is not None:
-            status, reason_code, rows_written, rows_failed = _job_status_from_result(result)
-            enriched = {
-                **result,
-                "snapshots_inserted": result.get("snapshots_inserted", rows_written),
-                "rows_failed": rows_failed,
-            }
-            _write_job_run(
-                _job_conn,
-                identity=identity,
-                status=status,
-                now_utc=_utcnow(),
-                result=enriched,
-                reason_code=reason_code,
-                started_at=now,
-                lock_acquired_at=lock_acquired_at,
-                lock_key=OPENDATA_DAEMON_LOCK_KEY,
-            )
-        return result
+            return result
 
 
 def _run_opendata_track_if_due(
@@ -830,6 +855,20 @@ def _run_journaled_opendata_track_if_due(track: str) -> dict:
         conn.close()
 
 
+def _run_due_opendata_tracks(
+    *,
+    _runner: Callable[[str], dict] | None = None,
+) -> dict[str, dict]:
+    runner = _runner or _run_journaled_opendata_track_if_due
+    tracks = ("mx2t6_high", "mn2t6_low")
+    with ThreadPoolExecutor(
+        max_workers=len(tracks),
+        thread_name_prefix="opendata-track",
+    ) as executor:
+        futures = {track: executor.submit(runner, track) for track in tracks}
+        return {track: futures[track].result() for track in tracks}
+
+
 @_scheduler_job(FORECAST_LIVE_DAILY_HIGH_JOB_ID)
 def _opendata_mx2t6_cycle() -> dict:
     """00z cron trigger: fires at 08:10 UTC, after the 08:05 UTC safe_fetch window."""
@@ -856,20 +895,14 @@ def _opendata_mn2t6_cycle_12z() -> dict:
 
 @_scheduler_job(FORECAST_LIVE_STARTUP_JOB_ID)
 def _opendata_startup_catch_up() -> dict:
-    results = {
-        "mx2t6_high": _run_journaled_opendata_track_if_due("mx2t6_high"),
-        "mn2t6_low": _run_journaled_opendata_track_if_due("mn2t6_low"),
-    }
+    results = _run_due_opendata_tracks()
     failed, reason = _classify_result({"tracks": results})
     return {"status": "partial" if failed else "ok", "reason": reason, "tracks": results}
 
 
 @_scheduler_job(FORECAST_LIVE_SAFE_CYCLE_POLL_JOB_ID)
 def _opendata_safe_cycle_poll() -> dict:
-    results = {
-        "mx2t6_high": _run_journaled_opendata_track_if_due("mx2t6_high"),
-        "mn2t6_low": _run_journaled_opendata_track_if_due("mn2t6_low"),
-    }
+    results = _run_due_opendata_tracks()
     failed, reason = _classify_result({"tracks": results})
     return {"status": "partial" if failed else "ok", "reason": reason, "tracks": results}
 

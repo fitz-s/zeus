@@ -1,4 +1,4 @@
-# Lifecycle: created=2026-04-30; last_reviewed=2026-04-30; last_reused=2026-05-14
+# Lifecycle: created=2026-04-30; last_reviewed=2026-07-16; last_reused=2026-07-16
 # Authority basis: docs/operations/task_2026-04-30_two_system_independence/design.md §5 Phase 1 + docs/archive/2026-Q2/task_2026-05-08_deep_alignment_audit/DATA_DAEMON_LIVE_EFFICIENCY_REFACTOR_PLAN.md §6.2.
 """Advisory per-table file lock for dual-run Phase 1.
 
@@ -37,6 +37,13 @@ from typing import Generator
 logger = logging.getLogger(__name__)
 
 OPENDATA_DAEMON_LOCK_KEY = "opendata_live_forecast"
+_OPENDATA_TRACKS = frozenset({"mx2t6_high", "mn2t6_low"})
+
+
+def opendata_track_lock_key(track: str) -> str:
+    if track not in _OPENDATA_TRACKS:
+        raise ValueError(f"Unknown OpenData track {track!r}")
+    return f"{OPENDATA_DAEMON_LOCK_KEY}_{track}"
 
 _KNOWN_TABLES = frozenset(
     {
@@ -56,6 +63,7 @@ _KNOWN_TABLES = frozenset(
         # Data-daemon live-efficiency refactor: mutual exclusion between
         # legacy ingest_main and dedicated forecast-live OpenData owners.
         OPENDATA_DAEMON_LOCK_KEY,
+        *(opendata_track_lock_key(track) for track in _OPENDATA_TRACKS),
     }
 )
 
@@ -80,9 +88,10 @@ def _locks_dir() -> Path:
 def acquire_lock(
     table_name: str,
     *,
+    shared: bool = False,
     _locks_dir_override: Path | None = None,
 ) -> Generator[bool, None, None]:
-    """Context manager that attempts to acquire an exclusive advisory file lock.
+    """Attempt to acquire a non-blocking advisory file lock.
 
     Parameters
     ----------
@@ -90,6 +99,8 @@ def acquire_lock(
         One of the six known ingest tables (or any string for testing).
     _locks_dir_override:
         For tests: use this directory instead of the canonical state/locks/.
+    shared:
+        Acquire a shared compatibility gate instead of exclusive ownership.
 
     Yields
     ------
@@ -106,7 +117,8 @@ def acquire_lock(
     lock_file = lock_path.open("w")
     try:
         try:
-            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            mode = fcntl.LOCK_SH if shared else fcntl.LOCK_EX
+            fcntl.flock(lock_file.fileno(), mode | fcntl.LOCK_NB)
         except BlockingIOError:
             # Another process holds the lock.
             lock_file.close()

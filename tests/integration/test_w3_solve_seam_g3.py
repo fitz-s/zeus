@@ -3439,7 +3439,7 @@ def test_live_adapter_discards_stale_hint_then_prefetches_unknown_full_refresh(
     world.close()
 
 
-def test_live_adapter_refreshes_only_eligible_triggered_probability_family(
+def test_live_adapter_reuses_tokens_and_refreshes_only_eligible_book_family(
     monkeypatch,
 ):
     from src.events.candidate_binding import weather_family_id
@@ -3627,11 +3627,9 @@ def test_live_adapter_refreshes_only_eligible_triggered_probability_family(
     assert bound == probabilities
     assert bound_again == changed_probabilities
     assert bound_after_unrelated_drift == unrelated_drift
-    assert bind_calls == [
-        ("metadata", (dallas, miami)),
-        ("metadata", (dallas,)),
-        ("metadata", (dallas,)),
-    ]
+    # q changed, but the condition/token topology did not. Reuse the still-current
+    # cached bindings while refreshing only the triggered family's live books.
+    assert bind_calls == [("metadata", (dallas, miami))]
     assert capture_calls == [
         (dallas, miami),
         (dallas,),
