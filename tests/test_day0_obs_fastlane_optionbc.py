@@ -681,6 +681,20 @@ class TestObsFastTickSchedulerRegistration:
         assert isinstance(im._day0_metar_emitter(), _Emitter)
         assert constructed == [0.0]
 
+    def test_day0_oracle_guard_is_separate_from_source_clock_lane(self):
+        import src.ingest_main as im
+
+        specs = im._ingest_main_job_specs()
+        kwargs = next(
+            spec[2]
+            for spec in specs
+            if spec[2].get("id") == "ingest_day0_oracle_anomaly"
+        )
+
+        assert kwargs["seconds"] == 10
+        assert kwargs["max_instances"] == 1
+        assert kwargs["coalesce"] is True
+
 
 class TestDay0MetarSourceClockTick:
     @staticmethod
@@ -908,6 +922,70 @@ class TestDay0MetarSourceClockTick:
         assert result == {"status": "WRITE_CONTENDED", "pending_reports": 1}
         conn.close.assert_called_once_with()
         mutex.release.assert_not_called()
+
+
+class TestDay0OracleAnomalyTick:
+    def test_current_cache_does_not_open_world_db(self, monkeypatch):
+        import src.ingest_main as im
+
+        TestDay0MetarSourceClockTick._enable(monkeypatch)
+        emitter = SimpleNamespace(cached_anomaly_actions=lambda **_kw: ())
+        monkeypatch.setattr(im, "_day0_metar_emitter", lambda: emitter)
+        monkeypatch.setattr(
+            "src.state.db.get_world_connection",
+            lambda **_kw: (_ for _ in ()).throw(
+                AssertionError("DB opened without anomaly action")
+            ),
+        )
+
+        result = im._day0_oracle_anomaly_tick.__wrapped__()
+
+        assert result == {"status": "CURRENT"}
+
+    def test_cached_action_commits_in_short_write_phase(self, monkeypatch):
+        import src.ingest_main as im
+
+        TestDay0MetarSourceClockTick._enable(monkeypatch)
+        action = SimpleNamespace(action="clear", city="Tokyo", target_date="2026-06-12")
+        emitter = SimpleNamespace(cached_anomaly_actions=lambda **_kw: (action,))
+        order: list[str] = []
+
+        class _Conn:
+            def execute(self, sql, _params=()):
+                if sql == "BEGIN IMMEDIATE":
+                    order.append("begin")
+                return self
+
+            def commit(self):
+                order.append("commit")
+
+            def rollback(self):
+                order.append("rollback")
+
+            def close(self):
+                order.append("close")
+
+        class _Mutex:
+            def acquire(self, *, timeout):
+                order.append("acquire")
+                return True
+
+            def release(self):
+                order.append("release")
+
+        monkeypatch.setattr(im, "_day0_metar_emitter", lambda: emitter)
+        monkeypatch.setattr("src.state.db.get_world_connection", lambda **_kw: _Conn())
+        monkeypatch.setattr("src.state.db.world_write_mutex", lambda: _Mutex())
+        monkeypatch.setattr(
+            "src.data.day0_oracle_anomaly.apply_day0_oracle_anomaly_action",
+            lambda applied, *, conn: order.append(f"apply:{applied.city}"),
+        )
+
+        result = im._day0_oracle_anomaly_tick.__wrapped__()
+
+        assert result == {"status": "COMMITTED", "actions": 1}
+        assert order.index("begin") < order.index("apply:Tokyo") < order.index("commit")
+        assert order[-2:] == ["release", "close"]
 
 
 # ---------------------------------------------------------------------------

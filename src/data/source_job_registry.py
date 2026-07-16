@@ -138,6 +138,12 @@ _INGEST_MAIN: tuple[SourceJobSpec, ...] = (
                   notes="5s default source-clock batch poll; HTTP precedes the bounded live "
                         "world-writer attempt, unchanged publication identities perform no DB "
                         "work, and committed Day0 extreme events wake the canonical reactor"),
+    SourceJobSpec("ingest_day0_oracle_anomaly", "ingest_main", "live", "default", True,
+                  source_ids=("aviationweather_metar", "wu_icao_history"),
+                  callable_ref="_day0_oracle_anomaly_tick", family="observation",
+                  misfire_grace_time=30,
+                  notes="10s round-robin WU-vs-METAR guard; reads the source-clock process "
+                        "cache without another AWC request and persists only changed guard actions"),
     SourceJobSpec("ingest_etl_recalibrate", "ingest_main", "derived", "default", True,
                   callable_ref="_etl_recalibrate"),
     SourceJobSpec("ingest_harvester_truth_writer", "ingest_main", "settlement", "default", True,

@@ -881,6 +881,8 @@ class Day0FastObsEmitter:
     _last_kill_memo_rounded: dict[tuple[str, str, str], int] = field(default_factory=dict, init=False)
     _last_live_emitted_rounded: dict[tuple[str, str, str], int] = field(default_factory=dict, init=False)
     _ledgered_report_keys: set[tuple[str, str, float]] = field(default_factory=set, init=False)
+    _ledger_cursor_id: int = field(default=0, init=False)
+    _anomaly_cursor: int = field(default=0, init=False)
     _lock: threading.Lock = field(default_factory=threading.Lock, init=False)
 
     def hydrate_from_ledger(self, world_conn: Any, eligible: tuple) -> int:
@@ -989,6 +991,102 @@ class Day0FastObsEmitter:
                 "DAY0_FAST_OBS_LEDGER_HYDRATE_FAILED exc=%s: %s", type(exc).__name__, exc,
             )
             return 0
+
+    def sync_from_ledger(
+        self,
+        world_conn: Any,
+        cities: list[Any],
+        *,
+        as_of: datetime | None = None,
+    ) -> int:
+        """Incrementally project the canonical METAR ledger into this process.
+
+        Cold start uses the city/time index for the retained 36-hour window.
+        Later calls seek only primary keys above the last observed row. This is
+        the cross-process read path for trading consumers after data-ingest
+        became the sole AWC network owner.
+        """
+
+        city_names = tuple(
+            dict.fromkeys(
+                str(getattr(city, "name", "") or "")
+                for city in cities
+                if fast_obs_source_for_city(city) is not None
+                and str(getattr(city, "name", "") or "")
+            )
+        )
+        if not city_names:
+            return 0
+        with self._lock:
+            cursor = self._ledger_cursor_id
+        if cursor > 0:
+            rows = world_conn.execute(
+                """
+                SELECT id, station_id, publish_ts_utc, value_native, raw_report
+                  FROM observation_prints
+                 WHERE id > ? AND source_channel = ?
+                 ORDER BY id
+                """,
+                (cursor, FAST_OBS_SOURCE_ID),
+            ).fetchall()
+        else:
+            placeholders = ",".join("?" for _ in city_names)
+            cutoff = (
+                (as_of or datetime.now(UTC)).astimezone(UTC)
+                - timedelta(hours=METAR_FULL_FETCH_HOURS)
+            ).isoformat()
+            rows = world_conn.execute(
+                f"""
+                SELECT id, station_id, publish_ts_utc, value_native, raw_report
+                  FROM observation_prints INDEXED BY idx_observation_prints_city_publish
+                 WHERE city IN ({placeholders})
+                   AND publish_ts_utc >= ?
+                   AND source_channel = ?
+                 ORDER BY id
+                """,
+                (*city_names, cutoff, FAST_OBS_SOURCE_ID),
+            ).fetchall()
+        if not rows:
+            return 0
+
+        reports: list[MetarReport] = []
+        max_id = cursor
+        for row in rows:
+            try:
+                row_id = int(row[0])
+                max_id = max(max_id, row_id)
+                published = datetime.fromisoformat(
+                    str(row[2]).replace("Z", "+00:00")
+                )
+                if published.tzinfo is None:
+                    continue
+                reports.append(
+                    MetarReport(
+                        station_id=str(row[1]).strip().upper(),
+                        obs_time=published.astimezone(UTC),
+                        receipt_time=published.astimezone(UTC),
+                        temp_c=float(row[3]),
+                        metar_type="METAR",
+                        raw=str(row[4] or ""),
+                    )
+                )
+            except (TypeError, ValueError, OSError, OverflowError):
+                continue
+        with self._lock:
+            self._ledger_cursor_id = max_id
+            if reports:
+                self._cached_reports = _merge_report_windows(
+                    self._cached_reports,
+                    reports,
+                )
+                self._cache_fetched_monotonic = time.monotonic()
+                self._full_window_loaded = True
+                self._ledgered_report_keys.update(
+                    key
+                    for report in reports
+                    if (key := _report_publication_key(report)) is not None
+                )
+        return len(reports)
 
     def _reports_with_status(self, stations: list[str]) -> tuple[list[MetarReport], str, Optional[float]]:
         """Return reports and freshness with a start-to-start fetch throttle."""
@@ -1120,7 +1218,7 @@ class Day0FastObsEmitter:
         *,
         as_of: Optional[datetime] = None,
     ) -> Optional["FastObsExtremes"]:
-        """Return computed FastObsExtremes from the in-process METAR cache for
+        """Return computed FastObsExtremes from the local METAR projection for
         ``city`` on ``target_date`` (UTC date, ISO string).
 
         This is the ENTRY-GATE source for Option-B monitor fallback (see
@@ -1130,12 +1228,11 @@ class Day0FastObsEmitter:
         coverage-window evaluation.
 
         CONTRACT:
-          - Returns None when the cache is empty (no fetch has succeeded in this
-            process), when the city is not eligible for the fast lane (non-wu_icao
-            or excluded by the faithfulness gate), or when no station-matching
-            reports exist for the target date.
+          - Returns None when the projection is empty, when the city is not
+            eligible for the fast lane, or when no station-matching reports
+            exist for the target date.
           - Does NOT perform any network I/O — reads only from ``_cached_reports``
-            (the in-process memo).
+            populated by the owning source clock or ``sync_from_ledger``.
           - ``as_of``: UTC instant cap passed to running_extremes_for_local_day;
             defaults to now().
 
@@ -1214,6 +1311,86 @@ class Day0FastObsEmitter:
                 getattr(city, "name", "?"), target_date, type(exc).__name__, exc,
             )
             return None
+
+    def cached_anomaly_actions(
+        self,
+        *,
+        cities: list[Any],
+        decision_time: datetime,
+        anomaly_check: Callable[[Any, FastObsExtremes, list[MetarReport]], Any],
+        max_cities: int = 1,
+    ) -> tuple[Any, ...]:
+        """Check cached METAR truth without opening another source request.
+
+        The data-ingest source-clock owns AWC polling. This lower-cadence guard
+        shares its cache, rotates across cities, and returns durable actions for
+        a separate short write phase. A fetch in progress/failed or a stale
+        cache cannot feed the comparison.
+        """
+
+        eligible: list[tuple[Any, FastObsSource, str]] = []
+        for city in cities:
+            source = fast_obs_source_for_city(city)
+            if source is None:
+                continue
+            try:
+                tz = ZoneInfo(str(city.timezone))
+            except Exception:
+                continue
+            local_today = decision_time.astimezone(tz).date().isoformat()
+            eligible.append((city, source, local_today))
+        if not eligible or max_cities <= 0:
+            return ()
+
+        now = time.monotonic()
+        with self._lock:
+            reports = list(self._cached_reports)
+            cache_age = (
+                now - self._cache_fetched_monotonic
+                if reports
+                else None
+            )
+            cache_current = (
+                bool(reports)
+                and self._cache_fetched_monotonic >= self._last_attempt_monotonic
+                and cache_age is not None
+                and cache_age <= FAST_LANE_ENTRY_MAX_CACHE_AGE_S
+            )
+            cursor = self._anomaly_cursor % len(eligible)
+        if not cache_current:
+            return ()
+
+        rotated = eligible[cursor:] + eligible[:cursor]
+        actions: list[Any] = []
+        visited = 0
+        checked = 0
+        for city, _source, target_date in rotated:
+            visited += 1
+            try:
+                extremes = running_extremes_for_local_day(
+                    reports,
+                    city=city,
+                    target_date=target_date,
+                    as_of=decision_time.astimezone(UTC),
+                )
+                if not extremes.sample_count:
+                    continue
+                checked += 1
+                action = anomaly_check(city, extremes, reports)
+                if action is not None:
+                    actions.append(action)
+                if checked >= max_cities:
+                    break
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "DAY0_FAST_OBS_ANOMALY_CHECK_FAILED city=%s exc=%s: %s",
+                    getattr(city, "name", "?"),
+                    type(exc).__name__,
+                    exc,
+                )
+        with self._lock:
+            self._anomaly_cursor = (cursor + max(1, visited)) % len(eligible)
+        return tuple(actions)
 
     def prefetch(
         self,

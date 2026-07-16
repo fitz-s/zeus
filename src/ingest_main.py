@@ -920,6 +920,66 @@ def _day0_metar_source_clock_tick():
     }
 
 
+@_scheduler_job("ingest_day0_oracle_anomaly")
+def _day0_oracle_anomaly_tick():
+    """Cross-check one cached METAR family without delaying source ingestion."""
+
+    import sqlite3
+
+    from src.config import runtime_cities, settings
+    from src.data.day0_oracle_anomaly import (
+        apply_day0_oracle_anomaly_action,
+        wu_metar_anomaly_action,
+    )
+    from src.state.db import get_world_connection, world_write_mutex
+
+    edli_cfg = settings["edli"]
+    if not (
+        edli_cfg.get("enabled")
+        and edli_cfg.get("event_writer_enabled")
+        and edli_cfg.get("day0_extreme_trigger_enabled")
+        and edli_cfg.get("day0_fast_obs_lane_enabled", True)
+    ):
+        return {"status": "DISABLED"}
+
+    actions = _day0_metar_emitter().cached_anomaly_actions(
+        cities=runtime_cities(),
+        decision_time=datetime.now(timezone.utc),
+        anomaly_check=wu_metar_anomaly_action,
+        max_cities=1,
+    )
+    if not actions:
+        return {"status": "CURRENT"}
+
+    conn = get_world_connection(write_class="live")
+    write_budget_s = _day0_metar_write_budget_seconds()
+    conn.execute(f"PRAGMA busy_timeout = {max(1, int(write_budget_s * 1000.0))}")
+    mutex = world_write_mutex()
+    acquired = mutex.acquire(timeout=write_budget_s)
+    if not acquired:
+        conn.close()
+        return {"status": "WRITE_CONTENDED", "actions": len(actions)}
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        for action in actions:
+            apply_day0_oracle_anomaly_action(action, conn=conn)
+        conn.commit()
+    except sqlite3.OperationalError as exc:
+        conn.rollback()
+        if "locked" in str(exc).lower() or "busy" in str(exc).lower():
+            return {"status": "WRITE_CONTENDED", "actions": len(actions)}
+        raise
+    except BaseException:
+        conn.rollback()
+        raise
+    finally:
+        mutex.release()
+        conn.close()
+
+    logger.info("DAY0_ORACLE_ANOMALY_ACTIONS_COMMITTED count=%d", len(actions))
+    return {"status": "COMMITTED", "actions": len(actions)}
+
+
 def _raise_if_all_obs_tick_attempts_failed(job_id: str, results: list[object]) -> None:
     """Fail scheduler health when an obs tick made no successful city attempt."""
 
@@ -2282,6 +2342,9 @@ def _ingest_main_job_specs() -> list[tuple]:
             id="ingest_day0_metar_source_clock", max_instances=1, coalesce=True,
             misfire_grace_time=max(5, int(day0_metar_poll_seconds * 2)),
             next_run_time=now)),
+        (_day0_oracle_anomaly_tick, "interval", dict(seconds=10,
+            id="ingest_day0_oracle_anomaly", max_instances=1, coalesce=True,
+            misfire_grace_time=30, next_run_time=now + timedelta(seconds=5))),
         (_k2_hko_tick, "cron", dict(minute=30, id="ingest_k2_hko_tick",
             max_instances=1, coalesce=True, misfire_grace_time=3600)),
         (_etl_recalibrate, "cron", dict(hour=6, minute=0, id="ingest_etl_recalibrate")),

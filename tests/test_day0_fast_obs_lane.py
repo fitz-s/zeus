@@ -1362,37 +1362,31 @@ class TestMutexNoHttpSplit:
             conn=sqlite3.connect(":memory:"),
         ) is False, "prefetch must not make restart durability depend on a standalone write"
 
-    def test_main_prefetches_before_mutex_and_emit_is_write_only(self):
-        """Source-order pin: the HTTP prefetch (_edli_prefetch_day0_fast_obs,
-        for live observations only) happens BEFORE _emit_mutex.acquire(); the
-        mutex-held emit consumes fast_prefetch and the write-phase function
-        contains no fetch/HTTP entry points. Open-Meteo hourly-vector refresh is
-        an independent scheduler job and must not pin the reactor prefetch.
+    def test_reactor_does_not_duplicate_source_clock_metar_fetch(self):
+        """The data-ingest source clock exclusively owns fast METAR HTTP.
+
+        Reactor Day0 emission is durable-state catch-up only. Open-Meteo
+        hourly-vector refresh remains an independent scheduler job.
 
         Pin home: the EDLI reactor body moved from src/main.py to
         src/events/reactor.py (R4-b2 slimming + 57c426dc3); the scheduler
         job id stays in src/main.py."""
         source = open("src/events/reactor.py", encoding="utf-8").read()
         main_source = open("src/main.py", encoding="utf-8").read()
-        prefetch_at = source.index("_edli_prefetch_day0_fast_obs(decision_time=now)")
-        acquire_at = source.index("_edli_acquire_mutex(_emit_mutex")
-        assert prefetch_at < acquire_at, "day0 HTTP prefetch must precede the world-write mutex"
+        assert "_edli_prefetch_day0_fast_obs" not in source
 
-        # the write-phase emit function must not contain network entry points
         start = source.index("def _edli_emit_day0_extreme_events(")
         end = source.index("def _edli_day0_settlement_semantics(")
         emit_body = source[start:end]
-        for forbidden in ("emit_events(", "httpx", "maybe_refresh_day0_hourly_vectors", ".prefetch("):
+        for forbidden in (
+            "emit_events(",
+            "emit_prefetched(",
+            "get_fast_obs_emitter",
+            "httpx",
+            "maybe_refresh_day0_hourly_vectors",
+            ".prefetch(",
+        ):
             assert forbidden not in emit_body, f"write phase must not contain {forbidden!r}"
-        assert "emit_prefetched(" in emit_body
-        # and the hourly-vector refresh lives in an independent scheduler job.
-        # R4-b2 (2026-07-08 main.py slimming): the job body was extracted to
-        # src.events.reactor.run_edli_day0_hourly_refresh_cycle; main.py's
-        # _edli_day0_hourly_refresh_cycle is now a thin delegating hook, so
-        # this check follows one level of delegation to find the real body.
-        pre_start = source.index("def _edli_prefetch_day0_fast_obs(")
-        pre_end = source.index("def _edli_emit_day0_extreme_events(")
-        assert "maybe_refresh_day0_hourly_vectors" not in source[pre_start:pre_end]
 
         import inspect
 
@@ -1855,6 +1849,105 @@ class TestAnomalyFreshnessGates:
 
         assert prefetch.freshness_status == "fresh_fetch"
         assert calls == ["Tokyo"]
+
+    def test_cached_anomaly_checks_rotate_without_another_metar_fetch(self):
+        from src.data.day0_fast_obs import Day0FastObsEmitter
+
+        t0 = datetime(2026, 6, 9, 16, 0, tzinfo=UTC)
+        tokyo = _tokyo()
+        tokyo_b = SimpleNamespace(
+            name="Tokyo-B",
+            timezone=tokyo.timezone,
+            settlement_unit=tokyo.settlement_unit,
+            wu_station="RJTT",
+            settlement_source_type=tokyo.settlement_source_type,
+        )
+        reports = [_report("RJTT", t0, 21.0, t_group=False)]
+        fetches = {"n": 0}
+
+        def fetcher(stations, **kw):
+            fetches["n"] += 1
+            return reports
+
+        checked: list[str] = []
+        emitter = Day0FastObsEmitter(fetcher=fetcher, min_fetch_interval_s=0.0)
+        emitter.prefetch(cities=[tokyo, tokyo_b], decision_time=t0)
+
+        for offset in (5, 10):
+            emitter.cached_anomaly_actions(
+                cities=[tokyo, tokyo_b],
+                decision_time=t0 + timedelta(seconds=offset),
+                anomaly_check=lambda city, *_args: checked.append(city.name),
+                max_cities=1,
+            )
+
+        assert fetches["n"] == 1
+        assert checked == ["Tokyo", "Tokyo-B"]
+
+    def test_ledger_projection_cold_load_then_primary_key_delta(self):
+        from src.data.day0_fast_obs import (
+            FAST_OBS_SOURCE_ID,
+            Day0FastObsEmitter,
+        )
+        from src.state.schema.observation_prints_schema import (
+            append_print,
+            ensure_table,
+        )
+
+        conn = sqlite3.connect(":memory:")
+        ensure_table(conn)
+        first = datetime(2026, 6, 9, 15, 0, tzinfo=UTC)
+        append_print(
+            conn,
+            city="Tokyo",
+            station_id="RJTT",
+            source_channel=FAST_OBS_SOURCE_ID,
+            publish_ts_utc=first.isoformat(),
+            value_native=21.0,
+            unit="C",
+            fetched_at_utc=first.isoformat(),
+            raw_report="METAR RJTT 091500Z T0210",
+        )
+        conn.commit()
+
+        emitter = Day0FastObsEmitter(fetcher=lambda *_args, **_kw: [])
+        assert emitter.sync_from_ledger(
+            conn,
+            [_tokyo()],
+            as_of=first + timedelta(minutes=1),
+        ) == 1
+
+        second = first + timedelta(minutes=5)
+        append_print(
+            conn,
+            city="Tokyo",
+            station_id="RJTT",
+            source_channel=FAST_OBS_SOURCE_ID,
+            publish_ts_utc=second.isoformat(),
+            value_native=22.0,
+            unit="C",
+            fetched_at_utc=second.isoformat(),
+            raw_report="METAR RJTT 091505Z T0220",
+        )
+        conn.commit()
+        traced: list[str] = []
+        conn.set_trace_callback(traced.append)
+        assert emitter.sync_from_ledger(
+            conn,
+            [_tokyo()],
+            as_of=second + timedelta(minutes=1),
+        ) == 1
+        conn.set_trace_callback(None)
+
+        assert any("WHERE id >" in sql for sql in traced)
+        extremes = emitter.latest_extremes(
+            _tokyo(),
+            "2026-06-10",
+            as_of=second + timedelta(minutes=1),
+        )
+        assert extremes is not None
+        assert extremes.high_so_far == pytest.approx(22.0)
+        assert extremes.sample_count == 2
 
     def test_detector_refuses_conclusion_when_metar_window_lags_wu(self):
         """Operator scenario: METAR outage since 10:00, WU moved at 12:00 —
