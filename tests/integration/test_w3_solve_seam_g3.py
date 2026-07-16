@@ -3732,15 +3732,29 @@ def test_live_adapter_reuses_tokens_and_refreshes_only_eligible_book_family(
         unrelated_drift,
         _dt.datetime.now(_dt.timezone.utc),
     )
+    bound_after_removal, epoch_after_removal = provider(
+        {miami: unrelated_drift[miami]},
+        _dt.datetime.now(_dt.timezone.utc),
+    )
+    rebound_after_add, epoch_after_add = provider(
+        unrelated_drift,
+        _dt.datetime.now(_dt.timezone.utc),
+    )
 
     assert bound == probabilities
     assert bound_again == changed_probabilities
     assert bound_after_unrelated_drift == unrelated_drift
+    assert bound_after_removal == {miami: unrelated_drift[miami]}
+    assert rebound_after_add == unrelated_drift
     # q changed, but the condition/token topology did not. Reuse the still-current
     # cached bindings while refreshing only the triggered family's live books.
-    assert bind_calls == [("metadata", (dallas, miami))]
+    assert bind_calls == [
+        ("metadata", (dallas, miami)),
+        ("metadata", (dallas,)),
+    ]
     assert capture_calls == [
         (dallas, miami),
+        (dallas,),
         (dallas,),
         (dallas,),
     ]
@@ -3753,10 +3767,18 @@ def test_live_adapter_reuses_tokens_and_refreshes_only_eligible_book_family(
         ),
         ("no-token-dallas", "yes-token-dallas"),
         ("no-token-dallas", "yes-token-dallas"),
+        ("no-token-dallas", "yes-token-dallas"),
     ]
     assert epoch_again.captured_at_utc == epoch.captured_at_utc
     assert len(epoch_again.asset_states) == 4
     assert epoch_again.witness_identity != epoch.witness_identity
+    assert len(epoch_after_removal.asset_states) == 2
+    assert {row[0] for row in epoch_after_removal.asset_states} == {miami}
+    assert len(epoch_after_add.asset_states) == 4
+    assert {row[0] for row in epoch_after_add.asset_states} == {
+        dallas,
+        miami,
+    }
     trade.close()
     forecast.close()
     topology.close()
@@ -3842,6 +3864,15 @@ def test_global_book_epoch_cache_requires_stable_topology(monkeypatch):
         checked_at=at,
         allowed=True,
     ) is None
+    mutable_cached, mutable_reason = era._probe_global_book_epoch_cache(
+        conn,
+        topology_changed,
+        checked_at=at,
+        allowed=True,
+        mutable_family_keys=frozenset({"family"}),
+    )
+    assert mutable_cached is epoch
+    assert mutable_reason == "hit_mutable_topology"
     price_event = replace(
         _global_scope_event(city="Dallas", source_run_id="run-dallas"),
         event_type="EDLI_REDECISION_PENDING",

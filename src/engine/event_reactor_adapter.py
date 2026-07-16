@@ -764,8 +764,10 @@ def _global_book_refresh_family_keys(
 
 def _merge_global_book_epoch_delta(
     base_epoch: object,
-    delta_epoch: object,
+    delta_epoch: object | None,
     family_keys: frozenset[str],
+    *,
+    allow_topology_change: bool = False,
 ) -> object:
     """Replace exact family books without extending untouched-family freshness."""
 
@@ -787,9 +789,14 @@ def _merge_global_book_epoch_delta(
         tuple(str(value) for value in row[:5])
         for row in delta_states
     }
-    if (
-        {row[0] for row in base_topology} != set(family_keys)
-        or {row[0] for row in delta_topology} != set(family_keys)
+    base_families = {row[0] for row in base_topology}
+    delta_families = {row[0] for row in delta_topology}
+    if allow_topology_change:
+        if base_families.union(delta_families) != set(family_keys):
+            raise ValueError("GLOBAL_BOOK_DELTA_FAMILY_COVERAGE_CHANGED")
+    elif (
+        base_families != set(family_keys)
+        or delta_families != set(family_keys)
         or base_topology != delta_topology
     ):
         raise ValueError("GLOBAL_BOOK_DELTA_TOPOLOGY_CHANGED")
@@ -847,6 +854,7 @@ def _probe_global_book_epoch_cache(
     checked_at: datetime,
     allowed: bool,
     topology_hint: tuple[tuple[str, str, str, str, str], ...] | None = None,
+    mutable_family_keys: frozenset[str] | None = None,
 ) -> tuple[object | None, str]:
     if not allowed:
         return None, "not_allowed"
@@ -868,22 +876,36 @@ def _probe_global_book_epoch_cache(
         return None, "cache_empty"
     if entry.namespace != namespace:
         return None, "namespace_changed"
+    hit_reason = "hit"
     if entry.topology != topology:
-        expected = hashlib.sha256(repr(entry.topology).encode("utf-8")).hexdigest()[:12]
-        current = hashlib.sha256(repr(topology).encode("utf-8")).hexdigest()[:12]
-        return (
-            None,
-            "topology_changed:"
-            f"cached={len(entry.topology)}:{expected}:"
-            f"current={len(topology)}:{current}",
+        mutable = frozenset(mutable_family_keys or ())
+        cached_stable = tuple(
+            row for row in entry.topology if row[0] not in mutable
         )
+        current_stable = tuple(
+            row for row in topology if row[0] not in mutable
+        )
+        if not mutable or cached_stable != current_stable:
+            expected = hashlib.sha256(
+                repr(entry.topology).encode("utf-8")
+            ).hexdigest()[:12]
+            current = hashlib.sha256(
+                repr(topology).encode("utf-8")
+            ).hexdigest()[:12]
+            return (
+                None,
+                "topology_changed:"
+                f"cached={len(entry.topology)}:{expected}:"
+                f"current={len(topology)}:{current}",
+            )
+        hit_reason = "hit_mutable_topology"
     current_identity = getattr(entry.epoch, "current_identity", None)
     if not callable(current_identity):
         return None, "current_identity_missing"
     try:
         if current_identity(checked_at.astimezone(UTC)) is None:
             return None, "expired"
-        return entry.epoch, "hit"
+        return entry.epoch, hit_reason
     except (TypeError, ValueError) as exc:
         return None, f"current_identity_invalid:{type(exc).__name__}"
 
@@ -6040,6 +6062,7 @@ def event_bound_live_adapter_from_trade_conn(
                 checked_at=cache_checked_at,
                 allowed=True,
                 topology_hint=speculative_topology,
+                mutable_family_keys=refresh_family_keys,
             )
             if cached_before_bind is None:
                 logging.getLogger(__name__).info(
@@ -6062,9 +6085,13 @@ def event_bound_live_adapter_from_trade_conn(
                 )
                 if cached_probabilities is not None:
                     try:
+                        cached_probability_slice = {
+                            family_key: cached_probabilities[family_key]
+                            for family_key in probabilities
+                        }
                         rebound_probabilities = _reuse_global_book_token_bindings(
                             probabilities,
-                            cached_probabilities,
+                            cached_probability_slice,
                         )
                     except (KeyError, TypeError, ValueError) as exc:
                         logging.getLogger(__name__).warning(
@@ -6073,15 +6100,32 @@ def event_bound_live_adapter_from_trade_conn(
                             exc,
                         )
                     else:
+                        epoch = cached_before_bind
+                        removed_family_keys = frozenset(
+                            cached_probabilities
+                        ).difference(probabilities)
+                        if removed_family_keys:
+                            epoch = _merge_global_book_epoch_delta(
+                                cached_before_bind,
+                                None,
+                                removed_family_keys,
+                                allow_topology_change=True,
+                            )
+                            _store_global_book_epoch(
+                                trade_conn,
+                                rebound_probabilities,
+                                epoch,
+                                checked_at=datetime.now(UTC),
+                            )
                         last_book_probability_output = rebound_probabilities
                         logging.getLogger(__name__).info(
                             "global book epoch cache hit: elapsed_s=%.3f "
                             "families=%d assets=%d",
                             _time.monotonic() - _book_started,
                             len(rebound_probabilities),
-                            len(getattr(cached_before_bind, "assets", ())),
+                            len(getattr(epoch, "assets", ())),
                         )
-                        return rebound_probabilities, cached_before_bind
+                        return rebound_probabilities, epoch
             prefetch_slice = None
             prefetch_mode = ""
             prefetch_token_hint = None
@@ -6210,6 +6254,7 @@ def event_bound_live_adapter_from_trade_conn(
                 bound_probabilities,
                 checked_at=cache_checked_at,
                 allowed=True,
+                mutable_family_keys=refresh_family_keys,
             )
             if cached is None:
                 logging.getLogger(__name__).info(
@@ -6258,10 +6303,24 @@ def event_bound_live_adapter_from_trade_conn(
                     prefetched=prefetched,
                 )
                 try:
+                    cached_probabilities = _cached_global_book_probabilities(cached)
+                    removed_family_keys = (
+                        frozenset(cached_probabilities).difference(
+                            bound_probabilities
+                        )
+                        if cached_probabilities is not None
+                        else frozenset()
+                    )
+                    merge_family_keys = eligible_refresh_family_keys.union(
+                        removed_family_keys
+                    )
                     merged_epoch = _merge_global_book_epoch_delta(
                         cached,
                         delta_epoch,
-                        eligible_refresh_family_keys,
+                        merge_family_keys,
+                        allow_topology_change=(
+                            cache_after_reason == "hit_mutable_topology"
+                        ),
                     )
                     if (
                         merged_epoch.current_identity(datetime.now(UTC))
