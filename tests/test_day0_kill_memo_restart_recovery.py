@@ -124,26 +124,35 @@ def test_recovery_excludes_non_memo_safe_events():
     assert recovered == 71
 
 
-def test_recovery_excludes_authorized_events_from_another_day0_source():
+def test_recovery_is_cross_source_not_scoped_to_fast_lanes_own_source():
+    """2026-07-16 (day0 defect-3, operator directive): the recovery query used
+    to also filter settlement_source=FAST_OBS_SOURCE_ID, so a cold in-process
+    memo could only ever recover the fast lane's OWN prior emissions — never a
+    higher/lower extreme another authorized source (e.g. wu_icao_history) had
+    already established for the same cell. That contradicted this function's
+    own docstring ("recover the kill-memo... from durably-persisted
+    DAY0_EXTREME_UPDATED events") and let a newly-eligible fast-lane fetch
+    treat its own first-sight value as the day-so-far extreme even when a
+    truer one already existed (2026-07-14 Paris: wu_icao_history had already
+    recorded 34; the fast lane's own first emission was 31; the cold memo
+    used to recover None, not 34). The absorbing-direction reduction must run
+    across EVERY authorized source.
+    """
     conn = _events_conn()
     _insert_event(
-        conn,
-        event_id="hko",
-        city="Hong Kong",
-        target_date="2026-07-13",
-        metric="high",
-        rounded_value=34,
-        settlement_source="hko_hourly_accumulator",
+        conn, event_id="wu", city="Paris", target_date="2026-07-14", metric="high",
+        rounded_value=34, settlement_source="wu_icao_history",
+    )
+    _insert_event(
+        conn, event_id="metar", city="Paris", target_date="2026-07-14", metric="high",
+        rounded_value=31, settlement_source=FAST_OBS_SOURCE_ID,
     )
 
     recovered = _recover_kill_memo_from_events(
-        city_name="Hong Kong",
-        target_date="2026-07-13",
-        metric="high",
-        world_conn=conn,
+        city_name="Paris", target_date="2026-07-14", metric="high", world_conn=conn,
     )
 
-    assert recovered is None
+    assert recovered == 34  # MAX across BOTH sources, not just the fast lane's own
 
 
 def test_recovery_none_when_no_events():

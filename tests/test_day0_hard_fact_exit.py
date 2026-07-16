@@ -933,16 +933,65 @@ class TestPlausibilityBound:
         assert ex.held_implausible == 1
         assert ex.high_so_far == pytest.approx(22.5)
 
-    def test_climatology_band_rejects_absurd_values(self):
-        from src.data.day0_fast_obs import filter_plausible_values
+    # ------------------------------------------------------------------
+    # 2026-07-16 (day0 defect-3, operator directive): the climatology-band
+    # gate was DELETED — a plausibility censor trained on the city's monthly
+    # climatology fired hardest on genuine, physically coherent extreme
+    # readings, exactly the highest-value trading days (2026-07-14 Paris: 11
+    # consecutive, mutually consistent 32-35C reports held outright because
+    # the config-derived band capped at 31.9C). METAR is an official
+    # published aviation feed, the same class of source the settlement chain
+    # already trusts; only the SPIKE RULE (a fixed physical rate-of-change
+    # bound, not climatology) remains — the three tests above already pin
+    # it and are unaffected by this deletion. These two replace the deleted
+    # climatology-band test.
+    # ------------------------------------------------------------------
 
-        base = datetime(2026, 6, 10, 0, 0, tzinfo=UTC)
-        values = [(base, 22.0, None), (base + timedelta(minutes=30), 80.0, None)]
-        accepted, held = filter_plausible_values(
-            values, unit="C", city_name="Tokyo", month=6,
+    def test_paris_2026_07_14_type_specimen_high_reaches_35_by_1430z(self):
+        """Real-incident replay. Before the fix, the Paris/July climatology
+        band ([3.0, 31.9]C, TIGGE-ensemble-derived) held every reading of the
+        actual 2026-07-14 heatwave outright, capping the fast lane's
+        day-so-far high at 31.0C. With the band deleted, the same sequence
+        must flow straight through with zero holds and high_so_far=35.0 as
+        soon as the 14:30Z report is observed."""
+        from src.data.day0_fast_obs import MetarReport, running_extremes_for_local_day
+
+        temps_by_hhmm = [
+            ("10:00", 27.0), ("10:30", 28.0), ("11:00", 30.0), ("11:30", 30.0),
+            ("12:00", 32.0), ("12:30", 32.0), ("13:00", 33.0), ("13:30", 34.0),
+            ("14:00", 34.0), ("14:30", 35.0),
+        ]
+        reports = [
+            MetarReport(
+                station_id="LFPB",
+                obs_time=datetime.fromisoformat(f"2026-07-14T{hhmm}:00+00:00"),
+                receipt_time=datetime.fromisoformat(f"2026-07-14T{hhmm}:00+00:00") + timedelta(minutes=4),
+                temp_c=temp, metar_type="METAR", raw=f"METAR LFPB {temp}/15",
+            )
+            for hhmm, temp in temps_by_hhmm
+        ]
+        as_of_1430z = datetime(2026, 7, 14, 14, 30, tzinfo=UTC)
+        ex = running_extremes_for_local_day(
+            reports, city=_paris(), target_date="2026-07-14", as_of=as_of_1430z,
         )
-        assert held >= 1
-        assert all(v <= 60.0 for _, v, _ in accepted)
+        assert ex.held_implausible == 0
+        assert ex.high_so_far == pytest.approx(35.0)
+
+    def test_low_metric_mirror_no_band_hold_on_cold_extreme(self):
+        """LOW-metric mirror: a coherent cold-snap sequence that would have
+        violated the OLD band's lower bound must also flow through cleanly
+        now — the deletion is symmetric, not high-side-only."""
+        from src.data.day0_fast_obs import running_extremes_for_local_day
+
+        # Smooth, mutually consistent descent well below any plausible
+        # Tokyo-June climatology lower bound; steps are all within the
+        # (still-active) spike-rule allowance.
+        reports = self._reports(
+            [(0, 15.0), (30, 8.0), (60, 6.0), (90, 4.0), (120, 3.5), (150, 9.0)]
+        )
+        ex = running_extremes_for_local_day(reports, city=_tokyo(), target_date="2026-06-10")
+        assert ex.held_implausible == 0
+        assert ex.low_so_far == pytest.approx(3.5)
 
 
 # ===========================================================================

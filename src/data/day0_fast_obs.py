@@ -321,59 +321,35 @@ class PreDay0LowWindow:
     held_implausible: int = 0
 
 
-# --- METAR PLAUSIBILITY BOUND (adversarial review 2026-06-10 fix 4) ----------
+# --- METAR PLAUSIBILITY BOUND (adversarial review 2026-06-10 fix 4) ---------
 # One corrupt/spoofed METAR value must not permanently ratchet the monotone
-# running extreme (emission is irreversible by design). Two checks, applied
-# BEFORE extremes are computed:
-#   1. ABSOLUTE BAND: value outside the city's monthly climatology band
-#      (config/city_monthly_bounds.json p01/p99, degC) +- a record-headroom
-#      allowance -> held outright.
-#   2. SPIKE RULE: a value whose step from the previous accepted report exceeds
-#      the physical rate bound is accepted ONLY when the NEXT report
-#      corroborates it (stays within the bound of the suspect value). The
-#      LATEST report (no next yet) with an implausible step is held
-#      PENDING corroboration — the next fetch cycle re-evaluates it with its
-#      successor present. Genuine frontal jumps corroborate within one report
-#      interval (~30-60 min) — bounded delay, never a permanent loss.
+# running extreme (emission is irreversible by design). SPIKE RULE: a value
+# whose step from the previous accepted report exceeds the physical rate
+# bound is accepted ONLY when the NEXT report corroborates it (stays within
+# the bound of the suspect value). The LATEST report (no next yet) with an
+# implausible step is held PENDING corroboration — the next fetch cycle
+# re-evaluates it with its successor present. Genuine frontal jumps
+# corroborate within one report interval (~30-60 min) — bounded delay, never
+# a permanent loss.
 # Held prints are excluded from extremes (no bin-kill), counted on the
 # extremes object, WARN-logged, and reported to the oracle-anomaly module.
+#
+# 2026-07-16 (day0 defect-3, operator directive): a second gate used to run
+# BEFORE this one — an absolute band from the city's monthly climatology
+# (config/city_monthly_bounds.json p01/p99) that held any value outright
+# regardless of corroboration. Deleted: METAR is an official published
+# aviation feed, the same class of source the settlement chain already
+# trusts, and a climatology censor on it fires hardest on exactly the
+# extreme-weather days that are the highest-value trades (2026-07-14 Paris:
+# 11 consecutive, mutually consistent 32-35C reports held outright because a
+# forecast-ensemble-derived band capped at 31.9C — the readings were real,
+# not noise, and the gate had no way to tell the difference). The spike rule
+# below is not climatology-based — it is a fixed physical rate-of-change
+# bound, independent of city or month — and stays; it is what actually
+# catches a corrupted transmission.
 _MAX_PLAUSIBLE_STEP_PER_HOUR = {"C": 10.0, "F": 18.0}
 _MIN_STEP_ALLOWANCE = {"C": 3.0, "F": 5.4}
-_CLIMATOLOGY_HEADROOM_C = 8.0
 _MIN_STEP_DT_HOURS = 1.0 / 12.0  # treat sub-5-min gaps as 5 min for the bound
-
-
-def _monthly_band_unit(city_name: str, month: int, unit: str) -> Optional[tuple[float, float]]:
-    """(lower, upper) plausibility band in the settlement unit, or None.
-
-    PROVENANCE NOTE (caught by tests; Fitz constraint #4): each
-    city_monthly_bounds.json entry carries its OWN ``unit`` field — NYC bounds
-    are already degF (p01 56.6, p99 94.0), Tokyo degC. The band must be read
-    in the ENTRY's unit and converted to the settlement unit, never assumed C.
-    """
-    try:
-        import json as _json
-        from pathlib import Path
-
-        path = Path(__file__).resolve().parents[2] / "config" / "city_monthly_bounds.json"
-        model = _json.loads(path.read_text(encoding="utf-8"))
-        entry = (model.get("cities") or {}).get(str(city_name), {}).get(str(int(month)))
-        if not entry:
-            return None
-        entry_unit = str(entry.get("unit") or "C").upper()
-        headroom = _CLIMATOLOGY_HEADROOM_C if entry_unit == "C" else _CLIMATOLOGY_HEADROOM_C * 1.8
-        lo = float(entry["p01"]) - headroom
-        hi = float(entry["p99"]) + headroom
-        target = str(unit).upper()
-        if entry_unit == target:
-            return (lo, hi)
-        if entry_unit == "C" and target == "F":
-            return (lo * 9.0 / 5.0 + 32.0, hi * 9.0 / 5.0 + 32.0)
-        if entry_unit == "F" and target == "C":
-            return ((lo - 32.0) * 5.0 / 9.0, (hi - 32.0) * 5.0 / 9.0)
-        return None
-    except Exception:  # noqa: BLE001 — band unavailable -> spike rule still applies
-        return None
 
 
 def _step_exceeds(prev: tuple[datetime, float], cur: tuple[datetime, float], unit: str) -> bool:
@@ -390,18 +366,10 @@ def filter_plausible_values(
     month: int,
 ) -> tuple[list[tuple[datetime, float, Optional[datetime]]], int]:
     """(accepted, held_count). ``values`` must be time-sorted."""
-    band = _monthly_band_unit(city_name, month, unit)
     accepted: list[tuple[datetime, float, Optional[datetime]]] = []
     held = 0
     for index, item in enumerate(values):
         ts, value, receipt = item
-        if band is not None and not (band[0] <= value <= band[1]):
-            held += 1
-            logger.warning(
-                "METAR_PRINT_HELD city=%s reason=climatology_band value=%.1f%s band=[%.1f,%.1f] ts=%s",
-                city_name, value, unit, band[0], band[1], ts.isoformat(),
-            )
-            continue
         if accepted and _step_exceeds((accepted[-1][0], accepted[-1][1]), (ts, value), unit):
             nxt = values[index + 1] if index + 1 < len(values) else None
             corroborated = nxt is not None and not _step_exceeds((ts, value), (nxt[0], nxt[1]), unit)
@@ -1267,8 +1235,20 @@ def _recover_kill_memo_from_events(
     Reads opportunity_events (zeus-world.db) for the cell, keeps only memo-safe
     rows (source_authorized_status=AUTHORIZED, local_date_status=MATCH,
     dst_status=UNAMBIGUOUS — the SAME authorization the live kill memo required),
-    and reduces by the absorbing direction (high=MAX, low=MIN). None when no
-    recoverable row exists or on any error (fail-soft).
+    ACROSS EVERY AUTHORIZED SOURCE for the cell (not just this emitter's own
+    fast-lane source), and reduces by the absorbing direction (high=MAX,
+    low=MIN). None when no recoverable row exists or on any error (fail-soft).
+
+    2026-07-16 (day0 defect-3, operator directive): this query used to also
+    filter ``settlement_source = FAST_OBS_SOURCE_ID``, so a cold in-process
+    memo could only ever recover this emitter's OWN prior emissions — never
+    a higher/lower extreme another source (e.g. wu_icao_history) had already
+    established for the same cell. That self-blinding contradicted this very
+    docstring's "restart-safe... recover the kill-memo" claim and let a
+    newly-eligible fast-lane fetch treat its own first-sight value as the
+    day-so-far extreme even when a truer one already existed. Deleted the
+    source filter; the existing AUTHORIZED/MATCH/UNAMBIGUOUS predicates are
+    already source-agnostic and are the actual authorization gate.
 
     ``world_conn`` MUST be supplied by the caller (a world-main read connection or
     a composite connection with zeus-world ATTACHed). Passing None raises
@@ -1296,14 +1276,13 @@ def _recover_kill_memo_from_events(
               AND json_extract(payload_json, '$.target_date') = ?
               AND json_extract(payload_json, '$.metric') = ?
               AND json_extract(payload_json, '$.source_authorized_status') = 'AUTHORIZED'
-              AND json_extract(payload_json, '$.settlement_source') = ?
               AND json_extract(payload_json, '$.local_date_status') = 'MATCH'
               AND json_extract(payload_json, '$.dst_status') = 'UNAMBIGUOUS'
               AND json_extract(payload_json, '$.rounded_value') IS NOT NULL
         """
         row = conn.execute(
             sql,
-            (city_name, target_date, metric, FAST_OBS_SOURCE_ID),
+            (city_name, target_date, metric),
         ).fetchone()
         if row is None:
             return None
