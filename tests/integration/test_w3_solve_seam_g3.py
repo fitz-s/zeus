@@ -2519,6 +2519,7 @@ def test_current_forecast_global_probability_still_requires_replacement_readines
 def test_live_adapter_routes_each_global_truth_to_its_owner(monkeypatch):
     import src.data.polymarket_client as polymarket_client
     import src.engine.global_auction_universe as universe
+    import src.runtime.reactor_wake as reactor_wake
 
     trade = sqlite3.connect(":memory:")
     forecast = sqlite3.connect(":memory:")
@@ -2535,6 +2536,12 @@ def test_live_adapter_routes_each_global_truth_to_its_owner(monkeypatch):
     captured = {}
     prepared_with = []
     capacity_calls = []
+    urgent_revision = {"value": (1, 2, 3)}
+    monkeypatch.setattr(
+        reactor_wake,
+        "reactor_urgent_wake_revision",
+        lambda: urgent_revision["value"],
+    )
 
     class CapacityAuthority:
         def capacity_usd(self, **kwargs):
@@ -2590,6 +2597,7 @@ def test_live_adapter_routes_each_global_truth_to_its_owner(monkeypatch):
         ),
         auction_capital_authority=CapacityAuthority(),
     )
+    urgent_revision["value"] = (4, 5, 6)
     event = _global_scope_event(city="Dallas", source_run_id="run-dallas")
 
     result = adapter.process_global_batch(
@@ -2602,6 +2610,7 @@ def test_live_adapter_routes_each_global_truth_to_its_owner(monkeypatch):
     assert captured["forecast_conn"] is forecast
     assert captured["world_conn"] is not topology
     assert captured["portfolio_state_provider"] is None
+    assert captured["epoch_superseded"]() is True
     assert callable(captured["candidate_policy_rejection_resolver"])
     assert "entry_candidates_enabled" not in captured
     candidate = SimpleNamespace(family_key="family-dallas")

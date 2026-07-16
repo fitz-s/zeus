@@ -4892,6 +4892,12 @@ def event_bound_live_adapter_from_trade_conn(
     _live_ack_count: list[int] = [0]
     _consumed_global_preflight_tokens: dict[str, datetime] = {}
     _global_entry_policy_by_family: dict[str, tuple[str, str]] = {}
+    from src.runtime.reactor_wake import reactor_urgent_wake_revision
+
+    # Seal before process_pending fetches its page. A Day0 fact committed after
+    # this point must supersede that page even if it arrives before the global
+    # batch begins; sampling inside _process_global_batch loses exactly that race.
+    _global_batch_urgent_wake_revision = reactor_urgent_wake_revision()
 
     # INV-K7 reservation ledger: closure-held, fresh per reactor cycle. FIX B
     # (2026-06-05): rollback-aware so a candidate rejected downstream of Kelly is
@@ -5667,13 +5673,13 @@ def event_bound_live_adapter_from_trade_conn(
 
         events = tuple(events)
         refresh_family_keys = _global_book_refresh_family_keys(events)
-        from src.runtime.reactor_wake import reactor_urgent_wake_revision
-
-        urgent_wake_revision = reactor_urgent_wake_revision()
 
         def _epoch_superseded() -> bool:
             current = reactor_urgent_wake_revision()
-            return current is not None and current != urgent_wake_revision
+            return (
+                current is not None
+                and current != _global_batch_urgent_wake_revision
+            )
 
         if forecast_conn is None or topology_conn is None or calibration_conn is None:
             from src.events.reactor import GlobalBatchSubmitResult
