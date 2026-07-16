@@ -713,3 +713,159 @@ def test_materialization_queue_retries_blocked_request_only_after_input_change(
     )
     assert third.status == "FAILED"
     assert len(spawned) == 2
+
+
+def test_blocked_source_clock_request_ignores_unrelated_input_churn(
+    tmp_path, monkeypatch
+) -> None:
+    import src.data.replacement_forecast_live_materialization_queue as queue_mod
+    from src.strategy.live_inference import source_clock_city_weights as source_clock
+
+    request_dir = tmp_path / "requests"
+    processed_dir = tmp_path / "processed"
+    failed_dir = tmp_path / "failed"
+    request_dir.mkdir()
+    payload_path = tmp_path / "payload.json"
+    precision_path = tmp_path / "precision.json"
+    payload_path.write_text("{}", encoding="utf-8")
+    precision_path.write_text("{}", encoding="utf-8")
+    scheme_path = tmp_path / "city_one_scheme.csv"
+    scheme_path.write_text(
+        "city,selection_status,grid_aware_sources,grid_aware_weighted_sources,"
+        "candidate_count,eligible_live_grid_cap10_count,eligible_grid_cap10_count,reason\n"
+        "Helsinki,GRID_CAP10_LIVE_READY,icon_eu+met_nordic,"
+        "icon_eu:0.5+met_nordic:0.5,10,2,2,\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv(source_clock.ENV_CITY_ONE_SCHEME_PATH, str(scheme_path))
+    source_clock.load_city_one_schemes.cache_clear()
+
+    db_path = tmp_path / "forecasts.db"
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        """
+        CREATE TABLE raw_model_forecasts (
+            raw_model_forecast_id INTEGER PRIMARY KEY,
+            model TEXT NOT NULL,
+            city TEXT NOT NULL,
+            metric TEXT NOT NULL,
+            target_date TEXT NOT NULL,
+            source_cycle_time TEXT NOT NULL,
+            source_available_at TEXT,
+            captured_at TEXT,
+            endpoint TEXT NOT NULL,
+            forecast_value_c REAL NOT NULL,
+            lead_days INTEGER
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO raw_model_forecasts VALUES
+        (1, 'icon_eu', 'Helsinki', 'high', '2026-07-18',
+         '2026-07-16T12:00:00+00:00', '2026-07-16T15:00:00+00:00',
+         '2026-07-16T15:00:00+00:00', 'single_runs', 25.0, 2)
+        """
+    )
+    conn.commit()
+
+    request_path = request_dir / "Helsinki.2026-07-18.high.json"
+    request = {
+        "city": "Helsinki",
+        "city_timezone": "Europe/Helsinki",
+        "target_date": "2026-07-18",
+        "temperature_metric": "high",
+        "source_cycle_time": "2026-07-16T12:00:00+00:00",
+        "computed_at": "2026-07-16T16:00:00+00:00",
+        "baseline_source_run_id": "baseline",
+        "baseline_data_version": "ecmwf_opendata",
+        "baseline_source_available_at": "2026-07-16T15:00:00+00:00",
+        "openmeteo_source_run_id": "openmeteo",
+        "openmeteo_source_available_at": "2026-07-16T15:00:00+00:00",
+        "openmeteo_payload_json": str(payload_path),
+        "precision_metadata_json": str(precision_path),
+        "bins": [{"bin_id": "25C"}],
+    }
+    spawned: list[str] = []
+
+    def _blocked_runner(argv):
+        spawned.append(Path(argv[argv.index("--input-json") + 1]).name)
+        return subprocess.CompletedProcess(
+            list(argv),
+            1,
+            stdout=json.dumps(
+                {
+                    "status": "BLOCKED",
+                    "reason_codes": [
+                        "REPLACEMENT_LIVE_POSTERIOR_REQUIREMENTS_NOT_MET"
+                    ],
+                }
+            )
+            + "\n",
+            stderr="missing configured sources",
+        )
+
+    try:
+        request_path.write_text(json.dumps(request), encoding="utf-8")
+        first = queue_mod.process_replacement_forecast_live_materialization_queue(
+            request_dir=request_dir,
+            processed_dir=processed_dir,
+            failed_dir=failed_dir,
+            forecast_db=db_path,
+            limit=1,
+            runner=_blocked_runner,
+        )
+        assert first.status == "FAILED"
+        assert len(spawned) == 1
+
+        payload_path.write_text('{"unrelated": true}', encoding="utf-8")
+        conn.execute(
+            """
+            INSERT INTO raw_model_forecasts VALUES
+            (2, 'icon_global', 'Helsinki', 'high', '2026-07-18',
+             '2026-07-16T12:00:00+00:00', '2026-07-16T16:01:00+00:00',
+             '2026-07-16T16:01:00+00:00', 'single_runs', 24.0, 2)
+            """
+        )
+        conn.commit()
+        request_path.write_text(
+            json.dumps({**request, "computed_at": "2026-07-16T16:02:00+00:00"}),
+            encoding="utf-8",
+        )
+        second = queue_mod.process_replacement_forecast_live_materialization_queue(
+            request_dir=request_dir,
+            processed_dir=processed_dir,
+            failed_dir=failed_dir,
+            forecast_db=db_path,
+            limit=1,
+            runner=_blocked_runner,
+        )
+        assert second.status == "PROCESSED"
+        assert len(spawned) == 1
+
+        conn.execute(
+            """
+            INSERT INTO raw_model_forecasts VALUES
+            (3, 'met_nordic', 'Helsinki', 'high', '2026-07-18',
+             '2026-07-16T12:00:00+00:00', '2026-07-16T16:03:00+00:00',
+             '2026-07-16T16:03:00+00:00', 'single_runs', 25.5, 2)
+            """
+        )
+        conn.commit()
+        request_path.write_text(
+            json.dumps({**request, "computed_at": "2026-07-16T16:04:00+00:00"}),
+            encoding="utf-8",
+        )
+        third = queue_mod.process_replacement_forecast_live_materialization_queue(
+            request_dir=request_dir,
+            processed_dir=processed_dir,
+            failed_dir=failed_dir,
+            forecast_db=db_path,
+            limit=1,
+            runner=_blocked_runner,
+        )
+        assert third.status == "FAILED"
+        assert len(spawned) == 2
+    finally:
+        conn.close()
+        source_clock.load_city_one_schemes.cache_clear()

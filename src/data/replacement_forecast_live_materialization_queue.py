@@ -599,6 +599,47 @@ _ATTEMPT_INPUT_PATH_FIELDS = (
 )
 
 
+def _source_clock_missing_configured_sources(
+    conn,
+    payload: Mapping[str, object],
+) -> tuple[str, ...] | None:
+    """Return the exact source-clock dependencies that still block this request."""
+
+    city = str(payload.get("city") or "").strip()
+    target_date = str(payload.get("target_date") or "").strip()
+    metric = str(payload.get("temperature_metric") or "").strip()
+    cycle = _parse_utc_iso(payload.get("source_cycle_time"))
+    if not city or not target_date or not metric or cycle is None:
+        return None
+    try:
+        from src.data.replacement_current_value_serving import (  # noqa: PLC0415
+            read_current_instrument_values,
+        )
+        from src.strategy.live_inference.source_clock_city_weights import (  # noqa: PLC0415
+            scheme_for_city,
+        )
+
+        scheme = scheme_for_city(city)
+        if scheme is None:
+            return ()
+        served = read_current_instrument_values(
+            conn,
+            city=city,
+            metric=metric,
+            target_date=target_date,
+            source_cycle_time_iso=cycle.isoformat(),
+            include_station_sources=True,
+        )
+    except Exception:  # noqa: BLE001 - uncertainty must retain the existing retry behavior
+        return None
+    if any(
+        model.startswith(("cwa_", "hko_")) and model not in scheme.weights
+        for model in served
+    ):
+        return ()
+    return tuple(source for source in scheme.final_sources if source not in served)
+
+
 def _validate_request_payload(path: Path) -> tuple[bool, str, str]:
     """Return (ok, reason_code, detail) for a queued request file WITHOUT spawning a subprocess.
 
@@ -699,6 +740,7 @@ def _blocked_attempt_fingerprint(
         conn = _connect(db_path, write_class=None)
         try:
             conn.execute("PRAGMA query_only=ON")
+            missing_sources = _source_clock_missing_configured_sources(conn, payload)
             row = conn.execute(
                 """
                 SELECT COUNT(*),
@@ -719,18 +761,19 @@ def _blocked_attempt_fingerprint(
     if row is None:
         return None
     file_revisions: dict[str, tuple[int, int] | None] = {}
-    for field in _ATTEMPT_INPUT_PATH_FIELDS:
-        raw_path = payload.get(field)
-        if raw_path in (None, ""):
-            continue
-        path = Path(str(raw_path))
-        if not path.is_absolute():
-            path = input_json.parent / path
-        try:
-            stat = path.stat()
-            file_revisions[field] = (stat.st_mtime_ns, stat.st_size)
-        except OSError:
-            file_revisions[field] = None
+    if not missing_sources:
+        for field in _ATTEMPT_INPUT_PATH_FIELDS:
+            raw_path = payload.get(field)
+            if raw_path in (None, ""):
+                continue
+            path = Path(str(raw_path))
+            if not path.is_absolute():
+                path = input_json.parent / path
+            try:
+                stat = path.stat()
+                file_revisions[field] = (stat.st_mtime_ns, stat.st_size)
+            except OSError:
+                file_revisions[field] = None
     logic_revisions: dict[str, tuple[int, int] | None] = {}
     for path in (
         PROJECT_ROOT / "src/data/replacement_forecast_materializer.py",
@@ -751,7 +794,11 @@ def _blocked_attempt_fingerprint(
                 if key not in _ATTEMPT_CLOCK_FIELDS
             },
             "files": file_revisions,
-            "raw": tuple(row),
+            "raw": (
+                {"missing_configured_sources": missing_sources}
+                if missing_sources
+                else tuple(row)
+            ),
             "logic": logic_revisions,
         },
         sort_keys=True,
