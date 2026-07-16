@@ -1578,6 +1578,15 @@ def _entry_global_submit_suppression_reason() -> str | None:
     return None
 
 
+def _entry_global_selection_suppression_reason(
+    conn: sqlite3.Connection | None,
+) -> str | None:
+    pause_reason = _entry_pause_blocks_live_submit(conn)
+    if pause_reason is not None:
+        return f"entries_paused:{pause_reason}"
+    return _entry_global_submit_suppression_reason()
+
+
 _DURABLE_LIVE_CAP_NO_EXPOSURE_TERMINAL_COMMAND_STATES = frozenset(
     {"CANCELLED", "CANCELED", "EXPIRED", "REJECTED", "SUBMIT_REJECTED"}
 )
@@ -6325,10 +6334,19 @@ def event_bound_live_adapter_from_trade_conn(
                     "GLOBAL_ENTRY_PRICE_POLICY_STRATEGY_UNAVAILABLE:"
                     f"{type(exc).__name__}:{exc}"
                 )
-            return _global_current_entry_price_policy_rejection_reason(
+            price_reason = _global_current_entry_price_policy_rejection_reason(
                 candidate,
                 strategy_key=strategy_key,
             )
+            return price_reason or entry_selection_suppression_reason
+
+        entry_selection_suppression_reason = (
+            _entry_global_selection_suppression_reason(
+                live_cap_conn or trade_conn
+            )
+            if real_order_submit_enabled
+            else None
+        )
 
         try:
             return process_current_global_batch(
@@ -6371,9 +6389,9 @@ def event_bound_live_adapter_from_trade_conn(
                 portfolio_state_provider=None,
                 current_book_epoch_provider=_current_book_epoch,
                 current_capital_limit_resolver=_current_entry_capital_limit,
-                # Operator pause and transient submit authority govern actuation,
-                # not economics. Keep the complete BUY/SELL/HOLD/CASH comparison
-                # observable while preflight and executor independently block BUY.
+                # A current entry suppression removes BUY before selection while
+                # preserving SELL/HOLD/CASH. Preflight and executor independently
+                # recheck authority to cover state changes during the auction.
                 candidate_policy_rejection_resolver=(
                     _current_entry_candidate_policy
                 ),
