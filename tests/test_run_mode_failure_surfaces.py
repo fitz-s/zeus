@@ -1,8 +1,8 @@
 # Created: 2026-05-19
-# Last reused or audited: 2026-07-15
+# Last reused or audited: 2026-07-16
 # Authority basis: codereview-may19-2.md relationship F
 #                  + docs/operations/task_2026-05-21_live_side_effect_risk_boundaries/task.md P1-1
-# Lifecycle: created=2026-05-19; last_reviewed=2026-07-15; last_reused=2026-07-15
+# Lifecycle: created=2026-05-19; last_reviewed=2026-07-16; last_reused=2026-07-16
 # Purpose: Relationship-F antibody — assert that compute_composite_live_health()
 #   surfaces DEGRADED when run_mode has failed or status_summary is stale, even
 #   when the heartbeat is OK (closing the "scheduler alive but not trading" gap).
@@ -4336,6 +4336,7 @@ def test_high_yes_edge_accepts_canonical_global_entry_pause(
         "zlib+base64+canonical-json-v4",
         "zlib+base64+canonical-json-v5",
         "zlib+base64+canonical-json-v6",
+        "zlib+base64+canonical-json-v7",
     ),
 )
 def test_high_yes_edge_accepts_current_global_auction_candidate(

@@ -5075,6 +5075,7 @@ def _latest_global_auction_candidate_counts(
             "zlib+base64+canonical-json-v4",
             "zlib+base64+canonical-json-v5",
             "zlib+base64+canonical-json-v6",
+            "zlib+base64+canonical-json-v7",
         }:
             return invalid("ENCODING")
         compressed = base64.b64decode(
