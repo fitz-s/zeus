@@ -1688,6 +1688,17 @@ def _lower_cvar(du: np.ndarray, weights: np.ndarray, alpha: float) -> float:
         weights = weights[keep]
     if du.size == 0:
         return float("-inf")
+    if np.all(weights == 1.0):
+        target = alpha * du.size
+        if target <= 0.0:
+            return float(np.min(du))
+        idx = min(max(math.ceil(target) - 1, 0), du.size - 1)
+        tail = np.partition(du, idx)[: idx + 1]
+        tail.sort(kind="stable")
+        full_sum = float(tail[:idx].sum()) if idx > 0 else 0.0
+        frac = target - idx
+        boundary = frac * float(tail[idx]) if frac > 0.0 else 0.0
+        return (full_sum + boundary) / target
     order = np.argsort(du, kind="stable")
     d = du[order]
     w = weights[order]

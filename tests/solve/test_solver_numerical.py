@@ -159,6 +159,25 @@ def test_lower_cvar_zero_weight_ruin_row_is_finite():
     assert np.isfinite(val), f"CVaR should be finite when the -inf row has zero weight, got {val}"
 
 
+@pytest.mark.parametrize("alpha", [0.05, 0.073, 0.25])
+def test_lower_cvar_uniform_partition_matches_stable_sort(alpha):
+    rng = np.random.default_rng(20260716)
+    values = rng.normal(size=4000)
+    values[::97] = -0.25
+    weights = np.ones(values.size, dtype=np.float64)
+    ordered = np.sort(values, kind="stable")
+    target = alpha * values.size
+    idx = min(
+        int(np.searchsorted(np.arange(1, values.size + 1), target)),
+        values.size - 1,
+    )
+    full_sum = float(ordered[:idx].sum()) if idx > 0 else 0.0
+    fraction = target - idx
+    expected = (full_sum + fraction * float(ordered[idx])) / target
+
+    assert S._lower_cvar(values, weights, alpha) == expected
+
+
 def test_max_orders_cap_enforced():
     bins = tuple(f"b{j}" for j in range(20))
     q = np.random.default_rng(5).dirichlet(np.full(20, 1.0 / 20) * 400, size=400)
