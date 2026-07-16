@@ -92,10 +92,15 @@ from src.solve.solver import (
     validate_family_decision_contract,
 )
 from src.contracts.executable_cost_curve import BookLevel, ExecutableCostCurve, FeeModel
+from src.contracts.executable_market_snapshot import (
+    ExecutableMarketSnapshot,
+    canonicalize_fee_details,
+)
 from src.contracts.semantic_types import Direction
 from src.strategy import utility_ranker
 from src.state.collateral_ledger import init_collateral_schema
 from src.state.portfolio import PortfolioState
+from src.state.snapshot_repo import get_snapshot, init_snapshot_schema, insert_snapshot
 from src.state.schema.opportunity_events_schema import (
     ensure_table as ensure_opportunity_events_table,
 )
@@ -4399,6 +4404,119 @@ def test_global_preflight_jit_curve_replaces_selected_size_and_reauctions():
         },
     )
     assert stable is receipt
+
+
+def test_global_winner_persists_jit_curve_as_executor_depth_authority():
+    conn = sqlite3.connect(":memory:")
+    init_snapshot_schema(conn)
+    captured = _dt.datetime(2026, 7, 14, 20, 5, tzinfo=_dt.timezone.utc)
+    old = ExecutableMarketSnapshot(
+        snapshot_id="old-snapshot",
+        gamma_market_id="gamma-a",
+        event_id="market-event-a",
+        event_slug="event-a",
+        condition_id="condition-a",
+        question_id="question-a",
+        yes_token_id="token-yes-a",
+        no_token_id="token-no-a",
+        selected_outcome_token_id="token-no-a",
+        outcome_label="NO",
+        enable_orderbook=True,
+        active=True,
+        closed=False,
+        accepting_orders=True,
+        market_start_at=None,
+        market_end_at=None,
+        market_close_at=None,
+        sports_start_at=None,
+        min_tick_size=Decimal("0.01"),
+        min_order_size=Decimal("1"),
+        fee_details=canonicalize_fee_details(
+            {"fee_rate_fraction": 0.05},
+            source="fixture",
+            token_id="token-no-a",
+        ),
+        token_map_raw={},
+        rfqe=None,
+        neg_risk=False,
+        orderbook_top_bid=Decimal("0.39"),
+        orderbook_top_ask=Decimal("0.40"),
+        orderbook_depth_jsonb=json.dumps(
+            {
+                "bids": [{"price": "0.39", "size": "100"}],
+                "asks": [{"price": "0.40", "size": "100"}],
+            }
+        ),
+        raw_gamma_payload_hash="a" * 64,
+        raw_clob_market_info_hash="b" * 64,
+        raw_orderbook_hash="c" * 64,
+        authority_tier="CLOB",
+        captured_at=captured - _dt.timedelta(seconds=5),
+        freshness_deadline=captured + _dt.timedelta(seconds=25),
+    )
+    insert_snapshot(conn, old)
+    conn.commit()
+    curve = ExecutableCostCurve(
+        token_id="token-no-a",
+        side="NO",
+        snapshot_id="jit-snapshot",
+        book_hash="d" * 64,
+        levels=(
+            BookLevel(price=Decimal("0.37"), size=Decimal("20")),
+            BookLevel(price=Decimal("0.38"), size=Decimal("30")),
+        ),
+        fee_model=FeeModel(fee_rate=Decimal("0.05")),
+        min_tick=Decimal("0.01"),
+        min_order_size=Decimal("1"),
+        quote_ttl=_dt.timedelta(seconds=30),
+    )
+    candidate = SimpleNamespace(
+        side="NO",
+        token_id="token-no-a",
+        condition_id="condition-a",
+        book_snapshot_id=curve.snapshot_id,
+        book_captured_at_utc=captured,
+        executable_cost_curve=curve,
+    )
+
+    snapshot, row = era._persist_global_candidate_executable_snapshot(
+        conn,
+        proof=SimpleNamespace(executable_snapshot_id=old.snapshot_id),
+        candidate=candidate,
+        decision_time=captured + _dt.timedelta(seconds=1),
+    )
+
+    assert row["snapshot_id"] == curve.snapshot_id
+    assert snapshot.orderbook_top_ask == Decimal("0.37")
+    assert snapshot.raw_orderbook_hash == curve.book_hash
+    assert snapshot.min_tick_size == curve.min_tick
+    assert snapshot.min_order_size == curve.min_order_size
+    assert snapshot.selected_outcome_token_id == curve.token_id
+    assert snapshot.orderbook_depth_jsonb == json.dumps(
+        {
+            "asks": [
+                {"price": "0.37", "size": "20"},
+                {"price": "0.38", "size": "30"},
+            ],
+            "bids": [],
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    assert get_snapshot(conn, curve.snapshot_id) == snapshot
+    with pytest.raises(ValueError, match="LIVE_DEPTH_AUTHORITY_MISSING"):
+        era._assert_taker_depth_authority_fresh(
+            snapshot=old,
+            direction="buy_no",
+            witness_touch=Decimal("0.37"),
+            tick_size=Decimal("0.01"),
+        )
+    era._assert_taker_depth_authority_fresh(
+        snapshot=snapshot,
+        direction="buy_no",
+        witness_touch=Decimal("0.37"),
+        tick_size=Decimal("0.01"),
+    )
 
 
 def test_global_preflight_token_lifetime_starts_after_proof_completion():

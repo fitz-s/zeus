@@ -7525,6 +7525,156 @@ def _global_buy_candidate_from_raw_book(
     )
 
 
+def _persist_global_candidate_executable_snapshot(
+    trade_conn: sqlite3.Connection,
+    *,
+    proof: "_CandidateProof",
+    candidate: object,
+    decision_time: datetime,
+) -> tuple[object, dict[str, Any]]:
+    """Persist the selected global curve as the snapshot cited by execution.
+
+    The global auction owns a current, full native ask curve.  The legacy proof
+    row is only the substrate that identified the market; citing it after the
+    auction has rebound the winner pairs current sizing with stale depth.  Make
+    the current curve an immutable executable snapshot before certificates are
+    built so selection, certificate validation, and executor re-sweep consume
+    one book.
+    """
+
+    from src.contracts.executable_market_snapshot import canonicalize_fee_details
+    from src.state.snapshot_repo import get_snapshot, insert_snapshot
+
+    curve = getattr(candidate, "executable_cost_curve", None)
+    candidate_side = str(getattr(candidate, "side", "") or "").upper()
+    candidate_token = str(getattr(candidate, "token_id", "") or "")
+    candidate_condition = str(getattr(candidate, "condition_id", "") or "")
+    if (
+        curve is None
+        or candidate_side not in {"YES", "NO"}
+        or not candidate_token
+        or not candidate_condition
+        or str(getattr(curve, "side", "") or "") != candidate_side
+        or str(getattr(curve, "token_id", "") or "") != candidate_token
+        or str(getattr(candidate, "book_snapshot_id", "") or "")
+        != str(getattr(curve, "snapshot_id", "") or "")
+    ):
+        raise ValueError("GLOBAL_JIT_SNAPSHOT_IDENTITY_INVALID")
+    base_id = str(getattr(proof, "executable_snapshot_id", "") or "")
+    base = get_snapshot(trade_conn, base_id) if base_id else None
+    if base is None:
+        raise ValueError("GLOBAL_JIT_SNAPSHOT_BASE_MISSING")
+    expected_token = base.yes_token_id if candidate_side == "YES" else base.no_token_id
+    if base.condition_id != candidate_condition or expected_token != candidate_token:
+        raise ValueError("GLOBAL_JIT_SNAPSHOT_MARKET_MISMATCH")
+    captured_at = getattr(candidate, "book_captured_at_utc", None)
+    if not isinstance(captured_at, datetime) or captured_at.tzinfo is None:
+        raise ValueError("GLOBAL_JIT_SNAPSHOT_CLOCK_INVALID")
+    captured_at = captured_at.astimezone(UTC)
+    if captured_at > decision_time.astimezone(UTC):
+        raise ValueError("GLOBAL_JIT_SNAPSHOT_AFTER_DECISION_TIME")
+    levels = tuple(getattr(curve, "levels", ()) or ())
+    if not levels:
+        raise ValueError("GLOBAL_JIT_SNAPSHOT_ASKS_MISSING")
+    raw_orderbook_hash = str(getattr(curve, "book_hash", "") or "")
+    if len(raw_orderbook_hash) != 64:
+        raise ValueError("GLOBAL_JIT_SNAPSHOT_BOOK_HASH_INVALID")
+    depth = json.dumps(
+        {
+            "asks": [
+                {"price": str(level.price), "size": str(level.size)}
+                for level in levels
+            ],
+            "bids": [],
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    fee_details = canonicalize_fee_details(
+        {"fee_rate_fraction": float(curve.fee_model.fee_rate)},
+        source="global_current_book_curve",
+        token_id=candidate_token,
+    )
+    snapshot = dataclass_replace(
+        base,
+        snapshot_id=str(curve.snapshot_id),
+        selected_outcome_token_id=candidate_token,
+        outcome_label=candidate_side,
+        min_tick_size=curve.min_tick,
+        min_order_size=curve.min_order_size,
+        fee_details=fee_details,
+        orderbook_top_bid=None,
+        orderbook_top_ask=levels[0].price,
+        orderbook_depth_jsonb=depth,
+        raw_orderbook_hash=raw_orderbook_hash,
+        authority_tier="CLOB",
+        captured_at=captured_at,
+        freshness_deadline=captured_at + curve.quote_ttl,
+        wide_spread_display_substitution=False,
+        depth_at_best_ask=int(levels[0].size),
+    )
+    existing = get_snapshot(trade_conn, snapshot.snapshot_id)
+    if existing is None:
+        insert_snapshot(trade_conn, snapshot)
+    elif existing.executable_snapshot_hash != snapshot.executable_snapshot_hash:
+        raise ValueError("GLOBAL_JIT_SNAPSHOT_ID_COLLISION")
+    # The next phase performs a direct venue JIT fetch.  Do not carry a trade-DB
+    # write transaction across that network boundary; the immutable row must be
+    # durable before the proof bundle cites it.
+    trade_conn.commit()
+    saved_factory = trade_conn.row_factory
+    trade_conn.row_factory = sqlite3.Row
+    try:
+        row = trade_conn.execute(
+            "SELECT * FROM executable_market_snapshots WHERE snapshot_id = ?",
+            (snapshot.snapshot_id,),
+        ).fetchone()
+    finally:
+        trade_conn.row_factory = saved_factory
+    if row is None:
+        raise ValueError("GLOBAL_JIT_SNAPSHOT_PERSISTENCE_FAILED")
+    return snapshot, dict(row)
+
+
+def _bind_global_candidate_executable_snapshot(
+    trade_conn: sqlite3.Connection,
+    *,
+    proof: "_CandidateProof",
+    candidate: object,
+    decision: object,
+    decision_time: datetime,
+) -> "_CandidateProof":
+    snapshot, row = _persist_global_candidate_executable_snapshot(
+        trade_conn,
+        proof=proof,
+        candidate=candidate,
+        decision_time=decision_time,
+    )
+    try:
+        shares = Decimal(str(getattr(decision, "shares")))
+        cost = Decimal(str(getattr(decision, "cost_usd")))
+        unit_cost = cost / shares
+    except (ArithmeticError, TypeError, ValueError) as exc:
+        raise ValueError("GLOBAL_JIT_SNAPSHOT_COST_INVALID") from exc
+    if (
+        shares <= 0
+        or not unit_cost.is_finite()
+        or not (Decimal("0") < unit_cost < Decimal("1"))
+    ):
+        raise ValueError("GLOBAL_JIT_SNAPSHOT_COST_INVALID")
+    return dataclass_replace(
+        proof,
+        row=row,
+        executable_snapshot_id=snapshot.snapshot_id,
+        execution_price=ExecutionPrice(
+            value=float(unit_cost),
+            price_type="fee_adjusted",
+            fee_deducted=True,
+            currency="probability_units",
+        ),
+    )
+
+
 def _global_actuation_sweep_cost_worsened(
     *,
     selected: object,
@@ -8648,6 +8798,7 @@ def _global_actuation_selected_proof(
     eligible_proofs: tuple["_CandidateProof", ...],
     forecast_conn: sqlite3.Connection,
     decision_time: datetime,
+    trade_conn: sqlite3.Connection | None = None,
 ) -> "_CandidateProof":
     """Bind the exact global winner to its current proof and sealed economics."""
 
@@ -8836,7 +8987,16 @@ def _global_actuation_selected_proof(
         )
     ):
         raise ValueError("GLOBAL_ACTUATION_IDENTITY_INCOMPLETE")
-    return _bind_global_current_state_economics_to_proof(proof, cert)
+    bound = _bind_global_current_state_economics_to_proof(proof, cert)
+    if trade_conn is not None:
+        bound = _bind_global_candidate_executable_snapshot(
+            trade_conn,
+            proof=bound,
+            candidate=candidate,
+            decision=decision,
+            decision_time=decision_time,
+        )
+    return bound
 
 
 def _global_prepare_failure_reason(spine_result: object) -> str | None:
@@ -9680,6 +9840,7 @@ def _build_event_bound_no_submit_receipt_core(
                 eligible_proofs=_spine_entry_proofs,
                 forecast_conn=source_conn,
                 decision_time=decision_time,
+                trade_conn=trade_conn,
             )
         except _GlobalProbabilityTightened as exc:
             return EventSubmissionReceipt(
@@ -16245,7 +16406,15 @@ def _build_no_submit_proof_bundle_from_adapter_evidence(
     }
     projection["projection_hash"] = stable_hash(projection)
     condition_ids = tuple(str(row.get("condition_id") or "") for row in family_topology_rows)
-    executable_snapshot_ids = tuple(sorted(str(row.get("snapshot_id") or "") for row in family_snapshot_rows))
+    executable_snapshot_ids = tuple(
+        sorted(
+            {
+                *(str(row.get("snapshot_id") or "") for row in family_snapshot_rows),
+                str(proof.executable_snapshot_id or ""),
+            }
+            - {""}
+        )
+    )
     hypothesis_id = f"{family.family_id}:{proof.token_id}"
     execution_price = proof.execution_price
     topology_clock = _evidence_clock_from_rows(family_topology_rows)
