@@ -5855,11 +5855,8 @@ def event_bound_live_adapter_from_trade_conn(
         book_metadata_by_key: dict[
             tuple[str, str], Mapping[str, object]
         ] = {}
-        last_book_probability_output: Mapping[str, object] | None = None
 
         def _current_book_epoch(probabilities, _at):
-            nonlocal last_book_probability_output
-
             from src.contracts.executable_market_snapshot import (
                 FRESHNESS_WINDOW_DEFAULT,
             )
@@ -6069,7 +6066,6 @@ def event_bound_live_adapter_from_trade_conn(
                     "global book epoch cache miss: phase=before_bind reason=%s",
                     cache_before_reason,
                 )
-            force_full_refresh = probabilities is last_book_probability_output
             eligible_refresh_family_keys = (
                 None
                 if refresh_family_keys is None
@@ -6077,7 +6073,6 @@ def event_bound_live_adapter_from_trade_conn(
             )
             if (
                 cached_before_bind is not None
-                and not force_full_refresh
                 and eligible_refresh_family_keys == frozenset()
             ):
                 cached_probabilities = _cached_global_book_probabilities(
@@ -6117,7 +6112,6 @@ def event_bound_live_adapter_from_trade_conn(
                                 epoch,
                                 checked_at=datetime.now(UTC),
                             )
-                        last_book_probability_output = rebound_probabilities
                         logging.getLogger(__name__).info(
                             "global book epoch cache hit: elapsed_s=%.3f "
                             "families=%d assets=%d",
@@ -6130,8 +6124,7 @@ def event_bound_live_adapter_from_trade_conn(
             prefetch_mode = ""
             prefetch_token_hint = None
             if (
-                force_full_refresh
-                or cached_before_bind is None
+                cached_before_bind is None
                 or refresh_family_keys is None
             ):
                 prefetch_slice = probabilities
@@ -6165,7 +6158,6 @@ def event_bound_live_adapter_from_trade_conn(
             retained_bound_probabilities: dict[str, object] = {}
             if (
                 cached_before_bind is not None
-                and not force_full_refresh
                 and eligible_refresh_family_keys
             ):
                 cached_probabilities = _cached_global_book_probabilities(
@@ -6269,16 +6261,10 @@ def event_bound_live_adapter_from_trade_conn(
                         metadata_sink=full_metadata,
                     )
                     prefetched = None
-            # A second call with the exact mapping returned by this provider is
-            # the same-batch CURVE_SUPERSEDED re-auction. It must recapture the
-            # complete curve universe because the changed winner is not supplied
-            # to this callback.
             if (
                 cached is not None
-                and not force_full_refresh
                 and eligible_refresh_family_keys == frozenset()
             ):
-                last_book_probability_output = bound_probabilities
                 logging.getLogger(__name__).info(
                     "global book epoch cache hit: elapsed_s=%.3f families=%d assets=%d",
                     _time.monotonic() - _book_started,
@@ -6289,7 +6275,6 @@ def event_bound_live_adapter_from_trade_conn(
 
             if (
                 cached is not None
-                and not force_full_refresh
                 and eligible_refresh_family_keys
                 and eligible_refresh_family_keys.issubset(bound_probabilities)
             ):
@@ -6348,7 +6333,6 @@ def event_bound_live_adapter_from_trade_conn(
                         len(merged_probabilities),
                         len(merged_epoch.assets),
                     )
-                    last_book_probability_output = merged_probabilities
                     return merged_probabilities, merged_epoch
                 except (TypeError, ValueError) as exc:
                     logging.getLogger(__name__).warning(
@@ -6373,7 +6357,6 @@ def event_bound_live_adapter_from_trade_conn(
                     "global book epoch cache store rejected: mode=full reason=%s",
                     cache_store_status,
                 )
-            last_book_probability_output = bound_probabilities
             return bound_probabilities, epoch
 
         def _current_entry_capital_limit(

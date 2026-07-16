@@ -19,6 +19,7 @@ from src.contracts.executable_market_snapshot import FRESHNESS_WINDOW_DEFAULT
 from src.data.market_topology_rows import prime_frozen_schema_reads
 from src.engine.global_auction_universe import (
     CurrentGlobalBookEpoch,
+    current_global_book_epoch_identity,
     current_global_auction_scope_from_events,
     current_portfolio_wealth_witness,
     current_venue_auction_identity,
@@ -31,7 +32,10 @@ from src.engine.global_single_order_auction import (
 from src.events.candidate_binding import weather_family_id
 from src.events.opportunity_event import OpportunityEvent, make_opportunity_event
 from src.events.reactor import EventSubmissionReceipt, GlobalBatchSubmitResult
-from src.solve.solver import CurrentFamilyProbabilityAuthority
+from src.solve.solver import (
+    CurrentFamilyProbabilityAuthority,
+    executable_curve_identity,
+)
 from src.state.collateral_ledger import COLLATERAL_SNAPSHOT_MAX_AGE_SECONDS
 
 UTC = timezone.utc
@@ -899,6 +903,108 @@ def _book_economics_manifest(
     if not manifest:
         raise ValueError("GLOBAL_BOOK_ECONOMICS_MISSING")
     return manifest
+
+
+def _book_epoch_with_replacement_candidate(
+    book_epoch: CurrentGlobalBookEpoch,
+    selected_candidate: object,
+    replacement_candidate: object,
+) -> CurrentGlobalBookEpoch:
+    """Overlay one exact JIT BUY curve without recapturing unrelated books."""
+
+    selected_key = tuple(
+        str(getattr(selected_candidate, field, "") or "")
+        for field in ("family_key", "bin_id", "condition_id", "side", "token_id")
+    )
+    replacement_key = tuple(
+        str(getattr(replacement_candidate, field, "") or "")
+        for field in ("family_key", "bin_id", "condition_id", "side", "token_id")
+    )
+    if (
+        str(getattr(selected_candidate, "action", "BUY") or "BUY") != "BUY"
+        or str(getattr(replacement_candidate, "action", "BUY") or "BUY") != "BUY"
+        or not all(selected_key)
+        or replacement_key != selected_key
+        or str(getattr(replacement_candidate, "candidate_id", "") or "")
+        != str(getattr(selected_candidate, "candidate_id", "") or "")
+        or str(
+            getattr(replacement_candidate, "probability_witness_identity", "") or ""
+        )
+        != str(
+            getattr(selected_candidate, "probability_witness_identity", "") or ""
+        )
+        or str(getattr(replacement_candidate, "resolution_identity", "") or "")
+        != str(getattr(selected_candidate, "resolution_identity", "") or "")
+        or str(getattr(replacement_candidate, "ledger_snapshot_id", "") or "")
+        != str(getattr(selected_candidate, "ledger_snapshot_id", "") or "")
+    ):
+        raise ValueError("GLOBAL_REAUCTION_REPLACEMENT_IDENTITY_MISMATCH")
+
+    curve = getattr(replacement_candidate, "executable_cost_curve", None)
+    captured_at = getattr(replacement_candidate, "book_captured_at_utc", None)
+    if (
+        curve is None
+        or getattr(captured_at, "tzinfo", None) is None
+        or str(getattr(curve, "token_id", "") or "") != replacement_key[4]
+        or str(getattr(curve, "side", "") or "") != replacement_key[3]
+        or str(getattr(curve, "snapshot_id", "") or "")
+        != str(getattr(replacement_candidate, "book_snapshot_id", "") or "")
+        or executable_curve_identity(curve)
+        != str(getattr(replacement_candidate, "execution_curve_identity", "") or "")
+    ):
+        raise ValueError("GLOBAL_REAUCTION_REPLACEMENT_CURVE_INVALID")
+
+    assets = []
+    asset_matches = 0
+    for asset in book_epoch.assets:
+        asset_key = (
+            str(asset.family_key),
+            str(asset.bin_id),
+            str(asset.condition_id),
+            str(asset.side),
+            str(asset.token_id),
+        )
+        if asset_key == selected_key:
+            if (
+                str(getattr(asset.curve, "snapshot_id", "") or "")
+                != str(getattr(selected_candidate, "book_snapshot_id", "") or "")
+                or executable_curve_identity(asset.curve)
+                != str(
+                    getattr(selected_candidate, "execution_curve_identity", "") or ""
+                )
+            ):
+                raise ValueError("GLOBAL_REAUCTION_SELECTED_CURVE_MISMATCH")
+            asset = replace(asset, curve=curve, captured_at_utc=captured_at)
+            asset_matches += 1
+        assets.append(asset)
+
+    states = []
+    state_matches = 0
+    for state in book_epoch.asset_states:
+        if tuple(str(value) for value in state[:5]) == selected_key:
+            state = (
+                *state[:5],
+                "EXECUTABLE",
+                str(getattr(curve, "book_hash", "") or ""),
+                *state[7:],
+            )
+            state_matches += 1
+        states.append(state)
+    if asset_matches != 1 or state_matches != 1:
+        raise ValueError("GLOBAL_REAUCTION_REPLACEMENT_ASSET_MISSING")
+
+    identity = current_global_book_epoch_identity(
+        asset_states=states,
+        captured_at_utc=book_epoch.captured_at_utc,
+    )
+    return CurrentGlobalBookEpoch(
+        assets=tuple(assets),
+        asset_states=tuple(states),
+        captured_at_utc=book_epoch.captured_at_utc,
+        max_age=book_epoch.max_age,
+        witness_identity=identity,
+        sell_assets=book_epoch.sell_assets,
+    )
 
 
 def _begin_selection_read_snapshot(
@@ -1911,23 +2017,20 @@ def process_current_global_batch(
                         len(excluded_by_candidate),
                     )
                 elif preflight.status == "CURVE_SUPERSEDED":
+                    candidate = selected.decision.candidate
+                    if candidate is None:
+                        return reject("GLOBAL_REAUCTION_SELECTED_CANDIDATE_MISSING")
                     try:
-                        next_probabilities, next_book_epoch = (
-                            current_book_epoch_provider(
-                                probabilities_fence,
-                                current_time(),
-                            )
+                        next_book_epoch = _book_epoch_with_replacement_candidate(
+                            attempt_book_epoch,
+                            candidate,
+                            preflight.replacement_candidate,
                         )
-                    except Exception as exc:  # noqa: BLE001 - full cut is atomic
+                    except Exception as exc:  # noqa: BLE001 - invalid JIT evidence blocks
                         return reject(
-                            "GLOBAL_REAUCTION_BOOK_REFRESH_FAILED:"
+                            "GLOBAL_REAUCTION_CURVE_OVERLAY_FAILED:"
                             f"{type(exc).__name__}:{exc}"
                         )
-                    if (
-                        _probability_manifest(next_probabilities)
-                        != probability_manifest
-                    ):
-                        return reject("GLOBAL_REAUCTION_PROBABILITY_MANIFEST_CHANGED")
                     if (
                         next_book_epoch.witness_identity
                         == attempt_book_epoch.witness_identity
@@ -1936,29 +2039,7 @@ def process_current_global_batch(
                             "GLOBAL_REAUCTION_CURVE_NO_PROGRESS:"
                             f"{preflight.reason or preflight.status}"
                         )
-                    prepared_fence = {
-                        event_id: replace(
-                            prepared,
-                            probability_witness=next_probabilities[
-                                prepared.probability_witness.family_key
-                            ],
-                        )
-                        for event_id, prepared in prepared_fence.items()
-                    }
-                    probabilities_fence = next_probabilities
                     attempt_book_epoch = next_book_epoch
-                    selection_state, selection_wealth = capture_selection_wealth()
-                    auction_deadline = (
-                        attempt_book_epoch.captured_at_utc
-                        + attempt_book_epoch.max_age
-                    )
-                    # Candidate exclusions are observations of one selected-token
-                    # JIT book.  A newer complete book epoch invalidates that local
-                    # evidence, so every candidate must be eligible for a fresh JIT
-                    # proof again.  Family and probability exclusions bind different
-                    # authorities and remain valid.
-                    excluded_by_candidate.clear()
-                    preflight_candidate_ineligible_by_event.clear()
                 elif preflight.status == "PROBABILITY_TIGHTENED":
                     tightening = preflight.probability_tightening
                     candidate = selected.decision.candidate
