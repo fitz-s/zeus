@@ -1,5 +1,5 @@
 # Created: 2026-06-08
-# Lifecycle: created=2026-06-08; last_reviewed=2026-06-18; last_reused=2026-06-18
+# Lifecycle: created=2026-06-08; last_reviewed=2026-07-16; last_reused=2026-07-16
 # Purpose: Regression tests for BPF raw forecast download and persistence semantics.
 # Reuse: Run when changing Bayes precision fusion raw-input capture or scheduler health.
 # Authority basis: BAYES_PRECISION_FUSION_SPEC.md §6 F1 (raw capture: previous_runs + single_runs ->
@@ -151,6 +151,53 @@ def test_download_timebox_returns_incomplete_without_fetching_targets(tmp_path, 
     assert report["timeboxed_incomplete"] is True
     assert report["timebox_unattempted_target_groups"] == 2
     assert report["written_row_count"] == 0
+
+
+def test_download_scopes_persisted_key_reads_to_requested_batch(
+    tmp_path, monkeypatch
+) -> None:
+    import src.state.db as state_db
+    from src.data.bayes_precision_fusion_download import (
+        download_bayes_precision_fusion_extra_raw_inputs,
+    )
+
+    statements: list[tuple[str, tuple[object, ...]]] = []
+
+    class _ReadConn:
+        def execute(self, sql, params=()):
+            statements.append((str(sql), tuple(params)))
+            return ()
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(state_db, "_connect", lambda *_args, **_kwargs: _ReadConn())
+    report = download_bayes_precision_fusion_extra_raw_inputs(
+        forecast_db=tmp_path / "forecasts.db",
+        cycle=datetime(2026, 6, 8, 0, tzinfo=UTC),
+        targets=_targets(),
+        models=("ecmwf_ifs",),
+        include_previous_runs=False,
+        prune_after=False,
+        single_runs_fetch=lambda **_kwargs: 20.0,
+        max_wall_clock_seconds=0,
+    )
+
+    assert report["timeboxed_incomplete"] is True
+    assert len(statements) == 1
+    sql, params = statements[0]
+    assert "WHERE endpoint = 'single_runs'" in sql
+    assert "model IN (" in sql
+    assert "city IN (" in sql
+    assert "target_date IN (" in sql
+    assert "source_cycle_time IN (" in sql
+    assert "previous_runs" not in sql
+    assert params == (
+        "ecmwf_ifs",
+        "Paris",
+        "2026-06-09",
+        "2026-06-08T00:00:00+00:00",
+    )
 
 
 def test_persist_lock_obeys_source_clock_deadline(tmp_path) -> None:

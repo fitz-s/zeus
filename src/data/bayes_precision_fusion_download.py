@@ -1273,6 +1273,26 @@ def download_bayes_precision_fusion_extra_raw_inputs(
     # R4a (2026-06-13): previous_runs fixed-lead values are IMMUTABLE once captured — the skip
     # key for previous_runs ignores source_cycle_time so a past target_date is never re-fetched
     # under a new cycle stamp. single_runs KEEPS the per-cycle key (current value changes per cycle).
+    source_clock_single_runs = (
+        {}
+        if _use_legacy_per_model
+        else _read_source_clock_single_runs_requests(decision_time=captured_at)
+    )
+    target_cities = tuple(sorted({target.city for target in target_list}))
+    target_dates = tuple(sorted({target.target_date for target in target_list}))
+    request_cycles = tuple(
+        sorted(
+            {
+                cycle_iso,
+                *(
+                    request.run.isoformat()
+                    for model, request in source_clock_single_runs.items()
+                    if model in requested_models
+                ),
+            }
+        )
+    )
+    persisted_cycle_keys: set[tuple] = set()
     persisted_keys: set[tuple] = set()
     prev_runs_done: set[tuple] = set()
     try:
@@ -1280,29 +1300,53 @@ def download_bayes_precision_fusion_extra_raw_inputs(
 
         _ro = _ro_connect(Path(forecast_db))
         try:
-            persisted_cycle_keys = {
-                tuple(r)
-                for r in _ro.execute(
-                    "SELECT model, city, target_date, metric, source_cycle_time, endpoint"
-                    " FROM raw_model_forecasts"
-                )
-            }
-            persisted_keys = {
-                tuple(r)
-                for r in _ro.execute(
-                    "SELECT model, city, target_date, metric, endpoint"
-                    " FROM raw_model_forecasts WHERE source_cycle_time = ?",
-                    (cycle_iso,),
-                )
-            }
+            if requested_models and target_cities and target_dates and request_cycles:
+                model_marks = ",".join("?" for _ in requested_models)
+                city_marks = ",".join("?" for _ in target_cities)
+                date_marks = ",".join("?" for _ in target_dates)
+                cycle_marks = ",".join("?" for _ in request_cycles)
+                persisted_cycle_keys = {
+                    tuple(r)
+                    for r in _ro.execute(
+                        "SELECT model, city, target_date, metric, source_cycle_time, endpoint"
+                        " FROM raw_model_forecasts"
+                        " WHERE endpoint = 'single_runs'"
+                        f" AND model IN ({model_marks})"
+                        f" AND city IN ({city_marks})"
+                        f" AND target_date IN ({date_marks})"
+                        f" AND source_cycle_time IN ({cycle_marks})",
+                        (
+                            *requested_models,
+                            *target_cities,
+                            *target_dates,
+                            *request_cycles,
+                        ),
+                    )
+                }
+                persisted_keys = {
+                    (model, city, target_date, metric, endpoint)
+                    for model, city, target_date, metric, source_cycle_time, endpoint
+                    in persisted_cycle_keys
+                    if source_cycle_time == cycle_iso
+                }
             # R4a: immutable previous_runs skip — ignore source_cycle_time entirely.
-            prev_runs_done = {
-                tuple(r)
-                for r in _ro.execute(
-                    "SELECT DISTINCT model, city, target_date, metric"
-                    " FROM raw_model_forecasts WHERE endpoint = 'previous_runs'"
-                )
-            }
+            if include_previous_runs and requested_models and target_cities and target_dates:
+                prev_runs_done = {
+                    tuple(r)
+                    for r in _ro.execute(
+                        "SELECT DISTINCT model, city, target_date, metric"
+                        " FROM raw_model_forecasts"
+                        " WHERE endpoint = 'previous_runs'"
+                        f" AND model IN ({model_marks})"
+                        f" AND city IN ({city_marks})"
+                        f" AND target_date IN ({date_marks})",
+                        (
+                            *requested_models,
+                            *target_cities,
+                            *target_dates,
+                        ),
+                    )
+                }
         finally:
             _ro.close()
     except Exception:
@@ -1315,11 +1359,6 @@ def download_bayes_precision_fusion_extra_raw_inputs(
         if endpoint == "single_runs"
     }
     single_fast_transport_failed: set[tuple[str, str, str]] = set()
-    source_clock_single_runs = (
-        {}
-        if _use_legacy_per_model
-        else _read_source_clock_single_runs_requests(decision_time=captured_at)
-    )
 
     def _single_runs_request_for_model(model: str) -> _SourceClockSingleRunsRequest:
         return source_clock_single_runs.get(
