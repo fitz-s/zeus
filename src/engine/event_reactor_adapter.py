@@ -24573,6 +24573,7 @@ def _day0_remaining_global_probability_components(
     )
     analysis = _market_analysis_from_event_snapshot(
         calibration_conn=calibration_conn,
+        hourly_vector_conn=forecast_conn,
         snapshot=snapshot,
         family=family,
         native_costs={},
@@ -25763,6 +25764,7 @@ def _canonical_probability_and_fdr_proof(
         )
     analysis = _market_analysis_from_event_snapshot(
         calibration_conn=calibration_conn,
+        hourly_vector_conn=conn,
         snapshot=snapshot,
         family=family,
         native_costs=native_costs,
@@ -27128,6 +27130,7 @@ def _make_day0_bootstrap_sampler(
 def _market_analysis_from_event_snapshot(
     *,
     calibration_conn: sqlite3.Connection,
+    hourly_vector_conn: sqlite3.Connection | None = None,
     snapshot: dict[str, Any],
     family,
     native_costs: dict[tuple[str, str], tuple[dict[str, Any] | None, ExecutionPrice | None, float, float | None, str | None]],
@@ -27331,6 +27334,7 @@ def _market_analysis_from_event_snapshot(
                 unit=unit,
                 decision_time=decision_time,
                 world_conn=calibration_conn,
+                forecast_conn=hourly_vector_conn,
             )
             if _day0_rd_members is None:
                 payload["_edli_day0_q_mode"] = "remaining_day_unavailable"
@@ -29556,6 +29560,7 @@ def _day0_remaining_day_members(
     unit: str,
     decision_time: "datetime | None",
     world_conn: sqlite3.Connection | None = None,
+    forecast_conn: sqlite3.Connection | None = None,
 ) -> "np.ndarray | None":
     """Pooled per-model remaining-day extremes in the NATIVE unit, clamped to
     the absorbing physical law. None means no fresh persisted high-res vectors
@@ -29591,6 +29596,7 @@ def _day0_remaining_day_members(
             expected_models=expected_models,
             require_expected=bool(expected_models),
             max_bundle_skew_minutes=DAY0_HOURLY_BUNDLE_MAX_SKEW_MINUTES,
+            conn=forecast_conn,
         )
         if not vectors:
             if expected_models:

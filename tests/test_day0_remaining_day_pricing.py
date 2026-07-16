@@ -678,14 +678,17 @@ class TestRemainingDayMembers:
         monkeypatch.setattr(hv, "read_freshest_day0_hourly_vectors", fake_read)
 
         payload = {"metric": "high", "rounded_value": 25.0}
+        forecast_conn = object()
         members = era._day0_remaining_day_members(
             payload=payload,
             family=self._family(),
             unit="C",
             decision_time=datetime(2026, 6, 10, 15, 0, tzinfo=UTC),
+            forecast_conn=forecast_conn,
         )
 
         assert members is None
+        assert captured["conn"] is forecast_conn
         assert captured["expected_models"] == ["icon_d2", "ecmwf_ifs"]
         assert captured["require_expected"] is True
         assert captured["max_bundle_skew_minutes"] == hv.DAY0_HOURLY_BUNDLE_MAX_SKEW_MINUTES
