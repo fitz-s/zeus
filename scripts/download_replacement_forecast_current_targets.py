@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # Created: 2026-06-07
-# Last reused/audited: 2026-07-13
-# Lifecycle: created=2026-06-07; last_reviewed=2026-07-13
+# Last reused/audited: 2026-07-16
+# Lifecycle: created=2026-06-07; last_reviewed=2026-07-16
 # Purpose: Download current-target Open-Meteo ECMWF IFS 9km raw inputs for replacement forecast materialization.
 # Reuse: Run before live replacement materialization when dry-run reports current-target coverage gaps.
 # Authority basis: Raw artifacts are live inputs only after the replacement materializer emits
@@ -16,6 +16,7 @@ import os
 import sys
 import tempfile
 import time
+from collections.abc import Callable
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -225,6 +226,7 @@ def _try_bucket_rung_three(
     meta_refusal: Exception,
     single_runs_exc: Exception,
     deadline_monotonic: float | None = None,
+    bucket_manifest_provider: Callable[[], dict] | None = None,
 ) -> tuple[dict, dict]:
     """Rung-3 admission gate: serve from the S3 data_spatial bucket, or re-raise rung-2.
 
@@ -249,9 +251,13 @@ def _try_bucket_rung_three(
         select_declaring_manifest,
     )
 
-    manifests = fetch_bucket_run_manifest(
-        timeout=_deadline_timeout(deadline_monotonic, default=20.0),
-        deadline_monotonic=deadline_monotonic,
+    manifests = (
+        bucket_manifest_provider()
+        if bucket_manifest_provider is not None
+        else fetch_bucket_run_manifest(
+            timeout=_deadline_timeout(deadline_monotonic, default=20.0),
+            deadline_monotonic=deadline_monotonic,
+        )
     )
     manifest = select_declaring_manifest(manifests, wanted_run=request.run)
     if manifest is None:
@@ -331,6 +337,7 @@ def _resolve_anchor_payload(
     target_date: str,
     timezone_name: str,
     deadline_monotonic: float | None = None,
+    bucket_manifest_provider: Callable[[], dict] | None = None,
 ) -> tuple[dict, dict]:
     """Resolve one city's anchor payload through the full transport ladder.
 
@@ -435,6 +442,8 @@ def _resolve_anchor_payload(
     }
     if deadline_monotonic is not None:
         rung_three_kwargs["deadline_monotonic"] = deadline_monotonic
+    if bucket_manifest_provider is not None:
+        rung_three_kwargs["bucket_manifest_provider"] = bucket_manifest_provider
     return _try_bucket_rung_three(
         **rung_three_kwargs,
     )
@@ -513,8 +522,21 @@ def download_current_target_raw_inputs(
     unavailable_targets: set[tuple[str, str]] = set()
     processed_target_count = 0
     timeboxed_incomplete = False
+    bucket_manifests: dict | None = None
 
-    from src.data.openmeteo_ecmwf_ifs9_bucket_transport import BucketTransportNotAdmissible
+    from src.data.openmeteo_ecmwf_ifs9_bucket_transport import (
+        BucketTransportNotAdmissible,
+        fetch_bucket_run_manifest,
+    )
+
+    def current_bucket_manifests() -> dict:
+        nonlocal bucket_manifests
+        if bucket_manifests is None:
+            bucket_manifests = fetch_bucket_run_manifest(
+                timeout=_deadline_timeout(deadline_monotonic, default=20.0),
+                deadline_monotonic=deadline_monotonic,
+            )
+        return bucket_manifests
 
     for target in targets:
         if deadline_monotonic is not None and time.monotonic() >= deadline_monotonic:
@@ -563,6 +585,7 @@ def download_current_target_raw_inputs(
                         target_date=target.target_date,
                         timezone_name=city_config.timezone,
                         deadline_monotonic=deadline_monotonic,
+                        bucket_manifest_provider=current_bucket_manifests,
                     )
                     resolved_payloads[target_key] = (
                         payload,

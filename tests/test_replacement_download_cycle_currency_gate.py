@@ -1,5 +1,5 @@
 # Created: 2026-06-09
-# Last reused or audited: 2026-07-13
+# Last reused or audited: 2026-07-16
 # Authority basis: 2026-06-09 anchor-lag root cause (/tmp/anchor_lag_report.md, verified against
 #   src/data/replacement_forecast_production.py + replacement_forecast_current_target_plan.py):
 #   the ALREADY_COVERED / HAVE_RAW_MANIFESTS short-circuits contained NO cycle comparison, so once
@@ -21,8 +21,6 @@ import sqlite3
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-
-import pytest
 
 from src.data.replacement_forecast_production import (
     _download_replacement_forecast_current_targets_if_needed,
@@ -453,6 +451,74 @@ def test_direct_downloader_reuses_plan_and_city_date_payload_across_metrics(
     assert report["manifest_count"] == 2
     assert report["downloaded"]["openmeteo_transport_fetch_count"] == 1
     assert len(calls) == 1
+
+
+def test_direct_downloader_reuses_bucket_manifest_across_targets(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    import scripts.download_replacement_forecast_current_targets as dl
+    import src.data.openmeteo_ecmwf_ifs9_bucket_transport as bucket_transport
+
+    rows = (
+        _TargetRow(
+            city="London",
+            target_date="2026-06-10",
+            temperature_metric="high",
+            covered=False,
+            missing_openmeteo_manifest=True,
+        ),
+        _TargetRow(
+            city="Paris",
+            target_date="2026-06-10",
+            temperature_metric="high",
+            covered=False,
+            missing_openmeteo_manifest=True,
+        ),
+    )
+    manifest_fetches = 0
+
+    def _fetch_bucket_run_manifest(**_kwargs):
+        nonlocal manifest_fetches
+        manifest_fetches += 1
+        return {}
+
+    providers: list[object] = []
+
+    def _resolve(**kwargs):
+        provider = kwargs["bucket_manifest_provider"]
+        providers.append(provider)
+        provider()
+        return (
+            {"hourly": {"time": [], "temperature_2m": []}},
+            {"openmeteo_endpoint": "bucket", "run_authority": "bucket_partial_run_test"},
+        )
+
+    monkeypatch.setattr(
+        bucket_transport,
+        "fetch_bucket_run_manifest",
+        _fetch_bucket_run_manifest,
+    )
+    monkeypatch.setattr(dl, "_resolve_anchor_payload", _resolve)
+
+    report = dl.download_current_target_raw_inputs(
+        forecast_db=tmp_path / "forecasts.db",
+        output_dir=tmp_path / "raw",
+        cycle=AVAILABLE_CYCLE,
+        limit=None,
+        write_db=False,
+        release_lag_hours=14.0,
+        anchor_sigma_c=3.0,
+        include_covered=True,
+        precomputed_plan=_PlanStub(ready=False, rows=rows),
+        max_wall_clock_seconds=5.0,
+    )
+
+    assert report["manifest_count"] == 2
+    assert report["downloaded"]["openmeteo_transport_fetch_count"] == 2
+    assert len(providers) == 2
+    assert providers[0] is providers[1]
+    assert manifest_fetches == 1
 
 
 def test_disabled_flag_still_short_circuits(tmp_path, monkeypatch) -> None:
