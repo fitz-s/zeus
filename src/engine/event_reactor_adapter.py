@@ -151,6 +151,7 @@ import logging
 import math
 import os
 import sqlite3
+import threading
 import time as _time
 from dataclasses import dataclass, replace as dataclass_replace
 from datetime import date, datetime, time, timedelta, timezone
@@ -307,6 +308,158 @@ from src.calibration.emos import (
 
 
 UTC = timezone.utc
+
+
+@dataclass(frozen=True)
+class _GlobalBookEpochCacheEntry:
+    namespace: str
+    topology: tuple[tuple[str, str, str, str, str], ...]
+    epoch: object
+
+
+_GLOBAL_BOOK_EPOCH_CACHE_LOCK = threading.Lock()
+_GLOBAL_BOOK_EPOCH_CACHE: _GlobalBookEpochCacheEntry | None = None
+
+
+def _global_book_topology_signature(
+    probabilities: Mapping[str, object],
+) -> tuple[tuple[str, str, str, str, str], ...] | None:
+    """Identify the exact family/bin/token universe without probability values."""
+
+    rows: list[tuple[str, str, str, str, str]] = []
+    tokens: set[str] = set()
+    for raw_family_key, witness in sorted(probabilities.items()):
+        family_key = str(raw_family_key or "").strip()
+        witness_family_key = str(
+            getattr(witness, "family_key", "") or ""
+        ).strip()
+        bindings = tuple(getattr(witness, "bindings", ()) or ())
+        if not family_key or witness_family_key != family_key or not bindings:
+            return None
+        for binding in bindings:
+            bin_id = str(getattr(binding, "bin_id", "") or "").strip()
+            condition_id = str(
+                getattr(binding, "condition_id", "") or ""
+            ).strip()
+            yes_token_id = str(
+                getattr(binding, "yes_token_id", "") or ""
+            ).strip()
+            no_token_id = str(
+                getattr(binding, "no_token_id", "") or ""
+            ).strip()
+            if not all(
+                (bin_id, condition_id, yes_token_id, no_token_id)
+            ) or yes_token_id in tokens or no_token_id in tokens:
+                return None
+            tokens.update((yes_token_id, no_token_id))
+            rows.append(
+                (
+                    family_key,
+                    bin_id,
+                    condition_id,
+                    yes_token_id,
+                    no_token_id,
+                )
+            )
+    return tuple(rows) or None
+
+
+def _global_book_epoch_cache_namespace(
+    trade_conn: sqlite3.Connection,
+) -> str | None:
+    try:
+        rows = trade_conn.execute("PRAGMA database_list").fetchall()
+    except sqlite3.Error:
+        return None
+    for row in rows:
+        name = str(row[1] if not isinstance(row, sqlite3.Row) else row["name"])
+        if name != "main":
+            continue
+        path = str(row[2] if not isinstance(row, sqlite3.Row) else row["file"])
+        return (
+            f"file:{os.path.realpath(path)}"
+            if path
+            else f"memory:{id(trade_conn)}"
+        )
+    return None
+
+
+def _global_book_epoch_cache_allowed(events: Iterable[object]) -> bool:
+    """Price-triggered work must observe the book move that triggered it."""
+
+    rows = tuple(events)
+    return bool(rows) and all(
+        str(getattr(event, "event_type", "") or "")
+        != _EDLI_REDECISION_EVENT_TYPE
+        for event in rows
+    )
+
+
+def _get_cached_global_book_epoch(
+    trade_conn: sqlite3.Connection,
+    probabilities: Mapping[str, object],
+    *,
+    checked_at: datetime,
+    allowed: bool,
+) -> object | None:
+    if not allowed or checked_at.tzinfo is None:
+        return None
+    namespace = _global_book_epoch_cache_namespace(trade_conn)
+    topology = _global_book_topology_signature(probabilities)
+    if namespace is None or topology is None:
+        return None
+    with _GLOBAL_BOOK_EPOCH_CACHE_LOCK:
+        entry = _GLOBAL_BOOK_EPOCH_CACHE
+    if (
+        entry is None
+        or entry.namespace != namespace
+        or entry.topology != topology
+    ):
+        return None
+    current_identity = getattr(entry.epoch, "current_identity", None)
+    if not callable(current_identity):
+        return None
+    try:
+        return (
+            entry.epoch
+            if current_identity(checked_at.astimezone(UTC)) is not None
+            else None
+        )
+    except (TypeError, ValueError):
+        return None
+
+
+def _store_global_book_epoch(
+    trade_conn: sqlite3.Connection,
+    probabilities: Mapping[str, object],
+    epoch: object,
+    *,
+    checked_at: datetime,
+) -> None:
+    global _GLOBAL_BOOK_EPOCH_CACHE
+
+    if checked_at.tzinfo is None:
+        return
+    namespace = _global_book_epoch_cache_namespace(trade_conn)
+    topology = _global_book_topology_signature(probabilities)
+    current_identity = getattr(epoch, "current_identity", None)
+    if (
+        namespace is None
+        or topology is None
+        or not callable(current_identity)
+    ):
+        return
+    try:
+        if current_identity(checked_at.astimezone(UTC)) is None:
+            return
+    except (TypeError, ValueError):
+        return
+    with _GLOBAL_BOOK_EPOCH_CACHE_LOCK:
+        _GLOBAL_BOOK_EPOCH_CACHE = _GlobalBookEpochCacheEntry(
+            namespace=namespace,
+            topology=topology,
+            epoch=epoch,
+        )
 
 
 @dataclass(frozen=True)
@@ -4959,6 +5112,9 @@ def event_bound_live_adapter_from_trade_conn(
             process_current_global_batch,
         )
 
+        events = tuple(events)
+        global_book_cache_allowed = _global_book_epoch_cache_allowed(events)
+
         if forecast_conn is None or topology_conn is None or calibration_conn is None:
             from src.events.reactor import GlobalBatchSubmitResult
 
@@ -5154,6 +5310,21 @@ def event_bound_live_adapter_from_trade_conn(
             from src.data.market_scanner import _gamma_get
 
             _book_started = _time.monotonic()
+            cache_checked_at = datetime.now(UTC)
+            cached_epoch = _get_cached_global_book_epoch(
+                trade_conn,
+                probabilities,
+                checked_at=cache_checked_at,
+                allowed=global_book_cache_allowed,
+            )
+            if cached_epoch is not None:
+                logging.getLogger(__name__).info(
+                    "global book epoch cache hit: elapsed_s=%.3f families=%d assets=%d",
+                    _time.monotonic() - _book_started,
+                    len(probabilities),
+                    len(getattr(cached_epoch, "assets", ())),
+                )
+                return probabilities, cached_epoch
 
             timeout = max(
                 1.0,
@@ -5314,6 +5485,12 @@ def event_bound_live_adapter_from_trade_conn(
                         metadata_overrides=book_metadata_by_key,
                     )
                 book_capture_elapsed = _time.monotonic() - capture_started
+            _store_global_book_epoch(
+                trade_conn,
+                bound_probabilities,
+                epoch,
+                checked_at=datetime.now(UTC),
+            )
             logging.getLogger(__name__).info(
                 "global book epoch stage completed: book_capture elapsed_s=%.3f "
                 "total_s=%.3f families=%d assets=%d",

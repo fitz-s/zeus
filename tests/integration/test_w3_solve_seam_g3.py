@@ -2273,6 +2273,7 @@ def test_live_adapter_overlaps_gamma_bind_with_clob_book_fetch(monkeypatch):
     topology = sqlite3.connect(":memory:")
     world = sqlite3.connect(":memory:")
     captured = {}
+    monkeypatch.setattr(era, "_GLOBAL_BOOK_EPOCH_CACHE", None)
 
     def fake_process(events, **kwargs):
         captured.update(kwargs)
@@ -2316,7 +2317,11 @@ def test_live_adapter_overlaps_gamma_bind_with_clob_book_fetch(monkeypatch):
         assert kwargs["metadata_overrides"] == metadata
         assert kwargs["prefetched_at_utc"].tzinfo is not None
         assert set(kwargs["prefetched_books"]) == {"yes-token", "no-token"}
-        return SimpleNamespace(witness_identity="book-overlapped", assets=())
+        return SimpleNamespace(
+            witness_identity="book-overlapped",
+            assets=(),
+            current_identity=lambda _checked_at: "book-overlapped",
+        )
 
     class FakeClient:
         def __init__(self, **_):
@@ -2345,8 +2350,11 @@ def test_live_adapter_overlaps_gamma_bind_with_clob_book_fetch(monkeypatch):
     provider = captured["current_book_epoch_provider"]
     probabilities = {
         "family": SimpleNamespace(
+            family_key="family",
             bindings=(
                 SimpleNamespace(
+                    bin_id="bin",
+                    condition_id="condition",
                     yes_token_id="yes-token",
                     no_token_id="no-token",
                 ),
@@ -2362,10 +2370,99 @@ def test_live_adapter_overlaps_gamma_bind_with_clob_book_fetch(monkeypatch):
     assert bound == probabilities
     assert epoch.witness_identity == "book-overlapped"
     assert len(capture_calls) == 1
+    bound_again, epoch_again = provider(
+        probabilities,
+        _dt.datetime.now(_dt.timezone.utc),
+    )
+    assert bound_again == probabilities
+    assert epoch_again is epoch
+    assert len(capture_calls) == 1
     trade.close()
     forecast.close()
     topology.close()
     world.close()
+
+
+def test_global_book_epoch_cache_requires_stable_non_price_topology(monkeypatch):
+    conn = sqlite3.connect(":memory:")
+    monkeypatch.setattr(era, "_GLOBAL_BOOK_EPOCH_CACHE", None)
+    at = _dt.datetime.now(_dt.timezone.utc)
+    probabilities = {
+        "family": SimpleNamespace(
+            family_key="family",
+            bindings=(
+                SimpleNamespace(
+                    bin_id="bin",
+                    condition_id="condition",
+                    yes_token_id="yes-token",
+                    no_token_id="no-token",
+                ),
+            ),
+        )
+    }
+    epoch = SimpleNamespace(
+        witness_identity="book-current",
+        current_identity=lambda _checked_at: "book-current",
+    )
+    era._store_global_book_epoch(
+        conn,
+        probabilities,
+        epoch,
+        checked_at=at,
+    )
+
+    assert era._get_cached_global_book_epoch(
+        conn,
+        probabilities,
+        checked_at=at,
+        allowed=True,
+    ) is epoch
+    changed = {
+        "family": SimpleNamespace(
+            family_key="family",
+            bindings=(
+                SimpleNamespace(
+                    bin_id="bin",
+                    condition_id="condition",
+                    yes_token_id="yes-token",
+                    no_token_id="new-no-token",
+                ),
+            ),
+        )
+    }
+    assert era._get_cached_global_book_epoch(
+        conn,
+        changed,
+        checked_at=at,
+        allowed=True,
+    ) is None
+    assert not era._global_book_epoch_cache_allowed(
+        (SimpleNamespace(event_type="EDLI_REDECISION_PENDING"),)
+    )
+    assert era._global_book_epoch_cache_allowed(
+        (
+            SimpleNamespace(event_type="FORECAST_SNAPSHOT_READY"),
+            SimpleNamespace(event_type="DAY0_EXTREME_UPDATED"),
+        )
+    )
+
+    expired = SimpleNamespace(
+        witness_identity="book-expired",
+        current_identity=lambda _checked_at: None,
+    )
+    era._store_global_book_epoch(
+        conn,
+        probabilities,
+        expired,
+        checked_at=at,
+    )
+    assert era._get_cached_global_book_epoch(
+        conn,
+        probabilities,
+        checked_at=at,
+        allowed=True,
+    ) is epoch
+    conn.close()
 
 
 def test_global_curve_supersession_keeps_typed_current_candidate():
