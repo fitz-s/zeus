@@ -3021,6 +3021,7 @@ def select_global_single_order(
         )
 
     scored: list[GlobalSingleOrderDecision] = []
+    capital_authority_available = True
     for candidate, q_samples, band_alpha, _band_basis in eligible:
         if isinstance(candidate, GlobalSingleOrderSellCandidate):
             score = _score_global_single_order_sell(
@@ -3040,6 +3041,9 @@ def select_global_single_order(
                 scored.append(score)
                 rejections.update(score.rejection_reasons)
             continue
+        if not capital_authority_available:
+            rejections[candidate.candidate_id] = "CAPITAL_CONSTRAINT_UNAVAILABLE"
+            continue
         candidate_capital_limit = capital_limit_usd
         if candidate_capital_limit_resolver is not None:
             try:
@@ -3047,29 +3051,10 @@ def select_global_single_order(
                     capital_limit_usd,
                     Decimal(candidate_capital_limit_resolver(candidate)),
                 )
-            except Exception:  # noqa: BLE001 - lost allocator authority invalidates the epoch
-                reason = "CAPITAL_CONSTRAINT_UNAVAILABLE"
-                failure_rejections = {
-                    **rejections,
-                    candidate.candidate_id: reason,
-                }
-                return GlobalSingleOrderDecision(
-                    candidate=None,
-                    shares=Decimal("0"),
-                    cost_usd=Decimal("0"),
-                    robust_delta_log_wealth=0.0,
-                    robust_ev_usd=0.0,
-                    capital_efficiency=0.0,
-                    no_trade_reason="GLOBAL_EPOCH_SUPERSEDED",
-                    rejection_reasons=failure_rejections,
-                    candidate_evaluations=_global_candidate_evaluations(
-                        candidates,
-                        rejections=failure_rejections,
-                        scores=scored,
-                        default_rejection="GLOBAL_EPOCH_SUPERSEDED",
-                    ),
-                    candidate_input_count=len(candidates),
-                )
+            except Exception:  # noqa: BLE001 - lost allocator authority blocks new risk
+                capital_authority_available = False
+                rejections[candidate.candidate_id] = "CAPITAL_CONSTRAINT_UNAVAILABLE"
+                continue
         if candidate_capital_limit <= 0:
             rejections[candidate.candidate_id] = "CAPITAL_CAPACITY_EXHAUSTED"
             continue
