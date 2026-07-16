@@ -25,6 +25,8 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import threading
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -526,7 +528,10 @@ def test_source_clock_scoped_capture_prioritizes_held_families(
     monkeypatch.setattr(dl, "download_bayes_precision_fusion_extra_raw_inputs", _download)
 
     report = prod._download_bayes_precision_fusion_source_clock_raw_inputs_if_needed(
-        {"forecast_db": str(tmp_path / "zeus-forecasts.db")},
+        {
+            "forecast_db": str(tmp_path / "zeus-forecasts.db"),
+            "source_clock_fanout_workers": 1,
+        },
         source_clock_report=_Report(),
         max_wall_clock_seconds=5.0,
     )
@@ -536,6 +541,92 @@ def test_source_clock_scoped_capture_prioritizes_held_families(
         ("Paris", "2026-07-16", "high"),
         ("Seoul", "2026-07-16", "high"),
     ]
+    assert report["status"] == (
+        "SOURCE_CLOCK_SCOPED_BAYES_PRECISION_FUSION_EXTRA_RAW_INPUTS_DOWNLOADED"
+    )
+
+
+def test_source_clock_scoped_capture_fans_out_city_dates(
+    tmp_path, monkeypatch
+) -> None:
+    import src.data.bayes_precision_fusion_download as dl
+    import src.data.openmeteo_model_updates as updates
+    import src.data.replacement_forecast_current_target_plan as target_plan
+    import src.data.replacement_forecast_seed_discovery as seed_discovery
+
+    class _Report:
+        updated_sources = ("ecmwf_ifs",)
+        affected_cities = ("Amsterdam", "London", "Paris", "Seoul")
+
+        def as_dict(self):
+            return {
+                "updated_sources": list(self.updated_sources),
+                "affected_cities": list(self.affected_cities),
+            }
+
+    keys = tuple(
+        target_plan.ReplacementForecastTargetKey(city, "2026-07-16", metric)
+        for city in _Report.affected_cities
+        for metric in ("high", "low")
+    )
+    lock = threading.Lock()
+    active = 0
+    max_active = 0
+    seen: list[tuple[tuple[str, str], ...]] = []
+
+    monkeypatch.setitem(
+        prod.settings["edli"],
+        "replacement_0_1_bayes_precision_fusion_capture_enabled",
+        True,
+    )
+    monkeypatch.setattr(dl, "bayes_precision_fusion_quota_cooldown_seconds", lambda: 0)
+    monkeypatch.setattr(updates, "read_model_updates_jsonl", lambda _path: ())
+    monkeypatch.setattr(
+        target_plan,
+        "replacement_forecast_current_target_keys",
+        lambda _path: keys,
+    )
+    monkeypatch.setattr(seed_discovery, "held_position_family_priorities", lambda: {})
+    monkeypatch.setattr(
+        prod,
+        "_probe_resolved_bayes_precision_fusion_extras_cycle",
+        lambda: _CYCLE,
+    )
+
+    def _download(**kwargs):
+        nonlocal active, max_active
+        group = tuple((target.city, target.metric) for target in kwargs["targets"])
+        with lock:
+            active += 1
+            max_active = max(max_active, active)
+            seen.append(group)
+        time.sleep(0.04)
+        with lock:
+            active -= 1
+        return {
+            "status": "BAYES_PRECISION_FUSION_EXTRA_RAW_INPUTS_DOWNLOADED",
+            "target_count": len(kwargs["targets"]),
+            "written_row_count": len(kwargs["targets"]),
+            "global_models_unavailable": [],
+        }
+
+    monkeypatch.setattr(dl, "download_bayes_precision_fusion_extra_raw_inputs", _download)
+
+    report = prod._download_bayes_precision_fusion_source_clock_raw_inputs_if_needed(
+        {
+            "forecast_db": str(tmp_path / "zeus-forecasts.db"),
+            "source_clock_fanout_workers": 4,
+        },
+        source_clock_report=_Report(),
+        max_wall_clock_seconds=1.0,
+    )
+
+    assert max_active == 4
+    assert report["fanout_workers"] == 4
+    assert report["target_count"] == 8
+    assert report["written_row_count"] == 8
+    assert report["fanout_errors"] == ()
+    assert all({metric for _, metric in group} == {"high", "low"} for group in seen)
     assert report["status"] == (
         "SOURCE_CLOCK_SCOPED_BAYES_PRECISION_FUSION_EXTRA_RAW_INPUTS_DOWNLOADED"
     )

@@ -1,5 +1,5 @@
 # Created: 2026-06-08
-# Last reused/audited: 2026-06-13
+# Last reused/audited: 2026-07-16
 # Authority basis: operator Point-1 directive 2026-06-08 — move BAYES_PRECISION_FUSION/replacement_0_1
 #   forecast PRODUCTION (raw-input download + live materialization) OFF the
 #   live-trading daemon (src/main.py) INTO the forecast-live (data) daemon. The
@@ -28,6 +28,8 @@ import functools
 import json
 import logging
 import sqlite3
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -120,6 +122,7 @@ def _replacement_forecast_live_materialization_queue_config() -> dict[str, objec
         "download_limit": int(cfg.get("download_limit_per_cycle") or cfg.get("seed_discovery_limit_per_cycle") or cfg.get("materialization_limit_per_cycle") or 10),
         "download_release_lag_hours": float(cfg.get("download_release_lag_hours") or 14.0),
         "download_anchor_sigma_c": float(cfg.get("download_anchor_sigma_c") or 3.0),
+        "source_clock_fanout_workers": int(cfg.get("source_clock_fanout_workers") or 4),
     }
 
 
@@ -509,18 +512,152 @@ def _download_bayes_precision_fusion_source_clock_raw_inputs_if_needed(
                 "affected_cities": affected_cities,
             }
 
-        report = download_bayes_precision_fusion_extra_raw_inputs(
-            forecast_db=Path(str(forecast_db)),
-            cycle=cycle,
-            targets=targets,
-            models=updated_sources,
-            include_previous_runs=False,
-            prune_after=False,
-            allow_single_runs_fallback=False,
-            release_lag_hours=float(cfg.get("download_release_lag_hours") or 14.0),
-            max_wall_clock_seconds=max_wall_clock_seconds,
+        grouped_targets: list[list[BayesPrecisionFusionDownloadTarget]] = []
+        group_index: dict[tuple[str, str], int] = {}
+        for target in targets:
+            key = (target.city, target.target_date)
+            index = group_index.get(key)
+            if index is None:
+                group_index[key] = len(grouped_targets)
+                grouped_targets.append([target])
+            else:
+                grouped_targets[index].append(target)
+
+        worker_count = min(
+            max(1, int(cfg.get("source_clock_fanout_workers") or 4)),
+            8,
+            len(grouped_targets),
         )
-        report["status"] = f"SOURCE_CLOCK_SCOPED_{report.get('status')}"
+        chunks = [
+            [
+                target
+                for group in grouped_targets[offset::worker_count]
+                for target in group
+            ]
+            for offset in range(worker_count)
+        ]
+        deadline = (
+            time.monotonic() + max(0.0, float(max_wall_clock_seconds))
+            if max_wall_clock_seconds is not None
+            else None
+        )
+
+        def _download_chunk(chunk: list[BayesPrecisionFusionDownloadTarget]) -> dict[str, object]:
+            remaining = (
+                max(0.0, deadline - time.monotonic())
+                if deadline is not None
+                else None
+            )
+            return download_bayes_precision_fusion_extra_raw_inputs(
+                forecast_db=Path(str(forecast_db)),
+                cycle=cycle,
+                targets=chunk,
+                models=updated_sources,
+                include_previous_runs=False,
+                prune_after=False,
+                allow_single_runs_fallback=False,
+                release_lag_hours=float(cfg.get("download_release_lag_hours") or 14.0),
+                max_wall_clock_seconds=remaining,
+            )
+
+        reports: list[dict[str, object]] = []
+        fanout_errors: list[str] = []
+        if worker_count == 1:
+            reports.append(_download_chunk(chunks[0]))
+        else:
+            with ThreadPoolExecutor(
+                max_workers=worker_count,
+                thread_name_prefix="source-clock-bpf",
+            ) as executor:
+                futures = [executor.submit(_download_chunk, chunk) for chunk in chunks]
+                for future in as_completed(futures):
+                    try:
+                        reports.append(future.result())
+                    except Exception as exc:  # noqa: BLE001 - preserve successful chunks
+                        fanout_errors.append(f"{type(exc).__name__}: {str(exc)[:220]}")
+
+        statuses = {str(report.get("status") or "") for report in reports}
+        if fanout_errors:
+            status = "SOURCE_CLOCK_BPF_SCOPED_CAPTURE_FAILSOFT_SKIPPED"
+        elif "BAYES_PRECISION_FUSION_EXTRA_TIMEBOXED_INCOMPLETE" in statuses:
+            status = "SOURCE_CLOCK_SCOPED_BAYES_PRECISION_FUSION_EXTRA_TIMEBOXED_INCOMPLETE"
+        elif "BAYES_PRECISION_FUSION_EXTRA_TRANSPORT_RETRYABLE" in statuses:
+            status = "SOURCE_CLOCK_SCOPED_BAYES_PRECISION_FUSION_EXTRA_TRANSPORT_RETRYABLE"
+        else:
+            status = "SOURCE_CLOCK_SCOPED_BAYES_PRECISION_FUSION_EXTRA_RAW_INPUTS_DOWNLOADED"
+
+        unavailable_sets = [
+            set(report.get("global_models_unavailable") or ())
+            for report in reports
+        ]
+        global_models_unavailable = (
+            sorted(set.intersection(*unavailable_sets))
+            if unavailable_sets
+            else []
+        )
+        report = {
+            "status": status,
+            "cycle": cycle.isoformat(),
+            "forecast_db": str(forecast_db),
+            "target_count": sum(int(item.get("target_count") or 0) for item in reports),
+            "candidate_row_count": sum(
+                int(item.get("candidate_row_count") or 0) for item in reports
+            ),
+            "written_row_count": sum(
+                int(item.get("written_row_count") or 0) for item in reports
+            ),
+            "pruned_row_count": sum(
+                int(item.get("pruned_row_count") or 0) for item in reports
+            ),
+            "dropped": tuple(
+                value
+                for item in reports
+                for value in (item.get("dropped") or ())
+            ),
+            "domain_excluded": tuple(sorted({
+                value
+                for item in reports
+                for value in (item.get("domain_excluded") or ())
+            })),
+            "transport_errors": tuple(
+                value
+                for item in reports
+                for value in (item.get("transport_errors") or ())
+            ),
+            "transport_aborted_remaining_targets": any(
+                bool(item.get("transport_aborted_remaining_targets"))
+                for item in reports
+            ),
+            "timeboxed_incomplete": any(
+                bool(item.get("timeboxed_incomplete"))
+                for item in reports
+            ),
+            "timebox_unattempted_target_groups": sum(
+                int(item.get("timebox_unattempted_target_groups") or 0)
+                for item in reports
+            ),
+            "timebox_unpersisted_row_count": sum(
+                int(item.get("timebox_unpersisted_row_count") or 0)
+                for item in reports
+            ),
+            "prune_skipped_timebox": any(
+                bool(item.get("prune_skipped_timebox"))
+                for item in reports
+            ),
+            "max_wall_clock_seconds": max_wall_clock_seconds,
+            "global_models_expected": max(
+                (int(item.get("global_models_expected") or 0) for item in reports),
+                default=0,
+            ),
+            "global_models_dropped_scoped": sorted({
+                value
+                for item in reports
+                for value in (item.get("global_models_dropped_scoped") or ())
+            }),
+            "global_models_unavailable": global_models_unavailable,
+            "fanout_workers": worker_count,
+            "fanout_errors": tuple(fanout_errors),
+        }
         report["updated_sources"] = updated_sources
         report["affected_cities"] = affected_cities
         return report
