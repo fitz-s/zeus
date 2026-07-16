@@ -1473,15 +1473,19 @@ def _replacement_forecast_download_cycle() -> None:
 
 
 @_scheduler_job("replacement_forecast_live_materialize")
-def _replacement_forecast_live_materialize_cycle() -> None:
+def _replacement_forecast_live_materialize_cycle(*, discover: bool = True) -> None:
     if not _replacement_forecast_live_materialization_enabled():
         return
     cfg = _replacement_forecast_live_materialization_queue_config()
-    report = _run_replacement_forecast_live_materialization_queue_once(cfg)
+    report = _run_replacement_forecast_live_materialization_queue_once(
+        cfg, discover=discover
+    )
     _log_replacement_forecast_materialization_report(report)
 
 
-def _run_replacement_forecast_live_materialization_queue_once(cfg: dict[str, object]):
+def _run_replacement_forecast_live_materialization_queue_once(
+    cfg: dict[str, object], *, discover: bool = True
+):
     from src.data.replacement_forecast_live_materialization_queue import (
         process_replacement_forecast_live_materialization_queue,
     )
@@ -1499,6 +1503,7 @@ def _run_replacement_forecast_live_materialization_queue_once(cfg: dict[str, obj
         seed_discovery_limit=int(cfg["seed_discovery_limit"]),
         seed_limit=int(cfg["seed_limit"]),
         limit=int(cfg["limit"]),
+        discover=discover,
     )
     revision_after = _forecast_posterior_revision(cfg)
     if (

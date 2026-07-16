@@ -2,15 +2,21 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
+import socket
+import tempfile
 import uuid
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Iterator
 
 REACTOR_WAKE_FILENAME = "edli-reactor-wake.json"
 REACTOR_WAKE_QUEUE_SUFFIX = ".d"
+REACTOR_WAKE_SOCKET_SUFFIX = ".sock"
 
 
 @dataclass(frozen=True)
@@ -34,6 +40,81 @@ def _wake_path(path: Path | None) -> Path:
 def _wake_queue_dir(path: Path | None) -> Path:
     target = _wake_path(path)
     return target.with_name(f"{target.name}{REACTOR_WAKE_QUEUE_SUFFIX}")
+
+
+def _wake_socket_path(path: Path | None) -> Path:
+    target = _wake_path(path)
+    socket_path = target.with_name(f"{target.name}{REACTOR_WAKE_SOCKET_SUFFIX}")
+    if len(os.fsencode(socket_path)) <= 100:
+        return socket_path
+    digest = hashlib.sha256(os.fsencode(target)).hexdigest()[:24]
+    return Path(tempfile.gettempdir()) / f"zeus-reactor-wake-{digest}.sock"
+
+
+def _notify_reactor_wake(path: Path | None) -> None:
+    """Best-effort latency signal; the durable queue remains the authority."""
+
+    notifier: socket.socket | None = None
+    try:
+        notifier = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+        notifier.setblocking(False)
+        notifier.sendto(b"\x01", str(_wake_socket_path(path)))
+    except OSError:
+        pass
+    finally:
+        if notifier is not None:
+            notifier.close()
+
+
+def _reactor_wake_socket_live(path: Path) -> bool:
+    probe: socket.socket | None = None
+    try:
+        probe = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+        probe.connect(str(path))
+        probe.send(b"\x00")
+        return True
+    except OSError:
+        return False
+    finally:
+        if probe is not None:
+            probe.close()
+
+
+@contextmanager
+def reactor_wake_listener_socket(
+    *, path: Path | None = None
+) -> Iterator[socket.socket | None]:
+    """Own the local notifier socket, or yield None when another listener does."""
+
+    target = _wake_socket_path(path)
+    listener: socket.socket | None = None
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if target.exists():
+            if _reactor_wake_socket_live(target):
+                yield None
+                return
+            target.unlink(missing_ok=True)
+        listener = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+        listener.bind(str(target))
+    except OSError:
+        if listener is not None:
+            listener.close()
+        yield None
+        return
+
+    assert listener is not None
+    bound_inode: int | None = None
+    try:
+        bound_inode = target.stat().st_ino
+        yield listener
+    finally:
+        listener.close()
+        try:
+            if bound_inode is not None and target.stat().st_ino == bound_inode:
+                target.unlink(missing_ok=True)
+        except OSError:
+            pass
 
 
 def _clean_forecast_families(
@@ -105,6 +186,7 @@ def publish_reactor_wake(
     queue_target = queue_dir / f"{published_us:020d}-{wake.wake_id}.json"
     _atomic_write_wake(queue_target, wake)
     _atomic_write_wake(target, wake)
+    _notify_reactor_wake(path)
     return wake
 
 

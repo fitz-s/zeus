@@ -3787,11 +3787,29 @@ def _run_edli_reactor_wake_listener(
     stop_event: threading.Event,
     poll_seconds: float = 1.0,
 ) -> None:
-    while not stop_event.wait(max(0.05, float(poll_seconds))):
-        try:
-            _edli_reactor_wake_poll_once()
-        except Exception:
-            logger.exception("EDLI reactor wake listener poll failed")
+    from src.runtime.reactor_wake import reactor_wake_listener_socket
+
+    fallback_seconds = max(0.05, float(poll_seconds))
+    with reactor_wake_listener_socket() as notifier:
+        if notifier is not None:
+            notifier.settimeout(fallback_seconds)
+        while not stop_event.is_set():
+            if notifier is None:
+                if stop_event.wait(fallback_seconds):
+                    break
+            else:
+                try:
+                    notifier.recv(1)
+                except TimeoutError:
+                    pass
+                except OSError:
+                    logger.exception("EDLI reactor wake notifier receive failed")
+                    if stop_event.wait(fallback_seconds):
+                        break
+            try:
+                _edli_reactor_wake_poll_once()
+            except Exception:
+                logger.exception("EDLI reactor wake listener poll failed")
 
 
 def _start_edli_reactor_wake_listener() -> None:

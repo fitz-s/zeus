@@ -185,15 +185,111 @@ def test_replacement_materialize_job_calls_undecorated_production_inner(monkeypa
     def _outer_wrapper() -> None:
         calls.append("outer")
 
-    def _inner_job() -> None:
-        calls.append("inner")
+    def _inner_job(*, discover: bool = True) -> None:
+        calls.append(f"inner:{discover}")
 
     _outer_wrapper.__wrapped__ = _inner_job  # type: ignore[attr-defined]
     monkeypatch.setattr(production, "_replacement_forecast_live_materialize_cycle", _outer_wrapper)
 
     _replacement_forecast_materialize_job.__wrapped__()
 
-    assert calls == ["inner"]
+    assert calls == ["inner:True"]
+
+
+def test_replacement_materialize_poll_prioritizes_explicit_queue(monkeypatch, tmp_path) -> None:
+    import src.data.replacement_forecast_production as production
+    import src.ingest.forecast_live_daemon as daemon
+
+    cfg = _materialization_queue_cfg(tmp_path)
+    seed_dir = Path(cfg["seed_dir"])
+    seed_dir.mkdir(parents=True)
+    (seed_dir / "urgent.json").write_text("{}\n", encoding="utf-8")
+    calls: list[bool] = []
+
+    monkeypatch.setattr(
+        production,
+        "_replacement_forecast_live_materialization_queue_config",
+        lambda: cfg,
+    )
+    monkeypatch.setattr(
+        daemon,
+        "_replacement_forecast_materialize_job",
+        lambda *, discover=True: calls.append(discover),
+    )
+    monkeypatch.setattr(
+        daemon, "_replacement_forecast_last_discovery_monotonic", 0.0
+    )
+
+    daemon._replacement_forecast_materialize_poll_job()
+
+    assert calls == [False]
+    assert daemon._replacement_forecast_last_discovery_monotonic == 0.0
+
+
+def test_replacement_materialize_poll_runs_periodic_discovery(monkeypatch, tmp_path) -> None:
+    import src.data.replacement_forecast_production as production
+    import src.ingest.forecast_live_daemon as daemon
+
+    cfg = _materialization_queue_cfg(tmp_path)
+    calls: list[bool] = []
+    monkeypatch.setattr(
+        production,
+        "_replacement_forecast_live_materialization_queue_config",
+        lambda: cfg,
+    )
+    monkeypatch.setattr(
+        daemon,
+        "_replacement_forecast_materialize_job",
+        lambda *, discover=True: calls.append(discover),
+    )
+    monkeypatch.setattr(
+        daemon, "_replacement_forecast_last_discovery_monotonic", 0.0
+    )
+
+    daemon._replacement_forecast_materialize_poll_job()
+
+    assert calls == [True]
+    assert daemon._replacement_forecast_last_discovery_monotonic > 0.0
+
+
+def test_replacement_materialize_scheduler_uses_fast_queue_poll(monkeypatch) -> None:
+    import src.ingest.forecast_live_daemon as daemon
+
+    class _Scheduler:
+        def __init__(self) -> None:
+            self.jobs: list[tuple[object, str, dict[str, object]]] = []
+
+        def add_job(self, fn, trigger, **kwargs) -> None:
+            self.jobs.append((fn, trigger, kwargs))
+
+    scheduler = _Scheduler()
+    monkeypatch.setattr(
+        daemon, "_replacement_forecast_publish_cron_hours", lambda: (0,)
+    )
+    monkeypatch.setattr(
+        daemon, "_replacement_forecast_materialize_interval_minutes", lambda: 1
+    )
+    monkeypatch.setattr(
+        daemon, "_replacement_forecast_materialize_poll_seconds", lambda: 5
+    )
+    monkeypatch.setattr(
+        daemon, "_replacement_forecast_live_runtime_enabled", lambda: True
+    )
+
+    daemon._register_replacement_forecast_production_jobs(
+        scheduler,
+        startup_run_date=datetime(2026, 7, 16, tzinfo=timezone.utc),
+    )
+
+    fn, trigger, kwargs = next(
+        job
+        for job in scheduler.jobs
+        if job[2].get("id") == daemon.REPLACEMENT_FORECAST_MATERIALIZE_JOB_ID
+    )
+    assert fn is daemon._replacement_forecast_materialize_poll_job
+    assert trigger == "interval"
+    assert kwargs["seconds"] == 5
+    assert "minutes" not in kwargs
 
 
 def _materialization_queue_cfg(tmp_path) -> dict[str, object]:
@@ -220,10 +316,11 @@ def test_materialization_queue_publishes_wake_after_posterior_advance(
     from src.runtime import reactor_wake
 
     report = object()
+    queue_calls: list[dict[str, object]] = []
     monkeypatch.setattr(
         queue,
         "process_replacement_forecast_live_materialization_queue",
-        lambda **kwargs: report,
+        lambda **kwargs: queue_calls.append(kwargs) or report,
     )
     revisions = iter((41, 42))
     monkeypatch.setattr(
@@ -253,10 +350,11 @@ def test_materialization_queue_publishes_wake_after_posterior_advance(
     )
 
     result = production._run_replacement_forecast_live_materialization_queue_once(
-        _materialization_queue_cfg(tmp_path)
+        _materialization_queue_cfg(tmp_path), discover=False
     )
 
     assert result is report
+    assert queue_calls[0]["discover"] is False
     assert published == [
         (
             "replacement_forecast_production",
@@ -513,6 +611,81 @@ def test_reactor_wake_sidecar_round_trip(tmp_path) -> None:
 
     assert reactor_wake_revision(path=path) != first_revision
     assert acknowledge_reactor_wake(published, path=path) is True
+
+
+def test_reactor_wake_publish_notifies_local_listener(tmp_path) -> None:
+    from src.runtime.reactor_wake import (
+        publish_reactor_wake,
+        reactor_wake_listener_socket,
+    )
+
+    path = tmp_path / "wake.json"
+    with reactor_wake_listener_socket(path=path) as listener:
+        assert listener is not None
+        listener.settimeout(0.5)
+        publish_reactor_wake(
+            source="test",
+            reason="day0_extreme_event_committed",
+            path=path,
+            event_ids=("event-1",),
+        )
+        assert listener.recv(1) == b"\x01"
+
+
+def test_reactor_wake_socket_failure_keeps_durable_queue(monkeypatch, tmp_path) -> None:
+    from src.runtime import reactor_wake
+
+    path = tmp_path / "wake.json"
+    monkeypatch.setattr(
+        reactor_wake.socket,
+        "socket",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("fd exhausted")),
+    )
+
+    published = reactor_wake.publish_reactor_wake(
+        source="test",
+        reason="day0_extreme_event_committed",
+        path=path,
+        event_ids=("event-1",),
+    )
+
+    assert reactor_wake.read_reactor_wake(path=path) == published
+
+
+def test_reactor_wake_listener_handles_signal_without_poll_delay(monkeypatch) -> None:
+    import socket
+    import threading
+    from contextlib import contextmanager
+
+    import src.main as main
+    from src.runtime import reactor_wake
+
+    receiver, sender = socket.socketpair(socket.AF_UNIX, socket.SOCK_DGRAM)
+    stop_event = threading.Event()
+    calls: list[str] = []
+
+    @contextmanager
+    def _listener():
+        yield receiver
+
+    def _poll_once() -> bool:
+        calls.append("poll")
+        stop_event.set()
+        return True
+
+    monkeypatch.setattr(reactor_wake, "reactor_wake_listener_socket", _listener)
+    monkeypatch.setattr(main, "_edli_reactor_wake_poll_once", _poll_once)
+    sender.send(b"\x01")
+    try:
+        main._run_edli_reactor_wake_listener(
+            stop_event=stop_event,
+            poll_seconds=10.0,
+        )
+    finally:
+        sender.close()
+        receiver.close()
+
+    assert calls == ["poll"]
 
 
 def test_reactor_wake_queue_prioritizes_day0_without_losing_forecasts(tmp_path) -> None:

@@ -1228,6 +1228,7 @@ def process_replacement_forecast_live_materialization_queue(
     seed_limit: int | None = None,
     limit: int = 10,
     runner: Runner | None = None,
+    discover: bool = True,
 ) -> ReplacementForecastLiveMaterializationQueueReport:
     """Process local materialization request JSON files.
 
@@ -1268,6 +1269,7 @@ def process_replacement_forecast_live_materialization_queue(
             seed_limit=seed_limit,
             limit=limit,
             runner=runner,
+            discover=discover,
         )
 
 
@@ -1285,9 +1287,10 @@ def _process_replacement_forecast_live_materialization_queue_locked(
     seed_limit: int | None = None,
     limit: int = 10,
     runner: Runner | None = None,
+    discover: bool = True,
 ) -> ReplacementForecastLiveMaterializationQueueReport:
     discovery_report: ReplacementForecastSeedDiscoveryReport | None = None
-    if raw_manifest_dir is not None:
+    if discover and raw_manifest_dir is not None:
         if seed_dir is None:
             raise ValueError("seed_dir is required when forecast_db/raw_manifest_dir discovery is configured")
         if forecast_db is None:

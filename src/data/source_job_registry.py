@@ -244,10 +244,10 @@ _FORECAST_LIVE: tuple[SourceJobSpec, ...] = (
                   dispatch_kind="startup", family="forecast", registry_built=False,
                   notes="one-shot date trigger 90s after boot; same download job as cron path"),
     SourceJobSpec("replacement_forecast_live_materialize", "forecast_live_daemon", "live", "default", True,
-                  callable_ref="_replacement_forecast_materialize_job",
+                  callable_ref="_replacement_forecast_materialize_poll_job",
                   misfire_grace_time=120, family="forecast", registry_built=False,
-                  notes="interval-driven seed_discovery→seed→materialize on already-downloaded "
-                        "manifests; runs on dedicated replacement_production executor lane"),
+                  notes="fast explicit seed/request drain plus periodic seed discovery on "
+                        "already-downloaded manifests; dedicated replacement_production lane"),
     SourceJobSpec("anchor_meta_stamp_cross_check", "forecast_live_daemon", "diagnostic", "default", False,
                   source_ids=("openmeteo_ecmwf_ifs_9km",),
                   callable_ref="_anchor_meta_stamp_cross_check_job",

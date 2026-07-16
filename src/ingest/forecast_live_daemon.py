@@ -131,6 +131,7 @@ REPLACEMENT_FORECAST_EXECUTOR_LANE = "replacement_production"
 # the materialize keeps its own worker and refreshes readiness every interval regardless of
 # download duration.
 REPLACEMENT_FORECAST_DOWNLOAD_EXECUTOR_LANE = "replacement_download"
+_replacement_forecast_last_discovery_monotonic = 0.0
 FORECAST_LIVE_HEARTBEAT_SECONDS = 30
 FORECAST_LIVE_SAFE_CYCLE_POLL_SECONDS = 5 * 60
 FORECAST_LIVE_SOURCE_HEALTH_SECONDS = 10 * 60
@@ -1072,7 +1073,7 @@ def _replacement_cycle_availability_poll_job() -> None:
 
 
 @_scheduler_job(REPLACEMENT_FORECAST_MATERIALIZE_JOB_ID)
-def _replacement_forecast_materialize_job() -> None:
+def _replacement_forecast_materialize_job(*, discover: bool = True) -> None:
     """LIGHT seed_discovery -> seed -> materialize on already-downloaded manifests (no download).
 
     Interval-driven; delegates to the shared production function, which is live-authority gated and
@@ -1084,7 +1085,38 @@ def _replacement_forecast_materialize_job() -> None:
     # Single health writer: the forecast-live scheduler wrapper owns this job's
     # health entry. Calling the production wrapper would swallow exceptions and
     # then let this outer wrapper overwrite FAILED with OK.
-    _replacement_forecast_live_materialize_cycle.__wrapped__()
+    _replacement_forecast_live_materialize_cycle.__wrapped__(discover=discover)
+
+
+def _replacement_forecast_queue_pending(cfg: dict[str, object]) -> bool:
+    for key in ("seed_dir", "request_dir"):
+        path = Path(str(cfg[key]))
+        if path.exists() and next(path.glob("*.json"), None) is not None:
+            return True
+    return False
+
+
+def _replacement_forecast_materialize_poll_job() -> None:
+    """Drain explicit work promptly; run global discovery only on its slower cadence."""
+
+    global _replacement_forecast_last_discovery_monotonic
+
+    from src.data.replacement_forecast_production import (
+        _replacement_forecast_live_materialization_queue_config,
+    )
+
+    cfg = _replacement_forecast_live_materialization_queue_config()
+    pending = _replacement_forecast_queue_pending(cfg)
+    now = time.monotonic()
+    discovery_due = (
+        now - _replacement_forecast_last_discovery_monotonic
+        >= 60.0 * _replacement_forecast_materialize_interval_minutes()
+    )
+    if pending:
+        _replacement_forecast_materialize_job(discover=False)
+    elif discovery_due:
+        _replacement_forecast_last_discovery_monotonic = now
+        _replacement_forecast_materialize_job(discover=True)
 
 
 def _publish_replacement_forecast_boot_wake() -> object | None:
@@ -1142,6 +1174,18 @@ def _replacement_forecast_materialize_interval_minutes() -> int:
     return int(_replacement_forecast_live_cfg().get("materialization_interval_min") or 1)
 
 
+def _replacement_forecast_materialize_poll_seconds() -> int:
+    return max(
+        1,
+        int(
+            _replacement_forecast_live_cfg().get(
+                "materialization_queue_poll_seconds"
+            )
+            or 5
+        ),
+    )
+
+
 def _register_replacement_forecast_production_jobs(
     scheduler: object, *, startup_run_date: datetime | None = None
 ) -> None:
@@ -1154,6 +1198,7 @@ def _register_replacement_forecast_production_jobs(
     startup_at = (startup_run_date or _utcnow())
     publish_hours = _replacement_forecast_publish_cron_hours()
     materialize_minutes = _replacement_forecast_materialize_interval_minutes()
+    materialize_poll_seconds = _replacement_forecast_materialize_poll_seconds()
     cron_hours = ",".join(str(h) for h in publish_hours)
 
     # Heavy download: publish-time cron (fires twice daily when each cycle is released).
@@ -1182,9 +1227,9 @@ def _register_replacement_forecast_production_jobs(
     )
     # Light materialize: interval (consumes already-downloaded manifests; no download).
     scheduler.add_job(  # type: ignore[attr-defined]
-        _replacement_forecast_materialize_job,
+        _replacement_forecast_materialize_poll_job,
         "interval",
-        minutes=materialize_minutes,
+        seconds=materialize_poll_seconds,
         id=REPLACEMENT_FORECAST_MATERIALIZE_JOB_ID,
         executor=REPLACEMENT_FORECAST_EXECUTOR_LANE,
         max_instances=1,
@@ -1211,8 +1256,10 @@ def _register_replacement_forecast_production_jobs(
     )
     logger.info(
         "replacement-forecast production jobs registered (download cron hour=%s min=10 + boot "
-        "catch-up; materialize interval=%dmin; lane=%s; live_runtime_enabled=%s)",
-        cron_hours, materialize_minutes, REPLACEMENT_FORECAST_EXECUTOR_LANE,
+        "catch-up; materialize queue poll=%ds discovery=%dmin; lane=%s; "
+        "live_runtime_enabled=%s)",
+        cron_hours, materialize_poll_seconds, materialize_minutes,
+        REPLACEMENT_FORECAST_EXECUTOR_LANE,
         _replacement_forecast_live_runtime_enabled(),
     )
 
