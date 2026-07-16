@@ -313,8 +313,7 @@ UTC = timezone.utc
 @dataclass(frozen=True)
 class _GlobalBookEpochCacheEntry:
     namespace: str
-    request_identity: tuple[tuple[str, str], ...]
-    bound_probabilities: Mapping[str, object]
+    topology: tuple[tuple[str, str, str, str, str], ...]
     epoch: object
 
 
@@ -322,28 +321,47 @@ _GLOBAL_BOOK_EPOCH_CACHE_LOCK = threading.Lock()
 _GLOBAL_BOOK_EPOCH_CACHE: _GlobalBookEpochCacheEntry | None = None
 
 
-def _global_probability_cache_identity(
+def _global_book_topology_signature(
     probabilities: Mapping[str, object],
-) -> tuple[tuple[str, str], ...] | None:
-    """Identify one immutable family-probability manifest before book binding."""
+) -> tuple[tuple[str, str, str, str, str], ...] | None:
+    """Identify the complete bound family/bin/token universe."""
 
-    rows: list[tuple[str, str]] = []
+    rows: list[tuple[str, str, str, str, str]] = []
+    tokens: set[str] = set()
     for raw_family_key, witness in sorted(probabilities.items()):
         family_key = str(raw_family_key or "").strip()
         witness_family_key = str(
             getattr(witness, "family_key", "") or ""
         ).strip()
-        witness_identity = str(
-            getattr(witness, "witness_identity", "") or ""
-        ).strip()
-        if (
-            not family_key
-            or witness_family_key != family_key
-            or not witness_identity
-        ):
+        bindings = tuple(getattr(witness, "bindings", ()) or ())
+        if not family_key or witness_family_key != family_key or not bindings:
             return None
-        rows.append((family_key, witness_identity))
-    return tuple(rows) or None
+        for binding in bindings:
+            bin_id = str(getattr(binding, "bin_id", "") or "").strip()
+            condition_id = str(
+                getattr(binding, "condition_id", "") or ""
+            ).strip()
+            yes_token_id = str(
+                getattr(binding, "yes_token_id", "") or ""
+            ).strip()
+            no_token_id = str(
+                getattr(binding, "no_token_id", "") or ""
+            ).strip()
+            if not all(
+                (bin_id, condition_id, yes_token_id, no_token_id)
+            ) or yes_token_id in tokens or no_token_id in tokens:
+                return None
+            tokens.update((yes_token_id, no_token_id))
+            rows.append(
+                (
+                    family_key,
+                    bin_id,
+                    condition_id,
+                    yes_token_id,
+                    no_token_id,
+                )
+            )
+    return tuple(sorted(rows)) or None
 
 
 def _global_book_epoch_cache_namespace(
@@ -366,16 +384,16 @@ def _global_book_epoch_cache_namespace(
     return None
 
 
-def _global_book_price_refresh_family_keys(
+def _global_book_refresh_family_keys(
     events: Iterable[object],
 ) -> frozenset[str] | None:
-    """Return exact price-triggered families; malformed triggers force full refresh."""
+    """Return exact changed families; malformed decision triggers force full refresh."""
 
     family_keys: set[str] = set()
     for event in events:
-        if (
-            str(getattr(event, "event_type", "") or "")
-            != _EDLI_REDECISION_EVENT_TYPE
+        event_type = str(getattr(event, "event_type", "") or "")
+        if event_type not in (
+            _FORECAST_DECISION_EVENT_TYPES | _DAY0_LANE_EVENT_TYPES
         ):
             continue
         try:
@@ -465,19 +483,19 @@ def _get_cached_global_book_epoch(
     *,
     checked_at: datetime,
     allowed: bool,
-) -> tuple[Mapping[str, object], object] | None:
+) -> object | None:
     if not allowed or checked_at.tzinfo is None:
         return None
     namespace = _global_book_epoch_cache_namespace(trade_conn)
-    request_identity = _global_probability_cache_identity(probabilities)
-    if namespace is None or request_identity is None:
+    topology = _global_book_topology_signature(probabilities)
+    if namespace is None or topology is None:
         return None
     with _GLOBAL_BOOK_EPOCH_CACHE_LOCK:
         entry = _GLOBAL_BOOK_EPOCH_CACHE
     if (
         entry is None
         or entry.namespace != namespace
-        or entry.request_identity != request_identity
+        or entry.topology != topology
     ):
         return None
     current_identity = getattr(entry.epoch, "current_identity", None)
@@ -486,14 +504,13 @@ def _get_cached_global_book_epoch(
     try:
         if current_identity(checked_at.astimezone(UTC)) is None:
             return None
-        return dict(entry.bound_probabilities), entry.epoch
+        return entry.epoch
     except (TypeError, ValueError):
         return None
 
 
 def _store_global_book_epoch(
     trade_conn: sqlite3.Connection,
-    request_probabilities: Mapping[str, object],
     bound_probabilities: Mapping[str, object],
     epoch: object,
     *,
@@ -504,15 +521,11 @@ def _store_global_book_epoch(
     if checked_at.tzinfo is None:
         return
     namespace = _global_book_epoch_cache_namespace(trade_conn)
-    request_identity = _global_probability_cache_identity(request_probabilities)
-    bound_identity = _global_probability_cache_identity(bound_probabilities)
+    topology = _global_book_topology_signature(bound_probabilities)
     current_identity = getattr(epoch, "current_identity", None)
     if (
         namespace is None
-        or request_identity is None
-        or bound_identity is None
-        or tuple(key for key, _ in request_identity)
-        != tuple(key for key, _ in bound_identity)
+        or topology is None
         or not callable(current_identity)
     ):
         return
@@ -524,8 +537,7 @@ def _store_global_book_epoch(
     with _GLOBAL_BOOK_EPOCH_CACHE_LOCK:
         _GLOBAL_BOOK_EPOCH_CACHE = _GlobalBookEpochCacheEntry(
             namespace=namespace,
-            request_identity=request_identity,
-            bound_probabilities=dict(bound_probabilities),
+            topology=topology,
             epoch=epoch,
         )
 
@@ -5181,7 +5193,7 @@ def event_bound_live_adapter_from_trade_conn(
         )
 
         events = tuple(events)
-        price_refresh_family_keys = _global_book_price_refresh_family_keys(events)
+        refresh_family_keys = _global_book_refresh_family_keys(events)
 
         if forecast_conn is None or topology_conn is None or calibration_conn is None:
             from src.events.reactor import GlobalBatchSubmitResult
@@ -5385,15 +5397,14 @@ def event_bound_live_adapter_from_trade_conn(
                 checked_at=cache_checked_at,
                 allowed=True,
             )
-            if cached is not None and price_refresh_family_keys == frozenset():
-                bound_probabilities, cached_epoch = cached
+            if cached is not None and refresh_family_keys == frozenset():
                 logging.getLogger(__name__).info(
                     "global book epoch cache hit: elapsed_s=%.3f families=%d assets=%d",
                     _time.monotonic() - _book_started,
-                    len(bound_probabilities),
-                    len(getattr(cached_epoch, "assets", ())),
+                    len(probabilities),
+                    len(getattr(cached, "assets", ())),
                 )
-                return bound_probabilities, cached_epoch
+                return probabilities, cached
 
             timeout = max(
                 1.0,
@@ -5585,13 +5596,12 @@ def event_bound_live_adapter_from_trade_conn(
 
             if (
                 cached is not None
-                and price_refresh_family_keys
-                and price_refresh_family_keys.issubset(probabilities)
+                and refresh_family_keys
+                and refresh_family_keys.issubset(probabilities)
             ):
-                cached_bound_probabilities, cached_epoch = cached
                 probability_delta = {
                     family_key: probabilities[family_key]
-                    for family_key in price_refresh_family_keys
+                    for family_key in refresh_family_keys
                 }
                 delta_bound_probabilities, delta_epoch = _capture(
                     probability_delta,
@@ -5599,20 +5609,19 @@ def event_bound_live_adapter_from_trade_conn(
                 )
                 try:
                     merged_epoch = _merge_global_book_epoch_delta(
-                        cached_epoch,
+                        cached,
                         delta_epoch,
-                        price_refresh_family_keys,
+                        refresh_family_keys,
                     )
                     if (
                         merged_epoch.current_identity(datetime.now(UTC))
                         is None
                     ):
                         raise ValueError("GLOBAL_BOOK_DELTA_BASE_EXPIRED")
-                    merged_probabilities = dict(cached_bound_probabilities)
+                    merged_probabilities = dict(probabilities)
                     merged_probabilities.update(delta_bound_probabilities)
                     _store_global_book_epoch(
                         trade_conn,
-                        probabilities,
                         merged_probabilities,
                         merged_epoch,
                         checked_at=datetime.now(UTC),
@@ -5621,7 +5630,7 @@ def event_bound_live_adapter_from_trade_conn(
                         "global book epoch delta merged: elapsed_s=%.3f "
                         "refreshed_families=%d total_families=%d assets=%d",
                         _time.monotonic() - _book_started,
-                        len(price_refresh_family_keys),
+                        len(refresh_family_keys),
                         len(merged_probabilities),
                         len(merged_epoch.assets),
                     )
@@ -5639,7 +5648,6 @@ def event_bound_live_adapter_from_trade_conn(
             )
             _store_global_book_epoch(
                 trade_conn,
-                probabilities,
                 bound_probabilities,
                 epoch,
                 checked_at=datetime.now(UTC),

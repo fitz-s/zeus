@@ -2291,7 +2291,10 @@ def test_live_adapter_overlaps_gamma_bind_with_clob_book_fetch(monkeypatch):
         topology_conn=topology,
         calibration_conn=world,
     )
-    event = _global_scope_event(city="Dallas", source_run_id="run-dallas")
+    event = replace(
+        _global_scope_event(city="Dallas", source_run_id="run-dallas"),
+        event_type="BOOK_SNAPSHOT",
+    )
     adapter.process_global_batch(
         (event,),
         _dt.datetime(2026, 7, 10, 8, 10, tzinfo=_dt.timezone.utc),
@@ -2412,7 +2415,7 @@ def test_live_adapter_overlaps_gamma_bind_with_clob_book_fetch(monkeypatch):
         probabilities,
         _dt.datetime.now(_dt.timezone.utc),
     )
-    assert bound_again == bound_probabilities
+    assert bound_again == probabilities
     assert epoch_again is epoch
     assert len(capture_calls) == 1
     trade.close()
@@ -2421,7 +2424,7 @@ def test_live_adapter_overlaps_gamma_bind_with_clob_book_fetch(monkeypatch):
     world.close()
 
 
-def test_live_adapter_refreshes_only_price_triggered_family(monkeypatch):
+def test_live_adapter_refreshes_only_triggered_probability_family(monkeypatch):
     from src.events.candidate_binding import weather_family_id
 
     trade = sqlite3.connect(":memory:")
@@ -2440,10 +2443,7 @@ def test_live_adapter_refreshes_only_price_triggered_family(monkeypatch):
         "process_current_global_batch",
         fake_process,
     )
-    event = replace(
-        _global_scope_event(city="Dallas", source_run_id="run-dallas"),
-        event_type="EDLI_REDECISION_PENDING",
-    )
+    event = _global_scope_event(city="Dallas", source_run_id="run-dallas")
     adapter = era.event_bound_live_adapter_from_trade_conn(
         trade,
         get_current_level=lambda: era.RiskLevel.GREEN,
@@ -2467,10 +2467,10 @@ def test_live_adapter_refreshes_only_price_triggered_family(monkeypatch):
         metric="high",
     )
 
-    def witness(family_key, suffix):
+    def witness(family_key, suffix, *, identity=None):
         return SimpleNamespace(
             family_key=family_key,
-            witness_identity=f"probability-{suffix}",
+            witness_identity=identity or f"probability-{suffix}",
             bindings=(
                 SimpleNamespace(
                     bin_id=f"bin-{suffix}",
@@ -2556,15 +2556,48 @@ def test_live_adapter_refreshes_only_price_triggered_family(monkeypatch):
         probabilities,
         _dt.datetime.now(_dt.timezone.utc),
     )
+    changed_probabilities = {
+        dallas: witness(
+            dallas,
+            "dallas",
+            identity="probability-dallas-updated",
+        ),
+        miami: probabilities[miami],
+    }
     bound_again, epoch_again = provider(
-        probabilities,
+        changed_probabilities,
+        _dt.datetime.now(_dt.timezone.utc),
+    )
+    unrelated_drift = {
+        dallas: witness(
+            dallas,
+            "dallas",
+            identity="probability-dallas-newer",
+        ),
+        miami: witness(
+            miami,
+            "miami",
+            identity="probability-miami-updated",
+        ),
+    }
+    bound_after_unrelated_drift, _ = provider(
+        unrelated_drift,
         _dt.datetime.now(_dt.timezone.utc),
     )
 
     assert bound == probabilities
-    assert bound_again == probabilities
-    assert bind_calls == [(dallas, miami), (dallas,)]
-    assert capture_calls == [(dallas, miami), (dallas,)]
+    assert bound_again == changed_probabilities
+    assert bound_after_unrelated_drift == unrelated_drift
+    assert bind_calls == [
+        (dallas, miami),
+        (dallas,),
+        (dallas,),
+    ]
+    assert capture_calls == [
+        (dallas, miami),
+        (dallas,),
+        (dallas,),
+    ]
     assert book_calls == [
         (
             "no-token-dallas",
@@ -2572,6 +2605,7 @@ def test_live_adapter_refreshes_only_price_triggered_family(monkeypatch):
             "yes-token-dallas",
             "yes-token-miami",
         ),
+        ("no-token-dallas", "yes-token-dallas"),
         ("no-token-dallas", "yes-token-dallas"),
     ]
     assert epoch_again.captured_at_utc == epoch.captured_at_utc
@@ -2583,7 +2617,7 @@ def test_live_adapter_refreshes_only_price_triggered_family(monkeypatch):
     world.close()
 
 
-def test_global_book_epoch_cache_requires_stable_probability_identity(monkeypatch):
+def test_global_book_epoch_cache_requires_stable_topology(monkeypatch):
     from src.events.candidate_binding import weather_family_id
 
     conn = sqlite3.connect(":memory:")
@@ -2610,7 +2644,6 @@ def test_global_book_epoch_cache_requires_stable_probability_identity(monkeypatc
     era._store_global_book_epoch(
         conn,
         probabilities,
-        probabilities,
         epoch,
         checked_at=at,
     )
@@ -2621,9 +2654,7 @@ def test_global_book_epoch_cache_requires_stable_probability_identity(monkeypatc
         checked_at=at,
         allowed=True,
     )
-    assert cached is not None
-    assert cached[0] == probabilities
-    assert cached[1] is epoch
+    assert cached is epoch
     changed = {
         "family": SimpleNamespace(
             family_key="family",
@@ -2643,25 +2674,44 @@ def test_global_book_epoch_cache_requires_stable_probability_identity(monkeypatc
         changed,
         checked_at=at,
         allowed=True,
+    ) is epoch
+    topology_changed = {
+        "family": SimpleNamespace(
+            family_key="family",
+            witness_identity="probability-changed",
+            bindings=(
+                SimpleNamespace(
+                    bin_id="bin",
+                    condition_id="condition",
+                    yes_token_id="yes-token",
+                    no_token_id="new-no-token",
+                ),
+            ),
+        )
+    }
+    assert era._get_cached_global_book_epoch(
+        conn,
+        topology_changed,
+        checked_at=at,
+        allowed=True,
     ) is None
     price_event = replace(
         _global_scope_event(city="Dallas", source_run_id="run-dallas"),
         event_type="EDLI_REDECISION_PENDING",
     )
-    assert era._global_book_price_refresh_family_keys((price_event,)) == {
+    assert era._global_book_refresh_family_keys((price_event,)) == {
         weather_family_id(
             city="Dallas",
             target_date="2026-07-11",
             metric="high",
         )
     }
-    assert era._global_book_price_refresh_family_keys(
+    assert era._global_book_refresh_family_keys(
         (
-            SimpleNamespace(event_type="FORECAST_SNAPSHOT_READY"),
-            SimpleNamespace(event_type="DAY0_EXTREME_UPDATED"),
+            SimpleNamespace(event_type="BOOK_SNAPSHOT"),
         )
     ) == frozenset()
-    assert era._global_book_price_refresh_family_keys(
+    assert era._global_book_refresh_family_keys(
         (
             SimpleNamespace(
                 event_type="EDLI_REDECISION_PENDING",
@@ -2677,7 +2727,6 @@ def test_global_book_epoch_cache_requires_stable_probability_identity(monkeypatc
     era._store_global_book_epoch(
         conn,
         probabilities,
-        probabilities,
         expired,
         checked_at=at,
     )
@@ -2687,8 +2736,7 @@ def test_global_book_epoch_cache_requires_stable_probability_identity(monkeypatc
         checked_at=at,
         allowed=True,
     )
-    assert cached is not None
-    assert cached[1] is epoch
+    assert cached is epoch
     conn.close()
 
 
