@@ -925,8 +925,6 @@ def _book_epoch_with_replacement_candidate(
         or str(getattr(replacement_candidate, "action", "BUY") or "BUY") != "BUY"
         or not all(selected_key)
         or replacement_key != selected_key
-        or str(getattr(replacement_candidate, "candidate_id", "") or "")
-        != str(getattr(selected_candidate, "candidate_id", "") or "")
         or str(
             getattr(replacement_candidate, "probability_witness_identity", "") or ""
         )

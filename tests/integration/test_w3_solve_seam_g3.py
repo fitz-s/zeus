@@ -7904,18 +7904,17 @@ def test_global_batch_overlays_jit_curve_without_full_universe_refresh(monkeypat
         price="0.41",
         captured_at=decision_at,
     )
-    replacement_candidate = replace(
-        _global_test_buy_candidate(
-            family_key=scope.family_keys[1],
-            probability_witness_identity=witnesses[
-                scope.family_keys[1]
-            ].witness_identity,
-            book_identity="book-2",
-            price="0.42",
-            captured_at=decision_at,
-        ),
-        candidate_id=selected_candidate.candidate_id,
+    replacement_candidate = _global_test_buy_candidate(
+        family_key=scope.family_keys[1],
+        probability_witness_identity=witnesses[
+            scope.family_keys[1]
+        ].witness_identity,
+        book_identity="book-2",
+        price="0.42",
+        captured_at=decision_at,
+        candidate_id="candidate-repriced",
     )
+    assert replacement_candidate.candidate_id != selected_candidate.candidate_id
     initial_book = _global_test_candidate_book(
         selected_candidate,
         epoch_captured_at=decision_at,
