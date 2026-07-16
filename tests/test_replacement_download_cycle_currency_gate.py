@@ -275,7 +275,8 @@ def test_partial_current_cycle_manifests_do_not_skip_download(tmp_path, monkeypa
     # Live 2026-06-24 shape: the artifact high-water mark reached the available
     # cycle because a few targets wrote 12Z manifests, while most current targets
     # still only had older-cycle manifests. The skip gate must ask the plan for
-    # current-cycle coverage, not use a non-cycle-aware manifest count.
+    # current-cycle coverage, but the repair must not replay targets whose current
+    # cycle raw input is already present.
     db = _make_db(tmp_path, {"openmeteo_ecmwf_ifs_9km": CURRENT_CYCLE_ISO})
     calls: list = []
     import scripts.download_replacement_forecast_current_targets as dl
@@ -313,7 +314,7 @@ def test_partial_current_cycle_manifests_do_not_skip_download(tmp_path, monkeypa
 
     assert report["status"] == "CURRENT_TARGET_RAW_INPUTS_DOWNLOADED"
     assert len(calls) == 1
-    assert calls[0].get("include_covered") is True
+    assert calls[0].get("include_covered") is False
 
 
 def test_direct_current_target_downloader_scopes_plan_to_requested_cycle(tmp_path, monkeypatch) -> None:

@@ -259,6 +259,7 @@ def _download_replacement_forecast_current_targets_if_needed(
             "retrying next tick — a guessed run is never requested",
         }
     downloaded_cycle = _max_downloaded_current_target_cycle(Path(str(forecast_db)))
+    cycle_advanced = downloaded_cycle is None or downloaded_cycle < available_cycle
 
     plan = build_replacement_forecast_current_target_plan(
         Path(str(forecast_db)),
@@ -307,8 +308,10 @@ def _download_replacement_forecast_current_targets_if_needed(
         # CYCLE-CURRENCY (K-root instance #3): when this call fires because the available
         # cycle is AHEAD of the downloaded high-water mark, the NEW cycle's raw inputs are
         # needed for ALL current targets — coverage ("a posterior exists") must not filter
-        # the target list, or covered targets can never re-materialize on the fresh cycle.
-        include_covered=not cycle_targets_have_current_manifests,
+        # the target list. Once that cycle is already represented, a residual manifest gap
+        # must repair only uncovered rows; replaying every covered target each poll rewrites
+        # the same manifests and repeatedly drives global seed discovery.
+        include_covered=cycle_advanced,
         precomputed_plan=plan,
         max_wall_clock_seconds=remaining,
     )
