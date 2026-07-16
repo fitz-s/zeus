@@ -225,8 +225,7 @@ def main(argv: list[str] | None = None) -> int:
             # request. None for a normal first materialization (default), so behaviour is unchanged.
             upgrade_trigger=(str(payload["upgrade_trigger"]) if payload.get("upgrade_trigger") else None),
         )
-        from src.state.db import _create_readiness_state, get_forecasts_connection
-        from src.state.schema.v2_schema import ensure_replacement_forecast_live_schema
+        from src.state.db import get_forecasts_connection
 
         conn = get_forecasts_connection(write_class="live")
         try:
@@ -243,6 +242,11 @@ def main(argv: list[str] | None = None) -> int:
             # already serialize via the live writer-flock.
             conn.execute("BEGIN IMMEDIATE")
             if args.init_schema:
+                from src.state.db import _create_readiness_state
+                from src.state.schema.v2_schema import (
+                    ensure_replacement_forecast_live_schema,
+                )
+
                 ensure_replacement_forecast_live_schema(conn)
                 _create_readiness_state(conn)
             if "openmeteo_manifest_json" in payload:

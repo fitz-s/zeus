@@ -572,6 +572,7 @@ def test_materialization_queue_coalesces_duplicate_requests_before_limit(tmp_pat
     spawned: list[str] = []
 
     def _successful_runner(argv):
+        assert "--init-schema" not in argv
         spawned.append(Path(argv[argv.index("--input-json") + 1]).name)
         return subprocess.CompletedProcess(list(argv), 0, stdout="ok\n", stderr="")
 

@@ -1292,7 +1292,6 @@ def _process_replacement_forecast_live_materialization_queue_locked(
             str(PROJECT_ROOT / "scripts" / "materialize_replacement_forecast_live.py"),
             "--input-json",
             str(input_json),
-            "--init-schema",
             "--commit",
         )
         timed_out = False
