@@ -1,5 +1,5 @@
 # Created: 2026-06-30
-# Last reused/audited: 2026-07-15
+# Last reused/audited: 2026-07-16
 # Authority basis: live-money qkernel submit authority and canonical selection-fact persistence.
 
 from __future__ import annotations
@@ -853,7 +853,7 @@ def test_live_entry_qkernel_gate_accepts_underpriced_buenos_aires_yes():
 
 
 @pytest.mark.parametrize(("side", "direction"), (("YES", "buy_yes"), ("NO", "buy_no")))
-def test_current_state_live_entry_cannot_waive_absolute_price_floor(side, direction):
+def test_current_state_live_entry_uses_robust_utility_not_absolute_price_floor(side, direction):
     cert = _current_qkernel_cert(side=side)
     cert.update(
         cost=0.04,
@@ -864,20 +864,19 @@ def test_current_state_live_entry_cannot_waive_absolute_price_floor(side, direct
     )
     _seal_current_qkernel_cert(cert)
 
-    with pytest.raises(ValueError, match="LIVE_ENTRY_UNIT_PRICE_OUT_OF_BOUNDS"):
-        _assert_live_entry_submit_authority(
-            {
-                "event_type": "FORECAST_SNAPSHOT_READY",
-                "selection_authority_applied": "qkernel_spine",
-                "direction": direction,
-                "strategy_key": "forecast_qkernel_entry",
-                "candidate_bin_id": "bin-1",
-                "q_live": 0.12,
-                "q_lcb_5pct": 0.10,
-                "min_entry_price": 0.95,
-                "qkernel_execution_economics": cert,
-            }
-        )
+    _assert_live_entry_submit_authority(
+        {
+            "event_type": "FORECAST_SNAPSHOT_READY",
+            "selection_authority_applied": "qkernel_spine",
+            "direction": direction,
+            "strategy_key": "forecast_qkernel_entry",
+            "candidate_bin_id": "bin-1",
+            "q_live": 0.12,
+            "q_lcb_5pct": 0.10,
+            "min_entry_price": 0.95,
+            "qkernel_execution_economics": cert,
+        }
+    )
 
 
 @pytest.mark.parametrize("missing_field", ("decision_id", "receipt_hash", "q_version", "sample_hash"))
@@ -2162,7 +2161,7 @@ def test_live_entry_qkernel_gate_rejects_failed_near_day0_consistency_verdict():
         )
 
 
-def test_live_entry_qkernel_gate_rejects_underpriced_low_probability_yes():
+def test_live_entry_qkernel_authority_defers_legacy_price_floor_to_presubmit():
     cert = _qkernel_cert()
     cert.update(
         route_id="DIRECT_YES:b34@proof",
@@ -2178,20 +2177,19 @@ def test_live_entry_qkernel_gate_rejects_underpriced_low_probability_yes():
         selection_guard_q_safe=0.06052567908958011,
     )
 
-    with pytest.raises(ValueError, match="LIVE_ENTRY_UNIT_PRICE_OUT_OF_BOUNDS"):
-        _assert_live_entry_submit_authority(
-            {
-                "event_type": "FORECAST_SNAPSHOT_READY",
-                "selection_authority_applied": "qkernel_spine",
-                "direction": "buy_yes",
-                "strategy_key": "forecast_qkernel_entry",
-                "candidate_bin_id": "b34",
-                "q_live": 0.12180248510788458,
-                "q_lcb_5pct": 0.06052567908958011,
-                "min_entry_price": 0.05,
-                "qkernel_execution_economics": cert,
-            }
-        )
+    _assert_live_entry_submit_authority(
+        {
+            "event_type": "FORECAST_SNAPSHOT_READY",
+            "selection_authority_applied": "qkernel_spine",
+            "direction": "buy_yes",
+            "strategy_key": "forecast_qkernel_entry",
+            "candidate_bin_id": "b34",
+            "q_live": 0.12180248510788458,
+            "q_lcb_5pct": 0.06052567908958011,
+            "min_entry_price": 0.05,
+            "qkernel_execution_economics": cert,
+        }
+    )
 
 
 def test_live_entry_qkernel_gate_accepts_six_to_eight_cent_positive_yes():
