@@ -2050,6 +2050,34 @@ def test_current_global_probability_prepare_does_not_require_price_snapshot(
         source_cycle_time="2026-07-10T00:00:00+00:00",
         source_available_at="2026-07-10T06:00:00+00:00",
     )
+    fresh_probabilities = (0.25, 0.25, 0.5)
+    fresh_bundle = SimpleNamespace(
+        posterior_id=2,
+        posterior_identity_hash="posterior-2",
+        dependency_hash="dependency-2",
+        posterior_config_hash="config-1",
+        q={
+            key: probability
+            for (key, _lo, _hi), probability in zip(
+                posterior_bins, fresh_probabilities
+            )
+        },
+        provenance_json={
+            "q_bootstrap_samples_basis": bootstrap_basis,
+            "q_bootstrap_samples_by_bin": {
+                key: [probability] * 400
+                for (key, _lo, _hi), probability in zip(
+                    posterior_bins, fresh_probabilities
+                )
+            },
+            "bin_topology": [
+                {"bin_id": key, "lower_c": lower, "upper_c": upper}
+                for key, lower, upper in posterior_bins
+            ],
+        },
+        source_cycle_time="2026-07-10T00:00:00+00:00",
+        source_available_at="2026-07-10T06:05:00+00:00",
+    )
     monkeypatch.setattr(
         hook_factory,
         "_latest_replacement_readiness",
@@ -2064,7 +2092,7 @@ def test_current_global_probability_prepare_does_not_require_price_snapshot(
         bundle_read.update(kwargs)
         return SimpleNamespace(
             ok=True,
-            bundle=bundle,
+            bundle=bundle if bundle_read_count == 1 else fresh_bundle,
             reason_code="READY",
         )
 
@@ -2073,7 +2101,6 @@ def test_current_global_probability_prepare_does_not_require_price_snapshot(
     traced: list[str] = []
     forecast.set_trace_callback(traced.append)
     event = _global_scope_event(city="Dallas", source_run_id="run-dallas")
-    cache_namespace = f"test-current-probability-{bootstrap_basis}-{id(forecast)}"
     first_cut = _dt.datetime(
         2026, 7, 10, 8, 10, tzinfo=_dt.timezone.utc
     )
@@ -2083,17 +2110,15 @@ def test_current_global_probability_prepare_does_not_require_price_snapshot(
         topology_conn=forecast,
         decision_time=first_cut,
         max_age=_dt.timedelta(seconds=30),
-        cache_namespace=cache_namespace,
     )
     forecast.set_trace_callback(None)
     second_cut = first_cut + _dt.timedelta(seconds=1)
-    cached = era._prepare_current_global_probability_family(
+    refreshed = era._prepare_current_global_probability_family(
         event,
         forecast_conn=forecast,
         topology_conn=forecast,
         decision_time=second_cut,
         max_age=_dt.timedelta(seconds=20),
-        cache_namespace=cache_namespace,
     )
 
     witness = prepared.probability_witness
@@ -2114,32 +2139,20 @@ def test_current_global_probability_prepare_does_not_require_price_snapshot(
         in statement.upper()
         for statement in traced
     )
-    assert bundle_read_count == 1
-    assert np.array_equal(
-        cached.probability_witness.yes_q_samples,
-        witness.yes_q_samples,
+    assert bundle_read_count == 2
+    refreshed_witness = refreshed.probability_witness
+    assert refreshed_witness.yes_q_samples[0].tolist() == pytest.approx(
+        list(fresh_probabilities)
     )
-    assert cached.probability_witness.captured_at_utc == second_cut
-    assert cached.probability_witness.max_age == _dt.timedelta(seconds=20)
+    assert refreshed_witness.posterior_identity_hash == "posterior-2"
+    assert refreshed_witness.q_version != witness.q_version
+    assert refreshed_witness.captured_at_utc == second_cut
+    assert refreshed_witness.max_age == _dt.timedelta(seconds=20)
     assert (
-        cached.probability_witness.authority_certificate_hash
+        refreshed_witness.authority_certificate_hash
         != witness.authority_certificate_hash
     )
-    assert cached.probability_witness.witness_identity != witness.witness_identity
-
-    changed = era._prepare_current_global_probability_family(
-        _global_scope_event(city="Dallas", source_run_id="run-dallas-next"),
-        forecast_conn=forecast,
-        topology_conn=forecast,
-        decision_time=second_cut,
-        max_age=_dt.timedelta(seconds=30),
-        cache_namespace=cache_namespace,
-    )
-    assert bundle_read_count == 2
-    assert (
-        changed.probability_witness.authority_certificate_hash
-        != cached.probability_witness.authority_certificate_hash
-    )
+    assert refreshed_witness.witness_identity != witness.witness_identity
 
 
 def test_current_day0_global_probability_uses_current_remaining_day_not_full_day_bundle(
