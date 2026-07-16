@@ -7371,6 +7371,8 @@ def _global_current_state_execution_economics(
         )
         or loss_payoff != -cost
         or win_payoff != shares - cost
+        or median_payoff != win_payoff
+        or median_payoff <= 0
         or wealth_after_loss <= 0
         or wealth_after_win <= 0
         or not math.isclose(
@@ -7381,16 +7383,11 @@ def _global_current_state_execution_economics(
         )
     ):
         raise ValueError("GLOBAL_CURRENT_STATE_DECISION_ECONOMICS_INVALID")
-    median_branch_coherent = (
-        (cut_win_probability > Decimal("0.5") and median_payoff == win_payoff)
-        or (cut_win_probability < Decimal("0.5") and median_payoff == loss_payoff)
-        or (
-            cut_win_probability == Decimal("0.5")
-            and loss_payoff <= median_payoff <= win_payoff
-        )
-    )
-    if not median_branch_coherent:
-        raise ValueError("GLOBAL_CURRENT_STATE_TERMINAL_CERTIFICATE_INCOHERENT")
+    if (
+        cut_win_probability <= Decimal("0.5")
+        or cut_loss_probability >= Decimal("0.5")
+    ):
+        raise ValueError("GLOBAL_CURRENT_STATE_ROBUST_MAJORITY_LOSS")
     if not point_q.is_finite():
         raise ValueError("GLOBAL_CURRENT_STATE_POINT_Q_INVALID")
     if prior_payoff_lcb is not None and not prior_payoff_lcb.is_finite():
@@ -7431,6 +7428,8 @@ def _global_current_state_execution_economics(
         raise ValueError("GLOBAL_CURRENT_STATE_PROBABILITY_ORDER_INVALID")
     if payoff_q_lcb < current_band_payoff_q_lcb:
         raise _GlobalProbabilityTightened(float(payoff_q_lcb))
+    if payoff_q_lcb <= Decimal("0.5"):
+        raise ValueError("GLOBAL_CURRENT_STATE_ROBUST_MAJORITY_LOSS")
     if edge_lcb <= 0:
         raise ValueError("GLOBAL_CURRENT_STATE_ECONOMICS_NON_POSITIVE")
     sample_hash = str(getattr(witness, "sample_matrix_identity", "") or "").strip()

@@ -96,14 +96,12 @@ def _global_decision(
     q_decimal = Decimal(q)
     robust_ev = q_decimal * shares_decimal - cost_decimal
     wealth_decimal = Decimal(wealth)
-    win_payoff = shares_decimal - cost_decimal
-    loss_payoff = -cost_decimal
     terminal = SimpleNamespace(
         win_probability_lcb=float(q_decimal),
         loss_probability_ucb=float(Decimal("1") - q_decimal),
-        loss_payoff_usd=loss_payoff,
-        win_payoff_usd=win_payoff,
-        median_payoff_usd=(win_payoff if q_decimal > Decimal("0.5") else loss_payoff),
+        loss_payoff_usd=-cost_decimal,
+        win_payoff_usd=shares_decimal - cost_decimal,
+        median_payoff_usd=shares_decimal - cost_decimal,
         wealth_after_loss_usd=wealth_decimal - cost_decimal,
         wealth_after_win_usd=wealth_decimal + shares_decimal - cost_decimal,
         expected_value_diagnostic_usd=float(robust_ev),
@@ -975,7 +973,7 @@ def test_global_actuation_rebinds_submit_gate_to_exact_current_band(
 
 
 @pytest.mark.parametrize(("side", "direction"), (("YES", "buy_yes"), ("NO", "buy_no")))
-def test_low_probability_current_band_taker_is_symmetric_positive_growth(
+def test_low_probability_current_band_taker_is_symmetric_majority_loss(
     side,
     direction,
 ):
@@ -997,19 +995,19 @@ def test_low_probability_current_band_taker_is_symmetric_positive_growth(
         yes_q_samples=SimpleNamespace(shape=(400, 11)),
         band_alpha=0.05,
     )
-    current = era._global_current_state_execution_economics(
-        cert,
-        decision=decision,
-        witness=witness,
-    )
-    assert current["payoff_q_lcb"] == pytest.approx(0.13)
-    assert current["edge_lcb"] == pytest.approx(0.10)
+    with pytest.raises(
+        ValueError,
+        match="GLOBAL_CURRENT_STATE_ROBUST_MAJORITY_LOSS",
+    ):
+        era._global_current_state_execution_economics(
+            cert,
+            decision=decision,
+            witness=witness,
+        )
 
 
-def test_global_current_band_rejects_terminal_certificate_incoherent_with_its_branch():
-    """A sub-0.5 win probability whose median is still pinned to the win
-    branch is not a valid certificate under any regime; it must be refused
-    on shape, distinct from the now-removed 0.5 majority wall."""
+def test_global_current_band_rejects_submajority_even_with_positive_win_payoff():
+    """A positive payout cannot turn a median-loss BUY into an admissible order."""
 
     cert = _current_qkernel_cert(side="YES")
     cert.update(
@@ -1029,7 +1027,7 @@ def test_global_current_band_rejects_terminal_certificate_incoherent_with_its_br
         loss_probability_ucb=0.87,
         loss_payoff_usd=-cost,
         win_payoff_usd=win_payoff,
-        median_payoff_usd=win_payoff,  # incoherent: sub-0.5 pinned to win branch
+        median_payoff_usd=win_payoff,
         wealth_after_loss_usd=Decimal("1000") - cost,
         wealth_after_win_usd=Decimal("1000") + win_payoff,
         expected_value_diagnostic_usd=float(Decimal("0.13") * shares - cost),
@@ -1049,7 +1047,7 @@ def test_global_current_band_rejects_terminal_certificate_incoherent_with_its_br
 
     with pytest.raises(
         ValueError,
-        match="GLOBAL_CURRENT_STATE_TERMINAL_CERTIFICATE_INCOHERENT",
+        match="GLOBAL_CURRENT_STATE_ROBUST_MAJORITY_LOSS",
     ):
         era._global_current_state_execution_economics(
             cert,
@@ -1446,7 +1444,7 @@ def test_global_actuation_current_band_refuses_candidate_cert_side_mismatch():
         )
 
 
-def test_global_actuation_current_band_missing_prior_still_accepts_low_probability_order():
+def test_global_actuation_current_band_missing_prior_still_rejects_majority_loss():
     cert = _current_qkernel_cert(side="YES")
     for field in (
         "source",
@@ -1470,14 +1468,15 @@ def test_global_actuation_current_band_missing_prior_still_accepts_low_probabili
         q_version="global-q-version-1",
     )
 
-    current = era._global_current_state_execution_economics(
-        cert,
-        decision=decision,
-        witness=witness,
-    )
-
-    assert current["payoff_q_lcb"] == pytest.approx(0.10)
-    assert current["edge_lcb"] == pytest.approx(0.09)
+    with pytest.raises(
+        ValueError,
+        match="GLOBAL_CURRENT_STATE_ROBUST_MAJORITY_LOSS",
+    ):
+        era._global_current_state_execution_economics(
+            cert,
+            decision=decision,
+            witness=witness,
+        )
 
 
 def test_global_actuation_current_band_rejects_malformed_present_prior_lcb():
@@ -1498,7 +1497,7 @@ def test_global_actuation_current_band_rejects_malformed_present_prior_lcb():
         )
 
 
-def test_global_actuation_missing_point_still_accepts_low_probability_order():
+def test_global_actuation_missing_point_does_not_rescue_majority_loss():
     cert = _current_qkernel_cert(side="NO")
     cert.pop("payoff_q_point")
     cert.update(
@@ -1520,14 +1519,15 @@ def test_global_actuation_missing_point_still_accepts_low_probability_order():
         band_alpha=0.05,
     )
 
-    current = era._global_current_state_execution_economics(
-        cert,
-        decision=decision,
-        witness=witness,
-    )
-
-    assert current["payoff_q_lcb"] == pytest.approx(0.15)
-    assert current["edge_lcb"] == pytest.approx(0.05)
+    with pytest.raises(
+        ValueError,
+        match="GLOBAL_CURRENT_STATE_ROBUST_MAJORITY_LOSS",
+    ):
+        era._global_current_state_execution_economics(
+            cert,
+            decision=decision,
+            witness=witness,
+        )
 
 
 @pytest.mark.parametrize("side", ("YES", "NO"))
@@ -1709,7 +1709,7 @@ def test_global_actuation_legacy_prior_below_majority_is_diagnostic_only(side):
 
 
 @pytest.mark.parametrize("side", ("YES", "NO"))
-def test_global_actuation_legacy_bound_absence_still_accepts_low_probability_order(side):
+def test_global_actuation_legacy_bound_absence_cannot_rescue_majority_loss(side):
     cert = _current_qkernel_cert(side=side)
     cert.pop("pre_qkernel_q_lcb_5pct", None)
     cert.update(
@@ -1725,14 +1725,15 @@ def test_global_actuation_legacy_bound_absence_still_accepts_low_probability_ord
         band_alpha=0.05,
     )
 
-    current = era._global_current_state_execution_economics(
-        cert,
-        decision=decision,
-        witness=witness,
-    )
-
-    assert current["payoff_q_lcb"] == pytest.approx(0.15)
-    assert current["edge_lcb"] == pytest.approx(0.05)
+    with pytest.raises(
+        ValueError,
+        match="GLOBAL_CURRENT_STATE_ROBUST_MAJORITY_LOSS",
+    ):
+        era._global_current_state_execution_economics(
+            cert,
+            decision=decision,
+            witness=witness,
+        )
 
 
 @pytest.mark.parametrize("side", ("YES", "NO"))

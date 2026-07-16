@@ -322,10 +322,10 @@ def qkernel_global_current_state_rejection_reason(
         return "global_cost_identity"
     probability_tol = 1e-12
     if not (
-        0.0 < terminal_win <= cut_win + probability_tol
+        0.5 < terminal_win <= cut_win + probability_tol
         and cut_win <= 1.0
         and 0.0 <= cut_loss <= terminal_loss + probability_tol
-        and terminal_loss < 1.0
+        and terminal_loss < 0.5
         and math.isclose(cut_win + cut_loss, 1.0, rel_tol=0.0, abs_tol=1e-12)
         and math.isclose(
             terminal_win + terminal_loss,
@@ -344,20 +344,8 @@ def qkernel_global_current_state_rejection_reason(
             rel_tol=0.0,
             abs_tol=1e-12,
         )
-        and (
-            (
-                terminal_win > 0.5
-                and math.isclose(median_payoff, win_payoff, rel_tol=0.0, abs_tol=1e-12)
-            )
-            or (
-                terminal_win < 0.5
-                and math.isclose(median_payoff, loss_payoff, rel_tol=0.0, abs_tol=1e-12)
-            )
-            or (
-                terminal_win == 0.5
-                and loss_payoff - 1e-12 <= median_payoff <= win_payoff + 1e-12
-            )
-        )
+        and math.isclose(median_payoff, win_payoff, rel_tol=0.0, abs_tol=1e-12)
+        and median_payoff > 0.0
         and wealth_after_loss > 0.0
         and wealth_after_win > 0.0
         and math.isclose(cut_ev, robust_ev, rel_tol=0.0, abs_tol=1e-12)
