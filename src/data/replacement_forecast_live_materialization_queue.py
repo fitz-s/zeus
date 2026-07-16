@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -586,6 +587,16 @@ _REQUEST_DEDUP_KEY_FIELDS: tuple[str, ...] = (
     "baseline_source_run_id",
     "openmeteo_source_run_id",
 )
+_UNCHANGED_BLOCKED_REASON = "REPLACEMENT_LIVE_POSTERIOR_REQUIREMENTS_NOT_MET"
+_UNCHANGED_BLOCKED_SKIP_REASON = (
+    "REPLACEMENT_LIVE_MATERIALIZATION_REQUEST_UNCHANGED_BLOCKED_INPUT"
+)
+_ATTEMPT_CLOCK_FIELDS = frozenset({"computed_at", "expires_at"})
+_ATTEMPT_INPUT_PATH_FIELDS = (
+    "openmeteo_payload_json",
+    "precision_metadata_json",
+    "aifs_samples_json",
+)
 
 
 def _validate_request_payload(path: Path) -> tuple[bool, str, str]:
@@ -663,6 +674,173 @@ def _request_freshness_key(path: Path, payload: Mapping[str, object]) -> tuple[d
     except OSError:
         mtime_ns = 0
     return computed_at, mtime_ns, path.name
+
+
+def _blocked_attempt_fingerprint(
+    *,
+    input_json: Path,
+    forecast_db: Path | str | None,
+    payload: Mapping[str, object],
+) -> str | None:
+    """Hash the request and current raw facts that can heal a blocked attempt."""
+
+    scope = tuple(
+        str(payload.get(field) or "").strip()
+        for field in ("city", "target_date", "temperature_metric")
+    )
+    if forecast_db is None:
+        return None
+    db_path = Path(forecast_db)
+    if not all(scope) or not db_path.exists():
+        return None
+    try:
+        from src.state.db import _connect  # noqa: PLC0415
+
+        conn = _connect(db_path, write_class=None)
+        try:
+            conn.execute("PRAGMA query_only=ON")
+            row = conn.execute(
+                """
+                SELECT COUNT(*),
+                       COALESCE(MAX(raw_model_forecast_id), 0),
+                       COALESCE(MAX(captured_at), ''),
+                       COALESCE(MAX(source_available_at), '')
+                FROM raw_model_forecasts
+                WHERE city = ?
+                  AND target_date = ?
+                  AND metric = ?
+                """,
+                scope,
+            ).fetchone()
+        finally:
+            conn.close()
+    except Exception:  # noqa: BLE001 - unknown watermark must retry, never suppress work
+        return None
+    if row is None:
+        return None
+    file_revisions: dict[str, tuple[int, int] | None] = {}
+    for field in _ATTEMPT_INPUT_PATH_FIELDS:
+        raw_path = payload.get(field)
+        if raw_path in (None, ""):
+            continue
+        path = Path(str(raw_path))
+        if not path.is_absolute():
+            path = input_json.parent / path
+        try:
+            stat = path.stat()
+            file_revisions[field] = (stat.st_mtime_ns, stat.st_size)
+        except OSError:
+            file_revisions[field] = None
+    logic_revisions: dict[str, tuple[int, int] | None] = {}
+    for path in (
+        PROJECT_ROOT / "src/data/replacement_forecast_materializer.py",
+        PROJECT_ROOT / "src/data/replacement_current_value_serving.py",
+        PROJECT_ROOT / "src/data/forecast_source_registry.py",
+        PROJECT_ROOT / "config/settings.json",
+    ):
+        try:
+            stat = path.stat()
+            logic_revisions[path.name] = (stat.st_mtime_ns, stat.st_size)
+        except OSError:
+            logic_revisions[path.name] = None
+    canonical = json.dumps(
+        {
+            "request": {
+                key: value
+                for key, value in payload.items()
+                if key not in _ATTEMPT_CLOCK_FIELDS
+            },
+            "files": file_revisions,
+            "raw": tuple(row),
+            "logic": logic_revisions,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _blocked_attempt_marker_path(
+    marker_dir: Path,
+    payload: Mapping[str, object],
+) -> Path | None:
+    scope = tuple(
+        str(payload.get(field) or "").strip()
+        for field in ("city", "target_date", "temperature_metric")
+    )
+    if not all(scope):
+        return None
+    digest = hashlib.sha256("\0".join(scope).encode("utf-8")).hexdigest()
+    return marker_dir / f"{digest}.json"
+
+
+def _blocked_attempt_state(
+    *,
+    marker_dir: Path,
+    input_json: Path,
+    payload: Mapping[str, object],
+    forecast_db: Path | str | None,
+) -> tuple[Path | None, str | None, bool]:
+    marker_path = _blocked_attempt_marker_path(marker_dir, payload)
+    fingerprint = _blocked_attempt_fingerprint(
+        input_json=input_json,
+        payload=payload,
+        forecast_db=forecast_db,
+    )
+    if marker_path is None or fingerprint is None:
+        return marker_path, fingerprint, False
+    try:
+        marker = json.loads(marker_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return marker_path, fingerprint, False
+    if not isinstance(marker, Mapping):
+        return marker_path, fingerprint, False
+    return marker_path, fingerprint, marker.get("attempt_fingerprint") == fingerprint
+
+
+def _write_blocked_attempt_marker(
+    *,
+    marker_path: Path | None,
+    payload: Mapping[str, object],
+    fingerprint: str | None,
+) -> None:
+    if marker_path is None or fingerprint is None:
+        return
+    marker_path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = marker_path.with_suffix(f".tmp.{os.getpid()}")
+    temp_path.write_text(
+        json.dumps(
+            {
+                "status": "BLOCKED",
+                "reason_codes": [_UNCHANGED_BLOCKED_REASON],
+                "attempt_fingerprint": fingerprint,
+                "city": payload.get("city"),
+                "target_date": payload.get("target_date"),
+                "temperature_metric": payload.get("temperature_metric"),
+                "recorded_at": datetime.now(timezone.utc).isoformat(),
+            },
+            sort_keys=True,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    os.replace(temp_path, marker_path)
+
+
+def _subprocess_result_reason_codes(completed: subprocess.CompletedProcess[str]) -> tuple[str, ...]:
+    for line in reversed((completed.stdout or "").splitlines()):
+        try:
+            payload = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(payload, Mapping):
+            continue
+        reasons = payload.get("reason_codes")
+        if not isinstance(reasons, list):
+            return ()
+        return tuple(str(reason) for reason in reasons)
+    return ()
 
 
 def _coalesce_superseded_materialization_requests(
@@ -1007,6 +1185,8 @@ def _process_replacement_forecast_live_materialization_queue_locked(
 
     processed: list[str] = list(superseded)
     failed: list[str] = []
+    unchanged_blocked: list[str] = []
+    marker_dir = request_path.parent / "blocked_attempts"
     for input_json in requests[:limit]:
         # POISON-PILL GATE: validate the request schema before spawning the materializer
         # subprocess. An invalid file (scout stub, malformed JSON, missing required keys)
@@ -1033,6 +1213,32 @@ def _process_replacement_forecast_live_materialization_queue_locked(
                 },
             )
             failed.append(str(moved))
+            continue
+        request_payload = _load_request_payload_for_coalescing(input_json)
+        marker_path, attempt_fingerprint, unchanged = (
+            _blocked_attempt_state(
+                marker_dir=marker_dir,
+                input_json=input_json,
+                payload=request_payload,
+                forecast_db=forecast_db,
+            )
+            if request_payload is not None
+            else (None, None, False)
+        )
+        if unchanged:
+            moved = _move_request(input_json, processed_path)
+            _write_sidecar(
+                moved,
+                {
+                    "status": "SKIPPED_UNCHANGED_BLOCKED_INPUT",
+                    "reason_codes": [_UNCHANGED_BLOCKED_SKIP_REASON],
+                    "request_validated": True,
+                    "subprocess_spawned": False,
+                    "attempt_fingerprint": attempt_fingerprint,
+                },
+            )
+            processed.append(str(moved))
+            unchanged_blocked.append(str(moved))
             continue
         command = (
             sys.executable,
@@ -1089,10 +1295,28 @@ def _process_replacement_forecast_live_materialization_queue_locked(
                 "REPLACEMENT_LIVE_MATERIALIZATION_REQUEST_TIMEOUT"
             ]
         if completed.returncode == 0:
+            if marker_path is not None:
+                try:
+                    marker_path.unlink()
+                except FileNotFoundError:
+                    pass
             moved = _move_request(input_json, processed_path)
             _write_sidecar(moved, payload)
             processed.append(str(moved))
         else:
+            if (
+                request_payload is not None
+                and _UNCHANGED_BLOCKED_REASON
+                in _subprocess_result_reason_codes(completed)
+            ):
+                try:
+                    _write_blocked_attempt_marker(
+                        marker_path=marker_path,
+                        payload=request_payload,
+                        fingerprint=attempt_fingerprint,
+                    )
+                except OSError:
+                    pass
             moved = _move_request(input_json, failed_path)
             _write_sidecar(moved, payload)
             failed.append(str(moved))
@@ -1101,6 +1325,8 @@ def _process_replacement_forecast_live_materialization_queue_locked(
     reasons = [*seed_reasons, "REPLACEMENT_LIVE_MATERIALIZATION_QUEUE_PROCESSED"]
     if superseded:
         reasons.append("REPLACEMENT_LIVE_MATERIALIZATION_REQUEST_SUPERSEDED_BY_NEWER_DUPLICATE")
+    if unchanged_blocked:
+        reasons.append(_UNCHANGED_BLOCKED_SKIP_REASON)
     if failed:
         reasons.append("REPLACEMENT_LIVE_MATERIALIZATION_REQUEST_FAILED")
     skipped = max(len(requests) - limit, 0)

@@ -1,5 +1,5 @@
 # Created: 2026-06-11
-# Last reused or audited: 2026-06-11
+# Last reused or audited: 2026-07-16
 # Authority basis: Task #32 follow-up (operator 2026-06-11) — 没有新的就用老的 applied to fusion
 #   membership. The gem_global-only previous_runs exception (edc598b440) is generalized into the
 #   SINGLE serving authority (src/data/replacement_current_value_serving.py): a provider absent
@@ -601,3 +601,115 @@ def test_materialization_queue_coalesces_duplicate_requests_before_limit(tmp_pat
     assert len(superseded) == 1
     assert superseded[0]["subprocess_spawned"] is False
     assert superseded[0]["superseded_by"] == newer_path.name
+
+
+def test_materialization_queue_retries_blocked_request_only_after_input_change(
+    tmp_path, monkeypatch
+) -> None:
+    import src.data.replacement_forecast_live_materialization_queue as queue_mod
+
+    request_dir = tmp_path / "requests"
+    processed_dir = tmp_path / "processed"
+    failed_dir = tmp_path / "failed"
+    request_dir.mkdir()
+    request_path = request_dir / "Helsinki.2026-07-18.high.json"
+    request = {
+        "city": "Helsinki",
+        "city_timezone": "Europe/Helsinki",
+        "target_date": "2026-07-18",
+        "temperature_metric": "high",
+        "source_cycle_time": "2026-07-16T06:00:00+00:00",
+        "computed_at": "2026-07-16T12:16:24+00:00",
+        "baseline_source_run_id": "ecmwf_open_data:mx2t6_high:2026-07-16T06Z",
+        "baseline_data_version": "ecmwf_opendata",
+        "baseline_source_available_at": "2026-07-16T12:00:00+00:00",
+        "openmeteo_source_run_id": "openmeteo-current-targets-Helsinki-high-20260716T060000Z",
+        "openmeteo_source_available_at": "2026-07-16T12:15:35+00:00",
+        "openmeteo_payload_json": "payload.json",
+        "precision_metadata_json": "precision.json",
+        "bins": [{"bin_id": "30C"}],
+    }
+    watermark = {"value": (3, 99, "2026-07-16T12:15:00+00:00", "")}
+    original_fingerprint = queue_mod._blocked_attempt_fingerprint
+
+    def _fingerprint(*, input_json, payload, forecast_db):
+        base = original_fingerprint(
+            input_json=input_json,
+            payload=payload,
+            forecast_db=forecast_db,
+        )
+        return f"{base}:{watermark['value']}"
+
+    monkeypatch.setattr(queue_mod, "_blocked_attempt_fingerprint", _fingerprint)
+    spawned: list[str] = []
+
+    def _blocked_runner(argv):
+        spawned.append(Path(argv[argv.index("--input-json") + 1]).name)
+        return subprocess.CompletedProcess(
+            list(argv),
+            1,
+            stdout=json.dumps(
+                {
+                    "status": "BLOCKED",
+                    "reason_codes": [
+                        "REPLACEMENT_LIVE_POSTERIOR_REQUIREMENTS_NOT_MET"
+                    ],
+                }
+            )
+            + "\n",
+            stderr="missing configured sources",
+        )
+
+    request_path.write_text(json.dumps(request), encoding="utf-8")
+    first = queue_mod.process_replacement_forecast_live_materialization_queue(
+        request_dir=request_dir,
+        processed_dir=processed_dir,
+        failed_dir=failed_dir,
+        forecast_db=tmp_path / "forecasts.db",
+        limit=1,
+        runner=_blocked_runner,
+    )
+    assert first.status == "FAILED"
+    assert len(spawned) == 1
+    assert len(tuple((tmp_path / "blocked_attempts").glob("*.json"))) == 1
+
+    request_path.write_text(
+        json.dumps({**request, "computed_at": "2026-07-16T12:17:24+00:00"}),
+        encoding="utf-8",
+    )
+    second = queue_mod.process_replacement_forecast_live_materialization_queue(
+        request_dir=request_dir,
+        processed_dir=processed_dir,
+        failed_dir=failed_dir,
+        forecast_db=tmp_path / "forecasts.db",
+        limit=1,
+        runner=_blocked_runner,
+    )
+    assert second.status == "PROCESSED"
+    assert len(spawned) == 1
+    assert (
+        "REPLACEMENT_LIVE_MATERIALIZATION_REQUEST_UNCHANGED_BLOCKED_INPUT"
+        in second.reason_codes
+    )
+    skipped_receipt = max(
+        processed_dir.glob("*.receipt.json"),
+        key=lambda path: path.stat().st_mtime_ns,
+    )
+    skipped = json.loads(skipped_receipt.read_text(encoding="utf-8"))
+    assert skipped["subprocess_spawned"] is False
+
+    watermark["value"] = (4, 100, "2026-07-16T12:18:00+00:00", "")
+    request_path.write_text(
+        json.dumps({**request, "computed_at": "2026-07-16T12:18:24+00:00"}),
+        encoding="utf-8",
+    )
+    third = queue_mod.process_replacement_forecast_live_materialization_queue(
+        request_dir=request_dir,
+        processed_dir=processed_dir,
+        failed_dir=failed_dir,
+        forecast_db=tmp_path / "forecasts.db",
+        limit=1,
+        runner=_blocked_runner,
+    )
+    assert third.status == "FAILED"
+    assert len(spawned) == 2
