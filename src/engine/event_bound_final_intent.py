@@ -335,6 +335,7 @@ def _final_execution_intent_from_payload(final_payload: dict):
         fee_rate=fee_rate,
         direction=str(final_payload["direction"]),
     )
+    family_id = _required_text(final_payload, "family_id")
     return FinalExecutionIntent(
         hypothesis_id=str(final_payload.get("candidate_id") or final_payload["final_intent_id"]),
         selected_token_id=str(final_payload["token_id"]),
@@ -360,7 +361,7 @@ def _final_execution_intent_from_payload(final_payload: dict):
         neg_risk=bool(final_payload.get("neg_risk", False)),
         event_id=str(final_payload.get("market_event_id") or final_payload["event_id"]),
         resolution_window=str(final_payload.get("resolution_window") or "default"),
-        correlation_key=str(final_payload["final_intent_id"]),
+        correlation_key=family_id,
         decision_source_context=decision_source_context,
         passive_maker_context=passive_maker_context,
         taker_quality_proof=(

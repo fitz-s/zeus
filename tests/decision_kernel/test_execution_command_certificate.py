@@ -1,4 +1,4 @@
-# Lifecycle: created=2026-05-25; last_reviewed=2026-07-10; last_reused=2026-07-10
+# Lifecycle: created=2026-05-25; last_reviewed=2026-07-16; last_reused=2026-07-16
 # Purpose: Prove live execution certificates preserve authority, sizing, and submit invariants.
 # Reuse: Re-audit final-intent, pre-submit, command, and verifier field closure before relying on it.
 # Authority basis: docs/operations/edli_v1/EDLI_REDEMPTION_FINAL_PACKAGE_SPEC.md §14 full-live increment.
@@ -262,6 +262,8 @@ def test_event_bound_final_intent_normalizes_legacy_fractional_maker_size():
     assert native.size_value == native.submitted_shares
     assert native.submitted_shares == Decimal("5.06")
     assert native.actionable_certificate_hash == final_intent.payload["actionable_certificate_hash"]
+    assert native.correlation_key == final_intent.payload["family_id"]
+    assert native.correlation_key != final_intent.payload["final_intent_id"]
 
 
 def test_final_intent_uses_submit_bound_not_curve_expected_cost_edge():

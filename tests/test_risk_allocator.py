@@ -1,6 +1,6 @@
 # Created: 2026-04-27
-# Last reused/audited: 2026-07-14
-# Lifecycle: created=2026-04-27; last_reviewed=2026-07-14; last_reused=2026-07-14
+# Last reused/audited: 2026-07-16
+# Lifecycle: created=2026-04-27; last_reviewed=2026-07-16; last_reused=2026-07-16
 # Authority basis: docs/operations/task_2026-05-08_object_invariance_remaining_mainline/PLAN.md
 # Purpose: Lock INV-NEW-R RiskAllocator / PortfolioGovernor cap and kill-switch behavior.
 # Reuse: Run for A2 allocator/governor, executor pre-submit, and live-readiness gate changes.
@@ -1004,6 +1004,112 @@ def test_allocator_uses_current_uuid_position_without_double_counting_legacy_lot
         3_400_000,
         8_600_000,
     )
+
+
+def test_position_lots_normalize_sibling_and_legacy_weather_exposure_to_family():
+    from src.events.candidate_binding import weather_family_id
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(
+        """
+        CREATE TABLE venue_commands (
+          command_id TEXT PRIMARY KEY,
+          position_id TEXT,
+          intent_kind TEXT,
+          side TEXT,
+          market_id TEXT,
+          token_id TEXT,
+          decision_id TEXT,
+          created_at TEXT
+        );
+        CREATE TABLE venue_command_events (
+          command_id TEXT,
+          sequence_no INTEGER,
+          event_type TEXT,
+          payload_json TEXT
+        );
+        CREATE TABLE position_lots (
+          lot_id INTEGER PRIMARY KEY AUTOINCREMENT,
+          position_id INTEGER,
+          state TEXT,
+          shares INTEGER,
+          entry_price_avg TEXT,
+          source_command_id TEXT,
+          source TEXT,
+          raw_payload_json TEXT,
+          local_sequence INTEGER
+        );
+        CREATE TABLE position_current (
+          position_id TEXT PRIMARY KEY,
+          phase TEXT,
+          market_id TEXT,
+          direction TEXT,
+          shares REAL,
+          cost_basis_usd REAL,
+          entry_price REAL,
+          token_id TEXT,
+          no_token_id TEXT,
+          chain_shares REAL,
+          chain_cost_basis_usd REAL,
+          city TEXT,
+          target_date TEXT,
+          temperature_metric TEXT
+        );
+        INSERT INTO venue_commands VALUES (
+          'cmd-29', 'position-29', 'ENTRY', 'BUY', 'market-29', 'no-29',
+          'decision-29', '2026-07-14T10:00:00+00:00'
+        );
+        INSERT INTO venue_commands VALUES (
+          'cmd-30', 'position-30', 'ENTRY', 'BUY', 'market-30', 'no-30',
+          'decision-30', '2026-07-14T10:01:00+00:00'
+        );
+        INSERT INTO venue_commands VALUES (
+          'cmd-legacy', 'legacy-runtime', 'ENTRY', 'BUY', 'market-31', 'no-31',
+          'decision-31', '2026-07-14T10:02:00+00:00'
+        );
+        INSERT INTO venue_command_events VALUES (
+          'cmd-29', 1, 'SUBMIT_REQUESTED',
+          '{"allocation":{"event_id":"seoul-high","correlation_key":"intent-29"}}'
+        );
+        INSERT INTO venue_command_events VALUES (
+          'cmd-30', 1, 'SUBMIT_REQUESTED',
+          '{"allocation":{"event_id":"seoul-high","correlation_key":"intent-30"}}'
+        );
+        INSERT INTO venue_command_events VALUES (
+          'cmd-legacy', 1, 'SUBMIT_REQUESTED',
+          '{"allocation":{"event_id":"seoul-high","correlation_key":"intent-31"}}'
+        );
+        INSERT INTO position_current VALUES (
+          'position-29', 'active', 'condition-29', 'buy_no', 10, 7, 0.7,
+          'yes-29', 'no-29', 10, 7, 'Seoul', '2026-07-16', 'high'
+        );
+        INSERT INTO position_current VALUES (
+          'position-30', 'active', 'condition-30', 'buy_no', 20, 15, 0.75,
+          'yes-30', 'no-30', 20, 15, 'Seoul', '2026-07-16', 'high'
+        );
+        INSERT INTO position_lots (
+          position_id, state, shares, entry_price_avg, source_command_id,
+          source, raw_payload_json, local_sequence
+        ) VALUES (
+          31, 'CONFIRMED_EXPOSURE', 5, '0.8', 'cmd-legacy', 'CHAIN',
+          '{"city":"Seoul","target_date":"2026-07-16",'
+          || '"temperature_metric":"high","correlation_key":"intent-31"}',
+          1
+        );
+        """
+    )
+
+    lots = load_position_lots(conn)
+    family_id = weather_family_id(
+        city="Seoul",
+        target_date="2026-07-16",
+        metric="high",
+    )
+
+    assert len(lots) == 3
+    assert {lot.correlation_key for lot in lots} == {family_id}
+    assert {lot.token_id for lot in lots} == {"no-29", "no-30", "no-31"}
 
 
 def test_pre_sdk_review_required_no_order_id_does_not_latch_unknown_side_effect_count():

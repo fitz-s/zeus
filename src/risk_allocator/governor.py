@@ -651,6 +651,33 @@ def load_cap_policy(path: str | Path = "config/risk_caps.yaml") -> CapPolicy:
     )
 
 
+def _weather_family_correlation_key(
+    *,
+    family_id: object = "",
+    city: object = "",
+    target_date: object = "",
+    metric: object = "",
+    fallback: object = "",
+) -> str:
+    """Normalize current and legacy exposure onto one terminal weather family."""
+
+    family = str(family_id or "").strip()
+    if family.startswith("edli_family_"):
+        return family
+    city_text = str(city or "").strip()
+    target_text = str(target_date or "").strip()
+    metric_text = str(metric or "").strip().lower()
+    if city_text and target_text and metric_text in {"high", "low"}:
+        from src.events.candidate_binding import weather_family_id
+
+        return weather_family_id(
+            city=city_text,
+            target_date=target_text,
+            metric=metric_text,
+        )
+    return family or str(fallback or "").strip()
+
+
 def load_position_lots(conn: Any) -> tuple[ExposureLot, ...]:
     """Read current confirmed exposure plus still-unprojected active lots."""
 
@@ -675,7 +702,21 @@ def load_position_lots(conn: Any) -> tuple[ExposureLot, ...]:
         market_id = str(payload.get("market_id") or row_map.get("market_id") or row_map.get("position_id"))
         event_id = str(allocation_payload.get("event_id") or payload.get("event_id") or row_map.get("event_id") or market_id)
         resolution_window = str(allocation_payload.get("resolution_window") or payload.get("resolution_window") or payload.get("window_label") or "default")
-        correlation_key = str(allocation_payload.get("correlation_key") or payload.get("correlation_key") or event_id)
+        correlation_key = _weather_family_correlation_key(
+            family_id=(
+                allocation_payload.get("family_id")
+                or payload.get("family_id")
+                or allocation_payload.get("correlation_key")
+                or payload.get("correlation_key")
+            ),
+            city=payload.get("city"),
+            target_date=payload.get("target_date"),
+            metric=(
+                payload.get("metric")
+                or payload.get("temperature_metric")
+            ),
+            fallback=event_id,
+        )
         token_id = str(payload.get("token_id") or row_map.get("token_id") or row_map.get("position_id"))
         exposure_micro = _lot_exposure_micro(row_map.get("shares"), row_map.get("entry_price_avg"))
         lots.append(
@@ -820,6 +861,19 @@ def _load_current_position_exposure_rows(conn: Any) -> list[Mapping[str, Any]]:
     fill_authority_expr = (
         "pc.fill_authority" if _has_column(conn, "position_current", "fill_authority") else "NULL"
     )
+    city_expr = (
+        "pc.city" if _has_column(conn, "position_current", "city") else "NULL"
+    )
+    target_date_expr = (
+        "pc.target_date"
+        if _has_column(conn, "position_current", "target_date")
+        else "NULL"
+    )
+    metric_expr = (
+        "pc.temperature_metric"
+        if _has_column(conn, "position_current", "temperature_metric")
+        else "NULL"
+    )
     rows = conn.execute(
             f"""
             SELECT pc.position_id,
@@ -834,6 +888,9 @@ def _load_current_position_exposure_rows(conn: Any) -> list[Mapping[str, Any]]:
                    pc.chain_shares,
                    pc.chain_cost_basis_usd,
                    {fill_authority_expr} AS fill_authority,
+                   {city_expr} AS city,
+                   {target_date_expr} AS target_date,
+                   {metric_expr} AS temperature_metric,
                    cmd.command_id,
                    cmd.market_id,
                    cmd.token_id,
@@ -981,7 +1038,16 @@ def _current_position_exposure_lots(row: Any) -> tuple[ExposureLot, ...]:
     )
     event_id = str(allocation.get("event_id") or row_map.get("event_id") or market_id)
     resolution_window = str(allocation.get("resolution_window") or "default")
-    correlation_key = str(allocation.get("correlation_key") or event_id)
+    correlation_key = _weather_family_correlation_key(
+        family_id=(
+            allocation.get("family_id")
+            or allocation.get("correlation_key")
+        ),
+        city=row_map.get("city"),
+        target_date=row_map.get("target_date"),
+        metric=row_map.get("temperature_metric"),
+        fallback=event_id,
+    )
     direction = str(row_map.get("direction") or "")
     token_id = str(
         row_map.get("token_id")

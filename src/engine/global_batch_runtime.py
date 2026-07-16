@@ -465,7 +465,7 @@ def _store_global_auction_receipt(
         probability_keys=probability_keys,
         buy_candidate_index=buy_candidate_index,
         excluded_by_family=excluded_by_family or {},
-        required=book_capture_complete and bool(evaluation_rows),
+        required=book_capture_complete,
     )
     compact_evaluations = {
         "rejected_groups": [

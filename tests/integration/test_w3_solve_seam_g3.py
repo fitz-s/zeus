@@ -476,6 +476,117 @@ def test_global_auction_receipt_persists_complete_buy_sell_hold_cash_comparison(
     conn.close()
 
 
+def test_global_auction_receipt_preserves_book_states_with_zero_evaluations():
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        """
+        CREATE TABLE decision_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            mode TEXT NOT NULL,
+            started_at TEXT NOT NULL,
+            completed_at TEXT NOT NULL,
+            artifact_json TEXT NOT NULL,
+            timestamp TEXT NOT NULL,
+            env TEXT NOT NULL
+        )
+        """
+    )
+    decision = GlobalSingleOrderDecision(
+        candidate=None,
+        shares=Decimal("0"),
+        cost_usd=Decimal("0"),
+        robust_delta_log_wealth=0.0,
+        robust_ev_usd=0.0,
+        capital_efficiency=0.0,
+        no_trade_reason="NO_CURRENT_EXECUTABLE_POSITIVE_ORDER",
+        rejection_reasons={},
+        candidate_evaluations=(),
+        candidate_input_count=0,
+    )
+    at = _dt.datetime(2026, 7, 16, 18, 0, tzinfo=_dt.timezone.utc)
+    row_id = global_batch_runtime._store_global_auction_receipt(
+        conn,
+        selected=SimpleNamespace(decision=decision),
+        selection_epoch_identity="epoch-empty-current",
+        selection_cut_at_utc=at,
+        decision_at_utc=at + _dt.timedelta(seconds=1),
+        probability_manifest=(("family-empty", "q-empty"),),
+        full_scope_identity="full-scope-empty-current",
+        full_scope_family_keys=("family-empty",),
+        probability_ineligible_by_family={},
+        book_epoch_identity="book-empty-current",
+        book_asset_count=1,
+        book_asset_states=(
+            (
+                "family-empty",
+                "20C",
+                "condition-empty",
+                "YES",
+                "yes-empty",
+                "NO_ASK",
+                "book-empty-yes",
+                "event-empty",
+                "gamma-empty",
+            ),
+            (
+                "family-empty",
+                "20C",
+                "condition-empty",
+                "NO",
+                "no-empty",
+                "VENUE_NOT_EXECUTABLE",
+                "metadata-empty-no",
+                "event-empty",
+                "gamma-empty",
+            ),
+        ),
+        wealth_witness=SimpleNamespace(
+            witness_identity="wealth-empty-current",
+            economic_identity="wealth-economics-empty-current",
+        ),
+        fractional_kelly_multiplier=Decimal("0.25"),
+        book_captured_at_utc=at,
+        book_max_age=_dt.timedelta(seconds=30),
+    )
+
+    artifact = json.loads(
+        conn.execute(
+            "SELECT artifact_json FROM decision_log WHERE id = ?",
+            (row_id,),
+        ).fetchone()["artifact_json"]
+    )
+    summary = artifact["summary"]
+    assert summary["candidate_evaluation_count"] == 0
+    assert summary["candidate_coverage_complete"] is True
+    assert summary["book_native_side_candidate_coverage_status"] == "COMPLETE"
+    assert summary["book_native_side_candidate_coverage_complete"] is True
+    assert summary["book_native_side_state_count"] == 2
+    assert summary["book_native_side_executable_count"] == 0
+    assert summary["book_native_side_non_executable_count"] == 2
+
+
+def test_global_candidate_correlation_key_is_weather_family_not_event_or_token():
+    family_key = "edli_family_shared"
+    first = SimpleNamespace(
+        family_key=family_key,
+        token_id="yes-token",
+        owner_event_id="event-a",
+    )
+    sibling = SimpleNamespace(
+        family_key=family_key,
+        token_id="no-token",
+        owner_event_id="event-b",
+    )
+
+    assert era._global_candidate_correlation_key(first) == family_key
+    assert era._global_candidate_correlation_key(sibling) == family_key
+    with pytest.raises(ValueError, match="GLOBAL_CANDIDATE_FAMILY_ID_MISSING"):
+        era._global_candidate_correlation_key(
+            SimpleNamespace(token_id="token-without-family")
+        )
+
+
 def test_global_preflight_receipt_persists_pause_and_zero_venue_side_effects():
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
