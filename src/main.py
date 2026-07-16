@@ -3626,7 +3626,7 @@ from src.data.replacement_forecast_production import (  # noqa: E402
 
 
 @_scheduler_job("edli_event_reactor")
-def _edli_event_reactor_cycle() -> None:
+def _edli_event_reactor_cycle(*, producer_wake_reason: str | None = None) -> bool:
     """Scheduler hook -- body owned by src.events.reactor (R4-b3 reactor+prune
     cluster extraction, 2026-07-08) as ``run_edli_event_reactor_cycle``. See
     that function's docstring for the full EDLI decision cycle it runs
@@ -3641,7 +3641,10 @@ def _edli_event_reactor_cycle() -> None:
     from src.events.reactor import run_edli_event_reactor_cycle
 
     _start_edli_reactor_wake_listener()
-    run_edli_event_reactor_cycle(active_lock=_edli_reactor_active_lock)
+    return run_edli_event_reactor_cycle(
+        active_lock=_edli_reactor_active_lock,
+        producer_wake_reason=producer_wake_reason,
+    )
 
 
 def _edli_initialize_reactor_wake_cursor() -> None:
@@ -3673,7 +3676,9 @@ def _edli_reactor_wake_poll_once() -> bool:
                 "Day0 reactor wake held-position monitor failed; "
                 "continuing to the canonical reactor"
             )
-    _edli_event_reactor_cycle()
+    ran = _edli_event_reactor_cycle(producer_wake_reason=wake.reason)
+    if ran is not True:
+        return False
     _edli_last_reactor_wake_id = wake.wake_id
     logger.info(
         "EDLI reactor consumed wake id=%s source=%s reason=%s",

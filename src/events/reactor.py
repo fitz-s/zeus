@@ -5074,7 +5074,11 @@ def _current_live_fact_status(relative_path: str) -> str:
             return "CURRENT_FOR_LIVE" if "CURRENT_FOR_LIVE" in line else "STALE_FOR_LIVE"
     return "STALE_FOR_LIVE"
 
-def run_edli_event_reactor_cycle(*, active_lock) -> None:
+def run_edli_event_reactor_cycle(
+    *,
+    active_lock,
+    producer_wake_reason: str | None = None,
+) -> bool:
     """EDLI event-reactor cycle body (R4-b3 extraction from src/main.py::
     _edli_event_reactor_cycle, 2026-07-08). main.py's scheduler hook is now a
     thin delegating call.
@@ -5110,13 +5114,16 @@ def run_edli_event_reactor_cycle(*, active_lock) -> None:
     _log = _logging.getLogger("zeus.events.reactor")
 
     edli_cfg = _settings_section("edli", {})
+    committed_day0_wake = (
+        producer_wake_reason == "day0_extreme_event_committed"
+    )
     if not edli_cfg.get("enabled") or not edli_cfg.get("event_writer_enabled"):
-        return
+        return False
     if _defer_for_held_position_monitor("edli_event_reactor"):
-        return
+        return False
     if active_lock.locked():
         _log.warning("EDLI reactor skipped: previous EDLI reactor cycle is still running")
-        return
+        return False
     import sqlite3  # transient world-DB lock classification for fail-soft emit boundary
     from src.engine.event_reactor_adapter import (
         edli_source_truth_gate,
@@ -5136,10 +5143,10 @@ def run_edli_event_reactor_cycle(*, active_lock) -> None:
 
     if not active_lock.acquire(blocking=False):
         _log.warning("EDLI reactor skipped: previous EDLI reactor cycle is still running")
-        return
+        return False
     if _defer_for_held_position_monitor("edli_event_reactor"):
         active_lock.release()
-        return
+        return False
     try:
         conn = get_world_connection()
     except Exception:
@@ -5223,14 +5230,16 @@ def run_edli_event_reactor_cycle(*, active_lock) -> None:
         # writes happen inside the mutex.
         _day0_fast_prefetch = None
         if (
-            edli_cfg.get("day0_extreme_trigger_enabled")
+            not committed_day0_wake
+            and edli_cfg.get("day0_extreme_trigger_enabled")
             and edli_cfg.get("day0_authority_catchup_scanner_enabled", False)
         ):
             _day0_fast_prefetch = _edli_prefetch_day0_fast_obs(decision_time=now)
         _log_stage("day0_prefetch")
         _day0_family_admission: _Day0LiveFamilyAdmission | None = None
         if (
-            edli_cfg.get("day0_extreme_trigger_enabled")
+            not committed_day0_wake
+            and edli_cfg.get("day0_extreme_trigger_enabled")
             and edli_cfg.get("day0_authority_catchup_scanner_enabled", False)
         ):
             try:
@@ -5257,7 +5266,11 @@ def run_edli_event_reactor_cycle(*, active_lock) -> None:
                 )
         _prune_mutex = _world_write_mutex()
         _prune_lock_timeout_s = _edli_prune_lock_timeout_seconds(edli_cfg)
-        _prune_acquired = _prune_mutex.acquire(timeout=_prune_lock_timeout_s)
+        _prune_acquired = (
+            False
+            if committed_day0_wake
+            else _prune_mutex.acquire(timeout=_prune_lock_timeout_s)
+        )
         if _prune_acquired:
             try:
                 _edli_prune_pending_working_set(
@@ -5268,15 +5281,23 @@ def run_edli_event_reactor_cycle(*, active_lock) -> None:
                 conn.commit()
             finally:
                 _prune_mutex.release()
-        else:
+        elif not committed_day0_wake:
             _log.warning(
                 "EDLI reactor prune skipped: world write mutex unavailable after %.3fs; "
                 "deferring maintenance so the money-path reactor can drain events.",
                 _prune_lock_timeout_s,
             )
+        else:
+            _log.info(
+                "EDLI reactor committed-Day0 wake: skipping maintenance prune "
+                "before draining the durable event"
+            )
         _log_stage("pending_prune")
         _fsr_events = []
-        if edli_cfg.get("forecast_snapshot_trigger_enabled"):
+        if (
+            not committed_day0_wake
+            and edli_cfg.get("forecast_snapshot_trigger_enabled")
+        ):
             try:
                 _fair_source = _edli_next_redecision_source()
                 _pending_key_budget_s = _edli_forecast_snapshot_build_budget_seconds(
@@ -5322,7 +5343,11 @@ def run_edli_event_reactor_cycle(*, active_lock) -> None:
         # Explicit acquire/finally (not ``with``) to avoid reindenting the block.
         _emit_mutex = _world_write_mutex()
         _emit_lock_timeout_s = _edli_emit_lock_timeout_seconds(edli_cfg)
-        _emit_acquired = _edli_acquire_mutex(_emit_mutex, timeout=_emit_lock_timeout_s)
+        _emit_acquired = (
+            False
+            if committed_day0_wake
+            else _edli_acquire_mutex(_emit_mutex, timeout=_emit_lock_timeout_s)
+        )
         if _emit_acquired:
             try:
                 if edli_cfg.get("forecast_snapshot_trigger_enabled"):
@@ -5353,7 +5378,8 @@ def run_edli_event_reactor_cycle(*, active_lock) -> None:
                 # positions with money at risk. The reactor still emits ordinary
                 # FORECAST_SNAPSHOT_READY candidates for new-entry discovery above.
                 if (
-                    edli_cfg.get("day0_extreme_trigger_enabled")
+                    not committed_day0_wake
+                    and edli_cfg.get("day0_extreme_trigger_enabled")
                     and edli_cfg.get("day0_authority_catchup_scanner_enabled", False)
                 ):
                     _day0_trade_conn = get_trade_connection_with_world_required(write_class=None)
@@ -5397,13 +5423,19 @@ def run_edli_event_reactor_cycle(*, active_lock) -> None:
                 _log_stage("emit_commit")
             finally:
                 _emit_mutex.release()
-        else:
+        elif not committed_day0_wake:
             _log.warning(
                 "EDLI reactor emit skipped: world write mutex unavailable after %.3fs; "
                 "draining already-queued candidates so heartbeat/monitor/redecision keep cadence.",
                 _emit_lock_timeout_s,
             )
             _log_stage("emit_lock_skipped")
+        else:
+            _log.info(
+                "EDLI reactor committed-Day0 wake: skipping forecast/day0 discovery "
+                "and draining the durable event immediately"
+            )
+            _log_stage("committed_day0_fast_path")
         # THROUGHPUT STRUCTURAL FIX (2026-06-01): the executable-snapshot refresh
         # (_refresh_pending_family_snapshots) runs a full-universe Gamma scan
         # (find_weather_markets → _get_active_events, benchmarked ~76s COLD; TTL 300s
@@ -5755,6 +5787,7 @@ def run_edli_event_reactor_cycle(*, active_lock) -> None:
         conn.close()
         active_lock.release()
         _start_venue_background_maintenance_after_reactor_if_required()
+    return True
 
 def _edli_positive_int_or_unbounded(
     config: dict, key: str, *, default: int, maximum: int
