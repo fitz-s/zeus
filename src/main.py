@@ -5574,12 +5574,14 @@ def _exit_monitor_cycle(
         return False
     _edli_reactor_active_lock.release()
     try:
-        run_exit_monitor_cycle(
+        monitor_succeeded = run_exit_monitor_cycle(
             held_position_monitor_active=_held_position_monitor_active,
             mark_held_position_monitor_complete=_mark_held_position_monitor_complete,
             monitor_claimed=True,
             target_families=target_families,
         )
+        if monitor_succeeded is not True:
+            raise RuntimeError("EXIT_MONITOR_CYCLE_INCOMPLETE")
         return True
     finally:
         if _held_position_monitor_active.is_set():

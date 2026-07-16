@@ -5720,11 +5720,12 @@ def test_exit_monitor_claims_priority_and_waits_for_reactor_handoff(monkeypatch)
         def release(self) -> None:
             calls.append("release")
 
-    def _run(**kwargs) -> None:
+    def _run(**kwargs) -> bool:
         calls.append(
             ("run", kwargs["monitor_claimed"], kwargs["target_families"])
         )
         kwargs["mark_held_position_monitor_complete"]()
+        return True
 
     main_module._held_position_monitor_active.clear()
     monkeypatch.setattr(main_module, "_edli_reactor_active_lock", ReactorGate())
@@ -5738,6 +5739,159 @@ def test_exit_monitor_claims_priority_and_waits_for_reactor_handoff(monkeypatch)
         ("run", True, None),
     ]
     assert not main_module._held_position_monitor_active.is_set()
+
+
+def test_exit_monitor_incomplete_runtime_cycle_is_not_success(monkeypatch) -> None:
+    import src.execution.exit_lifecycle as exit_module
+    import src.main as main_module
+
+    class ReactorGate:
+        def acquire(self, *, timeout: float) -> bool:
+            return True
+
+        def release(self) -> None:
+            pass
+
+    main_module._held_position_monitor_active.clear()
+    monkeypatch.setattr(main_module, "_edli_reactor_active_lock", ReactorGate())
+    monkeypatch.setattr(
+        exit_module,
+        "run_exit_monitor_cycle",
+        lambda **_kwargs: False,
+    )
+
+    assert main_module._exit_monitor_cycle() is not True
+    assert not main_module._held_position_monitor_active.is_set()
+
+
+def test_exit_monitor_monitoring_failure_returns_false(monkeypatch) -> None:
+    import threading
+
+    import src.config as config_module
+    import src.data.polymarket_client as polymarket_module
+    import src.engine.cycle_runner as cycle_module
+    import src.execution.exit_lifecycle as exit_module
+    import src.observability.scheduler_health as health_module
+    import src.observability.status_summary as status_module
+    import src.state.canonical_write as canonical_module
+    import src.state.decision_chain as decision_chain_module
+
+    class Conn:
+        closed = False
+
+        def close(self) -> None:
+            self.closed = True
+
+    class Client:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args) -> None:
+            pass
+
+    def fail_monitor(*_args, **_kwargs):
+        raise RuntimeError("monitor failed")
+
+    conn = Conn()
+    active = threading.Event()
+    completed: list[bool] = []
+    health: list[tuple[bool, str | None]] = []
+
+    monkeypatch.setattr(
+        config_module,
+        "settings",
+        {"edli": {"real_order_submit_enabled": False}},
+    )
+    monkeypatch.setattr(cycle_module, "get_connection", lambda: conn)
+    monkeypatch.setattr(cycle_module, "load_portfolio", lambda **_kwargs: object())
+    monkeypatch.setattr(cycle_module, "get_tracker", object)
+    monkeypatch.setattr(cycle_module, "_execute_monitoring_phase", fail_monitor)
+    monkeypatch.setattr(
+        exit_module,
+        "_check_monitor_cadence_watchdog",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        exit_module,
+        "_refresh_global_allocator_for_held_position_monitor",
+        lambda *_args, **_kwargs: {"configured": False},
+    )
+    monkeypatch.setattr(polymarket_module, "PolymarketClient", Client)
+    monkeypatch.setattr(
+        canonical_module,
+        "commit_then_export",
+        lambda _conn, *, db_op, json_exports: db_op(),
+    )
+    monkeypatch.setattr(
+        decision_chain_module,
+        "store_artifact",
+        lambda *_args, **_kwargs: 1,
+    )
+    monkeypatch.setattr(status_module, "write_cycle_pulse", lambda _summary: None)
+    monkeypatch.setattr(
+        health_module,
+        "_write_scheduler_health",
+        lambda _name, *, failed, reason=None, **_kwargs: health.append(
+            (failed, reason)
+        ),
+    )
+
+    succeeded = exit_module.run_exit_monitor_cycle(
+        held_position_monitor_active=active,
+        mark_held_position_monitor_complete=lambda: (
+            active.clear(),
+            completed.append(True),
+        ),
+    )
+
+    assert succeeded is False
+    assert conn.closed is True
+    assert completed == [True]
+    assert health == [(True, "monitor failed")]
+
+
+def test_day0_wake_does_not_ack_incomplete_exit_monitor(monkeypatch) -> None:
+    import src.main as main_module
+    import src.runtime.reactor_wake as wake_module
+
+    wake = wake_module.ReactorWake(
+        "wake-day0-monitor-failed",
+        "2026-07-16T12:00:00+00:00",
+        "ingest_main",
+        "day0_extreme_event_committed",
+        ("event-day0",),
+    )
+    acknowledgements: list[str] = []
+    reactor_calls: list[bool] = []
+
+    class IdleLock:
+        def locked(self) -> bool:
+            return False
+
+    class IdleMonitor:
+        def is_set(self) -> bool:
+            return False
+
+    monkeypatch.setattr(wake_module, "read_reactor_wake", lambda: wake)
+    monkeypatch.setattr(
+        wake_module,
+        "acknowledge_reactor_wake",
+        lambda selected: acknowledgements.append(selected.wake_id) or True,
+    )
+    monkeypatch.setattr(main_module, "_edli_reactor_active_lock", IdleLock())
+    monkeypatch.setattr(main_module, "_held_position_monitor_active", IdleMonitor())
+    monkeypatch.setattr(main_module, "_exit_monitor_cycle", lambda **_kwargs: False)
+    monkeypatch.setattr(
+        main_module,
+        "_edli_event_reactor_cycle",
+        lambda **_kwargs: reactor_calls.append(True) or True,
+    )
+    monkeypatch.setattr(main_module, "_edli_last_reactor_wake_id", None)
+
+    assert main_module._edli_reactor_wake_poll_once() is False
+    assert acknowledgements == []
+    assert reactor_calls == []
+    assert main_module._edli_last_reactor_wake_id is None
 
 
 def test_targeted_exit_monitor_filters_positions_without_mutating_full_portfolio() -> None:

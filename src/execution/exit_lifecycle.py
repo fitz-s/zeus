@@ -6632,7 +6632,7 @@ def run_exit_monitor_cycle(
     mark_held_position_monitor_complete: Callable[[], None],
     monitor_claimed: bool = False,
     target_families: Collection[tuple[str, str, str]] | None = None,
-) -> None:
+) -> bool:
     """Scheduler entrypoint (R4-b extraction from src/main.py::_exit_monitor_cycle).
 
     Standalone exit-lifecycle monitoring job owned by the order daemon.
@@ -6675,16 +6675,17 @@ def run_exit_monitor_cycle(
     real_order_submit_enabled = bool(edli_cfg.get("real_order_submit_enabled", False))
     if held_position_monitor_active.is_set() and not monitor_claimed:
         logger.warning("exit_monitor skipped: previous monitor cycle is still running")
-        return
+        return False
     held_position_monitor_active.set()
 
     conn = get_connection()
     if conn is None:
         logger.warning("exit_monitor: DB write-lock degrade — skipping cycle")
         mark_held_position_monitor_complete()
-        return
+        return False
 
     summary: dict = {"monitors": 0, "exits": 0}
+    succeeded = False
     # FIX 2c (2026-06-20): detect a lapsed MONITOR_REFRESHED cadence (whole-book
     # silence) on the first cycle after recovery. Detection only; the underlying
     # daemon supervision is operator infra.
@@ -6736,7 +6737,7 @@ def run_exit_monitor_cycle(
                 )
             except Exception as exc:
                 logger.error(
-                    "exit_monitor: monitoring phase failed (non-fatal): %s",
+                    "exit_monitor: monitoring phase failed: %s",
                     exc,
                     exc_info=True,
                 )
@@ -6797,10 +6798,12 @@ def run_exit_monitor_cycle(
         commit_then_export(
             conn, db_op=_db_op, json_exports=[_export_portfolio, _export_tracker]
         )
+        succeeded = "monitoring_error" not in summary
     except Exception as exc:
         logger.error(
             "exit_monitor: unexpected error: %s", exc, exc_info=True
         )
+        summary["monitoring_error"] = str(exc)
     finally:
         try:
             conn.close()
@@ -6829,10 +6832,12 @@ def run_exit_monitor_cycle(
 
     _write_scheduler_health(
         "exit_monitor",
-        failed=False,
+        failed=not succeeded,
+        reason=summary.get("monitoring_error"),
         extra={
             "exit_order_submit_enabled": real_order_submit_enabled,
             "monitors": summary.get("monitors", 0),
             "exits": summary.get("exits", 0),
         },
     )
+    return succeeded
