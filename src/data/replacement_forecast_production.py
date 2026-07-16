@@ -411,6 +411,9 @@ def _download_bayes_precision_fusion_source_clock_raw_inputs_if_needed(
         from src.data.replacement_forecast_current_target_plan import (  # noqa: PLC0415
             replacement_forecast_current_target_keys,
         )
+        from src.data.replacement_forecast_seed_discovery import (  # noqa: PLC0415
+            held_position_family_priorities,
+        )
         from src.data.source_clock_update_probe import DEFAULT_MODEL_UPDATES_JSONL  # noqa: PLC0415
         from src.strategy.live_inference.source_clock_vnext import source_publicly_usable_at  # noqa: PLC0415
 
@@ -463,10 +466,25 @@ def _download_bayes_precision_fusion_source_clock_raw_inputs_if_needed(
             }
 
         affected = set(affected_cities)
+        held_priority = held_position_family_priorities()
+        target_keys = sorted(
+            (
+                row
+                for row in replacement_forecast_current_target_keys(Path(str(forecast_db)))
+                if row.city in affected
+            ),
+            key=lambda row: (
+                held_priority.get(
+                    (row.city, row.target_date, row.temperature_metric),
+                    2,
+                ),
+                row.target_date,
+                row.city,
+                row.temperature_metric,
+            ),
+        )
         targets: list[BayesPrecisionFusionDownloadTarget] = []
-        for row in replacement_forecast_current_target_keys(Path(str(forecast_db))):
-            if row.city not in affected:
-                continue
+        for row in target_keys:
             city_cfg = cities_by_name.get(row.city)
             if city_cfg is None:
                 continue

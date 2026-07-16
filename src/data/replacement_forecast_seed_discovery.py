@@ -502,7 +502,7 @@ def _seed_name(target: Mapping[str, object], *, computed_at: datetime) -> str:
     return f"{city}.{target_date}.{metric}.{stamp}.json"
 
 
-def _held_position_family_priorities() -> dict[tuple[str, str, str], int]:
+def held_position_family_priorities() -> dict[tuple[str, str, str], int]:
     """Return live held-family priority from canonical position_current.
 
     Forecast materialization is both an entry input and the held-position
@@ -605,7 +605,7 @@ def discover_replacement_forecast_materialization_seeds(
                 skipped_count=0,
                 failed_count=0,
             )
-        held_family_priority = _held_position_family_priorities()
+        held_family_priority = held_position_family_priorities()
         targets = tuple(
             {
                 "city": row.city,

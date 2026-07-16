@@ -1,6 +1,6 @@
 # Created: 2026-06-16
-# Last reused or audited: 2026-06-19
-# Lifecycle: created=2026-06-16; last_reviewed=2026-06-19; last_reused=2026-06-19
+# Last reused or audited: 2026-07-16
+# Lifecycle: created=2026-06-16; last_reviewed=2026-07-16; last_reused=2026-07-16
 # Authority basis: docs/evidence/timing_audit/capture_reactor_stall_rootcause_2026-06-16.md
 #   (PRIMARY/CODE fix) + docs/evidence/timing_audit/impl_flat_threshold_capture_fix_2026-06-16.md.
 #   BAYES_PRECISION_FUSION_SPEC §6 F1 (the q-path consumes the persisted single_runs capture).
@@ -463,6 +463,82 @@ def test_source_clock_scoped_capture_skips_heavy_fanout_during_quota_cooldown(
         "affected_cities": ("Amsterdam",),
         "cooldown_seconds": 241,
     }
+
+
+def test_source_clock_scoped_capture_prioritizes_held_families(
+    tmp_path, monkeypatch
+) -> None:
+    import src.data.bayes_precision_fusion_download as dl
+    import src.data.openmeteo_model_updates as updates
+    import src.data.replacement_forecast_current_target_plan as target_plan
+    import src.data.replacement_forecast_seed_discovery as seed_discovery
+
+    class _Report:
+        updated_sources = ("ecmwf_ifs",)
+        affected_cities = ("Paris", "Seoul")
+
+        def as_dict(self):
+            return {
+                "updated_sources": list(self.updated_sources),
+                "affected_cities": list(self.affected_cities),
+            }
+
+    keys = (
+        target_plan.ReplacementForecastTargetKey("Paris", "2026-07-16", "high"),
+        target_plan.ReplacementForecastTargetKey("Seoul", "2026-07-17", "high"),
+        target_plan.ReplacementForecastTargetKey("Seoul", "2026-07-16", "high"),
+    )
+    seen: list[tuple[str, str, str]] = []
+
+    monkeypatch.setitem(
+        prod.settings["edli"],
+        "replacement_0_1_bayes_precision_fusion_capture_enabled",
+        True,
+    )
+    monkeypatch.setattr(dl, "bayes_precision_fusion_quota_cooldown_seconds", lambda: 0)
+    monkeypatch.setattr(updates, "read_model_updates_jsonl", lambda _path: ())
+    monkeypatch.setattr(
+        target_plan,
+        "replacement_forecast_current_target_keys",
+        lambda _path: keys,
+    )
+    monkeypatch.setattr(
+        seed_discovery,
+        "held_position_family_priorities",
+        lambda: {("Seoul", "2026-07-17", "high"): 0},
+    )
+    monkeypatch.setattr(
+        prod,
+        "_probe_resolved_bayes_precision_fusion_extras_cycle",
+        lambda: _CYCLE,
+    )
+
+    def _download(**kwargs):
+        seen.extend(
+            (target.city, target.target_date, target.metric)
+            for target in kwargs["targets"]
+        )
+        return {
+            "status": "BAYES_PRECISION_FUSION_EXTRA_RAW_INPUTS_DOWNLOADED",
+            "written_row_count": 1,
+        }
+
+    monkeypatch.setattr(dl, "download_bayes_precision_fusion_extra_raw_inputs", _download)
+
+    report = prod._download_bayes_precision_fusion_source_clock_raw_inputs_if_needed(
+        {"forecast_db": str(tmp_path / "zeus-forecasts.db")},
+        source_clock_report=_Report(),
+        max_wall_clock_seconds=5.0,
+    )
+
+    assert seen == [
+        ("Seoul", "2026-07-17", "high"),
+        ("Paris", "2026-07-16", "high"),
+        ("Seoul", "2026-07-16", "high"),
+    ]
+    assert report["status"] == (
+        "SOURCE_CLOCK_SCOPED_BAYES_PRECISION_FUSION_EXTRA_RAW_INPUTS_DOWNLOADED"
+    )
 
 
 def test_downloaded_extras_records_fixpoint_and_success_health(_cfg_with_db, _redirect_health):

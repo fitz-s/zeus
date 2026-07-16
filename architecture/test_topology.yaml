@@ -28,6 +28,7 @@ test_trust_policy:
   # Machine-readable registry: tests with valid lifecycle headers.
   # Tests not in this list require audit before running.
   trusted_tests:
+    tests/test_replacement_forecast_extras_coverage_gate.py: {created: "2026-06-16", last_used: "2026-07-16", note: "BPF source-clock capture coverage, fixpoint, quota cooldown, and held-family-first target ordering."}
     tests/test_replacement_forecast_current_target_plan.py: {created: "2026-06-06", last_used: "2026-07-15", note: "Current active-family coverage and seedability, including automatic reseed when a shaped posterior carries an older probability-semantics revision."}
     tests/test_replacement_forecast_materializer_cycle_policy.py: {created: "2026-06-10", last_used: "2026-07-15", note: "Shared replacement cycle and probability-semantics policy; the current revision is part of tradeable-grade coverage and materialization identity."}
     tests/engine/test_position_belief_authority.py: {created: "2026-06-12", last_used: "2026-07-15", note: "Held-position belief reads the same replacement authority as entry and refuses old current-evidence probability semantics."}
