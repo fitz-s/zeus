@@ -2022,12 +2022,14 @@ def current_portfolio_wealth_witness(
         pusd_micro = int(row.get("pusd_balance_micro") or 0)
         allowance_micro = int(row.get("pusd_allowance_micro") or 0)
         legacy_micro = int(row.get("usdc_e_legacy_balance_micro") or 0)
-        spendable_micro = min(pusd_micro, allowance_micro)
+        spendable_micro = pusd_micro
         if spendable_micro < 0:
             raise ValueError("CURRENT_WEALTH_SPENDABLE_CASH_INVALID")
-        # Allowance limits a new BUY; it does not erase cash the wallet owns.
-        # Keep terminal wealth and executable BUY capacity as separate facts so
-        # zero allowance still permits HOLD/CASH and reduce-only SELL ranking.
+        # Allowance is submit-time permission, not owned cash.  The executor
+        # refreshes and checks it against the exact order notional immediately
+        # before persistence or SDK contact; selection keeps the wallet's pUSD
+        # balance as its cash endowment instead of erasing every BUY on one
+        # transient zero-allowance snapshot.
         floor = (Decimal(pusd_micro) + Decimal(legacy_micro)) / Decimal(
             "1000000"
         )

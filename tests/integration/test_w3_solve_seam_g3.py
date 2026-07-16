@@ -6127,7 +6127,7 @@ def test_current_portfolio_wealth_witness_uses_one_chain_generation():
         portfolio_state=portfolio,
     )
 
-    assert witness.spendable_cash_usd == Decimal("20")
+    assert witness.spendable_cash_usd == Decimal("25")
     assert witness.wealth_floor_usd == Decimal("27")
     assert witness.wealth_ceiling_usd == Decimal("27")
     assert repeated.witness_identity == witness.witness_identity
@@ -6167,7 +6167,7 @@ def test_current_portfolio_wealth_keeps_owned_cash_when_allowance_is_zero():
         portfolio_state=portfolio,
     )
 
-    assert witness.spendable_cash_usd == Decimal("0")
+    assert witness.spendable_cash_usd == Decimal("25")
     assert witness.wealth_floor_usd == Decimal("27")
     assert witness.wealth_ceiling_usd == Decimal("27")
 
@@ -6439,7 +6439,7 @@ def test_current_portfolio_wealth_bounds_unverified_claim_without_spendable_cred
         portfolio_state=portfolio,
     )
 
-    assert witness.spendable_cash_usd == Decimal("20")
+    assert witness.spendable_cash_usd == Decimal("25")
     assert witness.wealth_floor_usd == Decimal("27")
     assert witness.wealth_ceiling_usd == Decimal("28")
 
