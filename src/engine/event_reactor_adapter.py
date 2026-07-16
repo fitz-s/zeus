@@ -240,7 +240,7 @@ from src.state.snapshot_repo import (
     insert_snapshot,
     snapshot_row_is_invalidated,
 )
-from src.events.candidate_binding import MarketTopologyCandidate
+from src.events.candidate_binding import MarketTopologyCandidate, weather_family_id
 from src.events.candidate_evaluation import CandidateEvaluation
 from src.events.decision_engine import EventBoundDecisionEngine, EventBoundDecisionRequest
 from src.events.event_store import EventStore
@@ -313,7 +313,7 @@ UTC = timezone.utc
 @dataclass(frozen=True)
 class _GlobalBookEpochCacheEntry:
     namespace: str
-    request_topology: tuple[tuple[str, str, str, str, str], ...]
+    request_identity: tuple[tuple[str, str], ...]
     bound_probabilities: Mapping[str, object]
     epoch: object
 
@@ -322,46 +322,27 @@ _GLOBAL_BOOK_EPOCH_CACHE_LOCK = threading.Lock()
 _GLOBAL_BOOK_EPOCH_CACHE: _GlobalBookEpochCacheEntry | None = None
 
 
-def _global_book_topology_signature(
+def _global_probability_cache_identity(
     probabilities: Mapping[str, object],
-) -> tuple[tuple[str, str, str, str, str], ...] | None:
-    """Identify the exact family/bin/token universe without probability values."""
+) -> tuple[tuple[str, str], ...] | None:
+    """Identify one immutable family-probability manifest before book binding."""
 
-    rows: list[tuple[str, str, str, str, str]] = []
-    tokens: set[str] = set()
+    rows: list[tuple[str, str]] = []
     for raw_family_key, witness in sorted(probabilities.items()):
         family_key = str(raw_family_key or "").strip()
         witness_family_key = str(
             getattr(witness, "family_key", "") or ""
         ).strip()
-        bindings = tuple(getattr(witness, "bindings", ()) or ())
-        if not family_key or witness_family_key != family_key or not bindings:
+        witness_identity = str(
+            getattr(witness, "witness_identity", "") or ""
+        ).strip()
+        if (
+            not family_key
+            or witness_family_key != family_key
+            or not witness_identity
+        ):
             return None
-        for binding in bindings:
-            bin_id = str(getattr(binding, "bin_id", "") or "").strip()
-            condition_id = str(
-                getattr(binding, "condition_id", "") or ""
-            ).strip()
-            yes_token_id = str(
-                getattr(binding, "yes_token_id", "") or ""
-            ).strip()
-            no_token_id = str(
-                getattr(binding, "no_token_id", "") or ""
-            ).strip()
-            if not all(
-                (bin_id, condition_id, yes_token_id, no_token_id)
-            ) or yes_token_id in tokens or no_token_id in tokens:
-                return None
-            tokens.update((yes_token_id, no_token_id))
-            rows.append(
-                (
-                    family_key,
-                    bin_id,
-                    condition_id,
-                    yes_token_id,
-                    no_token_id,
-                )
-            )
+        rows.append((family_key, witness_identity))
     return tuple(rows) or None
 
 
@@ -385,14 +366,96 @@ def _global_book_epoch_cache_namespace(
     return None
 
 
-def _global_book_epoch_cache_allowed(events: Iterable[object]) -> bool:
-    """Price-triggered work must observe the book move that triggered it."""
+def _global_book_price_refresh_family_keys(
+    events: Iterable[object],
+) -> frozenset[str] | None:
+    """Return exact price-triggered families; malformed triggers force full refresh."""
 
-    rows = tuple(events)
-    return bool(rows) and all(
-        str(getattr(event, "event_type", "") or "")
-        != _EDLI_REDECISION_EVENT_TYPE
-        for event in rows
+    family_keys: set[str] = set()
+    for event in events:
+        if (
+            str(getattr(event, "event_type", "") or "")
+            != _EDLI_REDECISION_EVENT_TYPE
+        ):
+            continue
+        try:
+            payload = json.loads(str(getattr(event, "payload_json", "") or ""))
+        except (TypeError, ValueError):
+            return None
+        if not isinstance(payload, Mapping):
+            return None
+        city = str(payload.get("city") or "").strip()
+        target_date = str(payload.get("target_date") or "").strip()
+        metric = str(payload.get("metric") or "").strip().lower()
+        if not city or not target_date or metric not in {"high", "low"}:
+            return None
+        family_keys.add(
+            weather_family_id(
+                city=city,
+                target_date=target_date,
+                metric=metric,
+            )
+        )
+    return frozenset(family_keys)
+
+
+def _merge_global_book_epoch_delta(
+    base_epoch: object,
+    delta_epoch: object,
+    family_keys: frozenset[str],
+) -> object:
+    """Replace exact family books without extending untouched-family freshness."""
+
+    from src.engine.global_auction_universe import (
+        CurrentGlobalBookEpoch,
+        current_global_book_epoch_identity,
+    )
+
+    if not family_keys:
+        raise ValueError("GLOBAL_BOOK_DELTA_FAMILY_EMPTY")
+    base_states = tuple(getattr(base_epoch, "asset_states", ()) or ())
+    delta_states = tuple(getattr(delta_epoch, "asset_states", ()) or ())
+    base_topology = {
+        tuple(str(value) for value in row[:5])
+        for row in base_states
+        if str(row[0]) in family_keys
+    }
+    delta_topology = {
+        tuple(str(value) for value in row[:5])
+        for row in delta_states
+    }
+    if (
+        {row[0] for row in base_topology} != set(family_keys)
+        or {row[0] for row in delta_topology} != set(family_keys)
+        or base_topology != delta_topology
+    ):
+        raise ValueError("GLOBAL_BOOK_DELTA_TOPOLOGY_CHANGED")
+
+    states = tuple(
+        row for row in base_states if str(row[0]) not in family_keys
+    ) + delta_states
+    assets = tuple(
+        asset
+        for asset in tuple(getattr(base_epoch, "assets", ()) or ())
+        if str(getattr(asset, "family_key", "") or "") not in family_keys
+    ) + tuple(getattr(delta_epoch, "assets", ()) or ())
+    sell_assets = tuple(
+        asset
+        for asset in tuple(getattr(base_epoch, "sell_assets", ()) or ())
+        if str(getattr(asset, "family_key", "") or "") not in family_keys
+    ) + tuple(getattr(delta_epoch, "sell_assets", ()) or ())
+    captured_at = getattr(base_epoch, "captured_at_utc", None)
+    max_age = getattr(base_epoch, "max_age", None)
+    return CurrentGlobalBookEpoch(
+        assets=assets,
+        asset_states=states,
+        captured_at_utc=captured_at,
+        max_age=max_age,
+        witness_identity=current_global_book_epoch_identity(
+            asset_states=states,
+            captured_at_utc=captured_at,
+        ),
+        sell_assets=sell_assets,
     )
 
 
@@ -406,15 +469,15 @@ def _get_cached_global_book_epoch(
     if not allowed or checked_at.tzinfo is None:
         return None
     namespace = _global_book_epoch_cache_namespace(trade_conn)
-    topology = _global_book_topology_signature(probabilities)
-    if namespace is None or topology is None:
+    request_identity = _global_probability_cache_identity(probabilities)
+    if namespace is None or request_identity is None:
         return None
     with _GLOBAL_BOOK_EPOCH_CACHE_LOCK:
         entry = _GLOBAL_BOOK_EPOCH_CACHE
     if (
         entry is None
         or entry.namespace != namespace
-        or entry.request_topology != topology
+        or entry.request_identity != request_identity
     ):
         return None
     current_identity = getattr(entry.epoch, "current_identity", None)
@@ -441,13 +504,15 @@ def _store_global_book_epoch(
     if checked_at.tzinfo is None:
         return
     namespace = _global_book_epoch_cache_namespace(trade_conn)
-    request_topology = _global_book_topology_signature(request_probabilities)
-    bound_topology = _global_book_topology_signature(bound_probabilities)
+    request_identity = _global_probability_cache_identity(request_probabilities)
+    bound_identity = _global_probability_cache_identity(bound_probabilities)
     current_identity = getattr(epoch, "current_identity", None)
     if (
         namespace is None
-        or request_topology is None
-        or bound_topology is None
+        or request_identity is None
+        or bound_identity is None
+        or tuple(key for key, _ in request_identity)
+        != tuple(key for key, _ in bound_identity)
         or not callable(current_identity)
     ):
         return
@@ -459,7 +524,7 @@ def _store_global_book_epoch(
     with _GLOBAL_BOOK_EPOCH_CACHE_LOCK:
         _GLOBAL_BOOK_EPOCH_CACHE = _GlobalBookEpochCacheEntry(
             namespace=namespace,
-            request_topology=request_topology,
+            request_identity=request_identity,
             bound_probabilities=dict(bound_probabilities),
             epoch=epoch,
         )
@@ -5116,7 +5181,7 @@ def event_bound_live_adapter_from_trade_conn(
         )
 
         events = tuple(events)
-        global_book_cache_allowed = _global_book_epoch_cache_allowed(events)
+        price_refresh_family_keys = _global_book_price_refresh_family_keys(events)
 
         if forecast_conn is None or topology_conn is None or calibration_conn is None:
             from src.events.reactor import GlobalBatchSubmitResult
@@ -5318,9 +5383,9 @@ def event_bound_live_adapter_from_trade_conn(
                 trade_conn,
                 probabilities,
                 checked_at=cache_checked_at,
-                allowed=global_book_cache_allowed,
+                allowed=True,
             )
-            if cached is not None:
+            if cached is not None and price_refresh_family_keys == frozenset():
                 bound_probabilities, cached_epoch = cached
                 logging.getLogger(__name__).info(
                     "global book epoch cache hit: elapsed_s=%.3f families=%d assets=%d",
@@ -5346,163 +5411,238 @@ def event_bound_live_adapter_from_trade_conn(
                 float(os.environ.get("ZEUS_GLOBAL_AUCTION_GAMMA_TIMEOUT_SECONDS", "6.0")),
             )
 
-            gamma_batch_requests = 0
-            gamma_event_requests = 0
+            def _capture(probability_slice, *, mode):
+                gamma_batch_requests = 0
+                gamma_event_requests = 0
 
-            def _gamma_markets(condition_ids):
-                nonlocal gamma_batch_requests
-                markets, batch_requests = fetch_current_gamma_markets(
-                    condition_ids,
-                    gamma_get=_gamma_get,
-                    timeout=gamma_timeout,
-                )
-                gamma_batch_requests += batch_requests
-                return markets
-
-            def _gamma_event(slug):
-                nonlocal gamma_event_requests
-                gamma_event_requests += 1
-                response = _gamma_get(
-                    "/events",
-                    params={"slug": str(slug)},
-                    timeout=gamma_timeout,
-                )
-                if getattr(response, "status_code", None) != 200:
-                    raise ValueError(
-                        "GLOBAL_CURRENT_GAMMA_EVENT_HTTP:"
-                        f"{getattr(response, 'status_code', None)}"
+                def _gamma_markets(condition_ids):
+                    nonlocal gamma_batch_requests
+                    markets, batch_requests = fetch_current_gamma_markets(
+                        condition_ids,
+                        gamma_get=_gamma_get,
+                        timeout=gamma_timeout,
                     )
-                payload = response.json()
-                if (
-                    not isinstance(payload, list)
-                    or len(payload) != 1
-                    or not isinstance(payload[0], Mapping)
-                ):
-                    raise ValueError("GLOBAL_CURRENT_GAMMA_EVENT_RESPONSE_INVALID")
-                return payload[0]
+                    gamma_batch_requests += batch_requests
+                    return markets
 
-            gamma_metadata = {}
-
-            def _bind_tokens():
-                started = _time.monotonic()
-                bound = bind_current_global_probability_tokens(
-                    forecast_conn,
-                    probability_witnesses=probabilities,
-                    get_gamma_event=_gamma_event,
-                    get_gamma_markets=_gamma_markets,
-                    trade_conn=trade_conn,
-                    checked_at_utc=_at,
-                    max_workers=16,
-                    metadata_sink=gamma_metadata,
-                )
-                return bound, _time.monotonic() - started
-
-            bound_tokens = tuple(
-                str(token or "").strip()
-                for witness in probabilities.values()
-                for binding in tuple(getattr(witness, "bindings", ()) or ())
-                for token in (
-                    getattr(binding, "yes_token_id", None),
-                    getattr(binding, "no_token_id", None),
-                )
-            )
-            can_prefetch = bool(bound_tokens) and all(bound_tokens) and len(
-                set(bound_tokens)
-            ) == len(bound_tokens)
-            prefetched_books = None
-            prefetched_at = None
-            book_fetch_started = None
-            if can_prefetch:
-                from concurrent.futures import ThreadPoolExecutor
-
-                def _prefetch_books():
-                    started = _time.monotonic()
-                    captured_at = datetime.now(UTC)
-                    with PolymarketClient(public_http_timeout=timeout) as clob:
-                        books = fetch_current_global_books(
-                            bound_tokens,
-                            get_books=lambda tokens: clob.get_orderbook_snapshots(
-                                tokens,
-                                timeout=timeout,
-                            ),
-                            batch_size=batch_size,
-                            book_fetch_workers=4,
+                def _gamma_event(slug):
+                    nonlocal gamma_event_requests
+                    gamma_event_requests += 1
+                    response = _gamma_get(
+                        "/events",
+                        params={"slug": str(slug)},
+                        timeout=gamma_timeout,
+                    )
+                    if getattr(response, "status_code", None) != 200:
+                        raise ValueError(
+                            "GLOBAL_CURRENT_GAMMA_EVENT_HTTP:"
+                            f"{getattr(response, 'status_code', None)}"
                         )
-                    return books, captured_at, started
+                    payload = response.json()
+                    if (
+                        not isinstance(payload, list)
+                        or len(payload) != 1
+                        or not isinstance(payload[0], Mapping)
+                    ):
+                        raise ValueError(
+                            "GLOBAL_CURRENT_GAMMA_EVENT_RESPONSE_INVALID"
+                        )
+                    return payload[0]
 
-                with ThreadPoolExecutor(
-                    max_workers=1,
-                    thread_name_prefix="global-book-authority",
-                ) as executor:
-                    books_future = executor.submit(_prefetch_books)
-                    bound_probabilities, token_bind_elapsed = _bind_tokens()
-                    (
-                        prefetched_books,
-                        prefetched_at,
-                        book_fetch_started,
-                    ) = books_future.result()
-            else:
-                bound_probabilities, token_bind_elapsed = _bind_tokens()
-            logging.getLogger(__name__).info(
-                "global book epoch stage completed: token_bind elapsed_s=%.3f "
-                "families=%d metadata=%d gamma_batch_requests=%d "
-                "gamma_event_requests=%d",
-                token_bind_elapsed,
-                len(bound_probabilities),
-                len(gamma_metadata),
-                gamma_batch_requests,
-                gamma_event_requests,
-            )
-            # Every whole-universe fence refreshes current Gamma tradeability.
-            # Cached rows remain useful only as a complete batch-local overlay;
-            # the current call replaces matching keys before book construction.
-            book_metadata_by_key.update(gamma_metadata)
-            if prefetched_books is not None:
-                epoch = capture_current_global_book_epoch(
-                    trade_conn,
-                    probability_witnesses=bound_probabilities,
-                    get_books=lambda _tokens: {},
-                    clock=lambda: datetime.now(UTC),
-                    max_age=FRESHNESS_WINDOW_DEFAULT,
-                    batch_size=batch_size,
-                    book_fetch_workers=4,
-                    metadata_overrides=book_metadata_by_key,
-                    prefetched_books=prefetched_books,
-                    prefetched_at_utc=prefetched_at,
+                gamma_metadata = {}
+
+                def _bind_tokens():
+                    started = _time.monotonic()
+                    bound = bind_current_global_probability_tokens(
+                        forecast_conn,
+                        probability_witnesses=probability_slice,
+                        get_gamma_event=_gamma_event,
+                        get_gamma_markets=_gamma_markets,
+                        trade_conn=trade_conn,
+                        checked_at_utc=_at,
+                        max_workers=16,
+                        metadata_sink=gamma_metadata,
+                    )
+                    return bound, _time.monotonic() - started
+
+                bound_tokens = tuple(
+                    str(token or "").strip()
+                    for witness in probability_slice.values()
+                    for binding in tuple(
+                        getattr(witness, "bindings", ()) or ()
+                    )
+                    for token in (
+                        getattr(binding, "yes_token_id", None),
+                        getattr(binding, "no_token_id", None),
+                    )
                 )
-                assert book_fetch_started is not None
-                book_capture_elapsed = _time.monotonic() - book_fetch_started
-            else:
-                capture_started = _time.monotonic()
-                with PolymarketClient(public_http_timeout=timeout) as clob:
+                can_prefetch = (
+                    bool(bound_tokens)
+                    and all(bound_tokens)
+                    and len(set(bound_tokens)) == len(bound_tokens)
+                )
+                prefetched_books = None
+                prefetched_at = None
+                book_fetch_started = None
+                if can_prefetch:
+                    from concurrent.futures import ThreadPoolExecutor
+
+                    def _prefetch_books():
+                        started = _time.monotonic()
+                        captured_at = datetime.now(UTC)
+                        with PolymarketClient(
+                            public_http_timeout=timeout
+                        ) as clob:
+                            books = fetch_current_global_books(
+                                bound_tokens,
+                                get_books=lambda tokens: (
+                                    clob.get_orderbook_snapshots(
+                                        tokens,
+                                        timeout=timeout,
+                                    )
+                                ),
+                                batch_size=batch_size,
+                                book_fetch_workers=4,
+                            )
+                        return books, captured_at, started
+
+                    with ThreadPoolExecutor(
+                        max_workers=1,
+                        thread_name_prefix="global-book-authority",
+                    ) as executor:
+                        books_future = executor.submit(_prefetch_books)
+                        bound_probabilities, token_bind_elapsed = _bind_tokens()
+                        (
+                            prefetched_books,
+                            prefetched_at,
+                            book_fetch_started,
+                        ) = books_future.result()
+                else:
+                    bound_probabilities, token_bind_elapsed = _bind_tokens()
+                logging.getLogger(__name__).info(
+                    "global book epoch stage completed: mode=%s "
+                    "token_bind elapsed_s=%.3f families=%d metadata=%d "
+                    "gamma_batch_requests=%d gamma_event_requests=%d",
+                    mode,
+                    token_bind_elapsed,
+                    len(bound_probabilities),
+                    len(gamma_metadata),
+                    gamma_batch_requests,
+                    gamma_event_requests,
+                )
+                book_metadata_by_key.update(gamma_metadata)
+                if prefetched_books is not None:
                     epoch = capture_current_global_book_epoch(
                         trade_conn,
                         probability_witnesses=bound_probabilities,
-                        get_books=lambda tokens: clob.get_orderbook_snapshots(
-                            tokens,
-                            timeout=timeout,
-                        ),
+                        get_books=lambda _tokens: {},
                         clock=lambda: datetime.now(UTC),
                         max_age=FRESHNESS_WINDOW_DEFAULT,
                         batch_size=batch_size,
                         book_fetch_workers=4,
                         metadata_overrides=book_metadata_by_key,
+                        prefetched_books=prefetched_books,
+                        prefetched_at_utc=prefetched_at,
                     )
-                book_capture_elapsed = _time.monotonic() - capture_started
+                    assert book_fetch_started is not None
+                    book_capture_elapsed = (
+                        _time.monotonic() - book_fetch_started
+                    )
+                else:
+                    capture_started = _time.monotonic()
+                    with PolymarketClient(
+                        public_http_timeout=timeout
+                    ) as clob:
+                        epoch = capture_current_global_book_epoch(
+                            trade_conn,
+                            probability_witnesses=bound_probabilities,
+                            get_books=lambda tokens: (
+                                clob.get_orderbook_snapshots(
+                                    tokens,
+                                    timeout=timeout,
+                                )
+                            ),
+                            clock=lambda: datetime.now(UTC),
+                            max_age=FRESHNESS_WINDOW_DEFAULT,
+                            batch_size=batch_size,
+                            book_fetch_workers=4,
+                            metadata_overrides=book_metadata_by_key,
+                        )
+                    book_capture_elapsed = (
+                        _time.monotonic() - capture_started
+                    )
+                logging.getLogger(__name__).info(
+                    "global book epoch stage completed: mode=%s "
+                    "book_capture elapsed_s=%.3f total_s=%.3f "
+                    "families=%d assets=%d",
+                    mode,
+                    book_capture_elapsed,
+                    _time.monotonic() - _book_started,
+                    len(bound_probabilities),
+                    len(getattr(epoch, "assets", ())),
+                )
+                return bound_probabilities, epoch
+
+            if (
+                cached is not None
+                and price_refresh_family_keys
+                and price_refresh_family_keys.issubset(probabilities)
+            ):
+                cached_bound_probabilities, cached_epoch = cached
+                probability_delta = {
+                    family_key: probabilities[family_key]
+                    for family_key in price_refresh_family_keys
+                }
+                delta_bound_probabilities, delta_epoch = _capture(
+                    probability_delta,
+                    mode="family_delta",
+                )
+                try:
+                    merged_epoch = _merge_global_book_epoch_delta(
+                        cached_epoch,
+                        delta_epoch,
+                        price_refresh_family_keys,
+                    )
+                    if (
+                        merged_epoch.current_identity(datetime.now(UTC))
+                        is None
+                    ):
+                        raise ValueError("GLOBAL_BOOK_DELTA_BASE_EXPIRED")
+                    merged_probabilities = dict(cached_bound_probabilities)
+                    merged_probabilities.update(delta_bound_probabilities)
+                    _store_global_book_epoch(
+                        trade_conn,
+                        probabilities,
+                        merged_probabilities,
+                        merged_epoch,
+                        checked_at=datetime.now(UTC),
+                    )
+                    logging.getLogger(__name__).info(
+                        "global book epoch delta merged: elapsed_s=%.3f "
+                        "refreshed_families=%d total_families=%d assets=%d",
+                        _time.monotonic() - _book_started,
+                        len(price_refresh_family_keys),
+                        len(merged_probabilities),
+                        len(merged_epoch.assets),
+                    )
+                    return merged_probabilities, merged_epoch
+                except (TypeError, ValueError) as exc:
+                    logging.getLogger(__name__).warning(
+                        "global book epoch delta rejected; refreshing full "
+                        "universe: reason=%s",
+                        exc,
+                    )
+
+            bound_probabilities, epoch = _capture(
+                probabilities,
+                mode="full",
+            )
             _store_global_book_epoch(
                 trade_conn,
                 probabilities,
                 bound_probabilities,
                 epoch,
                 checked_at=datetime.now(UTC),
-            )
-            logging.getLogger(__name__).info(
-                "global book epoch stage completed: book_capture elapsed_s=%.3f "
-                "total_s=%.3f families=%d assets=%d",
-                book_capture_elapsed,
-                _time.monotonic() - _book_started,
-                len(bound_probabilities),
-                len(getattr(epoch, "assets", ())),
             )
             return bound_probabilities, epoch
 

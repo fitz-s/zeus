@@ -2308,6 +2308,7 @@ def test_live_adapter_overlaps_gamma_bind_with_clob_book_fetch(monkeypatch):
     bound_probabilities = {
         "family": SimpleNamespace(
             family_key="family",
+            witness_identity="bound-probability",
             bindings=(
                 SimpleNamespace(
                     bin_id="bin-b",
@@ -2381,6 +2382,7 @@ def test_live_adapter_overlaps_gamma_bind_with_clob_book_fetch(monkeypatch):
     probabilities = {
         "family": SimpleNamespace(
             family_key="family",
+            witness_identity="request-probability",
             bindings=(
                 SimpleNamespace(
                     bin_id="bin-a",
@@ -2419,13 +2421,178 @@ def test_live_adapter_overlaps_gamma_bind_with_clob_book_fetch(monkeypatch):
     world.close()
 
 
-def test_global_book_epoch_cache_requires_stable_non_price_topology(monkeypatch):
+def test_live_adapter_refreshes_only_price_triggered_family(monkeypatch):
+    from src.events.candidate_binding import weather_family_id
+
+    trade = sqlite3.connect(":memory:")
+    forecast = sqlite3.connect(":memory:")
+    topology = sqlite3.connect(":memory:")
+    world = sqlite3.connect(":memory:")
+    captured = {}
+    monkeypatch.setattr(era, "_GLOBAL_BOOK_EPOCH_CACHE", None)
+
+    def fake_process(events, **kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(events=tuple(events))
+
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "process_current_global_batch",
+        fake_process,
+    )
+    event = replace(
+        _global_scope_event(city="Dallas", source_run_id="run-dallas"),
+        event_type="EDLI_REDECISION_PENDING",
+    )
+    adapter = era.event_bound_live_adapter_from_trade_conn(
+        trade,
+        get_current_level=lambda: era.RiskLevel.GREEN,
+        forecast_conn=forecast,
+        topology_conn=topology,
+        calibration_conn=world,
+    )
+    adapter.process_global_batch(
+        (event,),
+        _dt.datetime(2026, 7, 10, 8, 10, tzinfo=_dt.timezone.utc),
+    )
+
+    dallas = weather_family_id(
+        city="Dallas",
+        target_date="2026-07-11",
+        metric="high",
+    )
+    miami = weather_family_id(
+        city="Miami",
+        target_date="2026-07-11",
+        metric="high",
+    )
+
+    def witness(family_key, suffix):
+        return SimpleNamespace(
+            family_key=family_key,
+            witness_identity=f"probability-{suffix}",
+            bindings=(
+                SimpleNamespace(
+                    bin_id=f"bin-{suffix}",
+                    condition_id=f"condition-{suffix}",
+                    yes_token_id=f"yes-token-{suffix}",
+                    no_token_id=f"no-token-{suffix}",
+                ),
+            ),
+        )
+
+    probabilities = {
+        dallas: witness(dallas, "dallas"),
+        miami: witness(miami, "miami"),
+    }
+    bind_calls = []
+    capture_calls = []
+    book_calls = []
+
+    def fake_bind(_forecast_conn, *, probability_witnesses, **_):
+        bind_calls.append(tuple(sorted(probability_witnesses)))
+        return dict(probability_witnesses)
+
+    def fake_capture(_trade_conn, **kwargs):
+        probability_witnesses = kwargs["probability_witnesses"]
+        capture_calls.append(tuple(sorted(probability_witnesses)))
+        states = []
+        for family_key, probability in probability_witnesses.items():
+            for binding in probability.bindings:
+                for side, token_id in (
+                    ("YES", binding.yes_token_id),
+                    ("NO", binding.no_token_id),
+                ):
+                    states.append(
+                        (
+                            family_key,
+                            binding.bin_id,
+                            binding.condition_id,
+                            side,
+                            token_id,
+                            "EXECUTABLE",
+                            f"hash-{len(capture_calls)}-{token_id}",
+                            f"event-{family_key}",
+                            f"market-{family_key}",
+                        )
+                    )
+        captured_at = kwargs["prefetched_at_utc"]
+        return CurrentGlobalBookEpoch(
+            assets=(),
+            asset_states=tuple(states),
+            captured_at_utc=captured_at,
+            max_age=_dt.timedelta(seconds=180),
+            witness_identity=current_global_book_epoch_identity(
+                asset_states=states,
+                captured_at_utc=captured_at,
+            ),
+        )
+
+    class FakeClient:
+        def __init__(self, **_):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return False
+
+        def get_orderbook_snapshots(self, tokens, **_):
+            book_calls.append(tuple(sorted(tokens)))
+            return {
+                token: {"asset_id": token, "hash": f"hash-{token}"}
+                for token in tokens
+            }
+
+    monkeypatch.setattr(universe, "bind_current_global_probability_tokens", fake_bind)
+    monkeypatch.setattr(universe, "capture_current_global_book_epoch", fake_capture)
+    monkeypatch.setattr(
+        "src.data.polymarket_client.PolymarketClient",
+        FakeClient,
+    )
+    provider = captured["current_book_epoch_provider"]
+    bound, epoch = provider(
+        probabilities,
+        _dt.datetime.now(_dt.timezone.utc),
+    )
+    bound_again, epoch_again = provider(
+        probabilities,
+        _dt.datetime.now(_dt.timezone.utc),
+    )
+
+    assert bound == probabilities
+    assert bound_again == probabilities
+    assert bind_calls == [(dallas, miami), (dallas,)]
+    assert capture_calls == [(dallas, miami), (dallas,)]
+    assert book_calls == [
+        (
+            "no-token-dallas",
+            "no-token-miami",
+            "yes-token-dallas",
+            "yes-token-miami",
+        ),
+        ("no-token-dallas", "yes-token-dallas"),
+    ]
+    assert epoch_again.captured_at_utc == epoch.captured_at_utc
+    assert len(epoch_again.asset_states) == 4
+    assert epoch_again.witness_identity != epoch.witness_identity
+    trade.close()
+    forecast.close()
+    topology.close()
+    world.close()
+
+
+def test_global_book_epoch_cache_requires_stable_probability_identity(monkeypatch):
+    from src.events.candidate_binding import weather_family_id
+
     conn = sqlite3.connect(":memory:")
     monkeypatch.setattr(era, "_GLOBAL_BOOK_EPOCH_CACHE", None)
     at = _dt.datetime.now(_dt.timezone.utc)
     probabilities = {
         "family": SimpleNamespace(
             family_key="family",
+            witness_identity="probability-current",
             bindings=(
                 SimpleNamespace(
                     bin_id="bin",
@@ -2460,12 +2627,13 @@ def test_global_book_epoch_cache_requires_stable_non_price_topology(monkeypatch)
     changed = {
         "family": SimpleNamespace(
             family_key="family",
+            witness_identity="probability-changed",
             bindings=(
                 SimpleNamespace(
                     bin_id="bin",
                     condition_id="condition",
                     yes_token_id="yes-token",
-                    no_token_id="new-no-token",
+                    no_token_id="no-token",
                 ),
             ),
         )
@@ -2476,15 +2644,31 @@ def test_global_book_epoch_cache_requires_stable_non_price_topology(monkeypatch)
         checked_at=at,
         allowed=True,
     ) is None
-    assert not era._global_book_epoch_cache_allowed(
-        (SimpleNamespace(event_type="EDLI_REDECISION_PENDING"),)
+    price_event = replace(
+        _global_scope_event(city="Dallas", source_run_id="run-dallas"),
+        event_type="EDLI_REDECISION_PENDING",
     )
-    assert era._global_book_epoch_cache_allowed(
+    assert era._global_book_price_refresh_family_keys((price_event,)) == {
+        weather_family_id(
+            city="Dallas",
+            target_date="2026-07-11",
+            metric="high",
+        )
+    }
+    assert era._global_book_price_refresh_family_keys(
         (
             SimpleNamespace(event_type="FORECAST_SNAPSHOT_READY"),
             SimpleNamespace(event_type="DAY0_EXTREME_UPDATED"),
         )
-    )
+    ) == frozenset()
+    assert era._global_book_price_refresh_family_keys(
+        (
+            SimpleNamespace(
+                event_type="EDLI_REDECISION_PENDING",
+                payload_json="{}",
+            ),
+        )
+    ) is None
 
     expired = SimpleNamespace(
         witness_identity="book-expired",
