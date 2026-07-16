@@ -325,6 +325,41 @@ def _global_book_snapshot_rows(
     return rows
 
 
+def _global_book_latest_token_rows(
+    trade_conn: sqlite3.Connection,
+    *,
+    condition_ids: Sequence[str],
+) -> list[dict[str, object]]:
+    """Read only the latest token topology used for speculative book I/O."""
+
+    rows: list[dict[str, object]] = []
+    clean = tuple(dict.fromkeys(str(value or "").strip() for value in condition_ids))
+    clean = tuple(value for value in clean if value)
+    for offset in range(0, len(clean), 400):
+        chunk = clean[offset : offset + 400]
+        placeholders = ",".join("?" for _ in chunk)
+        try:
+            cur = trade_conn.execute(
+                f"""
+                SELECT condition_id,
+                       yes_token_id,
+                       no_token_id
+                  FROM executable_market_snapshot_latest
+                 WHERE condition_id IN ({placeholders})
+                """,
+                chunk,
+            )
+        except sqlite3.OperationalError as exc:
+            if "no such column" not in str(exc).lower():
+                raise
+            return _global_book_snapshot_rows(
+                trade_conn,
+                condition_ids=clean,
+            )
+        rows.extend(_row_dict(cur, row) for row in cur.fetchall())
+    return rows
+
+
 def _global_book_curve(
     *,
     family_key: str,

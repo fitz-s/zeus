@@ -416,10 +416,10 @@ def _global_book_speculative_topology(
 
     try:
         from src.engine.global_auction_universe import (
-            _global_book_snapshot_rows,
+            _global_book_latest_token_rows,
         )
 
-        snapshot_rows = _global_book_snapshot_rows(
+        snapshot_rows = _global_book_latest_token_rows(
             trade_conn,
             condition_ids=condition_ids,
         )

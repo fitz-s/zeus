@@ -4437,6 +4437,8 @@ def _global_book_metadata_conn(
             condition_id TEXT NOT NULL,
             selected_outcome_token_id TEXT NOT NULL,
             snapshot_id TEXT NOT NULL,
+            yes_token_id TEXT NOT NULL,
+            no_token_id TEXT NOT NULL,
             PRIMARY KEY (condition_id, selected_outcome_token_id)
         )
         """
@@ -4472,10 +4474,46 @@ def _global_book_metadata_conn(
                 ),
             )
             conn.execute(
-                "INSERT INTO executable_market_snapshot_latest VALUES (?,?,?)",
-                (binding.condition_id, token, snapshot_id),
+                "INSERT INTO executable_market_snapshot_latest VALUES (?,?,?,?,?)",
+                (
+                    binding.condition_id,
+                    token,
+                    snapshot_id,
+                    binding.yes_token_id,
+                    binding.no_token_id,
+                ),
             )
     return conn
+
+
+def test_speculative_global_book_topology_reads_latest_projection_only():
+    probability = _current_global_book_probability()
+    conn = _global_book_metadata_conn(probability)
+
+    def latest_only_authorizer(action, table, _column, _db, _trigger):
+        if action == sqlite3.SQLITE_READ and table == "executable_market_snapshots":
+            return sqlite3.SQLITE_DENY
+        return sqlite3.SQLITE_OK
+
+    conn.set_authorizer(latest_only_authorizer)
+    topology = era._global_book_speculative_topology(
+        conn,
+        {probability.family_key: probability},
+    )
+
+    assert topology is not None
+    assert len(topology) == len(probability.bindings)
+    assert {
+        (row[2], row[3], row[4])
+        for row in topology
+    } == {
+        (
+            binding.condition_id,
+            binding.yes_token_id,
+            binding.no_token_id,
+        )
+        for binding in probability.bindings
+    }
 
 
 def test_global_book_curve_uses_same_realized_fee_authority_as_jit(monkeypatch):
