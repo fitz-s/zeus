@@ -12,6 +12,9 @@ from typing import Mapping
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from src.data.replacement_forecast_cycle_policy import tradeable_grade_coverage_sql
+from src.data.replacement_input_hwm import (
+    prime_frozen_replacement_artifact_hwm,
+)
 from src.data.replacement_forecast_source_run_identity import expected_replacement_dependency_identity_by_role
 from src.engine.time_context import has_city_local_day_started
 from src.state.db import _connect
@@ -1562,6 +1565,7 @@ def build_replacement_forecast_current_target_plan(
         )
     conn = _connect(db_path, write_class="live")
     conn.row_factory = sqlite3.Row
+    release_input_hwm = None
     owned_observation_conn: sqlite3.Connection | None = None
     if observation_conn is None:
         try:
@@ -1840,6 +1844,20 @@ def build_replacement_forecast_current_target_plan(
         )
         payload_coverage_cache: dict[tuple[str, str, str], bool] = {}
         evaluation_now_utc = (now_utc or datetime.now(tz=timezone.utc)).astimezone(timezone.utc)
+        if not conn.in_transaction:
+            conn.execute("BEGIN")
+        release_input_hwm = prime_frozen_replacement_artifact_hwm(
+            conn,
+            requests={
+                (
+                    str(row["city"]),
+                    str(row["target_date"]),
+                    str(row["temperature_metric"]),
+                )
+                for row in rows
+            },
+            decision_time=evaluation_now_utc,
+        )
         for row in rows:
             metric = str(row["temperature_metric"])
             expected = expected_by_metric[metric]
@@ -1944,6 +1962,8 @@ def build_replacement_forecast_current_target_plan(
                 )
             )
     finally:
+        if release_input_hwm is not None:
+            release_input_hwm()
         if owned_observation_conn is not None:
             owned_observation_conn.close()
         conn.close()

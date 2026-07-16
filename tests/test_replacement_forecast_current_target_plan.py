@@ -790,9 +790,27 @@ def _create_db(path) -> None:
         conn.close()
 
 
-def test_current_target_plan_classifies_covered_seedable_and_missing_manifest_targets(tmp_path) -> None:
+def test_current_target_plan_classifies_covered_seedable_and_missing_manifest_targets(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    import src.data.replacement_forecast_current_target_plan as plan_module
+
     db = tmp_path / "forecasts.db"
     _create_db(db)
+    primed: list[set[tuple[str, str, str]]] = []
+    released: list[bool] = []
+
+    def _prime(conn, *, requests, decision_time):
+        assert conn.in_transaction
+        primed.append(set(requests))
+        return lambda: released.append(True)
+
+    monkeypatch.setattr(
+        plan_module,
+        "prime_frozen_replacement_artifact_hwm",
+        _prime,
+    )
 
     # Fixed evaluation time before the 2026-06-09 target so day0 logic does not lock the targets
     # (the fixture dates are static; real wall-clock has since advanced past them).
@@ -811,6 +829,14 @@ def test_current_target_plan_classifies_covered_seedable_and_missing_manifest_ta
     assert [row["city"] for row in download_plan["seedable_targets"]] == ["London"]
     assert [row["city"] for row in download_plan["openmeteo_download_targets"]] == ["Madrid"]
     assert download_plan["fusion_current_value_missing_targets"] == []
+    assert primed == [
+        {
+            ("London", "2026-06-09", "high"),
+            ("Madrid", "2026-06-09", "high"),
+            ("Paris", "2026-06-09", "high"),
+        }
+    ]
+    assert released == [True]
 
 
 def test_current_target_plan_orders_nearest_market_date_first(tmp_path) -> None:
