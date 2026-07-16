@@ -2571,6 +2571,57 @@ def test_live_adapter_overlaps_current_gamma_bind_with_complete_clob_prefetch(
     monkeypatch,
 ):
     trade = sqlite3.connect(":memory:")
+    trade.executescript(
+        """
+        CREATE TABLE executable_market_snapshots (
+            snapshot_id TEXT PRIMARY KEY,
+            gamma_market_id TEXT NOT NULL,
+            event_id TEXT NOT NULL,
+            condition_id TEXT NOT NULL,
+            selected_outcome_token_id TEXT,
+            yes_token_id TEXT NOT NULL,
+            no_token_id TEXT NOT NULL,
+            enable_orderbook INTEGER NOT NULL,
+            active INTEGER NOT NULL,
+            closed INTEGER NOT NULL,
+            accepting_orders INTEGER,
+            min_tick_size TEXT NOT NULL,
+            min_order_size TEXT NOT NULL,
+            fee_details_json TEXT NOT NULL,
+            tradeability_status_json TEXT NOT NULL,
+            captured_at TEXT NOT NULL,
+            freshness_deadline TEXT NOT NULL
+        );
+        CREATE TABLE executable_market_snapshot_latest (
+            condition_id TEXT NOT NULL,
+            selected_outcome_token_id TEXT NOT NULL,
+            snapshot_id TEXT NOT NULL,
+            PRIMARY KEY (condition_id, selected_outcome_token_id)
+        );
+        INSERT INTO executable_market_snapshots VALUES (
+            'snapshot-a',
+            'market-a',
+            'event-a',
+            'condition-a',
+            'yes-token-a',
+            'yes-token-a',
+            'no-token-a',
+            1,
+            1,
+            0,
+            1,
+            '0.01',
+            '5',
+            '{}',
+            '{}',
+            '2026-07-10T07:00:00+00:00',
+            '2026-07-10T07:03:00+00:00'
+        );
+        INSERT INTO executable_market_snapshot_latest VALUES
+            ('condition-a', 'yes-token-a', 'snapshot-a'),
+            ('condition-a', 'no-token-a', 'snapshot-a');
+        """
+    )
     forecast = sqlite3.connect(":memory:")
     topology = sqlite3.connect(":memory:")
     world = sqlite3.connect(":memory:")
@@ -2610,8 +2661,8 @@ def test_live_adapter_overlaps_current_gamma_bind_with_complete_clob_prefetch(
                 SimpleNamespace(
                     bin_id="bin-a",
                     condition_id="condition-a",
-                    yes_token_id="yes-token-a",
-                    no_token_id="no-token-a",
+                    yes_token_id="",
+                    no_token_id="",
                 ),
             ),
         )
@@ -2628,7 +2679,21 @@ def test_live_adapter_overlaps_current_gamma_bind_with_complete_clob_prefetch(
     ):
         bind_started.set()
         assert book_started.wait(1.0), "CLOB prefetch did not overlap Gamma bind"
-        return dict(probability_witnesses)
+        witness = probability_witnesses["family"]
+        return {
+            "family": SimpleNamespace(
+                family_key="family",
+                witness_identity=witness.witness_identity,
+                bindings=(
+                    SimpleNamespace(
+                        bin_id="bin-a",
+                        condition_id="condition-a",
+                        yes_token_id="yes-token-a",
+                        no_token_id="no-token-a",
+                    ),
+                ),
+            )
+        }
 
     class FakeClient:
         def __init__(self, **_):
@@ -2681,9 +2746,187 @@ def test_live_adapter_overlaps_current_gamma_bind_with_complete_clob_prefetch(
         _dt.datetime.now(_dt.timezone.utc),
     )
 
-    assert bound == probability
+    assert bound["family"].bindings[0].yes_token_id == "yes-token-a"
+    assert bound["family"].bindings[0].no_token_id == "no-token-a"
     assert epoch.witness_identity == "book-current"
     assert len(capture_calls) == 1
+    trade.close()
+    forecast.close()
+    topology.close()
+    world.close()
+
+
+def test_live_adapter_discards_speculative_books_when_current_gamma_rebinds(
+    monkeypatch,
+):
+    trade = sqlite3.connect(":memory:")
+    trade.executescript(
+        """
+        CREATE TABLE executable_market_snapshots (
+            snapshot_id TEXT PRIMARY KEY,
+            gamma_market_id TEXT NOT NULL,
+            event_id TEXT NOT NULL,
+            condition_id TEXT NOT NULL,
+            selected_outcome_token_id TEXT,
+            yes_token_id TEXT NOT NULL,
+            no_token_id TEXT NOT NULL,
+            enable_orderbook INTEGER NOT NULL,
+            active INTEGER NOT NULL,
+            closed INTEGER NOT NULL,
+            accepting_orders INTEGER,
+            min_tick_size TEXT NOT NULL,
+            min_order_size TEXT NOT NULL,
+            fee_details_json TEXT NOT NULL,
+            tradeability_status_json TEXT NOT NULL,
+            captured_at TEXT NOT NULL,
+            freshness_deadline TEXT NOT NULL
+        );
+        CREATE TABLE executable_market_snapshot_latest (
+            condition_id TEXT NOT NULL,
+            selected_outcome_token_id TEXT NOT NULL,
+            snapshot_id TEXT NOT NULL,
+            PRIMARY KEY (condition_id, selected_outcome_token_id)
+        );
+        INSERT INTO executable_market_snapshots VALUES (
+            'snapshot-old',
+            'market-a',
+            'event-a',
+            'condition-a',
+            'yes-token-old',
+            'yes-token-old',
+            'no-token-old',
+            1,
+            1,
+            0,
+            1,
+            '0.01',
+            '5',
+            '{}',
+            '{}',
+            '2026-07-10T07:00:00+00:00',
+            '2026-07-10T07:03:00+00:00'
+        );
+        INSERT INTO executable_market_snapshot_latest VALUES
+            ('condition-a', 'yes-token-old', 'snapshot-old'),
+            ('condition-a', 'no-token-old', 'snapshot-old');
+        """
+    )
+    forecast = sqlite3.connect(":memory:")
+    topology = sqlite3.connect(":memory:")
+    world = sqlite3.connect(":memory:")
+    captured = {}
+    monkeypatch.setattr(era, "_GLOBAL_BOOK_EPOCH_CACHE", None)
+
+    def fake_process(events, **kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(events=tuple(events))
+
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "process_current_global_batch",
+        fake_process,
+    )
+    adapter = era.event_bound_live_adapter_from_trade_conn(
+        trade,
+        get_current_level=lambda: era.RiskLevel.GREEN,
+        forecast_conn=forecast,
+        topology_conn=topology,
+        calibration_conn=world,
+    )
+    adapter.process_global_batch(
+        (
+            replace(
+                _global_scope_event(
+                    city="Dallas",
+                    source_run_id="run-dallas",
+                ),
+                event_type="BOOK_SNAPSHOT",
+            ),
+        ),
+        _dt.datetime(2026, 7, 10, 8, 10, tzinfo=_dt.timezone.utc),
+    )
+    probability = {
+        "family": SimpleNamespace(
+            family_key="family",
+            witness_identity="probability-current",
+            bindings=(
+                SimpleNamespace(
+                    bin_id="bin-a",
+                    condition_id="condition-a",
+                    yes_token_id="",
+                    no_token_id="",
+                ),
+            ),
+        )
+    }
+
+    def fake_bind(_forecast_conn, **_):
+        return {
+            "family": SimpleNamespace(
+                family_key="family",
+                witness_identity="probability-current",
+                bindings=(
+                    SimpleNamespace(
+                        bin_id="bin-a",
+                        condition_id="condition-a",
+                        yes_token_id="yes-token-current",
+                        no_token_id="no-token-current",
+                    ),
+                ),
+            )
+        }
+
+    book_calls = []
+
+    class FakeClient:
+        def __init__(self, **_):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return False
+
+        def get_orderbook_snapshots(self, tokens, **_):
+            book_calls.append(tuple(sorted(tokens)))
+            return {
+                token: {"asset_id": token, "hash": f"hash-{token}"}
+                for token in tokens
+            }
+
+    def fake_capture(_trade_conn, **kwargs):
+        assert "prefetched_books" not in kwargs
+        tokens = [
+            token
+            for witness in kwargs["probability_witnesses"].values()
+            for binding in witness.bindings
+            for token in (binding.yes_token_id, binding.no_token_id)
+        ]
+        kwargs["get_books"](tokens)
+        return SimpleNamespace(
+            witness_identity="book-current",
+            assets=(),
+            current_identity=lambda _checked_at: "book-current",
+        )
+
+    monkeypatch.setattr(universe, "bind_current_global_probability_tokens", fake_bind)
+    monkeypatch.setattr(universe, "capture_current_global_book_epoch", fake_capture)
+    monkeypatch.setattr(
+        "src.data.polymarket_client.PolymarketClient",
+        FakeClient,
+    )
+
+    _, epoch = captured["current_book_epoch_provider"](
+        probability,
+        _dt.datetime.now(_dt.timezone.utc),
+    )
+
+    assert epoch.witness_identity == "book-current"
+    assert book_calls == [
+        ("no-token-old", "yes-token-old"),
+        ("no-token-current", "yes-token-current"),
+    ]
     trade.close()
     forecast.close()
     topology.close()

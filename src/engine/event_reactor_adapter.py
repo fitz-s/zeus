@@ -379,6 +379,85 @@ def _global_book_prefetch_tokens(
     )
 
 
+def _global_candidate_correlation_key(candidate: object) -> str:
+    """Return the terminal-risk identity shared by every sibling bin."""
+
+    family_key = str(getattr(candidate, "family_key", "") or "").strip()
+    if not family_key:
+        raise ValueError("GLOBAL_CANDIDATE_FAMILY_ID_MISSING")
+    return family_key
+
+
+def _global_book_speculative_topology(
+    trade_conn: sqlite3.Connection,
+    probabilities: Mapping[str, object],
+) -> tuple[tuple[str, str, str, str, str], ...] | None:
+    """Bind last-seen tokens only as an I/O hint; current Gamma still owns authority."""
+
+    skeleton: list[tuple[str, str, str]] = []
+    condition_ids: list[str] = []
+    for raw_family_key, witness in sorted(probabilities.items()):
+        family_key = str(raw_family_key or "").strip()
+        witness_family_key = str(
+            getattr(witness, "family_key", "") or ""
+        ).strip()
+        bindings = tuple(getattr(witness, "bindings", ()) or ())
+        if not family_key or witness_family_key != family_key or not bindings:
+            return None
+        for binding in bindings:
+            bin_id = str(getattr(binding, "bin_id", "") or "").strip()
+            condition_id = str(
+                getattr(binding, "condition_id", "") or ""
+            ).strip()
+            if not bin_id or not condition_id:
+                return None
+            skeleton.append((family_key, bin_id, condition_id))
+            condition_ids.append(condition_id)
+
+    try:
+        from src.engine.global_auction_universe import (
+            _global_book_snapshot_rows,
+        )
+
+        snapshot_rows = _global_book_snapshot_rows(
+            trade_conn,
+            condition_ids=condition_ids,
+        )
+    except (sqlite3.Error, TypeError, ValueError):
+        return None
+
+    token_by_condition: dict[str, tuple[str, str]] = {}
+    for row in snapshot_rows:
+        condition_id = str(row.get("condition_id") or "").strip()
+        yes_token_id = str(row.get("yes_token_id") or "").strip()
+        no_token_id = str(row.get("no_token_id") or "").strip()
+        if not condition_id or not yes_token_id or not no_token_id:
+            continue
+        pair = (yes_token_id, no_token_id)
+        previous = token_by_condition.get(condition_id)
+        if previous is not None and previous != pair:
+            return None
+        token_by_condition[condition_id] = pair
+
+    topology: list[tuple[str, str, str, str, str]] = []
+    tokens: set[str] = set()
+    for family_key, bin_id, condition_id in skeleton:
+        pair = token_by_condition.get(condition_id)
+        if pair is None or pair[0] in tokens or pair[1] in tokens:
+            return None
+        tokens.update(pair)
+        topology.append(
+            (
+                family_key,
+                bin_id,
+                condition_id,
+                pair[0],
+                pair[1],
+            )
+        )
+    return tuple(sorted(topology)) or None
+
+
 def _global_book_epoch_cache_namespace(
     trade_conn: sqlite3.Connection,
 ) -> str | None:
@@ -498,11 +577,16 @@ def _get_cached_global_book_epoch(
     *,
     checked_at: datetime,
     allowed: bool,
+    topology_hint: tuple[tuple[str, str, str, str, str], ...] | None = None,
 ) -> object | None:
     if not allowed or checked_at.tzinfo is None:
         return None
     namespace = _global_book_epoch_cache_namespace(trade_conn)
-    topology = _global_book_topology_signature(probabilities)
+    topology = (
+        topology_hint
+        if topology_hint is not None
+        else _global_book_topology_signature(probabilities)
+    )
     if namespace is None or topology is None:
         return None
     with _GLOBAL_BOOK_EPOCH_CACHE_LOCK:
@@ -5488,8 +5572,17 @@ def event_bound_live_adapter_from_trade_conn(
                     book_metadata_by_key.update(metadata_sink)
                 return bound_probabilities
 
-            def _prefetch_books(probability_slice, *, mode):
-                tokens = _global_book_prefetch_tokens(probability_slice)
+            def _prefetch_books(
+                probability_slice,
+                *,
+                mode,
+                token_hint=None,
+            ):
+                tokens = _global_book_prefetch_tokens(
+                    probability_slice,
+                )
+                if tokens is None:
+                    tokens = token_hint
                 if tokens is None:
                     return None
                 captured_at = datetime.now(UTC)
@@ -5579,18 +5672,30 @@ def event_bound_live_adapter_from_trade_conn(
             # book capture is already known to be necessary, start that independent
             # CLOB I/O concurrently and join the two authorities before validation.
             cache_checked_at = datetime.now(UTC)
+            speculative_topology = _global_book_speculative_topology(
+                trade_conn,
+                probabilities,
+            )
             cached_before_bind = _get_cached_global_book_epoch(
                 trade_conn,
                 probabilities,
                 checked_at=cache_checked_at,
                 allowed=True,
+                topology_hint=speculative_topology,
             )
             force_full_refresh = probabilities is last_book_probability_output
             prefetch_slice = None
             prefetch_mode = ""
+            prefetch_token_hint = None
             if force_full_refresh or cached_before_bind is None:
                 prefetch_slice = probabilities
                 prefetch_mode = "full_books"
+                if speculative_topology is not None:
+                    prefetch_token_hint = tuple(
+                        token_id
+                        for row in speculative_topology
+                        for token_id in (row[3], row[4])
+                    )
             elif (
                 refresh_family_keys
                 and refresh_family_keys.issubset(probabilities)
@@ -5600,6 +5705,16 @@ def event_bound_live_adapter_from_trade_conn(
                     for family_key in refresh_family_keys
                 }
                 prefetch_mode = "family_delta_books"
+                delta_topology = _global_book_speculative_topology(
+                    trade_conn,
+                    prefetch_slice,
+                )
+                if delta_topology is not None:
+                    prefetch_token_hint = tuple(
+                        token_id
+                        for row in delta_topology
+                        for token_id in (row[3], row[4])
+                    )
             full_metadata: dict[
                 tuple[str, str], Mapping[str, object]
             ] = {}
@@ -5621,6 +5736,7 @@ def event_bound_live_adapter_from_trade_conn(
                         _prefetch_books,
                         prefetch_slice,
                         mode=prefetch_mode,
+                        token_hint=prefetch_token_hint,
                     )
                     bound_probabilities = _bind(
                         probabilities,
@@ -5721,7 +5837,7 @@ def event_bound_live_adapter_from_trade_conn(
             candidate,
             gamma_market_id,
             market_event_id,
-            owner_event_id,
+            _owner_event_id,
         ):
             from src.risk_allocator import current_global_entry_capacity_usd
 
@@ -5729,9 +5845,7 @@ def event_bound_live_adapter_from_trade_conn(
                 market_id=str(gamma_market_id),
                 event_id=str(market_event_id),
                 resolution_window="default",
-                correlation_key=(
-                    f"edli_intent:{owner_event_id}:{candidate.token_id}"
-                ),
+                correlation_key=_global_candidate_correlation_key(candidate),
             )
 
         try:
