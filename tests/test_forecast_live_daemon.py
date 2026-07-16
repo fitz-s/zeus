@@ -415,7 +415,7 @@ def test_reactor_wake_sidecar_round_trip(tmp_path) -> None:
     assert acknowledge_reactor_wake(published, path=path) is True
 
 
-def test_reactor_wake_queue_preserves_unconsumed_wakes(tmp_path) -> None:
+def test_reactor_wake_queue_prioritizes_day0_without_losing_forecasts(tmp_path) -> None:
     from src.runtime.reactor_wake import (
         acknowledge_reactor_wake,
         publish_reactor_wake,
@@ -437,12 +437,57 @@ def test_reactor_wake_queue_preserves_unconsumed_wakes(tmp_path) -> None:
         wake_id="wake-second",
         published_at=datetime(2026, 7, 16, 12, 0, 1, tzinfo=timezone.utc),
     )
+    latest = publish_reactor_wake(
+        source="forecast",
+        reason="forecast_posterior_advanced",
+        path=path,
+        wake_id="wake-latest",
+        published_at=datetime(2026, 7, 16, 12, 0, 2, tzinfo=timezone.utc),
+    )
 
-    assert read_reactor_wake(path=path) == first
-    assert acknowledge_reactor_wake(first, path=path) is True
     assert read_reactor_wake(path=path) == second
     assert acknowledge_reactor_wake(second, path=path) is True
+    assert read_reactor_wake(path=path) == latest
+    assert acknowledge_reactor_wake(latest, path=path) is True
+    assert read_reactor_wake(path=path) == first
+    assert acknowledge_reactor_wake(first, path=path) is True
     assert read_reactor_wake(path=path) is None
+
+
+def test_reactor_wake_ack_preserves_forecast_published_after_selected(tmp_path) -> None:
+    from src.runtime.reactor_wake import (
+        acknowledge_reactor_wake,
+        publish_reactor_wake,
+        read_reactor_wake,
+    )
+
+    path = tmp_path / "wake.json"
+    publish_reactor_wake(
+        source="forecast",
+        reason="forecast_posterior_advanced",
+        path=path,
+        wake_id="wake-old",
+        published_at=datetime(2026, 7, 16, 12, 0, tzinfo=timezone.utc),
+    )
+    selected = publish_reactor_wake(
+        source="forecast",
+        reason="forecast_posterior_advanced",
+        path=path,
+        wake_id="wake-selected",
+        published_at=datetime(2026, 7, 16, 12, 0, 1, tzinfo=timezone.utc),
+    )
+
+    assert read_reactor_wake(path=path) == selected
+    newer = publish_reactor_wake(
+        source="forecast",
+        reason="forecast_posterior_advanced",
+        path=path,
+        wake_id="wake-newer",
+        published_at=datetime(2026, 7, 16, 12, 0, 2, tzinfo=timezone.utc),
+    )
+
+    assert acknowledge_reactor_wake(selected, path=path) is True
+    assert read_reactor_wake(path=path) == newer
 
 
 def test_forecast_builder_forwards_wake_family_restriction(monkeypatch) -> None:
@@ -601,8 +646,8 @@ def test_day0_reactor_wake_runs_exit_monitor_before_reactor(monkeypatch) -> None
     monkeypatch.setattr(
         main,
         "_exit_monitor_cycle",
-        lambda *, target_families=None: calls.append(
-            f"monitor:{sorted(target_families or ())}"
+        lambda *, target_families=None: (
+            calls.append(f"monitor:{sorted(target_families or ())}") or True
         ),
     )
     monkeypatch.setattr(main, "_edli_event_reactor_cycle", _run_reactor)
@@ -612,6 +657,63 @@ def test_day0_reactor_wake_runs_exit_monitor_before_reactor(monkeypatch) -> None
     assert calls == [
         "monitor:[('Paris', '2026-07-16', 'high')]",
         "reactor:day0_extreme_event_committed:event-day0:0",
+    ]
+
+
+def test_day0_wake_claims_monitor_priority_while_reactor_is_active(
+    monkeypatch,
+) -> None:
+    import src.main as main
+    from src.runtime import reactor_wake
+
+    wake = reactor_wake.ReactorWake(
+        "wake-day0-active",
+        "2026-07-16T12:00:00+00:00",
+        "ingest_main",
+        "day0_extreme_event_committed",
+        ("event-day0",),
+    )
+    calls: list[str] = []
+
+    class _Lock:
+        def locked(self) -> bool:
+            return True
+
+    class _Held:
+        def is_set(self) -> bool:
+            return False
+
+    monkeypatch.setattr(reactor_wake, "read_reactor_wake", lambda: wake)
+    monkeypatch.setattr(
+        reactor_wake,
+        "acknowledge_reactor_wake",
+        lambda _wake: True,
+    )
+    monkeypatch.setattr(main, "_edli_reactor_active_lock", _Lock())
+    monkeypatch.setattr(main, "_held_position_monitor_active", _Held())
+    monkeypatch.setattr(
+        main,
+        "_day0_wake_target_families",
+        lambda _event_ids: frozenset({("Paris", "2026-07-16", "high")}),
+    )
+    monkeypatch.setattr(
+        main,
+        "_exit_monitor_cycle",
+        lambda *, target_families=None: (
+            calls.append(f"monitor:{sorted(target_families or ())}") or True
+        ),
+    )
+    monkeypatch.setattr(
+        main,
+        "_edli_event_reactor_cycle",
+        lambda **_kwargs: calls.append("reactor") or True,
+    )
+    monkeypatch.setattr(main, "_edli_last_reactor_wake_id", None)
+
+    assert main._edli_reactor_wake_poll_once() is True
+    assert calls == [
+        "monitor:[('Paris', '2026-07-16', 'high')]",
+        "reactor",
     ]
 
 

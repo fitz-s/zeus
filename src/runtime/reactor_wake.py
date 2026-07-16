@@ -147,17 +147,39 @@ def _read_reactor_wake_path(path: Path) -> ReactorWake | None:
     return wake
 
 
-def read_reactor_wake(*, path: Path | None = None) -> ReactorWake | None:
-    """Read the oldest queued wake, falling back to the legacy latest-wake file."""
-
+def _queued_wakes(path: Path | None) -> list[tuple[Path, ReactorWake]]:
     try:
         queue_files = sorted(_wake_queue_dir(path).glob("*.json"))
     except OSError:
-        queue_files = []
-    for queue_file in queue_files:
-        wake = _read_reactor_wake_path(queue_file)
-        if wake is not None:
+        return []
+    return [
+        (queue_file, wake)
+        for queue_file in queue_files
+        if (wake := _read_reactor_wake_path(queue_file)) is not None
+    ]
+
+
+def read_reactor_wake(*, path: Path | None = None) -> ReactorWake | None:
+    """Read urgent Day0 first, otherwise latest forecast, then legacy.
+
+    Forecast hints carry incremental family scopes.  A newer hint is more
+    time-sensitive, but it does not supersede a distinct older scope; exact
+    acknowledgement keeps every unconsumed increment queued.
+    """
+
+    queued = _queued_wakes(path)
+    for _queue_file, wake in queued:
+        if wake.reason == "day0_extreme_event_committed":
             return wake
+    ordinary = [
+        wake
+        for _queue_file, wake in queued
+        if wake.reason != "forecast_posterior_advanced"
+    ]
+    if ordinary:
+        return ordinary[0]
+    if queued:
+        return queued[-1][1]
     return _read_reactor_wake_path(_wake_path(path))
 
 
@@ -166,11 +188,11 @@ def acknowledge_reactor_wake(
     *,
     path: Path | None = None,
 ) -> bool:
-    """Remove one consumed queue entry and its matching legacy fallback."""
+    """Remove exactly one consumed wake and its matching legacy fallback."""
 
     try:
         suffix = f"-{wake.wake_id}.json"
-        for queue_file in _wake_queue_dir(path).glob("*.json"):
+        for queue_file, _queued_wake in _queued_wakes(path):
             if queue_file.name.endswith(suffix):
                 queue_file.unlink(missing_ok=True)
         legacy = _wake_path(path)

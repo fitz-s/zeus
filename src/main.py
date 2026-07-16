@@ -3740,18 +3740,24 @@ def _edli_reactor_wake_poll_once() -> bool:
     wake = read_reactor_wake()
     if wake is None or wake.wake_id == _edli_last_reactor_wake_id:
         return False
-    if _edli_reactor_active_lock.locked() or _held_position_monitor_active.is_set():
+    day0_wake = wake.reason == "day0_extreme_event_committed"
+    if _held_position_monitor_active.is_set():
         return False
-    if wake.reason == "day0_extreme_event_committed":
+    if not day0_wake and _edli_reactor_active_lock.locked():
+        return False
+    if day0_wake:
         try:
-            _exit_monitor_cycle(
+            monitor_ran = _exit_monitor_cycle(
                 target_families=_day0_wake_target_families(wake.event_ids)
             )
         except Exception:
             logger.exception(
                 "Day0 reactor wake held-position monitor failed; "
-                "continuing to the canonical reactor"
+                "wake remains queued for retry"
             )
+            return False
+        if monitor_ran is not True:
+            return False
     ran = _edli_event_reactor_cycle(
         producer_wake_reason=wake.reason,
         producer_wake_event_ids=wake.event_ids,
@@ -5537,7 +5543,7 @@ def _edli_boot_settlement_redeem_recovery() -> None:
 def _exit_monitor_cycle(
     *,
     target_families: frozenset[tuple[str, str, str]] | None = None,
-) -> None:
+) -> bool:
     """Scheduler hook — body owned by src.execution.exit_lifecycle (R4-b
     extraction, 2026-07-08) as ``run_exit_monitor_cycle``. See that function's
     docstring for the held-position monitoring / exit-submit lane it runs.
@@ -5551,7 +5557,7 @@ def _exit_monitor_cycle(
 
     if _held_position_monitor_active.is_set():
         logger.warning("exit_monitor skipped: previous monitor cycle is still running")
-        return
+        return False
 
     # Claim exit priority before waiting. New reactor ticks defer on this Event;
     # the current reactor finishes without a competing SQLite traversal.
@@ -5565,7 +5571,7 @@ def _exit_monitor_cycle(
             _EXIT_MONITOR_REACTOR_HANDOFF_SECONDS,
         )
         _held_position_monitor_active.clear()
-        return
+        return False
     _edli_reactor_active_lock.release()
     try:
         run_exit_monitor_cycle(
@@ -5574,6 +5580,7 @@ def _exit_monitor_cycle(
             monitor_claimed=True,
             target_families=target_families,
         )
+        return True
     finally:
         if _held_position_monitor_active.is_set():
             _mark_held_position_monitor_complete()

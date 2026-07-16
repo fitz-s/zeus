@@ -5730,7 +5730,7 @@ def test_exit_monitor_claims_priority_and_waits_for_reactor_handoff(monkeypatch)
     monkeypatch.setattr(main_module, "_edli_reactor_active_lock", ReactorGate())
     monkeypatch.setattr(exit_module, "run_exit_monitor_cycle", _run)
 
-    main_module._exit_monitor_cycle()
+    assert main_module._exit_monitor_cycle() is True
 
     assert calls == [
         ("wait", main_module._EXIT_MONITOR_REACTOR_HANDOFF_SECONDS, True),
@@ -5790,7 +5790,7 @@ def test_exit_monitor_handoff_timeout_releases_priority_claim(monkeypatch) -> No
         lambda **kwargs: calls.append("run"),
     )
 
-    main_module._exit_monitor_cycle()
+    assert main_module._exit_monitor_cycle() is False
 
     assert calls == []
     assert not main_module._held_position_monitor_active.is_set()
