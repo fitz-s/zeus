@@ -991,17 +991,18 @@ class Day0FastObsEmitter:
             return 0
 
     def _reports_with_status(self, stations: list[str]) -> tuple[list[MetarReport], str, Optional[float]]:
-        """(reports, freshness_status, cache_age_s). Throttle covers FAILED
-        attempts too (failure-throttle, P0-3)."""
+        """Return reports and freshness with a start-to-start fetch throttle."""
         now = time.monotonic()
         with self._lock:
             cache_age = (now - self._cache_fetched_monotonic) if self._cached_reports else None
-            if cache_age is not None and cache_age < self.min_fetch_interval_s:
-                return list(self._cached_reports), FETCH_CACHE_HIT, cache_age
             if (now - self._last_attempt_monotonic) < self.min_fetch_interval_s:
-                # throttled after a recent (failed) attempt: serve what exists
                 if self._cached_reports:
-                    return list(self._cached_reports), FETCH_STALE_AFTER_FAILURE, cache_age
+                    status = (
+                        FETCH_CACHE_HIT
+                        if self._cache_fetched_monotonic >= self._last_attempt_monotonic
+                        else FETCH_STALE_AFTER_FAILURE
+                    )
+                    return list(self._cached_reports), status, cache_age
                 return [], FETCH_NO_DATA, None
             self._last_attempt_monotonic = now
             fetch_hours = METAR_FULL_FETCH_HOURS

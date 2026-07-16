@@ -979,6 +979,25 @@ class TestFetchFailureDiscipline:
         assert calls["n"] == 2, "failed attempt must arm the throttle"
         assert status in (FETCH_STALE_AFTER_FAILURE, FETCH_CACHE_HIT)
 
+    def test_slow_success_does_not_double_the_start_to_start_poll_interval(self, monkeypatch):
+        import src.data.day0_fast_obs as fast_obs
+
+        t0 = datetime(2026, 6, 9, 16, 0, tzinfo=UTC)
+        reports = [_report("RJTT", t0, 21.0, t_group=False)]
+        calls = {"n": 0}
+        clock = iter((100.0, 100.7, 105.1, 105.3))
+
+        def fetcher(_stations, **_kwargs):
+            calls["n"] += 1
+            return reports
+
+        monkeypatch.setattr(fast_obs.time, "monotonic", lambda: next(clock))
+        emitter = Day0FastObsEmitter(fetcher=fetcher, min_fetch_interval_s=5.0)
+
+        assert emitter._reports_with_status(["RJTT"])[1] == fast_obs.FETCH_FRESH
+        assert emitter._reports_with_status(["RJTT"])[1] == fast_obs.FETCH_FRESH
+        assert calls["n"] == 2
+
     def test_stale_cache_beyond_budget_emits_no_live_event_but_updates_kill_memo(self):
         from src.data.day0_fast_obs import Day0FastObsEmitter
 
