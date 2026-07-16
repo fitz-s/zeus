@@ -2230,11 +2230,17 @@ def test_live_adapter_routes_each_global_truth_to_its_owner(monkeypatch):
     metadata_key = ("condition", "yes-token")
     metadata = {"condition_id": "condition", "active": True}
 
-    def fake_bind(_forecast_conn, *, probability_witnesses, metadata_sink, **_):
-        bind_calls.append(1)
-        if len(bind_calls) == 1:
+    def fake_bind(
+        _forecast_conn,
+        *,
+        probability_witnesses,
+        metadata_sink=None,
+        **_,
+    ):
+        bind_calls.append(metadata_sink is not None)
+        if metadata_sink is not None:
             metadata_sink[metadata_key] = metadata
-        return probability_witnesses
+        return dict(probability_witnesses)
 
     def fake_capture(_trade_conn, *, metadata_overrides, **_):
         metadata_calls.append(dict(metadata_overrides))
@@ -2265,9 +2271,12 @@ def test_live_adapter_routes_each_global_truth_to_its_owner(monkeypatch):
         {metadata_key: metadata},
         {metadata_key: metadata},
     ]
+    assert bind_calls == [False, True, False, True]
 
 
-def test_live_adapter_overlaps_gamma_bind_with_clob_book_fetch(monkeypatch):
+def test_live_adapter_rebinds_current_probability_before_book_cache_hit(
+    monkeypatch,
+):
     trade = sqlite3.connect(":memory:")
     forecast = sqlite3.connect(":memory:")
     topology = sqlite3.connect(":memory:")
@@ -2300,61 +2309,70 @@ def test_live_adapter_overlaps_gamma_bind_with_clob_book_fetch(monkeypatch):
         _dt.datetime(2026, 7, 10, 8, 10, tzinfo=_dt.timezone.utc),
     )
 
-    bind_started = threading.Event()
-    books_started = threading.Event()
     metadata = {
         ("condition-a", "yes-token-a"): {"condition_id": "condition-a"},
         ("condition-a", "no-token-a"): {"condition_id": "condition-a"},
         ("condition-b", "yes-token-b"): {"condition_id": "condition-b"},
         ("condition-b", "no-token-b"): {"condition_id": "condition-b"},
     }
-    bound_probabilities = {
-        "family": SimpleNamespace(
-            family_key="family",
-            witness_identity="bound-probability",
-            bindings=(
-                SimpleNamespace(
-                    bin_id="bin-b",
-                    condition_id="condition-b",
-                    yes_token_id="yes-token-b",
-                    no_token_id="no-token-b",
+    def probability(identity):
+        return {
+            "family": SimpleNamespace(
+                family_key="family",
+                witness_identity=identity,
+                bindings=(
+                    SimpleNamespace(
+                        bin_id="bin-a",
+                        condition_id="condition-a",
+                        yes_token_id="yes-token-a",
+                        no_token_id="no-token-a",
+                    ),
+                    SimpleNamespace(
+                        bin_id="bin-b",
+                        condition_id="condition-b",
+                        yes_token_id="yes-token-b",
+                        no_token_id="no-token-b",
+                    ),
                 ),
-                SimpleNamespace(
-                    bin_id="bin-a",
-                    condition_id="condition-a",
-                    yes_token_id="yes-token-a",
-                    no_token_id="no-token-a",
-                ),
-            ),
-        )
-    }
+            )
+        }
 
-    def fake_bind(_forecast_conn, *, probability_witnesses, metadata_sink, **_):
-        bind_started.set()
-        assert books_started.wait(1.0), "CLOB fetch did not overlap Gamma bind"
-        metadata_sink.update(metadata)
-        assert tuple(
-            binding.bin_id
-            for binding in probability_witnesses["family"].bindings
-        ) == ("bin-a", "bin-b")
-        return bound_probabilities
+    bind_calls = []
+
+    def fake_bind(
+        _forecast_conn,
+        *,
+        probability_witnesses,
+        metadata_sink=None,
+        **_,
+    ):
+        bind_calls.append(
+            (
+                metadata_sink is not None,
+                probability_witnesses["family"].witness_identity,
+            )
+        )
+        if metadata_sink is not None:
+            metadata_sink.update(metadata)
+        return dict(probability_witnesses)
 
     capture_calls = []
+    book_calls = []
 
     def fake_capture(_trade_conn, **kwargs):
         capture_calls.append(kwargs)
         assert kwargs["metadata_overrides"] == metadata
-        assert kwargs["prefetched_at_utc"].tzinfo is not None
-        assert set(kwargs["prefetched_books"]) == {
-            "yes-token-a",
-            "no-token-a",
-            "yes-token-b",
-            "no-token-b",
-        }
+        tokens = [
+            token
+            for witness in kwargs["probability_witnesses"].values()
+            for binding in witness.bindings
+            for token in (binding.yes_token_id, binding.no_token_id)
+        ]
+        kwargs["get_books"](tokens)
         return SimpleNamespace(
-            witness_identity="book-overlapped",
+            witness_identity="book-current",
             assets=(),
-            current_identity=lambda _checked_at: "book-overlapped",
+            current_identity=lambda _checked_at: "book-current",
         )
 
     class FakeClient:
@@ -2368,8 +2386,7 @@ def test_live_adapter_overlaps_gamma_bind_with_clob_book_fetch(monkeypatch):
             return False
 
         def get_orderbook_snapshots(self, tokens, **_):
-            books_started.set()
-            assert bind_started.wait(1.0), "Gamma bind did not overlap CLOB fetch"
+            book_calls.append(tuple(sorted(tokens)))
             return {
                 token: {"asset_id": token, "hash": f"hash-{token}"}
                 for token in tokens
@@ -2382,42 +2399,49 @@ def test_live_adapter_overlaps_gamma_bind_with_clob_book_fetch(monkeypatch):
         FakeClient,
     )
     provider = captured["current_book_epoch_provider"]
-    probabilities = {
-        "family": SimpleNamespace(
-            family_key="family",
-            witness_identity="request-probability",
-            bindings=(
-                SimpleNamespace(
-                    bin_id="bin-a",
-                    condition_id="condition-a",
-                    yes_token_id="yes-token-a",
-                    no_token_id="no-token-a",
-                ),
-                SimpleNamespace(
-                    bin_id="bin-b",
-                    condition_id="condition-b",
-                    yes_token_id="yes-token-b",
-                    no_token_id="no-token-b",
-                ),
-            )
-        )
-    }
-
+    probabilities = probability("request-probability-1")
     bound, epoch = provider(
         probabilities,
         _dt.datetime.now(_dt.timezone.utc),
     )
-
-    assert bound == bound_probabilities
-    assert epoch.witness_identity == "book-overlapped"
-    assert len(capture_calls) == 1
+    next_probabilities = probability("request-probability-2")
     bound_again, epoch_again = provider(
-        probabilities,
+        next_probabilities,
         _dt.datetime.now(_dt.timezone.utc),
     )
-    assert bound_again == probabilities
+    bound_reauction, epoch_reauction = provider(
+        bound_again,
+        _dt.datetime.now(_dt.timezone.utc),
+    )
+
+    assert bound == probabilities
+    assert bound_again == next_probabilities
+    assert bound_reauction == next_probabilities
+    assert epoch.witness_identity == "book-current"
     assert epoch_again is epoch
-    assert len(capture_calls) == 1
+    assert epoch_reauction is not epoch
+    assert bind_calls == [
+        (False, "request-probability-1"),
+        (True, "request-probability-1"),
+        (False, "request-probability-2"),
+        (False, "request-probability-2"),
+        (True, "request-probability-2"),
+    ]
+    assert len(capture_calls) == 2
+    assert book_calls == [
+        (
+            "no-token-a",
+            "no-token-b",
+            "yes-token-a",
+            "yes-token-b",
+        ),
+        (
+            "no-token-a",
+            "no-token-b",
+            "yes-token-a",
+            "yes-token-b",
+        ),
+    ]
     trade.close()
     forecast.close()
     topology.close()
@@ -2489,8 +2513,19 @@ def test_live_adapter_refreshes_only_triggered_probability_family(monkeypatch):
     capture_calls = []
     book_calls = []
 
-    def fake_bind(_forecast_conn, *, probability_witnesses, **_):
-        bind_calls.append(tuple(sorted(probability_witnesses)))
+    def fake_bind(
+        _forecast_conn,
+        *,
+        probability_witnesses,
+        metadata_sink=None,
+        **_,
+    ):
+        bind_calls.append(
+            (
+                "metadata" if metadata_sink is not None else "token",
+                tuple(sorted(probability_witnesses)),
+            )
+        )
         return dict(probability_witnesses)
 
     def fake_capture(_trade_conn, **kwargs):
@@ -2516,7 +2551,14 @@ def test_live_adapter_refreshes_only_triggered_probability_family(monkeypatch):
                             f"market-{family_key}",
                         )
                     )
-        captured_at = kwargs["prefetched_at_utc"]
+        tokens = [
+            token
+            for probability in probability_witnesses.values()
+            for binding in probability.bindings
+            for token in (binding.yes_token_id, binding.no_token_id)
+        ]
+        kwargs["get_books"](tokens)
+        captured_at = kwargs["clock"]()
         return CurrentGlobalBookEpoch(
             assets=(),
             asset_states=tuple(states),
@@ -2589,9 +2631,12 @@ def test_live_adapter_refreshes_only_triggered_probability_family(monkeypatch):
     assert bound_again == changed_probabilities
     assert bound_after_unrelated_drift == unrelated_drift
     assert bind_calls == [
-        (dallas, miami),
-        (dallas,),
-        (dallas,),
+        ("token", (dallas, miami)),
+        ("metadata", (dallas, miami)),
+        ("token", (dallas, miami)),
+        ("metadata", (dallas,)),
+        ("token", (dallas, miami)),
+        ("metadata", (dallas,)),
     ]
     assert capture_calls == [
         (dallas, miami),
