@@ -780,7 +780,7 @@ def test_global_preflight_exhaustion_distinguishes_cash_from_authority_failure()
     )
     assert global_batch_runtime._global_preflight_exhaustion_reason(
         "NO_CURRENT_EXECUTABLE_POSITIVE_ORDER",
-        excluded_by_family={"family-a": "GLOBAL_JIT_SNAPSHOT_REFRESH_FAILED"},
+        excluded_by_family={"family-a": "GLOBAL_ACTUATION_BOOK_SUPERSEDED"},
         excluded_by_candidate={},
     ) == (
         "GLOBAL_PREFLIGHT_ACTION_SET_EXHAUSTED:"
@@ -4008,34 +4008,6 @@ def test_global_probability_authority_is_materialized_once_per_family(monkeypatc
     assert calls == ["valid", "invalid"]
 
 
-def test_global_curve_supersession_keeps_typed_current_candidate():
-    candidate = object()
-    reason = (
-        "GLOBAL_ACTUATION_EXECUTION_BINDING_SUPERSEDED:curve_economics:"
-        "detail=prefix_price"
-    )
-    exc = era._GlobalCurveSuperseded(reason, candidate)
-    receipt = era.EventSubmissionReceipt(
-        False,
-        "event-1",
-        "snapshot-1",
-        reason=str(exc),
-        global_jit_candidate=exc.replacement_candidate,
-    )
-
-    assert era._global_curve_supersession_from_receipt(receipt) == (
-        "CURVE_SUPERSEDED",
-        candidate,
-        reason,
-    )
-    missing = replace(receipt, global_jit_candidate=None)
-    assert era._global_curve_supersession_from_receipt(missing) == (
-        "BLOCKED",
-        None,
-        f"{reason}:replacement_candidate_missing",
-    )
-
-
 def test_global_probability_tightening_keeps_candidate_identity_and_bound():
     candidate = SimpleNamespace(
         family_key="family-a",
@@ -4068,7 +4040,17 @@ def test_global_probability_tightening_keeps_candidate_identity_and_bound():
 def test_global_winner_binding_does_not_reapply_legacy_price_floor(monkeypatch):
     at = _dt.datetime(2026, 7, 14, 16, 24, tzinfo=_dt.timezone.utc)
     family_key = "Paris|2026-07-14|high"
-    curve = SimpleNamespace(book_hash="book-current")
+    curve = ExecutableCostCurve(
+        token_id="no-35c",
+        side="NO",
+        snapshot_id="snapshot-current",
+        book_hash="book-current",
+        levels=(BookLevel(price=Decimal("0.01"), size=Decimal("100")),),
+        fee_model=FeeModel(fee_rate=Decimal("0")),
+        min_tick=Decimal("0.01"),
+        min_order_size=Decimal("1"),
+        quote_ttl=_dt.timedelta(seconds=30),
+    )
     candidate = SimpleNamespace(
         candidate_id="global-no-35c",
         family_key=family_key,
@@ -4080,8 +4062,8 @@ def test_global_winner_binding_does_not_reapply_legacy_price_floor(monkeypatch):
         resolution_identity="resolution-current",
         ledger_snapshot_id="ledger-current",
         book_captured_at_utc=at,
-        book_snapshot_id="snapshot-current",
-        execution_curve_identity="curve-current",
+        book_snapshot_id=curve.snapshot_id,
+        execution_curve_identity=executable_curve_identity(curve),
         executable_cost_curve=curve,
     )
     proof = SimpleNamespace(
@@ -4140,30 +4122,17 @@ def test_global_winner_binding_does_not_reapply_legacy_price_floor(monkeypatch):
     )
     monkeypatch.setattr(
         era,
-        "_full_depth_native_side_candidate_from_proof",
-        lambda **_kwargs: object(),
-    )
-    monkeypatch.setattr(
-        "src.solve.solver.global_candidate_from_native",
-        lambda *_args, **_kwargs: candidate,
-    )
-    monkeypatch.setattr(
-        era,
-        "_global_selected_order_economics_drift",
-        lambda **_kwargs: None,
-    )
-    monkeypatch.setattr(
-        era,
         "current_global_probability_authority",
         lambda *_args, **_kwargs: object(),
     )
+
+    def persisted_execution_must_not_be_read(*_args, **_kwargs):
+        pytest.fail("global preflight must bind the in-memory book epoch")
+
     monkeypatch.setattr(
         era,
         "current_global_execution_authority",
-        lambda *_args, **_kwargs: SimpleNamespace(
-            book_snapshot_id=candidate.book_snapshot_id,
-            execution_curve_identity=candidate.execution_curve_identity,
-        ),
+        persisted_execution_must_not_be_read,
     )
     captured = {}
 
@@ -4194,7 +4163,6 @@ def test_global_winner_binding_does_not_reapply_legacy_price_floor(monkeypatch):
         all_proofs=(proof,),
         eligible_proofs=(proof,),
         forecast_conn=object(),
-        trade_conn=object(),
         decision_time=at,
     )
 
@@ -4215,7 +4183,6 @@ def test_global_winner_binding_does_not_reapply_legacy_price_floor(monkeypatch):
             all_proofs=(proof,),
             eligible_proofs=(),
             forecast_conn=object(),
-            trade_conn=object(),
             decision_time=at,
         )
 
@@ -4229,7 +4196,6 @@ def test_global_winner_binding_does_not_reapply_legacy_price_floor(monkeypatch):
             all_proofs=(proof, duplicate),
             eligible_proofs=(proof,),
             forecast_conn=object(),
-            trade_conn=object(),
             decision_time=at,
         )
 
@@ -4248,8 +4214,6 @@ def test_global_winner_binding_does_not_reapply_legacy_price_floor(monkeypatch):
         ),
         ("GLOBAL_CURRENT_STATE_ROBUST_MAJORITY_LOSS", "BATCH_BLOCKED"),
         ("GLOBAL_CURRENT_STATE_ECONOMICS_NON_POSITIVE", "BATCH_BLOCKED"),
-        ("GLOBAL_JIT_SNAPSHOT_REFRESH_FAILED", "BATCH_BLOCKED"),
-        ("GLOBAL_JIT_SNAPSHOT_REFRESH_UNAVAILABLE", "BATCH_BLOCKED"),
         (
             "GLOBAL_ACTUATION_PREPARE_FAILED:"
             "SPINE_INPUTS_UNAVAILABLE:MU_SIGMA_NOT_STASHED",
@@ -8652,8 +8616,6 @@ def test_global_batch_candidate_block_keeps_sibling_eligible(
         "GLOBAL_CURRENT_STATE_PAYOFF_Q_TIGHTENED_REAUCTION_REQUIRED",
         "GLOBAL_CURRENT_STATE_ROBUST_MAJORITY_LOSS",
         "GLOBAL_CURRENT_STATE_ECONOMICS_NON_POSITIVE",
-        "GLOBAL_JIT_SNAPSHOT_REFRESH_FAILED",
-        "GLOBAL_JIT_SNAPSHOT_REFRESH_UNAVAILABLE",
         (
             "GLOBAL_ACTUATION_PREPARE_FAILED:"
             "SPINE_INPUTS_UNAVAILABLE:MU_SIGMA_NOT_STASHED"

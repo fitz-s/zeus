@@ -7372,43 +7372,13 @@ def _decision_snapshot_refresh_target(
     row: Mapping[str, Any],
     payload: Mapping[str, Any],
     family_condition_ids: Sequence[str],
-    global_candidate: object | None,
 ) -> tuple[tuple[str, ...], str | None]:
-    """Target the global winner; ordinary decisions retain trigger scope."""
+    """Target the selected condition without refreshing unrelated siblings."""
 
-    condition_id = str(
-        getattr(global_candidate, "condition_id", "")
-        if global_candidate is not None
-        else row.get("condition_id") or ""
-    ).strip()
-    token_id = str(
-        getattr(global_candidate, "token_id", "")
-        if global_candidate is not None
-        else payload.get("token_id") or ""
-    ).strip()
+    condition_id = str(row.get("condition_id") or "").strip()
+    token_id = str(payload.get("token_id") or "").strip()
     conditions = (condition_id,) if condition_id else tuple(family_condition_ids)
     return conditions, token_id or None
-
-
-def _global_jit_snapshot_advanced(
-    *,
-    before: Mapping[str, Any],
-    after: Mapping[str, Any],
-) -> bool:
-    """Prove the exact winner row was recaptured after its pre-JIT row."""
-
-    before_id = str(before.get("snapshot_id") or "").strip()
-    after_id = str(after.get("snapshot_id") or "").strip()
-    before_at = _utc_datetime_or_none(before.get("captured_at"))
-    after_at = _utc_datetime_or_none(after.get("captured_at"))
-    return bool(
-        before_id
-        and after_id
-        and before_id != after_id
-        and before_at is not None
-        and after_at is not None
-        and after_at > before_at
-    )
 
 
 def _global_selected_order_economics_drift(
@@ -7566,14 +7536,6 @@ def _global_actuation_sweep_cost_worsened(
         or not current_cost.is_finite()
         or current_cost > selected_cost + Decimal("1e-12")
     )
-
-
-class _GlobalCurveSuperseded(ValueError):
-    """Typed submit-boundary drift carrying the current selected native curve."""
-
-    def __init__(self, reason: str, replacement_candidate: object) -> None:
-        super().__init__(reason)
-        self.replacement_candidate = replacement_candidate
 
 
 class _GlobalProbabilityTightened(ValueError):
@@ -8674,14 +8636,13 @@ def _global_actuation_selected_proof(
     all_proofs: tuple["_CandidateProof", ...],
     eligible_proofs: tuple["_CandidateProof", ...],
     forecast_conn: sqlite3.Connection,
-    trade_conn: sqlite3.Connection,
     decision_time: datetime,
 ) -> "_CandidateProof":
     """Bind the exact global winner to its current proof and sealed economics."""
 
     from src.solve.solver import (
+        executable_curve_identity,
         global_buy_fak_prefix_certificate,
-        global_candidate_from_native,
     )
 
     decision = getattr(global_actuation, "decision", None)
@@ -8752,79 +8713,33 @@ def _global_actuation_selected_proof(
             f"candidate={candidate.candidate_id}:reason={current_reason}"
         )
     proof = matches[0]
-    native = _full_depth_native_side_candidate_from_proof(
-        family_key=candidate.family_key,
-        proof=proof,
-    )
-    rebound = global_candidate_from_native(
-        native,
-        probability_witness=witness,
-        ledger_snapshot_id=candidate.ledger_snapshot_id,
-        book_captured_at_utc=candidate.book_captured_at_utc,
-    )
-    execution_identity_fields = (
-        "family_key",
-        "bin_id",
-        "condition_id",
-        "side",
-        "token_id",
-        "probability_witness_identity",
-        "resolution_identity",
-    )
-    execution_identity_drift = tuple(
-        field
-        for field in execution_identity_fields
-        if getattr(rebound, field) != getattr(candidate, field)
-    )
-    if execution_identity_drift:
-        raise ValueError(
-            "GLOBAL_ACTUATION_EXECUTION_BINDING_SUPERSEDED:identity:"
-            + ",".join(execution_identity_drift)
-        )
-    # T2 chose an argmax over the complete curve.  Any economic curve change can
-    # move that argmax, so T3 hands the current curve back for a complete global
-    # re-auction; evidence-carrier-only churn is ignored above.
-    execution_drift = _global_selected_order_economics_drift(
-        decision=decision,
-        current_candidate=rebound,
-    )
-    if execution_drift is not None:
-        raise _GlobalCurveSuperseded(
-            (
-                "GLOBAL_ACTUATION_EXECUTION_BINDING_SUPERSEDED:curve_economics:"
-                f"detail={execution_drift}:"
-                f"selected={candidate.execution_curve_identity}:"
-                f"current={rebound.execution_curve_identity}"
-            ),
-            rebound,
-        )
+    # T2 selected this exact full-depth curve from the current global book epoch.
+    # Rebuilding it from the persisted substrate would repeat network capture,
+    # wait on the broad observer lock, and write the DB before the selected token
+    # is fetched directly again below. Bind the sealed epoch candidate here; the
+    # final direct /book JIT is the only submit-bound execution recapture.
+    rebound = candidate
+    curve = getattr(rebound, "executable_cost_curve", None)
+    if (
+        curve is None
+        or str(getattr(curve, "token_id", "") or "") != candidate.token_id
+        or str(getattr(curve, "side", "") or "") != candidate.side
+        or str(getattr(curve, "snapshot_id", "") or "")
+        != candidate.book_snapshot_id
+        or executable_curve_identity(curve) != candidate.execution_curve_identity
+        or getattr(candidate.book_captured_at_utc, "tzinfo", None) is None
+    ):
+        raise ValueError("GLOBAL_ACTUATION_BOOK_SUPERSEDED")
     current_probability = current_global_probability_authority(
         forecast_conn,
         event,
         witness,
         decision_time=decision_time,
     )
-    current_execution = current_global_execution_authority(
-        trade_conn,
-        rebound,
-        decision_time=decision_time,
-        allow_exact_post_decision_snapshot=True,
-    )
     if current_probability is None:
         raise ValueError("GLOBAL_ACTUATION_PROBABILITY_SUPERSEDED")
-    if (
-        current_execution is None
-        or current_execution.book_snapshot_id != rebound.book_snapshot_id
-        or current_execution.execution_curve_identity != rebound.execution_curve_identity
-    ):
-        raise ValueError("GLOBAL_ACTUATION_BOOK_SUPERSEDED")
 
-    jit_depth = _json_object(
-        (proof.row or {}).get("orderbook_depth_json")
-        or (proof.row or {}).get("orderbook_depth_jsonb")
-        or {}
-    )
-    jit_venue_book_hash = str(jit_depth.get("hash") or "").strip()
+    jit_venue_book_hash = str(curve.book_hash or "").strip()
     if not jit_venue_book_hash:
         raise ValueError("GLOBAL_ACTUATION_JIT_VENUE_BOOK_HASH_MISSING")
     cert = _global_current_state_economics_seed(proof)
@@ -9226,6 +9141,12 @@ def _build_event_bound_no_submit_receipt_core(
     if row is None:
         return EventSubmissionReceipt(False, event.event_id, event.causal_snapshot_id, reason="EVENT_BOUND_SELECTED_SNAPSHOT_MISSING")
     selected_stale_reason = _snapshot_price_stale_reason(row, decision_time=decision_time)
+    if global_actuation is not None:
+        # The global selector priced every side from one current in-memory book
+        # epoch. Persisted rows here provide family topology/proof provenance,
+        # not execution price authority. The selected token is fetched directly
+        # once more by _global_preflight_entry_jit_receipt before any side effect.
+        selected_stale_reason = None
     if (
         selected_stale_reason is not None
         and prepare_global_auction
@@ -9259,26 +9180,16 @@ def _build_event_bound_no_submit_receipt_core(
     # family_condition_ids and is re-read after refresh; sibling catch-up belongs to
     # the warm/confirmation producer lanes so one stale selected row cannot make the
     # live reactor wait on every sibling's CLOB request.
-    if global_actuation is not None and family_snapshot_refresher is None:
-        return EventSubmissionReceipt(
-            False,
-            event.event_id,
-            event.causal_snapshot_id,
-            reason="GLOBAL_JIT_SNAPSHOT_REFRESH_UNAVAILABLE",
-        )
-    global_jit_rebound = False
     if (
-        (selected_stale_reason is not None or global_actuation is not None)
+        selected_stale_reason is not None
         and family_snapshot_refresher is not None
     ):
-        pre_refresh_row = dict(row)
         refreshed = False
         try:
             refresh_condition_ids, refresh_token_id = _decision_snapshot_refresh_target(
                 row=row,
                 payload=payload,
                 family_condition_ids=family_condition_ids,
-                global_candidate=global_candidate,
             )
             # Drop the read snapshot so the NET fetch holds no trade-DB txn and the
             # re-read observes the refresher's committed rows (WAL visibility).
@@ -9293,7 +9204,7 @@ def _build_event_bound_no_submit_receipt_core(
                     metric=str(payload.get("metric") or payload.get("temperature_metric") or ""),
                     condition_ids=refresh_condition_ids,
                     selected_token_id=refresh_token_id,
-                    force_refresh=global_actuation is not None,
+                    force_refresh=False,
                 )
             )
         except Exception as exc:  # noqa: BLE001 — refresh is fail-soft; stale rejection stands
@@ -9349,31 +9260,13 @@ def _build_event_bound_no_submit_receipt_core(
                         reason=f"EVENT_BOUND_MARKET_TOPOLOGY_INVALID:{exc}",
                     )
                 refreshed_row = (
-                    _global_candidate_snapshot_row(family_rows, global_candidate)
-                    if global_candidate is not None
-                    else _selected_snapshot_row_for_event(family_rows, payload)
+                    _selected_snapshot_row_for_event(family_rows, payload)
                 )
                 if refreshed_row is not None:
                     row = refreshed_row
-                    global_jit_rebound = (
-                        global_actuation is None
-                        or _global_jit_snapshot_advanced(
-                            before=pre_refresh_row,
-                            after=row,
-                        )
-                    )
                     if provenance_capture is not None:
                         provenance_capture["snapshot_row"] = row
                     selected_stale_reason = _snapshot_price_stale_reason(row, decision_time=decision_time)
-        if global_actuation is not None and (
-            not refreshed or not global_jit_rebound
-        ):
-            return EventSubmissionReceipt(
-                False,
-                event.event_id,
-                event.causal_snapshot_id,
-                reason="GLOBAL_JIT_SNAPSHOT_REFRESH_FAILED",
-            )
     if selected_stale_reason is not None:
         return EventSubmissionReceipt(
             False,
@@ -9775,20 +9668,7 @@ def _build_event_bound_no_submit_receipt_core(
                 all_proofs=proofs,
                 eligible_proofs=_spine_entry_proofs,
                 forecast_conn=source_conn,
-                trade_conn=trade_conn,
                 decision_time=decision_time,
-            )
-        except _GlobalCurveSuperseded as exc:
-            return EventSubmissionReceipt(
-                False,
-                event.event_id,
-                event.causal_snapshot_id,
-                reason=str(exc),
-                city=family.city,
-                target_date=family.target_date,
-                metric=family.metric,
-                family_id=family.family_id,
-                global_jit_candidate=exc.replacement_candidate,
             )
         except _GlobalProbabilityTightened as exc:
             return EventSubmissionReceipt(

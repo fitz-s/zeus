@@ -512,7 +512,7 @@ def test_global_actuation_sweep_accepts_equal_or_cheaper_buy_cost(current, worse
     ) is worsened
 
 
-def test_global_jit_refresh_targets_winner_sibling_not_trigger_row():
+def test_global_candidate_snapshot_row_targets_winner_sibling():
     rows = (
         {
             "snapshot_id": "trigger-snapshot",
@@ -538,39 +538,19 @@ def test_global_jit_refresh_targets_winner_sibling_not_trigger_row():
     )
 
     row = era._global_candidate_snapshot_row(rows, winner)
-    conditions, token = era._decision_snapshot_refresh_target(
-        row=rows[0],
-        payload={"token_id": "trigger-yes"},
-        family_condition_ids=("trigger-condition", "winner-condition"),
-        global_candidate=winner,
-    )
-
     assert row is not None
     assert row["snapshot_id"] == "winner-snapshot"
-    assert conditions == ("winner-condition",)
-    assert token == "winner-no"
 
 
-def test_global_jit_requires_a_newer_distinct_winner_snapshot():
-    before = {
-        "snapshot_id": "winner-before",
-        "captured_at": "2026-07-11T01:00:00+00:00",
-    }
-    assert era._global_jit_snapshot_advanced(
-        before=before,
-        after={
-            "snapshot_id": "winner-after",
-            "captured_at": "2026-07-11T01:00:01+00:00",
-        },
+def test_decision_refresh_targets_selected_row_only():
+    conditions, token = era._decision_snapshot_refresh_target(
+        row={"condition_id": "selected-condition"},
+        payload={"token_id": "selected-no"},
+        family_condition_ids=("trigger-condition", "selected-condition"),
     )
-    assert not era._global_jit_snapshot_advanced(before=before, after=before)
-    assert not era._global_jit_snapshot_advanced(
-        before=before,
-        after={
-            "snapshot_id": "winner-other",
-            "captured_at": "2026-07-11T00:59:59+00:00",
-        },
-    )
+
+    assert conditions == ("selected-condition",)
+    assert token == "selected-no"
 
 
 def test_global_submit_requires_complete_candidate_bound_jit_identity():
@@ -949,23 +929,36 @@ def test_global_candidate_rejects_scalar_curve_fallback_without_full_depth():
     assert global_candidate.executable_cost_curve is None
 
 
-def test_full_depth_builder_calls_are_keyword_bound() -> None:
-    """Actuation binds family identity and proof to the keyword-only builder."""
+def test_full_depth_builder_is_wired_only_into_global_preparation() -> None:
+    """Build full depth for the auction once; actuation reuses that candidate."""
 
     tree = ast.parse(inspect.getsource(era))
-    calls = [
+    direct_calls = [
         node
         for node in ast.walk(tree)
         if isinstance(node, ast.Call)
         and isinstance(node.func, ast.Name)
         and node.func.id == "_full_depth_native_side_candidate_from_proof"
     ]
-    assert calls
-    assert all(not call.args for call in calls)
-    assert all(
-        {keyword.arg for keyword in call.keywords} == {"family_key", "proof"}
-        for call in calls
-    )
+    assert direct_calls == []
+    spine_calls = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "decide_family_via_spine"
+    ]
+    callback_values = [
+        keyword.value
+        for call in spine_calls
+        for keyword in call.keywords
+        if keyword.arg == "global_native_side_candidate_from_proof"
+    ]
+    assert len(callback_values) == 1
+    callback = callback_values[0]
+    assert isinstance(callback, ast.IfExp)
+    assert isinstance(callback.body, ast.Name)
+    assert callback.body.id == "_full_depth_native_side_candidate_from_proof"
 
 
 def test_no_runtime_flag_routes_materialization():
