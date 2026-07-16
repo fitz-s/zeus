@@ -271,6 +271,17 @@ closed. The event reactor now owns
 live-optimality claim, which additionally requires a current complete-scope receipt, exact
 one-submit evidence, and fresh post-submit capital/venue reconciliation.
 
+**Time-sensitive current-truth acquisition.** Gamma tradeability/token metadata and CLOB native
+order books are independent external facts joined by condition/token identity. When the current
+book cache proves a fresh capture is required, the live adapter may fetch the complete bound CLOB
+token universe concurrently with the current Gamma bind, then join both results inside one
+authority-bounded capture window. The optimization must not shrink the family/token universe,
+reuse an expired book, infer tradeability from the CLOB response, or bypass the existing token,
+metadata, completeness, quote-TTL, and JIT winner recapture checks. A token identity change makes
+the speculative book batch unusable and falls back to the ordinary current capture/fail-closed
+path. This changes latency only; q, Fractional Kelly, BUY/SELL/HOLD/CASH ranking, operator pause,
+and venue actuation law are unchanged.
+
 **α-sensitivity replay (promotion-evidence-gate item, NOT a solver change).** Before promotion, replay
 the W3 fixture corpus at α ∈ {0.01, 0.05, 0.10} and require decision-stability bands (diff the
 selected/no-trade transitions) so CVaR conservatism is not an artifact of one tail level.

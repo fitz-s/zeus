@@ -364,6 +364,21 @@ def _global_book_topology_signature(
     return tuple(sorted(rows)) or None
 
 
+def _global_book_prefetch_tokens(
+    probabilities: Mapping[str, object],
+) -> tuple[str, ...] | None:
+    """Return the complete bound token universe for speculative current-book I/O."""
+
+    topology = _global_book_topology_signature(probabilities)
+    if topology is None:
+        return None
+    return tuple(
+        token_id
+        for row in topology
+        for token_id in (row[3], row[4])
+    )
+
+
 def _global_book_epoch_cache_namespace(
     trade_conn: sqlite3.Connection,
 ) -> str | None:
@@ -5387,6 +5402,7 @@ def event_bound_live_adapter_from_trade_conn(
             from src.engine.global_auction_universe import (
                 bind_current_global_probability_tokens,
                 capture_current_global_book_epoch,
+                fetch_current_global_books,
                 fetch_current_gamma_markets,
             )
             from src.data.market_scanner import _gamma_get
@@ -5472,47 +5488,146 @@ def event_bound_live_adapter_from_trade_conn(
                     book_metadata_by_key.update(metadata_sink)
                 return bound_probabilities
 
-            def _capture_bound(bound_probabilities, *, mode):
-                capture_started = _time.monotonic()
+            def _prefetch_books(probability_slice, *, mode):
+                tokens = _global_book_prefetch_tokens(probability_slice)
+                if tokens is None:
+                    return None
+                captured_at = datetime.now(UTC)
+                fetch_started = _time.monotonic()
                 with PolymarketClient(public_http_timeout=timeout) as clob:
-                    epoch = capture_current_global_book_epoch(
-                        trade_conn,
-                        probability_witnesses=bound_probabilities,
-                        get_books=lambda tokens: (
+                    books = fetch_current_global_books(
+                        tokens,
+                        get_books=lambda chunk: (
                             clob.get_orderbook_snapshots(
-                                tokens,
+                                chunk,
                                 timeout=timeout,
                             )
                         ),
+                        batch_size=batch_size,
+                        book_fetch_workers=4,
+                    )
+                logging.getLogger(__name__).info(
+                    "global book epoch stage completed: mode=%s "
+                    "book_prefetch elapsed_s=%.3f tokens=%d books=%d",
+                    mode,
+                    _time.monotonic() - fetch_started,
+                    len(tokens),
+                    len(books),
+                )
+                return tokens, books, captured_at
+
+            def _capture_bound(
+                bound_probabilities,
+                *,
+                mode,
+                prefetched=None,
+            ):
+                capture_started = _time.monotonic()
+                matching_prefetch = (
+                    prefetched
+                    if prefetched is not None
+                    and _global_book_prefetch_tokens(bound_probabilities)
+                    == prefetched[0]
+                    else None
+                )
+                if matching_prefetch is None:
+                    with PolymarketClient(public_http_timeout=timeout) as clob:
+                        epoch = capture_current_global_book_epoch(
+                            trade_conn,
+                            probability_witnesses=bound_probabilities,
+                            get_books=lambda tokens: (
+                                clob.get_orderbook_snapshots(
+                                    tokens,
+                                    timeout=timeout,
+                                )
+                            ),
+                            clock=lambda: datetime.now(UTC),
+                            max_age=FRESHNESS_WINDOW_DEFAULT,
+                            batch_size=batch_size,
+                            book_fetch_workers=4,
+                            metadata_overrides=book_metadata_by_key,
+                        )
+                else:
+                    _, books, captured_at = matching_prefetch
+                    epoch = capture_current_global_book_epoch(
+                        trade_conn,
+                        probability_witnesses=bound_probabilities,
+                        get_books=lambda _tokens: books,
                         clock=lambda: datetime.now(UTC),
                         max_age=FRESHNESS_WINDOW_DEFAULT,
                         batch_size=batch_size,
                         book_fetch_workers=4,
                         metadata_overrides=book_metadata_by_key,
+                        prefetched_books=books,
+                        prefetched_at_utc=captured_at,
                     )
                 logging.getLogger(__name__).info(
                     "global book epoch stage completed: mode=%s "
-                    "book_capture elapsed_s=%.3f total_s=%.3f "
+                    "book_capture elapsed_s=%.3f total_s=%.3f prefetched=%s "
                     "families=%d assets=%d",
                     mode,
                     _time.monotonic() - capture_started,
                     _time.monotonic() - _book_started,
+                    matching_prefetch is not None,
                     len(bound_probabilities),
                     len(getattr(epoch, "assets", ())),
                 )
                 return epoch
 
             # q and current Gamma tradeability are decision-time truth. Bind them
-            # once before considering the q-independent book cache; a cache miss
-            # must not pay a second per-family token lookup before the full bind.
+            # once before considering the q-independent book cache. When a fresh
+            # book capture is already known to be necessary, start that independent
+            # CLOB I/O concurrently and join the two authorities before validation.
+            cache_checked_at = datetime.now(UTC)
+            cached_before_bind = _get_cached_global_book_epoch(
+                trade_conn,
+                probabilities,
+                checked_at=cache_checked_at,
+                allowed=True,
+            )
+            force_full_refresh = probabilities is last_book_probability_output
+            prefetch_slice = None
+            prefetch_mode = ""
+            if force_full_refresh or cached_before_bind is None:
+                prefetch_slice = probabilities
+                prefetch_mode = "full_books"
+            elif (
+                refresh_family_keys
+                and refresh_family_keys.issubset(probabilities)
+            ):
+                prefetch_slice = {
+                    family_key: probabilities[family_key]
+                    for family_key in refresh_family_keys
+                }
+                prefetch_mode = "family_delta_books"
             full_metadata: dict[
                 tuple[str, str], Mapping[str, object]
             ] = {}
-            bound_probabilities = _bind(
-                probabilities,
-                mode="current_metadata",
-                metadata_sink=full_metadata,
-            )
+            prefetched = None
+            if prefetch_slice is None:
+                bound_probabilities = _bind(
+                    probabilities,
+                    mode="current_metadata",
+                    metadata_sink=full_metadata,
+                )
+            else:
+                from concurrent.futures import ThreadPoolExecutor
+
+                with ThreadPoolExecutor(
+                    max_workers=1,
+                    thread_name_prefix="global-clob-prefetch",
+                ) as pool:
+                    future = pool.submit(
+                        _prefetch_books,
+                        prefetch_slice,
+                        mode=prefetch_mode,
+                    )
+                    bound_probabilities = _bind(
+                        probabilities,
+                        mode="current_metadata",
+                        metadata_sink=full_metadata,
+                    )
+                    prefetched = future.result()
             cache_checked_at = datetime.now(UTC)
             cached = _get_cached_global_book_epoch(
                 trade_conn,
@@ -5524,7 +5639,6 @@ def event_bound_live_adapter_from_trade_conn(
             # the same-batch CURVE_SUPERSEDED re-auction. It must recapture the
             # complete curve universe because the changed winner is not supplied
             # to this callback.
-            force_full_refresh = probabilities is last_book_probability_output
             if (
                 cached is not None
                 and not force_full_refresh
@@ -5552,6 +5666,7 @@ def event_bound_live_adapter_from_trade_conn(
                 delta_epoch = _capture_bound(
                     probability_delta,
                     mode="family_delta_books",
+                    prefetched=prefetched,
                 )
                 try:
                     merged_epoch = _merge_global_book_epoch_delta(
@@ -5591,6 +5706,7 @@ def event_bound_live_adapter_from_trade_conn(
             epoch = _capture_bound(
                 bound_probabilities,
                 mode="full_books",
+                prefetched=prefetched,
             )
             _store_global_book_epoch(
                 trade_conn,

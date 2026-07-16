@@ -2459,6 +2459,129 @@ def test_live_adapter_rebinds_current_probability_before_book_cache_hit(
     world.close()
 
 
+def test_live_adapter_overlaps_current_gamma_bind_with_complete_clob_prefetch(
+    monkeypatch,
+):
+    trade = sqlite3.connect(":memory:")
+    forecast = sqlite3.connect(":memory:")
+    topology = sqlite3.connect(":memory:")
+    world = sqlite3.connect(":memory:")
+    captured = {}
+    monkeypatch.setattr(era, "_GLOBAL_BOOK_EPOCH_CACHE", None)
+
+    def fake_process(events, **kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(events=tuple(events))
+
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "process_current_global_batch",
+        fake_process,
+    )
+    adapter = era.event_bound_live_adapter_from_trade_conn(
+        trade,
+        get_current_level=lambda: era.RiskLevel.GREEN,
+        forecast_conn=forecast,
+        topology_conn=topology,
+        calibration_conn=world,
+    )
+    event = replace(
+        _global_scope_event(city="Dallas", source_run_id="run-dallas"),
+        event_type="BOOK_SNAPSHOT",
+    )
+    adapter.process_global_batch(
+        (event,),
+        _dt.datetime(2026, 7, 10, 8, 10, tzinfo=_dt.timezone.utc),
+    )
+
+    probability = {
+        "family": SimpleNamespace(
+            family_key="family",
+            witness_identity="probability-current",
+            bindings=(
+                SimpleNamespace(
+                    bin_id="bin-a",
+                    condition_id="condition-a",
+                    yes_token_id="yes-token-a",
+                    no_token_id="no-token-a",
+                ),
+            ),
+        )
+    }
+    bind_started = threading.Event()
+    book_started = threading.Event()
+
+    def fake_bind(
+        _forecast_conn,
+        *,
+        probability_witnesses,
+        metadata_sink=None,
+        **_,
+    ):
+        bind_started.set()
+        assert book_started.wait(1.0), "CLOB prefetch did not overlap Gamma bind"
+        return dict(probability_witnesses)
+
+    class FakeClient:
+        def __init__(self, **_):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return False
+
+        def get_orderbook_snapshots(self, tokens, **_):
+            book_started.set()
+            assert bind_started.wait(1.0), "Gamma bind did not overlap CLOB prefetch"
+            return {
+                token: {"asset_id": token, "hash": f"hash-{token}"}
+                for token in tokens
+            }
+
+    capture_calls = []
+
+    def fake_capture(_trade_conn, **kwargs):
+        capture_calls.append(kwargs)
+        assert kwargs["prefetched_books"] == {
+            "yes-token-a": {
+                "asset_id": "yes-token-a",
+                "hash": "hash-yes-token-a",
+            },
+            "no-token-a": {
+                "asset_id": "no-token-a",
+                "hash": "hash-no-token-a",
+            },
+        }
+        assert kwargs["prefetched_at_utc"].tzinfo is not None
+        return SimpleNamespace(
+            witness_identity="book-current",
+            assets=(),
+            current_identity=lambda _checked_at: "book-current",
+        )
+
+    monkeypatch.setattr(universe, "bind_current_global_probability_tokens", fake_bind)
+    monkeypatch.setattr(universe, "capture_current_global_book_epoch", fake_capture)
+    monkeypatch.setattr(
+        "src.data.polymarket_client.PolymarketClient",
+        FakeClient,
+    )
+
+    bound, epoch = captured["current_book_epoch_provider"](
+        probability,
+        _dt.datetime.now(_dt.timezone.utc),
+    )
+
+    assert bound == probability
+    assert epoch.witness_identity == "book-current"
+    assert len(capture_calls) == 1
+    trade.close()
+    forecast.close()
+    topology.close()
+    world.close()
+
+
 def test_live_adapter_refreshes_only_triggered_probability_family(monkeypatch):
     from src.events.candidate_binding import weather_family_id
 
