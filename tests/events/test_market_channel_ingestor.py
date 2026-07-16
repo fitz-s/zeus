@@ -154,6 +154,67 @@ def test_bounded_token_metadata_prefers_latest_projection_and_falls_back_per_mis
     assert len(direct_history_seeks) == 2
 
 
+def test_bounded_token_metadata_keeps_past_end_only_for_still_executable_exit():
+    conn = sqlite3.connect(":memory:")
+    conn.executescript(
+        """
+        CREATE TABLE executable_market_snapshots (
+            snapshot_id TEXT PRIMARY KEY,
+            condition_id TEXT NOT NULL,
+            yes_token_id TEXT NOT NULL,
+            no_token_id TEXT NOT NULL,
+            min_tick_size TEXT NOT NULL,
+            min_order_size TEXT NOT NULL,
+            neg_risk INTEGER NOT NULL,
+            enable_orderbook INTEGER NOT NULL,
+            accepting_orders INTEGER,
+            active INTEGER,
+            closed INTEGER,
+            event_slug TEXT,
+            market_end_at TEXT,
+            captured_at TEXT NOT NULL
+        );
+        CREATE TABLE executable_market_snapshot_latest (
+            snapshot_id TEXT NOT NULL,
+            yes_token_id TEXT NOT NULL,
+            no_token_id TEXT NOT NULL,
+            captured_at TEXT NOT NULL
+        );
+
+        INSERT INTO executable_market_snapshots VALUES
+            ('snap-exit-open', 'cond-exit-open', 'token-exit-open', 'no-exit-open',
+             '0.01', '5', 0, 1, 1, 1, 0, 'weather-open',
+             '2026-07-16T12:00:00+00:00', '2026-07-16T12:01:00+00:00'),
+            ('snap-exit-stopped', 'cond-exit-stopped', 'token-exit-stopped', 'no-exit-stopped',
+             '0.01', '5', 0, 1, 0, 1, 0, 'weather-stopped',
+             '2026-07-16T12:00:00+00:00', '2026-07-16T12:01:00+00:00');
+        INSERT INTO executable_market_snapshot_latest VALUES
+            ('snap-exit-open', 'token-exit-open', 'no-exit-open',
+             '2026-07-16T12:01:00+00:00'),
+            ('snap-exit-stopped', 'token-exit-stopped', 'no-exit-stopped',
+             '2026-07-16T12:01:00+00:00');
+        """
+    )
+    now = datetime(2026, 7, 16, 12, 2, tzinfo=timezone.utc)
+    token_ids = ("token-exit-open", "token-exit-stopped")
+
+    entry = active_weather_token_metadata_for_tokens(
+        conn,
+        token_ids=token_ids,
+        now=now,
+        purpose="entry",
+    )
+    exit_metadata = active_weather_token_metadata_for_tokens(
+        conn,
+        token_ids=token_ids,
+        now=now,
+        purpose="exit",
+    )
+
+    assert entry == {}
+    assert set(exit_metadata) == {"token-exit-open"}
+
+
 def test_book_buy_uses_best_ask():
     book = quote_book_from_depth_json(
         yes_depth_json='{"asks":[{"price":"0.52","size":"10"}],"bids":[{"price":"0.48","size":"10"}]}',

@@ -2076,6 +2076,7 @@ def _edli_refresh_held_position_quote_evidence(
             batch_metadata = active_weather_token_metadata_for_tokens(
                 trade_read,
                 token_ids=batch,
+                purpose="exit",
             )
             token_metadata.update(batch_metadata)
             for token_id in batch:
@@ -2544,9 +2545,18 @@ def _edli_market_channel_ingestor_cycle() -> dict | None:
             open_rest_priority_token_ids=open_rest_priority_token_ids,
             candidate_priority_token_ids=candidate_priority_token_ids,
         )
+        entry_token_ids = set(candidate_priority_token_ids)
+        entry_token_ids.update(open_rest_priority_token_ids)
         token_metadata = active_weather_token_metadata_for_tokens(
             trade_conn,
-            token_ids=priority_token_ids,
+            token_ids=entry_token_ids,
+        )
+        token_metadata.update(
+            active_weather_token_metadata_for_tokens(
+                trade_conn,
+                token_ids=held_priority_token_ids,
+                purpose="exit",
+            )
         )
         token_ids = set(token_metadata)
     finally:

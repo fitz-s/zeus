@@ -18,7 +18,7 @@ import time
 from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
-from typing import Any, Callable, Iterable, Iterator
+from typing import Any, Callable, Iterable, Iterator, Literal
 
 from src.events.event_coalescer import EventCoalescer
 from src.events.event_writer import EventWriter, EventWriteResult
@@ -831,15 +831,17 @@ def active_weather_token_metadata_for_tokens(
     *,
     token_ids: Iterable[str],
     now: datetime | None = None,
+    purpose: Literal["entry", "exit"] = "entry",
 ) -> dict[str, MarketTokenMetadata]:
     """Read latest executable snapshot metadata for a bounded token set.
 
-    This is the live priority path for held/recently-decided tokens. It avoids the
-    full latest-per-condition window scan used by the broad market-channel
-    universe, so the first REST seed for held positions is not blocked behind
-    thousands of stale/irrelevant weather tokens.
+    Entry metadata follows the nominal market end boundary. Exit metadata keeps
+    held exposure observable past that boundary until the venue explicitly
+    disables the order book or stops accepting orders.
     """
 
+    if purpose not in {"entry", "exit"}:
+        raise ValueError(f"unsupported token metadata purpose: {purpose}")
     tokens = list(
         dict.fromkeys(
             str(token_id).strip()
@@ -872,11 +874,17 @@ def active_weather_token_metadata_for_tokens(
             "(LOWER(COALESCE(event_slug, '')) LIKE '%weather%' "
             "OR LOWER(COALESCE(event_slug, '')) LIKE '%temperature%')"
         )
-    if "market_end_at" in columns:
+    extra_params: list[object] = []
+    if purpose == "entry" and "market_end_at" in columns:
         now_iso = (now or datetime.now(timezone.utc)).astimezone(timezone.utc).isoformat()
         predicates.append("(market_end_at IS NULL OR market_end_at > ?)")
+        extra_params.append(now_iso)
+    elif purpose == "exit":
+        if "enable_orderbook" in columns:
+            predicates.append("COALESCE(enable_orderbook, 0) = 1")
+        if "accepting_orders" in columns:
+            predicates.append("COALESCE(accepting_orders, 1) = 1")
     extra_where = (" AND " + " AND ".join(predicates)) if predicates else ""
-    extra_params = [now_iso] if "market_end_at" in columns else []
     order_value_expr = "captured_at" if "captured_at" in columns else "rowid"
     order_expr = "captured_at DESC, rowid DESC" if "captured_at" in columns else "rowid DESC"
     market_end_expr = "market_end_at" if "market_end_at" in columns else "NULL AS market_end_at"

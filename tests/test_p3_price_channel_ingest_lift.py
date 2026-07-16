@@ -59,6 +59,37 @@ _LIFTED_PRODUCERS = (
 )
 
 
+def test_market_channel_bootstrap_separates_entry_and_held_exit_metadata() -> None:
+    tree = ast.parse(_PRICE_CHANNEL_MODULE.read_text(encoding="utf-8"))
+    cycle = next(
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef)
+        and node.name == "_edli_market_channel_ingestor_cycle"
+    )
+    calls = [
+        call
+        for call in ast.walk(cycle)
+        if isinstance(call, ast.Call)
+        and isinstance(call.func, ast.Name)
+        and call.func.id == "active_weather_token_metadata_for_tokens"
+    ]
+    purposes = [
+        next(
+            (
+                keyword.value.value
+                for keyword in call.keywords
+                if keyword.arg == "purpose"
+                and isinstance(keyword.value, ast.Constant)
+            ),
+            "entry",
+        )
+        for call in calls
+    ]
+
+    assert purposes == ["entry", "exit"]
+
+
 def test_candidate_quote_refresh_budget_matches_live_redecision_surface() -> None:
     from src.ingest import price_channel_ingest as pci
 
@@ -1376,7 +1407,7 @@ def test_held_position_quote_refresh_backpressures_without_db_write_or_clob(monk
     monkeypatch.setattr(
         market_ingestor,
         "active_weather_token_metadata_for_tokens",
-        lambda conn, token_ids: {
+        lambda conn, token_ids, purpose="entry": {
             token_id: MarketTokenMetadata(
                 condition_id="0xcondition",
                 token_id=token_id,
@@ -1438,8 +1469,9 @@ def test_held_quote_refresh_skips_missing_metadata_tokens_to_refresh_tradeable_h
     monkeypatch.setattr(lane, "_edli_held_position_priority_token_ids", lambda conn: set(ordered))
     monkeypatch.setattr(lane, "_edli_order_token_ids_by_feasibility_age", lambda conn, token_ids: ordered)
 
-    def _metadata(conn, *, token_ids):  # noqa: ANN001
+    def _metadata(conn, *, token_ids, purpose="entry"):  # noqa: ANN001
         batch = list(token_ids)
+        assert purpose == "exit"
         seen["metadata"].append(batch)
         return {
             token_id: MarketTokenMetadata(
@@ -1523,8 +1555,9 @@ def test_held_quote_refresh_caps_selected_tokens_before_metadata_and_rest_seed(m
     monkeypatch.setattr(lane, "_edli_held_position_priority_token_ids", lambda conn: set(ordered))
     monkeypatch.setattr(lane, "_edli_order_token_ids_by_feasibility_age", lambda conn, token_ids: ordered)
 
-    def _metadata(conn, *, token_ids):  # noqa: ANN001
+    def _metadata(conn, *, token_ids, purpose="entry"):  # noqa: ANN001
         selected = list(token_ids)
+        assert purpose == "exit"
         seen["metadata"] = selected
         return {
             token_id: MarketTokenMetadata(
