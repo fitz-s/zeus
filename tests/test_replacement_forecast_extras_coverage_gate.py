@@ -797,6 +797,45 @@ def test_source_clock_scoped_capture_isolates_source_cycle_and_cities(
         "SOURCE_CLOCK_SOURCE_TRANSPORT_RETRYABLE"
     )
 
+    monkeypatch.setattr(
+        dl,
+        "download_bayes_precision_fusion_extra_raw_inputs",
+        lambda **_kwargs: {"status": "UNRECOGNIZED_DOWNLOAD_RESULT"},
+    )
+    unknown = prod._download_bayes_precision_fusion_source_clock_raw_inputs_if_needed(
+        {
+            "forecast_db": str(tmp_path / "zeus-forecasts.db"),
+            "source_clock_fanout_workers": 1,
+        },
+        source_clock_report=_Report(),
+        max_wall_clock_seconds=1.0,
+    )
+
+    assert unknown["status"] == "SOURCE_CLOCK_BPF_SCOPED_CAPTURE_FAILSOFT_SKIPPED"
+    assert {
+        result["status"] for result in unknown["source_results"].values()
+    } == {"SOURCE_CLOCK_SOURCE_CAPTURE_FAILSOFT_SKIPPED"}
+
+    monkeypatch.setattr(
+        city_weights,
+        "affected_cities_for_source_updates",
+        lambda _sources: (),
+    )
+    monkeypatch.setattr(
+        dl,
+        "download_bayes_precision_fusion_extra_raw_inputs",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("a source without mapped cities must not fan out")
+        ),
+    )
+    no_targets = prod._download_bayes_precision_fusion_source_clock_raw_inputs_if_needed(
+        {"forecast_db": str(tmp_path / "zeus-forecasts.db")},
+        source_clock_report=_Report(),
+        max_wall_clock_seconds=1.0,
+    )
+
+    assert no_targets["status"] == "SOURCE_CLOCK_BPF_SCOPED_NO_TARGETS"
+
 
 def test_downloaded_extras_records_fixpoint_and_success_health(_cfg_with_db, _redirect_health):
     cfg, db = _cfg_with_db

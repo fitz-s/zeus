@@ -487,11 +487,12 @@ def _download_bayes_precision_fusion_source_clock_raw_inputs_if_needed(
         try:
             updates_path = Path(str(payload.get("model_updates_path") or DEFAULT_MODEL_UPDATES_JSONL))
             for update in read_model_updates_jsonl(updates_path):
-                if str(update.model) not in updated_sources:
+                source = str(update.model)
+                if source not in updated_sources:
                     continue
                 run_clock = update.to_source_run_clock()
                 if now >= source_publicly_usable_at(run_clock):
-                    source_cycles[str(update.model)] = (
+                    source_cycles[source] = (
                         update.last_run_initialisation_time.astimezone(timezone.utc)
                     )
         except Exception:
@@ -517,11 +518,10 @@ def _download_bayes_precision_fusion_source_clock_raw_inputs_if_needed(
         reported_affected = set(affected_cities)
         target_keys_by_source: dict[str, list[object]] = {}
         for source in resolved_sources:
-            source_affected = set(affected_cities_for_source_updates((source,)))
-            if source_affected:
-                source_affected &= reported_affected
-            else:
-                source_affected = set(reported_affected)
+            source_affected = (
+                set(affected_cities_for_source_updates((source,)))
+                & reported_affected
+            )
             target_keys_by_source[source] = sorted(
                 (row for row in all_target_keys if row.city in source_affected),
                 key=lambda row: (
@@ -691,8 +691,12 @@ def _download_bayes_precision_fusion_source_clock_raw_inputs_if_needed(
                 status = "SOURCE_CLOCK_SOURCE_TIMEBOXED_INCOMPLETE"
             elif "BAYES_PRECISION_FUSION_EXTRA_TRANSPORT_RETRYABLE" in statuses:
                 status = "SOURCE_CLOCK_SOURCE_TRANSPORT_RETRYABLE"
-            else:
+            elif statuses == {
+                "BAYES_PRECISION_FUSION_EXTRA_RAW_INPUTS_DOWNLOADED"
+            }:
                 status = "SOURCE_CLOCK_SOURCE_RAW_INPUTS_DOWNLOADED"
+            else:
+                status = "SOURCE_CLOCK_SOURCE_CAPTURE_FAILSOFT_SKIPPED"
             source_results[source] = {
                 "status": status,
                 "cycle": source_cycles[source].isoformat(),
