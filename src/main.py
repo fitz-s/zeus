@@ -3657,10 +3657,7 @@ def _edli_event_reactor_cycle(
 def _edli_initialize_reactor_wake_cursor() -> None:
     global _edli_last_reactor_wake_id
 
-    from src.runtime.reactor_wake import read_reactor_wake
-
-    wake = read_reactor_wake()
-    _edli_last_reactor_wake_id = wake.wake_id if wake is not None else None
+    _edli_last_reactor_wake_id = None
 
 
 def _day0_wake_target_families(
@@ -3735,7 +3732,10 @@ def _edli_reactor_wake_poll_once() -> bool:
 
     global _edli_last_reactor_wake_id
 
-    from src.runtime.reactor_wake import read_reactor_wake
+    from src.runtime.reactor_wake import (
+        acknowledge_reactor_wake,
+        read_reactor_wake,
+    )
 
     wake = read_reactor_wake()
     if wake is None or wake.wake_id == _edli_last_reactor_wake_id:
@@ -3758,6 +3758,13 @@ def _edli_reactor_wake_poll_once() -> bool:
         producer_wake_families=wake.forecast_families,
     )
     if ran is not True:
+        return False
+    if not acknowledge_reactor_wake(wake):
+        logger.warning(
+            "EDLI reactor processed wake id=%s but queue acknowledgement failed; "
+            "leaving it pending for retry",
+            wake.wake_id,
+        )
         return False
     _edli_last_reactor_wake_id = wake.wake_id
     logger.info(

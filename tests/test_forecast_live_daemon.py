@@ -375,6 +375,7 @@ def test_materialization_queue_wake_failure_does_not_fail_committed_materializat
 
 def test_reactor_wake_sidecar_round_trip(tmp_path) -> None:
     from src.runtime.reactor_wake import (
+        acknowledge_reactor_wake,
         publish_reactor_wake,
         reactor_wake_revision,
         read_reactor_wake,
@@ -411,6 +412,37 @@ def test_reactor_wake_sidecar_round_trip(tmp_path) -> None:
     )
 
     assert reactor_wake_revision(path=path) != first_revision
+    assert acknowledge_reactor_wake(published, path=path) is True
+
+
+def test_reactor_wake_queue_preserves_unconsumed_wakes(tmp_path) -> None:
+    from src.runtime.reactor_wake import (
+        acknowledge_reactor_wake,
+        publish_reactor_wake,
+        read_reactor_wake,
+    )
+
+    path = tmp_path / "wake.json"
+    first = publish_reactor_wake(
+        source="forecast",
+        reason="forecast_posterior_advanced",
+        path=path,
+        wake_id="wake-first",
+        published_at=datetime(2026, 7, 16, 12, 0, tzinfo=timezone.utc),
+    )
+    second = publish_reactor_wake(
+        source="day0",
+        reason="day0_extreme_event_committed",
+        path=path,
+        wake_id="wake-second",
+        published_at=datetime(2026, 7, 16, 12, 0, 1, tzinfo=timezone.utc),
+    )
+
+    assert read_reactor_wake(path=path) == first
+    assert acknowledge_reactor_wake(first, path=path) is True
+    assert read_reactor_wake(path=path) == second
+    assert acknowledge_reactor_wake(second, path=path) is True
+    assert read_reactor_wake(path=path) is None
 
 
 def test_forecast_builder_forwards_wake_family_restriction(monkeypatch) -> None:
@@ -500,6 +532,11 @@ def test_reactor_wake_poll_defers_without_consuming_when_reactor_busy(monkeypatc
         return True
 
     monkeypatch.setattr(reactor_wake, "read_reactor_wake", lambda: wake)
+    monkeypatch.setattr(
+        reactor_wake,
+        "acknowledge_reactor_wake",
+        lambda _wake: True,
+    )
     monkeypatch.setattr(main, "_edli_reactor_active_lock", _Lock())
     monkeypatch.setattr(main, "_held_position_monitor_active", _Held())
     monkeypatch.setattr(main, "_edli_event_reactor_cycle", _run_reactor)
@@ -549,6 +586,11 @@ def test_day0_reactor_wake_runs_exit_monitor_before_reactor(monkeypatch) -> None
         return True
 
     monkeypatch.setattr(reactor_wake, "read_reactor_wake", lambda: wake)
+    monkeypatch.setattr(
+        reactor_wake,
+        "acknowledge_reactor_wake",
+        lambda _wake: True,
+    )
     monkeypatch.setattr(main, "_edli_reactor_active_lock", _Lock())
     monkeypatch.setattr(main, "_held_position_monitor_active", _Held())
     monkeypatch.setattr(
@@ -636,6 +678,11 @@ def test_reactor_wake_is_not_consumed_when_cycle_loses_execution_race(
 
     outcomes = iter((False, True))
     monkeypatch.setattr(reactor_wake, "read_reactor_wake", lambda: wake)
+    monkeypatch.setattr(
+        reactor_wake,
+        "acknowledge_reactor_wake",
+        lambda _wake: True,
+    )
     monkeypatch.setattr(main, "_edli_reactor_active_lock", _Lock())
     monkeypatch.setattr(main, "_held_position_monitor_active", _Held())
     monkeypatch.setattr(
@@ -646,6 +693,43 @@ def test_reactor_wake_is_not_consumed_when_cycle_loses_execution_race(
         producer_wake_event_ids=(),
         producer_wake_families=(): next(outcomes),
     )
+    monkeypatch.setattr(main, "_edli_last_reactor_wake_id", None)
+
+    assert main._edli_reactor_wake_poll_once() is False
+    assert main._edli_last_reactor_wake_id is None
+    assert main._edli_reactor_wake_poll_once() is True
+    assert main._edli_last_reactor_wake_id == wake.wake_id
+
+
+def test_reactor_wake_ack_failure_keeps_wake_retryable(monkeypatch) -> None:
+    import src.main as main
+    from src.runtime import reactor_wake
+
+    wake = reactor_wake.ReactorWake(
+        "wake-ack",
+        "2026-07-16T12:00:00+00:00",
+        "replacement_forecast_production",
+        "forecast_posterior_advanced",
+    )
+    acknowledgements = iter((False, True))
+
+    class _Lock:
+        def locked(self) -> bool:
+            return False
+
+    class _Held:
+        def is_set(self) -> bool:
+            return False
+
+    monkeypatch.setattr(reactor_wake, "read_reactor_wake", lambda: wake)
+    monkeypatch.setattr(
+        reactor_wake,
+        "acknowledge_reactor_wake",
+        lambda _wake: next(acknowledgements),
+    )
+    monkeypatch.setattr(main, "_edli_reactor_active_lock", _Lock())
+    monkeypatch.setattr(main, "_held_position_monitor_active", _Held())
+    monkeypatch.setattr(main, "_edli_event_reactor_cycle", lambda **_kwargs: True)
     monkeypatch.setattr(main, "_edli_last_reactor_wake_id", None)
 
     assert main._edli_reactor_wake_poll_once() is False

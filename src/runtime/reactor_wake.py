@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 REACTOR_WAKE_FILENAME = "edli-reactor-wake.json"
+REACTOR_WAKE_QUEUE_SUFFIX = ".d"
 
 
 @dataclass(frozen=True)
@@ -28,6 +29,11 @@ def _wake_path(path: Path | None) -> Path:
     from src.config import state_path
 
     return state_path(REACTOR_WAKE_FILENAME)
+
+
+def _wake_queue_dir(path: Path | None) -> Path:
+    target = _wake_path(path)
+    return target.with_name(f"{target.name}{REACTOR_WAKE_QUEUE_SUFFIX}")
 
 
 def _clean_forecast_families(
@@ -90,6 +96,19 @@ def publish_reactor_wake(
     )
     target = _wake_path(path)
     target.parent.mkdir(parents=True, exist_ok=True)
+    queue_dir = _wake_queue_dir(path)
+    queue_dir.mkdir(parents=True, exist_ok=True)
+    published_us = int(
+        datetime.fromisoformat(wake.published_at.replace("Z", "+00:00")).timestamp()
+        * 1_000_000
+    )
+    queue_target = queue_dir / f"{published_us:020d}-{wake.wake_id}.json"
+    _atomic_write_wake(queue_target, wake)
+    _atomic_write_wake(target, wake)
+    return wake
+
+
+def _atomic_write_wake(target: Path, wake: ReactorWake) -> None:
     temp = target.with_name(f".{target.name}.{os.getpid()}.{wake.wake_id}.tmp")
     try:
         temp.write_text(
@@ -102,14 +121,11 @@ def publish_reactor_wake(
             temp.unlink()
         except FileNotFoundError:
             pass
-    return wake
 
 
-def read_reactor_wake(*, path: Path | None = None) -> ReactorWake | None:
-    """Read the latest complete wake hint; malformed or absent hints are ignored."""
-
+def _read_reactor_wake_path(path: Path) -> ReactorWake | None:
     try:
-        payload = json.loads(_wake_path(path).read_text(encoding="utf-8"))
+        payload = json.loads(path.read_text(encoding="utf-8"))
         wake = ReactorWake(
             wake_id=str(payload["wake_id"]).strip(),
             published_at=str(payload["published_at"]).strip(),
@@ -129,6 +145,41 @@ def read_reactor_wake(*, path: Path | None = None) -> ReactorWake | None:
     if not all((wake.wake_id, wake.published_at, wake.source, wake.reason)):
         return None
     return wake
+
+
+def read_reactor_wake(*, path: Path | None = None) -> ReactorWake | None:
+    """Read the oldest queued wake, falling back to the legacy latest-wake file."""
+
+    try:
+        queue_files = sorted(_wake_queue_dir(path).glob("*.json"))
+    except OSError:
+        queue_files = []
+    for queue_file in queue_files:
+        wake = _read_reactor_wake_path(queue_file)
+        if wake is not None:
+            return wake
+    return _read_reactor_wake_path(_wake_path(path))
+
+
+def acknowledge_reactor_wake(
+    wake: ReactorWake,
+    *,
+    path: Path | None = None,
+) -> bool:
+    """Remove one consumed queue entry and its matching legacy fallback."""
+
+    try:
+        suffix = f"-{wake.wake_id}.json"
+        for queue_file in _wake_queue_dir(path).glob("*.json"):
+            if queue_file.name.endswith(suffix):
+                queue_file.unlink(missing_ok=True)
+        legacy = _wake_path(path)
+        latest = _read_reactor_wake_path(legacy)
+        if latest is not None and latest.wake_id == wake.wake_id:
+            legacy.unlink(missing_ok=True)
+    except OSError:
+        return False
+    return True
 
 
 def reactor_wake_revision(
