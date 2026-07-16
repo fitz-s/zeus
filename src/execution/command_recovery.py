@@ -1541,47 +1541,67 @@ def _cancel_ack_terminal_no_fill_fact_candidates(conn: sqlite3.Connection) -> li
         and _table_exists(conn, "position_current")
     ):
         return []
-    sql = "WITH " + _canonical_order_truth_cte() + """
+    sql = (
+        """
+        WITH candidate_commands AS (
+            SELECT
+                cmd.command_id AS command_id,
+                cmd.venue_order_id AS venue_order_id,
+                cmd.state AS command_state,
+                cmd.size AS command_size,
+                cmd.position_id AS position_id,
+                pc.position_id AS projected_position_id,
+                pc.phase AS projected_phase,
+                (
+                    SELECT MAX(event.occurred_at)
+                      FROM venue_command_events event
+                     WHERE event.command_id = cmd.command_id
+                       AND event.event_type IN ('CANCEL_ACKED', 'EXPIRED')
+                ) AS terminal_event_occurred_at
+              FROM venue_commands cmd
+              LEFT JOIN position_current pc
+                ON pc.position_id = cmd.position_id
+             WHERE cmd.intent_kind = 'ENTRY'
+               AND cmd.state IN ('CANCELLED', 'EXPIRED')
+               AND cmd.venue_order_id IS NOT NULL
+               AND cmd.venue_order_id != ''
+               AND (
+                    pc.position_id IS NULL
+                    OR (
+                        pc.phase = 'pending_entry'
+                        AND CAST(COALESCE(pc.shares, '0') AS REAL) = 0
+                        AND CAST(COALESCE(pc.cost_basis_usd, '0') AS REAL) = 0
+                    )
+               )
+               AND EXISTS (
+                    SELECT 1
+                      FROM venue_command_events event
+                     WHERE event.command_id = cmd.command_id
+                       AND event.event_type IN ('CANCEL_ACKED', 'EXPIRED')
+               )
+        ),
+        """
+        + _canonical_order_truth_cte(command_scope_cte="candidate_commands")
+        + """
         SELECT
             cmd.command_id AS command_id,
             cmd.venue_order_id AS venue_order_id,
-            cmd.state AS command_state,
-            cmd.size AS command_size,
+            cmd.command_state AS command_state,
+            cmd.command_size AS command_size,
             cmd.position_id AS position_id,
-            pc.position_id AS projected_position_id,
-            pc.phase AS projected_phase,
-            terminal_event.occurred_at AS terminal_event_occurred_at,
+            cmd.projected_position_id AS projected_position_id,
+            cmd.projected_phase AS projected_phase,
+            cmd.terminal_event_occurred_at AS terminal_event_occurred_at,
             fact.fact_id AS latest_order_fact_id,
             fact.state AS latest_order_fact_state,
             fact.remaining_size AS latest_order_fact_remaining_size,
             fact.matched_size AS latest_order_fact_matched_size,
             fact.source AS latest_order_fact_source
-          FROM venue_commands cmd
-          LEFT JOIN position_current pc
-            ON pc.position_id = cmd.position_id
+          FROM candidate_commands cmd
           JOIN canonical_order_truth fact
             ON fact.command_id = cmd.command_id
            AND fact.venue_order_id = cmd.venue_order_id
-          JOIN (
-                SELECT command_id, MAX(occurred_at) AS occurred_at
-                  FROM venue_command_events
-                 WHERE event_type IN ('CANCEL_ACKED', 'EXPIRED')
-                 GROUP BY command_id
-          ) terminal_event
-            ON terminal_event.command_id = cmd.command_id
-         WHERE cmd.intent_kind = 'ENTRY'
-           AND cmd.state IN ('CANCELLED', 'EXPIRED')
-           AND cmd.venue_order_id IS NOT NULL
-           AND cmd.venue_order_id != ''
-           AND (
-                pc.position_id IS NULL
-                OR (
-                    pc.phase = 'pending_entry'
-                    AND CAST(COALESCE(pc.shares, '0') AS REAL) = 0
-                    AND CAST(COALESCE(pc.cost_basis_usd, '0') AS REAL) = 0
-                )
-           )
-           AND CAST(COALESCE(fact.matched_size, '0') AS REAL) = 0
+         WHERE CAST(COALESCE(fact.matched_size, '0') AS REAL) = 0
            AND NOT EXISTS (
                 SELECT 1
                   FROM venue_trade_facts trade
@@ -1596,8 +1616,9 @@ def _cancel_ack_terminal_no_fill_fact_candidates(conn: sqlite3.Connection) -> li
                    AND terminal_fact.state IN ('CANCEL_CONFIRMED', 'EXPIRED', 'VENUE_WIPED')
                    AND CAST(COALESCE(terminal_fact.matched_size, '0') AS REAL) = 0
            )
-         ORDER BY terminal_event.occurred_at, cmd.command_id
+         ORDER BY cmd.terminal_event_occurred_at, cmd.command_id
         """
+    )
     rows = conn.execute(sql).fetchall()
     return [_dict_row(row) for row in rows]
 
