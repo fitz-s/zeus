@@ -1,5 +1,5 @@
 # Created: 2026-03-26
-# Last reused/audited: 2026-06-04
+# Last reused/audited: 2026-07-16
 # Authority basis: Phase 4B audited GRIB ingest + PLAN_v4 Phase 6 SourceRunContext linkage.
 #   2026-06-04: replaced inline ecmwf_opendata `_v1` strip with the shared
 #   ensemble_snapshot_provenance.normalize_opendata_data_version() helper so the
@@ -10,7 +10,7 @@
 #   WAL=0 bytes — wedge is somewhere between rglob and first INSERT or in
 #   the per-file loop). Diagnostic; not a fix. Expected to pinpoint the
 #   wedge on the next ingest cycle.
-# Lifecycle: created=2026-03-26; last_reviewed=2026-05-03; last_reused=2026-05-03
+# Lifecycle: created=2026-03-26; last_reviewed=2026-07-16; last_reused=2026-07-16
 # Purpose: Audited GRIB→ensemble_snapshots ingestor (Phase 4B / task #53);
 #          applies INV-14 identity spine and Law 5 causality gate before INSERT.
 # Reuse: Requires extracted local-calendar-day JSON files under FIFTY_ONE_ROOT
@@ -881,6 +881,7 @@ def ingest_track(
     source_run_context: SourceRunContext | None = None,
     ingest_backend: str = "unknown",
     json_files: Sequence[Path] | None = None,
+    chunker: Any | None = None,
 ) -> dict:
     cfg = _TRACK_CONFIGS[track]
     metric: MetricIdentity = cfg["metric"]
@@ -993,6 +994,10 @@ def ingest_track(
                 counters["written"] += 1
             else:
                 counters["other"] += 1
+            if chunker is not None:
+                if status == "written":
+                    chunker.increment_rows()
+                chunker.yield_if_live_contended()
 
             # 2026-05-14 ECMWF wedge diagnostic — boundary logs (#C): per-10 progress.
             # On a 2945-file scan this emits ~295 lines, acceptable noise.

@@ -58,7 +58,7 @@ from pathlib import Path
 from typing import Optional
 
 from src.state.db import ZEUS_FORECASTS_DB_PATH
-from src.state.db_writer_lock import WriteClass, db_writer_lock
+from src.state.db_writer_lock import bulk_lock_with_chunker
 
 logger = logging.getLogger(__name__)
 
@@ -374,9 +374,14 @@ def _ingest_track(
         logger.error("tigge_pipeline %s: import failed: %s", label, exc)
         return {"label": label, "ok": False, "error": f"import failed: {exc}"}
 
-    with db_writer_lock(ZEUS_FORECASTS_DB_PATH, WriteClass.BULK):
-        conn = get_forecasts_connection()
-        try:
+    conn = get_forecasts_connection()
+    try:
+        with bulk_lock_with_chunker(
+            ZEUS_FORECASTS_DB_PATH,
+            conn,
+            caller_module=__name__,
+        ) as chunker:
+            chunker.yield_if_live_contended()
             apply_canonical_schema(conn)
             try:
                 summary = _ingest_track_fn(
@@ -390,12 +395,13 @@ def _ingest_track(
                     # Allow zero-file runs during catch-up (download stage may skip
                     # already-present files; extract may not produce new JSONs).
                     require_files=False,
+                    chunker=chunker,
                 )
             except Exception as exc:
                 logger.error("tigge_pipeline %s: ingest_track raised: %s", label, exc)
                 return {"label": label, "ok": False, "error": str(exc)}
-        finally:
-            conn.close()
+    finally:
+        conn.close()
 
     return {
         "label": label,

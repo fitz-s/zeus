@@ -606,7 +606,7 @@ test_trust_policy:
     tests/test_contract_source_fields_baseline.py: {created: "2026-05-01", last_used: "2026-05-01"}
     tests/test_cycle_runner_db_lock_degrade.py: {created: "2026-05-05", last_used: "2026-05-05"}
     tests/test_daemon_ingest_acquires_bulk_lock.py: {created: "2026-05-08", last_used: "2026-05-08"}
-    tests/test_db_writer_lock_k3_live_yield.py: {created: "2026-05-12", last_used: "2026-05-12"}
+    tests/test_db_writer_lock_k3_live_yield.py: {created: "2026-05-12", last_used: "2026-07-16"}
     tests/test_db_writer_lock.py: {created: "2026-05-07", last_used: "2026-07-15", note: "Canonical writer-lock law, including forwarding nonblocking acquisition to both WORLD and TRADE flocks."}
     tests/test_dispatch_session_start.py: {created: "2026-05-07", last_used: "2026-05-07"}
     tests/test_doc_citation_lint.py: {created: "2026-05-17", last_used: "2026-05-17"}

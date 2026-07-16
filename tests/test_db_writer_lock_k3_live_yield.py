@@ -1,5 +1,5 @@
 # Created: 2026-05-12
-# Last reused or audited: 2026-05-12
+# Last reused or audited: 2026-07-16
 # Authority basis: architect K=3 structural decisions / AGENTS.md money path
 #                  K3 — BulkChunker yields writer-lock to LIVE work at chunk
 #                  boundary so LIVE trades do not wait for the entire bulk
@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import multiprocessing as mp
 import sqlite3
+import sys
 import time
 from pathlib import Path
 from typing import Any
@@ -219,6 +220,62 @@ def test_live_acquires_within_2s_during_bulk_chunk_loop(tmp_path: Path) -> None:
         if live_proc.is_alive():
             live_proc.terminate()
             live_proc.join(timeout=2.0)
+
+
+def test_grib_ingest_polls_chunker_at_each_file_boundary(tmp_path: Path, monkeypatch) -> None:
+    scripts_dir = Path(__file__).resolve().parents[1] / "scripts"
+    if str(scripts_dir) not in sys.path:
+        sys.path.insert(0, str(scripts_dir))
+    import ingest_grib_to_snapshots as ingest  # type: ignore
+
+    json_root = tmp_path / "raw"
+    subdir = json_root / "test-track"
+    subdir.mkdir(parents=True)
+    (subdir / "one.json").write_text("{}", encoding="utf-8")
+
+    class _Conn:
+        commits = 0
+        rollbacks = 0
+
+        def commit(self) -> None:
+            self.commits += 1
+
+        def rollback(self) -> None:
+            self.rollbacks += 1
+
+    class _Chunker:
+        rows = 0
+        polls = 0
+
+        def increment_rows(self, n: int = 1) -> None:
+            self.rows += n
+
+        def yield_if_live_contended(self) -> None:
+            self.polls += 1
+
+    conn = _Conn()
+    chunker = _Chunker()
+    original = ingest._TRACK_CONFIGS["mx2t6_high"]["json_subdir"]
+    ingest._TRACK_CONFIGS["mx2t6_high"]["json_subdir"] = "test-track"
+    monkeypatch.setattr(ingest, "ingest_json_file", lambda *_args, **_kwargs: "written")
+    try:
+        report = ingest.ingest_track(
+            track="mx2t6_high",
+            json_root=json_root,
+            conn=conn,
+            date_from=None,
+            date_to=None,
+            cities=None,
+            overwrite=False,
+            chunker=chunker,
+        )
+    finally:
+        ingest._TRACK_CONFIGS["mx2t6_high"]["json_subdir"] = original
+
+    assert report["written"] == 1
+    assert chunker.rows == 1
+    assert chunker.polls == 1
+    assert conn.commits == 1
 
 
 # --------------------------------------------------------------------------
