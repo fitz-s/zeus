@@ -1566,54 +1566,82 @@ def _entry_actionable_certificate_payload_and_component(
             allowed=False,
             reason="missing_actionable_certificate_hash",
         ), None
-    # World must be ATTACHed before the revocation check: decision_certificates
-    # (and its owner-local fact_revocations record) live in the world DB
-    # (src/state/domains.py), while this gate typically runs on a trade-main
-    # connection (DIQ packet, docs/rebuild/quarantine_excision_2026-07-11.md).
-    attach_error = _attach_world_for_trade_certificate_read(conn)
-    if _certificate_is_revoked(conn, certificate_hash):
-        return _capability_component(
-            "entry_actionable_certificate",
-            allowed=False,
-            reason="actionable_certificate_quarantined",
-            certificate_hash=certificate_hash,
-        ), None
-    matching_schema = ""
-    payload_json: str | None = None
-    table_seen = False
-    for schema in _attached_schema_names(conn):
+    # The reactor supplies a long-lived trade connection whose explicit write
+    # transaction can retain an older ATTACHed-world read snapshot.  The
+    # actionable certificate is committed on a separate world connection just
+    # before submit, so read it through a new owner-local connection here.  Do
+    # not commit or roll back the caller's trade transaction to refresh it.
+    read_conn = conn
+    owns_read_conn = False
+    attach_error: str | None = None
+    if _main_database_filename(conn) == "zeus_trades.db":
         try:
-            if not _table_exists_in_schema(conn, schema, "decision_certificates"):
-                continue
-            table_seen = True
-            schema_sql = _quote_sql_identifier(schema)
-            row = conn.execute(
-                f"""
-                SELECT certificate_type, mode, verifier_status, payload_json
-                  FROM {schema_sql}.decision_certificates
-                 WHERE certificate_hash = ?
-                   AND certificate_type = 'ActionableTradeCertificate'
-                   AND mode = 'LIVE'
-                   AND verifier_status = 'VERIFIED'
-                 LIMIT 1
-                """,
-                (certificate_hash,),
-            ).fetchone()
-        except sqlite3.Error as exc:
+            from src.state.db import get_world_connection_read_only
+
+            read_conn = get_world_connection_read_only()
+            owns_read_conn = True
+        except Exception as exc:  # noqa: BLE001 — fail closed before submit
             return _capability_component(
                 "entry_actionable_certificate",
                 allowed=False,
-                reason="decision_certificate_read_failed",
+                reason="decision_certificate_world_open_failed",
                 certificate_hash=certificate_hash,
                 error=str(exc),
             ), None
-        if row is not None:
-            matching_schema = schema
+    else:
+        # In-memory/unit callers and world-main callers retain the generic
+        # attached-schema path.
+        attach_error = _attach_world_for_trade_certificate_read(conn)
+
+    matching_schema = ""
+    payload_json: str | None = None
+    table_seen = False
+    try:
+        if _certificate_is_revoked(read_conn, certificate_hash):
+            return _capability_component(
+                "entry_actionable_certificate",
+                allowed=False,
+                reason="actionable_certificate_quarantined",
+                certificate_hash=certificate_hash,
+            ), None
+        for schema in _attached_schema_names(read_conn):
             try:
-                payload_json = str(row["payload_json"] if isinstance(row, sqlite3.Row) else row[3])
-            except (IndexError, KeyError, TypeError):
-                payload_json = None
-            break
+                if not _table_exists_in_schema(read_conn, schema, "decision_certificates"):
+                    continue
+                table_seen = True
+                schema_sql = _quote_sql_identifier(schema)
+                row = read_conn.execute(
+                    f"""
+                    SELECT certificate_type, mode, verifier_status, payload_json
+                      FROM {schema_sql}.decision_certificates
+                     WHERE certificate_hash = ?
+                       AND certificate_type = 'ActionableTradeCertificate'
+                       AND mode = 'LIVE'
+                       AND verifier_status = 'VERIFIED'
+                     LIMIT 1
+                    """,
+                    (certificate_hash,),
+                ).fetchone()
+            except sqlite3.Error as exc:
+                return _capability_component(
+                    "entry_actionable_certificate",
+                    allowed=False,
+                    reason="decision_certificate_read_failed",
+                    certificate_hash=certificate_hash,
+                    error=str(exc),
+                ), None
+            if row is not None:
+                matching_schema = schema
+                try:
+                    payload_json = str(
+                        row["payload_json"] if isinstance(row, sqlite3.Row) else row[3]
+                    )
+                except (IndexError, KeyError, TypeError):
+                    payload_json = None
+                break
+    finally:
+        if owns_read_conn:
+            read_conn.close()
     if not table_seen:
         if attach_error:
             return _capability_component(

@@ -174,6 +174,65 @@ def test_entry_actionable_certificate_guard_allows_persisted_live_verified_row()
     assert component["details"]["certificate_schema"] == "world"
 
 
+def test_entry_actionable_certificate_guard_reads_past_stale_attached_world_snapshot(
+    monkeypatch,
+    tmp_path,
+):
+    world_path = tmp_path / "zeus-world.db"
+    trade_path = tmp_path / "zeus_trades.db"
+    world_writer = sqlite3.connect(world_path)
+    world_writer.execute("PRAGMA journal_mode=WAL")
+    world_writer.execute(
+        """
+        CREATE TABLE decision_certificates (
+            certificate_hash TEXT NOT NULL,
+            certificate_type TEXT NOT NULL,
+            mode TEXT NOT NULL,
+            verifier_status TEXT NOT NULL,
+            payload_json TEXT NOT NULL
+        )
+        """
+    )
+    world_writer.execute(
+        """
+        CREATE TABLE fact_revocations (
+            table_name TEXT NOT NULL,
+            row_id TEXT NOT NULL,
+            reason_code TEXT NOT NULL
+        )
+        """
+    )
+    world_writer.commit()
+
+    trade_conn = sqlite3.connect(trade_path)
+    trade_conn.row_factory = sqlite3.Row
+    trade_conn.execute("ATTACH DATABASE ? AS world", (str(world_path),))
+    trade_conn.execute("BEGIN")
+    assert trade_conn.execute(
+        "SELECT COUNT(*) FROM world.decision_certificates"
+    ).fetchone()[0] == 0
+
+    _insert_sql = """
+        INSERT INTO decision_certificates (
+            certificate_hash, certificate_type, mode, verifier_status, payload_json
+        ) VALUES (?, 'ActionableTradeCertificate', 'LIVE', 'VERIFIED', ?)
+    """
+    world_writer.execute(_insert_sql, ("h1", json.dumps(_valid_actionable_payload())))
+    world_writer.commit()
+    monkeypatch.setattr(state_db, "ZEUS_WORLD_DB_PATH", world_path)
+
+    component = _entry_actionable_certificate_component(
+        trade_conn,
+        _submit_intent(),
+    )
+
+    assert component["allowed"] is True
+    assert component["details"]["certificate_schema"] == "main"
+    trade_conn.rollback()
+    trade_conn.close()
+    world_writer.close()
+
+
 def test_entry_actionable_certificate_guard_rejects_intent_payload_mismatch():
     conn = _conn_with_world_cert_table()
     _insert_actionable(conn)
@@ -334,7 +393,7 @@ def test_entry_actionable_certificate_guard_attaches_world_from_trade_main(
     component = _entry_actionable_certificate_component(conn, intent)
 
     assert component["allowed"] is True
-    assert component["details"]["certificate_schema"] == "world"
+    assert component["details"]["certificate_schema"] == "main"
 
 
 def test_entry_actionable_certificate_guard_rejects_invalid_current_payload():
