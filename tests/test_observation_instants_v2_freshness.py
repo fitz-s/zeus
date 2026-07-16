@@ -334,6 +334,9 @@ def test_obs_v2_live_tick_does_not_hold_writer_lock_across_city_fetch(monkeypatc
             self.committed = False
             self.closed = False
 
+        def execute(self, _sql, *_params):
+            return None
+
         def commit(self):
             self.committed = True
 

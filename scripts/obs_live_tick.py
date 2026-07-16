@@ -318,6 +318,12 @@ def _write_rows(
     with db_writer_lock(db_path, WriteClass.BULK):
         conn = _open_obs_tick_connection(db_path)
         try:
+            # Take the write lock up front. insert_rows starts with a
+            # SAVEPOINT (deferred) + SELECT, so its later UPDATE needs a
+            # read->write upgrade; if any writer outside the flock discipline
+            # committed after our snapshot, that upgrade fails immediately
+            # with SQLITE_BUSY_SNAPSHOT — busy_timeout never applies to it.
+            conn.execute("BEGIN IMMEDIATE")
             written = insert_rows(conn, rows)
             _append_wu_prints_to_ledger(conn, prints)
             conn.commit()
