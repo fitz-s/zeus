@@ -913,6 +913,29 @@ def test_fractional_order_survives_nonpositive_full_kelly_ev():
     assert decision.robust_ev_usd == pytest.approx(1.2625)
 
 
+@pytest.mark.parametrize("side", ("YES", "NO"))
+def test_zero_ev_fractional_order_is_not_admitted(side):
+    candidate = _global_candidate(
+        candidate_id=f"fractional-zero-ev-{side}",
+        family=f"fractional-zero-ev-{side}",
+        side=side,
+        q=0.49,
+        levels=(("0.49", "100"),),
+    )
+
+    decision = _global_score(
+        candidate,
+        floor="175",
+        ceiling="25",
+        cash="100",
+        cap="100",
+        multiplier="0.03125",
+    )
+
+    assert decision.candidate is None
+    assert decision.no_trade_reason == "NON_POSITIVE_ROBUST_OBJECTIVE"
+
+
 def test_global_selector_consumes_ledger_bound_cumulative_buy_endowment():
     candidate = _global_candidate(
         candidate_id="selector-cumulative-endowment",

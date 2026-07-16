@@ -107,6 +107,10 @@ _WEALTH_MARGIN = 1e-9
 # does not hide a binding budget); with real budget slack the single-coordinate optimum is global.
 _BUDGET_BIND_REL = 1e-3
 
+# Numerical zero for USD EV comparisons. This is far below venue/accounting
+# precision and prevents binary floating-point residue from becoming an order.
+_ROBUST_EV_EPS_USD = 1e-12
+
 # Base share discretization. Immediate BUY feasibility is a price-dependent subset
 # of this grid because the venue also constrains SDK maker/taker amount precision.
 _SIZE_QUANTUM = Decimal("0.01")
@@ -1119,7 +1123,7 @@ class GlobalBuySizingRejection:
         multiplier = fractional / full
         minimum_positive = (
             self.minimum_marketable_robust_delta_log_wealth > 0.0
-            and self.minimum_marketable_robust_ev_usd > 0.0
+            and self.minimum_marketable_robust_ev_usd > _ROBUST_EV_EPS_USD
         )
         if (
             not all(
@@ -1159,7 +1163,7 @@ class GlobalBuySizingRejection:
             or self.continuous_full_robust_delta_log_wealth <= 0.0
             or minimum_cost <= 0
             or self.minimum_marketable_robust_delta_log_wealth <= 0.0
-            or self.minimum_marketable_robust_ev_usd <= 0.0
+            or self.minimum_marketable_robust_ev_usd <= _ROBUST_EV_EPS_USD
             or self.minimum_marketable_capital_efficiency <= 0.0
             or not self.minimum_marketable_positive
             or self.minimum_marketable_positive != minimum_positive
@@ -1308,13 +1312,13 @@ class GlobalSingleOrderCandidateEvaluation:
                 or (
                     reason == "NON_POSITIVE_ROBUST_OBJECTIVE"
                     and self.robust_delta_log_wealth > 0.0
-                    and self.robust_ev_usd > 0.0
+                    and self.robust_ev_usd > _ROBUST_EV_EPS_USD
                 )
                 or (
                     reason == "NON_POSITIVE_ROBUST_FILL_PREFIX"
                     and not (
                         self.robust_delta_log_wealth > 0.0
-                        and self.robust_ev_usd > 0.0
+                        and self.robust_ev_usd > _ROBUST_EV_EPS_USD
                     )
                 )
             ):
@@ -1354,7 +1358,7 @@ class GlobalSingleOrderCandidateEvaluation:
             or self.shares <= 0
             or self.cost_usd <= 0
             or self.robust_delta_log_wealth <= 0.0
-            or self.robust_ev_usd <= 0.0
+            or self.robust_ev_usd <= _ROBUST_EV_EPS_USD
             or self.capital_efficiency <= 0.0
             or self.limit_price <= 0
             or self.expected_fill_price_before_fee <= 0
@@ -2432,7 +2436,7 @@ def _score_global_single_order(
         if not (
             continuous_best[0] > 0.0
             and minimum_robust_du > 0.0
-            and minimum_robust_ev > 0.0
+            and minimum_robust_ev > _ROBUST_EV_EPS_USD
             and minimum_efficiency > 0.0
         ):
             return GlobalSingleOrderDecision(
@@ -2467,7 +2471,8 @@ def _score_global_single_order(
             minimum_marketable_robust_ev_usd=minimum_robust_ev,
             minimum_marketable_capital_efficiency=minimum_efficiency,
             minimum_marketable_positive=(
-                minimum_robust_du > 0.0 and minimum_robust_ev > 0.0
+                minimum_robust_du > 0.0
+                and minimum_robust_ev > _ROBUST_EV_EPS_USD
             ),
         )
         return GlobalSingleOrderDecision(
@@ -2540,7 +2545,9 @@ def _score_global_single_order(
                 max_spend,
             )
 
-    if best is None or not (best[0] > 0.0 and best[1] > 0.0):
+    if best is None or not (
+        best[0] > 0.0 and best[1] > _ROBUST_EV_EPS_USD
+    ):
         return GlobalSingleOrderDecision(
             candidate=None,
             shares=Decimal("0"),
@@ -2696,7 +2703,11 @@ def global_buy_fak_prefix_certificate(
         win_q
     ) * math.log(float(win_after / win_baseline))
     robust_ev = float(win_q * shares - full_cost)
-    if not math.isfinite(robust_du) or robust_du <= 0 or robust_ev <= 0:
+    if (
+        not math.isfinite(robust_du)
+        or robust_du <= 0
+        or robust_ev <= _ROBUST_EV_EPS_USD
+    ):
         raise ValueError("buy FAK full-size worst-limit prefix is non-positive")
     return {
         "global_buy_fak_prefix_semantics": (
@@ -2899,7 +2910,9 @@ def _score_global_single_order_sell(
         cash_proceeds_usd=proceeds,
         terminal_wealth=terminal,
     )
-    if not (robust_du > 0.0 and robust_ev > 0.0):
+    if not (
+        robust_du > 0.0 and robust_ev > _ROBUST_EV_EPS_USD
+    ):
         return replace(
             scored,
             rejection_reasons={
@@ -3442,7 +3455,7 @@ def select_global_single_order(
         if score.candidate is not None
         and score.candidate.candidate_id not in rejections
         and score.robust_delta_log_wealth > 0.0
-        and score.robust_ev_usd > 0.0
+        and score.robust_ev_usd > _ROBUST_EV_EPS_USD
     )
     if not positive_scored:
         no_trade_reason = (
