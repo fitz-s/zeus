@@ -1,5 +1,5 @@
 # Created: 2026-06-10
-# Last reused or audited: 2026-06-13
+# Last reused or audited: 2026-07-16
 # Authority basis: day0 first-principles review 2026-06-10 §6.2 (live obs hook)
 #   + operator green-light 2026-06-10 (free METAR fast lane; no paid sources);
 #   /tmp/weather_source_research.md (aviationweather.gov ~3-5 min obs-to-cache,
@@ -1340,6 +1340,32 @@ class Day0FastObsEmitter:
             return 0
         reports = list(prefetch.reports)
         decision_time = prefetch.decision_time
+        emission_eligible = prefetch.eligible
+        if prefetch.ledger_reports is not None:
+            changed_stations = {
+                str(report.station_id).strip().upper()
+                for report in prefetch.ledger_reports
+            }
+            with self._lock:
+                pending_live_families = {
+                    (city, target_date)
+                    for (city, target_date, metric), kill_value
+                    in self._last_kill_memo_rounded.items()
+                    if self._last_live_emitted_rounded.get(
+                        (city, target_date, metric)
+                    ) != kill_value
+                }
+            emission_eligible = tuple(
+                item
+                for item in prefetch.eligible
+                if (
+                    str(item[1].station_id).strip().upper() in changed_stations
+                    or (str(getattr(item[0], "name", "")), item[2])
+                    in pending_live_families
+                )
+            )
+            if not emission_eligible:
+                return 0
         # day0 defect-ledger (2026-07-16): append every parsed report to the
         # publication-stream ledger for fast-eligible stations — ONE short
         # write under the mutex we already hold here, never across the HTTP
@@ -1353,7 +1379,7 @@ class Day0FastObsEmitter:
         )
         if _append_metar_prints_to_ledger(
             world_conn,
-            prefetch.eligible,
+            emission_eligible,
             ledger_reports,
         ):
             with self._lock:
@@ -1368,7 +1394,7 @@ class Day0FastObsEmitter:
             family_admission=family_admission,
         )
         emitted = 0
-        for city, source, target_date in prefetch.eligible:
+        for city, source, target_date in emission_eligible:
             if emitted >= max(1, int(limit)):
                 break
             try:

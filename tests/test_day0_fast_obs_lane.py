@@ -1055,6 +1055,66 @@ class TestMutexNoHttpSplit:
         )
         assert n == 2  # high + low emitted with ZERO fetcher invocations
 
+    def test_emit_prefetched_only_recomputes_changed_stations(self, monkeypatch):
+        import src.data.day0_fast_obs as fast_obs
+
+        t0 = datetime(2026, 6, 9, 16, 0, tzinfo=UTC)
+        tokyo = _tokyo()
+        osaka = SimpleNamespace(
+            name="Osaka",
+            timezone="Asia/Tokyo",
+            settlement_unit="C",
+            wu_station="RJOO",
+            settlement_source_type="wu_icao",
+        )
+        tokyo_report = _report("RJTT", t0, 21.0, t_group=False)
+        osaka_report = _report("RJOO", t0, 22.0, t_group=False)
+        prefetch = fast_obs.FastObsPrefetch(
+            eligible=(
+                (
+                    tokyo,
+                    fast_obs.FastObsSource(
+                        source_id=fast_obs.FAST_OBS_SOURCE_ID,
+                        station_id="RJTT",
+                        authority="ICAO_STATION_NATIVE",
+                    ),
+                    "2026-06-10",
+                ),
+                (
+                    osaka,
+                    fast_obs.FastObsSource(
+                        source_id=fast_obs.FAST_OBS_SOURCE_ID,
+                        station_id="RJOO",
+                        authority="ICAO_STATION_NATIVE",
+                    ),
+                    "2026-06-10",
+                ),
+            ),
+            reports=(tokyo_report, osaka_report),
+            freshness_status=fast_obs.FETCH_FRESH,
+            cache_age_s=0.0,
+            decision_time=t0 + timedelta(minutes=5),
+            ledger_reports=(tokyo_report,),
+        )
+        original = fast_obs.running_extremes_for_local_day
+        seen: list[str] = []
+
+        def _running_extremes(*args, **kwargs):
+            seen.append(kwargs["city"].name)
+            return original(*args, **kwargs)
+
+        monkeypatch.setattr(fast_obs, "running_extremes_for_local_day", _running_extremes)
+
+        emitted = fast_obs.Day0FastObsEmitter().emit_prefetched(
+            world_conn=_world_conn(),
+            prefetch=prefetch,
+            received_at=(t0 + timedelta(minutes=5)).isoformat(),
+            limit=20,
+        )
+
+        assert emitted == 2
+        assert seen == ["Tokyo"]
+
     def test_emit_prefetched_persists_anomaly_actions_with_world_conn(self, monkeypatch):
         from src.data import day0_oracle_anomaly as oa
         from src.data.day0_fast_obs import Day0FastObsEmitter, FastObsPrefetch
