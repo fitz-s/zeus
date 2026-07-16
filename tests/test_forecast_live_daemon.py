@@ -217,13 +217,47 @@ def test_replacement_materialize_poll_prioritizes_explicit_queue(monkeypatch, tm
         lambda *, discover=True: calls.append(discover),
     )
     monkeypatch.setattr(
-        daemon, "_replacement_forecast_last_discovery_monotonic", 0.0
+        daemon, "_replacement_forecast_last_discovery_monotonic", 90.0
     )
+    monkeypatch.setattr(daemon.time, "monotonic", lambda: 100.0)
 
     daemon._replacement_forecast_materialize_poll_job()
 
     assert calls == [False]
-    assert daemon._replacement_forecast_last_discovery_monotonic == 0.0
+    assert daemon._replacement_forecast_last_discovery_monotonic == 90.0
+
+
+def test_replacement_materialize_pending_queue_does_not_starve_discovery(
+    monkeypatch, tmp_path
+) -> None:
+    import src.data.replacement_forecast_production as production
+    import src.ingest.forecast_live_daemon as daemon
+
+    cfg = _materialization_queue_cfg(tmp_path)
+    seed_dir = Path(cfg["seed_dir"])
+    seed_dir.mkdir(parents=True)
+    (seed_dir / "urgent.json").write_text("{}\n", encoding="utf-8")
+    calls: list[bool] = []
+
+    monkeypatch.setattr(
+        production,
+        "_replacement_forecast_live_materialization_queue_config",
+        lambda: cfg,
+    )
+    monkeypatch.setattr(
+        daemon,
+        "_replacement_forecast_materialize_job",
+        lambda *, discover=True: calls.append(discover),
+    )
+    monkeypatch.setattr(
+        daemon, "_replacement_forecast_last_discovery_monotonic", 0.0
+    )
+    monkeypatch.setattr(daemon.time, "monotonic", lambda: 1000.0)
+
+    daemon._replacement_forecast_materialize_poll_job()
+
+    assert calls == [True]
+    assert daemon._replacement_forecast_last_discovery_monotonic == 1000.0
 
 
 def test_replacement_materialize_poll_runs_periodic_discovery(monkeypatch, tmp_path) -> None:

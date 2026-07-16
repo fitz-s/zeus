@@ -1112,11 +1112,11 @@ def _replacement_forecast_materialize_poll_job() -> None:
         now - _replacement_forecast_last_discovery_monotonic
         >= 60.0 * _replacement_forecast_materialize_interval_minutes()
     )
-    if pending:
-        _replacement_forecast_materialize_job(discover=False)
-    elif discovery_due:
+    if discovery_due:
         _replacement_forecast_last_discovery_monotonic = now
         _replacement_forecast_materialize_job(discover=True)
+    elif pending:
+        _replacement_forecast_materialize_job(discover=False)
 
 
 def _publish_replacement_forecast_boot_wake() -> object | None:
