@@ -1,5 +1,5 @@
 # Created: 2026-06-10
-# Last reused or audited: 2026-07-15
+# Last reused or audited: 2026-07-16
 # Authority basis: operator green-light 2026-06-10 item B (remaining-day
 #   pricing + persist-the-hourly-vector); day0 first-principles review §2.4
 #   (full-day-masked q DEVIATES: overprices excursion bins post-peak) and
@@ -1150,7 +1150,6 @@ class TestRequestHashProvenance:
                 "icon_d2",
                 "ecmwf_ifs",
                 "icon_global",
-                "jma_msm",
                 "ukmo_global_deterministic_10km",
             ]
             return [_vector(model="icon_d2")], "sha256:partial"
@@ -1184,10 +1183,11 @@ class TestRequestHashProvenance:
 
         monkeypatch.setattr(hv, "in_domain_models_for_city", lambda c, **kw: [])
 
+        assert "jma_msm" in hv.DAY0_HOURLY_MODELS
+        assert "jma_msm" not in hv.GLOBAL_DAY0_HOURLY_MODELS
         assert hv.day0_hourly_models_for_city(_paris()) == [
             "ecmwf_ifs",
             "icon_global",
-            "jma_msm",
             "ukmo_global_deterministic_10km",
         ]
 
@@ -1200,7 +1200,6 @@ class TestRequestHashProvenance:
             "icon_d2",
             "ecmwf_ifs",
             "icon_global",
-            "jma_msm",
             "ukmo_global_deterministic_10km",
         ]
 
@@ -1214,7 +1213,6 @@ class TestRequestHashProvenance:
             return [
                 _vector(model="ecmwf_ifs"),
                 _vector(model="icon_global"),
-                _vector(model="jma_msm"),
                 _vector(model="ukmo_global_deterministic_10km"),
             ], "sha256:globalhash"
 
@@ -1233,18 +1231,16 @@ class TestRequestHashProvenance:
             [_paris()], decision_time=datetime(2026, 6, 10, 9, 0, tzinfo=UTC)
         )
 
-        assert n == 8
+        assert n == 6
         assert captured["models"] == [
             "ecmwf_ifs",
             "icon_global",
-            "jma_msm",
             "ukmo_global_deterministic_10km",
         ]
         assert captured["request_hash"] == "sha256:globalhash"
         assert captured["vector_models"] == [
             "ecmwf_ifs",
             "icon_global",
-            "jma_msm",
             "ukmo_global_deterministic_10km",
         ]
         assert captured["target_dates"] == ["2026-06-10", "2026-06-11"]

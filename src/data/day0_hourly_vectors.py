@@ -60,11 +60,11 @@ DAY0_HOURLY_MODELS: tuple[str, ...] = (
     "meteofrance_arome_france_hd",
     "ukmo_uk_deterministic_2km",
     "ncep_nbm_conus",
+    "jma_msm",
 )
 GLOBAL_DAY0_HOURLY_MODELS: tuple[str, ...] = (
     "ecmwf_ifs",
     "icon_global",
-    "jma_msm",
     "ukmo_global_deterministic_10km",
 )
 
@@ -164,7 +164,7 @@ def day0_hourly_models_for_city(city: Any) -> list[str]:
 
     Regional high-resolution models are experts, not a replacement for the live
     probability chain's global evidence. Keep every available regional expert
-    and the same four global deterministic models used by the current forecast
+    and the same three global deterministic models used by the current forecast
     provider set. A single global anchor is not a probability distribution: it
     erases current between-model disagreement and makes Day0 entry/exit bands
     depend on one provider path.
