@@ -2300,15 +2300,40 @@ def test_live_adapter_overlaps_gamma_bind_with_clob_book_fetch(monkeypatch):
     bind_started = threading.Event()
     books_started = threading.Event()
     metadata = {
-        ("condition", "yes-token"): {"condition_id": "condition"},
-        ("condition", "no-token"): {"condition_id": "condition"},
+        ("condition-a", "yes-token-a"): {"condition_id": "condition-a"},
+        ("condition-a", "no-token-a"): {"condition_id": "condition-a"},
+        ("condition-b", "yes-token-b"): {"condition_id": "condition-b"},
+        ("condition-b", "no-token-b"): {"condition_id": "condition-b"},
+    }
+    bound_probabilities = {
+        "family": SimpleNamespace(
+            family_key="family",
+            bindings=(
+                SimpleNamespace(
+                    bin_id="bin-b",
+                    condition_id="condition-b",
+                    yes_token_id="yes-token-b",
+                    no_token_id="no-token-b",
+                ),
+                SimpleNamespace(
+                    bin_id="bin-a",
+                    condition_id="condition-a",
+                    yes_token_id="yes-token-a",
+                    no_token_id="no-token-a",
+                ),
+            ),
+        )
     }
 
     def fake_bind(_forecast_conn, *, probability_witnesses, metadata_sink, **_):
         bind_started.set()
         assert books_started.wait(1.0), "CLOB fetch did not overlap Gamma bind"
         metadata_sink.update(metadata)
-        return probability_witnesses
+        assert tuple(
+            binding.bin_id
+            for binding in probability_witnesses["family"].bindings
+        ) == ("bin-a", "bin-b")
+        return bound_probabilities
 
     capture_calls = []
 
@@ -2316,7 +2341,12 @@ def test_live_adapter_overlaps_gamma_bind_with_clob_book_fetch(monkeypatch):
         capture_calls.append(kwargs)
         assert kwargs["metadata_overrides"] == metadata
         assert kwargs["prefetched_at_utc"].tzinfo is not None
-        assert set(kwargs["prefetched_books"]) == {"yes-token", "no-token"}
+        assert set(kwargs["prefetched_books"]) == {
+            "yes-token-a",
+            "no-token-a",
+            "yes-token-b",
+            "no-token-b",
+        }
         return SimpleNamespace(
             witness_identity="book-overlapped",
             assets=(),
@@ -2353,10 +2383,16 @@ def test_live_adapter_overlaps_gamma_bind_with_clob_book_fetch(monkeypatch):
             family_key="family",
             bindings=(
                 SimpleNamespace(
-                    bin_id="bin",
-                    condition_id="condition",
-                    yes_token_id="yes-token",
-                    no_token_id="no-token",
+                    bin_id="bin-a",
+                    condition_id="condition-a",
+                    yes_token_id="yes-token-a",
+                    no_token_id="no-token-a",
+                ),
+                SimpleNamespace(
+                    bin_id="bin-b",
+                    condition_id="condition-b",
+                    yes_token_id="yes-token-b",
+                    no_token_id="no-token-b",
                 ),
             )
         )
@@ -2367,14 +2403,14 @@ def test_live_adapter_overlaps_gamma_bind_with_clob_book_fetch(monkeypatch):
         _dt.datetime.now(_dt.timezone.utc),
     )
 
-    assert bound == probabilities
+    assert bound == bound_probabilities
     assert epoch.witness_identity == "book-overlapped"
     assert len(capture_calls) == 1
     bound_again, epoch_again = provider(
         probabilities,
         _dt.datetime.now(_dt.timezone.utc),
     )
-    assert bound_again == probabilities
+    assert bound_again == bound_probabilities
     assert epoch_again is epoch
     assert len(capture_calls) == 1
     trade.close()
@@ -2407,16 +2443,20 @@ def test_global_book_epoch_cache_requires_stable_non_price_topology(monkeypatch)
     era._store_global_book_epoch(
         conn,
         probabilities,
+        probabilities,
         epoch,
         checked_at=at,
     )
 
-    assert era._get_cached_global_book_epoch(
+    cached = era._get_cached_global_book_epoch(
         conn,
         probabilities,
         checked_at=at,
         allowed=True,
-    ) is epoch
+    )
+    assert cached is not None
+    assert cached[0] == probabilities
+    assert cached[1] is epoch
     changed = {
         "family": SimpleNamespace(
             family_key="family",
@@ -2453,15 +2493,18 @@ def test_global_book_epoch_cache_requires_stable_non_price_topology(monkeypatch)
     era._store_global_book_epoch(
         conn,
         probabilities,
+        probabilities,
         expired,
         checked_at=at,
     )
-    assert era._get_cached_global_book_epoch(
+    cached = era._get_cached_global_book_epoch(
         conn,
         probabilities,
         checked_at=at,
         allowed=True,
-    ) is epoch
+    )
+    assert cached is not None
+    assert cached[1] is epoch
     conn.close()
 
 

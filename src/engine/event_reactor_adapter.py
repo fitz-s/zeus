@@ -313,7 +313,8 @@ UTC = timezone.utc
 @dataclass(frozen=True)
 class _GlobalBookEpochCacheEntry:
     namespace: str
-    topology: tuple[tuple[str, str, str, str, str], ...]
+    request_topology: tuple[tuple[str, str, str, str, str], ...]
+    bound_probabilities: Mapping[str, object]
     epoch: object
 
 
@@ -401,7 +402,7 @@ def _get_cached_global_book_epoch(
     *,
     checked_at: datetime,
     allowed: bool,
-) -> object | None:
+) -> tuple[Mapping[str, object], object] | None:
     if not allowed or checked_at.tzinfo is None:
         return None
     namespace = _global_book_epoch_cache_namespace(trade_conn)
@@ -413,25 +414,24 @@ def _get_cached_global_book_epoch(
     if (
         entry is None
         or entry.namespace != namespace
-        or entry.topology != topology
+        or entry.request_topology != topology
     ):
         return None
     current_identity = getattr(entry.epoch, "current_identity", None)
     if not callable(current_identity):
         return None
     try:
-        return (
-            entry.epoch
-            if current_identity(checked_at.astimezone(UTC)) is not None
-            else None
-        )
+        if current_identity(checked_at.astimezone(UTC)) is None:
+            return None
+        return dict(entry.bound_probabilities), entry.epoch
     except (TypeError, ValueError):
         return None
 
 
 def _store_global_book_epoch(
     trade_conn: sqlite3.Connection,
-    probabilities: Mapping[str, object],
+    request_probabilities: Mapping[str, object],
+    bound_probabilities: Mapping[str, object],
     epoch: object,
     *,
     checked_at: datetime,
@@ -441,11 +441,13 @@ def _store_global_book_epoch(
     if checked_at.tzinfo is None:
         return
     namespace = _global_book_epoch_cache_namespace(trade_conn)
-    topology = _global_book_topology_signature(probabilities)
+    request_topology = _global_book_topology_signature(request_probabilities)
+    bound_topology = _global_book_topology_signature(bound_probabilities)
     current_identity = getattr(epoch, "current_identity", None)
     if (
         namespace is None
-        or topology is None
+        or request_topology is None
+        or bound_topology is None
         or not callable(current_identity)
     ):
         return
@@ -457,7 +459,8 @@ def _store_global_book_epoch(
     with _GLOBAL_BOOK_EPOCH_CACHE_LOCK:
         _GLOBAL_BOOK_EPOCH_CACHE = _GlobalBookEpochCacheEntry(
             namespace=namespace,
-            topology=topology,
+            request_topology=request_topology,
+            bound_probabilities=dict(bound_probabilities),
             epoch=epoch,
         )
 
@@ -5311,20 +5314,21 @@ def event_bound_live_adapter_from_trade_conn(
 
             _book_started = _time.monotonic()
             cache_checked_at = datetime.now(UTC)
-            cached_epoch = _get_cached_global_book_epoch(
+            cached = _get_cached_global_book_epoch(
                 trade_conn,
                 probabilities,
                 checked_at=cache_checked_at,
                 allowed=global_book_cache_allowed,
             )
-            if cached_epoch is not None:
+            if cached is not None:
+                bound_probabilities, cached_epoch = cached
                 logging.getLogger(__name__).info(
                     "global book epoch cache hit: elapsed_s=%.3f families=%d assets=%d",
                     _time.monotonic() - _book_started,
-                    len(probabilities),
+                    len(bound_probabilities),
                     len(getattr(cached_epoch, "assets", ())),
                 )
-                return probabilities, cached_epoch
+                return bound_probabilities, cached_epoch
 
             timeout = max(
                 1.0,
@@ -5487,6 +5491,7 @@ def event_bound_live_adapter_from_trade_conn(
                 book_capture_elapsed = _time.monotonic() - capture_started
             _store_global_book_epoch(
                 trade_conn,
+                probabilities,
                 bound_probabilities,
                 epoch,
                 checked_at=datetime.now(UTC),
