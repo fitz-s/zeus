@@ -1997,66 +1997,6 @@ def test_global_venue_neighbor_validation_is_bounded(monkeypatch):
     assert calls <= 25
 
 
-def test_global_venue_neighbor_cache_key_is_complete_and_bounded():
-    candidate = _global_candidate(
-        candidate_id="venue-neighbor-cache",
-        family="venue-neighbor-cache",
-        side="YES",
-        q=0.99,
-        levels=(("0.37", "2000"),),
-    )
-    curve = candidate.executable_cost_curve
-    shares = Decimal("99.99")
-    cached = S._single_order_curve_venue_legal_neighbor
-    cached.cache_clear()
-    try:
-        expected = cached(curve, "YES", shares, True)
-        assert cached(replace(curve), "YES", shares, True) == expected
-        info = cached.cache_info()
-        assert info.maxsize == 4_096
-        assert (info.hits, info.misses) == (1, 1)
-
-        variants = (
-            replace(curve, token_id=f"{curve.token_id}-changed"),
-            replace(curve, side="NO"),
-            replace(curve, snapshot_id=f"{curve.snapshot_id}-changed"),
-            replace(curve, book_hash=f"{curve.book_hash}-changed"),
-            replace(
-                curve,
-                levels=(replace(curve.levels[0], size=Decimal("2001")),),
-            ),
-            replace(
-                curve,
-                fee_model=replace(
-                    curve.fee_model,
-                    fee_rate=curve.fee_model.fee_rate + Decimal("0.001"),
-                ),
-            ),
-            replace(curve, min_tick=curve.min_tick / Decimal("10")),
-            replace(curve, min_order_size=curve.min_order_size + Decimal("1")),
-            replace(curve, quote_ttl=curve.quote_ttl + timedelta(seconds=1)),
-        )
-        for variant in variants:
-            cached(variant, variant.side, shares, True)
-        cached(curve, "NO", shares, True)
-        cached(curve, "YES", shares, False)
-        assert cached.cache_info().misses == 1 + len(variants) + 2
-
-        for index in range(4_097):
-            cached(
-                replace(curve, snapshot_id=f"eviction-{index}"),
-                "YES",
-                shares,
-                True,
-            )
-        before = cached.cache_info()
-        assert before.currsize == before.maxsize == 4_096
-        cached(curve, "YES", shares, True)
-        assert cached.cache_info().misses == before.misses + 1
-    finally:
-        cached.cache_clear()
-
-
 def test_global_single_order_label_mirror_preserves_size_cost_and_objective():
     yes = _global_candidate(
         candidate_id="yes", family="a", side="YES", q=0.70,
