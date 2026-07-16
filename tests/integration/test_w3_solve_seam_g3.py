@@ -3870,6 +3870,30 @@ def test_global_book_cache_rebinds_fresh_q_without_refreshing_untouched_tokens()
     assert rebound.bindings == cached.bindings
 
 
+def test_global_probability_authority_is_materialized_once_per_family(monkeypatch):
+    calls = []
+    authority_a = object()
+
+    def build(_cls, witness):
+        calls.append(witness)
+        if witness == "invalid":
+            raise ValueError("invalid witness")
+        return authority_a
+
+    monkeypatch.setattr(
+        global_batch_runtime.CurrentFamilyProbabilityAuthority,
+        "from_witness",
+        classmethod(build),
+    )
+
+    authorities = global_batch_runtime._current_probability_authorities(
+        {"family-a": "valid", "family-b": "invalid"}
+    )
+
+    assert authorities == {"family-a": authority_a, "family-b": None}
+    assert calls == ["valid", "invalid"]
+
+
 def test_global_curve_supersession_keeps_typed_current_candidate():
     candidate = object()
     reason = (

@@ -212,6 +212,20 @@ def _probability_manifest(probabilities: Mapping[str, object]) -> tuple[tuple[st
     )
 
 
+def _current_probability_authorities(
+    probabilities: Mapping[str, object],
+) -> dict[str, CurrentFamilyProbabilityAuthority | None]:
+    authorities: dict[str, CurrentFamilyProbabilityAuthority | None] = {}
+    for family_key, witness in probabilities.items():
+        try:
+            authorities[family_key] = (
+                CurrentFamilyProbabilityAuthority.from_witness(witness)
+            )
+        except Exception:  # noqa: BLE001 - invalid family authority fails closed
+            authorities[family_key] = None
+    return authorities
+
+
 _BOOK_NATIVE_SIDE_STATE_FIELDS = (
     "family_key",
     "bin_id",
@@ -1642,14 +1656,12 @@ def process_current_global_batch(
                     probability_witnesses=attempt_probabilities,
                 )
             )
+            current_probability_authorities = (
+                _current_probability_authorities(attempt_probabilities)
+            )
 
             def probability_resolver(family_key):
-                witness = attempt_probabilities.get(family_key)
-                return (
-                    CurrentFamilyProbabilityAuthority.from_witness(witness)
-                    if witness is not None
-                    else None
-                )
+                return current_probability_authorities.get(family_key)
 
             def execution_resolver(candidate):
                 if attempt_book_epoch is not None:
