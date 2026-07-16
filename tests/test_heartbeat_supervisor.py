@@ -1,8 +1,8 @@
-# Lifecycle: created=2026-04-27; last_reviewed=2026-07-14; last_reused=2026-07-14
+# Lifecycle: created=2026-04-27; last_reviewed=2026-07-16; last_reused=2026-07-16
 # Purpose: Lock R3 Z3 HeartbeatSupervisor fail-closed resting-order gate behavior.
 # Reuse: Run when heartbeat supervision, executor submit gating, or R3 live-money readiness changes.
 # Created: 2026-04-27
-# Last reused/audited: 2026-07-14
+# Last reused/audited: 2026-07-16
 # Authority basis: docs/operations/task_2026-04-26_ultimate_plan/r3/slice_cards/Z3.yaml
 #                  + docs/archive/2026-Q2/task_2026-05-15_live_order_e2e_verification/LIVE_ORDER_E2E_VERIFICATION_PLAN.md
 #                  + 2026-05-17 CLOB venue-heartbeat critical-path split
@@ -148,6 +148,48 @@ def test_live_trading_launchd_watchdog_bootstraps_when_sidecars_are_fresh(
     assert result["action"] == "bootstrapped"
     assert calls[-1] == ["launchctl", "bootstrap", "gui/501", str(plist)]
     assert json.loads(status_path.read_text())["action"] == "bootstrapped"
+
+
+def test_live_trading_watchdog_yields_to_deploy_restart_lock(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("ZEUS_MODE", "live")
+    state_root = tmp_path / "state"
+    lock_path = (
+        state_root
+        / "locks"
+        / heartbeat_supervisor_module.LIVE_RESTART_LOCK_FILENAME
+    )
+    lock_path.parent.mkdir(parents=True)
+    fd = heartbeat_supervisor_module.os.open(
+        lock_path,
+        heartbeat_supervisor_module.os.O_RDWR
+        | heartbeat_supervisor_module.os.O_CREAT,
+        0o644,
+    )
+    heartbeat_supervisor_module.fcntl.flock(
+        fd,
+        heartbeat_supervisor_module.fcntl.LOCK_EX,
+    )
+    calls = []
+    try:
+        result = recover_missing_live_trading_launchd_if_needed(
+            run_cmd=lambda *args, **kwargs: calls.append((args, kwargs)),
+            state_root=state_root,
+            status_path=tmp_path / "watchdog.json",
+        )
+    finally:
+        heartbeat_supervisor_module.fcntl.flock(
+            fd,
+            heartbeat_supervisor_module.fcntl.LOCK_UN,
+        )
+        heartbeat_supervisor_module.os.close(fd)
+
+    assert result["ok"] is True
+    assert result["action"] == "none"
+    assert result["reason"] == "deploy_restart_in_progress"
+    assert calls == []
 
 
 def test_live_trading_launchd_watchdog_observes_identity_drift_without_blocking(

@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import contextlib
+import fcntl
 import inspect
 import json
 import logging
@@ -37,6 +38,7 @@ DEFAULT_HEARTBEAT_LEASE_RECOVERY_SUCCESS_TICKS = 3
 HEARTBEAT_KEEPER_STATUS_FILENAME = "venue-heartbeat-keeper.json"
 LIVE_TRADING_WATCHDOG_STATUS_FILENAME = "live-trading-launchd-watchdog.json"
 LIVE_TRADING_LABEL = "com.zeus.live-trading"
+LIVE_RESTART_LOCK_FILENAME = "deploy-live-restart.lock"
 DEFAULT_LIVE_TRADING_WATCHDOG_CHECK_SECONDS = 60
 DEFAULT_LIVE_TRADING_WATCHDOG_COOLDOWN_SECONDS = 300
 _RESTING_ORDER_TYPES = {"GTC", "GTD"}
@@ -449,6 +451,27 @@ def _state_root_from_config() -> Path:
     return Path(STATE_DIR)
 
 
+@contextlib.contextmanager
+def _live_restart_watchdog_lock(state_root: Path):
+    """Hold shared bootstrap ownership unless deploy owns the restart lifecycle."""
+
+    path = state_root / "locks" / LIVE_RESTART_LOCK_FILENAME
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o644)
+    acquired = False
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+            acquired = True
+        except BlockingIOError:
+            pass
+        yield acquired
+    finally:
+        if acquired:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
+
+
 def _live_trading_plist_path() -> Path:
     return Path.home() / "Library" / "LaunchAgents" / f"{LIVE_TRADING_LABEL}.plist"
 
@@ -522,6 +545,58 @@ def _live_trading_sidecars_ready(
 
 
 def recover_missing_live_trading_launchd_if_needed(
+    *,
+    now: datetime | None = None,
+    run_cmd: Any = subprocess.run,
+    repo_root: Path | None = None,
+    state_root: Path | None = None,
+    plist_path: Path | None = None,
+    status_path: Path | None = None,
+) -> dict[str, Any]:
+    """Bootstrap live-trading only outside an operator-owned deploy restart."""
+
+    resolved_state_root = state_root or _state_root_from_config()
+    if not live_trading_launchd_watchdog_enabled():
+        return _recover_missing_live_trading_launchd_under_restart_lock(
+            now=now,
+            run_cmd=run_cmd,
+            repo_root=repo_root,
+            state_root=resolved_state_root,
+            plist_path=plist_path,
+            status_path=status_path,
+        )
+    try:
+        with _live_restart_watchdog_lock(resolved_state_root) as acquired:
+            if not acquired:
+                return _live_trading_watchdog_write_status(
+                    {
+                        "ok": True,
+                        "action": "none",
+                        "reason": "deploy_restart_in_progress",
+                    },
+                    status_path=status_path,
+                )
+            return _recover_missing_live_trading_launchd_under_restart_lock(
+                now=now,
+                run_cmd=run_cmd,
+                repo_root=repo_root,
+                state_root=resolved_state_root,
+                plist_path=plist_path,
+                status_path=status_path,
+            )
+    except OSError as exc:
+        return _live_trading_watchdog_write_status(
+            {
+                "ok": False,
+                "action": "blocked",
+                "reason": "restart_lock_unavailable",
+                "detail": f"{type(exc).__name__}: {exc}",
+            },
+            status_path=status_path,
+        )
+
+
+def _recover_missing_live_trading_launchd_under_restart_lock(
     *,
     now: datetime | None = None,
     run_cmd: Any = subprocess.run,

@@ -1,10 +1,10 @@
-# Lifecycle: created=2026-06-12; last_reviewed=2026-07-15; last_reused=2026-07-15
+# Lifecycle: created=2026-06-12; last_reviewed=2026-07-16; last_reused=2026-07-16
 # Purpose: light smoke coverage for the three new ops scripts (zeus_status,
 #   deploy_live, generate_schema_cheatsheet).
 # Reuse: asserts the FAIL-SOFT contract (a locked/empty/missing DB degrades one
 #   section to ERR, the rest still render) and that each script runs read-only
 #   against temp DBs. No live DB is touched.
-# Last reused/audited: 2026-07-15
+# Last reused/audited: 2026-07-16
 # Authority basis: operator big-direction 2026-06-12 ("大方向现在也只是添加几个文件现在做")
 """Smoke tests for scripts/zeus_status.py, deploy_live.py, generate_schema_cheatsheet.py."""
 from __future__ import annotations
@@ -2863,6 +2863,11 @@ def test_deploy_live_live_restart_runs_recovery_before_preflight(monkeypatch, ca
         "_resume_entries_after_verified_live_restart_if_needed",
         _resume,
     )
+    monkeypatch.setattr(
+        dl,
+        "_live_restart_exclusive_lock",
+        contextlib.nullcontext,
+    )
 
     rc = dl.main(["restart", "live-trading"])
 
@@ -3116,6 +3121,11 @@ def test_deploy_live_all_restarts_sidecars_before_live_preflight(monkeypatch):
         "_wait_for_post_start_monitor_cadence",
         lambda **kwargs: (calls.append(("monitor", "post-start")) or (True, "monitor verified")),
     )
+    monkeypatch.setattr(
+        dl,
+        "_live_restart_exclusive_lock",
+        contextlib.nullcontext,
+    )
 
     rc = dl.main(["restart", "all"])
 
@@ -3192,6 +3202,11 @@ def test_deploy_live_preflight_failure_leaves_live_stopped(monkeypatch, capsys):
             calls.append(("prerequisite", tuple(labels))) or (True, "prerequisites verified")
         ),
     )
+    monkeypatch.setattr(
+        dl,
+        "_live_restart_exclusive_lock",
+        contextlib.nullcontext,
+    )
 
     rc = dl.main(["restart", "live-trading"])
 
@@ -3214,6 +3229,33 @@ def test_deploy_live_preflight_failure_leaves_live_stopped(monkeypatch, capsys):
     ]
     err = capsys.readouterr().err
     assert "live-trading left stopped" in err
+
+
+def test_deploy_live_restart_lock_excludes_watchdog_shared_lease(
+    monkeypatch,
+    tmp_path,
+):
+    dl = _load("deploy_live_restart_flock", "deploy_live.py")
+    monkeypatch.setattr(
+        dl,
+        "_live_restart_lock_path",
+        lambda: tmp_path / "deploy-live-restart.lock",
+    )
+
+    with dl._live_restart_exclusive_lock():
+        fd = dl.os.open(
+            dl._live_restart_lock_path(),
+            dl.os.O_RDWR | dl.os.O_CREAT,
+            0o644,
+        )
+        try:
+            with pytest.raises(BlockingIOError):
+                dl.fcntl.flock(
+                    fd,
+                    dl.fcntl.LOCK_SH | dl.fcntl.LOCK_NB,
+                )
+        finally:
+            dl.os.close(fd)
 
 
 def test_deploy_live_unknown_daemon_rejected(capsys):

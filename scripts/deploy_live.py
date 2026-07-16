@@ -5,7 +5,7 @@
 #   before booting the trading daemon.
 # Reuse: read-mostly (git status/rev-parse + launchctl list + preflight checks); the only
 #   state change is kickstart after the gates pass.
-# Last reused/audited: 2026-07-15
+# Last reused/audited: 2026-07-16
 # Authority basis: operator big-direction 2026-06-12 ("大方向现在也只是添加几个文件现在做") +
 #   incident: a `launchctl kickstart` booted a concurrent agent's mid-edit working tree
 #   into live money.
@@ -49,6 +49,7 @@ SAFETY
 from __future__ import annotations
 
 import argparse
+import fcntl
 import json
 import os
 import plistlib
@@ -57,6 +58,7 @@ import subprocess
 import sys
 import textwrap
 import time
+from contextlib import contextmanager, suppress
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -131,6 +133,7 @@ DAEMONS = {
     "heartbeat-sensor": "com.zeus.heartbeat-sensor",
 }
 LIVE_TRADING_LABEL = "com.zeus.live-trading"
+LIVE_RESTART_LOCK_FILENAME = "deploy-live-restart.lock"
 LIVE_TRADING_PREREQUISITE_LABELS = tuple(
     DAEMONS[key]
     for key in (
@@ -1227,7 +1230,58 @@ def _restart_labels_for_target(target: str) -> list[str] | None:
     return _dedupe_labels(labels)
 
 
+class LiveRestartLockError(RuntimeError):
+    """Raised when deploy cannot establish exclusive restart ownership."""
+
+
+def _live_restart_lock_path() -> Path:
+    return (
+        Path(_require_live_repo())
+        / "state"
+        / "locks"
+        / LIVE_RESTART_LOCK_FILENAME
+    )
+
+
+@contextmanager
+def _live_restart_exclusive_lock():
+    """Serialize deploy with the heartbeat watchdog bootstrap critical section."""
+
+    path = _live_restart_lock_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd = -1
+    try:
+        fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o644)
+        fcntl.flock(fd, fcntl.LOCK_EX)
+    except OSError as exc:
+        if fd >= 0:
+            with suppress(OSError):
+                os.close(fd)
+        raise LiveRestartLockError(
+            f"cannot acquire live restart lock {path}: {exc}"
+        ) from exc
+    try:
+        os.ftruncate(fd, 0)
+        os.write(fd, f"{os.getpid()}\n".encode())
+        yield path
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
+
+
 def cmd_restart(args: argparse.Namespace) -> int:
+    labels = _restart_labels_for_target(args.daemon)
+    if labels is None or LIVE_TRADING_LABEL not in labels:
+        return _cmd_restart_locked(args)
+    try:
+        with _live_restart_exclusive_lock():
+            return _cmd_restart_locked(args)
+    except LiveRestartLockError as exc:
+        print(f"REFUSING to restart — {exc}", file=sys.stderr)
+        return 1
+
+
+def _cmd_restart_locked(args: argparse.Namespace) -> int:
     target = args.daemon
     labels = _restart_labels_for_target(target)
     if labels is None:
