@@ -1182,33 +1182,25 @@ def _run_opendata_track(
     _collector=None,
 ) -> dict:
     """Legacy ingest-main OpenData wrapper kept mutually exclusive with forecast-live-daemon."""
-    from src.data.dual_run_lock import (
-        OPENDATA_DAEMON_LOCK_KEY,
-        acquire_lock,
-        opendata_track_lock_key,
-    )
+    from src.data.dual_run_lock import acquire_opendata_track_lock
     from src.data.ecmwf_open_data import SOURCE_ID, collect_open_ens_cycle
 
     if _is_source_paused(SOURCE_ID):
         logger.info("_run_opendata_track(%s): paused_by_control_plane", track)
         return {"status": "paused_by_control_plane", "source": SOURCE_ID, "track": track}
-    with acquire_lock(
-        OPENDATA_DAEMON_LOCK_KEY,
-        shared=True,
+    with acquire_opendata_track_lock(
+        track,
         _locks_dir_override=_locks_dir_override,
-    ) as compatible:
-        if not compatible:
-            logger.info("_run_opendata_track(%s): skipped_legacy_lock_held", track)
+    ) as (acquired, held_lock_key):
+        if not acquired:
+            logger.info(
+                "_run_opendata_track(%s): skipped_lock_held key=%s",
+                track,
+                held_lock_key,
+            )
             return {"status": "skipped_lock_held", "source": SOURCE_ID, "track": track}
-        with acquire_lock(
-            opendata_track_lock_key(track),
-            _locks_dir_override=_locks_dir_override,
-        ) as acquired:
-            if not acquired:
-                logger.info("_run_opendata_track(%s): skipped_lock_held", track)
-                return {"status": "skipped_lock_held", "source": SOURCE_ID, "track": track}
-            collector = _collector or collect_open_ens_cycle
-            return collector(track=track)
+        collector = _collector or collect_open_ens_cycle
+        return collector(track=track)
 
 
 @_scheduler_job("ingest_opendata_startup_catch_up")

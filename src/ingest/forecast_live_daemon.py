@@ -643,8 +643,7 @@ def run_opendata_track(
     _now_utc: datetime | None = None,
 ) -> dict:
     from src.data.dual_run_lock import (
-        OPENDATA_DAEMON_LOCK_KEY,
-        acquire_lock,
+        acquire_opendata_track_lock,
         opendata_track_lock_key,
     )
     from src.data.ecmwf_open_data import SOURCE_ID, collect_open_ens_cycle
@@ -679,109 +678,96 @@ def run_opendata_track(
             "selection": identity.get("metadata"),
         }
 
-    with acquire_lock(
-        OPENDATA_DAEMON_LOCK_KEY,
-        shared=True,
+    with acquire_opendata_track_lock(
+        track,
         _locks_dir_override=_locks_dir_override,
-    ) as compatible:
-        if not compatible:
-            logger.info("forecast-live OpenData %s skipped_legacy_lock_held", track)
-            result = {"status": "skipped_lock_held", "source": SOURCE_ID, "track": track}
+    ) as (acquired, held_lock_key):
+        if not acquired:
+            logger.info(
+                "forecast-live OpenData %s skipped_lock_held key=%s",
+                track,
+                held_lock_key,
+            )
             if _job_conn is not None:
                 _write_job_run(
                     _job_conn,
                     identity=identity,
                     status="SKIPPED_LOCK_HELD",
                     now_utc=now,
-                    result=result,
+                    result={"status": "skipped_lock_held", "source": SOURCE_ID, "track": track},
                     reason_code="SKIPPED_LOCK_HELD",
-                    lock_key=OPENDATA_DAEMON_LOCK_KEY,
+                    lock_key=held_lock_key,
                 )
-            return result
-        with acquire_lock(track_lock_key, _locks_dir_override=_locks_dir_override) as acquired:
-            if not acquired:
-                logger.info("forecast-live OpenData %s skipped_lock_held", track)
-                result = {"status": "skipped_lock_held", "source": SOURCE_ID, "track": track}
-                if _job_conn is not None:
-                    _write_job_run(
-                        _job_conn,
-                        identity=identity,
-                        status="SKIPPED_LOCK_HELD",
-                        now_utc=now,
-                        result=result,
-                        reason_code="SKIPPED_LOCK_HELD",
-                        lock_key=track_lock_key,
-                    )
-                return result
-            collector = _collector or collect_open_ens_cycle
-            lock_acquired_at = _utcnow()
+            return {"status": "skipped_lock_held", "source": SOURCE_ID, "track": track}
+        collector = _collector or collect_open_ens_cycle
+        lock_acquired_at = _utcnow()
+        if _job_conn is not None:
+            _write_job_run(
+                _job_conn,
+                identity=identity,
+                status="RUNNING",
+                now_utc=now,
+                started_at=now,
+                lock_acquired_at=lock_acquired_at,
+                lock_key=track_lock_key,
+            )
+            _job_conn.commit()
+        collector_kwargs = _collector_cycle_kwargs(identity, now_utc=now)
+        try:
+            result = collector(track=track, **collector_kwargs)
+        except Exception as exc:
             if _job_conn is not None:
                 _write_job_run(
                     _job_conn,
                     identity=identity,
-                    status="RUNNING",
-                    now_utc=now,
-                    started_at=now,
-                    lock_acquired_at=lock_acquired_at,
-                    lock_key=track_lock_key,
-                )
-                _job_conn.commit()
-            collector_kwargs = _collector_cycle_kwargs(identity, now_utc=now)
-            try:
-                result = collector(track=track, **collector_kwargs)
-            except Exception as exc:
-                if _job_conn is not None:
-                    _write_job_run(
-                        _job_conn,
-                        identity=identity,
-                        status="FAILED",
-                        now_utc=_utcnow(),
-                        result={"status": "exception"},
-                        reason_code=f"EXCEPTION:{type(exc).__name__}:{exc}",
-                        started_at=now,
-                        lock_acquired_at=lock_acquired_at,
-                        lock_key=track_lock_key,
-                    )
-                raise
-            identity_mismatch = _collector_identity_mismatch(identity, result)
-            if identity_mismatch is not None:
-                failed_result = {
-                    **(result if isinstance(result, dict) else {}),
-                    "status": "identity_mismatch",
-                    "rows_failed": 1,
-                }
-                if _job_conn is not None:
-                    _write_job_run(
-                        _job_conn,
-                        identity=identity,
-                        status="FAILED",
-                        now_utc=_utcnow(),
-                        result=failed_result,
-                        reason_code=identity_mismatch,
-                        started_at=now,
-                        lock_acquired_at=lock_acquired_at,
-                        lock_key=track_lock_key,
-                    )
-                raise RuntimeError(identity_mismatch)
-            if _job_conn is not None:
-                status, reason_code, rows_written, rows_failed = _job_status_from_result(result)
-                enriched = {
-                    **result,
-                    "snapshots_inserted": result.get("snapshots_inserted", rows_written),
-                    "rows_failed": rows_failed,
-                }
-                _write_job_run(
-                    _job_conn,
-                    identity=identity,
-                    status=status,
+                    status="FAILED",
                     now_utc=_utcnow(),
-                    result=enriched,
-                    reason_code=reason_code,
+                    result={"status": "exception"},
+                    reason_code=f"EXCEPTION:{type(exc).__name__}:{exc}",
                     started_at=now,
                     lock_acquired_at=lock_acquired_at,
                     lock_key=track_lock_key,
                 )
-            return result
+            raise
+        identity_mismatch = _collector_identity_mismatch(identity, result)
+        if identity_mismatch is not None:
+            failed_result = {
+                **(result if isinstance(result, dict) else {}),
+                "status": "identity_mismatch",
+                "rows_failed": 1,
+            }
+            if _job_conn is not None:
+                _write_job_run(
+                    _job_conn,
+                    identity=identity,
+                    status="FAILED",
+                    now_utc=_utcnow(),
+                    result=failed_result,
+                    reason_code=identity_mismatch,
+                    started_at=now,
+                    lock_acquired_at=lock_acquired_at,
+                    lock_key=track_lock_key,
+                )
+            raise RuntimeError(identity_mismatch)
+        if _job_conn is not None:
+            status, reason_code, rows_written, rows_failed = _job_status_from_result(result)
+            enriched = {
+                **result,
+                "snapshots_inserted": result.get("snapshots_inserted", rows_written),
+                "rows_failed": rows_failed,
+            }
+            _write_job_run(
+                _job_conn,
+                identity=identity,
+                status=status,
+                now_utc=_utcnow(),
+                result=enriched,
+                reason_code=reason_code,
+                started_at=now,
+                lock_acquired_at=lock_acquired_at,
+                lock_key=track_lock_key,
+            )
+        return result
 
 
 def _run_opendata_track_if_due(

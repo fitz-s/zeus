@@ -138,3 +138,23 @@ def acquire_lock(
             lock_file.close()
         except Exception:
             pass
+
+
+@contextmanager
+def acquire_opendata_track_lock(
+    track: str,
+    *,
+    _locks_dir_override: Path | None = None,
+) -> Generator[tuple[bool, str], None, None]:
+    """Permit new runners to overlap by track without racing legacy owners."""
+    track_key = opendata_track_lock_key(track)
+    with acquire_lock(
+        OPENDATA_DAEMON_LOCK_KEY,
+        shared=True,
+        _locks_dir_override=_locks_dir_override,
+    ) as compatible:
+        if not compatible:
+            yield False, OPENDATA_DAEMON_LOCK_KEY
+            return
+        with acquire_lock(track_key, _locks_dir_override=_locks_dir_override) as acquired:
+            yield acquired, track_key
