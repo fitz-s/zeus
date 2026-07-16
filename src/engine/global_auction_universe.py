@@ -46,7 +46,7 @@ from src.solve.solver import (
 from src.state.snapshot_repo import snapshot_row_is_invalidated
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, init=False)
 class CurrentGlobalAuctionScope:
     """Complete probability-ready family set at one decision instant."""
 
@@ -55,42 +55,23 @@ class CurrentGlobalAuctionScope:
     scope_identity: str
     captured_at_utc: datetime
 
-    def __post_init__(self) -> None:
-        rows = tuple(sorted(self.events_by_family, key=lambda item: item[0]))
-        keys = tuple(family_key for family_key, _ in rows)
-        expected_keys = tuple(_event_family_key(event) for _, event in rows)
-        resolutions = tuple(
-            sorted(
-                (
-                    str(family_key),
-                    resolution_at.astimezone(timezone.utc),
-                )
-                for family_key, resolution_at in self.family_resolution_at_utc
-                if resolution_at.tzinfo is not None
-            )
-        )
-        resolution_keys = tuple(family_key for family_key, _ in resolutions)
-        expected_resolutions = tuple(
-            (family_key, _event_resolution_at_utc(event))
-            for family_key, event in rows
-        )
-        if (
-            not rows
-            or len(set(keys)) != len(keys)
-            or keys != expected_keys
-            or resolution_keys != keys
-            or resolutions != expected_resolutions
-            or not all(family_key and event.event_id for family_key, event in rows)
-            or self.captured_at_utc.tzinfo is None
-        ):
+    def __init__(
+        self,
+        *,
+        events: Sequence[OpportunityEvent],
+        captured_at_utc: datetime,
+    ) -> None:
+        if captured_at_utc.tzinfo is None:
             raise ValueError("current global auction scope is incomplete or ambiguous")
-        expected = current_global_auction_scope_identity(
-            tuple(event for _, event in rows)
-        )
-        if self.scope_identity != expected:
-            raise ValueError("current global auction scope identity mismatch")
+        rows, resolutions, identity = _current_global_scope_parts(events)
         object.__setattr__(self, "events_by_family", rows)
         object.__setattr__(self, "family_resolution_at_utc", resolutions)
+        object.__setattr__(self, "scope_identity", identity)
+        object.__setattr__(
+            self,
+            "captured_at_utc",
+            captured_at_utc,
+        )
 
     @property
     def family_keys(self) -> tuple[str, ...]:
@@ -1384,13 +1365,17 @@ def bind_current_global_probability_tokens(
     return rebound
 
 
-def _event_family(event: OpportunityEvent) -> tuple[str, str, str]:
+def _event_payload(event: OpportunityEvent) -> dict[str, object]:
     try:
         payload = json.loads(event.payload_json)
     except (TypeError, json.JSONDecodeError) as exc:
         raise ValueError("global universe event payload is invalid") from exc
     if not isinstance(payload, dict):
         raise ValueError("global universe event payload must be an object")
+    return payload
+
+
+def _payload_family(payload: Mapping[str, object]) -> tuple[str, str, str]:
     city = str(payload.get("city") or "").strip()
     target_date = str(payload.get("target_date") or "").strip()
     metric = str(payload.get("metric") or "").strip().lower()
@@ -1399,14 +1384,24 @@ def _event_family(event: OpportunityEvent) -> tuple[str, str, str]:
     return city, target_date, metric
 
 
-def _event_probability_identity(event: OpportunityEvent) -> str:
-    payload = json.loads(event.payload_json)
+def _event_family(event: OpportunityEvent) -> tuple[str, str, str]:
+    return _payload_family(_event_payload(event))
+
+
+def _payload_probability_identity(
+    event: OpportunityEvent,
+    payload: Mapping[str, object],
+) -> str:
     return str(
         payload.get("source_run_id")
         or payload.get("snapshot_hash")
         or event.causal_snapshot_id
         or ""
     ).strip()
+
+
+def _event_probability_identity(event: OpportunityEvent) -> str:
+    return _payload_probability_identity(event, _event_payload(event))
 
 
 def _event_family_key(event: OpportunityEvent) -> str:
@@ -1418,16 +1413,20 @@ def _event_family_key(event: OpportunityEvent) -> str:
     )
 
 
-def _event_resolution_at_utc(event: OpportunityEvent) -> datetime:
-    """Current family resolution horizon: the end of its settlement-local day."""
-
-    payload = json.loads(event.payload_json)
-    city, target_date, _metric = _event_family(event)
+def _payload_resolution_at_utc(
+    payload: Mapping[str, object],
+    family: tuple[str, str, str],
+    *,
+    city_configs: Mapping[str, object] | None = None,
+) -> datetime:
+    city, target_date, _metric = family
     timezone_name = str(payload.get("city_timezone") or "").strip()
     if not timezone_name:
-        from src.config import runtime_cities_by_name
+        if city_configs is None:
+            from src.config import runtime_cities_by_name
 
-        city_config = runtime_cities_by_name().get(city)
+            city_configs = runtime_cities_by_name()
+        city_config = city_configs.get(city)
         timezone_name = str(
             getattr(city_config, "timezone", "") or ""
         ).strip()
@@ -1449,32 +1448,76 @@ def _event_resolution_at_utc(event: OpportunityEvent) -> datetime:
     return resolution_local.astimezone(timezone.utc)
 
 
+def _event_resolution_at_utc(event: OpportunityEvent) -> datetime:
+    """Current family resolution horizon: the end of its settlement-local day."""
+
+    payload = _event_payload(event)
+    return _payload_resolution_at_utc(payload, _payload_family(payload))
+
+
+def _current_global_scope_parts(
+    events: Sequence[OpportunityEvent],
+) -> tuple[
+    tuple[tuple[str, OpportunityEvent], ...],
+    tuple[tuple[str, datetime], ...],
+    str,
+]:
+    from src.config import runtime_cities_by_name
+
+    city_configs = runtime_cities_by_name()
+    facts: list[tuple[str, OpportunityEvent, str, datetime]] = []
+    for event in events:
+        payload = _event_payload(event)
+        family = _payload_family(payload)
+        family_key = weather_family_id(
+            city=family[0],
+            target_date=family[1],
+            metric=family[2],
+        )
+        probability_identity = _payload_probability_identity(event, payload)
+        if not probability_identity:
+            raise ValueError("global universe event lacks probability identity")
+        facts.append(
+            (
+                family_key,
+                event,
+                probability_identity,
+                _payload_resolution_at_utc(
+                    payload,
+                    family,
+                    city_configs=city_configs,
+                ),
+            )
+        )
+    facts.sort(key=lambda row: row[0])
+    if not facts or len({row[0] for row in facts}) != len(facts):
+        raise ValueError("global universe must contain one event per family")
+
+    digest = hashlib.sha256()
+    for family_key, _event, probability_identity, resolution_at in facts:
+        digest.update(
+            repr(
+                (
+                    family_key,
+                    probability_identity,
+                    resolution_at.isoformat(),
+                )
+            ).encode("utf-8")
+        )
+        digest.update(b"\x1f")
+    return (
+        tuple((family_key, event) for family_key, event, _, _ in facts),
+        tuple((family_key, resolution_at) for family_key, _, _, resolution_at in facts),
+        digest.hexdigest(),
+    )
+
+
 def current_global_auction_scope_identity(
     events: Sequence[OpportunityEvent],
 ) -> str:
     """Hash each current probability carrier and its settlement-time horizon."""
 
-    rows = []
-    for event in events:
-        family_key = _event_family_key(event)
-        probability_identity = _event_probability_identity(event)
-        if not probability_identity:
-            raise ValueError("global universe event lacks probability identity")
-        rows.append(
-            (
-                family_key,
-                probability_identity,
-                _event_resolution_at_utc(event).isoformat(),
-            )
-        )
-    rows.sort()
-    if not rows or len({family_key for family_key, _, _ in rows}) != len(rows):
-        raise ValueError("global universe must contain one event per family")
-    digest = hashlib.sha256()
-    for row in rows:
-        digest.update(repr(row).encode("utf-8"))
-        digest.update(b"\x1f")
-    return digest.hexdigest()
+    return _current_global_scope_parts(events)[2]
 
 
 def current_global_auction_scope_from_events(
@@ -1482,17 +1525,8 @@ def current_global_auction_scope_from_events(
     *,
     captured_at_utc: datetime,
 ) -> CurrentGlobalAuctionScope:
-    rows = []
-    for event in events:
-        rows.append((_event_family_key(event), event))
-    resolutions = tuple(
-        (family_key, _event_resolution_at_utc(event))
-        for family_key, event in rows
-    )
     return CurrentGlobalAuctionScope(
-        events_by_family=tuple(rows),
-        family_resolution_at_utc=resolutions,
-        scope_identity=current_global_auction_scope_identity(events),
+        events=events,
         captured_at_utc=captured_at_utc,
     )
 

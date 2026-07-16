@@ -5828,6 +5828,32 @@ def test_global_scope_is_independent_of_the_reactor_page_and_current_q_identity(
     }
 
 
+def test_global_scope_decodes_each_immutable_event_once(monkeypatch):
+    events = (
+        _global_scope_event(city="Chicago", source_run_id="posterior-chicago"),
+        _global_scope_event(city="London", source_run_id="posterior-london"),
+    )
+    real_loads = json.loads
+    decoded = 0
+
+    def _counting_loads(value):
+        nonlocal decoded
+        decoded += 1
+        return real_loads(value)
+
+    monkeypatch.setattr(universe.json, "loads", _counting_loads)
+
+    scope = current_global_auction_scope_from_events(
+        events,
+        captured_at_utc=_dt.datetime(
+            2026, 7, 10, 8, 0, tzinfo=_dt.timezone.utc
+        ),
+    )
+
+    assert len(scope.events) == 2
+    assert decoded == 2
+
+
 def test_global_scope_identity_binds_settlement_timezone_horizon():
     decision_at = _dt.datetime(2026, 7, 10, 8, 0, tzinfo=_dt.timezone.utc)
     utc = current_global_auction_scope_from_events(
