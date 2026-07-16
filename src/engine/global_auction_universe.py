@@ -293,9 +293,15 @@ def _global_book_snapshot_rows(
                 continue
             condition_id = str(raw_condition or "").strip()
             token_id = str(raw_token or "").strip()
-            if condition_id:
+            if condition_id and invalidated_at > condition_invalidated_at.get(
+                condition_id,
+                datetime.min.replace(tzinfo=timezone.utc),
+            ):
                 condition_invalidated_at[condition_id] = invalidated_at
-            if token_id:
+            if token_id and invalidated_at > token_invalidated_at.get(
+                token_id,
+                datetime.min.replace(tzinfo=timezone.utc),
+            ):
                 token_invalidated_at[token_id] = invalidated_at
 
     def snapshot_invalidated(row: Mapping[str, object]) -> bool:

@@ -5288,16 +5288,27 @@ def test_current_global_book_epoch_batches_snapshot_invalidation_truth():
         """
     )
     invalidated = probability.bindings[0]
-    conn.execute(
+    conn.executemany(
         """
         INSERT INTO executable_market_snapshot_invalidations VALUES (
-            'invalidate-one', ?, NULL, 'market_closed', ?, ?
+            ?, ?, ?, 'market_closed', ?, ?
         )
         """,
         (
-            invalidated.condition_id,
-            "2026-06-13T07:59:30+00:00",
-            "2026-06-13T07:59:30+00:00",
+            (
+                "invalidate-newer-token",
+                invalidated.condition_id,
+                "a-newer-token",
+                "2026-06-13T07:59:30+00:00",
+                "2026-06-13T07:59:30+00:00",
+            ),
+            (
+                "invalidate-older-token",
+                invalidated.condition_id,
+                "z-older-token",
+                "2026-06-13T07:58:30+00:00",
+                "2026-06-13T07:58:30+00:00",
+            ),
         ),
     )
     invalidation_reads = []
