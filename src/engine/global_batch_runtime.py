@@ -1297,21 +1297,25 @@ def process_current_global_batch(
         # epoch.  Only the selected winner is allowed to cross into the side-effect
         # path, where probability, exact book/curve, and free cash are rebuilt JIT.
         wealth_age = timedelta(seconds=float(COLLATERAL_SNAPSHOT_MAX_AGE_SECONDS))
-        selection_state = portfolio_state_provider() if portfolio_state_provider else None
-        if selection_state is None and hasattr(trade_conn, "execute"):
-            from src.state.portfolio import load_runtime_open_portfolio
 
-            selection_state = load_runtime_open_portfolio(trade_conn)
-        selection_wealth = current_portfolio_wealth_witness(
-            trade_conn,
-            decision_at_utc=(
-                book_epoch.captured_at_utc
-                if book_epoch is not None
-                else scope_at
-            ),
-            max_age=wealth_age,
-            portfolio_state=selection_state,
-        )
+        def capture_selection_wealth():
+            state = portfolio_state_provider() if portfolio_state_provider else None
+            if state is None and hasattr(trade_conn, "execute"):
+                from src.state.portfolio import load_runtime_open_portfolio
+
+                state = load_runtime_open_portfolio(trade_conn)
+            # Wealth is a selection-time fact.  Validating a newly refreshed ledger
+            # row against the earlier book-capture clock can falsely classify the
+            # row as future data when the collateral heartbeat lands mid-auction.
+            witness = current_portfolio_wealth_witness(
+                trade_conn,
+                decision_at_utc=current_time(),
+                max_age=wealth_age,
+                portfolio_state=state,
+            )
+            return state, witness
+
+        selection_state, selection_wealth = capture_selection_wealth()
 
         def select_once(
             attempt_probabilities: Mapping[str, object],
@@ -1649,6 +1653,11 @@ def process_current_global_batch(
                     }
                     probabilities_fence = next_probabilities
                     attempt_book_epoch = next_book_epoch
+                    selection_state, selection_wealth = capture_selection_wealth()
+                    auction_deadline = (
+                        attempt_book_epoch.captured_at_utc
+                        + attempt_book_epoch.max_age
+                    )
                     # Candidate exclusions are observations of one selected-token
                     # JIT book.  A newer complete book epoch invalidates that local
                     # evidence, so every candidate must be eligible for a fresh JIT

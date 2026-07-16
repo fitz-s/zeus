@@ -5827,12 +5827,16 @@ def test_global_one_shot_actuator_refuses_second_consumption():
     assert calls == ["first"]
 
 
-def _global_test_book(identity: str, *, price: str):
+def _global_test_book(
+    identity: str,
+    *,
+    price: str,
+    captured_at: _dt.datetime | None = None,
+):
     return SimpleNamespace(
         witness_identity=identity,
-        captured_at_utc=_dt.datetime(
-            2026, 7, 10, 8, 0, tzinfo=_dt.timezone.utc
-        ),
+        captured_at_utc=captured_at
+        or _dt.datetime(2026, 7, 10, 8, 0, tzinfo=_dt.timezone.utc),
         max_age=_dt.timedelta(seconds=30),
         assets=(
             SimpleNamespace(
@@ -5884,7 +5888,7 @@ def test_global_batch_reauctions_once_on_full_universe_curve_drift(monkeypatch):
         actuation_identity="actuation-b-fence", wealth_witness_identity="wealth-1"
     )
     actuation_b_final = SimpleNamespace(
-        actuation_identity="actuation-b-final", wealth_witness_identity="wealth-1"
+        actuation_identity="actuation-b-final", wealth_witness_identity="wealth-2"
     )
     selections = iter(
         SimpleNamespace(
@@ -5899,12 +5903,23 @@ def test_global_batch_reauctions_once_on_full_universe_curve_drift(monkeypatch):
     )
     books = iter(
         (
-            _global_test_book("book-1", price="0.41"),
-            _global_test_book("book-2", price="0.42"),
+            _global_test_book("book-1", price="0.41", captured_at=decision_at),
+            _global_test_book(
+                "book-2",
+                price="0.42",
+                captured_at=decision_at + _dt.timedelta(seconds=10),
+            ),
         )
     )
     replacement_candidate = object()
-    calls = {"prepare": 0, "books": 0, "wealth": 0, "preflight": [], "venue": 0}
+    calls = {
+        "prepare": 0,
+        "books": 0,
+        "wealth": 0,
+        "preflight": [],
+        "deadlines": [],
+        "venue": 0,
+    }
 
     monkeypatch.setattr(
         global_batch_runtime, "scan_current_global_auction_scope", lambda **_: scope
@@ -5947,8 +5962,9 @@ def test_global_batch_reauctions_once_on_full_universe_curve_drift(monkeypatch):
         calls["books"] += 1
         return probabilities, next(books)
 
-    def preflight(event, _actuation, _at, _authority):
+    def preflight(event, _actuation, _at, authority):
         calls["preflight"].append(event.event_id)
+        calls["deadlines"].append(authority.actuation_deadline)
         if len(calls["preflight"]) == 1:
             return global_batch_runtime.GlobalWinnerPreflight(
                 status="CURVE_SUPERSEDED",
@@ -5996,13 +6012,107 @@ def test_global_batch_reauctions_once_on_full_universe_curve_drift(monkeypatch):
     assert calls == {
         "prepare": 2,
         "books": 2,
-        "wealth": 1,
+        "wealth": 2,
         "preflight": [event_b.event_id, event_b.event_id],
+        "deadlines": [
+            decision_at + _dt.timedelta(seconds=30),
+            decision_at + _dt.timedelta(seconds=40),
+        ],
         "venue": 1,
     }
     assert result.winner_event_id == event_b.event_id
     assert result.venue_submit_count == 1
     assert result.receipts[event_b.event_id].submitted is True
+
+
+def test_global_batch_validates_wealth_on_selection_clock_not_book_clock(
+    monkeypatch,
+):
+    decision_at = _dt.datetime(2026, 7, 10, 8, 0, tzinfo=_dt.timezone.utc)
+    book_at = decision_at + _dt.timedelta(seconds=1)
+    wealth_at = decision_at + _dt.timedelta(seconds=20)
+    selection_at = decision_at + _dt.timedelta(seconds=21)
+    event = _global_scope_event(city="Alpha", source_run_id="run-a")
+    scope = current_global_auction_scope_from_events(
+        (event,), captured_at_utc=decision_at
+    )
+    family_key = scope.family_keys[0]
+    prepared = SimpleNamespace(
+        probability_witness=SimpleNamespace(
+            family_key=family_key,
+            captured_at_utc=decision_at,
+            posterior_identity_hash="run-a",
+            witness_identity="q-run-a",
+        )
+    )
+    times = iter((decision_at, book_at, wealth_at, selection_at))
+    wealth_checks = []
+
+    monkeypatch.setattr(
+        global_batch_runtime, "scan_current_global_auction_scope", lambda **_: scope
+    )
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "replace",
+        lambda value, **changes: SimpleNamespace(**(vars(value) | changes)),
+    )
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "current_portfolio_wealth_witness",
+        lambda *_, **kwargs: (
+            wealth_checks.append(kwargs["decision_at_utc"])
+            or SimpleNamespace(
+                spendable_cash_usd=Decimal("10"),
+                witness_identity="wealth",
+                economic_identity="wealth-economics",
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "select_prepared_global_auction",
+        lambda *_, **__: SimpleNamespace(
+            decision=SimpleNamespace(
+                candidate=None,
+                no_trade_reason="NO_CURRENT_EDGE",
+            ),
+            winner_event_id=None,
+            actuation=None,
+        ),
+    )
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "_store_global_auction_receipt",
+        lambda *_, **__: 1,
+    )
+
+    result = global_batch_runtime.process_current_global_batch(
+        (event,),
+        decision_time=decision_at,
+        world_conn=object(),
+        forecast_conn=object(),
+        trade_conn=object(),
+        payload_reader=lambda current: json.loads(current.payload_json),
+        prepare_event=lambda current, _at: EventSubmissionReceipt(
+            False,
+            current.event_id,
+            current.causal_snapshot_id,
+            prepared_global_family=prepared,
+        ),
+        actuate_winner=lambda *_: pytest.fail("no-trade must not actuate"),
+        stamp_receipt=lambda receipt: receipt,
+        venue_submit_count=lambda: 0,
+        current_execution=lambda *_: object(),
+        current_time_provider=lambda: next(times),
+        current_book_epoch_provider=lambda probabilities, _at: (
+            probabilities,
+            _global_test_book("book", price="0.40", captured_at=book_at),
+        ),
+    )
+
+    assert wealth_checks == [wealth_at]
+    assert result.winner_event_id is None
+    assert set(result.receipts) == {event.event_id}
 
 
 def test_global_batch_reauctions_with_tightened_candidate_q(monkeypatch):
@@ -6499,7 +6609,7 @@ def test_global_batch_candidate_block_keeps_sibling_and_reproves_after_book_refr
 
     assert calls == {
         "select": 3,
-        "wealth": 1,
+        "wealth": 2,
         "preflight": ["candidate-a", "candidate-b", "candidate-a"],
         "books": 2,
         "venue": 1,
@@ -6794,6 +6904,7 @@ def test_global_batch_stable_preflight_cannot_cross_epoch_deadline(monkeypatch):
     calls = {"preflight": 0, "venue": 0}
     current_times = iter(
         (
+            decision_at,
             decision_at,
             decision_at,
             decision_at,
