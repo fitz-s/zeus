@@ -283,15 +283,6 @@ speculative book batch unusable and falls back to the ordinary current capture/f
 This changes latency only; q, Fractional Kelly, BUY/SELL/HOLD/CASH ranking, operator pause, and
 venue actuation law are unchanged.
 
-**Entry-pause economic scope.** An entry pause blocks new BUY risk, not the management of current
-endowment. Before probability preparation or book capture, the live global auction reads the same
-durable entry-pause authority used at preflight. With no canonical held family, the claimed entry
-batch is requeued immediately under the existing transient pause reason. With held exposure, the
-active probability/book scope is restricted to those held families; candidate policy excludes BUY
-but preserves reduce-only SELL/HOLD/CASH. The final preflight and executor pause checks remain as
-race-safe defenses. A pause transition cannot authorize a BUY, and an unreadable pause authority
-continues to fail closed for new risk.
-
 **Native-side materialization closure.** A complete current book epoch already binds every native
 YES and NO token to one typed state: `EXECUTABLE`, `NO_ASK`, `VENUE_NOT_EXECUTABLE`, or
 `VENUE_METADATA_STALE`. Before any venue side effect, receipt schema v12 requires the
