@@ -136,9 +136,11 @@ def test_replacement_availability_fast_poll_skips_heavy_path_when_source_clock_c
         "_replacement_forecast_live_materialization_queue_config",
         lambda: {"download_current_targets_enabled": True},
     )
+    call_order: list[str] = []
     probe_kwargs: list[dict[str, object]] = []
 
     def _probe(**kwargs):
+        call_order.append("probe")
         probe_kwargs.append(kwargs)
         return _NoChange()
 
@@ -149,7 +151,9 @@ def test_replacement_availability_fast_poll_skips_heavy_path_when_source_clock_c
     monkeypatch.setattr(
         prod,
         "_download_replacement_forecast_current_targets_if_needed",
-        lambda cfg, **_kwargs: current_target_calls.append(dict(cfg)) or {
+        lambda cfg, **_kwargs: call_order.append("current_targets")
+        or current_target_calls.append(dict(cfg))
+        or {
             "status": "CURRENT_TARGETS_HAVE_RAW_MANIFESTS",
             "coverage": {
                 "status": "CURRENT_TARGETS_MISSING_REPLACEMENT_COVERAGE",
@@ -178,6 +182,7 @@ def test_replacement_availability_fast_poll_skips_heavy_path_when_source_clock_c
     assert result["current_target_download"]["coverage"]["missing_coverage_count"] == 1
     assert current_target_calls == [{"download_current_targets_enabled": True}]
     assert probe_kwargs == [{"advance_cursor": False}]
+    assert call_order == ["probe", "current_targets"]
 
 
 def test_replacement_materializer_default_limit_matches_seed_burst(monkeypatch) -> None:
@@ -213,8 +218,10 @@ def test_replacement_availability_fast_poll_passes_changed_source_clock_report(m
             }
 
     changed_report = _Changed()
+    call_order: list[str] = []
 
     def _scoped_path(cfg, *, source_clock_report=None, max_wall_clock_seconds=None):
+        call_order.append("scoped_download")
         assert cfg["download_current_targets_enabled"] is True
         assert source_clock_report is changed_report
         assert max_wall_clock_seconds == 45.0
@@ -232,16 +239,22 @@ def test_replacement_availability_fast_poll_passes_changed_source_clock_report(m
     probe_kwargs: list[dict[str, object]] = []
 
     def _probe(**kwargs):
+        call_order.append("probe")
         probe_kwargs.append(kwargs)
         return changed_report
 
     monkeypatch.setattr(source_clock_probe, "probe_openmeteo_source_clock_updates", _probe)
-    monkeypatch.setattr(source_clock_probe, "advance_source_clock_cursor", lambda report: ())
+    monkeypatch.setattr(
+        source_clock_probe,
+        "advance_source_clock_cursor",
+        lambda report: call_order.append("cursor") or (),
+    )
     monkeypatch.setattr(prod, "_download_bayes_precision_fusion_source_clock_raw_inputs_if_needed", _scoped_path)
     monkeypatch.setattr(
         prod,
         "_download_replacement_forecast_current_targets_if_needed",
-        lambda cfg, **_kwargs: {
+        lambda cfg, **_kwargs: call_order.append("current_targets")
+        or {
             "status": "CURRENT_TARGETS_HAVE_RAW_MANIFESTS",
             "available_cycle": "2026-07-02T12:00:00+00:00",
             "coverage": {
@@ -258,12 +271,14 @@ def test_replacement_availability_fast_poll_passes_changed_source_clock_report(m
     monkeypatch.setattr(
         prod,
         "_enqueue_fusion_upgrade_reseeds_if_needed",
-        lambda cfg: {"status": "FUSION_UPGRADE_TRIGGER", "seeds_enqueued": 1},
+        lambda cfg: call_order.append("fusion_reseed")
+        or {"status": "FUSION_UPGRADE_TRIGGER", "seeds_enqueued": 1},
     )
     monkeypatch.setattr(
         prod,
         "_enqueue_cycle_advance_reseeds_if_needed",
-        lambda cfg: {
+        lambda cfg: call_order.append("cycle_reseed")
+        or {
             "status": "CYCLE_ADVANCE_TRIGGER",
             "seeds_enqueued": 2,
             "advances_detected": 2,
@@ -282,6 +297,14 @@ def test_replacement_availability_fast_poll_passes_changed_source_clock_report(m
     assert result["cycle_advance_detail"]["held_advances_detected"] == 1
     assert result["source_clock_cursor_advanced_sources"] == ()
     assert probe_kwargs == [{"advance_cursor": False}]
+    assert call_order == [
+        "probe",
+        "scoped_download",
+        "fusion_reseed",
+        "cycle_reseed",
+        "cursor",
+        "current_targets",
+    ]
 
 
 def test_replacement_availability_poll_timebox_keeps_reseed_path_alive(monkeypatch) -> None:

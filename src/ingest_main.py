@@ -1429,34 +1429,41 @@ def _replacement_availability_poll_tick():
                 }
         return report
 
-    current_target_download_report = None
-    current_target_timeout = _replacement_current_target_poll_timeout_seconds(
-        _replacement_availability_poll_seconds()
-    )
-    try:
-        current_target_download_report = (
-            _download_replacement_forecast_current_targets_if_needed(
-                cfg,
-                max_wall_clock_seconds=current_target_timeout,
-            )
+    def _download_current_targets():
+        current_target_timeout = _replacement_current_target_poll_timeout_seconds(
+            _replacement_availability_poll_seconds()
         )
-    except TimeoutError as exc:
-        current_target_download_report = {
-            "status": "CURRENT_TARGET_DOWNLOAD_TIMEOUT",
-            "timeout_seconds": current_target_timeout,
-            "error": str(exc)[:240],
-        }
-        logger.warning("replacement current-target download timeboxed: %s", current_target_download_report)
-    except Exception as exc:  # noqa: BLE001 - source-clock/reseed must still run.
-        current_target_download_report = {
-            "status": "CURRENT_TARGET_DOWNLOAD_FAILSOFT",
-            "error": f"{type(exc).__name__}: {str(exc)[:220]}",
-        }
-        logger.warning("replacement current-target download failed fail-soft: %s", exc, exc_info=True)
-    current_target_download_compact = _compact_current_target_report(current_target_download_report)
+        try:
+            return _download_replacement_forecast_current_targets_if_needed(
+                cfg, max_wall_clock_seconds=current_target_timeout
+            )
+        except TimeoutError as exc:
+            report = {
+                "status": "CURRENT_TARGET_DOWNLOAD_TIMEOUT",
+                "timeout_seconds": current_target_timeout,
+                "error": str(exc)[:240],
+            }
+            logger.warning("replacement current-target download timeboxed: %s", report)
+            return report
+        except Exception as exc:  # noqa: BLE001 - source-clock/reseed must still run.
+            logger.warning(
+                "replacement current-target download failed fail-soft: %s",
+                exc,
+                exc_info=True,
+            )
+            return {
+                "status": "CURRENT_TARGET_DOWNLOAD_FAILSOFT",
+                "error": f"{type(exc).__name__}: {str(exc)[:220]}",
+            }
+
+    # The public source clock owns this latency path. Generic target repair may
+    # consume most of the poll cadence, so it must never delay detecting a new run.
     source_clock_report = probe_openmeteo_source_clock_updates(advance_cursor=False)
     source_clock_payload = source_clock_report.as_dict()
     if not source_clock_report.updated_sources:
+        current_target_download_compact = _compact_current_target_report(
+            _download_current_targets()
+        )
         report: dict[str, object] = {
             "status": "SOURCE_CLOCK_POLL_CURRENT",
             "source_clock_status": source_clock_payload.get("status"),
@@ -1485,13 +1492,27 @@ def _replacement_availability_poll_tick():
             "source_clock_affected_cities": source_clock_payload.get("affected_cities", []),
             "source_clock_error": source_clock_payload.get("error"),
         }
-    if current_target_download_compact is not None:
-        report["current_target_download"] = current_target_download_compact
+    # Publish the changed-source work before generic current-target maintenance.
+    # The forecast materializer can consume these idempotent seeds immediately.
     report = _attach_reseed_reports(report)
     if source_clock_scoped_download_allows_cursor_advance(report):
         report["source_clock_cursor_advanced_sources"] = advance_source_clock_cursor(source_clock_report)
     else:
         report["source_clock_cursor_advanced_sources"] = ()
+
+    current_target_download_report = _download_current_targets()
+    current_target_download_compact = _compact_current_target_report(
+        current_target_download_report
+    )
+    if current_target_download_compact is not None:
+        report["current_target_download"] = current_target_download_compact
+    if (
+        isinstance(current_target_download_report, dict)
+        and int(current_target_download_report.get("written_row_count") or 0) > 0
+    ):
+        maintenance_reseed = _attach_reseed_reports({})
+        if maintenance_reseed:
+            report["current_target_reseed"] = maintenance_reseed
     logger.info("replacement source-clock scoped download report: %s", report)
     return report
 
