@@ -1587,7 +1587,7 @@ def build_replacement_forecast_current_target_plan(
                           {readiness_source_run_clause}
                     ) AS readiness_count
                 FROM targets
-                ORDER BY targets.target_date DESC, targets.city, targets.temperature_metric
+                ORDER BY targets.target_date, targets.city, targets.temperature_metric
                 {sql_limit}
                 """,
                 (
@@ -1644,7 +1644,7 @@ def build_replacement_forecast_current_target_plan(
                 FROM targets
                 LEFT JOIN posteriors USING (city, target_date, temperature_metric)
                 LEFT JOIN readiness USING (city, target_date, temperature_metric)
-                ORDER BY targets.target_date DESC, targets.city, targets.temperature_metric
+                ORDER BY targets.target_date, targets.city, targets.temperature_metric
                 {sql_limit}
                 """,
                 (minimum_target_date, SOURCE_ID, SOURCE_ID),

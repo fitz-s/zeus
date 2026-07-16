@@ -812,6 +812,37 @@ def test_current_target_plan_classifies_covered_seedable_and_missing_manifest_ta
     assert download_plan["fusion_current_value_missing_targets"] == []
 
 
+def test_current_target_plan_orders_nearest_market_date_first(tmp_path) -> None:
+    db = tmp_path / "forecasts.db"
+    _create_db(db)
+    conn = sqlite3.connect(db)
+    try:
+        conn.execute(
+            "UPDATE market_events SET target_date='2026-06-10' WHERE city='London'"
+        )
+        conn.execute(
+            """
+            UPDATE source_run_coverage
+               SET target_local_date='2026-06-10'
+             WHERE city='London'
+            """
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    plan = build_replacement_forecast_current_target_plan(
+        db,
+        now_utc=datetime(2026, 6, 7, 12, 0, tzinfo=timezone.utc),
+    )
+
+    assert [row.target_date for row in plan.rows] == [
+        "2026-06-09",
+        "2026-06-09",
+        "2026-06-10",
+    ]
+
+
 def test_current_target_plan_reseeds_old_probability_semantics(tmp_path) -> None:
     db = tmp_path / "forecasts.db"
     _create_db(db)
