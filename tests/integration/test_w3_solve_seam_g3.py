@@ -2440,7 +2440,7 @@ def test_live_adapter_routes_each_global_truth_to_its_owner(monkeypatch):
         portfolio_state_provider=lambda: pytest.fail(
             "cycle-start portfolio must not back global selection wealth"
         ),
-        entry_capacity_authority=CapacityAuthority(),
+        auction_capital_authority=CapacityAuthority(),
     )
     event = _global_scope_event(city="Dallas", source_run_id="run-dallas")
 

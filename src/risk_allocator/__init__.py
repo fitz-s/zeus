@@ -7,8 +7,8 @@
 from src.risk_allocator.governor import (
     AllocationDecision,
     AllocationDenied,
+    AuctionCapitalAuthority,
     CapPolicy,
-    EntryCapacityAuthority,
     ExposureLot,
     GovernorState,
     PortfolioGovernor,
@@ -28,15 +28,15 @@ from src.risk_allocator.governor import (
     load_position_lots,
     refresh_global_allocator,
     select_global_order_type,
-    snapshot_global_entry_capacity_authority,
+    snapshot_global_auction_capital_authority,
     summary,
 )
 
 __all__ = [
     "AllocationDecision",
     "AllocationDenied",
+    "AuctionCapitalAuthority",
     "CapPolicy",
-    "EntryCapacityAuthority",
     "ExposureLot",
     "GovernorState",
     "PortfolioGovernor",
@@ -56,6 +56,6 @@ __all__ = [
     "load_position_lots",
     "refresh_global_allocator",
     "select_global_order_type",
-    "snapshot_global_entry_capacity_authority",
+    "snapshot_global_auction_capital_authority",
     "summary",
 ]

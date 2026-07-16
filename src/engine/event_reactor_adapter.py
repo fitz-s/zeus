@@ -264,7 +264,7 @@ from src.contracts.settlement_semantics import SettlementSemantics
 from src.strategy.market_fusion import MODEL_ONLY_POSTERIOR_MODE
 
 if TYPE_CHECKING:
-    from src.risk_allocator import EntryCapacityAuthority
+    from src.risk_allocator import AuctionCapitalAuthority
 from src.strategy.market_phase import (
     MarketPhase,
     FORECAST_ONLY_ADMIT_PHASES as _FORECAST_ONLY_ADMIT_PHASES,
@@ -4675,7 +4675,7 @@ def event_bound_live_adapter_from_trade_conn(
     edli_live_scope: str = "forecast_plus_day0",
     family_snapshot_refresher: "FamilySnapshotRefresher | None" = None,
     entry_live_health_authority_provider: Callable[[], Mapping[str, object] | None] | None = None,
-    entry_capacity_authority: "EntryCapacityAuthority | None" = None,
+    auction_capital_authority: "AuctionCapitalAuthority | None" = None,
 ) -> Callable[[OpportunityEvent, datetime], EventSubmissionReceipt]:
     """Build the event-bound live certificate chain up to the executor boundary.
 
@@ -4689,10 +4689,10 @@ def event_bound_live_adapter_from_trade_conn(
     adapter instance (== per reactor cycle).
     """
 
-    if entry_capacity_authority is None:
-        from src.risk_allocator import snapshot_global_entry_capacity_authority
+    if auction_capital_authority is None:
+        from src.risk_allocator import snapshot_global_auction_capital_authority
 
-        entry_capacity_authority = snapshot_global_entry_capacity_authority()
+        auction_capital_authority = snapshot_global_auction_capital_authority()
 
     # Live production scope is forecast_plus_day0 only. Forecast and Day0 events
     # both use this same execution adapter; unknown events fail closed before the
@@ -6017,7 +6017,7 @@ def event_bound_live_adapter_from_trade_conn(
             market_event_id,
             _owner_event_id,
         ):
-            return entry_capacity_authority.capacity_usd(
+            return auction_capital_authority.capacity_usd(
                 market_id=str(gamma_market_id),
                 event_id=str(market_event_id),
                 resolution_window="default",

@@ -40,7 +40,7 @@ from src.risk_allocator import (
     load_position_lots,
     refresh_global_allocator,
     select_global_order_type,
-    snapshot_global_entry_capacity_authority,
+    snapshot_global_auction_capital_authority,
     summary as risk_allocator_summary,
 )
 from src.riskguard.risk_level import RiskLevel
@@ -217,7 +217,7 @@ def test_current_entry_capacity_exposes_same_remaining_envelope_as_submit_gate()
         clear_global_allocator()
 
 
-def test_entry_capacity_snapshot_survives_later_global_clear():
+def test_auction_capital_snapshot_excludes_transient_actuation_health():
     allocator = RiskAllocator(
         CapPolicy(max_per_market_micro=150_000_000),
         [
@@ -232,8 +232,26 @@ def test_entry_capacity_snapshot_survives_later_global_clear():
             )
         ],
     )
-    configure_global_allocator(allocator, _state())
-    authority = snapshot_global_entry_capacity_authority()
+    configure_global_allocator(
+        allocator,
+        _state(heartbeat_health=HeartbeatHealth.STARTING),
+    )
+    authority = snapshot_global_auction_capital_authority()
+
+    assert authority.capacity_usd(
+        market_id="m1",
+        event_id="e1",
+        resolution_window="day0",
+        correlation_key="corr-1",
+    ) == Decimal("50")
+    with pytest.raises(AllocationDenied) as excinfo:
+        current_global_entry_capacity_usd(
+            market_id="m1",
+            event_id="e1",
+            resolution_window="day0",
+            correlation_key="corr-1",
+        )
+    assert excinfo.value.decision.reason == "reduce_only_mode_active"
 
     clear_global_allocator()
 
@@ -244,7 +262,7 @@ def test_entry_capacity_snapshot_survives_later_global_clear():
         correlation_key="corr-1",
     ) == Decimal("50")
     with pytest.raises(AllocationDenied) as excinfo:
-        snapshot_global_entry_capacity_authority()
+        snapshot_global_auction_capital_authority()
     assert excinfo.value.decision.reason == "allocator_not_configured"
 
 

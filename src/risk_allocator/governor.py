@@ -220,17 +220,15 @@ class RiskAllocator:
 
         return cls(cap_policy, load_position_lots(conn))
 
-    def entry_capacity(
+    def auction_capacity(
         self,
         *,
         market_id: str,
         event_id: str,
         resolution_window: str,
         correlation_key: str,
-        governor_state: GovernorState,
-        reduce_only: bool = False,
     ) -> AllocationDecision:
-        """Return the current entry capacity shared by selection and submit."""
+        """Return structural capacity for one economic auction epoch."""
 
         market = str(market_id or "").strip()
         event = str(event_id or market).strip()
@@ -273,15 +271,7 @@ class RiskAllocator:
             "confirmed_exposure_micro": confirmed,
             "optimistic_exposure_micro": optimistic,
             "weighted_existing_exposure_micro": weighted_market,
-            "reduce_only": reduce_only,
         }
-        kill_reason = self.kill_switch_reason(governor_state)
-        if kill_reason:
-            return AllocationDecision(False, kill_reason, 0, **base)
-        if market in set(governor_state.unknown_side_effect_markets):
-            return AllocationDecision(False, "unknown_side_effect_same_market", 0, **base)
-        if self.reduce_only_mode_active(governor_state) and not reduce_only:
-            return AllocationDecision(False, "reduce_only_mode_active", 0, **base)
         for remaining, reason in (
             (remaining_market, "per_market_cap_exceeded"),
             (remaining_event, "per_event_cap_exceeded"),
@@ -291,6 +281,51 @@ class RiskAllocator:
             if remaining <= 0:
                 return AllocationDecision(False, reason, 0, **base)
         return AllocationDecision(True, "allowed", 0, **base)
+
+    def entry_capacity(
+        self,
+        *,
+        market_id: str,
+        event_id: str,
+        resolution_window: str,
+        correlation_key: str,
+        governor_state: GovernorState,
+        reduce_only: bool = False,
+    ) -> AllocationDecision:
+        """Return submit-time capacity including current actuation health."""
+
+        capacity = self.auction_capacity(
+            market_id=market_id,
+            event_id=event_id,
+            resolution_window=resolution_window,
+            correlation_key=correlation_key,
+        )
+        if capacity.reason == "allocation_scope_missing":
+            return capacity
+        market = str(market_id or "").strip()
+        kill_reason = self.kill_switch_reason(governor_state)
+        if kill_reason:
+            return replace(
+                capacity,
+                allowed=False,
+                reason=kill_reason,
+                reduce_only=reduce_only,
+            )
+        if market in set(governor_state.unknown_side_effect_markets):
+            return replace(
+                capacity,
+                allowed=False,
+                reason="unknown_side_effect_same_market",
+                reduce_only=reduce_only,
+            )
+        if self.reduce_only_mode_active(governor_state) and not reduce_only:
+            return replace(
+                capacity,
+                allowed=False,
+                reason="reduce_only_mode_active",
+                reduce_only=False,
+            )
+        return replace(capacity, reduce_only=reduce_only)
 
     def can_allocate(self, intent: ExecutionIntent, governor_state: GovernorState) -> AllocationDecision:
         requested = _intent_notional_micro(intent)
@@ -397,11 +432,10 @@ class RiskAllocator:
 
 
 @dataclass(frozen=True)
-class EntryCapacityAuthority:
-    """One immutable allocator/governor pair for one selection epoch."""
+class AuctionCapitalAuthority:
+    """One immutable exposure-and-capacity witness for one auction epoch."""
 
     allocator: RiskAllocator
-    governor_state: GovernorState
 
     def capacity_usd(
         self,
@@ -411,12 +445,11 @@ class EntryCapacityAuthority:
         resolution_window: str = "default",
         correlation_key: str = "",
     ) -> Decimal:
-        decision = self.allocator.entry_capacity(
+        decision = self.allocator.auction_capacity(
             market_id=market_id,
             event_id=event_id,
             resolution_window=resolution_window,
             correlation_key=correlation_key,
-            governor_state=self.governor_state,
         )
         if not decision.allowed:
             if decision.reason in {
@@ -483,45 +516,34 @@ _DEFAULT_ALLOCATOR = RiskAllocator()
 _GLOBAL_GOVERNOR: PortfolioGovernor | None = None
 _GLOBAL_ALLOCATOR: RiskAllocator | None = None
 _GLOBAL_GOVERNOR_STATE: GovernorState | None = None
-_GLOBAL_ENTRY_CAPACITY_AUTHORITY: EntryCapacityAuthority | None = None
 _GLOBAL_ALLOCATION_LOCK = RLock()
 
 
 def configure_global_allocator(allocator: RiskAllocator | None, governor_state: GovernorState | None = None) -> None:
-    global _GLOBAL_ALLOCATOR, _GLOBAL_GOVERNOR_STATE, _GLOBAL_ENTRY_CAPACITY_AUTHORITY
+    global _GLOBAL_ALLOCATOR, _GLOBAL_GOVERNOR_STATE
     with _GLOBAL_ALLOCATION_LOCK:
         _GLOBAL_ALLOCATOR = allocator
         _GLOBAL_GOVERNOR_STATE = governor_state
-        _GLOBAL_ENTRY_CAPACITY_AUTHORITY = (
-            EntryCapacityAuthority(allocator, governor_state)
-            if allocator is not None and governor_state is not None
-            else None
-        )
 
 
 def configure_global_governor_state(governor_state: GovernorState | None) -> None:
-    global _GLOBAL_GOVERNOR_STATE, _GLOBAL_ENTRY_CAPACITY_AUTHORITY
+    global _GLOBAL_GOVERNOR_STATE
     with _GLOBAL_ALLOCATION_LOCK:
         _GLOBAL_GOVERNOR_STATE = governor_state
-        _GLOBAL_ENTRY_CAPACITY_AUTHORITY = (
-            EntryCapacityAuthority(_GLOBAL_ALLOCATOR, governor_state)
-            if _GLOBAL_ALLOCATOR is not None and governor_state is not None
-            else None
-        )
 
 
 def clear_global_allocator() -> None:
     configure_global_allocator(None, None)
 
 
-def snapshot_global_entry_capacity_authority() -> EntryCapacityAuthority:
-    """Freeze the currently published capacity pair for one decision epoch."""
+def snapshot_global_auction_capital_authority() -> AuctionCapitalAuthority:
+    """Freeze current exposure and caps without freezing actuation readiness."""
 
     with _GLOBAL_ALLOCATION_LOCK:
-        authority = _GLOBAL_ENTRY_CAPACITY_AUTHORITY
-    if authority is None:
+        allocator = _GLOBAL_ALLOCATOR
+    if allocator is None:
         raise AllocationDenied(AllocationDecision(False, "allocator_not_configured", 0))
-    return authority
+    return AuctionCapitalAuthority(allocator)
 
 
 def assert_global_allocation_allows(intent: ExecutionIntent) -> AllocationDecision:
@@ -543,12 +565,30 @@ def current_global_entry_capacity_usd(
 ) -> Decimal:
     """Read the current candidate-specific entry envelope without reserving it."""
 
-    return snapshot_global_entry_capacity_authority().capacity_usd(
+    with _GLOBAL_ALLOCATION_LOCK:
+        allocator = _GLOBAL_ALLOCATOR
+        governor_state = _GLOBAL_GOVERNOR_STATE
+    if allocator is None or governor_state is None:
+        raise AllocationDenied(
+            AllocationDecision(False, "allocator_not_configured", 0)
+        )
+    decision = allocator.entry_capacity(
         market_id=market_id,
         event_id=event_id,
         resolution_window=resolution_window,
         correlation_key=correlation_key,
+        governor_state=governor_state,
     )
+    if not decision.allowed:
+        if decision.reason in {
+            "per_market_cap_exceeded",
+            "per_event_cap_exceeded",
+            "per_resolution_window_cap_exceeded",
+            "correlated_market_cap_exceeded",
+        }:
+            return Decimal("0")
+        raise AllocationDenied(decision)
+    return Decimal(decision.available_capacity_micro) / Decimal("1000000")
 
 
 def assert_global_submit_allows(*, reduce_only: bool = False) -> AllocationDecision:
