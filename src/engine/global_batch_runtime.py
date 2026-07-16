@@ -212,6 +212,140 @@ def _probability_manifest(probabilities: Mapping[str, object]) -> tuple[tuple[st
     )
 
 
+_BOOK_NATIVE_SIDE_STATE_FIELDS = (
+    "family_key",
+    "bin_id",
+    "condition_id",
+    "side",
+    "token_id",
+    "status",
+    "book_hash",
+    "market_event_id",
+    "gamma_market_id",
+)
+_BOOK_NATIVE_SIDE_STATUSES = {
+    "EXECUTABLE",
+    "NO_ASK",
+    "VENUE_NOT_EXECUTABLE",
+    "VENUE_METADATA_STALE",
+}
+
+
+def _book_native_side_receipt(
+    *,
+    asset_states: Sequence[tuple[str, ...]],
+    probability_keys: Sequence[str],
+    buy_candidate_index: Sequence[Sequence[str]],
+    excluded_by_family: Mapping[str, str],
+    required: bool = True,
+) -> dict[str, object]:
+    """Prove every bound side became a candidate or a typed current-book exclusion."""
+
+    if not required:
+        payload = {
+            "fields": list(_BOOK_NATIVE_SIDE_STATE_FIELDS),
+            "rows": [],
+        }
+        encoded = json.dumps(
+            payload,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        return {
+            "book_native_side_state_count": 0,
+            "book_native_side_executable_count": 0,
+            "book_native_side_non_executable_count": 0,
+            "book_native_side_status_counts": {},
+            "book_native_side_candidate_coverage_complete": False,
+            "book_native_side_candidate_coverage_status": "UNAVAILABLE",
+            "book_native_side_candidate_missing_count": 0,
+            "book_native_side_candidate_extra_count": 0,
+            "book_native_side_encoding": "zlib+base64+canonical-json-v1",
+            "book_native_side_states_sha256": hashlib.sha256(encoded).hexdigest(),
+            "book_native_side_states_zlib_b64": base64.b64encode(
+                zlib.compress(encoded, level=9)
+            ).decode("ascii"),
+        }
+
+    rows = tuple(
+        sorted(tuple(str(value) for value in row) for row in asset_states)
+    )
+    if not rows or any(
+        len(row) != len(_BOOK_NATIVE_SIDE_STATE_FIELDS) for row in rows
+    ):
+        raise ValueError("GLOBAL_AUCTION_RECEIPT_BOOK_SIDE_STATE_INVALID")
+    keys = tuple(row[:5] for row in rows)
+    if (
+        len(keys) != len(set(keys))
+        or any(not all(key) or key[3] not in {"YES", "NO"} for key in keys)
+        or any(
+            not row[5] or row[5] not in _BOOK_NATIVE_SIDE_STATUSES
+            for row in rows
+        )
+        or {row[0] for row in rows} != set(probability_keys)
+    ):
+        raise ValueError("GLOBAL_AUCTION_RECEIPT_BOOK_SIDE_COVERAGE_INVALID")
+
+    candidate_keys = tuple(
+        tuple(str(value) for value in row[1:6])
+        for row in buy_candidate_index
+    )
+    if len(candidate_keys) != len(set(candidate_keys)):
+        raise ValueError("GLOBAL_AUCTION_RECEIPT_BUY_BOOK_KEY_DUPLICATE")
+    excluded_families = set(excluded_by_family)
+    executable_keys = {
+        row[:5]
+        for row in rows
+        if row[5] == "EXECUTABLE" and row[0] not in excluded_families
+    }
+    candidate_key_set = set(candidate_keys)
+    missing = sorted(executable_keys - candidate_key_set)
+    extra = sorted(candidate_key_set - executable_keys)
+    if missing or extra:
+        raise ValueError(
+            "GLOBAL_AUCTION_RECEIPT_BUY_BOOK_MATERIALIZATION_MISMATCH:"
+            f"missing={len(missing)}:extra={len(extra)}"
+        )
+
+    status_counts = {
+        side: {
+            status: sum(
+                1 for row in rows if row[3] == side and row[5] == status
+            )
+            for status in sorted(_BOOK_NATIVE_SIDE_STATUSES)
+        }
+        for side in ("YES", "NO")
+    }
+    payload = {
+        "fields": list(_BOOK_NATIVE_SIDE_STATE_FIELDS),
+        "rows": rows,
+    }
+    encoded = json.dumps(
+        payload,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return {
+        "book_native_side_state_count": len(rows),
+        "book_native_side_executable_count": sum(
+            1 for row in rows if row[5] == "EXECUTABLE"
+        ),
+        "book_native_side_non_executable_count": sum(
+            1 for row in rows if row[5] != "EXECUTABLE"
+        ),
+        "book_native_side_status_counts": status_counts,
+        "book_native_side_candidate_coverage_complete": True,
+        "book_native_side_candidate_coverage_status": "COMPLETE",
+        "book_native_side_candidate_missing_count": 0,
+        "book_native_side_candidate_extra_count": 0,
+        "book_native_side_encoding": "zlib+base64+canonical-json-v1",
+        "book_native_side_states_sha256": hashlib.sha256(encoded).hexdigest(),
+        "book_native_side_states_zlib_b64": base64.b64encode(
+            zlib.compress(encoded, level=9)
+        ).decode("ascii"),
+    }
+
+
 def _store_global_auction_receipt(
     conn,
     *,
@@ -225,6 +359,7 @@ def _store_global_auction_receipt(
     probability_ineligible_by_family: Mapping[str, str],
     book_epoch_identity: str,
     book_asset_count: int | None,
+    book_asset_states: Sequence[tuple[str, ...]],
     wealth_witness: object,
     fractional_kelly_multiplier: Decimal,
     excluded_by_family: Mapping[str, str] | None = None,
@@ -325,6 +460,13 @@ def _store_global_auction_receipt(
             for row in buy_candidate_index
         )
     )
+    book_native_side_receipt = _book_native_side_receipt(
+        asset_states=book_asset_states,
+        probability_keys=probability_keys,
+        buy_candidate_index=buy_candidate_index,
+        excluded_by_family=excluded_by_family or {},
+        required=book_capture_complete and bool(evaluation_rows),
+    )
     compact_evaluations = {
         "rejected_groups": [
             {
@@ -386,7 +528,7 @@ def _store_global_auction_receipt(
         )
     )
     receipt = {
-        "schema_version": 11,
+        "schema_version": 12,
         "selection_epoch_identity": selection_epoch_identity,
         "selection_cut_at_utc": selection_cut_at_utc.isoformat(),
         "decision_at_utc": decision_at_utc.isoformat(),
@@ -411,6 +553,7 @@ def _store_global_auction_receipt(
             else None
         ),
         "book_max_age_seconds": book_max_age_seconds,
+        **book_native_side_receipt,
         "excluded_by_family": dict(sorted((excluded_by_family or {}).items())),
         "excluded_by_candidate": [
             {
@@ -1484,6 +1627,13 @@ def process_current_global_batch(
                     )
                     if attempt_book_epoch is not None
                     else None
+                ),
+                book_asset_states=(
+                    tuple(
+                        getattr(attempt_book_epoch, "asset_states", ()) or ()
+                    )
+                    if attempt_book_epoch is not None
+                    else ()
                 ),
                 wealth_witness=selection_wealth,
                 fractional_kelly_multiplier=fractional_kelly_multiplier,

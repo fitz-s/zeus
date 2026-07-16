@@ -282,6 +282,15 @@ the speculative book batch unusable and falls back to the ordinary current captu
 path. This changes latency only; q, Fractional Kelly, BUY/SELL/HOLD/CASH ranking, operator pause,
 and venue actuation law are unchanged.
 
+**Native-side materialization closure.** A complete current book epoch already binds every native
+YES and NO token to one typed state: `EXECUTABLE`, `NO_ASK`, `VENUE_NOT_EXECUTABLE`, or
+`VENUE_METADATA_STALE`. Before any venue side effect, receipt schema v12 requires the
+non-excluded `EXECUTABLE` state keys to equal the solver BUY candidate keys exactly. A missing or
+extra key rejects the auction. The receipt persists the complete canonical side-state index,
+per-side status counts, and its hash in a separate compressed payload, so a one-sided candidate
+count can be distinguished from materialization loss using the same decision-time epoch rather
+than later book reconstruction.
+
 **α-sensitivity replay (promotion-evidence-gate item, NOT a solver change).** Before promotion, replay
 the W3 fixture corpus at α ∈ {0.01, 0.05, 0.10} and require decision-stability bands (diff the
 selected/no-trade transitions) so CVaR conservatism is not an artifact of one tail level.

@@ -182,6 +182,52 @@ def test_global_auction_receipt_persists_complete_buy_sell_hold_cash_comparison(
     )
     selected = SimpleNamespace(decision=decision)
     at = _dt.datetime(2026, 7, 14, 1, 0, tzinfo=_dt.timezone.utc)
+    book_asset_states = (
+        (
+            "family-buy",
+            "20C",
+            "condition-buy",
+            "YES",
+            "token-buy",
+            "EXECUTABLE",
+            "book-buy-yes",
+            "event-buy",
+            "gamma-buy",
+        ),
+        (
+            "family-buy",
+            "20C",
+            "condition-buy",
+            "NO",
+            "token-buy-no",
+            "NO_ASK",
+            "book-buy-no",
+            "event-buy",
+            "gamma-buy",
+        ),
+        (
+            "family-sell",
+            "21C",
+            "condition-sell",
+            "YES",
+            "token-sell-yes",
+            "VENUE_NOT_EXECUTABLE",
+            "metadata-sell-yes",
+            "event-sell",
+            "gamma-sell",
+        ),
+        (
+            "family-sell",
+            "21C",
+            "condition-sell",
+            "NO",
+            "token-sell",
+            "NO_ASK",
+            "book-sell-no",
+            "event-sell",
+            "gamma-sell",
+        ),
+    )
 
     row_id = global_batch_runtime._store_global_auction_receipt(
         conn,
@@ -204,6 +250,7 @@ def test_global_auction_receipt_persists_complete_buy_sell_hold_cash_comparison(
         },
         book_epoch_identity="book-current",
         book_asset_count=2,
+        book_asset_states=book_asset_states,
         wealth_witness=SimpleNamespace(
             witness_identity="wealth-current",
             economic_identity="wealth-economics-current",
@@ -228,7 +275,7 @@ def test_global_auction_receipt_persists_complete_buy_sell_hold_cash_comparison(
     artifact = json.loads(row["artifact_json"])
     summary = artifact["summary"]
     assert row["mode"] == "global_single_order_auction"
-    assert summary["schema_version"] == 11
+    assert summary["schema_version"] == 12
     assert summary["book_capture_freshness_complete"] is True
     assert summary["book_captured_at_utc"] == "2026-07-14T01:00:00.250000+00:00"
     assert summary["book_deadline_at_utc"] == "2026-07-14T01:00:30.250000+00:00"
@@ -248,6 +295,66 @@ def test_global_auction_receipt_persists_complete_buy_sell_hold_cash_comparison(
     assert summary["eligible_probability_family_count"] == 2
     assert summary["probability_ineligible_family_count"] == 1
     assert summary["scope_family_coverage_complete"] is True
+    assert summary["book_native_side_state_count"] == 4
+    assert summary["book_native_side_executable_count"] == 1
+    assert summary["book_native_side_non_executable_count"] == 3
+    assert summary["book_native_side_candidate_coverage_complete"] is True
+    assert summary["book_native_side_candidate_coverage_status"] == "COMPLETE"
+    assert summary["book_native_side_status_counts"] == {
+        "NO": {
+            "EXECUTABLE": 0,
+            "NO_ASK": 2,
+            "VENUE_METADATA_STALE": 0,
+            "VENUE_NOT_EXECUTABLE": 0,
+        },
+        "YES": {
+            "EXECUTABLE": 1,
+            "NO_ASK": 0,
+            "VENUE_METADATA_STALE": 0,
+            "VENUE_NOT_EXECUTABLE": 1,
+        },
+    }
+    book_side_states = json.loads(
+        zlib.decompress(
+            base64.b64decode(summary["book_native_side_states_zlib_b64"])
+        )
+    )
+    assert book_side_states["fields"] == list(
+        global_batch_runtime._BOOK_NATIVE_SIDE_STATE_FIELDS
+    )
+    assert book_side_states["rows"] == [
+        list(row) for row in sorted(book_asset_states)
+    ]
+    with pytest.raises(
+        ValueError,
+        match=(
+            "GLOBAL_AUCTION_RECEIPT_BUY_BOOK_MATERIALIZATION_MISMATCH:"
+            "missing=1:extra=0"
+        ),
+    ):
+        global_batch_runtime._book_native_side_receipt(
+            asset_states=(
+                book_asset_states[0],
+                (
+                    *book_asset_states[1][:5],
+                    "EXECUTABLE",
+                    *book_asset_states[1][6:],
+                ),
+                *book_asset_states[2:],
+            ),
+            probability_keys=("family-buy", "family-sell"),
+            buy_candidate_index=(
+                (
+                    "buy-paused",
+                    "family-buy",
+                    "20C",
+                    "condition-buy",
+                    "YES",
+                    "token-buy",
+                ),
+            ),
+            excluded_by_family={},
+        )
     assert summary["probability_ineligible_by_family"] == {
         "family-q-missing": (
             "GLOBAL_CURRENT_PROBABILITY_PREPARE_FAILED:ValueError:"
@@ -359,6 +466,7 @@ def test_global_auction_receipt_persists_complete_buy_sell_hold_cash_comparison(
             probability_ineligible_by_family={},
             book_epoch_identity="book-current",
             book_asset_count=2,
+            book_asset_states=book_asset_states,
             wealth_witness=SimpleNamespace(
                 witness_identity="wealth-current",
                 economic_identity="wealth-economics-current",
