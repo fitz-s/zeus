@@ -843,17 +843,6 @@ def _current_probability_ineligible(receipt: EventSubmissionReceipt) -> bool:
     )
 
 
-def _probability_epoch_transition_count(
-    ineligible_by_family: Mapping[str, str],
-) -> int:
-    """Count families waiting for post-HWM posterior materialization."""
-
-    return sum(
-        "REPLACEMENT_RAW_INPUT_HWM" in str(reason or "")
-        for reason in ineligible_by_family.values()
-    )
-
-
 def _family_key(event: OpportunityEvent, payload: Mapping[str, object]) -> str:
     return weather_family_id(
         city=str(payload.get("city") or ""),
@@ -1035,7 +1024,7 @@ def process_current_global_batch(
     fractional_kelly_multiplier: Decimal = Decimal("1"),
     claim_unpaged_winner: Callable[[OpportunityEvent], bool] | None = None,
 ) -> GlobalBatchSubmitResult:
-    """Select once from one complete current-evidence probability epoch."""
+    """Select once from every family holding a current q certificate."""
 
     if decision_time.tzinfo is None:
         raise ValueError("GLOBAL_AUCTION_DECISION_TIME_NAIVE")
@@ -1394,13 +1383,6 @@ def process_current_global_batch(
             # variable instead of the stale queue owner's carrier.
             prepared_by_event[scope_event.event_id] = prepared
         log_stage("prepare_families", families=len(prepared_by_event))
-        transitioning = _probability_epoch_transition_count(ineligible_by_family)
-        if transitioning:
-            return reject(
-                "GLOBAL_FAMILY_INELIGIBLE:"
-                "GLOBAL_PROBABILITY_EPOCH_TRANSITION_INCOMPLETE:"
-                f"families={transitioning}"
-            )
         if not prepared_by_event:
             return reject("GLOBAL_AUCTION_NO_CURRENT_PROBABILITY_FAMILY")
 

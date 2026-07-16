@@ -6912,7 +6912,7 @@ def test_global_batch_excludes_typed_current_q_ineligible_family(monkeypatch):
     persisted = {}
     ineligible_reason = (
         "GLOBAL_CURRENT_PROBABILITY_PREPARE_FAILED:ValueError:"
-        "DAY0_REMAINING_DAY_MEMBERS_UNAVAILABLE"
+        "GLOBAL_CURRENT_REPLACEMENT_BUNDLE_BLOCKED:REPLACEMENT_RAW_INPUT_HWM"
     )
 
     monkeypatch.setattr(
@@ -7007,20 +7007,12 @@ def test_global_batch_excludes_typed_current_q_ineligible_family(monkeypatch):
     }
 
 
-def test_global_batch_retries_incomplete_raw_input_epoch(monkeypatch):
+def test_global_batch_rejects_when_all_families_lack_current_q(monkeypatch):
     decision_at = _dt.datetime(2026, 7, 10, 8, 0, tzinfo=_dt.timezone.utc)
     event_a = _global_scope_event(city="Alpha", source_run_id="run-a")
     event_b = _global_scope_event(city="Beta", source_run_id="run-b")
     scope = current_global_auction_scope_from_events(
         (event_a, event_b), captured_at_utc=decision_at
-    )
-    family_b = scope.family_keys[1]
-    prepared_b = SimpleNamespace(
-        probability_witness=SimpleNamespace(
-            family_key=family_b,
-            captured_at_utc=decision_at,
-            posterior_identity_hash="run-b",
-        )
     )
     reason = (
         "GLOBAL_CURRENT_PROBABILITY_PREPARE_FAILED:ValueError:"
@@ -7033,23 +7025,16 @@ def test_global_batch_retries_incomplete_raw_input_epoch(monkeypatch):
         global_batch_runtime,
         "select_prepared_global_auction",
         lambda *_args, **_kwargs: pytest.fail(
-            "an incomplete evidence epoch must not select"
+            "an empty current-q scope must not select"
         ),
     )
 
     def prepare(event, _at):
-        if event.event_id == event_a.event_id:
-            return EventSubmissionReceipt(
-                False,
-                event.event_id,
-                event.causal_snapshot_id,
-                reason=reason,
-            )
         return EventSubmissionReceipt(
             False,
             event.event_id,
             event.causal_snapshot_id,
-            prepared_global_family=prepared_b,
+            reason=reason,
         )
 
     result = global_batch_runtime.process_current_global_batch(
@@ -7061,7 +7046,7 @@ def test_global_batch_retries_incomplete_raw_input_epoch(monkeypatch):
         payload_reader=lambda current: json.loads(current.payload_json),
         prepare_event=prepare,
         actuate_winner=lambda *_: pytest.fail(
-            "an incomplete evidence epoch must not actuate"
+            "an empty current-q scope must not actuate"
         ),
         stamp_receipt=lambda receipt: receipt,
         venue_submit_count=lambda: 0,
@@ -7069,13 +7054,11 @@ def test_global_batch_retries_incomplete_raw_input_epoch(monkeypatch):
         current_time_provider=lambda: decision_at,
     )
 
-    expected = (
-        "GLOBAL_FAMILY_INELIGIBLE:"
-        "GLOBAL_PROBABILITY_EPOCH_TRANSITION_INCOMPLETE:families=1"
-    )
     assert result.venue_submit_count == 0
     assert result.winner_event_id is None
-    assert {receipt.reason for receipt in result.receipts.values()} == {expected}
+    assert {receipt.reason for receipt in result.receipts.values()} == {
+        "GLOBAL_AUCTION_NO_CURRENT_PROBABILITY_FAMILY"
+    }
 
 
 def test_global_batch_rejects_unexpected_probability_prepare_failure(monkeypatch):
