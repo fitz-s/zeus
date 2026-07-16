@@ -4406,6 +4406,53 @@ def test_high_yes_edge_accepts_buy_yes_no_submit_evidence(
     assert surface["recent_buy_yes_no_trade_count"] == 0
 
 
+def test_high_yes_no_submit_window_uses_indexed_decision_time() -> None:
+    now = datetime.now(timezone.utc)
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        """
+        CREATE TABLE edli_no_submit_receipts (
+            decision_time TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            direction TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        "CREATE INDEX idx_edli_no_submit_receipts_decision_time "
+        "ON edli_no_submit_receipts(decision_time)"
+    )
+    conn.execute(
+        "INSERT INTO edli_no_submit_receipts VALUES (?, ?, 'buy_yes')",
+        (
+            (now - timedelta(minutes=1)).isoformat(),
+            (now - timedelta(days=2)).isoformat(),
+        ),
+    )
+
+    detail = live_health._recent_buy_yes_suppression_summary(
+        conn,
+        cutoff=(now - timedelta(minutes=5)).isoformat(),
+    )
+    plan = conn.execute(
+        """
+        EXPLAIN QUERY PLAN
+        SELECT COUNT(*)
+          FROM edli_no_submit_receipts
+         WHERE direction = 'buy_yes'
+           AND decision_time >= ?
+        """,
+        ((now - timedelta(minutes=5)).isoformat(),),
+    ).fetchall()
+
+    assert detail["recent_buy_yes_no_submit_count"] == 1
+    assert any(
+        "idx_edli_no_submit_receipts_decision_time" in str(row["detail"])
+        for row in plan
+    )
+
+
 def test_high_yes_edge_degrades_when_quality_yes_no_trade_has_no_order_chain(
     tmp_path: Path,
 ) -> None:

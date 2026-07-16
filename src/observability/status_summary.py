@@ -37,6 +37,7 @@ from src.observability.price_evidence_report import (
 )
 from src.state.decision_chain import query_learning_surface_summary, query_lifecycle_funnel_report
 from src.state.db import (
+    get_trade_connection_read_only,
     get_trade_connection_with_world,
     query_execution_event_summary,
     query_position_current_status_view,
@@ -500,7 +501,7 @@ def _refresh_minimal_runtime_read_model_for_status(status: dict) -> bool:
 
     conn = None
     try:
-        conn = get_trade_connection_with_world()
+        conn = get_trade_connection_read_only()
         position_view = query_position_current_status_view(conn)
     except Exception as exc:
         logger.warning(

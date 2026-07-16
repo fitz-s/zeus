@@ -789,6 +789,7 @@ class TestRCPV2RowCountSensor:
         ]
         monkeypatch.setattr(status_summary_module, "STATUS_PATH", status_path)
         monkeypatch.setattr(status_summary_module, "get_trade_connection_with_world", lambda: DummyConn())
+        monkeypatch.setattr(status_summary_module, "get_trade_connection_read_only", lambda: DummyConn())
         monkeypatch.setattr(
             status_summary_module,
             "query_position_current_status_view",
@@ -906,6 +907,7 @@ class TestRCPV2RowCountSensor:
 
         monkeypatch.setattr(status_summary_module, "STATUS_PATH", status_path)
         monkeypatch.setattr(status_summary_module, "get_trade_connection_with_world", lambda: DummyConn())
+        monkeypatch.setattr(status_summary_module, "get_trade_connection_read_only", lambda: DummyConn())
         monkeypatch.setattr(status_summary_module, "query_position_current_status_view", lambda conn: empty_position_view)
         monkeypatch.setattr(status_summary_module, "_get_execution_capability_status", lambda: {})
         monkeypatch.setattr(
@@ -972,6 +974,7 @@ class TestRCPV2RowCountSensor:
 
         monkeypatch.setattr(status_summary_module, "STATUS_PATH", status_path)
         monkeypatch.setattr(status_summary_module, "get_trade_connection_with_world", lambda: DummyConn())
+        monkeypatch.setattr(status_summary_module, "get_trade_connection_read_only", lambda: DummyConn())
         monkeypatch.setattr(
             status_summary_module,
             "query_position_current_status_view",
@@ -2611,3 +2614,48 @@ class TestPhase2DExecutionCapabilityStatus:
 
         assert "src.execution.executor" not in source
         assert "execute_intent" not in source
+
+    def test_cycle_pulse_position_refresh_uses_trade_read_only_connection(
+        self,
+        monkeypatch,
+    ):
+        from src.observability import status_summary as status_summary_module
+
+        class DummyConn:
+            closed = False
+
+            def close(self):
+                self.closed = True
+
+        conn = DummyConn()
+        monkeypatch.setattr(
+            status_summary_module,
+            "get_trade_connection_read_only",
+            lambda: conn,
+        )
+        monkeypatch.setattr(
+            status_summary_module,
+            "get_trade_connection_with_world",
+            lambda: (_ for _ in ()).throw(AssertionError("unexpected ATTACH connection")),
+        )
+        monkeypatch.setattr(
+            status_summary_module,
+            "query_position_current_status_view",
+            lambda current: {
+                "positions": [],
+                "open_positions": 0,
+                "total_exposure_usd": 0.0,
+                "unrealized_pnl": 0.0,
+                "chain_state_counts": {},
+                "exit_state_counts": {},
+                "unverified_entries": 0,
+                "day0_positions": 0,
+            }
+            if current is conn
+            else (_ for _ in ()).throw(AssertionError("wrong connection")),
+        )
+
+        status = {}
+        assert status_summary_module._refresh_minimal_runtime_read_model_for_status(status)
+        assert conn.closed is True
+        assert status["runtime"]["pulse_refreshed"] is True

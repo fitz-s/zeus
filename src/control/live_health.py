@@ -4673,13 +4673,16 @@ def _recent_buy_yes_suppression_summary(conn: object, *, cutoff: str) -> dict[st
     if "edli_no_submit_receipts" in tables:
         try:
             columns = _connection_table_columns(conn, "edli_no_submit_receipts")
-            if {"created_at", "direction"}.issubset(columns):
+            decision_time_column = (
+                "decision_time" if "decision_time" in columns else "created_at"
+            )
+            if {decision_time_column, "direction"}.issubset(columns):
                 row = conn.execute(
-                    """
+                    f"""
                     SELECT COUNT(*) AS n
                       FROM edli_no_submit_receipts
                      WHERE direction = 'buy_yes'
-                       AND created_at >= ?
+                       AND {decision_time_column} >= ?
                     """,
                     (cutoff,),
                 ).fetchone()
