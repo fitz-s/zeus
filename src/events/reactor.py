@@ -3329,6 +3329,33 @@ def _payload_dict(event: OpportunityEvent) -> dict[str, Any]:
     return parsed if isinstance(parsed, dict) else {}
 
 
+def _forecast_event_family(
+    event: OpportunityEvent,
+) -> tuple[str, str, str] | None:
+    payload = _payload_dict(event)
+    family = (
+        str(payload.get("city") or "").strip(),
+        str(payload.get("target_date") or "").strip(),
+        str(payload.get("metric") or "").strip(),
+    )
+    return family if all(family) else None
+
+
+def _rank_forecast_wake_events(
+    events: list[OpportunityEvent],
+    family_order: list[tuple[str, str, str]],
+) -> list[OpportunityEvent]:
+    rank = {family: index for index, family in enumerate(family_order)}
+    fallback = len(rank)
+    return sorted(
+        events,
+        key=lambda event: (
+            rank.get(_forecast_event_family(event), fallback),
+            event.event_id,
+        ),
+    )
+
+
 def _parse_utc_instant(value: object) -> datetime | None:
     if value is None:
         return None
@@ -5128,6 +5155,7 @@ def run_edli_event_reactor_cycle(
     committed_day0_wake = (
         producer_wake_reason == "day0_extreme_event_committed"
     )
+    forecast_wake_family_order: list[tuple[str, str, str]] = []
     forecast_wake_families: set[tuple[str, str, str]] = set()
     for raw_family in producer_wake_families:
         if len(raw_family) != 3:
@@ -5137,8 +5165,9 @@ def run_edli_event_reactor_cycle(
             str(raw_family[1] or "").strip(),
             str(raw_family[2] or "").strip(),
         )
-        if all(family):
+        if all(family) and family not in forecast_wake_families:
             forecast_wake_families.add(family)
+            forecast_wake_family_order.append(family)
     targeted_forecast_wake = (
         producer_wake_reason == "forecast_posterior_advanced"
         and bool(forecast_wake_families)
@@ -5356,6 +5385,11 @@ def run_edli_event_reactor_cycle(
                         forecast_wake_families if targeted_forecast_wake else None
                     ),
                 )
+                if targeted_forecast_wake:
+                    _fsr_events = _rank_forecast_wake_events(
+                        _fsr_events,
+                        forecast_wake_family_order,
+                    )
                 _log_stage("forecast_snapshot_build")
             except sqlite3.OperationalError as _emit_lock_exc:
                 if "locked" in str(_emit_lock_exc).lower() or "busy" in str(_emit_lock_exc).lower():
@@ -5397,7 +5431,8 @@ def run_edli_event_reactor_cycle(
                         _fsr_write_results = EventWriter(conn).write_many(_fsr_events)
                         if targeted_forecast_wake:
                             targeted_event_ids.update(
-                                result.event_id for result in _fsr_write_results
+                                result.event_id
+                                for result in _fsr_write_results[:proof_limit]
                             )
                         _log_stage("forecast_snapshot_emit")
                     except sqlite3.OperationalError as _emit_lock_exc:

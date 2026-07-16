@@ -34,6 +34,7 @@ from src.events.reactor import (
     ReactorResult,
     TERMINAL_MONEY_PATH_REASONS,
     TRANSIENT_MONEY_PATH_REASONS,
+    _rank_forecast_wake_events,
     _is_transient_money_path_reason,
 )
 from src.state.db import init_schema, world_write_mutex
@@ -222,6 +223,41 @@ def _market_event():
         payload=payload,
         causal_snapshot_id="hash-1",
     )
+
+
+def test_forecast_wake_events_follow_posterior_reversal_order():
+    paris = SimpleNamespace(
+        event_id="paris",
+        payload_json=json.dumps(
+            {"city": "Paris", "target_date": "2026-07-18", "metric": "high"}
+        ),
+    )
+    shanghai = SimpleNamespace(
+        event_id="shanghai",
+        payload_json=json.dumps(
+            {"city": "Shanghai", "target_date": "2026-07-18", "metric": "high"}
+        ),
+    )
+    ordinary = SimpleNamespace(
+        event_id="ordinary",
+        payload_json=json.dumps(
+            {"city": "London", "target_date": "2026-07-18", "metric": "high"}
+        ),
+    )
+
+    ranked = _rank_forecast_wake_events(
+        [ordinary, paris, shanghai],
+        [
+            ("Shanghai", "2026-07-18", "high"),
+            ("Paris", "2026-07-18", "high"),
+        ],
+    )
+
+    assert [event.event_id for event in ranked] == [
+        "shanghai",
+        "paris",
+        "ordinary",
+    ]
 
 
 def _reactor(store, *, gates=True, config=None):

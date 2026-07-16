@@ -27,6 +27,7 @@ from __future__ import annotations
 import functools
 import json
 import logging
+import math
 import sqlite3
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -1541,7 +1542,7 @@ def _forecast_posterior_families_between(
     revision_before: int,
     revision_after: int,
 ) -> tuple[tuple[str, str, str], ...]:
-    """Return changed live posterior families using the append-only rowid interval."""
+    """Return changed live families, largest settlement-bin reversal first."""
 
     raw_path = cfg.get("forecast_db")
     if not raw_path or revision_after <= revision_before:
@@ -1556,9 +1557,23 @@ def _forecast_posterior_families_between(
         conn = _connect_read_only(path)
         rows = conn.execute(
             """
-            SELECT city,
-                   target_date,
-                   temperature_metric
+            SELECT changed.city,
+                   changed.target_date,
+                   changed.temperature_metric,
+                   changed.latest_rowid,
+                   latest.q_json,
+                   (
+                       SELECT previous.q_json
+                         FROM forecast_posteriors AS previous
+                        WHERE previous.city = changed.city
+                          AND previous.target_date = changed.target_date
+                          AND previous.temperature_metric = changed.temperature_metric
+                          AND previous.runtime_layer = 'live'
+                          AND previous.training_allowed = 0
+                          AND previous.rowid <= ?
+                        ORDER BY previous.rowid DESC
+                        LIMIT 1
+                   ) AS previous_q_json
               FROM (
                     SELECT city,
                            target_date,
@@ -1570,13 +1585,14 @@ def _forecast_posterior_families_between(
                        AND runtime_layer = 'live'
                        AND training_allowed = 0
                      GROUP BY city, target_date, temperature_metric
-                   )
-             ORDER BY latest_rowid DESC
+                   ) AS changed
+              JOIN forecast_posteriors AS latest
+                ON latest.rowid = changed.latest_rowid
              LIMIT 101
             """,
-            (revision_before, revision_after),
+            (revision_before, revision_before, revision_after),
         ).fetchall()
-        families: list[tuple[str, str, str]] = []
+        ranked: list[tuple[float, int, tuple[str, str, str]]] = []
         for row in rows:
             family = (
                 str(row[0] or "").strip(),
@@ -1584,13 +1600,44 @@ def _forecast_posterior_families_between(
                 str(row[2] or "").strip(),
             )
             if all(family):
-                families.append(family)
-        return tuple(families) if len(families) <= 100 else ()
+                ranked.append(
+                    (
+                        _posterior_max_bin_delta(row[4], row[5]),
+                        int(row[3] or 0),
+                        family,
+                    )
+                )
+        if len(ranked) > 100:
+            return ()
+        ranked.sort(key=lambda item: (-item[0], -item[1], item[2]))
+        return tuple(item[2] for item in ranked)
     except (OSError, sqlite3.Error, TypeError, ValueError):
         return ()
     finally:
         if conn is not None:
             conn.close()
+
+
+def _posterior_max_bin_delta(new_q_json: object, old_q_json: object) -> float:
+    """Score one family by its largest changed settlement-bin probability."""
+
+    if old_q_json is None:
+        return 1.0
+    try:
+        new_q = json.loads(str(new_q_json))
+        old_q = json.loads(str(old_q_json))
+        if not isinstance(new_q, dict) or not isinstance(old_q, dict):
+            return 1.0
+        max_delta = 0.0
+        for label in set(new_q) | set(old_q):
+            new_value = float(new_q.get(label, 0.0))
+            old_value = float(old_q.get(label, 0.0))
+            if not math.isfinite(new_value) or not math.isfinite(old_value):
+                return 1.0
+            max_delta = max(max_delta, abs(new_value - old_value))
+        return max_delta
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return 1.0
 
 
 def _forecast_posterior_revision(cfg: dict[str, object]) -> int | None:
