@@ -751,33 +751,62 @@ def _get_cached_global_book_epoch(
     allowed: bool,
     topology_hint: tuple[tuple[str, str, str, str, str], ...] | None = None,
 ) -> object | None:
-    if not allowed or checked_at.tzinfo is None:
-        return None
+    cached, _ = _probe_global_book_epoch_cache(
+        trade_conn,
+        probabilities,
+        checked_at=checked_at,
+        allowed=allowed,
+        topology_hint=topology_hint,
+    )
+    return cached
+
+
+def _probe_global_book_epoch_cache(
+    trade_conn: sqlite3.Connection,
+    probabilities: Mapping[str, object],
+    *,
+    checked_at: datetime,
+    allowed: bool,
+    topology_hint: tuple[tuple[str, str, str, str, str], ...] | None = None,
+) -> tuple[object | None, str]:
+    if not allowed:
+        return None, "not_allowed"
+    if checked_at.tzinfo is None:
+        return None, "checked_at_naive"
     namespace = _global_book_epoch_cache_namespace(trade_conn)
     topology = (
         topology_hint
         if topology_hint is not None
         else _global_book_topology_signature(probabilities)
     )
-    if namespace is None or topology is None:
-        return None
+    if namespace is None:
+        return None, "namespace_unavailable"
+    if topology is None:
+        return None, "topology_unavailable"
     with _GLOBAL_BOOK_EPOCH_CACHE_LOCK:
         entry = _GLOBAL_BOOK_EPOCH_CACHE
-    if (
-        entry is None
-        or entry.namespace != namespace
-        or entry.topology != topology
-    ):
-        return None
+    if entry is None:
+        return None, "cache_empty"
+    if entry.namespace != namespace:
+        return None, "namespace_changed"
+    if entry.topology != topology:
+        expected = hashlib.sha256(repr(entry.topology).encode("utf-8")).hexdigest()[:12]
+        current = hashlib.sha256(repr(topology).encode("utf-8")).hexdigest()[:12]
+        return (
+            None,
+            "topology_changed:"
+            f"cached={len(entry.topology)}:{expected}:"
+            f"current={len(topology)}:{current}",
+        )
     current_identity = getattr(entry.epoch, "current_identity", None)
     if not callable(current_identity):
-        return None
+        return None, "current_identity_missing"
     try:
         if current_identity(checked_at.astimezone(UTC)) is None:
-            return None
-        return entry.epoch
-    except (TypeError, ValueError):
-        return None
+            return None, "expired"
+        return entry.epoch, "hit"
+    except (TypeError, ValueError) as exc:
+        return None, f"current_identity_invalid:{type(exc).__name__}"
 
 
 def _store_global_book_epoch(
@@ -786,31 +815,32 @@ def _store_global_book_epoch(
     epoch: object,
     *,
     checked_at: datetime,
-) -> None:
+) -> str:
     global _GLOBAL_BOOK_EPOCH_CACHE
 
     if checked_at.tzinfo is None:
-        return
+        return "checked_at_naive"
     namespace = _global_book_epoch_cache_namespace(trade_conn)
     topology = _global_book_topology_signature(bound_probabilities)
     current_identity = getattr(epoch, "current_identity", None)
-    if (
-        namespace is None
-        or topology is None
-        or not callable(current_identity)
-    ):
-        return
+    if namespace is None:
+        return "namespace_unavailable"
+    if topology is None:
+        return "topology_unavailable"
+    if not callable(current_identity):
+        return "current_identity_missing"
     try:
         if current_identity(checked_at.astimezone(UTC)) is None:
-            return
-    except (TypeError, ValueError):
-        return
+            return "expired"
+    except (TypeError, ValueError) as exc:
+        return f"current_identity_invalid:{type(exc).__name__}"
     with _GLOBAL_BOOK_EPOCH_CACHE_LOCK:
         _GLOBAL_BOOK_EPOCH_CACHE = _GlobalBookEpochCacheEntry(
             namespace=namespace,
             topology=topology,
             epoch=epoch,
         )
+    return "stored"
 
 
 @dataclass(frozen=True)
@@ -5854,13 +5884,18 @@ def event_bound_live_adapter_from_trade_conn(
                 trade_conn,
                 probabilities,
             )
-            cached_before_bind = _get_cached_global_book_epoch(
+            cached_before_bind, cache_before_reason = _probe_global_book_epoch_cache(
                 trade_conn,
                 probabilities,
                 checked_at=cache_checked_at,
                 allowed=True,
                 topology_hint=speculative_topology,
             )
+            if cached_before_bind is None:
+                logging.getLogger(__name__).info(
+                    "global book epoch cache miss: phase=before_bind reason=%s",
+                    cache_before_reason,
+                )
             force_full_refresh = probabilities is last_book_probability_output
             prefetch_slice = None
             prefetch_mode = ""
@@ -5923,12 +5958,17 @@ def event_bound_live_adapter_from_trade_conn(
                     )
                     prefetched = future.result()
             cache_checked_at = datetime.now(UTC)
-            cached = _get_cached_global_book_epoch(
+            cached, cache_after_reason = _probe_global_book_epoch_cache(
                 trade_conn,
                 bound_probabilities,
                 checked_at=cache_checked_at,
                 allowed=True,
             )
+            if cached is None:
+                logging.getLogger(__name__).info(
+                    "global book epoch cache miss: phase=after_bind reason=%s",
+                    cache_after_reason,
+                )
             # A second call with the exact mapping returned by this provider is
             # the same-batch CURVE_SUPERSEDED re-auction. It must recapture the
             # complete curve universe because the changed winner is not supplied
@@ -5974,12 +6014,18 @@ def event_bound_live_adapter_from_trade_conn(
                     ):
                         raise ValueError("GLOBAL_BOOK_DELTA_BASE_EXPIRED")
                     merged_probabilities = dict(bound_probabilities)
-                    _store_global_book_epoch(
+                    cache_store_status = _store_global_book_epoch(
                         trade_conn,
                         merged_probabilities,
                         merged_epoch,
                         checked_at=datetime.now(UTC),
                     )
+                    if cache_store_status != "stored":
+                        logging.getLogger(__name__).warning(
+                            "global book epoch cache store rejected: mode=family_delta "
+                            "reason=%s",
+                            cache_store_status,
+                        )
                     logging.getLogger(__name__).info(
                         "global book epoch delta merged: elapsed_s=%.3f "
                         "refreshed_families=%d total_families=%d assets=%d",
@@ -6002,12 +6048,17 @@ def event_bound_live_adapter_from_trade_conn(
                 mode="full_books",
                 prefetched=prefetched,
             )
-            _store_global_book_epoch(
+            cache_store_status = _store_global_book_epoch(
                 trade_conn,
                 bound_probabilities,
                 epoch,
                 checked_at=datetime.now(UTC),
             )
+            if cache_store_status != "stored":
+                logging.getLogger(__name__).warning(
+                    "global book epoch cache store rejected: mode=full reason=%s",
+                    cache_store_status,
+                )
             last_book_probability_output = bound_probabilities
             return bound_probabilities, epoch
 

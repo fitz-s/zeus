@@ -3585,20 +3585,21 @@ def test_global_book_epoch_cache_requires_stable_topology(monkeypatch):
         witness_identity="book-current",
         current_identity=lambda _checked_at: "book-current",
     )
-    era._store_global_book_epoch(
+    assert era._store_global_book_epoch(
         conn,
         probabilities,
         epoch,
         checked_at=at,
-    )
+    ) == "stored"
 
-    cached = era._get_cached_global_book_epoch(
+    cached, reason = era._probe_global_book_epoch_cache(
         conn,
         probabilities,
         checked_at=at,
         allowed=True,
     )
     assert cached is epoch
+    assert reason == "hit"
     changed = {
         "family": SimpleNamespace(
             family_key="family",
@@ -3668,19 +3669,20 @@ def test_global_book_epoch_cache_requires_stable_topology(monkeypatch):
         witness_identity="book-expired",
         current_identity=lambda _checked_at: None,
     )
-    era._store_global_book_epoch(
+    assert era._store_global_book_epoch(
         conn,
         probabilities,
         expired,
         checked_at=at,
-    )
-    cached = era._get_cached_global_book_epoch(
+    ) == "expired"
+    cached, reason = era._probe_global_book_epoch_cache(
         conn,
         probabilities,
         checked_at=at,
         allowed=True,
     )
     assert cached is epoch
+    assert reason == "hit"
     conn.close()
 
 
