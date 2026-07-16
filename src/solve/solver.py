@@ -54,7 +54,7 @@ from __future__ import annotations
 import hashlib
 import math
 from dataclasses import dataclass, field, replace
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from decimal import ROUND_CEILING, ROUND_FLOOR, ROUND_HALF_EVEN, Decimal
 from typing import TYPE_CHECKING, Any, Callable, Literal, Mapping, Optional, Sequence
 
@@ -562,6 +562,7 @@ class CurrentExecutionAuthority:
 def global_auction_universe_identity(
     *,
     family_bindings: Sequence[tuple[str, str]],
+    family_resolution_at_utc: Sequence[tuple[str, datetime]],
     venue_universe_identity: str,
     captured_at_utc: datetime,
 ) -> str:
@@ -573,8 +574,18 @@ def global_auction_universe_identity(
             for family_key, binding_identity in family_bindings
         )
     )
+    resolutions = tuple(
+        sorted(
+            (
+                str(family_key),
+                resolution_at.astimezone(timezone.utc).isoformat(),
+            )
+            for family_key, resolution_at in family_resolution_at_utc
+        )
+    )
     return _hash(
         *(f"{family_key}:{binding_identity}" for family_key, binding_identity in normalized),
+        *(f"{family_key}:{resolution_at}" for family_key, resolution_at in resolutions),
         venue_universe_identity,
         captured_at_utc.isoformat(),
     )
@@ -585,6 +596,7 @@ class GlobalAuctionUniverseWitness:
     """Current active-family/token binding that makes the word global auditable."""
 
     family_bindings: tuple[tuple[str, str], ...]
+    family_resolution_at_utc: tuple[tuple[str, datetime], ...]
     venue_universe_identity: str
     captured_at_utc: datetime
     max_age: timedelta
@@ -598,9 +610,23 @@ class GlobalAuctionUniverseWitness:
             )
         )
         keys = tuple(family_key for family_key, _ in family_bindings)
+        family_resolution_at_utc = tuple(
+            sorted(
+                (
+                    str(family_key),
+                    resolution_at.astimezone(timezone.utc),
+                )
+                for family_key, resolution_at in self.family_resolution_at_utc
+                if resolution_at.tzinfo is not None
+            )
+        )
+        resolution_keys = tuple(
+            family_key for family_key, _ in family_resolution_at_utc
+        )
         if (
             not family_bindings
             or len(set(keys)) != len(keys)
+            or resolution_keys != keys
             or not all(
                 family_key and binding_identity
                 for family_key, binding_identity in family_bindings
@@ -615,6 +641,7 @@ class GlobalAuctionUniverseWitness:
             raise ValueError("global auction universe freshness contract is invalid")
         expected = global_auction_universe_identity(
             family_bindings=family_bindings,
+            family_resolution_at_utc=family_resolution_at_utc,
             venue_universe_identity=self.venue_universe_identity,
             captured_at_utc=self.captured_at_utc,
         )
@@ -623,6 +650,11 @@ class GlobalAuctionUniverseWitness:
                 "global auction universe identity does not bind its family/token topology"
             )
         object.__setattr__(self, "family_bindings", family_bindings)
+        object.__setattr__(
+            self,
+            "family_resolution_at_utc",
+            family_resolution_at_utc,
+        )
 
     @property
     def family_keys(self) -> tuple[str, ...]:
@@ -631,6 +663,10 @@ class GlobalAuctionUniverseWitness:
     @property
     def binding_by_family(self) -> Mapping[str, str]:
         return dict(self.family_bindings)
+
+    @property
+    def resolution_at_by_family(self) -> Mapping[str, datetime]:
+        return dict(self.family_resolution_at_utc)
 
 
 def portfolio_wealth_identity(
@@ -1070,6 +1106,14 @@ class GlobalSingleOrderCandidateEvaluation:
     robust_delta_log_wealth: float = 0.0
     robust_ev_usd: float = 0.0
     capital_efficiency: float = 0.0
+    capital_action_mode: Literal[
+        "UNSCORED",
+        "SETTLEMENT_LOCKED_BUY",
+        "IMMEDIATE_REDUCE_ONLY_SELL",
+    ] = "UNSCORED"
+    resolution_at_utc: datetime | None = None
+    capital_lock_hours: float | None = None
+    robust_log_growth_per_hour: float | None = None
     limit_price: Decimal = Decimal("0")
     expected_fill_price_before_fee: Decimal = Decimal("0")
     max_spend_usd: Decimal = Decimal("0")
@@ -1115,6 +1159,10 @@ class GlobalSingleOrderCandidateEvaluation:
                     self.limit_price != 0,
                     self.expected_fill_price_before_fee != 0,
                     self.terminal_wealth is not None,
+                    self.capital_action_mode != "UNSCORED",
+                    self.resolution_at_utc is not None,
+                    self.capital_lock_hours is not None,
+                    self.robust_log_growth_per_hour is not None,
                 )
             )
             if not reason:
@@ -1181,6 +1229,32 @@ class GlobalSingleOrderCandidateEvaluation:
                     "rejected SELL evaluation lacks coherent counterfactual economics"
                 )
             return
+        if self.action == "BUY":
+            if (
+                self.capital_action_mode != "SETTLEMENT_LOCKED_BUY"
+                or self.resolution_at_utc is None
+                or self.resolution_at_utc.tzinfo is None
+                or self.capital_lock_hours is None
+                or self.robust_log_growth_per_hour is None
+                or not math.isfinite(self.capital_lock_hours)
+                or not math.isfinite(self.robust_log_growth_per_hour)
+                or self.capital_lock_hours <= 0.0
+                or self.robust_log_growth_per_hour <= 0.0
+                or not math.isclose(
+                    self.robust_log_growth_per_hour,
+                    self.robust_delta_log_wealth / self.capital_lock_hours,
+                    rel_tol=0.0,
+                    abs_tol=1e-15,
+                )
+            ):
+                raise ValueError("BUY evaluation lacks a coherent capital-time rate")
+        elif (
+            self.capital_action_mode != "IMMEDIATE_REDUCE_ONLY_SELL"
+            or self.resolution_at_utc is not None
+            or self.capital_lock_hours is not None
+            or self.robust_log_growth_per_hour is not None
+        ):
+            raise ValueError("SELL evaluation must be an immediate release action")
         if (
             self.status not in {"SCORED", "SELECTED"}
             or self.rejection_reason is not None
@@ -1226,6 +1300,14 @@ class GlobalSingleOrderDecision:
     robust_ev_usd: float
     capital_efficiency: float
     no_trade_reason: str | None
+    capital_action_mode: Literal[
+        "UNSCORED",
+        "SETTLEMENT_LOCKED_BUY",
+        "IMMEDIATE_REDUCE_ONLY_SELL",
+    ] = "UNSCORED"
+    resolution_at_utc: datetime | None = None
+    capital_lock_hours: float | None = None
+    robust_log_growth_per_hour: float | None = None
     limit_price: Decimal = Decimal("0")
     expected_fill_price_before_fee: Decimal = Decimal("0")
     max_spend_usd: Decimal = Decimal("0")
@@ -1239,6 +1321,14 @@ class GlobalSingleOrderDecision:
     candidate_input_count: int | None = None
 
     def __post_init__(self) -> None:
+        internal_score = (
+            self.candidate_input_count is None
+            and not self.candidate_evaluations
+            and self.capital_action_mode == "UNSCORED"
+            and self.resolution_at_utc is None
+            and self.capital_lock_hours is None
+            and self.robust_log_growth_per_hour is None
+        )
         if self.candidate_input_count is not None and (
             self.candidate_input_count < 0
             or self.candidate_input_count != len(self.candidate_evaluations)
@@ -1268,6 +1358,11 @@ class GlobalSingleOrderDecision:
                     != self.robust_delta_log_wealth
                     or winner.robust_ev_usd != self.robust_ev_usd
                     or winner.capital_efficiency != self.capital_efficiency
+                    or winner.capital_action_mode != self.capital_action_mode
+                    or winner.resolution_at_utc != self.resolution_at_utc
+                    or winner.capital_lock_hours != self.capital_lock_hours
+                    or winner.robust_log_growth_per_hour
+                    != self.robust_log_growth_per_hour
                     or winner.current_token_shares
                     != self.current_token_shares
                     or winner.full_kelly_target_shares
@@ -1290,6 +1385,10 @@ class GlobalSingleOrderDecision:
                 or self.full_kelly_target_shares != 0
                 or self.fractional_kelly_target_shares != 0
                 or self.terminal_wealth is not None
+                or self.capital_action_mode != "UNSCORED"
+                or self.resolution_at_utc is not None
+                or self.capital_lock_hours is not None
+                or self.robust_log_growth_per_hour is not None
             ):
                 raise ValueError("global no-trade decision cannot carry an execution boundary")
             return
@@ -1310,6 +1409,16 @@ class GlobalSingleOrderDecision:
                 or self.terminal_wealth is None
                 or self.terminal_wealth.loss_payoff_usd != -self.cost_usd
                 or self.terminal_wealth.win_payoff_usd != self.cash_proceeds_usd
+                or (
+                    not internal_score
+                    and (
+                        self.capital_action_mode
+                        != "IMMEDIATE_REDUCE_ONLY_SELL"
+                        or self.resolution_at_utc is not None
+                        or self.capital_lock_hours is not None
+                        or self.robust_log_growth_per_hour is not None
+                    )
+                )
                 or not math.isclose(
                     self.terminal_wealth.expected_value_diagnostic_usd,
                     self.robust_ev_usd,
@@ -1338,6 +1447,26 @@ class GlobalSingleOrderDecision:
             or self.terminal_wealth is None
             or self.terminal_wealth.loss_payoff_usd != -self.cost_usd
             or self.terminal_wealth.win_payoff_usd != self.shares - self.cost_usd
+            or (
+                not internal_score
+                and (
+                    self.capital_action_mode != "SETTLEMENT_LOCKED_BUY"
+                    or self.resolution_at_utc is None
+                    or self.resolution_at_utc.tzinfo is None
+                    or self.capital_lock_hours is None
+                    or self.robust_log_growth_per_hour is None
+                    or not math.isfinite(self.capital_lock_hours)
+                    or not math.isfinite(self.robust_log_growth_per_hour)
+                    or self.capital_lock_hours <= 0.0
+                    or self.robust_log_growth_per_hour <= 0.0
+                    or not math.isclose(
+                        self.robust_log_growth_per_hour,
+                        self.robust_delta_log_wealth / self.capital_lock_hours,
+                        rel_tol=0.0,
+                        abs_tol=1e-15,
+                    )
+                )
+            )
             or not math.isclose(
                 self.terminal_wealth.expected_value_diagnostic_usd,
                 self.robust_ev_usd,
@@ -1420,6 +1549,12 @@ def _global_candidate_evaluations(
                 robust_delta_log_wealth=score.robust_delta_log_wealth,
                 robust_ev_usd=score.robust_ev_usd,
                 capital_efficiency=score.capital_efficiency,
+                capital_action_mode=score.capital_action_mode,
+                resolution_at_utc=score.resolution_at_utc,
+                capital_lock_hours=score.capital_lock_hours,
+                robust_log_growth_per_hour=(
+                    score.robust_log_growth_per_hour
+                ),
                 limit_price=score.limit_price,
                 expected_fill_price_before_fee=(
                     score.expected_fill_price_before_fee
@@ -2895,6 +3030,10 @@ def select_global_single_order(
                 wealth_floor_usd=wealth_witness.wealth_floor_usd,
                 wealth_ceiling_usd=wealth_witness.wealth_ceiling_usd,
             )
+            score = replace(
+                score,
+                capital_action_mode="IMMEDIATE_REDUCE_ONLY_SELL",
+            )
             if score.candidate is None:
                 rejections.update(score.rejection_reasons)
             else:
@@ -3002,6 +3141,67 @@ def select_global_single_order(
         if score.candidate is None:
             rejections.update(score.rejection_reasons)
         else:
+            resolution_at = universe_witness.resolution_at_by_family.get(
+                candidate.family_key
+            )
+            if resolution_at is None:
+                reason = "CAPITAL_HORIZON_AUTHORITY_MISSING"
+                failure_rejections = {
+                    **rejections,
+                    candidate.candidate_id: reason,
+                }
+                return GlobalSingleOrderDecision(
+                    candidate=None,
+                    shares=Decimal("0"),
+                    cost_usd=Decimal("0"),
+                    robust_delta_log_wealth=0.0,
+                    robust_ev_usd=0.0,
+                    capital_efficiency=0.0,
+                    no_trade_reason="GLOBAL_EPOCH_SUPERSEDED",
+                    rejection_reasons=failure_rejections,
+                    candidate_evaluations=_global_candidate_evaluations(
+                        candidates,
+                        rejections=failure_rejections,
+                        scores=scored,
+                        default_rejection="GLOBAL_EPOCH_SUPERSEDED",
+                    ),
+                    candidate_input_count=len(candidates),
+                )
+            capital_lock_hours = (
+                resolution_at - decision_at_utc.astimezone(timezone.utc)
+            ).total_seconds() / 3600.0
+            if not math.isfinite(capital_lock_hours) or capital_lock_hours <= 0.0:
+                reason = "CAPITAL_HORIZON_NON_POSITIVE"
+                failure_rejections = {
+                    **rejections,
+                    candidate.candidate_id: reason,
+                }
+                return GlobalSingleOrderDecision(
+                    candidate=None,
+                    shares=Decimal("0"),
+                    cost_usd=Decimal("0"),
+                    robust_delta_log_wealth=0.0,
+                    robust_ev_usd=0.0,
+                    capital_efficiency=0.0,
+                    no_trade_reason="GLOBAL_EPOCH_SUPERSEDED",
+                    rejection_reasons=failure_rejections,
+                    candidate_evaluations=_global_candidate_evaluations(
+                        candidates,
+                        rejections=failure_rejections,
+                        scores=scored,
+                        default_rejection="GLOBAL_EPOCH_SUPERSEDED",
+                    ),
+                    candidate_input_count=len(candidates),
+                )
+            score = replace(
+                score,
+                capital_action_mode="SETTLEMENT_LOCKED_BUY",
+                resolution_at_utc=resolution_at,
+                capital_lock_hours=capital_lock_hours,
+                robust_log_growth_per_hour=(
+                    score.robust_delta_log_wealth / capital_lock_hours
+                ),
+            )
             scored.append(score)
 
     positive_scored = tuple(
@@ -3036,14 +3236,26 @@ def select_global_single_order(
             candidate_input_count=len(candidates),
         )
 
-    # Current-epoch capital growth is the only objective identified by current truth.
-    # A cross-epoch rate would require an authoritative capital-release distribution,
-    # future opportunity-arrival process, and reinvestment policy.  None may be guessed
-    # from a target date.  Maximize robust Δlog now; at a numerical tie, prefer higher
-    # robust terminal-wealth growth per dollar and then less cash.
+    # A positive reduce-only SELL is a strict current-endowment improvement: it
+    # requires no new capital, releases cash immediately, and is prefix-positive
+    # under FAK. The recurring engine can re-auction BUYs on the next cycle, so a
+    # certified SELL is lexically prior to adding new risk. If no such SELL exists,
+    # compare BUYs by robust log-growth per authority-bound family-resolution hour.
+    positive_sells = tuple(
+        score
+        for score in positive_scored
+        if isinstance(score.candidate, GlobalSingleOrderSellCandidate)
+    )
+    ranking_pool = positive_sells or positive_scored
     winner = min(
-        positive_scored,
+        ranking_pool,
         key=lambda score: (
+            -round(
+                score.robust_delta_log_wealth
+                if positive_sells
+                else float(score.robust_log_growth_per_hour or 0.0),
+                15,
+            ),
             -round(score.robust_delta_log_wealth, 15),
             -round(score.capital_efficiency, 15),
             score.cost_usd,
@@ -3059,6 +3271,10 @@ def select_global_single_order(
         robust_ev_usd=winner.robust_ev_usd,
         capital_efficiency=winner.capital_efficiency,
         no_trade_reason=None,
+        capital_action_mode=winner.capital_action_mode,
+        resolution_at_utc=winner.resolution_at_utc,
+        capital_lock_hours=winner.capital_lock_hours,
+        robust_log_growth_per_hour=winner.robust_log_growth_per_hour,
         limit_price=winner.limit_price,
         expected_fill_price_before_fee=winner.expected_fill_price_before_fee,
         max_spend_usd=winner.max_spend_usd,

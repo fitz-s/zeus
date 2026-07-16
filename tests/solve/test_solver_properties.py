@@ -924,19 +924,34 @@ def _global_probability_witness(candidate):
     return _GLOBAL_PROBABILITY_WITNESSES[candidate.probability_witness_identity]
 
 
-def _global_universe(probability_witnesses):
+def _global_universe(
+    probability_witnesses,
+    *,
+    resolution_hours_by_family=None,
+):
     captured_at = _DECISION_AT - timedelta(milliseconds=100)
     family_bindings = tuple(
         (family_key, witness.family_binding_identity)
         for family_key, witness in probability_witnesses.items()
     )
+    hours_by_family = resolution_hours_by_family or {}
+    family_resolution_at_utc = tuple(
+        (
+            family_key,
+            _DECISION_AT
+            + timedelta(hours=float(hours_by_family.get(family_key, 24.0))),
+        )
+        for family_key in probability_witnesses
+    )
     identity = S.global_auction_universe_identity(
         family_bindings=family_bindings,
+        family_resolution_at_utc=family_resolution_at_utc,
         venue_universe_identity="venue-universe-current",
         captured_at_utc=captured_at,
     )
     return S.GlobalAuctionUniverseWitness(
         family_bindings=family_bindings,
+        family_resolution_at_utc=family_resolution_at_utc,
         venue_universe_identity="venue-universe-current",
         captured_at_utc=captured_at,
         max_age=timedelta(seconds=1),
@@ -953,6 +968,7 @@ def _global_select(
     candidate_portfolio_endowment_resolver=None,
     candidate_policy_rejection_resolver=None,
     fractional_kelly_multiplier="1",
+    resolution_hours_by_family=None,
 ):
     candidates = tuple(candidates)
     if probability_witnesses is None:
@@ -978,7 +994,10 @@ def _global_select(
             for candidate in candidates
         }
     wealth = witness or _global_witness(floor=floor, ceiling=ceiling, cash=cash)
-    universe = universe or _global_universe(probability_witnesses)
+    universe = universe or _global_universe(
+        probability_witnesses,
+        resolution_hours_by_family=resolution_hours_by_family,
+    )
     return S.select_global_single_order(
         candidates,
         probability_witnesses=probability_witnesses,
@@ -1079,30 +1098,41 @@ def test_global_single_order_sell_uses_incremental_growth_not_loss_majority():
     assert decision.robust_ev_usd > 0
 
 
-def test_global_single_order_buy_can_beat_sell_and_cash():
+def test_global_single_order_positive_sell_precedes_new_risk_buy_and_cash():
     sell = _global_sell_candidate(
         candidate_id="sell-runner-up",
         family="sell-runner-family",
-        side="NO",
-        held_q=0.40,
-        bids=(("0.05", "10"),),
+        side="YES",
+        held_q=0.15,
+        bids=(("0.40", "4"), ("0.30", "6")),
         shares="10",
     )
     buy = _global_candidate(
         candidate_id="buy-winner",
         family="buy-winner-family",
         side="YES",
-        q=0.90,
-        levels=(("0.40", "20"),),
+        q=0.99,
+        levels=(("0.10", "20"),),
     )
 
     decision = _global_select(
         (sell, buy), floor="100", ceiling="110", cash="100", cap="5"
     )
 
-    assert decision.candidate is buy
-    assert decision.cash_proceeds_usd == 0
+    assert decision.candidate is sell
+    assert decision.cash_proceeds_usd > 0
     assert decision.robust_delta_log_wealth > 0
+    assert decision.capital_action_mode == "IMMEDIATE_REDUCE_ONLY_SELL"
+    assert decision.robust_log_growth_per_hour is None
+    evaluations = {
+        evaluation.candidate_id: evaluation
+        for evaluation in decision.candidate_evaluations
+    }
+    assert (
+        evaluations[buy.candidate_id].robust_delta_log_wealth
+        > evaluations[sell.candidate_id].robust_delta_log_wealth
+        > 0
+    )
 
 
 def test_global_single_order_entry_pause_blocks_buy_but_preserves_sell_and_cash():
@@ -1869,6 +1899,14 @@ def test_global_single_order_label_mirror_preserves_size_cost_and_objective():
     )
     yes_score = _global_score(yes)
     no_score = _global_score(no)
+    yes_decision = _global_select(
+        (yes,),
+        resolution_hours_by_family={"a": 18.0},
+    )
+    no_decision = _global_select(
+        (no,),
+        resolution_hours_by_family={"b": 18.0},
+    )
 
     assert yes_score.shares == no_score.shares
     assert yes_score.cost_usd == no_score.cost_usd
@@ -1879,6 +1917,10 @@ def test_global_single_order_label_mirror_preserves_size_cost_and_objective():
     )
     assert yes_score.max_spend_usd == no_score.max_spend_usd
     assert yes_score.robust_delta_log_wealth == no_score.robust_delta_log_wealth
+    assert (
+        yes_decision.robust_log_growth_per_hour
+        == no_decision.robust_log_growth_per_hour
+    )
 
 
 def test_global_single_order_fractional_kelly_bounds_final_holding_for_both_sides():
@@ -2251,11 +2293,17 @@ def test_global_single_order_refuses_native_token_changed_inside_same_family_key
     )
     universe = S.GlobalAuctionUniverseWitness(
         family_bindings=changed_bindings,
+        family_resolution_at_utc=(
+            (candidate.family_key, _DECISION_AT + timedelta(hours=24)),
+        ),
         venue_universe_identity="venue-universe-current",
         captured_at_utc=captured_at,
         max_age=timedelta(seconds=1),
         witness_identity=S.global_auction_universe_identity(
             family_bindings=changed_bindings,
+            family_resolution_at_utc=(
+                (candidate.family_key, _DECISION_AT + timedelta(hours=24)),
+            ),
             venue_universe_identity="venue-universe-current",
             captured_at_utc=captured_at,
         ),
@@ -2631,23 +2679,69 @@ def test_global_single_order_uses_coupling_robust_endowment_bounds():
     assert exposed.robust_delta_log_wealth < cash_only.robust_delta_log_wealth
 
 
-def test_global_single_order_uses_current_epoch_growth_not_forged_duration():
+def test_global_single_order_maximizes_authority_bound_log_growth_rate():
     slow = _global_candidate(
         candidate_id="higher-growth", family="a", side="YES", q=0.74
     )
     fast = _global_candidate(
         candidate_id="lower-growth", family="b", side="NO", q=0.60
     )
-    slow_score = _global_score(slow)
-    decision = _global_select((slow, fast))
+    fast_score = _global_score(fast)
+    decision = _global_select(
+        (slow, fast),
+        resolution_hours_by_family={"a": 48.0, "b": 12.0},
+    )
 
-    assert decision.robust_delta_log_wealth == slow_score.robust_delta_log_wealth
-    assert decision.candidate.candidate_id == "higher-growth"
+    assert decision.robust_delta_log_wealth == fast_score.robust_delta_log_wealth
+    assert decision.candidate.candidate_id == "lower-growth"
+    assert decision.capital_lock_hours == 12.0
+    assert decision.robust_log_growth_per_hour == pytest.approx(
+        fast_score.robust_delta_log_wealth / 12.0
+    )
+    selected = next(
+        evaluation
+        for evaluation in decision.candidate_evaluations
+        if evaluation.status == "SELECTED"
+    )
+    assert selected.capital_action_mode == "SETTLEMENT_LOCKED_BUY"
+    assert selected.resolution_at_utc == decision.resolution_at_utc
+    assert selected.capital_lock_hours == decision.capital_lock_hours
+    assert (
+        selected.robust_log_growth_per_hour
+        == decision.robust_log_growth_per_hour
+    )
 
 
-def test_global_single_order_has_no_caller_forgeable_duration_input():
+def test_global_single_order_duration_is_universe_bound_not_candidate_authored():
     assert "capital_release_at_utc" not in S.GlobalSingleOrderCandidate.__dataclass_fields__
-    assert "robust_log_growth_per_hour" not in S.GlobalSingleOrderDecision.__dataclass_fields__
+    assert (
+        "family_resolution_at_utc"
+        in S.GlobalAuctionUniverseWitness.__dataclass_fields__
+    )
+    assert (
+        "robust_log_growth_per_hour"
+        in S.GlobalSingleOrderDecision.__dataclass_fields__
+    )
+
+
+def test_global_single_order_nonpositive_buy_horizon_invalidates_epoch():
+    candidate = _global_candidate(
+        candidate_id="elapsed-horizon",
+        family="elapsed",
+        side="YES",
+        q=0.75,
+    )
+
+    decision = _global_select(
+        (candidate,),
+        resolution_hours_by_family={"elapsed": 0.0},
+    )
+
+    assert decision.candidate is None
+    assert decision.no_trade_reason == "GLOBAL_EPOCH_SUPERSEDED"
+    assert decision.rejection_reasons[candidate.candidate_id] == (
+        "CAPITAL_HORIZON_NON_POSITIVE"
+    )
 
 
 def test_global_single_order_rejects_probability_from_one_bin_welded_to_another_token():

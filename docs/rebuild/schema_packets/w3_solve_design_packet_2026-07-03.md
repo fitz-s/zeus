@@ -256,11 +256,17 @@ generation, reconciled positions, reservations, spendable cash, and wealth bound
 coupling is lower-bounded by evaluating wins against the portfolio ceiling and losses against
 the floor. Before that score is admitted, lower-tail-CVaR payoff-side win probability must be
 strictly above one half, so the exact binary payoff vector has positive median payoff; otherwise
-the typed result is `ROBUST_MAJORITY_LOSS`. The current-epoch primary score among admitted
-candidates is lower-CVaR Δlog-wealth; numerical ties use robust Δlog per dollar, then lower cash.
-Expected value is diagnostic only, not realized capital gain. A `/capital-hour` score is forbidden until capital release,
-future opportunity arrivals, and reinvestment policy have current authority. Maker-contingent
-assets and any stale/mismatched certificate fail closed. The event reactor now owns
+the typed result is `ROBUST_MAJORITY_LOSS`. A full-size and every-FAK-prefix positive
+reduce-only SELL is a current-endowment dominance action: it consumes no new capital and releases
+cash immediately, so it is selected before adding new BUY risk; multiple such SELLs rank by
+lower-CVaR Δlog-wealth. When no positive SELL exists, BUYs rank by lower-CVaR Δlog-wealth per
+remaining family-resolution hour. That horizon is not caller-authored: the current immutable
+family city and target local date plus configured settlement timezone derive it, and both current
+scope and venue-universe witness identities bind it. Ties use raw robust Δlog, robust Δlog per
+dollar, then lower cash. Expected value is diagnostic only, not realized capital gain. This is a
+current certified resolution-horizon rate, not a claim about future opportunity arrivals or a
+learned continuation value. Maker-contingent assets and any stale/mismatched certificate fail
+closed. The event reactor now owns
 `prepare all -> choose one -> JIT recapture -> submit once`; implementation alone is not a
 live-optimality claim, which additionally requires a current complete-scope receipt, exact
 one-submit evidence, and fresh post-submit capital/venue reconciliation.

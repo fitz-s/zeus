@@ -30,7 +30,7 @@ import sys
 import textwrap
 import threading
 import zlib
-from dataclasses import dataclass, replace
+from dataclasses import asdict, dataclass, replace
 from decimal import Decimal
 from types import SimpleNamespace
 
@@ -64,7 +64,6 @@ from src.engine.global_auction_universe import (
 from src.events.opportunity_event import (
     Day0ExtremeUpdatedPayload,
     ForecastSnapshotReadyPayload,
-    make_day0_extreme_updated_event,
     make_opportunity_event,
 )
 from src.events.day0_authority import (
@@ -151,6 +150,7 @@ def test_global_auction_receipt_persists_complete_buy_sell_hold_cash_comparison(
             robust_delta_log_wealth=-0.01,
             robust_ev_usd=-1.106,
             capital_efficiency=-0.004273504273504274,
+            capital_action_mode="IMMEDIATE_REDUCE_ONLY_SELL",
             limit_price=Decimal("0.80"),
             expected_fill_price_before_fee=Decimal("0.81"),
             terminal_wealth=BinaryTerminalWealthCertificate(
@@ -332,6 +332,12 @@ def test_global_auction_receipt_persists_complete_buy_sell_hold_cash_comparison(
     assert sell_evaluation["expected_fill_price_before_fee"] == "0.81"
     assert sell_evaluation["robust_delta_log_wealth"] == -0.01
     assert sell_evaluation["robust_ev_usd"] == -1.106
+    assert sell_evaluation["capital_action_mode"] == (
+        "IMMEDIATE_REDUCE_ONLY_SELL"
+    )
+    assert sell_evaluation["resolution_at_utc"] is None
+    assert sell_evaluation["capital_lock_hours"] is None
+    assert sell_evaluation["robust_log_growth_per_hour"] is None
     assert len(summary["receipt_hash"]) == 64
     with pytest.raises(ValueError, match="GLOBAL_AUCTION_RECEIPT_SCOPE_INCOMPLETE"):
         global_batch_runtime._store_global_auction_receipt(
@@ -1577,7 +1583,12 @@ def test_global_day0_current_band_accepts_only_bound_absorbing_certainty():
         )
 
 
-def _global_scope_event(*, city: str, source_run_id: str):
+def _global_scope_event(
+    *,
+    city: str,
+    source_run_id: str,
+    city_timezone: str = "UTC",
+):
     captured_at = "2026-07-10T08:00:00+00:00"
     payload = ForecastSnapshotReadyPayload(
         city=city,
@@ -1604,6 +1615,8 @@ def _global_scope_event(*, city: str, source_run_id: str):
         coverage_completeness_status="COMPLETE",
         coverage_readiness_status="LIVE_ELIGIBLE",
     )
+    payload_json = asdict(payload)
+    payload_json["city_timezone"] = city_timezone
     return make_opportunity_event(
         event_type="FORECAST_SNAPSHOT_READY",
         entity_key=f"{city}|2026-07-11|high",
@@ -1611,7 +1624,7 @@ def _global_scope_event(*, city: str, source_run_id: str):
         observed_at=captured_at,
         available_at=captured_at,
         received_at=captured_at,
-        payload=payload,
+        payload=payload_json,
         causal_snapshot_id=payload.snapshot_id,
     )
 
@@ -3244,12 +3257,16 @@ def test_current_global_scope_uses_latest_day0_carrier_per_family():
         source_authorized_status="AUTHORIZED",
         live_authority_status="live",
     )
-    day0_alpha = make_day0_extreme_updated_event(
+    day0_payload_json = asdict(day0_payload)
+    day0_payload_json["city_timezone"] = "UTC"
+    day0_alpha = make_opportunity_event(
+        event_type="DAY0_EXTREME_UPDATED",
         entity_key="Alpha|2026-07-11|high|ALPHA-WU",
         source="day0_observation",
         observed_at=day0_payload.observation_time,
+        available_at=day0_payload.observation_available_at,
         received_at="2026-07-10T08:10:01+00:00",
-        payload=day0_payload,
+        payload=day0_payload_json,
         causal_snapshot_id="day0-alpha-0810",
     )
     forecast_alpha = replace(
@@ -4752,6 +4769,42 @@ def test_global_scope_is_independent_of_the_reactor_page_and_current_q_identity(
     assert reactor_page.scope_identity != scope.scope_identity
     assert updated.family_keys == scope.family_keys
     assert updated.scope_identity != scope.scope_identity
+    assert set(scope.resolution_at_by_family.values()) == {
+        _dt.datetime(2026, 7, 12, tzinfo=_dt.timezone.utc)
+    }
+
+
+def test_global_scope_identity_binds_settlement_timezone_horizon():
+    decision_at = _dt.datetime(2026, 7, 10, 8, 0, tzinfo=_dt.timezone.utc)
+    utc = current_global_auction_scope_from_events(
+        (
+            _global_scope_event(
+                city="Alpha",
+                source_run_id="posterior-current",
+                city_timezone="UTC",
+            ),
+        ),
+        captured_at_utc=decision_at,
+    )
+    auckland = current_global_auction_scope_from_events(
+        (
+            _global_scope_event(
+                city="Alpha",
+                source_run_id="posterior-current",
+                city_timezone="Pacific/Auckland",
+            ),
+        ),
+        captured_at_utc=decision_at,
+    )
+
+    assert utc.family_keys == auckland.family_keys
+    assert utc.scope_identity != auckland.scope_identity
+    assert next(iter(utc.resolution_at_by_family.values())) == _dt.datetime(
+        2026, 7, 12, tzinfo=_dt.timezone.utc
+    )
+    assert next(iter(auckland.resolution_at_by_family.values())) == _dt.datetime(
+        2026, 7, 11, 12, tzinfo=_dt.timezone.utc
+    )
 
 
 def test_global_candidate_endowment_projects_correlated_family_holdings_exactly():

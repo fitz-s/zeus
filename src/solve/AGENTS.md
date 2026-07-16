@@ -60,10 +60,14 @@ current scope, book, wealth, probability, RiskGuard, and venue receipt evidence 
   positive and excludes lottery entries. A reduce-only SELL is scored against HOLD instead: its
   robust incremental log-growth and EV must both be positive for the full order and every possible
   FAK fill prefix, even when the favorable SELL branch itself is below one half.
-  Rank admitted candidates by coupling-robust lower-CVaR Δlog-wealth; numerical ties prefer
-  higher robust Δlog per dollar, then lower cash. Expected value remains diagnostic and must
-  never be named realized capital gain. A
-  capital-time rate is forbidden without an authoritative release/arrival/reinvestment model.
+  A full-size and every-FAK-prefix positive reduce-only SELL is lexically prior to a new BUY:
+  it improves the current endowment, consumes no new capital, and releases cash immediately;
+  among such SELLs rank by coupling-robust lower-CVaR Δlog-wealth. Otherwise rank BUYs by
+  coupling-robust lower-CVaR Δlog-wealth per remaining family-resolution hour. The horizon is
+  derived from the immutable family city and target local date plus the configured settlement
+  timezone, and is bound into the current scope/universe witness identity — never authored by a
+  candidate. Numerical ties prefer higher robust Δlog, then robust Δlog per dollar, then lower
+  cash. Expected value remains diagnostic and must never be named realized capital gain.
   This is not multi-order portfolio optimality.
 - **κ single-owner, typed.** κ=1.0 throughout W3/W4 (the downstream haircut still shades);
   `KappaPolicy.__post_init__` makes a κ<1 with the haircut alive unconstructable. κ is a

@@ -12,7 +12,7 @@ import hashlib
 import json
 import sqlite3
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal
 from functools import cached_property
 from typing import Callable, Mapping, Sequence
@@ -51,6 +51,7 @@ class CurrentGlobalAuctionScope:
     """Complete probability-ready family set at one decision instant."""
 
     events_by_family: tuple[tuple[str, OpportunityEvent], ...]
+    family_resolution_at_utc: tuple[tuple[str, datetime], ...]
     scope_identity: str
     captured_at_utc: datetime
 
@@ -58,10 +59,27 @@ class CurrentGlobalAuctionScope:
         rows = tuple(sorted(self.events_by_family, key=lambda item: item[0]))
         keys = tuple(family_key for family_key, _ in rows)
         expected_keys = tuple(_event_family_key(event) for _, event in rows)
+        resolutions = tuple(
+            sorted(
+                (
+                    str(family_key),
+                    resolution_at.astimezone(timezone.utc),
+                )
+                for family_key, resolution_at in self.family_resolution_at_utc
+                if resolution_at.tzinfo is not None
+            )
+        )
+        resolution_keys = tuple(family_key for family_key, _ in resolutions)
+        expected_resolutions = tuple(
+            (family_key, _event_resolution_at_utc(event))
+            for family_key, event in rows
+        )
         if (
             not rows
             or len(set(keys)) != len(keys)
             or keys != expected_keys
+            or resolution_keys != keys
+            or resolutions != expected_resolutions
             or not all(family_key and event.event_id for family_key, event in rows)
             or self.captured_at_utc.tzinfo is None
         ):
@@ -72,6 +90,7 @@ class CurrentGlobalAuctionScope:
         if self.scope_identity != expected:
             raise ValueError("current global auction scope identity mismatch")
         object.__setattr__(self, "events_by_family", rows)
+        object.__setattr__(self, "family_resolution_at_utc", resolutions)
 
     @property
     def family_keys(self) -> tuple[str, ...]:
@@ -80,6 +99,10 @@ class CurrentGlobalAuctionScope:
     @property
     def events(self) -> tuple[OpportunityEvent, ...]:
         return tuple(event for _, event in self.events_by_family)
+
+    @property
+    def resolution_at_by_family(self) -> Mapping[str, datetime]:
+        return dict(self.family_resolution_at_utc)
 
 
 @dataclass(frozen=True)
@@ -1360,10 +1383,41 @@ def _event_family_key(event: OpportunityEvent) -> str:
     )
 
 
+def _event_resolution_at_utc(event: OpportunityEvent) -> datetime:
+    """Current family resolution horizon: the end of its settlement-local day."""
+
+    payload = json.loads(event.payload_json)
+    city, target_date, _metric = _event_family(event)
+    timezone_name = str(payload.get("city_timezone") or "").strip()
+    if not timezone_name:
+        from src.config import runtime_cities_by_name
+
+        city_config = runtime_cities_by_name().get(city)
+        timezone_name = str(
+            getattr(city_config, "timezone", "") or ""
+        ).strip()
+    if not timezone_name:
+        raise ValueError(
+            f"global universe family lacks settlement timezone: {city}"
+        )
+    try:
+        target_local_date = date.fromisoformat(target_date)
+        resolution_local = datetime.combine(
+            target_local_date + timedelta(days=1),
+            time.min,
+            tzinfo=ZoneInfo(timezone_name),
+        )
+    except (TypeError, ValueError, KeyError) as exc:
+        raise ValueError(
+            f"global universe family resolution horizon is invalid: {city}|{target_date}"
+        ) from exc
+    return resolution_local.astimezone(timezone.utc)
+
+
 def current_global_auction_scope_identity(
     events: Sequence[OpportunityEvent],
 ) -> str:
-    """Hash the complete family set and each family's current probability carrier."""
+    """Hash each current probability carrier and its settlement-time horizon."""
 
     rows = []
     for event in events:
@@ -1371,9 +1425,15 @@ def current_global_auction_scope_identity(
         probability_identity = _event_probability_identity(event)
         if not probability_identity:
             raise ValueError("global universe event lacks probability identity")
-        rows.append((family_key, probability_identity))
+        rows.append(
+            (
+                family_key,
+                probability_identity,
+                _event_resolution_at_utc(event).isoformat(),
+            )
+        )
     rows.sort()
-    if not rows or len({family_key for family_key, _ in rows}) != len(rows):
+    if not rows or len({family_key for family_key, _, _ in rows}) != len(rows):
         raise ValueError("global universe must contain one event per family")
     digest = hashlib.sha256()
     for row in rows:
@@ -1390,8 +1450,13 @@ def current_global_auction_scope_from_events(
     rows = []
     for event in events:
         rows.append((_event_family_key(event), event))
+    resolutions = tuple(
+        (family_key, _event_resolution_at_utc(event))
+        for family_key, event in rows
+    )
     return CurrentGlobalAuctionScope(
         events_by_family=tuple(rows),
+        family_resolution_at_utc=resolutions,
         scope_identity=current_global_auction_scope_identity(events),
         captured_at_utc=captured_at_utc,
     )
@@ -1648,11 +1713,13 @@ def global_universe_witness_from_scope(
     )
     identity = global_auction_universe_identity(
         family_bindings=family_bindings,
+        family_resolution_at_utc=scope.family_resolution_at_utc,
         venue_universe_identity=venue_universe_identity,
         captured_at_utc=scope.captured_at_utc,
     )
     return GlobalAuctionUniverseWitness(
         family_bindings=family_bindings,
+        family_resolution_at_utc=scope.family_resolution_at_utc,
         venue_universe_identity=venue_universe_identity,
         captured_at_utc=scope.captured_at_utc,
         max_age=max_age,
