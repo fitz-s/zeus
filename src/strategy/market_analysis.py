@@ -453,6 +453,35 @@ class MarketAnalysis:
         measured = self._settle(noised)
         return np.array([self._bin_probability(measured, bb) for bb in self.bins])
 
+    def _bootstrap_p_raw_matrix(self, n: int, n_members: int) -> np.ndarray | None:
+        """Use an exact batch sampler when the configured signal provides one."""
+        batch_sampler = getattr(self._bootstrap_probability_sampler, "sample_matrix", None)
+        if not callable(batch_sampler):
+            return None
+        sampled = np.asarray(batch_sampler(self, n, n_members), dtype=np.float64)
+        expected_shape = (n, len(self.bins))
+        if sampled.shape != expected_shape:
+            raise ValueError(
+                f"{self._bootstrap_signal_type}_bootstrap_probability_matrix "
+                f"must have shape {expected_shape}, got {sampled.shape}"
+            )
+        if not np.all(np.isfinite(sampled)):
+            raise ValueError(
+                f"{self._bootstrap_signal_type}_bootstrap_probability_matrix must be finite"
+            )
+        if np.any(sampled < 0.0) or np.any(sampled > 1.0):
+            raise ValueError(
+                f"{self._bootstrap_signal_type}_bootstrap_probability_matrix "
+                "components must be within [0, 1]"
+            )
+        totals = sampled.sum(axis=1)
+        if not np.all(np.isclose(totals, 1.0, rtol=1e-6, atol=1e-6)):
+            raise ValueError(
+                f"{self._bootstrap_signal_type}_bootstrap_probability_matrix rows "
+                "must sum to 1.0"
+            )
+        return sampled
+
     def supports_buy_no_edges(self, bin_idx: int | None = None) -> bool:
         """Return whether local NO-side economics are executable for this market.
 
@@ -931,12 +960,17 @@ class MarketAnalysis:
         map_A = float(self._calibrator.A) if has_platt else 0.0
         map_B = float(self._calibrator.B) if has_platt else 0.0
         map_C = float(self._calibrator.C) if has_platt else 0.0
+        p_raw_matrix = self._bootstrap_p_raw_matrix(n, n_members)
         samples = np.zeros((n, len(self.bins)))
         for i in range(n):
             # Layer 1: sample the configured signal probability object for all
             # bins. Generic ENS uses member resampling; Day0 injects the
             # observation-fused signal sampler so CI and p_raw share authority.
-            p_raw_all = self._bootstrap_p_raw_all(n_members)
+            p_raw_all = (
+                p_raw_matrix[i]
+                if p_raw_matrix is not None
+                else self._bootstrap_p_raw_all(n_members)
+            )
 
             # Layer 2: calibrate with the current/MAP Platt parameterization for ALL bins
             if has_platt:

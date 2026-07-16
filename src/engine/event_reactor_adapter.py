@@ -27006,6 +27006,74 @@ def _day0_extra_member_sigma_native(
     return extra if extra > 0.0 and np.isfinite(extra) else 0.0
 
 
+@dataclass(frozen=True)
+class _Day0BootstrapSampler:
+    members: np.ndarray
+    rounded: float | None
+    metric: str
+    sigma: float
+    mask: np.ndarray
+
+    def __call__(self, analysis, n_members):
+        n = max(1, int(n_members))
+        idx = analysis._rng.integers(0, self.members.size, n)
+        draws = self.members[idx] + analysis._rng.normal(0.0, self.sigma, n)
+        if self.rounded is not None:
+            if self.metric == "high":
+                draws = np.maximum(draws, self.rounded)
+            else:
+                draws = np.minimum(draws, self.rounded)
+        measured = analysis._settle(draws)
+        vec = bin_counts_from_array(measured, analysis.bins).astype(float)
+        vec /= float(len(measured))
+        if vec.shape == self.mask.shape:
+            vec = vec * self.mask
+        if not np.all(np.isfinite(vec)):
+            return np.asarray(analysis.p_cal, dtype=float)
+        total = float(vec.sum())
+        if total <= 0.0:
+            return np.asarray(analysis.p_cal, dtype=float)
+        return vec / total
+
+    def sample_matrix(self, analysis, n_samples: int, n_members: int) -> np.ndarray:
+        """Produce scalar-equivalent rows while batching settlement and binning."""
+        rows = max(0, int(n_samples))
+        members_per_row = max(1, int(n_members))
+        draws = np.empty((rows, members_per_row), dtype=np.float64)
+        for row in range(rows):
+            idx = analysis._rng.integers(0, self.members.size, members_per_row)
+            draws[row] = (
+                self.members[idx]
+                + analysis._rng.normal(0.0, self.sigma, members_per_row)
+            )
+        if self.rounded is not None:
+            if self.metric == "high":
+                draws = np.maximum(draws, self.rounded)
+            else:
+                draws = np.minimum(draws, self.rounded)
+        measured = np.asarray(analysis._settle(draws), dtype=np.float64)
+        lows = np.asarray(
+            [float("-inf") if b.low is None else float(b.low) for b in analysis.bins],
+            dtype=np.float64,
+        )
+        highs = np.asarray(
+            [float("inf") if b.high is None else float(b.high) for b in analysis.bins],
+            dtype=np.float64,
+        )
+        counts = np.count_nonzero(
+            (measured[:, :, None] >= lows) & (measured[:, :, None] <= highs),
+            axis=1,
+        )
+        probabilities = counts.astype(np.float64) / float(members_per_row)
+        if probabilities.shape[1:] == self.mask.shape:
+            probabilities *= self.mask
+        totals = probabilities.sum(axis=1)
+        valid = np.all(np.isfinite(probabilities), axis=1) & (totals > 0.0)
+        probabilities[valid] /= totals[valid, None]
+        probabilities[~valid] = np.asarray(analysis.p_cal, dtype=np.float64)
+        return probabilities
+
+
 def _make_day0_bootstrap_sampler(
     *,
     members_native,
@@ -27048,31 +27116,13 @@ def _make_day0_bootstrap_sampler(
         )
         return None
 
-    members_arr = members
-    mask_arr = np.asarray(mask, dtype=float)
-
-    def _sampler(analysis, n_members):
-        n = max(1, int(n_members))
-        idx = analysis._rng.integers(0, members_arr.size, n)
-        draws = members_arr[idx] + analysis._rng.normal(0.0, sigma, n)
-        if rounded is not None:
-            if metric == "high":
-                draws = np.maximum(draws, float(rounded))
-            else:
-                draws = np.minimum(draws, float(rounded))
-        measured = analysis._settle(draws)
-        vec = bin_counts_from_array(measured, analysis.bins).astype(float)
-        vec /= float(len(measured))
-        if vec.shape == mask_arr.shape:
-            vec = vec * mask_arr
-        if not np.all(np.isfinite(vec)):
-            return np.asarray(analysis.p_cal, dtype=float)
-        s = float(vec.sum())
-        if s <= 0.0:
-            return np.asarray(analysis.p_cal, dtype=float)
-        return vec / s
-
-    return _sampler
+    return _Day0BootstrapSampler(
+        members=members,
+        rounded=rounded,
+        metric=metric,
+        sigma=float(sigma),
+        mask=np.asarray(mask, dtype=float),
+    )
 
 
 def _market_analysis_from_event_snapshot(

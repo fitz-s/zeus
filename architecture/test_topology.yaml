@@ -380,7 +380,7 @@ test_trust_policy:
     tests/test_day0_exit_gate.py: {created: "2026-04-07", last_used: "2026-04-23"}
     tests/test_day0_exposure_cap_kernel.py: {created: "2026-06-10", last_used: "2026-06-10"}
     tests/test_day0_fast_obs_lane.py: {created: "2026-06-10", last_used: "2026-07-16"}
-    tests/test_day0_first_principles_antibodies.py: {created: "2026-06-10", last_used: "2026-06-10"}
+    tests/test_day0_first_principles_antibodies.py: {created: "2026-06-10", last_used: "2026-07-16"}
     tests/test_day0_hard_fact_exit.py: {created: "2026-06-10", last_used: "2026-06-10"}
     tests/test_day0_oracle_matched_reading_basis.py: {created: "2026-06-13", last_used: "2026-06-13"}
     tests/test_day0_remaining_day_pricing.py: {created: "2026-06-10", last_used: "2026-07-15"}
