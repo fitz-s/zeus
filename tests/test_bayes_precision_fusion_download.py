@@ -19,6 +19,7 @@ All fetchers are injected (NO network).
 from __future__ import annotations
 
 import sqlite3
+import time
 from datetime import UTC, date, datetime
 from pathlib import Path
 
@@ -150,6 +151,57 @@ def test_download_timebox_returns_incomplete_without_fetching_targets(tmp_path, 
     assert report["timeboxed_incomplete"] is True
     assert report["timebox_unattempted_target_groups"] == 2
     assert report["written_row_count"] == 0
+
+
+def test_persist_lock_obeys_source_clock_deadline(tmp_path) -> None:
+    from src.data.bayes_precision_fusion_download import (
+        _PersistDeadlineExceeded,
+        _persist_chunk_with_lock_retry,
+    )
+
+    db = _forecast_db(tmp_path)
+    locker = sqlite3.connect(str(db))
+    locker.execute("PRAGMA journal_mode=WAL")
+    locker.execute("BEGIN IMMEDIATE")
+    started = time.monotonic()
+    try:
+        with pytest.raises(_PersistDeadlineExceeded):
+            _persist_chunk_with_lock_retry(
+                db,
+                (),
+                deadline_monotonic=started + 0.08,
+                ensure_schema=False,
+            )
+    finally:
+        locker.rollback()
+        locker.close()
+
+    assert time.monotonic() - started < 1.0
+
+
+def test_download_initializes_persist_schema_once_per_fanout(tmp_path, monkeypatch) -> None:
+    import src.data.bayes_precision_fusion_download as dl
+
+    db = _forecast_db(tmp_path)
+    ensure_flags: list[bool] = []
+
+    def _persist(_forecast_db, rows, **kwargs):
+        ensure_flags.append(bool(kwargs["ensure_schema"]))
+        return len(rows), 0
+
+    monkeypatch.setattr(dl, "_persist_chunk_with_lock_retry", _persist)
+    report = dl.download_bayes_precision_fusion_extra_raw_inputs(
+        forecast_db=db,
+        cycle=datetime(2026, 6, 8, 0, tzinfo=UTC),
+        targets=_two_city_targets(),
+        models=("ecmwf_ifs",),
+        include_previous_runs=False,
+        prune_after=False,
+        single_runs_fetch=lambda **_kwargs: 20.0,
+    )
+
+    assert report["written_row_count"] == 2
+    assert ensure_flags == [True, False]
 
 
 # =====================================================================================

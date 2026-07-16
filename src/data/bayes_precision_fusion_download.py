@@ -1035,12 +1035,25 @@ def _prune_old(conn, *, cutoff_iso: str) -> int:
     return int(cur.rowcount or 0)
 
 
+class _PersistDeadlineExceeded(TimeoutError):
+    pass
+
+
+def _deadline_busy_timeout_ms(deadline_monotonic: float) -> int:
+    remaining = deadline_monotonic - time.monotonic()
+    if remaining <= 0.0:
+        raise _PersistDeadlineExceeded("forecast persistence deadline expired")
+    return max(1, int(remaining * 1000.0))
+
+
 def _persist_chunk_with_lock_retry(
     forecast_db: Path | str,
     rows: Sequence[dict],
     *,
     cutoff_iso: str | None = None,
     attempts: int = 6,
+    deadline_monotonic: float | None = None,
+    ensure_schema: bool = True,
 ) -> tuple[int, int]:
     """Durably persist one CHUNK of capture rows (and optionally prune), retrying
     transient writer locks with the rows held in memory.
@@ -1062,9 +1075,20 @@ def _persist_chunk_with_lock_retry(
     written = 0
     pruned = 0
     for _attempt in range(attempts):
+        if deadline_monotonic is not None:
+            _deadline_busy_timeout_ms(deadline_monotonic)
         conn = _connect(Path(forecast_db), write_class="live")
         try:
-            ensure_replacement_forecast_live_schema(conn)
+            if deadline_monotonic is not None:
+                conn.execute(
+                    f"PRAGMA busy_timeout = {_deadline_busy_timeout_ms(deadline_monotonic)}"
+                )
+            if ensure_schema:
+                ensure_replacement_forecast_live_schema(conn)
+            if deadline_monotonic is not None:
+                conn.execute(
+                    f"PRAGMA busy_timeout = {_deadline_busy_timeout_ms(deadline_monotonic)}"
+                )
             if rows:
                 _scan_and_audit_request_conflicts(conn, rows)
             # BEGIN IMMEDIATE: take the write lock up front so busy_timeout WAITS for it,
@@ -1086,6 +1110,14 @@ def _persist_chunk_with_lock_retry(
         except sqlite3.OperationalError as lock_exc:
             if "locked" not in str(lock_exc).lower() or _attempt + 1 >= attempts:
                 raise
+            if deadline_monotonic is not None:
+                remaining = deadline_monotonic - time.monotonic()
+                if remaining <= 0.0:
+                    raise _PersistDeadlineExceeded(
+                        "forecast persistence exhausted its source-clock deadline"
+                    ) from lock_exc
+                time.sleep(min(0.05 * (2 ** _attempt), 0.25, remaining))
+                continue
             _LOG.warning(
                 "bayes_precision_fusion persist hit transient writer lock (attempt %d/%d) — retrying in 20s "
                 "with fetched rows held in memory: %s",
@@ -1184,6 +1216,9 @@ def download_bayes_precision_fusion_extra_raw_inputs(
     )
     timeboxed = False
     timebox_unattempted_target_groups = 0
+    timebox_unpersisted_row_count = 0
+    prune_skipped_timebox = False
+    persist_schema_ready = False
 
     def _timebox_expired() -> bool:
         return wall_clock_deadline is not None and time.monotonic() >= wall_clock_deadline
@@ -1546,7 +1581,20 @@ def download_bayes_precision_fusion_extra_raw_inputs(
         # CHUNKED DURABILITY (2026-06-11): persist THIS city×date's rows now — a restart or
         # crash later in the pass can no longer destroy completed targets' fetches.
         if rows:
-            chunk_written, _ = _persist_chunk_with_lock_retry(forecast_db, rows)
+            try:
+                chunk_written, _ = _persist_chunk_with_lock_retry(
+                    forecast_db,
+                    rows,
+                    deadline_monotonic=wall_clock_deadline,
+                    ensure_schema=not persist_schema_ready,
+                )
+            except _PersistDeadlineExceeded:
+                timeboxed = True
+                timebox_unpersisted_row_count += len(rows)
+                rows = []
+                timebox_unattempted_target_groups = len(target_groups) - group_index - 1
+                break
+            persist_schema_ready = True
             total_written += chunk_written
             rows = []
         if timeboxed:
@@ -1557,7 +1605,19 @@ def download_bayes_precision_fusion_extra_raw_inputs(
     written = total_written
     pruned = 0
     if prune_after and not timeboxed:
-        _, pruned = _persist_chunk_with_lock_retry(forecast_db, (), cutoff_iso=cutoff_iso)
+        if _timebox_expired():
+            prune_skipped_timebox = True
+        else:
+            try:
+                _, pruned = _persist_chunk_with_lock_retry(
+                    forecast_db,
+                    (),
+                    cutoff_iso=cutoff_iso,
+                    deadline_monotonic=wall_clock_deadline,
+                    ensure_schema=not persist_schema_ready,
+                )
+            except _PersistDeadlineExceeded:
+                prune_skipped_timebox = True
 
     if domain_excluded:
         _LOG.info(
@@ -1619,6 +1679,8 @@ def download_bayes_precision_fusion_extra_raw_inputs(
         "transport_aborted_remaining_targets": abort_transport,
         "timeboxed_incomplete": timeboxed,
         "timebox_unattempted_target_groups": timebox_unattempted_target_groups,
+        "timebox_unpersisted_row_count": timebox_unpersisted_row_count,
+        "prune_skipped_timebox": prune_skipped_timebox,
         "max_wall_clock_seconds": max_wall_clock_seconds,
         # Ensemble-completeness markers: how many global (always-in-domain) models succeeded.
         "global_models_expected": len(global_models_expected),

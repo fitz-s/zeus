@@ -953,7 +953,7 @@ def test_availability_stamp_is_proof_of_possession_bound() -> None:
 
     captured: list[dict] = []
 
-    def _fake_persist(forecast_db, rows, cutoff_iso=None):
+    def _fake_persist(forecast_db, rows, cutoff_iso=None, **_kwargs):
         for r in rows:
             captured.append(dict(r))
         return len(list(rows)), 0
