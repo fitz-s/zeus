@@ -316,6 +316,76 @@ def test_materialization_wake_families_use_only_changed_live_rows(tmp_path) -> N
     )
 
 
+def test_boot_wake_uses_each_familys_current_live_posterior(
+    monkeypatch, tmp_path
+) -> None:
+    import src.data.replacement_forecast_production as production
+    from src.runtime import reactor_wake
+
+    db_path = tmp_path / "forecasts.db"
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute(
+            """
+            CREATE TABLE forecast_posteriors (
+                city TEXT,
+                target_date TEXT,
+                temperature_metric TEXT,
+                computed_at TEXT,
+                runtime_layer TEXT,
+                training_allowed INTEGER
+            )
+            """
+        )
+        conn.executemany(
+            """
+            INSERT INTO forecast_posteriors VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                ("Paris", "2026-07-18", "high", "2026-07-16T12:00:00+00:00", "live", 0),
+                ("Paris", "2026-07-18", "high", "2026-07-16T12:02:00+00:00", "live", 0),
+                ("Shanghai", "2026-07-18", "high", "2026-07-16T12:01:00+00:00", "live", 0),
+                ("London", "2026-07-18", "high", "2026-07-16T12:03:00+00:00", "shadow", 0),
+                ("Toronto", "2026-07-18", "high", "2026-07-16T12:04:00+00:00", "live", 1),
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    published: list[tuple[str, str, tuple[tuple[str, str, str], ...]]] = []
+    monkeypatch.setattr(
+        reactor_wake,
+        "publish_reactor_wake",
+        lambda *, source, reason, forecast_families: published.append(
+            (source, reason, forecast_families)
+        )
+        or reactor_wake.ReactorWake(
+            "boot-wake",
+            "2026-07-16T12:05:00+00:00",
+            source,
+            reason,
+            forecast_families=forecast_families,
+        ),
+    )
+
+    wake = production._publish_current_forecast_posterior_wake(
+        {"forecast_db": db_path}
+    )
+
+    assert wake is not None
+    assert published == [
+        (
+            "forecast_live_boot_current_posterior",
+            "forecast_posterior_advanced",
+            (
+                ("Paris", "2026-07-18", "high"),
+                ("Shanghai", "2026-07-18", "high"),
+            ),
+        )
+    ]
+
+
 def test_materialization_queue_does_not_wake_without_new_posterior(
     monkeypatch, tmp_path
 ) -> None:
