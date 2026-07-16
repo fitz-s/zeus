@@ -368,6 +368,63 @@ def test_source_clock_accepts_registered_station_entry_sources(monkeypatch, tmp_
         source_clock.load_city_one_schemes.cache_clear()
 
 
+def test_source_clock_does_not_query_historical_width_twice(monkeypatch, tmp_path) -> None:
+    from src.strategy.live_inference import source_clock_city_weights as source_clock
+
+    _disable_other_layers(monkeypatch)
+    _enable_flag(monkeypatch)
+    scheme_path = tmp_path / "city_one_scheme_grid_aware.csv"
+    scheme_path.write_text(
+        "city,selection_status,grid_aware_sources,grid_aware_weighted_sources,"
+        "candidate_count,eligible_live_grid_cap10_count,eligible_grid_cap10_count,reason\n"
+        "Paris,GRID_CAP10_LIVE_READY,ecmwf_ifs+ukmo_global_deterministic_10km,"
+        "ecmwf_ifs:0.5+ukmo_global_deterministic_10km:0.5,10,2,2,\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv(source_clock.ENV_CITY_ONE_SCHEME_PATH, str(scheme_path))
+    source_clock.load_city_one_schemes.cache_clear()
+    histories = _make_history(
+        ["ecmwf_ifs", "ukmo_global_deterministic_10km", "icon_eu"]
+    )
+    calls: list[tuple[str, ...]] = []
+
+    def _provider(*, city, metric, lead_days, target_date, models):
+        calls.append(tuple(models))
+        return {model: histories[model] for model in models if model in histories}
+
+    monkeypatch.setattr(
+        mod._replacement_bayes_precision_fusion_override,
+        "_history_provider",
+        _provider,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        mod._replacement_bayes_precision_fusion_override,
+        "_live_fetch",
+        _make_live_fetch(
+            {"ukmo_global_deterministic_10km": 23.0, "icon_eu": 23.2}
+        ),
+        raising=False,
+    )
+    try:
+        conn = _conn()
+        _seed_current_single_runs(
+            conn,
+            live_values={
+                "ukmo_global_deterministic_10km": 23.0,
+                "icon_eu": 23.2,
+            },
+        )
+        _seed_current_ens(conn)
+
+        assert mod._insert_posterior(
+            conn, _request(), metric="high", anchor_id=1
+        ) is not None
+        assert len(calls) == 1
+    finally:
+        source_clock.load_city_one_schemes.cache_clear()
+
+
 def test_source_clock_missing_current_ens_shape_fails_closed(monkeypatch, tmp_path) -> None:
     from src.strategy.live_inference import source_clock_city_weights as source_clock
 

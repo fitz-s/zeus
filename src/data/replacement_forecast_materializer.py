@@ -1969,25 +1969,6 @@ def _replacement_bayes_precision_fusion_override(
                         _z_by_model[str(_m)] = float(_source_values[str(_m)])
                         if _m not in _raw_m2_and_n:
                             _raw_m2_and_n[str(_m)] = (None, 0)
-                    _source_clock_histories: dict[str, object] = {}
-                    try:
-                        _source_clock_histories = dict(
-                            history_provider(
-                                city=request.city,
-                                metric=metric,
-                                lead_days=lead_days,
-                                target_date=target_local_date,
-                                models=list(_source_clock_used_models),
-                            )
-                        )
-                    except Exception:
-                        _source_clock_histories = {}
-                    for _m in _source_clock_used_models:
-                        _hist = _source_clock_histories.get(str(_m))
-                        _residuals = tuple(getattr(_hist, "residuals", ()) or ())
-                        if _residuals:
-                            _m2 = sum(float(r) * float(r) for r in _residuals) / len(_residuals)
-                            _raw_m2_and_n[str(_m)] = (_m2, int(getattr(_hist, "n_train", len(_residuals)) or len(_residuals)))
                     _precision_center_basis = {}
                     for _m in _source_clock_used_models:
                         _rm2, _rn = _raw_m2_and_n.get(str(_m), (None, 0))
@@ -2008,60 +1989,9 @@ def _replacement_bayes_precision_fusion_override(
                         }
                     )
 
-                    _model_sigmas: list[float] = []
-                    _residual_maps: dict[str, Mapping[str, float]] = {}
-                    for _m in _source_clock_used_models:
-                        _hist = _source_clock_histories.get(str(_m))
-                        _residuals = tuple(getattr(_hist, "residuals", ()) or ())
-                        if len(_residuals) >= 2:
-                            import statistics  # noqa: PLC0415
-
-                            try:
-                                _sigma_m = float(statistics.stdev(float(r) for r in _residuals))
-                            except statistics.StatisticsError:
-                                _sigma_m = 1.5
-                        else:
-                            _sigma_m = 1.5
-                        _model_sigmas.append(max(1.0, _sigma_m))
-                        _by_date = getattr(_hist, "residual_by_target_date", {}) or {}
-                        if _by_date:
-                            _residual_maps[str(_m)] = _by_date
-                    if _model_sigmas:
-                        _source_clock_center_sigma_c = max(
-                            0.25,
-                            math.sqrt(
-                                sum(
-                                    (float(_weights.get(_m, 0.0)) * _sig) ** 2
-                                    for _m, _sig in zip(_source_clock_used_models, _model_sigmas, strict=False)
-                                )
-                            ),
-                        )
-                    if _residual_maps:
-                        _common_dates = sorted(set.intersection(*(set(v) for v in _residual_maps.values())))
-                        if len(_common_dates) >= 5:
-                            import statistics  # noqa: PLC0415
-
-                            _weighted_residuals = [
-                                sum(
-                                    float(_weights.get(_m, 0.0)) * float(_residual_maps[_m][d])
-                                    for _m in _source_clock_used_models
-                                    if _m in _residual_maps and d in _residual_maps[_m]
-                                )
-                                for d in _common_dates
-                            ]
-                            try:
-                                _sigma_resid_sc = max(1.0, float(statistics.stdev(_weighted_residuals)))
-                            except statistics.StatisticsError:
-                                _sigma_resid_sc = 1.5
-                        else:
-                            _sigma_resid_sc = 1.5
-                    else:
-                        _sigma_resid_sc = 1.5
-                    if _source_clock_center_sigma_c is not None:
-                        _source_clock_predictive_sigma_c = max(
-                            1.0,
-                            math.sqrt(_source_clock_center_sigma_c ** 2 + _sigma_resid_sc ** 2),
-                        )
+                    # Source-clock live width is current target-specific evidence.
+                    # Historical residual width was immediately overwritten below,
+                    # so querying it again only added DB work to the alpha path.
                     for _m in _source_clock_used_models:
                         if _m in served_current:
                             _source_clock_current_value_serving[_m] = served_current[_m].as_provenance()  # type: ignore[union-attr]
