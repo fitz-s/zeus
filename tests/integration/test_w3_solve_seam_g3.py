@@ -2440,7 +2440,7 @@ def test_live_adapter_routes_each_global_truth_to_its_owner(monkeypatch):
     world.execute("CREATE TABLE opportunity_events (marker TEXT NOT NULL)")
     world.execute("INSERT INTO opportunity_events VALUES ('authorized-day0')")
     captured = {}
-    prepared_with = {}
+    prepared_with = []
     capacity_calls = []
 
     class CapacityAuthority:
@@ -2449,7 +2449,7 @@ def test_live_adapter_routes_each_global_truth_to_its_owner(monkeypatch):
             return Decimal("17")
 
     def fake_prepare(_event, **kwargs):
-        prepared_with.update(kwargs)
+        prepared_with.append(kwargs)
         assert kwargs["forecast_conn"].execute(
             "SELECT marker FROM readiness_state"
         ).fetchone()[0] == "fresh-forecast"
@@ -2460,7 +2460,10 @@ def test_live_adapter_routes_each_global_truth_to_its_owner(monkeypatch):
             "SELECT marker FROM opportunity_events"
         ).fetchone()[0] == "authorized-day0"
         return SimpleNamespace(
-            probability_witness=SimpleNamespace(family_key="family-dallas"),
+            probability_witness=SimpleNamespace(
+                family_key="family-dallas",
+                witness_identity=f"current-q-{len(prepared_with)}",
+            ),
             candidate_seeds=(),
         )
 
@@ -2527,10 +2530,24 @@ def test_live_adapter_routes_each_global_truth_to_its_owner(monkeypatch):
         event,
         _dt.datetime(2026, 7, 10, 8, 10, tzinfo=_dt.timezone.utc),
     )
+    refreshed_receipt = captured["prepare_event"](
+        event,
+        _dt.datetime(2026, 7, 10, 8, 11, tzinfo=_dt.timezone.utc),
+    )
     assert prepared_receipt.prepared_global_family is not None
-    assert prepared_with["forecast_conn"] is forecast
-    assert prepared_with["topology_conn"] is topology
-    assert prepared_with["observation_conn"] is world
+    assert refreshed_receipt.prepared_global_family is not None
+    assert (
+        prepared_receipt.prepared_global_family.probability_witness.witness_identity
+        == "current-q-1"
+    )
+    assert (
+        refreshed_receipt.prepared_global_family.probability_witness.witness_identity
+        == "current-q-2"
+    )
+    assert len(prepared_with) == 2
+    assert all(kwargs["forecast_conn"] is forecast for kwargs in prepared_with)
+    assert all(kwargs["topology_conn"] is topology for kwargs in prepared_with)
+    assert all(kwargs["observation_conn"] is world for kwargs in prepared_with)
     policy = captured["candidate_policy_rejection_resolver"]
     low_price = SimpleNamespace(
         action="BUY",
@@ -3851,46 +3868,6 @@ def test_global_book_cache_rebinds_fresh_q_without_refreshing_untouched_tokens()
     assert rebound.witness_identity != cached.witness_identity
     assert np.array_equal(rebound.yes_q_samples, fresh.yes_q_samples)
     assert rebound.bindings == cached.bindings
-
-
-def test_prepared_forecast_probability_cache_is_bounded_by_witness_freshness():
-    event = _global_scope_event(city="Dallas", source_run_id="run-dallas")
-    captured_at = _dt.datetime(2026, 7, 10, 8, 0, tzinfo=_dt.timezone.utc)
-    prepared = SimpleNamespace(
-        probability_witness=SimpleNamespace(
-            captured_at_utc=captured_at,
-            max_age=_dt.timedelta(seconds=180),
-        )
-    )
-    namespace = ("forecast-db", "topology-db", "world-db")
-    with era._PREPARED_GLOBAL_PROBABILITY_CACHE_LOCK:
-        era._PREPARED_GLOBAL_PROBABILITY_CACHE.clear()
-
-    era._store_prepared_global_probability(
-        prepared,
-        namespace=namespace,
-        event=event,
-    )
-
-    assert era._cached_prepared_global_probability(
-        namespace=namespace,
-        event=event,
-        decision_time=captured_at + _dt.timedelta(seconds=179),
-        max_age=_dt.timedelta(seconds=180),
-    ) is prepared
-    assert era._cached_prepared_global_probability(
-        namespace=namespace,
-        event=event,
-        decision_time=captured_at + _dt.timedelta(seconds=181),
-        max_age=_dt.timedelta(seconds=180),
-    ) is None
-    day0 = replace(event, event_type="DAY0_EXTREME_UPDATED")
-    assert era._cached_prepared_global_probability(
-        namespace=namespace,
-        event=day0,
-        decision_time=captured_at,
-        max_age=_dt.timedelta(seconds=180),
-    ) is None
 
 
 def test_global_curve_supersession_keeps_typed_current_candidate():

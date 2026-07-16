@@ -329,97 +329,6 @@ _GLOBAL_BOOK_EPOCH_CACHE_LOCK = threading.Lock()
 _GLOBAL_BOOK_EPOCH_CACHE: _GlobalBookEpochCacheEntry | None = None
 
 
-@dataclass(frozen=True)
-class _PreparedGlobalProbabilityCacheEntry:
-    prepared: object
-    captured_at_utc: datetime
-    max_age: timedelta
-
-
-_PREPARED_GLOBAL_PROBABILITY_CACHE_LOCK = threading.Lock()
-_PREPARED_GLOBAL_PROBABILITY_CACHE: dict[
-    tuple[str, str, str, str], _PreparedGlobalProbabilityCacheEntry
-] = {}
-_PREPARED_GLOBAL_PROBABILITY_CACHE_LIMIT = 256
-
-
-def _prepared_global_probability_cache_key(
-    *,
-    namespace: tuple[str, str, str] | None,
-    event: OpportunityEvent,
-) -> tuple[str, str, str, str] | None:
-    if namespace is None:
-        return None
-    return (*namespace, str(event.event_id))
-
-
-def _cached_prepared_global_probability(
-    *,
-    namespace: tuple[str, str, str] | None,
-    event: OpportunityEvent,
-    decision_time: datetime,
-    max_age: timedelta,
-) -> object | None:
-    if event.event_type != "FORECAST_SNAPSHOT_READY":
-        return None
-    key = _prepared_global_probability_cache_key(
-        namespace=namespace,
-        event=event,
-    )
-    if key is None:
-        return None
-    with _PREPARED_GLOBAL_PROBABILITY_CACHE_LOCK:
-        entry = _PREPARED_GLOBAL_PROBABILITY_CACHE.get(key)
-    if entry is None:
-        return None
-    age = decision_time.astimezone(UTC) - entry.captured_at_utc
-    if age < timedelta(0) or age > min(max_age, entry.max_age):
-        with _PREPARED_GLOBAL_PROBABILITY_CACHE_LOCK:
-            _PREPARED_GLOBAL_PROBABILITY_CACHE.pop(key, None)
-        return None
-    return entry.prepared
-
-
-def _store_prepared_global_probability(
-    prepared: object,
-    *,
-    namespace: tuple[str, str, str] | None,
-    event: OpportunityEvent,
-) -> None:
-    if event.event_type != "FORECAST_SNAPSHOT_READY":
-        return
-    key = _prepared_global_probability_cache_key(
-        namespace=namespace,
-        event=event,
-    )
-    witness = getattr(prepared, "probability_witness", None)
-    captured_at = getattr(witness, "captured_at_utc", None)
-    max_age = getattr(witness, "max_age", None)
-    if (
-        key is None
-        or not isinstance(captured_at, datetime)
-        or captured_at.tzinfo is None
-        or not isinstance(max_age, timedelta)
-        or max_age <= timedelta(0)
-    ):
-        return
-    entry = _PreparedGlobalProbabilityCacheEntry(
-        prepared=prepared,
-        captured_at_utc=captured_at.astimezone(UTC),
-        max_age=max_age,
-    )
-    with _PREPARED_GLOBAL_PROBABILITY_CACHE_LOCK:
-        while (
-            key not in _PREPARED_GLOBAL_PROBABILITY_CACHE
-            and len(_PREPARED_GLOBAL_PROBABILITY_CACHE)
-            >= _PREPARED_GLOBAL_PROBABILITY_CACHE_LIMIT
-        ):
-            _PREPARED_GLOBAL_PROBABILITY_CACHE.pop(
-                next(iter(_PREPARED_GLOBAL_PROBABILITY_CACHE))
-            )
-        _PREPARED_GLOBAL_PROBABILITY_CACHE[key] = entry
-
-
 def _cached_global_book_probabilities(epoch: object) -> dict[str, object] | None:
     with _GLOBAL_BOOK_EPOCH_CACHE_LOCK:
         entry = _GLOBAL_BOOK_EPOCH_CACHE
@@ -4984,25 +4893,6 @@ def event_bound_live_adapter_from_trade_conn(
         forecast_conn=forecast_conn,
         trade_conn=trade_conn,
     )
-    prepared_probability_namespaces = tuple(
-        _global_book_epoch_cache_namespace(conn)
-        for conn in (
-            forecast_conn,
-            topology_conn,
-            calibration_conn or forecast_conn,
-        )
-        if conn is not None
-    )
-    prepared_probability_cache_namespace = (
-        (
-            str(prepared_probability_namespaces[0]),
-            str(prepared_probability_namespaces[1]),
-            str(prepared_probability_namespaces[2]),
-        )
-        if len(prepared_probability_namespaces) == 3
-        and all(namespace is not None for namespace in prepared_probability_namespaces)
-        else None
-    )
 
     def _submit_global_sell(
         event: OpportunityEvent,
@@ -5039,26 +4929,14 @@ def event_bound_live_adapter_from_trade_conn(
         from src.contracts.executable_market_snapshot import FRESHNESS_WINDOW_DEFAULT
 
         try:
-            prepared = _cached_prepared_global_probability(
-                namespace=prepared_probability_cache_namespace,
-                event=event,
+            prepared = _prepare_current_global_probability_family(
+                event,
+                forecast_conn=forecast_conn,
+                topology_conn=topology_conn,
+                observation_conn=calibration_conn,
                 decision_time=decision_time,
                 max_age=FRESHNESS_WINDOW_DEFAULT,
             )
-            if prepared is None:
-                prepared = _prepare_current_global_probability_family(
-                    event,
-                    forecast_conn=forecast_conn,
-                    topology_conn=topology_conn,
-                    observation_conn=calibration_conn,
-                    decision_time=decision_time,
-                    max_age=FRESHNESS_WINDOW_DEFAULT,
-                )
-                _store_prepared_global_probability(
-                    prepared,
-                    namespace=prepared_probability_cache_namespace,
-                    event=event,
-                )
         except Exception as exc:  # noqa: BLE001 - typed fail-closed batch receipt
             return EventSubmissionReceipt(
                 False,
