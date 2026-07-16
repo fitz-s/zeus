@@ -27326,7 +27326,11 @@ def _market_analysis_from_event_snapshot(
         _day0_rd_required = is_day0 and _day0_remaining_day_q_enabled()
         if _day0_rd_required:
             _day0_rd_members = _day0_remaining_day_members(
-                payload=payload, family=family, unit=unit, decision_time=decision_time
+                payload=payload,
+                family=family,
+                unit=unit,
+                decision_time=decision_time,
+                world_conn=calibration_conn,
             )
             if _day0_rd_members is None:
                 payload["_edli_day0_q_mode"] = "remaining_day_unavailable"
@@ -29322,6 +29326,7 @@ def _record_day0_remaining_day_exit_authority(
     metric: str,
     remaining_extremes_native: "np.ndarray",
     decision_time: "datetime | None",
+    world_conn: sqlite3.Connection | None = None,
 ) -> None:
     """Stamp whether Day0 remaining-window q may authorize live exits.
 
@@ -29376,6 +29381,7 @@ def _record_day0_remaining_day_exit_authority(
                 observation_time=payload.get("observation_time")
                 or payload.get("observation_available_at"),
                 observation_source="day0_extreme_updated_event",
+                conn=world_conn,
             )
         except Exception as exc:  # noqa: BLE001 - fail closed with reason evidence.
             temporal_context = None
@@ -29549,6 +29555,7 @@ def _day0_remaining_day_members(
     family,
     unit: str,
     decision_time: "datetime | None",
+    world_conn: sqlite3.Connection | None = None,
 ) -> "np.ndarray | None":
     """Pooled per-model remaining-day extremes in the NATIVE unit, clamped to
     the absorbing physical law. None means no fresh persisted high-res vectors
@@ -29635,6 +29642,7 @@ def _day0_remaining_day_members(
             metric=metric,
             remaining_extremes_native=maturity_values,
             decision_time=decision_time,
+            world_conn=world_conn,
         )
         rounded = _optional_float(payload.get("rounded_value"))
         if rounded is not None:

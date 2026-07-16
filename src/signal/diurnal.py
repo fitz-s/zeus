@@ -28,12 +28,14 @@ logger = logging.getLogger(__name__)
 from src.contracts.dst_semantics import _is_missing_local_hour  # noqa: F401  (re-export)
 
 
-def get_solar_day(city_name: str, target_date: date) -> SolarDay | None:
+def get_solar_day(city_name: str, target_date: date, *, conn=None) -> SolarDay | None:
     """Load DST-aware solar context for one city/day from Zeus-owned storage."""
+    owns_connection = conn is None
     try:
-        from src.state.db import get_world_connection
+        if owns_connection:
+            from src.state.db import get_world_connection
 
-        conn = get_world_connection()
+            conn = get_world_connection()
         row = conn.execute(
             """
             SELECT timezone, sunrise_local, sunset_local, sunrise_utc, sunset_utc,
@@ -42,7 +44,6 @@ def get_solar_day(city_name: str, target_date: date) -> SolarDay | None:
             """,
             (city_name, target_date.isoformat()),
         ).fetchone()
-        conn.close()
         if row is None:
             return None
 
@@ -60,6 +61,9 @@ def get_solar_day(city_name: str, target_date: date) -> SolarDay | None:
     except Exception as e:
         logger.debug("Solar context unavailable for %s %s: %s", city_name, target_date, e)
         return None
+    finally:
+        if owns_connection and conn is not None:
+            conn.close()
 
 
 def _solar_eval_hour(current_local_hour: int | float) -> float:
@@ -251,7 +255,12 @@ def _interpolated_seasonal_confidence(
 
 
 def get_peak_hour_context(
-    city_name: str, target_date: date, current_local_hour: int | float
+    city_name: str,
+    target_date: date,
+    current_local_hour: int | float,
+    *,
+    conn=None,
+    solar_day: SolarDay | None = None,
 ) -> tuple[Optional[int], float, str]:
     """Single source of truth for peak hour.
     Returns: (peak_hour, confidence, fallback_reason)
@@ -266,12 +275,15 @@ def get_peak_hour_context(
     city_lat = lat_for_city(city_name)
     season = season_from_month(target_date.month, lat=city_lat)
     month = target_date.month
-    solar_day = get_solar_day(city_name, target_date)
+    if solar_day is None:
+        solar_day = get_solar_day(city_name, target_date, conn=conn)
 
+    owns_connection = conn is None
     try:
-        from src.state.db import get_world_connection
+        if owns_connection:
+            from src.state.db import get_world_connection
 
-        conn = get_world_connection()
+            conn = get_world_connection()
 
         # Peak hour from seasonal avg_temp curve (unchanged)
         season_rows = conn.execute(
@@ -293,7 +305,6 @@ def get_peak_hour_context(
             # packet may revisit with a geographic-peer-average (Guangzhou /
             # Shenzhen / Singapore) if HK trading needs a diurnal prior before
             # the hko_hourly_accumulator builds native history.
-            conn.close()
             solar_conf = _solar_only_post_peak_confidence(current_local_hour, solar_day)
             if solar_conf is not None:
                 return None, solar_conf, "solar_only_no_diurnal_history"
@@ -309,7 +320,6 @@ def get_peak_hour_context(
             month=month,
             current_local_hour=current_local_hour,
         )
-        conn.close()
 
         if monthly_confidence is not None:
             conf = _apply_solar_bounds(monthly_confidence, current_local_hour, solar_day)
@@ -350,6 +360,9 @@ def get_peak_hour_context(
     except Exception as e:
         logger.debug("Failed to fetch peak hour context for %s: %s", city_name, e)
         return None, 0.0, f"exception_or_no_data: {e}"
+    finally:
+        if owns_connection and conn is not None:
+            conn.close()
 
 
 def post_peak_confidence(
@@ -579,6 +592,8 @@ def build_day0_temporal_context(
     current_local_hour: float | None = None,
     observation_time=None,
     observation_source: str = "",
+    *,
+    conn=None,
 ) -> Day0TemporalContext | None:
     """Single entry point for Day0 time semantics.
 
@@ -586,7 +601,7 @@ def build_day0_temporal_context(
     or observation date doesn't match target (ObservationDateMismatch).
     Callers wrapped in try/except will get the specific exception type.
     """
-    solar_day = get_solar_day(city_name, target_date)
+    solar_day = get_solar_day(city_name, target_date, conn=conn)
     if solar_day is None:
         logger.warning(
             "Day0 solar lookup failed for %s %s — no solar data available",
@@ -630,7 +645,13 @@ def build_day0_temporal_context(
         return None
 
     local_hour = observation_instant.local_hour_fraction
-    peak_hour, confidence, reason = get_peak_hour_context(city_name, target_date, local_hour)
+    peak_hour, confidence, reason = get_peak_hour_context(
+        city_name,
+        target_date,
+        local_hour,
+        conn=conn,
+        solar_day=solar_day,
+    )
     daylight_progress = solar_day.daylight_progress(local_hour)
     return Day0TemporalContext(
         city=city_name,

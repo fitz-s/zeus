@@ -1,5 +1,5 @@
 # Created: pre-Phase-0
-# Last reused/audited: 2026-05-08
+# Last reused/audited: 2026-07-16
 # Authority basis: Day0 solar/DST context contract; Wave39 malformed solar_daily rootpage degrade antibody
 from datetime import date, datetime, timezone
 import sqlite3
@@ -141,6 +141,57 @@ def test_build_day0_temporal_context_returns_typed_context(mock_get_conn):
     assert ctx.current_utc_timestamp.tzinfo is not None
     assert ctx.time_basis == "synthetic_local_hour"
     assert ctx.confidence_source in {"solar_heuristic", "seasonal_empirical", "monthly_empirical", "heuristic_slope"}
+
+
+def test_build_day0_temporal_context_reuses_injected_connection():
+    conn = MagicMock()
+    queries = []
+    season_rows = [
+        {
+            "hour": hour,
+            "avg_temp": 70.0 + hour if hour <= 16 else 85.0 - (hour - 16) * 2,
+            "std_temp": 2.0,
+            "p_high_set": None,
+        }
+        for hour in range(4, 20)
+    ]
+
+    def _execute(query, params=()):
+        normalized = " ".join(query.split())
+        queries.append(normalized)
+        cursor = MagicMock()
+        if "FROM solar_daily" in normalized:
+            cursor.fetchone.return_value = {
+                "timezone": "America/New_York",
+                "sunrise_local": "2026-04-01T06:30-04:00",
+                "sunset_local": "2026-04-01T19:30-04:00",
+                "sunrise_utc": "2026-04-01T10:30+00:00",
+                "sunset_utc": "2026-04-01T23:30+00:00",
+                "utc_offset_minutes": -240,
+                "dst_active": 1,
+            }
+        elif "FROM diurnal_curves" in normalized:
+            cursor.fetchall.return_value = season_rows
+        elif "FROM diurnal_peak_prob" in normalized:
+            cursor.fetchone.return_value = None
+        else:
+            raise AssertionError(normalized)
+        return cursor
+
+    conn.execute.side_effect = _execute
+    with patch("src.state.db.get_world_connection") as open_connection:
+        ctx = build_day0_temporal_context(
+            "Miami",
+            date(2026, 4, 1),
+            "America/New_York",
+            current_local_hour=12.0,
+            conn=conn,
+        )
+
+    assert ctx is not None
+    open_connection.assert_not_called()
+    conn.close.assert_not_called()
+    assert sum("FROM solar_daily" in query for query in queries) == 1
 
 
 @patch('src.state.db.get_world_connection')
