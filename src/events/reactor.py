@@ -3835,6 +3835,7 @@ TRANSIENT_MONEY_PATH_REASONS: frozenset[str] = frozenset({
     # neither may fall through the UNKNOWN fail-open classifier.
     "GLOBAL_AUCTION_NO_TRADE",
     "GLOBAL_AUCTION_FAILED",
+    "GLOBAL_AUCTION_SUPERSEDED_BY_NEW_FACT",
     # Preflight exhausted without proving the exact complete-auction CASH/HOLD
     # terminal below.  Preserve the event until the missing/changed authority is
     # rebuilt and a complete decision exists.

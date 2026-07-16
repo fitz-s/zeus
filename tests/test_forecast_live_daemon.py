@@ -303,9 +303,14 @@ def test_materialization_queue_wake_failure_does_not_fail_committed_materializat
 
 
 def test_reactor_wake_sidecar_round_trip(tmp_path) -> None:
-    from src.runtime.reactor_wake import publish_reactor_wake, read_reactor_wake
+    from src.runtime.reactor_wake import (
+        publish_reactor_wake,
+        reactor_wake_revision,
+        read_reactor_wake,
+    )
 
     path = tmp_path / "wake.json"
+    assert reactor_wake_revision(path=path) is None
     published = publish_reactor_wake(
         source="test",
         reason="posterior_advanced",
@@ -315,6 +320,18 @@ def test_reactor_wake_sidecar_round_trip(tmp_path) -> None:
     )
 
     assert read_reactor_wake(path=path) == published
+    first_revision = reactor_wake_revision(path=path)
+    assert first_revision is not None
+
+    publish_reactor_wake(
+        source="test",
+        reason="day0_advanced",
+        path=path,
+        wake_id="wake-43",
+        published_at=datetime(2026, 7, 16, 12, 0, 1, tzinfo=timezone.utc),
+    )
+
+    assert reactor_wake_revision(path=path) != first_revision
 
 
 def test_reactor_wake_poll_defers_without_consuming_when_reactor_busy(monkeypatch) -> None:

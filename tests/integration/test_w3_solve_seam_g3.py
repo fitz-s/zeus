@@ -6731,6 +6731,46 @@ def test_global_batch_waits_until_global_winner_family_is_claimed(monkeypatch):
     assert result.receipts[event_a.event_id].reason == "GLOBAL_WINNER_AWAITS_CLAIM"
 
 
+def test_global_batch_requeues_claimed_epoch_when_new_durable_fact_arrives(
+    monkeypatch,
+):
+    decision_at = _dt.datetime(2026, 7, 10, 8, 0, tzinfo=_dt.timezone.utc)
+    event = _global_scope_event(city="Alpha", source_run_id="run-a")
+    scope = current_global_auction_scope_from_events(
+        (event,),
+        captured_at_utc=decision_at,
+    )
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "scan_current_global_auction_scope",
+        lambda **_: scope,
+    )
+    prepared = []
+
+    result = global_batch_runtime.process_current_global_batch(
+        (event,),
+        decision_time=decision_at,
+        world_conn=object(),
+        forecast_conn=object(),
+        trade_conn=object(),
+        payload_reader=lambda item: json.loads(item.payload_json),
+        prepare_event=lambda *_: prepared.append(True),
+        actuate_winner=lambda *_: pytest.fail("superseded epoch must not actuate"),
+        stamp_receipt=lambda receipt: receipt,
+        venue_submit_count=lambda: 0,
+        current_execution=lambda *_: object(),
+        current_time_provider=lambda: decision_at,
+        epoch_superseded=lambda: True,
+    )
+
+    assert prepared == []
+    assert result.venue_submit_count == 0
+    assert result.winner_event_id is None
+    assert result.receipts[event.event_id].reason == (
+        "GLOBAL_AUCTION_SUPERSEDED_BY_NEW_FACT"
+    )
+
+
 def test_global_batch_claims_unpaged_cut_time_winner_and_continues_actuation(
     monkeypatch,
 ):

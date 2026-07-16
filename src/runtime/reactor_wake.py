@@ -83,3 +83,15 @@ def read_reactor_wake(*, path: Path | None = None) -> ReactorWake | None:
     if not all((wake.wake_id, wake.published_at, wake.source, wake.reason)):
         return None
     return wake
+
+
+def reactor_wake_revision(
+    *, path: Path | None = None
+) -> tuple[int, int, int] | None:
+    """Return a cheap revision for detecting atomic wake-file replacement."""
+
+    try:
+        stat = _wake_path(path).stat()
+    except OSError:
+        return None
+    return stat.st_ino, stat.st_mtime_ns, stat.st_size

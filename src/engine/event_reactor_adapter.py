@@ -5645,6 +5645,13 @@ def event_bound_live_adapter_from_trade_conn(
 
         events = tuple(events)
         refresh_family_keys = _global_book_refresh_family_keys(events)
+        from src.runtime.reactor_wake import reactor_wake_revision
+
+        wake_revision = reactor_wake_revision()
+
+        def _epoch_superseded() -> bool:
+            current = reactor_wake_revision()
+            return current is not None and current != wake_revision
 
         if forecast_conn is None or topology_conn is None or calibration_conn is None:
             from src.events.reactor import GlobalBatchSubmitResult
@@ -6355,6 +6362,7 @@ def event_bound_live_adapter_from_trade_conn(
                 selection_snapshot_connections=(
                     forecast_conn,
                 ),
+                epoch_superseded=_epoch_superseded,
             )
         finally:
             with contextlib.suppress(Exception):
