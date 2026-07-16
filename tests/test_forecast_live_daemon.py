@@ -386,6 +386,32 @@ def test_boot_wake_uses_each_familys_current_live_posterior(
     ]
 
 
+def test_forecast_daemon_boot_wires_current_posterior_wake(monkeypatch) -> None:
+    import src.data.replacement_forecast_production as production
+    import src.ingest.forecast_live_daemon as daemon
+
+    cfg = {"forecast_db": "current.db"}
+    calls: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        daemon,
+        "_replacement_forecast_live_runtime_enabled",
+        lambda: True,
+    )
+    monkeypatch.setattr(
+        production,
+        "_replacement_forecast_live_materialization_queue_config",
+        lambda: cfg,
+    )
+    monkeypatch.setattr(
+        production,
+        "_publish_current_forecast_posterior_wake",
+        lambda value: calls.append(value) or "wake",
+    )
+
+    assert daemon._publish_replacement_forecast_boot_wake() == "wake"
+    assert calls == [cfg]
+
+
 def test_materialization_queue_does_not_wake_without_new_posterior(
     monkeypatch, tmp_path
 ) -> None:

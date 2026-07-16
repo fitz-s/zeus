@@ -1068,6 +1068,21 @@ def _replacement_forecast_materialize_job() -> None:
     _replacement_forecast_live_materialize_cycle.__wrapped__()
 
 
+def _publish_replacement_forecast_boot_wake() -> object | None:
+    """Publish current posterior scope once before the scheduler starts."""
+
+    if not _replacement_forecast_live_runtime_enabled():
+        return None
+    from src.data.replacement_forecast_production import (
+        _publish_current_forecast_posterior_wake,
+        _replacement_forecast_live_materialization_queue_config,
+    )
+
+    return _publish_current_forecast_posterior_wake(
+        _replacement_forecast_live_materialization_queue_config()
+    )
+
+
 def _replacement_forecast_live_cfg() -> dict:
     """The ``replacement_forecast_live`` settings section via the shared production module's
     single config reader (one source for ``download_release_lag_hours`` /
@@ -1273,6 +1288,14 @@ def main() -> None:
 
     signal.signal(signal.SIGTERM, _graceful_shutdown)
     _source_health_probe_tick()
+    try:
+        _publish_replacement_forecast_boot_wake()
+    except Exception:
+        logger.warning(
+            "forecast-live current-posterior boot wake failed; "
+            "periodic materialization remains active",
+            exc_info=True,
+        )
     _scheduler = build_scheduler()
     jobs = [job.id for job in _scheduler.get_jobs()]
     _write_forecast_live_heartbeat(status="scheduler_ready")

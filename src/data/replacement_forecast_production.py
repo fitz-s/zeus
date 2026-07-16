@@ -1536,6 +1536,87 @@ def _run_replacement_forecast_live_materialization_queue_once(cfg: dict[str, obj
     return report
 
 
+def _current_forecast_posterior_families(
+    cfg: dict[str, object],
+    *,
+    limit: int = 100,
+) -> tuple[tuple[str, str, str], ...]:
+    """Return the most recently computed current live posterior families."""
+
+    raw_path = cfg.get("forecast_db")
+    if not raw_path:
+        return ()
+    path = Path(str(raw_path)).expanduser().resolve()
+    if not path.exists():
+        return ()
+    conn = None
+    try:
+        from src.state.db import _connect_read_only
+
+        conn = _connect_read_only(path)
+        rows = conn.execute(
+            """
+            SELECT current.city,
+                   current.target_date,
+                   current.temperature_metric
+              FROM forecast_posteriors AS current
+              JOIN (
+                    SELECT city,
+                           target_date,
+                           temperature_metric,
+                           MAX(rowid) AS latest_rowid
+                      FROM forecast_posteriors
+                     WHERE runtime_layer = 'live'
+                       AND training_allowed = 0
+                     GROUP BY city, target_date, temperature_metric
+                   ) AS latest
+                ON current.rowid = latest.latest_rowid
+             ORDER BY current.computed_at DESC, current.rowid DESC
+             LIMIT ?
+            """,
+            (max(1, min(int(limit), 100)),),
+        ).fetchall()
+        return tuple(
+            family
+            for row in rows
+            if all(
+                family := (
+                    str(row[0] or "").strip(),
+                    str(row[1] or "").strip(),
+                    str(row[2] or "").strip(),
+                )
+            )
+        )
+    except (OSError, sqlite3.Error, TypeError, ValueError):
+        return ()
+    finally:
+        if conn is not None:
+            conn.close()
+
+
+def _publish_current_forecast_posterior_wake(
+    cfg: dict[str, object],
+):
+    """Queue one boot catch-up for current posteriors committed before restart."""
+
+    families = _current_forecast_posterior_families(cfg)
+    if not families:
+        return None
+    from src.runtime.reactor_wake import publish_reactor_wake
+
+    wake = publish_reactor_wake(
+        source="forecast_live_boot_current_posterior",
+        reason="forecast_posterior_advanced",
+        forecast_families=families,
+    )
+    logger.info(
+        "forecast-live boot current-posterior wake published families=%d id=%s",
+        len(families),
+        wake.wake_id,
+    )
+    return wake
+
+
 def _forecast_posterior_families_between(
     cfg: dict[str, object],
     *,
