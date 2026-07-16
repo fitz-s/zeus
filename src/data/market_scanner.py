@@ -3218,6 +3218,9 @@ def capture_executable_market_snapshot(
             fee_details = _fetch_family_cached_fee_details(
                 clob,
                 selected_token,
+                gamma_market_raw,
+                outcome,
+                raw_clob_market,
                 cache_key=_substrate_fee_cache_key(market, condition_id),
                 fee_details_cache=cache,
             )
@@ -5657,12 +5660,15 @@ def _substrate_fee_cache_key(market: dict[str, Any], condition_id: str) -> str:
 
 
 def _fee_details_for_cached_token(cached: dict[str, Any], token_id: str) -> dict[str, Any]:
+    source = str(cached.get("source") or "clob_fee_rate")
+    details = {
+        key: value
+        for key, value in cached.items()
+        if key not in {"source", "token_id"}
+    }
     return canonicalize_fee_details(
-        {
-            "fee_rate_fraction": cached["fee_rate_fraction"],
-            "fee_rate_bps": cached["fee_rate_bps"],
-        },
-        source="clob_fee_rate_family_cache",
+        details,
+        source=f"{source}_family_cache",
         token_id=token_id,
     )
 
@@ -5670,17 +5676,14 @@ def _fee_details_for_cached_token(cached: dict[str, Any], token_id: str) -> dict
 def _fetch_family_cached_fee_details(
     clob: Any,
     token_id: str,
-    *,
+    *gamma_payloads: dict[str, Any],
     cache_key: str,
     fee_details_cache: dict[str, dict[str, Any]],
 ) -> dict[str, Any]:
     if cache_key in fee_details_cache:
         return _fee_details_for_cached_token(fee_details_cache[cache_key], token_id)
-    details = _fetch_fee_details(clob, token_id)
-    fee_details_cache[cache_key] = {
-        "fee_rate_fraction": details["fee_rate_fraction"],
-        "fee_rate_bps": details["fee_rate_bps"],
-    }
+    details = _fee_details_gamma_first(clob, token_id, *gamma_payloads)
+    fee_details_cache[cache_key] = dict(details)
     return details
 
 

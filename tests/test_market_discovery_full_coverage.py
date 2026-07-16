@@ -3530,6 +3530,117 @@ def test_substrate_identity_capture_fetches_current_fee_once_per_family(monkeypa
     assert captured[1].fee_details["fee_rate_fraction"] == pytest.approx(0.10)
 
 
+def test_substrate_identity_capture_preserves_gamma_fee_authority_across_family():
+    """Family caching must not replace Gamma V2 fees with stale /fee-rate."""
+
+    condition_id = "0x" + "a" * 64
+    yes_token = "0x" + "b" * 64
+    no_token = "0x" + "c" * 64
+    gamma = {
+        "conditionId": condition_id,
+        "questionID": condition_id,
+        "active": True,
+        "closed": False,
+        "acceptingOrders": True,
+        "enableOrderBook": True,
+        "clobTokenIds": [yes_token, no_token],
+        "feeType": "weather_fees",
+        "feeSchedule": {
+            "exponent": 1,
+            "rate": 0.05,
+            "takerOnly": True,
+            "rebateRate": 0.25,
+        },
+        "tradability_authority": "persisted_snapshot_reconstruction",
+    }
+    market = {
+        "event_id": "evt-gamma-fee-cache",
+        "slug": "highest-temperature-in-austin-on-june-8-2026",
+        "city": ms.cities_by_name.get("Austin", "Austin"),
+        "target_date": "2026-06-08",
+        "temperature_metric": "high",
+        "outcomes": [
+            {
+                "condition_id": condition_id,
+                "market_id": condition_id,
+                "question_id": condition_id,
+                "token_id": yes_token,
+                "no_token_id": no_token,
+                "active": True,
+                "closed": False,
+                "accepting_orders": True,
+                "enable_orderbook": True,
+                "gamma_market_raw": gamma,
+            }
+        ],
+    }
+
+    class GammaFeeClob:
+        def __init__(self) -> None:
+            self.fee_tokens: list[str] = []
+
+        def get_clob_market_info(self, _condition_id: str) -> dict:
+            return {
+                "condition_id": condition_id,
+                "tokens": [
+                    {"token_id": yes_token, "outcome": "YES"},
+                    {"token_id": no_token, "outcome": "NO"},
+                ],
+                "archived": False,
+                "enable_order_book": True,
+                "accepting_orders": True,
+                "tick_size": "0.01",
+                "min_order_size": "5",
+                "neg_risk": True,
+            }
+
+        def get_orderbook_snapshot(self, token_id: str) -> dict:
+            return {
+                "asset_id": token_id,
+                "tick_size": "0.01",
+                "min_order_size": "5",
+                "neg_risk": True,
+                "bids": [{"price": "0.40", "size": "10"}],
+                "asks": [{"price": "0.42", "size": "10"}],
+            }
+
+        def get_fee_rate_details(self, token_id: str) -> dict:
+            self.fee_tokens.append(token_id)
+            return {"base_fee": 1000, "token_id": token_id}
+
+    captured = []
+    clob = GammaFeeClob()
+    fee_cache: dict[str, dict[str, object]] = {}
+    clob_market_info_cache: dict[str, dict[str, object]] = {}
+    with (
+        patch("src.data.market_scanner.insert_snapshot", side_effect=lambda _conn, snapshot: captured.append(snapshot)),
+        patch("src.data.market_scanner._write_book_hash_transition"),
+    ):
+        for direction in ("buy_yes", "buy_no"):
+            ms.capture_executable_market_snapshot(
+                _make_in_memory_trade_db(),
+                market=market,
+                decision=SimpleNamespace(
+                    tokens={"token_id": yes_token, "no_token_id": no_token, "market_id": condition_id},
+                    edge=SimpleNamespace(direction=direction),
+                ),
+                clob=clob,
+                captured_at=_NOW,
+                scan_authority="VERIFIED",
+                clob_market_info_cache=clob_market_info_cache,
+                fee_details_cache=fee_cache,
+                tolerate_missing_book=True,
+            )
+
+    assert clob.fee_tokens == []
+    assert len(captured) == 2
+    assert captured[0].fee_details["source"] == "gamma_fee_schedule"
+    assert captured[1].fee_details["source"] == "gamma_fee_schedule_family_cache"
+    assert captured[1].fee_details["token_id"] == no_token
+    assert captured[1].fee_details["fee_rate_fraction"] == pytest.approx(0.05)
+    assert captured[1].fee_details["maker_rebate_rate"] == pytest.approx(0.25)
+
+
 def test_unlimited_pending_refresh_completes_family_before_next_city():
     """max_outcomes=0 is the pending-family path; it must complete families.
 
