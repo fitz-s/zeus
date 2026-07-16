@@ -1,4 +1,4 @@
-# Lifecycle: created=2026-05-24; last_reviewed=2026-07-11; last_reused=2026-07-11
+# Lifecycle: created=2026-05-24; last_reviewed=2026-07-16; last_reused=2026-07-16
 # Purpose: Prove FSR emits only complete, current, authority-bound forecast carriers.
 # Reuse: Re-audit replacement readiness binding and event clocks before trigger changes.
 # Authority basis: EDLI v1 implementation prompt §8 ForecastSnapshotReadyTrigger contract.
@@ -1257,10 +1257,104 @@ def test_posterior_bound_complete_provenance_fills_missing_raw_coverage():
     conn.execute(
         """
         CREATE TABLE raw_model_forecasts (
+            raw_model_forecast_id INTEGER PRIMARY KEY,
             model TEXT, city TEXT, target_date TEXT, metric TEXT,
             source_cycle_time TEXT, source_available_at TEXT, forecast_value_c REAL
         )
         """
+    )
+    row = {
+        "city": "Chicago",
+        "target_local_date": "2026-07-12",
+        "temperature_metric": "high",
+        "sr_source_cycle_time": "2026-07-11T00:00:00+00:00",
+        "carrier_raw_model_forecast_ids_json": "[101,102,103]",
+        "carrier_complete": 1,
+        "carrier_served": 3,
+        "carrier_expected": 3,
+        "provenance_json": "{malformed-unused-provenance",
+    }
+    traced: list[str] = []
+    conn.set_trace_callback(traced.append)
+
+    enriched = _with_posterior_raw_member_counts(
+        conn,
+        [row],
+        decision_iso="2026-07-11T02:00:00+00:00",
+    )
+    conn.set_trace_callback(None)
+
+    assert enriched[0]["observed_members"] == 3
+    assert sum(
+        "COUNT(DISTINCT RAW.MODEL)" in statement.upper() for statement in traced
+    ) == 1
+
+
+def test_current_raw_coverage_overrides_larger_posterior_provenance():
+    conn = sqlite3.connect(":memory:")
+    conn.execute(
+        """
+        CREATE TABLE raw_model_forecasts (
+            raw_model_forecast_id INTEGER PRIMARY KEY,
+            model TEXT, city TEXT, target_date TEXT, metric TEXT,
+            source_cycle_time TEXT, source_available_at TEXT, forecast_value_c REAL
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO raw_model_forecasts VALUES (
+            101, 'ecmwf', 'Chicago', '2026-07-12', 'high',
+            '2026-07-11T00:00:00+00:00', '2026-07-11T01:00:00+00:00', 20.0
+        )
+        """
+    )
+    row = {
+        "city": "Chicago",
+        "target_local_date": "2026-07-12",
+        "temperature_metric": "high",
+        "sr_source_cycle_time": "2026-07-11T00:00:00+00:00",
+        "provenance_json": json.dumps(
+            {
+                "bayes_precision_fusion": {
+                    "decorrelated_providers_complete": True,
+                    "raw_model_forecast_ids": [101, 102, 103],
+                }
+            }
+        ),
+    }
+
+    assert _with_posterior_raw_member_counts(
+        conn,
+        [row],
+        decision_iso="2026-07-11T02:00:00+00:00",
+    ) == []
+
+
+def test_complete_posterior_provenance_uses_exact_raw_ids_without_family_scan():
+    conn = sqlite3.connect(":memory:")
+    conn.execute(
+        """
+        CREATE TABLE raw_model_forecasts (
+            raw_model_forecast_id INTEGER PRIMARY KEY,
+            model TEXT, city TEXT, target_date TEXT, metric TEXT,
+            source_cycle_time TEXT, source_available_at TEXT, forecast_value_c REAL
+        )
+        """
+    )
+    conn.executemany(
+        """
+        INSERT INTO raw_model_forecasts VALUES (
+            ?, ?, 'Chicago', '2026-07-12', 'high',
+            '2026-07-11T00:00:00+00:00', '2026-07-11T01:00:00+00:00', 20.0
+        )
+        """,
+        [
+            (101, "ecmwf"),
+            (102, "gfs"),
+            (103, "icon"),
+            (104, "unconsumed"),
+        ],
     )
     row = {
         "city": "Chicago",
@@ -1289,47 +1383,7 @@ def test_posterior_bound_complete_provenance_fills_missing_raw_coverage():
     assert enriched[0]["observed_members"] == 3
     assert sum(
         "COUNT(DISTINCT RAW.MODEL)" in statement.upper() for statement in traced
-    ) == 1
-
-
-def test_current_raw_coverage_overrides_larger_posterior_provenance():
-    conn = sqlite3.connect(":memory:")
-    conn.execute(
-        """
-        CREATE TABLE raw_model_forecasts (
-            model TEXT, city TEXT, target_date TEXT, metric TEXT,
-            source_cycle_time TEXT, source_available_at TEXT, forecast_value_c REAL
-        )
-        """
-    )
-    conn.execute(
-        """
-        INSERT INTO raw_model_forecasts VALUES (
-            'ecmwf', 'Chicago', '2026-07-12', 'high',
-            '2026-07-11T00:00:00+00:00', '2026-07-11T01:00:00+00:00', 20.0
-        )
-        """
-    )
-    row = {
-        "city": "Chicago",
-        "target_local_date": "2026-07-12",
-        "temperature_metric": "high",
-        "sr_source_cycle_time": "2026-07-11T00:00:00+00:00",
-        "provenance_json": json.dumps(
-            {
-                "bayes_precision_fusion": {
-                    "decorrelated_providers_complete": True,
-                    "raw_model_forecast_ids": [101, 102, 103],
-                }
-            }
-        ),
-    }
-
-    assert _with_posterior_raw_member_counts(
-        conn,
-        [row],
-        decision_iso="2026-07-11T02:00:00+00:00",
-    ) == []
+    ) == 0
 
 
 def test_scan_emits_only_for_families_with_a_market_when_markets_exist():

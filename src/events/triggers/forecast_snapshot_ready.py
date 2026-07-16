@@ -943,7 +943,22 @@ class ForecastSnapshotReadyTrigger:
                     fp.source_available_at AS snapshot_available_at,
                     fp.computed_at AS snapshot_fetch_time,
                     fp.posterior_identity_hash AS snapshot_manifest_hash,
-                    fp.provenance_json AS provenance_json,
+                    json_extract(
+                        fp.provenance_json,
+                        '$.bayes_precision_fusion.raw_model_forecast_ids'
+                    ) AS carrier_raw_model_forecast_ids_json,
+                    json_extract(
+                        fp.provenance_json,
+                        '$.bayes_precision_fusion.decorrelated_providers_complete'
+                    ) AS carrier_complete,
+                    json_extract(
+                        fp.provenance_json,
+                        '$.bayes_precision_fusion.decorrelated_providers_served'
+                    ) AS carrier_served,
+                    json_extract(
+                        fp.provenance_json,
+                        '$.bayes_precision_fusion.decorrelated_providers_expected'
+                    ) AS carrier_expected,
                     NULL AS snapshot_members_json
                   FROM ready_posterior AS rs
                   JOIN forecast_posteriors AS fp
@@ -1419,8 +1434,8 @@ def _raw_model_member_counts_for_posterior_rows(
     *,
     decision_iso: str,
 ) -> list[int]:
-    provenance_counts = [
-        _posterior_provenance_raw_member_count(row) for row in rows
+    provenance_ids = [
+        _posterior_provenance_raw_member_ids(row) for row in rows
     ]
     keys = [
         (
@@ -1431,8 +1446,50 @@ def _raw_model_member_counts_for_posterior_rows(
         )
         for row in rows
     ]
+    exact_counts: dict[int, int] = {}
+    if "raw_model_forecast_id" in _table_columns(conn, "raw_model_forecasts"):
+        numeric_ids_by_row: dict[int, tuple[int, ...]] = {}
+        requested_ids: set[int] = set()
+        for index, raw_ids in enumerate(provenance_ids):
+            try:
+                numeric_ids = tuple(int(raw_id) for raw_id in raw_ids)
+            except (TypeError, ValueError):
+                continue
+            if not numeric_ids or any(raw_id <= 0 for raw_id in numeric_ids):
+                continue
+            numeric_ids_by_row[index] = numeric_ids
+            requested_ids.update(numeric_ids)
+        available_ids: set[int] = set()
+        if requested_ids:
+            limit = conn.getlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER)
+            chunk_size = max(1, limit - 1)
+            ordered_ids = sorted(requested_ids)
+            for offset in range(0, len(ordered_ids), chunk_size):
+                chunk = ordered_ids[offset : offset + chunk_size]
+                placeholders = ",".join("?" for _ in chunk)
+                available_ids.update(
+                    int(record[0])
+                    for record in conn.execute(
+                        f"""
+                        SELECT raw_model_forecast_id
+                          FROM raw_model_forecasts
+                         WHERE raw_model_forecast_id IN ({placeholders})
+                           AND source_available_at <= ?
+                           AND forecast_value_c IS NOT NULL
+                        """,
+                        (*chunk, decision_iso),
+                    ).fetchall()
+                )
+        for index, numeric_ids in numeric_ids_by_row.items():
+            if set(numeric_ids).issubset(available_ids):
+                exact_counts[index] = len(numeric_ids)
+
     requested = sorted(
-        {key for key in keys if all(key[:3]) and len(key[3]) == 10}
+        {
+            key
+            for index, key in enumerate(keys)
+            if index not in exact_counts and all(key[:3]) and len(key[3]) == 10
+        }
     )
     counts: dict[tuple[str, str, str, str], int] = {}
     if requested:
@@ -1470,10 +1527,10 @@ def _raw_model_member_counts_for_posterior_rows(
                 )
 
     out: list[int] = []
-    for row, key, provenance_count in zip(rows, keys, provenance_counts):
-        count = counts.get(key, 0)
+    for index, (row, key, raw_ids) in enumerate(zip(rows, keys, provenance_ids)):
+        count = exact_counts.get(index, counts.get(key, 0))
         if count <= 0:
-            count = provenance_count
+            count = len(raw_ids)
         if count <= 0:
             posterior_id = row.get("posterior_id") or row.get("coverage_id")
             if posterior_id not in (None, ""):
@@ -1492,8 +1549,8 @@ def _raw_model_member_counts_for_posterior_rows(
     return out
 
 
-def _posterior_provenance_raw_member_count(row: dict[str, Any]) -> int:
-    """Count materialized carrier members from posterior provenance when raw rows lag.
+def _posterior_provenance_raw_member_ids(row: dict[str, Any]) -> tuple[str, ...]:
+    """Read the exact materialized carrier IDs from posterior provenance.
 
     The replacement posterior row is the certified probability authority, but the
     live event still needs a concrete carrier-member count.  Some current-target
@@ -1505,18 +1562,38 @@ def _posterior_provenance_raw_member_count(row: dict[str, Any]) -> int:
     """
 
     raw = row.get("provenance_json")
-    if not raw:
-        return 0
-    try:
-        provenance = json.loads(raw) if isinstance(raw, str) else raw
-    except (TypeError, json.JSONDecodeError):
-        return 0
-    if not isinstance(provenance, dict):
-        return 0
-    fusion = provenance.get("bayes_precision_fusion")
-    if not isinstance(fusion, dict):
-        return 0
-    complete = fusion.get("decorrelated_providers_complete") is True
+    fusion: dict[str, Any]
+    projected_ids = row.get("carrier_raw_model_forecast_ids_json")
+    if projected_ids is not None:
+        try:
+            raw_ids = (
+                json.loads(projected_ids)
+                if isinstance(projected_ids, str)
+                else projected_ids
+            )
+        except (TypeError, json.JSONDecodeError):
+            return ()
+        fusion = {
+            "raw_model_forecast_ids": raw_ids,
+            "decorrelated_providers_complete": row.get("carrier_complete"),
+            "decorrelated_providers_served": row.get("carrier_served"),
+            "decorrelated_providers_expected": row.get("carrier_expected"),
+        }
+    else:
+        if not raw:
+            return ()
+        try:
+            provenance = json.loads(raw) if isinstance(raw, str) else raw
+        except (TypeError, json.JSONDecodeError):
+            return ()
+        if not isinstance(provenance, dict):
+            return ()
+        value = provenance.get("bayes_precision_fusion")
+        if not isinstance(value, dict):
+            return ()
+        fusion = value
+
+    complete = fusion.get("decorrelated_providers_complete") in (True, 1)
     if not complete:
         try:
             served = int(fusion.get("decorrelated_providers_served") or 0)
@@ -1525,12 +1602,12 @@ def _posterior_provenance_raw_member_count(row: dict[str, Any]) -> int:
             served = expected = 0
         complete = expected > 0 and served >= expected
     if not complete:
-        return 0
+        return ()
     raw_ids = fusion.get("raw_model_forecast_ids")
     if isinstance(raw_ids, list):
         unique_ids = {str(value) for value in raw_ids if value not in (None, "")}
         if unique_ids:
-            return len(unique_ids)
+            return tuple(sorted(unique_ids))
     serving = fusion.get("current_value_serving")
     if isinstance(serving, dict):
         unique_ids = {
@@ -1539,8 +1616,12 @@ def _posterior_provenance_raw_member_count(row: dict[str, Any]) -> int:
             if isinstance(details, dict) and details.get("raw_model_forecast_id") not in (None, "")
         }
         if unique_ids:
-            return len(unique_ids)
-    return 0
+            return tuple(sorted(unique_ids))
+    return ()
+
+
+def _posterior_provenance_raw_member_count(row: dict[str, Any]) -> int:
+    return len(_posterior_provenance_raw_member_ids(row))
 
 
 def _with_posterior_raw_member_counts(
