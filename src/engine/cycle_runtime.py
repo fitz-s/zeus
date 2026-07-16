@@ -5457,8 +5457,10 @@ def execute_monitoring_phase(
                     )
             p_market = exit_context.current_market_price
             portfolio_dirty = True
-            # A zero-payoff holding is not a capital-allocation comparison: any
-            # positive executable net proceeds strictly dominate HOLD.
+            # A hard fact can prove one held leg dead, but it cannot rank that SELL
+            # against every executable BUY/HOLD/CASH alternative. Keep the exact
+            # verdict as evidence; the complete global auction exclusively owns
+            # normal reduce-only SELL actuation.
             if _hard_fact is not None and _hard_fact.action == "EXIT_DEAD_BIN":
                 from src.state.portfolio import ExitDecision as _ExitDecision
 
@@ -5466,32 +5468,22 @@ def execute_monitoring_phase(
                     dict.fromkeys(
                         [
                             *(pos.applied_validations or []),
-                            "day0_hard_fact_zero_payoff_exit",
+                            "day0_hard_fact_sell_delegated_to_global_auction",
                         ]
                     )
                 )
-                exit_context = replace(
-                    exit_context,
-                    exit_reason=(
-                        "DAY0_HARD_FACT_BIN_DEAD "
-                        f"({_hard_fact.reason}; source={_hard_fact.source})"
-                    ),
-                    fresh_prob=0.0,
-                    fresh_prob_is_fresh=True,
-                )
-                pos.last_monitor_prob = 0.0
-                pos.last_monitor_prob_is_fresh = True
                 exit_decision = _ExitDecision(
-                    True,
-                    exit_context.exit_reason,
-                    urgency="urgent",
-                    trigger="DAY0_HARD_FACT_BIN_DEAD",
+                    False,
+                    "GLOBAL_AUCTION_OWNS_HARD_FACT_SELL "
+                    f"({_hard_fact.reason}; source={_hard_fact.source})",
+                    urgency="normal",
+                    trigger="GLOBAL_AUCTION_OWNS_HARD_FACT_SELL",
                     selected_method=pos.selected_method or pos.entry_method,
                     applied_validations=list(pos.applied_validations),
                 )
-                summary["day0_hard_fact_zero_payoff_exits"] = (
+                summary["day0_hard_fact_sells_delegated_to_global_auction"] = (
                     summary.get(
-                        "day0_hard_fact_zero_payoff_exits", 0
+                        "day0_hard_fact_sells_delegated_to_global_auction", 0
                     )
                     + 1
                 )
@@ -5571,14 +5563,25 @@ def execute_monitoring_phase(
                     summary=summary,
                 )
 
-            # Statistical SELLs remain globally allocated. Deterministic
-            # zero-payoff exits are already proven above and use this lane's
-            # current bid plus the canonical exit lifecycle.
+            # The current global q is shared with the full BUY/SELL/HOLD/CASH
+            # auction.  That auction already owns reduce-only SELL actuation
+            # through _submit_current_global_sell; allowing this legacy
+            # per-position monitor to submit the same capital decision would
+            # create a second optimizer with a different wealth/depth scope.
+            # Keep the local verdict as diagnostic evidence, but only the
+            # global auction may turn it into a normal SELL.  A hard fact can
+            # prove one held leg is dead, but it does not rank that SELL against
+            # every current BUY/HOLD/CASH alternative or prove every executable
+            # fill prefix.  It therefore supplies probability evidence, never a
+            # second normal SELL actuator.
             local_exit_trigger = _effective_exit_trigger(exit_decision, exit_reason)
             if (
                 should_exit
                 and local_exit_trigger != "RED_FORCE_EXIT"
-                and getattr(pos, _GLOBAL_MONITOR_SAMPLES_ATTR, None) is not None
+                and (
+                    getattr(pos, _GLOBAL_MONITOR_SAMPLES_ATTR, None) is not None
+                    or local_exit_trigger == "DAY0_HARD_FACT_BIN_DEAD"
+                )
             ):
                 should_exit = False
                 exit_reason = "GLOBAL_AUCTION_OWNS_REDUCE_ONLY_SELL"

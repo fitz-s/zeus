@@ -1117,14 +1117,14 @@ class TestHardFactExitDespiteCanonicalWriteFailure:
         )
         return results, summary
 
-    def test_dead_bin_sell_stays_blocked_when_canonical_write_fails(self, monkeypatch):
+    def test_dead_bin_sell_stays_global_when_canonical_write_fails(self, monkeypatch):
         verdict = HardFactVerdict(
             action="EXIT_DEAD_BIN",
             reason="running high extreme 26.0 beyond bin [25.0,25.0] — YES structurally dead",
             metric="high", rounded_extreme=26.0, source="same_station_fast_tail",
         )
         results, summary = self._run_phase(monkeypatch, hard_fact_verdict=verdict)
-        assert summary.get("day0_hard_fact_zero_payoff_exits") == 1
+        assert summary.get("day0_hard_fact_sells_delegated_to_global_auction") == 1
         assert summary.get("monitor_canonical_write_failed") == 1
         exits = [r for r in results if getattr(r, "should_exit", False)]
         assert not exits
@@ -1300,7 +1300,7 @@ class TestStructuralWinTerminalHold:
             "ORANGE favorable_exits counter must be 0 for a structural-win hold"
         )
 
-    def test_hard_fact_zero_payoff_exit_uses_monitor_exit_lane(self, monkeypatch):
+    def test_hard_fact_sell_signal_cannot_bypass_global_auction(self, monkeypatch):
         import logging as _logging
         import numpy as np
         from src.contracts import EdgeContext, EntryMethod
@@ -1352,21 +1352,6 @@ class TestStructuralWinTerminalHold:
             "src.execution.day0_hard_fact_exit.evaluate_hard_fact_exit",
             lambda *, position, city, now=None, world_conn=None, **kwargs: exit_verdict,
         )
-        exit_calls = []
-
-        def fake_execute_exit(*args, **kwargs):
-            exit_calls.append(
-                (
-                    kwargs["exit_context"],
-                    kwargs["exit_intent"],
-                )
-            )
-            return "exit_failed:test_stub"
-
-        monkeypatch.setattr(
-            "src.execution.exit_lifecycle.execute_exit",
-            fake_execute_exit,
-        )
 
         results = []
 
@@ -1393,20 +1378,16 @@ class TestStructuralWinTerminalHold:
         summary = {"monitors": 0, "exits": 0}
         cycle_runtime.execute_monitoring_phase(
             None, LiveClob(), portfolio, Artifact(), Tracker(), summary,
-            deps=deps, exit_order_submit_enabled=True,
+            deps=deps, exit_order_submit_enabled=False,
         )
-        assert summary.get("day0_hard_fact_zero_payoff_exits") == 1
-        assert summary["exits"] == 1
+        assert summary.get("day0_hard_fact_sells_delegated_to_global_auction") == 1
         exits = [r for r in results if getattr(r, "should_exit", False)]
-        assert len(exits) == 1
-        assert exits[0].fresh_prob == 0.0
-        assert "DAY0_HARD_FACT_BIN_DEAD" in exits[0].exit_reason
-        assert len(exit_calls) == 1
-        exit_context, exit_intent = exit_calls[0]
-        assert exit_context.fresh_prob == 0.0
-        assert exit_context.fresh_prob_is_fresh is True
-        assert exit_intent.fresh_prob == 0.0
-        assert exit_intent.fresh_prob_is_fresh is True
+        assert not exits
+        assert any(
+            "GLOBAL_AUCTION_OWNS_HARD_FACT_SELL"
+            in str(getattr(r, "exit_reason", ""))
+            for r in results
+        )
 
 
 def test_pending_exit_position_is_still_re_evaluated_without_duplicate_submit(monkeypatch):
