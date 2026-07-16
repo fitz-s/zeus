@@ -187,12 +187,12 @@ test_trust_policy:
     tests/events/test_opportunity_event.py: {created: "2026-05-24", last_used: "2026-05-24"}
     tests/events/test_event_candidate_binding.py: {created: "2026-05-24", last_used: "2026-05-24"}
     tests/events/test_event_bound_decision_engine_no_runtime.py: {created: "2026-05-24", last_used: "2026-05-24"}
-    tests/events/test_event_store_idempotency.py: {created: "2026-05-24", last_used: "2026-05-24"}
+    tests/events/test_event_store_idempotency.py: {created: "2026-05-24", last_used: "2026-07-16"}
     tests/events/test_event_store_lock_not_schema_error.py: {created: "2026-05-31", last_used: "2026-05-31"}
     tests/events/test_edli_position_bridge.py: {created: "2026-06-01", last_used: "2026-07-13"}
     tests/events/test_event_writer_single_writer.py: {created: "2026-05-24", last_used: "2026-05-24"}
     tests/events/test_market_event_coalescer.py: {created: "2026-05-24", last_used: "2026-05-24"}
-    tests/events/test_forecast_snapshot_ready.py: {created: "2026-05-24", last_used: "2026-07-11", note: "ForecastSnapshotReady replacement-carrier contracts, including bounded family restriction and batched posterior raw-member coverage without per-family history scans."}
+    tests/events/test_forecast_snapshot_ready.py: {created: "2026-05-24", last_used: "2026-07-16", note: "ForecastSnapshotReady replacement-carrier contracts, including bounded family restriction and exact current posterior raw-member coverage without per-family history scans."}
     tests/events/test_day0_extreme_updated_trigger.py: {created: "2026-05-24", last_used: "2026-05-24"}
     tests/strategy/live_inference/test_live_bin_inference.py: {created: "2026-05-24", last_used: "2026-05-24"}
     tests/strategy/live_inference/test_executable_cost.py: {created: "2026-05-24", last_used: "2026-05-24"}
@@ -202,7 +202,7 @@ test_trust_policy:
     tests/events/test_claim_lock_storm.py: {created: "2026-06-11", last_used: "2026-07-13", note: "World-writer claim contention, including unpaged global-winner claim and queue paths, remains bounded, visible, rollback-safe, pending on miss, and waits at most once per contention episode before same-cycle nonblocking probes."}
     tests/calibration/test_scaled_normal_uniform_q_builder.py: {created: "2026-06-29", last_used: "2026-07-10", note: "Capital-gated city rho mixture math, including row-wise simplex bootstrap-draw mixing so served q, bounds, empirical edge confidence, and CVaR share one probability world."}
     tests/engine/test_replacement_0_1_live_authority_probability.py: {created: "2026-06-07", last_used: "2026-07-10", note: "Replacement live probability authority and city-mixed bootstrap sample-basis gate."}
-    tests/engine/test_event_reactor_live_qkernel_gate.py: {created: "2026-06-30", last_used: "2026-07-15", note: "Live qkernel submit authority, including symmetric sealed global YES/NO execution, Day0 replacement-posterior parent binding, current observation admission, current-book and wealth revalidation, malformed-seal rejection, and INV-43 absolute unit-price rejection."}
+    tests/engine/test_event_reactor_live_qkernel_gate.py: {created: "2026-06-30", last_used: "2026-07-16", note: "Live qkernel submit authority, including symmetric sealed global YES/NO execution, Day0 replacement-posterior parent binding, current observation admission, current-book and wealth revalidation, malformed-seal rejection, and INV-43 absolute unit-price rejection."}
     tests/engine/test_cert_calibration_bridge.py: {created: "2026-06-10", last_used: "2026-07-13", note: "Replacement calibration credential relationship matrix; Day0 observation hard facts alone fail closed while current replacement bounds use their own typed calibration authority."}
     tests/events/test_continuous_redecision.py: {created: "2026-05-31", last_used: "2026-06-17"}
     tests/events/test_continuous_redecision_resurrection.py: {created: "2026-06-12", last_used: "2026-06-26", note: "Continuous redecision resurrection/deadlock antibodies; extended 2026-06-26 to prove open-maker token->condition resolution reads executable_market_snapshot_latest without append scans when latest rows exist."}
@@ -475,7 +475,7 @@ test_trust_policy:
     tests/test_rebuild_pipeline.py: {created: "2026-04-12", last_used: "2026-04-28"}
     tests/test_replay_time_provenance.py: {created: "2026-04-25", last_used: "2026-05-18"}
     tests/test_run_replay_cli.py: {created: "2026-04-25", last_used: "2026-05-18"}
-    tests/test_riskguard.py: {created: "2026-03-30", last_used: "2026-06-29", note: "RiskGuard strategy policy authority antibody: trade-main legacy control_overrides ghosts are ignored when world is attached; attached world.control_overrides remains the only live manual strategy policy authority."}
+    tests/test_riskguard.py: {created: "2026-03-30", last_used: "2026-07-16", note: "RiskGuard strategy policy authority antibody: trade-main legacy control_overrides ghosts are ignored when world is attached; attached world.control_overrides remains the only live manual strategy policy authority."}
     tests/test_riskguard_auxiliary_write_lock_no_degrade.py: {created: "2026-06-13", last_used: "2026-06-13", note: "no-order root Blocker 1 (docs/evidence/no_order_root_2026-06-13/diagnosis.md): RELATIONSHIP test — a concurrent writer holding the zeus_trades WAL write lock must NOT flip RiskGuard's computed level to DATA_DEGRADED when the risk-level READS succeed; the risk_actions/strategy_health writes are AUXILIARY bookkeeping (lock absorbed -> skipped_dependency_lock, level computed from reads). RED-on-revert control proves the unwrapped INSERT raises 'database is locked'; non-lock OperationalError still propagates (fail-loud). The dependency-lock storm / no-conn-across-IO class (9f70e9c581)."}
     tests/test_runtime_guards.py: {created: "2026-04-28", last_used: "2026-07-11"}
     tests/test_runtime_n_mc_floor.py: {created: "2026-04-29", last_used: "2026-05-08"}
