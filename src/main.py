@@ -3665,6 +3665,14 @@ def _edli_reactor_wake_poll_once() -> bool:
         return False
     if _edli_reactor_active_lock.locked() or _held_position_monitor_active.is_set():
         return False
+    if wake.reason == "day0_extreme_event_committed":
+        try:
+            _exit_monitor_cycle()
+        except Exception:
+            logger.exception(
+                "Day0 reactor wake held-position monitor failed; "
+                "continuing to the canonical reactor"
+            )
     _edli_event_reactor_cycle()
     _edli_last_reactor_wake_id = wake.wake_id
     logger.info(
