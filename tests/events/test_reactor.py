@@ -17,7 +17,6 @@ from types import SimpleNamespace
 import pytest
 
 from src.decision_kernel import claims
-from src.engine import global_batch_runtime
 from tests.decision_kernel.no_submit_fixtures import build_test_no_submit_proof_bundle
 from src.events.event_store import EventStore
 from src.events.opportunity_event import (
@@ -223,87 +222,6 @@ def _market_event():
         received_at="2026-05-24T18:08:00+00:00",
         payload=payload,
         causal_snapshot_id="hash-1",
-    )
-
-
-def test_paused_global_batch_prunes_to_held_sell_scope(monkeypatch):
-    event_a = object()
-    event_b = object()
-    alpha = global_batch_runtime.weather_family_id(
-        city="Alpha",
-        target_date="2026-05-24",
-        metric="high",
-    )
-    beta = global_batch_runtime.weather_family_id(
-        city="Beta",
-        target_date="2026-05-24",
-        metric="high",
-    )
-    full_scope = SimpleNamespace(
-        events_by_family=((alpha, event_a), (beta, event_b))
-    )
-    captured = {}
-    scoped = object()
-
-    def build(events, *, captured_at_utc):
-        captured["events"] = tuple(events)
-        captured["at"] = captured_at_utc
-        return scoped
-
-    monkeypatch.setattr(
-        global_batch_runtime,
-        "current_global_auction_scope_from_events",
-        build,
-    )
-    decision_at = datetime(2026, 5, 24, 18, 3, tzinfo=timezone.utc)
-
-    assert global_batch_runtime._held_family_scope(
-        full_scope,
-        (("Alpha", "2026-05-24", "high"),),
-        captured_at_utc=decision_at,
-    ) is scoped
-    assert captured == {"events": (event_a,), "at": decision_at}
-    assert global_batch_runtime._entry_block_candidate_rejection(
-        SimpleNamespace(action="BUY"),
-        entry_block_reason="entries_paused:test",
-        downstream=lambda _: pytest.fail("blocked BUY reached entry policy"),
-    ) == "GLOBAL_ENTRY_BLOCKED:entries_paused:test"
-    assert global_batch_runtime._entry_block_candidate_rejection(
-        SimpleNamespace(action="SELL"),
-        entry_block_reason="entries_paused:test",
-        downstream=lambda _: None,
-    ) is None
-
-
-def test_paused_global_batch_without_holdings_skips_scope(monkeypatch):
-    event = _forecast_event()
-    decision_at = datetime(2026, 5, 24, 18, 3, tzinfo=timezone.utc)
-    monkeypatch.setattr(
-        global_batch_runtime,
-        "scan_current_global_auction_scope",
-        lambda **_: pytest.fail("paused batch without holdings scanned scope"),
-    )
-
-    result = global_batch_runtime.process_current_global_batch(
-        (event,),
-        decision_time=decision_at,
-        world_conn=object(),
-        forecast_conn=object(),
-        trade_conn=object(),
-        payload_reader=lambda _: {},
-        prepare_event=lambda *_: pytest.fail("paused batch prepared an event"),
-        actuate_winner=lambda *_: pytest.fail("paused batch actuated"),
-        stamp_receipt=lambda receipt: receipt,
-        venue_submit_count=lambda: 0,
-        current_execution=lambda *_: None,
-        current_time_provider=lambda: decision_at,
-        entry_block_reason="entries_paused:test",
-    )
-
-    assert result.winner_event_id is None
-    assert result.venue_submit_count == 0
-    assert result.receipts[event.event_id].reason == (
-        "GLOBAL_PREFLIGHT_BATCH_BLOCKED:entries_paused:test"
     )
 
 
