@@ -1015,7 +1015,9 @@ tables:
     created_by: init_schema
     pk_col: id
     required_columns:
-      - {name: id, type: INTEGER, nullable: false}
+      # INTEGER PRIMARY KEY is a rowid alias: never NULL in practice, but
+      # PRAGMA table_info reports notnull=0 — declare what PRAGMA reports.
+      - {name: id, type: INTEGER, nullable: true}
       - {name: city, type: TEXT, nullable: false}
       - {name: station_id, type: TEXT, nullable: false}
       - {name: source_channel, type: TEXT, nullable: false}
