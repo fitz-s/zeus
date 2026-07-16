@@ -56,6 +56,7 @@ import math
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from decimal import ROUND_CEILING, ROUND_FLOOR, ROUND_HALF_EVEN, Decimal
+from functools import lru_cache
 from typing import TYPE_CHECKING, Any, Callable, Literal, Mapping, Optional, Sequence
 
 import numpy as np
@@ -1956,12 +1957,22 @@ def _single_order_execution_boundary(
 ) -> tuple[Decimal, Decimal, Decimal]:
     """Return raw limit, raw VWAP, and fee-aware max spend for exact shares."""
 
+    return _single_order_curve_execution_boundary(
+        candidate.executable_cost_curve,
+        shares,
+    )
+
+
+def _single_order_curve_execution_boundary(
+    curve: ExecutableCostCurve,
+    shares: Decimal,
+) -> tuple[Decimal, Decimal, Decimal]:
     remaining = Decimal(shares)
     if remaining <= 0:
         raise ValueError("single-order execution boundary requires positive shares")
     limit_price: Decimal | None = None
     raw_cost = Decimal("0")
-    for level in candidate.executable_cost_curve.levels:
+    for level in curve.levels:
         take = min(level.size, remaining)
         if take > 0:
             limit_price = level.price
@@ -1971,7 +1982,7 @@ def _single_order_execution_boundary(
             break
     if remaining > Decimal("1e-18") or limit_price is None:
         raise ValueError("single-order execution boundary exceeds executable depth")
-    all_in_limit = candidate.executable_cost_curve.fee_model.all_in_price(limit_price)
+    all_in_limit = curve.fee_model.all_in_price(limit_price)
     return limit_price, raw_cost / Decimal(shares), Decimal(shares) * all_in_limit
 
 
@@ -1979,6 +1990,21 @@ def _single_order_venue_legal_neighbor(
     candidate: GlobalSingleOrderCandidate,
     shares: Decimal,
     *,
+    at_most: bool,
+) -> Decimal | None:
+    return _single_order_curve_venue_legal_neighbor(
+        candidate.executable_cost_curve,
+        candidate.side,
+        Decimal(shares),
+        at_most,
+    )
+
+
+@lru_cache(maxsize=32_768)
+def _single_order_curve_venue_legal_neighbor(
+    curve: ExecutableCostCurve,
+    side: Literal["YES", "NO"],
+    shares: Decimal,
     at_most: bool,
 ) -> Decimal | None:
     """Nearest venue-legal FOK BUY size on one side of ``shares``.
@@ -1989,13 +2015,16 @@ def _single_order_venue_legal_neighbor(
     """
 
     current = Decimal(shares)
-    direction = "buy_yes" if candidate.side == "YES" else "buy_no"
+    direction = "buy_yes" if side == "YES" else "buy_no"
     # Each normalization is monotone and can cross a ladder boundary only once;
     # one final pass proves stability at the last reached boundary.
-    for _ in range(len(candidate.executable_cost_curve.levels) + 2):
+    for _ in range(len(curve.levels) + 2):
         try:
-            limit_price, _, _ = _single_order_execution_boundary(candidate, current)
-            tick = candidate.executable_cost_curve.min_tick
+            limit_price, _, _ = _single_order_curve_execution_boundary(
+                curve,
+                current,
+            )
+            tick = curve.min_tick
             price_decimals = abs(tick.normalize().as_tuple().exponent)
             scale = 10 ** price_decimals
             price_units = int(round(float(limit_price) * scale))
