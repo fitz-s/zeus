@@ -3159,7 +3159,7 @@ def test_speculative_topology_ignores_corrupt_receipt():
     trade.close()
 
 
-def test_live_adapter_discards_speculative_books_when_current_gamma_rebinds(
+def test_live_adapter_discards_stale_hint_then_prefetches_unknown_full_refresh(
     monkeypatch,
 ):
     trade = sqlite3.connect(":memory:")
@@ -3257,7 +3257,7 @@ def test_live_adapter_discards_speculative_books_when_current_gamma_rebinds(
                     city="Dallas",
                     source_run_id="run-dallas",
                 ),
-                event_type="BOOK_SNAPSHOT",
+                payload_json="{}",
             ),
         ),
         _dt.datetime(2026, 7, 10, 8, 10, tzinfo=_dt.timezone.utc),
@@ -3312,8 +3312,10 @@ def test_live_adapter_discards_speculative_books_when_current_gamma_rebinds(
                 for token in tokens
             }
 
+    capture_prefetched = []
+
     def fake_capture(_trade_conn, **kwargs):
-        assert "prefetched_books" not in kwargs
+        capture_prefetched.append("prefetched_books" in kwargs)
         tokens = [
             token
             for witness in kwargs["probability_witnesses"].values()
@@ -3334,14 +3336,21 @@ def test_live_adapter_discards_speculative_books_when_current_gamma_rebinds(
         FakeClient,
     )
 
-    _, epoch = captured["current_book_epoch_provider"](
+    bound, epoch = captured["current_book_epoch_provider"](
         probability,
+        _dt.datetime.now(_dt.timezone.utc),
+    )
+    _, refreshed_epoch = captured["current_book_epoch_provider"](
+        dict(bound),
         _dt.datetime.now(_dt.timezone.utc),
     )
 
     assert epoch.witness_identity == "book-current"
+    assert refreshed_epoch.witness_identity == "book-current"
+    assert capture_prefetched == [False, True]
     assert book_calls == [
         ("no-token-old", "yes-token-old"),
+        ("no-token-current", "yes-token-current"),
         ("no-token-current", "yes-token-current"),
     ]
     trade.close()

@@ -5905,7 +5905,11 @@ def event_bound_live_adapter_from_trade_conn(
             prefetch_slice = None
             prefetch_mode = ""
             prefetch_token_hint = None
-            if force_full_refresh or cached_before_bind is None:
+            if (
+                force_full_refresh
+                or cached_before_bind is None
+                or refresh_family_keys is None
+            ):
                 prefetch_slice = probabilities
                 prefetch_mode = "full_books"
                 if speculative_topology is not None:
