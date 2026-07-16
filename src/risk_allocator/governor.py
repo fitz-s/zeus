@@ -546,11 +546,22 @@ def snapshot_global_auction_capital_authority() -> AuctionCapitalAuthority:
     return AuctionCapitalAuthority(allocator)
 
 
+def _snapshot_global_actuation_authority() -> tuple[RiskAllocator, GovernorState]:
+    """Read one coherent current allocator/governor pair for a side effect."""
+
+    with _GLOBAL_ALLOCATION_LOCK:
+        allocator = _GLOBAL_ALLOCATOR
+        governor_state = _GLOBAL_GOVERNOR_STATE
+    if allocator is None or governor_state is None:
+        raise AllocationDenied(
+            AllocationDecision(False, "allocator_not_configured", 0)
+        )
+    return allocator, governor_state
+
+
 def assert_global_allocation_allows(intent: ExecutionIntent) -> AllocationDecision:
-    if _GLOBAL_ALLOCATOR is None or _GLOBAL_GOVERNOR_STATE is None:
-        decision = AllocationDecision(False, "allocator_not_configured", 0)
-        raise AllocationDenied(decision)
-    decision = _GLOBAL_ALLOCATOR.can_allocate(intent, _GLOBAL_GOVERNOR_STATE)
+    allocator, governor_state = _snapshot_global_actuation_authority()
+    decision = allocator.can_allocate(intent, governor_state)
     if not decision.allowed:
         raise AllocationDenied(decision)
     return decision
@@ -565,13 +576,7 @@ def current_global_entry_capacity_usd(
 ) -> Decimal:
     """Read the current candidate-specific entry envelope without reserving it."""
 
-    with _GLOBAL_ALLOCATION_LOCK:
-        allocator = _GLOBAL_ALLOCATOR
-        governor_state = _GLOBAL_GOVERNOR_STATE
-    if allocator is None or governor_state is None:
-        raise AllocationDenied(
-            AllocationDecision(False, "allocator_not_configured", 0)
-        )
+    allocator, governor_state = _snapshot_global_actuation_authority()
     decision = allocator.entry_capacity(
         market_id=market_id,
         event_id=event_id,
@@ -598,15 +603,17 @@ def assert_global_submit_allows(*, reduce_only: bool = False) -> AllocationDecis
     blocks all submit paths before command persistence or SDK contact.
     """
 
-    if _GLOBAL_ALLOCATOR is None or _GLOBAL_GOVERNOR_STATE is None:
-        decision = AllocationDecision(False, "allocator_not_configured", 0, reduce_only=reduce_only)
-        raise AllocationDenied(decision)
-    allocator = _GLOBAL_ALLOCATOR
-    kill_reason = allocator.kill_switch_reason(_GLOBAL_GOVERNOR_STATE)
+    try:
+        allocator, governor_state = _snapshot_global_actuation_authority()
+    except AllocationDenied as exc:
+        raise AllocationDenied(
+            replace(exc.decision, reduce_only=reduce_only)
+        ) from exc
+    kill_reason = allocator.kill_switch_reason(governor_state)
     if kill_reason:
         decision = AllocationDecision(False, kill_reason, 0, reduce_only=reduce_only)
         raise AllocationDenied(decision)
-    if not reduce_only and allocator.reduce_only_mode_active(_GLOBAL_GOVERNOR_STATE):
+    if not reduce_only and allocator.reduce_only_mode_active(governor_state):
         decision = AllocationDecision(False, "reduce_only_mode_active", 0, reduce_only=reduce_only)
         raise AllocationDenied(decision)
     return AllocationDecision(True, "allowed", 0, reduce_only=reduce_only)
@@ -621,14 +628,10 @@ def select_global_order_type(snapshot: Any) -> str:
     states raise ``AllocationDenied`` so callers block before persistence/SDK.
     """
 
-    if _GLOBAL_GOVERNOR_STATE is None:
-        raise AllocationDenied(AllocationDecision(False, "allocator_not_configured", 0))
-    if _GLOBAL_ALLOCATOR is None:
-        raise AllocationDenied(AllocationDecision(False, "allocator_not_configured", 0))
-    allocator = _GLOBAL_ALLOCATOR
-    mode = allocator.maker_or_taker(snapshot or _EmptySnapshot(), _GLOBAL_GOVERNOR_STATE)
+    allocator, governor_state = _snapshot_global_actuation_authority()
+    mode = allocator.maker_or_taker(snapshot or _EmptySnapshot(), governor_state)
     if mode == "NO_TRADE":
-        reason = allocator.kill_switch_reason(_GLOBAL_GOVERNOR_STATE) or "no_trade_mode"
+        reason = allocator.kill_switch_reason(governor_state) or "no_trade_mode"
         raise AllocationDenied(AllocationDecision(False, reason, 0))
     if mode == "TAKER":
         return "FOK"
@@ -636,23 +639,25 @@ def select_global_order_type(snapshot: Any) -> str:
 
 
 def summary() -> dict[str, Any]:
-    if _GLOBAL_GOVERNOR_STATE is None:
+    with _GLOBAL_ALLOCATION_LOCK:
+        allocator = _GLOBAL_ALLOCATOR
+        governor_state = _GLOBAL_GOVERNOR_STATE
+    if governor_state is None:
         return {"configured": False, "entry": {"allow_submit": False, "reason": "allocator_not_configured"}}
-    if _GLOBAL_ALLOCATOR is None:
+    if allocator is None:
         return {
             "configured": False,
-            "state": _GLOBAL_GOVERNOR_STATE.to_dict(),
+            "state": governor_state.to_dict(),
             "kill_switch_reason": "allocator_not_configured",
             "reduce_only": True,
             "entry": {"allow_submit": False, "reason": "allocator_not_configured"},
         }
-    allocator = _GLOBAL_ALLOCATOR
-    kill_reason = allocator.kill_switch_reason(_GLOBAL_GOVERNOR_STATE)
-    reduce_only = allocator.reduce_only_mode_active(_GLOBAL_GOVERNOR_STATE)
+    kill_reason = allocator.kill_switch_reason(governor_state)
+    reduce_only = allocator.reduce_only_mode_active(governor_state)
     entry_reason = kill_reason or ("reduce_only_mode_active" if reduce_only else "ok")
     return {
-        "configured": _GLOBAL_ALLOCATOR is not None,
-        "state": _GLOBAL_GOVERNOR_STATE.to_dict(),
+        "configured": True,
+        "state": governor_state.to_dict(),
         "kill_switch_reason": kill_reason,
         "reduce_only": reduce_only,
         "entry": {"allow_submit": entry_reason == "ok", "reason": entry_reason},

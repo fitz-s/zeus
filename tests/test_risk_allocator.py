@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import inspect
 import sqlite3
+import threading
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
@@ -264,6 +265,102 @@ def test_auction_capital_snapshot_excludes_transient_actuation_health():
     with pytest.raises(AllocationDenied) as excinfo:
         snapshot_global_auction_capital_authority()
     assert excinfo.value.decision.reason == "allocator_not_configured"
+
+
+def test_submit_reader_waits_for_one_coherent_allocator_governor_publication():
+    import src.risk_allocator.governor as governor_module
+
+    seen_states: list[str | None] = []
+
+    class PairCheckingAllocator(RiskAllocator):
+        def can_allocate(self, intent, governor_state):
+            seen_states.append(governor_state.manual_reason)
+            if governor_state.manual_reason != "new-pair":
+                return governor_module.AllocationDecision(
+                    False,
+                    "mixed_allocator_governor_pair",
+                    0,
+                )
+            return governor_module.AllocationDecision(True, "allowed", 0)
+
+    configure_global_allocator(RiskAllocator(), _state(manual_reason="old-pair"))
+    started = threading.Event()
+    done = threading.Event()
+    result: list[object] = []
+
+    def read_submit_authority() -> None:
+        started.set()
+        try:
+            result.append(assert_global_allocation_allows(_intent(size=1)))
+        except Exception as exc:  # noqa: BLE001 - the assertion diagnoses the race
+            result.append(exc)
+        finally:
+            done.set()
+
+    thread = threading.Thread(target=read_submit_authority)
+    try:
+        with governor_module._GLOBAL_ALLOCATION_LOCK:
+            governor_module._GLOBAL_ALLOCATOR = PairCheckingAllocator()
+            thread.start()
+            assert started.wait(timeout=1)
+            assert not done.wait(timeout=0.05)
+            governor_module._GLOBAL_GOVERNOR_STATE = _state(
+                manual_reason="new-pair"
+            )
+        assert done.wait(timeout=1)
+        thread.join(timeout=1)
+    finally:
+        clear_global_allocator()
+
+    assert len(result) == 1
+    assert isinstance(result[0], governor_module.AllocationDecision)
+    assert result[0].allowed
+    assert seen_states == ["new-pair"]
+
+
+def test_submit_rechecks_current_pair_after_auction_authority_was_captured():
+    selection_allocator = RiskAllocator(
+        CapPolicy(max_per_market_micro=150_000_000)
+    )
+    configure_global_allocator(selection_allocator, _state())
+    auction_authority = snapshot_global_auction_capital_authority()
+    assert auction_authority.capacity_usd(
+        market_id="m1",
+        event_id="e1",
+        resolution_window="day0",
+        correlation_key="corr-1",
+    ) == Decimal("150")
+
+    current_allocator = RiskAllocator(
+        CapPolicy(max_per_market_micro=150_000_000),
+        [
+            ExposureLot(
+                "m1",
+                "e1",
+                "day0",
+                "t1",
+                150_000_000,
+                "CONFIRMED_EXPOSURE",
+                correlation_key="corr-1",
+            )
+        ],
+    )
+    configure_global_allocator(current_allocator, _state())
+    try:
+        with pytest.raises(AllocationDenied) as excinfo:
+            assert_global_allocation_allows(
+                _intent(
+                    market="m1",
+                    event="e1",
+                    resolution="day0",
+                    correlation="corr-1",
+                    size=1,
+                )
+            )
+    finally:
+        clear_global_allocator()
+
+    assert excinfo.value.decision.reason == "per_market_cap_exceeded"
 
 
 def test_allocator_indexes_match_reference_scans_and_rebuild_with_lots():
