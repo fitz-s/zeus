@@ -5645,13 +5645,13 @@ def event_bound_live_adapter_from_trade_conn(
 
         events = tuple(events)
         refresh_family_keys = _global_book_refresh_family_keys(events)
-        from src.runtime.reactor_wake import reactor_wake_revision
+        from src.runtime.reactor_wake import reactor_urgent_wake_revision
 
-        wake_revision = reactor_wake_revision()
+        urgent_wake_revision = reactor_urgent_wake_revision()
 
         def _epoch_superseded() -> bool:
-            current = reactor_wake_revision()
-            return current is not None and current != wake_revision
+            current = reactor_urgent_wake_revision()
+            return current is not None and current != urgent_wake_revision
 
         if forecast_conn is None or topology_conn is None or calibration_conn is None:
             from src.events.reactor import GlobalBatchSubmitResult
@@ -6052,6 +6052,36 @@ def event_bound_live_adapter_from_trade_conn(
                 if refresh_family_keys is None
                 else frozenset(refresh_family_keys.intersection(probabilities))
             )
+            if (
+                cached_before_bind is not None
+                and not force_full_refresh
+                and eligible_refresh_family_keys == frozenset()
+            ):
+                cached_probabilities = _cached_global_book_probabilities(
+                    cached_before_bind
+                )
+                if cached_probabilities is not None:
+                    try:
+                        rebound_probabilities = _reuse_global_book_token_bindings(
+                            probabilities,
+                            cached_probabilities,
+                        )
+                    except (KeyError, TypeError, ValueError) as exc:
+                        logging.getLogger(__name__).warning(
+                            "global book cache token reuse rejected; rebinding "
+                            "full universe: reason=%s",
+                            exc,
+                        )
+                    else:
+                        last_book_probability_output = rebound_probabilities
+                        logging.getLogger(__name__).info(
+                            "global book epoch cache hit: elapsed_s=%.3f "
+                            "families=%d assets=%d",
+                            _time.monotonic() - _book_started,
+                            len(rebound_probabilities),
+                            len(getattr(cached_before_bind, "assets", ())),
+                        )
+                        return rebound_probabilities, cached_before_bind
             prefetch_slice = None
             prefetch_mode = ""
             prefetch_token_hint = None

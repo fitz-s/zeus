@@ -609,12 +609,14 @@ def test_reactor_wake_sidecar_round_trip(tmp_path) -> None:
     from src.runtime.reactor_wake import (
         acknowledge_reactor_wake,
         publish_reactor_wake,
+        reactor_urgent_wake_revision,
         reactor_wake_revision,
         read_reactor_wake,
     )
 
     path = tmp_path / "wake.json"
     assert reactor_wake_revision(path=path) is None
+    assert reactor_urgent_wake_revision(path=path) is None
     published = publish_reactor_wake(
         source="test",
         reason="posterior_advanced",
@@ -634,16 +636,27 @@ def test_reactor_wake_sidecar_round_trip(tmp_path) -> None:
     assert published.forecast_families == (("Shanghai", "2026-07-18", "high"),)
     first_revision = reactor_wake_revision(path=path)
     assert first_revision is not None
+    assert reactor_urgent_wake_revision(path=path) is None
 
     publish_reactor_wake(
         source="test",
-        reason="day0_advanced",
+        reason="day0_extreme_event_committed",
         path=path,
         wake_id="wake-43",
         published_at=datetime(2026, 7, 16, 12, 0, 1, tzinfo=timezone.utc),
     )
 
     assert reactor_wake_revision(path=path) != first_revision
+    urgent_revision = reactor_urgent_wake_revision(path=path)
+    assert urgent_revision is not None
+    publish_reactor_wake(
+        source="test",
+        reason="forecast_posterior_advanced",
+        path=path,
+        wake_id="wake-44",
+        published_at=datetime(2026, 7, 16, 12, 0, 2, tzinfo=timezone.utc),
+    )
+    assert reactor_urgent_wake_revision(path=path) == urgent_revision
     assert acknowledge_reactor_wake(published, path=path) is True
 
 

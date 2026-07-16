@@ -2718,7 +2718,7 @@ def test_live_adapter_routes_each_global_truth_to_its_owner(monkeypatch):
     assert bind_calls == [True, True]
 
 
-def test_live_adapter_rebinds_current_probability_before_book_cache_hit(
+def test_live_adapter_rebinds_current_probability_without_network_on_book_cache_hit(
     monkeypatch,
 ):
     trade = sqlite3.connect(":memory:")
@@ -2866,7 +2866,6 @@ def test_live_adapter_rebinds_current_probability_before_book_cache_hit(
     assert epoch_reauction is not epoch
     assert bind_calls == [
         (True, "request-probability-1"),
-        (True, "request-probability-2"),
         (True, "request-probability-2"),
     ]
     assert len(capture_calls) == 2

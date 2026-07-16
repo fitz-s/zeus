@@ -17,6 +17,8 @@ from typing import Iterator
 REACTOR_WAKE_FILENAME = "edli-reactor-wake.json"
 REACTOR_WAKE_QUEUE_SUFFIX = ".d"
 REACTOR_WAKE_SOCKET_SUFFIX = ".sock"
+REACTOR_URGENT_WAKE_SUFFIX = ".urgent"
+URGENT_WAKE_REASONS = frozenset({"day0_extreme_event_committed"})
 
 
 @dataclass(frozen=True)
@@ -49,6 +51,11 @@ def _wake_socket_path(path: Path | None) -> Path:
         return socket_path
     digest = hashlib.sha256(os.fsencode(target)).hexdigest()[:24]
     return Path(tempfile.gettempdir()) / f"zeus-reactor-wake-{digest}.sock"
+
+
+def _urgent_wake_path(path: Path | None) -> Path:
+    target = _wake_path(path)
+    return target.with_name(f"{target.name}{REACTOR_URGENT_WAKE_SUFFIX}")
 
 
 def _notify_reactor_wake(path: Path | None) -> None:
@@ -186,6 +193,8 @@ def publish_reactor_wake(
     queue_target = queue_dir / f"{published_us:020d}-{wake.wake_id}.json"
     _atomic_write_wake(queue_target, wake)
     _atomic_write_wake(target, wake)
+    if wake.reason in URGENT_WAKE_REASONS:
+        _atomic_write_wake(_urgent_wake_path(path), wake)
     _notify_reactor_wake(path)
     return wake
 
@@ -293,6 +302,18 @@ def reactor_wake_revision(
 
     try:
         stat = _wake_path(path).stat()
+    except OSError:
+        return None
+    return stat.st_ino, stat.st_mtime_ns, stat.st_size
+
+
+def reactor_urgent_wake_revision(
+    *, path: Path | None = None
+) -> tuple[int, int, int] | None:
+    """Return a cheap revision for inputs whose alpha clock can preempt an epoch."""
+
+    try:
+        stat = _urgent_wake_path(path).stat()
     except OSError:
         return None
     return stat.st_ino, stat.st_mtime_ns, stat.st_size
