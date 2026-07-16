@@ -317,9 +317,11 @@ def test_reactor_wake_sidecar_round_trip(tmp_path) -> None:
         path=path,
         wake_id="wake-42",
         published_at=datetime(2026, 7, 16, 12, 0, tzinfo=timezone.utc),
+        event_ids=("event-b", "event-a", "event-b", ""),
     )
 
     assert read_reactor_wake(path=path) == published
+    assert published.event_ids == ("event-b", "event-a")
     first_revision = reactor_wake_revision(path=path)
     assert first_revision is not None
 
@@ -356,8 +358,14 @@ def test_reactor_wake_poll_defers_without_consuming_when_reactor_busy(monkeypatc
 
     calls: list[str] = []
 
-    def _run_reactor(*, producer_wake_reason=None):
-        calls.append(f"reactor:{producer_wake_reason}")
+    def _run_reactor(
+        *,
+        producer_wake_reason=None,
+        producer_wake_event_ids=(),
+    ):
+        calls.append(
+            f"reactor:{producer_wake_reason}:{','.join(producer_wake_event_ids)}"
+        )
         return True
 
     monkeypatch.setattr(reactor_wake, "read_reactor_wake", lambda: wake)
@@ -371,7 +379,7 @@ def test_reactor_wake_poll_defers_without_consuming_when_reactor_busy(monkeypatc
     busy["value"] = False
     assert main._edli_reactor_wake_poll_once() is True
     assert main._edli_reactor_wake_poll_once() is False
-    assert calls == ["reactor:forecast_posterior_advanced"]
+    assert calls == ["reactor:forecast_posterior_advanced:"]
 
 
 def test_day0_reactor_wake_runs_exit_monitor_before_reactor(monkeypatch) -> None:
@@ -383,6 +391,7 @@ def test_day0_reactor_wake_runs_exit_monitor_before_reactor(monkeypatch) -> None
         "2026-07-16T12:00:00+00:00",
         "ingest_main",
         "day0_extreme_event_committed",
+        ("event-day0",),
     )
 
     class _Lock:
@@ -395,8 +404,14 @@ def test_day0_reactor_wake_runs_exit_monitor_before_reactor(monkeypatch) -> None
 
     calls: list[str] = []
 
-    def _run_reactor(*, producer_wake_reason=None):
-        calls.append(f"reactor:{producer_wake_reason}")
+    def _run_reactor(
+        *,
+        producer_wake_reason=None,
+        producer_wake_event_ids=(),
+    ):
+        calls.append(
+            f"reactor:{producer_wake_reason}:{','.join(producer_wake_event_ids)}"
+        )
         return True
 
     monkeypatch.setattr(reactor_wake, "read_reactor_wake", lambda: wake)
@@ -407,7 +422,10 @@ def test_day0_reactor_wake_runs_exit_monitor_before_reactor(monkeypatch) -> None
     monkeypatch.setattr(main, "_edli_last_reactor_wake_id", None)
 
     assert main._edli_reactor_wake_poll_once() is True
-    assert calls == ["monitor", "reactor:day0_extreme_event_committed"]
+    assert calls == [
+        "monitor",
+        "reactor:day0_extreme_event_committed:event-day0",
+    ]
 
 
 def test_reactor_wake_is_not_consumed_when_cycle_loses_execution_race(
@@ -438,7 +456,9 @@ def test_reactor_wake_is_not_consumed_when_cycle_loses_execution_race(
     monkeypatch.setattr(
         main,
         "_edli_event_reactor_cycle",
-        lambda *, producer_wake_reason=None: next(outcomes),
+        lambda *, producer_wake_reason=None, producer_wake_event_ids=(): next(
+            outcomes
+        ),
     )
     monkeypatch.setattr(main, "_edli_last_reactor_wake_id", None)
 

@@ -1053,7 +1053,13 @@ class OpportunityEventReactor:
         self._decision_certificate_ledger.ensure_schema()
         self._live_cap_ledger = LiveCapLedger(store.conn)
 
-    def process_pending(self, *, decision_time: datetime, limit: int | None = 100) -> ReactorResult:
+    def process_pending(
+        self,
+        *,
+        decision_time: datetime,
+        limit: int | None = 100,
+        targeted_event_ids: frozenset[str] = frozenset(),
+    ) -> ReactorResult:
         result = ReactorResult()
         # ALWAYS-DECIDABLE invariant (2026-06-12): families blocked on a refreshable substrate
         # THIS cycle, accumulated during processing and drained AFTER all per-event units of work
@@ -1100,11 +1106,14 @@ class OpportunityEventReactor:
                 if remaining is None
                 else _lane_fairness_fetch_limit(request_limit)
             )
-            events = self._store.fetch_pending(
-                decision_time=decision_time.astimezone(UTC).isoformat(),
-                limit=fetch_limit,
-                day0_is_tradeable=self._config.day0_is_tradeable,
-            )
+            fetch_kwargs = {
+                "decision_time": decision_time.astimezone(UTC).isoformat(),
+                "limit": fetch_limit,
+                "day0_is_tradeable": self._config.day0_is_tradeable,
+            }
+            if targeted_event_ids:
+                fetch_kwargs["targeted_event_ids"] = targeted_event_ids
+            events = self._store.fetch_pending(**fetch_kwargs)
             if not events:
                 break
             # FAIR LANE INTERLEAVE (2026-06-15). The per-cycle wall-clock budget completes
@@ -5078,6 +5087,7 @@ def run_edli_event_reactor_cycle(
     *,
     active_lock,
     producer_wake_reason: str | None = None,
+    producer_wake_event_ids: tuple[str, ...] = (),
 ) -> bool:
     """EDLI event-reactor cycle body (R4-b3 extraction from src/main.py::
     _edli_event_reactor_cycle, 2026-07-08). main.py's scheduler hook is now a
@@ -5719,7 +5729,11 @@ def run_edli_event_reactor_cycle(
             ),
         )
         _log_stage("reactor_construct")
-        _rr = reactor.process_pending(decision_time=process_pending_decision_time, limit=proof_limit)
+        _rr = reactor.process_pending(
+            decision_time=process_pending_decision_time,
+            limit=proof_limit,
+            targeted_event_ids=frozenset(producer_wake_event_ids),
+        )
         _log_stage("process_pending")
         # Canonical event/finalization truth must commit before the derived status
         # pulse opens independent readers. A slow pulse cannot retain the world

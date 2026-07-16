@@ -761,10 +761,13 @@ class TestDay0MetarSourceClockTick:
                 return 2
 
         class _Conn:
-            def execute(self, sql):
+            def execute(self, sql, _params=()):
                 if sql == "BEGIN IMMEDIATE":
                     order.append("begin")
                 return self
+
+            def fetchall(self):
+                return (("event-b",), ("event-a",))
 
             def commit(self):
                 order.append("commit")
@@ -788,7 +791,9 @@ class TestDay0MetarSourceClockTick:
         monkeypatch.setattr("src.state.db.world_write_mutex", lambda: _Mutex())
         monkeypatch.setattr(
             "src.runtime.reactor_wake.publish_reactor_wake",
-            lambda **_kw: order.append("wake"),
+            lambda **kwargs: order.append(
+                f"wake:{','.join(kwargs['event_ids'])}"
+            ),
         )
 
         result = im._day0_metar_source_clock_tick.__wrapped__()
@@ -798,7 +803,9 @@ class TestDay0MetarSourceClockTick:
             "pending_reports": 1,
             "events_emitted": 2,
         }
-        assert order.index("commit") < order.index("wake")
+        wake_entry = next(item for item in order if item.startswith("wake:"))
+        assert order.index("commit") < order.index(wake_entry)
+        assert "wake:event-b,event-a" in order
 
     def test_committed_event_survives_reactor_wake_failure(
         self, monkeypatch, caplog
@@ -821,8 +828,11 @@ class TestDay0MetarSourceClockTick:
                 return 2
 
         class _Conn:
-            def execute(self, _sql):
+            def execute(self, _sql, _params=()):
                 return self
+
+            def fetchall(self):
+                return (("event-b",), ("event-a",))
 
             def commit(self):
                 return None

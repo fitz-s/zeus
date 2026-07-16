@@ -138,6 +138,90 @@ def test_freshest_target_returned_first():
     )
 
 
+def test_committed_wake_target_precedes_normal_queue_fairness():
+    conn = _world_conn()
+    store = EventStore(conn)
+    ordinary = _event(
+        "2026-06-07",
+        "snap-ordinary",
+        available_at="2026-06-05T11:00:00+00:00",
+        received_at="2026-06-05T11:01:00+00:00",
+    )
+    committed = _event(
+        "2026-06-06",
+        "snap-committed",
+        available_at="2026-06-05T10:00:00+00:00",
+        received_at="2026-06-05T10:01:00+00:00",
+    )
+    store.insert_or_ignore(ordinary)
+    store.insert_or_ignore(committed)
+
+    returned = store.fetch_pending(
+        decision_time=_DECISION_TIME,
+        limit=2,
+        targeted_event_ids=frozenset({committed.event_id}),
+    )
+
+    assert [event.event_id for event in returned] == [
+        committed.event_id,
+        ordinary.event_id,
+    ]
+
+
+def test_committed_wake_target_bypasses_bounded_oldest_scan():
+    conn = _world_conn()
+    store = EventStore(conn)
+    newest = _event(
+        "2026-06-07",
+        "snap-newest",
+        available_at="2026-06-05T11:00:00+00:00",
+        received_at="2026-06-05T11:01:00+00:00",
+    )
+    targeted = _event(
+        "2026-06-06",
+        "snap-targeted",
+        available_at="2026-06-05T11:00:00+00:00",
+        received_at="2026-06-05T11:01:00+00:00",
+    )
+    store.insert_or_ignore(newest)
+    store.insert_or_ignore(targeted)
+    conn.executemany(
+        """
+        INSERT INTO opportunity_event_processing (
+            consumer_name,
+            event_id,
+            processing_status,
+            attempt_count,
+            updated_at
+        ) VALUES (?, ?, 'pending', 0, '2026-06-05T10:00:00+00:00')
+        """,
+        (
+            (store.consumer_name, f"ghost-{index:05d}")
+            for index in range(20_002)
+        ),
+    )
+    conn.execute(
+        """
+        UPDATE opportunity_event_processing
+           SET updated_at = CASE event_id
+               WHEN ? THEN '2026-06-05T12:01:00+00:00'
+               ELSE '2026-06-05T12:00:00+00:00'
+           END
+         WHERE event_id = ?
+            OR event_id = ?
+        """,
+        (newest.event_id, targeted.event_id, newest.event_id),
+    )
+
+    returned = store.fetch_pending(
+        decision_time=_DECISION_TIME,
+        limit=1,
+        targeted_event_ids=frozenset({targeted.event_id}),
+    )
+
+    assert [event.event_id for event in returned] == [targeted.event_id]
+
+
 def test_retry_debt_precedes_zero_attempt_redecision_with_same_target():
     """T3: bounded EDLI proof windows must not be refilled forever by newly
     emitted zero-attempt redecision rows while transient retries sit behind them.

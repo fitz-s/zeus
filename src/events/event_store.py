@@ -408,7 +408,12 @@ class EventStore:
         return [_event_from_row(row) for row in rows]
 
     def fetch_pending(
-        self, *, decision_time: str, limit: int = 100, day0_is_tradeable: bool = True
+        self,
+        *,
+        decision_time: str,
+        limit: int = 100,
+        day0_is_tradeable: bool = True,
+        targeted_event_ids: frozenset[str] = frozenset(),
     ) -> list[OpportunityEvent]:
         """Fetch pending events in deterministic replay/inference order.
 
@@ -484,6 +489,54 @@ class EventStore:
         # only, then point-read events by event_id and do tier/city ranking in Python.
         active_limit = max(limit * 512, limit + 20_000)
         active_rows: list[tuple[str, int, str, int]] = []
+        clean_targeted_event_ids = tuple(
+            dict.fromkeys(
+                event_id
+                for raw_event_id in targeted_event_ids
+                if (event_id := str(raw_event_id or "").strip())
+            )
+        )[:100]
+        if clean_targeted_event_ids:
+            placeholders = ",".join("?" for _ in clean_targeted_event_ids)
+            active_rows.extend(
+                (
+                    str(row[0] or ""),
+                    _safe_int(row[1]),
+                    str(row[2] or ""),
+                    _safe_int(row[3]),
+                )
+                for row in self.conn.execute(
+                    f"""
+                    SELECT p.event_id,
+                           p.attempt_count,
+                           p.last_error,
+                           CASE WHEN p.processing_status = 'processing' THEN 1 ELSE 0 END
+                      FROM opportunity_event_processing p
+                     WHERE p.consumer_name = ?
+                       AND p.event_id IN ({placeholders})
+                       AND (
+                            (
+                                p.processing_status = 'pending'
+                                AND (
+                                    p.claimed_at IS NULL
+                                    OR p.claimed_at <= ?
+                                )
+                            )
+                            OR (
+                                p.processing_status = 'processing'
+                                AND p.claimed_at IS NOT NULL
+                                AND p.claimed_at <= ?
+                            )
+                       )
+                    """,
+                    (
+                        self.consumer_name,
+                        *clean_targeted_event_ids,
+                        parsed_decision_time.isoformat(),
+                        stale_processing_before,
+                    ),
+                ).fetchall()
+            )
         # A target is inserted before the current batch's claimed rows are
         # finalized.  Finalization then updates as many as ``limit`` older target
         # rows after the new target, so the generic newest-row probe below can
@@ -688,7 +741,7 @@ class EventStore:
                     )
                 )
 
-        targeted_event_ids = frozenset(
+        winner_targeted_event_ids = frozenset(
             {
                 max(
                     targeted_generations,
@@ -700,6 +753,9 @@ class EventStore:
             }
             if targeted_generations
             else ()
+        )
+        targeted_event_ids = (
+            frozenset(clean_targeted_event_ids) | winner_targeted_event_ids
         )
         ranked = _rank_pending_rows_python(
             rank_rows,

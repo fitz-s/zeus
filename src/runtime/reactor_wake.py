@@ -18,6 +18,7 @@ class ReactorWake:
     published_at: str
     source: str
     reason: str
+    event_ids: tuple[str, ...] = ()
 
 
 def _wake_path(path: Path | None) -> Path:
@@ -35,6 +36,7 @@ def publish_reactor_wake(
     path: Path | None = None,
     wake_id: str | None = None,
     published_at: datetime | None = None,
+    event_ids: tuple[str, ...] = (),
 ) -> ReactorWake:
     """Atomically publish a non-authoritative wake hint after durable truth commits."""
 
@@ -42,6 +44,13 @@ def publish_reactor_wake(
     clean_reason = str(reason or "").strip()
     if not clean_source or not clean_reason:
         raise ValueError("reactor wake source and reason are required")
+    clean_event_ids = tuple(
+        dict.fromkeys(
+            event_id
+            for raw_event_id in event_ids
+            if (event_id := str(raw_event_id or "").strip())
+        )
+    )[:100]
     wake = ReactorWake(
         wake_id=str(wake_id or uuid.uuid4().hex),
         published_at=(published_at or datetime.now(timezone.utc))
@@ -49,6 +58,7 @@ def publish_reactor_wake(
         .isoformat(),
         source=clean_source,
         reason=clean_reason,
+        event_ids=clean_event_ids,
     )
     target = _wake_path(path)
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -77,6 +87,11 @@ def read_reactor_wake(*, path: Path | None = None) -> ReactorWake | None:
             published_at=str(payload["published_at"]).strip(),
             source=str(payload["source"]).strip(),
             reason=str(payload["reason"]).strip(),
+            event_ids=tuple(
+                str(event_id or "").strip()
+                for event_id in payload.get("event_ids", ())
+                if str(event_id or "").strip()
+            )[:100],
         )
     except (FileNotFoundError, OSError, KeyError, TypeError, ValueError, json.JSONDecodeError):
         return None
