@@ -2433,6 +2433,36 @@ def test_global_single_order_scores_probability_tail_once(monkeypatch):
     assert calls == 1
 
 
+def test_global_single_order_normalizes_each_probe_direction_once(monkeypatch):
+    candidate = _global_candidate(
+        candidate_id="probe-normalization-cache",
+        family="probe-normalization-cache",
+        side="YES",
+        q=0.70,
+        levels=(("0.19", "1.37"), ("0.34", "4.11"), ("0.57", "20")),
+    )
+    original = S._single_order_venue_legal_neighbor
+    calls = []
+
+    def counted(candidate_arg, shares, *, at_most):
+        calls.append((Decimal(shares), at_most))
+        return original(candidate_arg, shares, at_most=at_most)
+
+    monkeypatch.setattr(S, "_single_order_venue_legal_neighbor", counted)
+    score = S._score_global_single_order(
+        candidate,
+        q_samples=np.full(400, 0.70, dtype=np.float64),
+        band_alpha=0.05,
+        wealth_floor_usd=Decimal("100"),
+        wealth_ceiling_usd=Decimal("100"),
+        spendable_cash_usd=Decimal("50"),
+        capital_limit_usd=Decimal("20"),
+    )
+
+    assert score.candidate is not None
+    assert len(calls) == len(set(calls))
+
+
 def test_global_single_order_resizes_on_candidate_executable_q_bound():
     candidate = _global_candidate(
         candidate_id="tightened-q",

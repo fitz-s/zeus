@@ -1985,13 +1985,22 @@ def _score_global_single_order(
         min_shares=raw_min_shares,
         max_shares=raw_max_shares,
     )
+    legal_neighbor_cache: dict[tuple[Decimal, bool], Decimal | None] = {}
+
+    def venue_legal_neighbor(shares: Decimal, *, at_most: bool) -> Decimal | None:
+        key = (Decimal(shares), at_most)
+        if key not in legal_neighbor_cache:
+            legal_neighbor_cache[key] = _single_order_venue_legal_neighbor(
+                candidate,
+                shares,
+                at_most=at_most,
+            )
+        return legal_neighbor_cache[key]
 
     probes: set[Decimal] = set()
     for raw_probe in raw_probes:
         for at_most in (True, False):
-            legal = _single_order_venue_legal_neighbor(
-                candidate, raw_probe, at_most=at_most
-            )
+            legal = venue_legal_neighbor(raw_probe, at_most=at_most)
             if legal is not None:
                 probes.add(legal)
 
@@ -2053,9 +2062,7 @@ def _score_global_single_order(
             rejection_reasons={candidate.candidate_id: "NON_POSITIVE_ROBUST_OBJECTIVE"},
         )
 
-    legal_min_shares = _single_order_venue_legal_neighbor(
-        candidate, raw_min_shares, at_most=False
-    )
+    legal_min_shares = venue_legal_neighbor(raw_min_shares, at_most=False)
     if legal_min_shares is None:
         legal_min_shares = raw_min_shares
     full_kelly_target_shares = held_shares + full_best[4]
@@ -2073,8 +2080,7 @@ def _score_global_single_order(
             no_trade_reason=reason,
             rejection_reasons={candidate.candidate_id: reason},
         )
-    fractional_legal_max = _single_order_venue_legal_neighbor(
-        candidate,
+    fractional_legal_max = venue_legal_neighbor(
         remaining_target_shares,
         at_most=True,
     )
@@ -2108,9 +2114,7 @@ def _score_global_single_order(
         projected_probes = set()
         for raw_probe in fractional_raw_probes:
             for at_most in (True, False):
-                legal = _single_order_venue_legal_neighbor(
-                    candidate, raw_probe, at_most=at_most
-                )
+                legal = venue_legal_neighbor(raw_probe, at_most=at_most)
                 if legal is not None:
                     projected_probes.add(legal)
 
