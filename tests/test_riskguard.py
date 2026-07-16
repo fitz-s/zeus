@@ -1,5 +1,5 @@
 # Created: 2026-03-30
-# Last reused/audited: 2026-07-15
+# Last reused/audited: 2026-07-16
 # Authority basis: docs/operations/task_2026-04-28_contamination_remediation/plan.md Batch D RiskGuard test-law remediation; Wave26 verification-noise helper alignment; PR90 current-env fallback review fix.
 #                  2026-05-17 live lock remediation: RiskGuard trade/world DB lock degrades to fresh DATA_DEGRADED rather than stale RED.
 # Lifecycle: created=2026-03-30; last_reviewed=2026-05-08; last_reused=2026-05-08
@@ -1737,6 +1737,36 @@ class TestRiskGuardSettlementSource:
         level = riskguard_module.get_current_level()
 
         assert level == RiskLevel.RED
+
+    def test_get_current_level_reads_latest_append_without_schema_work(
+        self,
+        monkeypatch,
+        tmp_path,
+    ):
+        risk_db = tmp_path / "risk_state.db"
+        conn = get_connection(risk_db)
+        riskguard_module.init_risk_db(conn)
+        future = (datetime.now(timezone.utc) + timedelta(minutes=1)).isoformat()
+        now = datetime.now(timezone.utc).isoformat()
+        _insert_risk_state_row(conn, checked_at=future, level=RiskLevel.RED.value)
+        _insert_risk_state_row(conn, checked_at=now, level=RiskLevel.GREEN.value)
+        conn.commit()
+        conn.close()
+
+        monkeypatch.setattr(
+            riskguard_module,
+            "get_connection",
+            lambda path=None, **_kwargs: get_connection(risk_db),
+        )
+        monkeypatch.setattr(
+            riskguard_module,
+            "init_risk_db",
+            lambda _conn: (_ for _ in ()).throw(
+                AssertionError("current-level reads must not run schema initialization")
+            ),
+        )
+
+        assert riskguard_module.get_current_level() == RiskLevel.GREEN
 
     def test_tick_start_attestation_preserves_fresh_full_level_during_long_metrics_pass(
         self,

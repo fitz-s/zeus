@@ -2029,7 +2029,7 @@ def _latest_fresh_full_risk_row(conn: sqlite3.Connection, *, now: datetime) -> s
         """
         SELECT level, checked_at, details_json, force_exit_review
         FROM risk_state
-        ORDER BY checked_at DESC, id DESC
+        ORDER BY id DESC
         LIMIT 20
         """
     ).fetchall()
@@ -2216,7 +2216,7 @@ def _tick_once() -> RiskLevel:
         init_risk_db(risk_conn)
 
         previous_row = risk_conn.execute(
-            "SELECT level FROM risk_state ORDER BY checked_at DESC LIMIT 1"
+            "SELECT level FROM risk_state ORDER BY id DESC LIMIT 1"
         ).fetchone()
         previous_level = RiskLevel(previous_row["level"]) if previous_row else None
 
@@ -3113,11 +3113,10 @@ def get_current_level() -> RiskLevel:
     degraded, while never weakening a stronger halt (RED/ORANGE/YELLOW survive).
     """
     try:
-        conn = get_connection(RISK_DB_PATH, write_class="live")
-        init_risk_db(conn)
+        conn = get_connection(RISK_DB_PATH, write_class=None)
         row = conn.execute(
             "SELECT level, checked_at, details_json "
-            "FROM risk_state ORDER BY checked_at DESC LIMIT 1"
+            "FROM risk_state ORDER BY id DESC LIMIT 1"
         ).fetchone()
         conn.close()
 
@@ -3182,10 +3181,9 @@ def get_force_exit_review() -> bool:
     """
     conn = None
     try:
-        conn = get_connection(RISK_DB_PATH, write_class="live")
-        init_risk_db(conn)
+        conn = get_connection(RISK_DB_PATH, write_class=None)
         row = conn.execute(
-            "SELECT force_exit_review FROM risk_state ORDER BY checked_at DESC LIMIT 1"
+            "SELECT force_exit_review FROM risk_state ORDER BY id DESC LIMIT 1"
         ).fetchone()
         if row is None:
             return False
