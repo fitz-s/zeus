@@ -1032,6 +1032,7 @@ def process_current_global_batch(
     | None = None,
     candidate_policy_rejection_resolver: Callable[[object], str | None]
     | None = None,
+    new_entry_block_reason: str | None = None,
     fractional_kelly_multiplier: Decimal = Decimal("1"),
     claim_unpaged_winner: Callable[[OpportunityEvent], bool] | None = None,
 ) -> GlobalBatchSubmitResult:
@@ -1041,6 +1042,7 @@ def process_current_global_batch(
         raise ValueError("GLOBAL_AUCTION_DECISION_TIME_NAIVE")
     decision_time = decision_time.astimezone(UTC)
     event_tuple = tuple(events)
+    entry_block_reason = str(new_entry_block_reason or "").strip() or None
     claimed_target_by_scope_and_economics: dict[
         tuple[str, str], OpportunityEvent
     ] = {}
@@ -1312,12 +1314,33 @@ def process_current_global_batch(
         log_stage("selection_snapshot")
         scope_at = current_time()
         held_families = _current_held_weather_families(trade_conn)
+        held_family_keys = frozenset(
+            weather_family_id(
+                city=city,
+                target_date=target_date,
+                metric=metric,
+            )
+            for city, target_date, metric in held_families
+        )
+        if entry_block_reason is not None and not held_family_keys:
+            return reject(
+                f"GLOBAL_PREFLIGHT_BATCH_BLOCKED:{entry_block_reason}"
+            )
         full_scope = scan_current_global_auction_scope(
             world_conn=world_conn,
             forecasts_conn=forecast_conn,
             decision_at_utc=scope_at,
             held_families=held_families,
         )
+        if entry_block_reason is not None:
+            full_scope = current_global_auction_scope_from_events(
+                tuple(
+                    event
+                    for family_key, event in full_scope.events_by_family
+                    if family_key in held_family_keys
+                ),
+                captured_at_utc=scope_at,
+            )
         log_stage("scope_scan", families=len(full_scope.events_by_family))
         from src.data.replacement_input_hwm import (
             prime_frozen_replacement_artifact_hwm,
@@ -1531,8 +1554,13 @@ def process_current_global_batch(
                     raise ValueError("GLOBAL_EXCLUDED_CANDIDATE_UNKNOWN")
 
             def candidate_policy(candidate):
+                action = str(
+                    getattr(candidate, "action", "BUY") or "BUY"
+                ).upper()
+                if entry_block_reason is not None and action == "BUY":
+                    return entry_block_reason
                 key = (
-                    str(getattr(candidate, "action", "BUY") or "BUY").upper(),
+                    action,
                     str(getattr(candidate, "family_key", "") or ""),
                     str(getattr(candidate, "bin_id", "") or ""),
                     str(getattr(candidate, "side", "") or ""),
@@ -1659,6 +1687,10 @@ def process_current_global_batch(
         log_stage(initial_select_stage, families=len(prepared_by_event))
         if selected.decision.candidate is None:
             log_no_trade(initial_select_stage, selected.decision)
+            if entry_block_reason is not None:
+                return reject(
+                    f"GLOBAL_PREFLIGHT_BATCH_BLOCKED:{entry_block_reason}"
+                )
             return reject(
                 "GLOBAL_AUCTION_NO_TRADE:"
                 f"{selected.decision.no_trade_reason or 'unknown'}"

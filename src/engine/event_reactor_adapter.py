@@ -5848,6 +5848,14 @@ def event_bound_live_adapter_from_trade_conn(
                 correlation_key=_global_candidate_correlation_key(candidate),
             )
 
+        new_entry_block_reason = None
+        if real_order_submit_enabled:
+            pause_reason = _entry_pause_blocks_live_submit(
+                live_cap_conn or trade_conn
+            )
+            if pause_reason is not None:
+                new_entry_block_reason = f"entries_paused:{pause_reason}"
+
         try:
             return process_current_global_batch(
                 events,
@@ -5889,10 +5897,11 @@ def event_bound_live_adapter_from_trade_conn(
                 portfolio_state_provider=None,
                 current_book_epoch_provider=_current_book_epoch,
                 current_capital_limit_resolver=_current_entry_capital_limit,
-                # Operator pause and transient submit authority govern actuation,
-                # not economics. Keep the complete BUY/SELL/HOLD/CASH comparison
-                # observable while preflight and executor independently block BUY.
+                # Entry-only control state removes BUY work before the expensive
+                # book epoch, while canonical held families and reduce-only SELL
+                # remain in the auction.
                 candidate_policy_rejection_resolver=None,
+                new_entry_block_reason=new_entry_block_reason,
                 fractional_kelly_multiplier=Decimal(
                     str(_runtime_kelly_multiplier())
                 ),
