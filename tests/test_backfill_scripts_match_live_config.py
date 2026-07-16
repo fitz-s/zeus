@@ -395,6 +395,79 @@ def test_hko_ingest_row_stamps_provenance_identity(hko_ingest_tick_module):
     assert row.running_min == 24.1
 
 
+def test_hko_type_specimen_spot_reading_lifts_running_max(hko_ingest_tick_module):
+    """2026-07-16 (day0 defect-4) type specimen: Hong Kong 2026-07-15, HKO's
+    official since-midnight field (a 1-minute-mean extremum) sat at 28.8C
+    while the same row's spot reading (temp_current) was 29.0C — and
+    running_max stayed 28.8 for the rest of the day because it was never
+    folded with temp_current. The spot reading must lift running_max to
+    29.0, the absorbing-direction lower bound the day0 belief must track."""
+    snapshot = hko_ingest_tick_module.HkoExtremaSnapshot(
+        target_date="2026-07-15",
+        observed_at_utc="2026-07-15T02:20:00+00:00",
+        high_c=28.8,
+        low_c=24.0,
+        fetched_at_utc="2026-07-15T02:20:10+00:00",
+    )
+    row = hko_ingest_tick_module._build_hko_extrema_row(
+        snapshot,
+        temperature_c=29.0,
+        accumulator_fetched_at="2026-07-15T02:20:05+00:00",
+        data_version="v1.hk-accumulator.forward",
+        imported_at="2026-07-15T02:20:15+00:00",
+    )
+    assert row.temp_current == 29.0
+    assert row.running_max == 29.0
+    assert row.running_min == 24.0  # low side untouched, spot is above it
+
+
+def test_hko_low_metric_mirror_spot_reading_lowers_running_min(hko_ingest_tick_module):
+    """LOW-metric mirror: a spot reading colder than HKO's official
+    since-midnight low must lower running_min, same absorbing law."""
+    snapshot = hko_ingest_tick_module.HkoExtremaSnapshot(
+        target_date="2026-07-15",
+        observed_at_utc="2026-07-15T14:20:00+00:00",  # 22:20 HK local (UTC+8), still 07-15
+        high_c=28.8,
+        low_c=18.0,
+        fetched_at_utc="2026-07-15T14:20:10+00:00",
+    )
+    row = hko_ingest_tick_module._build_hko_extrema_row(
+        snapshot,
+        temperature_c=16.5,
+        accumulator_fetched_at="2026-07-15T14:20:05+00:00",
+        data_version="v1.hk-accumulator.forward",
+        imported_at="2026-07-15T14:20:15+00:00",
+    )
+    assert row.temp_current == 16.5
+    assert row.running_min == 16.5
+    assert row.running_max == 28.8  # high side untouched, spot is below it
+
+
+def test_hko_no_regression_official_extreme_higher_than_spot_stays(hko_ingest_tick_module):
+    """No-regression case: when HKO's official since-midnight extrema are
+    ALREADY beyond the current spot reading (the normal case — a spot
+    reading rarely exceeds the day's already-established peak), the
+    official values must pass through unchanged, not get pulled toward the
+    spot reading."""
+    snapshot = hko_ingest_tick_module.HkoExtremaSnapshot(
+        target_date="2026-07-15",
+        observed_at_utc="2026-07-15T06:00:00+00:00",
+        high_c=35.0,
+        low_c=22.0,
+        fetched_at_utc="2026-07-15T06:00:10+00:00",
+    )
+    row = hko_ingest_tick_module._build_hko_extrema_row(
+        snapshot,
+        temperature_c=29.0,
+        accumulator_fetched_at="2026-07-15T06:00:05+00:00",
+        data_version="v1.hk-accumulator.forward",
+        imported_at="2026-07-15T06:00:15+00:00",
+    )
+    assert row.temp_current == 29.0
+    assert row.running_max == 35.0
+    assert row.running_min == 22.0
+
+
 def test_hko_ingest_parses_official_since_midnight_extrema(hko_ingest_tick_module):
     payload = """Date time,Automatic Weather Station,Maximum Air Temperature Since Midnight(degree Celsius),Minimum Air Temperature Since Midnight(degree Celsius)
 202607132350,Chek Lap Kok,34.3,29.1
