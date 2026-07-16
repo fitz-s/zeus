@@ -391,20 +391,22 @@ def _metar_kill_margin_units(city_name: str, unit: str) -> Optional[float]:
     quantum'): the integer-grid strict crossing already consumes one full
     rounding quantum, and the divergence allowance is the measured p99 —
     0 for cities where the feeds are byte-identical post-rounding (threshold
-    1.0), `threshold` extra whole units for unmeasured/spread cities. Returns
-    None when METAR must not drive kills at all (not settlement-faithful).
-    """
-    from src.data.day0_oracle_anomaly import (
-        city_metar_settlement_faithful,
-        divergence_threshold_for_city,
-    )
+    1.0), `threshold` extra whole units for unmeasured/spread cities.
 
-    if not city_metar_settlement_faithful(city_name):
-        return None
-    threshold, provenance = divergence_threshold_for_city(city_name, unit)
-    if provenance == "empirical" and threshold <= 1.0:
-        return 0.0
-    return float(threshold)
+    2026-07-16 (day0 defect-5): delegates to the shared lookup
+    (day0_oracle_anomaly.metar_margin_units_for_city) so this and the
+    emission layer (day0_fast_obs.fast_obs_source_for_city) use ONE margin
+    mechanism. A measured-but-not-settlement-faithful city with an adequate
+    sample (Seoul/RKSI class) now gets a margin here too instead of None —
+    it used to be unreachable for such a city (the emission layer already
+    excluded it before this function was ever called), which was the same
+    "margin machinery exists but the boolean gate never lets it run" defect
+    as the two callers being reconciled. Returns None only when METAR must
+    not drive kills at all (thin/absent divergence measurement).
+    """
+    from src.data.day0_oracle_anomaly import metar_margin_units_for_city
+
+    return metar_margin_units_for_city(city_name, unit)
 
 
 def _wu_rounded_extremes(

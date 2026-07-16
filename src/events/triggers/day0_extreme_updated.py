@@ -80,6 +80,7 @@ def build_day0_extreme_updated_event(
         live_authority_status=normalize_day0_live_authority_status(
             observation.get("live_authority_status"),
         ),
+        metar_margin_units_applied=observation.get("metar_margin_units_applied"),
     )
     entity_key = "|".join((payload.city, payload.target_date, payload.metric, payload.station_id))
     return make_day0_extreme_updated_event(

@@ -130,6 +130,12 @@ class FastObsSource:
     station_id: str
     authority: str  # provenance authority class for the stream
     notes: str = ""
+    #: Settlement units a reading is shifted by, toward the absorbing
+    #: direction, before it may enter the day0 running belief. 0.0 for a
+    #: settlement-faithful station; >0.0 for a measured-but-not-faithful
+    #: station with an adequate sample (Seoul/RKSI class — see
+    #: day0_oracle_anomaly.metar_margin_units_for_city). Never negative.
+    margin_units: float = 0.0
 
 
 def fast_obs_source_for_city(city: Any) -> Optional[FastObsSource]:
@@ -148,30 +154,46 @@ def fast_obs_source_for_city(city: Any) -> Optional[FastObsSource]:
     source_type = str(getattr(city, "settlement_source_type", "") or "")
     station = str(getattr(city, "wu_station", "") or "").strip().upper()
     if source_type == "wu_icao" and station:
-        # SETTLEMENT-FAITHFULNESS GATE (operator correction 2026-06-10,
-        # measured config/wu_metar_divergence.json): a station whose METAR
-        # integer is NOT reliably WU's settlement integer (Seoul/RKSI class:
-        # +-1C on ~4.5% of reports) must not have METAR drive bin-kill
-        # decisions. Excluding the city is the monotone-safe direction —
-        # absence of fast events never kills a bin; the slower WU-derived
-        # lanes still serve it. Lazy import avoids a module cycle.
+        # SETTLEMENT-FAITHFULNESS MARGIN (operator correction 2026-06-10,
+        # measured config/wu_metar_divergence.json; ABSORBED not excluded as
+        # of 2026-07-16 day0 defect-5): a station whose METAR integer is NOT
+        # reliably WU's settlement integer (Seoul/RKSI class: +-1C on ~4.5%
+        # of reports) used to be excluded from the fast lane entirely, even
+        # though the margin-absorption machinery to include it safely already
+        # existed one layer over (day0_hard_fact_exit._metar_kill_margin_units)
+        # — binary exclusion where margin machinery already exists is the
+        # same disease as the climatology-band defect. A measured-but-not-
+        # faithful station with an adequate sample now gets a non-zero
+        # margin_units instead of None: the running belief still absorbs its
+        # readings, shifted toward the absorbing direction so a METAR-only
+        # value must clear the measured divergence allowance. Only a THIN or
+        # ABSENT divergence measurement (not enough evidence to trust even a
+        # margin-adjusted inclusion) still excludes the city outright — the
+        # monotone-safe direction when there is truly no calibration to lean
+        # on. Lazy import avoids a module cycle.
+        margin_units = 0.0
         try:
-            from src.data.day0_oracle_anomaly import city_metar_settlement_faithful
+            from src.data.day0_oracle_anomaly import metar_margin_units_for_city
 
-            if not city_metar_settlement_faithful(str(getattr(city, "name", "") or "")):
+            city_name = str(getattr(city, "name", "") or "")
+            unit = str(getattr(city, "settlement_unit", "C") or "C").upper()
+            margin = metar_margin_units_for_city(city_name, unit)
+            if margin is None:
                 logger.warning(
-                    "DAY0_FAST_OBS_CITY_EXCLUDED city=%s station=%s reason=metar_not_settlement_faithful "
-                    "(measured WU-vs-METAR divergence; see config/wu_metar_divergence.json)",
-                    getattr(city, "name", "?"), station,
+                    "DAY0_FAST_OBS_CITY_EXCLUDED city=%s station=%s reason=metar_divergence_measurement_too_thin "
+                    "(no empirical WU-vs-METAR divergence measurement to absorb; see config/wu_metar_divergence.json)",
+                    city_name, station,
                 )
                 return None
+            margin_units = margin
         except ImportError:
-            pass  # faithfulness model unavailable -> registry behaves as before
+            pass  # faithfulness model unavailable -> registry behaves as before (margin 0)
         return FastObsSource(
             source_id=FAST_OBS_SOURCE_ID,
             station_id=station,
             authority="ICAO_STATION_NATIVE",
             notes="same physical settlement station as WU; NOAA AWC distribution",
+            margin_units=margin_units,
         )
     return None
 
@@ -392,6 +414,7 @@ def running_extremes_for_local_day(
     city: Any,
     target_date: date | str,
     as_of: Optional[datetime] = None,
+    margin_units: float = 0.0,
 ) -> FastObsExtremes:
     """Running extremes over the city-local target day from METAR reports.
 
@@ -400,6 +423,15 @@ def running_extremes_for_local_day(
     oracle-anomaly detector to compare against a slower WU snapshot over the
     SAME observation window. Implausible prints are held (fix 4) before
     extremes are computed — for emission AND for the anomaly comparison.
+
+    ``margin_units`` (2026-07-16 day0 defect-5): shifts high_so_far/low_so_far
+    toward the absorbing direction (HIGH: -margin; LOW: +margin) before
+    returning — see day0_oracle_anomaly.metar_margin_units_for_city. 0.0 for
+    a settlement-faithful station (no-op, current_temp is never shifted, it
+    is diagnostic only). Callers that compare against a DIFFERENT source at
+    face value (the WU-vs-METAR anomaly detector) must NOT pass a margin —
+    shifting by the already-known divergence would blunt its own detection
+    of a NEW divergence beyond what's already characterized.
     """
     tz = ZoneInfo(str(getattr(city, "timezone")))
     unit = str(getattr(city, "settlement_unit", "F") or "F").upper()
@@ -451,7 +483,8 @@ def running_extremes_for_local_day(
     return FastObsExtremes(
         city=city_name, station_id=station,
         target_date=target.isoformat(), unit=unit,
-        high_so_far=max(temps), low_so_far=min(temps), current_temp=temps[-1],
+        high_so_far=max(temps) - margin_units, low_so_far=min(temps) + margin_units,
+        current_temp=temps[-1],
         first_obs_time=values[0][0], last_obs_time=values[-1][0],
         last_receipt_time=max(receipts) if receipts else None,
         sample_count=len(values), skipped_unit_law=skipped,
@@ -639,6 +672,14 @@ def fast_obs_to_day0_observation(
         "observation_context_id": (
             f"metar_fast:{extremes.station_id}:{extremes.target_date}:{available_at}"
         ),
+        # 2026-07-16 (day0 defect-5): extremes.high_so_far/low_so_far already
+        # have source.margin_units absorbed (see running_extremes_for_local_day)
+        # for a measured-but-not-settlement-faithful station — record the
+        # applied margin so raw_value vs the pre-margin METAR reading stays
+        # reconstructable (pre-margin = raw_value + margin for HIGH,
+        # raw_value - margin for LOW) without re-deriving it from a divergence
+        # config that could be regenerated later with a different number.
+        "metar_margin_units_applied": float(source.margin_units),
     }
 
 
@@ -849,7 +890,8 @@ class Day0FastObsEmitter:
         effective_as_of = (as_of or datetime.now(UTC)).astimezone(UTC)
         try:
             extremes = running_extremes_for_local_day(
-                reports, city=city, target_date=target_date, as_of=effective_as_of
+                reports, city=city, target_date=target_date, as_of=effective_as_of,
+                margin_units=source.margin_units,
             )
         except Exception as exc:
             logger.warning(
@@ -995,6 +1037,11 @@ class Day0FastObsEmitter:
                     )
                     break
                 try:
+                    # No margin_units here (deliberate): this is the WU-vs-
+                    # METAR divergence DETECTOR — it must compare a raw METAR
+                    # extreme against WU at face value to catch a NEW/EXCESS
+                    # divergence beyond what's already measured. Shifting by
+                    # the already-known margin first would blunt it.
                     extremes = running_extremes_for_local_day(
                         reports, city=city, target_date=target_date,
                         as_of=decision_time.astimezone(UTC),
@@ -1071,6 +1118,7 @@ class Day0FastObsEmitter:
                 extremes = running_extremes_for_local_day(
                     reports, city=city, target_date=target_date,
                     as_of=decision_time.astimezone(UTC),
+                    margin_units=source.margin_units,
                 )
                 if extremes.sample_count == 0:
                     continue

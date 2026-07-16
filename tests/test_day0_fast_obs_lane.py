@@ -75,10 +75,11 @@ def _seoul():
 
 
 def _tokyo():
-    # Tokyo: settlement-FAITHFUL C city (measured). Seoul is EXCLUDED from the
-    # fast lane by the faithfulness gate (config/wu_metar_divergence.json), so
-    # emitter tests use Tokyo. JST is UTC+9 like KST — the same UTC fixtures
-    # map to the same local day.
+    # Tokyo: settlement-FAITHFUL C city (measured, margin 0). Seoul is
+    # margin-absorbed rather than excluded as of 2026-07-16 (day0 defect-5,
+    # see TestMetarMarginAbsorption) but most emitter tests still use Tokyo
+    # for a margin-free baseline. JST is UTC+9 like KST — the same UTC
+    # fixtures map to the same local day.
     return SimpleNamespace(
         name="Tokyo", timezone="Asia/Tokyo", settlement_unit="C",
         wu_station="RJTT", settlement_source_type="wu_icao",
@@ -595,13 +596,25 @@ class TestEmpiricalThresholds:
         assert city_metar_settlement_faithful("NYC") is True
         assert city_metar_settlement_faithful("UnmeasuredCity") is True
 
-    def test_unfaithful_city_is_excluded_from_fast_lane(self):
-        """Monotone-safe exclusion: Seoul gets NO fast-lane source (its METAR
-        integer is not reliably WU's settlement integer), so METAR can never
-        drive a bin-kill there; faithful cities keep the lane."""
-        assert fast_obs_source_for_city(_seoul()) is None
-        assert fast_obs_source_for_city(_tokyo()) is not None
-        assert fast_obs_source_for_city(_nyc()) is not None
+    def test_unfaithful_but_well_measured_city_gets_margin_absorbed_not_excluded(self):
+        """2026-07-16 (day0 defect-5): Seoul's METAR integer is not reliably
+        WU's settlement integer, but the divergence IS well-measured (990
+        matched pairs, empirical_threshold=2.0C) — binary exclusion where
+        margin-absorption machinery already existed one layer over
+        (day0_hard_fact_exit._metar_kill_margin_units) was the same disease
+        as the climatology-band defect. Seoul now gets a fast-lane source
+        WITH the measured margin, not None; faithful cities keep margin 0."""
+        seoul_source = fast_obs_source_for_city(_seoul())
+        assert seoul_source is not None
+        assert seoul_source.margin_units == pytest.approx(2.0)
+
+        tokyo_source = fast_obs_source_for_city(_tokyo())
+        assert tokyo_source is not None
+        assert tokyo_source.margin_units == pytest.approx(0.0)
+
+        nyc_source = fast_obs_source_for_city(_nyc())
+        assert nyc_source is not None
+        assert nyc_source.margin_units == pytest.approx(0.0)
 
     def test_guard_verdict_records_threshold_provenance(self):
         verdict = check_wu_metar_divergence(
@@ -631,6 +644,113 @@ class TestEmpiricalThresholds:
         threshold, provenance = divergence_threshold_for_city("NYC", "F")
         assert provenance == "empirical" and threshold == pytest.approx(1.0)
         assert 1.4 > threshold  # would NOT have exceeded the old 1.5F guess
+
+
+# ===========================================================================
+# day0 defect-5 (2026-07-16) — margin absorption replaces binary exclusion
+# for a measured-but-not-settlement-faithful METAR station. Seoul/RKSI type
+# specimen: a raw 30.0C reading used to enter NOTHING (fast_obs_source_for_city
+# returned None); it now enters the running belief at 28.0C (30.0 - the
+# measured 2.0C margin), not at face value and not excluded.
+# ===========================================================================
+
+class TestMetarMarginAbsorption:
+    def _reports(self, temps_with_minutes, station="RKSI"):
+        base = datetime(2026, 6, 10, 0, 0, tzinfo=UTC)
+        return [
+            _report(station, base + timedelta(minutes=m), t, t_group=False)
+            for m, t in temps_with_minutes
+        ]
+
+    def test_seoul_type_specimen_reading_enters_belief_shifted_by_margin(self):
+        """The type specimen: METAR 30.0C at Seoul/RKSI, margin 2.0C ->
+        high_so_far == 28.0C, not 30.0 (face value) and not None (excluded,
+        the pre-fix behavior — fast_obs_source_for_city(_seoul()) used to
+        return None, so this reading previously entered nothing at all)."""
+        reports = self._reports([(0, 30.0)])
+        ex = running_extremes_for_local_day(
+            reports, city=_seoul(), target_date="2026-06-10", margin_units=2.0,
+        )
+        assert ex.high_so_far == pytest.approx(28.0)
+        assert ex.current_temp == pytest.approx(30.0)  # diagnostic field stays raw
+
+    def test_faithful_city_margin_zero_is_unchanged_face_value(self):
+        reports = self._reports([(0, 30.0)], station="RJTT")
+        ex = running_extremes_for_local_day(
+            reports, city=_tokyo(), target_date="2026-06-10", margin_units=0.0,
+        )
+        assert ex.high_so_far == pytest.approx(30.0)
+
+    def test_low_metric_mirror_margin_direction_flips(self):
+        """LOW metric: a reading proves the true min is AT MOST reading +
+        margin (margin adds, not subtracts, for the low side)."""
+        reports = self._reports([(0, 10.0)])
+        ex = running_extremes_for_local_day(
+            reports, city=_seoul(), target_date="2026-06-10", margin_units=2.0,
+        )
+        assert ex.low_so_far == pytest.approx(12.0)
+
+    def test_seoul_source_resolves_measured_margin_from_real_config(self):
+        source = fast_obs_source_for_city(_seoul())
+        assert source is not None
+        assert source.margin_units == pytest.approx(2.0)
+
+    def test_emitted_observation_records_margin_and_shifted_raw_value(self):
+        """End-to-end through fast_obs_to_day0_observation: raw_value in the
+        emitted payload is the ALREADY-shifted value (consistent with what
+        gets rounded and stored), and metar_margin_units_applied records the
+        margin so the pre-shift reading stays reconstructable."""
+        source = fast_obs_source_for_city(_seoul())
+        assert source is not None
+        reports = self._reports([(0, 30.0)])
+        extremes = running_extremes_for_local_day(
+            reports, city=_seoul(), target_date="2026-06-10",
+            margin_units=source.margin_units,
+        )
+        obs = fast_obs_to_day0_observation(
+            city=_seoul(), extremes=extremes, metric="high", source=source,
+        )
+        assert obs["raw_value"] == pytest.approx(28.0)
+        assert obs["metar_margin_units_applied"] == pytest.approx(2.0)
+        # pre-shift reading is reconstructable: raw_value + margin for HIGH
+        assert obs["raw_value"] + obs["metar_margin_units_applied"] == pytest.approx(30.0)
+
+    def test_thin_sample_unfaithful_city_still_excluded(self, tmp_path):
+        """A measured-but-not-faithful city whose divergence sample is too
+        thin to trust (threshold_provenance != 'empirical') stays excluded —
+        margin-absorption requires a well-sampled measurement, not just any
+        unfaithful verdict."""
+        import json
+
+        from src.data.day0_oracle_anomaly import metar_margin_units_for_city
+
+        path = tmp_path / "divergence.json"
+        path.write_text(json.dumps({
+            "cities": {
+                "ThinCity": {
+                    "matched_pairs": 12,
+                    "empirical_threshold": 2.5,
+                    "threshold_provenance": "thin_sample",
+                    "settlement_faithful": False,
+                },
+            },
+        }))
+        assert metar_margin_units_for_city("ThinCity", "C", path=path) is None
+
+    def test_never_measured_city_keeps_current_default_guess_margin(self):
+        """A city with NO entry at all in wu_metar_divergence.json defaults
+        to settlement_faithful=True (the guard threshold still covers it),
+        so it is INCLUDED — not excluded — exactly as it is today. Its
+        margin is the conservative DEFAULT_GUESS threshold (1.0C / 1.5F,
+        provenance='default_guess'), not 0.0 — this is the pre-existing
+        behavior this fix preserves unchanged (the OLD
+        _metar_kill_margin_units gave unmeasured faithful cities this same
+        non-zero margin; only an EMPIRICALLY byte-identical measured city
+        gets margin 0.0)."""
+        from src.data.day0_oracle_anomaly import metar_margin_units_for_city
+
+        assert metar_margin_units_for_city("CityNeverMeasured", "C") == pytest.approx(1.0)
+        assert metar_margin_units_for_city("CityNeverMeasured", "F") == pytest.approx(1.5)
 
 
 # ===========================================================================

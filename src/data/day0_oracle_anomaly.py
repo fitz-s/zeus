@@ -136,15 +136,61 @@ def divergence_threshold_for_city(
 def city_metar_settlement_faithful(city_name: str, *, path: "Optional[Path]" = None) -> bool:
     """False when the measurement shows the METAR integer is NOT reliably WU's
     settlement integer for this station (Seoul/RKSI class: +-1C disagreement
-    on ~4.5% of reports — WU's feed is not the METAR body there). Such a city
-    must NOT have METAR drive day0 bin-kill decisions: the fast lane excludes
-    it entirely (monotone-safe — absence of fast events never kills a bin).
+    on ~4.5% of reports — WU's feed is not the METAR body there).
+
+    2026-07-16 (day0 defect-5): such a city no longer means "METAR excluded
+    entirely" — see ``metar_margin_units_for_city`` below, which absorbs a
+    measured-not-faithful city's divergence with a margin instead of
+    excluding it outright (binary exclusion where margin-absorption machinery
+    already existed was the same disease as the climatology-band defect, one
+    layer up). This function still reports the raw faithfulness verdict —
+    callers that need the emission/kill decision should use
+    ``metar_margin_units_for_city`` instead of this boolean directly.
     Unmeasured cities default to True (the guard threshold still covers them)."""
     entry = _load_divergence_model(path).get("cities", {}).get(str(city_name)) or {}
     verdict = entry.get("settlement_faithful")
     if verdict is None:
         return True
     return bool(verdict)
+
+
+def metar_margin_units_for_city(
+    city_name: str, unit: str, *, path: "Optional[Path]" = None
+) -> Optional[float]:
+    """Margin (settlement units) a METAR reading must be shifted by, toward
+    the absorbing direction, before it may enter the day0 running belief —
+    or None when METAR must not drive the belief at all for this city.
+
+    Single shared lookup for BOTH the emission layer (day0_fast_obs.py) and
+    the exit lane's hard-fact kill margin (day0_hard_fact_exit.py
+    ``_metar_kill_margin_units``) — one margin mechanism, not two.
+
+    - Settlement-faithful (True, or unmeasured — the guard threshold still
+      covers unmeasured cities): 0.0 for an empirically-measured
+      byte-identical station (threshold already at the 1.0 floor — the
+      quantum is already consumed by strict boundary crossing), else the
+      measured/default threshold itself (unmeasured or measured-but-wider
+      faithful stations still carry their own conservative margin).
+    - NOT faithful, but the divergence was measured with an adequate sample
+      (threshold_provenance == 'empirical', >=100 matched pairs — Seoul/RKSI
+      class): the measured empirical_threshold. A reading still enters the
+      running belief, shifted toward the absorbing direction (HIGH: reading
+      - margin; LOW: reading + margin) so a METAR-only value must clear the
+      measured divergence allowance before it counts — absorb, don't exclude.
+    - NOT faithful and the divergence measurement itself is thin or absent
+      (threshold_provenance in {'thin_sample', 'no_data'}, or no comparable
+      pairs at all): None. There is not enough evidence to trust even a
+      margin-adjusted inclusion — stays excluded, same as an unfaithful city
+      does today.
+    """
+    threshold, provenance = divergence_threshold_for_city(city_name, unit, path=path)
+    if city_metar_settlement_faithful(city_name, path=path):
+        if provenance == "empirical" and threshold <= 1.0:
+            return 0.0
+        return float(threshold)
+    if provenance != "empirical":
+        return None
+    return float(threshold)
 
 
 @dataclass(frozen=True)

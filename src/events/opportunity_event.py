@@ -77,6 +77,12 @@ class Day0ExtremeUpdatedPayload:
     rounding_status: str = "UNKNOWN"
     source_authorized_status: str = "UNKNOWN"
     live_authority_status: str = "UNKNOWN"
+    #: 2026-07-16 (day0 defect-5): settlement-unit margin absorbed into
+    #: raw_value/rounded_value for a measured-but-not-settlement-faithful
+    #: METAR station (Seoul/RKSI class) — see
+    #: day0_oracle_anomaly.metar_margin_units_for_city. None for every other
+    #: source (WU, HKO, etc); 0.0 for a settlement-faithful METAR station.
+    metar_margin_units_applied: float | None = None
 
 
 @dataclass(frozen=True)
