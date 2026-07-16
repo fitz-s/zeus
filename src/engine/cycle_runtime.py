@@ -966,6 +966,29 @@ def _market_dict_from_snapshot(snapshot) -> dict:
         "negRisk": neg_risk,
         "clobTokenIds": [yes_token, no_token],
     }
+    # Submit-time recapture reconstructs immutable market identity and refreshes
+    # tradability/book facts from CLOB. Preserve the decision snapshot's Gamma
+    # Fee Structure V2 schedule as part of that identity: CLOB /fee-rate still
+    # exposes the legacy base_fee=1000 (0.10), which is not the V2 weather fee
+    # coefficient (Gamma feeSchedule.rate=0.05). Losing this field makes the
+    # recapture compare two different fee semantics and reject every valid FAK.
+    fee_details = dict(getattr(snapshot, "fee_details", None) or {})
+    fee_source = str(fee_details.get("source") or "")
+    if fee_source.startswith("gamma_fee_schedule"):
+        from src.contracts.executable_market_snapshot import (
+            fee_rate_fraction_from_details,
+        )
+
+        fee_schedule = {
+            "exponent": 1,
+            "rate": fee_rate_fraction_from_details(fee_details),
+            "takerOnly": bool(fee_details.get("feeSchedule_taker_only", True)),
+        }
+        if fee_details.get("maker_rebate_rate") is not None:
+            fee_schedule["rebateRate"] = fee_details["maker_rebate_rate"]
+        gamma_market_raw["feeSchedule"] = fee_schedule
+        if fee_details.get("fee_type"):
+            gamma_market_raw["feeType"] = fee_details["fee_type"]
     outcome = {
         "token_id": yes_token,
         "no_token_id": no_token,

@@ -18,6 +18,7 @@ is already stale at submit, and reprice re-read it without re-capturing.
 from __future__ import annotations
 
 import sqlite3
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from types import SimpleNamespace
@@ -200,6 +201,31 @@ def test_market_reconstruction_is_identity_only_not_fake_live_tradability():
         assert fake_live_field not in outcome
     for fake_live_field in ("active", "closed", "enableOrderBook", "acceptingOrders"):
         assert fake_live_field not in gamma_market_raw
+
+
+def test_market_reconstruction_preserves_gamma_v2_fee_schedule():
+    """JIT book recapture must not replace Gamma V2 fee semantics with legacy CLOB base_fee."""
+    from src.engine.cycle_runtime import _market_dict_from_snapshot
+
+    snapshot = replace(
+        _stale_snapshot(captured_at=NOW),
+        fee_details={
+            "fee_rate_fraction": 0.05,
+            "fee_rate_bps": 500,
+            "fee_rate_source_field": "fee_rate_fraction",
+            "feeSchedule_taker_only": True,
+            "source": "gamma_fee_schedule_family_cache",
+            "token_id": "yes-token",
+        },
+    )
+
+    raw = _market_dict_from_snapshot(snapshot)["outcomes"][0]["gamma_market_raw"]
+
+    assert raw["feeSchedule"] == {
+        "exponent": 1,
+        "rate": 0.05,
+        "takerOnly": True,
+    }
 
 
 def test_stale_snapshot_with_clob_recaptures_fresh(conn):
