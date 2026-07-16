@@ -55,6 +55,7 @@ DAY0_METAR_WRITE_BUDGET_MS_ENV = "ZEUS_DAY0_METAR_WRITE_BUDGET_MS"
 _ORACLE_BRIDGE_LOCK = threading.Lock()
 _ORACLE_SNAPSHOT_LOCK = threading.Lock()
 _DAY0_METAR_EMITTER: Any | None = None
+_REPLACEMENT_MAINTENANCE_NEXT_MONOTONIC = 0.0
 
 # SIGTERM-unif (WAVE-4): captured at module load so the forensic elapsed
 # computed in _graceful_shutdown matches what src/main.py and
@@ -122,35 +123,32 @@ def _day0_metar_emitter():
 def _replacement_availability_poll_seconds() -> int:
     """Fast source-clock poll cadence for replacement raw-input downloads.
 
-    Open-Meteo model-update metadata is cheap and parallelized; keeping this at
-    one minute by default closes most of the public-availability alpha window
-    without turning the heavy downloader into a tight loop. The download body is
-    still max_instances=1/coalesced/idempotent, so long passes do not overlap.
+    Open-Meteo model-update metadata is cheap and parallelized. Fifteen seconds
+    bounds unchanged-state detection lag without repeating the heavier current-
+    target maintenance, which is independently throttled below.
     """
     raw = os.environ.get(REPLACEMENT_AVAILABILITY_POLL_SECONDS_ENV, "").strip()
     if not raw:
-        return 60
+        return 15
     try:
         return max(15, int(raw))
     except ValueError:
         logger.warning(
-            "invalid %s=%r; using 60s replacement availability poll cadence",
+            "invalid %s=%r; using 15s replacement availability poll cadence",
             REPLACEMENT_AVAILABILITY_POLL_SECONDS_ENV,
             raw,
         )
-        return 60
+        return 15
 
 
 def _replacement_source_clock_download_budget_seconds(poll_seconds: int | None = None) -> float:
     """Wall-clock budget for the source-clock scoped download body.
 
-    The source-clock poll is cadence-sensitive: one updated source must not turn
-    the ingest daemon into a multi-minute downloader that causes APScheduler
-    max_instances skips and stale forecast serving records. Keep the body below
-    the next poll while leaving a small scheduler/logging margin.
+    A scoped download may span multiple probe intervals; APScheduler's single
+    instance/coalescing prevents overlap. Keep the established 45-second budget
+    so a faster metadata probe does not turn useful downloads into retry loops.
     """
-    cadence_s = float(poll_seconds if poll_seconds is not None else _replacement_availability_poll_seconds())
-    default_s = max(5.0, min(45.0, cadence_s - 5.0))
+    default_s = 45.0
     raw = os.environ.get(REPLACEMENT_SOURCE_CLOCK_DOWNLOAD_BUDGET_SECONDS_ENV, "").strip()
     if not raw:
         return default_s
@@ -164,19 +162,17 @@ def _replacement_source_clock_download_budget_seconds(poll_seconds: int | None =
             default_s,
         )
         return default_s
-    return max(1.0, min(requested, max(1.0, cadence_s - 1.0)))
+    return max(1.0, min(requested, 60.0))
 
 
 def _replacement_current_target_poll_timeout_seconds(poll_seconds: int | None = None) -> float:
-    """Bound the current-target substep so source-clock/reseed cannot starve.
+    """Bound the periodic current-target maintenance substep.
 
-    Current-target raw download is incremental and idempotent, but it runs before
-    the source-clock probe in the same availability tick. A single slow transport
-    must not monopolize the job's max_instances slot and suppress every later
-    re-decision seed.
+    Maintenance runs only on an unchanged-source tick and at most once per
+    minute, so its useful 20-second budget is independent of the 15-second
+    metadata cadence.
     """
-    cadence_s = float(poll_seconds if poll_seconds is not None else _replacement_availability_poll_seconds())
-    default_s = max(5.0, min(20.0, cadence_s / 3.0))
+    default_s = 20.0
     raw = os.environ.get(REPLACEMENT_CURRENT_TARGET_POLL_TIMEOUT_SECONDS_ENV, "").strip()
     if not raw:
         return default_s
@@ -190,7 +186,19 @@ def _replacement_current_target_poll_timeout_seconds(poll_seconds: int | None = 
             default_s,
         )
         return default_s
-    return max(1.0, min(requested, max(1.0, cadence_s - 1.0)))
+    return max(1.0, min(requested, 60.0))
+
+
+def _replacement_maintenance_due(*, now_monotonic: float | None = None) -> bool:
+    global _REPLACEMENT_MAINTENANCE_NEXT_MONOTONIC
+    now = time.monotonic() if now_monotonic is None else float(now_monotonic)
+    if now < _REPLACEMENT_MAINTENANCE_NEXT_MONOTONIC:
+        return False
+    _REPLACEMENT_MAINTENANCE_NEXT_MONOTONIC = now + max(
+        60.0,
+        float(_replacement_availability_poll_seconds()),
+    )
+    return True
 
 
 def _graceful_shutdown(signum, frame) -> None:
@@ -1461,9 +1469,6 @@ def _replacement_availability_poll_tick():
     source_clock_report = probe_openmeteo_source_clock_updates(advance_cursor=False)
     source_clock_payload = source_clock_report.as_dict()
     if not source_clock_report.updated_sources:
-        current_target_download_compact = _compact_current_target_report(
-            _download_current_targets()
-        )
         report: dict[str, object] = {
             "status": "SOURCE_CLOCK_POLL_CURRENT",
             "source_clock_status": source_clock_payload.get("status"),
@@ -1471,9 +1476,17 @@ def _replacement_availability_poll_tick():
             "source_clock_affected_cities": source_clock_payload.get("affected_cities", []),
             "source_clock_error": source_clock_payload.get("error"),
         }
-        if current_target_download_compact is not None:
-            report["current_target_download"] = current_target_download_compact
-        report = _attach_reseed_reports(report)
+        if _replacement_maintenance_due():
+            current_target_download_compact = _compact_current_target_report(
+                _download_current_targets()
+            )
+            if current_target_download_compact is not None:
+                report["current_target_download"] = current_target_download_compact
+            report = _attach_reseed_reports(report)
+        else:
+            report["current_target_download"] = {
+                "status": "CURRENT_TARGET_MAINTENANCE_NOT_DUE"
+            }
         logger.info("replacement source-clock poll current: %s", report)
         return report
     logger.info("replacement source-clock update detected; running download path: %s", source_clock_payload)
@@ -1505,20 +1518,6 @@ def _replacement_availability_poll_tick():
     report["source_clock_cursor_deferred_sources"] = tuple(
         sorted(set(source_clock_report.updated_sources) - set(advanced_sources))
     )
-
-    current_target_download_report = _download_current_targets()
-    current_target_download_compact = _compact_current_target_report(
-        current_target_download_report
-    )
-    if current_target_download_compact is not None:
-        report["current_target_download"] = current_target_download_compact
-    if (
-        isinstance(current_target_download_report, dict)
-        and int(current_target_download_report.get("written_row_count") or 0) > 0
-    ):
-        maintenance_reseed = _attach_reseed_reports({})
-        if maintenance_reseed:
-            report["current_target_reseed"] = maintenance_reseed
     logger.info("replacement source-clock scoped download report: %s", report)
     return report
 

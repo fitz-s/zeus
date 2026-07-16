@@ -99,7 +99,7 @@ def test_replacement_availability_poll_uses_fast_source_clock_cadence(monkeypatc
 
     monkeypatch.delenv(ingest_main.REPLACEMENT_AVAILABILITY_POLL_SECONDS_ENV, raising=False)
     kwargs = _poll_kwargs()
-    assert kwargs["seconds"] == 60
+    assert kwargs["seconds"] == 15
     assert "minutes" not in kwargs
     assert kwargs["misfire_grace_time"] == 120
     assert kwargs["next_run_time"] is not None
@@ -111,8 +111,28 @@ def test_replacement_availability_poll_uses_fast_source_clock_cadence(monkeypatc
     assert _poll_kwargs()["seconds"] == 15
 
 
+def test_replacement_current_target_maintenance_stays_minute_bounded(
+    monkeypatch,
+) -> None:
+    import src.ingest_main as ingest_main
+
+    monkeypatch.setattr(
+        ingest_main,
+        "_REPLACEMENT_MAINTENANCE_NEXT_MONOTONIC",
+        0.0,
+    )
+    monkeypatch.delenv(
+        ingest_main.REPLACEMENT_AVAILABILITY_POLL_SECONDS_ENV,
+        raising=False,
+    )
+
+    assert ingest_main._replacement_maintenance_due(now_monotonic=100.0)
+    assert not ingest_main._replacement_maintenance_due(now_monotonic=159.999)
+    assert ingest_main._replacement_maintenance_due(now_monotonic=160.0)
+
+
 def test_replacement_availability_fast_poll_skips_heavy_path_when_source_clock_current(monkeypatch) -> None:
-    """The 60s source-clock poll must stay lightweight when no public run changed."""
+    """The source-clock poll must stay lightweight when no public run changed."""
     import src.ingest_main as ingest_main
     import src.data.replacement_forecast_production as prod
     import src.data.source_clock_update_probe as source_clock_probe
@@ -135,6 +155,11 @@ def test_replacement_availability_fast_poll_skips_heavy_path_when_source_clock_c
         prod,
         "_replacement_forecast_live_materialization_queue_config",
         lambda: {"download_current_targets_enabled": True},
+    )
+    monkeypatch.setattr(
+        ingest_main,
+        "_REPLACEMENT_MAINTENANCE_NEXT_MONOTONIC",
+        0.0,
     )
     call_order: list[str] = []
     probe_kwargs: list[dict[str, object]] = []
@@ -293,7 +318,7 @@ def test_replacement_availability_fast_poll_passes_changed_source_clock_report(m
 
     assert result["status"] == "SOURCE_CLOCK_SCOPED_BAYES_PRECISION_FUSION_EXTRA_RAW_INPUTS_DOWNLOADED"
     assert result["source_clock_updated_sources"] == ["icon_global"]
-    assert result["current_target_download"]["available_cycle"] == "2026-07-02T12:00:00+00:00"
+    assert "current_target_download" not in result
     assert result["fusion_upgrade_seeds_enqueued"] == 1
     assert result["cycle_advance_seeds_enqueued"] == 2
     assert result["cycle_advance_detail"]["held_advances_detected"] == 1
@@ -306,12 +331,11 @@ def test_replacement_availability_fast_poll_passes_changed_source_clock_report(m
         "fusion_reseed",
         "cycle_reseed",
         "cursor",
-        "current_targets",
     ]
 
 
-def test_replacement_availability_poll_timebox_keeps_reseed_path_alive(monkeypatch) -> None:
-    """A timeboxed current-target pass must yield and resume on the next source-clock tick."""
+def test_replacement_availability_poll_throttles_timeboxed_maintenance(monkeypatch) -> None:
+    """A timeboxed maintenance pass must not repeat on every metadata tick."""
     import src.ingest_main as ingest_main
     import src.data.replacement_forecast_production as prod
     import src.data.source_clock_update_probe as source_clock_probe
@@ -328,6 +352,11 @@ def test_replacement_availability_poll_timebox_keeps_reseed_path_alive(monkeypat
             }
 
     monkeypatch.setenv(ingest_main.REPLACEMENT_CURRENT_TARGET_POLL_TIMEOUT_SECONDS_ENV, "1")
+    monkeypatch.setattr(
+        ingest_main,
+        "_REPLACEMENT_MAINTENANCE_NEXT_MONOTONIC",
+        0.0,
+    )
     monkeypatch.setattr(
         prod,
         "_replacement_forecast_live_materialization_queue_config",
@@ -368,20 +397,20 @@ def test_replacement_availability_poll_timebox_keeps_reseed_path_alive(monkeypat
     assert result["cycle_advance_seeds_enqueued"] == 3
 
     second = ingest_main._replacement_availability_poll_tick.__wrapped__()
-    assert second["current_target_download"]["status"] == "CURRENT_TARGET_RAW_INPUTS_TIMEBOXED_INCOMPLETE"
-    assert calls == [1.0, 1.0]
+    assert second["current_target_download"]["status"] == "CURRENT_TARGET_MAINTENANCE_NOT_DUE"
+    assert calls == [1.0]
 
 
 def test_replacement_availability_fast_poll_caps_scoped_download_under_cadence(monkeypatch) -> None:
-    """The heavy source-clock capture must be timeboxed below the next poll tick."""
+    """The scoped download keeps a useful budget across faster metadata polls."""
     import src.ingest_main as ingest_main
 
     monkeypatch.setenv(ingest_main.REPLACEMENT_AVAILABILITY_POLL_SECONDS_ENV, "20")
     monkeypatch.delenv(ingest_main.REPLACEMENT_SOURCE_CLOCK_DOWNLOAD_BUDGET_SECONDS_ENV, raising=False)
-    assert ingest_main._replacement_source_clock_download_budget_seconds(20) == 15.0
+    assert ingest_main._replacement_source_clock_download_budget_seconds(20) == 45.0
 
     monkeypatch.setenv(ingest_main.REPLACEMENT_SOURCE_CLOCK_DOWNLOAD_BUDGET_SECONDS_ENV, "999")
-    assert ingest_main._replacement_source_clock_download_budget_seconds(20) == 19.0
+    assert ingest_main._replacement_source_clock_download_budget_seconds(20) == 60.0
 
     monkeypatch.setenv(ingest_main.REPLACEMENT_SOURCE_CLOCK_DOWNLOAD_BUDGET_SECONDS_ENV, "0")
     assert ingest_main._replacement_source_clock_download_budget_seconds(20) == 1.0
