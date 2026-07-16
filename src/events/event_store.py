@@ -1424,7 +1424,22 @@ class EventStore:
                 e.entity_key,
                 json_extract(e.payload_json, '$.city') AS city,
                 json_extract(e.payload_json, '$.target_date') AS target_date,
-                json_extract(e.payload_json, '$.metric') AS metric
+                json_extract(e.payload_json, '$.metric') AS metric,
+                json_extract(e.payload_json, '$.coverage_completeness_status')
+                    AS coverage_completeness_status,
+                json_extract(e.payload_json, '$.coverage_readiness_status')
+                    AS coverage_readiness_status,
+                COALESCE(
+                    json_extract(e.payload_json, '$.member_count'),
+                    json_extract(e.payload_json, '$.observed_members'),
+                    json_extract(e.payload_json, '$.sr_observed_members')
+                ) AS observed_members,
+                COALESCE(
+                    json_extract(e.payload_json, '$.expected_members'),
+                    json_extract(e.payload_json, '$.sr_expected_members')
+                ) AS expected_members,
+                e.available_at,
+                e.received_at
             """,
             join_sql="JOIN opportunity_events e ON e.event_id = p.event_id",
             where_sql="""
@@ -1451,69 +1466,106 @@ class EventStore:
             key for row in candidate_rows if (key := _prune_key(row))[-1]
         }
         keeper_ids: set[str] = set()
-        for prune_key in candidate_keys:
-            if prune_key[0] == "family":
-                _, event_type, city, target_date, metric = prune_key
-                key_predicate = (
-                    "json_extract(e.payload_json, '$.city') = ? "
-                    "AND json_extract(e.payload_json, '$.target_date') = ? "
-                    "AND json_extract(e.payload_json, '$.metric') = ?"
-                )
-                key_params = (city, target_date, metric)
+        candidate_limit = max(1, int(batch_limit))
+
+        def _rank(row: sqlite3.Row | tuple) -> tuple[int, str, str, str]:
+            coverage_complete = str(row[6] or "") == "COMPLETE"
+            coverage_ready = str(row[7] or "") == "LIVE_ELIGIBLE"
+            try:
+                observed_members = int(row[8]) if row[8] is not None else None
+                expected_members = int(row[9]) if row[9] is not None else None
+            except (TypeError, ValueError):
+                observed_members = None
+                expected_members = None
+            if (
+                coverage_complete
+                and coverage_ready
+                and observed_members is not None
+                and expected_members is not None
+                and expected_members > 0
+                and observed_members >= expected_members
+            ):
+                quality = 2
+            elif coverage_complete and coverage_ready:
+                quality = 1
             else:
-                _, event_type, entity_key = prune_key
-                key_predicate = "e.entity_key = ?"
-                key_params = (entity_key,)
-            keeper_row = self.conn.execute(
-                f"""
-                SELECT e.event_id
-                  FROM opportunity_events e
-                  JOIN opportunity_event_processing p
-                    ON p.event_id = e.event_id
-                   AND p.consumer_name = ?
-                 WHERE e.event_type = ?
-                   AND {key_predicate}
-                   AND p.processing_status IN ('pending', 'processing')
-                 ORDER BY
-                   CASE
-                     WHEN json_extract(e.payload_json, '$.coverage_completeness_status') = 'COMPLETE'
-                      AND json_extract(e.payload_json, '$.coverage_readiness_status') = 'LIVE_ELIGIBLE'
-                      AND COALESCE(
-                            json_extract(e.payload_json, '$.member_count'),
-                            json_extract(e.payload_json, '$.observed_members'),
-                            json_extract(e.payload_json, '$.sr_observed_members')
-                          ) IS NOT NULL
-                      AND COALESCE(
-                            json_extract(e.payload_json, '$.expected_members'),
-                            json_extract(e.payload_json, '$.sr_expected_members')
-                          ) IS NOT NULL
-                      AND CAST(COALESCE(
-                            json_extract(e.payload_json, '$.expected_members'),
-                            json_extract(e.payload_json, '$.sr_expected_members')
-                          ) AS INTEGER) > 0
-                      AND CAST(COALESCE(
-                            json_extract(e.payload_json, '$.member_count'),
-                            json_extract(e.payload_json, '$.observed_members'),
-                            json_extract(e.payload_json, '$.sr_observed_members')
-                          ) AS INTEGER) >= CAST(COALESCE(
-                            json_extract(e.payload_json, '$.expected_members'),
-                            json_extract(e.payload_json, '$.sr_expected_members')
-                          ) AS INTEGER)
-                     THEN 0
-                     WHEN json_extract(e.payload_json, '$.coverage_completeness_status') = 'COMPLETE'
-                      AND json_extract(e.payload_json, '$.coverage_readiness_status') = 'LIVE_ELIGIBLE'
-                     THEN 1
-                     ELSE 2
-                   END ASC,
-                   e.available_at DESC,
-                   e.received_at DESC,
-                   e.event_id DESC
-                LIMIT 1
-                """,
-                (self.consumer_name, event_type, *key_params),
-            ).fetchone()
-            if keeper_row is not None:
-                keeper_ids.add(str(keeper_row[0]))
+                quality = 0
+            return quality, str(row[10] or ""), str(row[11] or ""), str(row[0] or "")
+
+        if len(candidate_rows) < candidate_limit:
+            keepers: dict[_FsrPruneKey, sqlite3.Row | tuple] = {}
+            for row in candidate_rows:
+                key = _prune_key(row)
+                if not key[-1]:
+                    continue
+                current = keepers.get(key)
+                if current is None or _rank(row) > _rank(current):
+                    keepers[key] = row
+            keeper_ids.update(str(row[0]) for row in keepers.values())
+        else:
+            for prune_key in candidate_keys:
+                if prune_key[0] == "family":
+                    _, event_type, city, target_date, metric = prune_key
+                    key_predicate = (
+                        "json_extract(e.payload_json, '$.city') = ? "
+                        "AND json_extract(e.payload_json, '$.target_date') = ? "
+                        "AND json_extract(e.payload_json, '$.metric') = ?"
+                    )
+                    key_params = (city, target_date, metric)
+                else:
+                    _, event_type, entity_key = prune_key
+                    key_predicate = "e.entity_key = ?"
+                    key_params = (entity_key,)
+                keeper_row = self.conn.execute(
+                    f"""
+                    SELECT e.event_id
+                      FROM opportunity_events e
+                      JOIN opportunity_event_processing p
+                        ON p.event_id = e.event_id
+                       AND p.consumer_name = ?
+                     WHERE e.event_type = ?
+                       AND {key_predicate}
+                       AND p.processing_status IN ('pending', 'processing')
+                     ORDER BY
+                       CASE
+                         WHEN json_extract(e.payload_json, '$.coverage_completeness_status') = 'COMPLETE'
+                          AND json_extract(e.payload_json, '$.coverage_readiness_status') = 'LIVE_ELIGIBLE'
+                          AND COALESCE(
+                                json_extract(e.payload_json, '$.member_count'),
+                                json_extract(e.payload_json, '$.observed_members'),
+                                json_extract(e.payload_json, '$.sr_observed_members')
+                              ) IS NOT NULL
+                          AND COALESCE(
+                                json_extract(e.payload_json, '$.expected_members'),
+                                json_extract(e.payload_json, '$.sr_expected_members')
+                              ) IS NOT NULL
+                          AND CAST(COALESCE(
+                                json_extract(e.payload_json, '$.expected_members'),
+                                json_extract(e.payload_json, '$.sr_expected_members')
+                              ) AS INTEGER) > 0
+                          AND CAST(COALESCE(
+                                json_extract(e.payload_json, '$.member_count'),
+                                json_extract(e.payload_json, '$.observed_members'),
+                                json_extract(e.payload_json, '$.sr_observed_members')
+                              ) AS INTEGER) >= CAST(COALESCE(
+                                json_extract(e.payload_json, '$.expected_members'),
+                                json_extract(e.payload_json, '$.sr_expected_members')
+                              ) AS INTEGER)
+                         THEN 0
+                         WHEN json_extract(e.payload_json, '$.coverage_completeness_status') = 'COMPLETE'
+                          AND json_extract(e.payload_json, '$.coverage_readiness_status') = 'LIVE_ELIGIBLE'
+                         THEN 1
+                         ELSE 2
+                       END ASC,
+                       e.available_at DESC,
+                       e.received_at DESC,
+                       e.event_id DESC
+                    LIMIT 1
+                    """,
+                    (self.consumer_name, event_type, *key_params),
+                ).fetchone()
+                if keeper_row is not None:
+                    keeper_ids.add(str(keeper_row[0]))
 
         superseded_ids = [str(row[0]) for row in candidate_rows if str(row[0]) not in keeper_ids]
         if not superseded_ids:

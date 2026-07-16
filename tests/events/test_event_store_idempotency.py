@@ -1,5 +1,5 @@
 # Created: 2026-05-24
-# Last reused/audited: 2026-07-08
+# Last reused/audited: 2026-07-16
 # Authority basis: EDLI v1 implementation prompt §7 EventStore acceptance A01-A04.
 from __future__ import annotations
 
@@ -744,6 +744,34 @@ def test_archive_superseded_forecast_snapshot_events_crosses_source_runs():
     )
     assert rows[older.event_id] == "expired"
     assert rows[newer.event_id] == "pending"
+
+
+def test_archive_superseded_forecast_snapshot_events_capped_batch_checks_newer_tail():
+    conn = _world_conn()
+    store = EventStore(conn)
+    events = [
+        _fsr_entity_event(
+            f"Chicago|2026-05-24|high|source-run-{index}",
+            f"snap-{index}",
+            f"2026-05-24T04:{index:02d}:00+00:00",
+            f"2026-05-24T04:{index:02d}:30+00:00",
+        )
+        for index in range(3)
+    ]
+    for event in events:
+        store.insert_or_ignore(event)
+
+    archived = store.archive_superseded_forecast_snapshot_events(batch_limit=2)
+
+    assert archived == 2
+    rows = dict(
+        conn.execute(
+            "SELECT event_id, processing_status FROM opportunity_event_processing"
+        ).fetchall()
+    )
+    assert rows[events[0].event_id] == "expired"
+    assert rows[events[1].event_id] == "expired"
+    assert rows[events[2].event_id] == "pending"
 
 
 def test_archive_superseded_forecast_snapshot_events_fallback_keeps_entity_keeper():
