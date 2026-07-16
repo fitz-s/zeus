@@ -443,6 +443,10 @@ def _openmeteo_manifest_coverage(
             str(manifest.metadata.get("source_cycle_time") or ""),
         }:
             continue
+        if not _cycle_at_or_after(
+            manifest.source_cycle_time, minimum_source_cycle_time
+        ):
+            continue
         if not _openmeteo_manifest_metadata_allows_target_date(
             manifest.metadata, target_date=target_date
         ):
@@ -456,10 +460,6 @@ def _openmeteo_manifest_coverage(
         ):
             continue
         source_run_id = _openmeteo_source_run_id(manifest.metadata)
-        if not _cycle_at_or_after(
-            manifest.source_cycle_time, minimum_source_cycle_time
-        ):
-            continue
         candidates.append(
             (
                 (
