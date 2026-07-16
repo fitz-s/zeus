@@ -9,11 +9,12 @@ Turns the job registry (src/data/source_job_registry) into per-job APScheduler b
 assigning each job an EXECUTOR CLASS by intent so the single-writer SQLite lock no longer lets
 DB-heavy jobs starve heartbeats:
 
-    live_db      — live DB writers (forecast/observation/market live ingest)
-    backfill_db  — backfill / historical DB writers (incl. UMA historical settlement)
-    derived_db   — derived/diagnostic DB writers (calibration, skill, drift, recalibrate)
-    io           — non-DB IO jobs
-    heartbeat    — heartbeat / health / status (file-only, must never block on the DB lock)
+    source_clock_db — latency-critical source publication -> short live write
+    live_db         — other live DB writers (forecast/observation/market ingest)
+    backfill_db     — backfill / historical DB writers (incl. UMA settlement)
+    derived_db      — derived/diagnostic DB writers (calibration, skill, drift)
+    io              — non-DB IO jobs
+    heartbeat       — heartbeat / health / status (file-only)
 
 This module is the structural home of the "UMA must not write the DB on the file-only fast
 executor" fix: by construction a writes_db job is assigned a *_db class, never io/heartbeat.
@@ -31,7 +32,14 @@ from typing import Literal, Optional
 
 from src.data.source_job_registry import JOB_REGISTRY, SourceJobSpec
 
-ExecutorClass = Literal["live_db", "backfill_db", "derived_db", "io", "heartbeat"]
+ExecutorClass = Literal[
+    "source_clock_db",
+    "live_db",
+    "backfill_db",
+    "derived_db",
+    "io",
+    "heartbeat",
+]
 
 
 def executor_class_for(spec: SourceJobSpec) -> ExecutorClass:
@@ -40,6 +48,8 @@ def executor_class_for(spec: SourceJobSpec) -> ExecutorClass:
         # file-only / non-DB jobs: heartbeat-class for diagnostics, io otherwise.
         return "heartbeat" if spec.role == "diagnostic" else "io"
     if spec.role == "live" or spec.role == "settlement":
+        if spec.job_id == "ingest_day0_metar_source_clock":
+            return "source_clock_db"
         # Settlement is live-critical EXCEPT historical UMA, which is a backfill concern.
         if spec.source_id == "polymarket_uma_oo_v2":
             return "backfill_db"
@@ -212,13 +222,16 @@ def expected_registry_job_ids(owner_daemon: str, forecast_live_owner_env: str) -
 
 
 def registry_executor_pools() -> dict[str, object]:
-    """The APScheduler executor pools for registry mode — one serial pool per lane (PR8 lane
-    separation). live_db is serial (preserve the single-writer invariant) but separated from
-    derived_db/backfill_db so an ETL/calibration job can never starve live ingest behind the lock.
+    """The APScheduler executor pools for registry mode.
+
+    Every DB lane is serial. The source-clock lane is separate so a long
+    observation/market ingest cannot queue time-sensitive publication work;
+    SQLite write exclusion remains enforced by the DB mutex at the job boundary.
     """
     from apscheduler.executors.pool import ThreadPoolExecutor
 
     return {
+        "source_clock_db": ThreadPoolExecutor(max_workers=1),
         "live_db": ThreadPoolExecutor(max_workers=1),
         "backfill_db": ThreadPoolExecutor(max_workers=1),
         "derived_db": ThreadPoolExecutor(max_workers=1),

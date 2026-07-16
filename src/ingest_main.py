@@ -7,8 +7,10 @@
 """Zeus data-ingest daemon entry point.
 
 Runs all K2 ingest jobs and supporting cycles on an independent APScheduler.
-Does NOT import from src.engine, src.execution, src.strategy, src.signal,
-src.control, or src.main — those are trading-lane only.
+Does NOT import from src.engine, src.execution, src.strategy, src.control, or
+src.main — those are trading-lane only. The Day0 source-clock job may emit the
+canonical source-derived opportunity event through src.events after the source
+fact is durable; it never evaluates, risks, or submits an order.
 
 Boot sequence:
 1. Proxy health check (strip dead proxy).
@@ -49,8 +51,11 @@ REPLACEMENT_AVAILABILITY_POLL_SECONDS_ENV = "ZEUS_REPLACEMENT_AVAILABILITY_POLL_
 REPLACEMENT_SOURCE_CLOCK_DOWNLOAD_BUDGET_SECONDS_ENV = "ZEUS_REPLACEMENT_SOURCE_CLOCK_DOWNLOAD_BUDGET_SECONDS"
 REPLACEMENT_CURRENT_TARGET_POLL_TIMEOUT_SECONDS_ENV = "ZEUS_REPLACEMENT_CURRENT_TARGET_POLL_TIMEOUT_SECONDS"
 REPLACEMENT_CURRENT_TARGET_TIMEOUT_COOLDOWN_SECONDS_ENV = "ZEUS_REPLACEMENT_CURRENT_TARGET_TIMEOUT_COOLDOWN_SECONDS"
+DAY0_METAR_POLL_SECONDS_ENV = "ZEUS_DAY0_METAR_POLL_SECONDS"
+DAY0_METAR_WRITE_BUDGET_MS_ENV = "ZEUS_DAY0_METAR_WRITE_BUDGET_MS"
 _ORACLE_BRIDGE_LOCK = threading.Lock()
 _ORACLE_SNAPSHOT_LOCK = threading.Lock()
+_DAY0_METAR_EMITTER: Any | None = None
 _replacement_current_target_timeout_suppressed_until = 0.0
 
 # SIGTERM-unif (WAVE-4): captured at module load so the forensic elapsed
@@ -72,6 +77,48 @@ def _ingest_main_owns_opendata() -> bool:
     from src.data.source_job_registry import active_opendata_owner
 
     return active_opendata_owner(_forecast_live_owner()) == "ingest_main"
+
+
+def _day0_metar_poll_seconds() -> float:
+    raw = os.environ.get(DAY0_METAR_POLL_SECONDS_ENV, "").strip()
+    if not raw:
+        return 5.0
+    try:
+        return max(1.0, float(raw))
+    except ValueError:
+        logger.warning(
+            "invalid %s=%r; using 5s Day0 METAR source-clock cadence",
+            DAY0_METAR_POLL_SECONDS_ENV,
+            raw,
+        )
+        return 5.0
+
+
+def _day0_metar_write_budget_seconds() -> float:
+    raw = os.environ.get(DAY0_METAR_WRITE_BUDGET_MS_ENV, "").strip()
+    if not raw:
+        return 0.2
+    try:
+        milliseconds = float(raw)
+    except ValueError:
+        logger.warning(
+            "invalid %s=%r; using 200ms Day0 METAR write budget",
+            DAY0_METAR_WRITE_BUDGET_MS_ENV,
+            raw,
+        )
+        return 0.2
+    return max(0.001, min(milliseconds / 1000.0, 1.0))
+
+
+def _day0_metar_emitter():
+    global _DAY0_METAR_EMITTER
+    if _DAY0_METAR_EMITTER is None:
+        from src.data.day0_fast_obs import Day0FastObsEmitter
+
+        _DAY0_METAR_EMITTER = Day0FastObsEmitter(
+            min_fetch_interval_s=_day0_metar_poll_seconds()
+        )
+    return _DAY0_METAR_EMITTER
 
 
 def _replacement_availability_poll_seconds() -> int:
@@ -757,6 +804,116 @@ def _k2_obs_fast_tick():
             len(city_filter), written, failed or "none", reasons or "none",
         )
         _raise_if_all_obs_tick_attempts_failed("ingest_k2_obs_fast_tick", results)
+
+
+@_scheduler_job("ingest_day0_metar_source_clock")
+def _day0_metar_source_clock_tick():
+    """Capture newly published AWC METAR reports and emit moved Day0 extremes.
+
+    The HTTP batch runs before any DB lock. Unchanged 36-hour payloads perform
+    no SQLite work. A new publication gets one short live-writer attempt; lock
+    contention is bounded and retried on the next source-clock tick because the
+    emitter does not acknowledge its publication identity until the ledger
+    write succeeds.
+    """
+    import sqlite3
+
+    from src.config import runtime_cities, settings
+    from src.events.event_priority import day0_is_tradeable_for_scope
+    from src.runtime.reactor_wake import publish_reactor_wake
+    from src.state.db import get_world_connection, world_write_mutex
+
+    edli_cfg = settings.get("edli", {}) if hasattr(settings, "get") else {}
+    if not (
+        edli_cfg.get("enabled")
+        and edli_cfg.get("event_writer_enabled")
+        and edli_cfg.get("day0_extreme_trigger_enabled")
+        and edli_cfg.get("day0_fast_obs_lane_enabled", True)
+    ):
+        return {"status": "DISABLED"}
+
+    decision_time = datetime.now(timezone.utc)
+    emitter = _day0_metar_emitter()
+    prefetch = emitter.prefetch(
+        cities=runtime_cities(),
+        decision_time=decision_time,
+        anomaly_check=None,
+    )
+    pending_reports = tuple(prefetch.ledger_reports or ())
+    if not pending_reports:
+        return {
+            "status": "SOURCE_CURRENT",
+            "freshness_status": prefetch.freshness_status,
+            "reports": len(prefetch.reports),
+        }
+
+    conn = get_world_connection(write_class="live")
+    write_budget_s = _day0_metar_write_budget_seconds()
+    conn.execute(f"PRAGMA busy_timeout = {max(1, int(write_budget_s * 1000.0))}")
+    mutex = world_write_mutex()
+    acquired = mutex.acquire(timeout=write_budget_s)
+    if not acquired:
+        conn.close()
+        logger.info(
+            "DAY0_METAR_SOURCE_CLOCK_DEFERRED reason=world_writer_busy "
+            "pending_reports=%d budget_ms=%d",
+            len(pending_reports),
+            int(write_budget_s * 1000.0),
+        )
+        return {
+            "status": "WRITE_CONTENDED",
+            "pending_reports": len(pending_reports),
+        }
+
+    emitted = 0
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        emitted = emitter.emit_prefetched(
+            world_conn=conn,
+            prefetch=prefetch,
+            received_at=decision_time.isoformat(),
+            limit=max(50, len(prefetch.eligible) * 2),
+            day0_is_tradeable=day0_is_tradeable_for_scope(
+                str(edli_cfg.get("edli_live_scope") or "forecast_plus_day0")
+            ),
+        )
+        conn.commit()
+    except sqlite3.OperationalError as exc:
+        conn.rollback()
+        if "locked" in str(exc).lower() or "busy" in str(exc).lower():
+            logger.info(
+                "DAY0_METAR_SOURCE_CLOCK_DEFERRED reason=sqlite_busy "
+                "pending_reports=%d exc=%r",
+                len(pending_reports),
+                exc,
+            )
+            return {
+                "status": "WRITE_CONTENDED",
+                "pending_reports": len(pending_reports),
+            }
+        raise
+    except BaseException:
+        conn.rollback()
+        raise
+    finally:
+        mutex.release()
+        conn.close()
+
+    if emitted:
+        publish_reactor_wake(
+            source="day0_metar_source_clock",
+            reason="day0_extreme_event_committed",
+        )
+    logger.info(
+        "DAY0_METAR_SOURCE_CLOCK_COMMITTED pending_reports=%d emitted=%d",
+        len(pending_reports),
+        emitted,
+    )
+    return {
+        "status": "COMMITTED",
+        "pending_reports": len(pending_reports),
+        "events_emitted": emitted,
+    }
 
 
 def _raise_if_all_obs_tick_attempts_failed(job_id: str, results: list[object]) -> None:
@@ -2087,6 +2244,7 @@ def _ingest_main_job_specs() -> list[tuple]:
 
     now = _dt_now.now()
     replacement_availability_poll_seconds = _replacement_availability_poll_seconds()
+    day0_metar_poll_seconds = _day0_metar_poll_seconds()
     specs: list[tuple] = [
         (_k2_daily_obs_tick, "cron", dict(minute=0, id="ingest_k2_daily_obs",
             max_instances=1, coalesce=True, misfire_grace_time=1800)),
@@ -2105,6 +2263,10 @@ def _ingest_main_job_specs() -> list[tuple]:
         # needed (primary daemon_writer remains ingest_k2_obs_tick).
         (_k2_obs_fast_tick, "interval", dict(minutes=15, id="ingest_k2_obs_fast_tick",
             max_instances=1, coalesce=True, misfire_grace_time=300)),
+        (_day0_metar_source_clock_tick, "interval", dict(seconds=day0_metar_poll_seconds,
+            id="ingest_day0_metar_source_clock", max_instances=1, coalesce=True,
+            misfire_grace_time=max(5, int(day0_metar_poll_seconds * 2)),
+            next_run_time=now)),
         (_k2_hko_tick, "cron", dict(minute=30, id="ingest_k2_hko_tick",
             max_instances=1, coalesce=True, misfire_grace_time=3600)),
         (_etl_recalibrate, "cron", dict(hour=6, minute=0, id="ingest_etl_recalibrate")),

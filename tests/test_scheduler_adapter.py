@@ -400,7 +400,14 @@ def test_build_registry_scheduler_builds_exact_set_and_routes_executors() -> Non
     # each job routed to its REGISTRY executor class (lane), and all are valid lanes:
     for j in sched.jobs:
         assert j["executor"] == executor_class_for(JOB_REGISTRY[j["id"]])
-        assert j["executor"] in ("live_db", "backfill_db", "derived_db", "io", "heartbeat")
+        assert j["executor"] in (
+            "source_clock_db",
+            "live_db",
+            "backfill_db",
+            "derived_db",
+            "io",
+            "heartbeat",
+        )
         assert j["max_instances"] == 1 and j["coalesce"] is True   # anti-overlap preserved
 
 
@@ -431,6 +438,7 @@ def test_ingest_main_registry_scheduler_replaces_manual_add_job_when_enabled() -
     for j in sched.jobs:
         assert j["executor"] == executor_class_for(JOB_REGISTRY[j["id"]])
     by_id = {j["id"]: j for j in sched.jobs}
+    assert by_id["ingest_day0_metar_source_clock"]["executor"] == "source_clock_db"
     assert by_id["ingest_uma_resolution_listener"]["executor"] == "backfill_db"   # PR8 fix landed
     assert by_id["ingest_heartbeat"]["executor"] == "heartbeat"                   # file-only lane
 

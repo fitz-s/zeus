@@ -131,6 +131,13 @@ _INGEST_MAIN: tuple[SourceJobSpec, ...] = (
                         "advisory lock 'obs_fast' (separate from 'obs'); registration was "
                         "missed at deploy -> registry guard crash-looped data-ingest until "
                         "this entry (boot RuntimeError job-set mismatch)"),
+    SourceJobSpec("ingest_day0_metar_source_clock", "ingest_main", "live", "default", True,
+                  source_id="aviationweather_metar",
+                  callable_ref="_day0_metar_source_clock_tick", family="observation",
+                  misfire_grace_time=10,
+                  notes="5s default source-clock batch poll; HTTP precedes the bounded live "
+                        "world-writer attempt, unchanged publication identities perform no DB "
+                        "work, and committed Day0 extreme events wake the canonical reactor"),
     SourceJobSpec("ingest_etl_recalibrate", "ingest_main", "derived", "default", True,
                   callable_ref="_etl_recalibrate"),
     SourceJobSpec("ingest_harvester_truth_writer", "ingest_main", "settlement", "default", True,

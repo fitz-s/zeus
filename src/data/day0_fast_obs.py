@@ -705,12 +705,38 @@ class FastObsPrefetch:
     cache_age_s: Optional[float]
     decision_time: datetime
     anomaly_actions: tuple = ()
+    # Reports whose publication identities have not yet been confirmed through
+    # this emitter's ledger write. ``None`` preserves compatibility for callers
+    # that construct FastObsPrefetch directly; those callers request the legacy
+    # full-report append behavior. Production prefetches always set a tuple.
+    ledger_reports: tuple | None = None
+
+
+def _report_publication_key(report: MetarReport) -> tuple[str, str, float] | None:
+    if report.temp_c is None:
+        return None
+    publish_ts = report.receipt_time or report.obs_time
+    return (
+        str(report.station_id).strip().upper(),
+        publish_ts.astimezone(UTC).isoformat(),
+        float(report.temp_c),
+    )
 
 
 def _append_metar_prints_to_ledger(
     world_conn: Any, eligible: tuple, reports: list[MetarReport]
-) -> None:
-    """Append every fetched METAR report for a fast-eligible station to the
+) -> bool:
+    """Append the supplied METAR publication delta for fast-eligible stations.
+
+    Returns True when the whole delta reached SQLite (including duplicate-only
+    INSERT OR IGNORE passes), False when the write failed and must be retried.
+
+    The caller keeps the complete report window for running-extreme reduction,
+    but passes only publication identities not yet confirmed through this
+    emitter. This prevents a source-clock poll from re-playing the same 36-hour
+    payload into SQLite every few seconds.
+
+    Append the reports to the
     observation_prints publication-stream ledger (day0 defect-ledger,
     2026-07-16).
 
@@ -735,7 +761,7 @@ def _append_metar_prints_to_ledger(
     raw_report text) — one rule, one place to keep in sync.
     """
     if not eligible or not reports:
-        return
+        return True
     try:
         from src.state.schema.observation_prints_schema import append_print
 
@@ -744,6 +770,7 @@ def _append_metar_prints_to_ledger(
             by_station.setdefault(str(report.station_id).strip().upper(), []).append(report)
 
         appended = 0
+        fetched_at = datetime.now(UTC).isoformat()
         seen_city_stations: set[tuple[str, str]] = set()
         for city, source, _target_date in eligible:
             station = str(source.station_id).strip().upper()
@@ -768,17 +795,19 @@ def _append_metar_prints_to_ledger(
                     publish_ts_utc=publish_ts.isoformat(),
                     value_native=float(report.temp_c),
                     unit="C",
-                    fetched_at_utc=datetime.now(UTC).isoformat(),
+                    fetched_at_utc=fetched_at,
                     raw_report=report.raw,
                 ):
                     appended += 1
         if appended:
             logger.debug("OBSERVATION_PRINTS_APPENDED source=%s count=%d", FAST_OBS_SOURCE_ID, appended)
+        return True
     except Exception as exc:  # noqa: BLE001 — ledger append is best-effort, never blocks emission
         logger.warning(
             "OBSERVATION_PRINTS_APPEND_FAILED source=%s exc=%s: %s",
             FAST_OBS_SOURCE_ID, type(exc).__name__, exc,
         )
+        return False
 
 
 @dataclass
@@ -816,6 +845,7 @@ class Day0FastObsEmitter:
     # exit lane's state). Two memos, two consumers, two update rules.
     _last_kill_memo_rounded: dict[tuple[str, str, str], int] = field(default_factory=dict, init=False)
     _last_live_emitted_rounded: dict[tuple[str, str, str], int] = field(default_factory=dict, init=False)
+    _ledgered_report_keys: set[tuple[str, str, float]] = field(default_factory=set, init=False)
     _lock: threading.Lock = field(default_factory=threading.Lock, init=False)
 
     def hydrate_from_ledger(self, world_conn: Any, eligible: tuple) -> int:
@@ -909,6 +939,11 @@ class Day0FastObsEmitter:
                     return 0  # a concurrent fetch beat us to it
                 self._cached_reports = reports
                 self._cache_fetched_monotonic = time.monotonic()
+                self._ledgered_report_keys.update(
+                    key
+                    for report in reports
+                    if (key := _report_publication_key(report)) is not None
+                )
             logger.info(
                 "DAY0_FAST_OBS_LEDGER_HYDRATED count=%d cities=%d",
                 len(reports), len(seen_city_stations),
@@ -1153,6 +1188,15 @@ class Day0FastObsEmitter:
         reports, status, cache_age = self._reports_with_status(
             [source.station_id for _, source, _ in eligible]
         )
+        with self._lock:
+            ledger_reports = tuple(
+                report
+                for report in reports
+                if (
+                    (key := _report_publication_key(report)) is not None
+                    and key not in self._ledgered_report_keys
+                )
+            )
         # ANOMALY-CHECK FRESHNESS GATE (PR#404 round-2 P0-2A): the WU-vs-METAR
         # cross-check must never CONCLUDE from a stale METAR cache — a METAR
         # outage plus a fresh WU update would read as divergence and falsely
@@ -1239,8 +1283,17 @@ class Day0FastObsEmitter:
                 cache_age,
                 decision_time,
                 tuple(anomaly_actions),
+                ledger_reports,
             )
-        return FastObsPrefetch(tuple(eligible), tuple(reports), status, cache_age, decision_time)
+        return FastObsPrefetch(
+            tuple(eligible),
+            tuple(reports),
+            status,
+            cache_age,
+            decision_time,
+            (),
+            ledger_reports,
+        )
 
     def emit_prefetched(
         self,
@@ -1293,7 +1346,22 @@ class Day0FastObsEmitter:
         # fetch (that happened in prefetch(), outside the mutex). Fail-soft:
         # a ledger append failure must never block the existing emission
         # pipeline (see _append_metar_prints_to_ledger docstring).
-        _append_metar_prints_to_ledger(world_conn, prefetch.eligible, reports)
+        ledger_reports = (
+            reports
+            if prefetch.ledger_reports is None
+            else list(prefetch.ledger_reports)
+        )
+        if _append_metar_prints_to_ledger(
+            world_conn,
+            prefetch.eligible,
+            ledger_reports,
+        ):
+            with self._lock:
+                self._ledgered_report_keys.update(
+                    key
+                    for report in ledger_reports
+                    if (key := _report_publication_key(report)) is not None
+                )
         trigger = Day0ExtremeUpdatedTrigger(
             EventWriter(world_conn),
             day0_is_tradeable=day0_is_tradeable,

@@ -762,6 +762,79 @@ class TestMetarMarginAbsorption:
 # depth — these tests are scoped to the in-process cache path only.
 # ===========================================================================
 
+class TestLedgerPublicationDelta:
+    def test_only_unconfirmed_publications_are_sent_to_sqlite(self):
+        conn = _world_conn()
+        t0 = datetime(2026, 6, 9, 16, 0, tzinfo=UTC)
+        first = _report("RJTT", t0, 21.0, t_group=False)
+        second = _report(
+            "RJTT",
+            t0 + timedelta(minutes=30),
+            22.0,
+            t_group=False,
+        )
+        source_reports = [first]
+        emitter = Day0FastObsEmitter(
+            fetcher=lambda _stations, **_kw: list(source_reports),
+            min_fetch_interval_s=0.0,
+        )
+
+        pf1 = emitter.prefetch(
+            cities=[_tokyo()],
+            decision_time=t0 + timedelta(minutes=5),
+        )
+        assert pf1.ledger_reports == (first,)
+        assert emitter.emit_prefetched(
+            world_conn=conn,
+            prefetch=pf1,
+            received_at=(t0 + timedelta(minutes=5)).isoformat(),
+        ) == 2
+
+        pf2 = emitter.prefetch(
+            cities=[_tokyo()],
+            decision_time=t0 + timedelta(minutes=6),
+        )
+        assert pf2.ledger_reports == ()
+
+        source_reports.append(second)
+        pf3 = emitter.prefetch(
+            cities=[_tokyo()],
+            decision_time=t0 + timedelta(minutes=36),
+        )
+        assert pf3.ledger_reports == (second,)
+
+    def test_failed_ledger_append_does_not_acknowledge_publication(self, monkeypatch):
+        conn = _world_conn()
+        t0 = datetime(2026, 6, 9, 16, 0, tzinfo=UTC)
+        report = _report("RJTT", t0, 21.0, t_group=False)
+        emitter = Day0FastObsEmitter(
+            fetcher=lambda _stations, **_kw: [report],
+            min_fetch_interval_s=0.0,
+        )
+        monkeypatch.setattr(
+            "src.state.schema.observation_prints_schema.append_print",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                sqlite3.OperationalError("busy")
+            ),
+        )
+
+        pf1 = emitter.prefetch(
+            cities=[_tokyo()],
+            decision_time=t0 + timedelta(minutes=5),
+        )
+        emitter.emit_prefetched(
+            world_conn=conn,
+            prefetch=pf1,
+            received_at=(t0 + timedelta(minutes=5)).isoformat(),
+        )
+        pf2 = emitter.prefetch(
+            cities=[_tokyo()],
+            decision_time=t0 + timedelta(minutes=6),
+        )
+
+        assert pf2.ledger_reports == (report,)
+
+
 class TestLedgerHydration:
     def test_cold_start_hydrates_cache_and_returns_todays_ledger_max(self):
         from src.data.day0_fast_obs import fast_obs_source_for_city

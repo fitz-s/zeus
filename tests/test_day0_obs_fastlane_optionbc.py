@@ -640,6 +640,161 @@ class TestObsFastTickSchedulerRegistration:
             "_k2_obs_fast_tick function not found in ingest_main"
         )
 
+    def test_day0_metar_source_clock_uses_five_second_default(self, monkeypatch):
+        import src.ingest_main as im
+
+        monkeypatch.delenv(im.DAY0_METAR_POLL_SECONDS_ENV, raising=False)
+        specs = im._ingest_main_job_specs()
+        _fn, trigger, kwargs = next(
+            spec
+            for spec in specs
+            if spec[2].get("id") == "ingest_day0_metar_source_clock"
+        )
+
+        assert trigger == "interval"
+        assert kwargs["seconds"] == 5.0
+        assert kwargs["max_instances"] == 1
+        assert kwargs["coalesce"] is True
+        assert kwargs["next_run_time"] is not None
+
+        monkeypatch.setenv(im.DAY0_METAR_POLL_SECONDS_ENV, "0.1")
+        specs = im._ingest_main_job_specs()
+        kwargs = next(
+            spec[2]
+            for spec in specs
+            if spec[2].get("id") == "ingest_day0_metar_source_clock"
+        )
+        assert kwargs["seconds"] == 1.0
+
+
+class TestDay0MetarSourceClockTick:
+    @staticmethod
+    def _enable(monkeypatch):
+        monkeypatch.setattr(
+            "src.config.settings",
+            {
+                "edli": {
+                    "enabled": True,
+                    "event_writer_enabled": True,
+                    "day0_extreme_trigger_enabled": True,
+                    "day0_fast_obs_lane_enabled": True,
+                    "edli_live_scope": "forecast_plus_day0",
+                }
+            },
+        )
+        monkeypatch.setattr("src.config.runtime_cities", lambda: [_wu_icao_city()])
+
+    def test_source_current_does_not_open_world_db(self, monkeypatch):
+        import src.ingest_main as im
+
+        self._enable(monkeypatch)
+        prefetch = SimpleNamespace(
+            ledger_reports=(),
+            freshness_status="fresh_fetch",
+            reports=(object(),),
+        )
+        emitter = SimpleNamespace(prefetch=lambda **_kw: prefetch)
+        monkeypatch.setattr(im, "_day0_metar_emitter", lambda: emitter)
+        monkeypatch.setattr(
+            "src.state.db.get_world_connection",
+            lambda **_kw: (_ for _ in ()).throw(
+                AssertionError("DB opened for unchanged payload")
+            ),
+        )
+
+        result = im._day0_metar_source_clock_tick.__wrapped__()
+
+        assert result["status"] == "SOURCE_CURRENT"
+
+    def test_commits_before_publishing_reactor_wake(self, monkeypatch):
+        import src.ingest_main as im
+
+        self._enable(monkeypatch)
+        order: list[str] = []
+        prefetch = SimpleNamespace(
+            ledger_reports=(object(),),
+            freshness_status="fresh_fetch",
+            reports=(object(),),
+            eligible=((_wu_icao_city(), object(), "2026-06-12"),),
+        )
+
+        class _Emitter:
+            def prefetch(self, **_kw):
+                return prefetch
+
+            def emit_prefetched(self, **_kw):
+                order.append("emit")
+                return 2
+
+        class _Conn:
+            def execute(self, sql):
+                if sql == "BEGIN IMMEDIATE":
+                    order.append("begin")
+                return self
+
+            def commit(self):
+                order.append("commit")
+
+            def rollback(self):
+                order.append("rollback")
+
+            def close(self):
+                order.append("close")
+
+        class _Mutex:
+            def acquire(self, *, timeout):
+                order.append(f"acquire:{timeout}")
+                return True
+
+            def release(self):
+                order.append("release")
+
+        monkeypatch.setattr(im, "_day0_metar_emitter", lambda: _Emitter())
+        monkeypatch.setattr("src.state.db.get_world_connection", lambda **_kw: _Conn())
+        monkeypatch.setattr("src.state.db.world_write_mutex", lambda: _Mutex())
+        monkeypatch.setattr(
+            "src.runtime.reactor_wake.publish_reactor_wake",
+            lambda **_kw: order.append("wake"),
+        )
+
+        result = im._day0_metar_source_clock_tick.__wrapped__()
+
+        assert result == {
+            "status": "COMMITTED",
+            "pending_reports": 1,
+            "events_emitted": 2,
+        }
+        assert order.index("commit") < order.index("wake")
+
+    def test_writer_contention_defers_without_emitting(self, monkeypatch):
+        import src.ingest_main as im
+
+        self._enable(monkeypatch)
+        prefetch = SimpleNamespace(
+            ledger_reports=(object(),),
+            freshness_status="fresh_fetch",
+            reports=(object(),),
+            eligible=((_wu_icao_city(), object(), "2026-06-12"),),
+        )
+        emitter = SimpleNamespace(
+            prefetch=lambda **_kw: prefetch,
+            emit_prefetched=lambda **_kw: (_ for _ in ()).throw(
+                AssertionError("emit called while writer lock was contended")
+            ),
+        )
+        conn = MagicMock()
+        mutex = MagicMock()
+        mutex.acquire.return_value = False
+        monkeypatch.setattr(im, "_day0_metar_emitter", lambda: emitter)
+        monkeypatch.setattr("src.state.db.get_world_connection", lambda **_kw: conn)
+        monkeypatch.setattr("src.state.db.world_write_mutex", lambda: mutex)
+
+        result = im._day0_metar_source_clock_tick.__wrapped__()
+
+        assert result == {"status": "WRITE_CONTENDED", "pending_reports": 1}
+        conn.close.assert_called_once_with()
+        mutex.release.assert_not_called()
+
 
 # ---------------------------------------------------------------------------
 # Prefix fusion: WU coverage-prover + METAR fresh tail (Denver 2026-06-12)
