@@ -822,6 +822,23 @@ class TestRestingOrderCancel:
         assert n == 1
         assert clob.cancelled == ["o1"]
 
+    def test_cancel_scope_ignores_unrelated_day0_family(self, monkeypatch):
+        _set_metar_memo(monkeypatch, 26)
+        clob = _FakeClob([
+            {"orderID": "o1", "asset_id": "tok-dead-yes", "side": "BUY"},
+        ])
+
+        n = cancel_day0_dead_bin_resting_entries(
+            clob=clob,
+            conn=_orders_conn(),
+            cities_by_name={"Tokyo": _tokyo()},
+            now=self.NOW_TOKYO_DAY,
+            target_families={("Paris", "2026-06-10", "high")},
+        )
+
+        assert n == 0
+        assert clob.cancelled == []
+
     def test_anomaly_paused_family_cancels_all_its_day0_entries(self, monkeypatch):
         _set_metar_memo(monkeypatch, None)
         flag_day0_oracle_anomaly("Tokyo", "2026-06-10", detail="paris-class")

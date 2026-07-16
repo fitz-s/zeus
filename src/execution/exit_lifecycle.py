@@ -22,8 +22,8 @@ import re
 import sqlite3
 import threading
 import time as _time_module
-from collections.abc import Mapping
-from dataclasses import dataclass
+from collections.abc import Collection, Mapping
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from inspect import Parameter, signature
@@ -63,6 +63,40 @@ _PENDING_EXIT_SCAN_INACTIVE_STATES = frozenset(
         "economically_closed",
     }
 )
+
+
+def _exit_family_key(
+    city: object,
+    target_date: object,
+    metric: object,
+) -> tuple[str, str, str]:
+    return (
+        str(city or "").strip().casefold(),
+        str(target_date or "").strip()[:10],
+        str(metric or "").strip().lower(),
+    )
+
+
+def _portfolio_for_target_families(
+    portfolio: PortfolioState,
+    target_families: Collection[tuple[str, str, str]] | None,
+) -> PortfolioState:
+    if target_families is None:
+        return portfolio
+    family_keys = {_exit_family_key(*family) for family in target_families}
+    return replace(
+        portfolio,
+        positions=[
+            position
+            for position in portfolio.positions
+            if _exit_family_key(
+                position.city,
+                position.target_date,
+                position.temperature_metric,
+            )
+            in family_keys
+        ],
+    )
 
 
 def _runtime_state_value(position: Position) -> str:
@@ -6597,6 +6631,7 @@ def run_exit_monitor_cycle(
     held_position_monitor_active: threading.Event,
     mark_held_position_monitor_complete: Callable[[], None],
     monitor_claimed: bool = False,
+    target_families: Collection[tuple[str, str, str]] | None = None,
 ) -> None:
     """Scheduler entrypoint (R4-b extraction from src/main.py::_exit_monitor_cycle).
 
@@ -6614,6 +6649,8 @@ def run_exit_monitor_cycle(
     consumes them for its own run/complete signalling. ``monitor_claimed`` means
     the dispatcher already set the Event while waiting for an active reactor to
     finish; direct callers retain the original local claim behavior.
+    ``target_families`` limits event-triggered runs to the families changed by
+    the committed observation while periodic runs retain the full portfolio.
 
     Called from the main daemon's ``exit_monitor`` scheduler job (2-minute
     cadence). Behavior-preserving relocation — was inline in src/main.py.
@@ -6670,6 +6707,13 @@ def run_exit_monitor_cycle(
                     observed_at=datetime.now(timezone.utc),
                 )
             )
+        monitor_portfolio = _portfolio_for_target_families(portfolio, target_families)
+        if target_families is not None:
+            summary["targeted_exit_monitor"] = True
+            summary["target_family_count"] = len(
+                {_exit_family_key(*family) for family in target_families}
+            )
+            summary["target_position_count"] = len(monitor_portfolio.positions)
         with PolymarketClient() as clob:
             tracker = get_tracker()
             artifact = CycleArtifact(
@@ -6683,7 +6727,7 @@ def run_exit_monitor_cycle(
                 portfolio_dirty, tracker_dirty = _execute_monitoring_phase(
                     conn,
                     clob,
-                    portfolio,
+                    monitor_portfolio,
                     artifact,
                     tracker,
                     summary,
@@ -6718,6 +6762,7 @@ def run_exit_monitor_cycle(
                         clob=clob,
                         conn=conn,
                         cities_by_name=runtime_cities_by_name(),
+                        target_families=target_families,
                     )
                     if cancelled:
                         summary["day0_dead_bin_orders_cancelled"] = cancelled

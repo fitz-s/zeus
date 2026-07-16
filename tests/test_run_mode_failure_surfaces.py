@@ -5738,6 +5738,38 @@ def test_exit_monitor_claims_priority_and_waits_for_reactor_handoff(monkeypatch)
     assert not main_module._held_position_monitor_active.is_set()
 
 
+def test_targeted_exit_monitor_filters_positions_without_mutating_full_portfolio() -> None:
+    from types import SimpleNamespace
+
+    from src.execution.exit_lifecycle import _portfolio_for_target_families
+    from src.state.portfolio import PortfolioState
+
+    paris = SimpleNamespace(
+        city="Paris",
+        target_date="2026-07-16",
+        temperature_metric="high",
+    )
+    shanghai = SimpleNamespace(
+        city="Shanghai",
+        target_date="2026-07-17",
+        temperature_metric="low",
+    )
+    portfolio = PortfolioState(positions=[paris, shanghai], bankroll=125.0)
+
+    targeted = _portfolio_for_target_families(
+        portfolio,
+        {("paris", "2026-07-16", "HIGH")},
+    )
+
+    assert targeted is not portfolio
+    assert targeted.positions == [paris]
+    assert targeted.bankroll == 125.0
+    assert targeted.positions[0] is paris
+    assert targeted.recent_exits is portfolio.recent_exits
+    assert portfolio.positions == [paris, shanghai]
+    assert _portfolio_for_target_families(portfolio, None) is portfolio
+
+
 def test_exit_monitor_handoff_timeout_releases_priority_claim(monkeypatch) -> None:
     import src.execution.exit_lifecycle as exit_module
     import src.main as main_module

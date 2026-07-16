@@ -51,6 +51,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
+from collections.abc import Collection
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from typing import Any, Optional
@@ -878,6 +879,7 @@ def cancel_day0_dead_bin_resting_entries(
     cities_by_name: dict[str, Any],
     now: Optional[datetime] = None,
     limit: int = 25,
+    target_families: Collection[tuple[str, str, str]] | None = None,
 ) -> int:
     """Cancel our OPEN resting entry orders whose day0 bin is hard-fact dead
     (for the order's side) or whose family is anomaly-paused.
@@ -898,6 +900,18 @@ def cancel_day0_dead_bin_resting_entries(
     from src.data.day0_oracle_anomaly import is_day0_family_paused
     from zoneinfo import ZoneInfo
 
+    target_family_keys = (
+        {
+            (
+                str(city or "").strip().casefold(),
+                str(target_date or "").strip()[:10],
+                str(metric or "").strip().lower(),
+            )
+            for city, target_date, metric in target_families
+        }
+        if target_families is not None
+        else None
+    )
     cancelled = 0
     for order in open_orders:
         if cancelled >= max(1, int(limit)):
@@ -919,6 +933,12 @@ def cancel_day0_dead_bin_resting_entries(
             range_high = identity["range_high"]
             metric = identity["metric"]
             direction = identity["direction"]
+            if target_family_keys is not None and (
+                str(city_name or "").strip().casefold(),
+                str(target_date or "").strip()[:10],
+                str(metric or "").strip().lower(),
+            ) not in target_family_keys:
+                continue
             city = cities_by_name.get(city_name)
             if city is None:
                 continue
