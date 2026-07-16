@@ -168,6 +168,34 @@ def test_committed_wake_target_precedes_normal_queue_fairness():
     ]
 
 
+def test_committed_wake_targeted_only_does_not_fill_from_queue_debt():
+    conn = _world_conn()
+    store = EventStore(conn)
+    ordinary = _event(
+        "2026-06-07",
+        "snap-ordinary-only",
+        available_at="2026-06-05T11:00:00+00:00",
+        received_at="2026-06-05T11:01:00+00:00",
+    )
+    committed = _event(
+        "2026-06-06",
+        "snap-committed-only",
+        available_at="2026-06-05T10:00:00+00:00",
+        received_at="2026-06-05T10:01:00+00:00",
+    )
+    store.insert_or_ignore(ordinary)
+    store.insert_or_ignore(committed)
+
+    returned = store.fetch_pending(
+        decision_time=_DECISION_TIME,
+        limit=100,
+        targeted_event_ids=frozenset({committed.event_id}),
+        targeted_only=True,
+    )
+
+    assert [event.event_id for event in returned] == [committed.event_id]
+
+
 def test_committed_wake_target_bypasses_bounded_oldest_scan():
     conn = _world_conn()
     store = EventStore(conn)

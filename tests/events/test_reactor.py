@@ -467,6 +467,26 @@ def test_global_batch_claims_epoch_then_calls_one_lock_free_batch_seam():
     } == {"SUBMIT_ABORTED_PRICE_MOVED:GLOBAL_TEST_NO_CURRENT_WINNER"}
 
 
+def test_global_batch_targeted_wake_claims_only_committed_event():
+    conn, store = _store()
+    ordinary = _forecast_event("global-ordinary", target_date="2026-05-25")
+    committed = _forecast_event("global-committed", target_date="2026-05-25")
+    store.insert_or_ignore(ordinary)
+    store.insert_or_ignore(committed)
+    observations = {}
+    reactor = _global_batch_probe_reactor(store, observations)
+
+    reactor.process_pending(
+        decision_time=_DT_VENUE_OPEN,
+        limit=12,
+        targeted_event_ids=frozenset({committed.event_id}),
+        targeted_only=True,
+    )
+
+    assert observations["batch_event_ids"] == (committed.event_id,)
+    assert _processing_status(conn, ordinary.event_id) == "pending"
+
+
 @pytest.mark.parametrize("winner_finalized", (True, False))
 def test_global_batch_prioritizes_venue_side_effect_and_stops_repeated_waits(
     monkeypatch, winner_finalized

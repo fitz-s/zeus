@@ -247,7 +247,10 @@ def test_edli_reactor_job_wired_behind_live_execution_mode_gate():
     assert 'edli_cfg.get("no_submit_proof_limit"' not in reactor_source
     assert "forecast_snapshot_emit_limit" in reactor_source
     assert "process_pending_decision_time = datetime.now(timezone.utc)" in reactor_source
-    assert "reactor.process_pending(decision_time=process_pending_decision_time, limit=proof_limit)" in reactor_source
+    assert "reactor.process_pending(" in reactor_source
+    assert "decision_time=process_pending_decision_time" in reactor_source
+    assert "targeted_event_ids=frozenset(targeted_event_ids)" in reactor_source
+    assert "targeted_only=producer_fast_path and bool(targeted_event_ids)" in reactor_source
     assert "reactor.process_pending(decision_time=now, limit=proof_limit)" not in reactor_source
     assert "decision_time=process_pending_decision_time" in reactor_source
     assert "_edli_positive_int_or_unbounded" in reactor_source

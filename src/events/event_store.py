@@ -414,6 +414,7 @@ class EventStore:
         limit: int = 100,
         day0_is_tradeable: bool = True,
         targeted_event_ids: frozenset[str] = frozenset(),
+        targeted_only: bool = False,
     ) -> list[OpportunityEvent]:
         """Fetch pending events in deterministic replay/inference order.
 
@@ -442,6 +443,11 @@ class EventStore:
         are NOT phase-filtered here (market-channel/day0 events have their own
         scope); only events that expose a city+target_date are subject to the
         timeliness floor.
+
+        ``targeted_only`` is the producer-wake fast path. It admits only the
+        explicitly committed event IDs instead of filling the remaining page
+        with unrelated queue debt. The global auction may still select an
+        unpaged winner from its complete current universe.
         """
 
         self._require_world_event_tables()
@@ -487,7 +493,7 @@ class EventStore:
         # A later bounded-overfetch CTE still let SQLite choose an event-table-first
         # plan under redecision/day0 predicates. Keep SQL to active processing rows
         # only, then point-read events by event_id and do tier/city ranking in Python.
-        active_limit = max(limit * 512, limit + 20_000)
+        active_limit = 0 if targeted_only else max(limit * 512, limit + 20_000)
         active_rows: list[tuple[str, int, str, int]] = []
         clean_targeted_event_ids = tuple(
             dict.fromkeys(
@@ -496,6 +502,8 @@ class EventStore:
                 if (event_id := str(raw_event_id or "").strip())
             )
         )[:100]
+        if targeted_only and not clean_targeted_event_ids:
+            return []
         if clean_targeted_event_ids:
             placeholders = ",".join("?" for _ in clean_targeted_event_ids)
             active_rows.extend(
@@ -560,7 +568,7 @@ class EventStore:
                 (
                     self.consumer_name,
                     GLOBAL_WINNER_TARGETED_CLAIM,
-                    max(1, limit + 1),
+                    0 if targeted_only else max(1, limit + 1),
                 ),
             ).fetchall()
         )
@@ -587,7 +595,7 @@ class EventStore:
                  ORDER BY p.updated_at DESC
                  LIMIT ?
                 """,
-                (self.consumer_name, max(1, limit)),
+                (self.consumer_name, 0 if targeted_only else max(1, limit)),
             ).fetchall()
         )
         # Keep the immediate-ready and retry-floor-ready pending lanes as two

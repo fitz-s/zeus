@@ -1059,6 +1059,7 @@ class OpportunityEventReactor:
         decision_time: datetime,
         limit: int | None = 100,
         targeted_event_ids: frozenset[str] = frozenset(),
+        targeted_only: bool = False,
     ) -> ReactorResult:
         result = ReactorResult()
         # ALWAYS-DECIDABLE invariant (2026-06-12): families blocked on a refreshable substrate
@@ -1113,6 +1114,8 @@ class OpportunityEventReactor:
             }
             if targeted_event_ids:
                 fetch_kwargs["targeted_event_ids"] = targeted_event_ids
+            if targeted_only:
+                fetch_kwargs["targeted_only"] = True
             events = self._store.fetch_pending(**fetch_kwargs)
             if not events:
                 break
@@ -5795,6 +5798,7 @@ def run_edli_event_reactor_cycle(
             decision_time=process_pending_decision_time,
             limit=proof_limit,
             targeted_event_ids=frozenset(targeted_event_ids),
+            targeted_only=producer_fast_path and bool(targeted_event_ids),
         )
         _log_stage("process_pending")
         # Canonical event/finalization truth must commit before the derived status
