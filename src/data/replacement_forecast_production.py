@@ -1541,7 +1541,7 @@ def _current_forecast_posterior_families(
     *,
     limit: int = 100,
 ) -> tuple[tuple[str, str, str], ...]:
-    """Return the most recently computed current live posterior families."""
+    """Return current live families from the append tail, newest compute first."""
 
     raw_path = cfg.get("forecast_db")
     if not raw_path:
@@ -1554,39 +1554,47 @@ def _current_forecast_posterior_families(
         from src.state.db import _connect_read_only
 
         conn = _connect_read_only(path)
-        rows = conn.execute(
-            """
-            SELECT current.city,
-                   current.target_date,
-                   current.temperature_metric
-              FROM forecast_posteriors AS current
-              JOIN (
-                    SELECT city,
-                           target_date,
-                           temperature_metric,
-                           MAX(rowid) AS latest_rowid
-                      FROM forecast_posteriors
-                     WHERE runtime_layer = 'live'
-                       AND training_allowed = 0
-                     GROUP BY city, target_date, temperature_metric
-                   ) AS latest
-                ON current.rowid = latest.latest_rowid
-             ORDER BY current.computed_at DESC, current.rowid DESC
-             LIMIT ?
-            """,
-            (max(1, min(int(limit), 100)),),
-        ).fetchall()
-        return tuple(
-            family
-            for row in rows
-            if all(
-                family := (
-                    str(row[0] or "").strip(),
+        family_limit = max(1, min(int(limit), 100))
+        cursor: int | None = None
+        scanned = 0
+        latest: dict[tuple[str, str, str], tuple[str, int]] = {}
+        while len(latest) < family_limit and scanned < 5_000:
+            cursor_filter = " AND rowid < ?" if cursor is not None else ""
+            params: tuple[object, ...] = (cursor, 256) if cursor is not None else (256,)
+            rows = conn.execute(
+                f"""
+                SELECT rowid,
+                       city,
+                       target_date,
+                       temperature_metric,
+                       computed_at
+                  FROM forecast_posteriors NOT INDEXED
+                 WHERE runtime_layer = 'live'
+                   AND training_allowed = 0
+                   {cursor_filter}
+                 ORDER BY rowid DESC
+                 LIMIT ?
+                """,
+                params,
+            ).fetchall()
+            if not rows:
+                break
+            scanned += len(rows)
+            cursor = int(rows[-1][0])
+            for row in rows:
+                family = (
                     str(row[1] or "").strip(),
                     str(row[2] or "").strip(),
+                    str(row[3] or "").strip(),
                 )
-            )
+                if all(family) and family not in latest:
+                    latest[family] = (str(row[4] or ""), int(row[0]))
+        ordered = sorted(
+            latest,
+            key=lambda family: (latest[family][0], latest[family][1]),
+            reverse=True,
         )
+        return tuple(ordered[:family_limit])
     except (OSError, sqlite3.Error, TypeError, ValueError):
         return ()
     finally:
