@@ -3630,6 +3630,7 @@ def _edli_event_reactor_cycle(
     *,
     producer_wake_reason: str | None = None,
     producer_wake_event_ids: tuple[str, ...] = (),
+    producer_wake_families: tuple[tuple[str, str, str], ...] = (),
 ) -> bool:
     """Scheduler hook -- body owned by src.events.reactor (R4-b3 reactor+prune
     cluster extraction, 2026-07-08) as ``run_edli_event_reactor_cycle``. See
@@ -3649,6 +3650,7 @@ def _edli_event_reactor_cycle(
         active_lock=_edli_reactor_active_lock,
         producer_wake_reason=producer_wake_reason,
         producer_wake_event_ids=producer_wake_event_ids,
+        producer_wake_families=producer_wake_families,
     )
 
 
@@ -3684,6 +3686,7 @@ def _edli_reactor_wake_poll_once() -> bool:
     ran = _edli_event_reactor_cycle(
         producer_wake_reason=wake.reason,
         producer_wake_event_ids=wake.event_ids,
+        producer_wake_families=wake.forecast_families,
     )
     if ran is not True:
         return False
@@ -4720,6 +4723,7 @@ def _edli_build_forecast_snapshot_events(
     already_pending_keys: set[str] | None = None,
     suppress_recent_no_value_refutations: bool = False,
     budget_seconds: float | None = None,
+    restrict_to_families: set[tuple[str, str, str]] | None = None,
 ) -> list[Any]:
     """Build FSR events without mutating world DB.
 
@@ -4756,6 +4760,7 @@ def _edli_build_forecast_snapshot_events(
             source=source,
             already_pending_keys=already_pending_keys,
             suppress_recent_no_value_refutations=suppress_recent_no_value_refutations,
+            restrict_to_families=restrict_to_families,
         )
     except sqlite3.OperationalError as exc:
         if "interrupted" in str(exc).lower():

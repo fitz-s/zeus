@@ -5088,6 +5088,7 @@ def run_edli_event_reactor_cycle(
     active_lock,
     producer_wake_reason: str | None = None,
     producer_wake_event_ids: tuple[str, ...] = (),
+    producer_wake_families: tuple[tuple[str, str, str], ...] = (),
 ) -> bool:
     """EDLI event-reactor cycle body (R4-b3 extraction from src/main.py::
     _edli_event_reactor_cycle, 2026-07-08). main.py's scheduler hook is now a
@@ -5127,6 +5128,22 @@ def run_edli_event_reactor_cycle(
     committed_day0_wake = (
         producer_wake_reason == "day0_extreme_event_committed"
     )
+    forecast_wake_families: set[tuple[str, str, str]] = set()
+    for raw_family in producer_wake_families:
+        if len(raw_family) != 3:
+            continue
+        family = (
+            str(raw_family[0] or "").strip(),
+            str(raw_family[1] or "").strip(),
+            str(raw_family[2] or "").strip(),
+        )
+        if all(family):
+            forecast_wake_families.add(family)
+    targeted_forecast_wake = (
+        producer_wake_reason == "forecast_posterior_advanced"
+        and bool(forecast_wake_families)
+    )
+    producer_fast_path = committed_day0_wake or targeted_forecast_wake
     if not edli_cfg.get("enabled") or not edli_cfg.get("event_writer_enabled"):
         return False
     if _defer_for_held_position_monitor("edli_event_reactor"):
@@ -5229,6 +5246,7 @@ def run_edli_event_reactor_cycle(
             maximum=50,
         )
         store = EventStore(conn)
+        targeted_event_ids = set(producer_wake_event_ids)
         #
         # PR#404 P0-2 (operator merge blocker): the day0 fast lane's network IO
         # (aviationweather METAR fetch, WU anomaly cross-check, open-meteo
@@ -5240,7 +5258,7 @@ def run_edli_event_reactor_cycle(
         # writes happen inside the mutex.
         _day0_fast_prefetch = None
         if (
-            not committed_day0_wake
+            not producer_fast_path
             and edli_cfg.get("day0_extreme_trigger_enabled")
             and edli_cfg.get("day0_authority_catchup_scanner_enabled", False)
         ):
@@ -5248,7 +5266,7 @@ def run_edli_event_reactor_cycle(
         _log_stage("day0_prefetch")
         _day0_family_admission: _Day0LiveFamilyAdmission | None = None
         if (
-            not committed_day0_wake
+            not producer_fast_path
             and edli_cfg.get("day0_extreme_trigger_enabled")
             and edli_cfg.get("day0_authority_catchup_scanner_enabled", False)
         ):
@@ -5278,7 +5296,7 @@ def run_edli_event_reactor_cycle(
         _prune_lock_timeout_s = _edli_prune_lock_timeout_seconds(edli_cfg)
         _prune_acquired = (
             False
-            if committed_day0_wake
+            if producer_fast_path
             else _prune_mutex.acquire(timeout=_prune_lock_timeout_s)
         )
         if _prune_acquired:
@@ -5291,7 +5309,7 @@ def run_edli_event_reactor_cycle(
                 conn.commit()
             finally:
                 _prune_mutex.release()
-        elif not committed_day0_wake:
+        elif not producer_fast_path:
             _log.warning(
                 "EDLI reactor prune skipped: world write mutex unavailable after %.3fs; "
                 "deferring maintenance so the money-path reactor can drain events.",
@@ -5299,8 +5317,8 @@ def run_edli_event_reactor_cycle(
             )
         else:
             _log.info(
-                "EDLI reactor committed-Day0 wake: skipping maintenance prune "
-                "before draining the durable event"
+                "EDLI reactor producer wake: skipping maintenance prune "
+                "before processing fresh fact"
             )
         _log_stage("pending_prune")
         _fsr_events = []
@@ -5310,28 +5328,33 @@ def run_edli_event_reactor_cycle(
         ):
             try:
                 _fair_source = _edli_next_redecision_source()
-                _pending_key_budget_s = _edli_forecast_snapshot_build_budget_seconds(
-                    edli_cfg
-                )
-                _fsr_pending = _edli_pending_entity_keys(
-                    conn,
-                    event_types=("FORECAST_SNAPSHOT_READY",),
-                    max_rows_per_status=_edli_prune_batch_limit(edli_cfg),
-                    deadline_monotonic=(
-                        time.monotonic() + _pending_key_budget_s
-                        if _pending_key_budget_s > 0
-                        else None
-                    ),
-                )
+                _fsr_pending = set()
+                if not targeted_forecast_wake:
+                    _pending_key_budget_s = _edli_forecast_snapshot_build_budget_seconds(
+                        edli_cfg
+                    )
+                    _fsr_pending = _edli_pending_entity_keys(
+                        conn,
+                        event_types=("FORECAST_SNAPSHOT_READY",),
+                        max_rows_per_status=_edli_prune_batch_limit(edli_cfg),
+                        deadline_monotonic=(
+                            time.monotonic() + _pending_key_budget_s
+                            if _pending_key_budget_s > 0
+                            else None
+                        ),
+                    )
                 _fsr_events = _edli_build_forecast_snapshot_events(
                     conn,
                     decision_time=now,
                     received_at=received_at,
-                    limit=forecast_emit_limit,
+                    limit=None if targeted_forecast_wake else forecast_emit_limit,
                     source=_fair_source,
                     already_pending_keys=_fsr_pending,
                     suppress_recent_no_value_refutations=True,
                     budget_seconds=_edli_forecast_snapshot_build_budget_seconds(edli_cfg),
+                    restrict_to_families=(
+                        forecast_wake_families if targeted_forecast_wake else None
+                    ),
                 )
                 _log_stage("forecast_snapshot_build")
             except sqlite3.OperationalError as _emit_lock_exc:
@@ -5371,7 +5394,11 @@ def run_edli_event_reactor_cycle(
                     try:
                         from src.events.event_writer import EventWriter
 
-                        EventWriter(conn).write_many(_fsr_events)
+                        _fsr_write_results = EventWriter(conn).write_many(_fsr_events)
+                        if targeted_forecast_wake:
+                            targeted_event_ids.update(
+                                result.event_id for result in _fsr_write_results
+                            )
                         _log_stage("forecast_snapshot_emit")
                     except sqlite3.OperationalError as _emit_lock_exc:
                         if "locked" in str(_emit_lock_exc).lower() or "busy" in str(_emit_lock_exc).lower():
@@ -5388,7 +5415,7 @@ def run_edli_event_reactor_cycle(
                 # positions with money at risk. The reactor still emits ordinary
                 # FORECAST_SNAPSHOT_READY candidates for new-entry discovery above.
                 if (
-                    not committed_day0_wake
+                    not producer_fast_path
                     and edli_cfg.get("day0_extreme_trigger_enabled")
                     and edli_cfg.get("day0_authority_catchup_scanner_enabled", False)
                 ):
@@ -5732,7 +5759,7 @@ def run_edli_event_reactor_cycle(
         _rr = reactor.process_pending(
             decision_time=process_pending_decision_time,
             limit=proof_limit,
-            targeted_event_ids=frozenset(producer_wake_event_ids),
+            targeted_event_ids=frozenset(targeted_event_ids),
         )
         _log_stage("process_pending")
         # Canonical event/finalization truth must commit before the derived status

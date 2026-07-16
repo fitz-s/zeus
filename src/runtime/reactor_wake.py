@@ -19,6 +19,7 @@ class ReactorWake:
     source: str
     reason: str
     event_ids: tuple[str, ...] = ()
+    forecast_families: tuple[tuple[str, str, str], ...] = ()
 
 
 def _wake_path(path: Path | None) -> Path:
@@ -29,6 +30,30 @@ def _wake_path(path: Path | None) -> Path:
     return state_path(REACTOR_WAKE_FILENAME)
 
 
+def _clean_forecast_families(
+    values: object,
+) -> tuple[tuple[str, str, str], ...]:
+    if not isinstance(values, (list, tuple)):
+        return ()
+    families: list[tuple[str, str, str]] = []
+    seen: set[tuple[str, str, str]] = set()
+    for raw in values:
+        if not isinstance(raw, (list, tuple)) or len(raw) != 3:
+            continue
+        family = (
+            str(raw[0] or "").strip(),
+            str(raw[1] or "").strip(),
+            str(raw[2] or "").strip(),
+        )
+        if not all(family) or family in seen:
+            continue
+        seen.add(family)
+        families.append(family)
+        if len(families) == 100:
+            break
+    return tuple(families)
+
+
 def publish_reactor_wake(
     *,
     source: str,
@@ -37,6 +62,7 @@ def publish_reactor_wake(
     wake_id: str | None = None,
     published_at: datetime | None = None,
     event_ids: tuple[str, ...] = (),
+    forecast_families: tuple[tuple[str, str, str], ...] = (),
 ) -> ReactorWake:
     """Atomically publish a non-authoritative wake hint after durable truth commits."""
 
@@ -51,6 +77,7 @@ def publish_reactor_wake(
             if (event_id := str(raw_event_id or "").strip())
         )
     )[:100]
+    clean_forecast_families = _clean_forecast_families(forecast_families)
     wake = ReactorWake(
         wake_id=str(wake_id or uuid.uuid4().hex),
         published_at=(published_at or datetime.now(timezone.utc))
@@ -59,6 +86,7 @@ def publish_reactor_wake(
         source=clean_source,
         reason=clean_reason,
         event_ids=clean_event_ids,
+        forecast_families=clean_forecast_families,
     )
     target = _wake_path(path)
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -92,6 +120,9 @@ def read_reactor_wake(*, path: Path | None = None) -> ReactorWake | None:
                 for event_id in payload.get("event_ids", ())
                 if str(event_id or "").strip()
             )[:100],
+            forecast_families=_clean_forecast_families(
+                payload.get("forecast_families", ())
+            ),
         )
     except (FileNotFoundError, OSError, KeyError, TypeError, ValueError, json.JSONDecodeError):
         return None

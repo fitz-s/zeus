@@ -227,12 +227,25 @@ def test_materialization_queue_publishes_wake_after_posterior_advance(
         "_forecast_posterior_revision",
         lambda cfg: next(revisions),
     )
-    published: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        production,
+        "_forecast_posterior_families_between",
+        lambda cfg, **kwargs: (("Shanghai", "2026-07-18", "high"),),
+    )
+    published: list[tuple[str, str, tuple[tuple[str, str, str], ...]]] = []
     monkeypatch.setattr(
         reactor_wake,
         "publish_reactor_wake",
-        lambda *, source, reason: published.append((source, reason))
-        or reactor_wake.ReactorWake("wake-1", "2026-07-16T12:00:00+00:00", source, reason),
+        lambda *, source, reason, forecast_families: published.append(
+            (source, reason, forecast_families)
+        )
+        or reactor_wake.ReactorWake(
+            "wake-1",
+            "2026-07-16T12:00:00+00:00",
+            source,
+            reason,
+            forecast_families=forecast_families,
+        ),
     )
 
     result = production._run_replacement_forecast_live_materialization_queue_once(
@@ -241,8 +254,64 @@ def test_materialization_queue_publishes_wake_after_posterior_advance(
 
     assert result is report
     assert published == [
-        ("replacement_forecast_production", "forecast_posterior_advanced")
+        (
+            "replacement_forecast_production",
+            "forecast_posterior_advanced",
+            (("Shanghai", "2026-07-18", "high"),),
+        )
     ]
+
+
+def test_materialization_wake_families_use_only_changed_live_rows(tmp_path) -> None:
+    import src.data.replacement_forecast_production as production
+
+    db_path = tmp_path / "forecasts.db"
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute(
+            """
+            CREATE TABLE forecast_posteriors (
+                city TEXT,
+                target_date TEXT,
+                temperature_metric TEXT,
+                runtime_layer TEXT,
+                training_allowed INTEGER
+            )
+            """
+        )
+        conn.executemany(
+            """
+            INSERT INTO forecast_posteriors (
+                city,
+                target_date,
+                temperature_metric,
+                runtime_layer,
+                training_allowed
+            ) VALUES (?, ?, ?, ?, ?)
+            """,
+            (
+                ("Paris", "2026-07-18", "high", "live", 0),
+                ("Paris", "2026-07-18", "high", "live", 0),
+                ("Shanghai", "2026-07-18", "high", "live", 0),
+                ("Shanghai", "2026-07-18", "high", "live", 0),
+                ("London", "2026-07-18", "high", "shadow", 0),
+                ("Toronto", "2026-07-18", "high", "live", 1),
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    families = production._forecast_posterior_families_between(
+        {"forecast_db": db_path},
+        revision_before=1,
+        revision_after=6,
+    )
+
+    assert families == (
+        ("Shanghai", "2026-07-18", "high"),
+        ("Paris", "2026-07-18", "high"),
+    )
 
 
 def test_materialization_queue_does_not_wake_without_new_posterior(
@@ -318,10 +387,16 @@ def test_reactor_wake_sidecar_round_trip(tmp_path) -> None:
         wake_id="wake-42",
         published_at=datetime(2026, 7, 16, 12, 0, tzinfo=timezone.utc),
         event_ids=("event-b", "event-a", "event-b", ""),
+        forecast_families=(
+            ("Shanghai", "2026-07-18", "high"),
+            ("Shanghai", "2026-07-18", "high"),
+            ("", "2026-07-18", "high"),
+        ),
     )
 
     assert read_reactor_wake(path=path) == published
     assert published.event_ids == ("event-b", "event-a")
+    assert published.forecast_families == (("Shanghai", "2026-07-18", "high"),)
     first_revision = reactor_wake_revision(path=path)
     assert first_revision is not None
 
@@ -336,6 +411,56 @@ def test_reactor_wake_sidecar_round_trip(tmp_path) -> None:
     assert reactor_wake_revision(path=path) != first_revision
 
 
+def test_forecast_builder_forwards_wake_family_restriction(monkeypatch) -> None:
+    import src.events.event_writer as writer_module
+    import src.events.triggers.forecast_snapshot_ready as trigger_module
+    import src.main as main
+    import src.state.db as state_db
+
+    family = ("Shanghai", "2026-07-18", "high")
+    captured: dict[str, object] = {}
+
+    class _Conn:
+        def set_progress_handler(self, *_args) -> None:
+            return None
+
+        def close(self) -> None:
+            return None
+
+    class _Trigger:
+        def __init__(self, _writer, *, live_eligibility_reader) -> None:
+            captured["reader"] = live_eligibility_reader
+
+        def build_committed_snapshot_events(self, **kwargs):
+            captured["families"] = kwargs["restrict_to_families"]
+            return ["event"]
+
+    monkeypatch.setattr(
+        state_db,
+        "get_forecasts_connection_read_only",
+        lambda: _Conn(),
+    )
+    monkeypatch.setattr(writer_module, "EventWriter", lambda _conn: object())
+    monkeypatch.setattr(trigger_module, "ForecastSnapshotReadyTrigger", _Trigger)
+    monkeypatch.setattr(
+        trigger_module,
+        "executable_forecast_live_eligible_reader",
+        lambda _conn: "reader",
+    )
+
+    events = main._edli_build_forecast_snapshot_events(
+        _Conn(),
+        decision_time=datetime(2026, 7, 16, 12, 0, tzinfo=timezone.utc),
+        received_at="2026-07-16T12:00:00+00:00",
+        limit=None,
+        source="wake",
+        restrict_to_families={family},
+    )
+
+    assert events == ["event"]
+    assert captured == {"reader": "reader", "families": {family}}
+
+
 def test_reactor_wake_poll_defers_without_consuming_when_reactor_busy(monkeypatch) -> None:
     import src.main as main
     from src.runtime import reactor_wake
@@ -345,6 +470,7 @@ def test_reactor_wake_poll_defers_without_consuming_when_reactor_busy(monkeypatc
         "2026-07-16T12:00:00+00:00",
         "replacement_forecast_production",
         "forecast_posterior_advanced",
+        forecast_families=(("Shanghai", "2026-07-18", "high"),),
     )
     busy = {"value": True}
 
@@ -362,9 +488,12 @@ def test_reactor_wake_poll_defers_without_consuming_when_reactor_busy(monkeypatc
         *,
         producer_wake_reason=None,
         producer_wake_event_ids=(),
+        producer_wake_families=(),
     ):
         calls.append(
-            f"reactor:{producer_wake_reason}:{','.join(producer_wake_event_ids)}"
+            "reactor:"
+            f"{producer_wake_reason}:{','.join(producer_wake_event_ids)}:"
+            f"{len(producer_wake_families)}"
         )
         return True
 
@@ -379,7 +508,7 @@ def test_reactor_wake_poll_defers_without_consuming_when_reactor_busy(monkeypatc
     busy["value"] = False
     assert main._edli_reactor_wake_poll_once() is True
     assert main._edli_reactor_wake_poll_once() is False
-    assert calls == ["reactor:forecast_posterior_advanced:"]
+    assert calls == ["reactor:forecast_posterior_advanced::1"]
 
 
 def test_day0_reactor_wake_runs_exit_monitor_before_reactor(monkeypatch) -> None:
@@ -408,9 +537,12 @@ def test_day0_reactor_wake_runs_exit_monitor_before_reactor(monkeypatch) -> None
         *,
         producer_wake_reason=None,
         producer_wake_event_ids=(),
+        producer_wake_families=(),
     ):
         calls.append(
-            f"reactor:{producer_wake_reason}:{','.join(producer_wake_event_ids)}"
+            "reactor:"
+            f"{producer_wake_reason}:{','.join(producer_wake_event_ids)}:"
+            f"{len(producer_wake_families)}"
         )
         return True
 
@@ -424,7 +556,7 @@ def test_day0_reactor_wake_runs_exit_monitor_before_reactor(monkeypatch) -> None
     assert main._edli_reactor_wake_poll_once() is True
     assert calls == [
         "monitor",
-        "reactor:day0_extreme_event_committed:event-day0",
+        "reactor:day0_extreme_event_committed:event-day0:0",
     ]
 
 
@@ -456,9 +588,10 @@ def test_reactor_wake_is_not_consumed_when_cycle_loses_execution_race(
     monkeypatch.setattr(
         main,
         "_edli_event_reactor_cycle",
-        lambda *, producer_wake_reason=None, producer_wake_event_ids=(): next(
-            outcomes
-        ),
+        lambda *,
+        producer_wake_reason=None,
+        producer_wake_event_ids=(),
+        producer_wake_families=(): next(outcomes),
     )
     monkeypatch.setattr(main, "_edli_last_reactor_wake_id", None)
 

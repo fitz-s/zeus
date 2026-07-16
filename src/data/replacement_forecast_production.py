@@ -1504,10 +1504,16 @@ def _run_replacement_forecast_live_materialization_queue_once(cfg: dict[str, obj
     ):
         from src.runtime.reactor_wake import publish_reactor_wake
 
+        forecast_families = _forecast_posterior_families_between(
+            cfg,
+            revision_before=revision_before,
+            revision_after=revision_after,
+        )
         try:
             wake = publish_reactor_wake(
                 source="replacement_forecast_production",
                 reason="forecast_posterior_advanced",
+                forecast_families=forecast_families,
             )
         except Exception:
             logger.warning(
@@ -1519,12 +1525,72 @@ def _run_replacement_forecast_live_materialization_queue_once(cfg: dict[str, obj
             )
         else:
             logger.info(
-                "forecast posterior advanced rowid=%d->%d; reactor wake published id=%s",
+                "forecast posterior advanced rowid=%d->%d families=%d; "
+                "reactor wake published id=%s",
                 revision_before,
                 revision_after,
+                len(forecast_families),
                 wake.wake_id,
             )
     return report
+
+
+def _forecast_posterior_families_between(
+    cfg: dict[str, object],
+    *,
+    revision_before: int,
+    revision_after: int,
+) -> tuple[tuple[str, str, str], ...]:
+    """Return changed live posterior families using the append-only rowid interval."""
+
+    raw_path = cfg.get("forecast_db")
+    if not raw_path or revision_after <= revision_before:
+        return ()
+    path = Path(str(raw_path)).expanduser().resolve()
+    if not path.exists():
+        return ()
+    conn = None
+    try:
+        from src.state.db import _connect_read_only
+
+        conn = _connect_read_only(path)
+        rows = conn.execute(
+            """
+            SELECT city,
+                   target_date,
+                   temperature_metric
+              FROM (
+                    SELECT city,
+                           target_date,
+                           temperature_metric,
+                           MAX(rowid) AS latest_rowid
+                      FROM forecast_posteriors
+                     WHERE rowid > ?
+                       AND rowid <= ?
+                       AND runtime_layer = 'live'
+                       AND training_allowed = 0
+                     GROUP BY city, target_date, temperature_metric
+                   )
+             ORDER BY latest_rowid DESC
+             LIMIT 101
+            """,
+            (revision_before, revision_after),
+        ).fetchall()
+        families: list[tuple[str, str, str]] = []
+        for row in rows:
+            family = (
+                str(row[0] or "").strip(),
+                str(row[1] or "").strip(),
+                str(row[2] or "").strip(),
+            )
+            if all(family):
+                families.append(family)
+        return tuple(families) if len(families) <= 100 else ()
+    except (OSError, sqlite3.Error, TypeError, ValueError):
+        return ()
+    finally:
+        if conn is not None:
+            conn.close()
 
 
 def _forecast_posterior_revision(cfg: dict[str, object]) -> int | None:
