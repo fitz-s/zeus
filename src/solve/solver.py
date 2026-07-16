@@ -1086,6 +1086,41 @@ class BinaryTerminalWealthCertificate:
 
 
 @dataclass(frozen=True)
+class GlobalBuySizingRejection:
+    """Counterfactual sizing proof for a positive BUY below the venue minimum."""
+
+    current_token_shares: Decimal
+    full_kelly_target_shares: Decimal
+    fractional_kelly_target_shares: Decimal
+    minimum_marketable_increment_shares: Decimal
+    minimum_fractional_kelly_multiplier: Decimal
+
+    def __post_init__(self) -> None:
+        current = Decimal(self.current_token_shares)
+        full = Decimal(self.full_kelly_target_shares)
+        fractional = Decimal(self.fractional_kelly_target_shares)
+        minimum = Decimal(self.minimum_marketable_increment_shares)
+        required = Decimal(self.minimum_fractional_kelly_multiplier)
+        expected_required = (current + minimum) / full
+        if (
+            not all(
+                value.is_finite()
+                for value in (current, full, fractional, minimum, required)
+            )
+            or current < 0
+            or full <= current
+            or fractional <= current
+            or fractional >= current + minimum
+            or minimum <= 0
+            or required <= 0
+            or required > 1
+            or required != expected_required
+            or required <= fractional / full
+        ):
+            raise ValueError("global BUY sizing rejection is incoherent")
+
+
+@dataclass(frozen=True)
 class GlobalSingleOrderCandidateEvaluation:
     """One candidate's complete result inside the current global auction."""
 
@@ -1121,6 +1156,7 @@ class GlobalSingleOrderCandidateEvaluation:
     full_kelly_target_shares: Decimal = Decimal("0")
     fractional_kelly_target_shares: Decimal = Decimal("0")
     terminal_wealth: BinaryTerminalWealthCertificate | None = None
+    buy_sizing_rejection: GlobalBuySizingRejection | None = None
 
     def __post_init__(self) -> None:
         if (
@@ -1168,6 +1204,15 @@ class GlobalSingleOrderCandidateEvaluation:
             if not reason:
                 raise ValueError("rejected candidate evaluation cannot carry economics")
             if not carries_economics:
+                if self.buy_sizing_rejection is not None:
+                    if (
+                        self.action != "BUY"
+                        or reason
+                        != "FRACTIONAL_KELLY_INCREMENT_BELOW_MINIMUM"
+                    ):
+                        raise ValueError(
+                            "BUY sizing rejection is bound to the wrong rejection"
+                        )
                 if (
                     self.robust_delta_log_wealth != 0.0
                     or self.robust_ev_usd != 0.0
@@ -1204,6 +1249,7 @@ class GlobalSingleOrderCandidateEvaluation:
                 or self.full_kelly_target_shares != 0
                 or self.fractional_kelly_target_shares != 0
                 or terminal is None
+                or self.buy_sizing_rejection is not None
                 or terminal.loss_payoff_usd != -self.cost_usd
                 or terminal.win_payoff_usd != self.cash_proceeds_usd
                 or not math.isclose(
@@ -1266,6 +1312,7 @@ class GlobalSingleOrderCandidateEvaluation:
             or self.limit_price <= 0
             or self.expected_fill_price_before_fee <= 0
             or self.terminal_wealth is None
+            or self.buy_sizing_rejection is not None
         ):
             raise ValueError("scored candidate evaluation lacks positive economics")
         if self.action == "BUY" and (
@@ -1316,6 +1363,7 @@ class GlobalSingleOrderDecision:
     full_kelly_target_shares: Decimal = Decimal("0")
     fractional_kelly_target_shares: Decimal = Decimal("0")
     terminal_wealth: BinaryTerminalWealthCertificate | None = None
+    buy_sizing_rejection: GlobalBuySizingRejection | None = None
     rejection_reasons: Mapping[str, str] = field(default_factory=dict)
     candidate_evaluations: tuple[GlobalSingleOrderCandidateEvaluation, ...] = ()
     candidate_input_count: int | None = None
@@ -1374,6 +1422,14 @@ class GlobalSingleOrderDecision:
         if self.candidate is None:
             if self.no_trade_reason is None:
                 raise ValueError("global no-trade decision requires a reason")
+            if self.buy_sizing_rejection is not None and (
+                not internal_score
+                or self.no_trade_reason
+                != "FRACTIONAL_KELLY_INCREMENT_BELOW_MINIMUM"
+            ):
+                raise ValueError(
+                    "global BUY sizing rejection belongs only to an internal below-minimum score"
+                )
             if self.shares != 0 or self.cost_usd != 0:
                 raise ValueError("global no-trade decision cannot allocate capital")
             if (
@@ -1392,6 +1448,8 @@ class GlobalSingleOrderDecision:
             ):
                 raise ValueError("global no-trade decision cannot carry an execution boundary")
             return
+        if self.buy_sizing_rejection is not None:
+            raise ValueError("global executable decision cannot carry a sizing rejection")
         if getattr(self.candidate, "action", "BUY") == "SELL":
             if (
                 self.no_trade_reason is not None
@@ -1484,11 +1542,13 @@ def _global_candidate_evaluations(
     *,
     rejections: Mapping[str, str],
     scores: Sequence[GlobalSingleOrderDecision] = (),
+    buy_sizing_rejections: Mapping[str, GlobalBuySizingRejection] | None = None,
     winner_id: str | None = None,
     default_rejection: str | None = None,
 ) -> tuple[GlobalSingleOrderCandidateEvaluation, ...]:
     """Retain every candidate's eligibility/economic result for one epoch."""
 
+    sizing_rejections = buy_sizing_rejections or {}
     scored_by_id = {
         score.candidate.candidate_id: score
         for score in scores
@@ -1520,6 +1580,9 @@ def _global_candidate_evaluations(
                     position_id=position_id,
                     held_shares=held_shares,
                     rejection_reason=reason,
+                    buy_sizing_rejection=sizing_rejections.get(
+                        candidate.candidate_id
+                    ),
                 )
             )
             continue
@@ -2221,6 +2284,15 @@ def _score_global_single_order(
     )
     if fractional_legal_max is None or fractional_legal_max < legal_min_shares:
         reason = "FRACTIONAL_KELLY_INCREMENT_BELOW_MINIMUM"
+        sizing_rejection = GlobalBuySizingRejection(
+            current_token_shares=held_shares,
+            full_kelly_target_shares=full_kelly_target_shares,
+            fractional_kelly_target_shares=fractional_kelly_target_shares,
+            minimum_marketable_increment_shares=legal_min_shares,
+            minimum_fractional_kelly_multiplier=(
+                (held_shares + legal_min_shares) / full_kelly_target_shares
+            ),
+        )
         return GlobalSingleOrderDecision(
             candidate=None,
             shares=Decimal("0"),
@@ -2229,6 +2301,7 @@ def _score_global_single_order(
             robust_ev_usd=0.0,
             capital_efficiency=0.0,
             no_trade_reason=reason,
+            buy_sizing_rejection=sizing_rejection,
             rejection_reasons={candidate.candidate_id: reason},
         )
     fractional_max_shares = min(
@@ -3010,6 +3083,7 @@ def select_global_single_order(
         )
 
     scored: list[GlobalSingleOrderDecision] = []
+    buy_sizing_rejections: dict[str, GlobalBuySizingRejection] = {}
     capital_authority_available = True
     for candidate, q_samples, band_alpha, _band_basis in eligible:
         if isinstance(candidate, GlobalSingleOrderSellCandidate):
@@ -3083,6 +3157,7 @@ def select_global_single_order(
                         candidates,
                         rejections=failure_rejections,
                         scores=scored,
+                        buy_sizing_rejections=buy_sizing_rejections,
                         default_rejection="GLOBAL_EPOCH_SUPERSEDED",
                     ),
                     candidate_input_count=len(candidates),
@@ -3113,6 +3188,10 @@ def select_global_single_order(
             current_token_shares=candidate_endowment.current_token_shares,
         )
         if score.candidate is None:
+            if score.buy_sizing_rejection is not None:
+                buy_sizing_rejections[candidate.candidate_id] = (
+                    score.buy_sizing_rejection
+                )
             rejections.update(score.rejection_reasons)
         else:
             resolution_at = universe_witness.resolution_at_by_family.get(
@@ -3137,6 +3216,7 @@ def select_global_single_order(
                         candidates,
                         rejections=failure_rejections,
                         scores=scored,
+                        buy_sizing_rejections=buy_sizing_rejections,
                         default_rejection="GLOBAL_EPOCH_SUPERSEDED",
                     ),
                     candidate_input_count=len(candidates),
@@ -3163,6 +3243,7 @@ def select_global_single_order(
                         candidates,
                         rejections=failure_rejections,
                         scores=scored,
+                        buy_sizing_rejections=buy_sizing_rejections,
                         default_rejection="GLOBAL_EPOCH_SUPERSEDED",
                     ),
                     candidate_input_count=len(candidates),
@@ -3206,6 +3287,7 @@ def select_global_single_order(
                 candidates,
                 rejections=rejections,
                 scores=scored,
+                buy_sizing_rejections=buy_sizing_rejections,
             ),
             candidate_input_count=len(candidates),
         )
@@ -3264,6 +3346,7 @@ def select_global_single_order(
             candidates,
             rejections=rejections,
             scores=scored,
+            buy_sizing_rejections=buy_sizing_rejections,
             winner_id=winner_id,
         ),
         candidate_input_count=len(candidates),

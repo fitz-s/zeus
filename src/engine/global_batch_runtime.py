@@ -418,7 +418,53 @@ def _store_global_auction_receipt(
     if decision is None:
         raise ValueError("GLOBAL_AUCTION_RECEIPT_DECISION_MISSING")
     evaluations = tuple(getattr(decision, "candidate_evaluations", ()) or ())
-    evaluation_rows = tuple(asdict(evaluation) for evaluation in evaluations)
+    buy_sizing_rejection_rows = tuple(
+        {
+            "candidate_id": str(evaluation.candidate_id),
+            "family_key": str(evaluation.family_key),
+            "bin_id": str(evaluation.bin_id),
+            "condition_id": str(evaluation.condition_id),
+            "side": str(evaluation.side),
+            "token_id": str(evaluation.token_id),
+            **asdict(evaluation.buy_sizing_rejection),
+        }
+        for evaluation in evaluations
+        if evaluation.buy_sizing_rejection is not None
+    )
+    evaluation_rows = tuple(
+        {
+            key: value
+            for key, value in asdict(evaluation).items()
+            if key != "buy_sizing_rejection"
+        }
+        for evaluation in evaluations
+    )
+    below_minimum_ids = {
+        str(row["candidate_id"])
+        for row in evaluation_rows
+        if row.get("action") == "BUY"
+        and row.get("status") == "REJECTED"
+        and row.get("rejection_reason")
+        == "FRACTIONAL_KELLY_INCREMENT_BELOW_MINIMUM"
+    }
+    sizing_rejection_ids = tuple(
+        str(row["candidate_id"]) for row in buy_sizing_rejection_rows
+    )
+    buy_sizing_rejection_complete = (
+        len(sizing_rejection_ids) == len(set(sizing_rejection_ids))
+        and set(sizing_rejection_ids) == below_minimum_ids
+    )
+    if not buy_sizing_rejection_complete:
+        raise ValueError(
+            "GLOBAL_AUCTION_RECEIPT_BUY_SIZING_REJECTION_INCOMPLETE"
+        )
+    sizing_rejection_json = json.dumps(
+        buy_sizing_rejection_rows,
+        default=str,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    sizing_rejection_zlib = zlib.compress(sizing_rejection_json, level=9)
     rejection_groups: dict[tuple[str, str, str], list[str]] = {}
     detailed_rows: list[dict] = []
     for row in evaluation_rows:
@@ -597,6 +643,15 @@ def _store_global_auction_receipt(
         ).hexdigest(),
         "candidate_evaluations_zlib_b64": base64.b64encode(
             evaluation_zlib
+        ).decode("ascii"),
+        "buy_sizing_rejection_count": len(buy_sizing_rejection_rows),
+        "buy_sizing_rejection_complete": buy_sizing_rejection_complete,
+        "buy_sizing_rejection_encoding": "zlib+base64+canonical-json-v1",
+        "buy_sizing_rejections_sha256": hashlib.sha256(
+            sizing_rejection_json
+        ).hexdigest(),
+        "buy_sizing_rejections_zlib_b64": base64.b64encode(
+            sizing_rejection_zlib
         ).decode("ascii"),
     }
     encoded = json.dumps(

@@ -76,6 +76,7 @@ from src.solve.solver import (
     CurrentExecutionAuthority,
     CurrentFamilyProbabilityAuthority,
     ExecutableSellCurve,
+    GlobalBuySizingRejection,
     GlobalSingleOrderCandidate,
     GlobalSingleOrderCandidateEvaluation,
     GlobalSingleOrderDecision,
@@ -130,7 +131,14 @@ def test_global_auction_receipt_persists_complete_buy_sell_hold_cash_comparison(
             token_id="token-buy",
             action="BUY",
             status="REJECTED",
-            rejection_reason="ENTRY_ACTION_PAUSED:external:operator",
+            rejection_reason="FRACTIONAL_KELLY_INCREMENT_BELOW_MINIMUM",
+            buy_sizing_rejection=GlobalBuySizingRejection(
+                current_token_shares=Decimal("0"),
+                full_kelly_target_shares=Decimal("40"),
+                fractional_kelly_target_shares=Decimal("10"),
+                minimum_marketable_increment_shares=Decimal("12"),
+                minimum_fractional_kelly_multiplier=Decimal("0.3"),
+            ),
         ),
         GlobalSingleOrderCandidateEvaluation(
             candidate_id="sell-negative",
@@ -369,6 +377,32 @@ def test_global_auction_receipt_persists_complete_buy_sell_hold_cash_comparison(
     assert summary["candidate_input_count"] == 2
     assert summary["candidate_detailed_count"] == 1
     assert summary["candidate_rejection_group_count"] == 1
+    assert summary["buy_sizing_rejection_count"] == 1
+    assert summary["buy_sizing_rejection_complete"] is True
+    assert summary["buy_sizing_rejection_encoding"] == (
+        "zlib+base64+canonical-json-v1"
+    )
+    sizing_rejection_json = zlib.decompress(
+        base64.b64decode(summary["buy_sizing_rejections_zlib_b64"])
+    )
+    assert hashlib.sha256(sizing_rejection_json).hexdigest() == (
+        summary["buy_sizing_rejections_sha256"]
+    )
+    assert json.loads(sizing_rejection_json) == [
+        {
+            "candidate_id": "buy-paused",
+            "family_key": "family-buy",
+            "bin_id": "20C",
+            "condition_id": "condition-buy",
+            "side": "YES",
+            "token_id": "token-buy",
+            "current_token_shares": "0",
+            "full_kelly_target_shares": "40",
+            "fractional_kelly_target_shares": "10",
+            "minimum_marketable_increment_shares": "12",
+            "minimum_fractional_kelly_multiplier": "0.3",
+        }
+    ]
     assert summary["hold_cash"] == {
         "robust_delta_log_wealth": "0",
         "robust_ev_usd": "0",
@@ -388,7 +422,7 @@ def test_global_auction_receipt_persists_complete_buy_sell_hold_cash_comparison(
         {
             "action": "BUY",
             "side": "YES",
-            "reason": "ENTRY_ACTION_PAUSED:external:operator",
+            "reason": "FRACTIONAL_KELLY_INCREMENT_BELOW_MINIMUM",
             "candidate_ids": ["buy-paused"],
         }
     ]

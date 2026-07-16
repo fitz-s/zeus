@@ -835,6 +835,25 @@ def test_fractional_kelly_does_not_promote_a_subminimum_target_to_an_order():
     assert decision.rejection_reasons[candidate.candidate_id] == (
         "FRACTIONAL_KELLY_INCREMENT_BELOW_MINIMUM"
     )
+    sizing = decision.buy_sizing_rejection
+    assert sizing is not None
+    assert sizing.current_token_shares == 0
+    assert sizing.full_kelly_target_shares > 0
+    assert sizing.fractional_kelly_target_shares == (
+        sizing.full_kelly_target_shares * Decimal("0.03125")
+    )
+    assert sizing.minimum_marketable_increment_shares >= Decimal("1")
+    assert sizing.fractional_kelly_target_shares < (
+        sizing.current_token_shares
+        + sizing.minimum_marketable_increment_shares
+    )
+    assert sizing.minimum_fractional_kelly_multiplier == (
+        (
+            sizing.current_token_shares
+            + sizing.minimum_marketable_increment_shares
+        )
+        / sizing.full_kelly_target_shares
+    )
 
 
 def test_global_selector_consumes_ledger_bound_cumulative_buy_endowment():
