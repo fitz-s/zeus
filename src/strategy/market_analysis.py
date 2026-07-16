@@ -968,6 +968,16 @@ class MarketAnalysis:
             if has_platt and self._transfer_logit_sigma > 0.0
             else self._bootstrap_p_raw_matrix(n, n_members)
         )
+        if (
+            p_raw_matrix is not None
+            and not has_platt
+            and self._posterior_mode == MODEL_ONLY_POSTERIOR_MODE
+        ):
+            totals = p_raw_matrix.sum(axis=1, keepdims=True)
+            samples = p_raw_matrix / totals
+            samples = np.clip(samples, 0.0, 1.0)
+            self._yes_matrix_cache[n] = samples
+            return samples
         samples = np.zeros((n, len(self.bins)))
         for i in range(n):
             # Layer 1: sample the configured signal probability object for all
