@@ -2585,6 +2585,34 @@ def test_global_single_order_scores_probability_tail_once(monkeypatch):
     assert calls == 1
 
 
+def test_global_single_order_prunes_impossible_ev_before_stake_probes(
+    monkeypatch,
+):
+    candidate = _global_candidate(
+        candidate_id="impossible-fee-inclusive-ev",
+        family="impossible-fee-inclusive-ev",
+        side="YES",
+        q=0.41,
+        levels=(("0.40", "1000"),),
+        fee="0.20",
+    )
+    monkeypatch.setattr(
+        S,
+        "_single_order_stationary_probes",
+        lambda *_args, **_kwargs: pytest.fail(
+            "an impossible robust EV must not enter stake optimization"
+        ),
+    )
+
+    score = _global_score(candidate, cap="100")
+
+    assert score.candidate is None
+    assert score.no_trade_reason == "NON_POSITIVE_ROBUST_OBJECTIVE"
+    assert score.rejection_reasons == {
+        candidate.candidate_id: "NON_POSITIVE_ROBUST_OBJECTIVE"
+    }
+
+
 def test_global_single_order_normalizes_each_probe_direction_once(monkeypatch):
     candidate = _global_candidate(
         candidate_id="probe-normalization-cache",

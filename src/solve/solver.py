@@ -2297,6 +2297,22 @@ def _score_global_single_order(
         if not math.isfinite(payoff_q_lcb) or not 0.0 <= payoff_q_lcb <= 1.0:
             raise ValueError("candidate payoff q lower bound must be finite in [0, 1]")
         robust_q = min(robust_q, payoff_q_lcb)
+    minimum_unit_cost = candidate.executable_cost_curve.fee_model.all_in_price(
+        candidate.executable_cost_curve.levels[0].price
+    )
+    if robust_q <= float(minimum_unit_cost):
+        return GlobalSingleOrderDecision(
+            candidate=None,
+            shares=Decimal("0"),
+            cost_usd=Decimal("0"),
+            robust_delta_log_wealth=0.0,
+            robust_ev_usd=0.0,
+            capital_efficiency=0.0,
+            no_trade_reason="NON_POSITIVE_ROBUST_OBJECTIVE",
+            rejection_reasons={
+                candidate.candidate_id: "NON_POSITIVE_ROBUST_OBJECTIVE"
+            },
+        )
     raw_probes = _single_order_stationary_probes(
         candidate.executable_cost_curve,
         robust_q=Decimal(str(robust_q)),
