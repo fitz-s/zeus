@@ -18,7 +18,6 @@ from typing import Callable, Mapping, Sequence
 from src.contracts.executable_market_snapshot import FRESHNESS_WINDOW_DEFAULT
 from src.data.market_topology_rows import prime_frozen_schema_reads
 from src.engine.global_auction_universe import (
-    CurrentGlobalAuctionScope,
     CurrentGlobalBookEpoch,
     current_global_auction_scope_from_events,
     current_portfolio_wealth_witness,
@@ -1068,43 +1067,6 @@ def _current_held_weather_families(
     return tuple(sorted(families))
 
 
-def _held_family_scope(
-    full_scope: CurrentGlobalAuctionScope,
-    held_families: Sequence[tuple[str, str, str]],
-    *,
-    captured_at_utc: datetime,
-) -> CurrentGlobalAuctionScope:
-    held_keys = {
-        weather_family_id(city=city, target_date=target_date, metric=metric)
-        for city, target_date, metric in held_families
-    }
-    events = tuple(
-        event
-        for family_key, event in full_scope.events_by_family
-        if family_key in held_keys
-    )
-    if len(events) != len(held_keys):
-        raise ValueError("GLOBAL_HELD_FAMILY_SCOPE_INCOMPLETE")
-    return current_global_auction_scope_from_events(
-        events,
-        captured_at_utc=captured_at_utc,
-    )
-
-
-def _entry_block_candidate_rejection(
-    candidate: object,
-    *,
-    entry_block_reason: str | None,
-    downstream: Callable[[object], str | None] | None,
-) -> str | None:
-    action = str(getattr(candidate, "action", "BUY") or "BUY").strip().upper()
-    if entry_block_reason is not None and action != "SELL":
-        return f"GLOBAL_ENTRY_BLOCKED:{entry_block_reason}"
-    if downstream is None:
-        return None
-    return downstream(candidate)
-
-
 def process_current_global_batch(
     events: Sequence[OpportunityEvent],
     *,
@@ -1136,7 +1098,6 @@ def process_current_global_batch(
     | None = None,
     candidate_policy_rejection_resolver: Callable[[object], str | None]
     | None = None,
-    entry_block_reason: str | None = None,
     fractional_kelly_multiplier: Decimal = Decimal("1"),
     claim_unpaged_winner: Callable[[OpportunityEvent], bool] | None = None,
     epoch_superseded: Callable[[], bool] | None = None,
@@ -1146,7 +1107,6 @@ def process_current_global_batch(
     if decision_time.tzinfo is None:
         raise ValueError("GLOBAL_AUCTION_DECISION_TIME_NAIVE")
     decision_time = decision_time.astimezone(UTC)
-    entry_block_reason = str(entry_block_reason or "").strip() or None
     event_tuple = tuple(events)
     claimed_target_by_scope_and_economics: dict[
         tuple[str, str], OpportunityEvent
@@ -1441,20 +1401,12 @@ def process_current_global_batch(
         log_stage("selection_snapshot")
         scope_at = current_time()
         held_families = _current_held_weather_families(trade_conn)
-        if entry_block_reason is not None and not held_families:
-            return reject(f"GLOBAL_PREFLIGHT_BATCH_BLOCKED:{entry_block_reason}")
         full_scope = scan_current_global_auction_scope(
             world_conn=world_conn,
             forecasts_conn=forecast_conn,
             decision_at_utc=scope_at,
             held_families=held_families,
         )
-        if entry_block_reason is not None:
-            full_scope = _held_family_scope(
-                full_scope,
-                held_families,
-                captured_at_utc=scope_at,
-            )
         log_stage("scope_scan", families=len(full_scope.events_by_family))
         if superseded("scope_scan"):
             return reject("GLOBAL_AUCTION_SUPERSEDED_BY_NEW_FACT")
@@ -1679,11 +1631,9 @@ def process_current_global_batch(
                 reason = excluded_candidates.get(key)
                 if reason is not None:
                     return f"GLOBAL_PREFLIGHT_CANDIDATE_INELIGIBLE:{reason}"
-                return _entry_block_candidate_rejection(
-                    candidate,
-                    entry_block_reason=entry_block_reason,
-                    downstream=candidate_policy_rejection_resolver,
-                )
+                if candidate_policy_rejection_resolver is None:
+                    return None
+                return candidate_policy_rejection_resolver(candidate)
             venue_identity = (
                 attempt_book_epoch.witness_identity
                 if attempt_book_epoch is not None

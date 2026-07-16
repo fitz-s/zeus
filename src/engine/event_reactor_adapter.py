@@ -6308,14 +6308,6 @@ def event_bound_live_adapter_from_trade_conn(
                 strategy_key=strategy_key,
             )
 
-        entry_block_reason = None
-        if real_order_submit_enabled:
-            pause_reason = _entry_pause_blocks_live_submit(
-                live_cap_conn or trade_conn
-            )
-            if pause_reason is not None:
-                entry_block_reason = f"entries_paused:{pause_reason}"
-
         try:
             return process_current_global_batch(
                 events,
@@ -6363,7 +6355,6 @@ def event_bound_live_adapter_from_trade_conn(
                 candidate_policy_rejection_resolver=(
                     _current_entry_candidate_policy
                 ),
-                entry_block_reason=entry_block_reason,
                 fractional_kelly_multiplier=Decimal(
                     str(_runtime_kelly_multiplier())
                 ),
