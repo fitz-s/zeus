@@ -1157,7 +1157,6 @@ class GlobalBuySizingRejection:
             or continuous_full < current
             or continuous_fractional != continuous_full * multiplier
             or self.continuous_full_robust_delta_log_wealth <= 0.0
-            or self.continuous_full_robust_ev_usd <= 0.0
             or minimum_cost <= 0
             or self.minimum_marketable_robust_delta_log_wealth <= 0.0
             or self.minimum_marketable_robust_ev_usd <= 0.0
@@ -2367,7 +2366,7 @@ def _score_global_single_order(
                 max_spend,
             )
 
-    if full_best is None or not (full_best[0] > 0.0 and full_best[1] > 0.0):
+    if full_best is None or full_best[0] <= 0.0:
         return GlobalSingleOrderDecision(
             candidate=None,
             shares=Decimal("0"),
@@ -2430,6 +2429,24 @@ def _score_global_single_order(
             alpha=band_alpha,
             robust_q=robust_q,
         )
+        if not (
+            continuous_best[0] > 0.0
+            and minimum_robust_du > 0.0
+            and minimum_robust_ev > 0.0
+            and minimum_efficiency > 0.0
+        ):
+            return GlobalSingleOrderDecision(
+                candidate=None,
+                shares=Decimal("0"),
+                cost_usd=Decimal("0"),
+                robust_delta_log_wealth=0.0,
+                robust_ev_usd=0.0,
+                capital_efficiency=0.0,
+                no_trade_reason="NON_POSITIVE_ROBUST_OBJECTIVE",
+                rejection_reasons={
+                    candidate.candidate_id: "NON_POSITIVE_ROBUST_OBJECTIVE"
+                },
+            )
         continuous_full_target = held_shares + continuous_best[4]
         sizing_rejection = GlobalBuySizingRejection(
             current_token_shares=held_shares,

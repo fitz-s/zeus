@@ -888,6 +888,31 @@ def test_nonpositive_venue_minimum_does_not_masquerade_as_sizing_rejection():
     assert decision.buy_sizing_rejection is None
 
 
+def test_fractional_order_survives_nonpositive_full_kelly_ev():
+    candidate = _global_candidate(
+        candidate_id="fractional-positive-full-ev-negative",
+        family="fractional-positive-full-ev-negative",
+        side="YES",
+        q=0.65,
+        levels=(("0.20", "1"), ("0.40", "4"), ("0.80", "20")),
+    )
+
+    decision = _global_score(
+        candidate,
+        floor="175",
+        ceiling="25",
+        cash="100",
+        cap="100",
+        multiplier="0.25",
+    )
+
+    assert decision.candidate is candidate
+    assert decision.shares == Decimal("6.25")
+    assert decision.cost_usd == Decimal("2.8000")
+    assert decision.robust_delta_log_wealth == pytest.approx(0.0783817345)
+    assert decision.robust_ev_usd == pytest.approx(1.2625)
+
+
 def test_global_selector_consumes_ledger_bound_cumulative_buy_endowment():
     candidate = _global_candidate(
         candidate_id="selector-cumulative-endowment",
