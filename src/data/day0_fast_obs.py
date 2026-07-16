@@ -114,6 +114,11 @@ DEFAULT_METAR_FETCH_TIMEOUT_S = _positive_float_env(
 METAR_FULL_FETCH_HOURS = 36.0
 METAR_INCREMENTAL_FETCH_HOURS = 2.0
 METAR_RECOVERY_OVERLAP_HOURS = 1.0
+METAR_HTTP_LIMITS = httpx.Limits(
+    max_keepalive_connections=1,
+    max_connections=2,
+    keepalive_expiry=90.0,
+)
 
 DAY0_ANOMALY_CHECK_BUDGET_S = _positive_float_env(
     "ZEUS_DAY0_ANOMALY_CHECK_BUDGET_SECONDS",
@@ -263,13 +268,15 @@ def fetch_metar_reports(
     hours: float = 36.0,
     timeout: float = DEFAULT_METAR_FETCH_TIMEOUT_S,
     endpoint: str = AVIATIONWEATHER_METAR_ENDPOINT,
+    client: httpx.Client | None = None,
 ) -> list[MetarReport]:
     """One batched fetch for all stations. Fail-soft: any error returns []."""
     ids = ",".join(sorted({str(s).strip().upper() for s in stations if str(s).strip()}))
     if not ids:
         return []
     try:
-        resp = httpx.get(
+        get = client.get if client is not None else httpx.get
+        resp = get(
             endpoint,
             params={"ids": ids, "format": "json", "hours": hours},
             timeout=timeout,
@@ -863,6 +870,7 @@ class Day0FastObsEmitter:
     _cache_fetched_monotonic: float = field(default=0.0, init=False)
     _cached_reports: list[MetarReport] = field(default_factory=list, init=False)
     _full_window_loaded: bool = field(default=False, init=False)
+    _http_client: httpx.Client | None = field(default=None, init=False, repr=False)
     # SPLIT MEMOS (PR#404 round-2 P0-1): the KILL memo (hard-fact exit source,
     # advanced by any memo-safe value incl. stale-withheld ones) and the LIVE
     # memo (emit moved-check, advanced ONLY by an INSERTED live event) were one
@@ -1006,7 +1014,13 @@ class Day0FastObsEmitter:
                     ),
                 )
         try:
-            reports = self.fetcher(stations, hours=fetch_hours)
+            fetch_kwargs: dict[str, Any] = {"hours": fetch_hours}
+            if self.fetcher is fetch_metar_reports:
+                with self._lock:
+                    if self._http_client is None:
+                        self._http_client = httpx.Client(limits=METAR_HTTP_LIMITS)
+                    fetch_kwargs["client"] = self._http_client
+            reports = self.fetcher(stations, **fetch_kwargs)
         except Exception as exc:  # noqa: BLE001 — fetcher contract is fail-soft, belt+braces
             logger.warning("DAY0_FAST_OBS_FETCH_RAISED exc=%s: %s", type(exc).__name__, exc)
             reports = []

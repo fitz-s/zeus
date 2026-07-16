@@ -1094,6 +1094,67 @@ class TestIncrementalFetchWindow:
         assert emitter._cached_reports[0].temp_c == pytest.approx(22.0)
 
 
+class TestMetarConnectionReuse:
+    def test_fetch_uses_injected_http_client(self):
+        from src.data.day0_fast_obs import fetch_metar_reports
+
+        class Response:
+            status_code = 200
+
+            @staticmethod
+            def json():
+                return []
+
+        class Client:
+            def __init__(self):
+                self.calls = []
+
+            def get(self, *args, **kwargs):
+                self.calls.append((args, kwargs))
+                return Response()
+
+        client = Client()
+        assert fetch_metar_reports(["RJTT"], hours=2.0, client=client) == []
+        assert len(client.calls) == 1
+        assert client.calls[0][1]["params"]["hours"] == 2.0
+
+    def test_emitter_reuses_one_client_across_polls(self, monkeypatch):
+        import src.data.day0_fast_obs as fast_obs
+
+        t0 = datetime(2026, 6, 9, 16, 0, tzinfo=UTC)
+        report = _report("RJTT", t0, 21.0, t_group=False)
+        clients = []
+
+        class Client:
+            def __init__(self, **_kwargs):
+                self.calls = 0
+                clients.append(self)
+
+            def get(self, *_args, **_kwargs):
+                self.calls += 1
+                return SimpleNamespace(
+                    status_code=200,
+                    json=lambda: [
+                        {
+                            "icaoId": report.station_id,
+                            "obsTime": report.obs_time.timestamp(),
+                            "receiptTime": report.receipt_time.isoformat(),
+                            "temp": report.temp_c,
+                            "metarType": report.metar_type,
+                            "rawOb": report.raw,
+                        }
+                    ],
+                )
+
+        monkeypatch.setattr(fast_obs.httpx, "Client", Client)
+        emitter = fast_obs.Day0FastObsEmitter(min_fetch_interval_s=0.0)
+        emitter._reports_with_status(["RJTT"])
+        emitter._reports_with_status(["RJTT"])
+
+        assert len(clients) == 1
+        assert clients[0].calls == 2
+
+
 class TestMutexNoHttpSplit:
     """PR#404 P0-2: the world-write mutex must never span HTTP. The write phase
     (emit_prefetched) performs zero network IO; main.py prefetches BEFORE
