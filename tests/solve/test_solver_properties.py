@@ -867,7 +867,7 @@ def test_fractional_kelly_does_not_promote_a_subminimum_target_to_an_order():
     assert sizing.minimum_marketable_positive is True
 
 
-def test_sizing_receipt_exposes_when_venue_minimum_destroys_continuous_edge():
+def test_nonpositive_venue_minimum_does_not_masquerade_as_sizing_rejection():
     candidate = _global_candidate(
         candidate_id="venue-minimum-destroys-edge",
         family="venue-minimum-destroys-edge",
@@ -884,21 +884,8 @@ def test_sizing_receipt_exposes_when_venue_minimum_destroys_continuous_edge():
     )
 
     assert decision.candidate is None
-    assert decision.no_trade_reason == "FRACTIONAL_KELLY_INCREMENT_BELOW_MINIMUM"
-    sizing = decision.buy_sizing_rejection
-    assert sizing is not None
-    assert (
-        Decimal("0")
-        < sizing.continuous_full_kelly_target_shares
-        < sizing.minimum_marketable_increment_shares
-    )
-    assert sizing.continuous_full_robust_delta_log_wealth > 0
-    assert sizing.continuous_full_robust_ev_usd > 0
-    assert sizing.minimum_marketable_increment_shares >= Decimal("1")
-    assert sizing.minimum_marketable_robust_delta_log_wealth < 0
-    assert sizing.minimum_marketable_robust_ev_usd > 0
-    assert sizing.minimum_marketable_capital_efficiency < 0
-    assert sizing.minimum_marketable_positive is False
+    assert decision.no_trade_reason == "NON_POSITIVE_ROBUST_OBJECTIVE"
+    assert decision.buy_sizing_rejection is None
 
 
 def test_global_selector_consumes_ledger_bound_cumulative_buy_endowment():

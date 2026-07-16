@@ -1156,7 +1156,13 @@ class GlobalBuySizingRejection:
             or required <= multiplier
             or continuous_full < current
             or continuous_fractional != continuous_full * multiplier
+            or self.continuous_full_robust_delta_log_wealth <= 0.0
+            or self.continuous_full_robust_ev_usd <= 0.0
             or minimum_cost <= 0
+            or self.minimum_marketable_robust_delta_log_wealth <= 0.0
+            or self.minimum_marketable_robust_ev_usd <= 0.0
+            or self.minimum_marketable_capital_efficiency <= 0.0
+            or not self.minimum_marketable_positive
             or self.minimum_marketable_positive != minimum_positive
         ):
             raise ValueError("global BUY sizing rejection is incoherent")
@@ -2361,7 +2367,7 @@ def _score_global_single_order(
                 max_spend,
             )
 
-    if full_best is None:
+    if full_best is None or not (full_best[0] > 0.0 and full_best[1] > 0.0):
         return GlobalSingleOrderDecision(
             candidate=None,
             shares=Decimal("0"),
