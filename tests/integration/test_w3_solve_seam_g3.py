@@ -3853,6 +3853,46 @@ def test_global_book_cache_rebinds_fresh_q_without_refreshing_untouched_tokens()
     assert rebound.bindings == cached.bindings
 
 
+def test_prepared_forecast_probability_cache_is_bounded_by_witness_freshness():
+    event = _global_scope_event(city="Dallas", source_run_id="run-dallas")
+    captured_at = _dt.datetime(2026, 7, 10, 8, 0, tzinfo=_dt.timezone.utc)
+    prepared = SimpleNamespace(
+        probability_witness=SimpleNamespace(
+            captured_at_utc=captured_at,
+            max_age=_dt.timedelta(seconds=180),
+        )
+    )
+    namespace = ("forecast-db", "topology-db", "world-db")
+    with era._PREPARED_GLOBAL_PROBABILITY_CACHE_LOCK:
+        era._PREPARED_GLOBAL_PROBABILITY_CACHE.clear()
+
+    era._store_prepared_global_probability(
+        prepared,
+        namespace=namespace,
+        event=event,
+    )
+
+    assert era._cached_prepared_global_probability(
+        namespace=namespace,
+        event=event,
+        decision_time=captured_at + _dt.timedelta(seconds=179),
+        max_age=_dt.timedelta(seconds=180),
+    ) is prepared
+    assert era._cached_prepared_global_probability(
+        namespace=namespace,
+        event=event,
+        decision_time=captured_at + _dt.timedelta(seconds=181),
+        max_age=_dt.timedelta(seconds=180),
+    ) is None
+    day0 = replace(event, event_type="DAY0_EXTREME_UPDATED")
+    assert era._cached_prepared_global_probability(
+        namespace=namespace,
+        event=day0,
+        decision_time=captured_at,
+        max_age=_dt.timedelta(seconds=180),
+    ) is None
+
+
 def test_global_curve_supersession_keeps_typed_current_candidate():
     candidate = object()
     reason = (
