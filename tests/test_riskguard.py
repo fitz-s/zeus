@@ -4472,6 +4472,8 @@ def _unprojected_equity_schema(conn: sqlite3.Connection) -> None:
             state TEXT NOT NULL,
             filled_size TEXT NOT NULL,
             fill_price TEXT NOT NULL,
+            observed_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            venue_timestamp TEXT,
             local_sequence INTEGER NOT NULL
         );
         CREATE TABLE position_lots (
