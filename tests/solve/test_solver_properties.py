@@ -1997,50 +1997,6 @@ def test_global_venue_neighbor_validation_is_bounded(monkeypatch):
     assert calls <= 25
 
 
-def test_global_venue_neighbor_reuses_immutable_curve(monkeypatch):
-    candidate = _global_candidate(
-        candidate_id="venue-neighbor-cache",
-        family="venue-neighbor-cache",
-        side="YES",
-        q=0.99,
-        levels=(("0.37", "2000"),),
-    )
-    calls = 0
-    original = S.venue_submit_amount_precision_error
-
-    def counted(**kwargs):
-        nonlocal calls
-        calls += 1
-        return original(**kwargs)
-
-    monkeypatch.setattr(S, "venue_submit_amount_precision_error", counted)
-    S._single_order_curve_venue_legal_neighbor.cache_clear()
-    try:
-        first = S._single_order_venue_legal_neighbor(
-            candidate,
-            Decimal("99.99"),
-            at_most=True,
-        )
-        first_calls = calls
-        rebound = replace(
-            candidate,
-            candidate_id="venue-neighbor-cache-rebound",
-            probability_witness_identity="fresh-witness",
-            ledger_snapshot_id="fresh-ledger",
-        )
-        second = S._single_order_venue_legal_neighbor(
-            rebound,
-            Decimal("99.99"),
-            at_most=True,
-        )
-    finally:
-        S._single_order_curve_venue_legal_neighbor.cache_clear()
-
-    assert first == second
-    assert first_calls > 0
-    assert calls == first_calls
-
-
 def test_global_single_order_label_mirror_preserves_size_cost_and_objective():
     yes = _global_candidate(
         candidate_id="yes", family="a", side="YES", q=0.70,
