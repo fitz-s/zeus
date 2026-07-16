@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import threading
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -41,6 +42,11 @@ _OPEN_POSITION_PHASES = frozenset(
         "pending_exit",
     }
 )
+_MANIFEST_CACHE_LOCK = threading.Lock()
+_MANIFEST_CACHE: dict[
+    Path,
+    dict[Path, tuple[tuple[int, int, int], RawForecastArtifactManifest]],
+] = {}
 
 
 @dataclass(frozen=True)
@@ -189,21 +195,38 @@ def _manifest_base_dir(manifest: RawForecastArtifactManifest, *, fallback: Path)
 def _load_manifests(raw_manifest_dir: Path, *, computed_at: datetime) -> tuple[RawForecastArtifactManifest, ...]:
     if not raw_manifest_dir.exists():
         return ()
-    manifests: list[RawForecastArtifactManifest] = []
-    for path in sorted(raw_manifest_dir.rglob("*.manifest.json")):
-        manifest = read_manifest(path)
-        manifest = RawForecastArtifactManifest(
-            **{
-                **manifest.to_dict(),
-                "product_metadata": {
-                    **dict(manifest.product_metadata),
-                    "manifest_json": str(path),
-                },
-            }
-        )
-        if manifest.source_available_at <= computed_at:
-            manifests.append(manifest)
-    return tuple(manifests)
+    root = raw_manifest_dir.resolve()
+    paths = tuple(sorted(root.rglob("*.manifest.json")))
+    current: dict[
+        Path,
+        tuple[tuple[int, int, int], RawForecastArtifactManifest],
+    ] = {}
+    with _MANIFEST_CACHE_LOCK:
+        cached = _MANIFEST_CACHE.get(root, {})
+        for path in paths:
+            stat = path.stat()
+            signature = (stat.st_mtime_ns, stat.st_ctime_ns, stat.st_size)
+            entry = cached.get(path)
+            if entry is not None and entry[0] == signature:
+                manifest = entry[1]
+            else:
+                loaded = read_manifest(path)
+                manifest = RawForecastArtifactManifest(
+                    **{
+                        **loaded.to_dict(),
+                        "product_metadata": {
+                            **dict(loaded.product_metadata),
+                            "manifest_json": str(path),
+                        },
+                    }
+                )
+            current[path] = (signature, manifest)
+        _MANIFEST_CACHE[root] = current
+    return tuple(
+        manifest
+        for _, manifest in current.values()
+        if manifest.source_available_at <= computed_at
+    )
 
 
 def _manifest_payload_covers_target_local_day(

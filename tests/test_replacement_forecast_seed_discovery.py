@@ -17,6 +17,7 @@ from src.data.raw_forecast_artifact_manifest import RawForecastArtifactManifest,
 from src.data.replacement_forecast_readiness import SOURCE_ID as REPLACEMENT_SOURCE_ID
 from src.data.replacement_forecast_readiness import STRATEGY_KEY as REPLACEMENT_STRATEGY_KEY
 from src.data.replacement_forecast_seed_discovery import (
+    _load_manifests,
     _manifest_allows_target_date,
     _latest_manifest,
     discover_replacement_forecast_materialization_seeds,
@@ -72,6 +73,52 @@ def _write_manifest(
     manifest_path = raw_dir / f"{name}.manifest.json"
     write_manifest(manifest, manifest_path)
     return manifest_path
+
+
+def test_load_manifests_reuses_unchanged_files_but_rechecks_availability(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    import src.data.replacement_forecast_seed_discovery as discovery
+
+    raw_dir = tmp_path / "raw"
+    manifest_path = _write_manifest(
+        raw_dir,
+        name="future",
+        source_id="openmeteo_ecmwf_ifs_9km",
+        product_id="openmeteo_ecmwf_ifs9_deterministic_anchor_v1",
+        data_version=OPENMETEO_HIGH_DATA_VERSION,
+        metadata={},
+        source_available_at="2026-06-07T00:00:00+00:00",
+        captured_at="2026-06-07T00:01:00+00:00",
+    )
+    discovery._MANIFEST_CACHE.pop(raw_dir.resolve(), None)
+    real_read = discovery.read_manifest
+    reads: list[Path] = []
+
+    def _read(path: Path):
+        reads.append(path)
+        return real_read(path)
+
+    monkeypatch.setattr(discovery, "read_manifest", _read)
+
+    before = _load_manifests(
+        raw_dir, computed_at=discovery._dt("2026-06-06T23:59:00+00:00", field_name="computed_at")
+    )
+    after = _load_manifests(
+        raw_dir, computed_at=discovery._dt("2026-06-07T00:02:00+00:00", field_name="computed_at")
+    )
+    manifest_path.write_text(
+        manifest_path.read_text(encoding="utf-8") + "\n",
+        encoding="utf-8",
+    )
+    changed = _load_manifests(
+        raw_dir, computed_at=discovery._dt("2026-06-07T00:02:00+00:00", field_name="computed_at")
+    )
+
+    assert before == ()
+    assert len(after) == len(changed) == 1
+    assert reads == [manifest_path.resolve(), manifest_path.resolve()]
 
 
 def _init_db(path: Path) -> None:
