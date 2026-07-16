@@ -20,6 +20,7 @@ from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation, ROUND_CEILING
 from pathlib import Path
+from threading import RLock
 from typing import Any, Iterator, Literal, Mapping, Sequence
 
 from src.control.heartbeat_supervisor import HeartbeatHealth, HeartbeatStatus
@@ -395,6 +396,40 @@ class RiskAllocator:
         )
 
 
+@dataclass(frozen=True)
+class EntryCapacityAuthority:
+    """One immutable allocator/governor pair for one selection epoch."""
+
+    allocator: RiskAllocator
+    governor_state: GovernorState
+
+    def capacity_usd(
+        self,
+        *,
+        market_id: str,
+        event_id: str,
+        resolution_window: str = "default",
+        correlation_key: str = "",
+    ) -> Decimal:
+        decision = self.allocator.entry_capacity(
+            market_id=market_id,
+            event_id=event_id,
+            resolution_window=resolution_window,
+            correlation_key=correlation_key,
+            governor_state=self.governor_state,
+        )
+        if not decision.allowed:
+            if decision.reason in {
+                "per_market_cap_exceeded",
+                "per_event_cap_exceeded",
+                "per_resolution_window_cap_exceeded",
+                "correlated_market_cap_exceeded",
+            }:
+                return Decimal("0")
+            raise AllocationDenied(decision)
+        return Decimal(decision.available_capacity_micro) / Decimal("1000000")
+
+
 class PortfolioGovernor:
     def __init__(self, cap_policy: CapPolicy | None = None) -> None:
         self.cap_policy = cap_policy or CapPolicy()
@@ -448,21 +483,45 @@ _DEFAULT_ALLOCATOR = RiskAllocator()
 _GLOBAL_GOVERNOR: PortfolioGovernor | None = None
 _GLOBAL_ALLOCATOR: RiskAllocator | None = None
 _GLOBAL_GOVERNOR_STATE: GovernorState | None = None
+_GLOBAL_ENTRY_CAPACITY_AUTHORITY: EntryCapacityAuthority | None = None
+_GLOBAL_ALLOCATION_LOCK = RLock()
 
 
 def configure_global_allocator(allocator: RiskAllocator | None, governor_state: GovernorState | None = None) -> None:
-    global _GLOBAL_ALLOCATOR, _GLOBAL_GOVERNOR_STATE
-    _GLOBAL_ALLOCATOR = allocator
-    _GLOBAL_GOVERNOR_STATE = governor_state
+    global _GLOBAL_ALLOCATOR, _GLOBAL_GOVERNOR_STATE, _GLOBAL_ENTRY_CAPACITY_AUTHORITY
+    with _GLOBAL_ALLOCATION_LOCK:
+        _GLOBAL_ALLOCATOR = allocator
+        _GLOBAL_GOVERNOR_STATE = governor_state
+        _GLOBAL_ENTRY_CAPACITY_AUTHORITY = (
+            EntryCapacityAuthority(allocator, governor_state)
+            if allocator is not None and governor_state is not None
+            else None
+        )
 
 
 def configure_global_governor_state(governor_state: GovernorState | None) -> None:
-    global _GLOBAL_GOVERNOR_STATE
-    _GLOBAL_GOVERNOR_STATE = governor_state
+    global _GLOBAL_GOVERNOR_STATE, _GLOBAL_ENTRY_CAPACITY_AUTHORITY
+    with _GLOBAL_ALLOCATION_LOCK:
+        _GLOBAL_GOVERNOR_STATE = governor_state
+        _GLOBAL_ENTRY_CAPACITY_AUTHORITY = (
+            EntryCapacityAuthority(_GLOBAL_ALLOCATOR, governor_state)
+            if _GLOBAL_ALLOCATOR is not None and governor_state is not None
+            else None
+        )
 
 
 def clear_global_allocator() -> None:
     configure_global_allocator(None, None)
+
+
+def snapshot_global_entry_capacity_authority() -> EntryCapacityAuthority:
+    """Freeze the currently published capacity pair for one decision epoch."""
+
+    with _GLOBAL_ALLOCATION_LOCK:
+        authority = _GLOBAL_ENTRY_CAPACITY_AUTHORITY
+    if authority is None:
+        raise AllocationDenied(AllocationDecision(False, "allocator_not_configured", 0))
+    return authority
 
 
 def assert_global_allocation_allows(intent: ExecutionIntent) -> AllocationDecision:
@@ -484,25 +543,12 @@ def current_global_entry_capacity_usd(
 ) -> Decimal:
     """Read the current candidate-specific entry envelope without reserving it."""
 
-    if _GLOBAL_ALLOCATOR is None or _GLOBAL_GOVERNOR_STATE is None:
-        raise AllocationDenied(AllocationDecision(False, "allocator_not_configured", 0))
-    decision = _GLOBAL_ALLOCATOR.entry_capacity(
+    return snapshot_global_entry_capacity_authority().capacity_usd(
         market_id=market_id,
         event_id=event_id,
         resolution_window=resolution_window,
         correlation_key=correlation_key,
-        governor_state=_GLOBAL_GOVERNOR_STATE,
     )
-    if not decision.allowed:
-        if decision.reason in {
-            "per_market_cap_exceeded",
-            "per_event_cap_exceeded",
-            "per_resolution_window_cap_exceeded",
-            "correlated_market_cap_exceeded",
-        }:
-            return Decimal("0")
-        raise AllocationDenied(decision)
-    return Decimal(decision.available_capacity_micro) / Decimal("1000000")
 
 
 def assert_global_submit_allows(*, reduce_only: bool = False) -> AllocationDecision:

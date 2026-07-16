@@ -5128,6 +5128,7 @@ def run_edli_event_reactor_cycle(*, active_lock) -> None:
     from src.engine.event_bound_final_intent import submit_event_bound_final_intent_via_existing_executor
     from src.events.event_priority import day0_is_tradeable_for_scope
     from src.events.event_store import EventStore
+    from src.risk_allocator import snapshot_global_entry_capacity_authority
     from src.riskguard.riskguard import get_current_level
     from src.state.db import ZEUS_FORECASTS_DB_PATH, get_forecasts_connection_read_only, get_trade_connection_with_world_required, get_world_connection
     from src.strategy.live_inference.no_trade_regret import NoTradeRegretLedger
@@ -5439,6 +5440,7 @@ def run_edli_event_reactor_cycle(*, active_lock) -> None:
         # (the live lane was simply not configured for this reactor_mode).
         _live_lane_block_cause: str | None = None
         live_submit_effective = live_bridge_mode or submit_disabled_effective_mode
+        _entry_capacity_authority = None
         # Task #107 (portfolio/multi Kelly): source one canonical exposure
         # snapshot per reactor cycle. Terminal history and operator/recovery
         # surfaces are irrelevant to sizing, so the decision path reads only
@@ -5479,6 +5481,24 @@ def run_edli_event_reactor_cycle(*, active_lock) -> None:
                     _alloc_refresh.get("fail_closed"),
                     _alloc_refresh.get("entry", {}).get("reason"),
                 )
+            elif _alloc_refresh.get("configured"):
+                try:
+                    _entry_capacity_authority = (
+                        snapshot_global_entry_capacity_authority()
+                    )
+                except Exception as _capacity_exc:  # noqa: BLE001 - incoherent pair blocks live lane
+                    live_submit_effective = False
+                    _live_lane_block_cause = (
+                        "live_submit_effective_false:"
+                        f"capital_authority_snapshot:{type(_capacity_exc).__name__}:"
+                        f"{_capacity_exc}"
+                    )
+                    _log.error(
+                        "EDLI reactor: allocator refresh reported configured but "
+                        "capacity authority snapshot failed; selecting NO-SUBMIT "
+                        "this cycle: %r",
+                        _capacity_exc,
+                    )
         # The FSR/redecision emit phase intentionally uses the cycle-start timestamp for
         # event identity. Decision certificates are built later, after DB-backed substrate
         # and portfolio reads; use the actual processing timestamp so fresh executable/book
@@ -5598,6 +5618,7 @@ def run_edli_event_reactor_cycle(*, active_lock) -> None:
                 # submit boundary.
                 edli_live_scope=edli_live_scope,
                 family_snapshot_refresher=_decision_family_snapshot_refresher,
+                entry_capacity_authority=_entry_capacity_authority,
             )
             if (live_submit_effective and operator_arm is not None)
             else event_bound_no_submit_adapter_from_trade_conn(

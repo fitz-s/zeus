@@ -2389,6 +2389,12 @@ def test_live_adapter_routes_each_global_truth_to_its_owner(monkeypatch):
     world.execute("INSERT INTO opportunity_events VALUES ('authorized-day0')")
     captured = {}
     prepared_with = {}
+    capacity_calls = []
+
+    class CapacityAuthority:
+        def capacity_usd(self, **kwargs):
+            capacity_calls.append(kwargs)
+            return Decimal("17")
 
     def fake_prepare(_event, **kwargs):
         prepared_with.update(kwargs)
@@ -2434,6 +2440,7 @@ def test_live_adapter_routes_each_global_truth_to_its_owner(monkeypatch):
         portfolio_state_provider=lambda: pytest.fail(
             "cycle-start portfolio must not back global selection wealth"
         ),
+        entry_capacity_authority=CapacityAuthority(),
     )
     event = _global_scope_event(city="Dallas", source_run_id="run-dallas")
 
@@ -2449,6 +2456,21 @@ def test_live_adapter_routes_each_global_truth_to_its_owner(monkeypatch):
     assert captured["portfolio_state_provider"] is None
     assert captured["candidate_policy_rejection_resolver"] is None
     assert "entry_candidates_enabled" not in captured
+    candidate = SimpleNamespace(family_key="family-dallas")
+    assert captured["current_capital_limit_resolver"](
+        candidate,
+        "gamma-market",
+        "market-event",
+        "owner-event",
+    ) == Decimal("17")
+    assert capacity_calls == [
+        {
+            "market_id": "gamma-market",
+            "event_id": "market-event",
+            "resolution_window": "default",
+            "correlation_key": "family-dallas",
+        }
+    ]
     prepared_receipt = captured["prepare_event"](
         event,
         _dt.datetime(2026, 7, 10, 8, 10, tzinfo=_dt.timezone.utc),
@@ -2707,6 +2729,8 @@ def test_live_adapter_overlaps_current_gamma_bind_with_complete_clob_prefetch(
             condition_id TEXT NOT NULL,
             selected_outcome_token_id TEXT NOT NULL,
             snapshot_id TEXT NOT NULL,
+            yes_token_id TEXT NOT NULL,
+            no_token_id TEXT NOT NULL,
             PRIMARY KEY (condition_id, selected_outcome_token_id)
         );
         INSERT INTO executable_market_snapshots VALUES (
@@ -2729,8 +2753,20 @@ def test_live_adapter_overlaps_current_gamma_bind_with_complete_clob_prefetch(
             '2026-07-10T07:03:00+00:00'
         );
         INSERT INTO executable_market_snapshot_latest VALUES
-            ('condition-a', 'yes-token-a', 'snapshot-a'),
-            ('condition-a', 'no-token-a', 'snapshot-a');
+            (
+                'condition-a',
+                'yes-token-a',
+                'snapshot-a',
+                'yes-token-a',
+                'no-token-a'
+            ),
+            (
+                'condition-a',
+                'no-token-a',
+                'snapshot-a',
+                'yes-token-a',
+                'no-token-a'
+            );
         """
     )
     forecast = sqlite3.connect(":memory:")
@@ -2867,6 +2903,262 @@ def test_live_adapter_overlaps_current_gamma_bind_with_complete_clob_prefetch(
     world.close()
 
 
+def test_speculative_topology_fills_snapshot_gap_from_complete_receipt():
+    trade = sqlite3.connect(":memory:")
+    trade.executescript(
+        """
+        CREATE TABLE executable_market_snapshots (
+            snapshot_id TEXT PRIMARY KEY,
+            gamma_market_id TEXT NOT NULL,
+            event_id TEXT NOT NULL,
+            condition_id TEXT NOT NULL,
+            selected_outcome_token_id TEXT,
+            yes_token_id TEXT NOT NULL,
+            no_token_id TEXT NOT NULL,
+            enable_orderbook INTEGER NOT NULL,
+            active INTEGER NOT NULL,
+            closed INTEGER NOT NULL,
+            accepting_orders INTEGER,
+            min_tick_size TEXT NOT NULL,
+            min_order_size TEXT NOT NULL,
+            fee_details_json TEXT NOT NULL,
+            tradeability_status_json TEXT NOT NULL,
+            captured_at TEXT NOT NULL,
+            freshness_deadline TEXT NOT NULL
+        );
+        CREATE TABLE executable_market_snapshot_latest (
+            condition_id TEXT NOT NULL,
+            selected_outcome_token_id TEXT NOT NULL,
+            snapshot_id TEXT NOT NULL,
+            yes_token_id TEXT NOT NULL,
+            no_token_id TEXT NOT NULL,
+            PRIMARY KEY (condition_id, selected_outcome_token_id)
+        );
+        CREATE TABLE decision_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            mode TEXT NOT NULL,
+            artifact_json TEXT NOT NULL
+        );
+        INSERT INTO executable_market_snapshots VALUES (
+            'snapshot-a',
+            'market-a',
+            'event-a',
+            'condition-a',
+            'yes-token-a',
+            'yes-token-a',
+            'no-token-a',
+            1,
+            1,
+            0,
+            1,
+            '0.01',
+            '5',
+            '{}',
+            '{}',
+            '2026-07-10T07:00:00+00:00',
+            '2026-07-10T07:03:00+00:00'
+        );
+        INSERT INTO executable_market_snapshot_latest VALUES
+            (
+                'condition-a',
+                'yes-token-a',
+                'snapshot-a',
+                'yes-token-a',
+                'no-token-a'
+            ),
+            (
+                'condition-a',
+                'no-token-a',
+                'snapshot-a',
+                'yes-token-a',
+                'no-token-a'
+            );
+        """
+    )
+    fields = [
+        "family_key",
+        "bin_id",
+        "condition_id",
+        "side",
+        "token_id",
+        "status",
+        "book_hash",
+        "market_event_id",
+        "gamma_market_id",
+    ]
+    rows = [
+        [
+            "family",
+            "bin-b",
+            "condition-b",
+            "YES",
+            "yes-token-b",
+            "EXECUTABLE",
+            "hash-yes-b",
+            "event-b",
+            "market-b",
+        ],
+        [
+            "family",
+            "bin-b",
+            "condition-b",
+            "NO",
+            "no-token-b",
+            "EXECUTABLE",
+            "hash-no-b",
+            "event-b",
+            "market-b",
+        ],
+    ]
+    encoded = json.dumps(
+        {"fields": fields, "rows": rows},
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode()
+    summary = {
+        "schema_version": 12,
+        "book_native_side_candidate_coverage_status": "COMPLETE",
+        "book_native_side_candidate_coverage_complete": True,
+        "book_native_side_encoding": "zlib+base64+canonical-json-v1",
+        "book_native_side_state_count": len(rows),
+        "book_native_side_states_sha256": hashlib.sha256(encoded).hexdigest(),
+        "book_native_side_states_zlib_b64": base64.b64encode(
+            zlib.compress(encoded)
+        ).decode(),
+    }
+    trade.execute(
+        """
+        INSERT INTO decision_log(mode, artifact_json)
+        VALUES ('global_single_order_auction', ?)
+        """,
+        (json.dumps({"summary": summary}),),
+    )
+    probabilities = {
+        "family": SimpleNamespace(
+            family_key="family",
+            bindings=(
+                SimpleNamespace(
+                    bin_id="bin-a",
+                    condition_id="condition-a",
+                ),
+                SimpleNamespace(
+                    bin_id="bin-b",
+                    condition_id="condition-b",
+                ),
+            ),
+        )
+    }
+
+    topology = era._global_book_speculative_topology(trade, probabilities)
+
+    assert topology == (
+        (
+            "family",
+            "bin-a",
+            "condition-a",
+            "yes-token-a",
+            "no-token-a",
+        ),
+        (
+            "family",
+            "bin-b",
+            "condition-b",
+            "yes-token-b",
+            "no-token-b",
+        ),
+    )
+    trade.close()
+
+
+def test_speculative_topology_ignores_corrupt_receipt():
+    trade = sqlite3.connect(":memory:")
+    trade.executescript(
+        """
+        CREATE TABLE executable_market_snapshots (
+            snapshot_id TEXT PRIMARY KEY,
+            gamma_market_id TEXT NOT NULL,
+            event_id TEXT NOT NULL,
+            condition_id TEXT NOT NULL,
+            selected_outcome_token_id TEXT,
+            yes_token_id TEXT NOT NULL,
+            no_token_id TEXT NOT NULL,
+            enable_orderbook INTEGER NOT NULL,
+            active INTEGER NOT NULL,
+            closed INTEGER NOT NULL,
+            accepting_orders INTEGER,
+            min_tick_size TEXT NOT NULL,
+            min_order_size TEXT NOT NULL,
+            fee_details_json TEXT NOT NULL,
+            tradeability_status_json TEXT NOT NULL,
+            captured_at TEXT NOT NULL,
+            freshness_deadline TEXT NOT NULL
+        );
+        CREATE TABLE executable_market_snapshot_latest (
+            condition_id TEXT NOT NULL,
+            selected_outcome_token_id TEXT NOT NULL,
+            snapshot_id TEXT NOT NULL,
+            yes_token_id TEXT NOT NULL,
+            no_token_id TEXT NOT NULL,
+            PRIMARY KEY (condition_id, selected_outcome_token_id)
+        );
+        CREATE TABLE decision_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            mode TEXT NOT NULL,
+            artifact_json TEXT NOT NULL
+        );
+        """
+    )
+    summary = {
+        "schema_version": 12,
+        "book_native_side_candidate_coverage_status": "COMPLETE",
+        "book_native_side_candidate_coverage_complete": True,
+        "book_native_side_encoding": "zlib+base64+canonical-json-v1",
+        "book_native_side_state_count": 2,
+        "book_native_side_states_sha256": "not-the-payload-hash",
+        "book_native_side_states_zlib_b64": base64.b64encode(
+            zlib.compress(
+                json.dumps(
+                    {
+                        "fields": [
+                            "family_key",
+                            "bin_id",
+                            "condition_id",
+                            "side",
+                            "token_id",
+                            "status",
+                            "book_hash",
+                            "market_event_id",
+                            "gamma_market_id",
+                        ],
+                        "rows": [],
+                    }
+                ).encode()
+            )
+        ).decode(),
+    }
+    trade.execute(
+        """
+        INSERT INTO decision_log(mode, artifact_json)
+        VALUES ('global_single_order_auction', ?)
+        """,
+        (json.dumps({"summary": summary}),),
+    )
+    probabilities = {
+        "family": SimpleNamespace(
+            family_key="family",
+            bindings=(
+                SimpleNamespace(
+                    bin_id="bin-b",
+                    condition_id="condition-b",
+                ),
+            ),
+        )
+    }
+
+    assert era._global_book_speculative_topology(trade, probabilities) is None
+    trade.close()
+
+
 def test_live_adapter_discards_speculative_books_when_current_gamma_rebinds(
     monkeypatch,
 ):
@@ -2896,6 +3188,8 @@ def test_live_adapter_discards_speculative_books_when_current_gamma_rebinds(
             condition_id TEXT NOT NULL,
             selected_outcome_token_id TEXT NOT NULL,
             snapshot_id TEXT NOT NULL,
+            yes_token_id TEXT NOT NULL,
+            no_token_id TEXT NOT NULL,
             PRIMARY KEY (condition_id, selected_outcome_token_id)
         );
         INSERT INTO executable_market_snapshots VALUES (
@@ -2918,8 +3212,20 @@ def test_live_adapter_discards_speculative_books_when_current_gamma_rebinds(
             '2026-07-10T07:03:00+00:00'
         );
         INSERT INTO executable_market_snapshot_latest VALUES
-            ('condition-a', 'yes-token-old', 'snapshot-old'),
-            ('condition-a', 'no-token-old', 'snapshot-old');
+            (
+                'condition-a',
+                'yes-token-old',
+                'snapshot-old',
+                'yes-token-old',
+                'no-token-old'
+            ),
+            (
+                'condition-a',
+                'no-token-old',
+                'snapshot-old',
+                'yes-token-old',
+                'no-token-old'
+            );
         """
     )
     forecast = sqlite3.connect(":memory:")
@@ -5346,8 +5652,14 @@ def test_current_gamma_identity_fills_missing_no_without_changing_q():
         (missing_condition,),
     )
     ambiguous.execute(
-        "INSERT INTO executable_market_snapshot_latest VALUES (?,?,?)",
-        (missing_condition, "conflicting-selected", "conflicting-topology"),
+        "INSERT INTO executable_market_snapshot_latest VALUES (?,?,?,?,?)",
+        (
+            missing_condition,
+            "conflicting-selected",
+            "conflicting-topology",
+            "conflicting-yes",
+            "conflicting-no",
+        ),
     )
     with pytest.raises(
         ValueError,

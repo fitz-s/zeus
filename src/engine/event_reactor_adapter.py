@@ -145,7 +145,10 @@ side-effect boundary.
 
 from __future__ import annotations
 
+import base64
+import binascii
 import contextlib
+import hashlib
 import json
 import logging
 import math
@@ -153,12 +156,13 @@ import os
 import sqlite3
 import threading
 import time as _time
+import zlib
 from dataclasses import dataclass, replace as dataclass_replace
 from datetime import date, datetime, time, timedelta, timezone
 from zoneinfo import ZoneInfo
 from decimal import Decimal
 from collections.abc import Iterable, Mapping
-from typing import Any, Callable, get_args
+from typing import TYPE_CHECKING, Any, Callable, get_args
 
 import numpy as np
 
@@ -258,6 +262,9 @@ from src.config import runtime_cities_by_name, edge_n_bootstrap, settings
 from src.contracts.position_truth import CURRENT_MONEY_RISK_CHAIN_STATES
 from src.contracts.settlement_semantics import SettlementSemantics
 from src.strategy.market_fusion import MODEL_ONLY_POSTERIOR_MODE
+
+if TYPE_CHECKING:
+    from src.risk_allocator import EntryCapacityAuthority
 from src.strategy.market_phase import (
     MarketPhase,
     FORECAST_ONLY_ADMIT_PHASES as _FORECAST_ONLY_ADMIT_PHASES,
@@ -439,6 +446,18 @@ def _global_book_speculative_topology(
             return None
         token_by_condition[condition_id] = pair
 
+    missing_condition_ids = {
+        condition_id
+        for condition_id in condition_ids
+        if condition_id not in token_by_condition
+    }
+    if missing_condition_ids:
+        receipt_pairs = _global_book_receipt_token_pairs(
+            trade_conn,
+            condition_ids=missing_condition_ids,
+        )
+        token_by_condition.update(receipt_pairs)
+
     topology: list[tuple[str, str, str, str, str]] = []
     tokens: set[str] = set()
     for family_key, bin_id, condition_id in skeleton:
@@ -456,6 +475,159 @@ def _global_book_speculative_topology(
             )
         )
     return tuple(sorted(topology)) or None
+
+
+def _global_book_receipt_token_pairs(
+    trade_conn: sqlite3.Connection,
+    *,
+    condition_ids: Iterable[str],
+) -> dict[str, tuple[str, str]]:
+    """Read a hash-verified complete receipt only as a last-seen token hint."""
+
+    requested = {
+        str(condition_id or "").strip()
+        for condition_id in condition_ids
+        if str(condition_id or "").strip()
+    }
+    if not requested:
+        return {}
+    try:
+        receipt_rows = trade_conn.execute(
+            """
+            SELECT
+                json_extract(
+                    artifact_json,
+                    '$.summary.schema_version'
+                ),
+                json_extract(
+                    artifact_json,
+                    '$.summary.book_native_side_candidate_coverage_status'
+                ),
+                json_extract(
+                    artifact_json,
+                    '$.summary.book_native_side_candidate_coverage_complete'
+                ),
+                json_extract(
+                    artifact_json,
+                    '$.summary.book_native_side_encoding'
+                ),
+                json_extract(
+                    artifact_json,
+                    '$.summary.book_native_side_state_count'
+                ),
+                json_extract(
+                    artifact_json,
+                    '$.summary.book_native_side_states_sha256'
+                ),
+                json_extract(
+                    artifact_json,
+                    '$.summary.book_native_side_states_zlib_b64'
+                )
+            FROM decision_log
+            WHERE mode = 'global_single_order_auction'
+            ORDER BY id DESC
+            LIMIT 4
+            """
+        ).fetchall()
+    except sqlite3.Error:
+        return {}
+
+    fields = (
+        "family_key",
+        "bin_id",
+        "condition_id",
+        "side",
+        "token_id",
+        "status",
+        "book_hash",
+        "market_event_id",
+        "gamma_market_id",
+    )
+    for receipt_row in receipt_rows:
+        (
+            schema_version,
+            coverage_status,
+            coverage_complete,
+            encoding,
+            state_count,
+            expected_hash,
+            compressed_b64,
+        ) = receipt_row
+        if (
+            schema_version != 12
+            or coverage_status != "COMPLETE"
+            or coverage_complete != 1
+            or encoding != "zlib+base64+canonical-json-v1"
+            or not isinstance(state_count, int)
+            or state_count <= 0
+            or not isinstance(expected_hash, str)
+            or not isinstance(compressed_b64, str)
+        ):
+            continue
+        try:
+            encoded = zlib.decompress(
+                base64.b64decode(compressed_b64, validate=True)
+            )
+            payload = json.loads(encoded)
+        except (
+            binascii.Error,
+            json.JSONDecodeError,
+            TypeError,
+            ValueError,
+            zlib.error,
+        ):
+            continue
+        if hashlib.sha256(encoded).hexdigest() != expected_hash:
+            continue
+        if (
+            not isinstance(payload, dict)
+            or tuple(payload.get("fields") or ()) != fields
+            or not isinstance(payload.get("rows"), list)
+            or len(payload["rows"]) != state_count
+        ):
+            continue
+
+        side_tokens: dict[tuple[str, str], str] = {}
+        row_keys: set[tuple[str, str, str, str, str]] = set()
+        valid = True
+        for raw_row in payload["rows"]:
+            if not isinstance(raw_row, (list, tuple)) or len(raw_row) != len(fields):
+                valid = False
+                break
+            row = tuple(str(value or "").strip() for value in raw_row)
+            family_key, bin_id, condition_id, side, token_id, status = row[:6]
+            row_key = row[:5]
+            if (
+                not all((family_key, bin_id, condition_id, side, token_id, status))
+                or side not in {"YES", "NO"}
+                or row_key in row_keys
+            ):
+                valid = False
+                break
+            row_keys.add(row_key)
+            if condition_id not in requested:
+                continue
+            side_key = (condition_id, side)
+            previous = side_tokens.get(side_key)
+            if previous is not None and previous != token_id:
+                valid = False
+                break
+            side_tokens[side_key] = token_id
+        if not valid:
+            continue
+
+        pairs: dict[str, tuple[str, str]] = {}
+        for condition_id in requested:
+            yes_token_id = side_tokens.get((condition_id, "YES"))
+            no_token_id = side_tokens.get((condition_id, "NO"))
+            if (
+                yes_token_id
+                and no_token_id
+                and yes_token_id != no_token_id
+            ):
+                pairs[condition_id] = (yes_token_id, no_token_id)
+        return pairs
+    return {}
 
 
 def _global_book_epoch_cache_namespace(
@@ -4503,6 +4675,7 @@ def event_bound_live_adapter_from_trade_conn(
     edli_live_scope: str = "forecast_plus_day0",
     family_snapshot_refresher: "FamilySnapshotRefresher | None" = None,
     entry_live_health_authority_provider: Callable[[], Mapping[str, object] | None] | None = None,
+    entry_capacity_authority: "EntryCapacityAuthority | None" = None,
 ) -> Callable[[OpportunityEvent, datetime], EventSubmissionReceipt]:
     """Build the event-bound live certificate chain up to the executor boundary.
 
@@ -4515,6 +4688,11 @@ def event_bound_live_adapter_from_trade_conn(
     reservation accumulator is CLOSURE-held (test-isolation safe), fresh per
     adapter instance (== per reactor cycle).
     """
+
+    if entry_capacity_authority is None:
+        from src.risk_allocator import snapshot_global_entry_capacity_authority
+
+        entry_capacity_authority = snapshot_global_entry_capacity_authority()
 
     # Live production scope is forecast_plus_day0 only. Forecast and Day0 events
     # both use this same execution adapter; unknown events fail closed before the
@@ -5839,9 +6017,7 @@ def event_bound_live_adapter_from_trade_conn(
             market_event_id,
             _owner_event_id,
         ):
-            from src.risk_allocator import current_global_entry_capacity_usd
-
-            return current_global_entry_capacity_usd(
+            return entry_capacity_authority.capacity_usd(
                 market_id=str(gamma_market_id),
                 event_id=str(market_event_id),
                 resolution_window="default",

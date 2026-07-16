@@ -40,6 +40,7 @@ from src.risk_allocator import (
     load_position_lots,
     refresh_global_allocator,
     select_global_order_type,
+    snapshot_global_entry_capacity_authority,
     summary as risk_allocator_summary,
 )
 from src.riskguard.risk_level import RiskLevel
@@ -214,6 +215,37 @@ def test_current_entry_capacity_exposes_same_remaining_envelope_as_submit_gate()
         ) == Decimal("50")
     finally:
         clear_global_allocator()
+
+
+def test_entry_capacity_snapshot_survives_later_global_clear():
+    allocator = RiskAllocator(
+        CapPolicy(max_per_market_micro=150_000_000),
+        [
+            ExposureLot(
+                "m1",
+                "e1",
+                "day0",
+                "t1",
+                100_000_000,
+                "CONFIRMED_EXPOSURE",
+                correlation_key="corr-1",
+            )
+        ],
+    )
+    configure_global_allocator(allocator, _state())
+    authority = snapshot_global_entry_capacity_authority()
+
+    clear_global_allocator()
+
+    assert authority.capacity_usd(
+        market_id="m1",
+        event_id="e1",
+        resolution_window="day0",
+        correlation_key="corr-1",
+    ) == Decimal("50")
+    with pytest.raises(AllocationDenied) as excinfo:
+        snapshot_global_entry_capacity_authority()
+    assert excinfo.value.decision.reason == "allocator_not_configured"
 
 
 def test_allocator_indexes_match_reference_scans_and_rebuild_with_lots():

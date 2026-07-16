@@ -273,15 +273,17 @@ one-submit evidence, and fresh post-submit capital/venue reconciliation.
 
 **Time-sensitive current-truth acquisition.** Gamma tradeability/token metadata and CLOB native
 order books are independent external facts joined by condition/token identity. When the current
-in-memory cache or canonical last-seen token mapping provides a complete speculative topology
-hint, the live adapter may fetch the corresponding CLOB token universe concurrently with the
-current Gamma bind, then join both results inside one authority-bounded capture window. The hint
-is never current authority: the optimization must not shrink the family/token universe, reuse an
-expired book, infer tradeability from the CLOB response, or bypass the existing token, metadata,
-completeness, quote-TTL, and JIT winner recapture checks. A token identity change makes the
-speculative book batch unusable and falls back to the ordinary current capture/fail-closed path.
-This changes latency only; q, Fractional Kelly, BUY/SELL/HOLD/CASH ranking, operator pause, and
-venue actuation law are unchanged.
+in-memory cache, canonical last-seen token mapping, or latest complete schema-v12 global-auction
+receipt provides a complete speculative topology hint, the live adapter may fetch the
+corresponding CLOB token universe concurrently with the current Gamma bind, then join both results
+inside one authority-bounded capture window. Receipt reuse requires COMPLETE native-side coverage,
+the exact encoding/field shape, and a matching payload hash; missing, malformed, conflicting, or
+corrupt receipt state contributes no hint. The hint is never current authority: the optimization
+must not shrink the family/token universe, reuse an expired book, infer tradeability from the CLOB
+response, or bypass the existing token, metadata, completeness, quote-TTL, and JIT winner
+recapture checks. A token identity change makes the speculative book batch unusable and falls back
+to the ordinary current capture/fail-closed path. This changes latency only; q, Fractional Kelly,
+BUY/SELL/HOLD/CASH ranking, operator pause, and venue actuation law are unchanged.
 
 **Native-side materialization closure.** A complete current book epoch already binds every native
 YES and NO token to one typed state: `EXECUTABLE`, `NO_ASK`, `VENUE_NOT_EXECUTABLE`, or
