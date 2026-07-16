@@ -3875,6 +3875,7 @@ def _forecast_sidecar_health() -> CheckResult:
                 REPLACEMENT_SIDECAR_RUNNING_MAX_AGE_SECONDS
             ),
         },
+        restart_blocking=False,
     )
 
 

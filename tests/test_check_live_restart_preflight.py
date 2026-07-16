@@ -4390,11 +4390,14 @@ def _init_sidecar_surfaces_for_identity(
     _insert_collateral_snapshot(trade, now=now)
 
 
-def test_preflight_blocks_unhealthy_replacement_forecast_sidecar(monkeypatch, tmp_path):
-    trade_db, forecast_db, _state_dir = _patch_paths(monkeypatch, tmp_path)
-    _init_trade_db(trade_db).close()
-    forecasts = _init_forecast_db(forecast_db)
+def test_preflight_entry_blocks_unhealthy_replacement_forecast_sidecar(monkeypatch, tmp_path):
+    trade_db, forecast_db, state_dir = _patch_paths(monkeypatch, tmp_path)
     fresh = datetime.now(timezone.utc)
+    trade = _init_trade_db(trade_db)
+    _init_sidecar_surfaces(trade, now=fresh)
+    _write_fresh_sidecar_heartbeats(state_dir, now=fresh)
+    trade.close()
+    forecasts = _init_forecast_db(forecast_db)
     forecasts.execute(
         """
         INSERT INTO forecast_posteriors (
@@ -4432,18 +4435,25 @@ def test_preflight_blocks_unhealthy_replacement_forecast_sidecar(monkeypatch, tm
 
     result = preflight.evaluate()
 
-    assert result["ok"] is False
+    assert result["ok"] is True
     sidecar = next(c for c in result["checks"] if c["name"] == "forecast_sidecar_health")
     assert sidecar["ok"] is False
+    assert sidecar["restart_blocking"] is False
+    assert [row["name"] for row in result["entry_blockers"]] == [
+        "forecast_sidecar_health"
+    ]
     assert sidecar["evidence"]["risky"][0]["risk"] == "latest_scheduler_outcome_failed"
     assert "trade_authority_status" in sidecar["evidence"]["risky"][0]["last_failure_reason"]
 
 
-def test_preflight_blocks_unhealthy_bpf_capture_scheduler_job(monkeypatch, tmp_path):
-    trade_db, forecast_db, _state_dir = _patch_paths(monkeypatch, tmp_path)
-    _init_trade_db(trade_db).close()
-    forecasts = _init_forecast_db(forecast_db)
+def test_preflight_entry_blocks_unhealthy_bpf_capture_scheduler_job(monkeypatch, tmp_path):
+    trade_db, forecast_db, state_dir = _patch_paths(monkeypatch, tmp_path)
     fresh = datetime.now(timezone.utc)
+    trade = _init_trade_db(trade_db)
+    _init_sidecar_surfaces(trade, now=fresh)
+    _write_fresh_sidecar_heartbeats(state_dir, now=fresh)
+    trade.close()
+    forecasts = _init_forecast_db(forecast_db)
     forecasts.execute(
         """
         INSERT INTO forecast_posteriors (
@@ -4466,9 +4476,13 @@ def test_preflight_blocks_unhealthy_bpf_capture_scheduler_job(monkeypatch, tmp_p
 
     result = preflight.evaluate()
 
-    assert result["ok"] is False
+    assert result["ok"] is True
     sidecar = next(c for c in result["checks"] if c["name"] == "forecast_sidecar_health")
     assert sidecar["ok"] is False
+    assert sidecar["restart_blocking"] is False
+    assert [row["name"] for row in result["entry_blockers"]] == [
+        "forecast_sidecar_health"
+    ]
     assert sidecar["evidence"]["risky"][0]["job"] == "bayes_precision_fusion_capture"
     assert sidecar["evidence"]["risky"][0]["risk"] == "scheduler_job_failed"
 
@@ -4518,11 +4532,14 @@ def test_preflight_allows_bpf_capture_transport_degraded_skip(monkeypatch, tmp_p
     assert sidecar["evidence"]["risky"] == []
 
 
-def test_preflight_blocks_forecast_live_heartbeat_missing_replacement_jobs(monkeypatch, tmp_path):
-    trade_db, forecast_db, _state_dir = _patch_paths(monkeypatch, tmp_path)
-    _init_trade_db(trade_db).close()
-    forecasts = _init_forecast_db(forecast_db)
+def test_preflight_entry_blocks_forecast_live_heartbeat_missing_replacement_jobs(monkeypatch, tmp_path):
+    trade_db, forecast_db, state_dir = _patch_paths(monkeypatch, tmp_path)
     fresh = datetime.now(timezone.utc)
+    trade = _init_trade_db(trade_db)
+    _init_sidecar_surfaces(trade, now=fresh)
+    _write_fresh_sidecar_heartbeats(state_dir, now=fresh)
+    trade.close()
+    forecasts = _init_forecast_db(forecast_db)
     forecasts.execute(
         """
         INSERT INTO forecast_posteriors (
@@ -4540,9 +4557,13 @@ def test_preflight_blocks_forecast_live_heartbeat_missing_replacement_jobs(monke
 
     result = preflight.evaluate()
 
-    assert result["ok"] is False
+    assert result["ok"] is True
     sidecar = next(c for c in result["checks"] if c["name"] == "forecast_sidecar_health")
     assert sidecar["ok"] is False
+    assert sidecar["restart_blocking"] is False
+    assert [row["name"] for row in result["entry_blockers"]] == [
+        "forecast_sidecar_health"
+    ]
     risks = {item["risk"] for item in sidecar["evidence"]["risky"]}
     assert "forecast_live_heartbeat_missing_replacement_jobs" in risks
 
@@ -4582,7 +4603,7 @@ def test_preflight_accepts_fresh_running_replacement_forecast_sidecar_job(monkey
     assert sidecar["evidence"]["risky"] == []
 
 
-def test_preflight_blocks_stale_running_replacement_forecast_sidecar_job(monkeypatch, tmp_path):
+def test_preflight_entry_blocks_stale_running_replacement_forecast_sidecar_job(monkeypatch, tmp_path):
     trade_db, forecast_db, state_dir = _patch_paths(monkeypatch, tmp_path)
     trade = _init_trade_db(trade_db)
     forecasts = _init_forecast_db(forecast_db)
@@ -4614,9 +4635,13 @@ def test_preflight_blocks_stale_running_replacement_forecast_sidecar_job(monkeyp
 
     result = preflight.evaluate()
 
-    assert result["ok"] is False
+    assert result["ok"] is True
     sidecar = next(c for c in result["checks"] if c["name"] == "forecast_sidecar_health")
     assert sidecar["ok"] is False
+    assert sidecar["restart_blocking"] is False
+    assert [row["name"] for row in result["entry_blockers"]] == [
+        "forecast_sidecar_health"
+    ]
     risks = {item["risk"] for item in sidecar["evidence"]["risky"]}
     assert "scheduler_job_running_stale" in risks
 
