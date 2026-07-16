@@ -2056,8 +2056,11 @@ def test_current_global_probability_prepare_does_not_require_price_snapshot(
         lambda *args, **kwargs: object(),
     )
     bundle_read: dict[str, object] = {}
+    bundle_read_count = 0
 
     def read_bundle(*args, **kwargs):
+        nonlocal bundle_read_count
+        bundle_read_count += 1
         bundle_read.update(kwargs)
         return SimpleNamespace(
             ok=True,
@@ -2069,14 +2072,29 @@ def test_current_global_probability_prepare_does_not_require_price_snapshot(
 
     traced: list[str] = []
     forecast.set_trace_callback(traced.append)
+    event = _global_scope_event(city="Dallas", source_run_id="run-dallas")
+    cache_namespace = f"test-current-probability-{bootstrap_basis}-{id(forecast)}"
+    first_cut = _dt.datetime(
+        2026, 7, 10, 8, 10, tzinfo=_dt.timezone.utc
+    )
     prepared = era._prepare_current_global_probability_family(
-        _global_scope_event(city="Dallas", source_run_id="run-dallas"),
+        event,
         forecast_conn=forecast,
         topology_conn=forecast,
-        decision_time=_dt.datetime(2026, 7, 10, 8, 10, tzinfo=_dt.timezone.utc),
+        decision_time=first_cut,
         max_age=_dt.timedelta(seconds=30),
+        cache_namespace=cache_namespace,
     )
     forecast.set_trace_callback(None)
+    second_cut = first_cut + _dt.timedelta(seconds=1)
+    cached = era._prepare_current_global_probability_family(
+        event,
+        forecast_conn=forecast,
+        topology_conn=forecast,
+        decision_time=second_cut,
+        max_age=_dt.timedelta(seconds=20),
+        cache_namespace=cache_namespace,
+    )
 
     witness = prepared.probability_witness
     assert prepared.candidate_seeds == ()
@@ -2095,6 +2113,32 @@ def test_current_global_probability_prepare_does_not_require_price_snapshot(
         "SELECT POSTERIOR_IDENTITY_HASH, DEPENDENCY_HASH, POSTERIOR_CONFIG_HASH"
         in statement.upper()
         for statement in traced
+    )
+    assert bundle_read_count == 1
+    assert np.array_equal(
+        cached.probability_witness.yes_q_samples,
+        witness.yes_q_samples,
+    )
+    assert cached.probability_witness.captured_at_utc == second_cut
+    assert cached.probability_witness.max_age == _dt.timedelta(seconds=20)
+    assert (
+        cached.probability_witness.authority_certificate_hash
+        != witness.authority_certificate_hash
+    )
+    assert cached.probability_witness.witness_identity != witness.witness_identity
+
+    changed = era._prepare_current_global_probability_family(
+        _global_scope_event(city="Dallas", source_run_id="run-dallas-next"),
+        forecast_conn=forecast,
+        topology_conn=forecast,
+        decision_time=second_cut,
+        max_age=_dt.timedelta(seconds=30),
+        cache_namespace=cache_namespace,
+    )
+    assert bundle_read_count == 2
+    assert (
+        changed.probability_witness.authority_certificate_hash
+        != cached.probability_witness.authority_certificate_hash
     )
 
 

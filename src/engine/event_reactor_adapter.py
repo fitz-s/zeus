@@ -327,6 +327,125 @@ class _GlobalBookEpochCacheEntry:
 
 _GLOBAL_BOOK_EPOCH_CACHE_LOCK = threading.Lock()
 _GLOBAL_BOOK_EPOCH_CACHE: _GlobalBookEpochCacheEntry | None = None
+_GLOBAL_PROBABILITY_PREP_CACHE_LOCK = threading.Lock()
+_GLOBAL_PROBABILITY_PREP_CACHE: dict[
+    tuple[str, str], tuple[str, str, object]
+] = {}
+_GLOBAL_PROBABILITY_PREP_CACHE_MAX_FAMILIES = 512
+
+
+def _sqlite_main_namespace(conn: sqlite3.Connection | None) -> str | None:
+    if conn is None:
+        return None
+    for _, name, path in conn.execute("PRAGMA database_list"):
+        if str(name) == "main":
+            resolved = str(path or "").strip()
+            return resolved or f":memory:{id(conn)}"
+    return None
+
+
+def _reissue_cached_probability_family(
+    prepared: object,
+    *,
+    event: OpportunityEvent,
+    family_binding_hash: str,
+    decision_time: datetime,
+    max_age: timedelta,
+) -> object:
+    from src.solve.solver import joint_probability_witness_identity
+
+    witness = prepared.probability_witness
+    authority_certificate_hash = stable_hash(
+        {
+            "event_id": event.event_id,
+            "causal_snapshot_id": event.causal_snapshot_id,
+            "family_binding_hash": family_binding_hash,
+            "q_version": witness.q_version,
+            "source_truth_identity": witness.source_truth_identity,
+            "captured_at_utc": decision_time.isoformat(),
+        }
+    )
+    witness_identity = joint_probability_witness_identity(
+        family_key=witness.family_key,
+        bindings=witness.bindings,
+        q_version=witness.q_version,
+        resolution_identity=witness.resolution_identity,
+        topology_identity=witness.topology_identity,
+        posterior_identity_hash=witness.posterior_identity_hash,
+        source_truth_identity=witness.source_truth_identity,
+        authority_certificate_hash=authority_certificate_hash,
+        band_alpha=witness.band_alpha,
+        band_basis=witness.band_basis,
+        yes_q_samples=witness.yes_q_samples,
+        captured_at_utc=decision_time,
+    )
+    current_witness = dataclass_replace(
+        witness,
+        authority_certificate_hash=authority_certificate_hash,
+        captured_at_utc=decision_time,
+        max_age=max_age,
+        witness_identity=witness_identity,
+    )
+    return dataclass_replace(
+        prepared,
+        decision_id=stable_hash(
+            {
+                "authority_certificate_hash": authority_certificate_hash,
+                "witness_identity": witness_identity,
+            }
+        ),
+        probability_witness=current_witness,
+    )
+
+
+def _cached_probability_family(
+    *,
+    cache_namespace: str,
+    event: OpportunityEvent,
+    family_key: str,
+    family_binding_hash: str,
+    decision_time: datetime,
+    max_age: timedelta,
+) -> object | None:
+    with _GLOBAL_PROBABILITY_PREP_CACHE_LOCK:
+        cached = _GLOBAL_PROBABILITY_PREP_CACHE.get(
+            (cache_namespace, family_key)
+        )
+    if cached is None:
+        return None
+    event_id, binding_hash, prepared = cached
+    if event_id != event.event_id or binding_hash != family_binding_hash:
+        return None
+    return _reissue_cached_probability_family(
+        prepared,
+        event=event,
+        family_binding_hash=family_binding_hash,
+        decision_time=decision_time,
+        max_age=max_age,
+    )
+
+
+def _store_cached_probability_family(
+    prepared: object,
+    *,
+    cache_namespace: str,
+    event: OpportunityEvent,
+    family_key: str,
+    family_binding_hash: str,
+) -> None:
+    with _GLOBAL_PROBABILITY_PREP_CACHE_LOCK:
+        _GLOBAL_PROBABILITY_PREP_CACHE[(cache_namespace, family_key)] = (
+            event.event_id,
+            family_binding_hash,
+            prepared,
+        )
+        while (
+            len(_GLOBAL_PROBABILITY_PREP_CACHE)
+            > _GLOBAL_PROBABILITY_PREP_CACHE_MAX_FAMILIES
+        ):
+            _GLOBAL_PROBABILITY_PREP_CACHE.pop(
+                next(iter(_GLOBAL_PROBABILITY_PREP_CACHE))
+            )
 
 
 def _cached_global_book_probabilities(epoch: object) -> dict[str, object] | None:
@@ -4870,6 +4989,7 @@ def event_bound_live_adapter_from_trade_conn(
     _live_ack_count: list[int] = [0]
     _consumed_global_preflight_tokens: dict[str, datetime] = {}
     _global_entry_policy_by_family: dict[str, tuple[str, str]] = {}
+    _global_probability_cache_namespace = _sqlite_main_namespace(forecast_conn)
 
     # INV-K7 reservation ledger: closure-held, fresh per reactor cycle. FIX B
     # (2026-06-05): rollback-aware so a candidate rejected downstream of Kelly is
@@ -4936,6 +5056,7 @@ def event_bound_live_adapter_from_trade_conn(
                 observation_conn=calibration_conn,
                 decision_time=decision_time,
                 max_age=FRESHNESS_WINDOW_DEFAULT,
+                cache_namespace=_global_probability_cache_namespace,
             )
         except Exception as exc:  # noqa: BLE001 - typed fail-closed batch receipt
             return EventSubmissionReceipt(
@@ -24623,6 +24744,7 @@ def _prepare_current_global_probability_family(
     decision_time: datetime,
     max_age: timedelta,
     day0_payload_out: dict[str, object] | None = None,
+    cache_namespace: str | None = None,
 ):
     """Build a current joint-q witness without any executable-price dependency."""
 
@@ -24676,6 +24798,17 @@ def _prepare_current_global_probability_family(
         )
     family = bound.candidate_family
     is_day0 = event.event_type == "DAY0_EXTREME_UPDATED"
+    if not is_day0 and cache_namespace:
+        cached = _cached_probability_family(
+            cache_namespace=cache_namespace,
+            event=event,
+            family_key=family.family_id,
+            family_binding_hash=family.binding_hash,
+            decision_time=decision_time,
+            max_age=max_age,
+        )
+        if cached is not None:
+            return cached
     current_day0_payload: dict[str, object] | None = None
     day0_observation_conn = observation_conn or forecast_conn
     day0_snapshot: Mapping[str, object] | None = None
@@ -25001,7 +25134,7 @@ def _prepare_current_global_probability_family(
         max_age=max_age,
         witness_identity=witness_identity,
     )
-    return PreparedGlobalFamily(
+    prepared = PreparedGlobalFamily(
         decision_id=stable_hash(
             {
                 "authority_certificate_hash": authority_certificate_hash,
@@ -25011,6 +25144,15 @@ def _prepare_current_global_probability_family(
         probability_witness=witness,
         candidate_seeds=(),
     )
+    if not is_day0 and cache_namespace:
+        _store_cached_probability_family(
+            prepared,
+            cache_namespace=cache_namespace,
+            event=event,
+            family_key=family.family_id,
+            family_binding_hash=family.binding_hash,
+        )
+    return prepared
 
 
 def _current_global_probability_sample_matrix(
