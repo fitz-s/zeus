@@ -536,6 +536,45 @@ def test_insert_rows_widens_running_min_when_incoming_is_lower(mem_db):
     assert revision == ("payload_hash_mismatch_monotone_widening_applied",)
 
 
+def test_insert_rows_same_hash_refetch_after_widening_is_noop(mem_db):
+    """Re-fetching a cell AFTER it was widened re-sends the identical payload
+    (same payload_hash), but the stored provenance now carries the writer's
+    own ``widened_from`` receipt. That receipt is audit metadata, not source
+    identity — the re-fetch must be a silent no-op, not an
+    InvalidObsV2RowError (2026-07-16: 1400+ live ingest crashes, and it
+    permanently bricked every once-widened cell against ALL later fetches)."""
+    r1 = _make_row(
+        running_max=34.0, running_min=34.0, observation_count=1,
+        provenance_json=_valid_provenance(payload_hash="sha256:" + "a" * 64, raw_obs_count=1),
+        imported_at="2026-04-21T15:15:00+00:00",
+    )
+    r2 = _make_row(
+        running_max=35.0, running_min=34.0, observation_count=2,
+        provenance_json=_valid_provenance(payload_hash="sha256:" + "b" * 64, raw_obs_count=2),
+        imported_at="2026-04-22T03:00:00+00:00",
+    )
+    assert insert_rows(mem_db, [r1]) == 1
+    assert insert_rows(mem_db, [r2]) == 0  # widening applied
+
+    # Identical re-fetch of the widened state: same hash as r2, no
+    # widened_from key (a fresh fetch never carries one).
+    r3 = _make_row(
+        running_max=35.0, running_min=34.0, observation_count=2,
+        provenance_json=_valid_provenance(payload_hash="sha256:" + "b" * 64, raw_obs_count=2),
+        imported_at="2026-04-23T03:00:00+00:00",
+    )
+    assert insert_rows(mem_db, [r3]) == 0  # no-op, no crash
+
+    running_max, running_min, observation_count, provenance_json = mem_db.execute(
+        "SELECT running_max, running_min, observation_count, provenance_json FROM observation_instants"
+    ).fetchone()
+    assert (running_max, running_min, observation_count) == (35.0, 34.0, 2)
+    # The widened_from receipt survives — the no-op re-fetch must not erase it.
+    assert json.loads(provenance_json)["widened_from"]["running_max"] == 34.0
+    (n_revisions,) = mem_db.execute("SELECT COUNT(*) FROM observation_revisions").fetchone()
+    assert n_revisions == 1  # only the widening event; the no-op adds nothing
+
+
 def test_insert_rows_quarantines_less_extreme_incoming_running_max(mem_db):
     """A later fetch reporting a LOWER max than what's stored is not a
     legitimate backfill completion (a bucket max cannot decrease as more raw

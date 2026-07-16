@@ -548,9 +548,17 @@ def _payload_hash_from_provenance(provenance_json: Any) -> str | None:
 def _normalize_material_value(column: str, value: Any) -> Any:
     if column == "provenance_json" and isinstance(value, str):
         try:
-            return json.loads(value)
+            parsed = json.loads(value)
         except ValueError:
             return value
+        if isinstance(parsed, dict):
+            # widened_from is this writer's own audit receipt (added by
+            # _widened_provenance_json on a monotone widening), not part of
+            # the source identity. Equal payload_hash already proves the raw
+            # data matches; without stripping it, every re-fetch of a
+            # once-widened cell trips the hash-reuse guard forever.
+            parsed.pop("widened_from", None)
+        return parsed
     return value
 
 
