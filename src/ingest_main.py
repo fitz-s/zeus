@@ -900,10 +900,18 @@ def _day0_metar_source_clock_tick():
         conn.close()
 
     if emitted:
-        publish_reactor_wake(
-            source="day0_metar_source_clock",
-            reason="day0_extreme_event_committed",
-        )
+        try:
+            publish_reactor_wake(
+                source="day0_metar_source_clock",
+                reason="day0_extreme_event_committed",
+            )
+        except Exception:
+            logger.warning(
+                "DAY0_METAR_REACTOR_WAKE_FAILED events_emitted=%d; "
+                "periodic reactor scan remains authoritative",
+                emitted,
+                exc_info=True,
+            )
     logger.info(
         "DAY0_METAR_SOURCE_CLOCK_COMMITTED pending_reports=%d emitted=%d",
         len(pending_reports),

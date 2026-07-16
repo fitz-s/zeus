@@ -766,6 +766,63 @@ class TestDay0MetarSourceClockTick:
         }
         assert order.index("commit") < order.index("wake")
 
+    def test_committed_event_survives_reactor_wake_failure(
+        self, monkeypatch, caplog
+    ):
+        import src.ingest_main as im
+
+        self._enable(monkeypatch)
+        prefetch = SimpleNamespace(
+            ledger_reports=(object(),),
+            freshness_status="fresh_fetch",
+            reports=(object(),),
+            eligible=((_wu_icao_city(), object(), "2026-06-12"),),
+        )
+
+        class _Emitter:
+            def prefetch(self, **_kw):
+                return prefetch
+
+            def emit_prefetched(self, **_kw):
+                return 2
+
+        class _Conn:
+            def execute(self, _sql):
+                return self
+
+            def commit(self):
+                return None
+
+            def rollback(self):
+                raise AssertionError("committed source event must not roll back")
+
+            def close(self):
+                return None
+
+        class _Mutex:
+            def acquire(self, *, timeout):
+                return True
+
+            def release(self):
+                return None
+
+        monkeypatch.setattr(im, "_day0_metar_emitter", lambda: _Emitter())
+        monkeypatch.setattr("src.state.db.get_world_connection", lambda **_kw: _Conn())
+        monkeypatch.setattr("src.state.db.world_write_mutex", lambda: _Mutex())
+        monkeypatch.setattr(
+            "src.runtime.reactor_wake.publish_reactor_wake",
+            lambda **_kw: (_ for _ in ()).throw(OSError("sidecar unavailable")),
+        )
+
+        result = im._day0_metar_source_clock_tick.__wrapped__()
+
+        assert result == {
+            "status": "COMMITTED",
+            "pending_reports": 1,
+            "events_emitted": 2,
+        }
+        assert "periodic reactor scan remains authoritative" in caplog.text
+
     def test_writer_contention_defers_without_emitting(self, monkeypatch):
         import src.ingest_main as im
 
