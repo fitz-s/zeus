@@ -683,13 +683,21 @@ def _download_bayes_precision_fusion_source_clock_raw_inputs_if_needed(
             statuses = {
                 str(item.get("status") or "") for item in source_reports
             }
+            source_incomplete = any(
+                item.get("global_models_dropped_scoped")
+                or item.get("global_models_unavailable")
+                for item in source_reports
+            )
             if not targets_by_source[source]:
                 status = "SOURCE_CLOCK_SOURCE_NO_TARGETS"
             elif source_errors:
                 status = "SOURCE_CLOCK_SOURCE_CAPTURE_FAILSOFT_SKIPPED"
             elif "BAYES_PRECISION_FUSION_EXTRA_TIMEBOXED_INCOMPLETE" in statuses:
                 status = "SOURCE_CLOCK_SOURCE_TIMEBOXED_INCOMPLETE"
-            elif "BAYES_PRECISION_FUSION_EXTRA_TRANSPORT_RETRYABLE" in statuses:
+            elif (
+                "BAYES_PRECISION_FUSION_EXTRA_TRANSPORT_RETRYABLE" in statuses
+                or source_incomplete
+            ):
                 status = "SOURCE_CLOCK_SOURCE_TRANSPORT_RETRYABLE"
             elif statuses == {
                 "BAYES_PRECISION_FUSION_EXTRA_RAW_INPUTS_DOWNLOADED"
@@ -796,8 +804,14 @@ def _download_bayes_precision_fusion_source_clock_raw_inputs_if_needed(
             ),
             "max_wall_clock_seconds": max_wall_clock_seconds,
             "global_models_expected": sum(
-                int(item.get("global_models_expected") or 0)
-                for item in reports
+                max(
+                    (
+                        int(item.get("global_models_expected") or 0)
+                        for item in source_reports
+                    ),
+                    default=0,
+                )
+                for source_reports in reports_by_source.values()
             ),
             "global_models_dropped_scoped": sorted(
                 {

@@ -661,6 +661,7 @@ def test_source_clock_scoped_capture_fans_out_city_dates(
             "status": "BAYES_PRECISION_FUSION_EXTRA_RAW_INPUTS_DOWNLOADED",
             "target_count": len(kwargs["targets"]),
             "written_row_count": len(kwargs["targets"]),
+            "global_models_expected": 1,
             "global_models_unavailable": [],
         }
 
@@ -679,6 +680,7 @@ def test_source_clock_scoped_capture_fans_out_city_dates(
     assert report["fanout_workers"] == 4
     assert report["target_count"] == 8
     assert report["written_row_count"] == 8
+    assert report["global_models_expected"] == 1
     assert report["fanout_errors"] == ()
     assert all({metric for _, metric in group} == {"high", "low"} for group in seen)
     assert report["status"] == (
@@ -815,6 +817,30 @@ def test_source_clock_scoped_capture_isolates_source_cycle_and_cities(
     assert {
         result["status"] for result in unknown["source_results"].values()
     } == {"SOURCE_CLOCK_SOURCE_CAPTURE_FAILSOFT_SKIPPED"}
+
+    monkeypatch.setattr(
+        dl,
+        "download_bayes_precision_fusion_extra_raw_inputs",
+        lambda **kwargs: {
+            "status": "BAYES_PRECISION_FUSION_EXTRA_RAW_INPUTS_DOWNLOADED",
+            "global_models_unavailable": list(kwargs["models"]),
+        },
+    )
+    incomplete = prod._download_bayes_precision_fusion_source_clock_raw_inputs_if_needed(
+        {
+            "forecast_db": str(tmp_path / "zeus-forecasts.db"),
+            "source_clock_fanout_workers": 1,
+        },
+        source_clock_report=_Report(),
+        max_wall_clock_seconds=1.0,
+    )
+
+    assert incomplete["status"] == (
+        "SOURCE_CLOCK_SCOPED_BAYES_PRECISION_FUSION_EXTRA_TRANSPORT_RETRYABLE"
+    )
+    assert {
+        result["status"] for result in incomplete["source_results"].values()
+    } == {"SOURCE_CLOCK_SOURCE_TRANSPORT_RETRYABLE"}
 
     monkeypatch.setattr(
         city_weights,
