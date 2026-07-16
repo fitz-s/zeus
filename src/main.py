@@ -87,6 +87,8 @@ logger = logging.getLogger("zeus")
 _cycle_lock = threading.Lock()
 _held_position_monitor_active = threading.Event()
 _held_position_monitor_bootstrap_complete = threading.Event()
+_edli_reactor_wake_thread: threading.Thread | None = None
+_edli_last_reactor_wake_id: str | None = None
 _HELD_POSITION_MONITOR_DEFER_JOBS = frozenset(
     {
         "market_discovery",
@@ -3638,7 +3640,68 @@ def _edli_event_reactor_cycle() -> None:
     """
     from src.events.reactor import run_edli_event_reactor_cycle
 
+    _start_edli_reactor_wake_listener()
     run_edli_event_reactor_cycle(active_lock=_edli_reactor_active_lock)
+
+
+def _edli_initialize_reactor_wake_cursor() -> None:
+    global _edli_last_reactor_wake_id
+
+    from src.runtime.reactor_wake import read_reactor_wake
+
+    wake = read_reactor_wake()
+    _edli_last_reactor_wake_id = wake.wake_id if wake is not None else None
+
+
+def _edli_reactor_wake_poll_once() -> bool:
+    """Run the canonical reactor once for a new durable-producer wake hint."""
+
+    global _edli_last_reactor_wake_id
+
+    from src.runtime.reactor_wake import read_reactor_wake
+
+    wake = read_reactor_wake()
+    if wake is None or wake.wake_id == _edli_last_reactor_wake_id:
+        return False
+    if _edli_reactor_active_lock.locked() or _held_position_monitor_active.is_set():
+        return False
+    _edli_event_reactor_cycle()
+    _edli_last_reactor_wake_id = wake.wake_id
+    logger.info(
+        "EDLI reactor consumed wake id=%s source=%s reason=%s",
+        wake.wake_id,
+        wake.source,
+        wake.reason,
+    )
+    return True
+
+
+def _run_edli_reactor_wake_listener(
+    *,
+    stop_event: threading.Event,
+    poll_seconds: float = 1.0,
+) -> None:
+    while not stop_event.wait(max(0.05, float(poll_seconds))):
+        try:
+            _edli_reactor_wake_poll_once()
+        except Exception:
+            logger.exception("EDLI reactor wake listener poll failed")
+
+
+def _start_edli_reactor_wake_listener() -> None:
+    global _edli_reactor_wake_thread
+
+    if _edli_reactor_wake_thread is not None and _edli_reactor_wake_thread.is_alive():
+        return
+    _edli_initialize_reactor_wake_cursor()
+    stop_event = threading.Event()
+    _edli_reactor_wake_thread = threading.Thread(
+        target=_run_edli_reactor_wake_listener,
+        kwargs={"stop_event": stop_event},
+        name="edli-reactor-wake",
+        daemon=True,
+    )
+    _edli_reactor_wake_thread.start()
 
 
 @_scheduler_job("edli_bankroll_warm")
@@ -5724,21 +5787,10 @@ def main():
     # is now an unconditional logged no-op (not applicable under single-truth).
     _assert_calibration_coverage_contract(edli_cfg)
     if live_execution_mode in EDLI_EVENT_DRIVEN_MODES and edli_cfg.get("enabled"):
-        # W4.3 liveness analysis (2026-07-03, scan demotion packet): process_pending
-        # (src/events/reactor.py:907) is the SOLE consumer of the opportunity_events queue —
-        # grepped every call site (main.py:4942 is the only one) and found no wake-on-write
-        # path, so EVERY event lane (FORECAST_SNAPSHOT_READY, DAY0_EXTREME_UPDATED,
-        # SOURCE_RUN_ARRIVED-derived staleness cancels, W4.1's book-move buckets, the
-        # continuous-redecision screen's EDLI_REDECISION_PENDING output) is only decided
-        # when THIS job's tick runs. The scan interval is therefore not merely a cold-start/
-        # outage backstop — it directly gates the A2 latency SLA (architecture doc §4b: the
-        # current 60-90s IS the detection floor the axiom measures against). Slowing this
-        # cadence would inject latency into every decision lane, not just the
-        # always-decidable substrate-refresh drain (reactor.py:995-1001) that is the scan's
-        # actual backstop content. Per ORCHESTRATOR ruling shape (b): the cadence is NOT
-        # demoted in this packet. Only the config knob lands (default unchanged — zero
-        # decision-behavior change); an actual slowdown is an explicit, evidence-gated
-        # operator decision once a decoupled wake mechanism exists (E5-adjacent).
+        # The interval remains the durable recovery/backlog scan. Forecast materialization
+        # also publishes a best-effort cross-process wake after its DB commit; the listener
+        # above invokes this same canonical reactor immediately for that hint. A lost or
+        # malformed hint therefore delays work only until this scan and never becomes truth.
         _edli_reactor_scan_interval_seconds = int(
             edli_cfg.get("reactor_scan_interval_seconds", 60) or 60
         )

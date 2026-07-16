@@ -27,6 +27,7 @@ from __future__ import annotations
 import functools
 import json
 import logging
+import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -1301,7 +1302,8 @@ def _run_replacement_forecast_live_materialization_queue_once(cfg: dict[str, obj
         process_replacement_forecast_live_materialization_queue,
     )
 
-    return process_replacement_forecast_live_materialization_queue(
+    revision_before = _forecast_posterior_revision(cfg)
+    report = process_replacement_forecast_live_materialization_queue(
         request_dir=cfg["request_dir"],
         processed_dir=cfg["processed_dir"],
         failed_dir=cfg["failed_dir"],
@@ -1314,6 +1316,50 @@ def _run_replacement_forecast_live_materialization_queue_once(cfg: dict[str, obj
         seed_limit=int(cfg["seed_limit"]),
         limit=int(cfg["limit"]),
     )
+    revision_after = _forecast_posterior_revision(cfg)
+    if (
+        revision_before is not None
+        and revision_after is not None
+        and revision_after > revision_before
+    ):
+        from src.runtime.reactor_wake import publish_reactor_wake
+
+        wake = publish_reactor_wake(
+            source="replacement_forecast_production",
+            reason="forecast_posterior_advanced",
+        )
+        logger.info(
+            "forecast posterior advanced rowid=%d->%d; reactor wake published id=%s",
+            revision_before,
+            revision_after,
+            wake.wake_id,
+        )
+    return report
+
+
+def _forecast_posterior_revision(cfg: dict[str, object]) -> int | None:
+    """Return the append-only posterior rowid high-water mark in constant time."""
+
+    raw_path = cfg.get("forecast_db")
+    if not raw_path:
+        return None
+    path = Path(str(raw_path)).expanduser().resolve()
+    if not path.exists():
+        return None
+    conn = None
+    try:
+        from src.state.db import _connect_read_only
+
+        conn = _connect_read_only(path)
+        row = conn.execute(
+            "SELECT COALESCE(MAX(rowid), 0) FROM forecast_posteriors"
+        ).fetchone()
+        return int(row[0] or 0) if row is not None else 0
+    except (OSError, sqlite3.Error, TypeError, ValueError):
+        return None
+    finally:
+        if conn is not None:
+            conn.close()
 
 
 def _log_replacement_forecast_materialization_report(report) -> None:

@@ -401,6 +401,13 @@ files:
     downstream:
     - src/observability/status_summary.py
     - src/riskguard/riskguard.py
+  src/runtime/reactor_wake.py:
+    zone: K2_runtime
+    authority_role: event_reactor_wake_hint
+    why: Publishes and reads an atomic non-authoritative sidecar hint after durable forecast posterior commits so the live daemon can invoke the existing canonical reactor without waiting for its periodic recovery scan. The hint carries no market, probability, risk, or order truth; loss or corruption falls back to the existing scan.
+    downstream:
+    - src/data/replacement_forecast_production.py
+    - src/main.py
   src/config.py:
     zone: K2_runtime
     authority_role: runtime_config_seed

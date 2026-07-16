@@ -192,6 +192,133 @@ def test_replacement_materialize_job_calls_undecorated_production_inner(monkeypa
     assert calls == ["inner"]
 
 
+def _materialization_queue_cfg(tmp_path) -> dict[str, object]:
+    return {
+        "request_dir": tmp_path / "requests",
+        "processed_dir": tmp_path / "processed",
+        "failed_dir": tmp_path / "failed",
+        "seed_dir": tmp_path / "seeds",
+        "seed_processed_dir": tmp_path / "seeds-processed",
+        "seed_failed_dir": tmp_path / "seeds-failed",
+        "forecast_db": tmp_path / "forecasts.db",
+        "raw_manifest_dir": tmp_path / "raw",
+        "seed_discovery_limit": 1,
+        "seed_limit": 1,
+        "limit": 1,
+    }
+
+
+def test_materialization_queue_publishes_wake_after_posterior_advance(
+    monkeypatch, tmp_path
+) -> None:
+    import src.data.replacement_forecast_live_materialization_queue as queue
+    import src.data.replacement_forecast_production as production
+    from src.runtime import reactor_wake
+
+    report = object()
+    monkeypatch.setattr(
+        queue,
+        "process_replacement_forecast_live_materialization_queue",
+        lambda **kwargs: report,
+    )
+    revisions = iter((41, 42))
+    monkeypatch.setattr(
+        production,
+        "_forecast_posterior_revision",
+        lambda cfg: next(revisions),
+    )
+    published: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        reactor_wake,
+        "publish_reactor_wake",
+        lambda *, source, reason: published.append((source, reason))
+        or reactor_wake.ReactorWake("wake-1", "2026-07-16T12:00:00+00:00", source, reason),
+    )
+
+    result = production._run_replacement_forecast_live_materialization_queue_once(
+        _materialization_queue_cfg(tmp_path)
+    )
+
+    assert result is report
+    assert published == [
+        ("replacement_forecast_production", "forecast_posterior_advanced")
+    ]
+
+
+def test_materialization_queue_does_not_wake_without_new_posterior(
+    monkeypatch, tmp_path
+) -> None:
+    import src.data.replacement_forecast_live_materialization_queue as queue
+    import src.data.replacement_forecast_production as production
+    from src.runtime import reactor_wake
+
+    monkeypatch.setattr(
+        queue,
+        "process_replacement_forecast_live_materialization_queue",
+        lambda **kwargs: object(),
+    )
+    monkeypatch.setattr(production, "_forecast_posterior_revision", lambda cfg: 42)
+    monkeypatch.setattr(
+        reactor_wake,
+        "publish_reactor_wake",
+        lambda **kwargs: (_ for _ in ()).throw(AssertionError("unexpected wake")),
+    )
+
+    production._run_replacement_forecast_live_materialization_queue_once(
+        _materialization_queue_cfg(tmp_path)
+    )
+
+
+def test_reactor_wake_sidecar_round_trip(tmp_path) -> None:
+    from src.runtime.reactor_wake import publish_reactor_wake, read_reactor_wake
+
+    path = tmp_path / "wake.json"
+    published = publish_reactor_wake(
+        source="test",
+        reason="posterior_advanced",
+        path=path,
+        wake_id="wake-42",
+        published_at=datetime(2026, 7, 16, 12, 0, tzinfo=timezone.utc),
+    )
+
+    assert read_reactor_wake(path=path) == published
+
+
+def test_reactor_wake_poll_defers_without_consuming_when_reactor_busy(monkeypatch) -> None:
+    import src.main as main
+    from src.runtime import reactor_wake
+
+    wake = reactor_wake.ReactorWake(
+        "wake-43",
+        "2026-07-16T12:00:00+00:00",
+        "replacement_forecast_production",
+        "forecast_posterior_advanced",
+    )
+    busy = {"value": True}
+
+    class _Lock:
+        def locked(self) -> bool:
+            return busy["value"]
+
+    class _Held:
+        def is_set(self) -> bool:
+            return False
+
+    calls: list[str] = []
+    monkeypatch.setattr(reactor_wake, "read_reactor_wake", lambda: wake)
+    monkeypatch.setattr(main, "_edli_reactor_active_lock", _Lock())
+    monkeypatch.setattr(main, "_held_position_monitor_active", _Held())
+    monkeypatch.setattr(main, "_edli_event_reactor_cycle", lambda: calls.append("reactor"))
+    monkeypatch.setattr(main, "_edli_last_reactor_wake_id", None)
+
+    assert main._edli_reactor_wake_poll_once() is False
+    assert main._edli_last_reactor_wake_id is None
+    busy["value"] = False
+    assert main._edli_reactor_wake_poll_once() is True
+    assert main._edli_reactor_wake_poll_once() is False
+    assert calls == ["reactor"]
+
+
 def test_replacement_materialize_defaults_to_next_reactor_minute(monkeypatch) -> None:
     import src.ingest.forecast_live_daemon as forecast_live_daemon
 
