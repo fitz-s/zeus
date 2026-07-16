@@ -3350,7 +3350,9 @@ def test_live_adapter_discards_speculative_books_when_current_gamma_rebinds(
     world.close()
 
 
-def test_live_adapter_refreshes_only_triggered_probability_family(monkeypatch):
+def test_live_adapter_refreshes_only_eligible_triggered_probability_family(
+    monkeypatch,
+):
     from src.events.candidate_binding import weather_family_id
 
     trade = sqlite3.connect(":memory:")
@@ -3370,6 +3372,10 @@ def test_live_adapter_refreshes_only_triggered_probability_family(monkeypatch):
         fake_process,
     )
     event = _global_scope_event(city="Dallas", source_run_id="run-dallas")
+    ineligible_event = _global_scope_event(
+        city="Alpha",
+        source_run_id="run-alpha",
+    )
     adapter = era.event_bound_live_adapter_from_trade_conn(
         trade,
         get_current_level=lambda: era.RiskLevel.GREEN,
@@ -3378,7 +3384,7 @@ def test_live_adapter_refreshes_only_triggered_probability_family(monkeypatch):
         calibration_conn=world,
     )
     adapter.process_global_batch(
-        (event,),
+        (event, ineligible_event),
         _dt.datetime(2026, 7, 10, 8, 10, tzinfo=_dt.timezone.utc),
     )
 

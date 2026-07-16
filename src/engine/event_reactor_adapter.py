@@ -5897,6 +5897,11 @@ def event_bound_live_adapter_from_trade_conn(
                     cache_before_reason,
                 )
             force_full_refresh = probabilities is last_book_probability_output
+            eligible_refresh_family_keys = (
+                None
+                if refresh_family_keys is None
+                else frozenset(refresh_family_keys.intersection(probabilities))
+            )
             prefetch_slice = None
             prefetch_mode = ""
             prefetch_token_hint = None
@@ -5909,13 +5914,10 @@ def event_bound_live_adapter_from_trade_conn(
                         for row in speculative_topology
                         for token_id in (row[3], row[4])
                     )
-            elif (
-                refresh_family_keys
-                and refresh_family_keys.issubset(probabilities)
-            ):
+            elif eligible_refresh_family_keys:
                 prefetch_slice = {
                     family_key: probabilities[family_key]
-                    for family_key in refresh_family_keys
+                    for family_key in eligible_refresh_family_keys
                 }
                 prefetch_mode = "family_delta_books"
                 delta_topology = _global_book_speculative_topology(
@@ -5976,7 +5978,7 @@ def event_bound_live_adapter_from_trade_conn(
             if (
                 cached is not None
                 and not force_full_refresh
-                and refresh_family_keys == frozenset()
+                and eligible_refresh_family_keys == frozenset()
             ):
                 last_book_probability_output = bound_probabilities
                 logging.getLogger(__name__).info(
@@ -5990,12 +5992,12 @@ def event_bound_live_adapter_from_trade_conn(
             if (
                 cached is not None
                 and not force_full_refresh
-                and refresh_family_keys
-                and refresh_family_keys.issubset(bound_probabilities)
+                and eligible_refresh_family_keys
+                and eligible_refresh_family_keys.issubset(bound_probabilities)
             ):
                 probability_delta = {
                     family_key: bound_probabilities[family_key]
-                    for family_key in refresh_family_keys
+                    for family_key in eligible_refresh_family_keys
                 }
                 delta_epoch = _capture_bound(
                     probability_delta,
@@ -6006,7 +6008,7 @@ def event_bound_live_adapter_from_trade_conn(
                     merged_epoch = _merge_global_book_epoch_delta(
                         cached,
                         delta_epoch,
-                        refresh_family_keys,
+                        eligible_refresh_family_keys,
                     )
                     if (
                         merged_epoch.current_identity(datetime.now(UTC))
@@ -6030,7 +6032,7 @@ def event_bound_live_adapter_from_trade_conn(
                         "global book epoch delta merged: elapsed_s=%.3f "
                         "refreshed_families=%d total_families=%d assets=%d",
                         _time.monotonic() - _book_started,
-                        len(refresh_family_keys),
+                        len(eligible_refresh_family_keys),
                         len(merged_probabilities),
                         len(merged_epoch.assets),
                     )
