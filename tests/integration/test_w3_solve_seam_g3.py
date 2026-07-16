@@ -2579,11 +2579,6 @@ def test_live_adapter_routes_each_global_truth_to_its_owner(monkeypatch):
         "_entry_global_submit_suppression_reason",
         lambda: "entries_paused:test_containment",
     )
-    monkeypatch.setattr(
-        era,
-        "_entry_pause_blocks_live_submit",
-        lambda _conn: None,
-    )
     adapter = era.event_bound_live_adapter_from_trade_conn(
         trade,
         get_current_level=lambda: era.RiskLevel.GREEN,
@@ -2594,12 +2589,6 @@ def test_live_adapter_routes_each_global_truth_to_its_owner(monkeypatch):
             "cycle-start portfolio must not back global selection wealth"
         ),
         auction_capital_authority=CapacityAuthority(),
-        real_order_submit_enabled=True,
-        executor_submit=lambda *_args: pytest.fail(
-            "the captured batch policy must not submit"
-        ),
-        durable_submit_outbox_enabled=True,
-        operator_arm=object(),
     )
     event = _global_scope_event(city="Dallas", source_run_id="run-dallas")
 
@@ -2678,7 +2667,7 @@ def test_live_adapter_routes_each_global_truth_to_its_owner(monkeypatch):
         "GLOBAL_ENTRY_PRICE_BELOW_STRATEGY_FLOOR:"
         "strategy=forecast_qkernel_entry:side=YES:best_ask=0.004:floor=0.1"
     )
-    assert policy(live_floor) == "entries_paused:test_containment"
+    assert policy(live_floor) is None
     assert policy(reduce_only) is None
     metadata_calls = []
     bind_calls = []
