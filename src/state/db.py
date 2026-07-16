@@ -3522,6 +3522,13 @@ def init_schema(
     _ensure_opportunity_event_processing_table(conn)
     _ensure_event_dead_letters_table(conn)
 
+    # day0 defects 1-5 (2026-07-16): append-only publication-stream ledger of
+    # raw station reports (metar_fast, hko rhrread spot) — lands beside
+    # observation_instants (unchanged), feeds the day0 fact reduction as one
+    # more absorbing-direction fact. See src/state/schema/observation_prints_schema.py.
+    from src.state.schema.observation_prints_schema import ensure_table as _ensure_observation_prints_table
+    _ensure_observation_prints_table(conn)
+
     # EDLI v1 (2026-05-24): event-triggered no-trade regret ledger.
     from src.state.schema.no_trade_regret_events_schema import ensure_table as _ensure_no_trade_regret_events_table
     _ensure_no_trade_regret_events_table(conn)

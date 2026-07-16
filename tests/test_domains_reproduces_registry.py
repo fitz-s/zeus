@@ -41,6 +41,11 @@ def test_domains_equals_registry_except_documented_corrections() -> None:
     for name, reg_db in registry.items():
         if name in corrected:
             continue
+        if name in domains.OWNER_LOCAL_MULTI_INSTANCE:
+            # One name, one instance per DB — inexpressible in the
+            # single-Domain-per-name map (and this dict already collapsed the
+            # registry's multiple rows into one arbitrary winner).
+            continue
         d = domains.owner_domain(name)
         assert d is not None, f"domains.py is missing live registry table {name!r} (drift)"
         assert d.value == reg_db, f"owner drift for {name!r}: domains={d.value} registry={reg_db}"

@@ -754,6 +754,110 @@ class TestMetarMarginAbsorption:
 
 
 # ===========================================================================
+# day0 defect-ledger (2026-07-16) — boot hydration. A fresh process's
+# _cached_reports is empty until the first successful HTTP fetch; hydration
+# seeds it from observation_prints instead, so the belief isn't silently
+# empty for the restart window. The kill-memo recovery path
+# (_recover_kill_memo_from_events) is untouched and stays as defense in
+# depth — these tests are scoped to the in-process cache path only.
+# ===========================================================================
+
+class TestLedgerHydration:
+    def test_cold_start_hydrates_cache_and_returns_todays_ledger_max(self):
+        from src.data.day0_fast_obs import fast_obs_source_for_city
+        from src.state.schema.observation_prints_schema import append_print
+
+        conn = _world_conn()
+        tokyo = _tokyo()
+        append_print(
+            conn, city="Tokyo", station_id="RJTT", source_channel="aviationweather_metar",
+            publish_ts_utc="2026-06-09T16:00:00+00:00", value_native=21.0, unit="C",
+            fetched_at_utc="2026-06-09T16:04:00+00:00", raw_report="METAR RJTT 21/15",
+        )
+        append_print(
+            conn, city="Tokyo", station_id="RJTT", source_channel="aviationweather_metar",
+            publish_ts_utc="2026-06-09T17:00:00+00:00", value_native=24.0, unit="C",
+            fetched_at_utc="2026-06-09T17:04:00+00:00", raw_report="METAR RJTT 24/15",
+        )
+        emitter = Day0FastObsEmitter(fetcher=lambda stations, **kw: [], min_fetch_interval_s=0.0)
+        source = fast_obs_source_for_city(tokyo)
+        eligible = ((tokyo, source, "2026-06-10"),)
+
+        hydrated_count = emitter.hydrate_from_ledger(conn, eligible)
+        assert hydrated_count == 2
+
+        extremes = emitter.latest_extremes(
+            tokyo, "2026-06-10", as_of=datetime(2026, 6, 9, 18, 0, tzinfo=UTC),
+        )
+        assert extremes is not None
+        assert extremes.high_so_far == pytest.approx(24.0)
+
+    def test_hydration_is_noop_once_the_cache_is_warm(self):
+        from src.data.day0_fast_obs import fast_obs_source_for_city
+        from src.state.schema.observation_prints_schema import append_print
+
+        conn = _world_conn()
+        tokyo = _tokyo()
+        append_print(
+            conn, city="Tokyo", station_id="RJTT", source_channel="aviationweather_metar",
+            publish_ts_utc="2026-06-09T16:00:00+00:00", value_native=21.0, unit="C",
+            fetched_at_utc="2026-06-09T16:04:00+00:00",
+        )
+        emitter = Day0FastObsEmitter(
+            fetcher=lambda stations, **kw: [_report("RJTT", datetime(2026, 6, 9, 16, 0, tzinfo=UTC), 30.0, t_group=False)],
+            min_fetch_interval_s=0.0,
+        )
+        emitter._reports_with_status(["RJTT"])  # a live fetch already warmed the cache
+        source = fast_obs_source_for_city(tokyo)
+        eligible = ((tokyo, source, "2026-06-10"),)
+
+        hydrated_count = emitter.hydrate_from_ledger(conn, eligible)
+        assert hydrated_count == 0  # no-op -- must not overwrite the live 30.0 with the ledger's 21.0
+
+    def test_hydration_with_no_ledger_data_is_a_safe_noop(self):
+        from src.data.day0_fast_obs import fast_obs_source_for_city
+
+        conn = _world_conn()
+        tokyo = _tokyo()
+        emitter = Day0FastObsEmitter(fetcher=lambda stations, **kw: [], min_fetch_interval_s=0.0)
+        source = fast_obs_source_for_city(tokyo)
+        eligible = ((tokyo, source, "2026-06-10"),)
+
+        assert emitter.hydrate_from_ledger(conn, eligible) == 0
+        assert emitter._cached_reports == []
+
+    def test_emit_prefetched_hydrates_on_a_cold_start_with_no_fetch_this_cycle(self):
+        """The real entry point: emit_prefetched calls hydration even when
+        THIS cycle's own fetch produced nothing -- the exact scenario
+        hydration exists for (an outage spanning multiple cycles)."""
+        from src.data.day0_fast_obs import FastObsPrefetch, fast_obs_source_for_city
+        from src.state.schema.observation_prints_schema import append_print
+
+        conn = _world_conn()
+        tokyo = _tokyo()
+        append_print(
+            conn, city="Tokyo", station_id="RJTT", source_channel="aviationweather_metar",
+            publish_ts_utc="2026-06-09T16:00:00+00:00", value_native=21.0, unit="C",
+            fetched_at_utc="2026-06-09T16:04:00+00:00",
+        )
+        emitter = Day0FastObsEmitter(fetcher=lambda stations, **kw: [], min_fetch_interval_s=0.0)
+        source = fast_obs_source_for_city(tokyo)
+        decision_time = datetime(2026, 6, 9, 18, 0, tzinfo=UTC)
+        prefetch = FastObsPrefetch(
+            eligible=((tokyo, source, "2026-06-10"),),
+            reports=(),  # this cycle's own fetch produced nothing
+            freshness_status="no_data",
+            cache_age_s=None,
+            decision_time=decision_time,
+        )
+
+        emitter.emit_prefetched(world_conn=conn, prefetch=prefetch, received_at=decision_time.isoformat())
+
+        assert len(emitter._cached_reports) == 1
+        assert emitter._cached_reports[0].temp_c == pytest.approx(21.0)
+
+
+# ===========================================================================
 # R19 — source-failure discipline + mutex/no-HTTP split (PR#404 P0-2 / P0-3)
 # ===========================================================================
 
@@ -976,10 +1080,15 @@ class TestMutexNoHttpSplit:
         for live observations only) happens BEFORE _emit_mutex.acquire(); the
         mutex-held emit consumes fast_prefetch and the write-phase function
         contains no fetch/HTTP entry points. Open-Meteo hourly-vector refresh is
-        an independent scheduler job and must not pin the reactor prefetch."""
-        source = open("src/main.py", encoding="utf-8").read()
+        an independent scheduler job and must not pin the reactor prefetch.
+
+        Pin home: the EDLI reactor body moved from src/main.py to
+        src/events/reactor.py (R4-b2 slimming + 57c426dc3); the scheduler
+        job id stays in src/main.py."""
+        source = open("src/events/reactor.py", encoding="utf-8").read()
+        main_source = open("src/main.py", encoding="utf-8").read()
         prefetch_at = source.index("_edli_prefetch_day0_fast_obs(decision_time=now)")
-        acquire_at = source.index("_emit_mutex.acquire()")
+        acquire_at = source.index("_edli_acquire_mutex(_emit_mutex")
         assert prefetch_at < acquire_at, "day0 HTTP prefetch must precede the world-write mutex"
 
         # the write-phase emit function must not contain network entry points
@@ -1004,7 +1113,7 @@ class TestMutexNoHttpSplit:
 
         hourly_src = inspect.getsource(reactor_module.run_edli_day0_hourly_refresh_cycle)
         assert "maybe_refresh_day0_hourly_vectors" in hourly_src
-        assert 'id="edli_day0_hourly_refresh"' in source
+        assert 'id="edli_day0_hourly_refresh"' in main_source
 
     def test_hourly_refresh_yields_before_priority_db_reads(self, monkeypatch):
         import src.config as config_module

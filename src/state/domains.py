@@ -34,6 +34,15 @@ class Domain(Enum):
 CORRECTED_FROM_REGISTRY: frozenset[str] = frozenset({
 })
 
+# ONE table name instantiated per-domain (each DB carries its own local
+# instance) — inexpressible in the single-Domain-per-name CANONICAL_OWNER map.
+# fact_revocations: DIQ packet (docs/rebuild/quarantine_excision_2026-07-11.md).
+# schema_epoch: per-DB epoch row, one per physical DB by construction.
+OWNER_LOCAL_MULTI_INSTANCE: frozenset[str] = frozenset({
+    'fact_revocations',
+    'schema_epoch',
+})
+
 # CANONICAL owner DB per live (non-legacy) table — the SINGLE source of ownership truth.
 CANONICAL_OWNER: dict[str, Domain] = {
     '_migrations_applied': Domain.TRADE,
@@ -86,6 +95,7 @@ CANONICAL_OWNER: dict[str, Domain] = {
     'edli_live_order_events': Domain.WORLD,
     'edli_live_order_projection': Domain.WORLD,
     'edli_live_profit_audit': Domain.WORLD,
+    'edli_live_profit_audit_supersessions': Domain.WORLD,
     'edli_no_submit_receipts': Domain.WORLD,
     'edli_user_channel_inbox': Domain.WORLD,
     'edli_user_channel_message_dedup': Domain.WORLD,
@@ -103,6 +113,8 @@ CANONICAL_OWNER: dict[str, Domain] = {
     'exit_mutex_holdings': Domain.TRADE,
     'exit_timing_attribution': Domain.WORLD,
     'family_rebalance_intents': Domain.WORLD,
+    # LX-T4 (3b08139f1) continuous fill synchronizer cursor state.
+    'fill_sync_watermarks': Domain.TRADE,
     'forecast_posteriors': Domain.FORECASTS,
     'forecast_skill': Domain.WORLD,
     'forecasts': Domain.WORLD,
@@ -120,14 +132,19 @@ CANONICAL_OWNER: dict[str, Domain] = {
     'no_trade_events': Domain.WORLD,
     'no_trade_regret_events': Domain.WORLD,
     'observation_instants': Domain.WORLD,
+    'observation_prints': Domain.WORLD,
     'observation_revisions': Domain.WORLD,
     'observations': Domain.FORECASTS,
     'opportunity_event_processing': Domain.WORLD,
     'opportunity_events': Domain.WORLD,
     'opportunity_fact': Domain.TRADE,
     'outcome_fact': Domain.TRADE,
+    # LX-T4 (3b08139f1): on-chain payout truth for the capital reducer.
+    'payout_observations': Domain.TRADE,
     'platt_models': Domain.WORLD,
     'position_current': Domain.TRADE,
+    # LX-E (23248f72e): decision-certificate attribution rehome.
+    'position_decision_attribution': Domain.TRADE,
     'position_events': Domain.TRADE,
     'position_lots': Domain.TRADE,
     'probability_trace_fact': Domain.WORLD,
@@ -145,6 +162,7 @@ CANONICAL_OWNER: dict[str, Domain] = {
     'selection_family_fact': Domain.WORLD,
     'selection_hypothesis_fact': Domain.WORLD,
     'settlement_attribution': Domain.WORLD,
+    'settlement_attribution_supersessions': Domain.WORLD,
     'settlement_capture_verifications': Domain.FORECASTS,
     'settlement_command_events': Domain.TRADE,
     'settlement_commands': Domain.TRADE,
@@ -163,6 +181,8 @@ CANONICAL_OWNER: dict[str, Domain] = {
     'token_suppression': Domain.TRADE,
     'token_suppression_history': Domain.TRADE,
     'trade_decisions': Domain.TRADE,
+    # Trade-DB epoch marker (single-instance, unlike schema_epoch).
+    'truth_epoch': Domain.TRADE,
     'uma_resolution': Domain.WORLD,
     'validated_calibration_transfers': Domain.WORLD,
     'venue_command_events': Domain.TRADE,
@@ -172,6 +192,8 @@ CANONICAL_OWNER: dict[str, Domain] = {
     'venue_trade_facts': Domain.TRADE,
     # Local-ledger excision LX-T2-a (2026-07-13): sync-owned collateral head.
     'wallet_balance_head': Domain.TRADE,
+    # LX-T4 (c2a98dfb5): durable foreign/ambiguous fill observation lane.
+    'wallet_fill_observations': Domain.TRADE,
     'wrap_unwrap_commands': Domain.WORLD,
     'wrap_unwrap_events': Domain.WORLD,
     'zeus_meta': Domain.WORLD,

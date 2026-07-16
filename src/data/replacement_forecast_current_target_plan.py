@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Mapping
-from zoneinfo import ZoneInfoNotFoundError
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from src.data.replacement_forecast_cycle_policy import tradeable_grade_coverage_sql
 from src.data.replacement_forecast_source_run_identity import expected_replacement_dependency_identity_by_role
@@ -850,6 +850,142 @@ def _latest_authorized_day0_fact(
                 }
             )
             break
+
+    # LEDGER FACT (day0 defect-ledger, 2026-07-16): a third candidate, over
+    # the append-only observation_prints publication stream — see
+    # src/state/schema/observation_prints_schema.py. This is the zero-risk
+    # migration path: it joins the SAME facts list as the two branches above
+    # and goes through the SAME absorbing-direction reduction below — no new
+    # reduction logic. observation_instants + the monotone-widening branch
+    # (defect-2, commit f1d135901) are now LEGACY COMPENSATION for
+    # derived-state-as-truth; once the ledger has full channel coverage and a
+    # settled period of shadow-parity against the other two facts, the day0
+    # belief can read the ledger alone and the widening branch retires — not
+    # yet, this only adds a third fact.
+    if "observation_prints" in _table_names(conn) and city_obj is not None:
+        try:
+            tz = ZoneInfo(str(getattr(city_obj, "timezone", "") or "UTC"))
+            target_day = date.fromisoformat(str(target_date)[:10])
+            local_day_start_utc = datetime.combine(
+                target_day, datetime.min.time(), tzinfo=tz
+            ).astimezone(timezone.utc)
+            local_day_end_utc = local_day_start_utc + timedelta(days=1)
+        except (ValueError, ZoneInfoNotFoundError):
+            local_day_start_utc = None
+            local_day_end_utc = None
+        if local_day_start_utc is not None:
+            # Channel authorization mirrors the opportunity_events branch
+            # above: settlement-family channels only when
+            # require_settlement_channel; physical (settlement + same-station
+            # fast) channels otherwise. wu_api and ogimet_metar_* channels are
+            # not yet written to the ledger (no writer for them) but are
+            # listed here so a future writer needs no reader change.
+            settlement_channels: set[str]
+            physical_channels: set[str]
+            if source_type == "wu_icao":
+                settlement_channels = {"wu_icao_history"}
+                physical_channels = {"wu_icao_history", "aviationweather_metar", "wu_api"}
+            elif source_type == "hko":
+                settlement_channels = set()
+                physical_channels = {"hko_rhrread_spot"}
+            elif source_type == "noaa" and expected_station:
+                ogimet_channel = f"ogimet_metar_{expected_station.lower()}"
+                settlement_channels = {ogimet_channel}
+                physical_channels = {ogimet_channel}
+            else:
+                settlement_channels = set()
+                physical_channels = set()
+            allowed_channels = (
+                settlement_channels if require_settlement_channel else physical_channels
+            )
+            if allowed_channels:
+                placeholders = ",".join("?" for _ in allowed_channels)
+                print_rows = conn.execute(
+                    f"""
+                    SELECT source_channel, publish_ts_utc, value_native, unit, station_id, raw_report
+                      FROM observation_prints
+                     WHERE city = ?
+                       AND source_channel IN ({placeholders})
+                       AND publish_ts_utc >= ?
+                       AND publish_ts_utc < ?
+                       AND publish_ts_utc <= ?
+                    """,
+                    (
+                        city,
+                        *sorted(allowed_channels),
+                        local_day_start_utc.isoformat(),
+                        local_day_end_utc.isoformat(),
+                        decision_utc.isoformat(),
+                    ),
+                ).fetchall()
+                margin_by_channel: dict[str, float | None] = {}
+                best_value: float | None = None
+                best_channel = ""
+                best_publish_ts = ""
+                for print_row in print_rows:
+                    channel = str(print_row["source_channel"])
+                    print_unit = str(print_row["unit"] or "").strip().upper()
+                    if expected_station and not _station_matches(
+                        str(print_row["station_id"] or "").strip().upper(),
+                        expected_station,
+                    ):
+                        continue
+                    value = float(print_row["value_native"])
+                    if channel == "aviationweather_metar":
+                        # Always stored raw Celsius on the wire (day0_fast_obs
+                        # writer) — apply the SAME unit law
+                        # settlement_temp_for_report does (F-settled cities
+                        # only trust a report carrying a T-group; a whole-C
+                        # ->F conversion is imprecise enough to falsely cross
+                        # a bin edge) instead of the generic unit-match check.
+                        from src.data.day0_fast_obs import _T_GROUP_RE
+
+                        if expected_unit == "F":
+                            if not _T_GROUP_RE.search(str(print_row["raw_report"] or "")):
+                                continue
+                            value = value * 9.0 / 5.0 + 32.0
+                        elif expected_unit != "C":
+                            continue
+                        # Same-station fast channel (not the settlement
+                        # channel itself) enters margin-adjusted, toward the
+                        # absorbing direction — reuses the SAME lookup as the
+                        # emission layer (day0_fast_obs) and the exit lane
+                        # (day0_hard_fact_exit) — no second margin mechanism.
+                        if channel not in margin_by_channel:
+                            from src.data.day0_oracle_anomaly import (
+                                metar_margin_units_for_city,
+                            )
+
+                            margin_by_channel[channel] = metar_margin_units_for_city(
+                                city, expected_unit
+                            )
+                        margin = margin_by_channel[channel]
+                        if margin is None:
+                            continue  # not enough evidence to trust even margin-adjusted
+                        value = value - margin if metric == "high" else value + margin
+                    elif print_unit != expected_unit:
+                        continue
+                    publish_ts = str(print_row["publish_ts_utc"])
+                    if best_value is None or (
+                        (metric == "high" and value > best_value)
+                        or (metric == "low" and value < best_value)
+                    ):
+                        best_value = value
+                        best_channel = channel
+                        best_publish_ts = publish_ts
+                if best_value is not None:
+                    facts.append(
+                        {
+                            "observed_extreme_native": best_value,
+                            "observation_time": best_publish_ts,
+                            "sample_count": len(print_rows),
+                            "source": f"observation_prints:{best_channel}",
+                            "observation_source": best_channel,
+                            "station_id": expected_station or "",
+                            "unit": expected_unit,
+                            "observation_available_at": best_publish_ts,
+                        }
+                    )
 
     def fact_time(fact: Mapping[str, object]) -> datetime:
         parsed = datetime.fromisoformat(

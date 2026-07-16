@@ -707,6 +707,80 @@ class FastObsPrefetch:
     anomaly_actions: tuple = ()
 
 
+def _append_metar_prints_to_ledger(
+    world_conn: Any, eligible: tuple, reports: list[MetarReport]
+) -> None:
+    """Append every fetched METAR report for a fast-eligible station to the
+    observation_prints publication-stream ledger (day0 defect-ledger,
+    2026-07-16).
+
+    One short write, already inside the caller's mutex-held world_conn — no
+    network here (reports were fetched earlier, outside the mutex, in
+    prefetch()). INSERT OR IGNORE dedup means a report seen on a previous
+    cycle is a free no-op, never a mutation. Fail-soft: any error is logged
+    and swallowed — the ledger is additive observability, not load-bearing
+    for the existing emission pipeline; a failure here must never block a
+    DAY0_EXTREME_UPDATED emission.
+
+    Stores the RAW METAR temperature (always Celsius on the wire) with
+    unit='C' UNCONDITIONALLY — including reports without a T-group, which
+    ``settlement_temp_for_report`` skips for F-settled cities (imprecise
+    whole-C->F conversion could falsely cross a bin edge). The ledger's job
+    is to record what was published, not to pre-apply a city-specific
+    trust decision at write time — a print stored here is exactly what
+    hydrate_from_ledger later reconstructs a MetarReport from, so storing
+    the SAME raw Celsius a live fetch would have produced avoids a lossy
+    C->F->C round trip. The F-city T-group unit law is instead applied at
+    READ time (_latest_authorized_day0_fact's ledger fact, using the stored
+    raw_report text) — one rule, one place to keep in sync.
+    """
+    if not eligible or not reports:
+        return
+    try:
+        from src.state.schema.observation_prints_schema import append_print
+
+        by_station: dict[str, list[MetarReport]] = {}
+        for report in reports:
+            by_station.setdefault(str(report.station_id).strip().upper(), []).append(report)
+
+        appended = 0
+        seen_city_stations: set[tuple[str, str]] = set()
+        for city, source, _target_date in eligible:
+            station = str(source.station_id).strip().upper()
+            city_name = str(getattr(city, "name", "") or "")
+            key = (city_name, station)
+            if key in seen_city_stations:
+                continue  # one prefetch batch can list a city more than once (e.g. multi-day)
+            seen_city_stations.add(key)
+            for report in by_station.get(station, ()):
+                if report.temp_c is None:
+                    continue
+                publish_ts = (
+                    report.receipt_time.astimezone(UTC)
+                    if report.receipt_time is not None
+                    else report.obs_time.astimezone(UTC)
+                )
+                if append_print(
+                    world_conn,
+                    city=city_name,
+                    station_id=report.station_id,
+                    source_channel=FAST_OBS_SOURCE_ID,
+                    publish_ts_utc=publish_ts.isoformat(),
+                    value_native=float(report.temp_c),
+                    unit="C",
+                    fetched_at_utc=datetime.now(UTC).isoformat(),
+                    raw_report=report.raw,
+                ):
+                    appended += 1
+        if appended:
+            logger.debug("OBSERVATION_PRINTS_APPENDED source=%s count=%d", FAST_OBS_SOURCE_ID, appended)
+    except Exception as exc:  # noqa: BLE001 — ledger append is best-effort, never blocks emission
+        logger.warning(
+            "OBSERVATION_PRINTS_APPEND_FAILED source=%s exc=%s: %s",
+            FAST_OBS_SOURCE_ID, type(exc).__name__, exc,
+        )
+
+
 @dataclass
 class Day0FastObsEmitter:
     """Stateful fast-lane emitter: prefetch (HTTP) -> emit (DB writes).
@@ -743,6 +817,108 @@ class Day0FastObsEmitter:
     _last_kill_memo_rounded: dict[tuple[str, str, str], int] = field(default_factory=dict, init=False)
     _last_live_emitted_rounded: dict[tuple[str, str, str], int] = field(default_factory=dict, init=False)
     _lock: threading.Lock = field(default_factory=threading.Lock, init=False)
+
+    def hydrate_from_ledger(self, world_conn: Any, eligible: tuple) -> int:
+        """Restart-proofing (day0 defect-ledger, 2026-07-16): seed the
+        in-process METAR cache from observation_prints instead of starting
+        empty on a fresh process.
+
+        A cold process's ``_cached_reports`` is empty until the first
+        successful HTTP fetch — normally ~90s (min_fetch_interval_s), but
+        unbounded during an outage. Every consumer of the cache
+        (latest_extremes' entry gate, emit_prefetched's own extreme
+        computation) silently has NOTHING for that whole window. This is a
+        BRIDGE, not a replacement for the kill-memo restart recovery
+        (_recover_kill_memo_from_events, defense in depth, unchanged) —
+        only the in-process cache path.
+
+        No-op once the cache is NON-EMPTY (a successful fetch or a prior
+        hydration) — that is the only state hydration must never overwrite.
+        A FAILED fetch attempt (``_last_attempt_monotonic`` armed, cache
+        still empty) must NOT block hydration: in the live reactor the
+        prefetch always runs before emit, so its failed attempt has already
+        armed that flag by the time this runs — gating on it would make
+        hydration dead code in exactly the outage scenario it exists for.
+        Sets
+        ``_cache_fetched_monotonic`` to now: hydration IS this process's
+        best current view of the world, exactly like a fresh fetch would be
+        — and the normal 90s throttle means a genuine live fetch supersedes
+        it almost immediately regardless.
+
+        Fail-soft: any error is logged and swallowed; the cache simply stays
+        at whatever it already was (empty, on a true cold start).
+        """
+        with self._lock:
+            if self._cached_reports:
+                return 0  # cache already warm — never overwrite live data
+        if not eligible:
+            return 0
+        try:
+            reports: list[MetarReport] = []
+            seen_city_stations: set[tuple[str, str]] = set()
+            for city, source, target_date in eligible:
+                station = str(source.station_id).strip().upper()
+                city_name = str(getattr(city, "name", "") or "")
+                key = (city_name, station)
+                if key in seen_city_stations:
+                    continue
+                seen_city_stations.add(key)
+                tz = ZoneInfo(str(getattr(city, "timezone", "") or "UTC"))
+                target_day = date.fromisoformat(str(target_date)[:10])
+                day_start = datetime.combine(
+                    target_day, datetime.min.time(), tzinfo=tz
+                ).astimezone(UTC)
+                day_end = day_start + timedelta(days=1)
+                rows = world_conn.execute(
+                    """
+                    SELECT publish_ts_utc, value_native, fetched_at_utc, raw_report
+                      FROM observation_prints
+                     WHERE city = ? AND station_id = ? AND source_channel = ?
+                       AND publish_ts_utc >= ? AND publish_ts_utc < ?
+                    """,
+                    (city_name, station, FAST_OBS_SOURCE_ID, day_start.isoformat(), day_end.isoformat()),
+                ).fetchall()
+                for row in rows:
+                    try:
+                        obs_time = datetime.fromisoformat(str(row[0]).replace("Z", "+00:00"))
+                        if obs_time.tzinfo is None:
+                            continue
+                    except (TypeError, ValueError):
+                        continue
+                    receipt_time = None
+                    try:
+                        receipt_time = datetime.fromisoformat(str(row[2]).replace("Z", "+00:00"))
+                        if receipt_time.tzinfo is None:
+                            receipt_time = None
+                    except (TypeError, ValueError):
+                        pass
+                    reports.append(
+                        MetarReport(
+                            station_id=station,
+                            obs_time=obs_time.astimezone(UTC),
+                            receipt_time=receipt_time.astimezone(UTC) if receipt_time else None,
+                            temp_c=float(row[1]),
+                            metar_type="METAR",
+                            raw=str(row[3] or ""),
+                        )
+                    )
+            if not reports:
+                return 0
+            with self._lock:
+                if self._cached_reports:
+                    return 0  # a concurrent fetch beat us to it
+                self._cached_reports = reports
+                self._cache_fetched_monotonic = time.monotonic()
+            logger.info(
+                "DAY0_FAST_OBS_LEDGER_HYDRATED count=%d cities=%d",
+                len(reports), len(seen_city_stations),
+            )
+            return len(reports)
+        except Exception as exc:  # noqa: BLE001 — hydration is best-effort, never blocks the caller
+            logger.warning(
+                "DAY0_FAST_OBS_LEDGER_HYDRATE_FAILED exc=%s: %s", type(exc).__name__, exc,
+            )
+            return 0
 
     def _reports_with_status(self, stations: list[str]) -> tuple[list[MetarReport], str, Optional[float]]:
         """(reports, freshness_status, cache_age_s). Throttle covers FAILED
@@ -1101,10 +1277,23 @@ class Day0FastObsEmitter:
                     "DAY0_ORACLE_ANOMALY_EMIT_ACTION_FAILED action=%r exc=%s: %s",
                     action, type(exc).__name__, exc,
                 )
+        if prefetch.eligible:
+            # day0 defect-ledger (2026-07-16): cold-start restart-proofing —
+            # runs even when this cycle's own fetch produced nothing
+            # (prefetch.reports empty), which is exactly the scenario this
+            # exists for. No-ops instantly once the cache is warm.
+            self.hydrate_from_ledger(world_conn, prefetch.eligible)
         if not prefetch.eligible or not prefetch.reports:
             return 0
         reports = list(prefetch.reports)
         decision_time = prefetch.decision_time
+        # day0 defect-ledger (2026-07-16): append every parsed report to the
+        # publication-stream ledger for fast-eligible stations — ONE short
+        # write under the mutex we already hold here, never across the HTTP
+        # fetch (that happened in prefetch(), outside the mutex). Fail-soft:
+        # a ledger append failure must never block the existing emission
+        # pipeline (see _append_metar_prints_to_ledger docstring).
+        _append_metar_prints_to_ledger(world_conn, prefetch.eligible, reports)
         trigger = Day0ExtremeUpdatedTrigger(
             EventWriter(world_conn),
             day0_is_tradeable=day0_is_tradeable,

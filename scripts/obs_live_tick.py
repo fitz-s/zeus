@@ -259,12 +259,58 @@ def _city_local_fetch_window(city_name: str, *, now_utc: datetime, days_back: in
     city = cities_by_name[city_name]
     return city_local_fetch_window(city.timezone, reference_time=now_utc, days_back=days_back)
 
-def _write_rows(conn_or_path, rows: list[ObsV2Row]) -> int:
-    """Persist one city's rows with the SQLite writer lock scoped to the write only."""
+def _append_wu_prints_to_ledger(conn: sqlite3.Connection, prints: list[dict] | None) -> None:
+    """Append WU hourly bucket extrema (hour_max_temp @ hour_max_raw_ts,
+    hour_min_temp @ hour_min_raw_ts) to the observation_prints
+    publication-stream ledger (day0 defect-ledger, 2026-07-16).
+
+    Design amendment: double-writing wu_icao_history (already durably
+    persisted via observation_instants + observation_revisions, see day0
+    defect-2's widening fix) is now the POINT, not a mistake to avoid — the
+    absorbing-direction reduction in _latest_authorized_day0_fact is
+    idempotent under duplicates (max(a, a) == a), so the same reading
+    entering via both the instants-fact and the ledger-fact can never corrupt
+    the belief. This is the zero-risk migration path: no switch, no parity
+    gate — the ledger grows to dominate as writers fill it, the instants
+    fact becomes a redundant shadow.
+
+    Fail-soft and non-raising by design: any error is logged and swallowed,
+    so a caller may call this unconditionally right after a successful
+    insert_rows() without risking an unrelated rollback of that
+    already-committed obs_v2 write.
+    """
+    if not prints:
+        return
+    try:
+        from src.state.schema.observation_prints_schema import append_print
+
+        appended = 0
+        for entry in prints:
+            if append_print(conn, **entry):
+                appended += 1
+        if appended:
+            logger.debug("OBSERVATION_PRINTS_APPENDED source=wu_icao_history count=%d", appended)
+    except Exception as exc:  # noqa: BLE001 — ledger append is best-effort, never blocks the obs_v2 write
+        logger.warning(
+            "OBSERVATION_PRINTS_APPEND_FAILED source=wu_icao_history exc=%s: %s",
+            type(exc).__name__, exc,
+        )
+
+
+def _write_rows(
+    conn_or_path, rows: list[ObsV2Row], prints: list[dict] | None = None
+) -> int:
+    """Persist one city's rows with the SQLite writer lock scoped to the write only.
+
+    ``prints`` (day0 defect-ledger, 2026-07-16): optional observation_prints
+    ledger entries appended in the SAME short mutex-held write.
+    """
     if not rows:
         return 0
     if isinstance(conn_or_path, sqlite3.Connection):
-        return insert_rows(conn_or_path, rows)
+        written = insert_rows(conn_or_path, rows)
+        _append_wu_prints_to_ledger(conn_or_path, prints)
+        return written
     if conn_or_path is None:
         return 0
 
@@ -273,6 +319,7 @@ def _write_rows(conn_or_path, rows: list[ObsV2Row]) -> int:
         conn = _open_obs_tick_connection(db_path)
         try:
             written = insert_rows(conn, rows)
+            _append_wu_prints_to_ledger(conn, prints)
             conn.commit()
             return written
         except Exception:
@@ -308,16 +355,32 @@ def _tick_wu_city(
         return result
 
     rows: list[ObsV2Row] = []
+    # day0 defect-ledger (2026-07-16): one print per hour-bucket extremum —
+    # (hour_max_temp @ hour_max_raw_ts) and (hour_min_temp @ hour_min_raw_ts).
+    # These are the RAW reading timestamps fetch_wu_hourly already resolves
+    # inside the bucket (not the bucket floor) — see _aggregate_hourly.
+    prints: list[dict] = []
     for obs in fetch.observations:
         try:
             rows.append(_hourly_obs_to_v2_row(obs, imported_at=imported_at, tier_name="WU_ICAO"))
         except (InvalidObsV2RowError, ValueError) as exc:
             logger.warning("Row build error %s %s: %s", city_name, obs.utc_timestamp, exc)
             result.row_build_errors += 1
+            continue
+        prints.append(dict(
+            city=city_name, station_id=obs.station_id, source_channel="wu_icao_history",
+            publish_ts_utc=obs.hour_max_raw_ts, value_native=obs.hour_max_temp,
+            unit=obs.temp_unit, fetched_at_utc=imported_at, raw_report=None,
+        ))
+        prints.append(dict(
+            city=city_name, station_id=obs.station_id, source_channel="wu_icao_history",
+            publish_ts_utc=obs.hour_min_raw_ts, value_native=obs.hour_min_temp,
+            unit=obs.temp_unit, fetched_at_utc=imported_at, raw_report=None,
+        ))
 
     result.rows_ready = len(rows)
     if not dry_run and rows:
-        result.rows_written = _write_rows(conn, rows)
+        result.rows_written = _write_rows(conn, rows, prints)
     return result
 
 

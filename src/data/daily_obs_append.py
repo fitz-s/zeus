@@ -581,7 +581,46 @@ def _accumulate_hko_reading(conn) -> bool:
         "HKO rhrread accumulated: date=%s hour=%s temp=%.1f°C",
         target_date_str, hour_utc_str, temp_c,
     )
+    _append_hko_rhrread_print_to_ledger(conn, data=data, temp_c=temp_c, now_utc=now_utc)
     return True
+
+
+def _append_hko_rhrread_print_to_ledger(conn, *, data: dict, temp_c: float, now_utc: datetime) -> None:
+    """Append the HKO rhrread spot reading to the observation_prints
+    publication-stream ledger (day0 defect-ledger, 2026-07-16).
+
+    Fail-soft: any error is logged and swallowed — the ledger is additive
+    observability, never load-bearing for the existing hko_hourly_accumulator
+    write above, which has already committed by the time this runs.
+    """
+    try:
+        from src.state.schema.observation_prints_schema import append_print
+
+        publish_ts = now_utc  # fallback: our fetch wall-clock
+        update_time_raw = data.get("updateTime")
+        if update_time_raw:
+            try:
+                parsed = datetime.fromisoformat(str(update_time_raw).replace("Z", "+00:00"))
+                if parsed.tzinfo is not None:
+                    publish_ts = parsed.astimezone(timezone.utc)
+            except (TypeError, ValueError):
+                pass  # malformed updateTime -> keep the fetch-wall-clock fallback
+        append_print(
+            conn,
+            city="Hong Kong",
+            station_id="HKO",
+            source_channel="hko_rhrread_spot",
+            publish_ts_utc=publish_ts.isoformat(),
+            value_native=float(temp_c),
+            unit="C",
+            fetched_at_utc=now_utc.isoformat(),
+            raw_report=json.dumps(data.get("temperature", {}), separators=(",", ":")),
+        )
+    except Exception as exc:  # noqa: BLE001 — ledger append is best-effort, never blocks accumulation
+        logger.warning(
+            "OBSERVATION_PRINTS_APPEND_FAILED source=hko_rhrread_spot exc=%s: %s",
+            type(exc).__name__, exc,
+        )
 
 
 def _finalize_hko_yesterday(

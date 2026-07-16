@@ -993,6 +993,54 @@ tables:
     created_by: init_schema
     pk_col: null
 
+  # ---------------------------------------------------------------------------
+  # observation_prints — APPEND-ONLY publication-stream ledger (2026-07-16)
+  # ---------------------------------------------------------------------------
+  # day0 defects 1-5 (Paris 2026-07-14 monotonicity regression, WU-backfill-
+  # frozen hour buckets, climatology-band self-blinding, HKO accumulator never
+  # folding its own spot read, Seoul binary exclusion where margin-absorption
+  # already existed) share one root cause: some derived-state surface (an hour
+  # bucket, an in-process cache, a single "current" row) discarded a reading
+  # it had already seen. Observations are a publication stream; this table IS
+  # that stream, keyed on the SOURCE's own publication clock, append-only by
+  # construction (UNIQUE(city, station_id, source_channel, publish_ts_utc,
+  # value_native) + INSERT OR IGNORE — no update path anywhere, ever). Lands
+  # BESIDE observation_instants (unchanged) and feeds
+  # replacement_forecast_current_target_plan._latest_authorized_day0_fact as
+  # one more absorbing-direction candidate fact, not a replacement source.
+  - name: observation_prints
+    db: world
+    schema_class: world_class
+    schema_version_owner: SCHEMA_VERSION
+    created_by: init_schema
+    pk_col: id
+    required_columns:
+      - {name: id, type: INTEGER, nullable: false}
+      - {name: city, type: TEXT, nullable: false}
+      - {name: station_id, type: TEXT, nullable: false}
+      - {name: source_channel, type: TEXT, nullable: false}
+      - {name: publish_ts_utc, type: TEXT, nullable: false}
+      - {name: value_native, type: REAL, nullable: false}
+      - {name: unit, type: TEXT, nullable: false}
+      - {name: fetched_at_utc, type: TEXT, nullable: false}
+    notes: >
+      Append-only publication-stream ledger of raw station reports.
+      Three writers: src/data/day0_fast_obs.py _append_metar_prints_to_ledger
+      (metar_fast, one short write under the already-held mutex, never across
+      the HTTP fetch), src/data/daily_obs_append.py
+      _append_hko_rhrread_print_to_ledger (HKO rhrread spot, called from
+      scripts/hko_ingest_tick.py), and scripts/obs_live_tick.py
+      _append_wu_prints_to_ledger (wu_icao_history hour-bucket extrema at
+      their RAW reading timestamps). The WU double-write (also persisted via
+      observation_instants + observation_revisions) is DELIBERATE: the
+      absorbing-direction reduction is idempotent under duplicates, so the
+      ledger grows to dominate with zero migration risk. Sole reader:
+      src/data/replacement_forecast_current_target_plan.py
+      _latest_authorized_day0_fact (the day0 absorbing-direction fact
+      reduction). observation_instants + its monotone-widening branch are
+      legacy compensation; retirement direction is ledger-alone once full
+      coverage + shadow parity.
+
   - name: opportunity_fact
     db: world
     schema_class: legacy_archived
