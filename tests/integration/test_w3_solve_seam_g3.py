@@ -2271,7 +2271,7 @@ def test_live_adapter_routes_each_global_truth_to_its_owner(monkeypatch):
         {metadata_key: metadata},
         {metadata_key: metadata},
     ]
-    assert bind_calls == [False, True, False, True]
+    assert bind_calls == [True, True]
 
 
 def test_live_adapter_rebinds_current_probability_before_book_cache_hit(
@@ -2421,10 +2421,8 @@ def test_live_adapter_rebinds_current_probability_before_book_cache_hit(
     assert epoch_again is epoch
     assert epoch_reauction is not epoch
     assert bind_calls == [
-        (False, "request-probability-1"),
         (True, "request-probability-1"),
-        (False, "request-probability-2"),
-        (False, "request-probability-2"),
+        (True, "request-probability-2"),
         (True, "request-probability-2"),
     ]
     assert len(capture_calls) == 2
@@ -2631,12 +2629,9 @@ def test_live_adapter_refreshes_only_triggered_probability_family(monkeypatch):
     assert bound_again == changed_probabilities
     assert bound_after_unrelated_drift == unrelated_drift
     assert bind_calls == [
-        ("token", (dallas, miami)),
         ("metadata", (dallas, miami)),
-        ("token", (dallas, miami)),
-        ("metadata", (dallas,)),
-        ("token", (dallas, miami)),
-        ("metadata", (dallas,)),
+        ("metadata", (dallas, miami)),
+        ("metadata", (dallas, miami)),
     ]
     assert capture_calls == [
         (dallas, miami),

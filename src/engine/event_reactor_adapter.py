@@ -5502,12 +5502,16 @@ def event_bound_live_adapter_from_trade_conn(
                 )
                 return epoch
 
-            # q is decision-time truth and must remain current on every call.
-            # Token binding is a lossless identity completion; it is deliberately
-            # rebuilt before the q-independent book cache is considered.
+            # q and current Gamma tradeability are decision-time truth. Bind them
+            # once before considering the q-independent book cache; a cache miss
+            # must not pay a second per-family token lookup before the full bind.
+            full_metadata: dict[
+                tuple[str, str], Mapping[str, object]
+            ] = {}
             bound_probabilities = _bind(
                 probabilities,
-                mode="token_identity",
+                mode="current_metadata",
+                metadata_sink=full_metadata,
             )
             cache_checked_at = datetime.now(UTC)
             cached = _get_cached_global_book_epoch(
@@ -5545,16 +5549,8 @@ def event_bound_live_adapter_from_trade_conn(
                     family_key: bound_probabilities[family_key]
                     for family_key in refresh_family_keys
                 }
-                delta_metadata: dict[
-                    tuple[str, str], Mapping[str, object]
-                ] = {}
-                delta_bound_probabilities = _bind(
-                    probability_delta,
-                    mode="family_delta_metadata",
-                    metadata_sink=delta_metadata,
-                )
                 delta_epoch = _capture_bound(
-                    delta_bound_probabilities,
+                    probability_delta,
                     mode="family_delta_books",
                 )
                 try:
@@ -5569,7 +5565,6 @@ def event_bound_live_adapter_from_trade_conn(
                     ):
                         raise ValueError("GLOBAL_BOOK_DELTA_BASE_EXPIRED")
                     merged_probabilities = dict(bound_probabilities)
-                    merged_probabilities.update(delta_bound_probabilities)
                     _store_global_book_epoch(
                         trade_conn,
                         merged_probabilities,
@@ -5593,14 +5588,6 @@ def event_bound_live_adapter_from_trade_conn(
                         exc,
                     )
 
-            full_metadata: dict[
-                tuple[str, str], Mapping[str, object]
-            ] = {}
-            bound_probabilities = _bind(
-                bound_probabilities,
-                mode="full_metadata",
-                metadata_sink=full_metadata,
-            )
             epoch = _capture_bound(
                 bound_probabilities,
                 mode="full_books",
