@@ -582,6 +582,18 @@ def _extract_localday_extremum_c(payload: object, hourly_var: str, metric: str) 
     return max(nums) if metric == "high" else min(nums)
 
 
+def _deadline_fetch_kwargs(deadline_monotonic: float | None) -> dict[str, float | int]:
+    if deadline_monotonic is None:
+        return {}
+    remaining = deadline_monotonic - time.monotonic()
+    if remaining <= 0.0:
+        raise TimeoutError("Open-Meteo source-clock request deadline expired")
+    return {
+        "timeout": max(0.05, min(30.0, remaining)),
+        "max_retries": 1,
+    }
+
+
 # ── BATCHED FETCH HELPERS (R1+R2 collapse, 2026-06-13) ──────────────────────────────────
 # Open-Meteo `models=a,b,c` returns temperature_2m_a / temperature_2m_b / temperature_2m_c
 # keys (or bare `temperature_2m` when a single model). ONE call covers all in-domain models
@@ -599,6 +611,7 @@ def _default_live_fetch_batched(
     target_local_date: "date",
     forecast_hours: int,
     allow_per_model_fallback: bool = True,
+    deadline_monotonic: float | None = None,
 ) -> dict[str, tuple[float | None, float | None]]:
     """R1+R2: ONE single-runs call for ALL `models` at (city, target_date, cycle).
 
@@ -636,6 +649,7 @@ def _default_live_fetch_batched(
             endpoint_label="bayes_precision_fusion_single_runs_batched",
             quota=_BPF_OPENMETEO_QUOTA_TRACKER,
             fast_fail_429=True,
+            **_deadline_fetch_kwargs(deadline_monotonic),
         )
         return _parse_batched_single_runs_payload(payload, models, target_local_date, timezone_name)
     except Exception as exc:
@@ -693,6 +707,7 @@ def _default_live_fetch_batched(
                 endpoint_label=f"bayes_precision_fusion_{model}_single_runs_fallback",
                 quota=_BPF_OPENMETEO_QUOTA_TRACKER,
                 fast_fail_429=True,
+                **_deadline_fetch_kwargs(deadline_monotonic),
             )
             parsed = _parse_batched_single_runs_payload(
                 payload,
@@ -792,6 +807,7 @@ def _default_previous_runs_fetch_batched(
     timezone_name: str,
     target_date: str,
     lead_days: int,
+    deadline_monotonic: float | None = None,
 ) -> dict[str, tuple[float | None, float | None]]:
     """R1+R2: ONE previous-runs call for ALL `models` at (city, target_date, lead).
 
@@ -823,6 +839,7 @@ def _default_previous_runs_fetch_batched(
             endpoint_label="bayes_precision_fusion_previous_runs_batched",
             quota=_BPF_OPENMETEO_QUOTA_TRACKER,
             fast_fail_429=True,
+            **_deadline_fetch_kwargs(deadline_monotonic),
         )
         return _parse_batched_previous_runs_payload(payload, models, hourly_var)
     except Exception as exc:
@@ -1548,6 +1565,7 @@ def download_bayes_precision_fusion_extra_raw_inputs(
                     target_local_date=target_local_date,
                     forecast_hours=forecast_hours,
                     allow_per_model_fallback=allow_single_runs_fallback,
+                    deadline_monotonic=wall_clock_deadline,
                 )
                 single_transport_error = sv_map.pop(_BATCH_TRANSPORT_ERROR_KEY, None)
                 if single_transport_error is not None:
@@ -1624,6 +1642,7 @@ def download_bayes_precision_fusion_extra_raw_inputs(
                     timezone_name=ref.timezone_name,
                     target_date=target_date,
                     lead_days=int(ref.lead_days),
+                    deadline_monotonic=wall_clock_deadline,
                 )
                 previous_transport_error = pv_map.pop(_BATCH_TRANSPORT_ERROR_KEY, None)
                 if previous_transport_error is not None:

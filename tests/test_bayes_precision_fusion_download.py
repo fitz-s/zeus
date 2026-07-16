@@ -200,6 +200,35 @@ def test_download_scopes_persisted_key_reads_to_requested_batch(
     )
 
 
+def test_source_clock_fetch_uses_remaining_deadline_without_retries(monkeypatch) -> None:
+    import src.data.bayes_precision_fusion_download as dl
+    import src.data.openmeteo_client as client
+
+    captured: dict[str, object] = {}
+
+    def _fetch(*_args, **kwargs):
+        captured.update(kwargs)
+        raise RuntimeError("synthetic transport stop")
+
+    monkeypatch.setattr(client, "fetch", _fetch)
+    deadline = time.monotonic() + 0.2
+    report = dl._default_live_fetch_batched(
+        models=["ecmwf_ifs"],
+        latitude=48.967,
+        longitude=2.428,
+        timezone_name="Europe/Paris",
+        run=datetime(2026, 6, 8, 0, tzinfo=UTC),
+        target_local_date=date(2026, 6, 9),
+        forecast_hours=120,
+        allow_per_model_fallback=False,
+        deadline_monotonic=deadline,
+    )
+
+    assert report[dl._BATCH_TRANSPORT_ERROR_KEY][0] == "synthetic transport stop"
+    assert captured["max_retries"] == 1
+    assert 0.0 < float(captured["timeout"]) <= 0.2
+
+
 def test_persist_lock_obeys_source_clock_deadline(tmp_path) -> None:
     from src.data.bayes_precision_fusion_download import (
         _PersistDeadlineExceeded,
