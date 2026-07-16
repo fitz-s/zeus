@@ -1024,6 +1024,76 @@ class TestFetchFailureDiscipline:
         assert out == [] and status == FETCH_NO_DATA and age is None
 
 
+class TestIncrementalFetchWindow:
+    def test_cold_fetch_is_full_then_warm_fetch_merges_recent_delta(self):
+        from src.data.day0_fast_obs import (
+            Day0FastObsEmitter,
+            METAR_FULL_FETCH_HOURS,
+            METAR_INCREMENTAL_FETCH_HOURS,
+        )
+
+        t0 = datetime(2026, 6, 9, 16, 0, tzinfo=UTC)
+        first = _report("RJTT", t0, 21.0, t_group=False)
+        second = _report("RJTT", t0 + timedelta(hours=1), 24.0, t_group=False)
+        hours = []
+        payloads = [[first], [second]]
+
+        def fetcher(_stations, **kwargs):
+            hours.append(kwargs["hours"])
+            return payloads.pop(0)
+
+        emitter = Day0FastObsEmitter(fetcher=fetcher, min_fetch_interval_s=0.0)
+        first_window, _, _ = emitter._reports_with_status(["RJTT"])
+        second_window, _, _ = emitter._reports_with_status(["RJTT"])
+
+        assert hours == [METAR_FULL_FETCH_HOURS, METAR_INCREMENTAL_FETCH_HOURS]
+        assert first_window == [first]
+        assert second_window == [first, second]
+
+    def test_fetch_window_expands_across_an_outage(self):
+        import time as _time
+
+        from src.data.day0_fast_obs import (
+            Day0FastObsEmitter,
+            METAR_FULL_FETCH_HOURS,
+        )
+
+        t0 = datetime(2026, 6, 9, 16, 0, tzinfo=UTC)
+        report = _report("RJTT", t0, 21.0, t_group=False)
+        hours = []
+
+        def fetcher(_stations, **kwargs):
+            hours.append(kwargs["hours"])
+            return [report]
+
+        emitter = Day0FastObsEmitter(fetcher=fetcher, min_fetch_interval_s=0.0)
+        emitter._reports_with_status(["RJTT"])
+        emitter._cache_fetched_monotonic = _time.monotonic() - 3 * 3600.0
+        emitter._reports_with_status(["RJTT"])
+
+        assert hours == [METAR_FULL_FETCH_HOURS, pytest.approx(4.0, abs=0.01)]
+
+    def test_ledger_hydration_does_not_skip_full_network_recovery(self):
+        import time as _time
+
+        from src.data.day0_fast_obs import Day0FastObsEmitter, METAR_FULL_FETCH_HOURS
+
+        t0 = datetime(2026, 6, 9, 16, 0, tzinfo=UTC)
+        hours = []
+
+        def fetcher(_stations, **kwargs):
+            hours.append(kwargs["hours"])
+            return [_report("RJTT", t0, 22.0, t_group=False)]
+
+        emitter = Day0FastObsEmitter(fetcher=fetcher, min_fetch_interval_s=0.0)
+        emitter._cached_reports = [_report("RJTT", t0, 21.0, t_group=False)]
+        emitter._cache_fetched_monotonic = _time.monotonic()
+        emitter._reports_with_status(["RJTT"])
+
+        assert hours == [METAR_FULL_FETCH_HOURS]
+        assert emitter._cached_reports[0].temp_c == pytest.approx(22.0)
+
+
 class TestMutexNoHttpSplit:
     """PR#404 P0-2: the world-write mutex must never span HTTP. The write phase
     (emit_prefetched) performs zero network IO; main.py prefetches BEFORE

@@ -111,6 +111,9 @@ DEFAULT_METAR_FETCH_TIMEOUT_S = _positive_float_env(
     "ZEUS_DAY0_METAR_FETCH_TIMEOUT_SECONDS",
     4.0,
 )
+METAR_FULL_FETCH_HOURS = 36.0
+METAR_INCREMENTAL_FETCH_HOURS = 2.0
+METAR_RECOVERY_OVERLAP_HOURS = 1.0
 
 DAY0_ANOMALY_CHECK_BUDGET_S = _positive_float_env(
     "ZEUS_DAY0_ANOMALY_CHECK_BUDGET_SECONDS",
@@ -723,6 +726,29 @@ def _report_publication_key(report: MetarReport) -> tuple[str, str, float] | Non
     )
 
 
+def _merge_report_windows(
+    cached: list[MetarReport],
+    fetched: list[MetarReport],
+) -> list[MetarReport]:
+    """Merge an incremental fetch into the retained full-history window."""
+    reports = list(dict.fromkeys((*cached, *fetched)))
+    if not reports:
+        return []
+    cutoff = max(report.obs_time for report in reports) - timedelta(
+        hours=METAR_FULL_FETCH_HOURS
+    )
+    reports = [report for report in reports if report.obs_time >= cutoff]
+    reports.sort(
+        key=lambda report: (
+            report.obs_time,
+            report.station_id,
+            report.receipt_time or report.obs_time,
+            report.raw,
+        )
+    )
+    return reports
+
+
 def _append_metar_prints_to_ledger(
     world_conn: Any, eligible: tuple, reports: list[MetarReport]
 ) -> bool:
@@ -836,6 +862,7 @@ class Day0FastObsEmitter:
     _last_attempt_monotonic: float = field(default=0.0, init=False)
     _cache_fetched_monotonic: float = field(default=0.0, init=False)
     _cached_reports: list[MetarReport] = field(default_factory=list, init=False)
+    _full_window_loaded: bool = field(default=False, init=False)
     # SPLIT MEMOS (PR#404 round-2 P0-1): the KILL memo (hard-fact exit source,
     # advanced by any memo-safe value incl. stale-withheld ones) and the LIVE
     # memo (emit moved-check, advanced ONLY by an INSERTED live event) were one
@@ -969,14 +996,30 @@ class Day0FastObsEmitter:
                     return list(self._cached_reports), FETCH_STALE_AFTER_FAILURE, cache_age
                 return [], FETCH_NO_DATA, None
             self._last_attempt_monotonic = now
+            fetch_hours = METAR_FULL_FETCH_HOURS
+            if self._cached_reports and self._full_window_loaded:
+                fetch_hours = min(
+                    METAR_FULL_FETCH_HOURS,
+                    max(
+                        METAR_INCREMENTAL_FETCH_HOURS,
+                        (cache_age or 0.0) / 3600.0 + METAR_RECOVERY_OVERLAP_HOURS,
+                    ),
+                )
         try:
-            reports = self.fetcher(stations)
+            reports = self.fetcher(stations, hours=fetch_hours)
         except Exception as exc:  # noqa: BLE001 — fetcher contract is fail-soft, belt+braces
             logger.warning("DAY0_FAST_OBS_FETCH_RAISED exc=%s: %s", type(exc).__name__, exc)
             reports = []
         with self._lock:
             if reports:
-                self._cached_reports = list(reports)
+                if self._full_window_loaded:
+                    self._cached_reports = _merge_report_windows(
+                        self._cached_reports,
+                        list(reports),
+                    )
+                else:
+                    self._cached_reports = list(reports)
+                self._full_window_loaded = True
                 self._cache_fetched_monotonic = time.monotonic()
                 return list(self._cached_reports), FETCH_FRESH, 0.0
             cache_age = (

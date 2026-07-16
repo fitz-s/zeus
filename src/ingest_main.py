@@ -793,11 +793,12 @@ def _k2_obs_fast_tick():
 def _day0_metar_source_clock_tick():
     """Capture newly published AWC METAR reports and emit moved Day0 extremes.
 
-    The HTTP batch runs before any DB lock. Unchanged 36-hour payloads perform
-    no SQLite work. A new publication gets one short live-writer attempt; lock
-    contention is bounded and retried on the next source-clock tick because the
-    emitter does not acknowledge its publication identity until the ledger
-    write succeeds.
+    The HTTP batch runs before any DB lock. Cold start loads the full observation
+    window; steady-state polls request and merge only the recent publication
+    delta. Unchanged reports perform no SQLite work. A new publication gets one
+    short live-writer attempt; lock contention is bounded and retried on the next
+    source-clock tick because the emitter does not acknowledge its publication
+    identity until the ledger write succeeds.
     """
     import sqlite3
 
