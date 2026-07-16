@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import json
 import math
+import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from functools import lru_cache
@@ -268,6 +269,7 @@ def fetch_bucket_run_manifest(
     *,
     http_get: Any = None,
     timeout: float = 20.0,
+    deadline_monotonic: float | None = None,
 ) -> dict[str, BucketRunManifest]:
     """Fetch in-progress.json AND latest.json; return both parsed (keyed by name).
 
@@ -275,13 +277,22 @@ def fetch_bucket_run_manifest(
     out: dict[str, BucketRunManifest] = {}
     getter = http_get or _default_http_get
     for name, key in (("in_progress", IN_PROGRESS_KEY), ("latest", LATEST_KEY)):
+        _check_deadline(deadline_monotonic)
+        request_timeout = timeout
+        if deadline_monotonic is not None:
+            request_timeout = max(
+                0.001,
+                min(timeout, deadline_monotonic - time.monotonic()),
+            )
         try:
-            raw = getter(f"{BUCKET_HTTP_BASE}/{key}", timeout=timeout)
+            raw = getter(f"{BUCKET_HTTP_BASE}/{key}", timeout=request_timeout)
         except Exception:  # noqa: BLE001 — transient bucket read; caller decides
+            _check_deadline(deadline_monotonic)
             continue
         if raw is None:
             continue
         out[name] = parse_bucket_manifest(raw, source_key=key)
+    _check_deadline(deadline_monotonic)
     return out
 
 
@@ -433,6 +444,11 @@ def _read_om_point(s3_uri: str, flat_index: int, *, cache_dir: str) -> float:
     return float(arr[0])
 
 
+def _check_deadline(deadline_monotonic: float | None) -> None:
+    if deadline_monotonic is not None and time.monotonic() >= deadline_monotonic:
+        raise TimeoutError("bucket anchor payload deadline expired")
+
+
 @dataclass(frozen=True)
 class BucketAnchorPayloadResult:
     payload: dict[str, Any]
@@ -449,6 +465,7 @@ def fetch_bucket_anchor_payload(
     manifest: BucketRunManifest,
     cache_dir: str = "/tmp/zeus_om_bucket_cache",
     read_point: Any = None,
+    deadline_monotonic: float | None = None,
 ) -> BucketAnchorPayloadResult:
     """Assemble an API-shaped hourly payload from per-timestep bucket om reads.
 
@@ -461,6 +478,7 @@ def fetch_bucket_anchor_payload(
     if not admission.admissible:
         raise ValueError(f"bucket anchor payload refused: {admission.reason}")
 
+    _check_deadline(deadline_monotonic)
     point = map_lat_lon_to_o1280_index(latitude, longitude)
     reader = read_point or (lambda uri, idx: _read_om_point(uri, idx, cache_dir=cache_dir))
 
@@ -470,9 +488,11 @@ def fetch_bucket_anchor_payload(
     per_step_keys: list[str] = []
     ordered = sorted(admission.needed_valid_times)
     for vt in ordered:
+        _check_deadline(deadline_monotonic)
         key = _spatial_key_for(run, vt)
         s3_uri = f"s3://{BUCKET_S3_PREFIX.split('/', 1)[0]}/{key}"
         value = reader(s3_uri, point.flat_index)
+        _check_deadline(deadline_monotonic)
         if value is None or not math.isfinite(float(value)):
             raise ValueError(f"non-finite bucket temperature at {vt.isoformat()} ({key})")
         local = vt.astimezone(zone)
@@ -889,6 +909,7 @@ def capture_city_target_elevation(
     *,
     cache_path: str = CITY_ELEVATION_CACHE_PATH,
     http_get: Any = None,
+    timeout: float = 20.0,
 ) -> float:
     """Fetch + cache the API's 90m-DEM elevation for ``city`` (authority for downscaling target).
 
@@ -913,7 +934,8 @@ def capture_city_target_elevation(
                 "models": "ecmwf_ifs",
                 "forecast_hours": 1,
             }.items()
-        )
+        ),
+        timeout=timeout,
     )
     if not isinstance(raw, Mapping) or raw.get("elevation") is None:
         raise ValueError(f"API did not report an elevation for {city}")
@@ -956,6 +978,7 @@ def fetch_bucket_anchor_payload_downscaled(
     hsurf_cache: str = HSURF_LOCAL_CACHE,
     read_point: Any = None,
     read_elevation: Any = None,
+    deadline_monotonic: float | None = None,
 ) -> BucketAnchorPayloadResult:
     """API-shaped payload assembled via Open-Meteo's point downscaling (cell_selection=land).
 
@@ -969,6 +992,7 @@ def fetch_bucket_anchor_payload_downscaled(
     if not admission.admissible:
         raise ValueError(f"bucket downscaled payload refused: {admission.reason}")
 
+    _check_deadline(deadline_monotonic)
     cell = select_terrain_optimised_point(
         latitude, longitude, target_elevation_m,
         local_cache=hsurf_cache, read_elevation=read_elevation,
@@ -984,9 +1008,11 @@ def fetch_bucket_anchor_payload_downscaled(
     per_step_keys: list[str] = []
     ordered = sorted(admission.needed_valid_times)
     for vt in ordered:
+        _check_deadline(deadline_monotonic)
         key = _spatial_key_for(run, vt)
         s3_uri = f"s3://{BUCKET_S3_PREFIX.split('/', 1)[0]}/{key}"
         raw_value = reader(s3_uri, cell.flat_index)
+        _check_deadline(deadline_monotonic)
         if raw_value is None or not math.isfinite(float(raw_value)):
             raise ValueError(f"non-finite bucket temperature at {vt.isoformat()} ({key})")
         corrected = apply_elevation_correction(

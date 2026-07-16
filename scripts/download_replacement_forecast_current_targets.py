@@ -15,6 +15,7 @@ import json
 import os
 import sys
 import tempfile
+import time
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -41,6 +42,7 @@ from src.data.raw_forecast_artifact_manifest import (  # noqa: E402
     write_manifest_to_db,
 )
 from src.data.replacement_forecast_current_target_plan import (  # noqa: E402
+    ReplacementForecastCurrentTargetPlan,
     build_replacement_forecast_current_target_plan,
 )
 from src.state.db import _connect  # noqa: E402
@@ -201,6 +203,19 @@ def _write_manifest_file(output_dir: Path, manifest: RawForecastArtifactManifest
     return target
 
 
+def _deadline_timeout(
+    deadline_monotonic: float | None,
+    *,
+    default: float,
+) -> float:
+    if deadline_monotonic is None:
+        return default
+    remaining = deadline_monotonic - time.monotonic()
+    if remaining <= 0:
+        raise TimeoutError("current-target download deadline expired")
+    return max(0.001, min(default, remaining))
+
+
 def _try_bucket_rung_three(
     *,
     request,
@@ -209,6 +224,7 @@ def _try_bucket_rung_three(
     timezone_name: str,
     meta_refusal: Exception,
     single_runs_exc: Exception,
+    deadline_monotonic: float | None = None,
 ) -> tuple[dict, dict]:
     """Rung-3 admission gate: serve from the S3 data_spatial bucket, or re-raise rung-2.
 
@@ -233,7 +249,10 @@ def _try_bucket_rung_three(
         select_declaring_manifest,
     )
 
-    manifests = fetch_bucket_run_manifest()
+    manifests = fetch_bucket_run_manifest(
+        timeout=_deadline_timeout(deadline_monotonic, default=20.0),
+        deadline_monotonic=deadline_monotonic,
+    )
     manifest = select_declaring_manifest(manifests, wanted_run=request.run)
     if manifest is None:
         # condition 1 fails: bucket does not declare the wanted run. No transport can serve
@@ -264,7 +283,10 @@ def _try_bucket_rung_three(
             # target elevation = the API-reported 90m-DEM elevation (captured once per city,
             # cached with provenance). This is the SAME authority that VERIFIED the city.
             target_elev = capture_city_target_elevation(
-                city, request.latitude, request.longitude
+                city,
+                request.latitude,
+                request.longitude,
+                timeout=_deadline_timeout(deadline_monotonic, default=20.0),
             )
             result = fetch_bucket_anchor_payload_downscaled(  # re-checks admission internally
                 latitude=request.latitude,
@@ -274,6 +296,7 @@ def _try_bucket_rung_three(
                 timezone_name=timezone_name,
                 needed_valid_times=needed,
                 manifest=manifest,
+                deadline_monotonic=deadline_monotonic,
             )
         else:  # "raw"
             result = fetch_bucket_anchor_payload(  # re-checks admission (condition 2) internally
@@ -283,6 +306,7 @@ def _try_bucket_rung_three(
                 timezone_name=timezone_name,
                 needed_valid_times=needed,
                 manifest=manifest,
+                deadline_monotonic=deadline_monotonic,
             )
     except ValueError as admission_exc:
         # condition 2 fails: a needed local-day timestep is not yet written. Skip this city
@@ -306,6 +330,7 @@ def _resolve_anchor_payload(
     city: str,
     target_date: str,
     timezone_name: str,
+    deadline_monotonic: float | None = None,
 ) -> tuple[dict, dict]:
     """Resolve one city's anchor payload through the full transport ladder.
 
@@ -344,7 +369,13 @@ def _resolve_anchor_payload(
     single_runs_exc: Exception
     if _single_runs_public_for_request(request):
         try:
-            payload = fetch_openmeteo_ecmwf_ifs9_anchor_payload(request, fast_fail_429=True)
+            kwargs: dict[str, object] = {"fast_fail_429": True}
+            if deadline_monotonic is not None:
+                kwargs.update(
+                    timeout=_deadline_timeout(deadline_monotonic, default=30.0),
+                    max_retries=1,
+                )
+            payload = fetch_openmeteo_ecmwf_ifs9_anchor_payload(request, **kwargs)
             return payload, {
                 "openmeteo_endpoint": "single_runs_api",
                 "run_authority": "run_pinned_single_runs",
@@ -366,8 +397,14 @@ def _resolve_anchor_payload(
 
     # Rung 2: meta-stamped standard API (provider-declared run + atomicity).
     try:
+        kwargs = {"fast_fail_429": True}
+        if deadline_monotonic is not None:
+            kwargs.update(
+                timeout=_deadline_timeout(deadline_monotonic, default=30.0),
+                max_retries=1,
+            )
         payload, meta_provenance = fetch_openmeteo_ecmwf_ifs9_anchor_payload_meta_stamped(
-            request, fast_fail_429=True
+            request, **kwargs
         )
         provenance = dict(meta_provenance)
         provenance["single_runs_fallback_reason"] = _exception_summary(single_runs_exc)
@@ -388,13 +425,18 @@ def _resolve_anchor_payload(
         rung2_reason = meta_exc
 
     # Rung 3: S3 bucket partial-run (whitelisted cities only).
+    rung_three_kwargs: dict[str, object] = {
+        "request": request,
+        "city": city,
+        "target_date": target_date,
+        "timezone_name": timezone_name,
+        "meta_refusal": rung2_reason,
+        "single_runs_exc": single_runs_exc,
+    }
+    if deadline_monotonic is not None:
+        rung_three_kwargs["deadline_monotonic"] = deadline_monotonic
     return _try_bucket_rung_three(
-        request=request,
-        city=city,
-        target_date=target_date,
-        timezone_name=timezone_name,
-        meta_refusal=rung2_reason,
-        single_runs_exc=single_runs_exc,
+        **rung_three_kwargs,
     )
 
 
@@ -408,6 +450,8 @@ def download_current_target_raw_inputs(
     release_lag_hours: float,
     anchor_sigma_c: float,
     include_covered: bool = False,
+    precomputed_plan: ReplacementForecastCurrentTargetPlan | None = None,
+    max_wall_clock_seconds: float | None = None,
 ) -> dict[str, object]:
     # Fetch the FULL plan (no limit) so uncovered cities beyond the first `limit`
     # alphabetical slots are visible.  The per-cycle cap is applied AFTER filtering
@@ -424,7 +468,7 @@ def download_current_target_raw_inputs(
     # ``include_covered=True`` (passed by the production wrapper when the available cycle is
     # ahead of the downloaded high-water mark, and by the CLI when --cycle is explicit)
     # downloads raw inputs for ALL current targets at the requested cycle.
-    plan = build_replacement_forecast_current_target_plan(
+    plan = precomputed_plan or build_replacement_forecast_current_target_plan(
         forecast_db,
         required_openmeteo_source_cycle_time=cycle,
     )
@@ -458,13 +502,28 @@ def download_current_target_raw_inputs(
     downloaded: dict[str, object] = {
         "openmeteo_payload_count": 0,
         "precision_metadata_count": 0,
+        "openmeteo_transport_fetch_count": 0,
     }
+    deadline_monotonic = (
+        time.monotonic() + max(0.0, float(max_wall_clock_seconds))
+        if max_wall_clock_seconds is not None
+        else None
+    )
+    resolved_payloads: dict[tuple[str, str], tuple[dict, dict[str, object]]] = {}
+    unavailable_targets: set[tuple[str, str]] = set()
+    processed_target_count = 0
+    timeboxed_incomplete = False
 
     from src.data.openmeteo_ecmwf_ifs9_bucket_transport import BucketTransportNotAdmissible
 
     for target in targets:
+        if deadline_monotonic is not None and time.monotonic() >= deadline_monotonic:
+            timeboxed_incomplete = True
+            break
+        target_key = (target.city, target.target_date)
         city_config = cities_by_name.get(target.city)
         if city_config is None:
+            processed_target_count += 1
             continue
         payload_path = raw_dir / f"openmeteo_{_safe_name(target.city)}_{target.target_date}_{target.temperature_metric}_{cycle.strftime('%Y%m%dT%H%M%SZ')}.json"
         precision_path = raw_dir / f"openmeteo_precision_{_safe_name(target.city)}_{target.target_date}_{target.temperature_metric}.json"
@@ -492,13 +551,30 @@ def download_current_target_raw_inputs(
             # (payload, provenance), or raises BucketTransportNotAdmissible when NO rung can
             # serve this city this cycle (so the city is skipped, not the batch aborted).
             try:
-                payload, anchor_transport_provenance = _resolve_anchor_payload(
-                    request=request,
-                    city=target.city,
-                    target_date=target.target_date,
-                    timezone_name=city_config.timezone,
-                )
+                if target_key in unavailable_targets:
+                    raise BucketTransportNotAdmissible(
+                        "same city/date transport was already non-admissible this pass"
+                    )
+                cached = resolved_payloads.get(target_key)
+                if cached is None:
+                    payload, anchor_transport_provenance = _resolve_anchor_payload(
+                        request=request,
+                        city=target.city,
+                        target_date=target.target_date,
+                        timezone_name=city_config.timezone,
+                        deadline_monotonic=deadline_monotonic,
+                    )
+                    resolved_payloads[target_key] = (
+                        payload,
+                        anchor_transport_provenance,
+                    )
+                    downloaded["openmeteo_transport_fetch_count"] = (
+                        int(downloaded["openmeteo_transport_fetch_count"]) + 1
+                    )
+                else:
+                    payload, anchor_transport_provenance = cached
             except BucketTransportNotAdmissible as not_admissible:
+                unavailable_targets.add(target_key)
                 skipped_cities.append(
                     {
                         "city": target.city,
@@ -507,7 +583,11 @@ def download_current_target_raw_inputs(
                         "reason": str(not_admissible)[:200],
                     }
                 )
+                processed_target_count += 1
                 continue
+            except TimeoutError:
+                timeboxed_incomplete = True
+                break
             _write_json(payload_path, payload)
         _write_json(precision_path, _precision_metadata(target.city, target.target_date, anchor_sigma_c=anchor_sigma_c))
         downloaded["openmeteo_payload_count"] = int(downloaded["openmeteo_payload_count"]) + 1
@@ -546,6 +626,7 @@ def download_current_target_raw_inputs(
                 },
             )
         )
+        processed_target_count += 1
 
     written_manifests: list[str] = []
     db_artifact_ids: list[int] = []
@@ -587,7 +668,11 @@ def download_current_target_raw_inputs(
             conn.close()
 
     return {
-        "status": "CURRENT_TARGET_RAW_INPUTS_DOWNLOADED",
+        "status": (
+            "CURRENT_TARGET_RAW_INPUTS_TIMEBOXED_INCOMPLETE"
+            if timeboxed_incomplete
+            else "CURRENT_TARGET_RAW_INPUTS_DOWNLOADED"
+        ),
         "cycle": cycle.isoformat(),
         "forecast_db": str(forecast_db),
         "output_dir": str(output_dir),
@@ -600,6 +685,9 @@ def download_current_target_raw_inputs(
         "downloaded": downloaded,
         "skipped_city_count": len(skipped_cities),
         "skipped_cities": skipped_cities,
+        "timeboxed_incomplete": timeboxed_incomplete,
+        "unattempted_target_count": len(targets) - processed_target_count,
+        "max_wall_clock_seconds": max_wall_clock_seconds,
         "coverage_before": plan.as_dict(),
     }
 
@@ -614,6 +702,8 @@ def download_current_target_openmeteo_inputs(
     release_lag_hours: float,
     anchor_sigma_c: float,
     include_covered: bool = False,
+    precomputed_plan: ReplacementForecastCurrentTargetPlan | None = None,
+    max_wall_clock_seconds: float | None = None,
 ) -> dict[str, object]:
     """Live replacement-chain downloader for Open-Meteo current-target inputs."""
 
@@ -626,6 +716,8 @@ def download_current_target_openmeteo_inputs(
         release_lag_hours=release_lag_hours,
         anchor_sigma_c=anchor_sigma_c,
         include_covered=include_covered,
+        precomputed_plan=precomputed_plan,
+        max_wall_clock_seconds=max_wall_clock_seconds,
     )
 
 

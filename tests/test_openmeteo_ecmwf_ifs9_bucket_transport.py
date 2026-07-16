@@ -22,6 +22,7 @@ The load-bearing cross-module RELATIONSHIPS verified here:
 """
 from __future__ import annotations
 
+import time
 from datetime import date, datetime, timedelta, timezone
 
 import pytest
@@ -76,6 +77,47 @@ def test_admission_passes_when_all_needed_timesteps_present() -> None:
     result = check_partial_run_admission(manifest, wanted_run=run, needed_valid_times=needed)
     assert result.admissible is True
     assert result.missing_valid_times == ()
+
+
+def test_bucket_payload_stops_after_current_timestep_when_deadline_expires(
+    monkeypatch,
+) -> None:
+    import src.data.openmeteo_ecmwf_ifs9_bucket_transport as bucket
+
+    run = datetime(2026, 6, 11, 0, tzinfo=UTC)
+    needed = tuple(run + timedelta(hours=h) for h in range(3))
+    manifest = _manifest(run=run, valid_times=list(needed))
+    reads: list[str] = []
+    point = type(
+        "_Point",
+        (),
+        {
+            "flat_index": 1,
+            "grid_latitude": 39.9,
+            "grid_longitude_east": 116.4,
+            "nearest_distance_km": 0.0,
+        },
+    )()
+    monkeypatch.setattr(bucket, "map_lat_lon_to_o1280_index", lambda *_args: point)
+
+    def _slow_read(uri: str, _index: int) -> float:
+        reads.append(uri)
+        time.sleep(0.02)
+        return 10.0
+
+    with pytest.raises(TimeoutError, match="deadline expired"):
+        fetch_bucket_anchor_payload(
+            latitude=39.9,
+            longitude=116.4,
+            run=run,
+            timezone_name="UTC",
+            needed_valid_times=needed,
+            manifest=manifest,
+            read_point=_slow_read,
+            deadline_monotonic=time.monotonic() + 0.005,
+        )
+
+    assert len(reads) == 1
 
 
 def test_admission_refuses_when_one_needed_timestep_missing() -> None:
@@ -487,6 +529,8 @@ def test_resolve_anchor_payload_reraises_non_degradable_errors(monkeypatch) -> N
         request = httpx.Request("GET", "https://x")
         return httpx.HTTPStatusError("e", request=request, response=httpx.Response(code, request=request))
 
+    monkeypatch.setattr(dl, "_single_runs_public_for_request", lambda _request: True)
+
     # single-runs 401 (auth) must raise, not degrade.
     monkeypatch.setattr(
         dl, "fetch_openmeteo_ecmwf_ifs9_anchor_payload",
@@ -539,6 +583,7 @@ def test_resolve_anchor_payload_fast_fails_429_to_transport_ladder(monkeypatch) 
     def _fake_rung3(*, request, city, target_date, timezone_name, meta_refusal, single_runs_exc):
         return {"hourly": {"time": [], "temperature_2m": []}}, {"run_authority": "bucket_partial_run_unverified"}
 
+    monkeypatch.setattr(dl, "_single_runs_public_for_request", lambda _request: True)
     monkeypatch.setattr(dl, "fetch_openmeteo_ecmwf_ifs9_anchor_payload", _single_runs)
     monkeypatch.setattr(
         "src.data.openmeteo_ecmwf_ifs9_anchor.fetch_openmeteo_ecmwf_ifs9_anchor_payload_meta_stamped",

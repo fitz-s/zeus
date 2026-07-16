@@ -213,7 +213,11 @@ def _probe_resolved_bayes_precision_fusion_extras_cycle() -> datetime | None:
     return newest_complete_cycle(availability)
 
 
-def _download_replacement_forecast_current_targets_if_needed(cfg: dict[str, object]) -> dict[str, object] | None:
+def _download_replacement_forecast_current_targets_if_needed(
+    cfg: dict[str, object],
+    *,
+    max_wall_clock_seconds: float | None = None,
+) -> dict[str, object] | None:
     if not bool(cfg.get("download_current_targets_enabled", False)):
         return None
     forecast_db = cfg.get("forecast_db")
@@ -241,6 +245,11 @@ def _download_replacement_forecast_current_targets_if_needed(cfg: dict[str, obje
     # source_available_at metadata model passed to the downloader — it takes no part in
     # deciding WHICH run to fetch.
     release_lag_hours = float(cfg.get("download_release_lag_hours") or 14.0)
+    deadline = (
+        time.monotonic() + max(0.0, float(max_wall_clock_seconds))
+        if max_wall_clock_seconds is not None
+        else None
+    )
     available_cycle = _probe_resolved_available_cycle()
     if available_cycle is None:
         return {
@@ -270,6 +279,21 @@ def _download_replacement_forecast_current_targets_if_needed(cfg: dict[str, obje
             "available_cycle": available_cycle.isoformat(),
             "downloaded_cycle": None if downloaded_cycle is None else downloaded_cycle.isoformat(),
         }
+    remaining = (
+        max(0.0, deadline - time.monotonic())
+        if deadline is not None
+        else None
+    )
+    if remaining is not None and remaining <= 0:
+        return {
+            "status": "CURRENT_TARGET_RAW_INPUTS_TIMEBOXED_INCOMPLETE",
+            "available_cycle": available_cycle.isoformat(),
+            "downloaded_cycle": None if downloaded_cycle is None else downloaded_cycle.isoformat(),
+            "timeboxed_incomplete": True,
+            "unattempted_target_count": plan.target_count,
+            "max_wall_clock_seconds": max_wall_clock_seconds,
+            "coverage": plan.as_dict(),
+        }
     cycle = available_cycle
     return download_current_target_openmeteo_inputs(
         forecast_db=Path(str(forecast_db)),
@@ -284,6 +308,8 @@ def _download_replacement_forecast_current_targets_if_needed(cfg: dict[str, obje
         # needed for ALL current targets — coverage ("a posterior exists") must not filter
         # the target list, or covered targets can never re-materialize on the fresh cycle.
         include_covered=not cycle_targets_have_current_manifests,
+        precomputed_plan=plan,
+        max_wall_clock_seconds=remaining,
     )
 
 

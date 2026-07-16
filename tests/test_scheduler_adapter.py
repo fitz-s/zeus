@@ -149,7 +149,7 @@ def test_replacement_availability_fast_poll_skips_heavy_path_when_source_clock_c
     monkeypatch.setattr(
         prod,
         "_download_replacement_forecast_current_targets_if_needed",
-        lambda cfg: current_target_calls.append(dict(cfg)) or {
+        lambda cfg, **_kwargs: current_target_calls.append(dict(cfg)) or {
             "status": "CURRENT_TARGETS_HAVE_RAW_MANIFESTS",
             "coverage": {
                 "status": "CURRENT_TARGETS_MISSING_REPLACEMENT_COVERAGE",
@@ -241,7 +241,7 @@ def test_replacement_availability_fast_poll_passes_changed_source_clock_report(m
     monkeypatch.setattr(
         prod,
         "_download_replacement_forecast_current_targets_if_needed",
-        lambda cfg: {
+        lambda cfg, **_kwargs: {
             "status": "CURRENT_TARGETS_HAVE_RAW_MANIFESTS",
             "available_cycle": "2026-07-02T12:00:00+00:00",
             "coverage": {
@@ -284,12 +284,11 @@ def test_replacement_availability_fast_poll_passes_changed_source_clock_report(m
     assert probe_kwargs == [{"advance_cursor": False}]
 
 
-def test_replacement_availability_poll_timeout_keeps_reseed_path_alive(monkeypatch) -> None:
-    """A wedged current-target download must not starve source-clock/reseed forever."""
+def test_replacement_availability_poll_timebox_keeps_reseed_path_alive(monkeypatch) -> None:
+    """A timeboxed current-target pass must yield and resume on the next source-clock tick."""
     import src.ingest_main as ingest_main
     import src.data.replacement_forecast_production as prod
     import src.data.source_clock_update_probe as source_clock_probe
-    import src.runtime.timeout_guard as timeout_guard
 
     class _NoChange:
         updated_sources = ()
@@ -302,18 +301,27 @@ def test_replacement_availability_poll_timeout_keeps_reseed_path_alive(monkeypat
                 "error": None,
             }
 
-    ingest_main._replacement_current_target_timeout_suppressed_until = 0.0
     monkeypatch.setenv(ingest_main.REPLACEMENT_CURRENT_TARGET_POLL_TIMEOUT_SECONDS_ENV, "1")
-    monkeypatch.setenv(ingest_main.REPLACEMENT_CURRENT_TARGET_TIMEOUT_COOLDOWN_SECONDS_ENV, "60")
     monkeypatch.setattr(
         prod,
         "_replacement_forecast_live_materialization_queue_config",
         lambda: {"download_current_targets_enabled": True},
     )
+    calls: list[float | None] = []
+
+    def _timeboxed(_cfg, *, max_wall_clock_seconds=None):
+        calls.append(max_wall_clock_seconds)
+        return {
+            "status": "CURRENT_TARGET_RAW_INPUTS_TIMEBOXED_INCOMPLETE",
+            "timeboxed_incomplete": True,
+            "unattempted_target_count": 2,
+            "max_wall_clock_seconds": max_wall_clock_seconds,
+        }
+
     monkeypatch.setattr(
-        timeout_guard,
-        "run_with_timeout",
-        lambda *args, **kwargs: (_ for _ in ()).throw(TimeoutError("hung current-target")),
+        prod,
+        "_download_replacement_forecast_current_targets_if_needed",
+        _timeboxed,
     )
     monkeypatch.setattr(source_clock_probe, "probe_openmeteo_source_clock_updates", lambda **kwargs: _NoChange())
     monkeypatch.setattr(source_clock_probe, "advance_source_clock_cursor", lambda report: ())
@@ -328,11 +336,14 @@ def test_replacement_availability_poll_timeout_keeps_reseed_path_alive(monkeypat
     result = ingest_main._replacement_availability_poll_tick.__wrapped__()
 
     assert result["status"] == "SOURCE_CLOCK_POLL_CURRENT"
-    assert result["current_target_download"]["status"] == "CURRENT_TARGET_DOWNLOAD_TIMEOUT"
+    assert result["current_target_download"]["status"] == "CURRENT_TARGET_RAW_INPUTS_TIMEBOXED_INCOMPLETE"
+    assert result["current_target_download"]["timeboxed_incomplete"] is True
+    assert result["current_target_download"]["unattempted_target_count"] == 2
     assert result["cycle_advance_seeds_enqueued"] == 3
 
     second = ingest_main._replacement_availability_poll_tick.__wrapped__()
-    assert second["current_target_download"]["status"] == "CURRENT_TARGET_TIMEOUT_COOLDOWN_SKIPPED"
+    assert second["current_target_download"]["status"] == "CURRENT_TARGET_RAW_INPUTS_TIMEBOXED_INCOMPLETE"
+    assert calls == [1.0, 1.0]
 
 
 def test_replacement_availability_fast_poll_caps_scoped_download_under_cadence(monkeypatch) -> None:

@@ -396,6 +396,65 @@ def test_direct_current_target_downloader_prioritizes_missing_cycle_manifest_bef
     assert "London" in report["written_manifests"][0]
 
 
+def test_direct_downloader_reuses_plan_and_city_date_payload_across_metrics(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    import scripts.download_replacement_forecast_current_targets as dl
+
+    rows = (
+        _TargetRow(
+            city="London",
+            target_date="2026-06-10",
+            temperature_metric="high",
+            covered=False,
+            missing_openmeteo_manifest=True,
+        ),
+        _TargetRow(
+            city="London",
+            target_date="2026-06-10",
+            temperature_metric="low",
+            covered=False,
+            missing_openmeteo_manifest=True,
+        ),
+    )
+    plan = _PlanStub(ready=False, rows=rows)
+    monkeypatch.setattr(
+        dl,
+        "build_replacement_forecast_current_target_plan",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("precomputed plan must be reused")
+        ),
+    )
+    calls: list[dict[str, object]] = []
+
+    def _resolve(**kwargs):
+        calls.append(kwargs)
+        return (
+            {"hourly": {"time": [], "temperature_2m": []}},
+            {"openmeteo_endpoint": "bucket", "run_authority": "bucket_partial_run_test"},
+        )
+
+    monkeypatch.setattr(dl, "_resolve_anchor_payload", _resolve)
+
+    report = dl.download_current_target_raw_inputs(
+        forecast_db=tmp_path / "forecasts.db",
+        output_dir=tmp_path / "raw",
+        cycle=AVAILABLE_CYCLE,
+        limit=None,
+        write_db=False,
+        release_lag_hours=14.0,
+        anchor_sigma_c=3.0,
+        include_covered=True,
+        precomputed_plan=plan,
+        max_wall_clock_seconds=5.0,
+    )
+
+    assert report["manifest_count"] == 2
+    assert report["downloaded"]["openmeteo_transport_fetch_count"] == 1
+    assert len(calls) == 1
+
+
 def test_disabled_flag_still_short_circuits(tmp_path, monkeypatch) -> None:
     db = _make_db(tmp_path, {})
     calls: list = []

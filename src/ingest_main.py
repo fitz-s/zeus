@@ -50,13 +50,11 @@ FORECAST_LIVE_OWNER_ENV = "ZEUS_FORECAST_LIVE_OWNER"
 REPLACEMENT_AVAILABILITY_POLL_SECONDS_ENV = "ZEUS_REPLACEMENT_AVAILABILITY_POLL_SECONDS"
 REPLACEMENT_SOURCE_CLOCK_DOWNLOAD_BUDGET_SECONDS_ENV = "ZEUS_REPLACEMENT_SOURCE_CLOCK_DOWNLOAD_BUDGET_SECONDS"
 REPLACEMENT_CURRENT_TARGET_POLL_TIMEOUT_SECONDS_ENV = "ZEUS_REPLACEMENT_CURRENT_TARGET_POLL_TIMEOUT_SECONDS"
-REPLACEMENT_CURRENT_TARGET_TIMEOUT_COOLDOWN_SECONDS_ENV = "ZEUS_REPLACEMENT_CURRENT_TARGET_TIMEOUT_COOLDOWN_SECONDS"
 DAY0_METAR_POLL_SECONDS_ENV = "ZEUS_DAY0_METAR_POLL_SECONDS"
 DAY0_METAR_WRITE_BUDGET_MS_ENV = "ZEUS_DAY0_METAR_WRITE_BUDGET_MS"
 _ORACLE_BRIDGE_LOCK = threading.Lock()
 _ORACLE_SNAPSHOT_LOCK = threading.Lock()
 _DAY0_METAR_EMITTER: Any | None = None
-_replacement_current_target_timeout_suppressed_until = 0.0
 
 # SIGTERM-unif (WAVE-4): captured at module load so the forensic elapsed
 # computed in _graceful_shutdown matches what src/main.py and
@@ -193,21 +191,6 @@ def _replacement_current_target_poll_timeout_seconds(poll_seconds: int | None = 
         )
         return default_s
     return max(1.0, min(requested, max(1.0, cadence_s - 1.0)))
-
-
-def _replacement_current_target_timeout_cooldown_seconds() -> float:
-    raw = os.environ.get(REPLACEMENT_CURRENT_TARGET_TIMEOUT_COOLDOWN_SECONDS_ENV, "").strip()
-    if not raw:
-        return 600.0
-    try:
-        return max(0.0, float(raw))
-    except ValueError:
-        logger.warning(
-            "invalid %s=%r; using 600s replacement current-target timeout cooldown",
-            REPLACEMENT_CURRENT_TARGET_TIMEOUT_COOLDOWN_SECONDS_ENV,
-            raw,
-        )
-        return 600.0
 
 
 def _graceful_shutdown(signum, frame) -> None:
@@ -1350,8 +1333,6 @@ def _replacement_availability_poll_tick():
     survives. Fail-soft: any error logs and the next tick retries; every lane it calls
     is idempotent per persisted row/manifest.
     """
-    global _replacement_current_target_timeout_suppressed_until
-
     from src.data.replacement_forecast_production import (  # noqa: PLC0415
         _download_bayes_precision_fusion_source_clock_raw_inputs_if_needed,
         _download_replacement_forecast_current_targets_if_needed,
@@ -1359,7 +1340,6 @@ def _replacement_availability_poll_tick():
         _enqueue_fusion_upgrade_reseeds_if_needed,
         _replacement_forecast_live_materialization_queue_config,
     )
-    from src.runtime.timeout_guard import run_with_timeout  # noqa: PLC0415
     from src.data.source_clock_update_probe import (  # noqa: PLC0415
         advance_source_clock_cursor,
         probe_openmeteo_source_clock_updates,
@@ -1381,8 +1361,9 @@ def _replacement_availability_poll_tick():
             "written_row_count": download_report.get("written_row_count"),
             "target_count": download_report.get("target_count"),
             "timeout_seconds": download_report.get("timeout_seconds"),
-            "cooldown_seconds": download_report.get("cooldown_seconds"),
-            "cooldown_remaining_seconds": download_report.get("cooldown_remaining_seconds"),
+            "timeboxed_incomplete": download_report.get("timeboxed_incomplete"),
+            "unattempted_target_count": download_report.get("unattempted_target_count"),
+            "max_wall_clock_seconds": download_report.get("max_wall_clock_seconds"),
             "error": download_report.get("error"),
         }
         coverage = download_report.get("coverage")
@@ -1438,41 +1419,29 @@ def _replacement_availability_poll_tick():
         return report
 
     current_target_download_report = None
-    now_monotonic = time.monotonic()
-    if now_monotonic < _replacement_current_target_timeout_suppressed_until:
-        current_target_download_report = {
-            "status": "CURRENT_TARGET_TIMEOUT_COOLDOWN_SKIPPED",
-            "cooldown_remaining_seconds": round(
-                _replacement_current_target_timeout_suppressed_until - now_monotonic, 3
-            ),
-        }
-    else:
-        current_target_timeout = _replacement_current_target_poll_timeout_seconds(
-            _replacement_availability_poll_seconds()
-        )
-        try:
-            current_target_download_report = run_with_timeout(
-                lambda: _download_replacement_forecast_current_targets_if_needed(cfg),
-                seconds=current_target_timeout,
-                label="replacement_current_targets",
+    current_target_timeout = _replacement_current_target_poll_timeout_seconds(
+        _replacement_availability_poll_seconds()
+    )
+    try:
+        current_target_download_report = (
+            _download_replacement_forecast_current_targets_if_needed(
+                cfg,
+                max_wall_clock_seconds=current_target_timeout,
             )
-            _replacement_current_target_timeout_suppressed_until = 0.0
-        except TimeoutError as exc:
-            cooldown = _replacement_current_target_timeout_cooldown_seconds()
-            _replacement_current_target_timeout_suppressed_until = time.monotonic() + cooldown
-            current_target_download_report = {
-                "status": "CURRENT_TARGET_DOWNLOAD_TIMEOUT",
-                "timeout_seconds": current_target_timeout,
-                "cooldown_seconds": cooldown,
-                "error": str(exc)[:240],
-            }
-            logger.warning("replacement current-target download timeboxed: %s", current_target_download_report)
-        except Exception as exc:  # noqa: BLE001 - source-clock/reseed must still run.
-            current_target_download_report = {
-                "status": "CURRENT_TARGET_DOWNLOAD_FAILSOFT",
-                "error": f"{type(exc).__name__}: {str(exc)[:220]}",
-            }
-            logger.warning("replacement current-target download failed fail-soft: %s", exc, exc_info=True)
+        )
+    except TimeoutError as exc:
+        current_target_download_report = {
+            "status": "CURRENT_TARGET_DOWNLOAD_TIMEOUT",
+            "timeout_seconds": current_target_timeout,
+            "error": str(exc)[:240],
+        }
+        logger.warning("replacement current-target download timeboxed: %s", current_target_download_report)
+    except Exception as exc:  # noqa: BLE001 - source-clock/reseed must still run.
+        current_target_download_report = {
+            "status": "CURRENT_TARGET_DOWNLOAD_FAILSOFT",
+            "error": f"{type(exc).__name__}: {str(exc)[:220]}",
+        }
+        logger.warning("replacement current-target download failed fail-soft: %s", exc, exc_info=True)
     current_target_download_compact = _compact_current_target_report(current_target_download_report)
     source_clock_report = probe_openmeteo_source_clock_updates(advance_cursor=False)
     source_clock_payload = source_clock_report.as_dict()
