@@ -5721,7 +5721,9 @@ def test_exit_monitor_claims_priority_and_waits_for_reactor_handoff(monkeypatch)
             calls.append("release")
 
     def _run(**kwargs) -> None:
-        calls.append(("run", kwargs["monitor_claimed"]))
+        calls.append(
+            ("run", kwargs["monitor_claimed"], kwargs["target_families"])
+        )
         kwargs["mark_held_position_monitor_complete"]()
 
     main_module._held_position_monitor_active.clear()
@@ -5733,7 +5735,7 @@ def test_exit_monitor_claims_priority_and_waits_for_reactor_handoff(monkeypatch)
     assert calls == [
         ("wait", main_module._EXIT_MONITOR_REACTOR_HANDOFF_SECONDS, True),
         "release",
-        ("run", True),
+        ("run", True, None),
     ]
     assert not main_module._held_position_monitor_active.is_set()
 

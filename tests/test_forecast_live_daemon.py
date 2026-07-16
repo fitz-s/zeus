@@ -275,7 +275,8 @@ def test_materialization_wake_families_use_only_changed_live_rows(tmp_path) -> N
                 target_date TEXT,
                 temperature_metric TEXT,
                 runtime_layer TEXT,
-                training_allowed INTEGER
+                training_allowed INTEGER,
+                q_json TEXT
             )
             """
         )
@@ -286,16 +287,17 @@ def test_materialization_wake_families_use_only_changed_live_rows(tmp_path) -> N
                 target_date,
                 temperature_metric,
                 runtime_layer,
-                training_allowed
-            ) VALUES (?, ?, ?, ?, ?)
+                training_allowed,
+                q_json
+            ) VALUES (?, ?, ?, ?, ?, ?)
             """,
             (
-                ("Paris", "2026-07-18", "high", "live", 0),
-                ("Paris", "2026-07-18", "high", "live", 0),
-                ("Shanghai", "2026-07-18", "high", "live", 0),
-                ("Shanghai", "2026-07-18", "high", "live", 0),
-                ("London", "2026-07-18", "high", "shadow", 0),
-                ("Toronto", "2026-07-18", "high", "live", 1),
+                ("Paris", "2026-07-18", "high", "live", 0, '{"29C":0.4,"30C":0.6}'),
+                ("Shanghai", "2026-07-18", "high", "live", 0, '{"35C":0.3,"36C":0.7}'),
+                ("Paris", "2026-07-18", "high", "live", 0, '{"29C":0.5,"30C":0.5}'),
+                ("Shanghai", "2026-07-18", "high", "live", 0, '{"35C":0.9,"36C":0.1}'),
+                ("London", "2026-07-18", "high", "shadow", 0, '{"25C":1.0}'),
+                ("Toronto", "2026-07-18", "high", "live", 1, '{"25C":1.0}'),
             ),
         )
         conn.commit()
@@ -304,7 +306,7 @@ def test_materialization_wake_families_use_only_changed_live_rows(tmp_path) -> N
 
     families = production._forecast_posterior_families_between(
         {"forecast_db": db_path},
-        revision_before=1,
+        revision_before=2,
         revision_after=6,
     )
 
@@ -549,15 +551,66 @@ def test_day0_reactor_wake_runs_exit_monitor_before_reactor(monkeypatch) -> None
     monkeypatch.setattr(reactor_wake, "read_reactor_wake", lambda: wake)
     monkeypatch.setattr(main, "_edli_reactor_active_lock", _Lock())
     monkeypatch.setattr(main, "_held_position_monitor_active", _Held())
-    monkeypatch.setattr(main, "_exit_monitor_cycle", lambda: calls.append("monitor"))
+    monkeypatch.setattr(
+        main,
+        "_day0_wake_target_families",
+        lambda event_ids: frozenset({("Paris", "2026-07-16", "high")}),
+    )
+    monkeypatch.setattr(
+        main,
+        "_exit_monitor_cycle",
+        lambda *, target_families=None: calls.append(
+            f"monitor:{sorted(target_families or ())}"
+        ),
+    )
     monkeypatch.setattr(main, "_edli_event_reactor_cycle", _run_reactor)
     monkeypatch.setattr(main, "_edli_last_reactor_wake_id", None)
 
     assert main._edli_reactor_wake_poll_once() is True
     assert calls == [
-        "monitor",
+        "monitor:[('Paris', '2026-07-16', 'high')]",
         "reactor:day0_extreme_event_committed:event-day0:0",
     ]
+
+
+def test_day0_wake_family_scope_is_canonical_and_fails_full_on_partial(
+    monkeypatch,
+) -> None:
+    import src.main as main
+
+    payload = json.dumps(
+        {"city": "Paris", "target_date": "2026-07-16", "metric": "high"}
+    )
+
+    class _Conn:
+        def __init__(self, rows):
+            self.rows = rows
+            self.closed = False
+
+        def execute(self, _sql, _params):
+            return self
+
+        def fetchall(self):
+            return self.rows
+
+        def close(self):
+            self.closed = True
+
+    complete = _Conn(
+        [("event-day0", "DAY0_EXTREME_UPDATED", payload)]
+    )
+    monkeypatch.setattr(main, "get_world_connection_read_only", lambda: complete)
+
+    assert main._day0_wake_target_families(("event-day0",)) == frozenset(
+        {("Paris", "2026-07-16", "high")}
+    )
+    assert complete.closed is True
+
+    partial = _Conn([])
+    monkeypatch.setattr(main, "get_world_connection_read_only", lambda: partial)
+
+    assert main._day0_wake_target_families(("event-day0",)) is None
+    assert partial.closed is True
 
 
 def test_reactor_wake_is_not_consumed_when_cycle_loses_execution_race(

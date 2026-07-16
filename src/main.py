@@ -3663,6 +3663,73 @@ def _edli_initialize_reactor_wake_cursor() -> None:
     _edli_last_reactor_wake_id = wake.wake_id if wake is not None else None
 
 
+def _day0_wake_target_families(
+    event_ids: tuple[str, ...],
+) -> frozenset[tuple[str, str, str]] | None:
+    clean_event_ids = tuple(
+        dict.fromkeys(
+            event_id
+            for raw_event_id in event_ids
+            if (event_id := str(raw_event_id or "").strip())
+        )
+    )
+    if not clean_event_ids:
+        return None
+
+    conn = None
+    try:
+        conn = get_world_connection_read_only()
+        placeholders = ",".join("?" for _ in clean_event_ids)
+        rows = conn.execute(
+            f"""
+            SELECT event_id, event_type, payload_json
+              FROM opportunity_events
+             WHERE event_id IN ({placeholders})
+            """,
+            clean_event_ids,
+        ).fetchall()
+    except Exception:
+        logger.warning(
+            "Day0 wake family scope unavailable; using full exit monitor",
+            exc_info=True,
+        )
+        return None
+    finally:
+        if conn is not None:
+            conn.close()
+
+    if len(rows) != len(clean_event_ids):
+        logger.warning(
+            "Day0 wake family scope incomplete events=%d rows=%d; "
+            "using full exit monitor",
+            len(clean_event_ids),
+            len(rows),
+        )
+        return None
+
+    families: set[tuple[str, str, str]] = set()
+    try:
+        for _event_id, event_type, payload_json in rows:
+            if str(event_type or "") != "DAY0_EXTREME_UPDATED":
+                return None
+            payload = json.loads(str(payload_json or ""))
+            city = str(payload.get("city") or "").strip()
+            target_date = date.fromisoformat(
+                str(payload.get("target_date") or "").strip()[:10]
+            ).isoformat()
+            metric = str(payload.get("metric") or "").strip().lower()
+            if not city or metric not in {"high", "low"}:
+                return None
+            families.add((city, target_date, metric))
+    except (AttributeError, TypeError, ValueError, json.JSONDecodeError):
+        logger.warning(
+            "Day0 wake family payload invalid; using full exit monitor",
+            exc_info=True,
+        )
+        return None
+    return frozenset(families) or None
+
+
 def _edli_reactor_wake_poll_once() -> bool:
     """Run the canonical reactor once for a new durable-producer wake hint."""
 
@@ -3677,7 +3744,9 @@ def _edli_reactor_wake_poll_once() -> bool:
         return False
     if wake.reason == "day0_extreme_event_committed":
         try:
-            _exit_monitor_cycle()
+            _exit_monitor_cycle(
+                target_families=_day0_wake_target_families(wake.event_ids)
+            )
         except Exception:
             logger.exception(
                 "Day0 reactor wake held-position monitor failed; "
@@ -5458,7 +5527,10 @@ def _edli_boot_settlement_redeem_recovery() -> None:
 
 
 @_scheduler_job("exit_monitor")
-def _exit_monitor_cycle() -> None:
+def _exit_monitor_cycle(
+    *,
+    target_families: frozenset[tuple[str, str, str]] | None = None,
+) -> None:
     """Scheduler hook — body owned by src.execution.exit_lifecycle (R4-b
     extraction, 2026-07-08) as ``run_exit_monitor_cycle``. See that function's
     docstring for the held-position monitoring / exit-submit lane it runs.
@@ -5493,6 +5565,7 @@ def _exit_monitor_cycle() -> None:
             held_position_monitor_active=_held_position_monitor_active,
             mark_held_position_monitor_complete=_mark_held_position_monitor_complete,
             monitor_claimed=True,
+            target_families=target_families,
         )
     finally:
         if _held_position_monitor_active.is_set():
