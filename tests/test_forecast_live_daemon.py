@@ -1,6 +1,6 @@
 # Created: 2026-05-14
-# Last reused/audited: 2026-07-16
-# Lifecycle: created=2026-05-14; last_reviewed=2026-07-16; last_reused=2026-07-16
+# Last reused/audited: 2026-07-17
+# Lifecycle: created=2026-05-14; last_reviewed=2026-07-17; last_reused=2026-07-17
 # Authority basis: docs/archive/2026-Q2/task_2026-05-08_deep_alignment_audit/DATA_DAEMON_LIVE_EFFICIENCY_REFACTOR_PLAN.md section 6.1, section 6.2, section 8 Phase 4, and Phase 6 durable work journaling; docs/archive/2026-Q2/task_2026-05-16_live_continuous_run_package/LIVE_CONTINUOUS_RUN_PACKAGE_PLAN.md source-health gate; fix/forecast-live-partial-retry 2026-05-19 (ECMWF incremental dissemination correction); a0d51d480b507f324 root-cause (ECMWF 00z ingest schedule fix — add 12z triggers, update FORECAST_LIVE_JOB_IDS).
 # Purpose: Relationship tests for the forecast-live daemon boundary — job registry, lock semantics, journaling, and source-health probe.
 # Reuse: Run when forecast_live_daemon.py job specs, run_opendata_track, or job journaling logic changes.
@@ -228,7 +228,7 @@ def test_replacement_materialize_poll_prioritizes_explicit_queue(monkeypatch, tm
     assert daemon._replacement_forecast_last_discovery_monotonic == 90.0
 
 
-def test_replacement_materialize_pending_queue_does_not_starve_discovery(
+def test_replacement_materialize_pending_queue_drains_before_due_discovery(
     monkeypatch, tmp_path
 ) -> None:
     import src.data.replacement_forecast_production as production
@@ -257,7 +257,7 @@ def test_replacement_materialize_pending_queue_does_not_starve_discovery(
 
     daemon._replacement_forecast_materialize_poll_job()
 
-    assert calls == [True]
+    assert calls == [False, True]
     assert daemon._replacement_forecast_last_discovery_monotonic == 1000.0
 
 
@@ -305,7 +305,7 @@ def test_replacement_materialize_scheduler_uses_fast_queue_poll(monkeypatch) -> 
         daemon, "_replacement_forecast_materialize_interval_minutes", lambda: 1
     )
     monkeypatch.setattr(
-        daemon, "_replacement_forecast_materialize_poll_seconds", lambda: 5
+        daemon, "_replacement_forecast_materialize_poll_seconds", lambda: 1
     )
     monkeypatch.setattr(
         daemon, "_replacement_forecast_live_runtime_enabled", lambda: True
@@ -323,8 +323,16 @@ def test_replacement_materialize_scheduler_uses_fast_queue_poll(monkeypatch) -> 
     )
     assert fn is daemon._replacement_forecast_materialize_poll_job
     assert trigger == "interval"
-    assert kwargs["seconds"] == 5
+    assert kwargs["seconds"] == 1
     assert "minutes" not in kwargs
+
+
+def test_replacement_materialize_queue_poll_defaults_to_one_second(monkeypatch) -> None:
+    import src.ingest.forecast_live_daemon as daemon
+
+    monkeypatch.setattr(daemon, "_replacement_forecast_live_cfg", lambda: {})
+
+    assert daemon._replacement_forecast_materialize_poll_seconds() == 1
 
 
 def _materialization_queue_cfg(tmp_path) -> dict[str, object]:
