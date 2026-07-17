@@ -2655,7 +2655,16 @@ class TestPhase2DExecutionCapabilityStatus:
             else (_ for _ in ()).throw(AssertionError("wrong connection")),
         )
 
-        status = {}
+        status = {
+            "portfolio": {
+                "status": "query_error",
+                "truth_authority": "UNVERIFIED",
+                "refresh_error": "position_current_pulse_query_error",
+            }
+        }
         assert status_summary_module._refresh_minimal_runtime_read_model_for_status(status)
         assert conn.closed is True
         assert status["runtime"]["pulse_refreshed"] is True
+        assert "status" not in status["portfolio"]
+        assert "truth_authority" not in status["portfolio"]
+        assert "refresh_error" not in status["portfolio"]

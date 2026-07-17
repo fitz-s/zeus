@@ -545,6 +545,9 @@ def _refresh_minimal_runtime_read_model_for_status(status: dict) -> bool:
     if not isinstance(portfolio, dict):
         portfolio = {}
         status["portfolio"] = portfolio
+    portfolio.pop("status", None)
+    portfolio.pop("truth_authority", None)
+    portfolio.pop("refresh_error", None)
     portfolio["open_positions"] = int(position_view.get("open_positions", 0))
     portfolio["total_exposure_usd"] = round(
         float(position_view.get("total_exposure_usd", 0.0) or 0.0),

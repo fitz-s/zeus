@@ -4322,13 +4322,16 @@ def test_live_adapter_reuses_tokens_and_refreshes_only_eligible_book_family(
         city="Alpha",
         source_run_id="run-alpha",
     )
-    adapter = era.event_bound_live_adapter_from_trade_conn(
-        trade,
-        get_current_level=lambda: era.RiskLevel.GREEN,
-        forecast_conn=forecast,
-        topology_conn=topology,
-        calibration_conn=world,
-    )
+    def make_adapter():
+        return era.event_bound_live_adapter_from_trade_conn(
+            trade,
+            get_current_level=lambda: era.RiskLevel.GREEN,
+            forecast_conn=forecast,
+            topology_conn=topology,
+            calibration_conn=world,
+        )
+
+    adapter = make_adapter()
     adapter.process_global_batch(
         (event, ineligible_event),
         _dt.datetime(2026, 7, 10, 8, 10, tzinfo=_dt.timezone.utc),
@@ -4380,10 +4383,28 @@ def test_live_adapter_reuses_tokens_and_refreshes_only_eligible_book_family(
                 tuple(sorted(probability_witnesses)),
             )
         )
+        if metadata_sink is not None:
+            for probability in probability_witnesses.values():
+                for binding in probability.bindings:
+                    for token_id in (
+                        binding.yes_token_id,
+                        binding.no_token_id,
+                    ):
+                        metadata_sink[(binding.condition_id, token_id)] = {
+                            "_global_current_gamma": True,
+                        }
         return dict(probability_witnesses)
 
     def fake_capture(_trade_conn, **kwargs):
         probability_witnesses = kwargs["probability_witnesses"]
+        metadata_overrides = kwargs["metadata_overrides"]
+        for probability in probability_witnesses.values():
+            for binding in probability.bindings:
+                for token_id in (
+                    binding.yes_token_id,
+                    binding.no_token_id,
+                ):
+                    assert (binding.condition_id, token_id) in metadata_overrides
         capture_calls.append(tuple(sorted(probability_witnesses)))
         states = []
         for family_key, probability in probability_witnesses.items():
@@ -4519,7 +4540,13 @@ def test_live_adapter_reuses_tokens_and_refreshes_only_eligible_book_family(
         "_global_book_metadata_refresh_family_keys",
         lambda *_args, **_kwargs: frozenset({dallas}),
     )
-    bound_after_expiry, epoch_after_expiry = provider(
+    rebuilt_adapter = make_adapter()
+    rebuilt_adapter.process_global_batch(
+        (event, ineligible_event),
+        _dt.datetime(2026, 7, 10, 8, 12, tzinfo=_dt.timezone.utc),
+    )
+    rebuilt_provider = captured["current_book_epoch_provider"]
+    bound_after_expiry, epoch_after_expiry = rebuilt_provider(
         unrelated_drift,
         _dt.datetime.now(_dt.timezone.utc),
     )
@@ -4533,9 +4560,13 @@ def test_live_adapter_reuses_tokens_and_refreshes_only_eligible_book_family(
     assert bound_after_expiry == unrelated_drift
     # q changed, but the condition/token topology did not. Reuse the still-current
     # cached bindings while refreshing only the triggered family's live books.
+    # A rebuilt adapter has no closure-local metadata, so any full capture first
+    # certifies current metadata for that capture's complete family scope.
     assert bind_calls == [
         ("metadata", (dallas, miami)),
+        ("metadata", (miami,)),
         ("metadata", (dallas,)),
+        ("metadata", (dallas, miami)),
     ]
     assert cache_after_removal is not None
     assert {family_key for family_key, _ in cache_after_removal.bound_probabilities} == {
