@@ -1184,7 +1184,7 @@ def _replacement_forecast_materialize_poll_job() -> None:
         _replacement_forecast_materialize_job(
             discover=False,
             limit=batch_limit,
-            seed_limit=1,
+            seed_limit=batch_limit,
         )
 
 

@@ -226,7 +226,7 @@ def test_replacement_materialize_poll_bounds_pending_seed_work(monkeypatch, tmp_
     )
     daemon._replacement_forecast_materialize_poll_job()
 
-    assert calls == [(False, 3, 1)]
+    assert calls == [(False, 3, 3)]
 
 
 def test_replacement_materialize_poll_prioritizes_requests_over_seeds(
@@ -286,7 +286,7 @@ def test_replacement_materialize_pending_queue_preempts_due_discovery(
     )
     daemon._replacement_forecast_materialize_poll_job()
 
-    assert calls == [(False, 3, 1)]
+    assert calls == [(False, 3, 3)]
 
 
 def test_replacement_discovery_runs_outside_materialization_queue(monkeypatch, tmp_path) -> None:
