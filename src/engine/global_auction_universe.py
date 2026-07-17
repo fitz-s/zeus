@@ -1986,11 +1986,32 @@ def scan_current_global_auction_scope(
     forecasts_conn: sqlite3.Connection,
     decision_at_utc: datetime,
     held_families: Sequence[tuple[str, str, str]] = (),
+    restrict_to_families: set[tuple[str, str, str]] | None = None,
 ) -> CurrentGlobalAuctionScope:
-    """Read every current family and every held-family probability obligation."""
+    """Read current families and the held-family obligations inside that scope."""
 
     if decision_at_utc.tzinfo is None:
         raise ValueError("decision_at_utc must be timezone-aware")
+    requested = (
+        None
+        if restrict_to_families is None
+        else {
+            (
+                str(city or "").strip(),
+                str(target_date or "").strip(),
+                str(metric or "").strip().lower(),
+            )
+            for city, target_date, metric in restrict_to_families
+        }
+    )
+    if requested is not None and (
+        not requested
+        or any(
+            not city or not target_date or metric not in {"high", "low"}
+            for city, target_date, metric in requested
+        )
+    ):
+        raise ValueError("GLOBAL_AUCTION_RESTRICTED_FAMILY_IDENTITY_INVALID")
     held = tuple(
         sorted(
             {
@@ -2000,6 +2021,13 @@ def scan_current_global_auction_scope(
                     str(metric or "").strip().lower(),
                 )
                 for city, target_date, metric in held_families
+                if requested is None
+                or (
+                    str(city or "").strip(),
+                    str(target_date or "").strip(),
+                    str(metric or "").strip().lower(),
+                )
+                in requested
             }
         )
     )
@@ -2015,6 +2043,7 @@ def scan_current_global_auction_scope(
         received_at=decision_at_utc.isoformat(),
         limit=None,
         source="global-auction-current-scope",
+        restrict_to_families=requested,
     )
     events = current_global_scope_events_with_day0(
         forecast_events,
@@ -2024,6 +2053,10 @@ def scan_current_global_auction_scope(
             held_families=held,
         ),
     )
+    if requested is not None:
+        events = tuple(
+            event for event in events if _event_family(event) in requested
+        )
     covered = {_event_family(event) for event in events}
     missing = sorted(set(held) - covered)
     if missing:

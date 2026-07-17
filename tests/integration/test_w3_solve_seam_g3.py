@@ -5253,6 +5253,42 @@ def test_global_scope_refuses_a_held_family_without_probability_carrier(
         )
 
 
+def test_global_scope_restricts_scan_to_requested_families(monkeypatch):
+    requested = {("Alpha", "2026-07-11", "high")}
+    alpha = _global_scope_event(city="Alpha", source_run_id="run-a")
+    beta = _global_scope_event(city="Beta", source_run_id="run-b")
+    calls = []
+
+    class Trigger:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def build_committed_snapshot_events(self, **kwargs):
+            calls.append(kwargs)
+            return alpha, beta
+
+    monkeypatch.setattr(universe, "ForecastSnapshotReadyTrigger", Trigger)
+    monkeypatch.setattr(
+        universe,
+        "executable_forecast_live_eligible_reader",
+        lambda _conn: lambda *_args, **_kwargs: True,
+    )
+    monkeypatch.setattr(universe, "_current_day0_events", lambda *_args, **_kwargs: ())
+
+    scope = universe.scan_current_global_auction_scope(
+        world_conn=object(),
+        forecasts_conn=object(),
+        decision_at_utc=_dt.datetime(
+            2026, 7, 11, 18, 0, tzinfo=_dt.timezone.utc
+        ),
+        held_families=(("Beta", "2026-07-11", "high"),),
+        restrict_to_families=requested,
+    )
+
+    assert calls[0]["restrict_to_families"] == requested
+    assert scope.events == (alpha,)
+
+
 @pytest.fixture(autouse=True)
 def _fast_band_draws(monkeypatch):
     monkeypatch.setattr(bridge, "SPINE_BAND_DRAWS", 400, raising=False)
@@ -8337,6 +8373,73 @@ def test_global_batch_reduce_only_skips_nonheld_universe(monkeypatch):
     assert result.winner_event_id is None
     assert result.receipts[event.event_id].reason == (
         "GLOBAL_AUCTION_NO_REDUCE_ONLY_FAMILY"
+    )
+
+
+def test_global_batch_day0_urgent_scope_only_scans_affected_families(monkeypatch):
+    import src.data.replacement_input_hwm as replacement_hwm
+
+    decision_at = _dt.datetime(2026, 7, 11, 18, 0, tzinfo=_dt.timezone.utc)
+    day0_event = _global_day0_scope_event(city="Alpha", source_run_id="run-a")
+    unrelated_event = _global_scope_event(city="Beta", source_run_id="run-b")
+    day0_family = ("Alpha", "2026-07-11", "high")
+    scope = current_global_auction_scope_from_events(
+        (day0_event,),
+        captured_at_utc=decision_at,
+    )
+    scanned = []
+    prepared = []
+
+    def scan(**kwargs):
+        scanned.append(kwargs)
+        return scope
+
+    def prepare(event, _at):
+        prepared.append(event)
+        return EventSubmissionReceipt(
+            False,
+            event.event_id,
+            event.causal_snapshot_id,
+            reason="GLOBAL_CURRENT_PROBABILITY_PREPARE_FAILED:ValueError:test",
+            proof_accepted=False,
+        )
+
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "_current_held_weather_families",
+        lambda _conn: (("Beta", "2026-07-11", "high"),),
+    )
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "scan_current_global_auction_scope",
+        scan,
+    )
+    monkeypatch.setattr(
+        replacement_hwm,
+        "prime_frozen_replacement_artifact_hwm",
+        lambda *_args, **_kwargs: lambda: None,
+    )
+
+    result = global_batch_runtime.process_current_global_batch(
+        (day0_event,),
+        decision_time=decision_at,
+        world_conn=object(),
+        forecast_conn=object(),
+        trade_conn=_wealth_test_conn(captured_at=decision_at),
+        payload_reader=lambda item: json.loads(item.payload_json),
+        prepare_event=prepare,
+        actuate_winner=lambda *_: pytest.fail("ineligible q must not actuate"),
+        stamp_receipt=lambda receipt: receipt,
+        venue_submit_count=lambda: 0,
+        current_execution=lambda *_: object(),
+        current_time_provider=lambda: decision_at,
+    )
+
+    assert scanned[0]["restrict_to_families"] == {day0_family}
+    assert unrelated_event not in prepared
+    assert prepared == [day0_event]
+    assert result.receipts[day0_event.event_id].reason == (
+        "GLOBAL_AUCTION_NO_CURRENT_PROBABILITY_FAMILY"
     )
 
 
