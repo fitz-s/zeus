@@ -159,29 +159,34 @@ def _write_frozen_csv(tmp_path: Path, *, city: str = "Seoul") -> Path:
     return path
 
 
-def _write_artifact(tmp_path: Path, *, city: str, weights: dict[str, float]) -> Path:
+def _write_artifact(
+    tmp_path: Path,
+    *,
+    city: str,
+    weights: dict[str, float],
+    low_weights: dict[str, float] | None = None,
+) -> Path:
     artifact_dir = tmp_path / "source_clock_weights"
     artifact_dir.mkdir(parents=True, exist_ok=True)
+    provenance = {
+        "n_paired_dates": 100,
+        "mae_basket": 0.5,
+        "mae_vs_frozen_delta": -0.1,
+        "region_fallback": False,
+        "tier": "CITY_SPECIFIC",
+    }
+    buckets: dict[str, dict] = {
+        "high": {"models": weights, "basket_provenance": provenance}
+    }
+    if low_weights is not None:
+        buckets["low"] = {"models": low_weights, "basket_provenance": provenance}
     artifact = {
         "schema_version": 1,
         "as_of": "2026-07-16",
         "generated_at": "TEST",
         "git_sha": "TEST",
         "settlement_rows_used": 1,
-        "cities": {
-            city: {
-                "high": {
-                    "models": weights,
-                    "basket_provenance": {
-                        "n_paired_dates": 100,
-                        "mae_basket": 0.5,
-                        "mae_vs_frozen_delta": -0.1,
-                        "region_fallback": False,
-                        "tier": "CITY_SPECIFIC",
-                    },
-                }
-            }
-        },
+        "cities": {city: buckets},
     }
     payload = json.dumps(artifact, sort_keys=True) + "\n"
     (artifact_dir / "city_weights_20260716.json").write_text(payload, encoding="utf-8")
@@ -208,6 +213,60 @@ def test_scheme_for_city_prefers_artifact_over_frozen_csv(tmp_path, monkeypatch)
     assert scheme is not None
     assert scheme.scheme_status == "SOURCE_CLOCK_ARTIFACT"
     assert scheme.weights == {"jma_seamless": 1.0}
+
+
+def test_scheme_for_city_metric_selects_low_bucket(tmp_path, monkeypatch) -> None:
+    """metric="low" reads the artifact's low bucket; metric-less callers keep "high"."""
+    import src.strategy.live_inference.source_clock_city_weights as m
+
+    csv_path = _write_frozen_csv(tmp_path, city="Seoul")
+    artifact_dir = _write_artifact(
+        tmp_path,
+        city="Seoul",
+        weights={"jma_seamless": 1.0},
+        low_weights={"ukmo_global_deterministic_10km": 1.0},
+    )
+    monkeypatch.setattr(m, "DEFAULT_CITY_ONE_SCHEME_PATH", csv_path)
+    monkeypatch.setattr(m, "DEFAULT_SOURCE_CLOCK_ARTIFACT_DIR", artifact_dir)
+    m._load_active_artifact.cache_clear()
+    m.load_city_one_schemes.cache_clear()
+    monkeypatch.delenv(m.ENV_CITY_ONE_SCHEME_PATH, raising=False)
+    monkeypatch.delenv(m.ENV_SOURCE_CLOCK_ARTIFACT_DIR, raising=False)
+
+    low = scheme_for_city("Seoul", metric="low")
+    assert low is not None
+    assert low.weights == {"ukmo_global_deterministic_10km": 1.0}
+
+    default = scheme_for_city("Seoul")
+    assert default is not None
+    assert default.weights == {"jma_seamless": 1.0}
+
+    center = m.fixed_weight_center_from_values(
+        city="Seoul",
+        values_c_by_source={"ukmo_global_deterministic_10km": 21.5},
+        metric="low",
+    )
+    assert center is not None
+    assert center.mu_c == 21.5
+    assert center.used_weights == {"ukmo_global_deterministic_10km": 1.0}
+
+
+def test_scheme_for_city_metric_miss_falls_back_to_csv(tmp_path, monkeypatch) -> None:
+    """A city whose artifact entry lacks the requested metric bucket falls to the CSV."""
+    import src.strategy.live_inference.source_clock_city_weights as m
+
+    csv_path = _write_frozen_csv(tmp_path, city="Seoul")
+    artifact_dir = _write_artifact(tmp_path, city="Seoul", weights={"jma_seamless": 1.0})
+    monkeypatch.setattr(m, "DEFAULT_CITY_ONE_SCHEME_PATH", csv_path)
+    monkeypatch.setattr(m, "DEFAULT_SOURCE_CLOCK_ARTIFACT_DIR", artifact_dir)
+    m._load_active_artifact.cache_clear()
+    m.load_city_one_schemes.cache_clear()
+    monkeypatch.delenv(m.ENV_CITY_ONE_SCHEME_PATH, raising=False)
+    monkeypatch.delenv(m.ENV_SOURCE_CLOCK_ARTIFACT_DIR, raising=False)
+
+    scheme = scheme_for_city("Seoul", metric="low")
+    assert scheme is not None
+    assert scheme.scheme_status == "GRID_CAP10_LIVE_READY"
 
 
 def test_scheme_for_city_falls_back_to_csv_when_city_absent_from_artifact(

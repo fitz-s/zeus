@@ -770,7 +770,7 @@ def _source_clock_missing_configured_sources(
             scheme_for_city,
         )
 
-        scheme = scheme_for_city(city)
+        scheme = scheme_for_city(city, metric=metric)
         if scheme is None:
             return ()
         served = read_current_instrument_values(

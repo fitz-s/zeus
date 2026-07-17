@@ -1998,7 +1998,7 @@ def _replacement_bayes_precision_fusion_override(
                 scheme_for_city,
             )
 
-            _scheme = scheme_for_city(request.city)
+            _scheme = scheme_for_city(request.city, metric=metric)
             _source_clock_shape_required = _scheme is not None
             # ADD-DATA (operator directive 2026-06-28 "加数据不禁数据"): a station-calibrated
             # source (cwa_*/hko_* family) that is LIVE in the precision fusion but absent from the
@@ -2042,6 +2042,7 @@ def _replacement_bayes_precision_fusion_override(
                     _source_clock_center = fixed_weight_center_from_values(
                         city=request.city,
                         values_c_by_source=_source_values,
+                        metric=metric,
                     )
                     if _source_clock_center is None:
                         try:

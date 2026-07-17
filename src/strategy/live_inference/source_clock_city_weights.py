@@ -56,9 +56,9 @@ PRESENT_WEIGHT_FLOOR = 0.25
 DEFAULT_SOURCE_CLOCK_ARTIFACT_DIR = PROJECT_ROOT / "state" / "source_clock_weights"
 ENV_SOURCE_CLOCK_ARTIFACT_DIR = "ZEUS_SOURCE_CLOCK_WEIGHTS_ARTIFACT_DIR"
 ACTIVE_POINTER_NAME = "ACTIVE.json"
-# No metric is threaded through every scheme_for_city call site yet (the legacy CSV was
-# metric-agnostic, so existing callers pass no metric). "high" is the documented default
-# bucket read when a caller does not supply one -- a named assumption, not a silent guess.
+# Live call sites (materializer + live queue) thread the track metric since 2026-07-17,
+# so HIGH and LOW read their own artifact buckets. "high" remains the documented default
+# for metric-less callers (legacy CSV was metric-agnostic) -- a named assumption.
 DEFAULT_ARTIFACT_METRIC = "high"
 
 
@@ -302,8 +302,9 @@ def fixed_weight_center_from_values(
     city: str,
     values_c_by_source: Mapping[str, float],
     path: str | Path | None = None,
+    metric: str | None = None,
 ) -> FixedWeightCenter | None:
-    scheme = scheme_for_city(city, path=path)
+    scheme = scheme_for_city(city, path=path, metric=metric)
     if scheme is None:
         return None
     used: dict[str, float] = {}
