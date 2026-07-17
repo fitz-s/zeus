@@ -1544,6 +1544,9 @@ def _replacement_availability_poll_tick():
         _enqueue_fusion_upgrade_reseeds_if_needed,
         _replacement_forecast_live_materialization_queue_config,
     )
+    from src.data.bayes_precision_fusion_download import (  # noqa: PLC0415
+        bayes_precision_fusion_quota_cooldown_seconds,
+    )
     from src.data.source_clock_update_probe import (  # noqa: PLC0415
         advance_source_clock_cursor,
         probe_openmeteo_source_clock_updates,
@@ -1553,6 +1556,18 @@ def _replacement_availability_poll_tick():
     cfg = _replacement_forecast_live_materialization_queue_config()
     if not bool(cfg.get("download_current_targets_enabled", False)):
         return None
+    cooldown_seconds = bayes_precision_fusion_quota_cooldown_seconds()
+    if cooldown_seconds > 0:
+        # No source-clock payload can land during provider cooldown. Re-probing
+        # the unchanged metadata cursor only rediscovers the same blocked work.
+        _defer_replacement_maintenance(float(cooldown_seconds))
+        report = {
+            "status": "SOURCE_CLOCK_BPF_SCOPED_QUOTA_COOLDOWN_SKIPPED",
+            "cooldown_seconds": cooldown_seconds,
+            "reseed_maintenance_status": "RESEED_MAINTENANCE_NOT_DUE",
+        }
+        logger.info("replacement source-clock quota cooldown: %s", report)
+        return report
 
     def _compact_current_target_report(download_report):
         if not isinstance(download_report, dict):
