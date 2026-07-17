@@ -90,6 +90,7 @@ _MONITOR_PROBABILITY_FRESH_ATTR = "_monitor_probability_is_fresh"
 _DAY0_ZERO_PROBABILITY_EXIT_AUTHORITY_ATTR = "_day0_zero_probability_exit_authority"
 _GLOBAL_MONITOR_SAMPLES_ATTR = "_current_global_held_probability_samples"
 _GLOBAL_MONITOR_ALPHA_ATTR = "_current_global_probability_band_alpha"
+_MONITOR_PREFETCHED_ORDERBOOKS_ATTR = "_zeus_monitor_prefetched_orderbooks"
 _WHALE_TOXICITY_PRICE_MARGIN = 0.05
 _WHALE_TOXICITY_SEVERE_PRICE_MARGIN = 0.15
 _WHALE_TOXICITY_LOOKBACK_HOURS = 1.0
@@ -107,6 +108,29 @@ _DAY0_STALE_OBSERVATION_REJECTION_PREFIX = (
     "Day0 observation is stale for executable probability generation:"
 )
 _nowcast_consecutive_write_failures = 0
+
+
+def install_monitor_orderbook_prefetch(clob, books: dict[str, dict]) -> bool:
+    """Attach one-cycle batch books to the cycle-scoped CLOB client."""
+
+    clean = {
+        str(token_id): book
+        for token_id, book in books.items()
+        if str(token_id).strip() and isinstance(book, dict) and book
+    }
+    try:
+        setattr(clob, _MONITOR_PREFETCHED_ORDERBOOKS_ATTR, clean)
+    except (AttributeError, TypeError):
+        return False
+    return True
+
+
+def prefetched_monitor_orderbook(clob, token_id: str) -> dict | None:
+    books = getattr(clob, "__dict__", {}).get(_MONITOR_PREFETCHED_ORDERBOOKS_ATTR)
+    if not isinstance(books, dict):
+        return None
+    book = books.get(str(token_id))
+    return book if isinstance(book, dict) and book else None
 
 
 def _monitor_receipt_float(value) -> float | None:
@@ -2564,9 +2588,11 @@ def monitor_quote_refresh(conn, clob: PolymarketClient, pos: Position) -> HeldTo
     if not tid:
         return None
 
+    book = prefetched_monitor_orderbook(clob, tid)
     get_orderbook = getattr(clob, "get_orderbook", None)
     try:
-        book = get_orderbook(tid) if callable(get_orderbook) else None
+        if book is None:
+            book = get_orderbook(tid) if callable(get_orderbook) else None
         if book is not None:
             from src.data.market_scanner import _top_book_level_decimal
 
@@ -2608,7 +2634,13 @@ def monitor_quote_refresh(conn, clob: PolymarketClient, pos: Position) -> HeldTo
             source_timestamp=source_timestamp,
         )
     except Exception as e:
-        one_sided_quote = _day0_one_sided_monitor_quote(conn, clob, pos, tid)
+        one_sided_quote = _day0_one_sided_monitor_quote(
+            conn,
+            clob,
+            pos,
+            tid,
+            book=book,
+        )
         if one_sided_quote is not None:
             return one_sided_quote
         logger.debug("VWMP refresh failed for %s: %s", pos.trade_id, e)

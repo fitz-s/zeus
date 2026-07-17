@@ -521,6 +521,85 @@ def test_monitor_quote_refresh_parses_two_sided_book_once(monkeypatch):
     assert clob.best_bid_ask_calls == 0
 
 
+def test_monitor_quote_refresh_consumes_batch_prefetch_without_singular_get(monkeypatch):
+    from src.engine import monitor_refresh
+
+    monkeypatch.setattr("src.state.db.log_microstructure", lambda *args, **kwargs: None)
+
+    clob = _TwoSidedMonitorBookClob()
+    monitor_refresh.install_monitor_orderbook_prefetch(
+        clob,
+        {
+            "yes123": {
+                "bids": [{"price": "0.40", "size": "30"}],
+                "asks": [{"price": "0.44", "size": "10"}],
+            }
+        },
+    )
+
+    quote = monitor_refresh.monitor_quote_refresh(None, clob, _position())
+
+    assert quote is not None
+    assert quote.best_bid == pytest.approx(0.40)
+    assert quote.best_ask == pytest.approx(0.44)
+    assert clob.orderbook_calls == 0
+    assert clob.best_bid_ask_calls == 0
+
+
+def test_held_monitor_uses_fresh_local_depth_before_network(monkeypatch, tmp_path):
+    from src.engine import cycle_runtime, monitor_refresh
+
+    conn = get_connection(tmp_path / "local-monitor-depth.db")
+    init_schema(conn)
+    from src.state.snapshot_repo import init_snapshot_schema
+
+    init_snapshot_schema(conn)
+    captured_at = datetime(2026, 7, 17, 1, 0, tzinfo=timezone.utc)
+    _insert_executable_snapshot(
+        conn,
+        snapshot_id="local-monitor-depth",
+        selected_outcome_token_id="yes123",
+        yes_token_id="yes123",
+        no_token_id="no123",
+        condition_id="condition-local-depth",
+        top_bid="0.40",
+        top_ask="0.44",
+        captured_at=captured_at,
+    )
+
+    class NoNetworkClob:
+        def get_orderbook_snapshots(self, _token_ids):
+            raise AssertionError("fresh local depth must suppress batch HTTP")
+
+        def get_orderbook(self, _token_id):
+            raise AssertionError("fresh local depth must suppress singular HTTP")
+
+    pos = _position()
+    pos.condition_id = "condition-local-depth"
+    clob = NoNetworkClob()
+    summary = {}
+    deps = types.SimpleNamespace(
+        logger=types.SimpleNamespace(warning=lambda *args, **kwargs: None)
+    )
+
+    cycle_runtime._prefetch_held_monitor_orderbooks(
+        conn,
+        clob,
+        [pos],
+        summary,
+        now_utc=captured_at,
+        deps=deps,
+    )
+    quote = monitor_refresh.monitor_quote_refresh(conn, clob, pos)
+
+    assert quote is not None
+    assert quote.best_bid == pytest.approx(0.40)
+    assert quote.best_ask == pytest.approx(0.44)
+    assert summary["held_monitor_orderbooks_local"] == 1
+    assert summary["held_monitor_orderbooks_network_requested"] == 0
+    conn.close()
+
+
 def test_day0_monitor_quote_refresh_uses_executable_bid_when_asks_absent(monkeypatch):
     from src.engine import monitor_refresh
 

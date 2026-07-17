@@ -5155,6 +5155,119 @@ def test_day0_closed_market_detection_uses_static_market_end_when_clob_info_miss
     assert info["accepting_orders"] is False
 
 
+def test_held_monitor_prefetch_batches_books_and_skips_redundant_market_metadata():
+    from src.engine import cycle_runtime, monitor_refresh
+
+    positions = [
+        _make_position(
+            trade_id=f"batch-monitor-{index}",
+            condition_id=f"condition-{index}",
+            market_id=f"condition-{index}",
+            token_id=f"token-{index}",
+            direction="buy_yes",
+        )
+        for index in range(3)
+    ]
+
+    class BatchClob:
+        def __init__(self):
+            self.batch_calls = []
+            self.market_calls = 0
+
+        def get_orderbook_snapshots(self, token_ids):
+            self.batch_calls.append(tuple(token_ids))
+            return {
+                token_id: {
+                    "bids": [{"price": "0.40", "size": "20"}],
+                    "asks": [{"price": "0.42", "size": "20"}],
+                }
+                for token_id in token_ids
+            }
+
+        def get_clob_market_info(self, _condition_id):
+            self.market_calls += 1
+            raise AssertionError("prefetched executable book makes metadata redundant")
+
+    clob = BatchClob()
+    summary = {}
+    deps = type(
+        "Deps",
+        (),
+        {"logger": type("Logger", (), {"warning": staticmethod(lambda *args: None)})()},
+    )()
+
+    cycle_runtime._prefetch_held_monitor_orderbooks(
+        None,
+        clob,
+        positions,
+        summary,
+        now_utc=datetime(2026, 7, 17, 1, 0, tzinfo=timezone.utc),
+        deps=deps,
+    )
+
+    assert len(clob.batch_calls) == 1
+    assert clob.batch_calls[0] == ("token-0", "token-1", "token-2")
+    assert summary["held_monitor_orderbooks_requested"] == 3
+    assert summary["held_monitor_orderbooks_local"] == 0
+    assert summary["held_monitor_orderbooks_network_requested"] == 3
+    assert summary["held_monitor_orderbooks_prefetched"] == 3
+    for pos in positions:
+        assert monitor_refresh.prefetched_monitor_orderbook(clob, pos.token_id)
+        assert (
+            cycle_runtime._closed_non_accepting_market_info(clob, pos, conn=None)
+            is None
+        )
+    assert clob.market_calls == 0
+
+
+def test_held_monitor_prefetch_clears_prior_cycle_when_batch_fetch_fails():
+    from src.engine import cycle_runtime, monitor_refresh
+
+    pos = _make_position(
+        trade_id="batch-monitor-stale",
+        condition_id="condition-stale",
+        market_id="condition-stale",
+        token_id="token-stale",
+        direction="buy_yes",
+    )
+
+    class FailingBatchClob:
+        def get_orderbook_snapshots(self, _token_ids):
+            raise RuntimeError("current batch unavailable")
+
+    clob = FailingBatchClob()
+    monitor_refresh.install_monitor_orderbook_prefetch(
+        clob,
+        {
+            "token-stale": {
+                "bids": [{"price": "0.40", "size": "20"}],
+                "asks": [{"price": "0.42", "size": "20"}],
+            }
+        },
+    )
+    warnings = []
+    deps = type(
+        "Deps",
+        (),
+        {"logger": type("Logger", (), {"warning": staticmethod(lambda *args: warnings.append(args))})()},
+    )()
+    summary = {}
+
+    cycle_runtime._prefetch_held_monitor_orderbooks(
+        None,
+        clob,
+        [pos],
+        summary,
+        now_utc=datetime(2026, 7, 17, 2, 0, tzinfo=timezone.utc),
+        deps=deps,
+    )
+
+    assert monitor_refresh.prefetched_monitor_orderbook(clob, "token-stale") is None
+    assert summary["held_monitor_orderbooks_prefetched"] == 0
+    assert summary["held_monitor_orderbook_prefetch_error"] == "current batch unavailable"
+    assert len(warnings) == 1
+
+
 # T5 (docs/rebuild/quarantine_excision_2026-07-11.md, REPLACEMENT PHASE LAW):
 # test_quarantine_expired_marks_distinct_admin_resolution_reason retired with
 # it — it exercised the same now-dead admin-resolution monitor branch

@@ -4400,11 +4400,22 @@ def _closed_by_static_market_end_info(conn, pos, *, decision_time: datetime | No
 
 
 def _closed_non_accepting_market_info(clob, pos, conn=None, *, decision_time: datetime | None = None) -> dict | None:
+    static_closed = _closed_by_static_market_end_info(
+        conn,
+        pos,
+        decision_time=decision_time,
+    )
     condition_id = str(
         getattr(pos, "condition_id", None)
         or getattr(pos, "market_id", None)
         or ""
     ).strip()
+    from src.engine.monitor_refresh import prefetched_monitor_orderbook
+
+    held_book = prefetched_monitor_orderbook(clob, _position_held_token_id(pos))
+    if held_book is not None and any(held_book.get(side) for side in ("bids", "asks")):
+        return static_closed
+
     get_market_info = getattr(clob, "get_clob_market_info", None)
     if condition_id and callable(get_market_info):
         try:
@@ -4423,7 +4434,7 @@ def _closed_non_accepting_market_info(clob, pos, conn=None, *, decision_time: da
                     "enable_orderbook": enable_orderbook,
                     "source": "clob_market_info",
                 }
-    return _closed_by_static_market_end_info(conn, pos, decision_time=decision_time)
+    return static_closed
 
 
 def _is_open_crowding_exposure(pos) -> bool:
@@ -4440,6 +4451,139 @@ def _position_held_token_id(pos) -> str:
     if direction == "buy_no":
         return str(getattr(pos, "no_token_id", "") or getattr(pos, "token_id", "") or "")
     return str(getattr(pos, "token_id", "") or getattr(pos, "no_token_id", "") or "")
+
+
+def _fresh_local_held_monitor_orderbooks(
+    conn,
+    positions,
+    *,
+    now_utc: datetime,
+    summary: dict,
+    deps,
+) -> dict[str, dict]:
+    if conn is None:
+        return {}
+    scope = list(
+        dict.fromkeys(
+            (condition_id, token_id)
+            for pos in positions
+            if (condition_id := str(getattr(pos, "condition_id", "") or "").strip())
+            and (token_id := _position_held_token_id(pos))
+        )
+    )
+    if not scope:
+        return {}
+    values_sql = ",".join("(?, ?)" for _ in scope)
+    params = [part for pair in scope for part in pair]
+    params.append(now_utc.astimezone(timezone.utc).isoformat())
+    try:
+        rows = conn.execute(
+            f"""
+            WITH requested(condition_id, token_id) AS (
+                VALUES {values_sql}
+            )
+            SELECT latest.selected_outcome_token_id,
+                   snapshot.orderbook_depth_json
+              FROM requested
+              JOIN executable_market_snapshot_latest AS latest
+                ON latest.condition_id = requested.condition_id
+               AND latest.selected_outcome_token_id = requested.token_id
+              JOIN executable_market_snapshots AS snapshot
+                ON snapshot.snapshot_id = latest.snapshot_id
+             WHERE latest.active = 1
+               AND latest.closed = 0
+               AND latest.accepting_orders = 1
+               AND latest.freshness_deadline >= ?
+            """,
+            params,
+        ).fetchall()
+    except Exception as exc:  # noqa: BLE001 - network remains the fallback.
+        summary["held_monitor_local_orderbook_error"] = str(exc)[:500]
+        deps.logger.warning(
+            "held monitor local orderbook prefetch failed; using network fallback: %s",
+            exc,
+        )
+        return {}
+
+    books: dict[str, dict] = {}
+    for row in rows:
+        try:
+            token_id, raw_book = row[0], row[1]
+            book = json.loads(str(raw_book))
+        except (IndexError, TypeError, ValueError, json.JSONDecodeError):
+            continue
+        token_id = str(token_id or "").strip()
+        asset_id = str(
+            book.get("asset_id")
+            or book.get("assetId")
+            or book.get("token_id")
+            or ""
+        ).strip()
+        if token_id and (not asset_id or asset_id == token_id):
+            books[token_id] = book
+    return books
+
+
+def _prefetch_held_monitor_orderbooks(
+    conn,
+    clob,
+    positions,
+    summary: dict,
+    *,
+    now_utc: datetime,
+    deps,
+) -> None:
+    from src.data.market_scanner import _configured_batch_orderbook_getter
+    from src.engine.monitor_refresh import install_monitor_orderbook_prefetch
+
+    # A client may survive across cycles. Clear the prior cycle before any
+    # return or failed fetch so stale executable truth cannot be reused.
+    install_monitor_orderbook_prefetch(clob, {})
+    getter = _configured_batch_orderbook_getter(clob)
+    token_ids = list(
+        dict.fromkeys(
+            token_id
+            for pos in positions
+            if (token_id := _position_held_token_id(pos))
+        )
+    )
+    summary["held_monitor_orderbooks_requested"] = len(token_ids)
+    local_books = _fresh_local_held_monitor_orderbooks(
+        conn,
+        positions,
+        now_utc=now_utc,
+        summary=summary,
+        deps=deps,
+    )
+    summary["held_monitor_orderbooks_local"] = len(local_books)
+    missing_token_ids = [
+        token_id for token_id in token_ids if token_id not in local_books
+    ]
+    summary["held_monitor_orderbooks_network_requested"] = len(missing_token_ids)
+    if not missing_token_ids or getter is None:
+        installed = install_monitor_orderbook_prefetch(clob, local_books)
+        summary["held_monitor_orderbooks_prefetched"] = (
+            len(local_books) if installed else 0
+        )
+        return
+    try:
+        network_books = getter(missing_token_ids)
+        if not isinstance(network_books, dict):
+            raise TypeError("batch orderbook response must be a mapping")
+    except Exception as exc:  # noqa: BLE001 - singular reads remain the fallback.
+        summary["held_monitor_orderbook_prefetch_error"] = str(exc)[:500]
+        installed = install_monitor_orderbook_prefetch(clob, local_books)
+        summary["held_monitor_orderbooks_prefetched"] = (
+            len(local_books) if installed else 0
+        )
+        deps.logger.warning(
+            "held monitor batch orderbook prefetch failed; using singular fallback: %s",
+            exc,
+        )
+        return
+    books = {**local_books, **network_books}
+    installed = install_monitor_orderbook_prefetch(clob, books)
+    summary["held_monitor_orderbooks_prefetched"] = len(books) if installed else 0
 
 
 def _blocking_review_fact_for_position(portfolio, pos):
@@ -4965,6 +5109,14 @@ def execute_monitoring_phase(
         portfolio,
         conn=conn,
         now_utc=monitor_now_utc,
+    )
+    _prefetch_held_monitor_orderbooks(
+        conn,
+        clob,
+        monitor_positions,
+        summary,
+        now_utc=monitor_now_utc,
+        deps=deps,
     )
     monitor_budget_seconds = _held_position_monitor_budget_seconds(
         held_position_monitor_budget_seconds
