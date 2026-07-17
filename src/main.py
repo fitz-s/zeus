@@ -3777,12 +3777,23 @@ def _edli_reactor_wake_poll_once() -> bool:
 
     from src.runtime.reactor_wake import (
         acknowledge_reactor_wake,
+        acknowledge_reactor_wakes,
+        coalescible_reactor_wakes,
         read_reactor_wake,
     )
 
     wake = read_reactor_wake()
     if wake is None or wake.wake_id == _edli_last_reactor_wake_id:
         return False
+    wakes = coalescible_reactor_wakes(wake)
+    wake_event_ids = tuple(
+        dict.fromkeys(event_id for queued in wakes for event_id in queued.event_ids)
+    )
+    wake_families = tuple(
+        dict.fromkeys(
+            family for queued in wakes for family in queued.forecast_families
+        )
+    )
     day0_wake = wake.reason == "day0_extreme_event_committed"
     substrate_refresh_wake = wake.reason == "money_path_substrate_refreshed"
     if day0_wake and _held_position_monitor_active.is_set():
@@ -3804,7 +3815,7 @@ def _edli_reactor_wake_poll_once() -> bool:
     ):
         return False
     if day0_wake and not substrate_refresh_wake:
-        target_families = _day0_wake_target_families(wake.event_ids)
+        target_families = _day0_wake_target_families(wake_event_ids)
         if _day0_wake_requires_exit_monitor(target_families):
             try:
                 monitor_ran = _exit_monitor_cycle(
@@ -3826,24 +3837,33 @@ def _edli_reactor_wake_poll_once() -> bool:
     if not substrate_refresh_wake:
         ran = _edli_event_reactor_cycle(
             producer_wake_reason=wake.reason,
-            producer_wake_event_ids=wake.event_ids,
-            producer_wake_families=wake.forecast_families,
+            producer_wake_event_ids=wake_event_ids,
+            producer_wake_families=wake_families,
         )
     if ran is not True:
         return False
-    if not acknowledge_reactor_wake(wake):
+    acknowledged = (
+        acknowledge_reactor_wake(wake)
+        if len(wakes) == 1
+        else acknowledge_reactor_wakes(wakes)
+    )
+    if not acknowledged:
         logger.warning(
-            "EDLI reactor processed wake id=%s but queue acknowledgement failed; "
+            "EDLI reactor processed wake id=%s batch=%d but queue acknowledgement failed; "
             "leaving it pending for retry",
             wake.wake_id,
+            len(wakes),
         )
         return False
     _edli_last_reactor_wake_id = wake.wake_id
     logger.info(
-        "EDLI reactor consumed wake id=%s source=%s reason=%s",
+        "EDLI reactor consumed wake id=%s source=%s reason=%s batch=%d events=%d families=%d",
         wake.wake_id,
         wake.source,
         wake.reason,
+        len(wakes),
+        len(wake_event_ids),
+        len(wake_families),
     )
     return True
 

@@ -191,11 +191,7 @@ def publish_reactor_wake(
     target.parent.mkdir(parents=True, exist_ok=True)
     queue_dir = _wake_queue_dir(path)
     queue_dir.mkdir(parents=True, exist_ok=True)
-    published_us = int(
-        datetime.fromisoformat(wake.published_at.replace("Z", "+00:00")).timestamp()
-        * 1_000_000
-    )
-    queue_target = queue_dir / f"{published_us:020d}-{wake.wake_id}.json"
+    queue_target = _wake_queue_target(wake, path=path)
     _atomic_write_wake(queue_target, wake)
     _atomic_write_wake(target, wake)
     if wake.reason in URGENT_WAKE_REASONS:
@@ -217,6 +213,14 @@ def _atomic_write_wake(target: Path, wake: ReactorWake) -> None:
             temp.unlink()
         except FileNotFoundError:
             pass
+
+
+def _wake_queue_target(wake: ReactorWake, *, path: Path | None) -> Path:
+    published_us = int(
+        datetime.fromisoformat(wake.published_at.replace("Z", "+00:00")).timestamp()
+        * 1_000_000
+    )
+    return _wake_queue_dir(path) / f"{published_us:020d}-{wake.wake_id}.json"
 
 
 def _read_reactor_wake_path(path: Path) -> ReactorWake | None:
@@ -279,6 +283,67 @@ def read_reactor_wake(*, path: Path | None = None) -> ReactorWake | None:
     return _read_reactor_wake_path(_wake_path(path))
 
 
+def coalescible_reactor_wakes(
+    selected: ReactorWake,
+    *,
+    path: Path | None = None,
+    max_wakes: int = 100,
+    max_event_ids: int = 100,
+    max_forecast_families: int = 100,
+) -> tuple[ReactorWake, ...]:
+    """Collect same-reason wake hints that one targeted reactor drain can serve."""
+
+    queued = [wake for _queue_file, wake in _queued_wakes(path)]
+    selected_index = next(
+        (
+            index
+            for index, wake in enumerate(queued)
+            if wake.wake_id == selected.wake_id
+        ),
+        None,
+    )
+    if selected_index is None or max_wakes <= 1:
+        return (selected,)
+
+    candidates: list[ReactorWake] = []
+    if selected.reason in {
+        "day0_extreme_event_committed",
+        "forecast_posterior_advanced",
+    }:
+        candidates = [
+            wake
+            for wake in queued
+            if wake.wake_id != selected.wake_id and wake.reason == selected.reason
+        ]
+    else:
+        for wake in queued[selected_index + 1 :]:
+            if wake.reason == "forecast_posterior_advanced":
+                continue
+            if wake.reason != selected.reason:
+                break
+            candidates.append(wake)
+
+    wakes = [selected]
+    wake_ids = {selected.wake_id}
+    event_ids = set(selected.event_ids)
+    families = set(selected.forecast_families)
+    for wake in candidates:
+        if len(wakes) >= max(1, int(max_wakes)) or wake.wake_id in wake_ids:
+            continue
+        next_event_ids = event_ids | set(wake.event_ids)
+        next_families = families | set(wake.forecast_families)
+        if (
+            len(next_event_ids) > max(1, int(max_event_ids))
+            or len(next_families) > max(1, int(max_forecast_families))
+        ):
+            continue
+        wakes.append(wake)
+        wake_ids.add(wake.wake_id)
+        event_ids = next_event_ids
+        families = next_families
+    return tuple(wakes)
+
+
 def acknowledge_reactor_wake(
     wake: ReactorWake,
     *,
@@ -286,16 +351,25 @@ def acknowledge_reactor_wake(
 ) -> bool:
     """Remove exactly one consumed wake and its matching legacy fallback."""
 
+    return acknowledge_reactor_wakes((wake,), path=path)
+
+
+def acknowledge_reactor_wakes(
+    wakes: tuple[ReactorWake, ...],
+    *,
+    path: Path | None = None,
+) -> bool:
+    """Acknowledge one coalesced reactor drain without rescanning the queue."""
+
     try:
-        suffix = f"-{wake.wake_id}.json"
-        for queue_file, _queued_wake in _queued_wakes(path):
-            if queue_file.name.endswith(suffix):
-                queue_file.unlink(missing_ok=True)
+        wake_ids = {wake.wake_id for wake in wakes}
+        for wake in wakes:
+            _wake_queue_target(wake, path=path).unlink(missing_ok=True)
         legacy = _wake_path(path)
         latest = _read_reactor_wake_path(legacy)
-        if latest is not None and latest.wake_id == wake.wake_id:
+        if latest is not None and latest.wake_id in wake_ids:
             legacy.unlink(missing_ok=True)
-    except OSError:
+    except (OSError, ValueError):
         return False
     return True
 

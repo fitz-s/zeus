@@ -827,6 +827,51 @@ def test_reactor_wake_queue_prioritizes_day0_without_losing_forecasts(tmp_path) 
     assert read_reactor_wake(path=path) is None
 
 
+def test_reactor_wake_coalesces_same_reason_until_ordering_barrier(tmp_path) -> None:
+    from src.runtime.reactor_wake import (
+        acknowledge_reactor_wakes,
+        coalescible_reactor_wakes,
+        publish_reactor_wake,
+        read_reactor_wake,
+    )
+
+    path = tmp_path / "wake.json"
+    first = publish_reactor_wake(
+        source="price",
+        reason="market_price_advanced",
+        path=path,
+        wake_id="price-first",
+        event_ids=("event-a",),
+    )
+    second = publish_reactor_wake(
+        source="price",
+        reason="market_price_advanced",
+        path=path,
+        wake_id="price-second",
+        event_ids=("event-b",),
+    )
+    barrier = publish_reactor_wake(
+        source="substrate",
+        reason="money_path_substrate_refreshed",
+        path=path,
+        wake_id="substrate-barrier",
+    )
+    publish_reactor_wake(
+        source="price",
+        reason="market_price_advanced",
+        path=path,
+        wake_id="price-after-barrier",
+        event_ids=("event-c",),
+    )
+
+    selected = read_reactor_wake(path=path)
+    assert selected == first
+    batch = coalescible_reactor_wakes(selected, path=path)
+    assert batch == (first, second)
+    assert acknowledge_reactor_wakes(batch, path=path) is True
+    assert read_reactor_wake(path=path) == barrier
+
+
 def test_reactor_wake_ack_preserves_forecast_published_after_selected(tmp_path) -> None:
     from src.runtime.reactor_wake import (
         acknowledge_reactor_wake,
@@ -966,6 +1011,66 @@ def test_reactor_wake_poll_defers_without_consuming_when_reactor_busy(monkeypatc
     assert main._edli_reactor_wake_poll_once() is True
     assert main._edli_reactor_wake_poll_once() is False
     assert calls == ["reactor:forecast_posterior_advanced::1"]
+
+
+def test_reactor_wake_poll_coalesces_targeted_events_into_one_cycle(monkeypatch) -> None:
+    import src.main as main
+    from src.runtime import reactor_wake
+
+    first = reactor_wake.ReactorWake(
+        "wake-price-first",
+        "2026-07-16T12:00:00+00:00",
+        "price_channel",
+        "market_price_advanced",
+        ("event-a", "event-shared"),
+    )
+    second = reactor_wake.ReactorWake(
+        "wake-price-second",
+        "2026-07-16T12:00:00.100000+00:00",
+        "price_channel",
+        "market_price_advanced",
+        ("event-shared", "event-b"),
+    )
+    reactor_calls: list[tuple[str, tuple[str, ...]]] = []
+    acknowledged: list[tuple[str, ...]] = []
+
+    class _IdleLock:
+        def locked(self) -> bool:
+            return False
+
+    monkeypatch.setattr(reactor_wake, "read_reactor_wake", lambda: first)
+    monkeypatch.setattr(
+        reactor_wake,
+        "coalescible_reactor_wakes",
+        lambda _wake: (first, second),
+    )
+    monkeypatch.setattr(
+        reactor_wake,
+        "acknowledge_reactor_wake",
+        lambda _wake: pytest.fail("coalesced wake must use one batch acknowledgement"),
+    )
+    monkeypatch.setattr(
+        reactor_wake,
+        "acknowledge_reactor_wakes",
+        lambda wakes: acknowledged.append(tuple(wake.wake_id for wake in wakes))
+        or True,
+    )
+    monkeypatch.setattr(main, "_edli_reactor_active_lock", _IdleLock())
+    monkeypatch.setattr(
+        main,
+        "_edli_event_reactor_cycle",
+        lambda *, producer_wake_reason, producer_wake_event_ids, **_kwargs: (
+            reactor_calls.append((producer_wake_reason, producer_wake_event_ids))
+            or True
+        ),
+    )
+    monkeypatch.setattr(main, "_edli_last_reactor_wake_id", None)
+
+    assert main._edli_reactor_wake_poll_once() is True
+    assert reactor_calls == [
+        ("market_price_advanced", ("event-a", "event-shared", "event-b"))
+    ]
+    assert acknowledged == [("wake-price-first", "wake-price-second")]
 
 
 def test_day0_reactor_wake_runs_exit_monitor_before_reactor(monkeypatch) -> None:
