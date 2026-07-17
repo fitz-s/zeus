@@ -324,6 +324,75 @@ These make error categories **unconstructable**, not merely less likely.
 
 **Iron rules:** (1) coverage != currency — five instances fixed today, zero tolerance for recurrence. (2) source-identity — a model's live product must match its de-bias product. (3) no in-sample promotion. (4) buy_no derives from forecast YES bin — cold-bias corrupts the family. (5) operator promotion requires settlement-graded evidence at the same evidence class as icon_eu.
 
+### 4a. Staleness degrade ladder (2026-07-17 addendum)
+
+Operator go 2026-07-17 ("除了需要累积的内容都执行 使用数学和统计就能证明一切") ratified
+executing the previously-pending consult (d) ladder. It REPLACES the binary
+fresh / fail-closed posterior-staleness regime with a GRADED ladder keyed on the
+served posterior's AGE at a decision, `age = decision_time − source_cycle_time`.
+Every boundary is DERIVED from settled live history, not guessed — full numbers,
+n, and p-values in
+`docs/evidence/upstream_physical_2026_07_17/staleness_ladder_derivation.md`.
+
+```
+GREEN   age ≤ 18h : full trading, UNCHANGED.
+AMBER   18h < age ≤ 24h : trading continues; predictive sigma widened by a
+        settlement-FITTED age-band variance v (degC²): σ' = sqrt(σ² + v).
+RED     24h < age < 30h, OR a newer live-eligible cycle detected-not-active :
+        NO new entries for the family; resting makers cancel; held-position
+        monitor/exit lanes stay FULLY ACTIVE (isolation of ENTRY, never monitoring).
+EXPIRED age ≥ 30h : existing fail-closed law, UNCHANGED. The ladder never
+        weakens replacement_source_cycle_max_age_hours.
+UNKNOWN unparseable/absent source_cycle_time : caller keeps its binary law
+        (the ladder never turns a classification failure into a NEW block).
+```
+
+**Derivation basis (paired, target-fixed, walk-forward; n=1479 settled targets).**
+Fresh serving age (`computed_at − source_cycle_time`) is p50 7.19h / p99 15.75h,
+so `GREEN ≤ 18h` covers a genuinely-fresh cycle with margin. The paired
+center-error variance increment is significant from one cycle-generation of
+staleness onward — fitted AMBER-band inflation **high v = 0.362 degC² (p=6.3e-8,
+n=1009), low v = 0.244 degC² (n=156)**, 13–19% of the base predictive variance
+(p50 1.86 degC²), spread-dominated so a symmetric widening prices it honestly.
+Past 24h the systematic center BIAS (|drift| ≥ 0.47°C) becomes a large,
+UNCORRECTABLE-by-variance fraction of the error and only ~6h remain to the
+EXPIRED wall — hence RED stops entry rather than pretending to price it.
+
+**Mechanism (minimal machinery, additive, fail-open).**
+- Classification: `src/data/staleness_degrade_ladder.classify_posterior_staleness`
+  (pure; reads the EXPIRED horizon from `replacement_forecast_cycle_policy` so the
+  two can never drift on that one number). Boundaries are module constants, not
+  new config knobs.
+- AMBER inflation artifact: `scripts/fit_posterior_age_inflation.py` (walk-forward,
+  deterministic, RO over the forecasts DB) → `state/posterior_age_inflation/`
+  ACTIVE.json + sha256, loaded by `src/forecast/posterior_age_inflation.v_for`
+  (lru_cache, fail-open 0.0, env-dir override) — mirrors `staleness_variance.py`.
+  Applied at the admission directional-sigma seam
+  (`event_reactor_adapter._amber_inflated_predictive_sigma_c`), never by mutating
+  the materialized q-vector or any posterior-identity hash.
+- RED entry isolation: `read_replacement_forecast_bundle` returns BLOCKED
+  `REPLACEMENT_STALENESS_RED_ENTRY_ISOLATED` (entry-decision authority). The
+  held-position monitor/exit read paths (`position_belief`, `portfolio.Position`)
+  are independent and untouched — same isolation-of-entry contract as
+  `FAMILY_ENTRY_BLOCKED`.
+
+**SEAM DISTINCTION (no double-counting with `staleness_variance.py`).** That term
+prices per-model INSTRUMENT cycle-lag inside the fused center at materialization;
+THIS term prices the whole POSTERIOR's age at admission. Different history slices,
+different times — they do not overlap.
+
+**Until the orchestrator activates a fitted artifact post-merge, `v_for` returns
+0.0 everywhere**, so the ladder ships INERT on the AMBER-inflation axis (the RED
+entry-isolation axis is independent of the artifact).
+
+**DEVIATION from the consult (d) sketch:** the "two-provider requirement relaxes
+to 1 provider + ENS on AMBER" clause is NOT implemented. Relaxing the source-clock
+completeness gate is a gate WEAKENING and no settlement-accuracy proof that a
+1-provider AMBER posterior settles as well as a 2-provider one was produced; per
+"never weaken a gate" + "使用数学和统计就能证明一切" it is deferred to its own
+walk-forward provider-count-vs-settlement derivation. AMBER keeps the existing
+provider-completeness requirement.
+
 ---
 
 ## 5. Test / Antibody Index
@@ -344,5 +413,8 @@ These make error categories **unconstructable**, not merely less likely.
 | `tests/test_replacement_live_authority_evidence_gate_wiring_honesty.py` | Dead-but-advertised evidence gate misleads operator (54a53334a9) |
 | `tests/test_bayes_precision_fusion_candidate_accrual_models.py` | Family coexistence impossibilities; lead fallback; single-fetch-per-target (a70436d478) |
 | `tests/test_bayes_precision_fusion_port_fidelity.py` | T2 math port reproduces proof engine (Paris/high/L1 2025-12-26 → μ*=4.3137, sd=0.7259) |
+| `tests/test_staleness_degrade_ladder.py` | §4a ladder band edges (18/24/30h), newer-cycle→RED, UNKNOWN keeps binary law, AMBER sigma inflation seam, monitor/exit lane untouched (2026-07-17) |
+| `tests/test_fit_posterior_age_inflation.py` | §4a AMBER inflation fitter: positive v in the aged band, walk-forward exclusion, monotone-in-age, byte-determinism (2026-07-17) |
+| `tests/test_replacement_forecast_bundle_reader_staleness.py` | §4a RED entry-isolation BLOCKED + AMBER-still-binds at the single bundle-reader gate (2026-07-17) |
 
 27/27 materializer+fusion+wiring green at ship. 61/61 green post-promotion (a70436d478).
