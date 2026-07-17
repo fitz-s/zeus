@@ -3161,6 +3161,10 @@ def test_live_adapter_routes_each_global_truth_to_its_owner(monkeypatch, event_f
     assert captured["epoch_superseded"]() is False
 
     urgent_revision["value"] = (10, 11, 12)
+    urgent_reason["value"] = "forecast_posterior_advanced"
+    assert captured["epoch_superseded"]() is False
+
+    urgent_revision["value"] = (13, 14, 15)
     urgent_reason["value"] = "day0_extreme_event_committed"
     assert captured["epoch_superseded"]() is True
 

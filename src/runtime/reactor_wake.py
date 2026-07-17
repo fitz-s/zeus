@@ -21,6 +21,7 @@ REACTOR_URGENT_WAKE_SUFFIX = ".urgent"
 URGENT_WAKE_REASONS = frozenset(
     {
         "day0_extreme_event_committed",
+        "forecast_posterior_advanced",
         "market_price_advanced",
     }
 )
@@ -260,26 +261,30 @@ def _queued_wakes(path: Path | None) -> list[tuple[Path, ReactorWake]]:
 
 
 def read_reactor_wake(*, path: Path | None = None) -> ReactorWake | None:
-    """Read urgent Day0 first, otherwise latest forecast, then legacy.
+    """Read the queued fact with the shortest alpha clock first.
 
-    Forecast hints carry incremental family scopes.  A newer hint is more
-    time-sensitive, but it does not supersede a distinct older scope; exact
-    acknowledgement keeps every unconsumed increment queued.
+    Day0 observations and executable-book changes can reverse value in
+    milliseconds, while a fresh forecast usually has a longer but still finite
+    reaction window. Maintenance and other ordinary hints cannot stand ahead
+    of those facts. Forecast hints carry incremental family scopes; selecting
+    the newest hint first does not lose older scopes because same-reason wakes
+    are coalesced and acknowledgement remains exact.
     """
 
     queued = _queued_wakes(path)
-    for _queue_file, wake in queued:
-        if wake.reason == "day0_extreme_event_committed":
+    priority_reasons = (
+        "day0_extreme_event_committed",
+        "market_price_advanced",
+    )
+    for reason in priority_reasons:
+        for _queue_file, wake in queued:
+            if wake.reason == reason:
+                return wake
+    for _queue_file, wake in reversed(queued):
+        if wake.reason == "forecast_posterior_advanced":
             return wake
-    ordinary = [
-        wake
-        for _queue_file, wake in queued
-        if wake.reason != "forecast_posterior_advanced"
-    ]
-    if ordinary:
-        return ordinary[0]
-    if queued:
-        return queued[-1][1]
+    for _queue_file, wake in queued:
+        return wake
     return _read_reactor_wake_path(_wake_path(path))
 
 

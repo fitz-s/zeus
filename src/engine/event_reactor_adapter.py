@@ -6949,11 +6949,13 @@ def event_bound_live_adapter_from_trade_conn(
                 return False
             if (
                 day0_urgent_batch
-                and reactor_urgent_wake_reason() == "market_price_advanced"
+                and reactor_urgent_wake_reason()
+                in {"forecast_posterior_advanced", "market_price_advanced"}
             ):
                 # The affected Day0 q has a shorter alpha clock than an
-                # unrelated quote tick. The selected leg still crosses the
-                # exact JIT book/probability/wealth preflight before submit.
+                # unrelated forecast or quote tick. The selected leg still
+                # crosses the exact JIT book/probability/wealth preflight
+                # before submit.
                 _global_batch_urgent_wake_revision[0] = current
                 return False
             return True

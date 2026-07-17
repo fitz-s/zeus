@@ -865,8 +865,8 @@ def test_reactor_wake_sidecar_round_trip(tmp_path) -> None:
         wake_id="wake-44",
         published_at=datetime(2026, 7, 16, 12, 0, 2, tzinfo=timezone.utc),
     )
-    assert reactor_urgent_wake_revision(path=path) == urgent_revision
-    assert reactor_urgent_wake_reason(path=path) == "day0_extreme_event_committed"
+    assert reactor_urgent_wake_revision(path=path) != urgent_revision
+    assert reactor_urgent_wake_reason(path=path) == "forecast_posterior_advanced"
     assert acknowledge_reactor_wake(published, path=path) is True
 
 
@@ -984,6 +984,51 @@ def test_reactor_wake_queue_prioritizes_day0_without_losing_forecasts(tmp_path) 
     assert read_reactor_wake(path=path) is None
 
 
+def test_reactor_wake_queue_follows_alpha_clock_before_maintenance(tmp_path) -> None:
+    from src.runtime.reactor_wake import (
+        acknowledge_reactor_wake,
+        publish_reactor_wake,
+        read_reactor_wake,
+    )
+
+    path = tmp_path / "wake.json"
+    maintenance = publish_reactor_wake(
+        source="substrate",
+        reason="money_path_substrate_refreshed",
+        path=path,
+        wake_id="wake-maintenance",
+        published_at=datetime(2026, 7, 16, 12, 0, tzinfo=timezone.utc),
+    )
+    forecast = publish_reactor_wake(
+        source="forecast",
+        reason="forecast_posterior_advanced",
+        path=path,
+        wake_id="wake-forecast",
+        published_at=datetime(2026, 7, 16, 12, 0, 1, tzinfo=timezone.utc),
+    )
+    price = publish_reactor_wake(
+        source="price",
+        reason="market_price_advanced",
+        path=path,
+        wake_id="wake-price",
+        published_at=datetime(2026, 7, 16, 12, 0, 2, tzinfo=timezone.utc),
+        event_ids=("price-event",),
+    )
+    day0 = publish_reactor_wake(
+        source="day0",
+        reason="day0_extreme_event_committed",
+        path=path,
+        wake_id="wake-day0",
+        published_at=datetime(2026, 7, 16, 12, 0, 3, tzinfo=timezone.utc),
+        event_ids=("day0-event",),
+    )
+
+    for expected in (day0, price, forecast, maintenance):
+        assert read_reactor_wake(path=path) == expected
+        assert acknowledge_reactor_wake(expected, path=path) is True
+    assert read_reactor_wake(path=path) is None
+
+
 def test_reactor_wake_coalesces_same_reason_until_ordering_barrier(tmp_path) -> None:
     from src.runtime.reactor_wake import (
         acknowledge_reactor_wakes,
@@ -1013,7 +1058,7 @@ def test_reactor_wake_coalesces_same_reason_until_ordering_barrier(tmp_path) -> 
         path=path,
         wake_id="substrate-barrier",
     )
-    publish_reactor_wake(
+    price_after_barrier = publish_reactor_wake(
         source="price",
         reason="market_price_advanced",
         path=path,
@@ -1026,6 +1071,8 @@ def test_reactor_wake_coalesces_same_reason_until_ordering_barrier(tmp_path) -> 
     batch = coalescible_reactor_wakes(selected, path=path)
     assert batch == (first, second)
     assert acknowledge_reactor_wakes(batch, path=path) is True
+    assert read_reactor_wake(path=path) == price_after_barrier
+    assert acknowledge_reactor_wakes((price_after_barrier,), path=path) is True
     assert read_reactor_wake(path=path) == barrier
 
 
