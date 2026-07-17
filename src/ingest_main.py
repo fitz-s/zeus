@@ -251,6 +251,34 @@ def _commit_pending_day0_metar(*, origin: str) -> dict:
     }
 
 
+def _schedule_day0_metar_commit_retry() -> bool:
+    """Schedule one retry only while a prefetched canonical write is pending."""
+
+    if _scheduler is None:
+        logger.error("DAY0_METAR_COMMIT_RETRY_NOT_SCHEDULED reason=scheduler_unavailable")
+        return False
+    _scheduler.add_job(
+        _day0_metar_commit_retry_tick,
+        "date",
+        run_date=datetime.now(timezone.utc)
+        + timedelta(seconds=DAY0_METAR_COMMIT_RETRY_SECONDS),
+        id="ingest_day0_metar_commit_retry",
+        executor="source_clock_db",
+        max_instances=1,
+        coalesce=True,
+        misfire_grace_time=1,
+        replace_existing=True,
+    )
+    return True
+
+
+def _commit_or_schedule_day0_metar(*, origin: str) -> dict:
+    result = _commit_pending_day0_metar(origin=origin)
+    if result.get("status") in {"COMMIT_ACTIVE", "WRITE_CONTENDED"}:
+        _schedule_day0_metar_commit_retry()
+    return result
+
+
 def _replacement_availability_poll_seconds() -> int:
     """Fast source-clock poll cadence for replacement raw-input downloads.
 
@@ -1008,14 +1036,14 @@ def _day0_metar_source_clock_tick():
             str(edli_cfg.get("edli_live_scope") or "forecast_plus_day0")
         ),
     )
-    return _commit_pending_day0_metar(origin="source_clock")
+    return _commit_or_schedule_day0_metar(origin="source_clock")
 
 
 @_scheduler_job("ingest_day0_metar_commit_retry")
 def _day0_metar_commit_retry_tick():
-    """Retry only the pending canonical write on a sub-second clock."""
+    """Retry a pending canonical write once without repeating network I/O."""
 
-    return _commit_pending_day0_metar(origin="commit_retry")
+    return _commit_or_schedule_day0_metar(origin="commit_retry")
 
 
 @_scheduler_job("ingest_day0_oracle_anomaly")
@@ -2478,10 +2506,6 @@ def _ingest_main_job_specs() -> list[tuple]:
             id="ingest_day0_metar_source_clock", max_instances=1, coalesce=True,
             misfire_grace_time=max(5, int(day0_metar_poll_seconds * 2)),
             next_run_time=now)),
-        (_day0_metar_commit_retry_tick, "interval", dict(seconds=DAY0_METAR_COMMIT_RETRY_SECONDS,
-            id="ingest_day0_metar_commit_retry", max_instances=1, coalesce=True,
-            misfire_grace_time=1,
-            next_run_time=now + timedelta(seconds=DAY0_METAR_COMMIT_RETRY_SECONDS))),
         (_day0_oracle_anomaly_tick, "interval", dict(seconds=10,
             id="ingest_day0_oracle_anomaly", max_instances=1, coalesce=True,
             misfire_grace_time=30, next_run_time=now + timedelta(seconds=2.5))),

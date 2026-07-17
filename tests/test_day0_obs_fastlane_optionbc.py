@@ -667,15 +667,10 @@ class TestObsFastTickSchedulerRegistration:
         )
         assert kwargs["seconds"] == 1.0
 
-        retry_kwargs = next(
-            spec[2]
+        assert not any(
+            spec[2].get("id") == "ingest_day0_metar_commit_retry"
             for spec in specs
-            if spec[2].get("id") == "ingest_day0_metar_commit_retry"
         )
-        assert retry_kwargs["seconds"] == im.DAY0_METAR_COMMIT_RETRY_SECONDS
-        assert retry_kwargs["max_instances"] == 1
-        assert retry_kwargs["coalesce"] is True
-        assert retry_kwargs["next_run_time"] is not None
 
     def test_day0_metar_source_clock_has_one_cadence_authority(self, monkeypatch):
         import src.ingest_main as im
@@ -990,15 +985,28 @@ class TestDay0MetarSourceClockTick:
         conn = MagicMock()
         mutex = MagicMock()
         mutex.acquire.return_value = False
+        scheduled = []
         monkeypatch.setattr(im, "_day0_metar_emitter", lambda: emitter)
         monkeypatch.setattr("src.state.db.get_world_connection", lambda **_kw: conn)
         monkeypatch.setattr("src.state.db.world_write_mutex", lambda: mutex)
+        monkeypatch.setattr(
+            im,
+            "_scheduler",
+            SimpleNamespace(add_job=lambda *args, **kwargs: scheduled.append((args, kwargs))),
+        )
 
         result = im._day0_metar_source_clock_tick.__wrapped__()
 
         assert result == {"status": "WRITE_CONTENDED", "pending_reports": 1}
         conn.close.assert_called_once_with()
         mutex.release.assert_not_called()
+        assert len(scheduled) == 1
+        args, kwargs = scheduled[0]
+        assert args == (im._day0_metar_commit_retry_tick, "date")
+        assert kwargs["id"] == "ingest_day0_metar_commit_retry"
+        assert kwargs["executor"] == "source_clock_db"
+        assert kwargs["replace_existing"] is True
+        assert kwargs["run_date"] is not None
 
     def test_commit_retry_reuses_prefetch_after_writer_contention(
         self,
@@ -1056,9 +1064,15 @@ class TestDay0MetarSourceClockTick:
 
         emitter = _Emitter()
         mutex = _Mutex()
+        scheduled = []
         monkeypatch.setattr(im, "_day0_metar_emitter", lambda: emitter)
         monkeypatch.setattr("src.state.db.get_world_connection", lambda **_kw: _Conn())
         monkeypatch.setattr("src.state.db.world_write_mutex", lambda: mutex)
+        monkeypatch.setattr(
+            im,
+            "_scheduler",
+            SimpleNamespace(add_job=lambda *args, **kwargs: scheduled.append((args, kwargs))),
+        )
         monkeypatch.setattr(
             "src.runtime.reactor_wake.publish_reactor_wake",
             lambda **kwargs: order.append(f"wake:{','.join(kwargs['event_ids'])}"),
@@ -1077,6 +1091,7 @@ class TestDay0MetarSourceClockTick:
         assert order.count("emit") == 1
         assert order.index("commit") < order.index("wake:event-day0")
         assert not im._DAY0_METAR_PENDING_COMMITS
+        assert len(scheduled) == 1
 
     def test_commit_retry_without_pending_fact_does_no_db_work(
         self,
@@ -1092,9 +1107,17 @@ class TestDay0MetarSourceClockTick:
             ),
         )
 
+        scheduled = []
+        monkeypatch.setattr(
+            im,
+            "_scheduler",
+            SimpleNamespace(add_job=lambda *args, **kwargs: scheduled.append((args, kwargs))),
+        )
+
         assert im._day0_metar_commit_retry_tick.__wrapped__() == {
             "status": "SOURCE_CURRENT"
         }
+        assert scheduled == []
 
     def test_commit_staging_preserves_oldest_and_coalesces_latest(
         self,
