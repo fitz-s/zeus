@@ -1524,6 +1524,28 @@ def process_current_global_batch(
             )
         return changed
 
+    def cancelled(stage: str) -> bool:
+        if selection_cancelled is None:
+            return False
+        try:
+            changed = bool(selection_cancelled())
+        except Exception as exc:  # noqa: BLE001 - wake hints cannot invent a trade veto
+            _LOG.warning(
+                "global batch cancellation probe failed: stage=%s error=%r",
+                stage,
+                exc,
+            )
+            return False
+        if changed:
+            _LOG.info(
+                "global batch preempted by urgent input: stage=%s "
+                "elapsed_s=%.3f events=%d",
+                stage,
+                time.monotonic() - batch_started,
+                len(event_tuple),
+            )
+        return changed
+
     def bind_selected_winner(selected):
         """Bind one selected scope event to a committed claim in this epoch."""
 
@@ -1691,6 +1713,8 @@ def process_current_global_batch(
 
         release_selection_snapshot = release_schema_snapshot
         log_stage("selection_snapshot")
+        if cancelled("selection_snapshot"):
+            return reject("GLOBAL_AUCTION_NO_TRADE:GLOBAL_SELECTION_CANCELLED")
         if probe_inflight_buy_ambiguity(trade_conn):
             raise ValueError("CURRENT_WEALTH_INFLIGHT_BUY_AMBIGUOUS")
         scope_at = current_time()
@@ -1702,6 +1726,8 @@ def process_current_global_batch(
             held_families=held_families,
         )
         log_stage("scope_scan", families=len(full_scope.events_by_family))
+        if cancelled("scope_scan"):
+            return reject("GLOBAL_AUCTION_NO_TRADE:GLOBAL_SELECTION_CANCELLED")
         if superseded("scope_scan"):
             return reject("GLOBAL_AUCTION_SUPERSEDED_BY_NEW_FACT")
         decision_scope = full_scope
@@ -1777,6 +1803,8 @@ def process_current_global_batch(
         ineligible_by_family: dict[str, str] = {}
         ineligible_by_event: dict[str, str] = {}
         for family_key, scope_event in decision_scope.events_by_family:
+            if cancelled(f"prepare_family:{family_key}"):
+                return reject("GLOBAL_AUCTION_NO_TRADE:GLOBAL_SELECTION_CANCELLED")
             if superseded(f"prepare_family:{family_key}"):
                 return reject("GLOBAL_AUCTION_SUPERSEDED_BY_NEW_FACT")
             owner = claimed_by_family.get(family_key, scope_event)
@@ -1806,6 +1834,8 @@ def process_current_global_batch(
             # here makes JIT probability revalidation rebuild the same random
             # variable instead of the stale queue owner's carrier.
             prepared_by_event[scope_event.event_id] = prepared
+        if cancelled("prepare_families"):
+            return reject("GLOBAL_AUCTION_NO_TRADE:GLOBAL_SELECTION_CANCELLED")
         if superseded("prepare_families"):
             return reject("GLOBAL_AUCTION_SUPERSEDED_BY_NEW_FACT")
         log_stage("prepare_families", families=len(prepared_by_event))
@@ -1840,6 +1870,8 @@ def process_current_global_batch(
         )
         book_epoch = None
         if current_book_epoch_provider is not None:
+            if cancelled("book_epoch_start"):
+                return reject("GLOBAL_AUCTION_NO_TRADE:GLOBAL_SELECTION_CANCELLED")
             probabilities, book_epoch = current_book_epoch_provider(
                 probabilities,
                 current_time(),
@@ -1853,6 +1885,8 @@ def process_current_global_batch(
                 )
                 for event_id, prepared in prepared_by_event.items()
             }
+        if cancelled("book_epoch_fence"):
+            return reject("GLOBAL_AUCTION_NO_TRADE:GLOBAL_SELECTION_CANCELLED")
         if superseded("book_epoch_fence"):
             return reject("GLOBAL_AUCTION_SUPERSEDED_BY_NEW_FACT")
         # The complete q/book/wealth cut is immutable from this point forward.
@@ -2134,6 +2168,10 @@ def process_current_global_batch(
                 tuple[str, str, str, str], float
             ] = {}
             while True:
+                if cancelled("winner_preflight_start"):
+                    return reject(
+                        "GLOBAL_AUCTION_NO_TRADE:GLOBAL_SELECTION_CANCELLED"
+                    )
                 preflight_at = current_time()
                 if preflight_at > auction_deadline:
                     return reject("GLOBAL_REAUCTION_EPOCH_EXPIRED")
@@ -2153,6 +2191,10 @@ def process_current_global_batch(
                     preflight_at,
                     preflight_authority,
                 )
+                if cancelled("winner_preflight"):
+                    return reject(
+                        "GLOBAL_AUCTION_NO_TRADE:GLOBAL_SELECTION_CANCELLED"
+                    )
                 log_stage("winner_preflight", families=len(prepared_by_event))
                 after_preflight = venue_submit_count()
                 if after_preflight != before_preflight:
@@ -2326,6 +2368,8 @@ def process_current_global_batch(
             binding_token = preflight.binding_token
 
         actuation_at = current_time()
+        if cancelled("actuation"):
+            return reject("GLOBAL_AUCTION_NO_TRADE:GLOBAL_SELECTION_CANCELLED")
         if preflight_winner is not None and actuation_at > auction_deadline:
             return reject("GLOBAL_REAUCTION_EPOCH_EXPIRED")
         before_calls = venue_submit_count()
