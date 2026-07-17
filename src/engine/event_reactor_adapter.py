@@ -9177,13 +9177,14 @@ def _global_preflight_entry_jit_receipt(
 
         raw_book: dict[str, object] = {}
 
-        def capture_book(token_id: str) -> Mapping[str, object]:
+        def capture_book(token_id: str):
             if book_quote_provider is None:
                 raise ValueError("PRE_SUBMIT_BOOK_AUTHORITY_JIT_REQUIRED")
-            current = dict(book_quote_provider(token_id))
+            response = book_quote_provider(token_id)
+            current = dict(response[0] if isinstance(response, tuple) else response)
             raw_book.clear()
             raw_book.update(current)
-            return current
+            return response
 
         jit = _edli_pre_submit_book_from_jit_fetch(
             capture_book,

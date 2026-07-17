@@ -5440,7 +5440,7 @@ def test_gate84_jit_sell_keeps_share_depth_semantics():
             size=150.0,
         )
 
-    _bid, _ask, book_hash, _observed_at = (
+    _bid, _ask, book_hash, _observed_at, authority_id = (
         reactor._edli_pre_submit_book_from_jit_fetch(
             _book("150"),
             token_id="yes-1",
@@ -5450,6 +5450,7 @@ def test_gate84_jit_sell_keeps_share_depth_semantics():
         )
     )
     assert book_hash == "sell-shares-150"
+    assert authority_id == "clob_jit_book"
 
 
 @pytest.mark.parametrize(

@@ -21,6 +21,10 @@
     60s reactor cycle; the keepalive pinger tick is fail-soft."""
 from __future__ import annotations
 
+import json
+import sqlite3
+from datetime import datetime, timedelta, timezone
+
 
 def test_default_pre_submit_outer_guard_clears_live_clob_tail(monkeypatch):
     """The unset live default must leave enough budget for a warm /book tail read.
@@ -120,6 +124,90 @@ def test_jit_book_provider_reuses_warm_client_across_calls(monkeypatch):
         )
     finally:
         reactor._edli_reset_pre_submit_jit_clob_client()
+
+
+def test_jit_book_provider_uses_fresh_projection_then_rest_fallback(monkeypatch):
+    from src.events import reactor
+
+    conn = sqlite3.connect(":memory:")
+    conn.executescript(
+        """
+        CREATE TABLE executable_market_snapshots (
+            snapshot_id TEXT PRIMARY KEY,
+            selected_outcome_token_id TEXT NOT NULL,
+            orderbook_depth_json TEXT NOT NULL,
+            captured_at TEXT NOT NULL
+        );
+        CREATE TABLE executable_market_snapshot_latest (
+            condition_id TEXT NOT NULL,
+            selected_outcome_token_id TEXT NOT NULL,
+            snapshot_id TEXT NOT NULL,
+            freshness_deadline TEXT NOT NULL,
+            PRIMARY KEY (condition_id, selected_outcome_token_id)
+        );
+        CREATE INDEX idx_snapshot_latest_selected_token_captured
+            ON executable_market_snapshot_latest (
+                selected_outcome_token_id,
+                freshness_deadline DESC
+            );
+        """
+    )
+    token = "token-projected"
+    projected = {
+        "asset_id": token,
+        "hash": "projected-hash",
+        "bids": [{"price": "0.40", "size": "100"}],
+        "asks": [{"price": "0.60", "size": "100"}],
+    }
+    captured_at = datetime.now(timezone.utc) - timedelta(milliseconds=50)
+    conn.execute(
+        "INSERT INTO executable_market_snapshots VALUES (?,?,?,?)",
+        ("snapshot-1", token, json.dumps(projected), captured_at.isoformat()),
+    )
+    conn.execute(
+        "INSERT INTO executable_market_snapshot_latest VALUES (?,?,?,?)",
+        (
+            "condition-1",
+            token,
+            "snapshot-1",
+            (captured_at + timedelta(minutes=3)).isoformat(),
+        ),
+    )
+
+    rest_calls = []
+
+    class StubClient:
+        def get_orderbook_snapshot(self, token_id):
+            rest_calls.append(token_id)
+            return {**projected, "hash": "rest-hash"}
+
+    monkeypatch.setattr(
+        reactor,
+        "_edli_pre_submit_jit_clob_client",
+        lambda: StubClient(),
+    )
+    monkeypatch.setattr(
+        reactor,
+        "_edli_run_pre_submit_clob_call",
+        lambda _name, call, **_kwargs: call(),
+    )
+    fetch = reactor._edli_pre_submit_jit_book_quote_provider(
+        conn,
+        max_quote_age_ms=1000,
+    )
+
+    book, observed_at, authority_id = fetch(token)
+    assert book["hash"] == "projected-hash"
+    assert observed_at == captured_at
+    assert authority_id == "price_channel_projection"
+    assert rest_calls == []
+
+    conn.execute(
+        "UPDATE executable_market_snapshots SET captured_at = ?",
+        ((datetime.now(timezone.utc) - timedelta(seconds=2)).isoformat(),),
+    )
+    assert fetch(token)["hash"] == "rest-hash"
+    assert rest_calls == [token]
 
 
 def test_prewarm_uses_warmup_timeout_and_keepalive_tick_is_fail_soft(monkeypatch):

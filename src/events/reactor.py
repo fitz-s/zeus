@@ -5687,7 +5687,12 @@ def run_edli_event_reactor_cycle(
             _edli_reactor_family_market_absence_provider()
         )
         _live_jit_book_quote_provider = (
-            _edli_pre_submit_jit_book_quote_provider()
+            _edli_pre_submit_jit_book_quote_provider(
+                trade_conn,
+                max_quote_age_ms=int(
+                    edli_cfg.get("pre_submit_max_quote_age_ms", 1000) or 1000
+                ),
+            )
             if live_submit_effective
             else None
         )
@@ -6951,11 +6956,72 @@ def _edli_pre_submit_jit_outer_timeout_seconds() -> float:
     outer = _edli_pre_submit_clob_timeout_seconds()
     return max(0.25, min(4.5, outer * 0.85))
 
-def _edli_pre_submit_jit_book_quote_provider():
-    """Build the just-in-time single-token ``/book`` fetcher for the pre-submit
-    authority (GATE #84). Returns a ``token_id -> dict`` callable that pulls the
-    live CLOB book for exactly the selected candidate at submit time, or ``None``
-    if a CLOB client cannot be constructed (caller then falls back to the DB row).
+def _edli_fresh_projected_pre_submit_book(
+    trade_conn,
+    token_id: str,
+    *,
+    max_quote_age_ms: int,
+):
+    """Return one fresh durable WS book without fabricating observation time."""
+
+    if trade_conn is None or max_quote_age_ms <= 0:
+        return None
+    try:
+        row = trade_conn.execute(
+            """
+            SELECT snapshot.orderbook_depth_json,
+                   snapshot.captured_at,
+                   latest.freshness_deadline
+              FROM executable_market_snapshot_latest AS latest
+                   INDEXED BY idx_snapshot_latest_selected_token_captured
+              JOIN executable_market_snapshots AS snapshot
+                ON snapshot.snapshot_id = latest.snapshot_id
+             WHERE latest.selected_outcome_token_id = ?
+            """,
+            (str(token_id),),
+        ).fetchone()
+        if row is None:
+            return None
+        captured_at = datetime.fromisoformat(str(row[1]).replace("Z", "+00:00"))
+        freshness_deadline = datetime.fromisoformat(
+            str(row[2]).replace("Z", "+00:00")
+        )
+        if captured_at.tzinfo is None or freshness_deadline.tzinfo is None:
+            return None
+        captured_at = captured_at.astimezone(timezone.utc)
+        freshness_deadline = freshness_deadline.astimezone(timezone.utc)
+        checked_at = datetime.now(timezone.utc)
+        age_ms = (checked_at - captured_at).total_seconds() * 1000.0
+        if (
+            age_ms < 0.0
+            or age_ms > float(max_quote_age_ms)
+            or freshness_deadline < checked_at
+        ):
+            return None
+        book = json.loads(str(row[0] or ""))
+        if (
+            not isinstance(book, Mapping)
+            or str(book.get("asset_id") or book.get("token_id") or "").strip()
+            != str(token_id)
+            or not str(book.get("hash") or "").strip()
+            or not isinstance(book.get("bids"), list)
+            or not isinstance(book.get("asks"), list)
+        ):
+            return None
+        return dict(book), captured_at, "price_channel_projection"
+    except (json.JSONDecodeError, sqlite3.Error, TypeError, ValueError):
+        return None
+
+
+def _edli_pre_submit_jit_book_quote_provider(
+    trade_conn=None,
+    *,
+    max_quote_age_ms: int = 1000,
+):
+    """Build the selected-token pre-submit book authority (GATE #84).
+
+    A sub-SLO durable price-channel projection is already current venue truth;
+    otherwise the existing warm ``/book`` fetch remains the fail-closed fallback.
 
     Uses a WARM, REUSED client (see ``_edli_pre_submit_jit_clob_client``) so the
     TLS connection stays warm across submit candidates instead of paying a cold
@@ -6964,7 +7030,14 @@ def _edli_pre_submit_jit_book_quote_provider():
     the next fetch, so a transiently-dead socket costs at most one requeue.
     """
 
-    def _fetch(token_id: str) -> dict:
+    def _fetch(token_id: str):
+        projected = _edli_fresh_projected_pre_submit_book(
+            trade_conn,
+            token_id,
+            max_quote_age_ms=max_quote_age_ms,
+        )
+        if projected is not None:
+            return projected
         clob = _edli_pre_submit_jit_clob_client()
         return _edli_run_pre_submit_clob_call(
             "jit_book",
@@ -7259,11 +7332,12 @@ def _edli_pre_submit_book_from_jit_fetch(
     candidate we pull its live book ``now`` and anchor freshness to OUR
     observation time — the FOK crosses against exactly this book.
 
-    Returns ``(best_bid, best_ask, book_hash, observed_at)`` on a usable executable
-    book, or ``None`` only when the fetch itself fails. The caller treats that as a
-    hard no-submit: cached feasibility rows cannot prove submit-time truth. For a
-    taker limit intent, ``size`` is ConditionalToken shares, so the same JIT
-    response must cover that share count at prices within the limit.
+    Returns ``(best_bid, best_ask, book_hash, observed_at, authority_id)`` on a
+    usable executable book, or ``None`` only when the fetch itself fails. The
+    caller treats that as a hard no-submit: cached feasibility rows cannot prove
+    submit-time truth. For a taker limit intent, ``size`` is ConditionalToken
+    shares, so the same JIT response must cover that share count at prices within
+    the limit.
     """
     import logging as _logging
     _log = _logging.getLogger("zeus.events.reactor")
@@ -7271,10 +7345,25 @@ def _edli_pre_submit_book_from_jit_fetch(
     if book_quote_provider is None:
         return None
     try:
-        message = dict(book_quote_provider(token_id))
+        response = book_quote_provider(token_id)
+        book_authority_id = "clob_jit_book"
+        observed_at = None
+        if isinstance(response, tuple):
+            if len(response) != 3:
+                raise ValueError("PRE_SUBMIT_BOOK_AUTHORITY_JIT_RESPONSE_INVALID")
+            response, observed_at, book_authority_id = response
+        message = dict(response)
     except Exception as exc:  # noqa: BLE001 - JIT fetch failure must not fabricate freshness
         _log.warning("EDLI pre-submit JIT book fetch failed for %s: %s", token_id, exc)
         return None
+    if observed_at is not None:
+        if not isinstance(observed_at, datetime) or observed_at.tzinfo is None:
+            raise ValueError("PRE_SUBMIT_BOOK_AUTHORITY_JIT_TIME_INVALID")
+        observed_at = observed_at.astimezone(timezone.utc)
+        if observed_at > datetime.now(timezone.utc):
+            raise ValueError("PRE_SUBMIT_BOOK_AUTHORITY_JIT_TIME_FROM_FUTURE")
+    if not str(book_authority_id or "").strip():
+        raise ValueError("PRE_SUBMIT_BOOK_AUTHORITY_JIT_SOURCE_MISSING")
     response_token_id = str(message.get("asset_id") or message.get("token_id") or "").strip()
     if not response_token_id or response_token_id != str(token_id):
         raise ValueError(
@@ -7342,7 +7431,13 @@ def _edli_pre_submit_book_from_jit_fetch(
                 f"executable_notional={executable_notional:.6f}:"
                 f"book_hash={book_hash}"
             )
-    return best_bid, best_ask, book_hash, datetime.now(timezone.utc)
+    return (
+        best_bid,
+        best_ask,
+        book_hash,
+        observed_at or datetime.now(timezone.utc),
+        str(book_authority_id),
+    )
 
 def _edli_book_best_price(levels, *, best: str):
     if not levels:
@@ -7491,10 +7586,9 @@ def _edli_pre_submit_authority_provider_from_book_evidence_conn(
         )
         if jit is None:
             raise ValueError("PRE_SUBMIT_BOOK_AUTHORITY_JIT_REQUIRED")
-        best_bid, best_ask, book_hash, book_observed_at = jit
-        checked_at = book_observed_at.astimezone(timezone.utc)
-        quote_seen_at = checked_at.isoformat()
-        book_authority_id = "clob_jit_book"
+        best_bid, best_ask, book_hash, book_observed_at, book_authority_id = jit
+        checked_at = datetime.now(timezone.utc)
+        quote_seen_at = book_observed_at.astimezone(timezone.utc).isoformat()
 
         heartbeat_summary = _edli_heartbeat_authority_summary()
         user_ws_summary = _edli_user_ws_authority_summary(checked_at)
