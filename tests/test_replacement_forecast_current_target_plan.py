@@ -839,6 +839,39 @@ def test_current_target_plan_classifies_covered_seedable_and_missing_manifest_ta
     assert released == [True]
 
 
+def test_current_target_plan_does_not_count_all_market_history(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    import src.data.replacement_forecast_current_target_plan as plan_module
+
+    db = tmp_path / "forecasts.db"
+    _create_db(db)
+    statements: list[str] = []
+
+    def _traced_read_only(path: Path) -> sqlite3.Connection:
+        conn = sqlite3.connect(f"file:{Path(path)}?mode=ro", uri=True)
+        conn.set_trace_callback(statements.append)
+        return conn
+
+    monkeypatch.setattr(plan_module, "_connect_read_only", _traced_read_only)
+    monkeypatch.setattr(
+        plan_module,
+        "prime_frozen_replacement_artifact_hwm",
+        lambda *args, **kwargs: lambda: None,
+    )
+
+    build_replacement_forecast_current_target_plan(
+        db,
+        min_target_date="2026-06-07",
+        now_utc=datetime(2026, 6, 7, 12, 0, tzinfo=timezone.utc),
+    )
+
+    normalized = {" ".join(statement.split()) for statement in statements}
+    assert "SELECT 1 FROM market_events LIMIT 1" in normalized
+    assert "SELECT COUNT(*) FROM market_events" not in normalized
+
+
 def test_current_target_plan_orders_nearest_market_date_first(tmp_path) -> None:
     db = tmp_path / "forecasts.db"
     _create_db(db)

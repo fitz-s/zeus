@@ -1664,10 +1664,12 @@ def build_replacement_forecast_current_target_plan(
         if not required.issubset(tables):
             return _blocked_plan("REPLACEMENT_CURRENT_TARGET_PLAN_REQUIRED_TABLE_MISSING")
         try:
-            market_event_count = int(conn.execute("SELECT COUNT(*) FROM market_events").fetchone()[0])
+            market_event_exists = conn.execute(
+                "SELECT 1 FROM market_events LIMIT 1"
+            ).fetchone()
         except sqlite3.Error:
-            market_event_count = -1
-        if market_event_count == 0:
+            market_event_exists = True
+        if market_event_exists is None:
             return ReplacementForecastCurrentTargetPlan(
                 status="NO_CURRENT_TARGETS",
                 reason_codes=("REPLACEMENT_CURRENT_TARGET_PLAN_NO_CURRENT_TARGETS",),
