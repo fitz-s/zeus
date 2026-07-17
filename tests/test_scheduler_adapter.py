@@ -602,6 +602,7 @@ def test_ingest_main_registry_scheduler_replaces_manual_add_job_when_enabled() -
     assert by_id["ingest_day0_metar_source_clock"]["executor"] == "source_clock_db"
     assert "ingest_day0_metar_commit_retry" not in by_id
     assert by_id["ingest_day0_oracle_anomaly"]["executor"] == "live_db"
+    assert by_id["ingest_k2_hourly_instants"]["executor"] == "backfill_db"
     assert by_id["ingest_uma_resolution_listener"]["executor"] == "backfill_db"   # PR8 fix landed
     assert by_id["ingest_heartbeat"]["executor"] == "heartbeat"                   # file-only lane
 

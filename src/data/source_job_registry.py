@@ -107,8 +107,10 @@ class SourceJobSpec:
 _INGEST_MAIN: tuple[SourceJobSpec, ...] = (
     SourceJobSpec("ingest_k2_daily_obs", "ingest_main", "live", "default", True,
                   source_id="wu_icao_history", callable_ref="_k2_daily_obs_tick", family="observation"),
-    SourceJobSpec("ingest_k2_hourly_instants", "ingest_main", "live", "default", True,
-                  callable_ref="_k2_hourly_instants_tick", family="observation"),
+    SourceJobSpec("ingest_k2_hourly_instants", "ingest_main", "backfill", "default", True,
+                  callable_ref="_k2_hourly_instants_tick", family="observation",
+                  notes="rolling archive of completed local days; isolated from live_db so "
+                        "Open-Meteo retries cannot starve current-source guards"),
     SourceJobSpec("ingest_k2_solar_daily", "ingest_main", "derived", "default", True,
                   source_id="openmeteo_archive", callable_ref="_k2_solar_daily_tick", family="solar"),
     SourceJobSpec("ingest_k2_forecasts_daily", "ingest_main", "live", "default", True,
