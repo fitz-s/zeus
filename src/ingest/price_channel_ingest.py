@@ -1849,6 +1849,122 @@ def _edli_open_rest_priority_token_ids(trade_conn) -> set[str]:
     return tokens
 
 
+def _edli_priority_family_token_ids(
+    trade_conn,
+    forecasts_conn,
+    token_ids,
+    *,
+    limit: int = 2000,
+) -> set[str]:
+    """Expand high-value token seeds to their complete weather families."""
+
+    seeds = {
+        str(token or "").strip()
+        for token in token_ids
+        if str(token or "").strip() and str(token or "").strip() != "None"
+    }
+    if not seeds or trade_conn is None or forecasts_conn is None:
+        return seeds
+    try:
+        seed_conditions: set[str] = set()
+        ordered_seeds = sorted(seeds)
+        for offset in range(0, len(ordered_seeds), 400):
+            chunk = ordered_seeds[offset : offset + 400]
+            placeholders = ",".join("?" for _ in chunk)
+            rows = trade_conn.execute(
+                f"""
+                SELECT DISTINCT condition_id
+                  FROM executable_market_snapshot_latest
+                 WHERE selected_outcome_token_id IN ({placeholders})
+                """,
+                chunk,
+            ).fetchall()
+            seed_conditions.update(
+                str(row[0] or "").strip() for row in rows if row
+            )
+        seed_conditions.discard("")
+        seed_conditions.discard("None")
+        if not seed_conditions:
+            return seeds
+
+        families: set[tuple[str, str, str]] = set()
+        ordered_conditions = sorted(seed_conditions)
+        for offset in range(0, len(ordered_conditions), 400):
+            chunk = ordered_conditions[offset : offset + 400]
+            placeholders = ",".join("?" for _ in chunk)
+            rows = forecasts_conn.execute(
+                f"""
+                SELECT DISTINCT city, target_date, temperature_metric
+                  FROM market_events
+                 WHERE condition_id IN ({placeholders})
+                   AND city IS NOT NULL AND TRIM(city) != ''
+                   AND target_date IS NOT NULL AND TRIM(target_date) != ''
+                   AND temperature_metric IN ('high', 'low')
+                """,
+                chunk,
+            ).fetchall()
+            families.update(
+                (
+                    str(row[0]).strip(),
+                    str(row[1]).strip(),
+                    str(row[2]).strip(),
+                )
+                for row in rows
+            )
+        if not families:
+            return seeds
+
+        family_conditions: set[str] = set()
+        ordered_families = sorted(families)
+        for offset in range(0, len(ordered_families), 200):
+            chunk = ordered_families[offset : offset + 200]
+            requested = ",".join("(?,?,?)" for _ in chunk)
+            params = tuple(value for family in chunk for value in family)
+            rows = forecasts_conn.execute(
+                f"""
+                WITH requested(city, target_date, metric) AS (VALUES {requested})
+                SELECT DISTINCT market.condition_id
+                  FROM requested
+                  JOIN market_events AS market
+                    ON market.city = requested.city
+                   AND market.target_date = requested.target_date
+                   AND market.temperature_metric = requested.metric
+                 WHERE market.condition_id IS NOT NULL
+                   AND TRIM(market.condition_id) != ''
+                """,
+                params,
+            ).fetchall()
+            family_conditions.update(
+                str(row[0] or "").strip() for row in rows if row
+            )
+        family_conditions.discard("")
+        family_conditions.discard("None")
+
+        expanded = set(seeds)
+        ordered_family_conditions = sorted(family_conditions)
+        for offset in range(0, len(ordered_family_conditions), 400):
+            chunk = ordered_family_conditions[offset : offset + 400]
+            placeholders = ",".join("?" for _ in chunk)
+            rows = trade_conn.execute(
+                f"""
+                SELECT selected_outcome_token_id, yes_token_id, no_token_id
+                  FROM executable_market_snapshot_latest
+                 WHERE condition_id IN ({placeholders})
+                """,
+                chunk,
+            ).fetchall()
+            for row in rows:
+                for raw_token in row:
+                    token = str(raw_token or "").strip()
+                    if token and token != "None":
+                        expanded.add(token)
+    except Exception:
+        return seeds
+
+    remaining = max(0, max(int(limit), len(seeds)) - len(seeds))
+    return seeds | set(sorted(expanded - seeds)[:remaining])
+
+
 def _edli_order_token_ids_by_feasibility_age(
     trade_conn,
     token_ids,
@@ -2235,7 +2351,11 @@ def _edli_refresh_candidate_priority_quote_evidence(
         MarketChannelOnlineService,
         active_weather_token_metadata_for_tokens,
     )
-    from src.state.db import get_trade_connection, get_world_connection
+    from src.state.db import (
+        get_forecasts_connection_read_only,
+        get_trade_connection,
+        get_world_connection,
+    )
 
     world_read = get_world_connection(write_class=None)
     try:
@@ -2528,6 +2648,14 @@ def _edli_market_channel_ingestor_cycle() -> dict | None:
         if world_read is not None:
             world_read.close()
 
+    forecasts_read = None
+    try:
+        forecasts_read = get_forecasts_connection_read_only()
+    except Exception as exc:
+        logger.warning(
+            "EDLI ingestor family-priority forecast read failed (non-fatal): %s",
+            exc,
+        )
     trade_conn = get_trade_connection(write_class=None)
     try:
         held_priority_token_ids = _edli_held_position_priority_token_ids(trade_conn)
@@ -2540,8 +2668,12 @@ def _edli_market_channel_ingestor_cycle() -> dict | None:
             open_rest_priority_token_ids=open_rest_priority_token_ids,
             candidate_priority_token_ids=candidate_priority_token_ids,
         )
-        entry_token_ids = set(candidate_priority_token_ids)
-        entry_token_ids.update(open_rest_priority_token_ids)
+        priority_token_ids = _edli_priority_family_token_ids(
+            trade_conn,
+            forecasts_read,
+            priority_token_ids,
+        )
+        entry_token_ids = set(priority_token_ids)
         token_metadata = active_weather_token_metadata_for_tokens(
             trade_conn,
             token_ids=entry_token_ids,
@@ -2556,6 +2688,8 @@ def _edli_market_channel_ingestor_cycle() -> dict | None:
         token_ids = set(token_metadata)
     finally:
         trade_conn.close()
+        if forecasts_read is not None:
+            forecasts_read.close()
 
     if not token_ids:
         health = {

@@ -574,6 +574,93 @@ def test_candidate_priority_uses_bounded_recent_row_window():
     )
 
 
+def test_priority_tokens_expand_to_complete_weather_families():
+    from src.ingest.price_channel_ingest import _edli_priority_family_token_ids
+
+    trade = sqlite3.connect(":memory:")
+    trade.executescript(
+        """
+        CREATE TABLE executable_market_snapshot_latest (
+            condition_id TEXT NOT NULL,
+            selected_outcome_token_id TEXT NOT NULL,
+            yes_token_id TEXT NOT NULL,
+            no_token_id TEXT NOT NULL
+        );
+        INSERT INTO executable_market_snapshot_latest VALUES
+            ('condition-a', 'a-yes', 'a-yes', 'a-no'),
+            ('condition-a', 'a-no', 'a-yes', 'a-no'),
+            ('condition-b', 'b-yes', 'b-yes', 'b-no'),
+            ('condition-b', 'b-no', 'b-yes', 'b-no'),
+            ('condition-other', 'other-yes', 'other-yes', 'other-no');
+        """
+    )
+    forecasts = sqlite3.connect(":memory:")
+    forecasts.executescript(
+        """
+        CREATE TABLE market_events (
+            condition_id TEXT NOT NULL,
+            city TEXT NOT NULL,
+            target_date TEXT NOT NULL,
+            temperature_metric TEXT NOT NULL
+        );
+        INSERT INTO market_events VALUES
+            ('condition-a', 'Paris', '2026-07-17', 'high'),
+            ('condition-b', 'Paris', '2026-07-17', 'high'),
+            ('condition-other', 'Paris', '2026-07-18', 'high');
+        """
+    )
+
+    expanded = _edli_priority_family_token_ids(
+        trade,
+        forecasts,
+        {"a-no"},
+    )
+
+    assert expanded == {"a-yes", "a-no", "b-yes", "b-no"}
+
+
+def test_priority_family_expansion_never_drops_seed_tokens_at_limit():
+    from src.ingest.price_channel_ingest import _edli_priority_family_token_ids
+
+    trade = sqlite3.connect(":memory:")
+    trade.executescript(
+        """
+        CREATE TABLE executable_market_snapshot_latest (
+            condition_id TEXT NOT NULL,
+            selected_outcome_token_id TEXT NOT NULL,
+            yes_token_id TEXT NOT NULL,
+            no_token_id TEXT NOT NULL
+        );
+        INSERT INTO executable_market_snapshot_latest VALUES
+            ('condition-a', 'seed-a', 'seed-a', 'expanded-a'),
+            ('condition-b', 'seed-b', 'seed-b', 'expanded-b');
+        """
+    )
+    forecasts = sqlite3.connect(":memory:")
+    forecasts.executescript(
+        """
+        CREATE TABLE market_events (
+            condition_id TEXT NOT NULL,
+            city TEXT NOT NULL,
+            target_date TEXT NOT NULL,
+            temperature_metric TEXT NOT NULL
+        );
+        INSERT INTO market_events VALUES
+            ('condition-a', 'Paris', '2026-07-17', 'high'),
+            ('condition-b', 'Paris', '2026-07-17', 'high');
+        """
+    )
+
+    expanded = _edli_priority_family_token_ids(
+        trade,
+        forecasts,
+        {"seed-a", "seed-b"},
+        limit=2,
+    )
+
+    assert expanded == {"seed-a", "seed-b"}
+
+
 def test_market_channel_seed_first_includes_all_money_path_priority_tokens():
     from src.ingest.price_channel_ingest import _edli_market_channel_seed_first_token_ids
 
