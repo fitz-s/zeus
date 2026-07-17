@@ -258,6 +258,17 @@ authority surface.
   time, weaken strict exposure validation, or count the same economic fill
   twice.
 
+- 2026-07-17: the same Tokyo fill also left its venue command in
+  `REVIEW_REQUIRED`, so the canonical PUSD reservation stayed open and every
+  subsequent global auction failed closed with
+  `CURRENT_WEALTH_INFLIGHT_BUY_AMBIGUOUS`.  Command recovery now lets one
+  authenticated `WS_USER` `CONFIRMED` full-fill fact plus a matching active,
+  synced projection cross the existing review boundary through a formally
+  validated `FILL_CONFIRMED` proof.  The proof deduplicates the EDLI alias,
+  binds the exact command/order/size and venue time, then uses the canonical
+  terminal-event seam to convert the reservation; it does not mutate the live
+  DB out of band or infer a fill from portfolio state alone.
+
 - 2026-07-14: post-deploy global auctions covered all 128 current families and
   repeatedly selected Sao Paulo Jul 14 HIGH NO with positive robust delta-log
   wealth, but preflight inherited `passed_prefilter=false` and the old
