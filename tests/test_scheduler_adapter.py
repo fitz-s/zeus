@@ -67,13 +67,27 @@ def test_executor_class_assignments_by_role() -> None:
     from src.data.scheduler_adapter import build_job_specs
 
     by_id = {s.job_id: s for s in build_job_specs()}
-    assert by_id["ingest_harvester_truth_writer"].executor_class == "live_db"   # live settlement
-    assert by_id["ingest_market_scan"].executor_class == "live_db"              # live
+    assert by_id["ingest_harvester_truth_writer"].executor_class == "settlement_db"
+    assert by_id["ingest_market_scan"].executor_class == "market_topology_db"
+    assert by_id["ingest_k2_forecasts_daily"].executor_class == "forecast_archive_db"
+    assert by_id["ingest_opendata_daily_mx2t6"].executor_class == "forecast_source_db"
+    assert by_id["ingest_day0_oracle_anomaly"].executor_class == "oracle_guard_db"
     assert by_id["ingest_k2_obs_fast_tick"].executor_class == "observation_db"
     assert by_id["ingest_tigge_archive_backfill"].executor_class == "backfill_db"
     assert by_id["ingest_calibration_auto_promote"].executor_class == "derived_db"
     assert by_id["ingest_heartbeat"].executor_class == "heartbeat"
     assert by_id["ingest_source_health_probe"].executor_class == "diagnostic_io"
+
+
+def test_unclassified_live_db_writer_fails_closed() -> None:
+    import pytest
+
+    from src.data.scheduler_adapter import executor_class_for
+    from src.data.source_job_registry import SourceJobSpec
+
+    unknown = SourceJobSpec("new_live_writer", "ingest_main", "live", "default", True)
+    with pytest.raises(ValueError, match="no explicit causal executor lane"):
+        executor_class_for(unknown)
 
 
 def test_all_jobs_single_instance_coalesce_preserved() -> None:
@@ -564,8 +578,13 @@ def test_build_registry_scheduler_builds_exact_set_and_routes_executors() -> Non
         assert j["executor"] == executor_class_for(JOB_REGISTRY[j["id"]])
         assert j["executor"] in (
             "source_clock_db",
+            "oracle_guard_db",
             "observation_db",
-            "live_db",
+            "forecast_source_db",
+            "forecast_archive_db",
+            "market_topology_db",
+            "settlement_db",
+            "venue_event_db",
             "backfill_db",
             "derived_db",
             "io",
@@ -604,7 +623,10 @@ def test_ingest_main_registry_scheduler_replaces_manual_add_job_when_enabled() -
     by_id = {j["id"]: j for j in sched.jobs}
     assert by_id["ingest_day0_metar_source_clock"]["executor"] == "source_clock_db"
     assert "ingest_day0_metar_commit_retry" not in by_id
-    assert by_id["ingest_day0_oracle_anomaly"]["executor"] == "live_db"
+    assert by_id["ingest_day0_oracle_anomaly"]["executor"] == "oracle_guard_db"
+    assert by_id["ingest_harvester_truth_writer"]["executor"] == "settlement_db"
+    assert by_id["ingest_market_scan"]["executor"] == "market_topology_db"
+    assert by_id["ingest_k2_forecasts_daily"]["executor"] == "forecast_archive_db"
     assert by_id["ingest_k2_obs_fast_tick"]["executor"] == "observation_db"
     assert by_id["ingest_k2_hourly_instants"]["executor"] == "backfill_db"
     assert by_id["ingest_uma_resolution_listener"]["executor"] == "backfill_db"   # PR8 fix landed

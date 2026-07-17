@@ -9,14 +9,19 @@ Turns the job registry (src/data/source_job_registry) into per-job APScheduler b
 assigning each job an EXECUTOR CLASS by intent so the single-writer SQLite lock no longer lets
 DB-heavy jobs starve heartbeats:
 
-    source_clock_db — latency-critical source publication -> short live write
-    observation_db  — supplemental observation ingest
-    live_db         — other live DB writers (forecast/observation/market ingest)
-    backfill_db     — backfill / historical DB writers (incl. UMA settlement)
-    derived_db      — derived/diagnostic DB writers (calibration, skill, drift)
-    io              — non-DB IO jobs
-    diagnostic_io   — health/status probes (file-only, potentially slow)
-    heartbeat       — process liveness heartbeat only
+    source_clock_db     — latency-critical source publication -> short live write
+    oracle_guard_db     — Day0 source disagreement guard
+    observation_db      — supplemental observation ingest
+    forecast_source_db  — current forecast downloads/materialization
+    forecast_archive_db — previous-runs history maintenance
+    market_topology_db  — Gamma/CLOB market discovery
+    settlement_db       — settlement truth collection
+    venue_event_db      — long-running venue event ingestion
+    backfill_db         — other backfill / historical DB writers (incl. UMA)
+    derived_db          — derived/diagnostic DB writers (calibration, skill, drift)
+    io                  — non-DB IO jobs
+    diagnostic_io       — health/status probes (file-only, potentially slow)
+    heartbeat           — process liveness heartbeat only
 
 This module is the structural home of the "UMA must not write the DB on the file-only fast
 executor" fix: by construction a writes_db job is assigned a *_db class, never io/heartbeat.
@@ -36,8 +41,13 @@ from src.data.source_job_registry import JOB_REGISTRY, SourceJobSpec
 
 ExecutorClass = Literal[
     "source_clock_db",
+    "oracle_guard_db",
     "observation_db",
-    "live_db",
+    "forecast_source_db",
+    "forecast_archive_db",
+    "market_topology_db",
+    "settlement_db",
+    "venue_event_db",
     "backfill_db",
     "derived_db",
     "io",
@@ -65,19 +75,36 @@ def executor_class_for(spec: SourceJobSpec) -> ExecutorClass:
             "ingest_k2_obs_fast_tick",
         }:
             return "observation_db"
+        if spec.job_id == "ingest_day0_oracle_anomaly":
+            return "oracle_guard_db"
+        if spec.job_id == "ingest_k2_forecasts_daily":
+            return "forecast_archive_db"
         # Settlement is live-critical EXCEPT historical UMA, which is a backfill concern.
         if spec.source_id == "polymarket_uma_oo_v2":
             return "backfill_db"
+        if spec.job_id == "ingest_harvester_truth_writer":
+            return "settlement_db"
+        if spec.job_id in {"ingest_market_scan", "market_discovery"}:
+            return "market_topology_db"
+        if spec.job_id == "user_ws_ingestor":
+            return "venue_event_db"
+        if (
+            spec.source_id == "ecmwf_open_data"
+            or spec.job_id == "replacement_forecast_live_materialize"
+        ):
+            return "forecast_source_db"
         # Replacement availability poll carries download + materialization work
         # (cycle-advance reseeds ride it) that can run for HOURS on a backlog.
-        # Incident 2026-06-12: one long poll run monopolized the serial live_db
+        # Incident 2026-06-12: one long poll run monopolized the shared live
         # lane 13:09->16:07 and starved every observation tick — Denver went
         # blind for the whole settlement-day heating ramp. Materialization is
         # derived-class work; the lane-separation rationale ("an ETL job can
         # never starve live ingest") must apply to it too.
         if spec.job_id == "ingest_replacement_availability_poll":
             return "derived_db"
-        return "live_db"
+        raise ValueError(
+            f"{spec.job_id}: live DB writer has no explicit causal executor lane"
+        )
     if spec.role == "backfill":
         return "backfill_db"
     return "derived_db"  # derived / diagnostic DB writers
@@ -247,8 +274,13 @@ def registry_executor_pools() -> dict[str, object]:
 
     return {
         "source_clock_db": ThreadPoolExecutor(max_workers=1),
+        "oracle_guard_db": ThreadPoolExecutor(max_workers=1),
         "observation_db": ThreadPoolExecutor(max_workers=1),
-        "live_db": ThreadPoolExecutor(max_workers=1),
+        "forecast_source_db": ThreadPoolExecutor(max_workers=1),
+        "forecast_archive_db": ThreadPoolExecutor(max_workers=1),
+        "market_topology_db": ThreadPoolExecutor(max_workers=1),
+        "settlement_db": ThreadPoolExecutor(max_workers=1),
+        "venue_event_db": ThreadPoolExecutor(max_workers=1),
         "backfill_db": ThreadPoolExecutor(max_workers=1),
         "derived_db": ThreadPoolExecutor(max_workers=1),
         "io": ThreadPoolExecutor(max_workers=2),
@@ -302,13 +334,7 @@ def build_registry_scheduler(
 
 
 def validate_lane_separation(specs: list[JobBuildSpec] | None = None) -> list[str]:
-    """PR8: derived/diagnostic/backfill DB writers must NOT share the live_db lane — so a
-    calibration/skill/drift ETL can never starve live forecast/observation/market ingest behind
-    the serial writer. Returns violations (empty = clean).
-
-    The live_db lane is reserved for role in {live, settlement(non-UMA)}; everything else gets
-    backfill_db / derived_db. This is enforced by executor_class_for(); this validator proves it.
-    """
+    """Reject semantic role drift onto latency-sensitive DB lanes."""
     from src.data.source_job_registry import JOB_REGISTRY
 
     specs = specs if specs is not None else build_job_specs()
@@ -319,8 +345,16 @@ def validate_lane_separation(specs: list[JobBuildSpec] | None = None) -> list[st
         job = JOB_REGISTRY.get(s.job_id)
         if job is None:
             continue
-        if s.executor_class == "live_db" and job.role in ("derived", "diagnostic", "backfill"):
+        if s.executor_class in {
+            "source_clock_db",
+            "oracle_guard_db",
+            "observation_db",
+            "forecast_source_db",
+            "market_topology_db",
+            "settlement_db",
+            "venue_event_db",
+        } and job.role in ("derived", "diagnostic", "backfill"):
             violations.append(
-                f"{s.job_id}: role={job.role} on live_db lane — would starve live ingest behind ETL"
+                f"{s.job_id}: role={job.role} on latency-sensitive lane {s.executor_class}"
             )
     return violations

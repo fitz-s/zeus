@@ -94,8 +94,7 @@ def test_live_authority_is_family_specific() -> None:
 # ---- PR8: lane separation ----
 
 def test_derived_jobs_not_on_live_lane() -> None:
-    """ANTIBODY: no derived/diagnostic/backfill DB writer shares the live_db lane (would starve
-    live ingest behind the serial SQLite writer)."""
+    """ANTIBODY: no derived/diagnostic/backfill writer uses a latency-sensitive lane."""
     from src.data.scheduler_adapter import build_job_specs, validate_lane_separation
 
     assert validate_lane_separation(build_job_specs()) == []
@@ -108,8 +107,9 @@ def test_calibration_etl_is_derived_lane_not_live() -> None:
     assert by_id["ingest_etl_recalibrate"].executor_class == "derived_db"
     assert by_id["ingest_calibration_auto_promote"].executor_class == "derived_db"
     assert by_id["ingest_drift_detector"].executor_class == "derived_db"
-    # while a live ingest job is on the live lane:
-    assert by_id["ingest_market_scan"].executor_class == "live_db"
+    assert by_id["ingest_market_scan"].executor_class == "market_topology_db"
+    assert by_id["ingest_harvester_truth_writer"].executor_class == "settlement_db"
+    assert by_id["ingest_k2_forecasts_daily"].executor_class == "forecast_archive_db"
 
 
 def test_obs_instant_v2_provenance_distinct_from_daily() -> None:
