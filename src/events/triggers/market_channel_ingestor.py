@@ -1775,12 +1775,14 @@ class MarketChannelOnlineService:
                     if str(token_id) not in wanted or not isinstance(book, dict):
                         continue
                     captured = dict(book)
-                    # A REST response without a venue clock is only known to be
-                    # at least as new as request start.  Using response/end-of-
-                    # chunk time would discard WS deltas that arrived while the
-                    # request was in flight even though they may be newer than
-                    # the REST snapshot.
-                    captured.setdefault("timestamp", batch_request_started_at)
+                    venue_timestamp = captured.get("timestamp")
+                    if venue_timestamp not in (None, ""):
+                        captured.setdefault("venue_timestamp", venue_timestamp)
+                    # /books is a current-state observation.  Its timestamp can
+                    # be the last mutation time, so it cannot identify when we
+                    # observed an unchanged book.  Request start is the latest
+                    # conservative cut that cannot overtake an in-flight WS delta.
+                    captured["timestamp"] = batch_request_started_at
                     pre_captured_books[str(token_id)] = captured
                 if len(pre_captured_books) == len(wanted):
                     return pre_captured_books
@@ -1810,7 +1812,10 @@ class MarketChannelOnlineService:
             try:
                 request_started_at = datetime.now(UTC).isoformat()
                 captured = dict(self.fetch_orderbook(token_id))
-                captured.setdefault("timestamp", request_started_at)
+                venue_timestamp = captured.get("timestamp")
+                if venue_timestamp not in (None, ""):
+                    captured.setdefault("venue_timestamp", venue_timestamp)
+                captured["timestamp"] = request_started_at
                 pre_captured_books[token_id] = captured
             except TimeoutError:
                 raise

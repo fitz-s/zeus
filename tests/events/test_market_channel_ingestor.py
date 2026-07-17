@@ -943,6 +943,37 @@ def test_subscribed_seed_separates_wide_network_fetch_from_small_db_commits():
     assert commit_counts == [4, 8, 10]
 
 
+def test_rest_seed_uses_request_start_not_last_venue_mutation_as_capture_time():
+    conn, writer = _conn_writer()
+    old_venue_time = "2026-01-01T00:00:00+00:00"
+    before = datetime.now(timezone.utc)
+    service = MarketChannelOnlineService(
+        MarketChannelIngestor(
+            writer,
+            active_token_ids={"token-1"},
+            token_metadata=_metadata(),
+        ),
+        fetch_orderbook=lambda _token_id: {},
+        fetch_orderbooks=lambda _token_ids: {
+            "token-1": {
+                "asset_id": "token-1",
+                "timestamp": old_venue_time,
+                "bids": [{"price": "0.48", "size": "10"}],
+                "asks": [{"price": "0.52", "size": "10"}],
+                "hash": "seed-hash",
+            }
+        },
+    )
+
+    captured = service._fetch_rest_seed_books(["token-1"])["token-1"]
+    after = datetime.now(timezone.utc)
+
+    capture_time = datetime.fromisoformat(str(captured["timestamp"]))
+    assert before <= capture_time <= after
+    assert captured["venue_timestamp"] == old_venue_time
+    assert capture_time > datetime.fromisoformat(old_venue_time)
+
+
 def test_websocket_subscribes_before_rest_seed(monkeypatch):
     import websockets
 
