@@ -197,6 +197,21 @@ def _scoped_sqlite_busy_timeout(conn: sqlite3.Connection, timeout_ms: int):
         conn.execute(f"PRAGMA busy_timeout = {previous}")
 
 
+def _begin_world_write_without_convoy(conn: sqlite3.Connection) -> bool:
+    """Acquire SQLite's WORLD writer immediately or yield to the next tick."""
+
+    if conn.in_transaction:
+        raise RuntimeError("WORLD_WRITE_BOUNDARY_ALREADY_IN_TRANSACTION")
+    with _scoped_sqlite_busy_timeout(conn, 0):
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+        except sqlite3.OperationalError as exc:
+            if not _is_sqlite_lock_error(exc):
+                raise
+            return False
+    return True
+
+
 def _snapshot_block_retry_delay_seconds(*, attempt_count: int = 1) -> float:
     """Retry floor for executable-snapshot substrate blocks.
 
@@ -9808,18 +9823,23 @@ def run_edli_continuous_redecision_screen_cycle(*, screen_lock) -> None:
                 emit_mutex = _world_write_mutex()
                 emit_lock_timeout_s = _edli_emit_lock_timeout_seconds(edli_cfg)
                 emit_acquired = False
-                world = None
+                world = get_world_connection()
                 expired_unadmitted = 0
                 try:
                     emit_acquired = _edli_acquire_mutex(emit_mutex, timeout=emit_lock_timeout_s)
                     if emit_acquired:
-                        world = get_world_connection()
-                        expired_unadmitted = _edli_apply_unadmitted_redecision_expiry(
-                            world,
-                            expiry_plan,
-                            decision_time=received_at,
-                        )
-                        world.commit()
+                        if _begin_world_write_without_convoy(world):
+                            expired_unadmitted = _edli_apply_unadmitted_redecision_expiry(
+                                world,
+                                expiry_plan,
+                                decision_time=received_at,
+                            )
+                            world.commit()
+                        else:
+                            _log.info(
+                                "edli_redecision_screen: no-fresh stale-pending expiry "
+                                "yielded to active SQLite WORLD writer"
+                            )
                     else:
                         _log.warning(
                             "edli_redecision_screen: no-fresh stale-pending expiry "
@@ -9964,17 +9984,22 @@ def run_edli_continuous_redecision_screen_cycle(*, screen_lock) -> None:
             emit_mutex = _world_write_mutex()
             emit_lock_timeout_s = _edli_emit_lock_timeout_seconds(edli_cfg)
             emit_acquired = False
-            world = None
+            world = get_world_connection()
             try:
                 emit_acquired = _edli_acquire_mutex(emit_mutex, timeout=emit_lock_timeout_s)
                 if emit_acquired:
-                    world = get_world_connection()
-                    expired_unadmitted = _edli_apply_unadmitted_redecision_expiry(
-                        world,
-                        expiry_plan,
-                        decision_time=received_at,
-                    )
-                    world.commit()
+                    if _begin_world_write_without_convoy(world):
+                        expired_unadmitted = _edli_apply_unadmitted_redecision_expiry(
+                            world,
+                            expiry_plan,
+                            decision_time=received_at,
+                        )
+                        world.commit()
+                    else:
+                        _log.info(
+                            "edli_redecision_screen: stale-pending expiry yielded "
+                            "to active SQLite WORLD writer"
+                        )
                 else:
                     _log.warning(
                         "edli_redecision_screen: stale-pending expiry skipped because "
@@ -10026,17 +10051,22 @@ def run_edli_continuous_redecision_screen_cycle(*, screen_lock) -> None:
                 expiry_ro.close()
             prune_mutex = _world_write_mutex()
             prune_lock_timeout_s = _edli_emit_lock_timeout_seconds(edli_cfg)
+            world_prune = get_world_connection()
             prune_acquired = _edli_acquire_mutex(prune_mutex, timeout=prune_lock_timeout_s)
-            if not prune_acquired:
-                _log.warning(
-                    "edli_redecision_screen skipped: world write mutex unavailable "
-                    "for stale-pending prune after %.3fs; no venue side effect attempted.",
-                    prune_lock_timeout_s,
-                )
-                return
-            world_prune = None
             try:
-                world_prune = get_world_connection()
+                if not prune_acquired:
+                    _log.warning(
+                        "edli_redecision_screen skipped: world write mutex unavailable "
+                        "for stale-pending prune after %.3fs; no venue side effect attempted.",
+                        prune_lock_timeout_s,
+                    )
+                    return
+                if not _begin_world_write_without_convoy(world_prune):
+                    _log.info(
+                        "edli_redecision_screen: stale-pending prune yielded "
+                        "to active SQLite WORLD writer"
+                    )
+                    return
                 expired_stale_pending = _edli_apply_unadmitted_redecision_expiry(
                     world_prune,
                     stale_plan,
@@ -10056,7 +10086,8 @@ def run_edli_continuous_redecision_screen_cycle(*, screen_lock) -> None:
                         world_prune.close()
                     except Exception:  # noqa: BLE001
                         pass
-                prune_mutex.release()
+                if prune_acquired:
+                    prune_mutex.release()
             world_scan_ro = get_world_connection_read_only()
             pending = _edli_pending_entity_keys(world_scan_ro, event_types=(REDECISION_EVENT_TYPE,))
             pending_families = _edli_redecision_family_keys_from_entity_keys(pending)
@@ -10093,7 +10124,7 @@ def run_edli_continuous_redecision_screen_cycle(*, screen_lock) -> None:
         emit_mutex = _world_write_mutex()
         emit_lock_timeout_s = _edli_emit_lock_timeout_seconds(edli_cfg)
         emit_acquired = False
-        world = None
+        world = get_world_connection()
         expiry_ro = get_world_connection_read_only()
         try:
             expiry_plan = _edli_plan_unadmitted_redecision_expiry(
@@ -10112,7 +10143,12 @@ def run_edli_continuous_redecision_screen_cycle(*, screen_lock) -> None:
                     emit_lock_timeout_s,
                 )
                 return
-            world = get_world_connection()
+            if not _begin_world_write_without_convoy(world):
+                _log.info(
+                    "edli_redecision_screen: redecision emit yielded "
+                    "to active SQLite WORLD writer"
+                )
+                return
             expired_unadmitted = _edli_apply_unadmitted_redecision_expiry(
                 world,
                 expiry_plan,

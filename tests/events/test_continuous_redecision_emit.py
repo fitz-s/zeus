@@ -1,5 +1,5 @@
 # Created: 2026-05-31
-# Last reused/audited: 2026-07-10
+# Last reused/audited: 2026-07-17
 # Authority basis: GOAL #36 continuous trading + PLAN_CONTINUOUS_REDECISION_MAX_ALPHA_2026-05-31.md.
 #   Proves the continuous re-decision emit: scan_committed_snapshots(source=<per-cycle>) re-emits a
 #   fresh FSR-equivalent each cycle (distinct event_id) instead of deduping to the consumed FSR, so
@@ -1338,6 +1338,28 @@ def test_expiry_plan_cannot_terminalize_work_requeued_after_discovery():
     assert tuple(row) == ("pending", retry_at)
 
 
+def test_redecision_world_write_yields_immediately_to_active_sqlite_writer(tmp_path):
+    """Maintenance cannot hold the global mutex while waiting on SQLite."""
+
+    db_path = tmp_path / "world.db"
+    holder = sqlite3.connect(db_path)
+    contender = sqlite3.connect(db_path, timeout=30.0)
+    holder.execute("CREATE TABLE facts (value INTEGER)")
+    holder.commit()
+    holder.execute("BEGIN IMMEDIATE")
+
+    started = time.monotonic()
+    acquired = reactor._begin_world_write_without_convoy(contender)
+    elapsed = time.monotonic() - started
+
+    assert acquired is False
+    assert elapsed < 0.1
+    assert contender.in_transaction is False
+    holder.rollback()
+    holder.close()
+    contender.close()
+
+
 def test_redecision_admission_is_screen_job_only():
     """The reactor cycle may emit FSR discovery, but EDLI_REDECISION_PENDING belongs to the screen."""
 
@@ -2265,8 +2287,8 @@ def test_redecision_screen_write_locks_are_bounded_and_emit_uses_prefetched_pend
     assert "if event.entity_key in pending:" in emit_block
 
 
-def test_redecision_screen_opens_world_writer_only_after_mutex():
-    """Every screen writer must use mutex -> connection -> close -> release order."""
+def test_redecision_screen_opens_connection_before_mutex_and_begins_after():
+    """Connection setup stays outside mutex; SQLite write begins inside it."""
 
     src = inspect.getsource(reactor.run_edli_continuous_redecision_screen_cycle)
 
@@ -2318,8 +2340,11 @@ def test_redecision_screen_opens_world_writer_only_after_mutex():
         ),
     ):
         assert block.index("_edli_plan_unadmitted_redecision_expiry") < block.index(acquire)
-        assert block.index(acquire) < block.index("get_world_connection()")
-        assert block.index(writer) < block.index("_edli_apply_unadmitted_redecision_expiry")
+        assert block.index(writer) < block.index(acquire)
+        assert block.index(acquire) < block.index("_begin_world_write_without_convoy")
+        assert block.index("_begin_world_write_without_convoy") < block.index(
+            "_edli_apply_unadmitted_redecision_expiry"
+        )
         assert block.index("_edli_apply_unadmitted_redecision_expiry") < block.index(close)
         assert block.index(close) < block.index(release)
 
