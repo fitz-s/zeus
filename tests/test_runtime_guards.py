@@ -10567,6 +10567,66 @@ def test_monitoring_defers_exit_pending_missing_resolution_to_exit_lifecycle(mon
     assert summary["exit_chain_missing_closed"] == 1
 
 
+def test_periodic_monitor_preempts_before_orderbook_prefetch_for_day0_wake(
+    monkeypatch,
+):
+    pos = Position(
+        trade_id="periodic-preempted-by-day0",
+        market_id="m1",
+        city="Paris",
+        cluster="Paris",
+        target_date="2026-07-16",
+        bin_label="29C",
+        direction="buy_no",
+        state="holding",
+        chain_state="synced",
+    )
+    portfolio = PortfolioState(positions=[pos])
+    artifact = cycle_runner.CycleArtifact(
+        mode="test",
+        started_at="2026-07-16T12:00:00Z",
+    )
+    summary = {"monitors": 0, "exits": 0}
+    preflight_calls: list[str] = []
+
+    monkeypatch.setattr(
+        cycle_runtime,
+        "_prefetch_held_monitor_orderbooks",
+        lambda *_args, **_kwargs: pytest.fail(
+            "urgent preemption must happen before network orderbook prefetch"
+        ),
+    )
+    monkeypatch.setattr(
+        "src.execution.exit_lifecycle.check_pending_exits",
+        lambda *_args, **_kwargs: (
+            preflight_calls.append("completed")
+            or {
+                "filled": 0,
+                "retried": 1,
+                "filled_positions": [],
+            }
+        ),
+    )
+
+    p_dirty, t_dirty = cycle_runner._execute_monitoring_phase(
+        None,
+        object(),
+        portfolio,
+        artifact,
+        object(),
+        summary,
+        should_preempt_for_urgent_day0=lambda: True,
+    )
+
+    assert preflight_calls == ["completed"]
+    assert p_dirty is True
+    assert t_dirty is False
+    assert summary["held_monitor_preempted"] is True
+    assert summary["held_monitor_positions_deferred"] == 1
+    assert summary["held_monitor_defer_reason"] == "urgent_day0_wake"
+    assert "held_monitor_orderbooks_requested" not in summary
+
+
 def test_monitoring_admin_closes_backoff_exhausted_when_chain_missing():
     pos = Position(
         trade_id="backoff-missing-chain",

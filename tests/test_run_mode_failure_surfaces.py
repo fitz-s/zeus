@@ -5728,6 +5728,7 @@ def test_exit_monitor_claims_priority_and_waits_for_reactor_handoff(monkeypatch)
         return True
 
     main_module._held_position_monitor_active.clear()
+    main_module._day0_urgent_wake_pending.clear()
     monkeypatch.setattr(main_module, "_edli_reactor_active_lock", ReactorGate())
     monkeypatch.setattr(exit_module, "run_exit_monitor_cycle", _run)
 
@@ -5739,6 +5740,58 @@ def test_exit_monitor_claims_priority_and_waits_for_reactor_handoff(monkeypatch)
         ("run", True, None),
     ]
     assert not main_module._held_position_monitor_active.is_set()
+
+
+def test_periodic_exit_monitor_yields_to_pending_day0_wake(monkeypatch) -> None:
+    import src.execution.exit_lifecycle as exit_module
+    import src.main as main_module
+
+    main_module._held_position_monitor_active.clear()
+    main_module._day0_urgent_wake_pending.set()
+    monkeypatch.setattr(
+        exit_module,
+        "run_exit_monitor_cycle",
+        lambda **_kwargs: pytest.fail("periodic monitor must yield before runtime work"),
+    )
+    try:
+        assert main_module._exit_monitor_cycle() is True
+    finally:
+        main_module._day0_urgent_wake_pending.clear()
+
+    assert main_module._held_position_monitor_active.is_set() is False
+
+
+def test_periodic_exit_monitor_yields_when_day0_arrives_during_handoff(
+    monkeypatch,
+) -> None:
+    import src.execution.exit_lifecycle as exit_module
+    import src.main as main_module
+
+    calls: list[str] = []
+
+    class ReactorGate:
+        def acquire(self, *, timeout: float) -> bool:
+            main_module._day0_urgent_wake_pending.set()
+            return True
+
+        def release(self) -> None:
+            calls.append("release")
+
+    main_module._held_position_monitor_active.clear()
+    main_module._day0_urgent_wake_pending.clear()
+    monkeypatch.setattr(main_module, "_edli_reactor_active_lock", ReactorGate())
+    monkeypatch.setattr(
+        exit_module,
+        "run_exit_monitor_cycle",
+        lambda **_kwargs: pytest.fail("periodic runtime must yield after handoff"),
+    )
+    try:
+        assert main_module._exit_monitor_cycle() is True
+    finally:
+        main_module._day0_urgent_wake_pending.clear()
+
+    assert calls == ["release"]
+    assert main_module._held_position_monitor_active.is_set() is False
 
 
 def test_exit_monitor_incomplete_runtime_cycle_is_not_success(monkeypatch) -> None:
@@ -5753,6 +5806,7 @@ def test_exit_monitor_incomplete_runtime_cycle_is_not_success(monkeypatch) -> No
             pass
 
     main_module._held_position_monitor_active.clear()
+    main_module._day0_urgent_wake_pending.clear()
     monkeypatch.setattr(main_module, "_edli_reactor_active_lock", ReactorGate())
     monkeypatch.setattr(
         exit_module,
@@ -5851,6 +5905,8 @@ def test_exit_monitor_monitoring_failure_returns_false(monkeypatch) -> None:
 
 
 def test_day0_wake_does_not_ack_incomplete_exit_monitor(monkeypatch) -> None:
+    import threading
+
     import src.main as main_module
     import src.runtime.reactor_wake as wake_module
 
@@ -5863,6 +5919,7 @@ def test_day0_wake_does_not_ack_incomplete_exit_monitor(monkeypatch) -> None:
     )
     acknowledgements: list[str] = []
     reactor_calls: list[bool] = []
+    pending = threading.Event()
 
     class IdleLock:
         def locked(self) -> bool:
@@ -5880,6 +5937,7 @@ def test_day0_wake_does_not_ack_incomplete_exit_monitor(monkeypatch) -> None:
     )
     monkeypatch.setattr(main_module, "_edli_reactor_active_lock", IdleLock())
     monkeypatch.setattr(main_module, "_held_position_monitor_active", IdleMonitor())
+    monkeypatch.setattr(main_module, "_day0_urgent_wake_pending", pending)
     monkeypatch.setattr(main_module, "_exit_monitor_cycle", lambda **_kwargs: False)
     monkeypatch.setattr(
         main_module,
@@ -5892,6 +5950,7 @@ def test_day0_wake_does_not_ack_incomplete_exit_monitor(monkeypatch) -> None:
     assert acknowledgements == []
     assert reactor_calls == []
     assert main_module._edli_last_reactor_wake_id is None
+    assert pending.is_set() is True
 
 
 def test_targeted_exit_monitor_filters_positions_without_mutating_full_portfolio() -> None:

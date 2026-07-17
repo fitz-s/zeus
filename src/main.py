@@ -87,6 +87,7 @@ logger = logging.getLogger("zeus")
 _cycle_lock = threading.Lock()
 _held_position_monitor_active = threading.Event()
 _held_position_monitor_bootstrap_complete = threading.Event()
+_day0_urgent_wake_pending = threading.Event()
 _edli_reactor_wake_thread: threading.Thread | None = None
 _edli_last_reactor_wake_id: str | None = None
 _HELD_POSITION_MONITOR_DEFER_JOBS = frozenset(
@@ -3655,6 +3656,7 @@ def _edli_initialize_reactor_wake_cursor() -> None:
     global _edli_last_reactor_wake_id
 
     _edli_last_reactor_wake_id = None
+    _day0_urgent_wake_pending.clear()
 
 
 def _day0_wake_target_families(
@@ -3790,6 +3792,7 @@ def _edli_reactor_wake_poll_once() -> bool:
         acknowledge_reactor_wakes,
         coalescible_reactor_wakes,
         read_reactor_wake,
+        reactor_urgent_wake_reason,
     )
 
     wake = read_reactor_wake()
@@ -3806,6 +3809,8 @@ def _edli_reactor_wake_poll_once() -> bool:
     )
     day0_wake = wake.reason == "day0_extreme_event_committed"
     substrate_refresh_wake = wake.reason == "money_path_substrate_refreshed"
+    if day0_wake:
+        _day0_urgent_wake_pending.set()
     if day0_wake and _held_position_monitor_active.is_set():
         return False
     if substrate_refresh_wake:
@@ -3829,7 +3834,8 @@ def _edli_reactor_wake_poll_once() -> bool:
         if _day0_wake_requires_exit_monitor(target_families):
             try:
                 monitor_ran = _exit_monitor_cycle(
-                    target_families=target_families
+                    target_families=target_families,
+                    urgent_day0=True,
                 )
             except Exception:
                 logger.exception(
@@ -3865,6 +3871,20 @@ def _edli_reactor_wake_poll_once() -> bool:
             len(wakes),
         )
         return False
+    if day0_wake:
+        try:
+            next_urgent_reason = reactor_urgent_wake_reason()
+        except Exception:
+            logger.warning(
+                "Day0 urgent wake state could not be refreshed after acknowledgement; "
+                "keeping periodic monitor preemption armed",
+                exc_info=True,
+            )
+        else:
+            if next_urgent_reason == "day0_extreme_event_committed":
+                _day0_urgent_wake_pending.set()
+            else:
+                _day0_urgent_wake_pending.clear()
     _edli_last_reactor_wake_id = wake.wake_id
     logger.info(
         "EDLI reactor consumed wake id=%s source=%s reason=%s batch=%d events=%d families=%d",
@@ -5685,6 +5705,7 @@ def _edli_boot_settlement_redeem_recovery() -> None:
 def _exit_monitor_cycle(
     *,
     target_families: frozenset[tuple[str, str, str]] | None = None,
+    urgent_day0: bool = False,
 ) -> bool:
     """Scheduler hook — body owned by src.execution.exit_lifecycle (R4-b
     extraction, 2026-07-08) as ``run_exit_monitor_cycle``. See that function's
@@ -5697,6 +5718,9 @@ def _exit_monitor_cycle(
     """
     from src.execution.exit_lifecycle import run_exit_monitor_cycle
 
+    if not urgent_day0 and _day0_urgent_wake_pending.is_set():
+        logger.info("periodic exit_monitor yielded to pending Day0 urgent wake")
+        return True
     if _held_position_monitor_active.is_set():
         logger.warning("exit_monitor skipped: previous monitor cycle is still running")
         return False
@@ -5715,12 +5739,21 @@ def _exit_monitor_cycle(
         _held_position_monitor_active.clear()
         return False
     _edli_reactor_active_lock.release()
+    if not urgent_day0 and _day0_urgent_wake_pending.is_set():
+        logger.info(
+            "periodic exit_monitor yielded after reactor handoff to pending Day0 urgent wake"
+        )
+        _mark_held_position_monitor_complete()
+        return True
     try:
         monitor_succeeded = run_exit_monitor_cycle(
             held_position_monitor_active=_held_position_monitor_active,
             mark_held_position_monitor_complete=_mark_held_position_monitor_complete,
             monitor_claimed=True,
             target_families=target_families,
+            should_preempt_for_urgent_day0=(
+                None if urgent_day0 else _day0_urgent_wake_pending.is_set
+            ),
         )
         if monitor_succeeded is not True:
             raise RuntimeError("EXIT_MONITOR_CYCLE_INCOMPLETE")

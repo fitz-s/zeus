@@ -17,6 +17,7 @@ import math
 import os
 import time
 import uuid
+from collections.abc import Callable
 from dataclasses import is_dataclass, replace
 from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
@@ -5019,6 +5020,7 @@ def execute_monitoring_phase(
     exit_order_submit_enabled: bool = True,
     run_exit_preflight: bool = True,
     held_position_monitor_budget_seconds: float | None = None,
+    should_preempt_for_urgent_day0: Callable[[], bool] | None = None,
 ):
     from src.engine.monitor_refresh import (
         _GLOBAL_MONITOR_SAMPLES_ATTR,
@@ -5039,6 +5041,18 @@ def execute_monitoring_phase(
 
     portfolio_dirty = False
     tracker_dirty = False
+
+    def urgent_preemption_requested() -> bool:
+        if should_preempt_for_urgent_day0 is None:
+            return False
+        try:
+            return bool(should_preempt_for_urgent_day0())
+        except Exception as exc:  # noqa: BLE001 - priority hint must not blind exits.
+            summary["held_monitor_preemption_probe_errors"] = (
+                summary.get("held_monitor_preemption_probe_errors", 0) + 1
+            )
+            deps.logger.warning("held monitor urgent-preemption probe failed: %s", exc)
+            return False
 
     if run_exit_preflight:
         try:
@@ -5110,6 +5124,17 @@ def execute_monitoring_phase(
         conn=conn,
         now_utc=monitor_now_utc,
     )
+    monitor_budget_seconds = _held_position_monitor_budget_seconds(
+        held_position_monitor_budget_seconds
+    )
+    monitor_deadline = time.monotonic() + monitor_budget_seconds
+    summary["held_monitor_candidates"] = len(monitor_positions)
+    summary["held_monitor_budget_seconds"] = monitor_budget_seconds
+    if urgent_preemption_requested():
+        summary["held_monitor_preempted"] = True
+        summary["held_monitor_positions_deferred"] = len(monitor_positions)
+        summary["held_monitor_defer_reason"] = "urgent_day0_wake"
+        return portfolio_dirty, tracker_dirty
     _prefetch_held_monitor_orderbooks(
         conn,
         clob,
@@ -5118,14 +5143,14 @@ def execute_monitoring_phase(
         now_utc=monitor_now_utc,
         deps=deps,
     )
-    monitor_budget_seconds = _held_position_monitor_budget_seconds(
-        held_position_monitor_budget_seconds
-    )
-    monitor_deadline = time.monotonic() + monitor_budget_seconds
-    summary["held_monitor_candidates"] = len(monitor_positions)
-    summary["held_monitor_budget_seconds"] = monitor_budget_seconds
 
     for position_index, pos in enumerate(monitor_positions):
+        if urgent_preemption_requested():
+            deferred_count = len(monitor_positions) - position_index
+            summary["held_monitor_preempted"] = True
+            summary["held_monitor_positions_deferred"] = deferred_count
+            summary["held_monitor_defer_reason"] = "urgent_day0_wake"
+            break
         if time.monotonic() >= monitor_deadline:
             deferred_count = len(monitor_positions) - position_index
             if deferred_count > 0:

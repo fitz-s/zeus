@@ -6636,6 +6636,7 @@ def run_exit_monitor_cycle(
     mark_held_position_monitor_complete: Callable[[], None],
     monitor_claimed: bool = False,
     target_families: Collection[tuple[str, str, str]] | None = None,
+    should_preempt_for_urgent_day0: Callable[[], bool] | None = None,
 ) -> bool:
     """Scheduler entrypoint (R4-b extraction from src/main.py::_exit_monitor_cycle).
 
@@ -6738,6 +6739,7 @@ def run_exit_monitor_cycle(
                     summary,
                     exit_order_submit_enabled=real_order_submit_enabled,
                     run_exit_preflight=True,
+                    should_preempt_for_urgent_day0=should_preempt_for_urgent_day0,
                 )
             except Exception as exc:
                 logger.error(
@@ -6754,8 +6756,15 @@ def run_exit_monitor_cycle(
             # only REDUCE standing risk; gated to live-submit mode because in
             # submit-disabled posture no real resting orders of ours exist (and
             # the venue cancel is a real API call). Fail-soft.
-            if real_order_submit_enabled and bool(
-                edli_cfg.get("day0_dead_bin_order_cancel_enabled", True)
+            if (
+                not summary.get("held_monitor_preempted")
+                and real_order_submit_enabled
+                and bool(
+                    edli_cfg.get(
+                        "day0_dead_bin_order_cancel_enabled",
+                        True,
+                    )
+                )
             ):
                 try:
                     from src.config import runtime_cities_by_name

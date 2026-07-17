@@ -1000,6 +1000,7 @@ def test_reactor_wake_poll_defers_without_consuming_when_reactor_busy(monkeypatc
         "acknowledge_reactor_wake",
         lambda _wake: True,
     )
+    monkeypatch.setattr(reactor_wake, "reactor_urgent_wake_reason", lambda: None)
     monkeypatch.setattr(main, "_edli_reactor_active_lock", _Lock())
     monkeypatch.setattr(main, "_held_position_monitor_active", _Held())
     monkeypatch.setattr(main, "_edli_event_reactor_cycle", _run_reactor)
@@ -1074,6 +1075,8 @@ def test_reactor_wake_poll_coalesces_targeted_events_into_one_cycle(monkeypatch)
 
 
 def test_day0_reactor_wake_runs_exit_monitor_before_reactor(monkeypatch) -> None:
+    import threading
+
     import src.main as main
     from src.runtime import reactor_wake
 
@@ -1094,6 +1097,7 @@ def test_day0_reactor_wake_runs_exit_monitor_before_reactor(monkeypatch) -> None
             return False
 
     calls: list[str] = []
+    pending = threading.Event()
 
     def _run_reactor(
         *,
@@ -1114,8 +1118,10 @@ def test_day0_reactor_wake_runs_exit_monitor_before_reactor(monkeypatch) -> None
         "acknowledge_reactor_wake",
         lambda _wake: True,
     )
+    monkeypatch.setattr(reactor_wake, "reactor_urgent_wake_reason", lambda: None)
     monkeypatch.setattr(main, "_edli_reactor_active_lock", _Lock())
     monkeypatch.setattr(main, "_held_position_monitor_active", _Held())
+    monkeypatch.setattr(main, "_day0_urgent_wake_pending", pending)
     monkeypatch.setattr(
         main,
         "_day0_wake_target_families",
@@ -1129,8 +1135,11 @@ def test_day0_reactor_wake_runs_exit_monitor_before_reactor(monkeypatch) -> None
     monkeypatch.setattr(
         main,
         "_exit_monitor_cycle",
-        lambda *, target_families=None: (
-            calls.append(f"monitor:{sorted(target_families or ())}") or True
+        lambda *, target_families=None, urgent_day0=False: (
+            calls.append(
+                f"monitor:{sorted(target_families or ())}:urgent={urgent_day0}"
+            )
+            or True
         ),
     )
     monkeypatch.setattr(main, "_edli_event_reactor_cycle", _run_reactor)
@@ -1138,14 +1147,17 @@ def test_day0_reactor_wake_runs_exit_monitor_before_reactor(monkeypatch) -> None
 
     assert main._edli_reactor_wake_poll_once() is True
     assert calls == [
-        "monitor:[('Paris', '2026-07-16', 'high')]",
+        "monitor:[('Paris', '2026-07-16', 'high')]:urgent=True",
         "reactor:day0_extreme_event_committed:event-day0:0",
     ]
+    assert pending.is_set() is False
 
 
 def test_day0_wake_claims_monitor_priority_while_reactor_is_active(
     monkeypatch,
 ) -> None:
+    import threading
+
     import src.main as main
     from src.runtime import reactor_wake
 
@@ -1157,6 +1169,7 @@ def test_day0_wake_claims_monitor_priority_while_reactor_is_active(
         ("event-day0",),
     )
     calls: list[str] = []
+    pending = threading.Event()
 
     class _Lock:
         def locked(self) -> bool:
@@ -1172,8 +1185,14 @@ def test_day0_wake_claims_monitor_priority_while_reactor_is_active(
         "acknowledge_reactor_wake",
         lambda _wake: True,
     )
+    monkeypatch.setattr(
+        reactor_wake,
+        "reactor_urgent_wake_reason",
+        lambda: "day0_extreme_event_committed",
+    )
     monkeypatch.setattr(main, "_edli_reactor_active_lock", _Lock())
     monkeypatch.setattr(main, "_held_position_monitor_active", _Held())
+    monkeypatch.setattr(main, "_day0_urgent_wake_pending", pending)
     monkeypatch.setattr(
         main,
         "_day0_wake_target_families",
@@ -1187,8 +1206,11 @@ def test_day0_wake_claims_monitor_priority_while_reactor_is_active(
     monkeypatch.setattr(
         main,
         "_exit_monitor_cycle",
-        lambda *, target_families=None: (
-            calls.append(f"monitor:{sorted(target_families or ())}") or True
+        lambda *, target_families=None, urgent_day0=False: (
+            calls.append(
+                f"monitor:{sorted(target_families or ())}:urgent={urgent_day0}"
+            )
+            or True
         ),
     )
     monkeypatch.setattr(
@@ -1200,12 +1222,51 @@ def test_day0_wake_claims_monitor_priority_while_reactor_is_active(
 
     assert main._edli_reactor_wake_poll_once() is True
     assert calls == [
-        "monitor:[('Paris', '2026-07-16', 'high')]",
+        "monitor:[('Paris', '2026-07-16', 'high')]:urgent=True",
         "reactor",
     ]
+    assert pending.is_set() is True
+
+
+def test_day0_wake_marks_periodic_monitor_for_preemption_without_ack(
+    monkeypatch,
+) -> None:
+    import threading
+
+    import src.main as main
+    from src.runtime import reactor_wake
+
+    wake = reactor_wake.ReactorWake(
+        "wake-day0-monitor-busy",
+        "2026-07-16T12:00:00+00:00",
+        "ingest_main",
+        "day0_extreme_event_committed",
+        ("event-day0",),
+    )
+    pending = threading.Event()
+
+    class _Held:
+        def is_set(self) -> bool:
+            return True
+
+    monkeypatch.setattr(reactor_wake, "read_reactor_wake", lambda: wake)
+    monkeypatch.setattr(
+        reactor_wake,
+        "acknowledge_reactor_wake",
+        lambda _wake: pytest.fail("busy monitor must leave urgent wake durable"),
+    )
+    monkeypatch.setattr(main, "_held_position_monitor_active", _Held())
+    monkeypatch.setattr(main, "_day0_urgent_wake_pending", pending)
+    monkeypatch.setattr(main, "_edli_last_reactor_wake_id", None)
+
+    assert main._edli_reactor_wake_poll_once() is False
+    assert pending.is_set() is True
+    assert main._edli_last_reactor_wake_id is None
 
 
 def test_day0_wake_without_exit_work_runs_reactor_directly(monkeypatch) -> None:
+    import threading
+
     import src.main as main
     from src.runtime import reactor_wake
 
@@ -1226,14 +1287,17 @@ def test_day0_wake_without_exit_work_runs_reactor_directly(monkeypatch) -> None:
             return False
 
     calls: list[str] = []
+    pending = threading.Event()
     monkeypatch.setattr(reactor_wake, "read_reactor_wake", lambda: wake)
     monkeypatch.setattr(
         reactor_wake,
         "acknowledge_reactor_wake",
         lambda _wake: True,
     )
+    monkeypatch.setattr(reactor_wake, "reactor_urgent_wake_reason", lambda: None)
     monkeypatch.setattr(main, "_edli_reactor_active_lock", _Lock())
     monkeypatch.setattr(main, "_held_position_monitor_active", _Held())
+    monkeypatch.setattr(main, "_day0_urgent_wake_pending", pending)
     monkeypatch.setattr(
         main,
         "_day0_wake_target_families",
@@ -1258,6 +1322,7 @@ def test_day0_wake_without_exit_work_runs_reactor_directly(monkeypatch) -> None:
 
     assert main._edli_reactor_wake_poll_once() is True
     assert calls == ["reactor"]
+    assert pending.is_set() is False
 
 
 @pytest.mark.parametrize(
