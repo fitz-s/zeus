@@ -3053,8 +3053,10 @@ def test_live_adapter_reuses_book_cache_after_probability_rebind(
     world.close()
 
 
+@pytest.mark.parametrize("projection_survives", [True, False])
 def test_live_adapter_overlaps_gamma_bind_with_missing_clob_book_prefetch(
     monkeypatch,
+    projection_survives,
 ):
     trade = sqlite3.connect(":memory:")
     trade.executescript(
@@ -3273,6 +3275,12 @@ def test_live_adapter_overlaps_gamma_bind_with_missing_clob_book_prefetch(
         "src.data.polymarket_client.PolymarketClient",
         FakeClient,
     )
+    if not projection_survives:
+        monkeypatch.setattr(
+            era,
+            "_global_book_prefetch_epoch_at",
+            lambda **_: None,
+        )
 
     bound, epoch = captured["current_book_epoch_provider"](
         probability,
@@ -3283,7 +3291,11 @@ def test_live_adapter_overlaps_gamma_bind_with_missing_clob_book_prefetch(
     assert bound["family"].bindings[0].no_token_id == "no-token-a"
     assert epoch.witness_identity == "book-current"
     assert len(capture_calls) == 1
-    assert book_calls == [("no-token-a",)]
+    assert book_calls == (
+        [("no-token-a",)]
+        if projection_survives
+        else [("no-token-a",), ("yes-token-a",)]
+    )
     trade.close()
     forecast.close()
     topology.close()

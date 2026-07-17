@@ -1320,6 +1320,33 @@ def _projected_global_books(
     )
 
 
+def _global_book_prefetch_epoch_at(
+    *,
+    projected_at: datetime | None,
+    fetch_started_at: datetime,
+    fetch_finished_at: datetime,
+    max_age: timedelta,
+) -> datetime | None:
+    """Return the conservative cut time, or require expired projections to refetch."""
+
+    if (
+        fetch_started_at.tzinfo is None
+        or fetch_finished_at.tzinfo is None
+        or max_age <= timedelta(0)
+    ):
+        raise ValueError("GLOBAL_BOOK_PREFETCH_CLOCK_INVALID")
+    started = fetch_started_at.astimezone(timezone.utc)
+    finished = fetch_finished_at.astimezone(timezone.utc)
+    if finished < started:
+        raise ValueError("GLOBAL_BOOK_PREFETCH_CLOCK_REVERSED")
+    if projected_at is None:
+        return started
+    if projected_at.tzinfo is None:
+        raise ValueError("GLOBAL_BOOK_PROJECTION_CLOCK_INVALID")
+    epoch_at = min(projected_at.astimezone(timezone.utc), started)
+    return epoch_at if finished - epoch_at <= max_age else None
+
+
 def _fresh_projected_global_books(
     trade_conn: sqlite3.Connection,
     tokens: Iterable[str],
@@ -6589,23 +6616,42 @@ def event_bound_live_adapter_from_trade_conn(
                         batch_size=batch_size,
                         book_fetch_workers=4,
                     )
+                    fetch_finished_at = datetime.now(UTC)
+                    epoch_at = _global_book_prefetch_epoch_at(
+                        projected_at=projected_at,
+                        fetch_started_at=captured_at,
+                        fetch_finished_at=fetch_finished_at,
+                        max_age=FRESHNESS_WINDOW_DEFAULT,
+                    )
+                    projection_refetched = 0
+                    if epoch_at is None:
+                        refreshed_projection = fetch_current_global_books(
+                            tuple(projected_books),
+                            get_books=lambda chunk: (
+                                clob.get_orderbook_snapshots(
+                                    chunk,
+                                    timeout=timeout,
+                                )
+                            ),
+                            batch_size=batch_size,
+                            book_fetch_workers=4,
+                        )
+                        projected_books = dict(refreshed_projection)
+                        projection_refetched = len(projected_books)
+                        epoch_at = captured_at
                 books = dict(projected_books)
                 books.update(fetched_books)
-                epoch_at = (
-                    min(projected_at, captured_at)
-                    if projected_at is not None
-                    else captured_at
-                )
                 logging.getLogger(__name__).info(
                     "global book epoch stage completed: mode=%s "
                     "book_prefetch elapsed_s=%.3f tokens=%d books=%d "
-                    "projected=%d fetched=%d",
+                    "projected=%d fetched=%d projection_refetched=%d",
                     mode,
                     _time.monotonic() - fetch_started,
                     len(tokens),
                     len(books),
                     len(projected_books),
                     len(fetched_books),
+                    projection_refetched,
                 )
                 return tokens, books, epoch_at
 
