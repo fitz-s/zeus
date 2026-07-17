@@ -1294,6 +1294,71 @@ def _book_levels_align_to_tick(
     return True
 
 
+def _market_channel_continuity_cut(
+    *,
+    checked_at: datetime,
+    max_age: timedelta,
+) -> tuple[datetime, datetime] | None:
+    """Return the live WS generation cut when both proof files agree."""
+
+    if checked_at.tzinfo is None or max_age <= timedelta(0):
+        return None
+    try:
+        from src.config import state_path
+
+        proof = json.loads(
+            state_path("market-channel-continuity.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        heartbeat = json.loads(
+            state_path("daemon-heartbeat-price-channel-ingest.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        if (
+            not isinstance(proof, Mapping)
+            or not isinstance(heartbeat, Mapping)
+            or proof.get("schema_version") != 1
+            or proof.get("channel") != "market_channel"
+            or proof.get("connected") is not True
+            or heartbeat.get("daemon") != "price-channel-ingest"
+            or int(proof.get("pid") or 0) != int(heartbeat.get("pid") or -1)
+        ):
+            return None
+        connected_at = datetime.fromisoformat(
+            str(proof.get("connected_at")).replace("Z", "+00:00")
+        )
+        observed_at = datetime.fromisoformat(
+            str(proof.get("observed_at")).replace("Z", "+00:00")
+        )
+        alive_at = datetime.fromisoformat(
+            str(heartbeat.get("alive_at")).replace("Z", "+00:00")
+        )
+        if any(
+            instant.tzinfo is None
+            for instant in (connected_at, observed_at, alive_at)
+        ):
+            return None
+        connected_at = connected_at.astimezone(timezone.utc)
+        observed_at = observed_at.astimezone(timezone.utc)
+        alive_at = alive_at.astimezone(timezone.utc)
+        checked = checked_at.astimezone(timezone.utc)
+        proof_age = checked - observed_at
+        heartbeat_age = checked - alive_at
+        if (
+            connected_at > observed_at
+            or proof_age < timedelta(0)
+            or proof_age > min(max_age, timedelta(seconds=2))
+            or heartbeat_age < timedelta(0)
+            or heartbeat_age > timedelta(seconds=90)
+        ):
+            return None
+        return connected_at, observed_at
+    except (OSError, TypeError, ValueError, json.JSONDecodeError):
+        return None
+
+
 def _latest_market_channel_book_rows(
     trade_conn: sqlite3.Connection,
     tokens: Iterable[str],
@@ -1313,6 +1378,10 @@ def _latest_market_channel_book_rows(
     projected: dict[
         str, tuple[Mapping[str, object] | None, datetime, str]
     ] = {}
+    continuity_cut = _market_channel_continuity_cut(
+        checked_at=checked_at,
+        max_age=max_age,
+    )
     try:
         for start in range(0, len(token_ids), 400):
             chunk = token_ids[start : start + 400]
@@ -1394,35 +1463,45 @@ def _latest_market_channel_book_rows(
                 if captured_at.tzinfo is None:
                     continue
                 captured_at = captured_at.astimezone(timezone.utc)
+                continuity_at = (
+                    continuity_cut[1]
+                    if continuity_cut is not None
+                    and continuity_cut[0] <= captured_at <= continuity_cut[1]
+                    else None
+                )
                 if (
                     token_id not in chunk
                     or not event_id
                     or captured_at > checked_at
-                    or checked_at - captured_at > max_age
+                    or (
+                        continuity_at is None
+                        and checked_at - captured_at > max_age
+                    )
                 ):
                     continue
+                effective_at = continuity_at or captured_at
                 raw_depth = row[3]
                 if raw_depth is None:
-                    projected[token_id] = (None, captured_at, event_id)
+                    projected[token_id] = (None, effective_at, event_id)
                     continue
                 try:
                     depth = json.loads(str(raw_depth))
                 except (TypeError, ValueError, json.JSONDecodeError):
-                    projected[token_id] = (None, captured_at, event_id)
+                    projected[token_id] = (None, effective_at, event_id)
                     continue
                 if (
                     not isinstance(depth, Mapping)
                     or not isinstance(depth.get("bids"), list)
                     or not isinstance(depth.get("asks"), list)
                 ):
-                    projected[token_id] = (None, captured_at, event_id)
+                    projected[token_id] = (None, effective_at, event_id)
                     continue
                 if not _book_levels_align_to_tick(depth, row[5]):
                     # The channel has crossed a tick-size change while the latest
                     # executable snapshot still carries the old grid.  Invalidate
                     # this projection so the caller fetches a current REST book,
                     # whose explicit tick_size can authorize the new ladder.
-                    projected[token_id] = (None, captured_at, event_id)
+                    projected[token_id] = (None, effective_at, event_id)
                     continue
                 book = dict(depth)
                 book.update(
@@ -1434,7 +1513,7 @@ def _latest_market_channel_book_rows(
                         "neg_risk": bool(row[7]),
                     }
                 )
-                projected[token_id] = (book, captured_at, event_id)
+                projected[token_id] = (book, effective_at, event_id)
     except sqlite3.Error:
         return {}
     return projected

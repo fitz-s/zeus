@@ -2864,7 +2864,7 @@ def _edli_market_channel_ingestor_cycle() -> dict | None:
             # The redecision-routing decision (WHICH families to re-solve) is a decision-layer
             # concern this boundary module only WIRES IN, never inlines (R6 split).
             from src.events.price_channel_redecision_router import (
-                _edli_price_channel_redecision_sink,
+                _edli_coalesced_price_channel_redecision_sink,
             )
 
             with PolymarketClient() as clob:
@@ -2876,7 +2876,9 @@ def _edli_market_channel_ingestor_cycle() -> dict | None:
                         feasibility_conn=feasibility_conn,
                         feasibility_schema="trades",
                         coalescer=EventCoalescer(max_market_keys=1000),
-                        market_event_sink=_edli_price_channel_redecision_sink(conn),
+                        market_event_sink=(
+                            _edli_coalesced_price_channel_redecision_sink(conn)
+                        ),
                         market_event_sink_independently_coordinated=True,
                     ),
                     fetch_orderbook=clob.get_orderbook_snapshot,

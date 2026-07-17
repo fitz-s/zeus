@@ -1015,6 +1015,60 @@ def test_price_channel_redecision_sink_closes_reads_before_world_writer(monkeypa
     ]
 
 
+def test_price_channel_redecision_coalesced_sink_does_not_block_ingest(
+    monkeypatch,
+):
+    import threading
+
+    from src.events import price_channel_redecision_router as router
+
+    started = threading.Event()
+    release = threading.Event()
+    batches: list[tuple[object, ...]] = []
+
+    def synchronous_sink(events) -> None:  # noqa: ANN001
+        batch = tuple(events)
+        batches.append(batch)
+        if len(batches) == 1:
+            started.set()
+            assert release.wait(2.0)
+
+    monkeypatch.setattr(
+        router,
+        "_edli_price_channel_redecision_sink",
+        lambda *_args, **_kwargs: synchronous_sink,
+    )
+    sink = router._edli_coalesced_price_channel_redecision_sink()
+
+    def event(token: str, version: int):
+        return types.SimpleNamespace(
+            event_type="BOOK_SNAPSHOT",
+            payload_json=json.dumps({"token_id": token, "version": version}),
+        )
+
+    first = event("token-a", 1)
+    started_at = time.perf_counter()
+    sink((first,))
+    elapsed = time.perf_counter() - started_at
+
+    assert elapsed < 0.1
+    assert started.wait(1.0)
+    replaced = event("token-b", 1)
+    latest = event("token-b", 2)
+    sink((replaced, latest))
+    release.set()
+    assert sink.wait_idle(2.0)
+    assert batches == [(first,), (latest,)]
+
+
+def test_market_channel_forever_uses_coalesced_redecision_sink():
+    from src.ingest import price_channel_ingest
+
+    source = inspect.getsource(price_channel_ingest._edli_market_channel_ingestor_cycle)
+    assert "_edli_coalesced_price_channel_redecision_sink" in source
+    assert "market_event_sink=_edli_price_channel_redecision_sink" not in source
+
+
 def test_price_channel_redecision_wake_is_targeted_urgent_fast_path():
     from src.events import reactor
     from src.runtime.reactor_wake import URGENT_WAKE_REASONS

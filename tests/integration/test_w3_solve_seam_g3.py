@@ -6471,6 +6471,211 @@ def test_global_book_prefetch_newer_bba_invalidates_older_depth():
     ) is None
 
 
+def test_market_channel_continuity_cut_requires_current_matching_daemon(
+    monkeypatch,
+    tmp_path,
+):
+    checked_at = _dt.datetime(2026, 7, 17, 0, 20, tzinfo=_dt.timezone.utc)
+    proof_path = tmp_path / "market-channel-continuity.json"
+    heartbeat_path = tmp_path / "daemon-heartbeat-price-channel-ingest.json"
+    proof_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "channel": "market_channel",
+                "connected": True,
+                "connected_at": (
+                    checked_at - _dt.timedelta(minutes=5)
+                ).isoformat(),
+                "observed_at": (
+                    checked_at - _dt.timedelta(milliseconds=200)
+                ).isoformat(),
+                "pid": 42,
+            }
+        ),
+        encoding="utf-8",
+    )
+    heartbeat_path.write_text(
+        json.dumps(
+            {
+                "daemon": "price-channel-ingest",
+                "alive_at": (checked_at - _dt.timedelta(seconds=30)).isoformat(),
+                "pid": 42,
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        "src.config.state_path",
+        lambda name: tmp_path / name,
+    )
+
+    assert era._market_channel_continuity_cut(
+        checked_at=checked_at,
+        max_age=_dt.timedelta(minutes=3),
+    ) == (
+        checked_at - _dt.timedelta(minutes=5),
+        checked_at - _dt.timedelta(milliseconds=200),
+    )
+
+    heartbeat_path.write_text(
+        json.dumps(
+            {
+                "daemon": "price-channel-ingest",
+                "alive_at": checked_at.isoformat(),
+                "pid": 43,
+            }
+        ),
+        encoding="utf-8",
+    )
+    assert era._market_channel_continuity_cut(
+        checked_at=checked_at,
+        max_age=_dt.timedelta(minutes=3),
+    ) is None
+
+    heartbeat_path.write_text(
+        json.dumps(
+            {
+                "daemon": "price-channel-ingest",
+                "alive_at": checked_at.isoformat(),
+                "pid": 42,
+            }
+        ),
+        encoding="utf-8",
+    )
+    proof = json.loads(proof_path.read_text(encoding="utf-8"))
+    proof["observed_at"] = (checked_at - _dt.timedelta(seconds=3)).isoformat()
+    proof_path.write_text(json.dumps(proof), encoding="utf-8")
+    assert era._market_channel_continuity_cut(
+        checked_at=checked_at,
+        max_age=_dt.timedelta(minutes=3),
+    ) is None
+
+
+def test_global_book_prefetch_uses_only_current_session_continuous_depth(
+    monkeypatch,
+):
+    conn = sqlite3.connect(":memory:")
+    conn.executescript(
+        """
+        CREATE TABLE executable_market_snapshots (
+            snapshot_id TEXT PRIMARY KEY,
+            selected_outcome_token_id TEXT NOT NULL,
+            orderbook_depth_json TEXT NOT NULL,
+            min_tick_size TEXT NOT NULL,
+            min_order_size TEXT NOT NULL,
+            neg_risk INTEGER NOT NULL,
+            captured_at TEXT NOT NULL
+        );
+        CREATE TABLE executable_market_snapshot_latest (
+            condition_id TEXT NOT NULL,
+            selected_outcome_token_id TEXT NOT NULL,
+            snapshot_id TEXT NOT NULL,
+            freshness_deadline TEXT NOT NULL,
+            PRIMARY KEY (condition_id, selected_outcome_token_id)
+        );
+        CREATE INDEX idx_snapshot_latest_selected_token_captured
+            ON executable_market_snapshot_latest (
+                selected_outcome_token_id,
+                freshness_deadline DESC
+            );
+        CREATE TABLE execution_feasibility_latest (
+            token_id TEXT NOT NULL,
+            direction TEXT NOT NULL,
+            evidence_id TEXT NOT NULL,
+            event_id TEXT NOT NULL,
+            condition_id TEXT NOT NULL,
+            outcome_label TEXT NOT NULL,
+            quote_seen_at TEXT NOT NULL,
+            book_hash_before TEXT,
+            best_bid_before REAL,
+            best_ask_before REAL,
+            depth_before_json TEXT,
+            created_at TEXT NOT NULL,
+            schema_version INTEGER NOT NULL,
+            PRIMARY KEY (token_id, direction)
+        );
+        """
+    )
+    depth = {
+        "bids": [{"price": "0.40", "size": "20"}],
+        "asks": [{"price": "0.42", "size": "30"}],
+    }
+    conn.execute(
+        "INSERT INTO executable_market_snapshots VALUES (?,?,?,?,?,?,?)",
+        (
+            "snapshot-a",
+            "yes-a",
+            json.dumps({"asset_id": "yes-a", **depth}),
+            "0.01",
+            "5",
+            1,
+            "2026-07-17T00:10:00+00:00",
+        ),
+    )
+    conn.execute(
+        "INSERT INTO executable_market_snapshot_latest VALUES (?,?,?,?)",
+        (
+            "condition-a",
+            "yes-a",
+            "snapshot-a",
+            "2026-07-17T00:30:00+00:00",
+        ),
+    )
+    conn.execute(
+        "INSERT INTO execution_feasibility_latest VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (
+            "yes-a",
+            "buy_yes",
+            "evidence-a",
+            "event-a",
+            "condition-a",
+            "YES",
+            "2026-07-17T00:16:00+00:00",
+            "book-hash",
+            0.40,
+            0.42,
+            json.dumps(depth),
+            "2026-07-17T00:16:00+00:00",
+            1,
+        ),
+    )
+    checked_at = _dt.datetime(2026, 7, 17, 0, 20, tzinfo=_dt.timezone.utc)
+    monkeypatch.setattr(
+        era,
+        "_market_channel_continuity_cut",
+        lambda **_kwargs: (
+            _dt.datetime(2026, 7, 17, 0, 15, tzinfo=_dt.timezone.utc),
+            checked_at,
+        ),
+    )
+
+    projected = era._projected_global_books(
+        conn,
+        ("yes-a",),
+        checked_at=checked_at,
+        max_age=_dt.timedelta(minutes=3),
+    )
+    assert projected is not None
+    assert projected[1] == checked_at
+    assert projected[0]["yes-a"]["hash"] == "book-hash"
+
+    monkeypatch.setattr(
+        era,
+        "_market_channel_continuity_cut",
+        lambda **_kwargs: (
+            _dt.datetime(2026, 7, 17, 0, 17, tzinfo=_dt.timezone.utc),
+            checked_at,
+        ),
+    )
+    assert era._projected_global_books(
+        conn,
+        ("yes-a",),
+        checked_at=checked_at,
+        max_age=_dt.timedelta(minutes=3),
+    ) is None
+
+
 def test_global_book_prefetch_rejects_incomplete_or_expired_projection():
     conn = sqlite3.connect(":memory:")
     conn.executescript(

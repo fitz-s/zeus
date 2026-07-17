@@ -42,6 +42,8 @@ from __future__ import annotations
 import contextlib
 import json
 import logging
+import threading
+import time
 from datetime import datetime, timezone
 
 logger = logging.getLogger("zeus.price_channel_redecision_router")
@@ -508,7 +510,7 @@ def _edli_price_channel_redecision_events_for_events(
         trade_schema=trade_schema,
     )
     families = held_families | entry_families | resting_families
-    logger.info(
+    (logger.info if families else logger.debug)(
         "EDLI price-channel redecision buckets held=%d screened=%d resting=%d union=%d",
         len(held_families),
         len(entry_families),
@@ -656,3 +658,88 @@ def _edli_price_channel_redecision_sink(_world_with_trades_conn=None, *, trade_s
             )
 
     return _sink
+
+
+class _CoalescingPriceChannelRedecisionSink:
+    """Keep decision routing off the WS receive loop and retain latest per token."""
+
+    def __init__(self, sink) -> None:  # noqa: ANN001
+        self._sink = sink
+        self._lock = threading.Lock()
+        self._pending: dict[str, object] = {}
+        self._running = False
+        self._idle = threading.Event()
+        self._idle.set()
+
+    @staticmethod
+    def _event_key(event) -> str | None:  # noqa: ANN001
+        tokens = _edli_quote_event_token_ids((event,))
+        return next(iter(tokens), None)
+
+    def __call__(self, events) -> None:  # noqa: ANN001
+        start = False
+        with self._lock:
+            for event in events or ():
+                key = self._event_key(event)
+                if key is not None:
+                    self._pending[key] = event
+            if self._pending and not self._running:
+                self._running = True
+                self._idle.clear()
+                start = True
+        if start:
+            threading.Thread(
+                target=self._drain,
+                name="price-channel-redecision",
+                daemon=True,
+            ).start()
+
+    def _drain(self) -> None:
+        failures = 0
+        while True:
+            with self._lock:
+                if not self._pending:
+                    self._running = False
+                    self._idle.set()
+                    return
+                batch = tuple(self._pending.values())
+                self._pending.clear()
+            try:
+                self._sink(batch)
+            except Exception as exc:  # noqa: BLE001 - derived work retries off-loop
+                failures += 1
+                with self._lock:
+                    for event in batch:
+                        key = self._event_key(event)
+                        if key is not None:
+                            self._pending.setdefault(key, event)
+                delay = min(30.0, float(2 ** min(failures - 1, 5)))
+                logger.warning(
+                    "price-channel redecision worker failed; retry_after_seconds=%.1f "
+                    "batch=%d pending=%d: %s: %s",
+                    delay,
+                    len(batch),
+                    len(self._pending),
+                    type(exc).__name__,
+                    exc,
+                    exc_info=True,
+                )
+                time.sleep(delay)
+            else:
+                failures = 0
+
+    def wait_idle(self, timeout: float | None = None) -> bool:
+        return self._idle.wait(timeout)
+
+
+def _edli_coalesced_price_channel_redecision_sink(
+    _world_with_trades_conn=None,
+    *,
+    trade_schema: str = "trades",
+):
+    return _CoalescingPriceChannelRedecisionSink(
+        _edli_price_channel_redecision_sink(
+            _world_with_trades_conn,
+            trade_schema=trade_schema,
+        )
+    )
