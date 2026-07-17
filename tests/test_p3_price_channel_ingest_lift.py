@@ -1596,7 +1596,7 @@ def test_held_position_quote_refresh_writes_feasibility_rows(monkeypatch, tmp_pa
     check = sqlite3.connect(trade_path)
     try:
         assert (
-            check.execute("SELECT COUNT(*) FROM execution_feasibility_evidence").fetchone()[0]
+            check.execute("SELECT COUNT(*) FROM execution_feasibility_latest").fetchone()[0]
             == 4
         )
     finally:
@@ -1933,7 +1933,7 @@ def test_candidate_priority_quote_refresh_writes_feasibility_rows(monkeypatch, t
     check = sqlite3.connect(trade_path)
     try:
         assert (
-            check.execute("SELECT COUNT(*) FROM execution_feasibility_evidence").fetchone()[0]
+            check.execute("SELECT COUNT(*) FROM execution_feasibility_latest").fetchone()[0]
             == 2
         )
     finally:
@@ -2249,7 +2249,7 @@ def test_open_rest_priority_quote_refresh_writes_without_candidate_regret(monkey
     check = sqlite3.connect(trade_path)
     try:
         assert (
-            check.execute("SELECT COUNT(*) FROM execution_feasibility_evidence").fetchone()[0]
+            check.execute("SELECT COUNT(*) FROM execution_feasibility_latest").fetchone()[0]
             == 2
         )
     finally:

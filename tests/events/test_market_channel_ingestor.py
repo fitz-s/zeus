@@ -290,7 +290,8 @@ def test_reconnect_gap_online_ingestor_no_stale_trade():
     assert len(results) == 1
     assert results[0].inserted is True
     assert conn.execute("SELECT COUNT(*) FROM opportunity_events").fetchone()[0] == 0
-    assert conn.execute("SELECT COUNT(*) FROM execution_feasibility_evidence").fetchone()[0] == 2
+    assert conn.execute("SELECT COUNT(*) FROM execution_feasibility_evidence").fetchone()[0] == 0
+    assert conn.execute("SELECT COUNT(*) FROM execution_feasibility_latest").fetchone()[0] == 2
 
 
 def test_market_message_ignores_inactive_token():
@@ -570,11 +571,11 @@ def test_quote_cache_seeded_from_rest_on_connect():
     assert results[0].inserted is True
     assert results[0].opportunity_event_persisted is False
     assert conn.execute("SELECT COUNT(*) FROM opportunity_events").fetchone()[0] == 0
-    assert conn.execute("SELECT COUNT(*) FROM execution_feasibility_evidence").fetchone()[0] == 2
+    assert conn.execute("SELECT COUNT(*) FROM execution_feasibility_evidence").fetchone()[0] == 0
     rows = conn.execute(
         """
         SELECT direction, depth_before_json
-          FROM execution_feasibility_evidence
+          FROM execution_feasibility_latest
          ORDER BY direction
         """
     ).fetchall()
@@ -731,7 +732,7 @@ def test_price_change_updates_full_depth_even_when_touch_is_unchanged():
     assert json.loads(latest[2]) == depth
     assert conn.execute(
         "SELECT COUNT(*) FROM execution_feasibility_evidence"
-    ).fetchone()[0] == 2
+    ).fetchone()[0] == 0
 
 
 def test_price_change_packet_expands_every_asset_delta():
@@ -802,7 +803,7 @@ def test_seed_from_rest_can_seed_priority_subset_before_full_universe():
     assert cache.get("token-2") is not None
     assert cache.get("token-1") is None
     rows = conn.execute(
-        "SELECT token_id FROM execution_feasibility_evidence ORDER BY token_id"
+        "SELECT token_id FROM execution_feasibility_latest ORDER BY token_id"
     ).fetchall()
     assert rows == [("token-2",), ("token-2",)]
 
@@ -842,9 +843,9 @@ def test_rest_seed_chunks_commit_progressively_before_full_universe_finishes():
     written = service.seed_rest_books_in_chunks(
         token_ids=set(metadata),
         received_at="2026-05-24T10:00:00+00:00",
-        world_mutex=nullcontext(),
+        write_gate=nullcontext(),
         commit=lambda: commit_counts.append(
-            conn.execute("SELECT COUNT(*) FROM execution_feasibility_evidence").fetchone()[0]
+            conn.execute("SELECT COUNT(*) FROM execution_feasibility_latest").fetchone()[0]
         ),
         chunk_size=2,
     )
@@ -881,7 +882,7 @@ def test_subscribed_seed_fetches_off_event_loop_thread():
     written = asyncio.run(
         service.seed_rest_books_after_subscribe(
             token_ids={"token-1"},
-            world_mutex=nullcontext(),
+            write_gate=nullcontext(),
             commit=conn.commit,
         )
     )
@@ -944,7 +945,7 @@ def test_websocket_subscribes_before_rest_seed(monkeypatch):
         service.run_websocket_forever(
             stop_event=stop,
             reconnect_delay_seconds=0,
-            world_mutex=nullcontext(),
+            quote_write_gate=nullcontext(),
             commit=conn.commit,
             rollback=conn.rollback,
         )
@@ -1031,7 +1032,7 @@ def test_websocket_delta_is_consumed_while_rest_seed_is_in_flight(monkeypatch):
         service.run_websocket_forever(
             stop_event=stop,
             reconnect_delay_seconds=0,
-            world_mutex=nullcontext(),
+            quote_write_gate=nullcontext(),
             commit=conn.commit,
             rollback=conn.rollback,
         )
@@ -1041,6 +1042,112 @@ def test_websocket_delta_is_consumed_while_rest_seed_is_in_flight(monkeypatch):
     assert len(proofs) == 2
     assert proofs[-1]["connected"] is True
     assert proofs[-1]["observed_at"] >= proofs[-1]["connected_at"]
+
+
+def test_websocket_routes_quote_and_world_events_to_independent_write_lanes(
+    monkeypatch,
+):
+    import websockets
+
+    world_conn = sqlite3.connect(":memory:")
+    init_schema(world_conn)
+    trade_conn = sqlite3.connect(":memory:")
+    init_schema_trade_only(trade_conn)
+    stop = asyncio.Event()
+    entered: list[str] = []
+
+    class Gate:
+        def __init__(self, name: str) -> None:
+            self.name = name
+
+        def __enter__(self):
+            entered.append(f"enter:{self.name}")
+            return self
+
+        def __exit__(self, exc_type, exc, tb):  # noqa: ANN001
+            entered.append(f"exit:{self.name}")
+            return False
+
+    class FakeWebSocket:
+        emitted = False
+
+        async def send(self, _payload):  # noqa: ANN001
+            return None
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            if self.emitted:
+                stop.set()
+                raise StopAsyncIteration
+            self.emitted = True
+            return json.dumps(
+                [
+                    {
+                        "event_type": "book",
+                        "asset_id": "token-1",
+                        "market": "0xcondition",
+                        "bids": [{"price": "0.48", "size": "10"}],
+                        "asks": [{"price": "0.52", "size": "10"}],
+                        "hash": "quote-hash",
+                    },
+                    {
+                        "event_type": "new_market",
+                        "condition_id": "0xcondition",
+                        "clob_token_ids": ["token-1"],
+                    },
+                ]
+            )
+
+    class FakeConnect:
+        async def __aenter__(self):
+            return FakeWebSocket()
+
+        async def __aexit__(self, _exc_type, _exc, _tb):
+            return False
+
+    monkeypatch.setattr(websockets, "connect", lambda *_args, **_kwargs: FakeConnect())
+    service = MarketChannelOnlineService(
+        MarketChannelIngestor(
+            EventWriter(world_conn),
+            active_token_ids={"token-1"},
+            token_metadata=_metadata(),
+            feasibility_conn=trade_conn,
+        )
+    )
+
+    asyncio.run(
+        service.run_websocket_forever(
+            stop_event=stop,
+            reconnect_delay_seconds=0,
+            quote_write_gate=Gate("trade"),
+            world_event_write_gate=Gate("world"),
+            commit=trade_conn.commit,
+            rollback=trade_conn.rollback,
+            world_event_commit=world_conn.commit,
+            world_event_rollback=world_conn.rollback,
+        )
+    )
+
+    assert entered == [
+        "enter:trade",
+        "exit:trade",
+        "enter:trade",
+        "exit:trade",
+        "enter:world",
+        "exit:world",
+    ]
+    assert trade_conn.execute(
+        "SELECT COUNT(*) FROM execution_feasibility_latest"
+    ).fetchone()[0] == 2
+    assert trade_conn.execute(
+        "SELECT COUNT(*) FROM execution_feasibility_evidence"
+    ).fetchone()[0] == 0
+    assert world_conn.execute(
+        "SELECT COUNT(*) FROM opportunity_events "
+        "WHERE event_type='NEW_MARKET_DISCOVERED'"
+    ).fetchone()[0] == 1
 
 
 def test_disconnect_transition_commits_after_rollback(monkeypatch):
@@ -1080,7 +1187,7 @@ def test_disconnect_transition_commits_after_rollback(monkeypatch):
         service.run_websocket_forever(
             stop_event=stop,
             reconnect_delay_seconds=0,
-            world_mutex=nullcontext(),
+            quote_write_gate=nullcontext(),
             commit=conn.commit,
             rollback=conn.rollback,
         )
@@ -1143,7 +1250,7 @@ def test_rest_seed_commits_deferred_sink_inside_world_writer_gate():
     written = service.seed_rest_books_in_chunks(
         token_ids=["token-1"],
         received_at="2026-07-13T12:00:00+00:00",
-        world_mutex=RecordingWorldMutex(),
+        write_gate=RecordingWorldMutex(),
         commit=commit,
         chunk_size=1,
     )
@@ -1203,7 +1310,7 @@ def test_rest_seed_independent_sink_flushes_after_world_writer_gate():
     written = service.seed_rest_books_in_chunks(
         token_ids=["token-1"],
         received_at="2026-07-14T09:00:00+00:00",
-        world_mutex=RecordingWorldMutex(),
+        write_gate=RecordingWorldMutex(),
         commit=commit,
         chunk_size=1,
     )
@@ -1243,7 +1350,7 @@ def test_independent_sink_failure_retains_events_for_retry():
     assert service.seed_rest_books_in_chunks(
         token_ids=["token-1"],
         received_at="2026-07-14T09:00:00+00:00",
-        world_mutex=nullcontext(),
+        write_gate=nullcontext(),
         commit=conn.commit,
         chunk_size=1,
     ) == 1
@@ -1381,9 +1488,9 @@ def test_rest_seed_write_backpressure_keeps_committed_chunks_and_stops():
     written = service.seed_rest_books_in_chunks(
         token_ids=[f"token-{idx}" for idx in range(3)],
         received_at="2026-05-24T10:00:00+00:00",
-        world_mutex=FlakyWorldMutex(),
+        write_gate=FlakyWorldMutex(),
         commit=lambda: commit_counts.append(
-            conn.execute("SELECT COUNT(*) FROM execution_feasibility_evidence").fetchone()[0]
+            conn.execute("SELECT COUNT(*) FROM execution_feasibility_latest").fetchone()[0]
         ),
         chunk_size=1,
     )
@@ -1394,7 +1501,7 @@ def test_rest_seed_write_backpressure_keeps_committed_chunks_and_stops():
     assert service.rest_seed_backpressure_count == 1
     assert service.rest_seed_backpressure_reason == "world write busy"
     assert (
-        conn.execute("SELECT COUNT(*) FROM execution_feasibility_evidence").fetchone()[0]
+        conn.execute("SELECT COUNT(*) FROM execution_feasibility_latest").fetchone()[0]
         == 2
     )
 
@@ -1443,7 +1550,7 @@ def test_rest_seed_uses_batch_orderbook_fetch_when_available():
     written = service.seed_rest_books_in_chunks(
         token_ids=set(metadata),
         received_at="2026-05-24T10:00:00+00:00",
-        world_mutex=nullcontext(),
+        write_gate=nullcontext(),
         commit=conn.commit,
         chunk_size=2,
     )
@@ -1451,7 +1558,7 @@ def test_rest_seed_uses_batch_orderbook_fetch_when_available():
     assert written == 5
     assert batch_calls == [["token-0", "token-1"], ["token-2", "token-3"], ["token-4"]]
     assert (
-        conn.execute("SELECT COUNT(*) FROM execution_feasibility_evidence").fetchone()[0]
+        conn.execute("SELECT COUNT(*) FROM execution_feasibility_latest").fetchone()[0]
         == 10
     )
 
@@ -1499,7 +1606,7 @@ def test_rest_seed_falls_back_for_partial_batch_orderbook_response():
     written = service.seed_rest_books_in_chunks(
         token_ids=["token-0", "token-1"],
         received_at="2026-05-24T10:00:00+00:00",
-        world_mutex=nullcontext(),
+        write_gate=nullcontext(),
         commit=conn.commit,
         chunk_size=2,
     )
@@ -1508,7 +1615,7 @@ def test_rest_seed_falls_back_for_partial_batch_orderbook_response():
     assert batch_calls == [["token-0", "token-1"]]
     assert single_calls == ["token-1"]
     assert (
-        conn.execute("SELECT COUNT(*) FROM execution_feasibility_evidence").fetchone()[0]
+        conn.execute("SELECT COUNT(*) FROM execution_feasibility_latest").fetchone()[0]
         == 4
     )
 
@@ -1541,7 +1648,7 @@ def test_rest_seed_deadline_stops_before_fetching_more_tokens():
     written = service.seed_rest_books_in_chunks(
         token_ids=set(metadata),
         received_at="2026-05-24T10:00:00+00:00",
-        world_mutex=nullcontext(),
+        write_gate=nullcontext(),
         commit=conn.commit,
         chunk_size=1,
         deadline_monotonic=0.0,
@@ -1584,7 +1691,7 @@ def test_rest_seed_preserves_ordered_priority_tokens():
     written = service.seed_rest_books_in_chunks(
         token_ids=["missing-token", "stale-token", "newer-token"],
         received_at="2026-05-24T10:00:00+00:00",
-        world_mutex=nullcontext(),
+        write_gate=nullcontext(),
         commit=conn.commit,
         chunk_size=1,
     )
@@ -1630,9 +1737,9 @@ def test_reconnect_rest_seed_chunks_preserve_gap_snapshot_and_commit_progressive
     written = service.reconnect_rest_books_in_chunks(
         token_ids=set(metadata),
         received_at="2026-05-24T10:00:00+00:00",
-        world_mutex=nullcontext(),
+        write_gate=nullcontext(),
         commit=lambda: commit_counts.append(
-            conn.execute("SELECT COUNT(*) FROM execution_feasibility_evidence").fetchone()[0]
+            conn.execute("SELECT COUNT(*) FROM execution_feasibility_latest").fetchone()[0]
         ),
         chunk_size=2,
     )
@@ -1645,7 +1752,7 @@ def test_reconnect_rest_seed_chunks_preserve_gap_snapshot_and_commit_progressive
     assert service.gap_start is None
 
 
-def test_market_channel_quote_writes_feasibility_evidence_only():
+def test_market_channel_quote_updates_latest_without_appending_history():
     conn, writer = _conn_writer()
     ingestor = MarketChannelIngestor(writer, active_token_ids={"token-1"}, token_metadata=_metadata())
 
@@ -1664,9 +1771,10 @@ def test_market_channel_quote_writes_feasibility_evidence_only():
     )
 
     rows = conn.execute(
-        "SELECT direction, accepted_or_rejected, filled_shares FROM execution_feasibility_evidence ORDER BY direction"
+        "SELECT direction FROM execution_feasibility_latest ORDER BY direction"
     ).fetchall()
-    assert rows == [("buy_yes", None, None), ("sell_yes", None, None)]
+    assert rows == [("buy_yes",), ("sell_yes",)]
+    assert conn.execute("SELECT COUNT(*) FROM execution_feasibility_evidence").fetchone()[0] == 0
 
 
 def test_market_channel_quote_notifies_inserted_event_sink_once():
@@ -1732,7 +1840,8 @@ def test_market_channel_same_top_of_book_bba_does_not_append_ignored_events():
     assert same_touch is None
     assert moved.inserted is True
     assert conn.execute("SELECT COUNT(*) FROM opportunity_events").fetchone()[0] == 0
-    assert conn.execute("SELECT COUNT(*) FROM execution_feasibility_evidence").fetchone()[0] == 4
+    assert conn.execute("SELECT COUNT(*) FROM execution_feasibility_evidence").fetchone()[0] == 0
+    assert conn.execute("SELECT COUNT(*) FROM execution_feasibility_latest").fetchone()[0] == 2
     assert len(seen) == 2
 
 
@@ -1768,9 +1877,12 @@ def test_market_channel_can_write_feasibility_to_trade_connection():
         "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='execution_feasibility_evidence'"
     ).fetchone()[0] == 0
     rows = trade_conn.execute(
-        "SELECT direction, accepted_or_rejected, filled_shares FROM execution_feasibility_evidence ORDER BY direction"
+        "SELECT direction FROM execution_feasibility_latest ORDER BY direction"
     ).fetchall()
-    assert rows == [("buy_yes", None, None), ("sell_yes", None, None)]
+    assert rows == [("buy_yes",), ("sell_yes",)]
+    assert trade_conn.execute(
+        "SELECT COUNT(*) FROM execution_feasibility_evidence"
+    ).fetchone()[0] == 0
 
 
 def test_market_channel_no_default_yes_for_no_token():
@@ -1796,7 +1908,7 @@ def test_market_channel_no_default_yes_for_no_token():
 
     assert conn.execute("SELECT COUNT(*) FROM opportunity_events").fetchone()[0] == 0
     rows = conn.execute(
-        "SELECT direction, outcome_label FROM execution_feasibility_evidence ORDER BY direction"
+        "SELECT direction, outcome_label FROM execution_feasibility_latest ORDER BY direction"
     ).fetchall()
     assert rows == [("buy_no", "NO"), ("sell_no", "NO")]
 
@@ -2511,7 +2623,7 @@ def test_long_lived_seed_prunes_tokens_that_expired_after_thread_start():
     written = service.seed_rest_books_in_chunks(
         token_ids=["token-expired", "token-live"],
         received_at="2026-06-28T06:45:00+00:00",
-        world_mutex=nullcontext(),
+        write_gate=nullcontext(),
         commit=conn.commit,
     )
 
@@ -2595,7 +2707,8 @@ def test_on_connect_with_pre_captured_books_seeds_cache_without_fetch_call():
     assert len(results) == 1
     assert cache.get("token-1") is not None
     assert conn.execute("SELECT COUNT(*) FROM opportunity_events").fetchone()[0] == 0
-    assert conn.execute("SELECT COUNT(*) FROM execution_feasibility_evidence").fetchone()[0] == 2
+    assert conn.execute("SELECT COUNT(*) FROM execution_feasibility_evidence").fetchone()[0] == 0
+    assert conn.execute("SELECT COUNT(*) FROM execution_feasibility_latest").fetchone()[0] == 2
     # The REST callable must NOT have been invoked — I/O happened before the lock
     assert fetch_calls == [], (
         "fetch_orderbook was called inside on_connect with pre_captured_books — "

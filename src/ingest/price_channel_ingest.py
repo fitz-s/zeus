@@ -227,11 +227,12 @@ def _budgeted_orderbook_fetchers(clob, *, deadline_monotonic: float):
     return _fetch_orderbook, _fetch_orderbooks
 
 
-class _PriceChannelWorldTradeWriteGate:
-    """Reusable context manager for one price-channel world+trade write unit."""
+class _PriceChannelWriteGate:
+    """Reusable context manager for one price-channel DB write unit."""
 
-    def __init__(self, *, owner: str) -> None:
+    def __init__(self, *, owner: str, scope: str) -> None:
         self._owner = owner
+        self._scope = scope
         self._stack: contextlib.ExitStack | None = None
 
     def __enter__(self):
@@ -243,16 +244,21 @@ class _PriceChannelWorldTradeWriteGate:
 
         stack = contextlib.ExitStack()
         try:
-            # Global lock order is legacy world writer mutex first, then the
-            # canonical multi-DB coordinator.  The money path already enters
-            # the world mutex before it reaches trade-owned writes.  Taking the
-            # coordinator's WORLD+TRADE gates first here creates the inverse
-            # edge and can deadlock both daemons (price channel waits for the
-            # world mutex while entry/exit waits for a trade writer gate).
-            stack.enter_context(_world_write_mutex())
+            if self._scope == "world_trade":
+                dbs = (DBIdentity.WORLD, DBIdentity.TRADE)
+            elif self._scope == "world":
+                dbs = (DBIdentity.WORLD,)
+            elif self._scope == "trade":
+                dbs = (DBIdentity.TRADE,)
+            else:
+                raise ValueError(f"unsupported price-channel write scope {self._scope!r}")
+            # World scopes preserve the repo-wide order: legacy world mutex
+            # before the canonical per-DB coordinator.
+            if DBIdentity.WORLD in dbs:
+                stack.enter_context(_world_write_mutex())
             stack.enter_context(
                 default_runtime_write_coordinator().lease(
-                    (DBIdentity.WORLD, DBIdentity.TRADE),
+                    dbs,
                     owner=self._owner,
                     write_class="live",
                     deadline_ms=PRICE_CHANNEL_DB_WRITE_LEASE_DEADLINE_MS,
@@ -274,8 +280,16 @@ class _PriceChannelWorldTradeWriteGate:
             self._stack = None
 
 
-def _edli_price_channel_world_trade_write_gate(*, owner: str) -> _PriceChannelWorldTradeWriteGate:
-    return _PriceChannelWorldTradeWriteGate(owner=owner)
+def _edli_price_channel_world_trade_write_gate(*, owner: str) -> _PriceChannelWriteGate:
+    return _PriceChannelWriteGate(owner=owner, scope="world_trade")
+
+
+def _edli_price_channel_world_write_gate(*, owner: str) -> _PriceChannelWriteGate:
+    return _PriceChannelWriteGate(owner=owner, scope="world")
+
+
+def _edli_price_channel_trade_write_gate(*, owner: str) -> _PriceChannelWriteGate:
+    return _PriceChannelWriteGate(owner=owner, scope="trade")
 
 
 @contextlib.contextmanager
@@ -2305,7 +2319,7 @@ def _edli_refresh_held_position_quote_evidence(
             written = service.seed_rest_books_in_chunks(
                 token_ids=ordered_metadata_tokens,
                 received_at=datetime.now(timezone.utc).isoformat(),
-                world_mutex=_edli_price_channel_world_trade_write_gate(
+                write_gate=_edli_price_channel_world_trade_write_gate(
                     owner="price_channel_held_quote_refresh"
                 ),
                 commit=_commit_atomic_cross_db,
@@ -2498,7 +2512,7 @@ def _edli_refresh_candidate_priority_quote_evidence(
             written = service.seed_rest_books_in_chunks(
                 token_ids=ordered_metadata_tokens,
                 received_at=datetime.now(timezone.utc).isoformat(),
-                world_mutex=_edli_price_channel_world_trade_write_gate(
+                write_gate=_edli_price_channel_world_trade_write_gate(
                     owner="price_channel_candidate_quote_refresh"
                 ),
                 commit=_commit_atomic_cross_db,
@@ -2737,26 +2751,28 @@ def _edli_market_channel_ingestor_cycle() -> dict | None:
             invalidate_executable_snapshots_for_market_channel_action,
             run_market_channel_service_forever,
         )
-        from src.state.db import get_world_connection_with_trades_required
+        from src.state.db import get_trade_connection, get_world_connection
 
-        # The long-lived market-channel ingestor commits quote evidence through one
-        # attached WORLD+TRADE connection. Derived redecision screening runs only after
-        # that commit on read-only connections, then emits through a short WORLD-only
-        # writer lease. It does not persist raw BOOK_SNAPSHOT/BEST_BID_ASK_CHANGED rows.
-        # The NON-flocked helper is used here because this connection lives for the
-        # whole forever-loop; holding cross-DB writer flocks for that lifetime would
-        # starve every other writer. Feasibility writes are schema-qualified 'trades'
-        # so they reach the runtime-read trades table, never the world ghost copy.
-        conn = get_world_connection_with_trades_required(write_class="live")
-        _bound_price_channel_sqlite_wait(conn)
-        world_conn = conn  # EventWriter target = world MAIN (unqualified opportunity_events)
-        feasibility_conn = conn
+        # Quote projection and NEW_MARKET_DISCOVERED are not one logical write:
+        # quotes update TRADE latest-state only, while new-market truth writes WORLD.
+        # Separate connections and gates let a long WORLD transaction coexist with
+        # millisecond market-feed ingestion without weakening either DB's ownership.
+        world_conn = get_world_connection(write_class="live")
+        feasibility_conn = get_trade_connection(write_class="live")
+        _bound_price_channel_sqlite_wait(world_conn)
+        _bound_price_channel_sqlite_wait(feasibility_conn)
 
-        def _commit_event_and_feasibility() -> None:
-            conn.commit()
+        def _commit_quote() -> None:
+            feasibility_conn.commit()
 
-        def _rollback_event_and_feasibility() -> None:
-            conn.rollback()
+        def _rollback_quote() -> None:
+            feasibility_conn.rollback()
+
+        def _commit_world_event() -> None:
+            world_conn.commit()
+
+        def _rollback_world_event() -> None:
+            world_conn.rollback()
 
         try:
             def _invalidate_snapshot_action(action: "MarketChannelAction") -> None:
@@ -2874,10 +2890,10 @@ def _edli_market_channel_ingestor_cycle() -> dict | None:
                         active_token_ids=token_ids,
                         token_metadata=token_metadata,
                         feasibility_conn=feasibility_conn,
-                        feasibility_schema="trades",
+                        feasibility_schema="",
                         coalescer=EventCoalescer(max_market_keys=1000),
                         market_event_sink=(
-                            _edli_coalesced_price_channel_redecision_sink(conn)
+                            _edli_coalesced_price_channel_redecision_sink()
                         ),
                         market_event_sink_independently_coordinated=True,
                     ),
@@ -2898,14 +2914,22 @@ def _edli_market_channel_ingestor_cycle() -> dict | None:
                 run_market_channel_service_forever(
                     service,
                     logger=logger,
-                    commit=_commit_event_and_feasibility,
-                    rollback=_rollback_event_and_feasibility,
-                    world_mutex=_edli_price_channel_world_trade_write_gate(
-                        owner="price_channel_market_channel"
+                    commit=_commit_quote,
+                    rollback=_rollback_quote,
+                    quote_write_gate=_edli_price_channel_trade_write_gate(
+                        owner="price_channel_market_quote"
                     ),
+                    world_event_write_gate=_edli_price_channel_world_write_gate(
+                        owner="price_channel_market_event"
+                    ),
+                    world_event_commit=_commit_world_event,
+                    world_event_rollback=_rollback_world_event,
                 )
         finally:
-            conn.close()
+            try:
+                feasibility_conn.close()
+            finally:
+                world_conn.close()
 
     _edli_market_channel_thread = threading.Thread(
         target=_runner,

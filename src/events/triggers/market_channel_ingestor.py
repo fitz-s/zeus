@@ -32,6 +32,15 @@ REST_SEED_COMMIT_CHUNK_SIZE = 16
 _logger = logging.getLogger(__name__)
 
 
+def _is_sqlite_write_contention(exc: BaseException) -> bool:
+    if isinstance(exc, TimeoutError):
+        return True
+    if not isinstance(exc, sqlite3.OperationalError):
+        return False
+    message = str(exc).lower()
+    return "locked" in message or "busy" in message
+
+
 def _world_write_mutex():
     """Lazily resolve the process-global zeus-world.db write mutex.
 
@@ -157,8 +166,6 @@ class MarketChannelIngestor:
         self._seen_quote_event_ids: set[str] = set()
         self._seen_quote_event_order: deque[str] = deque()
         self._seen_quote_event_limit = 20_000
-        self._latest_projection_event_ids: set[str] = set()
-        self._latest_projection_event_order: deque[str] = deque()
 
     def _token_is_open_at(self, token_id: str, *, now: datetime | None = None) -> bool:
         metadata = self._token_metadata.get(str(token_id))
@@ -222,14 +229,54 @@ class MarketChannelIngestor:
         self,
         *,
         market_budget: int | None = None,
+        commit: Callable[[], None] | None = None,
+        rollback: Callable[[], None] | None = None,
     ) -> list[EventWriteResult | MarketChannelQuoteResult]:
         if self._coalescer is None:
             return []
         events = self._coalescer.drain(market_budget=market_budget)
-        results = []
-        for event in events:
-            result = self._commit_market_event(event)
-            results.append(result)
+        quote_events: list[OpportunityEvent] = []
+        results: list[EventWriteResult | MarketChannelQuoteResult] = []
+        try:
+            for event in events:
+                if event.event_type not in {"BOOK_SNAPSHOT", "BEST_BID_ASK_CHANGED"}:
+                    results.append(self._commit_market_event(event))
+                    continue
+                if self._quote_event_seen(event.event_id):
+                    results.append(
+                        MarketChannelQuoteResult(
+                            event_id=event.event_id,
+                            event_type=event.event_type,
+                            inserted=False,
+                            duplicate=True,
+                            evidence_written=False,
+                        )
+                    )
+                    continue
+                quote_events.append(event)
+                results.append(
+                    MarketChannelQuoteResult(
+                        event_id=event.event_id,
+                        event_type=event.event_type,
+                        inserted=True,
+                        duplicate=False,
+                        evidence_written=True,
+                    )
+                )
+            self._write_feasibility_evidence_batch(quote_events)
+            self._notify_market_event_sink(quote_events)
+            if not self._market_event_sink_independently_coordinated:
+                self.flush_deferred_market_event_sink()
+            if commit is not None:
+                commit()
+        except BaseException:
+            if rollback is not None:
+                rollback()
+            for event in events:
+                self._coalescer.enqueue(event)
+            raise
+        for event in quote_events:
+            self._remember_quote_event(event.event_id)
         return results
 
     def event_from_message(self, message: dict[str, Any], *, received_at: str) -> OpportunityEvent | None:
@@ -385,8 +432,6 @@ class MarketChannelIngestor:
             source="polymarket_market_channel",
             received_at=received_at,
         )
-        if depth_json is not None:
-            self._mark_latest_projection_event(event.event_id)
         return event
 
     def _cache_event_payload(self, event: OpportunityEvent) -> None:
@@ -464,29 +509,37 @@ class MarketChannelIngestor:
             str(payload.get("quote_seen_at") or event.available_at)
         ) < _quote_instant(previous.quote_seen_at)
 
-    def _write_feasibility_evidence(
+    def _write_feasibility_evidence(self, event: OpportunityEvent) -> None:
+        self._write_feasibility_evidence_batch([event])
+
+    def _write_feasibility_evidence_batch(
         self,
-        event: OpportunityEvent,
-        *,
-        append_evidence: bool = True,
+        events: Iterable[OpportunityEvent],
     ) -> None:
-        if event.event_type not in {"BOOK_SNAPSHOT", "BEST_BID_ASK_CHANGED"}:
-            return
-        payload = json.loads(event.payload_json)
-        outcome_label = str(payload.get("outcome_label") or "").upper()
-        if outcome_label == "NO":
-            directions = ("buy_no", "sell_no")
-        elif outcome_label == "YES":
-            directions = ("buy_yes", "sell_yes")
-        else:
-            raise MarketChannelAuthorityError("market-channel token lacks canonical YES/NO outcome metadata")
-        for direction in directions:
-            insert_execution_feasibility_evidence(
-                self._feasibility_conn,
-                feasibility_evidence_from_quote(event, direction=direction),
-                schema=self._feasibility_schema,
-                append_evidence=append_evidence,
+        rows: list[dict[str, Any]] = []
+        for event in events:
+            if event.event_type not in {"BOOK_SNAPSHOT", "BEST_BID_ASK_CHANGED"}:
+                continue
+            payload = json.loads(event.payload_json)
+            outcome_label = str(payload.get("outcome_label") or "").upper()
+            if outcome_label == "NO":
+                directions = ("buy_no", "sell_no")
+            elif outcome_label == "YES":
+                directions = ("buy_yes", "sell_yes")
+            else:
+                raise MarketChannelAuthorityError(
+                    "market-channel token lacks canonical YES/NO outcome metadata"
+                )
+            rows.extend(
+                feasibility_evidence_from_quote(event, direction=direction)
+                for direction in directions
             )
+        insert_execution_feasibility_evidence_batch(
+            self._feasibility_conn,
+            rows,
+            schema=self._feasibility_schema,
+            append_evidence=False,
+        )
 
     def _new_market_event(self, message: dict[str, Any], *, received_at: str) -> OpportunityEvent | None:
         token_ids = [str(token) for token in message.get("clob_token_ids") or message.get("assets_ids") or []]
@@ -536,8 +589,6 @@ class MarketChannelIngestor:
 
     def _commit_market_event(self, event: OpportunityEvent) -> EventWriteResult | MarketChannelQuoteResult:
         if event.event_type in {"BOOK_SNAPSHOT", "BEST_BID_ASK_CHANGED"}:
-            latest_projection_only = event.event_id in self._latest_projection_event_ids
-            self._latest_projection_event_ids.discard(event.event_id)
             if self._quote_event_seen(event.event_id):
                 return MarketChannelQuoteResult(
                     event_id=event.event_id,
@@ -547,10 +598,7 @@ class MarketChannelIngestor:
                     evidence_written=False,
                 )
             self._remember_quote_event(event.event_id)
-            self._write_feasibility_evidence(
-                event,
-                append_evidence=not latest_projection_only,
-            )
+            self._write_feasibility_evidence(event)
             self._notify_market_event_sink([event])
             return MarketChannelQuoteResult(
                 event_id=event.event_id,
@@ -564,15 +612,6 @@ class MarketChannelIngestor:
             self._write_feasibility_evidence(event)
             self._notify_market_event_sink([event])
         return result
-
-    def _mark_latest_projection_event(self, event_id: str) -> None:
-        if event_id in self._latest_projection_event_ids:
-            return
-        self._latest_projection_event_ids.add(event_id)
-        self._latest_projection_event_order.append(event_id)
-        while len(self._latest_projection_event_order) > self._seen_quote_event_limit:
-            expired = self._latest_projection_event_order.popleft()
-            self._latest_projection_event_ids.discard(expired)
 
     def _quote_event_seen(self, event_id: str) -> bool:
         return event_id in self._seen_quote_event_ids
@@ -1221,7 +1260,7 @@ class MarketChannelOnlineService:
         *,
         token_ids: Iterable[str],
         received_at: str,
-        world_mutex: Any,
+        write_gate: Any,
         commit: Callable[[], None] | None,
         logger: Any | None = None,
         chunk_size: int = REST_SEED_COMMIT_CHUNK_SIZE,
@@ -1233,7 +1272,7 @@ class MarketChannelOnlineService:
         The old connect path pre-captured the entire active universe before one
         DB commit. With 100+ weather tokens that let held-position quote evidence
         age past the live preflight/redecision SLA while the thread was still
-        fetching. This method keeps the no-I/O-under-world-mutex invariant but
+        fetching. This method keeps network I/O outside the DB write gate but
         commits every small batch, so fresh held/candidate evidence reaches the
         live monitor continuously.
         """
@@ -1297,7 +1336,7 @@ class MarketChannelOnlineService:
                 continue
             with self.ingestor.defer_market_event_sink():
                 try:
-                    with world_mutex:
+                    with write_gate:
                         results = self.ingestor.seed_from_rest(
                             self.fetch_orderbook,
                             received_at=received_at,
@@ -1335,7 +1374,7 @@ class MarketChannelOnlineService:
         self,
         *,
         token_ids: Iterable[str],
-        world_mutex: Any,
+        write_gate: Any,
         commit: Callable[[], None] | None,
         logger: Any | None = None,
         chunk_size: int = REST_SEED_COMMIT_CHUNK_SIZE,
@@ -1360,7 +1399,7 @@ class MarketChannelOnlineService:
             written += self.seed_rest_books_in_chunks(
                 token_ids=chunk,
                 received_at=datetime.now(UTC).isoformat(),
-                world_mutex=world_mutex,
+                write_gate=write_gate,
                 commit=commit,
                 logger=logger,
                 chunk_size=size,
@@ -1372,7 +1411,7 @@ class MarketChannelOnlineService:
         self,
         *,
         active_token_ids: set[str],
-        world_mutex: Any,
+        write_gate: Any,
         commit: Callable[[], None] | None,
         logger: Any | None,
     ) -> int:
@@ -1387,13 +1426,13 @@ class MarketChannelOnlineService:
         if seed_first:
             written += await self.seed_rest_books_after_subscribe(
                 token_ids=seed_first,
-                world_mutex=world_mutex,
+                write_gate=write_gate,
                 commit=commit,
                 logger=logger,
             )
         written += await self.seed_rest_books_after_subscribe(
             token_ids=active_token_ids - seed_first,
-            world_mutex=world_mutex,
+            write_gate=write_gate,
             commit=commit,
             logger=logger,
         )
@@ -1561,7 +1600,7 @@ class MarketChannelOnlineService:
         *,
         token_ids: Iterable[str],
         received_at: str,
-        world_mutex: Any,
+        write_gate: Any,
         commit: Callable[[], None] | None,
         logger: Any | None = None,
         chunk_size: int = REST_SEED_COMMIT_CHUNK_SIZE,
@@ -1588,7 +1627,7 @@ class MarketChannelOnlineService:
             if not pre_captured_books:
                 continue
             with self.ingestor.defer_market_event_sink():
-                with world_mutex:
+                with write_gate:
                     results = self.on_reconnect(
                         received_at=received_at,
                         pre_captured_books=pre_captured_books,
@@ -1620,7 +1659,10 @@ class MarketChannelOnlineService:
         logger: Any | None = None,
         commit: Callable[[], None] | None = None,
         rollback: Callable[[], None] | None = None,
-        world_mutex: Any | None = None,
+        quote_write_gate: Any | None = None,
+        world_event_write_gate: Any | None = None,
+        world_event_commit: Callable[[], None] | None = None,
+        world_event_rollback: Callable[[], None] | None = None,
     ) -> None:
         """Run the public market channel online.
 
@@ -1630,12 +1672,21 @@ class MarketChannelOnlineService:
 
         import websockets
 
-        # EDLI live-canary contention fix (2026-05-31): serialize every world-DB
-        # write+commit unit in this loop against the EDLI reactor via the
-        # process-global world-DB write mutex. Held ONLY around the DB
-        # write+commit (never across the WS recv / network I/O), so it stays
-        # short and the reactor's per-event writes are never lock-starved.
-        _world_mutex = world_mutex if world_mutex is not None else _world_write_mutex()
+        # Quote projection and world-event truth are independent write units.
+        # Production passes a TRADE-only gate for quote evidence and a WORLD-only
+        # gate for NEW_MARKET_DISCOVERED.
+        _quote_write_gate = (
+            quote_write_gate
+            if quote_write_gate is not None
+            else _world_write_mutex()
+        )
+        _world_event_write_gate = (
+            world_event_write_gate
+            if world_event_write_gate is not None
+            else _quote_write_gate
+        )
+        _world_event_commit = world_event_commit or commit
+        _world_event_rollback = world_event_rollback or rollback
 
         while stop_event is None or not stop_event.is_set():
             active_token_ids: set[str] = set()
@@ -1661,7 +1712,7 @@ class MarketChannelOnlineService:
                     self.connected = True
                     self.gap_start = None
                     self._connected_at = connected_at
-                    with _world_mutex:
+                    with _quote_write_gate:
                         insert_market_channel_connectivity_event(
                             self.ingestor._feasibility_conn,
                             channel="market_channel",
@@ -1682,42 +1733,130 @@ class MarketChannelOnlineService:
                             "EDLI market-channel connected for %d active weather tokens",
                             len(active_token_ids),
                         )
+                    pending_world_messages: list[dict[str, Any]] = []
                     async with asyncio.TaskGroup() as tasks:
                         tasks.create_task(
                             self._seed_subscribed_books(
                                 active_token_ids=active_token_ids,
-                                world_mutex=_world_mutex,
+                                write_gate=_quote_write_gate,
                                 commit=commit,
                                 logger=logger,
                             )
                         )
                         async for raw_message in ws:
-                            # Hold the world-DB write mutex ONLY around the DB
-                            # write+commit unit for this message batch — never across
-                            # recv/network I/O or _handle_action callbacks.
                             pending_actions: list[MarketChannelAction] = []
-                            with self.ingestor.defer_market_event_sink():
-                                with _world_mutex:
-                                    for message in _parse_channel_messages(raw_message):
-                                        action_or_result = self.ingestor.handle_message(
-                                            message,
-                                            received_at=datetime.now(UTC).isoformat(),
+                            quote_messages: list[dict[str, Any]] = []
+                            world_messages: list[dict[str, Any]] = []
+                            for message in _parse_channel_messages(raw_message):
+                                event_type = str(
+                                    message.get("event_type") or message.get("type") or ""
+                                )
+                                if event_type == "new_market":
+                                    world_messages.append(message)
+                                elif event_type in {"tick_size_change", "market_resolved"}:
+                                    action = self.ingestor.handle_message(
+                                        message,
+                                        received_at=datetime.now(UTC).isoformat(),
+                                    )
+                                    if isinstance(action, MarketChannelAction):
+                                        pending_actions.append(action)
+                                else:
+                                    quote_messages.append(message)
+
+                            quote_projection_durable = True
+                            if self.ingestor._coalescer is not None:
+                                for message in quote_messages:
+                                    self.ingestor.handle_message(
+                                        message,
+                                        received_at=datetime.now(UTC).isoformat(),
+                                    )
+                                queued = self.ingestor._coalescer.pending_counts()
+                                should_flush_quotes = bool(
+                                    queued["lossless"] or queued["market"]
+                                )
+                            else:
+                                should_flush_quotes = bool(quote_messages)
+
+                            if should_flush_quotes:
+                                try:
+                                    with self.ingestor.defer_market_event_sink():
+                                        with _quote_write_gate:
+                                            if self.ingestor._coalescer is not None:
+                                                self.ingestor.flush_coalesced(
+                                                    market_budget=REST_SEED_COMMIT_CHUNK_SIZE,
+                                                    commit=commit,
+                                                    rollback=rollback,
+                                                )
+                                            else:
+                                                for message in quote_messages:
+                                                    self.ingestor.handle_message(
+                                                        message,
+                                                        received_at=datetime.now(UTC).isoformat(),
+                                                    )
+                                                if not self.ingestor._market_event_sink_independently_coordinated:
+                                                    self.ingestor.flush_deferred_market_event_sink()
+                                                if commit is not None:
+                                                    commit()
+                                        if self.ingestor._market_event_sink_independently_coordinated:
+                                            self.ingestor.flush_deferred_market_event_sink()
+                                except (TimeoutError, sqlite3.OperationalError) as exc:
+                                    if not _is_sqlite_write_contention(exc):
+                                        raise
+                                    quote_projection_durable = False
+                                    if rollback is not None:
+                                        rollback()
+                                    if logger is not None:
+                                        logger.warning(
+                                            "EDLI market-channel quote projection backpressure; "
+                                            "socket retained pending=%s: %s",
+                                            (
+                                                self.ingestor._coalescer.pending_counts()
+                                                if self.ingestor._coalescer is not None
+                                                else {"lossless": 0, "market": len(quote_messages)}
+                                            ),
+                                            exc,
                                         )
-                                        if isinstance(action_or_result, MarketChannelAction):
-                                            pending_actions.append(action_or_result)
-                                    self.ingestor.flush_coalesced(market_budget=100)
-                                    if not self.ingestor._market_event_sink_independently_coordinated:
-                                        self.ingestor.flush_deferred_market_event_sink()
-                                    if commit is not None:
-                                        commit()
-                                if self.ingestor._market_event_sink_independently_coordinated:
-                                    self.ingestor.flush_deferred_market_event_sink()
-                            self._publish_continuity(
-                                connected=True,
-                                observed_at=datetime.now(UTC).isoformat(),
-                                active_token_count=len(active_token_ids),
-                                logger=logger,
-                            )
+
+                            pending_world_messages.extend(world_messages)
+                            if pending_world_messages:
+                                try:
+                                    with self.ingestor.defer_market_event_sink():
+                                        with _world_event_write_gate:
+                                            for message in pending_world_messages:
+                                                event = self.ingestor.event_from_message(
+                                                    message,
+                                                    received_at=datetime.now(UTC).isoformat(),
+                                                )
+                                                if event is not None:
+                                                    self.ingestor._commit_market_event(event)
+                                            if not self.ingestor._market_event_sink_independently_coordinated:
+                                                self.ingestor.flush_deferred_market_event_sink()
+                                            if _world_event_commit is not None:
+                                                _world_event_commit()
+                                        if self.ingestor._market_event_sink_independently_coordinated:
+                                            self.ingestor.flush_deferred_market_event_sink()
+                                except (TimeoutError, sqlite3.OperationalError) as exc:
+                                    if not _is_sqlite_write_contention(exc):
+                                        raise
+                                    if _world_event_rollback is not None:
+                                        _world_event_rollback()
+                                    if logger is not None:
+                                        logger.warning(
+                                            "EDLI market-channel world-event backpressure; "
+                                            "socket retained pending=%d: %s",
+                                            len(pending_world_messages),
+                                            exc,
+                                        )
+                                else:
+                                    pending_world_messages.clear()
+
+                            if quote_projection_durable:
+                                self._publish_continuity(
+                                    connected=True,
+                                    observed_at=datetime.now(UTC).isoformat(),
+                                    active_token_count=len(active_token_ids),
+                                    logger=logger,
+                                )
                             for _action in pending_actions:
                                 self._handle_action(_action)
                     if stop_event is None or not stop_event.is_set():
@@ -1733,7 +1872,7 @@ class MarketChannelOnlineService:
                 # busy_timeout, crashing the reactor cycle. Rollback here releases the
                 # lock immediately so the sleep period is lock-free.
                 try:
-                    with _world_mutex:
+                    with _quote_write_gate:
                         if rollback is not None:
                             rollback()
                         else:
@@ -1741,6 +1880,8 @@ class MarketChannelOnlineService:
                         self.on_disconnect(gap_start=gap_start)
                         if commit is not None:
                             commit()
+                    if _world_event_rollback is not None:
+                        _world_event_rollback()
                     self._publish_continuity(
                         connected=False,
                         observed_at=gap_start,
@@ -1753,6 +1894,8 @@ class MarketChannelOnlineService:
                             rollback()
                         else:
                             self.ingestor._writer.conn.rollback()
+                        if _world_event_rollback is not None:
+                            _world_event_rollback()
                     except Exception:  # noqa: BLE001
                         pass
                     if logger is not None:
@@ -1800,7 +1943,10 @@ def run_market_channel_service_forever(
     logger: Any | None = None,
     commit: Callable[[], None] | None = None,
     rollback: Callable[[], None] | None = None,
-    world_mutex: Any | None = None,
+    quote_write_gate: Any | None = None,
+    world_event_write_gate: Any | None = None,
+    world_event_commit: Callable[[], None] | None = None,
+    world_event_rollback: Callable[[], None] | None = None,
 ) -> None:
     asyncio.run(
         service.run_websocket_forever(
@@ -1809,7 +1955,10 @@ def run_market_channel_service_forever(
             logger=logger,
             commit=commit,
             rollback=rollback,
-            world_mutex=world_mutex,
+            quote_write_gate=quote_write_gate,
+            world_event_write_gate=world_event_write_gate,
+            world_event_commit=world_event_commit,
+            world_event_rollback=world_event_rollback,
         )
     )
 
@@ -1848,11 +1997,45 @@ def insert_execution_feasibility_evidence(
     schema: str = "",
     append_evidence: bool = True,
 ) -> None:
-    assert_market_channel_not_fill_authority(source=str(row.get("fill_truth_source", "")))
+    insert_execution_feasibility_evidence_batch(
+        conn,
+        [row],
+        schema=schema,
+        append_evidence=append_evidence,
+    )
+
+
+def insert_execution_feasibility_evidence_batch(
+    conn: sqlite3.Connection,
+    rows: Iterable[dict[str, Any]],
+    *,
+    schema: str = "",
+    append_evidence: bool = True,
+) -> None:
     if schema not in _FEASIBILITY_EVIDENCE_ALLOWED_SCHEMAS:
         raise ValueError(
             f"insert_execution_feasibility_evidence: disallowed schema {schema!r}"
         )
+    values_rows: list[dict[str, Any]] = []
+    for row in rows:
+        assert_market_channel_not_fill_authority(
+            source=str(row.get("fill_truth_source", ""))
+        )
+        values = dict(row)
+        values.setdefault("schema_version", 1)
+        values.setdefault("created_at", datetime.now(UTC).isoformat())
+        values.setdefault(
+            "evidence_id",
+            stable_event_id(
+                str(values.get("event_id")),
+                str(values.get("token_id")),
+                str(values.get("quote_seen_at")),
+                str(values.get("direction")),
+            ),
+        )
+        values_rows.append(values)
+    if not values_rows:
+        return
     if schema:
         table = f"{schema}.execution_feasibility_evidence"
         latest_table = f"{schema}.execution_feasibility_latest"
@@ -1866,20 +2049,8 @@ def insert_execution_feasibility_evidence(
         if table is None or latest_table is None:
             return
     latest_row_table = latest_table.rsplit(".", 1)[-1]
-    values = dict(row)
-    values.setdefault("schema_version", 1)
-    values.setdefault("created_at", datetime.now(UTC).isoformat())
-    values.setdefault(
-        "evidence_id",
-        stable_event_id(
-            str(values.get("event_id")),
-            str(values.get("token_id")),
-            str(values.get("quote_seen_at")),
-            str(values.get("direction")),
-        ),
-    )
     if append_evidence:
-        conn.execute(
+        conn.executemany(
             f"""
             INSERT INTO {table} (
                 evidence_id, event_id, condition_id, token_id, outcome_label, direction,
@@ -1906,10 +2077,10 @@ def insert_execution_feasibility_evidence(
                 created_at = excluded.created_at,
                 schema_version = excluded.schema_version
             """,
-            values,
+            values_rows,
         )
     try:
-        conn.execute(
+        conn.executemany(
             f"""
             INSERT INTO {latest_table} (
                 token_id, direction, evidence_id, event_id, condition_id, outcome_label,
@@ -1934,7 +2105,7 @@ def insert_execution_feasibility_evidence(
                 schema_version = excluded.schema_version
             WHERE excluded.quote_seen_at >= {latest_row_table}.quote_seen_at
             """,
-            values,
+            values_rows,
         )
     except sqlite3.OperationalError as exc:
         if "execution_feasibility_latest" not in str(exc):

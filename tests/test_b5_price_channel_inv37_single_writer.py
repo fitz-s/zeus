@@ -2,21 +2,11 @@
 # Last audited: 2026-07-11
 # Last reused/audited: 2026-07-11
 # Authority basis: PR415 ChatGPT deep-review blocker B5 (INV-37). The held- and
-#   candidate-priority quote-evidence ingest (and the forever market-channel loop)
-#   must commit quote evidence through ONE attached connection (world.db MAIN +
-#   zeus_trades.db ATTACHed as 'trades', schema-qualified feasibility write), NEVER two
-#   independent connections. Derived redecision screening is retryable work and must not
-#   extend that atomic quote-evidence writer unit.
-"""B5 antibody: price-channel quote evidence is a single-writer cross-DB path.
-
-RED-on-revert: the prior shape opened
-    world_conn = get_world_connection(write_class="live")
-    feasibility_conn = get_trade_connection(write_class="live")
-and committed them SEPARATELY in `_commit_event_and_feasibility(): world_conn.commit();
-feasibility_conn.commit()`. These static + behavioral guards FAIL on that shape and
-PASS only when both writes go through one ATTACHed connection with a single commit and
-a schema-qualified feasibility insert.
-"""
+#   candidate-priority refresh still uses one attached connection when it can emit both
+#   WORLD and TRADE facts. The forever market-channel loop is different: quote projection
+#   writes TRADE only, while NEW_MARKET_DISCOVERED writes WORLD only, so those lanes must
+#   not share the WORLD writer lock.
+"""B5 antibodies for price-channel DB ownership and writer-lane isolation."""
 from __future__ import annotations
 
 import ast
@@ -66,7 +56,7 @@ def _live_conn_vars(fn: ast.FunctionDef, opener: str) -> set[str]:
     return out
 
 
-def _world_mutex_keyword_call_names(fn: ast.FunctionDef, call_attr: str) -> list[str]:
+def _write_gate_keyword_call_names(fn: ast.FunctionDef, call_attr: str) -> list[str]:
     names: list[str] = []
     for sub in ast.walk(fn):
         if (
@@ -76,7 +66,7 @@ def _world_mutex_keyword_call_names(fn: ast.FunctionDef, call_attr: str) -> list
         ):
             for kw in sub.keywords:
                 if (
-                    kw.arg == "world_mutex"
+                    kw.arg == "write_gate"
                     and isinstance(kw.value, ast.Call)
                     and isinstance(kw.value.func, ast.Name)
                 ):
@@ -97,7 +87,10 @@ def test_no_function_opens_a_paired_world_and_trade_live_connection():
             continue
         world_vars = _live_conn_vars(fn, "get_world_connection")
         trade_vars = _live_conn_vars(fn, "get_trade_connection")
-        if world_vars and trade_vars:
+        if world_vars and trade_vars and fn.name not in {
+            "_edli_market_channel_ingestor_cycle",
+            "_runner",
+        }:
             offenders.append(
                 f"{fn.name}: world={sorted(world_vars)} trade={sorted(trade_vars)}"
             )
@@ -105,6 +98,18 @@ def test_no_function_opens_a_paired_world_and_trade_live_connection():
         "INV-37 violation — a function opens a live world connection AND a live trade "
         f"connection (atomic cross-DB pair on two independent connections): {offenders}"
     )
+
+
+def test_forever_runner_opens_independent_world_and_trade_lanes():
+    node = _func_node("_edli_market_channel_ingestor_cycle")
+    runner = next(
+        sub
+        for sub in ast.walk(node)
+        if isinstance(sub, ast.FunctionDef) and sub.name == "_runner"
+    )
+    assert _live_conn_vars(runner, "get_world_connection") == {"world_conn"}
+    assert "feasibility_conn" in _live_conn_vars(runner, "get_trade_connection")
+    assert not _live_conn_vars(runner, "get_world_connection_with_trades_required")
 
 
 @pytest.mark.parametrize("func_name", _REFRESH_FUNCS)
@@ -157,22 +162,16 @@ def test_refresh_seed_chunks_use_unified_world_trade_gate(func_name):
     """The DB write chunk must use the composed world+trade gate, not the bare
     world mutex by itself."""
     node = _func_node(func_name)
-    world_mutex_calls = _world_mutex_keyword_call_names(node, "seed_rest_books_in_chunks")
-    assert world_mutex_calls == ["_edli_price_channel_world_trade_write_gate"], (
+    write_gate_calls = _write_gate_keyword_call_names(node, "seed_rest_books_in_chunks")
+    assert write_gate_calls == ["_edli_price_channel_world_trade_write_gate"], (
         f"{func_name} must pass _edli_price_channel_world_trade_write_gate(...) as "
-        f"seed_rest_books_in_chunks(world_mutex=...), got {world_mutex_calls!r}"
+        f"seed_rest_books_in_chunks(write_gate=...), got {write_gate_calls!r}"
     )
 
 
-def test_unified_gate_takes_world_mutex_before_coordinator(monkeypatch):
-    """Money-path and price-channel writers must share one global lock order.
-
-    Taking coordinator WORLD+TRADE before the world mutex deadlocks against the
-    entry/exit path, which already holds the world mutex when it reaches a
-    trade writer gate. ExitStack unwinds the reverse acquisition order.
-    """
+def test_trade_gate_never_takes_world_mutex(monkeypatch):
     from src.events.triggers import market_channel_ingestor
-    from src.ingest.price_channel_ingest import _PriceChannelWorldTradeWriteGate
+    from src.ingest.price_channel_ingest import _PriceChannelWriteGate
     from src.state import write_coordinator
 
     events: list[str] = []
@@ -201,9 +200,18 @@ def test_unified_gate_takes_world_mutex_before_coordinator(monkeypatch):
         lambda: _Coordinator(),
     )
 
-    with _PriceChannelWorldTradeWriteGate(owner="lock-order-antibody"):
+    with _PriceChannelWriteGate(owner="trade-lane-antibody", scope="trade"):
         events.append("body")
 
+    assert events == [
+        "enter:coordinator",
+        "body",
+        "exit:coordinator",
+    ]
+
+    events.clear()
+    with _PriceChannelWriteGate(owner="world-lane-antibody", scope="world"):
+        events.append("body")
     assert events == [
         "enter:world_mutex",
         "enter:coordinator",
@@ -213,20 +221,16 @@ def test_unified_gate_takes_world_mutex_before_coordinator(monkeypatch):
     ]
 
 
-def test_forever_ingestor_uses_single_attached_connection():
-    """The long-lived market-channel ingestor must use the single-connection ATTACH
-    helper (non-flocked, to avoid forever-holding cross-DB flocks), not two
-    independent connections."""
+def test_forever_ingestor_uses_owner_connections_not_attached_connection():
     node = _func_node("_edli_market_channel_ingestor_cycle")
     called = {
         sub.func.id
         for sub in ast.walk(node)
         if isinstance(sub, ast.Call) and isinstance(sub.func, ast.Name)
     }
-    assert "get_world_connection_with_trades_required" in called, (
-        "_edli_market_channel_ingestor_cycle must use the single-connection ATTACH "
-        "helper get_world_connection_with_trades_required (INV-37)."
-    )
+    assert "get_world_connection" in called
+    assert "get_trade_connection" in called
+    assert "get_world_connection_with_trades_required" not in called
     assert "_bound_price_channel_sqlite_wait" in called, (
         "the forever price-channel connection must not hold all writer gates "
         "for the repo-wide SQLite busy timeout"
@@ -250,32 +254,32 @@ def test_user_channel_reconcile_uses_world_main_with_trades_attached():
     assert assigned_openers["bridge_conn"] == "get_trade_connection_with_world_required"
 
 
-def test_forever_ingestor_passes_unified_world_trade_gate():
-    """The websocket forever loop must also use the unified world+trade gate for its
-    per-message write+commit units."""
+def test_forever_ingestor_passes_independent_trade_and_world_gates():
     node = _func_node("_edli_market_channel_ingestor_cycle")
-    world_mutex_calls: list[str] = []
+    gate_calls: dict[str, str] = {}
     for sub in ast.walk(node):
         if isinstance(sub, ast.Call) and isinstance(sub.func, ast.Name):
             if sub.func.id != "run_market_channel_service_forever":
                 continue
             for kw in sub.keywords:
                 if (
-                    kw.arg == "world_mutex"
+                    kw.arg in {"quote_write_gate", "world_event_write_gate"}
                     and isinstance(kw.value, ast.Call)
                     and isinstance(kw.value.func, ast.Name)
                 ):
-                    world_mutex_calls.append(kw.value.func.id)
-    assert world_mutex_calls == ["_edli_price_channel_world_trade_write_gate"]
+                    gate_calls[str(kw.arg)] = kw.value.func.id
+    assert gate_calls == {
+        "quote_write_gate": "_edli_price_channel_trade_write_gate",
+        "world_event_write_gate": "_edli_price_channel_world_write_gate",
+    }
 
 
 @pytest.mark.parametrize(
     ("func_name", "mutex_name"),
-    (
-        ("seed_rest_books_in_chunks", "world_mutex"),
-        ("reconnect_rest_books_in_chunks", "world_mutex"),
-        ("run_websocket_forever", "_world_mutex"),
-    ),
+        (
+            ("seed_rest_books_in_chunks", "write_gate"),
+            ("reconnect_rest_books_in_chunks", "write_gate"),
+        ),
 )
 def test_deferred_redecision_sink_supports_atomic_and_independent_flush(
     func_name: str,
@@ -324,6 +328,38 @@ def test_deferred_redecision_sink_supports_atomic_and_independent_flush(
     flushes_after_gate = [node for node in all_flushes if node not in flushes_in_gate]
     assert len(flushes_after_gate) == 1
     assert flushes_after_gate[0].lineno > gates[0].end_lineno
+
+
+def test_websocket_quote_and_world_sinks_flush_in_their_own_write_gates():
+    tree = ast.parse(_MARKET_CHANNEL_MODULE.read_text(encoding="utf-8"))
+    fn = next(
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.AsyncFunctionDef)
+        and node.name == "run_websocket_forever"
+    )
+    for gate_name in ("_quote_write_gate", "_world_event_write_gate"):
+        gates = [
+            node
+            for node in ast.walk(fn)
+            if isinstance(node, ast.With)
+            and any(
+                isinstance(item.context_expr, ast.Name)
+                and item.context_expr.id == gate_name
+                for item in node.items
+            )
+        ]
+        assert any(
+            sum(
+                1
+                for node in ast.walk(gate)
+                if isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "flush_deferred_market_event_sink"
+            )
+            == 1
+            for gate in gates
+        )
 
 
 @pytest.mark.parametrize(
