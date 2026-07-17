@@ -149,7 +149,6 @@ from src.strategy.utility_ranker import (
     FamilyPayoffMatrix,
     PortfolioExposureVector,
     _candidate_wins,
-    effective_outcome_pi,
 )
 
 # The default lower-tail probability the robust quantities are taken at. ``None`` means
@@ -482,6 +481,87 @@ def _candidate_guarded_pi(
     return {y: float(eff.get(y, 0.0)) for y in matrix.outcomes}
 
 
+def _candidate_pi_matrix(
+    candidate: NativeSideCandidate,
+    *,
+    samples: np.ndarray,
+    omega: OutcomeSpace,
+    matrix: FamilyPayoffMatrix,
+    guarded_payoff_q_lcb: float | None,
+) -> np.ndarray:
+    """Build every draw's candidate-effective outcome distribution at once."""
+
+    if not candidate.is_tradeable or candidate.q_lcb is None:
+        raise PayoffVectorError(
+            "candidate-effective Pi requires a tradeable candidate with q_lcb"
+        )
+    own_bin = candidate.bin_id
+    if own_bin not in matrix.outcomes:
+        raise PayoffVectorError(
+            f"candidate bin {own_bin!r} is not a family outcome {matrix.outcomes}"
+        )
+
+    bin_index = {outcome.bin_id: index for index, outcome in enumerate(omega.bins)}
+    matrix_indexes: list[int] = []
+    for outcome in matrix.bins:
+        if outcome not in bin_index:
+            raise PayoffVectorError(
+                f"MATRIX_BIN_NOT_IN_OMEGA: matrix outcome {outcome!r} is not an "
+                f"Omega bin ({sorted(bin_index)})"
+            )
+        matrix_indexes.append(bin_index[outcome])
+
+    Pi = np.empty((samples.shape[0], len(matrix.outcomes)), dtype=float)
+    outcome_index = {outcome: index for index, outcome in enumerate(matrix.outcomes)}
+    bin_columns = [outcome_index[outcome] for outcome in matrix.bins]
+    Pi[:, bin_columns] = samples[:, matrix_indexes]
+    outside_column = outcome_index[OUTSIDE_OUTCOME]
+    Pi[:, outside_column] = np.maximum(
+        0.0,
+        1.0 - Pi[:, bin_columns].sum(axis=1),
+    )
+
+    q_guard = _validate_guarded_payoff_q_lcb(guarded_payoff_q_lcb)
+    if candidate.side == "YES" and q_guard is None:
+        return Pi
+
+    own_column = outcome_index[own_bin]
+    other_columns = np.asarray(
+        [index for index in range(len(matrix.outcomes)) if index != own_column],
+        dtype=np.intp,
+    )
+    if other_columns.size == 0:
+        raise PayoffVectorError(
+            "candidate-effective Pi needs at least one other outcome"
+        )
+
+    if q_guard is not None:
+        own_mass = q_guard if candidate.side == "YES" else 1.0 - q_guard
+        other_mass = 1.0 - q_guard if candidate.side == "YES" else q_guard
+    else:
+        own_mass = 1.0 - float(candidate.q_lcb)
+        other_mass = float(candidate.q_lcb)
+
+    other_total = Pi[:, other_columns].sum(axis=1)
+    positive = other_total > 0.0
+    if positive.any():
+        Pi[np.ix_(positive, other_columns)] *= (
+            other_mass / other_total[positive]
+        )[:, None]
+    if (~positive).any():
+        Pi[np.ix_(~positive, other_columns)] = other_mass / other_columns.size
+    Pi[:, own_column] = own_mass
+
+    if q_guard is not None:
+        totals = Pi.sum(axis=1)
+        if (totals <= 0.0).any():
+            raise PayoffVectorError("candidate-local guarded Pi is degenerate")
+        renormalize = np.abs(totals - 1.0) > 1e-12
+        if renormalize.any():
+            Pi[renormalize] /= totals[renormalize, None]
+    return Pi
+
+
 class _PreparedSizing:
     """Stake-INDEPENDENT precompute for the robust-ΔU stake sweep (performance only).
 
@@ -558,21 +638,13 @@ class _PreparedSizing:
         )
         # Stake-INDEPENDENT effective-π matrix: Pi[k, j] = effective_outcome_pi(draw_k)[j].
         samples = np.asarray(band.samples, dtype=float)
-        n_draws = samples.shape[0]
-        n_out = len(outcomes)
-        Pi = np.zeros((n_draws, n_out), dtype=float)
-        for k in range(n_draws):
-            pi = _draw_to_pi(samples[k, :], omega, matrix)
-            eff_pi = (
-                _candidate_guarded_pi(
-                    candidate, matrix, pi, guarded_payoff_q_lcb=q_guard
-                )
-                if q_guard is not None
-                else effective_outcome_pi(candidate, matrix, pi)
-            )
-            for j, y in enumerate(outcomes):
-                Pi[k, j] = float(eff_pi.get(y, 0.0))
-        self._Pi = Pi
+        self._Pi = _candidate_pi_matrix(
+            candidate,
+            samples=samples,
+            omega=omega,
+            matrix=matrix,
+            guarded_payoff_q_lcb=q_guard,
+        )
         self._all_ruin_q: float | None = None
 
     def robust_at(self, stake_usd: Decimal) -> float:

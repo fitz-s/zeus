@@ -51,6 +51,8 @@ from src.contracts.executable_cost_curve import (
 from src.contracts.native_side_candidate import NativeSideCandidate
 from src.decision.payoff_vector import (
     _PreparedSizing,
+    _candidate_guarded_pi,
+    _candidate_pi_matrix,
     _draw_to_pi,
     _local_maximum_indexes,
     optimize_vector_stake,
@@ -213,6 +215,79 @@ def _matrix(space: OutcomeSpace) -> FamilyPayoffMatrix:
     """FamilyPayoffMatrix over the EXECUTABLE bins plus OUTSIDE (Hidden #5)."""
     bins = [b.bin_id for b in space.bins if b.executable]
     return FamilyPayoffMatrix.over_bins(bins)
+
+
+@pytest.mark.parametrize(
+    ("side", "guarded_q"),
+    (("YES", None), ("NO", None), ("YES", 0.37), ("NO", 0.63)),
+)
+def test_candidate_pi_matrix_matches_scalar_reference(side, guarded_q):
+    space = _outcome_space()
+    jq = _joint_q(space, {"b25": 0.55, "b26": 0.20})
+    band = _band_from_point(jq, n_draws=40, jitter=0.008)
+    matrix = _matrix(space)
+    curve = ExecutableCostCurve(
+        token_id=f"{side.lower()}-b25",
+        side=side,
+        snapshot_id="snap-pi",
+        book_hash=f"hash-pi-{side}",
+        levels=(BookLevel(price=Decimal("0.30"), size=Decimal("2000")),),
+        fee_model=FeeModel(fee_rate=Decimal("0.05")),
+        min_tick=Decimal("0.01"),
+        min_order_size=Decimal("1"),
+        quote_ttl=timedelta(seconds=2),
+    )
+    candidate = NativeSideCandidate.tradeable(
+        family_key=space.family_id,
+        bin_id="b25",
+        side=side,
+        token_id=curve.token_id,
+        condition_id="cond-b25",
+        q_point=0.55,
+        q_lcb=0.50,
+        probability_uncertainty=None,
+        executable_cost_curve=curve,
+        forecast_snapshot_id="fc-pi",
+        market_snapshot_id="mk-pi",
+        hypothesis_id=f"hyp-pi-{side}",
+    )
+
+    def _scalar(samples):
+        rows = []
+        for draw in samples:
+            base = _draw_to_pi(draw, space, matrix)
+            effective = (
+                _candidate_guarded_pi(
+                    candidate,
+                    matrix,
+                    base,
+                    guarded_payoff_q_lcb=guarded_q,
+                )
+                if guarded_q is not None
+                else effective_outcome_pi(candidate, matrix, base)
+            )
+            rows.append([effective[outcome] for outcome in matrix.outcomes])
+        return np.asarray(rows)
+
+    actual = _candidate_pi_matrix(
+        candidate,
+        samples=band.samples,
+        omega=space,
+        matrix=matrix,
+        guarded_payoff_q_lcb=guarded_q,
+    )
+    np.testing.assert_allclose(actual, _scalar(band.samples), rtol=0.0, atol=5e-15)
+
+    own_only = np.zeros((1, len(space.bins)), dtype=float)
+    own_only[0, next(i for i, b in enumerate(space.bins) if b.bin_id == "b25")] = 1.0
+    degenerate = _candidate_pi_matrix(
+        candidate,
+        samples=own_only,
+        omega=space,
+        matrix=matrix,
+        guarded_payoff_q_lcb=guarded_q,
+    )
+    np.testing.assert_allclose(degenerate, _scalar(own_only), rtol=0.0, atol=5e-15)
 
 
 @pytest.mark.parametrize("side", ["YES", "NO"])
