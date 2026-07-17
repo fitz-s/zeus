@@ -7208,6 +7208,8 @@ def event_bound_live_adapter_from_trade_conn(
         )
 
         def _current_book_epoch(probabilities, _at):
+            import httpx
+
             from src.contracts.executable_market_snapshot import (
                 FRESHNESS_WINDOW_DEFAULT,
             )
@@ -7219,7 +7221,7 @@ def event_bound_live_adapter_from_trade_conn(
                 fetch_current_global_books,
                 fetch_current_gamma_markets,
             )
-            from src.data.market_scanner import _gamma_get
+            from src.data.market_scanner import GAMMA_BASE
 
             _book_started = _time.monotonic()
             timeout = max(
@@ -7248,52 +7250,83 @@ def event_bound_live_adapter_from_trade_conn(
                 gamma_batch_requests = 0
                 gamma_event_requests = 0
                 refresh_started_at = datetime.now(UTC)
-
-                def _gamma_markets(condition_ids):
-                    nonlocal gamma_batch_requests
-                    markets, batch_requests = fetch_current_gamma_markets(
-                        condition_ids,
-                        gamma_get=_gamma_get,
-                        timeout=gamma_timeout,
-                    )
-                    gamma_batch_requests += batch_requests
-                    return markets
-
-                def _gamma_event(slug):
-                    nonlocal gamma_event_requests
-                    gamma_event_requests += 1
-                    response = _gamma_get(
-                        "/events",
-                        params={"slug": str(slug)},
-                        timeout=gamma_timeout,
-                    )
-                    if getattr(response, "status_code", None) != 200:
-                        raise ValueError(
-                            "GLOBAL_CURRENT_GAMMA_EVENT_HTTP:"
-                            f"{getattr(response, 'status_code', None)}"
-                        )
-                    payload = response.json()
-                    if (
-                        not isinstance(payload, list)
-                        or len(payload) != 1
-                        or not isinstance(payload[0], Mapping)
-                    ):
-                        raise ValueError(
-                            "GLOBAL_CURRENT_GAMMA_EVENT_RESPONSE_INVALID"
-                        )
-                    return payload[0]
-
                 started = _time.monotonic()
-                bound_probabilities = bind_current_global_probability_tokens(
-                    forecast_conn,
-                    probability_witnesses=probability_slice,
-                    get_gamma_event=_gamma_event,
-                    get_gamma_markets=_gamma_markets,
-                    trade_conn=None if force_current_gamma else trade_conn,
-                    checked_at_utc=_at,
-                    max_workers=16,
-                    metadata_sink=metadata_sink,
+                gamma_deadline = started + gamma_timeout
+                client_timeout = httpx.Timeout(
+                    gamma_timeout,
+                    pool=min(1.0, gamma_timeout),
                 )
+                limits = httpx.Limits(
+                    max_connections=16,
+                    max_keepalive_connections=16,
+                    keepalive_expiry=30.0,
+                )
+                with httpx.Client(
+                    base_url=GAMMA_BASE,
+                    timeout=client_timeout,
+                    limits=limits,
+                ) as gamma:
+
+                    def _remaining_gamma_timeout() -> float:
+                        remaining = gamma_deadline - _time.monotonic()
+                        if remaining <= 0.0:
+                            raise ValueError(
+                                "GLOBAL_CURRENT_GAMMA_DEADLINE_EXCEEDED"
+                            )
+                        return min(gamma_timeout, remaining)
+
+                    def _gamma_get_once(path, *, params=None, timeout):
+                        return gamma.get(
+                            path,
+                            params=params,
+                            timeout=min(float(timeout), _remaining_gamma_timeout()),
+                        )
+
+                    def _gamma_markets(condition_ids):
+                        nonlocal gamma_batch_requests
+                        markets, batch_requests = fetch_current_gamma_markets(
+                            condition_ids,
+                            gamma_get=_gamma_get_once,
+                            timeout=gamma_timeout,
+                            total_timeout=_remaining_gamma_timeout(),
+                        )
+                        gamma_batch_requests += batch_requests
+                        return markets
+
+                    def _gamma_event(slug):
+                        nonlocal gamma_event_requests
+                        gamma_event_requests += 1
+                        response = _gamma_get_once(
+                            "/events",
+                            params={"slug": str(slug)},
+                            timeout=_remaining_gamma_timeout(),
+                        )
+                        if getattr(response, "status_code", None) != 200:
+                            raise ValueError(
+                                "GLOBAL_CURRENT_GAMMA_EVENT_HTTP:"
+                                f"{getattr(response, 'status_code', None)}"
+                            )
+                        payload = response.json()
+                        if (
+                            not isinstance(payload, list)
+                            or len(payload) != 1
+                            or not isinstance(payload[0], Mapping)
+                        ):
+                            raise ValueError(
+                                "GLOBAL_CURRENT_GAMMA_EVENT_RESPONSE_INVALID"
+                            )
+                        return payload[0]
+
+                    bound_probabilities = bind_current_global_probability_tokens(
+                        forecast_conn,
+                        probability_witnesses=probability_slice,
+                        get_gamma_event=_gamma_event,
+                        get_gamma_markets=_gamma_markets,
+                        trade_conn=None if force_current_gamma else trade_conn,
+                        checked_at_utc=_at,
+                        max_workers=16,
+                        metadata_sink=metadata_sink,
+                    )
                 logging.getLogger(__name__).info(
                     "global book epoch stage completed: mode=%s "
                     "token_bind elapsed_s=%.3f families=%d metadata=%d "

@@ -11,6 +11,7 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
+import time as _time
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal, InvalidOperation
@@ -1176,12 +1177,17 @@ def fetch_current_gamma_markets(
     *,
     gamma_get: Callable[..., object],
     timeout: float,
+    total_timeout: float | None = None,
     chunk_size: int = 100,
     max_workers: int = 16,
 ) -> tuple[tuple[Mapping[str, object], ...], int]:
     """Fetch one complete current Gamma market batch or fail closed."""
 
-    from concurrent.futures import ThreadPoolExecutor, as_completed
+    from concurrent.futures import (
+        ThreadPoolExecutor,
+        TimeoutError as FuturesTimeoutError,
+        as_completed,
+    )
 
     conditions = tuple(
         dict.fromkeys(
@@ -1197,12 +1203,27 @@ def fetch_current_gamma_markets(
     )
     if not chunks:
         return (), 0
+    deadline = (
+        _time.monotonic() + float(total_timeout)
+        if total_timeout is not None and float(total_timeout) > 0.0
+        else None
+    )
+    if total_timeout is not None and deadline is None:
+        raise ValueError("GLOBAL_CURRENT_GAMMA_MARKETS_TIMEOUT_INVALID")
+
+    def remaining_timeout() -> float:
+        if deadline is None:
+            return float(timeout)
+        remaining = deadline - _time.monotonic()
+        if remaining <= 0.0:
+            raise ValueError("GLOBAL_CURRENT_GAMMA_MARKETS_DEADLINE_EXCEEDED")
+        return min(float(timeout), remaining)
 
     def _fetch(chunk: Sequence[str]) -> tuple[Mapping[str, object], ...]:
         response = gamma_get(
             "/markets",
             params={"condition_ids": list(chunk), "limit": len(chunk)},
-            timeout=timeout,
+            timeout=remaining_timeout(),
         )
         if getattr(response, "status_code", None) != 200:
             raise ValueError(
@@ -1216,17 +1237,32 @@ def fetch_current_gamma_markets(
             raise ValueError("GLOBAL_CURRENT_GAMMA_MARKET_INVALID")
         return tuple(payload)
 
-    if len(chunks) == 1:
+    if len(chunks) == 1 and deadline is None:
         return _fetch(chunks[0]), 1
     markets: list[Mapping[str, object]] = []
     workers = max(1, min(int(max_workers), len(chunks)))
-    with ThreadPoolExecutor(
+    pool = ThreadPoolExecutor(
         max_workers=workers,
         thread_name_prefix="global-market-metadata",
-    ) as pool:
+    )
+    futures = ()
+    try:
         futures = tuple(pool.submit(_fetch, chunk) for chunk in chunks)
-        for future in as_completed(futures):
+        completion_timeout = (
+            max(0.0, deadline - _time.monotonic())
+            if deadline is not None
+            else None
+        )
+        for future in as_completed(futures, timeout=completion_timeout):
             markets.extend(future.result())
+    except FuturesTimeoutError as exc:
+        raise ValueError(
+            "GLOBAL_CURRENT_GAMMA_MARKETS_DEADLINE_EXCEEDED"
+        ) from exc
+    finally:
+        for future in futures:
+            future.cancel()
+        pool.shutdown(wait=False, cancel_futures=True)
     return tuple(markets), len(chunks)
 
 

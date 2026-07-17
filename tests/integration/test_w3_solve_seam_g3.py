@@ -29,6 +29,7 @@ import subprocess
 import sys
 import textwrap
 import threading
+import time
 import zlib
 from dataclasses import asdict, dataclass, replace
 from decimal import Decimal
@@ -1156,6 +1157,31 @@ def test_current_gamma_market_fetch_batches_concurrently_and_fails_closed():
             timeout=4.0,
             max_workers=2,
         )
+
+
+def test_current_gamma_market_fetch_returns_at_total_deadline():
+    worker_finished = threading.Event()
+
+    def slow_gamma_get(_path, *, params, timeout):
+        assert timeout <= 0.05
+        time.sleep(0.15)
+        worker_finished.set()
+        return SimpleNamespace(status_code=200, json=lambda: [])
+
+    started = time.monotonic()
+    with pytest.raises(
+        ValueError,
+        match="GLOBAL_CURRENT_GAMMA_MARKETS_DEADLINE_EXCEEDED",
+    ):
+        universe.fetch_current_gamma_markets(
+            tuple(f"condition-{index}" for index in range(101)),
+            gamma_get=slow_gamma_get,
+            timeout=4.0,
+            total_timeout=0.05,
+            max_workers=2,
+        )
+    assert time.monotonic() - started < 0.12
+    assert worker_finished.wait(timeout=1.0)
 
 
 _SPINE_DECISION_AT = _dt.datetime(2026, 6, 13, 12, 0, tzinfo=_dt.timezone.utc)
