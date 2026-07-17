@@ -269,6 +269,17 @@ authority surface.
   terminal-event seam to convert the reservation; it does not mutate the live
   DB out of band or infer a fill from portfolio state alone.
 
+- 2026-07-17: command terminalization then exposed a second exactly-once gap:
+  the native Tokyo fill, its EDLI `source_trade_fact_id` alias, and a later REST
+  re-observation projected one 31.6-share economic fill as 63.2 local shares
+  while chain truth remained 31.6.  The shared economic reducer now validates
+  the EDLI pointer against the append-only source fact, independent of which
+  later revision becomes canonical, and entry reconciliation consumes that
+  reducer just as exit reconciliation already did.  A production-shaped
+  re-observation test proves the canonical projection converges from the
+  contaminated 63.2/$37.92 state back to 31.6/$18.96 without an out-of-band DB
+  edit.
+
 - 2026-07-14: post-deploy global auctions covered all 128 current families and
   repeatedly selected Sao Paulo Jul 14 HIGH NO with positive robust delta-log
   wealth, but preflight inherited `passed_prefilter=false` and the old
