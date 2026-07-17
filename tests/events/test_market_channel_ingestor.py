@@ -2383,6 +2383,74 @@ def test_market_channel_refresh_budget_still_invalidates_dropped_actions():
     assert service.refresh_action_dropped_count == 1
 
 
+def test_market_channel_refresh_queue_keeps_slow_work_off_caller_thread():
+    _conn, writer = _conn_writer()
+    caller_thread = threading.get_ident()
+    started = threading.Event()
+    release = threading.Event()
+    refresh_threads: list[int] = []
+
+    def refresh(_action: MarketChannelAction) -> None:
+        refresh_threads.append(threading.get_ident())
+        started.set()
+        assert release.wait(timeout=2.0)
+
+    service = MarketChannelOnlineService(
+        MarketChannelIngestor(writer, active_token_ids={"token-1"}, token_metadata=_metadata()),
+        refresh_snapshot=refresh,
+    )
+    action = MarketChannelAction(
+        refresh_snapshot=True,
+        reason="tick_size_change",
+        token_id="token-1",
+        condition_id="0xcondition",
+    )
+
+    service._enqueue_refresh_action(action)
+
+    assert started.wait(timeout=1.0)
+    assert len(refresh_threads) == 1
+    assert refresh_threads[0] != caller_thread
+    release.set()
+    assert service.wait_refresh_idle(timeout=1.0)
+    assert service.refresh_action_count == 1
+
+
+def test_market_channel_refresh_queue_coalesces_identical_pending_work():
+    _conn, writer = _conn_writer()
+    started = threading.Event()
+    release = threading.Event()
+    refreshed: list[MarketChannelAction] = []
+
+    def refresh(action: MarketChannelAction) -> None:
+        refreshed.append(action)
+        started.set()
+        assert release.wait(timeout=2.0)
+
+    service = MarketChannelOnlineService(
+        MarketChannelIngestor(writer, active_token_ids={"token-1"}, token_metadata=_metadata()),
+        refresh_snapshot=refresh,
+    )
+    action = MarketChannelAction(
+        refresh_snapshot=True,
+        reason="tick_size_change",
+        token_id="token-1",
+        condition_id="0xcondition",
+    )
+
+    service._enqueue_refresh_action(action)
+    assert started.wait(timeout=1.0)
+    service._enqueue_refresh_action(action)
+    service._enqueue_refresh_action(action)
+    release.set()
+
+    assert service.wait_refresh_idle(timeout=1.0)
+    assert refreshed == [action]
+    assert service.refresh_action_count == 1
+    assert service.refresh_action_dropped_count == 1
+    assert service.refresh_action_coalesced_count == 1
+
+
 def test_market_channel_condition_refresh_does_not_fallback_to_unrelated_markets():
     from src.ingest.price_channel_ingest import _edli_filter_markets_for_condition
 

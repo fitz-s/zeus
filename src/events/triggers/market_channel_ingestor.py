@@ -14,6 +14,7 @@ import contextlib
 import json
 import logging
 import sqlite3
+import threading
 import time
 from collections import deque
 from dataclasses import dataclass, field
@@ -1205,6 +1206,24 @@ class MarketChannelOnlineService:
     _current_generation_depth_tokens: set[str] = field(default_factory=set)
     _continuity_last_publish_monotonic: float | None = field(default=None, init=False)
     _continuity_last_connected: bool | None = field(default=None, init=False)
+    _refresh_worker_lock: threading.Lock = field(
+        default_factory=threading.Lock,
+        init=False,
+        repr=False,
+    )
+    _pending_refresh_actions: dict[
+        tuple[str, str, str], MarketChannelAction
+    ] = field(default_factory=dict, init=False, repr=False)
+    _refresh_worker_running: bool = field(default=False, init=False, repr=False)
+    _refresh_worker_idle: threading.Event = field(
+        default_factory=threading.Event,
+        init=False,
+        repr=False,
+    )
+    refresh_action_coalesced_count: int = field(default=0, init=False)
+
+    def __post_init__(self) -> None:
+        self._refresh_worker_idle.set()
 
     def _record_current_generation_depth(self, message: dict[str, Any]) -> None:
         event_type = str(message.get("event_type") or message.get("type") or "")
@@ -1935,7 +1954,7 @@ class MarketChannelOnlineService:
                                     logger=logger,
                                 )
                             for _action in pending_actions:
-                                self._handle_action(_action)
+                                self._enqueue_refresh_action(_action)
                     if stop_event is None or not stop_event.is_set():
                         raise ConnectionError("market channel stream ended")
             except Exception as exc:  # noqa: BLE001 - network loop must retry
@@ -1984,6 +2003,56 @@ class MarketChannelOnlineService:
                 if logger is not None:
                     logger.warning("EDLI market-channel disconnected: %s", exc, exc_info=True)
                 await asyncio.sleep(reconnect_delay_seconds)
+
+    @staticmethod
+    def _refresh_action_key(action: MarketChannelAction) -> tuple[str, str, str]:
+        return (
+            str(action.reason or ""),
+            str(action.condition_id or ""),
+            str(action.token_id or ""),
+        )
+
+    def _enqueue_refresh_action(self, action: MarketChannelAction) -> None:
+        if not action.refresh_snapshot:
+            return
+        start = False
+        key = self._refresh_action_key(action)
+        with self._refresh_worker_lock:
+            if key in self._pending_refresh_actions:
+                self.refresh_action_coalesced_count += 1
+            self._pending_refresh_actions[key] = action
+            if not self._refresh_worker_running:
+                self._refresh_worker_running = True
+                self._refresh_worker_idle.clear()
+                start = True
+        if start:
+            threading.Thread(
+                target=self._drain_refresh_actions,
+                name="market-channel-snapshot-refresh",
+                daemon=True,
+            ).start()
+
+    def _drain_refresh_actions(self) -> None:
+        while True:
+            with self._refresh_worker_lock:
+                if not self._pending_refresh_actions:
+                    self._refresh_worker_running = False
+                    self._refresh_worker_idle.set()
+                    return
+                key = next(iter(self._pending_refresh_actions))
+                action = self._pending_refresh_actions.pop(key)
+            try:
+                self._handle_action(action)
+            except Exception as exc:  # noqa: BLE001 - refresh failure must not kill quote ingest
+                _logger.warning(
+                    "market-channel snapshot refresh failed off socket loop: %s: %s",
+                    type(exc).__name__,
+                    exc,
+                    exc_info=True,
+                )
+
+    def wait_refresh_idle(self, timeout: float | None = None) -> bool:
+        return self._refresh_worker_idle.wait(timeout)
 
     def _handle_action(self, action: MarketChannelAction) -> None:
         if not action.refresh_snapshot:
