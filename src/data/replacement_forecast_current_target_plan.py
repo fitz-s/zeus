@@ -511,8 +511,30 @@ def _replacement_coverage_counts_for_dependencies(
     requests: set[tuple[str, str, str, str, str]],
     posterior_tradeable_grade_clause: str,
     readiness_status_clause: str,
+    readiness_columns: set[str] | None = None,
 ) -> dict[tuple[str, str, str, str, str], tuple[int, int]]:
     counts = {request: [0, 0] for request in requests}
+    typed_readiness_scope = {
+        "city",
+        "target_local_date",
+        "temperature_metric",
+    }.issubset(readiness_columns or set())
+    readiness_scope_clause = (
+        """
+               AND r.city = requested.city
+               AND r.target_local_date = requested.target_date
+               AND r.temperature_metric = requested.temperature_metric
+        """
+        if typed_readiness_scope
+        else """
+               AND json_extract(r.provenance_json, '$.city') = requested.city
+               AND json_extract(r.provenance_json, '$.target_date') = requested.target_date
+               AND json_extract(
+                       r.provenance_json,
+                       '$.temperature_metric'
+                   ) = requested.temperature_metric
+        """
+    )
     ordered = sorted(requests)
     for offset in range(0, len(ordered), 100):
         chunk = ordered[offset : offset + 100]
@@ -575,12 +597,7 @@ def _replacement_coverage_counts_for_dependencies(
               FROM requested
               LEFT JOIN readiness_state r
                 ON r.strategy_key = ?
-               AND json_extract(r.provenance_json, '$.city') = requested.city
-               AND json_extract(r.provenance_json, '$.target_date') = requested.target_date
-               AND json_extract(
-                       r.provenance_json,
-                       '$.temperature_metric'
-                   ) = requested.temperature_metric
+               {readiness_scope_clause}
                {readiness_status_clause}
                AND EXISTS (
                    SELECT 1
@@ -1229,12 +1246,23 @@ def _latest_readiness_bound_posterior_id(
         ).fetchone() is not None
     if not binding_supported:
         return None
-    predicates = [
-        "strategy_key = ?",
-        "json_extract(provenance_json, '$.city') = ?",
-        "json_extract(provenance_json, '$.target_date') = ?",
-        "json_extract(provenance_json, '$.temperature_metric') = ?",
-    ]
+    predicates = ["strategy_key = ?"]
+    if {"city", "target_local_date", "temperature_metric"}.issubset(columns):
+        predicates.extend(
+            [
+                "city = ?",
+                "target_local_date = ?",
+                "temperature_metric = ?",
+            ]
+        )
+    else:
+        predicates.extend(
+            [
+                "json_extract(provenance_json, '$.city') = ?",
+                "json_extract(provenance_json, '$.target_date') = ?",
+                "json_extract(provenance_json, '$.temperature_metric') = ?",
+            ]
+        )
     params: list[object] = [SOURCE_ID, city, target_date, temperature_metric]
     order = "datetime(computed_at) DESC, readiness_id DESC" if "computed_at" in columns else "rowid DESC"
     selected = "dependency_json" + (", status" if "status" in columns else "")
@@ -1447,31 +1475,6 @@ def _city_timezone_by_name() -> dict[str, str]:
         timezone_name = str(row.get("timezone") or "").strip()
         if name and timezone_name:
             out[name] = timezone_name
-    return out
-
-
-def _city_timezone_by_name_from_source_run_coverage(conn: sqlite3.Connection) -> dict[str, str]:
-    if "source_run_coverage" not in _table_names(conn):
-        return {}
-    if not {"city", "city_timezone"}.issubset(_columns(conn, "source_run_coverage")):
-        return {}
-    out: dict[str, str] = {}
-    for row in conn.execute(
-        """
-        SELECT city, city_timezone, max(recorded_at) AS recorded_at
-        FROM source_run_coverage
-        WHERE city IS NOT NULL
-          AND city != ''
-          AND city_timezone IS NOT NULL
-          AND city_timezone != ''
-        GROUP BY city, city_timezone
-        ORDER BY recorded_at DESC
-        """
-    ).fetchall():
-        city = str(row["city"]).strip()
-        timezone_name = str(row["city_timezone"]).strip()
-        if city and timezone_name and city not in out:
-            out[city] = timezone_name
     return out
 
 
@@ -1713,6 +1716,11 @@ def build_replacement_forecast_current_target_plan(
             ):
                 raise ValueError("raw_forecast_artifacts schema lacks manifest metadata columns")
         source_run_targets = _supports_source_run_targets(conn)
+        source_run_coverage_columns = (
+            _columns(conn, "source_run_coverage")
+            if "source_run_coverage" in tables
+            else set()
+        )
         if "source_run_coverage" in tables and not source_run_targets:
             return _blocked_plan("REPLACEMENT_CURRENT_TARGET_PLAN_SOURCE_RUN_DEPENDENCY_SCHEMA_MISSING")
         posterior_source_run_clause = ""
@@ -1757,6 +1765,11 @@ def build_replacement_forecast_current_target_plan(
             """
         sql_limit = "" if limit is None else f" LIMIT {int(limit)}"
         if source_run_targets:
+            coverage_timezone_select = (
+                "c.city_timezone"
+                if "city_timezone" in source_run_coverage_columns
+                else "NULL AS city_timezone"
+            )
             expected_high = expected_replacement_dependency_identity_by_role("high")["baseline_b0"]
             expected_low = expected_replacement_dependency_identity_by_role("low")["baseline_b0"]
             if metadata_column is not None:
@@ -1796,6 +1809,7 @@ def build_replacement_forecast_current_target_plan(
                 WITH ranked_coverage AS (
                     SELECT
                         c.city,
+                        {coverage_timezone_select},
                         c.target_local_date AS target_date,
                         c.temperature_metric,
                         c.source_run_id AS baseline_source_run_id,
@@ -1833,6 +1847,7 @@ def build_replacement_forecast_current_target_plan(
                 targets AS (
                     SELECT
                         rc.city,
+                        rc.city_timezone,
                         rc.target_date,
                         rc.temperature_metric,
                         rc.baseline_source_run_id,
@@ -1853,6 +1868,7 @@ def build_replacement_forecast_current_target_plan(
                 )
                 SELECT
                     targets.city,
+                    targets.city_timezone,
                     targets.target_date,
                     targets.temperature_metric,
                     targets.baseline_source_run_id,
@@ -1906,6 +1922,7 @@ def build_replacement_forecast_current_target_plan(
                 )
                 SELECT
                     targets.city,
+                    NULL AS city_timezone,
                     targets.target_date,
                     targets.temperature_metric,
                     NULL AS baseline_source_run_id,
@@ -1922,10 +1939,14 @@ def build_replacement_forecast_current_target_plan(
                 (minimum_target_date, SOURCE_ID, SOURCE_ID),
             ).fetchall()
         out: list[ReplacementForecastCurrentTargetPlanRow] = []
-        timezone_by_city = {
-            **_city_timezone_by_name(),
-            **_city_timezone_by_name_from_source_run_coverage(conn),
-        }
+        timezone_by_city = _city_timezone_by_name()
+        timezone_by_city.update(
+            {
+                str(row["city"]): str(row["city_timezone"])
+                for row in rows
+                if row["city_timezone"]
+            }
+        )
         expected_by_metric = {
             metric: expected_replacement_dependency_identity_by_role(metric)
             for metric in {str(row["temperature_metric"]) for row in rows}
@@ -2036,6 +2057,7 @@ def build_replacement_forecast_current_target_plan(
             requests=dependency_requests,
             posterior_tradeable_grade_clause=posterior_tradeable_grade_clause,
             readiness_status_clause=readiness_status_clause,
+            readiness_columns=readiness_columns,
         )
         for row in rows:
             metric = str(row["temperature_metric"])

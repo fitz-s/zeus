@@ -872,6 +872,60 @@ def test_current_target_plan_does_not_count_all_market_history(
     assert "SELECT COUNT(*) FROM market_events" not in normalized
 
 
+def test_current_target_plan_uses_typed_readiness_scope_when_available(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    import src.data.replacement_forecast_current_target_plan as plan_module
+
+    db = tmp_path / "forecasts.db"
+    _create_db(db)
+    now_utc = datetime(2026, 6, 7, 12, 0, tzinfo=timezone.utc)
+    legacy = build_replacement_forecast_current_target_plan(db, now_utc=now_utc)
+    conn = sqlite3.connect(db)
+    try:
+        conn.executescript(
+            """
+            ALTER TABLE readiness_state ADD COLUMN city TEXT;
+            ALTER TABLE readiness_state ADD COLUMN target_local_date TEXT;
+            ALTER TABLE readiness_state ADD COLUMN temperature_metric TEXT;
+            UPDATE readiness_state
+               SET city = json_extract(provenance_json, '$.city'),
+                   target_local_date = json_extract(provenance_json, '$.target_date'),
+                   temperature_metric = json_extract(
+                       provenance_json,
+                       '$.temperature_metric'
+                   );
+            """
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    statements: list[str] = []
+
+    def _traced_read_only(path: Path) -> sqlite3.Connection:
+        traced = sqlite3.connect(f"file:{Path(path)}?mode=ro", uri=True)
+        traced.set_trace_callback(statements.append)
+        return traced
+
+    monkeypatch.setattr(plan_module, "_connect_read_only", _traced_read_only)
+    typed = build_replacement_forecast_current_target_plan(db, now_utc=now_utc)
+
+    assert typed.as_dict() == legacy.as_dict()
+    readiness_sql = [
+        " ".join(statement.split())
+        for statement in statements
+        if "LEFT JOIN readiness_state r" in statement
+    ]
+    assert readiness_sql
+    assert all("r.city = requested.city" in statement for statement in readiness_sql)
+    assert all(
+        "json_extract(r.provenance_json, '$.city')" not in statement
+        for statement in readiness_sql
+    )
+
+
 def test_current_target_plan_orders_nearest_market_date_first(tmp_path) -> None:
     db = tmp_path / "forecasts.db"
     _create_db(db)
