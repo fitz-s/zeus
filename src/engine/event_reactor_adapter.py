@@ -682,6 +682,39 @@ def _reuse_global_book_token_bindings(
     return rebound
 
 
+def _reuse_global_book_superset_token_bindings(
+    trade_conn: sqlite3.Connection,
+    probabilities: Mapping[str, object],
+) -> tuple[dict[str, object] | None, str]:
+    """Reuse immutable token identity when the current scope narrows."""
+
+    namespace = _global_book_epoch_cache_namespace(trade_conn)
+    if namespace is None:
+        return None, "namespace_unavailable"
+    with _GLOBAL_BOOK_EPOCH_CACHE_LOCK:
+        entry = _GLOBAL_BOOK_EPOCH_CACHE
+    if entry is None:
+        return None, "cache_empty"
+    if entry.namespace != namespace:
+        return None, "namespace_changed"
+    cached = dict(entry.bound_probabilities)
+    if not set(probabilities) < set(cached):
+        return None, "not_cached_superset"
+    try:
+        cached_slice = {
+            family_key: cached[family_key] for family_key in probabilities
+        }
+        return (
+            _reuse_global_book_token_bindings(
+                probabilities,
+                cached_slice,
+            ),
+            "hit",
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        return None, f"token_reuse_invalid:{type(exc).__name__}"
+
+
 def _global_book_topology_signature(
     probabilities: Mapping[str, object],
 ) -> tuple[tuple[str, str, str, str, str], ...] | None:
@@ -7126,6 +7159,31 @@ def event_bound_live_adapter_from_trade_conn(
                     "global book epoch cache miss: phase=before_bind reason=%s",
                     cache_before_reason,
                 )
+            superset_bound_probabilities = None
+            if cached_before_bind is None:
+                (
+                    superset_bound_probabilities,
+                    superset_reuse_reason,
+                ) = _reuse_global_book_superset_token_bindings(
+                    trade_conn,
+                    probabilities,
+                )
+                if superset_bound_probabilities is not None:
+                    logging.getLogger(__name__).info(
+                        "global book token topology reused from cached superset: "
+                        "families=%d",
+                        len(superset_bound_probabilities),
+                    )
+                elif superset_reuse_reason not in {
+                    "cache_empty",
+                    "namespace_changed",
+                    "namespace_unavailable",
+                    "not_cached_superset",
+                }:
+                    logging.getLogger(__name__).info(
+                        "global book cached superset token reuse rejected: reason=%s",
+                        superset_reuse_reason,
+                    )
             reusable_topology_entry = None
             if cached_before_bind is None and cache_before_reason == "expired":
                 reusable_topology_entry, topology_cache_reason = (
@@ -7185,11 +7243,10 @@ def event_bound_live_adapter_from_trade_conn(
                                 removed_family_keys,
                                 allow_topology_change=True,
                             )
-                            _store_global_book_epoch(
-                                trade_conn,
-                                rebound_probabilities,
-                                epoch,
-                                checked_at=datetime.now(UTC),
+                            logging.getLogger(__name__).info(
+                                "global book broad topology cache retained after "
+                                "scoped cache hit: removed_families=%d",
+                                len(removed_family_keys),
                             )
                         logging.getLogger(__name__).info(
                             "global book epoch cache hit: elapsed_s=%.3f "
@@ -7322,7 +7379,14 @@ def event_bound_live_adapter_from_trade_conn(
             bind_slice = probabilities
             rebound_probabilities: dict[str, object] = {}
             topology_bindings_reused = False
-            if reusable_topology_entry is not None:
+            topology_bindings_reused_from_superset = (
+                superset_bound_probabilities is not None
+            )
+            if superset_bound_probabilities is not None:
+                rebound_probabilities = superset_bound_probabilities
+                bind_slice = {}
+                topology_bindings_reused = True
+            elif reusable_topology_entry is not None:
                 try:
                     rebound_probabilities = _reuse_global_book_token_bindings(
                         probabilities,
@@ -7343,6 +7407,11 @@ def event_bound_live_adapter_from_trade_conn(
                         "families=%d",
                         len(rebound_probabilities),
                     )
+            if topology_bindings_reused and prefetch_slice is not None:
+                prefetch_slice = {
+                    family_key: rebound_probabilities[family_key]
+                    for family_key in prefetch_slice
+                }
             retained_bound_probabilities: dict[str, object] = {}
             if (
                 cached_before_bind is not None
@@ -7554,17 +7623,25 @@ def event_bound_live_adapter_from_trade_conn(
                 mode="full_books",
                 prefetched=prefetched,
             )
-            cache_store_status = _store_global_book_epoch(
-                trade_conn,
-                bound_probabilities,
-                epoch,
-                checked_at=datetime.now(UTC),
-            )
-            if cache_store_status != "stored":
-                logging.getLogger(__name__).warning(
-                    "global book epoch cache store rejected: mode=full reason=%s",
-                    cache_store_status,
+            if topology_bindings_reused_from_superset:
+                logging.getLogger(__name__).info(
+                    "global book broad topology cache retained after scoped capture: "
+                    "families=%d assets=%d",
+                    len(bound_probabilities),
+                    len(getattr(epoch, "assets", ())),
                 )
+            else:
+                cache_store_status = _store_global_book_epoch(
+                    trade_conn,
+                    bound_probabilities,
+                    epoch,
+                    checked_at=datetime.now(UTC),
+                )
+                if cache_store_status != "stored":
+                    logging.getLogger(__name__).warning(
+                        "global book epoch cache store rejected: mode=full reason=%s",
+                        cache_store_status,
+                    )
             return bound_probabilities, epoch
 
         def _current_entry_capital_limit(

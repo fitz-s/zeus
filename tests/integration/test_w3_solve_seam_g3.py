@@ -4269,10 +4269,20 @@ def test_live_adapter_reuses_tokens_and_refreshes_only_eligible_book_family(
         unrelated_drift,
         _dt.datetime.now(_dt.timezone.utc),
     )
+    adapter.process_global_batch(
+        (_global_scope_event(city="Miami", source_run_id="run-miami"),),
+        _dt.datetime(2026, 7, 10, 8, 11, tzinfo=_dt.timezone.utc),
+    )
+    forecast_provider = captured["current_book_epoch_provider"]
+    bound_forecast_subset, _ = forecast_provider(
+        {miami: unrelated_drift[miami]},
+        _dt.datetime.now(_dt.timezone.utc),
+    )
     bound_after_removal, epoch_after_removal = provider(
         {miami: unrelated_drift[miami]},
         _dt.datetime.now(_dt.timezone.utc),
     )
+    cache_after_removal = era._GLOBAL_BOOK_EPOCH_CACHE
     rebound_after_add, epoch_after_add = provider(
         unrelated_drift,
         _dt.datetime.now(_dt.timezone.utc),
@@ -4301,19 +4311,23 @@ def test_live_adapter_reuses_tokens_and_refreshes_only_eligible_book_family(
     assert bound == probabilities
     assert bound_again == changed_probabilities
     assert bound_after_unrelated_drift == unrelated_drift
+    assert bound_forecast_subset == {miami: unrelated_drift[miami]}
     assert bound_after_removal == {miami: unrelated_drift[miami]}
     assert rebound_after_add == unrelated_drift
     assert bound_after_expiry == unrelated_drift
     # q changed, but the condition/token topology did not. Reuse the still-current
     # cached bindings while refreshing only the triggered family's live books.
-    assert bind_calls == [
-        ("metadata", (dallas, miami)),
-        ("metadata", (dallas,)),
-    ]
+    assert bind_calls == [("metadata", (dallas, miami))]
+    assert cache_after_removal is not None
+    assert {family_key for family_key, _ in cache_after_removal.bound_probabilities} == {
+        dallas,
+        miami,
+    }
     assert capture_calls == [
         (dallas, miami),
         (dallas,),
         (dallas,),
+        (miami,),
         (dallas,),
         (dallas, miami),
     ]
@@ -4326,6 +4340,7 @@ def test_live_adapter_reuses_tokens_and_refreshes_only_eligible_book_family(
         ),
         ("no-token-dallas", "yes-token-dallas"),
         ("no-token-dallas", "yes-token-dallas"),
+        ("no-token-miami", "yes-token-miami"),
         ("no-token-dallas", "yes-token-dallas"),
         (
             "no-token-dallas",
