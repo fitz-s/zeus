@@ -1084,7 +1084,7 @@ def _get_cached_global_book_epoch(
     return cached
 
 
-def _projected_global_book_rows(
+def _snapshot_projected_global_book_rows(
     trade_conn: sqlite3.Connection,
     tokens: Iterable[str],
     *,
@@ -1265,6 +1265,38 @@ def _latest_market_channel_book_rows(
     return projected
 
 
+def _projected_global_book_rows(
+    trade_conn: sqlite3.Connection,
+    tokens: Iterable[str],
+    *,
+    checked_at: datetime,
+    max_age: timedelta,
+) -> dict[str, tuple[Mapping[str, object], datetime, str]] | None:
+    """Merge fresh snapshot and market-channel depth projections."""
+
+    rows = _snapshot_projected_global_book_rows(
+        trade_conn,
+        tokens,
+        checked_at=checked_at,
+        max_age=max_age,
+    ) or {}
+    for token, channel_row in _latest_market_channel_book_rows(
+        trade_conn,
+        tokens,
+        checked_at=checked_at.astimezone(timezone.utc),
+        max_age=max_age,
+    ).items():
+        channel_book, channel_at, channel_id = channel_row
+        snapshot_row = rows.get(token)
+        if snapshot_row is not None and snapshot_row[1] > channel_at:
+            continue
+        if channel_book is None:
+            rows.pop(token, None)
+            continue
+        rows[token] = (channel_book, channel_at, channel_id)
+    return rows or None
+
+
 def _projected_global_books(
     trade_conn: sqlite3.Connection,
     tokens: Iterable[str],
@@ -1281,22 +1313,6 @@ def _projected_global_books(
         max_age=max_age,
     )
     if rows is None:
-        rows = {}
-    for token, channel_row in _latest_market_channel_book_rows(
-        trade_conn,
-        tokens,
-        checked_at=checked_at.astimezone(timezone.utc),
-        max_age=max_age,
-    ).items():
-        channel_book, channel_at, channel_id = channel_row
-        snapshot_row = rows.get(token)
-        if snapshot_row is not None and snapshot_row[1] > channel_at:
-            continue
-        if channel_book is None:
-            rows.pop(token, None)
-            continue
-        rows[token] = (channel_book, channel_at, channel_id)
-    if not rows:
         return None
     return (
         {token: raw_book for token, (raw_book, _, _) in rows.items()},

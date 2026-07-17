@@ -6080,6 +6080,16 @@ def test_global_book_prefetch_reuses_latest_market_channel_depth():
     assert captured_at == _dt.datetime(
         2026, 7, 17, 0, 12, 11, tzinfo=_dt.timezone.utc
     )
+    projected_rows = era._projected_global_book_rows(
+        conn,
+        ("yes-a",),
+        checked_at=_dt.datetime(
+            2026, 7, 17, 0, 12, 12, tzinfo=_dt.timezone.utc
+        ),
+        max_age=_dt.timedelta(seconds=30),
+    )
+    assert projected_rows is not None
+    assert projected_rows["yes-a"][2] == "book-event"
 
 
 def test_global_book_prefetch_newer_bba_invalidates_older_depth():
@@ -6150,7 +6160,7 @@ def test_global_book_prefetch_newer_bba_invalidates_older_depth():
         """
     )
 
-    assert era._projected_global_books(
+    assert era._projected_global_book_rows(
         conn,
         ("yes-a",),
         checked_at=_dt.datetime(
