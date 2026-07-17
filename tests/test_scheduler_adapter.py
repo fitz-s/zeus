@@ -69,6 +69,7 @@ def test_executor_class_assignments_by_role() -> None:
     by_id = {s.job_id: s for s in build_job_specs()}
     assert by_id["ingest_harvester_truth_writer"].executor_class == "live_db"   # live settlement
     assert by_id["ingest_market_scan"].executor_class == "live_db"              # live
+    assert by_id["ingest_k2_obs_fast_tick"].executor_class == "observation_db"
     assert by_id["ingest_tigge_archive_backfill"].executor_class == "backfill_db"
     assert by_id["ingest_calibration_auto_promote"].executor_class == "derived_db"
     assert by_id["ingest_heartbeat"].executor_class == "heartbeat"
@@ -563,6 +564,7 @@ def test_build_registry_scheduler_builds_exact_set_and_routes_executors() -> Non
         assert j["executor"] == executor_class_for(JOB_REGISTRY[j["id"]])
         assert j["executor"] in (
             "source_clock_db",
+            "observation_db",
             "live_db",
             "backfill_db",
             "derived_db",
@@ -603,6 +605,7 @@ def test_ingest_main_registry_scheduler_replaces_manual_add_job_when_enabled() -
     assert by_id["ingest_day0_metar_source_clock"]["executor"] == "source_clock_db"
     assert "ingest_day0_metar_commit_retry" not in by_id
     assert by_id["ingest_day0_oracle_anomaly"]["executor"] == "live_db"
+    assert by_id["ingest_k2_obs_fast_tick"]["executor"] == "observation_db"
     assert by_id["ingest_k2_hourly_instants"]["executor"] == "backfill_db"
     assert by_id["ingest_uma_resolution_listener"]["executor"] == "backfill_db"   # PR8 fix landed
     assert by_id["ingest_heartbeat"]["executor"] == "heartbeat"

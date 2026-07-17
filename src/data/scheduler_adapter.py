@@ -10,6 +10,7 @@ assigning each job an EXECUTOR CLASS by intent so the single-writer SQLite lock 
 DB-heavy jobs starve heartbeats:
 
     source_clock_db — latency-critical source publication -> short live write
+    observation_db  — supplemental observation ingest
     live_db         — other live DB writers (forecast/observation/market ingest)
     backfill_db     — backfill / historical DB writers (incl. UMA settlement)
     derived_db      — derived/diagnostic DB writers (calibration, skill, drift)
@@ -35,6 +36,7 @@ from src.data.source_job_registry import JOB_REGISTRY, SourceJobSpec
 
 ExecutorClass = Literal[
     "source_clock_db",
+    "observation_db",
     "live_db",
     "backfill_db",
     "derived_db",
@@ -56,6 +58,13 @@ def executor_class_for(spec: SourceJobSpec) -> ExecutorClass:
             "ingest_day0_metar_commit_retry",
         }:
             return "source_clock_db"
+        if spec.job_id in {
+            "ingest_k2_daily_obs",
+            "ingest_k2_hko_tick",
+            "ingest_k2_obs",
+            "ingest_k2_obs_fast_tick",
+        }:
+            return "observation_db"
         # Settlement is live-critical EXCEPT historical UMA, which is a backfill concern.
         if spec.source_id == "polymarket_uma_oo_v2":
             return "backfill_db"
@@ -238,6 +247,7 @@ def registry_executor_pools() -> dict[str, object]:
 
     return {
         "source_clock_db": ThreadPoolExecutor(max_workers=1),
+        "observation_db": ThreadPoolExecutor(max_workers=1),
         "live_db": ThreadPoolExecutor(max_workers=1),
         "backfill_db": ThreadPoolExecutor(max_workers=1),
         "derived_db": ThreadPoolExecutor(max_workers=1),
