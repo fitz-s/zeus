@@ -136,7 +136,12 @@ def current_evidence_shape_semantics_mismatch(provenance: object) -> bool:
     shape = _current_evidence_shape(provenance)
     if shape is None:
         return False
-    return str(shape.get("semantics_revision") or "") != CURRENT_EVIDENCE_SEMANTICS_REVISION
+    expected = (
+        ENSEMBLE_ANOMALY_TRANSPORT_SEMANTICS_REVISION
+        if shape.get("translation_applied") is True
+        else CURRENT_EVIDENCE_SEMANTICS_REVISION
+    )
+    return str(shape.get("semantics_revision") or "") != expected
 
 
 def tradeable_grade_coverage_sql(*, posterior_columns, alias: str = "") -> str:
@@ -162,10 +167,15 @@ def tradeable_grade_coverage_sql(*, posterior_columns, alias: str = "") -> str:
         f"AND json_extract({alias}provenance_json, '$.q_lcb_basis') = "
         f"'{TRADEABLE_GRADE_QLCB_BASIS}'"
     )
+    shape_path = "$.bayes_precision_fusion.current_evidence_shape"
     fragments.append(
-        f"AND json_extract({alias}provenance_json, "
-        "'$.bayes_precision_fusion.current_evidence_shape.semantics_revision') = "
-        f"'{CURRENT_EVIDENCE_SEMANTICS_REVISION}'"
+        "AND (("
+        f"COALESCE(json_extract({alias}provenance_json, '{shape_path}.translation_applied'), 0) = 0 "
+        f"AND json_extract({alias}provenance_json, '{shape_path}.semantics_revision') = "
+        f"'{CURRENT_EVIDENCE_SEMANTICS_REVISION}') OR ("
+        f"json_extract({alias}provenance_json, '{shape_path}.translation_applied') = 1 "
+        f"AND json_extract({alias}provenance_json, '{shape_path}.semantics_revision') = "
+        f"'{ENSEMBLE_ANOMALY_TRANSPORT_SEMANTICS_REVISION}'))"
     )
     return "\n              ".join(fragments)
 
