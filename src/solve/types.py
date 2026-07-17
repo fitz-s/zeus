@@ -273,12 +273,45 @@ class NativeHolding:
 
 
 @dataclass(frozen=True)
+class NativePendingEndowment:
+    """One committed BUY exposure that is not yet sellable native inventory."""
+
+    obligation_id: str
+    family_key: str
+    bin_id: str
+    side: NativeHoldingSide
+    token_id: str
+    shares: Decimal
+
+    def __post_init__(self) -> None:
+        for name in ("obligation_id", "family_key", "bin_id", "token_id"):
+            if not str(getattr(self, name)).strip():
+                raise ValueError(f"NativePendingEndowment.{name} must be non-empty")
+        if self.side not in ("YES", "NO"):
+            raise ValueError(
+                f"NativePendingEndowment.side must be YES or NO, got {self.side!r}"
+            )
+        if not Decimal(self.shares).is_finite() or Decimal(self.shares) <= 0:
+            raise ValueError(
+                "NativePendingEndowment.shares must be finite and positive, "
+                f"got {self.shares}"
+            )
+
+
+@dataclass(frozen=True)
 class NativeHoldingsSnapshot:
-    """Ledger-bound native holdings for exactly one family and one solve epoch."""
+    """One family's sellable inventory plus non-sellable committed BUY exposure."""
 
     family_key: str
     ledger_snapshot_id: str
     holdings: tuple[NativeHolding, ...] = ()
+    pending_endowments: tuple[NativePendingEndowment, ...] = ()
+
+    @property
+    def endowment_claims(
+        self,
+    ) -> tuple[NativeHolding | NativePendingEndowment, ...]:
+        return (*self.holdings, *self.pending_endowments)
 
     def __post_init__(self) -> None:
         if not self.family_key.strip() or not self.ledger_snapshot_id.strip():
@@ -293,6 +326,20 @@ class NativeHoldingsSnapshot:
             if holding.position_id in ids:
                 raise ValueError(f"duplicate NativeHolding position_id: {holding.position_id}")
             ids.add(holding.position_id)
+        obligation_ids: set[str] = set()
+        for endowment in self.pending_endowments:
+            if endowment.family_key != self.family_key:
+                raise ValueError(
+                    "NativeHoldingsSnapshot family mismatch: "
+                    f"{endowment.obligation_id} belongs to {endowment.family_key}, "
+                    f"not {self.family_key}"
+                )
+            if endowment.obligation_id in obligation_ids:
+                raise ValueError(
+                    "duplicate NativePendingEndowment obligation_id: "
+                    f"{endowment.obligation_id}"
+                )
+            obligation_ids.add(endowment.obligation_id)
 
 
 # --- menu --------------------------------------------------------------------

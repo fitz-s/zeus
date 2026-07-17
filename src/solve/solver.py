@@ -743,6 +743,7 @@ class PortfolioWealthWitness:
     max_age: timedelta
     witness_identity: str
     native_holdings_micro: tuple[tuple[str, int], ...] = ()
+    pending_entry_endowments_micro: tuple[tuple[str, str, int], ...] = ()
 
     @property
     def economic_identity(self) -> str:
@@ -775,6 +776,20 @@ class PortfolioWealthWitness:
             or any(not token or amount <= 0 for token, amount in native_holdings)
         ):
             raise ValueError("portfolio native holdings must be unique and positive")
+        pending = tuple(
+            sorted(
+                (str(obligation_id), str(token), int(amount))
+                for obligation_id, token, amount in self.pending_entry_endowments_micro
+            )
+        )
+        if (
+            len({obligation_id for obligation_id, _, _ in pending}) != len(pending)
+            or any(
+                not obligation_id or not token or amount <= 0
+                for obligation_id, token, amount in pending
+            )
+        ):
+            raise ValueError("portfolio pending entry endowments must be unique and positive")
         expected = portfolio_wealth_identity(
             ledger_snapshot_id=self.ledger_snapshot_id,
             position_set_hash=self.position_set_hash,
@@ -788,6 +803,7 @@ class PortfolioWealthWitness:
         if self.witness_identity != expected:
             raise ValueError("PortfolioWealthWitness identity does not bind its values")
         object.__setattr__(self, "native_holdings_micro", native_holdings)
+        object.__setattr__(self, "pending_entry_endowments_micro", pending)
 
 
 @dataclass(frozen=True)
@@ -4480,7 +4496,7 @@ class SolveEngineShim:
             holdings_payout = {
                 JointOutcomeAtom.canonical_id({family_key: b}): sum(
                     float(holding.shares)
-                    for holding in holdings.holdings
+                    for holding in holdings.endowment_claims
                     if (
                         b == holding.bin_id
                         if holding.side == "YES"

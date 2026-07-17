@@ -293,7 +293,10 @@ def _candidate_portfolio_endowment(
     payout_by_outcome = {outcome: Decimal("0") for outcome in outcomes}
     family_gross_shares = Decimal("0")
     current_token_shares = Decimal("0")
-    for holding in tuple(getattr(holdings_snapshot, "holdings", ()) or ()):
+    claims = getattr(holdings_snapshot, "endowment_claims", None)
+    if claims is None:
+        claims = getattr(holdings_snapshot, "holdings", ())
+    for holding in tuple(claims or ()):
         shares = Decimal(holding.shares)
         holding_bin = str(holding.bin_id)
         holding_side = str(holding.side)

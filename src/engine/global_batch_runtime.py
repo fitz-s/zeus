@@ -203,6 +203,16 @@ def _bind_selection_holdings(
             getattr(wealth_witness, "native_holdings_micro", ()) or ()
         )
     }
+    pending_entry_endowments = tuple(
+        (
+            str(obligation_id),
+            str(token),
+            Decimal(int(amount)) / Decimal("1000000"),
+        )
+        for obligation_id, token, amount in tuple(
+            getattr(wealth_witness, "pending_entry_endowments_micro", ()) or ()
+        )
+    )
     if not ledger_snapshot_id:
         raise ValueError("GLOBAL_HOLDINGS_LEDGER_IDENTITY_MISSING")
     rebound: dict[str, object] = {}
@@ -218,6 +228,7 @@ def _bind_selection_holdings(
             positions=positions,
             ledger_snapshot_id=ledger_snapshot_id,
             token_shares_by_id=token_shares_by_id,
+            pending_entry_endowments=pending_entry_endowments,
         )
         rebound[event_id] = replace(prepared, holdings_snapshot=holdings)
     return rebound

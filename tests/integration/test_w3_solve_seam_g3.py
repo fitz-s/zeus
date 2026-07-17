@@ -8383,6 +8383,139 @@ def test_global_selection_endowment_uses_same_chain_balance_as_wealth_witness():
     assert holding.shares == Decimal("49.5")
 
 
+def test_global_selection_counts_open_entry_without_granting_sell_inventory():
+    """A durable BUY commitment consumes Kelly target before chain projection."""
+
+    @dataclass(frozen=True)
+    class Prepared:
+        probability_witness: object
+        holdings_snapshot: object | None = None
+
+    bindings = (
+        SimpleNamespace(
+            bin_id="bin-a",
+            condition_id="condition-a",
+            yes_token_id="yes-a",
+            no_token_id="no-a",
+        ),
+        SimpleNamespace(
+            bin_id="bin-b",
+            condition_id="condition-b",
+            yes_token_id="yes-b",
+            no_token_id="no-b",
+        ),
+    )
+    prepared = Prepared(
+        probability_witness=SimpleNamespace(
+            family_key="family",
+            bindings=bindings,
+        )
+    )
+    position = SimpleNamespace(
+        trade_id="position-a",
+        position_id="position-a",
+        condition_id="condition-a",
+        direction="buy_no",
+        token_id="yes-a",
+        no_token_id="no-a",
+        shares=Decimal("31.6"),
+        chain_shares=Decimal("31.6"),
+        chain_state="synced",
+        chain_verified_at="2026-07-17T05:43:00+00:00",
+        state="entered",
+    )
+    at = _dt.datetime(2026, 7, 17, 5, 44, 34, tzinfo=_dt.timezone.utc)
+    conn = _wealth_test_conn(captured_at=at)
+    conn.execute(
+        "INSERT INTO venue_commands VALUES (?,?,?,?,?,?,?,?)",
+        (
+            "command-a",
+            "position-a",
+            "no-a",
+            "BUY",
+            7.5,
+            0.56,
+            "ENTRY",
+            "POST_ACKED",
+        ),
+    )
+    conn.execute(
+        "INSERT INTO entry_exposure_obligations VALUES (?,?,?,?,?,?,?)",
+        (
+            "command-a",
+            "OPEN",
+            "no-a",
+            7.5,
+            4.2,
+            0,
+            "2026-07-17T05:44:27+00:00",
+        ),
+    )
+    portfolio = PortfolioState(
+        positions=[position],
+        authority="canonical_db",
+        authority_scope="runtime_exposure",
+    )
+    wealth = current_portfolio_wealth_witness(
+        conn,
+        decision_at_utc=at,
+        max_age=_dt.timedelta(seconds=10),
+        portfolio_state=portfolio,
+    )
+    rebound = global_batch_runtime._bind_selection_holdings(
+        {"event-a": prepared},
+        portfolio_state=portfolio,
+        wealth_witness=wealth,
+    )
+    snapshot = rebound["event-a"].holdings_snapshot
+    endowment = _candidate_portfolio_endowment(
+        SimpleNamespace(
+            family_key="family",
+            bin_id="bin-a",
+            side="NO",
+            token_id="no-a",
+        ),
+        probability_witness=SimpleNamespace(bin_ids=("bin-a", "bin-b")),
+        holdings_snapshot=snapshot,
+        wealth_witness=wealth,
+    )
+
+    assert wealth.native_holdings_micro == (("no-a", 31_600_000),)
+    assert wealth.pending_entry_endowments_micro == (
+        ("command-a", "no-a", 7_500_000),
+    )
+    assert snapshot.holdings[0].shares == Decimal("31.6")
+    assert snapshot.pending_endowments[0].shares == Decimal("7.5")
+    assert endowment.current_token_shares == Decimal("39.1")
+
+    conn.execute(
+        "UPDATE venue_commands SET state = 'FILLED' WHERE command_id = 'command-a'"
+    )
+    conn.execute(
+        "INSERT INTO venue_command_events VALUES (?,?,?)",
+        ("command-a", "FILL_CONFIRMED", "2026-07-17T05:44:30+00:00"),
+    )
+    position.shares = Decimal("39.1")
+    position.chain_shares = Decimal("39.1")
+    position.chain_verified_at = "2026-07-17T05:44:42+00:00"
+    represented = current_portfolio_wealth_witness(
+        conn,
+        decision_at_utc=at + _dt.timedelta(seconds=10),
+        max_age=_dt.timedelta(seconds=10),
+        portfolio_state=portfolio,
+    )
+    represented_snapshot = global_batch_runtime._bind_selection_holdings(
+        {"event-a": prepared},
+        portfolio_state=portfolio,
+        wealth_witness=represented,
+    )["event-a"].holdings_snapshot
+
+    assert represented.native_holdings_micro == (("no-a", 39_100_000),)
+    assert represented.pending_entry_endowments_micro == ()
+    assert represented_snapshot.holdings[0].shares == Decimal("39.1")
+    assert represented_snapshot.pending_endowments == ()
+
+
 def test_two_prepared_families_choose_one_globally_unique_order():
     family, proofs, payload = _corpus()[0]
     decision_at = _dt.datetime(2026, 6, 13, 12, 0, tzinfo=_dt.timezone.utc)
@@ -8641,6 +8774,34 @@ def _wealth_test_conn(
 ):
     conn = sqlite3.connect(":memory:")
     init_collateral_schema(conn)
+    conn.executescript(
+        """
+        CREATE TABLE venue_commands (
+            command_id TEXT PRIMARY KEY,
+            position_id TEXT,
+            token_id TEXT,
+            side TEXT,
+            size REAL,
+            price REAL,
+            intent_kind TEXT,
+            state TEXT
+        );
+        CREATE TABLE venue_command_events (
+            command_id TEXT,
+            event_type TEXT,
+            occurred_at TEXT
+        );
+        CREATE TABLE entry_exposure_obligations (
+            command_id TEXT PRIMARY KEY,
+            status TEXT,
+            token_id TEXT,
+            shares REAL,
+            cost_basis_usd REAL,
+            unbounded INTEGER,
+            created_at TEXT
+        );
+        """
+    )
     conn.execute(
         "INSERT INTO collateral_ledger_snapshots ("
         "pusd_balance_micro,pusd_allowance_micro,usdc_e_legacy_balance_micro,"
@@ -9108,22 +9269,36 @@ def test_current_portfolio_wealth_witness_bounds_inflight_buy_reservation():
     )
     reserved = _wealth_test_conn(captured_at=decision_at)
     reserved.execute(
-        """
-        CREATE TABLE venue_commands (
-            command_id TEXT PRIMARY KEY,
-            intent_kind TEXT,
-            side TEXT,
-            size REAL
-        )
-        """
+        "INSERT INTO venue_commands VALUES (?,?,?,?,?,?,?,?)",
+        ("cmd", "position-1", "token-1", "BUY", 2.0, 0.5, "ENTRY", "POST_ACKED"),
     )
     reserved.execute(
-        "INSERT INTO venue_commands VALUES (?,?,?,?)",
-        ("cmd", "ENTRY", "BUY", 2.0),
+        "INSERT INTO venue_commands VALUES (?,?,?,?,?,?,?,?)",
+        (
+            "filled-cmd",
+            "position-2",
+            "token-2",
+            "BUY",
+            1.5,
+            0.333333333333,
+            "ENTRY",
+            "POST_ACKED",
+        ),
     )
-    reserved.execute(
-        "INSERT INTO venue_commands VALUES (?,?,?,?)",
-        ("filled-cmd", "ENTRY", "BUY", 1.5),
+    reserved.executemany(
+        "INSERT INTO entry_exposure_obligations VALUES (?,?,?,?,?,?,?)",
+        (
+            ("cmd", "OPEN", "token-1", 2.0, 1.0, 0, decision_at.isoformat()),
+            (
+                "filled-cmd",
+                "OPEN",
+                "token-2",
+                1.5,
+                0.5,
+                0,
+                decision_at.isoformat(),
+            ),
+        ),
     )
     reserved.execute(
         "INSERT INTO collateral_reservations ("

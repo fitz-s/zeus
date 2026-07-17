@@ -13,7 +13,7 @@ import json
 import sqlite3
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta, timezone
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from functools import cached_property
 from typing import Callable, Mapping, Sequence
 from zoneinfo import ZoneInfo
@@ -2342,7 +2342,7 @@ def _inflight_buy_wealth_bounds(
         try:
             amount_micro = int(row[1])
             size = Decimal(str(row[2]))
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, InvalidOperation):
             return None
         side = str(row[3] or "").strip().upper()
         intent_kind = str(row[4] or "").strip().upper()
@@ -2363,6 +2363,201 @@ def _inflight_buy_wealth_bounds(
         upper += max(amount_usd, size)
         identities.append((command_id, basis, amount_micro, str(size)))
     return cash_micro, upper, tuple(sorted(identities))
+
+
+def _pending_entry_endowments(
+    trade_conn: sqlite3.Connection,
+    *,
+    positions: tuple[object, ...],
+    native_holdings_micro: Mapping[str, int],
+) -> tuple[
+    tuple[tuple[str, str, int], ...],
+    tuple[tuple[str, ...], ...],
+    Mapping[str, int],
+    frozenset[str],
+]:
+    """Return committed BUY exposure absent from the current native balance.
+
+    ``position.shares`` can advance before ``chain_shares`` and an admitted
+    command can precede both.  The endowment therefore takes the larger of the
+    local fill-projection gap and still-open obligations for each token.  A
+    FILLED obligation is omitted only when a later positive chain observation
+    proves that fill is already represented by sellable inventory.
+    """
+
+    rows = trade_conn.execute(
+        """
+        SELECT obligation.command_id,
+               obligation.status,
+               obligation.token_id,
+               obligation.shares,
+               obligation.cost_basis_usd,
+               obligation.unbounded,
+               obligation.created_at,
+               command.position_id,
+               command.token_id,
+               command.side,
+               command.size,
+               command.price,
+               command.intent_kind,
+               command.state,
+               MAX(
+                   CASE WHEN event.event_type = 'FILL_CONFIRMED'
+                        THEN event.occurred_at END
+               ) AS fill_confirmed_at
+          FROM entry_exposure_obligations obligation
+          LEFT JOIN venue_commands command
+            ON command.command_id = obligation.command_id
+          LEFT JOIN venue_command_events event
+            ON event.command_id = obligation.command_id
+         GROUP BY obligation.command_id
+         ORDER BY obligation.command_id
+        """
+    ).fetchall()
+
+    positions_by_id: dict[str, object] = {}
+    projected_by_token: dict[str, int] = {}
+    for position in positions:
+        position_id = str(
+            getattr(position, "position_id", "")
+            or getattr(position, "trade_id", "")
+            or ""
+        ).strip()
+        token = _position_token(position)
+        if position_id:
+            positions_by_id[position_id] = position
+        if not token:
+            continue
+        try:
+            shares = Decimal(str(getattr(position, "shares", 0) or 0))
+        except (TypeError, ValueError, InvalidOperation) as exc:
+            raise ValueError("CURRENT_WEALTH_POSITION_PROJECTION_INVALID") from exc
+        if not shares.is_finite() or shares < 0:
+            raise ValueError("CURRENT_WEALTH_POSITION_PROJECTION_INVALID")
+        projected_by_token[token] = projected_by_token.get(token, 0) + int(
+            (shares * Decimal("1000000")).to_integral_value()
+        )
+
+    open_by_token: dict[str, list[tuple[str, int, int]]] = {}
+    identities: list[tuple[str, ...]] = []
+    obligation_ids: set[str] = set()
+    for row in rows:
+        command_id = str(row[0] or "").strip()
+        status = str(row[1] or "").strip().upper()
+        obligation_token = str(row[2] or "").strip()
+        command_position_id = str(row[7] or "").strip()
+        command_token = str(row[8] or "").strip()
+        side = str(row[9] or "").strip().upper()
+        intent_kind = str(row[12] or "").strip().upper()
+        command_state = str(row[13] or "").strip().upper()
+        fill_confirmed_at_raw = str(row[14] or "").strip()
+        try:
+            shares = Decimal(str(row[3]))
+            cost = Decimal(str(row[4]))
+            command_size = Decimal(str(row[10]))
+            command_price = Decimal(str(row[11]))
+        except (TypeError, ValueError, InvalidOperation) as exc:
+            raise ValueError("CURRENT_WEALTH_ENTRY_OBLIGATION_INVALID") from exc
+        if (
+            not command_id
+            or command_id in obligation_ids
+            or status not in {"OPEN", "RESOLVED"}
+            or not obligation_token
+            or obligation_token != command_token
+            or not command_position_id
+            or side != "BUY"
+            or intent_kind != "ENTRY"
+            or bool(row[5])
+            or not all(
+                value.is_finite()
+                for value in (shares, cost, command_size, command_price)
+            )
+            or shares <= 0
+            or cost < 0
+            or command_size <= 0
+            or command_price <= 0
+            or shares - command_size > Decimal("0.000001")
+        ):
+            raise ValueError("CURRENT_WEALTH_ENTRY_OBLIGATION_INVALID")
+        obligation_ids.add(command_id)
+        shares_micro = int((shares * Decimal("1000000")).to_integral_value())
+        cost_micro = int((cost * Decimal("1000000")).to_integral_value())
+        if shares_micro <= 0 or cost_micro < 0:
+            raise ValueError("CURRENT_WEALTH_ENTRY_OBLIGATION_INVALID")
+
+        represented = False
+        position = positions_by_id.get(command_position_id)
+        chain_seen_raw = str(
+            getattr(position, "chain_verified_at", "") if position is not None else ""
+        ).strip()
+        if command_state == "FILLED" and fill_confirmed_at_raw and chain_seen_raw:
+            try:
+                fill_confirmed_at = datetime.fromisoformat(
+                    fill_confirmed_at_raw.replace("Z", "+00:00")
+                )
+                chain_seen_at = datetime.fromisoformat(
+                    chain_seen_raw.replace("Z", "+00:00")
+                )
+            except ValueError as exc:
+                raise ValueError("CURRENT_WEALTH_ENTRY_OBLIGATION_TIME_INVALID") from exc
+            if fill_confirmed_at.tzinfo is None or chain_seen_at.tzinfo is None:
+                raise ValueError("CURRENT_WEALTH_ENTRY_OBLIGATION_TIME_INVALID")
+            represented = (
+                _position_token(position) == obligation_token
+                and native_holdings_micro.get(obligation_token, 0) > 0
+                and chain_seen_at.astimezone(timezone.utc)
+                >= fill_confirmed_at.astimezone(timezone.utc)
+            )
+
+        classification = "represented" if represented else "pending"
+        identities.append(
+            (
+                command_id,
+                status,
+                obligation_token,
+                str(shares),
+                str(cost),
+                command_position_id,
+                command_state,
+                fill_confirmed_at_raw,
+                chain_seen_raw,
+                classification,
+            )
+        )
+        if status == "OPEN" and not represented:
+            open_by_token.setdefault(obligation_token, []).append(
+                (command_id, shares_micro, cost_micro)
+            )
+
+    pending: list[tuple[str, str, int]] = []
+    pending_cost_micro: dict[str, int] = {}
+    for token in sorted(set(projected_by_token) | set(open_by_token)):
+        native = int(native_holdings_micro.get(token, 0))
+        projection_gap = max(projected_by_token.get(token, 0) - native, 0)
+        # Sub-cent-share projection dust is below the engine's smallest native
+        # order quantum and must not override the exact micro-unit chain balance.
+        if projection_gap < 10_000:
+            projection_gap = 0
+        obligations = open_by_token.get(token, [])
+        obligation_total = sum(shares for _, shares, _ in obligations)
+        for command_id, shares_micro, cost_micro in obligations:
+            pending.append((command_id, token, shares_micro))
+            pending_cost_micro[command_id] = cost_micro
+        if projection_gap > obligation_total:
+            pending.append(
+                (
+                    f"position_projection:{token}",
+                    token,
+                    projection_gap - obligation_total,
+                )
+            )
+
+    return (
+        tuple(sorted(pending)),
+        tuple(sorted(identities)),
+        pending_cost_micro,
+        frozenset(obligation_ids),
+    )
 
 
 def current_portfolio_wealth_witness(
@@ -2389,6 +2584,9 @@ def current_portfolio_wealth_witness(
         "collateral_ledger_snapshots",
         "collateral_reservations",
         "collateral_unsettled_proceeds",
+        "entry_exposure_obligations",
+        "venue_commands",
+        "venue_command_events",
     }
     if not all(_table_exists(trade_conn, table) for table in required):
         raise ValueError("CURRENT_WEALTH_LEDGER_SCHEMA_MISSING")
@@ -2423,7 +2621,7 @@ def current_portfolio_wealth_witness(
         inflight_bounds = _inflight_buy_wealth_bounds(trade_conn)
         if inflight_bounds is None:
             raise ValueError("CURRENT_WEALTH_INFLIGHT_BUY_AMBIGUOUS")
-        inflight_cash_micro, inflight_upper_usd, inflight_identities = inflight_bounds
+        inflight_cash_micro, _inflight_upper_usd, inflight_identities = inflight_bounds
 
         if portfolio_state is None:
             from src.state.portfolio import load_runtime_open_portfolio
@@ -2528,11 +2726,30 @@ def current_portfolio_wealth_witness(
         native_holdings = dict(held_balances)
         for token, amount in uncertain_micro.items():
             native_holdings[token] = native_holdings.get(token, 0) + amount
+        (
+            pending_endowments,
+            obligation_identities,
+            pending_cost_micro,
+            obligation_ids,
+        ) = _pending_entry_endowments(
+            trade_conn,
+            positions=positions,
+            native_holdings_micro=native_holdings,
+        )
+        inflight_command_ids = {identity[0] for identity in inflight_identities}
+        if not inflight_command_ids.issubset(obligation_ids):
+            raise ValueError("CURRENT_WEALTH_INFLIGHT_BUY_AMBIGUOUS")
+        uncovered_pending_cash_micro = sum(
+            amount
+            for command_id, amount in pending_cost_micro.items()
+            if command_id not in inflight_command_ids
+        )
 
         pusd_micro = int(row.get("pusd_balance_micro") or 0)
         allowance_micro = int(row.get("pusd_allowance_micro") or 0)
         legacy_micro = int(row.get("usdc_e_legacy_balance_micro") or 0)
-        spendable_micro = pusd_micro - inflight_cash_micro
+        cash_at_risk_micro = inflight_cash_micro + uncovered_pending_cash_micro
+        spendable_micro = pusd_micro - cash_at_risk_micro
         if spendable_micro < 0:
             raise ValueError("CURRENT_WEALTH_SPENDABLE_CASH_INVALID")
         # Allowance is submit-time permission, not owned cash.  The executor
@@ -2551,9 +2768,15 @@ def current_portfolio_wealth_witness(
             (Decimal(amount) / Decimal("1000000") for amount in uncertain_micro.values()),
             Decimal("0"),
         )
-        ceiling += inflight_upper_usd
+        ceiling += sum(
+            (
+                Decimal(amount) / Decimal("1000000")
+                for _, _, amount in pending_endowments
+            ),
+            Decimal("0"),
+        )
         spendable = Decimal(spendable_micro) / Decimal("1000000")
-        reservations = Decimal(inflight_cash_micro) / Decimal("1000000")
+        reservations = Decimal(cash_at_risk_micro) / Decimal("1000000")
 
         ledger_snapshot_id = hashlib.sha256(
             repr(
@@ -2567,6 +2790,7 @@ def current_portfolio_wealth_witness(
                     legacy_micro,
                     tuple(sorted(token_balances.items())),
                     inflight_identities,
+                    tuple(sorted(pending_endowments)),
                 )
             ).encode("utf-8")
         ).hexdigest()
@@ -2576,6 +2800,7 @@ def current_portfolio_wealth_witness(
                     tuple(sorted(position_rows)),
                     tuple(sorted(held_balances.items())),
                     tuple(sorted(uncertain_micro.items())),
+                    obligation_identities,
                 )
             ).encode("utf-8")
         ).hexdigest()
@@ -2601,6 +2826,7 @@ def current_portfolio_wealth_witness(
             max_age=max_age,
             witness_identity=identity,
             native_holdings_micro=tuple(sorted(native_holdings.items())),
+            pending_entry_endowments_micro=pending_endowments,
         )
     finally:
         if owns_txn and trade_conn.in_transaction:

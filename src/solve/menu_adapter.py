@@ -49,6 +49,7 @@ from src.solve.types import (
     MenuItem,
     NativeHolding,
     NativeHoldingsSnapshot,
+    NativePendingEndowment,
     SolveMenu,
     WealthStateByAtom,
 )
@@ -68,6 +69,7 @@ def native_holdings_snapshot_from_positions(
     positions,
     ledger_snapshot_id: str,
     token_shares_by_id: Mapping[str, Decimal] | None = None,
+    pending_entry_endowments: tuple[tuple[str, str, Decimal], ...] = (),
 ) -> NativeHoldingsSnapshot:
     """Bind canonical open positions to the exact native claims in ``omega``.
 
@@ -78,6 +80,15 @@ def native_holdings_snapshot_from_positions(
     """
 
     bindings = {str(outcome.condition_id or ""): outcome for outcome in omega.bins}
+    token_bindings: dict[str, tuple[object, str]] = {}
+    for outcome in omega.bins:
+        for token_id, side in (
+            (str(outcome.yes_token_id or ""), "YES"),
+            (str(outcome.no_token_id or ""), "NO"),
+        ):
+            if not token_id or token_id in token_bindings:
+                raise ValueError("current omega has missing or duplicate native token identity")
+            token_bindings[token_id] = (outcome, side)
     if not family_key.strip() or not ledger_snapshot_id.strip() or not bindings:
         raise ValueError("native holdings snapshot requires family, ledger, and omega identities")
     holdings: list[NativeHolding] = []
@@ -135,10 +146,27 @@ def native_holdings_snapshot_from_positions(
                 shares=shares,
             )
         )
+    pending: list[NativePendingEndowment] = []
+    for obligation_id, token_id, shares in pending_entry_endowments:
+        binding = token_bindings.get(str(token_id))
+        if binding is None:
+            continue
+        outcome, side = binding
+        pending.append(
+            NativePendingEndowment(
+                obligation_id=str(obligation_id),
+                family_key=family_key,
+                bin_id=str(getattr(outcome, "bin_id")),
+                side=side,  # type: ignore[arg-type]
+                token_id=str(token_id),
+                shares=Decimal(shares),
+            )
+        )
     return NativeHoldingsSnapshot(
         family_key=family_key,
         ledger_snapshot_id=ledger_snapshot_id,
         holdings=tuple(holdings),
+        pending_endowments=tuple(pending),
     )
 
 
