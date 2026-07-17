@@ -1583,12 +1583,38 @@ def _replacement_availability_poll_tick():
         logger.info("replacement source-clock poll current: %s", report)
         return report
     logger.info("replacement source-clock update detected; running download path: %s", source_clock_payload)
+    partial_reseed_published = False
+
+    def _publish_first_committed_source(
+        source: str,
+        task_report: object,
+    ) -> None:
+        nonlocal partial_reseed_published
+        if partial_reseed_published:
+            return
+        report = {
+            "status": "SOURCE_CLOCK_PARTIAL_RAW_INPUTS_COMMITTED",
+            "source": source,
+            "written_row_count": (
+                task_report.get("written_row_count")
+                if isinstance(task_report, dict)
+                else None
+            ),
+        }
+        _attach_reseed_reports(report)
+        partial_reseed_published = True
+        logger.info(
+            "replacement source-clock first committed source published reseeds: %s",
+            report,
+        )
+
     report = _download_bayes_precision_fusion_source_clock_raw_inputs_if_needed(
         cfg,
         source_clock_report=source_clock_report,
         max_wall_clock_seconds=_replacement_source_clock_download_budget_seconds(
             _replacement_availability_poll_seconds()
         ),
+        on_source_commit=_publish_first_committed_source,
     )
     if report is None:
         report = {

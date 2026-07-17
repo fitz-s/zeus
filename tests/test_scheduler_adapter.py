@@ -245,11 +245,20 @@ def test_replacement_availability_fast_poll_passes_changed_source_clock_report(m
     changed_report = _Changed()
     call_order: list[str] = []
 
-    def _scoped_path(cfg, *, source_clock_report=None, max_wall_clock_seconds=None):
+    def _scoped_path(
+        cfg,
+        *,
+        source_clock_report=None,
+        max_wall_clock_seconds=None,
+        on_source_commit=None,
+    ):
         call_order.append("scoped_download")
         assert cfg["download_current_targets_enabled"] is True
         assert source_clock_report is changed_report
         assert max_wall_clock_seconds == 45.0
+        assert on_source_commit is not None
+        on_source_commit("icon_global", {"written_row_count": 1})
+        call_order.append("scoped_download_complete")
         return {
             "status": "SOURCE_CLOCK_SCOPED_BAYES_PRECISION_FUSION_EXTRA_RAW_INPUTS_DOWNLOADED",
             "updated_sources": ["icon_global"],
@@ -328,6 +337,9 @@ def test_replacement_availability_fast_poll_passes_changed_source_clock_report(m
     assert call_order == [
         "probe",
         "scoped_download",
+        "fusion_reseed",
+        "cycle_reseed",
+        "scoped_download_complete",
         "fusion_reseed",
         "cycle_reseed",
         "cursor",

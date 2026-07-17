@@ -34,6 +34,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
 from threading import Event
+from typing import Callable, Mapping
 
 from src.config import settings
 
@@ -418,6 +419,7 @@ def _download_bayes_precision_fusion_source_clock_raw_inputs_if_needed(
     *,
     source_clock_report: object,
     max_wall_clock_seconds: float | None = None,
+    on_source_commit: Callable[[str, Mapping[str, object]], None] | None = None,
 ) -> dict[str, object] | None:
     """Fast source-clock current capture for only updated sources and affected cities.
 
@@ -579,14 +581,36 @@ def _download_bayes_precision_fusion_source_clock_raw_inputs_if_needed(
             max(1, int(cfg.get("source_clock_fanout_workers") or 4)),
             8,
         )
-        tasks: list[
-            tuple[
-                str,
-                datetime,
-                list[BayesPrecisionFusionDownloadTarget],
-            ]
-        ] = []
-        for source, targets in targets_by_source.items():
+        task_type = tuple[
+            str,
+            datetime,
+            list[BayesPrecisionFusionDownloadTarget],
+        ]
+        tasks_by_source: dict[str, list[task_type]] = {}
+        source_order = tuple(
+            sorted(
+                resolved_sources,
+                key=lambda source: (
+                    min(
+                        (
+                            held_priority.get(
+                                (
+                                    row.city,
+                                    row.target_date,
+                                    row.temperature_metric,
+                                ),
+                                2,
+                            )
+                            for row in target_keys_by_source[source]
+                        ),
+                        default=3,
+                    ),
+                    resolved_sources.index(source),
+                ),
+            )
+        )
+        for source in source_order:
+            targets = targets_by_source[source]
             if not targets:
                 continue
             grouped_targets: list[list[BayesPrecisionFusionDownloadTarget]] = []
@@ -600,13 +624,33 @@ def _download_bayes_precision_fusion_source_clock_raw_inputs_if_needed(
                 else:
                     grouped_targets[index].append(target)
             source_workers = min(max_workers, len(grouped_targets))
-            for offset in range(source_workers):
-                chunk = [
-                    target
-                    for group in grouped_targets[offset::source_workers]
-                    for target in group
-                ]
-                tasks.append((source, source_cycles[source], chunk))
+            tasks_by_source[source] = [
+                (
+                    source,
+                    source_cycles[source],
+                    [
+                        target
+                        for group in grouped_targets[offset::source_workers]
+                        for target in group
+                    ],
+                )
+                for offset in range(source_workers)
+            ]
+
+        tasks: list[
+            tuple[
+                str,
+                datetime,
+                list[BayesPrecisionFusionDownloadTarget],
+            ]
+        ] = []
+        for offset in range(
+            max((len(source_tasks) for source_tasks in tasks_by_source.values()), default=0)
+        ):
+            for source in source_order:
+                source_tasks = tasks_by_source.get(source, ())
+                if offset < len(source_tasks):
+                    tasks.append(source_tasks[offset])
 
         worker_count = min(max_workers, len(tasks))
         deadline = (
@@ -661,9 +705,32 @@ def _download_bayes_precision_fusion_source_clock_raw_inputs_if_needed(
             source: [] for source in updated_sources
         }
         fanout_errors: list[str] = []
+        source_commit_notifications = 0
+        source_commit_notification_errors: list[str] = []
+
+        def _notify_source_commit(
+            source: str,
+            task_report: Mapping[str, object],
+        ) -> None:
+            nonlocal source_commit_notifications
+            if (
+                on_source_commit is None
+                or int(task_report.get("written_row_count") or 0) <= 0
+            ):
+                return
+            try:
+                on_source_commit(source, task_report)
+            except Exception as exc:  # noqa: BLE001 - final catch-up remains authoritative
+                source_commit_notification_errors.append(
+                    f"{source}:{type(exc).__name__}: {str(exc)[:220]}"
+                )
+            else:
+                source_commit_notifications += 1
+
         if len(tasks) == 1:
             source, task_report = _download_task(*tasks[0])
             reports_by_source[source].append(task_report)
+            _notify_source_commit(source, task_report)
         else:
             with ThreadPoolExecutor(
                 max_workers=worker_count,
@@ -678,6 +745,7 @@ def _download_bayes_precision_fusion_source_clock_raw_inputs_if_needed(
                     try:
                         result_source, task_report = future.result()
                         reports_by_source[result_source].append(task_report)
+                        _notify_source_commit(result_source, task_report)
                     except Exception as exc:  # noqa: BLE001 - preserve successful sources
                         fanout_errors.append(
                             f"{source}:{type(exc).__name__}: {str(exc)[:220]}"
@@ -847,6 +915,10 @@ def _download_bayes_precision_fusion_source_clock_raw_inputs_if_needed(
             ),
             "fanout_workers": worker_count,
             "fanout_errors": tuple(fanout_errors),
+            "source_commit_notifications": source_commit_notifications,
+            "source_commit_notification_errors": tuple(
+                source_commit_notification_errors
+            ),
             "updated_sources": updated_sources,
             "affected_cities": affected_cities,
         }
