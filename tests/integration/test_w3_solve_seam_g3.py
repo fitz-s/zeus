@@ -2865,8 +2865,27 @@ def test_live_adapter_routes_each_global_truth_to_its_owner(monkeypatch, event_f
     assert policy(reduce_only) is None
     metadata_calls = []
     bind_calls = []
-    metadata_key = ("condition", "yes-token")
-    metadata = {"condition_id": "condition", "active": True}
+    metadata_keys = (
+        ("condition", "yes-token"),
+        ("condition", "no-token"),
+    )
+    metadata = {
+        "condition_id": "condition",
+        "active": True,
+        "_global_current_gamma": True,
+    }
+    refresh_hwm_calls = []
+
+    def metadata_refresh_keys(
+        _trade_conn,
+        _probabilities,
+        *,
+        checked_at,
+        refreshed_at_by_family=None,
+    ):
+        assert checked_at.tzinfo is not None
+        refresh_hwm_calls.append(dict(refreshed_at_by_family or {}))
+        return frozenset()
 
     def fake_bind(
         _forecast_conn,
@@ -2877,7 +2896,8 @@ def test_live_adapter_routes_each_global_truth_to_its_owner(monkeypatch, event_f
     ):
         bind_calls.append(metadata_sink is not None)
         if metadata_sink is not None:
-            metadata_sink[metadata_key] = metadata
+            for metadata_key in metadata_keys:
+                metadata_sink[metadata_key] = metadata
         return dict(probability_witnesses)
 
     def fake_capture(_trade_conn, *, metadata_overrides, **_):
@@ -2899,17 +2919,36 @@ def test_live_adapter_routes_each_global_truth_to_its_owner(monkeypatch, event_f
 
     monkeypatch.setattr(universe, "bind_current_global_probability_tokens", fake_bind)
     monkeypatch.setattr(universe, "capture_current_global_book_epoch", fake_capture)
+    monkeypatch.setattr(
+        era,
+        "_global_book_metadata_refresh_family_keys",
+        metadata_refresh_keys,
+    )
     monkeypatch.setattr(polymarket_client, "PolymarketClient", FakeClient)
     provider = captured["current_book_epoch_provider"]
-    probabilities = {"family": object()}
+    probabilities = {
+        "family": SimpleNamespace(
+            family_key="family",
+            bindings=(
+                SimpleNamespace(
+                    condition_id="condition",
+                    yes_token_id="yes-token",
+                    no_token_id="no-token",
+                ),
+            ),
+        )
+    }
     provider(probabilities, _dt.datetime.now(_dt.timezone.utc))
     provider(probabilities, _dt.datetime.now(_dt.timezone.utc))
 
     assert metadata_calls == [
-        {metadata_key: metadata},
-        {metadata_key: metadata},
+        {metadata_key: metadata for metadata_key in metadata_keys},
+        {metadata_key: metadata for metadata_key in metadata_keys},
     ]
     assert bind_calls == [True, True]
+    assert refresh_hwm_calls[0] == {}
+    assert set(refresh_hwm_calls[1]) == {"family"}
+    assert refresh_hwm_calls[1]["family"].tzinfo is not None
 
     urgent_revision["value"] = (7, 8, 9)
     urgent_reason["value"] = "market_price_advanced"
@@ -6578,6 +6617,9 @@ def test_global_book_metadata_refresh_tracks_unresolved_invalidation():
         """
     )
     binding = probability.bindings[0]
+    invalidated_at = _dt.datetime(
+        2026, 6, 13, 7, 59, 30, tzinfo=_dt.timezone.utc
+    )
     conn.execute(
         """
         INSERT INTO executable_market_snapshot_invalidations VALUES (
@@ -6587,8 +6629,8 @@ def test_global_book_metadata_refresh_tracks_unresolved_invalidation():
         (
             binding.condition_id,
             binding.yes_token_id,
-            "2026-06-13T07:59:30+00:00",
-            "2026-06-13T07:59:30+00:00",
+            invalidated_at.isoformat(),
+            invalidated_at.isoformat(),
         ),
     )
     checked_at = _dt.datetime(2026, 6, 13, 8, 0, tzinfo=_dt.timezone.utc)
@@ -6599,7 +6641,24 @@ def test_global_book_metadata_refresh_tracks_unresolved_invalidation():
         probabilities,
         checked_at=checked_at,
     ) == {probability.family_key}
+    assert era._global_book_metadata_refresh_family_keys(
+        conn,
+        probabilities,
+        checked_at=checked_at,
+        refreshed_at_by_family={
+            probability.family_key: invalidated_at - _dt.timedelta(seconds=1)
+        },
+    ) == {probability.family_key}
+    assert era._global_book_metadata_refresh_family_keys(
+        conn,
+        probabilities,
+        checked_at=checked_at,
+        refreshed_at_by_family={
+            probability.family_key: invalidated_at
+        },
+    ) == frozenset()
 
+    later_invalidation = checked_at + _dt.timedelta(seconds=1)
     conn.execute(
         """
         UPDATE executable_market_snapshots
@@ -6611,6 +6670,28 @@ def test_global_book_metadata_refresh_tracks_unresolved_invalidation():
         probabilities,
         checked_at=checked_at,
     ) == frozenset()
+
+    conn.execute(
+        """
+        INSERT INTO executable_market_snapshot_invalidations VALUES (
+            'market-resolved', ?, ?, 'market_resolved', ?, ?
+        )
+        """,
+        (
+            binding.condition_id,
+            binding.yes_token_id,
+            later_invalidation.isoformat(),
+            later_invalidation.isoformat(),
+        ),
+    )
+    assert era._global_book_metadata_refresh_family_keys(
+        conn,
+        probabilities,
+        checked_at=checked_at + _dt.timedelta(seconds=2),
+        refreshed_at_by_family={
+            probability.family_key: checked_at,
+        },
+    ) == {probability.family_key}
 
 
 def test_current_global_book_epoch_consumes_prefetched_books_at_original_cut():

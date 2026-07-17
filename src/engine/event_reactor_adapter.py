@@ -900,6 +900,7 @@ def _global_book_metadata_refresh_family_keys(
     probabilities: Mapping[str, object],
     *,
     checked_at: datetime,
+    refreshed_at_by_family: Mapping[str, datetime] | None = None,
 ) -> frozenset[str]:
     """Return families whose last local metadata was explicitly invalidated."""
 
@@ -931,17 +932,41 @@ def _global_book_metadata_refresh_family_keys(
                 if token_id:
                     families_by_token.setdefault(token_id, set()).add(family_key)
 
-    candidates: set[str] = set()
-    for raw_condition, raw_token in trade_conn.execute(
+    invalidated_at_by_family: dict[str, datetime | None] = {}
+
+    def record_invalidation(family_key: str, invalidated_at: datetime | None) -> None:
+        previous = invalidated_at_by_family.get(family_key)
+        if family_key in invalidated_at_by_family and previous is None:
+            return
+        if invalidated_at is None or previous is None or invalidated_at > previous:
+            invalidated_at_by_family[family_key] = invalidated_at
+
+    for raw_condition, raw_token, raw_invalidated_at in trade_conn.execute(
         """
-        SELECT condition_id, token_id
+        SELECT condition_id, token_id, invalidated_at
           FROM executable_market_snapshot_invalidations
          WHERE invalidated_at <= ?
         """,
         (checked_at.astimezone(timezone.utc).isoformat(),),
     ):
-        candidates.update(families_by_condition.get(str(raw_condition or "").strip(), ()))
-        candidates.update(families_by_token.get(str(raw_token or "").strip(), ()))
+        try:
+            invalidated_at = datetime.fromisoformat(
+                str(raw_invalidated_at).replace("Z", "+00:00")
+            )
+            if invalidated_at.tzinfo is None:
+                invalidated_at = invalidated_at.replace(tzinfo=timezone.utc)
+            invalidated_at = invalidated_at.astimezone(timezone.utc)
+        except (TypeError, ValueError):
+            invalidated_at = None
+        affected = set(
+            families_by_condition.get(str(raw_condition or "").strip(), ())
+        )
+        affected.update(
+            families_by_token.get(str(raw_token or "").strip(), ())
+        )
+        for family_key in affected:
+            record_invalidation(family_key, invalidated_at)
+    candidates = set(invalidated_at_by_family)
     if not candidates:
         return frozenset()
 
@@ -963,7 +988,19 @@ def _global_book_metadata_refresh_family_keys(
             invalidated.update(families_by_condition.get(condition_id, ()))
     for condition_id in candidate_conditions.difference(seen_conditions):
         invalidated.update(families_by_condition.get(condition_id, ()))
-    return frozenset(invalidated)
+    refreshed = refreshed_at_by_family or {}
+    unresolved: set[str] = set()
+    for family_key in invalidated:
+        invalidated_at = invalidated_at_by_family.get(family_key)
+        refreshed_at = refreshed.get(family_key)
+        if (
+            invalidated_at is None
+            or refreshed_at is None
+            or refreshed_at.tzinfo is None
+            or refreshed_at.astimezone(timezone.utc) < invalidated_at
+        ):
+            unresolved.add(family_key)
+    return frozenset(unresolved)
 
 
 def _global_book_receipt_token_pairs(
@@ -7001,6 +7038,7 @@ def event_bound_live_adapter_from_trade_conn(
         book_metadata_by_key: dict[
             tuple[str, str], Mapping[str, object]
         ] = {}
+        book_metadata_refreshed_at_by_family: dict[str, datetime] = {}
 
         def _current_book_epoch(probabilities, _at):
             from src.contracts.executable_market_snapshot import (
@@ -7035,6 +7073,7 @@ def event_bound_live_adapter_from_trade_conn(
             def _bind(probability_slice, *, mode, metadata_sink=None):
                 gamma_batch_requests = 0
                 gamma_event_requests = 0
+                refresh_started_at = datetime.now(UTC)
 
                 def _gamma_markets(condition_ids):
                     nonlocal gamma_batch_requests
@@ -7094,6 +7133,25 @@ def event_bound_live_adapter_from_trade_conn(
                 )
                 if metadata_sink:
                     book_metadata_by_key.update(metadata_sink)
+                    for family_key, witness in bound_probabilities.items():
+                        rows = [
+                            metadata_sink.get((binding.condition_id, token_id))
+                            for binding in tuple(
+                                getattr(witness, "bindings", ()) or ()
+                            )
+                            for token_id in (
+                                str(getattr(binding, "yes_token_id", "") or ""),
+                                str(getattr(binding, "no_token_id", "") or ""),
+                            )
+                        ]
+                        if rows and all(
+                            isinstance(row, Mapping)
+                            and row.get("_global_current_gamma") is True
+                            for row in rows
+                        ):
+                            book_metadata_refreshed_at_by_family[
+                                str(family_key)
+                            ] = refresh_started_at
                 return bound_probabilities
 
             def _prefetch_books(
@@ -7283,6 +7341,9 @@ def event_bound_live_adapter_from_trade_conn(
                     trade_conn,
                     probabilities,
                     checked_at=cache_checked_at,
+                    refreshed_at_by_family=(
+                        book_metadata_refreshed_at_by_family
+                    ),
                 )
             )
             effective_book_refresh_family_keys = (
