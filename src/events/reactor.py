@@ -9493,29 +9493,27 @@ def _edli_apply_unadmitted_redecision_expiry(
     now = str(decision_time)
     changed = 0
     for reason, generations in expire_by_reason.items():
-        for start in range(0, len(generations), 250):
-            chunk = generations[start : start + 250]
-            generation_predicates = " OR ".join(
-                "(event_id = ? AND processing_status = ? AND attempt_count = ? "
-                "AND claimed_at IS ? AND updated_at = ?)"
-                for _ in chunk
-            )
-            generation_params = tuple(
-                value for generation in chunk for value in generation
-            )
-            cur = world_conn.execute(
-                f"""
+        before = world_conn.total_changes
+        world_conn.executemany(
+            """
                 UPDATE opportunity_event_processing
                    SET processing_status = 'expired',
                        processed_at = ?,
                        updated_at = ?,
                        last_error = ?
                  WHERE consumer_name = 'edli_reactor_v1'
-                   AND ({generation_predicates})
-                """,
-                (now, now, reason, *generation_params),
-            )
-            changed += int(cur.rowcount or 0)
+                   AND event_id = ?
+                   AND processing_status = ?
+                   AND attempt_count = ?
+                   AND claimed_at IS ?
+                   AND updated_at = ?
+            """,
+            (
+                (now, now, reason, *generation)
+                for generation in generations
+            ),
+        )
+        changed += int(world_conn.total_changes - before)
     return changed
 
 
