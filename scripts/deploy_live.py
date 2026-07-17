@@ -233,7 +233,10 @@ def unpushed_state(branch: str) -> tuple[bool, str]:
     a checkout that was behind the actual remote). A failed fetch blocks.
     """
     local = _git("rev-parse", "HEAD").stdout.strip()
-    fetch_res = _git("fetch", "--quiet", "origin", branch)
+    try:
+        fetch_res = _git("fetch", "--quiet", "origin", branch)
+    except subprocess.TimeoutExpired:
+        return True, f"fetch origin/{branch} timed out (fail-closed)"
     if fetch_res.returncode != 0:
         detail = (fetch_res.stderr or fetch_res.stdout).strip().splitlines()
         return True, f"fetch origin/{branch} failed (fail-closed): {detail[-1] if detail else 'unknown'}"

@@ -475,6 +475,26 @@ def test_deploy_live_head_sha_reads_single_revision(monkeypatch):
     ]
 
 
+def test_deploy_live_fetch_timeout_is_an_unpushed_blocker(monkeypatch):
+    import subprocess
+
+    dl = _load("deploy_live_fetch_timeout", "deploy_live.py")
+
+    def _fake_git(*args, repo=None):  # noqa: ANN001, ARG001
+        if args == ("rev-parse", "HEAD"):
+            return subprocess.CompletedProcess(["git"], 0, "a" * 40 + "\n", "")
+        if args[:1] == ("fetch",):
+            raise subprocess.TimeoutExpired(["git", *args], timeout=20.0)
+        raise AssertionError(args)
+
+    monkeypatch.setattr(dl, "_git", _fake_git)
+
+    unpushed, detail = dl.unpushed_state("main")
+
+    assert unpushed is True
+    assert detail == "fetch origin/main timed out (fail-closed)"
+
+
 def test_deploy_live_status_runs(capsys):
     """status runs against this checkout and prints structured output.
 
