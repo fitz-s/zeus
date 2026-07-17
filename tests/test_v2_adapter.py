@@ -959,6 +959,38 @@ def test_collateral_payload_rechecks_chain_when_clob_reports_zero_allowance(tmp_
     assert len(rpc_calls) == 2
 
 
+def test_collateral_payload_chain_truth_overrides_stale_nonzero_clob_allowance(tmp_path):
+    from src.venue.polymarket_v2_adapter import PolymarketV2Adapter
+
+    fake = FakeBalanceAllowanceClient(
+        response={"balance": "100000000", "allowance": "1000000"}
+    )
+    rpc_calls = []
+
+    def rpc_call(_url, method, params):
+        rpc_calls.append((method, params))
+        return hex((2**256) - 1)
+
+    adapter = PolymarketV2Adapter(
+        host="https://clob.polymarket.com",
+        funder_address="0x1111111111111111111111111111111111111111",
+        signer_key="test-key",
+        chain_id=137,
+        signature_type=2,
+        polygon_rpc_url="https://rpc.test",
+        rpc_call=rpc_call,
+        q1_egress_evidence_path=tmp_path / "unused.txt",
+        client_factory=lambda **kwargs: fake,
+    )
+
+    payload = adapter.get_collateral_payload()
+
+    assert payload["pusd_allowance_micro"] == (2**256) - 1
+    assert payload["pusd_allowance_source"] == "chain_erc20_allowance"
+    assert payload["authority_tier"] == "CHAIN"
+    assert len(rpc_calls) == 2
+
+
 def test_collateral_payload_degrades_when_clob_zero_and_chain_unavailable(tmp_path):
     from src.venue.polymarket_v2_adapter import PolymarketV2Adapter
 

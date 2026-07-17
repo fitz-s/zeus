@@ -1224,22 +1224,25 @@ class PolymarketV2Adapter:
         allowance_int = _micro_int_or_none(pusd_allowance_raw)
         authority_tier = "CHAIN"
         allowance_source = "clob_balance_allowance"
-        if allowance_int is None or allowance_int == 0:
-            chain_allowance = (
-                self._chain_collateral_allowance_micro()
-                if allow_chain_allowance_fallback
-                else None
-            )
-            if chain_allowance is not None:
-                pusd_allowance_raw = chain_allowance
-                allowance_source = "chain_erc20_allowance"
-            elif allowance_int is None:
-                pusd_allowance_raw = None
-                allowance_source = "missing"
-            else:
-                pusd_allowance_raw = allowance_int
-                authority_tier = "DEGRADED"
-                allowance_source = "chain_erc20_unavailable_clob_zero"
+        chain_allowance = (
+            self._chain_collateral_allowance_micro()
+            if allow_chain_allowance_fallback
+            else None
+        )
+        if chain_allowance is not None:
+            # The CLOB balance/allowance response is a cache and can briefly
+            # retain the pre-fill remainder after a successful BUY. Direct
+            # ERC20 allowance across every venue spender is current executable
+            # truth, including when the stale cache is non-zero.
+            pusd_allowance_raw = chain_allowance
+            allowance_source = "chain_erc20_allowance"
+        elif allowance_int is None:
+            pusd_allowance_raw = None
+            allowance_source = "missing"
+        elif allowance_int == 0:
+            pusd_allowance_raw = allowance_int
+            authority_tier = "DEGRADED"
+            allowance_source = "chain_erc20_unavailable_clob_zero"
 
         return {
             "pusd_balance_micro": raw.get("balance", 0),
