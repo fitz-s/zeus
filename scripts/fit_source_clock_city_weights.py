@@ -326,8 +326,10 @@ def city_metric_entry(
     frozen_errs: dict[str, float] = {}
     for target_date, settle_c in settle_by_date.items():
         vals = obs_by_date.get(target_date, {})
+        # W1 (fd7e7b48c) made renormalize-over-present the sole behavior; the old
+        # allow_incomplete=True semantics are now the default contract.
         center = fixed_weight_center_from_values(
-            city=city, values_c_by_source=vals, path=frozen_csv_path, allow_incomplete=True
+            city=city, values_c_by_source=vals, path=frozen_csv_path
         )
         if center is not None:
             frozen_errs[target_date] = abs(center.mu_c - settle_c)
