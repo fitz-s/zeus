@@ -101,6 +101,45 @@ deployment-SHA freshness rule.
 The older walk-forward residual width remains diagnostic for non-source-clock
 carriers; it is not a fallback into the live source-clock probability regime.
 
+**2026-07-17 addendum — anomaly transport for a stale-but-coherent ENS shape.**
+Measured cost of the pre-addendum same-cycle-only rule: new scopes waited a mean
+14.6h (p50 6.8h) for the slow ENS-baseline leg while every other instrument was
+already fresh, costing 0.24–0.41°C of avoidable center error at scope-open
+(docs/evidence/upstream_physical_2026_07_17/consult_freshness_decoupling_verdict.txt
+§P2-B; docs/operations/current/plans/upstream_data_physical_2026-07-17.md). Reusing
+an older but internally coherent ENS cycle is licensed ONLY as a location-shape
+transport model, never as same-instant disagreement evidence:
+
+```
+shape_lag_hours = carrier_cycle_time - ens_cycle_time
+translation_applied = shape_lag_hours > 0
+
+if translation_applied:
+    X'_j        = μ* + (X_j - mean(X))     # anomalies recentered on the fresh center
+    δ_ens       = 0                         # operational: zeroed, never folded into σ_pred
+    δ_ens_raw   = μ* - mean(X)              # provenance-only (research / regime-discordance)
+    σ_pred      = sqrt(σ_within² + σ_between²)   # no δ_ens² term -- avoids double-counting μ*
+else:
+    # shape_lag_hours <= 0 (same ENS cycle as the carrier): §1d above, unchanged.
+```
+
+Translation is a pure shift and preserves `σ_within` exactly. The translated
+members `X'_j` — not the raw pre-translation members — are the operative sample
+for settlement-preimage hit counting and its downstream Clopper-Pearson tail.
+`ens_center_delta_raw_c` is carried in `current_evidence_shape` provenance for
+research only; it must never re-enter `σ_pred`. A translated row is stamped
+`semantics_revision = "ensemble_anomaly_transport_v1"` (module
+`src.data.replacement_forecast_cycle_policy`, constant
+`ENSEMBLE_ANOMALY_TRANSPORT_SEMANTICS_REVISION`), distinct from the same-cycle
+`"ensemble_center_disagreement_v1"` above — so the existing revision-mismatch
+convergence machinery (`current_evidence_shape_semantics_mismatch`) applies only
+to stale-shape rows, never a universe-wide replay. The 30h source-cycle
+staleness bound (§ above, `replacement_source_cycle_max_age_hours`) remains the
+outer catastrophic-guard on how old the selected ENS cycle may be; this
+addendum does not widen it, and carries no sigma age-inflation term of its own
+(a walk-forward-fitted `γ_g · age/6` term, per the consult's EMOS-like scale, is
+deferred to a separate calibration slice).
+
 ### 1e. q construction — fused-N-direct (commit 8541bc93cd)
 
 Flag `replacement_0_1_fused_q_shape_enabled = true`. Fail-closed to soft-anchor q on key-set mismatch or any construction error.

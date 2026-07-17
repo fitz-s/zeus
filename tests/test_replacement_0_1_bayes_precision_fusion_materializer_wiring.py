@@ -16,7 +16,9 @@
 from __future__ import annotations
 
 import json
+import math
 import sqlite3
+import statistics
 from datetime import date, datetime, timezone
 
 import pytest
@@ -28,6 +30,10 @@ from src.data.openmeteo_ecmwf_ifs9_anchor import OpenMeteoIfs9LocalDayAnchor
 from src.data.openmeteo_ecmwf_ifs9_precision_guard import (
     OpenMeteoIfs9PrecisionMetadata,
     evaluate_openmeteo_ecmwf_ifs9_precision_guard,
+)
+from src.data.replacement_forecast_cycle_policy import (
+    CURRENT_EVIDENCE_SEMANTICS_REVISION,
+    ENSEMBLE_ANOMALY_TRANSPORT_SEMANTICS_REVISION,
 )
 from src.data.replacement_forecast_materializer import ReplacementForecastMaterializeRequest
 from src.data.bayes_precision_fusion_capture import ModelHistory
@@ -404,6 +410,144 @@ def test_current_evidence_shape_fails_closed_when_finite_members_below_floor() -
     )
 
     assert shape is None
+
+
+# ---------------------------------------------------------------------------
+# P2-B anomaly transport (2026-07-17): stale ENS shape reuse is licensed only as
+# a location-shape transport -- see docs/evidence/upstream_physical_2026_07_17/
+# consult_freshness_decoupling_verdict.txt and authority doc
+# docs/authority/replacement_final_form_2026_06_09.md §1d.
+# ---------------------------------------------------------------------------
+
+
+def test_current_evidence_shape_translates_members_when_ens_cycle_stale() -> None:
+    """A 12h-stale ENS cycle (shape_lag_hours=12 > 0) is translated onto the fresh
+    center: members recenter exactly, the operational delta is zeroed, the raw
+    pre-translation delta survives as provenance-only, and preimage hits are
+    recomputed from the TRANSLATED members -- the operative sample -- not the raw
+    stale ones."""
+    from datetime import timedelta
+    from src.strategy.ecmwf_aifs_sampled_2t_probabilities import AifsTemperatureBin
+
+    conn = _conn()
+    req = _request()
+    carrier_cycle = mod._to_utc(req.source_cycle_time, field_name="source_cycle_time")
+    stale_cycle = carrier_cycle - timedelta(hours=12)
+    _seed_current_ens_at_cycle(conn, request=req, ens_cycle_time=stale_cycle)
+
+    shape = mod._read_current_evidence_shape(
+        conn,
+        req,
+        metric="high",
+        provider_values_c={"ecmwf_ifs": 24.0, "icon_global": 25.0},
+        provider_weights={"ecmwf_ifs": 0.5, "icon_global": 0.5},
+        center_c=24.5,
+    )
+
+    assert shape is not None
+    assert shape.translation_applied is True
+    assert shape.shape_lag_hours == pytest.approx(12.0)
+    assert shape.semantics_revision == ENSEMBLE_ANOMALY_TRANSPORT_SEMANTICS_REVISION
+    # The seeded raw members ([24.0 + (index-25)*0.02 for index in range(51)]) average
+    # to 24.0 exactly (symmetric offsets); translation recenters them onto the fresh
+    # 24.5 center exactly, so the operational delta is zeroed and the raw delta
+    # (mu_t - Xbar_e = 24.5 - 24.0) survives only in the provenance-only field.
+    assert shape.ensemble_member_mean_c == pytest.approx(24.5)
+    assert shape.ensemble_center_delta_c == pytest.approx(0.0)
+    assert shape.ens_center_delta_raw_c == pytest.approx(0.5)
+    # Translation is a pure shift by the raw delta -- verify on the extreme members.
+    assert shape.members_c[0] == pytest.approx(24.0 + (0 - 25) * 0.02 + 0.5)
+    assert shape.members_c[-1] == pytest.approx(24.0 + (50 - 25) * 0.02 + 0.5)
+
+    local_bins = (
+        AifsTemperatureBin("below", upper_c=24.0),
+        AifsTemperatureBin("above", lower_c=24.0),
+    )
+    raw_members = tuple(24.0 + (index - 25) * 0.02 for index in range(51))
+    raw_hits = mod._current_evidence_member_hit_counts(
+        bins=local_bins, half_step=0.0, rounding_rule="wmo_half_up", members_c=raw_members,
+    )
+    translated_hits = mod._current_evidence_member_hit_counts(
+        bins=local_bins, half_step=0.0, rounding_rule="wmo_half_up", members_c=shape.members_c,
+    )
+    # Raw stale cloud (centered 24.0) splits roughly evenly across the 24.0 boundary;
+    # the translated cloud (centered 24.5) sits entirely above it. Recomputing from
+    # the translated members -- not the raw ones -- is what produces this shift.
+    assert raw_hits == {"below": 25, "above": 26}
+    assert translated_hits == {"below": 0, "above": 51}
+
+
+def test_current_evidence_shape_sigma_drops_delta_term_when_translated() -> None:
+    """sigma_pred for the stale-shape (translated) case = sqrt(within^2 + between^2) --
+    no delta term. Carrying the raw center disagreement forward as squared uncertainty
+    would double-count the new center (consult P2-B)."""
+    from datetime import timedelta
+
+    conn = _conn()
+    req = _request()
+    carrier_cycle = mod._to_utc(req.source_cycle_time, field_name="source_cycle_time")
+    stale_cycle = carrier_cycle - timedelta(hours=12)
+    _seed_current_ens_at_cycle(conn, request=req, ens_cycle_time=stale_cycle)
+
+    shape = mod._read_current_evidence_shape(
+        conn,
+        req,
+        metric="high",
+        provider_values_c={"ecmwf_ifs": 24.0, "icon_global": 25.0},
+        provider_weights={"ecmwf_ifs": 0.5, "icon_global": 0.5},
+        center_c=24.5,
+    )
+
+    assert shape is not None
+    assert shape.translation_applied is True
+    assert shape.ensemble_center_delta_c == 0.0
+    assert shape.predictive_sigma_c == pytest.approx(
+        math.hypot(shape.ensemble_within_sigma_c, shape.provider_between_sigma_c)
+    )
+
+
+def test_current_evidence_shape_same_cycle_byte_identical_to_pre_transport() -> None:
+    """Regression pin: when the ENS cycle equals the carrier cycle (shape_lag_hours=0),
+    translation must NOT apply and every numeric field stays byte-identical to the
+    pre-anomaly-transport computation, whether the caller passes the legacy signature
+    (no carrier_cycle_time, e.g. tests/test_replacement_fused_q_shape.py) or the new
+    same-cycle carrier_cycle_time explicitly."""
+
+    raw = tuple(range(-25, 26))
+    scale = 0.32530930629305355 / statistics.pstdev(raw)
+    members = tuple(9.49229000315949 + value * scale for value in raw)
+    kwargs = dict(
+        snapshot_id=1202928,
+        source_cycle_time="2026-07-10T12:00:00+00:00",
+        source_available_at="2026-07-10T20:25:16.964968+00:00",
+        members_c=members,
+        provider_values_c={
+            "ecmwf_ifs": 10.0,
+            "icon_global": 10.9,
+            "ukmo_global": 11.1,
+        },
+        provider_weights={
+            "ecmwf_ifs": 0.052,
+            "icon_global": 0.112,
+            "ukmo_global": 0.836,
+        },
+        center_c=11.0204,
+    )
+
+    legacy = mod._current_evidence_shape_from_values(**kwargs)
+    same_cycle = mod._current_evidence_shape_from_values(
+        carrier_cycle_time="2026-07-10T12:00:00+00:00", **kwargs
+    )
+
+    for shape in (legacy, same_cycle):
+        assert shape.translation_applied is False
+        assert shape.shape_lag_hours == pytest.approx(0.0)
+        assert shape.semantics_revision == CURRENT_EVIDENCE_SEMANTICS_REVISION
+        assert shape.ensemble_within_sigma_c == pytest.approx(0.32530930629305355)
+        assert shape.provider_between_sigma_c == pytest.approx(0.24711098721020064)
+        assert shape.ensemble_member_mean_c == pytest.approx(9.49229000315949)
+        assert shape.ensemble_center_delta_c == pytest.approx(-1.5281099968405112)
+        assert shape.predictive_sigma_c == pytest.approx(1.5817743667175717)
 
 
 def _enable_flag(monkeypatch):

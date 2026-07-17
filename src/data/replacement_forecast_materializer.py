@@ -32,6 +32,7 @@ from src.data.forecast_target_contract import compute_target_local_day_window_ut
 from src.data.latency_metrics import emit_materialization_latency
 from src.data.replacement_forecast_cycle_policy import (
     CURRENT_EVIDENCE_SEMANTICS_REVISION,
+    ENSEMBLE_ANOMALY_TRANSPORT_SEMANTICS_REVISION,
     TRADEABLE_GRADE_QLCB_BASIS,
     classify_cycle_phase,
     cycle_age_exceeds_bound,
@@ -1208,6 +1209,14 @@ class _CurrentEvidenceShape:
     predictive_sigma_c: float
     center_sigma_c: float
     shape_hash: str
+    # Anomaly transport provenance (P2-B, 2026-07-17): shape_lag_hours is
+    # carrier_cycle_time - source_cycle_time in hours; translation_applied is
+    # true only when shape_lag_hours > 0 (ENS cycle older than the carrier).
+    # ens_center_delta_raw_c is the PRE-translation mu_t - member_mean, kept for
+    # research/regime-discordance only -- it is NEVER folded into sigma.
+    shape_lag_hours: float
+    translation_applied: bool
+    ens_center_delta_raw_c: float
 
     def as_payload(self) -> dict[str, object]:
         payload = asdict(self)
@@ -1224,6 +1233,7 @@ def _current_evidence_shape_from_values(
     provider_values_c: Mapping[str, float],
     provider_weights: Mapping[str, float],
     center_c: float,
+    carrier_cycle_time: str | datetime | None = None,
 ) -> _CurrentEvidenceShape:
     """Compose current ensemble and provider disagreement without a fitted floor.
 
@@ -1233,10 +1243,23 @@ def _current_evidence_shape_from_values(
     measures ENS/provider-center disagreement, and simultaneous provider
     centers measure between-model uncertainty. Independent components add in
     variance.
+
+    ``carrier_cycle_time`` (P2-B anomaly transport, 2026-07-17): when supplied
+    and newer than ``source_cycle_time`` (shape_lag_hours > 0), the ENS cycle
+    is being reused stale and is licensed ONLY as a location-shape transport
+    model (consult docs/evidence/upstream_physical_2026_07_17/
+    consult_freshness_decoupling_verdict.txt P2-B): members are translated onto
+    the fresh center (anomalies from the ONE coherent cycle, recentered), and
+    the operational ensemble_center_delta is zeroed rather than folded into
+    sigma -- carrying the raw center disagreement forward as squared
+    uncertainty would double-count the new center. The pre-translation delta
+    is kept as provenance-only ``ens_center_delta_raw_c``. Omitting
+    ``carrier_cycle_time`` (legacy call sites) or passing the same cycle as
+    ``source_cycle_time`` leaves today's same-cycle semantics untouched.
     """
 
-    members = tuple(float(value) for value in members_c)
-    if len(members) < 20 or any(not math.isfinite(value) for value in members):
+    raw_members = tuple(float(value) for value in members_c)
+    if len(raw_members) < 20 or any(not math.isfinite(value) for value in raw_members):
         raise ValueError("current ensemble requires at least 20 finite members")
     center = float(center_c)
     if not math.isfinite(center):
@@ -1257,8 +1280,31 @@ def _current_evidence_shape_from_values(
         (model, value, weight / weight_total) for model, value, weight in weighted
     )
 
-    member_mean = sum(members) / len(members)
-    ensemble_center_delta = member_mean - center
+    raw_member_mean = sum(raw_members) / len(raw_members)
+    # Consult D_t = mu_t - Xbar_e: provenance-only, never operational.
+    ens_center_delta_raw = center - raw_member_mean
+
+    shape_lag_hours = 0.0
+    if carrier_cycle_time is not None:
+        carrier_dt = _to_utc(carrier_cycle_time, field_name="carrier_cycle_time")
+        source_dt = _to_utc(source_cycle_time, field_name="source_cycle_time")
+        shape_lag_hours = (carrier_dt - source_dt).total_seconds() / 3600.0
+    translation_applied = shape_lag_hours > 0.0
+
+    if translation_applied:
+        # X'_j = center_c + (member_j - member_mean): anomalies from the one
+        # coherent selected cycle, recentered on the fused center. This
+        # preserves within-spread exactly (a pure shift), and these translated
+        # values -- not the raw members -- are the operative sample for
+        # downstream finite-evidence preimage hit counting.
+        members = tuple(center + (value - raw_member_mean) for value in raw_members)
+        member_mean = center
+        ensemble_center_delta = 0.0
+    else:
+        members = raw_members
+        member_mean = raw_member_mean
+        ensemble_center_delta = raw_member_mean - center
+
     within = math.sqrt(
         sum((value - member_mean) ** 2 for value in members) / len(members)
     )
@@ -1267,7 +1313,9 @@ def _current_evidence_shape_from_values(
     )
     # These members remain absolute settlement-bin evidence downstream.  Their
     # displacement from the served center is therefore current disagreement,
-    # not a location term that can be silently recentered out of the width.
+    # not a location term that can be silently recentered out of the width --
+    # except when shape_lag>0, where translation already recentered them and
+    # ensemble_center_delta is 0.0 (this hypot() term drops out naturally).
     sigma = math.hypot(within, between, ensemble_center_delta)
     effective_providers = 1.0 / sum(weight * weight for _, _, weight in normalized)
     center_sigma = math.hypot(
@@ -1280,8 +1328,14 @@ def _current_evidence_shape_from_values(
     if not math.isfinite(center_sigma) or center_sigma <= 0.0:
         raise ValueError("current evidence center sigma must be positive")
 
+    semantics_revision = (
+        ENSEMBLE_ANOMALY_TRANSPORT_SEMANTICS_REVISION
+        if translation_applied
+        else CURRENT_EVIDENCE_SEMANTICS_REVISION
+    )
+
     identity = {
-        "semantics_revision": CURRENT_EVIDENCE_SEMANTICS_REVISION,
+        "semantics_revision": semantics_revision,
         "snapshot_id": int(snapshot_id),
         "source_cycle_time": str(source_cycle_time),
         "source_available_at": str(source_available_at),
@@ -1298,11 +1352,14 @@ def _current_evidence_shape_from_values(
         "provider_between_sigma_c": between,
         "predictive_sigma_c": sigma,
         "center_sigma_c": center_sigma,
+        "shape_lag_hours": shape_lag_hours,
+        "translation_applied": translation_applied,
+        "ens_center_delta_raw_c": ens_center_delta_raw,
     }
     member_values_hash = str(identity["member_values_hash"])
     return _CurrentEvidenceShape(
         snapshot_id=int(snapshot_id),
-        semantics_revision=CURRENT_EVIDENCE_SEMANTICS_REVISION,
+        semantics_revision=semantics_revision,
         source_cycle_time=str(source_cycle_time),
         source_available_at=str(source_available_at),
         members_c=members,
@@ -1317,6 +1374,9 @@ def _current_evidence_shape_from_values(
         predictive_sigma_c=sigma,
         center_sigma_c=center_sigma,
         shape_hash=_json_hash(identity),
+        shape_lag_hours=shape_lag_hours,
+        translation_applied=translation_applied,
+        ens_center_delta_raw_c=ens_center_delta_raw,
     )
 
 
@@ -1403,6 +1463,7 @@ def _read_current_evidence_shape(
             provider_values_c=provider_values_c,
             provider_weights=provider_weights,
             center_c=center_c,
+            carrier_cycle_time=carrier_cycle,
         )
     except (json.JSONDecodeError, sqlite3.Error, TypeError, ValueError):
         return None

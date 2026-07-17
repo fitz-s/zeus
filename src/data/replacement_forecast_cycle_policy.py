@@ -92,6 +92,20 @@ _INTERMEDIATE_CYCLE_HOURS = frozenset()
 TRADEABLE_GRADE_QLCB_BASIS = "fused_center_bootstrap_p05"
 CURRENT_EVIDENCE_SEMANTICS_REVISION = "ensemble_center_disagreement_v1"
 
+# P2-B anomaly transport (consult docs/evidence/upstream_physical_2026_07_17/
+# consult_freshness_decoupling_verdict.txt; authority doc
+# docs/authority/replacement_final_form_2026_06_09.md §1d, dated 2026-07-17): when
+# the served ENS shape's cycle is OLDER than the fusion carrier's cycle
+# (shape_lag_hours > 0), its members are translated onto the fresh center before
+# use and the operational ensemble_center_delta is zeroed (kept raw, provenance-only,
+# as ens_center_delta_raw_c). That row's probability law differs from the same-cycle
+# disagreement semantics above, so it is stamped with ITS OWN revision string. Only
+# rows where translation_applied is true carry this value; same-cycle rows keep
+# CURRENT_EVIDENCE_SEMANTICS_REVISION -- this deliberately makes
+# current_evidence_shape_semantics_mismatch() force re-materialization convergence
+# for stale-shape rows only, never a universe-wide replay storm.
+ENSEMBLE_ANOMALY_TRANSPORT_SEMANTICS_REVISION = "ensemble_anomaly_transport_v1"
+
 
 def _current_evidence_shape(provenance: object) -> Mapping[str, object] | None:
     """Return the persisted source-clock shape when one is present."""
