@@ -2050,6 +2050,80 @@ def _edli_priority_family_token_ids(
     return seeds | set(sorted(expanded - seeds)[:remaining])
 
 
+def _edli_current_day0_priority_token_ids(
+    trade_conn,
+    forecasts_conn,
+    *,
+    checked_at: datetime | None = None,
+) -> tuple[str, ...]:
+    """Return every executable token on each configured city's current local day."""
+
+    if trade_conn is None or forecasts_conn is None:
+        return ()
+    from zoneinfo import ZoneInfo
+
+    from src.config import runtime_cities_by_name
+
+    checked = checked_at or datetime.now(timezone.utc)
+    if checked.tzinfo is None:
+        return ()
+    requested = sorted(
+        {
+            (
+                city,
+                checked.astimezone(ZoneInfo(str(config.timezone))).date().isoformat(),
+            )
+            for city, config in runtime_cities_by_name().items()
+            if str(getattr(config, "timezone", "") or "").strip()
+        }
+    )
+    if not requested:
+        return ()
+
+    conditions: set[str] = set()
+    for offset in range(0, len(requested), 200):
+        chunk = requested[offset : offset + 200]
+        values = ",".join("(?,?)" for _ in chunk)
+        rows = forecasts_conn.execute(
+            f"""
+            WITH requested(city, target_date) AS (VALUES {values})
+            SELECT DISTINCT market.condition_id
+              FROM requested
+              JOIN market_events AS market
+                ON market.city = requested.city
+               AND market.target_date = requested.target_date
+             WHERE market.temperature_metric IN ('high', 'low')
+               AND market.condition_id IS NOT NULL
+               AND TRIM(market.condition_id) != ''
+            """,
+            tuple(value for pair in chunk for value in pair),
+        ).fetchall()
+        conditions.update(str(row[0]).strip() for row in rows if row and row[0])
+    if not conditions:
+        return ()
+
+    tokens: set[str] = set()
+    ordered_conditions = sorted(conditions)
+    for offset in range(0, len(ordered_conditions), 400):
+        chunk = ordered_conditions[offset : offset + 400]
+        placeholders = ",".join("?" for _ in chunk)
+        rows = trade_conn.execute(
+            f"""
+            SELECT DISTINCT selected_outcome_token_id
+              FROM executable_market_snapshot_latest
+             WHERE condition_id IN ({placeholders})
+               AND active = 1
+               AND closed = 0
+               AND COALESCE(accepting_orders, 1) = 1
+               AND selected_outcome_token_id IS NOT NULL
+               AND TRIM(selected_outcome_token_id) != ''
+            """,
+            chunk,
+        ).fetchall()
+        tokens.update(str(row[0]).strip() for row in rows if row and row[0])
+    return tuple(sorted(tokens))
+
+
 def _edli_order_token_ids_by_feasibility_age(
     trade_conn,
     token_ids,
@@ -2245,8 +2319,9 @@ def _edli_market_channel_seed_first_token_ids(
     *,
     held_priority_token_ids: set[str],
     open_rest_priority_token_ids: set[str] | None = None,
+    day0_priority_token_ids=(),
     candidate_priority_token_ids,
-) -> set[str]:
+) -> tuple[str, ...]:
     """REST-seed tokens that must be fresh before the broad market universe.
 
     Open exposure owns the strictest freshness SLA: monitor/redecision/exit can
@@ -2262,10 +2337,17 @@ def _edli_market_channel_seed_first_token_ids(
     open_rest = {str(token or "").strip() for token in (open_rest_priority_token_ids or set())}
     open_rest.discard("")
     open_rest.discard("None")
+    day0 = {str(token or "").strip() for token in day0_priority_token_ids}
+    day0.discard("")
+    day0.discard("None")
     candidates = {str(token or "").strip() for token in candidate_priority_token_ids}
     candidates.discard("")
     candidates.discard("None")
-    return held | open_rest | candidates
+    return tuple(
+        dict.fromkeys(
+            (*sorted(held), *sorted(open_rest), *sorted(day0), *sorted(candidates))
+        )
+    )
 
 
 def _edli_schema_prefix(schema: str = "") -> str:
@@ -2924,16 +3006,29 @@ def _edli_market_channel_ingestor_cycle() -> dict | None:
             "EDLI ingestor family-priority forecast read failed (non-fatal): %s",
             exc,
         )
+    day0_priority_token_ids: tuple[str, ...] = ()
     trade_conn = get_trade_connection(write_class=None)
     try:
         held_priority_token_ids = _edli_held_position_priority_token_ids(trade_conn)
         open_rest_priority_token_ids = _edli_open_rest_priority_token_ids(trade_conn)
+        try:
+            day0_priority_token_ids = _edli_current_day0_priority_token_ids(
+                trade_conn,
+                forecasts_read,
+            )
+        except Exception as exc:  # noqa: BLE001 - broad universe remains available
+            logger.warning(
+                "EDLI ingestor Day0-priority read failed (non-fatal): %s",
+                exc,
+            )
         priority_token_ids = set(candidate_priority_token_ids)
         priority_token_ids.update(held_priority_token_ids)
         priority_token_ids.update(open_rest_priority_token_ids)
+        priority_token_ids.update(day0_priority_token_ids)
         seed_first_token_ids = _edli_market_channel_seed_first_token_ids(
             held_priority_token_ids=held_priority_token_ids,
             open_rest_priority_token_ids=open_rest_priority_token_ids,
+            day0_priority_token_ids=day0_priority_token_ids,
             candidate_priority_token_ids=candidate_priority_token_ids,
         )
         priority_token_ids = _edli_priority_family_token_ids(
@@ -2965,6 +3060,7 @@ def _edli_market_channel_ingestor_cycle() -> dict | None:
             "priority_token_ids": len(priority_token_ids),
             "held_priority_token_ids": len(held_priority_token_ids),
             "open_rest_priority_token_ids": len(open_rest_priority_token_ids),
+            "day0_priority_token_ids": len(day0_priority_token_ids),
             "seed_first_token_ids": len(seed_first_token_ids),
             "quote_cache_enabled": bool(edli_cfg.get("market_channel_quote_cache_enabled", False)),
             "fill_authority": "user_channel_or_reconcile_only",
@@ -3182,6 +3278,7 @@ def _edli_market_channel_ingestor_cycle() -> dict | None:
         "priority_token_ids": len(priority_token_ids),
         "held_priority_token_ids": len(held_priority_token_ids),
         "open_rest_priority_token_ids": len(open_rest_priority_token_ids),
+        "day0_priority_token_ids": len(day0_priority_token_ids),
         "seed_first_token_ids": len(seed_first_token_ids),
         "quote_cache_enabled": bool(edli_cfg.get("market_channel_quote_cache_enabled", False)),
         "fill_authority": "user_channel_or_reconcile_only",

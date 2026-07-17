@@ -667,20 +667,90 @@ def test_priority_family_expansion_never_drops_seed_tokens_at_limit():
 def test_market_channel_seed_first_includes_all_money_path_priority_tokens():
     from src.ingest.price_channel_ingest import _edli_market_channel_seed_first_token_ids
 
-    assert _edli_market_channel_seed_first_token_ids(
+    ordered = _edli_market_channel_seed_first_token_ids(
         held_priority_token_ids={"held-yes", "held-no"},
         open_rest_priority_token_ids={"rest-no"},
+        day0_priority_token_ids={"day0-yes", "day0-no"},
         candidate_priority_token_ids={"candidate-yes", "candidate-no"},
-    ) == {"held-yes", "held-no", "rest-no", "candidate-yes", "candidate-no"}
+    )
+
+    assert ordered == (
+        "held-no",
+        "held-yes",
+        "rest-no",
+        "day0-no",
+        "day0-yes",
+        "candidate-no",
+        "candidate-yes",
+    )
 
 
 def test_market_channel_seed_first_falls_back_to_candidates_without_open_positions():
     from src.ingest.price_channel_ingest import _edli_market_channel_seed_first_token_ids
 
-    assert _edli_market_channel_seed_first_token_ids(
-        held_priority_token_ids=set(),
-        candidate_priority_token_ids={"candidate-yes", "candidate-no"},
+    assert set(
+        _edli_market_channel_seed_first_token_ids(
+            held_priority_token_ids=set(),
+            candidate_priority_token_ids={"candidate-yes", "candidate-no"},
+        )
     ) == {"candidate-yes", "candidate-no"}
+
+
+def test_current_day0_priority_uses_each_city_local_date(monkeypatch):
+    from types import SimpleNamespace
+
+    from src.ingest.price_channel_ingest import (
+        _edli_current_day0_priority_token_ids,
+    )
+
+    monkeypatch.setattr(
+        "src.config.runtime_cities_by_name",
+        lambda: {
+            "Paris": SimpleNamespace(timezone="Europe/Paris"),
+            "New York": SimpleNamespace(timezone="America/New_York"),
+        },
+    )
+    forecasts = sqlite3.connect(":memory:")
+    forecasts.executescript(
+        """
+        CREATE TABLE market_events (
+            condition_id TEXT NOT NULL,
+            city TEXT NOT NULL,
+            target_date TEXT NOT NULL,
+            temperature_metric TEXT NOT NULL
+        );
+        INSERT INTO market_events VALUES
+            ('paris-current', 'Paris', '2026-07-18', 'high'),
+            ('paris-stale', 'Paris', '2026-07-17', 'high'),
+            ('ny-current', 'New York', '2026-07-17', 'low');
+        """
+    )
+    trade = sqlite3.connect(":memory:")
+    trade.executescript(
+        """
+        CREATE TABLE executable_market_snapshot_latest (
+            condition_id TEXT NOT NULL,
+            selected_outcome_token_id TEXT NOT NULL,
+            active INTEGER NOT NULL,
+            closed INTEGER NOT NULL,
+            accepting_orders INTEGER
+        );
+        INSERT INTO executable_market_snapshot_latest VALUES
+            ('paris-current', 'paris-yes', 1, 0, 1),
+            ('paris-current', 'paris-no', 1, 0, 1),
+            ('paris-stale', 'paris-stale-yes', 1, 0, 1),
+            ('ny-current', 'ny-yes', 1, 0, 1),
+            ('ny-current', 'ny-closed-no', 0, 1, 0);
+        """
+    )
+
+    tokens = _edli_current_day0_priority_token_ids(
+        trade,
+        forecasts,
+        checked_at=datetime.fromisoformat("2026-07-17T23:30:00+00:00"),
+    )
+
+    assert tokens == ("ny-yes", "paris-no", "paris-yes")
 
 
 def test_price_channel_money_path_tokens_resolve_to_redecision_families():

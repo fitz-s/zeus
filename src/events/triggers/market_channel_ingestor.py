@@ -29,6 +29,7 @@ from src.events.idempotency import stable_event_id
 UTC = timezone.utc
 MARKET_CHANNEL_WS_ENDPOINT = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
 REST_SEED_COMMIT_CHUNK_SIZE = 16
+REST_SEED_FETCH_BATCH_SIZE = 128
 MARKET_CHANNEL_INITIAL_BOOK_GRACE_SECONDS = 1.0
 MARKET_CHANNEL_CONTINUITY_PUBLISH_INTERVAL_SECONDS = 0.25
 _logger = logging.getLogger(__name__)
@@ -1191,7 +1192,7 @@ class MarketChannelOnlineService:
     refresh_window_action_count: int = 0
     max_refresh_actions_per_window: int = 5
     refresh_window_seconds: float = 60.0
-    seed_first_token_ids: set[str] = field(default_factory=set)
+    seed_first_token_ids: Iterable[str] = field(default_factory=tuple)
     initial_book_grace_seconds: float = MARKET_CHANNEL_INITIAL_BOOK_GRACE_SECONDS
     continuity_publish_interval_seconds: float = (
         MARKET_CHANNEL_CONTINUITY_PUBLISH_INTERVAL_SECONDS
@@ -1409,17 +1410,27 @@ class MarketChannelOnlineService:
         commit: Callable[[], None] | None,
         logger: Any | None = None,
         chunk_size: int = REST_SEED_COMMIT_CHUNK_SIZE,
+        fetch_batch_size: int = REST_SEED_FETCH_BATCH_SIZE,
         skip_current_generation_depth: bool = False,
     ) -> int:
-        """Fetch seed books off-loop while the subscribed WS buffers deltas."""
+        """Fetch wide network batches off-loop, then commit bounded DB chunks."""
 
         if self.fetch_orderbook is None:
             return 0
-        ordered = sorted(self.ingestor.active_token_ids_open_at(token_ids=token_ids))
+        raw_token_ids = [str(token_id) for token_id in token_ids]
+        if isinstance(token_ids, (set, frozenset)):
+            raw_token_ids = sorted(set(raw_token_ids))
+        open_token_ids = self.ingestor.active_token_ids_open_at(token_ids=raw_token_ids)
+        ordered = [
+            token_id
+            for token_id in dict.fromkeys(raw_token_ids)
+            if token_id in open_token_ids
+        ]
         size = max(1, int(chunk_size or REST_SEED_COMMIT_CHUNK_SIZE))
+        fetch_size = max(size, int(fetch_batch_size or REST_SEED_FETCH_BATCH_SIZE))
         written = 0
-        for offset in range(0, len(ordered), size):
-            chunk = ordered[offset : offset + size]
+        for offset in range(0, len(ordered), fetch_size):
+            chunk = ordered[offset : offset + fetch_size]
             if skip_current_generation_depth:
                 chunk = [
                     token_id
@@ -1463,11 +1474,13 @@ class MarketChannelOnlineService:
     ) -> int:
         if self.fetch_orderbook is None:
             return 0
-        seed_first = {
-            str(token_id)
-            for token_id in self.seed_first_token_ids
-            if str(token_id) in active_token_ids
-        }
+        seed_first = tuple(
+            dict.fromkeys(
+                str(token_id)
+                for token_id in self.seed_first_token_ids
+                if str(token_id) in active_token_ids
+            )
+        )
         written = 0
         if seed_first:
             written += await self.seed_rest_books_after_subscribe(
@@ -1479,7 +1492,7 @@ class MarketChannelOnlineService:
         await asyncio.sleep(max(0.0, float(self.initial_book_grace_seconds)))
         rest_fallback = (
             active_token_ids
-            - seed_first
+            - set(seed_first)
             - self._current_generation_depth_tokens
         )
         if logger is not None:

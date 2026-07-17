@@ -892,6 +892,57 @@ def test_subscribed_seed_fetches_off_event_loop_thread():
     assert fetch_threads and fetch_threads[0] != caller_thread
 
 
+def test_subscribed_seed_separates_wide_network_fetch_from_small_db_commits():
+    conn, writer = _conn_writer()
+    metadata = {
+        f"token-{idx}": _metadata(f"token-{idx}")[f"token-{idx}"]
+        for idx in range(5)
+    }
+    fetch_batches: list[list[str]] = []
+    commit_counts: list[int] = []
+
+    def fetch_many(token_ids: list[str]) -> dict[str, dict]:
+        fetch_batches.append(list(token_ids))
+        return {
+            token_id: {
+                "asset_id": token_id,
+                "market": "0xcondition",
+                "bids": [{"price": "0.48", "size": "10"}],
+                "asks": [{"price": "0.52", "size": "10"}],
+                "hash": f"hash-{token_id}",
+            }
+            for token_id in token_ids
+        }
+
+    service = MarketChannelOnlineService(
+        MarketChannelIngestor(
+            writer,
+            active_token_ids=set(metadata),
+            token_metadata=metadata,
+        ),
+        fetch_orderbook=lambda _token_id: {},
+        fetch_orderbooks=fetch_many,
+    )
+
+    written = asyncio.run(
+        service.seed_rest_books_after_subscribe(
+            token_ids=tuple(metadata),
+            write_gate=nullcontext(),
+            commit=lambda: commit_counts.append(
+                conn.execute(
+                    "SELECT COUNT(*) FROM execution_feasibility_latest"
+                ).fetchone()[0]
+            ),
+            chunk_size=2,
+            fetch_batch_size=5,
+        )
+    )
+
+    assert written == 5
+    assert fetch_batches == [[f"token-{idx}" for idx in range(5)]]
+    assert commit_counts == [4, 8, 10]
+
+
 def test_websocket_subscribes_before_rest_seed(monkeypatch):
     import websockets
 
