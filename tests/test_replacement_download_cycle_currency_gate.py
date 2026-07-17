@@ -368,6 +368,32 @@ def test_ready_plan_with_stale_artifacts_still_downloads_new_cycle(tmp_path, mon
     assert calls[0]["fetch_workers"] == 6
 
 
+def test_scoped_source_commit_is_not_truncated_by_maintenance_limit(
+    tmp_path, monkeypatch
+) -> None:
+    db = _make_db(tmp_path, {
+        "ecmwf_aifs_ens": STALE_CYCLE_ISO,
+        "openmeteo_ecmwf_ifs_9km": STALE_CYCLE_ISO,
+    })
+    calls: list = []
+    _wire(monkeypatch, plan=_PlanStub(ready=False), calls=calls)
+    scopes = tuple(
+        (f"City-{index:02d}", "2026-07-18", "high")
+        for index in range(25)
+    )
+
+    report = _download_replacement_forecast_current_targets_if_needed(
+        _cfg(db, tmp_path),
+        required_scopes=scopes,
+        max_wall_clock_seconds=10.0,
+    )
+
+    assert report is not None
+    assert len(calls) == 1
+    assert calls[0]["required_scopes"] == scopes
+    assert calls[0]["limit"] is None
+
+
 def test_ready_plan_with_current_artifacts_skips_without_download(tmp_path, monkeypatch) -> None:
     db = _make_db(tmp_path, {
         "ecmwf_aifs_ens": CURRENT_CYCLE_ISO,

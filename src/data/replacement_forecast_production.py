@@ -337,7 +337,15 @@ def _download_replacement_forecast_current_targets_if_needed(
         forecast_db=Path(str(forecast_db)),
         output_dir=Path(str(output_dir)),
         cycle=cycle,
-        limit=int(cfg.get("download_limit") or 10),
+        # ``required_scopes`` is already the bounded, freshly committed source
+        # batch. Applying the generic maintenance limit here silently drops the
+        # tail before the deadline can decide how much work fits, leaving raw
+        # model rows without the anchor required to materialize q.
+        limit=(
+            None
+            if required_scopes is not None
+            else int(cfg.get("download_limit") or 10)
+        ),
         write_db=True,
         release_lag_hours=release_lag_hours,
         anchor_sigma_c=float(cfg.get("download_anchor_sigma_c") or 3.0),
