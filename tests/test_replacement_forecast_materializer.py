@@ -944,7 +944,7 @@ def test_materialize_script_template_requires_precision_metadata() -> None:
     assert template["precision_metadata_json"] == "openmeteo_precision_metadata.json"
 
 
-def test_materialize_script_batch_reuses_connection_and_reports_each_request(
+def test_materialize_script_batch_reuses_connection_and_wakes_each_commit(
     tmp_path, monkeypatch, capsys
 ) -> None:
     import scripts.materialize_replacement_forecast_live as cli
@@ -964,7 +964,14 @@ def test_materialize_script_batch_reuses_connection_and_reports_each_request(
 
     def _run_one(input_json, **kwargs):
         calls.append((input_json, kwargs))
-        return 0, json.dumps({"status": "READY"}) + "\n", ""
+        return 0, json.dumps(
+            {
+                "status": "READY",
+                "committed": True,
+                "posterior_id": len(calls),
+                "reactor_wake_published": kwargs["publish_wake"],
+            }
+        ) + "\n", ""
 
     monkeypatch.setattr(cli, "_run_one", _run_one)
     rc = cli.main(
@@ -987,51 +994,6 @@ def test_materialize_script_batch_reuses_connection_and_reports_each_request(
     ]
     assert [Path(envelope["input_json"]) for envelope in envelopes] == inputs
     assert [envelope["returncode"] for envelope in envelopes] == [0, 0]
-
-
-def test_materialize_script_batch_keeps_first_wake_immediate_and_batches_rest(
-    tmp_path, monkeypatch, capsys
-) -> None:
-    import scripts.materialize_replacement_forecast_live as cli
-    import src.state.db as state_db
-
-    inputs = [tmp_path / "a.json", tmp_path / "b.json"]
-    families = [
-        ("Shanghai", "2026-07-18", "high"),
-        ("Paris", "2026-07-18", "low"),
-    ]
-    conn = SimpleNamespace(close=lambda: None)
-    monkeypatch.setattr(state_db, "get_forecasts_connection", lambda **_: conn)
-
-    def _run_one(input_json, **kwargs):
-        index = inputs.index(input_json)
-        response = {
-            "status": "READY",
-            "committed": True,
-            "posterior_id": index + 1,
-            "reactor_wake_published": kwargs["publish_wake"],
-            "forecast_family": list(families[index]),
-        }
-        return 0, json.dumps(response) + "\n", ""
-
-    published = []
-    monkeypatch.setattr(cli, "_run_one", _run_one)
-    monkeypatch.setattr(
-        cli,
-        "_publish_materialization_wake_families",
-        lambda changed: published.append(changed) or True,
-    )
-
-    rc = cli.main(
-        ["--batch-input-json", *(str(path) for path in inputs), "--commit"]
-    )
-
-    assert rc == 0
-    assert published == [(families[1],)]
-    envelopes = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
-    assert len(envelopes) == 3
-    latest = {Path(row["input_json"]): json.loads(row["stdout"]) for row in envelopes}
-    assert all(response["reactor_wake_published"] is True for response in latest.values())
 
 
 def test_materialize_script_publishes_family_wake_after_commit(monkeypatch) -> None:
