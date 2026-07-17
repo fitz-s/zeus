@@ -332,6 +332,18 @@ _GLOBAL_BOOK_EPOCH_CACHE: _GlobalBookEpochCacheEntry | None = None
 _GLOBAL_PROBABILITY_FAMILY_CACHE_LOCK = threading.Lock()
 _GLOBAL_PROBABILITY_FAMILY_CACHE_NAMESPACE: str | None = None
 _GLOBAL_PROBABILITY_FAMILY_CACHE: dict[str, tuple[str, str, object]] = {}
+_GLOBAL_PROBABILITY_FAMILY_INELIGIBLE_CACHE: dict[
+    str,
+    tuple[str, str, tuple[int, ...], EventSubmissionReceipt],
+] = {}
+_GLOBAL_PROBABILITY_CACHEABLE_INELIGIBLE_REASONS = frozenset(
+    {
+        "EVENT_BOUND_MARKET_TOPOLOGY_MISSING",
+        "DAY0_REMAINING_DAY_MEMBERS_UNAVAILABLE",
+        "GLOBAL_DAY0_CURRENT_OBSERVATION_MISSING",
+        "POST_LOCAL_DAY_FINAL_OBSERVATION_UNAVAILABLE",
+    }
+)
 
 
 def _global_probability_family_cache_namespace(
@@ -367,6 +379,32 @@ def _global_probability_family_cache_namespace(
             )
         ).encode("utf-8")
     ).hexdigest()
+
+
+def _global_probability_family_cache_revision(
+    connections: Iterable[sqlite3.Connection],
+) -> tuple[int, ...] | None:
+    revisions = []
+    for conn in connections:
+        try:
+            row = conn.execute("PRAGMA data_version").fetchone()
+            revisions.append(int(row[0]))
+        except (AttributeError, IndexError, TypeError, ValueError, sqlite3.Error):
+            return None
+    return tuple(revisions) or None
+
+
+def _cacheable_global_probability_ineligible(
+    receipt: EventSubmissionReceipt,
+) -> bool:
+    prefix = "GLOBAL_CURRENT_PROBABILITY_PREPARE_FAILED:ValueError:"
+    reason = str(receipt.reason or "")
+    return (
+        receipt.prepared_global_family is None
+        and reason.startswith(prefix)
+        and reason.removeprefix(prefix)
+        in _GLOBAL_PROBABILITY_CACHEABLE_INELIGIBLE_REASONS
+    )
 
 
 def _reissue_cached_global_probability_family(
@@ -480,11 +518,76 @@ def _store_global_probability_family_cache(
     with _GLOBAL_PROBABILITY_FAMILY_CACHE_LOCK:
         if _GLOBAL_PROBABILITY_FAMILY_CACHE_NAMESPACE != namespace:
             _GLOBAL_PROBABILITY_FAMILY_CACHE.clear()
+            _GLOBAL_PROBABILITY_FAMILY_INELIGIBLE_CACHE.clear()
             _GLOBAL_PROBABILITY_FAMILY_CACHE_NAMESPACE = namespace
+        _GLOBAL_PROBABILITY_FAMILY_INELIGIBLE_CACHE.pop(family_key, None)
         _GLOBAL_PROBABILITY_FAMILY_CACHE[family_key] = (
             event_id,
             family_binding_hash,
             prepared,
+        )
+
+
+def _probe_global_probability_family_ineligible_cache(
+    namespace: str | None,
+    *,
+    family_key: str,
+    event_id: str,
+    causal_snapshot_id: str,
+    revision: tuple[int, ...] | None,
+) -> EventSubmissionReceipt | None:
+    if (
+        not namespace
+        or not family_key
+        or not event_id
+        or not causal_snapshot_id
+        or revision is None
+    ):
+        return None
+    with _GLOBAL_PROBABILITY_FAMILY_CACHE_LOCK:
+        if _GLOBAL_PROBABILITY_FAMILY_CACHE_NAMESPACE != namespace:
+            return None
+        cached = _GLOBAL_PROBABILITY_FAMILY_INELIGIBLE_CACHE.get(family_key)
+    if cached is None or cached[:3] != (
+        event_id,
+        causal_snapshot_id,
+        revision,
+    ):
+        return None
+    return cached[3]
+
+
+def _store_global_probability_family_ineligible_cache(
+    namespace: str | None,
+    *,
+    family_key: str,
+    event_id: str,
+    causal_snapshot_id: str,
+    revision: tuple[int, ...] | None,
+    receipt: EventSubmissionReceipt,
+) -> None:
+    global _GLOBAL_PROBABILITY_FAMILY_CACHE_NAMESPACE
+
+    if (
+        not namespace
+        or not family_key
+        or not event_id
+        or not causal_snapshot_id
+        or revision is None
+        or not _cacheable_global_probability_ineligible(receipt)
+    ):
+        return
+    with _GLOBAL_PROBABILITY_FAMILY_CACHE_LOCK:
+        if _GLOBAL_PROBABILITY_FAMILY_CACHE_NAMESPACE != namespace:
+            _GLOBAL_PROBABILITY_FAMILY_CACHE.clear()
+            _GLOBAL_PROBABILITY_FAMILY_INELIGIBLE_CACHE.clear()
+            _GLOBAL_PROBABILITY_FAMILY_CACHE_NAMESPACE = namespace
+        _GLOBAL_PROBABILITY_FAMILY_CACHE.pop(family_key, None)
+        _GLOBAL_PROBABILITY_FAMILY_INELIGIBLE_CACHE[family_key] = (
+            event_id,
+            causal_snapshot_id,
+            revision,
+            receipt,
         )
 
 
@@ -498,6 +601,7 @@ def _evict_global_probability_family_cache(
     with _GLOBAL_PROBABILITY_FAMILY_CACHE_LOCK:
         if _GLOBAL_PROBABILITY_FAMILY_CACHE_NAMESPACE == namespace:
             _GLOBAL_PROBABILITY_FAMILY_CACHE.pop(family_key, None)
+            _GLOBAL_PROBABILITY_FAMILY_INELIGIBLE_CACHE.pop(family_key, None)
 
 
 def _cached_global_book_probabilities(epoch: object) -> dict[str, object] | None:
@@ -6338,7 +6442,15 @@ def event_bound_live_adapter_from_trade_conn(
             (forecast_conn, topology_conn, calibration_conn),
             decision_time=decision_time,
         )
-        probability_cache_stats = {"hit": 0, "miss": 0, "refresh": 0}
+        probability_cache_revision = _global_probability_family_cache_revision(
+            (forecast_conn, topology_conn, calibration_conn)
+        )
+        probability_cache_stats = {
+            "hit": 0,
+            "ineligible_hit": 0,
+            "miss": 0,
+            "refresh": 0,
+        }
 
         def _prepare_current_scope_event(event, at):
             payload = _payload(event)
@@ -6371,6 +6483,18 @@ def event_bound_live_adapter_from_trade_conn(
                 if cached is not None:
                     probability_cache_stats["hit"] += 1
                     return _prepared_global_event_receipt(event, cached)
+                cached_ineligible = (
+                    _probe_global_probability_family_ineligible_cache(
+                        probability_cache_namespace,
+                        family_key=family_key,
+                        event_id=event.event_id,
+                        causal_snapshot_id=event.causal_snapshot_id,
+                        revision=probability_cache_revision,
+                    )
+                )
+                if cached_ineligible is not None:
+                    probability_cache_stats["ineligible_hit"] += 1
+                    return cached_ineligible
                 probability_cache_stats["miss"] += 1
             cache_metadata: dict[str, str] = {}
             receipt = _prepare_global_event(
@@ -6388,6 +6512,15 @@ def event_bound_live_adapter_from_trade_conn(
                         cache_metadata.get("family_binding_hash") or ""
                     ),
                     prepared=prepared,
+                )
+            else:
+                _store_global_probability_family_ineligible_cache(
+                    probability_cache_namespace,
+                    family_key=family_key,
+                    event_id=event.event_id,
+                    causal_snapshot_id=event.causal_snapshot_id,
+                    revision=probability_cache_revision,
+                    receipt=receipt,
                 )
             return receipt
 
@@ -7325,8 +7458,10 @@ def event_bound_live_adapter_from_trade_conn(
                 epoch_superseded=_epoch_superseded,
             )
             logging.getLogger(__name__).info(
-                "global probability family cache: hits=%d misses=%d refreshed=%d",
+                "global probability family cache: hits=%d ineligible_hits=%d "
+                "misses=%d refreshed=%d",
                 probability_cache_stats["hit"],
+                probability_cache_stats["ineligible_hit"],
                 probability_cache_stats["miss"],
                 probability_cache_stats["refresh"],
             )

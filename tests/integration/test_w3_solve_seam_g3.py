@@ -2769,6 +2769,11 @@ def test_live_adapter_reuses_unchanged_probability_and_evicts_changed_family(
     prepare_calls = []
     monkeypatch.setattr(era, "_GLOBAL_PROBABILITY_FAMILY_CACHE_NAMESPACE", None)
     monkeypatch.setattr(era, "_GLOBAL_PROBABILITY_FAMILY_CACHE", {})
+    monkeypatch.setattr(
+        era,
+        "_GLOBAL_PROBABILITY_FAMILY_INELIGIBLE_CACHE",
+        {},
+    )
 
     family_key = era.weather_family_id(
         city="Dallas",
@@ -2917,6 +2922,79 @@ def test_live_adapter_reuses_unchanged_probability_and_evicts_changed_family(
     assert len(prepare_calls) == 3
     assert expired_refresh.probability_witness.q_version == "q-3"
     assert expired_refresh.probability_witness.captured_at_utc == at_expired
+
+
+def test_live_adapter_reuses_ineligible_probability_until_authority_db_changes(
+    monkeypatch,
+):
+    trade = sqlite3.connect(":memory:")
+    forecast = sqlite3.connect(":memory:")
+    topology = sqlite3.connect(":memory:")
+    world = sqlite3.connect(":memory:")
+    callbacks = []
+    prepare_calls = []
+    revision = {"value": (1, 1, 1)}
+    monkeypatch.setattr(era, "_GLOBAL_PROBABILITY_FAMILY_CACHE_NAMESPACE", None)
+    monkeypatch.setattr(era, "_GLOBAL_PROBABILITY_FAMILY_CACHE", {})
+    monkeypatch.setattr(
+        era,
+        "_GLOBAL_PROBABILITY_FAMILY_INELIGIBLE_CACHE",
+        {},
+    )
+    monkeypatch.setattr(
+        era,
+        "_global_probability_family_cache_revision",
+        lambda _connections: revision["value"],
+    )
+
+    def fail_prepare(*_args, **_kwargs):
+        prepare_calls.append(1)
+        raise ValueError("EVENT_BOUND_MARKET_TOPOLOGY_MISSING")
+
+    monkeypatch.setattr(
+        era,
+        "_prepare_current_global_probability_family",
+        fail_prepare,
+    )
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "process_current_global_batch",
+        lambda events, **kwargs: (
+            callbacks.append(kwargs["prepare_event"])
+            or SimpleNamespace(events=tuple(events))
+        ),
+    )
+
+    def adapter():
+        return era.event_bound_live_adapter_from_trade_conn(
+            trade,
+            get_current_level=lambda: era.RiskLevel.GREEN,
+            forecast_conn=forecast,
+            topology_conn=topology,
+            calibration_conn=world,
+        )
+
+    scope_event = _global_scope_event(city="Dallas", source_run_id="run-dallas")
+    book_event = replace(scope_event, event_type="BOOK_SNAPSHOT")
+    at_0 = _dt.datetime(2026, 7, 10, 8, 10, tzinfo=_dt.timezone.utc)
+
+    adapter().process_global_batch((book_event,), at_0)
+    first = callbacks[-1](scope_event, at_0)
+    adapter().process_global_batch((book_event,), at_0 + _dt.timedelta(seconds=1))
+    reused = callbacks[-1](scope_event, at_0 + _dt.timedelta(seconds=1))
+
+    assert len(prepare_calls) == 1
+    assert reused is first
+    assert reused.reason.endswith("EVENT_BOUND_MARKET_TOPOLOGY_MISSING")
+
+    revision["value"] = (2, 1, 1)
+    adapter().process_global_batch((book_event,), at_0 + _dt.timedelta(seconds=2))
+    callbacks[-1](scope_event, at_0 + _dt.timedelta(seconds=2))
+    assert len(prepare_calls) == 2
+
+    adapter().process_global_batch((scope_event,), at_0 + _dt.timedelta(seconds=3))
+    callbacks[-1](scope_event, at_0 + _dt.timedelta(seconds=3))
+    assert len(prepare_calls) == 3
 
 
 def test_live_adapter_reuses_book_cache_after_probability_rebind(
