@@ -3167,6 +3167,7 @@ class OpportunityEventReactor:
                 executable_snapshot_id=executable_snapshot_id,
             )
         )
+        _edli_note_day0_pause_rejection(event.event_type, reason_text)
         if family_level_no_trade:
             for candidate_row in _all_candidates_rejected_candidate_rows(receipt, family_reason=reason_text):
                 candidate_reason = str(candidate_row["rejection_reason"])
@@ -6279,6 +6280,18 @@ def _edli_active_rmf_forecast_snapshot_pending_count(world_conn, *, limit: int) 
     return int(row[0] or 0) if row is not None else 0
 
 _EDLI_LAST_PRUNE_MONOTONIC: float | None = None
+_EDLI_DAY0_PAUSE_RECOVERY_PENDING: bool | None = None
+
+
+def _edli_note_day0_pause_rejection(event_type: str, reason: str) -> None:
+    """Schedule the recovery scan only when a durable Day0 pause verdict exists."""
+
+    global _EDLI_DAY0_PAUSE_RECOVERY_PENDING
+    if event_type == "DAY0_EXTREME_UPDATED" and (
+        "entries_paused" in reason or "pause_entries" in reason
+    ):
+        _EDLI_DAY0_PAUSE_RECOVERY_PENDING = True
+
 
 def _edli_prune_pending_working_set(
     store,
@@ -6305,7 +6318,7 @@ def _edli_prune_pending_working_set(
 
     _log = _logging.getLogger("zeus.events.reactor")
 
-    global _EDLI_LAST_PRUNE_MONOTONIC
+    global _EDLI_DAY0_PAUSE_RECOVERY_PENDING, _EDLI_LAST_PRUNE_MONOTONIC
     edli_cfg = _settings_section("edli", {})
     # ANTIBODY (2026-06-08, operator directive): the working-set prune is NON-OPTIONAL.
     # It is the ONLY drain of the pending opportunity_event_processing set (archive_expired_
@@ -6468,10 +6481,16 @@ def _edli_prune_pending_working_set(
             )
             _entries_paused_currently = True
         _day0_pause_recovered = 0
-        if not _entries_paused_currently:
+        if _entries_paused_currently:
+            _EDLI_DAY0_PAUSE_RECOVERY_PENDING = True
+        elif _EDLI_DAY0_PAUSE_RECOVERY_PENDING is not False:
+            recovery_limit = min(batch_limit, 1000)
             _day0_pause_recovered = store.requeue_processed_day0_entries_paused(
                 decision_time=decision_time.isoformat(),
-                batch_limit=min(batch_limit, 1000),
+                batch_limit=recovery_limit,
+            )
+            _EDLI_DAY0_PAUSE_RECOVERY_PENDING = (
+                _day0_pause_recovered >= recovery_limit
             )
         _log_prune_step("requeue_processed_day0_entries_paused", _step_started, _day0_pause_recovered)
         if _day0_pause_recovered:

@@ -2338,6 +2338,56 @@ def test_reactor_prune_archives_orphan_processing_rows():
     assert "requeue_misclassified_local_pre_submit_rejections" not in src
 
 
+def test_reactor_prune_scans_day0_pause_recovery_only_when_pending(monkeypatch):
+    world = sqlite3.connect(":memory:")
+    world.row_factory = sqlite3.Row
+    init_schema(world)
+    store = EventStore(world)
+    calls = []
+    original = store.requeue_processed_day0_entries_paused
+
+    monkeypatch.setattr(
+        main,
+        "_settings_section",
+        lambda name, default=None: {
+            "reactor_prune_interval_seconds": 0,
+            "reactor_prune_batch_limit": 10,
+            "reactor_prune_budget_seconds": 30,
+        }
+        if name == "edli"
+        else (default if default is not None else {}),
+    )
+    monkeypatch.setattr(
+        "src.control.control_plane.is_entries_paused",
+        lambda: False,
+    )
+    monkeypatch.setattr(reactor, "_EDLI_LAST_PRUNE_MONOTONIC", None)
+    monkeypatch.setattr(reactor, "_EDLI_DAY0_PAUSE_RECOVERY_PENDING", None)
+
+    def counted_recovery(**kwargs):
+        calls.append(kwargs)
+        return original(**kwargs)
+
+    monkeypatch.setattr(
+        store,
+        "requeue_processed_day0_entries_paused",
+        counted_recovery,
+    )
+    decision_time = datetime(2026, 6, 26, 12, 0, tzinfo=timezone.utc)
+
+    reactor._edli_prune_pending_working_set(store, decision_time=decision_time)
+    reactor._edli_prune_pending_working_set(store, decision_time=decision_time)
+    assert len(calls) == 1
+
+    reactor._edli_note_day0_pause_rejection(
+        "DAY0_EXTREME_UPDATED",
+        "EVENT_BOUND_ALL_CANDIDATES_REJECTED:entries_paused:operator",
+    )
+    reactor._edli_prune_pending_working_set(store, decision_time=decision_time)
+    reactor._edli_prune_pending_working_set(store, decision_time=decision_time)
+    assert len(calls) == 2
+
+
 def test_reactor_prune_budget_exhaustion_restores_busy_timeout(monkeypatch):
     """Maintenance prune may skip remaining work, but must not poison later claim waits."""
 
