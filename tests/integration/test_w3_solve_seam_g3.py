@@ -1184,6 +1184,30 @@ def test_current_gamma_market_fetch_returns_at_total_deadline():
     assert worker_finished.wait(timeout=1.0)
 
 
+def test_current_gamma_client_survives_late_batch_workers(monkeypatch):
+    import httpx
+
+    clients = []
+
+    class FakeClient:
+        is_closed = False
+
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+            clients.append(self)
+
+    monkeypatch.setattr(era, "_GLOBAL_CURRENT_GAMMA_CLIENT", None)
+    monkeypatch.setattr(httpx, "Client", FakeClient)
+
+    first = era._global_current_gamma_client(timeout_seconds=6.0)
+    second = era._global_current_gamma_client(timeout_seconds=3.0)
+
+    assert first is second
+    assert clients == [first]
+    assert first.kwargs["base_url"] == "https://gamma-api.polymarket.com"
+    assert first.kwargs["limits"].max_connections == 16
+
+
 def test_speculative_book_prefetch_prunes_only_complete_prior_tradeability():
     probability = {
         "family": SimpleNamespace(

@@ -348,6 +348,8 @@ _GLOBAL_PROBABILITY_FAMILY_INELIGIBLE_CACHE: dict[
     str,
     tuple[str, str, tuple[int, ...], EventSubmissionReceipt],
 ] = {}
+_GLOBAL_CURRENT_GAMMA_CLIENT_LOCK = threading.Lock()
+_GLOBAL_CURRENT_GAMMA_CLIENT: Any | None = None
 _GLOBAL_PROBABILITY_CACHEABLE_INELIGIBLE_REASONS = frozenset(
     {
         "EVENT_BOUND_MARKET_TOPOLOGY_MISSING",
@@ -356,6 +358,31 @@ _GLOBAL_PROBABILITY_CACHEABLE_INELIGIBLE_REASONS = frozenset(
         "POST_LOCAL_DAY_FINAL_OBSERVATION_UNAVAILABLE",
     }
 )
+
+
+def _global_current_gamma_client(*, timeout_seconds: float):
+    """Keep late Gamma requests off the reactor's deadline boundary."""
+
+    import httpx
+
+    from src.data.market_scanner import GAMMA_BASE
+
+    global _GLOBAL_CURRENT_GAMMA_CLIENT
+    with _GLOBAL_CURRENT_GAMMA_CLIENT_LOCK:
+        client = _GLOBAL_CURRENT_GAMMA_CLIENT
+        if client is None or bool(getattr(client, "is_closed", False)):
+            timeout = max(1.0, float(timeout_seconds))
+            client = httpx.Client(
+                base_url=GAMMA_BASE,
+                timeout=httpx.Timeout(timeout, pool=min(1.0, timeout)),
+                limits=httpx.Limits(
+                    max_connections=16,
+                    max_keepalive_connections=16,
+                    keepalive_expiry=30.0,
+                ),
+            )
+            _GLOBAL_CURRENT_GAMMA_CLIENT = client
+        return client
 
 
 def _global_probability_family_cache_namespace(
@@ -7263,8 +7290,6 @@ def event_bound_live_adapter_from_trade_conn(
         )
 
         def _current_book_epoch(probabilities, _at):
-            import httpx
-
             from src.contracts.executable_market_snapshot import (
                 FRESHNESS_WINDOW_DEFAULT,
             )
@@ -7276,8 +7301,6 @@ def event_bound_live_adapter_from_trade_conn(
                 fetch_current_global_books,
                 fetch_current_gamma_markets,
             )
-            from src.data.market_scanner import GAMMA_BASE
-
             _book_started = _time.monotonic()
             timeout = max(
                 1.0,
@@ -7307,20 +7330,14 @@ def event_bound_live_adapter_from_trade_conn(
                 refresh_started_at = datetime.now(UTC)
                 started = _time.monotonic()
                 gamma_deadline = started + gamma_timeout
-                client_timeout = httpx.Timeout(
-                    gamma_timeout,
-                    pool=min(1.0, gamma_timeout),
+                gamma = _global_current_gamma_client(
+                    timeout_seconds=gamma_timeout,
                 )
-                limits = httpx.Limits(
-                    max_connections=16,
-                    max_keepalive_connections=16,
-                    keepalive_expiry=30.0,
-                )
-                with httpx.Client(
-                    base_url=GAMMA_BASE,
-                    timeout=client_timeout,
-                    limits=limits,
-                ) as gamma:
+                # Batch futures may still be inside a slowly streaming response
+                # after the caller's absolute deadline. The process-scoped client
+                # stays valid for those bounded workers; closing a per-wave client
+                # here can wait on them and turn a 6s deadline into minutes.
+                with contextlib.nullcontext(gamma):
 
                     def _remaining_gamma_timeout() -> float:
                         remaining = gamma_deadline - _time.monotonic()
