@@ -3772,6 +3772,7 @@ def _submit_result_from_response(
 
 _V2_AMOUNT_SCALE = Decimal("1000000")
 _V2_POINT_ORDER_CONTRACT = "POLYMARKET_CLOB_V2_FIXED_6_POINT_ORDER"
+_V2_HUMAN_POINT_ORDER_CONTRACT = "POLYMARKET_CLOB_V2_HUMAN_POINT_ORDER"
 _V2_SUBMIT_CONTRACT = "POLYMARKET_CLOB_V2_HUMAN_SUBMIT_AMOUNTS"
 
 
@@ -3803,10 +3804,9 @@ def _normalize_v2_amount_response(
         raise VenueResponseShapeError(
             endpoint,
             raw_response,
-            "point-order response requires original_size and size_matched fixed-6 fields",
+            "point-order response requires original_size and size_matched fields",
         )
     if original_raw not in (None, "") or matched_raw not in (None, ""):
-        normalized["_venue_response_contract"] = _V2_POINT_ORDER_CONTRACT
         try:
             original_units = Decimal(str(original_raw))
             matched_units = Decimal(str(matched_raw))
@@ -3815,32 +3815,47 @@ def _normalize_v2_amount_response(
                 raise VenueResponseShapeError(
                     endpoint,
                     raw_response,
-                    "point-order fixed-6 amount is non-numeric",
+                    "point-order amount is non-numeric",
                 )
             normalized["_v2_amount_normalization_error"] = "NON_NUMERIC_FIXED_6"
             return normalized
+        human_point_order = bool(
+            point_order_endpoint
+            and (
+                original_units != original_units.to_integral_value()
+                or matched_units != matched_units.to_integral_value()
+                or max(original_units, matched_units) < _V2_AMOUNT_SCALE
+            )
+        )
         if (
             not original_units.is_finite()
             or not matched_units.is_finite()
             or original_units < 0
             or matched_units < 0
-            or original_units != original_units.to_integral_value()
-            or matched_units != matched_units.to_integral_value()
+            or (
+                not human_point_order
+                and (
+                    original_units != original_units.to_integral_value()
+                    or matched_units != matched_units.to_integral_value()
+                )
+            )
         ):
             if point_order_endpoint:
                 raise VenueResponseShapeError(
                     endpoint,
                     raw_response,
-                    "point-order fixed-6 amount is outside the unsigned integer domain",
+                    "point-order amount is outside the non-negative decimal domain",
                 )
             normalized["_v2_amount_normalization_error"] = "INVALID_FIXED_6"
             return normalized
-        normalized["_v2_original_size"] = _v2_decimal_text(
-            original_units / _V2_AMOUNT_SCALE
+        normalized["_venue_response_contract"] = (
+            _V2_HUMAN_POINT_ORDER_CONTRACT
+            if human_point_order
+            else _V2_POINT_ORDER_CONTRACT
         )
-        normalized["_v2_matched_size"] = _v2_decimal_text(
-            matched_units / _V2_AMOUNT_SCALE
-        )
+        scale = Decimal("1") if human_point_order else _V2_AMOUNT_SCALE
+        normalized["_v2_original_size"] = _v2_decimal_text(original_units / scale)
+        normalized["_v2_matched_size"] = _v2_decimal_text(matched_units / scale)
         normalized["_v2_wire_original_size"] = str(original_raw)
         normalized["_v2_wire_size_matched"] = str(matched_raw)
         normalized["original_size"] = normalized["_v2_original_size"]

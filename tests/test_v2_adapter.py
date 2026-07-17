@@ -1,4 +1,4 @@
-# Lifecycle: created=2026-04-27; last_reviewed=2026-07-15; last_reused=2026-07-15
+# Lifecycle: created=2026-04-27; last_reviewed=2026-07-17; last_reused=2026-07-17
 # Purpose: R3 Z2 Polymarket V2 adapter and submission envelope antibodies.
 # Reuse: Run when V2 SDK adapter, envelope provenance, or Q1 preflight behavior changes.
 # Created: 2026-04-27
@@ -1745,6 +1745,28 @@ def test_point_order_fixed_6_sizes_are_typed_as_human_shares(tmp_path):
     assert payload["_venue_order_status"] == "MATCHED"
 
 
+def test_point_order_human_decimal_sizes_preserve_live_share_units(tmp_path):
+    class PointOrderClient(FakeOneStepClient):
+        def get_order(self, order_id):
+            return {
+                "id": order_id,
+                "status": "MATCHED",
+                "side": "BUY",
+                "original_size": "31.6",
+                "size_matched": "31.6",
+                "price": "0.6",
+            }
+
+    adapter, _ = _adapter(tmp_path, PointOrderClient())
+    payload = adapter.get_order("ord-human-point").raw
+
+    assert payload["original_size"] == "31.6"
+    assert payload["size_matched"] == "31.6"
+    assert payload["_venue_response_contract"] == "POLYMARKET_CLOB_V2_HUMAN_POINT_ORDER"
+    assert payload["_v2_original_size"] == "31.6"
+    assert payload["_v2_matched_size"] == "31.6"
+
+
 def test_point_order_ingress_provides_one_human_contract_to_live_consumers(tmp_path):
     class PointOrderClient(FakeOneStepClient):
         def get_order(self, order_id):
@@ -2319,7 +2341,8 @@ class TestOrderStatusResponseContract:
         (
             {"size_matched": "3250000"},
             {"original_size": "10000000"},
-            {"original_size": "10.5", "size_matched": "0"},
+            {"original_size": "-1", "size_matched": "0"},
+            {"original_size": "not-a-number", "size_matched": "0"},
         ),
     )
     def test_get_order_malformed_fixed_6_amounts_fail_closed(
@@ -2339,7 +2362,7 @@ class TestOrderStatusResponseContract:
 
         adapter, _ = _adapter(tmp_path, MalformedPointOrderClient())
 
-        with pytest.raises(VenueResponseShapeError, match="fixed-6"):
+        with pytest.raises(VenueResponseShapeError, match="point-order"):
             adapter.get_order("ord-malformed-fixed-6")
 
 
