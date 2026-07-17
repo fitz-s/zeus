@@ -240,11 +240,6 @@ def _defer_for_held_position_monitor(job_name: str) -> bool:
     return False
 
 
-def _mark_held_position_monitor_complete() -> None:
-    _held_position_monitor_active.clear()
-    _held_position_monitor_bootstrap_complete.set()
-
-
 def _live_execution_mode(edli_cfg: dict) -> str:
     mode = str(edli_cfg.get("live_execution_mode") or "legacy_cron")
     if mode not in LIVE_EXECUTION_MODES:
@@ -5777,9 +5772,9 @@ def _exit_monitor_cycle(
     """
     from src.execution.exit_lifecycle import run_exit_monitor_cycle
 
-    if not urgent_day0 and _day0_urgent_wake_pending.is_set():
-        logger.info("periodic exit_monitor yielded to pending Day0 urgent wake")
-        return True
+    pending_before_claim = (
+        not urgent_day0 and _day0_urgent_wake_pending.is_set()
+    )
     if _held_position_monitor_active.is_set():
         logger.warning("exit_monitor skipped: previous monitor cycle is still running")
         return False
@@ -5798,28 +5793,39 @@ def _exit_monitor_cycle(
         _held_position_monitor_active.clear()
         return False
     _edli_reactor_active_lock.release()
-    if not urgent_day0 and _day0_urgent_wake_pending.is_set():
+    if (
+        not urgent_day0
+        and not pending_before_claim
+        and _day0_urgent_wake_pending.is_set()
+    ):
         logger.info(
             "periodic exit_monitor yielded after reactor handoff to pending Day0 urgent wake"
         )
-        _mark_held_position_monitor_complete()
+        _held_position_monitor_active.clear()
         return True
+    if pending_before_claim:
+        logger.info(
+            "periodic exit_monitor servicing full portfolio after bounded Day0 priority"
+        )
     try:
         monitor_succeeded = run_exit_monitor_cycle(
             held_position_monitor_active=_held_position_monitor_active,
-            mark_held_position_monitor_complete=_mark_held_position_monitor_complete,
+            mark_held_position_monitor_complete=_held_position_monitor_active.clear,
             monitor_claimed=True,
             target_families=target_families,
             should_preempt_for_urgent_day0=(
-                None if urgent_day0 else _day0_urgent_wake_pending.is_set
+                None
+                if urgent_day0 or pending_before_claim
+                else _day0_urgent_wake_pending.is_set
             ),
         )
         if monitor_succeeded is not True:
             raise RuntimeError("EXIT_MONITOR_CYCLE_INCOMPLETE")
+        if target_families is None:
+            _held_position_monitor_bootstrap_complete.set()
         return True
     finally:
-        if _held_position_monitor_active.is_set():
-            _mark_held_position_monitor_complete()
+        _held_position_monitor_active.clear()
 
 
 def main():

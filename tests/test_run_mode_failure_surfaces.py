@@ -1,8 +1,8 @@
 # Created: 2026-05-19
-# Last reused or audited: 2026-07-16
+# Last reused or audited: 2026-07-17
 # Authority basis: codereview-may19-2.md relationship F
 #                  + docs/operations/task_2026-05-21_live_side_effect_risk_boundaries/task.md P1-1
-# Lifecycle: created=2026-05-19; last_reviewed=2026-07-16; last_reused=2026-07-16
+# Lifecycle: created=2026-05-19; last_reviewed=2026-07-17; last_reused=2026-07-17
 # Purpose: Relationship-F antibody — assert that compute_composite_live_health()
 #   surfaces DEGRADED when run_mode has failed or status_summary is stale, even
 #   when the heartbeat is OK (closing the "scheduler alive but not trading" gap).
@@ -5742,23 +5742,75 @@ def test_exit_monitor_claims_priority_and_waits_for_reactor_handoff(monkeypatch)
     assert not main_module._held_position_monitor_active.is_set()
 
 
-def test_periodic_exit_monitor_yields_to_pending_day0_wake(monkeypatch) -> None:
+def test_periodic_exit_monitor_services_full_book_after_pending_day0_wake(
+    monkeypatch,
+) -> None:
     import src.execution.exit_lifecycle as exit_module
     import src.main as main_module
 
+    calls: list[tuple[object, object]] = []
+
+    class ReactorGate:
+        def acquire(self, *, timeout: float) -> bool:
+            return True
+
+        def release(self) -> None:
+            pass
+
+    def _run(**kwargs) -> bool:
+        calls.append(
+            (
+                kwargs["target_families"],
+                kwargs["should_preempt_for_urgent_day0"],
+            )
+        )
+        kwargs["mark_held_position_monitor_complete"]()
+        return True
+
     main_module._held_position_monitor_active.clear()
+    main_module._held_position_monitor_bootstrap_complete.clear()
     main_module._day0_urgent_wake_pending.set()
-    monkeypatch.setattr(
-        exit_module,
-        "run_exit_monitor_cycle",
-        lambda **_kwargs: pytest.fail("periodic monitor must yield before runtime work"),
-    )
+    monkeypatch.setattr(main_module, "_edli_reactor_active_lock", ReactorGate())
+    monkeypatch.setattr(exit_module, "run_exit_monitor_cycle", _run)
     try:
         assert main_module._exit_monitor_cycle() is True
     finally:
         main_module._day0_urgent_wake_pending.clear()
 
+    assert calls == [(None, None)]
     assert main_module._held_position_monitor_active.is_set() is False
+    assert main_module._held_position_monitor_bootstrap_complete.is_set() is True
+
+
+def test_targeted_exit_monitor_does_not_complete_full_book_bootstrap(
+    monkeypatch,
+) -> None:
+    import src.execution.exit_lifecycle as exit_module
+    import src.main as main_module
+
+    class ReactorGate:
+        def acquire(self, *, timeout: float) -> bool:
+            return True
+
+        def release(self) -> None:
+            pass
+
+    def _run(**kwargs) -> bool:
+        kwargs["mark_held_position_monitor_complete"]()
+        return True
+
+    main_module._held_position_monitor_active.clear()
+    main_module._held_position_monitor_bootstrap_complete.clear()
+    monkeypatch.setattr(main_module, "_edli_reactor_active_lock", ReactorGate())
+    monkeypatch.setattr(exit_module, "run_exit_monitor_cycle", _run)
+
+    assert main_module._exit_monitor_cycle(
+        target_families=frozenset({("Panama City", "2026-07-17", "high")}),
+        urgent_day0=True,
+    ) is True
+
+    assert main_module._held_position_monitor_active.is_set() is False
+    assert main_module._held_position_monitor_bootstrap_complete.is_set() is False
 
 
 def test_periodic_exit_monitor_yields_when_day0_arrives_during_handoff(
