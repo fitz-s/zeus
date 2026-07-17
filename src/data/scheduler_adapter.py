@@ -48,7 +48,10 @@ def executor_class_for(spec: SourceJobSpec) -> ExecutorClass:
         # file-only / non-DB jobs: heartbeat-class for diagnostics, io otherwise.
         return "heartbeat" if spec.role == "diagnostic" else "io"
     if spec.role == "live" or spec.role == "settlement":
-        if spec.job_id == "ingest_day0_metar_source_clock":
+        if spec.job_id in {
+            "ingest_day0_metar_source_clock",
+            "ingest_day0_metar_commit_retry",
+        }:
             return "source_clock_db"
         # Settlement is live-critical EXCEPT historical UMA, which is a backfill concern.
         if spec.source_id == "polymarket_uma_oo_v2":

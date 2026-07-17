@@ -138,6 +138,12 @@ _INGEST_MAIN: tuple[SourceJobSpec, ...] = (
                   notes="5s default source-clock batch poll; HTTP precedes the bounded live "
                         "world-writer attempt, unchanged publication identities perform no DB "
                         "work, and committed Day0 extreme events wake the canonical reactor"),
+    SourceJobSpec("ingest_day0_metar_commit_retry", "ingest_main", "live", "default", True,
+                  source_id="aviationweather_metar",
+                  callable_ref="_day0_metar_commit_retry_tick", family="observation",
+                  misfire_grace_time=1,
+                  notes="sub-second retry of an already-fetched Day0 METAR canonical write; "
+                        "performs no network I/O and shares the source-clock executor lane"),
     SourceJobSpec("ingest_day0_oracle_anomaly", "ingest_main", "live", "default", True,
                   source_ids=("aviationweather_metar", "wu_icao_history"),
                   callable_ref="_day0_oracle_anomaly_tick", family="observation",
