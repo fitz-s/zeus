@@ -67,27 +67,29 @@ def test_market_channel_bootstrap_separates_entry_and_held_exit_metadata() -> No
         if isinstance(node, ast.FunctionDef)
         and node.name == "_edli_market_channel_ingestor_cycle"
     )
-    calls = [
+    entry_calls = [
+        call
+        for call in ast.walk(cycle)
+        if isinstance(call, ast.Call)
+        and isinstance(call.func, ast.Name)
+        and call.func.id == "active_weather_token_metadata_from_snapshots"
+    ]
+    exit_calls = [
         call
         for call in ast.walk(cycle)
         if isinstance(call, ast.Call)
         and isinstance(call.func, ast.Name)
         and call.func.id == "active_weather_token_metadata_for_tokens"
     ]
-    purposes = [
-        next(
-            (
-                keyword.value.value
-                for keyword in call.keywords
-                if keyword.arg == "purpose"
-                and isinstance(keyword.value, ast.Constant)
-            ),
-            "entry",
-        )
-        for call in calls
-    ]
-
-    assert purposes == ["entry", "exit"]
+    assert len(entry_calls) == 1
+    assert any(keyword.arg == "priority_token_ids" for keyword in entry_calls[0].keywords)
+    assert len(exit_calls) == 1
+    assert any(
+        keyword.arg == "purpose"
+        and isinstance(keyword.value, ast.Constant)
+        and keyword.value.value == "exit"
+        for keyword in exit_calls[0].keywords
+    )
 
 
 def test_candidate_quote_refresh_budget_matches_live_redecision_surface() -> None:

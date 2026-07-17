@@ -2632,7 +2632,10 @@ def _edli_market_channel_ingestor_cycle() -> dict | None:
         )
         return health
 
-    from src.events.triggers.market_channel_ingestor import active_weather_token_metadata_for_tokens
+    from src.events.triggers.market_channel_ingestor import (
+        active_weather_token_metadata_for_tokens,
+        active_weather_token_metadata_from_snapshots,
+    )
     from src.state.db import (
         get_forecasts_connection_read_only,
         get_trade_connection,
@@ -2688,9 +2691,9 @@ def _edli_market_channel_ingestor_cycle() -> dict | None:
             priority_token_ids,
         )
         entry_token_ids = set(priority_token_ids)
-        token_metadata = active_weather_token_metadata_for_tokens(
+        token_metadata = active_weather_token_metadata_from_snapshots(
             trade_conn,
-            token_ids=entry_token_ids,
+            priority_token_ids=entry_token_ids,
         )
         token_metadata.update(
             active_weather_token_metadata_for_tokens(
