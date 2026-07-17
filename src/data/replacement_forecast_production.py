@@ -326,6 +326,7 @@ def _download_replacement_forecast_current_targets_if_needed(
         missing_manifests_only=not cycle_advanced,
         precomputed_plan=plan,
         max_wall_clock_seconds=remaining,
+        fetch_workers=int(cfg.get("source_clock_fanout_workers") or 4),
     )
 
 
@@ -1422,6 +1423,7 @@ def _replacement_cycle_availability_poll_if_needed(
                 release_lag_hours=float(cfg.get("download_release_lag_hours") or 14.0),
                 anchor_sigma_c=float(cfg.get("download_anchor_sigma_c") or 3.0),
                 include_covered=True,
+                fetch_workers=int(cfg.get("source_clock_fanout_workers") or 4),
             )
             report["legs_fetched"].append({"leg": leg, "cycle": cycle.isoformat()})  # type: ignore[union-attr]
         except Exception as exc:  # noqa: BLE001 — anchor fail-soft; next tick retries

@@ -42,6 +42,7 @@ def fetch(
     endpoint_label: str = "",
     fast_fail_429: bool = False,
     quota: OpenMeteoQuotaTracker | None = None,
+    client: httpx.Client | None = None,
 ) -> dict:
     """GET an Open-Meteo endpoint with retries, 429 handling, and quota tracking.
 
@@ -64,7 +65,8 @@ def fetch(
     last_exc: Exception | None = None
     for attempt in range(max_retries):
         try:
-            resp = httpx.get(url, params=params, timeout=timeout)
+            get = client.get if client is not None else httpx.get
+            resp = get(url, params=params, timeout=timeout)
 
             if resp.status_code == 429:
                 retry_after = resp.headers.get("Retry-After")

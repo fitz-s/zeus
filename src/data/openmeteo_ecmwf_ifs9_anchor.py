@@ -236,6 +236,7 @@ def fetch_openmeteo_ecmwf_ifs9_anchor_payload(
     timeout: float = 30.0,
     max_retries: int = 3,
     fast_fail_429: bool = False,
+    client: Any = None,
 ) -> Mapping[str, Any]:
     """Fetch a run-pinned Open-Meteo ECMWF IFS 9km Single Runs payload."""
 
@@ -243,6 +244,9 @@ def fetch_openmeteo_ecmwf_ifs9_anchor_payload(
         raise TypeError("request must be OpenMeteoEcmwfIfs9AnchorRequest")
     from src.data.openmeteo_client import fetch
 
+    fetch_kwargs: dict[str, Any] = {}
+    if client is not None:
+        fetch_kwargs["client"] = client
     payload = fetch(
         SINGLE_RUNS_FORECAST_URL,
         request.params(),
@@ -250,6 +254,7 @@ def fetch_openmeteo_ecmwf_ifs9_anchor_payload(
         max_retries=max_retries,
         endpoint_label="openmeteo_ecmwf_ifs9_single_runs_anchor",
         fast_fail_429=fast_fail_429,
+        **fetch_kwargs,
     )
     if not isinstance(payload, Mapping):
         raise ValueError("Open-Meteo ECMWF IFS 9km response must be a JSON object")
@@ -261,6 +266,7 @@ def fetch_openmeteo_ifs9_model_meta(
     timeout: float = 20.0,
     max_retries: int = 2,
     fast_fail_429: bool = False,
+    client: Any = None,
 ) -> Mapping[str, Any]:
     """Provider-declared run metadata for the ecmwf_ifs (9km) model.
 
@@ -271,6 +277,9 @@ def fetch_openmeteo_ifs9_model_meta(
     completed ingestion (the atomicity marker for meta-stamped fetches)."""
     from src.data.openmeteo_client import fetch
 
+    fetch_kwargs: dict[str, Any] = {}
+    if client is not None:
+        fetch_kwargs["client"] = client
     meta = fetch(
         MODEL_META_URL,
         {},
@@ -278,6 +287,7 @@ def fetch_openmeteo_ifs9_model_meta(
         max_retries=max_retries,
         endpoint_label="openmeteo_ecmwf_ifs9_model_meta",
         fast_fail_429=fast_fail_429,
+        **fetch_kwargs,
     )
     if not isinstance(meta, Mapping):
         raise ValueError("Open-Meteo model meta must be a JSON object")
@@ -294,6 +304,70 @@ def fetch_openmeteo_ifs9_model_meta(
     return out
 
 
+def fetch_openmeteo_ecmwf_ifs9_anchor_payload_standard_unstamped(
+    request: OpenMeteoEcmwfIfs9AnchorRequest,
+    *,
+    timeout: float = 30.0,
+    max_retries: int = 3,
+    fast_fail_429: bool = False,
+    client: Any = None,
+) -> Mapping[str, Any]:
+    """Fetch the standard API payload; caller must bracket it with provider metadata."""
+    if not isinstance(request, OpenMeteoEcmwfIfs9AnchorRequest):
+        raise TypeError("request must be OpenMeteoEcmwfIfs9AnchorRequest")
+    from src.data.openmeteo_client import fetch
+
+    params = {k: v for k, v in request.params().items() if k != "run"}
+    fetch_kwargs: dict[str, Any] = {}
+    if client is not None:
+        fetch_kwargs["client"] = client
+    payload = fetch(
+        STANDARD_FORECAST_URL,
+        params,
+        timeout=timeout,
+        max_retries=max_retries,
+        endpoint_label="openmeteo_ecmwf_ifs9_standard_meta_stamped_anchor",
+        fast_fail_429=fast_fail_429,
+        **fetch_kwargs,
+    )
+    if not isinstance(payload, Mapping):
+        raise ValueError("Open-Meteo ECMWF IFS 9km response must be a JSON object")
+    return payload
+
+
+def validate_openmeteo_ecmwf_ifs9_meta_window(
+    request: OpenMeteoEcmwfIfs9AnchorRequest,
+    meta_before: Mapping[str, Any],
+    meta_after: Mapping[str, Any],
+) -> Mapping[str, Any]:
+    """Validate one payload or payload wave against a provider metadata window."""
+    declared_run = meta_before["run_initialisation_utc"]
+    if declared_run != request.run:
+        raise ValueError(
+            "meta-stamped anchor fetch refused: provider declares run "
+            f"{declared_run.isoformat()} but caller wants {request.run.isoformat()}"
+        )
+    if meta_before["run_availability_utc"] < declared_run:
+        raise ValueError("meta-stamped anchor fetch refused: declared run not yet complete")
+    if meta_after["run_initialisation_utc"] != declared_run:
+        raise ValueError(
+            "meta-stamped anchor fetch discarded: provider changed the declared run mid-fetch"
+        )
+    if meta_after["run_modification_utc"] != meta_before["run_modification_utc"]:
+        raise ValueError(
+            "meta-stamped anchor fetch discarded: provider modified the model dataset "
+            "mid-fetch (possible mixed-run payload); retry next tick"
+        )
+    return {
+        "openmeteo_endpoint": "standard_api_meta_stamped",
+        "run_authority": RUN_AUTHORITY_META_DECLARED,
+        "meta_run_initialisation_utc": declared_run.isoformat(),
+        "meta_run_availability_utc": meta_before["run_availability_utc"].isoformat(),
+        "meta_run_modification_utc": meta_before["run_modification_utc"].isoformat(),
+        "cross_check_status": "PENDING_SINGLE_RUNS_PUBLICATION",
+    }
+
+
 def fetch_openmeteo_ecmwf_ifs9_anchor_payload_meta_stamped(
     request: OpenMeteoEcmwfIfs9AnchorRequest,
     *,
@@ -301,6 +375,7 @@ def fetch_openmeteo_ecmwf_ifs9_anchor_payload_meta_stamped(
     max_retries: int = 3,
     fast_fail_429: bool = False,
     meta_fetch: Any = None,
+    client: Any = None,
 ) -> tuple[Mapping[str, Any], Mapping[str, Any]]:
     """Fetch the CURRENT run from the standard forecast API with provider meta run-stamp.
 
@@ -318,8 +393,6 @@ def fetch_openmeteo_ecmwf_ifs9_anchor_payload_meta_stamped(
     cross-check can find these artifacts."""
     if not isinstance(request, OpenMeteoEcmwfIfs9AnchorRequest):
         raise TypeError("request must be OpenMeteoEcmwfIfs9AnchorRequest")
-    from src.data.openmeteo_client import fetch
-
     def _fetch_meta() -> Mapping[str, Any]:
         if meta_fetch is not None:
             return meta_fetch(timeout=timeout)
@@ -327,42 +400,19 @@ def fetch_openmeteo_ecmwf_ifs9_anchor_payload_meta_stamped(
             timeout=timeout,
             max_retries=max_retries,
             fast_fail_429=fast_fail_429,
+            client=client,
         )
 
     meta_before = _fetch_meta()
-    declared_run = meta_before["run_initialisation_utc"]
-    if declared_run != request.run:
-        raise ValueError(
-            "meta-stamped anchor fetch refused: provider declares run "
-            f"{declared_run.isoformat()} but caller wants {request.run.isoformat()}"
-        )
-    if meta_before["run_availability_utc"] < meta_before["run_initialisation_utc"]:
-        raise ValueError("meta-stamped anchor fetch refused: declared run not yet complete")
-    params = {k: v for k, v in request.params().items() if k != "run"}
-    payload = fetch(
-        STANDARD_FORECAST_URL,
-        params,
+    payload = fetch_openmeteo_ecmwf_ifs9_anchor_payload_standard_unstamped(
+        request,
         timeout=timeout,
         max_retries=max_retries,
-        endpoint_label="openmeteo_ecmwf_ifs9_standard_meta_stamped_anchor",
         fast_fail_429=fast_fail_429,
+        client=client,
     )
-    if not isinstance(payload, Mapping):
-        raise ValueError("Open-Meteo ECMWF IFS 9km response must be a JSON object")
     meta_after = _fetch_meta()
-    if meta_after["run_modification_utc"] != meta_before["run_modification_utc"]:
-        raise ValueError(
-            "meta-stamped anchor fetch discarded: provider modified the model dataset "
-            "mid-fetch (possible mixed-run payload); retry next tick"
-        )
-    provenance: dict[str, Any] = {
-        "openmeteo_endpoint": "standard_api_meta_stamped",
-        "run_authority": RUN_AUTHORITY_META_DECLARED,
-        "meta_run_initialisation_utc": declared_run.isoformat(),
-        "meta_run_availability_utc": meta_before["run_availability_utc"].isoformat(),
-        "meta_run_modification_utc": meta_before["run_modification_utc"].isoformat(),
-        "cross_check_status": "PENDING_SINGLE_RUNS_PUBLICATION",
-    }
+    provenance = validate_openmeteo_ecmwf_ifs9_meta_window(request, meta_before, meta_after)
     return payload, provenance
 
 

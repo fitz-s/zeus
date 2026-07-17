@@ -17,7 +17,9 @@ Cross-module invariant (plan coverage -> download gate boundary):
 """
 from __future__ import annotations
 
+import json
 import sqlite3
+import threading
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -138,6 +140,153 @@ def test_anchor_ladder_skips_single_runs_when_source_clock_says_not_public(monke
     assert provenance["run_authority"] == "bucket_partial_run_test"
 
 
+def test_meta_stamped_wave_brackets_concurrent_payloads_once(monkeypatch) -> None:
+    import scripts.download_replacement_forecast_current_targets as dl
+    from src.data.openmeteo_ecmwf_ifs9_anchor import build_anchor_request
+
+    requests = {
+        (f"City {i}", "2026-06-25"): build_anchor_request(
+            latitude=30.0 + i,
+            longitude=10.0 + i,
+            run="2026-06-25T12:00:00+00:00",
+            timezone_name="UTC",
+        )
+        for i in range(4)
+    }
+    meta = {
+        "run_initialisation_utc": datetime(2026, 6, 25, 12, tzinfo=timezone.utc),
+        "run_availability_utc": datetime(2026, 6, 25, 13, tzinfo=timezone.utc),
+        "run_modification_utc": datetime(2026, 6, 25, 13, tzinfo=timezone.utc),
+    }
+    events: list[str] = []
+    barrier = threading.Barrier(4)
+
+    def _meta(**_kwargs):
+        events.append("meta")
+        return meta
+
+    def _payload(_request, **_kwargs):
+        events.append("payload-start")
+        barrier.wait(timeout=1.0)
+        events.append("payload-done")
+        return {"hourly": {"time": [], "temperature_2m": []}}
+
+    monkeypatch.setattr(dl, "fetch_openmeteo_ifs9_model_meta", _meta)
+    monkeypatch.setattr(
+        dl,
+        "fetch_openmeteo_ecmwf_ifs9_anchor_payload_standard_unstamped",
+        _payload,
+    )
+
+    resolved, failures = dl._fetch_meta_stamped_anchor_wave(
+        requests,
+        max_workers=4,
+        deadline_monotonic=None,
+        client=object(),
+    )
+
+    assert failures == {}
+    assert set(resolved) == set(requests)
+    assert events.count("meta") == 2
+    assert events[0] == events[-1] == "meta"
+    assert all(row[1]["meta_stamp_scope"] == "download_wave" for row in resolved.values())
+
+
+def test_meta_stamped_wave_discards_every_payload_when_provider_changes_run(
+    monkeypatch,
+) -> None:
+    import scripts.download_replacement_forecast_current_targets as dl
+    from src.data.openmeteo_ecmwf_ifs9_anchor import build_anchor_request
+
+    request = build_anchor_request(
+        latitude=33.63,
+        longitude=-84.44,
+        run="2026-06-25T12:00:00+00:00",
+        timezone_name="UTC",
+    )
+    metas = iter(
+        (
+            {
+                "run_initialisation_utc": request.run,
+                "run_availability_utc": request.run,
+                "run_modification_utc": request.run,
+            },
+            {
+                "run_initialisation_utc": request.run,
+                "run_availability_utc": request.run,
+                "run_modification_utc": request.run.replace(hour=13),
+            },
+        )
+    )
+    monkeypatch.setattr(dl, "fetch_openmeteo_ifs9_model_meta", lambda **_kwargs: next(metas))
+    monkeypatch.setattr(
+        dl,
+        "fetch_openmeteo_ecmwf_ifs9_anchor_payload_standard_unstamped",
+        lambda *_args, **_kwargs: {"hourly": {}},
+    )
+
+    requests = {("Atlanta", "2026-06-25"): request, ("Paris", "2026-06-25"): request}
+    resolved, failures = dl._fetch_meta_stamped_anchor_wave(
+        requests,
+        max_workers=2,
+        deadline_monotonic=None,
+        client=object(),
+    )
+
+    assert resolved == {}
+    assert set(failures) == set(requests)
+    assert all("mid-fetch" in str(exc) for exc in failures.values())
+
+
+def test_direct_downloader_uses_payload_completion_as_possession_time(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    import scripts.download_replacement_forecast_current_targets as dl
+
+    row = _TargetRow(
+        city="London",
+        target_date="2026-06-10",
+        temperature_metric="high",
+        covered=False,
+        missing_openmeteo_manifest=True,
+    )
+    captured_at = datetime(2026, 6, 9, 13, 59, 45, tzinfo=timezone.utc)
+    provenance = {
+        "openmeteo_endpoint": "standard_api_meta_stamped",
+        "run_authority": "provider_meta_declared",
+    }
+    monkeypatch.setattr(dl, "_single_runs_public_for_request", lambda _request: False)
+
+    def _wave(requests, **_kwargs):
+        key = next(iter(requests))
+        return {
+            key: (
+                {"hourly": {"time": [], "temperature_2m": []}},
+                provenance,
+                captured_at,
+            )
+        }, {}
+
+    monkeypatch.setattr(dl, "_fetch_meta_stamped_anchor_wave", _wave)
+
+    report = dl.download_current_target_raw_inputs(
+        forecast_db=tmp_path / "forecasts.db",
+        output_dir=tmp_path / "raw",
+        cycle=AVAILABLE_CYCLE,
+        limit=None,
+        write_db=False,
+        release_lag_hours=14.0,
+        anchor_sigma_c=3.0,
+        include_covered=True,
+        precomputed_plan=_PlanStub(ready=False, rows=(row,)),
+    )
+
+    manifest = json.loads(Path(report["written_manifests"][0]).read_text())
+    assert manifest["captured_at"] == captured_at.isoformat()
+    assert manifest["source_available_at"] == captured_at.isoformat()
+
+
 def _wire(monkeypatch, *, plan: _PlanStub, calls: list):
     import scripts.download_replacement_forecast_current_targets as dl
     import src.data.replacement_forecast_current_target_plan as plan_mod
@@ -196,6 +345,7 @@ def _cfg(db: Path, tmp_path: Path) -> dict:
         "download_limit": 10,
         "download_anchor_sigma_c": 3.0,
         "download_aifs_retries": 1,
+        "source_clock_fanout_workers": 6,
     }
 
 
@@ -215,6 +365,7 @@ def test_ready_plan_with_stale_artifacts_still_downloads_new_cycle(tmp_path, mon
     )
     assert len(calls) == 1
     assert calls[0]["cycle"] == AVAILABLE_CYCLE
+    assert calls[0]["fetch_workers"] == 6
 
 
 def test_ready_plan_with_current_artifacts_skips_without_download(tmp_path, monkeypatch) -> None:

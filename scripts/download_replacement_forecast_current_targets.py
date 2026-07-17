@@ -17,6 +17,7 @@ import sys
 import tempfile
 import time
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -34,6 +35,9 @@ from src.data.openmeteo_ecmwf_ifs9_anchor import (  # noqa: E402
     build_anchor_request,
     build_openmeteo_ecmwf_ifs9_anchor_artifact_manifest,
     fetch_openmeteo_ecmwf_ifs9_anchor_payload,
+    fetch_openmeteo_ecmwf_ifs9_anchor_payload_standard_unstamped,
+    fetch_openmeteo_ifs9_model_meta,
+    validate_openmeteo_ecmwf_ifs9_meta_window,
 )
 from src.data.raw_forecast_artifact_manifest import (  # noqa: E402
     RawForecastArtifactManifest,
@@ -338,6 +342,8 @@ def _resolve_anchor_payload(
     timezone_name: str,
     deadline_monotonic: float | None = None,
     bucket_manifest_provider: Callable[[], dict] | None = None,
+    client: httpx.Client | None = None,
+    meta_wave_failure: Exception | None = None,
 ) -> tuple[dict, dict]:
     """Resolve one city's anchor payload through the full transport ladder.
 
@@ -372,11 +378,20 @@ def _resolve_anchor_payload(
     def _exception_summary(exc: Exception) -> str:
         return f"{type(exc).__name__}: {str(exc)[:160]}"
 
-    # Rung 1: run-pinned single-runs (strongest provenance).
+    # A failed wave has already bracketed the provider's standard endpoint. Retrying both
+    # HTTP rungs per city would recreate the waterfall; preserve the refusal and continue at
+    # the independent bucket transport.
     single_runs_exc: Exception
-    if _single_runs_public_for_request(request):
+    if meta_wave_failure is not None:
+        single_runs_exc = RuntimeError(
+            "single-runs rung skipped: source-clock metadata says requested run is not public yet"
+        )
+        rung2_reason: Exception = meta_wave_failure
+    elif _single_runs_public_for_request(request):
         try:
             kwargs: dict[str, object] = {"fast_fail_429": True}
+            if client is not None:
+                kwargs["client"] = client
             if deadline_monotonic is not None:
                 kwargs.update(
                     timeout=_deadline_timeout(deadline_monotonic, default=30.0),
@@ -403,33 +418,36 @@ def _resolve_anchor_payload(
         )
 
     # Rung 2: meta-stamped standard API (provider-declared run + atomicity).
-    try:
-        kwargs = {"fast_fail_429": True}
-        if deadline_monotonic is not None:
-            kwargs.update(
-                timeout=_deadline_timeout(deadline_monotonic, default=30.0),
-                max_retries=1,
+    if meta_wave_failure is None:
+        try:
+            kwargs = {"fast_fail_429": True}
+            if client is not None:
+                kwargs["client"] = client
+            if deadline_monotonic is not None:
+                kwargs.update(
+                    timeout=_deadline_timeout(deadline_monotonic, default=30.0),
+                    max_retries=1,
+                )
+            payload, meta_provenance = fetch_openmeteo_ecmwf_ifs9_anchor_payload_meta_stamped(
+                request, **kwargs
             )
-        payload, meta_provenance = fetch_openmeteo_ecmwf_ifs9_anchor_payload_meta_stamped(
-            request, **kwargs
-        )
-        provenance = dict(meta_provenance)
-        provenance["single_runs_fallback_reason"] = _exception_summary(single_runs_exc)
-        return payload, provenance
-    except httpx.HTTPStatusError as meta_status_exc:
-        # 429/5xx = provider-side unavailability (degrade to rung 3); other 4xx = our defect.
-        status_code = meta_status_exc.response.status_code
-        if status_code != 429 and status_code < 500:
-            raise
-        rung2_reason: Exception = meta_status_exc
-    except RuntimeError as meta_runtime_exc:
-        if not _is_transient_provider_failure(meta_runtime_exc):
-            raise
-        rung2_reason = meta_runtime_exc
-    except (ValueError, httpx.TransportError) as meta_exc:
-        # ValueError = meta REFUSAL (older run; never weakened); TransportError = provider
-        # unreachable. Both degrade to rung 3 (the bucket is independent infrastructure).
-        rung2_reason = meta_exc
+            provenance = dict(meta_provenance)
+            provenance["single_runs_fallback_reason"] = _exception_summary(single_runs_exc)
+            return payload, provenance
+        except httpx.HTTPStatusError as meta_status_exc:
+            # 429/5xx = provider-side unavailability (degrade to rung 3); other 4xx = our defect.
+            status_code = meta_status_exc.response.status_code
+            if status_code != 429 and status_code < 500:
+                raise
+            rung2_reason = meta_status_exc
+        except RuntimeError as meta_runtime_exc:
+            if not _is_transient_provider_failure(meta_runtime_exc):
+                raise
+            rung2_reason = meta_runtime_exc
+        except (ValueError, httpx.TransportError) as meta_exc:
+            # ValueError = meta REFUSAL (older run; never weakened); TransportError = provider
+            # unreachable. Both degrade to rung 3 (the bucket is independent infrastructure).
+            rung2_reason = meta_exc
 
     # Rung 3: S3 bucket partial-run (whitelisted cities only).
     rung_three_kwargs: dict[str, object] = {
@@ -449,6 +467,74 @@ def _resolve_anchor_payload(
     )
 
 
+def _fetch_meta_stamped_anchor_wave(
+    requests: dict[tuple[str, str], object],
+    *,
+    max_workers: int,
+    deadline_monotonic: float | None,
+    client: httpx.Client,
+) -> tuple[
+    dict[tuple[str, str], tuple[dict, dict[str, object], datetime]],
+    dict[tuple[str, str], Exception],
+]:
+    """Fetch a CURRENT-run city wave under one provider metadata bracket."""
+    if not requests:
+        return {}, {}
+    request0 = next(iter(requests.values()))
+    timeout = _deadline_timeout(deadline_monotonic, default=30.0)
+    meta_before = fetch_openmeteo_ifs9_model_meta(
+        timeout=timeout,
+        max_retries=1,
+        fast_fail_429=True,
+        client=client,
+    )
+    # Refuse before issuing city payload requests when the provider does not declare this run.
+    validate_openmeteo_ecmwf_ifs9_meta_window(request0, meta_before, meta_before)
+
+    payloads: dict[tuple[str, str], tuple[dict, datetime]] = {}
+    failures: dict[tuple[str, str], Exception] = {}
+    workers = min(max(1, int(max_workers)), 8, len(requests))
+    with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="openmeteo-anchor") as executor:
+        future_keys = {
+            executor.submit(
+                fetch_openmeteo_ecmwf_ifs9_anchor_payload_standard_unstamped,
+                request,
+                timeout=_deadline_timeout(deadline_monotonic, default=30.0),
+                max_retries=1,
+                fast_fail_429=True,
+                client=client,
+            ): key
+            for key, request in requests.items()
+        }
+        for future in as_completed(future_keys):
+            key = future_keys[future]
+            try:
+                payloads[key] = (dict(future.result()), datetime.now(tz=UTC))
+            except Exception as exc:  # each city retains its independent bucket fallback
+                failures[key] = exc
+
+    meta_after = fetch_openmeteo_ifs9_model_meta(
+        timeout=_deadline_timeout(deadline_monotonic, default=20.0),
+        max_retries=1,
+        fast_fail_429=True,
+        client=client,
+    )
+    try:
+        provenance = dict(
+            validate_openmeteo_ecmwf_ifs9_meta_window(request0, meta_before, meta_after)
+        )
+    except Exception as exc:
+        failures.update({key: exc for key in payloads})
+        return {}, failures
+    provenance["meta_stamp_scope"] = "download_wave"
+    provenance["meta_stamp_wave_payload_count"] = len(payloads)
+    resolved = {
+        key: (payload, dict(provenance), captured_at)
+        for key, (payload, captured_at) in payloads.items()
+    }
+    return resolved, failures
+
+
 def download_current_target_raw_inputs(
     *,
     forecast_db: Path,
@@ -462,6 +548,7 @@ def download_current_target_raw_inputs(
     missing_manifests_only: bool = False,
     precomputed_plan: ReplacementForecastCurrentTargetPlan | None = None,
     max_wall_clock_seconds: float | None = None,
+    fetch_workers: int = 4,
 ) -> dict[str, object]:
     # Fetch the FULL plan (no limit) so uncovered cities beyond the first `limit`
     # alphabetical slots are visible.  The per-cycle cap is applied AFTER filtering
@@ -501,16 +588,8 @@ def download_current_target_raw_inputs(
     output_dir.mkdir(parents=True, exist_ok=True)
     raw_dir = output_dir / cycle.strftime("%Y%m%dT%H%M%SZ")
     raw_dir.mkdir(parents=True, exist_ok=True)
-    captured_at = datetime.now(tz=UTC)
-    # PROOF-OF-POSSESSION bound (2026-06-11, Fitz #4): probe-resolved run selection fetches
-    # runs the moment a transport serves them — routinely BEFORE the nominal cycle+lag
-    # publication model. Possessing the data at captured_at PROVES it was available by then,
-    # so source_available_at = min(captured_at, nominal). Stamping the nominal future time
-    # would hide the freshly fetched manifest from seed discovery (which admits only
-    # source_available_at <= now) until the lag caught up — defeating the early fetch.
-    # When capture happens after the nominal lag (backfill), the nominal model stands.
-    source_available = min(
-        captured_at, _source_available_at(cycle, release_lag_hours=release_lag_hours)
+    nominal_source_available = _source_available_at(
+        cycle, release_lag_hours=release_lag_hours
     )
     manifests: list[RawForecastArtifactManifest] = []
     skipped_cities: list[dict[str, object]] = []
@@ -518,13 +597,18 @@ def download_current_target_raw_inputs(
         "openmeteo_payload_count": 0,
         "precision_metadata_count": 0,
         "openmeteo_transport_fetch_count": 0,
+        "openmeteo_model_meta_fetch_count": 0,
+        "openmeteo_wave_payload_count": 0,
     }
     deadline_monotonic = (
         time.monotonic() + max(0.0, float(max_wall_clock_seconds))
         if max_wall_clock_seconds is not None
         else None
     )
-    resolved_payloads: dict[tuple[str, str], tuple[dict, dict[str, object]]] = {}
+    resolved_payloads: dict[
+        tuple[str, str], tuple[dict, dict[str, object], datetime]
+    ] = {}
+    meta_wave_failures: dict[tuple[str, str], Exception] = {}
     unavailable_targets: set[tuple[str, str]] = set()
     processed_target_count = 0
     timeboxed_incomplete = False
@@ -544,118 +628,164 @@ def download_current_target_raw_inputs(
             )
         return bucket_manifests
 
+    pending_requests: dict[tuple[str, str], object] = {}
     for target in targets:
-        if deadline_monotonic is not None and time.monotonic() >= deadline_monotonic:
-            timeboxed_incomplete = True
-            break
-        target_key = (target.city, target.target_date)
         city_config = cities_by_name.get(target.city)
         if city_config is None:
-            processed_target_count += 1
             continue
+        target_key = (target.city, target.target_date)
         payload_path = raw_dir / f"openmeteo_{_safe_name(target.city)}_{target.target_date}_{target.temperature_metric}_{cycle.strftime('%Y%m%dT%H%M%SZ')}.json"
-        precision_path = raw_dir / f"openmeteo_precision_{_safe_name(target.city)}_{target.target_date}_{target.temperature_metric}.json"
-        request = build_anchor_request(
-            latitude=float(city_config.lat),
-            longitude=float(city_config.lon),
-            run=cycle,
-            timezone_name=city_config.timezone,
-            forecast_hours=120,
+        if payload_path.exists() and _json_file_valid(payload_path):
+            continue
+        pending_requests.setdefault(
+            target_key,
+            build_anchor_request(
+                latitude=float(city_config.lat),
+                longitude=float(city_config.lon),
+                run=cycle,
+                timezone_name=city_config.timezone,
+                forecast_hours=120,
+            ),
         )
-        anchor_transport_provenance: dict[str, object] = {
-            "openmeteo_endpoint": "single_runs_api",
-            "run_authority": "run_pinned_single_runs",
-        }
-        # Per-city fault isolation (2026-06-11): one city for which NO rung can serve this
-        # cycle (BucketTransportNotAdmissible — single-runs 400 + meta older-run + (bucket
-        # un-declared OR city not whitelisted OR a step unwritten)) must NOT abort the
-        # whole batch. The city is recorded as skipped and the loop continues; it falls to
-        # a higher rung next tick. This preserves — never weakens — the rung-2 refusal:
-        # a non-admissible city simply gets no artifact this cycle.
-        if (not payload_path.exists()) or (not _json_file_valid(payload_path)):
-            # Transport ladder (operator directive 2026-06-11, K4.0b(f)): rung 1 run-pinned
-            # single-runs → rung 2 meta-stamped standard → rung 3 S3 bucket partial-run.
-            # _resolve_anchor_payload encapsulates the whole ladder and returns
-            # (payload, provenance), or raises BucketTransportNotAdmissible when NO rung can
-            # serve this city this cycle (so the city is skipped, not the batch aborted).
-            try:
-                if target_key in unavailable_targets:
-                    raise BucketTransportNotAdmissible(
-                        "same city/date transport was already non-admissible this pass"
-                    )
-                cached = resolved_payloads.get(target_key)
-                if cached is None:
-                    payload, anchor_transport_provenance = _resolve_anchor_payload(
-                        request=request,
-                        city=target.city,
-                        target_date=target.target_date,
-                        timezone_name=city_config.timezone,
-                        deadline_monotonic=deadline_monotonic,
-                        bucket_manifest_provider=current_bucket_manifests,
-                    )
-                    resolved_payloads[target_key] = (
-                        payload,
-                        anchor_transport_provenance,
-                    )
-                    downloaded["openmeteo_transport_fetch_count"] = (
-                        int(downloaded["openmeteo_transport_fetch_count"]) + 1
-                    )
-                else:
-                    payload, anchor_transport_provenance = cached
-            except BucketTransportNotAdmissible as not_admissible:
-                unavailable_targets.add(target_key)
-                skipped_cities.append(
-                    {
-                        "city": target.city,
-                        "target_date": target.target_date,
-                        "metric": target.temperature_metric,
-                        "reason": str(not_admissible)[:200],
-                    }
-                )
-                processed_target_count += 1
-                continue
-            except TimeoutError:
+
+    openmeteo_client = httpx.Client()
+    if pending_requests and not _single_runs_public_for_request(next(iter(pending_requests.values()))):
+        try:
+            wave_resolved, meta_wave_failures = _fetch_meta_stamped_anchor_wave(
+                pending_requests,
+                max_workers=fetch_workers,
+                deadline_monotonic=deadline_monotonic,
+                client=openmeteo_client,
+            )
+            downloaded["openmeteo_model_meta_fetch_count"] = 2
+        except Exception as exc:
+            meta_wave_failures = {key: exc for key in pending_requests}
+            wave_resolved = {}
+            downloaded["openmeteo_model_meta_fetch_count"] = 1
+        resolved_payloads.update(wave_resolved)
+        downloaded["openmeteo_transport_fetch_count"] = len(wave_resolved)
+        downloaded["openmeteo_wave_payload_count"] = len(wave_resolved)
+
+    try:
+        for target in targets:
+            if deadline_monotonic is not None and time.monotonic() >= deadline_monotonic:
                 timeboxed_incomplete = True
                 break
-            _write_json(payload_path, payload)
-        _write_json(precision_path, _precision_metadata(target.city, target.target_date, anchor_sigma_c=anchor_sigma_c))
-        downloaded["openmeteo_payload_count"] = int(downloaded["openmeteo_payload_count"]) + 1
-        downloaded["precision_metadata_count"] = int(downloaded["precision_metadata_count"]) + 1
-        # source_available_at semantics by transport (Fitz #4): the API release-lag
-        # (cycle + ~14h) models when single-runs/standard PUBLISH a run. The S3 bucket
-        # serves a run's steps the moment they are WRITTEN — hours BEFORE that lag (the
-        # whole point of rung 3). Tagging a bucket artifact with the API lag would push its
-        # source_available_at into the future and hide it from seed discovery's
-        # availability filter (it admits only manifests with source_available_at <= now),
-        # so the early data would never materialize. For a bucket read the data is
-        # available at capture time; for rungs 1-2 keep the API release-lag.
-        is_bucket = str(anchor_transport_provenance.get("run_authority", "")).startswith("bucket_partial_run")
-        effective_source_available = captured_at if is_bucket else source_available
-        manifests.append(
-            build_openmeteo_ecmwf_ifs9_anchor_artifact_manifest(
-                payload_path,
-                request=request,
-                metric=target.temperature_metric,
-                source_available_at=effective_source_available.isoformat(),
-                captured_at=max(captured_at, effective_source_available).isoformat(),
-                product_metadata={
-                    "artifact_class": "openmeteo_ecmwf_ifs9_anchor_current_targets",
-                    "city": target.city,
-                    "cities": [target.city],
-                    "target_date": target.target_date,
-                    "target_dates": [target.target_date],
-                    "metric": target.temperature_metric,
-                    "source_run_id": (
-                        f"openmeteo-current-targets-{_safe_name(target.city)}-"
-                        f"{target.temperature_metric}-{cycle.strftime('%Y%m%dT%H%M%SZ')}"
-                    ),
-                    "openmeteo_payload_json": str(payload_path),
-                    "precision_metadata_json": str(precision_path),
-                    **anchor_transport_provenance,
-                },
+            target_key = (target.city, target.target_date)
+            city_config = cities_by_name.get(target.city)
+            if city_config is None:
+                processed_target_count += 1
+                continue
+            payload_path = raw_dir / f"openmeteo_{_safe_name(target.city)}_{target.target_date}_{target.temperature_metric}_{cycle.strftime('%Y%m%dT%H%M%SZ')}.json"
+            precision_path = raw_dir / f"openmeteo_precision_{_safe_name(target.city)}_{target.target_date}_{target.temperature_metric}.json"
+            request = pending_requests.get(target_key) or build_anchor_request(
+                latitude=float(city_config.lat),
+                longitude=float(city_config.lon),
+                run=cycle,
+                timezone_name=city_config.timezone,
+                forecast_hours=120,
             )
-        )
-        processed_target_count += 1
+            payload_captured_at = datetime.now(tz=UTC)
+            anchor_transport_provenance: dict[str, object] = {
+                "openmeteo_endpoint": "single_runs_api",
+                "run_authority": "run_pinned_single_runs",
+            }
+
+            if (not payload_path.exists()) or (not _json_file_valid(payload_path)):
+                try:
+                    if target_key in unavailable_targets:
+                        raise BucketTransportNotAdmissible(
+                            "same city/date transport was already non-admissible this pass"
+                        )
+                    cached = resolved_payloads.get(target_key)
+                    if cached is None:
+                        payload, anchor_transport_provenance = _resolve_anchor_payload(
+                            request=request,
+                            city=target.city,
+                            target_date=target.target_date,
+                            timezone_name=city_config.timezone,
+                            deadline_monotonic=deadline_monotonic,
+                            bucket_manifest_provider=current_bucket_manifests,
+                            client=openmeteo_client,
+                            meta_wave_failure=meta_wave_failures.get(target_key),
+                        )
+                        payload_captured_at = datetime.now(tz=UTC)
+                        resolved_payloads[target_key] = (
+                            payload,
+                            anchor_transport_provenance,
+                            payload_captured_at,
+                        )
+                        downloaded["openmeteo_transport_fetch_count"] = (
+                            int(downloaded["openmeteo_transport_fetch_count"]) + 1
+                        )
+                    else:
+                        payload, anchor_transport_provenance, payload_captured_at = cached
+                except BucketTransportNotAdmissible as not_admissible:
+                    unavailable_targets.add(target_key)
+                    skipped_cities.append(
+                        {
+                            "city": target.city,
+                            "target_date": target.target_date,
+                            "metric": target.temperature_metric,
+                            "reason": str(not_admissible)[:200],
+                        }
+                    )
+                    processed_target_count += 1
+                    continue
+                except TimeoutError:
+                    timeboxed_incomplete = True
+                    break
+                _write_json(payload_path, payload)
+            _write_json(
+                precision_path,
+                _precision_metadata(
+                    target.city,
+                    target.target_date,
+                    anchor_sigma_c=anchor_sigma_c,
+                ),
+            )
+            downloaded["openmeteo_payload_count"] = (
+                int(downloaded["openmeteo_payload_count"]) + 1
+            )
+            downloaded["precision_metadata_count"] = (
+                int(downloaded["precision_metadata_count"]) + 1
+            )
+
+            is_bucket = str(
+                anchor_transport_provenance.get("run_authority", "")
+            ).startswith("bucket_partial_run")
+            effective_source_available = (
+                payload_captured_at
+                if is_bucket
+                else min(payload_captured_at, nominal_source_available)
+            )
+            manifests.append(
+                build_openmeteo_ecmwf_ifs9_anchor_artifact_manifest(
+                    payload_path,
+                    request=request,
+                    metric=target.temperature_metric,
+                    source_available_at=effective_source_available.isoformat(),
+                    captured_at=payload_captured_at.isoformat(),
+                    product_metadata={
+                        "artifact_class": "openmeteo_ecmwf_ifs9_anchor_current_targets",
+                        "city": target.city,
+                        "cities": [target.city],
+                        "target_date": target.target_date,
+                        "target_dates": [target.target_date],
+                        "metric": target.temperature_metric,
+                        "source_run_id": (
+                            f"openmeteo-current-targets-{_safe_name(target.city)}-"
+                            f"{target.temperature_metric}-{cycle.strftime('%Y%m%dT%H%M%SZ')}"
+                        ),
+                        "openmeteo_payload_json": str(payload_path),
+                        "precision_metadata_json": str(precision_path),
+                        **anchor_transport_provenance,
+                    },
+                )
+            )
+            processed_target_count += 1
+    finally:
+        openmeteo_client.close()
 
     written_manifests: list[str] = []
     db_artifact_ids: list[int] = []
@@ -717,6 +847,7 @@ def download_current_target_raw_inputs(
         "timeboxed_incomplete": timeboxed_incomplete,
         "unattempted_target_count": len(targets) - processed_target_count,
         "max_wall_clock_seconds": max_wall_clock_seconds,
+        "fetch_workers": min(max(1, int(fetch_workers)), 8),
         "coverage_before": plan.as_dict(),
     }
 
@@ -734,6 +865,7 @@ def download_current_target_openmeteo_inputs(
     missing_manifests_only: bool = False,
     precomputed_plan: ReplacementForecastCurrentTargetPlan | None = None,
     max_wall_clock_seconds: float | None = None,
+    fetch_workers: int = 4,
 ) -> dict[str, object]:
     """Live replacement-chain downloader for Open-Meteo current-target inputs."""
 
@@ -749,6 +881,7 @@ def download_current_target_openmeteo_inputs(
         missing_manifests_only=missing_manifests_only,
         precomputed_plan=precomputed_plan,
         max_wall_clock_seconds=max_wall_clock_seconds,
+        fetch_workers=fetch_workers,
     )
 
 
