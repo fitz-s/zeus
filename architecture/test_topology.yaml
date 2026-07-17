@@ -237,12 +237,12 @@ test_trust_policy:
     tests/strategy/live_inference/test_no_trade_regret.py: {created: "2026-05-24", last_used: "2026-05-24"}
     tests/analysis/test_event_opportunity_report.py: {created: "2026-05-24", last_used: "2026-05-24"}
     tests/money_path/test_edli_online_invariants.py: {created: "2026-05-24", last_used: "2026-07-10", note: "EDLI arm/no-submit relationship antibodies, including portfolio snapshot fail-closed helper-to-adapter selection."}
-    tests/money_path/test_edli_live_readiness.py: {created: "2026-05-25", last_used: "2026-07-09", note: "Extended live entry provenance antibody: receipt buy-NO gate inputs survive into actionable/final/pre-submit payloads for real-order audit."}
+    tests/money_path/test_edli_live_readiness.py: {created: "2026-05-25", last_used: "2026-07-17", note: "Extended live entry provenance and startup-latency antibody: recoverable global entry pauses retain events, and the durable wake listener starts before APScheduler."}
     tests/money_path/test_mainstream_enforce_on_submit.py: {created: "2026-06-03", last_used: "2026-06-03", note: "PR-2 (B) F1 enforce: mainstream_agreement_enforce_on_submit blocks armed submit when selected candidate's verdict != True (fail-closed); reference selector stays reference-only"}
     tests/money_path/test_edli_order_lifecycle.py: {created: "2026-05-25", last_used: "2026-05-25"}
     tests/money_path/test_edli_live_bridge_allocator_refresh.py: {created: "2026-05-31", last_used: "2026-05-31"}
     tests/money_path/test_edli_bankroll_warm_cycle.py: {created: "2026-05-31", last_used: "2026-05-31"}
-    tests/money_path/test_edli_market_substrate_warm_cycle.py: {created: "2026-06-01", last_used: "2026-07-14", note: "Warm-lane decoupling + venue-close warm-skip relationship tests. Extended 2026-07-14 to prove exact selected-winner recapture owns the inline lock attempt before publishing a sidecar fallback while preserving bounded fail-closed behavior."}
+    tests/money_path/test_edli_market_substrate_warm_cycle.py: {created: "2026-06-01", last_used: "2026-07-17", note: "Warm-lane decoupling and durable-wake relationship tests, including retaining event-backed wakes while their events remain retryable."}
     tests/money_path/test_edli_durable_fill_bridge_scan.py: {created: "2026-06-01", last_used: "2026-06-03"}
     tests/state/test_edli_table_ownership.py: {created: "2026-05-24", last_used: "2026-06-26", note: "EDLI world/trade table ownership, including execution_feasibility_latest trade ownership."}
     tests/state/test_write_coordinator.py: {created: "2026-06-26", last_used: "2026-06-26", note: "Runtime DB write coordinator skeleton antibodies: same-file LIVE/BULK serialization, canonical multi-DB lease ordering, single-DB BEGIN IMMEDIATE commit/rollback telemetry, and rejection of fake independent multi-DB transactions."}

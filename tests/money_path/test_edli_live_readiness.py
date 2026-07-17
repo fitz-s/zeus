@@ -1,5 +1,5 @@
 # Created: 2026-05-25
-# Last reused/audited: 2026-07-14
+# Last reused/audited: 2026-07-17
 # Authority basis: docs/operations/current/finite_evidence_probability_symmetry/PLAN.md
 from __future__ import annotations
 
@@ -1008,6 +1008,59 @@ def test_entry_global_submit_guard_does_not_early_block_unconfigured(monkeypatch
     monkeypatch.setattr("src.risk_allocator.assert_global_submit_allows", _unexpected_submit_check)
 
     assert adapter._entry_global_submit_suppression_reason() is None
+
+
+def test_global_entry_health_pause_requeues_instead_of_burning_event():
+    from src.engine import event_reactor_adapter as adapter
+    from src.events.reactor import (
+        EventSubmissionReceipt,
+        GlobalBatchSubmitResult,
+        _is_transient_money_path_reason,
+    )
+
+    result = GlobalBatchSubmitResult(
+        receipts={
+            "event-1": EventSubmissionReceipt(
+                submitted=False,
+                event_id="event-1",
+                causal_snapshot_id="snapshot-1",
+                reason=(
+                    "GLOBAL_AUCTION_NO_TRADE:"
+                    "NO_CURRENT_EXECUTABLE_POSITIVE_ORDER"
+                ),
+                proof_accepted=False,
+            )
+        },
+        winner_event_id=None,
+        venue_submit_count=0,
+    )
+    suppression = (
+        "RISK_ALLOCATOR_GLOBAL_ENTRY_UNAVAILABLE:"
+        "reason=heartbeat_lost:reduce_only=True:"
+        "kill_switch_reason=heartbeat_lost"
+    )
+
+    retained = adapter._retain_transient_entry_suppressed_batch(
+        result,
+        suppression,
+    )
+
+    reason = retained.receipts["event-1"].reason
+    assert reason == f"GLOBAL_AUCTION_NO_TRADE:{suppression}"
+    assert _is_transient_money_path_reason(reason) is True
+
+
+def test_main_starts_durable_reactor_wake_listener_before_scheduler():
+    import src.main as main
+
+    body = inspect.getsource(main.main)
+
+    assert body.index("_assert_cascade_liveness_contract(scheduler)") < body.index(
+        "_start_edli_reactor_wake_listener()"
+    )
+    assert body.index("_start_edli_reactor_wake_listener()") < body.index(
+        "        scheduler.start()"
+    )
 
 
 def test_fixA_active_live_order_suppresses_new_submit():

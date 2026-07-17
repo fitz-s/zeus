@@ -1588,6 +1588,50 @@ def test_forecast_wake_is_not_blocked_by_held_position_monitor(monkeypatch):
     assert calls == ["reactor", "ack"]
 
 
+def test_event_backed_wake_stays_queued_while_event_is_retryable(monkeypatch):
+    from src.runtime import reactor_wake
+
+    wake = reactor_wake.ReactorWake(
+        "wake-price",
+        "2026-07-17T01:00:00+00:00",
+        "price_channel",
+        "market_price_advanced",
+        event_ids=("event-1",),
+    )
+
+    class _Lock:
+        def locked(self) -> bool:
+            return False
+
+    class _Held:
+        def is_set(self) -> bool:
+            return False
+
+    calls: list[str] = []
+    monkeypatch.setattr(reactor_wake, "read_reactor_wake", lambda: wake)
+    monkeypatch.setattr(
+        reactor_wake,
+        "acknowledge_reactor_wake",
+        lambda _wake: calls.append("ack") or True,
+    )
+    monkeypatch.setattr(main_module, "_edli_reactor_active_lock", _Lock())
+    monkeypatch.setattr(main_module, "_held_position_monitor_active", _Held())
+    monkeypatch.setattr(
+        main_module,
+        "_edli_event_reactor_cycle",
+        lambda **_kwargs: calls.append("reactor") or True,
+    )
+    monkeypatch.setattr(
+        main_module,
+        "_reactor_wake_events_finished",
+        lambda _event_ids: False,
+    )
+    monkeypatch.setattr(main_module, "_edli_last_reactor_wake_id", None)
+
+    assert main_module._edli_reactor_wake_poll_once() is False
+    assert calls == ["reactor"]
+
+
 def test_day0_wake_waits_for_active_held_position_monitor(monkeypatch):
     from src.runtime import reactor_wake
 

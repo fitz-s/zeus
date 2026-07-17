@@ -3786,6 +3786,45 @@ def _day0_wake_requires_exit_monitor(
             conn.close()
 
 
+def _reactor_wake_events_finished(event_ids: tuple[str, ...]) -> bool:
+    """Return whether every event-backed wake has left the active queue."""
+
+    clean_event_ids = tuple(
+        dict.fromkeys(
+            event_id
+            for value in event_ids
+            if (event_id := str(value).strip())
+        )
+    )
+    if not clean_event_ids:
+        return True
+    conn = None
+    try:
+        conn = get_world_connection_read_only()
+        placeholders = ",".join("?" for _ in clean_event_ids)
+        rows = conn.execute(
+            f"""
+            SELECT event_id, processing_status
+              FROM opportunity_event_processing
+             WHERE consumer_name = 'edli_reactor_v1'
+               AND event_id IN ({placeholders})
+            """,
+            clean_event_ids,
+        ).fetchall()
+    except Exception:
+        logger.warning(
+            "EDLI wake completion probe unavailable; leaving wake queued",
+            exc_info=True,
+        )
+        return False
+    finally:
+        if conn is not None:
+            conn.close()
+    if len(rows) != len(clean_event_ids):
+        return False
+    return all(str(row[1]) not in {"pending", "processing"} for row in rows)
+
+
 def _edli_reactor_wake_poll_once() -> bool:
     """Run the canonical reactor once for a new durable-producer wake hint."""
 
@@ -3861,6 +3900,8 @@ def _edli_reactor_wake_poll_once() -> bool:
             producer_wake_families=wake_families,
         )
     if ran is not True:
+        return False
+    if wake_event_ids and not _reactor_wake_events_finished(wake_event_ids):
         return False
     acknowledged = (
         acknowledge_reactor_wake(wake)
@@ -6332,6 +6373,12 @@ def main():
     # all scheduler.add_job calls so it sees the complete job set, and
     # BEFORE scheduler.start() so a contract violation prevents booting.
     _assert_cascade_liveness_contract(scheduler)
+
+    # Producer commits are already durable before this process is ready.  Start
+    # their low-latency consumer before APScheduler can launch periodic monitor
+    # work; the interval reactor remains the recovery scan when a wake is lost.
+    if live_execution_mode in EDLI_EVENT_DRIVEN_MODES and edli_cfg.get("enabled"):
+        _start_edli_reactor_wake_listener()
 
     # Phase 3: K2 ingest jobs removed from this scheduler block.
     # All K2 ticks, etl_recalibrate, ecmwf_open_data, automation_analysis,

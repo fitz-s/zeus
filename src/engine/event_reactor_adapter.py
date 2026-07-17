@@ -253,7 +253,12 @@ from src.events.live_order_aggregate import LiveOrderAggregateError, LiveOrderAg
 from src.events.money_path_adapters import evaluate_fdr_full_family, evaluate_kelly, evaluate_riskguard
 from src.events.opportunity_book import OpportunityBook, build_family_opportunity_book
 from src.events.opportunity_event import OpportunityEvent
-from src.events.reactor import EventSubmissionReceipt, OpportunityEventReactor, ReactorConfig
+from src.events.reactor import (
+    EventSubmissionReceipt,
+    GlobalBatchSubmitResult,
+    OpportunityEventReactor,
+    ReactorConfig,
+)
 from src.riskguard.risk_level import RiskLevel
 from src.sizing.sizing_context import SizingContext
 from src.sizing.portfolio_reservation import PortfolioReservationLedger
@@ -2657,6 +2662,42 @@ def _entry_global_submit_suppression_reason() -> str | None:
             f"reason={reason}:reduce_only={reduce_only}:kill_switch_reason={kill_reason}"
         )
     return None
+
+
+_ENTRY_SUPPRESSED_ECONOMIC_NO_TRADE_REASONS = frozenset(
+    {
+        "GLOBAL_AUCTION_NO_TRADE:CASH_DOMINATES",
+        "GLOBAL_AUCTION_NO_TRADE:NO_CURRENT_EXECUTABLE_POSITIVE_ORDER",
+        "GLOBAL_AUCTION_NO_TRADE:ROBUST_MAJORITY_LOSS",
+    }
+)
+
+
+def _retain_transient_entry_suppressed_batch(
+    result: GlobalBatchSubmitResult,
+    entry_submit_suppression_reason: str | None,
+) -> GlobalBatchSubmitResult:
+    """Do not burn entry events while a recoverable global gate removes BUYs."""
+
+    if not entry_submit_suppression_reason or result.winner_event_id is not None:
+        return result
+    retry_reason = (
+        "GLOBAL_AUCTION_NO_TRADE:" + entry_submit_suppression_reason
+    )
+    receipts = {
+        event_id: (
+            dataclass_replace(receipt, reason=retry_reason)
+            if receipt.reason in _ENTRY_SUPPRESSED_ECONOMIC_NO_TRADE_REASONS
+            else receipt
+        )
+        for event_id, receipt in result.receipts.items()
+    }
+    if all(
+        receipts[event_id] is receipt
+        for event_id, receipt in result.receipts.items()
+    ):
+        return result
+    return dataclass_replace(result, receipts=receipts)
 
 
 _DURABLE_LIVE_CAP_NO_EXPOSURE_TERMINAL_COMMAND_STATES = frozenset(
@@ -8136,7 +8177,10 @@ def event_bound_live_adapter_from_trade_conn(
                 probability_cache_stats["miss"],
                 probability_cache_stats["refresh"],
             )
-            return result
+            return _retain_transient_entry_suppressed_batch(
+                result,
+                entry_submit_suppression_reason,
+            )
         finally:
             with contextlib.suppress(Exception):
                 trade_conn.commit()
