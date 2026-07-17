@@ -881,6 +881,10 @@ class Day0FastObsEmitter:
     _last_kill_memo_rounded: dict[tuple[str, str, str], int] = field(default_factory=dict, init=False)
     _last_live_emitted_rounded: dict[tuple[str, str, str], int] = field(default_factory=dict, init=False)
     _ledgered_report_keys: set[tuple[str, str, float]] = field(default_factory=set, init=False)
+    _pending_ledger_reports: dict[tuple[str, str, float], MetarReport] = field(
+        default_factory=dict,
+        init=False,
+    )
     _ledger_cursor_id: int = field(default=0, init=False)
     _anomaly_cursor: int = field(default=0, init=False)
     _lock: threading.Lock = field(default_factory=threading.Lock, init=False)
@@ -976,11 +980,14 @@ class Day0FastObsEmitter:
                     return 0  # a concurrent fetch beat us to it
                 self._cached_reports = reports
                 self._cache_fetched_monotonic = time.monotonic()
-                self._ledgered_report_keys.update(
+                ledgered_keys = tuple(
                     key
                     for report in reports
                     if (key := _report_publication_key(report)) is not None
                 )
+                self._ledgered_report_keys.update(ledgered_keys)
+                for key in ledgered_keys:
+                    self._pending_ledger_reports.pop(key, None)
             logger.info(
                 "DAY0_FAST_OBS_LEDGER_HYDRATED count=%d cities=%d",
                 len(reports), len(seen_city_stations),
@@ -1081,11 +1088,14 @@ class Day0FastObsEmitter:
                 )
                 self._cache_fetched_monotonic = time.monotonic()
                 self._full_window_loaded = True
-                self._ledgered_report_keys.update(
+                ledgered_keys = tuple(
                     key
                     for report in reports
                     if (key := _report_publication_key(report)) is not None
                 )
+                self._ledgered_report_keys.update(ledgered_keys)
+                for key in ledgered_keys:
+                    self._pending_ledger_reports.pop(key, None)
         return len(reports)
 
     def _reports_with_status(self, stations: list[str]) -> tuple[list[MetarReport], str, Optional[float]]:
@@ -1125,13 +1135,21 @@ class Day0FastObsEmitter:
             reports = []
         with self._lock:
             if reports:
+                fetched = list(reports)
+                for report in fetched:
+                    key = _report_publication_key(report)
+                    if key is not None and key not in self._ledgered_report_keys:
+                        self._pending_ledger_reports.setdefault(key, report)
                 if self._full_window_loaded:
-                    self._cached_reports = _merge_report_windows(
-                        self._cached_reports,
-                        list(reports),
-                    )
+                    cached = set(self._cached_reports)
+                    delta = [report for report in fetched if report not in cached]
+                    if delta:
+                        self._cached_reports = _merge_report_windows(
+                            self._cached_reports,
+                            delta,
+                        )
                 else:
-                    self._cached_reports = list(reports)
+                    self._cached_reports = fetched
                 self._full_window_loaded = True
                 self._cache_fetched_monotonic = time.monotonic()
                 return list(self._cached_reports), FETCH_FRESH, 0.0
@@ -1424,14 +1442,7 @@ class Day0FastObsEmitter:
             [source.station_id for _, source, _ in eligible]
         )
         with self._lock:
-            ledger_reports = tuple(
-                report
-                for report in reports
-                if (
-                    (key := _report_publication_key(report)) is not None
-                    and key not in self._ledgered_report_keys
-                )
-            )
+            ledger_reports = tuple(self._pending_ledger_reports.values())
         # ANOMALY-CHECK FRESHNESS GATE (PR#404 round-2 P0-2A): the WU-vs-METAR
         # cross-check must never CONCLUDE from a stale METAR cache — a METAR
         # outage plus a fresh WU update would read as divergence and falsely
@@ -1619,11 +1630,12 @@ class Day0FastObsEmitter:
             ledger_reports,
         ):
             with self._lock:
-                self._ledgered_report_keys.update(
-                    key
-                    for report in ledger_reports
-                    if (key := _report_publication_key(report)) is not None
-                )
+                for report in ledger_reports:
+                    key = _report_publication_key(report)
+                    if key is None:
+                        continue
+                    self._ledgered_report_keys.add(key)
+                    self._pending_ledger_reports.pop(key, None)
         trigger = Day0ExtremeUpdatedTrigger(
             EventWriter(world_conn),
             day0_is_tradeable=day0_is_tradeable,

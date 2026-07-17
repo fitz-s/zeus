@@ -1073,6 +1073,30 @@ class TestIncrementalFetchWindow:
         assert first_window == [first]
         assert second_window == [first, second]
 
+    def test_identical_warm_payload_skips_full_window_merge(self, monkeypatch):
+        import src.data.day0_fast_obs as fast_obs
+
+        t0 = datetime(2026, 6, 9, 16, 0, tzinfo=UTC)
+        report = _report("RJTT", t0, 21.0, t_group=False)
+        emitter = fast_obs.Day0FastObsEmitter(
+            fetcher=lambda _stations, **_kwargs: [report],
+            min_fetch_interval_s=0.0,
+        )
+
+        first_window, _, _ = emitter._reports_with_status(["RJTT"])
+        monkeypatch.setattr(
+            fast_obs,
+            "_merge_report_windows",
+            lambda *_args: (_ for _ in ()).throw(
+                AssertionError("identical payload rebuilt the retained window")
+            ),
+        )
+        second_window, status, _ = emitter._reports_with_status(["RJTT"])
+
+        assert first_window == [report]
+        assert second_window == [report]
+        assert status == fast_obs.FETCH_FRESH
+
     def test_fetch_window_expands_across_an_outage(self):
         import time as _time
 
