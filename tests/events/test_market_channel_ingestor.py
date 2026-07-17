@@ -974,6 +974,60 @@ def test_rest_seed_uses_request_start_not_last_venue_mutation_as_capture_time():
     assert capture_time > datetime.fromisoformat(old_venue_time)
 
 
+def test_quote_projection_pump_commits_one_available_stream_batch():
+    conn, writer = _conn_writer()
+    metadata = {
+        f"token-{idx}": _metadata(f"token-{idx}")[f"token-{idx}"]
+        for idx in range(100)
+    }
+    ingestor = MarketChannelIngestor(
+        writer,
+        active_token_ids=set(metadata),
+        token_metadata=metadata,
+        coalescer=EventCoalescer(max_market_keys=1000),
+    )
+    for token_id in metadata:
+        ingestor.handle_message(
+            {
+                "event_type": "book",
+                "asset_id": token_id,
+                "market": "0xcondition",
+                "bids": [{"price": "0.48", "size": "10"}],
+                "asks": [{"price": "0.52", "size": "10"}],
+                "hash": f"hash-{token_id}",
+            },
+            received_at="2026-07-17T12:00:00+00:00",
+        )
+    service = MarketChannelOnlineService(ingestor)
+    wake = asyncio.Event()
+    connection_done = asyncio.Event()
+    initial_seed_done = asyncio.Event()
+    wake.set()
+    connection_done.set()
+    initial_seed_done.set()
+    commits: list[int] = []
+
+    asyncio.run(
+        service._flush_quote_projection_forever(
+            wake=wake,
+            connection_done=connection_done,
+            initial_seed_done=initial_seed_done,
+            active_token_ids=set(metadata),
+            write_gate=nullcontext(),
+            commit=lambda: commits.append(
+                conn.execute(
+                    "SELECT COUNT(*) FROM execution_feasibility_latest"
+                ).fetchone()[0]
+            ),
+            rollback=conn.rollback,
+            logger=None,
+        )
+    )
+
+    assert commits == [200]
+    assert ingestor._coalescer.pending_counts() == {"lossless": 0, "market": 0}
+
+
 def test_websocket_subscribes_before_rest_seed(monkeypatch):
     import websockets
 

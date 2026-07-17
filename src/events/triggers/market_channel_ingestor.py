@@ -31,6 +31,7 @@ UTC = timezone.utc
 MARKET_CHANNEL_WS_ENDPOINT = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
 REST_SEED_COMMIT_CHUNK_SIZE = 16
 REST_SEED_FETCH_BATCH_SIZE = 128
+MARKET_CHANNEL_QUOTE_FLUSH_BATCH_SIZE = 128
 MARKET_CHANNEL_INITIAL_BOOK_GRACE_SECONDS = 1.0
 MARKET_CHANNEL_CONTINUITY_PUBLISH_INTERVAL_SECONDS = 0.25
 MARKET_CHANNEL_QUOTE_FLUSH_RETRY_SECONDS = 0.05
@@ -1698,7 +1699,7 @@ class MarketChannelOnlineService:
                 with self.ingestor.defer_market_event_sink():
                     with write_gate:
                         self.ingestor.flush_coalesced(
-                            market_budget=REST_SEED_COMMIT_CHUNK_SIZE,
+                            market_budget=MARKET_CHANNEL_QUOTE_FLUSH_BATCH_SIZE,
                             commit=commit,
                             rollback=rollback,
                         )
@@ -2133,7 +2134,7 @@ class MarketChannelOnlineService:
                                         with _quote_write_gate:
                                             if self.ingestor._coalescer is not None:
                                                 self.ingestor.flush_coalesced(
-                                                    market_budget=REST_SEED_COMMIT_CHUNK_SIZE,
+                                                    market_budget=MARKET_CHANNEL_QUOTE_FLUSH_BATCH_SIZE,
                                                     commit=commit,
                                                     rollback=rollback,
                                                 )
