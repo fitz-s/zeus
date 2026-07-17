@@ -334,6 +334,88 @@ def test_replacement_availability_fast_poll_passes_changed_source_clock_report(m
     ]
 
 
+def test_replacement_availability_cooldown_suppresses_repeated_reseed_scans(
+    monkeypatch,
+) -> None:
+    import src.data.replacement_forecast_production as prod
+    import src.data.source_clock_update_probe as source_clock_probe
+    import src.ingest_main as ingest_main
+
+    class _Changed:
+        updated_sources = ("icon_global",)
+
+        def as_dict(self):
+            return {
+                "status": "SOURCE_CLOCK_UPDATES_CHANGED",
+                "updated_sources": ["icon_global"],
+                "affected_cities": ["Munich"],
+                "error": None,
+            }
+
+    calls: list[str] = []
+    monkeypatch.setattr(
+        prod,
+        "_replacement_forecast_live_materialization_queue_config",
+        lambda: {"download_current_targets_enabled": True},
+    )
+    monkeypatch.setattr(
+        source_clock_probe,
+        "probe_openmeteo_source_clock_updates",
+        lambda **_kwargs: calls.append("probe") or _Changed(),
+    )
+    monkeypatch.setattr(
+        source_clock_probe,
+        "source_clock_scoped_download_cursor_sources",
+        lambda _report: (),
+    )
+    monkeypatch.setattr(
+        prod,
+        "_download_bayes_precision_fusion_source_clock_raw_inputs_if_needed",
+        lambda *_args, **_kwargs: calls.append("scoped_download")
+        or {
+            "status": "SOURCE_CLOCK_BPF_SCOPED_QUOTA_COOLDOWN_SKIPPED",
+            "cooldown_seconds": 241,
+        },
+    )
+    monkeypatch.setattr(
+        prod,
+        "_enqueue_fusion_upgrade_reseeds_if_needed",
+        lambda _cfg: calls.append("fusion_reseed")
+        or {"status": "FUSION_UPGRADE_TRIGGER", "seeds_enqueued": 0},
+    )
+    monkeypatch.setattr(
+        prod,
+        "_enqueue_cycle_advance_reseeds_if_needed",
+        lambda _cfg: calls.append("cycle_reseed")
+        or {"status": "CYCLE_ADVANCE_TRIGGER", "seeds_enqueued": 0},
+    )
+    monkeypatch.setattr(ingest_main.time, "monotonic", lambda: 100.0)
+    monkeypatch.setattr(
+        ingest_main,
+        "_REPLACEMENT_MAINTENANCE_NEXT_MONOTONIC",
+        0.0,
+    )
+
+    first = ingest_main._replacement_availability_poll_tick.__wrapped__()
+    second = ingest_main._replacement_availability_poll_tick.__wrapped__()
+
+    assert first["fusion_upgrade_status"] == "FUSION_UPGRADE_TRIGGER"
+    assert first["cycle_advance_status"] == "CYCLE_ADVANCE_TRIGGER"
+    assert second["reseed_maintenance_status"] == (
+        "RESEED_MAINTENANCE_NOT_DUE"
+    )
+    assert "fusion_upgrade_status" not in second
+    assert calls == [
+        "probe",
+        "scoped_download",
+        "fusion_reseed",
+        "cycle_reseed",
+        "probe",
+        "scoped_download",
+    ]
+    assert ingest_main._REPLACEMENT_MAINTENANCE_NEXT_MONOTONIC == 341.0
+
+
 def test_replacement_availability_poll_throttles_timeboxed_maintenance(monkeypatch) -> None:
     """A timeboxed maintenance pass must not repeat on every metadata tick."""
     import src.ingest_main as ingest_main

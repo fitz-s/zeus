@@ -202,6 +202,19 @@ def _replacement_maintenance_due(*, now_monotonic: float | None = None) -> bool:
     return True
 
 
+def _defer_replacement_maintenance(
+    seconds: float,
+    *,
+    now_monotonic: float | None = None,
+) -> None:
+    global _REPLACEMENT_MAINTENANCE_NEXT_MONOTONIC
+    now = time.monotonic() if now_monotonic is None else float(now_monotonic)
+    _REPLACEMENT_MAINTENANCE_NEXT_MONOTONIC = max(
+        _REPLACEMENT_MAINTENANCE_NEXT_MONOTONIC,
+        now + max(0.0, float(seconds)),
+    )
+
+
 def _graceful_shutdown(signum, frame) -> None:
     """SIGTERM handler — wait for in-flight jobs then exit 0.
 
@@ -1561,9 +1574,26 @@ def _replacement_availability_poll_tick():
             "source_clock_affected_cities": source_clock_payload.get("affected_cities", []),
             "source_clock_error": source_clock_payload.get("error"),
         }
-    # Publish the changed-source work before generic current-target maintenance.
-    # The forecast materializer can consume these idempotent seeds immediately.
-    report = _attach_reseed_reports(report)
+    # No raw input can land while the provider quota is cooling down. Run one
+    # catch-up scan, then suppress identical JSON-heavy reseed scans until the
+    # downloader can make progress again.
+    if (
+        report.get("status")
+        == "SOURCE_CLOCK_BPF_SCOPED_QUOTA_COOLDOWN_SKIPPED"
+    ):
+        if _replacement_maintenance_due():
+            report = _attach_reseed_reports(report)
+        else:
+            report["reseed_maintenance_status"] = (
+                "RESEED_MAINTENANCE_NOT_DUE"
+            )
+        _defer_replacement_maintenance(
+            float(report.get("cooldown_seconds") or 0)
+        )
+    else:
+        # Publish changed-source work before generic current-target maintenance.
+        # The forecast materializer can consume these idempotent seeds immediately.
+        report = _attach_reseed_reports(report)
     cursor_sources = source_clock_scoped_download_cursor_sources(report)
     advanced_sources = (
         advance_source_clock_cursor(source_clock_report, sources=cursor_sources)
