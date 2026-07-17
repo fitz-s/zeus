@@ -1578,6 +1578,86 @@ def test_quote_write_backpressure_retains_websocket_and_latest_event(monkeypatch
     assert all(proof["connected"] is True for proof in proofs)
 
 
+def test_quote_burst_coalesces_before_bounded_write_retry(monkeypatch):
+    import websockets
+
+    conn, writer = _conn_writer()
+    stop = asyncio.Event()
+
+    class BusyQuoteGate:
+        def __init__(self) -> None:
+            self.enters = 0
+
+        def __enter__(self):
+            self.enters += 1
+            if self.enters > 1:
+                raise TimeoutError("trade quote writer busy")
+            return self
+
+        def __exit__(self, exc_type, exc, tb):  # noqa: ANN001
+            return False
+
+    class FakeWebSocket:
+        emitted = 0
+
+        async def send(self, _payload):  # noqa: ANN001
+            return None
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            if self.emitted == 100:
+                stop.set()
+                raise StopAsyncIteration
+            self.emitted += 1
+            await asyncio.sleep(0)
+            return json.dumps(
+                {
+                    "event_type": "book",
+                    "asset_id": "token-1",
+                    "market": "0xcondition",
+                    "bids": [{"price": "0.48", "size": "10"}],
+                    "asks": [{"price": "0.52", "size": "10"}],
+                    "hash": f"burst-{self.emitted}",
+                    "timestamp": str(1766789469958 + self.emitted),
+                }
+            )
+
+    class FakeConnect:
+        async def __aenter__(self):
+            return FakeWebSocket()
+
+        async def __aexit__(self, _exc_type, _exc, _tb):
+            return False
+
+    monkeypatch.setattr(websockets, "connect", lambda *_args, **_kwargs: FakeConnect())
+    gate = BusyQuoteGate()
+    coalescer = EventCoalescer(max_market_keys=8)
+    ingestor = MarketChannelIngestor(
+        writer,
+        active_token_ids={"token-1"},
+        token_metadata=_metadata(),
+        coalescer=coalescer,
+    )
+    service = MarketChannelOnlineService(ingestor)
+
+    asyncio.run(
+        service.run_websocket_forever(
+            stop_event=stop,
+            reconnect_delay_seconds=0,
+            quote_write_gate=gate,
+            commit=conn.commit,
+            rollback=conn.rollback,
+        )
+    )
+
+    assert gate.enters <= 4
+    assert service.quote_projection_backpressure_count == gate.enters - 1
+    assert coalescer.pending_counts() == {"lossless": 0, "market": 1}
+    assert ingestor.quote_cache.get("token-1").book_hash == "burst-100"
+
+
 def test_continuity_publication_coalesces_quotes_but_not_state_changes(monkeypatch):
     proofs: list[dict] = []
     monotonic = iter((10.0, 10.1, 10.26, 10.27))

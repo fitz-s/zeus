@@ -33,6 +33,7 @@ REST_SEED_COMMIT_CHUNK_SIZE = 16
 REST_SEED_FETCH_BATCH_SIZE = 128
 MARKET_CHANNEL_INITIAL_BOOK_GRACE_SECONDS = 1.0
 MARKET_CHANNEL_CONTINUITY_PUBLISH_INTERVAL_SECONDS = 0.25
+MARKET_CHANNEL_QUOTE_FLUSH_RETRY_SECONDS = 0.05
 _logger = logging.getLogger(__name__)
 
 
@@ -1237,10 +1238,12 @@ class MarketChannelOnlineService:
         init=False,
         repr=False,
     )
+    _quote_projection_pump_active: bool = field(default=False, init=False, repr=False)
     refresh_action_coalesced_count: int = field(default=0, init=False)
     subscription_add_count: int = field(default=0, init=False)
     subscription_remove_count: int = field(default=0, init=False)
     universe_refresh_error_count: int = field(default=0, init=False)
+    quote_projection_backpressure_count: int = field(default=0, init=False)
 
     def __post_init__(self) -> None:
         self._refresh_worker_idle.set()
@@ -1404,6 +1407,15 @@ class MarketChannelOnlineService:
                         )
                     break
             if not captured:
+                continue
+            if self._quote_projection_pump_active:
+                results = self.ingestor.seed_from_rest(
+                    self.fetch_orderbook,
+                    received_at=received_at,
+                    pre_cached=captured,
+                    token_ids=captured.keys(),
+                )
+                written += len(results)
                 continue
             with self.ingestor.defer_market_event_sink():
                 try:
@@ -1649,6 +1661,80 @@ class MarketChannelOnlineService:
                 commit=commit,
                 logger=logger,
             )
+
+    async def _flush_quote_projection_forever(
+        self,
+        *,
+        wake: asyncio.Event,
+        connection_done: asyncio.Event,
+        initial_seed_done: asyncio.Event,
+        active_token_ids: set[str],
+        write_gate: Any,
+        commit: Callable[[], None] | None,
+        rollback: Callable[[], None] | None,
+        logger: Any | None,
+    ) -> None:
+        if self.ingestor._coalescer is None:
+            return
+        final_contention_attempts = 0
+        while True:
+            if not wake.is_set():
+                try:
+                    await asyncio.wait_for(
+                        wake.wait(),
+                        timeout=MARKET_CHANNEL_QUOTE_FLUSH_RETRY_SECONDS,
+                    )
+                except TimeoutError:
+                    pass
+            wake.clear()
+            queued = self.ingestor._coalescer.pending_counts()
+            if not (queued["lossless"] or queued["market"]):
+                if connection_done.is_set() and initial_seed_done.is_set():
+                    return
+                continue
+            try:
+                with self.ingestor.defer_market_event_sink():
+                    with write_gate:
+                        self.ingestor.flush_coalesced(
+                            market_budget=REST_SEED_COMMIT_CHUNK_SIZE,
+                            commit=commit,
+                            rollback=rollback,
+                        )
+                    if self.ingestor._market_event_sink_independently_coordinated:
+                        self.ingestor.flush_deferred_market_event_sink()
+            except (TimeoutError, sqlite3.OperationalError) as exc:
+                if not _is_sqlite_write_contention(exc):
+                    raise
+                self.quote_projection_backpressure_count += 1
+                if rollback is not None:
+                    rollback()
+                if logger is not None:
+                    logger.warning(
+                        "EDLI market-channel quote projection backpressure; "
+                        "socket retained pending=%s: %s",
+                        self.ingestor._coalescer.pending_counts(),
+                        exc,
+                    )
+                if connection_done.is_set():
+                    final_contention_attempts += 1
+                    if final_contention_attempts >= 2:
+                        return
+                await asyncio.sleep(MARKET_CHANNEL_QUOTE_FLUSH_RETRY_SECONDS)
+                wake.set()
+                continue
+
+            final_contention_attempts = 0
+            self._publish_continuity(
+                connected=True,
+                observed_at=datetime.now(UTC).isoformat(),
+                active_token_count=len(active_token_ids),
+                logger=logger,
+            )
+            queued = self.ingestor._coalescer.pending_counts()
+            if queued["lossless"] or queued["market"]:
+                wake.set()
+            elif connection_done.is_set() and initial_seed_done.is_set():
+                return
 
     def _fetch_rest_seed_books(
         self,
@@ -1948,15 +2034,26 @@ class MarketChannelOnlineService:
                         )
                     pending_world_messages: list[dict[str, Any]] = []
                     connection_done = asyncio.Event()
-                    async with asyncio.TaskGroup() as tasks:
-                        tasks.create_task(
-                            self._seed_subscribed_books(
+                    initial_seed_done = asyncio.Event()
+                    quote_flush_wake = asyncio.Event()
+                    self._quote_projection_pump_active = (
+                        self.ingestor._coalescer is not None
+                    )
+
+                    async def _seed_initial_books() -> None:
+                        try:
+                            await self._seed_subscribed_books(
                                 active_token_ids=active_token_ids,
                                 write_gate=_quote_write_gate,
                                 commit=commit,
                                 logger=logger,
                             )
-                        )
+                        finally:
+                            initial_seed_done.set()
+                            quote_flush_wake.set()
+
+                    async with asyncio.TaskGroup() as tasks:
+                        tasks.create_task(_seed_initial_books())
                         tasks.create_task(
                             self._refresh_subscription_universe_forever(
                                 ws,
@@ -1965,6 +2062,18 @@ class MarketChannelOnlineService:
                                 stop_event=stop_event,
                                 write_gate=_quote_write_gate,
                                 commit=commit,
+                                logger=logger,
+                            )
+                        )
+                        tasks.create_task(
+                            self._flush_quote_projection_forever(
+                                wake=quote_flush_wake,
+                                connection_done=connection_done,
+                                initial_seed_done=initial_seed_done,
+                                active_token_ids=active_token_ids,
+                                write_gate=_quote_write_gate,
+                                commit=commit,
+                                rollback=rollback,
                                 logger=logger,
                             )
                         )
@@ -2000,6 +2109,9 @@ class MarketChannelOnlineService:
                                 should_flush_quotes = bool(
                                     queued["lossless"] or queued["market"]
                                 )
+                                if should_flush_quotes:
+                                    quote_flush_wake.set()
+                                should_flush_quotes = False
                             else:
                                 should_flush_quotes = bool(quote_messages)
 
@@ -2077,7 +2189,10 @@ class MarketChannelOnlineService:
                                 else:
                                     pending_world_messages.clear()
 
-                            if quote_projection_durable:
+                            if (
+                                self.ingestor._coalescer is None
+                                and quote_projection_durable
+                            ):
                                 self._publish_continuity(
                                     connected=True,
                                     observed_at=datetime.now(UTC).isoformat(),
@@ -2087,6 +2202,8 @@ class MarketChannelOnlineService:
                             for _action in pending_actions:
                                 self._enqueue_refresh_action(_action)
                         connection_done.set()
+                        quote_flush_wake.set()
+                    self._quote_projection_pump_active = False
                     if stop_event is None or not stop_event.is_set():
                         raise ConnectionError("market channel stream ended")
             except Exception as exc:  # noqa: BLE001 - network loop must retry
