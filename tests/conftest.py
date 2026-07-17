@@ -38,6 +38,26 @@ def _ens_member_dependence_test_isolation(monkeypatch, tmp_path):
 
 
 @pytest.fixture(autouse=True)
+def _staleness_variance_test_isolation(monkeypatch, tmp_path):
+    """Staleness-variance artifact isolation: tests default to artifact-ABSENT.
+
+    Symmetric to the member-dependence isolation above. The serving loader
+    (src/forecast/staleness_variance.py) is fail-open: no artifact => 0.0
+    inflation => byte-identical precision weights. Once a live artifact exists
+    at state/staleness_variance/, a test expressing "artifact absent" by
+    unsetting the env var would fall back to that live dir and read it. Point
+    the loader at an empty per-test dir; tests exercising a fitted v write
+    their own ACTIVE.json into an override dir and clear the cache.
+    """
+    from src.forecast import staleness_variance as sv
+
+    monkeypatch.setenv(sv.ENV_STALENESS_VARIANCE_DIR, str(tmp_path / "staleness_variance"))
+    sv._load_active_artifact.cache_clear()
+    yield
+    sv._load_active_artifact.cache_clear()
+
+
+@pytest.fixture(autouse=True)
 def _bankroll_provider_test_isolation(monkeypatch):
     """P0-A antibody: deterministic bankroll, no live wallet fetches in tests.
 

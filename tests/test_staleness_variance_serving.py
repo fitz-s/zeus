@@ -155,9 +155,10 @@ def _override_with_stale_ukmo(monkeypatch, artifact_dir: Path | None):
     monkeypatch.setitem(
         cfg.settings["edli"], "replacement_0_1_bayes_precision_fusion_enabled", True
     )
-    if artifact_dir is None:
-        monkeypatch.delenv(sv.ENV_STALENESS_VARIANCE_DIR, raising=False)
-    else:
+    # None => keep the empty per-test dir the autouse isolation fixture set
+    # (artifact-ABSENT); NOT delenv, which would fall back to the live default
+    # dir once state/staleness_variance/ holds a fitted artifact.
+    if artifact_dir is not None:
         monkeypatch.setenv(sv.ENV_STALENESS_VARIANCE_DIR, str(artifact_dir))
     sv._load_active_artifact.cache_clear()
     conn = _conn()
