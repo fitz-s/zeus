@@ -2621,7 +2621,7 @@ def test_live_adapter_routes_each_global_truth_to_its_owner(monkeypatch):
     assert captured["portfolio_state_provider"] is None
     assert captured["epoch_superseded"]() is True
     assert callable(captured["candidate_policy_rejection_resolver"])
-    assert "entry_candidates_enabled" not in captured
+    assert captured["buy_candidates_enabled"] is False
     candidate = SimpleNamespace(family_key="family-dallas")
     assert captured["current_capital_limit_resolver"](
         candidate,
@@ -7793,6 +7793,104 @@ def test_current_portfolio_wealth_uses_fresh_ctf_mirror_over_stale_projection_ti
     assert witness.wealth_ceiling_usd == Decimal("30.25")
 
 
+def test_current_portfolio_wealth_uses_ctf_mirror_during_projection_lag():
+    decision_at = _dt.datetime(2026, 7, 17, 2, 42, tzinfo=_dt.timezone.utc)
+    conn = _wealth_test_conn(
+        captured_at=decision_at,
+        ctf={"no-token": 14_589_200},
+    )
+    portfolio = PortfolioState(
+        positions=[
+            SimpleNamespace(
+                trade_id="trade-1",
+                direction=Direction.NO,
+                token_id="yes-token",
+                no_token_id="no-token",
+                chain_state="unknown",
+                chain_shares=0.0,
+                shares=14.589284,
+                fill_authority="venue_confirmed_full",
+                chain_verified_at="",
+                state="entered",
+            )
+        ],
+        authority="canonical_db",
+        authority_scope="runtime_exposure",
+    )
+
+    witness = current_portfolio_wealth_witness(
+        conn,
+        decision_at_utc=decision_at,
+        max_age=_dt.timedelta(seconds=30),
+        portfolio_state=portfolio,
+    )
+
+    assert witness.wealth_ceiling_usd == Decimal("41.5892")
+
+
+def test_current_portfolio_wealth_bounds_verified_fill_during_chain_lag():
+    decision_at = _dt.datetime(2026, 7, 17, 2, 42, tzinfo=_dt.timezone.utc)
+    conn = _wealth_test_conn(captured_at=decision_at)
+    portfolio = PortfolioState(
+        positions=[
+            SimpleNamespace(
+                trade_id="trade-1",
+                direction=Direction.NO,
+                token_id="yes-token",
+                no_token_id="no-token",
+                chain_state="unknown",
+                chain_shares=0.0,
+                shares=14.589284,
+                fill_authority="venue_confirmed_full",
+                chain_verified_at="",
+                state="entered",
+            )
+        ],
+        authority="canonical_db",
+        authority_scope="runtime_exposure",
+    )
+
+    witness = current_portfolio_wealth_witness(
+        conn,
+        decision_at_utc=decision_at,
+        max_age=_dt.timedelta(seconds=30),
+        portfolio_state=portfolio,
+    )
+
+    assert witness.wealth_ceiling_usd == Decimal("41.589284")
+
+
+def test_current_portfolio_wealth_refuses_unverified_projection_lag():
+    decision_at = _dt.datetime(2026, 7, 17, 2, 42, tzinfo=_dt.timezone.utc)
+    conn = _wealth_test_conn(captured_at=decision_at)
+    portfolio = PortfolioState(
+        positions=[
+            SimpleNamespace(
+                trade_id="trade-1",
+                direction=Direction.NO,
+                token_id="yes-token",
+                no_token_id="no-token",
+                chain_state="unknown",
+                chain_shares=0.0,
+                shares=14.589284,
+                fill_authority="optimistic_submitted",
+                chain_verified_at="",
+                state="entered",
+            )
+        ],
+        authority="canonical_db",
+        authority_scope="runtime_exposure",
+    )
+
+    with pytest.raises(ValueError, match="CURRENT_WEALTH_OPEN_POSITION_INVALID"):
+        current_portfolio_wealth_witness(
+            conn,
+            decision_at_utc=decision_at,
+            max_age=_dt.timedelta(seconds=30),
+            portfolio_state=portfolio,
+        )
+
+
 def test_current_portfolio_wealth_accepts_targeted_ctf_subset():
     decision_at = _dt.datetime(2026, 7, 10, 8, 0, tzinfo=_dt.timezone.utc)
     conn = _wealth_test_conn(
@@ -7945,6 +8043,108 @@ def test_global_batch_rejects_inflight_buy_before_scope_scan(monkeypatch):
     assert result.receipts[event.event_id].reason == (
         "GLOBAL_AUCTION_FAILED:ValueError:"
         "CURRENT_WEALTH_INFLIGHT_BUY_AMBIGUOUS"
+    )
+
+
+def test_global_batch_reduce_only_skips_nonheld_universe(monkeypatch):
+    decision_at = _dt.datetime(2026, 7, 10, 8, 0, tzinfo=_dt.timezone.utc)
+    event = _global_scope_event(city="Alpha", source_run_id="run-a")
+    scope = current_global_auction_scope_from_events(
+        (event,),
+        captured_at_utc=decision_at,
+    )
+    trade_conn = _wealth_test_conn(captured_at=decision_at)
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "_current_held_weather_families",
+        lambda _conn: (),
+    )
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "scan_current_global_auction_scope",
+        lambda **_: scope,
+    )
+
+    result = global_batch_runtime.process_current_global_batch(
+        (event,),
+        decision_time=decision_at,
+        world_conn=object(),
+        forecast_conn=object(),
+        trade_conn=trade_conn,
+        payload_reader=lambda item: json.loads(item.payload_json),
+        prepare_event=lambda *_: pytest.fail("reduce-only must not prepare nonheld q"),
+        actuate_winner=lambda *_: pytest.fail("reduce-only must not actuate"),
+        stamp_receipt=lambda receipt: receipt,
+        venue_submit_count=lambda: 0,
+        current_execution=lambda *_: object(),
+        current_time_provider=lambda: decision_at,
+        buy_candidates_enabled=False,
+    )
+
+    assert result.venue_submit_count == 0
+    assert result.winner_event_id is None
+    assert result.receipts[event.event_id].reason == (
+        "GLOBAL_AUCTION_NO_REDUCE_ONLY_FAMILY"
+    )
+
+
+def test_global_batch_reduce_only_prepares_only_held_families(monkeypatch):
+    import src.data.replacement_input_hwm as replacement_hwm
+
+    decision_at = _dt.datetime(2026, 7, 10, 8, 0, tzinfo=_dt.timezone.utc)
+    held_event = _global_scope_event(city="Alpha", source_run_id="run-a")
+    unrelated_event = _global_scope_event(city="Beta", source_run_id="run-b")
+    scope = current_global_auction_scope_from_events(
+        (held_event, unrelated_event),
+        captured_at_utc=decision_at,
+    )
+    trade_conn = _wealth_test_conn(captured_at=decision_at)
+    prepared = []
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "_current_held_weather_families",
+        lambda _conn: (("Alpha", "2026-07-11", "high"),),
+    )
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "scan_current_global_auction_scope",
+        lambda **_: scope,
+    )
+    monkeypatch.setattr(
+        replacement_hwm,
+        "prime_frozen_replacement_artifact_hwm",
+        lambda *_args, **_kwargs: lambda: None,
+    )
+
+    def prepare(event, _at):
+        prepared.append(event)
+        return EventSubmissionReceipt(
+            False,
+            event.event_id,
+            event.causal_snapshot_id,
+            reason="GLOBAL_CURRENT_PROBABILITY_PREPARE_FAILED:ValueError:test",
+            proof_accepted=False,
+        )
+
+    result = global_batch_runtime.process_current_global_batch(
+        (held_event,),
+        decision_time=decision_at,
+        world_conn=object(),
+        forecast_conn=object(),
+        trade_conn=trade_conn,
+        payload_reader=lambda item: json.loads(item.payload_json),
+        prepare_event=prepare,
+        actuate_winner=lambda *_: pytest.fail("ineligible q must not actuate"),
+        stamp_receipt=lambda receipt: receipt,
+        venue_submit_count=lambda: 0,
+        current_execution=lambda *_: object(),
+        current_time_provider=lambda: decision_at,
+        buy_candidates_enabled=False,
+    )
+
+    assert prepared == [held_event]
+    assert result.receipts[held_event.event_id].reason == (
+        "GLOBAL_AUCTION_NO_CURRENT_PROBABILITY_FAMILY"
     )
 
 

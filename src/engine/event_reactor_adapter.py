@@ -7178,6 +7178,7 @@ def event_bound_live_adapter_from_trade_conn(
                 candidate_policy_rejection_resolver=(
                     _current_entry_candidate_policy
                 ),
+                buy_candidates_enabled=entry_submit_suppression_reason is None,
                 fractional_kelly_multiplier=Decimal(
                     str(_runtime_kelly_multiplier())
                 ),

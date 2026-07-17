@@ -1235,6 +1235,7 @@ def process_current_global_batch(
     | None = None,
     candidate_policy_rejection_resolver: Callable[[object], str | None]
     | None = None,
+    buy_candidates_enabled: bool = True,
     fractional_kelly_multiplier: Decimal = Decimal("1"),
     claim_unpaged_winner: Callable[[OpportunityEvent], bool] | None = None,
     epoch_superseded: Callable[[], bool] | None = None,
@@ -1549,6 +1550,32 @@ def process_current_global_batch(
         log_stage("scope_scan", families=len(full_scope.events_by_family))
         if superseded("scope_scan"):
             return reject("GLOBAL_AUCTION_SUPERSEDED_BY_NEW_FACT")
+        decision_scope = full_scope
+        if not buy_candidates_enabled:
+            held_family_keys = frozenset(
+                weather_family_id(
+                    city=city,
+                    target_date=target_date,
+                    metric=metric,
+                )
+                for city, target_date, metric in held_families
+            )
+            reduce_only_events = tuple(
+                event
+                for family_key, event in full_scope.events_by_family
+                if family_key in held_family_keys
+            )
+            if not reduce_only_events:
+                return reject("GLOBAL_AUCTION_NO_REDUCE_ONLY_FAMILY")
+            decision_scope = current_global_auction_scope_from_events(
+                reduce_only_events,
+                captured_at_utc=scope_at,
+            )
+            _LOG.info(
+                "global batch reduce-only scope: held_families=%d global_families=%d",
+                len(decision_scope.events_by_family),
+                len(full_scope.events_by_family),
+            )
         from src.data.replacement_input_hwm import (
             prime_frozen_replacement_artifact_hwm,
         )
@@ -1561,7 +1588,7 @@ def process_current_global_batch(
                     str(payload.get("target_date") or ""),
                     str(payload.get("metric") or ""),
                 )
-                for _, event in full_scope.events_by_family
+                for _, event in decision_scope.events_by_family
                 for payload in (payload_reader(event),)
             ),
             decision_time=scope_at,
@@ -1592,10 +1619,10 @@ def process_current_global_batch(
             claimed_by_family[family_key] = event
 
         prepared_by_event = {}
-        full_scope_event_by_family = dict(full_scope.events_by_family)
+        full_scope_event_by_family = dict(decision_scope.events_by_family)
         ineligible_by_family: dict[str, str] = {}
         ineligible_by_event: dict[str, str] = {}
-        for family_key, scope_event in full_scope.events_by_family:
+        for family_key, scope_event in decision_scope.events_by_family:
             if superseded(f"prepare_family:{family_key}"):
                 return reject("GLOBAL_AUCTION_SUPERSEDED_BY_NEW_FACT")
             owner = claimed_by_family.get(family_key, scope_event)
