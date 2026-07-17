@@ -540,6 +540,33 @@ def test_global_batch_claims_epoch_then_calls_one_lock_free_batch_seam():
     } == {"SUBMIT_ABORTED_PRICE_MOVED:GLOBAL_TEST_NO_CURRENT_WINNER"}
 
 
+def test_global_batch_stops_claiming_when_cycle_is_cancelled():
+    conn, store = _store()
+    events = (
+        _forecast_event("cancel-global-a", target_date="2026-05-25"),
+        _forecast_event("cancel-global-b", target_date="2026-05-25"),
+    )
+    for event in events:
+        store.insert_or_ignore(event)
+    observations = {}
+    reactor = _global_batch_probe_reactor(store, observations)
+
+    reactor.process_pending(
+        decision_time=_DT_VENUE_OPEN,
+        limit=2,
+        cancelled=lambda: any(
+            _processing_status(conn, event.event_id) == "processing"
+            for event in events
+        ),
+    )
+
+    assert len(observations["batch_event_ids"]) == 1
+    assert sum(
+        _processing_status(conn, event.event_id) == "pending"
+        for event in events
+    ) == 2
+
+
 @pytest.mark.parametrize(
     "verdict",
     (

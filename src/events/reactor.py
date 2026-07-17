@@ -1087,11 +1087,21 @@ class OpportunityEventReactor:
         limit: int | None = 100,
         targeted_event_ids: frozenset[str] = frozenset(),
         targeted_only: bool = False,
+        cancelled: Callable[[], bool] | None = None,
     ) -> ReactorResult:
         result = ReactorResult()
         if self._cycle_entry_gate is not None and not self._cycle_entry_gate():
             result.rejection_reasons.append("RISK_GUARD_BLOCKED")
             return result
+
+        def cycle_cancelled() -> bool:
+            if cancelled is None:
+                return False
+            try:
+                return bool(cancelled())
+            except Exception:  # noqa: BLE001 - a wake hint cannot invent a trade veto
+                return False
+
         # ALWAYS-DECIDABLE invariant (2026-06-12): families blocked on a refreshable substrate
         # THIS cycle, accumulated during processing and drained AFTER all per-event units of work
         # close (no network inside any open world/trade txn). Per-cycle scope so a family that
@@ -1112,6 +1122,8 @@ class OpportunityEventReactor:
         remaining = None if limit is None else batch_limit
         try:
           while remaining is None or remaining > 0:
+            if cycle_cancelled():
+                return result
             # fetch_pending is a READ — WAL permits concurrent readers, so it is NOT
             # taken under the world-DB write mutex.  limit=None means drain the current
             # admissible queue in batches; the batch size is pagination, not a total cap.
@@ -1174,6 +1186,7 @@ class OpportunityEventReactor:
                     budget=budget,
                     cycle_start=cycle_start,
                     remaining=remaining,
+                    cancelled=cycle_cancelled,
                 )
                 if remaining is not None:
                     remaining -= attempted
@@ -1182,6 +1195,8 @@ class OpportunityEventReactor:
                 return result
             events = _fair_lane_interleave(events)
             for event in events:
+                if cycle_cancelled():
+                    return result
                 # PRE-EVENT budget check (2026-06-11 cadence guard): if the budget
                 # is ALREADY spent, stop BEFORE claiming another event. The
                 # post-event check below cannot interrupt a long event mid-flight
@@ -1220,6 +1235,7 @@ class OpportunityEventReactor:
         budget: float | None,
         cycle_start: float,
         remaining: int | None,
+        cancelled: Callable[[], bool],
     ) -> int:
         """Claim/gate all epoch events, then let one opaque adapter auction act once."""
 
@@ -1228,6 +1244,8 @@ class OpportunityEventReactor:
         claim_lock_bounced_event_ids: set[str] = set()
         attempted = 0
         for event in events:
+            if cancelled():
+                break
             if remaining is not None and attempted >= remaining:
                 break
             if budget is not None and (time.monotonic() - cycle_start) >= budget:
@@ -1242,6 +1260,8 @@ class OpportunityEventReactor:
             if claim_generation is not None:
                 claimed.append(event)
                 claim_generations[event.event_id] = claim_generation
+            if cancelled():
+                break
         if not claimed:
             return attempted
 
@@ -5998,6 +6018,7 @@ def run_edli_event_reactor_cycle(
             limit=proof_limit,
             targeted_event_ids=frozenset(targeted_event_ids),
             targeted_only=producer_fast_path and bool(targeted_event_ids),
+            cancelled=None if producer_fast_path else _urgent_wake_pending,
         )
         _log_stage("process_pending")
         # Canonical event/finalization truth must commit before the derived status
