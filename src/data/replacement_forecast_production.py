@@ -40,6 +40,12 @@ from src.config import settings
 
 logger = logging.getLogger("zeus.replacement_forecast_production")
 
+# The source-clock downloader can parse up to this many Open-Meteo locations
+# from one response. Keep the urgent first request equally dense: after a run
+# appears or a quota window reopens, one round trip should advance many market
+# families instead of an arbitrary alphabetical city.
+_SOURCE_CLOCK_LOCATION_BATCH_SIZE = 25
+
 
 def _settings_section(name: str, default=None):
     source = settings._data if hasattr(settings, "_data") else settings
@@ -662,26 +668,55 @@ def _download_bayes_precision_fusion_source_clock_raw_inputs_if_needed(
                 else:
                     grouped_targets[index].append(target)
             if priority_task is None:
+                first_priority = min(
+                    held_priority.get(
+                        (target.city, target.target_date, target.metric),
+                        2,
+                    )
+                    for target in grouped_targets[0]
+                )
+                priority_groups: list[list[BayesPrecisionFusionDownloadTarget]] = []
+                while (
+                    grouped_targets
+                    and len(priority_groups) < _SOURCE_CLOCK_LOCATION_BATCH_SIZE
+                    and min(
+                        held_priority.get(
+                            (target.city, target.target_date, target.metric),
+                            2,
+                        )
+                        for target in grouped_targets[0]
+                    ) == first_priority
+                ):
+                    priority_groups.append(grouped_targets.pop(0))
                 priority_task = (
                     source,
                     source_cycles[source],
-                    grouped_targets.pop(0),
+                    [
+                        target
+                        for group in priority_groups
+                        for target in group
+                    ],
                 )
             if not grouped_targets:
                 tasks_by_source[source] = []
                 continue
-            source_workers = min(max_workers, len(grouped_targets))
             tasks_by_source[source] = [
                 (
                     source,
                     source_cycles[source],
                     [
                         target
-                        for group in grouped_targets[offset::source_workers]
+                        for group in grouped_targets[
+                            offset : offset + _SOURCE_CLOCK_LOCATION_BATCH_SIZE
+                        ]
                         for target in group
                     ],
                 )
-                for offset in range(source_workers)
+                for offset in range(
+                    0,
+                    len(grouped_targets),
+                    _SOURCE_CLOCK_LOCATION_BATCH_SIZE,
+                )
             ]
 
         tasks: list[

@@ -614,7 +614,7 @@ def test_source_clock_scoped_capture_prioritizes_held_families(
     )
 
 
-def test_source_clock_scoped_capture_fans_out_city_dates(
+def test_source_clock_scoped_capture_batches_city_dates_into_priority_request(
     tmp_path, monkeypatch
 ) -> None:
     import src.data.bayes_precision_fusion_download as dl
@@ -702,10 +702,12 @@ def test_source_clock_scoped_capture_fans_out_city_dates(
         max_wall_clock_seconds=1.0,
     )
 
-    assert max_active == 3
-    assert report["fanout_workers"] == 3
+    assert max_active == 1
+    assert report["fanout_workers"] == 0
     assert report["priority_probe_source"] == "ecmwf_ifs"
-    assert report["priority_probe_families"] == (("Amsterdam", "2026-07-16"),)
+    assert report["priority_probe_families"] == tuple(
+        (city, "2026-07-16") for city in _Report.affected_cities
+    )
     assert report["target_count"] == 8
     assert report["written_row_count"] == 8
     assert report["global_models_expected"] == 1
@@ -714,6 +716,93 @@ def test_source_clock_scoped_capture_fans_out_city_dates(
     assert report["status"] == (
         "SOURCE_CLOCK_SCOPED_BAYES_PRECISION_FUSION_EXTRA_RAW_INPUTS_DOWNLOADED"
     )
+
+
+def test_source_clock_scoped_capture_caps_priority_location_batch(
+    tmp_path, monkeypatch
+) -> None:
+    import src.data.bayes_precision_fusion_download as dl
+    import src.data.openmeteo_model_updates as updates
+    import src.data.replacement_forecast_current_target_plan as target_plan
+    import src.data.replacement_forecast_seed_discovery as seed_discovery
+    import src.strategy.live_inference.source_clock_city_weights as city_weights
+    from src.config import cities_by_name
+
+    cities = tuple(sorted(cities_by_name)[:30])
+
+    class _Report:
+        updated_sources = ("ecmwf_ifs",)
+        affected_cities = cities
+
+        def as_dict(self):
+            return {
+                "updated_sources": list(self.updated_sources),
+                "affected_cities": list(self.affected_cities),
+            }
+
+    keys = tuple(
+        target_plan.ReplacementForecastTargetKey(city, "2026-07-17", metric)
+        for city in cities
+        for metric in ("high", "low")
+    )
+    calls: list[tuple[str, ...]] = []
+
+    monkeypatch.setitem(
+        prod.settings["edli"],
+        "replacement_0_1_bayes_precision_fusion_capture_enabled",
+        True,
+    )
+    monkeypatch.setattr(dl, "bayes_precision_fusion_quota_cooldown_seconds", lambda: 0)
+    monkeypatch.setattr(
+        updates,
+        "read_model_updates_jsonl",
+        lambda _path: (
+            updates.OpenMeteoModelUpdate(
+                model="ecmwf_ifs",
+                last_run_initialisation_time=_CYCLE,
+                last_run_availability_time=_CYCLE,
+            ),
+        ),
+    )
+    monkeypatch.setattr(
+        target_plan,
+        "replacement_forecast_current_target_keys",
+        lambda _path: keys,
+    )
+    monkeypatch.setattr(seed_discovery, "held_position_family_priorities", lambda: {})
+    monkeypatch.setattr(
+        city_weights,
+        "affected_cities_for_source_updates",
+        lambda _sources: cities,
+    )
+
+    def _download(**kwargs):
+        target_cities = tuple(dict.fromkeys(target.city for target in kwargs["targets"]))
+        calls.append(target_cities)
+        return {
+            "status": "BAYES_PRECISION_FUSION_EXTRA_RAW_INPUTS_DOWNLOADED",
+            "target_count": len(kwargs["targets"]),
+            "written_row_count": len(kwargs["targets"]),
+            "global_models_expected": 1,
+            "global_models_unavailable": [],
+        }
+
+    monkeypatch.setattr(dl, "download_bayes_precision_fusion_extra_raw_inputs", _download)
+
+    report = prod._download_bayes_precision_fusion_source_clock_raw_inputs_if_needed(
+        {
+            "forecast_db": str(tmp_path / "zeus-forecasts.db"),
+            "source_clock_fanout_workers": 4,
+        },
+        source_clock_report=_Report(),
+        max_wall_clock_seconds=1.0,
+    )
+
+    assert tuple(map(len, calls)) == (25, 5)
+    assert report["priority_probe_families"] == tuple(
+        (city, "2026-07-17") for city in cities[:25]
+    )
+    assert report["target_count"] == 60
 
 
 def test_source_clock_scoped_capture_interleaves_sources_and_notifies_commits(
@@ -820,7 +909,7 @@ def test_source_clock_scoped_capture_interleaves_sources_and_notifies_commits(
     )
 
     assert starts[0] == "ecmwf_ifs"
-    assert set(starts[1:]) == set(sources)
+    assert starts[1:] == ["icon_global"]
     assert {source for source, _report in notifications} == set(sources)
     assert all(report["committed_families"] for _source, report in notifications)
     assert all(
