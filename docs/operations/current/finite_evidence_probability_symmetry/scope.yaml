@@ -34,6 +34,7 @@ in_scope:
 - src/state/portfolio.py
 - src/state/venue_command_repo.py
 - src/engine/global_auction_universe.py
+- src/engine/global_batch_runtime.py
 - src/engine/qkernel_spine_bridge.py
 - src/solve/solver.py
 - src/solve/menu_adapter.py

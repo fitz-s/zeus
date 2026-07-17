@@ -7204,6 +7204,45 @@ def test_current_portfolio_wealth_witness_refuses_inflight_or_unknown_inventory(
         )
 
 
+def test_global_batch_rejects_inflight_buy_before_scope_scan(monkeypatch):
+    decision_at = _dt.datetime(2026, 7, 10, 8, 0, tzinfo=_dt.timezone.utc)
+    event = _global_scope_event(city="Alpha", source_run_id="run-a")
+    trade_conn = _wealth_test_conn(captured_at=decision_at)
+    trade_conn.execute(
+        "INSERT INTO collateral_reservations ("
+        "command_id,reservation_type,token_id,amount,created_at"
+        ") VALUES (?,?,?,?,?)",
+        ("cmd", "PUSD_BUY", None, 1_000_000, decision_at.isoformat()),
+    )
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "scan_current_global_auction_scope",
+        lambda **_: pytest.fail("ambiguous wealth must reject before scope scan"),
+    )
+
+    result = global_batch_runtime.process_current_global_batch(
+        (event,),
+        decision_time=decision_at,
+        world_conn=object(),
+        forecast_conn=object(),
+        trade_conn=trade_conn,
+        payload_reader=lambda item: json.loads(item.payload_json),
+        prepare_event=lambda *_: pytest.fail("ambiguous wealth must not prepare q"),
+        actuate_winner=lambda *_: pytest.fail("ambiguous wealth must not actuate"),
+        stamp_receipt=lambda receipt: receipt,
+        venue_submit_count=lambda: 0,
+        current_execution=lambda *_: object(),
+        current_time_provider=lambda: decision_at,
+    )
+
+    assert result.venue_submit_count == 0
+    assert result.winner_event_id is None
+    assert result.receipts[event.event_id].reason == (
+        "GLOBAL_AUCTION_FAILED:ValueError:"
+        "CURRENT_WEALTH_INFLIGHT_BUY_AMBIGUOUS"
+    )
+
+
 def test_global_batch_waits_until_global_winner_family_is_claimed(monkeypatch):
     decision_at = _dt.datetime(2026, 7, 10, 8, 0, tzinfo=_dt.timezone.utc)
     event_a = _global_scope_event(city="Alpha", source_run_id="run-a")

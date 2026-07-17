@@ -1988,6 +1988,29 @@ def _position_token(position: object) -> str:
     return str(token or "").strip()
 
 
+def probe_inflight_buy_ambiguity(
+    trade_conn: sqlite3.Connection,
+) -> bool | None:
+    """Cheaply reject work that the later wealth witness cannot authorize."""
+
+    execute = getattr(trade_conn, "execute", None)
+    if execute is None:
+        return None
+    try:
+        row = execute(
+            "SELECT "
+            "EXISTS(SELECT 1 FROM collateral_reservations "
+            "WHERE reservation_type='PUSD_BUY' AND released_at IS NULL) "
+            "OR EXISTS(SELECT 1 FROM collateral_unsettled_proceeds "
+            "WHERE direction='OUTGOING_DEDUCTION' AND settled_at IS NULL)"
+        ).fetchone()
+    except sqlite3.OperationalError as exc:
+        if "no such table" in str(exc).lower():
+            return None
+        raise
+    return bool((row or (0,))[0])
+
+
 def current_portfolio_wealth_witness(
     trade_conn: sqlite3.Connection,
     *,
@@ -2043,17 +2066,7 @@ def current_portfolio_wealth_witness(
         if age.total_seconds() < 0.0 or age > max_age:
             raise ValueError("CURRENT_WEALTH_COLLATERAL_EXPIRED")
 
-        reserved_row = trade_conn.execute(
-            "SELECT COALESCE(SUM(amount),0) FROM collateral_reservations "
-            "WHERE reservation_type='PUSD_BUY' AND released_at IS NULL"
-        ).fetchone()
-        unsettled_row = trade_conn.execute(
-            "SELECT COALESCE(SUM(amount_micro),0) FROM collateral_unsettled_proceeds "
-            "WHERE direction='OUTGOING_DEDUCTION' AND settled_at IS NULL"
-        ).fetchone()
-        reserved_micro = int((reserved_row or (0,))[0] or 0)
-        unsettled_micro = int((unsettled_row or (0,))[0] or 0)
-        if reserved_micro > 0 or unsettled_micro > 0:
+        if probe_inflight_buy_ambiguity(trade_conn):
             raise ValueError("CURRENT_WEALTH_INFLIGHT_BUY_AMBIGUOUS")
 
         if portfolio_state is None:
@@ -2173,7 +2186,7 @@ def current_portfolio_wealth_witness(
             Decimal("0"),
         )
         spendable = Decimal(spendable_micro) / Decimal("1000000")
-        reservations = Decimal(reserved_micro + unsettled_micro) / Decimal("1000000")
+        reservations = Decimal("0")
 
         ledger_snapshot_id = hashlib.sha256(
             repr(

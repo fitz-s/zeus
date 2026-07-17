@@ -23,6 +23,7 @@ from src.engine.global_auction_universe import (
     current_global_auction_scope_from_events,
     current_portfolio_wealth_witness,
     current_venue_auction_identity,
+    probe_inflight_buy_ambiguity,
     scan_current_global_auction_scope,
 )
 from src.engine.global_single_order_auction import (
@@ -1535,6 +1536,8 @@ def process_current_global_batch(
 
         release_selection_snapshot = release_schema_snapshot
         log_stage("selection_snapshot")
+        if probe_inflight_buy_ambiguity(trade_conn):
+            raise ValueError("CURRENT_WEALTH_INFLIGHT_BUY_AMBIGUOUS")
         scope_at = current_time()
         held_families = _current_held_weather_families(trade_conn)
         full_scope = scan_current_global_auction_scope(
