@@ -885,6 +885,16 @@ def _blocked_attempt_fingerprint(
     db_path = Path(forecast_db)
     if not all(scope) or not db_path.exists():
         return None
+    # Scope the raw watermark to THIS request's own carrier cycle (2026-07-13/14 incident
+    # gap B): during active ingest a new raw row lands every few minutes for the target's
+    # OTHER cycles/leads, so a target-wide watermark churns every tick and NEVER settles
+    # (verified: 0/277 blocked attempts suppressed). Only inputs at the request's own
+    # source_cycle_time can heal THIS exact request; a fresher cycle produces a NEW request
+    # file with a new semantic key anyway (cycle-advance path), so narrowing here is safe.
+    request_cycle = _parse_utc_iso(payload.get("source_cycle_time"))
+    if request_cycle is None:
+        return None
+    request_cycle_iso = request_cycle.isoformat()
     try:
         from src.state.db import _connect  # noqa: PLC0415
 
@@ -902,8 +912,9 @@ def _blocked_attempt_fingerprint(
                 WHERE city = ?
                   AND target_date = ?
                   AND metric = ?
+                  AND source_cycle_time = ?
                 """,
-                scope,
+                scope + (request_cycle_iso,),
             ).fetchone()
         finally:
             conn.close()
