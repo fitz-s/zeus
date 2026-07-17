@@ -7487,9 +7487,9 @@ def _global_buy_candidate_from_raw_book(
         )
     except (ArithmeticError, TypeError, ValueError) as exc:
         raise ValueError("GLOBAL_BUY_JIT_MARKET_RULE_INVALID") from exc
-    book_hash = str(raw_book.get("hash") or "").strip() or stable_hash(
-        dict(raw_book)
-    )
+    # Venue ``hash`` is opaque and is not guaranteed to be a SHA-256 digest.
+    # Snapshot authority requires the digest of the actual raw book payload.
+    book_hash = stable_hash(dict(raw_book))
     snapshot_id = stable_hash(
         (
             "global-buy-jit",

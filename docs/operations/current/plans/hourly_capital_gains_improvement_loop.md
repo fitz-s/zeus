@@ -5,6 +5,12 @@
 
 ## 现状(forward)
 
+### 2026-07-17 00:10Z tick — deterministic dead-token SELL 脱离全局拍卖；JIT book hash 自拒绝已修
+- **严格占优退出:** `DAY0_EXTREME_UPDATED` 已先唤醒受影响 family 的 targeted exit monitor，但旧代码仍把 exact terminal value=0 的 held token SELL 委托给 107-family global auction。现在只有 absorbing `EXIT_DEAD_BIN` 直接生成 `urgency=immediate` reduce-only exit；canonical monitor write、fresh executable bid、submit gate、现有 `execute_exit` 和 lifecycle 仍全部保留。statistical SELL 继续只由 global auction actuation，互补 BUY 继续参加 BUY/HOLD/CASH 全局比较。
+- **为什么不需要全局排序:** 对结算价值严格为 0 的 held token，任何扣费后正现金回收都逐状态严格优于 HOLD；等待 unrelated family probability/book/wealth 只能损失残值，不会产生更优的保留理由。
+- **第二个 live blocker:** exact-HEAD `61a4ce8b` 运行后不再出现 `CURRENT_WEALTH_OPEN_POSITION_INVALID`，说明 confirmed-fill projection 已收敛；阻断前移到 `GLOBAL_JIT_SNAPSHOT_BOOK_HASH_INVALID`。根因是 venue `hash` 为 opaque string，新 JIT snapshot 却要求 64-char SHA-256 并原样保存后自拒绝。修复在 raw-book boundary 对完整 payload 生成 canonical digest，不放宽 snapshot authority。
+- **验证:** Day0 hard-fact + live SELL ownership `58 passed`；source-wake→targeted-monitor ordering/fail-closed `5 passed`；global winner/JIT preflight/depth binding `4 passed`。待提交并由 daemon 自动加载后，复验 `GLOBAL_JIT_SNAPSHOT_BOOK_HASH_INVALID` 消失和 targeted hard-fact exit 的 live receipt。
+
 ### 2026-07-17 00:01Z tick — 目标重对齐到 ingest-to-submit alpha clock；Day0 重复抓取已删除并 live
 - **资本目标更新:** 不再以平均 cycle、SQL 数或订单吞吐作为终局。唯一热路径是 `source available -> ingest commit -> current q -> current book -> risk -> submit`；forecast reversal 使用百秒级市场窗口，deterministic observation reversal 必须先处理 exact held SELL 和互补 BUY，不能等待无关全市场重建。
 - **已完成突破口:** commit `1b4af08a5` 已由 ingest/main 自动重启加载。AWC METAR HTTP 现在只由 5 秒 ingest source clock 拥有；reactor 删除重复网络抓取，只增量读取 canonical observation ledger；WU-vs-METAR anomaly guard 复用 ingest cache 并独立调度。最终 focused coverage `146/146` 通过。

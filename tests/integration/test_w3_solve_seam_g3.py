@@ -1,5 +1,5 @@
 # Created: 2026-07-03
-# Last reused/audited: 2026-07-16
+# Last reused/audited: 2026-07-17
 # Authority basis: W3 SOLVE design packet, global fractional-Kelly repair,
 #                  current Day0 global-cut routing, and auditable SELL holding bindings
 """G3 harness for the W3 SOLVE promotion seam (qkernel_spine_bridge.py w3_solve_enabled flag).
@@ -42,7 +42,10 @@ import src.engine.event_reactor_adapter as era
 import src.engine.global_batch_runtime as global_batch_runtime
 import src.engine.global_auction_universe as universe
 from src.decision_kernel import claims
-from src.decision_kernel.canonicalization import qkernel_current_state_identity_hash
+from src.decision_kernel.canonicalization import (
+    qkernel_current_state_identity_hash,
+    stable_hash,
+)
 from src.decision_kernel.certificate import build_certificate
 from src.engine.global_single_order_auction import (
     _candidate_portfolio_endowment,
@@ -4456,28 +4459,48 @@ def test_global_winner_persists_jit_curve_as_executor_depth_authority():
     )
     insert_snapshot(conn, old)
     conn.commit()
-    curve = ExecutableCostCurve(
+    selected_curve = ExecutableCostCurve(
         token_id="token-no-a",
         side="NO",
-        snapshot_id="jit-snapshot",
+        snapshot_id="selected-snapshot",
         book_hash="d" * 64,
         levels=(
-            BookLevel(price=Decimal("0.37"), size=Decimal("20")),
-            BookLevel(price=Decimal("0.38"), size=Decimal("30")),
+            BookLevel(price=Decimal("0.39"), size=Decimal("100")),
         ),
         fee_model=FeeModel(fee_rate=Decimal("0.05")),
         min_tick=Decimal("0.01"),
         min_order_size=Decimal("1"),
         quote_ttl=_dt.timedelta(seconds=30),
     )
-    candidate = SimpleNamespace(
+    raw_book = {
+        "asset_id": "token-no-a",
+        "hash": "opaque-venue-hash",
+        "asks": [
+            {"price": "0.37", "size": "20"},
+            {"price": "0.38", "size": "30"},
+        ],
+    }
+    selected = GlobalSingleOrderCandidate(
+        candidate_id="candidate-a",
+        family_key="family-a",
+        bin_id="bin-a",
         side="NO",
         token_id="token-no-a",
         condition_id="condition-a",
-        book_snapshot_id=curve.snapshot_id,
-        book_captured_at_utc=captured,
-        executable_cost_curve=curve,
+        probability_witness_identity="probability-a",
+        book_snapshot_id=selected_curve.snapshot_id,
+        book_captured_at_utc=captured - _dt.timedelta(seconds=1),
+        execution_curve_identity=executable_curve_identity(selected_curve),
+        ledger_snapshot_id="ledger-a",
+        executable_cost_curve=selected_curve,
+        resolution_identity="resolution-a",
     )
+    candidate = era._global_buy_candidate_from_raw_book(
+        selected,
+        raw_book,
+        captured_at_utc=captured,
+    )
+    curve = candidate.executable_cost_curve
 
     snapshot, row = era._persist_global_candidate_executable_snapshot(
         conn,
@@ -4487,6 +4510,8 @@ def test_global_winner_persists_jit_curve_as_executor_depth_authority():
     )
 
     assert row["snapshot_id"] == curve.snapshot_id
+    assert curve.book_hash == stable_hash(raw_book)
+    assert len(curve.book_hash) == 64
     assert snapshot.orderbook_top_ask == Decimal("0.37")
     assert snapshot.raw_orderbook_hash == curve.book_hash
     assert snapshot.min_tick_size == curve.min_tick
