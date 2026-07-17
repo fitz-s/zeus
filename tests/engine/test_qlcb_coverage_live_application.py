@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import sqlite3
 import sys
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -92,6 +93,83 @@ def _typed_lcb(condition_id, yes_q, no_q):
     d[(condition_id, "buy_yes")] = QlcbProvenance(yes_q, "FORECAST_BOOTSTRAP")
     d[(condition_id, "buy_no")] = QlcbProvenance(no_q, "FORECAST_BOOTSTRAP")
     return d
+
+
+def test_claim_history_scope_index_is_loaded_once_per_coverage_cycle(monkeypatch):
+    calls = 0
+    singapore_band = "Will the highest temperature in Singapore be 31C"
+    paris_band = "Will the lowest temperature in Paris be 18C"
+
+    def _load():
+        nonlocal calls
+        calls += 1
+        return {
+            ("Singapore", "high", "buy_yes"): {
+                singapore_band: {"2026-07-15": 0.61},
+            },
+            ("Paris", "low", "buy_no"): {
+                paris_band: {"2026-07-15": 0.73},
+            },
+        }
+
+    monkeypatch.setattr(adapter, "_claimed_qlcb_scope_index", _load)
+    cache = {}
+
+    singapore = adapter._per_day_claimed_qlcb_by_date(
+        city="Singapore",
+        metric="HIGH",
+        direction="buy_yes",
+        band_template=singapore_band,
+        coverage_cache=cache,
+    )
+    paris = adapter._per_day_claimed_qlcb_by_date(
+        city="Paris",
+        metric="low",
+        direction="buy_no",
+        band_template=paris_band,
+        coverage_cache=cache,
+    )
+
+    assert calls == 1
+    assert singapore == {"2026-07-15": 0.61}
+    assert paris == {"2026-07-15": 0.73}
+
+
+def test_claim_history_scope_index_keeps_latest_claim(tmp_path, monkeypatch):
+    db = tmp_path / "world.db"
+    conn = sqlite3.connect(db)
+    conn.execute(
+        "CREATE TABLE edli_no_submit_receipts ("
+        "direction TEXT, receipt_json TEXT, q_lcb_5pct REAL, created_at TEXT)"
+    )
+    band = "Will the highest temperature in Singapore be 31C on July 15?"
+    receipt = {
+        "city": "Singapore",
+        "metric": "high",
+        "bin_label": band,
+        "target_date": "2026-07-15",
+    }
+    conn.executemany(
+        "INSERT INTO edli_no_submit_receipts VALUES (?, ?, ?, ?)",
+        [
+            ("buy_yes", json.dumps(receipt), 0.41, "2026-07-14T10:00:00Z"),
+            ("buy_yes", json.dumps(receipt), 0.57, "2026-07-14T10:01:00Z"),
+            ("buy_yes", json.dumps(receipt), 0.63, "2026-07-14T10:01:00Z"),
+        ],
+    )
+    conn.commit()
+    conn.close()
+
+    monkeypatch.setattr(
+        "src.state.db.get_world_connection_read_only",
+        lambda: sqlite3.connect(db),
+    )
+
+    index = adapter._claimed_qlcb_scope_index()
+
+    assert index[("Singapore", "high", "buy_yes")][
+        "Will the highest temperature in Singapore be 31C"
+    ] == {"2026-07-15": 0.63}
 
 
 def test_observations_built_through_grade_receipt(tmp_path, monkeypatch):

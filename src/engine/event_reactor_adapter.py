@@ -29452,22 +29452,71 @@ def _per_day_claimed_qlcb_by_date(
     want_metric = str(metric).lower()
     want_direction = str(direction)
     if coverage_cache is not None:
-        cache_key = ("claimed_qlcb_by_band", want_city, want_metric, want_direction)
-        cached = coverage_cache.get(cache_key)
-        if cached is None:
-            cached = _claimed_qlcb_by_band_for_scope(
-                city=want_city,
-                metric=want_metric,
-                direction=want_direction,
-            )
-            coverage_cache[cache_key] = cached
-        return dict(cached.get(band_template, {}))
+        cache_key = ("claimed_qlcb_scope_index",)
+        index = coverage_cache.get(cache_key)
+        if index is None:
+            index = _claimed_qlcb_scope_index()
+            coverage_cache[cache_key] = index
+        by_band = index.get((want_city, want_metric, want_direction), {})
+        return dict(by_band.get(band_template, {}))
     by_band = _claimed_qlcb_by_band_for_scope(
         city=want_city,
         metric=want_metric,
         direction=want_direction,
     )
     return dict(by_band.get(band_template, {}))
+
+
+def _claimed_qlcb_scope_index(
+) -> dict[tuple[str, str, str], dict[str, dict[str, float]]]:
+    """Load all claimed q_lcb scopes in one compact pass for cycle-local reuse."""
+    out: dict[tuple[str, str, str], dict[str, dict[str, float]]] = {}
+    latest: dict[tuple[str, str, str, str, str], tuple[str, int]] = {}
+    try:
+        from src.state.db import get_world_connection_read_only
+
+        conn = get_world_connection_read_only()
+    except Exception:
+        return {}
+    try:
+        rows = conn.execute(
+            "SELECT rowid, direction, "
+            "json_extract(receipt_json, '$.city'), "
+            "lower(COALESCE(json_extract(receipt_json, '$.metric'), '')), "
+            "json_extract(receipt_json, '$.bin_label'), "
+            "json_extract(receipt_json, '$.target_date'), "
+            "q_lcb_5pct, created_at "
+            "FROM edli_no_submit_receipts WHERE q_lcb_5pct IS NOT NULL"
+        ).fetchall()
+    except Exception:
+        rows = []
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+    for row in rows:
+        try:
+            rowid = int(row[0])
+            direction = str(row[1])
+            city = str(row[2] or "")
+            metric = str(row[3] or "").lower()
+            band_template = _coverage_band_template(row[4])
+            target_date = str(row[5] or "")
+            qlcb = float(row[6])
+            created_at = str(row[7] or "")
+        except (TypeError, ValueError, IndexError):
+            continue
+        if not city or not metric or not band_template or not target_date:
+            continue
+        scope = (city, metric, direction)
+        claim = (*scope, band_template, target_date)
+        order = (created_at, rowid)
+        if order < latest.get(claim, ("", -1)):
+            continue
+        latest[claim] = order
+        out.setdefault(scope, {}).setdefault(band_template, {})[target_date] = qlcb
+    return out
 
 
 def _claimed_qlcb_by_band_for_scope(
