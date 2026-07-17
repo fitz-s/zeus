@@ -176,12 +176,12 @@ def test_trade_gate_never_takes_world_mutex(monkeypatch):
 
     events: list[str] = []
 
-    @contextlib.contextmanager
-    def _world_mutex():
-        events.append("enter:world_mutex")
-        try:
-            yield
-        finally:
+    class _WorldMutex:
+        def acquire(self, *, timeout):
+            events.append("enter:world_mutex")
+            return True
+
+        def release(self):
             events.append("exit:world_mutex")
 
     class _Coordinator:
@@ -193,7 +193,11 @@ def test_trade_gate_never_takes_world_mutex(monkeypatch):
             finally:
                 events.append("exit:coordinator")
 
-    monkeypatch.setattr(market_channel_ingestor, "_world_write_mutex", _world_mutex)
+    monkeypatch.setattr(
+        market_channel_ingestor,
+        "_world_write_mutex",
+        lambda: _WorldMutex(),
+    )
     monkeypatch.setattr(
         write_coordinator,
         "default_runtime_write_coordinator",
@@ -218,6 +222,50 @@ def test_trade_gate_never_takes_world_mutex(monkeypatch):
         "body",
         "exit:coordinator",
         "exit:world_mutex",
+    ]
+
+
+def test_world_gate_releases_mutex_when_coordinator_times_out(monkeypatch):
+    from src.events.triggers import market_channel_ingestor
+    from src.ingest.price_channel_ingest import _PriceChannelWriteGate
+    from src.state import write_coordinator
+
+    events: list[str] = []
+
+    class _WorldMutex:
+        def acquire(self, *, timeout):
+            events.append("acquire:world")
+            return True
+
+        def release(self):
+            events.append("release:world")
+
+    class _Coordinator:
+        @contextlib.contextmanager
+        def lease(self, *_args, **_kwargs):
+            events.append("enter:coordinator")
+            raise TimeoutError("trade writer busy")
+            yield
+
+    monkeypatch.setattr(
+        market_channel_ingestor,
+        "_world_write_mutex",
+        lambda: _WorldMutex(),
+    )
+    monkeypatch.setattr(
+        write_coordinator,
+        "default_runtime_write_coordinator",
+        lambda: _Coordinator(),
+    )
+
+    with pytest.raises(TimeoutError, match="trade writer busy"):
+        with _PriceChannelWriteGate(owner="bounded-world-trade", scope="world_trade"):
+            pytest.fail("timed-out gate must not enter its body")
+
+    assert events == [
+        "acquire:world",
+        "enter:coordinator",
+        "release:world",
     ]
 
 

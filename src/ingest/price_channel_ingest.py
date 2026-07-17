@@ -162,7 +162,7 @@ def _write_market_channel_continuity(payload: dict[str, object]) -> None:
     tmp = target.with_name(f".{target.name}.{os.getpid()}.tmp")
     tmp.write_text(json.dumps(proof, sort_keys=True), encoding="utf-8")
     tmp.replace(target)
-PRICE_CHANNEL_DB_WRITE_LEASE_DEADLINE_MS = 15000
+PRICE_CHANNEL_DB_WRITE_LEASE_DEADLINE_MS = 25
 PRICE_CHANNEL_DB_WRITE_MAX_HOLD_MS = 1000
 PRICE_CHANNEL_QUOTE_DB_WRITE_LEASE_DEADLINE_MS = 25
 PRICE_CHANNEL_QUOTE_DB_WRITE_MAX_HOLD_MS = 100
@@ -274,16 +274,33 @@ class _PriceChannelWriteGate:
                 dbs = (DBIdentity.TRADE,)
             else:
                 raise ValueError(f"unsupported price-channel write scope {self._scope!r}")
-            # World scopes preserve the repo-wide order: legacy world mutex
-            # before the canonical per-DB coordinator.
+            deadline = time.monotonic() + self._deadline_ms / 1000.0
             if DBIdentity.WORLD in dbs:
-                stack.enter_context(_world_write_mutex())
+                mutex = _world_write_mutex()
+                remaining = max(0.0, deadline - time.monotonic())
+                if not mutex.acquire(timeout=remaining):
+                    raise TimeoutError(
+                        f"{self._owner} deferred: WORLD writer busy for "
+                        f"{self._deadline_ms}ms"
+                    )
+                stack.callback(mutex.release)
+            remaining_ms = (
+                max(
+                    0,
+                    min(
+                        self._deadline_ms,
+                        int((deadline - time.monotonic()) * 1000.0),
+                    ),
+                )
+                if DBIdentity.WORLD in dbs
+                else self._deadline_ms
+            )
             stack.enter_context(
                 default_runtime_write_coordinator().lease(
                     dbs,
                     owner=self._owner,
                     write_class="live",
-                    deadline_ms=self._deadline_ms,
+                    deadline_ms=remaining_ms,
                     max_hold_ms=self._max_hold_ms,
                 )
             )

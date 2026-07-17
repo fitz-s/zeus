@@ -97,7 +97,7 @@ def test_candidate_quote_refresh_budget_matches_live_redecision_surface() -> Non
 
     assert 30.0 <= pci.MARKET_CHANNEL_CANDIDATE_QUOTE_REFRESH_BUDGET_SECONDS_DEFAULT < 60.0
     assert pci.MARKET_CHANNEL_PRIORITY_QUOTE_REFRESH_CHUNK_SIZE_DEFAULT <= 4
-    assert pci.PRICE_CHANNEL_DB_WRITE_LEASE_DEADLINE_MS >= 15000
+    assert pci.PRICE_CHANNEL_DB_WRITE_LEASE_DEADLINE_MS <= 25
     assert pci.PRICE_CHANNEL_DB_WRITE_MAX_HOLD_MS <= 1000
 
 
