@@ -1288,21 +1288,27 @@ def test_day0_wake_exit_work_probe_is_fail_closed(
     import src.execution.day0_hard_fact_exit as hard_fact
     import src.main as main
     import src.state.db as db
-    import src.state.portfolio as portfolio
 
     class _Conn:
         closed = False
+
+        def execute(self, _sql, _params):
+            return SimpleNamespace(
+                fetchall=lambda: [
+                    (
+                        position.city,
+                        position.target_date,
+                        position.temperature_metric,
+                    )
+                    for position in positions
+                ]
+            )
 
         def close(self) -> None:
             self.closed = True
 
     conn = _Conn()
     monkeypatch.setattr(db, "get_trade_connection_read_only", lambda: conn)
-    monkeypatch.setattr(
-        portfolio,
-        "load_runtime_open_portfolio",
-        lambda _conn: SimpleNamespace(positions=list(positions)),
-    )
     monkeypatch.setattr(
         hard_fact,
         "_target_family_entry_orders",

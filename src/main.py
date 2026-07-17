@@ -3742,19 +3742,29 @@ def _day0_wake_requires_exit_monitor(
     conn = None
     try:
         from src.execution.day0_hard_fact_exit import _target_family_entry_orders
-        from src.state.db import get_trade_connection_read_only
-        from src.state.portfolio import load_runtime_open_portfolio
+        from src.state.db import (
+            OPEN_EXPOSURE_PHASES,
+            get_trade_connection_read_only,
+        )
 
         conn = get_trade_connection_read_only()
-        portfolio = load_runtime_open_portfolio(conn)
+        placeholders = ",".join("?" for _ in OPEN_EXPOSURE_PHASES)
+        positions = conn.execute(
+            f"""
+            SELECT city, target_date, temperature_metric
+              FROM position_current
+             WHERE phase IN ({placeholders})
+            """,
+            tuple(OPEN_EXPOSURE_PHASES),
+        ).fetchall()
         if any(
             (
-                str(position.city or "").strip().casefold(),
-                str(position.target_date or "").strip()[:10],
-                str(position.temperature_metric or "").strip().lower(),
+                str(city or "").strip().casefold(),
+                str(target_date or "").strip()[:10],
+                str(metric or "").strip().lower(),
             )
             in family_keys
-            for position in portfolio.positions
+            for city, target_date, metric in positions
         ):
             return True
         open_entries = _target_family_entry_orders(conn, family_keys)
