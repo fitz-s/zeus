@@ -1394,11 +1394,21 @@ class FamilyDecisionEngine:
                 return _blocked_economics(d.economics, q_safe=q_safe)
 
             existing_q = d.economics.payoff_q_lcb
-            if existing_q is not None and math.isclose(
-                float(existing_q),
-                float(q_safe),
-                rel_tol=0.0,
-                abs_tol=1e-12,
+            existing_point = d.economics.q_dot_payoff
+            if (
+                existing_q is not None
+                and math.isclose(
+                    float(existing_q),
+                    float(q_safe),
+                    rel_tol=0.0,
+                    abs_tol=1e-12,
+                )
+                and math.isclose(
+                    float(existing_point),
+                    float(q_safe),
+                    rel_tol=0.0,
+                    abs_tol=1e-12,
+                )
             ):
                 economics = d.economics
             else:
@@ -1411,6 +1421,7 @@ class FamilyDecisionEngine:
                     exposure=exposure,
                     max_stake_usd=max_stake_usd,
                     guarded_payoff_q_lcb=float(q_safe),
+                    authoritative_payoff_q_point=float(q_safe),
                 )
             cost = float(economics.cost.value)
             chosen_cost = (

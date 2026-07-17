@@ -40,7 +40,7 @@ from __future__ import annotations
 
 import hashlib
 from decimal import Decimal
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Mapping, Optional
 
 from src.contracts.execution_price import polymarket_fee
 from src.solve.types import (
@@ -67,6 +67,7 @@ def native_holdings_snapshot_from_positions(
     omega,
     positions,
     ledger_snapshot_id: str,
+    token_shares_by_id: Mapping[str, Decimal] | None = None,
 ) -> NativeHoldingsSnapshot:
     """Bind canonical open positions to the exact native claims in ``omega``.
 
@@ -85,14 +86,6 @@ def native_holdings_snapshot_from_positions(
         outcome = bindings.get(condition_id)
         if outcome is None:
             continue
-        shares = Decimal(str(getattr(position, "chain_shares", 0) or 0))
-        if not shares.is_finite() or shares < 0:
-            raise ValueError(
-                f"position {getattr(position, 'trade_id', '')!r} has invalid "
-                f"chain_shares {shares}"
-            )
-        if shares == 0:
-            continue
         direction_raw = getattr(position, "direction", "")
         direction = str(getattr(direction_raw, "value", direction_raw) or "").lower()
         if direction == "buy_yes":
@@ -108,6 +101,20 @@ def native_holdings_snapshot_from_positions(
                 f"position {getattr(position, 'trade_id', '')!r} has unsupported direction "
                 f"{direction!r}"
             )
+        uses_ledger_balance = token_shares_by_id is not None
+        shares = Decimal(
+            token_shares_by_id.get(token_id, Decimal("0"))
+            if uses_ledger_balance
+            else str(getattr(position, "chain_shares", 0) or 0)
+        )
+        if not shares.is_finite() or shares < 0:
+            raise ValueError(
+                f"position {getattr(position, 'trade_id', '')!r} has invalid "
+                f"{'ledger token balance' if uses_ledger_balance else 'chain_shares'} "
+                f"{shares}"
+            )
+        if shares == 0:
+            continue
         if not token_id or token_id != expected_token:
             raise ValueError(
                 f"position {getattr(position, 'trade_id', '')!r} token does not match "

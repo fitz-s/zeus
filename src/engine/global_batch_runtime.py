@@ -189,13 +189,22 @@ def _bind_selection_holdings(
     prepared_by_event: Mapping[str, object],
     *,
     portfolio_state: object,
-    ledger_snapshot_id: str,
+    wealth_witness: object,
 ) -> dict[str, object]:
     """Bind every family holding to the same selection-time ledger generation."""
 
     from src.solve.menu_adapter import native_holdings_snapshot_from_positions
 
     positions = tuple(getattr(portfolio_state, "positions", ()) or ())
+    ledger_snapshot_id = str(getattr(wealth_witness, "ledger_snapshot_id", "") or "")
+    token_shares_by_id = {
+        str(token): Decimal(int(amount)) / Decimal("1000000")
+        for token, amount in tuple(
+            getattr(wealth_witness, "native_holdings_micro", ()) or ()
+        )
+    }
+    if not ledger_snapshot_id:
+        raise ValueError("GLOBAL_HOLDINGS_LEDGER_IDENTITY_MISSING")
     rebound: dict[str, object] = {}
     for event_id, prepared in prepared_by_event.items():
         witness = getattr(prepared, "probability_witness", None)
@@ -208,6 +217,7 @@ def _bind_selection_holdings(
             omega=SimpleNamespace(bins=bindings),
             positions=positions,
             ledger_snapshot_id=ledger_snapshot_id,
+            token_shares_by_id=token_shares_by_id,
         )
         rebound[event_id] = replace(prepared, holdings_snapshot=holdings)
     return rebound
@@ -2013,7 +2023,7 @@ def process_current_global_batch(
                 prepared_for_selection = _bind_selection_holdings(
                     attempt_prepared,
                     portfolio_state=selection_state,
-                    ledger_snapshot_id=selection_wealth.ledger_snapshot_id,
+                    wealth_witness=selection_wealth,
                 )
             excluded_candidates = dict(preflight_excluded_by_candidate or {})
             if attempt_book_epoch is not None and excluded_candidates:

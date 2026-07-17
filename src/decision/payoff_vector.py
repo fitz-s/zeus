@@ -1000,6 +1000,7 @@ def compute_candidate_economics(
     max_stake_usd: Decimal | None = None,
     alpha: float | None = None,
     guarded_payoff_q_lcb: float | None = None,
+    authoritative_payoff_q_point: float | None = None,
 ) -> CandidateEconomics:
     """Compute one candidate's Arrow-Debreu edge + vector-argmax size (spec 759-791).
 
@@ -1022,6 +1023,12 @@ def compute_candidate_economics(
     ``guarded_payoff_q_lcb`` is a candidate-local reliability lower bound on this route's
     payoff probability. It does not move point q / μ and does not mutate the global band;
     it makes edge_lcb and robust ΔU consume the same conservative side-specific q_safe.
+
+    ``authoritative_payoff_q_point`` is reserved for a stronger candidate-local fact that
+    supersedes the probabilistic point value, such as a Day0 monotone observation proving a
+    route payoff is exactly zero or one. It must be paired with a no-wider guarded lower
+    bound. This lets the early negative-edge sizing skip consume the authoritative point
+    instead of suppressing a certain payoff on the stale probabilistic point value.
     """
     payoff = np.asarray(candidate_route.payoff_vector, dtype=float)
     _validate_alignment(payoff, joint_q, band)
@@ -1037,10 +1044,26 @@ def compute_candidate_economics(
             f"candidate bin {sizing_candidate.bin_id!r}"
         )
 
-    cost = _route_cost_value(candidate_route.route_cost)
-    q_dot = point_fair_value(joint_q, payoff)
-    point_ev = q_dot - cost
     q_guard = _validate_guarded_payoff_q_lcb(guarded_payoff_q_lcb)
+    q_point_override = _validate_guarded_payoff_q_lcb(authoritative_payoff_q_point)
+    if q_point_override is not None:
+        if q_guard is None:
+            raise PayoffVectorError(
+                "AUTHORITATIVE_PAYOFF_Q_POINT_REQUIRES_GUARDED_Q_LCB"
+            )
+        if q_guard > q_point_override + 1e-12:
+            raise PayoffVectorError(
+                "GUARDED_PAYOFF_Q_LCB_EXCEEDS_AUTHORITATIVE_POINT: "
+                f"q_lcb={q_guard!r} q_point={q_point_override!r}"
+            )
+
+    cost = _route_cost_value(candidate_route.route_cost)
+    q_dot = (
+        float(q_point_override)
+        if q_point_override is not None
+        else point_fair_value(joint_q, payoff)
+    )
+    point_ev = q_dot - cost
     payoff_q_lcb = (
         float(q_guard)
         if q_guard is not None

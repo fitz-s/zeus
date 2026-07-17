@@ -2525,6 +2525,9 @@ def current_portfolio_wealth_witness(
             ):
                 raise ValueError("CURRENT_WEALTH_CHAIN_POSITION_SIZE_MISMATCH")
         held_balances = represented_micro
+        native_holdings = dict(held_balances)
+        for token, amount in uncertain_micro.items():
+            native_holdings[token] = native_holdings.get(token, 0) + amount
 
         pusd_micro = int(row.get("pusd_balance_micro") or 0)
         allowance_micro = int(row.get("pusd_allowance_micro") or 0)
@@ -2597,6 +2600,7 @@ def current_portfolio_wealth_witness(
             captured_at_utc=captured_at,
             max_age=max_age,
             witness_identity=identity,
+            native_holdings_micro=tuple(sorted(native_holdings.items())),
         )
     finally:
         if owns_txn and trade_conn.in_transaction:

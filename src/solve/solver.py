@@ -742,6 +742,7 @@ class PortfolioWealthWitness:
     captured_at_utc: datetime
     max_age: timedelta
     witness_identity: str
+    native_holdings_micro: tuple[tuple[str, int], ...] = ()
 
     @property
     def economic_identity(self) -> str:
@@ -766,6 +767,14 @@ class PortfolioWealthWitness:
             or self.reservations_usd < 0
         ):
             raise ValueError("portfolio wealth, cash, and reservations must be valid")
+        native_holdings = tuple(
+            sorted((str(token), int(amount)) for token, amount in self.native_holdings_micro)
+        )
+        if (
+            len({token for token, _ in native_holdings}) != len(native_holdings)
+            or any(not token or amount <= 0 for token, amount in native_holdings)
+        ):
+            raise ValueError("portfolio native holdings must be unique and positive")
         expected = portfolio_wealth_identity(
             ledger_snapshot_id=self.ledger_snapshot_id,
             position_set_hash=self.position_set_hash,
@@ -778,6 +787,7 @@ class PortfolioWealthWitness:
         )
         if self.witness_identity != expected:
             raise ValueError("PortfolioWealthWitness identity does not bind its values")
+        object.__setattr__(self, "native_holdings_micro", native_holdings)
 
 
 @dataclass(frozen=True)

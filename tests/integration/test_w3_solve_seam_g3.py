@@ -1003,7 +1003,10 @@ def test_global_selection_binds_holdings_to_exact_wealth_ledger_generation():
     rebound = global_batch_runtime._bind_selection_holdings(
         prepared,
         portfolio_state=state,
-        ledger_snapshot_id="ledger-selection-cut",
+        wealth_witness=SimpleNamespace(
+            ledger_snapshot_id="ledger-selection-cut",
+            native_holdings_micro=(("yes-a", 7_250_000),),
+        ),
     )
 
     holding_a = rebound["event-a"].holdings_snapshot
@@ -8318,6 +8321,68 @@ def test_global_candidate_endowment_projects_correlated_family_holdings_exactly(
     assert yes_endowment.current_token_shares == Decimal("10")
 
 
+def test_global_selection_endowment_uses_same_chain_balance_as_wealth_witness():
+    """A just-filled token cannot be sized again from a stale position projection."""
+
+    @dataclass(frozen=True)
+    class Prepared:
+        probability_witness: object
+        holdings_snapshot: object | None = None
+
+    prepared = Prepared(
+        probability_witness=SimpleNamespace(
+            family_key="family",
+            bindings=(
+                SimpleNamespace(
+                    bin_id="bin-a",
+                    condition_id="condition-a",
+                    yes_token_id="yes-a",
+                    no_token_id="no-a",
+                ),
+            ),
+        )
+    )
+    stale_position = SimpleNamespace(
+        trade_id="position-a",
+        position_id="position-a",
+        condition_id="condition-a",
+        direction="buy_no",
+        token_id="yes-a",
+        no_token_id="no-a",
+        chain_shares=Decimal("40.5"),
+        chain_state="synced",
+        chain_verified_at="2026-07-17T05:43:00+00:00",
+        state="entered",
+    )
+    at = _dt.datetime(2026, 7, 17, 5, 44, tzinfo=_dt.timezone.utc)
+    conn = _wealth_test_conn(
+        captured_at=at,
+        ctf={"no-a": 49_500_000},
+    )
+    portfolio = PortfolioState(
+        positions=[stale_position],
+        authority="canonical_db",
+        authority_scope="runtime_exposure",
+    )
+    wealth = current_portfolio_wealth_witness(
+        conn,
+        decision_at_utc=at,
+        max_age=_dt.timedelta(seconds=10),
+        portfolio_state=portfolio,
+    )
+
+    rebound = global_batch_runtime._bind_selection_holdings(
+        {"event-a": prepared},
+        portfolio_state=portfolio,
+        wealth_witness=wealth,
+    )
+
+    holding = rebound["event-a"].holdings_snapshot.holdings[0]
+    assert wealth.native_holdings_micro == (("no-a", 49_500_000),)
+    assert holding.token_id == "no-a"
+    assert holding.shares == Decimal("49.5")
+
+
 def test_two_prepared_families_choose_one_globally_unique_order():
     family, proofs, payload = _corpus()[0]
     decision_at = _dt.datetime(2026, 6, 13, 12, 0, tzinfo=_dt.timezone.utc)
@@ -8374,7 +8439,10 @@ def test_two_prepared_families_choose_one_globally_unique_order():
     prepared_by_event = global_batch_runtime._bind_selection_holdings(
         prepared_by_event,
         portfolio_state=SimpleNamespace(positions=()),
-        ledger_snapshot_id="ledger-current",
+        wealth_witness=SimpleNamespace(
+            ledger_snapshot_id="ledger-current",
+            native_holdings_micro=(),
+        ),
     )
     assets = tuple(
         CurrentGlobalBookAsset(
