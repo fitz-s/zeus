@@ -3740,6 +3740,12 @@ def _day0_wake_requires_exit_monitor(
         )
         for city, target_date, metric in target_families
     }
+    family_terms = " OR ".join(
+        "(lower(trim(city)) = ? AND substr(trim(target_date), 1, 10) = ? "
+        "AND lower(trim(temperature_metric)) = ?)"
+        for _ in family_keys
+    )
+    family_params = tuple(value for family in sorted(family_keys) for value in family)
     conn = None
     try:
         from src.execution.day0_hard_fact_exit import _target_family_entry_orders
@@ -3750,23 +3756,17 @@ def _day0_wake_requires_exit_monitor(
 
         conn = get_trade_connection_read_only()
         placeholders = ",".join("?" for _ in OPEN_EXPOSURE_PHASES)
-        positions = conn.execute(
+        position = conn.execute(
             f"""
-            SELECT city, target_date, temperature_metric
+            SELECT 1
               FROM position_current
              WHERE phase IN ({placeholders})
+               AND ({family_terms})
+             LIMIT 1
             """,
-            tuple(OPEN_EXPOSURE_PHASES),
-        ).fetchall()
-        if any(
-            (
-                str(city or "").strip().casefold(),
-                str(target_date or "").strip()[:10],
-                str(metric or "").strip().lower(),
-            )
-            in family_keys
-            for city, target_date, metric in positions
-        ):
+            (*OPEN_EXPOSURE_PHASES, *family_params),
+        ).fetchone()
+        if position is not None:
             return True
         open_entries = _target_family_entry_orders(conn, family_keys)
         return open_entries is None or bool(open_entries)
@@ -3847,10 +3847,20 @@ def _edli_reactor_wake_poll_once() -> bool:
     )
     day0_wake = wake.reason == "day0_extreme_event_committed"
     substrate_refresh_wake = wake.reason == "money_path_substrate_refreshed"
+    day0_target_families = None
+    day0_requires_exit_monitor = False
     if day0_wake:
         _day0_urgent_wake_pending.set()
-    if day0_wake and _held_position_monitor_active.is_set():
-        return False
+        day0_target_families = (
+            frozenset(wake_families)
+            if wake_families
+            else _day0_wake_target_families(wake_event_ids)
+        )
+        day0_requires_exit_monitor = _day0_wake_requires_exit_monitor(
+            day0_target_families
+        )
+        if day0_requires_exit_monitor and _held_position_monitor_active.is_set():
+            return False
     if substrate_refresh_wake:
         if (
             _edli_reactor_active_lock.locked()
@@ -3868,15 +3878,10 @@ def _edli_reactor_wake_poll_once() -> bool:
     ):
         return False
     if day0_wake and not substrate_refresh_wake:
-        target_families = (
-            frozenset(wake_families)
-            if wake_families
-            else _day0_wake_target_families(wake_event_ids)
-        )
-        if _day0_wake_requires_exit_monitor(target_families):
+        if day0_requires_exit_monitor:
             try:
                 monitor_ran = _exit_monitor_cycle(
-                    target_families=target_families,
+                    target_families=day0_target_families,
                     urgent_day0=True,
                 )
             except Exception:

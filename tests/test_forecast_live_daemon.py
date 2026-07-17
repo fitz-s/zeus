@@ -1349,7 +1349,7 @@ def test_day0_wake_without_exit_work_runs_reactor_directly(monkeypatch) -> None:
 
     class _Held:
         def is_set(self) -> bool:
-            return False
+            return True
 
     calls: list[str] = []
     pending = threading.Event()
@@ -1425,14 +1425,7 @@ def test_day0_wake_exit_work_probe_is_fail_closed(
 
         def execute(self, _sql, _params):
             return SimpleNamespace(
-                fetchall=lambda: [
-                    (
-                        position.city,
-                        position.target_date,
-                        position.temperature_metric,
-                    )
-                    for position in positions
-                ]
+                fetchone=lambda: 1 if positions else None,
             )
 
         def close(self) -> None:
