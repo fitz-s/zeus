@@ -15,9 +15,9 @@
 """Live-path tests for the K3 settlement-coverage shrink + its per-day calibration loader."""
 from __future__ import annotations
 
+import json
 import sqlite3
 import sys
-import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -170,6 +170,20 @@ def test_claim_history_scope_index_keeps_latest_claim(tmp_path, monkeypatch):
     assert index[("Singapore", "high", "buy_yes")][
         "Will the highest temperature in Singapore be 31C"
     ] == {"2026-07-15": 0.63}
+
+    conn = sqlite3.connect(db)
+    conn.execute(
+        "INSERT INTO edli_no_submit_receipts VALUES (?, ?, ?, ?)",
+        ("buy_yes", json.dumps(receipt), 0.71, "2026-07-14T10:02:00Z"),
+    )
+    conn.commit()
+    conn.close()
+
+    updated = adapter._claimed_qlcb_scope_index()
+
+    assert updated[("Singapore", "high", "buy_yes")][
+        "Will the highest temperature in Singapore be 31C"
+    ] == {"2026-07-15": 0.71}
 
 
 def test_observations_built_through_grade_receipt(tmp_path, monkeypatch):

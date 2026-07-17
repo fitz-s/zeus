@@ -29467,56 +29467,110 @@ def _per_day_claimed_qlcb_by_date(
     return dict(by_band.get(band_template, {}))
 
 
+_CLAIMED_QLCB_INDEX_LOCK = threading.Lock()
+_CLAIMED_QLCB_INDEX_SOURCE: tuple[str, int, int] | None = None
+_CLAIMED_QLCB_INDEX_MAX_ROWID = 0
+_CLAIMED_QLCB_INDEX: dict[tuple[str, str, str], dict[str, dict[str, float]]] = {}
+_CLAIMED_QLCB_INDEX_LATEST: dict[
+    tuple[str, str, str, str, str], tuple[str, int]
+] = {}
+
+
 def _claimed_qlcb_scope_index(
 ) -> dict[tuple[str, str, str], dict[str, dict[str, float]]]:
-    """Load all claimed q_lcb scopes in one compact pass for cycle-local reuse."""
-    out: dict[tuple[str, str, str], dict[str, dict[str, float]]] = {}
-    latest: dict[tuple[str, str, str, str, str], tuple[str, int]] = {}
-    try:
-        from src.state.db import get_world_connection_read_only
+    """Increment the process-local claimed-qLCB projection from append-only receipts."""
+    global _CLAIMED_QLCB_INDEX_SOURCE
+    global _CLAIMED_QLCB_INDEX_MAX_ROWID
+    global _CLAIMED_QLCB_INDEX
+    global _CLAIMED_QLCB_INDEX_LATEST
 
-        conn = get_world_connection_read_only()
-    except Exception:
-        return {}
-    try:
-        rows = conn.execute(
-            "SELECT rowid, direction, "
-            "json_extract(receipt_json, '$.city'), "
-            "lower(COALESCE(json_extract(receipt_json, '$.metric'), '')), "
-            "json_extract(receipt_json, '$.bin_label'), "
-            "json_extract(receipt_json, '$.target_date'), "
-            "q_lcb_5pct, created_at "
-            "FROM edli_no_submit_receipts WHERE q_lcb_5pct IS NOT NULL"
-        ).fetchall()
-    except Exception:
-        rows = []
-    finally:
+    with _CLAIMED_QLCB_INDEX_LOCK:
         try:
-            conn.close()
+            from src.state.db import get_world_connection_read_only
+
+            conn = get_world_connection_read_only()
         except Exception:
-            pass
-    for row in rows:
+            return {}
         try:
-            rowid = int(row[0])
-            direction = str(row[1])
-            city = str(row[2] or "")
-            metric = str(row[3] or "").lower()
-            band_template = _coverage_band_template(row[4])
-            target_date = str(row[5] or "")
-            qlcb = float(row[6])
-            created_at = str(row[7] or "")
-        except (TypeError, ValueError, IndexError):
-            continue
-        if not city or not metric or not band_template or not target_date:
-            continue
-        scope = (city, metric, direction)
-        claim = (*scope, band_template, target_date)
-        order = (created_at, rowid)
-        if order < latest.get(claim, ("", -1)):
-            continue
-        latest[claim] = order
-        out.setdefault(scope, {}).setdefault(band_template, {})[target_date] = qlcb
-    return out
+            db_path = next(
+                str(row[2] or "")
+                for row in conn.execute("PRAGMA database_list").fetchall()
+                if str(row[1]) == "main"
+            )
+            stat = os.stat(db_path)
+            source = (os.path.realpath(db_path), int(stat.st_dev), int(stat.st_ino))
+            max_rowid = int(
+                conn.execute(
+                    "SELECT COALESCE(MAX(rowid), 0) FROM edli_no_submit_receipts "
+                    "WHERE q_lcb_5pct IS NOT NULL"
+                ).fetchone()[0]
+            )
+            reset = (
+                source != _CLAIMED_QLCB_INDEX_SOURCE
+                or max_rowid < _CLAIMED_QLCB_INDEX_MAX_ROWID
+            )
+            watermark = 0 if reset else _CLAIMED_QLCB_INDEX_MAX_ROWID
+            if not reset and max_rowid == watermark:
+                return _CLAIMED_QLCB_INDEX
+            rows = conn.execute(
+                "SELECT rowid, direction, "
+                "json_extract(receipt_json, '$.city'), "
+                "lower(COALESCE(json_extract(receipt_json, '$.metric'), '')), "
+                "json_extract(receipt_json, '$.bin_label'), "
+                "json_extract(receipt_json, '$.target_date'), "
+                "q_lcb_5pct, created_at "
+                "FROM edli_no_submit_receipts "
+                "WHERE q_lcb_5pct IS NOT NULL AND rowid > ? AND rowid <= ?",
+                (watermark, max_rowid),
+            ).fetchall()
+        except Exception:
+            return {}
+        finally:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+        index = {} if reset else dict(_CLAIMED_QLCB_INDEX)
+        latest = {} if reset else dict(_CLAIMED_QLCB_INDEX_LATEST)
+        changed_scopes: set[tuple[str, str, str]] = set()
+        changed_bands: set[tuple[tuple[str, str, str], str]] = set()
+        for row in rows:
+            try:
+                rowid = int(row[0])
+                direction = str(row[1])
+                city = str(row[2] or "")
+                metric = str(row[3] or "").lower()
+                band_template = _coverage_band_template(row[4])
+                target_date = str(row[5] or "")
+                qlcb = float(row[6])
+                created_at = str(row[7] or "")
+            except (TypeError, ValueError, IndexError):
+                continue
+            if not city or not metric or not band_template or not target_date:
+                continue
+            scope = (city, metric, direction)
+            claim = (*scope, band_template, target_date)
+            order = (created_at, rowid)
+            if order < latest.get(claim, ("", -1)):
+                continue
+            latest[claim] = order
+            if scope not in changed_scopes:
+                index[scope] = dict(index.get(scope, {}))
+                changed_scopes.add(scope)
+            band_key = (scope, band_template)
+            if band_key not in changed_bands:
+                index[scope][band_template] = dict(
+                    index[scope].get(band_template, {})
+                )
+                changed_bands.add(band_key)
+            index[scope][band_template][target_date] = qlcb
+
+        _CLAIMED_QLCB_INDEX_SOURCE = source
+        _CLAIMED_QLCB_INDEX_MAX_ROWID = max_rowid
+        _CLAIMED_QLCB_INDEX = index
+        _CLAIMED_QLCB_INDEX_LATEST = latest
+        return index
 
 
 def _claimed_qlcb_by_band_for_scope(
