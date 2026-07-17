@@ -384,13 +384,33 @@ def _missing_forecast_window_reason(payload: dict) -> str:
 
 
 def _missing_contract_extrema_member_reasons(payload: dict) -> list[str]:
+    """Block reasons for members that are genuinely absent, not lawfully quarantined.
+
+    LOW-track members whose OWN ``boundary_ambiguous`` flag is set are nulled by
+    extract_open_ens_localday.py:574-580 to keep a boundary-crossing value out of
+    the local-day minimum (leakage law) -- that is a lawful exclusion, not a
+    missing observation. When the snapshot-level majority rule
+    (extract_open_ens_localday.py:596-598) has already decided the day is usable
+    (``boundary_policy.boundary_ambiguous`` is False), a quarantined member must
+    not count as "missing" here; it still contributes a null value (leakage law
+    is unaffected) but no longer blocks the whole snapshot's
+    ``contributes_to_target_extrema``. A majority-ambiguous snapshot is embargoed
+    regardless (see ``_contract_evidence_fields``'s boundary_ambiguous
+    block-reason path), so this function keeps the old any-null behavior in that
+    case.
+    """
     reasons: list[str] = []
     missing_members = payload.get("missing_members")
     if isinstance(missing_members, list) and missing_members:
         reasons.append("missing_forecast_members_for_contract_extrema")
     members = payload.get("members")
+    snapshot_boundary_ambiguous = bool(_boundary_policy(payload).get("boundary_ambiguous", False))
     if isinstance(members, list) and any(
-        not isinstance(member, dict) or member.get("value_native_unit") is None
+        not isinstance(member, dict)
+        or (
+            member.get("value_native_unit") is None
+            and not (not snapshot_boundary_ambiguous and bool(member.get("boundary_ambiguous")))
+        )
         for member in members
     ):
         reasons.append("missing_member_value_for_contract_extrema")

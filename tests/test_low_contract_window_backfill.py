@@ -85,6 +85,100 @@ def _payload(
     }
 
 
+def _payload_mixed_members(
+    *,
+    quarantined_count: int,
+    genuinely_missing_count: int = 0,
+    total: int = 51,
+) -> dict:
+    """Minority/majority-ambiguous payload with per-member boundary_ambiguous mix.
+
+    ``quarantined_count`` members are individually boundary-ambiguous (nulled by
+    the boundary rule, per extract_open_ens_localday.py:574-580 -- a lawful
+    exclusion, not missing data). ``genuinely_missing_count`` members have no
+    inner or boundary data at all (a real ingest gap). The snapshot-level
+    ``boundary_ambiguous`` flag follows the majority threshold (>=26/51), same
+    as extract_open_ens_localday.py:596-598.
+    """
+    majority_threshold = max(1, total // 2 + 1)
+    snapshot_boundary_ambiguous = quarantined_count >= majority_threshold
+    members = []
+    missing_members: list[int] = []
+    for idx in range(total):
+        if idx < genuinely_missing_count:
+            members.append({
+                "member": idx,
+                "value_native_unit": None,
+                "inner_min_native_unit": None,
+                "boundary_min_native_unit": None,
+                "boundary_ambiguous": False,
+            })
+            missing_members.append(idx)
+        elif idx < genuinely_missing_count + quarantined_count:
+            members.append({
+                "member": idx,
+                "value_native_unit": None,
+                "inner_min_native_unit": 60.0 + idx * 0.01,
+                "boundary_min_native_unit": 58.0,
+                "boundary_ambiguous": True,
+            })
+        else:
+            members.append({
+                "member": idx,
+                "value_native_unit": 60.0 + idx * 0.01,
+                "inner_min_native_unit": 60.0 + idx * 0.01,
+                "boundary_min_native_unit": 65.0,
+                "boundary_ambiguous": False,
+            })
+    return {
+        "generated_at": "2026-05-07T00:00:00+00:00",
+        "data_version": LOW_LOCALDAY_MIN.data_version,
+        "physical_quantity": LOW_LOCALDAY_MIN.physical_quantity,
+        "param": "122.128",
+        "paramId": 122,
+        "short_name": "mn2t6",
+        "step_type": "min",
+        "aggregation_window_hours": 6,
+        "city": "Chicago",
+        "lat": 41.8781,
+        "lon": -87.6298,
+        "unit": "F",
+        "timezone": "America/Chicago",
+        "manifest_sha256": "sha256:test",
+        "manifest_hash": "hash:test",
+        "issue_time_utc": "2026-05-30T00:00:00+00:00",
+        "target_date_local": "2026-06-01",
+        "lead_day": 2,
+        "lead_day_anchor": "target_local_date",
+        "local_day_start_utc": "2026-06-01T05:00:00+00:00",
+        "local_day_end_utc": "2026-06-02T05:00:00+00:00",
+        "local_day_window": {
+            "start_utc": "2026-06-01T05:00:00+00:00",
+            "end_utc": "2026-06-02T05:00:00+00:00",
+        },
+        "step_horizon_hours": 60,
+        "step_horizon_deficit_hours": 0,
+        "causality": {"status": "OK"},
+        "boundary_ambiguous": snapshot_boundary_ambiguous,
+        "boundary_policy": {
+            "training_rule": "drop_ambiguous_members",
+            "boundary_ambiguous": snapshot_boundary_ambiguous,
+            "ambiguous_member_count": quarantined_count,
+        },
+        "nearest_grid_lat": 41.875,
+        "nearest_grid_lon": -87.625,
+        "nearest_grid_distance_km": 0.5,
+        "member_count": total,
+        "missing_members": missing_members,
+        "training_allowed": snapshot_boundary_ambiguous is False and not missing_members,
+        "temperature_metric": "low",
+        "members_unit": "degF",
+        "selected_step_ranges_inner": ["54-60"],
+        "selected_step_ranges_boundary": ["48-54", "72-78"],
+        "members": members,
+    }
+
+
 def _write_payload(root: Path, payload: dict, *, suffix: str = "") -> Path:
     path = (
         root
@@ -418,3 +512,113 @@ def test_low_contract_window_backfill_ambiguous_window_stays_blocked(tmp_path: P
     assert row["causality_status"] == "REJECTED_BOUNDARY_AMBIGUOUS"
     assert row["forecast_window_attribution_status"] == "AMBIGUOUS_CROSSES_LOCAL_DAY_BOUNDARY"
     assert "boundary_ambiguous" in json.loads(row["forecast_window_block_reasons_json"])
+
+
+# ---------------------------------------------------------------------------
+# Boundary-quarantine vs. genuinely-missing (P0 fix regression).
+#
+# Root cause: extract_open_ens_localday.py nulls a member's value when ITS OWN
+# boundary_ambiguous flag is True (leakage law: a boundary-crossing value must
+# never enter the local-day minimum). The snapshot-level majority rule
+# (extract_open_ens_localday.py:596-598) separately decides whether the WHOLE
+# snapshot is too ambiguous to use (>=26/51 quarantined). Before this fix,
+# _missing_contract_extrema_member_reasons treated ANY null member value as
+# "missing" regardless of the majority verdict, so a minority-ambiguous day
+# (e.g. 10/51 lawfully quarantined, snapshot-level boundary_ambiguous=False)
+# still got contributes_to_target_extrema=0 for the WHOLE snapshot -- the
+# materializer's ENS query (replacement_forecast_materializer.py) then walked
+# back to a stale prior-day snapshot. Quarantine is a lawful exclusion, not a
+# missing value; only the classification of the block reason changes here --
+# the quarantined member's boundary value never enters members_json as
+# anything but null (leakage law preserved).
+# ---------------------------------------------------------------------------
+
+
+def test_low_contract_evidence_minority_quarantine_contributes():
+    """10/51 quarantined, snapshot-level boundary_ambiguous=False -> contributes=1."""
+    payload = _payload_mixed_members(quarantined_count=10)
+    assert payload["boundary_ambiguous"] is False, "10/51 is below the 26/51 majority threshold"
+
+    evidence = _contract_evidence_fields(
+        payload,
+        LOW_LOCALDAY_MIN,
+        source_id="tigge_mars",
+    )
+
+    assert evidence["forecast_window_attribution_status"] == "FULLY_INSIDE_TARGET_LOCAL_DAY"
+    assert evidence["contributes_to_target_extrema"] == 1
+    assert json.loads(evidence["forecast_window_block_reasons_json"]) == []
+
+    # Leakage law: quarantined members' values are never populated, whatever
+    # the block-reason classification. Only the 41 non-quarantined members are
+    # finite; the local-day minimum must be computed from exactly those.
+    finite_values = [
+        m["value_native_unit"] for m in payload["members"] if m["value_native_unit"] is not None
+    ]
+    assert len(finite_values) == 41
+    quarantined_values = [
+        m["value_native_unit"] for m in payload["members"] if m["boundary_ambiguous"]
+    ]
+    assert all(v is None for v in quarantined_values), (
+        "a quarantined member's boundary value must never enter the extrema computation"
+    )
+
+
+def test_low_contract_evidence_majority_quarantine_still_blocks():
+    """26/51 quarantined, snapshot-level boundary_ambiguous=True -> unchanged (blocked)."""
+    payload = _payload_mixed_members(quarantined_count=26)
+    assert payload["boundary_ambiguous"] is True, "26/51 meets the majority threshold"
+
+    evidence = _contract_evidence_fields(
+        payload,
+        LOW_LOCALDAY_MIN,
+        source_id="tigge_mars",
+    )
+
+    assert evidence["contributes_to_target_extrema"] == 0
+    assert evidence["forecast_window_attribution_status"] == "AMBIGUOUS_CROSSES_LOCAL_DAY_BOUNDARY"
+    assert "boundary_ambiguous" in json.loads(evidence["forecast_window_block_reasons_json"])
+
+
+def test_low_contract_evidence_genuine_missing_member_still_blocks():
+    """A real ingest gap (no inner/boundary data at all) still blocks contributes.
+
+    Distinguishes the fix from a blanket pass: even with 0 boundary-quarantined
+    members, a snapshot with a genuinely missing member (present in
+    missing_members, not merely boundary-nulled) must still fail closed.
+    """
+    payload = _payload_mixed_members(quarantined_count=0, genuinely_missing_count=2)
+    assert payload["boundary_ambiguous"] is False
+    assert payload["missing_members"] == [0, 1]
+
+    evidence = _contract_evidence_fields(
+        payload,
+        LOW_LOCALDAY_MIN,
+        source_id="tigge_mars",
+    )
+
+    assert evidence["contributes_to_target_extrema"] == 0
+    reasons = json.loads(evidence["forecast_window_block_reasons_json"])
+    assert "missing_forecast_members_for_contract_extrema" in reasons
+    assert "missing_member_value_for_contract_extrema" in reasons
+
+
+def test_low_contract_evidence_minority_quarantine_plus_genuine_gap_still_blocks():
+    """Mixed case: minority quarantine (lawful) alongside a genuine gap (unlawful).
+
+    The genuine gap must still surface as a block reason even though the
+    quarantined members no longer do.
+    """
+    payload = _payload_mixed_members(quarantined_count=10, genuinely_missing_count=1)
+    assert payload["boundary_ambiguous"] is False
+
+    evidence = _contract_evidence_fields(
+        payload,
+        LOW_LOCALDAY_MIN,
+        source_id="tigge_mars",
+    )
+
+    assert evidence["contributes_to_target_extrema"] == 0
+    reasons = json.loads(evidence["forecast_window_block_reasons_json"])
+    assert "missing_forecast_members_for_contract_extrema" in reasons
+    assert "missing_member_value_for_contract_extrema" in reasons

@@ -50,6 +50,9 @@ def _insert_snapshot(
     attribution_status: str,
     manifest_hash: str = "a" * 64,
     coordinate_manifest_sha: str = "m" * 64,
+    boundary_ambiguous: int = 0,
+    ambiguous_member_count: int = 0,
+    local_day_start_utc: str = "2026-05-30T00:00:00+00:00",
 ) -> None:
     provenance_json = json.dumps({"manifest_sha256": coordinate_manifest_sha})
     conn.execute(
@@ -67,8 +70,8 @@ def _insert_snapshot(
             :snapshot_id, :city, :target_date, 'high', 'mx2t3_local_calendar_day_max',
             'high_temp', '2026-05-30T12:00:00+00:00', '2026-05-30T12:00:00+00:00', 120.0, :members_json,
             'ecmwf', :dataset_id, 0, 'OK',
-            0, 0, :manifest_hash, :provenance_json, 'VERIFIED',
-            '2026-05-30T12:00:00+00:00', 'degC', 120.0, '2026-05-30T00:00:00+00:00',
+            :boundary_ambiguous, :ambiguous_member_count, :manifest_hash, :provenance_json, 'VERIFIED',
+            '2026-05-30T12:00:00+00:00', 'degC', 120.0, :local_day_start_utc,
             :source_id, :source_transport, :source_run_id, '2026-05-30T12Z',
             '2026-05-30T12:00:00+00:00', '2026-05-30T12:00:00+00:00', '2026-05-30T12:00:00+00:00',
             :contributes, :attribution_status
@@ -87,6 +90,9 @@ def _insert_snapshot(
             "attribution_status": attribution_status,
             "manifest_hash": manifest_hash,
             "provenance_json": provenance_json,
+            "boundary_ambiguous": boundary_ambiguous,
+            "ambiguous_member_count": ambiguous_member_count,
+            "local_day_start_utc": local_day_start_utc,
         },
     )
 
@@ -264,3 +270,129 @@ def test_mixed_snapshot_coordinate_manifest_shas_fail_closed(forecasts_conn):
     assert row["completeness_status"] == "MISSING"
     assert row["manifest_hash"] is None
     assert row["reason_code"] == "SNAPSHOT_COORDINATE_MANIFEST_SHA_MISMATCH"
+
+
+def test_minority_boundary_quarantine_coverage_not_blocked_on_missing_members(forecasts_conn):
+    """P0 fix regression: minority-quarantined members must not read as MISSING_EXPECTED_MEMBERS.
+
+    10/51 members are lawfully boundary-quarantined (nulled by the extractor's
+    per-member leakage-law rule) while the snapshot-level majority verdict says
+    the day IS usable (boundary_ambiguous=0, ambiguous_member_count=10 -- below
+    the 26/51 threshold). Before this fix, source_run_coverage compared the raw
+    41-finite-member count against a fixed expected_members=51 and blocked with
+    MISSING_EXPECTED_MEMBERS/BLOCKED even though contributes_to_target_extrema=1.
+    After the fix, expected_members is lowered to 41 (51 - ambiguous_member_count)
+    for this row only, since boundary_ambiguous=0 (minority, lawful exclusion).
+    """
+    conn = forecasts_conn
+    source_run_id = "ecmwf_open_data:mx2t6_high:2026-05-30T00Z:minority"
+    quarantined = 10
+    mixed_members = json.dumps([20.0 + i * 0.01 for i in range(51 - quarantined)] + [None] * quarantined)
+
+    _insert_snapshot(
+        conn,
+        snapshot_id=30,
+        city="London",
+        target_date="2026-05-31",
+        source_run_id=source_run_id,
+        members_json=mixed_members,
+        contributes=1,
+        attribution_status="FULLY_INSIDE_TARGET_LOCAL_DAY",
+        boundary_ambiguous=0,
+        ambiguous_member_count=quarantined,
+        # London 2026-05-31 local midnight is BST (UTC+1) -> 2026-05-30T23:00 UTC.
+        # Must match compute_target_local_day_window_utc's own answer, or the
+        # per-scope coverage decision reads SNAPSHOT_LOCAL_DAY_WINDOW_MISMATCH
+        # (a fixture-alignment concern, unrelated to this fix).
+        local_day_start_utc="2026-05-30T23:00:00+00:00",
+    )
+    conn.commit()
+
+    from datetime import datetime, timezone
+
+    cycle = datetime(2026, 5, 30, 0, tzinfo=timezone.utc)
+    _write_source_authority_chain(
+        conn,
+        summary={"written": 1, "errors": 0},
+        status="ok",
+        source_run_id=source_run_id,
+        source_cycle_time=cycle,
+        source_release_time=cycle,
+        release_calendar_key="2026-05-30T00Z",
+        forecast_track="mx2t6_high",
+        data_version=_DATA_VERSION,
+        computed_at=cycle,
+    )
+    conn.commit()
+
+    coverage_row = conn.execute(
+        """
+        SELECT expected_members, observed_members, completeness_status,
+               readiness_status, reason_code
+        FROM source_run_coverage
+        WHERE source_run_id = ? AND city = ?
+        """,
+        (source_run_id, "London"),
+    ).fetchone()
+    assert coverage_row is not None, "source_run_coverage row must be written for London"
+    assert int(coverage_row["observed_members"]) == 41
+    assert int(coverage_row["expected_members"]) == 41, (
+        "expected_members must be lowered by the lawfully-quarantined count, not left at 51"
+    )
+    assert coverage_row["reason_code"] != "MISSING_EXPECTED_MEMBERS"
+    assert coverage_row["completeness_status"] == "COMPLETE"
+    assert coverage_row["readiness_status"] == "LIVE_ELIGIBLE"
+
+
+def test_majority_boundary_quarantine_coverage_still_blocked(forecasts_conn):
+    """Majority-ambiguous (boundary_ambiguous=1) rows keep the full 51 expectation."""
+    conn = forecasts_conn
+    source_run_id = "ecmwf_open_data:mx2t6_high:2026-05-30T00Z:majority"
+    quarantined = 30
+    mixed_members = json.dumps([20.0 + i * 0.01 for i in range(51 - quarantined)] + [None] * quarantined)
+
+    _insert_snapshot(
+        conn,
+        snapshot_id=31,
+        city="London",
+        target_date="2026-05-31",
+        source_run_id=source_run_id,
+        members_json=mixed_members,
+        contributes=0,
+        attribution_status="AMBIGUOUS_CROSSES_LOCAL_DAY_BOUNDARY",
+        boundary_ambiguous=1,
+        ambiguous_member_count=quarantined,
+        local_day_start_utc="2026-05-30T23:00:00+00:00",
+    )
+    conn.commit()
+
+    from datetime import datetime, timezone
+
+    cycle = datetime(2026, 5, 30, 0, tzinfo=timezone.utc)
+    _write_source_authority_chain(
+        conn,
+        summary={"written": 1, "errors": 0},
+        status="ok",
+        source_run_id=source_run_id,
+        source_cycle_time=cycle,
+        source_release_time=cycle,
+        release_calendar_key="2026-05-30T00Z",
+        forecast_track="mx2t6_high",
+        data_version=_DATA_VERSION,
+        computed_at=cycle,
+    )
+    conn.commit()
+
+    coverage_row = conn.execute(
+        """
+        SELECT expected_members, observed_members, completeness_status, readiness_status
+        FROM source_run_coverage
+        WHERE source_run_id = ? AND city = ?
+        """,
+        (source_run_id, "London"),
+    ).fetchone()
+    assert coverage_row is not None
+    assert int(coverage_row["expected_members"]) == 51, "majority-ambiguous keeps the full expectation"
+    assert int(coverage_row["observed_members"]) == 21
+    assert coverage_row["completeness_status"] != "COMPLETE"
+    assert coverage_row["readiness_status"] == "BLOCKED"

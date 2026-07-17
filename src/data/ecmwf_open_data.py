@@ -60,7 +60,7 @@ from concurrent.futures import ThreadPoolExecutor, wait
 from contextlib import nullcontext
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Mapping, Optional
 
 import requests
 
@@ -617,6 +617,26 @@ def _usable_member_count(value: object) -> int:
     return count
 
 
+def _effective_expected_members(row: Mapping[str, Any], *, full_ensemble: int = 51) -> int:
+    """51 minus lawfully boundary-quarantined members, for a minority-ambiguous row.
+
+    LOW-track members individually nulled by the boundary-quarantine rule
+    (extract_open_ens_localday.py:574-580) are a lawful exclusion, not a missing
+    observation, once the snapshot-level majority rule
+    (ambiguous_member_count < majority threshold) has already decided the day is
+    usable -- ``row['boundary_ambiguous']`` is 0 in that case. Those quarantined
+    members must not count against the 51-member floor, or a lawful minority
+    exclusion reads identically to a genuine ingest gap
+    (MISSING_EXPECTED_MEMBERS). A majority-ambiguous row (``boundary_ambiguous``
+    == 1) keeps the full expectation: it is embargoed regardless
+    (contributes_to_target_extrema=0), so any member shortfall must still
+    surface undiminished.
+    """
+    if int(row.get("boundary_ambiguous") or 0):
+        return full_ensemble
+    return max(0, full_ensemble - int(row.get("ambiguous_member_count") or 0))
+
+
 def _parse_utc(value: object) -> datetime | None:
     if not isinstance(value, str) or not value:
         return None
@@ -1001,6 +1021,7 @@ def _write_source_authority_chain(
             downloaded_steps=download_observed_steps,
         )
         observed_members_for_scope = _usable_member_count(row.get("members_json"))
+        expected_members_for_scope = _effective_expected_members(row)
         horizon_decision = evaluate_horizon_coverage(
             required_steps=scope.required_step_hours,
             live_max_step_hours=int(float(row.get("step_horizon_hours") or 0)),
@@ -1018,7 +1039,7 @@ def _write_source_authority_chain(
             snapshot_metric=str(row["temperature_metric"]),
             expected_steps=scope.required_step_hours,
             observed_steps=observed_steps_for_scope,
-            expected_members=51,
+            expected_members=expected_members_for_scope,
             observed_members=observed_members_for_scope,
             has_source_linkage=all(
                 row.get(field)
@@ -1098,7 +1119,7 @@ def _write_source_authority_chain(
             physical_quantity=str(row["physical_quantity"]),
             observation_field=str(row["observation_field"]),
             data_version=data_version,
-            expected_members=51,
+            expected_members=expected_members_for_scope,
             observed_members=observed_members_for_scope,
             expected_steps_json=scope.required_step_hours,
             observed_steps_json=observed_steps_for_scope,
