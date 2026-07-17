@@ -637,6 +637,21 @@ def _effective_expected_members(row: Mapping[str, Any], *, full_ensemble: int = 
     return max(0, full_ensemble - int(row.get("ambiguous_member_count") or 0))
 
 
+def _run_level_observed_members(
+    row: Mapping[str, Any],
+    *,
+    full_ensemble: int = 51,
+) -> int:
+    """Normalize lawful member exclusions onto the source-run's fixed scale."""
+
+    usable = _usable_member_count(row.get("members_json"))
+    lawful_exclusions = full_ensemble - _effective_expected_members(
+        row,
+        full_ensemble=full_ensemble,
+    )
+    return min(full_ensemble, usable + lawful_exclusions)
+
+
 def _parse_utc(value: object) -> datetime | None:
     if not isinstance(value, str) or not value:
         return None
@@ -921,7 +936,9 @@ def _write_source_authority_chain(
         row for row in rows if int(row.get("contributes_to_target_extrema") or 0) == 1
     ]
     member_count_rows = contributing_rows if contributing_rows else rows
-    observed_member_counts = [_usable_member_count(row.get("members_json")) for row in member_count_rows]
+    observed_member_counts = [
+        _run_level_observed_members(row) for row in member_count_rows
+    ]
     observed_members = min(observed_member_counts) if observed_member_counts else 0
     if rows and observed_members < 51 and source_run_status == "SUCCESS":
         source_run_status = "PARTIAL"
@@ -933,7 +950,6 @@ def _write_source_authority_chain(
     # (all rows could legitimately have NULL source_available_at on degraded ingest).
     _avail_times = [str(row["source_available_at"]) for row in rows if row.get("source_available_at")]
     first_member_observed_time_iso: str = min(_avail_times, default="")
-    run_complete_time_iso: str = ("" if partial_run else max(_avail_times, default=""))
     observed_step_horizons = [
         float(row["step_horizon_hours"])
         for row in rows
@@ -946,13 +962,15 @@ def _write_source_authority_chain(
     if download_observed_steps is not None:
         observed_steps = list(download_observed_steps)
         if download_partial_run is not None:
-            partial_run = download_partial_run
-            source_run_completeness = "PARTIAL" if partial_run else source_run_completeness
-            source_run_status = "PARTIAL" if partial_run else source_run_status
+            partial_run = partial_run or download_partial_run
+            if download_partial_run:
+                source_run_completeness = "PARTIAL"
+                source_run_status = "PARTIAL"
         if download_reason_code is not None:
             reason_code = download_reason_code
     else:
         observed_steps = [step for step in STEP_HOURS if observed_step_horizons and step <= min(observed_step_horizons)]
+    run_complete_time_iso: str = "" if partial_run else max(_avail_times, default="")
 
     write_source_run(
         conn,

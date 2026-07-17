@@ -194,7 +194,7 @@ def test_genuine_partial_contributing_window_still_drops(forecasts_conn):
     from datetime import datetime, timezone
 
     cycle = datetime(2026, 5, 30, 0, tzinfo=timezone.utc)
-    _write_source_authority_chain(
+    authority = _write_source_authority_chain(
         conn,
         summary={"written": 1, "errors": 0},
         status="ok",
@@ -205,6 +205,8 @@ def test_genuine_partial_contributing_window_still_drops(forecasts_conn):
         forecast_track="mx2t6_high",
         data_version=_DATA_VERSION,
         computed_at=cycle,
+        download_observed_steps=[3],
+        download_partial_run=False,
     )
     conn.commit()
 
@@ -213,6 +215,8 @@ def test_genuine_partial_contributing_window_still_drops(forecasts_conn):
     assert int(row["observed_members"]) == 40
     assert row["completeness_status"] == "PARTIAL"
     assert row["reason_code"] == "MISSING_EXPECTED_MEMBERS"
+    assert int(row["partial_run"]) == 1
+    assert not authority["run_complete_time"]
 
 
 def test_mixed_snapshot_coordinate_manifest_shas_fail_closed(forecasts_conn):
@@ -325,6 +329,12 @@ def test_minority_boundary_quarantine_coverage_not_blocked_on_missing_members(fo
     )
     conn.commit()
 
+    source_run = get_source_run(conn, source_run_id)
+    assert source_run is not None
+    assert source_run["status"] == "SUCCESS"
+    assert source_run["completeness_status"] == "COMPLETE"
+    assert int(source_run["observed_members"]) == 51
+
     coverage_row = conn.execute(
         """
         SELECT expected_members, observed_members, completeness_status,
@@ -382,6 +392,11 @@ def test_majority_boundary_quarantine_coverage_still_blocked(forecasts_conn):
         computed_at=cycle,
     )
     conn.commit()
+
+    source_run = get_source_run(conn, source_run_id)
+    assert source_run is not None
+    assert source_run["status"] == "PARTIAL"
+    assert int(source_run["observed_members"]) == 21
 
     coverage_row = conn.execute(
         """
