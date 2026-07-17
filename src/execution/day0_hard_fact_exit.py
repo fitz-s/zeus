@@ -872,6 +872,82 @@ def _resolve_order_bin_identity(conn: Any, token_id: str) -> Optional[dict]:
     return identity
 
 
+_TARGET_CANCEL_COMMAND_STATES = (
+    "POSTING",
+    "POST_ACKED",
+    "SUBMITTING",
+    "ACKED",
+    "UNKNOWN",
+    "SUBMIT_UNKNOWN_SIDE_EFFECT",
+    "PARTIAL",
+    "CANCEL_PENDING",
+    "REVIEW_REQUIRED",
+)
+
+
+def _target_family_entry_orders(
+    conn: Any,
+    target_family_keys: set[tuple[str, str, str]],
+) -> Optional[list[dict[str, str]]]:
+    """Return command-known target orders, or None when local scope is incomplete."""
+    try:
+        columns = {
+            str(row[1])
+            for row in conn.execute("PRAGMA table_info(venue_commands)").fetchall()
+        }
+    except Exception:  # noqa: BLE001 - unavailable local authority falls back to venue scan
+        return None
+    if not {
+        "intent_kind",
+        "side",
+        "state",
+        "token_id",
+        "venue_order_id",
+    }.issubset(columns):
+        return None
+
+    placeholders = ",".join("?" for _ in _TARGET_CANCEL_COMMAND_STATES)
+    try:
+        rows = conn.execute(
+            f"""
+            SELECT venue_order_id, token_id, side, state
+              FROM venue_commands
+             WHERE intent_kind = 'ENTRY'
+               AND upper(side) = 'BUY'
+               AND state IN ({placeholders})
+            """,
+            _TARGET_CANCEL_COMMAND_STATES,
+        ).fetchall()
+    except Exception:  # noqa: BLE001 - preserve the prior authoritative venue fallback
+        return None
+
+    orders: dict[str, dict[str, str]] = {}
+    for row in rows:
+        token_id = str(_row_get(row, "token_id", 1) or "").strip()
+        if not token_id:
+            return None
+        identity = _resolve_order_bin_identity(conn, token_id)
+        if identity is None:
+            return None
+        family_key = (
+            str(identity.get("city") or "").strip().casefold(),
+            str(identity.get("target_date") or "").strip()[:10],
+            str(identity.get("metric") or "").strip().lower(),
+        )
+        if family_key not in target_family_keys:
+            continue
+
+        order_id = str(_row_get(row, "venue_order_id", 0) or "").strip()
+        if not order_id:
+            return None
+        orders[order_id] = {
+            "orderID": order_id,
+            "asset_id": token_id,
+            "side": str(_row_get(row, "side", 2) or "BUY"),
+        }
+    return list(orders.values())
+
+
 def cancel_day0_dead_bin_resting_entries(
     *,
     clob: Any,
@@ -889,17 +965,6 @@ def cancel_day0_dead_bin_resting_entries(
     cancel failure is loud but never raises. Returns cancels issued.
     """
     moment = (now or datetime.now(UTC)).astimezone(UTC)
-    try:
-        open_orders = clob.get_open_orders() or []
-    except Exception as exc:  # noqa: BLE001
-        logger.debug("day0 dead-bin cancel sweep: get_open_orders failed: %s", exc)
-        return 0
-    if not open_orders:
-        return 0
-
-    from src.data.day0_oracle_anomaly import is_day0_family_paused
-    from zoneinfo import ZoneInfo
-
     target_family_keys = (
         {
             (
@@ -912,6 +977,23 @@ def cancel_day0_dead_bin_resting_entries(
         if target_families is not None
         else None
     )
+    open_orders = (
+        _target_family_entry_orders(conn, target_family_keys)
+        if target_family_keys is not None
+        else None
+    )
+    if open_orders is None:
+        try:
+            open_orders = clob.get_open_orders() or []
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("day0 dead-bin cancel sweep: get_open_orders failed: %s", exc)
+            return 0
+    if not open_orders:
+        return 0
+
+    from src.data.day0_oracle_anomaly import is_day0_family_paused
+    from zoneinfo import ZoneInfo
+
     cancelled = 0
     for order in open_orders:
         if cancelled >= max(1, int(limit)):

@@ -744,8 +744,10 @@ class _FakeClob:
     def __init__(self, orders):
         self.orders = orders
         self.cancelled: list[str] = []
+        self.open_order_calls = 0
 
     def get_open_orders(self):
+        self.open_order_calls += 1
         return list(self.orders)
 
     def cancel_order(self, order_id):
@@ -803,6 +805,20 @@ def _orders_conn():
     return conn
 
 
+def _add_venue_commands(conn, *commands):
+    conn.execute(
+        """CREATE TABLE venue_commands (
+            intent_kind TEXT, side TEXT, state TEXT, token_id TEXT,
+            venue_order_id TEXT
+        )"""
+    )
+    conn.executemany(
+        "INSERT INTO venue_commands VALUES (?,?,?,?,?)",
+        commands,
+    )
+    return conn
+
+
 class TestRestingOrderCancel:
     NOW_TOKYO_DAY = datetime(2026, 6, 10, 6, 0, tzinfo=UTC)  # Jun 10 15:00 JST
 
@@ -838,6 +854,75 @@ class TestRestingOrderCancel:
 
         assert n == 0
         assert clob.cancelled == []
+
+    def test_target_scope_uses_command_known_orders_without_wallet_scan(self, monkeypatch):
+        _set_metar_memo(monkeypatch, 26)
+        conn = _add_venue_commands(
+            _orders_conn(),
+            ("ENTRY", "BUY", "ACKED", "tok-dead-yes", "o1"),
+            ("ENTRY", "BUY", "ACKED", "tok-alive-yes", "o2"),
+            ("ENTRY", "SELL", "ACKED", "tok-dead-yes", "exit-order"),
+            ("ENTRY", "BUY", "FILLED", "tok-dead-yes", "filled-order"),
+        )
+        clob = _FakeClob([
+            {"orderID": "wallet-wide", "asset_id": "tok-dead-yes", "side": "BUY"},
+        ])
+
+        n = cancel_day0_dead_bin_resting_entries(
+            clob=clob,
+            conn=conn,
+            cities_by_name={"Tokyo": _tokyo()},
+            now=self.NOW_TOKYO_DAY,
+            target_families={("Tokyo", "2026-06-10", "high")},
+        )
+
+        assert n == 1
+        assert clob.cancelled == ["o1"]
+        assert clob.open_order_calls == 0
+
+    def test_target_scope_without_command_known_orders_skips_wallet_scan(self, monkeypatch):
+        _set_metar_memo(monkeypatch, 26)
+        conn = _add_venue_commands(
+            _orders_conn(),
+            ("ENTRY", "BUY", "ACKED", "tok-dead-yes", "o1"),
+        )
+        clob = _FakeClob([
+            {"orderID": "wallet-wide", "asset_id": "tok-dead-yes", "side": "BUY"},
+        ])
+
+        n = cancel_day0_dead_bin_resting_entries(
+            clob=clob,
+            conn=conn,
+            cities_by_name={"Tokyo": _tokyo()},
+            now=self.NOW_TOKYO_DAY,
+            target_families={("Paris", "2026-06-10", "high")},
+        )
+
+        assert n == 0
+        assert clob.cancelled == []
+        assert clob.open_order_calls == 0
+
+    def test_target_scope_unknown_order_id_falls_back_to_wallet_scan(self, monkeypatch):
+        _set_metar_memo(monkeypatch, 26)
+        conn = _add_venue_commands(
+            _orders_conn(),
+            ("ENTRY", "BUY", "SUBMIT_UNKNOWN_SIDE_EFFECT", "tok-dead-yes", None),
+        )
+        clob = _FakeClob([
+            {"orderID": "venue-o1", "asset_id": "tok-dead-yes", "side": "BUY"},
+        ])
+
+        n = cancel_day0_dead_bin_resting_entries(
+            clob=clob,
+            conn=conn,
+            cities_by_name={"Tokyo": _tokyo()},
+            now=self.NOW_TOKYO_DAY,
+            target_families={("Tokyo", "2026-06-10", "high")},
+        )
+
+        assert n == 1
+        assert clob.cancelled == ["venue-o1"]
+        assert clob.open_order_calls == 1
 
     def test_anomaly_paused_family_cancels_all_its_day0_entries(self, monkeypatch):
         _set_metar_memo(monkeypatch, None)
