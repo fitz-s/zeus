@@ -11265,23 +11265,6 @@ class TestRecoveryResolutionTable:
         _insert(conn, size=5.0, price=0.32)
         _advance_to_acked(conn, venue_order_id="ord-001")
         _advance_to_review_required(conn)
-        _seed_pending_entry_projection(conn)
-        conn.execute(
-            """
-            UPDATE position_current
-               SET phase = 'active',
-                   chain_state = 'synced',
-                   shares = 5.0,
-                   chain_shares = 5.0,
-                   cost_basis_usd = 1.6,
-                   chain_cost_basis_usd = 1.6,
-                   entry_price = 0.32,
-                   chain_avg_price = 0.32,
-                   order_status = 'filled',
-                   updated_at = '2026-04-26T00:07:00Z'
-             WHERE position_id = 'pos-001'
-            """
-        )
         source_fact_id = append_trade_fact(
             conn,
             trade_id="trade-authenticated-review-fill",
@@ -11333,7 +11316,7 @@ class TestRecoveryResolutionTable:
         assert event["occurred_at"] == "2026-04-26T00:05:58Z"
         payload = json.loads(event["payload_json"])
         assert payload["proof_class"] == (
-            "authenticated_trade_fact_full_fill_with_held_projection"
+            "authenticated_trade_fact_full_fill"
         )
         assert reconcile_matched_cancel_review_required_entries(conn) == {
             "scanned": 0,
@@ -11341,6 +11324,38 @@ class TestRecoveryResolutionTable:
             "stayed": 0,
             "errors": 0,
         }
+
+    def test_authenticated_trade_for_other_order_does_not_clear_review(self, conn):
+        from src.execution.command_recovery import (
+            reconcile_matched_cancel_review_required_entries,
+        )
+        from src.state.venue_command_repo import append_trade_fact
+
+        _insert(conn, size=5.0, price=0.32)
+        _advance_to_acked(conn, venue_order_id="ord-001")
+        _advance_to_review_required(conn)
+        append_trade_fact(
+            conn,
+            trade_id="trade-other-order",
+            venue_order_id="ord-other",
+            command_id="cmd-001",
+            state="CONFIRMED",
+            filled_size="5",
+            fill_price="0.32",
+            source="WS_USER",
+            observed_at="2026-04-26T00:06:00Z",
+            venue_timestamp="2026-04-26T00:05:58Z",
+            raw_payload_hash="c" * 64,
+            raw_payload_json={"status": "CONFIRMED"},
+        )
+
+        assert reconcile_matched_cancel_review_required_entries(conn) == {
+            "scanned": 1,
+            "advanced": 0,
+            "stayed": 1,
+            "errors": 0,
+        }
+        assert _get_state(conn, "cmd-001") == "REVIEW_REQUIRED"
 
     def test_filled_entry_execution_fact_repair_preserves_position_increments(
         self,

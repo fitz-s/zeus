@@ -2632,9 +2632,19 @@ def _decimal_text(value: Decimal) -> str:
     return text or "0"
 
 
-def _positive_fill_trade_fact_summary(conn: sqlite3.Connection, command_id: str) -> dict:
+def _positive_fill_trade_fact_summary(
+    conn: sqlite3.Connection,
+    command_id: str,
+    *,
+    venue_order_id: str | None = None,
+) -> dict:
     if not _table_exists(conn, "venue_trade_facts"):
         return {"count": 0, "filled_size": "0"}
+    order_filter = ""
+    params: tuple[object, ...] = (command_id,)
+    if str(venue_order_id or "").strip():
+        order_filter = " AND fact.venue_order_id = ?"
+        params = (command_id, str(venue_order_id))
     sql = "WITH " + _canonical_trade_fact_cte() + ", " + _economic_trade_fact_cte() + """
         SELECT fact.filled_size,
                fact.source,
@@ -2644,10 +2654,10 @@ def _positive_fill_trade_fact_summary(conn: sqlite3.Connection, command_id: str)
           FROM economic_trade_fact fact
          WHERE fact.command_id = ?
            AND fact.state IN ('MATCHED', 'MINED', 'CONFIRMED')
-        """
+        """ + order_filter
     rows = conn.execute(
         sql,
-        (command_id,),
+        params,
     ).fetchall()
     count = 0
     filled = Decimal("0")
@@ -8595,14 +8605,15 @@ def _matched_cancel_review_required_candidates(conn: sqlite3.Connection) -> list
 
 
 def reconcile_matched_cancel_review_required_entries(conn: sqlite3.Connection) -> dict:
-    """Clear REVIEW_REQUIRED entries when matched-cancel facts prove held exposure.
+    """Clear REVIEW_REQUIRED entries when canonical venue facts prove a fill.
 
     This handles the live shape where a maker rest partially/near-fully fills,
     cancel-replace receives a venue NOT_CANCELED / matched-order response, and
     the command is left in REVIEW_REQUIRED even though canonical trade facts and
-    position_current already show a held, chain-synced position. The pass is
-    intentionally DB-only and proof-gated; REVIEW_REQUIRED rows without held
-    exposure evidence stay operator-visible.
+    position_current may still await the slower chain mirror. An authenticated
+    full-fill trade fact bound to the exact command and venue order is already
+    venue truth, so command finality must not wait for chain projection. Other
+    REVIEW_REQUIRED rows remain operator-visible.
     """
 
     summary = {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
@@ -8621,23 +8632,21 @@ def reconcile_matched_cancel_review_required_entries(conn: sqlite3.Connection) -
             if already_canceled_outcome not in {"stayed", "advanced"}:
                 summary["errors"] += 1
                 continue
-            trade_summary = _positive_fill_trade_fact_summary(conn, command_id)
+            trade_summary = _positive_fill_trade_fact_summary(
+                conn,
+                command_id,
+                venue_order_id=venue_order_id,
+            )
             filled_size = str(trade_summary.get("filled_size") or "0")
             if (
                 bool(trade_summary.get("authenticated_confirmed"))
                 and _matched_cancel_residual_is_dust(command, {}, filled_size)
-                and _active_projection_matches_confirmed_fill(
-                    conn,
-                    command=command,
-                    venue_order_id=venue_order_id,
-                    filled_size=filled_size,
-                )
             ):
                 observed_at = str(trade_summary.get("observed_at") or "")
                 payload = {
                     "reason": "review_cleared_confirmed_fill",
                     "proof_class": (
-                        "authenticated_trade_fact_full_fill_with_held_projection"
+                        "authenticated_trade_fact_full_fill"
                     ),
                     "command_id": command_id,
                     "venue_order_id": venue_order_id,
@@ -8647,8 +8656,8 @@ def reconcile_matched_cancel_review_required_entries(conn: sqlite3.Connection) -
                         "command_state_review_required": True,
                         "latest_event_is_review_boundary": True,
                         "authenticated_confirmed_trade_facts": True,
+                        "bound_venue_order_id_matches_trade": True,
                         "trade_facts_cover_command_or_leave_only_dust": True,
-                        "active_projection_matches_confirmed_fill": True,
                         "source_fill_time_valid": True,
                     },
                     "source_proof": {

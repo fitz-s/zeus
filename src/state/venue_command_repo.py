@@ -2109,6 +2109,7 @@ def _validate_review_confirmed_fill_payload(
         "recovery_no_venue_order_id_confirmed_trade",
         "matched_submit_missing_trade_id_confirmed_trade",
         "matched_cancel_with_confirmed_held_projection",
+        "authenticated_trade_fact_full_fill",
         "authenticated_trade_fact_full_fill_with_held_projection",
         "review_required_matched_order_fact_with_positive_trade_fact",
         "review_required_terminal_order_fact_with_held_projection",
@@ -2150,6 +2151,15 @@ def _validate_review_confirmed_fill_payload(
             "positive_trade_facts",
             "residual_size_is_dust",
             "active_projection_matches_confirmed_fill",
+        )
+    elif proof_class == "authenticated_trade_fact_full_fill":
+        required_true = (
+            "command_state_review_required",
+            "latest_event_is_review_boundary",
+            "authenticated_confirmed_trade_facts",
+            "bound_venue_order_id_matches_trade",
+            "trade_facts_cover_command_or_leave_only_dust",
+            "source_fill_time_valid",
         )
     elif proof_class == "authenticated_trade_fact_full_fill_with_held_projection":
         required_true = (
