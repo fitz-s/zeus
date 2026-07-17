@@ -685,6 +685,11 @@ class TestObsFastTickSchedulerRegistration:
         import src.ingest_main as im
 
         specs = im._ingest_main_job_specs()
+        source_kwargs = next(
+            spec[2]
+            for spec in specs
+            if spec[2].get("id") == "ingest_day0_metar_source_clock"
+        )
         kwargs = next(
             spec[2]
             for spec in specs
@@ -694,6 +699,9 @@ class TestObsFastTickSchedulerRegistration:
         assert kwargs["seconds"] == 10
         assert kwargs["max_instances"] == 1
         assert kwargs["coalesce"] is True
+        assert (
+            kwargs["next_run_time"] - source_kwargs["next_run_time"]
+        ).total_seconds() == pytest.approx(2.5)
 
 
 class TestDay0MetarSourceClockTick:

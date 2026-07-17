@@ -2344,7 +2344,7 @@ def _ingest_main_job_specs() -> list[tuple]:
             next_run_time=now)),
         (_day0_oracle_anomaly_tick, "interval", dict(seconds=10,
             id="ingest_day0_oracle_anomaly", max_instances=1, coalesce=True,
-            misfire_grace_time=30, next_run_time=now + timedelta(seconds=5))),
+            misfire_grace_time=30, next_run_time=now + timedelta(seconds=2.5))),
         (_k2_hko_tick, "cron", dict(minute=30, id="ingest_k2_hko_tick",
             max_instances=1, coalesce=True, misfire_grace_time=3600)),
         (_etl_recalibrate, "cron", dict(hour=6, minute=0, id="ingest_etl_recalibrate")),
