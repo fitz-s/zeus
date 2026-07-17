@@ -420,6 +420,55 @@ def test_blocked_entry_cycle_returns_before_runtime_db_setup(monkeypatch):
     assert run_edli_event_reactor_cycle(active_lock=_Lock()) is True
 
 
+def test_periodic_cycle_yields_to_already_pending_day0_before_runtime_db_setup(
+    monkeypatch,
+):
+    import src.main as main
+    import src.state.db as db
+    from src.events.reactor import run_edli_event_reactor_cycle
+    from src.riskguard import riskguard
+    from src.riskguard.risk_level import RiskLevel
+    from src.runtime import reactor_wake
+
+    class _Lock:
+        acquired = False
+
+        def locked(self):
+            return False
+
+        def acquire(self, *, blocking):
+            assert blocking is False
+            self.acquired = True
+            return True
+
+        def release(self):
+            self.acquired = False
+
+    lock = _Lock()
+    monkeypatch.setattr(
+        main,
+        "_settings_section",
+        lambda *_args, **_kwargs: {
+            "enabled": True,
+            "event_writer_enabled": True,
+        },
+    )
+    monkeypatch.setattr(main, "_defer_for_held_position_monitor", lambda _job: False)
+    monkeypatch.setattr(reactor_wake, "reactor_urgent_wake_revision", lambda: "day0-wake")
+    monkeypatch.setattr(riskguard, "get_current_level", lambda: RiskLevel.GREEN)
+    monkeypatch.setattr(
+        db,
+        "get_world_connection",
+        lambda: pytest.fail("periodic reactor must yield before opening the world DB"),
+    )
+
+    assert run_edli_event_reactor_cycle(
+        active_lock=lock,
+        urgent_day0_pending=lambda: True,
+    ) is False
+    assert lock.acquired is False
+
+
 def _global_batch_probe_reactor(
     store, observations, *, incomplete=False, next_claim_event=None
 ):

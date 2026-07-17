@@ -5414,6 +5414,8 @@ def run_edli_event_reactor_cycle(
     maintenance_urgent_revision = reactor_urgent_wake_revision()
 
     def _urgent_wake_pending() -> bool:
+        if urgent_day0_pending is not None and urgent_day0_pending():
+            return True
         current = reactor_urgent_wake_revision()
         return current is not None and current != maintenance_urgent_revision
 
