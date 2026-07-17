@@ -4820,6 +4820,7 @@ def _build_edli_status_pulse(
     retried: int,
     dead_lettered: int,
     rejection_reason_counts: dict,
+    risk_level: str,
     submit_disabled_effective_mode: bool,
     live_submit_attempts: int,
     live_venue_acks: int = 0,
@@ -4857,6 +4858,7 @@ def _build_edli_status_pulse(
             if submit_disabled_effective_mode and proof_accepted > 0
             else {}
         ),
+        "risk_level": risk_level,
     }
 
 def _open_rest_family_rows_for_refresh(trade_conn) -> list[tuple[str, str, str]]:
@@ -5900,6 +5902,7 @@ def run_edli_event_reactor_cycle(
                     retried=int(_rr.retried),
                     dead_lettered=int(_rr.dead_lettered),
                     rejection_reason_counts=_rejection_counts,
+                    risk_level=get_current_level().value,
                     submit_disabled_effective_mode=submit_disabled_effective_mode,
                     live_submit_attempts=_live_submit_attempts,
                     live_venue_acks=_live_venue_acks,

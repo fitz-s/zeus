@@ -30,6 +30,7 @@ def _call_pulse(**overrides):
         retried=1,
         dead_lettered=0,
         rejection_reason_counts={},
+        risk_level="GREEN",
         submit_disabled_effective_mode=False,
         live_submit_attempts=0,
         live_venue_acks=0,
@@ -77,6 +78,7 @@ def test_venue_acks_default_is_zero() -> None:
         retried=0,
         dead_lettered=0,
         rejection_reason_counts={},
+        risk_level="GREEN",
         submit_disabled_effective_mode=False,
         live_submit_attempts=1,
         # live_venue_acks intentionally omitted → must default to 0

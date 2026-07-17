@@ -24,6 +24,7 @@ def _call_pulse(**overrides):
         retried=1,
         dead_lettered=0,
         rejection_reason_counts={"TRADE_SCORE_BLOCKED": 1},
+        risk_level="GREEN",
         submit_disabled_effective_mode=False,
         live_submit_attempts=0,
     )
@@ -99,6 +100,12 @@ def test_final_intents_built_equals_proof_accepted() -> None:
     pulse = _call_pulse(proof_accepted=5, live_submit_attempts=0)
 
     assert pulse["final_intents_built"] == 5
+
+
+def test_current_risk_level_is_carried_by_cycle_pulse() -> None:
+    pulse = _call_pulse(risk_level="YELLOW")
+
+    assert pulse["risk_level"] == "YELLOW"
 
 
 # ---------------------------------------------------------------------------
