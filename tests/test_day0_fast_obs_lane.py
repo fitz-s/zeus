@@ -1073,6 +1073,28 @@ class TestIncrementalFetchWindow:
         assert first_window == [first]
         assert second_window == [first, second]
 
+    def test_warm_fetch_periodically_backfills_late_publications(self, monkeypatch):
+        import src.data.day0_fast_obs as fast_obs
+
+        t0 = datetime(2026, 6, 9, 16, 0, tzinfo=UTC)
+        report = _report("RJTT", t0, 21.0, t_group=False)
+        hours = []
+        clock = iter((100.0, 100.1, 1000.2, 1000.3))
+
+        def fetcher(_stations, **kwargs):
+            hours.append(kwargs["hours"])
+            return [report]
+
+        monkeypatch.setattr(fast_obs.time, "monotonic", lambda: next(clock))
+        emitter = fast_obs.Day0FastObsEmitter(fetcher=fetcher, min_fetch_interval_s=0.0)
+        emitter._reports_with_status(["RJTT"])
+        emitter._reports_with_status(["RJTT"])
+
+        assert hours == [
+            fast_obs.METAR_FULL_FETCH_HOURS,
+            fast_obs.METAR_BACKFILL_FETCH_HOURS,
+        ]
+
     def test_identical_warm_payload_skips_full_window_merge(self, monkeypatch):
         import src.data.day0_fast_obs as fast_obs
 
@@ -1103,6 +1125,7 @@ class TestIncrementalFetchWindow:
         from src.data.day0_fast_obs import (
             Day0FastObsEmitter,
             METAR_FULL_FETCH_HOURS,
+            METAR_RECOVERY_OVERLAP_HOURS,
         )
 
         t0 = datetime(2026, 6, 9, 16, 0, tzinfo=UTC)
@@ -1118,7 +1141,10 @@ class TestIncrementalFetchWindow:
         emitter._cache_fetched_monotonic = _time.monotonic() - 3 * 3600.0
         emitter._reports_with_status(["RJTT"])
 
-        assert hours == [METAR_FULL_FETCH_HOURS, pytest.approx(4.0, abs=0.01)]
+        assert hours == [
+            METAR_FULL_FETCH_HOURS,
+            pytest.approx(3.0 + METAR_RECOVERY_OVERLAP_HOURS, abs=0.01),
+        ]
 
     def test_ledger_hydration_does_not_skip_full_network_recovery(self):
         import time as _time

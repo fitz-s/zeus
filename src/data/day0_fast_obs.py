@@ -112,8 +112,10 @@ DEFAULT_METAR_FETCH_TIMEOUT_S = _positive_float_env(
     4.0,
 )
 METAR_FULL_FETCH_HOURS = 36.0
-METAR_INCREMENTAL_FETCH_HOURS = 2.0
-METAR_RECOVERY_OVERLAP_HOURS = 1.0
+METAR_INCREMENTAL_FETCH_HOURS = 0.5
+METAR_BACKFILL_FETCH_HOURS = 2.0
+METAR_BACKFILL_INTERVAL_S = 15.0 * 60.0
+METAR_RECOVERY_OVERLAP_HOURS = 0.25
 METAR_HTTP_LIMITS = httpx.Limits(
     max_keepalive_connections=1,
     max_connections=2,
@@ -868,6 +870,7 @@ class Day0FastObsEmitter:
     min_fetch_interval_s: float = DEFAULT_MIN_FETCH_INTERVAL_S
     _last_attempt_monotonic: float = field(default=0.0, init=False)
     _cache_fetched_monotonic: float = field(default=0.0, init=False)
+    _last_backfill_monotonic: float = field(default=0.0, init=False)
     _cached_reports: list[MetarReport] = field(default_factory=list, init=False)
     _full_window_loaded: bool = field(default=False, init=False)
     _http_client: httpx.Client | None = field(default=None, init=False, repr=False)
@@ -1190,6 +1193,8 @@ class Day0FastObsEmitter:
                         (cache_age or 0.0) / 3600.0 + METAR_RECOVERY_OVERLAP_HOURS,
                     ),
                 )
+                if (now - self._last_backfill_monotonic) >= METAR_BACKFILL_INTERVAL_S:
+                    fetch_hours = max(fetch_hours, METAR_BACKFILL_FETCH_HOURS)
         try:
             fetch_kwargs: dict[str, Any] = {"hours": fetch_hours}
             if self.fetcher is fetch_metar_reports:
@@ -1219,7 +1224,10 @@ class Day0FastObsEmitter:
                 else:
                     self._cached_reports = fetched
                 self._full_window_loaded = True
-                self._cache_fetched_monotonic = time.monotonic()
+                fetched_monotonic = time.monotonic()
+                self._cache_fetched_monotonic = fetched_monotonic
+                if fetch_hours >= METAR_BACKFILL_FETCH_HOURS:
+                    self._last_backfill_monotonic = fetched_monotonic
                 return list(self._cached_reports), FETCH_FRESH, 0.0
             cache_age = (
                 (time.monotonic() - self._cache_fetched_monotonic) if self._cached_reports else None
