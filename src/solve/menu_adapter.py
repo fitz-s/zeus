@@ -85,6 +85,14 @@ def native_holdings_snapshot_from_positions(
         outcome = bindings.get(condition_id)
         if outcome is None:
             continue
+        shares = Decimal(str(getattr(position, "chain_shares", 0) or 0))
+        if not shares.is_finite() or shares < 0:
+            raise ValueError(
+                f"position {getattr(position, 'trade_id', '')!r} has invalid "
+                f"chain_shares {shares}"
+            )
+        if shares == 0:
+            continue
         direction_raw = getattr(position, "direction", "")
         direction = str(getattr(direction_raw, "value", direction_raw) or "").lower()
         if direction == "buy_yes":
@@ -105,7 +113,6 @@ def native_holdings_snapshot_from_positions(
                 f"position {getattr(position, 'trade_id', '')!r} token does not match "
                 f"current omega for {condition_id}"
             )
-        shares = Decimal(str(getattr(position, "chain_shares", 0) or 0))
         position_id = str(
             getattr(position, "position_id", "")
             or getattr(position, "trade_id", "")

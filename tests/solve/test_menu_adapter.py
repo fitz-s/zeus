@@ -194,6 +194,76 @@ def test_native_holdings_snapshot_rejects_stale_token_binding():
         )
 
 
+def test_native_holdings_snapshot_skips_unproven_zero_chain_inventory():
+    omega = SimpleNamespace(
+        bins=(
+            SimpleNamespace(
+                bin_id="y",
+                condition_id="cond-y",
+                yes_token_id="yes-current",
+                no_token_id="no-current",
+            ),
+        )
+    )
+    positions = (
+        SimpleNamespace(
+            trade_id="unproven",
+            condition_id="cond-y",
+            direction="buy_yes",
+            token_id="",
+            no_token_id="",
+            chain_shares=None,
+        ),
+        SimpleNamespace(
+            trade_id="empty",
+            condition_id="cond-y",
+            direction="buy_yes",
+            token_id="",
+            no_token_id="",
+            chain_shares=Decimal("0"),
+        ),
+    )
+
+    snapshot = native_holdings_snapshot_from_positions(
+        family_key="fam",
+        omega=omega,
+        positions=positions,
+        ledger_snapshot_id="ledger-current",
+    )
+
+    assert snapshot.holdings == ()
+
+
+@pytest.mark.parametrize("shares", [Decimal("-1"), Decimal("NaN")])
+def test_native_holdings_snapshot_rejects_invalid_chain_inventory(shares):
+    omega = SimpleNamespace(
+        bins=(
+            SimpleNamespace(
+                bin_id="y",
+                condition_id="cond-y",
+                yes_token_id="yes-current",
+                no_token_id="no-current",
+            ),
+        )
+    )
+    position = SimpleNamespace(
+        trade_id="corrupt",
+        condition_id="cond-y",
+        direction="buy_yes",
+        token_id="yes-current",
+        no_token_id="no-current",
+        chain_shares=shares,
+    )
+
+    with pytest.raises(ValueError, match="invalid chain_shares"):
+        native_holdings_snapshot_from_positions(
+            family_key="fam",
+            omega=omega,
+            positions=(position,),
+            ledger_snapshot_id="ledger-current",
+        )
+
+
 def test_direct_yes_route_becomes_atom_projector():
     fb = _family_book(("y", "n"), {"y": _market("y"), "n": _market("n")})
     rs = _route_set(direct_yes={"y": _route("r_y", "y", "YES", 0.4, 500)})
