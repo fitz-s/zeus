@@ -30,6 +30,7 @@ UTC = timezone.utc
 MARKET_CHANNEL_WS_ENDPOINT = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
 REST_SEED_COMMIT_CHUNK_SIZE = 16
 MARKET_CHANNEL_INITIAL_BOOK_GRACE_SECONDS = 1.0
+MARKET_CHANNEL_CONTINUITY_PUBLISH_INTERVAL_SECONDS = 0.25
 _logger = logging.getLogger(__name__)
 
 
@@ -1192,12 +1193,17 @@ class MarketChannelOnlineService:
     refresh_window_seconds: float = 60.0
     seed_first_token_ids: set[str] = field(default_factory=set)
     initial_book_grace_seconds: float = MARKET_CHANNEL_INITIAL_BOOK_GRACE_SECONDS
+    continuity_publish_interval_seconds: float = (
+        MARKET_CHANNEL_CONTINUITY_PUBLISH_INTERVAL_SECONDS
+    )
     rest_seed_backpressure_count: int = 0
     rest_seed_backpressure_reason: str | None = None
     _connected_at: str | None = None
     _refresh_window_start: datetime | None = None
     _refresh_action_keys: set[tuple[str, str, str]] = field(default_factory=set)
     _current_generation_depth_tokens: set[str] = field(default_factory=set)
+    _continuity_last_publish_monotonic: float | None = field(default=None, init=False)
+    _continuity_last_connected: bool | None = field(default=None, init=False)
 
     def _record_current_generation_depth(self, message: dict[str, Any]) -> None:
         event_type = str(message.get("event_type") or message.get("type") or "")
@@ -1218,17 +1224,28 @@ class MarketChannelOnlineService:
     ) -> None:
         if self.continuity_sink is None:
             return
+        connected_state = bool(connected)
+        now_monotonic = time.monotonic()
+        interval = max(0.0, float(self.continuity_publish_interval_seconds))
+        if (
+            self._continuity_last_connected is connected_state
+            and self._continuity_last_publish_monotonic is not None
+            and now_monotonic - self._continuity_last_publish_monotonic < interval
+        ):
+            return
         try:
             self.continuity_sink(
                 {
                     "schema_version": 1,
                     "channel": "market_channel",
-                    "connected": bool(connected),
+                    "connected": connected_state,
                     "connected_at": self._connected_at,
                     "observed_at": observed_at,
                     "active_token_count": max(0, int(active_token_count)),
                 }
             )
+            self._continuity_last_publish_monotonic = now_monotonic
+            self._continuity_last_connected = connected_state
         except Exception as exc:  # noqa: BLE001 - proof loss falls back to REST
             if logger is not None:
                 logger.warning(

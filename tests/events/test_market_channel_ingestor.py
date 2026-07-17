@@ -1027,6 +1027,7 @@ def test_websocket_delta_is_consumed_while_rest_seed_is_in_flight(monkeypatch):
         ),
         fetch_orderbook=fetch,
         continuity_sink=proofs.append,
+        continuity_publish_interval_seconds=0.0,
     )
 
     asyncio.run(
@@ -1387,6 +1388,7 @@ def test_quote_write_backpressure_retains_websocket_and_latest_event(monkeypatch
             coalescer=EventCoalescer(max_market_keys=8),
         ),
         continuity_sink=proofs.append,
+        continuity_publish_interval_seconds=0.0,
     )
 
     asyncio.run(
@@ -1410,6 +1412,39 @@ def test_quote_write_backpressure_retains_websocket_and_latest_event(monkeypatch
     ).fetchall() == [("connected",)]
     assert len(proofs) == 2
     assert all(proof["connected"] is True for proof in proofs)
+
+
+def test_continuity_publication_coalesces_quotes_but_not_state_changes(monkeypatch):
+    proofs: list[dict] = []
+    monotonic = iter((10.0, 10.1, 10.26, 10.27))
+    monkeypatch.setattr(
+        "src.events.triggers.market_channel_ingestor.time.monotonic",
+        lambda: next(monotonic),
+    )
+    service = MarketChannelOnlineService(
+        object(),
+        continuity_sink=proofs.append,
+        continuity_publish_interval_seconds=0.25,
+    )
+
+    for connected, observed_at in (
+        (True, "2026-07-17T10:00:00+00:00"),
+        (True, "2026-07-17T10:00:00.100000+00:00"),
+        (True, "2026-07-17T10:00:00.260000+00:00"),
+        (False, "2026-07-17T10:00:00.270000+00:00"),
+    ):
+        service._publish_continuity(
+            connected=connected,
+            observed_at=observed_at,
+            active_token_count=2,
+        )
+
+    assert [proof["observed_at"] for proof in proofs] == [
+        "2026-07-17T10:00:00+00:00",
+        "2026-07-17T10:00:00.260000+00:00",
+        "2026-07-17T10:00:00.270000+00:00",
+    ]
+    assert [proof["connected"] for proof in proofs] == [True, True, False]
 
 
 def test_disconnect_transition_commits_after_rollback(monkeypatch):
