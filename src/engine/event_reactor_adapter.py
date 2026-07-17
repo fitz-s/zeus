@@ -773,6 +773,37 @@ def _global_book_prefetch_tokens(
     )
 
 
+def _global_current_executable_prefetch_tokens(
+    probabilities: Mapping[str, object],
+    metadata_by_key: Mapping[tuple[str, str], Mapping[str, object]],
+    *,
+    checked_at: datetime,
+) -> tuple[str, ...] | None:
+    """Narrow speculative I/O using complete current tradeability metadata."""
+
+    if checked_at.tzinfo is None:
+        return None
+    topology = _global_book_topology_signature(probabilities)
+    if topology is None:
+        return None
+    from src.engine.global_auction_universe import (
+        _global_book_metadata_is_executable,
+    )
+
+    tokens: list[str] = []
+    for _, _, condition_id, yes_token_id, no_token_id in topology:
+        for token_id in (yes_token_id, no_token_id):
+            metadata = metadata_by_key.get((condition_id, token_id))
+            if metadata is None:
+                return None
+            if _global_book_metadata_is_executable(
+                metadata,
+                checked_at_utc=checked_at,
+            ):
+                tokens.append(token_id)
+    return tuple(tokens)
+
+
 def _global_candidate_correlation_key(candidate: object) -> str:
     """Return the terminal-risk identity shared by every sibling bin."""
 
@@ -6999,12 +7030,15 @@ def event_bound_live_adapter_from_trade_conn(
                 *,
                 mode,
                 token_hint=None,
+                token_override=None,
                 projected=None,
                 captured_at=None,
             ):
-                tokens = _global_book_prefetch_tokens(
-                    probability_slice,
-                )
+                tokens = token_override
+                if tokens is None:
+                    tokens = _global_book_prefetch_tokens(
+                        probability_slice,
+                    )
                 if tokens is None:
                     tokens = token_hint
                 if tokens is None:
@@ -7034,15 +7068,19 @@ def event_bound_live_adapter_from_trade_conn(
                         _time.monotonic() - fetch_started,
                         len(tokens),
                         len(projected_books),
-                        max(
-                            0,
-                            int(
-                                (captured_at - projected_at).total_seconds()
-                                * 1000
-                            ),
+                        (
+                            max(
+                                0,
+                                int(
+                                    (captured_at - projected_at).total_seconds()
+                                    * 1000
+                                ),
+                            )
+                            if projected_at is not None
+                            else 0
                         ),
                     )
-                    return tokens, projected_books, projected_at
+                    return tokens, projected_books, projected_at or captured_at
                 with PolymarketClient(public_http_timeout=timeout) as clob:
                     fetched_books = fetch_current_global_books(
                         missing_tokens,
@@ -7101,11 +7139,24 @@ def event_bound_live_adapter_from_trade_conn(
                 prefetched=None,
             ):
                 capture_started = _time.monotonic()
+                prefetched_tokens = prefetched[0] if prefetched is not None else None
+                exact_tokens = (
+                    _global_current_executable_prefetch_tokens(
+                        bound_probabilities,
+                        book_metadata_by_key,
+                        checked_at=prefetched[2],
+                    )
+                    if prefetched is not None and prefetched[2] is not None
+                    else None
+                )
                 matching_prefetch = (
                     prefetched
                     if prefetched is not None
-                    and _global_book_prefetch_tokens(bound_probabilities)
-                    == prefetched[0]
+                    and (
+                        _global_book_prefetch_tokens(bound_probabilities)
+                        == prefetched_tokens
+                        or exact_tokens == prefetched_tokens
+                    )
                     else None
                 )
                 if matching_prefetch is None:
@@ -7477,7 +7528,7 @@ def event_bound_live_adapter_from_trade_conn(
                             )
             prefetched = None
             if not bind_slice:
-                if prefetch_slice is not None:
+                if prefetch_slice is not None and not day0_urgent_batch:
                     prefetched = _prefetch_books(
                         prefetch_slice,
                         mode=prefetch_mode,
@@ -7489,6 +7540,23 @@ def event_bound_live_adapter_from_trade_conn(
                     mode="current_metadata",
                     metadata_sink=full_metadata,
                 )
+            elif day0_urgent_batch:
+                rebound_probabilities = _bind(
+                    bind_slice,
+                    mode="current_metadata",
+                    metadata_sink=full_metadata,
+                )
+                exact_tokens = _global_current_executable_prefetch_tokens(
+                    rebound_probabilities,
+                    book_metadata_by_key,
+                    checked_at=datetime.now(UTC),
+                )
+                if exact_tokens is not None:
+                    prefetched = _prefetch_books(
+                        rebound_probabilities,
+                        mode="day0_executable_books",
+                        token_override=exact_tokens,
+                    )
             else:
                 from concurrent.futures import ThreadPoolExecutor
 

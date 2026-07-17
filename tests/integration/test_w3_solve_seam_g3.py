@@ -3370,6 +3370,158 @@ def test_live_adapter_reuses_book_cache_after_probability_rebind(
     world.close()
 
 
+@pytest.mark.parametrize(
+    ("condition_a_executable", "expected_book_calls"),
+    (
+        (True, [("yes-token-a", "no-token-a")]),
+        (False, []),
+    ),
+)
+def test_live_adapter_day0_binds_tradeability_before_fetching_executable_books(
+    monkeypatch,
+    condition_a_executable,
+    expected_book_calls,
+):
+    trade = sqlite3.connect(":memory:")
+    forecast = sqlite3.connect(":memory:")
+    topology = sqlite3.connect(":memory:")
+    world = sqlite3.connect(":memory:")
+    captured = {}
+    monkeypatch.setattr(era, "_GLOBAL_BOOK_EPOCH_CACHE", None)
+
+    def fake_process(events, **kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(events=tuple(events))
+
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "process_current_global_batch",
+        fake_process,
+    )
+    adapter = era.event_bound_live_adapter_from_trade_conn(
+        trade,
+        get_current_level=lambda: era.RiskLevel.GREEN,
+        forecast_conn=forecast,
+        topology_conn=topology,
+        calibration_conn=world,
+    )
+    event = replace(
+        _global_scope_event(city="Dallas", source_run_id="run-dallas"),
+        event_type="DAY0_EXTREME_UPDATED",
+    )
+    adapter.process_global_batch(
+        (event,),
+        _dt.datetime(2026, 7, 10, 8, 10, tzinfo=_dt.timezone.utc),
+    )
+
+    probability = {
+        "family": SimpleNamespace(
+            family_key="family",
+            witness_identity="probability-current",
+            bindings=(
+                SimpleNamespace(
+                    bin_id="bin-a",
+                    condition_id="condition-a",
+                    yes_token_id="yes-token-a",
+                    no_token_id="no-token-a",
+                ),
+                SimpleNamespace(
+                    bin_id="bin-b",
+                    condition_id="condition-b",
+                    yes_token_id="yes-token-b",
+                    no_token_id="no-token-b",
+                ),
+            ),
+        )
+    }
+    bind_complete = False
+    book_calls = []
+
+    def fake_bind(
+        _forecast_conn,
+        *,
+        probability_witnesses,
+        metadata_sink=None,
+        **_,
+    ):
+        nonlocal bind_complete
+        assert metadata_sink is not None
+        for condition_id, yes_token_id, no_token_id, executable in (
+            (
+                "condition-a",
+                "yes-token-a",
+                "no-token-a",
+                condition_a_executable,
+            ),
+            ("condition-b", "yes-token-b", "no-token-b", False),
+        ):
+            metadata = {
+                "_global_current_gamma": True,
+                "enable_orderbook": executable,
+                "active": executable,
+                "closed": not executable,
+                "accepting_orders": executable,
+                "tradeability_status_json": json.dumps(
+                    {"executable_allowed": executable}
+                ),
+            }
+            metadata_sink[(condition_id, yes_token_id)] = metadata
+            metadata_sink[(condition_id, no_token_id)] = metadata
+        bind_complete = True
+        return dict(probability_witnesses)
+
+    class FakeClient:
+        def __init__(self, **_):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return False
+
+        def get_orderbook_snapshots(self, tokens, **_):
+            assert bind_complete
+            book_calls.append(tuple(tokens))
+            return {
+                token: {"asset_id": token, "hash": f"hash-{token}"}
+                for token in tokens
+            }
+
+    def fake_capture(_trade_conn, **kwargs):
+        assert set(kwargs["prefetched_books"]) == (
+            {"yes-token-a", "no-token-a"}
+            if condition_a_executable
+            else set()
+        )
+        assert kwargs["prefetched_at_utc"].tzinfo is not None
+        return SimpleNamespace(
+            witness_identity="book-current",
+            assets=(),
+            current_identity=lambda _checked_at: "book-current",
+        )
+
+    monkeypatch.setattr(universe, "bind_current_global_probability_tokens", fake_bind)
+    monkeypatch.setattr(universe, "capture_current_global_book_epoch", fake_capture)
+    monkeypatch.setattr(
+        "src.data.polymarket_client.PolymarketClient",
+        FakeClient,
+    )
+
+    bound, epoch = captured["current_book_epoch_provider"](
+        probability,
+        _dt.datetime.now(_dt.timezone.utc),
+    )
+
+    assert bound == probability
+    assert epoch.witness_identity == "book-current"
+    assert book_calls == expected_book_calls
+    trade.close()
+    forecast.close()
+    topology.close()
+    world.close()
+
+
 @pytest.mark.parametrize("projection_survives", [True, False])
 def test_live_adapter_overlaps_gamma_bind_with_missing_clob_book_prefetch(
     monkeypatch,
