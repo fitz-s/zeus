@@ -32,6 +32,7 @@ in_scope:
 - src/execution/exit_lifecycle.py
 - src/architecture/gate_runtime.py
 - src/state/portfolio.py
+- src/state/venue_command_repo.py
 - src/engine/global_auction_universe.py
 - src/engine/qkernel_spine_bridge.py
 - src/solve/solver.py

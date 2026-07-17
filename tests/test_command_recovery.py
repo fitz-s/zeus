@@ -11252,6 +11252,96 @@ class TestRecoveryResolutionTable:
             "errors": 0,
         }
 
+    def test_authenticated_full_trade_clears_review_without_order_fact_or_alias_double_count(
+        self,
+        conn,
+    ):
+        from src.execution.command_recovery import (
+            _positive_fill_trade_fact_summary,
+            reconcile_matched_cancel_review_required_entries,
+        )
+        from src.state.venue_command_repo import append_trade_fact
+
+        _insert(conn, size=5.0, price=0.32)
+        _advance_to_acked(conn, venue_order_id="ord-001")
+        _advance_to_review_required(conn)
+        _seed_pending_entry_projection(conn)
+        conn.execute(
+            """
+            UPDATE position_current
+               SET phase = 'active',
+                   chain_state = 'synced',
+                   shares = 5.0,
+                   chain_shares = 5.0,
+                   cost_basis_usd = 1.6,
+                   chain_cost_basis_usd = 1.6,
+                   entry_price = 0.32,
+                   chain_avg_price = 0.32,
+                   order_status = 'filled',
+                   updated_at = '2026-04-26T00:07:00Z'
+             WHERE position_id = 'pos-001'
+            """
+        )
+        source_fact_id = append_trade_fact(
+            conn,
+            trade_id="trade-authenticated-review-fill",
+            venue_order_id="ord-001",
+            command_id="cmd-001",
+            state="CONFIRMED",
+            filled_size="5",
+            fill_price="0.32",
+            source="WS_USER",
+            observed_at="2026-04-26T00:06:00Z",
+            venue_timestamp="2026-04-26T00:05:58Z",
+            raw_payload_hash="a" * 64,
+            raw_payload_json={"status": "CONFIRMED"},
+        )
+        append_trade_fact(
+            conn,
+            trade_id="edli:trade-authenticated-review-fill",
+            venue_order_id="ord-001",
+            command_id="cmd-001",
+            state="CONFIRMED",
+            filled_size="5",
+            fill_price="0.32",
+            source="WS_USER",
+            observed_at="2026-04-26T00:07:00Z",
+            venue_timestamp=None,
+            raw_payload_hash="b" * 64,
+            raw_payload_json={
+                "source_module": "src.events.edli_position_bridge",
+                "raw_fill_payload": {"source_trade_fact_id": source_fact_id},
+            },
+        )
+
+        trade_summary = _positive_fill_trade_fact_summary(conn, "cmd-001")
+        assert trade_summary == {
+            "count": 1,
+            "filled_size": "5",
+            "authenticated_confirmed": True,
+            "observed_at": "2026-04-26T00:05:58Z",
+        }
+        assert reconcile_matched_cancel_review_required_entries(conn) == {
+            "scanned": 1,
+            "advanced": 1,
+            "stayed": 0,
+            "errors": 0,
+        }
+        assert _get_state(conn, "cmd-001") == "FILLED"
+        event = _get_events(conn, "cmd-001")[-1]
+        assert event["event_type"] == "FILL_CONFIRMED"
+        assert event["occurred_at"] == "2026-04-26T00:05:58Z"
+        payload = json.loads(event["payload_json"])
+        assert payload["proof_class"] == (
+            "authenticated_trade_fact_full_fill_with_held_projection"
+        )
+        assert reconcile_matched_cancel_review_required_entries(conn) == {
+            "scanned": 0,
+            "advanced": 0,
+            "stayed": 0,
+            "errors": 0,
+        }
+
     def test_filled_entry_execution_fact_repair_preserves_position_increments(
         self,
         conn,

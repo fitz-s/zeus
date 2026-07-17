@@ -353,7 +353,7 @@ def _economic_trade_fact_cte(
     canonical_cte_name: str = "canonical_trade_fact",
     cte_name: str = "economic_trade_fact",
 ) -> str:
-    """Exclude a tx-hash alias once an exact child trade fact exists."""
+    """Return one row per economic fill, excluding derived aliases."""
 
     return f"""
         {cte_name} AS (
@@ -376,6 +376,22 @@ def _economic_trade_fact_cte(
                            AND CAST(COALESCE(exact.filled_size, '0') AS REAL) > 0
                     )
                 )
+               AND NOT EXISTS (
+                       SELECT 1
+                         FROM {canonical_cte_name} source_fact
+                        WHERE source_fact.trade_fact_id = CASE
+                                  WHEN json_valid(fact.raw_payload_json)
+                                  THEN CAST(json_extract(
+                                      fact.raw_payload_json,
+                                      '$.raw_fill_payload.source_trade_fact_id'
+                                  ) AS INTEGER)
+                              END
+                          AND source_fact.command_id = fact.command_id
+                          AND source_fact.venue_order_id = fact.venue_order_id
+                          AND UPPER(COALESCE(source_fact.state, ''))
+                              IN ('MATCHED', 'MINED', 'CONFIRMED')
+                          AND CAST(COALESCE(source_fact.filled_size, '0') AS REAL) > 0
+                    )
         )
     """
 
@@ -2620,7 +2636,11 @@ def _positive_fill_trade_fact_summary(conn: sqlite3.Connection, command_id: str)
     if not _table_exists(conn, "venue_trade_facts"):
         return {"count": 0, "filled_size": "0"}
     sql = "WITH " + _canonical_trade_fact_cte() + ", " + _economic_trade_fact_cte() + """
-        SELECT fact.filled_size
+        SELECT fact.filled_size,
+               fact.source,
+               fact.state,
+               fact.observed_at,
+               fact.venue_timestamp
           FROM economic_trade_fact fact
          WHERE fact.command_id = ?
            AND fact.state IN ('MATCHED', 'MINED', 'CONFIRMED')
@@ -2631,8 +2651,12 @@ def _positive_fill_trade_fact_summary(conn: sqlite3.Connection, command_id: str)
     ).fetchall()
     count = 0
     filled = Decimal("0")
+    authenticated_confirmed = True
+    valid_source_times = 0
+    latest_source_time: tuple[datetime, str] | None = None
     for row in rows:
-        raw = _dict_row(row).get("filled_size")
+        fact = _dict_row(row)
+        raw = fact.get("filled_size")
         try:
             size = Decimal(str(raw))
         except (InvalidOperation, TypeError, ValueError):
@@ -2641,7 +2665,28 @@ def _positive_fill_trade_fact_summary(conn: sqlite3.Connection, command_id: str)
             continue
         count += 1
         filled += size
-    return {"count": count, "filled_size": _decimal_text(filled)}
+        authenticated_confirmed = authenticated_confirmed and (
+            str(fact.get("source") or "").upper() == "WS_USER"
+            and str(fact.get("state") or "").upper() == "CONFIRMED"
+        )
+        source_time = str(
+            fact.get("venue_timestamp") or fact.get("observed_at") or ""
+        )
+        parsed_source_time = _parse_ts(source_time)
+        if parsed_source_time is not None:
+            valid_source_times += 1
+            if latest_source_time is None or parsed_source_time > latest_source_time[0]:
+                latest_source_time = (parsed_source_time, source_time)
+    return {
+        "count": count,
+        "filled_size": _decimal_text(filled),
+        "authenticated_confirmed": (
+            count > 0
+            and authenticated_confirmed
+            and valid_source_times == count
+        ),
+        "observed_at": latest_source_time[1] if latest_source_time else "",
+    }
 
 
 def _latest_review_cancel_blocked_payload(conn: sqlite3.Connection, command_id: str) -> dict:
@@ -2706,7 +2751,7 @@ def _matched_cancel_residual_is_dust(command: Mapping[str, object], order_fact: 
         filled = _decimal_or_none(filled_size)
         if command_size is None or filled is None:
             return False
-        residual = max(command_size - filled, Decimal("0"))
+        residual = abs(command_size - filled)
     return Decimal("0") <= residual <= Decimal("0.011")
 
 
@@ -6132,25 +6177,10 @@ def _filled_entry_execution_fact_repair_candidates(conn: sqlite3.Connection) -> 
         "WITH "
         + _canonical_trade_fact_cte()
         + ",\n"
+        + _economic_trade_fact_cte()
+        + ",\n"
         + _canonical_order_truth_cte()
         + """,
-        logical_entry_trade_fact AS (
-            SELECT fact.*
-              FROM canonical_trade_fact fact
-             WHERE NOT EXISTS (
-                   SELECT 1
-                     FROM venue_trade_facts source_fact
-                    WHERE source_fact.trade_fact_id = CASE
-                              WHEN json_valid(fact.raw_payload_json)
-                              THEN CAST(json_extract(
-                                  fact.raw_payload_json,
-                                  '$.raw_fill_payload.source_trade_fact_id'
-                              ) AS INTEGER)
-                          END
-                      AND source_fact.command_id = fact.command_id
-                      AND source_fact.venue_order_id = fact.venue_order_id
-               )
-        ),
         latest_order AS (
             SELECT truth.command_id,
                    truth.venue_order_id,
@@ -6182,7 +6212,7 @@ def _filled_entry_execution_fact_repair_candidates(conn: sqlite3.Connection) -> 
                    MAX(fact.venue_timestamp) AS venue_timestamp,
                    GROUP_CONCAT(DISTINCT fact.state) AS fill_states,
                    MAX(fact.trade_fact_id) AS trade_fact_id
-              FROM logical_entry_trade_fact fact
+              FROM economic_trade_fact fact
              WHERE fact.state IN ('MATCHED', 'MINED', 'CONFIRMED')
                AND CAST(COALESCE(fact.filled_size, '0') AS REAL) > 0
                AND CAST(COALESCE(fact.fill_price, '0') AS REAL) > 0
@@ -8591,6 +8621,69 @@ def reconcile_matched_cancel_review_required_entries(conn: sqlite3.Connection) -
             if already_canceled_outcome not in {"stayed", "advanced"}:
                 summary["errors"] += 1
                 continue
+            trade_summary = _positive_fill_trade_fact_summary(conn, command_id)
+            filled_size = str(trade_summary.get("filled_size") or "0")
+            if (
+                bool(trade_summary.get("authenticated_confirmed"))
+                and _matched_cancel_residual_is_dust(command, {}, filled_size)
+                and _active_projection_matches_confirmed_fill(
+                    conn,
+                    command=command,
+                    venue_order_id=venue_order_id,
+                    filled_size=filled_size,
+                )
+            ):
+                observed_at = str(trade_summary.get("observed_at") or "")
+                payload = {
+                    "reason": "review_cleared_confirmed_fill",
+                    "proof_class": (
+                        "authenticated_trade_fact_full_fill_with_held_projection"
+                    ),
+                    "command_id": command_id,
+                    "venue_order_id": venue_order_id,
+                    "filled_size": filled_size,
+                    "fill_price": str(command.get("price") or ""),
+                    "required_predicates": {
+                        "command_state_review_required": True,
+                        "latest_event_is_review_boundary": True,
+                        "authenticated_confirmed_trade_facts": True,
+                        "trade_facts_cover_command_or_leave_only_dust": True,
+                        "active_projection_matches_confirmed_fill": True,
+                        "source_fill_time_valid": True,
+                    },
+                    "source_proof": {
+                        "source_commit": "runtime",
+                        "source_function": (
+                            "command_recovery."
+                            "reconcile_matched_cancel_review_required_entries"
+                        ),
+                        "source_reason": (
+                            "review_required_authenticated_trade_fill_clearance"
+                        ),
+                    },
+                    "reviewed_by": "command_recovery",
+                    "cleared_at": observed_at,
+                }
+                safe_command_id = "".join(
+                    ch if ch.isalnum() else "_" for ch in command_id
+                )
+                sp_name = f"sp_authenticated_review_fill_{safe_command_id}"
+                conn.execute(f"SAVEPOINT {sp_name}")
+                try:
+                    append_event(
+                        conn,
+                        command_id=command_id,
+                        event_type=CommandEventType.FILL_CONFIRMED.value,
+                        occurred_at=observed_at,
+                        payload=payload,
+                    )
+                    conn.execute(f"RELEASE SAVEPOINT {sp_name}")
+                except Exception:
+                    conn.execute(f"ROLLBACK TO SAVEPOINT {sp_name}")
+                    conn.execute(f"RELEASE SAVEPOINT {sp_name}")
+                    raise
+                summary["advanced"] += 1
+                continue
             latest_payload = _latest_review_cancel_blocked_payload(conn, command_id)
             if not _cancel_blocked_by_matched_order(latest_payload):
                 order_fact = _latest_order_fact_for_command_order(
@@ -8638,11 +8731,9 @@ def reconcile_matched_cancel_review_required_entries(conn: sqlite3.Connection) -
                     raise
                 summary["advanced"] += 1
                 continue
-            trade_summary = _positive_fill_trade_fact_summary(conn, command_id)
             if int(trade_summary.get("count") or 0) <= 0:
                 summary["stayed"] += 1
                 continue
-            filled_size = str(trade_summary.get("filled_size") or "0")
             order_fact = _latest_order_fact_for_command_order(
                 conn,
                 command_id=command_id,

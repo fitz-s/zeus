@@ -2109,6 +2109,7 @@ def _validate_review_confirmed_fill_payload(
         "recovery_no_venue_order_id_confirmed_trade",
         "matched_submit_missing_trade_id_confirmed_trade",
         "matched_cancel_with_confirmed_held_projection",
+        "authenticated_trade_fact_full_fill_with_held_projection",
         "review_required_matched_order_fact_with_positive_trade_fact",
         "review_required_terminal_order_fact_with_held_projection",
     }:
@@ -2149,6 +2150,15 @@ def _validate_review_confirmed_fill_payload(
             "positive_trade_facts",
             "residual_size_is_dust",
             "active_projection_matches_confirmed_fill",
+        )
+    elif proof_class == "authenticated_trade_fact_full_fill_with_held_projection":
+        required_true = (
+            "command_state_review_required",
+            "latest_event_is_review_boundary",
+            "authenticated_confirmed_trade_facts",
+            "trade_facts_cover_command_or_leave_only_dust",
+            "active_projection_matches_confirmed_fill",
+            "source_fill_time_valid",
         )
     elif proof_class == "review_required_matched_order_fact_with_positive_trade_fact":
         required_true = (
@@ -2492,9 +2502,46 @@ def _actual_review_confirmed_fill_predicates(
                                ) scored
                        ) ranked
                  WHERE ranked.canonical_rank = 1
+            ),
+            economic_trade_fact AS (
+                SELECT fact.*
+                  FROM canonical_trade_fact fact
+                 WHERE NOT (
+                        TRIM(COALESCE(fact.tx_hash, '')) != ''
+                    AND LOWER(TRIM(COALESCE(fact.trade_id, '')))
+                        = LOWER(TRIM(fact.tx_hash))
+                    AND EXISTS (
+                            SELECT 1
+                              FROM canonical_trade_fact exact
+                             WHERE exact.command_id = fact.command_id
+                               AND LOWER(TRIM(COALESCE(exact.tx_hash, '')))
+                                   = LOWER(TRIM(fact.tx_hash))
+                               AND LOWER(TRIM(COALESCE(exact.trade_id, '')))
+                                   != LOWER(TRIM(COALESCE(fact.trade_id, '')))
+                               AND UPPER(COALESCE(exact.state, ''))
+                                   IN ('MATCHED', 'MINED', 'CONFIRMED')
+                               AND CAST(COALESCE(exact.filled_size, '0') AS REAL) > 0
+                        )
+                    )
+                   AND NOT EXISTS (
+                           SELECT 1
+                             FROM canonical_trade_fact source_fact
+                            WHERE source_fact.trade_fact_id = CASE
+                                      WHEN json_valid(fact.raw_payload_json)
+                                      THEN CAST(json_extract(
+                                          fact.raw_payload_json,
+                                          '$.raw_fill_payload.source_trade_fact_id'
+                                      ) AS INTEGER)
+                                  END
+                              AND source_fact.command_id = fact.command_id
+                              AND source_fact.venue_order_id = fact.venue_order_id
+                              AND UPPER(COALESCE(source_fact.state, ''))
+                                  IN ('MATCHED', 'MINED', 'CONFIRMED')
+                              AND CAST(COALESCE(source_fact.filled_size, '0') AS REAL) > 0
+                        )
             )
-            SELECT filled_size
-              FROM canonical_trade_fact
+            SELECT filled_size, source, state, observed_at, venue_timestamp
+              FROM economic_trade_fact
              WHERE command_id = ?
                AND venue_order_id = ?
                AND state IN ('MATCHED', 'MINED', 'CONFIRMED')
@@ -2527,7 +2574,7 @@ def _actual_review_confirmed_fill_predicates(
             (command_id, venue_order_id),
         ).fetchone()
         command = conn.execute(
-            "SELECT position_id, state, venue_order_id FROM venue_commands WHERE command_id = ?",
+            "SELECT position_id, state, venue_order_id, size FROM venue_commands WHERE command_id = ?",
             (command_id,),
         ).fetchone()
         position_rows = conn.execute(
@@ -2566,12 +2613,23 @@ def _actual_review_confirmed_fill_predicates(
     )
     aggregate_filled = Decimal("0")
     aggregate_count = 0
+    aggregate_authenticated_confirmed = True
+    aggregate_source_times: list[datetime.datetime] = []
     for row in aggregate_trade_rows:
         size = _decimal_or_none(row["filled_size"])
         if size is None or size <= 0:
             continue
         aggregate_filled += size
         aggregate_count += 1
+        aggregate_authenticated_confirmed = aggregate_authenticated_confirmed and (
+            str(row["source"] or "").upper() == "WS_USER"
+            and str(row["state"] or "").upper() == "CONFIRMED"
+        )
+        source_time = _review_clearance_parse_utc(
+            row["venue_timestamp"] or row["observed_at"]
+        )
+        if source_time is not None:
+            aggregate_source_times.append(source_time)
     payload_filled = _decimal_or_none(filled_size)
     order_residual = _decimal_or_none(order_fact["remaining_size"]) if order_fact is not None else None
     residual_is_dust = (
@@ -2614,6 +2672,19 @@ def _actual_review_confirmed_fill_predicates(
         and payload_filled is not None
         and abs(aggregate_filled - payload_filled) <= Decimal("0.000001")
     )
+    command_size = _decimal_or_none(command["size"]) if command is not None else None
+    trade_facts_cover_command_or_leave_only_dust = (
+        aggregate_count > 0
+        and command_size is not None
+        and abs(command_size - aggregate_filled) <= Decimal("0.011")
+    )
+    cleared_at = _review_clearance_parse_utc(payload.get("cleared_at"))
+    source_fill_time_valid = (
+        aggregate_count > 0
+        and len(aggregate_source_times) == aggregate_count
+        and cleared_at is not None
+        and cleared_at == max(aggregate_source_times)
+    )
     order_fact_matched = _decimal_or_none(order_fact["matched_size"]) if order_fact is not None else None
     order_fact_remaining = _decimal_or_none(order_fact["remaining_size"]) if order_fact is not None else None
     matched_order_fact_positive = (
@@ -2648,6 +2719,13 @@ def _actual_review_confirmed_fill_predicates(
         "positive_trade_fact": positive_trade_fact,
         "matched_order_fact_positive": matched_order_fact_positive,
         "positive_trade_facts": aggregate_positive_trade_facts,
+        "authenticated_confirmed_trade_facts": (
+            aggregate_count > 0 and aggregate_authenticated_confirmed
+        ),
+        "trade_facts_cover_command_or_leave_only_dust": (
+            trade_facts_cover_command_or_leave_only_dust
+        ),
+        "source_fill_time_valid": source_fill_time_valid,
         "cancel_response_not_canceled_because_matched": (
             "not_canceled" in cancel_text and "matched" in cancel_text
         ),
