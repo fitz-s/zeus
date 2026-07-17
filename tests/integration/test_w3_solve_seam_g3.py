@@ -2827,7 +2827,11 @@ def test_live_adapter_routes_each_global_truth_to_its_owner(monkeypatch, event_f
 
     def fake_process(events, **kwargs):
         captured.update(kwargs)
-        return SimpleNamespace(events=tuple(events))
+        return SimpleNamespace(
+            events=tuple(events),
+            winner_event_id=None,
+            receipts={},
+        )
 
     monkeypatch.setattr(
         global_batch_runtime,

@@ -3640,7 +3640,7 @@ def test_pr332_db_concurrency_smoke_reactor_world_writes(tmp_path):
     ).fetchall()
     statuses = {row["event_id"]: row["processing_status"] for row in rows}
     assert {statuses[event.event_id] for event in forecast_events} == {"processed"}
-    assert statuses[book_event.event_id] == "ignored"
+    assert book_event.event_id not in statuses
     for event in forecast_events:
         cert_count = conn.execute(
             """
@@ -3698,7 +3698,7 @@ def test_processed_event_has_verified_certificate_or_failure_or_regret_or_dead_l
     statuses = {row[0]: row[1] for row in rows}
     assert statuses[accepted.event_id] == "processed"
     assert statuses[source_rejected.event_id] == "processed"
-    assert statuses[market_rejected.event_id] == "ignored"
+    assert market_rejected.event_id not in statuses
     expected = {
         accepted.event_id: {"verified_no_submit": 1, "execution_receipt": 0, "compile_failure": 0, "regret": 0, "dead_letter": 0},
         source_rejected.event_id: {"verified_no_submit": 0, "execution_receipt": 0, "compile_failure": 1, "regret": 1, "dead_letter": 0},
