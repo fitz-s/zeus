@@ -965,6 +965,11 @@ def refresh_current_global_book_epoch_tokens(
         metadata = metadata_by_token.get(token)
         if metadata is None or str(metadata.get("snapshot_id") or "") != snapshot_id:
             raise ValueError(f"GLOBAL_BOOK_TOKEN_DELTA_METADATA_MISSING:{token}")
+        if not _global_book_metadata_is_current(
+            metadata,
+            checked_at_utc=checked_at_utc,
+        ):
+            raise ValueError(f"GLOBAL_BOOK_TOKEN_DELTA_METADATA_STALE:{token}")
         expected_token = str(
             metadata.get("yes_token_id" if side == "YES" else "no_token_id")
             or ""

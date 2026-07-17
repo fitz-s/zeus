@@ -7693,6 +7693,48 @@ def test_current_global_book_epoch_refreshes_one_newer_projected_token():
     )
 
 
+def test_current_global_book_epoch_rejects_projected_token_with_stale_metadata():
+    probability = _current_global_book_probability()
+    conn = _global_book_metadata_conn(
+        probability,
+        freshness_deadline="2026-06-13T08:00:01+00:00",
+    )
+    at = _dt.datetime(2026, 6, 13, 8, 0, tzinfo=_dt.timezone.utc)
+    books = {
+        token: {
+            "asset_id": token,
+            "bids": [{"price": "0.20", "size": "100"}],
+            "asks": [{"price": "0.30", "size": "100"}],
+        }
+        for binding in probability.bindings
+        for token in (binding.yes_token_id, binding.no_token_id)
+    }
+    times = iter((at, at + _dt.timedelta(milliseconds=10)))
+    epoch = capture_current_global_book_epoch(
+        conn,
+        probability_witnesses={probability.family_key: probability},
+        get_books=lambda tokens: {token: books[token] for token in tokens},
+        clock=lambda: next(times),
+        max_age=_dt.timedelta(seconds=30),
+    )
+    token = probability.bindings[0].yes_token_id
+    projected_at = at + _dt.timedelta(seconds=2)
+    snapshot_id = conn.execute(
+        "SELECT snapshot_id FROM executable_market_snapshot_latest "
+        "WHERE selected_outcome_token_id = ?",
+        (token,),
+    ).fetchone()[0]
+
+    with pytest.raises(ValueError, match="GLOBAL_BOOK_TOKEN_DELTA_METADATA_STALE"):
+        refresh_current_global_book_epoch_tokens(
+            conn,
+            epoch=epoch,
+            projected_books={token: (books[token], projected_at, snapshot_id)},
+            required_tokens=(token,),
+            checked_at_utc=projected_at + _dt.timedelta(milliseconds=10),
+        )
+
+
 def test_current_global_book_epoch_rejects_older_projected_token_change():
     probability = _current_global_book_probability()
     conn = _global_book_metadata_conn(probability)
