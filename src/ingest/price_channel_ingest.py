@@ -2351,11 +2351,7 @@ def _edli_refresh_candidate_priority_quote_evidence(
         MarketChannelOnlineService,
         active_weather_token_metadata_for_tokens,
     )
-    from src.state.db import (
-        get_forecasts_connection_read_only,
-        get_trade_connection,
-        get_world_connection,
-    )
+    from src.state.db import get_trade_connection, get_world_connection
 
     world_read = get_world_connection(write_class=None)
     try:
@@ -2623,7 +2619,11 @@ def _edli_market_channel_ingestor_cycle() -> dict | None:
         return health
 
     from src.events.triggers.market_channel_ingestor import active_weather_token_metadata_for_tokens
-    from src.state.db import get_trade_connection, get_world_connection
+    from src.state.db import (
+        get_forecasts_connection_read_only,
+        get_trade_connection,
+        get_world_connection,
+    )
 
     # Candidate universe (Blocker #52): tokens the reactor recently decided on must
     # be PINNED into the ingestor universe so each has a fresh execution_feasibility_
