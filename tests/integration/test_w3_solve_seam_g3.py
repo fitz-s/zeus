@@ -6522,7 +6522,8 @@ def test_global_book_prefetch_reuses_latest_market_channel_depth_and_invalidates
         max_age=_dt.timedelta(seconds=30),
     )
     assert projected_rows is not None
-    assert projected_rows["yes-a"][2] == "book-event"
+    # Token-delta validation needs the metadata identity, not the quote event ID.
+    assert projected_rows["yes-a"][2] == "snapshot-a"
 
     conn.execute(
         """

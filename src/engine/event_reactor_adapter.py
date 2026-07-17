@@ -1397,7 +1397,8 @@ def _latest_market_channel_book_rows(
                            latest_event.book_hash_before,
                            snapshot.min_tick_size,
                            snapshot.min_order_size,
-                           snapshot.neg_risk
+                           snapshot.neg_risk,
+                           latest.snapshot_id
                       FROM requested
                       JOIN execution_feasibility_latest AS latest_event
                         ON latest_event.token_id = requested.token_id
@@ -1424,7 +1425,8 @@ def _latest_market_channel_book_rows(
                            latest_event.book_hash_before,
                            snapshot.min_tick_size,
                            snapshot.min_order_size,
-                           snapshot.neg_risk
+                           snapshot.neg_risk,
+                           latest.snapshot_id
                       FROM requested
                       JOIN execution_feasibility_evidence AS latest_event
                         ON latest_event.rowid = (
@@ -1513,7 +1515,11 @@ def _latest_market_channel_book_rows(
                         "neg_risk": bool(row[7]),
                     }
                 )
-                projected[token_id] = (book, effective_at, event_id)
+                projected[token_id] = (
+                    book,
+                    effective_at,
+                    str(row[8] or "").strip(),
+                )
     except sqlite3.Error:
         return {}
     return projected
