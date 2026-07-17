@@ -1622,19 +1622,16 @@ def _fresh_projected_global_books(
     return projected
 
 
-def _probe_global_book_epoch_cache(
+def _probe_global_book_cache_entry(
     trade_conn: sqlite3.Connection,
     probabilities: Mapping[str, object],
     *,
-    checked_at: datetime,
     allowed: bool,
     topology_hint: tuple[tuple[str, str, str, str, str], ...] | None = None,
     mutable_family_keys: frozenset[str] | None = None,
-) -> tuple[object | None, str]:
+) -> tuple[_GlobalBookEpochCacheEntry | None, str]:
     if not allowed:
         return None, "not_allowed"
-    if checked_at.tzinfo is None:
-        return None, "checked_at_naive"
     namespace = _global_book_epoch_cache_namespace(trade_conn)
     topology = (
         topology_hint
@@ -1674,6 +1671,29 @@ def _probe_global_book_epoch_cache(
                 f"current={len(topology)}:{current}",
             )
         hit_reason = "hit_mutable_topology"
+    return entry, hit_reason
+
+
+def _probe_global_book_epoch_cache(
+    trade_conn: sqlite3.Connection,
+    probabilities: Mapping[str, object],
+    *,
+    checked_at: datetime,
+    allowed: bool,
+    topology_hint: tuple[tuple[str, str, str, str, str], ...] | None = None,
+    mutable_family_keys: frozenset[str] | None = None,
+) -> tuple[object | None, str]:
+    if checked_at.tzinfo is None:
+        return None, "checked_at_naive"
+    entry, hit_reason = _probe_global_book_cache_entry(
+        trade_conn,
+        probabilities,
+        allowed=allowed,
+        topology_hint=topology_hint,
+        mutable_family_keys=mutable_family_keys,
+    )
+    if entry is None:
+        return None, hit_reason
     current_identity = getattr(entry.epoch, "current_identity", None)
     if not callable(current_identity):
         return None, "current_identity_missing"
@@ -7059,6 +7079,23 @@ def event_bound_live_adapter_from_trade_conn(
                     "global book epoch cache miss: phase=before_bind reason=%s",
                     cache_before_reason,
                 )
+            reusable_topology_entry = None
+            if cached_before_bind is None and cache_before_reason == "expired":
+                reusable_topology_entry, topology_cache_reason = (
+                    _probe_global_book_cache_entry(
+                        trade_conn,
+                        probabilities,
+                        allowed=True,
+                        topology_hint=speculative_topology,
+                        mutable_family_keys=book_refresh_family_keys,
+                    )
+                )
+                if reusable_topology_entry is None:
+                    logging.getLogger(__name__).info(
+                        "global book topology cache unavailable after price expiry: "
+                        "reason=%s",
+                        topology_cache_reason,
+                    )
             eligible_refresh_family_keys = (
                 None
                 if book_refresh_family_keys is None
@@ -7236,6 +7273,29 @@ def event_bound_live_adapter_from_trade_conn(
                 tuple[str, str], Mapping[str, object]
             ] = {}
             bind_slice = probabilities
+            rebound_probabilities: dict[str, object] = {}
+            topology_bindings_reused = False
+            if reusable_topology_entry is not None:
+                try:
+                    rebound_probabilities = _reuse_global_book_token_bindings(
+                        probabilities,
+                        dict(reusable_topology_entry.bound_probabilities),
+                    )
+                except (KeyError, TypeError, ValueError) as exc:
+                    logging.getLogger(__name__).info(
+                        "expired global book topology token reuse rejected; "
+                        "rebinding full universe: reason=%s",
+                        exc,
+                    )
+                    rebound_probabilities = {}
+                else:
+                    bind_slice = {}
+                    topology_bindings_reused = True
+                    logging.getLogger(__name__).info(
+                        "global book topology reused after price expiry: "
+                        "families=%d",
+                        len(rebound_probabilities),
+                    )
             retained_bound_probabilities: dict[str, object] = {}
             if (
                 cached_before_bind is not None
@@ -7287,7 +7347,6 @@ def event_bound_live_adapter_from_trade_conn(
                             )
             prefetched = None
             if not bind_slice:
-                rebound_probabilities = {}
                 if prefetch_slice is not None:
                     prefetched = _prefetch_books(
                         prefetch_slice,
@@ -7352,7 +7411,10 @@ def event_bound_live_adapter_from_trade_conn(
                     "global book epoch cache miss: phase=after_bind reason=%s",
                     cache_after_reason,
                 )
-                if bind_slice is not probabilities:
+                if (
+                    bind_slice is not probabilities
+                    and not topology_bindings_reused
+                ):
                     full_metadata = {}
                     bound_probabilities = _bind(
                         probabilities,

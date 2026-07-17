@@ -4220,12 +4220,33 @@ def test_live_adapter_reuses_tokens_and_refreshes_only_eligible_book_family(
         unrelated_drift,
         _dt.datetime.now(_dt.timezone.utc),
     )
+    expired_at = _dt.datetime.now(_dt.timezone.utc) - _dt.timedelta(seconds=181)
+    expired_epoch = replace(
+        epoch_after_add,
+        captured_at_utc=expired_at,
+        witness_identity=current_global_book_epoch_identity(
+            asset_states=epoch_after_add.asset_states,
+            captured_at_utc=expired_at,
+        ),
+    )
+    cache_entry = era._GLOBAL_BOOK_EPOCH_CACHE
+    assert cache_entry is not None
+    monkeypatch.setattr(
+        era,
+        "_GLOBAL_BOOK_EPOCH_CACHE",
+        replace(cache_entry, epoch=expired_epoch),
+    )
+    bound_after_expiry, epoch_after_expiry = provider(
+        unrelated_drift,
+        _dt.datetime.now(_dt.timezone.utc),
+    )
 
     assert bound == probabilities
     assert bound_again == changed_probabilities
     assert bound_after_unrelated_drift == unrelated_drift
     assert bound_after_removal == {miami: unrelated_drift[miami]}
     assert rebound_after_add == unrelated_drift
+    assert bound_after_expiry == unrelated_drift
     # q changed, but the condition/token topology did not. Reuse the still-current
     # cached bindings while refreshing only the triggered family's live books.
     assert bind_calls == [
@@ -4237,6 +4258,7 @@ def test_live_adapter_reuses_tokens_and_refreshes_only_eligible_book_family(
         (dallas,),
         (dallas,),
         (dallas,),
+        (dallas, miami),
     ]
     assert book_calls == [
         (
@@ -4248,6 +4270,12 @@ def test_live_adapter_reuses_tokens_and_refreshes_only_eligible_book_family(
         ("no-token-dallas", "yes-token-dallas"),
         ("no-token-dallas", "yes-token-dallas"),
         ("no-token-dallas", "yes-token-dallas"),
+        (
+            "no-token-dallas",
+            "no-token-miami",
+            "yes-token-dallas",
+            "yes-token-miami",
+        ),
     ]
     assert epoch_again.captured_at_utc == epoch.captured_at_utc
     assert len(epoch_again.asset_states) == 4
@@ -4259,6 +4287,7 @@ def test_live_adapter_reuses_tokens_and_refreshes_only_eligible_book_family(
         dallas,
         miami,
     }
+    assert epoch_after_expiry.captured_at_utc > expired_epoch.captured_at_utc
     trade.close()
     forecast.close()
     topology.close()
