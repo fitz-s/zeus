@@ -1049,16 +1049,21 @@ def compute_candidate_economics(
     payoff_q_lcb = min(max(float(payoff_q_lcb), 0.0), float(q_dot))
     edge_lcb = payoff_q_lcb - cost
 
-    optimal_stake, optimal_delta_u, delta_u_at_min = optimize_vector_stake(
-        sizing_candidate,
-        band=band,
-        omega=joint_q.omega,
-        matrix=matrix,
-        exposure=exposure,
-        max_stake_usd=max_stake_usd,
-        alpha=alpha,
-        guarded_payoff_q_lcb=q_guard,
-    )
+    if edge_lcb > 0.0 and candidate_route.route_cost.executable:
+        optimal_stake, optimal_delta_u, delta_u_at_min = optimize_vector_stake(
+            sizing_candidate,
+            band=band,
+            omega=joint_q.omega,
+            matrix=matrix,
+            exposure=exposure,
+            max_stake_usd=max_stake_usd,
+            alpha=alpha,
+            guarded_payoff_q_lcb=q_guard,
+        )
+    else:
+        optimal_stake = Decimal("0")
+        optimal_delta_u = 0.0
+        delta_u_at_min = 0.0
 
     chosen_stake_cost = None
     chosen_stake_point_ev = None

@@ -34,7 +34,7 @@ scalar behavior the spec replaces:
 """
 from __future__ import annotations
 
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, timedelta
 from decimal import Decimal
 from typing import Mapping
 
@@ -47,7 +47,6 @@ from src.contracts.execution_price import ExecutionPrice
 from src.contracts.native_side_candidate import NativeSideCandidate
 from src.decision.payoff_vector import (
     CandidateEconomics,
-    CandidateRoute,
     build_candidate_route,
     compute_candidate_economics,
     edge_lower_bound,
@@ -161,7 +160,6 @@ def _band_from_point(jq: JointQ, *, n_draws: int = 4000, jitter: float = 0.02,
     """
     rng = np.random.default_rng(seed)
     q = np.asarray(jq.q, dtype=float)
-    n_bins = q.shape[0]
     # Dirichlet centered on q (concentration scales inversely with jitter) so every row is
     # a coherent point on the simplex and the marginal spread is controlled.
     conc = q * (1.0 / max(jitter, 1e-6)) + 1e-6
@@ -479,6 +477,56 @@ def test_computed_economics_records_chosen_stake_cost_from_curve():
     assert economics.chosen_stake_cost.value == pytest.approx(0.40)
     assert economics.chosen_stake_edge_lcb == pytest.approx(0.78 - 0.40)
     assert economics.chosen_stake_edge_lcb < economics.edge_lcb
+
+
+@pytest.mark.parametrize(
+    ("cost", "executable"),
+    ((0.80, True), (0.20, False)),
+)
+def test_rejected_route_skips_robust_sizing(monkeypatch, cost, executable):
+    space = _outcome_space()
+    jq = _joint_q(space, {"b25": 0.30, "b24": 0.20})
+    band = _band_from_point(jq, jitter=0.01)
+    matrix = FamilyPayoffMatrix.over_bins(
+        [b.bin_id for b in space.bins if b.executable]
+    )
+    exposure = PortfolioExposureVector.flat(matrix, baseline=Decimal("1000"))
+    yes = _yes_instrument("b25")
+    route = build_candidate_route(
+        candidate_id="rejected-before-sizing",
+        instrument=yes,
+        route_cost=_route_cost(yes, cost=cost, executable=executable),
+        omega=space,
+    )
+    sizing = _sizing(
+        space,
+        side="YES",
+        bin_id="b25",
+        q_point=0.30,
+        q_lcb=0.25,
+        price=str(cost),
+    )
+    monkeypatch.setattr(
+        "src.decision.payoff_vector.optimize_vector_stake",
+        lambda *_args, **_kwargs: pytest.fail(
+            "rejected candidate must not enter robust sizing"
+        ),
+    )
+
+    economics = compute_candidate_economics(
+        route,
+        joint_q=jq,
+        band=band,
+        sizing_candidate=sizing,
+        matrix=matrix,
+        exposure=exposure,
+        max_stake_usd=Decimal("100"),
+    )
+
+    assert economics.edge_lcb <= 0.0 or not executable
+    assert economics.optimal_stake_usd == Decimal("0")
+    assert economics.optimal_delta_u == 0.0
+    assert economics.delta_u_at_min == 0.0
 
 
 # ===========================================================================
