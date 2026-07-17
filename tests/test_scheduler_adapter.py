@@ -33,7 +33,7 @@ def test_no_db_writer_on_file_only_executor() -> None:
     for s in specs:
         if s.is_db_writer:
             assert s.executor_class.endswith("_db")
-            assert s.executor_class not in ("io", "heartbeat")
+            assert s.executor_class not in ("io", "diagnostic_io", "heartbeat")
 
 
 def test_validator_catches_writes_db_on_file_only_lane() -> None:
@@ -71,8 +71,8 @@ def test_executor_class_assignments_by_role() -> None:
     assert by_id["ingest_market_scan"].executor_class == "live_db"              # live
     assert by_id["ingest_tigge_archive_backfill"].executor_class == "backfill_db"
     assert by_id["ingest_calibration_auto_promote"].executor_class == "derived_db"
-    assert by_id["ingest_heartbeat"].executor_class == "heartbeat"             # file-only
-    assert by_id["ingest_source_health_probe"].executor_class == "heartbeat"   # file-only
+    assert by_id["ingest_heartbeat"].executor_class == "heartbeat"
+    assert by_id["ingest_source_health_probe"].executor_class == "diagnostic_io"
 
 
 def test_all_jobs_single_instance_coalesce_preserved() -> None:
@@ -567,6 +567,7 @@ def test_build_registry_scheduler_builds_exact_set_and_routes_executors() -> Non
             "backfill_db",
             "derived_db",
             "io",
+            "diagnostic_io",
             "heartbeat",
         )
         assert j["max_instances"] == 1 and j["coalesce"] is True   # anti-overlap preserved
@@ -604,7 +605,8 @@ def test_ingest_main_registry_scheduler_replaces_manual_add_job_when_enabled() -
     assert by_id["ingest_day0_oracle_anomaly"]["executor"] == "live_db"
     assert by_id["ingest_k2_hourly_instants"]["executor"] == "backfill_db"
     assert by_id["ingest_uma_resolution_listener"]["executor"] == "backfill_db"   # PR8 fix landed
-    assert by_id["ingest_heartbeat"]["executor"] == "heartbeat"                   # file-only lane
+    assert by_id["ingest_heartbeat"]["executor"] == "heartbeat"
+    assert by_id["ingest_status_rollup"]["executor"] == "diagnostic_io"
 
 
 def test_ingest_main_non_owner_excludes_opendata_from_registry_build() -> None:

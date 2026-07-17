@@ -14,7 +14,8 @@ DB-heavy jobs starve heartbeats:
     backfill_db     — backfill / historical DB writers (incl. UMA settlement)
     derived_db      — derived/diagnostic DB writers (calibration, skill, drift)
     io              — non-DB IO jobs
-    heartbeat       — heartbeat / health / status (file-only)
+    diagnostic_io   — health/status probes (file-only, potentially slow)
+    heartbeat       — process liveness heartbeat only
 
 This module is the structural home of the "UMA must not write the DB on the file-only fast
 executor" fix: by construction a writes_db job is assigned a *_db class, never io/heartbeat.
@@ -38,6 +39,7 @@ ExecutorClass = Literal[
     "backfill_db",
     "derived_db",
     "io",
+    "diagnostic_io",
     "heartbeat",
 ]
 
@@ -45,8 +47,9 @@ ExecutorClass = Literal[
 def executor_class_for(spec: SourceJobSpec) -> ExecutorClass:
     """Assign an executor class by job intent. writes_db jobs ALWAYS get a *_db class."""
     if not spec.writes_db:
-        # file-only / non-DB jobs: heartbeat-class for diagnostics, io otherwise.
-        return "heartbeat" if spec.role == "diagnostic" else "io"
+        if spec.job_id in {"ingest_heartbeat", "forecast_live_heartbeat"}:
+            return "heartbeat"
+        return "diagnostic_io" if spec.role == "diagnostic" else "io"
     if spec.role == "live" or spec.role == "settlement":
         if spec.job_id in {
             "ingest_day0_metar_source_clock",
@@ -158,7 +161,7 @@ def validate_executor_assignment(specs: list[JobBuildSpec] | None = None) -> lis
     for s in specs:
         job = JOB_REGISTRY.get(s.job_id)
         writes_db = job.writes_db if job is not None else s.is_db_writer
-        if writes_db and s.executor_class in ("io", "heartbeat"):
+        if writes_db and s.executor_class in ("io", "diagnostic_io", "heartbeat"):
             violations.append(
                 f"{s.job_id}: writes_db job assigned file-only executor {s.executor_class!r}"
             )
@@ -239,13 +242,8 @@ def registry_executor_pools() -> dict[str, object]:
         "backfill_db": ThreadPoolExecutor(max_workers=1),
         "derived_db": ThreadPoolExecutor(max_workers=1),
         "io": ThreadPoolExecutor(max_workers=2),
-        # heartbeat lane carries the 60s liveness file write AND the file-only diagnostics
-        # (source_health probe ~minutes/network-bound, status rollup ~DB-reader). PR #329 review
-        # #1: a single worker would let a slow probe delay the 60s heartbeat past the supervisor's
-        # 30s restart-seed threshold -> false daemon-dead restart (the exact Fix #4 regression the
-        # legacy 4-worker 'fast' pool prevented). Multi-worker so the liveness heartbeat always has
-        # a free slot. These are file-only writers (no DB lock contention), so parallelism is safe.
-        "heartbeat": ThreadPoolExecutor(max_workers=3),
+        "diagnostic_io": ThreadPoolExecutor(max_workers=3),
+        "heartbeat": ThreadPoolExecutor(max_workers=1),
     }
 
 
