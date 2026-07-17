@@ -709,15 +709,23 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
 
         return True
 
-    def _canonical_current_chain_shares(
+    def _canonical_current_chain_observation(
         position_id: str,
-    ) -> tuple[bool, float | None, str | None, str | None]:
-        """Return (row_exists, chain_shares, chain_seen_at, chain_state) from position_current.
+    ) -> tuple[
+        bool,
+        float | None,
+        str | None,
+        str | None,
+        float | None,
+        float | None,
+    ]:
+        """Return the persisted chain observation from position_current.
 
         chain_shares is the persisted on-chain share count (NULL when the
         chain observation has never been projected). chain_seen_at is the
         ISO-8601 string of the last persisted positive-observation timestamp
-        (empty-string or NULL when never written). (False, None, None, None) means
+        (empty-string or NULL when never written). The final values are
+        chain_avg_price and chain_cost_basis_usd. A false first element means
         no canonical row exists yet — the position has no projection to update.
 
         Copilot review fix (2026-05-31, issue #1): include chain_seen_at so the
@@ -728,36 +736,50 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
         to mis-classify long-lived synced positions on restart.
         """
         if conn is None:
-            return (False, None, None, None)
+            return (False, None, None, None, None, None)
         try:
             row = conn.execute(
-                "SELECT chain_shares, chain_seen_at, chain_state FROM position_current "
+                "SELECT chain_shares, chain_seen_at, chain_state, "
+                "chain_avg_price, chain_cost_basis_usd FROM position_current "
                 "WHERE position_id = ?",
                 (position_id,),
             ).fetchone()
         except Exception:
-            return (False, None, None, None)
+            return (False, None, None, None, None, None)
         if row is None:
-            return (False, None, None, None)
+            return (False, None, None, None, None, None)
         if hasattr(row, "keys"):
             raw_shares = row["chain_shares"]
             raw_seen_at = row["chain_seen_at"]
             raw_chain_state = row["chain_state"]
+            raw_avg_price = row["chain_avg_price"]
+            raw_cost_basis = row["chain_cost_basis_usd"]
         else:
             raw_shares = row[0]
             raw_seen_at = row[1]
             raw_chain_state = row[2]
+            raw_avg_price = row[3]
+            raw_cost_basis = row[4]
         seen_at = str(raw_seen_at or "") or None
         persisted_chain_state = str(raw_chain_state or "") or None
-        if raw_shares is None:
-            return (True, None, seen_at, persisted_chain_state)
-        try:
-            parsed = Decimal(str(raw_shares))
-        except (InvalidOperation, ValueError):
-            return (True, None, seen_at, persisted_chain_state)
-        if not parsed.is_finite():
-            return (True, None, seen_at, persisted_chain_state)
-        return (True, float(parsed), seen_at, persisted_chain_state)
+
+        def _finite_float(value: object) -> float | None:
+            if value is None:
+                return None
+            try:
+                parsed = Decimal(str(value))
+            except (InvalidOperation, ValueError):
+                return None
+            return float(parsed) if parsed.is_finite() else None
+
+        return (
+            True,
+            _finite_float(raw_shares),
+            seen_at,
+            persisted_chain_state,
+            _finite_float(raw_avg_price),
+            _finite_float(raw_cost_basis),
+        )
 
     def _append_canonical_chain_observation_if_available(
         position: Position,
@@ -792,7 +814,7 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
         per stale position, bounded by the 30-minute window).
 
         Idempotency guard (fix #121, 2026-06-03): the stale-timestamp re-emit
-        (case d) is restricted to positions whose chain_state was ALREADY
+        (case e) is restricted to positions whose chain_state was ALREADY
         "synced" before this reconcile cycle (prior_chain_state == "synced").
         When a position is transitioning into "synced" for the first time (e.g.
         prior chain_state was "unknown"), reconcile's matched branch sets
@@ -806,13 +828,14 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
         Cases:
           (a) shares NULL → always write (first-population).
           (b) shares drifted → always write.
-          (c) shares unchanged + timestamp fresh → skip.
-          (d) shares unchanged + timestamp stale + prior_chain_state == "synced"
+          (c) avg price or cost basis drifted → always write.
+          (d) economics unchanged + timestamp fresh → skip.
+          (e) economics unchanged + timestamp stale + prior_chain_state == "synced"
               → write (long-lived synced: genuine refresh needed).
-          (e) shares unchanged + timestamp stale + prior_chain_state != "synced"
+          (f) economics unchanged + timestamp stale + prior_chain_state != "synced"
               → skip (transitioning into synced: chain_seen_at will be fresh
               after this cycle's canonical write from the size-correction path).
-          (f) shares unchanged + projected chain_state != "synced" → write
+          (g) shares unchanged + projected chain_state != "synced" → write
               (chain economics match, but the canonical visibility projection
               still misleads monitor/redecision).
 
@@ -834,9 +857,14 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
             if not current_phase:
                 return False
 
-            row_exists, persisted_chain_shares, persisted_seen_at, persisted_chain_state = (
-                _canonical_current_chain_shares(trade_id)
-            )
+            (
+                row_exists,
+                persisted_chain_shares,
+                persisted_seen_at,
+                persisted_chain_state,
+                persisted_avg_price,
+                persisted_cost_basis,
+            ) = _canonical_current_chain_observation(trade_id)
             if not row_exists:
                 return False
             target_chain_shares = getattr(position, "chain_shares", None)
@@ -846,22 +874,44 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
             # Decide whether a write is needed:
             #   (a) shares need first-population (NULL) → always write.
             #   (b) shares have genuinely drifted → always write.
-            #   (c) shares are unchanged AND timestamp is fresh → skip.
-            #   (d) shares are unchanged AND timestamp is stale AND position was
+            #   (c) avg price or cost basis has drifted → always write.
+            #   (d) economics unchanged AND timestamp is fresh → skip.
+            #   (e) economics unchanged AND timestamp is stale AND position was
             #       already synced before this cycle → write to refresh
             #       chain_seen_at so classify_chain_state() keeps the correct
             #       CHAIN_KNOWN classification on restart.
-            #   (e) shares are unchanged AND timestamp is stale AND position was
+            #   (f) economics unchanged AND timestamp is stale AND position was
             #       NOT already synced → skip (fix #121: transitioning into
             #       synced; chain_seen_at will be fresh after this write).
-            #   (f) shares are unchanged but projected chain_state is not synced
+            #   (g) shares are unchanged but projected chain_state is not synced
             #       → write (restore canonical chain visibility).
             shares_unchanged = (
                 persisted_chain_shares is not None
                 and abs(float(persisted_chain_shares) - float(target_chain_shares)) <= 1e-9
             )
-            if shares_unchanged and persisted_chain_state == "synced":
-                # Check timestamp freshness (case c vs d/e).
+            target_avg_price = float(getattr(position, "chain_avg_price", 0.0) or 0.0)
+            target_cost_basis = float(
+                getattr(position, "chain_cost_basis_usd", 0.0) or 0.0
+            )
+            economics_changed = (
+                target_avg_price > 0
+                and (
+                    persisted_avg_price is None
+                    or abs(persisted_avg_price - target_avg_price) > 1e-9
+                )
+            ) or (
+                target_cost_basis > 0
+                and (
+                    persisted_cost_basis is None
+                    or abs(persisted_cost_basis - target_cost_basis) > 1e-9
+                )
+            )
+            if (
+                shares_unchanged
+                and persisted_chain_state == "synced"
+                and not economics_changed
+            ):
+                # Check timestamp freshness (case d vs e/f).
                 timestamp_fresh = False
                 if persisted_seen_at:
                     try:
@@ -877,11 +927,11 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
                     except Exception:
                         timestamp_fresh = False  # parse failure → treat as stale
                 if timestamp_fresh:
-                    return False  # case c: nothing to write
-                # Case d vs e: stale timestamp. Only re-emit for long-lived
+                    return False  # case d: nothing to write
+                # Case e vs f: stale timestamp. Only re-emit for long-lived
                 # synced positions (fix #121 idempotency guard).
                 if prior_chain_state != "synced":
-                    return False  # case e: transitioning to synced this cycle
+                    return False  # case f: transitioning to synced this cycle
 
             from src.engine.lifecycle_events import (
                 build_chain_economics_observed_canonical_write,
@@ -920,8 +970,8 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
         current_phase = _canonical_chain_observation_phase(trade_id)
         if not current_phase:
             return False
-        row_exists, persisted_shares, _, persisted_state = (
-            _canonical_current_chain_shares(trade_id)
+        row_exists, persisted_shares, _, persisted_state, _, _ = (
+            _canonical_current_chain_observation(trade_id)
         )
         if not row_exists:
             return False

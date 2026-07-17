@@ -34,6 +34,7 @@ import json
 import os
 import sqlite3
 import tempfile
+from datetime import datetime, timezone
 
 import pytest
 
@@ -362,6 +363,81 @@ def test_synced_chain_shares_observation_emits_canonical_event() -> None:
     # No-op phase grammar: persisted as CHAIN_SIZE_CORRECTED (only allowed
     # no-op-phase chain event type) with the disambiguating reason.
     assert obs[0]["event_type"] == "CHAIN_SIZE_CORRECTED"
+
+
+def test_fresh_synced_projection_repairs_missing_derived_chain_cost_once() -> None:
+    """Matched shares and a fresh timestamp must not hide torn economics."""
+    trade_id = "synced-missing-derived-cost"
+    chain_size = 23.4
+    avg_price = 0.535
+    expected_cost = chain_size * avg_price
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db_path = os.path.join(tmpdir, "world.db")
+        conn = _setup_db_on_disk(db_path)
+        pos = _make_position(
+            trade_id=trade_id,
+            token_id="tok-missing-derived-cost",
+            shares=chain_size,
+        )
+        _seed_position_current(conn, pos, chain_shares=chain_size)
+        conn.execute(
+            """
+            UPDATE position_current
+               SET chain_state = 'synced',
+                   chain_avg_price = ?,
+                   chain_cost_basis_usd = 0.0,
+                   chain_seen_at = ?
+             WHERE position_id = ?
+            """,
+            (avg_price, datetime.now(timezone.utc).isoformat(), trade_id),
+        )
+        conn.commit()
+
+        pos.chain_shares = chain_size
+        pos.chain_avg_price = avg_price
+        pos.chain_cost_basis_usd = 0.0
+        chain = ChainPosition(
+            token_id=pos.token_id,
+            size=chain_size,
+            avg_price=avg_price,
+            cost=0.0,
+            condition_id=pos.condition_id,
+        )
+
+        first_stats = reconcile(PortfolioState(positions=[pos]), [chain], conn=conn)
+        first = conn.execute(
+            "SELECT chain_cost_basis_usd FROM position_current WHERE position_id = ?",
+            (trade_id,),
+        ).fetchone()
+        first_count = conn.execute(
+            """
+            SELECT COUNT(*)
+              FROM position_events
+             WHERE position_id = ?
+               AND event_type = 'CHAIN_SIZE_CORRECTED'
+               AND json_extract(payload_json, '$.reason') = 'chain_economics_observed'
+            """,
+            (trade_id,),
+        ).fetchone()[0]
+
+        second_stats = reconcile(PortfolioState(positions=[pos]), [chain], conn=conn)
+        second_count = conn.execute(
+            """
+            SELECT COUNT(*)
+              FROM position_events
+             WHERE position_id = ?
+               AND event_type = 'CHAIN_SIZE_CORRECTED'
+               AND json_extract(payload_json, '$.reason') = 'chain_economics_observed'
+            """,
+            (trade_id,),
+        ).fetchone()[0]
+        conn.close()
+
+    assert first_stats.get("chain_observation_persisted", 0) == 1
+    assert first["chain_cost_basis_usd"] == pytest.approx(expected_cost)
+    assert first_count == 1
+    assert second_stats.get("chain_observation_persisted", 0) == 0
+    assert second_count == 1
 
 
 def test_pending_exit_chain_observation_preserves_pending_exit_phase() -> None:
