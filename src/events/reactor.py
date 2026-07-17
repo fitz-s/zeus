@@ -5537,25 +5537,26 @@ def run_edli_event_reactor_cycle(
         store = EventStore(conn)
         targeted_event_ids = set(producer_wake_event_ids)
         catchup_day0_event_ids: tuple[str, ...] = ()
-        try:
-            from src.config import runtime_cities as _runtime_cities
-            from src.data.day0_fast_obs import get_fast_obs_emitter
+        if not producer_fast_path:
+            try:
+                from src.config import runtime_cities as _runtime_cities
+                from src.data.day0_fast_obs import get_fast_obs_emitter
 
-            _synced_reports = get_fast_obs_emitter().sync_from_ledger(
-                conn,
-                _runtime_cities(),
-                as_of=now,
-            )
-            if _synced_reports:
-                _log.info(
-                    "EDLI reactor synced %d new METAR ledger reports",
-                    _synced_reports,
+                _synced_reports = get_fast_obs_emitter().sync_from_ledger(
+                    conn,
+                    _runtime_cities(),
+                    as_of=now,
                 )
-        except Exception as _day0_sync_exc:  # noqa: BLE001
-            _log.warning(
-                "EDLI reactor METAR ledger sync failed; fast-tail consumers fail closed: %r",
-                _day0_sync_exc,
-            )
+                if _synced_reports:
+                    _log.info(
+                        "EDLI reactor synced %d new METAR ledger reports",
+                        _synced_reports,
+                    )
+            except Exception as _day0_sync_exc:  # noqa: BLE001
+                _log.warning(
+                    "EDLI reactor METAR ledger sync failed; fast-tail consumers fail closed: %r",
+                    _day0_sync_exc,
+                )
         _log_stage("day0_ledger_sync")
         _day0_family_admission: _Day0LiveFamilyAdmission | None = None
         if (

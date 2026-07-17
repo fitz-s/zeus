@@ -3,10 +3,11 @@
 # Authority basis: EDLI v1 implementation prompt §13 event reactor no-bypass contract.
 from __future__ import annotations
 
-import sqlite3
-import json
 import hashlib
+import inspect
+import json
 import logging
+import sqlite3
 import threading
 import time
 from contextlib import contextmanager
@@ -675,6 +676,19 @@ def test_producer_batch_yields_only_to_day0_between_event_units():
         urgent_wake_pending=any_urgent,
         urgent_day0_pending=day0_urgent,
     ) is any_urgent
+
+
+def test_producer_fast_path_skips_metar_ledger_recovery_sync():
+    from src.events.reactor import run_edli_event_reactor_cycle
+
+    source = inspect.getsource(run_edli_event_reactor_cycle)
+    recovery_sync = source[
+        source.index("if not producer_fast_path:") : source.index(
+            '_log_stage("day0_ledger_sync")'
+        )
+    ]
+
+    assert "sync_from_ledger" in recovery_sync
 
 
 def test_main_reactor_injects_live_day0_preemption_signal(monkeypatch):
