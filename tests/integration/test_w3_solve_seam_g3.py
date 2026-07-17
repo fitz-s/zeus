@@ -63,6 +63,7 @@ from src.engine.global_auction_universe import (
     current_portfolio_wealth_witness,
     current_global_auction_scope_from_events,
     current_global_book_epoch_identity,
+    refresh_current_global_book_epoch_tokens,
 )
 from src.events.opportunity_event import (
     Day0ExtremeUpdatedPayload,
@@ -4101,6 +4102,20 @@ def test_global_book_epoch_cache_requires_stable_topology(monkeypatch):
             metric="high",
         )
     }
+    price_payload = json.loads(price_event.payload_json)
+    price_payload["redecision_origin"] = "market_price"
+    price_payload["price_changed_token_ids"] = ["yes-token-a"]
+    exact_price_event = replace(
+        price_event,
+        payload_json=json.dumps(price_payload),
+    )
+    assert era._global_projected_book_refresh_tokens((exact_price_event,)) == {
+        weather_family_id(
+            city="Dallas",
+            target_date="2026-07-11",
+            metric="high",
+        ): frozenset({"yes-token-a"})
+    }
     assert era._global_book_refresh_family_keys(
         (
             SimpleNamespace(event_type="BOOK_SNAPSHOT"),
@@ -5783,6 +5798,75 @@ def test_current_global_book_epoch_consumes_prefetched_books_at_original_cut():
     assert {asset.token_id for asset in epoch.assets} == set(tokens)
 
 
+def test_current_global_book_epoch_refreshes_only_newer_projected_token():
+    probability = _current_global_book_probability()
+    conn = _global_book_metadata_conn(probability)
+    captured_at = _dt.datetime(2026, 6, 13, 8, 0, tzinfo=_dt.timezone.utc)
+    tokens = tuple(
+        token
+        for binding in probability.bindings
+        for token in (binding.yes_token_id, binding.no_token_id)
+    )
+
+    def raw_book(token, ask):
+        return {
+            "asset_id": token,
+            "hash": f"book-{token}-{ask}",
+            "tick_size": "0.01",
+            "min_order_size": "5",
+            "bids": [{"price": "0.20", "size": "100"}],
+            "asks": [{"price": ask, "size": "100"}],
+        }
+
+    initial_books = {token: raw_book(token, "0.30") for token in tokens}
+    epoch = capture_current_global_book_epoch(
+        conn,
+        probability_witnesses={probability.family_key: probability},
+        get_books=lambda _tokens: pytest.fail("prefetched epoch must not refetch"),
+        clock=lambda: captured_at + _dt.timedelta(seconds=1),
+        max_age=_dt.timedelta(seconds=30),
+        metadata_overrides={},
+        prefetched_books=initial_books,
+        prefetched_at_utc=captured_at,
+    )
+    changed_token = tokens[0]
+    changed_state = next(state for state in epoch.asset_states if state[4] == changed_token)
+    snapshot_id = f"metadata-{changed_state[2]}-{changed_state[3]}"
+    refreshed_at = captured_at + _dt.timedelta(seconds=5)
+
+    refreshed, changed = universe.refresh_current_global_book_epoch_tokens(
+        conn,
+        epoch=epoch,
+        projected_books={
+            changed_token: (
+                raw_book(changed_token, "0.40"),
+                refreshed_at,
+                snapshot_id,
+            )
+        },
+        required_tokens=(changed_token,),
+        checked_at_utc=refreshed_at + _dt.timedelta(seconds=1),
+    )
+
+    assert changed == 1
+    assert refreshed.witness_identity != epoch.witness_identity
+    refreshed_asset = next(
+        asset for asset in refreshed.assets if asset.token_id == changed_token
+    )
+    assert refreshed_asset.captured_at_utc == refreshed_at
+    assert refreshed_asset.curve.levels[0].price == Decimal("0.40")
+    unchanged = {
+        asset.token_id: asset.captured_at_utc
+        for asset in refreshed.assets
+        if asset.token_id != changed_token
+    }
+    assert unchanged == {
+        asset.token_id: asset.captured_at_utc
+        for asset in epoch.assets
+        if asset.token_id != changed_token
+    }
+
+
 def test_global_book_prefetch_reads_complete_fresh_price_channel_projection():
     conn = sqlite3.connect(":memory:")
     conn.executescript(
@@ -5999,6 +6083,114 @@ def _current_global_book_probability():
     )
     assert result.global_family is not None
     return result.global_family.probability_witness
+
+
+def test_current_global_book_epoch_refreshes_one_newer_projected_token():
+    probability = _current_global_book_probability()
+    conn = _global_book_metadata_conn(
+        probability,
+        freshness_deadline="2026-06-13T08:01:00+00:00",
+    )
+    at = _dt.datetime(2026, 6, 13, 8, 0, tzinfo=_dt.timezone.utc)
+    initial_books = {
+        token: {
+            "asset_id": token,
+            "bids": [{"price": "0.20", "size": "100"}],
+            "asks": [{"price": "0.30", "size": "100"}],
+        }
+        for binding in probability.bindings
+        for token in (binding.yes_token_id, binding.no_token_id)
+    }
+    times = iter((at, at + _dt.timedelta(milliseconds=10)))
+    epoch = capture_current_global_book_epoch(
+        conn,
+        probability_witnesses={probability.family_key: probability},
+        get_books=lambda tokens: {token: initial_books[token] for token in tokens},
+        clock=lambda: next(times),
+        max_age=_dt.timedelta(seconds=30),
+    )
+
+    binding = probability.bindings[0]
+    token = binding.yes_token_id
+    sibling = binding.no_token_id
+    projected_at = at + _dt.timedelta(seconds=2)
+    projected_book = {
+        "asset_id": token,
+        "bids": [{"price": "0.40", "size": "100"}],
+        "asks": [{"price": "0.10", "size": "100"}],
+    }
+    snapshot_id = conn.execute(
+        "SELECT snapshot_id FROM executable_market_snapshot_latest "
+        "WHERE selected_outcome_token_id = ?",
+        (token,),
+    ).fetchone()[0]
+    conn.execute(
+        "UPDATE executable_market_snapshots "
+        "SET orderbook_depth_json = ?, captured_at = ? WHERE snapshot_id = ?",
+        (json.dumps(projected_book), projected_at.isoformat(), snapshot_id),
+    )
+
+    refreshed, changed = refresh_current_global_book_epoch_tokens(
+        conn,
+        epoch=epoch,
+        projected_books={token: (projected_book, projected_at, snapshot_id)},
+        required_tokens=(token,),
+        checked_at_utc=projected_at + _dt.timedelta(milliseconds=10),
+    )
+
+    assert changed == 1
+    assert refreshed.captured_at_utc == epoch.captured_at_utc
+    assert refreshed.witness_identity != epoch.witness_identity
+    refreshed_asset = next(asset for asset in refreshed.assets if asset.token_id == token)
+    assert refreshed_asset.curve.levels[0].price == Decimal("0.10")
+    assert next(asset for asset in refreshed.assets if asset.token_id == sibling) is next(
+        asset for asset in epoch.assets if asset.token_id == sibling
+    )
+
+
+def test_current_global_book_epoch_rejects_older_projected_token_change():
+    probability = _current_global_book_probability()
+    conn = _global_book_metadata_conn(probability)
+    at = _dt.datetime(2026, 6, 13, 8, 0, tzinfo=_dt.timezone.utc)
+    books = {
+        token: {
+            "asset_id": token,
+            "bids": [{"price": "0.20", "size": "100"}],
+            "asks": [{"price": "0.30", "size": "100"}],
+        }
+        for binding in probability.bindings
+        for token in (binding.yes_token_id, binding.no_token_id)
+    }
+    times = iter((at, at + _dt.timedelta(milliseconds=10)))
+    epoch = capture_current_global_book_epoch(
+        conn,
+        probability_witnesses={probability.family_key: probability},
+        get_books=lambda tokens: {token: books[token] for token in tokens},
+        clock=lambda: next(times),
+        max_age=_dt.timedelta(seconds=30),
+    )
+    token = probability.bindings[0].yes_token_id
+    stale_book = {
+        "asset_id": token,
+        "bids": [{"price": "0.40", "size": "100"}],
+        "asks": [{"price": "0.10", "size": "100"}],
+    }
+    snapshot_id = conn.execute(
+        "SELECT snapshot_id FROM executable_market_snapshot_latest "
+        "WHERE selected_outcome_token_id = ?",
+        (token,),
+    ).fetchone()[0]
+
+    with pytest.raises(ValueError, match="GLOBAL_BOOK_TOKEN_DELTA_NOT_NEWER"):
+        refresh_current_global_book_epoch_tokens(
+            conn,
+            epoch=epoch,
+            projected_books={
+                token: (stale_book, at - _dt.timedelta(seconds=1), snapshot_id)
+            },
+            required_tokens=(token,),
+            checked_at_utc=at + _dt.timedelta(seconds=1),
+        )
 
 
 def test_current_global_book_epoch_rejects_one_missing_native_side():

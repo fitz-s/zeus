@@ -859,6 +859,212 @@ def capture_current_global_book_epoch(
     )
 
 
+def refresh_current_global_book_epoch_tokens(
+    trade_conn: sqlite3.Connection,
+    *,
+    epoch: CurrentGlobalBookEpoch,
+    projected_books: Mapping[
+        str,
+        tuple[Mapping[str, object], datetime, str],
+    ],
+    required_tokens: Sequence[str],
+    checked_at_utc: datetime,
+) -> tuple[CurrentGlobalBookEpoch, int]:
+    """Replace newer projected token books while preserving the epoch cut."""
+
+    if (
+        checked_at_utc.tzinfo is None
+        or epoch.current_identity(checked_at_utc) is None
+    ):
+        raise ValueError("GLOBAL_BOOK_TOKEN_DELTA_EPOCH_STALE")
+    required = frozenset(str(token or "").strip() for token in required_tokens)
+    if not required or any(not token for token in required):
+        raise ValueError("GLOBAL_BOOK_TOKEN_DELTA_REQUIRED_EMPTY")
+    state_by_token = {state[4]: state for state in epoch.asset_states}
+    if len(state_by_token) != len(epoch.asset_states):
+        raise ValueError("GLOBAL_BOOK_TOKEN_DELTA_TOPOLOGY_AMBIGUOUS")
+    if not required.issubset(state_by_token):
+        raise ValueError("GLOBAL_BOOK_TOKEN_DELTA_REQUIRED_UNKNOWN")
+
+    clean_projected = {
+        str(token or "").strip(): value
+        for token, value in projected_books.items()
+        if str(token or "").strip() in state_by_token
+    }
+    if not required.issubset(clean_projected):
+        raise ValueError("GLOBAL_BOOK_TOKEN_DELTA_PROJECTION_MISSING")
+
+    condition_ids = tuple(
+        dict.fromkeys(state_by_token[token][2] for token in clean_projected)
+    )
+    metadata_by_token: dict[str, Mapping[str, object]] = {}
+    for metadata in _global_book_snapshot_rows(
+        trade_conn,
+        condition_ids=condition_ids,
+        checked_at_utc=checked_at_utc,
+    ):
+        token = str(metadata.get("selected_outcome_token_id") or "").strip()
+        if token in clean_projected and token not in metadata_by_token:
+            metadata_by_token[token] = metadata
+
+    assets_by_token = {asset.token_id: asset for asset in epoch.assets}
+    sell_assets_by_token = {asset.token_id: asset for asset in epoch.sell_assets}
+    changed = 0
+    for token, (raw_book, captured_at, snapshot_id) in sorted(
+        clean_projected.items()
+    ):
+        if captured_at.tzinfo is None:
+            raise ValueError(f"GLOBAL_BOOK_TOKEN_DELTA_TIME_NAIVE:{token}")
+        captured_at = captured_at.astimezone(timezone.utc)
+        state = state_by_token[token]
+        family_key, bin_id, condition_id, side = state[:4]
+        base_asset = assets_by_token.get(token) or sell_assets_by_token.get(token)
+        base_captured_at = (
+            base_asset.captured_at_utc
+            if base_asset is not None
+            else epoch.captured_at_utc
+        )
+        if captured_at <= base_captured_at.astimezone(timezone.utc):
+            projected_hash = _canonical_raw_book_hash(raw_book)
+            if token in required and projected_hash != state[6]:
+                raise ValueError(f"GLOBAL_BOOK_TOKEN_DELTA_NOT_NEWER:{token}")
+            continue
+        if captured_at > checked_at_utc.astimezone(timezone.utc):
+            raise ValueError(f"GLOBAL_BOOK_TOKEN_DELTA_FROM_FUTURE:{token}")
+        metadata = metadata_by_token.get(token)
+        if metadata is None or str(metadata.get("snapshot_id") or "") != snapshot_id:
+            raise ValueError(f"GLOBAL_BOOK_TOKEN_DELTA_METADATA_MISSING:{token}")
+        expected_token = str(
+            metadata.get("yes_token_id" if side == "YES" else "no_token_id")
+            or ""
+        ).strip()
+        if (
+            str(metadata.get("condition_id") or "").strip() != condition_id
+            or expected_token != token
+        ):
+            raise ValueError(f"GLOBAL_BOOK_TOKEN_DELTA_TOPOLOGY_CHANGED:{token}")
+        if bool(metadata.get("snapshot_invalidated")):
+            raise ValueError(f"GLOBAL_BOOK_METADATA_INVALIDATED:{condition_id}:{token}")
+
+        metadata_current = _global_book_metadata_is_current(
+            metadata,
+            checked_at_utc=checked_at_utc,
+        )
+        executable_metadata = _global_book_metadata_is_executable(
+            metadata,
+            checked_at_utc=checked_at_utc,
+        )
+        curve = None
+        sell_curve = None
+        status = "VENUE_NOT_EXECUTABLE" if metadata_current else "VENUE_METADATA_STALE"
+        if executable_metadata:
+            raw_asset_id = str(
+                raw_book.get("asset_id")
+                or raw_book.get("assetId")
+                or raw_book.get("token_id")
+                or ""
+            ).strip()
+            if raw_asset_id != token:
+                raise ValueError(f"GLOBAL_BOOK_TOKEN_MISMATCH:{token}")
+            book_hash = _canonical_raw_book_hash(raw_book)
+            curve = _global_book_curve(
+                family_key=family_key,
+                bin_id=bin_id,
+                condition_id=condition_id,
+                side=side,
+                token_id=token,
+                raw_book=raw_book,
+                metadata=metadata,
+                captured_at_utc=captured_at,
+                max_age=epoch.max_age,
+            )
+            sell_curve = _global_sell_curve(
+                family_key=family_key,
+                bin_id=bin_id,
+                condition_id=condition_id,
+                side=side,
+                token_id=token,
+                raw_book=raw_book,
+                metadata=metadata,
+                captured_at_utc=captured_at,
+                max_age=epoch.max_age,
+            )
+            status = "EXECUTABLE" if curve is not None else "NO_ASK"
+        else:
+            book_hash = "metadata:" + hashlib.sha256(
+                json.dumps(
+                    dict(metadata),
+                    default=str,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            ).hexdigest()
+        new_state = (
+            family_key,
+            bin_id,
+            condition_id,
+            side,
+            token,
+            status,
+            book_hash,
+            str(metadata.get("event_id") or "").strip(),
+            str(metadata.get("gamma_market_id") or "").strip(),
+        )
+        if not new_state[7] or not new_state[8]:
+            raise ValueError(f"GLOBAL_BOOK_TOKEN_DELTA_IDENTITY_MISSING:{token}")
+        if new_state == state:
+            continue
+        state_by_token[token] = new_state
+        changed += 1
+        if curve is None:
+            assets_by_token.pop(token, None)
+        else:
+            assets_by_token[token] = CurrentGlobalBookAsset(
+                family_key=family_key,
+                bin_id=bin_id,
+                condition_id=condition_id,
+                gamma_market_id=new_state[8],
+                market_event_id=new_state[7],
+                side=side,
+                token_id=token,
+                curve=curve,
+                captured_at_utc=captured_at,
+            )
+        if sell_curve is None:
+            sell_assets_by_token.pop(token, None)
+        else:
+            sell_assets_by_token[token] = CurrentGlobalSellAsset(
+                family_key=family_key,
+                bin_id=bin_id,
+                condition_id=condition_id,
+                gamma_market_id=new_state[8],
+                market_event_id=new_state[7],
+                side=side,
+                token_id=token,
+                curve=sell_curve,
+                captured_at_utc=captured_at,
+            )
+
+    if not changed:
+        return epoch, 0
+    states = tuple(state_by_token.values())
+    identity = current_global_book_epoch_identity(
+        asset_states=states,
+        captured_at_utc=epoch.captured_at_utc,
+    )
+    return (
+        CurrentGlobalBookEpoch(
+            assets=tuple(assets_by_token.values()),
+            asset_states=states,
+            captured_at_utc=epoch.captured_at_utc,
+            max_age=epoch.max_age,
+            witness_identity=identity,
+            sell_assets=tuple(sell_assets_by_token.values()),
+        ),
+        changed,
+    )
+
+
 def _validated_global_book_batch(
     batch: Mapping[str, Mapping[str, object]],
 ) -> dict[str, Mapping[str, object]]:

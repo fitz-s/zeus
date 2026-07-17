@@ -1148,6 +1148,14 @@ def test_price_channel_resting_order_family_emits_and_debounces_on_second_tick(m
         ).fetchone()[0]
         == 1
     )
+    payload = json.loads(
+        world_conn.execute(
+            "SELECT payload_json FROM opportunity_events "
+            "WHERE event_type = 'EDLI_REDECISION_PENDING'"
+        ).fetchone()[0]
+    )
+    assert payload["redecision_origin"] == "market_price"
+    assert payload["price_changed_token_ids"] == ["resting-yes"]
 
     second_emitted = _edli_emit_price_channel_redecisions_for_events(
         world_conn,

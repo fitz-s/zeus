@@ -952,6 +952,53 @@ def _global_book_refresh_family_keys(
     )
 
 
+def _global_projected_book_refresh_tokens(
+    events: Iterable[object],
+) -> dict[str, frozenset[str] | None]:
+    """Return exact durable price tokens, or None per family for full refresh."""
+
+    tokens_by_family: dict[str, set[str] | None] = {}
+    for event in events:
+        if str(getattr(event, "event_type", "") or "") != _EDLI_REDECISION_EVENT_TYPE:
+            continue
+        try:
+            payload = json.loads(str(getattr(event, "payload_json", "") or ""))
+            family_key = weather_family_id(
+                city=str(payload.get("city") or ""),
+                target_date=str(payload.get("target_date") or ""),
+                metric=str(payload.get("metric") or "").lower(),
+            )
+        except (AttributeError, TypeError, ValueError):
+            continue
+        raw_tokens = payload.get("price_changed_token_ids")
+        if (
+            str(payload.get("redecision_origin") or "") != "market_price"
+            or not isinstance(raw_tokens, list)
+        ):
+            tokens_by_family[family_key] = None
+            continue
+        tokens = {
+            str(token or "").strip()
+            for token in raw_tokens
+            if str(token or "").strip()
+            and str(token or "").strip() != "None"
+        }
+        if not tokens:
+            tokens_by_family[family_key] = None
+            continue
+        if family_key in tokens_by_family:
+            existing = tokens_by_family[family_key]
+            if existing is None:
+                continue
+            existing.update(tokens)
+        else:
+            tokens_by_family[family_key] = set(tokens)
+    return {
+        family_key: None if tokens is None else frozenset(tokens)
+        for family_key, tokens in tokens_by_family.items()
+    }
+
+
 def _merge_global_book_epoch_delta(
     base_epoch: object,
     delta_epoch: object | None,
@@ -1037,14 +1084,14 @@ def _get_cached_global_book_epoch(
     return cached
 
 
-def _projected_global_books(
+def _projected_global_book_rows(
     trade_conn: sqlite3.Connection,
     tokens: Iterable[str],
     *,
     checked_at: datetime,
     max_age: timedelta,
-) -> tuple[dict[str, Mapping[str, object]], datetime] | None:
-    """Read every usable fresh book already projected by the price channel."""
+) -> dict[str, tuple[Mapping[str, object], datetime, str]] | None:
+    """Read usable fresh token books with their durable projection identity."""
 
     if checked_at.tzinfo is None or max_age <= timedelta(0):
         return None
@@ -1052,8 +1099,7 @@ def _projected_global_books(
     token_ids = tuple(dict.fromkeys(str(token).strip() for token in tokens))
     if not token_ids or any(not token for token in token_ids):
         return None
-    books: dict[str, Mapping[str, object]] = {}
-    captured: list[datetime] = []
+    books: dict[str, tuple[Mapping[str, object], datetime, str]] = {}
     try:
         for start in range(0, len(token_ids), 400):
             chunk = token_ids[start : start + 400]
@@ -1063,7 +1109,8 @@ def _projected_global_books(
                 SELECT latest.selected_outcome_token_id,
                        snapshot.orderbook_depth_json,
                        snapshot.captured_at,
-                       latest.freshness_deadline
+                       latest.freshness_deadline,
+                       snapshot.snapshot_id
                   FROM executable_market_snapshot_latest AS latest
                        INDEXED BY idx_snapshot_latest_selected_token_captured
                   JOIN executable_market_snapshots AS snapshot
@@ -1097,13 +1144,37 @@ def _projected_global_books(
                     or str(book.get("asset_id") or "").strip() != token_id
                 ):
                     continue
-                books[token_id] = dict(book)
-                captured.append(captured_at)
+                books[token_id] = (
+                    dict(book),
+                    captured_at,
+                    str(row[4] or "").strip(),
+                )
     except (sqlite3.Error, TypeError, ValueError, json.JSONDecodeError):
         return None
-    if not books or not captured:
+    return books or None
+
+
+def _projected_global_books(
+    trade_conn: sqlite3.Connection,
+    tokens: Iterable[str],
+    *,
+    checked_at: datetime,
+    max_age: timedelta,
+) -> tuple[dict[str, Mapping[str, object]], datetime] | None:
+    """Read every usable fresh book already projected by the price channel."""
+
+    rows = _projected_global_book_rows(
+        trade_conn,
+        tokens,
+        checked_at=checked_at,
+        max_age=max_age,
+    )
+    if rows is None:
         return None
-    return books, min(captured)
+    return (
+        {token: raw_book for token, (raw_book, _, _) in rows.items()},
+        min(captured_at for _, captured_at, _ in rows.values()),
+    )
 
 
 def _fresh_projected_global_books(
@@ -5965,6 +6036,9 @@ def event_bound_live_adapter_from_trade_conn(
             _global_probability_refresh_family_keys(events)
         )
         book_refresh_family_keys = _global_book_refresh_family_keys(events)
+        projected_book_refresh_tokens = _global_projected_book_refresh_tokens(
+            events
+        )
 
         def _epoch_superseded() -> bool:
             current = reactor_urgent_wake_revision()
@@ -6521,6 +6595,92 @@ def event_bound_live_adapter_from_trade_conn(
                             len(getattr(epoch, "assets", ())),
                         )
                         return rebound_probabilities, epoch
+            if cached_before_bind is not None and eligible_refresh_family_keys:
+                cached_probabilities = _cached_global_book_probabilities(
+                    cached_before_bind
+                )
+                exact_refresh_tokens: set[str] = set()
+                state_tokens_by_family: dict[str, set[str]] = {}
+                for state in tuple(
+                    getattr(cached_before_bind, "asset_states", ()) or ()
+                ):
+                    state_tokens_by_family.setdefault(str(state[0]), set()).add(
+                        str(state[4])
+                    )
+                exact_refresh_allowed = cached_probabilities is not None
+                for family_key in eligible_refresh_family_keys:
+                    family_tokens = state_tokens_by_family.get(family_key, set())
+                    event_tokens = projected_book_refresh_tokens.get(family_key)
+                    required = (
+                        family_tokens.intersection(event_tokens)
+                        if event_tokens is not None
+                        else set()
+                    )
+                    if not required:
+                        exact_refresh_allowed = False
+                        break
+                    exact_refresh_tokens.update(required)
+                if exact_refresh_allowed:
+                    projection_tokens = tuple(
+                        token
+                        for family_key in eligible_refresh_family_keys
+                        for token in state_tokens_by_family.get(family_key, ())
+                    )
+                    projected_rows = _projected_global_book_rows(
+                        trade_conn,
+                        projection_tokens,
+                        checked_at=cache_checked_at,
+                        max_age=FRESHNESS_WINDOW_DEFAULT,
+                    )
+                    try:
+                        if projected_rows is None:
+                            raise ValueError(
+                                "GLOBAL_BOOK_TOKEN_DELTA_PROJECTION_EMPTY"
+                            )
+                        from src.engine.global_auction_universe import (
+                            refresh_current_global_book_epoch_tokens,
+                        )
+
+                        refreshed_epoch, changed_tokens = (
+                            refresh_current_global_book_epoch_tokens(
+                                trade_conn,
+                                epoch=cached_before_bind,
+                                projected_books=projected_rows,
+                                required_tokens=tuple(exact_refresh_tokens),
+                                checked_at_utc=cache_checked_at,
+                            )
+                        )
+                        cached_probability_slice = {
+                            family_key: cached_probabilities[family_key]
+                            for family_key in probabilities
+                        }
+                        rebound_probabilities = _reuse_global_book_token_bindings(
+                            probabilities,
+                            cached_probability_slice,
+                        )
+                    except (KeyError, TypeError, ValueError) as exc:
+                        logging.getLogger(__name__).info(
+                            "global book token projection refresh rejected; "
+                            "falling back to family refresh: reason=%s",
+                            exc,
+                        )
+                    else:
+                        _store_global_book_epoch(
+                            trade_conn,
+                            rebound_probabilities,
+                            refreshed_epoch,
+                            checked_at=cache_checked_at,
+                        )
+                        logging.getLogger(__name__).info(
+                            "global book token projection refresh completed: "
+                            "elapsed_s=%.3f families=%d required_tokens=%d "
+                            "changed_tokens=%d",
+                            _time.monotonic() - _book_started,
+                            len(eligible_refresh_family_keys),
+                            len(exact_refresh_tokens),
+                            changed_tokens,
+                        )
+                        return rebound_probabilities, refreshed_epoch
             prefetch_slice = None
             prefetch_mode = ""
             prefetch_token_hint = None
