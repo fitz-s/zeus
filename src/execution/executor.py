@@ -941,13 +941,15 @@ def _certified_global_increment_authorized(
 
     This is not a general same-token bypass.  The verified actionable payload
     must carry the complete global-auction identity, and the executor economics
-    check must already have proved that the exact FOK shares/limit/max-spend
-    tuple retains positive conservative edge.  A resting or partially fillable
-    order cannot use this authority because its projection would need a
-    multi-observation increment fold rather than one atomic fill.
+    check must already have proved that the submitted shares/limit/max-spend
+    tuple retains positive conservative edge.  FOK is atomic at the target
+    size.  FAK is admitted only when its independent worst-limit certificate
+    proves every non-zero fill prefix beneficial; it terminates immediately, so
+    the resulting fill is one bounded increment rather than a resting exposure.
     """
 
-    if str(order_type or "").upper() != "FOK":
+    normalized_order_type = str(order_type or "").upper()
+    if normalized_order_type not in {"FOK", "FAK"}:
         return False
     if not isinstance(actionable_payload, Mapping):
         return False
@@ -960,6 +962,15 @@ def _certified_global_increment_authorized(
     if details.get("global_limit_bound_authorized") is not True:
         return False
     if str(economics.get("global_optimum_semantics") or "") != "CUT_TIME_GLOBAL_OPTIMUM":
+        return False
+    if (
+        normalized_order_type == "FAK"
+        and qkernel_global_buy_fak_prefix_rejection_reason(
+            economics,
+            direction=str(actionable_payload.get("direction") or ""),
+        )
+        is not None
+    ):
         return False
     return all(
         str(economics.get(field) or "").strip()

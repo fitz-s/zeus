@@ -1,5 +1,5 @@
 # Created: 2026-05-17
-# Last reused/audited: 2026-07-14
+# Last reused/audited: 2026-07-17
 # Authority basis: first-principles global marginal-increment execution repair
 #
 # Relationship test: when Module A (position_current DB state) shows a non-terminal
@@ -12,6 +12,7 @@
 # phantom_not_on_chain is not in _TERMINAL_PHASES → DB query returns True regardless
 # of whether the rest of the system treats it as a formal lifecycle state.
 
+import math
 import sqlite3
 from datetime import datetime
 from types import SimpleNamespace
@@ -899,7 +900,7 @@ def test_certified_global_increment_requires_materialized_existing_economics(mem
     assert blocked["existing_position_id"] == "zero-position"
 
 
-def test_global_increment_authority_requires_exact_fok_wealth_bound():
+def test_global_increment_authority_requires_atomic_wealth_bound():
     economics = {
         "global_optimum_semantics": "CUT_TIME_GLOBAL_OPTIMUM",
         "global_actuation_identity": "actuation",
@@ -921,6 +922,57 @@ def test_global_increment_authority_requires_exact_fok_wealth_bound():
         {"qkernel_execution_economics": economics},
         component,
         order_type="FOK",
+    )
+    fak_economics = {
+        **economics,
+        "side": "NO",
+        "global_target_shares": "5",
+        "global_limit_price": "0.4",
+        "global_terminal_win_probability_lcb": "0.8",
+        "global_terminal_loss_probability_ucb": "0.2",
+        "global_terminal_loss_payoff_usd": "0",
+        "global_terminal_win_payoff_usd": "0",
+        "global_terminal_wealth_after_loss_usd": "100",
+        "global_terminal_wealth_after_win_usd": "100",
+        "global_jit_execution_curve_identity": "curve",
+        "global_buy_fak_prefix_semantics": (
+            "CONCAVE_WORST_LIMIT_ALL_NONZERO_PREFIXES_POSITIVE"
+        ),
+        "global_buy_fak_fee_rate_source": "CURRENT_EXECUTABLE_CURVE",
+        "global_buy_fak_execution_curve_identity": "curve",
+        "global_buy_fak_fee_rate": "0",
+        "global_buy_fak_fee_rounding_bound": (
+            "ROUNDED_FEE_AT_MOST_TWO_X_UNROUNDED"
+        ),
+        "global_buy_fak_worst_fee_shape": "0.24",
+        "global_buy_fak_worst_fee_per_share": "0",
+        "global_buy_fak_worst_unit_cost": "0.4",
+        "global_buy_fak_full_worst_cost_usd": "2",
+        "global_buy_fak_full_robust_delta_log_wealth": (
+            0.2 * math.log(0.98) + 0.8 * math.log(1.03)
+        ),
+        "global_buy_fak_full_robust_ev_usd": "2",
+    }
+    assert _certified_global_increment_authorized(
+        {"direction": "buy_no", "qkernel_execution_economics": fak_economics},
+        component,
+        order_type="FAK",
+    )
+    assert not _certified_global_increment_authorized(
+        {
+            "direction": "buy_no",
+            "qkernel_execution_economics": {
+                **fak_economics,
+                "global_buy_fak_full_robust_ev_usd": "-1",
+            }
+        },
+        component,
+        order_type="FAK",
+    )
+    assert not _certified_global_increment_authorized(
+        {"direction": "buy_yes", "qkernel_execution_economics": fak_economics},
+        component,
+        order_type="FAK",
     )
     assert not _certified_global_increment_authorized(
         {"qkernel_execution_economics": economics},
