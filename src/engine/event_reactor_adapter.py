@@ -9180,7 +9180,16 @@ def _global_preflight_entry_jit_receipt(
         def capture_book(token_id: str):
             if book_quote_provider is None:
                 raise ValueError("PRE_SUBMIT_BOOK_AUTHORITY_JIT_REQUIRED")
-            response = book_quote_provider(token_id)
+            consume_last = getattr(book_quote_provider, "consume_last", None)
+            response = (
+                consume_last(token_id)
+                if callable(consume_last)
+                else None
+            )
+            if response is None:
+                response = book_quote_provider(token_id)
+                if callable(consume_last):
+                    consume_last(token_id)
             current = dict(response[0] if isinstance(response, tuple) else response)
             raw_book.clear()
             raw_book.update(current)

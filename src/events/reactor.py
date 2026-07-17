@@ -7030,6 +7030,8 @@ def _edli_pre_submit_jit_book_quote_provider(
     the next fetch, so a transiently-dead socket costs at most one requeue.
     """
 
+    last_observation = {}
+
     def _fetch(token_id: str):
         projected = _edli_fresh_projected_pre_submit_book(
             trade_conn,
@@ -7037,13 +7039,26 @@ def _edli_pre_submit_jit_book_quote_provider(
             max_quote_age_ms=max_quote_age_ms,
         )
         if projected is not None:
+            last_observation[str(token_id)] = projected
             return projected
         clob = _edli_pre_submit_jit_clob_client()
-        return _edli_run_pre_submit_clob_call(
+        book = _edli_run_pre_submit_clob_call(
             "jit_book",
             lambda: clob.get_orderbook_snapshot(token_id),
             seconds=_edli_pre_submit_jit_outer_timeout_seconds(),
         )
+        observation = (
+            (book, datetime.now(timezone.utc), "clob_jit_book")
+            if trade_conn is not None
+            else book
+        )
+        last_observation[str(token_id)] = observation
+        return observation
+
+    def _consume_last(token_id: str):
+        return last_observation.pop(str(token_id), None)
+
+    _fetch.consume_last = _consume_last
 
     return _fetch
 
@@ -7561,13 +7576,11 @@ def _edli_pre_submit_authority_provider_from_book_evidence_conn(
         return full_collateral_payload_cache
 
     def _provider(final_intent, _executable_snapshot, decision_time):
-        checked_at = decision_time.astimezone(timezone.utc)
+        del decision_time
+        checked_at = datetime.now(timezone.utc)
         intent = final_intent.payload
         token_id = str(intent["token_id"])
 
-        # PRIMARY: just-in-time live book for the selected candidate. Freshness is
-        # anchored to OUR observation time (checked_at) — the FOK crosses against
-        # exactly this book — so quote_age_ms is the observation-to-submit latency.
         side = str(intent.get("side") or "").upper()
         has_limit_price = intent.get("limit_price") not in (None, "")
         has_size = intent.get("size") not in (None, "")
@@ -7576,6 +7589,18 @@ def _edli_pre_submit_authority_provider_from_book_evidence_conn(
                 "PRE_SUBMIT_BOOK_AUTHORITY_JIT_INTENT_INCOMPLETE:"
                 f"token_id={token_id}:has_limit_price={has_limit_price}:has_size={has_size}"
             )
+
+        heartbeat_summary = _edli_heartbeat_authority_summary()
+        user_ws_summary = _edli_user_ws_authority_summary(checked_at)
+        venue_summary = _cached_venue_summary(checked_at)
+        balance_status, balance_authority_id = _edli_balance_allowance_status(
+            final_intent,
+            checked_at,
+            enabled=balance_check_enabled,
+            collateral_payload=_cached_collateral_payload(str(intent.get("side") or "")),
+        )
+        # Price is read last so slow venue/balance checks cannot age the book
+        # before the full-depth curve binds to this same observation.
         jit = _edli_pre_submit_book_from_jit_fetch(
             book_quote_provider,
             token_id=token_id,
@@ -7589,16 +7614,6 @@ def _edli_pre_submit_authority_provider_from_book_evidence_conn(
         best_bid, best_ask, book_hash, book_observed_at, book_authority_id = jit
         checked_at = datetime.now(timezone.utc)
         quote_seen_at = book_observed_at.astimezone(timezone.utc).isoformat()
-
-        heartbeat_summary = _edli_heartbeat_authority_summary()
-        user_ws_summary = _edli_user_ws_authority_summary(checked_at)
-        venue_summary = _cached_venue_summary(checked_at)
-        balance_status, balance_authority_id = _edli_balance_allowance_status(
-            final_intent,
-            checked_at,
-            enabled=balance_check_enabled,
-            collateral_payload=_cached_collateral_payload(str(intent.get("side") or "")),
-        )
 
         return PreSubmitAuthorityWitness(
             quote_seen_at=quote_seen_at,
