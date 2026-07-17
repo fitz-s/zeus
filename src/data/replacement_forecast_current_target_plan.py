@@ -343,8 +343,9 @@ def _load_openmeteo_manifest_index(
     *,
     raw_artifact_columns: set[str],
     metadata_column: str | None,
-    identities: set[tuple[str, str]],
+    identities: set[tuple[str, str, str]],
     cities: set[str],
+    minimum_source_cycle_time: str | None = None,
 ) -> dict[tuple[str, str, str], tuple[_OpenMeteoManifest, ...]]:
     if metadata_column is None or not identities or not cities:
         return {}
@@ -354,16 +355,43 @@ def _load_openmeteo_manifest_index(
         if col in raw_artifact_columns
     ]
     select_optional = "".join(f", {col}" for col in optional_columns)
-    identity_clause = " OR ".join("(source_id = ? AND data_version = ?)" for _ in identities)
-    identity_params = tuple(value for identity in sorted(identities) for value in identity)
+    has_product_id = "product_id" in raw_artifact_columns
+    if has_product_id:
+        identity_clause = " OR ".join(
+            "(source_id = ? AND product_id = ? AND data_version = ?)"
+            for _ in identities
+        )
+        identity_params = tuple(
+            value for identity in sorted(identities) for value in identity
+        )
+    else:
+        identity_clause = " OR ".join(
+            "(source_id = ? AND data_version = ?)" for _ in identities
+        )
+        identity_params = tuple(
+            value
+            for source_id, _, data_version in sorted(identities)
+            for value in (source_id, data_version)
+        )
     city_placeholders = ",".join("?" for _ in cities)
     city_params = tuple(sorted(cities))
+    cycle_clause = (
+        "AND source_cycle_time >= ?"
+        if minimum_source_cycle_time and "source_cycle_time" in raw_artifact_columns
+        else ""
+    )
+    cycle_params = (
+        (str(minimum_source_cycle_time),)
+        if cycle_clause
+        else ()
+    )
     rows = conn.execute(
         f"""
         SELECT source_id, data_version, artifact_path,
                {metadata_column} AS metadata_json{select_optional}
         FROM raw_forecast_artifacts
         WHERE ({identity_clause})
+          {cycle_clause}
           AND artifact_path IS NOT NULL
           AND artifact_path != ''
           AND (
@@ -375,7 +403,7 @@ def _load_openmeteo_manifest_index(
             )
           )
         """,
-        (*identity_params, *city_params, *city_params),
+        (*identity_params, *cycle_params, *city_params, *city_params),
     ).fetchall()
     index: dict[tuple[str, str, str], list[_OpenMeteoManifest]] = {}
     for row in rows:
@@ -480,75 +508,106 @@ def _openmeteo_manifest_coverage(
 def _replacement_coverage_counts_for_dependencies(
     conn: sqlite3.Connection,
     *,
-    city: str,
-    target_date: str,
-    temperature_metric: str,
-    baseline_source_run_id: str | None,
-    openmeteo_source_run_id: str | None,
+    requests: set[tuple[str, str, str, str, str]],
     posterior_tradeable_grade_clause: str,
     readiness_status_clause: str,
-) -> tuple[int, int]:
-    if not baseline_source_run_id or not openmeteo_source_run_id:
-        return 0, 0
-    posterior_count = int(
-        conn.execute(
+) -> dict[tuple[str, str, str, str, str], tuple[int, int]]:
+    counts = {request: [0, 0] for request in requests}
+    ordered = sorted(requests)
+    for offset in range(0, len(ordered), 100):
+        chunk = ordered[offset : offset + 100]
+        values = ",".join("(?, ?, ?, ?, ?)" for _ in chunk)
+        params = tuple(value for request in chunk for value in request)
+        posterior_rows = conn.execute(
             f"""
-            SELECT COUNT(*)
-            FROM forecast_posteriors p
-            WHERE p.source_id = ?
-              AND p.training_allowed = 0
-              AND p.runtime_layer = 'live'
-              AND p.city = ?
-              AND p.target_date = ?
-              AND p.temperature_metric = ?
-              {posterior_tradeable_grade_clause}
-              AND json_extract(p.dependency_source_run_ids_json, '$.baseline_b0') = ?
-              AND json_extract(p.dependency_source_run_ids_json, '$.openmeteo_ifs9_anchor') = ?
-            """,
-            (
-                SOURCE_ID,
+            WITH requested(
                 city,
                 target_date,
                 temperature_metric,
                 baseline_source_run_id,
-                openmeteo_source_run_id,
-            ),
-        ).fetchone()[0]
-    )
-    readiness_count = int(
-        conn.execute(
-            f"""
-            SELECT COUNT(*)
-            FROM readiness_state r
-            WHERE r.strategy_key = ?
-              AND json_extract(r.provenance_json, '$.city') = ?
-              AND json_extract(r.provenance_json, '$.target_date') = ?
-              AND json_extract(r.provenance_json, '$.temperature_metric') = ?
-              {readiness_status_clause}
-              AND EXISTS (
-                  SELECT 1
-                  FROM json_each(r.dependency_json, '$.dependencies')
-                  WHERE json_extract(value, '$.role') = 'baseline_b0'
-                    AND json_extract(value, '$.source_run_id') = ?
-              )
-              AND EXISTS (
-                  SELECT 1
-                  FROM json_each(r.dependency_json, '$.dependencies')
-                  WHERE json_extract(value, '$.role') = 'openmeteo_ifs9_anchor'
-                    AND json_extract(value, '$.source_run_id') = ?
-              )
+                openmeteo_source_run_id
+            ) AS (VALUES {values})
+            SELECT requested.city,
+                   requested.target_date,
+                   requested.temperature_metric,
+                   requested.baseline_source_run_id,
+                   requested.openmeteo_source_run_id,
+                   COUNT(p.source_id) AS posterior_count
+              FROM requested
+              LEFT JOIN forecast_posteriors p
+                ON p.source_id = ?
+               AND p.training_allowed = 0
+               AND p.runtime_layer = 'live'
+               AND p.city = requested.city
+               AND p.target_date = requested.target_date
+               AND p.temperature_metric = requested.temperature_metric
+               {posterior_tradeable_grade_clause}
+               AND json_extract(
+                       p.dependency_source_run_ids_json,
+                       '$.baseline_b0'
+                   ) = requested.baseline_source_run_id
+               AND json_extract(
+                       p.dependency_source_run_ids_json,
+                       '$.openmeteo_ifs9_anchor'
+                   ) = requested.openmeteo_source_run_id
+             GROUP BY 1, 2, 3, 4, 5
             """,
-            (
-                SOURCE_ID,
+            (*params, SOURCE_ID),
+        ).fetchall()
+        for row in posterior_rows:
+            key = tuple(str(row[index]) for index in range(5))
+            counts[key][0] = int(row["posterior_count"])
+        readiness_rows = conn.execute(
+            f"""
+            WITH requested(
                 city,
                 target_date,
                 temperature_metric,
                 baseline_source_run_id,
-                openmeteo_source_run_id,
-            ),
-        ).fetchone()[0]
-    )
-    return posterior_count, readiness_count
+                openmeteo_source_run_id
+            ) AS (VALUES {values})
+            SELECT requested.city,
+                   requested.target_date,
+                   requested.temperature_metric,
+                   requested.baseline_source_run_id,
+                   requested.openmeteo_source_run_id,
+                   COUNT(r.strategy_key) AS readiness_count
+              FROM requested
+              LEFT JOIN readiness_state r
+                ON r.strategy_key = ?
+               AND json_extract(r.provenance_json, '$.city') = requested.city
+               AND json_extract(r.provenance_json, '$.target_date') = requested.target_date
+               AND json_extract(
+                       r.provenance_json,
+                       '$.temperature_metric'
+                   ) = requested.temperature_metric
+               {readiness_status_clause}
+               AND EXISTS (
+                   SELECT 1
+                     FROM json_each(r.dependency_json, '$.dependencies')
+                    WHERE json_extract(value, '$.role') = 'baseline_b0'
+                      AND json_extract(
+                              value,
+                              '$.source_run_id'
+                          ) = requested.baseline_source_run_id
+               )
+               AND EXISTS (
+                   SELECT 1
+                     FROM json_each(r.dependency_json, '$.dependencies')
+                    WHERE json_extract(value, '$.role') = 'openmeteo_ifs9_anchor'
+                      AND json_extract(
+                              value,
+                              '$.source_run_id'
+                          ) = requested.openmeteo_source_run_id
+               )
+             GROUP BY 1, 2, 3, 4, 5
+            """,
+            (*params, SOURCE_ID),
+        ).fetchall()
+        for row in readiness_rows:
+            key = tuple(str(row[index]) for index in range(5))
+            counts[key][1] = int(row["readiness_count"])
+    return {key: (value[0], value[1]) for key, value in counts.items()}
 
 
 def _fusion_current_value_count(
@@ -1307,6 +1366,7 @@ def _covering_posterior_input_lag_reason(
         decision_time=decision_time,
         posterior_source_cycle_time=row["source_cycle_time"],
         posterior_computed_at=row["computed_at"],
+        posterior_provenance=_json_object(row["provenance_json"]),
     )
     if raw_lag is not None or not check_day0_observation:
         return raw_lag
@@ -1697,6 +1757,38 @@ def build_replacement_forecast_current_target_plan(
         if source_run_targets:
             expected_high = expected_replacement_dependency_identity_by_role("high")["baseline_b0"]
             expected_low = expected_replacement_dependency_identity_by_role("low")["baseline_b0"]
+            if metadata_column is not None:
+                coverage_select = """
+                    0 AS posterior_count,
+                    0 AS readiness_count
+                """
+                coverage_params: tuple[object, ...] = ()
+            else:
+                coverage_select = f"""
+                    (
+                        SELECT COUNT(*)
+                        FROM forecast_posteriors p
+                        WHERE p.source_id = ?
+                          AND p.training_allowed = 0
+                          AND p.runtime_layer = 'live'
+                          AND p.city = targets.city
+                          AND p.target_date = targets.target_date
+                          AND p.temperature_metric = targets.temperature_metric
+                          {posterior_tradeable_grade_clause}
+                          {posterior_source_run_clause}
+                    ) AS posterior_count,
+                    (
+                        SELECT COUNT(*)
+                        FROM readiness_state r
+                        WHERE r.strategy_key = ?
+                          AND json_extract(r.provenance_json, '$.city') = targets.city
+                          AND json_extract(r.provenance_json, '$.target_date') = targets.target_date
+                          AND json_extract(r.provenance_json, '$.temperature_metric') = targets.temperature_metric
+                          {readiness_status_clause}
+                          {readiness_source_run_clause}
+                    ) AS readiness_count
+                """
+                coverage_params = (SOURCE_ID, SOURCE_ID)
             rows = conn.execute(
                 f"""
                 WITH ranked_coverage AS (
@@ -1764,28 +1856,7 @@ def build_replacement_forecast_current_target_plan(
                     targets.baseline_source_run_id,
                     targets.baseline_source_cycle_time,
                     targets.market_bin_count,
-                    (
-                        SELECT COUNT(*)
-                        FROM forecast_posteriors p
-                        WHERE p.source_id = ?
-                          AND p.training_allowed = 0
-                          AND p.runtime_layer = 'live'
-                          AND p.city = targets.city
-                          AND p.target_date = targets.target_date
-                          AND p.temperature_metric = targets.temperature_metric
-                          {posterior_tradeable_grade_clause}
-                          {posterior_source_run_clause}
-                    ) AS posterior_count,
-                    (
-                        SELECT COUNT(*)
-                        FROM readiness_state r
-                        WHERE r.strategy_key = ?
-                          AND json_extract(r.provenance_json, '$.city') = targets.city
-                          AND json_extract(r.provenance_json, '$.target_date') = targets.target_date
-                          AND json_extract(r.provenance_json, '$.temperature_metric') = targets.temperature_metric
-                          {readiness_status_clause}
-                          {readiness_source_run_clause}
-                    ) AS readiness_count
+                    {coverage_select}
                 FROM targets
                 ORDER BY targets.target_date, targets.city, targets.temperature_metric
                 {sql_limit}
@@ -1795,8 +1866,7 @@ def build_replacement_forecast_current_target_plan(
                     minimum_target_date,
                     expected_high.data_version,
                     expected_low.data_version,
-                    SOURCE_ID,
-                    SOURCE_ID,
+                    *coverage_params,
                 ),
             ).fetchall()
         else:
@@ -1858,6 +1928,21 @@ def build_replacement_forecast_current_target_plan(
             metric: expected_replacement_dependency_identity_by_role(metric)
             for metric in {str(row["temperature_metric"]) for row in rows}
         }
+        required_manifest_cycle = (
+            str(required_openmeteo_cycle_iso or "").strip() or None
+        )
+        baseline_cycles = [
+            str(row["baseline_source_cycle_time"])
+            for row in rows
+            if row["baseline_source_cycle_time"]
+        ]
+        manifest_cycle_floor = required_manifest_cycle
+        if (
+            manifest_cycle_floor is None
+            and baseline_cycles
+            and len(baseline_cycles) == len(rows)
+        ):
+            manifest_cycle_floor = min(baseline_cycles)
         openmeteo_manifest_index = _load_openmeteo_manifest_index(
             conn,
             raw_artifact_columns=raw_artifact_columns,
@@ -1865,11 +1950,13 @@ def build_replacement_forecast_current_target_plan(
             identities={
                 (
                     expected["openmeteo_ifs9_anchor"].source_id,
+                    expected["openmeteo_ifs9_anchor"].product_id,
                     expected["openmeteo_ifs9_anchor"].data_version,
                 )
                 for expected in expected_by_metric.values()
             },
             cities={str(row["city"]) for row in rows},
+            minimum_source_cycle_time=manifest_cycle_floor,
         )
         payload_coverage_cache: dict[tuple[str, str, str], bool] = {}
         evaluation_now_utc = (now_utc or datetime.now(tz=timezone.utc)).astimezone(timezone.utc)
@@ -1887,15 +1974,73 @@ def build_replacement_forecast_current_target_plan(
             },
             decision_time=evaluation_now_utc,
         )
+        manifest_coverage_by_scope: dict[
+            tuple[str, str, str],
+            tuple[int, str | None, str | None],
+        ] = {}
+        for row in rows:
+            city = str(row["city"])
+            target_date = str(row["target_date"])
+            metric = str(row["temperature_metric"])
+            expected = expected_by_metric[metric]["openmeteo_ifs9_anchor"]
+            if metadata_column is not None:
+                coverage = _openmeteo_manifest_coverage(
+                    openmeteo_manifest_index.get(
+                        (expected.source_id, expected.data_version, city),
+                        (),
+                    ),
+                    target_date=target_date,
+                    city_timezone=timezone_by_city.get(city),
+                    required_source_cycle_time=required_manifest_cycle,
+                    minimum_source_cycle_time=(
+                        None
+                        if required_manifest_cycle
+                        else row["baseline_source_cycle_time"]
+                    ),
+                    payload_coverage_cache=payload_coverage_cache,
+                )
+            else:
+                coverage = (1, None, None) if not require_raw_artifacts else (0, None, None)
+            manifest_coverage_by_scope[(city, target_date, metric)] = coverage
+        dependency_requests = {
+            (
+                str(row["city"]),
+                str(row["target_date"]),
+                str(row["temperature_metric"]),
+                str(row["baseline_source_run_id"]),
+                str(
+                    manifest_coverage_by_scope[
+                        (
+                            str(row["city"]),
+                            str(row["target_date"]),
+                            str(row["temperature_metric"]),
+                        )
+                    ][1]
+                ),
+            )
+            for row in rows
+            if source_run_targets
+            and row["baseline_source_run_id"]
+            and manifest_coverage_by_scope[
+                (
+                    str(row["city"]),
+                    str(row["target_date"]),
+                    str(row["temperature_metric"]),
+                )
+            ][1]
+        }
+        dependency_coverage = _replacement_coverage_counts_for_dependencies(
+            conn,
+            requests=dependency_requests,
+            posterior_tradeable_grade_clause=posterior_tradeable_grade_clause,
+            readiness_status_clause=readiness_status_clause,
+        )
         for row in rows:
             metric = str(row["temperature_metric"])
-            expected = expected_by_metric[metric]
-            openmeteo_expected = expected["openmeteo_ifs9_anchor"]
             city = str(row["city"])
             target_date = str(row["target_date"])
             baseline_source_run_id = row["baseline_source_run_id"]
             baseline_source_cycle_time = row["baseline_source_cycle_time"]
-            required_openmeteo_cycle_for_row = str(required_openmeteo_cycle_iso or "").strip() or None
             day0_observed_extreme_required = _day0_observed_extreme_required(
                 city=city,
                 target_date=target_date,
@@ -1906,43 +2051,29 @@ def build_replacement_forecast_current_target_plan(
             openmeteo_source_run_id = None
             openmeteo_resolved_cycle: str | None = None
             fusion_current_count = 0
-            if metadata_column is not None:
-                openmeteo_count, openmeteo_source_run_id, openmeteo_resolved_cycle = _openmeteo_manifest_coverage(
-                    openmeteo_manifest_index.get(
-                        (
-                            openmeteo_expected.source_id,
-                            openmeteo_expected.data_version,
-                            city,
-                        ),
-                        (),
-                    ),
-                    target_date=target_date,
-                    city_timezone=timezone_by_city.get(city),
-                    required_source_cycle_time=required_openmeteo_cycle_for_row,
-                    minimum_source_cycle_time=(
-                        None if required_openmeteo_cycle_for_row else baseline_source_cycle_time
-                    ),
-                    payload_coverage_cache=payload_coverage_cache,
-                )
-            elif not require_raw_artifacts:
-                openmeteo_count = 1
+            (
+                openmeteo_count,
+                openmeteo_source_run_id,
+                openmeteo_resolved_cycle,
+            ) = manifest_coverage_by_scope[(city, target_date, metric)]
             posterior_count = int(row["posterior_count"])
             readiness_count = int(row["readiness_count"])
             if source_run_targets and openmeteo_source_run_id:
-                posterior_count, readiness_count = _replacement_coverage_counts_for_dependencies(
-                    conn,
-                    city=city,
-                    target_date=target_date,
-                    temperature_metric=metric,
-                    baseline_source_run_id=str(baseline_source_run_id or ""),
-                    openmeteo_source_run_id=openmeteo_source_run_id,
-                    posterior_tradeable_grade_clause=posterior_tradeable_grade_clause,
-                    readiness_status_clause=readiness_status_clause,
+                dependency_key = (
+                    city,
+                    target_date,
+                    metric,
+                    str(baseline_source_run_id or ""),
+                    openmeteo_source_run_id,
+                )
+                posterior_count, readiness_count = dependency_coverage.get(
+                    dependency_key,
+                    (0, 0),
                 )
             elif source_run_targets and metadata_column is not None:
                 posterior_count = 0
                 readiness_count = 0
-            elif required_openmeteo_cycle_for_row and metadata_column is not None and openmeteo_count <= 0:
+            elif required_manifest_cycle and metadata_column is not None and openmeteo_count <= 0:
                 posterior_count = 0
                 readiness_count = 0
             if openmeteo_count > 0:
@@ -1951,7 +2082,7 @@ def build_replacement_forecast_current_target_plan(
                     city=city,
                     target_date=target_date,
                     temperature_metric=metric,
-                    source_cycle_time=required_openmeteo_cycle_for_row
+                    source_cycle_time=required_manifest_cycle
                     or openmeteo_resolved_cycle
                     or baseline_source_cycle_time,
                     raw_model_forecasts_available="raw_model_forecasts" in tables,
