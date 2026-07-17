@@ -7698,16 +7698,20 @@ def event_bound_live_adapter_from_trade_conn(
                         token_hint=prefetch_token_hint,
                     )
             elif prefetch_slice is None:
-                rebound_probabilities = _bind(
-                    bind_slice,
-                    mode="current_metadata",
-                    metadata_sink=full_metadata,
+                rebound_probabilities.update(
+                    _bind(
+                        bind_slice,
+                        mode="current_metadata",
+                        metadata_sink=full_metadata,
+                    )
                 )
             elif day0_urgent_batch:
-                rebound_probabilities = _bind(
-                    bind_slice,
-                    mode="current_metadata",
-                    metadata_sink=full_metadata,
+                rebound_probabilities.update(
+                    _bind(
+                        bind_slice,
+                        mode="current_metadata",
+                        metadata_sink=full_metadata,
+                    )
                 )
                 exact_tokens = _global_current_executable_prefetch_tokens(
                     rebound_probabilities,
@@ -7751,10 +7755,12 @@ def event_bound_live_adapter_from_trade_conn(
                         projected=projected,
                         captured_at=projection_at,
                     )
-                    rebound_probabilities = _bind(
-                        bind_slice,
-                        mode="current_metadata",
-                        metadata_sink=full_metadata,
+                    rebound_probabilities.update(
+                        _bind(
+                            bind_slice,
+                            mode="current_metadata",
+                            metadata_sink=full_metadata,
+                        )
                     )
                     prefetched = future.result()
             bound_probabilities = dict(retained_bound_probabilities)

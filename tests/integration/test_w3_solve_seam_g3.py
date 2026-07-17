@@ -4503,6 +4503,11 @@ def test_live_adapter_reuses_tokens_and_refreshes_only_eligible_book_family(
         "_GLOBAL_BOOK_EPOCH_CACHE",
         replace(cache_entry, epoch=expired_epoch),
     )
+    monkeypatch.setattr(
+        era,
+        "_global_book_metadata_refresh_family_keys",
+        lambda *_args, **_kwargs: frozenset({dallas}),
+    )
     bound_after_expiry, epoch_after_expiry = provider(
         unrelated_drift,
         _dt.datetime.now(_dt.timezone.utc),
@@ -4517,7 +4522,10 @@ def test_live_adapter_reuses_tokens_and_refreshes_only_eligible_book_family(
     assert bound_after_expiry == unrelated_drift
     # q changed, but the condition/token topology did not. Reuse the still-current
     # cached bindings while refreshing only the triggered family's live books.
-    assert bind_calls == [("metadata", (dallas, miami))]
+    assert bind_calls == [
+        ("metadata", (dallas, miami)),
+        ("metadata", (dallas,)),
+    ]
     assert cache_after_removal is not None
     assert {family_key for family_key, _ in cache_after_removal.bound_probabilities} == {
         dallas,
