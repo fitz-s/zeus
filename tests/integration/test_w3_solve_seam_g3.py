@@ -10573,6 +10573,11 @@ def test_global_batch_preempts_after_book_capture_before_selection(
         "replace",
         lambda value, **changes: SimpleNamespace(**(vars(value) | changes)),
     )
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "current_portfolio_wealth_witness",
+        lambda *_, **__: object(),
+    )
     cancelled = [False]
     book_calls = []
 
@@ -11833,12 +11838,10 @@ def test_global_batch_overlays_jit_curve_without_full_universe_refresh(monkeypat
     assert result.receipts[event_b.event_id].submitted is True
 
 
-def test_global_batch_validates_wealth_on_selection_clock_not_book_clock(
-    monkeypatch,
-):
+def test_global_batch_captures_wealth_before_public_book_io(monkeypatch):
     decision_at = _dt.datetime(2026, 7, 10, 8, 0, tzinfo=_dt.timezone.utc)
-    book_at = decision_at + _dt.timedelta(seconds=1)
-    wealth_at = decision_at + _dt.timedelta(seconds=20)
+    wealth_at = decision_at + _dt.timedelta(seconds=1)
+    book_at = decision_at + _dt.timedelta(seconds=20)
     selection_at = decision_at + _dt.timedelta(seconds=21)
     event = _global_scope_event(city="Alpha", source_run_id="run-a")
     scope = current_global_auction_scope_from_events(
@@ -11853,8 +11856,9 @@ def test_global_batch_validates_wealth_on_selection_clock_not_book_clock(
             witness_identity="q-run-a",
         )
     )
-    times = iter((decision_at, book_at, wealth_at, selection_at))
+    times = iter((decision_at, wealth_at, book_at, selection_at))
     wealth_checks = []
+    stages = []
 
     monkeypatch.setattr(
         global_batch_runtime, "scan_current_global_auction_scope", lambda **_: scope
@@ -11868,7 +11872,8 @@ def test_global_batch_validates_wealth_on_selection_clock_not_book_clock(
         global_batch_runtime,
         "current_portfolio_wealth_witness",
         lambda *_, **kwargs: (
-            wealth_checks.append(kwargs["decision_at_utc"])
+            stages.append("wealth")
+            or wealth_checks.append(kwargs["decision_at_utc"])
             or SimpleNamespace(
                 spendable_cash_usd=Decimal("10"),
                 witness_identity="wealth",
@@ -11912,13 +11917,15 @@ def test_global_batch_validates_wealth_on_selection_clock_not_book_clock(
         venue_submit_count=lambda: 0,
         current_execution=lambda *_: object(),
         current_time_provider=lambda: next(times),
-        current_book_epoch_provider=lambda probabilities, _at: (
+        current_book_epoch_provider=lambda probabilities, _at: stages.append("book")
+        or (
             probabilities,
             _global_test_book("book", price="0.40", captured_at=book_at),
         ),
     )
 
     assert wealth_checks == [wealth_at]
+    assert stages == ["wealth", "book"]
     assert result.winner_event_id is None
     assert set(result.receipts) == {event.event_id}
 
