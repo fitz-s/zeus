@@ -1297,11 +1297,6 @@ def _dual_write_market_closed_hold_if_available(
     trade_id = str(getattr(position, "trade_id", "") or "")
     if not trade_id:
         return False
-    idempotency_key = _market_closed_hold_idempotency_key(
-        trade_id=trade_id,
-        reason=reason,
-        error=error,
-    )
     try:
         from src.engine.lifecycle_events import build_monitor_refreshed_canonical_write
         from src.state.db import append_many_and_project
@@ -1311,9 +1306,15 @@ def _dual_write_market_closed_hold_if_available(
             trade_id,
             reason=reason,
             error=error,
-            idempotency_key=idempotency_key,
         ):
             return False
+        monitor_basis_sequence_no = _latest_monitor_sequence_no(conn, trade_id)
+        idempotency_key = _market_closed_hold_idempotency_key(
+            trade_id=trade_id,
+            reason=reason,
+            error=error,
+            monitor_basis_sequence_no=monitor_basis_sequence_no,
+        )
         sequence_no = _next_canonical_sequence_no(conn, trade_id)
         occurred_at = datetime.now(timezone.utc).isoformat()
         _restore_last_monitor_snapshot_for_closed_hold(conn, position)
@@ -1376,56 +1377,57 @@ def _has_equivalent_market_closed_hold(
     *,
     reason: str,
     error: str,
-    idempotency_key: str | None = None,
 ) -> bool:
-    """Return true when the same closed-market hold is already recorded."""
+    """Return true when the latest monitor already records this closed hold."""
 
     try:
-        if idempotency_key:
-            row = conn.execute(
-                """
-                SELECT 1
-                  FROM position_events
-                 WHERE position_id = ?
-                   AND idempotency_key = ?
-                 LIMIT 1
-                """,
-                (position_id, idempotency_key),
-            ).fetchone()
-            if row is not None:
-                return True
-        rows = conn.execute(
+        row = conn.execute(
             """
             SELECT payload_json
               FROM position_events
              WHERE position_id = ?
                AND event_type = 'MONITOR_REFRESHED'
              ORDER BY sequence_no DESC
+             LIMIT 1
             """,
             (position_id,),
-        ).fetchall()
+        ).fetchone()
     except sqlite3.Error:
         return False
-    for row in rows:
-        try:
-            raw_payload = row["payload_json"]
-        except Exception:
-            raw_payload = row[0] if row else None
-        try:
-            payload = json.loads(str(raw_payload or "{}"))
-        except (TypeError, ValueError, json.JSONDecodeError):
-            continue
-        if not isinstance(payload, dict):
-            continue
-        if payload.get("semantic_event") != "MARKET_CLOSED_HOLD_TO_SETTLEMENT":
-            continue
-        return (
-            str(payload.get("hold_reason") or "") == reason
-            and str(payload.get("market_closed_error") or "") == error
-            and payload.get("exit_order_submitted") is False
-            and payload.get("exit_failure") is False
-        )
-    return False
+    if row is None:
+        return False
+    try:
+        raw_payload = row["payload_json"]
+    except Exception:
+        raw_payload = row[0]
+    try:
+        payload = json.loads(str(raw_payload or "{}"))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return False
+    return bool(
+        isinstance(payload, dict)
+        and payload.get("semantic_event") == "MARKET_CLOSED_HOLD_TO_SETTLEMENT"
+        and str(payload.get("hold_reason") or "") == reason
+        and str(payload.get("market_closed_error") or "") == error
+        and payload.get("exit_order_submitted") is False
+        and payload.get("exit_failure") is False
+    )
+
+
+def _latest_monitor_sequence_no(
+    conn: sqlite3.Connection,
+    position_id: str,
+) -> int:
+    row = conn.execute(
+        """
+        SELECT COALESCE(MAX(sequence_no), 0)
+          FROM position_events
+         WHERE position_id = ?
+           AND event_type = 'MONITOR_REFRESHED'
+        """,
+        (position_id,),
+    ).fetchone()
+    return int(row[0] or 0) if row is not None else 0
 
 
 def _semantic_position_event_idempotency_key(prefix: str, *parts: object) -> str:
@@ -1443,12 +1445,14 @@ def _market_closed_hold_idempotency_key(
     trade_id: str,
     reason: str,
     error: str,
+    monitor_basis_sequence_no: int,
 ) -> str:
     return _semantic_position_event_idempotency_key(
         "market_closed_hold",
         trade_id,
         reason,
         error,
+        monitor_basis_sequence_no,
     )
 
 

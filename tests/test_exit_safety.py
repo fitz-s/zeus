@@ -5704,7 +5704,44 @@ def test_market_closed_pending_exit_backoff_repairs_to_day0_hold(conn):
         for item in hold_payloads
         if item.get("semantic_event") == "MARKET_CLOSED_HOLD_TO_SETTLEMENT"
     )
-    assert semantic_hold_count == 1
+    assert semantic_hold_count == 2
+    hold_keys = [
+        row["idempotency_key"]
+        for row in conn.execute(
+            """
+            SELECT idempotency_key, payload_json
+              FROM position_events
+             WHERE position_id = ?
+               AND event_type = 'MONITOR_REFRESHED'
+             ORDER BY sequence_no
+            """,
+            (position.trade_id,),
+        ).fetchall()
+        if json.loads(row["payload_json"]).get("semantic_event")
+        == "MARKET_CLOSED_HOLD_TO_SETTLEMENT"
+    ]
+    assert len(set(hold_keys)) == 2
+
+    mark_market_closed_hold_to_settlement(
+        position,
+        reason="MARKET_CLOSED_AWAITING_SETTLEMENT",
+        error="legacy_pending_exit_projection_repaired",
+        conn=conn,
+    )
+    assert (
+        conn.execute(
+            """
+            SELECT COUNT(*)
+              FROM position_events
+             WHERE position_id = ?
+               AND event_type = 'MONITOR_REFRESHED'
+               AND json_extract(payload_json, '$.semantic_event')
+                   = 'MARKET_CLOSED_HOLD_TO_SETTLEMENT'
+            """,
+            (position.trade_id,),
+        ).fetchone()[0]
+        == 2
+    )
 
 
 def test_after_settlement_stale_market_price_marks_closed_hold_not_retry(conn, monkeypatch):
