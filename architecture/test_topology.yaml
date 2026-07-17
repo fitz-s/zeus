@@ -28,8 +28,9 @@ test_trust_policy:
   # Machine-readable registry: tests with valid lifecycle headers.
   # Tests not in this list require audit before running.
   trusted_tests:
-    tests/test_bayes_precision_fusion_download.py: {created: "2026-06-08", last_used: "2026-07-16", note: "BPF raw capture batching, scoped persisted-key reads, deadline-bound persistence, LIVE writer priority, and chunk durability."}
-    tests/test_replacement_forecast_extras_coverage_gate.py: {created: "2026-06-16", last_used: "2026-07-16", note: "BPF source-clock capture coverage, fixpoint, quota cooldown, and held-family-first target ordering."}
+    tests/test_bayes_precision_fusion_download.py: {created: "2026-06-08", last_used: "2026-07-17", note: "BPF raw capture batching, exact committed-family reporting, deadline-bound persistence, LIVE writer priority, and chunk durability."}
+    tests/test_replacement_forecast_extras_coverage_gate.py: {created: "2026-06-16", last_used: "2026-07-17", note: "BPF source-clock capture coverage, per-commit family notification, fixpoint, quota cooldown, and held-family-first target ordering."}
+    tests/data/test_fusion_upgrade_trigger.py: {created: "2026-06-11", last_used: "2026-07-17", note: "Fusion upgrade detects both provider-family growth and exact persisted source-row revision changes without repeated no-op materialization."}
     tests/test_replacement_forecast_current_target_plan.py: {created: "2026-06-06", last_used: "2026-07-15", note: "Current active-family coverage and seedability, including automatic reseed when a shaped posterior carries an older probability-semantics revision."}
     tests/test_replacement_forecast_materializer_cycle_policy.py: {created: "2026-06-10", last_used: "2026-07-15", note: "Shared replacement cycle and probability-semantics policy; the current revision is part of tradeable-grade coverage and materialization identity."}
     tests/engine/test_position_belief_authority.py: {created: "2026-06-12", last_used: "2026-07-15", note: "Held-position belief reads the same replacement authority as entry and refuses old current-evidence probability semantics."}
@@ -360,7 +361,7 @@ test_trust_policy:
     tests/test_source_job_registry.py: {created: "2026-05-24", last_used: "2026-05-24"}
     tests/test_opendata_ownership_singleton.py: {created: "2026-05-24", last_used: "2026-05-24"}
     tests/test_backfill_watermarks.py: {created: "2026-05-24", last_used: "2026-05-24"}
-    tests/test_scheduler_adapter.py: {created: "2026-05-24", last_used: "2026-05-24"}
+    tests/test_scheduler_adapter.py: {created: "2026-05-24", last_used: "2026-07-17", note: "Scheduler wiring plus source-clock committed-scope materialization before full fanout completion."}
     tests/test_temporal_provenance_and_lanes.py: {created: "2026-05-24", last_used: "2026-05-24"}
     # PR #329 D: persisted source_time_frontier (schema 7 + idempotent + backfill-safe writer).
     tests/test_frontier_store.py: {created: "2026-05-24", last_used: "2026-05-24"}

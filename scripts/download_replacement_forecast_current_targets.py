@@ -16,7 +16,7 @@ import os
 import sys
 import tempfile
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
@@ -48,6 +48,7 @@ from src.data.raw_forecast_artifact_manifest import (  # noqa: E402
 )
 from src.data.replacement_forecast_current_target_plan import (  # noqa: E402
     ReplacementForecastCurrentTargetPlan,
+    ReplacementForecastTargetKey,
     build_replacement_forecast_current_target_plan,
 )
 from src.state.db import _connect  # noqa: E402
@@ -547,6 +548,7 @@ def download_current_target_raw_inputs(
     include_covered: bool = False,
     missing_manifests_only: bool = False,
     precomputed_plan: ReplacementForecastCurrentTargetPlan | None = None,
+    required_scopes: Sequence[tuple[str, str, str]] | None = None,
     max_wall_clock_seconds: float | None = None,
     fetch_workers: int = 4,
 ) -> dict[str, object]:
@@ -565,25 +567,43 @@ def download_current_target_raw_inputs(
     # ``include_covered=True`` (passed by the production wrapper when the available cycle is
     # ahead of the downloaded high-water mark, and by the CLI when --cycle is explicit)
     # downloads raw inputs for ALL current targets at the requested cycle.
-    plan = precomputed_plan or build_replacement_forecast_current_target_plan(
-        forecast_db,
-        required_openmeteo_source_cycle_time=cycle,
-    )
-    if include_covered:
-        _rows = list(plan.rows)
-    elif missing_manifests_only:
-        _rows = [row for row in plan.rows if row.missing_openmeteo_manifest]
+    plan: ReplacementForecastCurrentTargetPlan | None = None
+    if required_scopes is not None:
+        _rows = [
+            ReplacementForecastTargetKey(city, target_date, metric)
+            for city, target_date, metric in dict.fromkeys(
+                (
+                    str(city).strip(),
+                    str(target_date).strip(),
+                    str(metric).strip(),
+                )
+                for city, target_date, metric in required_scopes
+                if str(city).strip()
+                and str(target_date).strip()
+                and str(metric).strip() in {"high", "low"}
+            )
+        ]
+        _rows.sort(key=lambda row: (row.target_date, row.city, row.temperature_metric))
     else:
-        _rows = [row for row in plan.rows if not row.covered]
-    _rows.sort(
-        key=lambda row: (
-            0 if getattr(row, "missing_openmeteo_manifest", False) else 1,
-            0 if not getattr(row, "covered", False) else 1,
-            str(getattr(row, "target_date", "")),
-            str(getattr(row, "city", "")),
-            str(getattr(row, "temperature_metric", "")),
+        plan = precomputed_plan or build_replacement_forecast_current_target_plan(
+            forecast_db,
+            required_openmeteo_source_cycle_time=cycle,
         )
-    )
+        if include_covered:
+            _rows = list(plan.rows)
+        elif missing_manifests_only:
+            _rows = [row for row in plan.rows if row.missing_openmeteo_manifest]
+        else:
+            _rows = [row for row in plan.rows if not row.covered]
+        _rows.sort(
+            key=lambda row: (
+                0 if getattr(row, "missing_openmeteo_manifest", False) else 1,
+                0 if not getattr(row, "covered", False) else 1,
+                str(getattr(row, "target_date", "")),
+                str(getattr(row, "city", "")),
+                str(getattr(row, "temperature_metric", "")),
+            )
+        )
     targets = _rows[:limit] if limit else _rows
     output_dir.mkdir(parents=True, exist_ok=True)
     raw_dir = output_dir / cycle.strftime("%Y%m%dT%H%M%SZ")
@@ -848,7 +868,8 @@ def download_current_target_raw_inputs(
         "unattempted_target_count": len(targets) - processed_target_count,
         "max_wall_clock_seconds": max_wall_clock_seconds,
         "fetch_workers": min(max(1, int(fetch_workers)), 8),
-        "coverage_before": plan.as_dict(),
+        "coverage_before": None if plan is None else plan.as_dict(),
+        "required_scope_count": None if required_scopes is None else len(_rows),
     }
 
 
@@ -864,6 +885,7 @@ def download_current_target_openmeteo_inputs(
     include_covered: bool = False,
     missing_manifests_only: bool = False,
     precomputed_plan: ReplacementForecastCurrentTargetPlan | None = None,
+    required_scopes: Sequence[tuple[str, str, str]] | None = None,
     max_wall_clock_seconds: float | None = None,
     fetch_workers: int = 4,
 ) -> dict[str, object]:
@@ -880,6 +902,7 @@ def download_current_target_openmeteo_inputs(
         include_covered=include_covered,
         missing_manifests_only=missing_manifests_only,
         precomputed_plan=precomputed_plan,
+        required_scopes=required_scopes,
         max_wall_clock_seconds=max_wall_clock_seconds,
         fetch_workers=fetch_workers,
     )

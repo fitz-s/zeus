@@ -34,7 +34,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
 from threading import Event
-from typing import Callable, Mapping
+from typing import Callable, Mapping, Sequence
 
 from src.config import settings
 
@@ -229,6 +229,7 @@ def _download_replacement_forecast_current_targets_if_needed(
     cfg: dict[str, object],
     *,
     max_wall_clock_seconds: float | None = None,
+    required_scopes: Sequence[tuple[str, str, str]] | None = None,
 ) -> dict[str, object] | None:
     if not bool(cfg.get("download_current_targets_enabled", False)):
         return None
@@ -272,12 +273,23 @@ def _download_replacement_forecast_current_targets_if_needed(
     downloaded_cycle = _max_downloaded_current_target_cycle(Path(str(forecast_db)))
     cycle_advanced = downloaded_cycle is None or downloaded_cycle < available_cycle
 
-    plan = build_replacement_forecast_current_target_plan(
-        Path(str(forecast_db)),
-        required_openmeteo_source_cycle_time=available_cycle,
+    plan = None
+    if required_scopes is None:
+        plan = build_replacement_forecast_current_target_plan(
+            Path(str(forecast_db)),
+            required_openmeteo_source_cycle_time=available_cycle,
+        )
+    else:
+        required_scopes = tuple(dict.fromkeys(required_scopes))
+        if not required_scopes:
+            return {
+                "status": "CURRENT_TARGET_SCOPED_DOWNLOAD_NO_TARGETS",
+                "available_cycle": available_cycle.isoformat(),
+            }
+    cycle_targets_have_current_manifests = (
+        plan is not None and plan.missing_openmeteo_manifest_count <= 0
     )
-    cycle_targets_have_current_manifests = plan.missing_openmeteo_manifest_count <= 0
-    cycle_targets_are_materialized = plan.ready
+    cycle_targets_are_materialized = plan is not None and plan.ready
     if cycle_targets_are_materialized:
         return {
             "status": "CURRENT_TARGETS_ALREADY_COVERED",
@@ -303,12 +315,19 @@ def _download_replacement_forecast_current_targets_if_needed(
             "available_cycle": available_cycle.isoformat(),
             "downloaded_cycle": None if downloaded_cycle is None else downloaded_cycle.isoformat(),
             "timeboxed_incomplete": True,
-            "unattempted_target_count": plan.target_count,
+            "unattempted_target_count": (
+                len(required_scopes)
+                if plan is None and required_scopes is not None
+                else plan.target_count
+            ),
             "max_wall_clock_seconds": max_wall_clock_seconds,
-            "coverage": plan.as_dict(),
+            "coverage": None if plan is None else plan.as_dict(),
         }
     cycle = available_cycle
-    return download_current_target_openmeteo_inputs(
+    download_kwargs: dict[str, object] = {}
+    if required_scopes is not None:
+        download_kwargs["required_scopes"] = required_scopes
+    result = download_current_target_openmeteo_inputs(
         forecast_db=Path(str(forecast_db)),
         output_dir=Path(str(output_dir)),
         cycle=cycle,
@@ -327,7 +346,14 @@ def _download_replacement_forecast_current_targets_if_needed(
         precomputed_plan=plan,
         max_wall_clock_seconds=remaining,
         fetch_workers=int(cfg.get("source_clock_fanout_workers") or 4),
+        **download_kwargs,
     )
+    result.setdefault("available_cycle", available_cycle.isoformat())
+    result.setdefault(
+        "downloaded_cycle",
+        None if downloaded_cycle is None else downloaded_cycle.isoformat(),
+    )
+    return result
 
 
 def _download_bayes_precision_fusion_extra_raw_inputs_if_needed(cfg: dict[str, object]) -> dict[str, object] | None:
@@ -750,7 +776,6 @@ def _download_bayes_precision_fusion_source_clock_raw_inputs_if_needed(
         assert priority_task is not None
         priority_source, priority_report = _download_task(*priority_task)
         reports_by_source[priority_source].append(priority_report)
-        _notify_source_commit(priority_source, priority_report)
 
         if quota_abort.is_set():
             # Preserve per-source retry accounting without admitting any more
@@ -759,9 +784,15 @@ def _download_bayes_precision_fusion_source_clock_raw_inputs_if_needed(
                 source, task_report = _download_task(*task)
                 reports_by_source[source].append(task_report)
         elif len(tasks) == 1:
-            source, task_report = _download_task(*tasks[0])
-            reports_by_source[source].append(task_report)
-            _notify_source_commit(source, task_report)
+            with ThreadPoolExecutor(
+                max_workers=1,
+                thread_name_prefix="source-clock-bpf",
+            ) as executor:
+                future = executor.submit(_download_task, *tasks[0])
+                _notify_source_commit(priority_source, priority_report)
+                source, task_report = future.result()
+                reports_by_source[source].append(task_report)
+                _notify_source_commit(source, task_report)
         elif tasks:
             with ThreadPoolExecutor(
                 max_workers=worker_count,
@@ -771,6 +802,10 @@ def _download_bayes_precision_fusion_source_clock_raw_inputs_if_needed(
                     executor.submit(_download_task, *task): task[0]
                     for task in tasks
                 }
+                # Start all remaining provider I/O before materializing the priority
+                # commit. The urgent family still publishes first, while its anchor and
+                # seed work overlap the broader source fan-out.
+                _notify_source_commit(priority_source, priority_report)
                 for future in as_completed(futures):
                     source = futures[future]
                     try:
@@ -781,6 +816,8 @@ def _download_bayes_precision_fusion_source_clock_raw_inputs_if_needed(
                         fanout_errors.append(
                             f"{source}:{type(exc).__name__}: {str(exc)[:220]}"
                         )
+        else:
+            _notify_source_commit(priority_source, priority_report)
 
         source_results: dict[str, dict[str, object]] = {}
         for source in updated_sources:
@@ -1525,12 +1562,17 @@ def _replacement_cycle_availability_poll_if_needed(
     return report
 
 
-def _enqueue_fusion_upgrade_reseeds_if_needed(cfg: dict[str, object]) -> dict[str, object] | None:
-    """Task #32 — enqueue re-materialization seeds for PARTIAL-fusion scopes whose 5th (or Nth)
-    decorrelated provider became capturable since the last materialization. Delegates the ENTIRE
-    instrument-set comparison to the single-authority module so the rule lives at exactly one
-    site. Returns the trigger report (None when the seed_dir / forecast_db / raw_manifest_dir are
-    not configured). Fail-soft: any error returns a status dict, never raises into the poll."""
+def _enqueue_fusion_upgrade_reseeds_if_needed(
+    cfg: dict[str, object],
+    *,
+    scopes: Sequence[tuple[str, str, str]] | None = None,
+    changed_sources: Sequence[str] | None = None,
+) -> dict[str, object] | None:
+    """Enqueue scopes whose provider set or consumed raw input revision changed.
+
+    Returns None when required paths are not configured. Errors remain fail-soft so source ingest
+    can continue and the periodic catch-up lane can retry.
+    """
     forecast_db = cfg.get("forecast_db")
     seed_dir = cfg.get("seed_dir")
     raw_manifest_dir = cfg.get("raw_manifest_dir")
@@ -1546,13 +1588,19 @@ def _enqueue_fusion_upgrade_reseeds_if_needed(cfg: dict[str, object]) -> dict[st
             seed_dir=Path(str(seed_dir)),
             raw_manifest_dir=Path(str(raw_manifest_dir)),
             limit=int(cfg.get("seed_limit") or cfg.get("limit") or 10),
+            scopes=scopes,
+            changed_sources=changed_sources,
         )
     except Exception as exc:  # noqa: BLE001 — fail-soft: the trigger never breaks the poll
         logger.warning("fusion-upgrade trigger skipped (fail-soft): %s", exc)
         return {"status": "FUSION_UPGRADE_TRIGGER_FAILSOFT_SKIPPED", "error": str(exc)}
 
 
-def _enqueue_cycle_advance_reseeds_if_needed(cfg: dict[str, object]) -> dict[str, object] | None:
+def _enqueue_cycle_advance_reseeds_if_needed(
+    cfg: dict[str, object],
+    *,
+    scopes: Sequence[tuple[str, str, str]] | None = None,
+) -> dict[str, object] | None:
     """U5 step 2a — enqueue re-materialization seeds for active-window families whose latest
     posterior consumed a STRICTLY OLDER cycle than the freshest materializable in-universe cycle.
     Delegates the comparison + enqueue to the single-authority module so the rule lives at one site.
@@ -1576,6 +1624,7 @@ def _enqueue_cycle_advance_reseeds_if_needed(cfg: dict[str, object]) -> dict[str
             raw_manifest_dir=Path(str(raw_manifest_dir)),
             trades_db=_zeus_trade_db_path(),
             limit=int(cfg.get("seed_limit") or cfg.get("limit") or 10),
+            scopes=scopes,
         )
     except Exception as exc:  # noqa: BLE001 — fail-soft: the trigger never breaks the poll
         logger.warning("cycle-advance trigger skipped (fail-soft): %s", exc)

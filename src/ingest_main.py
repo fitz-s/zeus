@@ -1586,12 +1586,32 @@ def _replacement_availability_poll_tick():
             compact["transport_errors"] = tuple(errors)[:3]
         return {k: v for k, v in compact.items() if v is not None}
 
-    def _attach_reseed_reports(report: dict[str, object]) -> dict[str, object]:
-        upgrade_report = _enqueue_fusion_upgrade_reseeds_if_needed(cfg)
+    def _attach_reseed_reports(
+        report: dict[str, object],
+        *,
+        scopes: tuple[tuple[str, str, str], ...] | None = None,
+        changed_sources: tuple[str, ...] | None = None,
+        include_cycle_advance: bool = True,
+    ) -> dict[str, object]:
+        upgrade_report = (
+            _enqueue_fusion_upgrade_reseeds_if_needed(cfg)
+            if scopes is None
+            else _enqueue_fusion_upgrade_reseeds_if_needed(
+                cfg,
+                scopes=scopes,
+                changed_sources=changed_sources,
+            )
+        )
         if upgrade_report is not None:
             report["fusion_upgrade_status"] = upgrade_report.get("status")
             report["fusion_upgrade_seeds_enqueued"] = upgrade_report.get("seeds_enqueued")
-        cycle_advance_report = _enqueue_cycle_advance_reseeds_if_needed(cfg)
+        if not include_cycle_advance:
+            return report
+        cycle_advance_report = (
+            _enqueue_cycle_advance_reseeds_if_needed(cfg)
+            if scopes is None
+            else _enqueue_cycle_advance_reseeds_if_needed(cfg, scopes=scopes)
+        )
         if cycle_advance_report is not None:
             report["cycle_advance_status"] = cycle_advance_report.get("status")
             report["cycle_advance_seeds_enqueued"] = cycle_advance_report.get("seeds_enqueued")
@@ -1672,14 +1692,31 @@ def _replacement_availability_poll_tick():
         logger.info("replacement source-clock poll current: %s", report)
         return report
     logger.info("replacement source-clock update detected; running download path: %s", source_clock_payload)
-    partial_reseed_published = False
+    notified_source_scopes: set[tuple[str, str, str, str]] = set()
+    anchor_scopes_attempted: set[tuple[str, str, str]] = set()
+    fallback_reseed_published = False
 
-    def _publish_first_committed_source(
+    def _publish_committed_source(
         source: str,
         task_report: object,
     ) -> None:
-        nonlocal partial_reseed_published
-        if partial_reseed_published:
+        nonlocal fallback_reseed_published
+        raw_scopes = (
+            task_report.get("committed_families", ())
+            if isinstance(task_report, dict)
+            else ()
+        )
+        scopes = tuple(
+            scope
+            for scope in (
+                (str(city), str(target_date), str(metric))
+                for city, target_date, metric in raw_scopes
+            )
+            if (source, *scope) not in notified_source_scopes
+        )
+        if scopes:
+            notified_source_scopes.update((source, *scope) for scope in scopes)
+        elif fallback_reseed_published:
             return
         report = {
             "status": "SOURCE_CLOCK_PARTIAL_RAW_INPUTS_COMMITTED",
@@ -1689,11 +1726,39 @@ def _replacement_availability_poll_tick():
                 if isinstance(task_report, dict)
                 else None
             ),
+            "committed_family_count": len(scopes),
         }
-        _attach_reseed_reports(report)
-        partial_reseed_published = True
+        if scopes:
+            anchor_scopes = tuple(
+                scope for scope in scopes if scope not in anchor_scopes_attempted
+            )
+            anchor_scopes_attempted.update(anchor_scopes)
+            if anchor_scopes:
+                anchor_report = _download_replacement_forecast_current_targets_if_needed(
+                    cfg,
+                    max_wall_clock_seconds=min(
+                        10.0,
+                        _replacement_current_target_poll_timeout_seconds(
+                            _replacement_availability_poll_seconds()
+                        ),
+                    ),
+                    required_scopes=anchor_scopes,
+                )
+                if isinstance(anchor_report, dict):
+                    report["anchor_scope_status"] = anchor_report.get("status")
+                    report["anchor_scope_manifest_count"] = anchor_report.get(
+                        "written_manifest_count"
+                    )
+            _attach_reseed_reports(
+                report,
+                scopes=scopes,
+                changed_sources=(source,),
+            )
+        else:
+            _attach_reseed_reports(report)
+            fallback_reseed_published = True
         logger.info(
-            "replacement source-clock first committed source published reseeds: %s",
+            "replacement source-clock committed families published reseeds: %s",
             report,
         )
 
@@ -1703,7 +1768,7 @@ def _replacement_availability_poll_tick():
         max_wall_clock_seconds=_replacement_source_clock_download_budget_seconds(
             _replacement_availability_poll_seconds()
         ),
-        on_source_commit=_publish_first_committed_source,
+        on_source_commit=_publish_committed_source,
     )
     if report is None:
         report = {

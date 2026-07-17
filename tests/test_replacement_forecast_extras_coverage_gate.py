@@ -1,6 +1,6 @@
 # Created: 2026-06-16
-# Last reused or audited: 2026-07-16
-# Lifecycle: created=2026-06-16; last_reviewed=2026-07-16; last_reused=2026-07-16
+# Last reused or audited: 2026-07-17
+# Lifecycle: created=2026-06-16; last_reviewed=2026-07-17; last_reused=2026-07-17
 # Authority basis: docs/evidence/timing_audit/capture_reactor_stall_rootcause_2026-06-16.md
 #   (PRIMARY/CODE fix) + docs/evidence/timing_audit/impl_flat_threshold_capture_fix_2026-06-16.md.
 #   BAYES_PRECISION_FUSION_SPEC §6 F1 (the q-path consumes the persisted single_runs capture).
@@ -665,6 +665,14 @@ def test_source_clock_scoped_capture_fans_out_city_dates(
             "status": "BAYES_PRECISION_FUSION_EXTRA_RAW_INPUTS_DOWNLOADED",
             "target_count": len(kwargs["targets"]),
             "written_row_count": len(kwargs["targets"]),
+            "committed_families": tuple(
+                sorted(
+                    {
+                        (target.city, target.target_date, target.metric)
+                        for target in kwargs["targets"]
+                    }
+                )
+            ),
             "global_models_expected": 1,
             "global_models_unavailable": [],
         }
@@ -722,8 +730,9 @@ def test_source_clock_scoped_capture_interleaves_sources_and_notifies_commits(
         for metric in ("high", "low")
     )
     starts: list[str] = []
-    notifications: list[str] = []
+    notifications: list[tuple[str, dict[str, object]]] = []
     lock = threading.Lock()
+    fanout_started = threading.Event()
 
     monkeypatch.setitem(
         prod.settings["edli"],
@@ -759,15 +768,32 @@ def test_source_clock_scoped_capture_interleaves_sources_and_notifies_commits(
         source = tuple(kwargs["models"])[0]
         with lock:
             starts.append(source)
+            if len(starts) > 1:
+                fanout_started.set()
         return {
             "status": "BAYES_PRECISION_FUSION_EXTRA_RAW_INPUTS_DOWNLOADED",
             "target_count": len(kwargs["targets"]),
             "written_row_count": len(kwargs["targets"]),
+            "committed_families": tuple(
+                sorted(
+                    {
+                        (target.city, target.target_date, target.metric)
+                        for target in kwargs["targets"]
+                    }
+                )
+            ),
             "global_models_expected": 1,
             "global_models_unavailable": [],
         }
 
     monkeypatch.setattr(dl, "download_bayes_precision_fusion_extra_raw_inputs", _download)
+
+    def _notify(source, task_report):
+        if not notifications:
+            assert fanout_started.wait(0.5), (
+                "remaining provider I/O must start before the priority materialization callback"
+            )
+        notifications.append((source, dict(task_report)))
 
     report = prod._download_bayes_precision_fusion_source_clock_raw_inputs_if_needed(
         {
@@ -776,12 +802,21 @@ def test_source_clock_scoped_capture_interleaves_sources_and_notifies_commits(
         },
         source_clock_report=_Report(),
         max_wall_clock_seconds=1.0,
-        on_source_commit=lambda source, _report: notifications.append(source),
+        on_source_commit=_notify,
     )
 
     assert starts[0] == "ecmwf_ifs"
     assert set(starts[1:]) == set(sources)
-    assert set(notifications) == set(sources)
+    assert {source for source, _report in notifications} == set(sources)
+    assert all(report["committed_families"] for _source, report in notifications)
+    assert all(
+        set(report["committed_families"]) <= {
+            (city, "2026-07-17", metric)
+            for city in cities
+            for metric in ("high", "low")
+        }
+        for _source, report in notifications
+    )
     assert report["source_commit_notifications"] == len(notifications)
     assert report["source_commit_notification_errors"] == ()
     assert report["priority_probe_source"] == "ecmwf_ifs"

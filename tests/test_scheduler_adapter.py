@@ -1,8 +1,8 @@
-# Lifecycle: created=2026-05-24; last_reviewed=2026-05-24; last_reused=never
+# Lifecycle: created=2026-05-24; last_reviewed=2026-07-17; last_reused=2026-07-17
 # Purpose: Executor-class assignment (no DB writer on file-only executor; UMA->backfill_db).
 # Reuse: Inspect docs/operations/current/plans/data_temporal_kernel/PLAN.md + the target module before relying on it.
 # Created: 2026-05-24
-# Last reused or audited: 2026-05-24
+# Last reused or audited: 2026-07-17
 # Authority basis: docs/operations/current/plans/data_temporal_kernel/PLAN.md (PR6);
 #   operator spec §7 (Scheduler adapter / executor classes).
 """PR6: registry -> scheduler executor-class assignment (pure planner, daemon wiring deferred)."""
@@ -273,7 +273,15 @@ def test_replacement_availability_fast_poll_passes_changed_source_clock_report(m
         assert source_clock_report is changed_report
         assert max_wall_clock_seconds == 45.0
         assert on_source_commit is not None
-        on_source_commit("icon_global", {"written_row_count": 1})
+        on_source_commit(
+            "icon_global",
+            {
+                "written_row_count": 1,
+                "committed_families": (
+                    ("Munich", "2026-07-03", "high"),
+                ),
+            },
+        )
         call_order.append("scoped_download_complete")
         return {
             "status": "SOURCE_CLOCK_SCOPED_BAYES_PRECISION_FUSION_EXTRA_RAW_INPUTS_DOWNLOADED",
@@ -302,13 +310,15 @@ def test_replacement_availability_fast_poll_passes_changed_source_clock_report(m
         or tuple(sources or ()),
     )
     monkeypatch.setattr(prod, "_download_bayes_precision_fusion_source_clock_raw_inputs_if_needed", _scoped_path)
-    monkeypatch.setattr(
-        prod,
-        "_download_replacement_forecast_current_targets_if_needed",
-        lambda cfg, **_kwargs: call_order.append("current_targets")
-        or {
+    anchor_calls: list[dict[str, object]] = []
+
+    def _download_anchor(_cfg, **kwargs):
+        call_order.append("anchor_scope_download")
+        anchor_calls.append(kwargs)
+        return {
             "status": "CURRENT_TARGETS_HAVE_RAW_MANIFESTS",
             "available_cycle": "2026-07-02T12:00:00+00:00",
+            "written_manifest_count": 1,
             "coverage": {
                 "status": "CURRENT_TARGETS_MISSING_REPLACEMENT_COVERAGE",
                 "target_count": 2,
@@ -318,26 +328,35 @@ def test_replacement_availability_fast_poll_passes_changed_source_clock_report(m
                 "missing_openmeteo_manifest_count": 0,
                 "day0_observed_extreme_required_count": 0,
             },
-        },
-    )
+        }
+
     monkeypatch.setattr(
         prod,
-        "_enqueue_fusion_upgrade_reseeds_if_needed",
-        lambda cfg: call_order.append("fusion_reseed")
-        or {"status": "FUSION_UPGRADE_TRIGGER", "seeds_enqueued": 1},
+        "_download_replacement_forecast_current_targets_if_needed",
+        _download_anchor,
     )
-    monkeypatch.setattr(
-        prod,
-        "_enqueue_cycle_advance_reseeds_if_needed",
-        lambda cfg: call_order.append("cycle_reseed")
-        or {
+    fusion_calls: list[dict[str, object]] = []
+
+    def _fusion_reseed(_cfg, **kwargs):
+        call_order.append("fusion_reseed")
+        fusion_calls.append(kwargs)
+        return {"status": "FUSION_UPGRADE_TRIGGER", "seeds_enqueued": 1}
+
+    monkeypatch.setattr(prod, "_enqueue_fusion_upgrade_reseeds_if_needed", _fusion_reseed)
+    cycle_calls: list[dict[str, object]] = []
+
+    def _cycle_reseed(_cfg, **kwargs):
+        call_order.append("cycle_reseed")
+        cycle_calls.append(kwargs)
+        return {
             "status": "CYCLE_ADVANCE_TRIGGER",
             "seeds_enqueued": 2,
             "advances_detected": 2,
             "held_advances_detected": 1,
             "freshest_materializable_cycle": "2026-07-02T12:00:00+00:00",
-        },
-    )
+        }
+
+    monkeypatch.setattr(prod, "_enqueue_cycle_advance_reseeds_if_needed", _cycle_reseed)
 
     result = ingest_main._replacement_availability_poll_tick.__wrapped__()
 
@@ -350,9 +369,27 @@ def test_replacement_availability_fast_poll_passes_changed_source_clock_report(m
     assert result["source_clock_cursor_advanced_sources"] == ("icon_global",)
     assert result["source_clock_cursor_deferred_sources"] == ()
     assert probe_kwargs == [{"advance_cursor": False}]
+    assert fusion_calls == [
+        {
+            "scopes": (("Munich", "2026-07-03", "high"),),
+            "changed_sources": ("icon_global",),
+        },
+        {},
+    ]
+    assert anchor_calls == [
+        {
+            "max_wall_clock_seconds": 10.0,
+            "required_scopes": (("Munich", "2026-07-03", "high"),),
+        }
+    ]
+    assert cycle_calls == [
+        {"scopes": (("Munich", "2026-07-03", "high"),)},
+        {},
+    ]
     assert call_order == [
         "probe",
         "scoped_download",
+        "anchor_scope_download",
         "fusion_reseed",
         "cycle_reseed",
         "scoped_download_complete",

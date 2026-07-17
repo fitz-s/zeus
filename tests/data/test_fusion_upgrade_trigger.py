@@ -1,5 +1,5 @@
 # Created: 2026-06-11
-# Last reused or audited: 2026-06-17
+# Last reused or audited: 2026-07-17
 # Authority basis: Task #32 (operator 2026-06-11) — PARTIAL-fusion upgrade trigger. Relationship
 #   pins for the SINGLE instrument-set comparison + the idempotency bound:
 #     - a posterior fused from {A,B} with capture later containing {A,B,C} for the SAME cycle ⇒
@@ -54,8 +54,20 @@ def _insert_posterior(
     cycle_iso: str,
     used_models: list[str],
     computed_at: str,
+    current_value_ids: dict[str, int] | None = None,
+    configured_sources: list[str] | None = None,
 ) -> None:
-    prov = {"bayes_precision_fusion": {"used_models": used_models}}
+    fusion: dict[str, object] = {"used_models": used_models}
+    if current_value_ids is not None:
+        fusion["current_value_serving"] = {
+            model: {"raw_model_forecast_id": raw_id}
+            for model, raw_id in current_value_ids.items()
+        }
+    if configured_sources is not None:
+        fusion["source_clock_one_scheme"] = {
+            "configured_sources": configured_sources,
+        }
+    prov = {"bayes_precision_fusion": fusion}
     conn.execute(
         """
         INSERT INTO forecast_posteriors
@@ -133,6 +145,104 @@ def test_equal_set_signals_no_upgrade() -> None:
     )
     assert verdict["is_upgrade"] is False
     assert verdict["new_families"] == []
+
+
+def test_same_provider_family_new_raw_revision_signals_upgrade() -> None:
+    """A source-clock value revision changes q even when the provider-family set is unchanged."""
+    conn = _conn()
+    cyc = "2026-06-12T06:00:00+00:00"
+    _insert_single_runs(
+        conn,
+        city="Testville",
+        target_date="2026-06-13",
+        metric="high",
+        cycle_iso=cyc,
+        models=[_DWD],
+    )
+    old_id = int(
+        conn.execute(
+            "SELECT MAX(raw_model_forecast_id) FROM raw_model_forecasts WHERE model = ?",
+            (_DWD,),
+        ).fetchone()[0]
+    )
+    _insert_posterior(
+        conn,
+        city="Testville",
+        target_date="2026-06-13",
+        metric="high",
+        cycle_iso=cyc,
+        used_models=[_DWD],
+        computed_at="2026-06-12T10:00:00+00:00",
+        current_value_ids={_DWD: old_id},
+        configured_sources=[_DWD],
+    )
+    conn.execute(
+        """
+        INSERT INTO raw_model_forecasts
+            (model, city, target_date, metric, source_cycle_time, source_available_at,
+             captured_at, lead_days, forecast_value_c, endpoint)
+        VALUES (?, 'Testville', '2026-06-13', 'high', ?, ?, ?, 1, 23.0, 'single_runs')
+        """,
+        (_DWD, cyc, cyc, "2026-06-12T10:01:00+00:00"),
+    )
+    conn.commit()
+
+    verdict = scope_capture_offers_larger_provider_set(
+        conn,
+        city="Testville",
+        target_date="2026-06-13",
+        metric="high",
+        changed_sources=[_DWD],
+    )
+
+    assert verdict["is_upgrade"] is True
+    assert verdict["family_upgrade"] is False
+    assert verdict["input_revision_changed"] is True
+    assert verdict["new_families"] == []
+    assert verdict["changed_input_sources"] == [_DWD]
+
+
+def test_unchanged_or_unrelated_raw_revision_is_noop() -> None:
+    conn = _conn()
+    cyc = "2026-06-12T06:00:00+00:00"
+    _insert_single_runs(
+        conn,
+        city="Testville",
+        target_date="2026-06-13",
+        metric="high",
+        cycle_iso=cyc,
+        models=[_DWD],
+    )
+    raw_id = int(conn.execute("SELECT MAX(raw_model_forecast_id) FROM raw_model_forecasts").fetchone()[0])
+    _insert_posterior(
+        conn,
+        city="Testville",
+        target_date="2026-06-13",
+        metric="high",
+        cycle_iso=cyc,
+        used_models=[_DWD],
+        computed_at="2026-06-12T10:00:00+00:00",
+        current_value_ids={_DWD: raw_id},
+        configured_sources=[_DWD],
+    )
+
+    unchanged = scope_capture_offers_larger_provider_set(
+        conn,
+        city="Testville",
+        target_date="2026-06-13",
+        metric="high",
+        changed_sources=[_DWD],
+    )
+    unrelated = scope_capture_offers_larger_provider_set(
+        conn,
+        city="Testville",
+        target_date="2026-06-13",
+        metric="high",
+        changed_sources=[_UKMO],
+    )
+
+    assert unchanged["is_upgrade"] is False
+    assert unrelated["is_upgrade"] is False
 
 
 def test_capture_smaller_than_served_is_not_an_upgrade() -> None:

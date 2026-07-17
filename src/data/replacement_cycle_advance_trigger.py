@@ -42,6 +42,7 @@ import logging
 import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Sequence
 
 from src.contracts.position_truth import CURRENT_MONEY_RISK_CHAIN_STATES
 
@@ -535,6 +536,7 @@ def enqueue_cycle_advance_reseeds(
     trades_db: Path | str | None = None,
     computed_at: datetime | None = None,
     limit: int = 50,
+    scopes: Sequence[tuple[str, str, str]] | None = None,
 ) -> dict[str, object]:
     """For every active-window target whose latest posterior consumed a STRICTLY OLDER cycle than
     the freshest materializable in-universe cycle, enqueue exactly one re-materialization seed
@@ -597,16 +599,57 @@ def enqueue_cycle_advance_reseeds(
         report["status"] = "CYCLE_ADVANCE_FORECAST_DB_MISSING"
         return report
 
-    plan = build_replacement_forecast_current_target_plan(
-        forecast_db,
-        min_target_date=now.date().isoformat(),
-        require_raw_artifacts=False,
-        now_utc=now,
-    )
-    if plan.status == "BLOCKED":
-        report["status"] = "CYCLE_ADVANCE_PLAN_BLOCKED"
-        report["reason_codes"] = list(plan.reason_codes)
-        return report
+    if scopes is None:
+        plan = build_replacement_forecast_current_target_plan(
+            forecast_db,
+            min_target_date=now.date().isoformat(),
+            require_raw_artifacts=False,
+            now_utc=now,
+        )
+        if plan.status == "BLOCKED":
+            report["status"] = "CYCLE_ADVANCE_PLAN_BLOCKED"
+            report["reason_codes"] = list(plan.reason_codes)
+            return report
+        candidates = tuple(
+            (
+                str(row.city),
+                str(row.target_date),
+                str(row.temperature_metric),
+                bool(getattr(row, "day0_observed_extreme_required", False)),
+            )
+            for row in plan.rows
+        )
+    else:
+        from src.data.replacement_forecast_current_target_plan import (  # noqa: PLC0415
+            _city_timezone_by_name,
+            _day0_observed_extreme_required,
+        )
+
+        timezone_by_city = _city_timezone_by_name()
+        candidates = tuple(
+            (
+                city,
+                target_date,
+                metric,
+                _day0_observed_extreme_required(
+                    city=city,
+                    target_date=target_date,
+                    timezone_by_city=timezone_by_city,
+                    now_utc=now,
+                ),
+            )
+            for city, target_date, metric in dict.fromkeys(
+                (
+                    str(city).strip(),
+                    str(target_date).strip(),
+                    str(metric).strip(),
+                )
+                for city, target_date, metric in scopes
+                if str(city).strip()
+                and str(target_date).strip()
+                and str(metric).strip() in {"high", "low"}
+            )
+        )
 
     manifests = _load_manifests(raw_dir, computed_at=now)
 
@@ -636,18 +679,18 @@ def enqueue_cycle_advance_reseeds(
         # PRIORITY ORDER: HELD families first (tier i), then nearest-target-first (mirrors the
         # seed-budget K-decision — far-date non-tradeable scopes must not starve the tradeable day0/day1
         # money scopes of the per-tick enqueue budget). A single sort key encodes both tiers.
-        def _priority_key(r) -> tuple:
-            scope = (str(r.city), str(r.target_date), str(r.temperature_metric))
+        def _priority_key(candidate) -> tuple:
+            scope = candidate[:3]
             is_held = scope in held
-            return (0 if is_held else 1, str(r.target_date), str(r.city), str(r.temperature_metric))
+            return (0 if is_held else 1, scope[1], scope[0], scope[2])
 
         enqueued = 0
-        for row in sorted(plan.rows, key=_priority_key):
+        for city, target_date, metric, day0_required in sorted(
+            candidates,
+            key=_priority_key,
+        ):
             if enqueued >= max(1, int(limit)):
                 break
-            city = str(row.city)
-            target_date = str(row.target_date)
-            metric = str(row.temperature_metric)
             scope = (city, target_date, metric)
             is_held = scope in held
             day0_payload: dict[str, object] = {}
@@ -655,7 +698,7 @@ def enqueue_cycle_advance_reseeds(
             # DAY0 GUARD: a started local day's scope must re-materialize with the canonical
             # observed-extreme hard fact. Skipping here permanently strands same-day stale
             # posteriors even when observation_instants already has the required truth.
-            if bool(getattr(row, "day0_observed_extreme_required", False)):
+            if day0_required:
                 payload = _day0_observed_extreme_seed_payload(
                     city=city,
                     target_date=target_date,

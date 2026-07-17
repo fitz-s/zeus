@@ -7,10 +7,9 @@
 #   served<5 posterior is then marked "covered" (q_lcb NOT NULL) by all three coverage gates —
 #   which key coverage on the baseline_b0 (ecmwf_open_data) run, BLIND to the bayes_precision_fusion decorrelated
 #   instrument set. So the scope never re-materializes even after its 5th provider lands.
-#   K-decision: ONE comparison — the latest posterior's served decorrelated-provider FAMILY set
-#   vs the family set CAPTURABLE NOW at the SAME source_cycle_time. A strict superset = an
-#   upgrade is available; enqueue exactly one re-materialization seed, idempotent per
-#   (city, target, metric, cycle, capturable-family-superset).
+#   K-decision: compare both the served provider-family set and the exact persisted CURRENT row
+#   revisions consumed by the latest posterior. A new family OR a changed configured source row
+#   requires re-materialization.
 """SINGLE-AUTHORITY comparison + idempotent enqueue for the PARTIAL-fusion upgrade trigger.
 
 The decorrelated-provider FAMILY mapping (`decorrelated_provider_families_of`) is the SOLE
@@ -18,11 +17,10 @@ authority for "which model belongs to which of the 5 decorrelated provider famil
 materializer's served/missing-provider determination imports it (single-builder), so the
 trigger and the fusion can never disagree on what "served 5/5" means.
 
-The comparison (`scope_capture_offers_larger_provider_set`) is the SOLE authority for
-"does a scope's latest posterior need re-materialization because a new provider family is now
-capturable". The seed-discovery / queue / plan coverage gates remain keyed on baseline_b0 +
-q_lcb (their job is freshness/tradeable-grade, NOT instrument completeness); this module is the
-ONE place the instrument-set dimension is evaluated, so the rule lives at exactly one site.
+The comparison (`scope_capture_offers_larger_provider_set`) is the SOLE authority for whether
+the latest posterior's provider set or exact CURRENT input revisions have been superseded. The
+seed-discovery / queue / plan coverage gates remain keyed on baseline_b0 + q_lcb (their job is
+freshness/tradeable-grade, not input revision detection).
 
 The enqueue (`enqueue_fusion_upgrade_reseeds`) writes a re-materialization seed via the EXISTING
 seed builder + write_seed into the SAME seed_dir the materialize cycle already drains — no new
@@ -38,7 +36,7 @@ import logging
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Mapping
+from typing import Mapping, Sequence
 
 from src.data.replacement_forecast_readiness import SOURCE_ID
 
@@ -142,10 +140,10 @@ def _family_set_key(families: "frozenset[str] | set[str]") -> str:
     return ",".join(sorted(families))
 
 
-def _capturable_models_for_scope(
+def _capturable_inputs_for_scope(
     conn: sqlite3.Connection, *, city: str, target_date: str, metric: str, source_cycle_iso: str
-) -> set[str]:
-    """Models whose CURRENT value the materializer COULD fuse for this (scope, cycle) RIGHT NOW.
+) -> dict[str, int]:
+    """CURRENT model -> raw row id available to the materializer for this scope and cycle.
 
     Delegates ENTIRELY to the single serving authority
     (replacement_current_value_serving.read_current_instrument_values) — the SAME function the
@@ -153,31 +151,45 @@ def _capturable_models_for_scope(
     can never drift (registry member #10). This includes the generalized previous-runs
     substitution (没有新的就用老的): a provider structurally unpublished on this cycle's
     single_runs leg (JMA at 06Z-cadence cycles) counts as capturable via its previous-runs row.
-    Fail-soft: any read error -> empty set (nothing newly capturable).
+    Fail-soft: any read error -> empty mapping (nothing newly capturable).
     """
     from src.data.replacement_current_value_serving import (  # noqa: PLC0415
         read_current_instrument_values,
     )
 
     try:
-        return set(
-            read_current_instrument_values(
-                conn, city=city, metric=metric, target_date=target_date,
-                source_cycle_time_iso=source_cycle_iso,
-            ).keys()
+        served = read_current_instrument_values(
+            conn,
+            city=city,
+            metric=metric,
+            target_date=target_date,
+            source_cycle_time_iso=source_cycle_iso,
+            include_station_sources=True,
         )
+        return {model: int(value.raw_model_forecast_id) for model, value in served.items()}
     except Exception:
-        return set()
+        return {}
 
 
-def _latest_posterior_served(
+def _capturable_models_for_scope(
+    conn: sqlite3.Connection, *, city: str, target_date: str, metric: str, source_cycle_iso: str
+) -> set[str]:
+    """Compatibility view used by existing callers that only need model identities."""
+    return set(
+        _capturable_inputs_for_scope(
+            conn,
+            city=city,
+            target_date=target_date,
+            metric=metric,
+            source_cycle_iso=source_cycle_iso,
+        )
+    )
+
+
+def _latest_posterior_inputs(
     conn: sqlite3.Connection, *, city: str, target_date: str, metric: str
-) -> tuple[str | None, frozenset[str]]:
-    """Return (source_cycle_time_iso, served_provider_family_set) for the LATEST soft-anchor
-    posterior of this scope. The served set is derived from provenance_json.bayes_precision_fusion.used_models
-    (the SAME field the fusion records). (None, empty) when there is no posterior or it carries no
-    used_models (a single-anchor / pre-fusion row — nothing to upgrade from). Fail-soft: any read
-    or JSON error -> (None, empty)."""
+) -> tuple[str | None, frozenset[str], dict[str, int], frozenset[str]]:
+    """Return cycle, families, consumed CURRENT row ids, and configured source identities."""
     try:
         row = conn.execute(
             """
@@ -190,18 +202,42 @@ def _latest_posterior_served(
             (SOURCE_ID, city, target_date, metric),
         ).fetchone()
     except Exception:
-        return None, frozenset()
+        return None, frozenset(), {}, frozenset()
     if row is None:
-        return None, frozenset()
+        return None, frozenset(), {}, frozenset()
     source_cycle_iso = str(row[0]) if row[0] is not None else None
     try:
         prov = json.loads(row[1]) if row[1] else {}
     except Exception:
-        return source_cycle_iso, frozenset()
-    used = (prov.get("bayes_precision_fusion", {}) or {}).get("used_models") or []
+        return source_cycle_iso, frozenset(), {}, frozenset()
+    fusion = prov.get("bayes_precision_fusion", {}) or {}
+    used = fusion.get("used_models") or []
     if not isinstance(used, (list, tuple)):
-        return source_cycle_iso, frozenset()
-    return source_cycle_iso, decorrelated_provider_families_of(set(str(m) for m in used))
+        used = []
+    serving = fusion.get("current_value_serving") or {}
+    consumed: dict[str, int] = {}
+    if isinstance(serving, Mapping):
+        for model, value in serving.items():
+            if not isinstance(value, Mapping):
+                continue
+            try:
+                consumed[str(model)] = int(value["raw_model_forecast_id"])
+            except (KeyError, TypeError, ValueError):
+                continue
+    source_clock = fusion.get("source_clock_one_scheme") or {}
+    configured = (
+        source_clock.get("configured_sources") or []
+        if isinstance(source_clock, Mapping)
+        else []
+    )
+    if not isinstance(configured, (list, tuple)):
+        configured = []
+    return (
+        source_cycle_iso,
+        decorrelated_provider_families_of(set(str(m) for m in used)),
+        consumed,
+        frozenset(str(source) for source in configured if str(source).strip()),
+    )
 
 
 def _city_latlon(city: str) -> tuple[float, float] | None:
@@ -242,19 +278,24 @@ def _scope_lead_days(city: str, target_date: str, cycle_iso: str) -> int:
 
 
 def scope_capture_offers_larger_provider_set(
-    conn: sqlite3.Connection, *, city: str, target_date: str, metric: str
+    conn: sqlite3.Connection,
+    *,
+    city: str,
+    target_date: str,
+    metric: str,
+    changed_sources: Sequence[str] | None = None,
 ) -> dict[str, object]:
-    """THE single comparison: does this scope's latest posterior need re-materialization because a
-    STRICTLY LARGER decorrelated-provider FAMILY set is now capturable at the SAME cycle?
+    """Return whether a larger family set or changed consumed input requires materialization.
 
     Returns a dict:
-      {is_upgrade, source_cycle_time, served_families, capturable_families, new_families}.
-    is_upgrade is True iff the posterior has a fusion served set AND the capturable family set is a
-    STRICT SUPERSET of it (at least one new provider family the posterior did not use). Equal sets
-    (already maximal for what is published) or a posterior without fusion -> is_upgrade False. This
-    is the ONLY place the instrument-set completeness dimension is evaluated. Fail-soft throughout.
+      {is_upgrade, family_upgrade, input_revision_changed, source_cycle_time,
+       served_families, capturable_families, new_families, changed_input_sources}.
+
+    ``changed_sources`` narrows source-clock commit callbacks to the provider that just landed.
+    Periodic catch-up omits it and compares every configured/previously-consumed source. Exact raw
+    row ids make repeated polls no-ops once the resulting posterior commits.
     """
-    source_cycle_iso, served = _latest_posterior_served(
+    source_cycle_iso, served, consumed_inputs, configured_sources = _latest_posterior_inputs(
         conn, city=city, target_date=target_date, metric=metric
     )
     if source_cycle_iso is None:
@@ -264,11 +305,14 @@ def scope_capture_offers_larger_provider_set(
             "served_families": [],
             "capturable_families": [],
             "new_families": [],
+            "family_upgrade": False,
+            "input_revision_changed": False,
+            "changed_input_sources": [],
         }
-    capturable_models = _capturable_models_for_scope(
+    capturable_inputs = _capturable_inputs_for_scope(
         conn, city=city, target_date=target_date, metric=metric, source_cycle_iso=source_cycle_iso
     )
-    capturable = decorrelated_provider_families_of(capturable_models)
+    capturable = decorrelated_provider_families_of(set(capturable_inputs))
     # DOMAIN-AWARE gate (2026-06-17 coarse-global removal): a family that is STRUCTURALLY ABSENT
     # for this city (NCEP/CMC outside their nest domains, now that the global fallbacks are gone)
     # must NEVER trigger an upgrade re-enqueue — there is no provider that can ever land, so the
@@ -288,13 +332,28 @@ def scope_capture_offers_larger_provider_set(
     # STRICT superset: the capturable-and-expected set must add a family the served set lacks. A
     # served set with no fusion (empty) is NOT upgraded here — there is no smaller-set posterior
     # to grow (the single-anchor fallback is a separate concern handled by the missing-capture gate).
-    is_upgrade = bool(served) and bool(new_families) and served.issubset(capturable_expected)
+    family_upgrade = bool(served) and bool(new_families) and served.issubset(capturable_expected)
+    relevant_sources = configured_sources or frozenset(consumed_inputs)
+    if changed_sources is not None:
+        relevant_sources &= frozenset(
+            str(source).strip() for source in changed_sources if str(source).strip()
+        )
+    changed_inputs = sorted(
+        source
+        for source in relevant_sources
+        if source in capturable_inputs
+        and capturable_inputs[source] != consumed_inputs.get(source)
+    )
+    input_revision_changed = bool(changed_inputs)
     return {
-        "is_upgrade": is_upgrade,
+        "is_upgrade": family_upgrade or input_revision_changed,
+        "family_upgrade": family_upgrade,
+        "input_revision_changed": input_revision_changed,
         "source_cycle_time": source_cycle_iso,
         "served_families": sorted(served),
         "capturable_families": sorted(capturable_expected),
         "new_families": sorted(new_families),
+        "changed_input_sources": changed_inputs,
     }
 
 
@@ -368,15 +427,13 @@ def enqueue_fusion_upgrade_reseeds(
     raw_manifest_dir: Path | str,
     computed_at: datetime | None = None,
     limit: int = 50,
+    scopes: Sequence[tuple[str, str, str]] | None = None,
+    changed_sources: Sequence[str] | None = None,
 ) -> dict[str, object]:
-    """For every current target whose latest posterior was fused from a STRICTLY SMALLER
-    decorrelated-provider family set than is now capturable at its cycle, enqueue exactly one
-    re-materialization seed (reusing the existing seed builder + seed_dir the materialize cycle
-    drains). Idempotent per (scope, cycle, capturable-family-superset) via fusion_upgrade_enqueues.
+    """Enqueue scopes with a larger provider set or changed persisted input revision.
 
-    Belongs in the EXISTING data-ingest availability-poll lane (no new daemon). Fail-soft: any
-    per-scope error is logged and skipped; the function never raises into the poll. Returns a
-    compact report.
+    Family growth retains the durable marker. Exact input revisions close their own loop through
+    posterior provenance, while pending duplicate seeds are coalesced by semantic request key.
     """
     from src.data.replacement_forecast_current_target_plan import (  # noqa: PLC0415
         build_replacement_forecast_current_target_plan,
@@ -411,6 +468,7 @@ def enqueue_fusion_upgrade_reseeds(
         "status": "FUSION_UPGRADE_TRIGGER",
         "scopes_checked": 0,
         "upgrades_detected": 0,
+        "input_revisions_detected": 0,
         "seeds_enqueued": 0,
         "already_enqueued": 0,
         "manifest_missing": 0,
@@ -420,18 +478,59 @@ def enqueue_fusion_upgrade_reseeds(
         report["status"] = "FUSION_UPGRADE_FORECAST_DB_MISSING"
         return report
 
-    # The current targets (same authority the seed discovery uses). require_raw_artifacts=False:
-    # the per-scope manifest is checked below, mirroring seed discovery.
-    plan = build_replacement_forecast_current_target_plan(
-        forecast_db,
-        min_target_date=now.date().isoformat(),
-        require_raw_artifacts=False,
-        now_utc=now,
-    )
-    if plan.status == "BLOCKED":
-        report["status"] = "FUSION_UPGRADE_PLAN_BLOCKED"
-        report["reason_codes"] = list(plan.reason_codes)
-        return report
+    if scopes is None:
+        # Periodic catch-up retains the full current-target authority. Source-clock
+        # commits pass exact durable scopes below and avoid this global DB plan.
+        plan = build_replacement_forecast_current_target_plan(
+            forecast_db,
+            min_target_date=now.date().isoformat(),
+            require_raw_artifacts=False,
+            now_utc=now,
+        )
+        if plan.status == "BLOCKED":
+            report["status"] = "FUSION_UPGRADE_PLAN_BLOCKED"
+            report["reason_codes"] = list(plan.reason_codes)
+            return report
+        candidates = tuple(
+            (
+                str(row.city),
+                str(row.target_date),
+                str(row.temperature_metric),
+                bool(getattr(row, "day0_observed_extreme_required", False)),
+            )
+            for row in plan.rows
+        )
+    else:
+        from src.data.replacement_forecast_current_target_plan import (  # noqa: PLC0415
+            _city_timezone_by_name,
+            _day0_observed_extreme_required,
+        )
+
+        timezone_by_city = _city_timezone_by_name()
+        candidates = tuple(
+            (
+                city,
+                target_date,
+                metric,
+                _day0_observed_extreme_required(
+                    city=city,
+                    target_date=target_date,
+                    timezone_by_city=timezone_by_city,
+                    now_utc=now,
+                ),
+            )
+            for city, target_date, metric in dict.fromkeys(
+                (
+                    str(city).strip(),
+                    str(target_date).strip(),
+                    str(metric).strip(),
+                )
+                for city, target_date, metric in scopes
+                if str(city).strip()
+                and str(target_date).strip()
+                and str(metric).strip() in {"high", "low"}
+            )
+        )
 
     manifests = _load_manifests(raw_dir, computed_at=now)
 
@@ -443,26 +542,27 @@ def enqueue_fusion_upgrade_reseeds(
         # NEAREST-TARGET-FIRST (mirrors the seed-budget K-decision, registry member #6): the
         # plan's native order is target_date DESC, which would spend the per-tick enqueue budget
         # on far-date non-tradeable scopes while the tradeable day0/day1 money scopes starve.
-        for row in sorted(
-            plan.rows,
-            key=lambda r: (str(r.target_date), str(r.city), str(r.temperature_metric)),
+        for city, target_date, metric, day0_required in sorted(
+            candidates,
+            key=lambda scope: scope[:3],
         ):
             if enqueued >= max(1, int(limit)):
                 break
-            city = str(row.city)
-            target_date = str(row.target_date)
-            metric = str(row.temperature_metric)
             # DAY0 GUARD (live-run finding 2026-06-11): a started local day's scope needs the
             # observed-extreme path, not a plain re-materialization — the seed discovery's
             # can_seed excludes these and the upgrade re-seed must too (same plan flag, same
             # reason). Without it the first live enqueue burned 18 budget slots on day0 scopes.
-            if bool(getattr(row, "day0_observed_extreme_required", False)):
+            if day0_required:
                 report["day0_skipped"] = int(report.get("day0_skipped", 0)) + 1  # type: ignore[arg-type]
                 continue
             report["scopes_checked"] = int(report["scopes_checked"]) + 1
             try:
                 verdict = scope_capture_offers_larger_provider_set(
-                    conn, city=city, target_date=target_date, metric=metric
+                    conn,
+                    city=city,
+                    target_date=target_date,
+                    metric=metric,
+                    changed_sources=changed_sources,
                 )
             except Exception as exc:  # noqa: BLE001 — per-scope fail-soft
                 _LOG.debug("fusion-upgrade comparison failed for %s/%s/%s: %s", city, target_date, metric, exc)
@@ -470,6 +570,10 @@ def enqueue_fusion_upgrade_reseeds(
             if not verdict["is_upgrade"]:
                 continue
             report["upgrades_detected"] = int(report["upgrades_detected"]) + 1
+            if verdict["input_revision_changed"]:
+                report["input_revisions_detected"] = (
+                    int(report["input_revisions_detected"]) + 1
+                )
             source_cycle_iso = str(verdict["source_cycle_time"])
             # CYCLE-AGE GUARD (live-run finding 2026-06-11): the materializer refuses a request
             # whose cycle exceeds the staleness bound (cycle_age_exceeds_bound -> CYCLE_TOO_OLD),
@@ -490,7 +594,8 @@ def enqueue_fusion_upgrade_reseeds(
                 pass
             capturable_key = _family_set_key(set(verdict["capturable_families"]))  # type: ignore[arg-type]
             served_key = _family_set_key(set(verdict["served_families"]))  # type: ignore[arg-type]
-            if _already_enqueued(
+            revision_update = bool(verdict["input_revision_changed"])
+            if not revision_update and _already_enqueued(
                 conn,
                 city=city,
                 target_date=target_date,
@@ -531,17 +636,19 @@ def enqueue_fusion_upgrade_reseeds(
             if seed_file is None:
                 report["manifest_missing"] = int(report["manifest_missing"]) + 1
                 continue
-            inserted = _record_enqueue(
-                conn,
-                city=city,
-                target_date=target_date,
-                metric=metric,
-                source_cycle_iso=source_cycle_iso,
-                served_family_key=served_key,
-                capturable_family_key=capturable_key,
-                seed_file=str(seed_file),
-            )
-            conn.commit()
+            inserted = True
+            if not revision_update:
+                inserted = _record_enqueue(
+                    conn,
+                    city=city,
+                    target_date=target_date,
+                    metric=metric,
+                    source_cycle_iso=source_cycle_iso,
+                    served_family_key=served_key,
+                    capturable_family_key=capturable_key,
+                    seed_file=str(seed_file),
+                )
+                conn.commit()
             if inserted:
                 enqueued += 1
                 report["seeds_enqueued"] = int(report["seeds_enqueued"]) + 1
@@ -554,6 +661,7 @@ def enqueue_fusion_upgrade_reseeds(
                         "served_families": verdict["served_families"],
                         "capturable_families": verdict["capturable_families"],
                         "new_families": verdict["new_families"],
+                        "changed_input_sources": verdict["changed_input_sources"],
                         "seed_file": str(seed_file),
                     }
                 )

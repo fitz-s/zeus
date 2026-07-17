@@ -1,5 +1,5 @@
 # Created: 2026-06-08
-# Lifecycle: created=2026-06-08; last_reviewed=2026-07-16; last_reused=2026-07-16
+# Lifecycle: created=2026-06-08; last_reviewed=2026-07-17; last_reused=2026-07-17
 # Purpose: Regression tests for BPF raw forecast download and persistence semantics.
 # Reuse: Run when changing Bayes precision fusion raw-input capture or scheduler health.
 # Authority basis: BAYES_PRECISION_FUSION_SPEC.md §6 F1 (raw capture: previous_runs + single_runs ->
@@ -93,6 +93,7 @@ def test_download_writes_single_and_previous_runs(tmp_path) -> None:
         single_runs_fetch=_single, previous_runs_fetch=_previous,
     )
     assert report["status"] == "BAYES_PRECISION_FUSION_EXTRA_RAW_INPUTS_DOWNLOADED"
+    assert report["committed_families"] == (("Paris", "2026-06-09", "high"),)
     # Current selected model set x {single_runs, previous_runs} for the one target.
     n_single = _count(db, endpoint="single_runs")
     n_prev = _count(db, endpoint="previous_runs")
@@ -119,6 +120,7 @@ def test_download_no_targets_writes_nothing(tmp_path) -> None:
     )
     assert _count(db) == 0
     assert report["written_row_count"] == 0
+    assert report["committed_families"] == ()
 
 
 def test_download_timebox_returns_incomplete_without_fetching_targets(tmp_path, monkeypatch) -> None:

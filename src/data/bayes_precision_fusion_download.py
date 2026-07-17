@@ -1326,8 +1326,9 @@ def download_bayes_precision_fusion_extra_raw_inputs(
             if str(model).strip()
         )
     )
-    rows: list[tuple] = []
+    rows: list[dict[str, object]] = []
     total_written = 0
+    committed_families: set[tuple[str, str, str]] = set()
     dropped: list[str] = []
     domain_excluded: list[str] = []
     transport_errors: list[str] = []
@@ -1861,6 +1862,10 @@ def download_bayes_precision_fusion_extra_raw_inputs(
         # CHUNKED DURABILITY (2026-06-11): persist THIS city×date's rows now — a restart or
         # crash later in the pass can no longer destroy completed targets' fetches.
         if rows:
+            pending_families = {
+                (str(row["city"]), str(row["target_date"]), str(row["metric"]))
+                for row in rows
+            }
             try:
                 chunk_written, _ = _persist_chunk_with_lock_retry(
                     forecast_db,
@@ -1876,6 +1881,8 @@ def download_bayes_precision_fusion_extra_raw_inputs(
                 break
             persist_schema_ready = True
             total_written += chunk_written
+            if chunk_written > 0:
+                committed_families.update(pending_families)
             rows = []
         if timeboxed:
             timebox_unattempted_target_groups = len(target_groups) - group_index - 1
@@ -1952,6 +1959,7 @@ def download_bayes_precision_fusion_extra_raw_inputs(
         "target_count": len(target_list),
         "candidate_row_count": len(rows),
         "written_row_count": written,
+        "committed_families": tuple(sorted(committed_families)),
         "pruned_row_count": pruned,
         "dropped": tuple(dropped),
         "domain_excluded": tuple(sorted(set(domain_excluded))),
