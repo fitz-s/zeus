@@ -313,6 +313,47 @@ def _reactor(store, *, gates=True, config=None):
     return reactor, rejected, submitted
 
 
+def test_cycle_entry_gate_stops_before_pending_event_work():
+    conn, store = _store()
+    events = (
+        _forecast_event(key_suffix="risk-blocked-a"),
+        _forecast_event(key_suffix="risk-blocked-b"),
+    )
+    for event in events:
+        store.insert_or_ignore(event)
+    per_event_gate_calls = []
+    cycle_gate_calls = []
+
+    reactor = OpportunityEventReactor(
+        store,
+        source_truth_gate=lambda _event: pytest.fail(
+            "source gate must not run while cycle entry is blocked"
+        ),
+        executable_snapshot_gate=lambda _event, _decision_time: pytest.fail(
+            "snapshot gate must not run while cycle entry is blocked"
+        ),
+        riskguard_gate=lambda event: per_event_gate_calls.append(event.event_id)
+        or False,
+        cycle_entry_gate=lambda: cycle_gate_calls.append(True) or False,
+        final_intent_submit=lambda *_args: pytest.fail(
+            "submit must not run while cycle entry is blocked"
+        ),
+        reject=lambda *_args: None,
+        config=ReactorConfig(),
+        regret_ledger=NoTradeRegretLedger(store.conn),
+    )
+
+    result = reactor.process_pending(decision_time=_DT_VENUE_OPEN)
+
+    assert result.rejection_reasons == ["RISK_GUARD_BLOCKED"]
+    assert cycle_gate_calls == [True]
+    assert per_event_gate_calls == []
+    assert [_processing_status(conn, event.event_id) for event in events] == [
+        "pending",
+        "pending",
+    ]
+
+
 def _global_batch_probe_reactor(
     store, observations, *, incomplete=False, next_claim_event=None
 ):

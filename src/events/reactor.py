@@ -972,6 +972,7 @@ class OpportunityEventReactor:
         final_intent_submit: Submit,
         reject: Reject,
         config: ReactorConfig | None = None,
+        cycle_entry_gate: Callable[[], bool] | None = None,
         regret_ledger: Any | None = None,
         decision_provenance_hook: Any | None = None,
         family_snapshot_refresher: "Callable[..., bool] | None" = None,
@@ -988,6 +989,7 @@ class OpportunityEventReactor:
         self._submit = final_intent_submit
         self._reject = reject
         self._config = config or ReactorConfig()
+        self._cycle_entry_gate = cycle_entry_gate
         self._regret_ledger = regret_ledger
         # ALWAYS-DECIDABLE invariant (operator law 2026-06-12). The SAME decision-time targeted
         # family snapshot refresher the adapter uses (main._edli_decision_family_snapshot_refresher,
@@ -1087,6 +1089,9 @@ class OpportunityEventReactor:
         targeted_only: bool = False,
     ) -> ReactorResult:
         result = ReactorResult()
+        if self._cycle_entry_gate is not None and not self._cycle_entry_gate():
+            result.rejection_reasons.append("RISK_GUARD_BLOCKED")
+            return result
         # ALWAYS-DECIDABLE invariant (2026-06-12): families blocked on a refreshable substrate
         # THIS cycle, accumulated during processing and drained AFTER all per-event units of work
         # close (no network inside any open world/trade txn). Per-cycle scope so a family that
@@ -5348,6 +5353,7 @@ def run_edli_event_reactor_cycle(
     from src.events.event_priority import day0_is_tradeable_for_scope
     from src.events.event_store import EventStore
     from src.risk_allocator import snapshot_global_auction_capital_authority
+    from src.riskguard.risk_level import RiskLevel
     from src.riskguard.riskguard import get_current_level
     from src.state.db import ZEUS_FORECASTS_DB_PATH, get_forecasts_connection_read_only, get_trade_connection_with_world_required, get_world_connection
     from src.strategy.live_inference.no_trade_regret import NoTradeRegretLedger
@@ -5942,6 +5948,7 @@ def run_edli_event_reactor_cycle(
                 topology_conn=forecasts_conn,
             ),
             riskguard_gate=riskguard_allows_new_entries(get_current_level=get_current_level),
+            cycle_entry_gate=lambda: get_current_level() == RiskLevel.GREEN,
             final_intent_submit=submit_adapter,
             reject=lambda _event, _stage, _reason: None,
             regret_ledger=regret_ledger,
