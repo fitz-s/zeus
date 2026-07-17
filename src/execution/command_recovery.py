@@ -6134,6 +6134,23 @@ def _filled_entry_execution_fact_repair_candidates(conn: sqlite3.Connection) -> 
         + ",\n"
         + _canonical_order_truth_cte()
         + """,
+        logical_entry_trade_fact AS (
+            SELECT fact.*
+              FROM canonical_trade_fact fact
+             WHERE NOT EXISTS (
+                   SELECT 1
+                     FROM venue_trade_facts source_fact
+                    WHERE source_fact.trade_fact_id = CASE
+                              WHEN json_valid(fact.raw_payload_json)
+                              THEN CAST(json_extract(
+                                  fact.raw_payload_json,
+                                  '$.raw_fill_payload.source_trade_fact_id'
+                              ) AS INTEGER)
+                          END
+                      AND source_fact.command_id = fact.command_id
+                      AND source_fact.venue_order_id = fact.venue_order_id
+               )
+        ),
         latest_order AS (
             SELECT truth.command_id,
                    truth.venue_order_id,
@@ -6165,7 +6182,7 @@ def _filled_entry_execution_fact_repair_candidates(conn: sqlite3.Connection) -> 
                    MAX(fact.venue_timestamp) AS venue_timestamp,
                    GROUP_CONCAT(DISTINCT fact.state) AS fill_states,
                    MAX(fact.trade_fact_id) AS trade_fact_id
-              FROM canonical_trade_fact fact
+              FROM logical_entry_trade_fact fact
              WHERE fact.state IN ('MATCHED', 'MINED', 'CONFIRMED')
                AND CAST(COALESCE(fact.filled_size, '0') AS REAL) > 0
                AND CAST(COALESCE(fact.fill_price, '0') AS REAL) > 0
@@ -6241,7 +6258,7 @@ def _filled_entry_execution_fact_repair_candidates(conn: sqlite3.Connection) -> 
                ef.fill_price AS ef_fill_price,
                ef.terminal_exec_status AS ef_terminal_exec_status
           FROM venue_commands cmd
-          JOIN latest_order
+          LEFT JOIN latest_order
             ON latest_order.command_id = cmd.command_id
            AND latest_order.venue_order_id = cmd.venue_order_id
           JOIN entry_fill
@@ -6261,8 +6278,14 @@ def _filled_entry_execution_fact_repair_candidates(conn: sqlite3.Connection) -> 
            AND ef.order_role = 'entry'
          WHERE cmd.intent_kind = 'ENTRY'
            AND cmd.side = 'BUY'
-           AND cmd.state IN ('FILLED', 'PARTIAL', 'EXPIRED')
-           AND ABS(CAST(entry_fill.filled_size AS REAL) - CAST(latest_order.matched_size AS REAL)) <= 0.000001
+           AND cmd.state IN ('FILLED', 'PARTIAL', 'EXPIRED', 'REVIEW_REQUIRED')
+           AND (
+               latest_order.command_id IS NULL
+               OR ABS(
+                   CAST(entry_fill.filled_size AS REAL)
+                   - CAST(latest_order.matched_size AS REAL)
+               ) <= 0.000001
+           )
          ORDER BY entry_fill.observed_at, entry_fill.trade_fact_id
         """
     )
@@ -6378,10 +6401,20 @@ def _entry_execution_fact_terminal_status(candidate: Mapping[str, object]) -> st
     remaining = _decimal_or_none(candidate.get("order_fact_remaining_size"))
     order_state = str(candidate.get("order_fact_state") or "").upper()
     command_state = str(candidate.get("cmd_state") or candidate.get("state") or "").upper()
+    filled_size = _decimal_or_none(candidate.get("filled_size"))
+    command_size = _decimal_or_none(candidate.get("cmd_size"))
+    trade_facts_cover_command = (
+        filled_size is not None
+        and command_size is not None
+        and filled_size + Decimal("0.000001") >= command_size
+    )
     if (
-        command_state == CommandState.FILLED.value
-        and remaining == 0
-        and order_state in {"MATCHED", "FILLED"}
+        trade_facts_cover_command
+        or (
+            command_state == CommandState.FILLED.value
+            and remaining == 0
+            and order_state in {"MATCHED", "FILLED"}
+        )
     ):
         return "filled"
     return "partial"

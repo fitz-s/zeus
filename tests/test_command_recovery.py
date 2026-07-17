@@ -1,8 +1,8 @@
 # Created: 2026-04-26
-# Lifecycle: created=2026-04-26; last_reviewed=2026-07-15; last_reused=2026-07-15
+# Lifecycle: created=2026-04-26; last_reviewed=2026-07-17; last_reused=2026-07-17
 # Purpose: Lock INV-31 command recovery behavior plus snapshot-gated command inserts.
 # Reuse: Run when command recovery, command journal schema, or executable snapshot gating changes.
-# Last reused/audited: 2026-07-15
+# Last reused/audited: 2026-07-17
 # Authority basis: docs/operations/task_2026-04-26_execution_state_truth_p1_command_bus/implementation_plan.md u00a7P1.S4
 """INV-31 anchor tests: command recovery loop.
 
@@ -11166,6 +11166,90 @@ class TestRecoveryResolutionTable:
             "fill_price": 0.32,
             "venue_status": "FILLED",
             "terminal_exec_status": "filled",
+        }
+
+    def test_review_required_entry_recovers_fill_time_without_order_fact_or_alias_double_count(
+        self,
+        conn,
+    ):
+        from src.execution.command_recovery import (
+            reconcile_filled_entry_execution_fact_repairs,
+        )
+        from src.state.db import log_execution_fact
+        from src.state.db import query_entry_execution_fill_aggregate
+        from src.state.venue_command_repo import append_trade_fact
+
+        _insert(conn, size=5.0, price=0.32)
+        _advance_to_review_required(conn)
+        source_fact_id = _append_trade_fact(
+            conn,
+            trade_id="trade-review-fill",
+            state="CONFIRMED",
+            filled_size="5",
+            fill_price="0.32",
+        )
+        append_trade_fact(
+            conn,
+            trade_id="edli:trade-review-fill",
+            venue_order_id="ord-001",
+            command_id="cmd-001",
+            state="CONFIRMED",
+            filled_size="5",
+            fill_price="0.32",
+            source="WS_USER",
+            observed_at="2026-04-26T00:07:00Z",
+            venue_timestamp=None,
+            raw_payload_hash="e" * 64,
+            raw_payload_json={
+                "source_module": "src.events.edli_position_bridge",
+                "raw_fill_payload": {"source_trade_fact_id": source_fact_id},
+            },
+        )
+        log_execution_fact(
+            conn,
+            intent_id="edli-final-intent",
+            position_id="pos-001",
+            decision_id="edli-final-intent",
+            command_id="cmd-001",
+            order_role="entry",
+            posted_at="2026-04-26T00:00:00Z",
+            filled_at=None,
+            submitted_price=0.32,
+            fill_price=0.32,
+            shares=5.0,
+            venue_status="CONFIRMED",
+            terminal_exec_status="filled",
+        )
+
+        assert reconcile_filled_entry_execution_fact_repairs(conn) == {
+            "scanned": 1,
+            "advanced": 1,
+            "stayed": 0,
+            "errors": 0,
+        }
+        execution = conn.execute(
+            """
+            SELECT filled_at, shares, fill_price, venue_status, terminal_exec_status
+              FROM execution_fact
+             WHERE intent_id = 'pos-001:entry:cmd-001'
+            """
+        ).fetchone()
+        assert dict(execution) == {
+            "filled_at": "2026-04-26T00:06:00Z",
+            "shares": 5.0,
+            "fill_price": 0.32,
+            "venue_status": "FILLED",
+            "terminal_exec_status": "filled",
+        }
+        aggregate = query_entry_execution_fill_aggregate(conn, "pos-001", strict=True)
+        assert aggregate is not None
+        assert aggregate["shares_filled"] == pytest.approx(5.0)
+        assert aggregate["filled_cost_basis_usd"] == pytest.approx(1.6)
+        assert reconcile_filled_entry_execution_fact_repairs(conn) == {
+            "scanned": 0,
+            "advanced": 0,
+            "stayed": 0,
+            "errors": 0,
         }
 
     def test_filled_entry_execution_fact_repair_preserves_position_increments(

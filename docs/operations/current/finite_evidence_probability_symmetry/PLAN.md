@@ -245,6 +245,19 @@ authority surface.
 
 ## Work record
 
+- 2026-07-17: the first post-deploy authenticated Tokyo fill exposed a
+  command-recovery gap.  The command remained `REVIEW_REQUIRED` after its
+  point-order read failed, while canonical `venue_trade_facts` proved the full
+  31.6-share fill and the EDLI projection wrote a terminal `execution_fact`
+  with no `filled_at`.  RiskGuard correctly rejected that malformed exposure
+  authority, then became stale and forced global reduce-only behavior.  The
+  repair admits authenticated trade facts as fill-time authority when an order
+  fact is absent, collapses the EDLI derived alias onto its cited source trade
+  fact, and writes one canonical per-command execution fact at the real venue
+  timestamp.  It does not edit canonical rows manually, invent wall-clock fill
+  time, weaken strict exposure validation, or count the same economic fill
+  twice.
+
 - 2026-07-14: post-deploy global auctions covered all 128 current families and
   repeatedly selected Sao Paulo Jul 14 HIGH NO with positive robust delta-log
   wealth, but preflight inherited `passed_prefilter=false` and the old
